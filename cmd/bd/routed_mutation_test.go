@@ -713,6 +713,114 @@ func TestRoutedWriteRetryCommitsFailedCommit(t *testing.T) {
 	}
 }
 
+// setupAutoRouteWithHydratedCopy extends setupAutoRoute with the row the bug
+// report's workflow leaves in the project: an exact copy of the planning
+// store's "shared-hub", imported with the options bd repo sync imports with
+// (CreateIssuesWithFullOptions, prefix validation skipped) and carrying the
+// planning repo's path as its source marker and the planning row's own
+// creation time, so the copy is identifiable as the planning row's mirror.
+// It returns the project's store and the repo and planning directories.
+func setupAutoRouteWithHydratedCopy(t *testing.T, role, routingKey string) (storage.DoltStorage, string, string) {
+	t.Helper()
+	primaryStore, repoDir, planningDir := setupAutoRoute(t, role, routingKey)
+	ctx := context.Background()
+
+	// Read the planning row through the same foreign read a routed open
+	// uses, so the copy's provenance is exactly what a real import recorded.
+	planningStore, err := openForeignStore(ctx, filepath.Join(planningDir, ".beads"), foreignRead)
+	if err != nil {
+		t.Fatalf("open the planning store for the import: %v", err)
+	}
+	defer func() { _ = planningStore.Close() }()
+	owner, err := planningStore.GetIssue(ctx, "shared-hub")
+	if err != nil {
+		t.Fatalf("read the planning row to copy: %v", err)
+	}
+
+	copy := *owner
+	copy.SourceRepo = planningDir
+	if err := primaryStore.CreateIssuesWithFullOptions(ctx, []*types.Issue{&copy}, "repo-sync", storage.BatchCreateOptions{
+		SkipPrefixValidation: true,
+	}); err != nil {
+		t.Fatalf("import the planning row's copy into the project: %v", err)
+	}
+	return primaryStore, repoDir, planningDir
+}
+
+// reopenAutoRouteTarget opens the planning store read-only again, the way
+// bd's next routed read would, so durability is asserted through a fresh
+// handle rather than the one the test just mutated through.
+func reopenAutoRouteTarget(t *testing.T, planningDir string) storage.DoltStorage {
+	t.Helper()
+	s, err := openForeignStore(context.Background(), filepath.Join(planningDir, ".beads"), foreignRead)
+	if err != nil {
+		t.Fatalf("reopen the planning store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+// requireRedirectedCopy fails unless rr is the owner redirection of a
+// hydrated copy: routed, and marked as a redirected copy with its owner path.
+func requireRedirectedCopy(t *testing.T, what string, rr *RoutedResult, planningDir string) {
+	t.Helper()
+	if !rr.Routed || !rr.RedirectedCopy {
+		t.Fatalf("%s resolved the project copy as local (Routed=%v, RedirectedCopy=%v); want the redirect to the owner in %s", what, rr.Routed, rr.RedirectedCopy, planningDir)
+	}
+	if rr.RedirectedCopyOwner != planningDir {
+		t.Fatalf("%s redirected to owner %q, want %q", what, rr.RedirectedCopyOwner, planningDir)
+	}
+}
+
+// TestAutoRouteResolvesPlanningRepoMirrorToOwner pins the two-store selection
+// the bug report's workflow needs (GH#6058): with an active auto-route to a
+// planning store and a project copy of one of its rows — what bd repo sync
+// hydrated, marked with the planning repo's path and creation time — every
+// id-based resolver hands the command the planning store's own row, so the
+// change lands where bd list reads from and the project copy stays as it was.
+// At the base the resolvers return the copy (Routed=false), which is the bug:
+// a close succeeds against the copy while the routed list keeps showing the
+// owner open.
+func TestAutoRouteResolvesPlanningRepoMirrorToOwner(t *testing.T) {
+	t.Run("close (resolveCloseTargets)", func(t *testing.T) {
+		primaryStore, _, planningDir := setupAutoRouteWithHydratedCopy(t, "maintainer", "routing.maintainer")
+		ctx := context.Background()
+
+		results, cleanup, err := resolveCloseTargets(ctx, primaryStore, []string{"shared-hub"})
+		if err != nil {
+			t.Fatalf("resolveCloseTargets of a hydrated copy: %v", err)
+		}
+		defer cleanup()
+		if len(results) != 1 {
+			t.Fatalf("results = %d, want 1", len(results))
+		}
+		requireRedirectedCopy(t, "close", results[0], planningDir)
+		if routedStoreIsReadOnly(t, results[0].Store) {
+			t.Fatalf("the owner redirect opened the planning store read-only for bd close")
+		}
+		if err := results[0].Store.CloseIssue(ctx, results[0].ResolvedID, "done", "test", ""); err != nil {
+			t.Fatalf("close through the owner redirect: %v", err)
+		}
+		cleanup()
+
+		owner, err := reopenAutoRouteTarget(t, planningDir).GetIssue(ctx, "shared-hub")
+		if err != nil {
+			t.Fatalf("reread the planning row after the routed close: %v", err)
+		}
+		if owner.Status != types.StatusClosed {
+			t.Fatalf("planning status = %s after the routed close, want %s", owner.Status, types.StatusClosed)
+		}
+		// The project copy is untouched: still open, still the stale mirror.
+		copyRow, err := primaryStore.GetIssue(ctx, "shared-hub")
+		if err != nil {
+			t.Fatalf("reread the project copy: %v", err)
+		}
+		if copyRow.Status != types.StatusOpen {
+			t.Fatalf("project copy status = %s after the routed close, want it left %s", copyRow.Status, types.StatusOpen)
+		}
+	})
+}
+
 // committedIssue returns id as the HEAD commit of beadsDir's database holds
 // it, without what the working set holds uncommitted.
 func committedIssue(t *testing.T, beadsDir, database, id string) *types.Issue {

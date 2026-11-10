@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -942,10 +943,14 @@ func resolveCloseTargets(ctx context.Context, localStore storage.DoltStorage, id
 // resolveCloseTarget resolves one ID of a bd close batch: the local store,
 // then a prefix route, then the batch's shared auto-routed store.
 func resolveCloseTarget(ctx context.Context, localStore storage.DoltStorage, shared *closeAutoRoute, id string) (*RoutedResult, error) {
-	// Local first.
+	// Local first. A local hit that is an identifiable copy of the active
+	// auto-route target's row closes the owner's row instead, through the
+	// batch's shared owner handle (closeAutoRoute.resolveCopyOwner): bd list
+	// answers from the target, so closing the copy reports success for a
+	// close the next list still shows open (GH#6058).
 	r, err := resolveAndGetFromStore(ctx, localStore, id, false)
 	if err == nil {
-		return r, nil
+		return shared.resolveCopyOwner(ctx, r)
 	}
 	if !isNotFoundErr(err) {
 		return nil, fmt.Errorf("resolving ID %s: %w", id, err)
@@ -988,29 +993,86 @@ type closeAutoRoute struct {
 	tried      bool
 }
 
+// open opens the shared auto-routed store on first use, with write intent, as
+// resolveAndGetIssueForMutation does: the target opens writable, whichever
+// rule selected it, so the close commits where the issue lives. The outcome of
+// that open, failure included, holds for the rest of the batch.
+func (a *closeAutoRoute) open(ctx context.Context) {
+	if a.tried {
+		return
+	}
+	a.tried = true
+	rs, routed, _, err := openAutoRoutedStore(ctx, a.localStore, true)
+	switch {
+	case err != nil:
+		a.err = err
+	case !routed:
+		a.err = fmt.Errorf("%w: no auto-routed store available", errRoutingUnavailable)
+	default:
+		a.store = rs
+	}
+}
+
 // resolve looks id up in the shared auto-routed store, opening it on the first
 // call with write intent, as resolveAndGetIssueForMutation does: the target
 // opens writable, whichever rule selected it, so the close commits where the
 // issue lives. The outcome of that open, failure included, holds for the rest
 // of the batch.
 func (a *closeAutoRoute) resolve(ctx context.Context, id string) (*RoutedResult, error) {
-	if !a.tried {
-		a.tried = true
-		rs, routed, _, err := openAutoRoutedStore(ctx, a.localStore, true)
-		switch {
-		case err != nil:
-			a.err = err
-		case !routed:
-			a.err = fmt.Errorf("%w: no auto-routed store available", errRoutingUnavailable)
-		default:
-			a.store = rs
-		}
-	}
+	a.open(ctx)
 	if a.err != nil {
 		return nil, a.err
 	}
 	// Per-id RoutedResult does not own the shared handle; Close does.
 	return resolveAndGetFromStore(ctx, a.store, id, true)
+}
+
+// resolveCopyOwner applies the owner-redirection decision
+// (copyOwnerTarget and its checks, see copy_owner.go) to a locally resolved
+// close target, through the batch's one shared owner handle: the close of a
+// copy that its owner demonstrably holds closes the owner's row, and the
+// handle that row came from is the one the whole batch cleans up once. As in
+// resolveCopyOfActiveAutoRouteTarget, a write never falls back to the copy: a
+// shared store that cannot open or answer refuses the close, naming the
+// target, rather than reporting success for a close that never reached the
+// owner. A row that fails any identity check, or that the target does not
+// hold, stays the local result.
+func (a *closeAutoRoute) resolveCopyOwner(ctx context.Context, local *RoutedResult) (*RoutedResult, error) {
+	target, ok := copyOwnerTarget(ctx, a.localStore, local.Issue)
+	if !ok {
+		return local, nil
+	}
+	a.open(ctx)
+	if a.err != nil {
+		return nil, fmt.Errorf("resolving the copy of %s in the routed store at %s: %w",
+			printedIssueID(local.ResolvedID), remedy.PrintedValue(target), a.err)
+	}
+	owner, err := a.store.GetIssue(ctx, local.ResolvedID)
+	switch {
+	case errors.Is(err, storage.ErrNotFound):
+		debug.Logf("[routing] %s resolved from the project copy: the routed store at %s holds no issue with that id\n",
+			printedIssueID(local.ResolvedID), remedy.PrintedValue(target))
+		return local, nil
+	case err != nil:
+		return nil, fmt.Errorf("resolving the copy of %s in the routed store at %s: %w",
+			printedIssueID(local.ResolvedID), remedy.PrintedValue(target), err)
+	}
+	if !sameOwnerCreation(local.Issue, owner) {
+		debug.Logf("[routing] %s resolved from the project copy: the issue in the routed store at %s was created at a different time\n",
+			printedIssueID(local.ResolvedID), remedy.PrintedValue(target))
+		return local, nil
+	}
+	debug.Logf("[routing] %s is a hydrated copy; closing the owner's row in the routed store at %s\n",
+		printedIssueID(local.ResolvedID), remedy.PrintedValue(target))
+	// Per-id RoutedResult does not own the shared handle; Close does.
+	return &RoutedResult{
+		Issue:               owner,
+		Store:               a.store,
+		Routed:              true,
+		ResolvedID:          local.ResolvedID,
+		RedirectedCopy:      true,
+		RedirectedCopyOwner: target,
+	}, nil
 }
 
 // Close closes the shared auto-routed store, if one was opened.

@@ -52,6 +52,15 @@ type RoutedResult struct {
 	Routed     bool                // true if the issue was found via routing
 	ResolvedID string              // The resolved (full) issue ID
 	closeFn    func()              // Function to close routed storage (if any)
+
+	// RedirectedCopy marks a result that was found locally as a hydrated copy
+	// (bd repo sync) and resolved to the owner's row in the active auto-route
+	// target instead (resolveCopyOfActiveAutoRouteTarget). Routed is true for
+	// it, like any other routed result, so the change commits in the owner's
+	// store; the flag and RedirectedCopyOwner are what lets bd delete tell the
+	// user their project still holds the copy. Only copy_owner.go sets them.
+	RedirectedCopy      bool
+	RedirectedCopyOwner string
 }
 
 // Close closes any routed storage. Safe to call if Routed is false.
@@ -103,10 +112,14 @@ func resolveAndGetIssueForMutation(ctx context.Context, localStore storage.DoltS
 }
 
 func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage.DoltStorage, id string, writable bool) (*RoutedResult, error) {
-	// Try local store first.
+	// Try local store first. A local hit that is an identifiable copy of the
+	// active auto-route target's row resolves to the owner instead (GH#6058):
+	// bd list answers from the target, so the copy a sync hydrated is the row
+	// the user does not see, and mutating it reports success for a change the
+	// next list still shows missing.
 	result, err := resolveAndGetFromStore(ctx, localStore, id, false)
 	if err == nil {
-		return result, nil
+		return resolveCopyOfActiveAutoRouteTarget(ctx, localStore, result, writable)
 	}
 
 	// The first routed tier that refuses the id answers instead of the local
@@ -233,7 +246,11 @@ func resolveAndGetFromStoreExact(ctx context.Context, s storage.DoltStorage, id 
 func resolveAndGetIssueForMutationExact(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, error) {
 	result, err := resolveAndGetFromStoreExact(ctx, localStore, id, false)
 	if err == nil {
-		return result, nil
+		// The same owner-redirection decision the ordinary resolver makes
+		// (resolveCopyOfActiveAutoRouteTarget): a local exact match that is an
+		// identifiable copy of the active auto-route target's row writes in
+		// the owner's store, with this resolver's exactness preserved.
+		return resolveCopyOfActiveAutoRouteTarget(ctx, localStore, result, true)
 	}
 	if !isNotFoundErr(err) {
 		return nil, err

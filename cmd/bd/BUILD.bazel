@@ -85,6 +85,7 @@ go_library(
         "context_cmd.go",
         "context_proxied_server.go",
         "cook.go",
+        "copy_owner.go",
         "count.go",
         "count_proxied_server.go",
         "create.go",
