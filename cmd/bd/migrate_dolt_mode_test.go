@@ -405,6 +405,153 @@ func TestMigrateToServer_FlipsModeAndRemovesSidecar(t *testing.T) {
 	require.NoError(t, configErr, "shared config.yaml must be preserved as the server-mode config")
 }
 
+// reverseMigrationWorkspace returns a proxied-server workspace and its proxied
+// root: the default .beads/dolt, or the shared server's dolt directory.
+func reverseMigrationWorkspace(t *testing.T, shared bool) (beadsDir string, root string) {
+	t.Helper()
+	if shared {
+		sharedDir := t.TempDir()
+		t.Setenv("BEADS_SHARED_SERVER_DIR", sharedDir)
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+		root = filepath.Join(sharedDir, "dolt")
+		require.NoError(t, os.MkdirAll(filepath.Join(root, ".dolt"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(root, ".dolt", "repo_state.json"), []byte(`{"head":"refs/heads/main","remotes":{},"backups":{},"branches":{}}`), 0o600))
+	}
+	beadsDir = migrateModeWorkspace(t, configfile.DoltModeProxiedServer)
+	if shared {
+		require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt:\n  shared-server: false\n"), 0o600))
+	} else {
+		root = filepath.Join(beadsDir, "dolt")
+	}
+	require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, &configfile.ProxiedServerClientInfo{RootPath: root}))
+	return beadsDir, root
+}
+
+func proxyLifecycleLockNames() []string {
+	return []string{proxy.LockFileName, server.LockFileName}
+}
+
+// retiredProxyControlNames are the controls reverse migration removes from
+// the proxied root; the lifecycle locks are kept as markers.
+func retiredProxyControlNames() []string {
+	return []string{
+		proxy.PIDFileName,
+		proxy.LogFileName,
+		proxy.LogFileName + ".1",
+		"proxy.secret",
+		"proxy.spawn",
+		"proxy.stop-epoch",
+		server.PIDFileName,
+		proxy.PIDFileName + ".stale-100",
+		server.PIDFileName + ".stale-200",
+	}
+}
+
+// seedProxyLifecycleMarkers creates empty, unlocked lifecycle lock files, as a
+// stopped proxy leaves them, and returns their identities.
+func seedProxyLifecycleMarkers(t *testing.T, root string) map[string]os.FileInfo {
+	t.Helper()
+	markers := map[string]os.FileInfo{}
+	for _, name := range proxyLifecycleLockNames() {
+		path := filepath.Join(root, name)
+		require.NoError(t, os.MkdirAll(root, 0o755))
+		require.NoError(t, os.WriteFile(path, nil, 0o600))
+		info, err := os.Stat(path)
+		require.NoError(t, err)
+		markers[path] = info
+	}
+	return markers
+}
+
+// assertProxyLifecycleMarkersKept checks that each marker is still the file it
+// was before migration and that a later lifecycle can lock it again.
+func assertProxyLifecycleMarkersKept(t *testing.T, markers map[string]os.FileInfo) {
+	t.Helper()
+	for path, before := range markers {
+		info, err := os.Stat(path)
+		if !assert.NoError(t, err, "lifecycle marker %s must be kept", filepath.Base(path)) {
+			continue
+		}
+		assert.True(t, os.SameFile(before, info), "lifecycle marker %s must keep its file identity", filepath.Base(path))
+		lock, err := util.TryLock(path)
+		if assert.NoError(t, err, "lifecycle marker %s must be lockable after migration", filepath.Base(path)) {
+			lock.Unlock()
+		}
+	}
+}
+
+func TestMigrateFromProxiedServer_KeepsLifecycleLockMarkers(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		shared bool
+	}{{"server", false}, {"shared-server", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir, root := reverseMigrationWorkspace(t, tc.shared)
+			markers := seedProxyLifecycleMarkers(t, root)
+			for _, name := range retiredProxyControlNames() {
+				touchFile(t, filepath.Join(root, name))
+			}
+			logAssets := []string{filepath.Join(root, "server.log"), filepath.Join(root, "server.log.1")}
+			for _, path := range logAssets {
+				touchFile(t, path)
+			}
+
+			require.NoError(t, runMigrateFromProxiedServer(false, tc.shared))
+
+			cfg, err := configfile.Load(beadsDir)
+			require.NoError(t, err)
+			assert.True(t, cfg.IsDoltServerMode())
+			if tc.shared {
+				v, ok := config.WorkspaceYamlValue(beadsDir, "dolt.shared-server")
+				assert.True(t, ok)
+				assert.Equal(t, "true", strings.ToLower(v))
+			}
+			assert.NoFileExists(t, configfile.ProxiedServerClientInfoPath(beadsDir))
+			for _, name := range retiredProxyControlNames() {
+				assert.NoFileExists(t, filepath.Join(root, name))
+			}
+			for _, path := range logAssets {
+				assert.NoFileExists(t, path)
+			}
+			j, err := loadMigrateJournal(beadsDir)
+			require.NoError(t, err)
+			assert.Nil(t, j)
+			assertProxyLifecycleMarkersKept(t, markers)
+
+			after := snapshotMigrationTree(t, beadsDir, root)
+			require.NoError(t, runMigrateFromProxiedServer(false, tc.shared), "completed migration must be a no-op")
+			assert.Equal(t, after, snapshotMigrationTree(t, beadsDir, root))
+			assertProxyLifecycleMarkersKept(t, markers)
+
+			// A kept marker someone holds still proves a live owner.
+			for path := range markers {
+				held, err := util.TryLock(path)
+				require.NoError(t, err)
+				err = runMigrateFromProxiedServer(false, tc.shared)
+				held.Unlock()
+				require.Error(t, err, "completed migration must refuse a held %s", filepath.Base(path))
+			}
+		})
+	}
+
+	t.Run("round-trip", func(t *testing.T) {
+		beadsDir, root := reverseMigrationWorkspace(t, false)
+		markers := seedProxyLifecycleMarkers(t, root)
+		require.NoError(t, runMigrateFromProxiedServer(false, false))
+		assertProxyLifecycleMarkersKept(t, markers)
+		require.NoError(t, runMigrateToProxiedServer(false, 0, false))
+		require.NoError(t, runMigrateFromProxiedServer(false, false))
+		cfg, err := configfile.Load(beadsDir)
+		require.NoError(t, err)
+		assert.True(t, cfg.IsDoltServerMode())
+		for _, name := range proxyLifecycleLockNames() {
+			lock, err := util.TryLock(filepath.Join(root, name))
+			require.NoError(t, err, "%s must be lockable after a round trip", name)
+			lock.Unlock()
+		}
+	})
+}
+
 func TestMigrateToServer_KeepsCustomConfig(t *testing.T) {
 	beadsDir := migrateModeWorkspace(t, configfile.DoltModeProxiedServer)
 	customConfig := filepath.Join(t.TempDir(), "custom.yaml")
