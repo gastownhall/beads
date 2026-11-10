@@ -2359,8 +2359,9 @@ func importJSONLForSync(reason string) {
 	// post-run export would write one worktree's branch state over another
 	// checkout's tracked file: GH#6680's second symptom, from the fix for its
 	// first. Keeping the marker also suppresses the subprocess's auto-backup,
-	// matching the export lane (hookSubprocessEnv).
-	cmd := exec.Command("bd", "import", "--quiet", fullPath)
+	// matching the export lane (hookSubprocessEnv). The child is this bd, as
+	// on the export lane (GH#5922).
+	cmd := exec.Command(hookSubprocessBinary(), "import", "--quiet", fullPath)
 	cmd.Dir = exportSubprocessDir(beadsDir)
 	cmd.Env = hookSubprocessEnv(os.Environ())
 
