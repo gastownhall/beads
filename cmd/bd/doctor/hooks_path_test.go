@@ -690,3 +690,43 @@ func getLocalGitConfig(t *testing.T, dir, key string) string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+// TestFixHooksPath_ManagedPathDeletedInPlaceStillUnsets pins AC-6 of the
+// GH#5853 design: the GH#4440 contract is unchanged by the relocation work.
+// A current beads-managed hooks directory deleted in place is unset — even
+// when a redirected storage directory elsewhere still holds valid hooks,
+// which the relocation arm must not treat as a repoint target.
+func TestFixHooksPath_ManagedPathDeletedInPlaceStillUnsets(t *testing.T) {
+	repoDir := t.TempDir()
+	setupGitRepoInDir(t, repoDir)
+	// The deleted-in-place current managed path: repository-local, absolute.
+	managed := filepath.Join(repoDir, ".beads", "hooks")
+	setGitConfig(t, repoDir, "core.hooksPath", managed)
+	if err := os.MkdirAll(managed, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(managed); err != nil {
+		t.Fatal(err)
+	}
+	// Redirected storage elsewhere holds valid hooks: a tempting repoint
+	// target the repair must not take — the value is unset instead.
+	storage := filepath.Join(t.TempDir(), "external storage")
+	if err := os.MkdirAll(storage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(storage, "metadata.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", storage)
+	writeRecognizedHooks(t, filepath.Join(storage, "hooks"))
+
+	runInDir(t, repoDir, func() {
+		if err := FixHooksPath(); err != nil {
+			t.Fatalf("FixHooksPath failed: %v", err)
+		}
+	})
+
+	if got := getGitConfig(t, repoDir, "core.hooksPath"); got != "" {
+		t.Errorf("core.hooksPath = %q after FixHooksPath, want unset: the GH#4440 in-place deletion contract is unchanged", got)
+	}
+}
