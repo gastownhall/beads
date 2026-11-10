@@ -559,6 +559,64 @@ cat .git/hooks/pre-commit
 .git/hooks/pre-commit
 ```
 
+### Hook works by hand but fails only from `git commit`
+
+**Symptom:** `bd export`, `BD_GIT_HOOK=1 bd export` and `bd hooks run
+<pre-hook>` all succeed when you run them, but the same hook invoked by git
+fails on every commit (or pull/checkout), with a child failure such as:
+
+```
+Error: failed to open database: embeddeddolt: ... Error 1105: table has unknown fields
+beads: pre-commit export warning: exit status 1
+```
+
+The git operation itself succeeds, but the export or import never runs, so
+`.beads/issues.jsonl` is silently stale in the commit.
+
+**Cause:** the hook shims resolve `bd` from PATH inside git's non-interactive
+shell, and that PATH is not your interactive shell's: a version-manager shim,
+a wrapper script, or an older bd install earlier on the hook's PATH can run
+instead of the bd you use by hand. An older bd cannot open a database a newer
+bd wrote — the quoted `check wisps table` / `table has unknown fields` chain is
+the fingerprint of bd 1.0.x-era code, so seeing it from git only means an old
+binary is being selected. (The same error class from an old *dolt* is a
+different problem — see [Version mismatch](#version-mismatch).)
+
+Current bd closes the largest part of this: the export and import children a
+hook re-executes now run the same binary as the hook parent, not whatever `bd`
+PATH selects, and `bd hooks install` plus non-quiet `bd init` warn once on
+stderr when PATH would select a different `bd` file or none at all. The
+outermost `bd hooks run` invocation is still resolved by the shim from PATH
+(the hooks stay portable — no machine-specific path is pinned into tracked
+hook files), so an old bd first on PATH still fails there; fix the selection.
+
+**Diagnosis:** compare what your interactive shell runs with what the hook's
+non-interactive shell runs:
+
+```bash
+# What your interactive shell runs: aliases, functions, every PATH match
+type -a bd
+which -a bd     # where available
+bd version
+
+# What the hook's shell resolves and runs
+sh -c 'command -v bd; bd version'
+```
+
+Different paths or versions between the two columns is the answer: git's
+hooks run the other one.
+
+**Fix:** remove the stale install (`which -a bd` lists the candidates), or
+correct PATH so the bd you want is first for non-interactive shells as well.
+Correcting the environment is the fix — a code update cannot repair a
+selection your environment already made.
+
+**Distinguish a skipped export from a child failure.** The pre-commit export
+is *supposed* to do nothing when the commit stages no change under `.beads/`
+(a code-only commit); that skip is silent and is not this bug. The failure
+mode above announces itself with the `beads: pre-commit export warning` (or
+`beads: <reason> import warning`) line — a child that ran and failed.
+
 ### Hook timeout kills chained pre-commit hooks
 
 **Symptom:** After `bd hooks install`, chained pre-commit hooks (eslint,

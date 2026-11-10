@@ -1308,6 +1308,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the export is not left staged at its old content. It also decides whether
   the commit touches `.beads` from that index, and in a linked worktree no
   longer re-stages an export you removed with `git rm` (#4080).
+- **The export and import children a git hook runs are now this `bd`, not
+  whatever `bd` PATH selects.** The pre-commit export and the post-merge and
+  post-checkout imports re-executed `bd` by bare name, so in git's
+  non-interactive shell an old install or a wrapper earlier on PATH could run
+  in the hook's place and fail to open the database the current `bd` wrote —
+  the failure that appears only from `git commit`, with the
+  `Error 1105: table has unknown fields` fingerprint (#5922). The children now
+  re-execute the running binary, resolved the way `bd prime` resolves itself
+  (symlinks canonicalized; inside a test binary the bare-name lookup stays).
+  The outermost `bd hooks run` that the hook shim invokes is still resolved
+  from PATH, so `bd hooks install` and non-quiet `bd init` now warn once on
+  stderr when PATH would select a different `bd` file or none at all — quiet
+  and failed installs stay silent, and the warning never goes to stdout, so
+  `--json` output stays valid. See "Hook works by hand but fails only from
+  `git commit`" in docs/reference/troubleshooting.md.
 - **bd again reads `GT_ROOT` from a rig's `.beads/.env`** (#8117; also
   shipped in 1.3.4). `gc rig add` writes the city root there, and the
   `.beads/.env` allowlist from #7879 (also in 1.3.3) dropped it, printing
