@@ -3,6 +3,8 @@ package setup
 import (
 	"bytes"
 	"errors"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -749,4 +751,35 @@ func TestRemoveCodexRemovesSkillDirsThroughEnv(t *testing.T) {
 		t.Fatalf("removeCodex err = %v, want the injected removal error for %s", err, agents)
 	}
 	requireDirKept(t, agents)
+}
+
+func stubCodexEnvProvider(t *testing.T, env codexEnv) {
+	t.Helper()
+	orig := codexEnvProvider
+	codexEnvProvider = func() (codexEnv, error) { return env, nil }
+	t.Cleanup(func() { codexEnvProvider = orig })
+}
+
+// As bd init calls it, with quiet progress: a non-writable AGENTS.md must
+// fail the project Codex install with a permission error named on the
+// supplied stderr, and the file must be preserved.
+func TestInstallCodexProjectRefusesAReadOnlyAgentsFile(t *testing.T) {
+	env, _, _ := newCodexTestEnv(t)
+	agentsPath := codexInstructionsPath(env, false)
+	content := "# My project\nSome user text.\n"
+	seed := seedReadOnlyFileWithOldMtime(t, agentsPath, content)
+	stubCodexEnvProvider(t, env)
+
+	stderrBuf := &bytes.Buffer{}
+	err := InstallCodexProjectTo(ProjectInstallOutput{Stdout: io.Discard, Stderr: stderrBuf})
+	if err == nil {
+		t.Fatal("the project Codex install replaced a read-only AGENTS.md instead of failing")
+	}
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("the failure must carry the underlying permission error, got: %v", err)
+	}
+	if !strings.Contains(stderrBuf.String(), agentsPath) {
+		t.Errorf("the reported error must name the file; stderr:\n%s", stderrBuf.String())
+	}
+	assertReadOnlyFilePreserved(t, agentsPath, content, seed)
 }
