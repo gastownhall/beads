@@ -1226,6 +1226,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- After an upgrade, a failed schema reconciliation is retried on the next
+  command instead of being skipped for good. bd advanced
+  `.beads/.local_version` to the new version before the post-upgrade
+  maintenance ran, so a failure (for example a migration refused because a
+  table had uncommitted changes) was never tried again. bd now keeps the old
+  marker until the maintenance settles. Two outcomes settle it without
+  migrating: a migration-gate or consent refusal, which leaves the decision
+  to an explicit `bd migrate schema`, and a performed pre-0.56 database
+  recovery, which is not repeated. A dirty-table refusal now prints `bd
+  upgraded to <version>: schema migration of <workspace> refused` on stderr,
+  naming the tables and the workspace to commit in (not under `--json`).
+  `bd doctor <path>` applies the same rule to the target workspace's marker
+  and leaves the caller's alone. See "Migration refused: uncommitted
+  changes" in docs/getting-started/upgrading.md (#6929, #6949).
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
