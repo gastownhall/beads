@@ -1189,3 +1189,44 @@ func embeddedIsBlocked(t *testing.T, beadsDir, database, id string) bool {
 	defer func() { _ = cleanup() }()
 	return readIsBlocked(t, db, id)
 }
+
+// bd-ltvqa9 AC-5: the guard refuses on a LIVE direct blocker, never on the
+// stored is_blocked flag alone — the close predicate's fail-open half. A flag
+// left set with no live edge (a purely transitive block, or direct blockers
+// that have since closed) claims cleanly without --force.
+func TestEmbeddedUpdateClaimPassesStaleBlockedFlag(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "cb")
+
+	issue := bdCreate(t, bd, dir, "stale", "--type", "task")
+
+	// Stale flag, written directly: every maintenance path would recompute
+	// the column away, and that is the point — only the raw row still says 1.
+	// The SQL connection is closed before the claim so it holds no lock.
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), "cb", "main")
+	if err != nil {
+		t.Fatalf("open embedded SQL: %v", err)
+	}
+	if _, err := db.ExecContext(t.Context(),
+		"UPDATE issues SET is_blocked = 1 WHERE id = ?", issue.ID); err != nil {
+		t.Fatalf("seed stale is_blocked flag for %s: %v", issue.ID, err)
+	}
+	if err := cleanup(); err != nil {
+		t.Fatalf("close embedded SQL: %v", err)
+	}
+
+	out, err := bdRunWithFlockRetry(t, bd, dir, "update", issue.ID, "--claim", "--actor", "w1")
+	if err != nil {
+		t.Fatalf("unforced claim of a stale-flagged issue refused: %v\n%s", err, out)
+	}
+	got := bdShow(t, bd, dir, issue.ID)
+	if got.Status != types.StatusInProgress || got.Assignee != "w1" {
+		t.Errorf("claim of a stale-flagged issue: status=%s assignee=%q, want in_progress/w1",
+			got.Status, got.Assignee)
+	}
+}

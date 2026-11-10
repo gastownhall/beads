@@ -83,6 +83,9 @@ func TestLifecycleUpdateContract(t *testing.T) {
 	t.Run("ReclaimByTheHolderIgnoresANewBlocker", func(t *testing.T) {
 		conformance.RunLifecycleUpdateReclaimByTheHolderIgnoresANewBlocker(t, ctx, fixture)
 	})
+	t.Run("ClaimIgnoresAnInheritedBlockedFlag", func(t *testing.T) {
+		conformance.RunLifecycleUpdateClaimIgnoresAnInheritedBlockedFlag(t, ctx, fixture)
+	})
 	t.Run("AssigneeTransferFence", func(t *testing.T) {
 		conformance.RunLifecycleUpdateAssigneeTransferFence(t, ctx, fixture)
 	})
@@ -144,6 +147,7 @@ func newUOWLifecycleUpdateFixture(t *testing.T, ctx context.Context, prefix stri
 		AddDependency:        kit.AddDependency,
 		SetConfig:            kit.SetConfig,
 		CountHistoryMatching: kit.CountHistoryMatching,
+		StoredIsBlocked:      conformance.StoredIsBlockedThrough(kit.QueryScalar),
 		ListEvents:           newUOWContractEventLister(provider),
 		ListDependencies:     newUOWContractDependencyLister(provider),
 		WispExists:           newUOWContractWispProbe(provider),

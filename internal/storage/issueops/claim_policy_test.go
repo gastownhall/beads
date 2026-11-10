@@ -60,6 +60,46 @@ func TestEnforceClaimPolicyInTxRefusesWithClaimBlockedSentinel(t *testing.T) {
 	}
 }
 
+// TestEnforceClaimPolicyInTxPassesStaleFlagAndClearFlag pins the guard's
+// fail-open half: a claim is refused only when the stored is_blocked flag AND
+// a live direct blocker both say so, exactly like the close predicate. A stale
+// flag (no live edges — a purely transitive block, or direct blockers that
+// have since closed) must not refuse, and neither must a clear flag.
+func TestEnforceClaimPolicyInTxPassesStaleFlagAndClearFlag(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		blocked int
+	}{
+		{"stale flag without live blockers", 1},
+		{"clear flag", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, mock, tx := beginMockTx(t)
+			const id = "claim-guard-target"
+			mock.ExpectQuery(`SELECT is_blocked FROM issues WHERE id = \?`).
+				WithArgs(id).
+				WillReturnRows(sqlmock.NewRows([]string{"is_blocked"}).AddRow(tc.blocked))
+			if tc.blocked != 0 {
+				for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+					mock.ExpectQuery(`(?s)SELECT\s+.*AS\s+depends_on_id,\s*type\s+FROM\s+` + depTable + `\s+WHERE\s+issue_id\s*=\s*\?\s+AND\s+type\s+IN`).
+						WithArgs(id).
+						WillReturnRows(sqlmock.NewRows([]string{"depends_on_id", "type"}))
+				}
+			}
+			if err := EnforceClaimPolicyInTx(context.Background(), tx, id, false); err != nil {
+				t.Fatalf("EnforceClaimPolicyInTx = %v, want nil (no live direct blocker)", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet claim-guard SQL expectations: %v", err)
+			}
+		})
+	}
+}
+
 // TestEnforceClaimPolicyInTxPropagatesReadFailure pins the guard's error
 // policy: a read that fails is reported, never interpreted as permission.
 func TestEnforceClaimPolicyInTxPropagatesReadFailure(t *testing.T) {
