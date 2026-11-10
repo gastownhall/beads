@@ -102,6 +102,23 @@ func TestRejectProtectedConfigKey(t *testing.T) {
 	}
 }
 
+// TestRejectProtectedConfigKeyNoDB: no-db is obsolete, so 'bd config set'
+// refuses it whatever the value and explains where issues live (GH#7387).
+func TestRejectProtectedConfigKeyNoDB(t *testing.T) {
+	msg, rejected := rejectProtectedConfigKey("no-db")
+	if !rejected {
+		t.Fatal(`rejectProtectedConfigKey("no-db") = (_, false), want rejected`)
+	}
+	for _, want := range []string{"no-db", "obsolete", "Dolt", "issues.jsonl", "bd config unset no-db"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("rejectProtectedConfigKey(\"no-db\") message missing %q; got:\n%s", want, msg)
+		}
+	}
+	if isRecognizedConfigKey("no-db") {
+		t.Error(`isRecognizedConfigKey("no-db") = true, want the obsolete key unrecognized`)
+	}
+}
+
 func TestLevenshteinDistance(t *testing.T) {
 	tests := []struct {
 		a, b string
