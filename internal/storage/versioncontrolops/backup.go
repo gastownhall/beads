@@ -202,6 +202,43 @@ func BackupToDir(ctx context.Context, register, sync DBConn, dir string) error {
 	return nil
 }
 
+// backupManifestName is the file a Dolt backup keeps at the top of its
+// directory: Dolt's file manifest (store/nbs/file_manifest.go in the pinned
+// Dolt names it "manifest"). `bd backup sync` writes it on every sync.
+const backupManifestName = "manifest"
+
+// CheckBackupDir reports whether dir is a local directory that holds a Dolt
+// backup, so a restore can refuse it before replacing anything. A forced
+// DOLT_BACKUP('restore') opens the source, drops the live database, and only
+// then syncs the backup into its replacement; an existing directory without
+// a manifest opens as an empty store, so without this check an empty or wrong
+// directory costs the database.
+//
+// It checks only that the backup's manifest is present as a regular file, not
+// that the backup is complete or readable.
+func CheckBackupDir(dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("backup source does not exist: %w", err)
+		}
+		return fmt.Errorf("check backup source %s: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("backup source is not a directory: %s", dir)
+	}
+	manifest := filepath.Join(dir, backupManifestName)
+	info, err = os.Stat(manifest)
+	switch {
+	case err == nil && info.Mode().IsRegular():
+		return nil
+	case err == nil, os.IsNotExist(err):
+		return fmt.Errorf("backup source %s holds no Dolt backup: it has no regular %q file at its top level", dir, backupManifestName)
+	default:
+		return fmt.Errorf("check backup source %s: %w", dir, err)
+	}
+}
+
 // DirToFileURL resolves dir to an absolute path and returns a file:// URL.
 //
 // An input that already carries a scheme is rejected rather than prefixed.
