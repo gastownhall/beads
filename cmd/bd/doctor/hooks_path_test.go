@@ -877,6 +877,24 @@ func TestFixHooksPath_ManagedDeletedInPlaceStillUnsets(t *testing.T) {
 				return filepath.Join(storage, "hooks")
 			},
 		},
+		{
+			// The opposite direction: the in-repository .beads/hooks is
+			// deleted while redirected storage holds valid hooks, a tempting
+			// repoint target the repair must not take.
+			name: "in-repo hooks deleted beside storage hooks",
+			arrange: func(t *testing.T, dir string) string {
+				storage := filepath.Join(t.TempDir(), "external storage")
+				if err := os.MkdirAll(storage, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(storage, "metadata.json"), []byte("{}\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("BEADS_DIR", storage)
+				writeRelocatedHook(t, filepath.Join(storage, "hooks"), relocatedHookBody)
+				return filepath.Join(dir, ".beads", "hooks")
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
