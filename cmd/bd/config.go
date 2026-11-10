@@ -1424,7 +1424,7 @@ func allRecognizedConfigPrefixes() []string {
 
 // recognizedConfigKeys lists valid non-namespaced config keys.
 var recognizedConfigKeys = map[string]bool{
-	"no-db": true, "json": true, "db": true, "actor": true,
+	"json": true, "db": true, "actor": true,
 	"identity": true, "no-push": true, "no-git-ops": true,
 	"node_id":                    true, // replica identity for the lease guard (read from yaml/env, never the DB)
 	"create.require-description": true, "beads.role": true,
@@ -1466,6 +1466,10 @@ func isRecognizedConfigKey(key string) bool {
 // dash or underscore form silently produces a write that looks like it
 // succeeded but is never visible to 'bd create'. Reject both and point the
 // user at the right command.
+//
+// no-db is refused for a different reason: the JSONL-only mode it selected
+// is gone, so any value would be a setting nothing reads (GH#7387). 'bd config
+// unset no-db' still clears an old entry.
 func rejectProtectedConfigKey(key string) (string, bool) {
 	switch key {
 	case "issue_prefix", "issue-prefix":
@@ -1473,6 +1477,10 @@ func rejectProtectedConfigKey(key string) (string, bool) {
 			"  - New project:       bd init --prefix <prefix>\n" +
 			"  - Fresh clone:       bd bootstrap\n" +
 			"  - Rename existing:   bd rename-prefix <new-prefix>", true
+	case "no-db":
+		return "Error: no-db is obsolete and cannot be set.\n" +
+			"  bd keeps issues in its Dolt database; .beads/issues.jsonl is only an export of them.\n" +
+			"  - Remove an old entry:   bd config unset no-db", true
 	}
 	return "", false
 }
