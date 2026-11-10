@@ -10,6 +10,7 @@ import (
 	// Import MySQL driver for server mode connections
 	_ "github.com/go-sql-driver/mysql"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/doltversion"
@@ -322,7 +323,7 @@ func checkDoltVersion(cfg *configfile.Config, beadsDir string) (DoctorCheck, *sq
 				Status:   StatusError,
 				Message:  "Dolt server endpoint not trusted",
 				Detail:   err.Error(),
-				Fix:      "Confirm the endpoint via BEADS_DOLT_SERVER_HOST or ~/.config/bd/config.yaml",
+				Fix:      "Confirm the endpoint via BEADS_DOLT_SERVER_HOST or " + config.UserConfigYamlDisplayPath(),
 				Category: CategoryFederation,
 			}, nil
 		}

@@ -215,6 +215,56 @@ func TestCheckDoltVersion_Unreachable(t *testing.T) {
 	}
 }
 
+// TestCheckDoltVersion_UntrustedEndpointFixNamesUserConfigBdReads pins the
+// fix hint for a shared Dolt host no private source confirmed: it names the
+// user config file bd reads. Here that is the native file, because
+// ~/.config/bd/config.yaml is missing, and creating that file instead would
+// hide every setting in the native one (GH#8113).
+func TestCheckDoltVersion_UntrustedEndpointFixNamesUserConfigBdReads(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("APPDATA", filepath.Join(home, "appdata"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg"))
+	for _, name := range []string{"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_SOCKET", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("BEADS_DOLT_PASSWORD", "secret")
+	t.Setenv("BEADS_CREDENTIALS_FILE", filepath.Join(home, "no-credentials"))
+	nativeDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	native := filepath.Join(nativeDir, "bd", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(native), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(native, []byte("actor: someone\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &configfile.Config{
+		DoltMode:       "server",
+		DoltServerHost: "db.example",
+		DoltServerUser: "root",
+		DoltDatabase:   "beads",
+	}
+	check, db := checkDoltVersion(cfg, t.TempDir())
+	if db != nil {
+		_ = db.Close()
+		t.Fatal("an untrusted endpoint must not be dialed")
+	}
+	if check.Message != "Dolt server endpoint not trusted" {
+		t.Fatalf("check = %q (%s), want the untrusted-endpoint refusal", check.Message, check.Detail)
+	}
+	if !strings.Contains(check.Fix, native) {
+		t.Errorf("fix %q does not name %s, the user config file bd reads", check.Fix, native)
+	}
+	if strings.Contains(check.Fix, "~/.config/bd/config.yaml") {
+		t.Errorf("fix %q names ~/.config/bd/config.yaml, which bd does not read", check.Fix)
+	}
+}
+
 // TestRunDoltServerDiagnostics_Unreachable exercises the credential-resolution
 // branch in runDoltServerDiagnostics (bd-h5k7): the loaded metadata.json's
 // user / tls / password build the DSN before the ping fails against the
