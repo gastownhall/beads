@@ -345,3 +345,75 @@ func TestDeleteRetainedCopyNoteOnlyAfterACopyDelete(t *testing.T) {
 		t.Fatalf("deleting an issue only the owner holds printed the retained-copy note:\n%s", res.stderr)
 	}
 }
+
+// TestWritesToLocalCopyLandInAutoRouteOwner pins that bd update --claim, bd
+// update and bd comment of an issue the project holds only as a copy of an
+// issue in its auto-route target change that issue, durably, and leave the
+// copy as it is.
+func TestWritesToLocalCopyLandInAutoRouteOwner(t *testing.T) {
+	f := newCopyFixture(t, []string{"pl-c", "pl-u", "pl-m"}, []string{"pl-c", "pl-u", "pl-m"}, nil)
+
+	for _, step := range []struct {
+		cmd   *cobra.Command
+		flags map[string]string
+		args  []string
+	}{
+		{updateCmd, map[string]string{"claim": "true"}, []string{"pl-c"}},
+		{updateCmd, map[string]string{"priority": "0"}, []string{"pl-u"}},
+		{commentCmd, nil, []string{"pl-m", "routed comment"}},
+	} {
+		res := runCopyCmd(t, step.cmd, step.flags, step.args...)
+		if res.exitCode != 0 {
+			t.Fatalf("bd %s %v: exit %d, err %v\nstderr: %s", step.cmd.Name(), step.args, res.exitCode, res.err, res.stderr)
+		}
+	}
+
+	if got := f.planningIssue(t, "pl-c"); got == nil || got.Assignee != "alice" || got.Status != types.StatusInProgress {
+		t.Errorf("planning pl-c after bd update --claim = %s, want claimed by alice at HEAD", issueStatusOrNil(got))
+	}
+	if got := f.planningIssue(t, "pl-u"); got == nil || got.Priority != 0 {
+		t.Errorf("planning pl-u after bd update --priority 0 = %s, want priority 0 at HEAD", issueStatusOrNil(got))
+	}
+	if !planningHeadHasComment(t, f, "pl-m", "routed comment") {
+		t.Errorf("the comment on pl-m did not land in the planning workspace's HEAD")
+	}
+	for _, id := range []string{"pl-c", "pl-u", "pl-m"} {
+		f.requireCopyUnchanged(t, id)
+	}
+	comments, err := f.project.GetIssueComments(t.Context(), "pl-m")
+	if err != nil {
+		t.Fatalf("read project comments: %v", err)
+	}
+	if len(comments) != 0 {
+		t.Errorf("the project copy of pl-m gained comments %+v", comments)
+	}
+}
+
+// planningHeadHasComment reports whether the planning workspace holds a
+// committed comment on id reading text: the comment is in its store and its
+// working set has nothing uncommitted.
+func planningHeadHasComment(t *testing.T, f *copyFixture, id, text string) bool {
+	t.Helper()
+	s, err := embeddeddolt.Open(t.Context(), f.planningBeadsDir, copyFixturePlanningDB, "main")
+	if err != nil {
+		t.Fatalf("open planning: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	status, err := s.Status(t.Context())
+	if err != nil {
+		t.Fatalf("planning status: %v", err)
+	}
+	if len(status.Staged)+len(status.Unstaged) != 0 {
+		t.Errorf("planning workspace has uncommitted changes %+v", status)
+	}
+	comments, err := s.GetIssueComments(t.Context(), id)
+	if err != nil {
+		t.Fatalf("read planning comments on %s: %v", id, err)
+	}
+	for _, c := range comments {
+		if c.Text == text {
+			return true
+		}
+	}
+	return false
+}
