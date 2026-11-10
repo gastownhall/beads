@@ -1,8 +1,12 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -12,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/uimd"
+	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/issueops"
 )
 
@@ -25,6 +30,82 @@ import (
 // (ga-m6inyb).
 func showNotFoundHint(id string) string {
 	return fmt.Sprintf("this ID may have never existed, or may reference a deleted/purged record with no trace left in the live database — try 'bd history %s'", id)
+}
+
+// prefixConfigReader is the one store read the not-found hints need.
+type prefixConfigReader interface {
+	GetConfig(ctx context.Context, key string) (string, error)
+}
+
+// showNotFoundHintIn is the hint bd show's direct route prints for an id
+// that resolved to no issue. When the id's prefix is not one this
+// workspace's store issues (issue_prefix or allowed_prefixes) and no
+// routes.jsonl route in beadsDir names it, no route sent the lookup to the
+// store that issues that prefix, so the miss says nothing about whether the
+// issue exists — the hint says so instead of suggesting the id never
+// existed (GH#5259). Any other miss gets showNotFoundHint.
+func showNotFoundHintIn(ctx context.Context, s prefixConfigReader, beadsDir, id string) string {
+	if storePrefix, idPrefix, ok := unroutedForeignPrefix(ctx, s, beadsDir, id); ok {
+		return foreignPrefixMissHint(storePrefix, idPrefix, beadsDir)
+	}
+	return showNotFoundHint(id)
+}
+
+// unroutedForeignPrefix reports the store's issue_prefix and the id's prefix
+// when id carries a prefix the store does not issue and no route names it. It
+// answers false whenever it cannot tell: no store, no configured
+// issue_prefix, no prefix in id, or a routes.jsonl it cannot read — a miss
+// under any of those stays showNotFoundHint's to explain.
+func unroutedForeignPrefix(ctx context.Context, s prefixConfigReader, beadsDir, id string) (storePrefix, idPrefix string, ok bool) {
+	if s == nil {
+		return "", "", false
+	}
+	// The display prefix comes from the heuristic; the allow check below
+	// matches known prefixes with HasPrefix first, so a multi-hyphen prefix
+	// (allowed or configured) is never cut at the wrong hyphen.
+	idPrefix = utils.ExtractIssuePrefix(id)
+	if idPrefix == "" {
+		return "", "", false
+	}
+	issuePrefix, err := s.GetConfig(ctx, "issue_prefix")
+	storePrefix = strings.TrimSuffix(strings.TrimSpace(issuePrefix), "-")
+	if err != nil || storePrefix == "" {
+		return "", "", false
+	}
+	known := []string{storePrefix}
+	if allowed, err := s.GetConfig(ctx, "allowed_prefixes"); err == nil {
+		known = append(known, strings.Split(allowed, ",")...)
+	}
+	for _, p := range known {
+		if p = strings.TrimSuffix(strings.TrimSpace(p), "-"); p != "" && strings.HasPrefix(id, p+"-") {
+			return "", "", false
+		}
+	}
+	if beadsDir != "" {
+		routes, err := loadPrefixRoutes(beadsDir)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return "", "", false
+		}
+		if matchPrefixRoute(routes, id) != nil {
+			return "", "", false
+		}
+	}
+	return storePrefix, idPrefix, true
+}
+
+// foreignPrefixMissHint renders the limited-search hint for the miss
+// unroutedForeignPrefix classified: it names the requested and configured
+// prefixes, states only that no route searched another store (never that the
+// issue cannot exist elsewhere), and points at the two remedies — another
+// workspace, or an explicit route. When no workspace routes.jsonl can be
+// resolved it says that instead of inventing a path.
+func foreignPrefixMissHint(storePrefix, idPrefix, beadsDir string) string {
+	if beadsDir == "" {
+		return fmt.Sprintf("the prefix %q is not among this store's configured prefixes (issue prefix \"%s\"); no workspace routes.jsonl is available from this directory, so no other store was searched for this ID and this miss does not mean the issue is absent elsewhere — run the command from a workspace attached to the store that issues %q IDs",
+			idPrefix, remedy.PrintedValue(storePrefix), idPrefix)
+	}
+	return fmt.Sprintf("the prefix %q is not among this store's configured prefixes (issue prefix \"%s\"); no configured route sent this lookup to another store, so this miss does not mean the issue is absent elsewhere — run the command from a workspace attached to the store that issues %q IDs, or configure a matching prefix route in %s",
+		idPrefix, remedy.PrintedValue(storePrefix), idPrefix, remedy.PrintedValue(filepath.Join(beadsDir, "routes.jsonl")))
 }
 
 var showCmd = &cobra.Command{
@@ -142,7 +223,7 @@ var showCmd = &cobra.Command{
 				}
 				if isNotFoundErr(err) {
 					fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
-					fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHint(id))
+					fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHintIn(ctx, store, resolveCommandBeadsDir(dbPath), id))
 				} else {
 					fmt.Fprintf(os.Stderr, "Error fetching %s: %s\n", id, remedy.PrintedMessage(err))
 				}
@@ -153,7 +234,7 @@ var showCmd = &cobra.Command{
 					result.Close()
 				}
 				fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
-				fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHint(id))
+				fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHintIn(ctx, store, resolveCommandBeadsDir(dbPath), id))
 				continue
 			}
 			issue := result.Issue
