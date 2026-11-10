@@ -221,6 +221,50 @@ func TestProxiedServerUpdate(t *testing.T) {
 		}
 	})
 
+	// A refused claim on the proxied route writes none of a claim's
+	// bookkeeping either: no lease, event, journal or version row for the
+	// issue and no Dolt commit, for a bare claim, a claim with a patch and a
+	// wisp claim.
+	t.Run("claim_blocked_writes_no_bookkeeping", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ucbk")
+		blocker := bdProxiedCreate(t, bd, p.dir, "Claim blocker", "--type", "task")
+		blocked := bdProxiedCreate(t, bd, p.dir, "Blocked claim", "--type", "task")
+		blockedWisp := bdProxiedCreate(t, bd, p.dir, "Blocked wisp claim", "--type", "task", "--ephemeral")
+		bdProxiedDep(t, bd, p.dir, "add", blocked.ID, blocker.ID)
+		bdProxiedDep(t, bd, p.dir, "add", blockedWisp.ID, blocker.ID)
+		db := openProxiedDB(t, p)
+
+		for _, tc := range []struct {
+			name string
+			id   string
+			args []string
+		}{
+			{name: "bare claim", id: blocked.ID},
+			{name: "claim with a patch", id: blocked.ID, args: []string{"--title", "Patched by a refused claim", "--notes", "refused notes"}},
+			{name: "wisp claim", id: blockedWisp.ID},
+		} {
+			before := bdProxiedShow(t, bd, p.dir, tc.id)
+			books := readClaimBookkeeping(t, db, tc.id)
+			args := append([]string{tc.id, "--claim", "--actor", "blocked-worker"}, tc.args...)
+			out, code := bdProxiedUpdateFailCode(t, bd, p.dir, args...)
+			if code != 1 {
+				t.Errorf("%s: exit code = %d, want 1\n%s", tc.name, code, out)
+			}
+			if !strings.Contains(out, "cannot claim blocked issue") {
+				t.Errorf("%s: refusal missing the blocked-claim text:\n%s", tc.name, out)
+			}
+			got := bdProxiedShow(t, bd, p.dir, tc.id)
+			if got.Status != types.StatusOpen || got.Assignee != "" || got.Title != before.Title || got.Notes != before.Notes {
+				t.Errorf("%s: refused claim changed %s: status=%q assignee=%q title=%q notes=%q",
+					tc.name, tc.id, got.Status, got.Assignee, got.Title, got.Notes)
+			}
+			if after := readClaimBookkeeping(t, db, tc.id); after != books {
+				t.Errorf("%s: refused claim wrote claim bookkeeping for %s: %+v -> %+v", tc.name, tc.id, books, after)
+			}
+		}
+	})
+
 	t.Run("claim_blocked_force_overrides", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "ucbf")
