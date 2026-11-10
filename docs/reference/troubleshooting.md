@@ -579,6 +579,14 @@ Dolt 2.3.3. Which engine that is depends on how `bd` runs Dolt:
   catch a `dolt` whose version `bd` cannot determine, so check
   `dolt version` yourself.
 
+**Workaround until you can upgrade:** if you administer the SSH server the
+remote lives on, raise `MaxStartups` in its `sshd_config` and reload the SSH
+service. The reporter of #6359 got compaction working again with
+`MaxStartups 100:30:200`; treat that as one reported example, not a setting
+guaranteed to be enough, since a larger burst can still exceed it. A Git host
+you do not administer cannot be tuned this way. Upgrading remains the
+permanent fix.
+
 ## Git Hook Issues
 
 ### Hooks not running
