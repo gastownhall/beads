@@ -142,3 +142,24 @@ func TestHideKeepsExplicitConsoleChoices(t *testing.T) {
 		}
 	}
 }
+
+// TestBackgroundSysProcAttr pins the long-lived children's flags exactly,
+// regardless of the console probe, and that each call returns a structure of
+// its own for the caller to keep.
+func TestBackgroundSysProcAttr(t *testing.T) {
+	for _, attached := range []bool{false, true} {
+		forceConsoleAttached(t, attached)
+		a, b := BackgroundSysProcAttr(), BackgroundSysProcAttr()
+		if a == nil || b == nil {
+			t.Fatalf("attached=%v: BackgroundSysProcAttr() = nil on windows", attached)
+		}
+		if a == b {
+			t.Fatalf("attached=%v: BackgroundSysProcAttr returned the same structure twice", attached)
+		}
+		want := uint32(windows.CREATE_NO_WINDOW | windows.CREATE_NEW_PROCESS_GROUP)
+		if a.CreationFlags != want {
+			t.Fatalf("attached=%v: CreationFlags = %#x, want exactly CREATE_NO_WINDOW|CREATE_NEW_PROCESS_GROUP (%#x)",
+				attached, a.CreationFlags, want)
+		}
+	}
+}
