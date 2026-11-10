@@ -40,7 +40,25 @@ bd history <id> --events. The JSONL sidecar is for explicit interaction capture:
 - auditing ("why did the agent do that?")
 - dataset generation (SFT/RL fine-tuning)
 
-Entries are append-only. Labeling creates a new "label" entry that references a parent entry.`,
+Entries are append-only. Labeling creates a new "label" entry that references a parent entry.
+
+While enabled, some commands also append entries on their own:
+- "field_change" (extra: field, old_value, new_value, optional reason): the
+  status, assignee and priority changes bd update makes, including the status
+  and assignee a --claim sets, and status changes from bd close and a few
+  other lifecycle commands. The old value comes from a read taken just before
+  the write, not from the write itself.
+- "claimed" (extra: status, assignee): bd ready --claim and
+  bd close --claim-next. Those claims return no prior state, so the entry
+  records only the claimed issue's status and assignee after the claim.
+
+Consumers should skip kinds they do not know. These entries are best-effort:
+a failed sidecar write never fails the command, and many writes (bd create,
+bd comment, labels, dependencies and others) append nothing, so the sidecar
+is not a replayable history. To replay every committed mutation in order,
+enable the transactional events journal (bd config set events-journal true)
+and read it with bd events tail; bd events --help covers its retention and
+per-replica scope.`,
 }
 
 var auditRecordCmd = &cobra.Command{

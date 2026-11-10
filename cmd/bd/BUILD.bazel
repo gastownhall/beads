@@ -564,6 +564,7 @@ go_test(
         "assign_fence_embedded_test.go",
         "assign_fence_proxied_test.go",
         "audit_field_changes_test.go",
+        "audit_help_test.go",
         "auto_import_upgrade_embedded_test.go",
         "auto_import_upgrade_unit_test.go",
         "autocommit_embedded_test.go",
