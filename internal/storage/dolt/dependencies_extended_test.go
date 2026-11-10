@@ -1876,3 +1876,80 @@ func TestGetBlockedIssues_WithBlockerDetails(t *testing.T) {
 }
 
 // Note: testContext is already defined in dolt_test.go for this package
+
+func TestConditionalBlocksAcrossWispPlanes(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// The conditional-blocks rule must hold on every plane pair: an issue or
+	// wisp fallback conditional on an issue or wisp precondition stays blocked
+	// through a success close and is released only by a failure close.
+	planes := []struct {
+		name       string
+		depIsWisp  bool
+		targetWisp bool
+	}{
+		{"issue_dep_wisp_target", false, true},
+		{"wisp_dep_issue_target", true, false},
+		{"wisp_dep_wisp_target", true, true},
+	}
+	reasons := []struct {
+		outcome     string
+		reason      string
+		wantBlocked bool
+	}{
+		{"success_close_keeps_blocked", "completed successfully", true},
+		{"failure_close_releases", "failed: rejected by reviewer", false},
+	}
+
+	for _, p := range planes {
+		for _, r := range reasons {
+			t.Run(p.name+"_"+r.outcome, func(t *testing.T) {
+				depID := "cb-plane-dep-" + p.name + "-" + r.outcome
+				targetID := "cb-plane-tgt-" + p.name + "-" + r.outcome
+
+				if p.targetWisp {
+					createWisp(t, ctx, store, targetID)
+				} else {
+					createPerm(t, ctx, store, targetID)
+				}
+				if p.depIsWisp {
+					createWisp(t, ctx, store, depID)
+				} else {
+					createPerm(t, ctx, store, depID)
+				}
+				depTable := "issues"
+				if p.depIsWisp {
+					depTable = "wisps"
+				}
+
+				addDependency(t, ctx, store, depID, targetID, types.DepConditionalBlocks)
+				assertIsBlocked(t, ctx, store, depTable, depID, true)
+
+				if err := store.CloseIssue(ctx, targetID, r.reason, "tester", ""); err != nil {
+					t.Fatalf("close target %s: %v", targetID, err)
+				}
+				assertIsBlocked(t, ctx, store, depTable, depID, r.wantBlocked)
+
+				// Ready membership is the durable plane's user-visible answer.
+				if !p.depIsWisp {
+					readyIssues, err := store.GetReadyWork(ctx, types.WorkFilter{Status: types.StatusOpen})
+					if err != nil {
+						t.Fatalf("GetReadyWork failed: %v", err)
+					}
+					readyIDs := make(map[string]bool)
+					for _, issue := range readyIssues {
+						readyIDs[issue.ID] = true
+					}
+					if readyIDs[depID] != !r.wantBlocked {
+						t.Errorf("ready membership = %v after close reason %q, want %v",
+							readyIDs[depID], r.reason, !r.wantBlocked)
+					}
+				}
+			})
+		}
+	}
+}
