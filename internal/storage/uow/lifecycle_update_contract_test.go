@@ -86,6 +86,9 @@ func TestLifecycleUpdateContract(t *testing.T) {
 	t.Run("ClaimIgnoresAnInheritedBlockedFlag", func(t *testing.T) {
 		conformance.RunLifecycleUpdateClaimIgnoresAnInheritedBlockedFlag(t, ctx, fixture)
 	})
+	t.Run("ForceClaimBlockedRequiresAClaim", func(t *testing.T) {
+		conformance.RunLifecycleUpdateForceClaimBlockedRequiresAClaim(t, ctx, fixture)
+	})
 	t.Run("AssigneeTransferFence", func(t *testing.T) {
 		conformance.RunLifecycleUpdateAssigneeTransferFence(t, ctx, fixture)
 	})

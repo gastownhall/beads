@@ -237,3 +237,28 @@ func StoredIsBlockedThrough(queryScalar func(context.Context, string, []any, ...
 		return flag != 0, nil
 	}
 }
+
+// RunLifecycleUpdateForceClaimBlockedRequiresAClaim pins the override's
+// shape: ForceClaimBlocked waives the blocked-claim refusal and nothing else,
+// so a request carrying it without Claim is refused by validation before
+// anything is written, patch included.
+func RunLifecycleUpdateForceClaimBlockedRequiresAClaim(t *testing.T, ctx context.Context, fixture LifecycleUpdateFixture) {
+	t.Helper()
+
+	id := fixture.IssuePrefix + "-lup-forcenoclaim"
+	seedLifecycleUpdateIssue(t, ctx, fixture, lifecycleUpdateIssue(id))
+	before := lifecycleUpdateRow(t, ctx, fixture, id)
+	events := newLifecycleUpdateEventCounter(t, ctx, fixture, id)
+
+	_, err := fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{
+		Actor:             "claimant",
+		IssueID:           id,
+		ForceClaimBlocked: true,
+		Patch:             publicops.IssuePatch{Title: publicops.Field[string]{Set: true, Value: "patched without a claim"}},
+	})
+	if !errors.Is(err, storage.ErrValidation) {
+		t.Fatalf("ForceClaimBlocked without Claim on %s: err = %v, want ErrValidation", id, err)
+	}
+	assertLifecycleUpdateRowUnchanged(t, ctx, fixture, id, "after a refused ForceClaimBlocked without Claim", before)
+	events.assert(t, "refused ForceClaimBlocked without Claim", 0)
+}
