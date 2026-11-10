@@ -191,6 +191,24 @@ func TestSharedServerVersionBumpDoesNotPromoteCursor(t *testing.T) {
 		t.Fatalf("the refused write promoted the schema cursor from %d to %d", behind, got)
 	}
 
+	// The refusals above consumed the one-shot .local_version signal, so the
+	// version-bump reconciliation will not run again to record the marker.
+	versionMarker := func() string {
+		var v string
+		err := admin.QueryRowContext(ctx,
+			"SELECT value FROM local_metadata WHERE `key` = 'bd_version'").Scan(&v)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ""
+		}
+		if err != nil {
+			t.Fatalf("read bd_version marker: %v", err)
+		}
+		return v
+	}
+	if got := versionMarker(); got == Version {
+		t.Fatalf("precondition failed: bd_version marker already %q before bd migrate schema", got)
+	}
+
 	// Consent completes the upgrade.
 	stdout, stderr, code = run("migrate", "schema")
 	if code != 0 {
@@ -198,6 +216,12 @@ func TestSharedServerVersionBumpDoesNotPromoteCursor(t *testing.T) {
 	}
 	if got := cursor(); got != schema.LatestVersion() {
 		t.Fatalf("cursor = %d after bd migrate schema, want %d", got, schema.LatestVersion())
+	}
+	// The migration ran during the store open, not in the command's own pass;
+	// the marker the refused reconciliation held back must still be recorded
+	// (gastownhall/beads#7283).
+	if got := versionMarker(); got != Version {
+		t.Errorf("bd_version marker = %q after bd migrate schema, want %q (gastownhall/beads#7283)", got, Version)
 	}
 }
 
