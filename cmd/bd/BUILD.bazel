@@ -932,6 +932,7 @@ go_test(
         "info_kv_exclusion_test.go",
         "info_proxied_integration_test.go",
         "info_test.go",
+        "init_adoption_consent_test.go",
         "init_agent_test.go",
         "init_cancel_e2e_test.go",
         "init_commit_test.go",

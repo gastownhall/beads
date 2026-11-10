@@ -2060,3 +2060,86 @@ func TestEmbeddedInitGitOriginAdoptionRequiresConsent(t *testing.T) {
 		t.Errorf("adoption refusal should not have created .beads:\n%s", initOut)
 	}
 }
+
+// TestEmbeddedInitGitOriginAdoptionWithYes pins the consented adoption path
+// of #6099: `bd init --yes` in a fork-less clone whose git origin carries
+// upstream's refs/dolt/data adopts that issue history, wires the origin as
+// the Dolt remote "origin" and persists sync.remote — and the derived URL is
+// disclosed on stderr BEFORE the history is cloned in.
+func TestEmbeddedInitGitOriginAdoptionWithYes(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
+	}
+
+	bd := buildEmbeddedBD(t)
+
+	bareDir := filepath.Join(t.TempDir(), "upstream.git")
+	runGitForBootstrapTest(t, "", "init", "--bare", "-b", "main", bareDir)
+	remoteURL := "file://" + bareDir
+
+	upstreamDir := t.TempDir()
+	initGitRepoAt(t, upstreamDir)
+	runGitForBootstrapTest(t, upstreamDir, "branch", "-M", "main")
+	runGitForBootstrapTest(t, upstreamDir, "commit", "--allow-empty", "-m", "init")
+	runBDInit(t, bd, upstreamDir, "--prefix", "up", "--skip-hooks", "--skip-agents")
+	bdCreate(t, bd, upstreamDir, "Upstream issue history", "--type", "task")
+	runGitForBootstrapTest(t, upstreamDir, "remote", "add", "origin", remoteURL)
+	runGitForBootstrapTest(t, upstreamDir, "push", "-u", "origin", "main")
+	bdDolt(t, bd, upstreamDir, "push", "--yes")
+
+	// Fork-less clone: origin IS upstream. --yes is the consent.
+	cloneDir := t.TempDir()
+	initGitRepoAt(t, cloneDir)
+	runGitForBootstrapTest(t, cloneDir, "remote", "add", "origin", remoteURL)
+	cmd := exec.Command(bd, "init", "--prefix", "mine", "--yes", "--skip-hooks", "--skip-agents")
+	cmd.Dir = cloneDir
+	cmd.Env = bdEnv(cloneDir)
+	initOut, initErr := cmd.CombinedOutput()
+	if initErr != nil {
+		t.Fatalf("bd init --yes should adopt the git origin's issue history: %v\n%s", initErr, initOut)
+	}
+	out := string(initOut)
+
+	// The adopted history is upstream's: its issue is here under its prefix
+	// ("up"), not the declined "mine" one. Consent adopts the origin's
+	// identity; it does not mint a fresh one.
+	list := exec.Command(bd, "list", "--all")
+	list.Dir = cloneDir
+	list.Env = bdEnv(cloneDir)
+	listOut, listErr := list.CombinedOutput()
+	if listErr != nil {
+		t.Fatalf("bd list after adoption: %v\n%s", listErr, listOut)
+	}
+	if !strings.Contains(string(listOut), "Upstream issue history") || !strings.Contains(string(listOut), "up-") {
+		t.Errorf("adoption should import upstream's issue under its prefix; bd list --all:\n%s", listOut)
+	}
+	if strings.Contains(string(listOut), "mine-") {
+		t.Errorf("adoption must not mint a fresh \"mine\" prefix; bd list --all:\n%s", listOut)
+	}
+
+	// The URL was disclosed before the clone: the announce line precedes the
+	// bootstrap-completed line.
+	announce := "Adopting this git origin's issue history: " + remoteURL
+	announceIdx := strings.Index(out, announce)
+	bootIdx := strings.Index(out, "Bootstrapped from remote")
+	if announceIdx < 0 {
+		t.Errorf("init --yes should disclose the derived URL before cloning; output:\n%s", out)
+	} else if bootIdx < 0 || bootIdx < announceIdx {
+		t.Errorf("the disclosure must precede the bootstrap (announce@%d, bootstrapped@%d):\n%s", announceIdx, bootIdx, out)
+	}
+
+	// The adopted origin is wired as the Dolt remote "origin"...
+	remotes := bdDolt(t, bd, cloneDir, "remote", "list")
+	if !strings.Contains(remotes, "origin") || !strings.Contains(remotes, remoteURL) {
+		t.Errorf("adoption should wire origin as a Dolt remote %q; remote list:\n%s", remoteURL, remotes)
+	}
+
+	// ...and persisted as sync.remote, so later syncs go to the same origin.
+	configYAML, err := os.ReadFile(filepath.Join(cloneDir, ".beads", "config.yaml"))
+	if err != nil {
+		t.Fatalf("read config.yaml: %v", err)
+	}
+	if !strings.Contains(string(configYAML), remoteURL) {
+		t.Errorf("adoption should persist sync.remote; config.yaml:\n%s", configYAML)
+	}
+}
