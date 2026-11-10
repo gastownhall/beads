@@ -55,11 +55,11 @@ func readDoltProcessPIDs() ([]int, error) {
 	return parseDoltProcessPIDs(out), nil
 }
 
-// parseDoltProcessPIDs returns matching, non-defunct Dolt server PIDs from a
+// parseDoltProcessPIDs returns matching, non-zombie Dolt server PIDs from a
 // `ps -axo pid=,state=,command=` snapshot. It preserves the source row order.
 // The state column is optional: macOS 26 leaves it empty for many rows
-// (#7121), so the field after the PID counts as a state only when it looks
-// like one, and every word of the row is command otherwise.
+// (#7121). Every word after the PID goes to isDoltSQLServerCommand, which
+// skips leading words, so a state, present or not, is just a leading word.
 func parseDoltProcessPIDs(snapshot []byte) []int {
 	var pids []int
 	for _, line := range strings.Split(string(snapshot), "\n") {
@@ -72,19 +72,16 @@ func parseDoltProcessPIDs(snapshot []byte) []int {
 		if err != nil || pid <= 0 {
 			continue
 		}
-		// A zombie or dead row is excluded before the optional state below:
-		// a state isPSStateCode does not recognize (a synthetic "Zp") must
-		// not turn into command words and let the row match.
-		if first := words[1][0]; first == 'Z' || first == 'X' {
+		// Only a zombie is skipped: ps prints Z first for one on every
+		// platform, whatever modifiers follow. X is not skipped: where macOS
+		// 26 leaves the state code blank, a leading X is the traced modifier
+		// of a live process, and Linux's dead state X leaves no command line
+		// to match.
+		if words[1][0] == 'Z' {
 			continue
 		}
 
-		command := words[1:]
-		if isPSStateCode(command[0]) {
-			command = command[1:]
-		}
-
-		if isDoltSQLServerCommand(command) {
+		if isDoltSQLServerCommand(words[1:]) {
 			pids = append(pids, pid)
 		}
 	}
@@ -99,7 +96,11 @@ func parseDoltProcessPIDs(snapshot []byte) []int {
 // executable paths containing spaces recognizable, at the cost of still
 // matching a command that merely mentions both words in order (`some-tool
 // says dolt then sql-server`). A renamed executable (dolt-2.6) no longer
-// qualifies. Every later dolt word's suffix is contained in the first one's,
+// qualifies, and neither does a server started through a `dolt` wrapper on
+// PATH that execs a binary with another name (dolt.real): ps shows the
+// command the wrapper exec'd, so the wrapper must exec a binary named dolt or
+// keep argv[0] (bash's `exec -a "$0"`). Windows likewise requires the dolt.exe
+// image name. Every later dolt word's suffix is contained in the first one's,
 // so the first dolt word decides.
 func isDoltSQLServerCommand(words []string) bool {
 	for i, word := range words {
@@ -108,26 +109,6 @@ func isDoltSQLServerCommand(words []string) bool {
 		}
 	}
 	return false
-}
-
-// isPSStateCode reports whether word looks like a ps state column: a leading
-// state letter (uppercase, or the lowercase traced "t") followed by the
-// modifier letters ps appends on Linux and the BSDs (uppercase letters, "s",
-// "l", "<", ">", "+"). It is a permissive parsing heuristic, not a claim that
-// ps prints every accepted letter; a word that fails it stays in the command,
-// where it cannot hide a dolt match.
-func isPSStateCode(word string) bool {
-	if word == "" || (word[0] != 't' && (word[0] < 'A' || word[0] > 'Z')) {
-		return false
-	}
-	for i := 1; i < len(word); i++ {
-		c := word[i]
-		if (c >= 'A' && c <= 'Z') || c == 's' || c == 'l' || c == '<' || c == '>' || c == '+' {
-			continue
-		}
-		return false
-	}
-	return true
 }
 
 // isProcessInDir checks if a process's working directory matches the given path.

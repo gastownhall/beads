@@ -277,8 +277,16 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 			snapshot: "105 S Dolt sql-server\n106 S dolt SQL-SERVER\n",
 		},
 		{
-			name:     "zombie and dead states including modifiers are rejected",
-			snapshot: "107 Z dolt sql-server\n108 Z+ dolt sql-server\n109 X dolt sql-server\n110 X< dolt sql-server\n",
+			name:     "zombie states including modifiers are rejected",
+			snapshot: "107 Z dolt sql-server\n108 Z+ dolt sql-server\n",
+		},
+		{
+			// macOS 26 can leave the state code blank, so a live server under
+			// a debugger shows only its modifiers: the traced X, after < when
+			// the process is reniced.
+			name:     "traced modifier X after a blank state keeps a live server",
+			snapshot: "109 X dolt sql-server\n110 X+ dolt sql-server\n119 <X dolt sql-server\n",
+			want:     []int{109, 110, 119},
 		},
 		{
 			name:     "valid state prefix with modifier is accepted",
@@ -301,7 +309,8 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 		},
 		{
 			// State letters across Linux, macOS and the BSDs, plus the
-			// empty-state macOS form, all leave a live row eligible.
+			// empty-state macOS form, all leave a live row eligible: a state
+			// is a leading word the command matcher skips.
 			name: "live state codes are accepted across platforms",
 			snapshot: "301 S /usr/local/bin/dolt sql-server\n" +
 				"302 Ss /usr/local/bin/dolt sql-server\n" +
@@ -321,12 +330,13 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 			want: []int{301, 302, 303, 304, 305, 306, 307, 308, 309, 310, 311, 312, 313, 314, 315},
 		},
 		{
-			// The zombie/dead exclusion reads the first field after the PID
-			// before the optional state is consumed, so an unrecognized
-			// modifier such as a synthetic Zp cannot turn a dead row into a
-			// match.
-			name:     "dead-state modifiers are excluded, recognized or not",
+			// The zombie exclusion reads only the first letter of the field
+			// after the PID, so a Z followed by any modifier, even an
+			// unfamiliar one such as a synthetic Zp, still marks a zombie,
+			// and an X followed by one is still a live traced process.
+			name:     "zombie states are excluded whatever modifiers follow",
 			snapshot: "316 Zs dolt sql-server\n317 Zp dolt sql-server\n318 Xp dolt sql-server\n",
+			want:     []int{318},
 		},
 		{
 			name:     "combined state modifiers keep a live server",
@@ -334,9 +344,9 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 			want:     []int{121, 124, 126, 127},
 		},
 		{
-			name: "zombie and dead states are rejected for spaced executable path",
+			name: "zombie states are rejected for spaced executable path",
 			snapshot: "307 Z /Users/John Smith/bin/dolt sql-server\n" +
-				"308 X< /Users/u/Library/Application Support/tools/dolt sql-server\n",
+				"308 Z+ /Users/u/Library/Application Support/tools/dolt sql-server\n",
 		},
 		{
 			name: "global flags between executable and subcommand",
@@ -357,9 +367,9 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 			want: []int{406, 407},
 		},
 		{
-			// Sp is not a state ps prints: the token stays in the command,
-			// where a later whole dolt word still matches.
-			name:     "unfamiliar state-like token stays in the command",
+			// Sp is not a state ps prints. Like any state, it is a leading
+			// word the matcher skips, so the later whole dolt word matches.
+			name:     "unfamiliar state-like token is tolerated",
 			snapshot: "408 Sp /usr/local/bin/dolt sql-server\n",
 			want:     []int{408},
 		},
@@ -492,4 +502,47 @@ func TestParseDoltProcessPIDsEmptyState(t *testing.T) {
 	if got := parseDoltProcessPIDs([]byte(snapshot)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("parseDoltProcessPIDs() = %v, want %v", got, want)
 	}
+}
+
+// TestReadDoltProcessPIDsListsLiveServer runs the reader against the system
+// ps: ps must accept the requested columns, and the parser must find a live
+// process in what it prints. A shell blocked on stdin, with dolt and
+// sql-server as whole words in its arguments, stands in for a server. It
+// keeps /bin/sh as its argv[0] (busybox picks its applet by argv[0]), so its
+// command starts with /bin/sh: it shows that ps accepts the columns and that
+// a live process is found, not that a blank state parses. Blank states are
+// covered by the GH#7121 rows in TestParseDoltProcessPIDs.
+func TestReadDoltProcessPIDsListsLiveServer(t *testing.T) {
+	if _, err := exec.LookPath("ps"); err != nil {
+		t.Skip("ps not available")
+	}
+	cmd := exec.Command("/bin/sh", "-c", "read line", "dolt", "sql-server")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(exited)
+	}()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		<-exited
+	})
+
+	pids, err := readDoltProcessPIDs()
+	if err != nil {
+		t.Fatalf("readDoltProcessPIDs() error = %v", err)
+	}
+	for _, pid := range pids {
+		if pid == cmd.Process.Pid {
+			return
+		}
+	}
+	t.Fatalf("readDoltProcessPIDs() = %v, want it to include stand-in PID %d", pids, cmd.Process.Pid)
 }

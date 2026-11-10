@@ -1231,9 +1231,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   list parser read the executable path as the state, which dropped the
   leading `dolt` from the command: a running server then vanished from the
   process list `bd` uses to verify recorded server PIDs, reclaim ports and
-  clean up stale servers. The state column is now optional: the field after
-  the PID counts as a state only when it looks like one (a state letter plus
-  the modifier letters `ps` appends), and the whole row is command otherwise.
+  clean up stale servers. Rows are now recognized with or without a state
+  column. A server running under a debugger, whose state macOS 26 shows as
+  just `X`, is recognized too; only zombie (`Z`) rows are skipped (#7121,
+  reported by @SimplicityGuy, first fixed by @vishnujayvel in #7130).
 
 - The process list recognizes a dolt server by whole command words: the
   command must name the dolt executable — the word `dolt` or a path ending
@@ -1243,7 +1244,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   like a dolt server to the port-reclaim and stale-server paths. Global
   flags between the executable and the subcommand still match, as do shell
   stand-ins that launch a `dolt`-named script; an executable renamed away
-  from `dolt` (say `dolt-2.6`) is not recognized.
+  from `dolt` (say `dolt-2.6`) is not recognized. Neither is a server
+  started through a `dolt` wrapper on `PATH` that execs a binary with
+  another name (`dolt.real`), so `bd` would lose track of the server it
+  started: such a wrapper must exec a binary named `dolt` or keep `argv[0]`
+  (bash's `exec -a "$0"`).
 
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
