@@ -682,7 +682,9 @@ func (s *DoltServer) waitReady(ctx context.Context, watch *doltserver.StartupWat
 		conn, err := s.Dial(dctx)
 		dcancel()
 		if err == nil {
-			_ = conn.Close()
+			// Read the greeting before closing: an unread close resets the
+			// connection, which dolt treats as an aborted handshake (#5589).
+			_ = doltserver.DrainAndCloseProbe(conn)
 			answered = true
 		}
 		switch {

@@ -37,6 +37,7 @@ go_test(
         "external_dolt_server_test.go",
         "testmain_test.go",
         "testserver_test.go",
+        "waitready_probe_test.go",
     ],
     embed = [":server"],
     deps = [
