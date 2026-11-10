@@ -1227,17 +1227,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `bd setup` and the integrations `bd init` installs no longer replace an
-  instruction file you made read-only. The setup writer writes a new file and
-  renames it over the old one, which needs only a writable directory, so a
-  0444 `AGENTS.md` or `CLAUDE.md` was rewritten and given the 0444 mode back
-  (#7975). An existing file the process cannot open for writing is now left
+  instruction or integration file you made read-only. The setup writer writes
+  a new file and renames it over the old one, which needs only a writable
+  directory, so a 0444 `AGENTS.md` or `CLAUDE.md` was rewritten and given the
+  0444 mode back (#7975), and `bd setup mux` made a read-only hook writable
+  again. An existing file the process cannot open for writing is now left
   unchanged and reported (`refusing to replace a file you cannot write:
   <path>`): `bd setup <recipe>` fails with it, while `bd init` and the
-  instructions step of `bd setup claude` warn and continue. A read-only file
-  that already holds what setup would write, under the mode it would set, is
-  left alone without an error. The check covers the files setup writes through
-  its shared atomic writer, which also refuses a path that is not a regular
-  file rather than replacing it.
+  instructions steps of `bd setup claude` and `bd setup gemini`, on install
+  and `--remove` alike, warn and continue (`bd setup claude --remove` run from
+  `~/.claude` fails). A read-only file that already holds what setup would
+  write, under the mode it would set, is left alone without an error. The
+  check covers the files the `claude`, `gemini`, `codex`, `cursor`, `factory`,
+  `opencode`, `mux`, `aider` and `junie` recipes write through setup's shared
+  atomic writer, which also refuses a path that is not a regular file rather
+  than replacing it. The other recipes write their files in place and, as
+  before, fail on a read-only one with the system's permission error, even
+  when it already holds what they would write.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
