@@ -1986,6 +1986,29 @@ bd dolt commit
     | For more options (--stdin, custom messages), see: bd vc commit
   flag --message -m type=string default="" usage="Commit message (default: auto-generated)"
 
+bd dolt drop-database
+  use: "drop-database <name>"
+  short: "Drop one named database from the Dolt server (recoverable via DOLT_UNDROP)"
+  hidden: false
+  runnable: true
+  long:
+    | Drop one named database from the Dolt server this workspace uses.
+    |
+    | Deleting a workspace's .beads directory does not drop its database on a
+    | shared Dolt server; this command does, for one database you name.
+    |
+    | DROP DATABASE only marks the database as dropped: it stays recoverable with
+    | CALL DOLT_UNDROP('<name>') until the server's dropped databases are purged.
+    | This command never purges. 'bd dolt clean-databases --purge-dropped' reclaims
+    | the disk, for every dropped database on the server at once.
+    |
+    | Asks for confirmation; pass --yes in scripts and agents.
+    |
+    | Examples:
+    |   bd dolt drop-database old_project          # prompts for confirmation
+    |   bd dolt drop-database old_project --yes    # no prompt
+  flag --yes -y type=bool default="false" usage="Skip the confirmation prompt (required in non-interactive use)"
+
 bd dolt killall
   use: "killall"
   short: "Kill all orphan Dolt server processes"
@@ -3700,12 +3723,19 @@ bd init
     | Cross-machine sync and backups use Dolt remotes/backups, not JSONL import/export.
     | To enable: bd config set export.auto true
     |
+    | Git origin with Dolt history: when no --remote or sync.remote is set and git
+    | origin has Dolt history (refs/dolt/data), adopting it imports that remote's
+    | issue history and identity. bd init asks once before adopting it; --yes
+    | consents ahead of time. Without --yes, non-interactive and --json runs refuse.
+    | --no-adopt (or BD_NO_REMOTE_ADOPT=1) never derives a remote from git origin.
+    |
     | Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
     |   Skips all interactive prompts, using sensible defaults:
     |   • Role defaults to "maintainer" (override with --role)
     |   • Fork exclude auto-configured when fork detected
     |   • Auto-export left at default (disabled)
     |   • --contributor and --team flags are rejected (wizards require interaction)
+    |   • Never consents to adopting git origin's Dolt history (pass --yes)
     |   Also auto-detected when stdin is not a terminal or CI=true is set.
   flag --agents-file type=string default="" usage="Custom filename for agent instructions (default: AGENTS.md)"
   flag --agents-profile type=string default="" usage="AGENTS.md profile: 'minimal' (default, pointer to bd prime) or 'full' (complete command reference)"
@@ -3721,6 +3751,7 @@ bd init
   flag --init-if-missing type=bool default="false" usage="If the workspace is already initialized, skip init and exit 0 instead of failing (idempotent init for scaffolds)"
   flag --mysql-database type=string default="" hidden usage="Legacy MySQL database (removed backend compatibility only)"
   flag --mysql-url type=string default="" hidden usage="Legacy MySQL connection URL (removed backend compatibility only)"
+  flag --no-adopt type=bool default="false" usage="Never derive a Dolt remote from git origin: no probe, no clone, no remote wiring (also BD_NO_REMOTE_ADOPT=1)"
   flag --non-interactive type=bool default="false" usage="Skip all interactive prompts (auto-detected in CI or non-TTY environments)"
   flag --pg-schema type=string default="" hidden usage="Legacy PostgreSQL schema (removed backend compatibility only)"
   flag --pg-url type=string default="" hidden usage="Legacy PostgreSQL connection URL (removed backend compatibility only)"
@@ -3761,6 +3792,7 @@ bd init
   flag --stealth type=bool default="false" usage="Enable stealth mode: keep beads files out of git via .git/info/exclude (sets no-git-ops)"
   flag --team type=bool default="false" usage="Run team workflow setup wizard"
   flag --team-server type=bool default="false" usage="[EXPERIMENTAL] The shared database's schema is managed by beads-team-server (bts): bd never creates the database or runs schema migrations, only verifies the schema version (proxied-server mode only). Not related to --team."
+  flag --yes -y type=bool default="false" usage="Consent to adopting the Dolt history of a remote derived from git origin (never implied by --non-interactive or --json)"
 
 bd init-safety
   use: "init-safety"
@@ -3777,7 +3809,19 @@ bd init-safety
     | FLAG SURFACE
     |
     |   bd init                       Mint a new identity. Bootstraps from
-    |                                 origin if it has refs/dolt/data.
+    |                                 --remote or sync.remote if it has
+    |                                 refs/dolt/data. A remote derived from git
+    |                                 origin with refs/dolt/data is adopted only
+    |                                 with consent: bd init asks once, and
+    |                                 refuses (exit 1) when it cannot ask.
+    |
+    |   bd init --yes                 Consent to adopting git origin's Dolt
+    |                                 history. --non-interactive and --json are
+    |                                 never consent.
+    |
+    |   bd init --no-adopt            Never derive a remote from git origin: no
+    |                                 probe, no clone, no remote wiring. Also
+    |                                 BD_NO_REMOTE_ADOPT=1. Wins over --yes.
     |
     |   bd init --reinit-local        Re-initialize local .beads/ over existing
     |                                 local data. Does NOT authorize discarding
@@ -3823,7 +3867,8 @@ bd init-safety
     |
     |       bd bootstrap
     |
-    |   bd init will automatically suggest this when a remote is detected.
+    |   or, for git origin, bd init --yes. bd init will automatically suggest
+    |   these when a remote is detected.
     |
     | DESTROY-TOKEN (non-interactive only)
     |
@@ -3845,6 +3890,8 @@ bd init-safety
     |
     | EXIT CODES
     |
+    |   1     refused: git origin has Dolt history and adoption was declined,
+    |         or not consented to with --yes where bd init cannot ask
     |   10    refused: remote has Dolt history and you selected local history
     |         without --discard-remote
     |   11    refused: existing local data and you declined the destroy confirm

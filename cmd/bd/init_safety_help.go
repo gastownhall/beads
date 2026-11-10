@@ -25,7 +25,19 @@ source is ambiguous, bd init refuses.
 FLAG SURFACE
 
   bd init                       Mint a new identity. Bootstraps from
-                                origin if it has refs/dolt/data.
+                                --remote or sync.remote if it has
+                                refs/dolt/data. A remote derived from git
+                                origin with refs/dolt/data is adopted only
+                                with consent: bd init asks once, and
+                                refuses (exit 1) when it cannot ask.
+
+  bd init --yes                 Consent to adopting git origin's Dolt
+                                history. --non-interactive and --json are
+                                never consent.
+
+  bd init --no-adopt            Never derive a remote from git origin: no
+                                probe, no clone, no remote wiring. Also
+                                BD_NO_REMOTE_ADOPT=1. Wins over --yes.
 
   bd init --reinit-local        Re-initialize local .beads/ over existing
                                 local data. Does NOT authorize discarding
@@ -71,7 +83,8 @@ ADOPTING A REMOTE
 
       bd bootstrap
 
-  bd init will automatically suggest this when a remote is detected.
+  or, for git origin, bd init --yes. bd init will automatically suggest
+  these when a remote is detected.
 
 DESTROY-TOKEN (non-interactive only)
 
@@ -93,6 +106,8 @@ DESTROY-TOKEN (non-interactive only)
 
 EXIT CODES
 
+  1     refused: git origin has Dolt history and adoption was declined,
+        or not consented to with --yes where bd init cannot ask
   10    refused: remote has Dolt history and you selected local history
         without --discard-remote
   11    refused: existing local data and you declined the destroy confirm

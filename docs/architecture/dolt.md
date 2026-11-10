@@ -384,6 +384,131 @@ Switch to server mode when you need:
 - Orchestrator multi-rig setups
 - Federation with remote peers
 
+### Shared Server Mode
+
+On machines with multiple beads projects, each project normally starts its own Dolt server.
+Shared server mode runs a single Dolt server at `~/.beads/shared-server/` that serves all projects:
+
+```bash
+# Enable for this project (config.yaml key)
+bd config set dolt.shared-server true
+
+# Or enable machine-wide via environment variable
+export BEADS_DOLT_SHARED_SERVER=1
+
+# Or enable during init
+bd init --prefix myproject --shared-server
+```
+
+**Benefits:**
+- No port conflicts between projects (single server on port 3308, avoids orchestrator on 3307)
+- Reduced resource usage (one process instead of many)
+- Automatic database isolation (each project uses its own database name)
+
+**How it works:**
+- Server state files (PID, port, lock, log) live in `~/.beads/shared-server/`
+- Dolt data directory: `~/.beads/shared-server/dolt/`
+- Each project's database is stored as a subdirectory (e.g., `~/.beads/shared-server/dolt/myproject/`)
+- The file lock mechanism ensures safe concurrent access from multiple projects
+- Default port is 3308 (not 3307) to avoid conflict with the orchestrator. Override with `BEADS_DOLT_SERVER_PORT` or `dolt.port` in config.yaml
+
+**Important:** Each project on a shared server **must have a unique prefix** (database name).
+Two projects with the same prefix share the same database — if this happens accidentally,
+the project identity check will detect the mismatch and refuse to connect, preventing
+silent data corruption. Always use distinct prefixes when running `bd init --shared-server`.
+
+```bash
+# Check shared server status from any project
+bd dolt status
+
+# Show full configuration including shared mode
+bd dolt show
+```
+
+**The global database.** `bd init --shared-server` (or init on a machine with
+shared mode on) also creates `beads_global` on the shared server and records it
+in `.beads/metadata.json` as the workspace's global database. It holds issues
+that belong to no single project, with the `global` prefix. Pass the root flag
+`--global` to any command to read or write `beads_global` instead of the
+project's database:
+
+```bash
+bd create "Upgrade the laptop toolchain" --global
+bd list --global
+```
+
+Every project on the shared server reads `beads_global`, so no command drops
+it.
+
+#### Removing a project from the shared server
+
+A project's database lives on the shared server, under
+`~/.beads/shared-server/dolt/`, not in the project. Deleting the project's
+`.beads` directory (or the whole checkout) does **not** drop its database: the
+server keeps serving it, and its name stays taken. To remove it, run
+`bd dolt drop-database <name>` from another workspace on the same server:
+
+```bash
+bd dolt drop-database old_project          # asks for confirmation
+bd dolt drop-database old_project --yes    # scripts and agents
+```
+
+It drops only the database you name, and refuses `beads_global`, the server's
+system databases, the workspace's own database and test databases. The drop
+is recoverable with `CALL DOLT_UNDROP('old_project')` until the server's
+dropped databases are purged (`bd dolt clean-databases --purge-dropped`,
+which purges every dropped database on the server at once).
+
+#### Durability and Dolt history
+
+Saving a write and recording it in Dolt history are separate steps:
+
+- **SQL commit (saved).** When a `bd` write succeeds, its SQL transaction has
+  committed and Dolt has synced it to the shared server's local data
+  directory through its chunk journal. With supported journal-backed Dolt and
+  the journal left at its default (enabled), the write survives the server
+  being killed (SIGKILL, out-of-memory, an ungraceful logout) and is there
+  after the next start. Surviving power loss also depends on the filesystem
+  and device honoring sync. A write still in an open transaction when the
+  server dies is lost, as in any database.
+- **Dolt commit (history).** A Dolt commit records saved changes in version
+  history: what `bd history` shows and what `bd dolt push` sends. With
+  `dolt.auto-commit` set to `batch` or `off`, saved changes wait in the working
+  set (`bd doctor` reports them under "Dolt Status") until you record them
+  yourself:
+
+  ```bash
+  bd dolt commit -m "record pending changes"
+  ```
+
+  A graceful `bd dolt stop` also records them, best-effort. A crash does not
+  discard them: they are still pending after the restart.
+
+A local commit of either kind is not a backup. To keep a copy off the
+machine, push history to a remote, or point `bd backup` at a separate or
+off-machine destination: run `bd backup init <path-or-url>` once, then
+`bd backup sync`. Only `bd backup sync` writes to that destination, so run it
+again to bring the copy up to date.
+
+bd does not turn on Dolt's `behavior.dolt_transaction_commit`, and saving
+writes does not need it. It would turn every SQL transaction into its own Dolt
+commit: history grows faster, Dolt's generic transaction commits take the
+place of bd's per-command messages and authors, and `batch` and `off` modes
+stop batching.
+
+**Server config file.** For a server bd launches with its default
+configuration, bd writes the shared server's config to
+`~/.beads/shared-server/dolt-server-config.yaml` and passes it with
+`--config`. bd rewrites it on every start, so edits to it do not last. With a
+Dolt too old for that config, bd passes command-line flags instead, and Dolt
+then writes a template to `~/.beads/shared-server/dolt/config.yaml` that
+records those flag values and leaves its other settings commented out. The
+bd-launched server does not read that template, so its server settings have no
+effect. bd itself still reads the template's `listener.port` when it resolves
+the shared server's port: after `BEADS_DOLT_SERVER_PORT` and bd's port file,
+ahead of `dolt.port` in config.yaml. Servers you configure and run yourself
+(external or proxied) use whatever config you give them.
+
 ## Maintenance — `bd prune` and `bd purge`
 
 `bd prune` permanently deletes closed non-ephemeral beads to reclaim storage
@@ -628,6 +753,22 @@ over auto-detection. Any Dolt-compatible remote URL is supported (DoltHub,
 S3, GCS, file, or git). On brand-new projects, `bd init` auto-detects
 `git origin` and persists it as `sync.remote`, so the first `bd dolt push`
 publishes Dolt history to `refs/dolt/data` on the same git remote.
+
+`bd init` adopts the Dolt history of a remote it derived from `git origin`
+only with consent, because on a fork-less clone `origin` is the upstream
+project and adopting it imports that project's whole issue history:
+
+- Interactively, `bd init` names the URL and asks once (`[y/N]`, default no).
+  A decline stops init without writing anything.
+- `bd init --yes` consents ahead of time and prints the URL it adopts from.
+  `--non-interactive` and `--json` are not consent: without `--yes` they
+  refuse (exit 1) and name the URL.
+- `bd init --no-adopt` (or `BD_NO_REMOTE_ADOPT=1`) never derives a remote
+  from `git origin`: no probe, no clone, no Dolt remote and no `sync.remote`.
+  It wins over `--yes`.
+
+A remote you name with `--remote` or `sync.remote`, and `bd bootstrap`, need
+no further consent.
 
 ### Verifying Bootstrap Worked
 
@@ -883,96 +1024,8 @@ correct, archive the old local Dolt data directory instead of deleting it
 immediately. Keep the backup until the managed city has been pushed or otherwise
 snapshotted.
 
-### Shared Server Mode
-
-On machines with multiple beads projects, each project normally starts its own Dolt server.
-Shared server mode runs a single Dolt server at `~/.beads/shared-server/` that serves all projects:
-
-```bash
-# Enable for this project (config.yaml key)
-bd config set dolt.shared-server true
-
-# Or enable machine-wide via environment variable
-export BEADS_DOLT_SHARED_SERVER=1
-
-# Or enable during init
-bd init --prefix myproject --shared-server
-```
-
-**Benefits:**
-- No port conflicts between projects (single server on port 3308, avoids orchestrator on 3307)
-- Reduced resource usage (one process instead of many)
-- Automatic database isolation (each project uses its own database name)
-
-**How it works:**
-- Server state files (PID, port, lock, log) live in `~/.beads/shared-server/`
-- Dolt data directory: `~/.beads/shared-server/dolt/`
-- Each project's database is stored as a subdirectory (e.g., `~/.beads/shared-server/dolt/myproject/`)
-- The file lock mechanism ensures safe concurrent access from multiple projects
-- Default port is 3308 (not 3307) to avoid conflict with the orchestrator. Override with `BEADS_DOLT_SERVER_PORT` or `dolt.port` in config.yaml
-
-**Important:** Each project on a shared server **must have a unique prefix** (database name).
-Two projects with the same prefix share the same database — if this happens accidentally,
-the project identity check will detect the mismatch and refuse to connect, preventing
-silent data corruption. Always use distinct prefixes when running `bd init --shared-server`.
-
-```bash
-# Check shared server status from any project
-bd dolt status
-
-# Show full configuration including shared mode
-bd dolt show
-```
-
-#### Durability and Dolt history
-
-Saving a write and recording it in Dolt history are separate steps:
-
-- **SQL commit (saved).** When a `bd` write succeeds, its SQL transaction has
-  committed and Dolt has synced it to the shared server's local data
-  directory through its chunk journal. With supported journal-backed Dolt and
-  the journal left at its default (enabled), the write survives the server
-  being killed (SIGKILL, out-of-memory, an ungraceful logout) and is there
-  after the next start. Surviving power loss also depends on the filesystem
-  and device honoring sync. A write still in an open transaction when the
-  server dies is lost, as in any database.
-- **Dolt commit (history).** A Dolt commit records saved changes in version
-  history: what `bd history` shows and what `bd dolt push` sends. With
-  `dolt.auto-commit` set to `batch` or `off`, saved changes wait in the working
-  set (`bd doctor` reports them under "Dolt Status") until you record them
-  yourself:
-
-  ```bash
-  bd dolt commit -m "record pending changes"
-  ```
-
-  A graceful `bd dolt stop` also records them, best-effort. A crash does not
-  discard them: they are still pending after the restart.
-
-A local commit of either kind is not a backup. To keep a copy off the
-machine, push history to a remote, or point `bd backup` at a separate or
-off-machine destination: run `bd backup init <path-or-url>` once, then
-`bd backup sync`. Only `bd backup sync` writes to that destination, so run it
-again to bring the copy up to date.
-
-bd does not turn on Dolt's `behavior.dolt_transaction_commit`, and saving
-writes does not need it. It would turn every SQL transaction into its own Dolt
-commit: history grows faster, Dolt's generic transaction commits take the
-place of bd's per-command messages and authors, and `batch` and `off` modes
-stop batching.
-
-**Server config file.** For a server bd launches with its default
-configuration, bd writes the shared server's config to
-`~/.beads/shared-server/dolt-server-config.yaml` and passes it with
-`--config`. bd rewrites it on every start, so edits to it do not last. With a
-Dolt too old for that config, bd passes command-line flags instead, and Dolt
-then writes a template to `~/.beads/shared-server/dolt/config.yaml` that
-records those flag values and leaves its other settings commented out. The
-bd-launched server does not read that template, so its server settings have no
-effect. bd itself still reads the template's `listener.port` when it resolves
-the shared server's port: after `BEADS_DOLT_SERVER_PORT` and bd's port file,
-ahead of `dolt.port` in config.yaml. Servers you configure and run yourself
-(external or proxied) use whatever config you give them.
+Shared server mode, one Dolt server for every project on a machine, is
+described under [Modes of Operation](#shared-server-mode).
 
 ### Data Location (Orchestrator)
 
