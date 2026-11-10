@@ -4,6 +4,7 @@ package doltserver
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -328,5 +329,31 @@ func TestParseDoltProcessPIDsEmptyState(t *testing.T) {
 	want := []int{114, 115}
 	if got := parseDoltProcessPIDs([]byte(snapshot)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("parseDoltProcessPIDs() = %v, want %v", got, want)
+	}
+}
+
+// TestParseDoltProcessPIDsStateCodes pins which state columns keep a live dolt
+// row eligible and which mark it zombie/dead. The Z/X check reads the first
+// post-PID word before the optional state is consumed, so an unfamiliar
+// modifier (Zp, Xp) cannot turn an excluded row into a match.
+func TestParseDoltProcessPIDsStateCodes(t *testing.T) {
+	live := []string{"S", "Ss", "Sl", "R+", "D", "I", "U", "t", "L", "W", "SC", "SJ", "SX", "SsJ"}
+	var snapshot strings.Builder
+	var want []int
+	for i, state := range live {
+		pid := 300 + i
+		fmt.Fprintf(&snapshot, "%d %s /usr/local/bin/dolt sql-server\n", pid, state)
+		want = append(want, pid)
+	}
+	if got := parseDoltProcessPIDs([]byte(snapshot.String())); !reflect.DeepEqual(got, want) {
+		t.Errorf("live states: parseDoltProcessPIDs() = %v, want %v", got, want)
+	}
+
+	snapshot.Reset()
+	for i, state := range []string{"Z", "Z+", "Zs", "X", "X<", "Zp", "Xp"} {
+		fmt.Fprintf(&snapshot, "%d %s /usr/local/bin/dolt sql-server\n", 400+i, state)
+	}
+	if got := parseDoltProcessPIDs([]byte(snapshot.String())); got != nil {
+		t.Errorf("zombie/dead states: parseDoltProcessPIDs() = %v, want none", got)
 	}
 }
