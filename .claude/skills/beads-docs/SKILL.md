@@ -201,7 +201,8 @@ document what the pinned release does, never main-only features. See
 ## 9. Verify before you call it done
 
 Run the gates in [references/verification.md](references/verification.md).
-The short list: `go test ./test/docsync` (nav↔file sync + link conventions),
+The short list: `bazel test //test/docsync:docsync_test --config=ci`
+(nav↔file sync + link conventions),
 `./scripts/generate-cli-docs.sh --check` (generated docs fresh),
 `./scripts/check-doc-freshness.sh` (Last reviewed markers), and a live
 preview with `make docs-dev` (or `./mint.sh dev`) at `localhost:3000`.

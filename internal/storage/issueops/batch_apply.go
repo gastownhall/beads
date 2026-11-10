@@ -194,6 +194,9 @@ type appliedEdge struct {
 // apply runs the three phases in order: the items, the metadata splice, the end
 // gate.
 func (r *applyBatchRun) apply(ctx context.Context, tx *sql.Tx) error {
+	if err := coordinateApplyBatchCreatesInTx(ctx, tx, r.plan); err != nil {
+		return err
+	}
 	for i := range r.plan.Items {
 		if err := r.applyItem(ctx, tx, i); err != nil {
 			return err
@@ -203,6 +206,23 @@ func (r *applyBatchRun) apply(ctx context.Context, tx *sql.Tx) error {
 		return err
 	}
 	return r.runEndGate(ctx, tx)
+}
+
+// coordinateApplyBatchCreatesInTx takes the coordination cell of every
+// explicit create id in the plan in ONE sorted write, before the first item
+// runs. Each create item then meets a cell the transaction already holds
+// instead of taking cells one item at a time in item order, which could
+// deadlock against a retaining sweep, an upsert batch or an import holding a
+// sorted cell set (see CoordinateIDCreatesInTx). A generated id is not known
+// yet and takes its own cell when its item mints it.
+func coordinateApplyBatchCreatesInTx(ctx context.Context, tx *sql.Tx, plan storage.ApplyBatchPlan) error {
+	var ids []string
+	for _, item := range plan.Items {
+		if item.Kind == publicops.ItemCreate && item.Create != nil && item.Create.Issue != nil && item.Create.Issue.ID != "" {
+			ids = append(ids, item.Create.Issue.ID)
+		}
+	}
+	return CoordinateIDCreatesInTx(ctx, tx, ids)
 }
 
 // applyItem applies one item and records its outcome at its own index.
@@ -238,9 +258,10 @@ func (r *applyBatchRun) applyItem(ctx context.Context, tx *sql.Tx, index int) er
 // cap. Revisit it with a measurement, not with a copy of ExecuteCreateBatch.
 func (r *applyBatchRun) applyCreate(ctx context.Context, tx *sql.Tx, index int, item *publicops.CreateItem) error {
 	created, tables, err := ExecuteCreate(ctx, tx, publicops.CreateRequest{
-		Actor:         r.plan.Actor,
-		Issue:         item.Issue,
-		ForceIDPrefix: r.plan.ForceIDPrefix,
+		Actor:           r.plan.Actor,
+		Issue:           item.Issue,
+		ForceIDPrefix:   r.plan.ForceIDPrefix,
+		DefaultPriority: item.DefaultPriority,
 	})
 	if err != nil {
 		return &publicops.ItemError{Index: index, Kind: publicops.ItemCreate, Key: item.Key, Err: err}
@@ -352,6 +373,12 @@ func (r *applyBatchRun) applyDepAdd(ctx context.Context, tx *sql.Tx, index int, 
 		// bound to. The planner catches only the syntactically identical pair.
 		return itemErr(fmt.Errorf("%w: %s", publicops.ErrSelfDependency, source))
 	}
+	// The dotted-id hierarchy rule DependencyEditor applies, on the RESOLVED
+	// ids: a key can name a row whose minted id is a dotted child, so the planner
+	// cannot decide this before the creates ran.
+	if err := publicops.CheckDottedChildDependency(source, target, item.Type); err != nil {
+		return itemErr(err)
+	}
 	// THE CROSS-PLANE REFUSAL IS ABOUT ROWS THIS REQUEST CREATED, and only
 	// those. The two planes hold their edges in different tables, so an edge
 	// between a durable row and a wisp the same batch minted is one the batch
@@ -385,7 +412,7 @@ func (r *applyBatchRun) applyDepAdd(ctx context.Context, tx *sql.Tx, index int, 
 		Metadata:    metadata,
 		ThreadID:    item.ThreadID,
 	}
-	eventWritten, err := AddDependencyInTx(ctx, tx, dep, r.plan.Actor, AddDependencyOpts{
+	written, err := AddDependencyInTxWithResult(ctx, tx, dep, r.plan.Actor, AddDependencyOpts{
 		SourceTable:    sourceTable,
 		WriteTable:     depTable,
 		IsCrossPrefix:  types.ExtractPrefix(source) != types.ExtractPrefix(target),
@@ -395,17 +422,21 @@ func (r *applyBatchRun) applyDepAdd(ctx context.Context, tx *sql.Tx, index int, 
 	if err != nil {
 		return itemErr(err)
 	}
-	// Stage the source's dependency table always and its events table only when
-	// a row was recorded — the selective staging addDependencyEdgeInTx
-	// documents, so an idempotent re-add cannot sweep unrelated pending event
-	// rows into this commit (GH#2455).
+	// Stage the source's dependency table always, its events table only when a
+	// row was recorded, and `issues` only when the edge flipped a durable
+	// is_blocked — the staging addDependencyEdgeInTx documents, so the flag
+	// rides the edge's commit (GH#6647) and an idempotent or non-flipping add
+	// cannot sweep unrelated pending rows into it (GH#2455).
 	r.write.Tables.Add(depTable)
 	// The edge row was written EITHER WAY: a new edge is an insert, and a
 	// same-type re-add rewrites that row's metadata. So the transaction has
 	// something to commit even when the caller sees no change.
 	r.write.Changed = true
-	if eventWritten {
+	if written.EventWritten {
 		r.write.Tables.Add(eventTable)
+	}
+	if written.Blocked.IssueRowsChanged {
+		r.write.Tables.Add("issues")
 	}
 	r.edges = append(r.edges, appliedEdge{
 		index: index,
@@ -415,7 +446,7 @@ func (r *applyBatchRun) applyDepAdd(ctx context.Context, tx *sql.Tx, index int, 
 		Kind:        publicops.ItemDepAdd,
 		IssueID:     source,
 		DependsOnID: target,
-		Changed:     eventWritten,
+		Changed:     written.EventWritten,
 	}
 	return nil
 }
@@ -481,11 +512,13 @@ func (r *applyBatchRun) spliceMetadataRefs(ctx context.Context, tx *sql.Tx) erro
 			return err
 		}
 		id := r.result.Items[index].IssueID
-		updated, tables, err := ExecuteUpdate(ctx, tx, publicops.UpdateRequest{
+		// Unguarded for templates: the splice finishes this request's own
+		// create, so a template it creates is not being modified.
+		updated, tables, err := executeUpdate(ctx, tx, publicops.UpdateRequest{
 			Actor:   r.plan.Actor,
 			IssueID: id,
 			Patch:   publicops.IssuePatch{Metadata: publicops.MetadataPatch{Set: set}},
-		})
+		}, false)
 		if err != nil {
 			return &publicops.ItemError{
 				Index: index, Kind: publicops.ItemCreate, Key: item.Create.Key, IssueID: id, Err: err,

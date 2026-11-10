@@ -9,16 +9,26 @@ it plugs in through `llvm.toolchain_root`.
 """
 
 def _llvm_dist_impl(rctx):
-    archive = "_llvm.tar.xz"
-    rctx.download(url = rctx.attr.urls, output = archive, sha256 = rctx.attr.sha256)
-    res = rctx.execute(
-        ["tar", "-xJf", archive, "--strip-components=1"] +
-        [rctx.attr.strip_prefix + "/" + m for m in rctx.attr.members],
-        timeout = 3600,
-    )
-    if res.return_code != 0:
-        fail("llvm_dist: extracting %s failed:\n%s" % (rctx.attr.urls[0], res.stderr))
-    rctx.delete(archive)
+    if rctx.attr.sliced:
+        # A members-only, zstd archive of the same release (tools/cc_toolchain/
+        # repack_llvm.sh): the same bytes as the tar -xJf below, extracted by
+        # Bazel itself in seconds instead of a minute-plus of single-threaded xz
+        # on every cold CI runner. Action keys are unchanged (identical files).
+        rctx.download_and_extract(url = rctx.attr.urls, sha256 = rctx.attr.sha256, type = "tar.zst")
+        missing = [m for m in rctx.attr.members if not rctx.path(m).exists]
+        if missing:
+            fail("llvm_dist: the sliced archive lacks %s" % ", ".join(missing))
+    else:
+        archive = "_llvm.tar.xz"
+        rctx.download(url = rctx.attr.urls, output = archive, sha256 = rctx.attr.sha256)
+        res = rctx.execute(
+            ["tar", "-xJf", archive, "--strip-components=1"] +
+            [rctx.attr.strip_prefix + "/" + m for m in rctx.attr.members],
+            timeout = 3600,
+        )
+        if res.return_code != 0:
+            fail("llvm_dist: extracting %s failed:\n%s" % (rctx.attr.urls[0], res.stderr))
+        rctx.delete(archive)
 
     # toolchains_llvm symlinks a fixed tool list into its toolchain package;
     # tools this repository leaves out get a stub that fails loudly if run.
@@ -42,7 +52,10 @@ llvm_dist = repository_rule(
         "llvm_version": attr.string(mandatory = True),
         "urls": attr.string_list(mandatory = True),
         "sha256": attr.string(mandatory = True),
-        "strip_prefix": attr.string(mandatory = True),
+        "strip_prefix": attr.string(doc = "The release archive's top directory (unsliced archives only)."),
+        "sliced": attr.bool(
+            doc = "urls is a members-only .tar.zst made by repack_llvm.sh, not the release .tar.xz.",
+        ),
         "members": attr.string_list(
             mandatory = True,
             doc = "Archive paths (below strip_prefix) to extract.",

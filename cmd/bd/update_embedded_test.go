@@ -243,12 +243,81 @@ func TestEmbeddedUpdateRoutedStoreCommitsTargetHead(t *testing.T) {
 	}
 }
 
-// TestEmbeddedUpdateFields and TestEmbeddedUpdateLifecycle were split from
-// TestEmbeddedUpdate (originally ~267s, measured under --config=embedded)
-// into 2 top-level tests over disjoint subtest groups, for CI shard balance
-// (see scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
-// subtest is preserved exactly once.
-func TestEmbeddedUpdateFields(t *testing.T) {
+// TestEmbeddedRoutedWriteMissDoesNotCreateTargetDatabase pins that a routed
+// write whose id misses leaves an embedded target that has not been
+// bootstrapped yet without a database. The routed open runs before the lookup
+// it serves, so a database it created would outlive the miss, and `bd
+// bootstrap` there would then take it for the real one and skip the clone.
+// tgt-zzzz takes the prefix route and src-zzzz the maintainer auto-route; both
+// lead to the same fresh clone.
+func TestEmbeddedRoutedWriteMissDoesNotCreateTargetDatabase(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt update tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "src")
+
+	targetDir := filepath.Join(dir, "fresh-clone")
+	if err := os.MkdirAll(targetDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepoAt(t, targetDir)
+	targetBeadsDir := filepath.Join(targetDir, ".beads")
+	writeEmbeddedMetadata(t, targetBeadsDir, "tgt")
+
+	route := `{"prefix":"tgt-","path":"fresh-clone"}` + "\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(route), 0644); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+	roleCmd := gitCommand("config", "beads.role", "maintainer")
+	roleCmd.Dir = dir
+	if out, err := roleCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git config beads.role: %v\n%s", err, out)
+	}
+
+	env := bdEnv(dir)
+	runBD := func(args ...string) (string, error) {
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = dir
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	for _, args := range [][]string{
+		{"config", "set", "routing.mode", "auto"},
+		{"config", "set", "routing.maintainer", targetDir},
+	} {
+		if out, err := runBD(args...); err != nil {
+			t.Fatalf("bd %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	for _, args := range [][]string{
+		{"update", "tgt-zzzz", "--priority", "0"},
+		{"close", "tgt-zzzz"},
+		{"update", "src-zzzz", "--priority", "0"},
+		{"close", "src-zzzz"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			out, err := runBD(args...)
+			requireNoEmbeddedDatabase(t, targetBeadsDir)
+			if err == nil || !strings.Contains(out, "no embedded database") {
+				t.Fatalf("err = %v, want the routed open's refusal\n%s", err, out)
+			}
+		})
+	}
+}
+
+// The TestEmbeddedUpdateFields* and TestEmbeddedUpdateLifecycle* tests were
+// split from TestEmbeddedUpdate (originally ~267s, measured under
+// --config=embedded), first into TestEmbeddedUpdateFields and
+// TestEmbeddedUpdateLifecycle and then (~75s each on rbe-west) into these 5
+// top-level tests over disjoint subtest groups, each with its own workspace,
+// for CI shard balance (see scripts/ci/embedded_cmd_test_durations.json and
+// engdocs/TESTING.md). Every original subtest is preserved exactly once.
+func TestEmbeddedUpdateFieldsMappingAndRefs(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -406,6 +475,16 @@ func TestEmbeddedUpdateFields(t *testing.T) {
 			t.Errorf("expected external_ref field to be omitted from JSON after clear, got: %s", rawA)
 		}
 	})
+}
+
+func TestEmbeddedUpdateFieldsNotesOverwrite(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "tu")
 
 	t.Run("update_notes_overwrite_requires_force", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Notes force test", "--type", "task")
@@ -466,6 +545,16 @@ func TestEmbeddedUpdateFields(t *testing.T) {
 			t.Errorf("expected notes %q, got %q", "replacement notes", got.Notes)
 		}
 	})
+}
+
+func TestEmbeddedUpdateFieldsNotesClearAndDefer(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "tu")
 
 	t.Run("update_empty_notes_refused", func(t *testing.T) {
 		// GH#6021: `--notes ""` is what a dead command substitution collapses
@@ -534,7 +623,7 @@ func TestEmbeddedUpdateFields(t *testing.T) {
 	})
 }
 
-func TestEmbeddedUpdateLifecycle(t *testing.T) {
+func TestEmbeddedUpdateLifecycleDefer(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -624,6 +713,16 @@ func TestEmbeddedUpdateLifecycle(t *testing.T) {
 			t.Errorf("expected status=in_progress to be preserved, got %q", got.Status)
 		}
 	})
+}
+
+func TestEmbeddedUpdateLifecycleClaimParentCommit(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "tu")
 
 	t.Run("update_claim_already_claimed", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Claim fail test", "--type", "task")

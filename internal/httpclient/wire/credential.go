@@ -16,14 +16,21 @@ import (
 // (internal/storage/postgres/credential.go), and it is the difference between a
 // misconfigured token file and an unauthenticated request nobody noticed.
 //
-// The interface is declared here rather than in the store package the design
-// sketches it in (engdocs/design/http-client-backend.md, D5) because this is the
-// only layer that consumes it; the store package aliases it, so there is still
-// one type.
+// The interface is declared here rather than in the store package the
+// original (bd-enterprise-internal) design sketched it in, because this is
+// the only layer that consumes it; the store package aliases it, so there is
+// still one type.
 type CredentialProvider interface {
 	// Authorize adds credentials to req (Authorization: Bearer, DPoP, ...).
 	// A no-auth deployment — the loopback-trust OSS server, which has no token
 	// file at all — returns nil without modifying req.
+	//
+	// It is called once per request the client builds, not once per attempt:
+	// a replayable request whose first attempt stalls or has its connection
+	// reset is resent once with the headers Authorize set, up to the client's
+	// overall timeout later (see Client.roundTrip). A provider whose
+	// credentials are single-use or expire within that window should expect
+	// the resend to draw a 401, which reaches Refresh like any other.
 	//
 	// The error must not carry the credential: it travels into the client's own
 	// error text, which reaches logs and terminals.

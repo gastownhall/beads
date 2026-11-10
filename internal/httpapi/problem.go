@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/go-sql-driver/mysql"
 
@@ -113,6 +114,18 @@ const (
 	// distinction before then reads the row, which the operation description
 	// tells it to do for a safety reason rather than a taste one.
 	CodeNotReleasable Code = "not_releasable"
+	// CodeLeaseNotHeld is a heartbeat refused because the actor holds no live
+	// claim on the row: it is open, closed, released, reclaimed, moved off
+	// in_progress, or a wisp (wisps are never leased). The `issue_status`
+	// extension carries the status the refusing transaction observed, from
+	// *issueops.LeaseConflictError's typed field.
+	//
+	// It is MINTED rather than folded into CodeNotClaimable for
+	// CodeNotReleasable's reason: an open, unassigned row is the most claimable
+	// row a workspace has, and answering `not_claimable` about it would send a
+	// worker somewhere there is nothing to find. A FOREIGN holder is not this
+	// code: that is the claim's own `already_claimed`, naming the holder.
+	CodeLeaseNotHeld Code = "lease_not_held"
 	// CodeNotClosable is close policy refusing an unforced close: open
 	// children, or a live blocker. The open-children refusal carries the count
 	// in the `open_children` extension member, read inside the refusing
@@ -136,6 +149,33 @@ const (
 	// notes and the patched ones), not about a foreign actor's identity a
 	// client might need to display.
 	CodeNotesOverwrite Code = "notes_overwrite_refused"
+	// CodeTemplateReadOnly is a guarded mutation that names a template;
+	// operationCodes lists the operations that answer it, and not every verb
+	// guards templates yet (bd-jkp9v3). Templates are read-only — work comes
+	// out of one by pouring it, which creates new issues — so no force flag
+	// waives it: the same request refuses for as long as the row is a
+	// template. The one stand-down is updateIssue's `allow_template`, a
+	// deliberate template edit (bd label, bd set-state).
+	// A 409 for CodeNotClosable's reason: the body is well-formed and the
+	// STATE of the named row refuses it.
+	CodeTemplateReadOnly Code = "template_read_only"
+	// CodeIssuePinned is an unforced close of a pinned issue, by either of the
+	// two spellings bd pins with (the `pinned` flag or the `pinned` status).
+	// `force` is the bypass. It is its own code rather than a third
+	// `not_closable` because that code's member-presence discriminator already
+	// reads "no `open_children`" as a live blocker, and a pin is not one.
+	CodeIssuePinned Code = "issue_pinned"
+	// CodeNotAssignee is an unforced close by an actor who is not the issue's
+	// assignee (be-035): an unassigned issue is closable by anyone, an
+	// assigned one by its holder, compared separator-insensitively. `force` is
+	// the bypass. The holder the refusing transaction observed travels in the
+	// `assignee` member, so a client names it without reading `detail`; the
+	// closing actor is the one the request sent.
+	//
+	// It is minted rather than folded into CodeAlreadyClaimed, which a client
+	// maps to a lost CLAIM: answering it for a close would have the client
+	// read the operation, rather than the code, to decide what was refused.
+	CodeNotAssignee Code = "not_assignee"
 	// CodeDependencyCycle covers BOTH never-makes-progress refusals a requested
 	// edge set can earn: a scheduling cycle, and a blocking edge against the
 	// issue's own ancestor or descendant. They are one code because they have
@@ -210,7 +250,8 @@ const (
 	// code a `bd events tail --json` failure carries and the code this surface
 	// emits cannot drift to two spellings of one condition.
 	//
-	// A 410 Gone, and the only one in the vocabulary: the records the caller
+	// A 410 Gone, one of the vocabulary's two (CodeIdempotencyExpired is the
+	// other, for the same reason): the records the caller
 	// asked for existed, were addressable by exactly this request, and have been
 	// deliberately deleted. That is what 410 means and what 404 does not — a 404
 	// would say the resource never existed and invite a retry, and the whole
@@ -219,6 +260,18 @@ const (
 	// still serve, so the recovery (resume from `floor - 1` and accept the gap,
 	// or re-baseline) is a decision the client makes from data rather than prose.
 	CodeEventsJournalTruncated Code = Code(storage.EventsJournalTruncatedCode)
+	// CodeIdempotencyExpired is a create whose explicit id a RETAINING sweep
+	// retired (issueops.SweepRequest.RetainIDs): the bead that held it was
+	// deleted after the create that used the id had already happened, and a
+	// create of that id never runs again. The value is issueops' own constant,
+	// so the code `bd create --json` prints and the code this surface emits
+	// are one spelling.
+	//
+	// A 410 Gone for CodeEventsJournalTruncated's reason: what the request
+	// addresses existed and was deliberately removed, and retrying it can never
+	// succeed. Not a 409 — there is no row to read and adopt, which is the
+	// recovery a 409 on a create (already_exists) sends a client to.
+	CodeIdempotencyExpired Code = Code(issueops.IdempotencyExpiredCode)
 	// CodeEventsWatchSaturated is this server already holding as many open
 	// journal streams as it will. It is not CodeBusy, even though both are a
 	// 503 with a Retry-After, because the two carry different recoveries: busy
@@ -262,7 +315,11 @@ var codeStatus = map[Code]int{
 	CodeNotClaimable:     http.StatusConflict,
 	CodeNotClosable:      http.StatusConflict,
 	CodeNotesOverwrite:   http.StatusConflict,
+	CodeTemplateReadOnly: http.StatusConflict,
+	CodeIssuePinned:      http.StatusConflict,
+	CodeNotAssignee:      http.StatusConflict,
 	CodeNotReleasable:    http.StatusConflict,
+	CodeLeaseNotHeld:     http.StatusConflict,
 	CodeDependencyCycle:  http.StatusConflict,
 	CodeDependencyExists: http.StatusConflict,
 	CodeAlreadyExists:    http.StatusConflict,
@@ -271,6 +328,7 @@ var codeStatus = map[Code]int{
 
 	CodeEventsJournalDisabled:  http.StatusConflict,
 	CodeEventsJournalTruncated: http.StatusGone,
+	CodeIdempotencyExpired:     http.StatusGone,
 	CodeEventsWatchSaturated:   http.StatusServiceUnavailable,
 
 	CodeBusy:          http.StatusServiceUnavailable,
@@ -315,6 +373,12 @@ const (
 	// client built for a revision it no longer supports, never to retry the same
 	// request.
 	ReasonWireRevisionUnsupported Reason = "wire_revision_unsupported"
+	// ReasonEphemeral qualifies a 409 CodeLeaseNotHeld: the id names a wisp,
+	// which is never leased, so no claim on it can ever be heartbeaten. It is
+	// the typed form of issueops.LeaseConflictError.Ephemeral, so a client
+	// tells a wisp from an unclaimed issue without parsing `detail` (a wisp's
+	// `issue_status` can be in_progress).
+	ReasonEphemeral Reason = "ephemeral"
 )
 
 // staticDetail is the set of codes whose `detail` is FIXED, whatever the
@@ -413,6 +477,9 @@ const (
 	// the reason and session under first-close-wins, the done-status
 	// normalization, and the close policy vocabulary.
 	OpCloseIssue = "closeIssue"
+	// OpAdvanceMolecule moves a molecule on after one of its steps closed: the
+	// operation behind `bd close --continue` (issueops.MoleculeStepper).
+	OpAdvanceMolecule = "advanceMolecule"
 	// OpReopenIssue is the close's mirror, and it completes the lifecycle pair
 	// so a recovery flow works end to end over this surface. It is the one write
 	// here with no POLICY conflict code: reopen takes an issue OUT of the done
@@ -466,6 +533,19 @@ const (
 	// answer EdgeCountRequest.IDs and EdgeReadRequest already give, applied to
 	// the issues themselves rather than their edges.
 	OpBatchGetIssues = "batchGetIssues"
+	// OpReclaimIssues reverts every stale lease a request scopes back to ready,
+	// behind issueops.LeaseReclaimer. It is NOT releaseIssue repeated: that
+	// operation gives up ONE claim on the holder's say-so and refuses an unheld
+	// row, and this one sweeps MANY leases on a clock's say-so and reports an id
+	// that was not a stale lease by leaving it out of `reclaimed`.
+	OpReclaimIssues = "reclaimIssues"
+	// OpHeartbeatIssue refreshes the lease on one issue the actor holds, behind
+	// issueops.Heartbeater: what `bd heartbeat` spells. It is NOT claimIssue
+	// repeated: a re-claim is idempotent for the holder WITHOUT extending the
+	// lease, and this extends the lease. A refresh writes nothing else — no
+	// revision, no version, no updated_at, no event; a re-arm (`rearmed`) is
+	// recorded as a mutation and writes each of them.
+	OpHeartbeatIssue = "heartbeatIssue"
 	// OpListRelatedIssues reads ONE issue's neighbors in a named direction,
 	// behind issueops.Relations. It is NOT listDependencies narrowed to one
 	// anchor: that operation answers the stored edge ROWS with their targets
@@ -495,6 +575,9 @@ const (
 	// depth, a cycle policy and a node shape of its own.
 	OpGetDependencyTree = "getDependencyTree"
 	OpCountReadyWork    = "countReadyWork"
+	// OpListBlockedIssues lists the blocked issues with the blockers bd names
+	// for each, behind issueops.BlockedLister: what `bd blocked` prints.
+	OpListBlockedIssues = "listBlockedIssues"
 	OpQueryIssues       = "queryIssues"
 	// OpCountIssues sizes a set the ISSUE listing describes, behind
 	// issueops.Counter. It is a sibling of countReadyWork rather than a mode of
@@ -720,6 +803,22 @@ var operationCodes = map[string][]Code{
 	// `ids` (*issueops.TooManyIDsError) and a blank entry. An empty `ids` is
 	// legal and answers with an empty result, so it earns no refusal at all.
 	OpBatchGetIssues: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// No not_found and no conflict: an id that is not a stale lease is left out
+	// of `reclaimed` rather than refused, and the sweep guards nothing a caller
+	// named a version of. Its only 400s are the role's own refusals and the
+	// handler's shape checks.
+	OpReclaimIssues: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// Two 409s, and they answer different questions. `already_claimed` is a
+	// live FOREIGN holder, in the claim's own shape: `assignee` names the
+	// holder and `issue_status` the status, both from the refusing
+	// transaction's *issueops.LeaseConflictError. `lease_not_held` is the
+	// actor holding no live claim at all, with `issue_status`. No
+	// precondition_failed: the fence is the holder, not a revision.
+	OpHeartbeatIssue: {
+		CodeInvalidArgument, CodeUnauthenticated, CodeNotFound,
+		CodeAlreadyClaimed, CodeLeaseNotHeld,
+		CodeBusy, CodeDBUnavailable, CodeInternal,
+	},
 	// The same vocabulary as the stored-edge read beside it, and no not_found
 	// for a stronger version of the same reason: this operation probes no id's
 	// existence at all, so there is nothing it could 404 on.
@@ -748,6 +847,10 @@ var operationCodes = map[string][]Code{
 	// and can refuse them the same way. limit=0's mode-dependent refusal has no
 	// analog here because there is no limit to pass.
 	OpCountReadyWork: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// The blocked listing has no page, so no cursor or unlimited-read refusal,
+	// and no 404: nothing blocked is an empty list. Its 400s are the
+	// transport's (an unknown parameter, a repeated `parent`).
+	OpListBlockedIssues: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// A cardinality has no page, so there is no cursor or unlimited-read
 	// refusal. It has no 404 either: a predicate matching nothing is 0.
 	//
@@ -801,7 +904,8 @@ var operationCodes = map[string][]Code{
 	// The NARROWEST write vocabulary on this surface, and the narrowness is the
 	// contract rather than an oversight. A problem document from this operation
 	// means the batch never ran; every refusal an ITEM can earn — not_found for
-	// an id naming no row, not_closable for close policy — travels in that
+	// an id naming no row, not_closable for close policy, template_read_only,
+	// issue_pinned and not_assignee for the close guards — travels in that
 	// item's outcome inside a 200. A 404 here would say the operation went to
 	// the wrong place, and a 409 would say the whole batch was refused, and
 	// neither is ever true of a per-item refusal.
@@ -834,14 +938,18 @@ var operationCodes = map[string][]Code{
 		CodeAlreadyClaimed, CodeNotReleasable, CodePreconditionFailed,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
-	// TWO 409s, and they answer different questions with `code` as the only
-	// discriminator a client needs.
+	// Several 409s, and they answer different questions with `code` as the
+	// only discriminator a client needs.
 	//
 	// not_closable is close POLICY: an unforced close refused for open children
-	// or for a live blocker. There is no already_claimed here — closing work
-	// somebody else holds is not a refusal on this surface — and the idempotent
-	// re-close is a 200 carrying `already_closed`, the claim's answer to the
-	// same question.
+	// or for a live blocker. The idempotent re-close is a 200 carrying
+	// `already_closed`, the claim's answer to the same question.
+	//
+	// template_read_only, issue_pinned and not_assignee are the CLOSE GUARDS
+	// the role applies before policy, in that order: a template (no bypass), a
+	// pin and closing work somebody else holds (both bypassed by `force`).
+	// There is no already_claimed: that code is a lost claim, and not_assignee
+	// carries the holder in `assignee` itself.
 	//
 	// precondition_failed is `expected_version`'s, in the 409 form for the
 	// reason that code documents, and it is CHECKED FIRST — before policy and
@@ -850,6 +958,14 @@ var operationCodes = map[string][]Code{
 	// members make unrelated claims.
 	OpCloseIssue: {
 		CodeInvalidArgument, CodeUnauthenticated, CodeNotFound, CodeNotClosable, CodePreconditionFailed,
+		CodeTemplateReadOnly, CodeIssuePinned, CodeNotAssignee,
+		CodeBusy, CodeDBUnavailable, CodeInternal,
+	},
+	// No conflict code: a ready step another actor holds, or one moved out of
+	// a claimable status, is skipped for the next one rather than refused —
+	// the role's own rule — so the only 404 is the path id's.
+	OpAdvanceMolecule: {
+		CodeInvalidArgument, CodeUnauthenticated, CodeNotFound,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
 	// ONE 409, and it is a PRECONDITION rather than a policy. Close has a policy
@@ -886,9 +1002,14 @@ var operationCodes = map[string][]Code{
 	//
 	// not_claimable arrived with `claim`, beside the already_claimed it shares
 	// with the fence: a refused claim answers as claimIssue does.
+	//
+	// template_read_only is the role refusing an update of a template:
+	// templates are read-only, no force flag waives it, and only
+	// `allow_template` stands it down.
 	OpUpdateIssue: {
 		CodeInvalidArgument, CodeUnauthenticated, CodeNotFound,
 		CodePreconditionFailed, CodeNotClosable, CodeAlreadyClaimed, CodeNotesOverwrite,
+		CodeTemplateReadOnly,
 		CodeNotClaimable, CodeDependencyCycle, CodeDependencyExists,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
@@ -926,6 +1047,7 @@ var operationCodes = map[string][]Code{
 	// minting.
 	OpCreateIssue: {
 		CodeInvalidArgument, CodeUnauthenticated, CodeAlreadyExists, CodeDependencyCycle,
+		CodeIdempotencyExpired,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
 	// The widest row here, and every code on it is inherited from an operation
@@ -951,7 +1073,8 @@ var operationCodes = map[string][]Code{
 	OpApplyBatch: {
 		CodeInvalidArgument, CodeUnauthenticated, CodeNotFound,
 		CodePreconditionFailed, CodeNotClosable, CodeAlreadyClaimed, CodeNotesOverwrite, CodeAlreadyExists,
-		CodeDependencyCycle, CodeDependencyExists,
+		CodeTemplateReadOnly, CodeIssuePinned, CodeNotAssignee,
+		CodeDependencyCycle, CodeDependencyExists, CodeIdempotencyExpired,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
 	// getDependencyTree's row, and it is the same shape for the same two
@@ -983,8 +1106,9 @@ var operationCodes = map[string][]Code{
 	// the CLI itself prints identically, so a 404 would publish an invented
 	// distinction. Here the CLI already distinguishes a miss — `bd recall` has
 	// an exit-code contract for it — and the role answers Found rather than a
-	// value, so the 404 reports a distinction that exists. The stored-empty row
-	// falls on the miss side of it, which the document states.
+	// value, so the 404 reports a distinction that exists. Found is row
+	// existence: a row stored as the empty string is a 200 with an empty value,
+	// and only an absent row is the 404, which the document states.
 	OpGetMemory: {CodeInvalidArgument, CodeUnauthenticated, CodeNotFound, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The read's vocabulary exactly, because the two operations address the same
 	// resource the same way and this one's Found false is the same answer: a key
@@ -1081,6 +1205,15 @@ func (r Result) WithAssignee(assignee string) Result {
 // status at the moment of refusal). Same rule as WithAssignee.
 func (r Result) WithIssueStatus(status string) Result {
 	r.Problem.IssueStatus = &status
+	return r
+}
+
+// WithReason attaches the `reason` member to a refusal other than the 400
+// (InvalidArgument sets its own). Same rule as WithAssignee: it comes from the
+// typed error's own field, never from parsing the refusal's prose.
+func (r Result) WithReason(reason Reason) Result {
+	v := string(reason)
+	r.Problem.Reason = &v
 	return r
 }
 
@@ -1304,6 +1437,20 @@ func (r Result) WithJournalWindow(since, floor, head int64) Result {
 	return r
 }
 
+// WithClosedAt attaches the `closed_at` member of an `idempotency_expired`:
+// when the bead a retaining sweep retired had closed. It comes from the typed
+// refusal's own field — the tombstone read inside the transaction that refused
+// — never from parsing prose. A zero time is omitted rather than sent as the
+// year 1.
+func (r Result) WithClosedAt(closedAt time.Time) Result {
+	if closedAt.IsZero() {
+		return r
+	}
+	at := closedAt.UTC()
+	r.Problem.ClosedAt = &at
+	return r
+}
+
 // WithRequestID sets the `request_id` member, the correlation id echoed in the
 // request log line. It is what makes a 5xx actionable: the body carries a fixed
 // static detail by design, so the id is the client's only handle on the one log
@@ -1457,10 +1604,9 @@ func EventsWatchSaturated() Result {
 //
 // A separate constructor rather than a detail argument on NotFound, because the
 // two say different things: that one is about the issue id space, and reusing
-// its sentence here would tell a client its memory key was an issue id. The
-// detail deliberately does NOT distinguish an absent row from one stored as the
-// empty string — the role cannot see the difference, so the wire must not claim
-// to.
+// its sentence here would tell a client its memory key was an issue id. It is
+// only ever the answer for an absent row: a row stored as the empty string is
+// found, and the read answers it with a 200.
 func MemoryNotFound() Result {
 	return newResult(CodeNotFound, "this workspace holds no memory under that key")
 }
@@ -1497,6 +1643,7 @@ func ClassifyError(err error) Result {
 	// `if` away from a pruned-past checkpoint arriving as a generic 500 on
 	// whichever arm forgot it.
 	var truncated *storage.EventsJournalTruncatedError
+	var notAssignee *issueops.CloseNotAssigneeError
 
 	switch {
 	case err == nil:
@@ -1531,6 +1678,20 @@ func ClassifyError(err error) Result {
 
 	case errors.Is(err, issueops.ErrCloseBlocked):
 		return closeBlockedResult(err, "issue is blocked", "clear the blocker or close with force")
+
+	// The close guards; the first, template read-only, is every update's guard
+	// too. Each detail is this server's own words rather than the role's
+	// message, for the reason Problem.detail gives; the typed members are what
+	// a client reconstructs the refusal from.
+	case errors.Is(err, issueops.ErrTemplateReadOnly):
+		return newResult(CodeTemplateReadOnly, "this issue is a template, and templates are read-only; pour it to create work")
+
+	case errors.Is(err, issueops.ErrPinned):
+		return newResult(CodeIssuePinned, "this issue is pinned; close with force to override")
+
+	case errors.As(err, &notAssignee):
+		return newResult(CodeNotAssignee,
+			"this issue is assigned to another actor; reclaim it, or close with force").WithAssignee(notAssignee.Assignee)
 
 	case errors.Is(err, ErrBusy):
 		res := newResult(CodeBusy, "")

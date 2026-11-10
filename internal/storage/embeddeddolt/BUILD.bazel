@@ -9,6 +9,7 @@ go_library(
         "batch_closer.go",
         "batch_creator.go",
         "batchgetter.go",
+        "blocked_lister.go",
         "blockingannotator.go",
         "bootstrapper.go",
         "cache.go",
@@ -25,9 +26,11 @@ go_library(
         "dependency_editor.go",
         "detection.go",
         "edgereader.go",
+        "epoch_cas.go",
         "federation.go",
         "get_issue.go",
         "graph_counter.go",
+        "heartbeater.go",
         "init_verifier.go",
         "issue_claimer.go",
         "issue_operations.go",
@@ -37,10 +40,12 @@ go_library(
         "iter_stubs.go",
         "journal_accessor.go",
         "labels.go",
+        "lease_reclaimer.go",
         "list_queries.go",
         "memories.go",
         "merge_slot.go",
         "metadata_cas.go",
+        "molecule_stepper.go",
         "open.go",
         "open_stub.go",
         "querier.go",
@@ -67,12 +72,15 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/config",
+        "//internal/configfile",
         "//internal/memoryapi",
+        "//internal/remedy",
         "//internal/storage",
         "//internal/storage/domain",
         "//internal/storage/issueops",
         "//internal/storage/memoryops",
         "//internal/storage/schema",
+        "//internal/storage/sqlbuild",
         "//internal/storage/versioncontrolops",
         "//internal/types",
         "//internal/utils",
@@ -94,7 +102,11 @@ go_library(
 go_test(
     name = "embeddeddolt_test",
     # -race -short runs ~6 min unsharded (pr-core gives go test -timeout=30m).
-    # Bazel shards by test count, not duration.
+    # Bazel shards by test count, not duration: rules_go deals tests out
+    # round-robin. At 8 shards one shard drew TestWithPeerAuth,
+    # TestWithPeerAuth_WarnsWhenStoredPeerSuppressesAmbientPassword and
+    # TestPushCommitsPendingChangesFirst (100-153s on rbe-west); 9 spreads
+    # them (measured costs put the heaviest shard at ~87s).
     size = "large",
     timeout = "long",
     srcs = [
@@ -103,8 +115,11 @@ go_test(
         "batch_closer_contract_test.go",
         "batch_creator_contract_test.go",
         "batch_getter_contract_test.go",
+        "blocked_lister_contract_test.go",
         "blocked_recheck_internal_test.go",
+        "blocked_recheck_regression_internal_test.go",
         "blocked_recompute_test.go",
+        "blocking_annotator_batch_test.go",
         "blocking_annotator_contract_test.go",
         "bootstrapper_contract_test.go",
         "cache_cleanup_test.go",
@@ -124,6 +139,7 @@ go_test(
         "counts_missing_table_test.go",
         "counts_wisp_test.go",
         "create_batch_equivalence_test.go",
+        "create_batch_participation_generation_test.go",
         "create_issue_test.go",
         "cross_record_invariant_contract_test.go",
         "cross_table_id_collision_test.go",
@@ -137,7 +153,10 @@ go_test(
         "detection_test.go",
         "dirty_tables_gate_test.go",
         "dualwrite_history_contract_test.go",
+        "dualwrite_participation_generation_contract_test.go",
         "edge_reader_contract_test.go",
+        "epoch_cas_publish_internal_test.go",
+        "epoch_cas_status_test.go",
         "events_since_test.go",
         "expected_revision_contract_test.go",
         "external_dependencies_test.go",
@@ -146,8 +165,12 @@ go_test(
         "git_ref_pin_test.go",
         "graph_counter_contract_test.go",
         "graph_walk_plan_test.go",
+        "head_hashes_test.go",
+        "heartbeater_contract_test.go",
+        "history_off_differential_test.go",
         "history_presence_contract_test.go",
         "history_test.go",
+        "id_retention_contract_test.go",
         "is_blocked_batch_test.go",
         "issue_lifecycle_test.go",
         "issue_operations_behavior_test.go",
@@ -156,15 +179,18 @@ go_test(
         "issue_operations_staging_test.go",
         "journal_accessor_test.go",
         "journal_actor_matrix_test.go",
+        "journal_arrival_seq_test.go",
         "journal_autoprune_test.go",
         "journal_concurrency_test.go",
         "journal_contract_test.go",
         "journal_retention_test.go",
+        "journal_shape_adaptive_test.go",
         "journal_truncation_test.go",
         "label_list_all_benchmark_test.go",
         "label_rename_test.go",
         "large_batch_apply_measure_test.go",
         "large_graph_create_bench_test.go",
+        "lease_reclaimer_contract_test.go",
         "lease_replica_test.go",
         "lease_test.go",
         "lenient_gate_warning_test.go",
@@ -174,18 +200,27 @@ go_test(
         "lifecycle_update_contract_test.go",
         "memories_contract_test.go",
         "merge_blockers_test.go",
+        "merge_events_flip_test.go",
         "merge_strategy_test.go",
         "metadata_cas_contract_test.go",
+        "metadata_number_fidelity_test.go",
+        "migrate_consent_gate_test.go",
         "migrate_dep_rekey_dedup_test.go",
         "migrate_events_flip_test.go",
+        "migrate_events_preflip_restore_test.go",
         "migrate_frozen_guard_convergence_test.go",
+        "migrate_id_tombstones_test.go",
         "migrate_ignored_cursor_untrack_test.go",
         "migrate_ignored_plane_shape_test.go",
         "migrate_journal_shape_repair_test.go",
         "migrate_repair_atomicity_test.go",
         "migrate_selfheal_test.go",
         "migrate_temp_intermediates_test.go",
+        "migrate_transaction_commit_4470_test.go",
+        "migrate_updated_at_preservation_test.go",
         "migrate_wisp_dep_forward_repair_test.go",
+        "minted_id_collision_test.go",
+        "molecule_contract_test.go",
         "new_methods_test.go",
         "open_test.go",
         "post_sql_commit_test.go",
@@ -205,6 +240,7 @@ go_test(
         "reject_stale_upsert_test.go",
         "relations_contract_test.go",
         "releaser_contract_test.go",
+        "remedy_printing_internal_test.go",
         "remote_git_ref_test.go",
         "remote_migrate_gate_test.go",
         "remote_peer_auth_test.go",
@@ -213,6 +249,7 @@ go_test(
         "retention_epoch_contract_test.go",
         "role_fixture_kit_test.go",
         "role_test_helpers_test.go",
+        "row_version_contract_test.go",
         "schema_test.go",
         "search_missing_table_test.go",
         "stats_reporter_contract_test.go",
@@ -226,16 +263,22 @@ go_test(
         "update_mergeops_test.go",
         "version_completeness_behaviour_test.go",
         "version_reconciler_contract_test.go",
+        "version_subsecond_test.go",
+        "versioned_history_activation_cost_test.go",
+        "versioned_read_contract_test.go",
+        "wisp_plane_states_test.go",
         "workspace_config_contract_test.go",
     ],
     embed = [":embeddeddolt"],
-    shard_count = 8,
+    shard_count = 9,
     deps = [
         "//:beads",
         "//backend/conformance",
         "//internal/debug",
         "//internal/eventsjournal",
         "//internal/hooks",
+        "//internal/idgen",
+        "//internal/remedy",
         "//internal/storage",
         "//internal/storage/batchbench",
         "//internal/storage/batchfixtures",
@@ -245,13 +288,16 @@ go_test(
         "//internal/storage/doltutil",
         "//internal/storage/domain/db",
         "//internal/storage/externaldeps",
+        "//internal/storage/historyoffequiv",
         "//internal/storage/issueops",
+        "//internal/storage/rowid",
         "//internal/storage/schema",
         "//internal/storage/sqlcount",
         "//internal/storage/storagecontract",
         "//internal/storage/versioncontrolops",
         "//internal/testutil/bazeltest",
         "//internal/types",
+        "//internal/versionedhistory",
         "//internal/workapi",
         "//issueops",
         "@com_github_cenkalti_backoff_v4//:backoff",
@@ -264,10 +310,10 @@ go_test(
     ],
 )
 
-# Runs 15 Bazel shards against every top-level Test* function in
+# Runs 40 Bazel shards against every top-level Test* function in
 # internal/storage/embeddeddolt/*_test.go but TestConformance, assigned by
-# the manifest's 15-shard block (duration-balanced; see
-# scripts/ci/embedded_storage_test_durations.json), with
+# the manifest's 40-shard block (duration-balanced on rbe-west measurements;
+# see scripts/ci/embedded_storage_test_durations.json), with
 # BEADS_TEST_EMBEDDED_DOLT=1; the wrapper points
 # BEADS_TEST_EMBEDDED_TEST_BINARY at this binary, which the concurrency test
 # re-executes. This is a *different* shard count from PR Risk's legacy
@@ -303,12 +349,18 @@ sh_test(
         "//:.github/scripts/embedded-storage-test-shards.txt",
     ],
     env = {"BEADS_TEST_EMBEDDED_DOLT": "1"},
-    shard_count = 15,
+    shard_count = 40,
     tags = ["embedded"],
 )
 
 # PR Risk's "Test (Embedded Dolt Conformance - core)" job: conformance.RunAll
-# except its Audit group, with the job's binary flags but -test.timeout.
+# except its Audit group, with the job's binary flags but -test.timeout. It
+# runs as two targets: this one skips Audit and the groups
+# embeddeddolt_conformance_core_slow_test (below) runs, so the two run every
+# core group exactly once between them (a group added to RunAll lands here).
+# As one action it took 108-150s on rbe-west, ~half of it those two groups.
+# Every RunAll group builds its own store from the factory, so the split
+# shares no state.
 #
 # Tags:
 #   embedded: the embedded-Dolt tier; excluded from --config=prcore/ci,
@@ -328,7 +380,32 @@ sh_test(
         "-test.count=1",
         "-test.timeout=19m",
         "-test.run=^TestConformance$$",
-        "-test.skip=^TestConformance$$/^Audit$$",
+        "-test.skip=^TestConformance$$/^(Audit|ReadyCountsPageChunking|Portable)$$",
+    ],
+    data = [":embeddeddolt_test"],
+    env = {"BEADS_TEST_EMBEDDED_DOLT": "1"},
+    tags = ["embedded"],
+)
+
+# The slow groups of the core conformance partition (see
+# embeddeddolt_conformance_core_test, which skips exactly these):
+# ReadyCountsPageChunking (~33s) and Portable (~20s) under -race.
+#
+# Tags:
+#   embedded: the embedded-Dolt tier; excluded from --config=prcore/ci,
+#     selected by --config=embedded.
+sh_test(
+    name = "embeddeddolt_conformance_core_slow_test",
+    size = "large",
+    # -test.timeout=19m: as embeddeddolt_conformance_core_test.
+    timeout = "eternal",
+    srcs = ["//tools/bazel:go_test_variant.sh"],
+    args = [
+        "$(rootpath :embeddeddolt_test)",
+        "-test.v",
+        "-test.count=1",
+        "-test.timeout=19m",
+        "-test.run=^TestConformance$$/^(ReadyCountsPageChunking|Portable)$$",
     ],
     data = [":embeddeddolt_test"],
     env = {"BEADS_TEST_EMBEDDED_DOLT": "1"},
@@ -421,12 +498,51 @@ filegroup(
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
 
 filegroup(
-    name = "repo_files",
+    name = "repo_doc_files",
+    srcs = glob(
+        [
+            "**/*.md",
+            "**/*.mdx",
+        ],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = [
+            "**/*_test.go",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_other_files",
     srcs = glob(
         ["**"],
         exclude = [
             "**/*.db",
             "**/*.exe",
+            "**/*.go",
+            "**/*.md",
+            "**/*.mdx",
             "**/*.out",
             "**/*.prof",
             "**/*.pyc",
@@ -435,7 +551,7 @@ filegroup(
             "**/node_modules/**",
         ],
     ),
-    visibility = ["//:__pkg__"],
+    visibility = ["//:__subpackages__"],
 )
 
 # --- end repo_files ---

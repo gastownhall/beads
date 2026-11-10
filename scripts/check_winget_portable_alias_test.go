@@ -11,7 +11,7 @@ import (
 
 // The guard's own vocabulary is shared between mikefarah yq v4 and python-yq,
 // so either flavour exercises these cases. Under Bazel yq is part of the
-// executor inventory //scripts:scripts_test relies on (the rbe-west worker
+// executor inventory the //scripts go_tests rely on (the rbe-west worker
 // image and ubuntu-latest ship mikefarah yq v4), so a missing yq fails there.
 func skipWithoutYQ(t *testing.T) {
 	t.Helper()

@@ -7,6 +7,9 @@ go_library(
         "container_provider.go",
         "container_provider_windows.go",
         "dockercontext.go",
+        "doltlock.go",
+        "doltsqlserver.go",
+        "git_env.go",
         "git_test_hooks.go",
         "localdoltserver.go",
         "localdoltserver_linux.go",
@@ -14,6 +17,7 @@ go_library(
         "suite_temp.go",
         "testdoltbranch.go",
         "testdoltcommon.go",
+        "testdoltreap.go",
         "testdoltserver.go",
         "testdoltserver_windows.go",
         "tmpfs.go",
@@ -21,6 +25,8 @@ go_library(
     importpath = "github.com/steveyegge/beads/internal/testutil",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/execenv",
+        "//internal/lockfile",
         "//internal/storage/doltutil",
         "//internal/testutil/bazeltest",
         "@com_github_go_sql_driver_mysql//:mysql",
@@ -108,12 +114,15 @@ go_test(
     name = "testutil_test",
     srcs = [
         "dockercontext_test.go",
+        "doltsqlserver_test.go",
+        "git_env_test.go",
         "gm2g3g5r_failopen_test.go",
         "gm2g3g5r_failopen_unix_test.go",
         "gm2g3g5r_failopen_windows_test.go",
         "localdoltserver_test.go",
         "suite_temp_test.go",
         "testdoltbranch_test.go",
+        "testdoltreap_test.go",
         "testdoltserver_env_test.go",
         "testdoltserver_unreachable_test.go",
         "tmpfs_test.go",
@@ -123,7 +132,69 @@ go_test(
     deps = [
         "//internal/storage/doltutil",
         "@com_github_go_sql_driver_mysql//:mysql",
-    ],
+    ] + select({
+        "@rules_go//go/platform:aix": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:android": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:darwin": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:dragonfly": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:freebsd": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:illumos": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:ios": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:js": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:linux": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:netbsd": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:openbsd": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:osx": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:plan9": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:qnx": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "@rules_go//go/platform:solaris": [
+            "@com_github_testcontainers_testcontainers_go//:testcontainers-go",
+            "@com_github_testcontainers_testcontainers_go_modules_dolt//:dolt",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # testutil_test on the dolt-server lane: the package's own tests of the
@@ -154,15 +225,64 @@ sh_test(
     tags = ["dolt-server"],
 )
 
+# The pinned dolt sql-server image, read by //scripts:scripts_test (the CI
+# pins agree) and //test/docsync (the docs' pin agrees).
+exports_files(
+    ["testdoltcommon.go"],
+    visibility = [
+        "//scripts:__pkg__",
+        "//test/docsync:__pkg__",
+    ],
+)
+
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
 
 filegroup(
-    name = "repo_files",
+    name = "repo_doc_files",
+    srcs = glob(
+        [
+            "**/*.md",
+            "**/*.mdx",
+        ],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = [
+            "**/*_test.go",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_other_files",
     srcs = glob(
         ["**"],
         exclude = [
             "**/*.db",
             "**/*.exe",
+            "**/*.go",
+            "**/*.md",
+            "**/*.mdx",
             "**/*.out",
             "**/*.prof",
             "**/*.pyc",
@@ -171,7 +291,7 @@ filegroup(
             "**/node_modules/**",
         ],
     ),
-    visibility = ["//:__pkg__"],
+    visibility = ["//:__subpackages__"],
 )
 
 # --- end repo_files ---

@@ -13,6 +13,16 @@ _DOLT_PLATFORMS_ONLY = select({
     "//conditions:default": ["@platforms//:incompatible"],
 })
 
+# Read by //scripts:go_test_sources_test: the shard-coverage check's list of
+# names that are not tests, and the Bazel-skip allowlist.
+exports_files(
+    [
+        "check_shard_coverage.py",
+        "equivalence_allowlist.txt",
+    ],
+    visibility = ["//scripts:__pkg__"],
+)
+
 # sh_test src for a second test target over an existing go_test binary (see
 # the script header), e.g. //cmd/bd/doctor/fix:fix_dolt_test.
 exports_files(
@@ -28,8 +38,17 @@ exports_files(
     visibility = ["//visibility:public"],
 )
 
+# sh_test src that runs one Bazel shard of an existing go_test binary with
+# its slowest tests pinned to shards of their own by a manifest (see the
+# script header and pin_shards.py), e.g. //cmd/bd:bd_dolt_server_test.
+exports_files(
+    ["go_test_pinned_shard.sh"],
+    visibility = ["//visibility:public"],
+)
+
 # sh_test src that runs an existing go_test binary with no network but
-# loopback (see the script header), e.g. //cmd/bd:bd_managed_local_test.
+# loopback, optionally sharded by a test manifest (see the script header),
+# e.g. //cmd/bd:bd_managed_local_test.
 exports_files(
     ["go_test_offline.sh"],
     visibility = ["//visibility:public"],
@@ -159,6 +178,7 @@ release_cross_build(
         ":pure_bd_has_no_cgo_only_deps",
         "//:beads",
         "//backend/conformance:conformance",
+        "//backend/http:http",
         "//backend:backend",
         "//beadserrors:beadserrors",
         "//cmd/bd/doctor/fix:fix",
@@ -180,6 +200,7 @@ release_cross_build(
         "//internal/doltremote:doltremote",
         "//internal/doltserver:doltserver",
         "//internal/doltversion:doltversion",
+        "//internal/endpointtrust:endpointtrust",
         "//internal/eventsjournal:eventsjournal",
         "//internal/execenv:execenv",
         "//internal/fdhygiene:fdhygiene",
@@ -203,6 +224,7 @@ release_cross_build(
         "//internal/httpclient/wire:wire",
         "//internal/httpclient:httpclient",
         "//internal/idgen:idgen",
+        "//internal/initprocs:initprocs",
         "//internal/jira:jira",
         "//internal/linear:linear",
         "//internal/lockfile:lockfile",
@@ -215,6 +237,7 @@ release_cross_build(
         "//internal/procid:procid",
         "//internal/query:query",
         "//internal/recipes:recipes",
+        "//internal/remedy:remedy",
         "//internal/remotecache:remotecache",
         "//internal/routing:routing",
         "//internal/storage/backendnames:backendnames",
@@ -240,6 +263,7 @@ release_cross_build(
         "//internal/storage/externaldeps:externaldeps",
         "//internal/storage/fs:fs",
         "//internal/storage/git:git",
+        "//internal/storage/historyoffequiv:historyoffequiv",
         "//internal/storage/issueops:issueops",
         "//internal/storage/journalscan:journalscan",
         "//internal/storage/kvkeys:kvkeys",
@@ -250,6 +274,7 @@ release_cross_build(
         "//internal/storage/sqlclass:sqlclass",
         "//internal/storage/sqlcount:sqlcount",
         "//internal/storage/storagecontract:storagecontract",
+        "//internal/storage/unsupportedgen:unsupportedgen",
         "//internal/storage/uow:uow",
         "//internal/storage/versioncontrolops:versioncontrolops",
         "//internal/storage:storage",
@@ -260,6 +285,7 @@ release_cross_build(
         "//internal/testutil/credentialcmd:credentialcmd",
         "//internal/testutil/fixtures:fixtures",
         "//internal/testutil/integration:integration",
+        "//internal/testutil/legacyworkspace:legacyworkspace",
         "//internal/testutil:testutil",
         "//internal/timeparsing:timeparsing",
         "//internal/tracker/conformance:conformance",
@@ -270,6 +296,7 @@ release_cross_build(
         "//internal/utils:utils",
         "//internal/validation:validation",
         "//internal/versioncheck:versioncheck",
+        "//internal/versionedhistory:versionedhistory",
         "//internal/workapi/storecounter:storecounter",
         "//internal/workapi/storequerier:storequerier",
         "//internal/workapi/storereader:storereader",
@@ -304,12 +331,51 @@ release_cross_build(
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
 
 filegroup(
-    name = "repo_files",
+    name = "repo_doc_files",
+    srcs = glob(
+        [
+            "**/*.md",
+            "**/*.mdx",
+        ],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = [
+            "**/*_test.go",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_other_files",
     srcs = glob(
         ["**"],
         exclude = [
             "**/*.db",
             "**/*.exe",
+            "**/*.go",
+            "**/*.md",
+            "**/*.mdx",
             "**/*.out",
             "**/*.prof",
             "**/*.pyc",
@@ -318,7 +384,7 @@ filegroup(
             "**/node_modules/**",
         ],
     ),
-    visibility = ["//:__pkg__"],
+    visibility = ["//:__subpackages__"],
 )
 
 # --- end repo_files ---

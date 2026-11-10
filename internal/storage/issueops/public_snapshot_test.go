@@ -45,7 +45,12 @@ func TestCloneIssueOperationRequestsDeepCopyMutableFields(t *testing.T) {
 	update.Patch.ExternalRef = publicops.Field[*string]{Set: true, Value: &ref}
 	update.Patch.DueAt = publicops.Field[*time.Time]{Set: true, Value: &now}
 	update.Patch.DeferUntil = publicops.Field[*time.Time]{Set: true, Value: &now}
+	update.Patch.Waiters = publicops.Field[[]string]{Set: true, Value: []string{"waiter"}}
 	updateClone := CloneUpdateRequest(update)
+	updateClone.Patch.Waiters.Value[0] = "changed"
+	if update.Patch.Waiters.Value[0] != "waiter" {
+		t.Fatal("CloneUpdateRequest() shares the caller's Waiters list")
+	}
 	updateClone.Patch.Metadata.Set["key"][0] = '{'
 	updateClone.Patch.Metadata.Unset[0] = "changed"
 	updateClone.Patch.Metadata.Replace.Value[0] = '{'
@@ -94,6 +99,7 @@ func TestIssueOperationCloneFunctionsKeepFrozenRequestFields(t *testing.T) {
 	assertFieldValueMutable(t, reflect.TypeOf(publicops.Field[*string]{}), "IssuePatch.ExternalRef")
 	assertFieldValueMutable(t, reflect.TypeOf(publicops.Field[*time.Time]{}), "IssuePatch.DueAt")
 	assertFieldValueMutable(t, reflect.TypeOf(publicops.Field[*time.Time]{}), "IssuePatch.DeferUntil")
+	assertFieldValueMutable(t, reflect.TypeOf(publicops.Field[[]string]{}), "IssuePatch.Waiters")
 }
 
 func isMutableKind(kind reflect.Kind) bool {

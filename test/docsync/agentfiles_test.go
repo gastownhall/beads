@@ -82,9 +82,10 @@ func contributorAgentFiles(t *testing.T, root string) []string {
 // CLAUDE.md`: Claude Code skips AGENTS.md files when a CLAUDE.md exists above
 // them), every nested one is listed in the root routing table, and every
 // local link, backticked repo path, and backticked guard-test name in them
-// resolves. Make targets are not checked. Under Bazel the checkout is
-// //:repo_files, where a source symlink arrives as its target's content, so
-// CLAUDE.md is checked by content: a copy that drifts from AGENTS.md fails.
+// resolves. Make targets are not checked. Under Bazel the tree is the test's
+// data (every Markdown file among it), where a source symlink arrives as its
+// target's content, so CLAUDE.md is checked by content: a copy that drifts
+// from AGENTS.md fails.
 func TestAgentInstructionFilesAreLinkedAndRouted(t *testing.T) {
 	root := repoRoot()
 	agentFiles := contributorAgentFiles(t, root)
@@ -167,7 +168,7 @@ func TestAgentInstructionFilesAreLinkedAndRouted(t *testing.T) {
 	}
 	if len(broken) > 0 {
 		sort.Strings(broken)
-		t.Errorf("agent instruction files reference paths that do not exist (%d):", len(broken))
+		t.Errorf("agent instruction files reference paths that do not exist (%d)%s:", len(broken), declaredDataHint())
 		for _, b := range broken {
 			t.Errorf("  %s", b)
 		}

@@ -160,13 +160,21 @@ func runListProxiedWatch(_ *cobra.Command, ctx context.Context, in listInput) er
 		return issues, hasMore, deps, nil
 	}
 
+	// --watch renders no gate (the nil gated map), here and on the direct route
+	// in displayWatchedIssueList: a bead the one-shot listing marks ⊘ keeps its
+	// plain status glyph while watched, and no refresh tick pays for the gate
+	// reads. Deliberate, not a forgotten argument — decorating watch means
+	// computing the map on every refresh.
+	draw := func(issues []*types.Issue, hasMore bool, deps map[string][]*types.Dependency) {
+		displayPrettyListWithDepsMode(issues, true, deps, "", hasMore, in.ReadyFlag, in.Status, in.SortBy, in.Reverse, nil)
+		printTruncationHint(hasMore, in.effectiveLimit)
+	}
+
 	issues, hasMore, deps, err := load()
 	if err != nil {
 		return fmt.Errorf("initial query: %w", err)
 	}
-	displayPrettyListWithDepsMode(issues, true, deps, "", hasMore, in.ReadyFlag, in.Status, in.SortBy, in.Reverse)
-	printTruncationHint(hasMore, in.effectiveLimit)
-	lastSnapshot := issueSnapshot(issues)
+	draw(issues, hasMore, deps)
 
 	fmt.Fprintf(os.Stderr, "\nWatching for changes... (Press Ctrl+C to exit)\n")
 
@@ -174,29 +182,30 @@ func runListProxiedWatch(_ *cobra.Command, ctx context.Context, in listInput) er
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sigChan)
 
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
+	proxiedListWatchLoop(sigChan, func() <-chan time.Time { return time.After(listWatchPollInterval) },
+		issueSnapshot(issues), load, draw)
+	return nil
+}
 
-	for {
-		select {
-		case <-sigChan:
-			fmt.Fprintf(os.Stderr, "\nStopped watching.\n")
-			return nil
-		case <-ticker.C:
-			issues, hasMore, deps, err := load()
+// proxiedListWatchLoop is runListProxiedWatch's refresh loop. It is
+// listWatchLoop, so a proxied refresh is followed by a full poll interval
+// exactly as a direct one is, however long it ran (GH#3415). load reads each
+// refresh's dependency records with its issues, in one unit of work, and a
+// redraw draws the tree from the records that same refresh read.
+func proxiedListWatchLoop(stop <-chan os.Signal, poll func() <-chan time.Time, lastSnapshot string,
+	load func() ([]*types.Issue, bool, map[string][]*types.Dependency, error),
+	draw func(issues []*types.Issue, hasMore bool, deps map[string][]*types.Dependency)) {
+	var deps map[string][]*types.Dependency
+	listWatchLoop(stop, poll, lastSnapshot,
+		func() ([]*types.Issue, bool, error) {
+			issues, hasMore, loaded, err := load()
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error refreshing issues: %v\n", err)
-				continue
+				return nil, false, err
 			}
-			snap := issueSnapshot(issues)
-			if snap != lastSnapshot {
-				lastSnapshot = snap
-				displayPrettyListWithDepsMode(issues, true, deps, "", hasMore, in.ReadyFlag, in.Status, in.SortBy, in.Reverse)
-				printTruncationHint(hasMore, in.effectiveLimit)
-				fmt.Fprintf(os.Stderr, "\nWatching for changes... (Press Ctrl+C to exit)\n")
-			}
-		}
-	}
+			deps = loaded
+			return issues, hasMore, nil
+		},
+		func(issues []*types.Issue, hasMore bool) { draw(issues, hasMore, deps) })
 }
 
 // emitProxiedListJSONResult writes the page the role already finished. It runs
@@ -247,7 +256,10 @@ func renderProxiedListText(ctx context.Context, out io.Writer, issues []*types.I
 			printTruncationHint(truncated, in.effectiveLimit)
 			return nil
 		}
-		displayPrettyListWithDepsMode(issues, false, depsByIssueID, in.depsMode, truncated, in.ReadyFlag, in.Status, in.SortBy, in.Reverse)
+		// The gate decoration rides the edge map this route just read, so the
+		// proxied pretty listing says what the direct one says (wy-j2upyy).
+		displayPrettyListWithDepsMode(issues, false, depsByIssueID, in.depsMode, truncated, in.ReadyFlag, in.Status, in.SortBy, in.Reverse,
+			proxiedGatedIssueIDs(ctx, uw, issues, depsByIssueID))
 		printTruncationHint(truncated, in.effectiveLimit)
 		printSkipLabelsFooter(in.SkipLabels)
 		return nil
@@ -276,11 +288,19 @@ func renderProxiedListText(ctx context.Context, out io.Writer, issues []*types.I
 	}
 	blocking := newListBlocking(result)
 
+	// The proxied --json routes get gated_by from workapi.BuildIssueDetails;
+	// without this the proxied TEXT routes would render a plain OPEN row for
+	// the same bead (wy-j2upyy). --long renders no gate, so it pays nothing.
+	var gated map[string][]string
+	if ui.IsAgentMode() || !in.longFormat {
+		gated = proxiedGatedIssueIDsOwnUOW(ctx, issues)
+	}
+
 	var buf strings.Builder
 	switch {
 	case ui.IsAgentMode():
 		for _, issue := range issues {
-			formatAgentIssue(&buf, issue, blocking.blockedBy[issue.ID], blocking.blocks[issue.ID], blocking.parent[issue.ID])
+			formatAgentIssue(&buf, issue, blocking.blockedBy[issue.ID], blocking.blocks[issue.ID], blocking.parent[issue.ID], gated[issue.ID])
 		}
 		fmt.Print(buf.String()) //nolint:forbidigo // Agent output is outside the --format contract.
 		printTruncationHint(truncated, in.effectiveLimit)
@@ -292,7 +312,7 @@ func renderProxiedListText(ctx context.Context, out io.Writer, issues []*types.I
 		}
 	default:
 		for _, issue := range issues {
-			formatIssueCompact(&buf, issue, labelsMap[issue.ID], blocking.blockedBy[issue.ID], blocking.blocks[issue.ID], blocking.parent[issue.ID])
+			formatIssueCompact(&buf, issue, labelsMap[issue.ID], blocking.blockedBy[issue.ID], blocking.blocks[issue.ID], blocking.parent[issue.ID], gated[issue.ID])
 		}
 	}
 

@@ -14,7 +14,7 @@
 
 # Plain go test's own bd build fallback (BEADS_TEST_BD_BINARY unset), which
 # Bazel never takes (bd comes in through BEADS_TEST_BD_BINARY). pr.yml's
-# pr-preflight-platforms runs both on Linux, macOS and Windows ("Exercise go
-# test's bd build fallback").
+# pr-preflight-platforms runs both on macOS and Windows ("Exercise generated
+# Git hook timeout process boundary and go test's bd build fallback").
 cmd/bd TestGOMODCACHENotUnderTestHome skip  # no in-test go build under Bazel; pr-preflight-platforms runs it
 cmd/bd TestGoBuildBDCommandIsCWDIndependent skip  # no in-test go build under Bazel; pr-preflight-platforms runs it

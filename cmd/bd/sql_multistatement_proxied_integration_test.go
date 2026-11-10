@@ -79,7 +79,7 @@ func TestProxiedServerMultiStatementSQL(t *testing.T) {
 
 func TestProxiedServerSQLDatabaseFlag(t *testing.T) {
 	bd := buildEmbeddedBD(t)
-	p := newSharedProxiedProject(t, bd, "df")
+	p := newSharedProxiedRootProject(t, bd, "df")
 
 	// Stand up a second database with a table, alongside the project database.
 	// The server is shared, so the name derives from the project's unique one.

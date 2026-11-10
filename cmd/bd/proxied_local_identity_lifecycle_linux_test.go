@@ -634,6 +634,12 @@ func managedProcessPIDs(p proxiedProject) (proxyPIDs, backendPIDs []int) {
 		return nil, nil
 	}
 	configPath := proxiedServerConfigPath(p.beadsDir)
+	// Since the serialized snapshot startup the backend runs on the proxy's
+	// private launch config (or the runtime config on a port-recovery
+	// relaunch), so its argv names a file under the proxy root rather than
+	// the operator config.
+	launchConfig := filepath.Join(p.proxyRoot, server.LaunchConfigFileName)
+	runtimeConfig := filepath.Join(p.proxyRoot, server.RuntimeConfigFileName)
 	for _, entry := range entries {
 		pid, err := strconv.Atoi(entry.Name())
 		if err != nil {
@@ -645,7 +651,9 @@ func managedProcessPIDs(p proxiedProject) (proxyPIDs, backendPIDs []int) {
 			strings.Contains(cmdline, p.proxyRoot):
 			proxyPIDs = append(proxyPIDs, pid)
 		case strings.Contains(cmdline, "sql-server") &&
-			strings.Contains(cmdline, configPath):
+			(strings.Contains(cmdline, configPath) ||
+				strings.Contains(cmdline, launchConfig) ||
+				strings.Contains(cmdline, runtimeConfig)):
 			backendPIDs = append(backendPIDs, pid)
 		}
 	}

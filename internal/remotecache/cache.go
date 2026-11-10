@@ -3,6 +3,7 @@ package remotecache
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,9 +12,11 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/githooksenv"
 	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/lockfile"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -85,7 +88,8 @@ func (c *Cache) Ensure(ctx context.Context, remoteURL string) (string, error) {
 	if err := ValidateRemoteURL(remoteURL); err != nil {
 		return "", fmt.Errorf("invalid remote URL: %w", err)
 	}
-	if _, err := exec.LookPath("dolt"); err != nil {
+	doltBin, err := exec.LookPath("dolt")
+	if err != nil {
 		return "", fmt.Errorf("dolt CLI not found (required for remote cache): %w", err)
 	}
 
@@ -113,13 +117,19 @@ func (c *Cache) Ensure(ctx context.Context, remoteURL string) (string, error) {
 				return entry, nil
 			}
 		}
+		if err := requireDoltCLIVersion(ctx, doltBin); err != nil {
+			return "", fmt.Errorf("dolt pull for %s: %w", remedy.PrintedValue(remoteURL), err)
+		}
 		if err := c.doltPull(ctx, target); err != nil {
-			return "", fmt.Errorf("dolt pull failed for %s: %w", remoteURL, err)
+			return "", fmt.Errorf("dolt pull failed for %s: %w", remedy.PrintedValue(remoteURL), err)
 		}
 	} else {
 		// Cold start: clone
+		if err := requireDoltCLIVersion(ctx, doltBin); err != nil {
+			return "", fmt.Errorf("dolt clone of %s: %w", remedy.PrintedValue(remoteURL), err)
+		}
 		if err := c.doltClone(ctx, remoteURL, target); err != nil {
-			return "", fmt.Errorf("dolt clone failed for %s: %w", remoteURL, err)
+			return "", fmt.Errorf("dolt clone failed for %s: %w", remedy.PrintedValue(remoteURL), err)
 		}
 	}
 
@@ -146,6 +156,11 @@ func (c *Cache) Push(ctx context.Context, remoteURL string) error {
 	}
 	defer c.releaseLock(lock)
 
+	if doltBin, err := exec.LookPath("dolt"); err == nil {
+		if err := requireDoltCLIVersion(ctx, doltBin); err != nil {
+			return fmt.Errorf("dolt push for %s: %w", remedy.PrintedValue(remoteURL), err)
+		}
+	}
 	cmd := doltCmd(ctx, target, "push", "origin", "main")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("dolt push failed: %w\nOutput: %s", err, output)
@@ -193,6 +208,23 @@ func (c *Cache) doltClone(ctx context.Context, remoteURL, target string) error {
 	cmd := doltCmd(ctx, "", doltCloneArgs(remoteURL, target)...)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%w\nOutput: %s", err, output)
+	}
+	return nil
+}
+
+// requireDoltCLIVersion refuses doltBin, the dolt on PATH that the cache
+// clones, pulls and pushes with, when its `dolt version` reports a release
+// below doltversion.RequiredMin, before that transfer runs. No sql-server
+// holds a cache entry, so the binary's own engine runs the transfer, and a
+// pull's merge, there. It applies the same policy as
+// doltserver.RequireDoltBinaryVersion, which this package cannot call
+// (doltserver imports internal/storage/doltutil, which imports
+// remotecache): a version that cannot be determined, or
+// a probe that fails, is not refused, and the dolt command that follows
+// reports a missing or broken binary in its own words.
+func requireDoltCLIVersion(ctx context.Context, doltBin string) error {
+	if _, _, err := doltversion.ProbeWithPolicy(ctx, doltBin); errors.Is(err, doltversion.ErrBelowRequiredMin) {
+		return err
 	}
 	return nil
 }

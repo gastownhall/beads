@@ -4,11 +4,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -105,7 +107,9 @@ func resolveLabelTarget(ctx context.Context, id string) (string, error) {
 // commits them together, so the N calls collapse back to one transaction and
 // one history entry with no new role and no new request type. It is not in this
 // slice because it needs a cmd/bd accessor of its own and because its end gate
-// runs a hierarchy and cycle walk a label-only request has no use for.
+// runs a hierarchy and cycle walk a label-only request has no use for. It also
+// needs a template stand-down first: UpdateItem has no AllowTemplate, so an
+// ItemUpdate refuses the templates this function edits today (bd-jkp9v3).
 func applyLabelEdit(ctx context.Context, issueIDs []string, labels []string, operation string) error {
 	lifecycle, err := openIssueLifecycle()
 	if err != nil {
@@ -165,9 +169,12 @@ func applyLabelEdit(ctx context.Context, issueIDs []string, labels []string, ope
 			}
 		}
 		result, uerr := lifecycle.Update(ctx, issueops.UpdateRequest{
-			Actor:   actor,
+			Actor:   currentActor(),
 			IssueID: issueID,
 			Patch:   patch,
+			// bd label has always edited templates; the role's template
+			// guard stands down for it (issueops.UpdateRequest.AllowTemplate).
+			AllowTemplate: true,
 		})
 		if uerr != nil {
 			gerund := labelOperationGerund(operation)
@@ -361,9 +368,11 @@ func removeLabelsByPrefix(ctx context.Context, issueIDs []string, prefix string,
 	outcomes := make([]labelEditOutcome, 0, len(targets))
 	for _, target := range targets {
 		result, uerr := lifecycle.Update(ctx, issueops.UpdateRequest{
-			Actor:   actor,
+			Actor:   currentActor(),
 			IssueID: target.issueID,
 			Patch:   issueops.IssuePatch{Labels: issueops.LabelPatch{Remove: target.labels}},
+			// As above: bd label edits templates by design.
+			AllowTemplate: true,
 		})
 		if uerr != nil {
 			return HandleErrorRespectJSON("label removing (prefix): %s: %v", target.issueID, uerr)
@@ -688,7 +697,7 @@ var labelPropagateCmd = &cobra.Command{
 		}
 
 		if strings.HasPrefix(label, "provides:") {
-			return HandleErrorRespectJSON("'provides:' labels are reserved for cross-project capabilities. Hint: use 'bd ship %s' instead", strings.TrimPrefix(label, "provides:"))
+			return HandleErrorRespectJSON("'provides:' labels are reserved for cross-project capabilities. Hint: use %s instead", shipCommand(strings.TrimPrefix(label, "provides:")))
 		}
 
 		children, err := store.SearchIssues(ctx, "", types.IssueFilter{ParentID: &parentID})
@@ -707,7 +716,7 @@ var labelPropagateCmd = &cobra.Command{
 		commitMsg := fmt.Sprintf("bd: propagate label '%s' from %s to %d children", label, parentID, len(children))
 		err = transactHonoringAutoCommit(ctx, store, commitMsg, func(tx storage.Transaction) error {
 			for _, child := range children {
-				if err := tx.AddLabel(ctx, child.ID, label, actor); err != nil {
+				if err := tx.AddLabel(ctx, child.ID, label, currentActor()); err != nil {
 					return fmt.Errorf("add label '%s' on %s: %w", label, child.ID, err)
 				}
 			}
@@ -809,7 +818,7 @@ func runLabelRename(ctx context.Context, args []string, dryRun bool) error {
 	if usesProxiedServer() {
 		renamed, merged, err = runLabelRenameProxiedServer(ctx, oldLabel, newLabel)
 	} else {
-		renamed, merged, _, err = store.RenameLabel(ctx, oldLabel, newLabel, actor)
+		renamed, merged, _, err = store.RenameLabel(ctx, oldLabel, newLabel, currentActor())
 	}
 	// Recorded from renamed>0 BEFORE the error check: a rename can commit its
 	// SQL side and still return a non-nil err (e.g. the Dolt publication step
@@ -1019,7 +1028,7 @@ func runLabelAdd(ctx context.Context, args []string) error {
 	// of the two answers rather than a new rule.
 	for _, label := range labels {
 		if strings.HasPrefix(label, "provides:") {
-			return HandleErrorRespectJSON("'provides:' labels are reserved for cross-project capabilities. Hint: use 'bd ship %s' instead", strings.TrimPrefix(label, "provides:"))
+			return HandleErrorRespectJSON("'provides:' labels are reserved for cross-project capabilities. Hint: use %s instead", shipCommand(strings.TrimPrefix(label, "provides:")))
 		}
 	}
 	// splitLabelArg already trims and drops empties, so this route never stored
@@ -1080,4 +1089,13 @@ func runLabelList(ctx context.Context, args []string) error {
 	}
 	fmt.Println()
 	return nil
+}
+
+// shipCommand is the bd ship command for capability, the capability as one
+// shell word or a placeholder named after the command. It is not wrapped in
+// backticks: sh, bash and zsh run a pasted `...` as a command substitution,
+// which a backtick in the single-quoted capability would end.
+func shipCommand(capability string) string {
+	arg, note := remedy.CommandArg(runtime.GOOS, capability, "<capability>")
+	return "bd ship " + arg + note
 }

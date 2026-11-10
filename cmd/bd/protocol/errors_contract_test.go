@@ -115,25 +115,16 @@ func TestProtocol_ErrorClass_NotClaimableNamesState(t *testing.T) {
 }
 
 // TestProtocol_ErrorClass_ClaimFailures_StructuredJSON is the §E5 half of the
-// claim error classes — and it is SKIPPED because bd-go does not satisfy it
-// today (wy-kxgf4).
-//
-// bd routes not-found through the JSON-respecting error helper, so
-// `bd show <missing> --json` emits {error, schema_version:1} (pinned above).
-// The claim path does not: `bd update <id> --claim --json` prints
-//
-//	Error claiming t04…-qqr: issue already claimed by alice
-//
-// as plain text, so an agent driving bd with --json gets an unparseable stderr
-// line for the single most common contended-write failure it must branch on.
-// The message contract (§E4) holds; the structured contract (§E5) does not.
-//
-// Per proposal §14, where bd's behavior deviates from a clause the clause wins
-// and the deviation is a bug — so this test asserts the clause and stays
-// skipped until wy-kxgf4 lands, at which point it becomes the guardrail.
+// claim error classes: a lost claim is the most common contended-write failure
+// an agent driving bd with --json has to branch on, so its class must be
+// readable from a JSON document and not only from a stderr line to scrape. bd
+// update reports per-id refusals in one batch document, so the class and the
+// holder/state live in the refused id's "failed" entry; the top-level "error"
+// is the batch summary. The document count is pinned as well: a second,
+// per-claim object beside the batch report would hand a consumer two
+// concatenated documents (wy-kxgf4). The stream (stdout vs stderr) is
+// deliberately not pinned — that split is proposal OQ-5.
 func TestProtocol_ErrorClass_ClaimFailures_StructuredJSON(t *testing.T) {
-	t.Skip("bd emits claim failures as plain text even with --json; violates §E5 (wy-kxgf4)")
-
 	t.Parallel()
 	w := newWorkspace(t)
 
@@ -145,18 +136,16 @@ func TestProtocol_ErrorClass_ClaimFailures_StructuredJSON(t *testing.T) {
 
 	// already-claimed: structured, and still naming the holder.
 	out, _ := w.runEnvExpectError([]string{actorBob}, "update", claimed, "--claim", "--json")
-	obj := requireJSONError(t, out, "already-claimed --json")
-	msg := errorMessage(obj)
+	msg := requireFailedEntry(t, out, claimed, "already-claimed --json")
 	if !strings.Contains(strings.ToLower(msg), "already claimed") || !strings.Contains(msg, "alice") {
-		t.Errorf("--json error does not name class + holder (§E4/§E5): %q", msg)
+		t.Errorf("--json failed entry does not name class + holder (§E4/§E5): %q", msg)
 	}
 
 	// not-claimable: structured, and still naming the state.
 	out, _ = w.runEnvExpectError([]string{actorBob}, "update", closed, "--claim", "--json")
-	obj = requireJSONError(t, out, "not-claimable --json")
-	msg = strings.ToLower(errorMessage(obj))
-	if !strings.Contains(msg, "not claimable") || !strings.Contains(msg, "closed") {
-		t.Errorf("--json error does not name class + state (§E4/§E5): %q", errorMessage(obj))
+	msg = requireFailedEntry(t, out, closed, "not-claimable --json")
+	if lower := strings.ToLower(msg); !strings.Contains(lower, "not claimable") || !strings.Contains(lower, "closed") {
+		t.Errorf("--json failed entry does not name class + state (§E4/§E5): %q", msg)
 	}
 }
 

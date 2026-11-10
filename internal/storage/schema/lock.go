@@ -326,7 +326,14 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 		}
 	}
 
-	applied, err = MigrateUp(ctx, conn)
+	// The same authority is consent for MigrateUp's own gate, which is that
+	// version-only test: an init that never sets local consent would otherwise
+	// be refused the retry of its own interrupted bootstrap.
+	migrate := MigrateUp
+	if o.freshBootstrapHeal != nil {
+		migrate = migrateUpConsented
+	}
+	applied, err = migrate(ctx, conn)
 	var dirtyErr *DirtyTablesError
 	if err != nil && o.freshBootstrapHeal != nil && errors.As(err, &dirtyErr) {
 		// Authorization is checked after the dirty guard fires and while the
@@ -347,7 +354,7 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 		if resetErr := drainFreshBootstrapReset(ctx, conn); resetErr != nil {
 			return applied, errors.Join(err, fmt.Errorf("schema: fresh-bootstrap reset: %w", resetErr))
 		}
-		applied, err = MigrateUp(ctx, conn)
+		applied, err = migrate(ctx, conn)
 	}
 	return applied, err
 }

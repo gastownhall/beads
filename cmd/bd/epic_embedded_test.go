@@ -119,12 +119,15 @@ func TestEmbeddedEpicStatus(t *testing.T) {
 	})
 }
 
-// TestEmbeddedEpicCloseEligible was split from TestEmbeddedEpic (originally
+// TestEmbeddedEpicCloseEligible* was split from TestEmbeddedEpic (originally
 // ~362s, measured under --config=embedded) into 3 top-level tests over
 // disjoint subtest groups, for CI shard balance (see
 // scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
-// subtest is preserved exactly once.
-func TestEmbeddedEpicCloseEligible(t *testing.T) {
+// subtest is preserved exactly once. It is split again in two:
+// TestEmbeddedEpicCloseEligibleNotEligible keeps the shared not-eligible epic
+// fixture and the two subtests that read it, and
+// TestEmbeddedEpicCloseEligibleClosesEpics the two that build their own.
+func TestEmbeddedEpicCloseEligibleNotEligible(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -155,6 +158,23 @@ func TestEmbeddedEpicCloseEligible(t *testing.T) {
 			t.Errorf("epic1 (not eligible) should not appear in dry-run: %s", out)
 		}
 	})
+
+	t.Run("close_eligible_none", func(t *testing.T) {
+		// epic1 has open children — should not be closeable
+		out := bdEpic(t, bd, dir, "close-eligible")
+		if strings.Contains(out, epic1.ID) {
+			t.Errorf("epic1 should not be closed: %s", out)
+		}
+	})
+}
+
+func TestEmbeddedEpicCloseEligibleClosesEpics(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("close_eligible_closes_epics", func(t *testing.T) {
 		dir3, _, _ := bdInit(t, bd, "--prefix", "ep3")
@@ -200,14 +220,6 @@ func TestEmbeddedEpicCloseEligible(t *testing.T) {
 		start := strings.IndexAny(s, "{[")
 		if start < 0 {
 			t.Fatalf("no JSON: %s", s)
-		}
-	})
-
-	t.Run("close_eligible_none", func(t *testing.T) {
-		// epic1 has open children — should not be closeable
-		out := bdEpic(t, bd, dir, "close-eligible")
-		if strings.Contains(out, epic1.ID) {
-			t.Errorf("epic1 should not be closed: %s", out)
 		}
 	})
 }

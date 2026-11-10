@@ -6,14 +6,36 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/uimd"
 )
+
+// watchCommentFormatTime is the watch path's comment timestamp formatter.
+// It reproduces, byte for byte, what the inline COMMENTS block here always
+// did before printComments existed: UTC, unconditionally — this path does
+// not read --local-time today (a pre-existing gap from the non-watch
+// render), and this change does not alter that.
+func watchCommentFormatTime(t time.Time) string {
+	return t.UTC().Format("2006-01-02 15:04")
+}
+
+// renderWatchComments prints the watch path's COMMENTS section, applying the
+// same --comments-tail cap as the other two show routes, always through
+// watchCommentFormatTime. Split out from displayShowIssueReturn as its own
+// function so tests can exercise the watch path's exact render call —
+// commentsTail plumbed all the way to printComments — without going through
+// displayShowIssueReturn itself, which resolves the issue via a live store
+// and so needs a real database.
+func renderWatchComments(comments []*types.Comment, commentsTail int, issueID string) {
+	printComments(comments, commentsTail, watchCommentFormatTime, issueID)
+}
 
 // singleIssueSnapshot builds a comparable string from a single issue's state
 // so we can detect when the issue has changed between poll cycles.
@@ -38,15 +60,18 @@ const showWatchPollInterval = 2 * time.Second
 
 // watchIssue polls for changes to an issue and auto-refreshes the display (GH#654).
 // Uses polling instead of fsnotify because Dolt stores data in a server-side
-// database, not files — file watchers never fire.
-func watchIssue(ctx context.Context, issueID string) error {
+// database, not files — file watchers never fire. commentsTail is the
+// --comments-tail render cap, threaded through to every render this loop
+// does (initial and on each refresh); see printComments.
+func watchIssue(ctx context.Context, issueID string, commentsTail int) error {
 	return runIssueWatch(ctx, issueWatchSource{
-		render: func(ctx context.Context) *types.Issue { return displayShowIssueReturn(ctx, issueID) },
+		render: func(ctx context.Context) *types.Issue { return displayShowIssueReturn(ctx, issueID, commentsTail) },
 		fetch:  func(ctx context.Context) (*types.Issue, error) { return fetchIssue(ctx, issueID) },
 	})
 }
 
-// runIssueWatch drives watchIssueLoop on a real ticker until Ctrl+C or SIGTERM.
+// runIssueWatch drives watchIssueLoop, waiting showWatchPollInterval after
+// each poll, until Ctrl+C or SIGTERM.
 // It fails when the initial render found nothing to watch; the render has
 // already said why, so the failure is silent.
 func runIssueWatch(ctx context.Context, src issueWatchSource) error {
@@ -55,24 +80,28 @@ func runIssueWatch(ctx context.Context, src issueWatchSource) error {
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sigChan)
 
-	ticker := time.NewTicker(showWatchPollInterval)
-	defer ticker.Stop()
-
-	if !watchIssueLoop(ctx, src, ticker.C, sigChan) {
+	poll := func() <-chan time.Time { return time.After(showWatchPollInterval) }
+	if !watchIssueLoop(ctx, src, poll, sigChan) {
 		return SilentExit()
 	}
 	return nil
 }
 
-// watchIssueLoop renders the issue once, then on every tick re-reads it and
+// watchIssueLoop renders the issue once, then after every wait re-reads it and
 // redraws only when singleIssueSnapshot changes. A poll that fails — the
 // issue was deleted, the backend blipped, a unit of work would not open — keeps
-// the last render on screen and is retried on the next tick without printing:
-// the watch is a live view, and a line (or, under --json, an error object) on
-// every tick for a condition the user can already see would bury it. It
-// returns when stop fires, or immediately, reporting false, when the initial
-// render found nothing to watch.
-func watchIssueLoop(ctx context.Context, src issueWatchSource, tick <-chan time.Time, stop <-chan os.Signal) bool {
+// the last render on screen and is retried after the next wait without
+// printing: the watch is a live view, and a line (or, under --json, an error
+// object) on every poll for a condition the user can already see would bury
+// it. It returns when stop fires, or immediately, reporting false, when the
+// initial render found nothing to watch.
+//
+// poll is called each time the loop starts waiting, which is after the
+// previous fetch (and any redraw) has returned, so every poll is followed by
+// a full wait. A fixed-rate ticker instead started the next fetch the moment
+// a slow one returned (GH#3415), and a stop that arrives during a fetch now
+// always wins over the next poll.
+func watchIssueLoop(ctx context.Context, src issueWatchSource, poll func() <-chan time.Time, stop <-chan os.Signal) bool {
 	issue := src.render(ctx)
 	if issue == nil {
 		return false
@@ -86,7 +115,7 @@ func watchIssueLoop(ctx context.Context, src issueWatchSource, tick <-chan time.
 		case <-stop:
 			fmt.Fprintf(os.Stderr, "\nStopped watching.\n")
 			return true
-		case <-tick:
+		case <-poll():
 			issue, err := src.fetch(ctx)
 			if err != nil || issue == nil {
 				continue
@@ -118,13 +147,14 @@ func fetchIssue(ctx context.Context, issueID string) (*types.Issue, error) {
 
 // displayShowIssueReturn displays a single issue and returns it for snapshot use.
 // Matches the full bd show output: header, metadata, content, labels, deps, comments.
-func displayShowIssueReturn(ctx context.Context, issueID string) *types.Issue {
+// commentsTail is the --comments-tail render cap; see printComments.
+func displayShowIssueReturn(ctx context.Context, issueID string, commentsTail int) *types.Issue {
 	result, err := resolveAndGetIssueWithRouting(ctx, store, issueID)
 	if result != nil {
 		defer result.Close()
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error fetching issue: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error fetching issue: %s\n", remedy.PrintedMessage(err))
 		return nil
 	}
 	if result == nil || result.Issue == nil {
@@ -185,18 +215,12 @@ func displayShowIssueReturn(ctx context.Context, issueID string) *types.Issue {
 	// Related (bidirectional, deduplicated)
 	printRelatedSection(relatedSeen)
 
-	// Comments
+	// Comments. watchCommentFormatTime hardcodes UTC — this path does not
+	// thread --local-time today (a pre-existing discrepancy from the
+	// non-watch render, left alone here; only the --comments-tail cap is
+	// wired through).
 	comments, _ := issueStore.GetIssueComments(ctx, issue.ID)
-	if len(comments) > 0 {
-		fmt.Printf("\n%s\n", ui.RenderBold("COMMENTS"))
-		for _, comment := range comments {
-			fmt.Printf("  %s %s\n", ui.RenderMuted(comment.CreatedAt.UTC().Format("2006-01-02 15:04")), comment.Author)
-			rendered := uimd.RenderMarkdown(comment.Text)
-			for _, line := range strings.Split(strings.TrimRight(rendered, "\n"), "\n") {
-				fmt.Printf("    %s\n", line)
-			}
-		}
-	}
+	renderWatchComments(comments, commentsTail, issue.ID)
 
 	fmt.Println()
 	return issue
@@ -300,8 +324,10 @@ func warnUnresolvableDepEdges(issueID string, counts depCounts, deps, dependents
 		if missing <= 0 {
 			return false
 		}
+		// issueID is the store's, named as printedIssueID spells it so it
+		// cannot redraw the bd dep list pointer printed below.
 		fmt.Fprintf(os.Stderr, "warning: %s has %d %s edge(s) whose far end has no row in this database (cross-repo/external) and are not shown above\n",
-			issueID, missing, kind)
+			printedIssueID(issueID), missing, kind)
 		return true
 	}
 	outbound := report("dependency", counts.deps.n, counts.deps.err, deps)
@@ -319,7 +345,11 @@ func warnUnresolvableDepEdges(issueID string, counts depCounts, deps, dependents
 	if outbound {
 		// Named once, after both directions, so an issue short on each gets
 		// one pointer rather than two.
-		fmt.Fprintf(os.Stderr, "For raw edge records, run: bd dep list %s %s\n", issueID, issueID)
+		// issueID is the store's (a partial-id argument resolves to it), so it
+		// goes into the bd dep list command as one shell word, or as a
+		// placeholder named escaped after it (remedy.CommandArg).
+		arg, note := remedy.CommandArg(runtime.GOOS, issueID, "<issue-id>")
+		fmt.Fprintf(os.Stderr, "For raw edge records, run: bd dep list %s %s%s\n", arg, arg, note)
 	}
 	if inbound {
 		fmt.Fprintln(os.Stderr, "The unrenderable dependent edges have no raw CLI listing yet: bd dep list is outbound-only.")

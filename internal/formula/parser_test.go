@@ -28,7 +28,7 @@ func resetFormulaSearchTestContext(t *testing.T) {
 
 func runGitForFormulaTest(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := gitCommand(args...)
 	cmd.Dir = dir
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -160,7 +160,7 @@ func TestDefaultSearchPaths_UsesResolvedBeadsDirForWorktree(t *testing.T) {
 	worktreeDir := filepath.Join(root, "worktree")
 	runGitForFormulaTest(t, mainRepo, "worktree", "add", worktreeDir, "HEAD")
 	t.Cleanup(func() {
-		cmd := exec.Command("git", "worktree", "remove", "--force", worktreeDir)
+		cmd := gitCommand("worktree", "remove", "--force", worktreeDir)
 		cmd.Dir = mainRepo
 		_ = cmd.Run()
 	})
@@ -2285,5 +2285,52 @@ func TestParseJSON_StepMetadata(t *testing.T) {
 	}
 	if got := step.Metadata["priority_level"]; got != "high" {
 		t.Errorf("Steps[0].Metadata[priority_level] = %v, want \"high\"", got)
+	}
+}
+
+// noAutoMaintenance keeps a fixture's git commit from spawning the detached
+// "git maintenance run --auto" child whose worktree-prune races the fixture's
+// next "git worktree add" (gastownhall/beads#7314, #7349). Flags ride the
+// command line, never env config: the routing-key scrub drops env config.
+var noAutoMaintenance = []string{"-c", "maintenance.auto=false", "-c", "gc.auto=0"}
+
+// gitCommand builds a git command for a fixture with noAutoMaintenance applied.
+func gitCommand(args ...string) *exec.Cmd {
+	return exec.Command("git", append(append([]string{}, noAutoMaintenance...), args...)...)
+}
+
+func TestOrchestratorOnlySearchPath(t *testing.T) {
+	resetFormulaSearchTestContext(t)
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	t.Setenv("HOME", home)
+	checkout := filepath.Join(root, "checkout")
+	if err := os.MkdirAll(checkout, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(checkout)
+	resetFormulaSearchCaches()
+
+	if got := OrchestratorOnlySearchPath(); got != "" {
+		t.Errorf("GT_ROOT unset: OrchestratorOnlySearchPath() = %q, want \"\"", got)
+	}
+
+	city := filepath.Join(root, "city")
+	t.Setenv("GT_ROOT", city)
+	want := filepath.Join(city, ".beads", "formulas")
+	if got := OrchestratorOnlySearchPath(); got != want {
+		t.Errorf("OrchestratorOnlySearchPath() = %q, want %q", got, want)
+	}
+	paths := DefaultSearchPaths()
+	if len(paths) == 0 || paths[len(paths)-1] != want {
+		t.Errorf("DefaultSearchPaths() = %v, want %q last", paths, want)
+	}
+
+	// GT_ROOT naming the user or checkout root adds no directory of its own.
+	for _, same := range []string{home, checkout} {
+		t.Setenv("GT_ROOT", same)
+		if got := OrchestratorOnlySearchPath(); got != "" {
+			t.Errorf("GT_ROOT=%s: OrchestratorOnlySearchPath() = %q, want \"\"", same, got)
+		}
 	}
 }

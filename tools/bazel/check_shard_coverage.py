@@ -2,7 +2,7 @@
 """Fail unless every Bazel shard ran exactly the tests its shard script lists.
 
 Usage: check_shard_coverage.py --bep <build_event_json_file> [--testlogs DIR]
-                               --suite LABEL SCRIPT SHARDS [--suite ...]
+                               --suite LABEL SCRIPT SHARDS[@OFFSET/TOTAL] [--suite ...]
                                [--whole LABEL ...]
 
 The manifest-sharded targets (//cmd/bd:bd_embedded_test runs
@@ -24,6 +24,13 @@ BEADS_TEST_SKIP or a lost BEADS_TEST_EMBEDDED_DOLT=1 turns the tier into
 t.Skip calls, which still list every test. It needs test.xml locally and
 -test.v in it, as --config=embedded sets.
 
+A manifest block bigger than Bazel's 50-shard cap per rule runs as several
+targets (tools/bazel/go_test_manifest_shard.sh --shard-offset/--shard-total):
+SHARDS@OFFSET/TOTAL says Bazel shard k of LABEL is the script's shard
+OFFSET+k of TOTAL. The suites sharing a SCRIPT and TOTAL must cover shards
+1..TOTAL exactly once between them, so (the script assigning each test to
+one shard of TOTAL) every test runs in exactly one shard of one target.
+
 Exit status: 0 if every shard matches, 1 otherwise.
 """
 
@@ -39,6 +46,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from equivalence import read_bep, testlog_xmls  # noqa: E402
 
 LISTED = re.compile(r"^  (Test[A-Za-z0-9_]*)$")
+SHARD_SPEC = re.compile(r"^(\d+)(?:@(\d+)/(\d+))?$")
 
 # Names the shard scripts' `grep '^func Test'` discovery lists that go test
 # never runs as a test: TestMain(m *testing.M) is the package's test entry
@@ -79,10 +87,36 @@ def all_skipped_problem(where, got, skipped):
     return None
 
 
+def tiling_problems(suites):
+    """Problems with suites of (label, script, shards, offset, total) that
+    split one SCRIPT's TOTAL-shard block over several targets: together they
+    must cover shards 1..TOTAL exactly once."""
+    problems = []
+    parts = {}
+    for label, script, shards, offset, total in suites:
+        if offset + shards > total:
+            problems.append(f"{label}: shards {offset + 1}..{offset + shards} exceed {script}'s total {total}")
+        parts.setdefault((script, total), []).append((offset, shards, label))
+    for (script, total), ranges in sorted(parts.items()):
+        covered = {}
+        for offset, shards, label in ranges:
+            for k in range(offset + 1, offset + shards + 1):
+                covered.setdefault(k, []).append(label)
+        missing = [k for k in range(1, total + 1) if k not in covered]
+        twice = sorted(k for k, labels in covered.items() if len(labels) > 1)
+        if missing:
+            problems.append(f"{script} {total}: no target runs shard(s) {missing}")
+        if twice:
+            problems.append(f"{script} {total}: shard(s) {twice} run by more than one target")
+    return problems
+
+
 def check(tested, testlogs, suites, lister=listed_tests, whole=()):
     """Return ([summary lines], [problems]) for suites of (label, script, shards)
-    and whole (unsharded or sharded) labels that must not be all-skipped."""
-    lines, problems = [], []
+    or (label, script, shards, offset, total), and whole (unsharded or
+    sharded) labels that must not be all-skipped."""
+    suites = [s if len(s) == 5 else (*s, 0, s[2]) for s in suites]
+    lines, problems = [], tiling_problems(suites)
     for label in whole:
         if label not in tested:
             problems.append(f"{label}: --whole, but the BEP has no result for it")
@@ -103,7 +137,7 @@ def check(tested, testlogs, suites, lister=listed_tests, whole=()):
             if p:
                 problems.append(p)
         lines.append(f"{label}: not all skipped")
-    for label, script, shards in suites:
+    for label, script, shards, offset, total_shards in suites:
         if tested.get(label) != shards:
             problems.append(f"{label}: the BEP has {tested.get(label, 0)} shard(s), want {shards} ({script})")
             continue
@@ -111,12 +145,12 @@ def check(tested, testlogs, suites, lister=listed_tests, whole=()):
         # The scripts' hash fallback forks per test (seconds per shard for
         # the server suite's ~1200 tests): list the shards concurrently.
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 2)) as pool:
-            listings = [pool.submit(lister, script, k, shards) for k in range(1, shards + 1)]
+            listings = [pool.submit(lister, script, offset + k, total_shards) for k in range(1, shards + 1)]
         for k, xml_path in enumerate(testlog_xmls(testlogs, label, shards), start=1):
             try:
                 want = listings[k - 1].result()
             except (OSError, subprocess.CalledProcessError) as e:
-                problems.append(f"{label}: {script} {k} {shards} failed: {e}")
+                problems.append(f"{label}: {script} {offset + k} {total_shards} failed: {e}")
                 continue
             rel = os.path.relpath(xml_path, testlogs)
             if not os.path.exists(xml_path):
@@ -136,7 +170,8 @@ def check(tested, testlogs, suites, lister=listed_tests, whole=()):
                                 f"(not in the target's srcs?)")
             for name in sorted(got - want):
                 problems.append(f"{label} shard {k}/{shards}: {name} ran but {script} does not list it there")
-        lines.append(f"{label}: {shards} shards, {total} listed tests")
+        span = "" if (offset, total_shards) == (0, shards) else f" (script shards {offset + 1}..{offset + shards} of {total_shards})"
+        lines.append(f"{label}: {shards} shards{span}, {total} listed tests")
     return lines, problems
 
 
@@ -145,16 +180,21 @@ def main(argv=None):
     ap.add_argument("--bep", required=True, help="--build_event_json_file of the bazel test run")
     ap.add_argument("--testlogs", default=None, help="default: from the BEP, else ./bazel-testlogs")
     ap.add_argument("--suite", nargs=3, action="append", required=True, metavar=("LABEL", "SCRIPT", "SHARDS"),
-                    help="a manifest-sharded target, its shard script and shard count (repeatable)")
+                    help="a manifest-sharded target, its shard script and shard count, as N or "
+                         "N@OFFSET/TOTAL for one of several targets splitting a TOTAL-shard block (repeatable)")
     ap.add_argument("--whole", action="append", default=[], metavar="LABEL",
                     help="a target none of whose test.xml may be all skipped (repeatable)")
     args = ap.parse_args(argv)
 
     suites = []
-    for label, script, shards in args.suite:
-        if not shards.isdigit() or int(shards) < 1:
-            ap.error(f"--suite {label}: SHARDS must be a positive integer, got {shards!r}")
-        suites.append((label, script, int(shards)))
+    for label, script, spec in args.suite:
+        m = SHARD_SPEC.match(spec)
+        if not m or int(m.group(1)) < 1:
+            ap.error(f"--suite {label}: SHARDS must be N or N@OFFSET/TOTAL with N >= 1, got {spec!r}")
+        shards = int(m.group(1))
+        offset = int(m.group(2)) if m.group(2) else 0
+        total = int(m.group(3)) if m.group(3) else shards
+        suites.append((label, script, shards, offset, total))
     tested, _, bep_testlogs = read_bep(args.bep)
     testlogs = args.testlogs or bep_testlogs or "bazel-testlogs"
     lines, problems = check(tested, testlogs, suites, whole=args.whole)

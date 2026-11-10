@@ -160,7 +160,7 @@ func (c *Client) CloseIssue(ctx context.Context, id string, body apigen.CloseIss
 		return nil, err
 	}
 	var out apigen.CloseIssueResponse
-	r := Request{Op: OpCloseIssue, Method: http.MethodPost, Path: path, Body: body, IssueID: id}
+	r := Request{Op: OpCloseIssue, Method: http.MethodPost, Path: path, Body: body, IssueID: id, Actor: body.Actor}
 	if err := c.dispatch(ctx, r, &out); err != nil {
 		return nil, err
 	}
@@ -228,6 +228,50 @@ type updateBody struct {
 	Actor string         `json:"actor"`
 	Patch map[string]any `json:"patch"`
 	UpdateGuards
+	// The five UpdateFlags, each sent only when true (setItemBool's
+	// convention: an explicit false is the default said twice). Absent is
+	// what an older server that predates a member reads correctly, which is
+	// what lets a request that sets none of them reach a server that knows
+	// none of them.
+	Claim                 *bool `json:"claim,omitempty"`
+	ForceAssigneeTransfer *bool `json:"force_assignee_transfer,omitempty"`
+	ForceClosePolicy      *bool `json:"force_close_policy,omitempty"`
+	ForceNotesOverwrite   *bool `json:"force_notes_overwrite,omitempty"`
+	AllowTemplate         *bool `json:"allow_template,omitempty"`
+}
+
+// UpdateFlags are updateIssue's five top-level booleans: the claim, the three
+// force overrides and the template stand-down. UpdateIssueRequest publishes all
+// five (internal/httpapi/apigen's generated type) and none is a GUARD — none
+// carries a comparison value, unlike every member UpdateGuards holds — so they
+// travel as their own struct rather than joining that one.
+//
+// It is a struct rather than five arguments for UpdateGuards' reason: five
+// positional booleans side by side are the shape a caller transposes, and a
+// transposed force flag is a bypass nobody asked for.
+type UpdateFlags struct {
+	// Claim claims the issue for the actor in the SAME transaction as the
+	// patch (upstream #6890): `bd update <id> --claim`, served by the same
+	// role. With it set the patch may be empty — the claim is then the whole
+	// write. The client sets it only for a server advertising
+	// CapIssuesUpdateClaim, read from the handshake before the dial; a server
+	// that predates the member would refuse it as an unknown parameter.
+	Claim bool
+	// ForceAssigneeTransfer bypasses ONLY the anti-steal fence on a genuine
+	// transfer away from a live foreign in-progress owner. The server
+	// requires patch.assignee beside it.
+	ForceAssigneeTransfer bool
+	// ForceClosePolicy bypasses ONLY close policy — the open-children and
+	// live-blocker refusals — on a patch.status crossing into the done
+	// category.
+	ForceClosePolicy bool
+	// ForceNotesOverwrite bypasses ONLY the refusal on a patch.notes that would
+	// replace existing non-empty notes with different non-empty content. The
+	// server requires patch.notes beside it.
+	ForceNotesOverwrite bool
+	// AllowTemplate stands the template read-only refusal down for this
+	// request (bd label, bd set-state edit templates by design).
+	AllowTemplate bool
 }
 
 // UpdateIssue patches one issue. It is the only PATCH on this surface: the
@@ -237,18 +281,37 @@ type updateBody struct {
 // The guards ride BESIDE the patch, at the body's top level, which is where the
 // server reads them: one smuggled into the patch document would be an unknown
 // member of `patch` and a 400.
-func (c *Client) UpdateIssue(ctx context.Context, id, actor string, patch map[string]any, guards UpdateGuards) (*apigen.UpdateIssueResponse, error) {
+//
+// The flags ride the same way, each sent only when true (see updateBody).
+func (c *Client) UpdateIssue(ctx context.Context, id, actor string, patch map[string]any, guards UpdateGuards, flags UpdateFlags) (*apigen.UpdateIssueResponse, error) {
 	path, err := IssuePath(id)
 	if err != nil {
 		return nil, err
 	}
 	var out apigen.UpdateIssueResponse
-	body := updateBody{Actor: actor, Patch: patch, UpdateGuards: guards}
+	body := updateBody{
+		Actor: actor, Patch: patch, UpdateGuards: guards,
+		Claim:                 trueOrAbsent(flags.Claim),
+		ForceAssigneeTransfer: trueOrAbsent(flags.ForceAssigneeTransfer),
+		ForceClosePolicy:      trueOrAbsent(flags.ForceClosePolicy),
+		ForceNotesOverwrite:   trueOrAbsent(flags.ForceNotesOverwrite),
+		AllowTemplate:         trueOrAbsent(flags.AllowTemplate),
+	}
 	r := Request{Op: OpUpdateIssue, Method: http.MethodPatch, Path: path, Body: body, IssueID: id}
 	if err := c.dispatch(ctx, r, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
+}
+
+// trueOrAbsent spells an optional wire boolean: a pointer to true when set,
+// nil — an omitted member — otherwise.
+func trueOrAbsent(set bool) *bool {
+	if !set {
+		return nil
+	}
+	v := true
+	return &v
 }
 
 // CompareAndSetMetadata swaps one metadata key of one issue if and only if it
@@ -396,6 +459,11 @@ type ApplyUpdateItem struct {
 	ExpectedAssignee      *string `json:"expected_assignee,omitempty"`
 	ForceClosePolicy      *bool   `json:"force_close_policy,omitempty"`
 	ForceAssigneeTransfer *bool   `json:"force_assignee_transfer,omitempty"`
+	// ForceNotesOverwrite is the same trio's third member (S3 reconciliation,
+	// 2026-10): apigen.ApplyUpdateItem publishes
+	// force_notes_overwrite exactly as it publishes the other two, and it is
+	// sent only when true, the same as them.
+	ForceNotesOverwrite *bool `json:"force_notes_overwrite,omitempty"`
 }
 
 // ApplyItem is one item of a plan: a `kind` and exactly one payload naming it.
@@ -471,7 +539,11 @@ func (c *Client) ApplyBatch(ctx context.Context, body ApplyBatchRequest) (*apige
 	}
 
 	var out apigen.ApplyBatchResponse
-	r := Request{Op: OpApplyBatch, Method: http.MethodPost, Path: PathIssuesBatchApply, Body: body}
+	// A plan over the server's large-apply threshold runs under the server's
+	// extended budget, so it is dialed under the matching client ceiling
+	// rather than DefaultTimeout.
+	r := Request{Op: OpApplyBatch, Method: http.MethodPost, Path: PathIssuesBatchApply, Body: body, Actor: body.Actor,
+		Timeout: largeApplyTimeout(len(body.Items))}
 	if err := c.dispatch(ctx, r, &out); err != nil {
 		return nil, err
 	}
@@ -490,10 +562,10 @@ func (c *Client) RememberMemory(ctx context.Context, body apigen.RememberRequest
 	return &out, nil
 }
 
-// RecallMemory reads one memory. A miss — including a row stored as the empty
-// string — is a 404, which the problem mapper turns into issueops.ErrNotFound;
-// the memory role converts that to its own Found-false result, because
-// memoryops has deliberately no ErrNotFound.
+// RecallMemory reads one memory. A miss is a 404, which the problem mapper
+// turns into issueops.ErrNotFound; the memory role converts that to its own
+// Found-false result, because memoryops has deliberately no ErrNotFound. A row
+// stored as the empty string is not a miss: it is a 200 with an empty value.
 func (c *Client) RecallMemory(ctx context.Context, key string) (*apigen.Memory, error) {
 	path, err := MemoryPath(key)
 	if err != nil {

@@ -2,7 +2,6 @@ package fix
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -844,7 +843,7 @@ func TestDetectActiveHookManager(t *testing.T) {
 			}
 			// Test isolation: force repo-local hooks path so global git config
 			// does not redirect detection to an unrelated directory.
-			setHooksPathCmd := exec.Command("git", "config", "core.hooksPath", ".git/hooks")
+			setHooksPathCmd := gitCommand("config", "core.hooksPath", ".git/hooks")
 			setHooksPathCmd.Dir = dir
 			if err := setHooksPathCmd.Run(); err != nil {
 				t.Fatalf("failed to set core.hooksPath: %v", err)
@@ -879,7 +878,7 @@ func TestDetectActiveHookManager_CustomHooksPath(t *testing.T) {
 		t.Fatalf("failed to copy git template: %v", err)
 	}
 	// Start from repo-local hooks for test isolation; override below.
-	setHooksPathCmd := exec.Command("git", "config", "core.hooksPath", ".git/hooks")
+	setHooksPathCmd := gitCommand("config", "core.hooksPath", ".git/hooks")
 	setHooksPathCmd.Dir = dir
 	if err := setHooksPathCmd.Run(); err != nil {
 		t.Fatalf("failed to set core.hooksPath: %v", err)
@@ -898,7 +897,7 @@ func TestDetectActiveHookManager_CustomHooksPath(t *testing.T) {
 	}
 
 	// Set core.hooksPath via git config
-	configCmd := exec.Command("git", "config", "core.hooksPath", "my-hooks")
+	configCmd := gitCommand("config", "core.hooksPath", "my-hooks")
 	configCmd.Dir = dir
 	if err := configCmd.Run(); err != nil {
 		t.Fatalf("failed to set core.hooksPath: %v", err)

@@ -1,6 +1,6 @@
 ---
 title: "bd mail"
-description: "Delegates mail operations to an external mail provider."
+description: "Delegate to mail provider (e.g., gt mail)"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -15,10 +15,11 @@ by delegating to the configured mail provider.
 
 Configuration (checked in order):
   1. BEADS_MAIL_DELEGATE or BD_MAIL_DELEGATE environment variable
-  2. 'mail.delegate' config setting (bd config set mail.delegate "gt mail")
+  2. 'mail.delegate' in user-global config (~/.config/bd/config.yaml;
+     project .beads/config.yaml and workspace database settings are ignored)
 
 Examples:
-  # Configure delegation (one-time setup)
+  # Configure delegation (one-time setup in ~/.config/bd/config.yaml)
   `export BEADS_MAIL_DELEGATE="gt mail"`
   # or
   bd config set mail.delegate "gt mail"

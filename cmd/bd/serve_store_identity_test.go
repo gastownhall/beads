@@ -210,6 +210,24 @@ func (*serveIdentityStore) ReadyClaimer() (issueops.ReadyClaimer, error) {
 	return serveIdentityRole{}, nil
 }
 func (*serveIdentityStore) Releaser() (issueops.Releaser, error) { return serveIdentityRole{}, nil }
+
+// LeaseReclaimer is declared at depth 1 for Releaser's reason: its hook
+// decorator wraps, and the recursion would otherwise land on a nil-embedded
+// promotion.
+func (*serveIdentityStore) LeaseReclaimer() (issueops.LeaseReclaimer, error) {
+	return serveIdentityRole{}, nil
+}
+
+// Heartbeater is declared at depth 1 for the same reason: its hook decorator
+// recurses, and the recursion would otherwise land on a nil-embedded promotion.
+func (*serveIdentityStore) Heartbeater() (issueops.Heartbeater, error) {
+	return serveIdentityRole{}, nil
+}
+
+// BlockedLister is declared at depth 1 for the same reason.
+func (*serveIdentityStore) BlockedLister() (issueops.BlockedLister, error) {
+	return serveIdentityRole{}, nil
+}
 func (*serveIdentityStore) IssueLifecycle() (issueops.Lifecycle, error) {
 	return serveIdentityRole{}, nil
 }
@@ -297,6 +315,9 @@ func (*serveIdentityStore) MetadataCAS() (issueops.MetadataCAS, error) {
 type serveIdentityRole struct {
 	issueops.Lifecycle
 	issueops.Releaser
+	issueops.LeaseReclaimer
+	issueops.Heartbeater
+	issueops.BlockedLister
 	issueops.ReadyClaimer
 	issueops.BatchCloser
 	issueops.MetadataCAS

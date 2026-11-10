@@ -1,6 +1,5 @@
 # Documentation Disposition Inventory
 
-Graph-plane design records added: 2026-09-10.
 Reviewed: 2026-07-07 (paths updated 2026-07-10 for the Mintlify port: user docs now live in the docs/ site tree; this ledger and other internal docs live in engdocs/)
 
 CI cleanup entry added: 2026-05-28
@@ -39,6 +38,7 @@ freshness source.
 | `SERVE_RUNBOOK.md` | `Last reviewed:` marker tied to the operating-envelope constants in `internal/httpapi/server.go` and the log fields in its `event`/`request` emitters. |
 | `CI_CLEANUP_PLAN.md` | `Last reviewed:` marker tied to the CI audit, workflow files, wrapper scripts, `Makefile`, package manifests, and maintainer decision review. |
 | `design/otel/otel-data-model.md` | `Last reviewed:` marker tied to telemetry, Dolt storage, hooks, and AI call sites. |
+| `EMBEDDING_OVER_PROXIED_SERVER.md` | `Last reviewed:` marker naming the commit it was read at, tied to `internal/storage/dbproxy/`, `internal/storage/uow/`, `internal/storage/schema/` gate and lock, `cmd/bd/dolt_proxied_lifecycle.go`, and the root `beads*.go` open path down into `internal/storage/dolt/` and `internal/storage/embeddeddolt/`. Re-read against those sources per release; the doc describes observed behaviour, so a stale marker makes it wrong rather than merely old. |
 
 Follow-up automation should replace marker-only checks with generated or
 `--check` blocks where a clean code source exists.
@@ -59,9 +59,6 @@ Follow-up automation should replace marker-only checks with generated or
 | `ANTIVIRUS.md` | Keep | User-facing operational note; review vendor/version claims when touched. |
 | `ARCHITECTURE.md` | Keep | Primary architecture overview; evidence is current package layout and Dolt-only storage path. |
 | `ATTRIBUTION.md` | Keep | Attribution record for removed merge engine. |
-| `BDP_BEAD_GRAPH_PLAN.md` | Keep | Graph-plane design record; ruled contracts and dated dependency sources, not runtime or merge clearance. |
-| `BDP_GRAPH_ARCHITECTURE.md` | Keep | Graph-plane design record; ruled contracts and dated dependency sources, not runtime or merge clearance. |
-| `BDP_GRAPH_CLI_AND_STORAGE_SPEC.md` | Keep | Graph-plane design record; ruled contracts and dated dependency sources, not runtime or merge clearance. |
 | `CLAUDE_INTEGRATION.md` | Keep | Design/user guide for Claude setup; paired with `SETUP.md`. |
 | `AGENTS.md` (`CLAUDE.md` is a symlink to it) | Keep | Contributor orientation for `engdocs/`: verified pointers only; workflow rules live in the root `AGENTS.md`. |
 | `CLI_REFERENCE.md` | Keep/generated | Generated command reference from live help output. |
@@ -86,7 +83,9 @@ Follow-up automation should replace marker-only checks with generated or
 | `DOLT-BACKEND.md` | Consolidated pointer | Old duplicate staged; stable path points to canonical `DOLT.md`. |
 | `DOLT.md` | Keep/canonical | Canonical Dolt backend guide. |
 | `ERROR_HANDLING.md` | Keep with freshness | Pattern guide with code-linked examples; marker added. |
+| `EMBEDDING_OVER_PROXIED_SERVER.md` | Keep with freshness | Observed proxied-server surfaces an embedder reads (pid file, child argv, status JSON, optional interfaces). Descriptive, not a compatibility contract; marker tied to the dbproxy, uow, schema-gate and proxied-lifecycle sources it quotes. |
 | `EXCLUSIVE_LOCK.md` | Keep | Behaviour/design doc for lock protocol. |
+| `EXTENDING.md` | Keep | Storage-API contracts callers must honor; entry point for embedder docs. |
 | `FAQ.md` | Revise | Opening wording now describes beads as Dolt-powered; stale pre-1.0 status removed. |
 | `FEDERATION.md` | Keep/canonical | Canonical federation (peer-to-peer sync) guide; moved from root `FEDERATION-SETUP.md`, which is now a stable pointer. Absorbed the duplicate federation section previously in `DOLT.md`. |
 | `GIT_INTEGRATION.md` | Keep | User-facing git/worktree/hook behaviour. |

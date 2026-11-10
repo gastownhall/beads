@@ -48,8 +48,10 @@ func OpenForReadOnlyCommand(ctx context.Context, beadsDir, database, branch stri
 // is to reconcile the Dolt working set (bd dolt commit, bd vc commit) must be
 // able to open the store even when pending migrations touch dirty tables -
 // otherwise the commit that would clear the dirty state and unblock the
-// migration can never run. The returned store is otherwise a normal writable
-// store.
+// migration can never run. A schema.MigrateConsentError, which fires first on
+// a database that is also behind, is skipped the same way
+// (toleratesConsentRefusal). The returned store is otherwise a normal
+// writable store.
 func OpenForWorkingSetReconcile(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
 	return openCached(ctx, beadsDir, database, branch, openWorkingSetReconcile)
 }

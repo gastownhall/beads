@@ -32,7 +32,7 @@ func resolveProvider(t *testing.T, p *BearerProvider) {
 }
 
 func TestSourceNamesTheEnvRung(t *testing.T) {
-	t.Setenv(TokenEnv, "tok-env")
+	t.Setenv(TokenEnv, "127.0.0.1=tok-env")
 	p := NewBearerProvider(mustURL(t, "http://127.0.0.1:8080"))
 	resolveProvider(t, p)
 	if got := p.Source(); got != TokenEnv {
@@ -43,7 +43,7 @@ func TestSourceNamesTheEnvRung(t *testing.T) {
 func TestSourceNamesTheTokenCommandRung(t *testing.T) {
 	// The env rung must be empty so the ladder falls to the command rung.
 	t.Setenv(TokenEnv, "")
-	t.Setenv(TokenCommandEnv, "printf tok-cmd")
+	t.Setenv(TokenCommandEnv, "127.0.0.1=printf tok-cmd")
 	p := NewBearerProvider(mustURL(t, "http://127.0.0.1:8080"))
 	resolveProvider(t, p)
 	if got := p.Source(); got != TokenCommandEnv {
@@ -59,6 +59,18 @@ func TestSourceRendersTheCredentialsFileRungWithHostPort(t *testing.T) {
 	p.resolved = true
 	p.source = credentialsFileSourceName
 	if got, want := p.Source(), "the credentials file [127.0.0.1:8080]"; got != want {
+		t.Errorf("Source() = %q, want %q", got, want)
+	}
+}
+
+func TestSourceNamesBothCredentialsFileSectionsForAnIPv6Host(t *testing.T) {
+	// An IPv6 endpoint's section is spelled [[::1]:8080] or [::1:8080], and the
+	// rung reads the first that sets a password, so Source names both, in the
+	// order the rung tries them, rather than one the file may not have.
+	p := NewBearerProvider(mustURL(t, "http://[::1]:8080"))
+	p.resolved = true
+	p.source = credentialsFileSourceName
+	if got, want := p.Source(), "the credentials file [[::1]:8080] or [::1:8080]"; got != want {
 		t.Errorf("Source() = %q, want %q", got, want)
 	}
 }

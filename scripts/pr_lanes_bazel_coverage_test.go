@@ -1,6 +1,7 @@
 package scripts_test
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -64,6 +65,8 @@ var bazelPRLaneRCLines = map[string][]string{
 		"test:doltserver --test_arg=-test.parallel=4",
 		"test:doltserver --local_test_jobs=4",
 		"test:doltserver --remote_download_regex=.*/test\\.(log|xml)$",
+		// F5 S1: the race configuration's nogo is owned by the test lane.
+		"test:doltserver --norun_validations",
 	},
 	"pure": {
 		"build:pure --@rules_go//go/config:pure",
@@ -190,7 +193,7 @@ func TestPRGateNonBazelNeeds(t *testing.T) {
 		t.Errorf("bazel-test packages bd with %q (continue-on-error %v)", pkgStep.Run, pkgStep.ContinueOnError)
 	}
 
-	lanes := bazelPRCallLanes(t, pr.job(t, "bazel").With)
+	lanes := bazelPRCallLanesFor(t, "pull_request")
 	if pass, out := runPRGateStep(t, gateStep, prGateFor(t, lanes, "pull_request", "remote")); !pass {
 		t.Errorf("remote, every lane and job passed: gate red\n%s", out)
 	}
@@ -255,9 +258,9 @@ func testPackageGateJobs(t *testing.T, prGateRequired []string) {
 		if !ok {
 			t.Fatalf("%s has no %s job", bazelWorkflowName, lane.job)
 		}
-		if !reflect.DeepEqual([]string(job.Needs), []string{bazelRBEJobName}) || job.If != bazelPackageGatesIf || job.RunsOn != bazelPackageRunsOn {
+		if !reflect.DeepEqual([]string(job.Needs), []string{bazelRBEJobName}) || job.If != bazelPackageGatesIf || job.RunsOn != bazelPackageRunsOn[lane.job] {
 			t.Errorf("%s: needs %v, if %q, runs-on %q; want needs [%s], if %q, runs-on %q",
-				lane.job, job.Needs, job.If, job.RunsOn, bazelRBEJobName, bazelPackageGatesIf, bazelPackageRunsOn)
+				lane.job, job.Needs, job.If, job.RunsOn, bazelRBEJobName, bazelPackageGatesIf, bazelPackageRunsOn[lane.job])
 		}
 
 		detectCond := "steps.detect.outputs." + lane.detectOutput + " == 'true'"
@@ -318,7 +321,11 @@ func testPackageGateJobs(t *testing.T, prGateRequired []string) {
 		// e2b78f7d7a: both configs cquery to the identical
 		// bazel-out/k8-fastbuild-ST-.../bin/cmd/bd/bd_for_tests/bd path).
 		buildStep := job.step(t, "bazel build //cmd/bd:bd_for_tests")
-		if buildStep.If != bazelPathIf || buildStep.Run != `bazel build --@rules_go//go/config:race //cmd/bd:bd_for_tests --remote_download_regex='.*/bin/cmd/bd/bd_for_tests/bd$'` {
+		// F5 S1: the package gates' build is a race-configuration non-owner
+		// (bd_for_tests is also built, with its nogo already validated, by
+		// bazel-test's `bazel test //... --config=ci`), so it passes
+		// --norun_validations too.
+		if buildStep.If != bazelPathIf || buildStep.Run != `bazel build --@rules_go//go/config:race //cmd/bd:bd_for_tests --remote_download_regex='.*/bin/cmd/bd/bd_for_tests/bd$' --norun_validations` {
 			t.Errorf("%s bazel build step: if %q, run %q; want if %q", lane.job, buildStep.If, buildStep.Run, bazelPathIf)
 		}
 		pkgBD := job.step(t, "Package the Bazel-built bd")
@@ -416,8 +423,8 @@ func TestDoltServerFingerprintRunsOnTheDoltServerLane(t *testing.T) {
 // cmd/go's defaultVetFlags analyzers beside every compile of every lane, so
 // bazel.yml's required test lane (`bazel test //... --config=ci`) fails on a
 // finding. No workflow runs `go vet` any more. The repository policy tests
-// and the Go tests that walk the checkout run under Bazel
-// (//scripts:scripts_test and //test/docsync over //:repo_files), so no
+// and the Go tests that walk the checkout run under Bazel (//scripts' and
+// //test/docsync's go_tests, over the repo_files partitions they read), so no
 // workflow runs `go test` over ./scripts/... or the equivalence allowlist
 // either.
 func TestPRRunsGoTestsBazelSkips(t *testing.T) {
@@ -425,28 +432,31 @@ func TestPRRunsGoTestsBazelSkips(t *testing.T) {
 	root := sourceRepoRoot(t)
 	// tools/nogo/analyzers.bzl's VET_PASSES are go test's vet checks (cmd/vet
 	// keeps -bool and -buildtags as aliases of the bools and buildtag
-	// analyzers).
-	m := regexp.MustCompile(`(?ms)^VET_PASSES = \[(.*?)^\]`).FindStringSubmatch(readPolicyFile(t, root, "tools/nogo/analyzers.bzl"))
-	if m == nil {
-		t.Fatal("tools/nogo/analyzers.bzl has no VET_PASSES list")
-	}
-	var passes []string
-	for _, q := range regexp.MustCompile(`"([a-z]+)"`).FindAllStringSubmatch(m[1], -1) {
-		passes = append(passes, q[1])
-	}
-	var want []string
-	for _, flag := range goTestDefaultVetFlags(t) {
-		flag = strings.TrimPrefix(flag, "-")
-		if alias, ok := map[string]string{"bool": "bools", "buildtags": "buildtag"}[flag]; ok {
-			flag = alias
+	// analyzers). A subtest, so a host that cannot run go.mod's toolchain skips
+	// only this comparison: the checks after it read nothing but the checkout.
+	t.Run("VET_PASSES", func(t *testing.T) {
+		m := regexp.MustCompile(`(?ms)^VET_PASSES = \[(.*?)^\]`).FindStringSubmatch(readPolicyFile(t, root, "tools/nogo/analyzers.bzl"))
+		if m == nil {
+			t.Fatal("tools/nogo/analyzers.bzl has no VET_PASSES list")
 		}
-		want = append(want, flag)
-	}
-	sort.Strings(passes)
-	sort.Strings(want)
-	if !reflect.DeepEqual(passes, want) {
-		t.Errorf("tools/nogo/analyzers.bzl VET_PASSES = %v, want go test's vet checks %v", passes, want)
-	}
+		var passes []string
+		for _, q := range regexp.MustCompile(`"([a-z]+)"`).FindAllStringSubmatch(m[1], -1) {
+			passes = append(passes, q[1])
+		}
+		var want []string
+		for _, flag := range goTestDefaultVetFlags(t) {
+			flag = strings.TrimPrefix(flag, "-")
+			if alias, ok := map[string]string{"bool": "bools", "buildtags": "buildtag"}[flag]; ok {
+				flag = alias
+			}
+			want = append(want, flag)
+		}
+		sort.Strings(passes)
+		sort.Strings(want)
+		if !reflect.DeepEqual(passes, want) {
+			t.Errorf("tools/nogo/analyzers.bzl VET_PASSES = %v, want go test's vet checks %v", passes, want)
+		}
+	})
 	if module := readPolicyFile(t, root, "MODULE.bazel"); !strings.Contains(module, "go_sdk.nogo(\n    includes = [\"//:__subpackages__\"],\n    nogo = \"//tools/nogo\",\n)") {
 		t.Error("MODULE.bazel does not register //tools/nogo for every first-party package (go_sdk.nogo)")
 	}
@@ -481,7 +491,7 @@ func TestPRRunsGoTestsBazelSkips(t *testing.T) {
 	}
 	// The allowlist's remaining skip entries run in pr-preflight-platforms
 	// (every OS), each named in its go test selector.
-	fallback := pr.job(t, "pr-preflight-platforms").step(t, "Exercise go test's bd build fallback").Run
+	fallback := pr.job(t, "pr-preflight-platforms").step(t, "Exercise generated Git hook timeout process boundary and go test's bd build fallback").Run
 	for _, line := range strings.Split(readPolicyFile(t, root, "tools/bazel/equivalence_allowlist.txt"), "\n") {
 		body, _, _ := strings.Cut(line, "#")
 		f := strings.Fields(body)
@@ -497,12 +507,33 @@ func TestPRRunsGoTestsBazelSkips(t *testing.T) {
 // goTestDefaultVetFlags: the vet checks go.mod's Go toolchain gives `go test`
 // (cmd/go's defaultVetFlags), read from its source, so a Go upgrade that
 // changes them fails here until tools/nogo/analyzers.bzl follows. Under Bazel the
-// toolchain is the registered SDK (testGo).
+// toolchain is the registered SDK (testGo), so naming it in GOTOOLCHAIN fetches
+// nothing; under plain go test, GOTOOLCHAIN keeps a host Go of another release
+// from changing the policy this test validates. Like the Makefile's export, it
+// overrides an ambient GOTOOLCHAIN (local included) and may download go.mod's
+// toolchain into GOMODCACHE; a host that can neither run nor fetch it (offline,
+// GOPROXY=off) lacks a host tool, so t skips (and fails under Bazel): call it
+// from a subtest that checks nothing else.
 func goTestDefaultVetFlags(t *testing.T) []string {
 	t.Helper()
-	goroot, err := exec.Command(testGo(t), "env", "GOROOT").Output()
+	root := sourceRepoRoot(t)
+	version, err := goModToolchainVersion(readPolicyFile(t, root, "go.mod"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	toolchain := goToolchainName(version)
+	cmd := exec.Command(testGo(t), "env", "GOROOT")
+	cmd.Env = append(os.Environ(), "GOTOOLCHAIN="+toolchain)
+	goroot, err := cmd.Output()
+	if err != nil {
+		msg := err.Error()
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			if stderr := strings.TrimSpace(string(exitErr.Stderr)); stderr != "" {
+				msg += ": " + stderr
+			}
+		}
+		skipOrFailWithoutHostTool(t, "go.mod's %s toolchain is unavailable: %s", toolchain, msg)
 	}
 	src, err := os.ReadFile(filepath.Join(strings.TrimSpace(string(goroot)), "src", "cmd", "go", "internal", "test", "test.go"))
 	if err != nil {
@@ -524,6 +555,25 @@ func goTestDefaultVetFlags(t *testing.T) []string {
 		t.Fatalf("defaultVetFlags parsed as %v", flags)
 	}
 	return flags
+}
+
+// goToolchainName: the GOTOOLCHAIN name of a go.mod version. A "go 1.26"
+// directive is legal, but toolchain names need the patch component
+// (scripts/ci/gofmt-bin.sh pads it the same way); a prerelease such as 1.26rc1
+// has none to add.
+func goToolchainName(version string) string {
+	if regexp.MustCompile(`^[0-9]+\.[0-9]+$`).MatchString(version) {
+		version += ".0"
+	}
+	return "go" + version
+}
+
+func TestGoToolchainNamePadsAMissingPatchComponent(t *testing.T) {
+	for version, want := range map[string]string{"1.26": "go1.26.0", "1.26.7": "go1.26.7", "1.26rc1": "go1.26rc1"} {
+		if got := goToolchainName(version); got != want {
+			t.Errorf("goToolchainName(%q) = %q, want %q", version, got, want)
+		}
+	}
 }
 
 // bazel.yml's step-3 lanes: in mode remote (always, on covered PRs) every

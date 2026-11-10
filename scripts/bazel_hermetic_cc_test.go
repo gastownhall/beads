@@ -26,13 +26,26 @@ const (
 	hermeticCCLLVMLabel    = "@llvm_dist_linux_x86_64//:BUILD.bazel"
 	// Every other host's stock LLVM release (toolchains_llvm's sha256 table).
 	hermeticCCHostLLVMLabel = "@llvm_dist_host//:BUILD.bazel"
+	// The members list tools/cc_toolchain/repack_llvm.sh slices the release
+	// to; it must equal llvm_dist's members (MODULE.bazel).
+	hermeticCCLLVMMembersFile = "tools/cc_toolchain/llvm_members.txt"
 )
 
 var (
 	sha256HexRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	// snapshot.ubuntu.com serves each timestamp's archive state forever; a
-	// moving mirror (archive.ubuntu.com) may only follow it as a fallback.
-	ubuntuSnapshotRE = regexp.MustCompile(`^https://snapshot\.ubuntu\.com/ubuntu/\d{8}T\d{6}Z/$`)
+	// snapshot.ubuntu.com serves each timestamp's archive state forever, so
+	// the package pins stay resolvable at the snapshot they were taken from.
+	ubuntuSnapshotRE = regexp.MustCompile(`^https://snapshot\.ubuntu\.com/ubuntu/\d{8}T\d{6}Z/\{path\}$`)
+	// archive.ubuntu.com drops superseded versions: a fallback, never first.
+	ubuntuMovingMirrorRE = regexp.MustCompile(`^https?://([a-z0-9-]+\.)*archive\.ubuntu\.com/`)
+	// deb_sysroot's URL templates: {path} (pool path), {file} (its basename)
+	// and {sha256} (the pin) are the only placeholders.
+	debURLPlaceholderRE = regexp.MustCompile(`\{[^}]*\}`)
+	// A sliced llvm_dist archive is a repack (repack_llvm.sh), not an
+	// upstream release, so it may only come from a gastownhall release:
+	// beads' own mirror or gascity's original asset (same bytes, same sha256).
+	llvmSliceURLRE = regexp.MustCompile(`^https://github\.com/gastownhall/(beads|gascity)/releases/download/toolchain-llvm-[0-9.]+-slice-[0-9]+/[A-Za-z0-9._-]+\.tar\.zst$`)
+	quotedStringRE = regexp.MustCompile(`"([^"]*)"`)
 )
 
 // moduleCall returns the argument text of the single top-level call
@@ -75,6 +88,8 @@ func checkHermeticCCModule(module string) []error {
 		}
 	}
 
+	errs = append(errs, checkDarwinLinker(module)...)
+
 	if sysroot, err := moduleCall(module, "llvm.sysroot", hermeticCCSysrootLabel); err != nil {
 		errs = append(errs, err)
 	} else if !strings.Contains(sysroot, `targets = ["linux-x86_64"]`) {
@@ -106,32 +121,160 @@ func checkHermeticCCModule(module string) []error {
 		errs = append(errs, errors.New("llvm_dist must pin its archive by sha256"))
 	}
 
-	if sysroot, err := moduleCall(module, "deb_sysroot", `name = "cc_sysroot_noble_amd64"`); err != nil {
+	if _, err := moduleCall(module, "deb_sysroot", `name = "cc_sysroot_noble_amd64"`); err != nil {
 		errs = append(errs, err)
+	}
+	for _, m := range regexp.MustCompile(`(?ms)^deb_sysroot\(\n(.*?)^\)`).FindAllStringSubmatch(module, -1) {
+		errs = append(errs, checkDebSysroot(module, m[1])...)
+	}
+	return errs
+}
+
+// Darwin already uses the installed SDK, so pair it with Apple's linker.
+// No default or Linux override is allowed: those must retain bundled LLD.
+func checkDarwinLinker(module string) []error {
+	toolchain, err := moduleCall(stripStarlarkComments(module), "llvm.toolchain", `name = "llvm_toolchain"`)
+	if err != nil {
+		return []error{err}
+	}
+	linkers := regexp.MustCompile(`(?s)\blinker\s*=\s*\{([^}]*?)\}`).FindAllStringSubmatch(toolchain, -1)
+	if len(linkers) != 1 {
+		return []error{errors.New("llvm.toolchain must select native linkers only for Darwin")}
+	}
+	pairs := regexp.MustCompile(`"([^"]*)"\s*:\s*"([^"]*)"`)
+	entries := pairs.FindAllStringSubmatch(linkers[0][1], -1)
+	remaining := pairs.ReplaceAllString(linkers[0][1], "")
+	seen := map[string]bool{}
+	for _, entry := range entries {
+		key := entry[1]
+		if (key != "darwin-aarch64" && key != "darwin-x86_64") || entry[2] != "auto" || seen[key] {
+			return []error{errors.New("linker overrides must be exactly Darwin aarch64 and x86_64 = auto; Linux must use bundled LLD")}
+		}
+		seen[key] = true
+	}
+	if len(seen) != 2 || strings.Trim(remaining, ", \t\r\n") != "" {
+		return []error{errors.New("linker overrides must be exactly Darwin aarch64 and x86_64 = auto")}
+	}
+	return nil
+}
+
+// checkDebSysroot: every package is an amd64 pool .deb pinned by sha256 that
+// ships no ICU, and its URL templates give each package more than one host,
+// keep the snapshot the pins were taken from, and never start with a moving
+// mirror.
+func checkDebSysroot(module, call string) []error {
+	var errs []error
+	name := "deb_sysroot"
+	if m := regexp.MustCompile(`name = "([^"]+)"`).FindStringSubmatch(call); m != nil {
+		name += " " + m[1]
+	}
+	urls, err := debSysrootURLs(module, call)
+	if err != nil {
+		errs = append(errs, errors.New(name+": "+err.Error()))
 	} else {
-		mirrors := regexp.MustCompile(`(?s)mirrors = \[\s*"([^"]+)"`).FindStringSubmatch(sysroot)
-		if mirrors == nil || !ubuntuSnapshotRE.MatchString(mirrors[1]) {
-			errs = append(errs, errors.New("deb_sysroot's first mirror must be an immutable snapshot.ubuntu.com/ubuntu/<timestamp>/ root"))
-		}
-		body := regexp.MustCompile(`(?s)packages = \{(.*?)\}`).FindStringSubmatch(sysroot)
-		if body == nil {
-			errs = append(errs, errors.New("deb_sysroot has no packages"))
-		} else {
-			pkgs := quotedPairs(body[1])
-			if len(pkgs) == 0 {
-				errs = append(errs, errors.New("deb_sysroot has no packages"))
+		hosts := map[string]bool{}
+		snapshot := false
+		for _, u := range urls {
+			holes := debURLPlaceholderRE.FindAllString(u, -1)
+			if len(holes) != 1 || (holes[0] != "{path}" && holes[0] != "{file}" && holes[0] != "{sha256}") {
+				errs = append(errs, errors.New(name+": url "+u+" must name the package by exactly one of {path}, {file} or {sha256}"))
 			}
-			for path, sum := range pkgs {
-				if !strings.HasPrefix(path, "pool/") || !strings.HasSuffix(path, "_amd64.deb") || !sha256HexRE.MatchString(sum) {
-					errs = append(errs, errors.New("deb_sysroot package "+path+" must be an amd64 pool .deb pinned by sha256"))
-				}
-				// ICU policy (engdocs/ICU-POLICY.md): nothing links libicu,
-				// so the sysroot offers no ICU to link against.
-				if strings.Contains(path, "/icu/") {
-					errs = append(errs, errors.New("deb_sysroot package "+path+" ships ICU, which beads must never link (engdocs/ICU-POLICY.md)"))
-				}
+			snapshot = snapshot || ubuntuSnapshotRE.MatchString(u)
+			host, _, _ := strings.Cut(strings.TrimPrefix(u, "https://"), "/")
+			hosts[host] = true
+		}
+		if !snapshot {
+			errs = append(errs, errors.New(name+": urls must include an immutable https://snapshot.ubuntu.com/ubuntu/<timestamp>/{path}"))
+		}
+		if len(hosts) < 2 {
+			errs = append(errs, errors.New(name+": urls must span at least two hosts, so one outage cannot fail a cold fetch"))
+		}
+		if len(urls) > 0 && ubuntuMovingMirrorRE.MatchString(urls[0]) {
+			errs = append(errs, errors.New(name+": the first url must not be a moving mirror (archive.ubuntu.com drops superseded packages)"))
+		}
+	}
+	body := regexp.MustCompile(`(?s)packages = \{(.*?)\}`).FindStringSubmatch(call)
+	if body == nil {
+		return append(errs, errors.New(name+" has no packages"))
+	}
+	pkgs := quotedPairs(body[1])
+	if len(pkgs) == 0 {
+		errs = append(errs, errors.New(name+" has no packages"))
+	}
+	for path, sum := range pkgs {
+		if !strings.HasPrefix(path, "pool/") || !strings.HasSuffix(path, "_amd64.deb") || !sha256HexRE.MatchString(sum) {
+			errs = append(errs, errors.New(name+" package "+path+" must be an amd64 pool .deb pinned by sha256"))
+		}
+		// ICU policy (engdocs/ICU-POLICY.md): nothing links libicu,
+		// so the sysroot offers no ICU to link against.
+		if strings.Contains(path, "/icu/") {
+			errs = append(errs, errors.New(name+" package "+path+" ships ICU, which beads must never link (engdocs/ICU-POLICY.md)"))
+		}
+	}
+	return errs
+}
+
+// debSysrootURLs returns a deb_sysroot call's url templates: an inline list,
+// or a top-level MODULE.bazel list constant.
+func debSysrootURLs(module, call string) ([]string, error) {
+	m := regexp.MustCompile(`(?s)urls = (\[.*?\]|[A-Z][A-Z0-9_]*),`).FindStringSubmatch(call)
+	if m == nil {
+		return nil, errors.New("no urls")
+	}
+	list := m[1]
+	if !strings.HasPrefix(list, "[") {
+		def := regexp.MustCompile(`(?ms)^` + list + ` = (\[.*?^\])`).FindStringSubmatch(module)
+		if def == nil {
+			return nil, errors.New("urls names " + list + ", which MODULE.bazel does not define as a list")
+		}
+		list = def[1]
+	}
+	var urls []string
+	for _, q := range regexp.MustCompile(`"([^"]+)"`).FindAllStringSubmatch(list, -1) {
+		urls = append(urls, q[1])
+	}
+	if len(urls) == 0 {
+		return nil, errors.New("no urls")
+	}
+	return urls, nil
+}
+
+// checkHermeticLLVMSlice: a sliced llvm_dist downloads only from a
+// gastownhall release, and its members equal the repack script's list, so
+// the pinned slice can be rebuilt from upstream and checked file by file.
+func checkHermeticLLVMSlice(module, membersFile string) []error {
+	dist, err := moduleCall(module, "llvm_dist", `name = "llvm_dist_linux_x86_64"`)
+	if err != nil {
+		return []error{err}
+	}
+	if !strings.Contains(dist, "sliced = True,") {
+		return nil
+	}
+	var errs []error
+	urls := regexp.MustCompile(`(?s)urls = \[(.*?)\]`).FindStringSubmatch(dist)
+	if urls == nil || len(quotedStringRE.FindAllStringSubmatch(urls[1], -1)) == 0 {
+		errs = append(errs, errors.New("sliced llvm_dist has no urls"))
+	} else {
+		for _, u := range quotedStringRE.FindAllStringSubmatch(urls[1], -1) {
+			if !llvmSliceURLRE.MatchString(u[1]) {
+				errs = append(errs, errors.New("sliced llvm_dist url "+u[1]+" is not a gastownhall/beads or gastownhall/gascity release .tar.zst"))
 			}
 		}
+	}
+	var members []string
+	if body := regexp.MustCompile(`(?s)members = \[(.*?)\]`).FindStringSubmatch(dist); body != nil {
+		for _, m := range quotedStringRE.FindAllStringSubmatch(body[1], -1) {
+			members = append(members, m[1])
+		}
+	}
+	var listed []string
+	for _, line := range strings.Split(membersFile, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			listed = append(listed, line)
+		}
+	}
+	if len(members) == 0 || strings.Join(members, "\n") != strings.Join(listed, "\n") {
+		errs = append(errs, errors.New("llvm_dist members must equal "+hermeticCCLLVMMembersFile+" (same order), or the pinned slice cannot be rebuilt by repack_llvm.sh"))
 	}
 	return errs
 }
@@ -175,7 +318,11 @@ func checkHermeticCCBazelRC(rc string) []error {
 
 func TestBazelHermeticCCToolchain(t *testing.T) {
 	root := bazelPolicyRoot(t)
-	for _, err := range checkHermeticCCModule(readPolicyFile(t, root, hermeticCCModuleFile)) {
+	module := readPolicyFile(t, root, hermeticCCModuleFile)
+	for _, err := range checkHermeticCCModule(module) {
+		t.Error(err)
+	}
+	for _, err := range checkHermeticLLVMSlice(module, readPolicyFile(t, root, hermeticCCLLVMMembersFile)) {
 		t.Error(err)
 	}
 	for _, err := range checkHermeticCCBazelRC(readPolicyFile(t, root, ".bazelrc")) {
@@ -188,12 +335,16 @@ func TestBazelHermeticCCToolchainGuards(t *testing.T) {
 	module := `bazel_dep(name = "rules_go", version = "0.63.0")
 bazel_dep(name = "toolchains_llvm", version = "1.11.0")
 
+NOBLE_DEB_URLS = [
+    "https://github.com/gastownhall/gascity/releases/download/toolchain-noble-debs-20261001/{sha256}.deb",
+    "https://snapshot.ubuntu.com/ubuntu/20261001T000000Z/{path}",
+    "https://launchpad.net/ubuntu/+archive/primary/+files/{file}",
+    "https://archive.ubuntu.com/ubuntu/{path}",
+]
+
 deb_sysroot(
     name = "cc_sysroot_noble_amd64",
-    mirrors = [
-        "https://snapshot.ubuntu.com/ubuntu/20261001T000000Z/",
-        "https://archive.ubuntu.com/ubuntu/",
-    ],
+    urls = NOBLE_DEB_URLS,
     packages = {
         "pool/main/g/glibc/libc6-dev_2.39-0ubuntu8.9_amd64.deb": "` + sum + `",
     },
@@ -208,6 +359,14 @@ llvm_host_dist(
     name = "llvm_dist_host",
     llvm_version = LLVM_VERSION,
     llvm_versions = {"": LLVM_VERSION},
+)
+
+llvm.toolchain(
+    name = "llvm_toolchain",
+    linker = {
+        "darwin-aarch64": "auto",
+        "darwin-x86_64": "auto",
+    },
 )
 
 llvm.toolchain_root(
@@ -230,6 +389,15 @@ llvm.sysroot(
 		t.Fatalf("good MODULE.bazel fixture: %v", errs)
 	}
 	for name, bad := range map[string]string{
+		"no linker selection":      strings.Replace(module, "linker = {", "other = {", 1),
+		"missing Darwin arm64":     strings.Replace(module, `"darwin-aarch64": "auto",`, "", 1),
+		"missing Darwin x86":       strings.Replace(module, `"darwin-x86_64": "auto",`, "", 1),
+		"bundled Darwin LLD":       strings.Replace(module, `"darwin-aarch64": "auto"`, `"darwin-aarch64": ""`, 1),
+		"global native linker":     strings.Replace(module, `"darwin-aarch64": "auto"`, `"": "auto"`, 1),
+		"Linux native linker":      strings.Replace(module, `"darwin-aarch64": "auto"`, `"linux-x86_64": "auto"`, 1),
+		"extra Linux override":     strings.Replace(module, "linker = {", `linker = {"linux-aarch64": "auto",`, 1),
+		"duplicate Darwin key":     strings.Replace(module, "linker = {", `linker = {"darwin-aarch64": "auto",`, 1),
+		"commented linker":         strings.Replace(module, "    linker = {", "    # linker = {", 1),
 		"no toolchains_llvm":       strings.Replace(module, `bazel_dep(name = "toolchains_llvm", version = "1.11.0")`, "", 1),
 		"no registration":          strings.Replace(module, hermeticCCToolchains, "", 1),
 		"second registration":      module + `register_toolchains("@local_config_cc//:all")` + "\n",
@@ -241,7 +409,14 @@ llvm.sysroot(
 		"other-host dist version":  strings.Replace(module, "llvm_version = LLVM_VERSION", `llvm_version = "17.0.6"`, 1),
 		"other-host dist versions": strings.Replace(module, `llvm_versions = {"": LLVM_VERSION},`, "", 1),
 		"unpinned LLVM":            strings.Replace(module, `    sha256 = "`+sum+`",`+"\n)", "\n)", 1),
-		"moving mirror first":      strings.Replace(module, `"https://snapshot.ubuntu.com/ubuntu/20261001T000000Z/",`, "", 1),
+		"moving mirror first":      strings.Replace(module, `"https://github.com/gastownhall/gascity/releases/download/toolchain-noble-debs-20261001/{sha256}.deb",`, `"https://archive.ubuntu.com/ubuntu/{path}",`, 1),
+		"no snapshot":              strings.Replace(module, `"https://snapshot.ubuntu.com/ubuntu/20261001T000000Z/{path}",`, "", 1),
+		"moving snapshot":          strings.Replace(module, "/ubuntu/20261001T000000Z/{path}", "/ubuntu/{path}", 1),
+		"single host":              strings.NewReplacer(`"https://github.com/gastownhall/gascity/releases/download/toolchain-noble-debs-20261001/{sha256}.deb",`, "", `"https://launchpad.net/ubuntu/+archive/primary/+files/{file}",`, "", `"https://archive.ubuntu.com/ubuntu/{path}",`, "").Replace(module),
+		"package-blind url":        strings.Replace(module, "/+files/{file}", "/+files/libc6.deb", 1),
+		"unknown placeholder":      strings.Replace(module, "/+files/{file}", "/+files/{name}", 1),
+		"undefined url list":       strings.Replace(module, "urls = NOBLE_DEB_URLS,", "urls = OTHER_URLS,", 1),
+		"no urls":                  strings.Replace(module, "urls = NOBLE_DEB_URLS,", "", 1),
 		"unpinned package":         strings.Replace(module, `_amd64.deb": "`+sum+`"`, `_amd64.deb": ""`, 1),
 		"ICU in sysroot":           strings.Replace(module, "    packages = {\n", "    packages = {\n        \"pool/main/i/icu/libicu74_74.2-1ubuntu3.1_amd64.deb\": \""+sum+"\",\n", 1),
 		"sysroot other targets":    strings.Replace(module, "label = \""+hermeticCCSysrootLabel+"\",\n    targets = [\"linux-x86_64\"]", "label = \""+hermeticCCSysrootLabel+"\",\n    targets = []", 1),
@@ -268,6 +443,49 @@ llvm.sysroot(
 	} {
 		if len(checkHermeticCCBazelRC(bad)) == 0 {
 			t.Errorf("%s: expected an error for .bazelrc fixture:\n%s", name, bad)
+		}
+	}
+}
+
+func TestBazelHermeticLLVMSliceGuards(t *testing.T) {
+	sum := strings.Repeat("ab", 32)
+	slice := "https://github.com/gastownhall/gascity/releases/download/toolchain-llvm-22.1.8-slice-1/LLVM-22.1.8-Linux-X64-slice.tar.zst"
+	mirror := "https://github.com/gastownhall/beads/releases/download/toolchain-llvm-22.1.8-slice-1/LLVM-22.1.8-Linux-X64-slice.tar.zst"
+	module := `llvm_dist(
+    name = "llvm_dist_linux_x86_64",
+    members = [
+        "bin/clang",
+        # a comment
+        "lib/clang/22/include",
+    ],
+    sha256 = "` + sum + `",
+    sliced = True,
+    urls = [
+        "` + mirror + `",
+        "` + slice + `",
+    ],
+)
+`
+	members := "bin/clang\nlib/clang/22/include\n"
+	if errs := checkHermeticLLVMSlice(module, members); len(errs) != 0 {
+		t.Fatalf("good sliced llvm_dist fixture: %v", errs)
+	}
+	unsliced := strings.Replace(strings.Replace(module, "    sliced = True,\n", "", 1), slice, "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-Linux-X64.tar.xz", 1)
+	if errs := checkHermeticLLVMSlice(unsliced, members); len(errs) != 0 {
+		t.Fatalf("unsliced llvm_dist needs no slice host or members file: %v", errs)
+	}
+	for name, bad := range map[string][2]string{
+		"other host":        {strings.Replace(module, slice, "https://example.com/LLVM-22.1.8-Linux-X64-slice.tar.zst", 1), members},
+		"other repo":        {strings.Replace(module, "gastownhall/gascity", "someone/gascity", 1), members},
+		"xz release":        {strings.Replace(module, slice, "https://github.com/gastownhall/gascity/releases/download/toolchain-llvm-22.1.8-slice-1/LLVM.tar.xz", 1), members},
+		"no urls":           {strings.Replace(strings.Replace(module, `"`+slice+`",`, "", 1), `"`+mirror+`",`, "", 1), members},
+		"member missing":    {module, "bin/clang\n"},
+		"member extra":      {module, members + "bin/lld\n"},
+		"member reordered":  {module, "lib/clang/22/include\nbin/clang\n"},
+		"empty member file": {module, ""},
+	} {
+		if len(checkHermeticLLVMSlice(bad[0], bad[1])) == 0 {
+			t.Errorf("%s: expected an error for sliced llvm_dist fixture:\n%s\nmembers:\n%s", name, bad[0], bad[1])
 		}
 	}
 }

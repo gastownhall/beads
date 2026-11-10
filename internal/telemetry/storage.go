@@ -72,25 +72,42 @@ func WrapStorage(s storage.DoltStorage) storage.DoltStorage {
 // instrumentation layer for optional-interface type assertions.
 func (s *InstrumentedStorage) Unwrap() storage.DoltStorage { return s.inner }
 
-// op starts a span and records a metric for the named storage operation.
-func (s *InstrumentedStorage) op(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span, time.Time) {
-	all := append([]attribute.KeyValue{attribute.String("db.operation", name)}, attrs...)
+// opStart is what op hands to done: the start time and the operation's metric
+// attribute set.
+type opStart struct {
+	at     time.Time
+	metric metric.MeasurementOption
+}
+
+// op starts a span and counts the named storage operation.
+//
+// The span carries db.operation plus the request attributes. The three
+// bd.storage.* metrics carry db.operation only: request attributes (issue
+// ids, actors, search text, commit messages, config keys) would make one
+// series per value, run into the SDK's per-metric cardinality limit (2000
+// sets, the rest folded into otel.metric.overflow) and send user content to
+// the metrics receiver. See engdocs/design/otel/otel-data-model.md.
+func (s *InstrumentedStorage) op(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span, opStart) {
+	opAttr := attribute.String("db.operation", name)
+	all := append([]attribute.KeyValue{opAttr}, attrs...)
 	ctx, span := s.tracer.Start(ctx, "storage."+name,
 		trace.WithAttributes(all...),
 		trace.WithSpanKind(trace.SpanKindClient),
 	)
-	s.ops.Add(ctx, 1, metric.WithAttributes(all...))
-	return ctx, span, time.Now()
+	started := opStart{at: time.Now(), metric: metric.WithAttributeSet(attribute.NewSet(opAttr))}
+	s.ops.Add(ctx, 1, started.metric)
+	return ctx, span, started
 }
 
-// done ends the span, records duration and optional error.
-func (s *InstrumentedStorage) done(ctx context.Context, span trace.Span, start time.Time, err error, attrs ...attribute.KeyValue) {
-	ms := float64(time.Since(start).Milliseconds())
-	s.dur.Record(ctx, ms, metric.WithAttributes(attrs...))
+// done ends the span and records the operation's duration and, on failure,
+// its error, both keyed by db.operation alone.
+func (s *InstrumentedStorage) done(ctx context.Context, span trace.Span, started opStart, err error) {
+	ms := Milliseconds(time.Since(started.at))
+	s.dur.Record(ctx, ms, started.metric)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		s.errs.Add(ctx, 1, metric.WithAttributes(attrs...))
+		s.errs.Add(ctx, 1, started.metric)
 	}
 	span.End()
 }
@@ -104,7 +121,7 @@ func (s *InstrumentedStorage) CreateIssue(ctx context.Context, issue *types.Issu
 	}
 	ctx, span, t := s.op(ctx, "CreateIssue", attrs...)
 	err := s.inner.CreateIssue(ctx, issue, actor)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return err
 }
 
@@ -115,7 +132,7 @@ func (s *InstrumentedStorage) CreateIssues(ctx context.Context, issues []*types.
 	}
 	ctx, span, t := s.op(ctx, "CreateIssues", attrs...)
 	err := s.inner.CreateIssues(ctx, issues, actor)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return err
 }
 
@@ -123,7 +140,7 @@ func (s *InstrumentedStorage) GetIssue(ctx context.Context, id string) (*types.I
 	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", id)}
 	ctx, span, t := s.op(ctx, "GetIssue", attrs...)
 	v, err := s.inner.GetIssue(ctx, id)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return v, err
 }
 
@@ -138,7 +155,7 @@ func (s *InstrumentedStorage) GetIssuesByIDs(ctx context.Context, ids []string) 
 	attrs := []attribute.KeyValue{attribute.Int("bd.issue.count", len(ids))}
 	ctx, span, t := s.op(ctx, "GetIssuesByIDs", attrs...)
 	v, err := s.inner.GetIssuesByIDs(ctx, ids)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return v, err
 }
 
@@ -150,7 +167,7 @@ func (s *InstrumentedStorage) UpdateIssue(ctx context.Context, id string, update
 	}
 	ctx, span, t := s.op(ctx, "UpdateIssue", attrs...)
 	err := s.inner.UpdateIssue(ctx, id, updates, actor)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return err
 }
 
@@ -162,7 +179,7 @@ func (s *InstrumentedStorage) UpdateIssueChecked(ctx context.Context, id string,
 	}
 	ctx, span, t := s.op(ctx, "UpdateIssueChecked", attrs...)
 	err := s.inner.UpdateIssueChecked(ctx, id, updates, actor, opts)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return err
 }
 
@@ -173,7 +190,7 @@ func (s *InstrumentedStorage) ReopenIssue(ctx context.Context, id string, reason
 	}
 	ctx, span, t := s.op(ctx, "ReopenIssue", attrs...)
 	err := s.inner.ReopenIssue(ctx, id, reason, actor)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return err
 }
 
@@ -185,7 +202,7 @@ func (s *InstrumentedStorage) UnclaimIssue(ctx context.Context, id string, actor
 	}
 	ctx, span, t := s.op(ctx, "UnclaimIssue", attrs...)
 	err := s.inner.UnclaimIssue(ctx, id, actor, force)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return err
 }
 
@@ -197,7 +214,7 @@ func (s *InstrumentedStorage) UnclaimIssueIfAssignee(ctx context.Context, id str
 	}
 	ctx, span, t := s.op(ctx, "UnclaimIssueIfAssignee", attrs...)
 	err := s.inner.UnclaimIssueIfAssignee(ctx, id, actor, expectedAssignee)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return err
 }
 
@@ -209,7 +226,7 @@ func (s *InstrumentedStorage) UpdateIssueType(ctx context.Context, id string, is
 	}
 	ctx, span, t := s.op(ctx, "UpdateIssueType", attrs...)
 	err := s.inner.UpdateIssueType(ctx, id, issueType, actor)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return err
 }
 
@@ -220,7 +237,7 @@ func (s *InstrumentedStorage) CloseIssue(ctx context.Context, id string, reason 
 	}
 	ctx, span, t := s.op(ctx, "CloseIssue", attrs...)
 	err := s.inner.CloseIssue(ctx, id, reason, actor, session)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return err
 }
 
@@ -231,7 +248,7 @@ func (s *InstrumentedStorage) CloseIssueChecked(ctx context.Context, id string, 
 	}
 	ctx, span, t := s.op(ctx, "CloseIssueChecked", attrs...)
 	res, err := s.inner.CloseIssueChecked(ctx, id, actor, opts)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return res, err
 }
 
@@ -239,7 +256,7 @@ func (s *InstrumentedStorage) DeleteIssue(ctx context.Context, id string) error 
 	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", id)}
 	ctx, span, t := s.op(ctx, "DeleteIssue", attrs...)
 	err := s.inner.DeleteIssue(ctx, id)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return err
 }
 
@@ -250,7 +267,7 @@ func (s *InstrumentedStorage) SearchIssues(ctx context.Context, query string, fi
 	if err == nil {
 		span.SetAttributes(attribute.Int("bd.result.count", len(issues)))
 	}
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return issues, err
 }
 
@@ -261,7 +278,7 @@ func (s *InstrumentedStorage) SearchIssuesWithCounts(ctx context.Context, query 
 	if err == nil {
 		span.SetAttributes(attribute.Int("bd.result.count", len(v)))
 	}
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return v, err
 }
 
@@ -272,7 +289,7 @@ func (s *InstrumentedStorage) SearchIssueIDs(ctx context.Context, query string, 
 	if err == nil {
 		span.SetAttributes(attribute.Int("bd.result.count", len(ids)))
 	}
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return ids, err
 }
 
@@ -283,8 +300,28 @@ func (s *InstrumentedStorage) SearchIssueSummaries(ctx context.Context, query st
 	if err == nil {
 		span.SetAttributes(attribute.Int("bd.result.count", len(summaries)))
 	}
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return summaries, err
+}
+
+var _ storage.DescendantSearcher = (*InstrumentedStorage)(nil)
+
+// SearchDescendants traces the `bd list --parent` tree walk
+// (storage.DescendantSearcher) as one span over the whole tree.
+// storage.SearchDescendants offers the walk to this layer before unwrapping it,
+// and this layer hands it on to the layers beneath: the embedded and Dolt
+// server stores still read the tree in one read transaction, and a store
+// without the capability (the http client) is walked node by node beneath
+// this span, which then stands for the walk's one SearchIssues call per node.
+func (s *InstrumentedStorage) SearchDescendants(ctx context.Context, rootID string, filter types.IssueFilter) ([]*types.Issue, error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", rootID)}
+	ctx, span, t := s.op(ctx, "SearchDescendants", attrs...)
+	issues, err := storage.SearchDescendants(ctx, s.inner, rootID, filter)
+	if err == nil {
+		span.SetAttributes(attribute.Int("bd.result.count", len(issues)))
+	}
+	s.done(ctx, span, t, err)
+	return issues, err
 }
 
 // ── Dependencies ────────────────────────────────────────────────────────────
@@ -297,7 +334,7 @@ func (s *InstrumentedStorage) AddDependency(ctx context.Context, dep *types.Depe
 	}
 	ctx, span, t := s.op(ctx, "AddDependency", attrs...)
 	err := s.inner.AddDependency(ctx, dep, actor)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return err
 }
 
@@ -309,7 +346,7 @@ func (s *InstrumentedStorage) AddDependencyWithOptions(ctx context.Context, dep 
 	}
 	ctx, span, t := s.op(ctx, "AddDependency", attrs...)
 	err := s.inner.AddDependencyWithOptions(ctx, dep, actor, opts)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return err
 }
 
@@ -320,7 +357,7 @@ func (s *InstrumentedStorage) RemoveDependency(ctx context.Context, issueID, dep
 	}
 	ctx, span, t := s.op(ctx, "RemoveDependency", attrs...)
 	err := s.inner.RemoveDependency(ctx, issueID, dependsOnID, actor)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return err
 }
 
@@ -331,7 +368,7 @@ func (s *InstrumentedStorage) RemoveDependencyWithOptions(ctx context.Context, i
 	}
 	ctx, span, t := s.op(ctx, "RemoveDependency", attrs...)
 	err := s.inner.RemoveDependencyWithOptions(ctx, issueID, dependsOnID, actor, opts)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return err
 }
 
@@ -339,7 +376,7 @@ func (s *InstrumentedStorage) GetDependencies(ctx context.Context, issueID strin
 	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
 	ctx, span, t := s.op(ctx, "GetDependencies", attrs...)
 	v, err := s.inner.GetDependencies(ctx, issueID)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return v, err
 }
 
@@ -347,7 +384,7 @@ func (s *InstrumentedStorage) GetDependents(ctx context.Context, issueID string)
 	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
 	ctx, span, t := s.op(ctx, "GetDependents", attrs...)
 	v, err := s.inner.GetDependents(ctx, issueID)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return v, err
 }
 
@@ -355,7 +392,7 @@ func (s *InstrumentedStorage) GetDependenciesWithMetadata(ctx context.Context, i
 	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
 	ctx, span, t := s.op(ctx, "GetDependenciesWithMetadata", attrs...)
 	v, err := s.inner.GetDependenciesWithMetadata(ctx, issueID)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return v, err
 }
 
@@ -363,7 +400,7 @@ func (s *InstrumentedStorage) GetDependentsWithMetadata(ctx context.Context, iss
 	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
 	ctx, span, t := s.op(ctx, "GetDependentsWithMetadata", attrs...)
 	v, err := s.inner.GetDependentsWithMetadata(ctx, issueID)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return v, err
 }
 
@@ -374,7 +411,7 @@ func (s *InstrumentedStorage) GetDependencyTree(ctx context.Context, issueID str
 	}
 	ctx, span, t := s.op(ctx, "GetDependencyTree", attrs...)
 	v, err := s.inner.GetDependencyTree(ctx, issueID, maxDepth, showAllPaths, reverse)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return v, err
 }
 
@@ -387,7 +424,7 @@ func (s *InstrumentedStorage) AddLabel(ctx context.Context, issueID, label, acto
 	}
 	ctx, span, t := s.op(ctx, "AddLabel", attrs...)
 	err := s.inner.AddLabel(ctx, issueID, label, actor)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return err
 }
 
@@ -398,7 +435,7 @@ func (s *InstrumentedStorage) RemoveLabel(ctx context.Context, issueID, label, a
 	}
 	ctx, span, t := s.op(ctx, "RemoveLabel", attrs...)
 	err := s.inner.RemoveLabel(ctx, issueID, label, actor)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return err
 }
 
@@ -415,7 +452,7 @@ func (s *InstrumentedStorage) RenameLabel(ctx context.Context, oldLabel, newLabe
 			attribute.Int("bd.merged.count", merged),
 		)
 	}
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return renamed, merged, ids, err
 }
 
@@ -423,7 +460,7 @@ func (s *InstrumentedStorage) GetLabels(ctx context.Context, issueID string) ([]
 	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
 	ctx, span, t := s.op(ctx, "GetLabels", attrs...)
 	v, err := s.inner.GetLabels(ctx, issueID)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return v, err
 }
 
@@ -431,7 +468,7 @@ func (s *InstrumentedStorage) GetIssuesByLabel(ctx context.Context, label string
 	attrs := []attribute.KeyValue{attribute.String("bd.label", label)}
 	ctx, span, t := s.op(ctx, "GetIssuesByLabel", attrs...)
 	v, err := s.inner.GetIssuesByLabel(ctx, label)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return v, err
 }
 
@@ -493,7 +530,7 @@ func (s *InstrumentedStorage) AddIssueComment(ctx context.Context, issueID, auth
 	}
 	ctx, span, t := s.op(ctx, "AddIssueComment", attrs...)
 	v, err := s.inner.AddIssueComment(ctx, issueID, author, text)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return v, err
 }
 
@@ -501,7 +538,7 @@ func (s *InstrumentedStorage) GetIssueComments(ctx context.Context, issueID stri
 	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
 	ctx, span, t := s.op(ctx, "GetIssueComments", attrs...)
 	v, err := s.inner.GetIssueComments(ctx, issueID)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return v, err
 }
 
@@ -509,7 +546,7 @@ func (s *InstrumentedStorage) GetIssueCommentsPage(ctx context.Context, issueID 
 	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
 	ctx, span, t := s.op(ctx, "GetIssueCommentsPage", attrs...)
 	v, err := s.inner.GetIssueCommentsPage(ctx, issueID, after, limit)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return v, err
 }
 
@@ -517,7 +554,7 @@ func (s *InstrumentedStorage) GetEvents(ctx context.Context, issueID string, lim
 	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
 	ctx, span, t := s.op(ctx, "GetEvents", attrs...)
 	v, err := s.inner.GetEvents(ctx, issueID, limit)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return v, err
 }
 
@@ -525,7 +562,7 @@ func (s *InstrumentedStorage) GetAllEventsSince(ctx context.Context, since time.
 	attrs := []attribute.KeyValue{attribute.String("bd.since", since.Format(time.RFC3339))}
 	ctx, span, t := s.op(ctx, "GetAllEventsSince", attrs...)
 	v, err := s.inner.GetAllEventsSince(ctx, since)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return v, err
 }
 
@@ -533,7 +570,7 @@ func (s *InstrumentedStorage) RecordProvenanceEvent(ctx context.Context, ev type
 	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", ev.IssueID), attribute.String("bd.prov.kind", string(ev.Kind))}
 	ctx, span, t := s.op(ctx, "RecordProvenanceEvent", attrs...)
 	id, inserted, err := s.inner.RecordProvenanceEvent(ctx, ev)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return id, inserted, err
 }
 
@@ -541,7 +578,7 @@ func (s *InstrumentedStorage) GetProvenanceEvents(ctx context.Context, issueID, 
 	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
 	ctx, span, t := s.op(ctx, "GetProvenanceEvents", attrs...)
 	v, err := s.inner.GetProvenanceEvents(ctx, issueID, kindFilter)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return v, err
 }
 
@@ -549,7 +586,7 @@ func (s *InstrumentedStorage) GetProvenanceByRef(ctx context.Context, ref string
 	attrs := []attribute.KeyValue{attribute.String("bd.prov.ref", ref)}
 	ctx, span, t := s.op(ctx, "GetProvenanceByRef", attrs...)
 	v, err := s.inner.GetProvenanceByRef(ctx, ref)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return v, err
 }
 
@@ -578,7 +615,7 @@ func (s *InstrumentedStorage) SetConfig(ctx context.Context, key, value string) 
 	attrs := []attribute.KeyValue{attribute.String("bd.config.key", key)}
 	ctx, span, t := s.op(ctx, "SetConfig", attrs...)
 	err := s.inner.SetConfig(ctx, key, value)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return err
 }
 
@@ -586,7 +623,7 @@ func (s *InstrumentedStorage) GetConfig(ctx context.Context, key string) (string
 	attrs := []attribute.KeyValue{attribute.String("bd.config.key", key)}
 	ctx, span, t := s.op(ctx, "GetConfig", attrs...)
 	v, err := s.inner.GetConfig(ctx, key)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return v, err
 }
 
@@ -616,7 +653,7 @@ func (s *InstrumentedStorage) GetConfigByPrefix(ctx context.Context, prefix stri
 	}); ok {
 		ctx, span, t := s.op(ctx, "GetConfigByPrefix", attrs...)
 		v, err := pr.GetConfigByPrefix(ctx, prefix)
-		s.done(ctx, span, t, err, attrs...)
+		s.done(ctx, span, t, err)
 		return v, err
 	}
 	all, err := s.GetAllConfig(ctx)
@@ -636,7 +673,7 @@ func (s *InstrumentedStorage) SetLocalMetadata(ctx context.Context, key, value s
 	attrs := []attribute.KeyValue{attribute.String("bd.local_metadata.key", key)}
 	ctx, span, t := s.op(ctx, "SetLocalMetadata", attrs...)
 	err := s.inner.SetLocalMetadata(ctx, key, value)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return err
 }
 
@@ -644,7 +681,7 @@ func (s *InstrumentedStorage) GetLocalMetadata(ctx context.Context, key string) 
 	attrs := []attribute.KeyValue{attribute.String("bd.local_metadata.key", key)}
 	ctx, span, t := s.op(ctx, "GetLocalMetadata", attrs...)
 	v, err := s.inner.GetLocalMetadata(ctx, key)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return v, err
 }
 
@@ -693,7 +730,7 @@ func (s *InstrumentedStorage) IterDependentsWithMetadata(ctx context.Context, is
 	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
 	ctx, span, t := s.op(ctx, "IterDependentsWithMetadata", attrs...)
 	it, err := s.inner.IterDependentsWithMetadata(ctx, issueID)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return it, err
 }
 
@@ -701,7 +738,7 @@ func (s *InstrumentedStorage) IterDependenciesWithMetadata(ctx context.Context, 
 	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
 	ctx, span, t := s.op(ctx, "IterDependenciesWithMetadata", attrs...)
 	it, err := s.inner.IterDependenciesWithMetadata(ctx, issueID)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return it, err
 }
 
@@ -709,7 +746,7 @@ func (s *InstrumentedStorage) IterIssueComments(ctx context.Context, issueID str
 	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
 	ctx, span, t := s.op(ctx, "IterIssueComments", attrs...)
 	it, err := s.inner.IterIssueComments(ctx, issueID)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return it, err
 }
 
@@ -717,7 +754,7 @@ func (s *InstrumentedStorage) IterEvents(ctx context.Context, issueID string, li
 	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
 	ctx, span, t := s.op(ctx, "IterEvents", attrs...)
 	it, err := s.inner.IterEvents(ctx, issueID, limit)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return it, err
 }
 
@@ -725,7 +762,7 @@ func (s *InstrumentedStorage) IterAllEventsSince(ctx context.Context, since time
 	attrs := []attribute.KeyValue{attribute.String("bd.since", since.Format(time.RFC3339))}
 	ctx, span, t := s.op(ctx, "IterAllEventsSince", attrs...)
 	it, err := s.inner.IterAllEventsSince(ctx, since)
-	s.done(ctx, span, t, err, attrs...)
+	s.done(ctx, span, t, err)
 	return it, err
 }
 

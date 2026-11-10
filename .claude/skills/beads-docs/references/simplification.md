@@ -39,8 +39,9 @@ don't measure that work by the word delta.
    *not* simplifying — it buries the real change in the diff.
 4. **Loss-check** (below).
 5. **Fact-check** (below).
-6. **Gates:** `go test ./test/docsync`, every fence parses, no body H1, no
-   HTML comments (MDX), preview with `make docs-dev`.
+6. **Gates:** `bazel test //test/docsync:docsync_test --config=ci`, every
+   fence parses, no body H1, no HTML comments (MDX), preview with
+   `make docs-dev`.
 7. **Preview, then commit on approval** — one page or section per batch, so
    the reviewer can steer before a cut compounds across the section.
 

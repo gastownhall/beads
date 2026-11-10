@@ -77,8 +77,8 @@ var auditRecordCmd = &cobra.Command{
 			if err := json.Unmarshal(b, &e); err != nil {
 				return HandleError("invalid JSON on stdin: %v", err)
 			}
-			if actor != "" {
-				e.Actor = actor
+			if currentActor() != "" {
+				e.Actor = currentActor()
 			}
 		} else {
 			if auditRecordKind == "" {
@@ -86,7 +86,7 @@ var auditRecordCmd = &cobra.Command{
 			}
 			e = audit.Entry{
 				Kind:     auditRecordKind,
-				Actor:    actor,
+				Actor:    currentActor(),
 				IssueID:  auditRecordIssueID,
 				Model:    auditRecordModel,
 				Prompt:   auditRecordPrompt,
@@ -137,7 +137,7 @@ var auditLabelCmd = &cobra.Command{
 		}
 		e := audit.Entry{
 			Kind:     "label",
-			Actor:    actor,
+			Actor:    currentActor(),
 			ParentID: parentID,
 			Label:    auditLabelValue,
 			Reason:   auditLabelReason,

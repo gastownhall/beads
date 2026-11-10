@@ -12,7 +12,7 @@ This page covers **Copilot Chat in VS Code via MCP**. For the terminal-based Cop
 - VS Code 1.96+ with the GitHub Copilot extension
 - A GitHub Copilot subscription (Individual, Business, or Enterprise)
 - The beads CLI installed ([installation guide](/getting-started/installation))
-- Python 3.10+ or the `uv` package manager
+- Python 3.11+ or the `uv` package manager
 
 ## Setup
 

@@ -205,9 +205,14 @@ func forceIPv4Loopback(t *testing.T, rt http.RoundTripper) {
 
 // caContextHandler answers the handshake like contextServer, and additionally
 // records the SNI name and Host header the request actually carried, so a test
-// can prove TransportFor never overrides either.
+// can prove TransportFor never overrides either. Some callers (e.g. the
+// MaxIdleConnsPerHost burst test) drive this handler with several concurrent
+// requests, so every field is behind mu: both the writes in handler() and the
+// reads in the accessor methods below.
 type caContextHandler struct {
-	body        apigen.ContextResponse
+	body apigen.ContextResponse
+
+	mu          sync.Mutex
 	sni         string
 	host        string
 	requestSeen bool
@@ -215,14 +220,37 @@ type caContextHandler struct {
 
 func (h *caContextHandler) handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		h.mu.Lock()
 		h.requestSeen = true
 		h.host = r.Host
 		if r.TLS != nil {
 			h.sni = r.TLS.ServerName
 		}
+		h.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(h.body)
 	}
+}
+
+// sawRequest reports whether the handler has observed at least one request.
+func (h *caContextHandler) sawRequest() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.requestSeen
+}
+
+// seenHost returns the Host header the most recent request carried.
+func (h *caContextHandler) seenHost() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.host
+}
+
+// seenSNI returns the TLS ServerName the most recent request carried.
+func (h *caContextHandler) seenSNI() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.sni
 }
 
 func TestTransportForNoCAConfiguredIsUnchanged(t *testing.T) {

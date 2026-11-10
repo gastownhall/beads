@@ -28,6 +28,7 @@ var (
 	_ apigen.IssueWithCounts             = types.IssueWithCounts{}
 	_ apigen.IssueDetails                = types.IssueDetails{}
 	_ apigen.BatchGetIssue               = types.BatchGetIssue{}
+	_ apigen.ReclaimedLease              = types.ReclaimedLease{}
 	_ apigen.IssueWithDependencyMetadata = types.IssueWithDependencyMetadata{}
 	_ apigen.Dependency                  = types.Dependency{}
 	_ apigen.TreeNode                    = types.TreeNode{}
@@ -45,6 +46,9 @@ var (
 	// `bd list` renders its decoration from.
 	_ apigen.IssueBlocking = issueops.IssueBlocking{}
 
+	// The blocked row is the struct `bd blocked --json` marshals.
+	_ apigen.BlockedIssue = types.BlockedIssue{}
+
 	// The journal record is pinned to neither internal/types nor a role package
 	// but to the journal's own leaf: eventsjournal.Record is what
 	// `bd events tail` prints one of per line, and the committed golden fixture
@@ -61,6 +65,7 @@ var (
 	_ types.Issue             = apigen.ClaimResponse{}.Issue
 	_ types.Statistics        = apigen.StatsResponse{}.Summary
 	_ []issueops.Cycle        = apigen.CyclesPage{}.Items
+	_ []types.BlockedIssue    = apigen.BlockedPage{}.Items
 	_ []types.TreeNode        = apigen.DependencyTreePage{}.Items
 
 	// The envelopes that are NOT pages resolve their items the same way and are
@@ -73,6 +78,7 @@ var (
 	_ []issueops.IssueBlocking = apigen.BlockingAnnotations{}.Items
 	_ []types.Issue            = apigen.BatchCreateResponse{}.Items
 	_ []types.BatchGetIssue    = apigen.BatchGetIssuesResult{}.Issues
+	_ []types.ReclaimedLease   = apigen.ReclaimIssuesResult{}.Reclaimed
 
 	_ []eventsjournal.Record = apigen.EventsPage{}.Records
 )

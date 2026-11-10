@@ -11,9 +11,11 @@ go_library(
         "audit_molecule_wisp_batch_iter.go",
         "audit_search-counts-stats.go",
         "batch_apply_contract.go",
+        "batch_apply_gate_contract.go",
         "batch_closer_contract.go",
         "batch_creator_contract.go",
         "batch_getter_contract.go",
+        "blocked_lister_contract.go",
         "blocked_state.go",
         "blocking_annotator_contract.go",
         "bootstrapper_contract.go",
@@ -26,20 +28,29 @@ go_library(
         "cycle_detector_contract.go",
         "deleter_contract.go",
         "dependency_editor_contract.go",
+        "descendants_contract.go",
         "dualwrite_history_contract.go",
+        "dualwrite_participation_generation_contract.go",
         "edge_reader_contract.go",
         "expected_revision_contract.go",
         "graph_counter_contract.go",
+        "heartbeater_contract.go",
         "history_matching.go",
+        "id_retention_contract.go",
         "importer_contract.go",
         "issue_operations_contract.go",
         "issue_operations_staging.go",
+        "journal_arrival_contract.go",
         "journal_contract.go",
+        "lease_reclaimer_contract.go",
         "lifecycle_close_reopen_contract.go",
         "lifecycle_create_contract.go",
+        "lifecycle_create_gate_contract.go",
         "lifecycle_update_contract.go",
+        "lifecycle_update_gate_contract.go",
         "memories_contract.go",
         "metadata_cas_contract.go",
+        "molecule_contract.go",
         "portable.go",
         "querier_contract.go",
         "reader_contract.go",
@@ -51,17 +62,20 @@ go_library(
         "retention_epoch_contract.go",
         "role_bundle.go",
         "role_bundle_cases.go",
+        "row_version_contract.go",
         "search_paging.go",
         "stats_reporter_contract.go",
         "sweeper_contract.go",
         "transaction_parity.go",
         "tree_walker_contract.go",
         "version_reconciler_contract.go",
+        "versioned_read_contract.go",
         "workspaceconfig_contract.go",
     ],
     importpath = "github.com/steveyegge/beads/backend/conformance",
     visibility = ["//visibility:public"],
     deps = [
+        "//internal/hooks",
         "//internal/storage",
         "//internal/storage/issueops",
         "//internal/storage/kvkeys",
@@ -76,6 +90,9 @@ go_library(
 go_test(
     name = "conformance_test",
     srcs = [
+        "deleter_race_probe_test.go",
+        "request_field_coverage_gate_test.go",
+        "request_field_coverage_scan_test.go",
         "role_bundle_test.go",
         "role_coverage_gate_test.go",
         "role_coverage_scan_test.go",
@@ -93,6 +110,7 @@ go_test(
     deps = [
         "//internal/storage",
         "//internal/testutil/bazeltest",
+        "//internal/types",
         "//issueops",
         "//journalops",
         "//memoryops",
@@ -115,12 +133,51 @@ filegroup(
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
 
 filegroup(
-    name = "repo_files",
+    name = "repo_doc_files",
+    srcs = glob(
+        [
+            "**/*.md",
+            "**/*.mdx",
+        ],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = [
+            "**/*_test.go",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_other_files",
     srcs = glob(
         ["**"],
         exclude = [
             "**/*.db",
             "**/*.exe",
+            "**/*.go",
+            "**/*.md",
+            "**/*.mdx",
             "**/*.out",
             "**/*.prof",
             "**/*.pyc",
@@ -129,7 +186,7 @@ filegroup(
             "**/node_modules/**",
         ],
     ),
-    visibility = ["//:__pkg__"],
+    visibility = ["//:__subpackages__"],
 )
 
 # --- end repo_files ---

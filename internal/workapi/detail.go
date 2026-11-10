@@ -145,6 +145,16 @@ func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue
 	deps, depsErr := src.Dependencies(ctx, id, isWisp)
 	details.Dependencies = deps
 
+	// The gates blocking this issue are the gate-typed subset of the
+	// dependencies JUST read (types.GatesHolding, the one predicate the
+	// readiness query's is_blocked column encodes — subject clause included,
+	// so a closed or pinned issue publishes no gated_by), which costs no extra
+	// query. The order is load-bearing twice over: computed AFTER the
+	// Dependencies read above (an earlier slot sees the nil slice and
+	// publishes no gate at all) and BEFORE the BriefDeps trim below, which
+	// rewrites the slice.
+	details.GatedBy = types.GateRefs(types.GatesHolding(issue, details.Dependencies))
+
 	// The count counts edge ROWS; the slice carries the issues on the far
 	// end, and drops any whose id has no row in this database. The two
 	// therefore disagree by exactly the cross-repo and `external:` edges,

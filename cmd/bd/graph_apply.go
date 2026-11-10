@@ -143,7 +143,7 @@ type GraphApplyDryRunRow struct {
 	ParentID  string `json:"parent_id,omitempty"`
 }
 
-const graphApplyDryRunTransactionValidationNote = "dry-run validates the graph structure only; live create may still reject parent-child blocking paths after resolving stored dependencies"
+const graphApplyDryRunTransactionValidationNote = "dry-run validates the graph structure only; live create may still reject parent-child blocking paths after resolving stored dependencies, or an edge that gates a dotted-id child on its own ancestor"
 
 // Known-field sets list the JSON keys recognized on each plan struct; unknown
 // keys warn about schema typos. Derived from json tags so they can't drift. (GH#3367)
@@ -417,7 +417,7 @@ func emitGraphApplyDryRun(plan *GraphApplyPlan, opts GraphApplyOptions) error {
 			Title:     node.Title,
 			Type:      string(issue.IssueType),
 			Status:    status,
-			Priority:  issue.Priority,
+			Priority:  graphApplyPreviewPriority(node, issue),
 			ParentKey: effectiveParentKey,
 			ParentID:  node.ParentID,
 		})
@@ -496,8 +496,10 @@ func validateFullGraphPlan(plan *GraphApplyPlan, cfg graphPlanConfig, opts Graph
 // duplicate ID (matching `bd create --id`), which for an atomic graph create
 // would silently rewrite the existing issue while reporting creation — a plan
 // must fail fast instead. Deliberately not overridable by --force: that flag
-// vouches for a foreign prefix, not for destroying existing data. Best-effort
-// by transport: exists is nil where the calling context has no store access.
+// vouches for a foreign prefix, not for destroying existing data. The probe is
+// exact on every backend, http included (its GetIssue answers a miss with
+// storage.ErrNotFound like the local stores); exists is nil only where the
+// command opened no store.
 func validateGraphApplyExplicitIDCollisions(plan *GraphApplyPlan, exists func(id string) (bool, error)) error {
 	if exists == nil {
 		return nil
@@ -798,7 +800,9 @@ func graphApplyNodeIssue(node GraphApplyNode, opts GraphApplyOptions, createdBy,
 		metadataJSON = raw
 	}
 
-	priority := 2
+	// A node with no priority asks for the role's default
+	// (CreateItem.DefaultPriority); the number is not spelled here.
+	priority := 0
 	if node.Priority != nil {
 		priority = *node.Priority
 	}
@@ -856,12 +860,22 @@ func graphApplyNodeIssue(node GraphApplyNode, opts GraphApplyOptions, createdBy,
 	})
 	// Backfill status-coupled timestamps: the proxied domain insert does no
 	// backfill, and neither path stamps started_at for issues born in_progress.
+	// created_at takes the same clock read, so a status stamp never predates
+	// it once the batch applies (GH#7519). A node with no status stamp keeps
+	// a zero created_at: the HTTP wire withholds the creation stamp and
+	// refuses a populated Issue.CreatedAt (W-CreateItem.Issue).
 	now := time.Now().UTC()
+	stamped := false
 	if issue.Status == types.StatusClosed && issue.ClosedAt == nil {
 		issue.ClosedAt = &now
+		stamped = true
 	}
 	if issue.Status == types.StatusInProgress && issue.StartedAt == nil {
 		issue.StartedAt = &now
+		stamped = true
+	}
+	if stamped && issue.CreatedAt.IsZero() {
+		issue.CreatedAt = now
 	}
 	issue.Pinned = node.Pinned
 	return issue, nil
@@ -1019,9 +1033,10 @@ func buildGraphApplyBatchRequest(plan *GraphApplyPlan, opts GraphApplyOptions, a
 		items = append(items, issueops.ApplyItem{
 			Kind: issueops.ItemCreate,
 			Create: &issueops.CreateItem{
-				Key:          node.Key,
-				Issue:        issue,
-				MetadataRefs: metadataRefs,
+				Key:             node.Key,
+				Issue:           issue,
+				MetadataRefs:    metadataRefs,
+				DefaultPriority: node.Priority == nil,
 			},
 		})
 	}
@@ -1167,7 +1182,7 @@ func graphApplyEdgeBatchMetadata(edge GraphApplyEdge, depType types.DependencyTy
 }
 
 func executeGraphApply(ctx context.Context, plan *GraphApplyPlan, opts GraphApplyOptions) (*GraphApplyResult, error) {
-	req, err := buildGraphApplyBatchRequest(plan, opts, actor, getOwner())
+	req, err := buildGraphApplyBatchRequest(plan, opts, currentActor(), getOwner())
 	if err != nil {
 		return nil, err
 	}
@@ -1211,4 +1226,15 @@ func graphApplySortedKeys(keys map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// graphApplyPreviewPriority is the priority the dry-run preview shows: the
+// node's own, or — for a node that names none and so asks the role for its
+// default — the library's DefaultCreatePriority, which is what the live apply
+// will store.
+func graphApplyPreviewPriority(node GraphApplyNode, issue *types.Issue) int {
+	if node.Priority == nil {
+		return issueops.DefaultCreatePriority
+	}
+	return issue.Priority
 }

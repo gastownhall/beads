@@ -16,6 +16,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -48,6 +49,12 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	embeddedDoltFixtureRoot = root
+
+	// Package-wide migration consent: these tests exercise the machinery that
+	// runs BELOW the consent gate (migrate_consent.go), exactly as production
+	// does once an operator has consented. Gate-behavior tests manage the
+	// consent state themselves.
+	schema.SetLocalMigrateConsent(true)
 
 	code := m.Run()
 	if err := os.RemoveAll(root); err != nil && code == 0 {

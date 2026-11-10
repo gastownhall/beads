@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -25,8 +26,8 @@ import (
 // revision table in openapi.v0.yaml, never before. A wire_revision LOWER than
 // the golden's is never fixed by regenerating: that table is append-only, so
 // the constant itself is wrong. Any other difference — a bumped
-// wire_revision, or entries only added — means this golden is simply stale;
-// regenerate it with:
+// wire_revision, entries only added, or a `sides` map that no longer matches
+// — means this golden is simply stale; regenerate it with:
 //
 //	go run ./internal/httpapi/wireshape/cmd/gendigest
 func TestWireShapeDigest(t *testing.T) {
@@ -50,8 +51,8 @@ func TestWireShapeDigest(t *testing.T) {
 
 // goldenDrift is TestWireShapeDigest's verdict, factored out so
 // TestGoldenDrift can drive every arm with synthetic digests. It returns ""
-// only when golden records exactly got — the same entries at the same
-// wire_revision. Every other state fails; the arms only choose which
+// only when golden records exactly got — the same entries and sides at the
+// same wire_revision. Every other state fails; the arms only choose which
 // instruction the failure gives.
 func goldenDrift(golden, got wireshape.Digest) string {
 	if got.WireRevision < golden.WireRevision {
@@ -62,7 +63,8 @@ func goldenDrift(golden, got wireshape.Digest) string {
 	}
 
 	cmp := wireshape.Compare(golden, got)
-	changed, removed, added := cmp.Changed, cmp.Removed, cmp.Added
+	changed, removed, added, widened := cmp.Changed, cmp.Removed, cmp.Added, cmp.Widened
+	sides := sidesDrift(golden.Sides, got.Sides)
 
 	switch {
 	case len(changed) > 0 || len(removed) > 0:
@@ -77,26 +79,56 @@ func goldenDrift(golden, got wireshape.Digest) string {
 			"removed=%v) and wire_revision moved %d -> %d, but the golden was not regenerated: run "+
 			"`go run ./internal/httpapi/wireshape/cmd/gendigest` and commit the result",
 			changed, removed, golden.WireRevision, got.WireRevision)
-	case len(added) > 0:
+	case len(added) > 0 || len(widened) > 0:
+		// Widened (a request-only enum strictly growing) is additive, same as
+		// Added (a brand-new key): neither needs CurrentWireRevision to move,
+		// both just need the golden regenerated.
 		if got.WireRevision == golden.WireRevision {
-			return fmt.Sprintf("wire shape (response/request-body member or parameter) added (%v) but the "+
-				"golden was not regenerated: this is additive and needs no wire_revision bump, but still run "+
-				"`go run ./internal/httpapi/wireshape/cmd/gendigest` and commit the result", added)
+			return fmt.Sprintf("wire shape (response/request-body member or parameter) added (%v) or had a "+
+				"request-only enum widen (%v) but the golden was not regenerated: this is additive and needs "+
+				"no wire_revision bump, but still run `go run ./internal/httpapi/wireshape/cmd/gendigest` "+
+				"and commit the result", added, widened)
 		}
 		// Passing here would leave the golden a revision behind
 		// CurrentWireRevision, and a later non-additive change at that
 		// already-moved constant would then be told only to regenerate (which
 		// SafeToWrite allows) instead of to bump.
-		return fmt.Sprintf("wire shape (response/request-body member or parameter) added (%v) and "+
-			"wire_revision moved %d -> %d, but the golden was not regenerated: run "+
-			"`go run ./internal/httpapi/wireshape/cmd/gendigest` and commit the result",
-			added, golden.WireRevision, got.WireRevision)
+		return fmt.Sprintf("wire shape (response/request-body member or parameter) added (%v) or had a "+
+			"request-only enum widen (%v) and wire_revision moved %d -> %d, but the golden was not "+
+			"regenerated: run `go run ./internal/httpapi/wireshape/cmd/gendigest` and commit the result",
+			added, widened, golden.WireRevision, got.WireRevision)
 	case got.WireRevision != golden.WireRevision:
 		return fmt.Sprintf("CurrentWireRevision is %d but the golden still says %d, with no shape change to justify "+
 			"either: regenerate with `go run ./internal/httpapi/wireshape/cmd/gendigest`",
 			got.WireRevision, golden.WireRevision)
+	case len(sides) > 0:
+		// Compare reads Sides only for the request-only widening carve-out, so
+		// a stale map changes no member's shape: it misfiles the next enum
+		// widening on those schemas instead. Nothing to bump, but the golden
+		// is still not what gendigest writes.
+		return fmt.Sprintf("the golden's `sides` map disagrees with a fresh digest for %v: this needs no "+
+			"wire_revision bump, but run `go run ./internal/httpapi/wireshape/cmd/gendigest` and commit the result",
+			sides)
 	}
 	return ""
+}
+
+// sidesDrift lists, sorted, every schema whose side differs between want and
+// got, including a schema only one of them records.
+func sidesDrift(want, got map[string]string) []string {
+	var drift []string
+	for schema, side := range want {
+		if gotSide, ok := got[schema]; !ok || gotSide != side {
+			drift = append(drift, schema)
+		}
+	}
+	for schema := range got {
+		if _, ok := want[schema]; !ok {
+			drift = append(drift, schema)
+		}
+	}
+	slices.Sort(drift)
+	return drift
 }
 
 // TestGoldenDrift is TestWireShapeDigest's own falsification: every way the
@@ -104,13 +136,15 @@ func goldenDrift(golden, got wireshape.Digest) string {
 // own instruction. "Added after a bump" is the state review found passing
 // silently — no arm fired when entries were only added and wire_revision had
 // also moved — and a LOWERED wire_revision was told to regenerate, which
-// would have written the golden's revision backwards.
+// would have written the golden's revision backwards. A stale `sides` map
+// passed the same way until goldenDrift compared it.
 func TestGoldenDrift(t *testing.T) {
 	golden := wireshape.Digest{
 		WireRevision: 2,
 		Entries: []wireshape.Entry{
 			{Schema: "Widget", Member: "name", Type: "string", Required: true},
 		},
+		Sides: map[string]string{"Widget": "response"},
 	}
 	changed := []wireshape.Entry{{Schema: "Widget", Member: "name", Type: "integer", Required: true}}
 	added := append(append([]wireshape.Entry{}, golden.Entries...),
@@ -141,6 +175,15 @@ func TestGoldenDrift(t *testing.T) {
 			wireshape.Digest{WireRevision: 1, Entries: changed}, []string{"LOWER than the 2"}},
 		{"added entry at a lowered revision asks to restore the constant",
 			wireshape.Digest{WireRevision: 1, Entries: added}, []string{"LOWER than the 2"}},
+		{"side recorded only by the fresh digest asks for a regenerate",
+			wireshape.Digest{WireRevision: 2, Entries: golden.Entries,
+				Sides: map[string]string{"Widget": "response", "Gadget": "request"}},
+			[]string{"`sides` map disagrees", "[Gadget]", "needs no wire_revision bump"}},
+		{"side that moved asks for a regenerate",
+			wireshape.Digest{WireRevision: 2, Entries: golden.Entries, Sides: map[string]string{"Widget": "both"}},
+			[]string{"`sides` map disagrees", "[Widget]"}},
+		{"side recorded only by the golden asks for a regenerate",
+			wireshape.Digest{WireRevision: 2, Entries: golden.Entries}, []string{"`sides` map disagrees", "[Widget]"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			drift := goldenDrift(golden, tc.got)
@@ -254,6 +297,135 @@ func TestSafeToWrite(t *testing.T) {
 		candidate := wireshape.Digest{WireRevision: 3, Entries: nil}
 		if ok, reason := wireshape.SafeToWrite(base, candidate); !ok {
 			t.Fatalf("removed entry with a higher revision refused: %s", reason)
+		}
+	})
+}
+
+// TestEnumWideningAdditivity is the falsification for widensAdditively
+// (review MED 1: "the only trigger [for S4's wire_revision bump] is the
+// request-only enum widening of SweepRequest.tier ... fix the wireshape gate
+// so widening a request-only enum counts as additive, while response-side
+// enum widening stays breaking"). Two synthetic digests, identical except for
+// their Sides map, prove the carve-out is keyed on Sides alone — Entry itself
+// never changes shape.
+func TestEnumWideningAdditivity(t *testing.T) {
+	requestBase := wireshape.Digest{
+		WireRevision: 2,
+		Entries: []wireshape.Entry{
+			{Schema: "SweepRequest", Member: "tier", Type: "string", Required: true,
+				Enum: []string{"durable", "ephemeral"}},
+		},
+		Sides: map[string]string{"SweepRequest": "request"},
+	}
+	requestWidened := wireshape.Digest{
+		WireRevision: 2,
+		Entries: []wireshape.Entry{
+			{Schema: "SweepRequest", Member: "tier", Type: "string", Required: true,
+				Enum: []string{"durable", "ephemeral", "wisps-plane"}},
+		},
+		Sides: map[string]string{"SweepRequest": "request"},
+	}
+
+	t.Run("a request-only enum widening is additive at the same revision", func(t *testing.T) {
+		cmp := wireshape.Compare(requestBase, requestWidened)
+		if len(cmp.Changed) != 0 {
+			t.Fatalf("Changed = %v, want none (the widening belongs in Widened)", cmp.Changed)
+		}
+		if len(cmp.Widened) != 1 {
+			t.Fatalf("Widened = %v, want exactly one entry", cmp.Widened)
+		}
+		if ok, reason := wireshape.SafeToWrite(requestBase, requestWidened); !ok {
+			t.Fatalf("request-only enum widening at the same revision refused: %s", reason)
+		}
+		drift := goldenDrift(requestBase, requestWidened)
+		if drift == "" || !strings.Contains(drift, "needs no wire_revision bump") {
+			t.Fatalf("goldenDrift = %q, want an additive (no-bump) instruction", drift)
+		}
+	})
+
+	responseBase := wireshape.Digest{
+		WireRevision: 2,
+		Entries: []wireshape.Entry{
+			{Schema: "SweepResult", Member: "tier", Type: "string", Required: true,
+				Enum: []string{"durable", "ephemeral"}},
+		},
+		Sides: map[string]string{"SweepResult": "response"},
+	}
+	responseWidened := wireshape.Digest{
+		WireRevision: 2,
+		Entries: []wireshape.Entry{
+			{Schema: "SweepResult", Member: "tier", Type: "string", Required: true,
+				Enum: []string{"durable", "ephemeral", "wisps-plane"}},
+		},
+		Sides: map[string]string{"SweepResult": "response"},
+	}
+
+	t.Run("the identical widening on a response-side entry stays breaking", func(t *testing.T) {
+		cmp := wireshape.Compare(responseBase, responseWidened)
+		if len(cmp.Widened) != 0 {
+			t.Fatalf("Widened = %v, want none (a response-side widening is not additive)", cmp.Widened)
+		}
+		if len(cmp.Changed) != 1 {
+			t.Fatalf("Changed = %v, want exactly one entry", cmp.Changed)
+		}
+		if ok, _ := wireshape.SafeToWrite(responseBase, responseWidened); ok {
+			t.Fatal("response-side enum widening at the same revision was allowed")
+		}
+		bumped := wireshape.Digest{WireRevision: 3, Entries: responseWidened.Entries, Sides: responseWidened.Sides}
+		if ok, reason := wireshape.SafeToWrite(responseBase, bumped); !ok {
+			t.Fatalf("response-side enum widening with a bumped revision refused: %s", reason)
+		}
+		drift := goldenDrift(responseBase, responseWidened)
+		if drift == "" || !strings.Contains(drift, "changed without a wire_revision bump") {
+			t.Fatalf("goldenDrift = %q, want the ordinary non-additive instruction", drift)
+		}
+	})
+
+	t.Run("an enum narrowing on a request-only entry is still breaking", func(t *testing.T) {
+		narrowed := wireshape.Digest{
+			WireRevision: 2,
+			Entries: []wireshape.Entry{
+				{Schema: "SweepRequest", Member: "tier", Type: "string", Required: true,
+					Enum: []string{"durable"}},
+			},
+			Sides: map[string]string{"SweepRequest": "request"},
+		}
+		cmp := wireshape.Compare(requestBase, narrowed)
+		if len(cmp.Widened) != 0 {
+			t.Fatalf("Widened = %v, want none (narrowing is not a widening)", cmp.Widened)
+		}
+		if len(cmp.Changed) != 1 {
+			t.Fatalf("Changed = %v, want exactly one entry", cmp.Changed)
+		}
+	})
+
+	t.Run("going from no enum at all to a fixed enum on a request-only entry is not additive", func(t *testing.T) {
+		// Pinning case for review finding: widensAdditively required
+		// len(new.Enum) > len(old.Enum), which holds vacuously when the old
+		// side has no enum (a free string). That let a request-only member
+		// go from unconstrained to a fixed set at the same wire_revision —
+		// the opposite of widening, since the server now 400s a value an
+		// old client could send yesterday.
+		noEnumBase := wireshape.Digest{
+			WireRevision: 2,
+			Entries: []wireshape.Entry{
+				{Schema: "SweepRequest", Member: "tier", Type: "string", Required: true},
+			},
+			Sides: map[string]string{"SweepRequest": "request"},
+		}
+		cmp := wireshape.Compare(noEnumBase, requestWidened)
+		if len(cmp.Widened) != 0 {
+			t.Fatalf("Widened = %v, want none (no enum before is a new restriction, not a widening)", cmp.Widened)
+		}
+		if len(cmp.Changed) != 1 {
+			t.Fatalf("Changed = %v, want exactly one entry", cmp.Changed)
+		}
+		if ok, _ := wireshape.SafeToWrite(noEnumBase, requestWidened); ok {
+			t.Fatal("no-enum-to-enum tightening at the same revision was allowed")
+		}
+		bumped := wireshape.Digest{WireRevision: 3, Entries: requestWidened.Entries, Sides: requestWidened.Sides}
+		if ok, reason := wireshape.SafeToWrite(noEnumBase, bumped); !ok {
+			t.Fatalf("no-enum-to-enum tightening with a bumped revision refused: %s", reason)
 		}
 	})
 }

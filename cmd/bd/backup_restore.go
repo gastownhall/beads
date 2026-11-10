@@ -35,6 +35,8 @@ To initialize and restore in one step, use: bd init && bd backup restore`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		CheckReadonly("backup restore")
+
 		evt := metrics.NewCommandEvent("backup-restore")
 		defer func() {
 			if c := metrics.Global(); c != nil {

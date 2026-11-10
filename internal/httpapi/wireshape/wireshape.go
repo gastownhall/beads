@@ -98,19 +98,35 @@ func paramKey(operationID, in, name string) (schema, member string) {
 }
 
 // Digest is the golden document: the wire revision it was computed against,
-// plus every member entry, sorted for a stable diff.
+// every member entry (sorted for a stable diff), and Sides — a side-channel
+// map from schema name to "request", "response" or "both", recording which
+// kind of body (if any) ever reaches that NAMED schema during the walk.
+//
+// Sides is deliberately NOT a field on Entry itself: Entry is the shape the
+// golden pins per member, and giving every member its own copy of the same
+// per-SCHEMA fact would turn "we now also track reachability" into a
+// spurious Changed diff on every existing entry the day this shipped, which
+// is exactly the noise a real, deliberate wire change is supposed to stand
+// out from. Keeping it a separate, schema-keyed map makes adding this
+// bookkeeping itself a pure addition to the digest.
 type Digest struct {
-	WireRevision int     `json:"wire_revision"`
-	Entries      []Entry `json:"entries"`
+	WireRevision int               `json:"wire_revision"`
+	Entries      []Entry           `json:"entries"`
+	Sides        map[string]string `json:"sides,omitempty"`
 }
 
 // CompareResult is the outcome of diffing two digests by "schema\x00member"
-// key: Changed holds keys present in both whose Entry differs, Removed holds
-// keys only want has, and Added holds keys only got has.
+// key: Changed holds keys present in both whose Entry differs non-additively,
+// Removed holds keys only want has, Added holds keys only got has, and
+// Widened holds keys present in both whose ONLY difference is a request-only
+// enum strictly widening (see widensAdditively) — additive, like Added, but
+// kept in its own bucket so a reader can tell "this key is new" apart from
+// "this key's enum grew" at a glance.
 type CompareResult struct {
 	Changed []string
 	Removed []string
 	Added   []string
+	Widened []string
 }
 
 // Compare diffs want (typically the committed golden) against got (typically
@@ -135,6 +151,10 @@ func Compare(want, got Digest) CompareResult {
 			continue
 		}
 		if !reflect.DeepEqual(w, g) {
+			if widensAdditively(w, g, want.Sides[w.Schema], got.Sides[g.Schema]) {
+				result.Widened = append(result.Widened, key)
+				continue
+			}
 			result.Changed = append(result.Changed, key)
 		}
 	}
@@ -146,7 +166,49 @@ func Compare(want, got Digest) CompareResult {
 	sort.Strings(result.Changed)
 	sort.Strings(result.Removed)
 	sort.Strings(result.Added)
+	sort.Strings(result.Widened)
 	return result
+}
+
+// widensAdditively reports whether old -> new differs ONLY in Enum, with
+// new's Enum a strict superset of old's, and oldSide/newSide (the entry's
+// Schema looked up in each Digest's Sides map) both exactly "request". That
+// combination is additive, not a wire break: a request-only member is never
+// decoded out of a response, so the CLIENT alone decides whether it sends
+// one of the new values — an old client that never sends the new member
+// never has anything to misdecode. Any other difference (type, format,
+// required, nullable, item/additional-props shape, or an enum NARROWING or
+// reordering-with-removal) is excluded here and falls through to the
+// ordinary non-additive Changed path, as does the identical widening on a
+// "response" or "both" (or unknown/param, "") side, where an existing client
+// decoding a response must still recognize every value the server might
+// send. An old side with NO enum at all (a free-form string) is the limit
+// case of a narrowing — going from unconstrained to any fixed set is a new
+// restriction the server did not enforce before, not a widening — so it is
+// excluded too: len(old.Enum) == 0 falls through to Changed just like a
+// strict narrowing does.
+func widensAdditively(old, new Entry, oldSide, newSide string) bool { //nolint:revive // "new" reads clearest paired with "old" here
+	if oldSide != sideRequest || newSide != sideRequest {
+		return false
+	}
+	oldNoEnum, newNoEnum := old, new
+	oldNoEnum.Enum, newNoEnum.Enum = nil, nil
+	if !reflect.DeepEqual(oldNoEnum, newNoEnum) {
+		return false
+	}
+	if len(old.Enum) == 0 || len(new.Enum) <= len(old.Enum) {
+		return false
+	}
+	newSet := make(map[string]bool, len(new.Enum))
+	for _, v := range new.Enum {
+		newSet[v] = true
+	}
+	for _, v := range old.Enum {
+		if !newSet[v] {
+			return false
+		}
+	}
+	return true
 }
 
 // SafeToWrite is gendigest's write guard (review MEDIUM: "refuse to write
@@ -218,7 +280,7 @@ func computeFrom(document []byte, wireRevision int) (Digest, error) {
 		return Digest{}, fmt.Errorf("parse openapi document: %w", err)
 	}
 
-	c := &collector{doc: doc, visited: map[string]bool{}, byKey: map[string]Entry{}}
+	c := &collector{doc: doc, sideWalked: map[string]bool{}, byKey: map[string]Entry{}, sideOf: map[string]string{}}
 
 	paths, _ := doc["paths"].(map[string]any)
 	for _, item := range paths {
@@ -242,12 +304,12 @@ func computeFrom(document []byte, wireRevision int) (Digest, error) {
 					continue
 				}
 				respMap = c.resolveAny(respMap)
-				c.walkContent(respMap)
+				c.walkContent(respMap, sideResponse)
 			}
 
 			if rb, ok := op["requestBody"].(map[string]any); ok {
 				rb = c.resolveAny(rb)
-				c.walkContent(rb)
+				c.walkContent(rb, sideRequest)
 			}
 
 			operationID := asString(op["operationId"])
@@ -272,14 +334,30 @@ func computeFrom(document []byte, wireRevision int) (Digest, error) {
 		}
 		return entries[i].Member < entries[j].Member
 	})
-	return Digest{WireRevision: wireRevision, Entries: entries}, nil
+	return Digest{WireRevision: wireRevision, Entries: entries, Sides: c.sideOf}, nil
 }
 
+// sideRequest and sideResponse are the two values recordSide ever writes
+// directly into Digest.Sides (keyed by schema name, not by Entry); an
+// unrecorded schema — a parameter's container, or any schema this walk never
+// reaches — simply has no key, which Compare's map lookup reads as "" and
+// widensAdditively then treats as ineligible, the same as sideResponse.
+const (
+	sideRequest  = "request"
+	sideResponse = "response"
+	// sideBoth marks a schema reached from both a request and a response
+	// walk — recordSide promotes to it the moment the two disagree, and it is
+	// never eligible for the enum-widening carve-out any more than
+	// sideResponse is.
+	sideBoth = "both"
+)
+
 // walkContent walks every media type's schema under a resolved response or
-// requestBody node's `content` map. Shared by Compute's response and request
-// body loops: a response object and a resolved requestBody object are both
-// shaped `{content: {mediaType: {schema: ...}}}`.
-func (c *collector) walkContent(node map[string]any) {
+// requestBody node's `content` map, tagging every schema it reaches in
+// Digest.Sides (via walk's recordSide calls). Shared by Compute's response
+// and request body loops: a response object and a resolved requestBody
+// object are both shaped `{content: {mediaType: {schema: ...}}}`.
+func (c *collector) walkContent(node map[string]any, side string) {
 	content, _ := node["content"].(map[string]any)
 	for _, rawMedia := range content {
 		media, ok := rawMedia.(map[string]any)
@@ -290,7 +368,7 @@ func (c *collector) walkContent(node map[string]any) {
 		if !ok {
 			continue
 		}
-		c.walk(schemaNode, "")
+		c.walk(schemaNode, "", side)
 	}
 }
 
@@ -375,9 +453,34 @@ func defaultParamStyle(in string) string {
 }
 
 type collector struct {
-	doc     map[string]any
-	visited map[string]bool
-	byKey   map[string]Entry // "schema\x00member" -> Entry
+	doc map[string]any
+	// sideWalked guards recursion into a named (or synthetically labeled)
+	// node's properties, keyed by "name\x00side" rather than by name alone
+	// (see walk's doc comment for why: name alone let a node visited first
+	// from one side block the OTHER side's walk from ever reaching that
+	// node's children).
+	sideWalked map[string]bool
+	byKey      map[string]Entry // "schema\x00member" -> Entry
+	sideOf     map[string]string
+}
+
+// recordSide notes that schema name was reached via side ("request" or
+// "response"), promoting to sideBoth the moment the two disagree. It runs on
+// EVERY visit to name, including one walk skips the properties of because
+// visited already marked it seen — a schema visited first from a response
+// and only later from a request must still end up "both", not stuck at
+// whichever context happened to walk its properties.
+func (c *collector) recordSide(name, side string) {
+	if name == "" || side == "" {
+		return
+	}
+	existing, ok := c.sideOf[name]
+	switch {
+	case !ok:
+		c.sideOf[name] = side
+	case existing != side:
+		c.sideOf[name] = sideBoth
+	}
 }
 
 // lookup resolves one local $ref to the node it names. It returns nil for
@@ -473,12 +576,25 @@ func defaultString(v any) string {
 // recorded under it; a $ref always overrides it with the component's own
 // name.
 //
-// Every NAMED schema is walked at most once (the visited guard), which is
-// what makes a cycle between named schemas (and there is at least the
-// potential for one as this document grows) a no-op rather than a stack
-// overflow, and what makes the digest the same whichever operation reaches a
-// shared schema first.
-func (c *collector) walk(node map[string]any, label string) {
+// Recursion into a (name, side) pair's properties happens at most once (the
+// sideWalked guard), which is what makes a cycle between named schemas (and
+// there is at least the potential for one as this document grows) a no-op
+// rather than a stack overflow. The guard is keyed on side, NOT on name
+// alone: a schema reached first from a request and later from a response
+// (directly, or nested under some other schema the response reaches) must
+// still have its PROPERTIES walked a second time with side="response", so
+// every descendant that is itself reachable from a response gets recordSide
+// called for that side too. Gating on name alone — walked once, ever,
+// regardless of which side asks — promotes the node ITSELF to "both" (recordSide
+// runs unconditionally before the guard) while leaving every child stuck at
+// whichever side first walked down into it: a child nested two levels under a
+// schema shared by both a request and a response would silently stay
+// request-only or response-only depending on map iteration order, which is
+// exactly backwards for a digest whose whole job is deciding whether an enum
+// widening is additive by side. TestSidePropagatesToNestedChildren and
+// TestComputeFromSideAssignmentIsDeterministic pin both the correctness and
+// the order-independence of this.
+func (c *collector) walk(node map[string]any, label string, side string) {
 	name := label
 	for {
 		ref, ok := node["$ref"].(string)
@@ -507,11 +623,13 @@ func (c *collector) walk(node map[string]any, label string) {
 		node = merged
 	}
 
+	c.recordSide(name, side)
 	if name != "" {
-		if c.visited[name] {
+		sideKey := name + "\x00" + side
+		if c.sideWalked[sideKey] {
 			return
 		}
-		c.visited[name] = true
+		c.sideWalked[sideKey] = true
 	}
 
 	if props, ok := node["properties"].(map[string]any); ok {
@@ -565,16 +683,16 @@ func (c *collector) walk(node map[string]any, label string) {
 
 			switch entry.Type {
 			case "object":
-				c.walk(propMap, name+"."+member)
+				c.walk(propMap, name+"."+member, side)
 				if addlPropsNode != nil {
 					// A map value that is itself a named/object schema gets
 					// its own members walked too, under a label distinct
 					// from an array's "[]" so the two can never collide.
-					c.walk(addlPropsNode, name+"."+member+"{}")
+					c.walk(addlPropsNode, name+"."+member+"{}", side)
 				}
 			case "array":
 				if itemsNode != nil {
-					c.walk(itemsNode, name+"."+member+"[]")
+					c.walk(itemsNode, name+"."+member+"[]", side)
 				}
 			}
 		}
@@ -587,7 +705,7 @@ func (c *collector) walk(node map[string]any, label string) {
 			if itemLabel == "" {
 				itemLabel = label
 			}
-			c.walk(items, itemLabel+"[]")
+			c.walk(items, itemLabel+"[]", side)
 		}
 	}
 }

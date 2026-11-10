@@ -78,16 +78,16 @@ func initGitRepo(t *testing.T, dir string) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir repo: %v", err)
 	}
-	cmd := exec.Command("git", "init", "-q")
+	cmd := gitCommand("init", "-q")
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git init %s: %v\n%s", dir, err, out)
 	}
 	writeFile(t, filepath.Join(dir, ".gitignore"), []byte(".beads/.env\n"))
-	commitCmd := exec.Command("git", "add", ".")
+	commitCmd := gitCommand("add", ".")
 	commitCmd.Dir = dir
 	_, _ = commitCmd.CombinedOutput()
-	commitCmd = exec.Command("git", "commit", "-q", "-m", "init")
+	commitCmd = gitCommand("commit", "-q", "-m", "init")
 	commitCmd.Dir = dir
 	commitCmd.Env = append(os.Environ(),
 		"GIT_AUTHOR_NAME=Test",
@@ -299,8 +299,15 @@ func TestDoltShowUsesExplicitDBFlagForNoDBCommand(t *testing.T) {
 	root := t.TempDir()
 	repoA := filepath.Join(root, "repo-a")
 	repoB := filepath.Join(root, "repo-b")
-	writeServerRepo(t, repoA, "repo_a_db", "10.0.0.1", "origin-a", 3311)
+	beadsDirA := writeServerRepo(t, repoA, "repo_a_db", "10.0.0.1", "origin-a", 3311)
 	beadsDirB := writeServerRepo(t, repoB, "repo_b_db", "10.0.0.2", "origin-b", 3312)
+	// Each port file records the port of bd's own server on 127.0.0.1, and
+	// bd never runs its server at 10.0.0.x (configfile.BdRunsServerAt), so
+	// the port file names no port for either workspace's server. Each Dolt
+	// server's own config.yaml (listener.port) does, so the port shows which
+	// workspace it was read from.
+	writeFile(t, filepath.Join(beadsDirA, "dolt", "config.yaml"), []byte("listener:\n  port: 3311\n"))
+	writeFile(t, filepath.Join(beadsDirB, "dolt", "config.yaml"), []byte("listener:\n  port: 3312\n"))
 
 	out := runBDCommand(t, binPath, repoA, nil, "--db", filepath.Join(beadsDirB, "dolt"), "dolt", "show", "--json")
 
@@ -313,7 +320,7 @@ func TestDoltShowUsesExplicitDBFlagForNoDBCommand(t *testing.T) {
 		t.Fatalf("host = %v, want 10.0.0.2", got["host"])
 	}
 	if got["port"] != float64(3312) {
-		t.Fatalf("port = %v, want 3312", got["port"])
+		t.Fatalf("port = %v, want 3312 (repo-b's listener.port)", got["port"])
 	}
 }
 

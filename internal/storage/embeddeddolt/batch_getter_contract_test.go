@@ -76,6 +76,7 @@ func newEmbeddedBatchGetterFixture(t *testing.T, te *testEnv, prefix string) con
 		IssuePrefix:  kit.IssuePrefix,
 		BatchGetter:  getter,
 		CreateIssue:  kit.CreateIssue,
+		CreateIssues: te.store.CreateIssues,
 		CreateWisp:   kit.CreateWisp,
 		CountHistory: kit.CountHistory,
 	}

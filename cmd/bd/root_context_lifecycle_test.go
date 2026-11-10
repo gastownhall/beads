@@ -78,9 +78,14 @@ func TestPersistentPostRunE_ClearsCancelledRootContext(t *testing.T) {
 	// getRootContext() is only reached if this test unpins it. Production
 	// runs that branch, so it is the one that must not regress.
 	t.Run("legacy globals", func(t *testing.T) { run(t, true) })
+	// Whether an earlier test in the same process ran a command (and so left
+	// cmdCtx initialized) depends on rules_go's shard assignment, so a skip
+	// here would come and go with unrelated test additions. Initialize the
+	// command context ourselves instead, and drop it again afterwards.
 	t.Run("command context", func(t *testing.T) {
 		if cmdCtx == nil {
-			t.Skip("no command context initialized in this binary")
+			initCommandContext()
+			t.Cleanup(resetCommandContext)
 		}
 		run(t, false)
 	})

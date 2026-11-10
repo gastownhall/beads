@@ -45,6 +45,12 @@ func TestDeleterContract(t *testing.T) {
 	t.Run("CascadeFromAWispRootDeletesTheClosure", func(t *testing.T) {
 		conformance.RunDeleterCascadeFromAWispRootDeletesTheClosure(t, ctx, fixture)
 	})
+	t.Run("CascadeFollowsOnlyContainment", func(t *testing.T) {
+		conformance.RunDeleterCascadeFollowsOnlyContainment(t, ctx, fixture)
+	})
+	t.Run("CascadeReportsSurvivingDependents", func(t *testing.T) {
+		conformance.RunDeleterCascadeReportsSurvivingDependents(t, ctx, fixture)
+	})
 	t.Run("GuardsAWispNamedWithADurableDependent", func(t *testing.T) {
 		conformance.RunDeleterGuardsAWispNamedWithADurableDependent(t, ctx, fixture)
 	})
@@ -62,6 +68,9 @@ func TestDeleterContract(t *testing.T) {
 	})
 	t.Run("RewritesReferencesInNeighbors", func(t *testing.T) {
 		conformance.RunDeleterRewritesReferencesInNeighbors(t, ctx, fixture)
+	})
+	t.Run("AttributesTheRewriteToTheActor", func(t *testing.T) {
+		conformance.RunDeleterAttributesTheRewriteToTheActor(t, ctx, fixture)
 	})
 	t.Run("DryRunChangesNothing", func(t *testing.T) {
 		conformance.RunDeleterDryRunChangesNothing(t, ctx, fixture)
@@ -92,6 +101,15 @@ func TestDeleterContract(t *testing.T) {
 	})
 	t.Run("RefusesAnExpectedVersionAcrossSeveralIDs", func(t *testing.T) {
 		conformance.RunDeleterRefusesAnExpectedVersionAcrossSeveralIDs(t, ctx, fixture)
+	})
+	// The two races run for real on this leg: the provider is a bare
+	// doltSQLProvider with an unbounded pool, so all sixteen racers reach the
+	// server together and only withDeleteFence admits one of them.
+	t.Run("ExpectedVersionSingleWinnerUnderConcurrency", func(t *testing.T) {
+		conformance.RunDeleterExpectedVersionSingleWinnerUnderConcurrency(t, ctx, fixture)
+	})
+	t.Run("ExpectedVersionCascadeSingleWinnerUnderConcurrency", func(t *testing.T) {
+		conformance.RunDeleterExpectedVersionCascadeSingleWinnerUnderConcurrency(t, ctx, fixture)
 	})
 }
 

@@ -11,13 +11,14 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/types"
 )
 
-// TestEmbeddedContributorCreate exercises the full contributor mode flow in
+// The TestEmbeddedContributorCreate* tests exercise the full contributor mode flow in
 // embedded Dolt: init → contributor wizard → create. This is the exact
 // scenario that triggered GH#2988 ("no database selected" when the planning
 // repo's .beads directory has no metadata.json).
-func TestEmbeddedContributorCreate(t *testing.T) {
+func TestEmbeddedContributorCreateRoutesToPlanning(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt contributor tests")
 	}
@@ -46,6 +47,15 @@ func TestEmbeddedContributorCreate(t *testing.T) {
 		projectBeadsDir := filepath.Join(dir, ".beads")
 		assertIssueNotInStore(t, projectBeadsDir, "cr", issue.ID)
 	})
+}
+
+func TestEmbeddedContributorCreateShowReadsRouted(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt contributor tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("show_reads_routed_issue", func(t *testing.T) {
 		dir, _ := initContributor(t, bd, "sh")
@@ -56,6 +66,15 @@ func TestEmbeddedContributorCreate(t *testing.T) {
 			t.Errorf("title: got %q, want %q", shown.Title, "Show me")
 		}
 	})
+}
+
+func TestEmbeddedContributorCreateMultiple(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt contributor tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("multiple_creates_succeed", func(t *testing.T) {
 		dir, planningDir := initContributor(t, bd, "mc")
@@ -78,6 +97,67 @@ func TestEmbeddedContributorCreate(t *testing.T) {
 			assertIssueInStore(t, planningBeadsDir, "mc", id)
 		}
 	})
+}
+
+// TestEmbeddedContributorRoutedWritesCommitInPlanning runs, through the bd
+// binary in a contributor checkout, the commands that change an issue living in
+// the planning repository: each writes the change there and advances the
+// planning database's HEAD, as the TestEmbeddedRoutedSiblingWritesCommitTargetHead*
+// tests pin for a prefix route. While the contributor auto-route opened its
+// target read-only, the embedded store refused every one of these writes.
+func TestEmbeddedContributorRoutedWritesCommitInPlanning(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt contributor tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, planningDir := initContributor(t, bd, "cw")
+	planningBeadsDir := filepath.Join(planningDir, ".beads")
+	issue := bdCreate(t, bd, dir, "Planning issue")
+	question := bdCreate(t, bd, dir, "Planning question")
+	dismissed := bdCreate(t, bd, dir, "Planning request")
+
+	for _, step := range []struct {
+		name string
+		args []string
+	}{
+		{"update --claim", []string{"update", issue.ID, "--claim"}},
+		{"unclaim", []string{"unclaim", issue.ID}},
+		{"comment", []string{"comment", issue.ID, "planning comment"}},
+		{"close", []string{"close", issue.ID, "--reason", "done"}},
+		{"human respond", []string{"human", "respond", question.ID, "--response", "answered"}},
+		{"human dismiss", []string{"human", "dismiss", dismissed.ID, "--reason", "not needed"}},
+	} {
+		before := embeddedCurrentCommit(t, planningBeadsDir, "cw")
+		bdCommand(t, bd, dir, step.args...)
+		assertEmbeddedHeadAdvanced(t, planningBeadsDir, "cw", before, step.name)
+	}
+
+	planningStore := openStore(t, planningBeadsDir, "cw")
+	for _, id := range []string{issue.ID, question.ID, dismissed.ID} {
+		got, err := planningStore.GetIssue(t.Context(), id)
+		if err != nil {
+			t.Fatalf("GetIssue(%s) in the planning store: %v", id, err)
+		}
+		if got.Status != types.StatusClosed {
+			t.Errorf("%s status in the planning store = %q, want %q", id, got.Status, types.StatusClosed)
+		}
+	}
+	comments, err := planningStore.GetIssueComments(t.Context(), issue.ID)
+	if err != nil {
+		t.Fatalf("GetIssueComments: %v", err)
+	}
+	found := false
+	for _, c := range comments {
+		if c.Text == "planning comment" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the comment did not land in the planning store: %+v", comments)
+	}
+	assertIssueNotInStore(t, filepath.Join(dir, ".beads"), "cw", issue.ID)
 }
 
 // initContributor sets up a project with contributor mode enabled and returns
@@ -109,7 +189,7 @@ func initContributor(t *testing.T, bd, prefix string) (projectDir, planningDir s
 	requireFile(t, planningBeadsDir)
 
 	// Sanity: beads.role should be "contributor".
-	roleCmd := exec.Command("git", "config", "beads.role")
+	roleCmd := gitCommand("config", "beads.role")
 	roleCmd.Dir = projectDir
 	roleOut, err := roleCmd.Output()
 	if err != nil {

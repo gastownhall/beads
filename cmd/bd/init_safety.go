@@ -46,6 +46,25 @@ const (
 	// Supplying the matching token is the correct remedy for sources 1-3
 	// (format via `bd help init-safety`); source 4 was a deliberate decline.
 	ExitDestroyTokenMissing = 12
+
+	// ExitHomeDirRefused signals `bd init` was run directly in the user's
+	// home directory, which is not itself a git repository, without the
+	// caller naming a BEADS_DIR. Refused because init would `git init` $HOME
+	// and install agent files into it, where most of them are user-wide
+	// agent settings (GH#4635).
+	//
+	// 15 because 13 and 14 are taken: ExitGuardMismatch (update.go, "racer
+	// won, skip gracefully") and ExitMigrationFrozen (errors.go). A wrapper
+	// that branches on bd's exit codes without regard to the subcommand must
+	// never read this refusal as a benign skip.
+	//
+	// Not part of protocol v0 §E3 (pinned in
+	// cmd/bd/protocol/exit_codes_init_test.go), which freezes 10/11/12/130
+	// and says a new stable code needs a spec revision. This constant gives
+	// the refusal the same in-repo scriptability the other three have — a
+	// stable number instead of grepping stderr — without claiming wire
+	// status the spec has not granted.
+	ExitHomeDirRefused = 15
 )
 
 // RemoteSafetyAction names what the init command should do once it has

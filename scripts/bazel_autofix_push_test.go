@@ -161,17 +161,6 @@ func writeRawPatch(t *testing.T, body string) string {
 	return file
 }
 
-// requireAutofixBash skips when bash cannot run the autofix scripts: they run
-// on Linux runners and use bash 4 associative arrays, and macOS runners ship
-// /bin/bash 3.2.
-func requireAutofixBash(t *testing.T) {
-	t.Helper()
-	requireHostTool(t, "bash")
-	if err := exec.Command("bash", "-c", "declare -A probe=()").Run(); err != nil {
-		t.Skip("bash lacks associative arrays (bash >= 4 required)")
-	}
-}
-
 func runAutofixCheck(t *testing.T, script, dir, patch string) (string, error) {
 	t.Helper()
 	requireAutofixBash(t)

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -33,6 +34,12 @@ func TestMain(m *testing.M) {
 }
 
 func testMainInner(m *testing.M) int {
+	// Package-wide migration consent: these tests exercise the
+	// provider/bootstrap machinery that runs BELOW the consent gate
+	// (schema/migrate_consent.go), exactly as production does once an operator
+	// has consented.
+	schema.SetLocalMigrateConsent(true)
+
 	// Clear out the roots of earlier runs of this suite whose process is
 	// gone, before claiming one of our own. Roots with no owner marker, and
 	// roots whose owner is still running (a parallel package under

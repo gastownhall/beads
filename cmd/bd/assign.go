@@ -63,6 +63,12 @@ Examples:
 			if result != nil {
 				result.Close()
 			}
+			// A concurrent `bd delete` that commits before this resolution
+			// is the same lost race as one that commits inside the guarded
+			// write below.
+			if reported, ok := reportIfRevisionTargetGone("assigning", id, err, ifRevision); ok {
+				return reported
+			}
 			return HandleErrorRespectJSON("resolving %s: %v", id, err)
 		}
 		if result == nil || result.Issue == nil {
@@ -75,9 +81,8 @@ Examples:
 
 		issueStore := result.Store
 
-		if err := validateIssueUpdatable(id, result.Issue); err != nil {
-			return HandleErrorRespectJSON("%s", err)
-		}
+		// The template guard is the role's (issueops.Lifecycle.Update); its
+		// refusal is printed below as this command always printed it.
 
 		// bd-98s5c: bd assign is shorthand for an unguarded assignee update —
 		// same live-claim fence as bd update -a. mc-zndi7.74: skipped when this
@@ -85,7 +90,7 @@ Examples:
 		// lost race reports precondition_failed from the guarded write below
 		// instead of this policy refusal — see ifRevisionAlreadyStale's doc.
 		if !ifRevisionAlreadyStale(result.Issue, ifRevision) {
-			if err := validateIssueReassignable(id, result.Issue, actor, assignee,
+			if err := validateIssueReassignable(id, result.Issue, currentActor(), assignee,
 				storeClaimPoolAliases(ctx, issueStore), force); err != nil {
 				return HandleErrorRespectJSON("%s", err)
 			}
@@ -104,7 +109,7 @@ Examples:
 			return HandleErrorRespectJSON("%v", err)
 		}
 		mutationResult, err := runCommandUpdateMutation(opsCtx, ops, commandUpdateMutation{
-			actor:   actor,
+			actor:   currentActor(),
 			issueID: result.ResolvedID,
 			patch: issueops.IssuePatch{
 				Assignee: issueops.Field[string]{Set: true, Value: assignee},
@@ -118,10 +123,13 @@ Examples:
 					return reported
 				}
 			}
+			if refusal, ok := templateReadOnlyRefusal(id, err); ok {
+				return HandleErrorRespectJSON("%s", refusal)
+			}
 			return HandleErrorRespectJSON("updating %s: %v", id, err)
 		}
 
-		if err := commitPendingIfEmbedded(ctx, issueStore, actor, doltAutoCommitParams{
+		if err := commitPendingIfEmbedded(ctx, issueStore, currentActor(), doltAutoCommitParams{
 			Command:  "assign",
 			IssueIDs: []string{result.ResolvedID},
 		}); err != nil {

@@ -2,6 +2,8 @@ package issueops
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -121,7 +123,8 @@ type RemoveDependencyResult struct {
 // an edge to hang off, so there is no third answer. One request may mix the
 // two; it is still one transaction, and still all-or-nothing across both.
 // Only the durable half is versioned, so a request made entirely of ephemeral
-// edges records no history entry.
+// edges records no history entry unless it changes a durable issue's blocked
+// state (below).
 //
 // A TARGET's plane is independent of its source's: either class may depend on
 // the other.
@@ -129,7 +132,10 @@ type RemoveDependencyResult struct {
 // EITHER METHOD MAINTAINS BLOCKED STATE under BlockedStateInvariant: an edge
 // that lands or is removed leaves the column settled — for the source, for
 // everything that inherits from it, and for any waiter whose gate the edge
-// changed — inside the same transaction that wrote the edge.
+// changed — inside the same transaction that wrote the edge. A durable
+// issue's blocked state that changes is versioned with the edge, whichever
+// plane the edge is on: a wisp-sourced edge can block or unblock a durable
+// child.
 //
 // EACH METHOD LEAVES A TRAIL IN THE SOURCE'S EVENT STREAM, attributed to the
 // request's Actor: a genuinely new edge records a dependency_added entry, and
@@ -138,7 +144,7 @@ type RemoveDependencyResult struct {
 // found no edge both leave the stream as they found it. The trail follows the
 // source's plane exactly as the edge does, which is what makes it readable on
 // an ephemeral edge at all: the wisp plane is not versioned, so for a
-// wisp-sourced edge this is the only record the operation leaves.
+// wisp-sourced edge this is the only record of the edge itself.
 //
 // Implementations never mutate caller-owned request values, snapshot the
 // request at method entry, and apply validation and normalization only to
@@ -147,12 +153,20 @@ type RemoveDependencyResult struct {
 type DependencyEditor interface {
 	// AddDependencies asserts every edge in the request as ONE durable act:
 	// one transaction, one history entry. Any refused edge refuses the whole
-	// request and writes nothing — a self-dependency (ErrSelfDependency), a
-	// scheduling cycle (ErrDependencyCycle), a conflicting type on a pair that
-	// already has an edge (*DependencyTypeConflictError), a blocking edge that
-	// would gate an issue on its own ancestor or descendant
-	// (*DependencyHierarchyConflictError), or a SOURCE that does not exist
-	// (ErrDependencySourceNotFound).
+	// request and writes nothing — a self-dependency (ErrSelfDependency), an
+	// explicit edge from a dotted-id child to its own ancestor
+	// (*DottedChildDependencyError), a scheduling cycle (ErrDependencyCycle),
+	// a conflicting type on a pair that already has an edge
+	// (*DependencyTypeConflictError), a blocking edge that would gate an issue
+	// on its own ancestor or descendant (*DependencyHierarchyConflictError),
+	// or a SOURCE that does not exist (ErrDependencySourceNotFound).
+	//
+	// The dotted-child refusal is decided from the request alone, before any
+	// read, so it takes precedence over every refusal that reads stored rows:
+	// a child whose parent-child edge to that parent is already stored (the
+	// `bd create --parent` shape) is refused with *DottedChildDependencyError,
+	// which matches ErrValidation, not with the hierarchy or type conflict the
+	// stored edge would otherwise raise.
 	//
 	// A target's existence is checked only where the backend can see it. A
 	// target may legitimately be an "external:" reference or an issue in
@@ -182,9 +196,79 @@ type DependencyEditor interface {
 	// existed with the requested type — records NO history entry, the same way
 	// RemoveDependencyResult states it for a removal that found nothing. The
 	// one entry is recorded when at least one durable edge was genuinely
-	// written, and one is all that is recorded however many were.
+	// written or an edge changed a durable issue's blocked state, and one is
+	// all that is recorded however many were.
 	AddDependencies(ctx context.Context, req AddDependenciesRequest) (AddDependenciesResult, error)
 	// RemoveDependency removes exactly the named edge. It is idempotent: a
 	// missing edge is Removed false with a nil error, not ErrNotFound.
 	RemoveDependency(ctx context.Context, req RemoveDependencyRequest) (RemoveDependencyResult, error)
+}
+
+// DottedChildDependencyError refuses an explicit edge from a dotted-id child to
+// its own ancestor. The id already says "bd-abc.1 is under bd-abc": a child
+// inherits its parent's completion through the hierarchy, so a blocking (or any
+// other) explicit edge back up the tree either duplicates that structure or, for
+// a blocking type, deadlocks it — the parent cannot close before the child, and
+// the child would wait on the parent.
+//
+// The one edge it allows is the hierarchy itself: a parent-child edge to the
+// IMMEDIATE dotted parent. A parent-child edge to a higher ancestor is refused
+// too, because it would contradict the parent the id names.
+//
+// It unwraps to ErrValidation: the refusal is decidable from the two ids and
+// the type alone, with no read, so it is a property of the request.
+//
+// The message is the sentence `bd dep add` already printed, kept verbatim, so
+// it says "deadlock" whatever the type; Type is carried for callers that
+// inspect the refusal and is not rendered.
+type DottedChildDependencyError struct {
+	IssueID     string
+	DependsOnID string
+	Type        DependencyType
+}
+
+func (e *DottedChildDependencyError) Error() string {
+	return fmt.Sprintf("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock",
+		e.IssueID, e.DependsOnID)
+}
+
+// Unwrap classifies the refusal as request validation.
+func (e *DottedChildDependencyError) Unwrap() error { return ErrValidation }
+
+// IsDottedChildDependency reports whether an edge from issueID to dependsOnID
+// of type depType is the dotted-id hierarchy conflict CheckDottedChildDependency
+// refuses. It is exported for callers that phrase the refusal themselves (a
+// bulk report naming the offending line); every role enforces it through
+// CheckDottedChildDependency.
+func IsDottedChildDependency(issueID, dependsOnID string, depType DependencyType) bool {
+	_, immediateParent, depth := types.ParseHierarchicalID(issueID)
+	if depth == 0 || dependsOnID == "" {
+		return false
+	}
+	if dependsOnID != immediateParent && !strings.HasPrefix(issueID, dependsOnID+".") {
+		return false
+	}
+	return depType != DepParentChild || dependsOnID != immediateParent
+}
+
+// CheckDottedChildDependency is the ONE enforcement of the dotted-id hierarchy
+// rule. Every DependencyEditor implementation applies it to each requested edge
+// and every BatchApplier applies it to each dep_add item once its refs resolve,
+// so `bd dep add`, an HTTP dependencies:add, and a batch apply (including
+// `bd create --graph`'s own edges) refuse the same edge the same way. Two CLI
+// paths that write an edge through a store verb instead of a role call it
+// themselves: `bd link` and `bd batch`'s `dep add`.
+//
+// Other edge writers do not apply it yet, so they can still store an edge the
+// roles refuse. The known ones are `bd relate`; the edges a create writes with
+// its issue (`bd create --deps`/`--waits-for`, and Lifecycle.Create's ParentID,
+// Dependencies and WaitsFor); `bd duplicate`, `bd supersede` and
+// `bd duplicates --auto-merge`'s link and reparenting; and the tracker engine's
+// createDependencies. The molecule, template and swarm writers have not been
+// audited against it. bd-25s1wh tracks the gap.
+func CheckDottedChildDependency(issueID, dependsOnID string, depType DependencyType) error {
+	if IsDottedChildDependency(issueID, dependsOnID, depType) {
+		return &DottedChildDependencyError{IssueID: issueID, DependsOnID: dependsOnID, Type: depType}
+	}
+	return nil
 }

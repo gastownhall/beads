@@ -168,7 +168,7 @@ def main():
             ap.error(f'total_shards is required with --write (the default, {default_total_shards}, '
                      'is the FROZEN legacy block -- see its header in embedded-storage-test-shards.txt; '
                      'it must not be regenerated). Pass the Bazel-only total explicitly instead, e.g. '
-                     '"15 --weights=duration" for bazel-embedded\'s block (see '
+                     '"40 --weights=duration" for bazel-embedded\'s block (see '
                      'internal/storage/embeddeddolt/BUILD.bazel\'s embeddeddolt_embedded_test '
                      'shard_count for the current value)')
         args.total_shards = default_total_shards

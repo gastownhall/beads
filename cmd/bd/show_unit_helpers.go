@@ -11,27 +11,18 @@ import (
 )
 
 // validateIssueUpdatable checks if an issue can be updated.
+//
+// It is the CLI-only template guard that bd comment, bd note, bd priority and
+// bd tag (and the proxied comment and mutate routes) still run as a pre-read:
+// their writes do not go through issueops.Lifecycle.Update, whose role rule
+// (storage issueops.AuthorizeTemplateUpdate) guards bd update and bd assign on
+// every route. Until those commands move onto the role, this is their only
+// guard.
 // Uses the centralized validation package for consistency.
 func validateIssueUpdatable(id string, issue *types.Issue) error {
 	// Note: We use NotTemplate() directly instead of ForUpdate() to maintain
 	// backward compatibility - the original didn't check for nil issues.
 	return validation.NotTemplate()(id, issue)
-}
-
-// validateIssueClosable checks if an issue can be closed.
-// Uses the centralized validation package for consistency.
-//
-// actor is the current actor identity (may be empty in early-init contexts);
-// AssigneeMatches refuses the close when the bead is assigned to someone else
-// unless force is true. This is the authority guard for be-035.
-func validateIssueClosable(id string, issue *types.Issue, actor string, force bool) error {
-	// Note: We use individual validators instead of ForClose() to maintain
-	// backward compatibility - the original didn't check for nil issues.
-	return validation.Chain(
-		validation.NotTemplate(),
-		validation.NotPinned(force),
-		validation.AssigneeMatches(actor, force),
-	)(id, issue)
 }
 
 // validateIssueReassignable checks whether an assignee update may proceed:

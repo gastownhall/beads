@@ -36,6 +36,13 @@ type BatchGetterFixture struct {
 	BatchGetter publicops.BatchGetter
 	// CreateIssue seeds a durable issue in the issues plane.
 	CreateIssue func(context.Context, *types.Issue, string) error
+	// CreateIssues seeds many durable issues in one call. Optional: only
+	// RunBatchGetterAcceptsExactlyTheCap uses it, to seed its MaxGetManyIDs
+	// issues in one write instead of MaxGetManyIDs single-row commits (about
+	// 200s of the embedded suites' race runs); nil falls back to CreateIssue
+	// per row. The seeded rows are the same either way, and the case asserts
+	// only on the GetMany read.
+	CreateIssues func(context.Context, []*types.Issue, string) error
 	// CreateWisp seeds an ephemeral issue in the wisps plane. It is a separate
 	// field rather than an Ephemeral flag on CreateIssue because the three
 	// adapters reach the two planes through different verbs.
@@ -205,7 +212,7 @@ func RunBatchGetterAcceptsExactlyTheCap(t *testing.T, ctx context.Context, fixtu
 	for i := range ids {
 		ids[i] = fmt.Sprintf("%s-atcap-%d", fixture.IssuePrefix, i)
 	}
-	seedBatchGetterIssues(t, ctx, fixture, ids...)
+	seedBatchGetterIssuesInBulk(t, ctx, fixture, ids...)
 
 	result := getMany(t, ctx, fixture, publicops.GetManyRequest{IDs: ids})
 	if len(result.Issues) != publicops.MaxGetManyIDs {
@@ -360,6 +367,23 @@ func seedBatchGetterIssues(t *testing.T, ctx context.Context, fixture BatchGette
 		if err := fixture.CreateIssue(ctx, batchGetterSeed(id, false), "batch-getter-seed"); err != nil {
 			t.Fatalf("seed issue %s: %v", id, err)
 		}
+	}
+}
+
+// seedBatchGetterIssuesInBulk seeds the same rows as seedBatchGetterIssues,
+// through the fixture's CreateIssues hook when it has one.
+func seedBatchGetterIssuesInBulk(t *testing.T, ctx context.Context, fixture BatchGetterFixture, ids ...string) {
+	t.Helper()
+	if fixture.CreateIssues == nil {
+		seedBatchGetterIssues(t, ctx, fixture, ids...)
+		return
+	}
+	issues := make([]*types.Issue, len(ids))
+	for i, id := range ids {
+		issues[i] = batchGetterSeed(id, false)
+	}
+	if err := fixture.CreateIssues(ctx, issues, "batch-getter-seed"); err != nil {
+		t.Fatalf("seed %d issues: %v", len(issues), err)
 	}
 }
 

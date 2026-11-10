@@ -55,8 +55,16 @@ mcp_pytest() {
     # Explicit worker count, not "auto": CI runners' reported CPU count
     # doesn't always match the cgroup quota, and -n 8 is pinned to measured
     # timing (tools/f3, 2026-10) on both 2 vCPU (2.7x) and 4 vCPU (~3x)
-    # runners. pytest-xdist is a pinned dev dependency (pyproject.toml).
-    uv run pytest -n 8 --durations=50
+    # runners. bazel.yml's package-mcp sets BEADS_MCP_PYTEST_WORKERS=16 on
+    # its 8 vCPU Blacksmith runner (the suite is dominated by per-test
+    # `bd init` fixture setup, so two workers per CPU still pay off).
+    # pytest-xdist is a pinned dev dependency (pyproject.toml).
+    local workers="${BEADS_MCP_PYTEST_WORKERS:-8}"
+    if [[ ! "$workers" =~ ^[1-9][0-9]*$ ]]; then
+        echo "BEADS_MCP_PYTEST_WORKERS must be a positive integer, got '$workers'" >&2
+        return 2
+    fi
+    uv run pytest -n "$workers" --durations=50
 }
 
 mcp_build() {

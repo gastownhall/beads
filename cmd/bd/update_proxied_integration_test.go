@@ -213,6 +213,14 @@ func TestProxiedServerUpdate(t *testing.T) {
 			t.Errorf("lost issue %s assignee = %q, want alice (unchanged)", lost.ID, gotLost.Assignee)
 		}
 	})
+}
+
+// TestProxiedServerUpdateB holds more of TestProxiedServerUpdate's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerUpdateB(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	// Parity with the non-proxied TestMultiIDUpdatePartialFailureExitsNonzero:
 	// a generic per-ID failure (a bogus ID) between two good IDs must exit
@@ -288,6 +296,54 @@ func TestProxiedServerUpdate(t *testing.T) {
 		}
 		if len(report.Failed) != 1 || report.Failed[0].ID != bogus {
 			t.Errorf("JSON failure report failed list = %+v, want exactly one entry for %s", report.Failed, bogus)
+		}
+	})
+
+	// A refused --claim under --json on the proxied path: the batch report is
+	// the only JSON document the command prints, and its failed entry names the
+	// already-claimed class and the holder — the direct route's contract,
+	// pinned by protocol.TestProtocol_ErrorClass_ClaimFailures_StructuredJSON
+	// (wy-kxgf4).
+	t.Run("claim_conflict_json_reports_holder_in_failed_entry", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "uccj")
+		issue := bdProxiedCreate(t, bd, p.dir, "Contested JSON")
+		bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--claim", "--actor", "alice")
+
+		stdout, stderr, err := bdProxiedUpdateRaw(t, bd, p.dir, "--json", issue.ID, "--claim", "--actor", "bob")
+		if err == nil {
+			t.Fatalf("proxied --json claim of an issue alice holds exited 0, want non-zero\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+
+		// A JSON document starts at column 0, whether compact or indented, so
+		// count those lines across both streams: one, not one per refusal.
+		docs := 0
+		for _, line := range strings.Split(stdout+"\n"+stderr, "\n") {
+			if strings.HasPrefix(line, "{") {
+				docs++
+			}
+		}
+		if docs != 1 {
+			t.Errorf("output carries %d JSON documents, want exactly 1 (the batch report)\nstdout:\n%s\nstderr:\n%s", docs, stdout, stderr)
+		}
+
+		lines := strings.Split(strings.TrimSpace(stderr), "\n")
+		last := lines[len(lines)-1]
+		var report struct {
+			Error  string `json:"error"`
+			Failed []struct {
+				ID    string `json:"id"`
+				Error string `json:"error"`
+			} `json:"failed"`
+		}
+		if uerr := json.Unmarshal([]byte(last), &report); uerr != nil {
+			t.Fatalf("last stderr line is not a JSON failure report: %v\nstderr:\n%s", uerr, stderr)
+		}
+		if len(report.Failed) != 1 || report.Failed[0].ID != issue.ID {
+			t.Fatalf("JSON failure report failed list = %+v, want exactly one entry for %s", report.Failed, issue.ID)
+		}
+		if msg := report.Failed[0].Error; !strings.Contains(msg, "already claimed") || !strings.Contains(msg, "alice") {
+			t.Errorf("failed entry error = %q, want the already-claimed class naming the holder alice", msg)
 		}
 	})
 
@@ -379,6 +435,14 @@ func TestProxiedServerUpdate(t *testing.T) {
 			t.Errorf("dependent should be unblocked after blocker closes")
 		}
 	})
+}
+
+// TestProxiedServerUpdateC holds more of TestProxiedServerUpdate's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerUpdateC(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("invalid_status_rejected", func(t *testing.T) {
 		t.Parallel()
@@ -512,7 +576,6 @@ func TestProxiedServerUpdate(t *testing.T) {
 				before, after)
 		}
 	})
-
 }
 
 func TestProxiedServerUpdate2(t *testing.T) {
@@ -637,6 +700,14 @@ func TestProxiedServerUpdate2(t *testing.T) {
 			t.Errorf("ephemeral: got %d, want 0 after --persistent", ephemeral)
 		}
 	})
+}
+
+// TestProxiedServerUpdate2B holds more of TestProxiedServerUpdate2's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerUpdate2B(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("update_ephemeral", func(t *testing.T) {
 		t.Parallel()
@@ -761,6 +832,14 @@ func TestProxiedServerUpdate2(t *testing.T) {
 			t.Errorf("metadata[keep]: got %v, want %q", got["keep"], "yes")
 		}
 	})
+}
+
+// TestProxiedServerUpdate2C holds more of TestProxiedServerUpdate2's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerUpdate2C(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("update_set_metadata", func(t *testing.T) {
 		t.Parallel()
@@ -885,7 +964,6 @@ func TestProxiedServerUpdate2(t *testing.T) {
 			t.Errorf("defer_until: got nil, want non-nil (defer still applied)")
 		}
 	})
-
 }
 
 func TestProxiedServerUpdate3(t *testing.T) {

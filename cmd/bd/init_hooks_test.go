@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -232,20 +231,50 @@ func TestGenerateHookSection_Timeout(t *testing.T) {
 	if !strings.Contains(section, `"$_bd_timeout_command" -- "$_bd_timeout"`) {
 		t.Error("section missing GNU timeout argv separator")
 	}
-	if !strings.Contains(section, "perl -e 'alarm shift; exec @ARGV' --") {
-		t.Error("section missing perl alarm fallback for stock macOS")
+	// The Perl fallback must supervise bd, not alarm+exec it: a pending alarm
+	// survives exec and the Go runtime ignores SIGALRM (GH#7753). It signals
+	// bd's own process group, because bd catches the first SIGTERM and keeps
+	// waiting on its children. TestGeneratedHookTimeoutProcessBoundary drives
+	// this program on a real Perl.
+	if strings.Contains(section, "alarm shift; exec @ARGV") {
+		t.Error("section still execs bd under a pending perl alarm")
+	}
+	for _, want := range []string{
+		"my $pid = fork;",
+		"setpgrp(0, 0); exec { $ARGV[0] } @ARGV",
+		"kill $sig, -$pid",
+		"for qw(HUP INT TERM)",
+		"exit 142 if $sent;",
+		`' -- "$_bd_timeout" bd hooks run pre-push "$@"; then`,
+	} {
+		if !strings.Contains(section, want) {
+			t.Errorf("section missing perl supervisor fragment %q", want)
+		}
+	}
+	// The supervisor is one single-quoted shell word inside the managed
+	// section, so it must not end an orphaned section early (a blank line) or
+	// look like the shim's exec line.
+	for _, hookName := range managedHookNames {
+		for i, line := range strings.Split(strings.TrimSuffix(generateHookSection(hookName), "\n"), "\n") {
+			if strings.TrimSpace(line) == "" {
+				t.Errorf("%s section line %d is blank", hookName, i+1)
+			}
+			if strings.HasPrefix(strings.TrimSpace(line), "exec") {
+				t.Errorf("%s section line %d starts with exec: %q", hookName, i+1, line)
+			}
+		}
 	}
 	if !strings.Contains(section, "_bd_timeout_backend=perl") {
 		t.Error("section missing scoped perl backend marker")
 	}
 
-	// GNU deadline statuses and Perl SIGALRM are scoped to the backend that can
-	// synthesize them. The direct fallback must not swallow a natural 124/142.
+	// GNU deadline statuses and the Perl supervisor's 142 are scoped to the
+	// backend that can synthesize them. The direct fallback must not swallow a natural 124/142.
 	if !strings.Contains(section, `"$_bd_exit" -eq 124`) {
 		t.Error("section missing timeout exit code handling")
 	}
 	if !strings.Contains(section, `"$_bd_timeout_backend" = perl`) || !strings.Contains(section, `"$_bd_exit" -eq 142`) {
-		t.Error("section missing perl-scoped SIGALRM timeout exit code handling")
+		t.Error("section missing perl-scoped supervisor timeout exit code handling")
 	}
 	if !strings.Contains(section, "timed out") {
 		t.Error("section missing timeout warning message")
@@ -795,7 +824,7 @@ func TestConfigureBeadsHooksPath_AbsolutePath(t *testing.T) {
 		}
 
 		// Read back core.hooksPath
-		out, err := exec.Command("git", "config", "--get", "core.hooksPath").Output()
+		out, err := gitCommand("config", "--get", "core.hooksPath").Output()
 		if err != nil {
 			t.Fatalf("git config --get core.hooksPath failed: %v", err)
 		}
@@ -827,7 +856,7 @@ func TestInstallHooksBeads_WorktreeAccess(t *testing.T) {
 			t.Fatalf("Failed to create metadata.json: %v", err)
 		}
 
-		cmd := exec.Command("git", "commit", "--allow-empty", "--no-verify", "-m", "init")
+		cmd := gitCommand("commit", "--allow-empty", "--no-verify", "-m", "init")
 		cmd.Dir = tmpDir
 		if output, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git commit failed: %v\n%s", err, string(output))
@@ -847,7 +876,7 @@ func TestInstallHooksBeads_WorktreeAccess(t *testing.T) {
 		}
 
 		// Read core.hooksPath and verify it's absolute
-		out, err := exec.Command("git", "config", "--get", "core.hooksPath").Output()
+		out, err := gitCommand("config", "--get", "core.hooksPath").Output()
 		if err != nil {
 			t.Fatalf("core.hooksPath not set after --beads install: %v", err)
 		}
@@ -858,17 +887,17 @@ func TestInstallHooksBeads_WorktreeAccess(t *testing.T) {
 
 		// Create a worktree and verify hooks are accessible from it
 		worktreeDir := filepath.Join(t.TempDir(), "worktree")
-		cmd = exec.Command("git", "worktree", "add", worktreeDir, "-b", "test-worktree")
+		cmd = gitCommand("worktree", "add", worktreeDir, "-b", "test-worktree")
 		cmd.Dir = tmpDir
 		if output, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git worktree add failed: %v\n%s", err, string(output))
 		}
 		defer func() {
-			exec.Command("git", "worktree", "remove", worktreeDir).Run()
+			gitCommand("worktree", "remove", worktreeDir).Run()
 		}()
 
 		// From the worktree, core.hooksPath should resolve to the same hooks
-		cmd = exec.Command("git", "config", "--get", "core.hooksPath")
+		cmd = gitCommand("config", "--get", "core.hooksPath")
 		cmd.Dir = worktreeDir
 		wtOut, err := cmd.Output()
 		if err != nil {
@@ -924,14 +953,14 @@ func TestInstallHooksBeads_PreservesGlobalHooks(t *testing.T) {
 		t.Fatalf("failed to write global pre-commit hook: %v", err)
 	}
 
-	setGlobal := exec.Command("git", "config", "--global", "core.hooksPath", globalHooksDir)
+	setGlobal := gitCommand("config", "--global", "core.hooksPath", globalHooksDir)
 	if out, err := setGlobal.CombinedOutput(); err != nil {
 		t.Fatalf("failed to set global core.hooksPath: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
 
 	// Manual repo init (can't use newGitRepo which sets a local core.hooksPath).
 	repoDir := t.TempDir()
-	initCmd := exec.Command("git", "init", "--initial-branch=main")
+	initCmd := gitCommand("init", "--initial-branch=main")
 	initCmd.Dir = repoDir
 	if err := initCmd.Run(); err != nil {
 		t.Fatalf("git init failed: %v", err)
@@ -940,7 +969,7 @@ func TestInstallHooksBeads_PreservesGlobalHooks(t *testing.T) {
 		{"config", "user.email", "test@test.com"},
 		{"config", "user.name", "Test User"},
 	} {
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = repoDir
 		if err := cmd.Run(); err != nil {
 			t.Fatalf("git config %v failed: %v", args, err)
@@ -987,7 +1016,7 @@ func TestInstallHooksBeads_PreservesDefaultGitHooks(t *testing.T) {
 		}
 
 		// Unset the local core.hooksPath that newGitRepo sets so git falls back to .git/hooks/.
-		exec.Command("git", "config", "--unset", "core.hooksPath").Run()
+		gitCommand("config", "--unset", "core.hooksPath").Run()
 
 		beadsDir := setupBeadsDir(t, repoDir)
 
@@ -1202,13 +1231,13 @@ func TestInstallHooksBeads_HuskyV8Helper(t *testing.T) {
 	}
 
 	// Set as global hooks path (simulating husky v8)
-	setGlobal := exec.Command("git", "config", "--global", "core.hooksPath", huskyDir)
+	setGlobal := gitCommand("config", "--global", "core.hooksPath", huskyDir)
 	if out, err := setGlobal.CombinedOutput(); err != nil {
 		t.Fatalf("set global core.hooksPath: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
 
 	repoDir := t.TempDir()
-	initCmd := exec.Command("git", "init", "--initial-branch=main")
+	initCmd := gitCommand("init", "--initial-branch=main")
 	initCmd.Dir = repoDir
 	if err := initCmd.Run(); err != nil {
 		t.Fatalf("git init: %v", err)
@@ -1217,7 +1246,7 @@ func TestInstallHooksBeads_HuskyV8Helper(t *testing.T) {
 		{"config", "user.email", "test@test.com"},
 		{"config", "user.name", "Test"},
 	} {
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = repoDir
 		if err := cmd.Run(); err != nil {
 			t.Fatalf("git config %v: %v", args, err)
@@ -1308,13 +1337,13 @@ s=$(dirname "$(dirname "$0")")/$n
 	}
 
 	// Set core.hooksPath to .husky/_/ (husky v9 style)
-	setGlobal := exec.Command("git", "config", "--global", "core.hooksPath", huskyInner)
+	setGlobal := gitCommand("config", "--global", "core.hooksPath", huskyInner)
 	if out, err := setGlobal.CombinedOutput(); err != nil {
 		t.Fatalf("set global core.hooksPath: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
 
 	repoDir := t.TempDir()
-	initCmd := exec.Command("git", "init", "--initial-branch=main")
+	initCmd := gitCommand("init", "--initial-branch=main")
 	initCmd.Dir = repoDir
 	if err := initCmd.Run(); err != nil {
 		t.Fatalf("git init: %v", err)
@@ -1323,7 +1352,7 @@ s=$(dirname "$(dirname "$0")")/$n
 		{"config", "user.email", "test@test.com"},
 		{"config", "user.name", "Test"},
 	} {
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = repoDir
 		if err := cmd.Run(); err != nil {
 			t.Fatalf("git config %v: %v", args, err)

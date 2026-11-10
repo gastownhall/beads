@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -133,12 +134,19 @@ func nodeIssueFromInput(t *testing.T, node GraphApplyNode, in createInput) *type
 
 func TestGraphApplyNodeIssue_DefaultsAndOpts(t *testing.T) {
 	t.Run("type and priority defaults", func(t *testing.T) {
-		issue := nodeIssueFromInput(t, GraphApplyNode{Key: "n", Title: "N"}, createInput{createdBy: "t"})
+		node := GraphApplyNode{Key: "n", Title: "N"}
+		issue := nodeIssueFromInput(t, node, createInput{createdBy: "t"})
 		if issue.IssueType != types.TypeTask {
 			t.Errorf("type default = %q, want task", issue.IssueType)
 		}
-		if issue.Priority != 2 {
-			t.Errorf("priority default = %d, want 2", issue.Priority)
+		// A node without a priority leaves it to the role's default
+		// (CreateItem.DefaultPriority), so the materialized issue carries none;
+		// the dry-run preview shows the library default the apply will store.
+		if issue.Priority != 0 {
+			t.Errorf("materialized priority = %d, want 0 (the role applies the default)", issue.Priority)
+		}
+		if got := graphApplyPreviewPriority(node, issue); got != issueops.DefaultCreatePriority {
+			t.Errorf("preview priority = %d, want the library default %d", got, issueops.DefaultCreatePriority)
 		}
 		if issue.Status != types.StatusOpen {
 			t.Errorf("status = %q, want open", issue.Status)
@@ -288,13 +296,19 @@ func TestParseMarkdownDependencies(t *testing.T) {
 		{"whitespace skipped", []string{"  ", ""}, nil, false},
 		{"bare id → blocks edge", []string{"bd-1"},
 			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-1"}}, false},
-		{"type:id preserved verbatim (no alias)", []string{"depends-on:bd-2"},
-			[]issueops.CreateDependency{{Type: types.DependencyType("depends-on"), TargetID: "bd-2"}}, false},
+		// GH#7508: the --deps aliases gate ready work in a file too.
+		{"depends-on alias → blocks edge", []string{"depends-on:bd-2"},
+			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-2"}}, false},
+		{"blocked-by alias → blocks edge", []string{"blocked-by:bd-2"},
+			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-2"}}, false},
 		{"discovered-from preserved", []string{"discovered-from:bd-3"},
 			[]issueops.CreateDependency{{Type: types.DepDiscoveredFrom, TargetID: "bd-3"}}, false},
 		{"whitespace trimmed", []string{"  blocks : bd-4 "},
-			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-4"}}, false},
+			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-4", Reverse: true}}, false},
 		{"empty type rejected", []string{":bd-1"}, nil, true},
+		// One edge spelled three ways is written once, as --deps writes it.
+		{"repeated edge deduped", []string{"depends-on:bd-1", "blocked-by:bd-1", "bd-1"},
+			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-1"}}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -315,13 +329,84 @@ func TestParseMarkdownDependencies(t *testing.T) {
 	}
 }
 
-func TestParseMarkdownDependencies_DoesNotSwapBlocks(t *testing.T) {
+// TestParseMarkdownDependencies_RefusesWhatDepsRefuses pins GH#7508: a type
+// `bd create --deps` refuses is refused in a file too, naming the template.
+func TestParseMarkdownDependencies_RefusesWhatDepsRefuses(t *testing.T) {
+	tests := []struct {
+		name              string
+		in                []string
+		wantErrSubstrings []string
+	}{
+		{"misspelled type", []string{"blokcs:bd-1"},
+			[]string{"unknown dependency type", "blokcs", "Test Title", "blocked-by"}},
+		{"custom type", []string{"implements:bd-1"},
+			[]string{"unknown dependency type", "implements", "Test Title", "blocked-by"}},
+		// `depends-on: bd-1` arrives split on the space.
+		{"type with no target", []string{"depends-on:", "bd-1"},
+			[]string{"no target", "Test Title"}},
+		// GH#4626: one target cannot carry two types.
+		{"two types on one target", []string{"discovered-from:bd-1", "blocked-by:bd-1"},
+			[]string{"discovered-from", "blocks", "Test Title"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseMarkdownDependencies(tt.in, "Test Title")
+			if err == nil {
+				t.Fatalf("parseMarkdownDependencies(%v) = %#v, want an error", tt.in, got)
+			}
+			for _, want := range tt.wantErrSubstrings {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("parseMarkdownDependencies(%v) error = %q, want to contain %q", tt.in, err, want)
+				}
+			}
+		})
+	}
+}
+
+// TestParseMarkdownDependencies_BlocksReversesDirection pins GH#7508: as with
+// `bd create --deps blocks:<id>`, the target depends on the new issue.
+func TestParseMarkdownDependencies_BlocksReversesDirection(t *testing.T) {
 	got, err := parseMarkdownDependencies([]string{"blocks:bd-5"}, "T")
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}
-	want := []issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-5"}}
+	want := []issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-5", Reverse: true}}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("got %#v, want %#v (no swap-direction)", got, want)
+		t.Errorf("got %#v, want %#v (reversed, like --deps)", got, want)
+	}
+}
+
+// GH#7519: a closed or in_progress node's status timestamp must not predate
+// its created_at. graphApplyNodeIssue stamps ClosedAt/StartedAt at plan time;
+// if it leaves CreatedAt zero, the insert stamps created_at later (one row at
+// a time), so a load crossing a second boundary stores closed_at < created_at.
+func TestGraphApplyNodeIssue_StatusTimestampsDoNotPredateCreatedAt(t *testing.T) {
+	for _, status := range []string{string(types.StatusClosed), string(types.StatusInProgress)} {
+		t.Run(status, func(t *testing.T) {
+			node := GraphApplyNode{Key: "n", Title: "N", Status: status}
+			issue := nodeIssueFromInput(t, node, createInput{createdBy: "t"})
+
+			// Mirror the insert (issueops/create.go, domain/db/issue.go): a zero
+			// CreatedAt is filled with the insert's own, later, clock reading.
+			insertNow := time.Now().UTC().Add(time.Second)
+			createdAt := issue.CreatedAt
+			if createdAt.IsZero() {
+				createdAt = insertNow
+			}
+
+			var stamped *time.Time
+			if status == string(types.StatusClosed) {
+				stamped = issue.ClosedAt
+			} else {
+				stamped = issue.StartedAt
+			}
+			if stamped == nil {
+				t.Fatalf("%s: status timestamp not stamped", status)
+			}
+			if stamped.Before(createdAt) {
+				t.Errorf("%s: status timestamp %v predates created_at %v (plan CreatedAt zero=%v)",
+					status, *stamped, createdAt, issue.CreatedAt.IsZero())
+			}
+		})
 	}
 }

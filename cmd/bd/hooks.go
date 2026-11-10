@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -18,6 +19,7 @@ import (
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
@@ -48,15 +50,27 @@ func hookSectionEndLine() string {
 	return fmt.Sprintf("%s v%s ---", hookSectionEndPrefix, Version)
 }
 
-// hookTimeoutSeconds is the soft deadline for a beads hook. GNU timeout sends
-// SIGTERM at the deadline, while Perl's alarm terminates the direct bd process.
-// Neither backend promises containment of TERM-resistant descendant work. When
-// neither helper is available, the generated hook warns that it is unbounded.
+// hookTimeoutSeconds is the soft deadline for a beads hook. Both backends send
+// SIGTERM at the deadline to bd and its process group. The group matters: bd
+// catches its first SIGTERM and keeps waiting (setupGracefulShutdown), and the
+// work it waits on, the chained .old hook and the bd export/import children,
+// runs in child processes that only a group signal reaches. The Perl backend
+// must supervise bd rather than alarm+exec it, because the Go runtime catches
+// SIGALRM and takes no action (GH#7753). Only the Perl backend follows up with
+// SIGKILL (hookTimeoutKillAfterSeconds); under coreutils timeout a bd that
+// outlives the SIGTERM keeps the hook waiting. A process that ignores SIGTERM
+// can outlive the hook under either backend. When neither helper is available,
+// the generated hook warns that it is unbounded.
 // The default is 300 seconds (5 minutes) to accommodate chained hooks — e.g.
 // pre-commit framework pipelines that run linters, type-checkers, and builds
 // inside `bd hooks run` via the `.old` hook chain (GH#2732).
 // The value can be overridden via the BEADS_HOOK_TIMEOUT environment variable.
 const hookTimeoutSeconds = 300
+
+// hookTimeoutKillAfterSeconds is how long the Perl backend waits after the
+// deadline SIGTERM before it sends SIGKILL to a bd that is still running, and
+// to its process group.
+const hookTimeoutKillAfterSeconds = 2
 
 // generateHookSection returns the marked section content for a given hook name.
 // The section is self-contained: it checks for bd availability, runs the hook
@@ -77,6 +91,14 @@ const hookTimeoutSeconds = 300
 //     coreutils) ..."), and the uutils multicall dispatches on the argv[0]
 //     suffix and then prints the canonical name ("timeout (uutils coreutils)
 //     ..." when invoked as gtimeout). checks.nix runs that case.
+//   - The Perl fallback forks bd into a process group of its own and arms the
+//     alarm in the parent only; alarm+exec would hand SIGALRM to bd, which
+//     ignores it (GH#7753). On expiry it sends the group SIGTERM, then SIGKILL
+//     hookTimeoutKillAfterSeconds later if bd is still running, and exits 142
+//     once bd is reaped. A bd that exits before the deadline keeps its own
+//     status. SIGHUP, SIGINT and SIGTERM that reach the supervisor are passed
+//     on to the group: a Ctrl-C signals the terminal's process group, which no
+//     longer holds bd.
 //   - If the beads database is not initialized (exit code 3), the hook exits
 //     successfully with a warning so that git operations are not blocked.
 func generateHookSection(hookName string) string {
@@ -114,7 +136,20 @@ func generateHookSection(hookName string) string {
 		"    fi\n" +
 		"  elif command -v perl >/dev/null 2>&1; then\n" +
 		"    _bd_timeout_backend=perl\n" +
-		"    if perl -e 'alarm shift; exec @ARGV' -- \"$_bd_timeout\" bd hooks run " + hookName + " \"$@\"; then\n" +
+		"    if perl -e '\n" +
+		"      my $t = shift;\n" +
+		"      my $pid = fork;\n" +
+		"      defined $pid or die \"beads: fork failed: $!\\n\";\n" +
+		"      if (!$pid) { setpgrp(0, 0); exec { $ARGV[0] } @ARGV; warn \"beads: cannot run $ARGV[0]: $!\\n\"; exit 127 }\n" +
+		"      my ($sig, $sent, $done) = (\"TERM\", 0, 0);\n" +
+		"      $SIG{ALRM} = sub { return if $done; kill $sig, -$pid; ($sig, $sent) = (\"KILL\", 1); alarm " + fmt.Sprintf("%d", hookTimeoutKillAfterSeconds) + " };\n" +
+		"      $SIG{$_} = sub { kill $_[0], -$pid unless $done } for qw(HUP INT TERM);\n" +
+		"      alarm $t;\n" +
+		"      $done = waitpid $pid, 0;\n" +
+		"      alarm 0;\n" +
+		"      exit 142 if $sent;\n" +
+		"      exit($? & 127 ? 128 + ($? & 127) : $? >> 8);\n" +
+		"    ' -- \"$_bd_timeout\" bd hooks run " + hookName + " \"$@\"; then\n" +
 		"      _bd_exit=0\n" +
 		"    else\n" +
 		"      _bd_exit=$?\n" +
@@ -863,8 +898,32 @@ var hooksListCmd = &cobra.Command{
 	},
 }
 
+// refuseSymlinkedHooksDir refuses a hooks directory that is itself a symlink,
+// dangling or not: every hook write, preserved copy and uninstall edit would
+// land in the link's target, a directory bd never selected. A missing
+// directory is allowed (install creates it), and aliases above the directory,
+// such as a symlinked .beads workspace, remain supported.
+func refuseSymlinkedHooksDir(hooksDir string) error {
+	// An absolute core.hooksPath arrives as configured, and Lstat follows a
+	// link spelled with a trailing separator.
+	hooksDir = filepath.Clean(hooksDir)
+	fi, err := os.Lstat(hooksDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to stat hooks directory %s: %w", remedy.PrintedValue(hooksDir), err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("hooks directory %s is a symlink; bd will not write hooks through it into the link target\nReplace the symlink with a real directory and re-run", remedy.PrintedValue(hooksDir))
+	}
+	return nil
+}
+
 // guardHookWritePath refuses hook writes that would silently modify files
 // bd does not own (bd-5vdt8):
+//   - a hook whose immediate parent directory is a symlink: the write lands
+//     in the link's target, even when the hook file does not exist yet
 //   - a symlinked hook path: os.WriteFile follows the link (O_TRUNC) and
 //     rewrites the target inode — e.g. a repo-tracked script the hook
 //     points at, dirtying every clone that shares it
@@ -876,6 +935,11 @@ func guardHookWritePath(hookPath string, allowTracked bool) error {
 }
 
 func guardHookWritePathWithProbe(hookPath string, allowTracked bool, tracked func(string) string) error {
+	// The parent is checked first: a hook that does not exist yet would still
+	// be created inside a symlinked directory's target.
+	if err := refuseSymlinkedHooksDir(filepath.Dir(hookPath)); err != nil {
+		return err
+	}
 	fi, err := os.Lstat(hookPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1100,6 +1164,12 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 		if err != nil {
 			return err
 		}
+	}
+
+	// Check the destination itself before creating, preserving into, or
+	// writing any hook in it, and before configuring Git to use it.
+	if err := refuseSymlinkedHooksDir(hooksDir); err != nil {
+		return fmt.Errorf("refusing to install hooks: %w", err)
 	}
 
 	// Create hooks directory if it doesn't exist.
@@ -1574,10 +1644,29 @@ func uninstallHooks() error {
 }
 
 func uninstallHooksAt(hooksDir string, reset func() error) error {
+	// Refuse before editing any hook or resetting configuration: every edit
+	// below would land in the link's target.
+	if err := refuseSymlinkedHooksDir(hooksDir); err != nil {
+		return fmt.Errorf("refusing to uninstall hooks: %w", err)
+	}
 	hookNames := []string{"pre-commit", "post-merge", "pre-push", "post-checkout", "prepare-commit-msg"}
 
 	for _, hookName := range hookNames {
 		hookPath := filepath.Join(hooksDir, hookName)
+
+		// A symlinked hook is not bd's to edit: reading and rewriting it would
+		// change the link's target.
+		fi, err := os.Lstat(hookPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return fmt.Errorf("failed to stat %s: %w", hookName, err)
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			fmt.Fprintf(os.Stderr, "Warning: %s is a symlink; leaving it and its target untouched\n", remedy.PrintedValue(hookPath))
+			continue
+		}
 
 		// #nosec G304 -- hook path constrained to .git/hooks directory
 		content, err := os.ReadFile(hookPath)
@@ -1612,12 +1701,17 @@ func uninstallHooksAt(hooksDir string, reset func() error) error {
 			if err := os.Remove(hookPath); err != nil {
 				return fmt.Errorf("failed to remove %s: %w", hookName, err)
 			}
-			// Restore backup if exists
+			// Restore the backup only when it is a regular file: renaming a
+			// symlink or directory would make it the executable hook path.
 			backupPath := hookPath + ".backup"
-			if _, err := os.Stat(backupPath); err == nil {
-				if err := os.Rename(backupPath, hookPath); err != nil {
+			if bfi, err := os.Lstat(backupPath); err == nil {
+				if !bfi.Mode().IsRegular() {
+					fmt.Fprintf(os.Stderr, "Warning: %s is not a regular file; leaving it in place instead of restoring it\n", remedy.PrintedValue(backupPath))
+				} else if err := os.Rename(backupPath, hookPath); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: failed to restore backup for %s: %v\n", hookName, err)
 				}
+			} else if !os.IsNotExist(err) {
+				fmt.Fprintf(os.Stderr, "Warning: failed to check backup for %s: %v\n", hookName, err)
 			}
 		}
 		// Not a bd hook at all — leave it alone
@@ -1834,8 +1928,9 @@ func exportJSONLForCommit() {
 	fullPath := filepath.Join(hookJSONLDir(beadsDir), exportPath)
 
 	// If the export file is staged for deletion (user ran `git rm`), do not
-	// re-export or re-stage it. GIT_INDEX_FILE is set during an actual commit,
-	// so git-diff-index reads the pending index — where the deletion lives.
+	// re-export or re-stage it. The guard reads every index gitAddFile would
+	// stage into: the pending index (GIT_INDEX_FILE during an actual commit)
+	// and, for `git commit -- <paths>`, the index git installs after it.
 	// Without this guard, git add fullPath would convert the staged deletion
 	// back to a modification and the file would never be removed from the
 	// repo. Reimplements gastownhall/beads#3838 (ckumar1).
@@ -1896,12 +1991,13 @@ func exportJSONLForCommit() {
 
 	// Stage the exported file if configured. Skip when no-git-ops is set
 	// (GH#3314). gitAddFile scrubs the inherited git hook env vars so git
-	// rediscovers the repo from cwd, and silently skips when fullPath is
-	// outside the hook's worktree. That guard still matters here: hookJSONLDir
-	// only retargets the cross-worktree case it can fix, so a .beads/redirect
-	// to a shared out-of-repo store, a BEADS_DIR override, or a beads dir
-	// above the repository root all still resolve outside this worktree and
-	// must not be dropped into the index. See GH#3311.
+	// rediscovers the repo from cwd, keeping only a GIT_INDEX_FILE that names
+	// this repository's commit index (GH#4080), and silently skips when
+	// fullPath is outside the hook's worktree. That guard still matters here:
+	// hookJSONLDir only retargets the cross-worktree case it can fix, so a
+	// .beads/redirect to a shared out-of-repo store, a BEADS_DIR override, or
+	// a beads dir above the repository root all still resolve outside this
+	// worktree and must not be dropped into the index. See GH#3311.
 	if config.GetBool("export.git-add") && !config.GetBool("no-git-ops") {
 		if err := gitAddFile(fullPath); err != nil {
 			debug.Logf("pre-commit: git add failed: %v\n", err)
@@ -2093,12 +2189,16 @@ func hookSubprocessEnv(env []string) []string {
 // back into a modification, silently reviving a file the user intentionally
 // removed.
 //
-// Unlike preCommitHasStagedBeadsFiles and gitAddFile, this deliberately runs
-// git with the hook's inherited environment intact rather than scrubbing
-// GIT_* vars. GIT_INDEX_FILE is set during an actual commit and points at
-// the pending index — where the staged deletion lives — so scrubbing it
-// here would make git fall back to the on-disk index and miss the
-// deletion. Reimplements gastownhall/beads#3838 (ckumar1).
+// Like preCommitHasStagedBeadsFiles and gitAddFile, this runs git with the
+// environment gitIndexEnv builds: GIT_* routing vars scrubbed, so git
+// discovers the repository from dir even when a linked-worktree hook
+// inherited GIT_DIR (which would make dir the work-tree top and the
+// pathspec miss), and the hook's GIT_INDEX_FILE kept, because it points at
+// the pending index where the staged deletion lives (GH#4080). It asks every
+// index gitAddFile stages into (stagingIndexes): a `git commit -- <paths>`
+// that leaves the export out keeps its deletion only in index.lock, the index
+// git installs after the commit. Reimplements gastownhall/beads#3838
+// (ckumar1).
 //
 // #nosec G702 -- no shell is involved: the binary is the literal "git" and
 // every argument is its own argv element. The only variable argument is the
@@ -2122,10 +2222,19 @@ func isExportFileStagedForDeletion(fullPath string) bool {
 	if err != nil {
 		return false
 	}
-	checkCmd := exec.Command("git", "diff", "--cached", "--diff-filter=D", "--name-only", "--", rel)
-	checkCmd.Dir = dir
-	out, _ := checkCmd.Output()
-	return len(out) > 0
+	env, indexFile, err := gitIndexEnv(dir)
+	if err != nil {
+		debug.Logf("pre-commit: failed to resolve the commit index: %v\n", err)
+	}
+	for _, index := range stagingIndexes(indexFile) {
+		checkCmd := exec.Command("git", "diff", "--cached", "--diff-filter=D", "--name-only", "--", rel)
+		checkCmd.Dir = dir
+		checkCmd.Env = envForIndex(env, indexFile, index)
+		if out, _ := checkCmd.Output(); len(out) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // nearestExistingDir walks up from dir to the first existing directory,
@@ -2148,9 +2257,15 @@ func preCommitHasStagedBeadsFiles(beadsDir string) bool {
 	if hookRoot := hookWorkTreeRoot(); hookRoot != "" {
 		cmdDir = hookRoot
 	}
+	// Ask the index the commit is built from: during `git commit -- <paths>`
+	// that is the hook's GIT_INDEX_FILE, not the on-disk index (GH#4080).
+	env, _, err := gitIndexEnv(cmdDir)
+	if err != nil {
+		debug.Logf("pre-commit: failed to resolve the commit index: %v\n", err)
+	}
 	cmd := exec.Command("git", "diff", "--cached", "--name-only", "--", ".beads")
 	cmd.Dir = cmdDir
-	cmd.Env = scrubGitHookEnv(os.Environ())
+	cmd.Env = env
 	out, err := cmd.Output()
 	if err != nil {
 		debug.Logf("pre-commit: failed to inspect staged .beads paths: %v\n", err)
@@ -2267,7 +2382,10 @@ func warnJSONLWithoutDoltRemote(reason string) {
 	fmt.Fprintf(os.Stderr, "beads: %s warning: no Dolt remote configured.\n", reason)
 	fmt.Fprintln(os.Stderr, "beads: .beads/issues.jsonl is an export, not cross-machine sync or source of truth.")
 	if originURL, err := gitOriginGetURL(); err == nil && originURL != "" {
-		fmt.Fprintf(os.Stderr, "beads: repair: bd dolt remote add origin %s && bd dolt push\n", normalizeRemoteURL(originURL))
+		// The URL is the git origin, set by whoever cloned the repository:
+		// it goes into the command only as one shell word.
+		url, note := remedy.CommandArg(runtime.GOOS, normalizeRemoteURL(originURL), "<url>")
+		fmt.Fprintf(os.Stderr, "beads: repair: bd dolt remote add origin %s && bd dolt push%s\n", url, note)
 		return
 	}
 	fmt.Fprintln(os.Stderr, "beads: repair: add a git origin, then run 'bd dolt remote add origin <git-remote-url>' and 'bd dolt push'.")

@@ -128,7 +128,9 @@ func TestGatedReadyHintWithoutReadyStep(t *testing.T) {
 		MoleculeTitle: "Gated molecule",
 	}})
 
-	if got := hintCommandLine(t, out); !strings.Contains(got, "<ready-step-id>") {
-		t.Errorf("dispatch hint = %q, want a placeholder when no ready step is known", got)
+	// The placeholder is bd's own text, so it prints bare on every platform,
+	// not quoted or replaced as a store-read step ID would be.
+	if got, want := hintCommandLine(t, out), "bd assign <ready-step-id> <agent>"; got != want {
+		t.Errorf("dispatch hint = %q, want %q when no ready step is known", got, want)
 	}
 }

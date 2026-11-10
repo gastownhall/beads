@@ -21,7 +21,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
-// TestPersistentPreRunLogsAndSkipsIdentityCheckForFreshEmbeddedWorkspace is
+// TestEmbeddedPersistentPreRunLogsAndSkipsIdentityCheckForFreshEmbeddedWorkspace is
 // the MINOR-criterion regression test for be-0gfcs round 2 (be-3bt2e): a
 // brand-new workspace -- metadata.json present, but no embedded database on
 // disk yet -- is the one previewErr case the identity check has always
@@ -32,7 +32,7 @@ import (
 // This exercises a real embedded-Dolt bootstrap (schema init on first open),
 // so it is opt-in like the other embedded-dolt integration tests in this
 // package: set BEADS_TEST_EMBEDDED_DOLT=1 to run it.
-func TestPersistentPreRunLogsAndSkipsIdentityCheckForFreshEmbeddedWorkspace(t *testing.T) {
+func TestEmbeddedPersistentPreRunLogsAndSkipsIdentityCheckForFreshEmbeddedWorkspace(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -120,7 +120,7 @@ func TestPersistentPreRunLogsAndSkipsIdentityCheckForFreshEmbeddedWorkspace(t *t
 	}
 }
 
-// TestIdentityGateRendersSchemaSkewFromForwardDriftedWorkspace pins the
+// TestEmbeddedIdentityGateRendersSchemaSkewFromForwardDriftedWorkspace pins the
 // preview→skew WIRE, which TestRefuseUnverifiablePreviewOpenRendersTypedErrors
 // deliberately does not: that test hands refuseUnverifiablePreviewOpen a
 // hand-built *schema.SchemaSkewError, so it pins the renderer in isolation.
@@ -136,7 +136,7 @@ func TestPersistentPreRunLogsAndSkipsIdentityCheckForFreshEmbeddedWorkspace(t *t
 //
 // This bootstraps a real embedded-Dolt database, so it is opt-in on the same
 // tier as the sibling above: set BEADS_TEST_EMBEDDED_DOLT=1 to run it.
-func TestIdentityGateRendersSchemaSkewFromForwardDriftedWorkspace(t *testing.T) {
+func TestEmbeddedIdentityGateRendersSchemaSkewFromForwardDriftedWorkspace(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}

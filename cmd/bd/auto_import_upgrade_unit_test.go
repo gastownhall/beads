@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -382,6 +383,72 @@ func TestMaybeAutoImportJSONL_ChangedJSONLBypassesSuccessStamp(t *testing.T) {
 	if got := count.Load(); got != 2 {
 		t.Fatalf("fallback importer invoked %d time(s), want 2 after JSONL changed", got)
 	}
+}
+
+// fakeJSONLImporterStore is a fakeFallbackStore that also implements
+// jsonlImporter, so maybeAutoImportJSONL takes the single-transaction path,
+// and answers every ImportJSONLData call with the same counts.
+type fakeJSONLImporterStore struct {
+	fakeFallbackStore
+	imported int
+	retired  []string
+	calls    atomic.Int32
+}
+
+func (f *fakeJSONLImporterStore) ImportJSONLData(_ context.Context, _ []*types.Issue, _ map[string]string, _ string) (int, []string, error) {
+	f.calls.Add(1)
+	return f.imported, f.retired, nil
+}
+
+// TestMaybeAutoImportJSONL_StampsAFileWhoseEveryRowWasRetired pins both
+// auto-import paths on a file that writes nothing because a retaining sweep
+// retired every row it carries (the sweep left no issue rows, so the database
+// counts as empty): the attempt is reported without calling the rows imported,
+// and it is stamped, so the next command does not read the file again.
+func TestMaybeAutoImportJSONL_StampsAFileWhoseEveryRowWasRetired(t *testing.T) {
+	prev := commandDidWrite.Load()
+	t.Cleanup(func() { commandDidWrite.Store(prev) })
+	const report = "auto-imported 0 issues (1 retired by a retention sweep, not re-created) from "
+
+	t.Run("single-transaction importer", func(t *testing.T) {
+		dir := t.TempDir()
+		writeAutoImportFixtureJSONL(t, dir)
+		store := &fakeJSONLImporterStore{retired: []string{"unit-1"}}
+		stderr := captureStderr(t, func() {
+			maybeAutoImportJSONL(context.Background(), store, dir)
+			maybeAutoImportJSONL(context.Background(), store, dir)
+		})
+		if got := store.calls.Load(); got != 1 {
+			t.Fatalf("ImportJSONLData invoked %d time(s), want 1: an attempt that met only retired rows must stamp the file", got)
+		}
+		if !strings.Contains(stderr, report) {
+			t.Errorf("stderr = %q, want it to contain %q", stderr, report)
+		}
+	})
+
+	t.Run("fallback importer", func(t *testing.T) {
+		dir := t.TempDir()
+		writeAutoImportFixtureJSONL(t, dir)
+		orig := fallbackImporter
+		var count atomic.Int32
+		fallbackImporter = func(_ context.Context, _ storage.DoltStorage, _ string) (*importLocalResult, error) {
+			count.Add(1)
+			return &importLocalResult{Retired: 1}, nil
+		}
+		t.Cleanup(func() { fallbackImporter = orig })
+
+		store := &fakeFallbackStore{statsTotalIssues: 0}
+		stderr := captureStderr(t, func() {
+			maybeAutoImportJSONL(context.Background(), store, dir)
+			maybeAutoImportJSONL(context.Background(), store, dir)
+		})
+		if got := count.Load(); got != 1 {
+			t.Fatalf("fallback importer invoked %d time(s), want 1: an attempt that met only retired rows must stamp the file", got)
+		}
+		if !strings.Contains(stderr, report) {
+			t.Errorf("stderr = %q, want it to contain %q", stderr, report)
+		}
+	})
 }
 
 // captureOptsStore is a storage.DoltStorage that records the
