@@ -6,6 +6,7 @@ go_test(
         "execwin_other_test.go",
         "execwin_test.go",
         "execwin_windows_test.go",
+        "subprocess_windows_test.go",
     ],
     embed = [":execwin"],
     deps = select({
