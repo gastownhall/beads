@@ -165,6 +165,18 @@ func assertCapabilityRuleInvariants(t *testing.T, where string, rule proxyCapabi
 			t.Errorf("%s: an unimplemented refusal needs a Tracking item naming who closes it", where)
 		}
 	}
+
+	// A force opt-in is a way past a gate refusal, so it means nothing on any
+	// other outcome, and a way past with no warning is a silent bypass.
+	if (rule.ForceFlag == "") != (rule.ForceWarning == "") {
+		t.Errorf("%s: ForceFlag %q and ForceWarning %q must be set together", where, rule.ForceFlag, rule.ForceWarning)
+	}
+	if rule.ForceFlag != "" && rule.Outcome != ProxyOutcomeRefused {
+		t.Errorf("%s: ForceFlag on a %q rule; only a gate refusal can be forced past", where, rule.Outcome)
+	}
+	if strings.Contains(rule.ForceWarning, "is not supported in proxied-server mode") {
+		t.Errorf("%s: ForceWarning %q reads as the refusal; the forced pass is not refused", where, rule.ForceWarning)
+	}
 }
 
 // inlineProxiedRefusal matches the untyped refusals commands raise from their
@@ -593,4 +605,102 @@ func TestProxyMigrateSchemaForceWarnsBeforeTheOpen(t *testing.T) {
 			t.Errorf("the refused invocation printed the force warning: %q", stderr)
 		}
 	})
+}
+
+// TestProxyCapabilityRegistryForceOptInsAreScoped keeps the force opt-in to the
+// one path #6656 decided: `bd migrate schema`. Every rule naming a ForceFlag,
+// topology overrides included, must name a bool flag the real command
+// registers — forcedPastRefusal fails closed on anything else, so a typo would
+// silently turn the route the refusal prescribes into a dead end.
+func TestProxyCapabilityRegistryForceOptInsAreScoped(t *testing.T) {
+	optIns := map[string]bool{}
+	for _, row := range proxyCapabilityRegistry {
+		rules := map[string]proxyCapabilityRule{row.display(): row.Rule}
+		for topology, rule := range row.Topology {
+			rules[row.display()+" on "+string(topology)] = rule
+		}
+		for where, rule := range rules {
+			if rule.ForceFlag == "" {
+				continue
+			}
+			optIns[row.display()] = true
+			flag := realCommandAtPath(t, row.Path).Flags().Lookup(rule.ForceFlag)
+			switch {
+			case flag == nil:
+				t.Errorf("%s: ForceFlag --%s is not a flag `bd %s` registers", where, rule.ForceFlag, row.Path)
+			case flag.Value.Type() != "bool":
+				t.Errorf("%s: ForceFlag --%s is a %s flag; only a bool can say \"forced\"", where, rule.ForceFlag, flag.Value.Type())
+			}
+		}
+	}
+	got := sortedKeys(optIns)
+	if want := []string{"migrate schema"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("rows with a force opt-in = %q, want %q; a new one is a policy change that needs its own design", got, want)
+	}
+}
+
+// TestProxyForceDoesNotBypassSiblingRefusals proves the opt-in is the row's,
+// not the flag's. Every other gate-refused command that accepts a bool --force
+// — `bd migrate` itself among them — is run with --force=true on each
+// topology it refuses, and must still get its own typed refusal and no force
+// warning.
+func TestProxyForceDoesNotBypassSiblingRefusals(t *testing.T) {
+	tried := map[string]bool{}
+	for _, row := range proxyCapabilityRegistry {
+		// An arg-set row is keyed on another flag too; its bare sibling row
+		// carries the same path and gets tried here.
+		if row.ArgSet != "" || row.Path == "migrate schema" {
+			continue
+		}
+		cmd := realCommandAtPath(t, row.Path)
+		flag := cmd.Flags().Lookup("force")
+		if flag == nil || flag.Value.Type() != "bool" {
+			continue
+		}
+		for _, topology := range allProxiedTopologies {
+			rule := row.ruleFor(topology)
+			if rule.Outcome != ProxyOutcomeRefused {
+				continue
+			}
+			tried[row.Path] = true
+			t.Run(row.Path+"/"+string(topology), func(t *testing.T) {
+				setCommandFlag(t, cmd, "force", "true")
+				stdout, stderr, err := runProxyRegistryGate(t, cmd, topology)
+				var exit *exitError
+				if !errors.As(err, &exit) || exit.Code != rule.ExitCode {
+					t.Fatalf("`bd %s --force` on %s: err = %v, want its refusal (exit %d)", row.Path, topology, err, rule.ExitCode)
+				}
+				var got refusalJSONForTest
+				if err := json.Unmarshal([]byte(stdout), &got); err != nil || got.Code != rule.Code {
+					t.Errorf("refusal JSON = %q (%v), want code %q", stdout, err, rule.Code)
+				}
+				if strings.Contains(stderr, "close co-resident library clients") {
+					t.Errorf("a sibling refusal printed the migrate schema force warning: %q", stderr)
+				}
+			})
+		}
+	}
+	// Vacuity guard: the parent verb is the sibling a misplaced opt-in would
+	// most likely catch, so it has to be among the ones tried.
+	if !tried["migrate"] {
+		t.Errorf("`bd migrate --force` was not tried (tried %q); the guard no longer covers the parent verb", sortedKeys(tried))
+	}
+}
+
+// setCommandFlag sets one flag on a shared command for the test and restores
+// both its value and its Changed bit afterwards.
+func setCommandFlag(t *testing.T, cmd *cobra.Command, name, value string) {
+	t.Helper()
+	flag := cmd.Flags().Lookup(name)
+	if flag == nil {
+		t.Fatalf("`bd %s` registers no --%s", commandRegistryPath(cmd), name)
+	}
+	oldValue, oldChanged := flag.Value.String(), flag.Changed
+	t.Cleanup(func() {
+		_ = flag.Value.Set(oldValue)
+		flag.Changed = oldChanged
+	})
+	if err := cmd.Flags().Set(name, value); err != nil {
+		t.Fatalf("set `bd %s` --%s=%s: %v", commandRegistryPath(cmd), name, value, err)
+	}
 }
