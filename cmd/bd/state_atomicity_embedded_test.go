@@ -4,12 +4,15 @@ package main
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
@@ -209,4 +212,183 @@ func TestEmbeddedSetStateRecordsOneEventWithItsEdgeAndLabelSwap(t *testing.T) {
 	if got := stateEventEdges(t, beadsDir, printed, subject.ID); got != 1 {
 		t.Errorf("printed event %q has %d parent-child edges to %s, want 1 (the id written)", printed, got, subject.ID)
 	}
+}
+
+// stateHookFiring is one hook run a plantStateHookRecorder script saved: the
+// event and the issue id the runner passed as $2 and $1, and the issue payload
+// it wrote to the script's stdin.
+type stateHookFiring struct {
+	event, id string
+	payload   stateHookPayload
+}
+
+// stateHookPayload is the part of a hook's issue payload the set-state hook
+// contract reads.
+type stateHookPayload struct {
+	ID           string   `json:"id"`
+	Labels       []string `json:"labels"`
+	Dependencies []struct {
+		IssueID     string `json:"issue_id"`
+		DependsOnID string `json:"depends_on_id"`
+		Type        string `json:"type"`
+	} `json:"dependencies"`
+}
+
+// plantStateHookRecorder installs on_create and on_update scripts that save
+// each firing's payload to a file of its own, named for the event, the issue
+// and the script's pid, and returns the directory they save into. A file per
+// firing keeps hook processes that run at once from interleaving their writes.
+func plantStateHookRecorder(t *testing.T, beadsDir string) string {
+	t.Helper()
+	logDir := t.TempDir()
+	hooksDir := filepath.Join(beadsDir, "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatalf("mkdir hooks: %v", err)
+	}
+	script := "#!/bin/sh\ncat > " + shellQuote(logDir) + "/\"$2 $1 $$.json\"\n"
+	for _, name := range []string{"on_create", "on_update"} {
+		if err := os.WriteFile(filepath.Join(hooksDir, name), []byte(script), 0o755); err != nil { //nolint:gosec // G306: a hook must be executable to run at all
+			t.Fatalf("plant %s: %v", name, err)
+		}
+	}
+	return logDir
+}
+
+// readStateHookFirings waits for want saved firings and decodes them. The
+// command has returned by then, and a command waits for the hooks it fired
+// before it exits, so a count past want is a hook that fired too often.
+func readStateHookFirings(t *testing.T, logDir string, want int) []stateHookFiring {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		entries, err := os.ReadDir(logDir)
+		if err != nil {
+			t.Fatalf("read the hook recorder's directory: %v", err)
+		}
+		names := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		if len(names) > want {
+			t.Fatalf("hooks fired %d times, want %d: %q", len(names), want, names)
+		}
+		if len(names) == want {
+			if firings, ok := decodeStateHookFirings(logDir, names); ok {
+				return firings
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("hooks fired %d times, want %d: %q", len(names), want, names)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// decodeStateHookFirings reads every saved firing, reporting false while a
+// script is still writing one.
+func decodeStateHookFirings(logDir string, names []string) ([]stateHookFiring, bool) {
+	firings := make([]stateHookFiring, 0, len(names))
+	for _, name := range names {
+		fields := strings.Fields(strings.TrimSuffix(name, ".json"))
+		if len(fields) != 3 {
+			return nil, false
+		}
+		data, err := os.ReadFile(filepath.Join(logDir, name)) // #nosec G304 -- this test's own temp file
+		if err != nil {
+			return nil, false
+		}
+		firing := stateHookFiring{event: fields[0], id: fields[1]}
+		if err := json.Unmarshal(data, &firing.payload); err != nil {
+			return nil, false
+		}
+		firings = append(firings, firing)
+	}
+	return firings, true
+}
+
+// assertStateChangeHooks checks one set-state's firings against the hook
+// contract both routes share (GH#5637): on_create for the event, on_update for
+// the event carrying its parent-child edge to the subject, which is the
+// payload a script tells the changed bead by, and on_update for the subject
+// carrying its new label. Nothing else fires.
+func assertStateChangeHooks(t *testing.T, firings []stateHookFiring, eventID, subject, label string) {
+	t.Helper()
+	got := map[string]int{}
+	for _, firing := range firings {
+		key := firing.event + " " + firing.id
+		got[key]++
+		if firing.payload.ID != firing.id {
+			t.Errorf("%s: the payload names %q", key, firing.payload.ID)
+		}
+		switch key {
+		case "update " + eventID:
+			if !stateHookPayloadHasParent(firing.payload, eventID, subject) {
+				t.Errorf("%s: payload dependencies = %+v, want the parent-child edge %s -> %s", key, firing.payload.Dependencies, eventID, subject)
+			}
+		case "update " + subject:
+			if !slices.Contains(firing.payload.Labels, label) {
+				t.Errorf("%s: payload labels = %v, want %s among them", key, firing.payload.Labels, label)
+			}
+		}
+	}
+	if want := map[string]int{"create " + eventID: 1, "update " + eventID: 1, "update " + subject: 1}; !maps.Equal(got, want) {
+		t.Errorf("hooks fired %v, want %v", got, want)
+	}
+}
+
+func stateHookPayloadHasParent(payload stateHookPayload, eventID, subject string) bool {
+	for _, dep := range payload.Dependencies {
+		if dep.IssueID == eventID && dep.DependsOnID == subject && dep.Type == string(types.DepParentChild) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestEmbeddedSetStateHooksSeeTheEventItsEdgeAndTheSubject pins what a
+// hook-enabled workspace sees for a set-state on the direct route (GH#5637):
+// on_create for the event, on_update for the event carrying its parent-child
+// edge to the subject, and on_update for the subject, for a durable subject
+// and a wisp alike, and nothing for a refused set-state. The proxied route pins
+// the same contract (TestProxiedServerSetState's
+// hooks_see_the_event_its_edge_and_the_subject), so a script sees one shape on
+// both.
+func TestEmbeddedSetStateHooksSeeTheEventItsEdgeAndTheSubject(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("hook script form is POSIX shell")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "sh")
+	durable := bdCreate(t, bd, dir, "Hooked durable subject", "--type", "task")
+	wisp := bdCreate(t, bd, dir, "Hooked wisp subject", "--type", "task", "--ephemeral")
+
+	for _, c := range []struct{ name, subject string }{{"durable", durable.ID}, {"wisp", wisp.ID}} {
+		t.Run(c.name, func(t *testing.T) {
+			// Planted after the setup, so every firing it saves is this
+			// set-state's.
+			logDir := plantStateHookRecorder(t, beadsDir)
+			res := stateSetStateJSON(t, bd, dir, c.subject, "patrol=muted")
+			eventID, _ := res["event_id"].(string)
+			if eventID == "" {
+				t.Fatalf("set-state --json returned no event_id: %v", res)
+			}
+			assertStateChangeHooks(t, readStateHookFirings(t, logDir, 3), eventID, c.subject, "patrol:muted")
+		})
+	}
+
+	t.Run("refused", func(t *testing.T) {
+		logDir := plantStateHookRecorder(t, beadsDir)
+		cmd := exec.Command(bd, "set-state", durable.ID, "patrol="+strings.Repeat("v", 260))
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		if stdout, _, err := runCommandBuffers(t, cmd); err == nil {
+			t.Fatalf("set-state with a 267-character label succeeded, want it refused\nstdout:\n%s", stdout.String())
+		}
+		readStateHookFirings(t, logDir, 0)
+	})
 }

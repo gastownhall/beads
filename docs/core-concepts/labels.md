@@ -850,10 +850,14 @@ Behavioral edges of the same change:
   the command's pre-read of the subject carries the template waiver the
   write needs, and a subject that *became* a template after the pre-read
   refuses atomically rather than succeeding halfway.
-- **Hooks.** On success, hook-enabled workspaces see `create` for the
-  event and `update` for the subject — no third event for the edge. On
-  refusal, nothing is emitted and nothing is written.
-- **Proxied servers.** Over HTTP the template waiver rides the batch's
+- **Hooks.** On success, hook-enabled workspaces see three firings, the
+  same on every route: `on_create` for the event, `on_update` for the
+  event once its parent edge lands, and `on_update` for the subject with
+  its new label. The event's `on_update` payload lists the parent-child
+  edge in its `dependencies`, which is how a script tells which bead
+  changed state now that the event id no longer names the subject. On
+  refusal, nothing fires and nothing is written.
+- **Over HTTP (`bd serve`).** The template waiver rides the batch's
   update item as `allow_template`, announced by the server's
   `issues.batchApply.updateAllowTemplate` capability; a client that needs
   the waiver against a server that does not announce it reports the

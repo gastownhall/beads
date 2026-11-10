@@ -254,15 +254,20 @@ func TestServedBatchApplyUpdateItemsRefuseATemplate(t *testing.T) {
 }
 
 // The set-state refusal arms (GH#5637) over the wire. The event-create refusal
-// runs through the shared contract (the first test below), because ErrAlreadyExists survives
-// encode and decode whole. The two arms below do not: the wire carries a
-// refusal's TYPED structure as problem-document TEXT — a server-side
-// *ItemError's Error() string, not the errors.As-able value — so the shared
-// cases' typed assertions cannot run here, and these bespoke tests pin what
+// runs through the shared contract (the first test below), and so does the
+// event-or-edge refusal (TestServedBatchApplyStateChangeRefusedAtTheEventOrItsEdge
+// WritesNothing): the client rebuilds the refusing item's *ItemError from the
+// problem document, and ErrAlreadyExists survives encode and decode whole. The
+// two arms below cannot run the shared cases, and the http leg waives those
+// (internal/storage/leg_contract_wiring_test.go). These bespoke tests pin what
 // the wire CAN express instead, the way TestServedBatchApplyRefusesAMetadata
-// RefWithoutNamingIt pins L-apply-ref: the refusal happened, the message names
-// the item and the target that caused it, and NOTHING WAS WRITTEN — the
-// executed create and edge rolled back, no history entry.
+// RefWithoutNamingIt pins L-apply-ref:
+//   - a missing parent target refuses at the edge item, and the executed
+//     create rolls back, but the problem document carries no endpoint id, so
+//     the item's *DependencyEndpointNotFoundError does not survive;
+//   - an over-length label never reaches execution: the server refuses it
+//     while decoding the request, before any item runs, so there is no
+//     executed create or edge to roll back and no item to name.
 func TestServedBatchApplyARefusedEventCreatePreventsTheStateChange(t *testing.T) {
 	conformance.RunBatchApplyARefusedEventCreatePreventsTheStateChange(t, t.Context(), newServedBatchApplyFixture(t, "hbars"))
 }
@@ -307,7 +312,14 @@ func TestServedBatchApplyAMissingParentTargetRollsTheExecutedCreateBack(t *testi
 	}
 }
 
-func TestServedBatchApplyALateLabelRefusalRollsBackTheEventAndEdge(t *testing.T) {
+// TestServedBatchApplyRefusesAnOverlongStateLabelAtDecode is the wire's form of
+// the late-label arm. The in-tree legs refuse the over-length label at the
+// update item, after the event create and the edge ran, and roll both back;
+// this server refuses it while decoding the request (applyLabelPatch ->
+// applyBoundedLabels), so the refusal names the member and no item, and
+// nothing ran. If the check ever moved into execution, the item error assertion
+// below fails, and the shared case could run on this leg instead of its waiver.
+func TestServedBatchApplyRefusesAnOverlongStateLabelAtDecode(t *testing.T) {
 	ctx := t.Context()
 	fixture := newServedBatchApplyFixture(t, "hball")
 	subject := fixture.IssuePrefix + "-latelab-subject"
@@ -330,17 +342,21 @@ func TestServedBatchApplyALateLabelRefusalRollsBackTheEventAndEdge(t *testing.T)
 	if err == nil {
 		t.Fatalf("a state change whose label patch overflows the column: ApplyBatch returned no error")
 	}
-	// The wire names the refused member and the bound it broke, which is the
-	// server's typed ErrFieldTooLong rendered into the problem document.
-	if !strings.Contains(err.Error(), "add[0]") {
-		t.Errorf("the wire refusal does not name the refused label member: %v", err)
+	// The wire names the refused member and the bound it broke while decoding,
+	// before any item ran, so the refusal names no item.
+	if !strings.Contains(err.Error(), "add[0]") || !strings.Contains(err.Error(), "storage holds at most") {
+		t.Errorf("the wire refusal does not name the refused label member and its bound: %v", err)
+	}
+	var itemErr *issueops.ItemError
+	if errors.As(err, &itemErr) {
+		t.Errorf("the over-length label refused at item %d (%s), want a decode-time refusal naming no item: %v", itemErr.Index, itemErr.Kind, err)
 	}
 	assertServedRowCount(t, ctx, fixture, "issues", eventID, 0)
 	assertServedRowCount(t, ctx, fixture, "wisps", eventID, 0)
 	if n := servedCount(t, ctx, fixture,
 		"SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?",
 		eventID, subject); n != 0 {
-		t.Errorf("edges %s -> %s after the refusal = %d, want 0: the executed edge rolled back", eventID, subject, n)
+		t.Errorf("edges %s -> %s after the refusal = %d, want 0", eventID, subject, n)
 	}
 	if n := servedCount(t, ctx, fixture, "SELECT COUNT(*) FROM labels WHERE issue_id = ? AND label = ?", subject, "patrol:active"); n != 1 {
 		t.Errorf("subject label rows for patrol:active after the refusal = %d, want 1 (the swap never ran)", n)
@@ -350,7 +366,7 @@ func TestServedBatchApplyALateLabelRefusalRollsBackTheEventAndEdge(t *testing.T)
 		t.Fatalf("CountHistory: %v", err)
 	}
 	if after-before != 0 {
-		t.Errorf("a state change refused at its last item recorded %d history entries over the wire, want none: the executed create and edge rolled back", after-before)
+		t.Errorf("a state change refused at decode recorded %d history entries over the wire, want none", after-before)
 	}
 
 	// POSITIVE HALF: the same plan over a legal label lands whole, so the
@@ -549,6 +565,15 @@ func TestServedBatchApplyCarriesTheGateMembers(t *testing.T) {
 // set-state's one-request state change reaches a template over the wire.
 func TestServedBatchApplyStateChangeOnATemplateHonorsAllowTemplate(t *testing.T) {
 	conformance.RunBatchApplyStateChangeOnATemplateHonorsAllowTemplate(t, t.Context(), newServedBatchApplyFixture(t, "hbasct"))
+}
+
+// TestServedBatchApplyStateChangeRefusedAtTheEventOrItsEdgeWritesNothing RUNS
+// the shared case: both of its refusals keep their types over the wire. The
+// client rebuilds the refusing item's *ItemError from the problem document,
+// and the problem's code maps back to ErrAlreadyExists at the event create and
+// to ErrValidation at the dotted-id edge.
+func TestServedBatchApplyStateChangeRefusedAtTheEventOrItsEdgeWritesNothing(t *testing.T) {
+	conformance.RunBatchApplyStateChangeRefusedAtTheEventOrItsEdgeWritesNothing(t, t.Context(), newServedBatchApplyFixture(t, "hbasre"))
 }
 
 // TestServedBatchApplyStampsSpawnerIDOnlyWhenNamed wires the dep_add

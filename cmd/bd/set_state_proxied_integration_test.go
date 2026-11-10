@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -376,6 +377,45 @@ func TestProxiedServerSetState(t *testing.T) {
 		if n := countRows(t, db, "SELECT COUNT(*) FROM labels WHERE issue_id = ?", wisp.ID); n != 0 {
 			t.Errorf("durable labels rows for a wisp = %d, want 0", n)
 		}
+	})
+
+	// The hook contract TestEmbeddedSetStateHooksSeeTheEventItsEdgeAndTheSubject
+	// pins on the direct route, here from the notifying provider: on_create for
+	// the event, on_update for the event carrying its parent-child edge to the
+	// subject, on_update for the subject, and nothing for a refusal. It has a
+	// workspace of its own, so no other subtest's write fires its recorder.
+	t.Run("hooks_see_the_event_its_edge_and_the_subject", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("hook script form is POSIX shell")
+		}
+		hp := newSharedProxiedProject(t, bd, "ssth")
+		durable := bdProxiedCreate(t, bd, hp.dir, "Hooked durable subject")
+		wisp := bdProxiedCreate(t, bd, hp.dir, "Hooked wisp subject", "--ephemeral")
+
+		for _, subject := range []string{durable.ID, wisp.ID} {
+			// Planted after the setup, so every firing it saves is this
+			// set-state's.
+			logDir := plantStateHookRecorder(t, hp.beadsDir)
+			out, err := bdProxiedRun(t, bd, hp.dir, "set-state", subject, "patrol=muted", "--json")
+			if err != nil {
+				t.Fatalf("set-state %s: %v\n%s", subject, err, out)
+			}
+			var got map[string]interface{}
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatalf("unmarshal: %v\n%s", err, out)
+			}
+			eventID, _ := got["event_id"].(string)
+			if eventID == "" {
+				t.Fatalf("set-state %s named no event id: %v", subject, got)
+			}
+			assertStateChangeHooks(t, readStateHookFirings(t, logDir, 3), eventID, subject, "patrol:muted")
+		}
+
+		logDir := plantStateHookRecorder(t, hp.beadsDir)
+		if out, err := bdProxiedRun(t, bd, hp.dir, "set-state", durable.ID, "patrol="+strings.Repeat("v", 260)); err == nil {
+			t.Fatalf("set-state with a 267-character label succeeded, want it refused\n%s", out)
+		}
+		readStateHookFirings(t, logDir, 0)
 	})
 }
 

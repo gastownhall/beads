@@ -47,28 +47,41 @@ type hookBatchApplier struct {
 // header warns about: a dependency change is an update to the issue the edge
 // leaves, and the legacy path fires for it.
 //
-// AN ISSUE THIS REQUEST CREATED DOES NOT ALSO FIRE UPDATE FOR ITS EDGES. A
-// script was already handed that row as a create, and the edges are part of the
-// same act; firing again would have it react to a graph it has already seen —
-// the argument hookDependencyEditor makes for per-source rather than per-edge,
-// applied across kinds.
+// AN ISSUE THIS REQUEST CREATED FIRES UPDATE FOR ITS EDGES TOO. Its create
+// hook is handed the row as its create item wrote it, before any edge item
+// ran, so that payload carries no dependencies: the update is the one firing
+// that shows a script the edges the request gave the row. It is also what the
+// other two plumbings fire for a create with an edge — a guarded create fires
+// update for the edges it wrote (hookIssueOperations.Create), and the
+// unit-of-work recorder for every source a batch edge leaves
+// (uow.recordingDepUC.AddDependencies) — so a script sees the same firings on
+// every route. bd set-state's event is such a row, and its parent edge is how
+// a script tells which bead changed state (GH#5637).
 //
 // The result's snapshots are what the hooks are handed, hydrated inside the
 // transaction that wrote them. That is why ItemResult carries an Issue at all;
 // see issueops.ItemResult.Issue.
+//
+// A ROW THAT CAME BACK WITHOUT ITS SNAPSHOT STILL LANDED. The http leg answers
+// lean (ledger row L-apply-snapshot), and a connected workspace runs its hooks
+// client-side over that leg (L11), so such a row fires through completeRowByID,
+// which reads it back after the commit, as the edge firings below do. Silence
+// there was the bug: bd set-state over bd connect fired only its edge's update.
 func (o *hookBatchApplier) ApplyBatch(ctx context.Context, request issueops.ApplyBatchRequest) (issueops.ApplyBatchResult, error) {
 	result, err := o.inner.ApplyBatch(ctx, request)
 	if err != nil {
 		return result, err
 	}
-	created := make(map[string]struct{}, len(result.Items))
 	for _, item := range result.Items {
 		if !item.Changed {
 			continue
 		}
+		if item.Issue == nil {
+			o.completeRowByID(ctx, item)
+			continue
+		}
 		switch item.Kind {
 		case issueops.ItemCreate:
-			created[item.IssueID] = struct{}{}
 			o.hooks.CompleteIssueOperationCreate(ctx, item.Issue, nil)
 		case issueops.ItemUpdate:
 			o.hooks.CompleteIssueOperationUpdate(item.Issue)
@@ -81,9 +94,6 @@ func (o *hookBatchApplier) ApplyBatch(ctx context.Context, request issueops.Appl
 		if item.Kind != issueops.ItemDepAdd || !item.Changed {
 			continue
 		}
-		if _, isCreate := created[item.IssueID]; isCreate {
-			continue
-		}
 		if _, already := fired[item.IssueID]; already {
 			continue
 		}
@@ -91,4 +101,20 @@ func (o *hookBatchApplier) ApplyBatch(ctx context.Context, request issueops.Appl
 		o.hooks.CompleteIssueOperationDependency(ctx, item.IssueID)
 	}
 	return result, nil
+}
+
+// completeRowByID fires a landed row verb's hook from the row read back by id,
+// for a leg that answered without its snapshot. The by-id completions read only
+// for a hook that would run, and what they read is the row as the whole request
+// left it rather than as this item did. A dep_add carries no snapshot on any
+// leg and matches no case here: ApplyBatch fires its edges on their own.
+func (o *hookBatchApplier) completeRowByID(ctx context.Context, item issueops.ItemResult) {
+	switch item.Kind {
+	case issueops.ItemCreate:
+		o.hooks.CompleteIssueOperationCreateByID(ctx, item.IssueID)
+	case issueops.ItemUpdate:
+		o.hooks.CompleteIssueOperationUpdateByID(ctx, item.IssueID)
+	case issueops.ItemClose:
+		o.hooks.CompleteIssueOperationCloseByID(ctx, item.IssueID)
+	}
 }
