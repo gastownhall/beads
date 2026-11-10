@@ -703,6 +703,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING: `bd mol wisp gc` no longer deletes without `--force`.** The age-based
+  forms (bare `bd mol wisp gc`, `--age`, `--all`) deleted abandoned wisps
+  although `--force` was documented as "Actually delete (default: preview
+  only)" (GH#5152). They now preview, as `--closed` already did: the
+  candidates' IDs, titles and types in text, `dry_run: true` in `--json`,
+  exit 0. `--dry-run` wins over `--force`. **Migration:** add `--force` to
+  every script or formula step that runs `bd mol wisp gc` to clean up;
+  without it the command succeeds and deletes nothing.
+
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add
@@ -1225,6 +1234,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no longer colored.
 
 ### Fixed
+
+- **`bd mol wisp gc --closed --force` no longer strands open molecule
+  steps.** It deleted a closed molecule root whose steps were still open,
+  dropping their `parent-child` edges so the surviving steps belonged to
+  nothing (GH#5152). A closed wisp that a live issue or wisp depends on
+  through `parent-child` or `tracks`, and its closed ancestors, are now held
+  back on both routes, counted in `live_dependent_skipped` in every
+  `--json` answer, and collected by a later run once the dependents close.
+  `blocks` edges still hold nothing back, nothing cascades, and a failed
+  dependency or status read aborts the run without deleting.
+
+- **`bd close` hints at separate arguments when an ID holds whitespace.**
+  Several IDs passed as one word (zsh does not split an unquoted `$IDS`)
+  failed with a bare not-found. The not-found error now adds "pass each ID
+  as its own argument; in zsh use an array or ${=IDS}" (GH#5152).
 
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
