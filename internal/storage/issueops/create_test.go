@@ -383,6 +383,53 @@ func TestPersistDependenciesRejectsHierarchyBlocking(t *testing.T) {
 	}
 }
 
+// TestPersistDependenciesRejectsCrossPrefixHierarchyBlocking is the
+// same-database cross-prefix twin of the refusal above (GH#8299): the
+// blocker's id carries another rig's prefix, but classification probes both
+// planes, finds the row this database holds, and the planned-ancestor check
+// applies to it like any other local target. Pre-fix the cross-prefix target
+// classified External before any read, the hierarchy gate skipped it, and the
+// create-with-deps pass would have committed the self-blocking edge.
+func TestPersistDependenciesRejectsCrossPrefixHierarchyBlocking(t *testing.T) {
+	ctx := context.Background()
+	db, mock, tx := beginMockTx(t)
+	defer db.Close()
+	issue := &types.Issue{
+		ID:        "bd-child",
+		IssueType: types.TypeTask,
+		Dependencies: []*types.Dependency{{
+			DependsOnID: "hq-parent",
+			Type:        types.DepBlocks,
+		}},
+	}
+
+	mock.ExpectQuery("SELECT issue_type FROM wisps WHERE id = \\?").
+		WithArgs("hq-parent").
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT issue_type FROM issues WHERE id = \\?").
+		WithArgs("hq-parent").
+		WillReturnRows(sqlmock.NewRows([]string{"issue_type"}).AddRow("task"))
+	mock.ExpectQuery("SELECT 1 FROM issues WHERE id = \\?").
+		WithArgs("hq-parent").
+		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+	mock.ExpectQuery("WITH RECURSIVE ancestors").
+		WithArgs("bd-child", "hq-parent").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+
+	_, err := PersistDependenciesWithOptionsResult(ctx, tx, []*types.Issue{issue}, "tester", storage.BatchCreateOptions{})
+	if err == nil || !strings.Contains(err.Error(), "cannot be blocked by its ancestor") {
+		t.Fatalf("error = %v, want ancestor hierarchy rejection for the locally held cross-prefix target", err)
+	}
+
+	mock.ExpectRollback()
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
 func TestPersistDependenciesValidatesPlannedHierarchyBeforeBlocking(t *testing.T) {
 	// This case pins the per-edge read sequence; its batch-lookup twin is
 	// TestPersistDependenciesBatchValidatesPlannedHierarchyBeforeBlocking.

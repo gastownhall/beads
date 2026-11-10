@@ -9,6 +9,7 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/steveyegge/beads/internal/storage/depid"
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
@@ -312,6 +313,51 @@ func TestAddDependencyInTxRefusesMissingSamePrefixTargetWithTypedError(t *testin
 	var notFound *publicops.DependencyEndpointNotFoundError
 	if !errors.As(err, &notFound) {
 		t.Fatalf("error = %v, want DependencyEndpointNotFoundError (not a raw FK or SQL error)", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// TestAddDependencyInTxRefusesBlockingACrossPrefixAncestor pins the explicit
+// add path's half of the hierarchy rule (GH#8299): a blocker this database
+// holds is checked for hierarchy conflicts whatever its prefix. Pre-fix the
+// cross-prefix target classified External before any read, the hierarchy walk
+// never ran, and `bd dep add <child> <cross-prefix ancestor> --type blocks`
+// committed a self-blocking hierarchy edge.
+func TestAddDependencyInTxRefusesBlockingACrossPrefixAncestor(t *testing.T) {
+	t.Parallel()
+
+	_, mock, tx := beginMockTx(t)
+
+	// Classification: hq-parent is not a wisp but is held in issues.
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_type FROM wisps WHERE id = ?")).
+		WithArgs("hq-parent").
+		WillReturnRows(sqlmock.NewRows([]string{"issue_type"}))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_type FROM issues WHERE id = ?")).
+		WithArgs("hq-parent").
+		WillReturnRows(sqlmock.NewRows([]string{"issue_type"}).AddRow("task"))
+	// Source read.
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_type FROM issues WHERE id = ?")).
+		WithArgs("bd-child").
+		WillReturnRows(sqlmock.NewRows([]string{"issue_type"}).AddRow("task"))
+	// The first ancestry walk finds the blocker: hq-parent IS bd-child's
+	// ancestor in this database's own parent-child graph.
+	mock.ExpectQuery("WITH RECURSIVE ancestors").
+		WithArgs("bd-child", "hq-parent").
+		WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1))
+
+	dep := &types.Dependency{IssueID: "bd-child", DependsOnID: "hq-parent", Type: types.DepBlocks}
+	_, err := AddDependencyInTx(context.Background(), tx, dep, "writer", AddDependencyOpts{
+		SourceTable: "issues",
+		WriteTable:  "dependencies",
+	})
+	var conflict *domain.DependencyHierarchyConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("AddDependencyInTx(bd-child blocks cross-prefix ancestor) = %v, want DependencyHierarchyConflictError", err)
+	}
+	if conflict.BlockerIsAncestor != true {
+		t.Errorf("conflict = %#v, want the blocker reported as the source's ancestor", conflict)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
