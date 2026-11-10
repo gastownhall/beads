@@ -3,6 +3,7 @@ package dolt
 import (
 	"errors"
 	"regexp"
+	"strings"
 	"testing"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
@@ -116,10 +117,14 @@ func TestServerSettlementSQLCommitResponseLossIsIndeterminate(t *testing.T) {
 		// GH#7811: CommitResolvedConflicts now concludes with the FULL merge
 		// result — it reads the open merge's source commit, then the unstaged
 		// tables that differ between HEAD and it (none here) — before the
-		// same DOLT_COMMIT.
+		// same DOLT_COMMIT. GH#7757 adds the completeness re-read: dolt_status
+		// is re-queried after staging and must come back empty before the
+		// commit runs.
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT source_commit FROM dolt_merge_status WHERE is_merging")).
 			WillReturnRows(sqlmock.NewRows([]string{"source_commit"}).AddRow("0123456789abcdefghijklmnopqrstuv"))
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT DISTINCT CASE WHEN s.table_name = CONCAT(d.from_table_name, ' -> ', d.to_table_name) THEN d.to_table_name ELSE s.table_name END FROM dolt_status s JOIN (SELECT from_table_name, to_table_name FROM dolt_diff_summary('HEAD', '0123456789abcdefghijklmnopqrstuv') UNION SELECT from_table_name, to_table_name FROM dolt_schema_diff('HEAD', '0123456789abcdefghijklmnopqrstuv')) d ON s.table_name IN (d.from_table_name, d.to_table_name, CONCAT(d.from_table_name, ' -> ', d.to_table_name)) WHERE s.staged = 0")).
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT DISTINCT CASE WHEN s.table_name = CONCAT(d.from_table_name, ' -> ', d.to_table_name) THEN d.to_table_name ELSE s.table_name END FROM dolt_status s JOIN (SELECT from_table_name, to_table_name FROM dolt_diff_summary('HEAD', '0123456789abcdefghijklmnopqrstuv') UNION SELECT from_table_name, to_table_name FROM dolt_schema_diff('HEAD', '0123456789abcdefghijklmnopqrstuv')) d ON s.table_name IN (d.from_table_name, d.to_table_name, CONCAT(d.from_table_name, ' -> ', d.to_table_name)) WHERE s.staged = 0 AND NOT EXISTS (SELECT 1 FROM dolt_ignore di WHERE di.ignored = 1 AND s.table_name LIKE di.pattern)")).
+			WillReturnRows(sqlmock.NewRows([]string{"table_name"}))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT DISTINCT CASE WHEN s.table_name = CONCAT(d.from_table_name, ' -> ', d.to_table_name) THEN d.to_table_name ELSE s.table_name END FROM dolt_status s JOIN (SELECT from_table_name, to_table_name FROM dolt_diff_summary('HEAD', '0123456789abcdefghijklmnopqrstuv') UNION SELECT from_table_name, to_table_name FROM dolt_schema_diff('HEAD', '0123456789abcdefghijklmnopqrstuv')) d ON s.table_name IN (d.from_table_name, d.to_table_name, CONCAT(d.from_table_name, ' -> ', d.to_table_name)) WHERE s.staged = 0 AND NOT EXISTS (SELECT 1 FROM dolt_ignore di WHERE di.ignored = 1 AND s.table_name LIKE di.pattern)")).
 			WillReturnRows(sqlmock.NewRows([]string{"table_name"}))
 		// concludeMerge passes the commit message as a bind arg, not a
 		// string-interpolated literal, and drains the CALL (schema.DrainCall).
@@ -137,6 +142,58 @@ func TestServerSettlementSQLCommitResponseLossIsIndeterminate(t *testing.T) {
 			t.Fatal("autoResolveConflictsAfterCLIPull() resolved = true after lost SQL commit response")
 		}
 		assertPublicCommitIndeterminate(t, err, responseLoss)
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet sqlmock expectations: %v", err)
+		}
+	})
+
+	// GH#7757 AC-5, server-side rollback contract: when the merge conclusion
+	// refuses a known-incomplete result (a merge-touched table still unstaged
+	// after staging), autoResolveConflictsAfterCLIPull must roll back its
+	// transaction and surface the error, leaving the pre-settlement working
+	// set for the operator instead of an open merge with a half-staged set.
+	t.Run("CLI conflict repair refuses an incomplete merge conclusion", func(t *testing.T) {
+		db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+
+		mock.ExpectExec(regexp.QuoteMeta("SET @@dolt_allow_commit_conflicts = 1")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectBegin()
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT `table`, num_conflicts FROM dolt_conflicts")).
+			WillReturnRows(sqlmock.NewRows([]string{"table", "num_conflicts"}).AddRow("metadata", 1))
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'metadata')")).
+			WillReturnRows(sqlmock.NewRows([]string{"status"}))
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD('metadata')")).
+			WillReturnRows(sqlmock.NewRows([]string{"status"}))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT `table` FROM dolt_constraint_violations WHERE num_violations > 0")).
+			WillReturnRows(sqlmock.NewRows([]string{"table"}))
+		// stageMergeResult: source commit, the unstaged merge-touched table,
+		// its DOLT_ADD, then the completeness re-read still naming it.
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT source_commit FROM dolt_merge_status WHERE is_merging")).
+			WillReturnRows(sqlmock.NewRows([]string{"source_commit"}).AddRow("0123456789abcdefghijklmnopqrstuv"))
+		mergedTables := "SELECT DISTINCT CASE WHEN s.table_name = CONCAT(d.from_table_name, ' -> ', d.to_table_name) THEN d.to_table_name ELSE s.table_name END FROM dolt_status s JOIN (SELECT from_table_name, to_table_name FROM dolt_diff_summary('HEAD', '0123456789abcdefghijklmnopqrstuv') UNION SELECT from_table_name, to_table_name FROM dolt_schema_diff('HEAD', '0123456789abcdefghijklmnopqrstuv')) d ON s.table_name IN (d.from_table_name, d.to_table_name, CONCAT(d.from_table_name, ' -> ', d.to_table_name)) WHERE s.staged = 0 AND NOT EXISTS (SELECT 1 FROM dolt_ignore di WHERE di.ignored = 1 AND s.table_name LIKE di.pattern)"
+		mock.ExpectQuery(regexp.QuoteMeta(mergedTables)).
+			WillReturnRows(sqlmock.NewRows([]string{"table_name"}).AddRow("labels"))
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
+			WithArgs("labels").
+			WillReturnRows(sqlmock.NewRows([]string{"status"}))
+		mock.ExpectQuery(regexp.QuoteMeta(mergedTables)).
+			WillReturnRows(sqlmock.NewRows([]string{"table_name"}).AddRow("labels"))
+		mock.ExpectRollback()
+		mock.ExpectExec(regexp.QuoteMeta("SET @@dolt_allow_commit_conflicts = 0")).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+
+		store := &DoltStore{db: db}
+		resolved, err := store.autoResolveConflictsAfterCLIPull(t.Context())
+		if resolved {
+			t.Fatal("autoResolveConflictsAfterCLIPull() resolved = true despite the refused conclusion")
+		}
+		if err == nil || !strings.Contains(err.Error(), "labels") {
+			t.Fatalf("autoResolveConflictsAfterCLIPull() error = %v, want it to name the unstaged merge-touched table", err)
+		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("unmet sqlmock expectations: %v", err)
 		}
