@@ -20,6 +20,7 @@ import (
 	"strings"
 	"testing"
 	"testing/iotest"
+	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 )
@@ -1478,4 +1479,170 @@ func TestInitAdoptionFlagsKeepExistingGuards(t *testing.T) {
 			t.Fatalf("re-init over an existing workspace: exit %d, want the already-initialized refusal:\n%s", code, out)
 		}
 	})
+}
+
+// TestInitDerivedOriginLateCheckpointRefusesUnconsentedURL is AC-6 of
+// GH#6099: consent at the early prompt is for that URL only. If origin
+// changes before the late checkpoint (here, while init waits at the prompt)
+// and the new origin has Dolt history, init refuses before cloning rather
+// than adopting a remote nobody agreed to.
+func TestInitDerivedOriginLateCheckpointRefusesUnconsentedURL(t *testing.T) {
+	workDir, consentedRemote := derivedOriginWithDoltDataFixture(t)
+	_, otherRemote := derivedOriginWithDoltDataFixture(t)
+	bdBin := buildBDForInitTests(t)
+	cmd := exec.Command(bdBin, "init", "--prefix", "mine", "--skip-hooks", "--skip-agents")
+	cmd.Dir = workDir
+	cmd.Env = hermeticInitEnv(t.TempDir(), "BD_NON_INTERACTIVE=0")
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	// Bound the interactive child: a hung init is killed, which closes its
+	// stderr and fails the reads below instead of stalling the suite.
+	killer := time.AfterFunc(2*time.Minute, func() { _ = cmd.Process.Kill() })
+	defer killer.Stop()
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	var seen bytes.Buffer
+	buf := make([]byte, 4096)
+	for !strings.Contains(seen.String(), "[y/N]") {
+		n, readErr := stderr.Read(buf)
+		seen.Write(buf[:n])
+		if readErr != nil {
+			_ = cmd.Wait()
+			t.Fatalf("init exited before prompting: %v\n%s%s", readErr, seen.String(), stdout.String())
+		}
+	}
+	if !strings.Contains(seen.String(), consentedRemote) {
+		t.Fatalf("prompt does not name the origin being consented to (%s):\n%s", consentedRemote, seen.String())
+	}
+	runGitForBootstrapTest(t, workDir, "remote", "set-url", "origin", otherRemote)
+	if _, err := io.WriteString(stdin, "y\n"); err != nil {
+		t.Fatal(err)
+	}
+	rest, _ := io.ReadAll(stderr)
+	seen.Write(rest)
+	err = cmd.Wait()
+	out := seen.String() + stdout.String()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("init after origin changed = %v, want exit 1\n%s", err, out)
+	}
+	for _, want := range []string{"bd init refuses", "Derived from git origin: " + otherRemote, "bd init --yes"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("late refusal missing %q:\n%s", want, out)
+		}
+	}
+	for _, unwanted := range []string{"failed to clone", "Adopting Dolt issue history"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("late checkpoint reached the clone (%q):\n%s", unwanted, out)
+		}
+	}
+	if cfg, err := os.ReadFile(filepath.Join(workDir, ".beads", "config.yaml")); err == nil && strings.Contains(string(cfg), otherRemote) {
+		t.Errorf("refused origin persisted as sync.remote:\n%s", cfg)
+	}
+}
+
+// TestInitAdoptionConsentAcrossCheckpoints pins how the two checkpoints of
+// one init share consent (GH#6099), through the same CheckRemoteSafety and
+// handleInitAdoptionDecision calls init.go makes. The late checkpoint never
+// prompts; only --yes, or the early answer for the SAME URL, lets it clone.
+// Its refusal says the workspace was scaffolded rather than "nothing was
+// written".
+func TestInitAdoptionConsentAcrossCheckpoints(t *testing.T) {
+	const (
+		originURL = "file:///tmp/upstream.git"
+		otherURL  = "file:///tmp/unrelated.git"
+	)
+	// lateCheckpoint runs the late decision exactly as init.go builds it.
+	lateCheckpoint := func(t *testing.T, consent initAdoptionConsent, syncURL string) (RemoteSafetyDecision, bool, error, string) {
+		t.Helper()
+		decision := CheckRemoteSafety(RemoteSafetyInput{
+			RemoteHasDoltData:    true,
+			IsInteractive:        true,
+			DerivedFromGitOrigin: true,
+			AdoptionConsented:    consent.grants(syncURL),
+		})
+		var handled bool
+		var err error
+		stderr := captureStderr(t, func() {
+			handled, err = handleInitAdoptionDecision(decision, syncURL, true, &consent)
+		})
+		return decision, handled, err, stderr
+	}
+	refuses := func(t *testing.T, decision RemoteSafetyDecision, handled bool, err error, stderr, syncURL string) {
+		t.Helper()
+		if decision.Action != ActionRefuseAdoption || !handled {
+			t.Fatalf("late decision = %v (handled=%v), want a refusal that never prompts", decision.Action, handled)
+		}
+		if code, ok := exitCodeFromError(err); !ok || code != 1 {
+			t.Fatalf("late refusal err = %v, want exit 1", err)
+		}
+		for _, want := range []string{syncURL, "The workspace was scaffolded, but no history was imported.", "bd init --yes"} {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("late refusal missing %q:\n%s", want, stderr)
+			}
+		}
+		if strings.Contains(stderr, "Nothing was written.") {
+			t.Errorf("late refusal claims nothing was written:\n%s", stderr)
+		}
+	}
+
+	t.Run("early answer covers the same URL without a second prompt", func(t *testing.T) {
+		// What the early prompt's yes leaves behind (handleInitAdoptionDecision).
+		decision, handled, err, _ := lateCheckpoint(t, initAdoptionConsent{url: originURL, prompted: true}, originURL)
+		if decision.Action != ActionBootstrap || handled || err != nil {
+			t.Fatalf("late decision = %v (handled=%v, err=%v), want bootstrap", decision.Action, handled, err)
+		}
+	})
+	t.Run("early empty then late history without consent refuses", func(t *testing.T) {
+		// The early probe found no Dolt data, so nothing was asked and
+		// nothing consented; the late probe now finds history.
+		var consent initAdoptionConsent
+		early := CheckRemoteSafety(RemoteSafetyInput{DerivedFromGitOrigin: true, AdoptionInteractive: true})
+		if early.Action != ActionNoRemoteData {
+			t.Fatalf("early decision = %v, want ActionNoRemoteData", early.Action)
+		}
+		decision, handled, err, stderr := lateCheckpoint(t, consent, originURL)
+		refuses(t, decision, handled, err, stderr, originURL)
+	})
+	t.Run("consent for an unrelated URL is not reused", func(t *testing.T) {
+		decision, handled, err, stderr := lateCheckpoint(t, initAdoptionConsent{url: otherURL, prompted: true}, originURL)
+		refuses(t, decision, handled, err, stderr, originURL)
+	})
+	t.Run("--yes covers a late URL", func(t *testing.T) {
+		decision, handled, err, _ := lateCheckpoint(t, initAdoptionConsent{assumeYes: true}, otherURL)
+		if decision.Action != ActionBootstrap || handled || err != nil {
+			t.Fatalf("late decision under --yes = %v (handled=%v, err=%v), want bootstrap", decision.Action, handled, err)
+		}
+	})
+}
+
+// TestInitAdoptionConsentGrants pins the consent predicate: --yes grants any
+// derived URL; a prompted answer grants exactly the URL it was given for.
+func TestInitAdoptionConsentGrants(t *testing.T) {
+	const url = "file:///tmp/upstream.git"
+	for _, tc := range []struct {
+		name    string
+		consent initAdoptionConsent
+		want    bool
+	}{
+		{"yes grants with no answer", initAdoptionConsent{assumeYes: true}, true},
+		{"answer for this URL grants", initAdoptionConsent{url: url}, true},
+		{"answer for another URL does not", initAdoptionConsent{url: "file:///tmp/other.git"}, false},
+		{"no consent does not", initAdoptionConsent{}, false},
+	} {
+		if got := tc.consent.grants(url); got != tc.want {
+			t.Errorf("%s: grants = %v, want %v", tc.name, got, tc.want)
+		}
+	}
 }
