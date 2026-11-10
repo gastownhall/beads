@@ -819,6 +819,73 @@ func TestAutoRouteResolvesPlanningRepoMirrorToOwner(t *testing.T) {
 			t.Fatalf("project copy status = %s after the routed close, want it left %s", copyRow.Status, types.StatusOpen)
 		}
 	})
+
+	t.Run("update (resolveAndGetIssueForMutation)", func(t *testing.T) {
+		primaryStore, _, planningDir := setupAutoRouteWithHydratedCopy(t, "maintainer", "routing.maintainer")
+		ctx := context.Background()
+
+		result, err := resolveAndGetIssueForMutation(ctx, primaryStore, "shared-hub")
+		if err != nil {
+			t.Fatalf("resolveAndGetIssueForMutation of a hydrated copy: %v", err)
+		}
+		requireRedirectedCopy(t, "update", result, planningDir)
+		if routedStoreIsReadOnly(t, result.Store) {
+			t.Fatalf("the owner redirect opened the planning store read-only for bd update")
+		}
+		if err := result.Store.UpdateIssue(ctx, result.ResolvedID, map[string]interface{}{"title": "owner's new title"}, "test"); err != nil {
+			t.Fatalf("update through the owner redirect: %v", err)
+		}
+		result.Close()
+
+		owner, err := reopenAutoRouteTarget(t, planningDir).GetIssue(ctx, "shared-hub")
+		if err != nil {
+			t.Fatalf("reread the planning row after the routed update: %v", err)
+		}
+		if owner.Title != "owner's new title" {
+			t.Fatalf("planning title = %q after the routed update, want %q", owner.Title, "owner's new title")
+		}
+		// The project copy keeps the stale title it was hydrated with.
+		copyRow, err := primaryStore.GetIssue(ctx, "shared-hub")
+		if err != nil {
+			t.Fatalf("reread the project copy: %v", err)
+		}
+		if copyRow.Title != "test issue shared-hub" {
+			t.Fatalf("project copy title = %q after the routed update, want it left %q", copyRow.Title, "test issue shared-hub")
+		}
+	})
+
+	t.Run("comment (resolveAndGetIssueForMutationExact)", func(t *testing.T) {
+		primaryStore, _, planningDir := setupAutoRouteWithHydratedCopy(t, "maintainer", "routing.maintainer")
+		ctx := context.Background()
+
+		result, err := resolveAndGetIssueForMutationExact(ctx, primaryStore, "shared-hub")
+		if err != nil {
+			t.Fatalf("resolveAndGetIssueForMutationExact of a hydrated copy: %v", err)
+		}
+		requireRedirectedCopy(t, "comment", result, planningDir)
+		if routedStoreIsReadOnly(t, result.Store) {
+			t.Fatalf("the owner redirect opened the planning store read-only for bd comment")
+		}
+		if _, err := addCommentDirect(ctx, result.Store, result.ResolvedID, "test", "comment through the redirect"); err != nil {
+			t.Fatalf("comment through the owner redirect: %v", err)
+		}
+		result.Close()
+
+		comments, err := reopenAutoRouteTarget(t, planningDir).GetIssueComments(ctx, "shared-hub")
+		if err != nil {
+			t.Fatalf("reread the planning comments after the routed comment: %v", err)
+		}
+		if len(comments) != 1 || comments[0].Text != "comment through the redirect" {
+			t.Fatalf("planning comments = %+v, want the one written through the redirect", comments)
+		}
+		copyComments, err := primaryStore.GetIssueComments(ctx, "shared-hub")
+		if err != nil {
+			t.Fatalf("reread the project copy's comments: %v", err)
+		}
+		if len(copyComments) != 0 {
+			t.Fatalf("project copy comments = %+v, want it left without any", copyComments)
+		}
+	})
 }
 
 // committedIssue returns id as the HEAD commit of beadsDir's database holds
