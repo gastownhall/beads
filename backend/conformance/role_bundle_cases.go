@@ -524,6 +524,7 @@ var roleContractCases = []roleContract{
 		func(b RoleContractBundle) func(t *testing.T) *LifecycleUpdateFixture { return b.LifecycleUpdate },
 		RunLifecycleUpdateClaimRefusesALiveBlocker,
 		RunLifecycleUpdateForceClaimBlockedClaimsPastALiveBlocker,
+		RunLifecycleUpdateReclaimByTheHolderIgnoresANewBlocker,
 		RunLifecycleUpdatePersistsThePatchAndHydratesTheResult,
 		RunLifecycleUpdatePreservesTheCreationStamp,
 		RunLifecycleUpdateReportsNoChangeForASameValuePatch,
