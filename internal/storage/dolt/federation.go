@@ -40,6 +40,11 @@ func (s *DoltStore) PushTo(ctx context.Context, peer string) error {
 // pushRefToPeer pushes a specific refspec to a peer remote. The refspec can be
 // a simple branch name ("main") or a mapping ("staging:main").
 func (s *DoltStore) pushRefToPeer(ctx context.Context, peer string, refspec string) error {
+	// The peer-publish funnel (GH#7876): PushTo and filtered refspec pushes
+	// both land here, so guard before any route decision or credential work.
+	if s.isStrictReadOnlyStore() {
+		return strictReadOnlyPublishErr("push to peer", peer)
+	}
 	if useCLI, err := s.prepareCLIRouteForPeerGitProtocol(ctx, peer); err != nil {
 		return err
 	} else if useCLI {
@@ -395,6 +400,15 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 	result := &SyncResult{
 		Peer:      peer,
 		StartTime: time.Now(),
+	}
+
+	// The publish gate for the whole sync funnel (GH#7876): Sync publishes
+	// (the filtered push to the peer) as well as receives, and merely
+	// guarding the final push would refuse too late — after the local commit,
+	// fetch and merge work. Refuse up front, before any of it.
+	if s.isStrictReadOnlyStore() {
+		result.Error = strictReadOnlyPublishErr("sync with", peer)
+		return result, result.Error
 	}
 
 	// GH#2474: match PullFrom — commit pending changes before the merge,

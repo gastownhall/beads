@@ -3905,14 +3905,31 @@ func (s *DoltStore) Path() string {
 
 // IsReadOnly reports whether the store was opened in read-only mode. It is a
 // test-facing accessor: production read-only enforcement comes from the
-// read-only open mode itself (the readOnly field guards every write path), not
-// from callers consulting this method. Tests such as
+// read-only open mode itself (the readOnly field guards the store's own write
+// paths; publish operations additionally refuse via isStrictReadOnlyStore,
+// GH#7876), not from callers consulting this method. Tests such as
 // TestDepRoutedTargetOpensReadOnly use it to assert that routed
 // dependency/link target resolution opens a by-ID target read-only, so
 // resolving it never opens a foreign project writable or runs open-time
 // migrations into its history (bd-6dnrw.32, GH#3231).
 func (s *DoltStore) IsReadOnly() bool {
 	return s.readOnly
+}
+
+// isStrictReadOnlyStore reports whether this store was opened in strict
+// read-only mode — --readonly, a preview, or a foreign project — as opposed
+// to a read-classified open (GH#804) that is otherwise a normal writable
+// store. Publish operations (push/push-to-peer/federation sync) refuse on
+// it (GH#7876): a strict read-only workspace must not publish either.
+func (s *DoltStore) isStrictReadOnlyStore() bool {
+	return s.readOnly && !s.classifiedRead
+}
+
+// strictReadOnlyPublishErr is the shared refusal for a publish operation on
+// a strict read-only store (GH#7876): an ordinary error naming the operation
+// and target; no exported sentinel is needed for this.
+func strictReadOnlyPublishErr(op, target string) error {
+	return fmt.Errorf("%s %q refused: store is read-only", op, target)
 }
 
 // CreatedDatabase reports whether opening this store created its database
@@ -5401,6 +5418,12 @@ func logRouteDecision(op, remote string, cli bool) {
 // pushToRemote is the internal implementation for all push operations.
 // It routes through CLI or SQL based on the remote's protocol and credentials.
 func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool) (retErr error) {
+	// The storage-side half of the publish gate (GH#7876): Push, ForcePush
+	// and PushRemote all funnel here, so one guard covers all three before
+	// any database, subprocess, remote or fsck work.
+	if s.isStrictReadOnlyStore() {
+		return strictReadOnlyPublishErr("push to", remote)
+	}
 	spanName := "dolt.push"
 	if force {
 		spanName = "dolt.force_push"
