@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -171,6 +173,199 @@ func TestShowDirectRoute_ForeignPrefixMissHint(t *testing.T) {
 		}
 		if !strings.Contains(stderr, "Issue "+tc.id+" not found") || !strings.Contains(stderr, tc.want) || strings.Contains(stderr, tc.notWant) {
 			t.Errorf("bd show %s stderr = %q, want %q and not %q", tc.id, stderr, tc.want, tc.notWant)
+		}
+	}
+}
+
+// prefixConfigFailStub is prefixConfigStub whose read of failKey fails.
+type prefixConfigFailStub struct {
+	prefixConfigStub
+	failKey string
+}
+
+func (s prefixConfigFailStub) GetConfig(ctx context.Context, key string) (string, error) {
+	if key == s.failKey {
+		return "", errors.New("config read failed")
+	}
+	return s.prefixConfigStub.GetConfig(ctx, key)
+}
+
+// TestShowNotFoundHintIn_KeepsExistingHintWhenUnsure pins AC-3 (GH#5259):
+// the foreign-prefix hint is printed only when the configuration reliably
+// says the id's prefix is foreign and nothing searched elsewhere for it. An
+// own or allowed prefix, a config read that fails, an unreadable routes.jsonl,
+// any matching route (a self-route included) or a routed search keeps
+// showNotFoundHint; a missing, empty, unmatched or hyphenless routes.jsonl
+// does not stop the new hint.
+func TestShowNotFoundHintIn_KeepsExistingHintWhenUnsure(t *testing.T) {
+	ctx := context.Background()
+	rig := prefixConfigStub{"issue_prefix": "openclaw"}
+
+	unreadableRoutes := foreignPrefixTown(t, "")
+	if err := os.Mkdir(filepath.Join(unreadableRoutes, "routes.jsonl"), 0o755); err != nil {
+		t.Fatalf("make routes.jsonl a directory: %v", err)
+	}
+
+	keep := []struct {
+		name     string
+		store    prefixConfigReader
+		beadsDir string
+		id       string
+		searched bool
+	}{
+		{name: "own prefix with surrounding whitespace in config", store: prefixConfigStub{"issue_prefix": "  openclaw- "}, beadsDir: foreignPrefixTown(t, ""), id: "openclaw-zz9"},
+		{name: "allowed prefix with whitespace and trailing hyphen", store: prefixConfigStub{"issue_prefix": "openclaw", "allowed_prefixes": " op ,  herald- "}, beadsDir: foreignPrefixTown(t, ""), id: "herald-x7k"},
+		{name: "allowed multi-hyphen prefix with an all-letter suffix", store: prefixConfigStub{"issue_prefix": "openclaw", "allowed_prefixes": "claude-os"}, beadsDir: foreignPrefixTown(t, ""), id: "claude-os-abcd"},
+		{name: "issue_prefix read fails", store: prefixConfigFailStub{rig, "issue_prefix"}, beadsDir: foreignPrefixTown(t, ""), id: "herald-x7k"},
+		{name: "allowed_prefixes read fails", store: prefixConfigFailStub{rig, "allowed_prefixes"}, beadsDir: foreignPrefixTown(t, ""), id: "herald-x7k"},
+		{name: "whitespace-only issue_prefix", store: prefixConfigStub{"issue_prefix": "  "}, beadsDir: foreignPrefixTown(t, ""), id: "herald-x7k"},
+		{name: "unreadable routes.jsonl", store: rig, beadsDir: unreadableRoutes, id: "herald-x7k"},
+		{name: "self-route", store: rig, beadsDir: foreignPrefixTown(t, `{"prefix":"herald-","path":"."}`), id: "herald-x7k"},
+		{name: "overlapping valid routes", store: rig, beadsDir: foreignPrefixTown(t, `{"prefix":"hq-","path":"town"}`+"\n"+`{"prefix":"hq-cv-","path":"convoys"}`), id: "hq-cv-x7k"},
+		{name: "a routed store was searched", store: rig, beadsDir: foreignPrefixTown(t, ""), id: "herald-x7k", searched: true},
+		{name: "a routed store was searched, no workspace", store: rig, id: "herald-x7k", searched: true},
+	}
+	for _, tc := range keep {
+		t.Run("keeps/"+tc.name, func(t *testing.T) {
+			if got, want := showNotFoundHintIn(ctx, tc.store, tc.beadsDir, tc.id, tc.searched), showNotFoundHint(tc.id); got != want {
+				t.Errorf("hint = %q, want showNotFoundHint's %q", got, want)
+			}
+		})
+	}
+
+	foreign := []struct {
+		name     string
+		beadsDir string
+		wantPath bool
+	}{
+		{name: "no routes.jsonl", beadsDir: foreignPrefixTown(t, ""), wantPath: true},
+		{name: "empty routes.jsonl", beadsDir: foreignPrefixTown(t, "# no routes yet"), wantPath: true},
+		{name: "unmatched route", beadsDir: foreignPrefixTown(t, `{"prefix":"gt-","path":"gastown"}`), wantPath: true},
+		{name: "hyphenless route entry", beadsDir: foreignPrefixTown(t, `{"prefix":"herald","path":"herald"}`), wantPath: true},
+		{name: "no resolved workspace"},
+	}
+	for _, tc := range foreign {
+		t.Run("new hint/"+tc.name, func(t *testing.T) {
+			got := showNotFoundHintIn(ctx, rig, tc.beadsDir, "herald-x7k", false)
+			if !strings.Contains(got, `prefix "herald"`) || !strings.Contains(got, "does not mean the issue is absent") {
+				t.Fatalf("hint = %q, want the foreign-prefix hint", got)
+			}
+			routesPath := filepath.Join(tc.beadsDir, "routes.jsonl")
+			if tc.wantPath && !strings.Contains(got, routesPath) {
+				t.Errorf("hint = %q, want it to name %s", got, routesPath)
+			}
+			if !tc.wantPath && (!strings.Contains(got, "routes.jsonl route is available") || strings.Contains(got, string(filepath.Separator)+"routes.jsonl")) {
+				t.Errorf("hint = %q, want it to say no workspace route is available without naming a path", got)
+			}
+		})
+	}
+}
+
+// lookupRecordingStore is showMissStubStore with every store read recorded,
+// the looked-up id written as <ID> and its hash part as <HASH> so the reads of
+// two misses compare.
+type lookupRecordingStore struct {
+	showMissStubStore
+	id    string
+	calls *[]string
+}
+
+func (s lookupRecordingStore) rec(call string, args ...string) {
+	arg := strings.ReplaceAll(strings.Join(args, ","), s.id, "<ID>")
+	if hash := s.id[strings.LastIndex(s.id, "-")+1:]; hash != "" {
+		arg = strings.ReplaceAll(arg, hash, "<HASH>")
+	}
+	*s.calls = append(*s.calls, call+"("+arg+")")
+}
+
+func (s lookupRecordingStore) SearchIssues(ctx context.Context, q string, f types.IssueFilter) ([]*types.Issue, error) {
+	s.rec("SearchIssues", append([]string{q}, f.IDs...)...)
+	return s.showMissStubStore.SearchIssues(ctx, q, f)
+}
+
+func (s lookupRecordingStore) SearchIssueIDs(ctx context.Context, q string, f types.IssueFilter) ([]string, error) {
+	s.rec("SearchIssueIDs", append([]string{q}, f.IDs...)...)
+	return s.showMissStubStore.SearchIssueIDs(ctx, q, f)
+}
+
+func (s lookupRecordingStore) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
+	s.rec("GetIssue", id)
+	return s.showMissStubStore.GetIssue(ctx, id)
+}
+
+func (s lookupRecordingStore) GetConfig(ctx context.Context, key string) (string, error) {
+	s.rec("GetConfig", key)
+	return s.showMissStubStore.GetConfig(ctx, key)
+}
+
+func (s lookupRecordingStore) GetAllConfig(ctx context.Context) (map[string]string, error) {
+	s.rec("GetAllConfig")
+	return s.showMissStubStore.GetAllConfig(ctx)
+}
+
+// TestShowDirectRoute_MissIdentityInvariant pins what the hint change must
+// not move. A foreign-prefix miss (new hint) and an own-prefix miss (old
+// hint) make the same store reads for the id, print the same "Issue <ID> not
+// found" line and return the same exit error; only the Hint line differs.
+// Choosing the hint reads config and nothing else, so it never looks the id
+// up a second time or anywhere new.
+func TestShowDirectRoute_MissIdentityInvariant(t *testing.T) {
+	ensureCleanGlobalState(t)
+	saveAndRestoreGlobals(t)
+	t.Setenv("BEADS_DIR", t.TempDir())
+	oldCtx, oldJSON, oldProxied := rootCtx, jsonOutput, proxiedServerMode
+	t.Cleanup(func() { rootCtx, jsonOutput, proxiedServerMode = oldCtx, oldJSON, oldProxied })
+	rootCtx, jsonOutput, proxiedServerMode = context.Background(), false, false
+	beadsDir := foreignPrefixTown(t, "")
+	dbPath = filepath.Join(beadsDir, "dolt")
+
+	type miss struct {
+		reads []string
+		lines string
+		code  int
+	}
+	run := func(id string) miss {
+		var calls []string
+		store = lookupRecordingStore{id: id, calls: &calls}
+		var err error
+		stderr := captureStderr(t, func() { err = showCmd.RunE(showCmd, []string{id}) })
+		var exit *exitError
+		if !errors.As(err, &exit) {
+			t.Fatalf("bd show %s: err = %v, want the not-found *exitError", id, err)
+		}
+		m := miss{reads: calls, code: exit.Code}
+		for _, line := range strings.SplitAfter(stderr, "\n") {
+			if !strings.HasPrefix(line, "Hint: ") {
+				m.lines += strings.ReplaceAll(line, id, "<ID>")
+			}
+		}
+		return m
+	}
+
+	foreign, own := run("herald-x7k"), run("openclaw-zz9")
+	if len(own.reads) == 0 {
+		t.Fatal("the direct route made no recorded store read; the invariant would be vacuous")
+	}
+	if !reflect.DeepEqual(foreign.reads, own.reads) {
+		t.Errorf("store reads differ:\nforeign %q\nown     %q", foreign.reads, own.reads)
+	}
+	if foreign.lines != own.lines || own.lines != "Issue <ID> not found\n" {
+		t.Errorf("non-hint stderr: foreign %q, own %q, want both %q", foreign.lines, own.lines, "Issue <ID> not found\n")
+	}
+	if foreign.code != own.code || own.code != 1 {
+		t.Errorf("exit code: foreign %d, own %d, want both 1", foreign.code, own.code)
+	}
+
+	for _, id := range []string{"herald-x7k", "openclaw-zz9"} {
+		var calls []string
+		showNotFoundHintIn(context.Background(), lookupRecordingStore{id: id, calls: &calls}, beadsDir, id, false)
+		for _, c := range calls {
+			if !strings.HasPrefix(c, "GetConfig(") {
+				t.Errorf("choosing the hint for %s made store read %s, want config reads only", id, c)
+			}
+		}
+		if len(calls) == 0 {
+			t.Errorf("choosing the hint for %s read no config; the config-only check would be vacuous", id)
 		}
 	}
 }
