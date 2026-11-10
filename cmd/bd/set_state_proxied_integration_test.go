@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 func TestProxiedServerSetState(t *testing.T) {
@@ -87,11 +89,12 @@ func TestProxiedServerSetState(t *testing.T) {
 		if res.States["patrol"] != "muted" {
 			t.Errorf("state list shows patrol=%q, want muted", res.States["patrol"])
 		}
-		// The set-state calls created event children under the issue.
+		// The set-state calls created event children under the issue: each
+		// event carries a parent-child edge to it.
 		children := bdProxiedListJSON(t, bd, p, "--parent", issue.ID, "--status", "all")
 		var events int
 		for _, c := range children {
-			if strings.HasPrefix(c.ID, issue.ID+".") {
+			if c.IssueType == types.TypeEvent {
 				events++
 			}
 		}
@@ -139,6 +142,49 @@ func TestProxiedServerSetState(t *testing.T) {
 		labels := getProxiedLabels(t, db, m.ID)
 		if !containsStr(labels, "phase:planning") || !containsStr(labels, "env:staging") {
 			t.Errorf("expected both phase:planning and env:staging labels, got %v", labels)
+		}
+	})
+
+	// GH#5637 on the proxied route: a refused label patch must leave no
+	// committed event or parent edge behind it. The value's dimension:value
+	// label overflows the 255-character label limit while the event title
+	// stays under 500, so the patch is the one write that refuses.
+	t.Run("refused_label_patch_writes_nothing", func(t *testing.T) {
+		subject := bdProxiedCreate(t, bd, p.dir, "Refused set-state subject")
+		if out, err := bdProxiedRun(t, bd, p.dir, "set-state", subject.ID, "patrol=active"); err != nil {
+			t.Fatalf("set-state patrol=active: %v\n%s", err, out)
+		}
+		db := openProxiedDB(t, p)
+		counts := func() (events, edges int) {
+			events = countRows(t, db, `SELECT
+				(SELECT COUNT(*) FROM issues WHERE issue_type = 'event') +
+				(SELECT COUNT(*) FROM wisps WHERE issue_type = 'event')`)
+			edges = countRows(t, db, `SELECT COUNT(*) FROM dependencies WHERE type = 'parent-child'
+				AND COALESCE(depends_on_issue_id, depends_on_wisp_id) = ?`, subject.ID)
+			return events, edges
+		}
+		eventsBefore, edgesBefore := counts()
+		if edgesBefore != 1 {
+			t.Fatalf("baseline parent-child edges into %s = %d, want 1", subject.ID, edgesBefore)
+		}
+
+		out, err := bdProxiedRun(t, bd, p.dir, "set-state", subject.ID, "patrol="+strings.Repeat("v", 260))
+		if err == nil {
+			t.Fatalf("set-state with a 267-character label succeeded, want the label patch refused\n%s", out)
+		}
+		if !strings.Contains(string(out), "setting patrol:") {
+			t.Errorf("output does not report the refused label patch as `setting patrol:`:\n%s", out)
+		}
+
+		eventsAfter, edgesAfter := counts()
+		if eventsAfter != eventsBefore {
+			t.Errorf("event rows %d -> %d across a refused set-state, want no new event", eventsBefore, eventsAfter)
+		}
+		if edgesAfter != edgesBefore {
+			t.Errorf("parent-child edges into %s %d -> %d across a refused set-state, want no new edge", subject.ID, edgesBefore, edgesAfter)
+		}
+		if labels := getProxiedLabels(t, db, subject.ID); len(labels) != 1 || labels[0] != "patrol:active" {
+			t.Errorf("labels after a refused set-state = %v, want only patrol:active", labels)
 		}
 	})
 
