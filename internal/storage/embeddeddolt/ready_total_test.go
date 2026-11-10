@@ -74,15 +74,19 @@ func readyIDs(items []*types.IssueWithCounts) []string {
 }
 
 type readyTotalWorld struct {
-	wisps          bool
+	wisps bool
+	// deferredParent seeds a dated deferral: status open, future defer_until.
 	deferredParent bool
-	collision      bool
+	// iceboxParent seeds an undated deferral (plain `bd defer`): status
+	// deferred, no defer_until (GH#7300).
+	iceboxParent bool
+	collision    bool
 }
 
 // seedReadyTotalWorld builds a ready front with every shape the total has to
 // get right: plain ready issues, a blocked issue (its blocker stays ready), a
-// future-deferred parent whose children are hidden, ready wisps, and an ID
-// present in both tables (the overlap the merge dedupes wisp-wins).
+// deferred parent whose children are hidden, ready wisps, and an ID present
+// in both tables (the overlap the merge dedupes wisp-wins).
 func seedReadyTotalWorld(t *testing.T, te *testEnv, prefix string, w readyTotalWorld) {
 	t.Helper()
 	ctx := t.Context()
@@ -111,9 +115,18 @@ func seedReadyTotalWorld(t *testing.T, te *testEnv, prefix string, w readyTotalW
 	create(&types.Issue{ID: prefix + "-blocked", Title: "blocked", Priority: 1})
 	dep(prefix+"-blocked", prefix+"-blocker", types.DepBlocks)
 
-	if w.deferredParent {
-		future := time.Now().UTC().Add(72 * time.Hour)
-		create(&types.Issue{ID: prefix + "-dparent", Title: "deferred parent", IssueType: types.TypeEpic, DeferUntil: &future})
+	if w.deferredParent || w.iceboxParent {
+		// The dated world's parent carries a future defer_until with status
+		// open; the icebox world's is plain `bd defer`: status deferred, no
+		// date.
+		parent := &types.Issue{ID: prefix + "-dparent", Title: "deferred parent", IssueType: types.TypeEpic}
+		if w.deferredParent {
+			future := time.Now().UTC().Add(72 * time.Hour)
+			parent.DeferUntil = &future
+		} else {
+			parent.Status = types.StatusDeferred
+		}
+		create(parent)
 		create(&types.Issue{ID: prefix + "-dchild", Title: "child of deferred", Priority: 0})
 		dep(prefix+"-dchild", prefix+"-dparent", types.DepParentChild)
 	}
@@ -121,7 +134,7 @@ func seedReadyTotalWorld(t *testing.T, te *testEnv, prefix string, w readyTotalW
 		for i := 0; i < 3; i++ {
 			create(&types.Issue{ID: fmt.Sprintf("%s-w%d", prefix, i), Title: fmt.Sprintf("wisp %d", i), Priority: 1, Ephemeral: true})
 		}
-		if w.deferredParent {
+		if w.deferredParent || w.iceboxParent {
 			create(&types.Issue{ID: prefix + "-wdchild", Title: "wisp child of deferred", Priority: 0, Ephemeral: true})
 			dep(prefix+"-wdchild", prefix+"-dparent", types.DepParentChild)
 		}
@@ -161,6 +174,11 @@ func TestReadyWorkPageTotal(t *testing.T) {
 		{"wisps", readyTotalWorld{wisps: true}, map[bool][]string{false: plain, true: withWisps}},
 		// The wisp child of the deferred parent is hidden too.
 		{"wisps_deferred_parent", readyTotalWorld{wisps: true, deferredParent: true}, map[bool][]string{false: plain, true: withWisps}},
+		// The icebox worlds repeat the deferred-parent shapes with plain
+		// `bd defer` (status deferred, no date, GH#7300): the same rows are
+		// hidden, via the status leg rather than the date leg.
+		{"issues_icebox_parent", readyTotalWorld{iceboxParent: true}, map[bool][]string{false: plain, true: plain}},
+		{"wisps_icebox_parent", readyTotalWorld{wisps: true, iceboxParent: true}, map[bool][]string{false: plain, true: withWisps}},
 		// r0 sits in both tables; it is listed (and counted) exactly once.
 		{"wisps_collision", readyTotalWorld{wisps: true, collision: true}, map[bool][]string{false: plain, true: withWisps}},
 	}
@@ -314,82 +332,110 @@ func prefixed(prefix string, suffixes []string) []string {
 // out by hand (the oracle); the total must equal the unbounded listing's
 // length, and every capped page must be that listing's prefix, so a filter
 // the window total ignored — or applied to one family only — fails here.
+//
+// The matrix runs over both deferred-parent shapes. Their defer-sensitive
+// expectations differ: under IncludeDeferred the dated parent (status open,
+// future defer_until) is listed, while the icebox parent (plain `bd defer`:
+// status deferred, no date, GH#7300) stays off — that flag lifts the child
+// exclusion, not the status filter — so each world writes its own oracle.
 func TestReadyWorkPageTotalFilterMatrix(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 
-	const prefix = "rm"
-	te := newTestEnv(t, prefix)
-	seedReadyTotalWorld(t, te, prefix, readyTotalWorld{wisps: true, deferredParent: true})
-	ctx := t.Context()
-	id := func(s string) string { return prefix + "-" + s }
-	for issue, labels := range map[string][]string{"r0": {"a", "b"}, "r1": {"a"}, "blocker": {"a"}, "w0": {"b"}} {
-		for _, l := range labels {
-			if err := te.store.AddLabel(ctx, id(issue), l, "tester"); err != nil {
-				t.Fatalf("AddLabel %s %s: %v", issue, l, err)
-			}
-		}
-	}
-	for _, issue := range []string{"r2", "w1"} {
-		if err := te.store.UpdateIssue(ctx, id(issue), map[string]interface{}{"assignee": "alice"}, "tester"); err != nil {
-			t.Fatalf("assign %s: %v", issue, err)
-		}
-	}
-
-	all := []string{"blocker", "r0", "r1", "r2", "r3", "r4", "w0", "w1", "w2"}
-	alice, zero := "alice", 0
-	parent := id("dparent")
-	cases := []struct {
+	worlds := []struct {
 		name   string
-		filter types.WorkFilter
-		want   []string
+		prefix string
+		world  readyTotalWorld
+		// parentIncludable reports whether the deferred parent itself can be
+		// listed under IncludeDeferred (true for the dated world's status-open
+		// parent, false for the icebox world's status-deferred one).
+		parentIncludable bool
 	}{
-		{"hybrid", types.WorkFilter{}, all},
-		{"oldest", types.WorkFilter{SortPolicy: types.SortPolicyOldest}, all},
-		{"priority", types.WorkFilter{SortPolicy: types.SortPolicyPriority}, all},
-		{"labels_all", types.WorkFilter{Labels: []string{"a", "b"}}, []string{"r0"}},
-		{"labels_any", types.WorkFilter{LabelsAny: []string{"a", "b"}}, []string{"blocker", "r0", "r1", "w0"}},
-		{"assignee", types.WorkFilter{Assignee: &alice}, []string{"r2", "w1"}},
-		{"unassigned", types.WorkFilter{Unassigned: true}, []string{"blocker", "r0", "r1", "r3", "r4", "w0", "w2"}},
-		{"priority_0", types.WorkFilter{Priority: &zero}, []string{"r0", "r3"}},
-		{"exclude_ids", types.WorkFilter{ExcludeIDs: []string{id("r1"), id("w2")}}, []string{"blocker", "r0", "r2", "r3", "r4", "w0", "w1"}},
-		{"include_deferred", types.WorkFilter{IncludeDeferred: true}, append(slices.Clone(all), "dchild", "dparent", "wdchild")},
-		{"parent_deferred", types.WorkFilter{ParentID: &parent, IncludeDeferred: true}, []string{"dchild", "wdchild"}},
-		{"max_rows", types.WorkFilter{MaxRows: 50}, all},
-		{"type_epic", types.WorkFilter{Type: string(types.TypeEpic), IncludeDeferred: true}, []string{"dparent"}},
-		{"type_task_oldest", types.WorkFilter{Type: string(types.TypeTask), SortPolicy: types.SortPolicyOldest}, all},
+		{"dated_deferred_parent", "rm", readyTotalWorld{wisps: true, deferredParent: true}, true},
+		{"icebox_deferred_parent", "ri", readyTotalWorld{wisps: true, iceboxParent: true}, false},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			base := tc.filter
-			base.IncludeEphemeral = true
-			var unbounded []*types.IssueWithCounts
-			withCountingReadTx(t, te, func(tx issueops.DBTX) error {
-				var err error
-				unbounded, err = issueops.GetReadyWorkWithCountsInTx(t.Context(), tx, base)
-				return err
-			})
-			listed := readyIDs(unbounded)
-			if got, want := sortedIDs(listed), prefixed(prefix, tc.want); strings.Join(got, ",") != strings.Join(want, ",") {
-				t.Fatalf("ready set = %v, want %v", got, want)
+	for _, wc := range worlds {
+		t.Run(wc.name, func(t *testing.T) {
+			prefix := wc.prefix
+			te := newTestEnv(t, prefix)
+			seedReadyTotalWorld(t, te, prefix, wc.world)
+			ctx := t.Context()
+			id := func(s string) string { return prefix + "-" + s }
+			for issue, labels := range map[string][]string{"r0": {"a", "b"}, "r1": {"a"}, "blocker": {"a"}, "w0": {"b"}} {
+				for _, l := range labels {
+					if err := te.store.AddLabel(ctx, id(issue), l, "tester"); err != nil {
+						t.Fatalf("AddLabel %s %s: %v", issue, l, err)
+					}
+				}
 			}
-			n := len(listed)
-			for _, limit := range []int{1, 2, n, n + 3} {
-				filter := base
-				filter.Limit = limit
-				var page []*types.IssueWithCounts
-				var total int
-				withCountingReadTx(t, te, func(tx issueops.DBTX) error {
-					var err error
-					page, total, err = issueops.GetReadyWorkWithCountsAndTotalInTx(t.Context(), tx, filter)
-					return err
+			for _, issue := range []string{"r2", "w1"} {
+				if err := te.store.UpdateIssue(ctx, id(issue), map[string]interface{}{"assignee": "alice"}, "tester"); err != nil {
+					t.Fatalf("assign %s: %v", issue, err)
+				}
+			}
+
+			all := []string{"blocker", "r0", "r1", "r2", "r3", "r4", "w0", "w1", "w2"}
+			alice, zero := "alice", 0
+			parent := id("dparent")
+			includable := append(slices.Clone(all), "dchild", "wdchild")
+			epicWant := []string(nil)
+			if wc.parentIncludable {
+				includable = append(includable, "dparent")
+				epicWant = []string{"dparent"}
+			}
+			cases := []struct {
+				name   string
+				filter types.WorkFilter
+				want   []string
+			}{
+				{"hybrid", types.WorkFilter{}, all},
+				{"oldest", types.WorkFilter{SortPolicy: types.SortPolicyOldest}, all},
+				{"priority", types.WorkFilter{SortPolicy: types.SortPolicyPriority}, all},
+				{"labels_all", types.WorkFilter{Labels: []string{"a", "b"}}, []string{"r0"}},
+				{"labels_any", types.WorkFilter{LabelsAny: []string{"a", "b"}}, []string{"blocker", "r0", "r1", "w0"}},
+				{"assignee", types.WorkFilter{Assignee: &alice}, []string{"r2", "w1"}},
+				{"unassigned", types.WorkFilter{Unassigned: true}, []string{"blocker", "r0", "r1", "r3", "r4", "w0", "w2"}},
+				{"priority_0", types.WorkFilter{Priority: &zero}, []string{"r0", "r3"}},
+				{"exclude_ids", types.WorkFilter{ExcludeIDs: []string{id("r1"), id("w2")}}, []string{"blocker", "r0", "r2", "r3", "r4", "w0", "w1"}},
+				{"include_deferred", types.WorkFilter{IncludeDeferred: true}, includable},
+				{"parent_deferred", types.WorkFilter{ParentID: &parent, IncludeDeferred: true}, []string{"dchild", "wdchild"}},
+				{"max_rows", types.WorkFilter{MaxRows: 50}, all},
+				{"type_epic", types.WorkFilter{Type: string(types.TypeEpic), IncludeDeferred: true}, epicWant},
+				{"type_task_oldest", types.WorkFilter{Type: string(types.TypeTask), SortPolicy: types.SortPolicyOldest}, all},
+			}
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					base := tc.filter
+					base.IncludeEphemeral = true
+					var unbounded []*types.IssueWithCounts
+					withCountingReadTx(t, te, func(tx issueops.DBTX) error {
+						var err error
+						unbounded, err = issueops.GetReadyWorkWithCountsInTx(t.Context(), tx, base)
+						return err
+					})
+					listed := readyIDs(unbounded)
+					if got, want := sortedIDs(listed), prefixed(prefix, tc.want); strings.Join(got, ",") != strings.Join(want, ",") {
+						t.Fatalf("ready set = %v, want %v", got, want)
+					}
+					n := len(listed)
+					for _, limit := range []int{1, 2, n, n + 3} {
+						filter := base
+						filter.Limit = limit
+						var page []*types.IssueWithCounts
+						var total int
+						withCountingReadTx(t, te, func(tx issueops.DBTX) error {
+							var err error
+							page, total, err = issueops.GetReadyWorkWithCountsAndTotalInTx(t.Context(), tx, filter)
+							return err
+						})
+						if total != n {
+							t.Errorf("limit=%d: total = %d, want %d", limit, total, n)
+						}
+						want := listed[:min(limit, n)]
+						if got := readyIDs(page); strings.Join(got, ",") != strings.Join(want, ",") {
+							t.Errorf("limit=%d: page = %v, want prefix %v", limit, got, want)
+						}
+					}
 				})
-				if total != n {
-					t.Errorf("limit=%d: total = %d, want %d", limit, total, n)
-				}
-				want := listed[:min(limit, n)]
-				if got := readyIDs(page); strings.Join(got, ",") != strings.Join(want, ",") {
-					t.Errorf("limit=%d: page = %v, want prefix %v", limit, got, want)
-				}
 			}
 		})
 	}
