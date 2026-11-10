@@ -60,6 +60,36 @@ func TestHidePolicy(t *testing.T) {
 			wantFlags: createNewProcessGroup,
 			wantApply: false,
 		},
+		{
+			name:      "unattached parent, caller flags without a console choice: CREATE_NO_WINDOW added, rest kept",
+			flags:     createNewProcessGroup | createUnicodeEnvironment,
+			attached:  false,
+			wantFlags: createNewProcessGroup | createUnicodeEnvironment | createNoWindow,
+			wantApply: true,
+		},
+		{
+			name:      "unattached parent, already hidden: unchanged",
+			flags:     createNoWindow | createNewProcessGroup,
+			attached:  false,
+			wantFlags: createNoWindow | createNewProcessGroup,
+			wantApply: false,
+		},
+		{
+			// CREATE_NO_WINDOW is ignored alongside DETACHED_PROCESS, and
+			// OR-ing it in would only hide that the caller chose no console.
+			name:      "unattached parent, DETACHED_PROCESS chosen: unchanged",
+			flags:     detachedProcess,
+			attached:  false,
+			wantFlags: detachedProcess,
+			wantApply: false,
+		},
+		{
+			name:      "unattached parent, CREATE_NEW_CONSOLE chosen: unchanged",
+			flags:     createNewConsole | createNewProcessGroup,
+			attached:  false,
+			wantFlags: createNewConsole | createNewProcessGroup,
+			wantApply: false,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

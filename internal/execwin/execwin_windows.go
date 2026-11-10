@@ -24,13 +24,23 @@ func probeConsoleAttached() bool {
 	return err == nil && cp != 0
 }
 
+// hide applies hiddenCreationFlags to cmd. A caller's SysProcAttr is never
+// written to: the flags go on a copy that keeps every other field, so a
+// structure the caller shares between commands is left as it was.
 func hide(cmd *exec.Cmd) {
+	var flags uint32
 	if cmd.SysProcAttr != nil {
-		return
+		flags = cmd.SysProcAttr.CreationFlags
 	}
-	flags, apply := hiddenCreationFlags(0, consoleAttached())
+	flags, apply := hiddenCreationFlags(flags, consoleAttached())
 	if !apply {
 		return
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: flags}
+	attr := &syscall.SysProcAttr{}
+	if cmd.SysProcAttr != nil {
+		copied := *cmd.SysProcAttr
+		attr = &copied
+	}
+	attr.CreationFlags = flags
+	cmd.SysProcAttr = attr
 }
