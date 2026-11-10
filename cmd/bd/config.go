@@ -1422,9 +1422,11 @@ func allRecognizedConfigPrefixes() []string {
 	return prefixes
 }
 
-// recognizedConfigKeys lists valid non-namespaced config keys.
+// recognizedConfigKeys lists valid non-namespaced config keys. no-db is
+// absent on purpose: it is an obsolete setting (it never selected a storage
+// backend), refused on every config-set path by rejectProtectedConfigKey.
 var recognizedConfigKeys = map[string]bool{
-	"no-db": true, "json": true, "db": true, "actor": true,
+	"json": true, "db": true, "actor": true,
 	"identity": true, "no-push": true, "no-git-ops": true,
 	"node_id":                    true, // replica identity for the lease guard (read from yaml/env, never the DB)
 	"create.require-description": true, "beads.role": true,
@@ -1473,6 +1475,11 @@ func rejectProtectedConfigKey(key string) (string, bool) {
 			"  - New project:       bd init --prefix <prefix>\n" +
 			"  - Fresh clone:       bd bootstrap\n" +
 			"  - Rename existing:   bd rename-prefix <new-prefix>", true
+	case "no-db":
+		return "Error: no-db is an obsolete setting and cannot be set: it never selected a\n" +
+			"  storage backend — issues live in the Dolt database, and the JSONL export is\n" +
+			"  an export, not a store.\n" +
+			"  - Remove it from an older config:   bd config unset no-db", true
 	}
 	return "", false
 }

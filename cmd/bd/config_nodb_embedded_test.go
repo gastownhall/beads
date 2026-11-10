@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -65,14 +66,14 @@ func TestEmbeddedConfigNoWorkspaceStoreFreeCommands(t *testing.T) {
 		}
 	})
 
-	t.Run("set_yaml_only_reports_config_yaml_error", func(t *testing.T) {
+	t.Run("set_refused_as_obsolete_setting", func(t *testing.T) {
 		stdout, stderr, err := runConfigCommandWithStreams(t, bd, dir, "set", "no-db", "true")
 		if err == nil {
-			t.Fatalf("expected config set no-db to fail without a workspace config, stdout:\n%s\nstderr:\n%s", stdout, stderr)
+			t.Fatalf("expected config set no-db to be refused as an obsolete setting, stdout:\n%s\nstderr:\n%s", stdout, stderr)
 		}
 		assertNoStoreInitLeak(t, stderr)
-		if !strings.Contains(stderr, "no .beads/config.yaml found") {
-			t.Fatalf("expected config.yaml error, got stderr:\n%s", stderr)
+		if !strings.Contains(stderr, "obsolete") || !strings.Contains(stderr, "bd config unset no-db") {
+			t.Fatalf("expected obsolete-setting refusal, got stderr:\n%s", stderr)
 		}
 	})
 
@@ -161,5 +162,69 @@ func TestEmbeddedConfigValidateJSONNoWorkspaceWritesStdout(t *testing.T) {
 	}
 	if hint, _ := payload["hint"].(string); !strings.Contains(hint, "bd where") {
 		t.Fatalf("expected hint to mention bd where, got %q", hint)
+	}
+}
+
+// TestEmbeddedConfigSetNoDBRefused pins GH#4135 AC-6: both config-set entry
+// points refuse no-db as an obsolete setting — it never selected a storage
+// backend; issues live in the Dolt database and the JSONL export is an
+// export — before writing to config.yaml or the database, while
+// `bd config unset no-db` still removes the entry an older workspace may
+// carry.
+func TestEmbeddedConfigSetNoDBRefused(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "nd")
+	configPath := filepath.Join(beadsDir, "config.yaml")
+
+	stdout, stderr, err := runConfigCommandWithStreams(t, bd, dir, "set", "no-db", "true")
+	if err == nil {
+		t.Fatalf("bd config set no-db succeeded on an initialized workspace, stdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	assertNoStoreInitLeak(t, stderr)
+	if !strings.Contains(stderr, "obsolete") || !strings.Contains(stderr, "bd config unset no-db") {
+		t.Fatalf("bd config set no-db refusal is not the obsolete-setting explanation, stderr:\n%s", stderr)
+	}
+
+	stdout, stderr, err = runConfigCommandWithStreams(t, bd, dir, "set-many", "no-db=true")
+	if err == nil {
+		t.Fatalf("bd config set-many no-db=true succeeded on an initialized workspace, stdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	assertNoStoreInitLeak(t, stderr)
+	if !strings.Contains(stderr, "obsolete") || !strings.Contains(stderr, "bd config unset no-db") {
+		t.Fatalf("bd config set-many no-db=true refusal is not the obsolete-setting explanation, stderr:\n%s", stderr)
+	}
+
+	// The refusals wrote nothing: the init-created config.yaml carries no
+	// no-db entry.
+	configYaml, readErr := os.ReadFile(configPath)
+	if readErr != nil {
+		t.Fatalf("read %s: %v", configPath, readErr)
+	}
+	if strings.Contains(string(configYaml), "no-db") {
+		t.Fatalf("config.yaml holds a no-db entry after the refused sets:\n%s", configYaml)
+	}
+
+	// An older workspace's entry is still removable: unset removes it from
+	// config.yaml without touching the database.
+	if writeErr := os.WriteFile(configPath, append(configYaml, []byte("no-db: true\n")...), 0o600); writeErr != nil {
+		t.Fatalf("seed no-db entry in %s: %v", configPath, writeErr)
+	}
+	stdout, stderr, err = runConfigCommandWithStreams(t, bd, dir, "unset", "no-db")
+	if err != nil {
+		t.Fatalf("bd config unset no-db failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	assertNoStoreInitLeak(t, stderr)
+	configYaml, readErr = os.ReadFile(configPath)
+	if readErr != nil {
+		t.Fatalf("reread %s: %v", configPath, readErr)
+	}
+	for _, line := range strings.Split(string(configYaml), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "no-db:") {
+			t.Fatalf("bd config unset no-db left an active no-db entry in config.yaml:\n%s", configYaml)
+		}
 	}
 }

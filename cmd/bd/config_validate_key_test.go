@@ -102,6 +102,24 @@ func TestRejectProtectedConfigKey(t *testing.T) {
 	}
 }
 
+// TestRejectProtectedConfigKeyNoDB pins GH#4135 AC-6: no-db is refused on both
+// config-set entry points as an obsolete setting. no-db never selected a
+// storage backend — issues live in the Dolt database and the JSONL export is
+// an export — so a `bd config set no-db true` that "succeeded" would write a
+// setting nothing reads. The refusal must explain that and point at the one
+// command that still applies to the key: removing it from an older config.
+func TestRejectProtectedConfigKeyNoDB(t *testing.T) {
+	msg, rejected := rejectProtectedConfigKey("no-db")
+	if !rejected {
+		t.Fatal("rejectProtectedConfigKey(\"no-db\") = (_, false), want rejected as an obsolete setting")
+	}
+	for _, want := range []string{"obsolete", "bd config unset no-db"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("no-db refusal message missing %q; got:\n%s", want, msg)
+		}
+	}
+}
+
 func TestLevenshteinDistance(t *testing.T) {
 	tests := []struct {
 		a, b string
