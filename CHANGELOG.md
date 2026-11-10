@@ -1226,6 +1226,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Git hooks run their `bd export` (pre-commit) and `bd import` (post-merge,
+  post-checkout) steps with the same `bd` as the hook, not whichever `bd`
+  comes first on `PATH`. An older `bd` earlier on git's `PATH` failed to open
+  the database, so commits warned `pre-commit export warning: exit status 1`
+  and left out their issue export (GH#5922). `bd hooks install` and `bd init`
+  now warn on stderr when `PATH` selects a different `bd`, or none, since the
+  hooks themselves start `bd` from `PATH`. See "Hooks run a different bd than
+  your shell" in the troubleshooting guide.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
