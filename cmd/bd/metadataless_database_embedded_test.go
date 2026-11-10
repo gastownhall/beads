@@ -274,6 +274,16 @@ func TestEmbeddedMetadatalessWorkspaceEnvVarSelectsDatabase(t *testing.T) {
 			t.Fatalf("stderr does not name the selected database and its source:\n%s", run.stderr)
 		}
 
+		// Strict --readonly takes the write-refusing open, and reads the
+		// same selected database.
+		run = runBDMetadataless(t, bd, dir, env, "list", "--json", "--readonly")
+		if run.err != nil {
+			t.Fatalf("bd list --json --readonly failed: %v\nstdout:\n%s\nstderr:\n%s", run.err, run.stdout, run.stderr)
+		}
+		if ids := listedIDs(t, run); !slices.Equal(ids, []string{secondID}) {
+			t.Fatalf("bd list --json --readonly listed %v, want only %s from the selected database \"second\"\nstderr:\n%s", ids, secondID, run.stderr)
+		}
+
 		run = runBDMetadataless(t, bd, dir, env, "close", secondID)
 		if run.err != nil {
 			t.Fatalf("bd close %s failed: %v\nstdout:\n%s\nstderr:\n%s", secondID, run.err, run.stdout, run.stderr)
@@ -310,4 +320,77 @@ func TestEmbeddedMetadatalessWorkspaceEnvVarSelectsDatabase(t *testing.T) {
 		assertIssueStatusIn(t, bd, dir, "gh4135", ownID, "open")
 		assertIssueStatusIn(t, bd, dir, "second", secondID, "open")
 	})
+
+	// A write as the first command runs the identity preview before the real
+	// open: both must reach the selected database.
+	t.Run("write first", func(t *testing.T) {
+		dir, beadsDir, saved, ownID, secondID := severalDatabasesFixture(t, bd, "second")
+		env := []string{"BEADS_DOLT_SERVER_DATABASE=second"}
+
+		run := runBDMetadataless(t, bd, dir, env, "close", secondID, "--json")
+		if run.err != nil {
+			t.Fatalf("bd close %s failed: %v\nstdout:\n%s\nstderr:\n%s", secondID, run.err, run.stdout, run.stderr)
+		}
+		assertEmbeddedDatabases(t, beadsDir, "gh4135", "second")
+		assertMetadataAbsent(t, beadsDir)
+
+		restoreMetadata(t, beadsDir, saved)
+		assertIssueStatusIn(t, bd, dir, "second", secondID, "closed")
+		assertIssueStatusIn(t, bd, dir, "gh4135", ownID, "open")
+	})
+}
+
+// TestEmbeddedMetadatalessWorkspaceLegacyDatabaseName: a metadata-less
+// workspace whose database directory still carries a legacy hyphenated name
+// selects it as named on disk, by itself or through BEADS_DOLT_SERVER_DATABASE,
+// and the identity preview and the real open both validate that name. Neither
+// is pointed at the sanitized sibling, which does not exist, and the selection
+// renames nothing and writes no metadata.json.
+func TestEmbeddedMetadatalessWorkspaceLegacyDatabaseName(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	bd := buildEmbeddedBD(t)
+
+	for _, tc := range []struct {
+		name string
+		env  []string
+		args func(id string) []string
+	}{
+		{name: "sole read", args: func(string) []string { return []string{"list", "--json"} }},
+		{name: "sole write first", args: func(id string) []string { return []string{"close", id, "--json"} }},
+		{name: "override write first", env: []string{"BEADS_DOLT_SERVER_DATABASE=gh-4135"}, args: func(id string) []string { return []string{"close", id, "--json"} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gh4135")
+			id := bdCreate(t, bd, dir, "In a legacy-named database").ID
+			if err := os.Rename(filepath.Join(beadsDir, "embeddeddolt", "gh4135"), filepath.Join(beadsDir, "embeddeddolt", "gh-4135")); err != nil {
+				t.Fatal(err)
+			}
+			removeMetadata(t, beadsDir)
+			args := tc.args(id)
+
+			run := runBDMetadataless(t, bd, dir, tc.env, args...)
+			if run.err == nil {
+				t.Fatalf("bd %s opened the invalid legacy name gh-4135:\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), run.stdout, run.stderr)
+			}
+			// The identity preview's refusal of a write keeps the --json
+			// contract and carries its error on stdout; nothing else may.
+			var envelope struct {
+				Error string `json:"error"`
+			}
+			if stdout := strings.TrimSpace(run.stdout); stdout != "" && (json.Unmarshal([]byte(stdout), &envelope) != nil || envelope.Error == "") {
+				t.Fatalf("refused bd %s printed a payload other than an error:\n%s", strings.Join(args, " "), run.stdout)
+			}
+			output := envelope.Error + "\n" + run.stderr
+			if !strings.Contains(output, `invalid database name: "gh-4135"`) {
+				t.Fatalf("bd %s did not refuse the legacy name as it is on disk:\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), run.stdout, run.stderr)
+			}
+			if strings.Contains(run.stdout+run.stderr, "gh_4135") {
+				t.Fatalf("bd %s reached for the sanitized sibling gh_4135, which does not exist:\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), run.stdout, run.stderr)
+			}
+			assertEmbeddedDatabases(t, beadsDir, "gh-4135")
+			assertMetadataAbsent(t, beadsDir)
+		})
+	}
 }
