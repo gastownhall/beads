@@ -223,8 +223,17 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 	if !didIncremental {
 		issueCount, memoryCount, err = exportToFile(ctx, fullPath, false)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: auto-export failed: %v\n", err)
-			return nil
+			// The shrink guard's deliberate refusal protects records
+			// outside auto-export scope; like the refusals above it stays
+			// a warning-only skip. Anything else is a failed export that
+			// leaves the JSONL behind the store, so the caller must see
+			// it (GH#6163).
+			var refusal *autoExportOverwriteRefusal
+			if errors.As(err, &refusal) {
+				fmt.Fprintf(os.Stderr, "Warning: auto-export failed: %v\n", err)
+				return nil
+			}
+			return fmt.Errorf("auto-export to %s: %w", fullPath, err)
 		}
 		dirtyIDs = nil
 	}
@@ -912,8 +921,18 @@ func guardAutoExportOverwrite(path string, infraTypes map[string]bool, includeMe
 	if stats.FilteredRecords == 0 {
 		return nil
 	}
-	return fmt.Errorf("auto-export shrink guard: refusing to overwrite %s because it contains %d record(s) outside auto-export scope (%d memories, %d infra/template/ephemeral issues, %d unknown); run an explicit export if you want to replace it", path, stats.FilteredRecords, stats.Memories, stats.FilteredIssues, stats.UnknownRecords)
+	return &autoExportOverwriteRefusal{msg: fmt.Sprintf("auto-export shrink guard: refusing to overwrite %s because it contains %d record(s) outside auto-export scope (%d memories, %d infra/template/ephemeral issues, %d unknown); run an explicit export if you want to replace it", path, stats.FilteredRecords, stats.Memories, stats.FilteredIssues, stats.UnknownRecords)}
 }
+
+// autoExportOverwriteRefusal is the shrink guard's deliberate refusal to
+// overwrite a JSONL holding records outside auto-export scope. It is typed
+// so maybeAutoExport can keep it a warning-only skip while every failure to
+// inspect that JSONL stays an error.
+type autoExportOverwriteRefusal struct {
+	msg string
+}
+
+func (e *autoExportOverwriteRefusal) Error() string { return e.msg }
 
 type autoExportOverwriteStats struct {
 	FilteredRecords int // blocking total: Memories + FilteredIssues + UnknownRecords
