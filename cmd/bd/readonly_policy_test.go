@@ -17,6 +17,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/eventsjournal"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -169,6 +170,99 @@ func TestPersistentPostRunStrictReadonlySuppressesMaintenance(t *testing.T) {
 	}
 	if fake.closeCalls != 1 {
 		t.Fatalf("store close calls = %d, want 1", fake.closeCalls)
+	}
+}
+
+// TestPreviewSkipsAutoPush pins AC-7 (GH#7876): a write-classified command
+// run as a preview (--dry-run, --inspect) changed nothing, so post-command
+// maintenance must not auto-push after it. Before the preview skip, a preview
+// on a strict-read-only store reached Push and printed an auto-push warning
+// plus a failed-attempt push-state write. The plain write is the control: the
+// same harness must invoke the hook exactly once.
+func TestPreviewSkipsAutoPush(t *testing.T) {
+	originalStore := store
+	originalReadonly := readonlyMode
+	originalProxied := proxiedServerMode
+	originalRootCtx := rootCtx
+	originalRootCancel := rootCancel
+	originalCommandSpan := commandSpan
+	originalProfileFile := profileFile
+	originalTraceFile := traceFile
+	storeMutex.Lock()
+	originalStoreActive := storeActive
+	storeMutex.Unlock()
+	originalDidWrite := commandDidWrite.Load()
+	originalDidWriteTipMetadata := commandDidWriteTipMetadata
+	originalCommit := runPostRunAutoCommit
+	originalBackup := runPostRunAutoBackup
+	originalExport := runPostRunAutoExport
+	originalPush := runPostRunAutoPush
+	t.Cleanup(func() {
+		store = originalStore
+		readonlyMode = originalReadonly
+		proxiedServerMode = originalProxied
+		rootCtx = originalRootCtx
+		rootCancel = originalRootCancel
+		commandSpan = originalCommandSpan
+		profileFile = originalProfileFile
+		traceFile = originalTraceFile
+		storeMutex.Lock()
+		storeActive = originalStoreActive
+		storeMutex.Unlock()
+		commandDidWrite.Store(originalDidWrite)
+		commandDidWriteTipMetadata = originalDidWriteTipMetadata
+		runPostRunAutoCommit = originalCommit
+		runPostRunAutoBackup = originalBackup
+		runPostRunAutoExport = originalExport
+		runPostRunAutoPush = originalPush
+	})
+	// Keep the events-journal retention pass, which runs after auto-push for
+	// the control write, off the fake store.
+	t.Setenv(eventsjournal.EnvVar, "false")
+
+	pushCalls := 0
+	runPostRunAutoCommit = func(context.Context, doltAutoCommitParams) error { return nil }
+	runPostRunAutoBackup = func(context.Context) {}
+	runPostRunAutoExport = func(context.Context, bool) error { return nil }
+	runPostRunAutoPush = func(context.Context) { pushCalls++ }
+
+	for _, tc := range []struct {
+		name       string
+		flag       string
+		wantPushes int
+	}{
+		{name: "dry-run", flag: "dry-run", wantPushes: 0},
+		{name: "inspect", flag: "inspect", wantPushes: 0},
+		{name: "write-control", wantPushes: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pushCalls = 0
+			store = &strictReadonlyPostRunStore{}
+			readonlyMode = false
+			proxiedServerMode = false
+			rootCtx = context.Background()
+			rootCancel = nil
+			commandSpan = nil
+			profileFile = nil
+			traceFile = nil
+			commandDidWrite.Store(false)
+			commandDidWriteTipMetadata = false
+
+			cmd := &cobra.Command{Use: "create"}
+			cmd.Flags().Bool("dry-run", false, "")
+			cmd.Flags().Bool("inspect", false, "")
+			if tc.flag != "" {
+				if err := cmd.Flags().Set(tc.flag, "true"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := rootCmd.PersistentPostRunE(cmd, nil); err != nil {
+				t.Fatalf("PersistentPostRunE: %v", err)
+			}
+			if pushCalls != tc.wantPushes {
+				t.Fatalf("auto-push calls = %d, want %d", pushCalls, tc.wantPushes)
+			}
+		})
 	}
 }
 
