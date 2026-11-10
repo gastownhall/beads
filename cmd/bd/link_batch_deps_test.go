@@ -194,3 +194,48 @@ func TestCLI_Batch_DepAdd_TypeBlockedByAliasGates(t *testing.T) {
 		}
 	}
 }
+
+// TestCLI_Batch_DepAdd_UnknownTypeRejected mirrors `bd dep add`'s unknown-type
+// rejection for the batch dep.add op: a typo or a custom type on line 2 fails
+// the batch with the line number, the type and the accepted vocabulary, and
+// line 1's write is rolled back with it.
+func TestCLI_Batch_DepAdd_UnknownTypeRejected(t *testing.T) {
+	bd, dir := linkBatchInit(t)
+
+	for _, bad := range []string{"blcoks", "owned-by"} {
+		a := createDepsExtractID(t, runCreateDepsBD(t, bd, dir, "create", "Batch A "+bad, "-p", "1", "--json"))
+		b := createDepsExtractID(t, runCreateDepsBD(t, bd, dir, "create", "Batch B "+bad, "-p", "1", "--json"))
+
+		script := "update " + a + " priority=3\ndep add " + a + " " + b + " " + bad + "\n"
+		scriptFile := filepath.Join(dir, "batch-"+bad+".txt")
+		if err := os.WriteFile(scriptFile, []byte(script), 0o600); err != nil {
+			t.Fatalf("write batch script: %v", err)
+		}
+
+		out, err := runCreateDepsBDRaw(bd, dir, "batch", "-f", scriptFile)
+		if err == nil {
+			t.Errorf("bd batch dep.add %s exited 0; output:\n%s", bad, out)
+		}
+		for _, want := range []string{"line 2 (dep add ", `unknown dependency type "` + bad + `"`, "valid types: " + createDepsAcceptedTypeList()} {
+			if !strings.Contains(out, want) {
+				t.Errorf("bd batch dep.add %s output does not contain %q:\n%s", bad, want, out)
+			}
+		}
+
+		show := runCreateDepsBD(t, bd, dir, "show", a, "--json")
+		var issue struct {
+			ID       string `json:"id"`
+			Priority int    `json:"priority"`
+		}
+		start := strings.Index(show, "{")
+		if start < 0 || json.NewDecoder(strings.NewReader(show[start:])).Decode(&issue) != nil || issue.ID != a {
+			t.Fatalf("bd show %s --json: unparseable output:\n%s", a, show)
+		}
+		if issue.Priority != 1 {
+			t.Errorf("%s priority = %d after the refused batch, want 1: line 1 must roll back", a, issue.Priority)
+		}
+		if deps := runCreateDepsBD(t, bd, dir, "dep", "list", a, "--json"); strings.Contains(deps, b) {
+			t.Errorf("the refused batch left an edge %s -> %s: %s", a, b, deps)
+		}
+	}
+}

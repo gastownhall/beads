@@ -403,7 +403,10 @@ func lastNonEmptyLine(s string) string {
 
 // TestProxiedServerBatchDepAddCanonicalizesAliasesAndRefusesUnknownTypes pins
 // the batch `dep add` type contract on BOTH backends (GH#5585): the documented
-// aliases store the canonical blocks edge that ready/blocked gating matches.
+// aliases store the canonical blocks edge that ready/blocked gating matches,
+// and a type outside the dep-add vocabulary — a typo like `blcoks` or a custom
+// spelling like `owned-by` — is refused with the line number, the offending
+// spelling and the accepted list, rolling the whole batch back.
 // batchDepAddEdge is the shared edge builder, so neither backend can drift
 // from `bd dep add`'s vocabulary again.
 func TestProxiedServerBatchDepAddCanonicalizesAliasesAndRefusesUnknownTypes(t *testing.T) {
@@ -411,6 +414,14 @@ func TestProxiedServerBatchDepAddCanonicalizesAliasesAndRefusesUnknownTypes(t *t
 	t.Parallel()
 	bd := buildEmbeddedBD(t)
 
+	type refusal struct {
+		code        int
+		namesLine   bool
+		namesType   bool
+		namesWords  bool
+		rolledBack  bool
+		edgesLeftOn int
+	}
 	type alias struct {
 		code       int
 		edges      int
@@ -418,13 +429,50 @@ func TestProxiedServerBatchDepAddCanonicalizesAliasesAndRefusesUnknownTypes(t *t
 		gates      bool
 	}
 	type outcome struct {
-		aliases [2]alias
+		refusals [2]refusal
+		aliases  [2]alias
 	}
+	badTypes := [2]string{"blcoks", "owned-by"}
 	aliasTypes := [2]string{"blocked-by", "depends-on"}
 	outcomes := make(map[string]outcome, 2)
 
 	for _, env := range newCrossModeEnvs(t, bd, "bqc", "bqp") {
 		var got outcome
+
+		for i, bad := range badTypes {
+			a := env.create(t, "Dep-add refusal A "+bad)
+			b := env.create(t, "Dep-add refusal B "+bad)
+
+			// Line 1 is a valid write the refusal on line 2 must take back
+			// with it: after the failed batch, A is still P2 (its default)
+			// and has no edge.
+			script := fmt.Sprintf("update %s priority=1\ndep add %s %s %s\n", a, a, b, bad)
+			stdout, stderr, code := env.runStdin(t, script, "batch")
+			report := stdout + stderr
+			r := refusal{
+				code:        code,
+				namesLine:   strings.Contains(report, "line 2 (dep add "),
+				namesType:   strings.Contains(report, `"`+bad+`"`),
+				namesWords:  strings.Contains(report, "valid types: "+createDepsAcceptedTypeList()),
+				rolledBack:  env.show(t, a).Priority == 2,
+				edgesLeftOn: len(env.depList(t, a)),
+			}
+			got.refusals[i] = r
+
+			if r.code == 0 {
+				t.Errorf("[%s] batch with dep-add type %q exited 0; it must be refused", env.mode, bad)
+			}
+			if !r.namesLine || !r.namesType || !r.namesWords {
+				t.Errorf("[%s] refusal of %q must name the line, the type and the vocabulary: line=%v type=%v words=%v\n%s",
+					env.mode, bad, r.namesLine, r.namesType, r.namesWords, report)
+			}
+			if !r.rolledBack {
+				t.Errorf("[%s] the refused %q line did not roll back line 1's priority write", env.mode, bad)
+			}
+			if r.edgesLeftOn != 0 {
+				t.Errorf("[%s] the refused %q batch left %d edges on A, want 0", env.mode, bad, r.edgesLeftOn)
+			}
+		}
 
 		// Each alias spelling commits the canonical edge, which gates its
 		// source while the target stays open (and itself ready).
