@@ -555,3 +555,72 @@ func TestIsBlocked_ConditionalBlocksHoldsOnSuccessClose(t *testing.T) {
 		t.Error("ordinary blocks dependent should be released by a success close")
 	}
 }
+
+// TestIsBlocked_ConditionalBlocksWispRoutes runs the conditional-blocks close
+// rule through every source/target combination that contains a wisp: the
+// fallback B is released (stored bit 0, in ready work) only when A closes with
+// a failure reason.
+func TestIsBlocked_ConditionalBlocksWispRoutes(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	type route struct {
+		name               string
+		sourceWisp, tgtWsp bool
+	}
+	routes := []route{
+		{"issue-to-wisp", false, true},
+		{"wisp-to-issue", true, false},
+		{"wisp-to-wisp", true, true},
+	}
+	reasons := []string{"completed successfully", "aborted by operator"}
+	for ri, r := range routes {
+		for oi, reason := range reasons {
+			a := "isb-cbw-a" + string(rune('0'+ri)) + string(rune('0'+oi))
+			b := "isb-cbw-b" + string(rune('0'+ri)) + string(rune('0'+oi))
+			if r.tgtWsp {
+				createWisp(t, ctx, store, a)
+			} else {
+				createPerm(t, ctx, store, a)
+			}
+			table := "issues"
+			if r.sourceWisp {
+				createWisp(t, ctx, store, b)
+				table = "wisps"
+			} else {
+				createPerm(t, ctx, store, b)
+			}
+			if err := store.AddDependency(ctx, &types.Dependency{
+				IssueID: b, DependsOnID: a, Type: types.DepConditionalBlocks,
+			}, "tester"); err != nil {
+				t.Fatalf("%s: AddDependency: %v", r.name, err)
+			}
+			if !getIsBlocked(t, ctx, store, table, b) {
+				t.Fatalf("%s: %s should be blocked while %s is open", r.name, b, a)
+			}
+			if err := store.CloseIssue(ctx, a, reason, "tester", ""); err != nil {
+				t.Fatalf("%s: CloseIssue: %v", r.name, err)
+			}
+
+			wantBlocked := !types.IsFailureClose(reason)
+			if got := getIsBlocked(t, ctx, store, table, b); got != wantBlocked {
+				t.Errorf("%s: close reason %q: stored is_blocked(%s) = %v, want %v", r.name, reason, b, got, wantBlocked)
+			}
+			ready, err := store.GetReadyWork(ctx, types.WorkFilter{Status: types.StatusOpen, IncludeEphemeral: true})
+			if err != nil {
+				t.Fatalf("%s: GetReadyWork: %v", r.name, err)
+			}
+			inReady := false
+			for _, issue := range ready {
+				if issue.ID == b {
+					inReady = true
+				}
+			}
+			if inReady == wantBlocked {
+				t.Errorf("%s: close reason %q: %s in ready work = %v, want %v", r.name, reason, b, inReady, !wantBlocked)
+			}
+		}
+	}
+}
