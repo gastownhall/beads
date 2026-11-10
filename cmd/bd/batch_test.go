@@ -289,6 +289,16 @@ func TestBatchDepAddEdge(t *testing.T) {
 			want: &types.Dependency{IssueID: "bd-1", DependsOnID: "bd-2", Type: types.DepRelated},
 		},
 		{
+			name: "blocked-by alias stores the gating blocks type",
+			args: []string{"bd-1", "bd-2", "blocked-by"},
+			want: &types.Dependency{IssueID: "bd-1", DependsOnID: "bd-2", Type: types.DepBlocks},
+		},
+		{
+			name: "depends-on alias stores the gating blocks type",
+			args: []string{"bd-1", "bd-2", "depends-on"},
+			want: &types.Dependency{IssueID: "bd-1", DependsOnID: "bd-2", Type: types.DepBlocks},
+		},
+		{
 			name:    "missing to-id",
 			args:    []string{"bd-1"},
 			wantErr: "dep add requires <from-id> <to-id>",
@@ -370,5 +380,21 @@ func TestBatchCmd_Registered(t *testing.T) {
 	}
 	if cmd.Flags().Lookup("message") == nil {
 		t.Error("batch missing --message flag")
+	}
+}
+
+// TestBatchDepAddEdgeCanonicalizesAliases pins GH#5585: a `dep.add` op with
+// the documented alias spellings must store the canonical "blocks" type, as
+// `bd dep add --type` does (canonicalDependencyType), or the edge never gates
+// bd ready.
+func TestBatchDepAddEdgeCanonicalizesAliases(t *testing.T) {
+	for _, alias := range []string{"blocked-by", "depends-on"} {
+		got, err := batchDepAddEdge([]string{"bd-1", "bd-2", alias})
+		if err != nil {
+			t.Fatalf("batchDepAddEdge(%q): %v", alias, err)
+		}
+		if got.Type != types.DepBlocks {
+			t.Errorf("batchDepAddEdge type %q stored as %q, want %q", alias, got.Type, types.DepBlocks)
+		}
 	}
 }

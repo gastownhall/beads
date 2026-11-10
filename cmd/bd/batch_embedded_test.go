@@ -105,6 +105,47 @@ dep add tb-3 tb-2
 	}
 }
 
+// TestBatch_DepAddAliasGatesReadyWork pins GH#5585 on the classic backend: a
+// `dep add` line spelling the documented blocked-by or depends-on alias
+// stores the canonical blocks edge, which keeps its source out of ready work
+// while the target is open.
+func TestBatch_DepAddAliasGatesReadyWork(t *testing.T) {
+	tmpDir := t.TempDir()
+	st := newTestStoreWithPrefix(t, filepath.Join(tmpDir, ".beads", "beads.db"), "tba")
+	ctx := context.Background()
+
+	seedBatchTestIssues(t, ctx, st, "tba-1", "tba-2", "tba-3")
+
+	script := `dep add tba-1 tba-3 blocked-by
+dep add tba-2 tba-3 depends-on
+`
+	if err := runBatchScriptInTx(t, ctx, st, script); err != nil {
+		t.Fatalf("batch run: %v", err)
+	}
+
+	for _, from := range []string{"tba-1", "tba-2"} {
+		recs, err := st.GetDependencyRecords(ctx, from)
+		if err != nil {
+			t.Fatalf("GetDependencyRecords %s: %v", from, err)
+		}
+		if len(recs) != 1 || recs[0].DependsOnID != "tba-3" || recs[0].Type != types.DepBlocks {
+			for _, r := range recs {
+				t.Logf("%s -> %s (%s)", r.IssueID, r.DependsOnID, r.Type)
+			}
+			t.Errorf("%s has %d dependencies, want one blocks edge to tba-3", from, len(recs))
+		}
+	}
+	ready, err := st.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	for _, issue := range ready {
+		if issue.ID == "tba-1" || issue.ID == "tba-2" {
+			t.Errorf("%s is ready while its alias-spelled blocker tba-3 is open", issue.ID)
+		}
+	}
+}
+
 // TestBatch_RollbackOnError verifies that if any op in the batch fails the
 // entire transaction is rolled back and earlier writes are not visible.
 //

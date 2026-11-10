@@ -400,3 +400,65 @@ func lastNonEmptyLine(s string) string {
 	}
 	return ""
 }
+
+// TestProxiedServerBatchDepAddCanonicalizesAliasesAndRefusesUnknownTypes pins
+// the batch `dep add` type contract on BOTH backends (GH#5585): the documented
+// aliases store the canonical blocks edge that ready/blocked gating matches.
+// batchDepAddEdge is the shared edge builder, so neither backend can drift
+// from `bd dep add`'s vocabulary again.
+func TestProxiedServerBatchDepAddCanonicalizesAliasesAndRefusesUnknownTypes(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	type alias struct {
+		code       int
+		edges      int
+		storedType string
+		gates      bool
+	}
+	type outcome struct {
+		aliases [2]alias
+	}
+	aliasTypes := [2]string{"blocked-by", "depends-on"}
+	outcomes := make(map[string]outcome, 2)
+
+	for _, env := range newCrossModeEnvs(t, bd, "bqc", "bqp") {
+		var got outcome
+
+		// Each alias spelling commits the canonical edge, which gates its
+		// source while the target stays open (and itself ready).
+		for i, aliasType := range aliasTypes {
+			a := env.create(t, "Dep-add alias A "+aliasType)
+			b := env.create(t, "Dep-add alias B "+aliasType)
+			stdout, stderr, code := env.runStdin(t, fmt.Sprintf("dep add %s %s %s\n", a, b, aliasType), "batch")
+			if code != 0 {
+				t.Fatalf("[%s] batch dep add %s failed with exit %d\nstdout:\n%s\nstderr:\n%s", env.mode, aliasType, code, stdout, stderr)
+			}
+			deps := env.depList(t, a)
+			al := alias{code: code, edges: len(deps)}
+			for _, d := range deps {
+				if d["id"] == b {
+					al.storedType, _ = d["dependency_type"].(string)
+				}
+			}
+			ready := proxiedIDSet(t, env.mustRun(t, "ready", "--json", "--limit", "0"))
+			blocked := proxiedIDSet(t, env.mustRun(t, "blocked", "--json"))
+			al.gates = !ready[a] && blocked[a] && ready[b]
+			got.aliases[i] = al
+
+			if al.edges != 1 || al.storedType != "blocks" {
+				t.Errorf("[%s] batch dep add %s: %d edges on A, stored type %q; want 1 blocks edge to B", env.mode, aliasType, al.edges, al.storedType)
+			}
+			if !al.gates {
+				t.Errorf("[%s] the %s edge did not gate A while B is open", env.mode, aliasType)
+			}
+		}
+
+		outcomes[env.mode] = got
+	}
+
+	if outcomes["classic"] != outcomes["proxied"] {
+		t.Errorf("cross-mode divergence:\nclassic=%+v\nproxied=%+v", outcomes["classic"], outcomes["proxied"])
+	}
+}
