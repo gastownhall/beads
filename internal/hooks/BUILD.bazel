@@ -16,6 +16,11 @@ go_library(
         "@io_opentelemetry_go_otel//attribute",
         "@io_opentelemetry_go_otel_trace//:trace",
     ] + select({
+        "@rules_go//go/platform:windows": [
+            "//internal/execwin",
+        ],
+        "//conditions:default": [],
+    }) + select({
         "@rules_go//go/platform:aix_ppc64": [
             "@io_opentelemetry_go_otel//:otel",
             "@io_opentelemetry_go_otel//codes",

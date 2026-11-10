@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/execwin"
 	"github.com/steveyegge/beads/internal/httpclient"
 	"github.com/steveyegge/beads/internal/httpclient/wire"
 	"github.com/steveyegge/beads/internal/metrics"
@@ -1169,7 +1170,7 @@ type ghPRStatus struct {
 type ghCommandRunner func(args ...string) (stdout, stderr []byte, err error)
 
 func runGHCommand(args ...string) (stdout, stderr []byte, err error) {
-	cmd := exec.Command("gh", args...) // #nosec G204 -- callers pass validated values as an argument vector, without a shell
+	cmd := execwin.Hide(exec.Command("gh", args...)) // #nosec G204 -- callers pass validated values as an argument vector, without a shell
 	var stdoutBuffer, stderrBuffer bytes.Buffer
 	cmd.Stdout = &stdoutBuffer
 	cmd.Stderr = &stderrBuffer
@@ -1925,7 +1926,7 @@ func escalateGate(gate *types.Issue, reason string) {
 		gate.CreatedAt.Format(time.RFC3339))
 
 	// Call gt escalate if available
-	escalateCmd := exec.Command("gt", "escalate", topic, "-s", "HIGH", "-m", message)
+	escalateCmd := execwin.Hide(exec.Command("gt", "escalate", topic, "-s", "HIGH", "-m", message))
 	escalateCmd.Stdout = os.Stdout
 	escalateCmd.Stderr = os.Stderr
 	if err := escalateCmd.Run(); err != nil {

@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads"
 	internalbeads "github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/execwin"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/memoryops"
@@ -318,7 +319,7 @@ func primeWorkspaceDir() string {
 // failure falls back to a cwd probe instead of propagating — so this no
 // longer returns an error. If a future caller needs one, reintroduce it then.
 func primeGitCmd(ctx context.Context, args ...string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := execwin.Hide(exec.CommandContext(ctx, "git", args...))
 	cmd.Dir = primeGitDir()
 	return cmd
 }
@@ -453,7 +454,7 @@ var primeHasGitRemote = func() bool {
 	if has, ok := git.HasRemoteInProcess(dir); ok {
 		return has
 	}
-	cmd := exec.CommandContext(context.Background(), "git", "remote")
+	cmd := execwin.Hide(exec.CommandContext(context.Background(), "git", "remote"))
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
@@ -478,7 +479,7 @@ func gitCWDHasRemote() bool {
 // (this is what gitCWDHasRemote uses); a non-empty dir lets tests probe an
 // explicit fixture repo without chdir-ing the whole process.
 func gitDirHasRemote(dir string) bool {
-	cmd := exec.Command("git", "remote")
+	cmd := execwin.Hide(exec.Command("git", "remote"))
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {

@@ -24,6 +24,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/execwin"
 	"github.com/steveyegge/beads/internal/procid"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/identity"
@@ -227,25 +228,25 @@ func (s *DoltServer) DSN(_ context.Context, database, user, password string) str
 }
 
 func (s *DoltServer) doltConfigure(ctx context.Context) error {
-	probe := exec.CommandContext(ctx, s.doltBinExec, "config", "--global", "--get", "user.name")
+	probe := execwin.Hide(exec.CommandContext(ctx, s.doltBinExec, "config", "--global", "--get", "user.name"))
 	if out, err := probe.Output(); err == nil && strings.TrimSpace(string(out)) != "" {
 		return nil
 	}
 	name, email := "beads", "beads@localhost"
-	if out, err := exec.CommandContext(ctx, "git", "config", "user.name").Output(); err == nil {
+	if out, err := execwin.Hide(exec.CommandContext(ctx, "git", "config", "user.name")).Output(); err == nil {
 		if v := strings.TrimSpace(string(out)); v != "" {
 			name = v
 		}
 	}
-	if out, err := exec.CommandContext(ctx, "git", "config", "user.email").Output(); err == nil {
+	if out, err := execwin.Hide(exec.CommandContext(ctx, "git", "config", "user.email")).Output(); err == nil {
 		if v := strings.TrimSpace(string(out)); v != "" {
 			email = v
 		}
 	}
-	if out, err := exec.CommandContext(ctx, s.doltBinExec, "config", "--global", "--add", "user.name", name).CombinedOutput(); err != nil {
+	if out, err := execwin.Hide(exec.CommandContext(ctx, s.doltBinExec, "config", "--global", "--add", "user.name", name)).CombinedOutput(); err != nil {
 		return fmt.Errorf("server: DoltServer.doltConfigure: set user.name: %w\n%s", err, out)
 	}
-	if out, err := exec.CommandContext(ctx, s.doltBinExec, "config", "--global", "--add", "user.email", email).CombinedOutput(); err != nil {
+	if out, err := execwin.Hide(exec.CommandContext(ctx, s.doltBinExec, "config", "--global", "--add", "user.email", email)).CombinedOutput(); err != nil {
 		return fmt.Errorf("server: DoltServer.doltConfigure: set user.email: %w\n%s", err, out)
 	}
 	return nil
@@ -256,7 +257,7 @@ func (s *DoltServer) doltInit(ctx context.Context) error {
 		return fmt.Errorf("server: DoltServer.doltInit: mkdir %q: %w", s.rootDir, err)
 	}
 
-	cmd := exec.CommandContext(ctx, s.doltBinExec, "init")
+	cmd := execwin.Hide(exec.CommandContext(ctx, s.doltBinExec, "init"))
 	cmd.Dir = s.rootDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		if strings.Contains(string(out), "already been initialized") {
