@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -83,13 +84,32 @@ func parseDoltProcessPIDs(snapshot []byte) []int {
 			command = command[1:]
 		}
 
-		joined := strings.Join(command, " ")
-		doltIndex := strings.Index(joined, "dolt")
-		if doltIndex >= 0 && strings.Contains(joined[doltIndex+len("dolt"):], "sql-server") {
+		if isDoltSQLServerCommand(command) {
 			pids = append(pids, pid)
 		}
 	}
 	return pids
+}
+
+// isDoltSQLServerCommand reports whether the command words name the dolt
+// executable — the word "dolt" or a path ending in "/dolt" — followed by a
+// whole "sql-server" argument, so global flags between the two are fine. It
+// is deliberately not an exact argv match: leading words are allowed, which
+// keeps the shell stand-ins tests use (`sh …/dolt sql-server`) and
+// executable paths containing spaces recognizable, at the cost of still
+// matching a command that merely mentions both words in order (`some-tool
+// says dolt then sql-server`). A renamed executable (dolt-2.6) no longer
+// qualifies.
+func isDoltSQLServerCommand(words []string) bool {
+	for i, word := range words {
+		if word != "dolt" && !strings.HasSuffix(word, "/dolt") {
+			continue
+		}
+		if slices.Contains(words[i+1:], "sql-server") {
+			return true
+		}
+	}
+	return false
 }
 
 // isPSStateCode reports whether word looks like a ps state column: a leading

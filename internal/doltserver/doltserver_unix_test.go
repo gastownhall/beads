@@ -261,6 +261,9 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 			want:     []int{102},
 		},
 		{
+			// Whole-word matching cannot prove executable identity: a command
+			// that mentions a whole dolt word before a whole sql-server word
+			// still matches. Kept deliberately; see isDoltSQLServerCommand.
 			name:     "ordered loose false positive",
 			snapshot: "103 S some-tool says dolt then sql-server\n",
 			want:     []int{103},
@@ -324,6 +327,38 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 			// match.
 			name:     "dead-state modifiers are excluded, recognized or not",
 			snapshot: "316 Zs dolt sql-server\n317 Zp dolt sql-server\n318 Xp dolt sql-server\n",
+		},
+		{
+			name: "global flags between executable and subcommand",
+			snapshot: "402 S /usr/local/bin/dolt --prof cpu --prof-path /tmp/pprof sql-server\n" +
+				"403 /usr/local/bin/dolt --prof cpu --prof-path /tmp/pprof sql-server\n",
+			want: []int{402, 403},
+		},
+		{
+			name: "executable path containing a space",
+			snapshot: "404 S /Users/Jane Doe/bin/dolt sql-server\n" +
+				"405 /Users/Jane Doe/bin/dolt sql-server\n",
+			want: []int{404, 405},
+		},
+		{
+			name: "shell stand-in launches dolt by path",
+			snapshot: "406 S /bin/sh /tmp/checkpoint-stand-in/dolt sql-server\n" +
+				"407 /bin/sh /tmp/checkpoint-stand-in/dolt sql-server\n",
+			want: []int{406, 407},
+		},
+		{
+			// Sp is not a state ps prints: the token stays in the command,
+			// where a later whole dolt word still matches.
+			name:     "unfamiliar state-like token stays in the command",
+			snapshot: "408 Sp /usr/local/bin/dolt sql-server\n",
+			want:     []int{408},
+		},
+		{
+			// A leading executable named t is indistinguishable from the
+			// traced state; either reading leaves the dolt match intact.
+			name:     "state-like leading executable is ambiguous but harmless",
+			snapshot: "409 t /usr/local/bin/dolt sql-server\n",
+			want:     []int{409},
 		},
 		{
 			name: "malformed and invalid rows are rejected",
