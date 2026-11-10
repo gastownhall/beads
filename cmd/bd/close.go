@@ -942,9 +942,17 @@ func resolveCloseTargets(ctx context.Context, localStore storage.DoltStorage, id
 // resolveCloseTarget resolves one ID of a bd close batch: the local store,
 // then a prefix route, then the batch's shared auto-routed store.
 func resolveCloseTarget(ctx context.Context, localStore storage.DoltStorage, shared *closeAutoRoute, id string) (*RoutedResult, error) {
-	// Local first.
+	// Local first. A local copy of an issue in the auto-route target
+	// resolves to that issue, through the batch's shared handle.
 	r, err := resolveAndGetFromStore(ctx, localStore, id, false)
 	if err == nil {
+		r, err = redirectLocalCopy(ctx, localStore, r, func(autoRouteTarget) (storage.DoltStorage, func(), error) {
+			rs, err := shared.open(ctx)
+			return rs, nil, err
+		})
+		if err != nil {
+			return nil, fmt.Errorf("resolving ID %s: %w", id, err)
+		}
 		return r, nil
 	}
 	if !isNotFoundErr(err) {
@@ -994,6 +1002,17 @@ type closeAutoRoute struct {
 // issue lives. The outcome of that open, failure included, holds for the rest
 // of the batch.
 func (a *closeAutoRoute) resolve(ctx context.Context, id string) (*RoutedResult, error) {
+	rs, err := a.open(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// Per-id RoutedResult does not own the shared handle; Close does.
+	return resolveAndGetFromStore(ctx, rs, id, true)
+}
+
+// open opens the shared auto-routed store on its first call; that outcome,
+// failure included, holds for the rest of the batch.
+func (a *closeAutoRoute) open(ctx context.Context) (storage.DoltStorage, error) {
 	if !a.tried {
 		a.tried = true
 		rs, routed, _, err := openAutoRoutedStore(ctx, a.localStore, true)
@@ -1006,11 +1025,7 @@ func (a *closeAutoRoute) resolve(ctx context.Context, id string) (*RoutedResult,
 			a.store = rs
 		}
 	}
-	if a.err != nil {
-		return nil, a.err
-	}
-	// Per-id RoutedResult does not own the shared handle; Close does.
-	return resolveAndGetFromStore(ctx, a.store, id, true)
+	return a.store, a.err
 }
 
 // Close closes the shared auto-routed store, if one was opened.
