@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -202,6 +203,32 @@ func TestCommitAllReportsPartialCommit(t *testing.T) {
 	if configDirty != 0 {
 		t.Fatalf("config still dirty after the partial commit (%d dolt_status rows)", configDirty)
 	}
+	assertIssuesLeftInWorkingSet(t, ctx, te, id)
+
+	// The residue is durable working-set state, not an in-memory leftover:
+	// after a reopen HEAD is still the partial commit, the stranded title is
+	// still there, and a full commit keeps refusing it.
+	if err := te.store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	beadsDir := strings.TrimSuffix(te.dataDir, "/embeddeddolt")
+	reopened, err := embeddeddolt.Open(ctx, beadsDir, te.database, "main")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	headReopened, err := reopened.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit after reopen: %v", err)
+	}
+	if headReopened != headAfter {
+		t.Fatalf("HEAD changed across reopen: %s -> %s", headAfter, headReopened)
+	}
+	committed, err = reopened.CommitAll(ctx, "test: commit after reopen")
+	if committed {
+		t.Fatal("CommitAll after reopen committed = true, want false: only the ignored issues change is dirty")
+	}
+	requireUncommittedChanges(t, err, "issues", false)
 	assertIssuesLeftInWorkingSet(t, ctx, te, id)
 }
 
