@@ -74,7 +74,7 @@ func TestShowNotFoundHintIn_ForeignPrefixIsNotCalledAbsent(t *testing.T) {
 	rig := prefixConfigStub{"issue_prefix": "openclaw"}
 
 	town := foreignPrefixTown(t, "")
-	foreign := showNotFoundHintIn(ctx, rig, town, "herald-x7k")
+	foreign := showNotFoundHintIn(ctx, rig, town, "herald-x7k", false)
 	for _, want := range []string{`prefix "herald"`, "openclaw", "does not mean the issue is absent", `issues "herald" IDs`, filepath.Join(town, "routes.jsonl")} {
 		if !strings.Contains(foreign, want) {
 			t.Errorf("foreign-prefix hint missing %q: %q", want, foreign)
@@ -105,13 +105,13 @@ func TestShowNotFoundHintIn_ForeignPrefixIsNotCalledAbsent(t *testing.T) {
 			if tc.beadsDir {
 				dir = foreignPrefixTown(t, tc.routes)
 			}
-			if got, want := showNotFoundHintIn(ctx, tc.store, dir, tc.id), showNotFoundHint(tc.id); got != want {
+			if got, want := showNotFoundHintIn(ctx, tc.store, dir, tc.id, false), showNotFoundHint(tc.id); got != want {
 				t.Errorf("hint = %q, want showNotFoundHint's %q", got, want)
 			}
 		})
 	}
 
-	if got, want := showNotFoundHintIn(ctx, nil, "", "herald-x7k"), showNotFoundHint("herald-x7k"); got != want {
+	if got, want := showNotFoundHintIn(ctx, nil, "", "herald-x7k", false), showNotFoundHint("herald-x7k"); got != want {
 		t.Errorf("no store: hint = %q, want %q", got, want)
 	}
 }
