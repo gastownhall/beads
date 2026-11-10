@@ -557,12 +557,19 @@ for viewers (bv), interchange, and issue-level migration; not backup.
 Cross-machine sync and backups use Dolt remotes/backups, not JSONL import/export.
 To enable: bd config set export.auto true
 
+Git origin with Dolt history: when no --remote or sync.remote is set and git
+origin has Dolt history (refs/dolt/data), adopting it imports that remote's
+issue history and identity. bd init asks once before adopting it; --yes
+consents ahead of time. Without --yes, non-interactive and --json runs refuse.
+--no-adopt (or BD_NO_REMOTE_ADOPT=1) never derives a remote from git origin.
+
 Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
   Skips all interactive prompts, using sensible defaults:
   • Role defaults to "maintainer" (override with --role)
   • Fork exclude auto-configured when fork detected
   • Auto-export left at default (disabled)
   • --contributor and --team flags are rejected (wizards require interaction)
+  • Never consents to adopting git origin's Dolt history (pass --yes)
   Also auto-detected when stdin is not a terminal or CI=true is set.`,
 	RunE: func(cmd *cobra.Command, _ []string) (retErr error) {
 		// First, before anything with an effect: never turn $HOME into a git
