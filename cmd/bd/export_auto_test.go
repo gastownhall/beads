@@ -19,6 +19,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
@@ -422,6 +423,108 @@ func TestMaybeAutoExportFallsBackToHeadCommit(t *testing.T) {
 
 	if fake.currentCommitCalls != 1 {
 		t.Fatalf("GetCurrentCommit calls = %d, want 1 (fallback when StateHasher is absent)", fake.currentCommitCalls)
+	}
+}
+
+// GH#6163 (adapted from #6016): an existing JSONL that cannot be parsed —
+// here, left with merge conflict markers — fails the auto-export with the
+// destination named, instead of warning and exiting 0. The JSONL and export
+// state stay as they were.
+func TestMaybeAutoExportFailsWhenExistingJSONLIsInvalid(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+
+	saveAndRestoreGlobals(t)
+	store = &fakeStateHashStore{stateHash: "changed-state"}
+
+	conflictMarkers := "<<<<<<< HEAD\n{\"id\":\"bd-main\"}\n=======\n{\"id\":\"bd-branch\"}\n>>>>>>> branch\n"
+	beadsDir, path, stateBytes := seedAutoExportFailureFixture(t, conflictMarkers, &exportAutoState{LastDoltCommit: "hash-before-write"})
+
+	var err error
+	stderr := captureStderr(t, func() { err = maybeAutoExport(context.Background(), false) })
+	if err == nil {
+		t.Fatal("maybeAutoExport succeeded with an invalid existing JSONL file")
+	}
+	if !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "existing JSONL") {
+		t.Fatalf("maybeAutoExport error = %q, want existing JSONL context naming %q", err, path)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want nothing: the caller reports the failure once", stderr)
+	}
+	assertAutoExportUntouched(t, beadsDir, path, conflictMarkers, stateBytes)
+}
+
+// GH#6163 (adapted from #6016): from a worktree whose .beads redirects to
+// the main checkout, the returned error names the resolved JSONL path that
+// was checked, not the worktree's own .beads.
+func TestMaybeAutoExport_WorktreeRedirectErrorUsesResolvedPath(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+	saveAndRestoreGlobals(t)
+	store = &fakeStateHashStore{stateHash: "changed-state"}
+
+	mainRepo := filepath.Join(t.TempDir(), "main")
+	if err := os.MkdirAll(mainRepo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit(mainRepo, "init", "-q")
+	runGit(mainRepo, "config", "user.email", "test@example.com")
+	runGit(mainRepo, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(mainRepo, "README.md"), []byte("# Test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(mainRepo, "add", "README.md")
+	runGit(mainRepo, "commit", "-qm", "initial")
+
+	mainBeadsDir := filepath.Join(mainRepo, ".beads")
+	if err := os.MkdirAll(mainBeadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mainBeadsDir, "metadata.json"), []byte(`{"database":"beads","backend":"dolt"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	worktree := filepath.Join(filepath.Dir(mainRepo), "worktree")
+	runGit(mainRepo, "worktree", "add", "-q", "-b", "redirect-test", worktree)
+	t.Cleanup(func() {
+		_ = exec.Command("git", "-C", mainRepo, "worktree", "remove", "--force", worktree).Run()
+	})
+	worktreeBeadsDir := filepath.Join(worktree, ".beads")
+	if err := os.MkdirAll(worktreeBeadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeBeadsDir, "redirect"), []byte(mainBeadsDir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(mainBeadsDir, "issues.jsonl")
+	invalid := "<<<<<<< HEAD\n=======\n>>>>>>> branch\n"
+	if err := os.WriteFile(path, []byte(invalid), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(worktree)
+	t.Setenv("BEADS_DIR", "")
+	git.ResetCaches()
+	t.Cleanup(git.ResetCaches)
+
+	err := maybeAutoExport(context.Background(), false)
+	if err == nil {
+		t.Fatal("maybeAutoExport succeeded with an invalid redirected JSONL file")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Fatalf("maybeAutoExport error = %q, want resolved checked path %q", err, path)
+	}
+	assertFileUnchanged(t, path, invalid)
+	if _, statErr := os.Stat(filepath.Join(worktreeBeadsDir, "issues.jsonl")); !os.IsNotExist(statErr) {
+		t.Fatalf("worktree JSONL was written (stat err %v), want only the redirected path checked", statErr)
 	}
 }
 
@@ -2553,6 +2656,97 @@ func TestMaybeAutoExportFailsWhenStateHashUnreadable(t *testing.T) {
 			}
 			if stderr != "" {
 				t.Fatalf("stderr = %q, want nothing: the caller reports the failure once", stderr)
+			}
+			assertAutoExportUntouched(t, beadsDir, jsonl, tc.seed, stateBytes)
+		})
+	}
+}
+
+// queryFailingStore fails the failOn-th SearchIssues call. With one in-scope
+// issue in both the store and the JSONL, call 1 is the reconciliation query
+// and call 2 is the empty-overwrite check.
+type queryFailingStore struct {
+	fakeStateHashStore
+	failOn      int
+	err         error
+	searchCalls int
+}
+
+func (f *queryFailingStore) SearchIssues(ctx context.Context, q string, filter types.IssueFilter) ([]*types.Issue, error) {
+	f.searchCalls++
+	if f.searchCalls == f.failOn {
+		return nil, f.err
+	}
+	return f.fakeStateHashStore.SearchIssues(ctx, q, filter)
+}
+
+// GH#6163: every pre-export check failure — an unreadable or invalid JSONL,
+// or a failing store query in either guard — fails the auto-export with the
+// destination named, prints nothing itself (the caller reports it once), and
+// leaves the JSONL and export state alone.
+func TestMaybeAutoExportPrecheckFailureIsAnError(t *testing.T) {
+	sentinel := errors.New("injected search failure")
+	issue := &types.Issue{ID: "bd-export1", Title: "export me", Status: types.StatusOpen, IssueType: types.TypeTask}
+	cases := []struct {
+		name      string
+		failOn    int
+		seed      string
+		dirAtPath bool
+		wantErr   error
+		wantCalls int
+		wantText  string
+	}{
+		{name: "reconciliation query", failOn: 1, seed: exportRelationSeed, wantErr: sentinel, wantCalls: 1, wantText: "compare existing JSONL against local store"},
+		{name: "empty check query", failOn: 2, seed: exportRelationSeed, wantErr: sentinel, wantCalls: 2, wantText: "check for an empty export over existing JSONL"},
+		{name: "malformed JSONL", seed: "{not json\n", wantText: "compare existing JSONL against local store"},
+		{name: "unreadable JSONL", dirAtPath: true, wantText: "compare existing JSONL against local store"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			initConfigForTest(t)
+			config.Set("export.auto", true)
+			saveAndRestoreGlobals(t)
+			t.Setenv("BD_GIT_HOOK", "")
+			fake := &queryFailingStore{
+				fakeStateHashStore: fakeStateHashStore{stateHash: "hash-after-write", issues: []*types.Issue{issue}},
+				failOn:             tc.failOn,
+				err:                sentinel,
+			}
+			store = fake
+			beadsDir, jsonl, stateBytes := seedAutoExportFailureFixture(t, tc.seed, &exportAutoState{LastDoltCommit: "hash-before-write"})
+			if tc.dirAtPath {
+				// Opens fine, then fails on read.
+				if err := os.Mkdir(jsonl, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			var err error
+			stderr := captureStderr(t, func() { err = maybeAutoExport(context.Background(), false) })
+			if err == nil {
+				t.Fatal("maybeAutoExport err = nil, want the pre-export check failure")
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("maybeAutoExport err = %v, want errors.Is %v", err, tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), jsonl) || !strings.Contains(err.Error(), tc.wantText) {
+				t.Fatalf("maybeAutoExport err = %q, want %q naming %q", err, tc.wantText, jsonl)
+			}
+			if tc.wantCalls != 0 && fake.searchCalls != tc.wantCalls {
+				t.Fatalf("SearchIssues calls = %d, want %d", fake.searchCalls, tc.wantCalls)
+			}
+			if stderr != "" {
+				t.Fatalf("stderr = %q, want nothing: the caller reports the failure once", stderr)
+			}
+			if tc.dirAtPath {
+				if fi, statErr := os.Stat(jsonl); statErr != nil || !fi.IsDir() {
+					t.Fatalf("%s replaced (stat %v, err %v), want the directory left alone", jsonl, fi, statErr)
+				}
+				got, readErr := os.ReadFile(filepath.Join(beadsDir, exportAutoStateFile))
+				if readErr != nil || !bytes.Equal(got, stateBytes) {
+					t.Fatalf("export state changed: got %s (err %v), want %s", got, readErr, stateBytes)
+				}
+				return
 			}
 			assertAutoExportUntouched(t, beadsDir, jsonl, tc.seed, stateBytes)
 		})
