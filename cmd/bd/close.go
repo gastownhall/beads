@@ -946,7 +946,7 @@ func resolveCloseTarget(ctx context.Context, localStore storage.DoltStorage, sha
 	// resolves to that issue, through the batch's shared handle.
 	r, err := resolveAndGetFromStore(ctx, localStore, id, false)
 	if err == nil {
-		r, err = redirectLocalCopy(ctx, localStore, r, func(autoRouteTarget) (storage.DoltStorage, func(), error) {
+		r, err = redirectLocalCopy(ctx, localStore, r, true, func(autoRouteTarget) (storage.DoltStorage, func(), error) {
 			rs, err := shared.open(ctx)
 			return rs, nil, err
 		})

@@ -731,3 +731,51 @@ func TestSameCreatedAtIdentifiesOnlyKnownEqualSeconds(t *testing.T) {
 		}
 	}
 }
+
+// TestWritesToLocalCopyOfUnreadableOwnerFail pins that a write to a copy whose
+// auto-route target cannot be opened fails, naming the target, and leaves the
+// copy as it is, while a read falls back to the copy.
+func TestWritesToLocalCopyOfUnreadableOwnerFail(t *testing.T) {
+	ids := []string{"pl-u", "pl-c", "pl-d", "pl-m"}
+	f := newCopyFixture(t, ids, ids, nil)
+	if err := os.WriteFile(filepath.Join(f.planningBeadsDir, "metadata.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("break planning metadata: %v", err)
+	}
+
+	for _, step := range []struct {
+		cmd   *cobra.Command
+		flags map[string]string
+		args  []string
+	}{
+		{updateCmd, map[string]string{"priority": "0"}, []string{"pl-u"}},
+		{closeCmd, map[string]string{"reason": "done"}, []string{"pl-c"}},
+		{deleteCmd, map[string]string{"force": "true"}, []string{"pl-d"}},
+		{commentCmd, nil, []string{"pl-m", "routed comment"}},
+	} {
+		res := runCopyCmd(t, step.cmd, step.flags, step.args...)
+		if res.exitCode == 0 {
+			t.Errorf("bd %s %v of a copy whose target cannot be opened exited 0, want a failure", step.cmd.Name(), step.args)
+		}
+		reported := res.stderr
+		if res.err != nil {
+			reported += res.err.Error()
+		}
+		if !strings.Contains(reported, f.planningDir) {
+			t.Errorf("bd %s %v failure does not name the target %s:\n%s", step.cmd.Name(), step.args, f.planningDir, reported)
+		}
+		f.requireCopyUnchanged(t, step.args[0])
+	}
+	comments, err := f.project.GetIssueComments(t.Context(), "pl-m")
+	if err != nil {
+		t.Fatalf("read project comments: %v", err)
+	}
+	if len(comments) != 0 {
+		t.Errorf("the project copy of pl-m gained comments %+v", comments)
+	}
+
+	jsonOutput = true
+	res := runCopyCmd(t, showCmd, nil, "pl-u")
+	if res.exitCode != 0 || !strings.Contains(res.stdout, `"pl-u"`) {
+		t.Errorf("bd show pl-u of a copy whose target cannot be opened: exit %d, stdout %q, stderr %q; want the copy", res.exitCode, res.stdout, res.stderr)
+	}
+}

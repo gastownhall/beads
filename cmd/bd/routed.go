@@ -209,9 +209,13 @@ func sameCreatedAt(a, b time.Time) bool {
 	return a.UTC().Truncate(time.Second).Equal(b.UTC().Truncate(time.Second))
 }
 
-// keepLocalCopy is the local resolution of a copy whose owner, target, could
-// not be read: the copy stays the issue resolved.
-func keepLocalCopy(local *RoutedResult, target autoRouteTarget, err error) (*RoutedResult, error) {
+// keepLocalCopy answers for a copy whose owner, target, could not be read. A
+// read falls back to the copy. A write fails, naming the target: changing the
+// copy would leave the issue itself as it was.
+func keepLocalCopy(local *RoutedResult, target autoRouteTarget, err error, writable bool) (*RoutedResult, error) {
+	if writable {
+		return nil, fmt.Errorf("%s is a copy of an issue in %s, which could not be read: %w", local.ResolvedID, remedy.PrintedValue(target.repoPath), err)
+	}
 	debug.Logf("[routing] %s is a copy of an issue in %s, which could not be read (%v); using the local copy\n", local.ResolvedID, target.repoPath, err)
 	return local, nil
 }
@@ -224,15 +228,16 @@ type ownerOpener func(target autoRouteTarget) (store storage.DoltStorage, releas
 // redirectLocalCopy hands back, in place of local, the issue a local copy was
 // imported from (localCopyTarget) when the active auto-route target, opened
 // through open, still holds it; the copy itself is left as it is. Anything
-// else keeps the local result.
-func redirectLocalCopy(ctx context.Context, localStore storage.DoltStorage, local *RoutedResult, open ownerOpener) (*RoutedResult, error) {
+// else keeps the local result, except that a write fails when the target
+// cannot be read (keepLocalCopy).
+func redirectLocalCopy(ctx context.Context, localStore storage.DoltStorage, local *RoutedResult, writable bool, open ownerOpener) (*RoutedResult, error) {
 	target, ok := localCopyTarget(ctx, localStore, local.Issue)
 	if !ok {
 		return local, nil
 	}
 	ownerStore, release, err := open(target)
 	if err != nil {
-		return keepLocalCopy(local, target, err)
+		return keepLocalCopy(local, target, err, writable)
 	}
 	owner, err := ownerRowFor(ctx, ownerStore, local.Issue)
 	if err != nil || owner == nil {
@@ -240,7 +245,7 @@ func redirectLocalCopy(ctx context.Context, localStore storage.DoltStorage, loca
 			release()
 		}
 		if err != nil {
-			return keepLocalCopy(local, target, err)
+			return keepLocalCopy(local, target, err, writable)
 		}
 		return local, nil
 	}
@@ -258,7 +263,7 @@ func redirectLocalCopy(ctx context.Context, localStore storage.DoltStorage, loca
 // redirectLocalCopyToOwner is redirectLocalCopy through an owner store of the
 // result's own, opened with the caller's write intent.
 func redirectLocalCopyToOwner(ctx context.Context, localStore storage.DoltStorage, local *RoutedResult, writable bool) (*RoutedResult, error) {
-	return redirectLocalCopy(ctx, localStore, local, func(target autoRouteTarget) (storage.DoltStorage, func(), error) {
+	return redirectLocalCopy(ctx, localStore, local, writable, func(target autoRouteTarget) (storage.DoltStorage, func(), error) {
 		ownerStore, err := openAutoRouteTarget(ctx, target, writable)
 		if err != nil {
 			return nil, nil, err
