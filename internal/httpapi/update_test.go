@@ -1521,6 +1521,37 @@ func TestUpdateALocalBlockedClaimWithoutTheTypedListNamesNobody(t *testing.T) {
 	}
 }
 
+// TestClaimBlockedMapsThroughTheSharedClassification pins the claim's
+// live-local-blocker refusal at the shared mapping as well, so an operation
+// that reaches a lifecycle claim without an arm of its own answers 409
+// not_claimable with the typed blockers, never a 500. Its hint names no
+// bypass, and the close-policy refusal sharing the BlockedError type still
+// maps by its own sentinel.
+func TestClaimBlockedMapsThroughTheSharedClassification(t *testing.T) {
+	blocked := &issueops.BlockedError{
+		IssueID:  "bd-1",
+		Blockers: []issueops.Blocker{issueops.ParseBlocker("bd-2")},
+		Err:      issueops.ErrClaimBlocked,
+	}
+	res := ClassifyError(fmt.Errorf("claiming step bd-1: %w", blocked))
+	if res.Problem.Status != http.StatusConflict || res.Problem.Code != string(CodeNotClaimable) {
+		t.Fatalf("ClassifyError = %d/%s, want 409/%s", res.Problem.Status, res.Problem.Code, CodeNotClaimable)
+	}
+	if res.Problem.Blockers == nil || len(*res.Problem.Blockers) != 1 || (*res.Problem.Blockers)[0].Id != "bd-2" {
+		t.Errorf("blockers = %+v, want the typed [bd-2]", res.Problem.Blockers)
+	}
+	if want := "cannot claim blocked issue: bd-1 is blocked by [bd-2]; clear the blocker first"; res.Problem.Detail == nil || *res.Problem.Detail != want {
+		t.Errorf("detail = %v, want %q", res.Problem.Detail, want)
+	}
+
+	if res := ClassifyError(issueops.ErrClaimBlocked); res.Problem.Code != string(CodeNotClaimable) || res.Problem.Blockers != nil {
+		t.Errorf("the bare sentinel = %s with blockers %v, want %s and no member", res.Problem.Code, res.Problem.Blockers, CodeNotClaimable)
+	}
+	if res := ClassifyError(issueops.NewCloseBlockedError("bd-1", []string{"bd-2"})); res.Problem.Code != string(CodeNotClosable) {
+		t.Errorf("a close-policy BlockedError = %s, want %s", res.Problem.Code, CodeNotClosable)
+	}
+}
+
 // TestUpdateForwardsThePersistenceMember is the plane move `bd promote` sends
 // (issueops.Promote): patch.persistence reaches the role's
 // IssuePatch.Persistence verbatim, for each of the three modes, and nothing

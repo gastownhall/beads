@@ -1692,6 +1692,13 @@ func ClassifyError(err error) Result {
 	case errors.Is(err, storage.ErrNotClaimable):
 		return newResult(CodeNotClaimable, "issue is not in a claimable state")
 
+	// A lifecycle claim's live-local-blocker refusal: the `not_claimable`
+	// updateIssue answers it with, `blockers` included, so an operation without
+	// an arm of its own still answers an ordinary refusal with a 409 rather
+	// than a 500. Its hint names no bypass, which is that operation's to name.
+	case errors.Is(err, issueops.ErrClaimBlocked):
+		return claimBlockedResult(err, "clear the blocker first")
+
 	// The two close-policy refusals share one code. They are the same statement
 	// to a client — the close was refused for the state of the graph around
 	// this issue, and `force` is the bypass for both — and what distinguishes

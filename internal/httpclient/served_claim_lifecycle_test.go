@@ -459,6 +459,9 @@ func newServedUpdateFixture(t *testing.T, prefix string) conformance.LifecycleUp
 		// replaces.
 		ListEvents:       env.listEvents,
 		ListDependencies: env.listDependencies,
+		// The inherited-flag claim case proves its premise (the child carries
+		// is_blocked) through it, read from the reference store.
+		StoredIsBlocked: conformance.StoredIsBlockedThrough(env.queryScalar),
 	}
 }
 
@@ -1003,6 +1006,20 @@ func TestServedLifecycleUpdateClaimRefusesALiveBlocker(t *testing.T) {
 // to a server advertising issues.update.forceClaimBlocked.
 func TestServedLifecycleUpdateForceClaimBlockedClaimsPastALiveBlocker(t *testing.T) {
 	conformance.RunLifecycleUpdateForceClaimBlockedClaimsPastALiveBlocker(t, t.Context(), newServedUpdateFixture(t, "hlfb"))
+}
+
+// TestServedLifecycleUpdateReclaimByTheHolderIgnoresANewBlocker: the holder's
+// repeat claim after a blocker appeared is the server's idempotent no-op, not
+// the blocked-claim refusal, and the update writes nothing.
+func TestServedLifecycleUpdateReclaimByTheHolderIgnoresANewBlocker(t *testing.T) {
+	conformance.RunLifecycleUpdateReclaimByTheHolderIgnoresANewBlocker(t, t.Context(), newServedUpdateFixture(t, "hlhr"))
+}
+
+// TestServedLifecycleUpdateClaimIgnoresAnInheritedBlockedFlag: a child that is
+// blocked only through its parent is claimed through updateIssue, because the
+// server's refusal reads live direct blockers, not the stored flag.
+func TestServedLifecycleUpdateClaimIgnoresAnInheritedBlockedFlag(t *testing.T) {
+	conformance.RunLifecycleUpdateClaimIgnoresAnInheritedBlockedFlag(t, t.Context(), newServedUpdateFixture(t, "hlib"))
 }
 
 // TestServedLifecycleUpdateForceClaimBlockedRequiresAClaim: the override
