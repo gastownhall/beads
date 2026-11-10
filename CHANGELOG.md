@@ -1226,6 +1226,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Merge settlement no longer publishes an incomplete merge commit.** When
+  two clones edit the same issue and one also comments on it, the merge's
+  auto-resolution committed only the tables it had resolved, so a push sent
+  a merge commit whose other tables still held the pre-merge values — the
+  first-syncing clone could lose its own comment that way
+  ([#7757](https://github.com/gastownhall/beads/issues/7757)). The embedded
+  push path's pending-changes flush had already stopped that exact
+  end-of-sync symptom; settlement now additionally stages every cleanly
+  merged table the conflicted merge left unstaged before concluding the
+  merge (auto-resolve, `--strategy` merges, and FK-cascade repair alike),
+  and refuses — with an error naming the table — when a merge-touched
+  table is still unstaged, instead of recording a known incomplete result.
+  Unrelated uncommitted local work is still left out of the merge commit.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
