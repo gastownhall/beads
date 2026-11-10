@@ -29,6 +29,7 @@ func (s *testSuite) TestIssueGetReadyWork() {
 	s.Run("IncludeDeferred", s.readyIncludeDeferred)
 	s.Run("ExcludesChildrenOfUndatedDeferredParent", s.readyExcludesChildrenOfUndatedDeferredParent)
 	s.Run("ExcludesChildrenOfParentInsertedDeferred", s.readyExcludesChildrenOfParentInsertedDeferred)
+	s.Run("IncludeDeferredShowsChildrenOfUndatedDeferredParent", s.readyIncludeDeferredShowsChildrenOfUndatedDeferredParent)
 	s.Run("LabelFilter", s.readyLabelFilter)
 	s.Run("LimitRespected", s.readyLimitRespected)
 	s.Run("SortByPriority", s.readySortByPriority)
@@ -348,6 +349,22 @@ func (s *testSuite) readyExcludesChildrenOfParentInsertedDeferred() {
 	out, err = r.GetReadyWork(s.Ctx(), types.WorkFilter{IncludeDeferred: true})
 	s.Require().NoError(err)
 	s.Contains(issueIDsFrom(out), child.ID)
+}
+
+func (s *testSuite) readyIncludeDeferredShowsChildrenOfUndatedDeferredParent() {
+	s.insertUndatedDeferredFamily("bd-rdy-uidf-p", "bd-rdy-uidf-c", "bd-rdy-uidf-free")
+	r := s.issueRepo()
+
+	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{})
+	s.Require().NoError(err)
+	s.NotContains(issueIDsFrom(out), "bd-rdy-uidf-c")
+
+	out, err = r.GetReadyWork(s.Ctx(), types.WorkFilter{IncludeDeferred: true})
+	s.Require().NoError(err)
+	got := issueIDsFrom(out)
+	s.Contains(got, "bd-rdy-uidf-c", "IncludeDeferred lifts the deferred-parent child exclusion")
+	s.NotContains(got, "bd-rdy-uidf-p", "the deferred status still fails the ready status filter")
+	s.Contains(got, "bd-rdy-uidf-free")
 }
 
 func (s *testSuite) readyLabelFilter() {

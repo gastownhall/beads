@@ -103,3 +103,23 @@ func TestReadyHidesChildrenOfUndatedDeferredParentAcrossTables(t *testing.T) {
 	f.wantReady(types.WorkFilter{IncludeEphemeral: true}, "ux-free", "ux-wfree", "ux-grand")
 	f.wantReady(types.WorkFilter{}, "ux-free", "ux-grand")
 }
+
+// TestReadyIncludeDeferredShowsChildrenOfUndatedDeferredParent: IncludeDeferred
+// lifts the child exclusion, while the parent itself stays out under the
+// normal ready status filter (deferred is not open or in_progress).
+func TestReadyIncludeDeferredShowsChildrenOfUndatedDeferredParent(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	f := undatedDeferredFixture{t: t, te: newTestEnv(t, "ui")}
+
+	f.create("ui-p", false)
+	f.create("ui-c", false)
+	f.create("ui-free", false)
+	f.child("ui-c", "ui-p")
+	f.setStatus("ui-p", types.StatusDeferred)
+	f.assertUndated("ui-p")
+
+	f.wantReady(types.WorkFilter{}, "ui-free")
+	f.wantReady(types.WorkFilter{IncludeDeferred: true}, "ui-c", "ui-free")
+	parent := "ui-p"
+	f.wantReady(types.WorkFilter{IncludeDeferred: true, ParentID: &parent}, "ui-c")
+}
