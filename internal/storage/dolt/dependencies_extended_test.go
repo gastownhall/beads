@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -2121,5 +2122,76 @@ func TestFailureClosePredicateSQLParity(t *testing.T) {
 	}
 	if nullSays {
 		t.Error("a NULL close reason must classify as non-failure")
+	}
+}
+
+// TestConditionalBlocksSuccessCloseNamesBlockerAndClosesUnguarded pins the
+// other places a held conditional edge shows (GH#5577). A success close of the
+// precondition keeps the fallback blocked, so the blocked listing must still
+// NAME the closed precondition as the fallback's blocker — through the closed
+// status, using its close reason — while the live-blocker scan stays
+// open-targets-only, which also leaves the guarded close of the fallback
+// permitted: no live blocker remains, so nothing refuses it.
+func TestConditionalBlocksSuccessCloseNamesBlockerAndClosesUnguarded(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issueA := &types.Issue{ID: "cb-vis-a", Title: "Precondition", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	issueB := &types.Issue{ID: "cb-vis-b", Title: "Fallback", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	for _, issue := range []*types.Issue{issueA, issueB} {
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("failed to create issue: %v", err)
+		}
+	}
+
+	dep := &types.Dependency{IssueID: issueB.ID, DependsOnID: issueA.ID, Type: types.DepConditionalBlocks}
+	if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+		t.Fatalf("failed to add dependency: %v", err)
+	}
+	if err := store.CloseIssue(ctx, issueA.ID, "completed successfully", "tester", ""); err != nil {
+		t.Fatalf("failed to close issue A: %v", err)
+	}
+
+	// The listing names the closed precondition as B's blocker.
+	blockedIssues, err := store.GetBlockedIssues(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetBlockedIssues failed: %v", err)
+	}
+	var row *types.BlockedIssue
+	for _, item := range blockedIssues {
+		if item.ID == issueB.ID {
+			row = item
+		}
+	}
+	if row == nil {
+		t.Fatalf("expected %s in the blocked listing after a success close of its conditional-blocks target, got %d rows", issueB.ID, len(blockedIssues))
+	}
+	if len(row.BlockedBy) != 1 || row.BlockedBy[0] != issueA.ID {
+		t.Errorf("expected the blocked listing to name %s as %s's blocker, got %v", issueA.ID, issueB.ID, row.BlockedBy)
+	}
+	if row.BlockedByCount != 1 {
+		t.Errorf("expected BlockedByCount 1, got %d", row.BlockedByCount)
+	}
+
+	// The stored flag stays set, but no LIVE blocker remains: the live scan
+	// reads open targets only, unchanged by the conditional-close rule.
+	blocked, liveBlockers, err := store.IsBlocked(ctx, issueB.ID)
+	if err != nil {
+		t.Fatalf("IsBlocked failed: %v", err)
+	}
+	if !blocked {
+		t.Error("expected the stored is_blocked flag on the fallback to stay set after a success close of its conditional-blocks target")
+	}
+	if len(liveBlockers) != 0 {
+		t.Errorf("expected no live blockers after the target closed, got %v", liveBlockers)
+	}
+
+	// The close policy refuses only on live direct blockers, so the guarded
+	// close of the fallback succeeds without force.
+	if _, err := store.CloseIssueChecked(ctx, issueB.ID, "tester", storage.CloseIssueOptions{Reason: "fallback no longer needed"}); err != nil {
+		t.Errorf("expected the guarded close of the fallback to succeed without force after its conditional target closed with a success reason, got: %v", err)
 	}
 }

@@ -763,6 +763,69 @@ func queryBlocksInfo(
 	return nil
 }
 
+// targetPosture is what a blocked-listing blocker decision needs from a
+// dependency target: the status it sits in and, when closed, the reason it
+// closed with — the pair types.BlockingEdgeHolds classifies.
+type targetPosture struct {
+	status      types.Status
+	closeReason string
+}
+
+// loadTargetPostureByIDInTx batch-loads id -> (status, close_reason) from the
+// issues and wisps tables, mirroring loadStatusByIDInTx's shapes: batches of
+// queryBatchSize, wisp-plane tables optional on pre-migration databases, and
+// the wisps-table row winning a cross-table id dup (be-iabdi).
+func loadTargetPostureByIDInTx(ctx context.Context, tx DBTX, ids []string) (map[string]targetPosture, error) {
+	postureByID := make(map[string]targetPosture)
+	if len(ids) == 0 {
+		return postureByID, nil
+	}
+
+	sourceByID := make(map[string]string)
+	for _, issueTable := range []string{"issues", "wisps"} {
+		for start := 0; start < len(ids); start += queryBatchSize {
+			end := start + queryBatchSize
+			if end > len(ids) {
+				end = len(ids)
+			}
+			placeholders, args := buildSQLInClause(ids[start:end])
+			//nolint:gosec // G201: issueTable is one of two hardcoded constants; placeholders carry only ? placeholders.
+			rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+				SELECT id, status, COALESCE(close_reason, '') FROM %s WHERE id IN (%s)
+			`, issueTable, placeholders), args...)
+			if err != nil {
+				if optionalBlockedTable(issueTable) && isTableNotExistError(err) {
+					break
+				}
+				return nil, fmt.Errorf("target posture from %s: %w", issueTable, err)
+			}
+			for rows.Next() {
+				var id string
+				var posture targetPosture
+				if err := rows.Scan(&id, &posture.status, &posture.closeReason); err != nil {
+					_ = rows.Close()
+					return nil, fmt.Errorf("scan target posture: %w", err)
+				}
+				if _, exists := sourceByID[id]; exists {
+					// Prefer the wisps-table row on a cross-table dup
+					// (be-iabdi). Tables iterate issues -> wisps so the
+					// second encounter is always wisps.
+					sourceByID[id] = issueTable
+					postureByID[id] = posture
+					continue
+				}
+				sourceByID[id] = issueTable
+				postureByID[id] = posture
+			}
+			_ = rows.Close()
+			if err := rows.Err(); err != nil {
+				return nil, fmt.Errorf("target posture rows from %s: %w", issueTable, err)
+			}
+		}
+	}
+	return postureByID, nil
+}
+
 func loadStatusByIDInTx(ctx context.Context, tx DBTX, ids []string) (map[string]types.Status, error) {
 	statusByID := make(map[string]types.Status)
 	if len(ids) == 0 {
