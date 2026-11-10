@@ -777,37 +777,20 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: cascade expansion incomplete: %v\n", err)
 	}
 
+	// --force is the confirmation, as it is for --closed (GH#5152): without
+	// it, and always under --dry-run, age mode only previews.
+	if dryRun || !force {
+		return renderWispGCAgePreview(abandoned, dryRun)
+	}
+
 	if len(abandoned) == 0 {
 		if jsonOutput {
 			return outputJSON(WispGCResult{
 				CleanedIDs:   []string{},
 				CleanedCount: 0,
-				DryRun:       dryRun,
 			})
 		}
 		fmt.Println("No abandoned wisps found")
-		return nil
-	}
-
-	if dryRun {
-		if jsonOutput {
-			ids := make([]string, len(abandoned))
-			for i, o := range abandoned {
-				ids[i] = o.ID
-			}
-			return outputJSON(WispGCResult{
-				CleanedIDs:   ids,
-				Candidates:   len(abandoned),
-				CleanedCount: 0,
-				DryRun:       true,
-			})
-		}
-		fmt.Printf("Dry run: would clean %d abandoned wisp(s):\n\n", len(abandoned))
-		for _, issue := range abandoned {
-			age := formatTimeAgo(issue.UpdatedAt)
-			fmt.Printf("  %s: %s (last updated: %s)\n", issue.ID, issue.Title, age)
-		}
-		fmt.Printf("\nRun without --dry-run to delete these wisps.\n")
 		return nil
 	}
 
@@ -826,6 +809,41 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 	if err := deleteBatch(nil, ids, true, false, false, jsonOutput, false, nil, "wisp gc"); err != nil {
 		return HandleError("%v", err)
 	}
+	return nil
+}
+
+// renderWispGCAgePreview answers an age-mode gc that deletes nothing: an
+// explicit --dry-run, or any run without --force (GH#5152). Both routes
+// render it, so the preview reads the same wherever the store lives. Each
+// candidate shows its type, since age mode selects every ephemeral issue the
+// type filters leave, not only molecule steps.
+func renderWispGCAgePreview(abandoned []*types.Issue, dryRun bool) error {
+	ids := make([]string, len(abandoned))
+	for i, issue := range abandoned {
+		ids[i] = issue.ID
+	}
+	if jsonOutput {
+		return outputJSON(WispGCResult{
+			CleanedIDs:   ids,
+			Candidates:   len(abandoned),
+			CleanedCount: 0,
+			DryRun:       true,
+		})
+	}
+	if len(abandoned) == 0 {
+		fmt.Println("No abandoned wisps found")
+		return nil
+	}
+	label := "Preview"
+	if dryRun {
+		label = "Dry run"
+	}
+	fmt.Printf("%s: would clean %d abandoned wisp(s):\n\n", label, len(abandoned))
+	for _, issue := range abandoned {
+		age := formatTimeAgo(issue.UpdatedAt)
+		fmt.Printf("  %s: %s (type: %s, last updated: %s)\n", issue.ID, issue.Title, issue.IssueType, age)
+	}
+	fmt.Printf("\nRe-run with --force to delete, keeping the same selection flags; remove --dry-run if present.\n")
 	return nil
 }
 

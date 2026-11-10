@@ -150,28 +150,16 @@ func runWispGCProxiedServer(ctx context.Context, dryRun bool, ageThreshold time.
 		fmt.Fprintf(os.Stderr, "Warning: cascade expansion incomplete: %v\n", err)
 	}
 
-	if len(abandoned) == 0 {
-		if jsonOutput {
-			return outputJSON(WispGCResult{CleanedIDs: []string{}, CleanedCount: 0, DryRun: dryRun})
-		}
-		fmt.Println("No abandoned wisps found")
-		return nil
+	// --force is the confirmation (GH#5152); mirrors runWispGC in wisp.go.
+	if dryRun || !force {
+		return renderWispGCAgePreview(abandoned, dryRun)
 	}
 
-	if dryRun {
+	if len(abandoned) == 0 {
 		if jsonOutput {
-			ids := make([]string, len(abandoned))
-			for i, o := range abandoned {
-				ids[i] = o.ID
-			}
-			return outputJSON(WispGCResult{CleanedIDs: ids, Candidates: len(abandoned), CleanedCount: 0, DryRun: true})
+			return outputJSON(WispGCResult{CleanedIDs: []string{}, CleanedCount: 0})
 		}
-		fmt.Printf("Dry run: would clean %d abandoned wisp(s):\n\n", len(abandoned))
-		for _, issue := range abandoned {
-			age := formatTimeAgo(issue.UpdatedAt)
-			fmt.Printf("  %s: %s (last updated: %s)\n", issue.ID, issue.Title, age)
-		}
-		fmt.Printf("\nRun without --dry-run to delete these wisps.\n")
+		fmt.Println("No abandoned wisps found")
 		return nil
 	}
 
