@@ -391,3 +391,99 @@ func TestSharedStoreGateSuppressesSmartAutoArms(t *testing.T) {
 		}
 	})
 }
+
+// newSharedNoRemoteGate raises the #5920 shared-no-remote refusal from a
+// mocked shared database with pending migrations and no remote, so a test can
+// render its guidance surfaces with or without the proxied marker.
+func newSharedNoRemoteGate(t *testing.T) *RemoteMigrateGateError {
+	t.Helper()
+	resetConsent(t)
+	t.Setenv(AllowRemoteMigrateEnv, "0")
+	t.Setenv(SmartGateEnv, "0") // no remote, so the smart router never runs anyway
+	db, mock, _ := sqlmock.New()
+	defer db.Close()
+	expectSharedGateProbe(mock, 1, 0)
+
+	var gateErr *RemoteMigrateGateError
+	if err := sharedGate(t, mock, db); !errors.As(err, &gateErr) {
+		t.Fatalf("expected *RemoteMigrateGateError, got %v", err)
+	}
+	if gateErr.Decision != gateDecisionSharedNoRemote {
+		t.Fatalf("Decision = %q, want %q", gateErr.Decision, gateDecisionSharedNoRemote)
+	}
+	return gateErr
+}
+
+// TestSharedNoRemoteProxiedConsentGuidance pins bd-n5e58c (GH#6656) on the
+// #5920 shared-no-remote guidance: a proxied workspace can no longer run the
+// bare consent verb — the front door refuses it typed, because the provider
+// open would promote the schema beneath library clients the proxy cannot see
+// — so every surface that prescribes the consent command has to prescribe
+// the FORCED form, with the close-clients precondition that form declares.
+// The non-proxied shapes keep the bare verb exactly as #5920 wrote them.
+func TestSharedNoRemoteProxiedConsentGuidance(t *testing.T) {
+	t.Run("proxied prescribes the forced verb", func(t *testing.T) {
+		gateErr := newSharedNoRemoteGate(t)
+		gateErr.Proxied = true
+
+		if hint := gateErr.EscapeHint(); hint != SharedConsentCommandForced {
+			t.Errorf("EscapeHint = %q, want the forced %q: the bare verb is refused at the proxied front door",
+				hint, SharedConsentCommandForced)
+		}
+
+		// The consent step prescribes the forced verb — the bare line the
+		// front door refuses must not appear as a prescription — and carries
+		// the close/restart discipline the front-door warning also names.
+		msg := gateErr.UserMessage()
+		if !strings.Contains(msg, "        "+SharedConsentCommandForced+"\n") {
+			t.Errorf("UserMessage must prescribe %q as the consent step:\n%s", SharedConsentCommandForced, msg)
+		}
+		if strings.Contains(msg, "        "+SharedConsentCommand+"\n") {
+			t.Errorf("UserMessage must not prescribe the bare %q on a proxied workspace:\n%s", SharedConsentCommand, msg)
+		}
+		for _, want := range []string{
+			"(" + SharedConsentCommandForcedGlobal + " for the shared global database",
+			"close the co-resident library clients",
+			"restart them",
+			AllowRemoteMigrateEnv,
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("UserMessage missing %q:\n%s", want, msg)
+			}
+		}
+
+		opts := gateErr.Options()
+		if len(opts) != 1 || opts[0].ID != "migrate-shared" {
+			t.Fatalf("Options = %+v, want a single migrate-shared option", opts)
+		}
+		if len(opts[0].Commands) != 1 || opts[0].Commands[0] != SharedConsentCommandForced {
+			t.Errorf("migrate-shared commands = %v, want [%q]: an option whose command cannot run is worse than no option",
+				opts[0].Commands, SharedConsentCommandForced)
+		}
+		if !strings.Contains(opts[0].When, "library clients are stopped") {
+			t.Errorf("migrate-shared When must carry the close-clients precondition: %q", opts[0].When)
+		}
+		if !strings.Contains(opts[0].Risk, "front-door refusal") {
+			t.Errorf("migrate-shared Risk must name the live-client promotion the front-door refusal prevents: %q", opts[0].Risk)
+		}
+	})
+
+	t.Run("non-proxied keeps the bare verb", func(t *testing.T) {
+		gateErr := newSharedNoRemoteGate(t)
+
+		if hint := gateErr.EscapeHint(); hint != SharedConsentCommand {
+			t.Errorf("EscapeHint = %q, want the bare %q on a non-proxied workspace", hint, SharedConsentCommand)
+		}
+		msg := gateErr.UserMessage()
+		if !strings.Contains(msg, "        "+SharedConsentCommand+"\n") {
+			t.Errorf("UserMessage must keep prescribing %q on a non-proxied workspace:\n%s", SharedConsentCommand, msg)
+		}
+		if strings.Contains(msg, SharedConsentCommandForced) {
+			t.Errorf("UserMessage must not prescribe the forced verb on a non-proxied workspace:\n%s", msg)
+		}
+		opts := gateErr.Options()
+		if len(opts) != 1 || len(opts[0].Commands) != 1 || opts[0].Commands[0] != SharedConsentCommand {
+			t.Errorf("Options = %+v, want a single migrate-shared option on the bare verb", opts)
+		}
+	})
+}

@@ -103,12 +103,23 @@ func handleRemoteMigrateGateJSON(e *schema.RemoteMigrateGateError) {
 		// the WRONG database and leave the refusal in place. Mirror the
 		// human/text path (printGlobalDatabaseConsentHint,
 		// noticeSharedMigrateRefusal) and name the --global verb when this
-		// invocation targeted the global database. Only shared-no-remote is
-		// retargeted; the remote-backed arms coordinate through bd bootstrap /
-		// bd migrate --force, which --global does not rewrite.
+		// invocation targeted the global database. On a proxied workspace the
+		// bare verb is refused at the front door (GH#6656), so the same
+		// retarget moves the prescription to the forced form — an `expected`
+		// field naming a command that cannot run is worse than no guidance.
+		// Only shared-no-remote is retargeted; the remote-backed arms
+		// coordinate through bd bootstrap / bd migrate --force, which
+		// --global does not rewrite.
 		sharedConsent := schema.SharedConsentCommand
 		if globalFlag {
 			sharedConsent = schema.SharedConsentCommandGlobal
+		}
+		if e.Proxied {
+			if globalFlag {
+				sharedConsent = schema.SharedConsentCommandForcedGlobal
+			} else {
+				sharedConsent = schema.SharedConsentCommandForced
+			}
 		}
 		// The #6575 data-behind stop on a SHARED store carries a consent verb in
 		// its second option (migrate-shared-after-pulling) too — the forced one,

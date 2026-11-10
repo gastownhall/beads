@@ -448,7 +448,11 @@ func printGlobalDatabaseConsentHint(w io.Writer, e *schema.RemoteMigrateGateErro
 		return
 	}
 	consent := schema.SharedConsentCommandGlobal
-	if e != nil && e.IsDataBehind() && e.Shared {
+	// The data-behind consent step is the forced verb (that stop is always
+	// remote-backed), and since GH#6656 a proxied workspace refuses the bare
+	// verb at its front door — either way the runnable command is the forced
+	// one, so this hint has to name it.
+	if e != nil && ((e.IsDataBehind() && e.Shared) || e.Proxied) {
 		consent = schema.SharedConsentCommandForcedGlobal
 	}
 	fmt.Fprintf(w,
