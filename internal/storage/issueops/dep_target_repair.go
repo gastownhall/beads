@@ -43,17 +43,27 @@ ORDER BY d.id`
 // dependency row a pre-GH#8299 write filed in depends_on_external although
 // this database holds its target, with the typed column it belongs in.
 //
+// Only a row whose target a local table holds moves; one held nowhere stays
+// external whatever its prefix, since the write-time fallback that files a
+// missing same-prefix target as an issue is not evidence the row can bind.
 // The versioned dependencies table binds only to targets in the versioned
 // issues table: a clone-local wisp must not decide a synced row, or two
 // clones with the same history would rewrite it differently. A row there
 // whose target is only a local wisp stays external. wisp_dependencies is
-// clone-local and follows DepTargetKindFor, wisp first. A database without
-// wisp tables has no wisp rows to repair.
+// clone-local and follows DepTargetKindFor, wisp first; without a wisps table
+// its rows can still bind to issues. A database without wisp_dependencies has
+// no wisp rows to repair.
 func PlanLocalExternalDepRepairInTx(ctx context.Context, tx DBTX) ([]DepRow, error) {
+	wispProbe := "FALSE"
+	if hasWisps, err := optionalTableExistsInTx(ctx, tx, "wisps"); err != nil {
+		return nil, fmt.Errorf("wisps: plan local external dependency repair: %w", err)
+	} else if hasWisps {
+		wispProbe = "EXISTS (SELECT 1 FROM wisps w WHERE w.id = d.depends_on_external)"
+	}
 	var out []DepRow
 	for _, leg := range []struct{ table, wispProbe string }{
 		{"dependencies", "FALSE"},
-		{"wisp_dependencies", "EXISTS (SELECT 1 FROM wisps w WHERE w.id = d.depends_on_external)"},
+		{"wisp_dependencies", wispProbe},
 	} {
 		//nolint:gosec // G201: table and probe are the hardcoded constants above.
 		rows, err := tx.QueryContext(ctx, fmt.Sprintf(localExternalDepSQL, leg.table, leg.wispProbe))
@@ -71,11 +81,12 @@ func PlanLocalExternalDepRepairInTx(ctx context.Context, tx DBTX) ([]DepRow, err
 				_ = rows.Close()
 				return nil, fmt.Errorf("%s: scan local external dependency: %w", leg.table, err)
 			}
+			if !heldAsWisp && !heldAsIssue {
+				continue
+			}
 			row.Table, row.Type = leg.table, types.DependencyType(depType)
 			row.Kind = DepTargetKindFor(row.IssueID, row.Target, heldAsWisp, heldAsIssue)
-			if row.Kind != DepTargetExternal {
-				out = append(out, row)
-			}
+			out = append(out, row)
 		}
 		if err := rows.Err(); err != nil {
 			_ = rows.Close()

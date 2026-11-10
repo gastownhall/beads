@@ -175,8 +175,9 @@ func requireBlockedStateConsistent(t *testing.T, ctx context.Context, conn *sql.
 // targets the versioned issues table holds move to depends_on_issue_id with
 // their id and payload intact; their sources and inherited descendants get
 // the blocked state the edges imply, with no updated_at churn; explicit
-// external references, targets held nowhere, and versioned edges onto a
-// clone-local wisp stay external; and the result is committed.
+// external references, targets held nowhere (of either prefix, on either
+// plane), and versioned edges onto a clone-local wisp stay external; and the
+// result is committed.
 func TestEmbeddedCrossPrefixRepairConvertsLegacyRows(t *testing.T) {
 	requireEmbedded(t)
 	ctx := t.Context()
@@ -196,6 +197,7 @@ func TestEmbeddedCrossPrefixRepairConvertsLegacyRows(t *testing.T) {
 		{"ra-grandchild", "open", true},    // parent-child -> ra-child: inherits
 		{"ra-external", "open", false},     // blocks -> external:proj:cap
 		{"ra-absent", "open", false},       // blocks -> zz-absent, held nowhere
+		{"ra-same-absent", "open", false},  // blocks -> ra-gone, same prefix, held nowhere
 		{"ra-onto-wisp", "open", false},    // blocks -> rw-local, a clone-local wisp
 		{"rc-closed-dep", "closed", false}, // closed itself: never blocked
 	}
@@ -213,11 +215,15 @@ func TestEmbeddedCrossPrefixRepairConvertsLegacyRows(t *testing.T) {
 	unchanged := [][3]string{
 		{"ra-external", "external:proj:cap", "blocks"},
 		{"ra-absent", "zz-absent", "blocks"},
+		{"ra-same-absent", "ra-gone", "blocks"},
 		{"ra-onto-wisp", "rw-local", "blocks"},
 	}
 	for _, e := range append(append([][3]string{}, converted...), unchanged...) {
 		seedDep(t, ctx, conn, "dependencies", e[0], e[1], "depends_on_external", e[2])
 	}
+	// The clone-local plane's twin of the same-prefix row held nowhere.
+	wispUnchanged := [3]string{"rw-local", "rw-gone", "blocks"}
+	seedDep(t, ctx, conn, "wisp_dependencies", wispUnchanged[0], wispUnchanged[1], "depends_on_external", wispUnchanged[2])
 	seedDep(t, ctx, conn, "dependencies", "ra-child", "ra-blocked", "depends_on_issue_id", "parent-child")
 	seedDep(t, ctx, conn, "dependencies", "ra-grandchild", "ra-child", "depends_on_issue_id", "parent-child")
 	commitLegacyStateAndUnmarkRepair(t, ctx, conn)
@@ -226,6 +232,7 @@ func TestEmbeddedCrossPrefixRepairConvertsLegacyRows(t *testing.T) {
 	for _, e := range append(append([][3]string{}, converted...), unchanged...) {
 		before[e] = readDepRow(t, ctx, conn, "dependencies", e[0], e[1])
 	}
+	wispBefore := readDepRow(t, ctx, conn, "wisp_dependencies", wispUnchanged[0], wispUnchanged[1])
 
 	if _, err := schema.MigrateUp(ctx, conn); err != nil {
 		t.Fatalf("repair MigrateUp: %v", err)
@@ -246,6 +253,9 @@ func TestEmbeddedCrossPrefixRepairConvertsLegacyRows(t *testing.T) {
 		if got := readDepRow(t, ctx, conn, "dependencies", e[0], e[1]); got != before[e] {
 			t.Errorf("edge %s -> %s = %+v, want it unchanged %+v", e[0], e[1], got, before[e])
 		}
+	}
+	if got := readDepRow(t, ctx, conn, "wisp_dependencies", wispUnchanged[0], wispUnchanged[1]); got != wispBefore {
+		t.Errorf("wisp edge %s -> %s = %+v, want it unchanged %+v", wispUnchanged[0], wispUnchanged[1], got, wispBefore)
 	}
 	for i, is := range issues {
 		blocked, updatedAt := readBlocked(t, ctx, conn, "issues", is.id)
