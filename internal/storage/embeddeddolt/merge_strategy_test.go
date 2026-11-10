@@ -456,12 +456,20 @@ func TestMergeWithStrategy_LeavesPreMergePendingChanges(t *testing.T) {
 
 			peerBranch := seedRetitleWithLabelSwap(t, ctx, conn, "pc-1")
 
-			// Pending work predating the merge, in a table neither branch
+			// Pending work predating the merge, in tables neither branch
 			// changed: sweeping it into the merge commit (a DOLT_ADD('-A')
-			// conclusion) would publish half-finished local work.
+			// conclusion) would publish half-finished local work. The
+			// config case is GH#7757's AC-4 on the explicit-strategy route:
+			// an unstaged user-kv (kv.*) config-table edit must survive the
+			// settlement unstaged, working value intact, and out of the
+			// merge commit.
 			if _, err := conn.ExecContext(ctx,
 				"INSERT INTO metadata (`key`, value) VALUES ('pc_pending', 'local-uncommitted')"); err != nil {
 				t.Fatalf("seed pending metadata: %v", err)
+			}
+			if _, err := conn.ExecContext(ctx,
+				"INSERT INTO config (`key`, value) VALUES ('kv.pc_pending', 'local-uncommitted')"); err != nil {
+				t.Fatalf("seed pending config: %v", err)
 			}
 
 			if _, err := versioncontrolops.MergeWithStrategy(ctx, conn, peerBranch, "test <test@example.com>", strategy); err != nil {
@@ -481,6 +489,27 @@ func TestMergeWithStrategy_LeavesPreMergePendingChanges(t *testing.T) {
 			}
 			if unstaged != 1 {
 				t.Errorf("dolt_status lists %d unstaged metadata row(s), want the pending insert preserved unstaged", unstaged)
+			}
+			var cfgValue string
+			cfgErr := conn.QueryRowContext(ctx,
+				"SELECT value FROM config AS OF 'HEAD' WHERE `key` = 'kv.pc_pending'").Scan(&cfgValue)
+			if !errors.Is(cfgErr, sql.ErrNoRows) {
+				t.Errorf("config AS OF 'HEAD' = (%q, %v), want the pre-merge pending kv edit uncommitted and absent from the merge commit", cfgValue, cfgErr)
+			}
+			var cfgUnstaged int
+			if err := conn.QueryRowContext(ctx,
+				"SELECT COUNT(*) FROM dolt_status WHERE table_name = 'config' AND staged = 0").Scan(&cfgUnstaged); err != nil {
+				t.Fatalf("count unstaged config: %v", err)
+			}
+			if cfgUnstaged != 1 {
+				t.Errorf("dolt_status lists %d unstaged config row(s), want the pending kv edit preserved unstaged", cfgUnstaged)
+			}
+			if err := conn.QueryRowContext(ctx,
+				"SELECT value FROM config WHERE `key` = 'kv.pc_pending'").Scan(&cfgValue); err != nil {
+				t.Fatalf("read working config value: %v", err)
+			}
+			if cfgValue != "local-uncommitted" {
+				t.Errorf("working config kv.pc_pending = %q, want the local edit's value preserved", cfgValue)
 			}
 
 			// The peer's cleanly merged label swap still reached HEAD: the
