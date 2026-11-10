@@ -891,6 +891,7 @@ go_test(
         "hook_children_embedded_test.go",
         "hook_env_test.go",
         "hook_index_env_test.go",
+        "hook_subprocess_test.go",
         "hooks_embedded_test.go",
         "hooks_exec_composition_test.go",
         "hooks_export_staged_deletion_test.go",
