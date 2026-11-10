@@ -56,7 +56,16 @@ Examples:
   bd federation sync --strategy theirs    # Auto-resolve using remote values`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
+	Args:          validateFederationPeerFlag,
 	RunE:          runFederationSync,
+}
+
+// validateFederationPeerFlag rejects an option-shaped --peer before the root
+// PersistentPreRunE opens the store (GH#7876): the peer name flows into
+// fetch/merge/push calls whose operands must not be parsable as options.
+func validateFederationPeerFlag(cmd *cobra.Command, args []string) error {
+	peer, _ := cmd.Flags().GetString("peer")
+	return validateRemoteOperandCLI(peer)
 }
 
 var federationStatusCmd = &cobra.Command{

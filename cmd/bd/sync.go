@@ -710,7 +710,16 @@ Examples:
   bd sync --json                 # machine-parseable outcome`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
+	Args:          validateSyncRemoteFlag,
 	RunE:          runSyncCommand,
+}
+
+// validateSyncRemoteFlag rejects an option-shaped --remote before the root
+// PersistentPreRunE opens the store (GH#7876): the name flows into
+// pull/push calls whose operands must not be parsable as options.
+func validateSyncRemoteFlag(cmd *cobra.Command, args []string) error {
+	remote, _ := cmd.Flags().GetString("remote")
+	return validateRemoteOperandCLI(remote)
 }
 
 func init() {
