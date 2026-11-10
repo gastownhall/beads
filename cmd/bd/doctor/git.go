@@ -623,6 +623,195 @@ func staleFilePaths(hooksDir string, names []string) []string {
 	return paths
 }
 
+// HooksPathQuery names the repository a core.hooksPath inspection reads.
+type HooksPathQuery struct {
+	// WorkDir is where git config runs, so the effective value is the one the
+	// invoking worktree sees; "" runs in the process working directory.
+	WorkDir string
+	// RepoRoot is the main repository root: relative values resolve against
+	// it, and it anchors the in-repository beads hooks locations.
+	RepoRoot string
+	// StorageHooksDir is <effective .beads>/hooks, the directory
+	// `bd hooks install --beads` configures (BeadsManagedStorageHooksDir or the
+	// selected workspace's), or "" when no beads storage resolves.
+	StorageHooksDir string
+	// Env is the git subprocess environment; nil inherits the process's.
+	Env []string
+}
+
+// HooksPathState is a read-only view of core.hooksPath. Git runs no hooks at
+// all while core.hooksPath names a directory that does not exist, so a hooks
+// status read from that directory alone reports "not installed" for hooks that
+// are installed somewhere else (GH#5853).
+type HooksPathState struct {
+	// Configured is the raw effective value; "" when core.hooksPath is unset.
+	Configured string
+	// Scope is the git config scope the effective value comes from (local,
+	// global, system, worktree, command); "" when it could not be read.
+	Scope string
+	// Resolved is Configured with ~ expanded and a relative value joined to
+	// the repository root.
+	Resolved string
+	// Exists reports whether Resolved exists.
+	Exists bool
+	// Managed reports a missing value IsBeadsManagedHooksPath recognizes: a
+	// current beads location deleted in place, which `bd doctor --fix` unsets
+	// (GH#4440).
+	Managed bool
+	// RelocatedTo is the validated current beads hooks directory that a
+	// missing value from the repository's former location should name, or "".
+	RelocatedTo string
+	// Refusal says why a missing value that is not Managed cannot be repointed.
+	Refusal string
+}
+
+// Missing reports a configured hooks directory that does not exist.
+func (s HooksPathState) Missing() bool {
+	return s.Configured != "" && !s.Exists
+}
+
+// CurrentHooksPathQuery describes the repository the process runs in. ok is
+// false outside a git repository.
+func CurrentHooksPathQuery() (HooksPathQuery, bool) {
+	repoRoot, _ := git.GetMainRepoRoot()
+	if repoRoot == "" {
+		repoRoot = git.GetRepoRoot()
+	}
+	if repoRoot == "" {
+		return HooksPathQuery{}, false
+	}
+	return HooksPathQuery{RepoRoot: repoRoot, StorageHooksDir: BeadsManagedStorageHooksDir()}, true
+}
+
+// InspectHooksPath reads core.hooksPath and classifies a missing target. It
+// never changes configuration or files.
+//
+// bd writes core.hooksPath as an absolute path so linked worktrees resolve it
+// (GH#2414), which strands the value when the repository moves. A missing
+// value qualifies for repointing (RelocatedTo) only when every one of these
+// holds; anything else is left to the user, with the reason in Refusal:
+//   - it is absolute and positively absent, and not a current beads location
+//     (those are Managed);
+//   - it names a .beads/hooks or .beads-hooks directory, the layouts bd writes;
+//   - its effective value comes from the repository-local config, so no
+//     global, worktree or command-line setting is rewritten or shadowed;
+//   - the matching current directory (the effective storage hooks directory,
+//     else <repo>/.beads/hooks, or <repo>/.beads-hooks) is a real directory,
+//     not a symlink, holding at least one recognizable beads hook.
+func InspectHooksPath(q HooksPathQuery) HooksPathState {
+	var s HooksPathState
+	s.Configured, s.Scope = readEffectiveHooksPath(q.WorkDir, q.Env)
+	if s.Configured == "" {
+		return s
+	}
+	s.Resolved = expandHookPathTilde(s.Configured)
+	if !filepath.IsAbs(s.Resolved) {
+		s.Resolved = filepath.Join(q.RepoRoot, s.Resolved)
+	}
+	if s.Exists = fileExists(s.Resolved); s.Exists {
+		return s
+	}
+	if s.Managed = IsBeadsManagedHooksPath(q.RepoRoot, q.StorageHooksDir, s.Configured); s.Managed {
+		return s
+	}
+	s.RelocatedTo, s.Refusal = relocatedHooksTarget(q, s)
+	return s
+}
+
+// readEffectiveHooksPath returns the effective core.hooksPath and its scope.
+func readEffectiveHooksPath(dir string, env []string) (value, scope string) {
+	cmd := exec.Command("git", "config", "--show-scope", "--get", "core.hooksPath")
+	cmd.Dir, cmd.Env = dir, env
+	out, err := cmd.Output()
+	if err == nil {
+		if gotScope, gotValue, ok := strings.Cut(strings.TrimRight(string(out), "\r\n"), "\t"); ok {
+			return strings.TrimSpace(gotValue), gotScope
+		}
+	} else if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 {
+		return "", "" // unset
+	}
+	// A git without --show-scope still reports the value; the unknown scope
+	// never qualifies it for repointing.
+	cmd = exec.Command("git", "config", "--get", "core.hooksPath")
+	cmd.Dir, cmd.Env = dir, env
+	if out, err = cmd.Output(); err != nil {
+		return "", ""
+	}
+	return strings.TrimSpace(string(out)), ""
+}
+
+// relocatedHooksTarget returns the directory a missing, unmanaged core.hooksPath
+// should name, or why it qualifies for none. See InspectHooksPath.
+func relocatedHooksTarget(q HooksPathQuery, s HooksPathState) (target, refusal string) {
+	former := expandHookPathTilde(s.Configured)
+	if !filepath.IsAbs(former) {
+		return "", "it is a relative path, not a location bd writes"
+	}
+	former = filepath.Clean(former)
+	switch {
+	case filepath.Base(former) == "hooks" && filepath.Base(filepath.Dir(former)) == ".beads":
+		// Never substitute the in-repository directory for a storage
+		// directory that resolves: that would pick hooks bd does not use.
+		target = q.StorageHooksDir
+		if target == "" && q.RepoRoot != "" {
+			target = filepath.Join(q.RepoRoot, ".beads", "hooks")
+		}
+	case filepath.Base(former) == ".beads-hooks":
+		if q.RepoRoot != "" {
+			target = filepath.Join(q.RepoRoot, ".beads-hooks")
+		}
+	default:
+		return "", "it does not name a .beads/hooks or .beads-hooks directory"
+	}
+	if _, err := os.Lstat(former); !os.IsNotExist(err) {
+		return "", "it could not be confirmed absent"
+	}
+	if s.Scope != "local" {
+		scope := s.Scope
+		if scope == "" {
+			scope = "an unknown"
+		}
+		return "", fmt.Sprintf("it is set in %s config, not this repository's local config", scope)
+	}
+	if target == "" || !filepath.IsAbs(target) {
+		return "", "no current beads hooks directory resolves"
+	}
+	printed := remedy.PrintedValue(target)
+	info, err := os.Lstat(target)
+	switch {
+	case err != nil:
+		return "", fmt.Sprintf("no beads hooks directory exists at %s", printed)
+	case info.Mode()&os.ModeSymlink != 0:
+		return "", fmt.Sprintf("%s is a symlink", printed)
+	case !info.IsDir():
+		return "", fmt.Sprintf("%s is not a directory", printed)
+	case !holdsBeadsHooks(target):
+		return "", fmt.Sprintf("%s holds no beads hooks", printed)
+	}
+	return target, ""
+}
+
+// holdsBeadsHooks reports whether dir holds at least one hook file whose
+// content beads wrote or that delegates to bd hooks run.
+func holdsBeadsHooks(dir string) bool {
+	for _, name := range managedHookNames {
+		path := filepath.Join(dir, name)
+		if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		content, err := os.ReadFile(path) // #nosec G304 -- fixed hook name in a directory bd resolved
+		if err != nil {
+			continue
+		}
+		text := string(content)
+		if strings.Contains(text, bdSectionMarkerPrefix) || strings.Contains(text, bdShimMarker) ||
+			strings.Contains(text, bdInlineHookMarker) || bdHooksRunPattern.MatchString(text) {
+			return true
+		}
+	}
+	return false
+}
+
 // CheckHooksPath detects a dangling core.hooksPath: a git config value that
 // still points at a hooks directory which no longer exists. This happens
 // when a user manually deletes .beads/ (e.g. `rm -rf .beads/`) without
