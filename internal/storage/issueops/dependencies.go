@@ -370,7 +370,12 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		case DepTargetIssue:
 			targetType = issueType
 		}
-		targetValidated = kind != DepTargetExternal
+		// Only a target the probes actually found is validated. A missing
+		// same-prefix target falls back to DepTargetIssue above, and treating
+		// that fallback as proof of presence would skip the existence read
+		// and surface the typed missing-target refusal as an FK violation
+		// from the INSERT instead.
+		targetValidated = heldWisp || heldIssue
 	}
 
 	targetTable := opts.TargetTable
