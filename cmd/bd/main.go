@@ -186,6 +186,21 @@ var (
 // store gate locally, without editing the central noDbCommands list.
 const skipStoreAnnotation = "bd:skip_store"
 
+// classifiedReadOpen answers whether the store may open as a classified read
+// (GH#804): a command on the read-only allowlist, neither strict --readonly
+// nor a preview. The store is genuinely writable underneath, so a classified
+// read may run bd's own background maintenance — the lazy defer-wake sweep
+// (be-vbhpf) — EXCEPT during a migration freeze: a frozen workspace is under
+// the freeze's read-only-during-freeze contract, and a sweep that wakes
+// defers and commits would violate it exactly like any other write (#7634).
+// Folding the frozen answer in here is the one decision point: the direct
+// server store consumes it through deferWakeSweepEligible (suppressing its
+// sweep) and the embedded store through SetDeferWakeSweepEnabled in the store
+// factory, both from this single commandFreeze snapshot.
+func classifiedReadOpen(policyReadOnly, readonlyMode, previewMode, frozen bool) bool {
+	return policyReadOnly && !readonlyMode && !previewMode && !frozen
+}
+
 // commandOptsOutOfStore reports whether cmd or any of its ancestors carries the
 // skipStoreAnnotation set to "1". The whole ancestor chain is walked, so
 // annotating a command exempts that command and every subcommand beneath it.
@@ -2121,9 +2136,11 @@ var rootCmd = &cobra.Command{
 			// pause (wy-sbgucn); explicit env/config settings still win.
 			PoolReadTimeoutFallback: bulkLoadPoolReadTimeout(cmd),
 			// Classification-only read (GH#804), never strict --readonly or a
-			// preview: the store is genuinely writable underneath, so the
-			// lazy defer-wake sweep may still run (be-vbhpf).
-			ClassifiedRead: policy.readOnly && !readonlyMode && !previewMode,
+			// preview: the store is genuinely writable underneath, so the lazy
+			// defer-wake sweep may still run (be-vbhpf) — but not during a
+			// migration freeze (#7634), which classifiedReadOpen folds in from
+			// this invocation's single commandFreeze snapshot.
+			ClassifiedRead: classifiedReadOpen(policy.readOnly, readonlyMode, previewMode, commandFreeze.Frozen()),
 			// A read-only or gateway open does not migrate, so a schema too
 			// old for this binary's issue reads is refused at open instead of
 			// failing each read on an unknown column. Not for a preview,

@@ -51,7 +51,16 @@ func runReadyProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 	// route opens is read-only-by-ending (Close rolls back), so the sweep runs
 	// in a committing UOW of its own first; the claim route above gets the
 	// same sweep from its role (uow.readyClaimer.ClaimNext).
-	uow.WakeExpiredDefersAdvisory(ctx, uowProvider)
+	//
+	// The advisory sweep is bd's own background maintenance, so under a
+	// MIGRATION-FREEZE marker it stands down while the read keeps answering
+	// (#7634) — the claim branch above is untouched: --claim is an intentional
+	// write, and its CheckReadonly refuses it under the freeze. The gate reads
+	// the one commandFreeze snapshot PersistentPreRunE resolved for this
+	// invocation; no second filesystem lookup.
+	if !commandFreeze.Frozen() {
+		uow.WakeExpiredDefersAdvisory(ctx, uowProvider)
+	}
 
 	// --mol reads through the provider's roles, each in a unit of work of its
 	// own, so it runs before this route opens the one it holds below.

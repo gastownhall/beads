@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
@@ -141,6 +142,41 @@ func TestProxiedServerDeferAutoWake(t *testing.T) {
 		status, _ := showState(t, a.ID)
 		if status != string(types.StatusDeferred) {
 			t.Errorf("future defer must stay deferred, got %s", status)
+		}
+	})
+
+	// #7634's proxied arm: while a MIGRATION-FREEZE marker holds, the
+	// ready-route advisory sweep stands down — the expired defer stays deferred
+	// — and wakes on the first ready read after the thaw.
+	t.Run("expired_dated_defer_stays_asleep_during_migration_freeze", func(t *testing.T) {
+		a := bdProxiedCreate(t, bd, p.dir, "Snooze behind a migration freeze (proxied)", "--type", "task")
+		if out, err := bdProxiedRun(t, bd, p.dir, "defer", a.ID, "--until", "2020-01-01"); err != nil {
+			t.Fatalf("defer: %v\n%s", err, out)
+		}
+		if status, _ := showState(t, a.ID); status != string(types.StatusDeferred) {
+			t.Fatalf("precondition: status = %s, want deferred", status)
+		}
+
+		marker := writeFreezeMarker(t, p.dir, "migrator", "dolt v2 migration")
+		t.Cleanup(func() { os.Remove(marker) })
+
+		ids := readySet(t)
+		if ids[a.ID] {
+			t.Errorf("frozen bd ready surfaced expired defer %s (proxied)", a.ID)
+		}
+		if status, _ := showState(t, a.ID); status != string(types.StatusDeferred) {
+			t.Errorf("frozen bd ready woke %s (proxied): status = %q, want deferred", a.ID, status)
+		}
+
+		if err := os.Remove(marker); err != nil {
+			t.Fatalf("remove freeze marker: %v", err)
+		}
+		ids = readySet(t)
+		if !ids[a.ID] {
+			t.Errorf("thawed bd ready must surface expired defer %s (proxied)", a.ID)
+		}
+		if status, deferUntil := showState(t, a.ID); status != string(types.StatusOpen) || deferUntil != nil {
+			t.Errorf("thawed bd ready left %s status = %q, defer_until = %v, want open and cleared", a.ID, status, deferUntil)
 		}
 	})
 }

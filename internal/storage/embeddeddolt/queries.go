@@ -30,7 +30,14 @@ var _ storage.IssuesWithConfigSearcher = (*EmbeddedDoltStore)(nil)
 // mirroring the tip-metadata write's tolerance), anything else warns. It runs
 // OUTSIDE the read connections below because withConn(ctx, false, …) always
 // rolls back.
+//
+// A sweep disabled via SetDeferWakeSweepEnabled stands down the same silent
+// way: a classified read under a MIGRATION-FREEZE marker (#7634) is a read
+// first, and the freeze's contract forbids the sweep's write, not the read.
 func (s *EmbeddedDoltStore) wakeExpiredDefers(ctx context.Context) {
+	if deferWakeDisabled.Load() {
+		return
+	}
 	err := s.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (issueops.ChangedTables, string, error) {
 		woke, err := issueops.WakeExpiredDefersInTx(ctx, tx)
 		if err != nil {

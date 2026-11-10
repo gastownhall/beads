@@ -1226,6 +1226,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The lazy defer-wake sweep now stands down during a `MIGRATION-FREEZE`
+  (#7634). `bd ready` and `bd list --ready` kept running the sweep —
+  returning expired defers to open and committing — even with a freeze
+  marker present, in embedded, direct-server and proxied-server modes
+  alike, violating the freeze's read-only-during-freeze contract the write
+  commands already honor. Reads keep answering during a freeze; an expired
+  defer wakes on the first ready read after the marker is removed. `bd ready
+  --claim` is an intentional write and keeps being refused by the freeze
+  gate itself.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

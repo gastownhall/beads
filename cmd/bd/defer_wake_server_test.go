@@ -3,6 +3,7 @@
 package main
 
 import (
+	"os"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -113,6 +114,45 @@ func TestServerModeDeferAutoWake(t *testing.T) {
 		status, _ = showDeferState(t, bd, p.dir, issue.ID)
 		if status != "deferred" {
 			t.Errorf("expired defer must stay deferred under strict --readonly, got %q", status)
+		}
+	})
+
+	// #7634's direct-server arm: a MIGRATION-FREEZE marker holds, `bd ready`
+	// still answers (reads keep working), but the classified-read defer-wake
+	// sweep stands down — no wake. The sweep's commit is the wake itself
+	// (wakeExpiredDefers only commits when it returns issues to open), so the
+	// issue's status staying deferred through the frozen read is the no-commit
+	// assertion here; unlike the embedded arm, there is no freeze-safe in-process
+	// dolt_log probe on a served database (bd sql is itself gated by the
+	// freeze), so no separate HEAD check. The expired defer wakes on the first
+	// ready read after the thaw.
+	t.Run("expired_dated_defer_stays_asleep_during_migration_freeze", func(t *testing.T) {
+		issue := bdCreate(t, bd, p.dir, "Snooze behind a migration freeze (server mode)", "--type", "task")
+		bdDefer(t, bd, p.dir, issue.ID, "--until", "2020-01-01")
+		if status, _ := showDeferState(t, bd, p.dir, issue.ID); status != "deferred" {
+			t.Fatalf("precondition: expected status=deferred, got %q", status)
+		}
+
+		marker := writeFreezeMarker(t, p.dir, "migrator", "dolt v2 migration")
+		t.Cleanup(func() { os.Remove(marker) })
+
+		ids := wakeReadyIDs(t, bd, p.dir)
+		if ids[issue.ID] {
+			t.Errorf("frozen bd ready surfaced expired defer %s (server mode)", issue.ID)
+		}
+		if status, _ := showDeferState(t, bd, p.dir, issue.ID); status != "deferred" {
+			t.Errorf("frozen bd ready woke %s (server mode): status = %q, want deferred", issue.ID, status)
+		}
+
+		if err := os.Remove(marker); err != nil {
+			t.Fatalf("remove freeze marker: %v", err)
+		}
+		ids = wakeReadyIDs(t, bd, p.dir)
+		if !ids[issue.ID] {
+			t.Errorf("thawed bd ready must surface expired defer %s (server mode)", issue.ID)
+		}
+		if status, deferUntil := showDeferState(t, bd, p.dir, issue.ID); status != "open" || deferUntil != nil {
+			t.Errorf("thawed bd ready left %s status = %q, defer_until = %v, want open and cleared", issue.ID, status, deferUntil)
 		}
 	})
 }

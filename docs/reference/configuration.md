@@ -577,7 +577,7 @@ rm MIGRATION-FREEZE        # thaw
 
 Blocked commands exit **14** — a stable code scripts branch on to tell "someone is migrating this workspace, come back later" from a generic failure worth an immediate retry. That includes the destructive ones: `bd init --reinit-local` and `bd bootstrap` are refused too.
 
-Reads (`bd list`, `bd show`, `bd ready`, …) keep working during a freeze, and bd's own background maintenance stands down with them — version-bump migration, JSONL auto-import, Dolt auto-commit, auto-backup, auto-export and auto-push are all skipped, so running a read does not leave a commit in the store you are migrating.
+Reads (`bd list`, `bd show`, `bd ready`, …) keep working during a freeze, and bd's own background maintenance stands down with them — version-bump migration, JSONL auto-import, Dolt auto-commit, auto-backup, auto-export, auto-push and the lazy defer-wake sweep are all skipped, so running a read does not leave a commit in the store you are migrating. The defer-wake sweep is the maintenance `bd ready` and `bd list --ready` normally run before listing (returning expired defers to open), so under a freeze an expired defer stays deferred — it wakes on the first ready read after you delete the marker.
 
 <Warning>
 A `bd serve` process started before the marker appeared keeps accepting HTTP writes: the freeze is a CLI-invocation gate, and a running server never re-reads it. Stop the server before you freeze.

@@ -109,7 +109,18 @@ func newDoltStore(ctx context.Context, cfg *dolt.Config) (s storage.DoltStorage,
 		// Ordinary classified-read commands (bd show, bd list, ...) must
 		// not be bricked by the #4259 remote-migrate gate (bd-578h9.5);
 		// server mode's ReadOnly opens already skip migration entirely.
-		return embeddeddolt.OpenForReadOnlyCommand(ctx, cfg.BeadsDir, cfg.Database, "main")
+		//
+		// The sweep gate follows the same classification: a classified read
+		// normally runs the lazy defer-wake sweep (be-vbhpf), but a frozen
+		// workspace must not (#7634) — main.go already folded this
+		// invocation's commandFreeze answer into cfg.ClassifiedRead, so
+		// seeding the gate from it reuses that single snapshot.
+		store, err := embeddeddolt.OpenForReadOnlyCommand(ctx, cfg.BeadsDir, cfg.Database, "main")
+		if err != nil {
+			return nil, err
+		}
+		embeddeddolt.SetDeferWakeSweepEnabled(cfg.ClassifiedRead)
+		return store, nil
 	}
 	if cfg.LenientOpen {
 		// Working-set-reconcile commands (bd dolt commit, bd vc commit) must
