@@ -15,6 +15,7 @@ This section provides step-by-step recovery procedures for common Beads issues. 
 | Database Corruption | `database is locked` after an interrupted command, or a database that will not open (`corrupted journal`) | [Database Corruption](/recovery/database-corruption) |
 | Merge Conflicts | Dolt conflicts during sync | [Merge Conflicts](/recovery/merge-conflicts) |
 | Circular Dependencies | Cycle detection errors | [Circular Dependencies](/recovery/circular-dependencies) |
+| Incomplete Commits | `commit incomplete: tracked changes remain …` or `commit verification failed: …` on a commit or push | [Incomplete Commits](/recovery/commit-incomplete) |
 | Sync Failures | `bd dolt push`/`bd dolt pull` errors | [Sync Failures](/recovery/sync-failures) |
 | History Bloat | Store grows unbounded; `dolt gc` reclaims nothing | [History Bloat](/recovery/history-squash) |
 | Removing beads | Uninstall bd or strip beads from a repo | [Uninstalling](/recovery/uninstalling) |

@@ -274,6 +274,7 @@
           "recovery/database-corruption",
           "recovery/merge-conflicts",
           "recovery/circular-dependencies",
+          "recovery/commit-incomplete",
           "recovery/sync-failures",
           "recovery/history-squash",
           "recovery/unmigrate-schema-v65",
