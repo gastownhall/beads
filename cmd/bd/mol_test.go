@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -3407,4 +3408,155 @@ func advanceForTest(ctx context.Context, s storage.DoltStorage, closedStepID str
 		return nil, err
 	}
 	return continueResultOf(result), nil
+}
+
+// TestBondProtoMolSequentialRefArmRunsAfterParentSteps reproduces bd-lrkpd3
+// (GH#6210): a sequential --ref arm is nested under the molecule, so its
+// blocking edge cannot point at the molecule itself, but it must still run
+// after the molecule's steps. The expected shape re-attaches the edge to the
+// parent's terminal step(s) instead of dropping it.
+func TestBondProtoMolSequentialRefArmRunsAfterParentSteps(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreWithPrefix(t, t.TempDir()+"/test.db", "patrol")
+
+	proto := &types.Issue{Title: "Arm: {{name}}", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2, Labels: []string{MoleculeLabel}}
+	if err := s.CreateIssue(ctx, proto, "test"); err != nil {
+		t.Fatalf("create proto: %v", err)
+	}
+	patrol := &types.Issue{Title: "Patrol", IssueType: types.TypeEpic, Status: types.StatusOpen, Priority: 1}
+	if err := s.CreateIssue(ctx, patrol, "test"); err != nil {
+		t.Fatalf("create patrol: %v", err)
+	}
+	step := &types.Issue{Title: "Patrol step", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2}
+	if err := s.CreateIssue(ctx, step, "test"); err != nil {
+		t.Fatalf("create step: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{IssueID: step.ID, DependsOnID: patrol.ID, Type: types.DepParentChild}, "test"); err != nil {
+		t.Fatalf("add step parent-child: %v", err)
+	}
+
+	result, err := bondProtoMol(ctx, s, proto, patrol, types.BondTypeSequential, map[string]string{"name": "ace"}, "arm-{{name}}", "test", false, false)
+	if err != nil {
+		t.Fatalf("bondProtoMol: %v", err)
+	}
+	armID := result.IDMapping[proto.ID]
+
+	deps, err := s.GetDependencyRecords(ctx, armID)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords(%s): %v", armID, err)
+	}
+	for _, d := range deps {
+		if d.Type == types.DepBlocks && d.DependsOnID == step.ID {
+			return
+		}
+	}
+	t.Fatalf("sequential --ref arm %s has no blocks edge onto the parent's terminal step %s (deps: %+v); the edge was dropped, so the arm is ready before the parent's steps run", armID, step.ID, deps)
+}
+
+// refArmFixture is the AC-1 parent graph for sequential --ref arm ordering:
+// molecule M with direct steps S1, S2 and S3, S2 blocked by S1 and S3
+// independent, plus a two-issue proto (root epic and one executable step).
+type refArmFixture struct {
+	proto, protoStep *types.Issue
+	mol, s1, s2, s3  *types.Issue
+}
+
+func seedRefArmFixture(t *testing.T, ctx context.Context, s storage.DoltStorage, ephemeralMol bool) refArmFixture {
+	t.Helper()
+	create := func(issue *types.Issue) *types.Issue {
+		t.Helper()
+		if err := s.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("create %q: %v", issue.Title, err)
+		}
+		return issue
+	}
+	link := func(from, to string, typ types.DependencyType) {
+		t.Helper()
+		if err := s.AddDependency(ctx, &types.Dependency{IssueID: from, DependsOnID: to, Type: typ}, "test"); err != nil {
+			t.Fatalf("add %s %s -> %s: %v", typ, from, to, err)
+		}
+	}
+	f := refArmFixture{
+		proto:     create(&types.Issue{Title: "Arm: {{name}}", IssueType: types.TypeEpic, Status: types.StatusOpen, Priority: 2, Labels: []string{MoleculeLabel}}),
+		protoStep: create(&types.Issue{Title: "Work {{name}}", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2}),
+		mol:       create(&types.Issue{Title: "Patrol", IssueType: types.TypeEpic, Status: types.StatusOpen, Priority: 1, Ephemeral: ephemeralMol}),
+	}
+	link(f.protoStep.ID, f.proto.ID, types.DepParentChild)
+	f.s1 = create(&types.Issue{Title: "S1", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2, Ephemeral: ephemeralMol})
+	f.s2 = create(&types.Issue{Title: "S2", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2, Ephemeral: ephemeralMol})
+	f.s3 = create(&types.Issue{Title: "S3", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2, Ephemeral: ephemeralMol})
+	for _, step := range []*types.Issue{f.s1, f.s2, f.s3} {
+		link(step.ID, f.mol.ID, types.DepParentChild)
+	}
+	link(f.s2.ID, f.s1.ID, types.DepBlocks)
+	return f
+}
+
+// outgoingDeps answers id's stored edges as "type:target" strings, sorted.
+func outgoingDeps(t *testing.T, ctx context.Context, s storage.DoltStorage, id string) []string {
+	t.Helper()
+	deps, err := s.GetDependencyRecords(ctx, id)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords(%s): %v", id, err)
+	}
+	out := make([]string, 0, len(deps))
+	for _, d := range deps {
+		out = append(out, string(d.Type)+":"+d.DependsOnID)
+	}
+	slices.Sort(out)
+	return out
+}
+
+func wantDeps(pairs ...string) []string {
+	out := slices.Clone(pairs)
+	slices.Sort(out)
+	if out == nil {
+		out = []string{}
+	}
+	return out
+}
+
+// TestBondProtoMolRefArmWaitsForTerminalSteps pins AC-1 of bd-lrkpd3: a
+// sequential --ref arm waits on the parent's terminal steps (S2 and S3, not
+// S1, which S2 already waits on, and not the molecule, which would deadlock)
+// and gains no membership edge.
+func TestBondProtoMolRefArmWaitsForTerminalSteps(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreWithPrefix(t, t.TempDir()+"/test.db", "patrol")
+	f := seedRefArmFixture(t, ctx, s, false)
+
+	result, err := bondProtoMol(ctx, s, f.proto, f.mol, types.BondTypeSequential, map[string]string{"name": "ace"}, "arm-{{name}}", "test", false, false)
+	if err != nil {
+		t.Fatalf("bondProtoMol: %v", err)
+	}
+	armID := result.IDMapping[f.proto.ID]
+	if got, want := outgoingDeps(t, ctx, s, armID), wantDeps("blocks:"+f.s2.ID, "blocks:"+f.s3.ID); !slices.Equal(got, want) {
+		t.Fatalf("arm %s deps = %v, want %v (no edge onto S1 %s or the molecule %s)", armID, got, want, f.s1.ID, f.mol.ID)
+	}
+}
+
+// TestBondProtoMolRefArmTerminalsOnlyForSequentialRef pins that the terminal
+// edges belong to the sequential --ref arm alone: a parallel --ref arm keeps
+// its single membership edge, and a sequential sibling (no --ref) keeps its
+// single edge onto the molecule.
+func TestBondProtoMolRefArmTerminalsOnlyForSequentialRef(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreWithPrefix(t, t.TempDir()+"/test.db", "patrol")
+	f := seedRefArmFixture(t, ctx, s, false)
+
+	parallel, err := bondProtoMol(ctx, s, f.proto, f.mol, types.BondTypeParallel, map[string]string{"name": "par"}, "arm-{{name}}", "test", false, false)
+	if err != nil {
+		t.Fatalf("parallel bond: %v", err)
+	}
+	if got, want := outgoingDeps(t, ctx, s, parallel.IDMapping[f.proto.ID]), wantDeps("parent-child:"+f.mol.ID); !slices.Equal(got, want) {
+		t.Fatalf("parallel arm deps = %v, want %v", got, want)
+	}
+
+	sibling, err := bondProtoMol(ctx, s, f.proto, f.mol, types.BondTypeSequential, map[string]string{"name": "sib"}, "", "test", false, false)
+	if err != nil {
+		t.Fatalf("sibling bond: %v", err)
+	}
+	if got, want := outgoingDeps(t, ctx, s, sibling.IDMapping[f.proto.ID]), wantDeps("blocks:"+f.mol.ID); !slices.Equal(got, want) {
+		t.Fatalf("sequential sibling deps = %v, want %v", got, want)
+	}
 }
