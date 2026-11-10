@@ -9,11 +9,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // setupAutoRoute builds a git repo with the given beads.role whose store
@@ -922,6 +925,301 @@ func TestAutoRouteResolvesPlanningRepoMirrorToOwner(t *testing.T) {
 			t.Fatalf("project copy title = %q after the routed read, want it left %q", copyRow.Title, "test issue shared-hub")
 		}
 	})
+}
+
+// importPlanningCopy reads the planning row "shared-hub" through the foreign
+// read a routed open uses and imports a copy of it into the project store with
+// the given source marker and creation time — what bd repo sync hydrated, with
+// exactly the knobs the edge cases below vary.
+func importPlanningCopy(t *testing.T, primaryStore storage.DoltStorage, planningDir, marker string, createdAt func(owner time.Time) time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	planningStore, err := openForeignStore(ctx, filepath.Join(planningDir, ".beads"), foreignRead)
+	if err != nil {
+		t.Fatalf("open the planning store for the import: %v", err)
+	}
+	defer func() { _ = planningStore.Close() }()
+	owner, err := planningStore.GetIssue(ctx, "shared-hub")
+	if err != nil {
+		t.Fatalf("read the planning row to copy: %v", err)
+	}
+	cp := *owner
+	cp.SourceRepo = marker
+	if createdAt != nil {
+		cp.CreatedAt = createdAt(owner.CreatedAt)
+	}
+	if err := primaryStore.CreateIssuesWithFullOptions(ctx, []*types.Issue{&cp}, "repo-sync", storage.BatchCreateOptions{
+		SkipPrefixValidation: true,
+	}); err != nil {
+		t.Fatalf("import the copy into the project: %v", err)
+	}
+}
+
+// TestHydratedCopyRedirectEdgeCases pins the identity checks the owner
+// redirect requires (GH#6058): a local row redirects to the active auto-route
+// target only when its source marker names that target and its id and
+// creation time identify it as that target's row. Every other row keeps its
+// local resolution, so no command mutates a foreign row by mistake, and a
+// local resolution really does write the project store. The controls in the
+// table prove the fixture redirects when the checks pass, so the local
+// expectations are not vacuous.
+func TestHydratedCopyRedirectEdgeCases(t *testing.T) {
+	cases := []struct {
+		name       string
+		routingKey string                                   // route config naming the target; default routing.maintainer
+		routeOff   bool                                     // routing.mode=off: no active route at all
+		target     func(repoDir, planningDir string) string // what the route names; default planningDir
+		marker     func(repoDir, planningDir string) string
+		createdAt  func(owner time.Time) time.Time
+		wantLocal  bool
+	}{
+		{
+			name:      "matching marker and creation redirect (control)",
+			marker:    func(_, planningDir string) string { return planningDir },
+			createdAt: func(owner time.Time) time.Time { return owner },
+		},
+		{
+			name:      "empty marker stays local",
+			marker:    func(_, _ string) string { return "" },
+			createdAt: func(owner time.Time) time.Time { return owner },
+			wantLocal: true,
+		},
+		{
+			name:      "dot marker stays local",
+			marker:    func(_, _ string) string { return "." },
+			createdAt: func(owner time.Time) time.Time { return owner },
+			wantLocal: true,
+		},
+		{
+			name: "different repo marker stays local",
+			marker: func(repoDir, _ string) string {
+				return filepath.Join(filepath.Dir(repoDir), "elsewhere")
+			},
+			createdAt: func(owner time.Time) time.Time { return owner },
+			wantLocal: true,
+		},
+		{
+			name:      "differing creation time stays local",
+			marker:    func(_, planningDir string) string { return planningDir },
+			createdAt: func(owner time.Time) time.Time { return owner.Add(time.Minute) },
+			wantLocal: true,
+		},
+		{
+			name: "canonical path alias in the marker redirects (control)",
+			marker: func(_, planningDir string) string {
+				alias := planningDir + "-alias"
+				if err := os.Symlink(planningDir, alias); err != nil {
+					t.Fatalf("symlink %s -> %s: %v", alias, planningDir, err)
+				}
+				return alias
+			},
+			createdAt: func(owner time.Time) time.Time { return owner },
+		},
+		{
+			name:      "no active route stays local",
+			routeOff:  true,
+			marker:    func(_, planningDir string) string { return planningDir },
+			createdAt: func(owner time.Time) time.Time { return owner },
+			wantLocal: true,
+		},
+		{
+			name:       "default auto-route redirects (control)",
+			routingKey: "routing.default",
+			marker:     func(_, planningDir string) string { return planningDir },
+			createdAt:  func(owner time.Time) time.Time { return owner },
+		},
+		{
+			name:      "target equal to this workspace stays local",
+			target:    func(repoDir, _ string) string { return repoDir },
+			marker:    func(repoDir, _ string) string { return repoDir },
+			createdAt: func(owner time.Time) time.Time { return owner },
+			wantLocal: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			routingKey := tc.routingKey
+			if routingKey == "" {
+				routingKey = "routing.maintainer"
+			}
+			primaryStore, repoDir, planningDir := setupAutoRoute(t, "maintainer", routingKey)
+			ctx := context.Background()
+			if tc.target != nil {
+				if err := primaryStore.SetConfig(ctx, routingKey, tc.target(repoDir, planningDir)); err != nil {
+					t.Fatalf("retarget %s: %v", routingKey, err)
+				}
+			}
+			if tc.routeOff {
+				if err := primaryStore.SetConfig(ctx, "routing.mode", "off"); err != nil {
+					t.Fatalf("set routing.mode=off: %v", err)
+				}
+			}
+			importPlanningCopy(t, primaryStore, planningDir, tc.marker(repoDir, planningDir), tc.createdAt)
+
+			result, err := resolveAndGetIssueForMutationExact(ctx, primaryStore, "shared-hub")
+			if err != nil {
+				t.Fatalf("resolveAndGetIssueForMutationExact: %v", err)
+			}
+			defer result.Close()
+			if !tc.wantLocal {
+				requireRedirectedCopy(t, tc.name, result, planningDir)
+				return
+			}
+			if result.Routed {
+				t.Fatalf("%s: resolution routed to %q; want it kept local", tc.name, result.RedirectedCopyOwner)
+			}
+			// A row kept local writes the project store only: the foreign
+			// planning row must not feel the edit.
+			if err := result.Store.UpdateIssue(ctx, result.ResolvedID, map[string]interface{}{"title": "local edit"}, "test"); err != nil {
+				t.Fatalf("update through the kept-local resolution: %v", err)
+			}
+			owner, err := reopenAutoRouteTarget(t, planningDir).GetIssue(ctx, "shared-hub")
+			if err != nil {
+				t.Fatalf("reread the planning row after the local update: %v", err)
+			}
+			if owner.Title == "local edit" {
+				t.Fatalf("%s: the local update reached the planning store's row", tc.name)
+			}
+		})
+	}
+
+	t.Run("inherited marker on a row the owner never held", func(t *testing.T) {
+		primaryStore, _, planningDir := setupAutoRoute(t, "maintainer", "routing.maintainer")
+		ctx := context.Background()
+
+		// A discovered-from child inherits its parent's source marker without
+		// the planning store ever holding its row.
+		child := &types.Issue{
+			ID:         "shared-hub-child",
+			Title:      "discovered-from child",
+			Status:     types.StatusOpen,
+			Priority:   2,
+			IssueType:  types.TypeTask,
+			SourceRepo: planningDir,
+			CreatedAt:  time.Now().UTC(),
+		}
+		if err := primaryStore.CreateIssuesWithFullOptions(ctx, []*types.Issue{child}, "repo-sync", storage.BatchCreateOptions{
+			SkipPrefixValidation: true,
+		}); err != nil {
+			t.Fatalf("import the child row: %v", err)
+		}
+
+		for _, resolve := range []struct {
+			what string
+			call func() (*RoutedResult, error)
+		}{
+			{"mutation (resolveAndGetIssueForMutationExact)", func() (*RoutedResult, error) {
+				return resolveAndGetIssueForMutationExact(ctx, primaryStore, "shared-hub-child")
+			}},
+			{"read (resolveAndGetIssueWithRouting)", func() (*RoutedResult, error) {
+				return resolveAndGetIssueWithRouting(ctx, primaryStore, "shared-hub-child")
+			}},
+		} {
+			result, err := resolve.call()
+			if err != nil {
+				t.Fatalf("%s of the inherited-marker row: %v", resolve.what, err)
+			}
+			if result.Routed {
+				t.Fatalf("%s routed the inherited-marker row to %q; want it kept local", resolve.what, result.RedirectedCopyOwner)
+			}
+			if result.Issue.ID != "shared-hub-child" {
+				t.Fatalf("%s returned issue %q; want the local child", resolve.what, result.Issue.ID)
+			}
+			result.Close()
+		}
+
+		// Missing owner, local row: the cleanup delete bd delete runs still
+		// works, locally only.
+		result, err := resolveAndGetIssueForMutationExact(ctx, primaryStore, "shared-hub-child")
+		if err != nil {
+			t.Fatalf("resolve the child for the cleanup delete: %v", err)
+		}
+		defer result.Close()
+		deleter, err := result.Store.Deleter()
+		if err != nil {
+			t.Fatalf("Deleter for the local row: %v", err)
+		}
+		opsCtx, err := issueOpsContext(ctx)
+		if err != nil {
+			t.Fatalf("issueOpsContext: %v", err)
+		}
+		if _, err := deleter.Delete(opsCtx, issueops.DeleteRequest{Actor: "test", IDs: []string{result.ResolvedID}, Force: true}); err != nil {
+			t.Fatalf("local-only cleanup delete of the child: %v", err)
+		}
+		if _, err := primaryStore.GetIssue(ctx, "shared-hub-child"); !errors.Is(err, storage.ErrNotFound) {
+			t.Fatalf("the local-only cleanup delete did not remove the row: err = %v", err)
+		}
+	})
+
+	t.Run("native row stays operable while the planning store is unavailable", func(t *testing.T) {
+		primaryStore, _, planningDir := setupAutoRoute(t, "maintainer", "routing.maintainer")
+		ctx := context.Background()
+		seedIssue(t, ctx, primaryStore, "local-only")
+
+		// The planning workspace disappears entirely; a native row, with no
+		// source marker, must keep resolving and mutating locally.
+		if err := os.RemoveAll(planningDir); err != nil {
+			t.Fatalf("remove the planning workspace: %v", err)
+		}
+		result, err := resolveAndGetIssueForMutationExact(ctx, primaryStore, "local-only")
+		if err != nil {
+			t.Fatalf("resolve a native row with the planning store gone: %v", err)
+		}
+		defer result.Close()
+		if result.Routed {
+			t.Fatalf("the native row routed to %q with no marker and no planning store", result.RedirectedCopyOwner)
+		}
+		if err := result.Store.CloseIssue(ctx, result.ResolvedID, "done", "test", ""); err != nil {
+			t.Fatalf("close the native row with the planning store gone: %v", err)
+		}
+	})
+
+	t.Run("partial id resolves locally once, then exactly in the owner", func(t *testing.T) {
+		primaryStore, _, planningDir := setupAutoRouteWithHydratedCopy(t, "maintainer", "routing.maintainer")
+		ctx := context.Background()
+
+		result, err := resolveAndGetIssueForMutation(ctx, primaryStore, "shared-h")
+		if err != nil {
+			t.Fatalf("resolveAndGetIssueForMutation by partial id: %v", err)
+		}
+		defer result.Close()
+		requireRedirectedCopy(t, "partial id", result, planningDir)
+		if result.ResolvedID != "shared-hub" {
+			t.Fatalf("partial id resolved to %q, want the owner's full id after one local resolution", result.ResolvedID)
+		}
+
+		// The exact resolver still refuses the abbreviation instead of
+		// handing a delete or comment something the id only abbreviates.
+		if _, err := resolveAndGetIssueForMutationExact(ctx, primaryStore, "shared-h"); !errors.Is(err, utils.ErrAbbreviatedIDNotAllowed) {
+			t.Fatalf("exact resolver error = %v, want utils.ErrAbbreviatedIDNotAllowed", err)
+		}
+	})
+}
+
+// TestSameOwnerCreationIdentifiesOnlyRealMatches pins the creation-time half
+// of the owner identity directly. A stored row can no longer hold a zero
+// creation time (PrepareIssueForInsert defaults it), so the zero cases are
+// unit assertions: the check must refuse to identify anything on a zero time
+// or a missing row, where no store round trip can demonstrate it.
+func TestSameOwnerCreationIdentifiesOnlyRealMatches(t *testing.T) {
+	created := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	owner := &types.Issue{CreatedAt: created}
+
+	if !sameOwnerCreation(&types.Issue{CreatedAt: created.Add(500 * time.Millisecond)}, owner) {
+		t.Fatal("sub-second differences must identify: storage keeps second precision")
+	}
+	if sameOwnerCreation(&types.Issue{CreatedAt: created.Add(time.Minute)}, owner) {
+		t.Fatal("a creation a minute apart identified an owner")
+	}
+	if sameOwnerCreation(&types.Issue{CreatedAt: time.Time{}}, owner) {
+		t.Fatal("a zero creation time on the copy identified an owner")
+	}
+	if sameOwnerCreation(&types.Issue{CreatedAt: created}, &types.Issue{CreatedAt: time.Time{}}) {
+		t.Fatal("a zero creation time on the owner identified the copy")
+	}
+	if sameOwnerCreation(nil, owner) || sameOwnerCreation(&types.Issue{CreatedAt: created}, nil) {
+		t.Fatal("a missing row identified an owner")
+	}
 }
 
 // committedIssue returns id as the HEAD commit of beadsDir's database holds
