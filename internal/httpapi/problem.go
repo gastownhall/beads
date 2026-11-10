@@ -1293,6 +1293,30 @@ func closeBlockedResult(err error, subject, hint string) Result {
 	return res
 }
 
+// claimBlockedResult is the live local-blocker refusal for a CLAIM: the
+// `not_claimable` the document gives a refused claim, carrying the typed
+// BlockedError's own sentence plus the hint naming this member's bypass, with
+// the blockers in `blockers` — the member that tells a client this refusal is
+// the local-blocker one rather than the status's own not_claimable.
+//
+// closeBlockedError's twin: the sentinel checked is ErrClaimBlocked, so a
+// close-policy refusal (which shares the BlockedError type) is never reported
+// as a claim's blockers.
+func claimBlockedResult(err error, hint string) Result {
+	var blocked *issueops.BlockedError
+	detail := "`claim` refuses a blocked issue"
+	blockers := (*[]apigen.Blocker)(nil)
+	if errors.As(err, &blocked) && errors.Is(blocked.Err, issueops.ErrClaimBlocked) {
+		detail = blocked.Error()
+		if len(blocked.Blockers) > 0 {
+			blockers = wireBlockers(blocked.Blockers)
+		}
+	}
+	res := newResult(CodeNotClaimable, detail+"; "+hint)
+	res.Problem.Blockers = blockers
+	return res
+}
+
 // WithDependencyTypeConflict attaches the two `dependency_exists` extension
 // members: the type the pair already carries and the type the request asked
 // for. Populate them from *issueops.DependencyTypeConflictError's fields — the
