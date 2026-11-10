@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remedy"
@@ -630,16 +629,10 @@ pointless).`,
 			if notesOverwritten {
 				notesOverwriteWarnings[issueStore] = append(notesOverwriteWarnings[issueStore], id)
 			}
-			// Audit log key field changes (survives Dolt GC flatten)
-			if patch.Status.Set {
-				audit.LogFieldChange(result.ResolvedID, "status", string(issue.Status), string(patch.Status.Value), currentActor(), "")
-			}
-			if patch.Assignee.Set {
-				audit.LogFieldChange(result.ResolvedID, "assignee", issue.Assignee, patch.Assignee.Value, currentActor(), "")
-			}
-			if patch.Priority.Set {
-				audit.LogFieldChange(result.ResolvedID, "priority", fmt.Sprintf("%d", issue.Priority), fmt.Sprintf("%d", patch.Priority.Value), currentActor(), "")
-			}
+			// Audit log key field changes (survives Dolt GC flatten), a
+			// --claim's implied status and assignee included (GH#6146).
+			logUpdateAuditChanges(result.ResolvedID, currentActor(),
+				updateAuditChanges(patch, claimFlag, updateResult.Changed, issue, updatedIssue))
 
 			// The operation's own post-state snapshot replaces the re-read.
 			// Dependency records are dropped from it because `bd update` has
