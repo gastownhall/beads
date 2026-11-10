@@ -98,9 +98,29 @@ func repairLocalExternalDepTargets(ctx context.Context, db DBConn, dirtyBefore m
 	if err != nil {
 		return moved > 0, err
 	}
+	if depLocalTargetRepairFaultHook != nil {
+		if err := depLocalTargetRepairFaultHook(ctx, db); err != nil {
+			return moved > 0, err
+		}
+	}
 	result, err := issueops.RecomputeIsBlockedInTxWithResult(ctx, db, issueIDs, wispIDs)
 	if err != nil {
 		return moved > 0, fmt.Errorf("recompute blocked state: %w", err)
 	}
 	return moved > 0 || result.IssueRowsChanged || result.WispRowsChanged, nil
+}
+
+// depLocalTargetRepairFaultHook is a test-only seam. When non-nil it runs
+// after repairLocalExternalDepTargets moves its rows and before it recomputes
+// blocked state; a non-nil error aborts the pass there, to simulate an
+// interruption.
+var depLocalTargetRepairFaultHook func(ctx context.Context, db DBConn) error
+
+// SetDepLocalTargetRepairFaultHookForTest installs fn as the local-target
+// repair fault hook and returns a function that restores the previous hook.
+// Test-only.
+func SetDepLocalTargetRepairFaultHookForTest(fn func(ctx context.Context, db DBConn) error) func() {
+	prev := depLocalTargetRepairFaultHook
+	depLocalTargetRepairFaultHook = fn
+	return func() { depLocalTargetRepairFaultHook = prev }
 }

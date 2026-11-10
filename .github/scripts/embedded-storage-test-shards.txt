@@ -284,6 +284,7 @@
 40 12 TestReaderListExcludeStatusAcceptsAWorkspaceCustomStatus
 
 40 13 TestEmbeddedActivationDoesNotOpenTheEngine
+40 13 TestEmbeddedCrossPrefixRepairInterruptedPassConverges
 40 13 TestEmbeddedDepRekeyConvergesRenameChain
 40 13 TestEmbeddedDependencyEditorAppliesParentChildBeforeBlockingEdges
 40 13 TestEmbeddedDependencyEditorRefusesAGhostSource
@@ -324,6 +325,7 @@
 40 15 TestReadyWorkPageTotalFilterMatrix
 
 40 16 TestDescendantWalkReachesEveryTargetKindAndStopsOnCycles
+40 16 TestEmbeddedCrossPrefixRepairRefusesDirtyTable
 40 16 TestEmbeddedDeferredActivationRecordsFromTheFirstWrite
 40 16 TestEmbeddedDependencyEditorAddedEchoesTheRequestOrder
 40 16 TestEmbeddedDependencyEditorRemovesOnlyTheNamedEdge

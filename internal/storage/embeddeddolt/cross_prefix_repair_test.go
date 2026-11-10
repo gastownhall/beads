@@ -5,9 +5,11 @@ package embeddeddolt_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -266,5 +268,75 @@ func TestEmbeddedCrossPrefixRepairConvertsLegacyRows(t *testing.T) {
 		if table == "dependencies" || table == "issues" {
 			t.Errorf("repair left %s uncommitted (dolt_status %v)", table, dirty)
 		}
+	}
+}
+
+// seedRefusalFixture writes and commits a legacy edge whose repair moves a
+// versioned row and flips a blocked flag, with the repair marker un-recorded.
+func seedRefusalFixture(t *testing.T, ctx context.Context, conn *sql.Conn) {
+	t.Helper()
+	seedLegacyIssue(t, ctx, conn, "issues", "rb-open", "open", 1)
+	seedLegacyIssue(t, ctx, conn, "issues", "ra-blocked", "open", 2)
+	seedLegacyIssue(t, ctx, conn, "issues", "ra-other", "open", 3)
+	seedDep(t, ctx, conn, "dependencies", "ra-blocked", "rb-open", "depends_on_external", "blocks")
+	seedDep(t, ctx, conn, "dependencies", "ra-other", "ra-blocked", "depends_on_issue_id", "related")
+	commitLegacyStateAndUnmarkRepair(t, ctx, conn)
+}
+
+// requireRepairConverged asserts the refusal fixture's edge is typed, its
+// source blocked, the blocked state consistent and the marker recorded.
+func requireRepairConverged(t *testing.T, ctx context.Context, conn *sql.Conn) {
+	t.Helper()
+	requireDepColumn(t, ctx, conn, "dependencies", "ra-blocked", "rb-open", "depends_on_issue_id")
+	if blocked, _ := readBlocked(t, ctx, conn, "issues", "ra-blocked"); !blocked {
+		t.Error("ra-blocked is_blocked = false after the repair, want true")
+	}
+	requireBlockedStateConsistent(t, ctx, conn)
+	if !ignoredMarkerRecorded(t, ctx, conn, 32) {
+		t.Error("ignored marker 0032 not recorded after the repair converged")
+	}
+}
+
+// TestEmbeddedCrossPrefixRepairRefusesDirtyTable is AC-6: a pass that would
+// write versioned rows while a graph table holds uncommitted user edits
+// refuses before writing anything, names the table, leaves the marker
+// pending, and converges on the next open once the user commits.
+func TestEmbeddedCrossPrefixRepairRefusesDirtyTable(t *testing.T) {
+	requireEmbedded(t)
+	for _, tc := range []struct {
+		table, edit string
+	}{
+		{"issues", "UPDATE issues SET title = 'user edit' WHERE id = 'ra-other'"},
+		{"dependencies", `UPDATE dependencies SET metadata = '{"user":"edit"}' WHERE issue_id = 'ra-other'`},
+	} {
+		t.Run(tc.table, func(t *testing.T) {
+			ctx := t.Context()
+			conn, _, closeConn := newCrossPrefixRepairDB(t, ctx)
+			defer closeConn()
+			seedRefusalFixture(t, ctx, conn)
+			execFrozenGuard(t, ctx, conn, tc.edit)
+
+			_, err := schema.MigrateUp(ctx, conn)
+			var dirtyErr *schema.DirtyTablesError
+			if !errors.As(err, &dirtyErr) {
+				t.Fatalf("MigrateUp over dirty %s = %v, want a DirtyTablesError", tc.table, err)
+			}
+			if !slices.Contains(dirtyErr.Tables, tc.table) {
+				t.Errorf("DirtyTablesError names %v, want %s", dirtyErr.Tables, tc.table)
+			}
+			requireDepColumn(t, ctx, conn, "dependencies", "ra-blocked", "rb-open", "depends_on_external")
+			if blocked, _ := readBlocked(t, ctx, conn, "issues", "ra-blocked"); blocked {
+				t.Error("refused pass wrote ra-blocked is_blocked")
+			}
+			if ignoredMarkerRecorded(t, ctx, conn, 32) {
+				t.Error("refused pass recorded ignored marker 0032")
+			}
+
+			execFrozenGuard(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'user edit')")
+			if _, err := schema.MigrateUp(ctx, conn); err != nil {
+				t.Fatalf("MigrateUp after committing the user edit: %v", err)
+			}
+			requireRepairConverged(t, ctx, conn)
+		})
 	}
 }
