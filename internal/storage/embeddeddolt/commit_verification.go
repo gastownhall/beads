@@ -9,6 +9,7 @@ import (
 	"slices"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 // commitAllThrough runs commitAllInTx in the transaction withTx provides and,
@@ -44,18 +45,32 @@ func commitAllThrough(ctx context.Context, withTx func(func(*sql.Tx) error) erro
 }
 
 // verifyCommitComplete reports the tables dolt_status still lists after a
-// full commit as a *storage.UncommittedChangesError.
+// full commit as a *storage.UncommittedChangesError, except bd's own
+// clone-local tables (schema.OwnedIgnorePolicy), whose changes a commit is
+// meant to leave behind. Only operator-visible status rows count: a new table
+// some pattern ignores is hidden from dolt_status by Dolt itself, so it is
+// outside what this check can see.
 func verifyCommitComplete(ctx context.Context, tx *sql.Tx, committed bool) error {
-	remaining, err := readStatusTables(ctx, tx)
+	tables, err := readStatusTables(ctx, tx)
 	if err != nil {
 		return err
 	}
+	if len(tables) == 0 {
+		return nil
+	}
+	// The policy is read only when something is dirty, so the healthy path
+	// costs one status query.
+	policy, err := schema.LoadOwnedIgnorePolicy(ctx, tx)
+	if err != nil {
+		return err
+	}
+	remaining := slices.DeleteFunc(tables, policy.OwnsTable)
 	if len(remaining) == 0 {
 		return nil
 	}
 	return &storage.UncommittedChangesError{
 		Tables:         remaining,
-		IgnorePatterns: enabledIgnorePatterns(ctx, tx),
+		IgnorePatterns: enabledForeignIgnorePatterns(ctx, tx, policy),
 		Committed:      committed,
 	}
 }
@@ -81,10 +96,11 @@ func readStatusTables(ctx context.Context, tx *sql.Tx) ([]string, error) {
 	return slices.Compact(tables), nil
 }
 
-// enabledIgnorePatterns is the optional diagnostic: the enabled dolt_ignore
-// patterns, a likely reason the commit skipped the remaining tables. A
-// failed read returns nil so the residual-change finding still surfaces.
-func enabledIgnorePatterns(ctx context.Context, tx *sql.Tx) []string {
+// enabledForeignIgnorePatterns is the optional diagnostic: the enabled
+// dolt_ignore patterns bd does not own, a likely reason the commit skipped
+// the remaining tables. A failed read returns nil so the residual-change
+// finding still surfaces.
+func enabledForeignIgnorePatterns(ctx context.Context, tx *sql.Tx, policy schema.OwnedIgnorePolicy) []string {
 	rows, err := tx.QueryContext(ctx, "SELECT pattern FROM dolt_ignore WHERE ignored = 1 ORDER BY pattern")
 	if err != nil {
 		return nil
@@ -96,7 +112,9 @@ func enabledIgnorePatterns(ctx context.Context, tx *sql.Tx) []string {
 		if err := rows.Scan(&pattern); err != nil {
 			return nil
 		}
-		patterns = append(patterns, pattern)
+		if !policy.OwnsPattern(pattern) {
+			patterns = append(patterns, pattern)
+		}
 	}
 	if rows.Err() != nil {
 		return nil
