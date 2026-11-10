@@ -13213,8 +13213,9 @@ components:
           description: >-
             The caller edits a template deliberately, so the template read-only
             refusal (`409 template_read_only`) stands down for this request.
-            `bd label` and `bd set-state` send it: they have always written to
-            templates. It bypasses nothing else, and has no effect on an issue
+            `bd label` sends it: it has always written to templates (`bd
+            set-state` sends the batch item's `allow_template` instead). It
+            bypasses nothing else, and has no effect on an issue
             that is not a template. Advertised by the
             `issues.update.allowTemplate` capability token; a server that
             predates the member refuses it as an unknown parameter, and such a
