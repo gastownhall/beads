@@ -164,3 +164,44 @@ func TestEmbeddedMergeAndSettleCommitsPeerCleanTables(t *testing.T) {
 	}
 	assertMergeConcluded(t, ctx, conn)
 }
+
+// TestEmbeddedStrategyMergeCommitsPeerCleanTables (GH#7757, AC-2): an issues
+// conflict only an explicit strategy settles, resolved through SettleMerge
+// (pull --strategy) or MergeWithStrategy (bd vc merge --strategy), keeps the
+// peer's cleanly merged rows in the merge commit and applies the strategy to
+// the conflicted title.
+func TestEmbeddedStrategyMergeCommitsPeerCleanTables(t *testing.T) {
+	for _, route := range []string{"settle", "vcmerge"} {
+		for _, strategy := range []string{"ours", "theirs"} {
+			t.Run(route+"/"+strategy, func(t *testing.T) {
+				te := newTestEnv(t, "gh7757"+route+strategy)
+				ctx := t.Context()
+				conn := openSettleConn(t, ctx, te)
+
+				d := gh7757Divergence{issueID: "ps-1", peer: "pspeer", peerLabel: true, declined: true}
+				seedGH7757Divergence(t, ctx, conn, d)
+
+				switch route {
+				case "settle":
+					if err := versioncontrolops.MergeAndSettleWithStrategy(ctx, conn, d.peer, strategy); err != nil {
+						t.Fatalf("MergeAndSettleWithStrategy(%s): %v", strategy, err)
+					}
+				case "vcmerge":
+					conflicts, err := versioncontrolops.MergeWithStrategy(ctx, conn, d.peer, "bd-test <bd-test@example.com>", strategy)
+					if err != nil {
+						t.Fatalf("MergeWithStrategy(%s): %v", strategy, err)
+					}
+					if len(conflicts) == 0 {
+						t.Fatal("MergeWithStrategy reported no conflicts; the seed must conflict on the issues row")
+					}
+				}
+
+				assertHeadCarriesPeerRows(t, ctx, conn, d)
+				if title, _ := headIssue(t, ctx, conn, d.issueID); title != strategy {
+					t.Errorf("HEAD title = %q, want %q (the %s side)", title, strategy, strategy)
+				}
+				assertMergeConcluded(t, ctx, conn)
+			})
+		}
+	}
+}
