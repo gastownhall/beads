@@ -624,3 +624,81 @@ func TestIsBlocked_ConditionalBlocksWispRoutes(t *testing.T) {
 		}
 	}
 }
+
+// TestIsBlocked_ConditionalBlocksInsertOntoClosedTarget inserts a
+// conditional-blocks edge onto an already-closed precondition through the
+// store's direct-insertion writer, on every issue/wisp route: the source is
+// blocked exactly when the target's close reason is not a failure.
+func TestIsBlocked_ConditionalBlocksInsertOntoClosedTarget(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	routes := []struct {
+		name                   string
+		sourceWisp, targetWisp bool
+	}{
+		{"issue-to-issue", false, false},
+		{"issue-to-wisp", false, true},
+		{"wisp-to-issue", true, false},
+		{"wisp-to-wisp", true, true},
+	}
+	reasons := []string{"completed successfully", "rejected by review"}
+	for ri, r := range routes {
+		for oi, reason := range reasons {
+			suffix := string(rune('0'+ri)) + string(rune('0'+oi))
+			a, b := "isb-cbi-a"+suffix, "isb-cbi-b"+suffix
+			if r.targetWisp {
+				createWisp(t, ctx, store, a)
+			} else {
+				createPerm(t, ctx, store, a)
+			}
+			if err := store.CloseIssue(ctx, a, reason, "tester", ""); err != nil {
+				t.Fatalf("%s: CloseIssue: %v", r.name, err)
+			}
+			table := "issues"
+			if r.sourceWisp {
+				createWisp(t, ctx, store, b)
+				table = "wisps"
+			} else {
+				createPerm(t, ctx, store, b)
+			}
+			if err := store.AddDependency(ctx, &types.Dependency{
+				IssueID: b, DependsOnID: a, Type: types.DepConditionalBlocks,
+			}, "tester"); err != nil {
+				t.Fatalf("%s: AddDependency: %v", r.name, err)
+			}
+			want := !types.IsFailureClose(reason)
+			if got := getIsBlocked(t, ctx, store, table, b); got != want {
+				t.Errorf("%s: insert onto target closed %q: stored is_blocked(%s) = %v, want %v", r.name, reason, b, got, want)
+			}
+		}
+	}
+
+	// Cross-session precheck: inside one transaction, an issue source and a
+	// wisp target live on different sessions, so the writer gates on the
+	// target row read through readDepTargetForPrecheck.
+	for oi, reason := range reasons {
+		suffix := string(rune('0' + oi))
+		a, b := "isb-cbi-tx-a"+suffix, "isb-cbi-tx-b"+suffix
+		if err := store.RunInTransaction(ctx, "conditional insert "+suffix, func(tx storage.Transaction) error {
+			if err := tx.CreateIssue(ctx, &types.Issue{ID: a, Title: "wisp " + a, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: true}, "tester"); err != nil {
+				return err
+			}
+			if err := tx.CloseIssue(ctx, a, reason, "tester", ""); err != nil {
+				return err
+			}
+			if err := tx.CreateIssue(ctx, &types.Issue{ID: b, Title: "perm " + b, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "tester"); err != nil {
+				return err
+			}
+			return tx.AddDependency(ctx, &types.Dependency{IssueID: b, DependsOnID: a, Type: types.DepConditionalBlocks}, "tester")
+		}); err != nil {
+			t.Fatalf("tx route %q: %v", reason, err)
+		}
+		want := !types.IsFailureClose(reason)
+		if got := getIsBlocked(t, ctx, store, "issues", b); got != want {
+			t.Errorf("tx issue-to-wisp: insert onto target closed %q: stored is_blocked(%s) = %v, want %v", reason, b, got, want)
+		}
+	}
+}
