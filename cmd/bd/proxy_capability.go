@@ -83,6 +83,10 @@ type proxyCapabilityRule struct {
 	// the flag is the operator saying they took it. Empty for every other rule.
 	// Only the path-keyed gate reads it (validateProxyRegistryBeforeProvider).
 	ForceFlag string
+	// ForceWarning is printed to stderr, once, when ForceFlag carries an
+	// invocation past the refusal. Set exactly when ForceFlag is. It is
+	// generic on purpose: bd cannot see who the warning is about.
+	ForceWarning string
 }
 
 // ProxyCapabilityError is a machine-identifiable front-door refusal.

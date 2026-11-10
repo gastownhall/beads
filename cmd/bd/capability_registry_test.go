@@ -555,3 +555,42 @@ type refusalJSONForTest struct {
 	Mutates bool   `json:"mutates"`
 	Reason  string `json:"reason"`
 }
+
+// TestProxyMigrateSchemaForceWarnsBeforeTheOpen pins what --force buys on a
+// proxied workspace: the gate lets it through to the provider open, and before
+// that open — the gate is the last thing to run ahead of it — it prints one
+// generic warning to close co-resident library clients. stderr only, so a
+// --json caller's stdout still carries the command's single report and nothing
+// else. Generic on purpose: the proxy does not track its clients, so there are
+// none to name.
+func TestProxyMigrateSchemaForceWarnsBeforeTheOpen(t *testing.T) {
+	const want = "Warning: before forcing schema migration, close co-resident library clients; " +
+		"restart them after this command completes.\n"
+	for _, topology := range allProxiedTopologies {
+		t.Run(string(topology), func(t *testing.T) {
+			setMigrateSchemaForce(t, "true")
+			stdout, stderr, err := runProxyRegistryGate(t, migrateSchemaCmd, topology)
+			if err != nil {
+				t.Fatalf("forced migrate schema was refused before the provider: %v", err)
+			}
+			if stdout != "" {
+				t.Errorf("the forced pass wrote to stdout, where the command's single JSON report goes:\n%s", stdout)
+			}
+			if stderr != want {
+				t.Errorf("stderr = %q, want exactly one warning %q", stderr, want)
+			}
+			if strings.Contains(stderr, "is not supported in proxied-server mode") {
+				t.Errorf("the warning reads as a refusal: %q", stderr)
+			}
+		})
+	}
+
+	// The refusal itself carries no warning: it is the route, not a pass.
+	t.Run("unforced", func(t *testing.T) {
+		setMigrateSchemaForce(t, "")
+		_, stderr, _ := runProxyRegistryGate(t, migrateSchemaCmd, ProxyTopologyManagedLocal)
+		if strings.Contains(stderr, "close co-resident library clients") {
+			t.Errorf("the refused invocation printed the force warning: %q", stderr)
+		}
+	})
+}
