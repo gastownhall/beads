@@ -1014,13 +1014,17 @@ func TestWispPurgeClosedPreviewDoesNotMutate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("runWispPurgeClosed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
 		}
-		for i, req := range s.deleter.requests {
-			if !req.DryRun {
-				t.Errorf("dry run sent request %d without DryRun", i)
-			}
+		if len(s.deleter.requests) != 1 || !s.deleter.requests[0].DryRun {
+			t.Errorf("dry run sent %d request(s) (first DryRun %v), want exactly one DryRun preview",
+				len(s.deleter.requests), len(s.deleter.requests) > 0 && s.deleter.requests[0].DryRun)
 		}
 		if len(s.deleter.deleted) != 0 {
 			t.Errorf("dry run deleted %d wisps", len(s.deleter.deleted))
+		}
+		obj := decodeSingleJSONObject(t, stdout)
+		if obj["dry_run"] != true || obj["preview"] != true {
+			t.Errorf("dry run answer = dry_run %v preview %v, want both true (the detailed preview shape is unchanged)",
+				obj["dry_run"], obj["preview"])
 		}
 	})
 
