@@ -186,7 +186,7 @@ func TestManagedLocalProxiedTeamServerCloneInitKeepsTrackedConfig(t *testing.T) 
 	}
 	tracked := map[string][]byte{
 		configfile.ConfigFileName: metadata,
-		"config.yaml":             append(renderInitConfigYAML("", false), "\n# Team settings\noutput:\n  title-length: 40\n"...),
+		"config.yaml":             append(renderInitConfigYAML(), "\n# Team settings\noutput:\n  title-length: 40\n"...),
 	}
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
 		t.Fatalf("mkdir %s: %v", beadsDir, err)
