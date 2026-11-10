@@ -9,6 +9,11 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 )
 
+// Every helper below that hands a remote or peer name to a DOLT_* procedure
+// refuses an option-shaped one first (storage.ValidateRemoteOperand): the
+// procedures parse a leading '-' as a flag even from a bound parameter
+// (GH#7876).
+
 // ListRemotes returns all configured Dolt remotes: name, URL, and the git ref
 // a git-backed remote keeps its data on when one was set. The ref is the
 // git_ref key of the dolt_remotes params column, a JSON object of the
@@ -44,6 +49,9 @@ func ListRemotes(ctx context.Context, db DBConn) ([]storage.RemoteInfo, error) {
 // accepts for git-backed remotes only; for any other scheme Dolt's own
 // refusal is returned unchanged.
 func AddRemote(ctx context.Context, db DBConn, name, url, ref string) error {
+	if err := storage.ValidateRemoteOperand(name); err != nil {
+		return err
+	}
 	if ref = strings.TrimSpace(ref); ref == "" {
 		_, err := db.ExecContext(ctx, "CALL DOLT_REMOTE('add', ?, ?)", name, url)
 		return err
@@ -54,6 +62,9 @@ func AddRemote(ctx context.Context, db DBConn, name, url, ref string) error {
 
 // RemoveRemote removes a configured Dolt remote.
 func RemoveRemote(ctx context.Context, db DBConn, name string) error {
+	if err := storage.ValidateRemoteOperand(name); err != nil {
+		return err
+	}
 	if _, err := db.ExecContext(ctx, "CALL DOLT_REMOTE('remove', ?)", name); err != nil {
 		return fmt.Errorf("remove remote %s: %w", name, err)
 	}
@@ -71,6 +82,9 @@ func RemoveRemote(ctx context.Context, db DBConn, name string) error {
 // every other open session on the same engine, so a failed fetch would break
 // concurrent in-flight connections (bd-6dnrw.10).
 func Fetch(ctx context.Context, db DBConn, peer, user string) error {
+	if err := storage.ValidateRemoteOperand(peer); err != nil {
+		return err
+	}
 	err := withRemoteEnvGuards(func() error {
 		if user != "" {
 			_, err := db.ExecContext(ctx, "CALL DOLT_FETCH('--user', ?, ?)", user, peer)
@@ -90,6 +104,9 @@ func Fetch(ctx context.Context, db DBConn, peer, user string) error {
 // must be set in the in-process Dolt server's environment. Required when
 // pushing to a remotesapi server that enforces CLONE_ADMIN authentication.
 func Push(ctx context.Context, db DBConn, remote, branch, user string) error {
+	if err := storage.ValidateRemoteOperand(remote); err != nil {
+		return err
+	}
 	err := withRemoteEnvGuards(func() error {
 		if user != "" {
 			_, err := db.ExecContext(ctx, "CALL DOLT_PUSH('--user', ?, ?, ?)", user, remote, branch)
@@ -107,6 +124,9 @@ func Push(ctx context.Context, db DBConn, remote, branch, user string) error {
 // ForcePush force-pushes the given branch to the named remote.
 // See Push for the user/auth contract.
 func ForcePush(ctx context.Context, db DBConn, remote, branch, user string) error {
+	if err := storage.ValidateRemoteOperand(remote); err != nil {
+		return err
+	}
 	err := withRemoteEnvGuards(func() error {
 		if user != "" {
 			_, err := db.ExecContext(ctx, "CALL DOLT_PUSH('--force', '--user', ?, ?, ?)", user, remote, branch)
@@ -142,6 +162,9 @@ func Pull(ctx context.Context, db DBConn, remote, branch, user string) error {
 // Pull's behavior. See MergeAndSettleWithStrategy/SettleMerge for the
 // resolution logic.
 func PullWithStrategy(ctx context.Context, db DBConn, remote, branch, user, strategy string) error {
+	if err := storage.ValidateRemoteOperand(remote); err != nil {
+		return err
+	}
 	if err := withRemoteEnvGuards(func() error {
 		if user != "" {
 			_, err := db.ExecContext(ctx, "CALL DOLT_FETCH('--user', ?, ?, ?)", user, remote, branch)
