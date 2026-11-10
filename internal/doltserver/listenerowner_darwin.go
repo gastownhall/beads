@@ -4,6 +4,7 @@ package doltserver
 
 import (
 	"errors"
+	"github.com/steveyegge/beads/internal/execwin"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -94,7 +95,7 @@ func descendsFrom(p, ancestor int, parents map[int]int) bool {
 // nothing matches, which is reported as no listener, not as an error, so the
 // caller treats both the same way.
 func lsofListeningPIDs(port int) ([]int, error) {
-	out, err := exec.Command("lsof", "-nP", "-t", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN").Output() //nolint:gosec // G702: port is an internal int, not user input
+	out, err := execwin.Hide(exec.Command("lsof", "-nP", "-t", "-iTCP:"+strconv.Itoa(port), "-sTCP:LISTEN")).Output() //nolint:gosec // G702: port is an internal int, not user input
 	if err != nil && len(out) == 0 {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
@@ -118,7 +119,7 @@ func parseLsofPIDs(out []byte) []int {
 
 // psParentPIDs snapshots every process's parent from `ps -axo pid=,ppid=`.
 func psParentPIDs() (map[int]int, error) {
-	out, err := exec.Command("ps", "-axo", "pid=,ppid=").Output()
+	out, err := execwin.Hide(exec.Command("ps", "-axo", "pid=,ppid=")).Output()
 	if err != nil {
 		return nil, err
 	}

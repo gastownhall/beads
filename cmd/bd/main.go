@@ -31,6 +31,7 @@ import (
 	"github.com/steveyegge/beads/internal/creds"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/execwin"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/httpclient"
 	"github.com/steveyegge/beads/internal/initprocs"
@@ -1175,7 +1176,7 @@ func resolveActorWithGit() string {
 	}
 
 	// Try git config user.name - the natural default for a git-native tool
-	if out, err := exec.Command("git", "config", "user.name").Output(); err == nil {
+	if out, err := execwin.Hide(exec.Command("git", "config", "user.name")).Output(); err == nil {
 		if gitUser := strings.TrimSpace(string(out)); gitUser != "" {
 			return gitUser
 		}
@@ -1200,7 +1201,7 @@ func getOwner() string {
 	}
 
 	// Fall back to git config user.email - the natural default
-	if out, err := exec.Command("git", "config", "user.email").Output(); err == nil {
+	if out, err := execwin.Hide(exec.Command("git", "config", "user.email")).Output(); err == nil {
 		if gitEmail := strings.TrimSpace(string(out)); gitEmail != "" {
 			return gitEmail
 		}

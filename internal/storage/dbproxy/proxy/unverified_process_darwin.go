@@ -10,6 +10,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/steveyegge/beads/internal/execwin"
 	"golang.org/x/sys/unix"
 )
 
@@ -36,7 +37,7 @@ func (p *unverifiedProcess) executableBasename() (basename string, gone bool, er
 // commandLineContains reports whether the process command line contains
 // needle, read best-effort through ps.
 func (p *unverifiedProcess) commandLineContains(needle string) (matched bool, gone bool, err error) {
-	output, commandErr := exec.Command("ps", "-p", strconv.Itoa(p.pid), "-o", "args=").Output()
+	output, commandErr := execwin.Hide(exec.Command("ps", "-p", strconv.Itoa(p.pid), "-o", "args=")).Output()
 	if commandErr != nil {
 		if killErr := syscall.Kill(p.pid, 0); errors.Is(killErr, unix.ESRCH) {
 			return false, true, nil

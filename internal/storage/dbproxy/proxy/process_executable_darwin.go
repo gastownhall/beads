@@ -11,11 +11,12 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/steveyegge/beads/internal/execwin"
 	"golang.org/x/sys/unix"
 )
 
 func processExecutableBasename(pid int) (basename string, gone bool, err error) {
-	output, commandErr := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
+	output, commandErr := execwin.Hide(exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=")).Output()
 	if commandErr != nil {
 		if killErr := syscall.Kill(pid, 0); errors.Is(killErr, unix.ESRCH) {
 			return "", true, nil

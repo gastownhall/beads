@@ -16,7 +16,8 @@ import (
 // allocation this package prevents depends on attachment, not on stdio.
 // It is a var so the Windows tests can force both outcomes.
 var attachedToConsole = func() bool {
-	return windows.GetConsoleCP() != 0
+	cp, err := windows.GetConsoleCP()
+	return err == nil && cp != 0
 }
 
 // Hide applies the console policy to cmd and returns it. See the package

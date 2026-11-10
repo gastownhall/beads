@@ -707,6 +707,41 @@ If you accidentally committed a Dolt data directory:
 Embedded mode is single-writer (enforced via file lock). If you need concurrent
 access, switch to server mode. See [Migrating Between Backends](#migrating-between-backends).
 
+### Stray Console Windows (Windows)
+
+**Symptom:** a visible console window pops up every time bd shells out (GH#6076).
+
+bd usually runs console-less — as an MCP server, a git hook, or a child of an
+agent harness. On Windows, a console-subsystem child of a console-less parent
+gets a brand-new console of its own, and with Windows Terminal as the default
+terminal that is a visible window for every `dolt`, `git`, or PowerShell
+command bd spawns.
+
+Every ordinary short-lived spawn goes through `internal/execwin`
+(`execwin.Hide(exec.Command(...))`), which adds `CREATE_NO_WINDOW` when — and
+only when — bd has no console attached: an interactive bd keeps its children
+sharing its console, and a caller that already picked an explicit console
+choice is left alone. Three long-lived children (the shared sql-server, the
+managed sql-server, and `bd db-proxy-child`) are pinned to
+`execwin.BackgroundSysProcAttr` instead — a hidden console of their own,
+in their own process group (so they survive their parent), and deliberately
+without `DETACHED_PROCESS`, because a console-less child of a console-less
+parent is exactly the bug: every console program it spawns (dolt's uname
+probes) would allocate a visible window. The exact scope — the directories
+and files whose spawns are guarded, and the three pins — is enforced by
+`scripts/console_spawn_policy_test.go`, which fails when a new spawn site
+appears unwrapped or a pin is renamed or gutted.
+
+The launcher that started bd owns bd's own initial window, not bd: a stray
+bd window means the launcher spawned bd console-less twice, or bd was
+started `DETACHED_PROCESS`. Paths outside the guard's scope (including
+`internal/hooks/hooks_unix.go`) are simply not guarded — exclusion is not a
+claim that they are interactive. A child reporting error code `0x800700E8`
+(Win32 error 232, `ERROR_NO_DATA`: the pipe is being closed) on startup was
+started with a broken stdio chain, not a console problem; check the FD/pipe
+setup in its launcher, and see the `execwin` package comment in
+`internal/execwin/execwin.go`.
+
 ## Configuration Reference
 
 ```yaml

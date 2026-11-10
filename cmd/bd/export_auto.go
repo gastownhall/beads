@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/execenv"
+	"github.com/steveyegge/beads/internal/execwin"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
@@ -1107,7 +1108,7 @@ func runGitAdd(path string, env []string) error {
 	// inject a command. gosec only reaches this line because the
 	// doctorEnsureGitignoreForBeadsDir seam's opaque indirect call widens
 	// taint propagation to package function parameters (#6225).
-	cmd := exec.CommandContext(ctx, "git", "add", "--", filepath.Base(path))
+	cmd := execwin.Hide(exec.CommandContext(ctx, "git", "add", "--", filepath.Base(path)))
 	cmd.Dir = filepath.Dir(path)
 	cmd.Env = env
 	// Capture combined output so the caller's warning surfaces git's stderr
@@ -1141,7 +1142,7 @@ func gitIndexEnv(dir string) (env []string, indexFile string, err error) {
 	env = scrubGitHookEnv(os.Environ())
 	ctx, cancel := context.WithTimeout(context.Background(), gitAddTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--absolute-git-dir")
+	cmd := execwin.Hide(exec.CommandContext(ctx, "git", "rev-parse", "--absolute-git-dir"))
 	cmd.Dir = dir
 	cmd.Env = env
 	var stderr bytes.Buffer
