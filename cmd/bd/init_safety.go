@@ -304,7 +304,18 @@ func refusalMessageAdoption(remoteURL string, lateCheck bool) string {
 	if lateCheck {
 		written = "The workspace was scaffolded, but no history was imported."
 	}
-	return fmt.Sprintf(`bd init refuses: git origin already has Dolt history, and bd will not adopt it without consent.
+	return adoptionRefusalText("bd init refuses: git origin already has Dolt history, and bd will not adopt it without consent.", remoteURL, written)
+}
+
+// refusalMessageAdoptionDeclined is the same text for an interactive caller
+// who answered anything but yes at the adoption prompt. A decline never falls
+// through to a fresh database: that would leave origin to be wired later.
+func refusalMessageAdoptionDeclined(remoteURL string) string {
+	return adoptionRefusalText("bd init stopped: adoption of git origin's Dolt history was declined.", remoteURL, "Nothing was written.")
+}
+
+func adoptionRefusalText(headline, remoteURL, written string) string {
+	return fmt.Sprintf(`%s
 
   Derived from git origin: %s
 
@@ -316,7 +327,7 @@ func refusalMessageAdoption(remoteURL string, lateCheck bool) string {
   Next:
     Adopt the remote's history:       bd init --yes
     Start a fresh local database:     bd init --no-adopt   (or BD_NO_REMOTE_ADOPT=1)
-    Bootstrap explicitly:             bd bootstrap`, remedy.PrintedValue(redactRemoteURL(remoteURL)), written)
+    Bootstrap explicitly:             bd bootstrap`, headline, remedy.PrintedValue(redactRemoteURL(remoteURL)), written)
 }
 
 // refusalMessageDivergence returns the What/Why/Next refusal text for local

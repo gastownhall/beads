@@ -3762,7 +3762,12 @@ func handleInitAdoptionDecision(decision RemoteSafetyDecision, syncURL string, l
 	switch decision.Action {
 	case ActionAskAdoption:
 		ok, err := confirmInitRemoteAdoption(getRootContext(), os.Stdin, os.Stdin, os.Stderr, syncURL)
-		if err != nil || !ok {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "\nSetup canceled.")
+			return true, errCanceled()
+		}
+		if !ok {
+			fmt.Fprintf(os.Stderr, "\n%s\n\n", refusalMessageAdoptionDeclined(syncURL))
 			return true, &exitError{Code: 1}
 		}
 		consent.url, consent.prompted = syncURL, true
