@@ -76,12 +76,16 @@ func readyIDs(items []*types.IssueWithCounts) []string {
 type readyTotalWorld struct {
 	wisps          bool
 	deferredParent bool
-	collision      bool
+	// undated defers the parent the way plain `bd defer` does: status
+	// deferred with no defer_until (GH#7300), instead of a future date.
+	undated   bool
+	collision bool
 }
 
 // seedReadyTotalWorld builds a ready front with every shape the total has to
 // get right: plain ready issues, a blocked issue (its blocker stays ready), a
-// future-deferred parent whose children are hidden, ready wisps, and an ID
+// deferred parent (future-dated, or undated when w.undated) whose children are
+// hidden, ready wisps, and an ID
 // present in both tables (the overlap the merge dedupes wisp-wins).
 func seedReadyTotalWorld(t *testing.T, te *testEnv, prefix string, w readyTotalWorld) {
 	t.Helper()
@@ -112,10 +116,19 @@ func seedReadyTotalWorld(t *testing.T, te *testEnv, prefix string, w readyTotalW
 	dep(prefix+"-blocked", prefix+"-blocker", types.DepBlocks)
 
 	if w.deferredParent {
-		future := time.Now().UTC().Add(72 * time.Hour)
-		create(&types.Issue{ID: prefix + "-dparent", Title: "deferred parent", IssueType: types.TypeEpic, DeferUntil: &future})
+		parent := &types.Issue{ID: prefix + "-dparent", Title: "deferred parent", IssueType: types.TypeEpic}
+		if !w.undated {
+			future := time.Now().UTC().Add(72 * time.Hour)
+			parent.DeferUntil = &future
+		}
+		create(parent)
 		create(&types.Issue{ID: prefix + "-dchild", Title: "child of deferred", Priority: 0})
 		dep(prefix+"-dchild", prefix+"-dparent", types.DepParentChild)
+		if w.undated {
+			if err := te.store.UpdateIssue(ctx, parent.ID, map[string]interface{}{"status": string(types.StatusDeferred)}, "tester"); err != nil {
+				t.Fatalf("defer %s: %v", parent.ID, err)
+			}
+		}
 	}
 	if w.wisps {
 		for i := 0; i < 3; i++ {
@@ -161,6 +174,9 @@ func TestReadyWorkPageTotal(t *testing.T) {
 		{"wisps", readyTotalWorld{wisps: true}, map[bool][]string{false: plain, true: withWisps}},
 		// The wisp child of the deferred parent is hidden too.
 		{"wisps_deferred_parent", readyTotalWorld{wisps: true, deferredParent: true}, map[bool][]string{false: plain, true: withWisps}},
+		// GH#7300: a parent deferred with no date hides its children the same way.
+		{"issues_undated_deferred_parent", readyTotalWorld{deferredParent: true, undated: true}, map[bool][]string{false: plain, true: plain}},
+		{"wisps_undated_deferred_parent", readyTotalWorld{wisps: true, deferredParent: true, undated: true}, map[bool][]string{false: plain, true: withWisps}},
 		// r0 sits in both tables; it is listed (and counted) exactly once.
 		{"wisps_collision", readyTotalWorld{wisps: true, collision: true}, map[bool][]string{false: plain, true: withWisps}},
 	}
@@ -198,7 +214,7 @@ func TestReadyWorkPageTotal(t *testing.T) {
 					if strings.Contains(id, "-w") {
 						sawWisp = true
 					}
-					if strings.HasSuffix(id, "-blocked") || strings.Contains(id, "dchild") {
+					if strings.HasSuffix(id, "-blocked") || strings.Contains(id, "dchild") || strings.HasSuffix(id, "-dparent") {
 						t.Fatalf("ephemeral=%v: %s is not ready but was listed: %v", includeEphemeral, id, all)
 					}
 				}
@@ -313,13 +329,19 @@ func prefixed(prefix string, suffixes []string) []string {
 // WorkFilter fields `bd ready` forwards. Each filter's ready set is written
 // out by hand (the oracle); the total must equal the unbounded listing's
 // length, and every capped page must be that listing's prefix, so a filter
-// the window total ignored — or applied to one family only — fails here.
+// the window total ignored — or applied to one family only — fails here. It
+// runs once with a future-dated deferred parent and once with an undated one
+// (plain `bd defer`, GH#7300).
 func TestReadyWorkPageTotalFilterMatrix(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 
-	const prefix = "rm"
+	t.Run("dated", func(t *testing.T) { readyWorkPageTotalFilterMatrix(t, "rm", false) })
+	t.Run("undated", func(t *testing.T) { readyWorkPageTotalFilterMatrix(t, "rmu", true) })
+}
+
+func readyWorkPageTotalFilterMatrix(t *testing.T, prefix string, undated bool) {
 	te := newTestEnv(t, prefix)
-	seedReadyTotalWorld(t, te, prefix, readyTotalWorld{wisps: true, deferredParent: true})
+	seedReadyTotalWorld(t, te, prefix, readyTotalWorld{wisps: true, deferredParent: true, undated: undated})
 	ctx := t.Context()
 	id := func(s string) string { return prefix + "-" + s }
 	for issue, labels := range map[string][]string{"r0": {"a", "b"}, "r1": {"a"}, "blocker": {"a"}, "w0": {"b"}} {
@@ -338,6 +360,15 @@ func TestReadyWorkPageTotalFilterMatrix(t *testing.T) {
 	all := []string{"blocker", "r0", "r1", "r2", "r3", "r4", "w0", "w1", "w2"}
 	alice, zero := "alice", 0
 	parent := id("dparent")
+	// IncludeDeferred lifts the deferral exclusions, not the ready status
+	// filter: a dated parent is open and listed, an undated one is deferred
+	// and stays out.
+	includeDeferred := append(slices.Clone(all), "dchild", "wdchild")
+	epics := []string{}
+	if !undated {
+		includeDeferred = append(includeDeferred, "dparent")
+		epics = []string{"dparent"}
+	}
 	cases := []struct {
 		name   string
 		filter types.WorkFilter
@@ -352,10 +383,10 @@ func TestReadyWorkPageTotalFilterMatrix(t *testing.T) {
 		{"unassigned", types.WorkFilter{Unassigned: true}, []string{"blocker", "r0", "r1", "r3", "r4", "w0", "w2"}},
 		{"priority_0", types.WorkFilter{Priority: &zero}, []string{"r0", "r3"}},
 		{"exclude_ids", types.WorkFilter{ExcludeIDs: []string{id("r1"), id("w2")}}, []string{"blocker", "r0", "r2", "r3", "r4", "w0", "w1"}},
-		{"include_deferred", types.WorkFilter{IncludeDeferred: true}, append(slices.Clone(all), "dchild", "dparent", "wdchild")},
+		{"include_deferred", types.WorkFilter{IncludeDeferred: true}, includeDeferred},
 		{"parent_deferred", types.WorkFilter{ParentID: &parent, IncludeDeferred: true}, []string{"dchild", "wdchild"}},
 		{"max_rows", types.WorkFilter{MaxRows: 50}, all},
-		{"type_epic", types.WorkFilter{Type: string(types.TypeEpic), IncludeDeferred: true}, []string{"dparent"}},
+		{"type_epic", types.WorkFilter{Type: string(types.TypeEpic), IncludeDeferred: true}, epics},
 		{"type_task_oldest", types.WorkFilter{Type: string(types.TypeTask), SortPolicy: types.SortPolicyOldest}, all},
 	}
 	for _, tc := range cases {
