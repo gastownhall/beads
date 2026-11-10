@@ -3585,6 +3585,63 @@ func TestBondProtoMolRefArmStepWaitsForEveryTerminalStep(t *testing.T) {
 	}
 }
 
+// TestBondProtoMolRefArmWithNothingToWaitFor pins AC-3: a parent with no
+// active direct steps (root only, or every step closed or pinned) still takes
+// a sequential --ref arm, with no ordering edges, and the arm's first step is
+// ready at once. The wisp case is a root-only ephemeral parent.
+func TestBondProtoMolRefArmWithNothingToWaitFor(t *testing.T) {
+	cases := []struct {
+		name      string
+		ephemeral bool
+		finish    func(t *testing.T, ctx context.Context, s storage.DoltStorage, f refArmFixture) string
+	}{
+		{name: "root_only", finish: rootOnlyParent},
+		{name: "root_only_wisp", ephemeral: true, finish: rootOnlyParent},
+		{name: "closed_and_pinned_steps", finish: func(t *testing.T, ctx context.Context, s storage.DoltStorage, f refArmFixture) string {
+			closeForTest(t, ctx, s, f.s1.ID, f.s2.ID)
+			if err := s.UpdateIssue(ctx, f.s3.ID, map[string]interface{}{"status": string(types.StatusPinned)}, "test"); err != nil {
+				t.Fatalf("pin S3: %v", err)
+			}
+			return f.mol.ID
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			s := newTestStoreWithPrefix(t, t.TempDir()+"/test.db", "patrol")
+			f := seedRefArmFixture(t, ctx, s, tc.ephemeral)
+			molID := tc.finish(t, ctx, s, f)
+			mol, err := s.GetIssue(ctx, molID)
+			if err != nil {
+				t.Fatalf("GetIssue(%s): %v", molID, err)
+			}
+
+			result, err := bondProtoMol(ctx, s, f.proto, mol, types.BondTypeSequential, map[string]string{"name": "ace"}, "arm-{{name}}", "test", false, false)
+			if err != nil {
+				t.Fatalf("bondProtoMol: %v", err)
+			}
+			armID := result.IDMapping[f.proto.ID]
+			if got := outgoingDeps(t, ctx, s, armID); len(got) != 0 {
+				t.Fatalf("arm %s deps = %v, want none", armID, got)
+			}
+			if armStep := result.IDMapping[f.protoStep.ID]; !isReadyWork(t, ctx, s, armStep) {
+				t.Fatalf("arm step %s is not ready though the parent has nothing left to wait for", armStep)
+			}
+		})
+	}
+}
+
+// rootOnlyParent answers a fresh molecule root with no steps, in the
+// fixture's plane.
+func rootOnlyParent(t *testing.T, ctx context.Context, s storage.DoltStorage, f refArmFixture) string {
+	t.Helper()
+	root := &types.Issue{Title: "Bare patrol", IssueType: types.TypeEpic, Status: types.StatusOpen, Priority: 1, Ephemeral: f.mol.Ephemeral}
+	if err := s.CreateIssue(ctx, root, "test"); err != nil {
+		t.Fatalf("create bare patrol: %v", err)
+	}
+	return root.ID
+}
+
 // TestBondProtoMolRefArmTerminalsOnlyForSequentialRef pins that the terminal
 // edges belong to the sequential --ref arm alone: a parallel --ref arm keeps
 // its single membership edge, and a sequential sibling (no --ref) keeps its
