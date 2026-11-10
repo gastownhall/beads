@@ -59,6 +59,51 @@ in yet, opens the one embedded database it holds, or its default database when
 it holds none or several; a prefix route in an orchestrator's `routes.jsonl`
 always needs the target's `dolt_database`, for reads as well as writes.
 
+## Looking up a bead in another store by prefix
+
+A workspace can also send lookups to another store by ID prefix, through a
+`routes.jsonl` file in its `.beads/` directory. This is how a seat attached
+to one store reads a bead that lives in a sibling store on the same server,
+such as a rig seat reading the town's `hq-` beads:
+
+```text
+town/.beads/                 # store issuing hq-
+town/openclaw/.beads/        # rig store issuing op-; bd runs here
+town/openclaw/.beads/routes.jsonl:
+{"prefix":"hq-","path":".."}
+```
+
+With that route, `bd show hq-gea4h` run from the rig finds no `hq-gea4h` in
+the rig's store, follows the route, and reads the bead from the town's store,
+which is opened read-only for the lookup. How the lookup works:
+
+- Only the resolved workspace's `routes.jsonl` is read: the `.beads/`
+  directory the command runs against, after any `.beads/redirect` is
+  followed. bd does not search parent directories for routes, and does not
+  discover other databases on a shared Dolt server.
+- A route's `prefix` must end in `-`; an entry without the trailing hyphen
+  matches nothing. When several routes match, the longest prefix wins
+  (`hq-cv-` over `hq-`).
+- `path` is relative to the directory that contains the resolved `.beads/`
+  (the rig directory above, so `..` is the town). The target's `.beads/` may
+  itself be a redirect, which is followed.
+- The target's `.beads/metadata.json` must name its `dolt_database`.
+- A route whose `path` is `.` names the current store, so it sends the lookup
+  nowhere new.
+- Routes apply to commands that change an existing bead (`bd update`,
+  `bd close`, ...) too, which open the routed store for writing. Adding a
+  route is broader than a shortcut for `bd show`.
+
+When no route or auto-route searched another store and the ID's prefix is
+not among the current store's configured prefixes (`issue_prefix` and
+`allowed_prefixes`), `bd show` says so instead of suggesting the bead never
+existed:
+
+```text
+Issue hq-gea4h not found
+Hint: the prefix "hq" is not among this store's configured prefixes (its issue prefix is op) and no configured route searched another store for this ID, so this miss does not mean the issue is absent elsewhere — run the command from a workspace attached to the store that issues "hq" IDs, or add a matching prefix route to town/openclaw/.beads/routes.jsonl
+```
+
 ## Role detection
 
 The role that drives auto mode comes from git config — `beads.role` is the
@@ -258,6 +303,15 @@ bd repo sync
 ```
 
 `bd doctor` catches this misconfiguration.
+
+### bd show says an ID's prefix is not among this store's prefixes
+
+The ID belongs to a store this workspace did not search. Run the command from
+a workspace attached to the store that issues the prefix, or add a prefix
+route to this workspace's `routes.jsonl` (see
+[Looking up a bead in another store by prefix](#looking-up-a-bead-in-another-store-by-prefix)).
+The hint is not printed when a route or auto-route did search another store
+and missed there too.
 
 ### Discovered beads appear in the "wrong" repo
 
