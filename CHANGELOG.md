@@ -1590,16 +1590,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OTEL_METRICS_EXPORTER=console`, legacy `BD_OTEL_STDOUT=true`) write to
   stderr, as documented. They wrote to stdout, where their JSON mixed into
   the command's own output and broke `--json` consumers.
-- `bd set-state` writes its event, the event's parent-child edge and the
-  label swap as one transaction and one history commit (`bd: set-state
-  <id>`). It used to commit the event and the label change separately, so a
-  refused label patch (a `dimension:value` label over 255 characters, say)
-  left a committed event and edge for a state change that never happened
-  (GH#5637). The event now takes an ordinary minted id instead of a dotted
-  child id; its parent-child edge still lists it under the issue. Over
-  `bd connect`, setting state on a template needs a server that advertises
-  `issues.batchApply.updateAllowTemplate`; an older server refuses before
-  anything is written.
+- **`bd set-state` is atomic: a failed label edit can no longer leave a
+  committed event recording a transition that never happened.** The command
+  used to commit its state-change event and its label swap as two
+  independent lifecycle writes; a label edit that refused (a value over the
+  label bound, a vanished subject) left the event behind, parented to the
+  subject and telling a story the subject's labels contradict. The three
+  writes — create the event, wire its parent-child edge, swap the
+  dimension label — now apply as one `batchApply` transaction: they commit
+  together or not at all, and a durable workspace records one history
+  entry (`bd: set-state <id>`) carrying all three. On the same shape: the
+  event is minted an ordinary id (parentage is an edge, no longer a dotted
+  child id, so a state change does not consume a child number of the
+  subject); a template subject stays settable with the pre-read carrying
+  the template waiver, while a subject that became a template after the
+  read refuses whole; hooks see `create` for the event and `update` for the
+  subject on success and nothing on refusal; and over HTTP the waiver
+  rides the batch update item's `allow_template` behind the new
+  `issues.batchApply.updateAllowTemplate` capability, reported before the
+  dial against a server that lacks it. A subject that moves between the
+  durable and wisp planes between the command's read and its write can
+  still gain a cross-plane parent edge (the batch's ordinary edge policy);
+  see the compatibility notes in
+  [labels.md](docs/core-concepts/labels.md#compatibility-notes). (GH#5637)
+
 - `bd.storage.operation.duration`, `bd.ai.request.duration` and the
   `bd.ai.duration_ms` span attribute record fractional milliseconds. They
   were truncated to whole milliseconds, so a sub-millisecond storage call
