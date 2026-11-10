@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -93,7 +94,8 @@ func declinedTables(conflicts []storage.Conflict) []string {
 
 // TestCLIPullDeclinedSettlement pins GH#7839 on persisted CLI-pull merges: a
 // merge the resolver declines is aborted back to the pre-pull HEAD, with row
-// conflicts reported as *MergeConflictsError (AC-1).
+// conflicts reported as *MergeConflictsError (AC-1) and unrepairable FK
+// violations as a non-conflict error naming their table (AC-4).
 func TestCLIPullDeclinedSettlement(t *testing.T) {
 	t.Run("declined dependency conflict", func(t *testing.T) {
 		for _, tc := range []struct {
@@ -133,6 +135,64 @@ func TestCLIPullDeclinedSettlement(t *testing.T) {
 				}
 			})
 		}
+	})
+
+	t.Run("unrepairable FK violation", func(t *testing.T) {
+		store, cleanup := setupTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+		db := store.db
+
+		// A test-local FK outside the cascade repair's allowlist: the current
+		// branch deletes the parent the peer branch gives a new child.
+		var currentBranch string
+		if err := db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&currentBranch); err != nil {
+			t.Fatalf("get current branch: %v", err)
+		}
+		peerBranch := currentBranch + "_fkdecline"
+		for _, step := range []struct {
+			query string
+			args  []any
+		}{
+			{"CREATE TABLE cpd_parent (id VARCHAR(32) PRIMARY KEY)", nil},
+			{"CREATE TABLE cpd_child (id VARCHAR(32) PRIMARY KEY, parent_id VARCHAR(32), " +
+				"CONSTRAINT fk_cpd_child_parent FOREIGN KEY (parent_id) REFERENCES cpd_parent (id))", nil},
+			{"INSERT INTO cpd_parent (id) VALUES ('p1')", nil},
+			{"CALL DOLT_COMMIT('-Am', 'seed cpd tables')", nil},
+			{"CALL DOLT_BRANCH(?, 'HEAD')", []any{peerBranch}},
+			{"DELETE FROM cpd_parent WHERE id = 'p1'", nil},
+			{"CALL DOLT_COMMIT('-Am', 'delete parent')", nil},
+			{"CALL DOLT_CHECKOUT(?)", []any{peerBranch}},
+			{"INSERT INTO cpd_child (id, parent_id) VALUES ('c1', 'p1')", nil},
+			{"CALL DOLT_COMMIT('-Am', 'peer adds child')", nil},
+			{"CALL DOLT_CHECKOUT(?)", []any{currentBranch}},
+		} {
+			if _, err := db.ExecContext(ctx, step.query, step.args...); err != nil {
+				t.Fatalf("%s: %v", step.query, err)
+			}
+		}
+		t.Cleanup(func() {
+			db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", currentBranch)
+			db.ExecContext(ctx, "CALL DOLT_BRANCH('-Df', ?)", peerBranch)
+		})
+		preHead := readHead(ctx, t, db)
+		persistPeerMerge(ctx, t, db, peerBranch, true)
+
+		err := store.finishCLIPull(ctx, nil)
+		if err == nil {
+			t.Fatal("finishCLIPull = nil for an unrepairable FK violation")
+		}
+		var mce *versioncontrolops.MergeConflictsError
+		if errors.As(err, &mce) {
+			t.Fatalf("finishCLIPull = %v; FK violations without row conflicts are not a MergeConflictsError", err)
+		}
+		for _, want := range []string{"constraint violations", "cpd_child", "merge aborted"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("finishCLIPull error %q does not mention %q", err, want)
+			}
+		}
+		assertMergeAborted(ctx, t, db, preHead)
 	})
 
 	t.Run("declined conflict beside a repairable FK violation", func(t *testing.T) {

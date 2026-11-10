@@ -6306,9 +6306,10 @@ func (s *DoltStore) finishCLIPull(ctx context.Context, pullErr error) error {
 // fails *because* of conflicts is recoverable once they resolve, so we inspect the
 // working set regardless and only surface pullErr when nothing was resolved.
 //
-// A merge whose row conflicts the resolver declines is aborted, as the SQL
-// route's rollback does, but only when prior says no merge was open before
-// the pull (GH#7839): left open, it blocked every later write and pull. See abortDeclinedCLIPull for what is reported.
+// A merge the resolver declines (row conflicts, or FK violations it cannot
+// repair) is aborted, as the SQL route's rollback does, but only when prior
+// says no merge was open before the pull (GH#7839): left open, it blocked
+// every later write and pull. See abortDeclinedCLIPull for what is reported.
 // An ordinary resolver error — including a failed or ambiguous commit, which
 // may have landed — is never followed by an abort.
 func (s *DoltStore) settleCLIPull(ctx context.Context, prior cliPullMergeState, pullErr error) error {
@@ -6336,11 +6337,13 @@ func (s *DoltStore) settleCLIPull(ctx context.Context, prior cliPullMergeState, 
 
 // cliPullDeclinedError is autoResolveConflictsAfterCLIPull's private report
 // that the merge a CLI pull left in the working set needs the operator: the
-// row conflicts the resolver declined, captured before the inspection
+// row conflicts the resolver declined, or the tables holding FK violations
+// the cascade repair cannot fix. Both are captured before the inspection
 // transaction rolls back. It never leaves this package: settleCLIPull turns
 // it into the abort's outcome.
 type cliPullDeclinedError struct {
-	conflicts []storage.Conflict
+	conflicts  []storage.Conflict
+	violations []string
 }
 
 func (e *cliPullDeclinedError) Error() string {
@@ -6349,11 +6352,18 @@ func (e *cliPullDeclinedError) Error() string {
 
 // what names the declined state for operator messages.
 func (e *cliPullDeclinedError) what() string {
-	tables := make([]string, len(e.conflicts))
-	for i, c := range e.conflicts {
-		tables[i] = c.Field
+	if len(e.conflicts) > 0 {
+		tables := make([]string, len(e.conflicts))
+		for i, c := range e.conflicts {
+			tables[i] = c.Field
+		}
+		return "merge conflicts in " + strings.Join(tables, ", ") + " that require operator resolution"
 	}
-	return "merge conflicts in " + strings.Join(tables, ", ") + " that require operator resolution"
+	tables := "unnamed tables"
+	if len(e.violations) > 0 {
+		tables = strings.Join(e.violations, ", ")
+	}
+	return "constraint violations in " + tables + " that bd cannot auto-repair"
 }
 
 // notRestored reports a declined merge bd did not (or could not confirm it
@@ -6372,9 +6382,9 @@ func (e *cliPullDeclinedError) notRestored(why string, pullErr error) error {
 // abortDeclinedCLIPull aborts a declined merge that this pull opened and
 // reports the outcome. Only a merge that was closed before the pull (prior)
 // and is open now is aborted, on one pinned connection, and the abort counts
-// only once a re-read shows the merge closed. Then the conflicts come back as
+// only once a re-read shows the merge closed. Then row conflicts come back as
 // *MergeConflictsError — the SQL route's contract, which PullFrom and bd sync
-// already read.
+// already read — and unrepairable violations as an error naming their tables.
 // Every other path leaves the working set alone (no abort, no reset) and says
 // the merge may still be open; none of them returns success.
 func (s *DoltStore) abortDeclinedCLIPull(ctx context.Context, prior cliPullMergeState, declined *cliPullDeclinedError, pullErr error) error {
@@ -6401,7 +6411,15 @@ func (s *DoltStore) abortDeclinedCLIPull(ctx context.Context, prior cliPullMerge
 	if readMergeState(ctx, conn) != mergeStateClosed {
 		return declined.notRestored("the abort could not be confirmed", pullErr)
 	}
-	return &versioncontrolops.MergeConflictsError{Conflicts: declined.conflicts, MergeErr: pullErr}
+	if len(declined.conflicts) > 0 {
+		return &versioncontrolops.MergeConflictsError{Conflicts: declined.conflicts, MergeErr: pullErr}
+	}
+	msg := declined.Error() + "; merge aborted and working set restored. The same merge is refused on every " +
+		"pull until the two histories are reconciled"
+	if pullErr != nil {
+		return fmt.Errorf("%s: %w", msg, pullErr)
+	}
+	return errors.New(msg)
 }
 
 // autoResolveConflictsAfterCLIPull inspects the working set and auto-resolves the
@@ -6413,11 +6431,11 @@ func (s *DoltStore) abortDeclinedCLIPull(ctx context.Context, prior cliPullMerge
 // see the conflicts. The pull's
 // network transfer already completed in the subprocess, so no long-timeout connection
 // is needed for the local resolve. Returns (true, nil) only if all conflicts were
-// resolved and committed and (false, nil) when there is nothing to resolve or only
-// FK violations the cascade repair cannot fix. Row conflicts the resolver declined
-// roll the inspection back untouched and return (false, *cliPullDeclinedError)
-// carrying them; the inspection did not open that merge, so aborting it is the
-// caller's decision (GH#7839).
+// resolved and committed and (false, nil) when there is nothing to resolve. A merge
+// that needs the operator — row conflicts the resolver declined, or FK violations
+// the cascade repair cannot fix — rolls the inspection back untouched and returns
+// (false, *cliPullDeclinedError) carrying what it found; the inspection did not
+// open that merge, so aborting it is the caller's decision (GH#7839).
 func (s *DoltStore) autoResolveConflictsAfterCLIPull(ctx context.Context) (bool, error) {
 	// Pin a single connection: @@dolt_allow_commit_conflicts is session-scoped,
 	// and setting it through a pooled transaction leaks it to whichever caller
@@ -6467,15 +6485,19 @@ func (s *DoltStore) autoResolveConflictsAfterCLIPull(ctx context.Context) (bool,
 	// bd-6dnrw.4: a CLI pull can also leave FK cascade violations in the
 	// shared working set (child rows whose parent issue was deleted on the
 	// other clone). Repair them like the SQL route does; unrepaired
-	// violations roll back untouched for the operator.
+	// violations roll back untouched and are named for the caller.
 	repairedViol, hadViol, violErr := s.tryRepairFKCascadeViolations(ctx, tx)
 	if violErr != nil {
 		_ = tx.Rollback()
 		return false, violErr
 	}
 	if hadViol && !repairedViol {
+		tables, err := versioncontrolops.ConstraintViolationTables(ctx, tx)
 		_ = tx.Rollback()
-		return false, nil
+		if err != nil {
+			return false, err
+		}
+		return false, &cliPullDeclinedError{violations: tables}
 	}
 	if !resolved && !repairedViol {
 		_ = tx.Rollback()

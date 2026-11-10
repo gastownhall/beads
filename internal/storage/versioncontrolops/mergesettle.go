@@ -1081,6 +1081,13 @@ func TryRepairFKCascadeViolations(ctx context.Context, db DBConn) (repaired, had
 	return true, true, nil
 }
 
+// ConstraintViolationTables lists the tables with outstanding constraint
+// violations in the working set, so a caller that refuses an unrepairable
+// merge can name them after the abort has cleared them (GH#7839).
+func ConstraintViolationTables(ctx context.Context, db DBConn) ([]string, error) {
+	return constraintViolationTables(ctx, db)
+}
+
 // constraintViolationTables lists the tables with outstanding constraint
 // violations in the working set.
 func constraintViolationTables(ctx context.Context, db DBConn) ([]string, error) {
