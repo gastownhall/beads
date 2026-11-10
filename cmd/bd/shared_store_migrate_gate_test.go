@@ -21,25 +21,21 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// TestSharedServerVersionBumpDoesNotPromoteCursor reproduces
-// gastownhall/beads#5920 end to end, through the real CLI.
-//
-// The incident: a shared dolt sql-server with no remote, a team of co-resident
-// bd clients, one of them upgraded. That client's first command was a plain
-// `bd list` — a read — but the root pre-run's version-bump reconciliation
-// (autoMigrateOnVersionBump) opens its OWN writable store, which migrated the
-// database and promoted schema_migrations for everyone. Every co-resident
-// client still on the old binary then refused the database until it was
-// upgraded too, for ~14 minutes, with nothing in the output saying what had
-// happened.
-//
-// The assertion that matters is MAX(version): the read must succeed and the
-// cursor must not move.
-func TestSharedServerVersionBumpDoesNotPromoteCursor(t *testing.T) {
-	if testDoltServerPort == 0 {
-		t.Skip("Dolt test server not available, skipping")
-	}
+// behindSharedServer is a shared no-remote server workspace whose recorded
+// schema cursor is one migration behind this binary, with a stale
+// .local_version arming the version-bump reconciliation. The fixture of
+// gastownhall/beads#5920 and #7283.
+type behindSharedServer struct {
+	admin  *sql.DB
+	behind int
+	// cursor reads the recorded schema version, MAX(schema_migrations.version).
+	cursor func() int
+	// run runs the candidate bd in the workspace: stdout, stderr, exit code.
+	run func(args ...string) (string, string, int)
+}
 
+func newBehindSharedServer(t *testing.T) *behindSharedServer {
+	t.Helper()
 	repo := t.TempDir()
 	beadsDir := filepath.Join(repo, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -164,6 +160,32 @@ func TestSharedServerVersionBumpDoesNotPromoteCursor(t *testing.T) {
 		return stdout.String(), stderr.String(), code
 	}
 
+	return &behindSharedServer{admin: admin, behind: behind, cursor: cursor, run: run}
+}
+
+// TestSharedServerVersionBumpDoesNotPromoteCursor reproduces
+// gastownhall/beads#5920 end to end, through the real CLI.
+//
+// The incident: a shared dolt sql-server with no remote, a team of co-resident
+// bd clients, one of them upgraded. That client's first command was a plain
+// `bd list` — a read — but the root pre-run's version-bump reconciliation
+// (autoMigrateOnVersionBump) opens its OWN writable store, which migrated the
+// database and promoted schema_migrations for everyone. Every co-resident
+// client still on the old binary then refused the database until it was
+// upgraded too, for ~14 minutes, with nothing in the output saying what had
+// happened.
+//
+// The assertion that matters is MAX(version): the read must succeed and the
+// cursor must not move.
+func TestSharedServerVersionBumpDoesNotPromoteCursor(t *testing.T) {
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available, skipping")
+	}
+
+	ws := newBehindSharedServer(t)
+	admin, behind, cursor, run := ws.admin, ws.behind, ws.cursor, ws.run
+	ctx := context.Background()
+
 	stdout, stderr, code := run("list")
 	if code != 0 {
 		t.Fatalf("bd list exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
@@ -228,6 +250,41 @@ func TestSharedServerVersionBumpDoesNotPromoteCursor(t *testing.T) {
 	// (gastownhall/beads#7283).
 	if got := versionMarker(); got != Version {
 		t.Errorf("bd_version marker = %q after bd migrate schema, want %q (gastownhall/beads#7283)", got, Version)
+	}
+}
+
+// TestSharedServerMigrateSchemaCountsVersionBumpOpen is gastownhall/beads#7283
+// when `bd migrate schema` is the upgraded binary's first command: the
+// version-bump reconciliation's own writable open runs first, under the verb's
+// consent, and applies the migration. The main store open and the command's
+// pass then both find nothing left, so neither count alone shows the work the
+// run did.
+func TestSharedServerMigrateSchemaCountsVersionBumpOpen(t *testing.T) {
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available, skipping")
+	}
+
+	ws := newBehindSharedServer(t)
+	ctx := context.Background()
+	// A stale database marker keeps the read-only probe from short-circuiting
+	// the reconciliation, so its writable open is the one that migrates.
+	if _, err := ws.admin.ExecContext(ctx,
+		"REPLACE INTO local_metadata (`key`, value) VALUES ('bd_version', '1.0.0')"); err != nil {
+		t.Fatalf("stale bd_version marker: %v", err)
+	}
+
+	stdout, stderr, code := ws.run("migrate", "schema")
+	if code != 0 {
+		t.Fatalf("bd migrate schema exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if !strings.Contains(stderr, "applying 1 pending schema migration(s) to a shared server database") {
+		t.Errorf("expected the consented shared-server migration warning on stderr, got:\n%s", stderr)
+	}
+	if got := ws.cursor(); got != schema.LatestVersion() {
+		t.Fatalf("cursor = %d after bd migrate schema, want %d", got, schema.LatestVersion())
+	}
+	if want := fmt.Sprintf("✓ Applied 1 schema migration(s); schema now at v%d", schema.LatestVersion()); !strings.Contains(stdout, want) {
+		t.Errorf("bd migrate schema output does not report the migration its version-bump open applied (gastownhall/beads#7283); want %q in:\n%s", want, stdout)
 	}
 }
 
