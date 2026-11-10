@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -216,6 +217,11 @@ func TestSharedServerVersionBumpDoesNotPromoteCursor(t *testing.T) {
 	}
 	if got := cursor(); got != schema.LatestVersion() {
 		t.Fatalf("cursor = %d after bd migrate schema, want %d", got, schema.LatestVersion())
+	}
+	// The open applied the migration under the verb's consent, before the
+	// command's own pass; the run that migrated must still say so.
+	if want := fmt.Sprintf("✓ Applied 1 schema migration(s); schema now at v%d", schema.LatestVersion()); !strings.Contains(stdout, want) {
+		t.Errorf("bd migrate schema output does not report the migration it applied (gastownhall/beads#7283); want %q in:\n%s", want, stdout)
 	}
 	// The migration ran during the store open, not in the command's own pass;
 	// the marker the refused reconciliation held back must still be recorded

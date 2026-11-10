@@ -397,6 +397,10 @@ type DoltStore struct {
 	// createdDatabase reports whether this store's open created its database
 	// (serverConnFacts.created); see CreatedDatabase.
 	createdDatabase bool
+
+	// migrationsAppliedAtOpen is what this store's own initSchema applied,
+	// set before the store is returned; see MigrationsAppliedAtOpen.
+	migrationsAppliedAtOpen int
 }
 
 // Config holds Dolt database configuration
@@ -2613,6 +2617,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			// refuses before migrating), so the rebuild below stays correct
 			// either way.
 		}
+		store.migrationsAppliedAtOpen = applied
 		// initSchema runs migrations over a separate pool (openMigrationDB).
 		// The Ping above already pinned a connection in store.db to the
 		// pre-migration session root; without a rebuild, the first read
@@ -3803,6 +3808,14 @@ func (s *DoltStore) ApplySchemaMigrations(ctx context.Context) (int, error) {
 	}
 	defer migDB.Close()
 	return initSchemaOnDBWithRetry(ctx, migDB)
+}
+
+// MigrationsAppliedAtOpen reports how many migrations this store's own open
+// applied. `bd migrate schema` on a shared server opens with migration
+// consent, so the open does the work and ApplySchemaMigrations then counts 0
+// (gastownhall/beads#7283). Implements storage.SchemaMigrator.
+func (s *DoltStore) MigrationsAppliedAtOpen() int {
+	return s.migrationsAppliedAtOpen
 }
 
 // openMigrationDB opens a one-off connection pool for schema migrations with no
