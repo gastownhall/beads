@@ -319,6 +319,76 @@ func TestCheckDefaultEndpointPinsAndBlocksSharedCustom(t *testing.T) {
 	}
 }
 
+// TestRefusalsNameTheUserConfigFileBdReads pins where a refusal sends the
+// user to confirm an endpoint: the user config file bd reads. While
+// ~/.config/bd/config.yaml is missing that is the native file, and creating
+// ~/.config/bd/config.yaml to follow the refusal would hide every setting in
+// the native file (GH#8113).
+func TestRefusalsNameTheUserConfigFileBdReads(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		native, documented bool // which user config files exist
+		wantNative         bool // the refusals name the native file
+	}{
+		{name: "native file only", native: true, wantNative: true},
+		{name: "both files", native: true, documented: true},
+		{name: "neither file"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home)
+			t.Setenv("APPDATA", filepath.Join(home, "appdata"))
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg"))
+			nativeDir, err := os.UserConfigDir()
+			if err != nil {
+				t.Fatal(err)
+			}
+			native := filepath.Join(nativeDir, "bd", "config.yaml")
+			documented := filepath.Join(home, ".config", "bd", "config.yaml")
+			for path, exists := range map[string]bool{native: tc.native, documented: tc.documented} {
+				if !exists {
+					continue
+				}
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("actor: someone\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want, other := documented, native
+			if tc.wantNative {
+				want, other = native, documented
+			}
+
+			key := filepath.Join(t.TempDir(), ".beads")
+			firstUse := Check(key, "github", "https://shared.example", false)
+			if !errors.As(firstUse, new(*FirstUseError)) {
+				t.Fatalf("shared first use = %v, want FirstUseError", firstUse)
+			}
+			if err := Check(key, "github", "https://one.example", true); err != nil {
+				t.Fatal(err)
+			}
+			mismatch := Check(key, "github", "https://two.example", false)
+			if !errors.As(mismatch, new(*MismatchError)) {
+				t.Fatalf("shared change = %v, want MismatchError", mismatch)
+			}
+			for _, err := range []error{firstUse, mismatch} {
+				msg := err.Error()
+				if !strings.Contains(msg, "github.url in "+want) {
+					t.Errorf("refusal does not name %s, the user config file bd reads:\n%s", want, msg)
+				}
+				for _, wrong := range []string{other, "~/.config/bd/config.yaml"} {
+					if strings.Contains(msg, wrong) {
+						t.Errorf("refusal names %s, which bd does not read:\n%s", wrong, msg)
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestCheckDoltServerRejectsForeignOwnedSocket pins the shared-host check: a
 // unix socket owned by another uid must never receive the Dolt credential.
 func TestCheckDoltServerRejectsForeignOwnedSocket(t *testing.T) {
