@@ -150,6 +150,88 @@ func TestProxiedServerSetState(t *testing.T) {
 		}
 	})
 
+	t.Run("success_event_shape", func(t *testing.T) {
+		s := bdProxiedCreate(t, bd, p.dir, "Success shape subject")
+		if out, err := bdProxiedRun(t, bd, p.dir, "set-state", s.ID, "patrol=active"); err != nil {
+			t.Fatalf("set-state patrol=active: %v\n%s", err, out)
+		}
+
+		// The transition under test, with the reason the event must carry.
+		out, err := bdProxiedRun(t, bd, p.dir, "set-state", s.ID, "patrol=muted", "--reason", "Investigating stuck worker", "--json")
+		if err != nil {
+			t.Fatalf("set-state --json: %v\n%s", err, out)
+		}
+		var got map[string]interface{}
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatalf("unmarshal: %v\n%s", err, out)
+		}
+		if got["changed"] != true || got["issue_id"] != s.ID || got["old_value"] != "active" || got["new_value"] != "muted" {
+			t.Errorf("unexpected JSON envelope: %v", got)
+		}
+		eventID, ok := got["event_id"].(string)
+		if !ok || eventID == "" {
+			t.Fatalf("JSON output names no event id: %v", got["event_id"])
+		}
+		// The batch shape mints an ORDINARY id; the old dotted child id is
+		// gone with the CreateRequest.ParentID spelling.
+		if strings.Contains(eventID, ".") {
+			t.Errorf("event id %q is a dotted child id; the batch shape mints ordinary ids", eventID)
+		}
+
+		db := openProxiedDB(t, p)
+		count := func(query string, args ...interface{}) int {
+			return countRows(t, db, query, args...)
+		}
+		scalar := func(query string, args ...interface{}) string {
+			var v string
+			if err := db.QueryRowContext(t.Context(), query, args...).Scan(&v); err != nil {
+				t.Fatalf("query %q: %v", query, err)
+			}
+			return v
+		}
+
+		if got := scalar("SELECT status FROM issues WHERE id = ?", eventID); got != "closed" {
+			t.Errorf("event status = %q, want closed", got)
+		}
+		if got := count("SELECT priority FROM issues WHERE id = ?", eventID); got != 4 {
+			t.Errorf("event priority = %d, want 4", got)
+		}
+		if got := scalar("SELECT title FROM issues WHERE id = ?", eventID); got != "State change: patrol → muted" {
+			t.Errorf("event title = %q, want the state-change title", got)
+		}
+		desc := scalar("SELECT description FROM issues WHERE id = ?", eventID)
+		if !strings.Contains(desc, "Changed patrol from active to muted") || !strings.Contains(desc, "Investigating stuck worker") {
+			t.Errorf("event description does not record transition and reason: %q", desc)
+		}
+		if n := count("SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ? AND type = 'parent-child'", eventID, s.ID); n != 1 {
+			t.Errorf("parent-child edges %s -> %s = %d, want 1", eventID, s.ID, n)
+		}
+		if n := count("SELECT COUNT(*) FROM labels WHERE issue_id = ? AND label = ?", s.ID, "patrol:active"); n != 0 {
+			t.Errorf("old label patrol:active still present (%d rows)", n)
+		}
+		if n := count("SELECT COUNT(*) FROM labels WHERE issue_id = ? AND label = ?", s.ID, "patrol:muted"); n != 1 {
+			t.Errorf("new label patrol:muted rows = %d, want 1", n)
+		}
+
+		// The human output retains its shape too: the printed Event line
+		// names a row that exists.
+		human, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "set-state", s.ID, "phase=planning")
+		if err != nil {
+			t.Fatalf("set-state human output: %v\nstderr:\n%s", err, stderr)
+		}
+		if !strings.Contains(human, "Set phase = planning on "+s.ID) {
+			t.Errorf("human output lost its success line:\n%s", human)
+		}
+		idx := strings.Index(human, "Event: ")
+		if idx < 0 {
+			t.Fatalf("human output lost its Event line:\n%s", human)
+		}
+		printedID := strings.TrimSpace(strings.TrimPrefix(human[idx:], "Event: "))
+		if n := count("SELECT COUNT(*) FROM issues WHERE id = ? AND issue_type = 'event'", printedID); n != 1 {
+			t.Errorf("human Event line names %q, which is not a stored event row", printedID)
+		}
+	})
+
 	t.Run("invalid_format", func(t *testing.T) {
 		out, err := bdProxiedRun(t, bd, p.dir, "set-state", issue.ID, "patrolactive")
 		if err == nil {
