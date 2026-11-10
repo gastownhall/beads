@@ -312,6 +312,39 @@ func TestEmbeddedMigrate(t *testing.T) {
 		}
 	})
 
+	// gastownhall/beads#7283: the verb's consent lets the store open apply
+	// the pending migration before the command's own pass runs, so that pass
+	// finds nothing left. The run that migrated must still report it.
+	t.Run("migrate_schema_reports_migrations_applied_by_open", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "mo")
+		setMigrateJSONConfigFalse(t, beadsDir)
+		regressEmbeddedSchemaCursor(t, beadsDir, "mo")
+		run := func() map[string]interface{} {
+			t.Helper()
+			out := bdMigrateJSON(t, bd, dir, "schema")
+			var result map[string]interface{}
+			if err := json.Unmarshal([]byte(out), &result); err != nil {
+				t.Fatalf("bd --format=json migrate schema returned invalid JSON: %v\n%s", err, out)
+			}
+			return result
+		}
+
+		first := run()
+		if got, ok := first["status"].(string); !ok || got != "applied" {
+			t.Errorf("first migrate schema status = %#v, want applied", first["status"])
+		}
+		if got, ok := first["applied"].(float64); !ok || got != 1 {
+			t.Errorf("first migrate schema applied = %#v, want 1", first["applied"])
+		}
+		second := run()
+		if got, ok := second["status"].(string); !ok || got != "current" {
+			t.Errorf("second migrate schema status = %#v, want current", second["status"])
+		}
+		if got, ok := second["applied"].(float64); !ok || got != 0 {
+			t.Errorf("second migrate schema applied = %#v, want 0", second["applied"])
+		}
+	})
+
 	// gastownhall/beads#7283: a current schema still gets its version marker
 	// reconciled, but marker-only work is not a write, so the post-run
 	// auto-commit must not sweep an unrelated pending edit into a commit.

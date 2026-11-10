@@ -627,6 +627,21 @@ migrate_schema_current() {
         die "$version: schema migration $label did not report the exact no-op output"
 }
 
+# migrate_schema_applied is migrate_schema_current's counterpart for a first
+# consented touch of a database the candidate has not migrated yet: the store
+# open applies the pending migrations under the verb's consent, and the run
+# that migrated reports them (gastownhall/beads#7283). It asserts the exact
+# single "✓ Applied <n> schema migration(s); schema now at v<N>" line with a
+# positive count, so a run that migrated nothing (or reported nothing) fails.
+migrate_schema_applied() {
+    local version="$1" label="$2" output
+    output="$workspace/migrate-$label.out"
+    run_in_workspace "$candidate" migrate schema > "$output" || die "$version: schema migration $label failed"
+    { [ "$(wc -l < "$output")" -eq 1 ] &&
+        grep -Eqx '✓ Applied [1-9][0-9]* schema migration\(s\); schema now at v[0-9]+' "$output"; } ||
+        die "$version: schema migration $label did not report the migrations it applied"
+}
+
 verify_empty_public_sqlite_bridge() {
     local version="$1" source="$2" before after export_file
     public_bridge_destination="${workspace}.empty-public-bridge"
@@ -1049,7 +1064,7 @@ run_embedded_dolt_upgrade() {
     fi
     grep -q 'bd migrate schema' "$workspace/consent-refusal.err" ||
         die "$version: consent refusal did not carry migration guidance"
-    migrate_schema_current "$version" first
+    migrate_schema_applied "$version" first
     verify_surviving_fixture "$version" direct
     if [ "$version" = v1.0.0 ]; then
         [ "$(run_in_workspace "$candidate" config get status.custom)" = review:active ] || die "$version: candidate did not preserve custom status config"
@@ -1706,7 +1721,7 @@ run_wisp_plane_upgrade() {
     # failure class for this lane. The migration-consent gate makes an ordinary
     # command refuse an un-migrated database, so the explicit schema migration
     # is that first touch (as in run_embedded_dolt_upgrade); the open follows.
-    migrate_schema_current "$version" wisp-first
+    migrate_schema_applied "$version" wisp-first
     run_in_workspace "$candidate" list --json -n 0 --all > "$workspace/wisp-first-open.json" ||
         die "$version: candidate could not open the seeded wisp workspace"
     snapshot_wisp_plane "$version" after

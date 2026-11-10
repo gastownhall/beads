@@ -86,6 +86,9 @@ type EmbeddedDoltStore struct {
 	// (e.g. the post-command autocommit net, or the commit itself) - only the
 	// migration step is skipped.
 	intent openIntent
+	// migrationsAppliedAtOpen is what this store's own initSchema applied,
+	// set before the store is returned; see MigrationsAppliedAtOpen.
+	migrationsAppliedAtOpen int
 }
 
 // lenientSharedGateGuidance is the blunt migrate-or-adopt block shared by the
@@ -665,9 +668,12 @@ func (s *EmbeddedDoltStore) ApplySchemaMigrations(ctx context.Context) (int, err
 	return schema.MigrateUp(ctx, conn)
 }
 
-// MigrationsAppliedAtOpen implements storage.SchemaMigrator.
+// MigrationsAppliedAtOpen reports how many migrations this store's own open
+// applied. `bd migrate schema` opens with migration consent, so the open does
+// the work and ApplySchemaMigrations then counts 0 (gastownhall/beads#7283).
+// Implements storage.SchemaMigrator.
 func (s *EmbeddedDoltStore) MigrationsAppliedAtOpen() int {
-	return 0
+	return s.migrationsAppliedAtOpen
 }
 
 func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
@@ -777,7 +783,9 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 
 	// Embedded mode relies on the dolthub/driver/v2's local file/concurrency
 	// controls; schema.MigrateUpWithLock requires a sql-server session lock.
-	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+	applied, err := schema.MigrateUp(ctx, conn)
+	s.migrationsAppliedAtOpen = applied
+	if err != nil {
 		var consentErr *schema.MigrateConsentError
 		if s.toleratesConsentRefusal() && errors.As(err, &consentErr) {
 			fmt.Fprint(os.Stderr, consentErr.WorkingSetWarning())
