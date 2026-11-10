@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -378,4 +379,114 @@ func TestMaybeAutoExport_WorktreeRedirectErrorUsesResolvedPath(t *testing.T) {
 		t.Fatalf("maybeAutoExport printed %q; the error path must leave the single print to the caller", stderr)
 	}
 	assertFileUnchanged(t, path, badJSONL)
+}
+
+// --- AC-4: deliberate refusals and capability skips stay warn-and-nil ---
+
+// shrinkRefusalSeed mixes one in-scope issue (still in the store) with one
+// memory record — exactly what guardAutoExportOverwrite refuses to drop.
+const shrinkRefusalSeed = exportRelationSeed +
+	`{"_type":"memory","key":"keep-me","value":"private context"}` + "\n"
+
+// TestMaybeAutoExportShrinkGuardRefusalStaysWarning pins the shrink guard's
+// half of AC-4 (GH#6163): the deliberate refusal to overwrite a JSONL with
+// out-of-scope records is a safety skip, not an operational failure — the
+// triggering command succeeds, exactly one warning is printed, and the
+// previous JSONL and export state stay unchanged.
+func TestMaybeAutoExportShrinkGuardRefusalStaysWarning(t *testing.T) {
+	s := &fakeHeadOnlyStore{issues: []*types.Issue{
+		{ID: "bd-export1", Title: "export me", Status: types.StatusOpen, IssueType: types.TypeTask},
+	}}
+	jsonl, statePath, stateBytes := setupDueAutoExport(t, s, shrinkRefusalSeed)
+	// fakeHeadOnlyStore is no storage.DiffStore, so the export goes straight
+	// to the full-export fallback that runs the shrink guard.
+
+	var err error
+	stderr := captureStderr(t, func() { err = maybeAutoExport(context.Background(), false) })
+	if err != nil {
+		t.Fatalf("maybeAutoExport err = %v, want nil (a shrink-guard refusal is a deliberate skip)", err)
+	}
+	if n := strings.Count(stderr, "Warning: auto-export skipped: auto-export shrink guard: refusing to overwrite"); n != 1 {
+		t.Fatalf("stderr = %q, want exactly one shrink-guard refusal warning", stderr)
+	}
+	assertFileUnchanged(t, jsonl, shrinkRefusalSeed)
+	assertFileUnchanged(t, statePath, stateBytes)
+}
+
+// stateHashUnsupportedStore refuses the state hash with the same wrapped
+// typed sentinel the http backend returns, and counts SearchIssues calls so
+// the test can prove the skip happens before any store read or file write.
+type stateHashUnsupportedStore struct {
+	fakeHeadOnlyStore
+	searchCalls int
+}
+
+func (f *stateHashUnsupportedStore) GetStateHash(context.Context) (string, error) {
+	return "", fmt.Errorf("get state hash: %w", &storage.ErrUnsupported{Op: "GetStateHash", Backend: "http"})
+}
+
+func (f *stateHashUnsupportedStore) SearchIssues(context.Context, string, types.IssueFilter) ([]*types.Issue, error) {
+	f.searchCalls++
+	return nil, nil
+}
+
+// TestMaybeAutoExportStateHashUnsupportedSkips pins the state-hash half of
+// AC-4 (GH#6163): a typed *storage.ErrUnsupported — a backend that cannot
+// report a state hash at all, wrapped like the http store's refusal — is a
+// missing capability, not a broken read. The export warns and skips; no
+// store query runs and no file is written.
+func TestMaybeAutoExportStateHashUnsupportedSkips(t *testing.T) {
+	fake := &stateHashUnsupportedStore{issues: []*types.Issue{
+		{ID: "bd-export1", Title: "export me", Status: types.StatusOpen, IssueType: types.TypeTask},
+	}}
+	jsonl, statePath, stateBytes := setupDueAutoExport(t, fake, "")
+
+	var err error
+	stderr := captureStderr(t, func() { err = maybeAutoExport(context.Background(), false) })
+	if err != nil {
+		t.Fatalf("maybeAutoExport err = %v, want nil (an unsupported state hash is a warning-only skip)", err)
+	}
+	if n := strings.Count(stderr, "Warning: auto-export skipped"); n != 1 {
+		t.Fatalf("stderr = %q, want exactly one skipped warning", stderr)
+	}
+	if fake.searchCalls != 0 {
+		t.Fatalf("SearchIssues calls = %d, want 0 (the skip must precede every store read)", fake.searchCalls)
+	}
+	assertFileUnchanged(t, jsonl, "") // nothing was written
+	assertFileUnchanged(t, statePath, stateBytes)
+}
+
+// TestMaybeAutoExportRetriesAfterFailure is the design's edge control over
+// the failure policy (GH#6163): a failed export leaves the previous state
+// in place, so the next eligible mutating command retries it without any
+// new retry mechanism — and succeeds once the fault is gone.
+func TestMaybeAutoExportRetriesAfterFailure(t *testing.T) {
+	failStore := &stateHashReadErrStore{}
+	jsonl, statePath, stateBytes := setupDueAutoExport(t, failStore, exportRelationSeed)
+
+	var err error
+	_ = captureStderr(t, func() { err = maybeAutoExport(context.Background(), false) })
+	if err == nil {
+		t.Fatal("first run: maybeAutoExport err = nil, want the state-hash failure")
+	}
+	assertFileUnchanged(t, statePath, stateBytes)
+
+	// The fault is gone and the state timestamp never advanced, so the very
+	// next command is eligible again and the export goes through.
+	store = &fakeHeadOnlyStore{issues: []*types.Issue{
+		{ID: "bd-export1", Title: "export me", Status: types.StatusOpen, IssueType: types.TypeTask},
+	}}
+	if err := maybeAutoExport(context.Background(), false); err != nil {
+		t.Fatalf("retry after failure: maybeAutoExport: %v", err)
+	}
+	got, readErr := os.ReadFile(jsonl)
+	if readErr != nil {
+		t.Fatalf("retry did not export: %v", readErr)
+	}
+	if !strings.Contains(string(got), "bd-export1") {
+		t.Fatalf("exported JSONL = %q, want it to contain bd-export1", got)
+	}
+	if state := loadExportAutoState(filepath.Dir(statePath)); state.LastDoltCommit != "head-commit-hash" {
+		t.Fatalf("retry did not advance export state: LastDoltCommit = %q", state.LastDoltCommit)
+	}
 }

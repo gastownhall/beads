@@ -236,6 +236,11 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 			// Single-print rule: no warning here; the caller prints the
 			// failure once. The shrink guard's deliberate refusal is the one
 			// carve-out from this rule; see errShrinkGuardRefusal.
+			var refusal *errShrinkGuardRefusal
+			if errors.As(err, &refusal) {
+				fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: %v\n", err)
+				return nil
+			}
 			return fmt.Errorf("auto-export: export to %s failed: %w", fullPath, err)
 		}
 		dirtyIDs = nil
@@ -888,6 +893,17 @@ func storeKnownIssueIDs(ctx context.Context) (map[string]struct{}, error) {
 	return ids, nil
 }
 
+// errShrinkGuardRefusal marks guardAutoExportOverwrite's deliberate refusal
+// (existing records outside auto-export scope that the store still has) as
+// a safety skip rather than an operational failure: maybeAutoExport warns
+// and returns nil for it (GH#6163), while the guard's inspection, parse and
+// scan errors stay real errors. Local to cmd/bd on purpose — this is command
+// policy, not a storage contract.
+type errShrinkGuardRefusal struct{ err error }
+
+func (e *errShrinkGuardRefusal) Error() string { return e.err.Error() }
+func (e *errShrinkGuardRefusal) Unwrap() error { return e.err }
+
 func guardAutoExportOverwrite(path string, infraTypes map[string]bool, includeMemories bool, storeIDs map[string]struct{}) error {
 	f, err := os.Open(path) //nolint:gosec
 	if err != nil {
@@ -924,7 +940,7 @@ func guardAutoExportOverwrite(path string, infraTypes map[string]bool, includeMe
 	if stats.FilteredRecords == 0 {
 		return nil
 	}
-	return fmt.Errorf("auto-export shrink guard: refusing to overwrite %s because it contains %d record(s) outside auto-export scope (%d memories, %d infra/template/ephemeral issues, %d unknown); run an explicit export if you want to replace it", path, stats.FilteredRecords, stats.Memories, stats.FilteredIssues, stats.UnknownRecords)
+	return &errShrinkGuardRefusal{err: fmt.Errorf("auto-export shrink guard: refusing to overwrite %s because it contains %d record(s) outside auto-export scope (%d memories, %d infra/template/ephemeral issues, %d unknown); run an explicit export if you want to replace it", path, stats.FilteredRecords, stats.Memories, stats.FilteredIssues, stats.UnknownRecords)}
 }
 
 type autoExportOverwriteStats struct {
