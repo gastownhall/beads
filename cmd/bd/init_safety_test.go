@@ -1337,3 +1337,69 @@ func TestInitAdoptionFlagsKeepExistingGuards(t *testing.T) {
 		}
 	})
 }
+
+// TestInitDerivedOriginLateCheckpointRefusesUnconsentedURL is AC-6 of
+// GH#6099: consent at the early prompt is for that URL only. If origin
+// changes before the late checkpoint (here, while init waits at the prompt)
+// and the new origin has Dolt history, init refuses before cloning rather
+// than adopting a remote nobody agreed to.
+func TestInitDerivedOriginLateCheckpointRefusesUnconsentedURL(t *testing.T) {
+	workDir, consentedRemote := derivedOriginWithDoltDataFixture(t)
+	_, otherRemote := derivedOriginWithDoltDataFixture(t)
+	bdBin := buildBDForInitTests(t)
+	cmd := exec.Command(bdBin, "init", "--prefix", "mine", "--skip-hooks", "--skip-agents")
+	cmd.Dir = workDir
+	cmd.Env = hermeticInitEnv(t.TempDir(), "BD_NON_INTERACTIVE=0")
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	var seen bytes.Buffer
+	buf := make([]byte, 4096)
+	for !strings.Contains(seen.String(), "[y/N]") {
+		n, readErr := stderr.Read(buf)
+		seen.Write(buf[:n])
+		if readErr != nil {
+			_ = cmd.Wait()
+			t.Fatalf("init exited before prompting: %v\n%s%s", readErr, seen.String(), stdout.String())
+		}
+	}
+	if !strings.Contains(seen.String(), consentedRemote) {
+		t.Fatalf("prompt does not name the origin being consented to (%s):\n%s", consentedRemote, seen.String())
+	}
+	runGitForBootstrapTest(t, workDir, "remote", "set-url", "origin", otherRemote)
+	if _, err := io.WriteString(stdin, "y\n"); err != nil {
+		t.Fatal(err)
+	}
+	rest, _ := io.ReadAll(stderr)
+	seen.Write(rest)
+	err = cmd.Wait()
+	out := seen.String() + stdout.String()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("init after origin changed = %v, want exit 1\n%s", err, out)
+	}
+	for _, want := range []string{"bd init refuses", "Derived from git origin: " + otherRemote, "bd init --yes"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("late refusal missing %q:\n%s", want, out)
+		}
+	}
+	for _, unwanted := range []string{"failed to clone", "Adopting Dolt issue history"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("late checkpoint reached the clone (%q):\n%s", unwanted, out)
+		}
+	}
+	if cfg, err := os.ReadFile(filepath.Join(workDir, ".beads", "config.yaml")); err == nil && strings.Contains(string(cfg), otherRemote) {
+		t.Errorf("refused origin persisted as sync.remote:\n%s", cfg)
+	}
+}
