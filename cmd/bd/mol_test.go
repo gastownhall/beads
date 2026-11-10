@@ -3597,3 +3597,41 @@ func TestBondProtoMolRefArmWaitsForTerminalSteps(t *testing.T) {
 		t.Errorf("arm step %s has no parent-child edge onto the arm root %s", armStepID, armID)
 	}
 }
+
+// AC-2: the arm's executable steps stay out of ready work until every
+// terminal step of the parent has closed, and the first one becomes ready
+// through the normal readiness path the moment the last terminal closes.
+func TestBondProtoMolRefArmStepsReadyOnlyAfterTerminalsClose(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreWithPrefix(t, t.TempDir()+"/test.db", "patrol")
+	proto, mol, s1, s2, s3, protoStep := bondRefArmSteps(t, ctx, s)
+
+	result, err := bondProtoMol(ctx, s, proto, mol, types.BondTypeSequential, map[string]string{"name": "ace"}, "arm-{{name}}", "test", false, false)
+	if err != nil {
+		t.Fatalf("bondProtoMol: %v", err)
+	}
+	armStepID := result.IDMapping[protoStep.ID]
+
+	if issueIsReady(t, ctx, s, armStepID) {
+		t.Fatalf("arm step %s is ready while the parent's terminal steps %s and %s are still open; the arm must run after them", armStepID, s2.ID, s3.ID)
+	}
+
+	// One terminal (s2, behind s1) closes; s3 still holds the arm back.
+	if err := s.CloseIssue(ctx, s1.ID, "done", "test", ""); err != nil {
+		t.Fatalf("close %s: %v", s1.ID, err)
+	}
+	if err := s.CloseIssue(ctx, s2.ID, "done", "test", ""); err != nil {
+		t.Fatalf("close %s: %v", s2.ID, err)
+	}
+	if issueIsReady(t, ctx, s, armStepID) {
+		t.Fatalf("arm step %s is ready while the terminal step %s is still open", armStepID, s3.ID)
+	}
+
+	// The last terminal closes: the arm's first executable step is ready.
+	if err := s.CloseIssue(ctx, s3.ID, "done", "test", ""); err != nil {
+		t.Fatalf("close %s: %v", s3.ID, err)
+	}
+	if !issueIsReady(t, ctx, s, armStepID) {
+		t.Fatalf("arm step %s is not ready after every terminal step closed", armStepID)
+	}
+}
