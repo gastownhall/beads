@@ -86,3 +86,22 @@ func TestEmbeddedCommitAuthorFollowsGitAuthorEnv(t *testing.T) {
 		t.Errorf("Merge authored %+v, want %+v", merge, want)
 	}
 }
+
+// TestEmbeddedCommitAuthorDefaultsWithoutGitAuthor pins the fallback: with no
+// GIT_AUTHOR_* identity, session and merge commits stay beads <beads@local>.
+func TestEmbeddedCommitAuthorDefaultsWithoutGitAuthor(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
+	}
+	t.Setenv("GIT_AUTHOR_NAME", "")
+	t.Setenv("GIT_AUTHOR_EMAIL", "")
+
+	want := commitAuthor{"beads", "beads@local"}
+	pending, merge := storeCommitAuthors(t, "cad")
+	if pending != want {
+		t.Errorf("CommitPending authored %+v, want %+v", pending, want)
+	}
+	if merge != want {
+		t.Errorf("Merge authored %+v, want %+v", merge, want)
+	}
+}
