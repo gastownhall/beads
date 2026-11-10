@@ -184,3 +184,212 @@ func assertDriftRefusal(t *testing.T, err, cause error, migration string, versio
 		t.Errorf("UserMessage lacks the migration or recovery URL:\n%s", msg)
 	}
 }
+
+// TestRunMigrationsEncodingDriftStepPhases: the selected step's other exits
+// carry the same typed refusal, attributed to that step, and the runner's
+// order and count are unchanged at each one. A cursor- or commit-phase failure
+// follows a body that succeeded, so it makes no promise about the cursor.
+func TestRunMigrationsEncodingDriftStepPhases(t *testing.T) {
+	cause := errors.New("Error 1105 (HY000): panic recovered: invalid hash length: 19")
+	emptyStatus := func() *sqlmock.Rows { return sqlmock.NewRows([]string{"table_name", "staged"}) }
+	ok := sqlmock.NewResult(0, 0)
+	stubbedGuard := func(snap *updatedAtSnapshot, err error) func(t *testing.T) {
+		return func(t *testing.T) {
+			orig := snapshotUpdatedAtForStep
+			snapshotUpdatedAtForStep = func(context.Context, DBConn, migrationSource, int) (*updatedAtSnapshot, error) {
+				return snap, err
+			}
+			t.Cleanup(func() { snapshotUpdatedAtForStep = orig })
+		}
+	}
+
+	for _, tc := range []struct {
+		name           string
+		src            migrationSource
+		from, to       int
+		commitEachStep bool
+		guard          func(t *testing.T)
+		expect         func(mock sqlmock.Sqlmock)
+		migration      string
+		version        int
+		wantApplied    int
+		wantDone       bool
+	}{
+		{
+			name: "dirty-table snapshot", src: mainSource, from: 58, to: 60, commitEachStep: true,
+			guard: stubUpdatedAtGuard,
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(guardDirtyStatusQuery).WillReturnError(cause)
+			},
+			migration: migration0059, version: 59,
+		},
+		{
+			name: "updated_at snapshot", src: mainSource, from: 58, to: 60, commitEachStep: false,
+			guard:     stubbedGuard(nil, fmt.Errorf("reading issues: %w", cause)),
+			expect:    func(sqlmock.Sqlmock) {},
+			migration: migration0059, version: 59,
+		},
+		{
+			// A real ignored-source step with a registered pre-repair: the
+			// refusal names that source's own cursor.
+			name: "pre-repair on the ignored source", src: ignoredSource, from: 6, to: 8, commitEachStep: false,
+			guard: stubUpdatedAtGuard,
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(`.`).WillReturnError(cause)
+			},
+			migration: "0007_recompute_wisp_is_blocked.up.sql", version: 7,
+		},
+		{
+			name: "updated_at restore", src: mainSource, from: 58, to: 60, commitEachStep: false,
+			guard: stubbedGuard(&updatedAtSnapshot{spec: updatedAtGuardSpec{restore: []string{"issues"}}}, nil),
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectExec(regexp.QuoteMeta(migrationBody(t, migration0059))).WillReturnResult(ok)
+				mock.ExpectQuery(`.`).WillReturnError(cause)
+			},
+			migration: migration0059, version: 59,
+		},
+		{
+			name: "cursor write", src: mainSource, from: 58, to: 60, commitEachStep: false,
+			guard: stubUpdatedAtGuard,
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectExec(regexp.QuoteMeta(migrationBody(t, migration0059))).WillReturnResult(ok)
+				mock.ExpectExec(`INSERT IGNORE INTO schema_migrations`).WithArgs(59, sqlmock.AnyArg()).WillReturnError(cause)
+			},
+			migration: migration0059, version: 59,
+		},
+		{
+			// The cursor row is written and counted before the step commit, as
+			// today; the refusal keeps that count.
+			name: "step commit", src: mainSource, from: 58, to: 60, commitEachStep: true,
+			guard: stubUpdatedAtGuard,
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(guardDirtyStatusQuery).WillReturnRows(emptyStatus())
+				mock.ExpectExec(regexp.QuoteMeta(migrationBody(t, migration0059))).WillReturnResult(ok)
+				mock.ExpectExec(`INSERT IGNORE INTO schema_migrations`).WithArgs(59, sqlmock.AnyArg()).WillReturnResult(ok)
+				mock.ExpectQuery(guardDirtyStatusQuery).
+					WillReturnRows(emptyStatus().AddRow("schema_migrations", false))
+				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD('-f', ?)")).WithArgs("schema_migrations").WillReturnError(cause)
+			},
+			migration: migration0059, version: 59, wantApplied: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			orig := stderr
+			stderr = &out
+			t.Cleanup(func() { stderr = orig })
+			zeroIssueRowCounter(t)
+			tc.guard(t)
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+			tc.expect(mock)
+
+			applied, err := runMigrations(context.Background(), db, tc.src, tc.from, tc.to, tc.commitEachStep)
+
+			assertDriftRefusal(t, err, cause, tc.migration, tc.version, tc.src.cursorTable)
+			if applied != tc.wantApplied {
+				t.Errorf("applied = %d, want %d (count semantics changed)", applied, tc.wantApplied)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("unmet expectations: %v", err)
+			}
+			if strings.Contains(out.String(), "done (") {
+				t.Errorf("a refused step printed its success line:\n%s", out.String())
+			}
+			if next := fmt.Sprintf("Applying migration %04d", tc.version+1); strings.Contains(out.String(), next) {
+				t.Errorf("the pass went on past the refused step:\n%s", out.String())
+			}
+		})
+	}
+}
+
+// TestRunMigrationsEncodingDriftAttributionBounds: the refusal never wraps
+// itself twice, and an error from outside a selected step (here the per-step
+// fault hook, which runs after the step completed) is not attributed to a
+// migration it did not come from.
+func TestRunMigrationsEncodingDriftAttributionBounds(t *testing.T) {
+	cause := errors.New("Error 1105 (HY000): panic recovered: invalid hash length: 19")
+
+	t.Run("already typed", func(t *testing.T) {
+		quietStderr(t)
+		zeroIssueRowCounter(t)
+		stubUpdatedAtGuard(t)
+		inner := &SchemaEncodingDriftError{Migration: "0007_recompute_wisp_is_blocked.up.sql", Version: 7, CursorTable: "ignored_schema_migrations", Cause: cause}
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+		defer db.Close()
+		mock.ExpectExec(regexp.QuoteMeta(migrationBody(t, migration0059))).WillReturnError(fmt.Errorf("nested: %w", inner))
+
+		_, err = runMigrations(context.Background(), db, mainSource, 58, 60, false)
+
+		var got *SchemaEncodingDriftError
+		if !errors.As(err, &got) {
+			t.Fatalf("typed refusal lost: %v", err)
+		}
+		if got != inner {
+			t.Errorf("refusal re-wrapped: outermost is %+v, want the original %+v", got, inner)
+		}
+	})
+
+	t.Run("after the step completed", func(t *testing.T) {
+		quietStderr(t)
+		zeroIssueRowCounter(t)
+		stubUpdatedAtGuard(t)
+		hookErr := fmt.Errorf("simulated kill: %w", cause)
+		t.Cleanup(SetMigrateStepFaultHookForTest(func(context.Context, DBConn, int) error { return hookErr }))
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+		defer db.Close()
+		mock.ExpectExec(regexp.QuoteMeta(migrationBody(t, migration0059))).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(`INSERT IGNORE INTO schema_migrations`).WillReturnResult(sqlmock.NewResult(0, 0))
+
+		applied, err := runMigrations(context.Background(), db, mainSource, 58, 60, false)
+
+		if err != hookErr {
+			t.Errorf("err = %v (%T), want the hook's error unchanged", err, err)
+		}
+		if applied != 1 {
+			t.Errorf("applied = %d, want 1", applied)
+		}
+	})
+
+	t.Run("before step selection", func(t *testing.T) {
+		quietStderr(t)
+		stubUpdatedAtGuard(t)
+		// The large-rig notice's row count runs before any step is
+		// selected; its existing handling ignores the error, so a
+		// drift-shaped failure there is neither a refusal nor a stop.
+		orig := issueRowCounter
+		issueRowCounter = func(context.Context, DBConn) (int64, error) { return 0, cause }
+		t.Cleanup(func() { issueRowCounter = orig })
+		ok := sqlmock.NewResult(0, 0)
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+		defer db.Close()
+		mock.ExpectExec(regexp.QuoteMeta(migrationBody(t, migration0059))).WillReturnResult(ok)
+		mock.ExpectExec(`INSERT IGNORE INTO schema_migrations`).WithArgs(59, sqlmock.AnyArg()).WillReturnResult(ok)
+		mock.ExpectExec(regexp.QuoteMeta(migrationBody(t, "0060_add_storage_class.up.sql"))).WillReturnResult(ok)
+		mock.ExpectExec(`INSERT IGNORE INTO schema_migrations`).WithArgs(60, sqlmock.AnyArg()).WillReturnResult(ok)
+
+		applied, err := runMigrations(context.Background(), db, mainSource, 58, 60, false)
+
+		if err != nil {
+			t.Fatalf("a drift-shaped error before step selection must keep its existing handling, got: %v", err)
+		}
+		if applied != 2 {
+			t.Errorf("applied = %d, want 2: the pass must still apply 0059 and 0060", applied)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet expectations: %v", err)
+		}
+	})
+}

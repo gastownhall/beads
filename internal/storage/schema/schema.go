@@ -2259,7 +2259,22 @@ func (m migrationSource) migrate(ctx context.Context, db DBConn, upTo int) (int,
 // its commitMigrationStep still leaves that one step's debris in the working
 // set for the dirty-table guard to refuse. The window shrinks from the whole
 // pass tail to one step; it does not close entirely.
-func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersion, upTo int, commitEachStep bool) (int, error) {
+//
+// An error returned while a numbered step is selected, from its snapshots,
+// pre-repair, body, updated_at restore, cursor row or step commit, that carries
+// a schema-encoding-drift signature comes back as a *SchemaEncodingDriftError
+// naming that step (gastownhall/beads#5699). The pass still stops where it did:
+// nothing is skipped, retried or rolled back, and a raw panic is not caught.
+func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersion, upTo int, commitEachStep bool) (count int, err error) {
+	// selected is the numbered step in progress, nil outside one, so a drift
+	// error is never attributed to a step it did not come from.
+	var selected *migrationFile
+	defer func() {
+		if selected != nil {
+			err = classifyMigrationDrift(err, src, *selected)
+		}
+	}()
+
 	if upTo == 0 {
 		upTo = src.latest()
 	}
@@ -2280,11 +2295,11 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 		emitLargeRigNotice(stderr, rowCount, rowCountErr)
 	}
 
-	count := 0
 	for _, mf := range src.list() {
 		if mf.version <= minVersion || mf.version > upTo {
 			continue
 		}
+		selected = &mf
 		data, err := src.files.ReadFile(src.dir + "/" + mf.name)
 		if err != nil {
 			return count, fmt.Errorf("reading migration %s: %w", mf.name, err)
@@ -2348,7 +2363,7 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 		if err := runMigrationWithWatchdog(ctx, watchdogStderr, mf.version, humanMigrationName(mf.name), migrationWatchdogIntervalDuration(),
 			func(ctx context.Context) error { return execMigrationBody(ctx, db, string(data)) },
 		); err != nil {
-			return count, classifyMigrationDrift(fmt.Errorf("migration %s: %w", mf.name, err), src, mf)
+			return count, fmt.Errorf("migration %s: %w", mf.name, err)
 		}
 		// Restore before the cursor row and the per-step commit, so neither
 		// the step's commit nor a later pass ever records the stamped values.
@@ -2375,6 +2390,7 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 			}
 		}
 		fmt.Fprintf(stderr, "  done (%.1fs)\n", time.Since(start).Seconds())
+		selected = nil
 
 		if migrateStepFaultHook != nil {
 			if err := migrateStepFaultHook(ctx, db, mf.version); err != nil {
