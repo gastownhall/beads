@@ -757,3 +757,67 @@ func TestFixHooksPath_RelocatedBeadsPath_ChangedBeforeRepair(t *testing.T) {
 	}
 	assertNotCreated(t, stale)
 }
+
+// TestFixHooksPath_ManagedDeletedInPlaceStillUnsets: a current beads location
+// deleted in place keeps the GH#4440 repair — the value is unset, never
+// repointed to another beads hooks directory that happens to exist, in the
+// repository or in out-of-repo storage (GH#5853).
+func TestFixHooksPath_ManagedDeletedInPlaceStillUnsets(t *testing.T) {
+	cases := []struct {
+		name string
+		// arrange returns the missing managed value to configure.
+		arrange func(t *testing.T, dir string) string
+	}{
+		{
+			name: "shared layout deleted beside .beads/hooks",
+			arrange: func(t *testing.T, dir string) string {
+				writeRelocatedHook(t, filepath.Join(dir, ".beads", "hooks"), relocatedHookBody)
+				return filepath.Join(dir, ".beads-hooks")
+			},
+		},
+		{
+			name: "out-of-repo storage hooks deleted",
+			arrange: func(t *testing.T, dir string) string {
+				storage := filepath.Join(t.TempDir(), "external storage")
+				if err := os.MkdirAll(storage, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(storage, "metadata.json"), []byte("{}\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("BEADS_DIR", storage)
+				writeRelocatedHook(t, filepath.Join(dir, ".beads", "hooks"), relocatedHookBody)
+				return filepath.Join(storage, "hooks")
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BEADS_DIR", "")
+			dir := t.TempDir()
+			setupGitRepoInDir(t, dir)
+			missing := tc.arrange(t, dir)
+			setGitConfig(t, dir, "core.hooksPath", missing)
+
+			runInDir(t, dir, func() {
+				check := CheckHooksPath()
+				if strings.Contains(check.Message, "moved repository") {
+					t.Errorf("a managed path deleted in place was reported as relocated: %q", check.Message)
+				}
+				if !strings.Contains(check.Fix, "unset core.hooksPath") {
+					t.Errorf("Fix = %q, want the unset remedy", check.Fix)
+				}
+				if err := FixHooksPath(); err != nil {
+					t.Fatalf("FixHooksPath failed: %v", err)
+				}
+			})
+
+			if got := getGitConfig(t, dir, "core.hooksPath"); got != "" {
+				t.Errorf("core.hooksPath = %q, want it unset", got)
+			}
+			if _, err := os.Lstat(missing); !os.IsNotExist(err) {
+				t.Errorf("FixHooksPath created %s (err=%v)", missing, err)
+			}
+		})
+	}
+}
