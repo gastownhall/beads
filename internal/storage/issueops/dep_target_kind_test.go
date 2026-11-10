@@ -11,6 +11,7 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // TestDepTargetKindFor pins the one rule every write path classifies a
@@ -156,5 +157,49 @@ func TestClassifyDepTargetProbeErrors(t *testing.T) {
 				t.Errorf("probe reads: %v", err)
 			}
 		})
+	}
+}
+
+// TestAddDependencyInTxRefusesMissingSamePrefixTargetWithTypedError pins the
+// missing-target half of the preserved behavior (GH#8299): a same-prefix
+// target no local row answers falls back to DepTargetIssue in classification,
+// and that fallback is NOT evidence of presence — the existence read still
+// runs and its miss is the typed MissingDependencyTarget refusal, not an FK
+// violation surfacing from the INSERT. The container-backed twin is
+// TestAddDependency_SamePrefix_RequiresTargetExistence (internal/storage/dolt).
+func TestAddDependencyInTxRefusesMissingSamePrefixTargetWithTypedError(t *testing.T) {
+	t.Parallel()
+
+	_, mock, tx := beginMockTx(t)
+
+	// Classification probes the wisp plane and finds no row; a same-prefix
+	// target never pays for the issues probe.
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps WHERE id = ? LIMIT 1")).
+		WithArgs("bd-b").
+		WillReturnError(sql.ErrNoRows)
+	// Source read.
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_type FROM issues WHERE id = ?")).
+		WithArgs("bd-a").
+		WillReturnRows(sqlmock.NewRows([]string{"issue_type"}).AddRow("task"))
+	// The fallback classification is not validated, so the target's
+	// existence read runs — and misses.
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_type FROM issues WHERE id = ?")).
+		WithArgs("bd-b").
+		WillReturnRows(sqlmock.NewRows([]string{"issue_type"}))
+
+	dep := &types.Dependency{IssueID: "bd-a", DependsOnID: "bd-b", Type: types.DepBlocks}
+	_, err := AddDependencyInTx(context.Background(), tx, dep, "writer", AddDependencyOpts{
+		SourceTable: "issues",
+		WriteTable:  "dependencies",
+	})
+	if err == nil {
+		t.Fatal("AddDependencyInTx(bd-a -> missing bd-b) = nil, want the missing-target refusal")
+	}
+	var notFound *publicops.DependencyEndpointNotFoundError
+	if !errors.As(err, &notFound) {
+		t.Fatalf("error = %v, want DependencyEndpointNotFoundError (not a raw FK or SQL error)", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
 	}
 }

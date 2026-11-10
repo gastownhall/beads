@@ -1233,10 +1233,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   database holds as a local edge and refuses a blocking edge across the
   issues' own hierarchy, as it does for same-prefix issues; a target the
   database does not hold, or an explicit `external:` reference, is still
-  external. On upgrade, opening an existing database converts the affected
-  rows it holds and recomputes blocked state once, committed as a migration;
-  with uncommitted edits to `issues` or `dependencies` it refuses until you
-  commit them.
+  external, and `bd repo remove` keeps an edge onto a removed repository's
+  issue of another prefix as such an external ID, as it did before. On
+  upgrade, opening an existing database converts the affected rows it holds
+  and recomputes blocked state once, committed as a migration; with
+  uncommitted edits to `issues` or `dependencies` it refuses until you commit
+  them.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
