@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 // Wisp commands - manage ephemeral molecules
@@ -766,7 +767,7 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 	}
 
 	if closedMode {
-		return runWispPurgeClosed(ctx, dryRun, force, excludeTypes)
+		return runWispPurgeClosed(ctx, store, dryRun, force, excludeTypes)
 	}
 
 	abandoned, err := findAbandonedWisps(ctx, store, cleanAll, ageThreshold, excludeTypes)
@@ -963,66 +964,39 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 	return abandoned, cascadeErr
 }
 
-func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTypes []types.IssueType) error {
-	statusClosed := types.StatusClosed
-	ephemeralTrue := true
-	filter := types.IssueFilter{
-		Status:       &statusClosed,
-		Ephemeral:    &ephemeralTrue,
-		ExcludeTypes: excludeTypes,
-		Limit:        5000,
-	}
+// wispPurgeClosedDelete is the closed-mode deletion; a test swaps it for a
+// spy to prove a failed selection deletes nothing.
+var wispPurgeClosedDelete = deleteBatchReporting
 
-	closedIssues, err := store.SearchIssues(ctx, "", filter)
+func runWispPurgeClosed(ctx context.Context, r molReader, dryRun bool, force bool, excludeTypes []types.IssueType) error {
+	sel, err := selectClosedWispsForPurge(ctx, r, excludeTypes)
 	if err != nil {
-		return HandleError("listing closed wisps: %v", err)
+		return HandleError("%v", err)
+	}
+	if !jsonOutput {
+		sel.printSkips()
 	}
 
-	// Filter out pinned and infra issues (protected from cleanup)
-	pinnedCount := 0
-	infraCount := 0
-	filtered := make([]*types.Issue, 0, len(closedIssues))
-	for _, issue := range closedIssues {
-		if issue.Pinned {
-			pinnedCount++
-			continue
-		}
-		if store.IsInfraTypeCtx(ctx, issue.IssueType) {
-			infraCount++
-			continue
-		}
-		filtered = append(filtered, issue)
-	}
-	closedIssues = filtered
-
-	if pinnedCount > 0 && !jsonOutput {
-		fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", pinnedCount)
-	}
-	if infraCount > 0 && !jsonOutput {
-		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", infraCount)
-	}
-
-	if len(closedIssues) == 0 {
+	if len(sel.Candidates) == 0 {
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
-				"deleted_count": 0,
-				"message":       "No closed wisps to delete",
+				"deleted_count":          0,
+				"message":                "No closed wisps to delete",
+				"live_dependent_skipped": sel.LiveDependentSkipped,
 			})
 		}
 		fmt.Println("No closed wisps to delete")
 		return nil
 	}
 
-	ids := make([]string, len(closedIssues))
-	for i, issue := range closedIssues {
-		ids[i] = issue.ID
-	}
+	ids := sel.ids()
 
 	if !force && !dryRun {
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
-				"candidates": len(ids),
-				"dry_run":    true,
+				"candidates":             len(ids),
+				"dry_run":                true,
+				"live_dependent_skipped": sel.LiveDependentSkipped,
 			})
 		}
 		fmt.Printf("Found %d closed wisp(s) to delete\n", len(ids))
@@ -1044,10 +1018,14 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 	// dependents are every other (live) step — cascading swept whole active
 	// molecules into deletion, steps, dependency links and events all at once
 	// (wisp gc --closed --force self-destructed the deacon patrol).
-	// Without cascade, closed wisps are deleted and live dependents are
-	// orphaned (edges dropped, is_blocked recomputed) — the same semantics as
-	// a plain `bd delete`.
-	if err := deleteBatch(nil, ids, force, dryRun, false, jsonOutput, false, nil, "wisp gc --closed"); err != nil {
+	// Without cascade, closed wisps are deleted and their remaining live
+	// dependents are orphaned (edges dropped, is_blocked recomputed), the same
+	// semantics as a plain `bd delete`. The selector already held back every
+	// closed wisp a live row reaches through parent-child or tracks
+	// (GH#5152), so what is orphaned here is a blocks edge: a closed blocker
+	// no longer blocks anything.
+	report := map[string]interface{}{"live_dependent_skipped": sel.LiveDependentSkipped}
+	if err := wispPurgeClosedDelete(ids, force, dryRun, false, jsonOutput, nil, report); err != nil {
 		return HandleError("%v", err)
 	}
 
@@ -1055,6 +1033,160 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 		fmt.Printf("\nHint: Run 'bd compact --dolt' to reclaim disk space\n")
 	}
 	return nil
+}
+
+// closedWispPurgeSelection is what `bd mol wisp gc --closed` may delete, and
+// how many closed wisps each protection held back.
+type closedWispPurgeSelection struct {
+	Candidates           []*types.Issue
+	PinnedSkipped        int
+	InfraSkipped         int
+	LiveDependentSkipped int
+}
+
+func (s closedWispPurgeSelection) ids() []string {
+	ids := make([]string, len(s.Candidates))
+	for i, issue := range s.Candidates {
+		ids[i] = issue.ID
+	}
+	return ids
+}
+
+func (s closedWispPurgeSelection) printSkips() {
+	if s.PinnedSkipped > 0 {
+		fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", s.PinnedSkipped)
+	}
+	if s.InfraSkipped > 0 {
+		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", s.InfraSkipped)
+	}
+	if s.LiveDependentSkipped > 0 {
+		fmt.Printf("Skipping %d closed wisp(s) with live dependents (parent-child or tracks); they are collected once those close\n", s.LiveDependentSkipped)
+	}
+}
+
+// wispPurgeLiveDependentEdgeTypes are the edges through which a live row
+// keeps a closed wisp from `gc --closed` (GH#5152): deleting the target would
+// drop the edge and leave the live row unattributable. A blocks edge does not
+// protect: a closed blocker blocks nothing, and holding it back would keep
+// most closed molecule steps forever (GH#5735).
+var wispPurgeLiveDependentEdgeTypes = map[types.DependencyType]bool{
+	types.DepParentChild: true,
+	types.DepTracks:      true,
+}
+
+// wispPurgeStatusReadBatch bounds the ids one live-status read names.
+const wispPurgeStatusReadBatch = 500
+
+// selectClosedWispsForPurge is the one closed-mode selector both routes use:
+// closed ephemeral wisps minus excluded types, pinned rows, configured infra
+// types, and every wisp a live row depends on through parent-child or tracks,
+// directly or through another held-back wisp. A read it cannot make fails the
+// selection: holding back nothing would delete what it should protect.
+func selectClosedWispsForPurge(ctx context.Context, r molReader, excludeTypes []types.IssueType) (closedWispPurgeSelection, error) {
+	statusClosed := types.StatusClosed
+	ephemeralTrue := true
+	filter := types.IssueFilter{
+		Status:       &statusClosed,
+		Ephemeral:    &ephemeralTrue,
+		ExcludeTypes: excludeTypes,
+		Limit:        5000,
+	}
+	closedIssues, err := r.SearchIssues(ctx, "", filter)
+	if err != nil {
+		return closedWispPurgeSelection{}, fmt.Errorf("listing closed wisps: %w", err)
+	}
+
+	var sel closedWispPurgeSelection
+	filtered := make([]*types.Issue, 0, len(closedIssues))
+	for _, issue := range closedIssues {
+		if issue.Pinned {
+			sel.PinnedSkipped++
+			continue
+		}
+		if r.IsInfraTypeCtx(ctx, issue.IssueType) {
+			sel.InfraSkipped++
+			continue
+		}
+		filtered = append(filtered, issue)
+	}
+
+	protected, err := closedWispsWithLiveDependents(ctx, r, filtered)
+	if err != nil {
+		return closedWispPurgeSelection{}, err
+	}
+	sel.Candidates, sel.LiveDependentSkipped = workapi.PartitionSweepLiveDependents(filtered, protected)
+	return sel, nil
+}
+
+// closedWispsWithLiveDependents returns which candidates a live row reaches
+// through parent-child or tracks, following held-back candidates upward.
+func closedWispsWithLiveDependents(ctx context.Context, r molReader, candidates []*types.Issue) (map[string]bool, error) {
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	ids := make([]string, len(candidates))
+	for i, issue := range candidates {
+		ids[i] = issue.ID
+	}
+	all, err := closedWispIncomingEdges(ctx, r, ids)
+	if err != nil {
+		return nil, fmt.Errorf("reading dependents of closed wisps: %w", err)
+	}
+	incoming := make(map[string][]*types.Dependency, len(all))
+	for target, deps := range all {
+		for _, dep := range deps {
+			if dep != nil && wispPurgeLiveDependentEdgeTypes[dep.Type] {
+				incoming[target] = append(incoming[target], dep)
+			}
+		}
+	}
+
+	sources := workapi.SweepLiveDependentSources(incoming)
+	if len(sources) == 0 {
+		return nil, nil
+	}
+	custom, err := r.GetCustomStatusesDetailed(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("reading custom statuses for live-dependent protection: %w", err)
+	}
+	live := make(map[string]bool)
+	for start := 0; start < len(sources); start += wispPurgeStatusReadBatch {
+		batch := sources[start:min(start+wispPurgeStatusReadBatch, len(sources))]
+		issues, err := r.SearchIssues(ctx, "", workapi.BuildSweepLiveDependentScanFilter(batch, custom))
+		if err != nil {
+			return nil, fmt.Errorf("reading dependent statuses for live-dependent protection: %w", err)
+		}
+		for _, issue := range issues {
+			if issue != nil {
+				live[issue.ID] = true
+			}
+		}
+	}
+	return workapi.SweepLiveDependentTargets(incoming, live), nil
+}
+
+// closedWispIncomingEdges reads every edge pointing at ids, keyed by target.
+// A store that refuses the batch read is asked one target at a time.
+func closedWispIncomingEdges(ctx context.Context, r molReader, ids []string) (map[string][]*types.Dependency, error) {
+	edges, err := r.GetDependentRecordsForIssues(ctx, ids)
+	var unsupported *storage.ErrUnsupported
+	if err == nil || !errors.As(err, &unsupported) {
+		return edges, err
+	}
+	edges = make(map[string][]*types.Dependency, len(ids))
+	for _, target := range ids {
+		dependents, err := r.GetDependentsWithMetadata(ctx, target)
+		if err != nil {
+			return nil, err
+		}
+		for _, d := range dependents {
+			if d == nil {
+				continue
+			}
+			edges[target] = append(edges[target], &types.Dependency{IssueID: d.Issue.ID, DependsOnID: target, Type: d.DependencyType})
+		}
+	}
+	return edges, nil
 }
 
 func init() {

@@ -106,6 +106,7 @@
 100 27 TestEmbeddedDoltRemoteAdd_GitOriginCollision_RefusalMessageCopy
 100 27 TestEmbeddedNewDoltStoreFromConfig_DottedDBName
 100 27 TestEmbeddedShipConcurrent
+100 27 TestEmbeddedWispGCPurgeClosedHoldsBackLiveChildren
 
 100 28 TestEmbeddedDoltLocalOnly_RemoteAdd_RefusesExitOne
 100 28 TestEmbeddedForeignPreDoltCloneLeftUnchanged
