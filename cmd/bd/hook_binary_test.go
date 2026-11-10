@@ -125,9 +125,41 @@ func TestHooksPATHBinaryWarning(t *testing.T) {
 			}
 		}
 	})
+	t.Run("same file is quiet", func(t *testing.T) {
+		if got := hookPATHBinaryWarning(self, selects(self, nil)); got != "" {
+			t.Errorf("warning for the same file:\n%s", got)
+		}
+	})
+	t.Run("symlink to this bd is quiet", func(t *testing.T) {
+		link := filepath.Join(dir, "bin", "bd")
+		if err := os.MkdirAll(filepath.Dir(link), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(self, link); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		if got := hookPATHBinaryWarning(self, selects(link, nil)); got != "" {
+			t.Errorf("warning for a symlink to this bd:\n%s", got)
+		}
+	})
+	t.Run("hard link to this bd is quiet", func(t *testing.T) {
+		link := filepath.Join(dir, "hard", "bd")
+		if err := os.MkdirAll(filepath.Dir(link), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Link(self, link); err != nil {
+			t.Skipf("hard links unavailable: %v", err)
+		}
+		if got := hookPATHBinaryWarning(self, selects(link, nil)); got != "" {
+			t.Errorf("warning for a hard link to this bd:\n%s", got)
+		}
+	})
 	t.Run("relative PATH entry counts as found", func(t *testing.T) {
 		// exec.LookPath reports a match through a relative PATH entry as
 		// ErrDot; the hook shell still runs it, so it is the selection.
+		if got := hookPATHBinaryWarning(self, selects(self, exec.ErrDot)); got != "" {
+			t.Errorf("warning for this bd found through a relative entry:\n%s", got)
+		}
 		if got := hookPATHBinaryWarning(self, selects(other, exec.ErrDot)); !strings.Contains(got, other) {
 			t.Errorf("warning for another bd found through a relative entry lacks %q:\n%s", other, got)
 		}
@@ -198,6 +230,7 @@ func TestHooksInstallWarnsWhenPATHSelectsAnotherBD(t *testing.T) {
 	}{
 		{name: "decoy first", path: decoyDir + string(os.PathListSeparator) + basePATH, wantWarn: []string{decoy, self}},
 		{name: "no bd", path: basePATH, wantWarn: []string{"no bd", self}},
+		{name: "symlink to this bd", path: aliasDir + string(os.PathListSeparator) + basePATH, wantQuiet: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := t.TempDir()
