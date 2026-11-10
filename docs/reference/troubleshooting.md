@@ -537,6 +537,30 @@ bd dolt push
 
 See [Merge Conflicts](/recovery/merge-conflicts) for the full runbook.
 
+### Push logs "conjoin of database failed" over SSH
+
+**Symptom:** `bd dolt push` to a `git+ssh://` remote prints this error and then
+reports the push complete:
+
+```
+conjoin of database failed with error: kex_exchange_identification: read: Connection reset by peer
+```
+
+The pushed data does reach the remote, but the remote's table files keep
+accumulating and `bd dolt pull` gets slower with every push.
+
+**Cause:** after a push, Dolt compacts (*conjoins*) the remote's table files.
+Older Dolt opened a separate SSH connection for each table file it conjoined,
+all at once. A burst larger than the SSH server's `MaxStartups` limit gets its
+excess connections dropped before authentication, so the compaction fails
+while the push itself succeeds, and the next compaction has even more files
+to merge. This is a known cause in affected Dolt versions, not an explanation
+for every SSH connection reset. Tracked in beads
+[#6359](https://github.com/gastownhall/beads/issues/6359) and upstream
+[dolthub/dolt#11739](https://github.com/dolthub/dolt/issues/11739); fixed by
+[dolthub/dolt#11742](https://github.com/dolthub/dolt/pull/11742) and
+[dolthub/dolt#11745](https://github.com/dolthub/dolt/pull/11745).
+
 ## Git Hook Issues
 
 ### Hooks not running
