@@ -222,14 +222,22 @@ func CheckRemoteSafety(in RemoteSafetyInput) RemoteSafetyDecision {
 	// project's whole issue history (GH#6099). An UNKNOWN probe keeps the
 	// caller's warn-and-fresh fallback: nothing will be cloned.
 	if !userOverride {
-		if in.DerivedFromGitOrigin && !in.RemoteProbeUnknown && !in.AdoptionConsented {
-			if in.AdoptionInteractive {
+		if in.DerivedFromGitOrigin && !in.RemoteProbeUnknown {
+			// The same consent policy as the outbound gate (#5068):
+			// consent proceeds, an interactive caller asks, anyone else
+			// refuses. The opt-out was handled above.
+			switch decision, _ := decideRemoteAdoption(adoptPolicy{
+				AssumeYes:   in.AdoptionConsented,
+				Interactive: in.AdoptionInteractive,
+			}); decision {
+			case adoptAsk:
 				return RemoteSafetyDecision{Action: ActionAskAdoption, Reason: "derived-adoption-needs-consent"}
-			}
-			return RemoteSafetyDecision{
-				Action:   ActionRefuseAdoption,
-				Reason:   "derived-adoption-without-consent",
-				ExitCode: 1,
+			case adoptRefuse:
+				return RemoteSafetyDecision{
+					Action:   ActionRefuseAdoption,
+					Reason:   "derived-adoption-without-consent",
+					ExitCode: 1,
+				}
 			}
 		}
 		return RemoteSafetyDecision{Action: ActionBootstrap, Reason: "bootstrap-from-remote"}

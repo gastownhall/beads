@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -1171,7 +1172,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					AdoptionConsented:    adoptConsent.grants(earlySyncURL),
 					AdoptionInteractive:  adoptInteractive,
 				})
-				if handled, err := handleInitAdoptionDecision(earlyDecision, earlySyncURL, false); handled {
+				if handled, err := handleInitAdoptionDecision(earlyDecision, earlySyncURL, false, &adoptConsent); handled {
 					if err != nil {
 						return err
 					}
@@ -1582,7 +1583,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					RemoteProbeUnknown:   probeErr != nil,
 					AdoptionConsented:    adoptConsent.grants(syncURL),
 				})
-				if handled, err := handleInitAdoptionDecision(decision, syncURL, true); handled {
+				if handled, err := handleInitAdoptionDecision(decision, syncURL, true, &adoptConsent); handled {
 					return err
 				}
 
@@ -1610,6 +1611,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 		if syncFromRemote {
+			if syncURLFromGitOrigin && !adoptConsent.prompted && !quiet {
+				// --yes consented ahead of time: still name the source
+				// before importing from it, so a scripted run leaves a
+				// record of whose history it adopted (GH#6099).
+				fmt.Fprintf(os.Stderr, "Adopting Dolt issue history from git origin: %s\n", remedy.PrintedValue(redactRemoteURL(syncURL)))
+			}
 			// A raw https:// forge URL would route through Dolt's remotesapi
 			// client and spin forever (#4421); its git+ form routes through
 			// the git remote factory. Non-forge URLs are untouched (GH#3339).
@@ -3737,6 +3744,9 @@ func handleRemoteSafetyDecision(decision RemoteSafetyDecision, prefix, syncURL, 
 type initAdoptionConsent struct {
 	assumeYes bool
 	url       string
+	// prompted records that the early prompt already disclosed the URL, so
+	// the pre-clone announcement does not repeat it.
+	prompted bool
 }
 
 func (c initAdoptionConsent) grants(syncURL string) bool {
@@ -3748,13 +3758,48 @@ func (c initAdoptionConsent) grants(syncURL string) bool {
 // the caller then passes to handleRemoteSafetyDecision. lateCheck marks the
 // checkpoint after workspace scaffolding, whose refusal must not claim that
 // nothing was written.
-func handleInitAdoptionDecision(decision RemoteSafetyDecision, syncURL string, lateCheck bool) (bool, error) {
+func handleInitAdoptionDecision(decision RemoteSafetyDecision, syncURL string, lateCheck bool, consent *initAdoptionConsent) (bool, error) {
 	switch decision.Action {
+	case ActionAskAdoption:
+		ok, err := confirmInitRemoteAdoption(getRootContext(), os.Stdin, os.Stdin, os.Stderr, syncURL)
+		if err != nil || !ok {
+			return true, &exitError{Code: 1}
+		}
+		consent.url, consent.prompted = syncURL, true
+		return true, nil
 	case ActionRefuseAdoption:
 		fmt.Fprintf(os.Stderr, "\n%s\n\n", refusalMessageAdoption(syncURL, lateCheck))
 		return true, &exitError{Code: decision.ExitCode}
 	}
 	return false, nil
+}
+
+// confirmInitRemoteAdoption asks once, on out, whether to adopt the derived
+// remote's history, naming the URL and every consequence of a yes. The
+// default is NO: an empty line, EOF, invalid input or a read error does not
+// consent. Cancellation returns the context error so the caller can keep the
+// usual exit 130.
+func confirmInitRemoteAdoption(ctx context.Context, in io.Reader, closer io.Closer, out io.Writer, remoteURL string) (bool, error) {
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Git origin already has Dolt issue history, and no Dolt remote is configured.")
+	fmt.Fprintf(out, "  Derived from git origin: %s\n", remedy.PrintedValue(redactRemoteURL(remoteURL)))
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Adopting it will:")
+	fmt.Fprintln(out, "  • import that remote's entire issue history and project identity")
+	fmt.Fprintln(out, "  • add it as Dolt remote \"origin\"")
+	fmt.Fprintln(out, "  • write sync.remote into .beads/config.yaml")
+	fmt.Fprintln(out)
+	fmt.Fprint(out, "Adopt this remote's issue history? [y/N] ")
+
+	line, err := readLineWithContext(ctx, bufio.NewReader(in), closer)
+	if err != nil {
+		if isCanceled(err) {
+			return false, err
+		}
+		return false, nil
+	}
+	answer := strings.ToLower(strings.TrimSpace(line))
+	return answer == "y" || answer == "yes", nil
 }
 
 func configureInitDoltRemote(ctx context.Context, store storage.DoltStorage, syncURL string, quiet bool) {

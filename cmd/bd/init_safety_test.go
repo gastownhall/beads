@@ -10,11 +10,15 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/steveyegge/beads/internal/config"
 )
@@ -1096,5 +1100,74 @@ func TestInitDerivedOriginAdoptionRefusesWithoutConsent(t *testing.T) {
 				t.Errorf("refusal created .beads (stat err=%v); the early refusal must write nothing", err)
 			}
 		})
+	}
+}
+
+// TestConfirmInitRemoteAdoptionAnswerTable pins the adoption prompt's
+// consent semantics (GH#6099): only an explicit y/yes grants consent. Every
+// other answer, EOF and a read error decline without an error, so the caller
+// refuses with exit 1; cancellation alone comes back as an error, so the
+// caller keeps exit 130.
+func TestConfirmInitRemoteAdoptionAnswerTable(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, tc := range []struct {
+		name         string
+		ctx          context.Context
+		in           io.Reader
+		wantGrant    bool
+		wantCanceled bool
+	}{
+		{name: "y grants", in: strings.NewReader("y\n"), wantGrant: true},
+		{name: "yes grants", in: strings.NewReader("yes\n"), wantGrant: true},
+		{name: "uppercase YES grants", in: strings.NewReader("YES\n"), wantGrant: true},
+		{name: "padded y grants", in: strings.NewReader("  y  \n"), wantGrant: true},
+		{name: "n declines", in: strings.NewReader("n\n")},
+		{name: "no declines", in: strings.NewReader("no\n")},
+		{name: "empty line declines", in: strings.NewReader("\n")},
+		{name: "unrelated word declines", in: strings.NewReader("maybe\n")},
+		{name: "EOF declines", in: strings.NewReader("")},
+		{name: "read error declines", in: iotest.ErrReader(errors.New("read: resource temporarily unavailable"))},
+		{name: "cancellation is an error", ctx: canceled, in: strings.NewReader("y\n"), wantCanceled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := tc.ctx
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			var out bytes.Buffer
+			granted, err := confirmInitRemoteAdoption(ctx, tc.in, nil, &out, "file:///tmp/upstream.git")
+			if granted != tc.wantGrant {
+				t.Errorf("granted = %v, want %v", granted, tc.wantGrant)
+			}
+			if tc.wantCanceled {
+				if !isCanceled(err) {
+					t.Errorf("err = %v, want a cancellation", err)
+				}
+			} else if err != nil {
+				t.Errorf("err = %v, want nil (a decline is not an error)", err)
+			}
+		})
+	}
+}
+
+// TestConfirmInitRemoteAdoptionDisclosesURL pins the prompt's disclosure: it
+// names the URL it would adopt with credentials stripped, says what adoption
+// does, and defaults to NO.
+func TestConfirmInitRemoteAdoptionDisclosesURL(t *testing.T) {
+	var out bytes.Buffer
+	granted, err := confirmInitRemoteAdoption(context.Background(), strings.NewReader("n\n"), nil, &out,
+		"https://x-access-token:s3cret@example.com/org/upstream.git")
+	if err != nil || granted {
+		t.Fatalf("decline = (%v, %v), want (false, nil)", granted, err)
+	}
+	text := out.String()
+	for _, want := range []string{"https://example.com/org/upstream.git", "entire issue history", "sync.remote", "Adopt this remote's issue history?", "[y/N]"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("prompt missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "s3cret") {
+		t.Errorf("prompt leaked the URL's credentials:\n%s", text)
 	}
 }
