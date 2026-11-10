@@ -775,3 +775,26 @@ func TestInstallCodexProjectRefusesAReadOnlyAgentsFile(t *testing.T) {
 	}
 	assertReadOnlyFileUntouched(t, path, content, seed)
 }
+
+// Removing the managed section rewrites the file, so a non-writable one with
+// a section to remove must fail without claiming removal.
+func TestRemoveCodexRefusesAReadOnlyInstructionsFile(t *testing.T) {
+	env, stdout, _ := newCodexTestEnv(t)
+	agentsPath := codexInstructionsPath(env, false)
+	if err := installCodexInstructions(env, false); err != nil {
+		t.Fatalf("seed install: %v", err)
+	}
+	data, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", agentsPath, err)
+	}
+	seed := seedReadOnlyFile(t, agentsPath, string(data))
+
+	if err := removeCodexInstructions(env, false); err == nil {
+		t.Fatal("removeCodexInstructions replaced a read-only AGENTS.md instead of failing")
+	}
+	if strings.Contains(stdout.String(), "✓ Codex instructions removed") {
+		t.Errorf("reported removing from a file it could not change:\n%s", stdout.String())
+	}
+	assertReadOnlyFileUntouched(t, agentsPath, string(data), seed)
+}
