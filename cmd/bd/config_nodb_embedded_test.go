@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -66,9 +67,9 @@ func TestEmbeddedConfigNoWorkspaceStoreFreeCommands(t *testing.T) {
 	})
 
 	t.Run("set_yaml_only_reports_config_yaml_error", func(t *testing.T) {
-		stdout, stderr, err := runConfigCommandWithStreams(t, bd, dir, "set", "no-db", "true")
+		stdout, stderr, err := runConfigCommandWithStreams(t, bd, dir, "set", "json", "true")
 		if err == nil {
-			t.Fatalf("expected config set no-db to fail without a workspace config, stdout:\n%s\nstderr:\n%s", stdout, stderr)
+			t.Fatalf("expected config set json to fail without a workspace config, stdout:\n%s\nstderr:\n%s", stdout, stderr)
 		}
 		assertNoStoreInitLeak(t, stderr)
 		if !strings.Contains(stderr, "no .beads/config.yaml found") {
@@ -161,5 +162,69 @@ func TestEmbeddedConfigValidateJSONNoWorkspaceWritesStdout(t *testing.T) {
 	}
 	if hint, _ := payload["hint"].(string); !strings.Contains(hint, "bd where") {
 		t.Fatalf("expected hint to mention bd where, got %q", hint)
+	}
+}
+
+// TestEmbeddedConfigSetNoDBRefused: 'bd config set no-db' (and set-many) is
+// refused with an obsolete-setting explanation before it writes config.yaml
+// or the database, while 'bd config unset no-db' still clears an old
+// config.yaml entry (GH#7387).
+func TestEmbeddedConfigSetNoDBRefused(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "nodbset")
+	configPath := filepath.Join(beadsDir, "config.yaml")
+
+	readConfig := func() []byte {
+		t.Helper()
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	listJSON := func() string {
+		t.Helper()
+		stdout, stderr, err := runConfigCommandWithStreams(t, bd, dir, "list", "--json")
+		if err != nil {
+			t.Fatalf("config list --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		return stdout
+	}
+
+	before, beforeList := readConfig(), listJSON()
+	for _, args := range [][]string{{"set", "no-db", "true"}, {"set", "no-db", "false"}, {"set-many", "no-db=true"}} {
+		stdout, stderr, err := runConfigCommandWithStreams(t, bd, dir, args...)
+		if err == nil {
+			t.Fatalf("bd config %s succeeded:\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), stdout, stderr)
+		}
+		for _, want := range []string{"no-db", "obsolete", "Dolt"} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("bd config %s refusal does not mention %q:\n%s", strings.Join(args, " "), want, stderr)
+			}
+		}
+		if after := readConfig(); !bytes.Equal(after, before) {
+			t.Fatalf("bd config %s changed config.yaml:\n%s", strings.Join(args, " "), after)
+		}
+		if after := listJSON(); after != beforeList {
+			t.Fatalf("bd config %s changed the stored settings:\nbefore:\n%s\nafter:\n%s", strings.Join(args, " "), beforeList, after)
+		}
+	}
+
+	if err := os.WriteFile(configPath, append(before, []byte("no-db: true\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, err := runConfigCommandWithStreams(t, bd, dir, "unset", "no-db")
+	if err != nil {
+		t.Fatalf("config unset no-db failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	// unset comments the entry out; only an active one would still be read.
+	after := readConfig()
+	for _, line := range strings.Split(string(after), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "no-db:") {
+			t.Fatalf("config unset no-db left the entry active in config.yaml:\n%s", after)
+		}
 	}
 }
