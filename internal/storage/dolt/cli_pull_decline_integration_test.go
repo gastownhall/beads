@@ -230,3 +230,29 @@ func TestGitProtocolPullDeclinedConflictRecovers(t *testing.T) {
 		t.Fatalf("dc-unrelated lost by the reconciliation: %v", err)
 	}
 }
+
+// TestGitProtocolPeerPullDeclinedConflictAbortsMerge is the federation side of
+// GH#7839 (AC-3): PullFrom over a git-protocol peer returns the declined
+// conflicts as data with a nil error, as the SQL route does, and leaves no
+// merge or conflict rows behind.
+func TestGitProtocolPeerPullDeclinedConflictAbortsMerge(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	fx := setupCLIPullDeclineFixture(ctx, t)
+	store := fx.store
+
+	if useCLI, err := store.prepareCLIRouteForPeerGitProtocol(ctx, "origin"); err != nil || !useCLI {
+		t.Fatalf("peer origin must take the git-protocol CLI route (useCLI=%v, err=%v)", useCLI, err)
+	}
+	conflicts, err := store.PullFrom(ctx, "origin")
+	if err != nil {
+		t.Fatalf("PullFrom error = %v, want the conflicts as data with a nil error", err)
+	}
+	if tables := declinedTables(conflicts); !slices.Contains(tables, "issues") {
+		t.Fatalf("PullFrom conflicts = %v, want issues", tables)
+	}
+	assertNoMergeLeft(ctx, t, store)
+	if head, err := store.GetCurrentCommit(ctx); err != nil || head != fx.preHead {
+		t.Fatalf("HEAD after the aborted peer pull = %q (err %v), want the pre-pull %q", head, err, fx.preHead)
+	}
+}
