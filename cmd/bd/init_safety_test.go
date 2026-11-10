@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"testing/iotest"
@@ -1169,5 +1170,90 @@ func TestConfirmInitRemoteAdoptionDisclosesURL(t *testing.T) {
 	}
 	if strings.Contains(text, "s3cret") {
 		t.Errorf("prompt leaked the URL's credentials:\n%s", text)
+	}
+}
+
+// TestInitDerivedOriginAdoptionDeclined is AC-3 of GH#6099: on an interactive
+// init, anything but an affirmative answer to the adoption prompt (a no, an
+// empty line, invalid input, EOF) exits 1 before the workspace exists, with
+// guidance, and never falls through to a fresh database or a clone.
+func TestInitDerivedOriginAdoptionDeclined(t *testing.T) {
+	for _, tc := range []struct{ name, stdin string }{
+		{"no", "n\n"},
+		{"empty", "\n"},
+		{"invalid", "maybe\n"},
+		{"eof", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workDir, remoteDir := derivedOriginWithDoltDataFixture(t)
+			out, code := runInitForAdoptionTest(t, workDir, tc.stdin, []string{"BD_NON_INTERACTIVE=0"},
+				"--prefix", "mine", "--skip-hooks", "--skip-agents", "--quiet")
+			if code != 1 {
+				t.Fatalf("exit code = %d, want 1 (adoption declined)\noutput:\n%s", code, out)
+			}
+			if got := strings.Count(out, "Adopt this remote's issue history?"); got != 1 {
+				t.Errorf("prompt shown %d times, want 1:\n%s", got, out)
+			}
+			for _, want := range []string{"declined", remoteDir, "--yes", "--no-adopt", "BD_NO_REMOTE_ADOPT", "bd bootstrap"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("decline output does not mention %q:\n%s", want, out)
+				}
+			}
+			if strings.Contains(out, "failed to clone") {
+				t.Errorf("init attempted the clone after a decline:\n%s", out)
+			}
+			if _, err := os.Stat(filepath.Join(workDir, ".beads")); !os.IsNotExist(err) {
+				t.Errorf("decline created .beads (stat err=%v)", err)
+			}
+		})
+	}
+}
+
+// TestInitDerivedOriginAdoptionPromptCanceled pins the other half of AC-3:
+// an interrupt at the adoption prompt keeps init's existing cancellation
+// exit (130), not the decline's exit 1, and writes nothing.
+func TestInitDerivedOriginAdoptionPromptCanceled(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("os.Interrupt cannot be delivered to a child process on Windows")
+	}
+	workDir, _ := derivedOriginWithDoltDataFixture(t)
+	bdBin := buildBDForInitTests(t)
+	cmd := exec.Command(bdBin, "init", "--prefix", "mine", "--skip-hooks", "--skip-agents", "--quiet")
+	cmd.Dir = workDir
+	cmd.Env = hermeticInitEnv(t.TempDir(), "BD_NON_INTERACTIVE=0")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	var seen bytes.Buffer
+	buf := make([]byte, 4096)
+	for !strings.Contains(seen.String(), "[y/N]") {
+		n, readErr := stderr.Read(buf)
+		seen.Write(buf[:n])
+		if readErr != nil {
+			_ = cmd.Wait()
+			t.Fatalf("init exited before prompting: %v\n%s", readErr, seen.String())
+		}
+	}
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	rest, _ := io.ReadAll(stderr)
+	seen.Write(rest)
+	err = cmd.Wait()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != exitCodeCanceled {
+		t.Fatalf("init after interrupt = %v, want exit %d\n%s", err, exitCodeCanceled, seen.String())
+	}
+	if _, err := os.Stat(filepath.Join(workDir, ".beads")); !os.IsNotExist(err) {
+		t.Errorf("canceled prompt created .beads (stat err=%v)", err)
 	}
 }
