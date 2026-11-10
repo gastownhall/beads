@@ -806,3 +806,26 @@ func TestRemoveCodexRefusesAReadOnlyInstructionsFile(t *testing.T) {
 	}
 	assertReadOnlyFilePreserved(t, agentsPath, string(data), seed)
 }
+
+// A rerun whose instructions content is already current must succeed against
+// a read-only file, leaving it exactly as it is.
+func TestInstallCodexLeavesACurrentReadOnlyAgentsFileAlone(t *testing.T) {
+	env, stdout, _ := newCodexTestEnv(t)
+	agentsPath := codexInstructionsPath(env, false)
+	if err := installCodexInstructions(env, false); err != nil {
+		t.Fatalf("seed install: %v", err)
+	}
+	current, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", agentsPath, err)
+	}
+	seed := seedReadOnlyFileWithOldMtime(t, agentsPath, string(current))
+
+	if err := installCodexInstructions(env, false); err != nil {
+		t.Fatalf("a rerun whose content is already current must succeed on a read-only file: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "✓ Codex instructions installed") {
+		t.Errorf("expected the rerun to report the instructions installed, got:\n%s", stdout.String())
+	}
+	assertReadOnlyFilePreserved(t, agentsPath, string(current), seed)
+}

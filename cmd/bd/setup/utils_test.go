@@ -593,3 +593,76 @@ func TestAtomicWriteFileRefusesAReadOnlyFile(t *testing.T) {
 	assertReadOnlyFilePreserved(t, path, content, seed)
 	assertNoTempResidue(t, dir)
 }
+
+// A read-only file whose bytes and requested mode are already what the write
+// would put there needs no change: the writer leaves it alone and reports
+// success, rather than refusing a no-op.
+func TestAtomicWriteFileLeavesACurrentReadOnlyFileAlone(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix-style write refusal is not exercised on Windows")
+	}
+	t.Run("same bytes, no explicit mode", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "AGENTS.md")
+		content := "# My project\nSome user text.\n"
+		seed := seedReadOnlyFileWithOldMtime(t, path, content)
+
+		if err := atomicWriteFile(path, []byte(content)); err != nil {
+			t.Fatalf("atomicWriteFile refused a no-op on a current read-only file: %v", err)
+		}
+		assertReadOnlyFilePreserved(t, path, content, seed)
+		assertNoTempResidue(t, dir)
+	})
+	t.Run("same bytes, same explicit mode", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "AGENTS.md")
+		content := "# My project\nSome user text.\n"
+		seed := seedReadOnlyFileWithOldMtime(t, path, content)
+
+		if err := atomicWriteFile(path, []byte(content), 0o444); err != nil {
+			t.Fatalf("atomicWriteFile refused a no-op on a current read-only file: %v", err)
+		}
+		assertReadOnlyFilePreserved(t, path, content, seed)
+		assertNoTempResidue(t, dir)
+	})
+	t.Run("same bytes, different explicit mode refuses", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "AGENTS.md")
+		content := "# My project\nSome user text.\n"
+		seed := seedReadOnlyFileWithOldMtime(t, path, content)
+
+		err := atomicWriteFile(path, []byte(content), 0o644)
+		if err == nil {
+			t.Fatal("a mode change must not sneak past a file the process cannot write")
+		}
+		assertReadOnlyFilePreserved(t, path, content, seed)
+		assertNoTempResidue(t, dir)
+	})
+	t.Run("unreadable content never counts as current", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "AGENTS.md")
+		content := "# My project\n"
+		seedFileMode(t, path, content, 0o000)
+		old := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatalf("backdate %s: %v", path, err)
+		}
+		requireWriteOpenDenied(t, path)
+
+		err := atomicWriteFile(path, []byte(content))
+		if err == nil {
+			t.Fatal("a file whose bytes cannot be read must be refused, whatever the write would hold")
+		}
+		info, serr := os.Stat(path)
+		if serr != nil {
+			t.Fatalf("stat %s: %v", path, serr)
+		}
+		if info.Mode().Perm() != 0o000 {
+			t.Errorf("%s mode = %04o, want 0000", path, info.Mode().Perm())
+		}
+		if !info.ModTime().Equal(old) {
+			t.Errorf("%s was rewritten: mtime %v, want %v", path, info.ModTime(), old)
+		}
+		assertNoTempResidue(t, dir)
+	})
+}

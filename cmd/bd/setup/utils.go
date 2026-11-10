@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -83,6 +84,15 @@ func atomicWriteFileFollowingSymlink(path string, data []byte, perm ...os.FileMo
 			}
 		case os.IsPermission(perr):
 			// The rename would replace this file whatever its mode says.
+			// Leave it instead: a no-op when the write would put there
+			// exactly what is already there — the requested bytes and, when
+			// an explicit mode was asked for, the mode the file has. A read
+			// that fails never counts as equal content.
+			if len(perm) == 0 || perm[0] == info.Mode().Perm() {
+				if current, rerr := os.ReadFile(targetPath); rerr == nil && bytes.Equal(current, data) { // #nosec G304 -- the resolved destination bd itself chose to write
+					return nil
+				}
+			}
 			return fmt.Errorf("%w: %s (left unchanged; make it writable and rerun): %w", errRefuseReadOnlyWrite, targetPath, perr)
 		default:
 			return fmt.Errorf("probe path: %w", perr)
