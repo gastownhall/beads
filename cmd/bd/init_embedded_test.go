@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1987,4 +1988,72 @@ func testEmbeddedInitGitBootstrapRouting(t *testing.T, names ...string) {
 			}
 		})
 	}
+}
+
+// TestEmbeddedInitGitOriginAdoptionRequiresConsent is the GH#6099 repro: a
+// fork-less clone whose git origin already carries another project's
+// refs/dolt/data. A non-interactive `bd init` with no --yes must not silently
+// adopt that issue history; #5068 already makes the outbound direction (bd
+// dolt push to a git-origin-derived remote) fail closed without consent.
+// Unlike a clone failure, the consent refusal exits 1 before .beads exists.
+func TestEmbeddedInitGitOriginAdoptionRequiresConsent(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
+	}
+
+	bd := buildEmbeddedBD(t)
+	cloneDir, remoteURL := embeddedUpstreamWithIssueHistory(t, bd)
+
+	cmd := exec.Command(bd, "init", "--prefix", "mine", "--skip-hooks", "--skip-agents")
+	cmd.Dir = cloneDir
+	cmd.Env = bdEnv(cloneDir)
+	initOut, initErr := cmd.CombinedOutput()
+	if initErr == nil {
+		list := exec.Command(bd, "list", "--all")
+		list.Dir = cloneDir
+		list.Env = bdEnv(cloneDir)
+		listOut, _ := list.CombinedOutput()
+		t.Fatalf("non-interactive bd init without --yes succeeded; want a consent refusal (#6099)\ninit output:\n%s\nbd list --all:\n%s", initOut, listOut)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(initErr, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("init error = %v, want exit 1\n%s", initErr, initOut)
+	}
+	for _, want := range []string{remoteURL, "will not adopt it without consent", "--yes", "--no-adopt"} {
+		if !strings.Contains(string(initOut), want) {
+			t.Errorf("refusal does not mention %q:\n%s", want, initOut)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(cloneDir, ".beads")); !os.IsNotExist(err) {
+		t.Errorf("refusal created .beads (stat err=%v)", err)
+	}
+}
+
+// embeddedUpstreamWithIssueHistory publishes a real upstream issue
+// ("Upstream issue history", prefix "up") to refs/dolt/data on a bare git
+// remote, and returns a fresh fork-less clone whose origin IS that remote,
+// plus the remote URL.
+func embeddedUpstreamWithIssueHistory(t *testing.T, bd string) (cloneDir, remoteURL string) {
+	t.Helper()
+	bareDir := filepath.Join(t.TempDir(), "upstream.git")
+	runGitForBootstrapTest(t, "", "init", "--bare", "-b", "main", bareDir)
+	remoteURL = "file://" + bareDir
+
+	upstreamDir := t.TempDir()
+	initGitRepoAt(t, upstreamDir)
+	runGitForBootstrapTest(t, upstreamDir, "branch", "-M", "main")
+	runGitForBootstrapTest(t, upstreamDir, "commit", "--allow-empty", "-m", "init")
+	runBDInit(t, bd, upstreamDir, "--prefix", "up", "--skip-hooks", "--skip-agents")
+	bdCreate(t, bd, upstreamDir, "Upstream issue history", "--type", "task")
+	runGitForBootstrapTest(t, upstreamDir, "remote", "add", "origin", remoteURL)
+	runGitForBootstrapTest(t, upstreamDir, "push", "-u", "origin", "main")
+	bdDolt(t, bd, upstreamDir, "push", "--yes")
+	if lsOut, err := gitCommand("ls-remote", remoteURL, "refs/dolt/data").CombinedOutput(); err != nil || !strings.Contains(string(lsOut), "refs/dolt/data") {
+		t.Fatalf("fixture: upstream did not publish refs/dolt/data: %v\n%s", err, lsOut)
+	}
+
+	cloneDir = t.TempDir()
+	initGitRepoAt(t, cloneDir)
+	runGitForBootstrapTest(t, cloneDir, "remote", "add", "origin", remoteURL)
+	return cloneDir, remoteURL
 }
