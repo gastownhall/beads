@@ -54,6 +54,45 @@ func loadBlockingDepsForIssueIDsInTx(ctx context.Context, tx DBTX, depTables []s
 	return deps, nil
 }
 
+// loadCloseReasonByIDInTx reads the close reason of each id from issues then
+// wisps, the wisps row winning a cross-table duplicate as in
+// loadStatusByIDInTx. A NULL reason reads as "". No ids, no reads.
+func loadCloseReasonByIDInTx(ctx context.Context, tx DBTX, ids []string) (map[string]string, error) {
+	reasonByID := make(map[string]string)
+	if len(ids) == 0 {
+		return reasonByID, nil
+	}
+	for _, issueTable := range []string{"issues", "wisps"} {
+		for start := 0; start < len(ids); start += queryBatchSize {
+			end := min(start+queryBatchSize, len(ids))
+			placeholders, args := buildSQLInClause(ids[start:end])
+			//nolint:gosec // G201: issueTable is a hardcoded constant; placeholders are ? markers.
+			rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+				SELECT id, COALESCE(close_reason, '') FROM %s WHERE id IN (%s)
+			`, issueTable, placeholders), args...)
+			if err != nil {
+				if optionalBlockedTable(issueTable) && isTableNotExistError(err) {
+					break
+				}
+				return nil, fmt.Errorf("close reason from %s: %w", issueTable, err)
+			}
+			for rows.Next() {
+				var id, reason string
+				if err := rows.Scan(&id, &reason); err != nil {
+					_ = rows.Close()
+					return nil, fmt.Errorf("scan close reason: %w", err)
+				}
+				reasonByID[id] = reason
+			}
+			_ = rows.Close()
+			if err := rows.Err(); err != nil {
+				return nil, fmt.Errorf("close reason rows from %s: %w", issueTable, err)
+			}
+		}
+	}
+	return reasonByID, nil
+}
+
 func loadParentIDsForChildrenInTx(ctx context.Context, tx DBTX, depTables []string, childIDs []string) (map[string]string, error) {
 	childParents := make(map[string]string)
 	for _, depTable := range depTables {
@@ -273,9 +312,29 @@ func GetBlockedIssuesInTx(ctx context.Context, tx DBTX, filter types.WorkFilter)
 		if err != nil {
 			return nil, fmt.Errorf("blocker target status: %w", err)
 		}
+		// A closed conditional-blocks target still holds its source while its
+		// close reason is not a failure (types.BlockingEdgeHolds), so only for
+		// those targets is the reason read at all.
+		var closedConditional []string
+		for _, rec := range blockingDeps {
+			if rec.depType == string(types.DepConditionalBlocks) && activeTargets[rec.dependsOnID] == types.StatusClosed {
+				closedConditional = append(closedConditional, rec.dependsOnID)
+			}
+		}
+		closeReasons, err := loadCloseReasonByIDInTx(ctx, tx, closedConditional)
+		if err != nil {
+			return nil, fmt.Errorf("blocker target close reason: %w", err)
+		}
 		for _, rec := range blockingDeps {
 			status, ok := activeTargets[rec.dependsOnID]
-			if !ok || status == types.StatusClosed || status == types.StatusPinned {
+			if !ok {
+				continue
+			}
+			holds := status != types.StatusClosed && status != types.StatusPinned
+			if rec.depType == string(types.DepConditionalBlocks) {
+				holds = types.BlockingEdgeHolds(types.DepConditionalBlocks, status, closeReasons[rec.dependsOnID])
+			}
+			if !holds {
 				continue
 			}
 			blockerMap[rec.issueID] = append(blockerMap[rec.issueID], rec.dependsOnID)
