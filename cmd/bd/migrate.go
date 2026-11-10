@@ -663,15 +663,27 @@ func handleSchemaMigrate() error {
 	if total > 0 {
 		status = "applied"
 		commandDidWrite.Store(true)
-		// Stamp the version markers the refused version-bump reconciliation
-		// could not (gastownhall/beads#5920 review). autoMigrateOnVersionBump
-		// is the only automatic writer of bd_version, it was refused by the
-		// gate this command just satisfied, and its one-shot .local_version
-		// signal is already consumed — so without this, `bd doctor` and the
-		// git-hook health check keep reporting a version mismatch after the
-		// operator has done everything the refusal told them to.
-		stampWorkspaceVersionAfterMigrate(store)
 	}
+
+	// Stamp the version markers on every successful direct run, not only when
+	// this pass migrated. The reconciliation autoMigrateOnVersionBump would
+	// have run is the one the #5920 gate refused — its one-shot
+	// .local_version signal may already be consumed (by the very refusal
+	// that sent the operator here) and the marker can also be stale after
+	// another client migrated this database while ours stood refused. Either
+	// way `bd doctor` and the git-hook health check keep reporting a version
+	// mismatch after the operator has done everything the refusal told them
+	// to, until some open reconciles it again (gastownhall/beads#7283).
+	//
+	// This is reconciliation, not an unconditional overwrite: the reconciler
+	// skips matching markers and refuses downgrades before any write. And it
+	// is best-effort and nonfatal by design (stampWorkspaceVersionAfterMigrate):
+	// the migration has already succeeded and been counted. Marker-only work
+	// deliberately does NOT set commandDidWrite above: local_metadata is
+	// dolt-ignored in server mode, but embedded auto-commit commits all
+	// pending edits, so treating a marker repair as a write would commit
+	// unrelated uncommitted work.
+	stampWorkspaceVersionAfterMigrate(store)
 
 	if jsonOutput {
 		return outputJSON(map[string]interface{}{

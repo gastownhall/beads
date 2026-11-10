@@ -206,6 +206,42 @@ func TestSharedServerVersionBumpDoesNotPromoteCursor(t *testing.T) {
 	if !strings.Contains(stdout, "Applied 1 schema migration(s)") {
 		t.Errorf("bd migrate schema reported %q, want the Applied/1 line (gastownhall/beads#7283):\n%s", stdout, stdout)
 	}
+	// The version-bump reconciliation this command stands in for was refused
+	// (and its one-shot .local_version signal consumed) by the very gate this
+	// command satisfied, so without a stamp bd doctor and the git-hook health
+	// check keep reporting a mismatch after the operator did everything the
+	// refusal told them to.
+	var marker string
+	if err := admin.QueryRowContext(ctx,
+		"SELECT value FROM local_metadata WHERE `key` = 'bd_version'").Scan(&marker); err != nil {
+		t.Fatalf("read bd_version marker after bd migrate schema: %v", err)
+	}
+	if marker != Version {
+		t.Errorf("bd_version marker = %q after bd migrate schema, want %q (gastownhall/beads#7283)", marker, Version)
+	}
+
+	// The same repair must not depend on migrations being pending: a stale
+	// marker on an already-current database is healed by a no-op run too —
+	// the count-based stamp could not (another client migrated while this
+	// workspace stood refused, and the upgrade signal is consumed).
+	if _, err := admin.ExecContext(ctx,
+		"UPDATE local_metadata SET value = '1.0.0' WHERE `key` = 'bd_version'"); err != nil {
+		t.Fatalf("regress bd_version marker: %v", err)
+	}
+	stdout, stderr, code = run("migrate", "schema")
+	if code != 0 {
+		t.Fatalf("second bd migrate schema exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Schema already at v") {
+		t.Errorf("second bd migrate schema reported %q, want the no-op line:\n%s", stdout, stdout)
+	}
+	if err := admin.QueryRowContext(ctx,
+		"SELECT value FROM local_metadata WHERE `key` = 'bd_version'").Scan(&marker); err != nil {
+		t.Fatalf("read bd_version marker after the no-op run: %v", err)
+	}
+	if marker != Version {
+		t.Errorf("bd_version marker = %q after the no-op bd migrate schema, want %q (gastownhall/beads#7283)", marker, Version)
+	}
 }
 
 // TestServerModeReadRefusesASchemaItsReadsCannotQuery is the other half of the
