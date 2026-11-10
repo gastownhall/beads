@@ -203,3 +203,66 @@ func TestEmbeddedSetStateSuccessShape(t *testing.T) {
 		}
 	})
 }
+
+// TestEmbeddedSetStateRecordsOneHistoryCommit pins AC-3 (GH#5637): one
+// successful set-state on a settled durable database with auto-commit records
+// ONE history commit, labelled `bd: set-state <id>`, carrying the event, its
+// parent edge and the label swap together — rather than the two independent
+// commits the old shape made, each with its own message.
+func TestEmbeddedSetStateRecordsOneHistoryCommit(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "sh")
+	issue := bdCreate(t, bd, dir, "History subject", "--type", "task")
+
+	cfg, _ := configfile.Load(beadsDir)
+	database := ""
+	if cfg != nil {
+		database = cfg.GetDoltDatabase()
+	}
+	// Read the version log in-process between commands, closing the handle
+	// before the next bd subprocess runs (one writer at a time).
+	logCount := func() (int, string) {
+		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), database, "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		defer cleanup()
+		var n int
+		if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dolt_log").Scan(&n); err != nil {
+			t.Fatalf("count dolt_log: %v", err)
+		}
+		var msg string
+		if err := db.QueryRowContext(t.Context(), "SELECT message FROM dolt_log ORDER BY commit_order DESC LIMIT 1").Scan(&msg); err != nil {
+			t.Fatalf("read dolt_log head: %v", err)
+		}
+		return n, msg
+	}
+
+	// Baseline on a settled database: init and create have already
+	// committed, so history recording is working before the run under test.
+	before, _ := logCount()
+	bdSetState(t, bd, dir, issue.ID, "patrol=muted", "--reason", "one commit")
+	after, head := logCount()
+
+	if delta := after - before; delta != 1 {
+		t.Fatalf("set-state recorded %d history commits, want exactly 1", delta)
+	}
+	if want := "bd: set-state " + issue.ID; head != want {
+		t.Fatalf("head commit message = %q, want %q", head, want)
+	}
+
+	// The ONE commit carries all three writes: nothing else was committed
+	// after the baseline, so the event, its parent edge and the swapped
+	// label below can only be inside it.
+	if got := bdState(t, bd, dir, issue.ID, "patrol"); strings.TrimSpace(got) != "muted" {
+		t.Errorf("patrol after set-state = %q, want muted", strings.TrimSpace(got))
+	}
+	if children := len(bdListJSON(t, bd, dir, "--parent", issue.ID, "--all", "--type", "event")); children != 1 {
+		t.Errorf("event children = %d, want 1", children)
+	}
+}
