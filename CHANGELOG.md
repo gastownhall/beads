@@ -1226,6 +1226,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd set-state` writes its event, the event's parent-child edge and the
+  label swap as one transaction and one history commit (`bd: set-state
+  <id>`). It used to commit the event and the label change separately, so a
+  refused label patch (a `dimension:value` label over 255 characters, say)
+  left a committed event and edge for a state change that never happened
+  (GH#5637). The event now takes an ordinary minted id instead of a dotted
+  child id; its parent-child edge still lists it under the issue. Over
+  `bd connect`, setting state on a template needs a server that advertises
+  `issues.batchApply.updateAllowTemplate`; an older server refuses before
+  anything is written.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
