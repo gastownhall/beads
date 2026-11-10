@@ -200,12 +200,15 @@ func runWispGCProxiedServer(ctx context.Context, dryRun bool, ageThreshold time.
 		return HandleError("%v", err)
 	}
 
-	return renderWispGCDeleteResult(ids, res)
+	return renderWispGCDeleteResult(ids, res, nil)
 }
 
-func renderWispGCDeleteResult(ids []string, res domain.DeleteIssuesResult) error {
+// renderWispGCDeleteResult prints a proxied wisp gc deletion; report adds
+// mode-specific keys to the JSON answer, as deleteBatchReporting does on the
+// direct route.
+func renderWispGCDeleteResult(ids []string, res domain.DeleteIssuesResult, report map[string]interface{}) error {
 	if jsonOutput {
-		return outputJSON(map[string]interface{}{
+		out := map[string]interface{}{
 			"deleted":              ids,
 			"deleted_count":        res.DeletedCount,
 			"dependencies_removed": res.DependenciesCount,
@@ -213,7 +216,11 @@ func renderWispGCDeleteResult(ids []string, res domain.DeleteIssuesResult) error
 			"events_removed":       res.EventsCount,
 			"references_updated":   res.ReferencesUpdated,
 			"orphaned_issues":      res.OrphanedIssues,
-		})
+		}
+		for k, v := range report {
+			out[k] = v
+		}
+		return outputJSON(out)
 	}
 	fmt.Printf("%s Deleted %d issue(s)\n", ui.RenderPass("✓"), res.DeletedCount)
 	fmt.Printf("  Removed %d dependency link(s)\n", res.DependenciesCount)
@@ -232,67 +239,35 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 	if err != nil {
 		return err
 	}
-	r := uowMolReader{uw: uw}
-
-	statusClosed := types.StatusClosed
-	ephemeralTrue := true
-	filter := types.IssueFilter{
-		Status:       &statusClosed,
-		Ephemeral:    &ephemeralTrue,
-		ExcludeTypes: excludeTypes,
-		Limit:        5000,
-	}
-	closedIssues, err := r.SearchIssues(ctx, "", filter)
-	if err != nil {
-		uw.Close(ctx)
-		return HandleError("listing closed wisps: %v", err)
-	}
-
-	pinnedCount := 0
-	infraCount := 0
-	filtered := make([]*types.Issue, 0, len(closedIssues))
-	for _, issue := range closedIssues {
-		if issue.Pinned {
-			pinnedCount++
-			continue
-		}
-		if r.IsInfraTypeCtx(ctx, issue.IssueType) {
-			infraCount++
-			continue
-		}
-		filtered = append(filtered, issue)
-	}
-	closedIssues = filtered
+	sel, err := selectClosedWispsForPurge(ctx, uowMolReader{uw: uw}, excludeTypes)
 	uw.Close(ctx)
-
-	if pinnedCount > 0 && !jsonOutput {
-		fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", pinnedCount)
+	if err != nil {
+		return HandleError("%v", err)
 	}
-	if infraCount > 0 && !jsonOutput {
-		fmt.Printf("Skipping %d configured infra issue(s) protected from GC\n", infraCount)
+	if !jsonOutput {
+		sel.printSkips()
 	}
 
-	if len(closedIssues) == 0 {
+	if len(sel.Candidates) == 0 {
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
-				"deleted_count": 0,
-				"message":       "No closed wisps to delete",
+				"deleted_count":          0,
+				"message":                "No closed wisps to delete",
+				"live_dependent_skipped": sel.LiveDependentSkipped,
 			})
 		}
 		fmt.Println("No closed wisps to delete")
 		return nil
 	}
 
-	ids := make([]string, len(closedIssues))
-	for i, issue := range closedIssues {
-		ids[i] = issue.ID
-	}
+	ids := sel.ids()
 
 	if !force && !dryRun {
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
-				"candidates": len(ids),
-				"dry_run":    true,
+				"candidates":             len(ids),
+				"dry_run":                true,
+				"live_dependent_skipped": sel.LiveDependentSkipped,
 			})
 		}
 		fmt.Printf("Found %d closed wisp(s) to delete\n", len(ids))
@@ -303,8 +278,9 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 	if dryRun {
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
-				"candidates": len(ids),
-				"dry_run":    true,
+				"candidates":             len(ids),
+				"dry_run":                true,
+				"live_dependent_skipped": sel.LiveDependentSkipped,
 			})
 		}
 		fmt.Printf("Found %d closed wisp(s)\n", len(ids))
@@ -316,7 +292,8 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 		// Cascade must stay OFF: the closed set above is already the complete
 		// purge candidate list, so cascade can only add NON-closed dependents
 		// (live molecule steps) to the batch — the patrol self-destruct bug.
-		// Mirrors runWispPurgeClosed in wisp.go.
+		// The selector already held back closed wisps with live parent-child
+		// or tracks dependents (GH#5152). Mirrors runWispPurgeClosed in wisp.go.
 		res, err := uw.IssueUseCase().DeleteIssues(ctx, domain.DeleteIssuesParams{
 			IDs:                  ids,
 			Cascade:              false,
@@ -331,5 +308,5 @@ func runWispPurgeClosedProxiedServer(ctx context.Context, dryRun, force bool, ex
 		return HandleError("%v", err)
 	}
 
-	return renderWispGCDeleteResult(ids, res)
+	return renderWispGCDeleteResult(ids, res, map[string]interface{}{"live_dependent_skipped": sel.LiveDependentSkipped})
 }
