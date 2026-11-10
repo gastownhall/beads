@@ -254,6 +254,36 @@ func TestProxiedServerMolBond(t *testing.T) {
 		}
 	})
 
+	// AC-6 on the proxied route: --ref with --type conditional is refused
+	// for a real bond and a dry run alike, and neither creates anything.
+	t.Run("conditional_ref_arm_is_refused_and_creates_nothing", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "mbcond")
+		writeFormulaFixture(t, p, twoStepFormula("arm", "Capture {{worker_name}}"))
+		patrol, _, s2, _ := seedProxiedRefArmParent(t, bd, p)
+		db := openProxiedDB(t, p)
+		before := bdProxiedListJSON(t, bd, p, "--all")
+		depsBefore := proxiedOutgoingDeps(t, db, s2)
+
+		for _, extra := range [][]string{nil, {"--dry-run"}} {
+			args := append([]string{"mol", "bond", "arm", patrol, "--type", "conditional",
+				"--ref", "arm-{{worker_name}}", "--var", "worker_name=ace"}, extra...)
+			stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, args...)
+			if err == nil {
+				t.Fatalf("bd %v succeeded, want the conditional --ref refusal: %s", args, stdout)
+			}
+			if !strings.Contains(stdout+stderr, "--ref cannot be combined with --type conditional") {
+				t.Fatalf("bd %v: want the conditional --ref refusal, got stdout:%s stderr:%s", args, stdout, stderr)
+			}
+		}
+		if after := bdProxiedListJSON(t, bd, p, "--all"); len(after) != len(before) {
+			t.Fatalf("refused bonds changed the issue count: %d -> %d", len(before), len(after))
+		}
+		if got := proxiedOutgoingDeps(t, db, s2); !slices.Equal(got, depsBefore) {
+			t.Fatalf("refused bonds changed S2's edges: %v -> %v", depsBefore, got)
+		}
+	})
+
 	t.Run("dry_run_creates_nothing", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "mbdr")

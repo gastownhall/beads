@@ -3753,3 +3753,32 @@ func TestCloneSubgraphTerminalEdgeFailureRollsBackTheArm(t *testing.T) {
 		}
 	}
 }
+
+// TestBondProtoMolConditionalRefArmCreatesNothing pins AC-6 on the direct
+// route: the refusal of --ref with --type conditional stands, and the refused
+// bond writes no issue and no edge.
+func TestBondProtoMolConditionalRefArmCreatesNothing(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreWithPrefix(t, t.TempDir()+"/test.db", "patrol")
+	f := seedRefArmFixture(t, ctx, s, false)
+	before, err := s.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("SearchIssues: %v", err)
+	}
+	depsBefore := outgoingDeps(t, ctx, s, f.s2.ID)
+
+	_, err = bondProtoMol(ctx, s, f.proto, f.mol, types.BondTypeConditional, map[string]string{"name": "ace"}, "arm-{{name}}", "test", false, false)
+	if err == nil || !strings.Contains(err.Error(), "--ref cannot be combined with --type conditional") {
+		t.Fatalf("bondProtoMol error = %v, want the conditional --ref refusal", err)
+	}
+	after, err := s.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("SearchIssues: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("refused bond changed the issue count: %d -> %d", len(before), len(after))
+	}
+	if got := outgoingDeps(t, ctx, s, f.s2.ID); !slices.Equal(got, depsBefore) {
+		t.Fatalf("refused bond changed S2's edges: %v -> %v", depsBefore, got)
+	}
+}
