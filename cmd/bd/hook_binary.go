@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -24,9 +25,11 @@ func resolveHookSubprocessBinary() string {
 
 // pickHookSubprocessBinary returns the running bd, so a hook's child is the
 // same binary as the hook that started it. A bare "bd" let the child be
-// whatever PATH selects: under git's non-interactive shell, or when the hook
-// was started by absolute path, that can be another, older install, which
-// then fails to open (or quietly rewrites) a database this bd wrote (GH#5922).
+// whatever PATH selects: when the hook's bd was started by absolute path, an
+// alias or a hook manager, that can be another, older install, which then
+// fails to open (or quietly rewrites) a database this bd wrote (GH#5922).
+// bd's own hooks start their bd from PATH, so there parent and child already
+// agree; hookPATHBinaryWarning covers that selection.
 //
 // Symlinks are resolved so every re-exec site agrees on one path; a failed
 // resolution keeps the unresolved path rather than falling back to PATH,
@@ -77,12 +80,18 @@ func warnHookPATHBinary() {
 // can see.
 //
 // Only file identity is compared (so a symlink or hard link to self is the
-// same bd), and no candidate is ever executed. Two files may hold the same
-// version, so the text names the paths without claiming the other bd is
-// older. A match exec.LookPath reports as exec.ErrDot (found through a
-// relative PATH entry) still counts: the hook shell would run it. When self
-// itself cannot be stat'ed there is no identity to compare, so nothing is
-// said.
+// same bd), and no candidate is ever executed. A PATH bd that resolves,
+// through its symlinks, to a file beside self with self's name and another
+// extension is a launcher installed with self, not another install (see
+// installedBeside): npm links <prefix>/bin/bd and
+// node_modules/.bin/bd to bin/bd.js, a Node launcher that starts the native bd
+// next to it, so the hooks run self and nothing is said. Any other file may
+// still be a wrapper or shim that runs self, or a copy of the same version,
+// so the text names both paths and self's version and leaves the verdict to
+// the version check instead of claiming the other bd is older. A match
+// exec.LookPath reports as exec.ErrDot (found through a relative PATH entry)
+// still counts: the hook shell would run it. When self itself cannot be
+// stat'ed there is no identity to compare, so nothing is said.
 func hookPATHBinaryWarning(self string, lookPath func(string) (string, error)) string {
 	selfInfo, err := os.Stat(self)
 	if err != nil {
@@ -98,9 +107,33 @@ func hookPATHBinaryWarning(self string, lookPath func(string) (string, error)) s
 	if foundInfo, err := os.Stat(found); err == nil && os.SameFile(selfInfo, foundInfo) {
 		return ""
 	}
-	return fmt.Sprintf("%s Git hooks run the bd that PATH selects, which is not this bd:\n"+
+	if installedBeside(found, self) {
+		return ""
+	}
+	return fmt.Sprintf("%s Git hooks run the bd that PATH selects, a different file from this bd:\n"+
 		"  PATH selects: %s\n"+
-		"  This bd:      %s\n"+
-		"  An older bd there can fail to open this database, and commits then miss their issue export.\n"+
-		"  Upgrade or remove that bd, or put this one first on the PATH git uses.\n"+check, ui.RenderWarn("⚠"), found, self)
+		"  This bd:      %s (version %s)\n"+check+
+		"  If it shows an older version, hooks can fail to open this database and commits miss their issue export:\n"+
+		"  upgrade or remove that bd, or put this one first on the PATH git uses. A wrapper that runs this bd is fine.\n",
+		ui.RenderWarn("⚠"), found, self, Version)
+}
+
+// installedBeside reports whether found, resolved through its symlinks, is a
+// launcher installed with self: a file in self's directory with self's name
+// and another extension, such as npm's bin/bd.js beside bin/bd. Any other file
+// there, an older bd-1.0.5 or a plain bd beside a differently named self, is
+// another install and still draws the warning.
+func installedBeside(found, self string) bool {
+	resolved, err := filepath.EvalSymlinks(found)
+	if err != nil {
+		return false
+	}
+	if resolved, err = filepath.Abs(resolved); err != nil {
+		return false
+	}
+	if filepath.Dir(resolved) != filepath.Dir(self) {
+		return false
+	}
+	stem := func(p string) string { return strings.TrimSuffix(filepath.Base(p), filepath.Ext(p)) }
+	return stem(resolved) == stem(self) && filepath.Ext(resolved) != filepath.Ext(self)
 }

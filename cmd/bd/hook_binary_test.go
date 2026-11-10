@@ -108,13 +108,84 @@ func TestHooksPATHBinaryWarning(t *testing.T) {
 
 	t.Run("another file warns with both paths", func(t *testing.T) {
 		got := hookPATHBinaryWarning(self, selects(other, nil))
-		for _, want := range []string{"not this bd", other, self} {
+		// File identity cannot tell a stale copy from a wrapper that runs
+		// this bd, so the advice hangs on the version check, never an
+		// unconditional "remove that bd".
+		for _, want := range []string{"a different file from this bd", other, self, "version " + Version, "bd version", "If it shows an older version"} {
 			if !strings.Contains(got, want) {
 				t.Errorf("warning lacks %q:\n%s", want, got)
 			}
 		}
 		if n := strings.Count(got, "⚠"); n != 1 {
 			t.Errorf("warning has %d ⚠ lines, want one diagnostic:\n%s", n, got)
+		}
+	})
+	t.Run("launcher installed beside this bd is quiet", func(t *testing.T) {
+		// npm's layout: <prefix>/bin/bd links to the package's bin/bd.js, a
+		// Node launcher that starts the native bd next to it.
+		pkgBin := filepath.Join(dir, "npm", "lib", "node_modules", "@beads", "bd", "bin")
+		native := filepath.Join(pkgBin, "bd")
+		link := filepath.Join(dir, "npm", "bin", "bd")
+		for _, p := range []string{native, link} {
+			if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, p := range []string{native, filepath.Join(pkgBin, "bd.js")} {
+			if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Symlink(filepath.Join("..", "lib", "node_modules", "@beads", "bd", "bin", "bd.js"), link); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		if got := hookPATHBinaryWarning(native, selects(link, nil)); got != "" {
+			t.Errorf("warning for npm's launcher beside this bd:\n%s", got)
+		}
+	})
+	t.Run("older bd beside this bd warns", func(t *testing.T) {
+		// Same directory, but another name: a kept older install, not a
+		// launcher of this one.
+		old := filepath.Join(filepath.Dir(self), "bd-1.0.5")
+		if err := os.WriteFile(old, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(dir, "home-bin", "bd")
+		if err := os.MkdirAll(filepath.Dir(link), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(old, link); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		if got := hookPATHBinaryWarning(self, selects(link, nil)); !strings.Contains(got, link) {
+			t.Errorf("warning for an older bd beside this one lacks %q:\n%s", link, got)
+		}
+	})
+	t.Run("plain bd beside a differently named bd warns", func(t *testing.T) {
+		tools := filepath.Join(dir, "tools")
+		newer, plain := filepath.Join(tools, "bd-new"), filepath.Join(tools, "bd")
+		if err := os.MkdirAll(tools, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range []string{newer, plain} {
+			if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := hookPATHBinaryWarning(newer, selects(plain, nil)); !strings.Contains(got, plain) {
+			t.Errorf("warning for a plain bd beside %s lacks %q:\n%s", newer, plain, got)
+		}
+	})
+	t.Run("link to a bd in another directory warns", func(t *testing.T) {
+		link := filepath.Join(dir, "elsewhere", "bd")
+		if err := os.MkdirAll(filepath.Dir(link), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(other, link); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		if got := hookPATHBinaryWarning(self, selects(link, nil)); !strings.Contains(got, link) {
+			t.Errorf("warning for a link to another directory's bd lacks %q:\n%s", link, got)
 		}
 	})
 	t.Run("no bd on PATH warns with this bd's path", func(t *testing.T) {
@@ -184,9 +255,10 @@ func TestHooksPATHBinaryWarning(t *testing.T) {
 
 // TestHooksInstallWarnsWhenPATHSelectsAnotherBD runs the real `bd hooks
 // install --json`, started by absolute path, under three PATHs: a decoy bd
-// first, no bd at all, and a symlink to this same bd. Installation succeeds
-// and stdout stays one JSON document each time; stderr carries one
-// diagnostic exactly when PATH selects another file or none, and the decoy
+// first, no bd at all, and a symlink to this same bd; then once more with
+// the decoy first and --quiet. Installation succeeds and stdout stays one
+// JSON document each time; stderr carries one diagnostic exactly when PATH
+// selects another file or none and the install is not quiet, and the decoy
 // never runs.
 func TestHooksInstallWarnsWhenPATHSelectsAnotherBD(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -236,12 +308,15 @@ func TestHooksInstallWarnsWhenPATHSelectsAnotherBD(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		path      string
+		args      []string
 		wantWarn  []string
 		wantQuiet bool
 	}{
 		{name: "decoy first", path: decoyDir + string(os.PathListSeparator) + basePATH, wantWarn: []string{decoy, self}},
 		{name: "no bd", path: basePATH, wantWarn: []string{"no bd", self}},
 		{name: "symlink to this bd", path: aliasDir + string(os.PathListSeparator) + basePATH, wantQuiet: true},
+		// -q is "errors only": the diagnostic is advice, not an error.
+		{name: "decoy first with --quiet", path: decoyDir + string(os.PathListSeparator) + basePATH, args: []string{"--quiet"}, wantQuiet: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := t.TempDir()
@@ -252,7 +327,7 @@ func TestHooksInstallWarnsWhenPATHSelectsAnotherBD(t *testing.T) {
 				t.Fatalf("git init: %v\n%s", err, out)
 			}
 
-			cmd = exec.Command(bd, "hooks", "install", "--json")
+			cmd = exec.Command(bd, append([]string{"hooks", "install", "--json"}, tc.args...)...)
 			cmd.Dir = repo
 			var env []string
 			for _, e := range testutil.WithoutGitRepoLocationEnv(os.Environ()) {

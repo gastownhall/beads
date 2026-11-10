@@ -730,6 +730,12 @@ func commitConfigThroughHook(t *testing.T, r commitIndexRepo, bd string) string 
 // while the real bd runs the hook and stages the result.
 func hookBDWithStubbableChildren(t *testing.T, bd string) string {
 	t.Helper()
+	// Under a local Bazel sandbox the prebuilt bd is a runfiles symlink, and
+	// Linux os.Link links the symlink itself: the alias would then run as its
+	// target's name, which is no test binary's, and launch the real export.
+	if resolved, err := filepath.EvalSymlinks(bd); err == nil {
+		bd = resolved
+	}
 	alias := filepath.Join(t.TempDir(), "bd.test")
 	if err := os.Link(bd, alias); err == nil {
 		return alias

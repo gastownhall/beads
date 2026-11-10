@@ -567,7 +567,7 @@ cat .git/hooks/pre-commit
 **Symptom:** commits warn `beads: pre-commit export warning: exit status 1`
 (sometimes after an error such as `check wisps table … table has unknown
 fields`), or `bd hooks install` / `bd init` prints
-`⚠ Git hooks run the bd that PATH selects, which is not this bd` or
+`⚠ Git hooks run the bd that PATH selects, a different file from this bd` or
 `⚠ Git hooks run bd from PATH, but PATH has no bd`.
 
 **Cause:** installed hooks start `bd` by name, so they run whichever `bd` the
@@ -607,8 +607,11 @@ If the paths or versions differ, the hooks run the other one.
 [Wrong version of bd running](#wrong-version-of-bd-running)), or put the
 directory of the `bd` you use first on the `PATH` your git client starts with.
 For a GUI client, that is the `PATH` of its login environment, not your shell
-startup file. Then run `bd hooks install` again: it prints no warning once the
-selection is right.
+startup file. Then run `bd hooks install` again: it prints no warning once
+`PATH` selects this `bd`, a link to it, or a launcher installed beside it (as
+an npm install's `bd` is). A wrapper script or shim in another directory, such
+as a version manager's, is a different file, so it still draws the warning
+even when it runs this `bd`; the version check above tells the two apart.
 
 **Skipped export or failed export?** The pre-commit export runs only when
 `export.auto` is on and the commit stages a path under `.beads/`. A commit of

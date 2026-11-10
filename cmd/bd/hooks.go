@@ -812,7 +812,9 @@ Installed hooks:
 				fmt.Printf("  - %s\n", hookName)
 			}
 		}
-		warnHookPATHBinary()
+		if !quietFlag {
+			warnHookPATHBinary()
+		}
 		return nil
 	},
 }
