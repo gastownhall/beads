@@ -12,7 +12,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"unicode"
 )
 
 // portConflictHint is the platform-specific command to diagnose port conflicts.
@@ -57,49 +56,60 @@ func readDoltProcessPIDs() ([]int, error) {
 
 // parseDoltProcessPIDs returns matching, non-defunct Dolt server PIDs from a
 // `ps -axo pid=,state=,command=` snapshot. It preserves the source row order.
+// The state column is optional: macOS 26 leaves it empty for many rows
+// (#7121), so the field after the PID counts as a state only when it looks
+// like one, and every word of the row is command otherwise.
 func parseDoltProcessPIDs(snapshot []byte) []int {
 	var pids []int
 	for _, line := range strings.Split(string(snapshot), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+		words := strings.Fields(line)
+		if len(words) < 2 {
 			continue
 		}
 
-		pidText, rest, ok := splitPSField(line)
-		if !ok {
-			continue
-		}
-		state, command, ok := splitPSField(rest)
-		if !ok {
-			continue
-		}
-
-		pid, err := strconv.Atoi(pidText)
+		pid, err := strconv.Atoi(words[0])
 		if err != nil || pid <= 0 {
 			continue
 		}
-		if state[0] == 'Z' || state[0] == 'X' {
+		// A zombie or dead row is excluded before the optional state below:
+		// a state isPSStateCode does not recognize (a synthetic "Zp") must
+		// not turn into command words and let the row match.
+		if first := words[1][0]; first == 'Z' || first == 'X' {
 			continue
 		}
 
-		doltIndex := strings.Index(command, "dolt")
-		if doltIndex >= 0 && strings.Contains(command[doltIndex+len("dolt"):], "sql-server") {
+		command := words[1:]
+		if isPSStateCode(command[0]) {
+			command = command[1:]
+		}
+
+		joined := strings.Join(command, " ")
+		doltIndex := strings.Index(joined, "dolt")
+		if doltIndex >= 0 && strings.Contains(joined[doltIndex+len("dolt"):], "sql-server") {
 			pids = append(pids, pid)
 		}
 	}
 	return pids
 }
 
-// splitPSField separates the next whitespace-delimited ps field from the
-// remaining text, retaining whitespace within the final command column.
-func splitPSField(line string) (field, rest string, ok bool) {
-	fieldEnd := strings.IndexFunc(line, unicode.IsSpace)
-	if fieldEnd == -1 {
-		return "", "", false
+// isPSStateCode reports whether word looks like a ps state column: a leading
+// state letter (uppercase, or the lowercase traced "t") followed by the
+// modifier letters ps appends on Linux and the BSDs (uppercase letters, "s",
+// "l", "<", ">", "+"). It is a permissive parsing heuristic, not a claim that
+// ps prints every accepted letter; a word that fails it stays in the command,
+// where it cannot hide a dolt match.
+func isPSStateCode(word string) bool {
+	if word == "" || (word[0] != 't' && (word[0] < 'A' || word[0] > 'Z')) {
+		return false
 	}
-	field = line[:fieldEnd]
-	rest = strings.TrimLeftFunc(line[fieldEnd:], unicode.IsSpace)
-	return field, rest, rest != ""
+	for i := 1; i < len(word); i++ {
+		c := word[i]
+		if (c >= 'A' && c <= 'Z') || c == 's' || c == 'l' || c == '<' || c == '>' || c == '+' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // isProcessInDir checks if a process's working directory matches the given path.
