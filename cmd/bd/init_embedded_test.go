@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -2056,4 +2057,100 @@ func embeddedUpstreamWithIssueHistory(t *testing.T, bd string) (cloneDir, remote
 	initGitRepoAt(t, cloneDir)
 	runGitForBootstrapTest(t, cloneDir, "remote", "add", "origin", remoteURL)
 	return cloneDir, remoteURL
+}
+
+// TestEmbeddedInitGitOriginAdoptionWithConsent is AC-2 of GH#6099: with
+// --yes, or an affirmative answer to the one early prompt, init adopts the
+// derived origin's issues and identity and wires/persists the remote, naming
+// the URL before it clones.
+func TestEmbeddedInitGitOriginAdoptionWithConsent(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
+	}
+
+	bd := buildEmbeddedBD(t)
+	for _, tc := range []struct {
+		name  string
+		args  []string
+		env   []string
+		stdin string
+	}{
+		{name: "yes", args: []string{"--yes"}},
+		{name: "yes-short-json", args: []string{"-y", "--json"}},
+		// BD_NON_INTERACTIVE=0 forces init's interactive mode on piped stdin;
+		// --quiet must not suppress a required prompt.
+		{name: "prompt-accepted", args: []string{"--quiet"}, env: []string{"BD_NON_INTERACTIVE=0"}, stdin: "yes\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cloneDir, remoteURL := embeddedUpstreamWithIssueHistory(t, bd)
+
+			args := append([]string{"init", "--prefix", "mine", "--skip-hooks", "--skip-agents", "--role", "maintainer"}, tc.args...)
+			cmd := exec.Command(bd, args...)
+			cmd.Dir = cloneDir
+			cmd.Env = append(envWithout(bdEnv(cloneDir), "BD_NON_INTERACTIVE"), tc.env...)
+			cmd.Stdin = strings.NewReader(tc.stdin)
+			// combined interleaves both streams in write order, so the
+			// disclosure can be ordered against the bootstrap line.
+			var stdout, stderr, combined bytes.Buffer
+			cmd.Stdout = io.MultiWriter(&stdout, &combined)
+			cmd.Stderr = io.MultiWriter(&stderr, &combined)
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("init with adoption consent failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+			}
+			errText := stderr.String()
+			if !strings.Contains(errText, remoteURL) {
+				t.Errorf("stderr does not disclose the adopted origin %q:\n%s", remoteURL, errText)
+			}
+			prompts := strings.Count(errText, "Adopt this remote's issue history?")
+			if tc.stdin != "" && prompts != 1 {
+				t.Errorf("prompt shown %d times, want exactly once:\n%s", prompts, errText)
+			}
+			if tc.stdin == "" && prompts != 0 {
+				t.Errorf("--yes still prompted %d times:\n%s", prompts, errText)
+			}
+			if tc.stdin == "" && !strings.Contains(errText, "Adopting Dolt issue history from git origin: "+remoteURL) {
+				t.Errorf("--yes did not announce the origin before cloning:\n%s", errText)
+			}
+			// The disclosure precedes the clone: the URL appears before the
+			// bootstrap-completed line (printed unless quiet or JSON).
+			if all := combined.String(); strings.Contains(all, "Bootstrapped from remote") {
+				if disclosed, booted := strings.Index(all, remoteURL), strings.Index(all, "Bootstrapped from remote"); disclosed < 0 || disclosed > booted {
+					t.Errorf("origin disclosed at %d, after the bootstrap line at %d:\n%s", disclosed, booted, all)
+				}
+			} else if tc.name == "yes" {
+				t.Errorf("plain --yes init printed no bootstrap line:\n%s", all)
+			}
+
+			list := exec.Command(bd, "list", "--all", "--json")
+			list.Dir = cloneDir
+			list.Env = bdEnv(cloneDir)
+			listOut, err := list.CombinedOutput()
+			if err != nil {
+				t.Fatalf("bd list after adoption: %v\n%s", err, listOut)
+			}
+			if !strings.Contains(string(listOut), "Upstream issue history") || !strings.Contains(string(listOut), `"up-`) {
+				t.Errorf("adopted workspace lacks the upstream issue and identity:\n%s", listOut)
+			}
+			// Adoption takes upstream's identity; it does not mint the
+			// requested local prefix.
+			if strings.Contains(string(listOut), `"mine-`) {
+				t.Errorf("adoption minted the requested \"mine\" prefix:\n%s", listOut)
+			}
+
+			cfg, err := os.ReadFile(filepath.Join(cloneDir, ".beads", "config.yaml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(cfg), strings.TrimPrefix(remoteURL, "file://")) {
+				t.Errorf("config.yaml does not persist the adopted remote as sync.remote:\n%s", cfg)
+			}
+			remotes := exec.Command(bd, "dolt", "remote", "list")
+			remotes.Dir = cloneDir
+			remotes.Env = bdEnv(cloneDir)
+			remotesOut, _ := remotes.CombinedOutput()
+			if !strings.Contains(string(remotesOut), "origin") || !strings.Contains(string(remotesOut), strings.TrimPrefix(remoteURL, "file://")) {
+				t.Errorf("Dolt remote origin not wired to %s:\n%s", remoteURL, remotesOut)
+			}
+		})
+	}
 }
