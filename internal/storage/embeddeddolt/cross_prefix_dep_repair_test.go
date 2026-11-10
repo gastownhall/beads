@@ -242,3 +242,58 @@ func TestEmbeddedCrossPrefixDepRepairRefusesDirtyWorkingSet(t *testing.T) {
 		t.Fatalf("ignored migration %d not recorded after the retry converged", crossPrefixDepRepairMarkerVersion)
 	}
 }
+
+// TestEmbeddedCrossPrefixDepRepairConvergedReopenIsNoOp pins the steady state
+// (AC-7): once the marker records, a converged reopen short-circuits in
+// migrationWorkNeeded before the repair, so a legacy-shaped row written after
+// convergence is left alone rather than churned on every open.
+func TestEmbeddedCrossPrefixDepRepairConvergedReopenIsNoOp(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	dataDir := seedMigratedStore(t, ctx)
+	conn, closeConn := openDepConn(t, ctx, dataDir)
+
+	const src, held = "bd-x-src", "hq-x-held"
+	seedIssue(t, ctx, conn, src)
+	seedIssue(t, ctx, conn, held)
+	seedDependency(t, ctx, conn, depid.New(src, held), src, nil, nil, strptr(held))
+	commitSeed(t, ctx, conn, "test: legacy cross-prefix row before the repair pass")
+
+	unrecordIgnoredVersionsFrom(t, ctx, conn, crossPrefixDepRepairMarkerVersion)
+	closeConn()
+
+	conn2, closeConn2 := openDepConn(t, ctx, dataDir)
+	if _, err := schema.MigrateUp(ctx, conn2); err != nil {
+		t.Fatalf("MigrateUp over the legacy row: %v", err)
+	}
+	if got := readDeps(t, ctx, conn2); !slices.Equal(got, []depRow{
+		{id: depid.New(src, held), issueID: src, dependsOnIssueID: held},
+	}) {
+		t.Fatalf("dependencies after the repair pass = %v, want the row moved", got)
+	}
+
+	// A legacy-shaped row written after convergence: artificial by
+	// construction now that the write path classifies by evidence, which is
+	// exactly why the converged open must not touch it — the marker, not a
+	// re-scan, is what says the repair is done.
+	seedIssue(t, ctx, conn2, "hq-x-post")
+	seedDependency(t, ctx, conn2, depid.New(src, "hq-x-post"), src, nil, nil, strptr("hq-x-post"))
+	commitSeed(t, ctx, conn2, "test: a legacy-shaped row written after convergence")
+	closeConn2()
+
+	conn3, _ := openDepConn(t, ctx, dataDir)
+	if _, err := schema.MigrateUp(ctx, conn3); err != nil {
+		t.Fatalf("MigrateUp on the converged store: %v", err)
+	}
+	want := []depRow{
+		{id: depid.New(src, held), issueID: src, dependsOnIssueID: held},
+		{id: depid.New(src, "hq-x-post"), issueID: src, dependsOnExternal: "hq-x-post"},
+	}
+	if got := depRowsByTarget(readDeps(t, ctx, conn3)); !slices.Equal(got, depRowsByTarget(want)) {
+		t.Fatalf("dependencies after the converged reopen = %v, want %v: the reopen must be a no-op", got, want)
+	}
+	if !ignoredVersionRecorded(t, ctx, conn3, crossPrefixDepRepairMarkerVersion) {
+		t.Fatalf("ignored migration %d lost by the converged reopen", crossPrefixDepRepairMarkerVersion)
+	}
+}
