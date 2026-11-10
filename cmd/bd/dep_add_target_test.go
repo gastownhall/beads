@@ -33,7 +33,8 @@ import (
 //     bogus external reference. That is bd-gmdx5, and it is a real bug.
 //
 //   - A bare, differently-prefixed target (e.g. "xy-999" from a "be-" issue) is
-//     NOT a bug. storeissueops.IsExternalDepTarget defines exactly this shape as
+//     NOT a bug. storeissueops.DepTargetKindFor classifies exactly this
+//     shape — a foreign-prefix target this database holds no row for — as
 //     belonging in depends_on_external, and calls that the single rule every
 //     backend classifies by. It is the multi-rig "add now, route later" shape,
 //     and `bd dep remove` still addresses such an edge. dep add must keep
@@ -241,10 +242,12 @@ func TestResolveUnresolvedDepTarget(t *testing.T) {
 // TestResolveUnresolvedDepTargetMatchesStorageClassification pins the CLI's
 // accept/refuse decision to the storage layer's own definition of an external
 // dependency target. Every target dep add passes through here must be one
-// IsExternalDepTarget classifies as external — i.e. one depends_on_external can
-// actually hold. If these two ever disagree, dep add is writing edges a backend
-// will route to the wrong column (or refusing edges it would have held fine),
-// which is the failure this whole change is about.
+// DepTargetKindFor classifies as external when the database holds no row for
+// it — i.e. one depends_on_external can actually hold. (A target the database
+// DOES hold is never routed through here: resolveIDWithRouting found it.) If
+// these two ever disagree, dep add is writing edges a backend will route to
+// the wrong column (or refusing edges it would have held fine), which is the
+// failure this whole change is about.
 func TestResolveUnresolvedDepTargetMatchesStorageClassification(t *testing.T) {
 	resolveErr := errors.New("issue not found")
 
@@ -269,9 +272,9 @@ func TestResolveUnresolvedDepTargetMatchesStorageClassification(t *testing.T) {
 			if (miss != nil) != tc.unverified {
 				t.Errorf("resolveUnresolvedDepTarget(%q, %q): miss = %v, want unverified %v", sourceID, target, miss, tc.unverified)
 			}
-			if !storeissueops.IsExternalDepTarget(sourceID, toID) {
-				t.Errorf("dep add accepted %q but storage would not classify it as an external dep target; "+
-					"the edge would be written to a column that cannot hold it", toID)
+			if got := storeissueops.DepTargetKindFor(sourceID, toID, false, false); got != storeissueops.DepTargetExternal {
+				t.Errorf("dep add accepted %q but storage would classify it as %v, not an external dep target; "+
+					"the edge would be written to a column that cannot hold it", toID, got)
 			}
 		})
 	}

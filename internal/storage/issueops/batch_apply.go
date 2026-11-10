@@ -415,7 +415,6 @@ func (r *applyBatchRun) applyDepAdd(ctx context.Context, tx *sql.Tx, index int, 
 	written, err := AddDependencyInTxWithResult(ctx, tx, dep, r.plan.Actor, AddDependencyOpts{
 		SourceTable:    sourceTable,
 		WriteTable:     depTable,
-		IsCrossPrefix:  types.ExtractPrefix(source) != types.ExtractPrefix(target),
 		SkipCycleCheck: r.plan.SkipPerEdgeCycleCheck,
 		EmitEvent:      true,
 	})
@@ -605,9 +604,17 @@ func (r *applyBatchRun) runEndGate(ctx context.Context, tx *sql.Tx) error {
 			DependsOnID: applied.edge.DependsOnID,
 			Type:        applied.edge.Type,
 		}
-		// An external or cross-repository target has no local hierarchy to
-		// conflict with, and the per-edge path filters it for the same reason.
-		if IsExternalDepTarget(dep.IssueID, dep.DependsOnID) {
+		// A target this database does not hold has no local hierarchy to
+		// conflict with: an explicit external ref, or a foreign-prefix id no
+		// local row answers (the multi-rig "add now, route later" shape).
+		// Locality is resolved by probe, not by prefix (GH#8299): a
+		// same-database cross-prefix ancestor or descendant is checked like any
+		// other local target, and the per-edge path filters by the same rule.
+		local, err := targetHeldLocallyInTx(ctx, tx, dep.DependsOnID)
+		if err != nil {
+			return err
+		}
+		if !local {
 			continue
 		}
 		if err := CheckBlockingHierarchyInTx(ctx, tx, dep, cycleDetectionTables()); err != nil {

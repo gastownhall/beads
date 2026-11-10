@@ -14,6 +14,7 @@ import (
 	"github.com/cenkalti/backoff/v4"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
@@ -86,6 +87,30 @@ func (t *doltTransaction) isActiveWisp(ctx context.Context, id string) bool {
 	var exists int
 	err := t.ignoredTx.QueryRowContext(ctx, "SELECT 1 FROM wisps WHERE id = ? LIMIT 1", id).Scan(&exists)
 	return err == nil
+}
+
+// targetHeldOn reports whether id is held in table, probing the SQL session
+// that owns table (txFor). Only a missing row — and, for the dolt-ignored
+// wisps plane a fresh clone can lose, a missing table — means "not held";
+// every other error propagates. A probe that swallowed errors would
+// misclassify a failed read as a missing target and route a local edge to
+// depends_on_external (GH#8299).
+//
+//nolint:gosec // G201: table is "issues" or "wisps", hardcoded by callers
+func (t *doltTransaction) targetHeldOn(ctx context.Context, table, id string) (bool, error) {
+	var probe int
+	err := t.txFor(table).QueryRowContext(ctx,
+		fmt.Sprintf("SELECT 1 FROM %s WHERE id = ? LIMIT 1", table), id).Scan(&probe)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case table == "wisps" && dberrors.IsMissingTable(err, table):
+		return false, nil
+	default:
+		return false, err
+	}
 }
 
 // CreateIssueImport is the import-friendly issue creation hook.
@@ -986,16 +1011,29 @@ func (t *doltTransaction) AddDependencyWithOptions(ctx context.Context, dep *typ
 		eventTable = "wisp_events"
 	}
 
-	isCrossPrefix := isCrossPrefixDep(dep.IssueID, dep.DependsOnID)
+	// Classify the target from database evidence, probing each plane on the
+	// session that owns it: wisps on the ignored session, issues on the
+	// regular one. A target created earlier in this logical transaction is
+	// visible on its own session whatever its prefix, and a locally held
+	// cross-prefix target is its local kind, not an external ref (GH#8299).
+	// A prefix mismatch alone is never a verdict.
 	targetTable := "issues"
 	kind := issueops.DepTargetIssue
 	switch {
-	case isCrossPrefix, strings.HasPrefix(dep.DependsOnID, "external:"):
+	case strings.HasPrefix(dep.DependsOnID, "external:"):
 		kind = issueops.DepTargetExternal
 	default:
-		if t.isActiveWisp(ctx, dep.DependsOnID) {
+		heldWisp, err := t.targetHeldOn(ctx, "wisps", dep.DependsOnID)
+		if err != nil {
+			return fmt.Errorf("failed to check dependency target %s in wisps: %w", dep.DependsOnID, err)
+		}
+		heldIssue, err := t.targetHeldOn(ctx, "issues", dep.DependsOnID)
+		if err != nil {
+			return fmt.Errorf("failed to check dependency target %s in issues: %w", dep.DependsOnID, err)
+		}
+		kind = issueops.DepTargetKindFor(dep.IssueID, dep.DependsOnID, heldWisp, heldIssue)
+		if kind == issueops.DepTargetWisp {
 			targetTable = "wisps"
-			kind = issueops.DepTargetWisp
 		}
 	}
 
@@ -1003,7 +1041,6 @@ func (t *doltTransaction) AddDependencyWithOptions(ctx context.Context, dep *typ
 		SourceTable:    sourceTable,
 		TargetTable:    targetTable,
 		WriteTable:     table,
-		IsCrossPrefix:  isCrossPrefix,
 		SkipCycleCheck: addOpts.SkipCycleCheck,
 		TargetKind:     &kind,
 		EmitEvent:      addOpts.EmitEvent,

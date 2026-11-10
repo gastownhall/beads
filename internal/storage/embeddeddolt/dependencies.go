@@ -24,9 +24,11 @@ func (s *EmbeddedDoltStore) AddDependencyWithOptions(ctx context.Context, dep *t
 	return s.withConn(ctx, true, func(tx *sql.Tx) error {
 		// Embedded commits the whole working set on the connection, so the
 		// event-written flag is not needed for selective staging (unlike DoltStore).
+		// Target classification happens inside the transaction through the
+		// shared rule: a locally held cross-prefix target is its local kind
+		// (GH#8299).
 		_, err := issueops.AddDependencyInTx(ctx, tx, dep, actor, issueops.AddDependencyOpts{
-			IsCrossPrefix: types.ExtractPrefix(dep.IssueID) != types.ExtractPrefix(dep.DependsOnID),
-			EmitEvent:     addOpts.EmitEvent,
+			EmitEvent: addOpts.EmitEvent,
 		})
 		return err
 	})

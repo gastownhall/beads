@@ -87,13 +87,16 @@ func depTargetColumns(t *testing.T) []string {
 // TestGetDescendantsCrossPrefixParent is the behavioural half of
 // TestBuildDescendantsCTEResolvesEveryDepTargetColumn: that test pins the
 // walk's query text, this one pins that the widened COALESCE matches real rows.
-// The write path classifies a target by prefix alone (issueops.IsExternalDepTarget),
-// so a parent-child edge between two prefixes lands in depends_on_external even
-// when both ends are local. Before be-qfm the walk coalesced only the issue and
-// wisp columns, so each child below — and its subtree — was missing from the
-// proxied `bd list --parent` tree. Each one is reached through a different edge
-// member (issues and wisps, anchor and recursive), so dropping the column from
-// any one member loses a different child.
+// The write path classifies a target from database evidence
+// (issueops.DepTargetKindFor, GH#8299): a cross-prefix parent this database
+// holds lands in its typed column, and only a foreign-prefix parent no local
+// row answers stays in depends_on_external. Before be-qfm the walk coalesced
+// only the issue and wisp columns, so each child below — and its subtree —
+// was missing from the proxied `bd list --parent` tree. Each one is reached
+// through a different edge member (issues and wisps, anchor and recursive),
+// so dropping the column from any one member loses a different child; the
+// missing-parent children keep the external column itself covered on both
+// planes.
 func (s *testSuite) TestGetDescendantsCrossPrefixParent() {
 	r := s.issueRepo()
 	deps := s.depRepo()
@@ -104,11 +107,17 @@ func (s *testSuite) TestGetDescendantsCrossPrefixParent() {
 		wisp   = "bd-xp-w" // wisp under root: wisps anchor member
 		grand  = "zz-xp-b" // issue under child: issues recursive member
 		grandW = "zz-xp-v" // wisp under child: wisps recursive member
+		// A foreign-prefix parent no local row answers — the one cross-prefix
+		// shape still stored unresolved in depends_on_external — and its two
+		// children, one per dependency plane.
+		missingParent = "qq-xp-absent"
+		missingChild  = "bd-xp-e"
+		missingWisp   = "bd-xp-u"
 	)
-	for _, id := range []string{root, child, grand} {
+	for _, id := range []string{root, child, grand, missingChild} {
 		s.Require().NoError(r.Insert(s.Ctx(), newTestIssue(id, "xp "+id), "tester", domain.InsertIssueOpts{}))
 	}
-	for _, id := range []string{wisp, grandW} {
+	for _, id := range []string{wisp, grandW, missingWisp} {
 		s.Require().NoError(r.Insert(s.Ctx(), newTestIssue(id, "xp "+id), "tester",
 			domain.InsertIssueOpts{UseWispsTable: true}))
 	}
@@ -120,21 +129,37 @@ func (s *testSuite) TestGetDescendantsCrossPrefixParent() {
 		{wisp, root, true},
 		{grand, child, false},
 		{grandW, child, true},
+		{missingChild, missingParent, false},
+		{missingWisp, missingParent, true},
 	} {
 		s.Require().NoError(deps.Insert(s.Ctx(),
 			&types.Dependency{IssueID: e.child, DependsOnID: e.parent, Type: types.DepParentChild},
 			"tester", domain.DepInsertOpts{UseWispsTable: e.wisps}))
 	}
 
-	// Were the classifier ever to route one of these edges to another column,
-	// the two-column walk would find that child too and the case would pin nothing.
-	for _, table := range []string{"dependencies", "wisp_dependencies"} {
-		rows := s.loadDepRows(table, "%-xp-%")
-		s.Require().Len(rows, 2, table)
+	// The storage half of the classification contract: every locally held
+	// cross-prefix parent lands in its typed column (GH#8299), and only the
+	// missing foreign parent stays external. Were the classifier ever to
+	// route a local parent's edge back to depends_on_external, the walk would
+	// still find that child (the CTE resolves every column) and the
+	// descendants assertions below would pin nothing.
+	byTarget := func(rows []depRow) map[string]string {
+		out := make(map[string]string, len(rows))
 		for _, d := range rows {
-			s.Equal("depends_on_external", d.targetColumn(), "%s: %s -> %s", table, d.issueID, d.dependsOnID)
+			out[d.dependsOnID] = d.targetColumn()
 		}
+		return out
 	}
+	durable := byTarget(s.loadDepRows("dependencies", "%-xp-%"))
+	s.Len(durable, 3)
+	s.Equal("depends_on_issue_id", durable[root])
+	s.Equal("depends_on_issue_id", durable[child])
+	s.Equal("depends_on_external", durable[missingParent])
+	wispPlane := byTarget(s.loadDepRows("wisp_dependencies", "%-xp-%"))
+	s.Len(wispPlane, 3)
+	s.Equal("depends_on_issue_id", wispPlane[root])
+	s.Equal("depends_on_issue_id", wispPlane[child])
+	s.Equal("depends_on_external", wispPlane[missingParent])
 
 	got, err := r.GetDescendants(s.Ctx(), root, types.IssueFilter{})
 	s.Require().NoError(err)
@@ -144,6 +169,17 @@ func (s *testSuite) TestGetDescendantsCrossPrefixParent() {
 		ids[i] = issue.ID
 	}
 	s.ElementsMatch([]string{child, wisp, grand, grandW}, ids,
+		"every edge member must resolve a parent recorded in its typed column")
+
+	// The be-qfm regression itself: a parent recorded ONLY in
+	// depends_on_external must still be walkable, on both planes.
+	gotMissing, err := r.GetDescendants(s.Ctx(), missingParent, types.IssueFilter{})
+	s.Require().NoError(err)
+	missingIDs := make([]string, len(gotMissing))
+	for i, issue := range gotMissing {
+		missingIDs[i] = issue.ID
+	}
+	s.ElementsMatch([]string{missingChild, missingWisp}, missingIDs,
 		"every edge member must resolve a parent recorded in depends_on_external")
 }
 

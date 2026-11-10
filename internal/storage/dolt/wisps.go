@@ -614,7 +614,10 @@ func (s *DoltStore) getWispsByIDs(ctx context.Context, ids []string) ([]*types.I
 }
 
 // addWispDependency adds a dependency to the wisp_dependencies table.
-func (s *DoltStore) addWispDependency(ctx context.Context, dep *types.Dependency, actor string, isCrossPrefix, emitEvent bool) error {
+// Target classification happens inside the transaction through the shared rule
+// (issueops.ClassifyDepTargetInTx): a locally held cross-prefix target is its
+// local kind, not an external ref (GH#8299).
+func (s *DoltStore) addWispDependency(ctx context.Context, dep *types.Dependency, actor string, emitEvent bool) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
@@ -624,16 +627,13 @@ func (s *DoltStore) addWispDependency(ctx context.Context, dep *types.Dependency
 	clearJournalScope := s.scopeEventsJournalTransaction(tx)
 	defer clearJournalScope()
 
-	kind := issueops.ClassifyDepTarget(ctx, tx, dep, isCrossPrefix)
 	// Wisp source/event tables are dolt_ignored (committed with the SQL tx, not
 	// via selective doltAddAndCommit), so the event-written flag is not needed
 	// here; only a durable is_blocked flip needs a Dolt commit.
 	written, err := issueops.AddDependencyInTxWithResult(ctx, tx, dep, actor, issueops.AddDependencyOpts{
-		SourceTable:   "wisps",
-		WriteTable:    "wisp_dependencies",
-		IsCrossPrefix: isCrossPrefix,
-		TargetKind:    &kind,
-		EmitEvent:     emitEvent,
+		SourceTable: "wisps",
+		WriteTable:  "wisp_dependencies",
+		EmitEvent:   emitEvent,
 	})
 	if err != nil {
 		return err

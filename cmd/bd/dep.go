@@ -193,20 +193,24 @@ func refuseMalformedDepTarget(sourceID, dependsOnArg string) error {
 //     refuseMalformedDepTarget — see there for the be-gmdx5 mechanism and the
 //     message's direction/type rules.
 //  3. A bare, differently-prefixed target is passed through unchanged. This is
-//     NOT malformed: issueops.IsExternalDepTarget defines a target "whose id
-//     prefix names ANOTHER REPOSITORY" as belonging in depends_on_external
-//     alongside "external:" refs, and calls that the single rule every backend
-//     classifies by (db.pickDepTargetColumn restates it). It is the multi-rig
-//     "add now, route later" shape — a gt- bead depending on a bd- bead whose
-//     rig is not in routes.jsonl yet — and dep remove (the ExtractPrefix
-//     fallback further down this file) still addresses such an edge. Refusing
-//     it here would make dep add reject an edge the store holds and dep remove
-//     can still delete. It is accepted unverified: miss is resolveErr, the
-//     lookup that did not find the target, so once the edge is stored the
-//     caller warns (warnUnresolvedDepTarget) rather than letting a typo pass
-//     as silently as a resolved target (GH#6556), and the warning can tell a
-//     target that is missing from one whose lookup failed. A route into a
-//     rig bd cannot open leaves no miss (depTargetLookupMiss).
+//     NOT malformed: reaching here means no local lookup found the target, and
+//     issueops.DepTargetKindFor classifies a foreign-prefix target this
+//     database holds no row for as belonging in depends_on_external alongside
+//     "external:" refs — the single rule every backend classifies by
+//     (db.pickDepTargetColumn restates it). A cross-prefix target the database
+//     DOES hold never reaches this branch (resolveIDWithRouting found it) and
+//     is stored in its typed column instead (GH#8299). This branch is the
+//     multi-rig "add now, route later" shape — a gt- bead depending on a bd-
+//     bead whose rig is not in routes.jsonl yet — and dep remove (the
+//     ExtractPrefix fallback further down this file) still addresses such an
+//     edge. Refusing it here would make dep add reject an edge the store
+//     holds and dep remove can still delete. It is accepted unverified: miss
+//     is resolveErr, the lookup that did not find the target, so once the
+//     edge is stored the caller warns (warnUnresolvedDepTarget) rather than
+//     letting a typo pass as silently as a resolved target (GH#6556), and the
+//     warning can tell a target that is missing from one whose lookup failed.
+//     A route into a rig bd cannot open leaves no miss
+//     (depTargetLookupMiss).
 //
 // A same-prefix target that resolves nowhere is still an error, unchanged.
 // miss is nil on every outcome but 3.

@@ -1252,8 +1252,10 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx DBTX, issues [
 			if (dep.Type == types.DepParentChild) != parentPhase {
 				continue
 			}
-			isCrossPrefix := types.ExtractPrefix(dep.IssueID) != types.ExtractPrefix(dep.DependsOnID)
-			kind := lookups.classify(ctx, tx, dep, isCrossPrefix)
+			kind, err := lookups.classify(ctx, tx, dep)
+			if err != nil {
+				return result, fmt.Errorf("failed to classify dependency target %s for %s: %w", dep.DependsOnID, dep.IssueID, err)
+			}
 
 			if kind != DepTargetExternal {
 				exists, err := lookups.targetExists(ctx, tx, kind, dep.DependsOnID)
@@ -1266,7 +1268,12 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx DBTX, issues [
 				}
 			}
 
-			if kind != DepTargetExternal && types.ExtractPrefix(dep.IssueID) == types.ExtractPrefix(dep.DependsOnID) {
+			// kind != DepTargetExternal is the resolved-locality gate: a
+			// locally held target has local hierarchy to conflict with,
+			// whatever its prefix (GH#8299). The equal-prefix requirement the
+			// classification used to impose would keep a same-database
+			// cross-prefix ancestor/descendant edge out of this check.
+			if kind != DepTargetExternal {
 				if err := lookups.checkHierarchy(ctx, tx, dep); err != nil {
 					if opts.SkipDependencyValidationErrors && isDependencyValidationRefusal(err) {
 						recordSkippedDependency(opts, dep, err.Error())

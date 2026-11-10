@@ -199,8 +199,9 @@ func (t *embeddedTransaction) AddDependency(ctx context.Context, dep *types.Depe
 
 func (t *embeddedTransaction) AddDependencyWithOptions(ctx context.Context, dep *types.Dependency, actor string, addOpts storage.DependencyAddOptions) error {
 	_, _, eventTable, depTable := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, dep.IssueID))
+	// Target classification happens inside the transaction through the shared
+	// rule: a locally held cross-prefix target is its local kind (GH#8299).
 	written, err := issueops.AddDependencyInTxWithResult(ctx, t.tx, dep, actor, issueops.AddDependencyOpts{
-		IsCrossPrefix:  types.ExtractPrefix(dep.IssueID) != types.ExtractPrefix(dep.DependsOnID),
 		SkipCycleCheck: addOpts.SkipCycleCheck,
 		EmitEvent:      addOpts.EmitEvent,
 	})

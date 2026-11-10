@@ -165,6 +165,7 @@ go_test(
         "cycle_report_test.go",
         "cycles_test.go",
         "delete_cascade_tables_test.go",
+        "dep_target_kind_test.go",
         "dependencies_test.go",
         "dependency_coordination_test.go",
         "dependency_queries_test.go",

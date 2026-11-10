@@ -44,27 +44,34 @@ func pickDepTable(useWisps bool) string {
 }
 
 // pickDepTargetColumn classifies an edge's target the same way the in-tx store
-// bodies do, through issueops.IsExternalDepTarget: a target this database
-// cannot hold — an "external:" reference or an issue belonging to another
-// repository — goes to depends_on_external, which carries no foreign key.
-// Only a target that could plausibly be local is probed against wisps and
-// otherwise treated as a local issue, where fk_dep_issue_target still refuses
-// an id that is genuinely missing.
+// bodies do, through issueops.DepTargetKindFor: a target this database HOLDS —
+// a wisp row, or an issue row whatever its prefix (GH#8299) — goes to its typed
+// column, and only a target no local row answers goes to depends_on_external,
+// which carries no foreign key. A same-prefix target no row answers is still
+// classified as an issue, where fk_dep_issue_target refuses the genuinely
+// missing id.
 func (r *dependencySQLRepositoryImpl) pickDepTargetColumn(ctx context.Context, issueID, dependsOnID string) (string, error) {
-	if issueops.IsExternalDepTarget(issueID, dependsOnID) {
-		return "depends_on_external", nil
+	heldWisp, err := r.rowExists(ctx, "wisps", dependsOnID)
+	if err != nil {
+		if dberrors.IsTableNotExist(err) {
+			// A fresh clone can lose its dolt-ignored wisps plane; its absence
+			// means no wisp targets, not a failed probe.
+			heldWisp = false
+		} else {
+			return "", fmt.Errorf("classify dep target %s: %w", dependsOnID, err)
+		}
 	}
-	var probe int
-	err := r.runner.QueryRowContext(ctx, "SELECT 1 FROM wisps WHERE id = ? LIMIT 1", dependsOnID).Scan(&probe)
-	switch {
-	case err == nil:
-		return "depends_on_wisp_id", nil
-	case errors.Is(err, sql.ErrNoRows):
-		return "depends_on_issue_id", nil
-	case dberrors.IsTableNotExist(err):
-		return "depends_on_issue_id", nil
-	default:
+	heldIssue, err := r.rowExists(ctx, "issues", dependsOnID)
+	if err != nil {
 		return "", fmt.Errorf("classify dep target %s: %w", dependsOnID, err)
+	}
+	switch issueops.DepTargetKindFor(issueID, dependsOnID, heldWisp, heldIssue) {
+	case issueops.DepTargetExternal:
+		return "depends_on_external", nil
+	case issueops.DepTargetWisp:
+		return "depends_on_wisp_id", nil
+	default:
+		return "depends_on_issue_id", nil
 	}
 }
 
@@ -323,7 +330,23 @@ func (r *dependencySQLRepositoryImpl) ValidateBlockingHierarchy(ctx context.Cont
 	if dep == nil {
 		return errors.New("db: DependencySQLRepository.ValidateBlockingHierarchy: dep must not be nil")
 	}
-	if issueops.IsExternalDepTarget(dep.IssueID, dep.DependsOnID) {
+	// Locality is resolved by probe, not by prefix (GH#8299): a target this
+	// database holds — whatever its prefix — has local hierarchy to conflict
+	// with, and only a target no local row answers (an explicit "external:"
+	// ref, or a foreign-prefix id stored unresolved) is skipped.
+	heldWisp, err := r.rowExists(ctx, "wisps", dep.DependsOnID)
+	if err != nil {
+		if dberrors.IsTableNotExist(err) {
+			heldWisp = false
+		} else {
+			return fmt.Errorf("db: DependencySQLRepository.ValidateBlockingHierarchy: %w", err)
+		}
+	}
+	heldIssue, err := r.rowExists(ctx, "issues", dep.DependsOnID)
+	if err != nil {
+		return fmt.Errorf("db: DependencySQLRepository.ValidateBlockingHierarchy: %w", err)
+	}
+	if issueops.DepTargetKindFor(dep.IssueID, dep.DependsOnID, heldWisp, heldIssue) == issueops.DepTargetExternal {
 		return nil
 	}
 	return issueops.CheckBlockingHierarchyInTx(ctx, r.runner, dep, nil)

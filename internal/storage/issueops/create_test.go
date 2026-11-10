@@ -131,9 +131,14 @@ func TestPersistDependenciesHonorsImportedCreatedBy(t *testing.T) {
 		}},
 	}
 
-	mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
+	// Classification probes both planes for the target (GH#8299)…
+	mock.ExpectQuery("SELECT issue_type FROM wisps WHERE id = \\?").
 		WithArgs("target").
 		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT issue_type FROM issues WHERE id = \\?").
+		WithArgs("target").
+		WillReturnRows(sqlmock.NewRows([]string{"issue_type"}).AddRow("task"))
+	// …and the held target's existence check reads its plane.
 	mock.ExpectQuery("SELECT 1 FROM issues WHERE id = \\?").
 		WithArgs("target").
 		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
@@ -173,9 +178,12 @@ func TestPersistDependenciesDefaultsCreatedByToActor(t *testing.T) {
 		}},
 	}
 
-	mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
+	mock.ExpectQuery("SELECT issue_type FROM wisps WHERE id = \\?").
 		WithArgs("target").
 		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT issue_type FROM issues WHERE id = \\?").
+		WithArgs("target").
+		WillReturnRows(sqlmock.NewRows([]string{"issue_type"}).AddRow("task"))
 	mock.ExpectQuery("SELECT 1 FROM issues WHERE id = \\?").
 		WithArgs("target").
 		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
@@ -212,8 +220,16 @@ func TestPersistDependenciesClassifiesBareCrossPrefixTargetAsExternal(t *testing
 	}
 	var skipped []string
 
-	// A bare target with a different issue prefix is external. In particular,
-	// persistence must not probe either local target table before this insert.
+	// A bare target with a different issue prefix stays external — but by
+	// probe outcome now, not by prefix (GH#8299): classification reads both
+	// planes, finds no row for mkt-456 in either, and only then routes the
+	// edge unresolved. A database that did hold mkt-456 would insert it typed.
+	mock.ExpectQuery("SELECT issue_type FROM wisps WHERE id = \\?").
+		WithArgs("mkt-456").
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT issue_type FROM issues WHERE id = \\?").
+		WithArgs("mkt-456").
+		WillReturnRows(sqlmock.NewRows([]string{"issue_type"}))
 	mock.ExpectExec("INSERT INTO dependencies \\(id, issue_id, depends_on_external").
 		WithArgs(depid.New("sym-3su", "mkt-456"), "sym-3su", "mkt-456", types.DepRelated, "tester", sqlmock.AnyArg(), "{}", "").
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -256,15 +272,15 @@ func TestPersistDependenciesReturnsTargetLookupErrors(t *testing.T) {
 		}},
 	}
 
-	mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
+	mock.ExpectQuery("SELECT issue_type FROM wisps WHERE id = \\?").
 		WithArgs("target").
 		WillReturnError(sql.ErrNoRows)
-	mock.ExpectQuery("SELECT 1 FROM issues WHERE id = \\?").
+	mock.ExpectQuery("SELECT issue_type FROM issues WHERE id = \\?").
 		WithArgs("target").
 		WillReturnError(targetErr)
 
 	err := PersistDependencies(ctx, tx, []*types.Issue{issue}, "tester")
-	if err == nil || !strings.Contains(err.Error(), "failed to check dependency target target for source") {
+	if err == nil || !strings.Contains(err.Error(), "failed to classify dependency target target for source") {
 		t.Fatalf("error = %v, want dependency target lookup error", err)
 	}
 
@@ -291,9 +307,12 @@ func TestPersistDependenciesSkipsValidationErrorsWhenConfigured(t *testing.T) {
 	}
 	var skipped []string
 
-	mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
+	mock.ExpectQuery("SELECT issue_type FROM wisps WHERE id = \\?").
 		WithArgs("source").
 		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT issue_type FROM issues WHERE id = \\?").
+		WithArgs("source").
+		WillReturnRows(sqlmock.NewRows([]string{"issue_type"}).AddRow("task"))
 	mock.ExpectQuery("SELECT 1 FROM issues WHERE id = \\?").
 		WithArgs("source").
 		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
@@ -337,9 +356,12 @@ func TestPersistDependenciesRejectsHierarchyBlocking(t *testing.T) {
 		}},
 	}
 
-	mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
+	mock.ExpectQuery("SELECT issue_type FROM wisps WHERE id = \\?").
 		WithArgs("parent").
 		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT issue_type FROM issues WHERE id = \\?").
+		WithArgs("parent").
+		WillReturnRows(sqlmock.NewRows([]string{"issue_type"}).AddRow("task"))
 	mock.ExpectQuery("SELECT 1 FROM issues WHERE id = \\?").
 		WithArgs("parent").
 		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
@@ -386,9 +408,12 @@ func TestPersistDependenciesValidatesPlannedHierarchyBeforeBlocking(t *testing.T
 	}
 
 	for _, pair := range [][2]string{{"bd-child", "bd-parent"}, {"bd-parent", "bd-grand"}} {
-		mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
+		mock.ExpectQuery("SELECT issue_type FROM wisps WHERE id = \\?").
 			WithArgs(pair[1]).
 			WillReturnError(sql.ErrNoRows)
+		mock.ExpectQuery("SELECT issue_type FROM issues WHERE id = \\?").
+			WithArgs(pair[1]).
+			WillReturnRows(sqlmock.NewRows([]string{"issue_type"}).AddRow("task"))
 		mock.ExpectQuery("SELECT 1 FROM issues WHERE id = \\?").
 			WithArgs(pair[1]).
 			WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
@@ -402,9 +427,12 @@ func TestPersistDependenciesValidatesPlannedHierarchyBeforeBlocking(t *testing.T
 			WithArgs(dependencyCoordinationKey(pair[1], dependencyCoordinationDurableTier), sqlmock.AnyArg()).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 	}
-	mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
+	mock.ExpectQuery("SELECT issue_type FROM wisps WHERE id = \\?").
 		WithArgs("bd-grand").
 		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT issue_type FROM issues WHERE id = \\?").
+		WithArgs("bd-grand").
+		WillReturnRows(sqlmock.NewRows([]string{"issue_type"}).AddRow("task"))
 	mock.ExpectQuery("SELECT 1 FROM issues WHERE id = \\?").
 		WithArgs("bd-grand").
 		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
@@ -439,8 +467,16 @@ func TestPersistDependenciesSkipsHierarchyValidationAcrossPrefixes(t *testing.T)
 		}},
 	}
 
-	// No target or ancestors query: target existence and hierarchy cannot be
-	// validated locally across rig prefixes.
+	// Classification probes both planes and finds no row for bb-target in
+	// either — the probe outcome, not the prefix, is what routes the edge
+	// unresolved now (GH#8299) — so no local target-existence or ancestors
+	// query applies to it. The cycle check still runs.
+	mock.ExpectQuery("SELECT issue_type FROM wisps WHERE id = \\?").
+		WithArgs("bb-target").
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT issue_type FROM issues WHERE id = \\?").
+		WithArgs("bb-target").
+		WillReturnRows(sqlmock.NewRows([]string{"issue_type"}))
 	mock.ExpectQuery("WITH RECURSIVE reachable").
 		WithArgs("bb-target", "aa-source").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
@@ -657,9 +693,12 @@ func TestPersistDependenciesTolerantReturnsValidationQueryErrors(t *testing.T) {
 					Type:        tc.depType,
 				}},
 			}
-			mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
+			mock.ExpectQuery("SELECT issue_type FROM wisps WHERE id = \\?").
 				WithArgs("bd-parent").
 				WillReturnError(sql.ErrNoRows)
+			mock.ExpectQuery("SELECT issue_type FROM issues WHERE id = \\?").
+				WithArgs("bd-parent").
+				WillReturnRows(sqlmock.NewRows([]string{"issue_type"}).AddRow("task"))
 			mock.ExpectQuery("SELECT 1 FROM issues WHERE id = \\?").
 				WithArgs("bd-parent").
 				WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
@@ -827,9 +866,12 @@ func TestPersistDependenciesTolerantSkipsTypedRefusals(t *testing.T) {
 				IssueType:    types.TypeTask,
 				Dependencies: []*types.Dependency{{DependsOnID: "bd-b", Type: types.DepBlocks}},
 			}
-			mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
+			mock.ExpectQuery("SELECT issue_type FROM wisps WHERE id = \\?").
 				WithArgs("bd-b").
 				WillReturnError(sql.ErrNoRows)
+			mock.ExpectQuery("SELECT issue_type FROM issues WHERE id = \\?").
+				WithArgs("bd-b").
+				WillReturnRows(sqlmock.NewRows([]string{"issue_type"}).AddRow("task"))
 			mock.ExpectQuery("SELECT 1 FROM issues WHERE id = \\?").
 				WithArgs("bd-b").
 				WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
