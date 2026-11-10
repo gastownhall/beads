@@ -243,6 +243,7 @@ go_test(
         "remedy_printing_internal_test.go",
         "remote_git_ref_test.go",
         "remote_migrate_gate_test.go",
+        "remote_operand_test.go",
         "remote_peer_auth_test.go",
         "remote_sync_gate_test.go",
         "reopen_category_test.go",

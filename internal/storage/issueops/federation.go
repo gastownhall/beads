@@ -137,7 +137,11 @@ func RemoveFederationPeerInTx(ctx context.Context, tx *sql.Tx, name string) erro
 
 // AddRemoteIfNotExists adds a Dolt remote, ignoring "already exists" errors.
 // This is a helper used when adding federation peers that also need a Dolt remote.
+// An option-shaped name is refused before any SQL (GH#7876).
 func AddRemoteIfNotExists(ctx context.Context, tx *sql.Tx, name, url string) error {
+	if err := storage.ValidateRemoteOperand(name); err != nil {
+		return err
+	}
 	_, err := tx.ExecContext(ctx, "CALL DOLT_REMOTE('add', ?, ?)", name, url)
 	if err != nil && !strings.Contains(err.Error(), "already exists") {
 		return fmt.Errorf("add remote %s: %w", name, err)

@@ -565,6 +565,10 @@ func (s *EmbeddedDoltStore) ListRemotes(ctx context.Context) ([]storage.RemoteIn
 // operating on a peer-backed remote now reads it holding federationEnvMutex,
 // where before it read it holding no lock at all.
 
+// The named-remote and peer verbs refuse an option-shaped name first
+// (storage.ValidateRemoteOperand, GH#7876), before CommitPending, credentials
+// or the engine; the default-remote verbs always pass defaultRemote.
+
 func (s *EmbeddedDoltStore) Push(ctx context.Context) error {
 	// GH#5433: every Pull variant below auto-commits pending changes first;
 	// push never did, so a working set with pending-but-uncommitted changes
@@ -623,6 +627,9 @@ func (s *EmbeddedDoltStore) PullWithStrategy(ctx context.Context, strategy strin
 // PullRemoteWithStrategy implements storage.StrategicPuller for a named
 // remote; see PullWithStrategy.
 func (s *EmbeddedDoltStore) PullRemoteWithStrategy(ctx context.Context, remote, strategy string) error {
+	if err := storage.ValidateRemoteOperand(remote); err != nil {
+		return err
+	}
 	if _, err := s.CommitPending(ctx, "beads"); err != nil {
 		return fmt.Errorf("commit pending before pull: %w", err)
 	}
@@ -651,6 +658,9 @@ func (s *EmbeddedDoltStore) ForcePush(ctx context.Context) error {
 }
 
 func (s *EmbeddedDoltStore) PushRemote(ctx context.Context, remote string, force bool) error {
+	if err := storage.ValidateRemoteOperand(remote); err != nil {
+		return err
+	}
 	// GH#5433: see Push.
 	if _, err := s.CommitPending(ctx, "beads"); err != nil {
 		return fmt.Errorf("commit pending before push: %w", err)
@@ -666,6 +676,9 @@ func (s *EmbeddedDoltStore) PushRemote(ctx context.Context, remote string, force
 }
 
 func (s *EmbeddedDoltStore) PullRemote(ctx context.Context, remote string) error {
+	if err := storage.ValidateRemoteOperand(remote); err != nil {
+		return err
+	}
 	// GH#2474 / bd-578h9.2: see Pull.
 	if _, err := s.CommitPending(ctx, "beads"); err != nil {
 		return fmt.Errorf("commit pending before pull: %w", err)
@@ -683,6 +696,9 @@ func (s *EmbeddedDoltStore) PullRemote(ctx context.Context, remote string) error
 }
 
 func (s *EmbeddedDoltStore) Fetch(ctx context.Context, peer string) error {
+	if err := storage.ValidateRemoteOperand(peer); err != nil {
+		return err
+	}
 	return s.withPeerAuth(ctx, peer, func(user string) error {
 		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 			return versioncontrolops.Fetch(ctx, db, peer, user)
@@ -691,6 +707,9 @@ func (s *EmbeddedDoltStore) Fetch(ctx context.Context, peer string) error {
 }
 
 func (s *EmbeddedDoltStore) PushTo(ctx context.Context, peer string) error {
+	if err := storage.ValidateRemoteOperand(peer); err != nil {
+		return err
+	}
 	// GH#5433: see Push.
 	if _, err := s.CommitPending(ctx, "beads"); err != nil {
 		return fmt.Errorf("commit pending before push: %w", err)
@@ -703,6 +722,9 @@ func (s *EmbeddedDoltStore) PushTo(ctx context.Context, peer string) error {
 }
 
 func (s *EmbeddedDoltStore) PullFrom(ctx context.Context, peer string) ([]storage.Conflict, error) {
+	if err := storage.ValidateRemoteOperand(peer); err != nil {
+		return nil, err
+	}
 	// Auto-commit pending changes before pull to prevent
 	// "cannot merge with uncommitted changes" errors.
 	if _, err := s.CommitPending(ctx, "beads"); err != nil {
