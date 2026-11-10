@@ -2289,92 +2289,9 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 		if err != nil {
 			return count, fmt.Errorf("reading migration %s: %w", mf.name, err)
 		}
-
-		// Snapshot the working set BEFORE the pre-migration repair runs, not
-		// just before the migration's own SQL. preMigrationRepair (below) can
-		// itself mutate synced tables (e.g. #4690's ensureDependenciesIDColumn
-		// ALTERs `dependencies`); snapshotting after it ran would misclassify
-		// that mutation as pre-existing dirt to exclude from this step's
-		// commit, so the repair would sit uncommitted in the working set while
-		// the cursor row for this version was already committed -- a killed
-		// process between this step and the pass's final commit would leave
-		// history claiming the version applied while the repaired table's
-		// change was never durably recorded, and the version-gated repair
-		// hook cannot re-run to fix it (its version is no longer pending).
-		// Snapshotting first makes repair-hook mutations count as this step's
-		// own newly-dirtied work, so they land in the same atomic commit as
-		// the migration and its cursor row.
-		var dirtyBeforeStep map[string]dirtyTableState
-		if commitEachStep {
-			dirtyBeforeStep, err = dirtyTables(ctx, db, true)
-			if err != nil {
-				return count, fmt.Errorf("snapshotting dirty tables before %s: %w", mf.name, err)
-			}
+		if err := runMigrationStep(ctx, db, src, mf, data, commitEachStep, &count); err != nil {
+			return count, err
 		}
-
-		// Snapshot updated_at before the repair and the body can stamp it,
-		// for the frozen migrations registered in updatedAtGuards (#5981);
-		// nil and query-free for every other step.
-		stamps, err := snapshotUpdatedAtForStep(ctx, db, src, mf.version)
-		if err != nil {
-			return count, fmt.Errorf("snapshotting updated_at before migration %s: %w", mf.name, err)
-		}
-
-		if err := src.preMigrationRepair(ctx, db, mf.version); err != nil {
-			return count, fmt.Errorf("pre-repair for migration %s: %w", mf.name, err)
-		}
-
-		fmt.Fprintf(stderr, "Applying migration %04d: %s…\n", mf.version, humanMigrationName(mf.name))
-		start := time.Now()
-		// Soft warning only, by design — never turn this into a hard
-		// timeout/abort. Migrations can legitimately run arbitrarily long
-		// (see the initSchema comment in internal/storage/dolt/store.go,
-		// e.g. migration 0047's full-table recompute); aborting mid-DDL
-		// risks leaving Dolt in a partially-migrated state with no clean
-		// rollback. Full scoping rationale and rejected alternatives:
-		// bd show be-m65rs.
-		//
-		// The wrap deliberately covers the migration's own SQL body and
-		// nothing else: the dirty-table snapshot and preMigrationRepair above
-		// and the cursor INSERT and commitMigrationStep below all run outside
-		// it, including the per-step DOLT_ADD/DOLT_COMMIT that the comment
-		// further down calls the expensive, fallible part of this step on the
-		// production embedded path. Widening the boundary to the whole step
-		// means moving this loop's snapshot/commit ordering — the atomicity
-		// contract documented on runMigrations and in commitMigrationStep
-		// (#4566, #4690) — which is more risk than an observability change
-		// should carry. So a wedge inside the per-step commit is still silent;
-		// CHANGELOG.md scopes the user-facing promise to match.
-		if err := runMigrationWithWatchdog(ctx, watchdogStderr, mf.version, humanMigrationName(mf.name), migrationWatchdogIntervalDuration(),
-			func(ctx context.Context) error { return execMigrationBody(ctx, db, string(data)) },
-		); err != nil {
-			return count, fmt.Errorf("migration %s: %w", mf.name, err)
-		}
-		// Restore before the cursor row and the per-step commit, so neither
-		// the step's commit nor a later pass ever records the stamped values.
-		if err := stamps.restore(ctx, db); err != nil {
-			return count, fmt.Errorf("restoring updated_at after migration %s: %w", mf.name, err)
-		}
-		sum := sha256.Sum256(data)
-		contentHash := hex.EncodeToString(sum[:])
-		if _, err := db.ExecContext(ctx, "INSERT IGNORE INTO "+src.cursorTable+" (version, content_hash) VALUES (?, ?)", mf.version, contentHash); err != nil {
-			return count, fmt.Errorf("recording %s in %s: %w", mf.name, src.cursorTable, err)
-		}
-		count++
-
-		// commitEachStep's DOLT_ADD/DOLT_COMMIT is the expensive, fallible
-		// part of this step on the production embedded path. The "done" line
-		// (and its timing) must land after that commit succeeds, not before
-		// it: printing "done" and then hitting a commit error would show an
-		// operator a false completion, and timing that stopped before the
-		// commit would understate the step's real cost. A failed commit
-		// returns before either print statement below runs.
-		if commitEachStep {
-			if err := commitMigrationStep(ctx, db, src.cursorTable, mf.name, dirtyBeforeStep); err != nil {
-				return count, fmt.Errorf("committing migration %s: %w", mf.name, err)
-			}
-		}
-		fmt.Fprintf(stderr, "  done (%.1fs)\n", time.Since(start).Seconds())
 
 		if migrateStepFaultHook != nil {
 			if err := migrateStepFaultHook(ctx, db, mf.version); err != nil {
@@ -2383,6 +2300,132 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 		}
 	}
 	return count, nil
+}
+
+// runMigrationStep applies one migration file the runMigrations loop has
+// already selected (minVersion < version <= upTo): the step's dirty-table and
+// updated_at snapshots, pre-migration repair, body, timestamp restore, cursor
+// row, per-step commit, and progress lines. count is advanced by one when the
+// step's cursor row is recorded — including on the per-step-commit exit below
+// it, the ordering runMigrations already had.
+//
+// The deferred drift wrapper is the bd-mjbau8 boundary (gastownhall/beads#5699):
+// every error this step returns that carries a dolthub/dolt#11131 signature is
+// re-wrapped as *SchemaEncodingDriftError naming this step, so a pre-guard
+// cursor (the reported case: 0059's INSERT..SELECT over a drifted table) gets
+// the actionable refusal instead of a raw engine error. The wrapper converts
+// nothing else: non-drift errors keep their text and identity (errors.Is and
+// errors.As both work through it), an already-typed error is never
+// double-wrapped, and no recover() is added — a raw engine panic still
+// propagates, the documented residual driver limitation. Errors from before
+// the loop selects a step, and from the fault hook after it, keep their
+// existing generic handling.
+func runMigrationStep(ctx context.Context, db DBConn, src migrationSource, mf migrationFile, data []byte, commitEachStep bool, count *int) (err error) {
+	defer func() {
+		if err == nil {
+			return
+		}
+		var typed *SchemaEncodingDriftError
+		if errors.As(err, &typed) {
+			return
+		}
+		if !isMigrationEncodingDriftErr(err) {
+			return
+		}
+		err = &SchemaEncodingDriftError{
+			Migration:   mf.name,
+			Version:     mf.version,
+			CursorTable: src.cursorTable,
+			Cause:       err,
+		}
+	}()
+
+	// Snapshot the working set BEFORE the pre-migration repair runs, not
+	// just before the migration's own SQL. preMigrationRepair (below) can
+	// itself mutate synced tables (e.g. #4690's ensureDependenciesIDColumn
+	// ALTERs `dependencies`); snapshotting after it ran would misclassify
+	// that mutation as pre-existing dirt to exclude from this step's
+	// commit, so the repair would sit uncommitted in the working set while
+	// the cursor row for this version was already committed -- a killed
+	// process between this step and the pass's final commit would leave
+	// history claiming the version applied while the repaired table's
+	// change was never durably recorded, and the version-gated repair
+	// hook cannot re-run to fix it (its version is no longer pending).
+	// Snapshotting first makes repair-hook mutations count as this step's
+	// own newly-dirtied work, so they land in the same atomic commit as
+	// the migration and its cursor row.
+	var dirtyBeforeStep map[string]dirtyTableState
+	if commitEachStep {
+		dirtyBeforeStep, err = dirtyTables(ctx, db, true)
+		if err != nil {
+			return fmt.Errorf("snapshotting dirty tables before %s: %w", mf.name, err)
+		}
+	}
+
+	// Snapshot updated_at before the repair and the body can stamp it,
+	// for the frozen migrations registered in updatedAtGuards (#5981);
+	// nil and query-free for every other step.
+	stamps, err := snapshotUpdatedAtForStep(ctx, db, src, mf.version)
+	if err != nil {
+		return fmt.Errorf("snapshotting updated_at before migration %s: %w", mf.name, err)
+	}
+
+	if err := src.preMigrationRepair(ctx, db, mf.version); err != nil {
+		return fmt.Errorf("pre-repair for migration %s: %w", mf.name, err)
+	}
+
+	fmt.Fprintf(stderr, "Applying migration %04d: %s…\n", mf.version, humanMigrationName(mf.name))
+	start := time.Now()
+	// Soft warning only, by design — never turn this into a hard
+	// timeout/abort. Migrations can legitimately run arbitrarily long
+	// (see the initSchema comment in internal/storage/dolt/store.go,
+	// e.g. migration 0047's full-table recompute); aborting mid-DDL
+	// risks leaving Dolt in a partially-migrated state with no clean
+	// rollback. Full scoping rationale and rejected alternatives:
+	// bd show be-m65rs.
+	//
+	// The wrap deliberately covers the migration's own SQL body and
+	// nothing else: the dirty-table snapshot and preMigrationRepair above
+	// and the cursor INSERT and commitMigrationStep below all run outside
+	// it, including the per-step DOLT_ADD/DOLT_COMMIT that the comment
+	// further down calls the expensive, fallible part of this step on the
+	// production embedded path. Widening the boundary to the whole step
+	// means moving this loop's snapshot/commit ordering — the atomicity
+	// contract documented on runMigrations and in commitMigrationStep
+	// (#4566, #4690) — which is more risk than an observability change
+	// should carry. So a wedge inside the per-step commit is still silent;
+	// CHANGELOG.md scopes the user-facing promise to match.
+	if err := runMigrationWithWatchdog(ctx, watchdogStderr, mf.version, humanMigrationName(mf.name), migrationWatchdogIntervalDuration(),
+		func(ctx context.Context) error { return execMigrationBody(ctx, db, string(data)) },
+	); err != nil {
+		return fmt.Errorf("migration %s: %w", mf.name, err)
+	}
+	// Restore before the cursor row and the per-step commit, so neither
+	// the step's commit nor a later pass ever records the stamped values.
+	if err := stamps.restore(ctx, db); err != nil {
+		return fmt.Errorf("restoring updated_at after migration %s: %w", mf.name, err)
+	}
+	sum := sha256.Sum256(data)
+	contentHash := hex.EncodeToString(sum[:])
+	if _, err := db.ExecContext(ctx, "INSERT IGNORE INTO "+src.cursorTable+" (version, content_hash) VALUES (?, ?)", mf.version, contentHash); err != nil {
+		return fmt.Errorf("recording %s in %s: %w", mf.name, src.cursorTable, err)
+	}
+	(*count)++
+
+	// commitEachStep's DOLT_ADD/DOLT_COMMIT is the expensive, fallible
+	// part of this step on the production embedded path. The "done" line
+	// (and its timing) must land after that commit succeeds, not before
+	// it: printing "done" and then hitting a commit error would show an
+	// operator a false completion, and timing that stopped before the
+	// commit would understate the step's real cost. A failed commit
+	// returns before either print statement below runs.
+	if commitEachStep {
+		if err := commitMigrationStep(ctx, db, src.cursorTable, mf.name, dirtyBeforeStep); err != nil {
+			return fmt.Errorf("committing migration %s: %w", mf.name, err)
+		}
+	}
+	fmt.Fprintf(stderr, "  done (%.1fs)\n", time.Since(start).Seconds())
+	return nil
 }
 
 // migrateStepFaultHook is a test-only seam. When non-nil it runs at the end of
