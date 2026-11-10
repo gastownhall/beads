@@ -604,6 +604,7 @@ go_test(
         "cascade_parity_proxied_integration_test.go",
         "children_embedded_test.go",
         "children_test.go",
+        "claim_audit_proxied_test.go",
         "claim_audit_sidecar_helpers_test.go",
         "claim_pools_embedded_test.go",
         "cli_fast_test.go",

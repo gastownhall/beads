@@ -273,6 +273,7 @@
 34 31 TestProxiedServerIfRevisionGuardClose
 34 31 TestProxiedServerMolBond
 
+34 32 TestProxiedServerClaimPathsJournalSidecar
 34 32 TestProxiedServerCleanDatabasesPurgeDropped
 34 32 TestProxiedServerConfigConcurrent
 34 32 TestProxiedServerDepB

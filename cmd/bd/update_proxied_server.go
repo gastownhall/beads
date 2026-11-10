@@ -186,6 +186,11 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 	if notesOverwritten {
 		warnNotesReplacement(id)
 	}
+	// Sidecar parity with the direct route (GH#6146): explicit patch fields
+	// and a claim's implied status/assignee move, from this route's own
+	// pre-read and the returned post-state, under the canonical id the
+	// mutation returned (id may be abbreviated on the command line).
+	auditUpdateFieldChanges(updated.ID, before, updated, patch, in.claim, result.Changed, currentActor())
 	return updated, nil, nil
 }
 
