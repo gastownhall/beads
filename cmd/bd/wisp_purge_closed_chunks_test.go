@@ -759,42 +759,72 @@ func TestWispPurgeClosedOrphanReportDropsLaterChunkDeletions(t *testing.T) {
 // the committed ids in this command's deletion bookkeeping (what its own
 // auto-export reads, GH#5896), and reports the confirmed progress with the
 // rerun hint. A role that does not happen to check the context must not be
-// the only thing standing between a canceled command and another write.
+// the only thing standing between a canceled command and another write. A
+// cancellation ahead of the first chunk stops the purge with no request at
+// all and nothing recorded.
 func TestWispPurgeClosedStopsOnCancellationBetweenChunks(t *testing.T) {
-	s := useWispPurgeStub(t, 450)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	s.deleter.committed = func(issueops.DeleteRequest) { cancel() }
+	t.Run("canceled after the first chunk", func(t *testing.T) {
+		s := useWispPurgeStub(t, 450)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		s.deleter.committed = func(issueops.DeleteRequest) { cancel() }
 
-	stdout, stderr, err := captureWispGC(t, func() error {
-		return runWispPurgeClosed(ctx, false, true, nil)
+		stdout, stderr, err := captureWispGC(t, func() error {
+			return runWispPurgeClosed(ctx, false, true, nil)
+		})
+		if err == nil {
+			t.Fatalf("runWispPurgeClosed succeeded after cancellation\nstdout:\n%s", stdout)
+		}
+		if got := len(s.deleter.requests); got != 1 {
+			t.Fatalf("sent %d requests, want 1 (none after the cancellation)", got)
+		}
+		// Every id of the committed chunk is recorded, none of the rest.
+		assertExportBookkeeping(t, s.closed[:200], s.closed[200:])
+		if !bytes.Contains([]byte(stdout), []byte("Deleted 200 issue(s)")) {
+			t.Errorf("stdout does not report the 200 confirmed deletions:\n%s", stdout)
+		}
+		for _, want := range []string{"250", "context canceled", "Rerun the same command"} {
+			if !bytes.Contains([]byte(stderr), []byte(want)) {
+				t.Errorf("stderr lacks %q:\n%s", want, stderr)
+			}
+		}
 	})
-	if err == nil {
-		t.Fatalf("runWispPurgeClosed succeeded after cancellation\nstdout:\n%s", stdout)
-	}
-	if got := len(s.deleter.requests); got != 1 {
-		t.Fatalf("sent %d requests, want 1 (none after the cancellation)", got)
-	}
-	first := s.deleter.requests[0].IDs
-	if !commandDidWrite.Load() {
-		t.Error("commandDidWrite not set after a committed chunk")
-	}
-	for _, id := range []string{first[0], first[len(first)-1]} {
-		if !commandDeletedIssueIDs.has(id) {
-			t.Errorf("committed id %s missing from the deletion bookkeeping", id)
+
+	t.Run("canceled before the first chunk", func(t *testing.T) {
+		s := useWispPurgeStub(t, 450)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		stdout, stderr, err := captureWispGC(t, func() error {
+			return runWispPurgeClosed(ctx, false, true, nil)
+		})
+		if err == nil {
+			t.Fatalf("a purge canceled before its first chunk exited nil\nstdout:\n%s", stdout)
 		}
-	}
-	if commandDeletedIssueIDs.has(s.closed[449]) {
-		t.Errorf("unsent id %s recorded as deleted", s.closed[449])
-	}
-	if !bytes.Contains([]byte(stdout), []byte("Deleted 200 issue(s)")) {
-		t.Errorf("stdout does not report the 200 confirmed deletions:\n%s", stdout)
-	}
-	for _, want := range []string{"250", "context canceled", "Rerun the same command"} {
-		if !bytes.Contains([]byte(stderr), []byte(want)) {
-			t.Errorf("stderr lacks %q:\n%s", want, stderr)
+		if got := len(s.deleter.requests); got != 0 {
+			t.Errorf("sent %d requests, want 0: the canceled context stops the purge before the first request", got)
 		}
-	}
+		if len(s.deleter.deleted) != 0 {
+			t.Errorf("deleted %d wisps, want 0", len(s.deleter.deleted))
+		}
+		if !bytes.Contains([]byte(stdout), []byte("Deleted 0 issue(s)")) {
+			t.Errorf("stdout does not report zero confirmed deletions:\n%s", stdout)
+		}
+		for _, want := range []string{"0 of 450", "context canceled"} {
+			if !bytes.Contains([]byte(stderr), []byte(want)) {
+				t.Errorf("stderr lacks %q:\n%s", want, stderr)
+			}
+		}
+		if commandDidWrite.Load() {
+			t.Error("a purge that deleted nothing marked the command as a write")
+		}
+		for _, id := range s.closed {
+			if commandDeletedIssueIDs.has(id) {
+				t.Errorf("unsent id %s recorded as deleted", id)
+				break
+			}
+		}
+	})
 }
 
 // TestWispPurgeClosedReportsCappedScan pins that a forced purge whose scan
