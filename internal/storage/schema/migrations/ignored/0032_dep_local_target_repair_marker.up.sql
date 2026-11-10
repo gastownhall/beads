@@ -1,0 +1,31 @@
+-- Ignored migration 0032: clone-local marker that forces one local
+-- dependency-target repair pass (gastownhall/beads#8299).
+--
+-- Until #8299 every write path filed a dependency target whose prefix differed
+-- from its source's in depends_on_external, even when this database held the
+-- target. Readiness joins only the typed target columns, so such an edge never
+-- gated anything: a dependent stayed ready beside its open blocker.
+-- repairLocalExternalDepTargets (internal/storage/schema/dep_local_target_repair.go)
+-- moves those rows into their typed column and recomputes the blocked state
+-- they move.
+--
+-- While this version is still pending, migrationWorkNeeded returns true, so
+-- every existing clone runs exactly one more MigrateUp pass and the repair
+-- reaches it. The repair also runs on every later migration pass, where a
+-- converged database plans nothing and writes nothing. While the marker is
+-- pending the recompute additionally covers every typed cross-prefix edge, so
+-- a pass interrupted after moving rows but before recomputing converges on
+-- retry.
+--
+-- Recording the marker AFTER the repair is what makes that retry happen:
+-- ignoredSource.migrate runs later in MigrateUp, so a repair that fails or
+-- refuses a pre-existing dirty table leaves this version unrecorded and the
+-- next open runs it again.
+--
+-- The cursor table is dolt-ignored, so the marker is clone-local: each clone
+-- repairs its own rows. Versioned edges bind only to versioned issues, so two
+-- clones with the same history converge on the same dependency rows whatever
+-- wisps each holds locally.
+--
+-- The marker itself changes nothing.
+SELECT 1;
