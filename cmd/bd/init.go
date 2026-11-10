@@ -905,6 +905,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				teamServer:             initTeamServer,
 				fromJSONL:              fromJSONL,
 				nonInteractive:         nonInteractive,
+				noAdopt:                noAdopt,
 			}); err != nil {
 				// runInitProxiedServer runs the same checkExistingBeadsData
 				// the route below does, but it runs it inside itself — so

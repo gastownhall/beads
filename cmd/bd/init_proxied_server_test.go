@@ -39,7 +39,7 @@ func TestProxiedInitRemoteURLUsesSelectedProject(t *testing.T) {
 		require.NoError(t, err, "fixture git %v: %s", args, out)
 		return strings.TrimSpace(string(out))
 	}
-	for _, name := range []string{"ordinary", "decoy", "invalid", "inline", "scp", "missing", "nonrepo", "bare", "stealth", "keep_home_clean", "explicit", "explicit_empty", "configured", "configured_stealth", "configured_keep_home_clean", "legacy", "canceled"} {
+	for _, name := range []string{"ordinary", "decoy", "invalid", "inline", "scp", "missing", "nonrepo", "bare", "stealth", "keep_home_clean", "no_adopt", "no_adopt_yes", "no_adopt_env", "no_adopt_configured", "explicit", "explicit_empty", "configured", "configured_stealth", "configured_keep_home_clean", "legacy", "canceled"} {
 		t.Run(name, func(t *testing.T) {
 			home := t.TempDir()
 			for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
@@ -83,6 +83,26 @@ func TestProxiedInitRemoteURLUsesSelectedProject(t *testing.T) {
 			case "keep_home_clean":
 				// The opt-out from a home inside another repository: its origin is not this workspace's remote.
 				in.keepHomeClean, want = true, ""
+			case "no_adopt", "no_adopt_yes", "no_adopt_env":
+				// #6099: --no-adopt / BD_NO_REMOTE_ADOPT=1 never derives a
+				// remote from git origin — no origin lookup, no wiring — and
+				// --yes cannot re-enable the derivation (the safer of two
+				// contradictory instructions wins). no_adopt_yes proves that
+				// combination only via the resolver input; consent itself is
+				// decided in CheckRemoteSafety, whose guard matrix carries the
+				// derived/no-adopt+yes row.
+				want = ""
+				if name == "no_adopt_env" {
+					t.Setenv("BD_NO_REMOTE_ADOPT", "1")
+				} else {
+					in.noAdopt = true
+				}
+			case "no_adopt_configured":
+				// The opt-out never affects a configured sync.remote: that
+				// remote names its source and keeps its existing semantics.
+				want = "dolthub://fixture/configured"
+				t.Setenv("BD_SYNC_REMOTE", want)
+				in.noAdopt = true
 			case "explicit", "explicit_empty":
 				in.initRemoteChanged = true
 				in.initRemote = "dolthub://fixture/explicit"

@@ -48,6 +48,7 @@ type initProxiedServerInput struct {
 	teamServer             bool
 	fromJSONL              bool
 	nonInteractive         bool
+	noAdopt                bool // --no-adopt: never derive a remote from git origin (#6099)
 }
 
 func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxiedServerInput) error {
@@ -338,6 +339,13 @@ func resolveProxiedInitRemoteURL(ctx context.Context, workDir string, in initPro
 		return url
 	}
 	if source != initSyncRemoteNone {
+		return ""
+	}
+	// An opted-out run never resolves git origin at all (#6099): --no-adopt /
+	// BD_NO_REMOTE_ADOPT applies before the origin lookup here, exactly as
+	// the direct route skips its derivation-and-probe branch, so an opted-out
+	// proxied init wires nothing and never touches the origin.
+	if skipDerivedRemoteAdoption(in.noAdopt) {
 		return ""
 	}
 	// Under keepHomeClean the repository around the home is not the project's,

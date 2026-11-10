@@ -1350,3 +1350,112 @@ func TestInitGitOriginAdoptionPromptDeclines(t *testing.T) {
 		}
 	})
 }
+
+// TestInitGitOriginNoAdoptOptsOut pins the opt-out half of #6099:
+// --no-adopt / BD_NO_REMOTE_ADOPT=1 means bd init never derives a remote from
+// git origin — no origin probe, no clone, a fresh local database, no derived
+// wiring — and it beats --yes when both are given (the safer instruction
+// wins). The explicit --remote and configured sync.remote routes are
+// unaffected (resolveInitConfiguredSyncRemote runs before the opt-out leg).
+func TestInitGitOriginNoAdoptOptsOut(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	// fixture builds a clone whose git origin is bareDir. When withDoltData
+	// is set it also carries synthetic refs/dolt/data, the shape that without
+	// the opt-out would bootstrap-adopt; when unreachable is set bareDir is
+	// replaced by a path that does not exist, the probe-error shape.
+	newClone := func(t *testing.T, withDoltData, unreachable bool) (dir string, originURL string) {
+		t.Helper()
+		bareDir := filepath.Join(t.TempDir(), "bare.git")
+		if unreachable {
+			bareDir = filepath.Join(t.TempDir(), "does-not-exist.git")
+		}
+		if !unreachable {
+			runGitForBootstrapTest(t, "", "init", "--bare", bareDir)
+			sourceDir := t.TempDir()
+			runGitForBootstrapTest(t, sourceDir, "init", "-b", "main")
+			runGitForBootstrapTest(t, sourceDir, "config", "user.email", "test@test.com")
+			runGitForBootstrapTest(t, sourceDir, "config", "user.name", "Test User")
+			runGitForBootstrapTest(t, sourceDir, "commit", "--allow-empty", "-m", "init")
+			runGitForBootstrapTest(t, sourceDir, "remote", "add", "origin", bareDir)
+			runGitForBootstrapTest(t, sourceDir, "push", "origin", "main")
+			if withDoltData {
+				runGitForBootstrapTest(t, sourceDir, "push", "origin", "HEAD:refs/dolt/data")
+			}
+		}
+		dir = t.TempDir()
+		runGitForBootstrapTest(t, dir, "init", "-b", "main")
+		runGitForBootstrapTest(t, dir, "remote", "add", "origin", bareDir)
+		runGitForBootstrapTest(t, dir, "config", "core.hooksPath", ".git/hooks")
+		return dir, bareDir
+	}
+
+	// runOptOut runs a plain non-interactive init in the clone and asserts
+	// the opted-out shape: success, a fresh local workspace, no bootstrap, no
+	// derived wiring persisted.
+	runOptOut := func(t *testing.T, cloneDir, originURL string, envExtra []string, args ...string) {
+		t.Helper()
+		cmd := exec.Command(bdBin, append([]string{"init", "--prefix", "mine", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents"}, args...)...)
+		cmd.Dir = cloneDir
+		cmd.Env = hermeticInitEnv(t.TempDir(), envExtra...)
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		cmd.Stderr = &out
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("opted-out bd init failed: %v\n%s", err, out.String())
+		}
+
+		if _, err := os.Stat(filepath.Join(cloneDir, ".beads")); err != nil {
+			t.Fatalf("opted-out init should create a fresh local workspace: %v\n%s", err, out.String())
+		}
+		if strings.Contains(out.String(), "Bootstrapped from remote") {
+			t.Errorf("opted-out init still bootstrapped from the origin:\n%s", out.String())
+		}
+		// No derived wiring: sync.remote must not mention the origin.
+		configYAML, err := os.ReadFile(filepath.Join(cloneDir, ".beads", "config.yaml"))
+		if err != nil {
+			t.Fatalf("read config.yaml after opted-out init: %v", err)
+		}
+		if strings.Contains(string(configYAML), originURL) {
+			t.Errorf("opted-out init must not persist the origin as sync.remote; config.yaml:\n%s", configYAML)
+		}
+	}
+
+	t.Run("no-adopt with a data-bearing origin", func(t *testing.T) {
+		cloneDir, originURL := newClone(t, true, false)
+		runOptOut(t, cloneDir, originURL, nil, "--no-adopt")
+	})
+
+	t.Run("BD_NO_REMOTE_ADOPT=1 env", func(t *testing.T) {
+		cloneDir, originURL := newClone(t, true, false)
+		runOptOut(t, cloneDir, originURL, []string{"BD_NO_REMOTE_ADOPT=1"})
+	})
+
+	t.Run("no-adopt beats --yes", func(t *testing.T) {
+		// The safer of two contradictory instructions wins: --yes is consent
+		// to adopting, but --no-adopt says never derive in the first place.
+		cloneDir, originURL := newClone(t, true, false)
+		runOptOut(t, cloneDir, originURL, nil, "--no-adopt", "--yes")
+	})
+
+	t.Run("no-adopt skips the origin probe entirely", func(t *testing.T) {
+		// An unreachable origin never gets probed at all, so its
+		// fail-closed UNKNOWN warning must not appear either.
+		cloneDir, _ := newClone(t, false, true)
+		cmd := exec.Command(bdBin, "init", "--prefix", "mine", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents", "--no-adopt")
+		cmd.Dir = cloneDir
+		cmd.Env = hermeticInitEnv(t.TempDir())
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		cmd.Stderr = &out
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("opted-out bd init with an unreachable origin failed: %v\n%s", err, out.String())
+		}
+		if strings.Contains(out.String(), "Could not verify") {
+			t.Errorf("opted-out init still probed the origin:\n%s", out.String())
+		}
+		if strings.Contains(out.String(), "Bootstrapped from remote") {
+			t.Errorf("opted-out init with an unreachable origin still bootstrapped:\n%s", out.String())
+		}
+	})
+}
