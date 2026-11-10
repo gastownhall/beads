@@ -3,7 +3,11 @@
 package embeddeddolt_test
 
 import (
+	"errors"
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // TestCommitAllOutOfBandChangeAndHonestNoOp covers the embedded half of the
@@ -62,5 +66,91 @@ func TestCommitAllOutOfBandChangeAndHonestNoOp(t *testing.T) {
 	}
 	if headSwept == headAfter {
 		t.Fatalf("CommitAll reported committed=true but HEAD did not advance from %s", headAfter)
+	}
+}
+
+// TestCommitAllReportsTrackedTableSkippedByIgnorePattern is the GH#5433
+// regression test. An enabled dolt_ignore pattern covering a TRACKED table
+// (here a user's 'issues' row) makes Dolt's '-Am' staging skip that table
+// while its working-set delta stays: dolt_status still lists it as modified,
+// the commit answers "nothing to commit" or commits only the other dirty
+// tables, and at base CommitAll answered (false, nil) for the whole state —
+// the silent stall the reporter hit three times, with push still reporting
+// success. The store must refuse that answer with an error naming the table.
+func TestCommitAllReportsTrackedTableSkippedByIgnorePattern(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	te := newTestEnv(t, "ntc")
+
+	// A tracked issue at HEAD, so the table's later delta is a modification
+	// of a tracked table, not a new table Dolt would hide from dolt_status.
+	te.exec(t, ctx,
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) "+
+			"VALUES ('ntc-issue-1', 'tracked at head', '', '', '', '', 'open', 2, 'task')")
+	if committed, err := te.store.CommitAll(ctx, "test: create tracked issue"); err != nil || !committed {
+		t.Fatalf("baseline CommitAll: committed=%v err=%v", committed, err)
+	}
+
+	// The stall fixture: an operator's ignore pattern covering the tracked
+	// table, itself committed so it is active for staging.
+	te.exec(t, ctx, "INSERT INTO dolt_ignore (pattern, ignored) VALUES ('issues', true)")
+	if _, err := te.store.CommitAll(ctx, "test: register ignore pattern"); err != nil {
+		t.Fatalf("CommitAll committing the ignore pattern: %v", err)
+	}
+
+	// A write that lands in the working set but, covered by the pattern,
+	// never stages. It must be visible in dolt_status: the fixture must be
+	// the reported stall before the assertion on it means anything.
+	te.exec(t, ctx, "UPDATE issues SET title = 'modified after pattern' WHERE id = 'ntc-issue-1'")
+	var modified int
+	te.queryScalar(t, ctx,
+		"SELECT COUNT(*) FROM dolt_status WHERE table_name = 'issues'", nil, &modified)
+	if modified == 0 {
+		t.Fatalf("fixture did not reproduce the stall: dolt_status does not list issues as changed (%d rows)", modified)
+	}
+
+	headBefore, err := te.store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit: %v", err)
+	}
+
+	committed, err := te.store.CommitAll(ctx, "test: commit with ignored tracked change")
+	if err == nil {
+		t.Fatalf("CommitAll accepted the stall: committed=%v err=nil, want an error reporting the skipped tracked change", committed)
+	}
+	// The refusal is the typed residual finding: nothing landed (DOLT_COMMIT
+	// reported nothing to commit), the tracked table is named, and the
+	// operator's pattern is offered as a suggested cause.
+	var residual *storage.UncommittedChangesError
+	if !errors.As(err, &residual) {
+		t.Fatalf("CommitAll error = %v, want *storage.UncommittedChangesError", err)
+	}
+	if residual.Committed {
+		t.Fatal("residual error says committed=true; DOLT_COMMIT reported nothing to commit for the pattern-covered store")
+	}
+	if len(residual.Tables) != 1 || residual.Tables[0] != "issues" {
+		t.Fatalf("residual tables = %v, want exactly [issues]", residual.Tables)
+	}
+	if len(residual.Patterns) != 1 || residual.Patterns[0] != "issues" {
+		t.Fatalf("residual patterns = %v, want exactly the noncanonical pattern [issues]", residual.Patterns)
+	}
+	if msg := residual.Error(); !strings.Contains(msg, "issues") ||
+		!strings.Contains(msg, "these changes are not in HEAD and push will not send them") {
+		t.Fatalf("residual error message lacks the table or the push warning: %q", msg)
+	}
+
+	// The refusal preserves the working set and HEAD: the write stays saved,
+	// and nothing was published.
+	headAfter, err := te.store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit: %v", err)
+	}
+	if headAfter != headBefore {
+		t.Fatalf("HEAD moved across the refused commit: %s -> %s", headBefore, headAfter)
+	}
+	var title string
+	te.queryScalar(t, ctx, "SELECT title FROM issues WHERE id = 'ntc-issue-1'", nil, &title)
+	if title != "modified after pattern" {
+		t.Fatalf("working-set row lost across the refused commit: title = %q", title)
 	}
 }

@@ -110,13 +110,44 @@ func (s *EmbeddedDoltStore) withMutatingPinnedDBConn(ctx context.Context, fn fun
 // from the returned bool instead of reading HEAD before and after: HEAD reads
 // are extra engine opens and are subject to a HEAD-moved-between-reads race
 // if anything else writes concurrently.
+//
+// GH#5433: after a successful or tolerated-empty DOLT_COMMIT, the same
+// transaction re-reads dolt_status and returns an *storage.
+// UncommittedChangesError naming any tracked table the commit left behind —
+// the silent stall where an ignore pattern covers a tracked table, its writes
+// stop reaching HEAD, and every check still reports success. The committed
+// bool keeps DOLT_COMMIT's own answer: a residual error with committed=true
+// is a partial publication (the other dirty tables did land).
 func (s *EmbeddedDoltStore) commitAll(ctx context.Context, message string, tolerateEmpty bool) (committed bool, err error) {
+	var verification *commitAllVerification
 	err = s.withConn(ctx, true, func(tx *sql.Tx) error {
 		var commitErr error
 		committed, commitErr = commitAllInTx(ctx, tx, message, tolerateEmpty)
-		return commitErr
+		if commitErr != nil {
+			return commitErr
+		}
+		// The verification finding is collected, never returned from the
+		// callback: withConn rolls the SQL transaction back on any callback
+		// error, and a DOLT_COMMIT that already ran must not lose its
+		// publication to a diagnostic. commitAll surfaces the finding after
+		// withConn finished, when publication is confirmed.
+		verification = verifyCommitAllInTx(ctx, tx, committed)
+		return nil
 	})
-	return committed, err
+	if err != nil {
+		// A SQL commit or cleanup failure keeps its precedence and its
+		// indeterminate classification: an unconfirmed publication is never
+		// reported as a confirmed residual finding.
+		return committed, err
+	}
+	if verification != nil && len(verification.residual) > 0 {
+		return committed, &storage.UncommittedChangesError{
+			Tables:    verification.residual,
+			Patterns:  verification.patterns,
+			Committed: committed,
+		}
+	}
+	return committed, nil
 }
 
 // CommitAll commits the entire working set (config included) with the given
