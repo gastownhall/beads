@@ -44,6 +44,7 @@
 
 100 10 TestEmbeddedCreateScalarAndRelationships
 
+100 11 TestEmbeddedDepAddCrossPrefixLocalBlockerGatesReady
 100 11 TestEmbeddedKVConcurrent
 
 100 12 TestEmbeddedAutoImportFallback_ConflictSkip_SkipsRetiredRows
@@ -75,6 +76,7 @@
 
 100 20 TestEmbeddedInitRoleRoutingRetainedFork
 100 20 TestEmbeddedMigrateSchema_IdentityMismatchRefusesBeforeApplying
+100 20 TestEmbeddedReadyCrossPrefixSameDatabaseBlocker
 
 100 21 TestEmbeddedArrivalSeqOnEveryJSONRead
 100 21 TestEmbeddedConfigGetIsReadOnly
