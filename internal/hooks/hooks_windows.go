@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/steveyegge/beads/internal/execwin"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -47,7 +48,7 @@ func (r *Runner) runHook(hookPath, event string, issue *types.Issue) (retErr err
 		return err
 	}
 
-	cmd := exec.CommandContext(ctx, hookPath, issue.ID, event)
+	cmd := execwin.Hide(exec.CommandContext(ctx, hookPath, issue.ID, event))
 	cmd.Stdin = bytes.NewReader(issueJSON)
 
 	var stdout, stderr bytes.Buffer

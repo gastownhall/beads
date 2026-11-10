@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+
+	"github.com/steveyegge/beads/internal/execwin"
 )
 
 // SweepOrphanedTestServers reaps `dolt sql-server` processes that are
@@ -43,7 +45,7 @@ func sweepServersUnderRoots(suiteTempRoots ...string) []SweptServer {
 }
 
 func gatherDoltServerCandidates() []serverCandidate {
-	out, err := exec.Command("ps", "-axo", "pid=,command=").Output()
+	out, err := execwin.Hide(exec.Command("ps", "-axo", "pid=,command=")).Output()
 	if err != nil {
 		return nil
 	}
@@ -51,7 +53,7 @@ func gatherDoltServerCandidates() []serverCandidate {
 }
 
 func isDoltServerProcess(pid int) bool {
-	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+	out, err := execwin.Hide(exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=")).Output()
 	if err != nil {
 		return false
 	}
@@ -65,9 +67,9 @@ type statFunc func(string) (os.FileInfo, error)
 // readDarwinCwd resolves pid's cwd from lsof's machine-readable field output.
 // lsof emits the name as an `n` field after selecting descriptor `cwd`.
 func readDarwinCwd(pid int) (cwd string, deleted bool, ok bool) {
-	out, err := exec.Command(
+	out, err := execwin.Hide(exec.Command(
 		"lsof", "-a", "-p", strconv.Itoa(pid), "-d", "cwd", "-Fn",
-	).Output()
+	)).Output()
 	if err != nil {
 		return "", false, false
 	}
