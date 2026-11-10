@@ -5,7 +5,7 @@ description: Complete reference for bd configuration across config.yaml and data
 
 Complete configuration reference for beads.
 
-Last reviewed: 2026-10-26
+Last reviewed: 2026-11-10
 
 Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, `internal/config/`, `internal/configfile/`, and `internal/endpointtrust/`.
 
@@ -105,7 +105,7 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `actor` | `--actor` | `BEADS_ACTOR` | `git config user.name` | Actor name for audit trail (see [Actor identity](#actor-identity-resolution)) |
 | `identity` | `--identity` | `BEADS_IDENTITY` | (git user / hostname) | Sender identity for `bd mail` |
 | `no-db` | `--no-db` | `BD_NO_DAEMON` (related) | `false` | Run without opening the database |
-| `no-push` | `--no-push` | `BD_NO_PUSH` | `false` | Skip pushing to the remote in `bd dolt push` |
+| `no-push` | `--no-push` | `BD_NO_PUSH` | `false` | Skip pushing to the remote in `bd dolt push`, `bd sync` and dolt auto-push. Pulls and fetches still run; set `dolt.local-only` to keep Dolt data off the network |
 | `no-git-ops` | — | — | `false` | Disable git ops in `bd prime` close protocol. Does not affect Dolt remote sync or auto-push; set `dolt.local-only` to stop those |
 | `agent.profile` | — | `BD_AGENT_PROFILE` | `conservative` | Policy profile `bd prime` uses for git/commit authority: `conservative`, `minimal`, `team-maintainer`; invalid values fall back to `conservative` |
 | `prime.max-memories` | `--max-memories` | `BD_PRIME_MAX_MEMORIES` | `0` | Max persistent memories injected by `bd prime` (0 = unlimited) |
@@ -273,6 +273,7 @@ How it works:
 - After each write command (after auto-commit and auto-backup), `bd` checks whether a push is due.
 - Pushes are debounced: skipped if the last push was less than `dolt.auto-push-interval` ago.
 - Change detection: skipped if the Dolt HEAD commit hasn't changed since the last push.
+- Skipped when `no-push` is set, and after a preview (`--dry-run`, `--inspect`), which writes nothing to publish.
 - Push failures are warnings only (non-fatal), and failed attempts are throttled too.
 - Last push time and commit are tracked in `.beads/push-state.json`, a per-machine file (not in the database, to avoid merge conflicts across machines).
 
