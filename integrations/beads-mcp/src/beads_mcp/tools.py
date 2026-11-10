@@ -663,7 +663,8 @@ async def beads_add_comment(
 
     Leave a durable, timestamped record of what you did, decided, or verified so
     humans don't have to read the agent transcript to know what happened. `show`
-    reports comment_count but not the bodies — use beads_list_comments to read them.
+    is count-only by default (comment_count/comments_omitted); read the bodies
+    with beads_list_comments, or hydrate them via show's include_comments.
 
     Prefer a comment over overwriting `notes`: comments accumulate as a per-turn
     trail, whereas the notes field is a single value that gets replaced.
@@ -678,7 +679,9 @@ async def beads_list_comments(
 ) -> list[Comment]:
     """List all comments on an issue in chronological order.
 
-    `show` returns comment_count but not the comment bodies; use this to read them.
+    `show` is count-only by default: it returns comment_count and
+    comments_omitted but not the bodies. Read the bodies here, or pass
+    include_comments=True to show for a hydrated full read.
     """
     client = await _get_client()
     params = ListCommentsParams(issue_id=issue_id)

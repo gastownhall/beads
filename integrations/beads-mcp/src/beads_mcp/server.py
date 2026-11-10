@@ -449,9 +449,18 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
                 "brief_deps": "bool (default false) - Full issue with compact dependencies",
                 "fields": "list[str] (optional) - Custom field projection",
                 "max_description_length": "int (optional) - Truncate description",
+                "include_comments": (
+                    "bool (default false) - Also return the full comment chronology. "
+                    "Without it the read is count-only: comment_count and comments_omitted "
+                    "report the comments (null means the CLI said nothing — unknown, not "
+                    "zero/false); read bodies with comments(issue_id=...) instead"
+                ),
                 "workspace_root": "str (optional)",
             },
-            "returns": "Full Issue object (or BriefIssue/dict based on params)",
+            "returns": (
+                "Full Issue object (or BriefIssue/dict based on params) carrying "
+                "comment_count/comments_omitted; comment bodies only with include_comments=True"
+            ),
             "example": "show(issue_id='bd-a1b2', brief_deps=True)",
         },
         "create": {
@@ -547,7 +556,11 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
         },
         "comments": {
             "name": "comments",
-            "description": "List all comments on an issue (show reports comment_count but not the bodies)",
+            "description": (
+                "List all comments on an issue (show is count-only by default: it reports "
+                "comment_count/comments_omitted; pass show(include_comments=True) or use this "
+                "tool to read the bodies)"
+            ),
             "parameters": {
                 "issue_id": "str (required)",
                 "workspace_root": "str (optional)",
@@ -1063,7 +1076,12 @@ async def list_issues(
 
 @mcp.tool(
     name="show",
-    description="Show detailed information about a specific issue including dependencies and dependents.",
+    description=(
+        "Show detailed information about a specific issue including dependencies and dependents. "
+        "Comment completeness is always reported: comment_count and comments_omitted describe the "
+        "comments (null means unknown, never zero/false); comment bodies come only with "
+        "include_comments=True, which hydrates the full chronology onto this one read."
+    ),
 )
 @with_workspace
 async def show_issue(
@@ -1339,7 +1357,11 @@ async def comment(
 
 @mcp.tool(
     name="comments",
-    description="List all comments on an issue (show reports comment_count but not the comment bodies).",
+    description=(
+        "List all comments on an issue in chronological order. show is count-only by default "
+        "(comment_count/comments_omitted, no bodies): read the bodies here, or pass "
+        "show(include_comments=True) to hydrate them onto a full show response."
+    ),
 )
 @with_workspace
 async def comments(

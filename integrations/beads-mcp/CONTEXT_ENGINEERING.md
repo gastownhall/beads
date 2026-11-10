@@ -189,6 +189,13 @@ full_issue = show(issue_id="bd-a1b2")
 # Returns complete Issue model with dependencies, description, etc.
 ```
 
+Full details stay comment-light by default: every show response carries
+`comment_count` and `comments_omitted` (null means the CLI said nothing —
+unknown, not zero), so a reader can tell "no comments" from "comments exist
+but were not fetched". Comment bodies are opt-in: `show(issue_id=...,
+include_comments=True)` hydrates the full chronology onto the one read, or
+use the `comments` tool to read them on demand.
+
 #### Option 2: Narrow Your Query
 
 Add filters to reduce the result set:
