@@ -179,3 +179,54 @@ func TestGitProtocolPullDeclinedConflictAbortsMerge(t *testing.T) {
 		t.Fatalf("local %s after the aborted pull = %+v (err %v), want title %q", cliDeclineIssueID, got, err, cliDeclineLocalTitle)
 	}
 }
+
+// TestGitProtocolPullDeclinedConflictRecovers is AC-2 of GH#7839: after a
+// declined git-protocol CLI pull the store keeps accepting writes and a retry
+// reports the same conflict instead of failing on a wedged working set, until
+// an explicit strategy merge reconciles the histories.
+func TestGitProtocolPullDeclinedConflictRecovers(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+	fx := setupCLIPullDeclineFixture(ctx, t)
+	store := fx.store
+
+	var pullErr error
+	logged := captureRouteLog(t, func() { pullErr = store.Pull(ctx) })
+	if !strings.Contains(logged, "dolt pull route: CLI") {
+		t.Fatalf("Pull did not take the CLI route; log:\n%s", logged)
+	}
+	if pullErr == nil {
+		t.Fatal("Pull = nil, want the declined conflict reported")
+	}
+
+	// Writes work again, and a retry reports the same semantic conflict
+	// rather than tripping over a wedged merge in commitBeforePull.
+	var mce *versioncontrolops.MergeConflictsError
+	createCommitted(ctx, t, store, "dc-unrelated", "unrelated work after the aborted pull")
+	waitOutGitRemoteReadCache()
+	retryErr := store.Pull(ctx)
+	if !errors.As(retryErr, &mce) {
+		t.Fatalf("retried Pull error = %v, want *MergeConflictsError", retryErr)
+	}
+	if strings.Contains(retryErr.Error(), "commit pending changes before pull") {
+		t.Fatalf("retried Pull failed in commitBeforePull: %v", retryErr)
+	}
+	assertNoMergeLeft(ctx, t, store)
+
+	// The documented reconciliation: an explicit strategy merge of the
+	// fetched remote-tracking ref, after which a pull has nothing to refuse.
+	if _, err := store.MergeWithStrategy(ctx, "origin/main", "theirs"); err != nil {
+		t.Fatalf("bd vc merge origin/main --strategy theirs: %v", err)
+	}
+	waitOutGitRemoteReadCache()
+	if err := store.Pull(ctx); err != nil {
+		t.Fatalf("Pull after strategy reconciliation: %v", err)
+	}
+	assertNoMergeLeft(ctx, t, store)
+	if got, err := store.GetIssue(ctx, cliDeclineIssueID); err != nil || got.Title != cliDeclinePeerTitle {
+		t.Fatalf("%s after --strategy theirs = %+v (err %v), want title %q", cliDeclineIssueID, got, err, cliDeclinePeerTitle)
+	}
+	if _, err := store.GetIssue(ctx, "dc-unrelated"); err != nil {
+		t.Fatalf("dc-unrelated lost by the reconciliation: %v", err)
+	}
+}
