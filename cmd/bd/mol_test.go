@@ -3516,6 +3516,29 @@ func wantDeps(pairs ...string) []string {
 	return out
 }
 
+func isReadyWork(t *testing.T, ctx context.Context, s storage.DoltStorage, id string) bool {
+	t.Helper()
+	ready, err := s.GetReadyWork(ctx, types.WorkFilter{IncludeEphemeral: true})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	for _, issue := range ready {
+		if issue.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func closeForTest(t *testing.T, ctx context.Context, s storage.DoltStorage, ids ...string) {
+	t.Helper()
+	for _, id := range ids {
+		if err := s.CloseIssue(ctx, id, "done", "test", ""); err != nil {
+			t.Fatalf("close %s: %v", id, err)
+		}
+	}
+}
+
 // TestBondProtoMolRefArmWaitsForTerminalSteps pins AC-1 of bd-lrkpd3: a
 // sequential --ref arm waits on the parent's terminal steps (S2 and S3, not
 // S1, which S2 already waits on, and not the molecule, which would deadlock)
@@ -3532,6 +3555,33 @@ func TestBondProtoMolRefArmWaitsForTerminalSteps(t *testing.T) {
 	armID := result.IDMapping[f.proto.ID]
 	if got, want := outgoingDeps(t, ctx, s, armID), wantDeps("blocks:"+f.s2.ID, "blocks:"+f.s3.ID); !slices.Equal(got, want) {
 		t.Fatalf("arm %s deps = %v, want %v (no edge onto S1 %s or the molecule %s)", armID, got, want, f.s1.ID, f.mol.ID)
+	}
+}
+
+// TestBondProtoMolRefArmStepWaitsForEveryTerminalStep pins AC-2 of
+// bd-lrkpd3: the arm's executable step stays out of ready work while any
+// terminal step is open, even once the steps before it closed, and becomes
+// ready when the last terminal closes.
+func TestBondProtoMolRefArmStepWaitsForEveryTerminalStep(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreWithPrefix(t, t.TempDir()+"/test.db", "patrol")
+	f := seedRefArmFixture(t, ctx, s, false)
+
+	result, err := bondProtoMol(ctx, s, f.proto, f.mol, types.BondTypeSequential, map[string]string{"name": "ace"}, "arm-{{name}}", "test", false, false)
+	if err != nil {
+		t.Fatalf("bondProtoMol: %v", err)
+	}
+	armStep := result.IDMapping[f.protoStep.ID]
+	if isReadyWork(t, ctx, s, armStep) {
+		t.Fatalf("arm step %s is ready before any parent step closed", armStep)
+	}
+	closeForTest(t, ctx, s, f.s1.ID, f.s2.ID)
+	if isReadyWork(t, ctx, s, armStep) {
+		t.Fatalf("arm step %s is ready while terminal step S3 %s is still open", armStep, f.s3.ID)
+	}
+	closeForTest(t, ctx, s, f.s3.ID)
+	if !isReadyWork(t, ctx, s, armStep) {
+		t.Fatalf("arm step %s is not ready after every parent step closed", armStep)
 	}
 }
 
