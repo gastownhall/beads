@@ -1195,6 +1195,7 @@ go_test(
         "root_context_lifecycle_test.go",
         "routed_local_near_miss_test.go",
         "routed_mutation_test.go",
+        "routed_sibling_store_repro_test.go",
         "routed_test.go",
         "routing_notice_test.go",
         "routing_read_remote_test.go",
