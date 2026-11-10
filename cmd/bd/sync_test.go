@@ -1010,6 +1010,32 @@ func TestSyncConflictMessage(t *testing.T) {
 			t.Errorf("aborted-merge halt must not send the operator to resolve a conflict that is not live:\n%s", got)
 		}
 	})
+
+	// Since GH#7839 every pull route aborts a declined conflict and restores
+	// the working set, so the aborted case is where a route conflict lands.
+	// The operator's reconcile step must name the exact command, not a help
+	// topic to go dig through.
+	t.Run("aborted conflict names the strategy reconcile command", func(t *testing.T) {
+		got := joined(&syncOutcome{Conflicts: []string{"issues"}})
+		if !strings.Contains(got, "bd vc merge <remote>/<branch> --strategy ours|theirs") {
+			t.Errorf("message does not name the reconcile command:\n%s", got)
+		}
+	})
+
+	// A sync pull no longer leaves live conflict rows behind (GH#7839): the
+	// old message blamed this run's pull route for them.
+	t.Run("live conflict is not attributed to this run's pull route", func(t *testing.T) {
+		got := joined(&syncOutcome{Conflicts: []string{"issues"}, ConflictsLive: true})
+		// The message is line-wrapped; compare on whitespace-collapsed text
+		// so a line break inside the phrase cannot hide it.
+		flat := strings.Join(strings.Fields(got), " ")
+		if strings.Contains(flat, "this pull route leaves them in place") {
+			t.Errorf("message still claims the pull route left the live rows behind:\n%s", got)
+		}
+		if !strings.Contains(got, "bd conflicts resolve") {
+			t.Errorf("message must still name a resolve command for genuinely live rows:\n%s", got)
+		}
+	})
 }
 
 func TestSyncCommandRegistered(t *testing.T) {

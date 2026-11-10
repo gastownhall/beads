@@ -78,9 +78,10 @@ type syncOutcome struct {
 	ConflictsPreexisting bool `json:"conflicts_preexisting,omitempty"`
 	// ConflictsLive reports whether the conflicts are sitting in the working
 	// set right now rather than having been aborted away. It is read from
-	// which detection source fired, never assumed: the SQL pull route aborts a
-	// conflicted merge and restores the working set, while the CLI/git-protocol
-	// route deliberately leaves the conflict rows live for the operator.
+	// which detection source fired, never assumed. Both pull routes abort a
+	// conflicted merge and restore the working set (GH#7839), so live rows
+	// mean a merge from outside this run: an earlier halted sync, a hand-run
+	// merge, or another writer on a shared sql-server.
 	ConflictsLive bool `json:"conflicts_live,omitempty"`
 	RowsCorrected int  `json:"rows_corrected"`
 	// Pulled reports whether an earlier attempt in this run already completed a
@@ -281,11 +282,12 @@ func runSyncLoop(ctx context.Context, ops syncOps, maxAttempts int) (*syncOutcom
 			out.Conflicts = conflicts
 			// Which source fired decides what the operator is told about the
 			// state of the database, and the two answers are opposites. Live
-			// rows mean the conflict is sitting in the working set right now:
-			// that is what the CLI/git-protocol pull route leaves behind, since
-			// it deliberately does not abort for the operator (see
-			// finishCLIPull). Captured-only means the settle pass aborted the
-			// merge and restored the working set. Guessing either way sends the
+			// rows mean the conflict is sitting in the working set right now —
+			// which no pull route leaves behind anymore: declined conflicts
+			// are aborted on both the SQL and the CLI route (GH#7839, see
+			// finishCLIPull), so live rows come from a merge outside this run.
+			// Captured-only means the settle pass aborted the merge and
+			// restored the working set. Guessing either way sends the
 			// operator looking in the wrong place.
 			out.ConflictsLive = len(live) > 0
 			// pullErr only describes the conflict itself when the merge
@@ -1019,21 +1021,22 @@ func syncConflictMessage(out *syncOutcome) []string {
 			conflictsResolveHint)
 	case out.ConflictsLive:
 		lines = append(lines,
-			"The conflict rows above are LIVE in the working set — this pull route leaves them",
-			"in place for you rather than aborting. The database is conflicted right now, and",
-			"Dolt will refuse to merge over it, so every later sync halts here until you resolve",
-			"it. Nothing was pushed.",
+			"The conflict rows above are LIVE in the working set — the database is conflicted",
+			"right now, and Dolt will refuse to merge over it, so every later sync halts here",
+			"until you resolve them. A sync pull no longer leaves conflicts behind — it aborts",
+			"them like every other route — so these rows come from a merge outside this run:",
+			"a hand-run merge, or another writer on a shared server. Nothing was pushed.",
 			"Inspect with: bd conflicts list / bd conflicts show",
 			conflictsResolveHint)
 	default:
 		lines = append(lines,
 			"The conflicted merge was aborted and the working set restored, so no local work was",
-			"lost — and sync will keep halting here, unchanged, until an operator resolves the",
+			"lost — and sync will keep halting here, unchanged, until an operator reconciles the",
 			"divergence between this replica and the remote. Nothing is lost by waiting.",
-			"'bd conflicts list' will show nothing right now — this pull route restores the working",
-			"set instead of leaving conflicts live for it. The same conflict recurs on every retry",
-			"until the two histories are reconciled by hand (see 'bd vc merge --help' for a route",
-			"that leaves conflicts live and resolvable instead of aborting).")
+			"'bd conflicts list' will show nothing right now — every pull route restores the working",
+			"set instead of leaving conflicts live. The same conflict recurs on every retry until",
+			"the two histories are reconciled by hand:",
+			"  bd vc merge <remote>/<branch> --strategy ours|theirs")
 	}
 
 	// Second: did anything at all happen before the halt? Only reported when

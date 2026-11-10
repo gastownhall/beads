@@ -40,12 +40,15 @@ convergent conflict classes it always has — machine-local metadata rows,
 audit-only dependency rows, last-write-wins on issue cells. Anything past those
 halts here.)
 
-The halt message says which state the halt left behind, because it depends on
-the pull route and both are real: the SQL route aborts the conflicted merge and
-restores the working set, while the CLI/git-protocol route leaves the conflict
-rows **live** for you. A conflict that was already live when sync started — from
-an earlier halted sync or a hand-run merge — halts before the pull instead, and
-says that too.
+The halt message says which state the halt left behind, because both states
+are real: every pull route aborts a conflicted merge and restores the working
+set (the CLI/git-protocol route too, since GH#7839 — it used to wedge `bd` on an
+open merge here), so the halt names the reconcile command
+(`bd vc merge <remote>/<branch> --strategy ours|theirs`) and waiting is safe.
+Conflict rows that are **live** in the working set come from outside the pull —
+a hand-run merge or another writer on a shared server — and a conflict that was
+already live when sync started halts before the pull instead; the message says
+so and points at `bd conflicts resolve`.
 
 The recompute between pull and push is not bookkeeping either — `is_blocked` is
 denormalized, so a dependency edge merged in from another replica leaves

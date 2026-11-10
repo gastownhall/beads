@@ -1226,6 +1226,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A declined conflict on a git-protocol pull no longer wedges the database
+  on an open merge (GH#7839).** `bd dolt pull` over a git-protocol (or
+  credentialed) remote shells to the `dolt` CLI, and when the conflict
+  auto-resolver declined, the merge the CLI left open
+  (`dolt_merge_status.is_merging=1`) stayed open — every later write failed
+  with "Merge conflict detected, @autocommit transaction rolled back" and
+  every later pull halted, until an operator ran `DOLT_MERGE('--abort')` by
+  hand. The SQL route already aborted correctly. The CLI route now aborts the
+  merge and reports the same `*MergeConflictsError` the SQL route does
+  (including via `PullFrom`, which returns the captured conflicts as data);
+  unrepairable FK cascade violations abort the same way and name their
+  tables; a merge that was already open before the pull started is never
+  aborted (the settlement diagnoses it instead), and an indeterminate
+  resolve commit keeps its no-replay sentinel instead of being masked by the
+  transport error. `bd sync`'s halt message now names the reconcile command
+  (`bd vc merge <remote>/<branch> --strategy ours|theirs`) for the
+  aborted-merge case and no longer tells the operator the pull route left
+  live conflict rows behind.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

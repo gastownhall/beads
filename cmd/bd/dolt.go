@@ -858,9 +858,13 @@ or 'bd dolt pull --remote <remote>'. The remote must already exist (see
 
 Use --strategy ours|theirs to resolve conflicts the auto-resolver declines
 (e.g. both sides edited the same issue since the last sync) instead of
-aborting the pull for manual resolution. Embedded storage only (#4992); on
-server-mode/sql-server storage use 'bd conflicts resolve' after a pull that
-reports conflicts.`,
+aborting the pull for manual resolution. Embedded storage only (#4992). A
+declined pull aborts its conflicted merge and restores the working set first
+(GH#7839), so a retry without a strategy meets the same conflict rather than
+wedging on an open merge; on server-mode/sql-server storage, reconcile it with
+'bd vc merge <remote>/<branch> --strategy ours|theirs', and use
+'bd conflicts resolve' on any conflict rows that are live in the working set
+(those come from a hand-run merge, not from a pull).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if isDoltLocalOnly() {
 			if jsonOutput {

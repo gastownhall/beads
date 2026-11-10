@@ -132,11 +132,12 @@ func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Co
 
 // peerPullOutcome converts a settled peer pull's result into PullFrom's
 // contract: conflicts the settle machinery could not auto-resolve are returned
-// as data for the caller, anything else stays an error. The SQL route rolls
-// the conflicted merge back before returning, so its conflicts arrive only via
-// MergeConflictsError, captured pre-rollback (bd-578h9.15); the CLI route's
-// subprocess writes conflicts to the on-disk working set where GetConflicts
-// still sees them.
+// as data for the caller, anything else stays an error. Both routes abort the
+// conflicted merge and capture its conflicts before doing so, so declined
+// conflicts arrive via MergeConflictsError (bd-578h9.15; the CLI route's
+// settlement since GH#7839). The live GetConflicts fallback only covers
+// conflict rows the pull's abort never produced: a hand-run merge's, or
+// another writer's on a shared sql-server.
 func (s *DoltStore) peerPullOutcome(ctx context.Context, peer string, pullErr error, conflicts *[]storage.Conflict) error {
 	if pullErr == nil {
 		return nil

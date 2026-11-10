@@ -23,10 +23,10 @@ import (
 // issues are conflicted, what each side says field by field, and a resolution
 // that can name a single issue instead of a whole table.
 //
-// It reads the LIVE working set. beads' own pull path auto-resolves the safe
-// conflict classes and aborts anything else (restoring the working set), so
-// what lands here is what a CLI-level pull — the federation bridge's — left
-// behind, plus anything a `bd vc merge` left unresolved.
+// It reads the LIVE working set. beads' own pull paths auto-resolve the safe
+// conflict classes and abort anything else (restoring the working set, on the
+// CLI/git-protocol route as well since GH#7839), so what lands here is what a
+// `bd vc merge` or another writer left unresolved.
 
 const conflictsResolveHint = "Resolve with: bd conflicts resolve <issue-id> --ours|--theirs"
 
