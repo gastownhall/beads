@@ -305,6 +305,7 @@ class ShowIssueParams(BaseModel):
     """Parameters for showing issue details."""
 
     issue_id: str
+    include_comments: bool = False  # bd show --include-comments: return comment bodies
 
 
 class StatsSummary(BaseModel):
