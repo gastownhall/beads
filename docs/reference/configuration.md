@@ -100,6 +100,8 @@ Plus these individual keys:
 
 `json`, `db`, `actor`, `identity`, `no-push`, `no-git-ops`, `agent.profile`, `create.require-description`, `import.auto`, `import.path`, `prime.max-memories`, `prime.max-memory-chars`, `prime.disabled`, `memories.budget-chars`, and the secret keys `github.token`, `gitlab.token`, `jira.api_token`, `ado.pat`, `linear.api_key`, `linear.oauth_client_id`, `linear.oauth_client_secret`, `notion.token`.
 
+`no-db` is obsolete: the JSONL-only mode it selected is gone, and issues always live in the Dolt database. `bd config set no-db` is refused; an old `no-db: true` in `config.yaml` (or `BD_NO_DB=true`) is ignored with a warning on stderr. Remove it with `bd config unset no-db`.
+
 Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `password` is treated as a secret: it is refused on git-tracked `config.yaml` files unless you pass `--force-git-tracked`. Prefer exporting the value as an environment variable instead (e.g. `LINEAR_API_KEY`).
 
 `bd config unset` on one of these secret keys clears the `config.yaml` entry and also deletes any copy an older bd stored in the database, reporting which of them it removed. Keys reached YAML routing at different points in bd's history, so a workspace configured before the move can still hold the value in a table that `bd dolt push` replicates. The database half is best effort: the command never creates a database to look in, so it is skipped where reaching the row would mean provisioning one — but not for a server-mode or proxied workspace whose database is real and simply not on local disk; a database that refuses the delete is reported as a row that is still stored. Deleting it locally does not unpublish it — rotate a secret that has already been pushed.
