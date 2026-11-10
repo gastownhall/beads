@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -160,14 +161,29 @@ func localCopyTarget(ctx context.Context, localStore storage.DoltStorage, issue 
 		return autoRouteTarget{}, false
 	}
 	target, ok := activeAutoRouteTarget(ctx, localStore)
-	if !ok || !isPlanningRepoMirror(issue, target.repoPath) {
+	if !ok || !isPlanningRepoMirror(issue, target.repoPath) || isCommandWorkspace(target.beadsDir) {
 		return autoRouteTarget{}, false
 	}
 	return target, true
 }
 
-// ownerRowFor returns the row ownerStore holds under local's id, or nil when
-// it holds none, in which case the local row stays the one resolved.
+// isCommandWorkspace reports whether beadsDir is the .beads directory of the
+// command's own store: a route back to it leads to the local row itself.
+func isCommandWorkspace(beadsDir string) bool {
+	if dbPath == "" {
+		return false
+	}
+	own := resolveBeadsDirForDBPath(dbPath)
+	if own == "" {
+		own = filepath.Dir(dbPath)
+	}
+	return utils.CanonicalizePath(beadsDir) == utils.CanonicalizePath(own)
+}
+
+// ownerRowFor returns the row ownerStore holds under local's id when it is
+// the issue local was copied from, or nil when it holds none or a different
+// issue under that id, in which case the local row stays the one resolved.
+// bd repo sync keeps created_at, so an issue and its copy share it.
 func ownerRowFor(ctx context.Context, ownerStore storage.DoltStorage, local *types.Issue) (*types.Issue, error) {
 	owner, err := ownerStore.GetIssue(ctx, local.ID)
 	if err != nil {
@@ -176,7 +192,20 @@ func ownerRowFor(ctx context.Context, ownerStore storage.DoltStorage, local *typ
 		}
 		return nil, err
 	}
+	if !sameCreatedAt(owner.CreatedAt, local.CreatedAt) {
+		debug.Logf("[routing] %s: the routed target's row was created at %v, the local row at %v; using the local row\n", local.ID, owner.CreatedAt, local.CreatedAt)
+		return nil, nil
+	}
 	return owner, nil
+}
+
+// sameCreatedAt reports whether a and b are the same known creation time, to
+// the second a DATETIME column keeps.
+func sameCreatedAt(a, b time.Time) bool {
+	if a.IsZero() || b.IsZero() {
+		return false
+	}
+	return a.UTC().Truncate(time.Second).Equal(b.UTC().Truncate(time.Second))
 }
 
 // keepLocalCopy is the local resolution of a copy whose owner, target, could
