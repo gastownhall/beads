@@ -1057,8 +1057,10 @@ run_embedded_dolt_upgrade() {
     # migrates an existing database from ordinary commands, so the explicit
     # schema migration is now the FIRST candidate step — previously it ran
     # later and was already a no-op because the first candidate open had
-    # silently migrated. Same effective sequence, now stated. Before
-    # consenting, assert the gate actually refuses an ordinary command.
+    # silently migrated. Same effective sequence, now stated: this touch
+    # migrates during the open under the verb's consent and reports the
+    # migrations it applied (#7283). Before consenting, assert the gate
+    # actually refuses an ordinary command.
     if run_in_workspace "$candidate" list >/dev/null 2>"$workspace/consent-refusal.err"; then
         die "$version: candidate operated an un-migrated database without consent"
     fi
@@ -1720,7 +1722,9 @@ run_wisp_plane_upgrade() {
     # timeout. A dirty-table refusal or a migration error here is the headline
     # failure class for this lane. The migration-consent gate makes an ordinary
     # command refuse an un-migrated database, so the explicit schema migration
-    # is that first touch (as in run_embedded_dolt_upgrade); the open follows.
+    # is that first touch (as in run_embedded_dolt_upgrade): it migrates
+    # during the open and reports the migrations it applied (#7283). The open
+    # follows.
     migrate_schema_applied "$version" wisp-first
     run_in_workspace "$candidate" list --json -n 0 --all > "$workspace/wisp-first-open.json" ||
         die "$version: candidate could not open the seeded wisp workspace"
