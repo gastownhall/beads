@@ -111,7 +111,7 @@ Only some dependency types block execution:
 |------|-----------|----------|
 | `blocks` | B can't start until A closes | Sequencing work |
 | `parent-child` | If the parent is blocked, children are blocked | Hierarchy (children parallel by default) |
-| `conditional-blocks` | B runs only if A fails | Error-handling paths |
+| `conditional-blocks` | B runs only if A fails — B is released only when A closes with a failure reason; a success close of A keeps B blocked | Error-handling paths |
 | `waits-for` | B waits for all of A's dynamic children | Fan-in gates — see [Gates](/workflows/gates) |
 
 Non-blocking types (`related`, `discovered-from`, `replies-to`) link issues

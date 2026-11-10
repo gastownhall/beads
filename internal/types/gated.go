@@ -12,8 +12,8 @@ import "strings"
 // (internal/storage/issueops/blocked_consistency.go) a gate can account for:
 //
 //   - the EDGE clause, from the recompute's first two union legs: the edge is
-//     'blocks' or 'conditional-blocks' and the target is neither closed nor
-//     pinned (IsGateEdge + the status test in GateIsHolding);
+//     'blocks' or 'conditional-blocks' and the target holds it
+//     (IsGateEdge + BlockingEdgeHolds in GateIsHolding);
 //   - the SUBJECT clause, from unmarkAllBlockedSQL, which forces is_blocked=0
 //     for a closed or pinned subject whatever its edges say (SubjectCanBeGated).
 //
@@ -72,6 +72,12 @@ func SubjectCanBeGated(subject *Issue) bool {
 // depType, is a gate that is currently holding its dependent back. It is the
 // EDGE half of the rule; the caller still owes the subject half, which is what
 // GatesHolding exists to keep it from forgetting.
+//
+// The holding test is BlockingEdgeHolds, the same predicate the is_blocked
+// recompute splices into its union: a conditional-blocks gate closed with a
+// NON-failure reason still holds (GH#5577 — "B runs only if A fails" means the
+// fallback stays blocked when the gate succeeds), while a failure close, a
+// close over a blocks edge, and a pin all release.
 func GateIsHolding(depType DependencyType, target *Issue) bool {
 	if target == nil || target.IssueType != TypeGate {
 		return false
@@ -79,7 +85,7 @@ func GateIsHolding(depType DependencyType, target *Issue) bool {
 	if !IsGateEdge(depType) {
 		return false
 	}
-	return target.Status != StatusClosed && target.Status != StatusPinned
+	return BlockingEdgeHolds(depType, target.Status, target.CloseReason)
 }
 
 // GatesHolding selects, from subject's hydrated dependencies, the gates that

@@ -24,6 +24,20 @@ func TestGateIsHolding(t *testing.T) {
 		{"open gate over waits-for", DepWaitsFor, gateIssue("g1", StatusOpen), false},
 		{"closed gate", DepBlocks, gateIssue("g1", StatusClosed), false},
 		{"pinned gate", DepBlocks, gateIssue("g1", StatusPinned), false},
+		// GH#5577: "B runs only if A fails" — a conditional-blocks gate
+		// closed with a NON-failure reason still holds its dependent back
+		// (the is_blocked recompute keeps it blocked), so the decoration must
+		// keep naming it; a failure close is the one that releases.
+		{"success-closed conditional gate still holds", DepConditionalBlocks, &Issue{
+			ID: "g1", IssueType: TypeGate, Status: StatusClosed, CloseReason: "completed successfully",
+		}, true},
+		{"failure-closed conditional gate releases", DepConditionalBlocks, &Issue{
+			ID: "g1", IssueType: TypeGate, Status: StatusClosed, CloseReason: "failed: flaky in CI",
+		}, false},
+		{"success-closed gate over a blocks edge releases", DepBlocks, &Issue{
+			ID: "g1", IssueType: TypeGate, Status: StatusClosed, CloseReason: "completed successfully",
+		}, false},
+		{"pinned conditional gate releases", DepConditionalBlocks, gateIssue("g1", StatusPinned), false},
 		// parent-child is structural: it propagates blockedness through the
 		// is_blocked recompute, not as a direct blocking edge. Inheritance is
 		// its own question (wy-raudbw) and must not sneak in here.
