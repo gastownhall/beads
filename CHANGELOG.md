@@ -1226,6 +1226,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd set-state` is atomic: a failed label edit can no longer leave a
+  committed event recording a transition that never happened.** The command
+  used to commit its state-change event and its label swap as two
+  independent lifecycle writes; a label edit that refused (a value over the
+  label bound, a vanished subject) left the event behind, parented to the
+  subject and telling a story the subject's labels contradict. The three
+  writes — create the event, wire its parent-child edge, swap the
+  dimension label — now apply as one `batchApply` transaction: they commit
+  together or not at all, and a durable workspace records one history
+  entry (`bd: set-state <id>`) carrying all three. On the same shape: the
+  event is minted an ordinary id (parentage is an edge, no longer a dotted
+  child id, so a state change does not consume a child number of the
+  subject); a template subject stays settable with the pre-read carrying
+  the template waiver, while a subject that became a template after the
+  read refuses whole; hooks see `create` for the event and `update` for the
+  subject on success and nothing on refusal; and over HTTP the waiver
+  rides the batch update item's `allow_template` behind the new
+  `issues.batchApply.updateAllowTemplate` capability, reported before the
+  dial against a server that lacks it. A subject that moves between the
+  durable and wisp planes between the command's read and its write can
+  still gain a cross-plane parent edge (the batch's ordinary edge policy);
+  see the compatibility notes in
+  [labels.md](docs/core-concepts/labels.md#compatibility-notes). (GH#5637)
+
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
