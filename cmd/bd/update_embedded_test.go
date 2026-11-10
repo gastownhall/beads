@@ -795,6 +795,37 @@ func TestEmbeddedUpdateLifecycleClaimParentCommit(t *testing.T) {
 		}
 	})
 
+	// --force lets the claim through a live local blocker, and leaves the
+	// blocker and its edge where they were.
+	t.Run("claim_blocked_force_overrides", func(t *testing.T) {
+		blocker := bdCreate(t, bd, dir, "Forced claim blocker", "--type", "task")
+		blocked := bdCreate(t, bd, dir, "Forced blocked claim", "--type", "task")
+		bdDepAdd(t, bd, dir, blocked.ID, blocker.ID)
+
+		bdUpdate(t, bd, dir, blocked.ID, "--claim", "--actor", "forced-worker", "--force")
+		got := bdShow(t, bd, dir, blocked.ID)
+		if got.Status != types.StatusInProgress || got.Assignee != "forced-worker" {
+			t.Errorf("forced claim did not land: status=%q assignee=%q", got.Status, got.Assignee)
+		}
+		if gotBlocker := bdShow(t, bd, dir, blocker.ID); gotBlocker.Status != types.StatusOpen {
+			t.Errorf("forced claim moved blocker %s to %q, want open", blocker.ID, gotBlocker.Status)
+		}
+		kept := false
+		for _, d := range showDeps(t, bd, dir, blocked.ID) {
+			if d.ID == blocker.ID && d.Type == "blocks" {
+				kept = true
+			}
+		}
+		if !kept {
+			t.Errorf("forced claim dropped %s's blocks edge to %s", blocked.ID, blocker.ID)
+		}
+		// The override claims; it does not clear the block. is_blocked is not
+		// part of issue hydration, so read the column directly.
+		if !embeddedIsBlocked(t, beadsDir, "tu", blocked.ID) {
+			t.Errorf("forced claim cleared %s's is_blocked flag, want the block left standing", blocked.ID)
+		}
+	})
+
 	// A batch where one claim is lost and another is won must exit non-zero, so
 	// the lost claim is not hidden from exit-code automation (beads audit
 	// finding #10). The winner is still committed.
@@ -1145,4 +1176,16 @@ func embeddedClaimBookkeeping(t *testing.T, beadsDir, database, id string) claim
 	}
 	defer func() { _ = cleanup() }()
 	return readClaimBookkeeping(t, db, id)
+}
+
+// embeddedIsBlocked reads id's stored is_blocked flag from an embedded
+// workspace, closing the database before the next bd invocation needs it.
+func embeddedIsBlocked(t *testing.T, beadsDir, database, id string) bool {
+	t.Helper()
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), database, "main")
+	if err != nil {
+		t.Fatalf("open embedded SQL: %v", err)
+	}
+	defer func() { _ = cleanup() }()
+	return readIsBlocked(t, db, id)
 }

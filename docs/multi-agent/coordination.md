@@ -120,6 +120,14 @@ Prefer claiming over assigning when agents self-select work:
 bd ready --claim --json
 ```
 
+A claim by id respects the dependency graph the same way `bd ready` does:
+`bd update <id> --claim` refuses an issue with an open local blocker and writes
+nothing, so an agent cannot start work the graph says it cannot finish.
+`bd update <id> --claim --force` overrides the refusal when you know the
+blocker no longer applies. An unresolved external dependency still refuses
+the claim, with or without `--force`. Repeating a claim you already hold
+succeeds even if a blocker appeared after you claimed.
+
 ### Merge Slots
 
 Serialize conflict-prone work (such as merge-queue conflict resolution) with

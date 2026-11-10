@@ -523,6 +523,7 @@ var roleContractCases = []roleContract{
 	roleCases("LifecycleUpdate", "IssueLifecycle()", oncePerRole,
 		func(b RoleContractBundle) func(t *testing.T) *LifecycleUpdateFixture { return b.LifecycleUpdate },
 		RunLifecycleUpdateClaimRefusesALiveBlocker,
+		RunLifecycleUpdateForceClaimBlockedClaimsPastALiveBlocker,
 		RunLifecycleUpdatePersistsThePatchAndHydratesTheResult,
 		RunLifecycleUpdatePreservesTheCreationStamp,
 		RunLifecycleUpdateReportsNoChangeForASameValuePatch,

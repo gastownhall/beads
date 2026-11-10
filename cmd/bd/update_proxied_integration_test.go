@@ -221,6 +221,30 @@ func TestProxiedServerUpdate(t *testing.T) {
 		}
 	})
 
+	t.Run("claim_blocked_force_overrides", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ucbf")
+		blocker := bdProxiedCreate(t, bd, p.dir, "Forced claim blocker", "--type", "task")
+		blocked := bdProxiedCreate(t, bd, p.dir, "Forced blocked claim", "--type", "task")
+		bdProxiedDep(t, bd, p.dir, "add", blocked.ID, blocker.ID)
+
+		bdProxiedUpdateOne(t, bd, p.dir, blocked.ID, "--claim", "--actor", "forced-worker", "--force")
+		got := bdProxiedShow(t, bd, p.dir, blocked.ID)
+		if got.Status != types.StatusInProgress || got.Assignee != "forced-worker" {
+			t.Errorf("forced claim did not land: status=%q assignee=%q", got.Status, got.Assignee)
+		}
+		if gotBlocker := bdProxiedShow(t, bd, p.dir, blocker.ID); gotBlocker.Status != types.StatusOpen {
+			t.Errorf("forced claim moved blocker %s to %q, want open", blocker.ID, gotBlocker.Status)
+		}
+		if deps := bdProxiedDep(t, bd, p.dir, "list", blocked.ID); !strings.Contains(deps, blocker.ID) {
+			t.Errorf("forced claim dropped %s's edge to %s:\n%s", blocked.ID, blocker.ID, deps)
+		}
+		// The override claims; it does not clear the block.
+		if !readIsBlocked(t, openProxiedDB(t, p), blocked.ID) {
+			t.Errorf("forced claim cleared %s's is_blocked flag, want the block left standing", blocked.ID)
+		}
+	})
+
 	// Parity with the non-proxied update_claim_batch_partial_loss_exits_nonzero:
 	// a batch where one claim is lost and another is won must exit non-zero so
 	// the lost claim is not hidden from exit-code automation (beads audit

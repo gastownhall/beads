@@ -95,3 +95,57 @@ func assertLifecycleClaimBlocked(t *testing.T, label string, err error, id, bloc
 		t.Errorf("%s: BlockedError.Blockers = %+v, want exactly [%s blocks]", label, blocked.Blockers, blockerID)
 	}
 }
+
+// RunLifecycleUpdateForceClaimBlockedClaimsPastALiveBlocker pins the override:
+// ForceClaimBlocked lets a claim through a live local blocker — the issue goes
+// in_progress under the actor and the blocker and its edge stay as they were —
+// and waives nothing else: a live foreign holder still refuses with
+// ErrAlreadyClaimed.
+func RunLifecycleUpdateForceClaimBlockedClaimsPastALiveBlocker(t *testing.T, ctx context.Context, fixture LifecycleUpdateFixture) {
+	t.Helper()
+
+	if fixture.AddDependency == nil {
+		t.Skip("fixture cannot seed an edge: AddDependency is nil, so there is no blocker to force past")
+	}
+
+	blockerID := fixture.IssuePrefix + "-lup-forceclaim-blocker"
+	blockedID := fixture.IssuePrefix + "-lup-forceclaim-blocked"
+	heldID := fixture.IssuePrefix + "-lup-forceclaim-held"
+	for _, id := range []string{blockerID, blockedID, heldID} {
+		seedLifecycleUpdateIssue(t, ctx, fixture, lifecycleUpdateIssue(id))
+	}
+	if _, err := fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{Actor: "holder", IssueID: heldID, Claim: true}); err != nil {
+		t.Fatalf("seed holder's claim of %s: %v", heldID, err)
+	}
+	seedLifecycleUpdateEdge(t, ctx, fixture, blockedID, blockerID, types.DepBlocks)
+	seedLifecycleUpdateEdge(t, ctx, fixture, heldID, blockerID, types.DepBlocks)
+	blockerBefore := lifecycleUpdateRow(t, ctx, fixture, blockerID)
+
+	forced, err := fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{Actor: "claimant", IssueID: blockedID, Claim: true, ForceClaimBlocked: true})
+	if err != nil {
+		t.Fatalf("forced claim of %s past a live blocker: %v", blockedID, err)
+	}
+	if !forced.Changed {
+		t.Errorf("forced claim of %s reported Changed = false, want a committed claim", blockedID)
+	}
+	assertLifecycleUpdateAssigneeAndStatus(t, ctx, fixture, blockedID, "claimant", types.StatusInProgress)
+	assertLifecycleUpdateRowUnchanged(t, ctx, fixture, blockerID, "after a forced claim of the issue it blocks", blockerBefore)
+	if fixture.ListDependencies != nil {
+		edges, err := fixture.ListDependencies(ctx, blockedID)
+		if err != nil {
+			t.Fatalf("list %s's edges: %v", blockedID, err)
+		}
+		if !lifecycleUpdateHasEdge(edges, blockerID) {
+			t.Errorf("forced claim of %s dropped its edge to %s: %+v", blockedID, blockerID, edges)
+		}
+	} else {
+		t.Log("fixture cannot list edges (ListDependencies is nil): the blocker edge surviving the forced claim is not proven on this leg")
+	}
+
+	before := lifecycleUpdateRow(t, ctx, fixture, heldID)
+	_, err = fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{Actor: "rival", IssueID: heldID, Claim: true, ForceClaimBlocked: true})
+	if !errors.Is(err, storage.ErrAlreadyClaimed) {
+		t.Fatalf("forced claim of %s held by another actor: err = %v, want ErrAlreadyClaimed", heldID, err)
+	}
+	assertLifecycleUpdateRowUnchanged(t, ctx, fixture, heldID, "after a forced claim against a live holder", before)
+}
