@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **An option-shaped remote name can no longer become a Dolt flag.** Dolt
+  parses a leading `-` in a remote operand as an option, even from a bound
+  SQL parameter, so `bd dolt push --remote=--force` could turn into a forced
+  push (GH#7876). Remote and peer names that start with `-` are refused with
+  `invalid remote name "<name>": must not start with '-'`: by `bd dolt
+  push|pull`, `bd sync --remote`, `bd federation sync --peer` and `bd dolt
+  remote add|remove` before the store opens, and by every push, pull, fetch,
+  sync and remote add/remove entry point of the Go storage API. Names such
+  as `1st` and an omitted (default) remote are unaffected.
+
+- **Read-only mode now covers every publish path** (GH#7876). `bd dolt
+  push`, `bd dolt clean-databases` and `bd federation sync` refuse under
+  `--readonly`/`BD_READONLY` with the standard `Error: operation '<op>' is
+  not allowed in read-only mode` (exit 1), as other write commands do; `bd
+  dolt push` refuses even when `no-push` or `dolt.local-only` is set. A
+  store opened strict read-only refuses Push, ForcePush, PushRemote, PushTo
+  and Sync before any database, subprocess or remote work.
+
+- **`no-push` now stops dolt auto-push**, as it already stopped `bd dolt
+  push` and `bd sync`, and a preview (`--dry-run`, `--inspect`) no longer
+  triggers auto-push (GH#7876). `no-push` still allows pulls and fetches.
+
 - **Telemetry no longer exports the raw command line.** With telemetry on
   (`BD_OTEL_ENABLED=true`), the OTel resource attached to every exported
   metric and span carried `process.command_args`, the unscrubbed `os.Args`,
