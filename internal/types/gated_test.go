@@ -24,6 +24,12 @@ func TestGateIsHolding(t *testing.T) {
 		{"open gate over waits-for", DepWaitsFor, gateIssue("g1", StatusOpen), false},
 		{"closed gate", DepBlocks, gateIssue("g1", StatusClosed), false},
 		{"pinned gate", DepBlocks, gateIssue("g1", StatusPinned), false},
+		// conditional-blocks follows the close reason: a gate closed without
+		// a failure reason still holds, a failure close releases.
+		{"success-closed gate over conditional-blocks", DepConditionalBlocks, closedGate("completed successfully"), true},
+		{"default-closed gate over conditional-blocks", DepConditionalBlocks, closedGate(""), true},
+		{"failure-closed gate over conditional-blocks", DepConditionalBlocks, closedGate("timeout waiting for approval"), false},
+		{"pinned gate over conditional-blocks", DepConditionalBlocks, gateIssue("g1", StatusPinned), false},
 		// parent-child is structural: it propagates blockedness through the
 		// is_blocked recompute, not as a direct blocking edge. Inheritance is
 		// its own question (wy-raudbw) and must not sneak in here.
@@ -160,4 +166,10 @@ func TestGateRefsProjection(t *testing.T) {
 	if refs[1] != (GateRef{ID: "g2", Type: "gate"}) {
 		t.Errorf("refs[1] = %+v, want the gate fallback kind and no reason", refs[1])
 	}
+}
+
+func closedGate(reason string) *Issue {
+	gate := gateIssue("g1", StatusClosed)
+	gate.CloseReason = reason
+	return gate
 }
