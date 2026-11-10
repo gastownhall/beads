@@ -1,0 +1,6 @@
+{
+  "shape": "mc-ready-parent",
+  "requests": [
+    {"method":"GET","operation_id":"listReadyWork","path":"/v0/beads/ready","query":["limit","parent","sort"],"status":200}
+  ]
+}

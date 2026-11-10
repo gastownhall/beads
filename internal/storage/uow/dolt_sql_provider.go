@@ -42,6 +42,10 @@ type doltSQLProvider struct {
 	// connection. Fresh-bootstrap reset authority is bound to it together with
 	// the Dolt server UUID, database name, and initial HEAD.
 	serverEndpoint string
+	// endpointResolver re-resolves the proxy endpoint for new physical
+	// connections of db once the provider is handed out; nil when the
+	// provider's pool keeps a fixed address. See proxyEndpointResolver.
+	endpointResolver *proxyEndpointResolver
 	// teamServer: schema is owned by beads-team-server (bts) — bd never
 	// creates the database or migrates, only verifies the schema version.
 	teamServer bool
@@ -283,6 +287,10 @@ func (p *doltSQLProvider) NewUOW(ctx context.Context) (UnitOfWork, error) {
 }
 
 func (p *doltSQLProvider) Close(ctx context.Context) error {
+	// Stop rediscovery first, so no discovery worker outlives the provider.
+	if p.endpointResolver != nil {
+		p.endpointResolver.close()
+	}
 	if p.db == nil {
 		return nil
 	}
@@ -946,11 +954,12 @@ func assertSessionDatabaseOnPool(ctx context.Context, pool *sql.DB, want string)
 }
 
 // openDB opens dsn and waits out a server that is still coming up, retrying
-// transient ping failures for up to 30s (#6003).
-func openDB(ctx context.Context, dsn string) (*sql.DB, error) {
+// transient ping failures for up to 30s (#6003). resolver is optional; see
+// openPool.
+func openDB(ctx context.Context, dsn string, resolver *proxyEndpointResolver) (*sql.DB, error) {
 	bo := backoff.NewExponentialBackOff()
 	bo.MaxElapsedTime = 30 * time.Second
-	return openPool(dsn, func(conn *sql.DB) error {
+	return openPool(dsn, resolver, func(conn *sql.DB) error {
 		return pingWithRetry(ctx, conn, bo, pingAttemptTimeout)
 	})
 }
@@ -969,8 +978,8 @@ func openDB(ctx context.Context, dsn string) (*sql.DB, error) {
 // pingWithRetry caps its own attempts: the DSN sets no ReadTimeout, so a server
 // that accepts TCP and then stalls mid-handshake is otherwise bounded only by
 // the caller's context.
-func openDBProbe(ctx context.Context, dsn string) (*sql.DB, error) {
-	return openPool(dsn, func(conn *sql.DB) error {
+func openDBProbe(ctx context.Context, dsn string, resolver *proxyEndpointResolver) (*sql.DB, error) {
+	return openPool(dsn, resolver, func(conn *sql.DB) error {
 		pingCtx, cancel := context.WithTimeout(ctx, pingAttemptTimeout)
 		defer cancel()
 		return conn.PingContext(pingCtx)
@@ -981,11 +990,25 @@ func openDBProbe(ctx context.Context, dsn string) (*sql.DB, error) {
 // the server answers on it. The error texts are load-bearing — callers match
 // on "uow: open db" and "uow: ping db" — and a pool whose prove fails is
 // closed here rather than leaked to a caller that only sees an error.
-func openPool(dsn string, prove func(*sql.DB) error) (*sql.DB, error) {
-	conn, err := sql.Open("mysql", dsn)
+//
+// A non-nil resolver is installed as the driver's BeforeConnect hook, so every
+// new physical connection of the pool resolves the proxy endpoint afresh; nil
+// opens the same static pool sql.Open would.
+func openPool(dsn string, resolver *proxyEndpointResolver, prove func(*sql.DB) error) (*sql.DB, error) {
+	cfg, err := mysql.ParseDSN(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("uow: open db: %w", err)
 	}
+	if resolver != nil {
+		if err := cfg.Apply(mysql.BeforeConnect(resolver.beforeConnect)); err != nil {
+			return nil, fmt.Errorf("uow: open db: %w", err)
+		}
+	}
+	connector, err := mysql.NewConnector(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("uow: open db: %w", err)
+	}
+	conn := sql.OpenDB(connector)
 	if err := prove(conn); err != nil {
 		return nil, errors.Join(fmt.Errorf("uow: ping db: %w", err), conn.Close())
 	}
@@ -1022,8 +1045,10 @@ func requireServerDoltVersion(ctx context.Context, q doltversion.RowQuerier, ep 
 // given MySQL dial network — proxy.DataNetwork for a bd-managed proxy
 // (which requires the BDPROXY1 handshake) or "tcp" for a raw server.
 // backend names the server behind it when bd does not run that server
-// (see requireServerDoltVersion), and is empty otherwise.
-func openAndInitSchema(ctx context.Context, network string, ep proxy.Endpoint, backend, database, rootUser, rootPassword, tlsConfigName string, teamServer bool, expectedProjectID string, opts providerOptions) (UnitOfWorkProvider, error) {
+// (see requireServerDoltVersion), and is empty otherwise. resolver, when
+// non-nil, re-resolves the proxy endpoint for each new physical connection
+// of the pool handed to the provider (see proxyEndpointResolver).
+func openAndInitSchema(ctx context.Context, network string, ep proxy.Endpoint, backend, database, rootUser, rootPassword, tlsConfigName string, teamServer bool, expectedProjectID string, opts providerOptions, resolver *proxyEndpointResolver) (UnitOfWorkProvider, error) {
 	newProvider := func(pool *sql.DB) *doltSQLProvider {
 		return &doltSQLProvider{
 			defaultBranch:     defaultBranch,
@@ -1035,6 +1060,16 @@ func openAndInitSchema(ctx context.Context, network string, ep proxy.Endpoint, b
 			readOnly:          opts.readOnly,
 			proxiedServerMode: opts.proxiedServerMode,
 		}
+	}
+	// handOut gives the provider its resolver and arms it. It runs only once
+	// the open has proven the pool it returns, so every bootstrap connection
+	// used ep.
+	handOut := func(provider *doltSQLProvider) UnitOfWorkProvider {
+		if resolver != nil {
+			provider.endpointResolver = resolver
+			resolver.arm()
+		}
+		return provider
 	}
 
 	// Fast path (wy-s8ytnw): connect straight to the target database. A
@@ -1078,7 +1113,7 @@ func openAndInitSchema(ctx context.Context, network string, ep proxy.Endpoint, b
 	// signal, and every error message callers already match on. The probe is
 	// single-shot (openDBProbe) precisely so that fall-through cannot cost a
 	// second full retry budget.
-	probeConn, probeErr := openDBProbe(ctx, buildDSN(network, ep, database, rootUser, rootPassword, tlsConfigName))
+	probeConn, probeErr := openDBProbe(ctx, buildDSN(network, ep, database, rootUser, rootPassword, tlsConfigName), resolver)
 	if probeErr == nil {
 		if err := requireServerDoltVersion(ctx, probeConn, ep, backend); err != nil {
 			return nil, errors.Join(err, probeConn.Close())
@@ -1088,7 +1123,7 @@ func openAndInitSchema(ctx context.Context, network string, ep proxy.Endpoint, b
 			_ = probeConn.Close()
 			return nil, fmt.Errorf("uow: init schema: %w", err)
 		}
-		return provider, nil
+		return handOut(provider), nil
 	}
 
 	// Advisory only: the fall-through below is the historical open, so this is
@@ -1100,7 +1135,9 @@ func openAndInitSchema(ctx context.Context, network string, ep proxy.Endpoint, b
 	debug.Logf("uow: single-session open unavailable for %q, using the no-database init connection: %v\n",
 		database, probeErr)
 
-	initDB, err := openDB(ctx, buildDSN(network, ep, "", rootUser, rootPassword, tlsConfigName))
+	// The no-database init pool is closed below and never handed out, so it
+	// gets no resolver.
+	initDB, err := openDB(ctx, buildDSN(network, ep, "", rootUser, rootPassword, tlsConfigName), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1121,7 +1158,7 @@ func openAndInitSchema(ctx context.Context, network string, ep proxy.Endpoint, b
 		return nil, fmt.Errorf("uow: close init db: %w", err)
 	}
 
-	dbConn, err := openDB(ctx, buildDSN(network, ep, database, rootUser, rootPassword, tlsConfigName))
+	dbConn, err := openDB(ctx, buildDSN(network, ep, database, rootUser, rootPassword, tlsConfigName), resolver)
 	if err != nil {
 		return nil, err
 	}
@@ -1135,5 +1172,5 @@ func openAndInitSchema(ctx context.Context, network string, ep proxy.Endpoint, b
 		return nil, errors.Join(err, dbConn.Close())
 	}
 
-	return newProvider(dbConn), nil
+	return handOut(newProvider(dbConn)), nil
 }

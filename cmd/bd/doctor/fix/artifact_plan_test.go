@@ -36,7 +36,6 @@ func TestPlanArtifacts_DeletesOnlyWithPositiveOwnership(t *testing.T) {
 		extra map[string]string // other paths under the root
 		links map[string]string // symlinks under the root: link -> target, both relative to the root
 		owner beadsDirOwner
-		skip  bool
 		// want maps each reported path, relative to the .beads directory
 		// ("." for a directory-level cruft finding), to SafeDelete.
 		want map[string]bool
@@ -133,8 +132,6 @@ func TestPlanArtifacts_DeletesOnlyWithPositiveOwnership(t *testing.T) {
 		{name: "clean stub, metadata beside its redirect naming sqlite", dir: "polecats/p1/.beads", files: map[string]string{"redirect": "../../.beads\n", ".gitkeep": "", configfile.ConfigFileName: `{"backend":"sqlite"}`}, owner: ownerOtherBackend, want: map[string]bool{}},
 		{name: "clean stub, torn metadata beside its redirect", dir: "polecats/p2/.beads", files: map[string]string{"redirect": "../../.beads\n", configfile.ConfigFileName: torn}, owner: ownerUnreadable, want: map[string]bool{}},
 		{name: "clean stub, metadata beside its redirect naming an existing dolt_data_dir", dir: "polecats/p3/.beads", files: map[string]string{"redirect": "../../.beads\n", configfile.ConfigFileName: `{"backend":"dolt","dolt_data_dir":"../../../store"}`}, extra: map[string]string{"store/p3/.dolt/": ""}, owner: ownerDolt, want: map[string]bool{}},
-		// A format this build cannot open: skipped, not even reported.
-		{name: "graph format marker", dir: "sub/.beads", files: map[string]string{configfile.GraphFormatMarkerFile: "link-preview-v9\n", "beads.db-wal": "w"}, owner: ownerUnsupportedFormat, skip: true, want: map[string]bool{}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -155,10 +152,7 @@ func TestPlanArtifacts_DeletesOnlyWithPositiveOwnership(t *testing.T) {
 			if got := classifyBeadsDir(beadsDir).owner; got != tc.owner {
 				t.Errorf("classifyBeadsDir owner = %d, want %d", got, tc.owner)
 			}
-			findings, skip := PlanArtifacts(beadsDir)
-			if skip != tc.skip {
-				t.Errorf("PlanArtifacts skip = %v, want %v", skip, tc.skip)
-			}
+			findings := PlanArtifacts(beadsDir)
 			got := map[string]bool{}
 			removable := map[string]bool{}
 			for _, f := range findings {
@@ -416,7 +410,7 @@ func TestPlanArtifacts_ReviewFindingsNameWhatWasFound(t *testing.T) {
 	}
 
 	descriptions := func(beadsDir string) map[string]string {
-		findings, _ := PlanArtifacts(beadsDir)
+		findings := PlanArtifacts(beadsDir)
 		out := map[string]string{}
 		for _, f := range findings {
 			out[filepath.Base(f.Path)] = f.Description
@@ -588,7 +582,7 @@ func TestPlanArtifacts_StubRuleRemovesOnlyRuntimeLeftovers(t *testing.T) {
 			if got := classifyBeadsDir(beadsDir).owner; got != ownerRedirectStub {
 				t.Fatalf("classifyBeadsDir owner = %d, want ownerRedirectStub", got)
 			}
-			findings, _ := PlanArtifacts(beadsDir)
+			findings := PlanArtifacts(beadsDir)
 			var stub []PlannedArtifact
 			var removed []string
 			for _, f := range findings {
@@ -625,7 +619,7 @@ func TestPlanArtifacts_StubRuleRemovesOnlyRuntimeLeftovers(t *testing.T) {
 			}
 			// What is left is reported for review, and nothing more is safe
 			// to delete.
-			findings, _ = PlanArtifacts(beadsDir)
+			findings = PlanArtifacts(beadsDir)
 			switch {
 			case tc.cleaned && len(findings) != 0:
 				t.Fatalf("PlanArtifacts after the cleanup = %+v, want nothing left to report", findings)
