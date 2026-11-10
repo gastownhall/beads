@@ -1226,6 +1226,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A blocking dependency between two issues with different prefixes held in
+  the same database now blocks ready work (GH#8299). bd filed any target whose
+  prefix differed from the source's as an external reference, so `bd ready`
+  listed the dependent beside its open blocker. bd now stores a target this
+  database holds as a local edge and refuses a blocking edge across the
+  issues' own hierarchy, as it does for same-prefix issues; a target the
+  database does not hold, or an explicit `external:` reference, is still
+  external. On upgrade, opening an existing database converts the affected
+  rows it holds and recomputes blocked state once, committed as a migration;
+  with uncommitted edits to `issues` or `dependencies` it refuses until you
+  commit them.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

@@ -43,6 +43,7 @@ go_library(
         "delete.go",
         "delete_role.go",
         "dep_counts.go",
+        "dep_target_repair.go",
         "dependencies.go",
         "dependency_coordination.go",
         "dependency_editor.go",
