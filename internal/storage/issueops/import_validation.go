@@ -13,10 +13,14 @@ import (
 // AddLabelInTx applies to each label, so an import can set aside a record the
 // writer is certain to refuse before it writes anything (GH#4492).
 //
-// It covers only what the record itself decides. Database state (an id
-// conflict, a retired id, a concurrent update) is still the writer's, and the
-// writer validates again: configuration can change between a screen and the
-// write.
+// It covers only the checks the writer makes in Go. What the database refuses
+// is still the write's to refuse: a value too long for its column (of the
+// issue's VARCHAR columns only the title, assignee, owner and labels are
+// bounded here) and database state (an id conflict, a retired id, a
+// concurrent update). The writer validates again, too: configuration can
+// change between a screen and the write. So a metadata schema warning
+// (validation.metadata.mode warn) is the writer's to print, and the probe
+// prints none.
 func ValidateIssueForInsert(issue *types.Issue, customStatuses, customTypes []string) error {
 	if issue == nil {
 		return fmt.Errorf("issue is nil")
@@ -25,7 +29,7 @@ func ValidateIssueForInsert(issue *types.Issue, customStatuses, customTypes []st
 	// never writes through one, so a shallow copy keeps the caller's issue as
 	// it was.
 	probe := *issue
-	if err := PrepareIssueForInsert(&probe, customStatuses, customTypes); err != nil {
+	if err := prepareIssueForInsert(&probe, customStatuses, customTypes, false); err != nil {
 		return err
 	}
 	for _, label := range issue.Labels {

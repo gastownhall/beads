@@ -1,12 +1,16 @@
 package issueops
 
 import (
+	"encoding/json"
 	"errors"
+	"io"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -74,4 +78,74 @@ func TestValidateIssueForInsertRefusesAnOverLengthLabel(t *testing.T) {
 	if !strings.Contains(err.Error(), "bd-1") {
 		t.Fatalf("error %q does not name the issue", err)
 	}
+}
+
+// TestValidateIssueForInsertLeavesTheMetadataWarningToTheWriter pins the
+// screen's metadata check to the writer's verdict without the writer's output.
+// Under validation.metadata.mode warn a record that breaks the schema passes
+// both, and only the writer prints the warning, so an import that screens a
+// record and then writes it shows the warning once, not twice. Under error
+// mode both refuse the record with the same error.
+func TestValidateIssueForInsertLeavesTheMetadataWarningToTheWriter(t *testing.T) {
+	// t.Setenv forces non-parallel; ignore the repo's tracked config so only the
+	// schema set below is in effect.
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	defer config.ResetForTesting()
+	config.Set("validation.metadata.fields", map[string]interface{}{
+		"required_field": map[string]interface{}{"type": "string", "required": true},
+	})
+	for _, tc := range []struct {
+		mode        string
+		writerWarns int
+		refused     bool
+	}{
+		{mode: "warn", writerWarns: 1},
+		{mode: "error", refused: true},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			config.Set("validation.metadata.mode", tc.mode)
+			issue := &types.Issue{ID: "bd-1", Title: "t", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Metadata: json.RawMessage(`{}`)}
+			var screenErr, writerErr error
+			screenOut := captureStderr(t, func() { screenErr = ValidateIssueForInsert(issue, nil, nil) })
+			writerCopy := *issue
+			writerOut := captureStderr(t, func() { writerErr = PrepareIssueForInsert(&writerCopy, nil, nil) })
+			if screenOut != "" {
+				t.Errorf("ValidateIssueForInsert printed %q, want nothing: the writer prints the warning", screenOut)
+			}
+			if got := strings.Count(writerOut, "warning: "); got != tc.writerWarns {
+				t.Errorf("PrepareIssueForInsert printed %d warnings (%q), want %d", got, writerOut, tc.writerWarns)
+			}
+			if (screenErr != nil) != tc.refused || (writerErr != nil) != tc.refused {
+				t.Fatalf("ValidateIssueForInsert() = %v, writer said %v; want refused=%v", screenErr, writerErr, tc.refused)
+			}
+			if tc.refused && screenErr.Error() != writerErr.Error() {
+				t.Errorf("ValidateIssueForInsert() = %v, writer said %v", screenErr, writerErr)
+			}
+		})
+	}
+}
+
+// captureStderr returns what fn writes to os.Stderr.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	func() {
+		defer func() { os.Stderr = orig }()
+		fn()
+	}()
+	_ = w.Close()
+	out, err := io.ReadAll(r)
+	_ = r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
 }

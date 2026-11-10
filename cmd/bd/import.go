@@ -91,17 +91,22 @@ the already-committed chunks are durable and the command exits nonzero;
 re-running the same import is safe and converges (rows upsert,
 labels/comments/dependencies deduplicate).
 
-Every row is checked against the database's rules (status and type
-vocabulary, including the configured status.custom and types.custom, plus
-the other insert checks) before anything is written. By default a single
-invalid row fails the whole import, naming each one as <file>:<line>: <id>,
-and nothing is imported. --skip-invalid imports the valid rows instead and
-reports the skipped ones; add --rejects <file> to keep their original lines
-(merged into the file, never overwriting earlier records). --dry-run applies
-the same check and writes neither the database nor the rejects file. A line
-that is not valid JSON always fails the import with its location.
-Auto-import, 'bd init --from-jsonl', 'bd bootstrap' and the git-hook import
-always skip invalid rows into <name>.rejected.jsonl next to the source.
+Before anything is written, every row gets the checks the writer makes on
+the record itself, such as its status and type (built-in, or configured in
+status.custom and types.custom), title, priority and timestamps, and the
+length of its assignee, owner and labels. By default a single invalid row
+fails the whole import, naming each one as <file>:<line>: <id>, and nothing
+is imported. --skip-invalid imports the valid rows instead and reports the
+skipped ones; add --rejects <file> to keep their original lines (merged into
+the file, never overwriting earlier records). --dry-run applies the same
+check and writes neither the database nor the rejects file. A line that is
+not valid JSON always fails the import with its location. Auto-import,
+'bd init --from-jsonl', 'bd bootstrap' and the git-hook import always skip
+invalid rows into <name>.rejected.jsonl next to the source. The check does
+not cover the column sizes the database enforces: a value too long for its
+column (an external_ref over 255 characters, say) is refused by the write
+itself, so it still fails the import, even with --skip-invalid, and what was
+written before the failure stays (see above).
 
 EXAMPLES:
   bd import                        # Import from configured import.path
@@ -135,7 +140,7 @@ func init() {
 	importCmd.Flags().BoolVar(&importDryRun, "dry-run", false, "Show what would be imported without importing")
 	importCmd.Flags().BoolVar(&importDedup, "dedup", false, "Skip lines whose title matches an existing open issue")
 	importCmd.Flags().BoolVar(&importAllowStale, "allow-stale", false, "Import rows even when older than the local issue (required to restore an older snapshot)")
-	importCmd.Flags().BoolVar(&importSkipInvalid, "skip-invalid", false, "Import the valid records and skip the ones the database would refuse (e.g. an unregistered status), reporting each")
+	importCmd.Flags().BoolVar(&importSkipInvalid, "skip-invalid", false, "Import the valid records and skip the invalid ones (e.g. an unregistered status), reporting each")
 	importCmd.Flags().StringVar(&importRejects, "rejects", "", "With --skip-invalid, save the skipped records' original lines to this file")
 	rootCmd.AddCommand(importCmd)
 }

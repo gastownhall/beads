@@ -23,9 +23,11 @@ import (
 // written the memories and committed earlier chunks, and auto-import restored
 // nothing at all. The screen runs the writer's own validation over the write
 // plan before any import write, so a caller decides up front what happens to
-// the records the writer would refuse: explicit import refuses the input
+// the records that validation refuses: explicit import refuses the input
 // unless asked to skip them, and the recovery imports skip them into a
-// quarantine file. The writer still validates every row it writes.
+// quarantine file. The writer still validates every row it writes, and the
+// database still refuses what no Go check covers, such as a value too long
+// for its column (issueops.ValidateIssueForInsert).
 
 // importRecord is one issue line of an import source: the parsed issue, the
 // line's 1-based physical line number and its original bytes, so a record the
@@ -215,6 +217,12 @@ func (s *importScreen) Kept(records []importRecord) []*types.Issue {
 // screened, then the writer's validation over every row left to write. It
 // reads the vocabulary only for a nonempty write set, and a failed read fails
 // the screen: the rows are not invalid, the screen could not tell.
+//
+// When it rejects rows, it runs the pre-filter again over the rows left, so
+// the plan reports only rows the writer is handed. Taking a rejected row's
+// entry out by id cannot work: two rows can carry one id (an accepted update
+// and a rejected timestamp tie, say), and nothing in the plan says which entry
+// was whose. The second plan is the one a dry run makes for the same rows.
 func screenImportRecords(ctx context.Context, lookup importIssueLookup, readVocabulary importVocabularyFunc, records []importRecord, allowStale bool) (*importScreen, error) {
 	screen := &importScreen{Write: importRecordIssues(records), rejected: map[*types.Issue]struct{}{}}
 	if !allowStale && len(screen.Write) > 0 {
@@ -237,55 +245,24 @@ func screenImportRecords(ctx context.Context, lookup importIssueLookup, readVoca
 		recordOf[record.Issue] = record
 	}
 	accepted := make([]*types.Issue, 0, len(screen.Write))
-	var rejectedRows []*types.Issue
 	for _, issue := range screen.Write {
 		if err := issueops.ValidateIssueForInsert(issue, customStatuses, customTypes); err != nil {
 			record := recordOf[issue]
 			screen.Rejected = append(screen.Rejected, importRejection{Line: record.Line, ID: issue.ID, Reason: err.Error(), Raw: record.Raw})
 			screen.rejected[issue] = struct{}{}
-			rejectedRows = append(rejectedRows, issue)
 			continue
 		}
 		accepted = append(accepted, issue)
 	}
 	screen.Write = accepted
-	if screen.Prefiltered && len(rejectedRows) > 0 {
-		dropRejectedFromImportPlan(&screen.Plan, rejectedRows, accepted)
+	if screen.Prefiltered && len(screen.Rejected) > 0 {
+		_, staleSkippedIDs, plan, err := filterStaleImportIssues(ctx, lookup, screen.Kept(records))
+		if err != nil {
+			return nil, err
+		}
+		screen.StaleSkippedIDs, screen.Plan = staleSkippedIDs, plan
 	}
 	return screen, nil
-}
-
-// dropRejectedFromImportPlan takes the rejected rows out of the pre-filter's
-// change plan, so the report counts only rows the writer is handed. Each
-// classified row contributed one entry: a would-create row to NewCount (and
-// its id to NewIDs, deduplicated), an existing one to Updates or
-// TieKeptLocal. An id stays listed while an accepted row still carries it.
-func dropRejectedFromImportPlan(plan *importChangePlan, rejectedRows, accepted []*types.Issue) {
-	newIDs := make(map[string]struct{}, len(plan.NewIDs))
-	for _, id := range plan.NewIDs {
-		newIDs[id] = struct{}{}
-	}
-	for _, issue := range rejectedRows {
-		if _, isNew := newIDs[issue.ID]; isNew || issue.ID == "" {
-			plan.NewCount--
-			continue
-		}
-		if i := slices.IndexFunc(plan.Updates, func(c ImportChange) bool { return c.ID == issue.ID }); i >= 0 {
-			plan.Updates = slices.Delete(plan.Updates, i, i+1)
-			continue
-		}
-		if i := slices.Index(plan.TieKeptLocal, issue.ID); i >= 0 {
-			plan.TieKeptLocal = slices.Delete(plan.TieKeptLocal, i, i+1)
-		}
-	}
-	stillWritten := make(map[string]struct{}, len(accepted))
-	for _, issue := range accepted {
-		stillWritten[issue.ID] = struct{}{}
-	}
-	plan.NewIDs = slices.DeleteFunc(plan.NewIDs, func(id string) bool {
-		_, ok := stillWritten[id]
-		return !ok
-	})
 }
 
 // importRejectionListLimit bounds the records an import names in its error or

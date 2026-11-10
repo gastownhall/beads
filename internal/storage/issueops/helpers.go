@@ -551,6 +551,13 @@ func GetCustomStatusesTx(ctx context.Context, tx DBTX) ([]string, error) {
 
 // ValidateMetadataIfConfigured checks metadata against the schema from config.
 func ValidateMetadataIfConfigured(metadata json.RawMessage) error {
+	return validateMetadataIfConfigured(metadata, true)
+}
+
+// validateMetadataIfConfigured is ValidateMetadataIfConfigured, printing warn
+// mode's warnings only when warn is set. The import screen's probe of a record
+// the writer then checks again passes false, so each warning prints once.
+func validateMetadataIfConfigured(metadata json.RawMessage, warn bool) error {
 	mode := config.MetadataValidationMode()
 	if mode == "none" || mode == "" {
 		return nil
@@ -586,8 +593,10 @@ func ValidateMetadataIfConfigured(metadata json.RawMessage) error {
 	}
 
 	if mode == "warn" {
-		for _, e := range errs {
-			fmt.Fprintf(os.Stderr, "warning: %s\n", e.Error())
+		if warn {
+			for _, e := range errs {
+				fmt.Fprintf(os.Stderr, "warning: %s\n", e.Error())
+			}
 		}
 		return nil
 	}

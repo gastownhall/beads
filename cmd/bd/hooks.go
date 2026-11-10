@@ -2361,7 +2361,7 @@ func importJSONLForSync(reason string) {
 	// matching the export lane (hookSubprocessEnv).
 	//
 	// --skip-invalid with the quarantine next to the source: a record the
-	// database would refuse (an unregistered status, GH#4492) is kept there
+	// import's screen refuses (an unregistered status, GH#4492) is kept there
 	// instead of failing the whole import, and the warning that names it is
 	// forwarded even though the import succeeded.
 	cmd := exec.Command("bd", syncImportArgs(fullPath)...)

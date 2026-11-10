@@ -1229,16 +1229,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **One invalid row no longer aborts an import (GH#4492).** A JSONL row
   with a status or type the database does not know (for example a custom
   `verify` status from another workspace) failed the whole import, and
-  auto-import on a fresh clone then imported nothing. Every import now
-  checks rows against the database's rules, including the configured
-  `status.custom` and `types.custom`, before writing anything. `bd import`
-  stays strict but names each invalid row as `<file>:<line>: <id>` and
-  writes nothing; the new `--skip-invalid` imports the valid rows and
-  `--rejects <file>` keeps the skipped lines. Auto-import, `bd init
-  --from-jsonl`, `bd bootstrap` and the git-hook import skip invalid rows
-  into `.beads/issues.rejected.jsonl` (merged, never overwritten; now in the
-  generated `.beads/.gitignore`) and warn. `--dry-run` applies the same check
-  and writes no rejects file.
+  auto-import on a fresh clone then imported nothing. Every import now runs
+  the writer's own record checks on every row before writing anything, such
+  as status and type (including the configured `status.custom` and
+  `types.custom`), title, priority and the length of the assignee, owner
+  and labels. `bd import` stays strict but names each invalid row as
+  `<file>:<line>: <id>` and writes nothing; the new `--skip-invalid` imports
+  the valid rows and `--rejects <file>` keeps the skipped lines.
+  Auto-import, `bd init --from-jsonl`, `bd bootstrap` and the git-hook
+  import skip invalid rows into `.beads/issues.rejected.jsonl` (merged,
+  never overwritten; now in the generated `.beads/.gitignore`) and warn, and
+  the embedded auto-import now skips and reports a dependency edge it cannot
+  write (a cycle, say) as the other imports do. `--dry-run` applies the same
+  check and writes no rejects file. A value too long for its database column
+  (an `external_ref` over 255 characters, say) is still refused only by the
+  write, so it still fails the import.
 
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools

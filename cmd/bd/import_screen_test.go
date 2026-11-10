@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // TestImportRejectsFileMergesAndRefusesUnsafeDestinations pins the rejects
@@ -384,4 +387,64 @@ func TestPlanRecoveryImportUndecodableLineReportsPhysicalLocation(t *testing.T) 
 		t.Errorf("plan = %+v, want none", plan)
 	}
 	assertNoQuarantine(t, source)
+}
+
+// TestScreenImportRecordsReportsTheRowsLeftWhenARejectedRowSharesAnID pins the
+// screen's plan to the rows it hands the writer (GH#4492) when a rejected row
+// carries the id of an accepted one. Taking the rejected row's entry out of the
+// plan by id took the accepted row's instead, so the import reported a tie kept
+// local, or the rejected row's change summary, for the update it wrote, while
+// its dry run reported that update. Both must report the same thing.
+func TestScreenImportRecordsReportsTheRowsLeftWhenARejectedRowSharesAnID(t *testing.T) {
+	base := time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC)
+	local := &types.Issue{ID: "bd-x", Title: "local", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, UpdatedAt: base}
+	row := func(line int, title string, status types.Status, updatedAt time.Time) importRecord {
+		return importRecord{Issue: &types.Issue{ID: "bd-x", Title: title, Status: status, Priority: 2, IssueType: types.TypeTask, UpdatedAt: updatedAt}, Line: line}
+	}
+	accepted := row(1, "accepted", types.StatusOpen, base.Add(time.Hour))
+	noCustomVocabulary := func(context.Context) ([]string, []string, error) { return nil, nil, nil }
+	for _, tc := range []struct {
+		name     string
+		rejected importRecord
+	}{
+		// The rejected row ties the local row: the pre-filter planned it as
+		// a tie kept local.
+		{name: "rejected tie", rejected: row(2, "rejected", "verify", base)},
+		// The rejected row is newer too: the pre-filter planned two updates
+		// of one id, with different change summaries.
+		{name: "rejected update", rejected: row(2, "rejected", "verify", base.Add(2*time.Hour))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := &fakeImportIssueLookupStore{issues: []*types.Issue{local}}
+			records := []importRecord{accepted, tc.rejected}
+			screen, err := screenImportRecords(ctx, store, noCustomVocabulary, records, false)
+			if err != nil {
+				t.Fatalf("screenImportRecords: %v", err)
+			}
+			if len(screen.Rejected) != 1 || screen.Rejected[0].Line != 2 {
+				t.Fatalf("rejected = %+v, want line 2 only", screen.Rejected)
+			}
+			imported, err := importIssuesCore(ctx, "", store, screen.Write, ImportOptions{SkipPrefixValidation: true, Screened: screen})
+			if err != nil {
+				t.Fatalf("importIssuesCore: %v", err)
+			}
+			dryRun, err := classifyDryRunImport(ctx, store, screen.Kept(records), false)
+			if err != nil {
+				t.Fatalf("classifyDryRunImport: %v", err)
+			}
+			want := []ImportChange{{ID: "bd-x", Changes: importRowChangeSummary(local, accepted.Issue)}}
+			for _, got := range []struct {
+				name   string
+				result *ImportResult
+			}{{"import", imported}, {"dry run", dryRun}} {
+				if got.result.Updated != 1 || !reflect.DeepEqual(got.result.UpdatedIssues, want) {
+					t.Errorf("%s: updated %d %+v, want 1 %+v", got.name, got.result.Updated, got.result.UpdatedIssues, want)
+				}
+				if len(got.result.TieKeptLocalIDs) != 0 {
+					t.Errorf("%s: tie_kept_local_ids = %v, want none", got.name, got.result.TieKeptLocalIDs)
+				}
+			}
+		})
+	}
 }
