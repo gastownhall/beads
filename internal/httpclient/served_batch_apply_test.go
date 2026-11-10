@@ -263,6 +263,267 @@ func TestServedBatchApplyAllowTemplateWaivesTheTemplateGuardOnTheUpdateItem(t *t
 	conformance.RunBatchApplyAllowTemplateWaivesTheTemplateGuardOnTheUpdateItem(t, t.Context(), newServedBatchApplyFixture(t, "hbauw"))
 }
 
+// The set-state refusal arms (GH#5637) over the wire. The event-create refusal
+// runs through the shared contract above, because ErrAlreadyExists survives
+// encode and decode whole. The two arms below do not: the wire carries a
+// refusal's TYPED structure as problem-document TEXT — a server-side
+// *ItemError's Error() string, not the errors.As-able value — so the shared
+// cases' typed assertions cannot run here, and these bespoke tests pin what
+// the wire CAN express instead, the way TestServedBatchApplyRefusesAMetadata
+// RefWithoutNamingIt pins L-apply-ref: the refusal happened, the message names
+// the item and the target that caused it, and NOTHING WAS WRITTEN — the
+// executed create and edge rolled back, no history entry.
+func TestServedBatchApplyARefusedEventCreatePreventsTheStateChange(t *testing.T) {
+	conformance.RunBatchApplyARefusedEventCreatePreventsTheStateChange(t, t.Context(), newServedBatchApplyFixture(t, "hbars"))
+}
+
+func TestServedBatchApplyAMissingParentTargetRollsTheExecutedCreateBack(t *testing.T) {
+	ctx := t.Context()
+	fixture := newServedBatchApplyFixture(t, "hbams")
+	subject := fixture.IssuePrefix + "-mstgt-subject" // never seeded
+	eventID := fixture.IssuePrefix + "-mstgt-event"
+
+	if err := fixture.CommitPending(ctx); err != nil {
+		t.Fatalf("settling: %v", err)
+	}
+	before, err := fixture.CountHistory(ctx)
+	if err != nil {
+		t.Fatalf("CountHistory: %v", err)
+	}
+
+	_, err = fixture.BatchApplier.ApplyBatch(ctx, servedStateChangePlan(eventID, subject, false, "patrol:muted"))
+	if err == nil {
+		t.Fatalf("a state change whose parent target %s is missing: ApplyBatch returned no error", subject)
+	}
+	// The wire's spelling of the in-process *ItemError: the refusal text names
+	// the edge item that refused — though not the missing endpoint's id, which
+	// the problem document does not carry.
+	if !strings.Contains(err.Error(), "dep_add") {
+		t.Errorf("the wire refusal does not name the edge item: %v", err)
+	}
+	assertServedRowCount(t, ctx, fixture, "issues", eventID, 0)
+	assertServedRowCount(t, ctx, fixture, "wisps", eventID, 0)
+	if n := servedCount(t, ctx, fixture,
+		"SELECT COUNT(*) FROM dependencies WHERE COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?",
+		subject); n != 0 {
+		t.Errorf("edges targeting the missing subject = %d, want 0", n)
+	}
+	after, err := fixture.CountHistory(ctx)
+	if err != nil {
+		t.Fatalf("CountHistory: %v", err)
+	}
+	if after-before != 0 {
+		t.Errorf("a state change refused at the edge recorded %d history entries over the wire, want none: the executed create rolled back", after-before)
+	}
+}
+
+func TestServedBatchApplyALateLabelRefusalRollsBackTheEventAndEdge(t *testing.T) {
+	ctx := t.Context()
+	fixture := newServedBatchApplyFixture(t, "hball")
+	subject := fixture.IssuePrefix + "-latelab-subject"
+	seeded := &types.Issue{ID: subject, Title: "the state subject", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Labels: []string{"patrol:active"}}
+	if err := fixture.CreateIssue(ctx, seeded, "seed"); err != nil {
+		t.Fatalf("seed %s: %v", subject, err)
+	}
+	eventID := fixture.IssuePrefix + "-latelab-event"
+	overlong := "patrol:" + strings.Repeat("v", 300)
+
+	if err := fixture.CommitPending(ctx); err != nil {
+		t.Fatalf("settling: %v", err)
+	}
+	before, err := fixture.CountHistory(ctx)
+	if err != nil {
+		t.Fatalf("CountHistory: %v", err)
+	}
+
+	_, err = fixture.BatchApplier.ApplyBatch(ctx, servedStateChangePlan(eventID, subject, false, overlong))
+	if err == nil {
+		t.Fatalf("a state change whose label patch overflows the column: ApplyBatch returned no error")
+	}
+	// The wire names the refused member and the bound it broke, which is the
+	// server's typed ErrFieldTooLong rendered into the problem document.
+	if !strings.Contains(err.Error(), "add[0]") {
+		t.Errorf("the wire refusal does not name the refused label member: %v", err)
+	}
+	assertServedRowCount(t, ctx, fixture, "issues", eventID, 0)
+	assertServedRowCount(t, ctx, fixture, "wisps", eventID, 0)
+	if n := servedCount(t, ctx, fixture,
+		"SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?",
+		eventID, subject); n != 0 {
+		t.Errorf("edges %s -> %s after the refusal = %d, want 0: the executed edge rolled back", eventID, subject, n)
+	}
+	if n := servedCount(t, ctx, fixture, "SELECT COUNT(*) FROM labels WHERE issue_id = ? AND label = ?", subject, "patrol:active"); n != 1 {
+		t.Errorf("subject label rows for patrol:active after the refusal = %d, want 1 (the swap never ran)", n)
+	}
+	after, err := fixture.CountHistory(ctx)
+	if err != nil {
+		t.Fatalf("CountHistory: %v", err)
+	}
+	if after-before != 0 {
+		t.Errorf("a state change refused at its last item recorded %d history entries over the wire, want none: the executed create and edge rolled back", after-before)
+	}
+
+	// POSITIVE HALF: the same plan over a legal label lands whole, so the
+	// refusal above is a refusal of a batch that could have applied.
+	if _, err := fixture.BatchApplier.ApplyBatch(ctx, servedStateChangePlan(eventID, subject, false, "patrol:muted")); err != nil {
+		t.Fatalf("the same plan with a legal label: %v", err)
+	}
+	assertServedRowCount(t, ctx, fixture, "issues", eventID, 1)
+	if n := servedCount(t, ctx, fixture, "SELECT COUNT(*) FROM labels WHERE issue_id = ? AND label = ?", subject, "patrol:muted"); n != 1 {
+		t.Errorf("subject label rows for patrol:muted after the positive half = %d, want 1", n)
+	}
+}
+
+// TestServedBatchApplyAStateChangeBatchCommitsACrossPlaneEdge is the served
+// half of RunBatchApplyAStateChangeBatchSurvivesASubjectThatChangedPlanes.
+// The wire cannot stage the race the in-tree legs stage — an update item's
+// Persistence patch is not expressible on ApplyPatchBody (it is an
+// issues.update.persistence capability, deliberately not a batch member) — so
+// the subject is SEEDED on the far plane instead. The pre-read is caller-side
+// state either way: what the contract pins is the batch's geometry, a saved
+// mode that no longer matches the subject, and that geometry is seedable.
+// The outcome is the documented acceptance: a cross-plane parent edge, the
+// label routed to the subject's current plane, and one atomic request.
+func TestServedBatchApplyAStateChangeBatchCommitsACrossPlaneEdge(t *testing.T) {
+	ctx := t.Context()
+	fixture := newServedBatchApplyFixture(t, "hbaps")
+
+	t.Run("durable saved mode, wisp subject", func(t *testing.T) {
+		subject := fixture.IssuePrefix + "-plane-durable"
+		seeded := &types.Issue{ID: subject, Title: "a wisp the saved mode misremembered", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: true, Labels: []string{"patrol:active"}}
+		if err := fixture.CreateWisp(ctx, seeded, "seed"); err != nil {
+			t.Fatalf("seed wisp %s: %v", subject, err)
+		}
+		eventID := fixture.IssuePrefix + "-plane-durable-event"
+
+		if err := fixture.CommitPending(ctx); err != nil {
+			t.Fatalf("settling: %v", err)
+		}
+		before, err := fixture.CountHistory(ctx)
+		if err != nil {
+			t.Fatalf("CountHistory: %v", err)
+		}
+
+		if _, err := fixture.BatchApplier.ApplyBatch(ctx, servedStateChangePlan(eventID, subject, false, "patrol:muted")); err != nil {
+			t.Fatalf("the cross-plane state change: %v", err)
+		}
+		assertServedRowCount(t, ctx, fixture, "issues", eventID, 1)
+		assertServedRowCount(t, ctx, fixture, "wisps", eventID, 0)
+		// The cross-plane edge: the durable event's parent edge to the wisp
+		// subject lands in the durable edge table, through the wisp's typed
+		// target column.
+		if n := servedCount(t, ctx, fixture,
+			"SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_wisp_id = ? AND type = 'parent-child'",
+			eventID, subject); n != 1 {
+			t.Errorf("durable-plane parent edges %s -> %s = %d, want 1: the documented cross-plane edge", eventID, subject, n)
+		}
+		if n := servedCount(t, ctx, fixture,
+			"SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id = ?", eventID); n != 0 {
+			t.Errorf("wisp-plane edges from the durable event = %d, want 0", n)
+		}
+		if n := servedCount(t, ctx, fixture, "SELECT COUNT(*) FROM wisp_labels WHERE issue_id = ? AND label = ?", subject, "patrol:muted"); n != 1 {
+			t.Errorf("wisp_labels rows for patrol:muted = %d, want 1 (the label follows the subject's current plane)", n)
+		}
+		if n := servedCount(t, ctx, fixture, "SELECT COUNT(*) FROM labels WHERE issue_id = ?", subject); n != 0 {
+			t.Errorf("durable label rows for the wisp subject = %d, want 0", n)
+		}
+		after, err := fixture.CountHistory(ctx)
+		if err != nil {
+			t.Fatalf("CountHistory: %v", err)
+		}
+		if after-before != 1 {
+			t.Errorf("the cross-plane state change recorded %d history entries over the wire, want exactly 1: durable rows landed in one request", after-before)
+		}
+	})
+
+	t.Run("ephemeral saved mode, durable subject", func(t *testing.T) {
+		subject := fixture.IssuePrefix + "-plane-wisp"
+		seeded := &types.Issue{ID: subject, Title: "a durable issue the saved mode misremembered", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Labels: []string{"patrol:active"}}
+		if err := fixture.CreateIssue(ctx, seeded, "seed"); err != nil {
+			t.Fatalf("seed %s: %v", subject, err)
+		}
+		eventID := fixture.IssuePrefix + "-plane-wisp-event"
+
+		if err := fixture.CommitPending(ctx); err != nil {
+			t.Fatalf("settling: %v", err)
+		}
+		before, err := fixture.CountHistory(ctx)
+		if err != nil {
+			t.Fatalf("CountHistory: %v", err)
+		}
+
+		if _, err := fixture.BatchApplier.ApplyBatch(ctx, servedStateChangePlan(eventID, subject, true, "patrol:muted")); err != nil {
+			t.Fatalf("the cross-plane state change: %v", err)
+		}
+		assertServedRowCount(t, ctx, fixture, "wisps", eventID, 1)
+		assertServedRowCount(t, ctx, fixture, "issues", eventID, 0)
+		if n := servedCount(t, ctx, fixture,
+			"SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id = ? AND depends_on_issue_id = ? AND type = 'parent-child'",
+			eventID, subject); n != 1 {
+			t.Errorf("wisp-plane parent edges %s -> %s = %d, want 1: the cross-plane edge from the other side", eventID, subject, n)
+		}
+		if n := servedCount(t, ctx, fixture,
+			"SELECT COUNT(*) FROM dependencies WHERE issue_id = ?", eventID); n != 0 {
+			t.Errorf("durable-plane edges from the wisp event = %d, want 0", n)
+		}
+		if n := servedCount(t, ctx, fixture, "SELECT COUNT(*) FROM labels WHERE issue_id = ? AND label = ?", subject, "patrol:muted"); n != 1 {
+			t.Errorf("durable label rows for patrol:muted = %d, want 1 (the label follows the subject's current plane)", n)
+		}
+		if n := servedCount(t, ctx, fixture, "SELECT COUNT(*) FROM wisp_labels WHERE issue_id = ?", subject); n != 0 {
+			t.Errorf("wisp label rows for the durable subject = %d, want 0", n)
+		}
+		after, err := fixture.CountHistory(ctx)
+		if err != nil {
+			t.Fatalf("CountHistory: %v", err)
+		}
+		if after-before != 1 {
+			t.Errorf("the cross-plane state change recorded %d history entries over the wire, want exactly 1: the label landed on the durable plane in one request", after-before)
+		}
+	})
+}
+
+// servedStateChangePlan is `bd set-state`'s three-item shape (GH#5637) spelled
+// for the served leg's bespoke tests: create the closed priority-4 event —
+// ephemeral carrying the pre-read's saved retention mode — wire its
+// parent-child edge to the subject, swap the subject's dimension label.
+func servedStateChangePlan(eventID, subject string, ephemeral bool, addLabel string) issueops.ApplyBatchRequest {
+	event := &types.Issue{ID: eventID, Title: "State change: patrol → muted", Status: types.StatusClosed, Priority: 4, IssueType: types.TypeEvent, Ephemeral: ephemeral}
+	return issueops.ApplyBatchRequest{
+		Actor:         "apply-writer",
+		ForceIDPrefix: true,
+		Items: []issueops.ApplyItem{
+			{Kind: issueops.ItemCreate, Create: &issueops.CreateItem{Key: "event", Issue: event}},
+			{Kind: issueops.ItemDepAdd, DepAdd: &issueops.DepAddItem{
+				Source: issueops.Ref{Key: "event"}, Target: issueops.Ref{ID: subject}, Type: types.DepParentChild,
+			}},
+			{Kind: issueops.ItemUpdate, Update: &issueops.UpdateItem{
+				Target: issueops.Ref{ID: subject},
+				Patch: issueops.IssuePatch{Labels: issueops.LabelPatch{Add: []string{addLabel}, Remove: []string{"patrol:active"}}},
+			}},
+		},
+	}
+}
+
+// assertServedRowCount counts one id in the issues/wisps plane tables, the
+// row-existence half of the served bespoke tests' atomicity pins.
+func assertServedRowCount(t *testing.T, ctx context.Context, fixture conformance.BatchApplyFixture, table, id string, want int) {
+	t.Helper()
+	//nolint:gosec // G201: table is one of this test's two hardcoded plane names.
+	if got := servedCount(t, ctx, fixture, "SELECT COUNT(*) FROM "+table+" WHERE id = ?", id); got != want {
+		t.Errorf("%s rows for %s = %d, want %d", table, id, got, want)
+	}
+}
+
+// servedCount runs one scalar COUNT query through the fixture's raw seam.
+func servedCount(t *testing.T, ctx context.Context, fixture conformance.BatchApplyFixture, query string, args ...any) int {
+	t.Helper()
+	var n int
+	if err := fixture.QueryScalar(ctx, query, args, &n); err != nil {
+		t.Fatalf("counting with %q: %v", query, err)
+	}
+	return n
+}
+
 // TestServedBatchApplySplicesTheMetadataOfATemplateItCreates is PARKED: a create
 // item cannot make a template over the v0 wire (ApplyCreateItem publishes no
 // is_template member), so the client refuses the plan before the splice could
