@@ -52,6 +52,10 @@ type RoutedResult struct {
 	Routed     bool                // true if the issue was found via routing
 	ResolvedID string              // The resolved (full) issue ID
 	closeFn    func()              // Function to close routed storage (if any)
+	// copyOwner is the repository the issue was resolved in when this
+	// workspace holds a bd repo sync copy of it (redirectLocalCopyToOwner),
+	// and "" otherwise.
+	copyOwner string
 }
 
 // Close closes any routed storage. Safe to call if Routed is false.
@@ -141,6 +145,82 @@ func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage
 	}
 
 	return nil, err
+}
+
+// localCopyTarget reports the active auto-route target that issue, a row of
+// localStore, names as its source: a copy `bd repo sync` imported from the
+// repository `bd list` and `bd ready` read instead of this one. Such a row is
+// not the issue those commands show, so a command that changed it would
+// change a different row from the one the user sees. A native row (no
+// source_repo, or ".") and a copy of any other repository are not.
+func localCopyTarget(ctx context.Context, localStore storage.DoltStorage, issue *types.Issue) (autoRouteTarget, bool) {
+	if issue == nil || issue.SourceRepo == "" || issue.SourceRepo == "." {
+		return autoRouteTarget{}, false
+	}
+	target, ok := activeAutoRouteTarget(ctx, localStore)
+	if !ok || !isPlanningRepoMirror(issue, target.repoPath) {
+		return autoRouteTarget{}, false
+	}
+	return target, true
+}
+
+// ownerRowFor returns the row ownerStore holds under local's id, or nil when
+// it holds none, in which case the local row stays the one resolved.
+func ownerRowFor(ctx context.Context, ownerStore storage.DoltStorage, local *types.Issue) (*types.Issue, error) {
+	owner, err := ownerStore.GetIssue(ctx, local.ID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return owner, nil
+}
+
+// keepLocalCopy is the local resolution of a copy whose owner, target, could
+// not be read: the copy stays the issue resolved.
+func keepLocalCopy(local *RoutedResult, target autoRouteTarget, err error) (*RoutedResult, error) {
+	debug.Logf("[routing] %s is a copy of an issue in %s, which could not be read (%v); using the local copy\n", local.ResolvedID, target.repoPath, err)
+	return local, nil
+}
+
+// ownerOpener opens the store of target, a local copy's owner, and returns
+// what releases it; a nil release leaves the store open (a handle the caller
+// shares).
+type ownerOpener func(target autoRouteTarget) (store storage.DoltStorage, release func(), err error)
+
+// redirectLocalCopy hands back, in place of local, the issue a local copy was
+// imported from (localCopyTarget) when the active auto-route target, opened
+// through open, still holds it; the copy itself is left as it is. Anything
+// else keeps the local result.
+func redirectLocalCopy(ctx context.Context, localStore storage.DoltStorage, local *RoutedResult, open ownerOpener) (*RoutedResult, error) {
+	target, ok := localCopyTarget(ctx, localStore, local.Issue)
+	if !ok {
+		return local, nil
+	}
+	ownerStore, release, err := open(target)
+	if err != nil {
+		return keepLocalCopy(local, target, err)
+	}
+	owner, err := ownerRowFor(ctx, ownerStore, local.Issue)
+	if err != nil || owner == nil {
+		if release != nil {
+			release()
+		}
+		if err != nil {
+			return keepLocalCopy(local, target, err)
+		}
+		return local, nil
+	}
+	debug.Logf("[routing] %s is a copy of an issue in %s; resolving it there\n", local.ResolvedID, target.repoPath)
+	return &RoutedResult{
+		Issue:      owner,
+		Store:      ownerStore,
+		Routed:     true,
+		ResolvedID: local.ResolvedID,
+		closeFn:    release,
+		copyOwner:  target.repoPath,
+	}, nil
 }
 
 // isRoutedResolutionRefusal reports whether a routed tier's resolution error

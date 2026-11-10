@@ -190,27 +190,56 @@ func openRoutedReadStore(ctx context.Context, store storage.DoltStorage) (storag
 // The target opens its own dolt_database, as a prefix route does
 // (openRoutedTargetStore, autoRouteTargetDatabase).
 func openAutoRoutedStore(ctx context.Context, store storage.DoltStorage, writable bool) (storage.DoltStorage, bool, routing.RoutingRule, error) {
-	repoPath, rule := determineAutoRoutedRepoPath(ctx, store)
-	if repoPath == "" || repoPath == "." {
+	target, ok := activeAutoRouteTarget(ctx, store)
+	if !ok {
 		return nil, false, routing.RuleNone, nil
 	}
+	targetStore, err := openAutoRouteTarget(ctx, target, writable)
+	if err != nil {
+		return nil, false, target.rule, err
+	}
+	return targetStore, true, target.rule, nil
+}
 
+// autoRouteTarget is the workspace auto-routing selects for store's commands.
+type autoRouteTarget struct {
+	repoPath string // the target repository, ~ expanded
+	beadsDir string // its .beads directory
+	rule     routing.RoutingRule
+}
+
+// activeAutoRouteTarget reports the target auto-routing selects for store,
+// and false when commands stay in the current store.
+func activeAutoRouteTarget(ctx context.Context, store storage.DoltStorage) (autoRouteTarget, bool) {
+	repoPath, rule := determineAutoRoutedRepoPath(ctx, store)
+	if repoPath == "" || repoPath == "." {
+		return autoRouteTarget{}, false
+	}
 	targetRepoPath := routing.ExpandPath(repoPath)
-	targetBeadsDir := filepath.Join(targetRepoPath, ".beads")
+	return autoRouteTarget{
+		repoPath: targetRepoPath,
+		beadsDir: filepath.Join(targetRepoPath, ".beads"),
+		rule:     rule,
+	}, true
+}
+
+// openAutoRouteTarget opens target, writable or read-only, as
+// openAutoRoutedStore does once auto-routing has selected it.
+func openAutoRouteTarget(ctx context.Context, target autoRouteTarget, writable bool) (storage.DoltStorage, error) {
 	// Refuse what admission refuses from the target's own contents first, as
 	// the open below would: a write's dolt_database lookup would otherwise
 	// report a historical SQLite or legacy Dolt target as a missing
 	// dolt_database field.
-	if _, err := admitForeignWorkspace(targetBeadsDir); err != nil {
-		return nil, false, rule, fmt.Errorf("failed to open routed store at %s: %w", remedy.PrintedValue(targetRepoPath), err)
+	if _, err := admitForeignWorkspace(target.beadsDir); err != nil {
+		return nil, fmt.Errorf("failed to open routed store at %s: %w", remedy.PrintedValue(target.repoPath), err)
 	}
-	database, err := autoRouteTargetDatabase(targetBeadsDir, writable)
+	database, err := autoRouteTargetDatabase(target.beadsDir, writable)
 	if err != nil {
-		return nil, false, rule, fmt.Errorf("failed to open routed store at %s: target has no dolt_database configured: %w", remedy.PrintedValue(targetRepoPath), err)
+		return nil, fmt.Errorf("failed to open routed store at %s: target has no dolt_database configured: %w", remedy.PrintedValue(target.repoPath), err)
 	}
-	targetStore, err := openRoutedTargetStore(ctx, targetBeadsDir, database, writable)
+	targetStore, err := openRoutedTargetStore(ctx, target.beadsDir, database, writable)
 	if err != nil {
-		return nil, false, rule, fmt.Errorf("failed to open routed store at %s: %w", remedy.PrintedValue(targetRepoPath), err)
+		return nil, fmt.Errorf("failed to open routed store at %s: %w", remedy.PrintedValue(target.repoPath), err)
 	}
-	return wireExternalDependencyPolicy(targetStore), true, rule, nil
+	return wireExternalDependencyPolicy(targetStore), nil
 }
