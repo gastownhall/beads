@@ -184,3 +184,56 @@ func RunLifecycleUpdateReclaimByTheHolderIgnoresANewBlocker(t *testing.T, ctx co
 	assertLifecycleUpdateAssigneeAndStatus(t, ctx, fixture, heldID, "holder", types.StatusInProgress)
 	events.assert(t, "holder's repeat claim", 0)
 }
+
+// RunLifecycleUpdateClaimIgnoresAnInheritedBlockedFlag pins what the refusal
+// reads: the live direct blockers the close policy reports, not the stored
+// is_blocked projection. A child whose parent is blocked carries the inherited
+// flag with no blocker of its own, so an unforced claim of it goes through.
+func RunLifecycleUpdateClaimIgnoresAnInheritedBlockedFlag(t *testing.T, ctx context.Context, fixture LifecycleUpdateFixture) {
+	t.Helper()
+
+	if fixture.AddDependency == nil {
+		t.Skip("fixture cannot seed an edge: AddDependency is nil, so there is no inherited flag to ignore")
+	}
+
+	blockerID := fixture.IssuePrefix + "-lup-inherit-blocker"
+	parentID := fixture.IssuePrefix + "-lup-inherit-parent"
+	childID := fixture.IssuePrefix + "-lup-inherit-child"
+	for _, id := range []string{blockerID, parentID, childID} {
+		seedLifecycleUpdateIssue(t, ctx, fixture, lifecycleUpdateIssue(id))
+	}
+	seedLifecycleUpdateEdge(t, ctx, fixture, parentID, blockerID, types.DepBlocks)
+	seedLifecycleUpdateEdge(t, ctx, fixture, childID, parentID, types.DepParentChild)
+	if fixture.StoredIsBlocked != nil {
+		flagged, err := fixture.StoredIsBlocked(ctx, childID)
+		if err != nil {
+			t.Fatalf("read %s's stored is_blocked: %v", childID, err)
+		}
+		if !flagged {
+			t.Fatalf("premise: %s under a blocked parent does not carry is_blocked, so this case cannot tell the flag from the live check", childID)
+		}
+	} else {
+		t.Log("fixture cannot read the stored flag (StoredIsBlocked is nil): the inherited is_blocked premise is not proven on this leg")
+	}
+
+	result, err := fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{Actor: "claimant", IssueID: childID, Claim: true})
+	if err != nil {
+		t.Fatalf("claim of %s with only an inherited is_blocked flag: %v, want the claim", childID, err)
+	}
+	if !result.Changed {
+		t.Errorf("claim of %s reported Changed = false, want a committed claim", childID)
+	}
+	assertLifecycleUpdateAssigneeAndStatus(t, ctx, fixture, childID, "claimant", types.StatusInProgress)
+}
+
+// StoredIsBlockedThrough builds LifecycleUpdateFixture.StoredIsBlocked from a
+// role fixture kit's QueryScalar hook.
+func StoredIsBlockedThrough(queryScalar func(context.Context, string, []any, ...any) error) func(context.Context, string) (bool, error) {
+	return func(ctx context.Context, id string) (bool, error) {
+		var flag int
+		if err := queryScalar(ctx, "SELECT is_blocked FROM issues WHERE id = ?", []any{id}, &flag); err != nil {
+			return false, err
+		}
+		return flag != 0, nil
+	}
+}
