@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -2062,5 +2063,63 @@ func TestConditionalBlocksRecomputeOnReasonAndPinEdits(t *testing.T) {
 	if !bUpdatedAtAfter.Equal(bUpdatedAtBefore) {
 		t.Errorf("cb-edit-b updated_at moved from %v to %v; recompute must pin updated_at",
 			bUpdatedAtBefore, bUpdatedAtAfter)
+	}
+}
+
+func TestFailureClosePredicateSQLParity(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// The is_blocked recompute and the direct-mark writers classify a closed
+	// conditional-blocks target with a rendered SQL predicate; the CLI gate
+	// and molecule classify with types.IsFailureClose. The two must answer
+	// identically for every keyword and the case/Unicode shapes users write,
+	// so ask the engine directly (GH#5577).
+	samples := []string{
+		"failed", "FAILED", "Failed to build", "prefailed",
+		"rejected by reviewer", "REJECTED",
+		"wontfix", "won't fix", "Won't Fix", "WON'T FIX",
+		"canceled", "Cancelled",
+		"abandoned feature", "Abandoned",
+		"blocked by external dependency", "bLoCkEd",
+		"encountered error", "Error",
+		"test timeout exceeded", "Timeout",
+		"build aborted", "Aborted",
+		"completed successfully", "Done", "Merged to main", "shipped",
+		"partial match: refailed", "no keyword at all",
+		"fáiled with accents", "abandóned", "échec",
+		"precondition bloKed (Kelvin sign)",
+	}
+	samples = append(samples, types.FailureCloseKeywords...)
+
+	// Rendering over bound placeholders (one per keyword) lets one SELECT
+	// classify one sample.
+	pred := issueops.FailureClosePredicateSQL("?")
+	args := make([]any, strings.Count(pred, "?"))
+	for _, sample := range samples {
+		var sqlSays bool
+		for i := range args {
+			args[i] = sample
+		}
+		if err := store.db.QueryRowContext(ctx, "SELECT "+pred, args...).Scan(&sqlSays); err != nil {
+			t.Fatalf("engine failed on %q: %v", sample, err)
+		}
+		if goSays := types.IsFailureClose(sample); sqlSays != goSays {
+			t.Errorf("engine and Go disagree on %q: SQL says %v, IsFailureClose says %v",
+				sample, sqlSays, goSays)
+		}
+	}
+
+	// NULL and the empty string are the non-failure closes the row itself
+	// defaults to.
+	var nullSays bool
+	if err := store.db.QueryRowContext(ctx, "SELECT "+issueops.FailureClosePredicateSQL("NULL")).Scan(&nullSays); err != nil {
+		t.Fatalf("engine failed on NULL reason: %v", err)
+	}
+	if nullSays {
+		t.Error("a NULL close reason must classify as non-failure")
 	}
 }

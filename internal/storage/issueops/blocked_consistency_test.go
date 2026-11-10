@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // The fingerprint's whole job is to be equal when the pending edits are equal
@@ -261,5 +263,59 @@ func TestBlockedParentEdgesGuardStatus(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Errorf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+// The failure-close predicate is spliced into the batched is_blocked
+// templates, whose expander counts every percent sign and question mark
+// textually (expandBatchTemplate). The rendered predicate must therefore carry
+// none of its own — pinned here on the ci lane beside the budget tests it
+// exists to keep — and must cover every types.FailureCloseKeywords entry with
+// its single quotes doubled, so a keyword like "won't fix" survives the string
+// literal.
+func TestFailureClosePredicateSQLContract(t *testing.T) {
+	pred := FailureClosePredicateSQL("t.close_reason")
+	if strings.ContainsRune(pred, '%') {
+		t.Errorf("predicate carries a percent sign of its own: %s", pred)
+	}
+	if strings.ContainsRune(pred, '?') {
+		t.Errorf("predicate carries a question mark of its own: %s", pred)
+	}
+	for _, keyword := range types.FailureCloseKeywords {
+		literal := "'" + strings.ReplaceAll(keyword, "'", "''") + "'"
+		if !strings.Contains(pred, literal) {
+			t.Errorf("predicate misses keyword %q (as %s): %s", keyword, literal, pred)
+		}
+	}
+	if !strings.Contains(pred, "COALESCE(t.close_reason, '')") {
+		t.Errorf("predicate must NULL-guard the reason expression: %s", pred)
+	}
+
+	guard := edgeTargetHoldsSQL("d", "t")
+	for text, name := range map[string]string{pred: "predicate", guard: "target guard"} {
+		if strings.ContainsRune(text, '%') || strings.ContainsRune(text, '?') {
+			t.Errorf("union %s carries a percent sign or question mark of its own: %s", name, text)
+		}
+	}
+	if !strings.Contains(guard, "t.status <> 'pinned'") {
+		t.Errorf("target guard must release a pinned target: %s", guard)
+	}
+	if !strings.Contains(guard, "d.type = 'conditional-blocks'") {
+		t.Errorf("target guard must split on the conditional-blocks type: %s", guard)
+	}
+}
+
+// The union's status-tested legs apply the conditional-blocks close rule
+// (GH#5577): the leg guard names the target's close_reason and the
+// conditional-blocks type, on the ci lane where the dolt suites skip.
+func TestShouldBeBlockedUnionAppliesConditionalCloseGuard(t *testing.T) {
+	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+		q := strings.Join(strings.Fields(shouldBeBlockedIDsUnionCoreSQL(depTable, "", "", "")), " ")
+		if got := strings.Count(q, "d.type = 'conditional-blocks' AND NOT (INSTR"); got != 2 {
+			t.Errorf("%s: %d conditional close guards in the status-tested legs, want 2: %s", depTable, got, q)
+		}
+		if !strings.Contains(q, "t.close_reason") {
+			t.Errorf("%s: status-tested legs must read the target's close_reason: %s", depTable, q)
+		}
 	}
 }

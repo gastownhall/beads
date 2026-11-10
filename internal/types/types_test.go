@@ -2102,3 +2102,42 @@ func TestArrivalSeqSerializesOnlyWhenStamped(t *testing.T) {
 		t.Error("arrival_seq changed the content hash; it is storage-assigned metadata, not content")
 	}
 }
+
+func TestBlockingEdgeHolds(t *testing.T) {
+	tests := []struct {
+		name        string
+		depType     DependencyType
+		status      Status
+		closeReason string
+		holds       bool
+	}{
+		// An ordinary blocks edge holds while its target is open and releases
+		// on closed or pinned, whatever the reason.
+		{"blocks open", DepBlocks, StatusOpen, "", true},
+		{"blocks in_progress", DepBlocks, StatusInProgress, "", true},
+		{"blocks closed", DepBlocks, StatusClosed, "failed", false},
+		{"blocks pinned", DepBlocks, StatusPinned, "", false},
+
+		// A conditional-blocks edge releases only on a failure close (GH#5577).
+		{"conditional open", DepConditionalBlocks, StatusOpen, "", true},
+		{"conditional in_progress", DepConditionalBlocks, StatusInProgress, "", true},
+		{"conditional pinned", DepConditionalBlocks, StatusPinned, "", false},
+		{"conditional closed no reason", DepConditionalBlocks, StatusClosed, "", true},
+		{"conditional closed success", DepConditionalBlocks, StatusClosed, "completed successfully", true},
+		{"conditional closed failure", DepConditionalBlocks, StatusClosed, "failed: flaky in CI", false},
+		{"conditional closed wontfix", DepConditionalBlocks, StatusClosed, "Won't fix - by design", false},
+		{"conditional closed rejected", DepConditionalBlocks, StatusClosed, "REJECTED", false},
+
+		// Any other type is not status-decided and never routes through here.
+		{"waits_for", DepWaitsFor, StatusOpen, "", false},
+		{"parent_child", DepParentChild, StatusOpen, "", false},
+		{"related", DepRelated, StatusClosed, "failed", false},
+	}
+
+	for _, tt := range tests {
+		if got := BlockingEdgeHolds(tt.depType, tt.status, tt.closeReason); got != tt.holds {
+			t.Errorf("%s: BlockingEdgeHolds(%s, %s, %q) = %v, want %v",
+				tt.name, tt.depType, tt.status, tt.closeReason, got, tt.holds)
+		}
+	}
+}
