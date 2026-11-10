@@ -435,6 +435,44 @@ func TestEmbeddedCrossPrefixRepairReopenIsNoop(t *testing.T) {
 	requireIgnoredCursorAtLatest(t, ctx, conn)
 }
 
+// TestEmbeddedCrossPrefixRepairIsMarkerGatedAfterConvergence is AC-7's
+// steady state: once the marker records, a converged reopen short-circuits
+// before the repair, so a legacy-shaped row committed after convergence onto
+// a held target stays external, and HEAD and the working set stay put. The
+// marker, not a re-scan, says the repair is done.
+func TestEmbeddedCrossPrefixRepairIsMarkerGatedAfterConvergence(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	conn, dataDir, closeConn := newCrossPrefixRepairDB(t, ctx)
+	seedRefusalFixture(t, ctx, conn)
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		closeConn()
+		t.Fatalf("repair MigrateUp: %v", err)
+	}
+	requireRepairConverged(t, ctx, conn)
+
+	// Artificial by construction now that the write path classifies by
+	// evidence, which is exactly why the converged open must not touch it.
+	seedLegacyIssue(t, ctx, conn, "issues", "rb-post", "open", 4)
+	seedDep(t, ctx, conn, "dependencies", "ra-other", "rb-post", "depends_on_external", "blocks")
+	execFrozenGuard(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'test: legacy-shaped row after convergence')")
+	before := graphSnapshot(t, ctx, conn)
+	closeConn()
+
+	conn, closeConn = openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("converged reopen MigrateUp: %v", err)
+	}
+	requireDepColumn(t, ctx, conn, "dependencies", "ra-other", "rb-post", "depends_on_external")
+	if got := graphSnapshot(t, ctx, conn); got != before {
+		t.Errorf("converged reopen changed the store:\n got: %s\nwant: %s", got, before)
+	}
+	if !ignoredMarkerRecorded(t, ctx, conn, 32) {
+		t.Error("ignored marker 0032 lost by the converged reopen")
+	}
+}
+
 // TestEmbeddedCrossPrefixRepairClonesConverge is AC-8: two clones with the
 // same versioned history but different clone-local wisps repair the synced
 // dependencies table identically, because a versioned row binds only to the
