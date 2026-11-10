@@ -629,6 +629,13 @@ type hostToolAllowlistEntry struct {
 // findPrebuiltBDBinary()/bazeltest.PrebuiltBD() result `!= ""` and returns),
 // so they need no allowlist entry.
 var hostToolExecAllowlist = map[string][]hostToolAllowlistEntry{
+	"internal/execwin/execwin_test.go": {
+		{
+			fn:      "newHiddenPolicyCmd",
+			snippet: `return exec.Command("go", "version")`,
+			why:     "never started: the Cmd is constructed only so Hide's attribute policy can be pinned against it (from GH#7572, @Zireael)",
+		},
+	},
 	"internal/storage/embeddeddolt/concurrency_test.go": {
 		{
 			fn:      "TestConcurrencyMultiProcess",
