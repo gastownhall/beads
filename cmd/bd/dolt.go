@@ -2323,6 +2323,7 @@ func init() {
 	doltCommitCmd.Flags().StringP("message", "m", "", "Commit message (default: auto-generated)")
 	doltCleanDatabasesCmd.Flags().Bool("dry-run", false, "Show what would be dropped without dropping")
 	doltCleanDatabasesCmd.Flags().Bool("purge-dropped", false, "After dropping, also run CALL DOLT_PURGE_DROPPED_DATABASES() — server-global and irreversible, see --help")
+	doltDropDatabaseCmd.Flags().BoolVarP(&doltDropDatabaseYes, "yes", "y", false, "Drop without prompting (required in non-interactive use)")
 	doltRemoteAddCmd.Flags().Bool("allow-git-origin", false, "Allow adding a Dolt remote whose URL matches the git origin (proceed with a warning instead of aborting)")
 	doltRemoteResetDataCmd.Flags().BoolVarP(&doltRemoteResetDataYes, "yes", "y", false, "Skip the confirmation prompt (required in non-interactive use)")
 	doltRemoteCmd.AddCommand(doltRemoteAddCmd)
@@ -2340,6 +2341,7 @@ func init() {
 	doltCmd.AddCommand(doltStatusCmd)
 	doltCmd.AddCommand(doltKillallCmd)
 	doltCmd.AddCommand(doltCleanDatabasesCmd)
+	doltCmd.AddCommand(doltDropDatabaseCmd)
 	doltCmd.AddCommand(doltRemoteCmd)
 	rootCmd.AddCommand(doltCmd)
 }

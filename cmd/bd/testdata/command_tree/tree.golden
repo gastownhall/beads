@@ -1986,6 +1986,34 @@ bd dolt commit
     | For more options (--stdin, custom messages), see: bd vc commit
   flag --message -m type=string default="" usage="Commit message (default: auto-generated)"
 
+bd dolt drop-database
+  use: "drop-database <name>"
+  short: "Drop one named database from the Dolt server (consent required)"
+  hidden: false
+  runnable: true
+  long:
+    | Drop a single named database from the Dolt server.
+    |
+    | This is the way to remove a database bd created on the server — for example
+    | one an unwanted 'bd init' adoption of a git origin brought in — because
+    | deleting a workspace's .beads directory never removes the database from a
+    | shared server. It refuses what no invocation should drop: system schemas,
+    | the global shared-server database (beads_global), the database this
+    | workspace is initialized against, and stale test databases ('bd dolt
+    | clean-databases' owns those).
+    |
+    | DROP DATABASE only marks a database as dropped; Dolt keeps its directory
+    | under .dolt_dropped_databases/ so it stays recoverable via
+    | CALL DOLT_UNDROP(name) until an explicit purge. This command never purges;
+    | 'bd dolt clean-databases --purge-dropped' does (server-global, irreversible).
+    |
+    | Requires --yes (or an interactive confirmation) before dropping anything.
+    |
+    | Examples:
+    |   bd dolt drop-database old_project    # prompts for confirmation
+    |   bd dolt drop-database old_project --yes    # no prompt (scripts, agents)
+  flag --yes -y type=bool default="false" usage="Drop without prompting (required in non-interactive use)"
+
 bd dolt killall
   use: "killall"
   short: "Kill all orphan Dolt server processes"
