@@ -59,11 +59,16 @@ func (e *SchemaEncodingDriftError) Unwrap() error { return e.Cause }
 // the original, untruncated cause.
 func (e *SchemaEncodingDriftError) Symptom() string { return driftSymptomLine(e.Cause) }
 
-// UserMessage renders the full operator-facing refusal: what stopped, why the
-// migration cannot be skipped, the partial-state warning, and the recovery
-// runbook.
+// UserMessage renders the full operator-facing refusal: what stopped, the
+// engine's own symptom line, why the migration cannot be skipped, the
+// partial-state warning, and the recovery runbook. The recovery URL appears
+// exactly once; Error()'s one-liner repeats it for callers that print only
+// the short form.
 func (e *SchemaEncodingDriftError) UserMessage() string {
-	return e.Error() + "\n" +
+	return fmt.Sprintf("Schema encoding drift (dolthub/dolt#11131) stopped migration %s on %s.\n",
+		e.Migration, e.CursorTable) +
+		"\n" +
+		"  Engine symptom: " + e.Symptom() + "\n" +
 		"\n" +
 		"  This failure is consistent with Dolt schema-encoding drift (dolthub/dolt#11131):\n" +
 		"  a TEXT column's on-disk storage encoding was re-derived without rewriting its\n" +

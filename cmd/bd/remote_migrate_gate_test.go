@@ -354,6 +354,37 @@ func TestRenderTypedOpenError(t *testing.T) {
 		}
 	})
 
+	t.Run("schema encoding drift renders the full refusal", func(t *testing.T) {
+		drift := &schema.SchemaEncodingDriftError{
+			Migration:   "0059_recompute_null_gate_is_blocked.up.sql",
+			Version:     59,
+			CursorTable: "schema_migrations",
+			Cause:       errors.New("Error 1105 (HY000): panic recovered: invalid hash length: 19\ngoroutine 1 [running]:\nsome.Frame(...)"),
+		}
+		out, handled := capture(func() bool {
+			return renderTypedOpenError(fmt.Errorf("uow: init schema: %w", drift))
+		})
+		if !handled {
+			t.Fatal("renderTypedOpenError = false, want true for a wrapped drift refusal")
+		}
+		if out != drift.UserMessage() {
+			t.Errorf("rendered output is not the full UserMessage:\n%s", out)
+		}
+		for _, want := range []string{
+			"0059_recompute_null_gate_is_blocked.up.sql",
+			"schema_migrations",
+			"dolthub/dolt#11131",
+			schema.SchemaEncodingDriftRecoveryURL,
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("output missing %q:\n%s", want, out)
+			}
+		}
+		if strings.Contains(out, "goroutine") {
+			t.Errorf("engine stack leaked into the refusal:\n%s", out)
+		}
+	})
+
 	t.Run("an ordinary error is left to the caller", func(t *testing.T) {
 		out, handled := capture(func() bool {
 			return renderTypedOpenError(errors.New("connection refused"))

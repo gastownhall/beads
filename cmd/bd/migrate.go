@@ -582,6 +582,43 @@ func handleInspect() error {
 	return nil
 }
 
+// handleSchemaMigrateFailure renders a failed explicit schema migration
+// (`bd migrate schema`) and returns the exit error for it. Extracted from
+// handleSchemaMigrate so the failure arms — including the drift refusal —
+// are directly testable without standing up a store.
+func handleSchemaMigrateFailure(err error) error {
+	// gastownhall/beads#5699: an explicit migration over a drifted table gets
+	// the same typed refusal the store-open paths render — the full block in
+	// text mode, the envelope plus schema_encoding_drift object under --json —
+	// before the generic failure handling below.
+	if renderSchemaEncodingDriftRefusal(err) {
+		return SilentExit()
+	}
+	if jsonOutput {
+		if jerr := outputJSON(map[string]interface{}{
+			"error":   "schema_migration_failed",
+			"message": err.Error(),
+		}); jerr != nil {
+			return jerr
+		}
+		return SilentExit()
+	}
+	var dirtyErr *schema.DirtyTablesError
+	if errors.As(err, &dirtyErr) {
+		// The dirty guard's own remedy is `bd dolt commit`, which on a
+		// shared server opens writably, hits the migrate gate, and is told
+		// to run this command — the two messages point at each other and
+		// the operator loops (gastownhall/beads#5920 review). Name the
+		// sequence that actually terminates.
+		return HandleErrorWithHint(
+			fmt.Sprintf("schema migration failed: %v", err),
+			"in server mode `bd dolt commit` is itself gated, so commit the working set on the server first "+
+				"(`CALL DOLT_COMMIT('-Am', 'pre-migration working set')` over the sql-server, or "+
+				schema.AllowRemoteMigrateEnv+"=1 bd dolt commit), then re-run this command")
+	}
+	return HandleError("schema migration failed: %v", err)
+}
+
 func handleSchemaMigrate() error {
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
@@ -627,29 +664,7 @@ func handleSchemaMigrate() error {
 
 	applied, err := migrator.ApplySchemaMigrations(rootCtx)
 	if err != nil {
-		if jsonOutput {
-			if jerr := outputJSON(map[string]interface{}{
-				"error":   "schema_migration_failed",
-				"message": err.Error(),
-			}); jerr != nil {
-				return jerr
-			}
-			return SilentExit()
-		}
-		var dirtyErr *schema.DirtyTablesError
-		if errors.As(err, &dirtyErr) {
-			// The dirty guard's own remedy is `bd dolt commit`, which on a
-			// shared server opens writably, hits the migrate gate, and is told
-			// to run this command — the two messages point at each other and
-			// the operator loops (gastownhall/beads#5920 review). Name the
-			// sequence that actually terminates.
-			return HandleErrorWithHint(
-				fmt.Sprintf("schema migration failed: %v", err),
-				"in server mode `bd dolt commit` is itself gated, so commit the working set on the server first "+
-					"(`CALL DOLT_COMMIT('-Am', 'pre-migration working set')` over the sql-server, or "+
-					schema.AllowRemoteMigrateEnv+"=1 bd dolt commit), then re-run this command")
-		}
-		return HandleError("schema migration failed: %v", err)
+		return handleSchemaMigrateFailure(err)
 	}
 
 	latest := schema.LatestVersion()

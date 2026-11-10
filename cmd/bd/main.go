@@ -502,6 +502,12 @@ func renderTypedOpenError(err error) bool {
 		}
 		return true
 	}
+	// gastownhall/beads#5699: a migration over a dolthub/dolt#11131-drifted
+	// table refuses with the recovery runbook instead of the raw engine
+	// error.
+	if renderSchemaEncodingDriftRefusal(err) {
+		return true
+	}
 	return false
 }
 
