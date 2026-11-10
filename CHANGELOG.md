@@ -1226,6 +1226,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A live `dolt sql-server` is recognized again when the `ps` state column is
+  empty. macOS 26 leaves the state empty for many `ps` rows, and the process
+  list parser read the executable path as the state, which dropped the
+  leading `dolt` from the command: a running server then vanished from the
+  process list `bd` uses to verify recorded server PIDs, reclaim ports and
+  clean up stale servers. The state column is now optional: the field after
+  the PID counts as a state only when it looks like one (a state letter plus
+  the modifier letters `ps` appends), and the whole row is command otherwise.
+
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

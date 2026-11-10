@@ -283,6 +283,20 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 			want:     []int{111},
 		},
 		{
+			// GH#7121: macOS 26 prints an empty state column, so the state is
+			// optional and the executable must survive the missing field.
+			name: "empty and present states mix without losing rows",
+			snapshot: "114      /usr/local/bin/dolt sql-server --port 3306\n" +
+				"115 S    /usr/local/bin/dolt sql-server --port 3307\n" +
+				"1466      /Users/u/.nix-profile/bin/dolt sql-server --config /Users/u/.beads/shared-server/dolt-server-config.yaml\n",
+			want: []int{114, 115, 1466},
+		},
+		{
+			name:     "tab-separated empty-state row is accepted",
+			snapshot: "114\tdolt sql-server\n",
+			want:     []int{114},
+		},
+		{
 			name: "malformed and invalid rows are rejected",
 			snapshot: "\n" +
 				"not-a-pid S dolt sql-server\n" +
@@ -290,7 +304,6 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 				"-1 S dolt sql-server\n" +
 				"112\n" +
 				"113 S\n" +
-				"114\tdolt sql-server\n" +
 				"115 S \n",
 		},
 		{
@@ -306,5 +319,16 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 				t.Fatalf("parseDoltProcessPIDs() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestParseDoltProcessPIDsEmptyState covers macOS ps rows whose state column
+// is blank (#7121): the live dolt sql-server must still be recognized.
+func TestParseDoltProcessPIDsEmptyState(t *testing.T) {
+	snapshot := "  114      /usr/local/bin/dolt sql-server --port 3306\n" +
+		"  115 S    /usr/local/bin/dolt sql-server --port 3307\n"
+	want := []int{114, 115}
+	if got := parseDoltProcessPIDs([]byte(snapshot)); !reflect.DeepEqual(got, want) {
+		t.Fatalf("parseDoltProcessPIDs() = %v, want %v", got, want)
 	}
 }
