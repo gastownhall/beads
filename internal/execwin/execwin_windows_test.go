@@ -52,6 +52,24 @@ func TestHideWindowsUnattachedNilAttributes(t *testing.T) {
 	}
 }
 
+func TestHideWindowsAttachedLeavesCommandAlone(t *testing.T) {
+	withConsoleAttachment(t, true)
+	cmd := newHiddenPolicyCmd()
+	dir := t.TempDir()
+	cmd.Dir = dir
+	cmd.Env = []string{"EXECWIN_TEST=1"}
+	returned := Hide(cmd)
+	if returned != cmd {
+		t.Fatalf("Hide returned a different command (%p != %p); an attached parent must get the same one", returned, cmd)
+	}
+	if returned.Dir != dir || len(returned.Env) != 1 || returned.Env[0] != "EXECWIN_TEST=1" {
+		t.Fatalf("Hide changed unrelated command configuration: Dir=%q Env=%v", returned.Dir, returned.Env)
+	}
+	if cmd.SysProcAttr != nil {
+		t.Fatalf("Hide set SysProcAttr = %+v for an attached parent; the attribute pointer and values must stay unchanged (nil)", cmd.SysProcAttr)
+	}
+}
+
 func TestBackgroundSysProcAttrWindows(t *testing.T) {
 	attr := BackgroundSysProcAttr()
 	if attr == nil {

@@ -31,6 +31,37 @@ func TestHidePinsNoWindowWhenUnattached(t *testing.T) {
 	}
 }
 
+func TestHideLeavesAttachedConsoleAlone(t *testing.T) {
+	// An attached parent must keep everything it set, whatever flags it
+	// chose: the child inherits the console it can already see.
+	for _, flags := range []uint32{0, flagCreateNewProcessGroup, flagCreateNoWindow, flagDetachedProcess} {
+		merged, changed := hideCreationFlags(true, flags)
+		if changed || merged != flags {
+			t.Errorf("hideCreationFlags(true, %#x) = (%#x, %v), want the caller's flags unchanged", flags, merged, changed)
+		}
+	}
+}
+
+func TestHideOffWindowsIsIdentity(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows behavior is pinned by execwin_windows_test.go")
+	}
+	dir := t.TempDir()
+	cmd := newHiddenPolicyCmd()
+	cmd.Dir = dir
+	cmd.Env = []string{"EXECWIN_TEST=1"}
+	returned := Hide(cmd)
+	if returned != cmd {
+		t.Fatalf("Hide returned a different command (%p != %p); off Windows it must return the same one", returned, cmd)
+	}
+	if returned.Dir != dir || len(returned.Env) != 1 || returned.Env[0] != "EXECWIN_TEST=1" {
+		t.Fatalf("Hide changed unrelated command configuration: Dir=%q Env=%v", returned.Dir, returned.Env)
+	}
+	if cmd.SysProcAttr != nil {
+		t.Fatalf("Hide set SysProcAttr = %+v off Windows; it must not touch attributes there", cmd.SysProcAttr)
+	}
+}
+
 func TestBackgroundSysProcAttrCreationFlags(t *testing.T) {
 	flags := backgroundCreationFlags()
 	if flags != flagCreateNoWindow|flagCreateNewProcessGroup {
