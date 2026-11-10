@@ -42,6 +42,10 @@ var trackedRuntimePatterns = []string{
 	"push-state.json",
 	"export-state.json",
 	"sync-state.json",
+	"dolt-backup.json",          // GH#8318: absolute backup destination path
+	"dolt-backup-state.json",    // GH#8318: per-machine backup progress
+	"dolt-config.log",           // GH#8318: audit entries carry absolute local paths
+	".auto-import-issues.jsonl", // GH#8318: per-machine auto-import state
 	"last-touched",
 	"last_pull", // bd-578h9.6: gitignored since 7ebf4df6a, but gitignore cannot untrack already-committed copies
 	".local_version",

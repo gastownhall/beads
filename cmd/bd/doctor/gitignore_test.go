@@ -1670,6 +1670,47 @@ func TestGitignore_ContainsDoltServerConfig(t *testing.T) {
 	}
 }
 
+// TestGitignore_ContainsBackupStateFiles verifies that the per-machine
+// backup state and auto-import logs are ignored like the other runtime
+// files they sit beside. bd backup writes .beads/dolt-backup.json (with the
+// absolute backup destination path) and .beads/dolt-backup-state.json, bd
+// dolt set logs to .beads/dolt-config.log (absolute paths in its audit
+// entries), and the JSONL auto-import path writes
+// .beads/.auto-import-issues.jsonl. A `git add .` would otherwise commit
+// them. They must be in requiredPatterns too, otherwise bd doctor --fix
+// cannot heal an existing .beads/.gitignore.
+// GH#8318
+func TestGitignore_ContainsBackupStateFiles(t *testing.T) {
+	patterns := []string{
+		"dolt-backup.json",
+		"dolt-backup-state.json",
+		"dolt-config.log",
+		".auto-import-issues.jsonl",
+	}
+
+	for _, pattern := range patterns {
+		if !containsGitignorePattern(GitignoreTemplate, pattern) {
+			t.Errorf("GitignoreTemplate should contain %q", pattern)
+		}
+	}
+	if missing := missingGitignorePatterns(GitignoreTemplate); len(missing) != 0 {
+		t.Errorf("GitignoreTemplate is missing required patterns %v", missing)
+	}
+
+	for _, pattern := range patterns {
+		found := false
+		for _, p := range requiredPatterns {
+			if p == pattern {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("requiredPatterns should include %q", pattern)
+		}
+	}
+}
+
 // TestGitignore_ContainsHTTPTarget verifies that the http backend's activation
 // sidecar is ignored like proxied_server_client_info.json, the per-user
 // sidecar it follows. It names the server the bearer ladder authorizes
