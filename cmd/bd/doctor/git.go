@@ -888,11 +888,14 @@ func CheckHooksPath() DoctorCheck {
 	}
 }
 
-// FixHooksPath unsets core.hooksPath ONLY when it is beads-managed and its
-// target is missing. It re-reads the current value and re-checks both
-// conditions immediately before acting, so it never mutates a third-party
-// hooksPath (e.g. husky) even if the check that triggered the fix pass is
-// stale.
+// FixHooksPath repairs a dangling core.hooksPath. It re-reads the current
+// value and revalidates the conditions immediately before acting, so it never
+// mutates a third-party hooksPath (e.g. husky) even if the check that
+// triggered the fix pass is stale. Two repairs exist:
+//   - GH#4440: the value is the current beads-managed location and its target
+//     is missing (deleted in place) — unset it.
+//   - GH#5853: the value is a stranded former beads hooks directory with a
+//     validated current target — repoint it, never recreating the stale path.
 func FixHooksPath() error {
 	repoRoot, _ := git.GetMainRepoRoot()
 	if repoRoot == "" {
@@ -902,41 +905,51 @@ func FixHooksPath() error {
 		return nil // not in a git repo
 	}
 
-	hooksPath, ok := getConfiguredHooksPath(repoRoot)
-	if !ok || hooksPath == "" {
-		return nil // nothing set
-	}
-
-	if !IsBeadsManagedHooksPath(repoRoot, BeadsManagedStorageHooksDir(), hooksPath) {
-		return nil // never touch a third-party hooksPath
-	}
-
-	resolved := expandHookPathTilde(hooksPath)
-	if !filepath.IsAbs(resolved) {
-		resolved = filepath.Join(repoRoot, resolved)
-	}
-	if fileExists(resolved) {
-		return nil // target exists — nothing dangling to fix
-	}
-
-	cmd := exec.Command("git", "config", "--unset", "core.hooksPath")
-	cmd.Dir = repoRoot
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git config --unset core.hooksPath failed: %w (output: %s)", err, strings.TrimSpace(string(output)))
+	st := InspectHooksPathAt("", repoRoot, BeadsManagedStorageHooksDir(), nil)
+	switch st.State {
+	case HooksPathManagedMissing:
+		cmd := exec.Command("git", "config", "--unset", "core.hooksPath")
+		cmd.Dir = repoRoot
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("git config --unset core.hooksPath failed: %w (output: %s)", err, strings.TrimSpace(string(output)))
+		}
+	case HooksPathRelocated:
+		if err := repointHooksPath(repoRoot, st.Target); err != nil {
+			return err
+		}
+		fmt.Printf("Repointed core.hooksPath: %s -> %s\n", st.Configured, st.Target)
 	}
 	return nil
 }
 
-// getConfiguredHooksPath reads the raw core.hooksPath value from repoRoot.
-// The bool return is false when core.hooksPath is not set at all.
-func getConfiguredHooksPath(repoRoot string) (string, bool) {
-	cmd := exec.Command("git", "config", "--get", "core.hooksPath")
-	cmd.Dir = repoRoot
-	out, err := cmd.Output()
-	if err != nil {
-		return "", false
+// FixRelocatedHooksPathAt is the GH#5853 relocation repair for callers that
+// operate on an explicitly selected repository instead of the ambient one
+// (the hook installer's selected-workspace context). It re-reads the
+// configuration and revalidates the target immediately before writing, then
+// repoints the repository-local core.hooksPath to the validated current
+// target, reporting whether it repointed. It never unsets or rewrites any
+// other value: an ineligible configuration is left untouched.
+func FixRelocatedHooksPathAt(workDir, mainRepoRoot, storageHooksDir string, env []string) (bool, error) {
+	st := InspectHooksPathAt(workDir, mainRepoRoot, storageHooksDir, env)
+	if st.State != HooksPathRelocated {
+		return false, nil
 	}
-	return strings.TrimSpace(string(out)), true
+	if err := repointHooksPath(workDir, st.Target); err != nil {
+		return false, err
+	}
+	fmt.Printf("Repointed core.hooksPath: %s -> %s\n", st.Configured, st.Target)
+	return true, nil
+}
+
+// repointHooksPath writes value to the repository-local core.hooksPath from
+// dir. Callers must have validated the replacement immediately before.
+func repointHooksPath(dir, value string) error {
+	cmd := exec.Command("git", "config", "core.hooksPath", value)
+	cmd.Dir = dir
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git config core.hooksPath failed: %w (output: %s)", err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 // IsBeadsManagedHooksPath reports whether hooksPath is one of the values bd

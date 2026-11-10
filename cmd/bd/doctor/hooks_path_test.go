@@ -465,3 +465,68 @@ func TestCheckHooksPath_RelocatedBeadsPath(t *testing.T) {
 		})
 	}
 }
+
+// TestFixHooksPath_RelocatedBeadsPath pins AC-3 of the GH#5853 design:
+// 'bd doctor --fix' repoints repository-local core.hooksPath from an eligible
+// stranded former beads hooks directory to the validated absolute current
+// target — including effective redirected storage — and never creates or
+// modifies anything at the stale path.
+func TestFixHooksPath_RelocatedBeadsPath(t *testing.T) {
+	for _, layout := range []string{".beads/hooks", ".beads-hooks"} {
+		t.Run(layout, func(t *testing.T) {
+			repoDir, stale, current := strandedHooksRepo(t, layout)
+			runInDir(t, repoDir, func() {
+				if err := FixHooksPath(); err != nil {
+					t.Fatalf("FixHooksPath failed: %v", err)
+				}
+			})
+			if got := getGitConfig(t, repoDir, "core.hooksPath"); got != current {
+				t.Errorf("core.hooksPath = %q after FixHooksPath, want repointed to %q", got, current)
+			}
+			if _, err := os.Stat(stale); !os.IsNotExist(err) {
+				t.Errorf("the stale directory %s must not be created by the repair (stat err=%v)", stale, err)
+			}
+			// A second repair is a no-op: the configuration now points at an
+			// existing directory.
+			runInDir(t, repoDir, func() {
+				if err := FixHooksPath(); err != nil {
+					t.Fatalf("second FixHooksPath failed: %v", err)
+				}
+			})
+			if got := getGitConfig(t, repoDir, "core.hooksPath"); got != current {
+				t.Errorf("core.hooksPath = %q after a second FixHooksPath, want unchanged %q", got, current)
+			}
+		})
+	}
+
+	t.Run("redirected storage target", func(t *testing.T) {
+		repoDir := t.TempDir()
+		setupGitRepoInDir(t, repoDir)
+		// Effective storage redirected outside the repository (BEADS_DIR with
+		// project files); its hooks directory is the validated replacement.
+		storage := filepath.Join(t.TempDir(), "external storage")
+		if err := os.MkdirAll(storage, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(storage, "metadata.json"), []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_DIR", storage)
+		storageHooks := filepath.Join(storage, "hooks")
+		writeRecognizedHooks(t, storageHooks)
+		stale := filepath.Join(t.TempDir(), "moved-away", ".beads", "hooks")
+		setGitConfig(t, repoDir, "core.hooksPath", stale)
+
+		runInDir(t, repoDir, func() {
+			if err := FixHooksPath(); err != nil {
+				t.Fatalf("FixHooksPath failed: %v", err)
+			}
+		})
+		if got := getGitConfig(t, repoDir, "core.hooksPath"); got != storageHooks {
+			t.Errorf("core.hooksPath = %q after FixHooksPath, want the effective storage target %q", got, storageHooks)
+		}
+		if _, err := os.Stat(stale); !os.IsNotExist(err) {
+			t.Errorf("the stale directory %s must not be created by the repair (stat err=%v)", stale, err)
+		}
+	})
+}
