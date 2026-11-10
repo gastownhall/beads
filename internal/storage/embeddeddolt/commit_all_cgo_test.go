@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
 // TestCommitAllOutOfBandChangeAndHonestNoOp covers the embedded half of the
@@ -152,5 +153,119 @@ func TestCommitAllReportsTrackedTableSkippedByIgnorePattern(t *testing.T) {
 	te.queryScalar(t, ctx, "SELECT title FROM issues WHERE id = 'ntc-issue-1'", nil, &title)
 	if title != "modified after pattern" {
 		t.Fatalf("working-set row lost across the refused commit: title = %q", title)
+	}
+}
+
+// TestCommitAllPartialPublishesCommittableTablesAndReportsResidual is the
+// partial-publication half of GH#5433: ignored modified issues PLUS committable
+// config dirt. DOLT_COMMIT('-Am') stages and commits the config change, so the
+// commit reports success — but the pattern-covered issues delta stays in the
+// working set, and at base CommitAll answered (true, nil) for it: push would
+// send the config commit and still never the issues. The committed bool must
+// keep DOLT_COMMIT's answer (true: partial publication) alongside the typed
+// residual error.
+func TestCommitAllPartialPublishesCommittableTablesAndReportsResidual(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	te := newTestEnv(t, "ntp")
+
+	te.exec(t, ctx,
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) "+
+			"VALUES ('ntp-issue-1', 'tracked at head', '', '', '', '', 'open', 2, 'task')")
+	if committed, err := te.store.CommitAll(ctx, "test: create tracked issue"); err != nil || !committed {
+		t.Fatalf("baseline CommitAll: committed=%v err=%v", committed, err)
+	}
+	te.exec(t, ctx, "INSERT INTO dolt_ignore (pattern, ignored) VALUES ('issues', true)")
+	if _, err := te.store.CommitAll(ctx, "test: register ignore pattern"); err != nil {
+		t.Fatalf("CommitAll committing the ignore pattern: %v", err)
+	}
+
+	// The partial state: the ignored issues delta plus a committable config
+	// write, together.
+	te.exec(t, ctx, "UPDATE issues SET title = 'stranded by pattern' WHERE id = 'ntp-issue-1'")
+	te.exec(t, ctx, "INSERT INTO config (`key`, value) VALUES ('test.nt-partial', 'v1')")
+
+	headBefore, err := te.store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit: %v", err)
+	}
+
+	committed, err := te.store.CommitAll(ctx, "test: partial publication")
+	if err == nil {
+		t.Fatalf("CommitAll reported the partial publication clean: committed=%v err=nil, want the typed residual error", committed)
+	}
+	if !committed {
+		t.Fatalf("CommitAll committed = false with the partial case, want true (DOLT_COMMIT reported success)")
+	}
+	var residual *storage.UncommittedChangesError
+	if !errors.As(err, &residual) {
+		t.Fatalf("CommitAll error = %v, want *storage.UncommittedChangesError", err)
+	}
+	if !residual.Committed {
+		t.Fatal("residual error says committed=false; the partial case published the config change")
+	}
+	if len(residual.Tables) != 1 || residual.Tables[0] != "issues" {
+		t.Fatalf("residual tables = %v, want exactly [issues]", residual.Tables)
+	}
+
+	// The committable change reached HEAD: the config value is committed and
+	// config is no longer dirty, and HEAD advanced.
+	headAfter, err := te.store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit: %v", err)
+	}
+	if headAfter == headBefore {
+		t.Fatalf("HEAD did not advance across the partial publication (was %s)", headBefore)
+	}
+	var configValue string
+	te.queryScalar(t, ctx, "SELECT value FROM config WHERE `key` = 'test.nt-partial'", nil, &configValue)
+	if configValue != "v1" {
+		t.Fatalf("config value after the partial publication = %q, want v1", configValue)
+	}
+	var configDirty int
+	te.queryScalar(t, ctx, "SELECT COUNT(*) FROM dolt_status WHERE table_name = 'config'", nil, &configDirty)
+	if configDirty != 0 {
+		t.Fatalf("config still dirty after the partial publication (%d dolt_status rows)", configDirty)
+	}
+
+	// The ignored delta stayed in the working set, and it is still there
+	// after a reopen: durable working-set state, not an in-memory leftover.
+	var issuesRows int
+	te.queryScalar(t, ctx, "SELECT COUNT(*) FROM dolt_status WHERE table_name = 'issues'", nil, &issuesRows)
+	if issuesRows == 0 {
+		t.Fatal("issues no longer listed in dolt_status after the partial publication")
+	}
+	headAtClose := headAfter
+	if err := te.store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	beadsDir := strings.TrimSuffix(te.dataDir, "/embeddeddolt")
+	reopened, err := embeddeddolt.Open(ctx, beadsDir, te.database, "main")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if headReopened, err := reopened.GetCurrentCommit(ctx); err != nil {
+		t.Fatalf("GetCurrentCommit after reopen: %v", err)
+	} else if headReopened != headAtClose {
+		t.Fatalf("HEAD changed across reopen: %s -> %s", headAtClose, headReopened)
+	}
+	// The still-ignored delta keeps refusing a full commit on the reopened
+	// store: the stall stays loud, not just for the session that hit it.
+	if _, err := reopened.CommitAll(ctx, "test: reopen refusal"); err == nil {
+		t.Fatal("CommitAll after reopen on the ignored-delta-only working set = nil error, want the residual refusal")
+	} else {
+		var reopenResidual *storage.UncommittedChangesError
+		if !errors.As(err, &reopenResidual) || len(reopenResidual.Tables) != 1 || reopenResidual.Tables[0] != "issues" {
+			t.Fatalf("CommitAll after reopen error = %v, want the residual refusal naming issues", err)
+		}
+		if reopenResidual.Committed {
+			t.Fatal("CommitAll after reopen reported committed=true; only the ignored delta is dirty")
+		}
+	}
+	var reopenedTitle string
+	te.queryScalar(t, ctx, "SELECT title FROM issues WHERE id = 'ntp-issue-1'", nil, &reopenedTitle)
+	if reopenedTitle != "stranded by pattern" {
+		t.Fatalf("working-set row lost across reopen: title = %q", reopenedTitle)
 	}
 }
