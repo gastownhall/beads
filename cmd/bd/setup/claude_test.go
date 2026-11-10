@@ -4644,3 +4644,66 @@ func TestClaudeLegacySettingsWritesEndWithNewline(t *testing.T) {
 		}
 	})
 }
+
+// The Claude project installer treats an instructions failure as non-fatal:
+// with a non-writable CLAUDE.md the hooks are still installed, a warning
+// names the file, and the file itself is preserved.
+func TestInstallClaudeProjectWarnsAndKeepsAReadOnlyClaudeFile(t *testing.T) {
+	stubDetectRenderOpts(t)
+	env, stdout, stderr := newClaudeTestEnv(t)
+	claudePath := filepath.Join(env.projectDir, claudeInstructionsFile)
+	content := "# My project\n\nOnly user text.\n"
+	seed := seedReadOnlyFileWithOldMtime(t, claudePath, content)
+
+	if err := installClaude(env, false, false); err != nil {
+		t.Fatalf("installClaude must keep its nonfatal result for instructions: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "Warning: failed to update CLAUDE.md") {
+		t.Errorf("expected a warning naming CLAUDE.md, got:\n%s", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "✓ Claude Code integration installed") {
+		t.Errorf("expected the install to report success, got:\n%s", stdout.String())
+	}
+	assertReadOnlyFilePreserved(t, claudePath, content, seed)
+	if !hasBeadsHooks(projectSettingsPath(env.projectDir)) {
+		t.Error("hooks were not installed")
+	}
+}
+
+// With the @AGENTS.md redirect active, a non-writable AGENTS.md must fail the
+// guidance stage non-fatally and leave the whole redirect pair alone: the
+// stub keeps the stale beads block an older bd left in it, because stripping
+// it before the replacement exists elsewhere would delete the only copy.
+func TestInstallClaudeRedirectedReadOnlyAgentsKeepsStubAndStaleBlock(t *testing.T) {
+	stubDetectRenderOpts(t)
+	env, stdout, stderr := newClaudeTestEnv(t)
+	claudePath := filepath.Join(env.projectDir, claudeInstructionsFile)
+	claudeContent := "# Claude Code\n\n@AGENTS.md\n\n" +
+		"<!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:00000000 -->\n" +
+		"Stale guidance an older bd left here.\n" +
+		"<!-- END BEADS INTEGRATION -->\n"
+	if err := os.WriteFile(claudePath, []byte(claudeContent), 0o644); err != nil {
+		t.Fatalf("write CLAUDE.md: %v", err)
+	}
+	agentsPath := filepath.Join(env.projectDir, "AGENTS.md")
+	agentsContent := "# Agent Instructions\n\nSome content.\n"
+	seed := seedReadOnlyFileWithOldMtime(t, agentsPath, agentsContent)
+
+	if err := installClaude(env, false, false); err != nil {
+		t.Fatalf("installClaude must keep its nonfatal result for instructions: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "Warning: failed to update AGENTS.md") {
+		t.Errorf("expected a warning naming AGENTS.md, got:\n%s", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "✓ Claude Code integration installed") {
+		t.Errorf("expected the install to report success, got:\n%s", stdout.String())
+	}
+	claData, err := os.ReadFile(claudePath)
+	if err != nil {
+		t.Fatalf("read CLAUDE.md: %v", err)
+	}
+	if string(claData) != claudeContent {
+		t.Errorf("CLAUDE.md must keep its stub and stale block:\n got: %q\nwant: %q", claData, claudeContent)
+	}
+	assertReadOnlyFilePreserved(t, agentsPath, agentsContent, seed)
+}
