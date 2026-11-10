@@ -4,10 +4,17 @@ description: Recover when a commit leaves tracked changes behind or cannot verif
 ---
 
 This runbook helps you recover when `bd` reports that a commit did not
-capture every change. Your writes are not lost: they are saved in the Dolt
-working set but are not in a commit yet, so `bd dolt push` cannot send them.
-The goal is to get those changes into a commit without losing or repeating
-any of them.
+capture every change, or could not check whether it did. The two errors
+say different things:
+
+- `commit incomplete` identifies tracked changes that are saved in the Dolt
+  working set but are not in HEAD, so `bd dolt push` cannot send them.
+- `commit verification failed` means the check after the commit could not
+  run, so whether anything is missing from HEAD is unknown. It does not
+  prove that any data is absent from HEAD.
+
+Neither error proves the original write failed. The goal is to get any
+changes left behind into a commit without losing or repeating any of them.
 
 After a full commit (`bd dolt commit`, `bd vc commit`, auto-commit, or the
 commit `bd dolt push` and `bd dolt pull` make before they talk to the
@@ -43,11 +50,12 @@ parsing messages:
 
 | Error | Match with | Fields |
 |-------|------------|--------|
-| `*storage.UncommittedChangesError` | `errors.As` | `Tables` (dirty `dolt_status` table names, sorted; a rename keeps Dolt's `old -> new` form), `IgnorePatterns` (enabled `dolt_ignore` patterns bd did not set: a hint, empty when there are none or they could not be read), `Committed` (a partial commit was created) |
+| `*storage.UncommittedChangesError` | `errors.As` | `Tables` (dirty `dolt_status` table names, sorted; a rename keeps Dolt's `old -> new` form), `IgnorePatterns` (enabled `dolt_ignore` patterns outside bd's canonical clone-local set: a hint at the cause, not proof of it or of who added them; empty when there are none or they could not be read), `Committed` (a partial commit was created) |
 | `*storage.CommitVerificationError` | `errors.Is(err, storage.ErrCommitVerificationFailed)`, `errors.As` | `Outcome` (`commit_succeeded` or `nothing_to_commit`: what Dolt itself answered), `Operation` (the read that failed), `Cause` (its error, also reachable with `errors.Is`) |
 
-Neither error means the write failed. Treat them as "saved, not committed"
-(or "saved, commit state unknown"), never as a signal to retry the write.
+Neither error means the write failed. Treat `commit incomplete` as "saved,
+not committed" and `commit verification failed` as "commit state unknown",
+never as a signal to retry the write.
 
 ## Diagnosis
 
@@ -55,12 +63,18 @@ Neither error means the write failed. Treat them as "saved, not committed"
 # Current branch, HEAD, and uncommitted changes
 bd vc status
 
+# The database and branch the check ran against
+bd sql 'SELECT DATABASE(), active_branch()'
+
 # Which tables are dirty, and which ignore patterns are enabled
 bd sql 'SELECT table_name, staged, status FROM dolt_status'
 bd sql 'SELECT pattern, ignored FROM dolt_ignore WHERE ignored = 1'
 
 # Recent commits, to see whether a commit landed
 bd sql 'SELECT commit_hash, message, date FROM dolt_log LIMIT 5'
+
+# What a dirty table holds in the working set but not in HEAD
+bd sql "SELECT * FROM dolt_diff('HEAD', 'WORKING', 'issues')"
 ```
 
 The usual cause of `commit incomplete` is an enabled `dolt_ignore` pattern
@@ -72,11 +86,15 @@ What the check cannot see:
 
 - Only rows `dolt_status` shows count. A new table an ignore pattern hides
   never appears there, so it is never reported.
-- bd's own clone-local tables (`wisps`, `leases`, `local_metadata` and the
-  other patterns bd writes into `dolt_ignore`) are left out on purpose:
-  their changes are meant to stay local.
+- bd's own clone-local tables (the `__temp__%`, `bd_events_journal`,
+  `bd_events_seq`, `ignored_schema_migrations`, `leases`, `local_metadata`,
+  `repo_mtimes`, `wisp_%` and `wisps` patterns, plus `events` once the
+  database has applied migration 0062) are left out on purpose: their
+  changes are meant to stay local. The exemption comes from bd's canonical
+  pattern set, not from whatever rows your `dolt_ignore` holds, so a
+  pattern you added never hides a tracked table from the check.
 - The listed patterns are a hint, not proof of the cause or of who added
-  them.
+  them: they are only the enabled patterns outside bd's canonical set.
 - Server-mode storage does not run this check.
 
 ## Solution
@@ -88,9 +106,11 @@ What the check cannot see:
 cp -r .beads ".beads.backup-$(date +%Y%m%d%H%M%S)"
 ```
 
-**Step 2:** Inspect with the Diagnosis commands. Confirm which tables are
-dirty and which ignore pattern covers them, and decide whether that pattern
-is wanted. Do not change anything you have not confirmed.
+**Step 2:** Inspect with the Diagnosis commands before changing or
+retrying anything. Confirm the active database and branch are the ones you
+expect, compare the working-set data with HEAD for each dirty table, and
+find which ignore pattern covers it. Then decide whether that pattern is
+wanted. Do not change anything you have not confirmed.
 
 **Step 3:** If a pattern you confirmed as unwanted covers a tracked table,
 turn it off (this example uses the pattern `issues`):
@@ -99,8 +119,9 @@ turn it off (this example uses the pattern `issues`):
 bd sql "UPDATE dolt_ignore SET ignored = 0 WHERE pattern = 'issues'"
 ```
 
-For `commit verification failed`, skip this step unless the Diagnosis shows
-such a pattern; the read may simply have failed once.
+For `commit verification failed`, follow
+[If the error is commit verification failed](#if-the-error-is-commit-verification-failed)
+instead of assuming a pattern is at fault.
 
 **Step 4:** Retry the commit:
 
@@ -117,6 +138,10 @@ bd sql 'SELECT commit_hash, message FROM dolt_log LIMIT 3'
 bd dolt push
 ```
 
+When the error said `a commit was created`, this retry is the second commit
+of a two-commit recovery: the earlier partial commit holds the tables
+outside the pattern, this one holds the rest.
+
 <Warning>
 **Do not replay the mutations.** The writes already landed in the working
 set; running the same `bd create`, `bd update` or `bd close` commands again
@@ -131,9 +156,28 @@ database to "fix" this: that throws away the uncommitted changes you are
 trying to save.
 </Warning>
 
+## If the error is commit verification failed
+
+The commit ran; the read after it that checks `dolt_status` and bd's ignore
+policy did not. The error names that read (`Operation`) and its error
+(`Cause`), and `Outcome` records what Dolt answered. Back up and inspect as
+in Steps 1 and 2, then go by what you find:
+
+- **`bd vc status` still lists tracked tables.** Treat it as
+  `commit incomplete`: confirm the covering pattern, correct it only if it
+  is unwanted, retry the commit, and verify the history.
+- **The working set is clean and `dolt_log` shows the commit.** The commit
+  completed and nothing was left behind; nothing needs retrying.
+- **The working set is clean and Dolt answered `nothing_to_commit`.**
+  There was nothing to commit. Fix whatever made the read fail if it keeps
+  failing; there is nothing to recover.
+
+In every case, do not replay the mutations: inspect, then commit what is
+still in the working set.
+
 ## Prevention
 
 - Add `dolt_ignore` patterns only for tables you never want shared, and
   never one that matches a table bd tracks.
-- Read the error before retrying anything: `commit incomplete` and
-  `commit verification failed` mean the writes are saved.
+- Read the error before retrying anything: neither `commit incomplete` nor
+  `commit verification failed` means the writes were lost.

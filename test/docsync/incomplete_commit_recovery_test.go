@@ -19,6 +19,11 @@ func TestIncompleteCommitRecoveryGuidance(t *testing.T) {
 		return body
 	}
 
+	requirePhrases(t, "incomplete-commits.md", runbook,
+		"whether anything is missing from HEAD is unknown",
+		"does not prove that any data is absent from HEAD",
+		"Neither error proves the original write failed",
+	)
 	requirePhrases(t, "incomplete-commits.md ## Symptoms", section("## Symptoms"),
 		"commit incomplete:",
 		"a commit was created, but tracked changes remain in",
@@ -37,11 +42,14 @@ func TestIncompleteCommitRecoveryGuidance(t *testing.T) {
 		"only rows dolt_status shows count",
 		"a new table an ignore pattern hides never appears there",
 		"a hint, not proof",
+		"plus `events` once the database has applied migration 0062",
 		"server-mode storage does not run this check",
 	)
 	solution := section("## Solution")
 	requirePhrases(t, "incomplete-commits.md ## Solution", solution,
 		"back up the whole .beads directory",
+		"confirm the active database and branch",
+		"compare the working-set data with HEAD",
 		"do not change anything you have not confirmed",
 		"bd dolt commit",
 		"verify the history",
@@ -50,5 +58,16 @@ func TestIncompleteCommitRecoveryGuidance(t *testing.T) {
 	)
 	forbidPhrases(t, "incomplete-commits.md ## Solution", solution,
 		"rm -rf .beads", "bd init --force", "bd import ",
+	)
+	requirePhrases(t, "incomplete-commits.md ## If the error is commit verification failed",
+		section("## If the error is commit verification failed"),
+		"Operation", "Cause", "Outcome",
+		"still lists tracked tables",
+		"the working set is clean",
+		"do not replay the mutations",
+	)
+	// Canonical membership says nothing about who added a pattern.
+	forbidPhrases(t, "incomplete-commits.md", runbook,
+		"not set by bd", "bd did not set",
 	)
 }
