@@ -3716,3 +3716,40 @@ func TestBondProtoMolRefArmTerminalsOnlyForSequentialRef(t *testing.T) {
 		t.Fatalf("sequential sibling deps = %v, want %v", got, want)
 	}
 }
+
+// TestCloneSubgraphTerminalEdgeFailureRollsBackTheArm pins AC-5's direct
+// route: when an ordering edge cannot be written after another already was,
+// the clone transaction leaves no arm issue and no partial edge behind.
+func TestCloneSubgraphTerminalEdgeFailureRollsBackTheArm(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreWithPrefix(t, t.TempDir()+"/test.db", "patrol")
+	f := seedRefArmFixture(t, ctx, s, false)
+
+	subgraph, err := loadTemplateSubgraph(ctx, s, f.proto.ID)
+	if err != nil {
+		t.Fatalf("loadTemplateSubgraph: %v", err)
+	}
+	opts, err := buildAttachCloneOpts(subgraph, f.mol, types.BondTypeSequential, map[string]string{"name": "ace"}, "arm-{{name}}", "test", false, false)
+	if err != nil {
+		t.Fatalf("buildAttachCloneOpts: %v", err)
+	}
+	missing := f.mol.ID + "-gone"
+	opts.AttachBlocksOn = []string{f.s2.ID, missing}
+
+	if _, err := cloneSubgraph(ctx, s, subgraph, opts); err == nil || !strings.Contains(err.Error(), missing) {
+		t.Fatalf("cloneSubgraph error = %v, want a failure naming the unwritable terminal %s", err, missing)
+	}
+	armID := f.mol.ID + ".arm-ace"
+	if issue, err := s.GetIssue(ctx, armID); err == nil && issue != nil {
+		t.Fatalf("arm %s persisted after a failed ordering edge", armID)
+	}
+	dependents, err := s.GetDependents(ctx, f.s2.ID)
+	if err != nil {
+		t.Fatalf("GetDependents(%s): %v", f.s2.ID, err)
+	}
+	for _, d := range dependents {
+		if strings.HasPrefix(d.ID, armID) {
+			t.Fatalf("partial ordering edge %s -> %s persisted after rollback", d.ID, f.s2.ID)
+		}
+	}
+}
