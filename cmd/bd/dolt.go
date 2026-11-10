@@ -1436,8 +1436,8 @@ is shown as not running, and the next bd command launches it.`,
 		if beadsDir == "" {
 			return HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 		}
-		// A workspace in a format this build cannot open is refused before
-		// configfile.Load, which would first migrate a legacy config.json.
+		// A historical SQLite workspace is refused before configfile.Load,
+		// which would first migrate a legacy config.json.
 		if err := checkDiscoveredForOpen(beadsDir); err != nil {
 			return handleWorkspaceGuardError(err)
 		}
@@ -2451,8 +2451,8 @@ func showDoltConfig(testConnection bool) error {
 		return HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 	}
 
-	// A workspace in a format this build cannot open is refused before
-	// configfile.Load, which would first migrate a legacy config.json.
+	// A historical SQLite workspace is refused before configfile.Load, which
+	// would first migrate a legacy config.json.
 	if err := checkDiscoveredForOpen(beadsDir); err != nil {
 		return handleWorkspaceGuardError(err)
 	}

@@ -95,7 +95,7 @@ func (c *servedComposition) listSpy(t *testing.T, snapshot *apigen.ContextRespon
 	if err != nil {
 		t.Fatalf("parse the composition base URL: %v", err)
 	}
-	transport, err := wire.New(base, nil, wire.Options{})
+	transport, err := wire.New(base, nil, servedWireOptions(newServedWitness(t, "listSpy"), wire.Options{}))
 	if err != nil {
 		t.Fatalf("build a spying wire client: %v", err)
 	}

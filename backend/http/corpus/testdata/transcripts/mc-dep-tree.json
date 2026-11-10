@@ -1,0 +1,8 @@
+{
+  "shape": "mc-dep-tree",
+  "requests": [
+    {"method":"GET","operation_id":"getContext","path":"/v0/beads/context","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-mol","status":200},
+    {"method":"GET","operation_id":"getDependencyTree","path":"/v0/beads/dependencies/tree","query":["direction","max_depth","root_id"],"status":200}
+  ]
+}

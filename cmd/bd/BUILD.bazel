@@ -536,6 +536,7 @@ go_binary(
         "//backend/http/corpus:__pkg__",
         "//cmd/bd:__subpackages__",
         "//internal/beads:__pkg__",
+        "//internal/httpclient:__pkg__",
         "//internal/storage/uow:__pkg__",
         "//test/conformance:__pkg__",
         "//tests/migration:__pkg__",
@@ -705,6 +706,7 @@ go_test(
         "database_name_test.go",
         "db_proxy_child_test.go",
         "defer_embedded_test.go",
+        "defer_per_id_failure_exit_test.go",
         "defer_proxied_integration_test.go",
         "defer_until_hint_test.go",
         "defer_wake_embedded_test.go",
@@ -874,8 +876,6 @@ go_test(
         "graph_apply_thread_spawner_embedded_test.go",
         "graph_embedded_test.go",
         "graph_export_test.go",
-        "graph_mode_admission_e2e_test.go",
-        "graph_mode_dependency_embedded_test.go",
         "graph_proxied_integration_test.go",
         "graph_test.go",
         "graph_visual_test.go",
@@ -896,6 +896,8 @@ go_test(
         "hooks_husky_test.go",
         "hooks_marker_skip_test.go",
         "hooks_post_merge_import_test.go",
+        "hooks_symlinked_dir_test.go",
+        "hooks_symlinked_hooks_dir_repro_test.go",
         "hooks_timeout_process_test.go",
         "hooks_worktree_test.go",
         "human_embedded_test.go",
@@ -1219,7 +1221,7 @@ go_test(
         "serve_delete_proxied_integration_test.go",
         "serve_dependencies_proxied_integration_test.go",
         "serve_edge_counts_proxied_integration_test.go",
-        "serve_graph_mode_env_test.go",
+        "serve_init_cost_test.go",
         "serve_inprocess_test.go",
         "serve_list_sort_proxied_integration_test.go",
         "serve_proxied_integration_test.go",
@@ -1308,6 +1310,9 @@ go_test(
         "sync_remote_test.go",
         "sync_test.go",
         "telemetry_scrub_test.go",
+        "template_guard_verbs_embedded_test.go",
+        "template_guard_verbs_proxied_integration_test.go",
+        "template_guard_verbs_test.go",
         "template_test.go",
         "test_dolt_server_cgo_test.go",
         "test_helpers_integration_test.go",
@@ -1881,6 +1886,14 @@ exports_files(
     visibility = ["//internal/httpapi:__pkg__"],
 )
 
+# The command tree golden, read as data by //backend/http's bd connect
+# front-door classifier (TestConnectFrontDoorClassifiesEveryCommand), which
+# fails on a runnable command its matrix does not classify.
+exports_files(
+    ["testdata/command_tree/tree.golden"],
+    visibility = ["//backend/http:__pkg__"],
+)
+
 # //scripts:android_release_docs_test: the comment counting the CGO_ENABLED=0
 # release targets.
 exports_files(
@@ -1898,6 +1911,14 @@ exports_files(
         "winres/winres.json",
     ],
     visibility = ["//:__pkg__"],
+)
+
+# Tests that pin divergence-ledger rows, resolved by
+# //internal/httpclient/encode:encode_test's crossPackagePins registry
+# (internal/httpclient/encode/ledger_pins_test.go).
+exports_files(
+    ["serve_test.go"],
+    visibility = ["//internal/httpclient/encode:__pkg__"],
 )
 
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
