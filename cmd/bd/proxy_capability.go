@@ -76,6 +76,19 @@ type proxyCapabilityRule struct {
 	Mutates  bool
 	Reason   ProxyRefusalReason
 	Tracking string
+	// ForceFlag names the bool flag that lifts THIS refusal when it is
+	// actually set to true — the one sanctioned bypass in this table
+	// (gastownhall/beads#6656). The front door reads the flag's VALUE, not its
+	// presence: a missing, wrongly typed or set-but-false flag keeps the
+	// typed refusal. Empty on every rule but the forceable one; an honored or
+	// N/A rule must never carry one (asserted by the row invariants).
+	ForceFlag string
+	// ForceWarning is what the gate prints once to stderr, before any
+	// provider work, when ForceFlag actually lifts the refusal. Paired with
+	// ForceFlag by the same invariant: generic by decision — the proxy is a
+	// byte pump and does not track its clients, so there is nothing truthful
+	// to enumerate.
+	ForceWarning string
 }
 
 // ProxyCapabilityError is a machine-identifiable front-door refusal.

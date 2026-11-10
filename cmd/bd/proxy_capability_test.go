@@ -11,22 +11,23 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 // TestProxyMaintenanceAllowsTheSharedConsentVerb pins the capability facts the
-// #6575 proxied data-behind guidance is written against: the consent command
-// that guidance prescribes is NOT refused at the proxied front door, while the
-// bare `bd migrate` verb, the `bd dolt pull` remedy and the other refusals the
-// guidance names (`bd dolt push`, `bd conflicts`) are.
+// #6575 proxied data-behind guidance is written against: the FORCED consent
+// command that guidance prescribes is not refused at the proxied front door,
+// while the bare `bd migrate` verb, the `bd dolt pull` remedy and the other
+// refusals the guidance names (`bd dolt push`, `bd conflicts`) are.
 //
-// The capability registry keys on the full command path. It refuses the bare
-// `migrate` verb and `migrate hooks` / `migrate issues` / `migrate sync`, but
-// permits `migrate schema` — so that path passes
-// validateProxyRegistryBeforeProvider and reaches `bd migrate schema`'s own
-// proxied arm, which reports the migration the provider open already applied
-// under this verb's consent.
+// The capability registry keys on the full command path. Since GH#6656 it
+// refuses the bare `migrate schema` verb on proxied topologies and lifts that
+// refusal only for --force, so the command has to be resolved AND its flags
+// parsed — rootCmd.Find resolves the path but leaves `--force` in rest, and
+// an unparsed flag would silently test the bare verb and read its refusal as
+// a regression.
 //
 // An earlier revision of that guidance asserted the opposite on three runtime
 // surfaces and nothing failed, because no test called the front door with this
@@ -43,7 +44,7 @@ func TestProxyMaintenanceAllowsTheSharedConsentVerb(t *testing.T) {
 	t.Cleanup(func() { jsonOutput = oldJSON })
 
 	args := strings.Fields(strings.TrimPrefix(schema.SharedConsentCommandForced, "bd "))
-	target, _, err := rootCmd.Find(args)
+	target, rest, err := rootCmd.Find(args)
 	if err != nil || target == rootCmd {
 		t.Fatalf("the gate prescribes %q, which does not resolve to a subcommand: %v",
 			schema.SharedConsentCommandForced, err)
@@ -51,6 +52,22 @@ func TestProxyMaintenanceAllowsTheSharedConsentVerb(t *testing.T) {
 	if path := commandRegistryPath(target); path != "migrate schema" {
 		t.Fatalf("prescribed consent command resolves to path %q, want %q", path, "migrate schema")
 	}
+	if err := target.ParseFlags(rest); err != nil {
+		t.Fatalf("the gate prescribes %q, whose flags do not parse: %v",
+			schema.SharedConsentCommandForced, err)
+	}
+	// These cobra commands are package-level singletons, so a parsed --force
+	// outlives this test and would consent (or lift a refusal) for the next
+	// one that runs.
+	t.Cleanup(func() {
+		target.Flags().VisitAll(func(f *pflag.Flag) {
+			if !f.Changed {
+				return
+			}
+			_ = f.Value.Set(f.DefValue)
+			f.Changed = false
+		})
+	})
 
 	find := func(t *testing.T, args ...string) *cobra.Command {
 		t.Helper()
@@ -89,22 +106,40 @@ func TestProxyMaintenanceAllowsTheSharedConsentVerb(t *testing.T) {
 				t.Errorf("a non-refusal still emitted a typed error: %s", out)
 			}
 
-			// The counterfactuals, so "only the bare `bd migrate` verb is
-			// refused here" and "the pull cannot be run from here" are claims
-			// and not vacuous ones. The push and conflicts rows hold the rest
-			// of the refusal list the proxied body recites: `dolt push` is
-			// refused as unimplemented, the class of row that flips to allowed
-			// once a route lands (as `dolt commit`'s did), and the body would
-			// then name a refusal that no longer exists.
+			// The counterfactuals, so "the pull cannot be run from here" and
+			// "only the forced schema verb gets through" are claims and not
+			// vacuous ones. The push and conflicts rows hold the rest of the
+			// refusal list the proxied body recites: `dolt push` is refused as
+			// unimplemented, the class of row that flips to allowed once a
+			// route lands (as `dolt commit`'s did), and the body would then
+			// name a refusal that no longer exists. The forced PARENT is the
+			// pin that --force on `bd migrate` does not borrow the schema
+			// verb's bypass: each row's escape route is declared per row.
 			for _, tc := range []struct {
+				name string
 				cmd  *cobra.Command
 				code string
+				force bool
 			}{
-				{bareMigrate, "proxy.migrate.unsupported"},
-				{doltPull, "proxy.dolt_pull.unsupported"},
-				{doltPush, "proxy.dolt_push.unsupported"},
-				{conflictsResolve, "proxy.conflicts.unsupported"},
+				{name: "bare migrate", cmd: bareMigrate, code: "proxy.migrate.unsupported"},
+				{name: "forced migrate", cmd: bareMigrate, code: "proxy.migrate.unsupported", force: true},
+				{name: "dolt pull", cmd: doltPull, code: "proxy.dolt_pull.unsupported"},
+				{name: "dolt push", cmd: doltPush, code: "proxy.dolt_push.unsupported"},
+				{name: "conflicts resolve", cmd: conflictsResolve, code: "proxy.conflicts.unsupported"},
 			} {
+				forceFlag := tc.cmd.Flags().Lookup("force")
+				if tc.force {
+					if forceFlag == nil {
+						t.Fatalf("bd %s has no --force flag to set", tc.name)
+					}
+					if err := forceFlag.Value.Set("true"); err != nil {
+						t.Fatalf("set --force on bd %s: %v", tc.name, err)
+					}
+					t.Cleanup(func() {
+						_ = forceFlag.Value.Set(forceFlag.DefValue)
+						forceFlag.Changed = false
+					})
+				}
 				var refuseErr error
 				refusal := captureStdout(t, func() error {
 					refuseErr = validateProxyRegistryBeforeProvider(tc.cmd, topology)
@@ -112,11 +147,11 @@ func TestProxyMaintenanceAllowsTheSharedConsentVerb(t *testing.T) {
 				})
 				if refuseErr == nil {
 					t.Errorf("bd %s is no longer refused in proxied-server mode; the data-behind guidance says it is",
-						commandRegistryPath(tc.cmd))
+						tc.name)
 					continue
 				}
 				if !strings.Contains(refusal, `"code": "`+tc.code+`"`) {
-					t.Errorf("bd %s refusal = %q, want %s", commandRegistryPath(tc.cmd), refusal, tc.code)
+					t.Errorf("bd %s refusal = %q, want %s", tc.name, refusal, tc.code)
 				}
 			}
 		})

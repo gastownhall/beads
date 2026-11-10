@@ -153,6 +153,28 @@ func (r capabilityRow) withMessage(message string) capabilityRow {
 	return r
 }
 
+// forcedProxiedMigrateSchemaWarning is what the gate prints once to stderr,
+// before any provider work, when `bd migrate schema --force` lifts its
+// proxied refusal (gastownhall/beads#6656). Generic by decision: the proxy
+// is a byte pump and does not track its clients, so a warning that named or
+// counted them would be invented. It must not carry the refusal phrase — a
+// warning is not a refusal, and the capability matrix asserts the two stay
+// distinguishable.
+const forcedProxiedMigrateSchemaWarning = "Warning: before forcing schema migration, close co-resident library clients; restart them after this command completes."
+
+// forceableWith declares the sanctioned --force bypass for a refusal: the
+// bool flag that lifts it (the command must register one under that name) and
+// the warning the gate prints once when the flag's VALUE is actually true.
+// Zero-valued on every other rule, so nothing else changes behavior. Only a
+// refused rule may carry the pair, and only the value-aware read in
+// validateProxyRegistryBeforeProvider honors it — the arg-set half of the
+// key stays untouched, so `--force=false` cannot masquerade as consent.
+func (r capabilityRow) forceableWith(flag, warning string) capabilityRow {
+	r.Rule.ForceFlag = flag
+	r.Rule.ForceWarning = warning
+	return r
+}
+
 // refusedPath builds a typed front-door refusal for a bare command path.
 func refusedPath(path, code string, reason ProxyRefusalReason, tracking string) capabilityRow {
 	return refusedArgs(path, "", code, reason, tracking)
@@ -352,8 +374,19 @@ var proxyCapabilityRegistry = []capabilityRow{
 
 	// --- migration and workspace surgery ------------------------------------
 	// Storage-format and workspace surgery against a store other clients may be
-	// holding open. `migrate schema` is the exception and is already routed:
-	// the provider open runs it under the migration gate.
+	// holding open.
+	//
+	// `migrate schema` is the one row here WITH a sanctioned escape route
+	// (gastownhall/beads#6656): its proxied arm is a report, not a migrator —
+	// the provider open performs the migration — and that open runs beneath
+	// co-resident library clients the proxy cannot see or count. So the verb
+	// refuses, typed, on every proxied shape, and --force (the flag the CLI
+	// already registers on it for the remote-migrate gate) is the operator's
+	// declared client-stop: stop the co-resident clients, run it forced,
+	// restart them. Uniform across the proxied shapes by the same argument as
+	// the blanket refusals below: the proxy's blindness to its clients is a
+	// property of the topology, not of who owns the server. On team-server the
+	// provider stays verification-only even after force.
 	//
 	// S7 MUST RE-EXAMINE THE ROWS BELOW PER TOPOLOGY. "A store other clients may
 	// be holding open" describes external and team-server workspaces; it does
@@ -364,6 +397,9 @@ var proxyCapabilityRegistry = []capabilityRow{
 	// These rows keep it because nobody has done the semantic work to narrow
 	// them, not because the work has been done and come out this way.
 	refusedPath("migrate", "proxy.migrate.unsupported", ProxyReasonDesign, ""),
+	refusedPath("migrate schema", "proxy.migrate.unsupported", ProxyReasonDesign, "").
+		withMessage("migrate schema without --force is not supported in proxied-server mode: the provider open promotes the schema beneath co-resident library clients the proxy cannot see. Stop the co-resident clients, run 'bd migrate schema --force', then restart them").
+		forceableWith("force", forcedProxiedMigrateSchemaWarning),
 	refusedPath("migrate sync", "proxy.migrate.unsupported", ProxyReasonDesign, ""),
 	// `migrate hooks` is the one row in this block the surgery rationale never
 	// described: it plans and applies GIT HOOK FILE migration (migrate_hooks.go
@@ -534,7 +570,7 @@ var proxyPermittedPaths = []string{
 	"dolt start", "dolt stop", "dolt test",
 	"migrate from-proxied-server-to-server", "migrate from-proxied-server-to-shared-server",
 	"migrate from-server-to-proxied-server", "migrate from-shared-server-to-proxied-server",
-	"migrate legacy-sqlite", "migrate schema",
+	"migrate legacy-sqlite",
 
 	// formulas (parser-only), agent memory, swarm reads
 	"formula convert", "formula list", "formula schema", "formula show",
@@ -640,7 +676,9 @@ func commandPolicyArgSet(cmd *cobra.Command) string {
 // validateProxyRegistryBeforeProvider is the path-keyed half of the proxied
 // front door: it rejects direct-only commands before migrations, auto-start or
 // provider construction, so a refusal leaves the workspace untouched. The
-// flag-keyed half is validateProxyCapabilitiesBeforeProvider.
+// flag-keyed half is validateProxyCapabilitiesBeforeProvider. A refused row
+// may declare a --force bypass (see forceableWith); only this half, per row,
+// reads the flag's value.
 //
 // topology is the workspace's proxied shape (resolveProxiedTopology). It is a
 // parameter rather than a lookup inside so the gate can be exercised for every
@@ -668,6 +706,19 @@ func validateProxyRegistryBeforeProvider(cmd *cobra.Command, topology ProxyTopol
 	rule := row.ruleFor(topology)
 	if rule.Outcome != ProxyOutcomeRefused {
 		return nil
+	}
+	// A refusal that declares a force bypass (ForceFlag) is lifted only by the
+	// flag's VALUE: a missing flag, a wrongly typed one, or a set-but-false one
+	// keeps the typed refusal (gastownhall/beads#6656). GetBool reports an
+	// error for the first two, so the one happy path below is "the command
+	// registers the flag as a bool AND it is true". Environment consent
+	// (BD_ALLOW_REMOTE_MIGRATE and friends) never substitutes for the
+	// explicit flag here: standing configuration must not replace the
+	// per-invocation client-stop declaration the bypass is.
+	if rule.ForceFlag != "" {
+		if force, err := cmd.Flags().GetBool(rule.ForceFlag); err == nil && force {
+			return nil
+		}
 	}
 	return HandleProxyCapabilityError(proxyCapabilityErrorFor(rule))
 }

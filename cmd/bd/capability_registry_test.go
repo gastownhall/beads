@@ -283,6 +283,11 @@ func TestProxyCapabilityRegistryReasonsAreAssignedIndividually(t *testing.T) {
 		// command is on none of main.go's store-init skip lists — which makes
 		// it unimplemented with a tracking item, not design.
 		"migrate": true, "migrate sync": true, "migrate issues": true,
+		// `migrate schema` joins the surgery refusals (GH#6656) but with the
+		// registry's one sanctioned escape route: provider open promotes the
+		// schema beneath co-resident library clients the proxy cannot see, so
+		// the bare verb is refused by design and --force lifts it.
+		"migrate schema": true,
 		"migrate-issues": true, "migrate-personal": true,
 		"admin cleanup": true, "admin reset": true,
 		// The backup family's DEFAULT rule is the design refusal; managed-local
