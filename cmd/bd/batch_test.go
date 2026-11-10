@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -299,6 +300,16 @@ func TestBatchDepAddEdge(t *testing.T) {
 			want: &types.Dependency{IssueID: "bd-1", DependsOnID: "bd-2", Type: types.DepBlocks},
 		},
 		{
+			name:    "typo of a built-in type",
+			args:    []string{"bd-1", "bd-2", "blcoks"},
+			wantErr: `dep add: unknown dependency type "blcoks"; valid types: ` + createDepsAcceptedTypeList(),
+		},
+		{
+			name:    "custom type outside dep add's vocabulary",
+			args:    []string{"bd-1", "bd-2", "owned-by"},
+			wantErr: `dep add: unknown dependency type "owned-by"; valid types: ` + createDepsAcceptedTypeList(),
+		},
+		{
 			name:    "missing to-id",
 			args:    []string{"bd-1"},
 			wantErr: "dep add requires <from-id> <to-id>",
@@ -306,7 +317,7 @@ func TestBatchDepAddEdge(t *testing.T) {
 		{
 			name:    "invalid type",
 			args:    []string{"bd-1", "bd-2", tooLong},
-			wantErr: `dep add: invalid dependency type "` + tooLong + `"`,
+			wantErr: `dep add: invalid dependency type "` + tooLong + `" (must be non-empty, max ` + strconv.Itoa(types.MaxDependencyTypeLen) + ` chars); valid types: ` + createDepsAcceptedTypeList(),
 		},
 		{
 			name:       "dotted child gated on its own parent",
