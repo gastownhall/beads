@@ -1953,3 +1953,51 @@ func TestConditionalBlocksAcrossWispPlanes(t *testing.T) {
 		}
 	}
 }
+
+func TestAddDependency_ConditionalBlocksOntoClosedTarget(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// The edge can be added after its precondition already closed: a success
+	// close leaves the fallback blocked, a failure close leaves it free. The
+	// direct mark the add performs must answer that, or the stored bit is
+	// stale until the next recompute.
+	reasons := []struct {
+		outcome     string
+		reason      string
+		wantBlocked bool
+	}{
+		{"success_close_marks_blocked", "completed successfully", true},
+		{"failure_close_leaves_free", "failed: rejected by reviewer", false},
+	}
+	for _, r := range reasons {
+		t.Run(r.outcome, func(t *testing.T) {
+			targetID := "cb-closed-tgt-" + r.outcome
+			depID := "cb-closed-dep-" + r.outcome
+
+			createPerm(t, ctx, store, targetID)
+			createPerm(t, ctx, store, depID)
+			if err := store.CloseIssue(ctx, targetID, r.reason, "tester", ""); err != nil {
+				t.Fatalf("close target %s: %v", targetID, err)
+			}
+
+			addDependency(t, ctx, store, depID, targetID, types.DepConditionalBlocks)
+			assertIsBlocked(t, ctx, store, "issues", depID, r.wantBlocked)
+
+			readyIssues, err := store.GetReadyWork(ctx, types.WorkFilter{Status: types.StatusOpen})
+			if err != nil {
+				t.Fatalf("GetReadyWork failed: %v", err)
+			}
+			readyIDs := make(map[string]bool)
+			for _, issue := range readyIssues {
+				readyIDs[issue.ID] = true
+			}
+			if readyIDs[depID] != !r.wantBlocked {
+				t.Errorf("ready membership = %v, want %v", readyIDs[depID], !r.wantBlocked)
+			}
+		})
+	}
+}

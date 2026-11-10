@@ -184,6 +184,11 @@ type AddDependencyOpts struct {
 type DepTargetPrecheck struct {
 	IssueType string
 	Status    string
+	// CloseReason is the closed target's close_reason ('' when open or closed
+	// without one). The conditional-blocks gate the direct is_blocked mark
+	// applies needs it: a success close holds the fallback, a failure close
+	// releases it (GH#5577).
+	CloseReason string
 }
 
 // AddDependencyInTx validates and inserts a dependency within an existing
@@ -433,7 +438,7 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		return false, fmt.Errorf("affected by add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, aerr)
 	}
 	if dep.Type == types.DepBlocks || dep.Type == types.DepConditionalBlocks {
-		marked, err := markDirectBlockingDependencySourceInTx(ctx, tx, dep.IssueID, srcIsWisp, dep.DependsOnID, kind, opts.PrecheckedTarget)
+		marked, err := markDirectBlockingDependencySourceInTx(ctx, tx, dep.IssueID, srcIsWisp, dep.DependsOnID, dep.Type, kind, opts.PrecheckedTarget)
 		if err != nil {
 			return false, fmt.Errorf("mark direct is_blocked after add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 		}
@@ -511,12 +516,16 @@ func removeID(ids []string, remove string) []string {
 }
 
 // markDirectBlockingDependencySourceInTx marks the source of a new blocking
-// edge blocked when its target is open, and reports whether it flipped the
-// row. The `is_blocked = 0` predicate makes a matched row a changed row, so
+// edge blocked when the edge holds, and reports whether it flipped the row.
+// The `is_blocked = 0` predicate makes a matched row a changed row, so
 // RowsAffected is the verdict whatever the driver's found-rows mode.
 //
+// Whether the edge holds follows types.BlockingEdgeHolds: an ordinary blocks
+// edge holds while its target is open; a conditional-blocks edge additionally
+// holds through a success close of its target (GH#5577).
+//
 //nolint:gosec // G201: table names are selected from fixed issue/wisp tables.
-func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, source string, srcIsWisp bool, target string, targetKind DepTargetKind, precheckedTarget *DepTargetPrecheck) (bool, error) {
+func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, source string, srcIsWisp bool, target string, depType types.DependencyType, targetKind DepTargetKind, precheckedTarget *DepTargetPrecheck) (bool, error) {
 	sourceTable := "issues"
 	if srcIsWisp {
 		sourceTable = "wisps"
@@ -533,9 +542,10 @@ func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, sou
 
 	if precheckedTarget != nil {
 		// The target row lives on another session; the EXISTS gate below
-		// would miss it there. Its openness is already known, so gate in Go
-		// and mark the source (whose table always matches tx) directly.
-		if types.Status(precheckedTarget.Status) == types.StatusClosed || types.Status(precheckedTarget.Status) == types.StatusPinned {
+		// would miss it there. Its status and close reason are already
+		// known, so gate in Go and mark the source (whose table always
+		// matches tx) directly.
+		if !types.BlockingEdgeHolds(depType, types.Status(precheckedTarget.Status), precheckedTarget.CloseReason) {
 			return false, nil
 		}
 		res, err := tx.ExecContext(ctx, fmt.Sprintf(`
@@ -545,6 +555,16 @@ func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, sou
 			  AND s.status <> 'closed' AND s.status <> 'pinned'
 		`, sourceTable), source)
 		return rowsChanged(res, err)
+	}
+
+	// The SQL form of the same gate for a target this transaction can read.
+	// FailureClosePredicateSQL carries no % and no ?, so the fmt verbs below
+	// are the only formatting this statement sees.
+	targetHolds := "t.status <> 'closed' AND t.status <> 'pinned'"
+	if depType == types.DepConditionalBlocks {
+		targetHolds = fmt.Sprintf(
+			"t.status <> 'pinned' AND (t.status <> 'closed' OR NOT %s)",
+			FailureClosePredicateSQL("t.close_reason"))
 	}
 
 	// MySQL 8.0+ rejects UPDATE <T> ... WHERE EXISTS (SELECT FROM <T> ...)
@@ -560,11 +580,11 @@ func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, sou
 		  AND s.status <> 'closed' AND s.status <> 'pinned'
 		  AND EXISTS (
 		    SELECT 1 FROM (
-		      SELECT id, status FROM %s WHERE id = ?
+		      SELECT id, status, close_reason FROM %s WHERE id = ?
 		    ) AS t
-		    WHERE t.status <> 'closed' AND t.status <> 'pinned'
+		    WHERE %s
 		  )
-	`, sourceTable, targetTable), source, target)
+	`, sourceTable, targetTable, targetHolds), source, target)
 	return rowsChanged(res, err)
 }
 

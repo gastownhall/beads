@@ -123,3 +123,36 @@ func (s *testSuite) ibClaimDoesNotChange() {
 	s.False(s.isBlocked("bd-ib-cl-free"), "claimed issue (open->in_progress) must not become blocked")
 	s.False(s.isBlocked("bd-ib-cl-blocker"), "untouched issue must stay unblocked")
 }
+
+// The direct is_blocked mark a dependency insert performs must answer the
+// conditional-blocks rule when the target is already closed (GH#5577): a
+// success-closed precondition still blocks the fallback, a failure-closed one
+// does not.
+func (s *testSuite) TestConditionalBlocksDirectMarkClosedTarget() {
+	s.Run("SuccessCloseMarksBlocked", func() {
+		s.seedIssueRow("bd-cb-closed-src")
+		s.seedIssueRow("bd-cb-closed-tgt")
+		issueRepo := NewIssueSQLRepository(s.Runner())
+		_, err := issueRepo.Close(s.Ctx(), "bd-cb-closed-tgt",
+			domain.CloseRowParams{Reason: "completed successfully"}, "tester", domain.IssueTableOpts{})
+		s.Require().NoError(err)
+
+		s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+			newDep("bd-cb-closed-src", "bd-cb-closed-tgt", types.DepConditionalBlocks), "tester", domain.DepInsertOpts{}))
+		s.True(s.isBlocked("bd-cb-closed-src"),
+			"a conditional-blocks edge onto a success-closed target must mark its source blocked")
+	})
+	s.Run("FailureCloseLeavesFree", func() {
+		s.seedIssueRow("bd-cb-failed-src")
+		s.seedIssueRow("bd-cb-failed-tgt")
+		issueRepo := NewIssueSQLRepository(s.Runner())
+		_, err := issueRepo.Close(s.Ctx(), "bd-cb-failed-tgt",
+			domain.CloseRowParams{Reason: "failed: rejected by reviewer"}, "tester", domain.IssueTableOpts{})
+		s.Require().NoError(err)
+
+		s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+			newDep("bd-cb-failed-src", "bd-cb-failed-tgt", types.DepConditionalBlocks), "tester", domain.DepInsertOpts{}))
+		s.False(s.isBlocked("bd-cb-failed-src"),
+			"a conditional-blocks edge onto a failure-closed target must leave its source free")
+	})
+}

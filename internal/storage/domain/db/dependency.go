@@ -234,7 +234,7 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 		return fmt.Errorf("db: DependencySQLRepository.Insert: affected set: %w", aerr)
 	}
 	if dep.Type == types.DepBlocks || dep.Type == types.DepConditionalBlocks {
-		if err := r.markDirectBlockedSource(ctx, dep.IssueID, srcIsWisp, dep.DependsOnID, targetCol); err != nil {
+		if err := r.markDirectBlockedSource(ctx, dep.IssueID, srcIsWisp, dep.DependsOnID, dep.Type, targetCol); err != nil {
 			return fmt.Errorf("db: DependencySQLRepository.Insert: mark is_blocked: %w", err)
 		}
 		affectedIssues, affectedWisps = issueops.RemoveSourceFromAffected(dep.IssueID, srcIsWisp, affectedIssues, affectedWisps)
@@ -332,9 +332,11 @@ func (r *dependencySQLRepositoryImpl) ValidateBlockingHierarchy(ctx context.Cont
 // markDirectBlockedSource mirrors issueops.markDirectBlockingDependencySourceInTx:
 // is_blocked is derived state, and ready-work queries filter on it directly
 // (is_blocked = 0), so a blocking edge insert must set it on the source row
-// while the target is still open. updated_at is pinned because recomputing
-// derived state is not an edit.
-func (r *dependencySQLRepositoryImpl) markDirectBlockedSource(ctx context.Context, source string, srcIsWisp bool, target, targetCol string) error {
+// while the edge holds. A conditional-blocks edge holds through a success
+// close of its target (GH#5577), so the gate consults the target's close
+// reason, the SQL form of types.BlockingEdgeHolds the issueops union applies.
+// updated_at is pinned because recomputing derived state is not an edit.
+func (r *dependencySQLRepositoryImpl) markDirectBlockedSource(ctx context.Context, source string, srcIsWisp bool, target string, depType types.DependencyType, targetCol string) error {
 	sourceTable := "issues"
 	if srcIsWisp {
 		sourceTable = "wisps"
@@ -350,6 +352,15 @@ func (r *dependencySQLRepositoryImpl) markDirectBlockedSource(ctx context.Contex
 		return nil
 	}
 
+	// issueops.FailureClosePredicateSQL carries no % and no ?, so the fmt
+	// verbs below are the only formatting this statement sees.
+	targetHolds := "t.status <> 'closed' AND t.status <> 'pinned'"
+	if depType == types.DepConditionalBlocks {
+		targetHolds = fmt.Sprintf(
+			"t.status <> 'pinned' AND (t.status <> 'closed' OR NOT %s)",
+			issueops.FailureClosePredicateSQL("t.close_reason"))
+	}
+
 	//nolint:gosec // G201: sourceTable/targetTable are hardcoded constants
 	_, err := r.runner.ExecContext(ctx, fmt.Sprintf(`
 		UPDATE %s s SET s.is_blocked = 1, s.updated_at = s.updated_at
@@ -359,9 +370,9 @@ func (r *dependencySQLRepositoryImpl) markDirectBlockedSource(ctx context.Contex
 		  AND EXISTS (
 		    SELECT 1 FROM %s t
 		    WHERE t.id = ?
-		      AND t.status <> 'closed' AND t.status <> 'pinned'
+		      AND %s
 		  )
-	`, sourceTable, targetTable), source, target)
+	`, sourceTable, targetTable, targetHolds), source, target)
 	return err
 }
 
