@@ -600,6 +600,76 @@ func TestEmbeddedMergeAndSettleFKRepairKeepsCleanMergedTables(t *testing.T) {
 	assertMergeConcluded(t, ctx, conn)
 }
 
+// TestEmbeddedMergeAndSettleCommitsPeerCleanTables (GH#7757) is the
+// settlement-level regression for the issue's data loss: an issues conflict
+// the field merger settles deterministically (LWW on updated_at) riding with
+// peer-only comment, label, and user-kv (config kv.*) inserts — disjoint
+// rows dolt merges cleanly and leaves UNSTAGED in the conflicted merge's
+// working set. A conclusion that commits only the resolved issues table
+// records HEAD's copy of comments/labels/config, so the merge commit a push
+// sends drops the peer's rows while the local working set keeps reading them
+// (GH#7811). The rows are read AS OF 'HEAD' — the merge commit itself — not
+// from the working set, so a later commit cannot mask the drop.
+func TestEmbeddedMergeAndSettleCommitsPeerCleanTables(t *testing.T) {
+	te := newTestEnv(t, "peerclean")
+	ctx := t.Context()
+	conn := openSettleConn(t, ctx, te)
+
+	exec := func(q string) {
+		t.Helper()
+		if _, err := conn.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	exec("INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES ('pcs-1', 'base', '', '', '', '', 'open', 3, 'bug')")
+	exec("CALL DOLT_COMMIT('-Am', 'seed issue')")
+	exec("CALL DOLT_BRANCH('pcspeer', 'HEAD')")
+	// Main retitles with the LATER updated_at, so the contested title cell
+	// settles last-write-wins to ours deterministically.
+	exec("UPDATE issues SET title = 'ours title', updated_at = '2026-01-02 00:00:00' WHERE id = 'pcs-1'")
+	exec("CALL DOLT_COMMIT('-Am', 'main retitle')")
+	exec("CALL DOLT_CHECKOUT('pcspeer')")
+	// The peer retitles the same cell (loses LWW) and inserts the peer-only
+	// rows the merge must carry: a comment, a label, and a user-kv config
+	// row. comments.id needs an explicit id (0051 dropped the DB default).
+	exec("UPDATE issues SET title = 'theirs title', updated_at = '2026-01-01 00:00:00' WHERE id = 'pcs-1'")
+	exec("INSERT INTO comments (id, issue_id, author, text, created_at) VALUES ('pcs-comment-peer', 'pcs-1', 'peer', 'comment from peer', NOW())")
+	exec("INSERT INTO labels (issue_id, label) VALUES ('pcs-1', 'peer-label')")
+	exec("INSERT INTO config (`key`, value) VALUES ('kv.peer', 'peer-value')")
+	exec("CALL DOLT_COMMIT('-Am', 'peer retitle + comment + label + kv')")
+	exec("CALL DOLT_CHECKOUT('main')")
+
+	if err := versioncontrolops.MergeAndSettle(ctx, conn, "pcspeer"); err != nil {
+		t.Fatalf("MergeAndSettle: %v", err)
+	}
+
+	headString := func(q string) (string, error) {
+		var s string
+		err := conn.QueryRowContext(ctx, q).Scan(&s)
+		return s, err
+	}
+	if text, err := headString("SELECT text FROM comments AS OF 'HEAD' WHERE id = 'pcs-comment-peer'"); err != nil {
+		t.Errorf("the peer's comment is missing from the merge commit (read AS OF 'HEAD': %v)", err)
+	} else if text != "comment from peer" {
+		t.Errorf("HEAD comment text = %q, want %q", text, "comment from peer")
+	}
+	if v, err := headString("SELECT value FROM config AS OF 'HEAD' WHERE `key` = 'kv.peer'"); err != nil {
+		t.Errorf("the peer's kv.peer row is missing from the merge commit (read AS OF 'HEAD': %v)", err)
+	} else if v != "peer-value" {
+		t.Errorf("HEAD config kv.peer = %q, want %q", v, "peer-value")
+	}
+	if title, err := headString("SELECT title FROM issues AS OF 'HEAD' WHERE id = 'pcs-1'"); err != nil {
+		t.Fatalf("read settled issue AS OF 'HEAD': %v", err)
+	} else if title != "ours title" {
+		t.Errorf("HEAD title = %q, want %q (the later updated_at wins LWW)", title, "ours title")
+	}
+	labels := headLabels(t, ctx, conn, "pcs-1")
+	if len(labels) != 1 || labels[0] != "peer-label" {
+		t.Errorf("HEAD labels = %v, want [peer-label]: the merge commit did not carry the peer's label", labels)
+	}
+	assertMergeConcluded(t, ctx, conn)
+}
+
 // TestEmbeddedMergeAndSettleCommitsPeerTableChanges (GH#7811) covers the
 // table-level shapes the conclusion must stage beside a resolved conflict: a
 // table the peer added (dolt_diff_summary's to_table_name), dropped
