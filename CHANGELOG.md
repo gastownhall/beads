@@ -1235,6 +1235,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the PID counts as a state only when it looks like one (a state letter plus
   the modifier letters `ps` appends), and the whole row is command otherwise.
 
+- The process list recognizes a dolt server by whole command words: the
+  command must name the dolt executable — the word `dolt` or a path ending
+  in `/dolt` — before a whole `sql-server` argument. `cat
+  /etc/dolt/sql-server.yaml`, `dolt-helper sql-server`, `docker run
+  dolthub/dolt-sql-server` and `vim …/dolt/sql-server.log` no longer look
+  like a dolt server to the port-reclaim and stale-server paths. Global
+  flags between the executable and the subcommand still match, as do shell
+  stand-ins that launch a `dolt`-named script; an executable renamed away
+  from `dolt` (say `dolt-2.6`) is not recognized.
+
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

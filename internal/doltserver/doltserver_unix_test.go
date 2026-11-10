@@ -261,6 +261,9 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 			want:     []int{102},
 		},
 		{
+			// Whole-word matching cannot prove executable identity: a command
+			// that mentions a whole dolt word before a whole sql-server word
+			// still matches. Kept deliberately; see isDoltSQLServerCommand.
 			name:     "ordered loose false positive",
 			snapshot: "103 S some-tool says dolt then sql-server\n",
 			want:     []int{103},
@@ -334,6 +337,75 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 			name: "zombie and dead states are rejected for spaced executable path",
 			snapshot: "307 Z /Users/John Smith/bin/dolt sql-server\n" +
 				"308 X< /Users/u/Library/Application Support/tools/dolt sql-server\n",
+		},
+		{
+			name: "global flags between executable and subcommand",
+			snapshot: "402 S /usr/local/bin/dolt --prof cpu --prof-path /tmp/pprof sql-server\n" +
+				"403 /usr/local/bin/dolt --prof cpu --prof-path /tmp/pprof sql-server\n",
+			want: []int{402, 403},
+		},
+		{
+			name: "executable path containing a space",
+			snapshot: "404 S /Users/Jane Doe/bin/dolt sql-server\n" +
+				"405 /Users/Jane Doe/bin/dolt sql-server\n",
+			want: []int{404, 405},
+		},
+		{
+			name: "shell stand-in launches dolt by path",
+			snapshot: "406 S /bin/sh /tmp/checkpoint-stand-in/dolt sql-server\n" +
+				"407 /bin/sh /tmp/checkpoint-stand-in/dolt sql-server\n",
+			want: []int{406, 407},
+		},
+		{
+			// Sp is not a state ps prints: the token stays in the command,
+			// where a later whole dolt word still matches.
+			name:     "unfamiliar state-like token stays in the command",
+			snapshot: "408 Sp /usr/local/bin/dolt sql-server\n",
+			want:     []int{408},
+		},
+		{
+			// A leading executable named t is indistinguishable from the
+			// traced state; either reading leaves the dolt match intact.
+			name:     "state-like leading executable is ambiguous but harmless",
+			snapshot: "409 t /usr/local/bin/dolt sql-server\n",
+			want:     []int{409},
+		},
+		{
+			name:     "bare dolt with and without state",
+			snapshot: "410 dolt sql-server\n411 S dolt sql-server\n",
+			want:     []int{410, 411},
+		},
+		{
+			name:     "global flag with an argument before sql-server",
+			snapshot: "412 dolt --data-dir /srv/dolt sql-server --port 3307\n",
+			want:     []int{412},
+		},
+		{
+			name: "absolute executable path containing spaces is recognised",
+			snapshot: "301 S /Users/John Smith/bin/dolt sql-server --config x.yaml\n" +
+				"302 S /Users/u/Library/Application Support/tools/dolt sql-server\n" +
+				"303 Sl /Users/John Smith/bin/dolt --prof cpu sql-server\n",
+			want: []int{301, 302, 303},
+		},
+		{
+			name: "empty state column with spaced executable path",
+			snapshot: "304 /Users/John Smith/bin/dolt sql-server\n" +
+				"305 /Users/u/Library/Application Support/tools/dolt sql-server --port 3307\n" +
+				"306 dolt sql-server\n",
+			want: []int{304, 305, 306},
+		},
+		{
+			// Like the ordered loose false positive above: a program whose
+			// arguments hold a whole dolt (or .../dolt) word before a whole
+			// sql-server word matches. Leading words stay allowed so shell
+			// stand-ins and spaced paths match; see isDoltSQLServerCommand.
+			name: "wrapper commands naming dolt sql-server still match",
+			snapshot: "1468 /usr/bin/python3 -c dolt sql-server\n" +
+				"315 S /usr/bin/cat /opt/bin/dolt sql-server\n" +
+				"316 S /usr/bin/tool --opt /opt/bin/dolt sql-server\n" +
+				"317 /usr/bin/env dolt sql-server\n" +
+				"318 S /usr/bin/python3 -c dolt sql-server\n",
+			want: []int{1468, 315, 316, 317, 318},
 		},
 		{
 			name: "malformed and invalid rows are rejected",
