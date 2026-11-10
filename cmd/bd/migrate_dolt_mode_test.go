@@ -581,6 +581,47 @@ func TestMigrateToServer_RefusesWhenLifecycleLockHeld(t *testing.T) {
 	}
 }
 
+// TestMigrateFromProxiedServer_RetirementErrorRetainsCheckpoint covers the
+// failure side of retirement (GH#6884): an unremovable non-lock control is
+// reported, reverse migration does not advance past the failed retirement
+// phase, and repairing only that obstacle lets the retry complete while
+// preserving the original lifecycle markers.
+func TestMigrateFromProxiedServer_RetirementErrorRetainsCheckpoint(t *testing.T) {
+	beadsDir := migrateModeWorkspace(t, configfile.DoltModeProxiedServer)
+	rootDir := filepath.Join(beadsDir, "dolt")
+	require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, &configfile.ProxiedServerClientInfo{RootPath: rootDir}))
+	require.NoError(t, os.MkdirAll(filepath.Join(rootDir, ".dolt"), 0o755))
+	markers := seedLifecycleMarkers(t, rootDir)
+	// A nonempty directory at the proxy log path fails the purge
+	// deterministically, even when tests run as root.
+	logDir := filepath.Join(rootDir, proxy.LogFileName)
+	require.NoError(t, os.MkdirAll(logDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(logDir, "retain"), []byte("x"), 0o600))
+
+	var migrateErr error
+	stderr := captureStderr(t, func() {
+		migrateErr = runMigrateFromProxiedServer(false, false)
+	})
+	require.Error(t, migrateErr)
+	assert.Contains(t, stderr, "failed to retire proxy controls")
+
+	j, jErr := loadMigrateJournal(beadsDir)
+	require.NoError(t, jErr)
+	require.NotNil(t, j)
+	assert.Equal(t, migrateTargetConfigured, j.Phase, "retirement failure must not advance past the failed phase")
+	assertLifecycleMarkersKept(t, rootDir, markers)
+
+	require.NoError(t, os.RemoveAll(logDir), "repair only the fixture obstacle")
+	require.NoError(t, runMigrateFromProxiedServer(false, false))
+	assertLifecycleMarkersKept(t, rootDir, markers)
+	j, jErr = loadMigrateJournal(beadsDir)
+	require.NoError(t, jErr)
+	assert.Nil(t, j, "successful retry removes the journal")
+	cfg, cfgErr := configfile.Load(beadsDir)
+	require.NoError(t, cfgErr)
+	assert.True(t, cfg.IsDoltServerMode())
+}
+
 // TestMigrateFromProxiedServer_DryRunOmitsLifecycleLocks covers the dry-run
 // side of the persistent-marker contract (GH#6884): planned removals list the
 // non-lock controls, never advertise removal of either lifecycle lock,
