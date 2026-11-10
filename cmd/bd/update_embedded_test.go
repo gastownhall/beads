@@ -1095,3 +1095,50 @@ func TestEmbeddedUpdateClaimBlockedRefusalLeavesIssueUntouched(t *testing.T) {
 		t.Errorf("blocker changed by refused claim: status=%s", gotBlocker.Status)
 	}
 }
+
+// bd-ltvqa9 AC-3: --force claims an issue a live local blocker still blocks —
+// the reordering is deliberate — and neither the blocker row nor the stored
+// is_blocked flag changes: the override claims, it does not clear the block.
+func TestEmbeddedUpdateClaimForceOverridesBlocked(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "cb")
+
+	blocker := bdCreate(t, bd, dir, "blocker", "--type", "task")
+	blocked := bdCreate(t, bd, dir, "blocked", "--type", "task")
+	bdRunOK(t, bd, dir, "dep", "add", blocked.ID, blocker.ID)
+
+	out, err := bdRunWithFlockRetry(t, bd, dir, "update", blocked.ID, "--claim", "--force", "--actor", "w1")
+	if err != nil {
+		t.Fatalf("forced claim of blocked issue %s failed: %v\n%s", blocked.ID, err, out)
+	}
+	got := bdShow(t, bd, dir, blocked.ID)
+	if got.Status != types.StatusInProgress || got.Assignee != "w1" {
+		t.Errorf("after --force claim: status=%s assignee=%q, want in_progress/w1", got.Status, got.Assignee)
+	}
+	if gotBlocker := bdShow(t, bd, dir, blocker.ID); gotBlocker.Status != types.StatusOpen {
+		t.Errorf("blocker changed by forced claim: status=%s", gotBlocker.Status)
+	}
+	// The stored flag survives the override: is_blocked is not part of issue
+	// hydration, so read the column directly. This is the LAST assertion on
+	// purpose — OpenSQL holds the embedded database's lock, so any bd
+	// subprocess run after it would block on that lock (the reverse of the
+	// flock-retry the CLI does for itself).
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), "cb", "main")
+	if err != nil {
+		t.Fatalf("open embedded SQL: %v", err)
+	}
+	defer func() { _ = cleanup() }()
+	var flag int
+	if err := db.QueryRowContext(t.Context(),
+		"SELECT is_blocked FROM issues WHERE id = ?", blocked.ID).Scan(&flag); err != nil {
+		t.Fatalf("read is_blocked for %s: %v", blocked.ID, err)
+	}
+	if flag != 1 {
+		t.Errorf("forced claim cleared the is_blocked flag, want the block left standing")
+	}
+}

@@ -244,6 +244,31 @@ func TestProxiedServerUpdate(t *testing.T) {
 				clear.ID, gotClear.Status, gotClear.Assignee)
 		}
 	})
+
+	// bd-ltvqa9 AC-3: --force claims an issue a live local blocker still
+	// blocks on the proxied route too. The claim lands (in_progress, the
+	// actor) while the block stays standing: the is_blocked flag and the
+	// blocker row are untouched.
+	t.Run("claim_blocked_force_claims_anyway", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ucbf")
+		blocker := bdProxiedCreate(t, bd, p.dir, "Force blocker")
+		blocked := bdProxiedCreate(t, bd, p.dir, "Forced claim target", "--deps", "depends-on:"+blocker.ID)
+
+		updated := bdProxiedUpdateOne(t, bd, p.dir, blocked.ID, "--claim", "--force", "--actor", "bob")
+		if updated.Status != types.StatusInProgress || updated.Assignee != "bob" {
+			t.Errorf("after --force claim: status=%s assignee=%q, want in_progress/bob",
+				updated.Status, updated.Assignee)
+		}
+
+		db := openProxiedDB(t, p)
+		if !readIsBlocked(t, db, blocked.ID) {
+			t.Errorf("forced claim cleared the is_blocked flag, want the block left standing")
+		}
+		if gotBlocker := bdProxiedShow(t, bd, p.dir, blocker.ID); gotBlocker.Status != types.StatusOpen {
+			t.Errorf("blocker changed by forced claim: status=%s", gotBlocker.Status)
+		}
+	})
 }
 
 // TestProxiedServerUpdateB holds more of TestProxiedServerUpdate's cases, split
