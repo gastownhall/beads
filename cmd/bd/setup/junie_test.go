@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -45,14 +46,19 @@ func TestJunieMCPConfig(t *testing.T) {
 		t.Fatal("beads server config missing or wrong type")
 	}
 
+	// bd has no "mcp" subcommand (GH#5563): the server is beads-mcp.
 	command, ok := beads["command"].(string)
-	if !ok || command != "bd" {
-		t.Errorf("Expected command 'bd', got %v", beads["command"])
+	if !ok || command != "uvx" {
+		t.Errorf("Expected command 'uvx', got %v", beads["command"])
 	}
 
 	args, ok := beads["args"].([]string)
-	if !ok || len(args) != 1 || args[0] != "mcp" {
-		t.Errorf("Expected args ['mcp'], got %v", beads["args"])
+	if !ok || len(args) != 1 || args[0] != "beads-mcp" {
+		t.Errorf("Expected args ['beads-mcp'], got %v", beads["args"])
+	}
+
+	if len(mcpServers) != 1 || len(beads) != 2 {
+		t.Errorf("Expected one beads server with only command and args, got %v", mcpServers)
 	}
 
 	// Verify it's valid JSON
@@ -84,7 +90,9 @@ func TestInstallJunie(t *testing.T) {
 		}
 	}()
 
-	InstallJunie()
+	if err := InstallJunie(); err != nil {
+		t.Fatalf("InstallJunie: %v", err)
+	}
 
 	// Verify guidelines file was created
 	guidelinesPath := ".junie/guidelines.md"
@@ -114,14 +122,36 @@ func TestInstallJunie(t *testing.T) {
 				t.Errorf("MCP config should be valid JSON: %v", err)
 			}
 
-			// Verify structure
-			mcpServers, ok := parsed["mcpServers"].(map[string]interface{})
-			if !ok {
-				t.Error("mcpServers key missing or wrong type")
-			} else if _, ok := mcpServers["beads"]; !ok {
-				t.Error("beads server config missing")
-			}
+			// The written file must launch beads-mcp, never a bd
+			// subcommand that does not exist (GH#5563).
+			assertJunieMCPConfigFile(t, mcpPath)
 		}
+	}
+}
+
+// wantJunieMCPConfig is the MCP config bd setup junie must write, spelled out
+// independently of junieMCPConfig so a wrong launch command cannot satisfy
+// both sides of the comparison.
+const wantJunieMCPConfig = `{"mcpServers":{"beads":{"command":"uvx","args":["beads-mcp"]}}}`
+
+// assertJunieMCPConfigFile checks that path decodes to exactly
+// wantJunieMCPConfig. It compares decoded JSON, not bytes, so indentation and
+// trailing newlines stay free to change.
+func assertJunieMCPConfigFile(t *testing.T, path string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read MCP config: %v", err)
+	}
+	var got, want interface{}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("MCP config is not JSON: %v\n%s", err, data)
+	}
+	if err := json.Unmarshal([]byte(wantJunieMCPConfig), &want); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("MCP config = %s, want %s", data, wantJunieMCPConfig)
 	}
 }
 
