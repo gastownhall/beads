@@ -228,3 +228,75 @@ func TestEmbeddedConfigSetNoDBRefused(t *testing.T) {
 		}
 	}
 }
+
+// TestEmbeddedNoDBTrueIgnoredWithWarning: a workspace whose old config still
+// turns no-db on (config.yaml or BD_NO_DB) opens its Dolt database as usual,
+// and a store-opening command warns exactly once on stderr that the setting
+// is obsolete, leaving --json stdout parseable (GH#7387).
+func TestEmbeddedNoDBTrueIgnoredWithWarning(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	const warning = "no-db is obsolete"
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "nodbwarn")
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	template, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue := bdCreate(t, bd, dir, "kept in dolt")
+
+	listsIssue := func(t *testing.T, env []string, wantWarnings int) {
+		t.Helper()
+		run := runBDMetadataless(t, bd, dir, env, "list", "--json")
+		if run.err != nil {
+			t.Fatalf("bd list --json failed: %v\nstdout:\n%s\nstderr:\n%s", run.err, run.stdout, run.stderr)
+		}
+		var issues []map[string]any
+		if err := json.Unmarshal([]byte(run.stdout), &issues); err != nil {
+			t.Fatalf("bd list --json stdout is not JSON: %v\n%s", err, run.stdout)
+		}
+		if len(issues) != 1 || issues[0]["id"] != issue.ID {
+			t.Fatalf("bd list --json = %s, want only %s from the Dolt database", run.stdout, issue.ID)
+		}
+		if got := strings.Count(run.stderr, warning); got != wantWarnings {
+			t.Fatalf("stderr has %d %q warnings, want %d:\n%s", got, warning, wantWarnings, run.stderr)
+		}
+	}
+
+	t.Run("config.yaml true", func(t *testing.T) {
+		if err := os.WriteFile(configPath, append(append([]byte{}, template...), []byte("no-db: true\n")...), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.WriteFile(configPath, template, 0o600) })
+		listsIssue(t, nil, 1)
+
+		run := runBDMetadataless(t, bd, dir, nil, "update", issue.ID, "--notes", "written to dolt", "--json")
+		if run.err != nil {
+			t.Fatalf("bd update --json failed: %v\nstdout:\n%s\nstderr:\n%s", run.err, run.stdout, run.stderr)
+		}
+		if !json.Valid([]byte(run.stdout)) {
+			t.Fatalf("bd update --json stdout is not JSON:\n%s", run.stdout)
+		}
+		if got := strings.Count(run.stderr, warning); got != 1 {
+			t.Fatalf("bd update stderr has %d %q warnings, want 1:\n%s", got, warning, run.stderr)
+		}
+		if shown := bdShow(t, bd, dir, issue.ID); shown.Notes != "written to dolt" {
+			t.Fatalf("notes = %q after bd update, want the write in the Dolt database", shown.Notes)
+		}
+	})
+
+	t.Run("BD_NO_DB true", func(t *testing.T) {
+		listsIssue(t, []string{"BD_NO_DB=true"}, 1)
+	})
+
+	t.Run("false or unset is quiet", func(t *testing.T) {
+		if err := os.WriteFile(configPath, append(append([]byte{}, template...), []byte("no-db: false\n")...), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.WriteFile(configPath, template, 0o600) })
+		listsIssue(t, nil, 0)
+		listsIssue(t, []string{"BD_NO_DB=false"}, 0)
+	})
+}

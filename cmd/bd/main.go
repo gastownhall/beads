@@ -2104,6 +2104,13 @@ var rootCmd = &cobra.Command{
 			autoMigrateOnVersionBump(beadsDir)
 		}
 
+		// One warning per command for an old no-db=true: the identity
+		// preview and the real open below both run under this pre-run, so
+		// neither prints it.
+		if msg := config.NoDBObsoleteWarning(); msg != "" {
+			WarnError("%s", msg)
+		}
+
 		// Initialize direct storage access
 		var err error
 
