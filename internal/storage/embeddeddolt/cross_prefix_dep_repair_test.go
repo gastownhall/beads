@@ -175,3 +175,70 @@ func TestEmbeddedCrossPrefixDepRepairRestoresLegacyRows(t *testing.T) {
 		t.Fatalf("ignored migration %d not recorded after a successful pass", crossPrefixDepRepairMarkerVersion)
 	}
 }
+
+// TestEmbeddedCrossPrefixDepRepairRefusesDirtyWorkingSet pins the dirty-table
+// contract (AC-6): a repair that would write refuses at plan time, before any
+// write and before the 0032 marker records, with the same DirtyTablesError the
+// lenient open intents already tolerate; the working set the user commits
+// clears the refusal and the retry converges.
+func TestEmbeddedCrossPrefixDepRepairRefusesDirtyWorkingSet(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	dataDir := seedMigratedStore(t, ctx)
+	conn, closeConn := openDepConn(t, ctx, dataDir)
+
+	const src, held, other = "bd-x-src", "hq-x-held", "bd-x-other"
+	seedIssue(t, ctx, conn, src)
+	seedIssue(t, ctx, conn, held)
+	seedIssue(t, ctx, conn, other)
+	seedDependency(t, ctx, conn, depid.New(src, held), src, nil, nil, strptr(held))
+	commitSeed(t, ctx, conn, "test: legacy cross-prefix row before a dirty working set")
+
+	unrecordIgnoredVersionsFrom(t, ctx, conn, crossPrefixDepRepairMarkerVersion)
+	// An uncommitted user row leaves dependencies dirty in the working set —
+	// the state the plan-time refusal exists to keep the repair out of.
+	seedDependency(t, ctx, conn, depid.New(src, other), src, strptr(other), nil, nil)
+	closeConn()
+
+	conn2, _ := openDepConn(t, ctx, dataDir)
+	_, err := schema.MigrateUp(ctx, conn2)
+	var dirty *schema.DirtyTablesError
+	if !errors.As(err, &dirty) {
+		t.Fatalf("MigrateUp over a dirty dependencies table = %v, want *schema.DirtyTablesError", err)
+	}
+	if !slices.Contains(dirty.Tables, "dependencies") {
+		t.Fatalf("DirtyTablesError.Tables = %v, want it to name dependencies", dirty.Tables)
+	}
+
+	// Nothing was written and the marker stayed pending: the refusal fired at
+	// plan time, ahead of every write and ahead of ignoredSource.migrate.
+	wantUnchanged := []depRow{
+		{id: depid.New(src, held), issueID: src, dependsOnExternal: held},
+		{id: depid.New(src, other), issueID: src, dependsOnIssueID: other},
+	}
+	if got := depRowsByTarget(readDeps(t, ctx, conn2)); !slices.Equal(got, depRowsByTarget(wantUnchanged)) {
+		t.Fatalf("dependencies after the refused pass = %v, want %v: the refusal must write nothing", got, wantUnchanged)
+	}
+	if ignoredVersionRecorded(t, ctx, conn2, crossPrefixDepRepairMarkerVersion) {
+		t.Fatalf("ignored migration %d recorded by the refused pass, want it pending for the retry", crossPrefixDepRepairMarkerVersion)
+	}
+
+	// The documented recovery: commit the working set at the current schema,
+	// and the next open retries the pass and converges.
+	mustExecConn(t, ctx, conn2, "CALL DOLT_ADD('-A')")
+	mustExecConn(t, ctx, conn2, "CALL DOLT_COMMIT('-m', 'test: clear the dirty working set', '--skip-empty')")
+	if _, err := schema.MigrateUp(ctx, conn2); err != nil {
+		t.Fatalf("MigrateUp after the working set was committed: %v", err)
+	}
+	wantRepaired := []depRow{
+		{id: depid.New(src, held), issueID: src, dependsOnIssueID: held},
+		{id: depid.New(src, other), issueID: src, dependsOnIssueID: other},
+	}
+	if got := depRowsByTarget(readDeps(t, ctx, conn2)); !slices.Equal(got, depRowsByTarget(wantRepaired)) {
+		t.Fatalf("dependencies after the retry = %v, want %v", got, wantRepaired)
+	}
+	if !ignoredVersionRecorded(t, ctx, conn2, crossPrefixDepRepairMarkerVersion) {
+		t.Fatalf("ignored migration %d not recorded after the retry converged", crossPrefixDepRepairMarkerVersion)
+	}
+}

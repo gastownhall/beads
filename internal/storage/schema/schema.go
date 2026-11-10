@@ -1141,8 +1141,16 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	// clone, and the marker records only if the repair returned, so an aborted
 	// repair is retried on the next open instead of the database claiming it
 	// migrated.
-	repaired, err := repairCrossPrefixDepTargets(ctx, db)
+	repaired, err := repairCrossPrefixDepTargets(ctx, db, dirtyBefore)
 	if err != nil {
+		// Like the re-key's refusal one step above: DirtyTablesError carries
+		// its own recovery text and is matched with errors.As by the callers
+		// that must stay open (embeddeddolt's non-strict intents), so it
+		// travels unwrapped rather than under a mechanical prefix.
+		var dirtyErr *DirtyTablesError
+		if errors.As(err, &dirtyErr) {
+			return applied, err
+		}
 		return applied, fmt.Errorf("repair cross-prefix dependency targets: %w", err)
 	}
 	backfilled = backfilled || repaired

@@ -16,6 +16,19 @@ import (
 // evidence each plane may act on differs (see planCrossPrefixDepRepair).
 var depRepairTables = []string{"dependencies", "wisp_dependencies"}
 
+// depRepairWriteTables names every table a repair pass that moves rows out of
+// plan.table can modify, for the plan-time dirty-table refusal: the move itself
+// writes the edge table, and the post-move blocked-state recompute can write
+// issues (mark/unmark) and the wisp plane. wisp_dependencies and wisps are
+// dolt-ignored so they never appear in MigrateUp's committable dirty set, but
+// naming them keeps the refusal honest if that ever changes.
+func depRepairWriteTables(table string) []string {
+	if table == "dependencies" {
+		return []string{"dependencies", "issues"}
+	}
+	return []string{"wisp_dependencies", "wisps", "issues"}
+}
+
 // depRepairMove is one edge row whose target moves from depends_on_external to
 // the typed column the database's own evidence names. destColumn is that typed
 // column; the row id never changes, because depid keys on (issue_id, resolved
@@ -81,9 +94,9 @@ func (p *depRepairPlan) writes() bool { return len(p.moves) > 0 }
 // per-column unique keys), so no uk_dep_*_target conflict can oppose a move.
 //
 // dirtyBefore is MigrateUp's set of committable tables that were already dirty
-// when the pass started. The refusal that consults it lands with the
-// dirty-table contract (AC-6), which is why it is not a parameter yet.
-func repairCrossPrefixDepTargets(ctx context.Context, db DBConn) (bool, error) {
+// when the pass started; the refusal that consults it is what keeps the repair
+// out of a dirty working set (see refuseDepRepairOverDirtyTables).
+func repairCrossPrefixDepTargets(ctx context.Context, db DBConn, dirtyBefore map[string]dirtyTableState) (bool, error) {
 	plans := make([]*depRepairPlan, 0, len(depRepairTables))
 	for _, table := range depRepairTables {
 		plan, err := planCrossPrefixDepRepair(ctx, db, table)
@@ -91,6 +104,10 @@ func repairCrossPrefixDepTargets(ctx context.Context, db DBConn) (bool, error) {
 			return false, err
 		}
 		plans = append(plans, plan)
+	}
+
+	if err := refuseDepRepairOverDirtyTables(plans, dirtyBefore); err != nil {
+		return false, err
 	}
 
 	issueAffected := map[string]bool{}
@@ -157,7 +174,37 @@ type depRepairCandidate struct {
 	target  string
 }
 
-// planCrossPrefixDepRepair scans one edge table for legacy misclassified rows
+// refuseDepRepairOverDirtyTables keeps the repair out of tables the user left
+// dirty. Writing moves into a pre-existing dirty table would entangle repair
+// output with uncommitted user data, and the pass's changed-signature guard
+// that exists to catch exactly that runs only AFTER ignoredSource.migrate has
+// durably recorded the 0032 marker — so it would fail the open once, with the
+// marker recorded, and never retry: the heal would ride an unrelated user
+// commit instead. Refusing here instead — at plan time, before any write and
+// before the marker records — keeps the contract: nothing written, marker
+// pending, retried on the next open once the working set is committed. The
+// refusal is the DirtyTablesError the lenient open intents already tolerate,
+// and it travels unwrapped like the re-key's own refusal for the same reason.
+func refuseDepRepairOverDirtyTables(plans []*depRepairPlan, dirtyBefore map[string]dirtyTableState) error {
+	blocked := map[string]bool{}
+	for _, plan := range plans {
+		if !plan.writes() {
+			continue
+		}
+		for _, table := range depRepairWriteTables(plan.table) {
+			if _, dirty := dirtyBefore[table]; dirty {
+				blocked[table] = true
+			}
+		}
+	}
+	if len(blocked) == 0 {
+		return nil
+	}
+	tables := sortedKeys(blocked)
+	return &DirtyTablesError{Tables: tables}
+}
+
+// depRepairCandidate is one scanned legacy row awaiting its evidence probes.
 // and returns the validated plan. It is read-only. table must be a hardcoded
 // constant ("dependencies" or "wisp_dependencies").
 func planCrossPrefixDepRepair(ctx context.Context, db DBConn, table string) (*depRepairPlan, error) {
