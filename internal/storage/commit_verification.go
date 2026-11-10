@@ -18,9 +18,10 @@ type UncommittedChangesError struct {
 	// Tables are the dolt_status table names still dirty after the commit,
 	// sorted and de-duplicated. A rename row keeps Dolt's "old -> new" form.
 	Tables []string
-	// IgnorePatterns are enabled dolt_ignore patterns that Beads does not
-	// own. They are a hint at the cause, not proof of it or of who added
-	// them, and are empty when there are none or the optional read failed.
+	// IgnorePatterns are enabled dolt_ignore patterns outside Beads'
+	// canonical clone-local set that may cover the tables above. They
+	// suggest a cause without proving it or who added them, and are empty
+	// when there are none or the optional read failed.
 	IgnorePatterns []string
 	// Committed reports that DOLT_COMMIT did create a commit (a partial
 	// commit): some changes reached HEAD, the tables above did not.
@@ -37,7 +38,7 @@ func (e *UncommittedChangesError) Error() string {
 	}
 	b.WriteString("; these changes are not in HEAD and push will not send them")
 	if len(e.IgnorePatterns) > 0 {
-		fmt.Fprintf(&b, " (enabled dolt_ignore patterns not set by bd, a possible cause: %s)", strings.Join(e.IgnorePatterns, ", "))
+		fmt.Fprintf(&b, " (enabled noncanonical dolt_ignore patterns that may cover them, a suggested cause, not proof: %s)", strings.Join(e.IgnorePatterns, ", "))
 	}
 	b.WriteString("; the writes may still be saved in the working set: back up the store, inspect and correct any unwanted configuration, then retry the commit; do not replay the mutations")
 	return b.String()

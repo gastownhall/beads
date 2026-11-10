@@ -20,7 +20,7 @@ again to check that nothing is left. Two errors come out of that check.
   names the tables still holding changes, for example:
 
   ```
-  commit incomplete: tracked changes remain in issues; these changes are not in HEAD and push will not send them (enabled dolt_ignore patterns not set by bd, a possible cause: issues); ...
+  commit incomplete: tracked changes remain in issues; these changes are not in HEAD and push will not send them (enabled noncanonical dolt_ignore patterns that may cover them, a suggested cause, not proof: issues); ...
   ```
 
   When it says `a commit was created, but tracked changes remain in ...`,

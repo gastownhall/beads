@@ -147,7 +147,7 @@ func TestCommitAllReportsTrackedTableSkippedByIgnorePattern(t *testing.T) {
 	}
 	residual := requireUncommittedChanges(t, err, "issues", false)
 	if !slices.Contains(residual.IgnorePatterns, "issues") {
-		t.Errorf("UncommittedChangesError.IgnorePatterns = %v, want the operator pattern %q", residual.IgnorePatterns, "issues")
+		t.Errorf("UncommittedChangesError.IgnorePatterns = %v, want the noncanonical pattern %q", residual.IgnorePatterns, "issues")
 	}
 	if !strings.Contains(err.Error(), "tracked changes remain in issues") {
 		t.Errorf("CommitAll error = %q, want it to name issues", err)

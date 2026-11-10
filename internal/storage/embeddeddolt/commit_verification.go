@@ -69,7 +69,7 @@ func verifyCommitComplete(ctx context.Context, tx *sql.Tx, committed bool) error
 	}
 	return &storage.UncommittedChangesError{
 		Tables:         remaining,
-		IgnorePatterns: enabledForeignIgnorePatterns(ctx, tx, policy),
+		IgnorePatterns: enabledNoncanonicalIgnorePatterns(ctx, tx, policy),
 		Committed:      committed,
 	}
 }
@@ -107,11 +107,12 @@ func readStatusTables(ctx context.Context, tx *sql.Tx) ([]string, error) {
 	return slices.Compact(tables), nil
 }
 
-// enabledForeignIgnorePatterns is the optional diagnostic: the enabled
-// dolt_ignore patterns bd does not own, a likely reason the commit skipped
-// the remaining tables. A failed read returns nil so the residual-change
-// finding still surfaces.
-func enabledForeignIgnorePatterns(ctx context.Context, tx *sql.Tx, policy schema.OwnedIgnorePolicy) []string {
+// enabledNoncanonicalIgnorePatterns is the optional diagnostic: the enabled
+// dolt_ignore patterns outside bd's canonical clone-local set, which may
+// explain why the commit skipped the remaining tables but do not prove it or
+// who added them. A failed read returns nil so the residual-change finding
+// still surfaces.
+func enabledNoncanonicalIgnorePatterns(ctx context.Context, tx *sql.Tx, policy schema.OwnedIgnorePolicy) []string {
 	rows, err := tx.QueryContext(ctx, "SELECT pattern FROM dolt_ignore WHERE ignored = 1 ORDER BY pattern")
 	if err != nil {
 		return nil
