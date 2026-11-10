@@ -3,6 +3,7 @@ package dolt
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
@@ -446,5 +447,146 @@ func TestFinishCLIPull_DeclinedConflictAbortsMerge(t *testing.T) {
 	}
 	if depType != "blocks" {
 		t.Errorf("local edge type = %q after the abort, want our pre-pull value %q", depType, "blocks")
+	}
+}
+
+// TestFinishCLIPull_UnrepairedViolationsAbortsMerge pins the FK-violations half
+// of the declined CLI-pull settlement (GH#7839): a merge whose FK cascade
+// violations the repair cannot fix used to be rolled back and left in the
+// shared working set with the merge OPEN — the same is_merging=1 wedge as a
+// declined conflict. finishCLIPull must abort it and name the unrepaired
+// tables, and must NOT report *MergeConflictsError: the abort wipes
+// dolt_constraint_violations with the rest of the merge state, so there are no
+// conflict rows for the SQL route's contract to carry.
+func TestFinishCLIPull_UnrepairedViolationsAbortsMerge(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+	db := store.db
+
+	// A child table with an FK to issues that is deliberately NOT on the
+	// repair allowlist (fkCascadeRepairDeletes): the repair declines it
+	// exactly as it would a child table a future migration adds.
+	if _, err := db.ExecContext(ctx,
+		"CREATE TABLE cli_decline_children (id INT PRIMARY KEY, issue_id VARCHAR(255), "+
+			"CONSTRAINT fk_cli_decline_issue FOREIGN KEY (issue_id) REFERENCES issues(id))"); err != nil {
+		t.Fatalf("create child table: %v", err)
+	}
+
+	var currentBranch string
+	if err := db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&currentBranch); err != nil {
+		t.Fatalf("get current branch: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES ('decl-x', 'X', '', '', '', '', 'open', 2, 'task')"); err != nil {
+		t.Fatalf("seed issue: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'seed decl-x')"); err != nil {
+		t.Fatalf("commit seed: %v", err)
+	}
+	peerBranch := currentBranch + "_declinepeer"
+	if _, err := db.ExecContext(ctx, "CALL DOLT_BRANCH(?, 'HEAD')", peerBranch); err != nil {
+		t.Fatalf("create peer branch: %v", err)
+	}
+	t.Cleanup(func() {
+		db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", currentBranch)
+		db.ExecContext(ctx, "CALL DOLT_BRANCH('-Df', ?)", peerBranch)
+	})
+
+	// The delete-vs-insert hazard (bd-6dnrw.4): the current branch deletes the
+	// issue while the peer branch inserts a child row referencing it.
+	if _, err := db.ExecContext(ctx, "DELETE FROM issues WHERE id = 'decl-x'"); err != nil {
+		t.Fatalf("delete issue on current: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'delete decl-x')"); err != nil {
+		t.Fatalf("commit delete: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", peerBranch); err != nil {
+		t.Fatalf("checkout peer: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "INSERT INTO cli_decline_children (id, issue_id) VALUES (1, 'decl-x')"); err != nil {
+		t.Fatalf("insert child row on peer: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'add child row')"); err != nil {
+		t.Fatalf("commit child row: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", currentBranch); err != nil {
+		t.Fatalf("checkout current: %v", err)
+	}
+
+	preHead, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("read pre-pull head: %v", err)
+	}
+
+	// Persist the violated merge into the shared working set exactly the way
+	// a CLI `dolt pull` leaves it (bd-6dnrw.4's TestFKCascadeViolationRepairOnCLIPull
+	// stage): forced merge committed with its violations, no transaction to inspect.
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	for _, q := range []string{"SET @@dolt_allow_commit_conflicts = 1", "SET @@dolt_force_transaction_commit = 1"} {
+		if _, err := tx.ExecContext(ctx, q); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, "CALL DOLT_MERGE(?)", peerBranch); err != nil {
+		t.Logf("merge returned: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("persist violated working set: %v", err)
+	}
+	var violating string
+	if err := db.QueryRowContext(ctx,
+		"SELECT `table` FROM dolt_constraint_violations WHERE num_violations > 0").Scan(&violating); err != nil {
+		t.Fatalf("precondition: read violating table: %v", err)
+	}
+	if violating != "cli_decline_children" {
+		t.Fatalf("precondition: violating table = %q, want cli_decline_children", violating)
+	}
+
+	pullErr := errors.New("dolt pull failed: exit status 1")
+	err = store.finishCLIPull(ctx, pullErr)
+
+	var mce *versioncontrolops.MergeConflictsError
+	if errors.As(err, &mce) {
+		t.Fatalf("finishCLIPull error = %v, want a constraint-violations error, not *MergeConflictsError", err)
+	}
+	if !errors.Is(err, pullErr) {
+		t.Errorf("the violations error does not wrap the pull's own error: %v", err)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "cli_decline_children") {
+		t.Errorf("error %q does not name the unrepaired table", msg)
+	}
+
+	var merging bool
+	if err := db.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&merging); err != nil {
+		t.Fatalf("read dolt_merge_status after finishCLIPull: %v", err)
+	}
+	if merging {
+		t.Fatal("unrepaired-violation CLI pull left the merge open (dolt_merge_status.is_merging=1); want it aborted")
+	}
+	var violations int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COALESCE(SUM(num_violations),0) FROM dolt_constraint_violations").Scan(&violations); err != nil {
+		t.Fatalf("count surviving violations: %v", err)
+	}
+	if violations != 0 {
+		t.Errorf("%d violation(s) remain in the working set; want the merge aborted", violations)
+	}
+	if got, err := store.GetCurrentCommit(ctx); err != nil {
+		t.Fatalf("read head after the aborted pull: %v", err)
+	} else if got != preHead {
+		t.Errorf("head = %s after the aborted pull, want the pre-pull head %s", got, preHead)
+	}
+	var childRows int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM cli_decline_children").Scan(&childRows); err != nil {
+		t.Fatalf("count child rows after the abort: %v", err)
+	} else if childRows != 0 {
+		t.Errorf("%d child row(s) survive the abort; want the pre-pull working set restored", childRows)
 	}
 }

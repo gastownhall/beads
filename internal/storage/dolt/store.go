@@ -6424,16 +6424,25 @@ func (s *DoltStore) autoResolveConflictsAfterCLIPull(ctx context.Context) (bool,
 	}
 	// bd-6dnrw.4: a CLI pull can also leave FK cascade violations in the
 	// shared working set (child rows whose parent issue was deleted on the
-	// other clone). Repair them like the SQL route does; unrepaired
-	// violations roll back untouched for the operator.
+	// other clone). Repair them like the SQL route does; violations the
+	// repair cannot fix are the operator's, and — like a declined conflict —
+	// they ride an OPEN merge, so capture the violating tables before
+	// anything wipes the merge state and hand them to finishCLIPull, which
+	// aborts the merge the way the SQL route's rollback does and names them
+	// (GH#7839).
 	repairedViol, hadViol, violErr := s.tryRepairFKCascadeViolations(ctx, tx)
 	if violErr != nil {
 		_ = tx.Rollback()
 		return false, violErr
 	}
 	if hadViol && !repairedViol {
+		violations, vErr := cliPullViolationTables(ctx, tx)
+		if vErr != nil {
+			_ = tx.Rollback()
+			return false, vErr
+		}
 		_ = tx.Rollback()
-		return false, nil
+		return false, &cliPullDeclineError{violations: violations}
 	}
 	if !resolved && !repairedViol {
 		_ = tx.Rollback()
@@ -6451,6 +6460,28 @@ func (s *DoltStore) autoResolveConflictsAfterCLIPull(ctx context.Context) (bool,
 		return false, err
 	}
 	return true, nil
+}
+
+// cliPullViolationTables lists the tables with outstanding FK constraint
+// violations in the working set, so the CLI pull decline path can name what
+// the repair could not fix before the settlement aborts the merge that
+// carries them. The same query TryRepairFKCascadeViolations screens with.
+func cliPullViolationTables(ctx context.Context, tx *sql.Tx) ([]string, error) {
+	rows, err := tx.QueryContext(ctx,
+		"SELECT `table` FROM dolt_constraint_violations WHERE num_violations > 0")
+	if err != nil {
+		return nil, fmt.Errorf("query constraint violations: %w", err)
+	}
+	defer rows.Close()
+	var tables []string
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			return nil, fmt.Errorf("scan constraint violation: %w", err)
+		}
+		tables = append(tables, table)
+	}
+	return tables, rows.Err()
 }
 
 // tryAutoResolveMergeConflicts auto-resolves merge conflicts that are safe to
