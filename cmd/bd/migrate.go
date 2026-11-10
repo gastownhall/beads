@@ -651,6 +651,7 @@ func handleSchemaMigrate() error {
 		}
 		return HandleError("schema migration failed: %v", err)
 	}
+	passApplied := applied
 	// This verb opens with migration consent, so on a shared server the
 	// store open applies the pending migrations and the pass above finds
 	// nothing left (gastownhall/beads#7283). The version-bump
@@ -678,6 +679,12 @@ func handleSchemaMigrate() error {
 	status := "current"
 	if applied > 0 {
 		status = "applied"
+	}
+	// Only this pass's own migrations mark the command as a write. The
+	// opens committed each migration step they applied, so counting theirs
+	// would leave the post-run auto-commit nothing to take but the user's
+	// unrelated pending edits (gastownhall/beads#7283).
+	if passApplied > 0 {
 		commandDidWrite.Store(true)
 	}
 
