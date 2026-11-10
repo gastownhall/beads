@@ -282,6 +282,14 @@ func TestServedBatchApplyCarriesTheGateMembers(t *testing.T) {
 	conformance.RunBatchApplyCarriesTheGateMembers(t, t.Context(), newServedBatchApplyFixture(t, "hbagate"))
 }
 
+// TestServedBatchApplyStateChangeOnATemplateHonorsAllowTemplate RUNS: the
+// served Config advertises issues.batchApply.updateAllowTemplate, and this
+// client sends an update item's allow_template when it is set, so bd
+// set-state's one-request state change reaches a template over the wire.
+func TestServedBatchApplyStateChangeOnATemplateHonorsAllowTemplate(t *testing.T) {
+	conformance.RunBatchApplyStateChangeOnATemplateHonorsAllowTemplate(t, t.Context(), newServedBatchApplyFixture(t, "hbasct"))
+}
+
 // TestServedBatchApplyStampsSpawnerIDOnlyWhenNamed wires the dep_add
 // HasSpawner/ThreadID lineage conformance case onto the http leg (S5): a
 // served default Config always advertises CapBatchApplyDepAddLineage (it is
