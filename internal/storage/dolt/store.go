@@ -6240,6 +6240,28 @@ func (s *DoltStore) markBlockedRecomputePending(ctx context.Context, fromCommit 
 	_ = tx.Commit()
 }
 
+// cliPullDeclineError reports what a post-CLI-pull auto-resolve pass
+// declined to settle, captured from the working set before any abort wipes
+// the merge state. finishCLIPull turns it into the settlement the SQL pull
+// route's rollback performs: abort the open merge, then report (GH#7839).
+type cliPullDeclineError struct {
+	conflicts []storage.Conflict
+	// violations names the tables whose FK cascade violations the repair
+	// could not fix (bd-6dnrw.4's delete-vs-insert hazard).
+	violations []string
+}
+
+func (e *cliPullDeclineError) Error() string {
+	if len(e.conflicts) > 0 {
+		tables := make([]string, len(e.conflicts))
+		for i, c := range e.conflicts {
+			tables[i] = c.Field
+		}
+		return fmt.Sprintf("CLI pull conflicts in %s were declined for operator resolution", strings.Join(tables, ", "))
+	}
+	return fmt.Sprintf("CLI pull left constraint violations bd cannot auto-repair in %s", strings.Join(e.violations, ", "))
+}
+
 // finishCLIPull runs the merge-conflict auto-resolver after a CLI-based pull
 // (git-protocol, credentialed, or cloud-auth remotes). CLI `dolt pull` writes any
 // merge conflicts into the shared working set but, unlike the SQL DOLT_PULL path,
@@ -6250,12 +6272,21 @@ func (s *DoltStore) markBlockedRecomputePending(ctx context.Context, fromCommit 
 // same resolver as the SQL path. pullErr is what doltCLIPull returned: a pull that
 // fails *because* of conflicts is recoverable once they resolve, so we inspect the
 // working set regardless and only surface pullErr when nothing was resolved.
+// A declined conflict no longer stays in the working set for the operator: the
+// CLI subprocess also left the merge OPEN, and an open merge wedges every
+// later write and pull until an operator runs DOLT_MERGE('--abort') by hand
+// (GH#7839), so a decline is settled by aborting and reporting, exactly as
+// the SQL route's rollback does.
 func (s *DoltStore) finishCLIPull(ctx context.Context, pullErr error) error {
 	if s.readOnly {
 		// A read-only store cannot resolve or commit; surface the pull result as-is.
 		return pullErr
 	}
 	resolved, resolveErr := s.autoResolveConflictsAfterCLIPull(ctx)
+	var declined *cliPullDeclineError
+	if errors.As(resolveErr, &declined) {
+		return s.settleDeclinedCLIPull(ctx, pullErr, declined)
+	}
 	if resolveErr != nil {
 		if pullErr != nil {
 			return pullErr
@@ -6270,6 +6301,63 @@ func (s *DoltStore) finishCLIPull(ctx context.Context, pullErr error) error {
 	return nil
 }
 
+// settleDeclinedCLIPull aborts the merge a declined CLI pull left open
+// (GH#7839) and converts the decline into the SQL route's reporting
+// contract. The conflicts were captured before the abort — the abort wipes
+// dolt_conflicts along with the rest of the merge state (bd-578h9.15) — so
+// the caller still sees what was declined. This never returns nil: the pull
+// failed, and the settlement's job is to leave the operator an actionable
+// failure with a restored working set, not to hide it.
+func (s *DoltStore) settleDeclinedCLIPull(ctx context.Context, pullErr error, declined *cliPullDeclineError) error {
+	// Pin a single connection: the is_merging read and the abort must land on
+	// the same branch the CLI pull merged into. A fresh connection from the
+	// pool defaults to the base branch and can miss the open merge
+	// (be-b0am). The pull's network transfer already ran in the subprocess,
+	// so no long-timeout connection is needed for local settlement.
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return errors.Join(pullErr, fmt.Errorf("failed to acquire a connection to settle the declined CLI pull: %w", err))
+	}
+	defer func() { _ = conn.Close() }()
+	var merging bool
+	switch err := conn.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&merging); {
+	case err == nil:
+	case errors.Is(err, sql.ErrNoRows):
+		// No merge status to read is no evidence of an open merge — treat it
+		// as closed, as concludeOpenMerge does.
+		merging = false
+	default:
+		return errors.Join(pullErr, fmt.Errorf("failed to read merge state while settling the declined CLI pull: %w", err))
+	}
+	if merging {
+		if err := versioncontrolops.AbortMerge(ctx, conn); err != nil {
+			// The abort is the restoration this settlement promises; report
+			// its failure rather than pretending the merge was settled. No
+			// hard-reset fallback: this store cannot know whether the
+			// working set was clean before the pull, and a reset there
+			// would destroy uncommitted data the merge never touched
+			// (bd-578h9.2). The merge stays open for the operator's own
+			// DOLT_MERGE('--abort').
+			return errors.Join(pullErr, fmt.Errorf("the declined CLI pull's merge could not be aborted; it is still open, run DOLT_MERGE('--abort') on the database: %w", err))
+		}
+	}
+	if len(declined.conflicts) > 0 {
+		// The SQL route's contract (bd-578h9.15): restoration already
+		// happened, and the conflicts are what was declined, captured
+		// pre-abort because they are not queryable afterwards.
+		return &versioncontrolops.MergeConflictsError{Conflicts: declined.conflicts, MergeErr: pullErr}
+	}
+	if len(declined.violations) > 0 {
+		// Not MergeConflictsError: the abort wiped dolt_constraint_violations
+		// with the rest of the merge state, so pointing the operator at that
+		// table would send them to rows that no longer exist.
+		return errors.Join(pullErr, fmt.Errorf("pull merge left constraint violations bd cannot auto-repair in %s; the merge was aborted and the working set restored — reconcile the divergent parent rows (bd vc merge <remote>/<branch> --strategy ours|theirs) before retrying", strings.Join(declined.violations, ", ")))
+	}
+	// A decline carrying neither conflicts nor violations should be
+	// unreachable; report it rather than silently succeed after a failed pull.
+	return errors.Join(pullErr, errors.New("CLI pull declined without captured conflicts or violations"))
+}
+
 // autoResolveConflictsAfterCLIPull inspects the working set and auto-resolves the
 // conflict classes that are safe without operator input (#4259 audit-only dependency
 // edges, GH#2466 metadata, GH#4698 issues-table LWW). It runs on a connection from
@@ -6279,8 +6367,10 @@ func (s *DoltStore) finishCLIPull(ctx context.Context, pullErr error) error {
 // see the conflicts. The pull's
 // network transfer already completed in the subprocess, so no long-timeout connection
 // is needed for the local resolve. Returns (true, nil) only if all conflicts were
-// resolved and committed; (false, nil) when there is nothing to resolve or a conflict
-// needs the operator, leaving the working set untouched for manual resolution.
+// resolved and committed; (false, nil) when there is nothing to resolve; and
+// (false, *cliPullDeclineError) when a conflict or violation needs the operator,
+// captured from the working set so finishCLIPull can abort the open merge and
+// report what was declined (GH#7839).
 func (s *DoltStore) autoResolveConflictsAfterCLIPull(ctx context.Context) (bool, error) {
 	// Pin a single connection: @@dolt_allow_commit_conflicts is session-scoped,
 	// and setting it through a pooled transaction leaks it to whichever caller
@@ -6312,6 +6402,25 @@ func (s *DoltStore) autoResolveConflictsAfterCLIPull(ctx context.Context) (bool,
 	if err != nil {
 		_ = tx.Rollback()
 		return false, err
+	}
+	// GH#7839: a conflict the resolver declined is the operator's, and the
+	// CLI `dolt pull` that left it in the working set also left the merge
+	// OPEN. Capture the conflicts before anything wipes the merge state — a
+	// post-abort GetConflicts is empty (bd-578h9.15) — and hand them to
+	// finishCLIPull, which aborts the merge the way the SQL route's rollback
+	// does and reports them. Declining here, before the FK repair, also
+	// closes the old path where declined conflicts rode a repaired-violations
+	// settle into a commit that left them live in the working set.
+	if !resolved {
+		conflicts, cErr := versioncontrolops.GetConflicts(ctx, tx)
+		if cErr != nil {
+			_ = tx.Rollback()
+			return false, cErr
+		}
+		if len(conflicts) > 0 {
+			_ = tx.Rollback()
+			return false, &cliPullDeclineError{conflicts: conflicts}
+		}
 	}
 	// bd-6dnrw.4: a CLI pull can also leave FK cascade violations in the
 	// shared working set (child rows whose parent issue was deleted on the

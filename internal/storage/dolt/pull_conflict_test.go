@@ -1,7 +1,11 @@
 package dolt
 
 import (
+	"context"
+	"errors"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 // TestPullAutoResolveMetadataConflicts verifies that merge conflicts limited to
@@ -347,5 +351,100 @@ func TestSettleMergeInTxKeepsCleanMergedTables(t *testing.T) {
 	}
 	if dirty != 0 {
 		t.Errorf("%d table(s) left uncommitted after the settlement", dirty)
+	}
+}
+
+// persistConflictedCLIMerge persists a conflicted merge into the shared
+// working set exactly the way a CLI `dolt pull` subprocess leaves it: the
+// merge ran outside any transaction bd can inspect, its conflicts are live
+// in dolt_conflicts, and dolt_merge_status.is_merging is 1.
+func persistConflictedCLIMerge(ctx context.Context, t *testing.T, store *DoltStore, peerBranch string) {
+	t.Helper()
+	db := store.db
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, "SET @@dolt_allow_commit_conflicts = 1"); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("allow commit conflicts: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, "CALL DOLT_MERGE(?)", peerBranch); err != nil {
+		t.Logf("merge returned: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("persist conflicted working set: %v", err)
+	}
+	var merging bool
+	if err := db.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&merging); err != nil {
+		t.Fatalf("read dolt_merge_status: %v", err)
+	}
+	if !merging {
+		t.Fatal("precondition: expected an open merge in the working set after the simulated CLI pull")
+	}
+}
+
+// TestFinishCLIPull_DeclinedConflictAbortsMerge pins the CLI-pull route against
+// GH#7839: when the resolver declines a conflict (here a same-edge dependency whose
+// type differs), finishCLIPull must abort the merge the CLI `dolt pull` left in the
+// shared working set, as the SQL pull route does. Leaving it open (is_merging=1)
+// blocks every later write and pull until an operator runs DOLT_MERGE('--abort').
+func TestFinishCLIPull_DeclinedConflictAbortsMerge(t *testing.T) {
+	store, peerBranch := setupDependencyMergeConflict(t, "blocks", "alice", "related", "alice")
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+	db := store.db
+
+	preHead, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("read pre-pull head: %v", err)
+	}
+
+	persistConflictedCLIMerge(ctx, t, store, peerBranch)
+
+	pullErr := errors.New("dolt pull failed: Automatic merge failed; fix conflicts and then commit the result")
+	err = store.finishCLIPull(ctx, pullErr)
+
+	var mce *versioncontrolops.MergeConflictsError
+	if !errors.As(err, &mce) {
+		t.Fatalf("finishCLIPull error = %v, want *MergeConflictsError carrying the declined conflicts", err)
+	}
+	if len(mce.Conflicts) != 1 || mce.Conflicts[0].Field != "dependencies" {
+		t.Errorf("MergeConflictsError.Conflicts = %v, want the declined dependencies conflict", mce.Conflicts)
+	}
+	if !errors.Is(err, pullErr) {
+		t.Error("the conflicts error does not wrap the pull's own error")
+	}
+
+	var merging bool
+	if err := db.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&merging); err != nil {
+		t.Fatalf("read dolt_merge_status after finishCLIPull: %v", err)
+	}
+	if merging {
+		t.Fatal("declined CLI-pull conflict left the merge open (dolt_merge_status.is_merging=1); want it aborted")
+	}
+	var conflicts int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_conflicts").Scan(&conflicts); err != nil {
+		t.Fatalf("count dolt_conflicts: %v", err)
+	}
+	if conflicts != 0 {
+		t.Errorf("%d conflicted table(s) remain after the declined CLI pull; want the merge aborted", conflicts)
+	}
+
+	// The abort restores the pre-pull state: same head, our side of the
+	// declined edge intact.
+	if got, err := store.GetCurrentCommit(ctx); err != nil {
+		t.Fatalf("read head after finishCLIPull: %v", err)
+	} else if got != preHead {
+		t.Errorf("head = %s after the aborted pull, want the pre-pull head %s", got, preHead)
+	}
+	var depType string
+	if err := db.QueryRowContext(ctx,
+		"SELECT type FROM dependencies WHERE issue_id = 'depc-x' AND depends_on_issue_id = 'depc-y'").Scan(&depType); err != nil {
+		t.Fatalf("read local edge after the aborted pull: %v", err)
+	}
+	if depType != "blocks" {
+		t.Errorf("local edge type = %q after the abort, want our pre-pull value %q", depType, "blocks")
 	}
 }

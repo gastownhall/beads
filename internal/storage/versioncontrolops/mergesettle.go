@@ -378,9 +378,23 @@ func MergeWithStrategy(ctx context.Context, db DBConn, ref, author, strategy str
 // destroy uncommitted data the merge never touched (bd-578h9.2).
 // Best-effort: the caller's error is what matters.
 func abortMerge(ctx context.Context, db DBConn, preMergeClean bool) {
-	if err := schema.DrainCall(ctx, db, "CALL DOLT_MERGE('--abort')"); err != nil && preMergeClean {
+	if err := AbortMerge(ctx, db); err != nil && preMergeClean {
 		_ = schema.DrainCall(ctx, db, "CALL DOLT_RESET('--hard')")
 	}
+}
+
+// AbortMerge aborts the currently open merge on db, returning the abort's
+// own error so callers that PROMISE restoration can tell whether it ran.
+// The settle paths use the best-effort abortMerge instead, whose
+// preMergeClean-gated hard-reset fallback this deliberately omits: a caller
+// that cannot know whether the working set was clean before the merge must
+// never hard-reset on the abort's failure (bd-578h9.2). The CLI pull route's
+// declined-conflict settlement (GH#7839) is the caller that needs the
+// distinction — a swallowed abort failure leaves
+// dolt_merge_status.is_merging=1, wedging every later write and pull until
+// an operator runs DOLT_MERGE('--abort') by hand.
+func AbortMerge(ctx context.Context, db DBConn) error {
+	return schema.DrainCall(ctx, db, "CALL DOLT_MERGE('--abort')")
 }
 
 // doltCommitHashRE matches a Dolt commit hash (32 base32 characters), the
