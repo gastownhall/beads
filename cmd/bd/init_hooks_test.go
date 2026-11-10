@@ -1663,6 +1663,7 @@ func TestHooksList_RelocatedHooksPath(t *testing.T) {
 			Hooks     []HookStatus `json:"hooks"`
 			HooksPath *struct {
 				Configured  string `json:"configured"`
+				Resolved    string `json:"resolved"`
 				Exists      bool   `json:"exists"`
 				RelocatedTo string `json:"relocated_to"`
 			} `json:"hooks_path"`
@@ -1676,11 +1677,11 @@ func TestHooksList_RelocatedHooksPath(t *testing.T) {
 		if got.HooksPath == nil {
 			t.Fatalf("--json output lacks hooks_path:\n%s", raw)
 		}
-		if got.HooksPath.Configured != stale || got.HooksPath.Exists {
-			t.Errorf("hooks_path = %+v, want configured %q with exists=false", *got.HooksPath, stale)
+		if got.HooksPath.Configured != stale || got.HooksPath.Resolved != stale || got.HooksPath.Exists {
+			t.Errorf("hooks_path = %+v, want configured and resolved %q with exists=false", *got.HooksPath, stale)
 		}
-		if got.HooksPath.RelocatedTo == "" || filepath.Base(filepath.Dir(got.HooksPath.RelocatedTo)) != ".beads" {
-			t.Errorf("hooks_path.relocated_to = %q, want the current .beads/hooks", got.HooksPath.RelocatedTo)
+		if rel := got.HooksPath.RelocatedTo; rel != target && !utilsSameDir(rel, target) {
+			t.Errorf("hooks_path.relocated_to = %q, want %q", rel, target)
 		}
 	})
 
@@ -1688,6 +1689,74 @@ func TestHooksList_RelocatedHooksPath(t *testing.T) {
 		t.Errorf("bd hooks list changed core.hooksPath: %q -> %q", before, after)
 	}
 	assertStaleNotCreated(t, stale)
+}
+
+// TestHooksList_UnownedHooksPath: a missing core.hooksPath bd cannot repoint,
+// or one it cannot inspect, is named without offering a repoint or claiming
+// hooks live elsewhere, and list changes nothing (GH#5853).
+func TestHooksList_UnownedHooksPath(t *testing.T) {
+	t.Run("third-party path", func(t *testing.T) {
+		t.Setenv("BEADS_DIR", "")
+		repo := newGitRepo(t)
+		stale := filepath.Join(t.TempDir(), "team-hooks")
+		gitConfigIn(t, repo, "core.hooksPath", stale)
+		before := hooksPathConfig(t, repo)
+		runInDir(t, repo, func() {
+			out := captureStdout(t, func() error { return hooksListCmd.RunE(hooksListCmd, nil) })
+			for _, want := range []string{stale, "Git runs no hooks", "bd will not change it"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("text output lacks %q:\n%s", want, out)
+				}
+			}
+			if strings.Contains(out, "repoint") || strings.Contains(out, "bd hooks are installed at") {
+				t.Errorf("no relocation may be offered for a path bd does not own:\n%s", out)
+			}
+		})
+		if after := hooksPathConfig(t, repo); after != before {
+			t.Errorf("bd hooks list changed core.hooksPath: %q -> %q", before, after)
+		}
+		if _, err := os.Lstat(stale); !os.IsNotExist(err) {
+			t.Errorf("bd hooks list created %s (err=%v)", stale, err)
+		}
+	})
+
+	t.Run("not a directory, json", func(t *testing.T) {
+		t.Setenv("BEADS_DIR", "")
+		repo := newGitRepo(t)
+		file := filepath.Join(t.TempDir(), "hooks-file")
+		if err := os.WriteFile(file, []byte("not a directory\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		gitConfigIn(t, repo, "core.hooksPath", file)
+		runInDir(t, repo, func() {
+			old := jsonOutput
+			jsonOutput = true
+			defer func() { jsonOutput = old }()
+			raw := captureStdout(t, func() error { return hooksListCmd.RunE(hooksListCmd, nil) })
+			var got struct {
+				Hooks     []HookStatus `json:"hooks"`
+				HooksPath *struct {
+					Configured   string `json:"configured"`
+					Exists       bool   `json:"exists"`
+					RelocatedTo  string `json:"relocated_to"`
+					InspectError string `json:"inspect_error"`
+				} `json:"hooks_path"`
+			}
+			if err := json.Unmarshal([]byte(raw), &got); err != nil {
+				t.Fatalf("--json output is not JSON: %v\n%s", err, raw)
+			}
+			if len(got.Hooks) != len(managedHookNames) {
+				t.Errorf("hooks array has %d entries, want %d", len(got.Hooks), len(managedHookNames))
+			}
+			if got.HooksPath == nil {
+				t.Fatalf("--json output lacks hooks_path:\n%s", raw)
+			}
+			if got.HooksPath.Configured != file || !got.HooksPath.Exists || got.HooksPath.RelocatedTo != "" ||
+				!strings.Contains(got.HooksPath.InspectError, "not a directory") {
+				t.Errorf("hooks_path = %+v, want %q reported as existing but not a directory", *got.HooksPath, file)
+			}
+		})
+	})
 }
 
 // TestInstallHooks_RelocatedHooksPath: a plain install and the config apply

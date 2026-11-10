@@ -671,8 +671,15 @@ type HooksPathState struct {
 	// Resolved is Configured with ~ expanded and a relative value joined to
 	// the repository root.
 	Resolved string
-	// Exists reports whether Resolved exists.
+	// Exists reports whether something exists at Resolved; false with an
+	// InspectError means existence is unknown, not that the path is absent.
 	Exists bool
+	// InspectError says why the value could not be classified: the config
+	// read failed, Resolved could not be inspected (a permission failure,
+	// say), or it names something other than a directory. Such a value is
+	// never Missing, Managed or relocated: none of that is evidence the
+	// directory is gone.
+	InspectError string
 	// Managed reports a missing value IsBeadsManagedHooksPath recognizes: a
 	// current beads location deleted in place, which `bd doctor --fix` unsets
 	// (GH#4440).
@@ -684,9 +691,15 @@ type HooksPathState struct {
 	Refusal string
 }
 
-// Missing reports a configured hooks directory that does not exist.
+// Missing reports a configured hooks directory that is confirmed absent.
 func (s HooksPathState) Missing() bool {
-	return s.Configured != "" && !s.Exists
+	return s.Configured != "" && !s.Exists && s.InspectError == ""
+}
+
+// Unusable reports a configured hooks directory git cannot run hooks from:
+// confirmed absent, or one bd could not inspect.
+func (s HooksPathState) Unusable() bool {
+	return s.Missing() || s.InspectError != ""
 }
 
 // CurrentHooksPathQuery describes the repository the process runs in. ok is
@@ -720,7 +733,11 @@ func CurrentHooksPathQuery() (HooksPathQuery, bool) {
 //     not a symlink, holding at least one recognizable beads hook.
 func InspectHooksPath(q HooksPathQuery) HooksPathState {
 	var s HooksPathState
-	s.Configured, s.Scope = readEffectiveHooksPath(q.WorkDir, q.Env)
+	var err error
+	if s.Configured, s.Scope, err = readEffectiveHooksPath(q.WorkDir, q.Env); err != nil {
+		s.InspectError = err.Error()
+		return s
+	}
 	if s.Configured == "" {
 		return s
 	}
@@ -728,7 +745,16 @@ func InspectHooksPath(q HooksPathQuery) HooksPathState {
 	if !filepath.IsAbs(s.Resolved) {
 		s.Resolved = filepath.Join(q.RepoRoot, s.Resolved)
 	}
-	if s.Exists = fileExists(s.Resolved); s.Exists {
+	info, err := os.Stat(s.Resolved)
+	switch {
+	case err == nil:
+		s.Exists = true
+		if !info.IsDir() {
+			s.InspectError = fmt.Sprintf("%s is not a directory", remedy.PrintedValue(s.Resolved))
+		}
+		return s
+	case !os.IsNotExist(err):
+		s.InspectError = fmt.Sprintf("could not inspect %s: %v", remedy.PrintedValue(s.Resolved), err)
 		return s
 	}
 	if s.Managed = IsBeadsManagedHooksPath(q.RepoRoot, q.StorageHooksDir, s.Configured); s.Managed {
@@ -738,26 +764,30 @@ func InspectHooksPath(q HooksPathQuery) HooksPathState {
 	return s
 }
 
-// readEffectiveHooksPath returns the effective core.hooksPath and its scope.
-func readEffectiveHooksPath(dir string, env []string) (value, scope string) {
+// readEffectiveHooksPath returns the effective core.hooksPath and its scope;
+// value is "" with a nil error when core.hooksPath is unset.
+func readEffectiveHooksPath(dir string, env []string) (value, scope string, err error) {
 	cmd := exec.Command("git", "config", "--show-scope", "--get", "core.hooksPath")
 	cmd.Dir, cmd.Env = dir, env
 	out, err := cmd.Output()
 	if err == nil {
 		if gotScope, gotValue, ok := strings.Cut(strings.TrimRight(string(out), "\r\n"), "\t"); ok {
-			return strings.TrimSpace(gotValue), gotScope
+			return strings.TrimSpace(gotValue), gotScope, nil
 		}
 	} else if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 {
-		return "", "" // unset
+		return "", "", nil // unset
 	}
 	// A git without --show-scope still reports the value; the unknown scope
 	// never qualifies it for repointing.
 	cmd = exec.Command("git", "config", "--get", "core.hooksPath")
 	cmd.Dir, cmd.Env = dir, env
 	if out, err = cmd.Output(); err != nil {
-		return "", ""
+		if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 {
+			return "", "", nil // unset
+		}
+		return "", "", fmt.Errorf("could not read core.hooksPath: %w", err)
 	}
-	return strings.TrimSpace(string(out)), ""
+	return strings.TrimSpace(string(out)), "", nil
 }
 
 // relocatedHooksTarget returns the directory a missing, unmanaged core.hooksPath
@@ -794,7 +824,7 @@ func relocatedHooksTarget(q HooksPathQuery, s HooksPathState) (target, refusal s
 		return "", fmt.Sprintf("it is set in %s config, not this repository's local config", scope)
 	}
 	if q.InheritedEnv != nil {
-		if value, scope := readEffectiveHooksPath(q.WorkDir, q.InheritedEnv); value != s.Configured || scope != s.Scope {
+		if value, scope, err := readEffectiveHooksPath(q.WorkDir, q.InheritedEnv); err != nil || value != s.Configured || scope != s.Scope {
 			return "", fmt.Sprintf("this process's environment overrides it with %s config", scope)
 		}
 	}
@@ -828,9 +858,7 @@ func holdsBeadsHooks(dir string) bool {
 		if err != nil {
 			continue
 		}
-		text := string(content)
-		if strings.Contains(text, bdSectionMarkerPrefix) || strings.Contains(text, bdShimMarker) ||
-			strings.Contains(text, bdInlineHookMarker) || bdHooksRunPattern.MatchString(text) {
+		if IsBdHookContent(string(content)) {
 			return true
 		}
 	}
@@ -847,6 +875,9 @@ func RepointRelocatedHooksPath(q HooksPathQuery, from, to string) (HooksPathStat
 	if s.RelocatedTo == "" {
 		reason := s.Refusal
 		if reason == "" {
+			reason = s.InspectError
+		}
+		if reason == "" {
 			reason = "it no longer names a moved beads hooks directory"
 		}
 		return s, fmt.Errorf("core.hooksPath %s was not repointed: %s", remedy.PrintedValue(s.Configured), reason)
@@ -862,9 +893,11 @@ func RepointRelocatedHooksPath(q HooksPathQuery, from, to string) (HooksPathStat
 	return s, nil
 }
 
-// HooksPathFix is the remedy text for a missing core.hooksPath.
+// HooksPathFix is the remedy text for a missing or uninspectable core.hooksPath.
 func HooksPathFix(s HooksPathState) string {
 	switch {
+	case s.InspectError != "":
+		return "bd will not change a core.hooksPath it cannot inspect. Make the directory readable, or correct core.hooksPath where it is set (git config --show-scope --get core.hooksPath)"
 	case s.RelocatedTo != "":
 		return fmt.Sprintf("Run 'bd doctor --fix' or 'bd hooks install' to repoint core.hooksPath to %s", s.RelocatedTo)
 	case s.Managed:
@@ -894,6 +927,17 @@ func CheckHooksPath() DoctorCheck {
 	}
 
 	s := InspectHooksPath(q)
+	if s.InspectError != "" {
+		// Neither absent nor usable: git cannot run hooks from it, but nothing
+		// here proves the directory is gone, so no unset or repoint applies.
+		return DoctorCheck{
+			Name:    name,
+			Status:  StatusWarning,
+			Message: "core.hooksPath could not be inspected",
+			Detail:  fmt.Sprintf("core.hooksPath=%s: %s", s.Configured, s.InspectError),
+			Fix:     HooksPathFix(s),
+		}
+	}
 	if s.Configured == "" {
 		return DoctorCheck{
 			Name:    name,
@@ -942,7 +986,7 @@ func FixHooksPath() error {
 	s := InspectHooksPath(q)
 	switch {
 	case !s.Missing():
-		return nil // nothing set, or the target exists — nothing dangling to fix
+		return nil // nothing set, the target exists, or it could not be inspected — nothing proven dangling to fix
 	case s.Managed:
 		cmd := exec.Command("git", "config", "--unset", "core.hooksPath")
 		cmd.Dir = q.RepoRoot
