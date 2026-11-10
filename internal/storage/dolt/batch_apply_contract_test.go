@@ -295,6 +295,26 @@ func TestBatchApplyContract(t *testing.T) {
 		defer cancel()
 		conformance.RunBatchApplyStateChangeRefusedAtTheEventOrItsEdgeWritesNothing(t, ctx, fixture)
 	})
+	t.Run("ARefusedEventCreatePreventsTheStateChange", func(t *testing.T) {
+		ctx, cancel := testContext(t)
+		defer cancel()
+		conformance.RunBatchApplyARefusedEventCreatePreventsTheStateChange(t, ctx, fixture)
+	})
+	t.Run("MissingParentTargetRefusesTheStateChangeAfterTheEventCreate", func(t *testing.T) {
+		ctx, cancel := testContext(t)
+		defer cancel()
+		conformance.RunBatchApplyAMissingParentTargetRefusesTheStateChangeAfterTheEventCreate(t, ctx, fixture)
+	})
+	t.Run("LateLabelRefusalRollsBackTheStateChange", func(t *testing.T) {
+		ctx, cancel := testContext(t)
+		defer cancel()
+		conformance.RunBatchApplyALateLabelRefusalRollsBackTheStateChange(t, ctx, fixture)
+	})
+	t.Run("AStateChangeBatchSurvivesASubjectThatChangedPlanes", func(t *testing.T) {
+		ctx, cancel := testContext(t)
+		defer cancel()
+		conformance.RunBatchApplyAStateChangeBatchSurvivesASubjectThatChangedPlanes(t, ctx, fixture)
+	})
 }
 
 // newDoltBatchApplyFixture composes the frozen role kit with this backend's
