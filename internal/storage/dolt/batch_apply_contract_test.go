@@ -290,6 +290,11 @@ func TestBatchApplyContract(t *testing.T) {
 		defer cancel()
 		conformance.RunBatchApplyStateChangeOnATemplateHonorsAllowTemplate(t, ctx, fixture)
 	})
+	t.Run("StateChangeRefusedAtTheEventOrItsEdgeWritesNothing", func(t *testing.T) {
+		ctx, cancel := testContext(t)
+		defer cancel()
+		conformance.RunBatchApplyStateChangeRefusedAtTheEventOrItsEdgeWritesNothing(t, ctx, fixture)
+	})
 }
 
 // newDoltBatchApplyFixture composes the frozen role kit with this backend's
