@@ -297,3 +297,84 @@ func TestEmbeddedCrossPrefixDepRepairConvergedReopenIsNoOp(t *testing.T) {
 		t.Fatalf("ignored migration %d lost by the converged reopen", crossPrefixDepRepairMarkerVersion)
 	}
 }
+
+// TestEmbeddedCrossPrefixDepRepairConvergesAcrossClones pins the per-plane
+// evidence rules (AC-8): the versioned dependencies table only trusts issue
+// evidence, which syncs, so two databases holding the same versioned rows
+// converge to byte-identical content even when one of them also holds the
+// target as a clone-local wisp — the wisp-held target stays external in the
+// versioned table on both. The dolt-ignored wisp_dependencies plane is
+// clone-local already, so it repairs per-clone with wisp evidence first.
+func TestEmbeddedCrossPrefixDepRepairConvergesAcrossClones(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	const src, heldIssue, heldWisp, wispSrc = "bd-x-src", "hq-x-issue-target", "hq-x-wisp-target", "bd-x-wisp-src"
+
+	// repairAndRead runs one clone's full lifecycle: seed, force the pass,
+	// migrate, and return the post-pass table contents. The versioned rows are
+	// planted identically on every clone; only the wisp plane is
+	// clone-specific.
+	repairAndRead := func(t *testing.T, seedClone func(t *testing.T, ctx context.Context, conn *sql.Conn)) ([]depRow, []depRow) {
+		t.Helper()
+		dataDir := seedMigratedStore(t, ctx)
+		conn, closeConn := openDepConn(t, ctx, dataDir)
+
+		seedIssue(t, ctx, conn, src)
+		seedIssue(t, ctx, conn, heldIssue)
+		// Versioned rows, identical on every clone: one target the issues
+		// plane holds, one only a wisp can answer.
+		seedDependency(t, ctx, conn, depid.New(src, heldIssue), src, nil, nil, strptr(heldIssue))
+		seedDependency(t, ctx, conn, depid.New(src, heldWisp), src, nil, nil, strptr(heldWisp))
+		seedClone(t, ctx, conn)
+		commitSeed(t, ctx, conn, "test: legacy cross-prefix rows before the repair pass")
+
+		unrecordIgnoredVersionsFrom(t, ctx, conn, crossPrefixDepRepairMarkerVersion)
+		closeConn()
+
+		conn2, _ := openDepConn(t, ctx, dataDir)
+		if _, err := schema.MigrateUp(ctx, conn2); err != nil {
+			t.Fatalf("MigrateUp over the clone's legacy rows: %v", err)
+		}
+		return readDeps(t, ctx, conn2), readDepTable(t, ctx, conn2, "wisp_dependencies")
+	}
+
+	// Clone A also holds the wisp-target as a wisp, and carries wisp-plane
+	// edges of its own for both evidence kinds.
+	depsA, wispDepsA := repairAndRead(t, func(t *testing.T, ctx context.Context, conn *sql.Conn) {
+		seedWisp(t, ctx, conn, heldWisp)
+		seedWisp(t, ctx, conn, wispSrc)
+		seedWispDependency(t, ctx, conn, depid.New(wispSrc, heldWisp), wispSrc, nil, nil, strptr(heldWisp))
+		seedWispDependency(t, ctx, conn, depid.New(wispSrc, heldIssue), wispSrc, nil, nil, strptr(heldIssue))
+	})
+	// Clone B holds no wisp plane content at all.
+	depsB, wispDepsB := repairAndRead(t, func(t *testing.T, ctx context.Context, conn *sql.Conn) {})
+
+	// The versioned table converged: identical on both clones, the wisp-held
+	// target still external on both — clone A even though it holds the wisp.
+	wantDeps := []depRow{
+		{id: depid.New(src, heldIssue), issueID: src, dependsOnIssueID: heldIssue},
+		{id: depid.New(src, heldWisp), issueID: src, dependsOnExternal: heldWisp},
+	}
+	if !slices.Equal(depRowsByTarget(depsA), depRowsByTarget(wantDeps)) ||
+		!slices.Equal(depRowsByTarget(depsB), depRowsByTarget(wantDeps)) {
+		t.Fatalf("versioned dependencies diverged across clones:\nclone A = %v\nclone B = %v\nwant   = %v", depsA, depsB, wantDeps)
+	}
+	if !slices.Equal(depsA, depsB) {
+		t.Fatal("dependencies differ across clones after the repair; the versioned table must converge")
+	}
+
+	// The clone-local plane repaired per-clone with wisp evidence first: A's
+	// wisp-held edge moved to depends_on_wisp_id, its issue-held edge to
+	// depends_on_issue_id, and B stays empty.
+	wantWispDeps := []depRow{
+		{id: depid.New(wispSrc, heldIssue), issueID: wispSrc, dependsOnIssueID: heldIssue},
+		{id: depid.New(wispSrc, heldWisp), issueID: wispSrc, dependsOnWispID: heldWisp},
+	}
+	if got := depRowsByTarget(wispDepsA); !slices.Equal(got, depRowsByTarget(wantWispDeps)) {
+		t.Fatalf("wisp_dependencies on clone A = %v, want %v", wispDepsA, wantWispDeps)
+	}
+	if len(wispDepsB) != 0 {
+		t.Fatalf("wisp_dependencies on clone B = %v, want none: the plane is clone-local", wispDepsB)
+	}
+}
