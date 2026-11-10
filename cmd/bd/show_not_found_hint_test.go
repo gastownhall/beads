@@ -128,6 +128,21 @@ func (s prefixConfigStub) GetConfig(_ context.Context, key string) (string, erro
 	return s[key], nil
 }
 
+// allowedPrefixErrStub is a prefixConfigStub whose allowed_prefixes read
+// fails. AC-3: a store whose allow-list cannot be read cannot certify a
+// prefix foreign — the list may name it — so the miss must keep
+// showNotFoundHint instead of the limited-search hint.
+type allowedPrefixErrStub struct {
+	prefixConfigStub
+}
+
+func (s allowedPrefixErrStub) GetConfig(ctx context.Context, key string) (string, error) {
+	if key == "allowed_prefixes" {
+		return "", errors.New("allowed_prefixes read failed")
+	}
+	return s.prefixConfigStub.GetConfig(ctx, key)
+}
+
 // TestShowNotFoundHintIn_ForeignPrefixIsNotCalledAbsent pins GH#5259: an id
 // whose prefix this workspace's store does not issue, and that no routes.jsonl
 // route names, may never have been looked up where it lives, so the hint
@@ -149,24 +164,40 @@ func TestShowNotFoundHintIn_ForeignPrefixIsNotCalledAbsent(t *testing.T) {
 
 	for _, tc := range []struct {
 		name     string
-		store    prefixConfigStub
+		store    prefixConfigReader
 		routes   string
 		id       string
 		beadsDir bool
 		searched bool
+		dirRoute bool // routes.jsonl exists but cannot be read (a directory in its place)
 	}{
 		{name: "own prefix", store: rig, id: "openclaw-zz9", beadsDir: true},
 		{name: "own prefix with trailing hyphen in config", store: prefixConfigStub{"issue_prefix": "openclaw-"}, id: "openclaw-zz9", beadsDir: true},
 		{name: "allowed prefix", store: prefixConfigStub{"issue_prefix": "openclaw", "allowed_prefixes": "op, herald-"}, id: "herald-x7k", beadsDir: true},
+		{name: "allowed prefix with whitespace and trailing hyphens", store: prefixConfigStub{"issue_prefix": "openclaw", "allowed_prefixes": " op , herald- , "}, id: "herald-x7k", beadsDir: true},
+		{name: "multi-hyphen allowed prefix", store: prefixConfigStub{"issue_prefix": "openclaw", "allowed_prefixes": "claude-os"}, id: "claude-os-test", beadsDir: true},
+		{name: "allowed_prefixes read error", store: allowedPrefixErrStub{prefixConfigStub{"issue_prefix": "openclaw", "allowed_prefixes": "herald"}}, id: "herald-x7k", beadsDir: true},
 		{name: "routed prefix", store: rig, routes: `{"prefix":"herald-","path":"herald"}`, id: "herald-x7k", beadsDir: true},
+		{name: "self route", store: rig, routes: `{"prefix":"herald-","path":"."}`, id: "herald-x7k", beadsDir: true},
+		{name: "second of overlapping valid routes", store: rig, routes: `{"prefix":"ga-","path":"ga"}` + "\n" + `{"prefix":"herald-","path":"herald"}`, id: "herald-x7k", beadsDir: true},
+		{name: "unreadable routes.jsonl", store: rig, id: "herald-x7k", dirRoute: true},
 		{name: "routed tier searched another store", store: rig, id: "herald-x7k", beadsDir: true, searched: true},
 		{name: "no issue_prefix configured", store: prefixConfigStub{}, id: "herald-x7k", beadsDir: true},
 		{name: "bare hash", store: rig, id: "gea4h", beadsDir: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := ""
-			if tc.beadsDir {
+			switch {
+			case tc.beadsDir:
 				dir = foreignPrefixTown(t, tc.routes)
+			case tc.dirRoute:
+				// A routes.jsonl that exists but cannot be read must fail
+				// safe: the classifier cannot tell whether a route named
+				// the prefix, so the miss keeps the deletion/history hint.
+				dir = filepath.Join(t.TempDir(), ".beads")
+				if err := os.MkdirAll(filepath.Join(dir, "routes.jsonl"), 0o755); err != nil {
+					t.Fatalf("mkdir routes.jsonl: %v", err)
+				}
 			}
 			if got, want := showNotFoundHintIn(ctx, tc.store, dir, tc.id, tc.searched), showNotFoundHint(tc.id); got != want {
 				t.Errorf("hint = %q, want showNotFoundHint's %q", got, want)
@@ -176,6 +207,39 @@ func TestShowNotFoundHintIn_ForeignPrefixIsNotCalledAbsent(t *testing.T) {
 
 	if got, want := showNotFoundHintIn(ctx, nil, "", "herald-x7k", false), showNotFoundHint("herald-x7k"); got != want {
 		t.Errorf("no store: hint = %q, want %q", got, want)
+	}
+
+	// The classifier must still call a prefix foreign when the evidence says
+	// no route could have carried it: routes for other prefixes, a route
+	// whose entry lacks the trailing hyphen (it never matches), and no
+	// workspace routes.jsonl at all (the no-path wording, not an invented
+	// path).
+	for _, tc := range []struct {
+		name   string
+		store  prefixConfigReader
+		routes string
+		dir    bool
+		id     string
+		want   string
+	}{
+		{name: "route for another prefix", store: rig, routes: `{"prefix":"ga-","path":"ga"}`, dir: true, id: "herald-x7k", want: "or configure a matching prefix route"},
+		{name: "route whose entry lacks the trailing hyphen", store: rig, routes: `{"prefix":"hq","path":"hq"}`, dir: true, id: "hq-x7k", want: "or configure a matching prefix route"},
+		{name: "multi-hyphen allowed prefix does not swallow siblings", store: prefixConfigStub{"issue_prefix": "openclaw", "allowed_prefixes": "claude-os"}, dir: true, id: "claude-x1", want: `prefix "claude"`},
+		{name: "no workspace routes.jsonl available", store: rig, id: "herald-x7k", want: "no workspace routes.jsonl is available from this directory"},
+	} {
+		t.Run("still foreign: "+tc.name, func(t *testing.T) {
+			dir := ""
+			if tc.dir {
+				dir = foreignPrefixTown(t, tc.routes)
+			}
+			hint := showNotFoundHintIn(ctx, tc.store, dir, tc.id, false)
+			if !strings.Contains(hint, tc.want) {
+				t.Errorf("hint = %q, want the limited-search hint containing %q", hint, tc.want)
+			}
+			if strings.Contains(hint, "never existed") {
+				t.Errorf("hint = %q, suggests the id never existed", hint)
+			}
+		})
 	}
 }
 

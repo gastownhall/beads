@@ -77,9 +77,14 @@ func unroutedForeignPrefix(ctx context.Context, s prefixConfigReader, beadsDir, 
 		return "", "", false
 	}
 	known := []string{storePrefix}
-	if allowed, err := s.GetConfig(ctx, "allowed_prefixes"); err == nil {
-		known = append(known, strings.Split(allowed, ",")...)
+	allowed, err := s.GetConfig(ctx, "allowed_prefixes")
+	if err != nil {
+		// The allow-list is unreadable, so the classifier cannot certify the
+		// prefix foreign — the list may name it (GH#5259): say nothing the
+		// store could contradict and let the deletion/history hint answer.
+		return "", "", false
 	}
+	known = append(known, strings.Split(allowed, ",")...)
 	for _, p := range known {
 		if p = strings.TrimSuffix(strings.TrimSpace(p), "-"); p != "" && strings.HasPrefix(id, p+"-") {
 			return "", "", false
