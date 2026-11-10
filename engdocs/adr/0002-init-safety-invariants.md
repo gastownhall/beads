@@ -96,8 +96,23 @@ bd init --reinit-local \        local reinit, overwrite remote on next push
     --discard-remote            (interactive confirm or --destroy-token required)
 bd init --from-jsonl            local JSONL import; refuses remote divergence
 bd init --force                 deprecated alias for --reinit-local (≥2 releases)
+bd init --yes                   consent ahead of time to adopting a git origin's issue history (#6099)
+bd init --no-adopt              never derive a Dolt remote from git origin (also BD_NO_REMOTE_ADOPT=1)
 bd bootstrap                    adopt remote — signposted by init refusal
 ```
+
+Since #6099, the derived-origin bootstrap (`origin` carrying
+`refs/dolt/data`, no configured Dolt remote) is gated by explicit consent
+rather than happening silently: a non-interactive `bd init` refuses with the
+generic exit 1 (no new stable code — protocol v0 §E3 freezes 10/11/12/130),
+an interactive run asks once at the early checkpoint and the consent binds
+to the URL it named, and `--yes` consents ahead of time. The late bootstrap
+probe never prompts; a consent granted for one URL is not reused for
+another. The guard matrix in `cmd/bd/init_safety_test.go` covers the
+derived/`--yes`/`--no-adopt`/probe-unknown rows, and
+`cmd/bd/dolt_drop_database.go` is the recovery half: `bd dolt
+drop-database <name>` removes a database an unwanted adoption left on the
+server, with consent and without purging DOLT_UNDROP recovery.
 
 ### Exit codes (stable, grep-safe)
 

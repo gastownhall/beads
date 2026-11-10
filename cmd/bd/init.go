@@ -556,6 +556,15 @@ for viewers (bv), interchange, and issue-level migration; not backup.
 Cross-machine sync and backups use Dolt remotes/backups, not JSONL import/export.
 To enable: bd config set export.auto true
 
+When no Dolt remote is configured and the git origin already carries Dolt
+issue history (refs/dolt/data), bd init adopts that history only with
+consent: interactively it asks once and names the origin; non-interactively
+it refuses instead (--non-interactive is not consent).
+  --yes           consent ahead of time to adopting the origin's issue history
+  --no-adopt      never derive a Dolt remote from git origin
+                  (equivalent: BD_NO_REMOTE_ADOPT=1)
+Declining exits 1 and creates no workspace. See 'bd help init-safety'.
+
 Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
   Skips all interactive prompts, using sensible defaults:
   • Role defaults to "maintainer" (override with --role)

@@ -65,6 +65,16 @@ FLAG SURFACE
                                 --discard-remote authorizes replacing that
                                 remote history.
 
+  bd init --yes                 Consent ahead of time to adopting the git
+                                origin's issue history when no Dolt remote
+                                is configured and origin has refs/dolt/
+                                data. Covers the adoption only: the
+                                divergence and destroy guards still fire.
+
+  bd init --no-adopt            Never derive a Dolt remote from git origin.
+                                No probe, no clone, no sync.remote wiring
+                                (equivalent: BD_NO_REMOTE_ADOPT=1).
+
 ADOPTING A REMOTE
 
   If you want to use the remote's existing history, use:
@@ -72,6 +82,13 @@ ADOPTING A REMOTE
       bd bootstrap
 
   bd init will automatically suggest this when a remote is detected.
+  A git-origin-derived remote is adopted only with consent (#6099):
+  interactively bd init asks once and names the origin; non-interactively
+  it refuses (exit 1) rather than adopt silently. Consent given at the
+  prompt is bound to the URL it approved. If an adoption already happened
+  and you want it gone, see "init-adoption-consent" in
+  docs/recovery/init-safety.md — removing the workspace does not remove
+  the database from a Dolt server; bd dolt drop-database does.
 
 DESTROY-TOKEN (non-interactive only)
 

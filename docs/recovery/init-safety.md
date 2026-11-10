@@ -3,7 +3,7 @@ title: Recovery Playbooks
 description: Step-by-step recovery for bd init and bd dolt push/pull refusals, including the primary-key fork playbook
 ---
 
-Last reviewed: 2026-10-01
+Last reviewed: 2026-11-10
 
 Freshness source: `cmd/bd/init.go`, `cmd/bd/init_safety.go`,
 `cmd/bd/init_safety_test.go`, `cmd/bd/init_safety_help.go`, and
@@ -26,6 +26,7 @@ See also: `bd help init-safety`, and
 - [init-token-missing — a destructive re-init refused because `--destroy-token` is missing or wrong](#init-token-missing)
 - [init-local-exists — `bd init --reinit-local` refused because local data already exists](#init-local-exists)
 - [init-home-refused — `bd init` refused because the working directory is your home directory](#init-home-refused)
+- [init-adoption-consent — `bd init` refused to adopt the git origin's issue history without consent](#init-adoption-consent)
 - [init-missing-server-db — `bd init` refused because the configured server-side database is missing](#init-missing-server-db)
 - [pk-fork-refused — `bd dolt pull`/`push` refused because a table has different primary keys in its common ancestor](#pk-fork-refused)
 - [re-clone-gotchas — two gotchas hit during manual re-clone recovery: damaged stores left inside `data_dir`, and a fresh clone missing clone-local tables](#re-clone-gotchas)
@@ -310,6 +311,102 @@ bd init || case $? in
   15) echo "wrong directory — cd into the project first" ;;
 esac
 ```
+
+---
+
+## init-adoption-consent
+
+**Exit code:** `1` (generic refusal — protocol v0 §E3 freezes only
+10/11/12/130, and this refusal deliberately adds no new stable code)
+
+**Symptom**
+
+```
+bd init refuses: adopting this git origin's issue history requires consent.
+
+  Derived from git origin: <url>
+
+  Why: that origin already has Dolt history (refs/dolt/data). ...
+  Next:
+    bd init --yes          # adopt this origin's issue history
+    bd init --no-adopt     # or set BD_NO_REMOTE_ADOPT=1: initialize a fresh
+                           # local database without deriving a remote
+    bd bootstrap           # or run the explicit adoption command
+```
+
+Interactively you see a prompt instead, once, before anything is cloned:
+
+```
+No Dolt remote is configured for this repository, and its git origin already
+  has Dolt history: <url>
+
+Adopting it will:
+  • import its full issue history and project identity into this workspace
+  • wire it as Dolt remote "origin" and persist sync.remote in .beads/config.yaml
+
+Adopt this origin's issue history? [y/N]
+```
+
+**Why this happens**
+
+Before [#6099](https://github.com/gastownhall/beads/issues/6099), a plain
+`bd init` in a clone whose git origin carried Dolt issue history adopted
+that history silently: no count, no consent, and no CLI path to undo it. It
+now asks. The consent is deliberate and URL-bound: an answer names the
+origin it approved, a later checkpoint that derives a different URL does not
+reuse it, and `--non-interactive` (CI, agents, piped input) is not consent —
+it gets this refusal instead. A declined prompt or EOF also refuses; Ctrl-C
+at the prompt keeps the standard exit `130`.
+
+The late refusal (the one that adds "no issue history was imported and no
+remote was wired") fires when the origin probe that runs after workspace
+scaffolding newly finds Dolt history — for example the remote was being
+fetched for the first time. Nothing was imported; re-run with `--yes` or
+`--no-adopt`.
+
+**Recovery paths**
+
+### 1. You do want this origin's history
+
+```bash
+bd init --yes        # scripts and agents
+# or re-run interactively and answer "y" at the prompt
+```
+
+`--yes` consents to adoption only. It does not bypass the divergence
+(exit `10`), local-exists (exit `11`) or destroy-token (exit `12`) guards —
+those still fire as described above.
+
+### 2. You want a fresh local database (not this origin's history)
+
+```bash
+bd init --no-adopt   # or: export BD_NO_REMOTE_ADOPT=1
+```
+
+`--no-adopt` skips the derivation entirely: no probe, no clone, no
+`sync.remote` wiring. It also covers the proxied-server route.
+
+### 3. The adoption already happened and you want it gone
+
+If an earlier `bd init` (or a pre-#6099 bd) already adopted the origin's
+history and wired the remote, removing the local workspace is not enough on
+a server: deleting a workspace's `.beads` directory never removes its
+database from a Dolt server (see
+[Shared Server Mode](/architecture/dolt#shared-server-mode) — in
+shared-server mode all projects' databases live in the server's data
+directory). Drop the database explicitly:
+
+```bash
+bd dolt drop-database <database-name> --yes
+```
+
+It refuses the databases no invocation should drop (system schemas, the
+global `beads_global`, the workspace's own database, stale test databases —
+`bd dolt clean-databases` owns those), asks for confirmation without
+`--yes`, and never purges: the database stays recoverable via
+`CALL DOLT_UNDROP(<name>)` until a purge. See
+[ADR 0002](https://github.com/gastownhall/beads/blob/main/engdocs/adr/0002-init-safety-invariants.md)
+for the consent invariant itself.
 
 ---
 
