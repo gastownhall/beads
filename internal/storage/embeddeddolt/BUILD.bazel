@@ -201,6 +201,7 @@ go_test(
         "memories_contract_test.go",
         "merge_blockers_test.go",
         "merge_events_flip_test.go",
+        "merge_peer_rows_test.go",
         "merge_strategy_test.go",
         "metadata_cas_contract_test.go",
         "metadata_number_fidelity_test.go",
