@@ -392,7 +392,11 @@ func openNonMutatingStoreFromConfig(ctx context.Context, beadsDir string, previe
 	if err != nil {
 		return nil, err
 	}
-	if sanitized := sanitizeDBName(database); sanitized != database {
+	// A metadata-less workspace's database is named as it is on disk, and
+	// the root pre-run opens that name unsanitized: sanitizing here would
+	// point the identity preview at a sibling that does not exist instead
+	// of the legacy database the real open validates.
+	if sanitized := sanitizeDBName(database); sanitized != database && !metadataAbsent {
 		database = sanitized
 	}
 	if preview {
