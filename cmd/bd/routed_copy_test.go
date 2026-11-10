@@ -417,3 +417,54 @@ func planningHeadHasComment(t *testing.T, f *copyFixture, id, text string) bool 
 	}
 	return false
 }
+
+// updatePlanning applies updates to id in the planning workspace and commits
+// them, as work done there after bd repo sync took its copy.
+func (f *copyFixture) updatePlanning(t *testing.T, id string, updates map[string]interface{}) {
+	t.Helper()
+	s, err := embeddeddolt.Open(t.Context(), f.planningBeadsDir, copyFixturePlanningDB, "main")
+	if err != nil {
+		t.Fatalf("open planning: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := s.UpdateIssue(t.Context(), id, updates, "bob"); err != nil {
+		t.Fatalf("update planning %s: %v", id, err)
+	}
+	if err := s.Commit(t.Context(), "planning work"); err != nil {
+		t.Fatalf("commit planning work: %v", err)
+	}
+}
+
+// TestShowOfLocalCopyReadsAutoRouteOwner pins that bd show of an issue the
+// project holds only as a copy of an issue in its auto-route target reports
+// the target's current state, not the stale copy.
+func TestShowOfLocalCopyReadsAutoRouteOwner(t *testing.T) {
+	f := newCopyFixture(t, []string{"pl-s"}, []string{"pl-s"}, nil)
+	f.updatePlanning(t, "pl-s", map[string]interface{}{
+		"status":   string(types.StatusInProgress),
+		"priority": 0,
+		"assignee": "bob",
+	})
+
+	jsonOutput = true
+	res := runCopyCmd(t, showCmd, nil, "pl-s")
+	if res.exitCode != 0 {
+		t.Fatalf("bd show pl-s: exit %d, err %v\nstderr: %s", res.exitCode, res.err, res.stderr)
+	}
+	var shown []struct {
+		ID       string       `json:"id"`
+		Status   types.Status `json:"status"`
+		Priority int          `json:"priority"`
+		Assignee string       `json:"assignee"`
+	}
+	if err := json.Unmarshal([]byte(res.stdout), &shown); err != nil {
+		t.Fatalf("parse bd show --json: %v\n%s", err, res.stdout)
+	}
+	if len(shown) != 1 || shown[0].ID != "pl-s" {
+		t.Fatalf("bd show --json pl-s = %+v, want pl-s alone", shown)
+	}
+	if got := shown[0]; got.Status != types.StatusInProgress || got.Priority != 0 || got.Assignee != "bob" {
+		t.Errorf("bd show pl-s = status %s, priority %d, assignee %q; want the planning workspace's in_progress, 0, \"bob\"", got.Status, got.Priority, got.Assignee)
+	}
+	f.requireCopyUnchanged(t, "pl-s")
+}

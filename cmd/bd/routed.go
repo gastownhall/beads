@@ -85,7 +85,9 @@ func commitRoutedWrite(ctx context.Context, result *RoutedResult, command string
 // Tries the local store first, then prefix-based routing via routes.jsonl,
 // then falls back to auto-routing (routing.mode=auto). A routing failure, such
 // as an unreadable routes.jsonl or a routed store that fails to open, is
-// returned as itself rather than as the local not-found.
+// returned as itself rather than as the local not-found. A local hit that is
+// a bd repo sync copy of an issue in the auto-route target resolves to that
+// issue in the target instead (redirectLocalCopyToOwner).
 //
 // Returns a RoutedResult containing the issue, resolved ID, and the store to use.
 // The caller MUST call result.Close() when done to release any routed storage.
@@ -111,10 +113,7 @@ func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage
 	// Try local store first.
 	result, err := resolveAndGetFromStore(ctx, localStore, id, false)
 	if err == nil {
-		if writable {
-			return redirectLocalCopyToOwner(ctx, localStore, result, true)
-		}
-		return result, nil
+		return redirectLocalCopyToOwner(ctx, localStore, result, writable)
 	}
 
 	// The first routed tier that refuses the id answers instead of the local
