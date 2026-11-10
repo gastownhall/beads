@@ -1252,8 +1252,10 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx DBTX, issues [
 			if (dep.Type == types.DepParentChild) != parentPhase {
 				continue
 			}
-			isCrossPrefix := types.ExtractPrefix(dep.IssueID) != types.ExtractPrefix(dep.DependsOnID)
-			kind := lookups.classify(ctx, tx, dep, isCrossPrefix)
+			kind, err := lookups.classify(ctx, tx, dep)
+			if err != nil {
+				return result, err
+			}
 
 			if kind != DepTargetExternal {
 				exists, err := lookups.targetExists(ctx, tx, kind, dep.DependsOnID)

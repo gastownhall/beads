@@ -836,31 +836,6 @@ func TestAddDependency_MultipleExternalReferences(t *testing.T) {
 // Cross-Prefix Dependency Tests
 // =============================================================================
 
-func TestIsCrossPrefixDep(t *testing.T) {
-	tests := []struct {
-		name     string
-		source   string
-		target   string
-		expected bool
-	}{
-		{"same prefix", "sh-abc", "sh-def", false},
-		{"different prefix", "sh-abc", "hq-def", true},
-		{"hq to bd", "hq-abc", "bd-def", true},
-		{"same prefix with subtype", "hq-cv-abc", "hq-xyz", false},
-		{"no prefix source", "abc", "sh-def", true},
-		{"no prefix either", "abc", "def", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := isCrossPrefixDep(tt.source, tt.target)
-			if got != tt.expected {
-				t.Errorf("isCrossPrefixDep(%q, %q) = %v, want %v", tt.source, tt.target, got, tt.expected)
-			}
-		})
-	}
-}
-
 func TestAddDependency_CrossPrefix_SkipsTargetExistence(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
