@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 // DoltSQLServerReadyTimeout is how long StartDoltSQLServer waits for one
@@ -117,7 +119,10 @@ func launchDoltSQLServer(dataDir string, port int, readyTimeout time.Duration) (
 		if strings.Contains(out.String(), "Server ready. Accepting connections.") {
 			// #nosec G704 -- addr is always loopback with a test-selected port.
 			if conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond); err == nil {
-				_ = conn.Close()
+				// Drain the MySQL greeting before closing, so the probe's
+				// close is a FIN and not the RST that aborts the handshake
+				// (#4132/#5589).
+				doltutil.DrainAndCloseProbe(conn)
 				return srv, nil
 			}
 		}
