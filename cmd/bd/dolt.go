@@ -754,6 +754,10 @@ Name a remote to push to it instead of the default: 'bd dolt push <remote>'
 or 'bd dolt push --remote <remote>'. The remote must already exist (see
 'bd dolt remote add').`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Publishes local commits to a remote: refused in read-only mode
+		// before the no-push/local-only early returns, which exit 0 and
+		// would mask the refusal (GH#7876).
+		CheckReadonly("dolt push")
 		if config.GetBool("no-push") {
 			fmt.Println("skipping push: rig is local-only (no-push: true)")
 			return nil
