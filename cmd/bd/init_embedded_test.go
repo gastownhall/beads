@@ -115,6 +115,11 @@ func buildEmbeddedBD(t *testing.T) string {
 // red — or, worse, green for the wrong reason. The two BD_ vars this suite
 // actually wants are re-added below with fixed values, and they are also the
 // only two CI sets, so the strip is a no-op there and a leak guard locally.
+//
+// GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL are stripped for the same reason: the
+// embedded store captures them as its commit identity at construction
+// (#7628), so an inherited pair would silently change the author attributed
+// by the store under test. Tests that exercise #7628 set them explicitly.
 func bdEnv(dir string) []string {
 	var env []string
 	for _, e := range os.Environ() {
@@ -122,6 +127,11 @@ func bdEnv(dir string) []string {
 		// BD_ROUTING_MODE, which overrides the routing.mode a test's
 		// workspace holds.
 		if strings.HasPrefix(e, "BEADS_") || strings.HasPrefix(e, "BD_") {
+			continue
+		}
+		// See the doc comment: inherited git-author identity would leak into
+		// the store under test's commit authorship.
+		if strings.HasPrefix(e, "GIT_AUTHOR_NAME=") || strings.HasPrefix(e, "GIT_AUTHOR_EMAIL=") {
 			continue
 		}
 		env = append(env, e)

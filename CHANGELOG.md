@@ -1235,6 +1235,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   defer wakes on the first ready read after the marker is removed. `bd ready
   --claim` is an intentional write and keeps being refused by the freeze
   gate itself.
+- Embedded-mode Dolt commits honor `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`
+  (#7628). Every embedded commit — issue writes, `bd dolt commit`, merges,
+  post-pull `is_blocked` recomputes — was authored as the hardcoded
+  `beads <beads@local>` (or, for commits made without an explicit author,
+  the engine's OS user, e.g. `root@%`), ignoring the identity server mode
+  already resolves. Both the author and the committer fields of an embedded
+  commit now carry the resolved identity: explicit values when the command
+  names one, `GIT_AUTHOR_*` when set, and the `beads <beads@local>` default
+  unchanged.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

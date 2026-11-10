@@ -5,14 +5,20 @@ package embeddeddolt
 import (
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
+
+// testCommitter is the identity the DSN tests pin: buildDSN's only
+// committer-dependent behavior is writing its fields into the DSN params.
+var testCommitter = versioncontrolops.Committer{Name: "beads", Email: "beads@local"}
 
 func TestBuildDSN_SpacesInPath(t *testing.T) {
 	// Regression test for #2920: paths with spaces must not be
 	// percent-encoded (%20) because the Dolt driver's ParseDataSource
 	// uses the path as a literal filesystem path.
 	dir := "/Users/bbrenner/Documents/Scripting Projects/beads/.beads/embeddeddolt"
-	dsn := buildDSN(dir, "beads")
+	dsn := buildDSN(dir, "beads", testCommitter)
 
 	if !strings.HasPrefix(dsn, "file://") {
 		t.Fatalf("DSN should start with file://, got %q", dsn)
@@ -39,14 +45,14 @@ func TestBuildDSN_SpacesInPath(t *testing.T) {
 }
 
 func TestBuildDSN_NoDatabase(t *testing.T) {
-	dsn := buildDSN("/tmp/test", "")
+	dsn := buildDSN("/tmp/test", "", testCommitter)
 	if strings.Contains(dsn, "database=") {
 		t.Errorf("DSN should not contain database param when empty; got %q", dsn)
 	}
 }
 
 func TestBuildDSN_WithDatabase(t *testing.T) {
-	dsn := buildDSN("/tmp/test", "mydb")
+	dsn := buildDSN("/tmp/test", "mydb", testCommitter)
 	if !strings.Contains(dsn, "database=mydb") {
 		t.Errorf("DSN should contain database=mydb; got %q", dsn)
 	}

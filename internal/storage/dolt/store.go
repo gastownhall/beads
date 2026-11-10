@@ -1865,18 +1865,13 @@ func applyConfigDefaults(cfg *Config) {
 			cfg.Database = configfile.DefaultDoltDatabase
 		}
 	}
-	if cfg.CommitterName == "" {
-		cfg.CommitterName = os.Getenv("GIT_AUTHOR_NAME")
-		if cfg.CommitterName == "" {
-			cfg.CommitterName = "beads"
-		}
-	}
-	if cfg.CommitterEmail == "" {
-		cfg.CommitterEmail = os.Getenv("GIT_AUTHOR_EMAIL")
-		if cfg.CommitterEmail == "" {
-			cfg.CommitterEmail = "beads@local"
-		}
-	}
+	// Commit identity: the one rule both modes share. versioncontrolops.
+	// ResolveCommitter owns the per-field explicit > GIT_AUTHOR_* > default
+	// ladder (extracted here so embedded mode's captured identity cannot
+	// drift from server mode's); behavior is unchanged.
+	resolvedCommitter := versioncontrolops.ResolveCommitter(cfg.CommitterName, cfg.CommitterEmail)
+	cfg.CommitterName = resolvedCommitter.Name
+	cfg.CommitterEmail = resolvedCommitter.Email
 	if cfg.Remote == "" {
 		cfg.Remote = "origin"
 	}
