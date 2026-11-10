@@ -542,12 +542,46 @@ See [Merge Conflicts](/recovery/merge-conflicts) for the full runbook.
 ### Hooks not running
 
 ```bash
-# Check if installed
-ls -la .git/hooks/
+# Check status; this names a missing core.hooksPath directory
+bd hooks list
 
 # Reinstall
 bd hooks install
 ```
+
+**Moved repository.** bd writes `core.hooksPath` as an absolute path, so
+linked worktrees resolve it. When you move or rename the repository, the
+value still names the old location, the directory no longer exists, and git
+silently runs no hooks. Check the value and where it is set:
+
+```bash
+git config --show-scope --get core.hooksPath
+```
+
+`bd hooks list`, `bd doctor` (Hooks Path and Git Hooks) report the stale
+path, the current beads hooks directory, and the repair. Reading status
+never changes git config. Repair it explicitly with either command:
+
+```bash
+bd doctor --fix      # repoints core.hooksPath to the current hooks directory
+bd hooks install     # refreshes the hooks there, then repoints core.hooksPath
+```
+
+Both keep the value absolute, so it works from every worktree; from a linked
+worktree they point at the main repository's (or redirected storage's)
+hooks. Neither recreates the old directory, and `bd hooks install` keeps
+your own content around the managed section of each hook. Run
+`git worktree repair` first if the move also broke linked worktrees.
+
+bd repoints only a value it can prove is its own: an absolute
+`.beads/hooks` or `.beads-hooks` path that no longer exists, set in this
+repository's local config and not overridden (global, worktree or
+command-line config), whose replacement is a real directory (not a symlink)
+holding beads hooks. Otherwise `bd doctor --fix` leaves the value alone and
+`bd hooks install` refuses with the reason, without creating anything;
+restore the directory or correct `core.hooksPath` where it is set. A
+`.beads/hooks` or `.beads-hooks` directory deleted in place (not moved) is
+still unset by `bd doctor --fix`.
 
 ### Hook errors
 
