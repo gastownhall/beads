@@ -623,6 +623,10 @@ func (s *EmbeddedDoltStore) PullWithStrategy(ctx context.Context, strategy strin
 // PullRemoteWithStrategy implements storage.StrategicPuller for a named
 // remote; see PullWithStrategy.
 func (s *EmbeddedDoltStore) PullRemoteWithStrategy(ctx context.Context, remote, strategy string) error {
+	// Option-shaped names are refused before any commit work (GH#7876).
+	if err := storage.ValidateRemoteOperand(remote); err != nil {
+		return err
+	}
 	if _, err := s.CommitPending(ctx, "beads"); err != nil {
 		return fmt.Errorf("commit pending before pull: %w", err)
 	}
@@ -651,6 +655,10 @@ func (s *EmbeddedDoltStore) ForcePush(ctx context.Context) error {
 }
 
 func (s *EmbeddedDoltStore) PushRemote(ctx context.Context, remote string, force bool) error {
+	// Option-shaped names are refused before any commit work (GH#7876).
+	if err := storage.ValidateRemoteOperand(remote); err != nil {
+		return err
+	}
 	// GH#5433: see Push.
 	if _, err := s.CommitPending(ctx, "beads"); err != nil {
 		return fmt.Errorf("commit pending before push: %w", err)
@@ -666,6 +674,10 @@ func (s *EmbeddedDoltStore) PushRemote(ctx context.Context, remote string, force
 }
 
 func (s *EmbeddedDoltStore) PullRemote(ctx context.Context, remote string) error {
+	// Option-shaped names are refused before any commit work (GH#7876).
+	if err := storage.ValidateRemoteOperand(remote); err != nil {
+		return err
+	}
 	// GH#2474 / bd-578h9.2: see Pull.
 	if _, err := s.CommitPending(ctx, "beads"); err != nil {
 		return fmt.Errorf("commit pending before pull: %w", err)
@@ -683,6 +695,10 @@ func (s *EmbeddedDoltStore) PullRemote(ctx context.Context, remote string) error
 }
 
 func (s *EmbeddedDoltStore) Fetch(ctx context.Context, peer string) error {
+	// Option-shaped names are refused before any connection work (GH#7876).
+	if err := storage.ValidateRemoteOperand(peer); err != nil {
+		return err
+	}
 	return s.withPeerAuth(ctx, peer, func(user string) error {
 		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 			return versioncontrolops.Fetch(ctx, db, peer, user)
@@ -691,6 +707,10 @@ func (s *EmbeddedDoltStore) Fetch(ctx context.Context, peer string) error {
 }
 
 func (s *EmbeddedDoltStore) PushTo(ctx context.Context, peer string) error {
+	// Option-shaped names are refused before any commit work (GH#7876).
+	if err := storage.ValidateRemoteOperand(peer); err != nil {
+		return err
+	}
 	// GH#5433: see Push.
 	if _, err := s.CommitPending(ctx, "beads"); err != nil {
 		return fmt.Errorf("commit pending before push: %w", err)
@@ -703,6 +723,10 @@ func (s *EmbeddedDoltStore) PushTo(ctx context.Context, peer string) error {
 }
 
 func (s *EmbeddedDoltStore) PullFrom(ctx context.Context, peer string) ([]storage.Conflict, error) {
+	// Option-shaped names are refused before any commit work (GH#7876).
+	if err := storage.ValidateRemoteOperand(peer); err != nil {
+		return nil, err
+	}
 	// Auto-commit pending changes before pull to prevent
 	// "cannot merge with uncommitted changes" errors.
 	if _, err := s.CommitPending(ctx, "beads"); err != nil {

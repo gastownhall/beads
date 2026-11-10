@@ -361,6 +361,13 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 		StartTime: time.Now(),
 	}
 
+	// Option-shaped peer names are refused before any commit, fetch or merge
+	// work (GH#7876).
+	if err := storage.ValidateRemoteOperand(peer); err != nil {
+		result.Error = err
+		return result, result.Error
+	}
+
 	// GH#2474 / bd-578h9.2: commit pending changes before the merge, matching
 	// embedded Pull/PullRemote/PullFrom and server-mode Sync. Embedded Commit is
 	// DOLT_COMMIT('-Am'), so it stages config — where kv.memory.* memories live —

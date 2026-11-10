@@ -45,6 +45,10 @@ func (s *DoltStore) pushRefToPeer(ctx context.Context, peer string, refspec stri
 	if s.isStrictReadOnlyStore() {
 		return strictReadOnlyPublishErr("push to peer", peer)
 	}
+	// Option-shaped names are refused before any work (GH#7876).
+	if err := storage.ValidateRemoteOperand(peer); err != nil {
+		return err
+	}
 	if useCLI, err := s.prepareCLIRouteForPeerGitProtocol(ctx, peer); err != nil {
 		return err
 	} else if useCLI {
@@ -72,6 +76,11 @@ func (s *DoltStore) pushRefToPeer(ctx context.Context, peer string, refspec stri
 // For git-protocol remotes, uses CLI `dolt pull` to avoid MySQL connection timeouts.
 // Returns any merge conflicts if present.
 func (s *DoltStore) PullFrom(ctx context.Context, peer string) ([]storage.Conflict, error) {
+	// Option-shaped names are refused before the circuit or any pull work
+	// (GH#7876).
+	if err := storage.ValidateRemoteOperand(peer); err != nil {
+		return nil, err
+	}
 	var conflicts []storage.Conflict
 	err := s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		var err error
@@ -176,6 +185,10 @@ func (s *DoltStore) finishPeerPull(ctx context.Context, conflicts []storage.Conf
 // If credentials are stored for this peer, they are used automatically.
 // For git-protocol remotes, uses CLI `dolt fetch` to avoid MySQL connection timeouts.
 func (s *DoltStore) Fetch(ctx context.Context, peer string) error {
+	// Option-shaped names are refused before any route decision (GH#7876).
+	if err := storage.ValidateRemoteOperand(peer); err != nil {
+		return err
+	}
 	if useCLI, err := s.prepareCLIRouteForPeerGitProtocol(ctx, peer); err != nil {
 		return err
 	} else if useCLI {
@@ -408,6 +421,12 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 	// fetch and merge work. Refuse up front, before any of it.
 	if s.isStrictReadOnlyStore() {
 		result.Error = strictReadOnlyPublishErr("sync with", peer)
+		return result, result.Error
+	}
+
+	// Option-shaped peer names are refused before the same work (GH#7876).
+	if err := storage.ValidateRemoteOperand(peer); err != nil {
+		result.Error = err
 		return result, result.Error
 	}
 

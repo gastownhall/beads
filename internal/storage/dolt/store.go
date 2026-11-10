@@ -5424,6 +5424,10 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 	if s.isStrictReadOnlyStore() {
 		return strictReadOnlyPublishErr("push to", remote)
 	}
+	// Option-shaped names are refused before any work (GH#7876).
+	if err := storage.ValidateRemoteOperand(remote); err != nil {
+		return err
+	}
 	spanName := "dolt.push"
 	if force {
 		spanName = "dolt.force_push"
@@ -5533,6 +5537,11 @@ func (s *DoltStore) PullRemote(ctx context.Context, remote string) error {
 // pullFromRemote is the internal implementation for all pull operations.
 // It routes through CLI or SQL based on the remote's protocol and credentials.
 func (s *DoltStore) pullFromRemote(ctx context.Context, remote string) (retErr error) {
+	// Option-shaped names are refused before the circuit or any pull work
+	// (GH#7876).
+	if err := storage.ValidateRemoteOperand(remote); err != nil {
+		return err
+	}
 	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		return s.pullFromRemoteUnchecked(ctx, remote)
 	})
