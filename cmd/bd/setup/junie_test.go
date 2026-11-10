@@ -597,6 +597,68 @@ func TestRemoveJunieKeepsDirsItDidNotEmpty(t *testing.T) {
 	}
 }
 
+// An install over a stale `bd mcp` MCP config (the launcher bd generated
+// before it learned about uvx) rewrites it with the current launcher, and a
+// re-run of the repaired install produces the same bytes.
+func TestInstallJunieRewritesStaleBdMCPConfig(t *testing.T) {
+	root := t.TempDir()
+	ws := filepath.Join(root, "ws")
+	if err := os.MkdirAll(filepath.Join(ws, ".junie", "mcp"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stale := "{\n  \"mcpServers\": {\n    \"beads\": {\n      \"command\": \"bd\",\n      \"args\": [\"mcp\"]\n    }\n  }\n}\n"
+	if err := os.WriteFile(filepath.Join(ws, ".junie", "mcp", "mcp.json"), []byte(stale), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, ".junie", "guidelines.md"), []byte(junieGuidelinesTemplate), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(ws)
+
+	if err := InstallJunie(); err != nil {
+		t.Fatalf("InstallJunie: %v", err)
+	}
+
+	data, err := os.ReadFile(".junie/mcp/mcp.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("repaired MCP config should be valid JSON: %v", err)
+	}
+	expected := map[string]interface{}{
+		"mcpServers": map[string]interface{}{
+			"beads": map[string]interface{}{
+				"command": "uvx",
+				"args":    []interface{}{"beads-mcp"},
+			},
+		},
+	}
+	if !reflect.DeepEqual(parsed, expected) {
+		t.Errorf("repaired MCP config = %s, want %v", data, expected)
+	}
+
+	guidelines, err := os.ReadFile(".junie/guidelines.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(guidelines) != junieGuidelinesTemplate {
+		t.Error("guidelines.md should equal the template after install")
+	}
+
+	if err := InstallJunie(); err != nil {
+		t.Fatalf("second InstallJunie: %v", err)
+	}
+	second, err := os.ReadFile(".junie/mcp/mcp.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != string(second) {
+		t.Error("a re-run after repair should produce the same MCP config bytes")
+	}
+}
+
 // The Junie MCP entry must launch the beads MCP server (beads-mcp), not a bd
 // subcommand: bd has no `mcp` command, so `bd mcp` exits "unknown command".
 func TestJunieMCPConfigLaunchesBeadsMCP(t *testing.T) {
