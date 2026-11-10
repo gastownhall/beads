@@ -94,7 +94,9 @@ func TestUnixSocket_ConnectAndQuery(t *testing.T) {
 	for time.Now().Before(deadline) {
 		conn, err := net.DialTimeout("unix", socketPath, 500*time.Millisecond)
 		if err == nil {
-			_ = conn.Close()
+			// The server writes its MySQL greeting over the socket the
+			// moment it is accepted; drain it before closing (#4132/#5589).
+			doltutil.DrainAndCloseProbe(conn)
 			break
 		}
 		time.Sleep(100 * time.Millisecond)

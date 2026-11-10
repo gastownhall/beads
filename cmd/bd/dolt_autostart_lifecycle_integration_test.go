@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -121,7 +122,10 @@ func TestE2E_AutoStartedRepoLocalServerPersistsAcrossCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected auto-started server to keep listening on %s: %v", port, err)
 	}
-	_ = conn.Close()
+	// The auto-started server writes its MySQL greeting on the accepted
+	// connection; drain it so the probe's close is a FIN, not the RST that
+	// aborts the handshake (#4132/#5589).
+	doltutil.DrainAndCloseProbe(conn)
 
 	stopOut, stopErr := runBDExecWithBinary(t, bdBinary, tmpDir, env, "dolt", "stop")
 	if stopErr != nil {

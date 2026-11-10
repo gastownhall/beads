@@ -121,7 +121,10 @@ func waitForPortClosed(t *testing.T, port int, timeout time.Duration) {
 		if err != nil {
 			return
 		}
-		_ = conn.Close()
+		// While the server is still up it writes its MySQL greeting on the
+		// accepted connection; drain it so the probe's close is a FIN, not
+		// the RST that aborts the handshake (#4132/#5589).
+		doltserver.DrainAndCloseProbe(conn)
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("server port %d still accepting connections after %v", port, timeout)
