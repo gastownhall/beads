@@ -10,6 +10,7 @@ go_library(
         "probe_pid_unix.go",
         "probe_pid_windows.go",
         "remotes.go",
+        "sqlprobe.go",
     ],
     importpath = "github.com/steveyegge/beads/internal/storage/doltutil",
     visibility = ["//:__subpackages__"],
@@ -37,6 +38,7 @@ go_test(
         "identifier_test.go",
         "persisted_remotes_test.go",
         "remotes_test.go",
+        "sqlprobe_test.go",
     ],
     embed = [":doltutil"],
     deps = [

@@ -3,40 +3,24 @@ package doltserver
 import (
 	"net"
 	"time"
+
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 // DrainAndCloseProbe drains the MySQL handshake greeting (if any) from conn
-// before closing it, then closes the connection.
+// before closing it, then closes the connection, so the close is a clean
+// FIN instead of the RST that aborts dolt's MySQL handshake. See
+// doltutil.DrainAndCloseProbe (and gastownhall/beads#4132, #4133) for why
+// draining matters.
 //
-// A bare Close() on a connection that hasn't read the server's handshake
-// packet causes the OS to send a TCP RST instead of a clean FIN. Dolt's
-// sql-server interprets that RST as an aborted MySQL handshake; enough of
-// them in a short window (e.g. from repeated readiness/circuit-breaker
-// probes) can crash the dolt sql-server process. Reading the greeting first
-// — even partially — lets the TCP stack close cleanly instead. See
-// gastownhall/beads#4132 and #4133.
+// This is the compatibility forwarder for existing callers and tests; the
+// implementation moved to doltutil (a leaf package both testutil and the
+// dbproxy packages can import) so every probe site shares one drain.
 //
 // Returns whether the first read observed any greeting bytes before the
 // connection was closed.
 func DrainAndCloseProbe(conn net.Conn) bool {
-	defer func() { _ = conn.Close() }()
-
-	_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-	buf := make([]byte, 1024)
-	n, err := conn.Read(buf)
-	greeted := err == nil && n > 0
-	if !greeted {
-		return false
-	}
-
-	// Drain any remaining bytes so the FIN close doesn't race a still-writing peer.
-	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
-	for {
-		if _, e := conn.Read(buf); e != nil {
-			break
-		}
-	}
-	return true
+	return doltutil.DrainAndCloseProbe(conn)
 }
 
 // ProbeSQLServer dials network/addr with the given timeout and, on success,
@@ -47,9 +31,5 @@ func DrainAndCloseProbe(conn net.Conn) bool {
 // before the probe connection closed — a dial-succeeded-but-mute server
 // (TCP accepting, MySQL engine not yet writing) reports greeted == false.
 func ProbeSQLServer(network, addr string, timeout time.Duration) (greeted bool, err error) {
-	conn, dialErr := net.DialTimeout(network, addr, timeout)
-	if dialErr != nil {
-		return false, dialErr
-	}
-	return DrainAndCloseProbe(conn), nil
+	return doltutil.ProbeSQLServer(network, addr, timeout)
 }
