@@ -88,6 +88,44 @@ func ManageClosedAt(oldIssue *types.Issue, updates map[string]interface{}, setCl
 	return setClauses, args
 }
 
+// PostUpdateClosePosture reports the status and close reason an update lands
+// on oldIssue, applying the same defaults ManageClosedAt writes: an explicit
+// close_reason wins; a status crossing into the literal closed status defaults
+// the reason to empty; a reopen out of closed (including closed-to-pinned)
+// clears it; anything else keeps the old reason.
+//
+// Both update stacks feed their blocked-state recompute trigger from here, so
+// the trigger judges the same reason the row will carry — a conditional-blocks
+// edge onto this issue holds through a success close (GH#5577), and only the
+// landed reason says which kind of close it is.
+func PostUpdateClosePosture(oldIssue *types.Issue, updates map[string]interface{}) (types.Status, string) {
+	newStatus := oldIssue.Status
+	if raw, ok := updates["status"]; ok {
+		switch v := raw.(type) {
+		case string:
+			newStatus = types.Status(v)
+		case types.Status:
+			newStatus = v
+		}
+	}
+	newReason := oldIssue.CloseReason
+	if raw, ok := updates["close_reason"]; ok {
+		switch v := raw.(type) {
+		case string:
+			newReason = v
+		case nil:
+			newReason = ""
+		}
+	} else if newStatus != oldIssue.Status {
+		// The close-lifecycle defaults the caller did not name: a crossing
+		// into closed lands reason '', and so does leaving closed behind.
+		if newStatus == types.StatusClosed || oldIssue.Status == types.StatusClosed {
+			newReason = ""
+		}
+	}
+	return newStatus, newReason
+}
+
 // ValidateClosedAtCoherence refuses an explicit closed_at write that would
 // leave the row violating the closed-iff-closed_at invariant
 // types.Issue.Validate enforces: a closed issue has a closed_at, a non-closed
@@ -521,17 +559,18 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	}
 
 	updateResult := &UpdateResult{OldIssue: oldIssue, IsWisp: isWisp, Changed: true, IssueRowsChanged: !isWisp, WispRowsChanged: isWisp}
-	if rawStatus, hasStatus := updates["status"]; hasStatus {
-		var newStatus string
-		switch v := rawStatus.(type) {
-		case string:
-			newStatus = v
-		case types.Status:
-			newStatus = string(v)
-		}
+	{
+		newStatus, newReason := PostUpdateClosePosture(oldIssue, updates)
 		oldActive := oldIssue.Status != types.StatusClosed && oldIssue.Status != types.StatusPinned
-		newActive := newStatus != string(types.StatusClosed) && newStatus != string(types.StatusPinned)
-		if oldActive != newActive {
+		newActive := newStatus != types.StatusClosed && newStatus != types.StatusPinned
+		// A conditional-blocks edge onto this issue holds through a success
+		// close (GH#5577), so a reason edit that flips the failure
+		// classification — or a closed<->pinned hop, which resets the reason —
+		// changes its dependents' blockedness without ever crossing the
+		// active line. Recompute on either flip.
+		oldHolds := types.BlockingEdgeHolds(types.DepConditionalBlocks, oldIssue.Status, oldIssue.CloseReason)
+		newHolds := types.BlockingEdgeHolds(types.DepConditionalBlocks, newStatus, newReason)
+		if oldActive != newActive || oldHolds != newHolds {
 			var affectedIssues, affectedWisps []string
 			var aerr error
 			if isWisp {
@@ -555,8 +594,10 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 			}
 			updateResult.IssueRowsChanged = !isWisp || recompute.IssueRowsChanged
 			updateResult.WispRowsChanged = isWisp || recompute.WispRowsChanged
-			if !newActive {
-				NoteStatusChangeBlockedRecheck(tx, id, newStatus, affectedIssues, affectedWisps)
+			// The recheck note is a STATUS-change record; a reason-only edit
+			// is not one, whatever it does to conditional dependents.
+			if oldActive != newActive && !newActive {
+				NoteStatusChangeBlockedRecheck(tx, id, string(newStatus), affectedIssues, affectedWisps)
 			}
 		}
 	}

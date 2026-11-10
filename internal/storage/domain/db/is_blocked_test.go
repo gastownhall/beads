@@ -1,6 +1,8 @@
 package db
 
 import (
+	"time"
+
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -155,4 +157,41 @@ func (s *testSuite) TestConditionalBlocksDirectMarkClosedTarget() {
 		s.False(s.isBlocked("bd-cb-failed-src"),
 			"a conditional-blocks edge onto a failure-closed target must leave its source free")
 	})
+}
+
+// A close-reason edit that flips the failure classification must recompute the
+// conditional dependents even though no status changes — and without moving
+// the dependent's updated_at (GH#5577).
+func (s *testSuite) TestConditionalBlocksReasonEditRecomputes() {
+	s.seedIssueRow("bd-cb-reason-src")
+	s.seedIssueRow("bd-cb-reason-tgt")
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep("bd-cb-reason-src", "bd-cb-reason-tgt", types.DepConditionalBlocks), "tester", domain.DepInsertOpts{}))
+	s.True(s.isBlocked("bd-cb-reason-src"))
+
+	issueRepo := NewIssueSQLRepository(s.Runner())
+	_, err := issueRepo.Close(s.Ctx(), "bd-cb-reason-tgt",
+		domain.CloseRowParams{Reason: "completed successfully"}, "tester", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.True(s.isBlocked("bd-cb-reason-src"), "a success close keeps the fallback blocked")
+
+	var updatedBefore time.Time
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT updated_at FROM issues WHERE id = ?", "bd-cb-reason-src").Scan(&updatedBefore))
+
+	s.Require().NoError(issueRepo.Update(s.Ctx(), "bd-cb-reason-tgt",
+		map[string]any{"close_reason": "failed: flaky in CI"}, "tester", domain.IssueTableOpts{}))
+	s.False(s.isBlocked("bd-cb-reason-src"),
+		"a reason edit to a failure classification must release the fallback")
+
+	s.Require().NoError(issueRepo.Update(s.Ctx(), "bd-cb-reason-tgt",
+		map[string]any{"close_reason": "completed successfully"}, "tester", domain.IssueTableOpts{}))
+	s.True(s.isBlocked("bd-cb-reason-src"),
+		"a reason edit back to a success classification must re-block the fallback")
+
+	var updatedAfter time.Time
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT updated_at FROM issues WHERE id = ?", "bd-cb-reason-src").Scan(&updatedAfter))
+	s.Equal(updatedBefore.Unix(), updatedAfter.Unix(),
+		"recompute is derived-state maintenance; the dependent's updated_at must not move")
 }

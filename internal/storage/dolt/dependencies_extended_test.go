@@ -2001,3 +2001,66 @@ func TestAddDependency_ConditionalBlocksOntoClosedTarget(t *testing.T) {
 		})
 	}
 }
+
+func TestConditionalBlocksRecomputeOnReasonAndPinEdits(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Walk one A/B pair through the whole posture lattice. Every step must
+	// recompute B even when the active line is never crossed: a close-reason
+	// edit between failure and non-failure, and a closed<->pinned hop (which
+	// resets the reason), both flip the conditional-blocks holding. And none
+	// of it may touch B's updated_at: recompute pins derived state.
+	createPerm(t, ctx, store, "cb-edit-a")
+	createPerm(t, ctx, store, "cb-edit-b")
+	addDependency(t, ctx, store, "cb-edit-b", "cb-edit-a", types.DepConditionalBlocks)
+	assertIsBlocked(t, ctx, store, "issues", "cb-edit-b", true)
+
+	var bUpdatedAtBefore time.Time
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT updated_at FROM issues WHERE id = ?", "cb-edit-b").Scan(&bUpdatedAtBefore); err != nil {
+		t.Fatalf("read cb-edit-b updated_at: %v", err)
+	}
+
+	steps := []struct {
+		name        string
+		update      map[string]interface{}
+		wantBlocked bool
+	}{
+		{"reason_edit_to_failure_releases", map[string]interface{}{"close_reason": "failed: flaky in CI"}, false},
+		{"reason_edit_back_to_success_reblocks", map[string]interface{}{"close_reason": "completed successfully"}, true},
+		{"pin_releases", map[string]interface{}{"status": "pinned"}, false},
+	}
+	// Start from a success close of A.
+	if err := store.CloseIssue(ctx, "cb-edit-a", "completed successfully", "tester", ""); err != nil {
+		t.Fatalf("close cb-edit-a: %v", err)
+	}
+	assertIsBlocked(t, ctx, store, "issues", "cb-edit-b", true)
+
+	for _, step := range steps {
+		if err := store.UpdateIssue(ctx, "cb-edit-a", step.update, "tester"); err != nil {
+			t.Fatalf("%s: update cb-edit-a: %v", step.name, err)
+		}
+		assertIsBlocked(t, ctx, store, "issues", "cb-edit-b", step.wantBlocked)
+	}
+
+	// Closing the pinned precondition with a success reason re-blocks B.
+	if err := store.CloseIssue(ctx, "cb-edit-a", "completed successfully", "tester", ""); err != nil {
+		t.Fatalf("close pinned cb-edit-a: %v", err)
+	}
+	assertIsBlocked(t, ctx, store, "issues", "cb-edit-b", true)
+
+	// Recompute is derived-state maintenance: B's updated_at never moved.
+	var bUpdatedAtAfter time.Time
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT updated_at FROM issues WHERE id = ?", "cb-edit-b").Scan(&bUpdatedAtAfter); err != nil {
+		t.Fatalf("read cb-edit-b updated_at: %v", err)
+	}
+	if !bUpdatedAtAfter.Equal(bUpdatedAtBefore) {
+		t.Errorf("cb-edit-b updated_at moved from %v to %v; recompute must pin updated_at",
+			bUpdatedAtBefore, bUpdatedAtAfter)
+	}
+}

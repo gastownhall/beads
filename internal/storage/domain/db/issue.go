@@ -359,11 +359,19 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 		return err
 	}
 
-	if statusChanging {
-		newStatus := coerceStatus(updates["status"])
+	{
+		// Blocked-state parity with issueops.updateIssueInTx: recompute the
+		// dependents on the active crossing OR on a flip of the row's
+		// conditional-blocks holding — a close-reason edit between failure and
+		// non-failure, or a closed<->pinned hop, changes a conditional
+		// dependent's blockedness without ever crossing the active line
+		// (GH#5577).
+		newStatus, newReason := issueops.PostUpdateClosePosture(oldIssue, updates)
 		oldActive := oldIssue.Status != types.StatusClosed && oldIssue.Status != types.StatusPinned
 		newActive := newStatus != types.StatusClosed && newStatus != types.StatusPinned
-		if oldActive != newActive {
+		oldHolds := types.BlockingEdgeHolds(types.DepConditionalBlocks, oldIssue.Status, oldIssue.CloseReason)
+		newHolds := types.BlockingEdgeHolds(types.DepConditionalBlocks, newStatus, newReason)
+		if oldActive != newActive || oldHolds != newHolds {
 			var (
 				affectedIssues, affectedWisps []string
 				aerr                          error
@@ -379,7 +387,9 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 			if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, affectedIssues, affectedWisps); err != nil {
 				return fmt.Errorf("db: Update %s: recompute is_blocked: %w", id, err)
 			}
-			if !newActive {
+			// The recheck note is a STATUS-change record; a reason-only edit
+			// is not one, whatever it does to conditional dependents.
+			if oldActive != newActive && !newActive {
 				issueops.NoteStatusChangeBlockedRecheck(r.runner, id, string(newStatus), affectedIssues, affectedWisps)
 			}
 		}
@@ -438,17 +448,6 @@ func cloneUpdateFields(updates map[string]any) map[string]any {
 		cloned[key] = value
 	}
 	return cloned
-}
-
-func coerceStatus(v any) types.Status {
-	switch s := v.(type) {
-	case string:
-		return types.Status(s)
-	case types.Status:
-		return s
-	default:
-		return ""
-	}
 }
 
 func (r *issueSQLRepositoryImpl) Claim(ctx context.Context, id, actor string, opts domain.IssueTableOpts) (domain.ClaimRowResult, error) {
