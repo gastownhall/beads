@@ -1977,10 +1977,15 @@ func exportJSONLForCommit() {
 	// it retains the hook's selected Git context. The parent stages fullPath
 	// after the subprocess returns, using that same context for the
 	// cross-worktree guard (GH#3311 part 2).
+	// The child re-executes this process's own bd (hookSubprocessBinary), not
+	// whatever bd PATH selects: a hook invoked by absolute path used to hand
+	// the export to a stale install earlier on PATH, which failed to open the
+	// database the current bd wrote and silently left the committed JSONL
+	// stale (GH#5922).
 	// Run from the project root, not .beads/. Embedded Dolt discovery starts
 	// from cwd, so cwd=.beads/ can make the export subprocess look for a
 	// nested .beads/.beads workspace and warn on every commit (GH#3454).
-	cmd := exec.Command("bd", "export", "-o", fullPath)
+	cmd := exec.Command(hookSubprocessBinary(), "export", "-o", fullPath)
 	cmd.Dir = exportSubprocessDir(beadsDir)
 	cmd.Env = hookSubprocessEnv(os.Environ())
 	cmd.Stderr = os.Stderr

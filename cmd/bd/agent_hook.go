@@ -34,6 +34,54 @@ var errPrimeTestBinary = errors.New("running as test binary - cannot re-exec bd"
 // input.
 var primeExecutable = resolvePrimeExecutable
 
+// canonicalizeExecutablePath returns exe with its symlinks resolved when
+// filepath.EvalSymlinks succeeds, and exe unchanged when it does not.
+//
+// One trade-off is kept deliberately, and it is narrower than it looks. Linux
+// reports an unlinked image with a " (deleted)" suffix, but os.Executable
+// strips that suffix (os/executable_procfs.go), so no "(deleted)" path ever
+// reaches this canonicalizer: a bd replaced in place mid-session (an ordinary
+// `go install ./cmd/bd`) still resolves to its own path, EvalSymlinks succeeds
+// against the new file, and a re-exec runs the replacement. The residual gap
+// is a bd deleted without being replaced: EvalSymlinks fails, that failure is
+// tolerated so the stale path is kept, and the PATH fallback is correctly not
+// taken because os.Executable itself returned no error.
+//
+// Shared by every bd-re-invokes-bd site (resolvePrimeExecutable here,
+// hookSubprocessBinary and the install-time PATH diagnostic in hook_subprocess.go
+// and hook_path_selection.go) so they all agree on one path for the same bd.
+func canonicalizeExecutablePath(exe string) string {
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		return resolved
+	}
+	return exe
+}
+
+// isTestBinaryPath reports whether exe's file name identifies a Go test
+// binary: output of `go test -c` (".test", ".test.<hash>"). rules_go links
+// test binaries as <name>_test (cmd/bd's is bd_test), which no ".test" name
+// check can see — that case is caught by testing.Testing() at the call sites
+// (under the Bazel lane the name check alone would let an unstubbed call
+// re-exec the test binary). Mirrors doctor/fix's isTestBinary.
+func isTestBinaryPath(exe string) bool {
+	base := filepath.Base(exe)
+	return strings.HasSuffix(base, ".test") || strings.Contains(base, ".test.")
+}
+
+// resolveSelfExecutable returns the running binary's absolute path with its
+// symlinks canonicalized, or the os.Executable error when the running image
+// cannot be identified at all. The self-identity behind every bd-re-invokes-bd
+// decision: re-execing a child (hookSubprocessBinary) and warning about PATH
+// selection (warnBdPathSelection) must both describe the same binary the
+// process actually is.
+func resolveSelfExecutable() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return canonicalizeExecutablePath(exe), nil
+}
+
 // resolvePrimeExecutable is the production re-exec resolver. It restates
 // getBdBinary (cmd/bd/doctor/fix/common.go), the repo's existing answer to "bd
 // re-invokes bd": prefer the running binary, resolve symlinks so every re-exec
@@ -42,34 +90,12 @@ var primeExecutable = resolvePrimeExecutable
 // lookup when the running binary cannot be resolved. getBdBinary is
 // package-private to doctor/fix, so this restates the precedent rather than
 // reusing it.
-//
-// One trade-off is kept deliberately, and it is narrower than it looks. Linux
-// reports an unlinked image with a " (deleted)" suffix, but os.Executable
-// strips that suffix (os/executable_procfs.go), so no "(deleted)" path ever
-// reaches this resolver: a bd replaced in place mid-session (an ordinary
-// `go install ./cmd/bd`) still resolves to its own path, EvalSymlinks succeeds
-// against the new file, and the re-exec runs the replacement. The residual gap
-// is a bd deleted without being replaced: EvalSymlinks fails, that failure is
-// tolerated so the stale path is kept, and the PATH fallback is correctly not
-// taken because os.Executable itself returned no error. Accepted: the target is
-// PATH-independent because it contains a path separator (exec.Command calls
-// LookPath only when filepath.Base(name) == name), and both hook handlers treat
-// a prime failure as non-fatal, so the effect is a session primed without
-// context.
 func resolvePrimeExecutable() (string, error) {
-	exe, err := os.Executable()
+	exe, err := resolveSelfExecutable()
 	if err == nil {
-		if resolved, linkErr := filepath.EvalSymlinks(exe); linkErr == nil {
-			exe = resolved
-		}
-		// testing.Testing() is the authoritative signal and must come first:
-		// rules_go links test binaries as <name>_test (cmd/bd's is bd_test),
-		// which no ".test" name check can see, so under the Bazel lane the
-		// name checks alone would let an unstubbed call re-exec the test
-		// binary. The name checks remain for binaries built with `go test -c`
-		// and run outside the harness. Mirrors doctor/fix's isTestBinary.
-		base := filepath.Base(exe)
-		if testing.Testing() || strings.HasSuffix(base, ".test") || strings.Contains(base, ".test.") {
+		// testing.Testing() is the authoritative signal and must come first;
+		// see isTestBinaryPath for why the name checks stay.
+		if testing.Testing() || isTestBinaryPath(exe) {
 			return "", errPrimeTestBinary
 		}
 		return exe, nil
