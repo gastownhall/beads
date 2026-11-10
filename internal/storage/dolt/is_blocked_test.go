@@ -764,3 +764,70 @@ func TestIsBlocked_ConditionalBlocksReasonEditFlipsDependent(t *testing.T) {
 		}
 	}
 }
+
+// TestIsBlocked_ConditionalBlocksSuccessHoldIsListedButClosable pins the
+// read surfaces for a dependent held only by a success-closed conditional
+// target: the blocked listing names the target as the blocker, the blocked
+// reads report blocked with no live blockers (the target is closed, so it
+// cannot be worked), and a manual close without force goes through.
+func TestIsBlocked_ConditionalBlocksSuccessHoldIsListedButClosable(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	a, b := "isb-cbl-a", "isb-cbl-b"
+	createPerm(t, ctx, store, a)
+	createPerm(t, ctx, store, b)
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID: b, DependsOnID: a, Type: types.DepConditionalBlocks,
+	}, "tester"); err != nil {
+		t.Fatalf("AddDependency: %v", err)
+	}
+	if err := store.CloseIssue(ctx, a, "completed successfully", "tester", ""); err != nil {
+		t.Fatalf("CloseIssue A: %v", err)
+	}
+
+	listed, err := store.GetBlockedIssues(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetBlockedIssues: %v", err)
+	}
+	var entry *types.BlockedIssue
+	for _, item := range listed {
+		if item.ID == b {
+			entry = item
+		}
+	}
+	if entry == nil {
+		t.Fatalf("blocked listing omits %s held by success-closed conditional %s", b, a)
+	}
+	if len(entry.BlockedBy) != 1 || entry.BlockedBy[0] != a || entry.BlockedByCount != 1 {
+		t.Errorf("blocked listing names %v (count %d) as %s's blockers, want [%s]", entry.BlockedBy, entry.BlockedByCount, b, a)
+	}
+
+	blocked, blockers, err := store.IsBlocked(ctx, b)
+	if err != nil {
+		t.Fatalf("IsBlocked: %v", err)
+	}
+	if !blocked || len(blockers) != 0 {
+		t.Errorf("IsBlocked(%s) = %v, %v; want true with no live blockers", b, blocked, blockers)
+	}
+	batch, err := store.IsBlockedBatch(ctx, []string{b})
+	if err != nil {
+		t.Fatalf("IsBlockedBatch: %v", err)
+	}
+	if !batch[b] {
+		t.Errorf("IsBlockedBatch(%s) = false, want true", b)
+	}
+	withBlockers, err := store.IsBlockedWithBlockersBatch(ctx, []string{b})
+	if err != nil {
+		t.Fatalf("IsBlockedWithBlockersBatch: %v", err)
+	}
+	if got, ok := withBlockers[b]; !ok || len(got) != 0 {
+		t.Errorf("IsBlockedWithBlockersBatch(%s) = %v (present %v), want present with no live blockers", b, got, ok)
+	}
+
+	if _, err := store.CloseIssueChecked(ctx, b, "tester", storage.CloseIssueOptions{Reason: "done by hand"}); err != nil {
+		t.Fatalf("manual close of %s without force: %v", b, err)
+	}
+}

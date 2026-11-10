@@ -269,13 +269,26 @@ func GetBlockedIssuesInTx(ctx context.Context, tx DBTX, filter types.WorkFilter)
 				targetIDs = append(targetIDs, rec.dependsOnID)
 			}
 		}
-		activeTargets, err := loadStatusByIDInTx(ctx, tx, targetIDs)
+		targetPostures, err := loadTargetPostureByIDInTx(ctx, tx, targetIDs)
 		if err != nil {
-			return nil, fmt.Errorf("blocker target status: %w", err)
+			return nil, fmt.Errorf("blocker target posture: %w", err)
 		}
 		for _, rec := range blockingDeps {
-			status, ok := activeTargets[rec.dependsOnID]
-			if !ok || status == types.StatusClosed || status == types.StatusPinned {
+			posture, ok := targetPostures[rec.dependsOnID]
+			if !ok {
+				continue
+			}
+			// blocks and conditional-blocks name their blocker exactly while
+			// the edge holds (types.BlockingEdgeHolds — a conditional-blocks
+			// target still names itself through a SUCCESS close, GH#5577).
+			// waits-for keeps its listing shape: it is named while its target
+			// is open, the rule it has always had.
+			depType := types.DependencyType(rec.depType)
+			holds := posture.status != types.StatusClosed && posture.status != types.StatusPinned
+			if depType == types.DepBlocks || depType == types.DepConditionalBlocks {
+				holds = types.BlockingEdgeHolds(depType, posture.status, posture.closeReason)
+			}
+			if !holds {
 				continue
 			}
 			blockerMap[rec.issueID] = append(blockerMap[rec.issueID], rec.dependsOnID)

@@ -43,6 +43,11 @@ type BlockedListerFixture struct {
 	// changed. A nil hook means this leg cannot write the column, and the case
 	// that needs it skips with that reason.
 	MarkBlocked func(context.Context, string) error
+	// CloseIssue closes one durable issue with a close reason, the way the
+	// close verb does, so the conditional-close cases can land a real reason
+	// on the row. A nil hook means this leg cannot close, and the cases that
+	// need it skip with that reason.
+	CloseIssue func(context.Context, string, string, string) error
 }
 
 // RunBlockedLister runs every blocked-listing case as a subtest of t.
@@ -57,6 +62,8 @@ func RunBlockedLister(t *testing.T, ctx context.Context, fixture BlockedListerFi
 	t.Run("LabelFilters", func(t *testing.T) { runBlockedLabelFilters(t, ctx, fixture) })
 	t.Run("Order", func(t *testing.T) { runBlockedOrder(t, ctx, fixture) })
 	t.Run("NamesWaitsForAndConditionalBlockers", func(t *testing.T) { runBlockedNamesWaitsForAndConditionalBlockers(t, ctx, fixture) })
+	t.Run("NamesASuccessClosedConditionalTarget", func(t *testing.T) { runBlockedNamesASuccessClosedConditionalTarget(t, ctx, fixture) })
+	t.Run("OmitsAFailureClosedConditionalTarget", func(t *testing.T) { runBlockedOmitsAFailureClosedConditionalTarget(t, ctx, fixture) })
 	t.Run("OmitsAStaleFlagWithNoNameableBlocker", func(t *testing.T) { runBlockedOmitsAStaleFlag(t, ctx, fixture) })
 	t.Run("HasNoTypeExclusions", func(t *testing.T) { runBlockedHasNoTypeExclusions(t, ctx, fixture) })
 	t.Run("EmptyIsAnEmptySlice", func(t *testing.T) { runBlockedEmptyIsAnEmptySlice(t, ctx, fixture) })
@@ -267,6 +274,47 @@ func runBlockedNamesWaitsForAndConditionalBlockers(t *testing.T, ctx context.Con
 
 	items := blListerList(t, ctx, f, publicops.BlockedRequest{Labels: []string{label}})
 	blListerAssertRows(t, items, map[string][]string{waiter: {spawner}, conditional: {target}})
+}
+
+// runBlockedNamesASuccessClosedConditionalTarget: a conditional-blocks target
+// closed with a NON-failure reason still holds its fallback (GH#5577), and the
+// listing names it — through the closed status, using the close reason.
+func runBlockedNamesASuccessClosedConditionalTarget(t *testing.T, ctx context.Context, f BlockedListerFixture) {
+	if f.CloseIssue == nil {
+		t.Skip("this leg cannot close an issue with a reason")
+	}
+	label := f.IssuePrefix + "-bl-cbsucc"
+	src, dst := blListerID(f, "cbsucc-src"), blListerID(f, "cbsucc-dst")
+	blListerSeedIssue(t, ctx, f, blListerIssue(src, 1, label))
+	blListerSeedIssue(t, ctx, f, blListerIssue(dst, 1, label))
+	blListerSeedEdge(t, ctx, f, src, dst, types.DepConditionalBlocks)
+	if err := f.CloseIssue(ctx, dst, "completed successfully", "seed"); err != nil {
+		t.Fatalf("close %s: %v", dst, err)
+	}
+
+	items := blListerList(t, ctx, f, publicops.BlockedRequest{Labels: []string{label}})
+	blListerAssertRows(t, items, map[string][]string{src: {dst}})
+}
+
+// runBlockedOmitsAFailureClosedConditionalTarget: a conditional-blocks target
+// closed with a FAILURE reason releases its fallback, so the fallback is not
+// blocked and is not listed. The case is the mirror of
+// NamesASuccessClosedConditionalTarget: only the close reason differs.
+func runBlockedOmitsAFailureClosedConditionalTarget(t *testing.T, ctx context.Context, f BlockedListerFixture) {
+	if f.CloseIssue == nil {
+		t.Skip("this leg cannot close an issue with a reason")
+	}
+	label := f.IssuePrefix + "-bl-cbfail"
+	src, dst := blListerID(f, "cbfail-src"), blListerID(f, "cbfail-dst")
+	blListerSeedIssue(t, ctx, f, blListerIssue(src, 1, label))
+	blListerSeedIssue(t, ctx, f, blListerIssue(dst, 1, label))
+	blListerSeedEdge(t, ctx, f, src, dst, types.DepConditionalBlocks)
+	if err := f.CloseIssue(ctx, dst, "failed: rejected by reviewer", "seed"); err != nil {
+		t.Fatalf("close %s: %v", dst, err)
+	}
+
+	items := blListerList(t, ctx, f, publicops.BlockedRequest{Labels: []string{label}})
+	blListerAssertRows(t, items, map[string][]string{})
 }
 
 // runBlockedOmitsAStaleFlag: a row whose stored flag says blocked but which
