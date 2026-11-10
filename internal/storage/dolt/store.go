@@ -6353,10 +6353,29 @@ func (s *DoltStore) finishCLIPullChecked(ctx context.Context, pullErr error, pri
 		return s.settleDeclinedCLIPullChecked(ctx, pullErr, declined, prior)
 	}
 	if resolveErr != nil {
-		if pullErr != nil {
-			return pullErr
+		if !isIndeterminateCommitResponse(resolveErr) {
+			if pullErr != nil {
+				return pullErr
+			}
+			return resolveErr
 		}
-		return resolveErr
+		// An INDETERMINATE commit during the resolve is the one resolve
+		// error surfaced even alongside a transport error: the repair's
+		// commit may have landed without its response, and the no-replay
+		// sentinel is what keeps bd sync from re-driving the pull over a
+		// settlement that may already have happened. commitSQLTx wraps its
+		// own commit boundary with the sentinel; a settlement-commit error
+		// that lacks one (CommitResolvedConflicts wraps plainly) still lost
+		// its response — every untyped error is conservatively
+		// indeterminate — so the sentinel is added here rather than trusted.
+		wrapped := resolveErr
+		if !errors.Is(resolveErr, ErrCommitIndeterminate) {
+			wrapped = fmt.Errorf("%w: %w", resolveErr, ErrCommitIndeterminate)
+		}
+		if pullErr != nil {
+			return errors.Join(pullErr, wrapped)
+		}
+		return wrapped
 	}
 	if pullErr != nil && !resolved {
 		// Pull failed for a non-conflict reason, or conflicts are not auto-resolvable;

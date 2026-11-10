@@ -7,6 +7,7 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
@@ -202,4 +203,97 @@ func TestCLIPullSettlementSafety(t *testing.T) {
 			t.Fatalf("unmet sqlmock expectations: %v", err)
 		}
 	})
+}
+
+// expectResolvableCLIMerge mocks the resolver pass over ONE auto-resolvable
+// metadata conflict (GH#2466) with no FK violations, up to the settlement's
+// two commit boundaries: CommitSettledMerge's CALL DOLT_COMMIT and the
+// transaction's final Commit. failCommit selects which boundary loses its
+// response ("settled" — the CALL DOLT_COMMIT — or "tx" — the final Commit).
+func expectResolvableCLIMerge(mock sqlmock.Sqlmock, failCommit string, responseLoss error) {
+	mock.ExpectExec(regexp.QuoteMeta("SET @@dolt_allow_commit_conflicts = 1")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT `table`, num_conflicts FROM dolt_conflicts")).
+		WillReturnRows(sqlmock.NewRows([]string{"table", "num_conflicts"}).AddRow("metadata", 1))
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'metadata')")).
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD('metadata')")).
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT `table` FROM dolt_constraint_violations WHERE num_violations > 0")).
+		WillReturnRows(sqlmock.NewRows([]string{"table"}))
+	// GH#7811: CommitSettledMerge concludes with the FULL merge result — it
+	// reads the open merge's source commit, then the unstaged tables that
+	// differ between HEAD and it (none here) — before its DOLT_COMMIT.
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT source_commit FROM dolt_merge_status WHERE is_merging")).
+		WillReturnRows(sqlmock.NewRows([]string{"source_commit"}).AddRow("0123456789abcdefghijklmnopqrstuv"))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT DISTINCT CASE WHEN s.table_name = CONCAT(d.from_table_name, ' -> ', d.to_table_name) THEN d.to_table_name ELSE s.table_name END FROM dolt_status s JOIN (SELECT from_table_name, to_table_name FROM dolt_diff_summary('HEAD', '0123456789abcdefghijklmnopqrstuv') UNION SELECT from_table_name, to_table_name FROM dolt_schema_diff('HEAD', '0123456789abcdefghijklmnopqrstuv')) d ON s.table_name IN (d.from_table_name, d.to_table_name, CONCAT(d.from_table_name, ' -> ', d.to_table_name)) WHERE s.staged = 0")).
+		WillReturnRows(sqlmock.NewRows([]string{"table_name"}))
+	// concludeMerge binds the commit message and drains the CALL.
+	if failCommit == "settled" {
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?)")).
+			WithArgs("auto-resolve merge conflicts: metadata, dependencies, schema_migrations, config, issues (field-level three-way merge), labels/comments/events (union)").
+			WillReturnError(responseLoss)
+		mock.ExpectRollback()
+	} else {
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?)")).
+			WithArgs("auto-resolve merge conflicts: metadata, dependencies, schema_migrations, config, issues (field-level three-way merge), labels/comments/events (union)").
+			WillReturnRows(sqlmock.NewRows([]string{"status"}))
+		mock.ExpectCommit().WillReturnError(responseLoss)
+	}
+	mock.ExpectExec(regexp.QuoteMeta("SET @@dolt_allow_commit_conflicts = 0")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+}
+
+// TestFinishCLIPullCommitFailurePreservesOutcome pins the deliberate
+// exception in the declined-CLI-pull settlement: an INDETERMINATE commit
+// during the resolve (a commit whose server response was lost, so the
+// repair may have landed) must not be masked by the transport error. The
+// no-replay sentinel (storage.ErrCommitIndeterminate) is what tells bd sync
+// not to re-drive the pull, and both commit boundaries can lose it — the
+// settlement commit's CALL DOLT_COMMIT and the resolve transaction's own
+// final Commit. GH#7839's abort-and-report fix deliberately does NOT abort
+// on these (an indeterminate commit may be the merge's conclusion), so all
+// this path does is keep the sentinel in the returned error.
+func TestFinishCLIPullCommitFailurePreservesOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		failCommit string
+		withPull   bool
+	}{
+		{name: "settled merge commit response lost, transport failed", failCommit: "settled", withPull: true},
+		{name: "resolve tx commit response lost, transport failed", failCommit: "tx", withPull: true},
+		{name: "settled merge commit response lost, transport succeeded", failCommit: "settled", withPull: false},
+		{name: "resolve tx commit response lost, transport succeeded", failCommit: "tx", withPull: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+
+			responseLoss := errors.New("SQL commit response lost")
+			expectResolvableCLIMerge(mock, tc.failCommit, responseLoss)
+
+			store := &DoltStore{db: db}
+			var pullErr error
+			if tc.withPull {
+				pullErr = errors.New("dolt pull failed: Automatic merge failed")
+			}
+			err = store.finishCLIPull(t.Context(), pullErr)
+			if !errors.Is(err, storage.ErrCommitIndeterminate) {
+				t.Fatalf("finishCLIPull error = %v, want storage.ErrCommitIndeterminate preserved", err)
+			}
+			if !errors.Is(err, responseLoss) {
+				t.Errorf("error = %v, want the lost-response cause preserved", err)
+			}
+			if pullErr != nil && !errors.Is(err, pullErr) {
+				t.Errorf("error = %v, want the transport error preserved alongside the sentinel", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet sqlmock expectations: %v", err)
+			}
+		})
+	}
 }
