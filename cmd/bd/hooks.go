@@ -1176,6 +1176,28 @@ func installHooksWithContext(hookNames []string, force, shared, chain, beadsHook
 	return installHooksAt(hookNames, force, shared, chain, beadsHooks, selected)
 }
 
+// plainHooksPathQuery describes the repository a plain install configures:
+// the selected one when the caller resolved it, else the process's. ok is
+// false when there is no repository config to inspect.
+func plainHooksPathQuery(selected *initHooksContext) (doctor.HooksPathQuery, bool) {
+	if selected == nil {
+		return doctor.CurrentHooksPathQuery()
+	}
+	if selected.paths.CommonDir == "" || selected.paths.MainRepoRoot == "" {
+		return doctor.HooksPathQuery{}, false // absolute-path fallback: no repository config authority
+	}
+	storage := doctor.BeadsManagedStorageHooksDir()
+	if selected.beadsDir != "" {
+		storage = filepath.Join(selected.beadsDir, "hooks")
+	}
+	return doctor.HooksPathQuery{
+		WorkDir:         selected.workDir,
+		RepoRoot:        selected.paths.MainRepoRoot,
+		StorageHooksDir: storage,
+		Env:             selected.env,
+	}, true
+}
+
 //nolint:unparam // force and chain remain accepted compatibility no-ops
 func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, selected *initHooksContext) error {
 	var hooksDir string
@@ -1209,6 +1231,22 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 		hooksDir, err = git.GetGitHooksDir()
 		if err != nil {
 			return err
+		}
+	}
+
+	// A plain install writes wherever core.hooksPath points. When that
+	// directory is missing, git runs no hooks from it, and creating it would
+	// only entrench the stale value: install into the moved repository's
+	// validated beads hooks directory and repoint the value there (GH#5853).
+	// Decided before anything below creates or writes a file.
+	var relocation *doctor.HooksPathState
+	var relocationQuery doctor.HooksPathQuery
+	if !beadsHooks && !shared {
+		if q, ok := plainHooksPathQuery(selected); ok {
+			if s := doctor.InspectHooksPath(q); s.Missing() && !s.Managed && s.RelocatedTo != "" {
+				hooksDir = s.RelocatedTo
+				relocation, relocationQuery = &s, q
+			}
 		}
 	}
 
@@ -1314,7 +1352,13 @@ func installHooksAt(hookNames []string, force, shared, chain, beadsHooks bool, s
 	}
 
 	// Configure git to use the hooks directory after writing, as in ordinary installs.
-	if selected != nil && (beadsHooks || shared) {
+	if relocation != nil {
+		if _, err := doctor.RepointRelocatedHooksPath(relocationQuery, relocation.Configured, relocation.RelocatedTo); err != nil {
+			return fmt.Errorf("hooks refreshed in %s, but failed to repoint core.hooksPath: %w", remedy.PrintedValue(hooksDir), err)
+		}
+		fmt.Fprintf(os.Stderr, "Repointed core.hooksPath from missing %s to %s\n",
+			remedy.PrintedValue(relocation.Configured), remedy.PrintedValue(relocation.RelocatedTo))
+	} else if selected != nil && (beadsHooks || shared) {
 		if err := selected.configureHooksPath(hooksDir); err != nil {
 			return fmt.Errorf("failed to configure git hooks path: %w", err)
 		}

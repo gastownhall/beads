@@ -1688,3 +1688,73 @@ func TestHooksList_RelocatedHooksPath(t *testing.T) {
 	}
 	assertStaleNotCreated(t, stale)
 }
+
+// TestInstallHooks_RelocatedHooksPath: a plain install and the config apply
+// reinstall refresh the hooks in the current beads hooks directory, keep the
+// user content around the managed section, repoint core.hooksPath there and
+// never recreate the former location (GH#5853).
+func TestInstallHooks_RelocatedHooksPath(t *testing.T) {
+	installs := []struct {
+		name    string
+		install func() error
+	}{
+		{"bd hooks install", func() error {
+			return installStandaloneHooks(managedHookNames, false, false, false, false)
+		}},
+		{"config apply", func() error {
+			if r := applyHooks(true, false); r.Status != applyStatusApplied {
+				return fmt.Errorf("applyHooks: %s %s", r.Message, r.Error)
+			}
+			return nil
+		}},
+	}
+	for _, tc := range installs {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BEADS_DIR", "")
+			repo := newGitRepo(t)
+			stale, target := strandRepoHooksPath(t, repo)
+			userHook := "#!/bin/sh\necho user-before\n" +
+				hookSectionBeginPrefix + " v0.0.1 ---\nbd hooks run pre-commit \"$@\"\n" + hookSectionEndPrefix + " v0.0.1 ---\n" +
+				"echo user-after\n"
+			if err := os.WriteFile(filepath.Join(target, "pre-commit"), []byte(userHook), 0755); err != nil {
+				t.Fatal(err)
+			}
+
+			runInDir(t, repo, func() {
+				if err := tc.install(); err != nil {
+					t.Fatalf("install failed: %v", err)
+				}
+			})
+
+			cmd := exec.Command("git", "config", "--local", "--get", "core.hooksPath")
+			cmd.Dir = repo
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("core.hooksPath unset after install: %v", err)
+			}
+			got := strings.TrimSpace(string(out))
+			if !filepath.IsAbs(got) || !utilsSameDir(got, target) {
+				t.Errorf("core.hooksPath = %q, want the absolute %s", got, target)
+			}
+			content, err := os.ReadFile(filepath.Join(target, "pre-commit"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := string(content)
+			if !strings.Contains(text, "echo user-before") || !strings.Contains(text, "echo user-after") {
+				t.Errorf("user content around the managed section was lost:\n%s", text)
+			}
+			if !strings.Contains(text, hookSectionBeginLine()) || strings.Contains(text, "v0.0.1") {
+				t.Errorf("managed section was not refreshed to %s:\n%s", Version, text)
+			}
+			assertStaleNotCreated(t, stale)
+		})
+	}
+}
+
+// utilsSameDir reports whether two existing directories are the same.
+func utilsSameDir(a, b string) bool {
+	ai, aerr := os.Stat(a)
+	bi, berr := os.Stat(b)
+	return aerr == nil && berr == nil && os.SameFile(ai, bi)
+}
