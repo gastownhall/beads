@@ -150,6 +150,9 @@ func getFederatedStore() (storage.DoltStorage, error) {
 }
 
 func runFederationSync(cmd *cobra.Command, args []string) error {
+	// Sync publishes to peers as well as receiving, so strict read-only
+	// refuses it outright (GH#7876).
+	CheckReadonly("federation sync")
 	if usesProxiedServer() {
 		return HandleErrorRespectJSON("federation sync is not supported in proxied-server mode")
 	}
