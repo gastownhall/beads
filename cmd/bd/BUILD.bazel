@@ -1255,6 +1255,7 @@ go_test(
         "show_current_test.go",
         "show_details_json_test.go",
         "show_embedded_test.go",
+        "show_foreign_prefix_routing_test.go",
         "show_format_metadata_test.go",
         "show_format_test.go",
         "show_not_found_hint_test.go",
