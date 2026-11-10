@@ -178,6 +178,9 @@ func TestBatchApplyContract(t *testing.T) {
 	t.Run("StateChangeOnATemplateHonorsAllowTemplate", func(t *testing.T) {
 		conformance.RunBatchApplyStateChangeOnATemplateHonorsAllowTemplate(t, ctx, fixture)
 	})
+	t.Run("StateChangeRefusedAtTheEventOrItsEdgeWritesNothing", func(t *testing.T) {
+		conformance.RunBatchApplyStateChangeRefusedAtTheEventOrItsEdgeWritesNothing(t, ctx, fixture)
+	})
 }
 
 func newUOWBatchApplyFixture(t *testing.T, ctx context.Context, prefix string) conformance.BatchApplyFixture {
