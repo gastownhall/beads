@@ -863,17 +863,36 @@ var hooksListCmd = &cobra.Command{
 		}()
 
 		statuses := CheckGitHooks()
+		var hooksPath doctor.HooksPathState
+		if q, ok := doctor.CurrentHooksPathQuery(); ok {
+			hooksPath = doctor.InspectHooksPath(q)
+		}
 
 		if jsonOutput {
 			output := map[string]interface{}{
 				"hooks": statuses,
 			}
+			if hooksPath.Missing() {
+				output["hooks_path"] = hooksPathReport{
+					Configured:  hooksPath.Configured,
+					Resolved:    hooksPath.Resolved,
+					Exists:      hooksPath.Exists,
+					RelocatedTo: hooksPath.RelocatedTo,
+				}
+			}
 			jsonBytes, _ := json.MarshalIndent(output, "", "  ")
 			fmt.Println(string(jsonBytes))
 		} else {
+			if hooksPath.Missing() {
+				printMissingHooksPath(hooksPath)
+			}
 			fmt.Println("Git hooks status:")
 			for _, status := range statuses {
-				if !status.Installed {
+				if hooksPath.Missing() {
+					// The files were looked up in a directory git cannot use,
+					// so "not installed" would send the user to reinstall.
+					fmt.Printf("  ✗ %s: not run (core.hooksPath directory is missing)\n", status.Name)
+				} else if !status.Installed {
 					fmt.Printf("  ✗ %s: not installed\n", status.Name)
 				} else if status.IsShim {
 					// An external manager's integration (GH#946) carries no bd
@@ -896,6 +915,33 @@ var hooksListCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+// hooksPathReport is the additive bd hooks list --json view of a configured
+// core.hooksPath whose directory is missing (GH#5853).
+type hooksPathReport struct {
+	Configured  string `json:"configured"`
+	Resolved    string `json:"resolved"`
+	Exists      bool   `json:"exists"`
+	RelocatedTo string `json:"relocated_to,omitempty"`
+}
+
+// printMissingHooksPath names the configuration fault behind a missing
+// core.hooksPath and the repair that applies to it.
+func printMissingHooksPath(s doctor.HooksPathState) {
+	fmt.Printf("⚠ core.hooksPath points at %s, which does not exist\n", remedy.PrintedValue(s.Configured))
+	fmt.Println("  Git runs no hooks at all while core.hooksPath names a missing directory.")
+	switch {
+	case s.RelocatedTo != "":
+		fmt.Printf("  bd hooks are installed at %s; the repository appears to have moved.\n", remedy.PrintedValue(s.RelocatedTo))
+		fmt.Println("  Repair: run 'bd hooks install' or 'bd doctor --fix' to repoint core.hooksPath there.")
+	case s.Managed:
+		fmt.Println("  Repair: run 'bd doctor --fix' to unset it, or 'bd hooks install' to reinstall hooks there.")
+	default:
+		fmt.Printf("  bd will not change it: %s.\n", s.Refusal)
+		fmt.Println("  Restore that directory, or correct core.hooksPath where it is set (git config --show-scope --get core.hooksPath).")
+	}
+	fmt.Println()
 }
 
 // refuseSymlinkedHooksDir refuses a hooks directory that is itself a symlink,

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1543,4 +1545,146 @@ func TestCheckGitHooks_BeadsHookIsInstalled(t *testing.T) {
 			})
 		})
 	}
+}
+
+// TestHooksList_StrandedHooksPathNamesTheConfig reproduces GH#5853 (bd-m9es2y).
+// The .beads/hooks files are present and current, but core.hooksPath still
+// names the absolute path of the repo's old location, so git runs no hooks.
+// bd hooks list must name the stale core.hooksPath instead of reporting every
+// hook as "not installed", which sends the user to reinstall.
+func TestHooksList_StrandedHooksPathNamesTheConfig(t *testing.T) {
+	tmpDir := newGitRepo(t)
+	runInDir(t, tmpDir, func() {
+		beadsHooks := filepath.Join(tmpDir, ".beads", "hooks")
+		if err := os.MkdirAll(beadsHooks, 0750); err != nil {
+			t.Fatalf("mkdir .beads/hooks: %v", err)
+		}
+		for _, name := range managedHookNames {
+			body := "#!/bin/sh\n" + shimVersionPrefix + Version + "\nexec bd hooks run " + name + " \"$@\"\n"
+			if err := os.WriteFile(filepath.Join(beadsHooks, name), []byte(body), 0755); err != nil {
+				t.Fatalf("write hook %s: %v", name, err)
+			}
+		}
+
+		stale := filepath.Join(t.TempDir(), "moved-away", ".beads", "hooks")
+		if out, err := exec.Command("git", "config", "core.hooksPath", stale).CombinedOutput(); err != nil {
+			t.Fatalf("git config core.hooksPath: %v: %s", err, out)
+		}
+		resetRepoCaches()
+
+		out := captureStdout(t, func() error {
+			return hooksListCmd.RunE(hooksListCmd, nil)
+		})
+
+		if !strings.Contains(out, stale) {
+			t.Errorf("bd hooks list does not name the stranded core.hooksPath %q (GH#5853); output:\n%s", stale, out)
+		}
+		if strings.Count(out, "not installed") == len(managedHookNames) {
+			t.Errorf("bd hooks list reports every hook \"not installed\" although .beads/hooks holds all of them and the fault is core.hooksPath (GH#5853); output:\n%s", out)
+		}
+	})
+}
+
+// strandRepoHooksPath writes current beads hooks to repo/.beads/hooks and sets
+// core.hooksPath to the absolute path the repository had at a former location,
+// which does not exist (GH#5853). It returns the stale value and the target.
+func strandRepoHooksPath(t *testing.T, repo string) (stale, target string) {
+	t.Helper()
+	target = filepath.Join(repo, ".beads", "hooks")
+	if err := os.MkdirAll(target, 0750); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range managedHookNames {
+		body := "#!/bin/sh\n" + shimVersionPrefix + Version + "\nexec bd hooks run " + name + " \"$@\"\n"
+		if err := os.WriteFile(filepath.Join(target, name), []byte(body), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stale = filepath.Join(t.TempDir(), "moved-away", "repo", ".beads", "hooks")
+	gitConfigIn(t, repo, "core.hooksPath", stale)
+	return stale, target
+}
+
+// gitConfigIn runs git config args in dir, failing the test on error.
+func gitConfigIn(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"config"}, args...)...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git config %v: %v (%s)", args, err, strings.TrimSpace(string(out)))
+	}
+}
+
+// hooksPathConfig returns every core.hooksPath value with its scope, as git
+// lists them from dir.
+func hooksPathConfig(t *testing.T, dir string) string {
+	t.Helper()
+	cmd := exec.Command("git", "config", "--show-scope", "--get-all", "core.hooksPath")
+	cmd.Dir = dir
+	out, _ := cmd.Output()
+	return strings.TrimSpace(string(out))
+}
+
+// assertStaleNotCreated fails when the former location (or its parent) exists.
+func assertStaleNotCreated(t *testing.T, stale string) {
+	t.Helper()
+	if _, err := os.Lstat(filepath.Dir(stale)); !os.IsNotExist(err) {
+		t.Errorf("the former location %s was created (err=%v)", filepath.Dir(stale), err)
+	}
+}
+
+// TestHooksList_RelocatedHooksPath: bd hooks list names the stranded path,
+// says git runs no hooks, names the current beads hooks directory and the
+// repair, and keeps the --json hooks array while adding hooks_path; listing
+// changes nothing (GH#5853).
+func TestHooksList_RelocatedHooksPath(t *testing.T) {
+	t.Setenv("BEADS_DIR", "")
+	repo := newGitRepo(t)
+	stale, target := strandRepoHooksPath(t, repo)
+	before := hooksPathConfig(t, repo)
+
+	runInDir(t, repo, func() {
+		out := captureStdout(t, func() error { return hooksListCmd.RunE(hooksListCmd, nil) })
+		for _, want := range []string{stale, "Git runs no hooks", "bd hooks install", "bd doctor --fix"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("text output lacks %q:\n%s", want, out)
+			}
+		}
+		if !strings.Contains(out, "bd hooks are installed at ") || !strings.Contains(out, filepath.Join(".beads", "hooks")+";") {
+			t.Errorf("text output does not name the current hooks directory %s:\n%s", target, out)
+		}
+
+		old := jsonOutput
+		jsonOutput = true
+		defer func() { jsonOutput = old }()
+		raw := captureStdout(t, func() error { return hooksListCmd.RunE(hooksListCmd, nil) })
+		var got struct {
+			Hooks     []HookStatus `json:"hooks"`
+			HooksPath *struct {
+				Configured  string `json:"configured"`
+				Exists      bool   `json:"exists"`
+				RelocatedTo string `json:"relocated_to"`
+			} `json:"hooks_path"`
+		}
+		if err := json.Unmarshal([]byte(raw), &got); err != nil {
+			t.Fatalf("--json output is not JSON: %v\n%s", err, raw)
+		}
+		if len(got.Hooks) != len(managedHookNames) {
+			t.Errorf("hooks array has %d entries, want %d", len(got.Hooks), len(managedHookNames))
+		}
+		if got.HooksPath == nil {
+			t.Fatalf("--json output lacks hooks_path:\n%s", raw)
+		}
+		if got.HooksPath.Configured != stale || got.HooksPath.Exists {
+			t.Errorf("hooks_path = %+v, want configured %q with exists=false", *got.HooksPath, stale)
+		}
+		if got.HooksPath.RelocatedTo == "" || filepath.Base(filepath.Dir(got.HooksPath.RelocatedTo)) != ".beads" {
+			t.Errorf("hooks_path.relocated_to = %q, want the current .beads/hooks", got.HooksPath.RelocatedTo)
+		}
+	})
+
+	if after := hooksPathConfig(t, repo); after != before {
+		t.Errorf("bd hooks list changed core.hooksPath: %q -> %q", before, after)
+	}
+	assertStaleNotCreated(t, stale)
 }
