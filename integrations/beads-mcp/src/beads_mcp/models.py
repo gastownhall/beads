@@ -158,11 +158,31 @@ class LinkedIssue(IssueBase):
     dependency_type: DependencyType | None = None
 
 
+class Comment(BaseModel):
+    """A comment on an issue (matches `bd comments <id> --json`)."""
+
+    id: str
+    issue_id: str
+    author: str | None = None
+    text: str
+    created_at: datetime
+
+
 class Issue(IssueBase):
-    """Issue model matching bd JSON output."""
+    """Issue model matching bd JSON output.
+
+    Comment completeness mirrors the CLI: ``comment_count`` and
+    ``comments_omitted`` say how many comments exist and whether their bodies
+    were left out; ``comments`` holds the bodies only when the CLI supplied them
+    (``bd show --include-comments``). ``None`` means unknown/unavailable, never
+    "no comments".
+    """
 
     dependencies: list[LinkedIssue] = Field(default_factory=list)
     dependents: list[LinkedIssue] = Field(default_factory=list)
+    comments: list[Comment] | None = None
+    comment_count: int | None = None
+    comments_omitted: bool | None = None
 
 
 class Dependency(BaseModel):
@@ -332,16 +352,6 @@ class InitResult(BaseModel):
 # =============================================================================
 # COMMENTS & NOTES
 # =============================================================================
-
-
-class Comment(BaseModel):
-    """A comment on an issue (matches `bd comments <id> --json`)."""
-
-    id: str
-    issue_id: str
-    author: str | None = None
-    text: str
-    created_at: datetime
 
 
 class AddCommentParams(BaseModel):
