@@ -1304,6 +1304,8 @@ go_test(
         "sync_git_test.go",
         "sync_is_scoped_test.go",
         "sync_issues_flag_test.go",
+        "sync_merge_commit_embedded_test.go",
+        "sync_merge_commit_server_test.go",
         "sync_parent_flag_test.go",
         "sync_push_pull_test.go",
         "sync_remote_fixture_test.go",
