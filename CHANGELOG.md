@@ -1226,6 +1226,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd show` no longer suggests a cross-store ID never existed** (#5259). An
+  ID whose prefix this workspace's store does not issue (`issue_prefix` or
+  `allowed_prefixes`), and that no configured route searched for, may live
+  in a store bd never asked, yet its miss printed the same "may have never
+  existed" hint as a missing local ID. That hint now names the requested and
+  configured prefixes, says the miss does not mean the issue is absent
+  elsewhere, and points at running the command from a workspace attached to
+  the store that issues the prefix or adding a prefix route to the
+  workspace's `routes.jsonl`. The error line and exit status are unchanged.
+
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
