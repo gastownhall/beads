@@ -2226,10 +2226,12 @@ var rootCmd = &cobra.Command{
 			// identity preview and the store factories resolve — rather than
 			// the literal default, which created a second database beside
 			// the workspace's own (GH#4135). Server mode keeps the default
-			// name. Without a name embeddeddolt.New rejects the open with
-			// "database name must not be empty".
+			// name, and so does --global, which names its database below: a
+			// refused local selection must not preempt it. Without a name
+			// embeddeddolt.New rejects the open with "database name must not
+			// be empty".
 			selection := metadatalessDatabaseSelection{Database: configfile.DefaultDoltDatabase, Source: "the default"}
-			if !doltCfg.ServerMode && !doltCfg.ProxiedServer {
+			if !doltCfg.ServerMode && !doltCfg.ProxiedServer && !globalFlag {
 				var err error
 				if selection, err = resolveMetadatalessEmbeddedDatabase(beadsDir); err != nil {
 					return HandleError("%v", err)

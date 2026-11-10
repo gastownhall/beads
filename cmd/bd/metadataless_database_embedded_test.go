@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -68,6 +69,23 @@ func assertEmbeddedDatabases(t *testing.T, beadsDir string, want ...string) {
 	}
 }
 
+// listedIDs decodes run's `bd list --json` stdout, which must be exactly one
+// JSON array, and returns the issue ids it lists.
+func listedIDs(t *testing.T, run metadatalessRun) []string {
+	t.Helper()
+	var issues []struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(run.stdout), &issues); err != nil {
+		t.Fatalf("bd list --json stdout is not one JSON array: %v\nstdout:\n%s\nstderr:\n%s", err, run.stdout, run.stderr)
+	}
+	ids := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		ids = append(ids, issue.ID)
+	}
+	return ids
+}
+
 // TestEmbeddedMetadatalessWorkspaceAdoptsSoleDatabase pins GH#4135's
 // split-brain: an embedded workspace that lost metadata.json opened the
 // literal default database "beads", creating it beside the workspace's own,
@@ -87,8 +105,8 @@ func TestEmbeddedMetadatalessWorkspaceAdoptsSoleDatabase(t *testing.T) {
 		if run.err != nil {
 			t.Fatalf("bd list --json failed: %v\nstdout:\n%s\nstderr:\n%s", run.err, run.stdout, run.stderr)
 		}
-		if !strings.Contains(run.stdout, `"`+issue.ID+`"`) {
-			t.Fatalf("bd list --json did not return %s from the workspace's database:\nstdout:\n%s\nstderr:\n%s", issue.ID, run.stdout, run.stderr)
+		if ids := listedIDs(t, run); !slices.Equal(ids, []string{issue.ID}) {
+			t.Fatalf("bd list --json listed %v, want only %s from the workspace's database\nstderr:\n%s", ids, issue.ID, run.stderr)
 		}
 		if !strings.Contains(run.stderr, `"gh4135"`) {
 			t.Fatalf("stderr does not name the selected database \"gh4135\":\n%s", run.stderr)

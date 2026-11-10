@@ -100,6 +100,27 @@ bd init --quiet
 BEADS_DIR=/path/to/.beads bd list
 ```
 
+### Missing metadata.json: bd refuses to open, or picked the wrong database
+
+In releases after v1.3.4, an embedded workspace without
+`.beads/metadata.json` selects its database as described in
+[Configuration](/reference/configuration#missing-metadatajson): it uses the
+sole existing database, honors `BEADS_DOLT_SERVER_DATABASE`, and refuses when
+several databases exist and none is selected. The selection itself renames no
+database directory and writes no `metadata.json`.
+
+```bash
+# Restore the metadata from a known-good copy: a backup, or a recent
+# version if the workspace keeps the file in version control
+git checkout <good-rev> -- .beads/metadata.json
+
+# Or select one of the existing databases explicitly
+BEADS_DOLT_SERVER_DATABASE=<name> bd list
+```
+
+Do not run `bd init` over the existing databases: the refusal is a safety
+stop, and reinitializing cannot recover which database the workspace meant.
+
 ### Database locked
 
 ```bash
