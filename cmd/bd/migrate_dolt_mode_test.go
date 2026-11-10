@@ -1196,6 +1196,37 @@ func TestMigrateFromProxiedServer_AllCheckpointFaultsRetry(t *testing.T) {
 	}
 }
 
+func TestMigrateFromProxiedServer_RetirementErrorRetainsCheckpoint(t *testing.T) {
+	beadsDir, root := reverseMigrationWorkspace(t, false)
+	markers := seedProxyLifecycleMarkers(t, root)
+	// A non-empty directory cannot be removed, even by root.
+	obstacle := filepath.Join(root, proxy.LogFileName)
+	touchFile(t, filepath.Join(obstacle, "retain"))
+
+	var migrateErr error
+	stderr := captureStderr(t, func() {
+		migrateErr = runMigrateFromProxiedServer(false, false)
+	})
+	require.Error(t, migrateErr)
+	assert.Contains(t, stderr, "failed to retire proxy controls")
+	assert.Contains(t, stderr, obstacle)
+	j, err := loadMigrateJournal(beadsDir)
+	require.NoError(t, err)
+	require.NotNil(t, j)
+	assert.Equal(t, migrateTargetConfigured, j.Phase, "a failed retirement must not advance the checkpoint")
+	assertProxyLifecycleMarkersKept(t, markers)
+
+	require.NoError(t, os.RemoveAll(obstacle))
+	require.NoError(t, runMigrateFromProxiedServer(false, false))
+	j, err = loadMigrateJournal(beadsDir)
+	require.NoError(t, err)
+	assert.Nil(t, j)
+	cfg, err := configfile.Load(beadsDir)
+	require.NoError(t, err)
+	assert.True(t, cfg.IsDoltServerMode())
+	assertProxyLifecycleMarkersKept(t, markers)
+}
+
 func TestMigrateFromProxiedServer_ExternalJournalAlwaysFailsClosed(t *testing.T) {
 	for _, phase := range []migratePhase{migratePrepared, migrateTargetConfigured, migrateOldControlsRetired, migrateVerified, migrateCommitted} {
 		t.Run(string(phase), func(t *testing.T) {
