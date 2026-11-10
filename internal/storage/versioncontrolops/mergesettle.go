@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -418,10 +419,14 @@ var doltCommitHashRE = regexp.MustCompile(`^[0-9a-v]{32}$`)
 // unstaged diff-vs-HEAD table while a merge is open is merge output, never
 // pre-existing pending work — and that pending work stays pending in tables
 // the merge did not change (server mode deliberately leaves some config
-// uncommitted, GH#2455). Tables dolt_ignore covers are skipped explicitly
-// (the anti-join commitWorkingSet uses): DOLT_ADD without --force never
-// stages them, so listing one would fail the completeness re-read on every
-// merge, and ignored tables (wisps, ...) cannot sneak into the merge commit.
+// uncommitted, GH#2455). Every listed table goes to DOLT_ADD without --force,
+// so Dolt's own dolt_ignore resolution decides what is staged: it skips an
+// ignored table (wisps, committed __temp__ residue, ...), which therefore
+// cannot sneak into the merge commit, and stages a table a more specific
+// ignored = 0 row keeps versioned. The list is deliberately not filtered by
+// dolt_ignore: a filter that drops every table some ignored = 1 row matches
+// also drops such an override-kept table, and the peer's changes to it, from
+// the merge commit.
 func stageMergeResult(ctx context.Context, db DBConn) error {
 	var sourceCommit sql.NullString
 	if err := db.QueryRowContext(ctx,
@@ -448,12 +453,21 @@ func stageMergeResult(ctx context.Context, db DBConn) error {
 	// Re-read status before the caller commits (GH#7757), even when the first
 	// read found nothing: if staging did not clear every merge-touched table,
 	// the commit would record HEAD's copy of the survivor — the very revert
-	// this staging exists to prevent — so refuse it. This is a completeness
+	// this staging exists to prevent — so refuse it. A survivor some
+	// ignored = 1 dolt_ignore pattern matches is exempt, because DOLT_ADD may
+	// have skipped it by design; refusing it would wedge sync, as every retry
+	// merges the same change and would refuse again. This is a completeness
 	// check within the settlement session, not a guarantee against a writer
 	// that dirties the table after it runs.
 	remaining, err := unstagedMergeTables(ctx, db, sourceCommit.String)
 	if err != nil {
 		return fmt.Errorf("re-check merged-but-unstaged tables: %w", err)
+	}
+	if len(remaining) > 0 {
+		remaining, err = withoutIgnoreMatches(ctx, db, remaining)
+		if err != nil {
+			return fmt.Errorf("re-check merged-but-unstaged tables: %w", err)
+		}
 	}
 	if len(remaining) > 0 {
 		return fmt.Errorf("merge-touched table(s) %s remain unstaged after staging; refusing to commit an incomplete merge result", strings.Join(remaining, ", "))
@@ -462,11 +476,10 @@ func stageMergeResult(ctx context.Context, db DBConn) error {
 }
 
 // unstagedMergeTables lists the tables that differ between HEAD and the
-// merge source commit and are still unstaged in dolt_status, skipping tables
-// dolt_ignore covers and mapping a rename's "<from> -> <to>" dolt_status
-// display name to the new name DOLT_ADD stages. sourceCommit must already be
-// validated against doltCommitHashRE: the diff table functions take literal
-// arguments only.
+// merge source commit and are still unstaged in dolt_status, mapping a
+// rename's "<from> -> <to>" dolt_status display name to the new name DOLT_ADD
+// stages. sourceCommit must already be validated against doltCommitHashRE:
+// the diff table functions take literal arguments only.
 func unstagedMergeTables(ctx context.Context, db DBConn, sourceCommit string) ([]string, error) {
 	//nolint:gosec // G201: sourceCommit is validated by the caller against doltCommitHashRE; the diff table functions require literal arguments.
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(
@@ -475,8 +488,7 @@ func unstagedMergeTables(ctx context.Context, db DBConn, sourceCommit string) ([
 			"JOIN (SELECT from_table_name, to_table_name FROM dolt_diff_summary('HEAD', '%[1]s') "+
 			"UNION SELECT from_table_name, to_table_name FROM dolt_schema_diff('HEAD', '%[1]s')) d "+
 			"ON s.table_name IN (d.from_table_name, d.to_table_name, CONCAT(d.from_table_name, ' -> ', d.to_table_name)) "+
-			"WHERE s.staged = 0 AND NOT EXISTS (SELECT 1 FROM dolt_ignore di WHERE di.ignored = 1 AND s.table_name LIKE di.pattern)",
-		sourceCommit))
+			"WHERE s.staged = 0", sourceCommit))
 	if err != nil {
 		return nil, fmt.Errorf("query merged-but-unstaged tables: %w", err)
 	}
@@ -495,6 +507,58 @@ func unstagedMergeTables(ctx context.Context, db DBConn, sourceCommit string) ([
 		return nil, fmt.Errorf("list merged-but-unstaged tables: %w", err)
 	}
 	return tables, nil
+}
+
+// withoutIgnoreMatches returns the tables no ignored = 1 dolt_ignore pattern
+// matches. The tables it drops are a superset of those DOLT_ADD without
+// --force skips: Dolt ignores a table only when such a pattern matches it,
+// though a more specific ignored = 0 row may still keep the table versioned.
+// Dropping an override-kept table here costs nothing, because staging is not
+// filtered and DOLT_ADD staged it. Leaving out a table Dolt ignores would
+// refuse every merge that touches it.
+func withoutIgnoreMatches(ctx context.Context, db DBConn, tables []string) ([]string, error) {
+	rows, err := db.QueryContext(ctx, "SELECT pattern FROM dolt_ignore WHERE ignored = 1")
+	if err != nil {
+		return nil, fmt.Errorf("query dolt_ignore: %w", err)
+	}
+	var patterns []*regexp.Regexp
+	for rows.Next() {
+		var pattern string
+		if err := rows.Scan(&pattern); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("scan dolt_ignore pattern: %w", err)
+		}
+		re, err := doltIgnorePatternRE(pattern)
+		if err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("compile dolt_ignore pattern %q: %w", pattern, err)
+		}
+		patterns = append(patterns, re)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return nil, fmt.Errorf("list dolt_ignore patterns: %w", err)
+	}
+	var kept []string
+	for _, table := range tables {
+		if !slices.ContainsFunc(patterns, func(re *regexp.Regexp) bool { return re.MatchString(table) }) {
+			kept = append(kept, table)
+		}
+	}
+	return kept, nil
+}
+
+// doltIgnorePatternRE compiles a dolt_ignore pattern into the regexp Dolt
+// matches table names with (doltdb's compilePattern): '%' and '*' match any
+// run of characters, '?' exactly one, and every other character only itself,
+// '_' included, case-sensitively. SQL LIKE, the dolt_ignore idiom elsewhere in
+// bd, reads '_' as a wildcard and '*' and '?' literally, so it misses a table
+// that a '*' or '?' pattern ignores.
+func doltIgnorePatternRE(pattern string) (*regexp.Regexp, error) {
+	re := "^" + regexp.QuoteMeta(pattern) + "$"
+	re = strings.ReplaceAll(re, `\?`, ".")
+	re = strings.ReplaceAll(re, `\*`, ".*")
+	re = strings.ReplaceAll(re, "%", ".*")
+	return regexp.Compile(re)
 }
 
 // concludeMerge commits the resolved, repaired working set as the merge's
