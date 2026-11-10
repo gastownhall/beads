@@ -1231,6 +1231,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   state made bd read the executable path as the state, so a live server was
   missing from the process list that port reclaim and stale-server cleanup
   rely on.
+- That process list now matches `dolt` and `sql-server` as whole words: a
+  word equal to `dolt` or ending in `/dolt`, followed by a `sql-server` word.
+  Processes that only mention them as substrings, such as
+  `cat /etc/dolt/sql-server.yaml` or a `dolt-helper sql-server`, are no longer
+  treated as Dolt servers. A dolt executable renamed to anything else (for
+  example `dolt-2.6`) is not recognized either.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

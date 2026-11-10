@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -80,10 +81,7 @@ func parseDoltProcessPIDs(snapshot []byte) []int {
 		if isPSStateCode(words[0]) {
 			words = words[1:]
 		}
-
-		command := strings.Join(words, " ")
-		doltIndex := strings.Index(command, "dolt")
-		if doltIndex >= 0 && strings.Contains(command[doltIndex+len("dolt"):], "sql-server") {
+		if isDoltSQLServerCommand(words) {
 			pids = append(pids, pid)
 		}
 	}
@@ -108,6 +106,23 @@ func isPSStateCode(word string) bool {
 
 func isASCIIUpper(c byte) bool {
 	return c >= 'A' && c <= 'Z'
+}
+
+// isDoltSQLServerCommand reports whether the command words hold a word equal
+// to dolt or ending in /dolt, followed later by a word equal to sql-server.
+// Words before dolt are allowed so `/bin/sh /path/dolt sql-server` stand-ins
+// and executable paths containing spaces still match, as do global flags
+// between dolt and sql-server. Matching whole words rejects substring-only
+// mentions such as dolt-helper or sql-server.yaml, but it is a heuristic, not
+// proof of the executable: a program whose arguments include the words dolt
+// and sql-server in that order still matches, and a renamed dolt does not.
+func isDoltSQLServerCommand(words []string) bool {
+	for i, word := range words {
+		if word == "dolt" || strings.HasSuffix(word, "/dolt") {
+			return slices.Contains(words[i+1:], "sql-server")
+		}
+	}
+	return false
 }
 
 // isProcessInDir checks if a process's working directory matches the given path.

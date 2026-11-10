@@ -403,3 +403,53 @@ func TestParseDoltProcessPIDsWholeWordCommand(t *testing.T) {
 		})
 	}
 }
+
+// TestParseDoltProcessPIDsRejectsNonServerRows covers rows that mention dolt
+// or sql-server only as substrings, in the wrong order, or that carry no
+// usable PID or command, with the state column present and omitted.
+func TestParseDoltProcessPIDsRejectsNonServerRows(t *testing.T) {
+	tests := []struct {
+		name     string
+		snapshot string
+	}{
+		{
+			name:     "config file path",
+			snapshot: "601 S /usr/bin/cat /etc/dolt/sql-server.yaml\n602 /usr/bin/cat /etc/dolt/sql-server.yaml\n",
+		},
+		{
+			name:     "dolt-prefixed helper",
+			snapshot: "603 S /opt/dolt-tools/bin/dolt-helper sql-server\n604 /opt/dolt-tools/bin/dolt-helper sql-server\n",
+		},
+		{
+			name:     "image name",
+			snapshot: "605 S docker run dolthub/dolt-sql-server\n606 docker run dolthub/dolt-sql-server\n",
+		},
+		{
+			name:     "log file path",
+			snapshot: "607 S vim /Users/u/.beads/dolt/sql-server.log\n608 vim /Users/u/.beads/dolt/sql-server.log\n",
+		},
+		{
+			name:     "sql-server as a word prefix",
+			snapshot: "609 S /usr/local/bin/dolt sql-server-proxy\n610 /usr/local/bin/dolt sql-serverless\n",
+		},
+		{
+			name:     "reversed order without state",
+			snapshot: "611 sql-server then dolt\n612 sql-server /usr/local/bin/dolt\n",
+		},
+		{
+			name:     "invalid pids without state",
+			snapshot: "not-a-pid dolt sql-server\n0 dolt sql-server\n-1 dolt sql-server\n",
+		},
+		{
+			name:     "no command",
+			snapshot: "613\n614 S\n615 dolt\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseDoltProcessPIDs([]byte(tt.snapshot)); got != nil {
+				t.Fatalf("parseDoltProcessPIDs() = %v, want none", got)
+			}
+		})
+	}
+}
