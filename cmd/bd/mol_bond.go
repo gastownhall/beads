@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var molBondCmd = &cobra.Command{
@@ -41,13 +42,17 @@ Bond types:
   conditional         - B runs only if A fails
 
   With --ref, the spawned proto arm is nested inside the molecule operand
-  rather than ordered against it - whichever side of the bond that is - so a
-  sequential --ref arm carries no ordering: it is ready as soon as it is
-  spawned. Ordering a nested arm against its own container is unsatisfiable
-  in both directions (the arm waits for the molecule to close; the molecule
-  cannot close while it holds an open arm). --ref is refused with --type
-  conditional, which has no safe degradation - omit --ref to bond a
-  conditional arm as a sibling.
+  rather than ordered against it - whichever side of the bond that is. A
+  sequential --ref arm runs after the molecule's terminal steps: the open,
+  unpinned direct steps that no other direct step must finish after,
+  resolved once at bond time and recorded as one blocks edge per step, so
+  the snapshot holds even if the parent grows more steps later. Ordering a
+  nested arm against its own container is unsatisfiable in both directions
+  (the arm waits for the molecule to close; the molecule cannot close while
+  it holds an open arm), so the arm never waits on the container itself, and
+  a parent with no steps still running leaves the arm ready immediately.
+  --ref is refused with --type conditional, which has no safe degradation -
+  omit --ref to bond a conditional arm as a sibling.
 
 Phase control:
   By default, spawned protos follow the target's phase:
@@ -500,7 +505,18 @@ func bondProtoMolWithSubgraph(ctx context.Context, s storage.DoltStorage, protoS
 			return nil, fmt.Errorf("loading proto: %w", err)
 		}
 	}
-	opts, err := buildAttachCloneOpts(protoSubgraph, mol, bondType, vars, childRef, actorName, ephemeralFlag, pourFlag)
+	// The terminal steps are resolved from the store before the clone opens
+	// its transaction, never inside it: the clone transaction is
+	// write-shaped, and the molecule read must stay on the reader role.
+	mr, err := issueops.NewMoleculeReader(s)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s to order the arm after its steps: %w", mol.ID, err)
+	}
+	afterSteps, err := refArmAfterSteps(ctx, mr, bondType, childRef, mol.ID)
+	if err != nil {
+		return nil, err
+	}
+	opts, err := buildAttachCloneOpts(protoSubgraph, mol, bondType, vars, childRef, afterSteps, actorName, ephemeralFlag, pourFlag)
 	if err != nil {
 		return nil, err
 	}
@@ -519,8 +535,11 @@ func bondProtoMolWithSubgraph(ctx context.Context, s storage.DoltStorage, protoS
 
 // bondProtoMolAttachInto is bondProtoMolWithSubgraph's counterpart for
 // callers that already have an open molWriter (the proxied-server duals),
-// so spawn + attach happen inside the caller's own transaction.
-func bondProtoMolAttachInto(ctx context.Context, w molWriter, protoSubgraph *TemplateSubgraph, proto, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, ephemeralFlag, pourFlag bool) (*BondResult, error) {
+// so spawn + attach happen inside the caller's own transaction. mr reads the
+// parent molecule inside that same transaction (the proxied caller passes
+// uow.MoleculeReaderInUOW, so the terminal-step snapshot observes the unit of
+// work it is being bonded into).
+func bondProtoMolAttachInto(ctx context.Context, w molWriter, mr issueops.MoleculeReader, protoSubgraph *TemplateSubgraph, proto, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, ephemeralFlag, pourFlag bool) (*BondResult, error) {
 	if protoSubgraph == nil {
 		var err error
 		protoSubgraph, err = loadTemplateSubgraph(ctx, w, proto.ID)
@@ -528,7 +547,11 @@ func bondProtoMolAttachInto(ctx context.Context, w molWriter, protoSubgraph *Tem
 			return nil, fmt.Errorf("loading proto: %w", err)
 		}
 	}
-	opts, err := buildAttachCloneOpts(protoSubgraph, mol, bondType, vars, childRef, actorName, ephemeralFlag, pourFlag)
+	afterSteps, err := refArmAfterSteps(ctx, mr, bondType, childRef, mol.ID)
+	if err != nil {
+		return nil, err
+	}
+	opts, err := buildAttachCloneOpts(protoSubgraph, mol, bondType, vars, childRef, afterSteps, actorName, ephemeralFlag, pourFlag)
 	if err != nil {
 		return nil, err
 	}
@@ -549,12 +572,14 @@ func bondProtoMolAttachInto(ctx context.Context, w molWriter, protoSubgraph *Tem
 //
 // A --ref arm is nested inside its target, so an ordering edge onto that
 // target can never be satisfied (see buildAttachCloneOpts). A sequential bond
-// degrades gracefully: the edge is dropped and the arm carries no ordering. A
-// conditional edge means "run only if the target fails", so dropping it would
-// turn an arm that should almost never run into one that always runs - a
-// silent false dispatch, which is worse than the deadlock it replaced. There
-// is no reading of the two flags together that is both safe and useful, so
-// refuse rather than guess.
+// re-attaches its ordering onto the target's terminal steps instead
+// (refArmAfterSteps), keeping the "B runs after A" promise without the
+// deadlock. A conditional edge means "run only if the target fails", and
+// there is no set of steps whose failure means the container's, so dropping
+// it would turn an arm that should almost never run into one that always
+// runs - a silent false dispatch, which is worse than the deadlock it
+// replaced. There is no reading of the two flags together that is both safe
+// and useful, so refuse rather than guess.
 //
 // Both gatherMolBondInput (which also covers --dry-run and the proxied route)
 // and buildAttachCloneOpts consult this, so a caller that skips flag
@@ -573,7 +598,24 @@ func refuseConditionalRefArm(bondType, childRef string) error {
 	return fmt.Errorf("--ref cannot be combined with --type conditional: where --ref nests an arm, a conditional edge onto the arm's own container cannot be satisfied, and dropping that edge would run the arm unconditionally instead of only on failure. Omit --ref to bond a conditional arm as a sibling, or use --type sequential or --type parallel with --ref")
 }
 
-func buildAttachCloneOpts(subgraph *TemplateSubgraph, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, ephemeralFlag, pourFlag bool) (CloneOptions, error) {
+// refArmAfterSteps resolves the ordering a sequential --ref arm keeps: the
+// terminal steps of the live molecule it is bonded into (issueops.MoleculeTerminalSteps),
+// taken as a bond-time snapshot the caller passes into the clone. Other bond
+// shapes answer nil - a parallel arm keeps its membership edge, and a
+// conditional --ref arm is refused before this runs - so those shapes never
+// need a reader and the function leaves one untouched.
+func refArmAfterSteps(ctx context.Context, r issueops.MoleculeReader, bondType, childRef, molID string) ([]string, error) {
+	if childRef == "" || bondType != types.BondTypeSequential {
+		return nil, nil
+	}
+	g, err := issueops.LoadMolecule(ctx, r, molID)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s to order the arm after its steps: %w", molID, err)
+	}
+	return issueops.MoleculeTerminalSteps(g), nil
+}
+
+func buildAttachCloneOpts(subgraph *TemplateSubgraph, mol *types.Issue, bondType string, vars map[string]string, childRef string, afterSteps []string, actorName string, ephemeralFlag, pourFlag bool) (CloneOptions, error) {
 	if err := refuseConditionalRefArm(bondType, childRef); err != nil {
 		return CloneOptions{}, err
 	}
@@ -627,25 +669,26 @@ func buildAttachCloneOpts(subgraph *TemplateSubgraph, mol *types.Issue, bondType
 		// A --ref arm is nested INSIDE mol, and its ID already records that.
 		// Blocking it on mol as well is unsatisfiable in both directions: the
 		// arm waits for mol to close, and mol cannot close while it holds an
-		// open arm. Nesting carries the attachment, so the blocking edge is
-		// dropped rather than deadlocking the molecule it was bonded into.
+		// open arm. Nesting carries the attachment, so for a sequential bond
+		// the ordering moves onto the parent's terminal steps - one blocks
+		// edge each (afterSteps, resolved by refArmAfterSteps before the
+		// clone) - keeping the "B runs after A completes" promise without the
+		// deadlock. The steps are a bond-time snapshot: a parent that grows
+		// more steps later never retargets an existing arm. An empty snapshot
+		// leaves the arm ready as soon as it is spawned.
 		//
-		// The arm therefore carries NO ordering relative to mol - it is ready
-		// as soon as it is spawned. That is a real loss of the "B runs after A
-		// completes" promise, documented in the place that makes it: this
-		// command's long help. docs/cli-reference/mol.md is generated from the
-		// release named in docs/cli-docs.pin, so it will carry the same text
-		// once that pin advances past this change - do not hand-write it there.
-		// The loss is the deliberate trade: a nested arm's only satisfiable
-		// relationship to its container is containment.
+		// docs/cli-reference/mol.md is generated from the release named in
+		// docs/cli-docs.pin, so it carries this text only once that pin
+		// advances past this change - do not hand-write it there.
 		//
-		// Only DepBlocks is dropped. DepConditionalBlocks never arrives here -
-		// refuseConditionalRefArm above rejects it - and keeping the check
-		// narrow means a future bond type that does reach this point is not
-		// silently stripped of its edge as well.
+		// Only DepBlocks is re-attached. DepConditionalBlocks never arrives
+		// here - refuseConditionalRefArm above rejects it - and keeping the
+		// check narrow means a future bond type that does reach this point is
+		// not silently re-attached either.
 		if depType == types.DepBlocks {
 			opts.AttachToID = ""
 			opts.AttachDepType = ""
+			opts.AttachBlocksOn = afterSteps
 		}
 		// A parallel arm keeps its DepParentChild edge on top of the ParentID
 		// nesting. The two say the same thing, so the edge is redundant rather

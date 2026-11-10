@@ -139,7 +139,7 @@ func runPourProxiedServer(ctx context.Context, in pourInput) error {
 				return pourProxiedResult{}, "", fmt.Errorf("loading spawned mol: %w", err)
 			}
 			for _, attach := range attachments {
-				bondResult, err := bondProtoMolAttachInto(ctx, w, attach.subgraph, attach.issue, spawnedMol, in.attachType, vars, "", currentActor(), false, true)
+				bondResult, err := bondProtoMolAttachInto(ctx, w, uow.MoleculeReaderInUOW(uw), attach.subgraph, attach.issue, spawnedMol, in.attachType, vars, "", currentActor(), false, true)
 				if err != nil {
 					return pourProxiedResult{}, "", fmt.Errorf("attaching %s: %w", attach.id, err)
 				}
@@ -326,9 +326,9 @@ func runMolBondProxiedServer(ctx context.Context, in molBondInput) error {
 		case aIsProto && bIsProto:
 			result, err = bondProtoProtoInto(ctx, w, issueA, issueB, in.bondType, in.customTitle, currentActor())
 		case aIsProto && !bIsProto:
-			result, err = bondProtoMolAttachInto(ctx, w, subgraphA, issueA, issueB, in.bondType, in.vars, in.childRef, currentActor(), in.ephemeral, in.pour)
+			result, err = bondProtoMolAttachInto(ctx, w, uow.MoleculeReaderInUOW(uw), subgraphA, issueA, issueB, in.bondType, in.vars, in.childRef, currentActor(), in.ephemeral, in.pour)
 		case !aIsProto && bIsProto:
-			result, err = bondProtoMolAttachInto(ctx, w, subgraphB, issueB, issueA, in.bondType, in.vars, in.childRef, currentActor(), in.ephemeral, in.pour)
+			result, err = bondProtoMolAttachInto(ctx, w, uow.MoleculeReaderInUOW(uw), subgraphB, issueB, issueA, in.bondType, in.vars, in.childRef, currentActor(), in.ephemeral, in.pour)
 		default:
 			result, err = bondMolMolInto(ctx, w, issueA, issueB, in.bondType, currentActor())
 		}

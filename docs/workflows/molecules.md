@@ -274,6 +274,17 @@ bd mol bond mol-worker-arm bd-patrol --ref arm-{{name}} --var name=ace
 # Creates: bd-patrol.arm-ace (and children like bd-patrol.arm-ace.capture)
 ```
 
+A sequential `--ref` arm is nested inside the parent, so it cannot simply
+block on the parent — that edge is unsatisfiable in both directions. It runs
+after the parent's **terminal steps** instead: the open, unpinned direct
+steps that no other direct step must finish after. The terminals are resolved
+once at bond time and recorded as one `blocks` edge per step, so the arm waits
+on all of them, and a parent that grows more steps later never retargets an
+existing arm. A parent with no steps still running (finished, or none yet)
+bonds the arm ready immediately. Nesting stays ID-only: a sequential arm is
+not a member of the container, so a second arm waits on the same terminals,
+never on the earlier arm.
+
 ## Advanced Features
 
 ### Bond Points

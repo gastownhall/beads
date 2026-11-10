@@ -1226,6 +1226,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A sequential `bd mol bond --ref` arm nested inside a molecule now runs
+  after the parent's terminal steps (the open, unpinned direct steps nothing
+  else must finish after) instead of carrying no ordering at all. The
+  ordering edge onto the parent itself is unsatisfiable - the arm waits for
+  the parent to close while the parent waits for its own open arm - so it was
+  dropped, leaving the arm ready as soon as it was spawned. The edge now
+  re-attaches onto one `blocks` edge per terminal step, resolved once at bond
+  time; a parent with no steps still running leaves the arm ready immediately.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

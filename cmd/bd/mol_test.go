@@ -5,6 +5,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -3407,4 +3409,191 @@ func advanceForTest(ctx context.Context, s storage.DoltStorage, closedStepID str
 		return nil, err
 	}
 	return continueResultOf(result), nil
+}
+
+// bondRefArmSteps seeds the parent graph the terminal-attachment ACs share:
+// molecule mol with direct steps s1, s2 and s3, where s2 blocks on s1 and s3
+// is independent, plus a two-step proto (epic root carrying the template
+// label, and one executable task) whose text substitutes {{name}}. s1 is a
+// non-terminal step; s2 and s3 are the terminals.
+func bondRefArmSteps(t *testing.T, ctx context.Context, s storage.DoltStorage) (proto, mol, s1, s2, s3, protoStep *types.Issue) {
+	t.Helper()
+
+	proto = &types.Issue{Title: "Arm: {{name}}", IssueType: types.TypeEpic, Status: types.StatusOpen, Priority: 2, Labels: []string{MoleculeLabel}}
+	if err := s.CreateIssue(ctx, proto, "test"); err != nil {
+		t.Fatalf("create proto root: %v", err)
+	}
+	protoStep = &types.Issue{Title: "Arm step {{name}}", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2}
+	if err := s.CreateIssue(ctx, protoStep, "test"); err != nil {
+		t.Fatalf("create proto step: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{IssueID: protoStep.ID, DependsOnID: proto.ID, Type: types.DepParentChild}, "test"); err != nil {
+		t.Fatalf("add proto step parent-child: %v", err)
+	}
+
+	mol = &types.Issue{Title: "Patrol", IssueType: types.TypeEpic, Status: types.StatusOpen, Priority: 1}
+	if err := s.CreateIssue(ctx, mol, "test"); err != nil {
+		t.Fatalf("create patrol: %v", err)
+	}
+	for _, step := range []struct {
+		issue **types.Issue
+		title string
+	}{
+		{&s1, "Patrol step one"},
+		{&s2, "Patrol step two"},
+		{&s3, "Patrol step three"},
+	} {
+		*step.issue = &types.Issue{Title: step.title, IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2}
+		if err := s.CreateIssue(ctx, *step.issue, "test"); err != nil {
+			t.Fatalf("create %s: %v", step.title, err)
+		}
+		if err := s.AddDependency(ctx, &types.Dependency{IssueID: (*step.issue).ID, DependsOnID: mol.ID, Type: types.DepParentChild}, "test"); err != nil {
+			t.Fatalf("add %s parent-child: %v", step.title, err)
+		}
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{IssueID: s2.ID, DependsOnID: s1.ID, Type: types.DepBlocks}, "test"); err != nil {
+		t.Fatalf("make step two block on step one: %v", err)
+	}
+	return proto, mol, s1, s2, s3, protoStep
+}
+
+// blocksTargetsOf answers the ids the issue's outgoing blocks edges point
+// at, sorted.
+func blocksTargetsOf(t *testing.T, ctx context.Context, s storage.DoltStorage, issueID string) []string {
+	t.Helper()
+	deps, err := s.GetDependencyRecords(ctx, issueID)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords(%s): %v", issueID, err)
+	}
+	var targets []string
+	for _, dep := range deps {
+		if dep.Type == types.DepBlocks {
+			targets = append(targets, dep.DependsOnID)
+		}
+	}
+	sort.Strings(targets)
+	return targets
+}
+
+// issueIsReady reports whether id shows up in the store's normal ready-work
+// query.
+func issueIsReady(t *testing.T, ctx context.Context, s storage.DoltStorage, id string) bool {
+	t.Helper()
+	ready, err := s.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	for _, issue := range ready {
+		if issue.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// TestBondProtoMolSequentialRefArmRunsAfterParentSteps reproduces bd-lrkpd3
+// (GH#6210): a sequential --ref arm is nested under the molecule, so its
+// blocking edge cannot point at the molecule itself, but it must still run
+// after the molecule's steps. The expected shape re-attaches the edge to the
+// parent's terminal step(s) instead of dropping it.
+func TestBondProtoMolSequentialRefArmRunsAfterParentSteps(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreWithPrefix(t, t.TempDir()+"/test.db", "patrol")
+
+	proto := &types.Issue{Title: "Arm: {{name}}", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2, Labels: []string{MoleculeLabel}}
+	if err := s.CreateIssue(ctx, proto, "test"); err != nil {
+		t.Fatalf("create proto: %v", err)
+	}
+	patrol := &types.Issue{Title: "Patrol", IssueType: types.TypeEpic, Status: types.StatusOpen, Priority: 1}
+	if err := s.CreateIssue(ctx, patrol, "test"); err != nil {
+		t.Fatalf("create patrol: %v", err)
+	}
+	step := &types.Issue{Title: "Patrol step", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2}
+	if err := s.CreateIssue(ctx, step, "test"); err != nil {
+		t.Fatalf("create step: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{IssueID: step.ID, DependsOnID: patrol.ID, Type: types.DepParentChild}, "test"); err != nil {
+		t.Fatalf("add step parent-child: %v", err)
+	}
+
+	result, err := bondProtoMol(ctx, s, proto, patrol, types.BondTypeSequential, map[string]string{"name": "ace"}, "arm-{{name}}", "test", false, false)
+	if err != nil {
+		t.Fatalf("bondProtoMol: %v", err)
+	}
+	armID := result.IDMapping[proto.ID]
+
+	deps, err := s.GetDependencyRecords(ctx, armID)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords(%s): %v", armID, err)
+	}
+	for _, d := range deps {
+		if d.Type == types.DepBlocks && d.DependsOnID == step.ID {
+			return
+		}
+	}
+	t.Fatalf("sequential --ref arm %s has no blocks edge onto the parent's terminal step %s (deps: %+v); the edge was dropped, so the arm is ready before the parent's steps run", armID, step.ID, deps)
+}
+
+// AC-1: a sequential --ref arm is ordered after exactly the parent's terminal
+// steps - the ones nothing else in the molecule must finish after - and never
+// after the parent itself, by edge or by membership.
+func TestBondProtoMolRefArmWaitsForTerminalSteps(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreWithPrefix(t, t.TempDir()+"/test.db", "patrol")
+	proto, mol, s1, s2, s3, protoStep := bondRefArmSteps(t, ctx, s)
+
+	result, err := bondProtoMol(ctx, s, proto, mol, types.BondTypeSequential, map[string]string{"name": "ace"}, "arm-{{name}}", "test", false, false)
+	if err != nil {
+		t.Fatalf("bondProtoMol: %v", err)
+	}
+	armID := result.IDMapping[proto.ID]
+
+	// Ordering edges: exactly one blocks edge onto each terminal step.
+	want := []string{s2.ID, s3.ID}
+	sort.Strings(want)
+	if got := blocksTargetsOf(t, ctx, s, armID); !slices.Equal(got, want) {
+		t.Fatalf("arm %s blocks on %v, want the terminal steps %v (s1 is ordered before s2; the arm must not wait on it)", armID, got, want)
+	}
+
+	deps, err := s.GetDependencyRecords(ctx, armID)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords(%s): %v", armID, err)
+	}
+	for _, dep := range deps {
+		if dep.DependsOnID == mol.ID {
+			t.Errorf("arm %s must not carry an edge onto its own container %s (got %s); nesting is unsatisfiable in both directions", armID, mol.ID, dep.Type)
+		}
+		if dep.DependsOnID == s1.ID {
+			t.Errorf("arm %s must not wait on the non-terminal step %s (only the terminals %s and %s gate it)", armID, s1.ID, s2.ID, s3.ID)
+		}
+	}
+
+	// No membership edge either: the arm is nested by ID, not a step of the
+	// molecule, so a later arm does not chain behind it and the parent's
+	// progress is unaffected.
+	members, err := s.GetDependentsWithMetadata(ctx, mol.ID)
+	if err != nil {
+		t.Fatalf("GetDependentsWithMetadata(%s): %v", mol.ID, err)
+	}
+	for _, member := range members {
+		if member.ID == armID && member.DependencyType == types.DepParentChild {
+			t.Errorf("arm %s gained a parent-child edge onto %s; a sequential --ref arm nests by ID only", armID, mol.ID)
+		}
+	}
+
+	// The spawned executable step keeps its place inside the arm.
+	armStepID := result.IDMapping[protoStep.ID]
+	stepDeps, err := s.GetDependencyRecords(ctx, armStepID)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords(%s): %v", armStepID, err)
+	}
+	foundParent := false
+	for _, dep := range stepDeps {
+		if dep.Type == types.DepParentChild && dep.DependsOnID == armID {
+			foundParent = true
+		}
+	}
+	if !foundParent {
+		t.Errorf("arm step %s has no parent-child edge onto the arm root %s", armStepID, armID)
+	}
 }

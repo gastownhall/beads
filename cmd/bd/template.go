@@ -109,6 +109,12 @@ type CloneOptions struct {
 	AttachToID    string               // Molecule ID to attach spawned root to
 	AttachDepType types.DependencyType // Dependency type for the attachment
 
+	// AttachBlocksOn: ordering-edge targets resolved before the clone. If
+	// set, adds one DepBlocks edge from the spawned root to each target
+	// within the same transaction as the clone, so a sequential --ref arm
+	// runs after the parent's terminal steps (bd-lrkpd3).
+	AttachBlocksOn []string
+
 	// RootOnly: if true, only create the root issue (no child step issues).
 	// Used by patrol wisps where steps are inlined at prime time, not tracked as beads.
 	RootOnly bool
@@ -975,6 +981,22 @@ func cloneSubgraphInto(ctx context.Context, w molWriter, subgraph *TemplateSubgr
 		}
 		if err := w.AddDependency(ctx, attachDep, opts.Actor); err != nil {
 			return nil, fmt.Errorf("attaching to molecule: %w", err)
+		}
+	}
+
+	// Ordering attachment: one blocks edge from the spawned root to each
+	// resolved terminal step, in the same transaction as the clone. The arm
+	// runs after them but nests by ID only, so the targets come from the
+	// caller's snapshot of the parent, never from a read inside the clone
+	// transaction.
+	for _, terminalID := range opts.AttachBlocksOn {
+		dep := &types.Dependency{
+			IssueID:     idMapping[subgraph.Root.ID],
+			DependsOnID: terminalID,
+			Type:        types.DepBlocks,
+		}
+		if err := w.AddDependency(ctx, dep, opts.Actor); err != nil {
+			return nil, fmt.Errorf("attaching spawned root %s after %s: %w", idMapping[subgraph.Root.ID], terminalID, err)
 		}
 	}
 

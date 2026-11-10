@@ -546,6 +546,128 @@ func blockingDepths(g *MoleculeGraph, blockedBy map[string]map[string]bool) map[
 	return depths
 }
 
+// stepStillRuns reports whether a node still has work to do: it is neither
+// closed nor pinned.
+func stepStillRuns(issue *Issue) bool {
+	return issue.Status != types.StatusClosed && issue.Status != types.StatusPinned
+}
+
+// MoleculeTerminalSteps answers the direct steps of the molecule root that
+// still run and that no other direct step must finish after — the steps an
+// arm spawned to run "after the molecule" should wait on. A step is a
+// candidate when it is a direct child of the root that still runs, and one
+// candidate must finish after another when it, or an active descendant of
+// it reached only through active steps, holds a blocks or conditional-blocks
+// edge onto that other candidate. Waits-for edges, edges onto non-candidates
+// and edges held by closed or pinned steps (their subtrees included) order
+// nothing. Every candidate nothing else must finish after is terminal, so a
+// cycle keeps its members; the answer holds no duplicates and follows the
+// graph's issue order. A parent with no candidates answers none, without an
+// error, so an arm bonded into a finished or empty parent runs immediately.
+func MoleculeTerminalSteps(g *MoleculeGraph) []string {
+	// Candidates: the root's direct children that still run, in issue order.
+	children := make(map[string][]string)
+	for _, dep := range g.Dependencies {
+		if dep.Type == types.DepParentChild {
+			children[dep.DependsOnID] = append(children[dep.DependsOnID], dep.IssueID)
+		}
+	}
+	var candidates []string
+	isCandidate := make(map[string]bool)
+	for _, issue := range g.Issues {
+		if issue.ID == g.Root.ID || !stepStillRuns(issue) {
+			continue
+		}
+		direct := false
+		for _, childID := range children[g.Root.ID] {
+			if childID == issue.ID {
+				direct = true
+				break
+			}
+		}
+		if direct {
+			candidates = append(candidates, issue.ID)
+			isCandidate[issue.ID] = true
+		}
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	// waitsOn[D][T]: candidate D must finish after candidate T, on D's own
+	// blocks edge or on one held by an active descendant of D.
+	blocksHeldBy := make(map[string][]string)
+	for _, dep := range g.Dependencies {
+		if dep.Type != types.DepBlocks && dep.Type != types.DepConditionalBlocks {
+			continue
+		}
+		blocksHeldBy[dep.IssueID] = append(blocksHeldBy[dep.IssueID], dep.DependsOnID)
+	}
+	waitsOn := make(map[string]map[string]bool)
+	for _, d := range candidates {
+		waitsOn[d] = make(map[string]bool)
+		// The walk starts at D and descends only through steps that still
+		// run, so a closed or pinned step never speaks for its compound.
+		var visit func(id string)
+		visited := make(map[string]bool)
+		visit = func(id string) {
+			if visited[id] {
+				return
+			}
+			visited[id] = true
+			for _, target := range blocksHeldBy[id] {
+				if isCandidate[target] && target != d {
+					waitsOn[d][target] = true
+				}
+			}
+			for _, childID := range children[id] {
+				if child := g.IssueMap[childID]; child != nil && stepStillRuns(child) {
+					visit(childID)
+				}
+			}
+		}
+		visit(d)
+	}
+
+	// reaches[D][T]: D must finish after T, directly or along the waits-on
+	// arcs. A candidate stays terminal unless another candidate reaches it
+	// without being reached back — the members of a cycle reach each other,
+	// so a cycle keeps every member.
+	reaches := make(map[string]map[string]bool)
+	for _, d := range candidates {
+		seen := make(map[string]bool)
+		var walk func(id string)
+		walk = func(id string) {
+			for target := range waitsOn[id] {
+				if !seen[target] {
+					seen[target] = true
+					walk(target)
+				}
+			}
+		}
+		walk(d)
+		reaches[d] = seen
+	}
+
+	var terminals []string
+	for _, t := range candidates {
+		gated := false
+		for _, d := range candidates {
+			if d == t {
+				continue
+			}
+			if reaches[d][t] && !reaches[t][d] {
+				gated = true
+				break
+			}
+		}
+		if !gated {
+			terminals = append(terminals, t)
+		}
+	}
+	return terminals
+}
+
 // Molecule step states, as MoleculeStep.State spells them.
 const (
 	MoleculeStepDone    = "done"

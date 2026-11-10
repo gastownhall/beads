@@ -1482,7 +1482,7 @@ func TestBuildAttachCloneOpts_VarResolutionMatchesPour(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			subgraph := &TemplateSubgraph{Issues: tt.issues, VarDefs: tt.varDefs}
-			opts, err := buildAttachCloneOpts(subgraph, mol, types.BondTypeSequential, tt.vars, "", "actor", false, false)
+			opts, err := buildAttachCloneOpts(subgraph, mol, types.BondTypeSequential, tt.vars, "", nil, "actor", false, false)
 
 			if tt.wantErr != "" {
 				if err == nil {

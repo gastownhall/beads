@@ -593,3 +593,307 @@ func TestActiveMoleculeIDsFallsBackToHookedWork(t *testing.T) {
 		t.Fatalf("ActiveMoleculeIDs (nobody's work) = %v, %v, want none", ids, err)
 	}
 }
+
+// seedTerminalStepsFixture seeds the open molecule root "m" every
+// terminal-selection case hangs its steps under.
+func seedTerminalStepsFixture(f *fakeMolecules) {
+	f.add("m", types.TypeMolecule, types.StatusOpen)
+}
+
+// TestMoleculeTerminalSteps pins the terminal-step selection a sequential
+// --ref arm is ordered after: the open, unpinned direct children of the root
+// that no other direct step must finish after, with waits-on arcs derived
+// from blocks and conditional-blocks edges - a direct step's own edge, or an
+// active descendant's edge reached through active steps only. A cycle never
+// makes its members disappear; the answer follows the graph's issue order
+// and holds no duplicates.
+func TestMoleculeTerminalSteps(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		seed func(f *fakeMolecules)
+		want []string
+	}{
+		{
+			name: "linear chain keeps only the last step",
+			seed: func(f *fakeMolecules) {
+				seedTerminalStepsFixture(f)
+				for _, id := range []string{"m.1", "m.2", "m.3"} {
+					f.add(id, types.TypeTask, types.StatusOpen)
+					f.edge(id, "m", types.DepParentChild)
+				}
+				f.edge("m.2", "m.1", types.DepBlocks)
+				f.edge("m.3", "m.2", types.DepBlocks)
+			},
+			want: []string{"m.3"},
+		},
+		{
+			name: "parallel branches are all terminal",
+			seed: func(f *fakeMolecules) {
+				seedTerminalStepsFixture(f)
+				for _, id := range []string{"m.a", "m.b"} {
+					f.add(id, types.TypeTask, types.StatusOpen)
+					f.edge(id, "m", types.DepParentChild)
+				}
+			},
+			want: []string{"m.a", "m.b"},
+		},
+		{
+			name: "root only has no terminals",
+			seed: func(f *fakeMolecules) {
+				seedTerminalStepsFixture(f)
+			},
+			want: nil,
+		},
+		{
+			name: "all closed steps have no terminals",
+			seed: func(f *fakeMolecules) {
+				seedTerminalStepsFixture(f)
+				for _, id := range []string{"m.1", "m.2"} {
+					f.add(id, types.TypeTask, types.StatusClosed)
+					f.edge(id, "m", types.DepParentChild)
+				}
+			},
+			want: nil,
+		},
+		{
+			name: "all pinned steps have no terminals",
+			seed: func(f *fakeMolecules) {
+				seedTerminalStepsFixture(f)
+				f.add("m.1", types.TypeTask, types.StatusPinned)
+				f.edge("m.1", "m", types.DepParentChild)
+			},
+			want: nil,
+		},
+		{
+			name: "a closed step never gates its predecessor",
+			seed: func(f *fakeMolecules) {
+				seedTerminalStepsFixture(f)
+				f.add("m.1", types.TypeTask, types.StatusOpen)
+				f.add("m.2", types.TypeTask, types.StatusClosed)
+				f.edge("m.1", "m", types.DepParentChild)
+				f.edge("m.2", "m", types.DepParentChild)
+				f.edge("m.2", "m.1", types.DepBlocks)
+			},
+			want: []string{"m.1"},
+		},
+		{
+			name: "an in-progress step still runs",
+			seed: func(f *fakeMolecules) {
+				seedTerminalStepsFixture(f)
+				f.add("m.1", types.TypeTask, types.StatusInProgress)
+				f.edge("m.1", "m", types.DepParentChild)
+			},
+			want: []string{"m.1"},
+		},
+		{
+			name: "an active descendant's edge orders its compound",
+			seed: func(f *fakeMolecules) {
+				seedTerminalStepsFixture(f)
+				f.add("m.a", types.TypeEpic, types.StatusOpen)
+				f.add("m.b", types.TypeTask, types.StatusOpen)
+				f.add("m.a.1", types.TypeTask, types.StatusOpen)
+				f.edge("m.a", "m", types.DepParentChild)
+				f.edge("m.b", "m", types.DepParentChild)
+				f.edge("m.a.1", "m.a", types.DepParentChild)
+				f.edge("m.a.1", "m.b", types.DepBlocks)
+			},
+			want: []string{"m.a"},
+		},
+		{
+			name: "a closed descendant's stale edge orders nobody",
+			seed: func(f *fakeMolecules) {
+				seedTerminalStepsFixture(f)
+				f.add("m.a", types.TypeEpic, types.StatusOpen)
+				f.add("m.b", types.TypeTask, types.StatusOpen)
+				f.add("m.a.1", types.TypeTask, types.StatusClosed)
+				f.edge("m.a", "m", types.DepParentChild)
+				f.edge("m.b", "m", types.DepParentChild)
+				f.edge("m.a.1", "m.a", types.DepParentChild)
+				f.edge("m.a.1", "m.b", types.DepBlocks)
+			},
+			want: []string{"m.a", "m.b"},
+		},
+		{
+			name: "a closed intermediate ancestor breaks the implication",
+			seed: func(f *fakeMolecules) {
+				seedTerminalStepsFixture(f)
+				f.add("m.a", types.TypeEpic, types.StatusOpen)
+				f.add("m.b", types.TypeTask, types.StatusOpen)
+				f.add("m.a.1", types.TypeEpic, types.StatusClosed)
+				f.add("m.a.1.1", types.TypeTask, types.StatusOpen)
+				f.edge("m.a", "m", types.DepParentChild)
+				f.edge("m.b", "m", types.DepParentChild)
+				f.edge("m.a.1", "m.a", types.DepParentChild)
+				f.edge("m.a.1.1", "m.a.1", types.DepParentChild)
+				f.edge("m.a.1.1", "m.b", types.DepBlocks)
+			},
+			want: []string{"m.a", "m.b"},
+		},
+		{
+			name: "an edge onto another compound's child implies nothing",
+			seed: func(f *fakeMolecules) {
+				seedTerminalStepsFixture(f)
+				f.add("m.a", types.TypeTask, types.StatusOpen)
+				f.add("m.b", types.TypeEpic, types.StatusOpen)
+				f.add("m.b.1", types.TypeTask, types.StatusOpen)
+				f.edge("m.a", "m", types.DepParentChild)
+				f.edge("m.b", "m", types.DepParentChild)
+				f.edge("m.b.1", "m.b", types.DepParentChild)
+				f.edge("m.a", "m.b.1", types.DepBlocks)
+			},
+			want: []string{"m.a", "m.b"},
+		},
+		{
+			name: "waits-for is not an ordering edge",
+			seed: func(f *fakeMolecules) {
+				seedTerminalStepsFixture(f)
+				f.add("m.a", types.TypeTask, types.StatusOpen)
+				f.add("m.b", types.TypeTask, types.StatusOpen)
+				f.edge("m.a", "m", types.DepParentChild)
+				f.edge("m.b", "m", types.DepParentChild)
+				f.edge("m.a", "m.b", types.DepWaitsFor)
+			},
+			want: []string{"m.a", "m.b"},
+		},
+		{
+			name: "conditional-blocks is an ordering edge",
+			seed: func(f *fakeMolecules) {
+				seedTerminalStepsFixture(f)
+				f.add("m.a", types.TypeTask, types.StatusOpen)
+				f.add("m.b", types.TypeTask, types.StatusOpen)
+				f.edge("m.a", "m", types.DepParentChild)
+				f.edge("m.b", "m", types.DepParentChild)
+				f.edge("m.b", "m.a", types.DepConditionalBlocks)
+			},
+			want: []string{"m.b"},
+		},
+		{
+			name: "duplicate edges still answer unique terminals",
+			seed: func(f *fakeMolecules) {
+				seedTerminalStepsFixture(f)
+				f.add("m.a", types.TypeTask, types.StatusOpen)
+				f.add("m.b", types.TypeTask, types.StatusOpen)
+				f.edge("m.a", "m", types.DepParentChild)
+				f.edge("m.b", "m", types.DepParentChild)
+				f.edge("m.b", "m.a", types.DepBlocks)
+				f.edge("m.b", "m.a", types.DepBlocks)
+			},
+			want: []string{"m.b"},
+		},
+		{
+			name: "a parent-child cycle terminates",
+			seed: func(f *fakeMolecules) {
+				seedTerminalStepsFixture(f)
+				f.add("m.a", types.TypeEpic, types.StatusOpen)
+				f.add("m.b", types.TypeEpic, types.StatusOpen)
+				f.edge("m.a", "m", types.DepParentChild)
+				f.edge("m.b", "m", types.DepParentChild)
+				f.edge("m.a", "m.b", types.DepParentChild)
+				f.edge("m.b", "m.a", types.DepParentChild)
+			},
+			want: []string{"m.a", "m.b"},
+		},
+		{
+			name: "an ordering cycle retains every member",
+			seed: func(f *fakeMolecules) {
+				seedTerminalStepsFixture(f)
+				f.add("m.a", types.TypeTask, types.StatusOpen)
+				f.add("m.b", types.TypeTask, types.StatusOpen)
+				f.edge("m.a", "m", types.DepParentChild)
+				f.edge("m.b", "m", types.DepParentChild)
+				f.edge("m.a", "m.b", types.DepBlocks)
+				f.edge("m.b", "m.a", types.DepBlocks)
+			},
+			want: []string{"m.a", "m.b"},
+		},
+		{
+			name: "an ordering cycle never hides an independent terminal",
+			seed: func(f *fakeMolecules) {
+				seedTerminalStepsFixture(f)
+				for _, id := range []string{"m.a", "m.b", "m.c"} {
+					f.add(id, types.TypeTask, types.StatusOpen)
+					f.edge(id, "m", types.DepParentChild)
+				}
+				f.edge("m.a", "m.b", types.DepBlocks)
+				f.edge("m.b", "m.a", types.DepBlocks)
+			},
+			want: []string{"m.a", "m.b", "m.c"},
+		},
+		{
+			name: "an edge from outside the candidate set orders nobody",
+			seed: func(f *fakeMolecules) {
+				seedTerminalStepsFixture(f)
+				f.add("m.a", types.TypeTask, types.StatusOpen)
+				f.add("m.b", types.TypeTask, types.StatusOpen)
+				f.edge("m.a", "m", types.DepParentChild)
+				f.edge("m.b", "m", types.DepParentChild)
+				// The closed m.z blocks on m.a, but a closed step is not a
+				// candidate and its edges never gate.
+				f.add("m.z", types.TypeTask, types.StatusClosed)
+				f.edge("m.z", "m", types.DepParentChild)
+				f.edge("m.z", "m.a", types.DepBlocks)
+			},
+			want: []string{"m.a", "m.b"},
+		},
+		{
+			name: "the root's own edge onto a step orders nobody",
+			seed: func(f *fakeMolecules) {
+				seedTerminalStepsFixture(f)
+				f.add("m.a", types.TypeTask, types.StatusOpen)
+				f.add("m.b", types.TypeTask, types.StatusOpen)
+				f.edge("m.a", "m", types.DepParentChild)
+				f.edge("m.b", "m", types.DepParentChild)
+				f.edge("m", "m.a", types.DepBlocks)
+			},
+			want: []string{"m.a", "m.b"},
+		},
+		{
+			name: "a compound is waited on until it closes",
+			seed: func(f *fakeMolecules) {
+				seedTerminalStepsFixture(f)
+				f.add("m.a", types.TypeEpic, types.StatusOpen)
+				f.add("m.a.1", types.TypeTask, types.StatusOpen)
+				f.add("m.b", types.TypeTask, types.StatusOpen)
+				f.edge("m.a", "m", types.DepParentChild)
+				f.edge("m.a.1", "m.a", types.DepParentChild)
+				f.edge("m.b", "m", types.DepParentChild)
+				f.edge("m.b", "m.a", types.DepBlocks)
+			},
+			want: []string{"m.b"},
+		},
+		{
+			name: "a graph edge to an id the graph does not hold is ignored",
+			seed: func(f *fakeMolecules) {
+				seedTerminalStepsFixture(f)
+				f.add("m.a", types.TypeTask, types.StatusOpen)
+				f.add("m.b", types.TypeTask, types.StatusOpen)
+				f.edge("m.a", "m", types.DepParentChild)
+				f.edge("m.b", "m", types.DepParentChild)
+				// DependsOnID names nothing in the graph: MoleculeTerminalSteps
+				// must not treat it as a candidate.
+				f.edge("m.a", "elsewhere", types.DepBlocks)
+			},
+			want: []string{"m.a", "m.b"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeMolecules()
+			tc.seed(f)
+			g, err := issueops.LoadMolecule(context.Background(), f.reader(), "m")
+			if err != nil {
+				t.Fatalf("LoadMolecule: %v", err)
+			}
+			got := issueops.MoleculeTerminalSteps(g)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("MoleculeTerminalSteps = %v, want %v", got, tc.want)
+			}
+			seen := map[string]bool{}
+			for _, id := range got {
+				if seen[id] {
+					t.Errorf("terminal %s listed twice", id)
+				}
+				seen[id] = true
+			}
+		})
+	}
+}
