@@ -352,6 +352,73 @@ func TestEmbeddedMigrate(t *testing.T) {
 		}
 	})
 
+	// #7283, embedded arm of the zero-work stamp: a stale bd_version marker on
+	// an already-current database is healed by a no-op `bd migrate schema`
+	// (another client migrated this database while ours stood refused, and the
+	// one-shot upgrade signal may already be consumed), and the healing must
+	// stay marker-only: the embedded auto-commit commits the whole working
+	// set, so a Dolt commit here would either publish a stranger's uncommitted
+	// edits or, on a clean database, create an empty commit.
+	t.Run("migrate_schema_stamps_a_stale_marker_without_committing", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "sm")
+		setMigrateJSONConfigFalse(t, beadsDir)
+		issue := bdCreate(t, bd, dir, "Marker stamp witness")
+		// Leave an uncommitted edit in the working set: what a marker-only
+		// stamp must not commit.
+		bdCommand(t, bd, dir, "--dolt-auto-commit", "batch", "update", issue.ID, "--title", "Marker stamp witness, edited")
+		withEmbeddedMigrateSQL(t, beadsDir, "sm", func(db *sql.DB) error {
+			if _, err := db.ExecContext(t.Context(), "UPDATE local_metadata SET value = ? WHERE `key` = 'bd_version'", "1.0.0"); err != nil {
+				return fmt.Errorf("regress bd_version marker: %w", err)
+			}
+			return nil
+		})
+		headBefore := embeddedCurrentCommit(t, beadsDir, "sm")
+		_, dirtyBefore := embeddedLogCountAndDirtyTables(t, beadsDir)
+		if len(dirtyBefore) == 0 {
+			t.Fatalf("test setup invalid: no tables dirty after the batch update")
+		}
+
+		out := bdMigrateJSON(t, bd, dir, "schema")
+		var result struct {
+			Status  string `json:"status"`
+			Applied int    `json:"applied"`
+		}
+		if err := json.Unmarshal([]byte(out), &result); err != nil {
+			t.Fatalf("bd --format=json migrate schema returned invalid JSON: %v\n%s", err, out)
+		}
+		if result.Status != "current" || result.Applied != 0 {
+			t.Errorf("no-op migrate schema status=%q applied=%d, want current/0 (gastownhall/beads#7283)", result.Status, result.Applied)
+		}
+
+		var marker string
+		withEmbeddedMigrateSQL(t, beadsDir, "sm", func(db *sql.DB) error {
+			if err := db.QueryRowContext(t.Context(), "SELECT value FROM local_metadata WHERE `key` = 'bd_version'").Scan(&marker); err != nil {
+				return fmt.Errorf("read bd_version marker: %w", err)
+			}
+			return nil
+		})
+		if marker != Version {
+			t.Errorf("bd_version marker = %q after the no-op bd migrate schema, want %q (gastownhall/beads#7283)", marker, Version)
+		}
+
+		// The stamp healed the marker without touching the Dolt working set.
+		assertEmbeddedHeadUnchanged(t, beadsDir, "sm", headBefore, "migrate schema")
+		_, dirtyAfter := embeddedLogCountAndDirtyTables(t, beadsDir)
+		if !reflect.DeepEqual(dirtyBefore, dirtyAfter) {
+			t.Errorf("no-op migrate schema changed the working set: before %v, after %v", dirtyBefore, dirtyAfter)
+		}
+		var title string
+		withEmbeddedMigrateSQL(t, beadsDir, "sm", func(db *sql.DB) error {
+			if err := db.QueryRowContext(t.Context(), "SELECT title FROM issues WHERE id = ?", issue.ID).Scan(&title); err != nil {
+				return fmt.Errorf("read witness title: %w", err)
+			}
+			return nil
+		})
+		if title != "Marker stamp witness, edited" {
+			t.Errorf("witness title = %q, want the uncommitted edit (a commit would have been acceptable; losing the edit is not)", title)
+		}
+	})
+
 	t.Run("migrate_sync_persists_and_noops", func(t *testing.T) {
 		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "ms")
 		setMigrateJSONConfigFalse(t, beadsDir)
