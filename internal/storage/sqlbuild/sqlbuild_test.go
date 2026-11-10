@@ -750,3 +750,38 @@ func TestColumnNames(t *testing.T) {
 		t.Errorf("QualifyColumns = %q, want %q", got, want)
 	}
 }
+
+// TestDeferredParentPredicate pins the joined-row form of the deferred-parent
+// rule (GH#7300): a parent is deferred by its deferred status, which plain
+// `bd defer` sets with no date, or by a defer_until still in the future.
+func TestDeferredParentPredicate(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		alias string
+		want  string
+	}{
+		{"parent", "(parent.status = 'deferred' OR (parent.defer_until IS NOT NULL AND parent.defer_until > UTC_TIMESTAMP()))"},
+		{"", "(status = 'deferred' OR (defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP()))"},
+	}
+	for _, tc := range cases {
+		if got := DeferredParentPredicate(tc.alias); got != tc.want {
+			t.Errorf("DeferredParentPredicate(%q) =\n  %s\nwant\n  %s", tc.alias, got, tc.want)
+		}
+	}
+}
+
+// TestAnyDeferredParentSQL pins the existence form: one EXISTS per branch of
+// the rule, so each leg can range-scan its own index rather than relying on
+// the planner to merge two indexes for an OR inside one WHERE.
+func TestAnyDeferredParentSQL(t *testing.T) {
+	t.Parallel()
+
+	for _, table := range []string{"issues", "wisps"} {
+		want := "(EXISTS (SELECT 1 FROM " + table + " WHERE status = 'deferred')" +
+			" OR EXISTS (SELECT 1 FROM " + table + " WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP()))"
+		if got := AnyDeferredParentSQL(table); got != want {
+			t.Errorf("AnyDeferredParentSQL(%q) =\n  %s\nwant\n  %s", table, got, want)
+		}
+	}
+}
