@@ -2111,10 +2111,10 @@ func TestPushPullAtAHostBdDoesNotRunMoveTheServersData(t *testing.T) {
 	}
 }
 
-// TestGitProtocolPullDeclinedConflictAbortsMerge is the regression test for
-// #7839: a CLI `dolt pull` over a git-protocol remote (git+file://) that hits
-// a conflict the auto-resolver declines must abort the merge and restore the
-// working set — exactly like the SQL DOLT_PULL route already does via
+// TestGitProtocolPullAddAddConflictAbortsAndRepeatsCleanly is the
+// contributor's regression test for #7839 (PR #7849): a CLI `dolt pull` over a
+// git-protocol remote (git+file://) that hits a conflict the auto-resolver
+// declines must abort the merge and restore the working set — exactly like the SQL DOLT_PULL route already does via
 // versioncontrolops.SettleMerge — instead of leaving
 // dolt_merge_status.is_merging=1 open on the server, which then fails every
 // later write and pull until an operator aborts it by hand.
@@ -2125,7 +2125,7 @@ func TestPushPullAtAHostBdDoesNotRunMoveTheServersData(t *testing.T) {
 // modify/modify, which resolves last-write-wins by updated_at) as always
 // left for the operator — the one deterministic way to force
 // TryAutoResolveMergeConflicts to decline without racing on timestamps.
-func TestGitProtocolPullDeclinedConflictAbortsMerge(t *testing.T) {
+func TestGitProtocolPullAddAddConflictAbortsAndRepeatsCleanly(t *testing.T) {
 	testutil.RequireDoltBinary(t)
 	skipIfNoGit(t)
 	acquireTestSlot()
@@ -2153,7 +2153,8 @@ func TestGitProtocolPullDeclinedConflictAbortsMerge(t *testing.T) {
 		t.Fatalf("mkdir seed: %v", err)
 	}
 	runCmd(t, seedDir, "git", "init", "-b", "main")
-	runCmd(t, seedDir, "git", "commit", "--allow-empty", "-m", "init")
+	runCmd(t, seedDir, "git", "-c", "user.name=test", "-c", "user.email=test@example.com",
+		"commit", "--allow-empty", "-m", "init")
 	runCmd(t, seedDir, "git", "remote", "add", "origin", remoteDir)
 	runCmd(t, seedDir, "git", "push", "-u", "origin", "main")
 

@@ -1226,6 +1226,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A pull over a git-protocol or credentialed remote (the `dolt pull` CLI
+  route) whose merge bd declines to auto-resolve no longer leaves the merge
+  open in the server's working set, where it blocked every later write and
+  pull (GH#7839). bd now aborts a merge that pull opened, as the SQL route
+  does, and reports the conflicts (`bd sync` exits 2; `bd federation sync`
+  lists them) or names the tables whose constraint violations it cannot
+  repair. Reconcile the histories with
+  `bd vc merge <remote>/<branch> --strategy ours|theirs`, then pull again. A
+  merge that was already open before the pull, or whose abort bd cannot
+  confirm, is left untouched and reported as possibly still open.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

@@ -378,9 +378,18 @@ func MergeWithStrategy(ctx context.Context, db DBConn, ref, author, strategy str
 // destroy uncommitted data the merge never touched (bd-578h9.2).
 // Best-effort: the caller's error is what matters.
 func abortMerge(ctx context.Context, db DBConn, preMergeClean bool) {
-	if err := schema.DrainCall(ctx, db, "CALL DOLT_MERGE('--abort')"); err != nil && preMergeClean {
+	if err := AbortMerge(ctx, db); err != nil && preMergeClean {
 		_ = schema.DrainCall(ctx, db, "CALL DOLT_RESET('--hard')")
 	}
+}
+
+// AbortMerge runs DOLT_MERGE('--abort') on db, draining the procedure's
+// result sets, and returns its error. Unlike abortMerge it has no hard-reset
+// fallback: a caller that cannot vouch for the working set's pre-merge
+// cleanliness (the CLI pull route, GH#7839) must treat a failed abort as
+// "nothing was restored", never paper over it with a reset.
+func AbortMerge(ctx context.Context, db DBConn) error {
+	return schema.DrainCall(ctx, db, "CALL DOLT_MERGE('--abort')")
 }
 
 // doltCommitHashRE matches a Dolt commit hash (32 base32 characters), the
@@ -494,15 +503,6 @@ func concludeMerge(ctx context.Context, db DBConn, msg, author string) error {
 		return nil
 	}
 	return err
-}
-
-// AbortMerge is abortMerge, exported for callers outside this package that
-// drove a merge themselves and need to restore the pre-merge working set
-// when a settle pass they implement declines it (e.g. package dolt's
-// finishCLIPull, which settles a CLI `dolt pull`'s merge the same way
-// SettleMerge settles a SQL DOLT_PULL's — see #7839).
-func AbortMerge(ctx context.Context, db DBConn, preMergeClean bool) {
-	abortMerge(ctx, db, preMergeClean)
 }
 
 // workingSetClean reports whether dolt_status is empty. Errors count as
@@ -1079,6 +1079,13 @@ func TryRepairFKCascadeViolations(ctx context.Context, db DBConn) (repaired, had
 		return false, true, nil
 	}
 	return true, true, nil
+}
+
+// ConstraintViolationTables lists the tables with outstanding constraint
+// violations in the working set, so a caller that refuses an unrepairable
+// merge can name them after the abort has cleared them (GH#7839).
+func ConstraintViolationTables(ctx context.Context, db DBConn) ([]string, error) {
+	return constraintViolationTables(ctx, db)
 }
 
 // constraintViolationTables lists the tables with outstanding constraint
