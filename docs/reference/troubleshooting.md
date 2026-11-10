@@ -537,6 +537,27 @@ bd dolt push
 
 See [Merge Conflicts](/recovery/merge-conflicts) for the full runbook.
 
+### Push logs "conjoin of database failed" over SSH
+
+`bd dolt push` to a `git+ssh://` remote logs
+`conjoin of database failed with error: kex_exchange_identification: read: Connection reset by peer`
+and then reports a successful push. Nothing looks broken, because the data
+push really did succeed — but the remote's table files only accumulate, and
+`bd dolt pull` slows down progressively as they do.
+
+This is a known cause in affected Dolt versions, not a diagnosis of every
+SSH reset and not data loss. After a push, Dolt compacts the remote's table
+files (a step called conjoin), and an older Dolt opens enough simultaneous
+SSH connections while compacting that the SSH server drops the excess before
+they authenticate. Stock OpenSSH drops connections past its `MaxStartups`
+limit (default `10:30:100`), so compaction fails while the data transfer
+succeeds. The defect is in Dolt, not in beads — beads only constructs the
+`git+ssh://` remote URL. Tracked in
+[#6359](https://github.com/gastownhall/beads/issues/6359), reported upstream
+as [#11739](https://github.com/dolthub/dolt/issues/11739), and fixed upstream
+by [#11742](https://github.com/dolthub/dolt/pull/11742) and
+[#11745](https://github.com/dolthub/dolt/pull/11745).
+
 ## Git Hook Issues
 
 ### Hooks not running
