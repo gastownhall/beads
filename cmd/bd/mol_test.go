@@ -3635,3 +3635,63 @@ func TestBondProtoMolRefArmStepsReadyOnlyAfterTerminalsClose(t *testing.T) {
 		t.Fatalf("arm step %s is not ready after every terminal step closed", armStepID)
 	}
 }
+
+// AC-3: a parent with no open, unpinned direct steps has no terminals, so a
+// sequential --ref arm bonds successfully with no ordering edges and its
+// otherwise-ready first step is ready immediately.
+func TestBondProtoMolRefArmEmptyParentIsReadyImmediately(t *testing.T) {
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name   string
+		closed bool
+	}{
+		{"root_only_molecule", false},
+		{"only_closed_steps", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStoreWithPrefix(t, t.TempDir()+"/test.db", "patrol")
+
+			proto := &types.Issue{Title: "Arm: {{name}}", IssueType: types.TypeEpic, Status: types.StatusOpen, Priority: 2, Labels: []string{MoleculeLabel}}
+			if err := s.CreateIssue(ctx, proto, "test"); err != nil {
+				t.Fatalf("create proto root: %v", err)
+			}
+			protoStep := &types.Issue{Title: "Arm step {{name}}", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2}
+			if err := s.CreateIssue(ctx, protoStep, "test"); err != nil {
+				t.Fatalf("create proto step: %v", err)
+			}
+			if err := s.AddDependency(ctx, &types.Dependency{IssueID: protoStep.ID, DependsOnID: proto.ID, Type: types.DepParentChild}, "test"); err != nil {
+				t.Fatalf("add proto step parent-child: %v", err)
+			}
+
+			mol := &types.Issue{Title: "Patrol", IssueType: types.TypeEpic, Status: types.StatusOpen, Priority: 1}
+			if err := s.CreateIssue(ctx, mol, "test"); err != nil {
+				t.Fatalf("create patrol: %v", err)
+			}
+			if tc.closed {
+				step := &types.Issue{Title: "Finished step", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2}
+				if err := s.CreateIssue(ctx, step, "test"); err != nil {
+					t.Fatalf("create finished step: %v", err)
+				}
+				if err := s.AddDependency(ctx, &types.Dependency{IssueID: step.ID, DependsOnID: mol.ID, Type: types.DepParentChild}, "test"); err != nil {
+					t.Fatalf("add finished step parent-child: %v", err)
+				}
+				if err := s.CloseIssue(ctx, step.ID, "done", "test", ""); err != nil {
+					t.Fatalf("close finished step: %v", err)
+				}
+			}
+
+			result, err := bondProtoMol(ctx, s, proto, mol, types.BondTypeSequential, map[string]string{"name": "ace"}, "arm-{{name}}", "test", false, false)
+			if err != nil {
+				t.Fatalf("bondProtoMol into an empty parent: %v", err)
+			}
+			armID := result.IDMapping[proto.ID]
+			if got := blocksTargetsOf(t, ctx, s, armID); len(got) != 0 {
+				t.Fatalf("arm %s blocks on %v, want no ordering edges: the parent has no terminal steps", armID, got)
+			}
+			if !issueIsReady(t, ctx, s, result.IDMapping[protoStep.ID]) {
+				t.Fatalf("arm step %s is not ready immediately after bonding into a parent with no open steps", result.IDMapping[protoStep.ID])
+			}
+		})
+	}
+}
