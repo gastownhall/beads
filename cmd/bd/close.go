@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/audit"
@@ -976,7 +977,18 @@ func resolveCloseTarget(ctx context.Context, localStore storage.DoltStorage, sha
 	if isRoutingFailure(err) {
 		return nil, fmt.Errorf("resolving ID %s: %w", id, err)
 	}
-	return nil, fmt.Errorf("resolving ID %s: no issue found matching %q", id, id)
+	return nil, fmt.Errorf("resolving ID %s: no issue found matching %q%s", id, id, closeWhitespaceIDHint(id))
+}
+
+// closeWhitespaceIDHint is the remedy appended to close's not-found error when
+// the unresolved argument holds whitespace: several IDs reached bd as one word,
+// typically an unsplit shell variable (zsh does not word-split unquoted $IDS).
+// It is empty for any other ID, so a plain unknown ID reads as before.
+func closeWhitespaceIDHint(id string) string {
+	if strings.IndexFunc(id, unicode.IsSpace) < 0 {
+		return ""
+	}
+	return " (pass each ID as its own argument; in zsh use an array or ${=IDS})"
 }
 
 // closeAutoRoute is the auto-routed store a bd close batch shares. It opens on
