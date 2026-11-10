@@ -27,9 +27,6 @@ func (s *testSuite) TestIssueGetReadyWork() {
 	s.Run("Unassigned", s.readyUnassigned)
 	s.Run("ExcludesDeferred", s.readyExcludesDeferred)
 	s.Run("IncludeDeferred", s.readyIncludeDeferred)
-	s.Run("ExcludesChildrenOfUndatedDeferredParent", s.readyExcludesChildrenOfUndatedDeferredParent)
-	s.Run("ExcludesChildrenOfParentInsertedDeferred", s.readyExcludesChildrenOfParentInsertedDeferred)
-	s.Run("IncludeDeferredShowsChildrenOfUndatedDeferredParent", s.readyIncludeDeferredShowsChildrenOfUndatedDeferredParent)
 	s.Run("LabelFilter", s.readyLabelFilter)
 	s.Run("LimitRespected", s.readyLimitRespected)
 	s.Run("SortByPriority", s.readySortByPriority)
@@ -38,6 +35,17 @@ func (s *testSuite) TestIssueGetReadyWork() {
 	s.Run("OffsetWithLooseLimitReturnsRemainder", s.readyOffsetWithoutLimit)
 	s.Run("OffsetHasMoreSignaling", s.readyOffsetHasMoreSignaling)
 	s.Run("OffsetWalksAllPages", s.readyOffsetWalksAllPages)
+}
+
+// TestIssueGetReadyWorkUndatedDeferredParent is a suite method of its own
+// because SetupTest resets the database per method, not per subtest:
+// TestIssueGetReadyWork's ExcludesDeferred and IncludeDeferred leave
+// future-dated rows behind, and those would answer the deferred-parent probe
+// for these subtests (GH#7300). Here only a deferred status can.
+func (s *testSuite) TestIssueGetReadyWorkUndatedDeferredParent() {
+	s.Run("ExcludesChildrenOfUndatedDeferredParent", s.readyExcludesChildrenOfUndatedDeferredParent)
+	s.Run("ExcludesChildrenOfParentInsertedDeferred", s.readyExcludesChildrenOfParentInsertedDeferred)
+	s.Run("IncludeDeferredShowsChildrenOfUndatedDeferredParent", s.readyIncludeDeferredShowsChildrenOfUndatedDeferredParent)
 }
 
 func (s *testSuite) readyOpenAndInProgress() {

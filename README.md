@@ -89,7 +89,10 @@ Beads supports hierarchical IDs for epics:
 Deferring a parent hides its direct children from `bd ready` too, whether it
 was deferred to a date (`bd defer --until`) or indefinitely (plain `bd defer`).
 `bd ready --include-deferred` lists those children again; the deferred parent
-itself still stays out of the listing.
+itself still stays out of the listing. Once a dated deferral's date passes, the
+next `bd ready` returns the parent to open, and its children with it. A read
+that cannot write that change, such as `bd --readonly ready`, keeps the
+children hidden until a writable read has woken the parent.
 
 **Stealth Mode:** Run `bd init --stealth` to use Beads locally without committing files to the main repo. Perfect for personal use on shared projects. See [Git-Free Usage](#-git-free-usage) below.
 
