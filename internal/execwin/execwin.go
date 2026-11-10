@@ -32,8 +32,15 @@ import "os/exec"
 // platform-neutral policy below compiles, and is tested, on every platform;
 // execwin_windows_test.go pins them to golang.org/x/sys/windows.
 const (
-	createNewProcessGroup uint32 = 0x00000200
-	createNoWindow        uint32 = 0x08000000
+	detachedProcess          uint32 = 0x00000008
+	createNewConsole         uint32 = 0x00000010
+	createNewProcessGroup    uint32 = 0x00000200
+	createUnicodeEnvironment uint32 = 0x00000400
+	createNoWindow           uint32 = 0x08000000
+
+	// consoleChoiceFlags are the flags by which a caller has already decided
+	// what console the child gets.
+	consoleChoiceFlags = createNoWindow | detachedProcess | createNewConsole
 )
 
 // Hide keeps cmd from allocating a visible console window on Windows and
@@ -63,9 +70,13 @@ func Hide(cmd *exec.Cmd) *exec.Cmd {
 // differ from flags at all.
 //
 // An attached bd changes nothing: its console children inherit that console
-// as before, so prompts, terminal output and Ctrl+C keep reaching them.
+// as before, so prompts, terminal output and Ctrl+C keep reaching them. Nor
+// does a command whose flags already decide its console (hidden, none, or a
+// new visible one): CREATE_NO_WINDOW is ignored alongside DETACHED_PROCESS or
+// CREATE_NEW_CONSOLE, so adding it would only obscure that choice. Every other
+// flag the caller set is kept.
 func hiddenCreationFlags(flags uint32, attached bool) (uint32, bool) {
-	if attached {
+	if attached || flags&consoleChoiceFlags != 0 {
 		return flags, false
 	}
 	return flags | createNoWindow, true
