@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/uimd"
@@ -52,7 +53,7 @@ func foreignPrefixMissHintIn(ctx context.Context, s prefixConfigReader, beadsDir
 // a miss on id with the direct route's foreign-prefix hint, when that hint
 // applies; any other miss keeps its line alone.
 func printForeignPrefixMissHint(ctx context.Context, id string, routedSearched bool) {
-	if hint, ok := foreignPrefixMissHintIn(ctx, store, resolveCommandBeadsDir(dbPath), id, routedSearched); ok {
+	if hint, ok := foreignPrefixMissHintIn(ctx, missHintConfigReader(store), resolveCommandBeadsDir(dbPath), id, routedSearched); ok {
 		fmt.Fprintf(os.Stderr, "Hint: %s\n", hint)
 	}
 }
@@ -74,20 +75,35 @@ type prefixConfigReader interface {
 	GetConfig(ctx context.Context, key string) (string, error)
 }
 
+// missHintConfigReader is the reader bd show chooses a miss's hint with: s,
+// or nil when choosing it must read nothing. A remote backend pays a round
+// trip for every config read, and a miss on a served store is one issue
+// lookup and nothing else (S6b), so its misses keep showNotFoundHint, as the
+// not-found fallback keeps its routing settings local (routingSettingsStore).
+func missHintConfigReader(s storage.DoltStorage) prefixConfigReader {
+	if s == nil || storeIsRemoteBackend(s) {
+		return nil
+	}
+	return s
+}
+
 // unroutedForeignPrefix reports the store's issue_prefix and the id's prefix
 // when id carries a prefix the store does not issue and no route names it. It
-// answers false whenever it cannot tell: no store, an issue_prefix or
-// allowed_prefixes it cannot read, no configured issue_prefix, no prefix in
-// id, or a routes.jsonl it cannot read. It reads config and routes.jsonl and
-// nothing else: it never looks the id up or opens a store.
+// answers false whenever it cannot tell: no store, no prefix in id, an
+// issue_prefix or allowed_prefixes it cannot read, no configured
+// issue_prefix, or a routes.jsonl it cannot read. It reads config and
+// routes.jsonl and nothing else: it never looks the id up or opens a store.
 //
-// Both config keys are read before anything is matched, so an own-prefix and
-// a foreign-prefix miss make the same store reads. Known prefixes are matched
-// as a leading "<prefix>-" before the id's prefix is extracted for display, so
-// a multi-hyphen allowed prefix ("claude-os" for "claude-os-abcd") is never
-// mistaken for a foreign one.
+// An id with no prefix (a bare hash) cannot be foreign, so it answers before
+// any read. For any other id both config keys are read before anything is
+// matched, so an own-prefix and a foreign-prefix miss make the same store
+// reads. Known prefixes are matched as a leading "<prefix>-" of the whole id,
+// not against its extracted prefix, so a multi-hyphen allowed prefix
+// ("claude-os" for "claude-os-abcd", extracted as "claude") is never mistaken
+// for a foreign one.
 func unroutedForeignPrefix(ctx context.Context, s prefixConfigReader, beadsDir, id string) (storePrefix, idPrefix string, ok bool) {
-	if s == nil {
+	idPrefix = utils.ExtractIssuePrefix(id)
+	if s == nil || idPrefix == "" {
 		return "", "", false
 	}
 	issuePrefix, err := s.GetConfig(ctx, "issue_prefix")
@@ -106,10 +122,6 @@ func unroutedForeignPrefix(ctx context.Context, s prefixConfigReader, beadsDir, 
 		if p = strings.TrimSuffix(strings.TrimSpace(p), "-"); p != "" && strings.HasPrefix(id, p+"-") {
 			return "", "", false
 		}
-	}
-	idPrefix = utils.ExtractIssuePrefix(id)
-	if idPrefix == "" {
-		return "", "", false
 	}
 	if beadsDir != "" {
 		routes, err := loadPrefixRoutes(beadsDir)
@@ -250,7 +262,7 @@ var showCmd = &cobra.Command{
 				}
 				if isNotFoundErr(err) {
 					fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
-					fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHintIn(ctx, store, resolveCommandBeadsDir(dbPath), id, routedSearched))
+					fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHintIn(ctx, missHintConfigReader(store), resolveCommandBeadsDir(dbPath), id, routedSearched))
 				} else {
 					fmt.Fprintf(os.Stderr, "Error fetching %s: %s\n", id, remedy.PrintedMessage(err))
 				}
@@ -261,7 +273,7 @@ var showCmd = &cobra.Command{
 					result.Close()
 				}
 				fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
-				fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHintIn(ctx, store, resolveCommandBeadsDir(dbPath), id, routedSearched))
+				fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHintIn(ctx, missHintConfigReader(store), resolveCommandBeadsDir(dbPath), id, routedSearched))
 				continue
 			}
 			issue := result.Issue

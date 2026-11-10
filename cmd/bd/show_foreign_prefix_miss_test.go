@@ -306,3 +306,57 @@ func TestShowForeignPrefixMiss_JSONCompatibility(t *testing.T) {
 		t.Errorf("bd show --json %s: the foreign-prefix hint leaked into stdout: %s", foreignID, stdout)
 	}
 }
+
+// remoteShowFixtureStore is showFixtureStore as the http backend's client is
+// shaped: a storage.RemoteBackendStore that resolves exact ids only. Every
+// config read it answers is recorded.
+type remoteShowFixtureStore struct {
+	showFixtureStore
+	configReads *[]string
+}
+
+func (remoteShowFixtureStore) IsRemoteBackendStore() bool { return true }
+
+func (remoteShowFixtureStore) ExactIDLookupOnly() bool { return true }
+
+func (s remoteShowFixtureStore) GetConfig(ctx context.Context, key string) (string, error) {
+	*s.configReads = append(*s.configReads, key)
+	return s.showFixtureStore.GetConfig(ctx, key)
+}
+
+func (s remoteShowFixtureStore) GetAllConfig(ctx context.Context) (map[string]string, error) {
+	*s.configReads = append(*s.configReads, "<all>")
+	return s.showFixtureStore.GetAllConfig(ctx)
+}
+
+// TestShowMissHint_RemoteBackendReadsNoConfig pins the served-store budget
+// (S6b) for the GH#5259 hint. On a remote backend every config read is a
+// round trip, and a miss on a prefixed id is one issue lookup and nothing else
+// (TestE2E_ShowMissingIDIsNotFoundInOneLookup and the gc-show-missing corpus
+// transcript in backend/http), so choosing the hint reads no config there and
+// every mode prints what it printed before the hint existed: the direct route
+// showNotFoundHint, --refs and --children no hint, for a foreign and an own
+// prefix alike.
+func TestShowMissHint_RemoteBackendReadsNoConfig(t *testing.T) {
+	for _, mode := range []string{"direct", "refs", "children"} {
+		t.Run(mode, func(t *testing.T) {
+			useShowFixture(t, newShowFixtureStore(), false)
+			var reads []string
+			store = remoteShowFixtureStore{showFixtureStore: newShowFixtureStore(), configReads: &reads}
+
+			for _, id := range []string{"herald-x7k", "openclaw-zz9"} {
+				reads = nil
+				_, stderr, _ := runShowMode(t, mode, id)
+				if len(reads) != 0 {
+					t.Errorf("bd show (%s) %s on a remote backend read config %q, want no config read", mode, id, reads)
+				}
+				if strings.Contains(stderr, foreignPrefixHintMarker) {
+					t.Errorf("bd show (%s) %s on a remote backend printed the foreign-prefix hint: %q", mode, id, stderr)
+				}
+				if want := mode == "direct"; strings.Contains(stderr, existingHintMarker) != want {
+					t.Errorf("bd show (%s) %s on a remote backend: stderr = %q, want showNotFoundHint: %v", mode, id, stderr, want)
+				}
+			}
+		})
+	}
+}
