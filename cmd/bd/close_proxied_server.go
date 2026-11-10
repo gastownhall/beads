@@ -182,6 +182,10 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 	var claimedNextIssue *types.Issue
 	if result.ClaimedNext != nil {
 		claimedNextIssue = result.ClaimedNext.Issue
+		// The claim already happened inside the batch's transaction; journal
+		// its returned post-state after the close records (GH#6146), matching
+		// the direct route.
+		audit.LogClaimed(claimedNextIssue.ID, currentActor(), string(claimedNextIssue.Status), claimedNextIssue.Assignee)
 	}
 
 	for _, o := range outcomes {

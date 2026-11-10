@@ -384,6 +384,11 @@ in the molecule for you; add --no-auto to only show it.`,
 			if claimedNext != nil {
 				claimedNextIssue = claimedNext.Issue
 				mutatedStores[postCloseStore] = append(mutatedStores[postCloseStore], claimedNextIssue.ID)
+				// The claim already happened inside the batch's transaction;
+				// journal its returned post-state after the close records
+				// (GH#6146). A sibling's refusal does not reach here: the
+				// claim landed with the survivors either way.
+				audit.LogClaimed(claimedNextIssue.ID, currentActor(), string(claimedNextIssue.Status), claimedNextIssue.Assignee)
 				if !jsonOutput {
 					debug.PrintNormal("%s Auto-claimed next ready issue: %s (P%d)\n", ui.RenderPass("✓"), formatFeedbackID(claimedNextIssue.ID, claimedNextIssue.Title), claimedNextIssue.Priority)
 				}

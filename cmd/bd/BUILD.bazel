@@ -607,6 +607,7 @@ go_test(
         "claim_audit_sidecar_helpers_test.go",
         "claim_pools_embedded_test.go",
         "cli_fast_test.go",
+        "close_claim_audit_embedded_test.go",
         "close_embedded_test.go",
         "close_failure_report_test.go",
         "close_fanin_proxied_integration_test.go",
