@@ -486,3 +486,72 @@ func TestIsBlocked_ClosedDependerNotRemarkedActive(t *testing.T) {
 		t.Fatal("closed depender should be is_blocked = 0")
 	}
 }
+
+// TestIsBlocked_ConditionalBlocksHoldsOnSuccessClose pins conditional-blocks'
+// documented rule, B runs only if A fails: closing the precondition releases
+// the fallback (stored bit 0, in ready work) exactly when the close reason is
+// a failure (types.IsFailureClose); any other reason, the default "Closed" and
+// the empty reason included, keeps it blocked.
+func TestIsBlocked_ConditionalBlocksHoldsOnSuccessClose(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	cases := []struct {
+		name, reason string
+	}{
+		{"success", "completed successfully"},
+		{"default", "Closed"},
+		{"empty", ""},
+		{"failure", "failed: upstream returned 500"},
+		{"wontfix", "Won't fix"},
+	}
+	for i, tc := range cases {
+		a := "isb-cbs-a" + string(rune('0'+i))
+		b := "isb-cbs-b" + string(rune('0'+i))
+		createPerm(t, ctx, store, a)
+		createPerm(t, ctx, store, b)
+		if err := store.AddDependency(ctx, &types.Dependency{
+			IssueID: b, DependsOnID: a, Type: types.DepConditionalBlocks,
+		}, "tester"); err != nil {
+			t.Fatalf("%s: AddDependency: %v", tc.name, err)
+		}
+		if err := store.CloseIssue(ctx, a, tc.reason, "tester", ""); err != nil {
+			t.Fatalf("%s: CloseIssue: %v", tc.name, err)
+		}
+
+		wantBlocked := !types.IsFailureClose(tc.reason)
+		if got := getIsBlocked(t, ctx, store, "issues", b); got != wantBlocked {
+			t.Errorf("%s: close reason %q: stored is_blocked(%s) = %v, want %v", tc.name, tc.reason, b, got, wantBlocked)
+		}
+		ready, err := store.GetReadyWork(ctx, types.WorkFilter{Status: types.StatusOpen})
+		if err != nil {
+			t.Fatalf("%s: GetReadyWork: %v", tc.name, err)
+		}
+		inReady := false
+		for _, issue := range ready {
+			if issue.ID == b {
+				inReady = true
+			}
+		}
+		if inReady == wantBlocked {
+			t.Errorf("%s: close reason %q: %s in ready work = %v, want %v", tc.name, tc.reason, b, inReady, !wantBlocked)
+		}
+	}
+
+	// Compatibility control: an ordinary blocks edge releases on any close.
+	createPerm(t, ctx, store, "isb-cbs-plain-a")
+	createPerm(t, ctx, store, "isb-cbs-plain-b")
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID: "isb-cbs-plain-b", DependsOnID: "isb-cbs-plain-a", Type: types.DepBlocks,
+	}, "tester"); err != nil {
+		t.Fatalf("AddDependency blocks: %v", err)
+	}
+	if err := store.CloseIssue(ctx, "isb-cbs-plain-a", "completed successfully", "tester", ""); err != nil {
+		t.Fatalf("CloseIssue plain: %v", err)
+	}
+	if getIsBlocked(t, ctx, store, "issues", "isb-cbs-plain-b") {
+		t.Error("ordinary blocks dependent should be released by a success close")
+	}
+}
