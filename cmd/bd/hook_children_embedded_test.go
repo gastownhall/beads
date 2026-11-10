@@ -3,13 +3,16 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/testutil"
 )
@@ -66,6 +69,32 @@ func TestEmbeddedHookChildrenRunTheHookBinary(t *testing.T) {
 			t.Errorf("indexed JSONL lacks %s after pre-commit:\n%s\nhook stderr:\n%s", pending.ID, got, stderr)
 		}
 	})
+
+	for _, tc := range []struct {
+		hook string
+		args []string
+	}{
+		{hook: "post-merge", args: []string{"0"}},
+		{hook: "post-checkout", args: []string{"HEAD", "HEAD", "1"}},
+	} {
+		t.Run(tc.hook+" import", func(t *testing.T) {
+			t.Parallel()
+			dir, beadsDir, _ := bdInit(t, bd, "--prefix", "hx")
+			issue := bdCreate(t, bd, dir, "original title", "--type", "task")
+			jsonl := filepath.Join(beadsDir, "issues.jsonl")
+			bdExportTo(t, bd, dir, jsonl)
+			reviseJSONLTitle(t, jsonl, issue.ID, "revised title")
+
+			marker, env := decoyBDEnv(t, dir)
+			env = append(env, "BD_IMPORT_AUTO=true")
+			_, stderr := runHookForTest(t, bd, dir, env, tc.hook, tc.args...)
+
+			assertDecoyNeverRan(t, marker)
+			if got := bdShow(t, bd, dir, issue.ID).Title; got != "revised title" {
+				t.Errorf("%s left title %q, want the JSONL's %q\nhook stderr:\n%s", tc.hook, got, "revised title", stderr)
+			}
+		})
+	}
 }
 
 // decoyBDEnv returns the hook environment for dir with a decoy bd first on
@@ -141,6 +170,46 @@ func appendFileForHookTest(t *testing.T, path, text string) {
 		t.Fatal(err)
 	}
 	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// reviseJSONLTitle rewrites id's row in jsonl with a new title and an
+// updated_at an hour ahead, so an import must take it as the newer revision.
+func reviseJSONLTitle(t *testing.T, jsonl, id, title string) {
+	t.Helper()
+	data, err := os.ReadFile(jsonl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	found := false
+	sc := bufio.NewScanner(bytes.NewReader(data))
+	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	for sc.Scan() {
+		line := sc.Bytes()
+		var row map[string]any
+		if err := json.Unmarshal(line, &row); err != nil {
+			t.Fatalf("parse %s: %v", jsonl, err)
+		}
+		if row["id"] == id {
+			row["title"] = title
+			row["updated_at"] = time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)
+			found = true
+			if line, err = json.Marshal(row); err != nil {
+				t.Fatal(err)
+			}
+		}
+		out.Write(line)
+		out.WriteByte('\n')
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatalf("%s has no row for %s:\n%s", jsonl, id, data)
+	}
+	if err := os.WriteFile(jsonl, out.Bytes(), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
