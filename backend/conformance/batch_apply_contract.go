@@ -2562,6 +2562,90 @@ func RunBatchApplyUpdateItemsRefuseATemplate(t *testing.T, ctx context.Context, 
 	}
 }
 
+// RunBatchApplyAllowTemplateWaivesTheTemplateGuardOnTheUpdateItem pins the
+// waiver the atomic `bd set-state` shape rides (GH#5637): an update item's
+// AllowTemplate is the batch's spelling of UpdateRequest.AllowTemplate, so on
+// a template target ONLY the template read-only refusal stands down — the
+// update lands and the row KEEPS its IsTemplate identity — while the default
+// false refuses the whole request, exactly as UpdateItemsRefuseATemplate
+// pins. The request is set-state's own three-item shape (create a keyed event,
+// wire its parent-child edge, patch the subject's labels), so the refusal
+// proves all three writes rolled back together.
+func RunBatchApplyAllowTemplateWaivesTheTemplateGuardOnTheUpdateItem(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	template := fixture.IssuePrefix + "-tmplwaive-template"
+	seeded := batchApplyIssue(template, "a template")
+	seeded.IsTemplate = true
+	seeded.Labels = []string{"patrol:active"}
+	if err := fixture.CreateIssue(ctx, seeded, "seed"); err != nil {
+		t.Fatalf("seed %s: %v", template, err)
+	}
+
+	plan := func(allow bool) publicops.ApplyBatchRequest {
+		update := batchApplyUpdate(publicops.Ref{ID: template}, publicops.IssuePatch{Labels: publicops.LabelPatch{
+			Add:    []string{"patrol:muted"},
+			Remove: []string{"patrol:active"},
+		}})
+		update.Update.AllowTemplate = allow
+		event := batchApplyMintedIssue("State change: patrol → muted")
+		event.Status = types.StatusClosed
+		event.Priority = 4
+		event.IssueType = types.TypeEvent
+		return publicops.ApplyBatchRequest{
+			Actor:         "apply-writer",
+			ForceIDPrefix: true,
+			Items: []publicops.ApplyItem{
+				batchApplyCreate("event", event),
+				batchApplyDepAdd(publicops.Ref{Key: "event"}, publicops.Ref{ID: template}, types.DepParentChild, ""),
+				update,
+			},
+		}
+	}
+
+	// THE DEFAULT REFUSES THE WHOLE REQUEST: the refusal is the update item's
+	// *ItemError carrying *TemplateReadOnlyError, and neither the event nor
+	// its edge landed beside it.
+	_, err := fixture.BatchApplier.ApplyBatch(ctx, plan(false))
+	var itemErr *publicops.ItemError
+	if !errors.As(err, &itemErr) || itemErr.Kind != publicops.ItemUpdate || itemErr.Index != 2 {
+		t.Fatalf("an update item on template %s without the waiver: error = %v, want the update item's *ItemError at index 2", template, err)
+	}
+	var refusal *publicops.TemplateReadOnlyError
+	if !errors.As(err, &refusal) || refusal.IssueID != template {
+		t.Errorf("update item on template = %v, want *TemplateReadOnlyError naming %s", err, template)
+	}
+	if n := batchApplyCount(t, ctx, fixture, "SELECT COUNT(*) FROM issues WHERE title = ?", []any{"State change: patrol → muted"}); n != 0 {
+		t.Errorf("%d event rows landed beside the refusal, want 0", n)
+	}
+	if n := batchApplyCount(t, ctx, fixture, "SELECT COUNT(*) FROM dependencies WHERE depends_on_issue_id = ? AND type = 'parent-child'", []any{template}); n != 0 {
+		t.Errorf("%d parent-child edges target the template after the refusal, want 0", n)
+	}
+	if n := batchApplyCount(t, ctx, fixture, "SELECT COUNT(*) FROM labels WHERE issue_id = ? AND label = 'patrol:active'", []any{template}); n != 1 {
+		t.Errorf("template label rows for patrol:active after the refusal = %d, want 1 (untouched)", n)
+	}
+
+	// THE WAIVER PERMITS THE UPDATE AND PRESERVES THE IDENTITY: all three
+	// items land, the label swaps, and the row is still a template.
+	result := batchApplyMust(t, ctx, fixture, plan(true))
+	eventID, ok := result.Keys["event"]
+	if !ok || eventID == "" {
+		t.Fatalf("the waived request bound no event key: %#v", result.Keys)
+	}
+	if n := batchApplyCount(t, ctx, fixture, "SELECT COUNT(*) FROM issues WHERE id = ? AND status = 'closed' AND priority = 4 AND issue_type = 'event'", []any{eventID}); n != 1 {
+		t.Errorf("event row %s after the waiver = %d, want exactly the closed priority-4 event", eventID, n)
+	}
+	assertBatchApplyEdgeCount(t, ctx, fixture, eventID, template, 1)
+	if n := batchApplyCount(t, ctx, fixture, "SELECT COUNT(*) FROM labels WHERE issue_id = ? AND label = 'patrol:muted'", []any{template}); n != 1 {
+		t.Errorf("template label rows for patrol:muted after the waiver = %d, want 1", n)
+	}
+	if n := batchApplyCount(t, ctx, fixture, "SELECT COUNT(*) FROM labels WHERE issue_id = ? AND label = 'patrol:active'", []any{template}); n != 0 {
+		t.Errorf("old label patrol:active survived the swap (%d rows)", n)
+	}
+	if n := batchApplyCount(t, ctx, fixture, "SELECT COUNT(*) FROM issues WHERE id = ? AND is_template = 1", []any{template}); n != 1 {
+		t.Errorf("the waived update demoted the template: is_template rows = %d, want 1", n)
+	}
+}
+
 // RunBatchApplySplicesTheMetadataOfATemplateItCreates is the template guard's
 // boundary: the one write a template legitimately takes inside a batch is a
 // CREATE item that makes it and asks for a metadata splice. The splice runs as

@@ -260,6 +260,11 @@ func TestBatchApplyContract(t *testing.T) {
 		defer cancel()
 		conformance.RunBatchApplyUpdateItemsRefuseATemplate(t, ctx, fixture)
 	})
+	t.Run("AllowTemplateWaivesTheTemplateGuardOnTheUpdateItem", func(t *testing.T) {
+		ctx, cancel := testContext(t)
+		defer cancel()
+		conformance.RunBatchApplyAllowTemplateWaivesTheTemplateGuardOnTheUpdateItem(t, ctx, fixture)
+	})
 	t.Run("SplicesTheMetadataOfATemplateItCreates", func(t *testing.T) {
 		ctx, cancel := testContext(t)
 		defer cancel()
