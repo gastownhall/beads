@@ -51,6 +51,9 @@ func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequ
 		return publicops.CreateResult{}, nil, err
 	}
 	issue := attempt.Issue
+	// An id minted below is new to this database, so the create need not
+	// look for edges already naming it (BatchContext.idsMinted).
+	idMinted := issue.ID == ""
 	// Configured infra types live in the wisp tables, the same routing the
 	// stores' own CreateIssue applies (internal/storage/dolt/issues.go). Mark
 	// the issue before its ID is assigned so ID generation, the create-only
@@ -91,6 +94,7 @@ func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequ
 	// nothing since has written config, so re-reading it (as
 	// CreateIssuesInTxWithResult would) only repeats the same reads.
 	createContext := *batch
+	createContext.idsMinted = idMinted
 	createContext.Opts = storage.BatchCreateOptions{
 		CreateOnly: true, SkipPrefixValidation: attempt.ForceIDPrefix,
 		OnSkippedDependency: func(issueID, dependsOnID, reason string) {

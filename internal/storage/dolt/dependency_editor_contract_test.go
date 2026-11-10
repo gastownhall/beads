@@ -193,6 +193,12 @@ func TestDependencyEditorWritesTheTargetIntoItsTypedColumn(t *testing.T) {
 	conformance.RunDependencyEditorWritesTheTargetIntoItsTypedColumn(t, ctx, fixture)
 }
 
+func TestDependencyEditorFilesAnArrivedTargetInItsTypedColumn(t *testing.T) {
+	fixture, ctx, cleanup := newDoltDependencyEditorFixture(t, "arr")
+	defer cleanup()
+	conformance.RunDependencyEditorFilesAnArrivedTargetInItsTypedColumn(t, ctx, fixture)
+}
+
 func TestDependencyEditorRefusesBlockingEdgeAcrossAWispHierarchy(t *testing.T) {
 	fixture, ctx, cleanup := newDoltDependencyEditorFixture(t, "whier")
 	defer cleanup()

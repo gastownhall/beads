@@ -302,6 +302,7 @@ var roleContractCases = []roleContract{
 		RunDependencyEditorSkipPerEdgeCycleCheckDropsOnlyTheProbe,
 		RunDependencyEditorRecordsOneHistoryEntryForAMixedPlaneRequest,
 		RunDependencyEditorWritesTheTargetIntoItsTypedColumn,
+		RunDependencyEditorFilesAnArrivedTargetInItsTypedColumn,
 		RunDependencyEditorRefusesBlockingEdgeAcrossAWispHierarchy,
 		RunDependencyEditorRefusesACycleThroughAParentChildHop,
 		RunDependencyEditorRefusesASamePlaneEdgeClosingACrossPlaneCycle,

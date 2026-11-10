@@ -1006,10 +1006,12 @@ func validateDependencyGraph(issues []*types.Issue) error {
 	if hasDirectedCycle(scheduling) {
 		return fmt.Errorf("legacy SQLite dependency graph has a scheduling cycle")
 	}
+	// Every target is an exported issue (loadDependencies refuses an orphan),
+	// and the import checks the hierarchy of a target it holds whatever its
+	// prefix (GH#8299), so every blocking edge is checked here too.
 	for _, dep := range blocking {
-		if types.ExtractPrefix(dep.IssueID) == types.ExtractPrefix(dep.DependsOnID) &&
-			(reachable(hierarchy, dep.IssueID, dep.DependsOnID) ||
-				reachable(hierarchy, dep.DependsOnID, dep.IssueID)) {
+		if reachable(hierarchy, dep.IssueID, dep.DependsOnID) ||
+			reachable(hierarchy, dep.DependsOnID, dep.IssueID) {
 			return fmt.Errorf("blocking dependency %s -> %s conflicts with parent-child hierarchy", dep.IssueID, dep.DependsOnID)
 		}
 	}

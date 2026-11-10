@@ -100,11 +100,12 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 
 	var existingType string
 	var existingMetadataNS, existingThreadNS sql.NullString
+	var storedExternal bool
 	err := r.runner.QueryRowContext(ctx,
 		//nolint:gosec // G201: table and depTargetExpr are hardcoded constants
-		fmt.Sprintf("SELECT type, metadata, thread_id FROM %s WHERE issue_id = ? AND %s = ?", table, depTargetExpr),
+		fmt.Sprintf("SELECT type, metadata, thread_id, depends_on_external IS NOT NULL FROM %s WHERE issue_id = ? AND %s = ?", table, depTargetExpr),
 		dep.IssueID, dep.DependsOnID,
-	).Scan(&existingType, &existingMetadataNS, &existingThreadNS)
+	).Scan(&existingType, &existingMetadataNS, &existingThreadNS, &storedExternal)
 	switch {
 	case err == nil:
 		existingMetadata := existingMetadataNS.String
@@ -112,6 +113,15 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 			existingMetadata = "{}"
 		}
 		if existingType == string(dep.Type) {
+			// A row filed external before this database held its target
+			// moves to its typed column, as the store bodies' re-add moves it,
+			// together with any other edge filed external onto that target
+			// (GH#8299). Nothing moves while the target is held nowhere.
+			if storedExternal && !strings.HasPrefix(dep.DependsOnID, "external:") {
+				if _, err := issueops.RefileArrivedDepTargetsInTx(ctx, r.runner, []string{dep.DependsOnID}); err != nil {
+					return fmt.Errorf("db: DependencySQLRepository.Insert: %w", err)
+				}
+			}
 			// A re-add naming a thread the row does not carry moves it; one
 			// naming none keeps the stored thread (the issueops twin's rule).
 			thread, threadChanged := issueops.ReAddedDependencyThread(existingThreadNS, dep.ThreadID)

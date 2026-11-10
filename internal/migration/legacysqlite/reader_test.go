@@ -155,6 +155,12 @@ func TestExportRejectsUnauthenticatedOrUnsafeLegacySQLite(t *testing.T) {
 			`INSERT INTO issues (id,title,status,priority,issue_type,created_at,updated_at,metadata) VALUES ('old-3','old-3','open',2,'task','2026-01-02T03:04:05Z','2026-01-02T03:04:05Z','{}')`,
 			`INSERT INTO dependencies VALUES ('old-1','old-2','parent-child','2026-01-02T03:04:05Z','old',NULL,NULL),('old-2','old-3','parent-child','2026-01-02T03:04:05Z','old',NULL,NULL),('old-1','old-3','blocks','2026-01-02T03:04:05Z','old',NULL,NULL)`,
 		)},
+		// The import checks a held target's hierarchy whatever its prefix
+		// (GH#8299), so an ancestor of another prefix conflicts too.
+		{"cross-prefix-hierarchy-conflict", mutations(
+			`INSERT INTO issues (id,title,status,priority,issue_type,created_at,updated_at,metadata) VALUES ('gt-3','gt-3','open',2,'task','2026-01-02T03:04:05Z','2026-01-02T03:04:05Z','{}')`,
+			`INSERT INTO dependencies VALUES ('old-1','old-2','parent-child','2026-01-02T03:04:05Z','old',NULL,NULL),('old-2','gt-3','parent-child','2026-01-02T03:04:05Z','old',NULL,NULL),('old-1','gt-3','blocks','2026-01-02T03:04:05Z','old',NULL,NULL)`,
+		)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db, path := legacyFixture(t, "0.49.6")

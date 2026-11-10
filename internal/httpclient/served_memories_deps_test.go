@@ -353,6 +353,10 @@ func TestServedDependencyEditorWritesTheTargetIntoItsTypedColumn(t *testing.T) {
 	conformance.RunDependencyEditorWritesTheTargetIntoItsTypedColumn(t, t.Context(), newServedDependencyEditorFixture(t, "hd27"))
 }
 
+func TestServedDependencyEditorFilesAnArrivedTargetInItsTypedColumn(t *testing.T) {
+	conformance.RunDependencyEditorFilesAnArrivedTargetInItsTypedColumn(t, t.Context(), newServedDependencyEditorFixture(t, "hd42"))
+}
+
 func TestServedDependencyEditorRefusesBlockingEdgeAcrossAWispHierarchy(t *testing.T) {
 	conformance.RunDependencyEditorRefusesBlockingEdgeAcrossAWispHierarchy(t, t.Context(), newServedDependencyEditorFixture(t, "hd28"))
 }

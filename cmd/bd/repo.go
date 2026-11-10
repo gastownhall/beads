@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -314,9 +315,7 @@ Also triggers Dolt push/pull if a remote is configured.`,
 					issue.SourceRepo = repoPath
 				}
 				if len(issues) > 0 {
-					if importErr := store.CreateIssuesWithFullOptions(ctx, issues, "repo-sync", storage.BatchCreateOptions{
-						SkipPrefixValidation: true,
-					}); importErr != nil {
+					if importErr := hydrateRepoIssues(ctx, repoPath, issues); importErr != nil {
 						fmt.Fprintf(os.Stderr, "Warning: failed to import from %s: %v\n", repoPath, importErr)
 						continue
 					}
@@ -383,10 +382,7 @@ Also triggers Dolt push/pull if a remote is configured.`,
 				issue.SourceRepo = repoPath
 			}
 
-			// Import with prefix validation skipped (cross-prefix hydration)
-			if err := store.CreateIssuesWithFullOptions(ctx, issues, "repo-sync", storage.BatchCreateOptions{
-				SkipPrefixValidation: true,
-			}); err != nil {
+			if err := hydrateRepoIssues(ctx, repoPath, issues); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to import from %s: %v\n", repoPath, err)
 				continue
 			}
@@ -429,6 +425,37 @@ Also triggers Dolt push/pull if a remote is configured.`,
 		}
 		return nil
 	},
+}
+
+// hydrateRepoIssues writes one configured repository's issues into the
+// primary database in one batch, keeping their own prefixes. A dependency
+// the batch refuses (a cycle, or a blocker in the issue's own hierarchy) is
+// skipped and reported, as `bd import` does, rather than failing the whole
+// repository: the repository's own database files an edge onto an issue of
+// another repository as an unverified external ID and never checks it, so
+// its export can carry an edge that is invalid once both are here (GH#8299).
+func hydrateRepoIssues(ctx context.Context, repoPath string, issues []*types.Issue) error {
+	var skipped []string
+	seen := make(map[string]bool)
+	err := store.CreateIssuesWithFullOptions(ctx, issues, "repo-sync", storage.BatchCreateOptions{
+		SkipPrefixValidation:           true,
+		SkipDependencyValidationErrors: true,
+		// The transaction may retry, so the same edge can be reported twice.
+		OnSkippedDependency: func(issueID, dependsOnID, reason string) {
+			edge := fmt.Sprintf("%s -> %s: %s", issueID, dependsOnID, reason)
+			if !seen[edge] {
+				seen[edge] = true
+				skipped = append(skipped, edge)
+			}
+		},
+	})
+	if err != nil {
+		return err
+	}
+	for _, edge := range skipped {
+		fmt.Fprintf(os.Stderr, "Warning: %s: skipped dependency %s\n", repoPath, edge)
+	}
+	return nil
 }
 
 // parseIssuesFromJSONL reads and parses issues from a JSONL file.

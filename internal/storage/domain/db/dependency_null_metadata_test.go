@@ -39,9 +39,9 @@ func newMockDependencyRepo(t *testing.T) (sqlmock.Sqlmock, *dependencySQLReposit
 func TestDependencyInsertReadsNullStoredMetadataAsEmptyObject(t *testing.T) {
 	mock, repo := newMockDependencyRepo(t)
 
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT type, metadata, thread_id FROM dependencies")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT type, metadata, thread_id, depends_on_external IS NOT NULL FROM dependencies")).
 		WithArgs("dep-a", "dep-b").
-		WillReturnRows(sqlmock.NewRows([]string{"type", "metadata", "thread_id"}).AddRow(string(types.DepRelated), nil, nil))
+		WillReturnRows(sqlmock.NewRows([]string{"type", "metadata", "thread_id", "external"}).AddRow(string(types.DepRelated), nil, nil, false))
 
 	dep := &types.Dependency{IssueID: "dep-a", DependsOnID: "dep-b", Type: types.DepRelated}
 	// DepRelated is not a scheduling edge and the hierarchy check is declared

@@ -54,13 +54,19 @@ func (s *DoltStore) createIssue(ctx context.Context, issue *types.Issue, actor s
 		return err
 	}
 
-	// Dolt versioning — wisps and no-history issues skip DOLT_COMMIT.
+	// Dolt versioning — wisps and no-history issues skip DOLT_COMMIT. Their
+	// create can still re-file durable edges onto the new id and flip a
+	// durable is_blocked (issueops.RefileArrivedDepTargetsInTx), and those
+	// rows are committed (GH#6647).
 	if !issue.Ephemeral && !issue.NoHistory {
 		if err := s.doltAddAndCommit(ctx, createIssueCommitTables(ctx, issue, result),
 			fmt.Sprintf("bd: create %s", issue.ID)); err != nil {
 			return err
 		}
+		return nil
 	}
+	s.commitWispDurable(ctx, wispDurable{issues: result.ChangedTables["issues"], dependencies: result.ChangedTables["dependencies"]},
+		fmt.Sprintf("bd: create %s", issue.ID))
 	return nil
 }
 
@@ -107,7 +113,8 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 	// All-wisps fast path: one SQL transaction, no Dolt versioning.
 	// Covers both ephemeral issues and no-history issues (both skip DOLT_COMMIT).
 	// A create-time edge can still flip a durable row's is_blocked (a waiter
-	// on a wisp's durable spawner), and that row is committed (GH#6647).
+	// on a wisp's durable spawner), and a durable edge re-filed onto a new id
+	// moves a dependencies row; those rows are committed (GH#6647).
 	if issueops.AllWisps(issues) {
 		for _, issue := range issues {
 			if !issue.NoHistory {
@@ -122,7 +129,7 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 		}); err != nil {
 			return err
 		}
-		s.commitWispDurable(ctx, wispDurable{issues: result.ChangedTables["issues"]},
+		s.commitWispDurable(ctx, wispDurable{issues: result.ChangedTables["issues"], dependencies: result.ChangedTables["dependencies"]},
 			fmt.Sprintf("bd: create %d issue(s)", len(issues)))
 		return nil
 	}

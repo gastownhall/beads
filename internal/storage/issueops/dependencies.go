@@ -308,9 +308,10 @@ type DependencyWriteResult struct {
 	EventWritten bool
 	Blocked      RecomputeIsBlockedResult
 	// TargetKind is the typed column the edge's row holds its target in: the
-	// classification of a new edge, or the stored column of an existing one
-	// (a re-add does not move it). A caller re-validating the edge later (a
-	// batch end gate) skips an external one by it rather than re-deriving it.
+	// classification of a new edge, or the stored column of an existing one,
+	// which a re-add moves only out of depends_on_external onto a target this
+	// database now holds. A caller re-validating the edge later (a batch end
+	// gate) skips an external one by it rather than re-deriving it.
 	TargetKind DepTargetKind
 }
 
@@ -416,64 +417,15 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 
 	// Check for existing dependency between the same pair. Use the resolved
 	// target expression defensively so stale/reclassified rows in another typed
-	// target column cannot bypass the idempotency/conflict check. An existing
-	// row keeps the column it was written to (a re-add does not move it), so
-	// its stored kind is the one reported.
-	var existingType string
-	var existingMetadataNS, existingThreadNS sql.NullString
-	var existingKind DepTargetKind
+	// target column cannot bypass the idempotency/conflict check.
+	var stored storedDependency
 	//nolint:gosec // G201: writeTable from WispTableRouting; depTargetEquals has no user input.
 	err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT type, metadata, thread_id, %s FROM %s WHERE issue_id = ? AND %s`, storedDepTargetKindExpr, writeTable, depTargetEquals("")),
-		dep.IssueID, dep.DependsOnID).Scan(&existingType, &existingMetadataNS, &existingThreadNS, &existingKind)
+		dep.IssueID, dep.DependsOnID).Scan(&stored.depType, &stored.metadata, &stored.thread, &stored.kind)
 	if err == nil {
-		if targetKind != nil {
-			*targetKind = existingKind
-		}
-		existingMetadata := existingMetadataNS.String
-		if !existingMetadataNS.Valid {
-			existingMetadata = "{}"
-		}
-		if existingType == string(dep.Type) {
-			// A re-add naming a thread the row does not carry moves it. One
-			// naming none keeps the stored thread rather than clearing it, so
-			// the callers that never carry a thread cannot erase one.
-			thread, threadChanged := ReAddedDependencyThread(existingThreadNS, dep.ThreadID)
-			if !threadChanged && DependencyMetadataEqual(existingMetadata, metadata) {
-				// Same type, same metadata, same thread: a change-free write.
-				// Nothing is written and nothing is journaled (#5898 R3).
-				return false, nil
-			}
-			// Same type, different metadata or thread — idempotent; update the
-			// row in place. No event is written, so the caller must not stage
-			// the events table for this re-add.
-			//nolint:gosec // G201: writeTable from WispTableRouting; depTargetEquals has no user input.
-			if _, err := tx.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET metadata = ?, thread_id = ? WHERE issue_id = ? AND %s`, writeTable, depTargetEquals("")),
-				metadata, thread, dep.IssueID, dep.DependsOnID); err != nil {
-				return false, fmt.Errorf("failed to update dependency metadata: %w", err)
-			}
-			// A same-type add refreshes the edge's metadata or thread. It is an
-			// observable graph mutation, so journal the replacement edge for
-			// replay even though no audit event is written. EventDep has no
-			// thread member, so a thread-only change journals the same payload
-			// as the original add; the source's version snapshot is what
-			// records the new thread.
-			if err := RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
-				return false, err
-			}
-			// The metadata or thread genuinely changed, so — unlike the
-			// change-free branch above — this re-add is a real durable-state
-			// mutation of the source issue (its version snapshot carries each
-			// edge's thread_id) and mints on the same terms as a new edge
-			// (#5898 leg 2: "a same-type re-add whose metadata actually
-			// changed mints EXACTLY ONE version carrying the new state").
-			return false, mintDependencyVersion(ctx, tx, dep.IssueID, actor, mintVersion)
-		}
-		return false, &domain.DependencyTypeConflictError{
-			IssueID:       dep.IssueID,
-			DependsOnID:   dep.DependsOnID,
-			ExistingType:  existingType,
-			RequestedType: string(dep.Type),
-		}
+		return reAddDependencyInTx(ctx, tx, dep, actor, metadata, stored, reAddTarget{
+			writeTable: writeTable, kind: kind, precheck: opts.PrecheckedTarget,
+		}, recomputeResult, targetKind, mintVersion)
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return false, fmt.Errorf("failed to check existing dependency: %w", err)
 	}
@@ -514,6 +466,125 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		eventWritten = true
 	}
 
+	if err := markBlockedForAddedEdgeInTx(ctx, tx, dep, srcIsWisp, kind, opts.PrecheckedTarget, recomputeResult); err != nil {
+		return false, err
+	}
+	// Snapshot only after all derived blocked-state maintenance has completed.
+	// The journal is never gated on opts.EmitEvent: a structurally-wired edge is
+	// as real to a replaying consumer as one added by an explicit dep verb —
+	// and neither is the version row minted beside it.
+	if err := RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
+		return eventWritten, err
+	}
+	return eventWritten, mintDependencyVersion(ctx, tx, dep.IssueID, actor, mintVersion)
+}
+
+// storedDependency is the row an add finds already stored for its edge's
+// source and target.
+type storedDependency struct {
+	depType          string
+	metadata, thread sql.NullString
+	kind             DepTargetKind
+}
+
+// reAddTarget is where an add classified its target: the edge table it
+// writes, the target's kind, and the caller's read of the target, if any.
+type reAddTarget struct {
+	writeTable string
+	kind       DepTargetKind
+	precheck   *DepTargetPrecheck
+}
+
+// reAddDependencyInTx is addDependencyInTx for an edge already stored
+// between its source and target. Another type is a conflict. The same type
+// is idempotent: new metadata or a new thread updates the row in place,
+// journals the edge and mints, and anything else writes nothing, except
+// that a row filed in depends_on_external whose target this database now
+// holds moves into the typed column a first add would choose (GH#8299).
+func reAddDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor, metadata string, stored storedDependency, target reAddTarget, recomputeResult *RecomputeIsBlockedResult, targetKind *DepTargetKind, mintVersion bool) (bool, error) {
+	if stored.depType != string(dep.Type) {
+		return false, &domain.DependencyTypeConflictError{
+			IssueID:       dep.IssueID,
+			DependsOnID:   dep.DependsOnID,
+			ExistingType:  stored.depType,
+			RequestedType: string(dep.Type),
+		}
+	}
+	if targetKind != nil {
+		*targetKind = stored.kind
+	}
+	if stored.kind == DepTargetExternal && target.kind != DepTargetExternal {
+		if err := moveReAddedDependencyInTx(ctx, tx, dep, target, recomputeResult); err != nil {
+			return false, err
+		}
+		if targetKind != nil {
+			*targetKind = target.kind
+		}
+	}
+	existingMetadata := stored.metadata.String
+	if !stored.metadata.Valid {
+		existingMetadata = "{}"
+	}
+	// A re-add naming a thread the row does not carry moves it. One naming
+	// none keeps the stored thread rather than clearing it, so the callers
+	// that never carry a thread cannot erase one.
+	thread, threadChanged := ReAddedDependencyThread(stored.thread, dep.ThreadID)
+	if !threadChanged && DependencyMetadataEqual(existingMetadata, metadata) {
+		// Same type, same metadata, same thread: the edge itself is unchanged.
+		// Nothing more is written and nothing is journaled (#5898 R3).
+		return false, nil
+	}
+	// Same type, different metadata or thread — idempotent; update the row in
+	// place. No event is written, so the caller must not stage the events
+	// table for this re-add.
+	//nolint:gosec // G201: writeTable from WispTableRouting; depTargetEquals has no user input.
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET metadata = ?, thread_id = ? WHERE issue_id = ? AND %s`, target.writeTable, depTargetEquals("")),
+		metadata, thread, dep.IssueID, dep.DependsOnID); err != nil {
+		return false, fmt.Errorf("failed to update dependency metadata: %w", err)
+	}
+	// A same-type add refreshes the edge's metadata or thread. It is an
+	// observable graph mutation, so journal the replacement edge for replay
+	// even though no audit event is written. EventDep has no thread member, so
+	// a thread-only change journals the same payload as the original add; the
+	// source's version snapshot is what records the new thread.
+	if err := RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
+		return false, err
+	}
+	// The metadata or thread genuinely changed, so — unlike the change-free
+	// branch above — this re-add is a real durable-state mutation of the
+	// source issue (its version snapshot carries each edge's thread_id) and
+	// mints on the same terms as a new edge (#5898 leg 2: "a same-type re-add
+	// whose metadata actually changed mints EXACTLY ONE version carrying the
+	// new state").
+	return false, mintDependencyVersion(ctx, tx, dep.IssueID, actor, mintVersion)
+}
+
+// moveReAddedDependencyInTx moves a stored edge's target from
+// depends_on_external into target.kind's typed column, where the re-add that
+// found it classified the target. The row keeps its id and payload, and the
+// journal and version snapshot carry the resolved target, so neither records
+// the move; blocked state follows it as it follows a new edge.
+func moveReAddedDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, target reAddTarget, recomputeResult *RecomputeIsBlockedResult) error {
+	//nolint:gosec // G201: writeTable from WispTableRouting; the column comes from DepTargetKind.Column().
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET %s = ?, depends_on_external = NULL
+		WHERE issue_id = ? AND depends_on_external = ? AND depends_on_issue_id IS NULL AND depends_on_wisp_id IS NULL`,
+		target.writeTable, target.kind.Column()), dep.DependsOnID, dep.IssueID, dep.DependsOnID); err != nil {
+		return fmt.Errorf("move dependency %s -> %s into %s: %w", dep.IssueID, dep.DependsOnID, target.kind.Column(), err)
+	}
+	if dep.Type == types.DepParentChild {
+		if err := TouchDependencyCoordinationTableInTx(ctx, tx, dep.DependsOnID, target.writeTable); err != nil {
+			return err
+		}
+	}
+	return markBlockedForAddedEdgeInTx(ctx, tx, dep, target.writeTable == "wisp_dependencies", target.kind, target.precheck, recomputeResult)
+}
+
+// markBlockedForAddedEdgeInTx brings blocked state up to date for an edge
+// whose target now sits in kind's typed column: a new edge, or one a re-add
+// moved there. A blocking edge marks its source when the target is open, and
+// the rows the edge affects are marked, or recomputed for a parent-child
+// edge.
+func markBlockedForAddedEdgeInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, srcIsWisp bool, kind DepTargetKind, precheck *DepTargetPrecheck, recomputeResult *RecomputeIsBlockedResult) error {
 	var affectedIssues, affectedWisps []string
 	var aerr error
 	if srcIsWisp {
@@ -522,12 +593,12 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		affectedIssues, affectedWisps, aerr = AffectedByDepChangeInTx(ctx, tx, dep.IssueID, dep.DependsOnID, dep.Type)
 	}
 	if aerr != nil {
-		return false, fmt.Errorf("affected by add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, aerr)
+		return fmt.Errorf("affected by add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, aerr)
 	}
 	if dep.Type == types.DepBlocks || dep.Type == types.DepConditionalBlocks {
-		marked, err := markDirectBlockingDependencySourceInTx(ctx, tx, dep.IssueID, srcIsWisp, dep.DependsOnID, kind, opts.PrecheckedTarget)
+		marked, err := markDirectBlockingDependencySourceInTx(ctx, tx, dep.IssueID, srcIsWisp, dep.DependsOnID, kind, precheck)
 		if err != nil {
-			return false, fmt.Errorf("mark direct is_blocked after add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
+			return fmt.Errorf("mark direct is_blocked after add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 		}
 		if srcIsWisp {
 			mergeRecomputeIsBlockedResult(recomputeResult, RecomputeIsBlockedResult{WispRowsChanged: marked})
@@ -541,28 +612,17 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		// satisfy an any-children waits-for gate and unblock the waiter.
 		recomputed, err := RecomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps)
 		if err != nil {
-			return false, fmt.Errorf("recompute is_blocked after add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
+			return fmt.Errorf("recompute is_blocked after add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 		}
 		mergeRecomputeIsBlockedResult(recomputeResult, recomputed)
-		// Snapshot only after all derived blocked-state maintenance has completed.
-		if err := RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
-			return eventWritten, err
-		}
-		return eventWritten, mintDependencyVersion(ctx, tx, dep.IssueID, actor, mintVersion)
+		return nil
 	}
 	marked, err := MarkIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps)
 	if err != nil {
-		return false, fmt.Errorf("mark is_blocked after add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
+		return fmt.Errorf("mark is_blocked after add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 	}
 	mergeRecomputeIsBlockedResult(recomputeResult, marked)
-	// Snapshot only after all derived blocked-state maintenance has completed.
-	// The journal is never gated on opts.EmitEvent: a structurally-wired edge is
-	// as real to a replaying consumer as one added by an explicit dep verb —
-	// and neither is the version row minted beside it.
-	if err := RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
-		return eventWritten, err
-	}
-	return eventWritten, mintDependencyVersion(ctx, tx, dep.IssueID, actor, mintVersion)
+	return nil
 }
 
 // mintDependencyVersion versions the referencing (source) issue of an edge that

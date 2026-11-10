@@ -41,12 +41,42 @@ type BatchContext struct {
 	// Singular creates leave this false and mint in place — they never run
 	// the dependency pass.
 	DeferVersionMint bool
+	// TiersOnSeparateSessions reports that the caller writes the issues and
+	// wisps tiers on different SQL sessions (doltTransaction without the
+	// events journal). A create then re-files arrived dependency targets
+	// (RefileArrivedDepTargetsInTx) only in its own tier's edge table: rows
+	// of the other one belong to the other session.
+	TiersOnSeparateSessions bool
+	// deferArrivalRefile tells CreateIssueInTxWithResult to leave the
+	// arrival re-file to CreateIssuesInTxWithContext, which re-files every
+	// issue it wrote once, after its dependency pass. Set on that function's
+	// private copy only.
+	deferArrivalRefile bool
+	// idsMinted reports that every id the create receives was minted for it
+	// in this transaction (ExecuteCreate assigns the id before the batch
+	// body runs), so no stored edge can name one yet and the arrival re-file
+	// is skipped. An id the create mints itself is skipped without it.
+	idsMinted bool
 	// cache, when set, answers the per-issue presence/label lookups from one
 	// up-front batch read and buffers the batch's audit events for one
 	// bulk write (see createBatchCache). CreateIssuesInTxWithContext sets it
 	// on its private copy for multi-issue batches; it is never set on a
 	// caller's context.
 	cache *createBatchCache
+}
+
+// arrivalEdgeTables is the edge tables a create of wisp or non-wisp rows
+// re-files arrived dependency targets in: both, unless the caller writes the
+// two tiers on separate sessions (TiersOnSeparateSessions).
+func (bc *BatchContext) arrivalEdgeTables(wisp bool) []string {
+	switch {
+	case !bc.TiersOnSeparateSessions:
+		return []string{"dependencies", "wisp_dependencies"}
+	case wisp:
+		return []string{"wisp_dependencies"}
+	default:
+		return []string{"dependencies"}
+	}
 }
 
 // NewBatchContext reads config from the database and returns a BatchContext.
@@ -94,6 +124,10 @@ type CreateIssueResult struct {
 	// the issue's aux data must not be persisted by later batch stages either.
 	RetiredSkipped        bool
 	persistedDependencies []persistedDependency
+	// heldDuplicateTargets are the targets, held here, of the edges the
+	// dependency pass found already stored. A row stored before its target
+	// arrived is external, so the batch re-files these with its arrivals.
+	heldDuplicateTargets []string
 	// persistedComments are the comments this create actually inserted, carried
 	// up to the entry point so their journal rows land AFTER the create's. A
 	// consumer must never see a comment for a bead it has not been told about.
@@ -145,6 +179,9 @@ func mergeChangedTables(dst map[string]bool, src map[string]bool) map[string]boo
 
 func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string) (CreateIssueResult, error) {
 	var result CreateIssueResult
+	// An id the caller names may be one an edge here already points at as
+	// external; one minted below cannot be.
+	namedID := issue.ID != "" && !bc.idsMinted
 	issueTable, eventTable, outcome, err := prepareCreateIssueInTx(ctx, tx, bc, issue, actor)
 	if err != nil || outcome == prepareSkip {
 		return result, err
@@ -168,7 +205,16 @@ func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, i
 		}
 		return result, nil
 	}
-	return finishCreateIssueInTx(ctx, tx, bc, issue, actor, issueTable, eventTable, isNew)
+	result, err = finishCreateIssueInTx(ctx, tx, bc, issue, actor, issueTable, eventTable, isNew)
+	if err != nil || !namedID || bc.deferArrivalRefile {
+		return result, err
+	}
+	refile, err := refileArrivedDepTargetsInTx(ctx, tx, []string{issue.ID}, bc.arrivalEdgeTables(issueTable == "wisps"))
+	if err != nil {
+		return result, err
+	}
+	result.ChangedTables = mergeChangedTables(result.ChangedTables, refile.ChangedTables())
+	return result, nil
 }
 
 // prepareOutcome is what prepareCreateIssueInTx decided for one issue.
@@ -461,6 +507,10 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 	// version of each issue must carry them (one version per issue at
 	// creation, minted last).
 	batch.DeferVersionMint = true
+	// The ids the caller named are the ones an edge stored here can already
+	// point at; the batch re-files them once, after its dependency pass.
+	batch.deferArrivalRefile = true
+	named := namedCreateIDs(&batch, issues)
 	if len(issues) >= createBatchCacheMinIssues && !createFastPathsDisabled.Load() {
 		cache, err := newCreateBatchCache(ctx, tx, issues, opts)
 		if err != nil {
@@ -549,7 +599,17 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 	for table := range changedCounters {
 		result.markChanged(table)
 	}
-	issueIDs, wispIDs, err := createBlockedRecomputeIDs(ctx, tx, issues, depResult.persistedDependencies)
+	// GH#8299: an edge written before its target was here is external.
+	// Re-file the ones naming an id the caller named, or the target of an
+	// edge this batch found already stored; the recompute below covers them.
+	moved, err := moveArrivedDepTargetsInTx(ctx, tx, batchArrivals(named, issues, depResult.heldDuplicateTargets), batch.arrivalEdgeTables(AllWisps(issues)))
+	if err != nil {
+		return CreateIssuesResult{}, err
+	}
+	for _, row := range moved {
+		result.markChanged(row.Table)
+	}
+	issueIDs, wispIDs, err := createBlockedRecomputeIDs(ctx, tx, issues, depResult.persistedDependencies, moved)
 	if err != nil {
 		return CreateIssuesResult{}, err
 	}
@@ -690,7 +750,38 @@ func validateCreateIssuesMixedBucketDependencies(issues []*types.Issue) error {
 	return nil
 }
 
-func createBlockedRecomputeIDs(ctx context.Context, tx DBTX, issues []*types.Issue, dependencies []persistedDependency) ([]string, []string, error) {
+// namedCreateIDs is the set of issues whose id the caller named, taken
+// before the create mints ids for the rest.
+func namedCreateIDs(bc *BatchContext, issues []*types.Issue) map[*types.Issue]bool {
+	named := make(map[*types.Issue]bool, len(issues))
+	if bc.idsMinted {
+		return named
+	}
+	for _, issue := range issues {
+		if issue != nil && issue.ID != "" {
+			named[issue] = true
+		}
+	}
+	return named
+}
+
+// batchArrivals is the targets a batch create re-files (see
+// CreateIssuesInTxWithContext): the ids of the written issues the caller
+// named, and the held targets of edges the batch found already stored.
+func batchArrivals(named map[*types.Issue]bool, issues []*types.Issue, heldDuplicateTargets []string) []string {
+	arrivals := make([]string, 0, len(named)+len(heldDuplicateTargets))
+	for _, issue := range issues {
+		if named[issue] {
+			arrivals = append(arrivals, issue.ID)
+		}
+	}
+	return append(arrivals, heldDuplicateTargets...)
+}
+
+// createBlockedRecomputeIDs is the issue and wisp ids a batch create
+// recomputes: the batch's rows, the rows its created dependencies affect,
+// and the rows its re-filed edges (moved) affect.
+func createBlockedRecomputeIDs(ctx context.Context, tx DBTX, issues []*types.Issue, dependencies []persistedDependency, moved []DepRow) ([]string, []string, error) {
 	issueSeen := make(map[string]bool, len(issues))
 	wispSeen := make(map[string]bool, len(issues))
 	issueIDs := make([]string, 0, len(issues))
@@ -754,6 +845,18 @@ func createBlockedRecomputeIDs(ctx context.Context, tx DBTX, issues []*types.Iss
 		affectedIssues, affectedWisps, err := expandByParentChildDescendantsInTx(ctx, tx, depIssueSeed, depWispSeed, depIssueSeen, depWispSeen)
 		if err != nil {
 			return nil, nil, fmt.Errorf("affected by created dependencies: %w", err)
+		}
+		for _, id := range affectedIssues {
+			add(id, false)
+		}
+		for _, id := range affectedWisps {
+			add(id, true)
+		}
+	}
+	if len(moved) > 0 {
+		affectedIssues, affectedWisps, err := AffectedByDepRowsInTx(ctx, tx, moved)
+		if err != nil {
+			return nil, nil, fmt.Errorf("affected by re-filed dependencies: %w", err)
 		}
 		for _, id := range affectedIssues {
 			add(id, false)
@@ -1313,6 +1416,9 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx DBTX, issues [
 			}
 			if err := lookups.recordInsert(ctx, tx, item.depTable, dep, rowsAffected); err != nil {
 				return result, err
+			}
+			if rowsAffected == 0 && kind != DepTargetExternal {
+				result.heldDuplicateTargets = append(result.heldDuplicateTargets, dep.DependsOnID)
 			}
 			if rowsAffected > 0 {
 				result.markChanged(item.depTable)

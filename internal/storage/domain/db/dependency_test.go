@@ -20,6 +20,7 @@ func (s *testSuite) TestDependencySQLRepository() {
 		s.Run("MissingTargetIssueFailsFK", s.depInsertFKViolation)
 		s.Run("ForeignRepoTargetGoesToExternalColumn", s.depInsertForeignRepoTarget)
 		s.Run("CrossPrefixLocalTargetGoesToItsTypedColumn", s.depInsertCrossPrefixLocalTarget)
+		s.Run("ReAddFilesAnExternalRowOntoAHeldTarget", s.depInsertReAddFilesExternalRow)
 		s.Run("ThreadIDPersists", s.depInsertThreadID)
 		s.Run("EmitsDependencyAddedEventWhenEmitEventSet", s.depInsertEmitsAddedEvent)
 		s.Run("RecordsNoEventWithoutEmitEvent", s.depInsertWithoutEmitEventRecordsNoEvent)
@@ -252,6 +253,39 @@ func (s *testSuite) depInsertCrossPrefixLocalTarget() {
 		got := map[string]string{"depends_on_issue_id": issueTarget.String, "depends_on_wisp_id": wispTgt.String}
 		s.Equal(want.target, got[want.column], "%s belongs in %s", want.target, want.column)
 	}
+}
+
+// depInsertReAddFilesExternalRow is the GH#8299 re-add on the domain
+// repository: a row that holds a target this database holds only in
+// depends_on_external, the shape in which a merge brings in a row a peer
+// wrote before it held the target, moves to its typed column when the same
+// edge is added again. The stored row stays (same id and author), and its
+// source is blocked by it.
+func (s *testSuite) depInsertReAddFilesExternalRow() {
+	const (
+		src = "bd-dep-readd-src"
+		tgt = "otherrig-readd-tgt"
+	)
+	s.seedIssueRow(src)
+	s.seedIssueRow(tgt)
+	_, err := s.Runner().ExecContext(s.Ctx(),
+		"INSERT INTO dependencies (id, issue_id, depends_on_external, type, created_at, created_by, metadata) VALUES (?, ?, ?, ?, NOW(), 'peer', '{}')",
+		depid.New(src, tgt), src, tgt, string(types.DepBlocks))
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(), newDep(src, tgt, types.DepBlocks), "tester", domain.DepInsertOpts{}))
+
+	var external, issueTarget sql.NullString
+	var createdBy string
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT depends_on_external, depends_on_issue_id, created_by FROM dependencies WHERE id = ?",
+		depid.New(src, tgt)).Scan(&external, &issueTarget, &createdBy))
+	s.False(external.Valid, "%s is held locally; depends_on_external must be NULL, got %q", tgt, external.String)
+	s.Equal(tgt, issueTarget.String, "the re-add files %s in depends_on_issue_id", tgt)
+	s.Equal("peer", createdBy, "the re-add keeps the stored row")
+	var blocked bool
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(), "SELECT is_blocked FROM issues WHERE id = ?", src).Scan(&blocked))
+	s.True(blocked, "%s blocks on the open %s once the edge is local", src, tgt)
 }
 
 func (s *testSuite) depInsertThreadID() {

@@ -282,6 +282,46 @@ func TestEmbeddedCrossPrefixRepairConvertsLegacyRows(t *testing.T) {
 	}
 }
 
+// TestEmbeddedCrossPrefixRepairLeavesAHierarchyConflictExternal: the
+// pre-fix write paths skipped the hierarchy check for a target of another
+// prefix, so a legacy row can block an issue on its own ancestor, or a parent
+// on its own descendant. As a local edge either is a gate the write path
+// refuses, so the repair moves the parent-child rows that make the hierarchy
+// and leaves those blocking rows external, where they gate nothing.
+func TestEmbeddedCrossPrefixRepairLeavesAHierarchyConflictExternal(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	conn, _, closeConn := newCrossPrefixRepairDB(t, ctx)
+	defer closeConn()
+
+	for i, id := range []string{"rb-grand", "ra-parent", "ra-child", "rb-top", "ra-below"} {
+		seedLegacyIssue(t, ctx, conn, "issues", id, "open", i)
+	}
+	seedDep(t, ctx, conn, "dependencies", "ra-child", "ra-parent", "depends_on_issue_id", "parent-child")
+	seedDep(t, ctx, conn, "dependencies", "ra-parent", "rb-grand", "depends_on_external", "parent-child")
+	seedDep(t, ctx, conn, "dependencies", "ra-child", "rb-grand", "depends_on_external", "blocks")
+	seedDep(t, ctx, conn, "dependencies", "ra-below", "rb-top", "depends_on_external", "parent-child")
+	seedDep(t, ctx, conn, "dependencies", "rb-top", "ra-below", "depends_on_external", "blocks")
+	commitLegacyStateAndUnmarkRepair(t, ctx, conn)
+
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("repair MigrateUp: %v", err)
+	}
+	requireDepColumn(t, ctx, conn, "dependencies", "ra-parent", "rb-grand", "depends_on_issue_id")
+	requireDepColumn(t, ctx, conn, "dependencies", "ra-below", "rb-top", "depends_on_issue_id")
+	requireDepColumn(t, ctx, conn, "dependencies", "ra-child", "rb-grand", "depends_on_external")
+	requireDepColumn(t, ctx, conn, "dependencies", "rb-top", "ra-below", "depends_on_external")
+	for _, id := range []string{"ra-child", "rb-top"} {
+		if blocked, _ := readBlocked(t, ctx, conn, "issues", id); blocked {
+			t.Errorf("%s is_blocked = true: an edge left external gates nothing", id)
+		}
+	}
+	requireBlockedStateConsistent(t, ctx, conn)
+	if !ignoredMarkerRecorded(t, ctx, conn, 32) {
+		t.Error("ignored marker 0032 not recorded after the repair")
+	}
+}
+
 // seedRefusalFixture writes and commits a legacy edge whose repair moves a
 // versioned row and flips a blocked flag, with the repair marker un-recorded.
 func seedRefusalFixture(t *testing.T, ctx context.Context, conn *sql.Conn) {
@@ -451,8 +491,10 @@ func TestEmbeddedCrossPrefixRepairIsMarkerGatedAfterConvergence(t *testing.T) {
 	}
 	requireRepairConverged(t, ctx, conn)
 
-	// Artificial by construction now that the write path classifies by
-	// evidence, which is exactly why the converged open must not touch it.
+	// bd's own writes no longer leave this shape: a create of the target
+	// re-files the edges onto it, and so does a merge that brings in the
+	// target or the row. A row written straight into the table still can,
+	// and the converged open must not touch it.
 	seedLegacyIssue(t, ctx, conn, "issues", "rb-post", "open", 4)
 	seedDep(t, ctx, conn, "dependencies", "ra-other", "rb-post", "depends_on_external", "blocks")
 	execFrozenGuard(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'test: legacy-shaped row after convergence')")
@@ -476,8 +518,12 @@ func TestEmbeddedCrossPrefixRepairIsMarkerGatedAfterConvergence(t *testing.T) {
 // TestEmbeddedCrossPrefixRepairClonesConverge is AC-8: two clones with the
 // same versioned history but different clone-local wisps repair the synced
 // dependencies table identically, because a versioned row binds only to the
-// versioned issues table, while each clone's own wisp edges resolve against
-// its own wisps.
+// versioned issues table and is checked against the versioned hierarchy
+// alone, while each clone's own wisp edges resolve against its own wisps. On
+// clone A a local wisp, rw-mid, is the parent the synced rows name for ra-c,
+// and its own parent is rb-open: ra-c's blocks edge onto rb-open would be a
+// hierarchy conflict there only, so it must not keep the synced row external
+// on A while B files it local.
 func TestEmbeddedCrossPrefixRepairClonesConverge(t *testing.T) {
 	requireEmbedded(t)
 	ctx := t.Context()
@@ -486,8 +532,11 @@ func TestEmbeddedCrossPrefixRepairClonesConverge(t *testing.T) {
 		seedLegacyIssue(t, ctx, conn, "issues", "rb-open", "open", 1)
 		seedLegacyIssue(t, ctx, conn, "issues", "ra-a", "open", 2)
 		seedLegacyIssue(t, ctx, conn, "issues", "ra-b", "open", 3)
+		seedLegacyIssue(t, ctx, conn, "issues", "ra-c", "open", 4)
 		seedDep(t, ctx, conn, "dependencies", "ra-a", "rw-1", "depends_on_external", "blocks")
 		seedDep(t, ctx, conn, "dependencies", "ra-b", "rb-open", "depends_on_external", "blocks")
+		seedDep(t, ctx, conn, "dependencies", "ra-c", "rw-mid", "depends_on_external", "parent-child")
+		seedDep(t, ctx, conn, "dependencies", "ra-c", "rb-open", "depends_on_external", "blocks")
 	}
 
 	connA, _, closeA := newCrossPrefixRepairDB(t, ctx)
@@ -495,8 +544,10 @@ func TestEmbeddedCrossPrefixRepairClonesConverge(t *testing.T) {
 	seedVersioned(connA)
 	seedLegacyIssue(t, ctx, connA, "wisps", "rw-1", "open", 10)
 	seedLegacyIssue(t, ctx, connA, "wisps", "ra-w1", "open", 11)
+	seedLegacyIssue(t, ctx, connA, "wisps", "rw-mid", "open", 13)
 	seedDep(t, ctx, connA, "wisp_dependencies", "ra-w1", "rw-1", "depends_on_external", "blocks")
 	seedDep(t, ctx, connA, "wisp_dependencies", "ra-w1", "rb-open", "depends_on_external", "related")
+	seedDep(t, ctx, connA, "wisp_dependencies", "rw-mid", "rb-open", "depends_on_external", "parent-child")
 	commitLegacyStateAndUnmarkRepair(t, ctx, connA)
 
 	connB, _, closeB := newCrossPrefixRepairDB(t, ctx)
@@ -512,6 +563,11 @@ func TestEmbeddedCrossPrefixRepairClonesConverge(t *testing.T) {
 		}
 		requireDepColumn(t, ctx, conn, "dependencies", "ra-a", "rw-1", "depends_on_external")
 		requireDepColumn(t, ctx, conn, "dependencies", "ra-b", "rb-open", "depends_on_issue_id")
+		requireDepColumn(t, ctx, conn, "dependencies", "ra-c", "rw-mid", "depends_on_external")
+		requireDepColumn(t, ctx, conn, "dependencies", "ra-c", "rb-open", "depends_on_issue_id")
+		if blocked, _ := readBlocked(t, ctx, conn, "issues", "ra-c"); !blocked {
+			t.Errorf("clone %s: ra-c is_blocked = false, want true (blocks -> open rb-open)", name)
+		}
 		requireBlockedStateConsistent(t, ctx, conn)
 		if !ignoredMarkerRecorded(t, ctx, conn, 32) {
 			t.Errorf("clone %s: ignored marker 0032 not recorded", name)
@@ -519,6 +575,7 @@ func TestEmbeddedCrossPrefixRepairClonesConverge(t *testing.T) {
 	}
 	requireDepColumn(t, ctx, connA, "wisp_dependencies", "ra-w1", "rw-1", "depends_on_wisp_id")
 	requireDepColumn(t, ctx, connA, "wisp_dependencies", "ra-w1", "rb-open", "depends_on_issue_id")
+	requireDepColumn(t, ctx, connA, "wisp_dependencies", "rw-mid", "rb-open", "depends_on_issue_id")
 	if blocked, _ := readBlocked(t, ctx, connA, "wisps", "ra-w1"); !blocked {
 		t.Error("clone A: ra-w1 is_blocked = false, want true (blocks -> open local wisp rw-1)")
 	}
@@ -528,5 +585,9 @@ func TestEmbeddedCrossPrefixRepairClonesConverge(t *testing.T) {
 		" CAST(created_at AS CHAR), CAST(metadata AS CHAR), thread_id FROM dependencies ORDER BY id"
 	if a, b := dumpRows(t, ctx, connA, versioned), dumpRows(t, ctx, connB, versioned); a != b {
 		t.Errorf("clones repaired the synced dependencies table differently:\nA: %s\nB: %s", a, b)
+	}
+	blockedFlags := "SELECT id, is_blocked FROM issues ORDER BY id"
+	if a, b := dumpRows(t, ctx, connA, blockedFlags), dumpRows(t, ctx, connB, blockedFlags); a != b {
+		t.Errorf("clones recomputed the synced issues' blocked flags differently:\nA: %s\nB: %s", a, b)
 	}
 }

@@ -88,6 +88,16 @@ func assertCrossPrefixEdgeColumn(t *testing.T, ctx context.Context, te *testEnv,
 	}
 }
 
+// seedExternalCrossPrefixEdge writes an edge row that holds its target only
+// in depends_on_external, the way a merge from a peer that wrote it before
+// the target was synced there brings it in, bypassing every write path.
+func seedExternalCrossPrefixEdge(t *testing.T, ctx context.Context, te *testEnv, table, source, target string, depType types.DependencyType) {
+	t.Helper()
+	//nolint:gosec // G202: table is "dependencies" or "wisp_dependencies" from this file's callers.
+	te.exec(t, ctx, "INSERT INTO "+table+" (id, issue_id, depends_on_external, type, created_at, created_by, metadata) VALUES (?, ?, ?, ?, UTC_TIMESTAMP(), 'peer', '{}')",
+		depid.New(source, target), source, target, string(depType))
+}
+
 func assertCrossPrefixIsBlocked(t *testing.T, ctx context.Context, te *testEnv, table, id string, want int) {
 	t.Helper()
 	var got int
@@ -230,10 +240,13 @@ func TestEmbeddedCrossPrefixImportBatchTargetAfterSources(t *testing.T) {
 // onto one of them with another prefix is local while the issue is here
 // (GH#8299), and outlives it as the unverified external edge every such edge
 // was before: the row keeps its id, type and metadata, its source stops being
-// blocked by it, and no dep_remove is journaled for it. Re-syncing the repo
-// could not restore it, since the repo's export does not carry it. An edge
-// onto a removed issue of the source's own prefix still cascades, as do the
-// removed issues' own edges, and each of those is journaled as removed.
+// blocked by it, and no dep_remove is journaled for it. The repo's export
+// does not carry such an edge, so only this database can restore it:
+// re-syncing the repo files it local again, from either source plane, and its
+// source is blocked again. An edge that was external already onto a removed
+// issue survives too and journals no removal. An edge onto a removed issue of
+// the source's own prefix still cascades, as do the removed issues' own
+// edges, and each of those is journaled as removed.
 func TestEmbeddedCrossPrefixRepoRemoveKeepsEdgesOntoItsIssues(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	te := newTestEnv(t, "a")
@@ -244,12 +257,12 @@ func TestEmbeddedCrossPrefixRepoRemoveKeepsEdgesOntoItsIssues(t *testing.T) {
 	}
 
 	const repo = "../repo-b"
-	const ownIssue, ownWisp, ownSame = "a-rown1", "a-rownw1", "a-rown2"
+	const ownIssue, ownWisp, ownSame, ownLegacy = "a-rown1", "a-rownw1", "a-rown2", "a-rown3"
 	const hydrated, hydratedSame = "b-rhyd1", "a-rhyd2"
 	for _, seed := range []struct {
 		id        string
 		ephemeral bool
-	}{{ownIssue, false}, {ownWisp, true}, {ownSame, false}} {
+	}{{ownIssue, false}, {ownWisp, true}, {ownSame, false}, {ownLegacy, false}} {
 		issue := &types.Issue{ID: seed.id, Title: seed.id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: seed.ephemeral}
 		if err := te.store.CreateIssue(ctx, issue, "tester"); err != nil {
 			t.Fatalf("CreateIssue %s: %v", seed.id, err)
@@ -257,12 +270,16 @@ func TestEmbeddedCrossPrefixRepoRemoveKeepsEdgesOntoItsIssues(t *testing.T) {
 	}
 	// Hydrate the way `bd repo sync` does: the repo's own ids, whatever their
 	// prefix, tagged with the repo they came from.
-	if err := te.store.CreateIssuesWithFullOptions(ctx, []*types.Issue{
-		{ID: hydrated, Title: hydrated, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, SourceRepo: repo},
-		{ID: hydratedSame, Title: hydratedSame, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, SourceRepo: repo},
-	}, "repo-sync", storage.BatchCreateOptions{SkipPrefixValidation: true}); err != nil {
-		t.Fatalf("hydrate %s: %v", repo, err)
+	hydrate := func() {
+		t.Helper()
+		if err := te.store.CreateIssuesWithFullOptions(ctx, []*types.Issue{
+			{ID: hydrated, Title: hydrated, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, SourceRepo: repo},
+			{ID: hydratedSame, Title: hydratedSame, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, SourceRepo: repo},
+		}, "repo-sync", storage.BatchCreateOptions{SkipPrefixValidation: true}); err != nil {
+			t.Fatalf("hydrate %s: %v", repo, err)
+		}
 	}
+	hydrate()
 	for _, dep := range []*types.Dependency{
 		{IssueID: ownIssue, DependsOnID: hydrated, Type: types.DepBlocks, Metadata: `{"origin":"primary"}`},
 		{IssueID: ownWisp, DependsOnID: hydrated, Type: types.DepBlocks},
@@ -276,6 +293,9 @@ func TestEmbeddedCrossPrefixRepoRemoveKeepsEdgesOntoItsIssues(t *testing.T) {
 	assertCrossPrefixEdgeColumn(t, ctx, te, "dependencies", ownIssue, hydrated, "depends_on_issue_id")
 	assertCrossPrefixIsBlocked(t, ctx, te, "issues", ownIssue, 1)
 	assertCrossPrefixIsBlocked(t, ctx, te, "wisps", ownWisp, 1)
+	// An edge filed external although its target is here: what a merge from
+	// a peer that wrote the edge before the target was synced brings in.
+	seedExternalCrossPrefixEdge(t, ctx, te, "dependencies", ownLegacy, hydrated, types.DepRelated)
 
 	edgeRows := func(table, source, target string) int {
 		t.Helper()
@@ -297,7 +317,7 @@ func TestEmbeddedCrossPrefixRepoRemoveKeepsEdgesOntoItsIssues(t *testing.T) {
 		t.Fatalf("DeleteIssuesBySourceRepo removed %d issue(s), want 2", n)
 	}
 
-	for _, kept := range []struct{ table, source string }{{"dependencies", ownIssue}, {"wisp_dependencies", ownWisp}} {
+	for _, kept := range []struct{ table, source string }{{"dependencies", ownIssue}, {"wisp_dependencies", ownWisp}, {"dependencies", ownLegacy}} {
 		if rows := edgeRows(kept.table, kept.source, hydrated); rows != 1 {
 			t.Fatalf("%s edge %s -> %s has %d row(s) after %s was removed, want 1", kept.table, kept.source, hydrated, rows, repo)
 		}
@@ -340,6 +360,26 @@ func TestEmbeddedCrossPrefixRepoRemoveKeepsEdgesOntoItsIssues(t *testing.T) {
 	if want := []string{ownSame + " -> " + hydratedSame, hydrated + " -> " + ownSame}; !slices.Equal(removals, want) {
 		t.Errorf("journaled dep_remove = %v, want %v (the kept edges record no removal)", removals, want)
 	}
+
+	// Re-syncing the repo brings the issue back here, and every edge kept
+	// onto it is local again.
+	hydrate()
+	for _, kept := range []struct{ table, source, sourceTable string }{
+		{"dependencies", ownIssue, "issues"}, {"wisp_dependencies", ownWisp, "wisps"}, {"dependencies", ownLegacy, "issues"},
+	} {
+		assertCrossPrefixEdgeColumn(t, ctx, te, kept.table, kept.source, hydrated, "depends_on_issue_id")
+	}
+	assertCrossPrefixIsBlocked(t, ctx, te, "issues", ownIssue, 1)
+	assertCrossPrefixIsBlocked(t, ctx, te, "wisps", ownWisp, 1)
+	if crossPrefixReady(t, ctx, te, ownIssue) {
+		t.Errorf("%s is ready after %s re-synced its open blocker %s", ownIssue, repo, hydrated)
+	}
+	// Re-adding the edge is the change-free write it is for any local edge.
+	if err := te.store.AddDependency(ctx, &types.Dependency{IssueID: ownIssue, DependsOnID: hydrated, Type: types.DepBlocks, Metadata: `{"origin":"primary"}`}, "tester"); err != nil {
+		t.Fatalf("re-add %s -> %s: %v", ownIssue, hydrated, err)
+	}
+	assertCrossPrefixEdgeColumn(t, ctx, te, "dependencies", ownIssue, hydrated, "depends_on_issue_id")
+	assertCrossPrefixIsBlocked(t, ctx, te, "issues", ownIssue, 1)
 }
 
 // TestEmbeddedCrossPrefixCreateRefusesABlockerInItsOwnHierarchy: a create

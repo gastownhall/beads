@@ -3,6 +3,7 @@ package schema
 import (
 	"context"
 	"fmt"
+	"log"
 	"slices"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -27,14 +28,22 @@ const depLocalTargetRepairMarker = 32
 // Planning is read-only and covers both edge tables and the affected issue
 // and wisp sets before anything is written, so a refusal writes nothing.
 // dependencies changes and issues blocked flags are staged and committed by
-// MigrateUp; wisp tables are dolt-ignored, so their changes stay local.
+// MigrateUp; wisp tables are dolt-ignored, so their changes stay local. A
+// blocking row whose move would block an issue on its own ancestor or
+// descendant, which the pre-fix writes let through for a target of another
+// prefix, stays external and is logged: as a local edge it would be a gate
+// that never clears.
 //
 // The pass is not atomic (see depPlan.execute: DBConn may be pooled). A pass
 // interrupted after moving rows but before recomputing leaves those rows
-// typed and their dependents' blocked flags stale, and the next plan no
-// longer finds them. So while the 0032 marker is pending, the recompute also
-// covers every typed cross-prefix edge, which includes every row this repair
-// can have moved; a retry after any interruption therefore converges.
+// typed, uncommitted, and their dependents' blocked flags stale, and the
+// next plan no longer finds them. The next open then refuses, like any pass
+// over a dirty graph table (below), until those rows are committed (`bd dolt
+// commit`); while the 0032 marker is pending, that retry's recompute also
+// covers every typed cross-prefix edge, which includes every cross-prefix row
+// this repair can have moved, so it converges. A same-prefix legacy row the
+// interrupted pass moved is not in that set; `bd doctor --fix` recomputes
+// any blocked flag left stale.
 //
 // dirtyBefore is MigrateUp's set of committable tables already dirty when the
 // pass started. Writing into one would entangle migration output with
@@ -52,9 +61,13 @@ func repairLocalExternalDepTargets(ctx context.Context, db DBConn, dirtyBefore m
 	if !hasTargets {
 		return false, nil
 	}
-	plan, err := issueops.PlanLocalExternalDepRepairInTx(ctx, db)
+	plan, conflicts, err := issueops.PlanLocalExternalDepRepairInTx(ctx, db)
 	if err != nil {
 		return false, err
+	}
+	for _, row := range conflicts {
+		log.Printf("schema: GH#8299: %s: leaving %s edge %s -> %s external: as a local edge it would block an issue on its own ancestor or descendant",
+			row.Table, row.Type, row.IssueID, row.Target)
 	}
 	scope := plan
 	pending, err := ignoredSource.pendingVersions(ctx, db)
@@ -106,6 +119,10 @@ func repairLocalExternalDepTargets(ctx context.Context, db DBConn, dirtyBefore m
 	result, err := issueops.RecomputeIsBlockedInTxWithResult(ctx, db, issueIDs, wispIDs)
 	if err != nil {
 		return moved > 0, fmt.Errorf("recompute blocked state: %w", err)
+	}
+	if moved > 0 {
+		log.Printf("schema: GH#8299: re-filed %d dependency row(s) whose target this database holds; recomputed blocked state for %d issue(s), %d wisp(s)",
+			moved, len(issueIDs), len(wispIDs))
 	}
 	return moved > 0 || result.IssueRowsChanged || result.WispRowsChanged, nil
 }

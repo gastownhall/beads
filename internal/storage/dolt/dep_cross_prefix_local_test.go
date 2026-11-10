@@ -195,3 +195,72 @@ func requireDepTargetColumn(ctx context.Context, t *testing.T, db *sql.DB, table
 		}
 	}
 }
+
+// TestMergeFilesACrossPrefixEdgeOntoAMergedTarget is the merge half of
+// GH#8299 on the Dolt store: this clone adds an edge onto an id it does not
+// hold, so the edge is filed external, and a peer creates that id. The merge
+// that brings the issue in files the edge into depends_on_issue_id, blocks its
+// source, and commits the moved row with the recompute.
+func TestMergeFilesACrossPrefixEdgeOntoAMergedTarget(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	db := store.db
+
+	// setupTestStore isolates tests by branch on a shared database: stay on
+	// this test's branch, as TestMergeRecomputesIsBlocked does.
+	var currentBranch string
+	if err := db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&currentBranch); err != nil {
+		t.Fatalf("get current branch: %v", err)
+	}
+	peerBranch := currentBranch + "-xpeer"
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), "CALL DOLT_BRANCH('-D', ?)", peerBranch)
+	})
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := db.ExecContext(ctx, query, args...); err != nil && !isDoltNothingToCommit(err) {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+
+	const source, target = "xa-msrc", "xb-mtgt"
+	if err := store.CreateIssue(ctx, &types.Issue{ID: source, Title: source, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "tester"); err != nil {
+		t.Fatalf("CreateIssue %s: %v", source, err)
+	}
+	exec("CALL DOLT_COMMIT('-Am', 'seed the source')")
+	exec("CALL DOLT_BRANCH(?, 'HEAD')", peerBranch)
+
+	if err := store.AddDependency(ctx, &types.Dependency{IssueID: source, DependsOnID: target, Type: types.DepBlocks}, "tester"); err != nil {
+		t.Fatalf("AddDependency %s -> %s: %v", source, target, err)
+	}
+	requireDepTargetColumn(ctx, t, db, "dependencies", source, target, "depends_on_external")
+	exec("CALL DOLT_COMMIT('-Am', 'edge onto an id not held yet')")
+
+	// The peer creates the target: a merged-in write, past every local
+	// write path.
+	exec("CALL DOLT_CHECKOUT(?)", peerBranch)
+	exec("INSERT INTO issues (id, title, description, design, acceptance_criteria, notes) VALUES (?, ?, '', '', '', '')", target, target)
+	exec("CALL DOLT_COMMIT('-Am', 'peer creates the target')")
+	exec("CALL DOLT_CHECKOUT(?)", currentBranch)
+
+	conflicts, err := store.Merge(ctx, peerBranch)
+	if err != nil {
+		t.Fatalf("merge peer branch: %v", err)
+	}
+	if len(conflicts) != 0 {
+		t.Fatalf("expected a conflict-free merge, got %d conflicts", len(conflicts))
+	}
+	requireDepTargetColumn(ctx, t, db, "dependencies", source, target, "depends_on_issue_id")
+	if !isBlocked(ctx, t, db, source) {
+		t.Errorf("%s is not blocked by the open %s the merge brought in", source, target)
+	}
+	var dirty int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_status WHERE table_name IN ('issues', 'dependencies')").Scan(&dirty); err != nil {
+		t.Fatalf("read dolt_status: %v", err)
+	}
+	if dirty != 0 {
+		t.Errorf("%d graph table(s) left uncommitted after the merge", dirty)
+	}
+}

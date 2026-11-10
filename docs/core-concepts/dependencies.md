@@ -183,11 +183,23 @@ An ID with another prefix that this database holds (a database with several
 `allowed_prefixes`, or an issue imported from another rig) is a local
 dependency like any other: it blocks, `bd blocked` names it, and cycle and
 parent-child checks apply to it. Beads decides by whether the ID is in this
-database when the edge is written, not by its prefix. When `bd repo remove`
-drops an imported rig's issues, an edge from one of your own issues onto one of
-them with another prefix stays, as an unverified external ID that no longer
-blocks. An edge written before beads followed this rule is converted to a local
-edge once, when an upgraded bd first opens the database.
+database, not by its prefix: an edge written before the ID was here becomes
+local when the issue arrives (created, imported, synced with `bd repo sync`,
+pulled from another clone with `bd dolt pull`, or promoted). When
+`bd repo remove` drops an imported rig's issues, an edge from one of your own
+issues onto one of them with another prefix stays, as an unverified external ID
+that no longer blocks until that rig is synced again. An edge written before
+beads followed this rule is converted to a local edge once, when an upgraded bd
+first opens the database.
+
+One edge stays external even then: a blocking edge that would make an issue
+wait on its own ancestor or descendant, which bd refuses between local issues.
+It gates nothing, and bd logs a warning naming it when it leaves it external.
+Between two issues only their own parent-child links count here, not a link
+through a wisp, which lives in one clone only, so every clone files the edge
+the same way. `bd repo sync`, `bd import` and `bd init --from-jsonl` skip
+such an edge in the data they import (`bd repo sync` and `bd import` with a
+warning) and import the rest.
 
 A bare ID whose prefix names another rig (`bd dep add bd-abc gt-123`) is
 stored even when bd cannot find it in this database or through routes. `bd dep

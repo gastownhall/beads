@@ -754,9 +754,10 @@ func (s *EmbeddedDoltStore) preMergeHead(ctx context.Context) string {
 // the rows a pull's merge changed (bd-6dnrw.3) and creates a Dolt commit for
 // the result. is_blocked is otherwise maintained only by local write paths, so
 // a merge that brings in another clone's status or dependency changes leaves
-// it stale and `bd ready` trusts it. A pull that merged nothing (HEAD
-// unchanged) is a no-op; derived state converges, so committing it on every
-// clone is merge-safe.
+// it stale and `bd ready` trusts it. The commit also carries the dependencies
+// rows the recompute files onto a target the merge brought in (GH#8299). A
+// pull that merged nothing (HEAD unchanged) is a no-op; derived state
+// converges, so committing it on every clone is merge-safe.
 func (s *EmbeddedDoltStore) recomputeBlockedAfterPull(ctx context.Context, preHead string) error {
 	if err := s.withConn(ctx, true, func(tx *sql.Tx) error {
 		return issueops.RecomputeIsBlockedAfterMergeInTx(ctx, tx, preHead)
@@ -772,7 +773,7 @@ func (s *EmbeddedDoltStore) recomputeBlockedAfterPull(ctx context.Context, preHe
 	}
 	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		return stageAndCommitAfterSQLCommit(ctx, db,
-			map[string]bool{"issues": true}, "bd: recompute is_blocked after pull", commitAuthor)
+			map[string]bool{"issues": true, "dependencies": true}, "bd: recompute is_blocked after pull", commitAuthor)
 	})
 }
 

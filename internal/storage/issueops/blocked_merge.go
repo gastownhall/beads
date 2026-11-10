@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"regexp"
+	"slices"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -82,10 +83,23 @@ func pendingIsBlockedRecompute(ctx context.Context, tx *sql.Tx) string {
 // recomputing every issue and wisp. A fromCommit equal to HEAD with a clean
 // working set (nothing merged) is a no-op.
 //
-// The is_blocked updates land in the working set; committing them is the
-// caller's responsibility (they are derived state, so committing them on every
-// clone converges — both sides compute the same values from the same merged
-// graph).
+// A merge also bypasses the arrival re-file (GH#8299): an edge onto an id
+// this database did not hold is filed in depends_on_external, and the merge
+// can bring in either half of it, the target another clone created or the
+// row another clone wrote before it held the target. So before recomputing,
+// every row that names, in depends_on_external, an issue the merge changed,
+// or that the merge changed itself, moves to its typed column once this
+// database holds its target (moveMergedDepTargetsInTx); the full pass moves
+// every such row. The recompute covers the rows it moved.
+//
+// The is_blocked updates and moved rows land in the working set; committing
+// them is the caller's responsibility (both are derived state, so committing
+// them on every clone converges — both sides compute the same values from the
+// same merged graph). That holds while the edge stays: a peer that removes a
+// moved row, or deletes its source, before it merges the commit that moved
+// it meets a modify/delete conflict on that row (and on the source's
+// is_blocked when the move flipped it), which the merge settle leaves to the
+// operator.
 func RecomputeIsBlockedAfterMergeInTx(ctx context.Context, tx *sql.Tx, fromCommit string) error {
 	// bd-578h9.11: a marker from an earlier recompute that failed after its
 	// merge committed means this call must also cover THAT merge's window —
@@ -152,8 +166,10 @@ func recomputeIsBlockedAfterMergeScoped(ctx context.Context, tx *sql.Tx, fromCom
 	return RecomputeIsBlockedInTx(ctx, tx, issueIDs, wispIDs)
 }
 
-// mergeAffectedSets expands the issues/dependencies rows changed since
-// fromCommit into the closed affected set, exactly as the local write paths
+// mergeAffectedSets re-files the external edges onto the issues the merge
+// changed and the edges it changed (moveMergedDepTargetsInTx), then expands
+// the issues/dependencies rows changed since fromCommit, and the rows it
+// moved, into the closed affected set, exactly as the local write paths
 // would have done for each change. ok=false means the caller should fall back
 // to a full recompute (diff unavailable or seed volume above the cap).
 func mergeAffectedSets(ctx context.Context, tx *sql.Tx, fromCommit string) (issueIDs, wispIDs []string, ok bool, err error) {
@@ -178,6 +194,10 @@ func mergeAffectedSets(ctx context.Context, tx *sql.Tx, fromCommit string) (issu
 	if len(changedIssues)+len(changedDeps) > mergeRecomputeSeedCap {
 		return nil, nil, false, nil
 	}
+	movedIssues, movedWisps, err := refileMergeArrivals(ctx, tx, changedIssues, changedDeps)
+	if err != nil {
+		return nil, nil, false, err
+	}
 
 	issueSet := make(map[string]bool)
 	wispSet := make(map[string]bool)
@@ -196,6 +216,7 @@ func mergeAffectedSets(ctx context.Context, tx *sql.Tx, fromCommit string) (issu
 		}
 	}
 
+	add(movedIssues, movedWisps)
 	for _, id := range changedIssues {
 		issues, wisps, err := AffectedByStatusChangeInTx(ctx, tx, id)
 		if err != nil {
@@ -211,6 +232,21 @@ func mergeAffectedSets(ctx context.Context, tx *sql.Tx, fromCommit string) (issu
 		add(issues, wisps)
 	}
 	return issueIDs, wispIDs, true, nil
+}
+
+// refileMergeArrivals re-files the external edges onto the changed issues
+// and onto the targets of the changed edges (moveMergedDepTargetsInTx), and
+// returns the issues and wisps whose blocked state the moved rows affect.
+func refileMergeArrivals(ctx context.Context, tx *sql.Tx, changedIssues []string, changedDeps []changedDepEdge) ([]string, []string, error) {
+	targets := slices.Clone(changedIssues)
+	for _, e := range changedDeps {
+		targets = append(targets, e.target)
+	}
+	moved, err := moveMergedDepTargetsInTx(ctx, tx, targets)
+	if err != nil {
+		return nil, nil, fmt.Errorf("re-file merged dependency targets: %w", err)
+	}
+	return AffectedByDepRowsInTx(ctx, tx, moved)
 }
 
 // changedIssueIDs returns the id of every issues row added, removed, or
@@ -275,10 +311,14 @@ func changedDependencyEdges(ctx context.Context, tx *sql.Tx, fromCommit string) 
 	return edges, rows.Err()
 }
 
-// recomputeIsBlockedForAll recomputes the whole graph in one batched
-// mark/unmark fixpoint pass — the fallback when the merge is too large or too
-// reshaped to scope.
+// recomputeIsBlockedForAll re-files every external edge onto a target this
+// database holds (moveAllHeldExternalDepTargetsInTx), then recomputes the
+// whole graph in one batched mark/unmark fixpoint pass — the fallback when
+// the merge is too large or too reshaped to scope.
 func recomputeIsBlockedForAll(ctx context.Context, tx *sql.Tx) error {
+	if _, err := moveAllHeldExternalDepTargetsInTx(ctx, tx); err != nil {
+		return fmt.Errorf("recompute is_blocked after merge: re-file held dependency targets: %w", err)
+	}
 	issueIDs, err := allIDs(ctx, tx, "issues")
 	if err != nil {
 		return fmt.Errorf("recompute is_blocked after merge: list issues: %w", err)

@@ -7,15 +7,17 @@
 -- gated anything: a dependent stayed ready beside its open blocker.
 -- repairLocalExternalDepTargets (internal/storage/schema/dep_local_target_repair.go)
 -- moves those rows into their typed column and recomputes the blocked state
--- they move.
+-- they move. A blocking row that would block an issue on its own ancestor or
+-- descendant stays external and is logged.
 --
 -- While this version is still pending, migrationWorkNeeded returns true, so
 -- every existing clone runs exactly one more MigrateUp pass and the repair
 -- reaches it. The repair also runs on every later migration pass, where a
--- converged database plans nothing and writes nothing. While the marker is
--- pending the recompute additionally covers every typed cross-prefix edge, so
--- a pass interrupted after moving rows but before recomputing converges on
--- retry.
+-- converged database plans nothing and writes nothing. A pass interrupted
+-- after moving rows but before recomputing leaves them uncommitted, so the
+-- next open refuses until they are committed (`bd dolt commit`); while the
+-- marker is pending the recompute additionally covers every typed
+-- cross-prefix edge, so that retry converges.
 --
 -- Recording the marker AFTER the repair is what makes that retry happen:
 -- ignoredSource.migrate runs later in MigrateUp, so a repair that fails or
