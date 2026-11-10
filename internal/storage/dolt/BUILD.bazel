@@ -298,6 +298,7 @@ go_test(
         "lifecycle_update_contract_test.go",
         "lock_error_test.go",
         "memories_contract_test.go",
+        "merge_peer_rows_test.go",
         "merge_strategy_test.go",
         "metadata_cas_contract_test.go",
         "metadata_merge_test.go",
