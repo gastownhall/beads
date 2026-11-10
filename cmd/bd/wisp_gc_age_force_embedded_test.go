@@ -91,3 +91,49 @@ func TestEmbeddedWispGCAgeRequiresForce(t *testing.T) {
 	// Nothing above deleted the wisp.
 	bdShow(t, bd, dir, idle)
 }
+
+// TestEmbeddedWispGCAgeForceDeletesSelection pins the other side of
+// GH#5152: --force is the one path that deletes, and it deletes exactly the
+// age selector's eligible set without cascade. Too-young, live, excluded and
+// (without --all) closed wisps survive, and so does a live dependent of a
+// deleted wisp. --dry-run beside --force still deletes nothing.
+func TestEmbeddedWispGCAgeForceDeletesSelection(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "gd")
+
+	idle := bdCreate(t, bd, dir, "idle wisp", "--ephemeral").ID
+	running := bdCreate(t, bd, dir, "running step", "--ephemeral").ID
+	bdCommand(t, bd, dir, "update", running, "--status", "in_progress")
+	excluded := bdCreate(t, bd, dir, "excluded wisp", "--ephemeral", "--type", "bug").ID
+	closed := bdCreate(t, bd, dir, "closed wisp", "--ephemeral").ID
+	bdClose(t, bd, dir, closed)
+	// Blocked on idle, so live: cascade would take it with idle.
+	dependent := bdCreate(t, bd, dir, "dependent step", "--ephemeral").ID
+	bdDepAdd(t, bd, dir, dependent, idle)
+
+	// Every wisp is younger than an hour: --force finds nothing to delete.
+	if got := runWispGCAgeJSON(t, bd, dir, "--age", "1h", "--force"); got.DryRun || len(got.CleanedIDs) != 0 || got.DeletedCount != 0 {
+		t.Errorf("gc --age 1h --force --json = %+v, want an empty non-preview answer", got)
+	}
+
+	// --dry-run wins over --force.
+	got := runWispGCAgeJSON(t, bd, dir, "--age", "0s", "--force", "--dry-run", "--exclude-type", "bug")
+	if !got.DryRun || got.DeletedCount != 0 || len(got.CleanedIDs) != 1 || got.CleanedIDs[0] != idle {
+		t.Errorf("gc --age 0s --force --dry-run --json = %+v, want a preview naming only %s", got, idle)
+	}
+	bdShow(t, bd, dir, idle)
+
+	got = runWispGCAgeJSON(t, bd, dir, "--age", "0s", "--force", "--exclude-type", "bug")
+	if got.DeletedCount != 1 || len(got.Deleted) != 1 || got.Deleted[0] != idle {
+		t.Errorf("gc --age 0s --force --json = %+v, want exactly %s deleted", got, idle)
+	}
+	bdShowFail(t, bd, dir, idle)
+	for _, id := range []string{running, excluded, closed, dependent} {
+		bdShow(t, bd, dir, id)
+	}
+}
