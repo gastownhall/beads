@@ -272,6 +272,7 @@ How it works:
 
 - After each write command (after auto-commit and auto-backup), `bd` checks whether a push is due.
 - Auto-push honors the same publish safeguards as explicit push: `no-push: true` and `dolt.local-only: true` both skip it.
+- Preview commands (`--dry-run`, `--inspect`) skip auto-push entirely: a preview must not publish anything or write `.beads/push-state.json`.
 - Pushes are debounced: skipped if the last push was less than `dolt.auto-push-interval` ago.
 - Change detection: skipped if the Dolt HEAD commit hasn't changed since the last push.
 - Push failures are warnings only (non-fatal), and failed attempts are throttled too.

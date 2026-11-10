@@ -2638,7 +2638,10 @@ var rootCmd = &cobra.Command{
 				// Auto-push: push to Dolt remote if enabled and due.
 				// Skip for read-only commands to avoid unnecessary network operations
 				// and metadata writes on commands like bd list/show/ready (GH#2191).
-				if !isReadOnlyCommand(cmd.Name()) {
+				// Preview commands (--dry-run/--inspect) are in the same boat:
+				// a preview must not publish anything, so it skips the push
+				// and the push-state file entirely (GH#7876).
+				if !isReadOnlyCommand(cmd.Name()) && !isPreviewCommand(cmd) {
 					runPostRunAutoPush(rootCtx)
 				}
 
