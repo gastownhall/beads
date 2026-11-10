@@ -1151,16 +1151,17 @@ func TestAutoMigrateStillRunsWithoutFreeze(t *testing.T) {
 	}
 }
 
-// TestDeferWakeSweepSkippedDuringMigrationFreeze pins the
-// `MigrationFrozen: commandFreeze.Frozen()` wire-up in main.go's doltCfg
-// construction (dc-6jaq review round 3, finding 3): an expired defer must
-// stay deferred while the workspace is frozen, because the lazy
-// defer-wake sweep (be-vbhpf, GH#7634) is a real write against the store and
-// must not run until the freeze lifts — even though the command reading it
-// ('bd ready') is itself classified read-only and must still exit 0.
+// TestDeferWakeSweepSkippedDuringMigrationFreeze pins the freeze term in
+// main.go's ClassifiedRead (classifiedReadOpen fed commandFreeze.Frozen()):
+// an expired defer must stay deferred while the workspace is frozen, because
+// the lazy defer-wake sweep (be-vbhpf, GH#7634) is a real write against the
+// store and must not run until the freeze lifts — even though the command
+// reading it ('bd ready') is itself classified read-only and must still exit 0.
+// It freezes through a workspace marker that is later removed, complementing
+// the authoritative-override cases in the defer-wake tests.
 //
-// Hand-reproduced pre-fix: hardcoding MigrationFrozen to false wakes the
-// issue during the freeze; this test fails against that regression.
+// Hand-reproduced pre-fix: dropping the freeze term wakes the issue during
+// the freeze; this test fails against that regression.
 func TestDeferWakeSweepSkippedDuringMigrationFreeze(t *testing.T) {
 	bd, dir := setupMigrationFreezeWorkspace(t)
 

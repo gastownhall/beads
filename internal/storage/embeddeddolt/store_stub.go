@@ -14,6 +14,9 @@ type EmbeddedDoltStore struct {
 	branch   string
 }
 
+// SetDeferWakeSweepEnabled is a no-op when CGO is not enabled.
+func (s *EmbeddedDoltStore) SetDeferWakeSweepEnabled(_ bool) {}
+
 var errNoCGO = errors.New("embeddeddolt: requires CGO (build with CGO_ENABLED=1)")
 
 // Open returns an error when CGO is not enabled.
@@ -32,7 +35,7 @@ func OpenForPreviewCommand(_ context.Context, _, _, _ string) (*EmbeddedDoltStor
 }
 
 // OpenForReadOnlyCommand returns an error when CGO is not enabled.
-func OpenForReadOnlyCommand(_ context.Context, _, _, _ string, _ bool) (*EmbeddedDoltStore, error) {
+func OpenForReadOnlyCommand(_ context.Context, _, _, _ string) (*EmbeddedDoltStore, error) {
 	return nil, errNoCGO
 }
 
@@ -45,7 +48,3 @@ func OpenForWorkingSetReconcile(_ context.Context, _, _, _ string) (*EmbeddedDol
 func OpenForRemoteSync(_ context.Context, _, _, _ string) (*EmbeddedDoltStore, error) {
 	return nil, errNoCGO
 }
-
-// SetCommitIdentity is a no-op when CGO is not enabled: there is no embedded
-// store to author commits for.
-func SetCommitIdentity(_, _ string) {}
