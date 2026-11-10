@@ -284,6 +284,36 @@ func TestProxiedServerClose(t *testing.T) {
 			t.Errorf("close_reason: got %q, want %q", got, "wontfix")
 		}
 	})
+
+	t.Run("whitespace_id_hint_on_not_found", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cwh")
+
+		// An unquoted zsh $LIST arrives as ONE argv token: the refusal keeps
+		// its identity and gains the separate-argument hint (GH#5152).
+		out, err := bdProxiedRun(t, bd, p.dir, "close", "a b c")
+		if err == nil {
+			t.Fatalf("bd close \"a b c\" succeeded:\n%s", out)
+		}
+		if !strings.Contains(string(out), "Issue a b c not found") {
+			t.Errorf("not-found identity changed; output:\n%s", out)
+		}
+		if !strings.Contains(string(out), "pass each ID as its own argument") {
+			t.Errorf("whitespace argument must carry the separate-argument hint; output:\n%s", out)
+		}
+
+		// A single unknown id keeps today's refusal, byte for byte.
+		out, err = bdProxiedRun(t, bd, p.dir, "close", "no-such-wisp")
+		if err == nil {
+			t.Fatalf("bd close no-such-wisp succeeded:\n%s", out)
+		}
+		if !strings.Contains(string(out), "Issue no-such-wisp not found") {
+			t.Errorf("not-found identity changed for a single unknown id; output:\n%s", out)
+		}
+		if strings.Contains(string(out), "pass each ID") {
+			t.Errorf("single unknown id must not carry the whitespace hint; output:\n%s", out)
+		}
+	})
 }
 
 // TestProxiedServerCloseB holds more of TestProxiedServerClose's cases, split

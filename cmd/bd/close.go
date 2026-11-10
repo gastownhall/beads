@@ -976,7 +976,19 @@ func resolveCloseTarget(ctx context.Context, localStore storage.DoltStorage, sha
 	if isRoutingFailure(err) {
 		return nil, fmt.Errorf("resolving ID %s: %w", id, err)
 	}
-	return nil, fmt.Errorf("resolving ID %s: no issue found matching %q", id, id)
+	return nil, fmt.Errorf("resolving ID %s: no issue found matching %q%s", id, id, closeArgWhitespaceHint(id))
+}
+
+// closeArgWhitespaceHint appends the separate-argument remedy to a close
+// not-found error when the unresolved argument contains whitespace: an
+// unquoted zsh $LIST arrives as ONE argv token ("no issue found matching
+// \"a b c\""), and the split the user meant is invisible in that message
+// (GH#5152). A single unknown id keeps today's error, byte for byte.
+func closeArgWhitespaceHint(id string) string {
+	if strings.ContainsAny(id, " \t\n") {
+		return " (pass each ID as its own argument; in zsh use an array or ${=IDS})"
+	}
+	return ""
 }
 
 // closeAutoRoute is the auto-routed store a bd close batch shares. It opens on

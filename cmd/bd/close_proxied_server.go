@@ -299,7 +299,7 @@ func closeProxiedRunPreflight(ctx context.Context, args, reasons []string, in cl
 func closeProxiedCheckOne(ctx context.Context, uw uow.UnitOfWork, id string, in closeProxiedInput) (string, *types.Issue) {
 	current, _, err := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), id)
 	if errors.Is(err, storage.ErrNotFound) {
-		return fmt.Sprintf("Issue %s not found", id), nil
+		return fmt.Sprintf("Issue %s not found%s", id, closeArgWhitespaceHint(id)), nil
 	}
 	if err != nil {
 		return fmt.Sprintf("Error resolving %s: %v", id, err), nil
@@ -475,7 +475,7 @@ func closeProxiedRefusal(id string, err error) string {
 	case errors.Is(err, storage.ErrCloseOpenChildren):
 		return err.Error()
 	case errors.Is(err, storage.ErrNotFound):
-		return fmt.Sprintf("Issue %s not found", id)
+		return fmt.Sprintf("Issue %s not found%s", id, closeArgWhitespaceHint(id))
 	default:
 		return fmt.Sprintf("Error closing %s: %v", id, err)
 	}

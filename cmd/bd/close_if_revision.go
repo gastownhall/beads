@@ -39,7 +39,7 @@ func runCloseDirectIfRevision(ctx context.Context, id, reason string, force bool
 	}
 	defer result.Close()
 	if result.Issue == nil {
-		fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
+		fmt.Fprintf(os.Stderr, "Issue %s not found%s\n", id, closeArgWhitespaceHint(id))
 		return &exitError{Code: 1}
 	}
 

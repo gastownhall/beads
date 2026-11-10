@@ -166,6 +166,7 @@
 100 38 TestEmbeddedRoutedCreateJournalsIntoTheTargetWorkspace
 100 38 TestEmbeddedUnclaimIfAssigneeFlagValidation
 
+100 39 TestEmbeddedCloseWhitespaceIDHint
 100 39 TestEmbeddedIfRevisionRejectsLabelAndParentEdits
 100 39 TestEmbeddedMaxRowsGraph
 100 39 TestEmbeddedNewDoltStoreFromConfig_NoMetadata
