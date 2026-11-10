@@ -12,7 +12,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"unicode"
 )
 
 // portConflictHint is the platform-specific command to diagnose port conflicts.
@@ -57,31 +56,32 @@ func readDoltProcessPIDs() ([]int, error) {
 
 // parseDoltProcessPIDs returns matching, non-defunct Dolt server PIDs from a
 // `ps -axo pid=,state=,command=` snapshot. It preserves the source row order.
+//
+// The state column is optional: macOS 26 prints it empty for many rows, so
+// the word after the PID is consumed as a state only when it looks like one
+// (isPSStateCode); otherwise it is the start of the command. A first word
+// starting with Z or X is a zombie or dead process and is excluded before
+// that check, so an unfamiliar modifier cannot let such a row through.
 func parseDoltProcessPIDs(snapshot []byte) []int {
 	var pids []int
 	for _, line := range strings.Split(string(snapshot), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+		words := strings.Fields(line)
+		if len(words) < 2 {
 			continue
 		}
-
-		pidText, rest, ok := splitPSField(line)
-		if !ok {
-			continue
-		}
-		state, command, ok := splitPSField(rest)
-		if !ok {
-			continue
-		}
-
-		pid, err := strconv.Atoi(pidText)
+		pid, err := strconv.Atoi(words[0])
 		if err != nil || pid <= 0 {
 			continue
 		}
-		if state[0] == 'Z' || state[0] == 'X' {
+		words = words[1:]
+		if words[0][0] == 'Z' || words[0][0] == 'X' {
 			continue
 		}
+		if isPSStateCode(words[0]) {
+			words = words[1:]
+		}
 
+		command := strings.Join(words, " ")
 		doltIndex := strings.Index(command, "dolt")
 		if doltIndex >= 0 && strings.Contains(command[doltIndex+len("dolt"):], "sql-server") {
 			pids = append(pids, pid)
@@ -90,16 +90,24 @@ func parseDoltProcessPIDs(snapshot []byte) []int {
 	return pids
 }
 
-// splitPSField separates the next whitespace-delimited ps field from the
-// remaining text, retaining whitespace within the final command column.
-func splitPSField(line string) (field, rest string, ok bool) {
-	fieldEnd := strings.IndexFunc(line, unicode.IsSpace)
-	if fieldEnd == -1 {
-		return "", "", false
+// isPSStateCode reports whether word looks like a ps state column: an
+// uppercase letter or t (Linux tracing stop), then uppercase modifiers or s,
+// l, <, >, +. It is a permissive parsing heuristic, not a catalog of every
+// platform's states; an unrecognized token is left in the command.
+func isPSStateCode(word string) bool {
+	if word == "" || !(isASCIIUpper(word[0]) || word[0] == 't') {
+		return false
 	}
-	field = line[:fieldEnd]
-	rest = strings.TrimLeftFunc(line[fieldEnd:], unicode.IsSpace)
-	return field, rest, rest != ""
+	for i := 1; i < len(word); i++ {
+		if c := word[i]; !isASCIIUpper(c) && strings.IndexByte("sl<>+", c) < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func isASCIIUpper(c byte) bool {
+	return c >= 'A' && c <= 'Z'
 }
 
 // isProcessInDir checks if a process's working directory matches the given path.

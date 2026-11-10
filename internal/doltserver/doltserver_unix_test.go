@@ -290,8 +290,19 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 				"-1 S dolt sql-server\n" +
 				"112\n" +
 				"113 S\n" +
-				"114\tdolt sql-server\n" +
 				"115 S \n",
+		},
+		{
+			name: "omitted states mixed with present states keep the executable",
+			snapshot: "  114      /usr/local/bin/dolt sql-server --port 3306\n" +
+				"  115 S    /usr/local/bin/dolt sql-server --port 3307\n" +
+				" 1466      /Users/u/.nix-profile/bin/dolt sql-server --config /Users/u/.beads/shared-server/dolt-server-config.yaml\n",
+			want: []int{114, 115, 1466},
+		},
+		{
+			name:     "tab separated row with no state column",
+			snapshot: "114\tdolt sql-server\n",
+			want:     []int{114},
 		},
 		{
 			name:     "preserves source order",
@@ -306,5 +317,16 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 				t.Fatalf("parseDoltProcessPIDs() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestParseDoltProcessPIDsEmptyState covers macOS ps rows whose state column
+// is blank (#7121): the live dolt sql-server must still be recognized.
+func TestParseDoltProcessPIDsEmptyState(t *testing.T) {
+	snapshot := "  114      /usr/local/bin/dolt sql-server --port 3306\n" +
+		"  115 S    /usr/local/bin/dolt sql-server --port 3307\n"
+	want := []int{114, 115}
+	if got := parseDoltProcessPIDs([]byte(snapshot)); !reflect.DeepEqual(got, want) {
+		t.Fatalf("parseDoltProcessPIDs() = %v, want %v", got, want)
 	}
 }
