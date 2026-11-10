@@ -317,3 +317,75 @@ async def test_mcp_show_include_comments_propagates_cli_errors() -> None:
         await server.show_issue(issue_id="bd-1", include_comments=True)
 
     _assert_one_hydrating_show(rec)
+
+
+# AC-6: brief reads keep exactly {id, title, status, priority} and never hydrate.
+
+BRIEF_KEYS = {"id", "title", "status", "priority"}
+
+
+def _keys(obj: Any) -> set[str]:
+    return set(obj.model_dump() if hasattr(obj, "model_dump") else obj)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        pytest.param({}, id="plain"),
+        pytest.param({"include_comments": True}, id="include_comments"),
+        pytest.param({"fields": ["comments"]}, id="fields-comments"),
+        pytest.param({"include_comments": True, "fields": ["comments"]}, id="both"),
+    ],
+)
+async def test_brief_show_is_exact_and_never_hydrates(kwargs: dict[str, Any]) -> None:
+    rec = _Recorder([_issue(comment_count=2, comments_omitted=True)])
+
+    with rec.patched(), rec.tools_patched():
+        result = await server.show_issue(issue_id="bd-1", brief=True, **kwargs)
+
+    assert _keys(result) == BRIEF_KEYS
+    assert len(rec.calls) == 1
+    assert "--include-comments" not in rec.calls[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["list", "ready", "blocked"])
+async def test_brief_collections_are_exact(tool: str) -> None:
+    row = _issue(comment_count=2, comments_omitted=True, comments=TWO_COMMENTS)
+    if tool == "blocked":
+        row.update(blocked_by_count=1, blocked_by=["bd-2"])
+    rec = _Recorder([row])
+
+    with rec.patched(), rec.tools_patched():
+        if tool == "list":
+            rows = await server.list_issues(brief=True)
+        elif tool == "ready":
+            rows = await server.ready_work(brief=True)
+        else:
+            rows = await server.blocked(brief=True)
+
+    assert [_keys(r) for r in rows] == [BRIEF_KEYS]
+    assert len(rec.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_brief_deps_keeps_issue_comment_metadata() -> None:
+    rec = _Recorder([_issue(comment_count=2, comments_omitted=True)])
+
+    with rec.patched(), rec.tools_patched():
+        data = await server.show_issue(issue_id="bd-1", brief_deps=True)
+
+    assert data["comment_count"] == 2
+    assert data["comments_omitted"] is True
+    assert "--include-comments" not in rec.calls[0]
+
+
+@pytest.mark.asyncio
+async def test_brief_mutation_result_shape_unchanged() -> None:
+    rec = _Recorder(_issue(comment_count=2, comments_omitted=True))
+
+    with rec.patched(), rec.tools_patched():
+        result = await server.claim_issue(issue_id="bd-1")
+
+    assert _keys(result) == {"id", "action", "message"}
