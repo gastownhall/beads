@@ -634,7 +634,7 @@ func expectMergeSourceCommit(mock sqlmock.Sqlmock) {
 
 // expectMergeResult answers concludeMerge's stageMergeResult (GH#7811): the
 // open merge's source commit, then the merged-but-unstaged tables, each
-// staged with a drained DOLT_ADD.
+// staged with a drained DOLT_ADD, then the re-read that proves none is left.
 func expectMergeResult(mock sqlmock.Sqlmock, tables ...string) {
 	expectMergeSourceCommit(mock)
 	rows := sqlmock.NewRows([]string{"table_name"})
@@ -644,6 +644,11 @@ func expectMergeResult(mock sqlmock.Sqlmock, tables ...string) {
 	mock.ExpectQuery(regexp.QuoteMeta(mergedTablesQueryPrefix)).WillReturnRows(rows)
 	for _, table := range tables {
 		expectDrainedCall(mock, "CALL DOLT_ADD(?)", table)
+	}
+	if len(tables) > 0 {
+		// The post-stage completeness re-read (GH#7757) finds nothing left.
+		mock.ExpectQuery(regexp.QuoteMeta(mergedTablesQueryPrefix)).
+			WillReturnRows(sqlmock.NewRows([]string{"table_name"}))
 	}
 }
 
