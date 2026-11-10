@@ -5800,7 +5800,7 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 		// CLI pull leaves any conflicts in the working set; run the auto-resolver so
 		// git-protocol remotes get the same audit-only dependency / metadata repair
 		// as the SQL DOLT_PULL path (#4259).
-		return pullReport{}, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
+		return pullReport{}, s.runCLIPull(ctx, func() error { return s.doltCLIPull(ctx, remote, creds) })
 	}
 	// Credential CLI routing: mirrors git-protocol path, including post-pull
 	// auto-resolution.
@@ -5808,14 +5808,14 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 		return pullReport{}, err
 	} else if useCLI {
 		logRouteDecision("pull", remote, true)
-		return pullReport{}, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
+		return pullReport{}, s.runCLIPull(ctx, func() error { return s.doltCLIPull(ctx, remote, creds) })
 	}
 	// Cloud auth CLI routing (GH#6), including post-pull auto-resolution.
 	if useCLI, err := s.prepareCLIRouteForCloudAuth(ctx, remote); err != nil {
 		return pullReport{}, err
 	} else if useCLI {
 		logRouteDecision("pull", remote, true)
-		return pullReport{}, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
+		return pullReport{}, s.runCLIPull(ctx, func() error { return s.doltCLIPull(ctx, remote, creds) })
 	}
 	// Local file:// pulls intentionally stay on the SQL path. The matching CLI
 	// guard is a push-only optimization; SQL pull keeps pullWithAutoResolve in
@@ -6277,7 +6277,72 @@ func (e *cliPullDeclineError) Error() string {
 // later write and pull until an operator runs DOLT_MERGE('--abort') by hand
 // (GH#7839), so a decline is settled by aborting and reporting, exactly as
 // the SQL route's rollback does.
+// priorMergeState is what dolt_merge_status said before a CLI pull's
+// transport ran. A decline settlement may only abort a merge THIS pull
+// opened; a merge that was already open belongs to the operator (or to an
+// earlier wedged pull), and aborting it would discard their in-progress
+// resolution (GH#7839).
+type priorMergeState int
+
+const (
+	// priorMergeUnknown: the pre-read could not tell — treat any open merge
+	// as not this pull's.
+	priorMergeUnknown priorMergeState = iota
+	// priorMergeClosed: no merge was open when the transport started, so a
+	// merge open now is this pull's to abort.
+	priorMergeClosed
+	// priorMergeOpen: a merge was already open before the transport ran.
+	priorMergeOpen
+)
+
+// runCLIPull brackets a CLI pull transport (doltCLIPull /
+// doltCLIPullFromPeer) with the merge-state pre-read the decline settlement
+// needs: a merge that was already open when the transport started is not
+// this pull's to abort, so the settlement must be able to tell the two apart
+// (GH#7839). The pre-read runs on a connection released BEFORE the
+// transport — the subprocess owns the database during the transfer — and a
+// read that errors or returns no row leaves the state unknown, the
+// conservative answer. A read-only store skips the pre-read entirely; its
+// finishCLIPullChecked returns the transport error untouched.
+func (s *DoltStore) runCLIPull(ctx context.Context, pull func() error) error {
+	prior := priorMergeUnknown
+	if !s.readOnly {
+		prior = s.readPriorMergeState(ctx)
+	}
+	return s.finishCLIPullChecked(ctx, pull(), prior)
+}
+
+// readPriorMergeState reports whether a merge was open on the branch a CLI
+// pull is about to merge into.
+func (s *DoltStore) readPriorMergeState(ctx context.Context) priorMergeState {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return priorMergeUnknown
+	}
+	defer func() { _ = conn.Close() }()
+	var merging bool
+	switch err := conn.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&merging); {
+	case err == nil && merging:
+		return priorMergeOpen
+	case err == nil:
+		return priorMergeClosed
+	default:
+		// No row is as unreadable as an error: dolt_merge_status's row
+		// layout is version state bd cannot interpret on the operator's
+		// behalf, and the settlement treats unknown as not-ours.
+		return priorMergeUnknown
+	}
+}
+
 func (s *DoltStore) finishCLIPull(ctx context.Context, pullErr error) error {
+	// The 2-arg form is the pre-AC-5 entry point: its callers cannot tell
+	// whether a merge was already open, so the settlement treats any open
+	// merge as this pull's. The transport-bracketed runCLIPull is the safer
+	// entry point.
+	return s.finishCLIPullChecked(ctx, pullErr, priorMergeClosed)
+}
+
+func (s *DoltStore) finishCLIPullChecked(ctx context.Context, pullErr error, prior priorMergeState) error {
 	if s.readOnly {
 		// A read-only store cannot resolve or commit; surface the pull result as-is.
 		return pullErr
@@ -6285,7 +6350,7 @@ func (s *DoltStore) finishCLIPull(ctx context.Context, pullErr error) error {
 	resolved, resolveErr := s.autoResolveConflictsAfterCLIPull(ctx)
 	var declined *cliPullDeclineError
 	if errors.As(resolveErr, &declined) {
-		return s.settleDeclinedCLIPull(ctx, pullErr, declined)
+		return s.settleDeclinedCLIPullChecked(ctx, pullErr, declined, prior)
 	}
 	if resolveErr != nil {
 		if pullErr != nil {
@@ -6309,6 +6374,10 @@ func (s *DoltStore) finishCLIPull(ctx context.Context, pullErr error) error {
 // failed, and the settlement's job is to leave the operator an actionable
 // failure with a restored working set, not to hide it.
 func (s *DoltStore) settleDeclinedCLIPull(ctx context.Context, pullErr error, declined *cliPullDeclineError) error {
+	return s.settleDeclinedCLIPullChecked(ctx, pullErr, declined, priorMergeClosed)
+}
+
+func (s *DoltStore) settleDeclinedCLIPullChecked(ctx context.Context, pullErr error, declined *cliPullDeclineError, prior priorMergeState) error {
 	// Pin a single connection: the is_merging read and the abort must land on
 	// the same branch the CLI pull merged into. A fresh connection from the
 	// pool defaults to the base branch and can miss the open merge
@@ -6328,6 +6397,15 @@ func (s *DoltStore) settleDeclinedCLIPull(ctx context.Context, pullErr error, de
 		merging = false
 	default:
 		return errors.Join(pullErr, fmt.Errorf("failed to read merge state while settling the declined CLI pull: %w", err))
+	}
+	if merging && prior != priorMergeClosed {
+		// The merge was open before this pull's transport ran, or the
+		// pre-read could not tell: it is not this pull's to abort. A
+		// DOLT_MERGE('--abort') would discard an operator's in-progress
+		// resolution, and a MergeConflictsError would promise a restoration
+		// that never happened. Name the state and the manual remedy instead;
+		// this never reports success.
+		return errors.Join(pullErr, fmt.Errorf("a merge was already open before this pull ran (dolt_merge_status.is_merging=1) and bd will not abort it: inspect the conflicts with 'bd conflicts list' and 'bd conflicts show', then finish or abort the merge with DOLT_MERGE('--abort') before retrying the pull"))
 	}
 	if merging {
 		if err := versioncontrolops.AbortMerge(ctx, conn); err != nil {
