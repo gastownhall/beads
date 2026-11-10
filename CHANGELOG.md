@@ -1590,6 +1590,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OTEL_METRICS_EXPORTER=console`, legacy `BD_OTEL_STDOUT=true`) write to
   stderr, as documented. They wrote to stdout, where their JSON mixed into
   the command's own output and broke `--json` consumers.
+- `bd set-state` writes its event, the event's parent-child edge and the
+  label swap as one transaction and one history commit (`bd: set-state
+  <id>`). It used to commit the event and the label change separately, so a
+  refused label patch (a `dimension:value` label over 255 characters, say)
+  left a committed event and edge for a state change that never happened
+  (GH#5637). The event now takes an ordinary minted id instead of a dotted
+  child id; its parent-child edge still lists it under the issue. Over
+  `bd connect`, setting state on a template needs a server that advertises
+  `issues.batchApply.updateAllowTemplate`; an older server refuses before
+  anything is written.
 - `bd.storage.operation.duration`, `bd.ai.request.duration` and the
   `bd.ai.duration_ms` span attribute record fractional milliseconds. They
   were truncated to whole milliseconds, so a sub-millisecond storage call

@@ -829,6 +829,11 @@ The `set-state` command atomically:
 2. Removes the old dimension label if present
 3. Adds the new dimension:value label (cache)
 
+The three writes land together (in one history commit, for a durable issue)
+or not at all: if any of them is refused (for example a label over 255
+characters), none is written. The event is linked to the issue by a
+parent-child dependency.
+
 See [bd set-state](/cli-reference/set-state) for full command reference.
 
 ## Troubleshooting
