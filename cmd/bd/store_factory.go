@@ -217,6 +217,10 @@ func openDoltStoreFromConfig(ctx context.Context, beadsDir string, requireExisti
 	if err := validateConfiguredBackend(cfg, beadsDir); err != nil {
 		return nil, err
 	}
+	// Taken before normalizeLoadedConfig fills in the defaults: a workspace
+	// without metadata.json names its embedded database through
+	// resolveMetadatalessEmbeddedDatabase, as the root pre-run does.
+	metadataAbsent := cfg == nil
 	cfg = normalizeLoadedConfig(cfg)
 	if backend, ok := backends.Lookup(cfg.GetBackend()); ok {
 		return backend.Open(ctx, beadsDir)
@@ -232,9 +236,9 @@ func openDoltStoreFromConfig(ctx context.Context, beadsDir string, requireExisti
 	if requireExisting && !embeddeddolt.HasRepository(beadsDir) {
 		return nil, errNoRoutedEmbeddedDatabase(beadsDir)
 	}
-	database := configfile.DefaultDoltDatabase
-	if cfg != nil {
-		database = cfg.GetDoltDatabase()
+	database, err := embeddedDatabaseFromConfig(beadsDir, cfg, metadataAbsent)
+	if err != nil {
+		return nil, err
 	}
 	if sanitized := sanitizeDBName(database); sanitized != database {
 		if err := migrateHyphenatedDB(beadsDir, cfg, database, sanitized); err != nil {
@@ -243,6 +247,21 @@ func openDoltStoreFromConfig(ctx context.Context, beadsDir string, requireExisti
 		database = sanitized
 	}
 	return embeddeddolt.Open(ctx, beadsDir, database, "main")
+}
+
+// embeddedDatabaseFromConfig names the embedded database a store factory
+// opens: the one metadata.json (or BEADS_DOLT_SERVER_DATABASE) names, or, for
+// a workspace without metadata.json, the one
+// resolveMetadatalessEmbeddedDatabase selects.
+func embeddedDatabaseFromConfig(beadsDir string, cfg *configfile.Config, metadataAbsent bool) (string, error) {
+	if !metadataAbsent {
+		return cfg.GetDoltDatabase(), nil
+	}
+	selection, err := resolveMetadatalessEmbeddedDatabase(beadsDir)
+	if err != nil {
+		return "", err
+	}
+	return selection.Database, nil
 }
 
 // errNoRoutedEmbeddedDatabase refuses a routed write to beadsDir, an embedded
@@ -353,6 +372,10 @@ func openNonMutatingStoreFromConfig(ctx context.Context, beadsDir string, previe
 	if err := validateConfiguredBackend(cfg, beadsDir); err != nil {
 		return nil, err
 	}
+	// Taken before normalizeLoadedConfig fills in the defaults: a workspace
+	// without metadata.json names its embedded database through
+	// resolveMetadatalessEmbeddedDatabase, as the root pre-run does.
+	metadataAbsent := cfg == nil
 	cfg = normalizeLoadedConfig(cfg)
 	if backend, ok := backends.Lookup(cfg.GetBackend()); ok {
 		return backend.OpenReadOnly(ctx, beadsDir)
@@ -365,9 +388,9 @@ func openNonMutatingStoreFromConfig(ctx context.Context, beadsDir string, previe
 		// open; a preview tolerates a behind schema, as on the embedded arms.
 		return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true, RequireReadableSchema: !preview})
 	}
-	database := configfile.DefaultDoltDatabase
-	if cfg != nil {
-		database = cfg.GetDoltDatabase()
+	database, err := embeddedDatabaseFromConfig(beadsDir, cfg, metadataAbsent)
+	if err != nil {
+		return nil, err
 	}
 	if sanitized := sanitizeDBName(database); sanitized != database {
 		database = sanitized
