@@ -1185,3 +1185,63 @@ func TestInitDerivedOriginAdoptionPromptCanceled(t *testing.T) {
 		t.Errorf("canceled prompt created .beads (stat err=%v)", err)
 	}
 }
+
+// TestInitDerivedOriginOptOut is AC-4 of GH#6099: --no-adopt or a truthy
+// BD_NO_REMOTE_ADOPT skips the derived origin entirely (no probe, no clone,
+// no remote wiring, no persisted sync.remote) and creates a local database,
+// even when --yes is also supplied: the safer instruction wins.
+func TestInitDerivedOriginOptOut(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		args        []string
+		env         []string
+		unreachable bool
+	}{
+		{name: "flag", args: []string{"--no-adopt"}},
+		{name: "env", env: []string{"BD_NO_REMOTE_ADOPT=1"}},
+		{name: "env-true", env: []string{"BD_NO_REMOTE_ADOPT=true"}},
+		{name: "flag-beats-yes", args: []string{"--no-adopt", "--yes"}},
+		// An origin whose probe would fail prints a "could not verify" note
+		// when probed; its absence shows no probe ran.
+		{name: "no-probe", args: []string{"--no-adopt"}, unreachable: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var workDir, remoteDir string
+			if tc.unreachable {
+				workDir = t.TempDir()
+				runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+				runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+				remoteDir = filepath.Join(t.TempDir(), "does-not-exist.git")
+				runGitForBootstrapTest(t, workDir, "remote", "add", "origin", remoteDir)
+			} else {
+				workDir, remoteDir = derivedOriginWithDoltDataFixture(t)
+			}
+			args := append([]string{"--prefix", "mine", "--non-interactive", "--skip-hooks", "--skip-agents"}, tc.args...)
+			out, code := runInitForAdoptionTest(t, workDir, "", tc.env, args...)
+			if code != 0 {
+				t.Fatalf("opted-out init exit code = %d, want 0\noutput:\n%s", code, out)
+			}
+			for _, unwanted := range []string{"could not verify", "failed to clone", "Bootstrapped from remote", "Adopting Dolt issue history"} {
+				if strings.Contains(out, unwanted) {
+					t.Errorf("opted-out init output contains %q (probe/clone ran):\n%s", unwanted, out)
+				}
+			}
+			cfg, err := os.ReadFile(filepath.Join(workDir, ".beads", "config.yaml"))
+			if err != nil {
+				t.Fatalf("opted-out init created no local workspace: %v\n%s", err, out)
+			}
+			if strings.Contains(string(cfg), remoteDir) {
+				t.Errorf("opted-out init persisted the derived origin:\n%s", cfg)
+			}
+
+			bdBin := buildBDForInitTests(t)
+			remotes := exec.Command(bdBin, "dolt", "remote", "list")
+			remotes.Dir = workDir
+			remotes.Env = hermeticInitEnv(t.TempDir())
+			remotesOut, _ := remotes.CombinedOutput()
+			if strings.Contains(string(remotesOut), remoteDir) {
+				t.Errorf("opted-out init wired the derived origin as a Dolt remote:\n%s", remotesOut)
+			}
+		})
+	}
+}
