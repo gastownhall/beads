@@ -653,18 +653,26 @@ func handleSchemaMigrate() error {
 	}
 
 	latest := schema.LatestVersion()
+	// Stamp the version markers the refused version-bump reconciliation
+	// could not (gastownhall/beads#5920 review). autoMigrateOnVersionBump
+	// is the only automatic writer of bd_version, it was refused by the
+	// gate this command just satisfied, and its one-shot .local_version
+	// signal is already consumed — so without this, `bd doctor` and the
+	// git-hook health check keep reporting a version mismatch after the
+	// operator has done everything the refusal told them to.
+	//
+	// On every successful pass, not only one that counted migrations: the
+	// pending migrations may already have run during the store open (or in
+	// another client), and the reconciler skips a matching marker and
+	// refuses a downgrade on its own (gastownhall/beads#7283). Marker-only
+	// work is not a write: local_metadata is dolt-ignored, and setting
+	// commandDidWrite would let the post-run auto-commit sweep unrelated
+	// pending edits into a commit.
+	stampWorkspaceVersionAfterMigrate(store)
 	status := "current"
 	if applied > 0 {
 		status = "applied"
 		commandDidWrite.Store(true)
-		// Stamp the version markers the refused version-bump reconciliation
-		// could not (gastownhall/beads#5920 review). autoMigrateOnVersionBump
-		// is the only automatic writer of bd_version, it was refused by the
-		// gate this command just satisfied, and its one-shot .local_version
-		// signal is already consumed — so without this, `bd doctor` and the
-		// git-hook health check keep reporting a version mismatch after the
-		// operator has done everything the refusal told them to.
-		stampWorkspaceVersionAfterMigrate(store)
 	}
 
 	if jsonOutput {
