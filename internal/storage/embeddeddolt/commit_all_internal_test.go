@@ -202,3 +202,103 @@ func sqlmockWithTx(t *testing.T, db *sql.DB) func(func(*sql.Tx) error) error {
 		return commitEmbeddedTx(tx)
 	}
 }
+
+// TestCommitAllVerificationKeepsIndeterminateAndNonTolerantOutcomes: the
+// completeness check never replaces an outcome the commit already had. A SQL
+// publication failure after a finding is still ErrCommitIndeterminate, not a
+// confirmed partial commit or verification failure; a DOLT_COMMIT error rolls
+// back without a status read; and CommitMergeResolution's non-tolerant call
+// still fails on "nothing to commit" without consulting dolt_status (GH#5433).
+func TestCommitAllVerificationKeepsIndeterminateAndNonTolerantOutcomes(t *testing.T) {
+	const msg = "test: publish working set"
+	const status = `SELECT table_name FROM dolt_status`
+
+	t.Run("publication failure after a finding", func(t *testing.T) {
+		for name, expectFinding := range map[string]func(sqlmock.Sqlmock){
+			"residual": func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(status).WillReturnRows(sqlmock.NewRows([]string{"table_name"}).AddRow("issues"))
+				mock.ExpectQuery(`information_schema\.schemata`).
+					WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(0))
+				mock.ExpectQuery(regexp.QuoteMeta("SELECT pattern FROM dolt_ignore")).
+					WillReturnRows(sqlmock.NewRows([]string{"pattern"}))
+			},
+			"verification failure": func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(status).WillReturnError(errors.New("status read failed"))
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				db, mock := newCommitAllMock(t)
+				mock.ExpectBegin()
+				mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-Am', ?)")).WithArgs(msg).
+					WillReturnResult(sqlmock.NewResult(0, 1))
+				expectFinding(mock)
+				publishLoss := errors.New("connection lost before COMMIT response")
+				mock.ExpectCommit().WillReturnError(publishLoss)
+
+				_, err := commitAllThrough(t.Context(), sqlmockWithTx(t, db), msg, true)
+				if !errors.Is(err, storage.ErrCommitIndeterminate) || !errors.Is(err, publishLoss) {
+					t.Fatalf("error = %v, want ErrCommitIndeterminate wrapping the publication loss", err)
+				}
+				var residual *storage.UncommittedChangesError
+				if errors.As(err, &residual) || errors.Is(err, storage.ErrCommitVerificationFailed) {
+					t.Errorf("error = %v reports a finding for a commit that was never confirmed", err)
+				}
+				if err := mock.ExpectationsWereMet(); err != nil {
+					t.Fatalf("unmet sqlmock expectations: %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("DOLT_COMMIT failure rolls back without a status read", func(t *testing.T) {
+		db, mock := newCommitAllMock(t)
+		mock.ExpectBegin()
+		responseLoss := errors.New("connection lost before DOLT_COMMIT response")
+		mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-Am', ?)")).WithArgs(msg).
+			WillReturnError(responseLoss)
+		mock.ExpectRollback()
+
+		committed, err := commitAllThrough(t.Context(), sqlmockWithTx(t, db), msg, true)
+		if committed || !errors.Is(err, storage.ErrCommitIndeterminate) || !errors.Is(err, responseLoss) {
+			t.Fatalf("commitAllThrough = (%v, %v), want (false, ErrCommitIndeterminate)", committed, err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet sqlmock expectations: %v", err)
+		}
+	})
+
+	t.Run("non-tolerant nothing to commit", func(t *testing.T) {
+		db, mock := newCommitAllMock(t)
+		mock.ExpectBegin()
+		mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-Am', ?)")).WithArgs(msg).
+			WillReturnError(errors.New("nothing to commit"))
+		mock.ExpectRollback()
+
+		committed, err := commitAllThrough(t.Context(), sqlmockWithTx(t, db), msg, false)
+		if committed || err == nil || !strings.HasPrefix(err.Error(), "dolt commit: ") {
+			t.Fatalf("commitAllThrough = (%v, %v), want (false, \"dolt commit: ...\")", committed, err)
+		}
+		if errors.Is(err, storage.ErrCommitIndeterminate) || errors.Is(err, storage.ErrCommitVerificationFailed) {
+			t.Errorf("error = %v, want the plain non-tolerant failure", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet sqlmock expectations: %v", err)
+		}
+	})
+
+	t.Run("non-tolerant success skips the status read", func(t *testing.T) {
+		db, mock := newCommitAllMock(t)
+		mock.ExpectBegin()
+		mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-Am', ?)")).WithArgs(msg).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectCommit()
+
+		committed, err := commitAllThrough(t.Context(), sqlmockWithTx(t, db), msg, false)
+		if !committed || err != nil {
+			t.Fatalf("commitAllThrough = (%v, %v), want (true, nil)", committed, err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet sqlmock expectations: %v", err)
+		}
+	})
+}
