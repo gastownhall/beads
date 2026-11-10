@@ -1,6 +1,6 @@
 """Integration tests for MCP tools."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -41,7 +41,7 @@ def reset_connection_pool():
 @pytest.fixture
 def sample_issue():
     """Create a sample issue for testing."""
-    now = datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
     return Issue(
         id="bd-1",
         title="Test issue",
@@ -323,14 +323,14 @@ async def test_beads_list_comments_success():
             issue_id="bd-1",
             author="agent",
             text="First comment",
-            created_at=datetime(2026, 7, 7, 12, 0, 0, tzinfo=timezone.utc),
+            created_at=datetime(2026, 7, 7, 12, 0, 0, tzinfo=UTC),
         ),
         Comment(
             id="c-2",
             issue_id="bd-1",
             author=None,
             text="Second comment",
-            created_at=datetime(2026, 7, 7, 12, 5, 0, tzinfo=timezone.utc),
+            created_at=datetime(2026, 7, 7, 12, 5, 0, tzinfo=UTC),
         ),
     ]
     mock_client = AsyncMock()
@@ -735,7 +735,7 @@ async def test_beads_stats():
 @pytest.mark.asyncio
 async def test_beads_blocked():
     """Test beads_blocked tool."""
-    now = datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC)
     blocked_issue = BlockedIssue(
         id="bd-1",
         title="Blocked issue",

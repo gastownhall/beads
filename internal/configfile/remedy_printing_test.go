@@ -11,7 +11,7 @@ import (
 
 // TestWorkspaceMessagesNameBeadsDirEscaped pins the remedy-printing invariant
 // at the refusals this package builds for a workspace, which bd prints beside
-// their remedy (a Hint, "to heal, edit <metadata.json>", "follow bd help
+// their remedy ("to heal, edit <metadata.json>", "follow bd help
 // init-safety"): the workspace path is named escaped. A routed planning or
 // target repo is a path a cloned repository's committed routing config names,
 // so a raw carriage return or ESC[8m in it could redraw or hide the remedy.
@@ -39,12 +39,6 @@ func TestWorkspaceMessagesNameBeadsDirEscaped(t *testing.T) {
 		name string
 		msg  func(t *testing.T) string
 	}{
-		{"graph format marker", func(t *testing.T) string {
-			return (&UnsupportedWorkspaceFormatError{BeadsDir: hostileBeadsDir(t), FormatMarker: true}).Error()
-		}},
-		{"graph_mode", func(t *testing.T) string {
-			return (&UnsupportedWorkspaceFormatError{BeadsDir: hostileBeadsDir(t), GraphMode: "link"}).Error()
-		}},
 		{"removed backend, heal", func(t *testing.T) string {
 			return RemovedBackendErrorAt("sqlite", withDoltDatabase(t), nil).Error()
 		}},

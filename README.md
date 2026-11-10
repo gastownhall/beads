@@ -124,7 +124,17 @@ mail delegates, editor, pager, Dolt executable/host/credential-file/root-path
 overrides, the rest of the dolt-owned `DOLT_*` namespace (such as
 `DOLT_SSH_COMMAND` and `DOLT_PAGER`), and non-Beads process variables (such as
 `GIT_*`, `SSH_*`, `LD_*`, and `DYLD_*`) in that file and prints a warning for
-each.
+each. Any `BEADS_*` or `BD_*` key named as a command or executable (ending in
+`_COMMAND`, `_BIN` or `_BINARY`) is ignored the same way, as are the http
+backend's bearer token `BEADS_HTTP_TOKEN` and plaintext grant
+`BEADS_HTTP_ALLOW_INSECURE`, the token file `bd serve` accepts bearers from
+(`BEADS_SERVE_TOKEN_FILE`), and the files bd writes to: the heap profile and
+MemStats summary (`BEADS_MEM_PROFILE`, `BEADS_MEM_STATS`) and the proxied Dolt
+server's log (`BEADS_PROXIED_SERVER_LOG`). Values in `.beads/.env` are taken
+literally: a value that uses `$VAR` or `${VAR}` is ignored with a warning
+instead of being filled in from your environment, so a committed file cannot
+copy a secret out of your environment into a setting the workspace sends
+elsewhere. Write the value out, or set it in your shell.
 `bd config set mail.delegate "gt mail"` writes to user-global YAML rather than
 the replicated database; the workspace settings API rejects `mail.delegate`.
 Mail delegation also ignores project `.beads/config.yaml`; only shell environment

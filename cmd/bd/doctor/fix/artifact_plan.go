@@ -40,9 +40,6 @@ const (
 	// ownerUndetermined: nothing positively identifies the directory's
 	// backend (no metadata and no Dolt store, or an ambiguous layout).
 	ownerUndetermined beadsDirOwner = iota
-	// ownerUnsupportedFormat: a format this build cannot open; the
-	// directory is neither reported nor touched.
-	ownerUnsupportedFormat
 	// ownerUnreadable: its metadata exists but does not load, or the
 	// directory cannot be listed.
 	ownerUnreadable
@@ -70,11 +67,7 @@ type beadsDirClass struct {
 // runtime leftovers beside, or instead of, a redirect). Every other answer
 // leaves the directory byte-identical.
 func classifyBeadsDir(beadsDir string) beadsDirClass {
-	cfg, err := configfile.LoadAndCheckWorkspaceFormat(beadsDir)
-	var formatErr *configfile.UnsupportedWorkspaceFormatError
-	if errors.As(err, &formatErr) {
-		return beadsDirClass{owner: ownerUnsupportedFormat}
-	}
+	cfg, err := configfile.LoadForDiscovery(beadsDir)
 	c := beadsDirClass{redirectExpected: isRedirectExpectedLocation(beadsDir)}
 	entries, listErr := os.ReadDir(beadsDir)
 	// Only a stub candidate needs every entry inspected; elsewhere the
@@ -429,22 +422,17 @@ func databaseStateEntries(beadsDir string, entries []os.DirEntry) []string {
 }
 
 // PlanArtifacts is the one decision the Classic Artifacts scan reports and its
-// cleanup carries out for the .beads directory beadsDir. skip is true for a
-// directory in a format this build cannot open, which neither reports nor
-// touches. Only a .beads positively on Dolt (orphaned SQLite sidecars) and a
-// redirect-only stub holding no database state (bd's runtime leftovers in
-// it) yield findings marked SafeDelete. Everything else is left
-// byte-identical; what is reported for manual review is a database file or
-// sidecar outside another backend's .beads, what a stub holds beyond its
-// runtime leftovers, and a redirect-only .beads that is not a stub but holds
-// more than a clean stub does.
-func PlanArtifacts(beadsDir string) (findings []PlannedArtifact, skip bool) {
+// cleanup carries out for the .beads directory beadsDir. Only a .beads
+// positively on Dolt (orphaned SQLite sidecars) and a redirect-only stub
+// holding no database state (bd's runtime leftovers in it) yield findings
+// marked SafeDelete. Everything else is left byte-identical; what is reported
+// for manual review is a database file or sidecar outside another backend's
+// .beads, what a stub holds beyond its runtime leftovers, and a redirect-only
+// .beads that is not a stub but holds more than a clean stub does.
+func PlanArtifacts(beadsDir string) (findings []PlannedArtifact) {
 	c := classifyBeadsDir(beadsDir)
-	if c.owner == ownerUnsupportedFormat {
-		return nil, true
-	}
 	if c.owner == ownerRedirectStub {
-		return stubCruftFindings(beadsDir), false
+		return stubCruftFindings(beadsDir)
 	}
 	if c.owner != ownerOtherBackend {
 		findings = append(findings, sqliteFindings(beadsDir, c)...)
@@ -461,7 +449,7 @@ func PlanArtifacts(beadsDir string) (findings []PlannedArtifact, skip bool) {
 		}
 		findings = append(findings, PlannedArtifact{Path: beadsDir, Type: ArtifactCruft, Description: desc})
 	}
-	return findings, false
+	return findings
 }
 
 // sqliteFindings reports beads.db, its WAL and SHM, and beads.backup-*.db. In

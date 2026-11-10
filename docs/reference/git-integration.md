@@ -68,6 +68,15 @@ bd hooks install --chain    # Run existing hooks before bd hooks
 Hook installation is worktree-aware: `bd` resolves the shared git directory,
 so installing from a linked worktree works.
 
+In releases after v1.3.2, `bd hooks install` (and the hook install `bd init`
+runs) refuses a hooks directory that is itself a symlink, including a dangling
+one, in every mode: `.git/hooks`, a `core.hooksPath` directory, `.beads-hooks/`
+and `.beads/hooks/`. It refuses before copying existing hooks, writing any
+hook, or changing `core.hooksPath`, because each write would land in the
+link's target. Replace the symlink with a real directory and re-run. A symlink
+higher up the path, such as a `.beads` directory that links to external
+storage, is still supported.
+
 ### Status
 
 ```bash
@@ -79,6 +88,13 @@ bd hooks list
 ```bash
 bd hooks uninstall
 ```
+
+In releases after v1.3.2, uninstall refuses a hooks directory that is itself a
+symlink, before editing any hook or resetting `core.hooksPath`. In a real
+hooks directory it leaves a symlinked hook and its target untouched, and it
+restores a `<hook>.backup` only when that backup is a regular file; each
+skipped entry is named in a warning, and the other hooks are uninstalled as
+usual.
 
 ### External Hook Managers
 
