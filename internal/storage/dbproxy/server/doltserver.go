@@ -682,7 +682,11 @@ func (s *DoltServer) waitReady(ctx context.Context, watch *doltserver.StartupWat
 		conn, err := s.Dial(dctx)
 		dcancel()
 		if err == nil {
-			_ = conn.Close()
+			// The child dolt writes its MySQL greeting the moment the dial
+			// is accepted; close through the drain so the probe's close is
+			// a FIN and not the RST that aborts the child's handshake
+			// (#4132/#5589).
+			doltserver.DrainAndCloseProbe(conn)
 			answered = true
 		}
 		switch {

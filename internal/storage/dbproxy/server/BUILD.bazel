@@ -34,6 +34,7 @@ go_test(
         "doltserver_exit_unix_test.go",
         "doltserver_internal_test.go",
         "doltserver_test.go",
+        "doltserver_waitready_probe_internal_test.go",
         "external_dolt_server_test.go",
         "testmain_test.go",
         "testserver_test.go",
