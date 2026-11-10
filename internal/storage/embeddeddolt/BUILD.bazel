@@ -289,6 +289,7 @@ go_test(
         "//internal/storage/dberrors",
         "//internal/storage/depid",
         "//internal/storage/doltutil",
+        "//internal/storage/domain",
         "//internal/storage/domain/db",
         "//internal/storage/externaldeps",
         "//internal/storage/historyoffequiv",
