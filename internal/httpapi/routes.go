@@ -293,6 +293,17 @@ const CapIssuesSweepRetainedTypes = "issues.sweep.retainedTypes"
 // predate it; it refuses locally before the dial when the token is absent.
 const CapBatchApplyDepAddLineage = "issues.batchApply.depAddLineage"
 
+// CapBatchApplyUpdateAllowTemplate is the behavior capability that advertises
+// ApplyUpdateItem's `allow_template` member (batch_apply.go): the per-item
+// form of UpdateIssueRequest's member, standing the template read-only refusal
+// down for one update item of a plan. bd set-state sends it on the label patch
+// of its one-request state change (GH#5637). It is a token of its own, not
+// CapIssuesUpdateAllowTemplate, because a server can predate this member while
+// serving that one: such a server answers the item member with
+// `400 invalid_argument`/`unknown_parameter`, so the client refuses an item
+// carrying it locally before the dial when the token is absent.
+const CapBatchApplyUpdateAllowTemplate = "issues.batchApply.updateAllowTemplate"
+
 // CapIssuesUpdateAllowTemplate is the behavior capability that advertises
 // two things together: updateIssue enforces the role's template read-only
 // refusal, and UpdateIssueRequest's `allow_template` member (update.go) stands
@@ -304,6 +315,8 @@ const CapBatchApplyDepAddLineage = "issues.batchApply.depAddLineage"
 // covers updateIssue only: an applyBatch `update` item gets no client-side
 // check (its target resolves on the server), so through an older server it
 // still edits a template (bd-jkp9v3).
+// The token names updateIssue's member only; an applyBatch `update` item's
+// own `allow_template` is CapBatchApplyUpdateAllowTemplate's.
 const CapIssuesUpdateAllowTemplate = "issues.update.allowTemplate"
 
 // CapIssuesUpdatePersistence is the behavior capability that advertises
@@ -1187,7 +1200,7 @@ var behaviorCapabilities = []string{
 	CapProjectEnforce, CapBatchApplyLarge, CapIssuesListSort, CapIssuesCountScope,
 	CapIssuesSweepWispsPlane, CapIssuesSweepLiveDependents, CapIssuesSweepLimit,
 	CapIssuesSweepRetainIDs, CapIssuesSweepRetainedTypes,
-	CapBatchApplyDepAddLineage, CapIssuesUpdateAllowTemplate, CapIssuesCreateDefaultPriority,
+	CapBatchApplyDepAddLineage, CapBatchApplyUpdateAllowTemplate, CapIssuesUpdateAllowTemplate, CapIssuesCreateDefaultPriority,
 	CapIssuesCloseAutoCloseMolecule, CapIssuesListSearch,
 	CapIssuesListNoAssignee, CapIssuesListTitle, CapListIDs, CapIssuesUpdatePersistence, CapDependenciesBlockingIsBlocked, CapIssuesUpdateClaim,
 	CapIssuesCreateGates, CapIssuesUpdateGates, CapIssuesListFilters,
