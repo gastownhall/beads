@@ -50,15 +50,20 @@ func runEmbeddedInitHooks(ctx context.Context, workDir, beadsDir string, skip, q
 		if err := installHooksWithContext(jjHookNames, false, false, false, false, hooks); err != nil && !quiet {
 			fmt.Fprintf(os.Stderr, "\n%s Failed to install jj hooks: %v\n", ui.RenderWarn("⚠"), err)
 			fmt.Fprintf(os.Stderr, "You can try again with: %s\n\n", ui.RenderAccent("bd doctor --fix"))
-		} else if !quiet {
+		} else if err == nil && !quiet {
 			fmt.Printf("  Hooks installed (jujutsu mode - no staging)\n")
+			// GH#5922: the hooks resolve bd from PATH at commit time; warn
+			// when PATH selects another bd than this one (or none). Quiet,
+			// failed and skipped installs stay silent.
+			warnBdPathSelection()
 		}
 	} else {
 		if err := installHooksWithContext(managedHookNames, false, false, false, true, hooks); err != nil && !quiet {
 			fmt.Fprintf(os.Stderr, "\n%s Failed to install git hooks to .beads/hooks/: %v\n", ui.RenderWarn("⚠"), err)
 			fmt.Fprintf(os.Stderr, "You can try again with: %s\n\n", ui.RenderAccent("bd hooks install --beads"))
-		} else if !quiet {
+		} else if err == nil && !quiet {
 			fmt.Printf("  Hooks installed to: .beads/hooks/\n")
+			warnBdPathSelection()
 		}
 	}
 }

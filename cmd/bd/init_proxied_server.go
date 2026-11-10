@@ -660,15 +660,20 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 				if isColocated {
 					if err := hookFS.InstallJJHooks(ctx); err != nil && !in.quiet {
 						fmt.Fprintf(os.Stderr, "\n%s Failed to install jj hooks: %v\n", ui.RenderWarn("⚠"), err)
-					} else if !in.quiet {
+					} else if err == nil && !in.quiet {
 						fmt.Printf("  Hooks installed (jujutsu mode - no staging)\n")
+						// GH#5922: warn when PATH selects another bd than this
+						// one (or none); quiet, failed and skipped installs
+						// stay silent.
+						warnBdPathSelection()
 					}
 				} else {
 					hooksParams := domain.HooksInstallParams{HookNames: managedHookNames, BeadsHooks: true}
 					if err := hookFS.InstallGitHooks(ctx, hooksParams); err != nil && !in.quiet {
 						fmt.Fprintf(os.Stderr, "\n%s Failed to install git hooks to .beads/hooks/: %v\n", ui.RenderWarn("⚠"), err)
-					} else if !in.quiet {
+					} else if err == nil && !in.quiet {
 						fmt.Printf("  Hooks installed to: .beads/hooks/\n")
+						warnBdPathSelection()
 					}
 				}
 			}

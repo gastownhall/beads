@@ -269,6 +269,91 @@ func TestEmbeddedHookChildrenRunTheHookBinary(t *testing.T) {
 	})
 }
 
+// TestEmbeddedHooksInstallBdPathWarning covers the install-time arm of the
+// GH#5922 fix: a successful install compares this bd with the bd PATH
+// selects and warns once on stderr when they differ or PATH holds none,
+// leaving the install's stdout (JSON included) intact. Quiet, failed and
+// skipped installs stay silent.
+func TestEmbeddedHooksInstallBdPathWarning(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	f := newHookChildFixture(t)
+
+	t.Run("explicit install warns when PATH selects another bd", func(t *testing.T) {
+		dir, _, _ := bdInit(t, f.bd, "--prefix", "hcw")
+
+		f.resetDecoy(t)
+		stdout, stderr, err := f.runBD(dir, f.hookChildEnv(dir), "hooks", "install", "--json")
+
+		if err != nil {
+			t.Fatalf("bd hooks install failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		var parsed map[string]any
+		if jsonErr := json.Unmarshal([]byte(stdout), &parsed); jsonErr != nil {
+			t.Fatalf("install stdout is not valid JSON: %v\n%s", jsonErr, stdout)
+		}
+		if ok, _ := parsed["success"].(bool); !ok {
+			t.Errorf("install JSON = %v, want success=true", parsed)
+		}
+		if f.decoyRan(t) {
+			t.Error("the decoy bd ran: the diagnostic compared a PATH candidate by executing it")
+		}
+		if !strings.Contains(stderr, "PATH selects bd at") {
+			t.Errorf("stderr lacks the PATH mismatch diagnostic:\n%s", stderr)
+		} else if !strings.Contains(stderr, f.decoyDir) || !strings.Contains(stderr, f.bd) {
+			t.Errorf("diagnostic must name the PATH copy and this bd's path:\n%s", stderr)
+		}
+		if got := strings.Count(stderr, "beads: warning:"); got != 1 {
+			t.Errorf("stderr carries %d diagnostics, want exactly one:\n%s", got, stderr)
+		}
+	})
+
+	t.Run("explicit install warns when PATH selects no bd", func(t *testing.T) {
+		dir, _, _ := bdInit(t, f.bd, "--prefix", "hcn")
+
+		// PATH holds git but no bd at all.
+		_, stderr, err := f.runBD(dir, f.envWithDecoyPATH(dir, ""), "hooks", "install")
+		if err != nil {
+			t.Fatalf("bd hooks install failed: %v\n%s", err, stderr)
+		}
+		if !strings.Contains(stderr, "PATH has no bd now") {
+			t.Errorf("stderr lacks the missing-bd diagnostic:\n%s", stderr)
+		} else if !strings.Contains(stderr, f.bd) {
+			t.Errorf("diagnostic must name this bd's path:\n%s", stderr)
+		}
+	})
+
+	t.Run("non-quiet init warns when PATH selects another bd", func(t *testing.T) {
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+
+		f.resetDecoy(t)
+		_, stderr, err := f.runBD(dir, f.hookChildEnv(dir), "init", "--prefix", "hcn2", "--non-interactive")
+		if err != nil {
+			t.Fatalf("bd init failed: %v\n%s", err, stderr)
+		}
+		if !strings.Contains(stderr, "PATH selects bd at") {
+			t.Errorf("non-quiet init stderr lacks the PATH mismatch diagnostic:\n%s", stderr)
+		}
+	})
+
+	t.Run("quiet init stays silent", func(t *testing.T) {
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+
+		_, stderr, err := f.runBD(dir, f.hookChildEnv(dir), "init", "--quiet", "--prefix", "hcq2")
+		if err != nil {
+			t.Fatalf("bd init --quiet failed: %v\n%s", err, stderr)
+		}
+		if strings.Contains(stderr, "PATH selects bd at") || strings.Contains(stderr, "PATH has no bd now") {
+			t.Errorf("quiet init warned about PATH selection:\n%s", stderr)
+		}
+	})
+}
+
 // reviseJSONLIssue rewrites one issue's line in the exported JSONL: a new
 // title and an updated_at strictly newer than the store's, which is the shape
 // the upsert import applies.

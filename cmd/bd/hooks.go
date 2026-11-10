@@ -783,6 +783,11 @@ Installed hooks:
 			return HandleErrorRespectJSON("installing hooks: %v", err)
 		}
 
+		// GH#5922: the shims just installed resolve bd from PATH at commit
+		// time; say so on stderr when PATH would select a different bd than
+		// this one (or none). Never on stdout: --json output stays valid.
+		warnBdPathSelection()
+
 		if jsonOutput {
 			output := map[string]interface{}{
 				"success":    true,
