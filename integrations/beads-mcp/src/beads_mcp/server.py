@@ -1050,6 +1050,7 @@ async def show_issue(
     brief_deps: bool = False,
     fields: list[str] | None = None,
     max_description_length: int | None = None,
+    include_comments: bool = False,
 ) -> Issue | BriefIssue | dict[str, Any]:
     """Show detailed information about a specific issue.
 
@@ -1060,8 +1061,11 @@ async def show_issue(
         brief_deps: If True, return full issue but with compact dependencies
         fields: Return only specified fields (custom projections)
         max_description_length: Truncate description to this length
+        include_comments: Also return the comment bodies (ignored with brief)
     """
-    issue = await beads_show_issue(issue_id=issue_id)
+    # Bodies are fetched only when asked for; brief output never carries them.
+    hydrate = not brief and (include_comments or bool(fields and "comments" in fields))
+    issue = await beads_show_issue(issue_id=issue_id, include_comments=hydrate)
 
     if max_description_length:
         issue = _truncate_description(issue, max_description_length)

@@ -225,3 +225,95 @@ async def test_non_comment_projection_and_invalid_fields_unchanged() -> None:
 
     with pytest.raises(ValueError, match="Invalid field"):
         await _collection("list", rec, fields=["id", "comment_bodies"])
+
+
+# AC-2: non-brief show hydrates bodies on request, in one show command.
+
+HYDRATED = _issue(comments=TWO_COMMENTS, comment_count=2)
+
+
+def _assert_one_hydrating_show(rec: _Recorder) -> None:
+    assert len(rec.calls) == 1
+    argv = rec.calls[0]
+    assert argv[1] == "show"
+    assert "--include-comments" in argv
+    # The flag goes before the operand separator, the issue id after it.
+    assert argv.index("--include-comments") < argv.index("--") < argv.index("bd-1")
+    assert argv[-1] == "bd-1"
+
+
+@pytest.mark.asyncio
+async def test_client_show_include_comments_passes_flag_and_keeps_order() -> None:
+    rec = _Recorder([HYDRATED])
+
+    with rec.patched():
+        issue = await rec.client.show(ShowIssueParams(issue_id="bd-1", include_comments=True))
+
+    _assert_one_hydrating_show(rec)
+    assert [(c.id, c.text) for c in issue.comments] == [
+        ("c-first", "first comment"),
+        ("c-second", "second comment"),
+    ]
+    assert issue.comment_count == 2
+    assert issue.comments_omitted is False
+
+
+@pytest.mark.asyncio
+async def test_tools_show_forwards_include_comments() -> None:
+    from beads_mcp.tools import beads_show_issue
+
+    rec = _Recorder([HYDRATED])
+    with rec.patched(), rec.tools_patched():
+        issue = await beads_show_issue(issue_id="bd-1", include_comments=True)
+
+    _assert_one_hydrating_show(rec)
+    assert issue.comment_count == 2
+
+
+@pytest.mark.asyncio
+async def test_mcp_show_include_comments_returns_full_chronology() -> None:
+    rec = _Recorder([HYDRATED])
+
+    with rec.patched(), rec.tools_patched():
+        issue = await server.show_issue(issue_id="bd-1", include_comments=True)
+
+    _assert_one_hydrating_show(rec)
+    assert [c.text for c in issue.comments] == ["first comment", "second comment"]
+    assert issue.comment_count == 2
+    assert issue.comments_omitted is False
+
+
+@pytest.mark.asyncio
+async def test_mcp_show_comments_field_hydrates_projection() -> None:
+    rec = _Recorder([HYDRATED])
+
+    with rec.patched(), rec.tools_patched():
+        result = await server.show_issue(issue_id="bd-1", fields=["comments"])
+
+    _assert_one_hydrating_show(rec)
+    assert set(result) == {"comments", "comments_omitted"}
+    assert [c["text"] for c in result["comments"]] == ["first comment", "second comment"]
+    assert result["comments_omitted"] is False
+
+
+@pytest.mark.asyncio
+async def test_mcp_show_include_comments_propagates_cli_errors() -> None:
+    from beads_mcp.bd_client import BdCommandError
+
+    rec = _Recorder([])
+
+    async def failing_exec(*argv: str, **_kwargs: Any) -> MagicMock:
+        rec.calls.append(argv)
+        process = MagicMock()
+        process.returncode = 1
+        process.communicate = AsyncMock(return_value=(b"", b"Error: issue not found"))
+        return process
+
+    with (
+        patch("asyncio.create_subprocess_exec", side_effect=failing_exec),
+        rec.tools_patched(),
+        pytest.raises(BdCommandError),
+    ):
+        await server.show_issue(issue_id="bd-1", include_comments=True)
+
+    _assert_one_hydrating_show(rec)
