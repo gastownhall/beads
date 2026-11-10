@@ -151,3 +151,71 @@ func RunBatchApplyStateChangeOnATemplateHonorsAllowTemplate(t *testing.T, ctx co
 		t.Errorf("%s is no longer a template after an AllowTemplate state change", template)
 	}
 }
+
+// RunBatchApplyStateChangeRefusedAtTheEventOrItsEdgeWritesNothing pins the
+// other half of the state-change promise: when the event create (item 0) or
+// its parent-child edge (item 1) is refused, ApplyBatch returns that item's
+// *ItemError, the subject's labels are untouched, and no event, edge or
+// history entry survives. Each refusal is deterministic on every backend: the
+// create takes an occupied id (ErrAlreadyExists), and the edge runs from a
+// dotted grandchild id to its grandparent, which the dotted-id hierarchy rule
+// refuses only once the create has minted it.
+func RunBatchApplyStateChangeRefusedAtTheEventOrItsEdgeWritesNothing(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
+	t.Helper()
+	subject := fixture.IssuePrefix + "-screfuse"
+	occupied := fixture.IssuePrefix + "-screfuse-occupied"
+	stateChangeSeedSubject(t, ctx, fixture, subject, false)
+	batchApplySeedIssue(t, ctx, fixture, subject+".1", types.StatusOpen)
+	batchApplySeedIssue(t, ctx, fixture, occupied, types.StatusOpen)
+	batchApplySettle(t, ctx, fixture)
+	observeHistory := fixture.CountHistory != nil && fixture.CommitPending != nil
+
+	for _, refused := range []struct {
+		name, event string
+		index       int
+		kind        publicops.ItemKind
+		want        error
+	}{
+		{"the event create", occupied, 0, publicops.ItemCreate, publicops.ErrAlreadyExists},
+		{"the parent edge", subject + ".1.1", 1, publicops.ItemDepAdd, publicops.ErrValidation},
+	} {
+		t.Run(refused.name, func(t *testing.T) {
+			historyBefore := 0
+			if observeHistory {
+				historyBefore = batchApplyHistory(t, ctx, fixture)
+			}
+			_, err := fixture.BatchApplier.ApplyBatch(ctx,
+				stateChangeBatchRequest(refused.event, subject, "patrol:muted", "patrol:active", false))
+			if !errors.Is(err, refused.want) {
+				t.Errorf("error = %v, want %v", err, refused.want)
+			}
+			var itemErr *publicops.ItemError
+			if !errors.As(err, &itemErr) {
+				t.Fatalf("error = %v, want an *ItemError naming %s", err, refused.name)
+			}
+			if itemErr.Index != refused.index || itemErr.Kind != refused.kind {
+				t.Errorf("ItemError = %#v, want Index %d and Kind %q", itemErr, refused.index, refused.kind)
+			}
+			if got := stateChangeLabelCount(t, ctx, fixture, subject, "patrol:active"); got != 1 {
+				t.Errorf("%s carries patrol:active %d times after the refusal, want 1", subject, got)
+			}
+			if got := stateChangeLabelCount(t, ctx, fixture, subject, "patrol:muted"); got != 0 {
+				t.Errorf("%s carries patrol:muted %d times after the refusal, want 0", subject, got)
+			}
+			if got := batchApplyCount(t, ctx, fixture,
+				"SELECT (SELECT COUNT(*) FROM issues WHERE id = ? AND issue_type = 'event') + (SELECT COUNT(*) FROM wisps WHERE id = ?)",
+				[]any{refused.event, refused.event}); got != 0 {
+				t.Errorf("%d event row(s) %s survive the refusal, want none", got, refused.event)
+			}
+			if got := stateChangeParentEdges(t, ctx, fixture, refused.event, subject); got != 0 {
+				t.Errorf("%d parent-child edge(s) %s -> %s survive the refusal, want none", got, refused.event, subject)
+			}
+			if observeHistory {
+				if got := batchApplyHistory(t, ctx, fixture) - historyBefore; got != 0 {
+					t.Errorf("the refused state change recorded %d history entries, want none", got)
+				}
+			}
+		})
+	}
+	assertBatchApplyRowCount(t, ctx, fixture, "issues", subject+".1.1", 0)
+}

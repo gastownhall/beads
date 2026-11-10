@@ -65,6 +65,7 @@ var roleContractCases = []roleContract{
 		RunBatchApplyAppliesTheDefaultPriority,
 		RunBatchApplyCarriesTheGateMembers,
 		RunBatchApplyStateChangeOnATemplateHonorsAllowTemplate,
+		RunBatchApplyStateChangeRefusedAtTheEventOrItsEdgeWritesNothing,
 	),
 
 	roleCases("BatchCloser", "BatchCloser()", oncePerRole,
