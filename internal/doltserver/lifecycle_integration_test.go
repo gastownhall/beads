@@ -121,7 +121,7 @@ func waitForPortClosed(t *testing.T, port int, timeout time.Duration) {
 		if err != nil {
 			return
 		}
-		_ = conn.Close()
+		_ = doltserver.DrainAndCloseProbe(conn)
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("server port %d still accepting connections after %v", port, timeout)

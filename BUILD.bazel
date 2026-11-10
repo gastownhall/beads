@@ -241,6 +241,7 @@ go_test(
     ],
     embed = [":beads"],
     deps = [
+        "//internal/doltserver",
         "//internal/hooks",
         "//internal/storage",
         "//internal/storage/backends",

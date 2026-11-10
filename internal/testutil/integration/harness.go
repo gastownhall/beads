@@ -10,7 +10,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -329,22 +328,6 @@ func IsProcessAlive(pid int) bool {
 		return false
 	}
 	return p.Signal(syscall.Signal(0)) == nil
-}
-
-// WaitForPort polls until a TCP connection to host:port succeeds or timeout expires.
-func WaitForPort(t *testing.T, host string, port int, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	addr := net.JoinHostPort(host, strconv.Itoa(port))
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
-		if err == nil {
-			_ = conn.Close()
-			return
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	t.Fatalf("WaitForPort: %s not reachable after %v", addr, timeout)
 }
 
 // ReadPIDFile reads and parses a PID file, returning 0 if missing or corrupt.

@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/doltserver"
 )
 
 // TestPullWithAutoResolve_BranchTrackingSuccess is the end-to-end regression
@@ -151,7 +153,13 @@ func startDoltServer(t *testing.T, dir string, sqlPort, remotesAPIPort int) func
 			}
 			conn, err := net.DialTimeout("tcp", addr, time.Second)
 			if err == nil {
-				conn.Close()
+				// Drain dolt's MySQL greeting before closing (#5589); the
+				// remotesapi port speaks HTTP and sends none.
+				if port == sqlPort {
+					_ = doltserver.DrainAndCloseProbe(conn)
+				} else {
+					conn.Close()
+				}
 				break
 			}
 			time.Sleep(200 * time.Millisecond)

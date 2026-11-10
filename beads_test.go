@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -60,7 +61,7 @@ func skipIfNoDoltServer(t *testing.T) {
 	if err != nil {
 		t.Skipf("Dolt server not running on %s, skipping test", addr)
 	}
-	_ = conn.Close()
+	_ = doltserver.DrainAndCloseProbe(conn)
 }
 
 func TestOpen(t *testing.T) {

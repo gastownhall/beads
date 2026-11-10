@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 // holdLoopbackPort binds a loopback port for the rest of the test, so a dolt
@@ -50,7 +52,7 @@ func TestStartDoltSQLServer_RetriesOnFreshPortAfterBindLoss(t *testing.T) {
 	if err != nil {
 		t.Fatalf("server on port %d not reachable: %v", srv.port, err)
 	}
-	_ = conn.Close()
+	_ = doltutil.DrainAndCloseProbe(conn)
 }
 
 func TestStartDoltSQLServer_BoundedRetriesReportDoltOutput(t *testing.T) {

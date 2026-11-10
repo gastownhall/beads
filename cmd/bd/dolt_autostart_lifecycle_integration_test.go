@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -121,7 +122,7 @@ func TestE2E_AutoStartedRepoLocalServerPersistsAcrossCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected auto-started server to keep listening on %s: %v", port, err)
 	}
-	_ = conn.Close()
+	_ = doltserver.DrainAndCloseProbe(conn)
 
 	stopOut, stopErr := runBDExecWithBinary(t, bdBinary, tmpDir, env, "dolt", "stop")
 	if stopErr != nil {

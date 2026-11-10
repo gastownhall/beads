@@ -15,6 +15,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/testutil/integration"
 )
@@ -94,7 +95,7 @@ func TestUnixSocket_ConnectAndQuery(t *testing.T) {
 	for time.Now().Before(deadline) {
 		conn, err := net.DialTimeout("unix", socketPath, 500*time.Millisecond)
 		if err == nil {
-			_ = conn.Close()
+			_ = doltserver.DrainAndCloseProbe(conn)
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
