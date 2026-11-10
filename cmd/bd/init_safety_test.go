@@ -1459,3 +1459,171 @@ func TestInitGitOriginNoAdoptOptsOut(t *testing.T) {
 		}
 	})
 }
+
+// TestInitGitOriginNewFlagsRetainExistingGuards pins that the two new #6099
+// flags compose with — but never bypass — the existing init-safety guards:
+// --yes consents to adoption only (never to divergence or destroy-token
+// flows), and --no-adopt never defangs a guard for a remote the caller
+// named explicitly or configured. The decision-level rows live in the
+// guard matrix (derived/yes+force, derived/yes+force+discard,
+// explicit/no-adopt); this is the composition at the CLI, with exit codes.
+func TestInitGitOriginNewFlagsRetainExistingGuards(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	// newBareWithDoltData builds a bare remote with synthetic refs/dolt/data.
+	newBareWithDoltData := func(t *testing.T) string {
+		t.Helper()
+		bareDir := filepath.Join(t.TempDir(), "bare.git")
+		runGitForBootstrapTest(t, "", "init", "--bare", bareDir)
+		sourceDir := t.TempDir()
+		runGitForBootstrapTest(t, sourceDir, "init", "-b", "main")
+		runGitForBootstrapTest(t, sourceDir, "config", "user.email", "test@test.com")
+		runGitForBootstrapTest(t, sourceDir, "config", "user.name", "Test User")
+		runGitForBootstrapTest(t, sourceDir, "commit", "--allow-empty", "-m", "init")
+		runGitForBootstrapTest(t, sourceDir, "remote", "add", "origin", bareDir)
+		runGitForBootstrapTest(t, sourceDir, "push", "origin", "main")
+		runGitForBootstrapTest(t, sourceDir, "push", "origin", "HEAD:refs/dolt/data")
+		return bareDir
+	}
+	newCloneWithOrigin := func(t *testing.T, origin string) string {
+		t.Helper()
+		cloneDir := t.TempDir()
+		runGitForBootstrapTest(t, cloneDir, "init", "-b", "main")
+		runGitForBootstrapTest(t, cloneDir, "remote", "add", "origin", origin)
+		runGitForBootstrapTest(t, cloneDir, "config", "core.hooksPath", ".git/hooks")
+		return cloneDir
+	}
+
+	t.Run("unreachable origin with --yes keeps the fresh-local fallback", func(t *testing.T) {
+		// --yes is consent to ADOPT, and an UNKNOWN probe still must not
+		// convert a plain init into a clone against an unreachable origin.
+		cloneDir := newCloneWithOrigin(t, filepath.Join(t.TempDir(), "does-not-exist.git"))
+		cmd := exec.Command(bdBin, "init", "--prefix", "yesx", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents", "--yes")
+		cmd.Dir = cloneDir
+		cmd.Env = hermeticInitEnv(t.TempDir())
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		cmd.Stderr = &out
+		if err := cmd.Run(); err != nil {
+			lower := strings.ToLower(out.String())
+			if strings.Contains(lower, "dolt") && (strings.Contains(lower, "not supported") || strings.Contains(lower, "not available") || strings.Contains(lower, "unknown")) {
+				t.Skipf("dolt backend not available: %s", out.String())
+			}
+			t.Fatalf("--yes with an unreachable origin should keep the fresh-local fallback: %v\n%s", err, out.String())
+		}
+		if strings.Contains(out.String(), "Bootstrapped from remote") {
+			t.Errorf("--yes must not convert UNKNOWN into a bootstrap attempt:\n%s", out.String())
+		}
+		if _, err := os.Stat(filepath.Join(cloneDir, ".beads")); err != nil {
+			t.Fatalf("--yes fresh-local fallback should create a workspace: %v\n%s", err, out.String())
+		}
+	})
+
+	t.Run("configured remote without data with --no-adopt succeeds", func(t *testing.T) {
+		// A configured sync.remote names its source: --no-adopt opts out of
+		// DERIVATION only, so a data-free configured remote keeps flowing
+		// exactly as before (the GH#4861 shape).
+		bareDir := filepath.Join(t.TempDir(), "empty.git")
+		runGitForBootstrapTest(t, "", "init", "--bare", bareDir)
+		workDir := t.TempDir()
+		runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+		runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+
+		cmd := exec.Command(bdBin, "init", "--prefix", "cfg", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents", "--no-adopt")
+		cmd.Dir = workDir
+		cmd.Env = hermeticInitEnv(t.TempDir(), "BD_SYNC_REMOTE="+bareDir)
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		cmd.Stderr = &out
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("--no-adopt must not block a configured sync.remote init: %v\n%s", err, out.String())
+		}
+		if _, err := os.Stat(filepath.Join(workDir, ".beads")); err != nil {
+			t.Fatalf("configured-remote init should create a workspace: %v\n%s", err, out.String())
+		}
+	})
+
+	t.Run("--yes does not bypass the divergence guard", func(t *testing.T) {
+		cloneDir := newCloneWithOrigin(t, newBareWithDoltData(t))
+		cmd := exec.Command(bdBin, "init", "--force", "--yes", "--prefix", "yf", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+		cmd.Dir = cloneDir
+		cmd.Env = hermeticInitEnv(t.TempDir())
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		if err == nil {
+			t.Fatalf("--yes --force succeeded; consent must not authorize divergence. stderr:\n%s", stderr.String())
+		}
+		exitErr, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("non-exec-exit error: %v\nstderr:\n%s", err, stderr.String())
+		}
+		if code := exitErr.ExitCode(); code != ExitRemoteDivergenceRefused {
+			t.Errorf("exit code = %d, want %d (divergence guard outranks --yes)", code, ExitRemoteDivergenceRefused)
+		}
+	})
+
+	t.Run("--yes does not bypass the destroy-token guard", func(t *testing.T) {
+		cloneDir := newCloneWithOrigin(t, newBareWithDoltData(t))
+		cmd := exec.Command(bdBin, "init", "--force", "--yes", "--discard-remote", "--prefix", "yt", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+		cmd.Dir = cloneDir
+		cmd.Env = hermeticInitEnv(t.TempDir())
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		if err == nil {
+			t.Fatalf("--yes --discard-remote succeeded without a token; consent is not a destroy token. stderr:\n%s", stderr.String())
+		}
+		exitErr, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("non-exec-exit error: %v\nstderr:\n%s", err, stderr.String())
+		}
+		if code := exitErr.ExitCode(); code != ExitDestroyTokenMissing {
+			t.Errorf("exit code = %d, want %d (destroy-token guard outranks --yes)", code, ExitDestroyTokenMissing)
+		}
+	})
+
+	t.Run("--no-adopt leaves an explicit --remote untouched", func(t *testing.T) {
+		// An explicit --remote is bootstrap-from intent by itself
+		// (init.go wires it unconditionally); --no-adopt opts out of
+		// DERIVATION only, so the explicit route must behave identically
+		// with and without the flag. Equivalence is the assertion: same
+		// exit, same sync.remote wiring.
+		bareURL := newBareWithDoltData(t)
+		run := func(t *testing.T, args ...string) (int, string) {
+			t.Helper()
+			workDir := t.TempDir()
+			runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+			runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+			cmd := exec.Command(bdBin, append([]string{"init", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents"}, args...)...)
+			cmd.Dir = workDir
+			cmd.Env = hermeticInitEnv(t.TempDir())
+			var out bytes.Buffer
+			cmd.Stdout = &out
+			cmd.Stderr = &out
+			err := cmd.Run()
+			configYAML, readErr := os.ReadFile(filepath.Join(workDir, ".beads", "config.yaml"))
+			syncRemote := ""
+			if readErr == nil && strings.Contains(string(configYAML), bareURL) {
+				syncRemote = bareURL
+			}
+			if err == nil {
+				return 0, syncRemote
+			}
+			exitErr, ok := err.(*exec.ExitError)
+			if !ok {
+				t.Fatalf("non-exec-exit error: %v\n%s", err, out.String())
+			}
+			return exitErr.ExitCode(), syncRemote
+		}
+
+		wantCode, wantSync := run(t, "--remote", bareURL, "--prefix", "na0")
+		gotCode, gotSync := run(t, "--remote", bareURL, "--no-adopt", "--prefix", "na1")
+		if gotCode != wantCode {
+			t.Errorf("--no-adopt changed the explicit --remote exit: %d, want %d (unchanged)", gotCode, wantCode)
+		}
+		if gotSync != wantSync {
+			t.Errorf("--no-adopt changed the explicit --remote sync.remote wiring: %q, want %q (unchanged)", gotSync, wantSync)
+		}
+	})
+}
