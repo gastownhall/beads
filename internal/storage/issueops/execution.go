@@ -198,7 +198,9 @@ func executeUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 	// first.
 	changedAny := false
 	if attempt.Claim {
-		claimed, err := claimIssueInTx(ctx, tx, attempt.IssueID, attempt.Actor, false)
+		// Enforce the claim-blocked guard unless the request forced it, the one
+		// override this policy has (UpdateRequest.ForceClaimBlocked).
+		claimed, err := claimIssueInTx(ctx, tx, attempt.IssueID, attempt.Actor, false, !attempt.ForceClaimBlocked)
 		if err != nil {
 			return publicops.UpdateResult{}, nil, err
 		}

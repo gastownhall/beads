@@ -297,6 +297,16 @@ type UpdateRequest struct {
 	// It is the update-side spelling of CloseRequest.Force; a command adapter
 	// that maps one flag to both spells both.
 	ForceClosePolicy bool
+	// ForceClaimBlocked bypasses only the blocked-claim refusal — the
+	// live-direct-local-blocker guard the claim runs after its compare-and-set
+	// wins (ErrClaimBlocked), the same predicate close policy applies. The zero
+	// value enforces the guard. It has no effect without Claim, and a request
+	// that sets it without one is invalid. It never bypasses the claim's own
+	// eligibility rules (a foreign holder still refuses with ErrAlreadyClaimed,
+	// even with force), the guards, or the unresolved-`external:`-reference
+	// claim refusal; a command adapter with a single --force flag maps that
+	// flag to this field for a claim only.
+	ForceClaimBlocked bool
 	// AllowTemplate says the caller edits a template deliberately, so the
 	// template read-only refusal (*TemplateReadOnlyError) stands down for this
 	// request. bd label and bd set-state set it to keep their pre-guard

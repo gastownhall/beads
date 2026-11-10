@@ -132,6 +132,14 @@ var ErrPrefixMismatch = errors.New("prefix mismatch")
 // or an open blocking gate). Bypass with CloseIssueOptions.Force.
 var ErrCloseBlocked = errors.New("cannot close blocked issue")
 
+// ErrClaimBlocked is returned by Lifecycle.Update's claim (UpdateRequest.Claim)
+// when the issue has a LIVE direct local blocker — the same predicate that
+// refuses a close (is_blocked set and at least one live direct blocker), read
+// in the claim's own transaction after its compare-and-set won. Bypass with
+// UpdateRequest.ForceClaimBlocked (`bd update --claim --force`); the override
+// covers local blockers only, never unresolved `external:` references.
+var ErrClaimBlocked = errors.New("cannot claim blocked issue")
+
 // Blocker is one live blocker named by a BlockedError: a local issue id, or an
 // `external:<project>:<capability>` reference, with the blocking edge's type
 // when the refusal knew it.

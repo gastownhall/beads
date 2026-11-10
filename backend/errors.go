@@ -22,6 +22,7 @@ var (
 	ErrAlreadyExists       = storage.ErrAlreadyExists
 	ErrAssigneeMismatch    = storage.ErrAssigneeMismatch
 	ErrCloseBlocked        = storage.ErrCloseBlocked
+	ErrClaimBlocked        = storage.ErrClaimBlocked
 	ErrCloseOpenChildren   = storage.ErrCloseOpenChildren
 	ErrCommitIndeterminate = storage.ErrCommitIndeterminate
 	ErrIdempotencyExpired  = storage.ErrIdempotencyExpired

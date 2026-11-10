@@ -1031,3 +1031,67 @@ func TestEmbeddedUpdateConcurrent(t *testing.T) {
 	t.Logf("created and updated %d issues across %d/%d successful workers, %d in DB",
 		len(allIDs), successes, numWorkers, stats.TotalIssues)
 }
+
+// bd-ltvqa9: `bd update --claim` must refuse an issue with an open blocker,
+// the way `bd close` does, and leave it open and unassigned.
+func TestEmbeddedUpdateClaimRefusesBlockedIssue(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "cb")
+
+	blocker := bdCreate(t, bd, dir, "blocker", "--type", "task")
+	blocked := bdCreate(t, bd, dir, "blocked", "--type", "task")
+	bdRunOK(t, bd, dir, "dep", "add", blocked.ID, blocker.ID)
+
+	out, err := bdRunWithFlockRetry(t, bd, dir, "update", blocked.ID, "--claim", "--actor", "w1")
+	if err == nil {
+		t.Errorf("claim of blocked issue %s succeeded, want refusal naming blocker %s\n%s", blocked.ID, blocker.ID, out)
+	} else if !strings.Contains(string(out), blocker.ID) {
+		t.Errorf("refusal should name blocker %s, got: %s", blocker.ID, out)
+	}
+	got := bdShow(t, bd, dir, blocked.ID)
+	if got.Status != types.StatusOpen || got.Assignee != "" {
+		t.Errorf("blocked issue after refused claim: status=%s assignee=%q, want open and unassigned", got.Status, got.Assignee)
+	}
+}
+
+// bd-ltvqa9 AC-1: the blocked-claim refusal names the blocker, carries the
+// --force hint, and — for a claim riding a field patch — commits nothing: the
+// patch, the claim bookkeeping and the blocker all stay as they were.
+func TestEmbeddedUpdateClaimBlockedRefusalLeavesIssueUntouched(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "cb")
+
+	blocker := bdCreate(t, bd, dir, "blocker", "--type", "task")
+	blocked := bdCreate(t, bd, dir, "blocked", "--type", "task")
+	bdRunOK(t, bd, dir, "dep", "add", blocked.ID, blocker.ID)
+
+	out, err := bdRunWithFlockRetry(t, bd, dir, "update", blocked.ID, "--claim", "--actor", "w1", "--title", "patched title")
+	if err == nil {
+		t.Fatalf("claim+patch of blocked issue %s succeeded, want refusal\n%s", blocked.ID, out)
+	}
+	for _, want := range []string{"cannot claim blocked issue", blocked.ID, blocker.ID, "use --force to override"} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("refusal should contain %q, got: %s", want, out)
+		}
+	}
+	got := bdShow(t, bd, dir, blocked.ID)
+	if got.Status != types.StatusOpen || got.Assignee != "" {
+		t.Errorf("blocked issue after refused claim+patch: status=%s assignee=%q, want open and unassigned", got.Status, got.Assignee)
+	}
+	if got.Title != "blocked" {
+		t.Errorf("refused claim's patch committed: title=%q, want the original", got.Title)
+	}
+	if gotBlocker := bdShow(t, bd, dir, blocker.ID); gotBlocker.Status != types.StatusOpen {
+		t.Errorf("blocker changed by refused claim: status=%s", gotBlocker.Status)
+	}
+}

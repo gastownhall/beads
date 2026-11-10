@@ -143,6 +143,11 @@ bd update bd-42 --add-label urgent
 bd update bd-42 --claim --priority 1 --add-label "in-review"
 ```
 
+`--claim` refuses an issue that a live blocker still blocks — the same guard
+`bd close` applies, so `bd ready` and `bd update --claim` now agree on what is
+workable. The refusal names the blocker and writes nothing; `--force` claims
+anyway (`bd update bd-42 --claim --force`) when the reordering is deliberate.
+
 ## Closing Issues
 
 ```bash

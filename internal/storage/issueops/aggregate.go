@@ -104,6 +104,13 @@ func ValidateUpdateRequest(request publicops.UpdateRequest) error {
 	if request.ForceNotesOverwrite && !request.Patch.Notes.Set {
 		return fmt.Errorf("%w: invalid forced notes overwrite", storage.ErrValidation)
 	}
+	// The claim-blocked override means nothing without the claim it overrides,
+	// so spelling it alone is an invalid REQUEST, refused before any mutation —
+	// the same shape as the forced notes overwrite above. Both update paths
+	// (issueops and the unit of work) run this check before their engines.
+	if request.ForceClaimBlocked && !request.Claim {
+		return fmt.Errorf("%w: invalid forced blocked-claim override", storage.ErrValidation)
+	}
 	// Checked HERE, ahead of the notes-overwrite fence in ExecuteUpdate: a
 	// patch setting both Notes and AppendNotes is an invalid REQUEST, not a
 	// refused overwrite, and must report ErrValidation even when the notes

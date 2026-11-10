@@ -54,8 +54,9 @@ type commandUpdateMutation struct {
 // runCommandUpdateMutation maps a command update into its lifecycle request and
 // returns the lifecycle result unchanged. It is the ONE place the command's
 // flag semantics become a request — in particular the one --force that means
-// three overrides, whose assignee half only applies to an assignee edit and
-// whose notes half only applies to a notes edit. The assignee half is never
+// four overrides, whose assignee half only applies to an assignee edit, whose
+// notes half only applies to a notes edit, and whose claim-blocked half only
+// applies to a claim. The assignee half is never
 // set alongside --if-assignee (ExpectedAssignee): the contract rejects that
 // combination outright. The notes half carries no such restriction — it is
 // deliberately independent of ExpectedAssignee — so --force paired with
@@ -69,6 +70,7 @@ func runCommandUpdateMutation(ctx context.Context, updater commandIssueUpdater, 
 		ForceAssigneeTransfer: mutation.force && mutation.patch.Assignee.Set && mutation.expectedAssignee == nil,
 		ForceClosePolicy:      mutation.force,
 		ForceNotesOverwrite:   mutation.force && mutation.patch.Notes.Set,
+		ForceClaimBlocked:     mutation.force && mutation.claim,
 		ExpectedAssignee:      mutation.expectedAssignee,
 		ExpectedStatus:        mutation.expectedStatus,
 		ExpectedVersion:       mutation.expectedVersion,
@@ -607,6 +609,12 @@ pointless).`,
 				if refusal, ok := templateReadOnlyRefusal(id, updateErr); ok {
 					failureText = refusal.Error()
 					fmt.Fprintf(os.Stderr, "%s\n", refusal)
+				} else if refusal, ok := claimBlockedRefusal(updateErr); ok {
+					// The claim-blocked guard refused inside the mutation
+					// transaction and the transaction rolled back. A policy
+					// refusal: exit 1, never GuardMismatch/13.
+					failureText = refusal.Error()
+					fmt.Fprintf(os.Stderr, "%s\n", refusal)
 				} else if errors.Is(updateErr, issueops.ErrNotesOverwrite) {
 					// The contract's AuthorizeNotesOverwrite fence refused
 					// inside the mutation transaction. Print the advice, not
@@ -877,6 +885,25 @@ func replacesExistingNotes(existing string, fields map[string]any) bool {
 	return replacing && issueops.NotesReplacement(existing, newNotes)
 }
 
+// claimBlockedRefusal renders the ErrClaimBlocked policy refusal for either
+// `bd update` route: the typed BlockedError's own sentence — "cannot claim
+// blocked issue: <id> is blocked by [<blockers>]" — plus the --force override
+// hint, the same text the direct route prints, the proxied route records on
+// its per-id failure, and the C0 report specified. The blocker list comes from
+// the typed error the engine raised inside the refusing transaction, never
+// from parsing prose. The close-policy refusal (ErrCloseBlocked) does NOT
+// match here, so its copy keeps its own hint.
+func claimBlockedRefusal(err error) (error, bool) {
+	if !errors.Is(err, issueops.ErrClaimBlocked) {
+		return nil, false
+	}
+	var blocked *issueops.BlockedError
+	if errors.As(err, &blocked) {
+		return fmt.Errorf("%v (use --force to override)", blocked), true
+	}
+	return fmt.Errorf("%v (use --force to override)", err), true
+}
+
 // errNotesOverwriteRefusal is the user-facing advice both `bd update` routes
 // (the embedded path here and the proxied path in update_proxied_server.go)
 // print when the contract's AuthorizeNotesOverwrite fence refuses the
@@ -1105,8 +1132,9 @@ func init() {
 	updateCmd.Flags().StringSlice("set-labels", nil, "Set labels, replacing all existing (repeatable)")
 	updateCmd.Flags().String("parent", "", "New parent issue ID (reparents the issue, use empty string to remove parent)")
 	updateCmd.Flags().Bool("claim", false, "Atomically claim the issue (sets assignee to you, status to in_progress; idempotent if already claimed by you; issues assigned to a pool alias listed in the claim.pools config are claimable too)")
-	// Overrides the live-claim reassign fence (bd-98s5c) and close policy.
-	updateCmd.Flags().Bool("force", false, "Override refusals: let -a/--assignee overwrite another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim), let -s/--status move the issue into closed (or a configured done status) despite open children or a live blocker (same as bd close --force), and let --notes overwrite existing non-empty notes (use --append-notes to preserve history instead)")
+	// Overrides the live-claim reassign fence (bd-98s5c), the blocked-claim
+	// guard and close policy.
+	updateCmd.Flags().Bool("force", false, "Override refusals: let -a/--assignee overwrite another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim), let --claim take an issue that a live local blocker still blocks (deliberate reordering only; unresolved external references stay refused), let -s/--status move the issue into closed (or a configured done status) despite open children or a live blocker (same as bd close --force), and let --notes overwrite existing non-empty notes (use --append-notes to preserve history instead)")
 	// Conditional (compare-and-set) update guards (bd-wsqvw)
 	updateCmd.Flags().String("if-assignee", "", "Apply the update only if the current assignee equals this value (--if-assignee '' requires unassigned); a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")
 	updateCmd.Flags().String("if-status", "", "Apply the update only if the current status equals this value; a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")

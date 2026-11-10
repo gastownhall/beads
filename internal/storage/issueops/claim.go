@@ -34,7 +34,30 @@ type ClaimResult struct {
 // A claim that wrote the row mints one version row (assignee, status and
 // started_at are durable state); the idempotent re-claim mints nothing.
 func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*ClaimResult, error) {
-	return claimIssueInTx(ctx, tx, id, actor, true)
+	return claimIssueInTx(ctx, tx, id, actor, true, false)
+}
+
+// EnforceClaimPolicyInTx refuses a claim whose issue has a LIVE direct local
+// blocker, the exact predicate close policy applies (isBlockedByInTx: blocked
+// && len(blockers) > 0, direct blocks/waits-for/conditional-blocks edges whose
+// local target is neither closed nor pinned). It is the claim half of
+// EnforceClosePolicyInTx: same predicate, own sentinel, so a caller can tell a
+// refused claim from a refused close while the blocker list stays typed.
+//
+// A stale is_blocked flag without live edges does not refuse (the predicate
+// self-heals against it), and a read failure propagates rather than being read
+// as permission. The caller runs it inside the claim's own transaction, after
+// the CAS has won, so a refusal rolls the claim back with that transaction —
+// nothing commits.
+func EnforceClaimPolicyInTx(ctx context.Context, tx DBTX, id string) error {
+	blocked, blockers, err := isBlockedByInTx(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	if blocked && len(blockers) > 0 {
+		return &publicops.BlockedError{IssueID: id, Blockers: blockers, Err: storage.ErrClaimBlocked}
+	}
+	return nil
 }
 
 // claimIssueInTx is the body of ClaimIssueInTx. mintVersion controls whether a
@@ -44,8 +67,15 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 // mints exactly once after the last of them, so the version carries the final
 // state and one guarded update never records two.
 //
+// refuseBlocked runs EnforceClaimPolicyInTx after the CAS: only the lifecycle
+// update claim sets it (unless ForceClaimBlocked), so the raw claim entry points
+// keep their unchecked behavior. Checked only after the zero-row branch, so a
+// same-actor idempotent re-claim of an issue that later gained a blocker still
+// succeeds without claim writes, and a foreign holder still reports the
+// conflict that lost the CAS rather than a blocker.
+//
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func claimIssueInTx(ctx context.Context, tx DBTX, id string, actor string, mintVersion bool) (*ClaimResult, error) {
+func claimIssueInTx(ctx context.Context, tx DBTX, id string, actor string, mintVersion, refuseBlocked bool) (*ClaimResult, error) {
 	// The CAS below writes assignee = actor. actor is user-settable (--actor /
 	// BEADS_ACTOR), so bound it against the VARCHAR(255) assignee column up front
 	// and return a typed ErrFieldTooLong rather than a raw backend error.
@@ -203,6 +233,17 @@ func claimIssueInTx(ctx context.Context, tx DBTX, id string, actor string, mintV
 			Assignee: assignee,
 			Status:   currentStatus,
 			Err:      refusal,
+		}
+	}
+
+	// The claim-blocked guard, after the CAS won but before the first lease,
+	// event, journal or version write: a refusal here leaves the transaction
+	// to roll the claim back, so nothing commits (EnforceClaimPolicyInTx
+	// documents the predicate). Checked only on the lifecycle update claim
+	// path, and bypassed by ForceClaimBlocked.
+	if refuseBlocked {
+		if err := EnforceClaimPolicyInTx(ctx, tx, id); err != nil {
+			return nil, err
 		}
 	}
 
