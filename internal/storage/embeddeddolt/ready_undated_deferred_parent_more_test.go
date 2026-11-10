@@ -123,3 +123,22 @@ func TestReadyIncludeDeferredShowsChildrenOfUndatedDeferredParent(t *testing.T) 
 	parent := "ui-p"
 	f.wantReady(types.WorkFilter{IncludeDeferred: true, ParentID: &parent}, "ui-c")
 }
+
+// TestReadyShowsChildrenAfterUndatedDeferredParentIsUndeferred: moving the
+// parent back to open, still with no date, returns its child to ready work.
+func TestReadyShowsChildrenAfterUndatedDeferredParentIsUndeferred(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	f := undatedDeferredFixture{t: t, te: newTestEnv(t, "uu")}
+
+	f.create("uu-p", false)
+	f.create("uu-c", false)
+	f.create("uu-free", false)
+	f.child("uu-c", "uu-p")
+	f.setStatus("uu-p", types.StatusDeferred)
+	f.assertUndated("uu-p")
+	f.wantReady(types.WorkFilter{}, "uu-free")
+
+	f.setStatus("uu-p", types.StatusOpen)
+	f.assertUndated("uu-p")
+	f.wantReady(types.WorkFilter{}, "uu-c", "uu-free", "uu-p")
+}
