@@ -352,6 +352,22 @@ func TestEmbeddedHooksInstallBdPathWarning(t *testing.T) {
 			t.Errorf("quiet init warned about PATH selection:\n%s", stderr)
 		}
 	})
+
+	t.Run("install stays silent when PATH selects this very bd", func(t *testing.T) {
+		dir, _, _ := bdInit(t, f.bd, "--prefix", "hcs")
+
+		// PATH's first bd directory holds the binary under test itself.
+		_, stderr, err := f.runBD(dir, f.envWithDecoyPATH(dir, filepath.Dir(f.bd)), "hooks", "install")
+		if err != nil {
+			t.Fatalf("bd hooks install failed: %v\n%s", err, stderr)
+		}
+		if strings.Contains(stderr, "beads: warning:") {
+			t.Errorf("PATH selects this very bd, but the install warned:\n%s", stderr)
+		}
+		if f.decoyRan(t) {
+			t.Error("the decoy bd ran although PATH's first bd is this binary")
+		}
+	})
 }
 
 // reviseJSONLIssue rewrites one issue's line in the exported JSONL: a new

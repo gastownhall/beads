@@ -52,6 +52,56 @@ func TestHooksPATHBinaryWarning(t *testing.T) {
 		}
 	})
 
+	t.Run("stays silent when PATH selects the same file", func(t *testing.T) {
+		self := selfBD(t)
+		if msg := bdPathSelectionWarning(self, nil, false, self); msg != "" {
+			t.Errorf("bdPathSelectionWarning(same file) = %q, want silence", msg)
+		}
+	})
+
+	t.Run("stays silent when PATH selects a symlink to self", func(t *testing.T) {
+		self := selfBD(t)
+		link := filepath.Join(t.TempDir(), "bd")
+		if err := os.Symlink(self, link); err != nil {
+			t.Skipf("symlink: %v", err)
+		}
+		if msg := bdPathSelectionWarning(self, nil, false, link); msg != "" {
+			t.Errorf("bdPathSelectionWarning(symlink to self) = %q, want silence", msg)
+		}
+	})
+
+	t.Run("stays silent when PATH selects a hardlink to self", func(t *testing.T) {
+		self := selfBD(t)
+		link := filepath.Join(t.TempDir(), "bd")
+		if err := os.Link(self, link); err != nil {
+			t.Skipf("hardlink: %v", err)
+		}
+		if msg := bdPathSelectionWarning(self, nil, false, link); msg != "" {
+			t.Errorf("bdPathSelectionWarning(hardlink to self) = %q, want silence", msg)
+		}
+	})
+
+	t.Run("compares a relative PATH result against the process cwd", func(t *testing.T) {
+		// exec.LookPath can return a nonempty relative path alongside
+		// exec.ErrDot; it counts as found and compares by stat, exactly as a
+		// bare bd invocation would resolve it.
+		self := selfBD(t)
+		cwd, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		rel, err := filepath.Rel(cwd, self)
+		if err != nil {
+			t.Skipf("no relative path from %s to %s: %v", cwd, self, err)
+		}
+		if filepath.IsAbs(rel) {
+			t.Skipf("relative path from %s to %s is absolute", cwd, self)
+		}
+		if msg := bdPathSelectionWarning(self, nil, false, rel); msg != "" {
+			t.Errorf("bdPathSelectionWarning(relative name for self) = %q, want silence", msg)
+		}
+	})
+
 	t.Run("stays silent inside the test harness", func(t *testing.T) {
 		self, other := selfBD(t), selfBD(t)
 		if msg := bdPathSelectionWarning(self, nil, true, other); msg != "" {
