@@ -266,3 +266,116 @@ func TestEmbeddedSetStateRecordsOneHistoryCommit(t *testing.T) {
 		t.Errorf("event children = %d, want 1", children)
 	}
 }
+
+// TestEmbeddedSetStateKeepsTheWispPlane pins AC-6 (GH#5637): a subject whose
+// retention mode stays stable across the command — ephemeral, or no-history —
+// gets an event that RETAINS that mode, an edge and labels that persist in the
+// wisp plane, and no durable issue/edge/label row or history entry beside
+// them. The assertions read the raw wisp tables rather than the reader, because
+// the reader answers from whichever plane the write chose and a write and a
+// read that agree on the wrong plane still agree with each other.
+func TestEmbeddedSetStateKeepsTheWispPlane(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		flag       string
+		modeColumn string
+	}{
+		{"ephemeral", "--ephemeral", "ephemeral"},
+		{"no_history", "--no-history", "no_history"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bd := buildEmbeddedBD(t)
+			dir, beadsDir, _ := bdInit(t, bd, "--prefix", "sw")
+			subject := bdCreate(t, bd, dir, "Wisp state subject", "--type", "task", tc.flag)
+			bdSetState(t, bd, dir, subject.ID, "patrol=active")
+
+			cfg, _ := configfile.Load(beadsDir)
+			database := ""
+			if cfg != nil {
+				database = cfg.GetDoltDatabase()
+			}
+			// withDB: the one-writer discipline — every CLI call below must
+			// find the OpenSQL handle closed (see TestEmbeddedSetStateSuccessShape).
+			withDB := func(fn func(count func(query string, args ...interface{}) int)) {
+				db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), database, "main")
+				if err != nil {
+					t.Fatalf("OpenSQL: %v", err)
+				}
+				defer func() {
+					if err := cleanup(); err != nil {
+						t.Fatalf("cleanup: %v", err)
+					}
+				}()
+				count := func(query string, args ...interface{}) int {
+					var n int
+					if err := db.QueryRowContext(t.Context(), query, args...).Scan(&n); err != nil {
+						t.Fatalf("query %q: %v", query, err)
+					}
+					return n
+				}
+				fn(count)
+			}
+			logCount := func() int {
+				var n int
+				withDB(func(count func(string, ...interface{}) int) {
+					n = count("SELECT COUNT(*) FROM dolt_log")
+				})
+				return n
+			}
+
+			before := logCount()
+			cmd := exec.Command(bd, "set-state", subject.ID, "patrol=muted", "--reason", "wisp mode", "--json")
+			cmd.Dir = dir
+			cmd.Env = bdEnv(dir)
+			stdout, stderr, err := runCommandBuffers(t, cmd)
+			if err != nil {
+				t.Fatalf("set-state on a %s subject: %v\nstdout:\n%s\nstderr:\n%s", tc.name, err, stdout.String(), stderr.String())
+			}
+			var got map[string]interface{}
+			if err := json.Unmarshal([]byte(strings.TrimSpace(stdout.String())), &got); err != nil {
+				t.Fatalf("set-state --json output is not JSON: %v\n%s", err, stdout.String())
+			}
+			eventID, ok := got["event_id"].(string)
+			if !ok || eventID == "" {
+				t.Fatalf("JSON output names no event id: %v", got["event_id"])
+			}
+
+			withDB(func(count func(string, ...interface{}) int) {
+				// THE EVENT RETAINS THE SUBJECT'S MODE: it is a wisp row with
+				// the mode column set, and no durable issue row exists.
+				if n := count("SELECT COUNT(*) FROM wisps WHERE id = ? AND "+tc.modeColumn+" = 1", eventID); n != 1 {
+					t.Errorf("event %s as a %s wisp row = %d, want 1", eventID, tc.name, n)
+				}
+				if n := count("SELECT COUNT(*) FROM issues WHERE id = ?", eventID); n != 0 {
+					t.Errorf("the event landed %d durable issue row(s), want none", n)
+				}
+				// THE EDGE PERSISTS IN THE WISP PLANE, and only there.
+				if n := count("SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?", eventID, subject.ID); n != 1 {
+					t.Errorf("wisp plane parent edges %s -> %s = %d, want 1", eventID, subject.ID, n)
+				}
+				if n := count("SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?", eventID, subject.ID); n != 0 {
+					t.Errorf("the event left %d durable edge row(s), want none", n)
+				}
+				// THE LABEL SWAP PERSISTS IN THE WISP PLANE, and the durable
+				// label table stays empty for the subject.
+				if n := count("SELECT COUNT(*) FROM wisp_labels WHERE issue_id = ? AND label = 'patrol:active'", subject.ID); n != 0 {
+					t.Errorf("old label patrol:active survived the swap (%d wisp rows)", n)
+				}
+				if n := count("SELECT COUNT(*) FROM wisp_labels WHERE issue_id = ? AND label = 'patrol:muted'", subject.ID); n != 1 {
+					t.Errorf("wisp_labels rows for patrol:muted = %d, want 1", n)
+				}
+				if n := count("SELECT COUNT(*) FROM labels WHERE issue_id = ?", subject.ID); n != 0 {
+					t.Errorf("durable label rows for a wisp subject = %d, want 0", n)
+				}
+			})
+			if delta := logCount() - before; delta != 0 {
+				t.Errorf("a wisp-plane set-state recorded %d durable history entries, want none", delta)
+			}
+		})
+	}
+}

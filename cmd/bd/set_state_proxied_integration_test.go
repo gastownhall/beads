@@ -334,6 +334,48 @@ func TestProxiedServerSetState(t *testing.T) {
 			t.Errorf("durable labels rows for a wisp = %d, want 0", n)
 		}
 	})
+
+	// AC-6 (GH#5637): the event INHERITS the subject's retention mode, so a
+	// wisp subject's whole transition — event, parent edge, label — stays in
+	// the wisp plane and no durable row or edge records it. The reader cannot
+	// be the witness here: it answers from whichever plane the write chose,
+	// so the raw tables are.
+	t.Run("wisp_event_retains_mode", func(t *testing.T) {
+		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp mode event", "--ephemeral")
+
+		out, err := bdProxiedRun(t, bd, p.dir, "set-state", wisp.ID, "patrol=muted", "--json")
+		if err != nil {
+			t.Fatalf("set-state on wisp: %v\n%s", err, out)
+		}
+		var got map[string]interface{}
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatalf("unmarshal: %v\n%s", err, out)
+		}
+		eventID, ok := got["event_id"].(string)
+		if !ok || eventID == "" {
+			t.Fatalf("set-state on a wisp named no event id: %v", got["event_id"])
+		}
+
+		db := openProxiedDB(t, p)
+		if n := countRows(t, db, "SELECT COUNT(*) FROM wisps WHERE id = ? AND ephemeral = 1", eventID); n != 1 {
+			t.Errorf("the event is an ephemeral wisp row = %d, want 1: the event must retain the subject's mode", n)
+		}
+		if n := countRows(t, db, "SELECT COUNT(*) FROM issues WHERE id = ?", eventID); n != 0 {
+			t.Errorf("the event landed %d durable issue row(s), want none", n)
+		}
+		if n := countRows(t, db, "SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?", eventID, wisp.ID); n != 1 {
+			t.Errorf("wisp plane parent edges %s -> %s = %d, want 1", eventID, wisp.ID, n)
+		}
+		if n := countRows(t, db, "SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?", eventID, wisp.ID); n != 0 {
+			t.Errorf("the event left %d durable edge row(s), want none", n)
+		}
+		if n := countRows(t, db, "SELECT COUNT(*) FROM wisp_labels WHERE issue_id = ? AND label = ?", wisp.ID, "patrol:muted"); n != 1 {
+			t.Errorf("wisp_labels rows for patrol:muted = %d, want 1", n)
+		}
+		if n := countRows(t, db, "SELECT COUNT(*) FROM labels WHERE issue_id = ?", wisp.ID); n != 0 {
+			t.Errorf("durable labels rows for a wisp = %d, want 0", n)
+		}
+	})
 }
 
 func containsStr(ss []string, want string) bool {
