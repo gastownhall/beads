@@ -111,7 +111,8 @@ type CreateItem struct {
 type UpdateItem struct {
 	// Target names the issue to patch and must resolve BACKWARD — see Ref. A
 	// template target refuses with *TemplateReadOnlyError, exactly as
-	// Lifecycle.Update does: templates are read-only.
+	// Lifecycle.Update does: templates are read-only, unless AllowTemplate
+	// below stands that one guard down.
 	Target Ref
 	// Patch is the edit, read exactly as UpdateRequest.Patch is — including
 	// that Patch.Labels is the whole LabelPatch, so a label REMOVAL is
@@ -163,6 +164,18 @@ type UpdateItem struct {
 	ForceClosePolicy      bool
 	ForceAssigneeTransfer bool
 	ForceNotesOverwrite   bool
+	// AllowTemplate is UpdateRequest.AllowTemplate, per item and under its
+	// rules: the template read-only refusal stands down for THIS item, and
+	// nothing else does — validation, the Expected* guards, the assignee and
+	// notes fences and close policy still apply, and it has no effect on a
+	// target that is not a template. The zero value enforces the guard.
+	//
+	// It is what lets bd set-state record a state change on a template as one
+	// request (create the event, wire it to its subject, swap the label) rather
+	// than as separately committed writes. A caller that sets it only when its
+	// own pre-read saw a template gets the guard back for free if the row
+	// becomes one afterwards: the item refuses and the whole request with it.
+	AllowTemplate bool
 }
 
 // CloseItem closes one existing issue, under CloseRequest's rules.
