@@ -872,18 +872,19 @@ var hooksListCmd = &cobra.Command{
 			output := map[string]interface{}{
 				"hooks": statuses,
 			}
-			if hooksPath.Missing() {
+			if hooksPath.Unusable() {
 				output["hooks_path"] = hooksPathReport{
-					Configured:  hooksPath.Configured,
-					Resolved:    hooksPath.Resolved,
-					Exists:      hooksPath.Exists,
-					RelocatedTo: hooksPath.RelocatedTo,
+					Configured:   hooksPath.Configured,
+					Resolved:     hooksPath.Resolved,
+					Exists:       hooksPath.Exists,
+					RelocatedTo:  hooksPath.RelocatedTo,
+					InspectError: hooksPath.InspectError,
 				}
 			}
 			jsonBytes, _ := json.MarshalIndent(output, "", "  ")
 			fmt.Println(string(jsonBytes))
 		} else {
-			if hooksPath.Missing() {
+			if hooksPath.Unusable() {
 				printMissingHooksPath(hooksPath)
 			}
 			fmt.Println("Git hooks status:")
@@ -892,6 +893,8 @@ var hooksListCmd = &cobra.Command{
 					// The files were looked up in a directory git cannot use,
 					// so "not installed" would send the user to reinstall.
 					fmt.Printf("  ✗ %s: not run (core.hooksPath directory is missing)\n", status.Name)
+				} else if hooksPath.InspectError != "" {
+					fmt.Printf("  ✗ %s: unknown (core.hooksPath could not be inspected)\n", status.Name)
 				} else if !status.Installed {
 					fmt.Printf("  ✗ %s: not installed\n", status.Name)
 				} else if status.IsShim {
@@ -918,17 +921,27 @@ var hooksListCmd = &cobra.Command{
 }
 
 // hooksPathReport is the additive bd hooks list --json view of a configured
-// core.hooksPath whose directory is missing (GH#5853).
+// core.hooksPath whose directory is missing or could not be inspected
+// (GH#5853).
 type hooksPathReport struct {
-	Configured  string `json:"configured"`
-	Resolved    string `json:"resolved"`
-	Exists      bool   `json:"exists"`
-	RelocatedTo string `json:"relocated_to,omitempty"`
+	Configured   string `json:"configured"`
+	Resolved     string `json:"resolved"`
+	Exists       bool   `json:"exists"`
+	RelocatedTo  string `json:"relocated_to,omitempty"`
+	InspectError string `json:"inspect_error,omitempty"`
 }
 
-// printMissingHooksPath names the configuration fault behind a missing
-// core.hooksPath and the repair that applies to it.
+// printMissingHooksPath names the configuration fault behind a missing or
+// uninspectable core.hooksPath and the repair that applies to it.
 func printMissingHooksPath(s doctor.HooksPathState) {
+	if s.InspectError != "" {
+		// Not evidence the directory is gone: name the fault, claim nothing.
+		fmt.Printf("⚠ core.hooksPath %s could not be inspected: %s\n", remedy.PrintedValue(s.Configured), s.InspectError)
+		fmt.Println("  Git runs no hooks from a directory it cannot use, and bd will not change this value.")
+		fmt.Println("  Check that directory, or correct core.hooksPath where it is set (git config --show-scope --get core.hooksPath).")
+		fmt.Println()
+		return
+	}
 	fmt.Printf("⚠ core.hooksPath points at %s, which does not exist\n", remedy.PrintedValue(s.Configured))
 	fmt.Println("  Git runs no hooks at all while core.hooksPath names a missing directory.")
 	switch {

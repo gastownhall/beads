@@ -529,6 +529,93 @@ func TestCheckHooksPath_RelocatedBeadsPath(t *testing.T) {
 	}
 }
 
+// TestInspectHooksPath_UninspectablePath: a configured hooks path that is not
+// a directory, or that cannot be inspected, is not evidence the directory is
+// gone. The inspection reports the error instead of Missing, the check names
+// it, and the fix neither unsets nor repoints the value (GH#5853).
+func TestInspectHooksPath_UninspectablePath(t *testing.T) {
+	cases := []struct {
+		name string
+		// arrange sets up the repository and returns the configured value.
+		arrange func(t *testing.T, dir string) string
+		want    string
+	}{
+		{
+			// The current managed location, but a file: no GH#4440 unset.
+			name: "not a directory",
+			arrange: func(t *testing.T, dir string) string {
+				path := filepath.Join(dir, ".beads", "hooks")
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("not a directory\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return path
+			},
+			want: "is not a directory",
+		},
+		{
+			// A former .beads/hooks behind an unreadable parent, with valid
+			// current hooks: a permission failure is not a move.
+			name: "permission denied",
+			arrange: func(t *testing.T, dir string) string {
+				if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+					t.Skip("directory permissions do not deny this user")
+				}
+				writeRelocatedHook(t, filepath.Join(dir, ".beads", "hooks"), relocatedHookBody)
+				locked := filepath.Join(t.TempDir(), "locked")
+				if err := os.MkdirAll(locked, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(locked, 0); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+				return filepath.Join(locked, "repo", ".beads", "hooks")
+			},
+			want: "could not inspect",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BEADS_DIR", "")
+			dir := t.TempDir()
+			setupGitRepoInDir(t, dir)
+			configured := tc.arrange(t, dir)
+			setGitConfig(t, dir, "core.hooksPath", configured)
+
+			runInDir(t, dir, func() {
+				q, ok := CurrentHooksPathQuery()
+				if !ok {
+					t.Fatal("CurrentHooksPathQuery: not in a repository")
+				}
+				s := InspectHooksPath(q)
+				if !strings.Contains(s.InspectError, tc.want) {
+					t.Errorf("InspectError = %q, want it to contain %q", s.InspectError, tc.want)
+				}
+				if s.Missing() || s.Managed || s.RelocatedTo != "" {
+					t.Errorf("state = %+v; an uninspectable path must be neither missing, managed nor relocated", s)
+				}
+				check := CheckHooksPath()
+				if check.Status != StatusWarning || !strings.Contains(check.Detail, tc.want) {
+					t.Errorf("check = %q %q / %q, want a warning naming %q", check.Status, check.Message, check.Detail, tc.want)
+				}
+				if strings.Contains(check.Fix, "--unset") || strings.Contains(check.Fix, "repoint") {
+					t.Errorf("fix %q offers an unset or repoint for a path not proven gone", check.Fix)
+				}
+				if err := FixHooksPath(); err != nil {
+					t.Fatalf("FixHooksPath failed: %v", err)
+				}
+			})
+
+			if got := getGitConfig(t, dir, "core.hooksPath"); got != configured {
+				t.Errorf("core.hooksPath = %q after fix, want it left at %q", got, configured)
+			}
+		})
+	}
+}
+
 // TestFixHooksPath_RelocatedBeadsPath: bd doctor --fix repoints a moved
 // repository's stranded core.hooksPath to the validated current directory in
 // the local config, never recreating the former location; a second run is a
