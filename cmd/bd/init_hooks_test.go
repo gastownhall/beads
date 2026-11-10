@@ -1758,3 +1758,84 @@ func utilsSameDir(a, b string) bool {
 	bi, berr := os.Stat(b)
 	return aerr == nil && berr == nil && os.SameFile(ai, bi)
 }
+
+// TestInstallHooks_MissingHooksPathRefusal: a plain install against a missing
+// core.hooksPath that is not provably a moved repository's beads hooks
+// creates nothing, repoints nothing and says why (GH#5853).
+func TestInstallHooks_MissingHooksPathRefusal(t *testing.T) {
+	cases := []struct {
+		name string
+		// arrange returns the missing value whose location must stay absent.
+		arrange func(t *testing.T, repo string) string
+		want    string
+	}{
+		{
+			name: "no replacement directory",
+			arrange: func(t *testing.T, repo string) string {
+				stale := filepath.Join(t.TempDir(), "moved-away", "repo", ".beads", "hooks")
+				gitConfigIn(t, repo, "core.hooksPath", stale)
+				return stale
+			},
+			want: "no beads hooks directory exists",
+		},
+		{
+			name: "third-party path",
+			arrange: func(t *testing.T, repo string) string {
+				strandRepoHooksPath(t, repo)
+				husky := filepath.Join(t.TempDir(), "moved-away", "repo", ".husky", "_")
+				gitConfigIn(t, repo, "core.hooksPath", husky)
+				return husky
+			},
+			want: "does not name a .beads/hooks or .beads-hooks directory",
+		},
+		{
+			name: "global-only value",
+			arrange: func(t *testing.T, repo string) string {
+				stale, _ := strandRepoHooksPath(t, repo)
+				gitConfigIn(t, repo, "--unset", "core.hooksPath")
+				home := t.TempDir()
+				t.Setenv("HOME", home)
+				t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+				t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(home, ".gitconfig"))
+				gitConfigIn(t, repo, "--global", "core.hooksPath", stale)
+				return stale
+			},
+			want: "global config",
+		},
+		{
+			name: "command-line override",
+			arrange: func(t *testing.T, repo string) string {
+				strandRepoHooksPath(t, repo)
+				other := filepath.Join(t.TempDir(), "elsewhere", ".beads", "hooks")
+				t.Setenv("GIT_CONFIG_COUNT", "1")
+				t.Setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+				t.Setenv("GIT_CONFIG_VALUE_0", other)
+				return other
+			},
+			want: "command config",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BEADS_DIR", "")
+			repo := newGitRepo(t)
+			missing := tc.arrange(t, repo)
+			before := hooksPathConfig(t, repo)
+
+			var err error
+			runInDir(t, repo, func() {
+				err = installStandaloneHooks(managedHookNames, false, false, false, false)
+			})
+			if err == nil {
+				t.Fatal("install succeeded against a missing core.hooksPath bd may not repoint")
+			}
+			if !strings.Contains(err.Error(), "bd will not create it") || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not explain the refusal (%q)", err, tc.want)
+			}
+			if after := hooksPathConfig(t, repo); after != before {
+				t.Errorf("install changed core.hooksPath: %q -> %q", before, after)
+			}
+			assertStaleNotCreated(t, missing)
+		})
+	}
+}

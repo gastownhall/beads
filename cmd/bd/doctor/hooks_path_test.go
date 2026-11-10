@@ -577,3 +577,183 @@ func TestFixHooksPath_RelocatedBeadsPath(t *testing.T) {
 		})
 	}
 }
+
+// TestFixHooksPath_RelocatedBeadsPath_Ineligible: a missing path that is not
+// provably a moved repository's beads hooks — no validated replacement,
+// unrecognized hooks, a symlinked destination, a value outside the local
+// config, an override that shadows it, an existing former directory, or a value
+// that changed after the check — is never repointed, and the former location
+// is never created (GH#5853).
+func TestFixHooksPath_RelocatedBeadsPath_Ineligible(t *testing.T) {
+	beadsLayout := filepath.Join(".beads", "hooks")
+	cases := []struct {
+		name string
+		// arrange sets up dir and returns the value core.hooksPath must
+		// still hold after the fix; stale is the former path.
+		arrange func(t *testing.T, dir, stale string) string
+		// wantInDetail is a refusal fragment the check must report, if any.
+		wantInDetail string
+	}{
+		{
+			name: "no replacement directory",
+			arrange: func(t *testing.T, dir, stale string) string {
+				setGitConfig(t, dir, "core.hooksPath", stale)
+				return stale
+			},
+			wantInDetail: "no beads hooks directory exists",
+		},
+		{
+			name: "replacement holds no beads hooks",
+			arrange: func(t *testing.T, dir, stale string) string {
+				// Mentions bd, but is no beads hook.
+				writeRelocatedHook(t, filepath.Join(dir, ".beads", "hooks"), "#!/bin/sh\necho bd\n")
+				setGitConfig(t, dir, "core.hooksPath", stale)
+				return stale
+			},
+			wantInDetail: "holds no beads hooks",
+		},
+		{
+			name: "replacement is a symlink",
+			arrange: func(t *testing.T, dir, stale string) string {
+				real := filepath.Join(t.TempDir(), "real-hooks")
+				writeRelocatedHook(t, real, relocatedHookBody)
+				if err := os.Symlink(real, filepath.Join(dir, ".beads", "hooks")); err != nil {
+					t.Skipf("cannot create symlink: %v", err)
+				}
+				setGitConfig(t, dir, "core.hooksPath", stale)
+				return stale
+			},
+			wantInDetail: "is a symlink",
+		},
+		{
+			name: "third-party layout",
+			arrange: func(t *testing.T, dir, stale string) string {
+				writeRelocatedHook(t, filepath.Join(dir, ".beads", "hooks"), relocatedHookBody)
+				husky := filepath.Join(filepath.Dir(filepath.Dir(stale)), ".husky", "_")
+				setGitConfig(t, dir, "core.hooksPath", husky)
+				return husky
+			},
+		},
+		{
+			name: "global-only value",
+			arrange: func(t *testing.T, dir, stale string) string {
+				writeRelocatedHook(t, filepath.Join(dir, ".beads", "hooks"), relocatedHookBody)
+				unsetGitConfig(t, dir, "core.hooksPath")
+				t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
+				cmd := gitCommand("config", "--global", "core.hooksPath", stale)
+				cmd.Dir = dir
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("git config --global: %v (%s)", err, out)
+				}
+				return stale
+			},
+			wantInDetail: "global config",
+		},
+		{
+			name: "differing worktree override",
+			arrange: func(t *testing.T, dir, stale string) string {
+				writeRelocatedHook(t, filepath.Join(dir, ".beads", "hooks"), relocatedHookBody)
+				setGitConfig(t, dir, "core.hooksPath", stale)
+				setGitConfig(t, dir, "extensions.worktreeConfig", "true")
+				other := filepath.Join(t.TempDir(), "elsewhere", ".beads", "hooks")
+				cmd := gitCommand("config", "--worktree", "core.hooksPath", other)
+				cmd.Dir = dir
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("git config --worktree: %v (%s)", err, out)
+				}
+				return stale
+			},
+			wantInDetail: "worktree config",
+		},
+		{
+			name: "command-line override",
+			arrange: func(t *testing.T, dir, stale string) string {
+				writeRelocatedHook(t, filepath.Join(dir, ".beads", "hooks"), relocatedHookBody)
+				setGitConfig(t, dir, "core.hooksPath", stale)
+				t.Setenv("GIT_CONFIG_COUNT", "1")
+				t.Setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+				t.Setenv("GIT_CONFIG_VALUE_0", filepath.Join(t.TempDir(), "elsewhere", ".beads", "hooks"))
+				return stale
+			},
+			wantInDetail: "command config",
+		},
+		{
+			name: "former directory still exists",
+			arrange: func(t *testing.T, dir, stale string) string {
+				writeRelocatedHook(t, filepath.Join(dir, ".beads", "hooks"), relocatedHookBody)
+				if err := os.MkdirAll(stale, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				setGitConfig(t, dir, "core.hooksPath", stale)
+				return stale
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BEADS_DIR", "")
+			dir := t.TempDir()
+			setupGitRepoInDir(t, dir)
+			stale := strandedHooksPath(t, beadsLayout)
+			want := tc.arrange(t, dir, stale)
+			readRaw := func() string {
+				cmd := gitCommand("config", "--show-scope", "--get-all", "core.hooksPath")
+				cmd.Dir = dir
+				out, _ := cmd.Output()
+				return string(out)
+			}
+			before := readRaw()
+
+			runInDir(t, dir, func() {
+				check := CheckHooksPath()
+				if strings.Contains(check.Message, "moved repository") {
+					t.Errorf("an ineligible path was reported as relocated: %q / %q", check.Message, check.Detail)
+				}
+				if tc.wantInDetail != "" && !strings.Contains(check.Detail, tc.wantInDetail) {
+					t.Errorf("detail %q does not explain the refusal (%q)", check.Detail, tc.wantInDetail)
+				}
+				if err := FixHooksPath(); err != nil {
+					t.Fatalf("FixHooksPath failed: %v", err)
+				}
+			})
+
+			if after := readRaw(); after != before {
+				t.Errorf("FixHooksPath changed core.hooksPath:\nbefore: %s\nafter:  %s", before, after)
+			}
+			if _, err := os.Lstat(want); tc.name != "former directory still exists" && !os.IsNotExist(err) {
+				t.Errorf("FixHooksPath created %s (err=%v)", want, err)
+			}
+		})
+	}
+}
+
+// TestFixHooksPath_RelocatedBeadsPath_ChangedBeforeRepair: the repair re-reads
+// core.hooksPath immediately before writing, so a value that changed after
+// the check is not overwritten with the relocation target (GH#5853).
+func TestFixHooksPath_RelocatedBeadsPath_ChangedBeforeRepair(t *testing.T) {
+	t.Setenv("BEADS_DIR", "")
+	dir := t.TempDir()
+	setupGitRepoInDir(t, dir)
+	writeRelocatedHook(t, filepath.Join(dir, ".beads", "hooks"), relocatedHookBody)
+	stale := strandedHooksPath(t, filepath.Join(".beads", "hooks"))
+	setGitConfig(t, dir, "core.hooksPath", stale)
+	husky := filepath.Join(filepath.Dir(stale), ".husky")
+
+	runInDir(t, dir, func() {
+		if check := CheckHooksPath(); !strings.Contains(check.Message, "moved repository") {
+			t.Fatalf("precondition: expected a relocated path, got %q", check.Message)
+		}
+		// The user (or another tool) changes the value between the check
+		// and the fix pass.
+		setGitConfig(t, dir, "core.hooksPath", husky)
+		if err := FixHooksPath(); err != nil {
+			t.Fatalf("FixHooksPath failed: %v", err)
+		}
+	})
+
+	if got := getGitConfig(t, dir, "core.hooksPath"); got != husky {
+		t.Errorf("core.hooksPath = %q, want the changed third-party value %q left alone", got, husky)
+	}
+	assertNotCreated(t, stale)
+}
