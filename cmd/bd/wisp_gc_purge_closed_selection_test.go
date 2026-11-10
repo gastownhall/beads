@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -25,13 +27,27 @@ type purgeClosedFakeReader struct {
 	custom   []types.CustomStatus
 	infra    map[types.IssueType]bool
 
+	// Failure injection (GH#5152 AC-4). batchUnsupported makes the batched
+	// target-keyed read refuse with *storage.ErrUnsupported, which the
+	// selection answers through the per-target GetDependentsWithMetadata
+	// fallback (metadata); the err fields fail the named read outright.
+	batchUnsupported bool
+	metadata         map[string][]*types.IssueWithDependencyMetadata
+	errDependent     error
+	errCustom        error
+	errLive          error
+
 	captured []types.IssueFilter
 }
 
 func (r *purgeClosedFakeReader) SearchIssues(_ context.Context, _ string, filter types.IssueFilter) ([]*types.Issue, error) {
-	r.captured = append(r.captured, filter)
 	if len(filter.IDs) == 0 {
+		r.captured = append(r.captured, filter)
 		return r.closed, nil
+	}
+	r.captured = append(r.captured, filter)
+	if r.errLive != nil {
+		return nil, r.errLive
 	}
 	return r.filterRows(filter), nil
 }
@@ -53,10 +69,26 @@ func (r *purgeClosedFakeReader) filterRows(filter types.IssueFilter) []*types.Is
 }
 
 func (r *purgeClosedFakeReader) GetDependentRecordsForIssues(_ context.Context, _ []string) (map[string][]*types.Dependency, error) {
-	return r.incoming, nil
+	switch {
+	case r.errDependent != nil:
+		return nil, r.errDependent
+	case r.batchUnsupported:
+		return nil, &storage.ErrUnsupported{Op: "GetDependentRecordsForIssues", Backend: "fake"}
+	default:
+		return r.incoming, nil
+	}
+}
+
+// GetDependentsWithMetadata is the ErrUnsupported fallback's read: it answers
+// the inbound edges of one target as hydrated sources with their edge types.
+func (r *purgeClosedFakeReader) GetDependentsWithMetadata(_ context.Context, targetID string) ([]*types.IssueWithDependencyMetadata, error) {
+	return r.metadata[targetID], nil
 }
 
 func (r *purgeClosedFakeReader) GetCustomStatusesDetailed(context.Context) ([]types.CustomStatus, error) {
+	if r.errCustom != nil {
+		return nil, r.errCustom
+	}
 	return r.custom, nil
 }
 
@@ -328,4 +360,129 @@ func TestSelectClosedWispsForPurgeScansEverySource(t *testing.T) {
 	if src.Limit != 0 {
 		t.Errorf("source scan limit = %d, want 0 (unlimited: an explicit id list must be read complete)", src.Limit)
 	}
+}
+
+// guardedPurgeReader is one closed candidate with one live child: the shape
+// every read-failure case in TestSelectClosedWispsForPurgeReadFailures needs.
+func guardedPurgeReader() *purgeClosedFakeReader {
+	return &purgeClosedFakeReader{
+		rows:     map[string]*types.Issue{"src-open": liveRow("src-open", types.StatusOpen)},
+		closed:   []*types.Issue{closedWisp("cand-a"), closedWisp("cand-b")},
+		incoming: map[string][]*types.Dependency{"cand-a": {dep("src-open", "cand-a", types.DepParentChild)}},
+	}
+}
+
+// TestSelectClosedWispsForPurgeReadFailures pins GH#5152 AC-4's selector half:
+// a closed-mode selection whose required dependency, custom-status or
+// source-status read fails returns an error instead of a delete set, and the
+// ErrUnsupported batch refusal falls back to the per-target metadata read
+// without losing source, target or edge type.
+func TestSelectClosedWispsForPurgeReadFailures(t *testing.T) {
+	t.Run("dependency_read_failure_fails_selection", func(t *testing.T) {
+		r := guardedPurgeReader()
+		r.errDependent = errors.New("dep read wedged")
+		if _, err := selectClosedWispsForPurge(context.Background(), r, nil); err == nil {
+			t.Fatal("selection succeeded despite a failed dependency read")
+		}
+	})
+	t.Run("custom_status_read_failure_fails_selection", func(t *testing.T) {
+		r := guardedPurgeReader()
+		r.errCustom = errors.New("config read wedged")
+		if _, err := selectClosedWispsForPurge(context.Background(), r, nil); err == nil {
+			t.Fatal("selection succeeded despite a failed custom-status read")
+		}
+	})
+	t.Run("source_status_read_failure_fails_selection", func(t *testing.T) {
+		r := guardedPurgeReader()
+		r.errLive = errors.New("source read wedged")
+		if _, err := selectClosedWispsForPurge(context.Background(), r, nil); err == nil {
+			t.Fatal("selection succeeded despite a failed source-status read")
+		}
+	})
+	t.Run("unsupported_batch_read_falls_back_to_metadata", func(t *testing.T) {
+		r := guardedPurgeReader()
+		r.batchUnsupported = true
+		r.metadata = map[string][]*types.IssueWithDependencyMetadata{
+			"cand-a": {{
+				Issue:          types.Issue{ID: "src-open", Status: types.StatusOpen, IssueType: types.TypeTask},
+				DependencyType: types.DepParentChild,
+			}},
+			"cand-b": nil,
+		}
+		sel, err := selectClosedWispsForPurge(context.Background(), r, nil)
+		if err != nil {
+			t.Fatalf("fallback selection: %v", err)
+		}
+		if got := purgeSelectionIDs(sel.Deletable); len(got) != 1 || got[0] != "cand-b" {
+			t.Errorf("deletable = %v, want [cand-b] (cand-a protected via the fallback read)", got)
+		}
+		if sel.LiveDependentSkipped != 1 {
+			t.Errorf("live_dependent_skipped = %d, want 1", sel.LiveDependentSkipped)
+		}
+	})
+}
+
+// TestWispPurgeClosedSelectionDeletionSpy drives the caller boundary
+// (runWispPurgeClosedWithReader) with a deletion spy. The selector-only tests
+// above cannot prove edges survive; this one proves the ordering every route
+// relies on: a failed read never reaches deletion, and a successful forced
+// run deletes exactly the deletable ids.
+func TestWispPurgeClosedSelectionDeletionSpy(t *testing.T) {
+	deleteSpy := func(calls *[][]string) func(sel *closedWispPurgeSelection, ids []string) error {
+		return func(_ *closedWispPurgeSelection, ids []string) error {
+			*calls = append(*calls, append([]string(nil), ids...))
+			return nil
+		}
+	}
+
+	t.Run("read_failures_never_reach_deletion", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			reader *purgeClosedFakeReader
+		}{
+			{"dependency_read", func() *purgeClosedFakeReader {
+				r := guardedPurgeReader()
+				r.errDependent = errors.New("wedge")
+				return r
+			}()},
+			{"custom_status_read", func() *purgeClosedFakeReader { r := guardedPurgeReader(); r.errCustom = errors.New("wedge"); return r }()},
+			{"source_status_read", func() *purgeClosedFakeReader { r := guardedPurgeReader(); r.errLive = errors.New("wedge"); return r }()},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				var calls [][]string
+				err := runWispPurgeClosedWithReader(context.Background(), tc.reader, false, true, nil, deleteSpy(&calls))
+				if err == nil {
+					t.Fatal("run succeeded despite a failed read")
+				}
+				if len(calls) != 0 {
+					t.Errorf("deletion ran %d times despite the failed read: %v", len(calls), calls)
+				}
+			})
+		}
+	})
+
+	t.Run("forced_run_deletes_exactly_the_deletable_ids", func(t *testing.T) {
+		r := guardedPurgeReader()
+		var calls [][]string
+		if err := runWispPurgeClosedWithReader(context.Background(), r, false, true, nil, deleteSpy(&calls)); err != nil {
+			t.Fatalf("runWispPurgeClosedWithReader: %v", err)
+		}
+		if len(calls) != 1 {
+			t.Fatalf("deletion calls = %d, want 1", len(calls))
+		}
+		if got := calls[0]; len(got) != 1 || got[0] != "cand-b" {
+			t.Errorf("deleted %v, want [cand-b] (cand-a is protected)", got)
+		}
+	})
+
+	t.Run("unforced_run_previews_without_deleting", func(t *testing.T) {
+		r := guardedPurgeReader()
+		var calls [][]string
+		if err := runWispPurgeClosedWithReader(context.Background(), r, false, false, nil, deleteSpy(&calls)); err != nil {
+			t.Fatalf("runWispPurgeClosedWithReader: %v", err)
+		}
+		if len(calls) != 0 {
+			t.Errorf("unconfirmed run deleted %v", calls)
+		}
+	})
 }
