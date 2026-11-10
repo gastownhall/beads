@@ -389,6 +389,10 @@ func TestMigrateToServer_FlipsModeAndRemovesSidecar(t *testing.T) {
 
 	for _, n := range proxiedAssetNames() {
 		_, err := os.Stat(filepath.Join(rootDir, n))
+		if n == proxy.LockFileName || n == server.LockFileName {
+			assert.NoError(t, err, "lifecycle marker %s must be retained", n)
+			continue
+		}
 		assert.True(t, os.IsNotExist(err), "proxied asset %s must be removed", n)
 	}
 
@@ -399,6 +403,77 @@ func TestMigrateToServer_FlipsModeAndRemovesSidecar(t *testing.T) {
 
 	_, configErr := os.Stat(filepath.Join(rootDir, "config.yaml"))
 	require.NoError(t, configErr, "shared config.yaml must be preserved as the server-mode config")
+}
+
+// TestMigrateFromProxiedServer_KeepsLifecycleLockMarkers covers the
+// persistent-marker contract of GH#6884: reverse migration holds proxy.lock
+// and proxy-child.lock itself while retiring the other controls, so it must
+// leave both markers on disk, with their file identity intact and re-lockable,
+// while removing every other control and the journal.
+func TestMigrateFromProxiedServer_KeepsLifecycleLockMarkers(t *testing.T) {
+	beadsDir := migrateModeWorkspace(t, configfile.DoltModeProxiedServer)
+	require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, &configfile.ProxiedServerClientInfo{}))
+	rootDir := filepath.Join(beadsDir, "dolt")
+	require.NoError(t, os.MkdirAll(filepath.Join(rootDir, ".dolt"), 0o755))
+	touchFile(t, filepath.Join(rootDir, "config.yaml"))
+	for _, n := range proxiedAssetNames() {
+		touchFile(t, filepath.Join(rootDir, n))
+	}
+	markerStats := map[string]os.FileInfo{}
+	for _, n := range []string{proxy.LockFileName, server.LockFileName} {
+		info, err := os.Stat(filepath.Join(rootDir, n))
+		require.NoError(t, err)
+		markerStats[n] = info
+	}
+
+	require.NoError(t, runMigrateFromProxiedServer(false, false))
+
+	cfg, err := configfile.Load(beadsDir)
+	require.NoError(t, err)
+	assert.True(t, cfg.IsDoltServerMode())
+	_, statErr := os.Stat(configfile.ProxiedServerClientInfoPath(beadsDir))
+	assert.True(t, os.IsNotExist(statErr), "sidecar must be removed")
+	j, err := loadMigrateJournal(beadsDir)
+	require.NoError(t, err)
+	assert.Nil(t, j, "journal must be removed")
+	for _, n := range proxiedAssetNames() {
+		if n == proxy.LockFileName || n == server.LockFileName {
+			continue
+		}
+		_, err := os.Stat(filepath.Join(rootDir, n))
+		assert.True(t, os.IsNotExist(err), "proxied asset %s must be removed", n)
+	}
+	for _, n := range []string{proxy.LockFileName, server.LockFileName} {
+		info, err := os.Stat(filepath.Join(rootDir, n))
+		require.NoError(t, err, "lifecycle marker %s must be retained", n)
+		assert.True(t, os.SameFile(markerStats[n], info), "lifecycle marker %s must keep its file identity", n)
+		assert.Equal(t, []byte("x"), mustReadFile(t, filepath.Join(rootDir, n)), "lifecycle marker %s must not be truncated", n)
+		lock, lockErr := util.TryLock(filepath.Join(rootDir, n))
+		require.NoError(t, lockErr, "retained marker %s must be re-lockable", n)
+		lock.Unlock()
+	}
+
+	// A subsequent identical invocation is a successful no-op that changes
+	// nothing.
+	after := snapshotMigrationTree(t, beadsDir)
+	require.NoError(t, runMigrateFromProxiedServer(false, false))
+	assert.Equal(t, after, snapshotMigrationTree(t, beadsDir), "rerun changed durable migration artifacts")
+
+	// A held retained marker on an already-completed rerun still refuses.
+	held, err := util.TryLock(filepath.Join(rootDir, proxy.LockFileName))
+	require.NoError(t, err)
+	require.Error(t, runMigrateFromProxiedServer(false, false), "held marker must be refused on a completed rerun")
+	held.Unlock()
+
+	// Forward/reverse round trip: retained markers must not block a fresh
+	// forward migration, and a second reverse keeps them again.
+	require.NoError(t, runMigrateToProxiedServer(false, 0, false))
+	require.NoError(t, runMigrateFromProxiedServer(false, false))
+	for _, n := range []string{proxy.LockFileName, server.LockFileName} {
+		info, err := os.Stat(filepath.Join(rootDir, n))
+		require.NoError(t, err, "lifecycle marker %s must survive a round trip", n)
+		assert.True(t, os.SameFile(markerStats[n], info), "lifecycle marker %s must keep its identity across a round trip", n)
+	}
 }
 
 func TestMigrateToServer_KeepsCustomConfig(t *testing.T) {

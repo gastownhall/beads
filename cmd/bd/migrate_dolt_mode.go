@@ -1204,6 +1204,10 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 		if err := os.Remove(configfile.ProxiedServerClientInfoPath(beadsDir)); err != nil && !os.IsNotExist(err) {
 			return HandleError("failed to remove %s: %v", configfile.ProxiedServerClientInfoFileName, err)
 		}
+		// The purge preserves the two lifecycle lock markers this migration
+		// itself holds open (proxy.lock, proxy-child.lock): they stay on disk
+		// as reusable, ownership-probing markers rather than being removed
+		// while held (GH#6884).
 		if errs := proxy.PurgeControlFiles(rootDir); len(errs) > 0 {
 			return HandleError("failed to retire proxy controls: %v", errs[0])
 		}

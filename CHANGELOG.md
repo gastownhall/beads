@@ -1226,6 +1226,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Reverse migration no longer removes `proxy.lock` and
+  `proxy-child.lock`.** `bd migrate from-proxied-server-to-server` and
+  `bd migrate from-proxied-server-to-shared-server` hold both files open
+  for their own lifecycle lease while retiring the proxy's other controls,
+  and Windows refuses to remove a file its holder keeps open without delete
+  sharing, so the reverse transition failed on native Windows with
+  `failed to retire proxy controls` and left the migration incomplete
+  (GH#6884). The two files now stay on disk as empty, reusable markers:
+  removing a held lock would equally be wrong on POSIX, where an unlink
+  detaches it from the pathname competing proxy starts acquire. A marker's
+  absence is not relied on anywhere: an unlocked marker is accepted wherever
+  a completed state is validated, and a held marker still proves active
+  ownership and is refused.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

@@ -82,6 +82,17 @@ The control files in that root, as enumerated by `proxy.ControlFilePaths`:
 | `proxy-child.lock` | the proxy | held while the backend runs |
 | `<name>.stale-<unix>` | either | quarantined records, swept after 30 days |
 
+`proxy.lock` and `proxy-child.lock` double as lifecycle locks, and a reverse
+migration (`bd migrate from-proxied-server-to-server` and
+`bd migrate from-proxied-server-to-shared-server`) holds both files itself
+while it retires every other control. Those two markers are therefore
+**persistent**: retiring the proxied workspace leaves them on disk as empty,
+reusable markers rather than removing them (GH#6884). Windows cannot remove a
+file its own holder keeps open without delete sharing, and on POSIX an unlink
+would detach the held lock from the pathname competing starters acquire.
+Everywhere a completed state is validated, an unlocked marker is accepted
+and a held one is refused — a marker still proves active ownership.
+
 Two topologies share this machinery: **managed-local**, where bd spawns the
 `dolt sql-server` itself, and **external**, where the proxy fronts a
 `dolt sql-server` somebody else runs. They differ in several of the surfaces
