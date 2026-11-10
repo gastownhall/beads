@@ -486,10 +486,13 @@ var capabilityProbes = []probe{
 		},
 	},
 
-	// --- migrate schema: already lifted in 1.3.0 -----------------------------
+	// --- migrate schema: refused unless forced (GH#6656) --------------------
 	{
-		// The one family the 1.3.0 release already lifted. It is HONORED
-		// proxied, but reports no applied count — S6 makes it report one.
+		// GH#6656: on a proxied workspace the provider open promotes the
+		// schema beneath library clients the proxy cannot see, so the bare
+		// verb is refused typed at the front door on every proxied shape.
+		// The refusal partition runs before any provider work, so this cell
+		// doubles as that no-side-effects assertion for the verb.
 		name: "migrate schema",
 		args: []string{"migrate", "schema"},
 		direct: expectation{
@@ -498,7 +501,26 @@ var capabilityProbes = []probe{
 			outcome: outcomeHonored, substr: `"status": "current"`, reason: reasonNA,
 		},
 		proxied: expectation{
+			outcome: outcomeRefusedTyped, code: "proxy.migrate.unsupported",
+			substr:  "without --force",
+			reason:  reasonDesign,
+		},
+	},
+	{
+		// The registry's one sanctioned escape route: --force lifts that
+		// refusal — with a close-clients warning on stderr — and the command
+		// proceeds to its proxied arm. The S6 known-bad moves here verbatim:
+		// the missing applied count belongs to the forced run, not to the
+		// refusal cell above, which now fails closed and has nothing to
+		// report.
+		name: "migrate schema --force",
+		args: []string{"migrate", "schema", "--force"},
+		direct: expectation{
+			outcome: outcomeHonored, substr: `"status": "current"`, reason: reasonNA,
+		},
+		proxied: expectation{
 			outcome: outcomeDegraded, substr: "reconciled during provider open",
+			absent:  `"applied"`,
 			knownBad: "proxied migrate schema reports no applied count (design 1.5 / slice S6)",
 			reason:   reasonNA,
 		},
