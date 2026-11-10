@@ -8,6 +8,7 @@ import (
 	neturl "net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -261,12 +262,14 @@ func TestBackupRestorePassesURLVerbatim(t *testing.T) {
 	}
 }
 
-// TestCheckBackupDir pins the restore precondition (bd-jwaljq, GH#7098): only a
-// directory whose top level holds Dolt's manifest as a regular file counts as a
-// backup. An existing directory without one opens as an empty store inside
-// DOLT_BACKUP, so a forced restore from it would drop the live database for
-// nothing; exports, backup state and failed-restore debris are not backups.
-func TestCheckBackupDir(t *testing.T) {
+// TestRestoreSourceURL pins the restore precondition (bd-jwaljq, GH#7098):
+// only a directory whose top level holds Dolt's manifest as a regular file
+// counts as a backup. An existing directory without one opens as an empty
+// store inside DOLT_BACKUP, so a forced restore from it would drop the live
+// database for nothing; exports, backup state and failed-restore debris are
+// not backups. A source that passes comes back as the file:// URL a restore
+// hands Dolt.
+func TestRestoreSourceURL(t *testing.T) {
 	root := t.TempDir()
 	mkdir := func(name string, files ...string) string {
 		t.Helper()
@@ -317,21 +320,82 @@ func TestCheckBackupDir(t *testing.T) {
 		{name: "manifest_symlink_to_file", dir: goodLink},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := CheckBackupDir(tc.dir)
+			url, err := RestoreSourceURL(tc.dir)
 			if tc.want == "" {
 				if err != nil {
-					t.Fatalf("CheckBackupDir(%q) = %v, want nil", tc.dir, err)
+					t.Fatalf("RestoreSourceURL(%q) = %v, want nil", tc.dir, err)
+				}
+				if want := "file://" + tc.dir; url != want {
+					t.Errorf("RestoreSourceURL(%q) = %q, want %q", tc.dir, url, want)
 				}
 				return
 			}
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("CheckBackupDir(%q) error = %v, want one containing %q", tc.dir, err, tc.want)
+				t.Fatalf("RestoreSourceURL(%q) error = %v, want one containing %q", tc.dir, err, tc.want)
 			}
 			if tc.want == noBackup && !strings.Contains(err.Error(), tc.dir) {
-				t.Errorf("CheckBackupDir(%q) error = %v, want it to name the source", tc.dir, err)
+				t.Errorf("RestoreSourceURL(%q) error = %v, want it to name the source", tc.dir, err)
 			}
 		})
 	}
+
+	// A backup at a path Dolt does not read literally is refused even though
+	// it holds a manifest: Dolt parses the source as a file:// URL, so
+	// "proj#2" would restore from "proj", an empty directory Dolt creates,
+	// after dropping the live database. Windows paths skip the URL parse,
+	// but '%' is unescaped there too.
+	type misreadCase struct{ name, dir string }
+	misread := []misreadCase{
+		{"escape", "proj%232"},
+		{"bad_escape", "proj%zz"},
+	}
+	if runtime.GOOS != "windows" {
+		misread = append(misread,
+			misreadCase{"fragment", "proj#2"},
+			misreadCase{"query", "proj?x"},
+			misreadCase{"backslash", `proj\2`},
+		)
+	}
+	for _, tc := range misread {
+		t.Run("backup_at_a_misread_path_"+tc.name, func(t *testing.T) {
+			dir := mkdir(tc.dir, "manifest")
+			url, err := RestoreSourceURL(dir)
+			if err == nil {
+				t.Fatalf("RestoreSourceURL(%q) = %q, want a refusal", dir, url)
+			}
+			for _, want := range []string{dir, "cannot be restored where it is", "move or rename the backup"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("RestoreSourceURL(%q) error = %v, want it to contain %q", dir, err, want)
+				}
+			}
+		})
+	}
+
+	// The check follows the path Dolt opens, not the kernel's reading of the
+	// argument: after a symlink, "link/../bk" names link's target's sibling
+	// to the kernel, but filepath.Abs, and so the URL Dolt gets, cleans it to
+	// link's own sibling. Here only the kernel's directory holds a backup.
+	t.Run("dotdot_after_symlink_checks_the_directory_dolt_opens", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows resolves .. lexically, as filepath.Abs does")
+		}
+		mkdir(filepath.Join("elsewhere", "bk"), "manifest")
+		mkdir("bk")
+		link := filepath.Join(root, "link")
+		if err := os.Symlink(mkdir(filepath.Join("elsewhere", "inner")), link); err != nil {
+			t.Skipf("symlink: %v", err)
+		}
+		// Built by hand: filepath.Join would clean the ".." away.
+		sep := string(filepath.Separator)
+		dir := link + sep + ".." + sep + "bk"
+		if _, err := os.Stat(dir + sep + "manifest"); err != nil {
+			t.Fatalf("fixture: the kernel does not reach a manifest through %s: %v", dir, err)
+		}
+		url, err := RestoreSourceURL(dir)
+		if err == nil || !strings.Contains(err.Error(), noBackup) || !strings.Contains(err.Error(), filepath.Join(root, "bk")) {
+			t.Fatalf("RestoreSourceURL(%q) = %q, %v; want a refusal naming %s, the directory Dolt would open", dir, url, err, filepath.Join(root, "bk"))
+		}
+	})
 
 	// A source bd cannot inspect is refused, not waved through. Only asserted
 	// where the platform and user really make the stat fail (root reads past
@@ -346,8 +410,8 @@ func TestCheckBackupDir(t *testing.T) {
 		if _, statErr := os.Stat(filepath.Join(dir, "manifest")); statErr == nil || os.IsNotExist(statErr) {
 			t.Skipf("stat through a 0000 directory did not fail with a permission error here: %v", statErr)
 		}
-		if err := CheckBackupDir(dir); err == nil {
-			t.Fatalf("CheckBackupDir(%q) = nil for a source it cannot stat", dir)
+		if url, err := RestoreSourceURL(dir); err == nil {
+			t.Fatalf("RestoreSourceURL(%q) = %q for a source it cannot stat", dir, url)
 		}
 	})
 }

@@ -43,6 +43,9 @@ func TestRestoreDatabaseRefusesNonBackupDirBeforeConnecting(t *testing.T) {
 		{name: "regular_file", dir: file, want: "backup source is not a directory"},
 		{name: "empty_dir", dir: mkdir("empty"), want: "holds no Dolt backup"},
 		{name: "exports_only", dir: mkdir("exports", "issues.jsonl", "backup_state.json"), want: "holds no Dolt backup"},
+		// A backup at a path Dolt reads as another directory: Dolt unescapes
+		// the "%23", on every platform.
+		{name: "backup_at_a_misread_path", dir: mkdir("proj%232", "manifest"), want: "cannot be restored where it is"},
 		// Control: a source with a manifest passes the check and reaches the
 		// connection step, so the refusals above are the check's own.
 		{name: "backup", dir: mkdir("backup", "manifest"), want: reachedConn},

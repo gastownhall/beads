@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -47,11 +48,11 @@ func TestBackupRestoreMissingDir(t *testing.T) {
 }
 
 // TestValidateBackupRestoreDir pins the restore preflight (bd-jwaljq, GH#7098):
-// an existing directory with no Dolt backup is refused before either restore
-// path starts, with the source named and a way forward, while a missing path
-// keeps its "not found" wording and a directory holding a manifest passes.
-// The empty, regular-file, missing and manifest cases are @rjgeng's from
-// PR #7192.
+// an existing directory with no Dolt backup, or a backup at a path Dolt would
+// read as another directory, is refused before either restore path starts,
+// with the source named and a way forward, while a missing path keeps its
+// "not found" wording and a directory holding a manifest passes. The empty,
+// regular-file, missing and manifest cases are @rjgeng's from PR #7192.
 func TestValidateBackupRestoreDir(t *testing.T) {
 	root := t.TempDir()
 	mkdir := func(name string, files ...string) string {
@@ -85,6 +86,12 @@ func TestValidateBackupRestoreDir(t *testing.T) {
 	link(filepath.Join(brokenLink, "absent"), filepath.Join(brokenLink, "manifest"))
 	linked := mkdir("linked", "manifest.real")
 	link(filepath.Join(linked, "manifest.real"), filepath.Join(linked, "manifest"))
+	// A backup at a path Dolt reads as another directory: it cuts a file://
+	// path at '#'. Windows paths skip that parse, but '%' is unescaped there.
+	misread := "proj#2"
+	if runtime.GOOS == "windows" {
+		misread = "proj%232"
+	}
 
 	for _, tc := range []struct {
 		name, dir string
@@ -97,6 +104,7 @@ func TestValidateBackupRestoreDir(t *testing.T) {
 		{name: "lock_and_oldgen_debris", dir: debris, want: []string{"holds no Dolt backup"}},
 		{name: "manifest_is_a_directory", dir: manifestDir, want: []string{"holds no Dolt backup", "Restore was not attempted"}},
 		{name: "broken_manifest_symlink", dir: brokenLink, want: []string{"holds no Dolt backup"}},
+		{name: "backup_at_a_misread_path", dir: mkdir(misread, "manifest"), want: []string{"cannot be restored where it is", "move or rename the backup", "Restore was not attempted"}},
 		{name: "backup", dir: mkdir("backup", "manifest")},
 		{name: "manifest_symlink_to_regular_file", dir: linked},
 	} {

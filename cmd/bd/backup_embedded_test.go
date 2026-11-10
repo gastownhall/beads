@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -354,6 +355,45 @@ func TestEmbeddedBackupRestoreStrictReadonly(t *testing.T) {
 			}
 		})
 	}
+
+	// A real backup at a path Dolt reads as another directory is refused too.
+	// Dolt parses the source as a file:// URL, so a backup copied to "proj#2"
+	// was restored from "proj": Dolt created that directory empty, dropped
+	// the live database, and failed, as with an empty source. Windows paths
+	// skip that parse, but '%' is unescaped there.
+	t.Run("refuses_backup_at_a_path_dolt_misreads", func(t *testing.T) {
+		dir, backupDir := newWorkspace(t, "rrmisread")
+		before := issueSet(t, dir)
+		if len(before) != 3 {
+			t.Fatalf("fixture holds %d issues, want 3: %v", len(before), before)
+		}
+		name := "proj#2"
+		if runtime.GOOS == "windows" {
+			name = "proj%232"
+		}
+		parent := t.TempDir()
+		source := filepath.Join(parent, name)
+		if err := copyTree(backupDir, source); err != nil {
+			t.Fatalf("copy the backup to %s: %v", source, err)
+		}
+
+		stdout, stderr, code := runBDMigrationFreeze(t, bd, dir, "backup", "restore", "--force", source)
+
+		if code == 0 {
+			t.Errorf("bd backup restore --force %s exited 0\nstdout:\n%s\nstderr:\n%s", source, stdout, stderr)
+		}
+		for _, want := range []string{"cannot be restored where it is", source, "Restore was not attempted"} {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("stderr is missing %q:\n%s", want, stderr)
+			}
+		}
+		if after := issueSet(t, dir); !slices.Equal(after, before) {
+			t.Errorf("issues after the refused restore = %v, want the live store's %v", after, before)
+		}
+		if _, err := os.Stat(filepath.Join(parent, "proj")); !os.IsNotExist(err) {
+			t.Errorf("the refused restore reached Dolt, which created %s: %v", filepath.Join(parent, "proj"), err)
+		}
+	})
 
 	for _, tc := range []struct {
 		name   string
