@@ -7,6 +7,7 @@ go_test(
         "database_corruption_recovery_test.go",
         "docsync_test.go",
         "doltpin_test.go",
+        "incomplete_commit_recovery_test.go",
         "init_safety_recovery_test.go",
     ],
     # Every Markdown file (the docs trees, the root docs, every AGENTS.md),
