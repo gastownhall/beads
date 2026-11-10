@@ -1226,6 +1226,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Loading config no longer touches the native user config file
+  (`os.UserConfigDir()/bd/config.yaml`, on macOS
+  `~/Library/Application Support/bd/config.yaml`) while
+  `~/.config/bd/config.yaml` exists. Every launch stat'd it, which on macOS 26
+  was reported to raise a privacy prompt each time (GH#8113). The native file
+  is now a fallback, read only when the existence check for
+  `~/.config/bd/config.yaml` fails, instead of a layer merged beneath it; the
+  legacy `~/.beads/config.yaml` still merges beneath the selected file.
+  **Breaking for dual-file setups:** if you have both files, settings defined
+  only in the native file stop applying. That includes `node_id`: unless it is
+  supplied elsewhere, it reads as unset and replica-aware behavior is
+  disabled. Copy the settings you want into `~/.config/bd/config.yaml`
+  (keeping its own value where both set a key), for example with
+  `bd config set node_id <name>`. The native file can stay in place. Other
+  commands may still touch the native directory; this removes only the
+  config-load probe.
+
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

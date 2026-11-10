@@ -5,7 +5,7 @@ description: Complete reference for bd configuration across config.yaml and data
 
 Complete configuration reference for beads.
 
-Last reviewed: 2026-10-26
+Last reviewed: 2026-11-10
 
 Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, `internal/config/`, `internal/configfile/`, and `internal/endpointtrust/`.
 
@@ -23,11 +23,25 @@ Dolt is the only storage backend. Embedded mode (the default) stores data at `.b
 `config.yaml` is searched in this order, with later files overriding earlier ones:
 
 1. `~/.beads/config.yaml` (legacy user-level, lowest priority)
-2. `~/.config/bd/config.yaml` (user-level; this exact path is checked even on platforms whose native user-config directory differs)
+2. `~/.config/bd/config.yaml` (user-level), or the native user config file when that one does not exist (see below)
 3. `<repo>/.beads/config.yaml` (project-level, walked up from the current directory)
 4. `$BEADS_DIR/config.yaml` (highest priority, when `BEADS_DIR` points at a different workspace)
 
 A `config.local.yaml` next to the project `config.yaml` is also merged in last for machine-specific overrides that should not be committed.
+
+### The user-level config: documented and native locations
+
+The documented user-level file is the literal `<home>/.config/bd/config.yaml` on every platform; `XDG_CONFIG_HOME` does not relocate it.
+
+The native user config file is `bd/config.yaml` in the operating system's user config directory (`os.UserConfigDir()`): `~/Library/Application Support/bd/config.yaml` on macOS, `%APPDATA%\bd\config.yaml` on Windows, and `$XDG_CONFIG_HOME/bd/config.yaml` on Linux when `XDG_CONFIG_HOME` points somewhere other than `~/.config`. bd uses it **only as a fallback**: when the existence check for `~/.config/bd/config.yaml` fails, typically because the file is missing; an existing documented file that does not parse is not skipped in favor of native. The two files are not merged: while `~/.config/bd/config.yaml` exists, loading configuration does not look at the native file at all. Touching that directory on every launch was reported to raise a macOS privacy prompt (GH#8113). `~/.beads/config.yaml` (legacy) still merges beneath whichever user-level file is selected.
+
+Earlier releases merged the native file beneath `~/.config/bd/config.yaml`. If you have both files, a setting that only the native file defines no longer applies. That includes `node_id`: when the native file was its only source and it is not supplied elsewhere, the replica identity is now unset and replica-aware behavior is off. To keep such settings, copy them into `~/.config/bd/config.yaml`, keeping that file's own value where both set the same key; for example:
+
+```bash
+bd config set node_id <name>
+```
+
+writes to `~/.config/bd/config.yaml` once it exists. You do not need to delete the native file. Other bd commands may still touch the native directory for other purposes; this change removes the config-load probe, not every access.
 
 ## Precedence
 
