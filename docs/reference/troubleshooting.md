@@ -559,8 +559,9 @@ git config --show-scope --get core.hooksPath
 ```
 
 `bd hooks list`, `bd doctor` (Hooks Path and Git Hooks) report the stale
-path, the current beads hooks directory, and the repair. Reading status
-never changes git config. Repair it explicitly with either command:
+path, the current beads hooks directory, and the repair. Ordinary bd
+commands never rewrite git configuration; only `bd hooks install` and
+`bd doctor --fix` do:
 
 ```bash
 bd doctor --fix      # repoints core.hooksPath to the current hooks directory

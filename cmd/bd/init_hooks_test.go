@@ -1961,6 +1961,9 @@ func TestDoctorGitHooks_RelocatedHooksPath(t *testing.T) {
 		if !strings.Contains(check.Detail, stale) {
 			t.Errorf("Git Hooks detail %q does not name %s", check.Detail, stale)
 		}
+		if check.Fix != "" {
+			t.Errorf("Git Hooks check carries Fix %q; the Hooks Path check owns the repair", check.Fix)
+		}
 
 		out := captureStdout(t, func() error {
 			applyFixList(repo, []doctorCheck{{Name: "Git Hooks", Status: statusWarning, Message: check.Message}})
