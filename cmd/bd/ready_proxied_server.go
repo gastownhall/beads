@@ -50,8 +50,12 @@ func runReadyProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 	// Wake expired dated defers before the read below. The unit of work this
 	// route opens is read-only-by-ending (Close rolls back), so the sweep runs
 	// in a committing UOW of its own first; the claim route above gets the
-	// same sweep from its role (uow.readyClaimer.ClaimNext).
-	uow.WakeExpiredDefersAdvisory(ctx, uowProvider)
+	// same sweep from its role (uow.readyClaimer.ClaimNext). A
+	// MIGRATION-FREEZE holds the sweep off: its write waits for the first
+	// ready read after the thaw (#7634).
+	if !commandFreeze.Frozen() {
+		uow.WakeExpiredDefersAdvisory(ctx, uowProvider)
+	}
 
 	// --mol reads through the provider's roles, each in a unit of work of its
 	// own, so it runs before this route opens the one it holds below.

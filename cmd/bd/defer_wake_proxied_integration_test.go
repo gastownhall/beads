@@ -37,13 +37,13 @@ func TestProxiedServerDeferAutoWake(t *testing.T) {
 		return status, arr[0]["defer_until"]
 	}
 
-	readySet := func(t *testing.T) map[string]bool {
+	readySetEnv := func(t *testing.T, extraEnv []string) map[string]bool {
 		t.Helper()
-		out, err := bdProxiedRun(t, bd, p.dir, "ready", "--json", "--limit", "0")
+		out, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, extraEnv, "ready", "--json", "--limit", "0")
 		if err != nil {
-			t.Fatalf("ready: %v\n%s", err, out)
+			t.Fatalf("ready: %v\n%s%s", err, out, stderr)
 		}
-		s := strings.TrimSpace(string(out))
+		s := strings.TrimSpace(out)
 		start := strings.Index(s, "[")
 		if start < 0 {
 			return map[string]bool{}
@@ -60,6 +60,11 @@ func TestProxiedServerDeferAutoWake(t *testing.T) {
 		}
 		return ids
 	}
+	readySet := func(t *testing.T) map[string]bool {
+		t.Helper()
+		return readySetEnv(t, nil)
+	}
+	markerDir := t.TempDir()
 
 	t.Run("expired_dated_defer_wakes_on_ready", func(t *testing.T) {
 		a := bdProxiedCreate(t, bd, p.dir, "Expired snooze proxied", "--type", "task")
@@ -109,6 +114,47 @@ func TestProxiedServerDeferAutoWake(t *testing.T) {
 		}
 		if deferUntil != nil {
 			t.Errorf("wisp defer_until should be cleared after wake, got %v", deferUntil)
+		}
+	})
+
+	// A MIGRATION-FREEZE holds the proxied ready route's sweep off: the
+	// read still answers (an ordinary open issue is listed) but nothing
+	// wakes and HEAD stays put (#7634). The first ready read after the thaw
+	// wakes the deferral in one defer-wake commit.
+	t.Run("frozen_ready_leaves_expired_defer_asleep_until_thaw", func(t *testing.T) {
+		db := openProxiedDB(t, p)
+		plain := bdProxiedCreate(t, bd, p.dir, "Ordinary ready work proxied", "--type", "task")
+		a := bdProxiedCreate(t, bd, p.dir, "Frozen snooze proxied", "--type", "task")
+		if out, err := bdProxiedRun(t, bd, p.dir, "defer", a.ID, "--until", "2020-01-01"); err != nil {
+			t.Fatalf("defer: %v\n%s", err, out)
+		}
+		before := proxiedDoltHead(t, db)
+
+		ids := readySetEnv(t, deferWakeFreezeEnv(t, markerDir, true))
+		if !ids[plain.ID] {
+			t.Errorf("frozen bd ready dropped ordinary open issue %s", plain.ID)
+		}
+		if ids[a.ID] {
+			t.Errorf("frozen bd ready listed %s: the sweep woke it during a freeze", a.ID)
+		}
+		if after := proxiedDoltHead(t, db); after != before {
+			t.Errorf("frozen bd ready moved HEAD %s -> %s", before, after)
+		}
+		status, deferUntil := showState(t, a.ID)
+		if status != string(types.StatusDeferred) || deferUntil == nil {
+			t.Fatalf("frozen bd ready changed %s to status=%s defer_until=%v, want deferred with its date", a.ID, status, deferUntil)
+		}
+
+		ids = readySetEnv(t, deferWakeFreezeEnv(t, markerDir, false))
+		if !ids[a.ID] {
+			t.Errorf("expected %s in bd ready after the thaw", a.ID)
+		}
+		status, deferUntil = showState(t, a.ID)
+		if status != string(types.StatusOpen) || deferUntil != nil {
+			t.Errorf("thawed bd ready left %s at status=%s defer_until=%v, want open with no date", a.ID, status, deferUntil)
+		}
+		if n := proxiedDoltCommitCountSince(t, db, before); n != 1 {
+			t.Errorf("thawed bd ready made %d commits since the frozen read, want exactly one defer-wake commit", n)
 		}
 	})
 

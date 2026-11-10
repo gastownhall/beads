@@ -15,6 +15,8 @@ import (
 
 	"github.com/cenkalti/backoff/v4"
 	doltembed "github.com/dolthub/driver/v2"
+
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 // validIdentifier matches safe SQL identifiers (letters, digits, underscores).
@@ -22,37 +24,21 @@ import (
 // variable identifiers (@@<db>_head_ref) where hyphens are invalid.
 var validIdentifier = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
-// defaultAuthorName/defaultAuthorEmail are the Dolt commit identity every
-// embedded connection uses (GH#7628: embedded mode hardcoded this to
-// beads/beads@local regardless of the resolved actor or GIT_AUTHOR_*, while
-// server mode already resolved it). cmd/bd overrides both once per process,
-// before any embedded store opens, via SetCommitIdentity; a caller that never
-// calls it — a test in this package, or any other binary built on
-// embeddeddolt — keeps the historical beads/beads@local identity unchanged.
-var (
-	defaultAuthorName  = "beads"
-	defaultAuthorEmail = "beads@local"
-)
-
-// SetCommitIdentity overrides the Dolt commit author every subsequent
-// embedded connection in this process uses (GH#7628). Pass already-resolved,
-// non-empty values — cmd/bd resolves GIT_AUTHOR_NAME/the actor fallback chain
-// and GIT_AUTHOR_EMAIL/git config user.email itself, the same way server mode
-// resolves CommitterName/CommitterEmail. Either argument empty is a no-op,
-// leaving the current identity (beads/beads@local, unless already set) in
-// place rather than adopting a half-resolved identity.
-func SetCommitIdentity(name, email string) {
-	if name == "" || email == "" {
-		return
-	}
-	defaultAuthorName = name
-	defaultAuthorEmail = email
+// OpenSQL opens an embedded Dolt database at dir. The returned cleanup
+// function closes both the *sql.DB and the underlying connector. The DSN
+// carries the identity versioncontrolops.ResolveCommitter resolves now
+// (GIT_AUTHOR_*, else beads/beads@local) as the engine's user.name/user.email,
+// which Dolt uses for commits the engine makes itself, such as a new
+// database's initial commit. A DOLT_COMMIT or DOLT_MERGE issued on the
+// handle records the SQL user unless it passes --author, so store commits
+// always pass their identity explicitly. A store's own connections use the
+// identity it captured at construction instead.
+func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func() error, error) {
+	return openSQL(ctx, dir, database, branch, versioncontrolops.ResolveCommitter("", ""))
 }
 
-// OpenSQL opens an embedded Dolt database at dir. The returned cleanup
-// function closes both the *sql.DB and the underlying connector.
-func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func() error, error) {
-	dsn := buildDSN(dir, database)
+func openSQL(ctx context.Context, dir, database, branch string, committer versioncontrolops.Committer) (*sql.DB, func() error, error) {
+	dsn := buildDSN(dir, database, committer)
 
 	cfg, err := doltembed.ParseDSN(dsn)
 	if err != nil {
@@ -117,10 +103,10 @@ func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func()
 	return db, cleanup, nil
 }
 
-func buildDSN(dir, database string) string {
+func buildDSN(dir, database string, committer versioncontrolops.Committer) string {
 	v := url.Values{}
-	v.Set(doltembed.CommitNameParam, defaultAuthorName)
-	v.Set(doltembed.CommitEmailParam, defaultAuthorEmail)
+	v.Set(doltembed.CommitNameParam, committer.Name)
+	v.Set(doltembed.CommitEmailParam, committer.Email)
 	v.Set(doltembed.MultiStatementsParam, "true")
 	if strings.TrimSpace(database) != "" {
 		v.Set(doltembed.DatabaseParam, database)

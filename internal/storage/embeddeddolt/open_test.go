@@ -5,6 +5,8 @@ package embeddeddolt
 import (
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 func TestBuildDSN_SpacesInPath(t *testing.T) {
@@ -12,7 +14,7 @@ func TestBuildDSN_SpacesInPath(t *testing.T) {
 	// percent-encoded (%20) because the Dolt driver's ParseDataSource
 	// uses the path as a literal filesystem path.
 	dir := "/Users/bbrenner/Documents/Scripting Projects/beads/.beads/embeddeddolt"
-	dsn := buildDSN(dir, "beads")
+	dsn := buildDSN(dir, "beads", versioncontrolops.Committer{})
 
 	if !strings.HasPrefix(dsn, "file://") {
 		t.Fatalf("DSN should start with file://, got %q", dsn)
@@ -39,14 +41,14 @@ func TestBuildDSN_SpacesInPath(t *testing.T) {
 }
 
 func TestBuildDSN_NoDatabase(t *testing.T) {
-	dsn := buildDSN("/tmp/test", "")
+	dsn := buildDSN("/tmp/test", "", versioncontrolops.Committer{})
 	if strings.Contains(dsn, "database=") {
 		t.Errorf("DSN should not contain database param when empty; got %q", dsn)
 	}
 }
 
 func TestBuildDSN_WithDatabase(t *testing.T) {
-	dsn := buildDSN("/tmp/test", "mydb")
+	dsn := buildDSN("/tmp/test", "mydb", versioncontrolops.Committer{})
 	if !strings.Contains(dsn, "database=mydb") {
 		t.Errorf("DSN should contain database=mydb; got %q", dsn)
 	}

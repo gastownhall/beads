@@ -1261,6 +1261,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restore from a real backup there dropped the database the same way. Move or
   rename such a backup before restoring it. In plain server mode the source
   must also be visible to the bd client, since bd now checks it locally.
+- `bd ready` and `bd list --ready` no longer write to a workspace under a
+  `MIGRATION-FREEZE`. Their lazy defer-wake sweep reopened issues whose
+  `--until` date had passed and committed `bd: wake N expired defer(s)` while
+  the freeze held, in embedded, direct-server and proxied-server workspaces
+  alike. The sweep now waits: those issues stay deferred and out of the ready
+  list until the first ready read after the marker is removed (#7634).
+
+- Embedded-mode commits now record the `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL`
+  identity, as server mode already did. Embedded stores committed as
+  `beads <beads@local>`, and the pending-changes commit recorded the SQL user
+  `root <root@%>` as its author. With neither variable set, commits are still
+  authored by `beads <beads@local>` (#7628).
+
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
