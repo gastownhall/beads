@@ -13,14 +13,6 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// foreignPrefixHintMarker is a phrase only the foreign-prefix miss hint
-// (foreignPrefixMissHint) prints; existingHintMarker one only
-// showNotFoundHint prints.
-const (
-	foreignPrefixHintMarker = "does not mean the issue is absent"
-	existingHintMarker      = "never existed"
-)
-
 // createShowRoutingIssue creates id in s, failing the test on error.
 func createShowRoutingIssue(t *testing.T, s storage.DoltStorage, id string) {
 	t.Helper()
