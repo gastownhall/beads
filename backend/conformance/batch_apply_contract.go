@@ -491,11 +491,23 @@ func RunBatchApplyNeverReordersItsItems(t *testing.T, ctx context.Context, fixtu
 //
 // POSITIVE HALF: the same three edges with the first one non-blocking all land,
 // because a hierarchy is only a conflict for an edge that GATES.
+//
+// The case runs twice: once with every endpoint in the fixture's prefix, and
+// once with a grandparent of another prefix that this database holds. A local
+// issue is local whatever its prefix (GH#8299), so the end gate re-validates
+// the blocking edge onto it instead of passing it as another rig's.
 func RunBatchApplyEndGateRefusesAHierarchyTheRequestBuilt(t *testing.T, ctx context.Context, fixture BatchApplyFixture) {
 	t.Helper()
-	grand := fixture.IssuePrefix + "-endgate-grand"
-	parent := fixture.IssuePrefix + "-endgate-parent"
-	child := fixture.IssuePrefix + "-endgate-child"
+	for _, grandPrefix := range []string{fixture.IssuePrefix, "x" + fixture.IssuePrefix} {
+		endGateRefusesAHierarchyTheRequestBuilt(t, ctx, fixture, grandPrefix)
+	}
+}
+
+func endGateRefusesAHierarchyTheRequestBuilt(t *testing.T, ctx context.Context, fixture BatchApplyFixture, grandPrefix string) {
+	t.Helper()
+	grand := grandPrefix + "-endgate-grand"
+	parent := fixture.IssuePrefix + "-endgate-parent-" + grandPrefix
+	child := fixture.IssuePrefix + "-endgate-child-" + grandPrefix
 	for _, id := range []string{grand, parent, child} {
 		batchApplySeedIssue(t, ctx, fixture, id, types.StatusOpen)
 	}

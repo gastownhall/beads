@@ -71,6 +71,10 @@ func (k DepTargetKind) Column() string {
 // kind ahead of time.
 const DepTargetExpr = sqlbuild.DepTargetExpr
 
+// storedDepTargetKindExpr projects which typed column a dependency row holds
+// its target in, as a DepTargetKind value.
+const storedDepTargetKindExpr = "CASE WHEN depends_on_issue_id IS NOT NULL THEN 0 WHEN depends_on_wisp_id IS NOT NULL THEN 1 ELSE 2 END"
+
 func depTargetExpr(alias string) string {
 	if alias == "" {
 		return DepTargetExpr
@@ -289,7 +293,7 @@ type DepTargetPrecheck struct {
 // same terms; only a genuinely change-free re-add (identical type and metadata,
 // no new thread) mints nothing.
 func AddDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts) (bool, error) {
-	return addDependencyInTx(ctx, tx, dep, actor, opts, nil, true)
+	return addDependencyInTx(ctx, tx, dep, actor, opts, nil, nil, true)
 }
 
 // DependencyWriteResult is what a dependency write reports to a caller that
@@ -303,13 +307,18 @@ func AddDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 type DependencyWriteResult struct {
 	EventWritten bool
 	Blocked      RecomputeIsBlockedResult
+	// TargetKind is the typed column the edge's row holds its target in: the
+	// classification of a new edge, or the stored column of an existing one
+	// (a re-add does not move it). A caller re-validating the edge later (a
+	// batch end gate) skips an external one by it rather than re-deriving it.
+	TargetKind DepTargetKind
 }
 
 // AddDependencyInTxWithResult is AddDependencyInTx reporting the blocked-state
 // tables the add changed alongside the event verdict.
 func AddDependencyInTxWithResult(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts) (DependencyWriteResult, error) {
 	var result DependencyWriteResult
-	eventWritten, err := addDependencyInTx(ctx, tx, dep, actor, opts, &result.Blocked, true)
+	eventWritten, err := addDependencyInTx(ctx, tx, dep, actor, opts, &result.Blocked, &result.TargetKind, true)
 	result.EventWritten = eventWritten
 	return result, err
 }
@@ -318,7 +327,7 @@ func AddDependencyInTxWithResult(ctx context.Context, tx *sql.Tx, dep *types.Dep
 // whether a new edge mints the source's version row here: the exported entry
 // point always does, while a parent patch (applyParentPatch) rewires several
 // edges for one caller-visible mutation and mints once after the last of them.
-func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts, recomputeResult *RecomputeIsBlockedResult, mintVersion bool) (bool, error) {
+func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts, recomputeResult *RecomputeIsBlockedResult, targetKind *DepTargetKind, mintVersion bool) (bool, error) {
 	if strings.HasPrefix(dep.DependsOnID, "external:") && dep.Type == types.DepParentChild {
 		return false, fmt.Errorf("external capability dependencies cannot use parent-child edges")
 	}
@@ -401,16 +410,25 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 	}
 
 	targetCol := kind.Column()
+	if targetKind != nil {
+		*targetKind = kind
+	}
 
 	// Check for existing dependency between the same pair. Use the resolved
 	// target expression defensively so stale/reclassified rows in another typed
-	// target column cannot bypass the idempotency/conflict check.
+	// target column cannot bypass the idempotency/conflict check. An existing
+	// row keeps the column it was written to (a re-add does not move it), so
+	// its stored kind is the one reported.
 	var existingType string
 	var existingMetadataNS, existingThreadNS sql.NullString
+	var existingKind DepTargetKind
 	//nolint:gosec // G201: writeTable from WispTableRouting; depTargetEquals has no user input.
-	err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT type, metadata, thread_id FROM %s WHERE issue_id = ? AND %s`, writeTable, depTargetEquals("")),
-		dep.IssueID, dep.DependsOnID).Scan(&existingType, &existingMetadataNS, &existingThreadNS)
+	err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT type, metadata, thread_id, %s FROM %s WHERE issue_id = ? AND %s`, storedDepTargetKindExpr, writeTable, depTargetEquals("")),
+		dep.IssueID, dep.DependsOnID).Scan(&existingType, &existingMetadataNS, &existingThreadNS, &existingKind)
 	if err == nil {
+		if targetKind != nil {
+			*targetKind = existingKind
+		}
 		existingMetadata := existingMetadataNS.String
 		if !existingMetadataNS.Valid {
 			existingMetadata = "{}"

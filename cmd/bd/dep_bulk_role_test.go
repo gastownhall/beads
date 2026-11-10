@@ -71,6 +71,64 @@ func TestBulkDepAddRoleAppliesHierarchyBeforeBlockingEdges(t *testing.T) {
 	}
 }
 
+// The same-database cross-prefix twin of the ordering test above (GH#8299):
+// the grandparent row is this database's own row — only its id prefix belongs
+// to another rig — so the hierarchy check the bulk route applies must see it
+// exactly like a same-prefix ancestor. Pre-fix the cross-prefix blocker
+// classified external before any read, the hierarchy gate skipped it, and the
+// whole request would have committed a self-blocking hierarchy edge set.
+func TestBulkDepAddRoleAppliesHierarchyBeforeBlockingEdgesCrossPrefix(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	s := newTestStore(t, filepath.Join(tmpDir, ".beads", "beads.db"))
+	ctx := context.Background()
+
+	const grand, parent, child = "hq-xp-grand", "test-xp-parent", "test-xp-child"
+	seedBulkRoleIssues(ctx, t, s, parent, child)
+	// The grand row mints under a foreign prefix, import-shaped: an explicit
+	// id the prefix gate would refuse, allowed here by the import path's own
+	// SkipPrefixValidation option. It is the database's row after this.
+	grandIssue := &types.Issue{
+		ID: grand, Title: grand, Status: types.StatusOpen,
+		Priority: 1, IssueType: types.TypeTask, CreatedAt: time.Now(),
+	}
+	if err := s.CreateIssuesWithFullOptions(ctx, []*types.Issue{grandIssue}, "tester", storage.BatchCreateOptions{
+		SkipPrefixValidation: true,
+	}); err != nil {
+		t.Fatalf("create cross-prefix %s: %v", grand, err)
+	}
+
+	editor, err := s.DependencyEditor()
+	if err != nil {
+		t.Fatalf("DependencyEditor(): %v", err)
+	}
+	_, err = editor.AddDependencies(ctx, issueops.AddDependenciesRequest{
+		Actor: "tester",
+		Edges: []issueops.DependencyEdge{
+			{IssueID: child, DependsOnID: grand, Type: types.DepBlocks},
+			{IssueID: child, DependsOnID: parent, Type: types.DepParentChild},
+			{IssueID: parent, DependsOnID: grand, Type: types.DepParentChild},
+		},
+	})
+	var conflict *domain.DependencyHierarchyConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("error = %v, want *domain.DependencyHierarchyConflictError for the locally held cross-prefix ancestor", err)
+	}
+	if !conflict.BlockerIsAncestor {
+		t.Fatalf("conflict = %#v, want the blocker reported as the child's ancestor", conflict)
+	}
+
+	for _, id := range []string{child, parent} {
+		deps, err := s.GetDependencyRecords(ctx, id)
+		if err != nil {
+			t.Fatalf("GetDependencyRecords(%s): %v", id, err)
+		}
+		if len(deps) != 0 {
+			t.Fatalf("%s edges after a refused cross-prefix request = %#v, want none: the request is all-or-nothing", id, deps)
+		}
+	}
+}
+
 // bd-6dnrw.8: with the per-edge probe off the whole-graph gate is the check
 // that actually holds the invariant. Its refusal must roll the request back —
 // no cycle may ever commit — and must render the message the bulk route has

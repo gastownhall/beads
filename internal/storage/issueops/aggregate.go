@@ -512,7 +512,7 @@ func applyParentPatch(ctx context.Context, tx DBTX, current *types.Issue, parent
 		}
 	}
 	for _, parentID := range stringSetDifference(target, existing) {
-		if _, err := addDependencyInTx(ctx, sqlTx, &types.Dependency{IssueID: current.ID, DependsOnID: parentID, Type: types.DepParentChild}, actor, AddDependencyOpts{}, &recomputed, false); err != nil {
+		if _, err := addDependencyInTx(ctx, sqlTx, &types.Dependency{IssueID: current.ID, DependsOnID: parentID, Type: types.DepParentChild}, actor, AddDependencyOpts{}, &recomputed, nil, false); err != nil {
 			return ParentPatchResult{}, err
 		}
 	}

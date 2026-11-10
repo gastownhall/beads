@@ -185,13 +185,12 @@ type applyBatchRun struct {
 	result publicops.ApplyBatchResult
 }
 
-// appliedEdge is one edge the request wrote, paired with its item's index.
+// appliedEdge is one edge the request wrote, paired with its item's index and
+// the typed column its row holds the target in.
 type appliedEdge struct {
-	index int
-	edge  publicops.DependencyEdge
-	// kind is the target's class as the write resolved it, so the end gate
-	// skips exactly the targets this database does not hold.
-	kind DepTargetKind
+	index      int
+	edge       publicops.DependencyEdge
+	targetKind DepTargetKind
 }
 
 // apply runs the three phases in order: the items, the metadata splice, the end
@@ -415,14 +414,9 @@ func (r *applyBatchRun) applyDepAdd(ctx context.Context, tx *sql.Tx, index int, 
 		Metadata:    metadata,
 		ThreadID:    item.ThreadID,
 	}
-	kind, err := ClassifyDepTarget(ctx, tx, dep)
-	if err != nil {
-		return itemErr(err)
-	}
 	written, err := AddDependencyInTxWithResult(ctx, tx, dep, r.plan.Actor, AddDependencyOpts{
 		SourceTable:    sourceTable,
 		WriteTable:     depTable,
-		TargetKind:     &kind,
 		SkipCycleCheck: r.plan.SkipPerEdgeCycleCheck,
 		EmitEvent:      true,
 	})
@@ -446,9 +440,9 @@ func (r *applyBatchRun) applyDepAdd(ctx context.Context, tx *sql.Tx, index int, 
 		r.write.Tables.Add("issues")
 	}
 	r.edges = append(r.edges, appliedEdge{
-		index: index,
-		edge:  publicops.DependencyEdge{IssueID: source, DependsOnID: target, Type: item.Type},
-		kind:  kind,
+		index:      index,
+		edge:       publicops.DependencyEdge{IssueID: source, DependsOnID: target, Type: item.Type},
+		targetKind: written.TargetKind,
 	})
 	r.result.Items[index] = publicops.ItemResult{
 		Kind:        publicops.ItemDepAdd,
@@ -615,8 +609,9 @@ func (r *applyBatchRun) runEndGate(ctx context.Context, tx *sql.Tx) error {
 		}
 		// A target this database does not hold has no local hierarchy to
 		// conflict with, and the per-edge path filters it for the same reason.
-		// A held one is checked whatever its prefix (GH#8299).
-		if applied.kind == DepTargetExternal {
+		// The kind is the one the edge's row was written with, so a held target
+		// is checked whatever its prefix (GH#8299).
+		if applied.targetKind == DepTargetExternal {
 			continue
 		}
 		if err := CheckBlockingHierarchyInTx(ctx, tx, dep, cycleDetectionTables()); err != nil {

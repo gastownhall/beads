@@ -70,15 +70,17 @@ func (c *dependencyCommitBoundaryConn) QueryContext(_ context.Context, query str
 		return &dependencyCommitBoundaryRows{columns: []string{"issue_type"}, values: [][]driver.Value{{"task"}}}, nil
 	// The add path's existence probe reads the stored edge's metadata and
 	// thread_id alongside its type: a same-type re-add compares both to decide
-	// whether it changes anything.
-	case strings.Contains(query, "SELECT type, metadata, thread_id FROM dependencies"),
-		strings.Contains(query, "SELECT type, metadata, thread_id FROM wisp_dependencies"):
+	// whether it changes anything. It also reads which typed column the row
+	// holds its target in (0 = issue), the kind a re-add reports.
+	case strings.HasPrefix(query, "SELECT type, metadata, thread_id, ") &&
+		(strings.Contains(query, " FROM dependencies ") || strings.Contains(query, " FROM wisp_dependencies ")):
+		columns := []string{"type", "metadata", "thread_id", "target_kind"}
 		if c.driver.newEdge {
-			return &dependencyCommitBoundaryRows{columns: []string{"type", "metadata", "thread_id"}}, nil
+			return &dependencyCommitBoundaryRows{columns: columns}, nil
 		}
 		return &dependencyCommitBoundaryRows{
-			columns: []string{"type", "metadata", "thread_id"},
-			values:  [][]driver.Value{{"related", "{}", nil}},
+			columns: columns,
+			values:  [][]driver.Value{{"related", "{}", nil, int64(0)}},
 		}, nil
 	// The remove path reads the edge's metadata alongside its type: the events
 	// journal records the removed edge's full payload so a consumer can replay
