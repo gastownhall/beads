@@ -939,7 +939,7 @@ func TestFixHooksPath_RelocatedLinkedWorktree(t *testing.T) {
 	root := t.TempDir()
 	git := func(dir string, args ...string) {
 		t.Helper()
-		cmd := gitCommand(append([]string{"-c", "user.name=t", "-c", "user.email=t@example.com"}, args...)...)
+		cmd := gitCommand(append([]string{"-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"}, args...)...)
 		cmd.Dir = dir
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v (%s)", args, err, strings.TrimSpace(string(out)))
@@ -951,13 +951,21 @@ func TestFixHooksPath_RelocatedLinkedWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 	git(mainRepo, "init", "-q")
+	// Pin repo-local hooks before the fixture commits, so a global
+	// core.hooksPath or template hook never runs in (or counts toward) it.
+	noHooks := filepath.Join(root, "no-hooks")
+	if err := os.MkdirAll(noHooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git(mainRepo, "config", "--local", "core.hooksPath", noHooks)
 	git(mainRepo, "commit", "-q", "--allow-empty", "-m", "init")
 	git(mainRepo, "worktree", "add", "-q", filepath.Join(before, "wt"))
 
 	sentinel := filepath.Join(root, "ran")
-	hook := "#!/bin/sh\n" + bdSectionMarkerPrefix + " v1.0.0 ---\necho ran >> '" + sentinel + "'\n# --- END BEADS INTEGRATION v1.0.0 ---\n"
+	quoted := "'" + strings.ReplaceAll(sentinel, "'", `'\''`) + "'"
+	hook := "#!/bin/sh\n" + bdSectionMarkerPrefix + " v1.0.0 ---\necho ran >> " + quoted + "\n# --- END BEADS INTEGRATION v1.0.0 ---\n"
 	writeRelocatedHook(t, filepath.Join(mainRepo, ".beads", "hooks"), hook)
-	git(mainRepo, "config", "core.hooksPath", filepath.Join(mainRepo, ".beads", "hooks"))
+	git(mainRepo, "config", "--local", "core.hooksPath", filepath.Join(mainRepo, ".beads", "hooks"))
 
 	after := filepath.Join(root, "b")
 	if err := os.Rename(before, after); err != nil {
@@ -983,13 +991,16 @@ func TestFixHooksPath_RelocatedLinkedWorktree(t *testing.T) {
 	if _, err := os.Lstat(stale); !os.IsNotExist(err) {
 		t.Errorf("the former location %s was created (err=%v)", stale, err)
 	}
-	git(movedMain, "hook", "run", "pre-commit")
-	git(movedWT, "hook", "run", "pre-commit")
-	data, err := os.ReadFile(sentinel)
-	if err != nil {
-		t.Fatalf("hooks did not run: %v", err)
-	}
-	if n := strings.Count(string(data), "ran"); n != 2 {
-		t.Errorf("hook ran %d times, want once from each worktree", n)
+	// Real commits, not hook presence: git must fire the repaired
+	// pre-commit from the main and the linked worktree.
+	for i, dir := range []string{movedMain, movedWT} {
+		git(dir, "commit", "-q", "--allow-empty", "-m", "sentinel")
+		data, err := os.ReadFile(sentinel)
+		if err != nil {
+			t.Fatalf("the repaired hook did not run for a commit in %s: %v", dir, err)
+		}
+		if n := strings.Count(string(data), "ran"); n != i+1 {
+			t.Errorf("after a commit in %s the hook has run %d times, want %d", dir, n, i+1)
+		}
 	}
 }
