@@ -94,15 +94,18 @@ which is opened read-only for the lookup. How the lookup works:
   `bd close`, ...) too, which open the routed store for writing. Adding a
   route is broader than a shortcut for `bd show`.
 
-When no route or auto-route searched another store and the ID's prefix is
-not among the current store's configured prefixes (`issue_prefix` and
-`allowed_prefixes`), `bd show` says so instead of suggesting the bead never
-existed:
+In an embedded or server-mode workspace, when no route or auto-route
+searched another store and the ID's prefix is not among the current store's
+configured prefixes (`issue_prefix` and `allowed_prefixes`), `bd show` says
+so instead of suggesting the bead never existed:
 
 ```text
 Issue hq-gea4h not found
 Hint: the prefix "hq" is not among this store's configured prefixes (its issue prefix is op) and no configured route searched another store for this ID, so this miss does not mean the issue is absent elsewhere — run the command from a workspace attached to the store that issues "hq" IDs, or add a matching prefix route to town/openclaw/.beads/routes.jsonl
 ```
+
+A proxied-server workspace, or one connected to `bd serve` over HTTP, prints
+the general not-found hint instead.
 
 ## Role detection
 

@@ -318,7 +318,7 @@ func (s lookupRecordingStore) GetAllConfig(ctx context.Context) (map[string]stri
 // hint) make the same store reads for the id, print the same "Issue <ID> not
 // found" line and return the same exit error; only the Hint line differs.
 // Choosing the hint reads config and nothing else, so it never looks the id
-// up a second time or anywhere new.
+// up a second time or anywhere new, and for a bare hash it reads nothing.
 func TestShowDirectRoute_MissIdentityInvariant(t *testing.T) {
 	ensureCleanGlobalState(t)
 	saveAndRestoreGlobals(t)
@@ -377,5 +377,12 @@ func TestShowDirectRoute_MissIdentityInvariant(t *testing.T) {
 		if len(calls) == 0 {
 			t.Errorf("choosing the hint for %s read no config; the config-only check would be vacuous", id)
 		}
+	}
+
+	// A bare hash has no prefix that could be foreign, so choosing its hint
+	// reads nothing at all.
+	var calls []string
+	if got, want := showNotFoundHintIn(context.Background(), lookupRecordingStore{id: "gea4h", calls: &calls}, beadsDir, "gea4h", false), showNotFoundHint("gea4h"); got != want || len(calls) != 0 {
+		t.Errorf("choosing the hint for bare hash gea4h = (%q, reads %q), want (%q, no read)", got, calls, want)
 	}
 }

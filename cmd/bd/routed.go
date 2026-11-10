@@ -120,8 +120,10 @@ func resolveAndGetIssueWithRoutingSearchScope(ctx context.Context, localStore st
 // local store, then the routes.jsonl prefix route, then the auto-route. Its
 // bool reports whether a routed tier reached a lookup, that is, whether a
 // routed store answered for id: true once either tier succeeds or misses,
-// and on a routed refusal; false when neither tier had a store to ask. It
-// does not mean the issue's owner was found.
+// and after a prefix-tier refusal; false when neither tier had a store to
+// ask. With an error other than not-found it covers only the tiers tried
+// before that error (an auto-tier refusal after no prefix search is false),
+// so read it for a miss alone. It does not mean the issue's owner was found.
 func resolveAndGetIssueWithRoutingScope(ctx context.Context, localStore storage.DoltStorage, id string, writable bool) (*RoutedResult, bool, error) {
 	// Try local store first.
 	result, err := resolveAndGetFromStore(ctx, localStore, id, false)
