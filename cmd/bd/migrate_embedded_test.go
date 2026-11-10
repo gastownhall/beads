@@ -326,6 +326,11 @@ func TestEmbeddedMigrate(t *testing.T) {
 			if err := json.Unmarshal([]byte(out), &result); err != nil {
 				t.Fatalf("bd --format=json migrate schema returned invalid JSON: %v\n%s", err, out)
 			}
+			for _, key := range []string{"status", "applied", "latest_version"} {
+				if _, ok := result[key]; !ok {
+					t.Errorf("migrate schema JSON missing %q: %v", key, result)
+				}
+			}
 			return result
 		}
 
