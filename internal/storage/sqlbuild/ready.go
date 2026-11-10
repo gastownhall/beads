@@ -116,6 +116,40 @@ func StaleBlockedIDsSQL(tables FilterTables) string {
 		tables.Main, OwnReadyAffectingEdgeSQL(tables, "t"))
 }
 
+// deferredParentLegs renders the two conditions that each make an issue a
+// deferred parent, with col qualifying a column name: its status is deferred
+// (plain `bd defer` sets it with no date, GH#7300), or its defer_until is
+// still in the future.
+func deferredParentLegs(col func(string) string) (status, future string) {
+	return col("status") + " = '" + string(types.StatusDeferred) + "'",
+		col("defer_until") + " IS NOT NULL AND " + col("defer_until") + " > UTC_TIMESTAMP()"
+}
+
+// DeferredParentPredicate is the deferred-parent rule as a condition on one
+// row: alias qualifies its columns ("" leaves them bare). Ready work hides the
+// direct children of a parent it matches. alias is a trusted internal
+// identifier, never user input.
+func DeferredParentPredicate(alias string) string {
+	status, future := deferredParentLegs(func(c string) string {
+		if alias == "" {
+			return c
+		}
+		return alias + "." + c
+	})
+	return "(" + status + " OR (" + future + "))"
+}
+
+// AnyDeferredParentSQL answers whether table holds any row
+// DeferredParentPredicate matches, as a boolean expression. Each branch of the
+// rule gets its own EXISTS, so each leg can be answered from an index on its
+// own column instead of relying on the planner to merge two indexes for an OR
+// inside one WHERE. table is a trusted internal identifier.
+func AnyDeferredParentSQL(table string) string {
+	status, future := deferredParentLegs(func(c string) string { return c })
+	return fmt.Sprintf("(EXISTS (SELECT 1 FROM %s WHERE %s) OR EXISTS (SELECT 1 FROM %s WHERE %s))",
+		table, status, table, future)
+}
+
 // readyBlockedClause renders the ready-work blocked exclusion: the indexed
 // is_blocked projection decides, except for the rows whose flag is stale
 // (StaleBlockedIDsSQL), which it lists by id.
@@ -148,8 +182,8 @@ func idBatchClauses(format string, ids []string) ([]string, []any) {
 // clause folds in. Computing them takes queries, which is execution-context
 // work each stack does its own way.
 type ReadyWorkWhereInputs struct {
-	// DeferredChildIDs are children of future-deferred parents; consulted
-	// only when !filter.IncludeDeferred.
+	// DeferredChildIDs are the direct children of deferred parents
+	// (DeferredParentPredicate); consulted only when !filter.IncludeDeferred.
 	DeferredChildIDs []string
 	// ParentDescendantIDs are the transitive descendants of *filter.ParentID;
 	// consulted only when filter.ParentID != nil.

@@ -86,6 +86,11 @@ Beads supports hierarchical IDs for epics:
 * `bd-a3f8.1` (Task)
 * `bd-a3f8.1.1` (Sub-task)
 
+Deferring a parent hides its direct children from `bd ready` too, whether it
+was deferred to a date (`bd defer --until`) or indefinitely (plain `bd defer`).
+`bd ready --include-deferred` lists those children again; the deferred parent
+itself still stays out of the listing.
+
 **Stealth Mode:** Run `bd init --stealth` to use Beads locally without committing files to the main repo. Perfect for personal use on shared projects. See [Git-Free Usage](#-git-free-usage) below.
 
 **Contributor vs Maintainer:** When working on open-source projects:
