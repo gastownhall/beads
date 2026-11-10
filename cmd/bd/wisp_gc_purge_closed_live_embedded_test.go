@@ -138,3 +138,57 @@ func bdDepList(t *testing.T, bd, dir, id, depType string) string {
 	stdout, _ := bdRunSplit(t, bd, dir, "dep", "list", id, "--type", depType, "--json")
 	return stdout
 }
+
+// TestEmbeddedWispGCPurgeClosedReclaimsBlocksOnlyAndClosedMolecules guards
+// the other side of GH#5152's live-dependent protection: it must not hold
+// back what gc --closed reclaimed before. A closed step whose live
+// dependents reach it only through blocks is still deleted (GH#5735: a
+// closed blocker blocks nothing), and a molecule whose root and steps are
+// all closed is reclaimed whole. Live rows survive, nothing cascades.
+func TestEmbeddedWispGCPurgeClosedReclaimsBlocksOnlyAndClosedMolecules(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "pb")
+
+	// Running molecule: open root, first step closed, second step blocked
+	// on it and still open.
+	liveRoot := bdCreate(t, bd, dir, "running molecule", "--ephemeral", "--type", "molecule").ID
+	doneStep := bdCreate(t, bd, dir, "finished step", "--ephemeral").ID
+	nextStep := bdCreate(t, bd, dir, "next step", "--ephemeral").ID
+	bdDepAdd(t, bd, dir, doneStep, liveRoot, "--type", "parent-child")
+	bdDepAdd(t, bd, dir, nextStep, liveRoot, "--type", "parent-child")
+	bdDepAdd(t, bd, dir, nextStep, doneStep)
+	bdClose(t, bd, dir, doneStep)
+
+	// Finished molecule: root and both steps closed.
+	doneRoot := bdCreate(t, bd, dir, "finished molecule", "--ephemeral", "--type", "molecule").ID
+	stepA := bdCreate(t, bd, dir, "finished step a", "--ephemeral").ID
+	stepB := bdCreate(t, bd, dir, "finished step b", "--ephemeral").ID
+	bdDepAdd(t, bd, dir, stepA, doneRoot, "--type", "parent-child")
+	bdDepAdd(t, bd, dir, stepB, doneRoot, "--type", "parent-child")
+	bdDepAdd(t, bd, dir, stepB, stepA)
+	bdClose(t, bd, dir, stepA)
+	bdClose(t, bd, dir, stepB)
+	bdClose(t, bd, dir, doneRoot)
+
+	got := runWispPurgeClosedJSON(t, bd, dir, "--force")
+	want := []string{doneStep, doneRoot, stepA, stepB}
+	sort.Strings(want)
+	sort.Strings(got.Deleted)
+	if strings.Join(got.Deleted, ",") != strings.Join(want, ",") || liveDependentSkipped(got) != 0 {
+		t.Errorf("gc --closed --force --json = %+v (live_dependent_skipped %d), want %v deleted, none held back", got, liveDependentSkipped(got), want)
+	}
+	for _, id := range want {
+		bdShowFail(t, bd, dir, id)
+	}
+	for _, id := range []string{liveRoot, nextStep} {
+		bdShow(t, bd, dir, id)
+	}
+	if out := bdDepList(t, bd, dir, nextStep, "parent-child"); !strings.Contains(out, liveRoot) {
+		t.Errorf("live step %s lost its parent-child edge to %s:\n%s", nextStep, liveRoot, out)
+	}
+}
