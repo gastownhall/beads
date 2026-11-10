@@ -3,6 +3,7 @@ package setup
 import (
 	"bytes"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -735,4 +736,55 @@ func TestInstallMuxFailsOnMalformedMarkers(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A full-profile managed-section install against a non-writable agents file
+// must fail with the permission error, preserve the file, and claim no
+// success.
+func TestInstallAgentsRefusesAReadOnlyAgentsFile(t *testing.T) {
+	stubDetectRenderOpts(t)
+	env, stdout, stderr := newFactoryTestEnv(t)
+	content := "# My project\nSome user text.\n"
+	seed := seedReadOnlyFileWithOldMtime(t, env.agentsPath, content)
+
+	if err := installAgents(env, factoryIntegration); err != nil {
+		if !errors.Is(err, fs.ErrPermission) {
+			t.Errorf("the failure must carry the underlying permission error, got: %v", err)
+		}
+	} else {
+		t.Fatal("installAgents replaced a read-only AGENTS.md instead of failing")
+	}
+	if out := stdout.String(); strings.Contains(out, "✓") {
+		t.Errorf("reported success against a file it could not change:\n%s", out)
+	}
+	if !strings.Contains(stderr.String(), env.agentsPath) {
+		t.Errorf("the reported error must name the file; stderr:\n%s", stderr.String())
+	}
+	assertReadOnlyFilePreserved(t, env.agentsPath, content, seed)
+}
+
+// Removing the managed section rewrites the file, so a non-writable one must
+// fail without claiming removal.
+func TestRemoveAgentsRefusesAReadOnlyAgentsFile(t *testing.T) {
+	stubDetectRenderOpts(t)
+	env, stdout, stderr := newFactoryTestEnv(t)
+	if err := installAgents(env, factoryIntegration); err != nil {
+		t.Fatalf("seed install: %v", err)
+	}
+	data, err := os.ReadFile(env.agentsPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", env.agentsPath, err)
+	}
+	seed := seedReadOnlyFileWithOldMtime(t, env.agentsPath, string(data))
+
+	if err := removeAgents(env, factoryIntegration); err == nil {
+		t.Fatal("removeAgents replaced a read-only AGENTS.md instead of failing")
+	}
+	if out := stdout.String(); strings.Contains(out, "✓ Removed beads section") {
+		t.Errorf("reported removing from a file it could not change:\n%s", out)
+	}
+	if !strings.Contains(stderr.String(), env.agentsPath) {
+		t.Errorf("the reported error must name the file; stderr:\n%s", stderr.String())
+	}
+	assertReadOnlyFilePreserved(t, env.agentsPath, string(data), seed)
 }
