@@ -528,3 +528,52 @@ func TestCheckHooksPath_RelocatedBeadsPath(t *testing.T) {
 		})
 	}
 }
+
+// TestFixHooksPath_RelocatedBeadsPath: bd doctor --fix repoints a moved
+// repository's stranded core.hooksPath to the validated current directory in
+// the local config, never recreating the former location; a second run is a
+// no-op (GH#5853).
+func TestFixHooksPath_RelocatedBeadsPath(t *testing.T) {
+	for _, tc := range relocationCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BEADS_DIR", "")
+			dir := t.TempDir()
+			setupGitRepoInDir(t, dir)
+			target := tc.setup(t, dir)
+			stale := strandedHooksPath(t, tc.layout)
+			setGitConfig(t, dir, "core.hooksPath", stale)
+
+			runInDir(t, dir, func() {
+				if err := FixHooksPath(); err != nil {
+					t.Fatalf("FixHooksPath failed: %v", err)
+				}
+			})
+
+			got := getGitConfig(t, dir, "core.hooksPath")
+			if !filepath.IsAbs(got) || !sameDir(got, target) {
+				t.Fatalf("core.hooksPath = %q, want the absolute current directory %q", got, target)
+			}
+			local := gitCommand("config", "--local", "--get", "core.hooksPath")
+			local.Dir = dir
+			if out, err := local.Output(); err != nil || strings.TrimSpace(string(out)) != got {
+				t.Errorf("repointed value is not in the local config: %q (%v)", out, err)
+			}
+			assertNotCreated(t, stale)
+			if body, err := os.ReadFile(filepath.Join(target, "pre-commit")); err != nil || string(body) != relocatedHookBody {
+				t.Errorf("FixHooksPath modified the current hooks: %q (%v)", body, err)
+			}
+
+			runInDir(t, dir, func() {
+				if check := CheckHooksPath(); check.Status != StatusOK {
+					t.Errorf("after the repair, Hooks Path = %q: %s", check.Status, check.Message)
+				}
+				if err := FixHooksPath(); err != nil {
+					t.Fatalf("second FixHooksPath failed: %v", err)
+				}
+			})
+			if again := getGitConfig(t, dir, "core.hooksPath"); again != got {
+				t.Errorf("second FixHooksPath changed core.hooksPath from %q to %q", got, again)
+			}
+		})
+	}
+}
