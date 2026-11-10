@@ -103,3 +103,60 @@ async def test_mcp_default_show_returns_count_only_metadata() -> None:
     assert dumped["comments"] is None
     assert len(rec.calls) == 1
     assert "--include-comments" not in rec.calls[0]
+
+
+# AC-3: the Issue model derives missing completeness from supplied bodies and
+# keeps unknowns unknown.
+
+
+@pytest.mark.parametrize(
+    ("extra", "count", "omitted"),
+    [
+        pytest.param({}, None, None, id="no-information"),
+        pytest.param({"comments": TWO_COMMENTS}, 2, False, id="bodies-without-count"),
+        pytest.param({"comments": []}, 0, False, id="empty-array"),
+        pytest.param({"comment_count": 0}, 0, False, id="zero-count"),
+        pytest.param({"comment_count": 3}, 3, True, id="ready-style-count-without-marker"),
+        pytest.param({"comment_count": 3, "comments": TWO_COMMENTS[:1]}, 3, True, id="fewer-bodies-than-count"),
+        pytest.param({"comment_count": 1, "comments": TWO_COMMENTS}, 1, False, id="more-bodies-than-count"),
+        pytest.param({"comment_count": 0, "comments_omitted": True}, 0, True, id="explicit-true-kept"),
+        pytest.param({"comment_count": 5, "comments_omitted": False}, 5, False, id="explicit-false-kept"),
+        pytest.param({"comments_omitted": True}, None, True, id="marker-without-count"),
+    ],
+)
+@pytest.mark.parametrize("model_name", ["Issue", "BlockedIssue"])
+def test_model_derives_comment_completeness(
+    model_name: str, extra: dict[str, Any], count: int | None, omitted: bool | None
+) -> None:
+    from beads_mcp import models
+
+    payload = _issue(**extra)
+    if model_name == "BlockedIssue":
+        payload.update(blocked_by_count=1, blocked_by=["bd-2"])
+    issue = getattr(models, model_name).model_validate(payload)
+
+    assert issue.comment_count == count
+    assert issue.comments_omitted is omitted
+    if "comments" in extra:
+        assert [c.text for c in issue.comments] == [c["text"] for c in extra["comments"]]
+    else:
+        assert issue.comments is None
+
+    # Revalidation (model_dump round trips, description truncation) is idempotent.
+    again = type(issue).model_validate(issue.model_dump())
+    assert again == issue
+    assert server._truncate_description(issue, 2).comment_count == count
+    assert server._truncate_description(issue, 2).comments_omitted is omitted
+
+
+@pytest.mark.asyncio
+async def test_blocked_without_metadata_stays_unknown() -> None:
+    rec = _Recorder([_issue(blocked_by_count=1, blocked_by=["bd-2"])])
+
+    with rec.patched(), rec.tools_patched():
+        result = await server.blocked()
+
+    assert len(rec.calls) == 1
+    assert result[0].comment_count is None
+    assert result[0].comments_omitted is None
+    assert result[0].comments is None
