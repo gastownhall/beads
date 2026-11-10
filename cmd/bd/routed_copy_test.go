@@ -779,3 +779,186 @@ func TestWritesToLocalCopyOfUnreadableOwnerFail(t *testing.T) {
 		t.Errorf("bd show pl-u of a copy whose target cannot be opened: exit %d, stdout %q, stderr %q; want the copy", res.exitCode, res.stdout, res.stderr)
 	}
 }
+
+// TestDeleteBatchAcrossWorkspacesRefused pins that a bd delete batch whose ids
+// resolve in different workspaces fails before deleting anything, while a
+// batch resolving in one workspace deletes as before.
+func TestDeleteBatchAcrossWorkspacesRefused(t *testing.T) {
+	// pl-n is a native project row whose id the planning workspace also
+	// holds for a different issue: it resolves locally.
+	f := newCopyFixture(t, []string{"pl-x", "pl-y", "pl-z", "pl-n"}, []string{"pl-x", "pl-y", "pl-z"}, []string{"pl-n"})
+
+	res := runCopyCmd(t, deleteCmd, map[string]string{"force": "true"}, "pl-x", "pl-n")
+	if res.exitCode == 0 {
+		t.Errorf("bd delete --force pl-x pl-n across two workspaces exited 0, want a refusal")
+	}
+	reported := res.stderr
+	if res.err != nil {
+		reported += res.err.Error()
+	}
+	if !strings.Contains(reported, "separate") {
+		t.Errorf("the refusal does not say to submit separate commands:\n%s", reported)
+	}
+	for _, id := range []string{"pl-x", "pl-n"} {
+		if f.planningIssue(t, id) == nil {
+			t.Errorf("the refused batch deleted planning %s", id)
+		}
+		if f.projectIssue(t, id) == nil {
+			t.Errorf("the refused batch deleted project %s", id)
+		}
+	}
+
+	res = runCopyCmd(t, deleteCmd, map[string]string{"force": "true"}, "pl-y", "pl-z")
+	if res.exitCode != 0 {
+		t.Fatalf("bd delete --force pl-y pl-z in one workspace: exit %d, err %v\nstderr: %s", res.exitCode, res.err, res.stderr)
+	}
+	for _, id := range []string{"pl-y", "pl-z"} {
+		if f.planningIssue(t, id) != nil {
+			t.Errorf("planning %s survived bd delete --force", id)
+		}
+	}
+}
+
+// TestDeleteBatchMixedDestinationsRefusedInEitherOrder pins the refusal for
+// a copy beside a project-only row with the project row first too, and for
+// a copy beside an id a prefix route serves from a rig: two routed
+// destinations, neither of which loses a row.
+func TestDeleteBatchMixedDestinationsRefusedInEitherOrder(t *testing.T) {
+	f := newCopyFixture(t, []string{"pl-x"}, []string{"pl-x"}, []string{"pr-n"})
+
+	reported := func(res runResult) string {
+		if res.err != nil {
+			return res.stderr + res.err.Error()
+		}
+		return res.stderr
+	}
+	res := runCopyCmd(t, deleteCmd, map[string]string{"force": "true"}, "pr-n", "pl-x")
+	if res.exitCode == 0 || !strings.Contains(reported(res), "separate bd delete") {
+		t.Fatalf("bd delete --force pr-n pl-x: exit %d; want the mixed-destination refusal:\n%s", res.exitCode, reported(res))
+	}
+	for _, want := range []string{"pr-n in this workspace", "pl-x in " + f.planningDir} {
+		if !strings.Contains(reported(res), want) {
+			t.Errorf("the refusal does not name %q:\n%s", want, reported(res))
+		}
+	}
+	if f.projectIssue(t, "pr-n") == nil || f.planningIssue(t, "pl-x") == nil {
+		t.Fatal("the refused batch deleted a row")
+	}
+	f.requireCopyUnchanged(t, "pl-x")
+
+	rigDir := filepath.Join(filepath.Dir(f.repoDir), "rig")
+	rigBeadsDir := filepath.Join(rigDir, ".beads")
+	writeEmbeddedMetadata(t, rigBeadsDir, "rig")
+	seedEmbeddedSchema(t, rigDir, "rig")
+	rig, err := embeddeddolt.Open(t.Context(), rigBeadsDir, "rig", "main")
+	if err != nil {
+		t.Fatalf("open rig: %v", err)
+	}
+	if err := rig.SetConfig(t.Context(), "issue_prefix", "gt"); err != nil {
+		t.Fatalf("set rig issue_prefix: %v", err)
+	}
+	if err := rig.CreateIssue(t.Context(), &types.Issue{ID: "gt-r1", Title: "rig gt-r1", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "test"); err != nil {
+		t.Fatalf("seed rig gt-r1: %v", err)
+	}
+	if err := rig.Commit(t.Context(), "seed"); err != nil {
+		t.Fatalf("commit rig seed: %v", err)
+	}
+	if err := rig.Close(); err != nil {
+		t.Fatalf("close rig: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(f.projectBeadsDir, "routes.jsonl"), []byte(`{"prefix":"gt-","path":"../rig"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+
+	res = runCopyCmd(t, deleteCmd, map[string]string{"force": "true"}, "pl-x", "gt-r1")
+	if res.exitCode == 0 || !strings.Contains(reported(res), "separate bd delete") {
+		t.Fatalf("bd delete --force pl-x gt-r1: exit %d; want the mixed-destination refusal:\n%s", res.exitCode, reported(res))
+	}
+	if f.planningIssue(t, "pl-x") == nil {
+		t.Error("the refused batch deleted planning pl-x")
+	}
+	if headIssueOrNil(t, rigBeadsDir, "rig", "gt-r1") == nil {
+		t.Error("the refused batch deleted rig gt-r1")
+	}
+	f.requireCopyUnchanged(t, "pl-x")
+}
+
+// TestDeleteDestinationIsWorkspaceAndDatabase pins what makes two delete
+// destinations one: the canonical .beads directory and the database selected
+// there, not the handle. Two databases of one workspace are two, and a route
+// back to this workspace's own database is this workspace.
+func TestDeleteDestinationIsWorkspaceAndDatabase(t *testing.T) {
+	f := newCopyFixture(t, nil, nil, nil)
+	alias := f.planningDir + "-alias"
+	if err := os.Symlink(f.planningDir, alias); err != nil {
+		t.Fatalf("symlink %s -> %s: %v", alias, f.planningDir, err)
+	}
+	routed := func(beadsDir, database string) *RoutedResult {
+		return &RoutedResult{Routed: true, beadsDir: beadsDir, database: database}
+	}
+	planA := routed(f.planningBeadsDir, copyFixturePlanningDB).deleteDestination()
+	for _, tc := range []struct {
+		name string
+		got  deleteDestination
+		same bool
+	}{
+		{"another handle on the same database", routed(f.planningBeadsDir, copyFixturePlanningDB).deleteDestination(), true},
+		{"the same database through a symlinked path", routed(filepath.Join(alias, ".beads"), copyFixturePlanningDB).deleteDestination(), true},
+		{"another database of the same workspace", routed(f.planningBeadsDir, "other").deleteDestination(), false},
+		{"this workspace", (&RoutedResult{}).deleteDestination(), false},
+	} {
+		if (tc.got.key == planA.key) != tc.same {
+			t.Errorf("%s: key %q vs %q, want same=%v", tc.name, tc.got.key, planA.key, tc.same)
+		}
+	}
+	if got := routed(f.projectBeadsDir, copyFixtureProjectDB).deleteDestination(); got.key != "" || got.where != "this workspace" {
+		t.Errorf("a route to this workspace's own database = %+v, want this workspace", got)
+	}
+	if got := routed(f.projectBeadsDir, "other").deleteDestination(); got.key == "" {
+		t.Error("another database of this workspace keyed as this workspace")
+	}
+	if err := refuseMixedDeleteDestinations([]string{"pl-1", "pl-2"}, []deleteDestination{planA, routed(f.planningBeadsDir, "other").deleteDestination()}); err == nil {
+		t.Error("a batch across two databases of one workspace was not refused")
+	}
+}
+
+// TestResolveDeleteBatchReleasesWhatItKeeps pins the handles a delete batch's
+// resolution holds: it keeps the first routed resolution open for the batch
+// and closes every other one at once, and an id that fails after it closes
+// the kept one as well.
+func TestResolveDeleteBatchReleasesWhatItKeeps(t *testing.T) {
+	closes := map[string]int{}
+	resolver := func(failing map[string]error) func(string) (*RoutedResult, error) {
+		return func(id string) (*RoutedResult, error) {
+			if err := failing[id]; err != nil {
+				return nil, err
+			}
+			return &RoutedResult{Routed: true, ResolvedID: id, Issue: &types.Issue{ID: id}, closeFn: func() { closes[id]++ }}, nil
+		}
+	}
+
+	batch, err := resolveDeleteBatch([]string{"pl-a", "pl-b", "pl-gone"}, resolver(map[string]error{"pl-gone": storage.ErrNotFound}))
+	if err != nil {
+		t.Fatalf("resolveDeleteBatch: %v", err)
+	}
+	if batch.routed == nil || batch.routed.ResolvedID != "pl-a" || closes["pl-a"] != 0 || closes["pl-b"] != 1 {
+		t.Fatalf("kept %v with closes %v, want pl-a kept open and pl-b closed once", batch.routed, closes)
+	}
+	if !slices.Equal(batch.notFound, []string{"pl-gone"}) || !slices.Equal(batch.resolvedIDs, []string{"pl-a", "pl-b"}) {
+		t.Fatalf("resolved %v, not found %v", batch.resolvedIDs, batch.notFound)
+	}
+	batch.routed.Close()
+
+	for _, failure := range []error{
+		errors.New("owner unreadable"),
+		&utils.AbbreviatedIDError{Input: "pl-c", Matches: []string{"pl-c1", "pl-c2"}},
+	} {
+		clear(closes)
+		if _, err := resolveDeleteBatch([]string{"pl-a", "pl-b", "pl-c"}, resolver(map[string]error{"pl-c": failure})); err == nil {
+			t.Fatalf("resolveDeleteBatch with pl-c failing (%v) succeeded", failure)
+		}
+		if closes["pl-a"] != 1 || closes["pl-b"] != 1 {
+			t.Errorf("pl-c failing (%v) left closes %v, want pl-a and pl-b closed once each", failure, closes)
+		}
+	}
+}

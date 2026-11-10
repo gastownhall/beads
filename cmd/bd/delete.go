@@ -366,6 +366,84 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 	return deleteBatchReporting(issueIDs, force, dryRun, cascade, jsonOutput, ifRevision, nil)
 }
 
+// deleteBatchResolution is what a delete batch's ids resolved to.
+type deleteBatchResolution struct {
+	issues      map[string]*types.Issue
+	resolvedIDs []string
+	notFound    []string
+	// destinations[i] is the database resolvedIDs[i] resolved in.
+	destinations []deleteDestination
+	// retainedCopies are the ids that resolved to the repository a local
+	// copy came from, whose copies the deletion leaves here
+	// (printRetainedCopyNote).
+	retainedCopies []*RoutedResult
+	// routed is the first routed resolution, whose store the batch runs on;
+	// nil when no id routed, and the batch runs on this workspace's store.
+	routed *RoutedResult
+}
+
+// resolveDeleteBatch resolves each of ids through resolve, keeping the first
+// routed resolution open for the batch and closing every other one as it
+// goes. An error closes the one it kept as well, so a later id's failure
+// leaves no store open.
+func resolveDeleteBatch(ids []string, resolve func(id string) (*RoutedResult, error)) (*deleteBatchResolution, error) {
+	batch := &deleteBatchResolution{issues: make(map[string]*types.Issue), resolvedIDs: make([]string, 0, len(ids))}
+	fail := func(err error) (*deleteBatchResolution, error) {
+		if batch.routed != nil {
+			batch.routed.Close()
+		}
+		return nil, err
+	}
+	for _, id := range ids {
+		result, err := resolve(id)
+		if err != nil {
+			if isNotFoundErr(err) {
+				batch.notFound = append(batch.notFound, id)
+				continue
+			}
+			if refusal := deleteAbbreviationRefusal(err); refusal != nil {
+				return fail(refusal)
+			}
+			return fail(fmt.Errorf("getting issue %s: %v", id, err))
+		}
+		batch.issues[result.ResolvedID] = result.Issue
+		batch.resolvedIDs = append(batch.resolvedIDs, result.ResolvedID)
+		batch.destinations = append(batch.destinations, result.deleteDestination())
+		if result.copyOwner != "" {
+			batch.retainedCopies = append(batch.retainedCopies, result)
+		}
+		if result.Routed && batch.routed == nil {
+			batch.routed = result
+		} else {
+			result.Close()
+		}
+	}
+	return batch, nil
+}
+
+// refuseMixedDeleteDestinations refuses a delete batch whose ids, resolved
+// in order, are held by more than one database (destinations[i] is
+// resolvedIDs[i]'s), naming each one's ids in the order first seen.
+func refuseMixedDeleteDestinations(resolvedIDs []string, destinations []deleteDestination) error {
+	var order []deleteDestination
+	byKey := map[string][]string{}
+	for i, id := range resolvedIDs {
+		dest := destinations[i]
+		if _, seen := byKey[dest.key]; !seen {
+			order = append(order, dest)
+		}
+		byKey[dest.key] = append(byKey[dest.key], id)
+	}
+	if len(order) < 2 {
+		return nil
+	}
+	parts := make([]string, 0, len(order))
+	for _, dest := range order {
+		parts = append(parts, fmt.Sprintf("%s in %s", strings.Join(byKey[dest.key], " "), dest.where))
+	}
+	return fmt.Errorf("these issues are in different workspaces (%s); nothing was deleted, submit a separate bd delete for each workspace", strings.Join(parts, "; "))
+}
+
 // deleteBatchReporting is deleteBatch for a bulk command that reports on its
 // own selection: report's members (`bd admin cleanup`'s retention_required) are added to the --json preview and result. A nil report
 // adds nothing, which is deleteBatch.
@@ -376,38 +454,21 @@ func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput 
 		}
 	}
 	ctx := rootCtx
-	issues := make(map[string]*types.Issue)
-	resolvedIDs := make([]string, 0, len(issueIDs))
-	notFound := []string{}
-	var routedStore storage.DoltStorage
-	// The ids that resolved to the repository a local copy came from, whose
-	// copies the deletion leaves here (printRetainedCopyNote).
-	var retainedCopies []*RoutedResult
-	for _, id := range issueIDs {
-		result, err := resolveAndGetIssueForMutationExact(ctx, store, id)
-		if err != nil {
-			if isNotFoundErr(err) {
-				notFound = append(notFound, id)
-			} else if refusal := deleteAbbreviationRefusal(err); refusal != nil {
-				return refusal
-			} else {
-				return fmt.Errorf("getting issue %s: %v", id, err)
-			}
-		} else {
-			issues[result.ResolvedID] = result.Issue
-			resolvedIDs = append(resolvedIDs, result.ResolvedID)
-			if result.copyOwner != "" {
-				retainedCopies = append(retainedCopies, result)
-			}
-			if result.Routed && routedStore == nil {
-				routedStore = result.Store
-			} else {
-				result.Close()
-			}
-		}
+	batch, err := resolveDeleteBatch(issueIDs, func(id string) (*RoutedResult, error) {
+		return resolveAndGetIssueForMutationExact(ctx, store, id)
+	})
+	if err != nil {
+		return err
 	}
-	if routedStore != nil {
-		defer func() { _ = routedStore.Close() }()
+	if batch.routed != nil {
+		defer batch.routed.Close()
+	}
+	issues, resolvedIDs, notFound := batch.issues, batch.resolvedIDs, batch.notFound
+	// The batch runs on one store, so every id must resolve in one
+	// database: run on the first routed store, an id another one holds
+	// would delete whatever that store has under it.
+	if err := refuseMixedDeleteDestinations(resolvedIDs, batch.destinations); err != nil {
+		return err
 	}
 	if len(notFound) > 0 {
 		// The role's own existence probe reports a missing id with this same
@@ -421,8 +482,8 @@ func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput 
 		return &issueops.NotFoundError{IDs: notFound}
 	}
 	batchStore := store
-	if routedStore != nil {
-		batchStore = routedStore
+	if batch.routed != nil {
+		batchStore = batch.routed.Store
 	}
 
 	deleter, err := batchStore.Deleter()
@@ -541,7 +602,7 @@ func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput 
 				ui.RenderWarn("⚠"), len(result.Orphaned), strings.Join(result.Orphaned, ", "))
 		}
 	}
-	for _, retained := range retainedCopies {
+	for _, retained := range batch.retainedCopies {
 		printRetainedCopyNote(retained)
 	}
 	return nil
