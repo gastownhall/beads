@@ -210,4 +210,30 @@ func TestEmbeddedClaimPathsJournalSidecar(t *testing.T) {
 		}
 		requireClaimed(t, rows[0], "alice", claimed.Issue)
 	})
+
+	t.Run("close_claim_next", func(t *testing.T) {
+		t.Parallel()
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "cn")
+		p := bdCreate(t, bd, dir, "Closed first", "--priority", "0")
+		q := bdCreate(t, bd, dir, "Claimed next", "--priority", "1")
+
+		out := bdAuditRun(t, bd, dir, "close", p.ID, "--claim-next", "--json")
+		var res struct {
+			Claimed *types.Issue `json:"claimed"`
+		}
+		if err := json.Unmarshal([]byte(out[strings.Index(out, "{"):]), &res); err != nil {
+			t.Fatalf("parse bd close --claim-next --json: %v\n%s", err, out)
+		}
+		if res.Claimed == nil || res.Claimed.ID != q.ID {
+			t.Fatalf("bd close --claim-next claimed %+v, want %s", res.Claimed, q.ID)
+		}
+		rows := readSidecarEntries(t, beadsDir)
+		if len(rows) != 2 {
+			t.Fatalf("bd close --claim-next journaled %d rows, want P's close then Q's claim: %+v", len(rows), rows)
+		}
+		if rows[0].IssueID != p.ID || rows[0].Kind != "field_change" || rows[0].Extra["field"] != "status" || rows[0].Extra["new_value"] != "closed" {
+			t.Fatalf("first row %+v: want %s's close field_change", rows[0], p.ID)
+		}
+		requireClaimed(t, rows[1], "alice", res.Claimed)
+	})
 }
