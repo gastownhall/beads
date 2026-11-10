@@ -408,6 +408,56 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 			want: []int{1468, 315, 316, 317, 318},
 		},
 		{
+			name: "substring mentions in file paths are rejected",
+			snapshot: "501 S /usr/bin/cat /etc/dolt/sql-server.yaml\n" +
+				"502 /usr/bin/cat /etc/dolt/sql-server.yaml\n",
+		},
+		{
+			name: "dolt-helper executable is rejected",
+			snapshot: "503 S /opt/dolt-tools/bin/dolt-helper sql-server\n" +
+				"504 /opt/dolt-tools/bin/dolt-helper sql-server\n",
+		},
+		{
+			name: "container image mention is rejected",
+			snapshot: "505 S docker run dolthub/dolt-sql-server\n" +
+				"506 docker run dolthub/dolt-sql-server\n",
+		},
+		{
+			name: "log file mention is rejected",
+			snapshot: "507 S vim /Users/u/.beads/dolt/sql-server.log\n" +
+				"508 vim /Users/u/.beads/dolt/sql-server.log\n",
+		},
+		{
+			name: "sql-server as a word prefix is rejected",
+			snapshot: "509 S /usr/local/bin/dolt sql-server-proxy\n" +
+				"510 /usr/local/bin/dolt sql-serverless\n",
+		},
+		{
+			name: "reversed order without state is rejected",
+			snapshot: "511 sql-server then dolt\n" +
+				"512 sql-server /usr/local/bin/dolt\n",
+		},
+		{
+			name:     "invalid pids without state are rejected",
+			snapshot: "not-a-pid dolt sql-server\n0 dolt sql-server\n-1 dolt sql-server\n",
+		},
+		{
+			name:     "incomplete dolt-only rows are rejected",
+			snapshot: "513 dolt\n514 S dolt\n",
+		},
+		{
+			name: "spaced path with a different executable name is rejected",
+			snapshot: "309 S /Users/John Smith/bin/dolt-helper sql-server\n" +
+				"310 /Users/John Smith/bin/not-dolt sql-server\n" +
+				"311 S /Users/John Smith/bin/dolt/helper sql-server\n",
+		},
+		{
+			name: "spaced path without a whole sql-server argument is rejected",
+			snapshot: "312 S /Users/John Smith/bin/dolt version\n" +
+				"313 S /Users/John Smith/bin/dolt sql-server.yaml\n" +
+				"314 /Users/John Smith/bin/dolt --config=sql-server\n",
+		},
+		{
 			name: "malformed and invalid rows are rejected",
 			snapshot: "\n" +
 				"not-a-pid S dolt sql-server\n" +
