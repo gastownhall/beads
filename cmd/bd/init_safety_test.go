@@ -1245,3 +1245,95 @@ func TestInitDerivedOriginOptOut(t *testing.T) {
 		})
 	}
 }
+
+// TestInitAdoptionFlagsKeepExistingGuards is AC-5 of GH#6099: --yes is
+// consent to adopt a derived origin, nothing more. It does not authorize
+// divergence, stand in for a destroy-token, bypass the local-data guard, or
+// change an explicit --remote; an unreachable origin still falls back to a
+// fresh local database. --no-adopt leaves explicit remotes alone.
+func TestInitAdoptionFlagsKeepExistingGuards(t *testing.T) {
+	base := []string{"--prefix", "mine", "--non-interactive", "--skip-hooks", "--skip-agents"}
+	plainRepo := func(t *testing.T, origin string) string {
+		t.Helper()
+		dir := t.TempDir()
+		runGitForBootstrapTest(t, dir, "init", "-b", "main")
+		runGitForBootstrapTest(t, dir, "config", "core.hooksPath", ".git/hooks")
+		if origin != "" {
+			runGitForBootstrapTest(t, dir, "remote", "add", "origin", origin)
+		}
+		return dir
+	}
+	noDoltDataBare := func(t *testing.T) string {
+		t.Helper()
+		// A branch but no refs/dolt/data: dolt cannot clone a branchless repo.
+		dir := filepath.Join(t.TempDir(), "empty.git")
+		runGitForBootstrapTest(t, "", "init", "--bare", dir)
+		src := t.TempDir()
+		runGitForBootstrapTest(t, src, "init", "-b", "main")
+		runGitForBootstrapTest(t, src, "config", "user.email", "test@test.com")
+		runGitForBootstrapTest(t, src, "config", "user.name", "Test User")
+		runGitForBootstrapTest(t, src, "commit", "--allow-empty", "-m", "init")
+		runGitForBootstrapTest(t, src, "push", dir, "HEAD:refs/heads/main")
+		return dir
+	}
+
+	t.Run("derived/force+yes refuses divergence", func(t *testing.T) {
+		workDir, _ := derivedOriginWithDoltDataFixture(t)
+		out, code := runInitForAdoptionTest(t, workDir, "", nil, append(base, "--force", "--yes")...)
+		if code != ExitRemoteDivergenceRefused || !strings.Contains(out, "already has Dolt history") {
+			t.Fatalf("exit %d, want %d with the divergence refusal:\n%s", code, ExitRemoteDivergenceRefused, out)
+		}
+	})
+	t.Run("derived/discard+wrong-token+yes refuses", func(t *testing.T) {
+		workDir, _ := derivedOriginWithDoltDataFixture(t)
+		out, code := runInitForAdoptionTest(t, workDir, "", nil, append(base, "--discard-remote", "--destroy-token=WRONG", "--yes")...)
+		if code != ExitDestroyTokenMissing || !strings.Contains(out, "does not match") {
+			t.Fatalf("exit %d, want %d with the token-mismatch refusal:\n%s", code, ExitDestroyTokenMissing, out)
+		}
+	})
+	t.Run("configured/force+yes refuses divergence", func(t *testing.T) {
+		_, remoteDir := derivedOriginWithDoltDataFixture(t)
+		workDir := plainRepo(t, "")
+		out, code := runInitForAdoptionTest(t, workDir, "", []string{"BD_SYNC_REMOTE=" + remoteDir}, append(base, "--force", "--yes", "--no-adopt")...)
+		if code != ExitRemoteDivergenceRefused || !strings.Contains(out, "already has Dolt history") {
+			t.Fatalf("exit %d, want %d: --no-adopt must not disarm a configured remote's guard:\n%s", code, ExitRemoteDivergenceRefused, out)
+		}
+	})
+	t.Run("derived/unreachable+yes falls back to fresh", func(t *testing.T) {
+		workDir := plainRepo(t, filepath.Join(t.TempDir(), "does-not-exist.git"))
+		out, code := runInitForAdoptionTest(t, workDir, "", nil, append(base, "--yes")...)
+		if code != 0 {
+			t.Fatalf("exit %d, want 0 (fresh fallback):\n%s", code, out)
+		}
+		if _, err := os.Stat(filepath.Join(workDir, ".beads")); err != nil {
+			t.Fatalf("no workspace after fallback: %v\n%s", err, out)
+		}
+	})
+	for _, extra := range [][]string{{"--yes"}, {"--no-adopt"}} {
+		t.Run("explicit/"+extra[0]+" keeps --remote", func(t *testing.T) {
+			remoteDir := noDoltDataBare(t)
+			workDir := plainRepo(t, "")
+			out, code := runInitForAdoptionTest(t, workDir, "", nil, append(append(base, "--remote", remoteDir), extra...)...)
+			if code != 0 {
+				t.Fatalf("exit %d, want 0:\n%s", code, out)
+			}
+			if strings.Contains(out, "Adopting Dolt issue history from git origin") {
+				t.Errorf("explicit --remote announced as a git-origin adoption:\n%s", out)
+			}
+			cfg, err := os.ReadFile(filepath.Join(workDir, ".beads", "config.yaml"))
+			if err != nil || !strings.Contains(string(cfg), remoteDir) {
+				t.Fatalf("explicit --remote not persisted (err=%v):\n%s\noutput:\n%s", err, cfg, out)
+			}
+		})
+	}
+	t.Run("local-data guard ignores --yes", func(t *testing.T) {
+		workDir := plainRepo(t, "")
+		if out, code := runInitForAdoptionTest(t, workDir, "", nil, base...); code != 0 {
+			t.Fatalf("first init exit %d:\n%s", code, out)
+		}
+		out, code := runInitForAdoptionTest(t, workDir, "", nil, append(base, "--yes")...)
+		if code == 0 || !strings.Contains(out, "already initialized") {
+			t.Fatalf("re-init over an existing workspace: exit %d, want the already-initialized refusal:\n%s", code, out)
+		}
+	})
+}
