@@ -257,3 +257,47 @@ func TestCommitAllToleratesOwnedCloneLocalChanges(t *testing.T) {
 		t.Fatalf("config at HEAD = %q, want v1", headValue)
 	}
 }
+
+// TestRemoteOperationsRejectUncommittedChanges: every embedded push and pull
+// commits pending changes first; when that commit leaves tracked changes
+// behind, the operation stops there with the report instead of reaching the
+// remote (none is configured here, so any transport attempt would fail with
+// a different, untyped error) and pushing nothing while reporting success.
+func TestRemoteOperationsRejectUncommittedChanges(t *testing.T) {
+	ctx := t.Context()
+	te := newTestEnv(t, "ro")
+	id := seedIgnoredIssue(t, ctx, te)
+	headBefore, err := te.store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit: %v", err)
+	}
+
+	for name, op := range map[string]func() error{
+		"Push":                   func() error { return te.store.Push(ctx) },
+		"ForcePush":              func() error { return te.store.ForcePush(ctx) },
+		"PushRemote":             func() error { return te.store.PushRemote(ctx, "origin", false) },
+		"PushRemote force":       func() error { return te.store.PushRemote(ctx, "origin", true) },
+		"PushTo":                 func() error { return te.store.PushTo(ctx, "nosuch-peer") },
+		"Pull":                   func() error { return te.store.Pull(ctx) },
+		"PullWithStrategy":       func() error { return te.store.PullWithStrategy(ctx, "ours") },
+		"PullRemote":             func() error { return te.store.PullRemote(ctx, "origin") },
+		"PullRemoteWithStrategy": func() error { return te.store.PullRemoteWithStrategy(ctx, "origin", "ours") },
+		"PullFrom": func() error {
+			_, err := te.store.PullFrom(ctx, "nosuch-peer")
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			requireUncommittedChanges(t, op(), "issues", false)
+		})
+	}
+
+	headAfter, err := te.store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit: %v", err)
+	}
+	if headAfter != headBefore {
+		t.Fatalf("HEAD moved %s -> %s across refused remote operations", headBefore, headAfter)
+	}
+	assertIssuesLeftInWorkingSet(t, ctx, te, id)
+}
