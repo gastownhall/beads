@@ -799,6 +799,34 @@ func TestRemoveCodexRefusesAReadOnlyInstructionsFile(t *testing.T) {
 	assertReadOnlyFileUntouched(t, agentsPath, string(data), seed)
 }
 
+// --remove rewrites a hooks.json that also holds a hook of the user's, so a
+// non-writable one must fail and say why. bd setup prints no error of its
+// own: an unprinted refusal made bd setup codex --remove exit 1 with no
+// message.
+func TestRemoveCodexReportsAReadOnlyHooksFile(t *testing.T) {
+	env, _, stderr := newCodexTestEnv(t)
+	path := codexHooksPath(env, false)
+	seedFileMode(t, path, `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo mine"}]}]}}`, 0o644)
+	if err := installCodex(env, false); err != nil {
+		t.Fatalf("installCodex: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	seed := seedReadOnlyFile(t, path, string(data))
+	stderr.Reset()
+
+	err = removeCodex(env, false)
+	if !errors.Is(err, errRefuseReadOnlyWrite) {
+		t.Fatalf("removeCodex error = %v, want the read-only refusal", err)
+	}
+	if !strings.Contains(stderr.String(), "Error: write "+path) {
+		t.Errorf("stderr does not name %s: %q", path, stderr.String())
+	}
+	assertReadOnlyFileUntouched(t, path, string(data), seed)
+}
+
 // A repeated Codex install over a read-only AGENTS.md that already holds the
 // current Codex section succeeds without touching it.
 func TestInstallCodexLeavesACurrentReadOnlyAgentsFileAlone(t *testing.T) {

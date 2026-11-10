@@ -550,7 +550,11 @@ func removeCodexHooksJSON(env codexEnv, global bool) error {
 	if err != nil {
 		return err
 	}
-	return env.writeFile(path, next)
+	if err := env.writeFile(path, next); err != nil {
+		_, _ = fmt.Fprintf(env.stderr, "Error: write %s: %v\n", path, err)
+		return err
+	}
+	return nil
 }
 
 func codexHooksJSONCurrent(env codexEnv, global bool) bool {
