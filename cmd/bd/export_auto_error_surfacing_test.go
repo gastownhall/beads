@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -225,5 +226,127 @@ func TestMaybeAutoExportPrecheckFailureIsAnError(t *testing.T) {
 			}
 			assertAutoExportUntouched(t, beadsDir, jsonl, tc.seed, stateBytes)
 		})
+	}
+}
+
+// GH#6163: the deliberate pre-export refusals stay warning-only skips. Only
+// an operational failure fails the command; a guard that refuses to
+// overwrite records it cannot account for is doing its job.
+func TestMaybeAutoExportGuardRefusalsStayWarnings(t *testing.T) {
+	other := &types.Issue{ID: "bd-other", Title: "store only", Status: types.StatusOpen, IssueType: types.TypeTask}
+	cases := []struct {
+		name     string
+		issues   []*types.Issue
+		wantWarn string
+	}{
+		{name: "empty overwrite", wantWarn: "current database would export 0 issues"},
+		{name: "unproven JSONL record", issues: []*types.Issue{other}, wantWarn: "JSONL-only issue record(s) absent from the local Dolt store (bd-export1)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			initConfigForTest(t)
+			config.Set("export.auto", true)
+			saveAndRestoreGlobals(t)
+			t.Setenv("BD_GIT_HOOK", "")
+			store = &fakeStateHashStore{stateHash: "hash-after-write", issues: tc.issues}
+			beadsDir, jsonl, stateBytes := seedAutoExportFailureFixture(t, exportRelationSeed, &exportAutoState{LastDoltCommit: "hash-before-write"})
+
+			var err error
+			stderr := captureStderr(t, func() { err = maybeAutoExport(context.Background(), false) })
+			if err != nil {
+				t.Fatalf("maybeAutoExport err = %v, want nil: a guard refusal is a skip", err)
+			}
+			if !strings.Contains(stderr, "Warning: auto-export skipped: ") || !strings.Contains(stderr, tc.wantWarn) {
+				t.Fatalf("stderr = %q, want the %q refusal warning", stderr, tc.wantWarn)
+			}
+			assertAutoExportUntouched(t, beadsDir, jsonl, exportRelationSeed, stateBytes)
+		})
+	}
+}
+
+// GH#6163: the shrink guard's refusal to overwrite a JSONL holding records
+// outside auto-export scope (here a memory) is reached through the full
+// export but stays a warning-only skip, unlike the export's real failures.
+func TestMaybeAutoExportShrinkGuardRefusalStaysWarning(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+	saveAndRestoreGlobals(t)
+	t.Setenv("BD_GIT_HOOK", "")
+	// fakeStateHashStore is no DiffStore, so the export is a full one.
+	store = &fakeStateHashStore{
+		stateHash: "hash-after-write",
+		issues:    []*types.Issue{{ID: "bd-export1", Title: "export me", Status: types.StatusOpen, IssueType: types.TypeTask}},
+	}
+	seed := exportRelationSeed + `{"_type":"memory","key":"private-note","value":"agent context"}` + "\n"
+	beadsDir, jsonl, stateBytes := seedAutoExportFailureFixture(t, seed, &exportAutoState{LastDoltCommit: "hash-before-write"})
+
+	var err error
+	stderr := captureStderr(t, func() { err = maybeAutoExport(context.Background(), false) })
+	if err != nil {
+		t.Fatalf("maybeAutoExport err = %v, want nil: the shrink guard refusal is a skip", err)
+	}
+	if want := "Warning: auto-export failed: auto-export shrink guard: refusing to overwrite " + jsonl; strings.Count(stderr, want) != 1 {
+		t.Fatalf("stderr = %q, want exactly one %q warning", stderr, want)
+	}
+	assertAutoExportUntouched(t, beadsDir, jsonl, seed, stateBytes)
+}
+
+// GH#6163: a backend that reports the state hash as a typed unsupported
+// capability (the HTTP client's refusal, wrapped) has nothing to detect
+// changes with. That stays a warning-only skip that reads nothing else and
+// writes nothing.
+func TestMaybeAutoExportStateHashUnsupportedSkips(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+	saveAndRestoreGlobals(t)
+	t.Setenv("BD_GIT_HOOK", "")
+	fake := &failingStateHashStore{err: fmt.Errorf("http backend: %w", &storage.ErrUnsupported{Op: "GetStateHash", Backend: "http"})}
+	store = fake
+	beadsDir, jsonl, stateBytes := seedAutoExportFailureFixture(t, exportRelationSeed, &exportAutoState{LastDoltCommit: "hash-before-write"})
+
+	var err error
+	stderr := captureStderr(t, func() { err = maybeAutoExport(context.Background(), false) })
+	if err != nil {
+		t.Fatalf("maybeAutoExport err = %v, want nil: an unsupported state hash is a skip", err)
+	}
+	if !strings.Contains(stderr, "Warning: auto-export skipped: ") || !strings.Contains(stderr, "GetStateHash") {
+		t.Fatalf("stderr = %q, want the skip warning naming the unsupported operation", stderr)
+	}
+	if fake.searchCalls != 0 {
+		t.Fatalf("SearchIssues calls = %d, want 0: the skip happens before any export work", fake.searchCalls)
+	}
+	assertAutoExportUntouched(t, beadsDir, jsonl, exportRelationSeed, stateBytes)
+}
+
+// GH#6163: a failed export leaves the JSONL and export state alone, so the
+// next eligible command retries it without any new retry mechanism and
+// succeeds once the fault is gone.
+func TestMaybeAutoExportRetriesAfterFailure(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+	saveAndRestoreGlobals(t)
+	t.Setenv("BD_GIT_HOOK", "")
+	store = &failingStateHashStore{err: errors.New("injected state hash failure")}
+	// A zero timestamp leaves the throttle window open.
+	beadsDir, jsonl, stateBytes := seedAutoExportFailureFixture(t, exportRelationSeed, &exportAutoState{LastDoltCommit: "hash-before-write"})
+
+	var err error
+	_ = captureStderr(t, func() { err = maybeAutoExport(context.Background(), false) })
+	if err == nil {
+		t.Fatal("first run: maybeAutoExport err = nil, want the state-hash failure")
+	}
+	assertAutoExportUntouched(t, beadsDir, jsonl, exportRelationSeed, stateBytes)
+
+	store = &fakeHeadOnlyStore{issues: []*types.Issue{
+		{ID: "bd-export1", Title: "export me", Status: types.StatusOpen, IssueType: types.TypeTask},
+	}}
+	if err := maybeAutoExport(context.Background(), false); err != nil {
+		t.Fatalf("retry after failure: maybeAutoExport: %v", err)
+	}
+	if got := jsonlRecordsByID(t, jsonl); got["bd-export1"] == nil {
+		t.Fatalf("retry did not export bd-export1: %v", got)
+	}
+	if state := loadExportAutoState(beadsDir); state.LastDoltCommit != "head-commit-hash" || state.Timestamp.IsZero() {
+		t.Fatalf("retry did not advance export state: %+v", state)
 	}
 }
