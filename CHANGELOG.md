@@ -1226,6 +1226,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd setup junie` generates an MCP configuration that launches the standalone
+  `beads-mcp` server with `uvx` instead of the nonexistent `bd mcp` command,
+  so the Junie MCP server can start. The default launcher needs
+  [uv](https://docs.astral.sh/uv/) installed with `uvx` on the PATH Junie
+  uses; see the Junie integration docs for a manually installed `beads-mcp`
+  alternative. Rerunning `bd setup junie` rewrites a config that still
+  carries the old `bd mcp` entry.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
