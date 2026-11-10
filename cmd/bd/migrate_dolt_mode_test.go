@@ -552,6 +552,28 @@ func TestMigrateFromProxiedServer_KeepsLifecycleLockMarkers(t *testing.T) {
 	})
 }
 
+func TestMigrateFromProxiedServer_DryRunOmitsLifecycleLocks(t *testing.T) {
+	beadsDir, root := reverseMigrationWorkspace(t, false)
+	markers := seedProxyLifecycleMarkers(t, root)
+	for _, name := range retiredProxyControlNames() {
+		touchFile(t, filepath.Join(root, name))
+	}
+	before := snapshotMigrationTree(t, beadsDir, root)
+
+	out, err := captureMigrationJSON(t, func() error { return runMigrateFromProxiedServer(true, false) })
+	require.NoError(t, err)
+
+	lines := strings.Split(out, "\n")
+	for _, name := range retiredProxyControlNames() {
+		assert.Contains(t, lines, "Would remove "+filepath.Join(root, name))
+	}
+	for path := range markers {
+		assert.NotContains(t, out, "Would remove "+path)
+		assert.Contains(t, lines, "Would keep "+path+" (lifecycle lock, held during the migration; left as an unlocked marker)")
+	}
+	assert.Equal(t, before, snapshotMigrationTree(t, beadsDir, root), "dry-run must not change the workspace")
+}
+
 func TestMigrateToServer_KeepsCustomConfig(t *testing.T) {
 	beadsDir := migrateModeWorkspace(t, configfile.DoltModeProxiedServer)
 	customConfig := filepath.Join(t.TempDir(), "custom.yaml")

@@ -1123,8 +1123,11 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 			fmt.Println("Would enable dolt.shared-server")
 		}
 		fmt.Printf("Would remove %s\n", configfile.ProxiedServerClientInfoFileName)
-		for _, p := range proxy.ControlFilePaths(rootDir) {
+		for _, p := range proxy.PurgeableControlFilePaths(rootDir) {
 			fmt.Printf("Would remove %s\n", p)
+		}
+		for _, name := range []string{proxy.LockFileName, server.LockFileName} {
+			fmt.Printf("Would keep %s (lifecycle lock, held during the migration; left as an unlocked marker)\n", filepath.Join(rootDir, name))
 		}
 		for _, p := range logAssets {
 			fmt.Printf("Would remove %s\n", p)
@@ -1204,6 +1207,9 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 		if err := os.Remove(configfile.ProxiedServerClientInfoPath(beadsDir)); err != nil && !os.IsNotExist(err) {
 			return HandleError("failed to remove %s: %v", configfile.ProxiedServerClientInfoFileName, err)
 		}
+		// The purge keeps proxy.lock and proxy-child.lock: this migration
+		// holds them until it returns, and removing a held lock fails on
+		// Windows and detaches it from its path on POSIX.
 		if errs := proxy.PurgeControlFiles(rootDir); len(errs) > 0 {
 			return HandleError("failed to retire proxy controls: %v", errs[0])
 		}
