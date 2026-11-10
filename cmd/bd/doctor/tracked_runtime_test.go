@@ -32,8 +32,12 @@ func TestShouldFlagTrackedFile_RuntimeArtifacts(t *testing.T) {
 		{"sync-state.json", true},
 		{"daemon.pid", true},
 		{"bd.lock", true},
-		{"dolt-server-config.yaml", true}, // GH#6191: absolute cfg_dir + per-machine port
-		{"dolt-server.activity", true},    // GH#6191
+		{"dolt-server-config.yaml", true},   // GH#6191: absolute cfg_dir + per-machine port
+		{"dolt-server.activity", true},      // GH#6191
+		{"dolt-backup.json", true},          // GH#8318: absolute backup destination
+		{"dolt-backup-state.json", true},    // GH#8318
+		{"dolt-config.log", true},           // GH#8318: beads_dir=<absolute path>
+		{".auto-import-issues.jsonl", true}, // GH#8318
 		{"dolt/noms/manifest", true},
 		{"issues.jsonl", false},
 		{"config.json", false},

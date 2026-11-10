@@ -1229,7 +1229,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `.beads/.gitignore` that `bd init` writes now ignores
   `dolt-backup.json`, `dolt-backup-state.json`, `dolt-config.log` and
   `.auto-import-issues.jsonl`, and `bd doctor` flags an existing
-  `.beads/.gitignore` that lacks them as outdated. These per-machine files
+  `.beads/.gitignore` that lacks them as outdated, and `bd doctor --fix`
+  untracks copies that were already committed. These per-machine files
   showed as untracked after `bd backup init`, `bd backup sync`, a
   server-mode `bd dolt set` or a JSONL auto-import, so a `git add .`
   committed them; `dolt-backup.json` and `dolt-config.log` hold absolute

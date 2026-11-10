@@ -89,7 +89,7 @@ dolt-pprof/
 backup/
 
 # Backup and auto-import state (per-machine; dolt-backup.json and
-# dolt-backup-state.json carry absolute local paths, GH#8318)
+# dolt-config.log carry absolute local paths, GH#8318)
 dolt-backup.json
 dolt-backup-state.json
 dolt-config.log

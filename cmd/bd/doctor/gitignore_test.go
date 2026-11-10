@@ -1749,7 +1749,7 @@ func TestCheckGitignore_FlagsPreBackupFilesTemplateAsOutdated(t *testing.T) {
 	// the per-project env file comment) stripped out.
 	oldTemplate := strings.Replace(GitignoreTemplate,
 		"\n# Backup and auto-import state (per-machine; dolt-backup.json and\n"+
-			"# dolt-backup-state.json carry absolute local paths, GH#8318)\n"+
+			"# dolt-config.log carry absolute local paths, GH#8318)\n"+
 			"dolt-backup.json\n"+
 			"dolt-backup-state.json\n"+
 			"dolt-config.log\n"+
