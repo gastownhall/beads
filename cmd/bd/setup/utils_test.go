@@ -635,3 +635,32 @@ func statFile(t *testing.T, path string) os.FileInfo {
 	}
 	return info
 }
+
+// The read-only refusal keeps the symlink rules: atomicWriteFile still refuses
+// a link as a link, and the write-through helper probes the file the link
+// points to, refusing a read-only one with the link and its target unchanged.
+func TestAtomicWriteFileSymlinkToAReadOnlyTarget(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "AGENTS.md")
+	link := filepath.Join(dir, "CLAUDE.md")
+	content := "# My Project\nUser text.\n"
+	seed := seedReadOnlyFile(t, target, content)
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+
+	if err := atomicWriteFile(link, []byte("new")); !errors.Is(err, errRefuseSymlinkWrite) || errors.Is(err, errRefuseReadOnlyWrite) {
+		t.Errorf("atomicWriteFile(link) error = %v, want the symlink refusal", err)
+	}
+	if err := atomicWriteFileFollowingSymlink(link, []byte("new")); !errors.Is(err, errRefuseReadOnlyWrite) || !strings.Contains(err.Error(), target) {
+		t.Errorf("atomicWriteFileFollowingSymlink(link) error = %v, want a read-only refusal naming %s", err, target)
+	}
+
+	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("%s is no longer a symlink (lstat err %v)", link, err)
+	}
+	if got, err := os.Readlink(link); err != nil || got != target {
+		t.Errorf("link points to %q (err %v), want %q", got, err, target)
+	}
+	assertReadOnlyFileUntouched(t, target, content, seed)
+}
