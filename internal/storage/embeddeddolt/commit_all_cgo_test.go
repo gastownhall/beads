@@ -204,3 +204,56 @@ func TestCommitAllReportsPartialCommit(t *testing.T) {
 	}
 	assertIssuesLeftInWorkingSet(t, ctx, te, id)
 }
+
+// TestCommitAllToleratesOwnedCloneLocalChanges pins what the GH#5433 check
+// must not report: a change to a table bd's own dolt_ignore policy covers is
+// expected to stay in the working set. A formerly tracked __temp__ table
+// (the residue schema.go documents) stands in for that state; with only it
+// dirty CommitAll stays an honest no-op, and an ordinary tracked change
+// beside it still commits cleanly.
+func TestCommitAllToleratesOwnedCloneLocalChanges(t *testing.T) {
+	ctx := t.Context()
+	te := newTestEnv(t, "ow")
+	if _, err := te.store.CommitAll(ctx, "test: flush baseline"); err != nil {
+		t.Fatalf("baseline CommitAll: %v", err)
+	}
+	committed, err := te.store.CommitAll(ctx, "test: clean store")
+	if err != nil || committed {
+		t.Fatalf("CommitAll on a clean store = (%v, %v), want (false, nil)", committed, err)
+	}
+
+	te.exec(t, ctx, "UPDATE dolt_ignore SET ignored = false WHERE pattern = '__temp__%'")
+	te.exec(t, ctx, "CREATE TABLE __temp__probe (id INT PRIMARY KEY, v VARCHAR(16))")
+	if _, err := te.store.CommitAll(ctx, "test: track __temp__probe"); err != nil {
+		t.Fatalf("CommitAll tracking __temp__probe: %v", err)
+	}
+	te.exec(t, ctx, "UPDATE dolt_ignore SET ignored = true WHERE pattern = '__temp__%'")
+	if _, err := te.store.CommitAll(ctx, "test: re-ignore __temp__"); err != nil {
+		t.Fatalf("CommitAll re-ignoring __temp__: %v", err)
+	}
+	te.exec(t, ctx, "INSERT INTO __temp__probe VALUES (1, 'x')")
+	var dirty int
+	te.queryScalar(t, ctx, "SELECT COUNT(*) FROM dolt_status WHERE table_name = '__temp__probe'", nil, &dirty)
+	if dirty == 0 {
+		t.Fatal("fixture: modified formerly tracked __temp__probe is not listed in dolt_status")
+	}
+
+	committed, err = te.store.CommitAll(ctx, "test: only clone-local changes")
+	if err != nil || committed {
+		t.Fatalf("CommitAll with only owned clone-local changes = (%v, %v), want (false, nil)", committed, err)
+	}
+	if err := te.store.Commit(ctx, "test: tolerant Commit"); err != nil {
+		t.Fatalf("Commit with only owned clone-local changes: %v", err)
+	}
+
+	te.exec(t, ctx, "INSERT INTO config (`key`, value) VALUES ('test.owned-beside', 'v1')")
+	committed, err = te.store.CommitAll(ctx, "test: ordinary change beside clone-local")
+	if err != nil || !committed {
+		t.Fatalf("CommitAll with an ordinary tracked change = (%v, %v), want (true, nil)", committed, err)
+	}
+	var headValue string
+	te.queryScalar(t, ctx, "SELECT value FROM config AS OF 'HEAD' WHERE `key` = 'test.owned-beside'", nil, &headValue)
+	if headValue != "v1" {
+		t.Fatalf("config at HEAD = %q, want v1", headValue)
+	}
+}
