@@ -156,6 +156,87 @@ func TestCommitAllReportsTrackedTableSkippedByIgnorePattern(t *testing.T) {
 	}
 }
 
+// TestCommitAllToleratesOwnedCloneLocalDirtAndCommitsTrackedChanges is the
+// GH#5433 AC-3 regression guard: the residual-change check must not break the
+// healthy no-op. A clean store still answers (false, nil), ordinary tracked
+// changes still commit, and a Beads-OWNED clone-local pattern covering a
+// tracked table — the residual-shaped state an old store's __temp__ or
+// pre-flip wisp tables legitimately sit in — stays a tolerated no-op rather
+// than being reported as the stall.
+func TestCommitAllToleratesOwnedCloneLocalDirtAndCommitsTrackedChanges(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	te := newTestEnv(t, "nto")
+
+	// A clean store: the tolerated no-op, exactly as before the residual
+	// check existed.
+	headClean, err := te.store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit: %v", err)
+	}
+	committed, err := te.store.CommitAll(ctx, "test: clean no-op")
+	if err != nil || committed {
+		t.Fatalf("clean-store CommitAll = (%v, %v), want (false, nil)", committed, err)
+	}
+	if headAgain, err := te.store.GetCurrentCommit(ctx); err != nil {
+		t.Fatalf("GetCurrentCommit: %v", err)
+	} else if headAgain != headClean {
+		t.Fatalf("clean-store CommitAll moved HEAD: %s -> %s", headClean, headAgain)
+	}
+
+	// Ordinary tracked changes still commit.
+	te.exec(t, ctx,
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) "+
+			"VALUES ('nto-issue-1', 'commits normally', '', '', '', '', 'open', 2, 'task')")
+	committed, err = te.store.CommitAll(ctx, "test: ordinary tracked change")
+	if err != nil || !committed {
+		t.Fatalf("ordinary-tracked-change CommitAll = (%v, %v), want (true, nil)", committed, err)
+	}
+
+	// The owned-pattern fixture: a table covered by a Beads-owned clone-local
+	// pattern (__temp__%), first committed at HEAD while the pattern is
+	// absent — the state an old binary's __temp__ intermediate reaches HEAD
+	// in — then modified with the pattern back in force, so dolt_status
+	// lists it exactly like the stall lists a user-pattern-covered table.
+	te.exec(t, ctx, "DELETE FROM dolt_ignore WHERE pattern = '__temp__%'")
+	te.exec(t, ctx, "CREATE TABLE __temp__nto_probe (id VARCHAR(255) PRIMARY KEY, note VARCHAR(255))")
+	te.exec(t, ctx, "INSERT INTO __temp__nto_probe VALUES ('p1', 'tracked at head')")
+	if committed, err := te.store.CommitAll(ctx, "test: track the probe table"); err != nil || !committed {
+		t.Fatalf("CommitAll tracking the probe table: committed=%v err=%v", committed, err)
+	}
+	te.exec(t, ctx, "INSERT INTO dolt_ignore (pattern, ignored) VALUES ('__temp__%', true)")
+	if committed, err := te.store.CommitAll(ctx, "test: re-assert the owned pattern"); err != nil || !committed {
+		t.Fatalf("CommitAll re-asserting the owned pattern: committed=%v err=%v", committed, err)
+	}
+
+	te.exec(t, ctx, "UPDATE __temp__nto_probe SET note = 'dirty working set' WHERE id = 'p1'")
+	var probeDirty int
+	te.queryScalar(t, ctx,
+		"SELECT COUNT(*) FROM dolt_status WHERE table_name = '__temp__nto_probe'", nil, &probeDirty)
+	if probeDirty == 0 {
+		t.Fatal("fixture did not reach the residual-shaped state: dolt_status does not list the owned-covered tracked table")
+	}
+
+	// The owned exemption: this dirt is a tolerated no-op, (false, nil), not
+	// a residual finding.
+	headBefore, err := te.store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit: %v", err)
+	}
+	committed, err = te.store.CommitAll(ctx, "test: owned clone-local dirt")
+	if err != nil {
+		t.Fatalf("CommitAll on owned clone-local dirt = (%v, %v), want (false, nil): %v", committed, err, err)
+	}
+	if committed {
+		t.Fatal("CommitAll on owned clone-local dirt reported committed=true; the pattern keeps the probe out of staging")
+	}
+	if headAfter, err := te.store.GetCurrentCommit(ctx); err != nil {
+		t.Fatalf("GetCurrentCommit: %v", err)
+	} else if headAfter != headBefore {
+		t.Fatalf("owned clone-local dirt moved HEAD: %s -> %s", headBefore, headAfter)
+	}
+}
+
 // TestCommitAllPartialPublishesCommittableTablesAndReportsResidual is the
 // partial-publication half of GH#5433: ignored modified issues PLUS committable
 // config dirt. DOLT_COMMIT('-Am') stages and commits the config change, so the
