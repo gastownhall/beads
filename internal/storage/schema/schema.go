@@ -2348,7 +2348,7 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 		if err := runMigrationWithWatchdog(ctx, watchdogStderr, mf.version, humanMigrationName(mf.name), migrationWatchdogIntervalDuration(),
 			func(ctx context.Context) error { return execMigrationBody(ctx, db, string(data)) },
 		); err != nil {
-			return count, fmt.Errorf("migration %s: %w", mf.name, err)
+			return count, classifyMigrationDrift(fmt.Errorf("migration %s: %w", mf.name, err), src, mf)
 		}
 		// Restore before the cursor row and the per-step commit, so neither
 		// the step's commit nor a later pass ever records the stamped values.
