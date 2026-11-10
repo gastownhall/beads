@@ -86,6 +86,11 @@ type EmbeddedDoltStore struct {
 	// (e.g. the post-command autocommit net, or the commit itself) - only the
 	// migration step is skipped.
 	intent openIntent
+	// committer is the Dolt commit identity this store writes under, resolved
+	// once at construction (versioncontrolops.ResolveCommitter, #7628): the
+	// session committer of every connection it opens and the --author of its
+	// explicit commits. Immutable after construction.
+	committer versioncontrolops.Committer
 	// deferWakeDisabled turns the lazy defer-wake sweep off for THIS store
 	// instance only (SetDeferWakeSweepEnabled); never process-global.
 	deferWakeDisabled atomic.Bool
@@ -340,11 +345,12 @@ func newStore(ctx context.Context, beadsDir, database, branch string, intent ope
 	}
 
 	s := &EmbeddedDoltStore{
-		dataDir:  dataDir,
-		beadsDir: absBeadsDir,
-		database: database,
-		branch:   branch,
-		intent:   intent,
+		dataDir:   dataDir,
+		beadsDir:  absBeadsDir,
+		database:  database,
+		branch:    branch,
+		intent:    intent,
+		committer: versioncontrolops.ResolveCommitter("", ""),
 	}
 
 	if err := s.initSchema(ctx); err != nil {
@@ -401,14 +407,15 @@ func openReadOnly(ctx context.Context, beadsDir, database, branch string, checkB
 	}
 
 	s := &EmbeddedDoltStore{
-		dataDir:  dataDir,
-		beadsDir: absBeadsDir,
-		database: database,
-		branch:   branch,
-		readOnly: true,
+		dataDir:   dataDir,
+		beadsDir:  absBeadsDir,
+		database:  database,
+		branch:    branch,
+		readOnly:  true,
+		committer: versioncontrolops.ResolveCommitter("", ""),
 	}
 
-	db, cleanup, err := OpenSQL(ctx, dataDir, database, branch)
+	db, cleanup, err := openSQL(ctx, dataDir, database, branch, s.committer)
 	if err != nil {
 		return nil, fmt.Errorf("embeddeddolt: open db: %w", err)
 	}
@@ -506,7 +513,7 @@ func (s *EmbeddedDoltStore) commitConn(ctx context.Context, commit bool, fn func
 
 	var db *sql.DB
 	var cleanup func() error
-	db, cleanup, err = OpenSQL(ctx, s.dataDir, s.database, s.branch)
+	db, cleanup, err = openSQL(ctx, s.dataDir, s.database, s.branch, s.committer)
 	if err != nil {
 		return
 	}
@@ -600,7 +607,7 @@ func (s *EmbeddedDoltStore) SetEventsJournalEnabled(enabled bool) {
 // probeJournalShape runs issueops.ProbeJournalShape over a connection opened
 // and closed just for it.
 func (s *EmbeddedDoltStore) probeJournalShape(ctx context.Context) (*issueops.JournalShape, error) {
-	db, cleanup, err := OpenSQL(ctx, s.dataDir, s.database, s.branch)
+	db, cleanup, err := openSQL(ctx, s.dataDir, s.database, s.branch, s.committer)
 	if err != nil {
 		return nil, fmt.Errorf("journal: open connection to probe shape: %w", err)
 	}
@@ -653,7 +660,7 @@ func (s *EmbeddedDoltStore) ApplySchemaMigrations(ctx context.Context) (int, err
 	if s.readOnly {
 		return 0, ErrReadOnly
 	}
-	db, cleanup, err := OpenSQL(ctx, s.dataDir, s.database, s.branch)
+	db, cleanup, err := openSQL(ctx, s.dataDir, s.database, s.branch, s.committer)
 	if err != nil {
 		return 0, fmt.Errorf("embeddeddolt: open db: %w", err)
 	}
@@ -669,7 +676,7 @@ func (s *EmbeddedDoltStore) ApplySchemaMigrations(ctx context.Context) (int, err
 }
 
 func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
-	db, cleanup, err := OpenSQL(ctx, s.dataDir, "", "")
+	db, cleanup, err := openSQL(ctx, s.dataDir, "", "", s.committer)
 	if err != nil {
 		return fmt.Errorf("embeddeddolt: open db: %w", err)
 	}

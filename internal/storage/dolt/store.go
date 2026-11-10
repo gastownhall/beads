@@ -1865,18 +1865,8 @@ func applyConfigDefaults(cfg *Config) {
 			cfg.Database = configfile.DefaultDoltDatabase
 		}
 	}
-	if cfg.CommitterName == "" {
-		cfg.CommitterName = os.Getenv("GIT_AUTHOR_NAME")
-		if cfg.CommitterName == "" {
-			cfg.CommitterName = "beads"
-		}
-	}
-	if cfg.CommitterEmail == "" {
-		cfg.CommitterEmail = os.Getenv("GIT_AUTHOR_EMAIL")
-		if cfg.CommitterEmail == "" {
-			cfg.CommitterEmail = "beads@local"
-		}
-	}
+	committer := versioncontrolops.ResolveCommitter(cfg.CommitterName, cfg.CommitterEmail)
+	cfg.CommitterName, cfg.CommitterEmail = committer.Name, committer.Email
 	if cfg.Remote == "" {
 		cfg.Remote = "origin"
 	}

@@ -26,7 +26,7 @@ func (s *EmbeddedDoltStore) withDBConn(ctx context.Context, fn func(db versionco
 
 	var db *sql.DB
 	var cleanup func() error
-	db, cleanup, err = OpenSQL(ctx, s.dataDir, s.database, s.branch)
+	db, cleanup, err = openSQL(ctx, s.dataDir, s.database, s.branch, s.committer)
 	if err != nil {
 		return
 	}
@@ -57,7 +57,7 @@ func (s *EmbeddedDoltStore) withPinnedDBConn(ctx context.Context, fn func(db ver
 
 	var db *sql.DB
 	var cleanup func() error
-	db, cleanup, err = OpenSQL(ctx, s.dataDir, s.database, s.branch)
+	db, cleanup, err = openSQL(ctx, s.dataDir, s.database, s.branch, s.committer)
 	if err != nil {
 		return
 	}
@@ -282,7 +282,7 @@ func (s *EmbeddedDoltStore) ListBranches(ctx context.Context) ([]string, error) 
 // ---------------------------------------------------------------------------
 
 // commitAuthor returns the author string for merge commits.
-const commitAuthor = commitName + " <" + commitEmail + ">"
+const commitAuthor = versioncontrolops.DefaultCommitterName + " <" + versioncontrolops.DefaultCommitterEmail + ">"
 
 func (s *EmbeddedDoltStore) CommitExists(ctx context.Context, commitHash string) (bool, error) {
 	var exists bool
