@@ -1233,6 +1233,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   alike. The sweep now waits: those issues stay deferred and out of the ready
   list until the first ready read after the marker is removed (#7634).
 
+- Embedded-mode commits now record the `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL`
+  identity, as server mode already did. Embedded stores committed as
+  `beads <beads@local>`, and the pending-changes commit recorded the SQL user
+  `root <root@%>` as its author. With neither variable set, commits are still
+  authored by `beads <beads@local>` (#7628).
+
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
