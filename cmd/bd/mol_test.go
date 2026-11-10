@@ -3744,6 +3744,39 @@ func TestBondProtoMolSecondRefArmWaitsOnSameTerminalsNotEarlierArm(t *testing.T)
 	}
 }
 
+// AC-6: --ref plus --type conditional is refused on the bond itself, before
+// any issue or edge is created.
+func TestBondProtoMolConditionalRefArmRefusalCreatesNothing(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreWithPrefix(t, t.TempDir()+"/test.db", "patrol")
+	proto, mol, s1, s2, s3, protoStep := bondRefArmSteps(t, ctx, s)
+
+	_, err := bondProtoMol(ctx, s, proto, mol, types.BondTypeConditional, map[string]string{"name": "ace"}, "arm-{{name}}", "test", false, false)
+	if err == nil {
+		t.Fatal("bondProtoMol with --type conditional + --ref succeeded, want the refusal")
+	}
+	if !strings.Contains(err.Error(), "--ref cannot be combined with --type conditional") {
+		t.Fatalf("refusal = %q, want it to name the refused flag combination", err)
+	}
+
+	// Nothing was created: no arm issues, no edges from or about them.
+	armID := mol.ID + ".arm-ace"
+	if _, gerr := s.GetIssue(ctx, armID); gerr == nil {
+		t.Errorf("arm root %s exists after the refused bond", armID)
+	}
+	for _, id := range []string{proto.ID, protoStep.ID, mol.ID, s1.ID, s2.ID, s3.ID} {
+		deps, derr := s.GetDependencyRecords(ctx, id)
+		if derr != nil {
+			t.Fatalf("GetDependencyRecords(%s): %v", id, derr)
+		}
+		for _, dep := range deps {
+			if strings.HasPrefix(dep.IssueID, armID) || strings.HasPrefix(dep.DependsOnID, armID) {
+				t.Errorf("edge %+v touches the refused arm %s", dep, armID)
+			}
+		}
+	}
+}
+
 // failingTerminalAttachWriter fails the AddDependency that attaches the arm
 // onto one chosen terminal step, after the edges before it have written.
 type failingTerminalAttachWriter struct {
