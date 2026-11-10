@@ -611,3 +611,43 @@ func TestRemoveJunieKeepsDirsItDidNotEmpty(t *testing.T) {
 		})
 	}
 }
+
+// An older bd wrote a config launching the nonexistent "bd mcp" (GH#5563).
+// Re-running setup over it must repair the config, leave the guidelines at the
+// template, and converge: a further run writes the same bytes.
+func TestInstallJunieRewritesStaleBdMCPConfig(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll(".junie/mcp", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stale := `{"mcpServers":{"beads":{"command":"bd","args":["mcp"]}}}`
+	if err := os.WriteFile(".junie/mcp/mcp.json", []byte(stale), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(".junie/guidelines.md", []byte(junieGuidelinesTemplate), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := InstallJunie(); err != nil {
+		t.Fatalf("InstallJunie over stale config: %v", err)
+	}
+	assertJunieMCPConfigFile(t, ".junie/mcp/mcp.json")
+	if got, err := os.ReadFile(".junie/guidelines.md"); err != nil || string(got) != junieGuidelinesTemplate {
+		t.Errorf("guidelines.md changed by the repair (err %v)", err)
+	}
+
+	repaired, err := os.ReadFile(".junie/mcp/mcp.json")
+	if err != nil {
+		t.Fatalf("read MCP config: %v", err)
+	}
+	if err := InstallJunie(); err != nil {
+		t.Fatalf("second InstallJunie: %v", err)
+	}
+	again, err := os.ReadFile(".junie/mcp/mcp.json")
+	if err != nil {
+		t.Fatalf("read MCP config: %v", err)
+	}
+	if string(again) != string(repaired) {
+		t.Errorf("MCP config changed on re-run:\nfirst:  %s\nsecond: %s", repaired, again)
+	}
+}
