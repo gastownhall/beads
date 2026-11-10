@@ -14,7 +14,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 )
@@ -1101,9 +1103,9 @@ func TestInitGitOriginAdoptionRefusesWithoutConsent(t *testing.T) {
 
 	stderrStr := stderr.String()
 	for _, must := range []string{
-		bareDir,          // the refusal names the origin it would adopt
-		"bd init --yes",  // and the consent remedy
-		"--no-adopt",     // and the opt-out remedy
+		bareDir,         // the refusal names the origin it would adopt
+		"bd init --yes", // and the consent remedy
+		"--no-adopt",    // and the opt-out remedy
 		"BD_NO_REMOTE_ADOPT",
 	} {
 		if !strings.Contains(stderrStr, must) {
@@ -1119,4 +1121,232 @@ func TestInitGitOriginAdoptionRefusesWithoutConsent(t *testing.T) {
 	if _, err := os.Stat(beadsDir); err == nil {
 		t.Errorf("adoption refusal should not have created %s", beadsDir)
 	}
+}
+
+// TestInitGitOriginAdoptionPromptDeclines pins the interactive arm of the
+// #6099 consent gate at the command level, using the pipe-driven pattern of
+// TestProtocol_ExitCode130_PromptCanceled (BD_NON_INTERACTIVE=0 keeps the
+// prompt alive without a TTY): a decline or a no-answer at the adoption
+// prompt exits 1 with the refusal naming the origin, creating no workspace,
+// and Ctrl-C at the prompt keeps the standard cancellation exit 130.
+func TestInitGitOriginAdoptionPromptDeclines(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	// fixture: a clone whose git origin carries synthetic refs/dolt/data,
+	// the same shape as TestInitGitOriginAdoptionRefusesWithoutConsent.
+	newClone := func(t *testing.T) (dir string, remoteURL string) {
+		t.Helper()
+		bareDir := filepath.Join(t.TempDir(), "bare.git")
+		runGitForBootstrapTest(t, "", "init", "--bare", bareDir)
+		sourceDir := t.TempDir()
+		runGitForBootstrapTest(t, sourceDir, "init", "-b", "main")
+		runGitForBootstrapTest(t, sourceDir, "config", "user.email", "test@test.com")
+		runGitForBootstrapTest(t, sourceDir, "config", "user.name", "Test User")
+		runGitForBootstrapTest(t, sourceDir, "commit", "--allow-empty", "-m", "init")
+		runGitForBootstrapTest(t, sourceDir, "remote", "add", "origin", bareDir)
+		runGitForBootstrapTest(t, sourceDir, "push", "origin", "main")
+		runGitForBootstrapTest(t, sourceDir, "push", "origin", "HEAD:refs/dolt/data")
+
+		dir = t.TempDir()
+		runGitForBootstrapTest(t, dir, "init", "-b", "main")
+		runGitForBootstrapTest(t, dir, "remote", "add", "origin", bareDir)
+		runGitForBootstrapTest(t, dir, "config", "core.hooksPath", ".git/hooks")
+		// The derived sync URL bd reports is the git origin URL verbatim
+		// (no file:// scheme added), so that raw path is what the prompt
+		// and the refusal name.
+		return dir, bareDir
+	}
+
+	// startAdoptionPrompt launches bd init interactive-eligible against the
+	// clone, wires combined stdout+stderr to a reader the test watches, and
+	// returns the process handle, the stdin writer, and helpers for output
+	// and waiting. The adoption prompt is the FIRST prompt on this path
+	// (--prefix is given and the role prompt needs a TTY), so seeing it
+	// proves the gate fired before anything else touched the workspace.
+	startAdoptionPrompt := func(t *testing.T, cloneDir string) (cmd *exec.Cmd, stdinW *os.File, waitCh <-chan error, output func() string, promptSeen <-chan struct{}) {
+		t.Helper()
+		stdinR, stdinW, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("stdin pipe: %v", err)
+		}
+		outR, outW, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("stdout pipe: %v", err)
+		}
+		cmd = exec.Command(bdBin, "init", "--prefix", "mine", "--quiet", "--skip-hooks", "--skip-agents")
+		cmd.Dir = cloneDir
+		cmd.Stdin = stdinR
+		cmd.Stdout = outW
+		cmd.Stderr = outW
+		// BD_NON_INTERACTIVE=0 forces the interactive path despite the pipe
+		// (isNonInteractiveInit treats an explicit 0 as interactive); CI=
+		// strips any ambient CI signal the same way.
+		cmd.Env = hermeticInitEnv(t.TempDir(), "BD_NON_INTERACTIVE=0", "CI=")
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start bd init: %v", err)
+		}
+		_ = stdinR.Close()
+		_ = outW.Close()
+
+		var (
+			mu   sync.Mutex
+			buf  bytes.Buffer
+			seen = make(chan struct{})
+			once sync.Once
+			wait = make(chan error, 1)
+		)
+		go func() { wait <- cmd.Wait() }()
+		go func() {
+			b := make([]byte, 1024)
+			for {
+				n, readErr := outR.Read(b)
+				if n > 0 {
+					mu.Lock()
+					buf.Write(b[:n])
+					if strings.Contains(buf.String(), "Adopt this origin's issue history?") {
+						once.Do(func() { close(seen) })
+					}
+					mu.Unlock()
+				}
+				if readErr != nil {
+					return
+				}
+			}
+		}()
+		return cmd, stdinW, wait, func() string {
+			mu.Lock()
+			defer mu.Unlock()
+			return buf.String()
+		}, seen
+	}
+
+	t.Run("decline at the prompt exits 1 with no workspace", func(t *testing.T) {
+		cloneDir, remoteURL := newClone(t)
+		cmd, stdinW, waitCh, output, promptSeen := startAdoptionPrompt(t, cloneDir)
+
+		select {
+		case <-promptSeen:
+		case err := <-waitCh:
+			t.Fatalf("bd init exited before the adoption prompt: %v\n%s", err, output())
+		case <-time.After(60 * time.Second):
+			_ = cmd.Process.Kill()
+			<-waitCh
+			t.Fatalf("timed out waiting for the adoption prompt\n%s", output())
+		}
+
+		if _, err := stdinW.Write([]byte("n\n")); err != nil {
+			t.Fatalf("write decline: %v", err)
+		}
+		_ = stdinW.Close()
+
+		var waitErr error
+		select {
+		case waitErr = <-waitCh:
+		case <-time.After(30 * time.Second):
+			_ = cmd.Process.Kill()
+			<-waitCh
+			t.Fatalf("bd did not exit after the decline\n%s", output())
+		}
+
+		exitErr, ok := waitErr.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("declined init: expected a non-zero exit, got %v\n%s", waitErr, output())
+		}
+		if code := exitErr.ExitCode(); code != 1 {
+			t.Errorf("exit code = %d, want 1 (adoption declined)\n%s", code, output())
+		}
+		out := output()
+		for _, want := range []string{remoteURL, "bd init --yes", "--no-adopt"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("decline refusal missing %q:\n%s", want, out)
+			}
+		}
+		if strings.Contains(out, "Bootstrapped from remote") {
+			t.Errorf("declined init still bootstrapped:\n%s", out)
+		}
+		if _, err := os.Stat(filepath.Join(cloneDir, ".beads")); err == nil {
+			t.Errorf("declined adoption must not create a workspace (.beads exists)\n%s", out)
+		}
+	})
+
+	t.Run("no answer (EOF) exits 1 with no workspace", func(t *testing.T) {
+		cloneDir, remoteURL := newClone(t)
+		cmd, stdinW, waitCh, output, promptSeen := startAdoptionPrompt(t, cloneDir)
+
+		select {
+		case <-promptSeen:
+		case err := <-waitCh:
+			t.Fatalf("bd init exited before the adoption prompt: %v\n%s", err, output())
+		case <-time.After(60 * time.Second):
+			_ = cmd.Process.Kill()
+			<-waitCh
+			t.Fatalf("timed out waiting for the adoption prompt\n%s", output())
+		}
+
+		// No answer: close stdin, so the prompt's read gets EOF. An EOF is a
+		// read error on this path, and a read error is not consent.
+		_ = stdinW.Close()
+
+		var waitErr error
+		select {
+		case waitErr = <-waitCh:
+		case <-time.After(30 * time.Second):
+			_ = cmd.Process.Kill()
+			<-waitCh
+			t.Fatalf("bd did not exit after EOF\n%s", output())
+		}
+
+		exitErr, ok := waitErr.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("EOF'd init: expected a non-zero exit, got %v\n%s", waitErr, output())
+		}
+		if code := exitErr.ExitCode(); code != 1 {
+			t.Errorf("exit code = %d, want 1 (no answer is not consent)\n%s", code, output())
+		}
+		if !strings.Contains(output(), remoteURL) {
+			t.Errorf("EOF refusal should still name the origin:\n%s", output())
+		}
+		if _, err := os.Stat(filepath.Join(cloneDir, ".beads")); err == nil {
+			t.Errorf("no-answer adoption must not create a workspace (.beads exists)\n%s", output())
+		}
+	})
+
+	t.Run("cancel at the prompt exits 130", func(t *testing.T) {
+		cloneDir, _ := newClone(t)
+		cmd, stdinW, waitCh, output, promptSeen := startAdoptionPrompt(t, cloneDir)
+		defer func() { _ = stdinW.Close() }()
+
+		select {
+		case <-promptSeen:
+			if err := cmd.Process.Signal(os.Interrupt); err != nil {
+				t.Fatalf("send SIGINT: %v", err)
+			}
+		case err := <-waitCh:
+			t.Fatalf("bd init exited before the adoption prompt: %v\n%s", err, output())
+		case <-time.After(60 * time.Second):
+			_ = cmd.Process.Kill()
+			<-waitCh
+			t.Fatalf("timed out waiting for the adoption prompt\n%s", output())
+		}
+
+		var waitErr error
+		select {
+		case waitErr = <-waitCh:
+		case <-time.After(30 * time.Second):
+			_ = cmd.Process.Kill()
+			<-waitCh
+			t.Fatalf("bd did not exit after SIGINT\n%s", output())
+		}
+
+		exitErr, ok := waitErr.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("canceled init: expected a non-zero exit, got %v\n%s", waitErr, output())
+		}
+		if code := exitErr.ExitCode(); code != 130 {
+			t.Errorf("exit code = %d, want 130 (the standard prompt-cancel exit)\n%s", code, output())
+		}
+		if _, err := os.Stat(filepath.Join(cloneDir, ".beads")); err == nil {
+			t.Errorf("canceled adoption must not create a workspace (.beads exists)\n%s", output())
+		}
+	})
 }
