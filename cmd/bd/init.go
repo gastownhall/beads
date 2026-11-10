@@ -1626,7 +1626,8 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			if syncURLFromGitOrigin && !adoptConsent.prompted && !quiet {
 				// --yes consented ahead of time: still name the source
 				// before importing from it, so a scripted run leaves a
-				// record of whose history it adopted (GH#6099).
+				// record of whose history it adopted (GH#6099). --quiet
+				// suppresses this record, as it does init's other output.
 				fmt.Fprintf(os.Stderr, "Adopting Dolt issue history from git origin: %s\n", remedy.PrintedValue(redactRemoteURL(syncURL)))
 			}
 			// A raw https:// forge URL would route through Dolt's remotesapi

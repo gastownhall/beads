@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -2089,13 +2088,9 @@ func TestEmbeddedInitGitOriginAdoptionWithConsent(t *testing.T) {
 			cmd.Dir = cloneDir
 			cmd.Env = append(envWithout(bdEnv(cloneDir), "BD_NON_INTERACTIVE"), tc.env...)
 			cmd.Stdin = strings.NewReader(tc.stdin)
-			// combined interleaves both streams in write order, so the
-			// disclosure can be ordered against the bootstrap line; the two
-			// stream copiers write it concurrently, hence the lock.
 			var stdout, stderr bytes.Buffer
-			var combined syncBuffer
-			cmd.Stdout = io.MultiWriter(&stdout, &combined)
-			cmd.Stderr = io.MultiWriter(&stderr, &combined)
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
 			if err := cmd.Run(); err != nil {
 				t.Fatalf("init with adoption consent failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 			}
@@ -2113,14 +2108,12 @@ func TestEmbeddedInitGitOriginAdoptionWithConsent(t *testing.T) {
 			if tc.stdin == "" && !strings.Contains(errText, "Adopting Dolt issue history from git origin: "+remoteURL) {
 				t.Errorf("--yes did not announce the origin before cloning:\n%s", errText)
 			}
-			// The disclosure precedes the clone: the URL appears before the
-			// bootstrap-completed line (printed unless quiet or JSON).
-			if all := combined.String(); strings.Contains(all, "Bootstrapped from remote") {
-				if disclosed, booted := strings.Index(all, remoteURL), strings.Index(all, "Bootstrapped from remote"); disclosed < 0 || disclosed > booted {
-					t.Errorf("origin disclosed at %d, after the bootstrap line at %d:\n%s", disclosed, booted, all)
-				}
-			} else if tc.name == "yes" {
-				t.Errorf("plain --yes init printed no bootstrap line:\n%s", all)
+			// That the disclosure precedes the clone is pinned on one stream
+			// by TestInitDerivedOriginYesAnnouncesBeforeCloning: the
+			// bootstrap line goes to stdout, and two separately drained
+			// pipes do not keep the order init wrote them in.
+			if tc.name == "yes" && !strings.Contains(stdout.String(), "Bootstrapped from remote") {
+				t.Errorf("plain --yes init printed no bootstrap line:\n%s", stdout.String())
 			}
 
 			list := exec.Command(bd, "list", "--all", "--json")

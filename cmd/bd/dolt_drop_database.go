@@ -52,7 +52,7 @@ func dropNamedDatabase(ctx context.Context, conn versioncontrolops.DBConn, req d
 	if strings.TrimSpace(req.name) == "" {
 		return dropDatabaseResult{}, &dropDatabaseRefusal{
 			message: "no database name given",
-			hint:    "Usage: bd dolt drop-database <name>. Run 'bd dolt status' or SHOW DATABASES to see the databases this server holds.",
+			hint:    "Usage: bd dolt drop-database <name>. Run bd sql 'SHOW DATABASES' to list the databases this server holds.",
 		}
 	}
 	existing, err := listServerDatabases(ctx, conn)
@@ -69,7 +69,7 @@ func dropNamedDatabase(ctx context.Context, conn versioncontrolops.DBConn, req d
 	if name == "" {
 		return dropDatabaseResult{}, &dropDatabaseRefusal{
 			message: fmt.Sprintf("database %s does not exist on this Dolt server", remedy.PrintedValue(req.name)),
-			hint:    "Run 'bd dolt status' or SHOW DATABASES to see the databases this server holds.",
+			hint:    "Run bd sql 'SHOW DATABASES' to list the databases this server holds.",
 		}
 	}
 
@@ -183,7 +183,7 @@ func listServerDatabases(ctx context.Context, conn versioncontrolops.DBConn) ([]
 // shows which one. A canceled read returns the cancellation so the caller
 // exits 130.
 func confirmDropDatabase(ctx context.Context, in io.Reader, closer io.Closer, out io.Writer, name, endpoint string) (bool, error) {
-	fmt.Fprintf(out, "This drops database %s from the Dolt server at %s.\n", remedy.PrintedValue(name), endpoint)
+	fmt.Fprintf(out, "This drops database %s from the Dolt server at %s.\n", remedy.PrintedValue(name), remedy.PrintedValue(endpoint))
 	fmt.Fprintf(out, "It stays recoverable with %s until the server's dropped databases are purged.\n", undropCall(name))
 	fmt.Fprint(out, "Drop it? [y/N] ")
 	line, err := readLineWithContext(ctx, bufio.NewReader(in), closer)
@@ -205,13 +205,11 @@ func undropCall(name string) string {
 	return "CALL DOLT_UNDROP('" + name + "')"
 }
 
-// dropDatabaseEndpoint names the server a drop runs on for the confirmation,
-// without credentials: the configured endpoint's host:port (or socket), or,
-// for a proxied workspace, its external backend or the managed one.
-func dropDatabaseEndpoint(beadsDir string, cfg *configfile.Config) string {
-	if !usesProxiedServer() {
-		return doltserver.ResolveEndpoint(beadsDir, cfg).Location()
-	}
+// proxiedDropDatabaseEndpoint names the server a drop on a proxied workspace
+// runs on for the confirmation, without credentials: its external backend, or
+// the managed one. A direct drop names the server its connection reached
+// (openDoltServerConnectionAt).
+func proxiedDropDatabaseEndpoint(beadsDir string) string {
 	if info, err := configfile.LoadProxiedServerClientInfo(beadsDir); err == nil && info != nil && info.External != nil {
 		return externalDoltEndpoint(*info.External)
 	}
@@ -269,8 +267,13 @@ Examples:
 			globals:    []string{cfg.GetGlobalDoltDatabase()},
 			assumeYes:  yes,
 		}
-		if !jsonOutput && !isNonInteractiveInit(false) {
-			endpoint := dropDatabaseEndpoint(beadsDir, cfg)
+		// confirmOn asks before the drop, naming endpoint, the server the drop
+		// runs on: for a direct drop, the one its connection reached, so the
+		// prompt cannot name one server while the drop runs on another.
+		confirmOn := func(endpoint string) {
+			if jsonOutput || isNonInteractiveInit(false) {
+				return
+			}
 			req.confirm = func(name string) (bool, error) {
 				return confirmDropDatabase(rootCtx, os.Stdin, os.Stdin, os.Stderr, name, endpoint)
 			}
@@ -294,13 +297,15 @@ Examples:
 		}
 
 		if usesProxiedServer() {
+			confirmOn(proxiedDropDatabaseEndpoint(beadsDir))
 			return runDoltDropDatabaseProxied(rootCtx, beadsDir, run)
 		}
-		db, cleanup, err := openDoltServerConnection()
+		db, endpoint, cleanup, err := openDoltServerConnectionAt()
 		if err != nil {
 			return err
 		}
 		defer cleanup()
+		confirmOn(endpoint)
 		return run(rootCtx, db)
 	},
 }

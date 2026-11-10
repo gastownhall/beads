@@ -1106,22 +1106,28 @@ func runInitForAdoptionTest(t *testing.T, workDir, stdin string, extraEnv []stri
 // TestInitDerivedOriginAdoptionRefusesWithoutConsent is AC-1 of GH#6099: a
 // fresh clone whose git origin carries Dolt history, no configured remote,
 // and no TTY. Init must refuse with exit 1 BEFORE creating .beads, name the
-// origin, and say how to consent or opt out. --non-interactive, --quiet and
-// --json are not consent.
+// origin, and say how to consent or opt out, without prompting.
+// --non-interactive, --quiet and --json are not consent.
 func TestInitDerivedOriginAdoptionRefusesWithoutConsent(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		args []string
+		name  string
+		args  []string
+		env   []string
+		stdin string
 	}{
-		{"non-interactive", []string{"--non-interactive"}},
-		{"no-tty", nil},
-		{"quiet", []string{"--non-interactive", "--quiet"}},
-		{"json", []string{"--json"}},
+		{name: "non-interactive", args: []string{"--non-interactive"}},
+		{name: "no-tty"},
+		{name: "quiet", args: []string{"--non-interactive", "--quiet"}},
+		{name: "json", args: []string{"--json"}},
+		// BD_NON_INTERACTIVE=0 forces init's interactive mode on piped
+		// stdin, so only --json keeps this run from prompting: JSON never
+		// prompts, and the yes waiting on stdin is never read as consent.
+		{name: "json-forced-interactive", args: []string{"--json"}, env: []string{"BD_NON_INTERACTIVE=0"}, stdin: "y\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			workDir, remoteDir := derivedOriginWithDoltDataFixture(t)
 			args := append([]string{"--prefix", "mine", "--skip-hooks", "--skip-agents"}, tc.args...)
-			out, code := runInitForAdoptionTest(t, workDir, "", nil, args...)
+			out, code := runInitForAdoptionTest(t, workDir, tc.stdin, tc.env, args...)
 			if code != 1 {
 				t.Fatalf("exit code = %d, want 1 (adoption refused without consent)\noutput:\n%s", code, out)
 			}
@@ -1130,6 +1136,9 @@ func TestInitDerivedOriginAdoptionRefusesWithoutConsent(t *testing.T) {
 					t.Errorf("refusal does not mention %q:\n%s", want, out)
 				}
 			}
+			if n := strings.Count(out, "[y/N]"); n != 0 {
+				t.Errorf("init prompted %d time(s); a run that cannot ask must refuse without prompting:\n%s", n, out)
+			}
 			if strings.Contains(out, "failed to clone") {
 				t.Errorf("init attempted the clone before refusing:\n%s", out)
 			}
@@ -1137,6 +1146,35 @@ func TestInitDerivedOriginAdoptionRefusesWithoutConsent(t *testing.T) {
 				t.Errorf("refusal created .beads (stat err=%v); the early refusal must write nothing", err)
 			}
 		})
+	}
+}
+
+// TestInitDerivedOriginYesAnnouncesBeforeCloning pins the order of the
+// --yes disclosure (GH#6099): init names the origin it adopts from before it
+// clones. The fixture's refs/dolt/data is an ordinary commit, so the clone
+// fails, and its error goes to stderr, the stream the announcement is on.
+// One stream keeps the order init wrote them in; a buffer merging stdout and
+// stderr, drained by two goroutines, does not.
+func TestInitDerivedOriginYesAnnouncesBeforeCloning(t *testing.T) {
+	workDir, remoteDir := derivedOriginWithDoltDataFixture(t)
+	bdBin := buildBDForInitTests(t)
+	cmd := exec.Command(bdBin, "init", "--prefix", "mine", "--skip-hooks", "--skip-agents", "--non-interactive", "--yes")
+	cmd.Dir = workDir
+	cmd.Env = hermeticInitEnv(t.TempDir())
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err == nil {
+		t.Fatalf("init succeeded although the fixture's refs/dolt/data holds no Dolt history:\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+	errText := stderr.String()
+	announced := strings.Index(errText, "Adopting Dolt issue history from git origin: ")
+	cloned := strings.Index(errText, "failed to clone")
+	if announced < 0 || cloned < 0 || announced > cloned {
+		t.Fatalf("on stderr the --yes announcement is at %d and the clone failure at %d; want the announcement first:\n%s", announced, cloned, errText)
+	}
+	if line, _, _ := strings.Cut(errText[announced:], "\n"); !strings.Contains(line, remoteDir) {
+		t.Errorf("the announcement does not name the origin %s: %q", remoteDir, line)
 	}
 }
 
