@@ -436,6 +436,83 @@ func TestInitializeIgnoresNativeUserConfigWhenDocumentedExists(t *testing.T) {
 	assertNativeIgnored("legacy")
 }
 
+// Without the documented file, native still applies above legacy and below
+// project and BEADS_DIR config, and direct user reads resolve to it.
+func TestInitializeFallsBackToNativeUserConfigWhenDocumentedMissing(t *testing.T) {
+	candidates, root := newDistinctUserConfigFixture(t)
+	writeConfigYAML(t, candidates.legacy, "actor: legacy\njira:\n  url: https://legacy.example\n")
+	writeConfigYAML(t, candidates.native,
+		"actor: native\ngithub:\n  url: https://native.example\nnode_id: native-node\n")
+	counts := recordUserConfigStats(t)
+
+	initialize := func() {
+		t.Helper()
+		ResetForTesting()
+		if err := Initialize(); err != nil {
+			t.Fatalf("Initialize: %v", err)
+		}
+	}
+	assertNativeMerged := func(wantActor string) {
+		t.Helper()
+		if got := GetString("actor"); got != wantActor {
+			t.Errorf("actor = %q, want %q", got, wantActor)
+		}
+		if got := PrivateConfigValue("actor"); got != "native" {
+			t.Errorf("private actor = %q, want native", got)
+		}
+		for key, want := range map[string]string{
+			"github.url": "https://native.example",
+			"node_id":    "native-node",
+			"jira.url":   "https://legacy.example",
+		} {
+			if got := GetString(key); got != want {
+				t.Errorf("%s = %q, want %q", key, got, want)
+			}
+			if got := PrivateConfigValue(key); got != want {
+				t.Errorf("private %s = %q, want %q", key, got, want)
+			}
+		}
+		if got := NodeID(); got != "native-node" {
+			t.Errorf("NodeID() = %q, want native-node", got)
+		}
+	}
+
+	initialize()
+	assertNativeMerged("native")
+	if counts[candidates.native] == 0 {
+		t.Errorf("native %s was never probed although documented is absent", candidates.native)
+	}
+	if got, err := UserConfigYamlPath(); err != nil || got != candidates.native {
+		t.Errorf("UserConfigYamlPath() = %q, %v; want native %q", got, err, candidates.native)
+	}
+
+	projectRoot := filepath.Join(root, "project")
+	writeConfigActor(t, filepath.Join(projectRoot, ".beads", "config.yaml"), "project")
+	t.Chdir(projectRoot)
+	initialize()
+	assertNativeMerged("project")
+
+	beadsConfig := filepath.Join(root, "explicit", ".beads", "config.yaml")
+	writeConfigActor(t, beadsConfig, "beads-dir")
+	t.Setenv("BEADS_DIR", filepath.Dir(beadsConfig))
+	initialize()
+	assertNativeMerged("beads-dir")
+
+	// With neither user file present, both are probed and nothing applies.
+	t.Setenv("BEADS_DIR", "")
+	t.Chdir(filepath.Join(root, "work"))
+	removeConfigPath(t, candidates.legacy)
+	removeConfigPath(t, candidates.native)
+	clear(counts)
+	initialize()
+	if counts[candidates.documented] == 0 || counts[candidates.native] == 0 {
+		t.Errorf("absent user files were not both probed: %v", counts)
+	}
+	if got := GetString("github.url"); got != "" {
+		t.Errorf("github.url = %q with no user config, want unset", got)
+	}
+}
+
 func userConfigTestRoots(t *testing.T) (string, string) {
 	t.Helper()
 	base := t.TempDir()
