@@ -5,6 +5,7 @@ package main
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -93,5 +94,49 @@ func TestEmbeddedMetadatalessWorkspaceAdoptsSoleDatabase(t *testing.T) {
 		}
 		assertEmbeddedDatabases(t, beadsDir, "gh4135")
 		assertMetadataAbsent(t, beadsDir)
+	})
+
+	// The close is the first command after metadata.json goes: the identity
+	// preview and the real open must both reach the workspace's database, so
+	// restoring metadata.json shows the close it acknowledged.
+	t.Run("close first", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gh4135")
+		issue := bdCreate(t, bd, dir, "Closed while metadata was lost")
+		saved := removeMetadata(t, beadsDir)
+
+		run := runBDMetadataless(t, bd, dir, nil, "close", issue.ID)
+		if run.err != nil {
+			t.Fatalf("bd close %s failed: %v\nstdout:\n%s\nstderr:\n%s", issue.ID, run.err, run.stdout, run.stderr)
+		}
+		assertEmbeddedDatabases(t, beadsDir, "gh4135")
+		restoreMetadata(t, beadsDir, saved)
+		if got := bdShow(t, bd, dir, issue.ID); got.Status != "closed" {
+			t.Fatalf("%s status = %q in the original database after the acknowledged close, want closed", issue.ID, got.Status)
+		}
+	})
+
+	// The report's sequence: a read creates the phantom, the git-tracked
+	// export then seeds it on the next write, and the close lands there
+	// instead of in the database metadata.json names again once restored.
+	t.Run("list then close with a JSONL export", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gh4135")
+		issue := bdCreate(t, bd, dir, "Exported before metadata was lost")
+		if out, err := bdRunWithFlockRetry(t, bd, dir, "export", "-o", filepath.Join(beadsDir, "issues.jsonl")); err != nil {
+			t.Fatalf("bd export failed: %v\n%s", err, out)
+		}
+		saved := removeMetadata(t, beadsDir)
+
+		if run := runBDMetadataless(t, bd, dir, nil, "list", "--json"); run.err != nil {
+			t.Fatalf("bd list --json failed: %v\nstdout:\n%s\nstderr:\n%s", run.err, run.stdout, run.stderr)
+		}
+		run := runBDMetadataless(t, bd, dir, nil, "close", issue.ID)
+		if run.err != nil {
+			t.Fatalf("bd close %s failed: %v\nstdout:\n%s\nstderr:\n%s", issue.ID, run.err, run.stdout, run.stderr)
+		}
+		restoreMetadata(t, beadsDir, saved)
+		if got := bdShow(t, bd, dir, issue.ID); got.Status != "closed" {
+			t.Fatalf("%s status = %q in the original database after the acknowledged close, want closed", issue.ID, got.Status)
+		}
+		assertEmbeddedDatabases(t, beadsDir, "gh4135")
 	})
 }
