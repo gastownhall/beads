@@ -123,6 +123,35 @@ func TestProxyCapabilityRegistryRowInvariants(t *testing.T) {
 		if row.History == HistoryProxySupported && row.Rule.Outcome != ProxyOutcomeHonored {
 			t.Errorf("%s: classified proxy-supported but the gate refuses it", row.display())
 		}
+
+		// A row that declares a force bypass must name a bool flag its real
+		// command registers. A typo here fails silent and expensive: the gate
+		// never lifts, the refusal looks like policy, and the operator's
+		// --force is a dead keystroke. The default and every topology
+		// override of the same row point at the same command.
+		rules := []proxyCapabilityRule{row.Rule}
+		for _, rule := range row.Topology {
+			rules = append(rules, rule)
+		}
+		for _, rule := range rules {
+			if rule.ForceFlag == "" {
+				continue
+			}
+			cmd, _, err := rootCmd.Find(strings.Fields(row.Path))
+			if err != nil || cmd == rootCmd {
+				t.Errorf("%s: declares a force bypass but its path does not resolve to a command", row.display())
+				continue
+			}
+			flag := cmd.Flags().Lookup(rule.ForceFlag)
+			if flag == nil {
+				t.Errorf("%s: ForceFlag %q is not a flag bd %s registers", row.display(), rule.ForceFlag, row.Path)
+				continue
+			}
+			if flag.Value.Type() != "bool" {
+				t.Errorf("%s: ForceFlag %q must be a bool; the gate reads its value, and only a bool cannot smuggle a partial lift",
+					row.display(), rule.ForceFlag)
+			}
+		}
 	}
 }
 
@@ -162,6 +191,25 @@ func assertCapabilityRuleInvariants(t *testing.T, where string, rule proxyCapabi
 		}
 		if rule.Reason == ProxyReasonUnimplemented && rule.Tracking == "" {
 			t.Errorf("%s: an unimplemented refusal needs a Tracking item naming who closes it", where)
+		}
+	}
+
+	// The force bypass (GH#6656) is per-row policy and needs the same guard
+	// discipline as the rest of the table: only a typed refusal has anything
+	// to lift, the two fields are set together or not at all (a warning with
+	// no bypass, or a bypass with no warning, is half a contract a future
+	// row will copy), and the warning must not read like the refusal it
+	// lifts — the operator just typed the command; the warning's job is the
+	// precondition, not the policy.
+	if rule.ForceFlag != "" || rule.ForceWarning != "" {
+		if rule.Outcome != ProxyOutcomeRefused {
+			t.Errorf("%s: only a typed refusal can carry a force bypass; an honored or N/A row has nothing to lift", where)
+		}
+		if rule.ForceFlag == "" || rule.ForceWarning == "" {
+			t.Errorf("%s: ForceFlag and ForceWarning are set together or not at all", where)
+		}
+		if strings.Contains(rule.ForceWarning, "is not supported in proxied-server mode") {
+			t.Errorf("%s: the force warning must not read like the refusal it lifts", where)
 		}
 	}
 }
