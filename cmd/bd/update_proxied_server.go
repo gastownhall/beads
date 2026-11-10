@@ -85,6 +85,21 @@ func proxiedIssueLifecycle() (issueops.Lifecycle, error) {
 	return src.IssueLifecycle()
 }
 
+// proxiedBatchApplier asks the unit-of-work provider for the apply-many role,
+// the same way proxiedIssueLifecycle above asks for the write one. `bd
+// set-state` composes its event, parent edge and label swap through it as one
+// all-or-nothing request (GH#5637); see openBatchApplier in cmd/bd/state.go.
+func proxiedBatchApplier() (issueops.BatchApplier, error) {
+	if uowProvider == nil {
+		return nil, errors.New("proxied-server UOW provider not initialized")
+	}
+	src, ok := uowProvider.(uow.BatchApplierSource)
+	if !ok {
+		return nil, fmt.Errorf("proxied-server provider %T does not offer the batch-apply surface", uowProvider)
+	}
+	return src.BatchApplier()
+}
+
 // applyUpdateProxiedOne applies one issue's update — plain or --claim —
 // through issueops.Lifecycle. What stays here is this surface's own protocol:
 // the advisory reassign pre-read, the per-id failure taxonomy the multi-id

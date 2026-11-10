@@ -111,7 +111,8 @@ type CreateItem struct {
 type UpdateItem struct {
 	// Target names the issue to patch and must resolve BACKWARD — see Ref. A
 	// template target refuses with *TemplateReadOnlyError, exactly as
-	// Lifecycle.Update does: templates are read-only.
+	// Lifecycle.Update does: templates are read-only — unless this item sets
+	// AllowTemplate, the batch's spelling of UpdateRequest.AllowTemplate.
 	Target Ref
 	// Patch is the edit, read exactly as UpdateRequest.Patch is — including
 	// that Patch.Labels is the whole LabelPatch, so a label REMOVAL is
@@ -163,6 +164,14 @@ type UpdateItem struct {
 	ForceClosePolicy      bool
 	ForceAssigneeTransfer bool
 	ForceNotesOverwrite   bool
+	// AllowTemplate is UpdateRequest.AllowTemplate, per item: the caller says
+	// it edits a template deliberately, so ONLY the template read-only
+	// refusal stands down. Every other refusal — validation, the expected
+	// guards, the assignee and notes fences, close policy — still applies,
+	// and the row's IsTemplate flag is never cleared by the write. False is
+	// the default and keeps the template guard, so a request that names no
+	// waiver cannot touch a template through this role.
+	AllowTemplate bool
 }
 
 // CloseItem closes one existing issue, under CloseRequest's rules.

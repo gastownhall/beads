@@ -87,16 +87,66 @@ func TestProxiedServerSetState(t *testing.T) {
 		if res.States["patrol"] != "muted" {
 			t.Errorf("state list shows patrol=%q, want muted", res.States["patrol"])
 		}
-		// The set-state calls created event children under the issue.
-		children := bdProxiedListJSON(t, bd, p, "--parent", issue.ID, "--status", "all")
-		var events int
-		for _, c := range children {
-			if strings.HasPrefix(c.ID, issue.ID+".") {
-				events++
-			}
+		// The set-state calls created event children under the issue. Since
+		// the batch migration (GH#5637) an event's parentage is a
+		// parent-child EDGE rather than a dotted child id, so count
+		// event-type children through the edge and assert the edge itself
+		// at the table.
+		children := bdProxiedListJSON(t, bd, p, "--parent", issue.ID, "--status", "all", "--type", "event")
+		if len(children) == 0 {
+			t.Errorf("expected event-type children under %s, got none", issue.ID)
 		}
-		if events == 0 {
-			t.Errorf("expected event child beads under %s, got none", issue.ID)
+		db := openProxiedDB(t, p)
+		if n := countRows(t, db,
+			"SELECT COUNT(*) FROM dependencies d JOIN issues i ON d.issue_id = i.id WHERE i.issue_type = 'event' AND d.depends_on_issue_id = ? AND d.type = 'parent-child'", issue.ID); n != len(children) {
+			t.Errorf("parent-child edges from event children = %d, want %d (the listed children)", n, len(children))
+		}
+	})
+
+	t.Run("failed_patch_leaves_no_event", func(t *testing.T) {
+		f := bdProxiedCreate(t, bd, p.dir, "Failed patch target")
+
+		// Control: one successful set-state records exactly one event child
+		// and exactly one parent-child edge to it.
+		if out, err := bdProxiedRun(t, bd, p.dir, "set-state", f.ID, "patrol=active"); err != nil {
+			t.Fatalf("set-state patrol=active: %v\n%s", err, out)
+		}
+		eventChildren := func() int {
+			return len(bdProxiedListJSON(t, bd, p, "--parent", f.ID, "--status", "all", "--type", "event"))
+		}
+		if got := eventChildren(); got != 1 {
+			t.Fatalf("after one successful set-state: %d event children, want 1", got)
+		}
+		db := openProxiedDB(t, p)
+		parentEdges := func() int {
+			return countRows(t, db,
+				"SELECT COUNT(*) FROM dependencies d JOIN issues i ON d.issue_id = i.id WHERE i.issue_type = 'event' AND d.depends_on_issue_id = ? AND d.type = 'parent-child'", f.ID)
+		}
+		if got := parentEdges(); got != 1 {
+			t.Fatalf("after one successful set-state: %d parent-child edges from event children, want 1", got)
+		}
+		labelsBefore := getProxiedLabels(t, db, f.ID)
+
+		// The label exceeds labels.label VARCHAR(255) while the event title
+		// stays under 500 chars, so the batch's update item is refused after
+		// its create item would have landed — which is exactly the refusal
+		// that must roll the event back with it.
+		longValue := strings.Repeat("v", 300)
+		_, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "set-state", f.ID, "patrol="+longValue)
+		if err == nil {
+			t.Fatalf("set-state with a 302-char label succeeded; the test needs the label patch to fail")
+		}
+		if !strings.Contains(stderr, "setting patrol:") || !strings.Contains(stderr, "exceeds maximum length") {
+			t.Errorf("failure text does not name the refused label patch:\n%s", stderr)
+		}
+		if got := eventChildren(); got != 1 {
+			t.Errorf("after a failed set-state: %d event children, want 1 (the failed transition left an orphaned committed event)", got)
+		}
+		if got := parentEdges(); got != 1 {
+			t.Errorf("after a failed set-state: %d parent-child edges from event children, want 1", got)
+		}
+		if labelsAfter := getProxiedLabels(t, db, f.ID); !equalStrSets(labelsBefore, labelsAfter) {
+			t.Errorf("labels changed on a failed set-state: before %v, after %v", labelsBefore, labelsAfter)
 		}
 	})
 
@@ -211,4 +261,23 @@ func containsStr(ss []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// equalStrSets reports whether two label slices hold the same set, ignoring
+// order — the label reader's ordering is not part of the contract under test.
+func equalStrSets(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]int, len(a))
+	for _, s := range a {
+		seen[s]++
+	}
+	for _, s := range b {
+		if seen[s] == 0 {
+			return false
+		}
+		seen[s]--
+	}
+	return true
 }
