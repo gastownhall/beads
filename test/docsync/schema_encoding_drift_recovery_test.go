@@ -21,6 +21,11 @@ const (
 // prints (internal/storage/schema/encoding_drift.go).
 var driftRecoveryURLConst = regexp.MustCompile(`SchemaEncodingDriftRecoveryURL = "https://beads\.gascity\.com(/[^"#]*)"`)
 
+// dirtyTablesGuardConst matches the opening of the #4566 dirty-table guard's
+// message (internal/storage/schema/dirty_tables_error.go), which the pass
+// after a drift stop can print instead of the refusal.
+var dirtyTablesGuardConst = regexp.MustCompile(`dirtyTablesGuardPrefix = "([^"]+)"`)
+
 // TestSchemaEncodingDriftRecoveryGuidance guards the runbook a schema-encoding
 // drift migration refusal links (GH#5699): the refusal's URL resolves to a
 // published page, and the page gives preservation steps, source-attributed
@@ -66,12 +71,27 @@ func TestSchemaEncodingDriftRecoveryGuidance(t *testing.T) {
 
 	t.Run("preservation before any further writes", func(t *testing.T) {
 		const heading = "## Before any further writes"
+		src, err := os.ReadFile(filepath.Join(repoRoot(), "internal", "storage", "schema", "dirty_tables_error.go"))
+		if err != nil {
+			t.Fatalf("reading the dirty-table guard source: %v", err)
+		}
+		guard := dirtyTablesGuardConst.FindSubmatch(src)
+		if guard == nil {
+			t.Fatal("dirty_tables_error.go no longer defines dirtyTablesGuardPrefix")
+		}
 		requirePhrases(t, "schema-encoding-drift.md "+heading, section(t, heading),
 			"nothing was rolled back",
 			"partial changes may remain",
 			"]("+preserveStoreRoute+")",
+			"bd context --json",
 			"do not commit the working set",
 			"do not delete rows",
+			// The next run can print the #4566 guard's commit advice for the
+			// stopped step's own partial changes; the runbook must recognize
+			// that message and forbid the commit.
+			string(guard[1]),
+			"stopped migration's partial changes",
+			"do not run `bd dolt commit` on this store",
 			"outside any server `data_dir`",
 			"work only on the copy",
 		)
@@ -82,11 +102,20 @@ func TestSchemaEncodingDriftRecoveryGuidance(t *testing.T) {
 
 	t.Run("diagnosis names candidates, not confirmed damage", func(t *testing.T) {
 		const heading = "## Diagnosis"
-		requirePhrases(t, "schema-encoding-drift.md "+heading, section(t, heading),
-			"issues", "dependencies", "wisps", "wisp_dependencies",
-			"candidate tables",
+		body := section(t, heading)
+		requirePhrases(t, "schema-encoding-drift.md "+heading, body,
+			"the candidate tables are the ones that migration reads",
 			"not confirmed corruption locations",
+			// gastownhall/beads#5699's verified case is 0035 reading events,
+			// not 0059.
+			"0035, the reported case",
+			"copied `events` rows into `wisp_events`",
+			"0057 and 0062 rewrite `events`",
+			"wisp tables (`wisps` and every `wisp_*` table) are clone-local",
 			"cannot detect readable garbage",
+		)
+		forbidPhrases(t, "schema-encoding-drift.md "+heading, body,
+			"0059 is the reported case",
 		)
 	})
 
@@ -98,8 +127,10 @@ func TestSchemaEncodingDriftRecoveryGuidance(t *testing.T) {
 			"(https://github.com/dolthub/dolt/pull/11133)",
 			"(https://github.com/gastownhall/beads/issues/4380#issuecomment-4898979147)",
 			"(https://github.com/gastownhall/beads/issues/4380#issuecomment-4899140648)",
-			"select * from issues as of",
+			"select * from events as of",
+			"every other candidate table",
 			"`count(*)` can succeed without decoding",
+			"cannot restore a clone-local table",
 			"deleted rows",
 			"rows created since",
 			"schema differences",
@@ -120,7 +151,8 @@ func TestSchemaEncodingDriftRecoveryGuidance(t *testing.T) {
 		body := section(t, heading)
 		requirePhrases(t, "schema-encoding-drift.md "+heading, body,
 			"every row and every column of every relevant table",
-			"dependencies", "wisps", "wisp_dependencies",
+			"every candidate table of the stopped migration",
+			"issues", "dependencies", "labels", "events", "comments", "wisps", "every `wisp_*` table",
 			"select * from",
 			"do not read every row of every table",
 			"issue and dependency semantics",

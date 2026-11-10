@@ -16,6 +16,7 @@ import (
 )
 
 const (
+	migration0035 = "0035_migrate_infra_to_wisps.up.sql"
 	migration0059 = "0059_recompute_null_gate_is_blocked.up.sql"
 	migration0041 = "0041_split_dependencies_target.up.sql"
 	// driftRecoveryURL is spelled out rather than read from the package
@@ -60,54 +61,122 @@ type userMessager interface {
 	UserMessage() string
 }
 
-// bd-mjbau8 / gastownhall/beads#5699: a pre-0059 cursor over a drifted table
-// fails inside migration 0059's INSERT ... SELECT, before the v53 aux re-key's
-// drift guard is ever reached. The runner must stop there with an actionable,
-// typed refusal that names the migration and its cursor, keeps the engine's
-// error as its cause, and does none of the step's later work: no cursor row,
-// no step commit, no "done" line, and no 0060.
+// bd-mjbau8 / gastownhall/beads#5699: a cursor below a migration that reads a
+// drifted table fails inside that migration's body, before the v53 aux
+// re-key's drift guard is ever reached. The reported case is 0035, which a
+// cursor-less store reaches first and which stops while it copies events rows
+// into wisp_events; 0059's INSERT ... SELECT bodies, which the issue first
+// named, read issues, dependencies and the wisp tables. The runner must stop
+// there with an actionable, typed refusal that names the migration and its
+// cursor, keeps the engine's error as its cause, and does none of the step's
+// later work: no cursor row, no step commit, no "done" line, and no next step.
 func TestRunMigrationsEncodingDriftRefuses(t *testing.T) {
-	for _, tc := range driftSignatures {
-		t.Run(tc.name, func(t *testing.T) {
-			var out bytes.Buffer
-			orig := stderr
-			stderr = &out
-			t.Cleanup(func() { stderr = orig })
-			zeroIssueRowCounter(t)
-			stubUpdatedAtGuard(t)
+	for _, step := range []struct {
+		migration string
+		version   int
+	}{
+		{migration0035, 35},
+		{migration0059, 59},
+	} {
+		for _, tc := range driftSignatures {
+			t.Run(fmt.Sprintf("%04d/%s", step.version, tc.name), func(t *testing.T) {
+				var out bytes.Buffer
+				orig := stderr
+				stderr = &out
+				t.Cleanup(func() { stderr = orig })
+				zeroIssueRowCounter(t)
+				stubUpdatedAtGuard(t)
 
-			db, mock, err := sqlmock.New()
-			if err != nil {
-				t.Fatalf("sqlmock.New: %v", err)
-			}
-			defer db.Close()
-			// sqlmock matches in order and refuses anything unexpected, so the
-			// expectation list is the whole permitted statement sequence.
-			mock.ExpectQuery(guardDirtyStatusQuery).
-				WillReturnRows(sqlmock.NewRows([]string{"table_name", "staged"}))
-			mock.ExpectExec(regexp.QuoteMeta(migrationBody(t, migration0059))).
-				WillReturnError(tc.err)
+				db, mock, err := sqlmock.New()
+				if err != nil {
+					t.Fatalf("sqlmock.New: %v", err)
+				}
+				defer db.Close()
+				// sqlmock matches in order and refuses anything unexpected, so the
+				// expectation list is the whole permitted statement sequence.
+				mock.ExpectQuery(guardDirtyStatusQuery).
+					WillReturnRows(sqlmock.NewRows([]string{"table_name", "staged"}))
+				mock.ExpectExec(regexp.QuoteMeta(migrationBody(t, step.migration))).
+					WillReturnError(tc.err)
 
-			applied, err := runMigrations(context.Background(), db, mainSource, 58, 60, true)
+				applied, err := runMigrations(context.Background(), db, mainSource, step.version-1, step.version+1, true)
 
-			assertDriftRefusal(t, err, tc.err, migration0059, 59, "schema_migrations")
-			if applied != 0 {
-				t.Errorf("applied = %d, want 0: the drifted step must not count", applied)
-			}
-			if err := mock.ExpectationsWereMet(); err != nil {
-				t.Errorf("unmet expectations: %v", err)
-			}
-			progress := out.String()
-			if !strings.Contains(progress, "Applying migration 0059") {
-				t.Errorf("progress never announced 0059:\n%s", progress)
-			}
-			if strings.Contains(progress, "done (") {
-				t.Errorf("a refused step printed its success line:\n%s", progress)
-			}
-			if strings.Contains(progress, "0060") {
-				t.Errorf("the pass went on to 0060 after refusing 0059:\n%s", progress)
-			}
-		})
+				assertDriftRefusal(t, err, tc.err, step.migration, step.version, "schema_migrations")
+				if applied != 0 {
+					t.Errorf("applied = %d, want 0: the drifted step must not count", applied)
+				}
+				if err := mock.ExpectationsWereMet(); err != nil {
+					t.Errorf("unmet expectations: %v", err)
+				}
+				progress := out.String()
+				if announced := fmt.Sprintf("Applying migration %04d", step.version); !strings.Contains(progress, announced) {
+					t.Errorf("progress never announced %04d:\n%s", step.version, progress)
+				}
+				if strings.Contains(progress, "done (") {
+					t.Errorf("a refused step printed its success line:\n%s", progress)
+				}
+				if next := fmt.Sprintf("Applying migration %04d", step.version+1); strings.Contains(progress, next) {
+					t.Errorf("the pass went on past the refused step:\n%s", progress)
+				}
+			})
+		}
+	}
+}
+
+// TestSchemaEncodingDriftRefusalWarnsAboutTheDirtyTableGuard: the stopped
+// step's partial writes stay uncommitted (0059 creates and fills its
+// __bd_0059_recompute_* tables and resets issues.is_blocked before its
+// INSERT ... SELECT reads), so the next pass can stop sooner, at the #4566
+// dirty-table guard, which advises 'bd dolt commit'. That commit would record
+// the half-applied step, so the terminal refusal quotes the guard's message
+// and both it and the JSON hint say not to commit; both also say to stop
+// every writer and to find the store with bd context, not to assume .beads.
+func TestSchemaEncodingDriftRefusalWarnsAboutTheDirtyTableGuard(t *testing.T) {
+	body := migrationBody(t, migration0059)
+	for _, table := range []string{"__bd_0059_recompute_wisp_deps", "__bd_0059_recompute_wisps", "issues"} {
+		if !migrationSQLTouchesTable(body, table) {
+			t.Errorf("the dirty-table guard does not count 0059's write to %s", table)
+		}
+	}
+	guard := (&DirtyTablesError{Tables: []string{"__bd_0059_recompute_wisp_deps", "__bd_0059_recompute_wisps"}}).Error()
+	if !strings.HasPrefix(guard, dirtyTablesGuardPrefix+": __bd_0059_recompute_wisp_deps") ||
+		!strings.Contains(guard, "run 'bd dolt commit'") {
+		t.Fatalf("the dirty-table guard's message changed shape: %s", guard)
+	}
+
+	refusal := &SchemaEncodingDriftError{Migration: migration0059, Version: 59, CursorTable: "schema_migrations",
+		Cause: errors.New("invalid hash length: 19")}
+	msg := refusal.UserMessage()
+	if !strings.Contains(msg, dirtyTablesGuardPrefix+": ") {
+		t.Errorf("UserMessage does not quote the dirty-table guard's message:\n%s", msg)
+	}
+	for _, want := range []string{
+		"do not commit them",
+		"Stop every bd process and agent that uses this store",
+		"'bd context --json'",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("UserMessage lacks %q:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, ".beads") {
+		t.Errorf("UserMessage still names .beads as the store to preserve:\n%s", msg)
+	}
+
+	hint := refusal.Hint()
+	for _, want := range []string{
+		"do not run 'bd dolt commit'",
+		"pre-existing dirty tables",
+		"stop every bd process and agent",
+		"'bd context --json'",
+		driftRecoveryURL,
+	} {
+		if !strings.Contains(hint, want) {
+			t.Errorf("Hint lacks %q: %s", want, hint)
+		}
+	}
+	if strings.Contains(hint, ".beads") || strings.Contains(hint, "\n") {
+		t.Errorf("Hint names .beads or spans lines: %q", hint)
 	}
 }
 

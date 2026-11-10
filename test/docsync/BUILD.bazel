@@ -28,6 +28,7 @@ go_test(
         "//cmd/bd:label.go",
         "//cmd/bd:main.go",
         "//cmd/bd:state.go",
+        "//internal/storage/schema:dirty_tables_error.go",
         "//internal/storage/schema:encoding_drift.go",
         "//internal/testutil:testdoltcommon.go",
         "//scripts:bump-version.sh",

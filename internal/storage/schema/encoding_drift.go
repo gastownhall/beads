@@ -33,16 +33,18 @@ const maxDriftSymptomRunes = 160
 // The migration stopped on its first error and nothing was rolled back.
 //
 // Unlike the v53 aux re-key, which can skip a drifted table and retry later,
-// a numbered migration may be a semantic recompute (0059 resets and rebuilds
-// is_blocked), so skipping the rows it cannot read would leave derived state
-// silently wrong. The operator has to recover the store out of band.
+// a numbered migration may move rows (0035, the reported case, copies events
+// and other infra rows into the wisp tables) or recompute them (0059 resets
+// and rebuilds is_blocked), so skipping the rows it cannot read would leave
+// that state silently wrong. The operator has to recover the store out of
+// band.
 //
 // The match is on the returned error only: it is evidence consistent with
 // drift, not proof of which table is damaged, and a raw engine panic never
 // reaches it.
 type SchemaEncodingDriftError struct {
 	// Migration is the migration file the pass stopped in, for example
-	// "0059_recompute_null_gate_is_blocked.up.sql".
+	// "0035_migrate_infra_to_wisps.up.sql".
 	Migration string
 	// Version is that migration's number.
 	Version int
@@ -72,6 +74,11 @@ func (e *SchemaEncodingDriftError) Symptom() string {
 }
 
 // UserMessage returns the full multi-line refusal for terminal output.
+//
+// The stopped step's partial writes stay uncommitted, so the next pass can
+// stop sooner, at the #4566 dirty-table guard, whose message advises
+// 'bd dolt commit'. That commit would record the half-applied migration, so
+// the refusal quotes the guard's message and says not to.
 func (e *SchemaEncodingDriftError) UserMessage() string {
 	return fmt.Sprintf("schema migration %s (%s v%d) stopped: a stored value could not be read\n", e.Migration, e.CursorTable, e.Version) +
 		"\n" +
@@ -79,7 +86,7 @@ func (e *SchemaEncodingDriftError) UserMessage() string {
 		"\n" +
 		"  This is consistent with schema-encoding drift (dolthub/dolt#11131): text\n" +
 		"  values written under an older Dolt that this engine cannot decode. This\n" +
-		"  migration recomputes stored state, so bd will not skip the rows it cannot\n" +
+		"  migration rewrites stored state, so bd will not skip the rows it cannot\n" +
 		"  read: doing so would leave that state silently wrong.\n" +
 		"\n" +
 		"  The migration stopped on its first error and nothing was rolled back:\n" +
@@ -87,16 +94,25 @@ func (e *SchemaEncodingDriftError) UserMessage() string {
 		"  may remain from this one.\n" +
 		"\n" +
 		"  Before any further writes:\n" +
-		"    1. Preserve a full copy of the .beads directory and inspect the copy.\n" +
-		"    2. Do not commit the working set or delete rows to get past this error.\n" +
-		"    3. Follow the recovery runbook:\n" +
+		"    1. Stop every bd process and agent that uses this store.\n" +
+		"    2. Preserve a full copy of the store and its configuration, and work\n" +
+		"       only on the copy. 'bd context --json' shows where the store lives.\n" +
+		"    3. Do not commit the working set or delete rows to get past this error.\n" +
+		"       A later run may report instead\n" +
+		"         " + dirtyTablesGuardPrefix + ": ...\n" +
+		"       and advise 'bd dolt commit'. Those tables hold this migration's\n" +
+		"       partial changes: do not commit them.\n" +
+		"    4. Follow the recovery runbook:\n" +
 		"       " + SchemaEncodingDriftRecoveryURL + "\n"
 }
 
 // Hint returns the one-line next step for JSON error output.
 func (e *SchemaEncodingDriftError) Hint() string {
-	return "preserve a full copy of the .beads directory, then follow the operator-supervised recovery at " +
-		SchemaEncodingDriftRecoveryURL + " (there is no flag that skips this migration)"
+	return "stop every bd process and agent using this store and preserve a full copy of the store " +
+		"('bd context --json' shows where it lives); do not run 'bd dolt commit', even when a later run " +
+		"reports pre-existing dirty tables: they hold this migration's partial changes. " +
+		"Then follow the operator-supervised recovery at " + SchemaEncodingDriftRecoveryURL +
+		" (there is no flag that skips this migration)"
 }
 
 // isMigrationEncodingDriftErr reports whether err carries one of the

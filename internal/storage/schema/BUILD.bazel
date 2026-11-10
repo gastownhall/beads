@@ -208,10 +208,13 @@ filegroup(
     visibility = ["//internal/storage:__subpackages__"],
 )
 
-# The drift refusal's recovery URL, pinned against the published runbook by
-# //test/docsync.
+# The drift refusal's recovery URL, and the dirty-table guard message its
+# runbook quotes, pinned against the published runbook by //test/docsync.
 exports_files(
-    ["encoding_drift.go"],
+    [
+        "dirty_tables_error.go",
+        "encoding_drift.go",
+    ],
     visibility = ["//test/docsync:__pkg__"],
 )
 
