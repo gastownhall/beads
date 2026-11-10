@@ -2926,34 +2926,59 @@ func testHTTPConnectivity(url string) bool {
 // does not connect through here: it stays usable against such a server so
 // it can still diagnose and repair (see doctor/fix.openFixDB).
 func openDoltServerConnection() (*sql.DB, func(), error) {
+	db, _, cleanup, err := openDoltServerConnectionAt()
+	return db, cleanup, err
+}
+
+// openDoltServerConnectionAt is openDoltServerConnection, and also names the
+// server it reached for a message: unix:<socket> when it dialed the
+// workspace's socket, else host:port, through the remedy printer.
+//
+// It dials over the store's transport: a live unix socket first, else TCP at
+// host:port (doltserver.SocketTransport). Beside a live socket, TCP alone
+// would reach whatever listens at the port, which can be another server
+// holding a database of the same name: a drop there removes the wrong
+// project's data. A socket is an address of its own, so a workspace whose
+// server only a socket names is dialed there rather than refused for want of
+// a port.
+func openDoltServerConnectionAt() (*sql.DB, string, func(), error) {
 	beadsDir := selectedDoltBeadsDir()
 	if beadsDir == "" {
-		return nil, nil, HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
+		return nil, "", nil, HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 	}
 
 	cfg, err := loadDoltBackendConfig(beadsDir)
 	if err != nil {
-		return nil, nil, HandleError("%v", err)
+		return nil, "", nil, HandleError("%v", err)
 	}
 
 	host := cfg.GetDoltServerHost()
 	dc := doltserver.DialConfig(beadsDir)
 	port := dc.Port
-	if advice := unresolvedServerPortAdvice(host, port); advice != "" {
-		fmt.Fprintf(os.Stderr, "Error: no Dolt server port configured; %s\n", advice)
-		return nil, nil, SilentExit()
+	configuredSocket := cfg.GetDoltServerSocket()
+	if configuredSocket == "" {
+		if advice := unresolvedServerPortAdvice(host, port); advice != "" {
+			fmt.Fprintf(os.Stderr, "Error: no Dolt server port configured; %s\n", advice)
+			return nil, "", nil, SilentExit()
+		}
 	}
 	user := cfg.GetDoltServerUser()
 	password := os.Getenv("BEADS_DOLT_PASSWORD")
 	if password != "" {
 		// Refuse to send BEADS_DOLT_PASSWORD to a shared-config host the
 		// workspace never pinned, as the store's open does (GH#7886).
-		if err := doltserver.CheckEndpointTrust(beadsDir, cfg, host, port, cfg.GetDoltServerSocket()); err != nil {
-			return nil, nil, HandleError("%v", err)
+		if err := doltserver.CheckEndpointTrust(beadsDir, cfg, host, port, configuredSocket); err != nil {
+			return nil, "", nil, HandleError("%v", err)
 		}
 	}
 
+	socket := doltserver.SocketTransport(configuredSocket, host, port, 500*time.Millisecond)
+	location := doltutil.PrintedServerAddr(host, port)
+	if socket != "" {
+		location = remedy.PrintedValue("unix:" + socket)
+	}
 	connStr := doltutil.ServerDSN{
+		Socket:   socket,
 		Host:     host,
 		Port:     port,
 		User:     user,
@@ -2963,7 +2988,7 @@ func openDoltServerConnection() (*sql.DB, func(), error) {
 
 	db, err := sql.Open("mysql", connStr)
 	if err != nil {
-		return nil, nil, HandleError("connecting to Dolt server: %v", err)
+		return nil, "", nil, HandleError("connecting to Dolt server: %v", err)
 	}
 
 	db.SetMaxOpenConns(2)
@@ -2975,21 +3000,25 @@ func openDoltServerConnection() (*sql.DB, func(), error) {
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
-		fmt.Fprintf(os.Stderr, "Error: cannot reach Dolt server at %s: %v\n", doltutil.PrintedServerAddr(host, port), remedy.PrintedError(err))
-		fmt.Fprintln(os.Stderr, unreachableServerAdvice(beadsDir, host, dc))
-		return nil, nil, SilentExit()
+		fmt.Fprintf(os.Stderr, "Error: cannot reach Dolt server at %s: %v\n", location, remedy.PrintedError(err))
+		if socket != "" {
+			fmt.Fprintln(os.Stderr, "Verify the Dolt server is running and listening on that unix socket.")
+		} else {
+			fmt.Fprintln(os.Stderr, unreachableServerAdvice(beadsDir, host, dc))
+		}
+		return nil, "", nil, SilentExit()
 	}
 
-	subject := "dolt sql-server at " + doltutil.PrintedServerAddr(host, port)
+	subject := "dolt sql-server at " + location
 	if err := doltversion.CheckServer(ctx, db, subject, func(err error) {
 		debug.Logf("dolt: could not determine the version of %s; not checking it against the required minimum %s: %v\n",
 			subject, doltversion.RequiredMin, remedy.PrintedError(err))
 	}); err != nil {
 		_ = db.Close()
-		return nil, nil, HandleError("%s", err.Error())
+		return nil, "", nil, HandleError("%s", err.Error())
 	}
 
-	return db, func() { _ = db.Close() }, nil
+	return db, location, func() { _ = db.Close() }, nil
 }
 
 // unreachableServerAdvice is what to do about a Dolt server at host and dc's

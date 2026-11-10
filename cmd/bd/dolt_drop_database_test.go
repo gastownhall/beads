@@ -4,7 +4,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"io"
+	"os/exec"
 	"regexp"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -223,4 +226,75 @@ func TestDropDatabaseExecutesOneQuotedDrop(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDoltDropDatabaseDialsTheSocketTheStoreDials drives bd dolt
+// drop-database, and bd dolt clean-databases, which opens the same
+// connection, through the binary. Both fake servers refuse every login, so
+// nothing is dropped; where each command logged in is what this test
+// observes.
+//
+// With a live unix socket and a resolved port naming two different servers,
+// the store dials the socket, so the drop must too: over TCP it listed and
+// dropped a same-named database on whatever listened at the port. A server
+// only a socket names, at a host bd does not run, is dialed on its socket
+// rather than refused for want of a port.
+func TestDoltDropDatabaseDialsTheSocketTheStoreDials(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix socket fixture")
+	}
+	bd := buildBDForInitTests(t)
+	commands := [][]string{
+		{"dolt", "drop-database", "old_project", "--yes"},
+		{"dolt", "clean-databases", "--dry-run"},
+	}
+	run := func(t *testing.T, root string, env, args []string) string {
+		t.Helper()
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = root
+		cmd.Env = env
+		out, _ := cmd.CombinedOutput()
+		return string(out)
+	}
+
+	t.Run("socket beside a port", func(t *testing.T) {
+		tcp := newFakeMySQLLogin(t)
+		socketServer := newFakeMySQLLoginOn(t, "unix", diagnosticSocketPath(t))
+		socket := socketServer.ln.Addr().String()
+		root, _, env := externallyManagedStartWorkspace(t, "false")
+		env = append(env, "BEADS_DOLT_SERVER_PORT="+strconv.Itoa(tcp.port()), "BEADS_DOLT_SERVER_SOCKET="+socket)
+		for _, args := range commands {
+			name := "bd " + strings.Join(args, " ")
+			before := len(socketServer.Logins())
+			out := run(t, root, env, args)
+			if len(socketServer.Logins()) == before {
+				t.Errorf("%s never logged in on the socket the store dials, %s:\n%s", name, socket, out)
+			}
+			if n := len(tcp.Logins()); n != 0 {
+				t.Errorf("%s logged in over TCP at %s %d time(s); the store dials the live socket %s:\n%s", name, tcp.ln.Addr(), n, socket, out)
+			}
+			if !strings.Contains(out, "unix:"+socket) {
+				t.Errorf("%s does not name unix:%s, the server it reached:\n%s", name, socket, out)
+			}
+		}
+	})
+
+	t.Run("socket only", func(t *testing.T) {
+		root, beadsDir, env := externallyManagedStartWorkspace(t, "true")
+		env = configureDoltServerHost(t, beadsDir, env, "db.invalid", false)
+		socket := diagnosticSocketPath(t)
+		fake := newFakeMySQLLoginOn(t, "unix", socket)
+		env = append(env, "BEADS_DOLT_SERVER_SOCKET="+socket)
+		for _, args := range commands {
+			name := "bd " + strings.Join(args, " ")
+			before := len(fake.Logins())
+			out := run(t, root, env, args)
+			if len(fake.Logins()) == before {
+				t.Errorf("%s never logged in on the socket the store dials, %s:\n%s", name, socket, out)
+			}
+			if strings.Contains(out, "port configured") {
+				t.Errorf("%s refused for want of a port; the store dials the socket:\n%s", name, out)
+			}
+		}
+	})
 }

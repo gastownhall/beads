@@ -120,6 +120,14 @@ freezes (pinned in `cmd/bd/protocol/exit_codes_init_test.go`). 15 is stable
 in-repo but not §E3-frozen (GH#4635); it skips 13 and 14, which bd already
 uses for `ExitGuardMismatch` and `ExitMigrationFrozen`.
 
+Refusing to adopt git origin's Dolt history without consent (GH#6099)
+exits with the generic 1, by design. It mirrors `bd dolt push`'s adoption
+refusal (#5068), which also exits 1, and the way to avoid either is to state
+an adoption policy up front (`--yes`, or `--no-adopt` /
+`BD_NO_REMOTE_ADOPT=1`) rather than to branch on the code afterwards. A
+dedicated code (16) was considered and not allocated: a script that must not
+meet this refusal passes one of those flags.
+
 ### Deprecation cycle
 
 `--force` continues to work for ≥2 releases post-0.x, emitting a

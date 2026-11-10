@@ -147,8 +147,8 @@ were never shown. Nothing was imported and no remote was wired; re-run with
 bd init --yes
 ```
 
-`--yes` consents ahead of time; `bd init` prints the URL it adopts from.
-`bd bootstrap` adopts it too.
+`--yes` consents ahead of time; `bd init` prints the URL it adopts from
+(unless `--quiet`). `bd bootstrap` adopts it too.
 
 ### 2. You want a fresh local database
 
@@ -166,10 +166,17 @@ no probe, no clone, no Dolt remote and no `sync.remote`. It wins over
 bd init --remote <url>
 ```
 
-A remote you name needs no further consent.
+A remote you name is not derived, so `bd init` adopts its history without
+asking. The same holds for a `sync.remote` in `.beads/config.yaml`,
+including one committed to the repository you cloned (a plain `bd init` in a
+repository with a git origin writes it there): `bd init` adopts from it
+without a prompt, even with `--no-adopt`. To start fresh in such a clone,
+remove `sync.remote` from `.beads/config.yaml` and run `bd init --no-adopt`.
 
-`--yes` consents to adoption only. It does not bypass the divergence (exit
-`10`), local-exists (exit `11`) or destroy-token (exit `12`) guards.
+`--yes` consents to adoption only. It does not bypass the divergence guard
+(exit `10`), the destroy-token guard (exit `12`) or the existing-workspace
+guard: a plain `bd init` over an initialized workspace still refuses, and
+declining the destroy confirmation for existing local data exits `11`.
 
 ### 4. The adoption already happened and you want it gone
 
@@ -178,9 +185,11 @@ adopted the origin's history and wired the remote, removing the workspace is
 not enough on a server: deleting a workspace's `.beads` directory never
 removes its database from a Dolt server (see
 [Shared Server Mode](/architecture/dolt#shared-server-mode); in shared-server
-mode every project's database lives in the server's data directory). Remove
-the workspace's `.beads` directory, then drop the database explicitly from
-another workspace on the same server:
+mode every project's database lives in the server's data directory). Note
+the workspace's database name first: it is `dolt_database` in
+`.beads/metadata.json`, and `bd sql 'SHOW DATABASES'` lists every database
+the server holds. Remove the workspace's `.beads` directory, then drop the
+database explicitly from another workspace on the same server:
 
 ```bash
 bd dolt drop-database <database-name>          # asks for confirmation

@@ -467,6 +467,10 @@ is recoverable with `CALL DOLT_UNDROP('old_project')` until the server's
 dropped databases are purged (`bd dolt clean-databases --purge-dropped`,
 which purges every dropped database on the server at once).
 
+Note the project's database name before you delete its `.beads` directory:
+it is `dolt_database` in `.beads/metadata.json`. `bd sql 'SHOW DATABASES'`
+lists every database the server holds.
+
 #### Durability and Dolt history
 
 Saving a write and recording it in Dolt history are separate steps:
@@ -768,22 +772,34 @@ project and adopting it imports that project's whole issue history:
 
 - Interactively, `bd init` names the URL and asks once (`[y/N]`, default no).
   A decline stops init without writing anything.
-- `bd init --yes` consents ahead of time and prints the URL it adopts from.
-  `--non-interactive` and `--json` are not consent: without `--yes` they
-  refuse (exit 1) and name the URL.
+- `bd init --yes` consents ahead of time and prints the URL it adopts from
+  (unless `--quiet`). `--non-interactive` and `--json` are not consent:
+  without `--yes` they refuse (exit 1) and name the URL.
 - `bd init --no-adopt` (or `BD_NO_REMOTE_ADOPT=1`) never derives a remote
   from `git origin`: no probe, no clone, no Dolt remote and no `sync.remote`.
   It wins over `--yes`.
 
-A remote you name with `--remote` or `sync.remote`, and `bd bootstrap`, need
-no further consent. An explicit `--remote` wins over a configured
-`sync.remote`, and with either one set `bd init` never consults `git origin`.
+The consent check covers only a remote derived from `git origin`. `bd init`
+does not ask before adopting from an explicit `--remote` or from a
+`sync.remote` in `.beads/config.yaml`, and neither does `bd bootstrap`. That
+includes a `sync.remote` committed to the repository you cloned: a plain
+`bd init` in a repository with a git origin writes the origin URL there, and
+`.beads/config.yaml` is tracked by git. So a fresh clone of a repository
+whose `.beads/` was committed adopts that remote's history without a prompt,
+even with `--no-adopt`. Before running `bd init` in a clone of someone else's
+repository, check `.beads/config.yaml`; to start fresh there, remove
+`sync.remote` from it and run `bd init --no-adopt`. An explicit `--remote`
+wins over a configured `sync.remote`, and with either one set `bd init` never
+consults `git origin`.
 
 When the probe of `git origin` fails (for example a private origin and no
 credentials), nobody can see whether it holds Dolt history. `bd init` then
-keeps the fallback it always had: it warns, asks nothing, adopts nothing and
-initializes a fresh local database. Run `bd bootstrap` once the origin is
-reachable to adopt its history.
+keeps the fallback it always had: it warns, asks nothing, imports nothing and
+initializes a fresh local database. It still wires `git origin` as Dolt
+remote `origin` and writes it as `sync.remote`, as it does for an origin with
+no Dolt history, so a later `bd bootstrap` finds the workspace initialized
+and does nothing. To adopt the origin's history once it is reachable, run
+`bd init --yes` in a fresh clone.
 
 ### Verifying Bootstrap Worked
 

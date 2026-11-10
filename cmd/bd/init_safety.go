@@ -159,9 +159,11 @@ type RemoteSafetyInput struct {
 	IsInteractive bool
 
 	// Inbound adoption of a git-origin-derived remote (GH#6099). These
-	// fields matter only when DerivedFromGitOrigin is true: an explicit
-	// --remote or a configured sync.remote names its source, so its
-	// bootstrap needs no further consent.
+	// fields matter only when DerivedFromGitOrigin is true. An explicit
+	// --remote or a configured sync.remote bootstraps without consent, as
+	// before. That includes a sync.remote committed to a cloned repository's
+	// .beads/config.yaml, which a plain bd init writes: gating it is a
+	// separate policy decision, not made here.
 	//
 	// DerivedFromGitOrigin reports that the URL came from git origin, not
 	// from --remote or sync.remote.
@@ -216,8 +218,8 @@ func CheckRemoteSafety(in RemoteSafetyInput) RemoteSafetyDecision {
 	userOverride := in.Force || in.ReinitLocal || in.FromJSONL || in.DiscardRemote
 
 	// Remote has data, user did not override anything. Bootstrap is the
-	// adoption path. A remote the user named (--remote, sync.remote) is
-	// consent enough; one derived from git origin is not, because on a
+	// adoption path. A named remote (--remote, sync.remote) bootstraps as
+	// before; one derived from git origin needs consent, because on a
 	// fork-less clone origin is upstream and adopting it imports another
 	// project's whole issue history (GH#6099). An UNKNOWN probe keeps the
 	// caller's warn-and-fresh fallback: nothing will be cloned.

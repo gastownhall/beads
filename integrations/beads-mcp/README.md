@@ -210,7 +210,7 @@ await beads_ready_work(workspace_root="/Users/you/project-a")
 - `beads://quickstart` - Quickstart guide for using beads
 
 **Tools (all support `workspace_root` parameter):**
-- `init` - Initialize bd in current directory
+- `init` - Initialize bd in current directory. It fails when git origin already has Dolt issue history and no Dolt remote is configured: `bd init` does not adopt that history without consent, so run `bd init --yes` (adopt it) or `bd init --no-adopt` (fresh database) in a shell instead
 - `create` - Create new issue (bug, feature, task, epic, chore, decision)
 - `list` - List issues with filters (status, priority, type, assignee)
 - `ready` - Find tasks with no blockers ready to work on
