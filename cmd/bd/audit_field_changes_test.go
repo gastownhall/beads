@@ -60,6 +60,30 @@ func TestUpdateAuditChanges(t *testing.T) {
 			},
 		},
 		{
+			name:    "claim plus explicit status: the explicit value wins, assignee from the claim",
+			patch:   statusPatch,
+			claim:   true,
+			changed: true,
+			before:  open,
+			after:   claimedBy(types.StatusBlocked, "alice"),
+			want: []updateAuditChange{
+				{"status", "open", "blocked"},
+				{"assignee", "", "alice"},
+			},
+		},
+		{
+			name:    "claim plus explicit assignee: one assignee row, the explicit one",
+			patch:   assigneePatch,
+			claim:   true,
+			changed: true,
+			before:  open,
+			after:   claimedBy(types.StatusInProgress, "bob"),
+			want: []updateAuditChange{
+				{"status", "open", "in_progress"},
+				{"assignee", "", "bob"},
+			},
+		},
+		{
 			name:    "claim plus priority: priority stays explicit-only",
 			patch:   priorityPatch,
 			claim:   true,

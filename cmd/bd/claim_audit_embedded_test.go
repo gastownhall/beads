@@ -119,4 +119,18 @@ func TestEmbeddedClaimPathsJournalSidecar(t *testing.T) {
 			t.Fatalf("idempotent re-claim journaled more rows: %+v", rows)
 		}
 	})
+
+	t.Run("update_claim_with_status", func(t *testing.T) {
+		t.Parallel()
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "us")
+		x := bdCreate(t, bd, dir, "Claimed and blocked")
+
+		bdAuditRun(t, bd, dir, "update", x.ID, "--claim", "--status", "blocked")
+		rows := sidecarEntriesFor(readSidecarEntries(t, beadsDir), x.ID)
+		if len(rows) != 2 {
+			t.Fatalf("bd update --claim --status blocked journaled %d rows for %s, want 2: %+v", len(rows), x.ID, rows)
+		}
+		requireFieldChange(t, rows[0], "alice", "status", "open", "blocked")
+		requireFieldChange(t, rows[1], "alice", "assignee", "", "alice")
+	})
 }
