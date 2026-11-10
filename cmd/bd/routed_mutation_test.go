@@ -716,36 +716,45 @@ func TestRoutedWriteRetryCommitsFailedCommit(t *testing.T) {
 	}
 }
 
-// setupAutoRouteWithHydratedCopy extends setupAutoRoute with the row the bug
+// setupAutoRouteWithHydratedCopy extends setupAutoRoute with the rows the bug
 // report's workflow leaves in the project: an exact copy of the planning
-// store's "shared-hub", imported with the options bd repo sync imports with
-// (CreateIssuesWithFullOptions, prefix validation skipped) and carrying the
-// planning repo's path as its source marker and the planning row's own
-// creation time, so the copy is identifiable as the planning row's mirror.
-// It returns the project's store and the repo and planning directories.
-func setupAutoRouteWithHydratedCopy(t *testing.T, role, routingKey string) (storage.DoltStorage, string, string) {
+// store's "shared-hub" and of each extraCopies id, imported with the options
+// bd repo sync imports with (CreateIssuesWithFullOptions, prefix validation
+// skipped) and carrying the planning repo's path as their source marker and
+// the planning rows' own creation times, so each copy is identifiable as its
+// planning row's mirror. It returns the project's store and the repo and
+// planning directories.
+func setupAutoRouteWithHydratedCopy(t *testing.T, role, routingKey string, extraCopies ...string) (storage.DoltStorage, string, string) {
 	t.Helper()
-	primaryStore, repoDir, planningDir := setupAutoRoute(t, role, routingKey)
+	primaryStore, repoDir, planningDir := setupAutoRoute(t, role, routingKey, extraCopies...)
 	ctx := context.Background()
 
-	// Read the planning row through the same foreign read a routed open
-	// uses, so the copy's provenance is exactly what a real import recorded.
+	// Read the planning rows through the same foreign read a routed open
+	// uses, so the copies' provenance is exactly what a real import recorded.
 	planningStore, err := openForeignStore(ctx, filepath.Join(planningDir, ".beads"), foreignRead)
 	if err != nil {
 		t.Fatalf("open the planning store for the import: %v", err)
 	}
 	defer func() { _ = planningStore.Close() }()
-	owner, err := planningStore.GetIssue(ctx, "shared-hub")
-	if err != nil {
-		t.Fatalf("read the planning row to copy: %v", err)
+	ids := []string{"shared-hub"}
+	ids = append(ids, extraCopies...)
+	rows := make([]*types.Issue, 0, len(ids))
+	for _, id := range ids {
+		owner, err := planningStore.GetIssue(ctx, id)
+		if err != nil {
+			t.Fatalf("read the planning row %s to copy: %v", id, err)
+		}
+		rows = append(rows, owner)
 	}
 
-	copy := *owner
-	copy.SourceRepo = planningDir
-	if err := primaryStore.CreateIssuesWithFullOptions(ctx, []*types.Issue{&copy}, "repo-sync", storage.BatchCreateOptions{
-		SkipPrefixValidation: true,
-	}); err != nil {
-		t.Fatalf("import the planning row's copy into the project: %v", err)
+	for _, owner := range rows {
+		copy := *owner
+		copy.SourceRepo = planningDir
+		if err := primaryStore.CreateIssuesWithFullOptions(ctx, []*types.Issue{&copy}, "repo-sync", storage.BatchCreateOptions{
+			SkipPrefixValidation: true,
+		}); err != nil {
+			t.Fatalf("import the planning row %s's copy into the project: %v", owner.ID, err)
+		}
 	}
 	return primaryStore, repoDir, planningDir
 }
@@ -1291,6 +1300,137 @@ func TestMutationOfHydratedCopyRefusesUnreachableOwner(t *testing.T) {
 	if read.Issue.ID != "shared-hub" || read.Issue.Status != types.StatusOpen {
 		t.Fatalf("read returned %+v; want the local copy's own row", read.Issue)
 	}
+}
+
+// wireDeleteBatchGlobals points deleteBatchReporting's process-wide plumbing
+// at s, standing in for what command dispatch would have set: the store
+// handle the command path reads, its activation flag, dbPath (whose .beads
+// directory prefix routing reads routes.jsonl from), the root context the
+// resolvers run on, and the acting user. The prior values are restored on
+// cleanup, unlike the command itself, which never runs twice in one process.
+func wireDeleteBatchGlobals(t *testing.T, s storage.DoltStorage, db string) {
+	t.Helper()
+	storeMutex.Lock()
+	oldStore, oldActive := store, storeActive
+	store, storeActive = s, true
+	storeMutex.Unlock()
+	oldDBPath, oldRootCtx := dbPath, rootCtx
+	dbPath, rootCtx = db, context.Background()
+	actorMu.Lock()
+	oldActor, oldPending := actor, actorGitFallbackPending
+	actor, actorGitFallbackPending = "alice", false
+	actorMu.Unlock()
+	t.Cleanup(func() {
+		storeMutex.Lock()
+		store, storeActive = oldStore, oldActive
+		storeMutex.Unlock()
+		dbPath, rootCtx = oldDBPath, oldRootCtx
+		actorMu.Lock()
+		actor, actorGitFallbackPending = oldActor, oldPending
+		actorMu.Unlock()
+	})
+}
+
+// TestDeleteBatchRejectsMixedStores pins the batch half of the two-store
+// safety GH#6058 adds: bd delete resolves each id on its own, so a batch can
+// span ids that live in different stores — a hydrated copy whose delete
+// belongs to the auto-route owner next to a project-only row, or next to an
+// id a prefix route serves from another rig. The batch then commits through
+// ONE store (the first routed handle, the project store when nothing
+// routed), so such a mix would submit ids to a store that cannot see them.
+// The batch must refuse before deleting anything and say to split it into one
+// bd delete per store; a batch whose ids land in one store keeps deleting,
+// however many handles the resolution opened along the way (AC-7).
+func TestDeleteBatchRejectsMixedStores(t *testing.T) {
+	t.Run("hydrated copy and project-only row refused, in either order", func(t *testing.T) {
+		primaryStore, repoDir, planningDir := setupAutoRouteWithHydratedCopy(t, "maintainer", "routing.maintainer")
+		wireDeleteBatchGlobals(t, primaryStore, filepath.Join(repoDir, ".beads", "beads.db"))
+		ctx := context.Background()
+		// A row only the project store holds, unlike the imported copy.
+		seedIssue(t, ctx, primaryStore, "shared-only")
+
+		for _, order := range [][]string{{"shared-hub", "shared-only"}, {"shared-only", "shared-hub"}} {
+			err := deleteBatchReporting(order, true, false, false, false, nil, nil)
+			if err == nil || !strings.Contains(err.Error(), "run a separate bd delete per store") {
+				t.Fatalf("deleteBatch(%v) = %v, want the mixed-store refusal", order, err)
+			}
+			// The refusal names each destination and its ids, so the user can
+			// split the batch without re-deriving what went where.
+			for _, want := range []string{planningDir, "shared-hub", "shared-only"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("refusal %q does not name %s", err.Error(), want)
+				}
+			}
+			// Refused BEFORE deleting: the planning owner's row, the project
+			// copy and the project-only row all survive.
+			if _, err := reopenAutoRouteTarget(t, planningDir).GetIssue(ctx, "shared-hub"); err != nil {
+				t.Fatalf("planning row shared-hub after the refusal: %v", err)
+			}
+			for _, id := range []string{"shared-hub", "shared-only"} {
+				if _, err := primaryStore.GetIssue(ctx, id); err != nil {
+					t.Fatalf("project row %s after the refusal: %v", id, err)
+				}
+			}
+		}
+	})
+
+	t.Run("two copies of one owner store delete together", func(t *testing.T) {
+		primaryStore, repoDir, planningDir := setupAutoRouteWithHydratedCopy(t, "maintainer", "routing.maintainer", "shared-two")
+		wireDeleteBatchGlobals(t, primaryStore, filepath.Join(repoDir, ".beads", "beads.db"))
+		ctx := context.Background()
+
+		// Each id's resolution opens the owner through its own handle; both
+		// handles land in the same destination, so the batch proceeds.
+		if err := deleteBatchReporting([]string{"shared-hub", "shared-two"}, true, false, false, false, nil, nil); err != nil {
+			t.Fatalf("deleteBatch of two copies of one owner store: %v", err)
+		}
+		planning := reopenAutoRouteTarget(t, planningDir)
+		for _, id := range []string{"shared-hub", "shared-two"} {
+			if _, err := planning.GetIssue(ctx, id); err == nil {
+				t.Fatalf("%s still stands in the planning owner's store after the redirected batch delete", id)
+			}
+			// The deletes were redirects, so the project's copies remain.
+			if _, err := primaryStore.GetIssue(ctx, id); err != nil {
+				t.Fatalf("project copy %s should remain after the redirected delete: %v", id, err)
+			}
+		}
+	})
+
+	t.Run("hydrated copy and prefix-routed rig refused", func(t *testing.T) {
+		primaryStore, repoDir, planningDir := setupAutoRouteWithHydratedCopy(t, "maintainer", "routing.maintainer")
+		ctx := context.Background()
+
+		// A second routed destination, the rig-town way: a prefix route from
+		// the project's .beads to a rig store. lookupPrefixRoute joins the
+		// route's path onto the repo root, so the rig (a sibling of the repo)
+		// is named relative to it, the way a real town's routes.jsonl does.
+		rigDir := filepath.Join(filepath.Dir(repoDir), "rig")
+		rigStore := newTestStoreIsolatedDB(t, filepath.Join(rigDir, ".beads", "beads.db"), "gt")
+		seedIssue(t, ctx, rigStore, "gt-rig-1")
+		if err := rigStore.Close(); err != nil {
+			t.Fatalf("close the rig store: %v", err)
+		}
+		route := "{\"prefix\":\"gt-\",\"path\":\"../rig\"}\n"
+		if err := os.WriteFile(filepath.Join(repoDir, ".beads", "routes.jsonl"), []byte(route), 0o600); err != nil {
+			t.Fatalf("write routes.jsonl: %v", err)
+		}
+		wireDeleteBatchGlobals(t, primaryStore, filepath.Join(repoDir, ".beads", "beads.db"))
+
+		err := deleteBatchReporting([]string{"shared-hub", "gt-rig-1"}, true, false, false, false, nil, nil)
+		if err == nil || !strings.Contains(err.Error(), "run a separate bd delete per store") {
+			t.Fatalf("deleteBatch of a redirected copy and a prefix-routed id = %v, want the mixed-store refusal", err)
+		}
+		// Neither routed destination lost a row.
+		if _, err := reopenAutoRouteTarget(t, planningDir).GetIssue(ctx, "shared-hub"); err != nil {
+			t.Fatalf("planning row shared-hub after the refusal: %v", err)
+		}
+		if _, err := primaryStore.GetIssue(ctx, "shared-hub"); err != nil {
+			t.Fatalf("project copy shared-hub after the refusal: %v", err)
+		}
+		if _, err := reopenAutoRouteTarget(t, rigDir).GetIssue(ctx, "gt-rig-1"); err != nil {
+			t.Fatalf("rig row gt-rig-1 after the refusal: %v", err)
+		}
+	})
 }
 
 // committedIssue returns id as the HEAD commit of beadsDir's database holds

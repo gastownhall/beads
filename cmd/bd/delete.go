@@ -384,6 +384,10 @@ func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput 
 	resolvedIDs := make([]string, 0, len(issueIDs))
 	notFound := []string{}
 	retainedCopies := []retainedCopy{}
+	// The destination each resolved id would be deleted from, keyed by
+	// storeDestinationKey, in first-seen order for a stable refusal message.
+	destinations := map[string]*batchDestination{}
+	var destinationOrder []string
 	var routedStore storage.DoltStorage
 	for _, id := range issueIDs {
 		result, err := resolveAndGetIssueForMutationExact(ctx, store, id)
@@ -401,6 +405,13 @@ func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput 
 			if result.RedirectedCopy {
 				retainedCopies = append(retainedCopies, retainedCopy{id: result.ResolvedID, owner: result.RedirectedCopyOwner})
 			}
+			key := storeDestinationKey(result.Store)
+			if d, ok := destinations[key]; ok {
+				d.ids = append(d.ids, result.ResolvedID)
+			} else {
+				destinations[key] = &batchDestination{display: deleteDestinationDisplay(result), ids: []string{result.ResolvedID}}
+				destinationOrder = append(destinationOrder, key)
+			}
 			if result.Routed && routedStore == nil {
 				routedStore = result.Store
 			} else {
@@ -410,6 +421,21 @@ func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput 
 	}
 	if routedStore != nil {
 		defer func() { _ = routedStore.Close() }()
+	}
+	// The batch deletes through ONE store: this one when no id routed,
+	// otherwise the first routed handle. Ids whose resolutions reached a
+	// different destination would be deleted from whichever store that handle
+	// happens to serve — the copy from its owner, or worse, the owner's row
+	// through a handle that cannot see it. Refuse before any delete and ask
+	// for one command per store.
+	if len(destinationOrder) > 1 {
+		parts := make([]string, 0, len(destinationOrder))
+		for _, key := range destinationOrder {
+			d := destinations[key]
+			parts = append(parts, fmt.Sprintf("%s (%s)", d.display, strings.Join(d.ids, ", ")))
+		}
+		return fmt.Errorf("refusing to delete a batch that spans %d stores: %s; run a separate bd delete per store",
+			len(destinationOrder), strings.Join(parts, "; "))
 	}
 	if len(notFound) > 0 {
 		// The role's own existence probe reports a missing id with this same
@@ -559,6 +585,49 @@ func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput 
 type retainedCopy struct {
 	id    string
 	owner string
+}
+
+// batchDestination groups the ids a delete batch resolved into ONE store:
+// display names that destination for the mixed-batch refusal message, and the
+// ids that landed there. Insertion order (kept by the caller) makes the
+// message stable across runs.
+type batchDestination struct {
+	display string
+	ids     []string
+}
+
+// storeDestinationKey is the identity of the store a resolved id would be
+// deleted from, so a batch that spans two stores can refuse before deleting
+// anything. Locatable stores (storage.StoreLocator, via the outermost
+// decorator) key on their canonical CLI directory — the same directory the
+// CLI opens, so two handles onto one database share a key. A store that
+// locates no directory (remote backends) keys on its unwrapped pointer, which
+// cannot be confused with a path and stays stable for one handle.
+func storeDestinationKey(s storage.DoltStorage) string {
+	unwrapped := storage.UnwrapStore(s)
+	if locator, ok := unwrapped.(storage.StoreLocator); ok {
+		if cli := locator.CLIDir(); cli != "" {
+			return "store:" + utils.CanonicalizePath(cli)
+		}
+	}
+	return fmt.Sprintf("handle:%p", unwrapped)
+}
+
+// deleteDestinationDisplay names the store a delete resolved to, for the
+// mixed-batch refusal. A redirected hydrated copy names the owner path the
+// resolver already recorded; anything else names its CLI directory; a store
+// that names neither is "an unidentified store" — still distinct in the
+// message via its key, but honestly unnamed.
+func deleteDestinationDisplay(result *RoutedResult) string {
+	if result.RedirectedCopyOwner != "" {
+		return result.RedirectedCopyOwner
+	}
+	if locator, ok := storage.UnwrapStore(result.Store).(storage.StoreLocator); ok {
+		if cli := locator.CLIDir(); cli != "" {
+			return cli
+		}
+	}
+	return "an unidentified store"
 }
 
 // printRetainedCopyNote tells the user that a delete redirected from a
