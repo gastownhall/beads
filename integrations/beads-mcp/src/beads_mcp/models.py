@@ -291,6 +291,10 @@ class ShowIssueParams(BaseModel):
     """Parameters for showing issue details."""
 
     issue_id: str
+    # Opt-in hydration: default show is count-only (comment_count plus
+    # comments_omitted); True adds --include-comments so the response also
+    # carries the full comment chronology.
+    include_comments: bool = False
 
 
 class StatsSummary(BaseModel):

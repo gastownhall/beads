@@ -1043,8 +1043,16 @@ async def show_issue(
     brief_deps: bool = False,
     fields: list[str] | None = None,
     max_description_length: int | None = None,
+    include_comments: bool = False,
 ) -> Issue | BriefIssue | dict[str, Any]:
     """Show detailed information about a specific issue.
+
+    Comment completeness is always reported: comment_count says how many
+    comments exist and comments_omitted says whether their bodies are absent
+    from this response (null count/omitted means the CLI said nothing —
+    unknown, not zero). Comment bodies are opt-in: pass include_comments=True
+    (or select the 'comments' field) to hydrate the full chronology onto the
+    one bd show command; otherwise read bodies with comments(issue_id=...).
 
     Args:
         issue_id: The issue ID to show (e.g., 'bd-a1b2')
@@ -1053,8 +1061,12 @@ async def show_issue(
         brief_deps: If True, return full issue but with compact dependencies
         fields: Return only specified fields (custom projections)
         max_description_length: Truncate description to this length
+        include_comments: If True, include full comment bodies in the response
     """
-    issue = await beads_show_issue(issue_id=issue_id)
+    # Only a non-brief read hydrates: brief wins over every other mode, and
+    # a fields projection only needs bodies when it actually names comments.
+    hydrate_comments = not brief and (include_comments or bool(fields and "comments" in fields))
+    issue = await beads_show_issue(issue_id=issue_id, include_comments=hydrate_comments)
 
     if max_description_length:
         issue = _truncate_description(issue, max_description_length)

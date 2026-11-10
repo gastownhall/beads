@@ -441,13 +441,22 @@ async def beads_list_issues(
 
 async def beads_show_issue(
     issue_id: Annotated[str, "Issue ID (e.g., bd-1)"],
+    include_comments: Annotated[
+        bool,
+        "Also return the full comment chronology (adds bd show --include-comments). "
+        "Default False keeps the read count-only: comment_count and comments_omitted "
+        "describe the comments without fetching their bodies.",
+    ] = False,
 ) -> Issue:
     """Show detailed information about a specific issue.
 
-    Includes full description, dependencies, and dependents.
+    Includes full description, dependencies, and dependents. Comment bodies
+    come only with include_comments=True; otherwise comment_count and
+    comments_omitted report what the CLI withheld (use beads_list_comments
+    to read bodies on demand).
     """
     client = await _get_client()
-    params = ShowIssueParams(issue_id=issue_id)
+    params = ShowIssueParams(issue_id=issue_id, include_comments=include_comments)
     return await client.show(params)
 
 

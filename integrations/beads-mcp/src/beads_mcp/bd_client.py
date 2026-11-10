@@ -511,7 +511,12 @@ class BdCliClient(BdClientBase):
         Raises:
             BdCommandError: If issue not found
         """
-        data = await self._run_command("show", positional=[params.issue_id])
+        args = ["show"]
+        if params.include_comments:
+            # Before the "--" separator: it is a flag bd parses, not an operand.
+            args.append("--include-comments")
+
+        data = await self._run_command(*args, positional=[params.issue_id])
         # bd show returns an array, extract first element
         if isinstance(data, list):
             if not data:
