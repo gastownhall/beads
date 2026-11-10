@@ -391,3 +391,91 @@ func TestSharedStoreGateSuppressesSmartAutoArms(t *testing.T) {
 		}
 	})
 }
+
+// TestSharedNoRemoteProxiedConsentGuidance pins what the shared-no-remote stop
+// prescribes on each side of gastownhall/beads#6656. On a proxied-server
+// workspace the front door refuses the bare `bd migrate schema` (the provider
+// open is the migration, and it changes the schema under every library client
+// the proxy does not track), so every surface there names the forced verb and
+// the stop-the-clients precondition. Off the proxy the bare verb still works
+// and is still what the stop names.
+func TestSharedNoRemoteProxiedConsentGuidance(t *testing.T) {
+	refusal := func(proxied bool) *RemoteMigrateGateError {
+		return &RemoteMigrateGateError{
+			CurrentVersion: 1, LatestVersion: LatestVersion(), Pending: 2,
+			Decision: gateDecisionSharedNoRemote, Shared: true, Proxied: proxied,
+		}
+	}
+
+	t.Run("proxied", func(t *testing.T) {
+		e := refusal(true)
+		if got := e.EscapeHint(); got != SharedConsentCommandForced {
+			t.Errorf("EscapeHint = %q, want %q", got, SharedConsentCommandForced)
+		}
+		msg := e.UserMessage()
+		for _, want := range []string{
+			"        " + SharedConsentCommandForced + "\n",
+			"(" + SharedConsentCommandForcedGlobal + " for the shared global database",
+			"Stop every library client",
+			"Restart those clients",
+			"`" + SharedConsentCommand + "` without --force",
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("UserMessage missing %q:\n%s", want, msg)
+			}
+		}
+		for _, absent := range []string{
+			"        " + SharedConsentCommand + "\n",
+			"(" + SharedConsentCommandGlobal + " for the shared global database",
+			// The env hatch skips the front door AND its warning; it is not
+			// the route to prescribe where clients have to be stopped first.
+			AllowRemoteMigrateEnv + "=1 bd <cmd>",
+		} {
+			if strings.Contains(msg, absent) {
+				t.Errorf("UserMessage must not prescribe %q on a proxied workspace:\n%s", absent, msg)
+			}
+		}
+		opts := e.Options()
+		if len(opts) != 1 || opts[0].ID != "migrate-shared" {
+			t.Fatalf("Options = %+v, want a single migrate-shared option", opts)
+		}
+		if got := opts[0].Commands; len(got) != 1 || got[0] != SharedConsentCommandForced {
+			t.Errorf("migrate-shared Commands = %q, want [%q]", got, SharedConsentCommandForced)
+		}
+		if !strings.Contains(opts[0].When, "library client") || !strings.Contains(opts[0].When, "stopped") {
+			t.Errorf("migrate-shared When must carry the client-stop precondition: %q", opts[0].When)
+		}
+		if !strings.Contains(opts[0].Risk, "library client") {
+			t.Errorf("migrate-shared Risk must name what happens to clients left running: %q", opts[0].Risk)
+		}
+	})
+
+	t.Run("not proxied", func(t *testing.T) {
+		e := refusal(false)
+		if got := e.EscapeHint(); got != SharedConsentCommand {
+			t.Errorf("EscapeHint = %q, want %q", got, SharedConsentCommand)
+		}
+		msg := e.UserMessage()
+		for _, want := range []string{
+			"        " + SharedConsentCommand + "\n",
+			"(" + SharedConsentCommandGlobal + " for the shared global database;",
+			AllowRemoteMigrateEnv + "=1 bd <cmd>",
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("UserMessage missing %q:\n%s", want, msg)
+			}
+		}
+		for _, absent := range []string{SharedConsentCommandForced, "library client"} {
+			if strings.Contains(msg, absent) {
+				t.Errorf("UserMessage must not carry the proxied guidance %q off the proxy:\n%s", absent, msg)
+			}
+		}
+		opts := e.Options()
+		if len(opts) != 1 || len(opts[0].Commands) != 1 || opts[0].Commands[0] != SharedConsentCommand {
+			t.Fatalf("Options = %+v, want a single migrate-shared option running %q", opts, SharedConsentCommand)
+		}
+		if strings.Contains(opts[0].When+opts[0].Risk, "library client") {
+			t.Errorf("migrate-shared option carries the proxied precondition off the proxy: %+v", opts[0])
+		}
+	})
+}
