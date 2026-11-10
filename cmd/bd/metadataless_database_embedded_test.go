@@ -145,13 +145,20 @@ func TestEmbeddedMetadatalessWorkspaceAdoptsSoleDatabase(t *testing.T) {
 		}
 		saved := removeMetadata(t, beadsDir)
 
-		if run := runBDMetadataless(t, bd, dir, nil, "list", "--json"); run.err != nil {
+		run := runBDMetadataless(t, bd, dir, nil, "list", "--json")
+		if run.err != nil {
 			t.Fatalf("bd list --json failed: %v\nstdout:\n%s\nstderr:\n%s", run.err, run.stdout, run.stderr)
 		}
-		run := runBDMetadataless(t, bd, dir, nil, "close", issue.ID)
+		if ids := listedIDs(t, run); !slices.Equal(ids, []string{issue.ID}) {
+			t.Fatalf("bd list --json listed %v, want only %s from the workspace's database\nstderr:\n%s", ids, issue.ID, run.stderr)
+		}
+		assertEmbeddedDatabases(t, beadsDir, "gh4135")
+		run = runBDMetadataless(t, bd, dir, nil, "close", issue.ID)
 		if run.err != nil {
 			t.Fatalf("bd close %s failed: %v\nstdout:\n%s\nstderr:\n%s", issue.ID, run.err, run.stdout, run.stderr)
 		}
+		assertEmbeddedDatabases(t, beadsDir, "gh4135")
+		assertMetadataAbsent(t, beadsDir)
 		restoreMetadata(t, beadsDir, saved)
 		if got := bdShow(t, bd, dir, issue.ID); got.Status != "closed" {
 			t.Fatalf("%s status = %q in the original database after the acknowledged close, want closed", issue.ID, got.Status)
