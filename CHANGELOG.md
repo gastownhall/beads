@@ -1226,6 +1226,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Commands on a `bd repo sync` copy act on the original.** With
+  `routing.mode=auto`, an issue this project holds only as a copy hydrated
+  from its routing target (its `source_repo` names that target and the two
+  share their `created_at`) was changed, closed or deleted here, so the
+  original stayed open and `bd show` reported the copy's stale state. `bd
+  show`, `bd update` (including `--claim`), `bd comment`, `bd close` and `bd
+  delete` now act on the original in the target and leave the copy as it is;
+  `bd delete` notes the copy it leaves behind. A write fails, naming the
+  target, when the target cannot be opened, rather than changing the copy.
+  Any other row, including one whose `source_repo` names another repository,
+  is still resolved here.
+- `bd delete` refuses a batch whose ids are in different workspaces, before
+  deleting anything, and asks for a separate `bd delete` per workspace. A
+  batch ran on the first routed store, so an id another workspace held was
+  deleted from that store under the same id.
+- With `--verbose` or `BD_DEBUG=1`, bd logs each store a command opens to
+  stderr as `store: <.beads dir> <read|write> (<reason>)`, for example
+  `(auto-route: contributor)`, so a routed command shows where it read and
+  wrote.
+
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

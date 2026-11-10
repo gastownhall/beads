@@ -223,6 +223,22 @@ func activeAutoRouteTarget(ctx context.Context, store storage.DoltStorage) (auto
 	}, true
 }
 
+// autoRouteReason is the store-open log's reason for a target rule selected.
+func autoRouteReason(rule routing.RoutingRule) string {
+	switch rule {
+	case routing.RuleMaintainer:
+		return "auto-route: maintainer"
+	case routing.RuleContributor:
+		return "auto-route: contributor"
+	case routing.RuleDefault:
+		return "auto-route: default"
+	case routing.RuleExplicitOverride:
+		return "auto-route: override"
+	default:
+		return "auto-route"
+	}
+}
+
 // openAutoRouteTarget opens target, writable or read-only, as
 // openAutoRoutedStore does once auto-routing has selected it.
 func openAutoRouteTarget(ctx context.Context, target autoRouteTarget, writable bool) (storage.DoltStorage, error) {
@@ -237,7 +253,7 @@ func openAutoRouteTarget(ctx context.Context, target autoRouteTarget, writable b
 	if err != nil {
 		return nil, fmt.Errorf("failed to open routed store at %s: target has no dolt_database configured: %w", remedy.PrintedValue(target.repoPath), err)
 	}
-	targetStore, err := openRoutedTargetStore(ctx, target.beadsDir, database, writable)
+	targetStore, err := openRoutedTargetStore(ctx, target.beadsDir, database, writable, autoRouteReason(target.rule))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open routed store at %s: %w", remedy.PrintedValue(target.repoPath), err)
 	}

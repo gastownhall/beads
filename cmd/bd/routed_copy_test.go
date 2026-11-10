@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/types"
@@ -608,5 +609,35 @@ func TestDeleteBatchAcrossWorkspacesRefused(t *testing.T) {
 		if f.planningIssue(t, id) != nil {
 			t.Errorf("planning %s survived bd delete --force", id)
 		}
+	}
+}
+
+// TestStoreOpensLoggedUnderVerbose pins that --verbose logs each store a
+// command opens, with its access and the reason, on stderr, and leaves the
+// command's stdout as it was.
+func TestStoreOpensLoggedUnderVerbose(t *testing.T) {
+	f := newCopyFixture(t, []string{"pl-v"}, []string{"pl-v"}, nil)
+	jsonOutput = true
+
+	quiet := runCopyCmd(t, showCmd, nil, "pl-v")
+	if quiet.exitCode != 0 {
+		t.Fatalf("bd show pl-v: exit %d, err %v\nstderr: %s", quiet.exitCode, quiet.err, quiet.stderr)
+	}
+	if strings.Contains(quiet.stderr, "store: ") {
+		t.Errorf("bd show without --verbose logged store opens:\n%s", quiet.stderr)
+	}
+
+	debug.SetVerbose(true)
+	t.Cleanup(func() { debug.SetVerbose(false) })
+	verbose := runCopyCmd(t, showCmd, nil, "pl-v")
+	if verbose.exitCode != 0 {
+		t.Fatalf("bd show pl-v --verbose: exit %d, err %v\nstderr: %s", verbose.exitCode, verbose.err, verbose.stderr)
+	}
+	if verbose.stdout != quiet.stdout {
+		t.Errorf("--verbose changed stdout:\nwithout: %s\nwith:    %s", quiet.stdout, verbose.stdout)
+	}
+	want := "store: " + f.planningBeadsDir + " read (auto-route: maintainer)\n"
+	if !strings.Contains(verbose.stderr, want) {
+		t.Errorf("bd show pl-v --verbose stderr lacks %q:\n%s", want, verbose.stderr)
 	}
 }

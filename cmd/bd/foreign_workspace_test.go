@@ -86,7 +86,7 @@ func TestAdmitForeignWorkspaceRefusesLegacyDoltAsAdmissionDoes(t *testing.T) {
 					t.Fatalf("admitForeignWorkspace = %v, want %q", err, want)
 				}
 				for name, access := range foreignOpenAccesses {
-					store, err := openForeignStore(t.Context(), beadsDir, access)
+					store, err := openForeignStore(t.Context(), beadsDir, access, "test")
 					if err == nil {
 						_ = store.Close()
 					}
@@ -146,7 +146,7 @@ func testOpenForeignStoreLeavesCloneUnchanged(t *testing.T, layout legacyworkspa
 			beadsDir := filepath.Join(t.TempDir(), ".beads")
 			layout.Write(t, beadsDir)
 			before := legacyworkspace.TreeDigest(t, beadsDir)
-			store, err := openForeignStore(t.Context(), beadsDir, foreignOpenAccesses[name])
+			store, err := openForeignStore(t.Context(), beadsDir, foreignOpenAccesses[name], "test")
 			if err == nil {
 				_ = store.Close()
 			}

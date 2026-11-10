@@ -93,7 +93,7 @@ func openMigrationPlanningStore(ctx context.Context, planningBeadsDir string, pr
 	if err != nil {
 		return nil, err
 	}
-	planningStore, err := openRoutedTargetStore(ctx, planningBeadsDir, database, true)
+	planningStore, err := openRoutedTargetStore(ctx, planningBeadsDir, database, true, "migrate personal")
 	if err != nil {
 		return nil, err
 	}

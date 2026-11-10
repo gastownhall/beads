@@ -207,6 +207,27 @@ For dependencies on *capabilities* of another project rather than specific
 beads, `bd dep add` also accepts `external:<project>:<capability>` targets —
 see [`bd dep`](/cli-reference/dep).
 
+### Changing a hydrated bead
+
+A hydrated bead is a copy. When the routing target is the repository the copy
+came from (the copy's `source_repo` names it and the two share their
+`created_at`), commands act on the original there:
+
+- `bd show` reads the original, so it reports the current state.
+- `bd update` (including `--claim`), `bd comment`, `bd close` and `bd delete`
+  change the original and leave the copy as it is. `bd delete` notes the copy
+  it leaves behind; once the target no longer holds the bead,
+  `bd delete <id> --force` removes the copy.
+- If the target can't be opened, those writes fail and name it rather than
+  change the copy. `bd show` falls back to the copy.
+- A `bd delete` whose ids are in different repositories fails before deleting
+  anything; run one `bd delete` per repository.
+
+Any other row, such as a bead hydrated from a repository that isn't the
+routing target or one created here, is changed here. To see which stores a
+command opened, run it with `--verbose` (or `BD_DEBUG=1`): each opening logs
+`store: <.beads dir> <read|write> (<reason>)` to stderr.
+
 ## One agent, many projects
 
 An AI agent working across several repositories should run a *single* beads

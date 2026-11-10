@@ -424,7 +424,7 @@ var createCmd = &cobra.Command{
 
 				targetBeadsDirPath := filepath.Join(targetBeadsDir, ".beads")
 				var err error
-				targetStore, err = openForeignStore(rootCtx, targetBeadsDirPath, foreignCreate)
+				targetStore, err = openForeignStore(rootCtx, targetBeadsDirPath, foreignCreate, "create route")
 				if err != nil {
 					return handleCreateTargetStoreError(err, targetBeadsDirPath, "failed to open target store: %v")
 				}
@@ -1072,7 +1072,7 @@ func openDryRunTargetStore(ctx context.Context, repoPath string) (storage.DoltSt
 	if err := refuseExistingCreateTarget(beadsDir); err != nil {
 		return nil, err
 	}
-	store, err := openForeignStore(ctx, beadsDir, foreignPreview)
+	store, err := openForeignStore(ctx, beadsDir, foreignPreview, "create route preview")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open target store for dry-run: %w", remedy.PrintedTextError(err))
 	}

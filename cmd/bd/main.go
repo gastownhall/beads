@@ -2420,6 +2420,8 @@ var rootCmd = &cobra.Command{
 			return HandleError("%v", openStoreError(cfg.GetBackend(), err))
 		}
 
+		logStoreOpen(beadsDir, !storeIsReadOnly, "project")
+
 		// Mark store as active for flush goroutine safety
 		storeMutex.Lock()
 		storeActive = true
