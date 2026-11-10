@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -46,13 +47,22 @@ func TestJunieMCPConfig(t *testing.T) {
 	}
 
 	command, ok := beads["command"].(string)
-	if !ok || command != "bd" {
-		t.Errorf("Expected command 'bd', got %v", beads["command"])
+	if !ok || command != "uvx" {
+		t.Errorf("Expected command 'uvx', got %v", beads["command"])
 	}
 
 	args, ok := beads["args"].([]string)
-	if !ok || len(args) != 1 || args[0] != "mcp" {
-		t.Errorf("Expected args ['mcp'], got %v", beads["args"])
+	if !ok || len(args) != 1 || args[0] != "beads-mcp" {
+		t.Errorf("Expected args ['beads-mcp'], got %v", beads["args"])
+	}
+
+	// The beads server carries only the launch command: extra keys (env,
+	// paths) would change what Junie runs.
+	if len(beads) != 2 {
+		t.Errorf("Expected only command and args on the beads server, got %v", beads)
+	}
+	if len(mcpServers) != 1 {
+		t.Errorf("Expected only the beads server, got %v", mcpServers)
 	}
 
 	// Verify it's valid JSON
@@ -84,7 +94,9 @@ func TestInstallJunie(t *testing.T) {
 		}
 	}()
 
-	InstallJunie()
+	if err := InstallJunie(); err != nil {
+		t.Fatalf("InstallJunie: %v", err)
+	}
 
 	// Verify guidelines file was created
 	guidelinesPath := ".junie/guidelines.md"
@@ -99,29 +111,32 @@ func TestInstallJunie(t *testing.T) {
 		}
 	}
 
-	// Verify MCP config file was created
+	// Verify MCP config file was created and holds the intended launch
+	// configuration, compared against a literal built here rather than
+	// junieMCPConfig(): the helper under test must not supply the expected
+	// value too.
 	mcpPath := ".junie/mcp/mcp.json"
 	if !FileExists(mcpPath) {
-		t.Errorf("File was not created: %s", mcpPath)
-	} else {
-		data, err := os.ReadFile(mcpPath)
-		if err != nil {
-			t.Errorf("Failed to read %s: %v", mcpPath, err)
-		} else {
-			// Verify it's valid JSON
-			var parsed map[string]interface{}
-			if err := json.Unmarshal(data, &parsed); err != nil {
-				t.Errorf("MCP config should be valid JSON: %v", err)
-			}
-
-			// Verify structure
-			mcpServers, ok := parsed["mcpServers"].(map[string]interface{})
-			if !ok {
-				t.Error("mcpServers key missing or wrong type")
-			} else if _, ok := mcpServers["beads"]; !ok {
-				t.Error("beads server config missing")
-			}
-		}
+		t.Fatalf("File was not created: %s", mcpPath)
+	}
+	data, err := os.ReadFile(mcpPath)
+	if err != nil {
+		t.Fatalf("Failed to read %s: %v", mcpPath, err)
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("MCP config should be valid JSON: %v", err)
+	}
+	expected := map[string]interface{}{
+		"mcpServers": map[string]interface{}{
+			"beads": map[string]interface{}{
+				"command": "uvx",
+				"args":    []interface{}{"beads-mcp"},
+			},
+		},
+	}
+	if !reflect.DeepEqual(parsed, expected) {
+		t.Errorf("MCP config = %s, want %v", data, expected)
 	}
 }
 
@@ -579,5 +594,23 @@ func TestRemoveJunieKeepsDirsItDidNotEmpty(t *testing.T) {
 				requireState(t, filepath.Join(ws, rel), want)
 			}
 		})
+	}
+}
+
+// The Junie MCP entry must launch the beads MCP server (beads-mcp), not a bd
+// subcommand: bd has no `mcp` command, so `bd mcp` exits "unknown command".
+func TestJunieMCPConfigLaunchesBeadsMCP(t *testing.T) {
+	beads := junieMCPConfig()["mcpServers"].(map[string]interface{})["beads"].(map[string]interface{})
+	command, _ := beads["command"].(string)
+	args, _ := beads["args"].([]string)
+	argv := append([]string{command}, args...)
+	launchesBeadsMCP := false
+	for _, a := range argv {
+		if a == "beads-mcp" {
+			launchesBeadsMCP = true
+		}
+	}
+	if !launchesBeadsMCP {
+		t.Fatalf("Junie MCP server argv %q does not launch beads-mcp", argv)
 	}
 }

@@ -96,13 +96,15 @@ If the MCP server is configured, you can use these tools directly:
 For more details, run ` + "`bd --help`" + ` or see the project's AGENTS.md file.
 `
 
-// junieMCPConfig generates the MCP configuration for Junie
+// junieMCPConfig generates the MCP configuration for Junie. The beads MCP
+// server is the standalone beads-mcp package, launched through uvx; bd has no
+// `mcp` subcommand to run it.
 func junieMCPConfig() map[string]interface{} {
 	return map[string]interface{}{
 		"mcpServers": map[string]interface{}{
 			"beads": map[string]interface{}{
-				"command": "bd",
-				"args":    []string{"mcp"},
+				"command": "uvx",
+				"args":    []string{"beads-mcp"},
 			},
 		},
 	}
