@@ -54,3 +54,43 @@ func TestIsNothingToCommitErrorRejectsResidualChanges(t *testing.T) {
 		}
 	}
 }
+
+// TestIsNothingToCommitErrorRejectsVerificationErrors pins the classifier's
+// typed pre-check for the GH#5433 AC-5 verification failure: a commit whose
+// required completeness read failed is never a healthy no-op. The
+// nothing_to_commit outcome's message quotes Dolt's own "nothing to commit"
+// response, so the string match alone would misclassify it — the typed
+// rejection is the only honest classification, through any wrapper.
+func TestIsNothingToCommitErrorRejectsVerificationErrors(t *testing.T) {
+	readErr := errors.New("dolt_status read failed")
+	for name, err := range map[string]error{
+		"commit_succeeded": &storage.CommitVerificationError{
+			Outcome:   storage.CommitSucceeded,
+			Operation: "read dolt_status after the commit",
+			Cause:     readErr,
+		},
+		"nothing_to_commit": &storage.CommitVerificationError{
+			Outcome:   storage.CommitNothingToCommit,
+			Operation: "load the Beads-owned dolt_ignore policy",
+			Cause:     readErr,
+		},
+		"wrapped":       fmt.Errorf("commit pending before push: %w", &storage.CommitVerificationError{Outcome: storage.CommitNothingToCommit, Cause: readErr}),
+		"sentinel only": fmt.Errorf("guard: %w", storage.ErrCommitVerificationFailed),
+	} {
+		if IsNothingToCommitError(err) {
+			t.Errorf("IsNothingToCommitError(%s) = true, want false: an unverified commit outcome is not a healthy no-op", name)
+		}
+		if name != "sentinel only" {
+			var typed *storage.CommitVerificationError
+			if !errors.As(err, &typed) {
+				t.Errorf("errors.As(%s) = false, want the typed payload through the wrapper", name)
+			}
+			if !errors.Is(err, readErr) {
+				t.Errorf("errors.Is(%s, cause) = false, want the underlying read error through Unwrap", name)
+			}
+		}
+		if !errors.Is(err, storage.ErrCommitVerificationFailed) {
+			t.Errorf("errors.Is(%s, ErrCommitVerificationFailed) = false, want the sentinel through any wrapper", name)
+		}
+	}
+}

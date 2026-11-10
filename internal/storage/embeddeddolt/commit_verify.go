@@ -15,7 +15,10 @@ import (
 // verification. A variable as a test seam: the sqlmock tests of the
 // verification seam drive the required policy read without re-mocking
 // mainSource's cursor probes.
-var commitAllPolicyLoader = schema.LoadOwnedIgnorePolicy
+var commitAllPolicyLoader LoadOwnedIgnorePolicyFunc = schema.LoadOwnedIgnorePolicy
+
+// LoadOwnedIgnorePolicyFunc is the seam type of commitAllPolicyLoader.
+type LoadOwnedIgnorePolicyFunc func(ctx context.Context, db schema.DBConn) (schema.OwnedIgnorePolicy, error)
 
 // commitAllVerification is what the post-commit working-set check found,
 // collected apart from operational errors: withConn rolls the SQL
@@ -33,6 +36,10 @@ type commitAllVerification struct {
 	// Its typing is the caller's business (commitAll turns it into the
 	// verification failure error); it is never silently dropped.
 	readFailed error
+	// readFailedOperation names the required read that failed — the
+	// status read or the owned-policy load — for the verification error's
+	// Operation field.
+	readFailedOperation string
 	// residual are the dolt_status table_name values that stayed changed
 	// after the commit and are not Beads-owned clone-local tables: the
 	// tracked changes the commit skipped (GH#5433).
@@ -60,11 +67,13 @@ func verifyCommitAllInTx(ctx context.Context, tx *sql.Tx, committed bool) *commi
 	tables, err := residualStatusTables(ctx, tx)
 	if err != nil {
 		v.readFailed = err
+		v.readFailedOperation = "read dolt_status after the commit"
 		return v
 	}
 	policy, err := commitAllPolicyLoader(ctx, tx)
 	if err != nil {
 		v.readFailed = err
+		v.readFailedOperation = "load the Beads-owned dolt_ignore policy"
 		return v
 	}
 	for _, table := range tables {

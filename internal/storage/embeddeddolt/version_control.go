@@ -140,6 +140,24 @@ func (s *EmbeddedDoltStore) commitAll(ctx context.Context, message string, toler
 		// reported as a confirmed residual finding.
 		return committed, err
 	}
+	if verification != nil && verification.readFailed != nil {
+		// A required completeness read failed after the DOLT_COMMIT. The
+		// finding replaces a clean/success claim with the typed
+		// verification failure — outcome-sensitive: committed=true keeps
+		// DOLT_COMMIT's own success answer (the commit may have landed),
+		// committed=false keeps its nothing-to-commit answer (cleanliness
+		// unknown). It never claims the mutation failed and never
+		// prescribes replaying it.
+		outcome := storage.CommitNothingToCommit
+		if verification.committed {
+			outcome = storage.CommitSucceeded
+		}
+		return verification.committed, &storage.CommitVerificationError{
+			Outcome:   outcome,
+			Operation: verification.readFailedOperation,
+			Cause:     verification.readFailed,
+		}
+	}
 	if verification != nil && len(verification.residual) > 0 {
 		return committed, &storage.UncommittedChangesError{
 			Tables:    verification.residual,

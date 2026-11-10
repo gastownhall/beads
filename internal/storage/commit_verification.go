@@ -1,8 +1,77 @@
 package storage
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 )
+
+// ErrCommitVerificationFailed marks a CommitVerificationError through any
+// wrapping, so callers can match the failure class without importing the
+// concrete type: a required completeness read failed after a full embedded
+// commit, so the store cannot confirm whether tracked changes were left
+// behind (GH#5433).
+var ErrCommitVerificationFailed = errors.New("commit verification failed")
+
+// CommitVerificationOutcome records DOLT_COMMIT's own answer when a
+// required completeness read failed after it, so the error can say what is
+// known and what is not — never more.
+type CommitVerificationOutcome string
+
+const (
+	// CommitSucceeded is DOLT_COMMIT's success response: the commit may
+	// have landed, but completeness could not be verified.
+	CommitSucceeded CommitVerificationOutcome = "commit_succeeded"
+	// CommitNothingToCommit is DOLT_COMMIT's tolerated nothing-to-commit
+	// response: working-set cleanliness could not be verified, so the
+	// completeness outcome is unknown.
+	CommitNothingToCommit CommitVerificationOutcome = "nothing_to_commit"
+)
+
+// CommitVerificationError reports that a full embedded commit's required
+// completeness verification could not run: the post-commit dolt_status or
+// owned-policy read failed after the DOLT_COMMIT, so the store cannot say
+// whether the stall (tracked changes skipped by staging) happened (GH#5433).
+// It replaces a clean/success claim — it is an error — but it never claims
+// the mutation failed and never prescribes replaying it: Outcome carries
+// DOLT_COMMIT's own answer, and the message keeps what is verified apart
+// from what is not.
+type CommitVerificationError struct {
+	// Outcome is DOLT_COMMIT's own response, recorded before the failed
+	// read: CommitSucceeded means it reported success, CommitNothingToCommit
+	// means it reported nothing to commit.
+	Outcome CommitVerificationOutcome
+	// Operation names the required status or policy read that failed.
+	Operation string
+	// Cause is the underlying read error.
+	Cause error
+}
+
+func (e *CommitVerificationError) Error() string {
+	var b strings.Builder
+	b.WriteString("commit verification failed: ")
+	switch e.Outcome {
+	case CommitSucceeded:
+		b.WriteString("DOLT_COMMIT reported success; the commit may have landed, but completeness could not be verified")
+	default:
+		b.WriteString("DOLT_COMMIT reported nothing to commit; working-set cleanliness could not be verified, so the completeness outcome is unknown")
+	}
+	fmt.Fprintf(&b, " (failed operation: %s: %v)", e.Operation, e.Cause)
+	b.WriteString("; inspect the working set and the dolt_ignore configuration before retrying the commit; do not replay the writes")
+	return b.String()
+}
+
+// Is matches the sentinel so errors.Is finds the failure class through any
+// wrapper; the underlying cause matches through Unwrap.
+func (e *CommitVerificationError) Is(target error) bool {
+	return target == ErrCommitVerificationFailed
+}
+
+// Unwrap exposes the underlying read error: errors.Is(err, cause) holds for
+// the failed operation through any wrapper.
+func (e *CommitVerificationError) Unwrap() error {
+	return e.Cause
+}
 
 // UncommittedChangesError reports a full embedded commit (DOLT_COMMIT '-Am')
 // that left tracked changes behind in the working set (GH#5433). An enabled

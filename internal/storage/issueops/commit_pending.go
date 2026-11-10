@@ -133,17 +133,25 @@ func BuildBatchCommitMessage(ctx context.Context, db SQLQuerier, actor string) s
 // IsNothingToCommitError returns true if the error indicates there was nothing
 // to commit (Dolt may report this even when dolt_status showed changes).
 //
-// The GH#5433 residual-change failure is rejected by type before any string
-// matching: its message names tables and dolt_ignore patterns, and a
-// misleading name — a table or pattern that happens to read "nothing to
-// commit" — must never re-classify a commit that verifiably left tracked
-// changes behind as a healthy no-op, whatever wrapper carries it.
+// The GH#5433 residual-change and verification failures are rejected by type
+// before any string matching: their messages name tables and dolt_ignore
+// patterns — and the verification message itself quotes Dolt's "nothing to
+// commit" response — so a string match alone would re-classify a commit that
+// verifiably left tracked changes behind (or whose completeness could not be
+// verified) as a healthy no-op, whatever wrapper carries it.
 func IsNothingToCommitError(err error) bool {
 	if err == nil {
 		return false
 	}
 	var residual *storage.UncommittedChangesError
 	if errors.As(err, &residual) {
+		return false
+	}
+	var verification *storage.CommitVerificationError
+	if errors.As(err, &verification) {
+		return false
+	}
+	if errors.Is(err, storage.ErrCommitVerificationFailed) {
 		return false
 	}
 	s := strings.ToLower(err.Error())
