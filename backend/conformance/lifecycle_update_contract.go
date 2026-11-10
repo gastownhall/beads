@@ -2698,8 +2698,8 @@ func RunLifecycleUpdateRefusesATemplate(t *testing.T, ctx context.Context, fixtu
 }
 
 // RunLifecycleUpdateAllowTemplateEditsATemplate pins the template guard's one
-// stand-down: an update with AllowTemplate — what bd label and bd set-state
-// send, since they have always edited templates — lands on a template, and
+// stand-down: an update with AllowTemplate — what bd label sends, since it has
+// always edited templates — lands on a template, and
 // only that request is waived (the same patch without it still refuses).
 func RunLifecycleUpdateAllowTemplateEditsATemplate(t *testing.T, ctx context.Context, fixture LifecycleUpdateFixture) {
 	t.Helper()

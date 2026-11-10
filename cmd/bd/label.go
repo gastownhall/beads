@@ -35,6 +35,18 @@ func openIssueLifecycle() (issueops.Lifecycle, error) {
 	return store.IssueLifecycle()
 }
 
+// openIssueBatchApplier hands back the guarded apply-many role the same way.
+// bd set-state uses it to make a state change one transaction: the event, its
+// parent edge and the label swap are three items of one plan. The direct
+// route's accessor is already hook- and telemetry-decorated, and the proxied
+// one comes from the notifying provider, so hooks fire on both.
+func openIssueBatchApplier() (issueops.BatchApplier, error) {
+	if usesProxiedServer() {
+		return proxiedIssueBatchApplier()
+	}
+	return store.BatchApplier()
+}
+
 // openIssueReader hands back the read role the same way. `bd label list` is a
 // detail read whose answer is already hydrated — issueops.Reader.Get returns
 // IssueDetails with Labels on it — so there is nothing here for a label-shaped
@@ -107,9 +119,10 @@ func resolveLabelTarget(ctx context.Context, id string) (string, error) {
 // commits them together, so the N calls collapse back to one transaction and
 // one history entry with no new role and no new request type. It is not in this
 // slice because it needs a cmd/bd accessor of its own and because its end gate
-// runs a hierarchy and cycle walk a label-only request has no use for. It also
-// needs a template stand-down first: UpdateItem has no AllowTemplate, so an
-// ItemUpdate refuses the templates this function edits today (bd-jkp9v3).
+// runs a hierarchy and cycle walk a label-only request has no use for. The
+// accessor exists now (openIssueBatchApplier, for bd set-state), and so does
+// the template stand-down an ItemUpdate needs to edit the templates this
+// function edits today (UpdateItem.AllowTemplate).
 func applyLabelEdit(ctx context.Context, issueIDs []string, labels []string, operation string) error {
 	lifecycle, err := openIssueLifecycle()
 	if err != nil {
