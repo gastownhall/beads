@@ -307,6 +307,7 @@ func (r *uowApplyRun) applyUpdate(ctx context.Context, index int, item *publicop
 		ForceClosePolicy:      item.ForceClosePolicy,
 		ForceAssigneeTransfer: item.ForceAssigneeTransfer,
 		ForceNotesOverwrite:   item.ForceNotesOverwrite,
+		AllowTemplate:         item.AllowTemplate,
 	}
 	if err := validateUpdateRequest(request); err != nil {
 		return itemErr(err)

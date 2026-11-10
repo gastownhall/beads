@@ -12,6 +12,7 @@ go_library(
         "audit_search-counts-stats.go",
         "batch_apply_contract.go",
         "batch_apply_gate_contract.go",
+        "batch_apply_state_change_contract.go",
         "batch_closer_contract.go",
         "batch_creator_contract.go",
         "batch_getter_contract.go",
