@@ -260,7 +260,7 @@ var filesystemOnlyFixes = map[string]bool{
 	"Last-Touched Tracking": true,
 	"Tracked Runtime Files": true,
 	"Git Hooks":             true,
-	"Hooks Path":            true, // git-config unset, beads-managed paths only
+	"Hooks Path":            true, // git-config unset or repoint, beads-managed paths only
 	"Permissions":           true,
 	"Lock Files":            true,
 	"Legacy MQ Files":       true,
