@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -135,10 +136,21 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 
 	// Change detection via Dolt state hash. This is cheap, so do it before
 	// throttle: when there are no changes, there is nothing to throttle.
+	//
+	// An operational failure here must fail the invocation (GH#6163): the
+	// JSONL would otherwise silently drift from the store while bd exits 0.
+	// The one carve-out is a *storage.ErrUnsupported cause: a backend that
+	// cannot report a state hash at all (the http store's typed refusal) is a
+	// missing capability, not a broken read, so the export stays a
+	// warning-only skip. Deliberately NOT extended to ordinary read errors.
 	currentCommit, err := storeStateHash(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to get current commit: %v\n", err)
-		return nil
+		var unsupported *storage.ErrUnsupported
+		if errors.As(err, &unsupported) {
+			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: state hash is not supported by this store: %v\n", err)
+			return nil
+		}
+		return fmt.Errorf("auto-export: failed to read the state hash for %s: %w", fullPath, err)
 	}
 	if currentCommit == state.LastDoltCommit && state.LastDoltCommit != "" {
 		debug.Logf("auto-export: no changes since last export\n")
