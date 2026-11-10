@@ -78,14 +78,17 @@ type readyTotalWorld struct {
 	deferredParent bool
 	// undated defers the parent the way plain `bd defer` does: status
 	// deferred with no defer_until (GH#7300), instead of a future date.
-	undated   bool
-	collision bool
+	undated bool
+	// deferredLeaf adds an issue deferred the plain `bd defer` way that has
+	// no children, so it is no one's parent.
+	deferredLeaf bool
+	collision    bool
 }
 
 // seedReadyTotalWorld builds a ready front with every shape the total has to
 // get right: plain ready issues, a blocked issue (its blocker stays ready), a
 // deferred parent (future-dated, or undated when w.undated) whose children are
-// hidden, ready wisps, and an ID
+// hidden, a childless deferred leaf, ready wisps, and an ID
 // present in both tables (the overlap the merge dedupes wisp-wins).
 func seedReadyTotalWorld(t *testing.T, te *testEnv, prefix string, w readyTotalWorld) {
 	t.Helper()
@@ -129,6 +132,9 @@ func seedReadyTotalWorld(t *testing.T, te *testEnv, prefix string, w readyTotalW
 				t.Fatalf("defer %s: %v", parent.ID, err)
 			}
 		}
+	}
+	if w.deferredLeaf {
+		create(&types.Issue{ID: prefix + "-dleaf", Title: "childless deferred leaf", Status: types.StatusDeferred})
 	}
 	if w.wisps {
 		for i := 0; i < 3; i++ {
@@ -280,6 +286,12 @@ func TestReadyWorkStatementBudget(t *testing.T) {
 		// An undated deferred parent (GH#7300) costs no more than a dated one.
 		{"wisps_undated_deferred_parent/limit0", readyTotalWorld{wisps: true, deferredParent: true, undated: true}, 0, 4},
 		{"wisps_undated_deferred_parent/limit1", readyTotalWorld{wisps: true, deferredParent: true, undated: true}, 1, 6},
+		// A childless deferred leaf costs the child scan too: the probe asks
+		// whether any row is deferred, not whether a deferred row has
+		// children. These rows pin that accepted cost; a probe that learns
+		// to skip the scan only drops under them.
+		{"wisps_undated_deferred_leaf/limit0", readyTotalWorld{wisps: true, deferredLeaf: true}, 0, 4},
+		{"wisps_undated_deferred_leaf/limit1", readyTotalWorld{wisps: true, deferredLeaf: true}, 1, 6},
 		// + the overlap count, only because an ID sits in both tables
 		{"wisps_collision/limit1", readyTotalWorld{wisps: true, collision: true}, 1, 6},
 	}
