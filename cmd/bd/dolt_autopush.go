@@ -129,6 +129,12 @@ func maybeAutoPush(ctx context.Context) {
 		debug.Logf("dolt auto-push: skipped (dolt.local-only=true)\n")
 		return
 	}
+	// no-push is the publish safeguard `bd dolt push` and `bd sync` already
+	// honor (dolt.go, sync.go); auto-push must not bypass it (GH#7876).
+	if config.GetBool("no-push") {
+		debug.Logf("dolt auto-push: skipped (no-push=true)\n")
+		return
+	}
 	if !isDoltAutoPushEnabled(ctx) {
 		return
 	}

@@ -322,7 +322,7 @@ func setupNoGitOpsAutoPushWorkspace(t *testing.T, configYAML string) (string, *f
 	// GetValueSource counts set-but-empty env vars as explicit, so unset the
 	// keys rather than setting them empty. t.Setenv first registers the
 	// restore of the original values as a subtest cleanup.
-	for _, key := range []string{"BD_DOLT_AUTO_PUSH", "BD_DOLT_LOCAL_ONLY"} {
+	for _, key := range []string{"BD_DOLT_AUTO_PUSH", "BD_DOLT_LOCAL_ONLY", "BD_NO_PUSH"} {
 		t.Setenv(key, "")
 		os.Unsetenv(key)
 	}
@@ -435,6 +435,46 @@ func TestPushedCommitForState(t *testing.T) {
 		target := &fakeAutoPushTarget{commit: "after", commitErr: errors.New("engine closed")}
 		if got := pushedCommitForState(ctx, target, "before"); got != "before" {
 			t.Fatalf("pushedCommitForState() = %q, want %q (pre-push fallback)", got, "before")
+		}
+	})
+}
+
+// TestMaybeAutoPush_NoPushSuppressesAutoPush reproduces GH#7876 item 1:
+// no-push: true must stop dolt.auto-push exactly as it stops `bd dolt push`.
+func TestMaybeAutoPush_NoPushSuppressesAutoPush(t *testing.T) {
+	// Cannot be parallel: mutates env vars, config, and the store global.
+
+	t.Run("no_push_true_skips", func(t *testing.T) {
+		beadsDir, fake := setupNoGitOpsAutoPushWorkspace(t, "no-git-ops: true\nno-push: true\ndolt:\n  auto-push: true\n")
+		if !config.GetBool("no-push") || !config.GetBool("dolt.auto-push") {
+			t.Fatal("precondition: no-push and dolt.auto-push must be read from the workspace config.yaml")
+		}
+
+		maybeAutoPush(context.Background())
+
+		if fake.pushCalls != 0 {
+			t.Errorf("Push calls = %d, want 0 (no-push: true must suppress dolt.auto-push)", fake.pushCalls)
+		}
+		if _, err := os.Stat(filepath.Join(beadsDir, "push-state.json")); err == nil {
+			t.Error("push-state.json was created although no-push is set")
+		}
+	})
+
+	t.Run("no_push_false_still_pushes", func(t *testing.T) {
+		// Control: without no-push, the same fixture must actually attempt a
+		// push, so the skip above cannot be a config or debounce artifact.
+		beadsDir, fake := setupNoGitOpsAutoPushWorkspace(t, "no-git-ops: true\ndolt:\n  auto-push: true\n")
+		if config.GetBool("no-push") {
+			t.Fatal("precondition: no-push must be unset in this subtest")
+		}
+
+		maybeAutoPush(context.Background())
+
+		if fake.pushCalls != 1 {
+			t.Fatalf("Push calls = %d, want 1 (no-push unset must not suppress dolt.auto-push)", fake.pushCalls)
+		}
+		if _, err := os.Stat(filepath.Join(beadsDir, "push-state.json")); err != nil {
+			t.Fatalf("push-state.json must exist after a successful auto-push: %v", err)
 		}
 	})
 }

@@ -105,7 +105,7 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `actor` | `--actor` | `BEADS_ACTOR` | `git config user.name` | Actor name for audit trail (see [Actor identity](#actor-identity-resolution)) |
 | `identity` | `--identity` | `BEADS_IDENTITY` | (git user / hostname) | Sender identity for `bd mail` |
 | `no-db` | `--no-db` | `BD_NO_DAEMON` (related) | `false` | Run without opening the database |
-| `no-push` | `--no-push` | `BD_NO_PUSH` | `false` | Skip pushing to the remote in `bd dolt push` |
+| `no-push` | `--no-push` | `BD_NO_PUSH` | `false` | Skip pushing to the remote in `bd dolt push`, `bd sync` and auto-push |
 | `no-git-ops` | — | — | `false` | Disable git ops in `bd prime` close protocol. Does not affect Dolt remote sync or auto-push; set `dolt.local-only` to stop those |
 | `agent.profile` | — | `BD_AGENT_PROFILE` | `conservative` | Policy profile `bd prime` uses for git/commit authority: `conservative`, `minimal`, `team-maintainer`; invalid values fall back to `conservative` |
 | `prime.max-memories` | `--max-memories` | `BD_PRIME_MAX_MEMORIES` | `0` | Max persistent memories injected by `bd prime` (0 = unlimited) |
@@ -271,6 +271,7 @@ dolt:
 How it works:
 
 - After each write command (after auto-commit and auto-backup), `bd` checks whether a push is due.
+- Auto-push honors the same publish safeguards as explicit push: `no-push: true` and `dolt.local-only: true` both skip it.
 - Pushes are debounced: skipped if the last push was less than `dolt.auto-push-interval` ago.
 - Change detection: skipped if the Dolt HEAD commit hasn't changed since the last push.
 - Push failures are warnings only (non-fatal), and failed attempts are throttled too.
