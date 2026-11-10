@@ -597,6 +597,9 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		fromJSONL, _ := cmd.Flags().GetBool("from-jsonl")
 		initRemote, _ := cmd.Flags().GetString("remote")
 		initRemoteChanged := cmd.Flags().Changed("remote")
+		// Adoption consent/opt-out for a git-origin-derived remote (#6099).
+		assumeYes, _ := cmd.Flags().GetBool("yes")
+		noAdopt, _ := cmd.Flags().GetBool("no-adopt")
 		// Dolt server connection flags
 		backendFlag, _ := cmd.Flags().GetString("backend")
 		initServerMode, _ := cmd.Flags().GetBool("server")
@@ -1100,14 +1103,29 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// valid (directory names like "001" are common in temp dirs).
 		prefix = normalizeIssuePrefix(prefix)
 		remoteDivergenceConfirmed := false
+		// Adoption consent state and opt-out, computed by the early remote
+		// checkpoint below and reused by the later bootstrap one (#6099).
+		var initAdoptionConsent *adoptionConsentState
+		var initSkipDerivedRemote bool
 
 		// Cross-boundary safety (bd-q83 / ADR 0002): check remote state
 		// BEFORE any filesystem side-effects so a refusal exits cleanly.
 		// We only refuse here; bootstrap decisions happen later once
 		// beadsDir is computed. See CheckRemoteSafety in init_safety.go.
 		{
+			// Adoption consent state for a git-origin-derived remote (#6099),
+			// shared by this early checkpoint and the later bootstrap one so
+			// granted consent binds to the URL it named and is never asked
+			// twice. Only the early checkpoint may prompt: it runs before
+			// any workspace write, so a decline leaves nothing behind.
+			adoptionConsent := &adoptionConsentState{
+				assumeYes:   assumeYes,
+				interactive: !nonInteractive && !jsonOutput,
+			}
+			skipDerived := skipDerivedRemoteAdoption(noAdopt)
 			var earlySyncURL string
 			earlyRemoteSource := initSyncRemoteNone
+			earlyRemoteDerivedFromGitOrigin := false
 			earlyRemoteHasDoltData := false
 			var earlyProbeNote string
 			if !initRemoteChanged {
@@ -1133,12 +1151,15 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				// --reinit-local / local init.
 				hasData, err := gitRemoteHasDoltDataRefStatus(earlySyncURL)
 				earlyRemoteHasDoltData, earlyProbeNote = resolveRemoteHasDoltDataProbe(earlySyncURL, hasData, err)
-			} else if earlyRemoteSource == initSyncRemoteNone && !stealth && !keepHomeClean && isGitRepo() && !isBareGitRepo() {
+			} else if earlyRemoteSource == initSyncRemoteNone && !skipDerived && !stealth && !keepHomeClean && isGitRepo() && !isBareGitRepo() {
 				// Not under keepHomeClean: a repository git finds from the
 				// home is not the project's, so its origin is not this
-				// workspace's remote (see guardInitInHomeDir).
+				// workspace's remote (see guardInitInHomeDir). An opted-out
+				// run (--no-adopt / BD_NO_REMOTE_ADOPT) never resolves or
+				// probes the origin at all (#6099).
 				if originURL, err := gitOriginGetURL(); err == nil && originURL != "" {
 					earlySyncURL = normalizeRemoteURL(originURL)
+					earlyRemoteDerivedFromGitOrigin = true
 					hasData, probeErr := gitOriginHasDoltDataRefStatus()
 					earlyRemoteHasDoltData, earlyProbeNote = resolveRemoteHasDoltDataProbe(earlySyncURL, hasData, probeErr)
 				}
@@ -1148,14 +1169,18 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					fmt.Fprintf(os.Stderr, "%s %s\n", ui.RenderWarn("!"), earlyProbeNote)
 				}
 				earlyDecision := CheckRemoteSafety(RemoteSafetyInput{
-					Force:             force,
-					ReinitLocal:       reinitLocal,
-					FromJSONL:         fromJSONL,
-					DiscardRemote:     discardRemote,
-					DestroyToken:      destroyToken,
-					ExpectedToken:     FormatDestroyToken(prefix),
-					RemoteHasDoltData: earlyRemoteHasDoltData,
-					IsInteractive:     term.IsTerminal(int(os.Stdin.Fd())),
+					Force:                      force,
+					ReinitLocal:                reinitLocal,
+					FromJSONL:                  fromJSONL,
+					DiscardRemote:              discardRemote,
+					DestroyToken:               destroyToken,
+					ExpectedToken:              FormatDestroyToken(prefix),
+					RemoteHasDoltData:          earlyRemoteHasDoltData,
+					RemoteDerivedFromGitOrigin: earlyRemoteDerivedFromGitOrigin,
+					RemoteProbeUnknown:         earlyProbeNote != "",
+					NoAdopt:                    skipDerived,
+					AssumeYes:                  initAdoptionConsentSatisfied(adoptionConsent.assumeYes, adoptionConsent.consentedURL, earlySyncURL),
+					IsInteractive:              term.IsTerminal(int(os.Stdin.Fd())),
 				})
 				if _, err := handleRemoteSafetyDecision(earlyDecision, prefix, earlySyncURL, destroyToken, func() (bool, error) {
 					switch earlyRemoteSource {
@@ -1164,12 +1189,17 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					default:
 						return gitOriginHasDoltDataRefStatus()
 					}
-				}, earlyRemoteHasDoltData, &remoteDivergenceConfirmed); err != nil {
+				}, earlyRemoteHasDoltData, &remoteDivergenceConfirmed, adoptionConsent, true); err != nil {
 					// The early guard refuses and confirms only; bootstrap
 					// selection happens later after beadsDir/dbName are known.
 					return err
 				}
 			}
+			// The consent state must outlive this block: the later bootstrap
+			// checkpoint reuses granted consent for the same URL instead of
+			// prompting a second time.
+			initAdoptionConsent = adoptionConsent
+			initSkipDerivedRemote = skipDerived
 		}
 
 		// Determine beadsDir first (used for all storage path calculations).
@@ -1523,7 +1553,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				})
 				bootstrap, err := handleRemoteSafetyDecision(decision, prefix, syncURL, destroyToken, func() (bool, error) {
 					return gitRemoteHasDoltDataRefStatus(syncURL)
-				}, remoteHasDoltData, &remoteDivergenceConfirmed)
+				}, remoteHasDoltData, &remoteDivergenceConfirmed, initAdoptionConsent, false)
 				if err != nil {
 					return err
 				}
@@ -1535,8 +1565,10 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					fmt.Printf("  %s Remote has no Dolt data yet; initialized a fresh local database\n", ui.RenderWarn("!"))
 				}
 			}
-		} else if syncRemoteSource == initSyncRemoteNone && !stealth && !keepHomeClean && isGitRepo() && !isBareGitRepo() {
-			// keepHomeClean: as in the early remote check above.
+		} else if syncRemoteSource == initSyncRemoteNone && !initSkipDerivedRemote && !stealth && !keepHomeClean && isGitRepo() && !isBareGitRepo() {
+			// keepHomeClean: as in the early remote check above. An
+			// opted-out run (--no-adopt / BD_NO_REMOTE_ADOPT) never
+			// resolves or probes the origin at all (#6099).
 			if originURL, err := gitOriginGetURL(); err == nil && originURL != "" {
 				syncURL = normalizeRemoteURL(originURL)
 				syncURLFromGitOrigin = true
@@ -1547,17 +1579,29 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				}
 
 				decision := CheckRemoteSafety(RemoteSafetyInput{
-					Force:             force,
-					ReinitLocal:       reinitLocal,
-					FromJSONL:         fromJSONL,
-					DiscardRemote:     discardRemote,
-					DestroyToken:      destroyToken,
-					ExpectedToken:     FormatDestroyToken(prefix),
-					RemoteHasDoltData: remoteHasDoltData,
-					IsInteractive:     term.IsTerminal(int(os.Stdin.Fd())),
+					Force:                      force,
+					ReinitLocal:                reinitLocal,
+					FromJSONL:                  fromJSONL,
+					DiscardRemote:              discardRemote,
+					DestroyToken:               destroyToken,
+					ExpectedToken:               FormatDestroyToken(prefix),
+					RemoteHasDoltData:           remoteHasDoltData,
+					RemoteDerivedFromGitOrigin: true,
+					RemoteProbeUnknown:         lateProbeNote != "",
+					NoAdopt:                    initSkipDerivedRemote,
+					AssumeYes:                  initAdoptionConsentSatisfied(initAdoptionConsent.assumeYes, initAdoptionConsent.consentedURL, syncURL),
+					IsInteractive:              term.IsTerminal(int(os.Stdin.Fd())),
 				})
 
-				bootstrap, err := handleRemoteSafetyDecision(decision, prefix, syncURL, destroyToken, gitOriginHasDoltDataRefStatus, remoteHasDoltData, &remoteDivergenceConfirmed)
+				// The late checkpoint never prompts for adoption consent:
+				// workspace scaffolding has been written by now, and a
+				// decline must not leave a half-built workspace behind a
+				// second question. Consent granted at the early prompt binds
+				// to the URL it named; --yes covers any derived URL. A
+				// probe that newly finds populated derived history, or a
+				// changed origin URL, with no matching consent refuses here
+				// instead of importing (#6099).
+				bootstrap, err := handleRemoteSafetyDecision(decision, prefix, syncURL, destroyToken, gitOriginHasDoltDataRefStatus, remoteHasDoltData, &remoteDivergenceConfirmed, initAdoptionConsent, false)
 				if err != nil {
 					return err
 				}
@@ -1581,6 +1625,13 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 		if syncFromRemote {
+			// A git-origin-derived adoption discloses where the issue
+			// history is coming from immediately before the clone (#6099),
+			// on stderr with the sanitized URL, unless quiet suppresses
+			// ordinary progress.
+			if syncURLFromGitOrigin && !quiet {
+				fmt.Fprintf(os.Stderr, "%s Adopting this git origin's issue history: %s\n", ui.RenderAccent("▶"), remedy.PrintedValue(syncURL))
+			}
 			// A raw https:// forge URL would route through Dolt's remotesapi
 			// client and spin forever (#4421); its git+ form routes through
 			// the git remote factory. Non-forge URLs are untouched (GH#3339).
@@ -2574,6 +2625,11 @@ func init() {
 	initCmd.Flags().String("agents-profile", "", "AGENTS.md profile: 'minimal' (default, pointer to bd prime) or 'full' (complete command reference)")
 	initCmd.Flags().String("agents-file", "", "Custom filename for agent instructions (default: AGENTS.md)")
 	initCmd.Flags().String("remote", "", "Dolt remote URL to clone from and persist as sync.remote")
+	// Adoption consent/opt-out for a remote derived from git origin (#6099):
+	// the inbound mirror of bd dolt push's #5068 gate. --non-interactive is
+	// not consent; --no-adopt skips the derivation entirely.
+	initCmd.Flags().BoolP("yes", "y", false, "Consent to adopting the issue history a derived git origin already carries when no remote is configured (inbound mirror of 'bd dolt push --yes'; see 'bd help init-safety')")
+	initCmd.Flags().Bool("no-adopt", false, "Never derive a Dolt remote from git origin (also BD_NO_REMOTE_ADOPT=1); initialize a local database without remote wiring. Explicit --remote and configured sync.remote are unaffected.")
 
 	// Non-interactive mode for CI/cloud agents
 	initCmd.Flags().Bool("non-interactive", false, "Skip all interactive prompts (auto-detected in CI or non-TTY environments)")
@@ -3660,17 +3716,61 @@ func resolveRemoteHasDoltDataProbe(syncURL string, hasData bool, err error) (boo
 // when the caller should clone/bootstrap from the remote, and err is a non-nil
 // *exitError when init must abort with a specific exit code.
 //
+// consent carries the adoption-consent inputs for a git-origin-derived remote
+// (#6099); it is nil on the non-derived call paths and in older tests, and a
+// consent decision with nil consent fails closed. allowConsentPrompt is true
+// only at the early checkpoint, which runs before any workspace write: the
+// late checkpoint must never prompt — a decline there would leave a
+// half-built workspace behind a second question.
+//
 // It must NOT call os.Exit: this runs inside the init RunE body, whose deferred
 // metrics CloseEventAndAdd only fires on a normal return. Every refusal path
 // returns an *exitError so the caller can propagate it up through RunE and keep
 // the usage-metrics close intact (see errors.go).
-func handleRemoteSafetyDecision(decision RemoteSafetyDecision, prefix, syncURL, destroyToken string, remoteHasDoltData func() (bool, error), observedRemoteHasDoltData bool, confirmed *bool) (bool, error) {
+func handleRemoteSafetyDecision(decision RemoteSafetyDecision, prefix, syncURL, destroyToken string, remoteHasDoltData func() (bool, error), observedRemoteHasDoltData bool, confirmed *bool, consent *adoptionConsentState, allowConsentPrompt bool) (bool, error) {
 	switch decision.Action {
 	case ActionRefuseDivergence, ActionRequireDestroyToken:
 		fmt.Fprintf(os.Stderr, "\n%s\n\n", decision.UserMessage)
 		return false, &exitError{Code: decision.ExitCode}
 	case ActionBootstrap:
 		return true, nil
+	case ActionSkipRemote:
+		// --no-adopt: no derived remote, no clone, no refusal. The caller
+		// proceeds with a purely local init.
+		return false, nil
+	case ActionRequireAdoptionConsent:
+		// No consent machinery wired (non-derived path or a bare test): fail
+		// closed rather than adopt.
+		if consent == nil {
+			fmt.Fprintf(os.Stderr, "\n%s\n\n", adoptionConsentRefusalMessage(syncURL, !allowConsentPrompt))
+			return false, &exitError{Code: decision.ExitCode}
+		}
+		if initAdoptionConsentSatisfied(consent.assumeYes, consent.consentedURL, syncURL) {
+			return true, nil
+		}
+		if allowConsentPrompt && consent.interactive {
+			granted, err := promptInitRemoteAdoptionFn(getRootContext(), syncURL, bufio.NewReader(os.Stdin))
+			if err != nil {
+				if isCanceled(err) {
+					// Ctrl-C at the consent prompt keeps the standard
+					// cancellation exit (130), like every other init prompt.
+					return false, errCanceled()
+				}
+				// A read error is not consent: refuse rather than guess.
+				fmt.Fprintf(os.Stderr, "\n%s\n\n", adoptionConsentRefusalMessage(syncURL, false))
+				return false, &exitError{Code: decision.ExitCode}
+			}
+			if !granted {
+				fmt.Fprintf(os.Stderr, "\n%s\n\n", adoptionConsentRefusalMessage(syncURL, false))
+				return false, &exitError{Code: decision.ExitCode}
+			}
+			// Consent binds to the URL it was asked about, so the later
+			// checkpoint reuses it for the same origin and never asks twice.
+			consent.consentedURL = syncURL
+			return true, nil
+		}
+		fmt.Fprintf(os.Stderr, "\n%s\n\n", adoptionConsentRefusalMessage(syncURL, !allowConsentPrompt))
+		return false, &exitError{Code: decision.ExitCode}
 	case ActionProceedWithDivergence:
 		if decision.Reason == "authorized-divergence" && term.IsTerminal(int(os.Stdin.Fd())) && destroyToken == "" && !*confirmed {
 			expected := FormatDestroyToken(prefix)

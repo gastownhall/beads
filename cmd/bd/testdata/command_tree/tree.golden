@@ -3721,6 +3721,7 @@ bd init
   flag --init-if-missing type=bool default="false" usage="If the workspace is already initialized, skip init and exit 0 instead of failing (idempotent init for scaffolds)"
   flag --mysql-database type=string default="" hidden usage="Legacy MySQL database (removed backend compatibility only)"
   flag --mysql-url type=string default="" hidden usage="Legacy MySQL connection URL (removed backend compatibility only)"
+  flag --no-adopt type=bool default="false" usage="Never derive a Dolt remote from git origin (also BD_NO_REMOTE_ADOPT=1); initialize a local database without remote wiring. Explicit --remote and configured sync.remote are unaffected."
   flag --non-interactive type=bool default="false" usage="Skip all interactive prompts (auto-detected in CI or non-TTY environments)"
   flag --pg-schema type=string default="" hidden usage="Legacy PostgreSQL schema (removed backend compatibility only)"
   flag --pg-url type=string default="" hidden usage="Legacy PostgreSQL connection URL (removed backend compatibility only)"
@@ -3761,6 +3762,7 @@ bd init
   flag --stealth type=bool default="false" usage="Enable stealth mode: keep beads files out of git via .git/info/exclude (sets no-git-ops)"
   flag --team type=bool default="false" usage="Run team workflow setup wizard"
   flag --team-server type=bool default="false" usage="[EXPERIMENTAL] The shared database's schema is managed by beads-team-server (bts): bd never creates the database or runs schema migrations, only verifies the schema version (proxied-server mode only). Not related to --team."
+  flag --yes -y type=bool default="false" usage="Consent to adopting the issue history a derived git origin already carries when no remote is configured (inbound mirror of 'bd dolt push --yes'; see 'bd help init-safety')"
 
 bd init-safety
   use: "init-safety"

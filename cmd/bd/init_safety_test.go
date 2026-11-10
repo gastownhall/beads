@@ -325,6 +325,88 @@ func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 			},
 			ActionProceedWithDivergence, 0,
 		},
+
+		// --- git-origin adoption consent (#6099) --------------------------------
+		// A remote DERIVED from git origin (no --remote, no sync.remote) is
+		// only adopted with consent; --no-adopt skips the derivation
+		// entirely; explicit/configured remotes and the existing override/
+		// token rows above keep their outcomes unchanged.
+		{
+			// The reported incident: derived origin has confirmed history,
+			// plain init, no consent flag. Must demand consent (exit 1,
+			// the generic failure code) instead of silently bootstrapping.
+			"derived/no-flags",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteDerivedFromGitOrigin: true},
+			ActionRequireAdoptionConsent, 1,
+		},
+		{
+			// --yes is consent given ahead of time: adopt.
+			"derived/yes",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteDerivedFromGitOrigin: true, AssumeYes: true},
+			ActionBootstrap, 0,
+		},
+		{
+			// An UNKNOWN probe never demands consent: the plain-init
+			// warn-and-fresh fallback for an unreachable origin keeps its
+			// existing behavior (fail-closed RemoteHasDoltData=true still
+			// feeds the override refusals).
+			"derived/probe-unknown",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteDerivedFromGitOrigin: true, RemoteProbeUnknown: true},
+			ActionBootstrap, 0,
+		},
+		{
+			// A derived origin with no Dolt history is untouched: nothing to
+			// adopt, nothing to consent to.
+			"derived/no-data",
+			RemoteSafetyInput{RemoteDerivedFromGitOrigin: true},
+			ActionNoRemoteData, 0,
+		},
+		{
+			// Consent never bypasses the divergence guard: --yes with a
+			// local-source override flag keeps the bd-q83 refusal.
+			"derived/yes+force",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteDerivedFromGitOrigin: true, AssumeYes: true, Force: true},
+			ActionRefuseDivergence, ExitRemoteDivergenceRefused,
+		},
+		{
+			// ...nor the destroy-token requirement.
+			"derived/yes+force+discard/no-token",
+			RemoteSafetyInput{
+				RemoteHasDoltData: true, RemoteDerivedFromGitOrigin: true, AssumeYes: true,
+				Force: true, DiscardRemote: true, ExpectedToken: "DESTROY-bd",
+			},
+			ActionRequireDestroyToken, ExitDestroyTokenMissing,
+		},
+		{
+			// --no-adopt skips the derived remote and beats --yes: the safer
+			// of two contradictory instructions wins, and it takes effect
+			// even before the no-data branch (no probe ran at all).
+			"derived/no-adopt",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteDerivedFromGitOrigin: true, NoAdopt: true},
+			ActionSkipRemote, 0,
+		},
+		{
+			"derived/no-adopt+yes",
+			RemoteSafetyInput{RemoteHasDoltData: true, RemoteDerivedFromGitOrigin: true, NoAdopt: true, AssumeYes: true},
+			ActionSkipRemote, 0,
+		},
+		{
+			"derived/no-adopt/no-data",
+			RemoteSafetyInput{RemoteDerivedFromGitOrigin: true, NoAdopt: true},
+			ActionSkipRemote, 0,
+		},
+		{
+			// The opt-out never touches a remote the caller named explicitly
+			// or configured: those keep their existing bootstrap semantics.
+			"explicit/no-adopt",
+			RemoteSafetyInput{RemoteHasDoltData: true, NoAdopt: true},
+			ActionBootstrap, 0,
+		},
+		{
+			"explicit/yes+no-adopt",
+			RemoteSafetyInput{RemoteHasDoltData: true, AssumeYes: true, NoAdopt: true},
+			ActionBootstrap, 0,
+		},
 	}
 
 	for _, tc := range cases {
@@ -507,7 +589,7 @@ func TestHandleRemoteSafetyDecision_RefusalSeam(t *testing.T) {
 			// terms rather than relying on the harness lacking a TTY.
 			bootstrap, err := handleRemoteSafetyDecision(
 				tc.decision, "bd", "git+https://example.invalid/repo.git",
-				"DESTROY-bd", nil, true, &confirmed,
+				"DESTROY-bd", nil, true, &confirmed, nil, false,
 			)
 			if bootstrap != tc.wantBootstrap {
 				t.Errorf("bootstrap = %v, want %v", bootstrap, tc.wantBootstrap)
@@ -970,3 +1052,71 @@ func TestInitForceDiscardRemoteProceedsWithToken(t *testing.T) {
 
 // Helpers used above: buildBDForInitTests, runGitForBootstrapTest — both
 // defined elsewhere in the test package (init_test.go and bootstrap_test.go).
+
+// TestInitGitOriginAdoptionRefusesWithoutConsent is the CI-lane end-to-end
+// regression for GH#6099 item 1: a fork-less clone whose origin carries
+// synthetic refs/dolt/data, a non-interactive plain `bd init` with no --yes,
+// must refuse with exit 1 naming the origin and its consent/opt-out
+// remedies, creating no workspace. The embedded twin
+// (TestEmbeddedInitGitOriginAdoptionRequiresConsent) proves the same refusal
+// against a real upstream issue history.
+func TestInitGitOriginAdoptionRefusesWithoutConsent(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	bareDir := filepath.Join(t.TempDir(), "bare.git")
+	runGitForBootstrapTest(t, "", "init", "--bare", bareDir)
+
+	sourceDir := t.TempDir()
+	runGitForBootstrapTest(t, sourceDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, sourceDir, "config", "user.email", "test@test.com")
+	runGitForBootstrapTest(t, sourceDir, "config", "user.name", "Test User")
+	runGitForBootstrapTest(t, sourceDir, "commit", "--allow-empty", "-m", "init")
+	runGitForBootstrapTest(t, sourceDir, "remote", "add", "origin", bareDir)
+	runGitForBootstrapTest(t, sourceDir, "push", "origin", "main")
+	runGitForBootstrapTest(t, sourceDir, "push", "origin", "HEAD:refs/dolt/data")
+
+	cloneDir := t.TempDir()
+	runGitForBootstrapTest(t, cloneDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, cloneDir, "remote", "add", "origin", bareDir)
+	runGitForBootstrapTest(t, cloneDir, "config", "core.hooksPath", ".git/hooks")
+	homeDir := t.TempDir() // must differ from workDir: metrics.go caches to $HOME/.beads
+
+	cmd := exec.Command(bdBin, "init", "--prefix", "mine", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+	cmd.Dir = cloneDir
+	cmd.Env = hermeticInitEnv(homeDir)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+
+	if err == nil {
+		t.Fatalf("bd init succeeded; expected the adoption-consent refusal. stderr:\n%s", stderr.String())
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("non-exec-exit error: %v\nstderr:\n%s", err, stderr.String())
+	}
+	if code := exitErr.ExitCode(); code != 1 {
+		t.Errorf("exit code = %d, want 1 (adoption consent refusal, the generic failure code)", code)
+	}
+
+	stderrStr := stderr.String()
+	for _, must := range []string{
+		bareDir,          // the refusal names the origin it would adopt
+		"bd init --yes",  // and the consent remedy
+		"--no-adopt",     // and the opt-out remedy
+		"BD_NO_REMOTE_ADOPT",
+	} {
+		if !strings.Contains(stderrStr, must) {
+			t.Errorf("adoption refusal missing %q:\n%s", must, stderrStr)
+		}
+	}
+	if strings.Contains(stderrStr, "Bootstrapped from remote") {
+		t.Errorf("init output claims a bootstrap happened:\n%s", stderrStr)
+	}
+
+	// The early-refusal path must create no workspace.
+	beadsDir := filepath.Join(cloneDir, ".beads")
+	if _, err := os.Stat(beadsDir); err == nil {
+		t.Errorf("adoption refusal should not have created %s", beadsDir)
+	}
+}

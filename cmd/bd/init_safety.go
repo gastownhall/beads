@@ -11,6 +11,11 @@ package main
 // authorizes the cross-boundary operation via `--discard-remote` + a
 // destroy-token.
 //
+// Adopting a git-origin-derived remote's issue history additionally requires
+// consent (#6099): `--yes` ahead of time, or an affirmative answer to the
+// early interactive prompt. `--non-interactive` is not consent. `--no-adopt`
+// / `BD_NO_REMOTE_ADOPT=1` skips the derivation entirely.
+//
 // Error-message contract: no runtime error may emit a complete destructive
 // invocation. Flag identifiers and safe-tool names are permitted; token
 // values and other friction-bearing arguments live in `bd help init-safety`
@@ -99,6 +104,18 @@ const (
 	// caller). Skip bootstrap; wire the remote so the caller can
 	// force-push local history on next operation.
 	ActionProceedWithDivergence
+
+	// ActionSkipRemote — the caller asked never to derive a remote from git
+	// origin (--no-adopt / BD_NO_REMOTE_ADOPT) and the remote candidate WAS
+	// derived: proceed with a purely local init. Not a refusal.
+	ActionSkipRemote
+
+	// ActionRequireAdoptionConsent — the git-origin-derived remote has Dolt
+	// history and the caller did not consent to adopting it (#6099). The
+	// caller must obtain consent (--yes, an affirmative interactive prompt)
+	// or refuse with the generic failure code 1; adopting silently is the
+	// bug this action exists to prevent.
+	ActionRequireAdoptionConsent
 )
 
 // RemoteSafetyInput is the minimal input to CheckRemoteSafety. Pure
@@ -126,6 +143,32 @@ type RemoteSafetyInput struct {
 	// Observed state.
 	RemoteHasDoltData bool
 
+	// RemoteDerivedFromGitOrigin marks the remote candidate as derived from
+	// git origin (no explicit --remote, no configured sync.remote). Only a
+	// derived remote is subject to the adoption consent gate and the
+	// --no-adopt opt-out; explicit and configured remotes name their source
+	// and keep their existing semantics (#6099).
+	RemoteDerivedFromGitOrigin bool
+
+	// RemoteProbeUnknown is true when the refs/dolt/data probe could not
+	// reach the remote. The fail-closed probe already reports such a remote
+	// as having data (RemoteHasDoltData=true) so override flags keep their
+	// refusal, but consent is NOT demanded for an unverified history: the
+	// plain-init warn-and-fresh fallback for an unreachable origin keeps its
+	// existing behavior, and a later successful probe re-asks.
+	RemoteProbeUnknown bool
+
+	// NoAdopt is --no-adopt / BD_NO_REMOTE_ADOPT: never derive a remote
+	// from git origin. It precedes the remote-data and override evaluation
+	// and beats AssumeYes — the safer of two contradictory instructions
+	// wins. Callers also skip the derivation (and the probe) entirely.
+	NoAdopt bool
+
+	// AssumeYes is bd init --yes: consent given ahead of time to importing
+	// a derived origin's issue history. It authorizes adoption only — never
+	// the divergence/destroy-token guards below.
+	AssumeYes bool
+
 	// IsInteractive is true when the caller is attached to a TTY.
 	// Interactive callers can prompt for destroy-token confirmation, so the
 	// decision returned for an interactive caller that supplied NO token
@@ -151,6 +194,16 @@ type RemoteSafetyDecision struct {
 // function — never add a new `&& !someFlag` at the call site. See the
 // guard matrix test in init_safety_test.go.
 func CheckRemoteSafety(in RemoteSafetyInput) RemoteSafetyDecision {
+	// Opt-out (--no-adopt / BD_NO_REMOTE_ADOPT): never derive a remote from
+	// git origin. It precedes the remote-data and override evaluation — a
+	// derived remote is skipped whether the probe found data, found none,
+	// or never ran — and it beats --yes: the safer of two contradictory
+	// instructions wins (#6099). It never applies to a remote the caller
+	// named explicitly or configured; those keep their existing semantics.
+	if in.RemoteDerivedFromGitOrigin && in.NoAdopt {
+		return RemoteSafetyDecision{Action: ActionSkipRemote, Reason: "no-adopt"}
+	}
+
 	// No remote data → no cross-boundary concern. Proceed.
 	if !in.RemoteHasDoltData {
 		return RemoteSafetyDecision{Action: ActionNoRemoteData, Reason: "no-remote-data"}
@@ -164,8 +217,22 @@ func CheckRemoteSafety(in RemoteSafetyInput) RemoteSafetyDecision {
 	userOverride := in.Force || in.ReinitLocal || in.FromJSONL || in.DiscardRemote
 
 	// Remote has data, user did not override anything. Bootstrap is the
-	// safe adoption path — this is the existing correct behavior.
+	// adoption path. For a remote derived from git origin it is gated on
+	// consent (#6099): a non-interactive init must opt in with --yes, and
+	// an interactive one must answer the prompt — importing another
+	// project's whole issue history silently is the reported incident.
+	// An UNKNOWN probe stays out of the gate so the plain-init
+	// warn-and-fresh fallback for an unreachable origin keeps its existing
+	// behavior; a consent flag never reaches past this branch into the
+	// divergence/destroy-token guards.
 	if !userOverride {
+		if in.RemoteDerivedFromGitOrigin && !in.AssumeYes && !in.RemoteProbeUnknown {
+			return RemoteSafetyDecision{
+				Action:   ActionRequireAdoptionConsent,
+				Reason:   "adoption-consent-required",
+				ExitCode: 1, // the generic failure code: no new stable exit code without a protocol spec revision (see ExitHomeDirRefused)
+			}
+		}
 		return RemoteSafetyDecision{Action: ActionBootstrap, Reason: "bootstrap-from-remote"}
 	}
 
@@ -287,4 +354,23 @@ func refusalMessageTokenMismatch() string {
 // runtime error text (see the ADR invariant).
 func FormatDestroyToken(prefix string) string {
 	return fmt.Sprintf("DESTROY-%s", prefix)
+}
+
+// skipDerivedRemoteAdoption reports whether bd init must not derive a Dolt
+// remote from git origin at all: --no-adopt or a truthy BD_NO_REMOTE_ADOPT
+// (#6099). Both init checkpoints and the proxied init route apply it before
+// any origin resolution or probing, so an opted-out run never touches the
+// origin. It never affects an explicit --remote or a configured sync.remote.
+func skipDerivedRemoteAdoption(noAdoptFlag bool) bool {
+	return noAdoptFlag || envNoRemoteAdopt()
+}
+
+// initAdoptionConsentSatisfied reports whether the caller's consent inputs
+// authorize importing the derived remote at syncURL (#6099): --yes consents
+// to any derived origin; a consent granted at the interactive early prompt
+// binds to the normalized URL it named, so a later checkpoint that newly
+// finds populated derived history — or derives a different URL — cannot
+// silently reuse it.
+func initAdoptionConsentSatisfied(assumeYes bool, consentedURL, syncURL string) bool {
+	return assumeYes || (consentedURL != "" && consentedURL == syncURL)
 }

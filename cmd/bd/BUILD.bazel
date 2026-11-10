@@ -190,6 +190,7 @@ go_library(
         "info.go",
         "info_proxied_server.go",
         "init.go",
+        "init_adoption_consent.go",
         "init_agent.go",
         "init_contributor.go",
         "init_git_hooks.go",
