@@ -101,3 +101,16 @@ func TestHidePolicy(t *testing.T) {
 		})
 	}
 }
+
+// TestBackgroundCreationFlags pins, on every platform, the flags
+// BackgroundSysProcAttr gives the long-lived children on Windows: a hidden
+// console of their own and their own process group, and never no console.
+func TestBackgroundCreationFlags(t *testing.T) {
+	if backgroundCreationFlags != createNoWindow|createNewProcessGroup {
+		t.Fatalf("backgroundCreationFlags = %#x, want CREATE_NO_WINDOW|CREATE_NEW_PROCESS_GROUP (%#x)",
+			backgroundCreationFlags, createNoWindow|createNewProcessGroup)
+	}
+	if backgroundCreationFlags&(detachedProcess|createNewConsole) != 0 {
+		t.Fatalf("backgroundCreationFlags = %#x includes DETACHED_PROCESS or CREATE_NEW_CONSOLE", backgroundCreationFlags)
+	}
+}

@@ -44,3 +44,23 @@ func hide(cmd *exec.Cmd) {
 	attr.CreationFlags = flags
 	cmd.SysProcAttr = attr
 }
+
+// BackgroundSysProcAttr returns fresh attributes for a long-lived child that
+// must outlive the command that starts it: bd db-proxy-child and the dolt
+// sql-servers. Unlike Hide it applies whether or not bd has a console, since
+// such a child must never hold on to (or pop up) a console window.
+//
+// CREATE_NO_WINDOW gives the child a console of its own that is never
+// displayed. It is the child's, not the parent's, so the child survives the
+// parent exiting, and every console program it starts in turn inherits it
+// rather than allocating a visible one. CREATE_NEW_PROCESS_GROUP keeps a
+// Ctrl+C aimed at the parent's group from reaching it.
+//
+// Not DETACHED_PROCESS: that leaves the child with no console at all, and
+// dolt runs `uname -s`, `uname -r` and `uname -m` on every start; with Git
+// for Windows on PATH each is a console program that then gets a fresh,
+// visible console, three windows per server start. CREATE_NO_WINDOW is
+// ignored alongside it anyway.
+func BackgroundSysProcAttr() *syscall.SysProcAttr {
+	return &syscall.SysProcAttr{CreationFlags: backgroundCreationFlags}
+}

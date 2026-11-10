@@ -48,3 +48,11 @@ func TestHideDoesNotOverwriteExistingAttr(t *testing.T) {
 			cmd.Path, cmd.Args, cmd.Dir, cmd.Env)
 	}
 }
+
+// TestBackgroundSysProcAttrIsNilOffWindows: the long-lived children's own
+// Unix attributes stay whatever their packages set.
+func TestBackgroundSysProcAttrIsNilOffWindows(t *testing.T) {
+	if attr := BackgroundSysProcAttr(); attr != nil {
+		t.Fatalf("BackgroundSysProcAttr() = %+v off windows, want nil", attr)
+	}
+}

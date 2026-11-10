@@ -41,6 +41,9 @@ const (
 	// consoleChoiceFlags are the flags by which a caller has already decided
 	// what console the child gets.
 	consoleChoiceFlags = createNoWindow | detachedProcess | createNewConsole
+
+	// backgroundCreationFlags are BackgroundSysProcAttr's flags on Windows.
+	backgroundCreationFlags = createNoWindow | createNewProcessGroup
 )
 
 // Hide keeps cmd from allocating a visible console window on Windows and

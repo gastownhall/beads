@@ -519,6 +519,9 @@ func (s *DoltServer) startAttempt(ctx context.Context, prepare bool, lock *util.
 
 	cmd := exec.CommandContext(managedCtx, s.doltBinExec, args...)
 	cmd.Dir = s.rootDir
+	// Windows: a hidden console of its own, so the server never shows a
+	// window (procattr_windows.go). Nil elsewhere, as before.
+	cmd.SysProcAttr = managedServerSysProcAttr()
 	cmd.Stdin = nil
 	// Both streams go through one watcher, which forwards to the log file
 	// and spots the ready line and a port conflict for waitReady.
