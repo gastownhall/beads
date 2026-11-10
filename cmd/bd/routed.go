@@ -110,6 +110,9 @@ func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage
 	// Try local store first.
 	result, err := resolveAndGetFromStore(ctx, localStore, id, false)
 	if err == nil {
+		if writable {
+			return redirectLocalCopyToOwner(ctx, localStore, result, true)
+		}
 		return result, nil
 	}
 
