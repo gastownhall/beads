@@ -43,6 +43,8 @@ func TestDropNamedDatabaseDropsOnlyThatDatabase(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db, mock := newDropDatabaseMock(t, "information_schema", "mysql", "other_proj", "old_proj", "my_proj")
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT DATABASE()")).
+				WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow(nil))
 			mock.ExpectExec(regexp.QuoteMeta("DROP DATABASE `old_proj`")).WillReturnResult(sqlmock.NewResult(0, 0))
 
 			res, err := dropNamedDatabase(t.Context(), db, dropDatabaseRequest{
@@ -97,5 +99,66 @@ func TestDoltDropDatabaseReportsUndropRecovery(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Errorf("report missing %q:\n%s", want, text)
 		}
+	}
+}
+
+// TestDropNamedDatabaseRefuses is AC-8 of GH#6099: a named drop refuses with
+// guidance, before any prompt and without a DROP, for a protected system
+// database, beads_global, the connection's current database, the
+// workspace's configured database, a test-prefix name (clean-databases owns
+// those), a database the server does not have, and missing consent.
+func TestDropNamedDatabaseRefuses(t *testing.T) {
+	server := []string{"information_schema", "mysql", "performance_schema", "sys", "beads_global", "team_global", "cur_proj", "my_proj", "testdb_abc", "old_proj"}
+	for _, tc := range []struct {
+		name, target string
+		current      string
+		consent      bool
+		confirm      func(string) (bool, error)
+		wantMsg      string
+		wantHint     string
+	}{
+		{name: "system-db", target: "mysql", consent: true, wantMsg: "system database", wantHint: "never drops"},
+		{name: "system-db-case", target: "INFORMATION_SCHEMA", consent: true, wantMsg: "system database"},
+		{name: "system-db-sys", target: "sys", consent: true, wantMsg: "system database"},
+		{name: "beads-global", target: "beads_global", consent: true, wantMsg: "shared-server global database"},
+		{name: "configured-global", target: "team_global", consent: true, wantMsg: "shared-server global database"},
+		{name: "configured", target: "my_proj", consent: true, wantMsg: "this workspace's database", wantHint: "another workspace"},
+		{name: "current", target: "cur_proj", current: "cur_proj", consent: true, wantMsg: "the connection's current database"},
+		{name: "test-prefix", target: "testdb_abc", consent: true, wantMsg: "test database", wantHint: "bd dolt clean-databases"},
+		{name: "missing", target: "nope", consent: true, wantMsg: "does not exist"},
+		{name: "no-consent", target: "old_proj", wantMsg: "no confirmation", wantHint: "--yes"},
+		{name: "declined", target: "old_proj", confirm: func(string) (bool, error) { return false, nil }, wantMsg: "no confirmation"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock := newDropDatabaseMock(t, server...)
+			if tc.current != "" || tc.name == "no-consent" || tc.name == "declined" {
+				mock.ExpectQuery(regexp.QuoteMeta("SELECT DATABASE()")).
+					WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow(tc.current))
+			}
+			prompted := false
+			confirm := tc.confirm
+			if tc.consent {
+				confirm = func(string) (bool, error) { prompted = true; return true, nil }
+			}
+			_, err := dropNamedDatabase(t.Context(), db, dropDatabaseRequest{
+				name:       tc.target,
+				configured: "my_proj",
+				globals:    []string{"team_global"},
+				confirm:    confirm,
+			})
+			refusal, ok := err.(*dropDatabaseRefusal)
+			if !ok {
+				t.Fatalf("dropNamedDatabase(%q) = %v, want a refusal", tc.target, err)
+			}
+			if !strings.Contains(refusal.message, tc.wantMsg) || !strings.Contains(refusal.hint, tc.wantHint) {
+				t.Errorf("refusal = %q / hint %q, want %q / %q", refusal.message, refusal.hint, tc.wantMsg, tc.wantHint)
+			}
+			if prompted {
+				t.Errorf("prompted before refusing %q: a refused drop must not ask", tc.target)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("statements: %v", err)
+			}
+		})
 	}
 }
