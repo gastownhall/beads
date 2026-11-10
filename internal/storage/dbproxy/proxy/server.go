@@ -591,7 +591,9 @@ func waitForServerReady(ctx context.Context, s server.DatabaseServer, timeout ti
 		if err != nil {
 			return err
 		}
-		_ = conn.Close()
+		// Read the greeting before closing: an unread close resets the
+		// connection, which dolt treats as an aborted handshake (#5589).
+		_ = doltserver.DrainAndCloseProbe(conn)
 		// The dial proves something answers on the backend's address, not
 		// that the backend does. A local backend's Start has already proved
 		// its own process owns the port (see server.DoltServer.waitReady),
