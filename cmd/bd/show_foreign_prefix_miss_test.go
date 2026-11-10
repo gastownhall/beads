@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -153,6 +155,19 @@ func withoutHintLines(stderr, id string) string {
 	return kept
 }
 
+// exitCode is err's exit status as bd reports it: 0 for nil, the
+// *exitError's code, or -1 for any other error.
+func exitCode(err error) int {
+	var exit *exitError
+	switch {
+	case err == nil:
+		return 0
+	case errors.As(err, &exit):
+		return exit.Code
+	}
+	return -1
+}
+
 // TestShowRefsChildren_ForeignPrefixMissHint pins AC-5 (GH#5259): bd show
 // --refs and --children keep their current leading line and exit status for
 // an unrouted foreign-prefix miss and add the direct route's limited-search
@@ -208,3 +223,65 @@ const (
 	foreignPrefixHintMarker = "does not mean the issue is absent"
 	existingHintMarker      = "never existed"
 )
+
+// TestShowForeignPrefixMiss_JSONCompatibility pins AC-6 (GH#5259): under
+// --json, a foreign-prefix miss leaves each mode's stdout payload and exit
+// status exactly as an own-prefix miss leaves them, which this change does
+// not touch, whether every id misses or a found id comes with it; only the
+// stderr diagnostics gain the foreign-prefix hint.
+func TestShowForeignPrefixMiss_JSONCompatibility(t *testing.T) {
+	const foreignID, ownID, foundID = "herald-x7k", "openclaw-zz9", "openclaw-ab1"
+	for _, mode := range []string{"direct", "refs", "children"} {
+		t.Run(mode, func(t *testing.T) {
+			useShowFixture(t, newShowFixtureStore(foundID), true)
+
+			for _, batch := range []struct {
+				name          string
+				foreign, own  []string
+				wantFoundJSON bool
+			}{
+				{name: "all missing", foreign: []string{foreignID}, own: []string{ownID}},
+				{name: "found and missing", foreign: []string{foundID, foreignID}, own: []string{foundID, ownID}, wantFoundJSON: true},
+			} {
+				fOut, fErr, fRunErr := runShowMode(t, mode, batch.foreign...)
+				oOut, oErr, oRunErr := runShowMode(t, mode, batch.own...)
+
+				if fOut != oOut {
+					t.Errorf("%s: stdout differs:\nforeign %q\nown     %q", batch.name, fOut, oOut)
+				}
+				if batch.wantFoundJSON != strings.Contains(oOut, foundID) {
+					t.Errorf("%s: own-prefix stdout %q, want the found issue in it: %v", batch.name, oOut, batch.wantFoundJSON)
+				}
+				if fc, oc := exitCode(fRunErr), exitCode(oRunErr); fc != oc {
+					t.Errorf("%s: exit %d (%v), own-prefix exit %d (%v)", batch.name, fc, fRunErr, oc, oRunErr)
+				}
+				if got, want := withoutHintLines(fErr, foreignID), withoutHintLines(oErr, ownID); got != want {
+					t.Errorf("%s: non-hint stderr differs:\nforeign %q\nown     %q", batch.name, got, want)
+				}
+				if !strings.Contains(fErr, foreignPrefixHintMarker) {
+					t.Errorf("%s: foreign-prefix stderr %q, want the foreign-prefix hint", batch.name, fErr)
+				}
+				if strings.Contains(oErr, foreignPrefixHintMarker) {
+					t.Errorf("%s: own-prefix stderr %q carries the foreign-prefix hint", batch.name, oErr)
+				}
+			}
+		})
+	}
+
+	// The comparison above is only as good as its baseline: pin that the
+	// own-prefix payloads are the ones bd show has always printed.
+	useShowFixture(t, newShowFixtureStore(foundID), true)
+	for mode, want := range map[string]map[string]any{
+		"refs":     {foundID: nil, "schema_version": float64(1)},
+		"children": {foundID: []any{}, "schema_version": float64(1)},
+	} {
+		stdout, _, err := runShowMode(t, mode, foundID, ownID)
+		var got map[string]any
+		if err != nil || json.Unmarshal([]byte(stdout), &got) != nil {
+			t.Fatalf("bd show --%s --json: (%v, %q)", mode, err, stdout)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("bd show --%s --json stdout = %v, want %v", mode, got, want)
+		}
+	}
+}
