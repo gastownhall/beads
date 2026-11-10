@@ -164,3 +164,37 @@ func TestCleanDatabasesReadonly(t *testing.T) {
 		}
 	})
 }
+
+// TestFederationSyncReadonly pins AC-8: `bd federation sync` publishes to its
+// peers as well as receiving, so strict read-only refuses it before the sync
+// operation runs, with or without an explicit --peer.
+func TestFederationSyncReadonly(t *testing.T) {
+	w := newDoltReadonlyGateWorkspace(t)
+	beadsBefore := snapshotReadonlyTree(t, filepath.Join(w.dir, ".beads"))
+	remoteBefore := snapshotReadonlyTree(t, w.remoteDir)
+
+	rows := []struct {
+		name string
+		args []string
+	}{
+		{name: "all-peers", args: []string{"federation", "sync"}},
+		{name: "one-peer", args: []string{"federation", "sync", "--peer", "origin"}},
+	}
+	for _, spelling := range readonlyGateSpellings {
+		t.Run(spelling.name, func(t *testing.T) {
+			for _, row := range rows {
+				t.Run(row.name, func(t *testing.T) {
+					args := append(append([]string{}, row.args...), spelling.flags...)
+					stdout, stderr, code := w.run(t, spelling.env, args...)
+					assertStandardReadonlyRefusal(t, "federation sync", stdout, stderr, code)
+					if diff := readonlyTreeDiff(remoteBefore, snapshotReadonlyTree(t, w.remoteDir)); len(diff) > 0 {
+						t.Errorf("a refused federation sync changed the peer:\n  %s", strings.Join(diff, "\n  "))
+					}
+					if diff := readonlyTreeDiff(beadsBefore, snapshotReadonlyTree(t, filepath.Join(w.dir, ".beads"))); len(diff) > 0 {
+						t.Errorf("a refused federation sync changed .beads:\n  %s", strings.Join(diff, "\n  "))
+					}
+				})
+			}
+		})
+	}
+}
