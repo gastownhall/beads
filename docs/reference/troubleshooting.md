@@ -558,6 +558,21 @@ as [#11739](https://github.com/dolthub/dolt/issues/11739), and fixed upstream
 by [#11742](https://github.com/dolthub/dolt/pull/11742) and
 [#11745](https://github.com/dolthub/dolt/pull/11745).
 
+The fixes first shipped in Dolt 2.3.3, and current beads main already
+carries them: it links Dolt 2.6.0, and outside embedded mode it refuses a
+detected Dolt server or CLI older than 2.6.0. The released beads v1.3.4
+embeds an engine that predates the fix, so an affected installation needs
+an upgrade, and which upgrade depends on how it runs:
+
+- **Embedded mode** (the default `bd init`): the Dolt engine is linked into
+  the `bd` binary itself, so a corrected engine arrives only with a beads
+  release that contains it. Upgrading or replacing a standalone `dolt`
+  binary does not replace the embedded engine.
+- **Server or external mode**: install the supported Dolt version — see
+  [Which Dolt version to install](/architecture/dolt#which-dolt-version-to-install)
+  — including the `dolt` CLI used for git-protocol transfers, and restart
+  the server on the new binary.
+
 ## Git Hook Issues
 
 ### Hooks not running
