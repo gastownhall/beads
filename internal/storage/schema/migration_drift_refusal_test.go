@@ -3,6 +3,7 @@ package schema
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"regexp"
@@ -357,6 +358,116 @@ func TestRunMigrationsEncodingDriftAttributionBounds(t *testing.T) {
 		}
 		if applied != 1 {
 			t.Errorf("applied = %d, want 1", applied)
+		}
+	})
+}
+
+// panickingBodyDB panics out of ExecContext the way the embedded engine's
+// unconverted decode paths do.
+type panickingBodyDB struct{ mockDB }
+
+func (*panickingBodyDB) ExecContext(context.Context, string, ...any) (sql.Result, error) {
+	panic("invalid hash length: 19")
+}
+
+// TestMigrationDriftClassificationPreservesOtherFailures: the drift boundary
+// changes nothing else. Healthy steps run in order and count as before,
+// unrelated failures keep their exact text and type, a raw engine panic passes
+// through untouched (Beads adds no recover), and the aux re-key keeps its own
+// narrower classifier.
+func TestMigrationDriftClassificationPreservesOtherFailures(t *testing.T) {
+	ok := sqlmock.NewResult(0, 0)
+
+	t.Run("healthy steps", func(t *testing.T) {
+		var out bytes.Buffer
+		orig := stderr
+		stderr = &out
+		t.Cleanup(func() { stderr = orig })
+		zeroIssueRowCounter(t)
+		stubUpdatedAtGuard(t)
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+		defer db.Close()
+		mock.ExpectExec(regexp.QuoteMeta(migrationBody(t, migration0059))).WillReturnResult(ok)
+		mock.ExpectExec(`INSERT IGNORE INTO schema_migrations`).WithArgs(59, sqlmock.AnyArg()).WillReturnResult(ok)
+		mock.ExpectExec(regexp.QuoteMeta(migrationBody(t, "0060_add_storage_class.up.sql"))).WillReturnResult(ok)
+		mock.ExpectExec(`INSERT IGNORE INTO schema_migrations`).WithArgs(60, sqlmock.AnyArg()).WillReturnResult(ok)
+
+		applied, err := runMigrations(context.Background(), db, mainSource, 58, 60, false)
+		if err != nil {
+			t.Fatalf("healthy pass failed: %v", err)
+		}
+		if applied != 2 {
+			t.Errorf("applied = %d, want 2", applied)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet expectations: %v", err)
+		}
+		if got := strings.Count(out.String(), "done ("); got != 2 {
+			t.Errorf("success lines = %d, want 2:\n%s", got, out.String())
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"duplicate key", errors.New("Error 1062 (23000): duplicate unique key given: [bd-1]")},
+		{"lock wait timeout", errors.New("Error 1205 (HY000): Lock wait timeout exceeded; try restarting transaction")},
+		{"unrelated recovered panic", errors.New("Error 1105 (HY000): panic recovered: runtime error: index out of range [3] with length 3")},
+		{"bare 1105", errors.New("Error 1105 (HY000): no root value found in session")},
+	} {
+		t.Run("unrelated error: "+tc.name, func(t *testing.T) {
+			quietStderr(t)
+			zeroIssueRowCounter(t)
+			stubUpdatedAtGuard(t)
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+			mock.ExpectExec(regexp.QuoteMeta(migrationBody(t, migration0059))).WillReturnError(tc.err)
+
+			applied, err := runMigrations(context.Background(), db, mainSource, 58, 60, false)
+
+			if want := "migration " + migration0059 + ": " + tc.err.Error(); err == nil || err.Error() != want {
+				t.Errorf("err = %v, want unchanged %q", err, want)
+			}
+			if !errors.Is(err, tc.err) {
+				t.Errorf("unrelated error lost its cause: %v", err)
+			}
+			var refusal *SchemaEncodingDriftError
+			if errors.As(err, &refusal) {
+				t.Errorf("unrelated error was classified as drift: %v", err)
+			}
+			if applied != 0 {
+				t.Errorf("applied = %d, want 0", applied)
+			}
+		})
+	}
+
+	t.Run("raw panic passes through", func(t *testing.T) {
+		quietStderr(t)
+		zeroIssueRowCounter(t)
+		stubUpdatedAtGuard(t)
+		var recovered any
+		func() {
+			defer func() { recovered = recover() }()
+			_, _ = runMigrations(context.Background(), &panickingBodyDB{}, mainSource, 58, 60, false)
+		}()
+		if recovered != "invalid hash length: 19" {
+			t.Errorf("recovered %#v, want the engine's raw panic value unchanged", recovered)
+		}
+	})
+
+	t.Run("aux re-key classifier unchanged", func(t *testing.T) {
+		if !isSchemaEncodingDriftErr(errors.New("Error 1105 (HY000): panic recovered: invalid hash length: 19")) {
+			t.Error("aux re-key no longer tolerates the hash-length drift it skips")
+		}
+		if isSchemaEncodingDriftErr(errors.New("malformed out-of-band adaptive value: invalid address length 3")) {
+			t.Error("aux re-key widened to the migration-only adaptive signature")
 		}
 	})
 }
