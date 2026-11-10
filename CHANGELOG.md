@@ -1226,6 +1226,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A moved repository no longer silently disables hooks.** `bd hooks
+  install --beads` writes `core.hooksPath` as an absolute path (required for
+  linked worktrees), so moving or re-cloning the repository strands that
+  path and git runs no hooks at all, while `bd hooks list` and `bd doctor`
+  misreported the fault as hooks "not installed". Both now name the stale
+  configuration: `bd hooks list` reports a missing configured hooks
+  directory before the per-hook statuses (and adds a `hooks_path` object to
+  `--json`), and `bd doctor` reports the relocated path. `bd doctor --fix`
+  repoints a repository-local stranded beads hooks path to the validated
+  current directory (the effective storage directory, `BEADS_DIR` and
+  `.beads/redirect` included), never creating the stale one; a plain
+  `bd hooks install` (and the reinstall `bd config apply` uses) installs to
+  the current target and repoints when the relocation is eligible, and
+  refuses with an explanation instead of recreating the stale destination
+  otherwise. Third-party, global, worktree- or command-scoped, and
+  unrecognized values are never rewritten: repair those manually
+  (`git config --show-scope --get core.hooksPath` names where a value comes
+  from). Ordinary bd invocations never mutate git configuration.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

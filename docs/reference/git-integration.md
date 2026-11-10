@@ -83,6 +83,19 @@ storage, is still supported.
 bd hooks list
 ```
 
+When `core.hooksPath` names a directory that no longer exists — most
+commonly after the repository was moved or re-cloned, stranding the absolute
+path bd writes — the status names the stale configuration and explains that
+git runs no hooks from it, before the per-hook statuses. If the current
+hooks directory can be validated, the repair names it and suggests
+`bd doctor --fix` or `bd hooks install`; a path bd does not own
+(third-party, or set at global/worktree/command scope) is reported with the
+fault but never rewritten. `--json` keeps the `hooks` array and adds a
+`hooks_path` object (`configured`, `resolved`, `exists`, `relocated_to`)
+when the configured directory is missing. Ordinary bd invocations never
+mutate `core.hooksPath`; only `bd hooks install` and `bd doctor --fix`
+repair it.
+
 ### Uninstall
 
 ```bash

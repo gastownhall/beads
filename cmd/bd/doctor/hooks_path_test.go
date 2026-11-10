@@ -806,3 +806,28 @@ func TestFixHooksPath_RelocatedLinkedWorktree(t *testing.T) {
 		}
 	}
 }
+
+// TestDoctorGitHooks_RelocatedHooksPath pins AC-8 of the GH#5853 design:
+// with a configured hooks directory missing, the doctor Git Hooks finding
+// names the configuration fault instead of reporting "no hooks installed",
+// and offers no generic force-install — the Hooks Path check owns that
+// repair.
+func TestDoctorGitHooks_RelocatedHooksPath(t *testing.T) {
+	repoDir, stale, current := strandedHooksRepo(t, ".beads/hooks")
+	runInDir(t, repoDir, func() {
+		check := CheckGitHooks("1.0.0")
+		if check.Status != StatusWarning {
+			t.Fatalf("expected StatusWarning, got %q: %s", check.Status, check.Message)
+		}
+		if !strings.Contains(check.Message, "core.hooksPath") && !strings.Contains(check.Detail, "core.hooksPath") {
+			t.Errorf("the Git Hooks finding must name the configuration fault, got: %s (%s)", check.Message, check.Detail)
+		}
+		if !strings.Contains(check.Detail, stale) {
+			t.Errorf("the Git Hooks finding must name the configured path %q, got: %s", stale, check.Detail)
+		}
+		if check.Fix != "" {
+			t.Errorf("the generic force-install action must be suppressed while a configured destination is missing (Hooks Path owns the repair), got fix: %s", check.Fix)
+		}
+		_ = current
+	})
+}

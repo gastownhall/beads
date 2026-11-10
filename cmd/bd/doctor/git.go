@@ -53,6 +53,21 @@ func CheckGitHooks(cliVersion string) DoctorCheck {
 		}
 	}
 
+	// GH#5853: when the configured core.hooksPath names a missing directory,
+	// the per-hook file check below would report every hook missing and
+	// recommend an install that would recreate the stale destination. Name
+	// the configuration fault instead and suppress the generic force-install:
+	// the Hooks Path check owns that repair.
+	switch st := InspectHooksPath(); st.State {
+	case HooksPathManagedMissing, HooksPathRelocated, HooksPathMissing:
+		return DoctorCheck{
+			Name:    "Git Hooks",
+			Status:  StatusWarning,
+			Message: "core.hooksPath points at a missing directory; git runs no hooks from it",
+			Detail:  fmt.Sprintf("core.hooksPath=%s (resolved: %s)", st.Configured, st.Resolved),
+		}
+	}
+
 	// Recommended hooks and their purposes
 	recommendedHooks := map[string]string{
 		"pre-commit": "Syncs pending bd changes before commit",

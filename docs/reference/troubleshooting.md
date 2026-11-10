@@ -549,6 +549,34 @@ ls -la .git/hooks/
 bd hooks install
 ```
 
+**Symptom (moved or re-cloned repository):** every hook silently stops
+running — no warning on `git commit` — and `bd hooks list` reports the
+configuration rather than a pile of "not installed" hooks.
+
+`bd hooks install --beads` writes `core.hooksPath` as an absolute path
+(required so linked worktrees resolve it), so moving the repository strands
+it: git then runs no hooks at all. Check where the value points:
+
+```bash
+git config --show-scope --get core.hooksPath
+```
+
+If the named directory does not exist, `bd hooks list` and `bd doctor` name
+the stale path and, when the current hooks directory can be validated
+(the effective `.beads/hooks`, including `BEADS_DIR` and `.beads/redirect`,
+or `.beads-hooks`), recommend the repair:
+
+```bash
+bd doctor --fix      # repoints core.hooksPath to the current directory
+bd hooks install     # same repair, refreshing the hooks there
+```
+
+The stale directory is never recreated. Repair is refused — by design — for
+values bd does not own: a third-party hooks path, or one set at global,
+worktree, or command scope. Correct those manually, in the scope
+`git config --show-scope` names. Ordinary bd commands never rewrite git
+configuration; only `bd hooks install` and `bd doctor --fix` do.
+
 ### Hook errors
 
 ```bash

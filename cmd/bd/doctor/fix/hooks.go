@@ -606,6 +606,22 @@ func GitHooks(path string) error {
 		return fmt.Errorf("not a git repository")
 	}
 
+	// GH#5853: a configured core.hooksPath may name a directory that no longer
+	// exists (a moved repository strands the absolute value bd writes), and
+	// the plain force-install below would recreate that stale destination.
+	// The Hooks Path repair owns this configuration, so re-inspect before
+	// acting — the check that triggered this fix pass may be stale — and skip
+	// when the configured destination is missing.
+	if configured, ok := configuredHooksPathFor(path); ok && configured != "" {
+		resolved := configured
+		if !filepath.IsAbs(resolved) {
+			resolved = filepath.Join(path, resolved)
+		}
+		if _, statErr := os.Stat(resolved); os.IsNotExist(statErr) {
+			return skipFix(fmt.Errorf("core.hooksPath points at %s, which does not exist; the Hooks Path repair owns repointing it, so no hooks were force-installed", resolved))
+		}
+	}
+
 	// Detect external hook managers
 	externalManagers := DetectExternalHookManagers(path)
 
@@ -635,4 +651,16 @@ func GitHooks(path string) error {
 	}
 
 	return nil
+}
+
+// configuredHooksPathFor reads the configured core.hooksPath as git resolves
+// it from dir. The bool return is false when core.hooksPath is not set.
+func configuredHooksPathFor(dir string) (string, bool) {
+	cmd := exec.Command("git", "config", "--get", "core.hooksPath")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(out)), true
 }
