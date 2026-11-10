@@ -37,6 +37,7 @@ Requires the Dolt storage backend.`,
 
 var federationSyncCmd = &cobra.Command{
 	Use:   "sync [--peer name]",
+	Args:  validateRemoteFlag("peer"),
 	Short: "Synchronize with a peer town",
 	Long: `Pull from and push to peer towns.
 

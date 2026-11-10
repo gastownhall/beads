@@ -708,7 +708,7 @@ func printDivergedHistoryGuidance(operation string) {
 func remoteFromArgs(cmd *cobra.Command, args []string) (string, error) {
 	flagRemote, _ := cmd.Flags().GetString("remote")
 	if len(args) == 0 {
-		return flagRemote, nil
+		return flagRemote, checkRemoteOperand(flagRemote)
 	}
 	remote := args[0]
 	// An empty name (`bd dolt push "$R"` with R unset) must not fall back to
@@ -721,7 +721,36 @@ func remoteFromArgs(cmd *cobra.Command, args []string) (string, error) {
 	if flagRemote != "" && flagRemote != remote {
 		return "", HandleError("remote named twice: %q as an argument and %q with --remote; name it once", remote, flagRemote)
 	}
-	return remote, nil
+	return remote, checkRemoteOperand(remote)
+}
+
+// checkRemoteOperand refuses a remote or peer name Dolt would parse as an
+// option (`--remote=--force` must not become a forced push, GH#7876). It runs
+// from cobra Args validation, so the refusal lands before the store opens.
+// "" (the default remote) and names such as "1st" pass.
+func checkRemoteOperand(name string) error {
+	if err := storage.ValidateRemoteOperand(name); err != nil {
+		return HandleError("%v", err)
+	}
+	return nil
+}
+
+// validateRemoteFlag is Args validation for a command whose remote or peer
+// arrives only through the named string flag.
+func validateRemoteFlag(flag string) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, _ []string) error {
+		name, _ := cmd.Flags().GetString(flag)
+		return checkRemoteOperand(name)
+	}
+}
+
+// validateRemoteNameArg is Args validation for `bd dolt remote add|remove`,
+// whose first positional argument is the remote name.
+func validateRemoteNameArg(_ *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	return checkRemoteOperand(args[0])
 }
 
 // validateRemoteArg runs remoteFromArgs as cobra's Args validation, which
@@ -2123,7 +2152,7 @@ var doltRemoteAddCmd = &cobra.Command{
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	Short:         "Add a Dolt remote",
-	Args:          cobra.ExactArgs(2),
+	Args:          cobra.MatchAll(cobra.ExactArgs(2), validateRemoteNameArg),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if isDoltLocalOnly() {
 			fmt.Fprintln(os.Stderr, "Error: cannot add Dolt remote: remote sync is disabled (dolt.local-only=true).")
@@ -2251,7 +2280,7 @@ var doltRemoteRemoveCmd = &cobra.Command{
 	Short:         "Remove a Dolt remote",
 	SilenceUsage:  true,
 	SilenceErrors: true,
-	Args:          cobra.ExactArgs(1),
+	Args:          cobra.MatchAll(cobra.ExactArgs(1), validateRemoteNameArg),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := context.Background()
 		name := args[0]

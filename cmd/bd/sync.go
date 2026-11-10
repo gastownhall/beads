@@ -649,6 +649,7 @@ func conflictTables(conflicts []storage.Conflict) []string {
 
 var syncCmd = &cobra.Command{
 	Use:     "sync",
+	Args:    validateRemoteFlag("remote"),
 	GroupID: "sync",
 	Short:   "Pull, check for conflicts, repair is_blocked, and push (the federation loop)",
 	Long: `Run one full synchronization cycle against the Dolt remote.
