@@ -340,6 +340,7 @@
 
 40 17 TestAddDependency
 40 17 TestEmbeddedBatchCloserWispItemClosesAndEarnsTheClaim
+40 17 TestEmbeddedCrossPrefixRepairReopenIsNoop
 40 17 TestEmbeddedDependencyEditorSameTypeReAddWithChangedThreadMintsOneVersion
 40 17 TestEmbeddedIgnoredMigration0031OpensAShallowClone
 40 17 TestEmbeddedIssueOperationsUpdateIssuePlaneOnlyRefusesWisps
