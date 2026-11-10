@@ -665,6 +665,11 @@ func (s *EmbeddedDoltStore) ApplySchemaMigrations(ctx context.Context) (int, err
 	return schema.MigrateUp(ctx, conn)
 }
 
+// MigrationsAppliedAtOpen implements storage.SchemaMigrator.
+func (s *EmbeddedDoltStore) MigrationsAppliedAtOpen() int {
+	return 0
+}
+
 func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 	db, cleanup, err := OpenSQL(ctx, s.dataDir, "", "")
 	if err != nil {
