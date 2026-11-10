@@ -110,13 +110,14 @@ func (s *EmbeddedDoltStore) withMutatingPinnedDBConn(ctx context.Context, fn fun
 // from the returned bool instead of reading HEAD before and after: HEAD reads
 // are extra engine opens and are subject to a HEAD-moved-between-reads race
 // if anything else writes concurrently.
+//
+// A tolerant commit also verifies that no tracked change was left behind
+// (commitAllThrough): leftovers come back as a *storage.UncommittedChangesError
+// with committed reporting whether Dolt still made a partial commit.
 func (s *EmbeddedDoltStore) commitAll(ctx context.Context, message string, tolerateEmpty bool) (committed bool, err error) {
-	err = s.withConn(ctx, true, func(tx *sql.Tx) error {
-		var commitErr error
-		committed, commitErr = commitAllInTx(ctx, tx, message, tolerateEmpty)
-		return commitErr
-	})
-	return committed, err
+	return commitAllThrough(ctx, func(fn func(*sql.Tx) error) error {
+		return s.withConn(ctx, true, fn)
+	}, message, tolerateEmpty)
 }
 
 // CommitAll commits the entire working set (config included) with the given
