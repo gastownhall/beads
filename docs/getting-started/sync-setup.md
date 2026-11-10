@@ -113,6 +113,10 @@ Remote and peer *names* must not begin with `-` either: `bd dolt push|pull
 all refuse a name like `--force` before opening the database, so no part of
 it can be parsed as a Dolt option.
 
+The publish commands — `bd dolt push`, `bd dolt clean-databases` and `bd
+federation sync` — also refuse under `bd --readonly` (or `readonly: true`
+in `.beads/config.yaml`) before any store or transport work.
+
 `sync.remote` and `sync.git-remote` must be remote URLs. bd refuses a value
 that begins with `-`, and an `ssh://` URL whose user name or host begins with
 `-`, before passing it to git, Dolt or ssh, so no part of it can be parsed as

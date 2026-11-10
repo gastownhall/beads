@@ -144,3 +144,37 @@ func TestCleanDatabasesBlockedInReadonlyMode(t *testing.T) {
 		t.Logf("control run: exit %d stderr=%q", code, stderr)
 	})
 }
+
+// TestFederationSyncBlockedInReadonlyMode is the readonly gate for
+// `bd federation sync` (GH#7876 item 8): sync publishes to the peer, so
+// strict readonly refuses the whole command before any peer, credential or
+// store work.
+func TestFederationSyncBlockedInReadonlyMode(t *testing.T) {
+	bd, dir := setupMigrationFreezeWorkspace(t)
+
+	for _, tt := range []struct {
+		name string
+		args []string
+	}{
+		{name: "bare", args: []string{"federation", "sync"}},
+		{name: "named_peer", args: []string{"federation", "sync", "--peer", "origin"}},
+		{name: "with_strategy", args: []string{"federation", "sync", "--peer", "origin", "--strategy", "ours"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			args := append(append([]string{}, tt.args...), "--readonly")
+			stdout, stderr, code := runBDMigrationFreeze(t, bd, dir, args...)
+			assertReadonlyRefusal(t, stdout, stderr, code, "federation sync")
+		})
+	}
+
+	t.Run("control_without_readonly", func(t *testing.T) {
+		stdout, stderr, code := runBDMigrationFreeze(t, bd, dir, "federation", "sync", "--peer", "origin")
+		if strings.Contains(stderr, "not allowed in read-only mode") {
+			t.Fatalf("bd federation sync without --readonly was refused by the readonly gate:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		// The sqlite workspace has no federated peers, so the control fails
+		// on its own — exit 1 is fine as long as it is not the readonly
+		// refusal.
+		t.Logf("control run: exit %d stderr=%q", code, stderr)
+	})
+}
