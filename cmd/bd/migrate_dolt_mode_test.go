@@ -100,6 +100,38 @@ func touchFile(t *testing.T, path string) {
 	require.NoError(t, os.WriteFile(path, []byte("x"), 0o600))
 }
 
+// seedLifecycleMarkers seeds the two proxy lifecycle lock markers under root
+// and returns their file identity, keyed by path, for later same-file
+// assertions (GH#6884: reverse migration retains them on disk).
+func seedLifecycleMarkers(t *testing.T, root string) map[string]os.FileInfo {
+	t.Helper()
+	stats := map[string]os.FileInfo{}
+	for _, name := range []string{proxy.LockFileName, server.LockFileName} {
+		path := filepath.Join(root, name)
+		touchFile(t, path)
+		info, err := os.Stat(path)
+		require.NoError(t, err)
+		stats[path] = info
+	}
+	return stats
+}
+
+// assertLifecycleMarkersKept checks that the seeded markers are still on
+// disk, kept their file identity, and are re-lockable. It must be called
+// with no migration in flight: it acquires each marker briefly.
+func assertLifecycleMarkersKept(t *testing.T, root string, stats map[string]os.FileInfo) {
+	t.Helper()
+	for _, name := range []string{proxy.LockFileName, server.LockFileName} {
+		path := filepath.Join(root, name)
+		info, err := os.Stat(path)
+		require.NoError(t, err, "lifecycle marker %s must be retained", name)
+		assert.True(t, os.SameFile(stats[path], info), "lifecycle marker %s must keep its file identity", name)
+		lock, lockErr := util.TryLock(path)
+		require.NoError(t, lockErr, "retained marker %s must be re-lockable", name)
+		lock.Unlock()
+	}
+}
+
 func mustReadFile(t *testing.T, path string) []byte {
 	t.Helper()
 	b, err := os.ReadFile(path)
@@ -688,8 +720,10 @@ func TestMigrateFromProxiedToSharedServer_AllCheckpointFaultsRetry(t *testing.T)
 			beadsDir := migrateModeWorkspace(t, configfile.DoltModeProxiedServer)
 			require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, &configfile.ProxiedServerClientInfo{RootPath: root}))
 			require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt:\n  shared-server: false\n"), 0o600))
+			markers := seedLifecycleMarkers(t, root)
 			t.Setenv("BEADS_MIGRATION_FAIL_PHASE", string(phase))
 			require.Error(t, runMigrateFromProxiedServer(false, true))
+			assertLifecycleMarkersKept(t, root, markers)
 			j, err := loadMigrateJournal(beadsDir)
 			require.NoError(t, err)
 			require.NotNil(t, j)
@@ -697,6 +731,7 @@ func TestMigrateFromProxiedToSharedServer_AllCheckpointFaultsRetry(t *testing.T)
 			assert.Equal(t, 1, j.Attempt)
 			t.Setenv("BEADS_MIGRATION_FAIL_PHASE", "")
 			require.NoError(t, runMigrateFromProxiedServer(false, true))
+			assertLifecycleMarkersKept(t, root, markers)
 			after := snapshotMigrationTree(t, beadsDir, root)
 			require.NoError(t, runMigrateFromProxiedServer(false, true))
 			assert.Equal(t, after, snapshotMigrationTree(t, beadsDir, root), "retry changed durable migration artifacts")
@@ -1072,10 +1107,13 @@ func TestMigrateFromProxiedServer_AllCheckpointFaultsRetry(t *testing.T) {
 			sentinelBefore, err := os.ReadFile(sentinel)
 			require.NoError(t, err)
 			require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, &configfile.ProxiedServerClientInfo{RootPath: root}))
+			markers := seedLifecycleMarkers(t, root)
 			t.Setenv("BEADS_MIGRATION_FAIL_PHASE", string(phase))
 			require.Error(t, runMigrateFromProxiedServer(false, false))
+			assertLifecycleMarkersKept(t, root, markers)
 			t.Setenv("BEADS_MIGRATION_FAIL_PHASE", "")
 			require.NoError(t, runMigrateFromProxiedServer(false, false))
+			assertLifecycleMarkersKept(t, root, markers)
 			after := snapshotMigrationTree(t, beadsDir)
 			assert.Equal(t, sentinelBefore, mustReadFile(t, sentinel), "migration sentinel changed")
 			j, err := loadMigrateJournal(beadsDir)
