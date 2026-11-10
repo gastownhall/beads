@@ -394,3 +394,137 @@ func TestIsBeadsManagedHooksPath_LeavesThirdPartyAlone(t *testing.T) {
 		})
 	}
 }
+
+// relocatedHookBody is a marker-managed hook the relocation check recognizes.
+const relocatedHookBody = "#!/usr/bin/env sh\n" + bdSectionMarkerPrefix + " v1.0.0 ---\nbd hooks run pre-commit \"$@\"\n# --- END BEADS INTEGRATION v1.0.0 ---\n"
+
+// writeRelocatedHook writes body as dir/pre-commit, creating dir.
+func writeRelocatedHook(t *testing.T, dir, body string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pre-commit"), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// strandedHooksPath returns the absolute hooks path a repository that used to
+// live under a different directory would still carry (GH#5853). Neither it nor
+// its parent exists.
+func strandedHooksPath(t *testing.T, layout string) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "moved-away", "repo", layout)
+}
+
+// sameDir reports whether two absolute directories name the same location
+// once their existing prefixes are symlink-resolved.
+func sameDir(a, b string) bool {
+	return resolveExistingPrefix(a) == resolveExistingPrefix(b)
+}
+
+// assertNotCreated fails when the stranded path or its parent was created.
+func assertNotCreated(t *testing.T, stale string) {
+	t.Helper()
+	if _, err := os.Lstat(filepath.Dir(stale)); !os.IsNotExist(err) {
+		t.Errorf("stale hooks path parent %s was created (err=%v); a repair must not recreate the former location", filepath.Dir(stale), err)
+	}
+}
+
+// relocationCase is a repository whose core.hooksPath still names its former
+// location while its beads hooks live at target.
+type relocationCase struct {
+	name   string
+	layout string // the former path's trailing layout
+	// setup prepares the current hooks and returns the directory the value
+	// must be repointed to.
+	setup func(t *testing.T, dir string) string
+}
+
+func relocationCases() []relocationCase {
+	return []relocationCase{
+		{
+			name:   ".beads/hooks",
+			layout: filepath.Join(".beads", "hooks"),
+			setup: func(t *testing.T, dir string) string {
+				target := filepath.Join(dir, ".beads", "hooks")
+				writeRelocatedHook(t, target, relocatedHookBody)
+				return target
+			},
+		},
+		{
+			name:   ".beads-hooks",
+			layout: ".beads-hooks",
+			setup: func(t *testing.T, dir string) string {
+				target := filepath.Join(dir, ".beads-hooks")
+				writeRelocatedHook(t, target, relocatedHookBody)
+				return target
+			},
+		},
+		{
+			// BEADS_DIR (like .beads/redirect) places the effective storage
+			// outside the repository; `bd hooks install --beads` writes
+			// <storage>/hooks, so that is where the value must point.
+			name:   "redirected storage",
+			layout: filepath.Join(".beads", "hooks"),
+			setup: func(t *testing.T, dir string) string {
+				storage := filepath.Join(t.TempDir(), "external storage")
+				if err := os.MkdirAll(storage, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(storage, "metadata.json"), []byte("{}\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("BEADS_DIR", storage)
+				target := filepath.Join(storage, "hooks")
+				writeRelocatedHook(t, target, relocatedHookBody)
+				// A decoy in-repository directory must not win over storage.
+				writeRelocatedHook(t, filepath.Join(dir, ".beads", "hooks"), relocatedHookBody)
+				return target
+			},
+		},
+	}
+}
+
+// TestCheckHooksPath_RelocatedBeadsPath: a moved repository's stranded
+// absolute core.hooksPath is reported as a relocated beads path naming both
+// the configured and the current directory, and the check changes nothing
+// (GH#5853).
+func TestCheckHooksPath_RelocatedBeadsPath(t *testing.T) {
+	for _, tc := range relocationCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BEADS_DIR", "")
+			dir := t.TempDir()
+			setupGitRepoInDir(t, dir)
+			target := tc.setup(t, dir)
+			stale := strandedHooksPath(t, tc.layout)
+			setGitConfig(t, dir, "core.hooksPath", stale)
+
+			runInDir(t, dir, func() {
+				check := CheckHooksPath()
+				if check.Status != StatusWarning {
+					t.Fatalf("expected StatusWarning, got %q: %s", check.Status, check.Message)
+				}
+				if !strings.Contains(check.Message, "moved repository") {
+					t.Errorf("message does not identify a relocated beads path: %q", check.Message)
+				}
+				if !strings.Contains(check.Detail, stale) {
+					t.Errorf("detail does not name the configured path %q: %q", stale, check.Detail)
+				}
+				if !strings.Contains(check.Detail, target) && !strings.Contains(check.Detail, resolveExistingPrefix(target)) {
+					t.Errorf("detail does not name the current path %q: %q", target, check.Detail)
+				}
+				for _, want := range []string{"bd doctor --fix", "bd hooks install"} {
+					if !strings.Contains(check.Fix, want) {
+						t.Errorf("fix %q does not recommend %q", check.Fix, want)
+					}
+				}
+			})
+
+			if got := getGitConfig(t, dir, "core.hooksPath"); got != stale {
+				t.Errorf("CheckHooksPath changed core.hooksPath to %q; a check must be read-only", got)
+			}
+			assertNotCreated(t, stale)
+		})
+	}
+}

@@ -812,20 +812,30 @@ func holdsBeadsHooks(dir string) bool {
 	return false
 }
 
+// HooksPathFix is the remedy text for a missing core.hooksPath.
+func HooksPathFix(s HooksPathState) string {
+	switch {
+	case s.RelocatedTo != "":
+		return fmt.Sprintf("Run 'bd doctor --fix' or 'bd hooks install' to repoint core.hooksPath to %s", s.RelocatedTo)
+	case s.Managed:
+		return "Run 'bd doctor --fix' to unset core.hooksPath, or: git config --unset core.hooksPath"
+	default:
+		return "core.hooksPath is not beads-managed; bd will not change it. Restore the missing directory, or unset it yourself: git config --unset core.hooksPath"
+	}
+}
+
 // CheckHooksPath detects a dangling core.hooksPath: a git config value that
 // still points at a hooks directory which no longer exists. This happens
 // when a user manually deletes .beads/ (e.g. `rm -rf .beads/`) without
 // running `bd hooks uninstall` first — git keeps looking for the missing
 // directory, and beads' post-checkout import can recreate a stray .beads/
-// workspace as a side effect (GH#4440).
+// workspace as a side effect (GH#4440) — and when the repository moves, which
+// strands the absolute path bd wrote (GH#5853).
 func CheckHooksPath() DoctorCheck {
 	const name = "Hooks Path"
 
-	repoRoot, _ := git.GetMainRepoRoot()
-	if repoRoot == "" {
-		repoRoot = git.GetRepoRoot()
-	}
-	if repoRoot == "" {
+	q, ok := CurrentHooksPathQuery()
+	if !ok {
 		return DoctorCheck{
 			Name:    name,
 			Status:  StatusOK,
@@ -833,43 +843,37 @@ func CheckHooksPath() DoctorCheck {
 		}
 	}
 
-	hooksPath, ok := getConfiguredHooksPath(repoRoot)
-	if !ok || hooksPath == "" {
+	s := InspectHooksPath(q)
+	if s.Configured == "" {
 		return DoctorCheck{
 			Name:    name,
 			Status:  StatusOK,
 			Message: "core.hooksPath is not set",
 		}
 	}
-
-	resolved := expandHookPathTilde(hooksPath)
-	if !filepath.IsAbs(resolved) {
-		resolved = filepath.Join(repoRoot, resolved)
-	}
-
-	if fileExists(resolved) {
+	if s.Exists {
 		return DoctorCheck{
 			Name:    name,
 			Status:  StatusOK,
-			Message: fmt.Sprintf("core.hooksPath is set to %s", hooksPath),
+			Message: fmt.Sprintf("core.hooksPath is set to %s", s.Configured),
 		}
 	}
 
-	managed := IsBeadsManagedHooksPath(repoRoot, BeadsManagedStorageHooksDir(), hooksPath)
-	var fix string
-	if managed {
-		fix = "Run 'bd doctor --fix' to unset core.hooksPath, or: git config --unset core.hooksPath"
-	} else {
-		fix = "core.hooksPath is not beads-managed; bd will not change it. Restore the missing directory, or unset it yourself: git config --unset core.hooksPath"
-	}
-
-	return DoctorCheck{
+	check := DoctorCheck{
 		Name:    name,
 		Status:  StatusWarning,
 		Message: "core.hooksPath points at a missing directory",
-		Detail:  fmt.Sprintf("core.hooksPath=%s (resolved: %s)", hooksPath, resolved),
-		Fix:     fix,
+		Detail:  fmt.Sprintf("core.hooksPath=%s (resolved: %s)", s.Configured, s.Resolved),
+		Fix:     HooksPathFix(s),
 	}
+	if s.RelocatedTo != "" {
+		check.Message = "core.hooksPath points at the beads hooks of a moved repository"
+		check.Detail = fmt.Sprintf("core.hooksPath=%s does not exist, so git runs no hooks; the current beads hooks directory is %s",
+			s.Configured, s.RelocatedTo)
+	} else if s.Refusal != "" {
+		check.Detail += "; bd will not repoint it: " + s.Refusal
+	}
+	return check
 }
 
 // FixHooksPath unsets core.hooksPath ONLY when it is beads-managed and its
