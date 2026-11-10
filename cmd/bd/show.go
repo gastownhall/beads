@@ -21,13 +21,17 @@ import (
 )
 
 // showNotFoundHintIn is the hint the direct route prints for an id that
-// resolved to no issue. When the id's prefix is not one this workspace's store
-// issues (issue_prefix or allowed_prefixes) and no routes.jsonl route in
-// beadsDir names it, the miss says nothing about whether the issue exists:
-// no route sent the lookup to the store that issues that prefix, so the hint
-// says so instead of suggesting the id never existed (GH#5259). Any other
-// miss gets showNotFoundHint.
-func showNotFoundHintIn(ctx context.Context, s prefixConfigReader, beadsDir, id string) string {
+// resolved to no issue. When no routed store was searched for the id
+// (routedSearched, from resolveAndGetIssueWithRoutingSearchScope), its prefix
+// is not one this workspace's store issues (issue_prefix or allowed_prefixes)
+// and no routes.jsonl route in beadsDir names it, the miss says nothing about
+// whether the issue exists: no route sent the lookup to the store that issues
+// that prefix, so the hint says so instead of suggesting the id never existed
+// (GH#5259). Any other miss gets showNotFoundHint.
+func showNotFoundHintIn(ctx context.Context, s prefixConfigReader, beadsDir, id string, routedSearched bool) string {
+	if routedSearched {
+		return showNotFoundHint(id)
+	}
 	if storePrefix, idPrefix, ok := unroutedForeignPrefix(ctx, s, beadsDir, id); ok {
 		return foreignPrefixMissHint(storePrefix, idPrefix, beadsDir)
 	}
@@ -209,14 +213,14 @@ var showCmd = &cobra.Command{
 		foundCount := 0
 		for idx, id := range args {
 			// Resolve and get issue with routing (e.g., gt-xyz routes to another rig)
-			result, err := resolveAndGetIssueWithRouting(ctx, store, id)
+			result, routedSearched, err := resolveAndGetIssueWithRoutingSearchScope(ctx, store, id)
 			if err != nil {
 				if result != nil {
 					result.Close()
 				}
 				if isNotFoundErr(err) {
 					fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
-					fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHintIn(ctx, store, resolveCommandBeadsDir(dbPath), id))
+					fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHintIn(ctx, store, resolveCommandBeadsDir(dbPath), id, routedSearched))
 				} else {
 					fmt.Fprintf(os.Stderr, "Error fetching %s: %s\n", id, remedy.PrintedMessage(err))
 				}
@@ -227,7 +231,7 @@ var showCmd = &cobra.Command{
 					result.Close()
 				}
 				fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
-				fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHintIn(ctx, store, resolveCommandBeadsDir(dbPath), id))
+				fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHintIn(ctx, store, resolveCommandBeadsDir(dbPath), id, routedSearched))
 				continue
 			}
 			issue := result.Issue
