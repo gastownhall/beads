@@ -1235,9 +1235,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reporting every hook "not installed". `bd doctor --fix`, `bd hooks install`
   and the `bd config apply` hook reinstall repoint the local value to the
   validated current `.beads/hooks`, `.beads-hooks` or redirected storage
-  hooks directory without recreating the old one; a value bd cannot prove
-  is its own (global, overridden, third-party, or with no replacement) is
-  left alone, and `bd hooks install` says why.
+  hooks directory without recreating the old one, and report a write that
+  git does not then read back as an error; a missing absolute value bd
+  cannot prove is its own (global, overridden, set in a file the repository
+  config includes, third-party, or with no replacement) is left alone, and
+  `bd hooks install` says why. A relative value, which git resolves in each
+  worktree, is handled as before.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

@@ -646,10 +646,12 @@ func GitHooks(path string) error {
 	return nil
 }
 
-// missingHooksPath reports the core.hooksPath configured for the repository
-// at path, resolved the way doctor's Hooks Path inspection resolves it (~
-// expanded, a relative value joined to the main repository root), when that
-// directory is confirmed absent.
+// missingHooksPath reports the absolute core.hooksPath configured for the
+// repository at path, ~ expanded, when that directory is confirmed absent.
+// A relative value is never reported: git resolves it in the worktree it runs
+// in, which is where GitHooks's install writes, while an absolute one (the
+// kind bd writes, which a moved repository strands) names the same directory
+// from every worktree.
 func missingHooksPath(path string) (string, bool) {
 	cmd := exec.Command("git", "config", "--get", "core.hooksPath")
 	cmd.Dir = path
@@ -668,26 +670,10 @@ func missingHooksPath(path string) (string, bool) {
 		}
 	}
 	if !filepath.IsAbs(resolved) {
-		resolved = filepath.Join(mainRepoRootFor(path), resolved)
+		return "", false
 	}
 	if _, err := os.Stat(resolved); !os.IsNotExist(err) {
 		return "", false
 	}
 	return resolved, true
-}
-
-// mainRepoRootFor returns the main repository root of the repository at
-// path (the parent of its common git directory), falling back to path.
-func mainRepoRootFor(path string) string {
-	cmd := exec.Command("git", "rev-parse", "--git-common-dir")
-	cmd.Dir = path
-	out, err := cmd.Output()
-	common := strings.TrimSpace(string(out))
-	if err != nil || common == "" {
-		return path
-	}
-	if !filepath.IsAbs(common) {
-		common = filepath.Join(path, common)
-	}
-	return filepath.Dir(filepath.Clean(common))
 }

@@ -576,13 +576,17 @@ your own content around the managed section of each hook. Run
 
 bd repoints only a value it can prove is its own: an absolute
 `.beads/hooks` or `.beads-hooks` path that no longer exists, set in this
-repository's local config and not overridden (global, worktree or
-command-line config), whose replacement is a real directory (not a symlink)
-holding beads hooks. Otherwise `bd doctor --fix` leaves the value alone and
-`bd hooks install` refuses with the reason, without creating anything;
-restore the directory or correct `core.hooksPath` where it is set. A
+repository's own local config file (not in a file it includes) and not
+overridden (global, worktree or command-line config), whose replacement is a
+real directory (not a symlink) holding beads hooks. Otherwise
+`bd doctor --fix` leaves the value alone and `bd hooks install` refuses with
+the reason, without creating anything; restore the directory or correct
+`core.hooksPath` where it is set
+(`git config --show-origin --get-all core.hooksPath` names the file). A
 `.beads/hooks` or `.beads-hooks` directory deleted in place (not moved) is
-still unset by `bd doctor --fix`.
+still unset by `bd doctor --fix`. A relative value is resolved by git in
+each worktree, so `bd hooks install` installs into that worktree's
+directory, as it always has.
 
 ### Hook errors
 

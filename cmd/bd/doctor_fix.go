@@ -392,16 +392,6 @@ func applyFixList(path string, fixes []doctorCheck) {
 		case "Tracked Runtime Files":
 			err = doctor.FixTrackedRuntimeFiles(path)
 		case "Git Hooks":
-			// A missing core.hooksPath is the Hooks Path fix's to repair:
-			// re-read it here, since a force-install against it would
-			// recreate the stale directory (GH#5853).
-			if q, ok := doctor.CurrentHooksPathQuery(); ok {
-				if s := doctor.InspectHooksPath(q); s.Missing() {
-					fmt.Printf("  ⚠ core.hooksPath points at missing %s; not installing hooks there\n", remedy.PrintedValue(s.Configured))
-					fmt.Printf("  Fix: %s\n", doctor.HooksPathFix(s))
-					continue
-				}
-			}
 			err = fix.GitHooks(path)
 		case "Hooks Path":
 			err = doctor.FixHooksPath()

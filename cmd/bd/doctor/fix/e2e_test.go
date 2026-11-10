@@ -467,3 +467,26 @@ func TestGitHooks_SkipsWhenConfiguredHooksPathMissing(t *testing.T) {
 		t.Errorf("the stale directory %s must not be created (stat err=%v)", stale, statErr)
 	}
 }
+
+// TestGitHooks_RelativeHooksPathIsNotSkipped: only an absolute core.hooksPath
+// naming a missing directory defers the fixer to the Hooks Path repair. Git
+// resolves a relative value in the worktree it runs in, which is where the
+// install writes, so a relative value never skips the install, whatever the
+// main repository root holds (GH#5853).
+func TestGitHooks_RelativeHooksPathIsNotSkipped(t *testing.T) {
+	dir := setupTestGitRepo(t)
+	cmd := gitCommand("config", "core.hooksPath", "custom-hooks")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git config core.hooksPath failed: %v (%s)", err, out)
+	}
+
+	if resolved, ok := missingHooksPath(dir); ok {
+		t.Errorf("missingHooksPath reported the relative value as missing %s", resolved)
+	}
+	// Past the guard the fixer runs bd hooks install, which a test binary
+	// refuses to spawn.
+	if err := GitHooks(dir); !errors.Is(err, ErrTestBinary) {
+		t.Errorf("GitHooks = %v, want it to reach the install (%v)", err, ErrTestBinary)
+	}
+}

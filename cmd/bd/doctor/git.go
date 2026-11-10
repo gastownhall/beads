@@ -57,8 +57,10 @@ func CheckGitHooks(cliVersion string) DoctorCheck {
 	// fault, not missing hook files: git runs no hooks at all, and the Hooks
 	// Path check owns the repair. A generic install would only recreate the
 	// stale directory (GH#5853), so this finding carries no Fix of its own.
+	// A relative value is left to the checks below: git resolves it in this
+	// worktree, which is where hooksDir already looks.
 	if q, ok := CurrentHooksPathQuery(); ok {
-		if s := InspectHooksPath(q); s.Missing() {
+		if s := InspectHooksPath(q); s.Missing() && !s.Relative {
 			return DoctorCheck{
 				Name:    "Git Hooks",
 				Status:  StatusWarning,
@@ -670,6 +672,13 @@ type HooksPathState struct {
 	// Resolved is Configured with ~ expanded and a relative value joined to
 	// the repository root.
 	Resolved string
+	// Relative reports a value git resolves against the root of the worktree
+	// it runs in, not the main repository root Resolved joins it to, so from
+	// a linked worktree Exists may describe a directory git does not use.
+	// Callers that speak for the invoking worktree (bd hooks list, the Git
+	// Hooks check, a plain install) act only on an absolute value, the kind bd
+	// writes, which names the same directory from every worktree.
+	Relative bool
 	// Exists reports whether something exists at Resolved; false with an
 	// InspectError means existence is unknown, not that the path is absent.
 	Exists bool
@@ -726,7 +735,9 @@ func CurrentHooksPathQuery() (HooksPathQuery, bool) {
 //   - it names a .beads/hooks or .beads-hooks directory, the layouts bd writes;
 //   - its effective value comes from the repository-local config, also under
 //     InheritedEnv, so no global, worktree or command-line setting is
-//     rewritten or shadowed;
+//     rewritten or shadowed, and from that config file itself: git reports a
+//     value from a file it includes (include.path, includeIf) as local too,
+//     but a local write would not override that file;
 //   - the matching current directory (the effective storage hooks directory,
 //     else <repo>/.beads/hooks, or <repo>/.beads-hooks) is a real directory,
 //     not a symlink, holding at least one recognizable beads hook.
@@ -741,7 +752,7 @@ func InspectHooksPath(q HooksPathQuery) HooksPathState {
 		return s
 	}
 	s.Resolved = expandHookPathTilde(s.Configured)
-	if !filepath.IsAbs(s.Resolved) {
+	if s.Relative = !filepath.IsAbs(s.Resolved); s.Relative {
 		s.Resolved = filepath.Join(q.RepoRoot, s.Resolved)
 	}
 	info, err := os.Stat(s.Resolved)
@@ -815,34 +826,68 @@ func relocatedHooksTarget(q HooksPathQuery, s HooksPathState) (target, refusal s
 	if _, err := os.Lstat(former); !os.IsNotExist(err) {
 		return "", "it could not be confirmed absent"
 	}
+	if refusal := localHooksPathRefusal(q, s); refusal != "" {
+		return "", refusal
+	}
+	if refusal := hooksTargetRefusal(target); refusal != "" {
+		return "", refusal
+	}
+	return target, ""
+}
+
+// localHooksPathRefusal says why s is not the value a git config --local write
+// replaces for this process, or "" when it is. See InspectHooksPath.
+func localHooksPathRefusal(q HooksPathQuery, s HooksPathState) string {
 	if s.Scope != "local" {
 		scope := s.Scope
 		if scope == "" {
 			scope = "an unknown"
 		}
-		return "", fmt.Sprintf("it is set in %s config, not this repository's local config", scope)
+		return fmt.Sprintf("it is set in %s config, not this repository's local config", scope)
+	}
+	// --local reads the repository's own config file alone, without the files
+	// it includes, which --show-scope reports as local too.
+	cmd := exec.Command("git", "config", "--local", "--no-includes", "--get", "core.hooksPath")
+	cmd.Dir, cmd.Env = q.WorkDir, q.Env
+	out, err := cmd.Output()
+	if err != nil {
+		if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 {
+			return fmt.Sprintf("this repository's own config could not be read: %v", err)
+		}
+	}
+	if strings.TrimSpace(string(out)) != s.Configured {
+		return "it is set in a file this repository's config includes, not in that config itself"
 	}
 	if q.InheritedEnv != nil {
 		if value, scope, err := readEffectiveHooksPath(q.WorkDir, q.InheritedEnv); err != nil || value != s.Configured || scope != s.Scope {
-			return "", fmt.Sprintf("this process's environment overrides it with %s config", scope)
+			if scope == "" {
+				scope = "an unknown"
+			}
+			return fmt.Sprintf("this process's environment overrides it with %s config", scope)
 		}
 	}
+	return ""
+}
+
+// hooksTargetRefusal says why target cannot replace a stranded value, or ""
+// when it is a real directory, not a symlink, holding beads hooks.
+func hooksTargetRefusal(target string) string {
 	if target == "" || !filepath.IsAbs(target) {
-		return "", "no current beads hooks directory resolves"
+		return "no current beads hooks directory resolves"
 	}
 	printed := remedy.PrintedValue(target)
 	info, err := os.Lstat(target)
 	switch {
 	case err != nil:
-		return "", fmt.Sprintf("no beads hooks directory exists at %s", printed)
+		return fmt.Sprintf("no beads hooks directory exists at %s", printed)
 	case info.Mode()&os.ModeSymlink != 0:
-		return "", fmt.Sprintf("%s is a symlink", printed)
+		return fmt.Sprintf("%s is a symlink", printed)
 	case !info.IsDir():
-		return "", fmt.Sprintf("%s is not a directory", printed)
+		return fmt.Sprintf("%s is not a directory", printed)
 	case !holdsBeadsHooks(target):
-		return "", fmt.Sprintf("%s holds no beads hooks", printed)
+		return fmt.Sprintf("%s holds no beads hooks", printed)
 	}
-	return target, ""
+	return ""
 }
 
 // holdsBeadsHooks reports whether dir holds at least one hook file whose
@@ -867,8 +912,9 @@ func holdsBeadsHooks(dir string) bool {
 // RepointRelocatedHooksPath re-inspects core.hooksPath immediately before
 // writing and repoints it in the repository-local config only while it still
 // names the missing former directory from and still relocates to to; from ""
-// accepts whatever the fresh inspection relocates. It never creates, writes
-// or removes a directory. It returns the state it acted on.
+// accepts whatever the fresh inspection relocates. It succeeds only when git
+// reads the new value back. It never creates, writes or removes a directory.
+// It returns the state it acted on.
 func RepointRelocatedHooksPath(q HooksPathQuery, from, to string) (HooksPathState, error) {
 	s := InspectHooksPath(q)
 	if s.RelocatedTo == "" {
@@ -888,6 +934,16 @@ func RepointRelocatedHooksPath(q HooksPathQuery, from, to string) (HooksPathStat
 	cmd.Dir, cmd.Env = q.WorkDir, q.Env
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return s, fmt.Errorf("git config --local core.hooksPath failed: %w (output: %s)", err, strings.TrimSpace(string(output)))
+	}
+	// The write replaces the value in the repository's own config file, which
+	// a later entry (a file included after it, say) still overrides.
+	now, _, err := readEffectiveHooksPath(q.WorkDir, q.Env)
+	if err != nil {
+		return s, fmt.Errorf("core.hooksPath was written to this repository's config, but could not be read back: %w", err)
+	}
+	if now != s.RelocatedTo {
+		return s, fmt.Errorf("core.hooksPath was written to this repository's config, but another entry still overrides it with %s; "+
+			"correct core.hooksPath where it is set (git config --show-origin --get-all core.hooksPath)", remedy.PrintedValue(now))
 	}
 	return s, nil
 }
