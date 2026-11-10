@@ -798,3 +798,26 @@ func TestRemoveCodexRefusesAReadOnlyInstructionsFile(t *testing.T) {
 	}
 	assertReadOnlyFileUntouched(t, agentsPath, string(data), seed)
 }
+
+// A repeated Codex install over a read-only AGENTS.md that already holds the
+// current Codex section succeeds without touching it.
+func TestInstallCodexLeavesACurrentReadOnlyAgentsFileAlone(t *testing.T) {
+	env, _, stderr := newCodexTestEnv(t)
+	if err := installCodex(env, false); err != nil {
+		t.Fatalf("first installCodex: %v", err)
+	}
+	path := codexInstructionsPath(env, false)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	seed := seedReadOnlyFile(t, path, string(content))
+
+	if err := installCodex(env, false); err != nil {
+		t.Fatalf("repeated installCodex: %v", err)
+	}
+	assertReadOnlyFileUntouched(t, path, string(content), seed)
+	if stderr.Len() != 0 {
+		t.Errorf("unexpected stderr: %q", stderr.String())
+	}
+}

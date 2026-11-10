@@ -581,3 +581,63 @@ func TestAtomicWriteFileRefusesAReadOnlyFile(t *testing.T) {
 	}
 	assertReadOnlyFileUntouched(t, path, content, seed)
 }
+
+// A rerun of setup on a read-only file that already holds what it would
+// write has nothing to replace: it succeeds and leaves the file alone. Only
+// readable bytes that match, under the mode asked for, count as current.
+func TestAtomicWriteFileLeavesACurrentReadOnlyFileAlone(t *testing.T) {
+	content := "# My Project\nUser text.\n"
+	for _, tt := range []struct {
+		name       string
+		perm       []os.FileMode
+		unreadable bool
+		refuse     bool
+	}{
+		{name: "same bytes"},
+		{name: "same bytes and explicit mode", perm: []os.FileMode{0o444}},
+		{name: "same bytes but another explicit mode", perm: []os.FileMode{0o644}, refuse: true},
+		{name: "unreadable", unreadable: true, refuse: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "AGENTS.md")
+			seed := seedReadOnlyFile(t, path, content)
+			if tt.unreadable {
+				if err := os.Chmod(path, 0); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := os.ReadFile(path); err == nil {
+					t.Skip("this process can read a 0000 file")
+				}
+				seed = statFile(t, path)
+			}
+
+			err := atomicWriteFile(path, []byte(content), tt.perm...)
+			if tt.refuse {
+				if !errors.Is(err, errRefuseReadOnlyWrite) {
+					t.Fatalf("atomicWriteFile error = %v, want a read-only refusal", err)
+				}
+			} else if err != nil {
+				t.Fatalf("atomicWriteFile: %v", err)
+			}
+			if tt.unreadable {
+				if err := os.Chmod(path, 0o444); err != nil {
+					t.Fatal(err)
+				}
+				if info := statFile(t, path); !os.SameFile(seed, info) || !info.ModTime().Equal(seed.ModTime()) {
+					t.Fatalf("%s was replaced or rewritten", path)
+				}
+				return
+			}
+			assertReadOnlyFileUntouched(t, path, content, seed)
+		})
+	}
+}
+
+func statFile(t *testing.T, path string) os.FileInfo {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return info
+}
