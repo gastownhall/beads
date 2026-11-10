@@ -235,6 +235,7 @@ Force: Delete and orphan dependents
 			fmt.Printf("  Removed %d dependency link(s)\n", result.Dependencies)
 			fmt.Printf("  Updated text references in %d issue(s)\n", result.ReferencesUpdated)
 		}
+		printRetainedCopyNote(routedResult)
 		return nil
 	},
 }
@@ -379,6 +380,9 @@ func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput 
 	resolvedIDs := make([]string, 0, len(issueIDs))
 	notFound := []string{}
 	var routedStore storage.DoltStorage
+	// The ids that resolved to the repository a local copy came from, whose
+	// copies the deletion leaves here (printRetainedCopyNote).
+	var retainedCopies []*RoutedResult
 	for _, id := range issueIDs {
 		result, err := resolveAndGetIssueForMutationExact(ctx, store, id)
 		if err != nil {
@@ -392,6 +396,9 @@ func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput 
 		} else {
 			issues[result.ResolvedID] = result.Issue
 			resolvedIDs = append(resolvedIDs, result.ResolvedID)
+			if result.copyOwner != "" {
+				retainedCopies = append(retainedCopies, result)
+			}
 			if result.Routed && routedStore == nil {
 				routedStore = result.Store
 			} else {
@@ -533,6 +540,9 @@ func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput 
 			fmt.Printf("  %s Orphaned %d issue(s): %s\n",
 				ui.RenderWarn("⚠"), len(result.Orphaned), strings.Join(result.Orphaned, ", "))
 		}
+	}
+	for _, retained := range retainedCopies {
+		printRetainedCopyNote(retained)
 	}
 	return nil
 }

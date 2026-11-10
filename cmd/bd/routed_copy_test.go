@@ -251,3 +251,41 @@ func issueStatusOrNil(issue *types.Issue) string {
 	}
 	return string(issue.Status)
 }
+
+// TestDeleteOfLocalCopyDeletesAutoRouteOwner pins that bd delete --force of an
+// issue the project holds only as a copy of an issue in its auto-route target
+// deletes that issue, so routed bd list no longer shows it, keeps the copy,
+// and says once on stderr that the copy remains, unless --quiet.
+func TestDeleteOfLocalCopyDeletesAutoRouteOwner(t *testing.T) {
+	f := newCopyFixture(t, []string{"pl-x", "pl-y"}, []string{"pl-x", "pl-y"}, nil)
+	const note = "this project still holds the copy bd repo sync imported"
+
+	res := runCopyCmd(t, deleteCmd, map[string]string{"force": "true"}, "pl-x")
+	if res.exitCode != 0 {
+		t.Fatalf("bd delete pl-x --force: exit %d, err %v\nstderr: %s", res.exitCode, res.err, res.stderr)
+	}
+	if owner := f.planningIssue(t, "pl-x"); owner != nil {
+		t.Fatalf("planning pl-x after bd delete = %s, want it gone at HEAD", issueStatusOrNil(owner))
+	}
+	f.requireCopyUnchanged(t, "pl-x")
+	if got := strings.Count(res.stderr, note); got != 1 {
+		t.Fatalf("bd delete stderr holds the retained-copy note %d times, want once:\n%s", got, res.stderr)
+	}
+	if !strings.Contains(res.stderr, "bd delete pl-x --force") {
+		t.Fatalf("the retained-copy note does not name the local cleanup:\n%s", res.stderr)
+	}
+
+	quietFlag = true
+	res = runCopyCmd(t, deleteCmd, map[string]string{"force": "true"}, "pl-y")
+	quietFlag = false
+	if res.exitCode != 0 {
+		t.Fatalf("bd delete pl-y --force --quiet: exit %d, err %v\nstderr: %s", res.exitCode, res.err, res.stderr)
+	}
+	if owner := f.planningIssue(t, "pl-y"); owner != nil {
+		t.Fatalf("planning pl-y after bd delete = %s, want it gone at HEAD", issueStatusOrNil(owner))
+	}
+	f.requireCopyUnchanged(t, "pl-y")
+	if strings.Contains(res.stderr, note) {
+		t.Fatalf("--quiet bd delete printed the retained-copy note:\n%s", res.stderr)
+	}
+}
