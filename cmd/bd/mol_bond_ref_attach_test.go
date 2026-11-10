@@ -134,3 +134,46 @@ func TestBuildAttachCloneOptsParallelRefArmKeepsAttachment(t *testing.T) {
 		t.Errorf("AttachDepType = %q, want %q", opts.AttachDepType, types.DepParentChild)
 	}
 }
+
+// Only a sequential --ref arm loses its edge onto the molecule, so only it
+// reads the molecule's terminal steps; every other bond keeps its own
+// attachment and must not pick up extra edges.
+func TestRefArmNeedsTerminalStepsOnlyForSequentialRef(t *testing.T) {
+	cases := []struct {
+		bondType, childRef string
+		want               bool
+	}{
+		{types.BondTypeSequential, "arm-ace", true},
+		{types.BondTypeSequential, "", false},
+		{types.BondTypeParallel, "arm-ace", false},
+		{types.BondTypeParallel, "", false},
+		{types.BondTypeConditional, "", false},
+		{types.BondTypeConditional, "arm-ace", false},
+	}
+	for _, tc := range cases {
+		if got := refArmNeedsTerminalSteps(tc.bondType, tc.childRef); got != tc.want {
+			t.Errorf("refArmNeedsTerminalSteps(%q, %q) = %v, want %v", tc.bondType, tc.childRef, got, tc.want)
+		}
+	}
+}
+
+// The long help is where the sequential --ref contract is documented (the
+// CLI reference is generated from it): wait for every terminal step, read
+// once at bond time, ready at once with nothing to wait for, no membership.
+func TestMolBondHelpDocumentsRefArmTerminalOrdering(t *testing.T) {
+	long := strings.Join(strings.Fields(molBondCmd.Long), " ")
+	for _, want := range []string{
+		"a sequential --ref arm instead waits on the molecule's terminal steps",
+		"The arm runs once ALL of them close.",
+		"The set is read once, at bond time: steps added later do not retarget the arm",
+		"a molecule with no open steps takes an arm that is ready at once",
+		"The arm is not made a member of the molecule",
+	} {
+		if !strings.Contains(long, want) {
+			t.Errorf("mol bond --help does not say %q", want)
+		}
+	}
+	if strings.Contains(long, "carries no ordering") {
+		t.Errorf("mol bond --help still says a sequential --ref arm carries no ordering")
+	}
+}

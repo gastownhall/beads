@@ -546,6 +546,117 @@ func blockingDepths(g *MoleculeGraph, blockedBy map[string]map[string]bool) map[
 	return depths
 }
 
+// MoleculeTerminalSteps answers the direct steps of g's root that something
+// bonded to run "after the molecule's steps" must wait for, in g.Issues order.
+// Waiting on all of them waits on every active direct step.
+//
+// The candidates are the root's direct parent-child children that still hold
+// a blocking edge: neither closed nor pinned, the status rule of the gate
+// edges (types.IsGateEdge). A direct compound is one candidate; its
+// descendants only order it against the others. Candidate D finishes after
+// candidate T when D, or an active descendant of D reached through active
+// nodes only, holds a blocks or conditional-blocks edge onto T. A closed or
+// pinned node on the way no longer promises that D waits, so it cuts the
+// implication; an uncertain implication is left out, which only keeps an
+// extra terminal. waits-for, other relations and edges onto non-candidates
+// (a compound's child is not the compound) order nothing.
+//
+// The answer is every candidate in a source strongly connected component of
+// that "finishes after" graph: T is kept unless some D reaches T that T cannot
+// reach back. Without cycles that is the set nothing else waits on; a cycle
+// keeps all its members rather than answering nothing. No candidates answers
+// an empty list.
+func MoleculeTerminalSteps(g *MoleculeGraph) []string {
+	if g == nil || g.Root == nil {
+		return nil
+	}
+	holds := func(id string) bool {
+		issue := g.IssueMap[id]
+		return issue != nil && issue.Status != types.StatusClosed && issue.Status != types.StatusPinned
+	}
+	children := map[string][]string{}
+	gatesOf := map[string][]string{}
+	direct := map[string]bool{}
+	for _, dep := range g.Dependencies {
+		if dep == nil || dep.IssueID == dep.DependsOnID {
+			continue
+		}
+		switch {
+		case dep.Type == types.DepParentChild:
+			children[dep.DependsOnID] = append(children[dep.DependsOnID], dep.IssueID)
+			if dep.DependsOnID == g.Root.ID {
+				direct[dep.IssueID] = true
+			}
+		case types.IsGateEdge(dep.Type):
+			gatesOf[dep.IssueID] = append(gatesOf[dep.IssueID], dep.DependsOnID)
+		}
+	}
+
+	var candidates []string
+	isCandidate := map[string]bool{}
+	for _, issue := range g.Issues {
+		if id := issue.ID; id != g.Root.ID && direct[id] && holds(id) && !isCandidate[id] {
+			isCandidate[id] = true
+			candidates = append(candidates, id)
+		}
+	}
+
+	// after[D] holds every candidate D finishes after.
+	after := make(map[string]map[string]bool, len(candidates))
+	for _, d := range candidates {
+		after[d] = map[string]bool{}
+		visited := map[string]bool{g.Root.ID: true, d: true}
+		stack := []string{d}
+		for len(stack) > 0 {
+			x := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			for _, target := range gatesOf[x] {
+				if target != d && isCandidate[target] {
+					after[d][target] = true
+				}
+			}
+			for _, c := range children[x] {
+				if !visited[c] && holds(c) {
+					visited[c] = true
+					stack = append(stack, c)
+				}
+			}
+		}
+	}
+
+	reaches := make(map[string]map[string]bool, len(candidates))
+	for _, d := range candidates {
+		seen := map[string]bool{}
+		stack := []string{d}
+		for len(stack) > 0 {
+			x := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			for target := range after[x] {
+				if !seen[target] {
+					seen[target] = true
+					stack = append(stack, target)
+				}
+			}
+		}
+		reaches[d] = seen
+	}
+
+	terminals := []string{}
+	for _, t := range candidates {
+		kept := true
+		for _, d := range candidates {
+			if d != t && reaches[d][t] && !reaches[t][d] {
+				kept = false
+				break
+			}
+		}
+		if kept {
+			terminals = append(terminals, t)
+		}
+	}
+	return terminals
+}
+
 // Molecule step states, as MoleculeStep.State spells them.
 const (
 	MoleculeStepDone    = "done"

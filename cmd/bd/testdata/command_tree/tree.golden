@@ -4926,13 +4926,17 @@ bd mol bond
     |   conditional         - B runs only if A fails
     |
     |   With --ref, the spawned proto arm is nested inside the molecule operand
-    |   rather than ordered against it - whichever side of the bond that is - so a
-    |   sequential --ref arm carries no ordering: it is ready as soon as it is
-    |   spawned. Ordering a nested arm against its own container is unsatisfiable
-    |   in both directions (the arm waits for the molecule to close; the molecule
-    |   cannot close while it holds an open arm). --ref is refused with --type
-    |   conditional, which has no safe degradation - omit --ref to bond a
-    |   conditional arm as a sibling.
+    |   rather than ordered against it - whichever side of the bond that is.
+    |   Ordering a nested arm against its own container is unsatisfiable in both
+    |   directions (the arm waits for the molecule to close; the molecule cannot
+    |   close while it holds an open arm), so a sequential --ref arm instead waits
+    |   on the molecule's terminal steps: every direct step that is neither closed
+    |   nor pinned and that no other such step waits on. The arm runs once ALL of
+    |   them close. The set is read once, at bond time: steps added later do not
+    |   retarget the arm, and a molecule with no open steps takes an arm that is
+    |   ready at once. The arm is not made a member of the molecule (no
+    |   parent-child edge). --ref is refused with --type conditional, which has no
+    |   safe degradation - omit --ref to bond a conditional arm as a sibling.
     |
     | Phase control:
     |   By default, spawned protos follow the target's phase:

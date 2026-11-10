@@ -1226,6 +1226,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A sequential `bd mol bond <proto> <mol> --ref <ref>` arm runs after the
+  molecule's steps again (GH#6210). The nested arm cannot wait on the molecule
+  it is nested in, so bd used to drop its ordering edge and the arm was ready
+  as soon as it was spawned. It now waits, with one `blocks` edge each, on the
+  molecule's terminal steps: every direct step that is neither closed nor
+  pinned and that no other such step waits on. The set is read at bond time;
+  a molecule with no open steps still takes an arm that is ready at once. The
+  arm is still not a member of the molecule, and `--ref` with
+  `--type conditional` is still refused.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
