@@ -384,6 +384,9 @@ in the molecule for you; add --no-auto to only show it.`,
 			if claimedNext != nil {
 				claimedNextIssue = claimedNext.Issue
 				mutatedStores[postCloseStore] = append(mutatedStores[postCloseStore], claimedNextIssue.ID)
+				// After the close rows above; the claim returns no pre-image,
+				// so the sidecar records its post-state (GH#6146).
+				audit.LogClaimed(claimedNextIssue.ID, currentActor(), string(claimedNextIssue.Status), claimedNextIssue.Assignee)
 				if !jsonOutput {
 					debug.PrintNormal("%s Auto-claimed next ready issue: %s (P%d)\n", ui.RenderPass("✓"), formatFeedbackID(claimedNextIssue.ID, claimedNextIssue.Title), claimedNextIssue.Priority)
 				}
