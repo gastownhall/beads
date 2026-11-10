@@ -464,6 +464,9 @@ type ApplyUpdateItem struct {
 	// force_notes_overwrite exactly as it publishes the other two, and it is
 	// sent only when true, the same as them.
 	ForceNotesOverwrite *bool `json:"force_notes_overwrite,omitempty"`
+	// AllowTemplate stands the template read-only refusal down for this item,
+	// gated by CapBatchApplyUpdateAllowTemplate and sent only when true.
+	AllowTemplate *bool `json:"allow_template,omitempty"`
 }
 
 // ApplyItem is one item of a plan: a `kind` and exactly one payload naming it.

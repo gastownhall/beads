@@ -612,6 +612,12 @@
     },
     {
       "schema": "ApplyUpdateItem",
+      "member": "allow_template",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "ApplyUpdateItem",
       "member": "expected_assignee",
       "type": "string",
       "required": false

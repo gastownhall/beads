@@ -76,6 +76,7 @@ func TestApplyBatchForwardsEveryLevelOfTheDocumentedBody(t *testing.T) {
 				"target":{"key":"root"},
 				"expected_status":"open","expected_assignee":"bob",
 				"force_close_policy":true,"force_assignee_transfer":true,"force_notes_overwrite":true,
+				"allow_template":true,
 				"patch":{"title":"renamed","status":"closed","assignee":"dave","owner":"erin","notes":"replacement",
 					"labels":{"replace":["a"],"add":["b"],"remove":["c"]},
 					"metadata":{"set":{"k":null},"unset":["old"]},
@@ -189,6 +190,9 @@ func TestApplyBatchForwardsEveryLevelOfTheDocumentedBody(t *testing.T) {
 	if !update.ForceClosePolicy || !update.ForceAssigneeTransfer || !update.ForceNotesOverwrite {
 		t.Errorf("update force flags = %v/%v/%v, want all three true",
 			update.ForceClosePolicy, update.ForceAssigneeTransfer, update.ForceNotesOverwrite)
+	}
+	if !update.AllowTemplate {
+		t.Error("update.allow_template = false, want the template stand-down the request asked for")
 	}
 	if !update.Patch.Notes.Set || update.Patch.Notes.Value != "replacement" {
 		t.Errorf("update.patch.notes = %+v, want replacement", update.Patch.Notes)
