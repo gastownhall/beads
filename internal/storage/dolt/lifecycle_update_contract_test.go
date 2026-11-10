@@ -78,6 +78,9 @@ func TestLifecycleUpdateContract(t *testing.T) {
 	t.Run("ForceClaimBlockedClaimsPastALiveBlocker", func(t *testing.T) {
 		conformance.RunLifecycleUpdateForceClaimBlockedClaimsPastALiveBlocker(t, ctx, fixture)
 	})
+	t.Run("ReclaimByTheHolderIgnoresANewBlocker", func(t *testing.T) {
+		conformance.RunLifecycleUpdateReclaimByTheHolderIgnoresANewBlocker(t, ctx, fixture)
+	})
 	t.Run("AssigneeTransferFence", func(t *testing.T) {
 		conformance.RunLifecycleUpdateAssigneeTransferFence(t, ctx, fixture)
 	})

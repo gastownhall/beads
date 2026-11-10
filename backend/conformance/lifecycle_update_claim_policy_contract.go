@@ -149,3 +149,38 @@ func RunLifecycleUpdateForceClaimBlockedClaimsPastALiveBlocker(t *testing.T, ctx
 	}
 	assertLifecycleUpdateRowUnchanged(t, ctx, fixture, heldID, "after a forced claim against a live holder", before)
 }
+
+// RunLifecycleUpdateReclaimByTheHolderIgnoresANewBlocker pins the idempotent
+// re-claim: an issue already in_progress under the actor that gains a live
+// blocker afterwards is not refused when the same actor claims it again, and
+// the repeat writes nothing — the blocker check guards taking a claim, not
+// holding one.
+func RunLifecycleUpdateReclaimByTheHolderIgnoresANewBlocker(t *testing.T, ctx context.Context, fixture LifecycleUpdateFixture) {
+	t.Helper()
+
+	if fixture.AddDependency == nil {
+		t.Skip("fixture cannot seed an edge: AddDependency is nil, so there is no blocker to ignore")
+	}
+
+	blockerID := fixture.IssuePrefix + "-lup-reclaim-blocker"
+	heldID := fixture.IssuePrefix + "-lup-reclaim-held"
+	seedLifecycleUpdateIssue(t, ctx, fixture, lifecycleUpdateIssue(blockerID))
+	seedLifecycleUpdateIssue(t, ctx, fixture, lifecycleUpdateIssue(heldID))
+	if _, err := fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{Actor: "holder", IssueID: heldID, Claim: true}); err != nil {
+		t.Fatalf("seed holder's claim of %s: %v", heldID, err)
+	}
+	seedLifecycleUpdateEdge(t, ctx, fixture, heldID, blockerID, types.DepBlocks)
+
+	before := lifecycleUpdateRow(t, ctx, fixture, heldID)
+	events := newLifecycleUpdateEventCounter(t, ctx, fixture, heldID)
+	result, err := fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{Actor: "holder", IssueID: heldID, Claim: true})
+	if err != nil {
+		t.Fatalf("holder's repeat claim of %s after a blocker appeared: %v, want the idempotent no-op", heldID, err)
+	}
+	if result.Changed {
+		t.Errorf("holder's repeat claim of %s reported Changed = true, want a no-op", heldID)
+	}
+	assertLifecycleUpdateRowUnchanged(t, ctx, fixture, heldID, "after the holder's repeat claim", before)
+	assertLifecycleUpdateAssigneeAndStatus(t, ctx, fixture, heldID, "holder", types.StatusInProgress)
+	events.assert(t, "holder's repeat claim", 0)
+}
