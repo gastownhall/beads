@@ -1226,6 +1226,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd setup` no longer silently replaces an integration file the process
+  cannot write (GH#7975).** Every file the setup recipes rewrite through the
+  shared writer — `AGENTS.md`, `CLAUDE.md`, Codex instructions, hooks and
+  settings files — is probed first with a non-truncating write-open. A
+  file that denies the probe (a `chmod 444` `AGENTS.md` in a writable
+  directory, or one writable only by another user) is left unchanged and the
+  recipe reports a permission error naming the file and the fix: make it
+  writable and rerun. A rerun whose content — and mode, when a mode was
+  requested — is already current leaves the file alone and succeeds, and
+  `bd init` and `bd setup claude` treat the failure in their instructions
+  stage as a warning and continue, so hooks are still installed. A file the
+  process can write, however narrow its mode, is written as before, and a
+  path that is not a regular file is refused rather than replaced.
+
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

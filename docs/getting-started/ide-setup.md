@@ -5,7 +5,7 @@ description: Configure bd setup recipes, hooks, and instruction files for Claude
 
 Configure your IDE or coding agent for optimal beads integration.
 
-Last reviewed: 2026-10-05
+Last reviewed: 2026-11-10
 
 Freshness source: `cmd/bd/setup*.go` and `internal/recipes/`.
 
@@ -81,6 +81,8 @@ BD_AGENT_PROFILE=team-maintainer bd prime
 `bd setup factory`, `bd setup mux`, and `bd setup opencode` append a beads section to `AGENTS.md`, wrapped in `BEGIN/END BEADS INTEGRATION` HTML-comment markers. The begin marker carries version, profile, and hash metadata (e.g. `<!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:19cc25d9 -->`) so `--check` can report `missing`, `stale`, or `current`; legacy markers without metadata are auto-upgraded on the next install or update. Re-running setup updates the existing section in place (idempotent), and `--remove` deletes only the managed section and the blank lines that set it off — the rest of your `AGENTS.md` is untouched. Running setup again after `--remove` appends the section to the end of the file after one blank line, so removing and re-adding it toggles between the same two files. The section `bd setup claude` and `bd setup gemini` manage in `CLAUDE.md` and `GEMINI.md` behaves the same way, except that in `~/.gemini/GEMINI.md` it goes ahead of the `## Gemini Added Memories` section older Gemini CLI releases keep there, so memories they save stay outside it.
 
 `bd setup codex` uses its own marker pair (`BEGIN/END BEADS CODEX SETUP`). Running it alongside `bd setup factory` or `bd setup mux` against the same `AGENTS.md` leaves two managed sections side by side; each recipe's `--check` inspects only its own section, and each `--remove` removes only its own section.
+
+Every file `bd setup` rewrites goes through the same atomic writer, and the writer first checks whether the current process can write the existing file. A file you have made read-only, or one writable only by another user, is never silently replaced: a recipe that needed to change it fails with a permission error naming the file and leaves it exactly as it was, and a rerun whose content is already current leaves it alone and succeeds. `bd init` and `bd setup claude` treat such a failure in their instructions stage as a warning and continue, so hooks still get installed; make the file writable and rerun the setup command. A file the process can write, however narrow its mode, is written as before.
 
 One `AGENTS.md` works across many tools — Factory Droid, Mux, OpenCode, Cursor, Zed, Jules, and other AGENTS.md-aware assistants — so `bd setup factory` is a good starting point when your team mixes AI tools.
 

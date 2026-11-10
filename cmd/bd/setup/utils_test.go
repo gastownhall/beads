@@ -666,3 +666,43 @@ func TestAtomicWriteFileLeavesACurrentReadOnlyFileAlone(t *testing.T) {
 		assertNoTempResidue(t, dir)
 	})
 }
+
+// The read-only gate applies only to files the process cannot write. Writable
+// and missing targets keep the behavior they always had: rewritten even when
+// the bytes already match, modes chosen as before, symlinks still refused by
+// atomicWriteFile and written through by the following-symlink helper.
+func TestAtomicWriteFileWritableAndMissingTargetsKeepTheirBehavior(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file permissions are not supported on Windows")
+	}
+	t.Run("a writable current file is still rewritten", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "AGENTS.md")
+		seedFileMode(t, path, "same bytes", 0o600)
+		old := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatalf("backdate %s: %v", path, err)
+		}
+
+		if err := atomicWriteFile(path, []byte("same bytes")); err != nil {
+			t.Fatalf("atomicWriteFile: %v", err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Errorf("mode = %04o, want 0600", info.Mode().Perm())
+		}
+		if info.ModTime().Equal(old) {
+			t.Error("a writable file with unchanged bytes should still be rewritten")
+		}
+	})
+	t.Run("a missing file gets the explicit mode", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "new.md")
+		if err := atomicWriteFile(path, []byte("data"), 0o600); err != nil {
+			t.Fatalf("atomicWriteFile: %v", err)
+		}
+		assertFileMode(t, path, 0o600)
+	})
+}
