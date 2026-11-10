@@ -205,3 +205,71 @@ func TestEmbeddedStrategyMergeCommitsPeerCleanTables(t *testing.T) {
 		}
 	}
 }
+
+// TestEmbeddedMergeAndSettleKeepsLocalPendingConfigAndLabel (GH#7757, AC-4):
+// local uncommitted edits to an internal config key and to labels, tables
+// both committed branches left identical, stay unstaged with their working
+// values through an otherwise conflicted settlement and stay out of the merge
+// commit, which still carries the peer's comment.
+func TestEmbeddedMergeAndSettleKeepsLocalPendingConfigAndLabel(t *testing.T) {
+	te := newTestEnv(t, "gh7757local")
+	ctx := t.Context()
+	conn := openSettleConn(t, ctx, te)
+
+	d := gh7757Divergence{issueID: "pl-1", peer: "plpeer"}
+	seedGH7757Divergence(t, ctx, conn, d)
+	for _, q := range []string{
+		"INSERT INTO config (`key`, value) VALUES ('local_pending_setting', 'local')",
+		"INSERT INTO labels (issue_id, label) VALUES ('pl-1', 'local-pending')",
+	} {
+		if _, err := conn.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+
+	if err := versioncontrolops.MergeAndSettle(ctx, conn, d.peer); err != nil {
+		t.Fatalf("MergeAndSettle: %v", err)
+	}
+
+	assertHeadCarriesPeerRows(t, ctx, conn, d)
+	if v, ok := configValue(t, ctx, conn, "HEAD", "local_pending_setting"); ok {
+		t.Errorf("merge commit swept in the local pending config row (value %q)", v)
+	}
+	if v, ok := configValue(t, ctx, conn, "WORKING", "local_pending_setting"); !ok || v != "local" {
+		t.Errorf("working config local_pending_setting = %q (present %v), want %q", v, ok, "local")
+	}
+	if got := headLabels(t, ctx, conn, d.issueID); len(got) != 0 {
+		t.Errorf("merge commit swept in the local pending label: HEAD labels = %v", got)
+	}
+	var workingLabels int
+	if err := conn.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM labels WHERE issue_id = 'pl-1' AND label = 'local-pending'").Scan(&workingLabels); err != nil {
+		t.Fatalf("count working labels: %v", err)
+	}
+	if workingLabels != 1 {
+		t.Errorf("working set lost the local pending label (%d rows)", workingLabels)
+	}
+	rows, err := conn.QueryContext(ctx, "SELECT table_name, staged FROM dolt_status ORDER BY table_name")
+	if err != nil {
+		t.Fatalf("read dolt_status: %v", err)
+	}
+	defer rows.Close()
+	got := map[string]bool{}
+	for rows.Next() {
+		var name string
+		var staged bool
+		if err := rows.Scan(&name, &staged); err != nil {
+			t.Fatalf("scan dolt_status: %v", err)
+		}
+		got[name] = staged
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate dolt_status: %v", err)
+	}
+	if want := map[string]bool{"config": false, "labels": false}; !reflect.DeepEqual(got, want) {
+		t.Errorf("dolt_status after settlement = %v, want %v (the local edits pending and unstaged, nothing else)", got, want)
+	}
+	if mergeOpen(t, ctx, conn) {
+		t.Error("merge left open (dolt_merge_status.is_merging = 1) after settlement")
+	}
+}
