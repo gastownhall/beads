@@ -1230,7 +1230,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#6146](https://github.com/gastownhall/beads/issues/6146)). With
   `audit.enabled` on, `bd update --claim` wrote no rows, and `--claim
   --status` dropped the assignee. It now writes the same status and assignee
-  `field_change` rows an explicit update writes. `bd ready --claim` and
+  `field_change` rows an explicit update writes; their old values come from
+  a read just before the write, so they are advisory under concurrency.
+  `bd ready --claim` and
   `bd close --claim-next`, which return no prior state, append a new
   `claimed` entry with the claimed issue's status and assignee and no old
   values. Through `--proxied-server`, `bd update` (an explicit `--status`,
