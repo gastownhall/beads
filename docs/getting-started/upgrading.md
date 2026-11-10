@@ -225,7 +225,10 @@ A database written under an older Dolt can hold values the new engine cannot
 decode. A migration that hits one stops and bd refuses with `stopped: a stored
 value could not be read`, naming the migration and the engine symptom. Make no
 further writes, preserve a full copy of the store, and follow
-[Schema-Encoding Drift](/recovery/schema-encoding-drift).
+[Schema-Encoding Drift](/recovery/schema-encoding-drift). If a later run
+reports `pending schema migrations alter pre-existing dirty tables` instead,
+do not run the `bd dolt commit` it suggests: those tables hold the stopped
+migration's partial changes.
 
 #### Upgrade every client that shares a store, together
 

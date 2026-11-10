@@ -14,14 +14,16 @@ import (
 	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
-// driftRefusalForTest is the refusal a pre-0059 cursor over a drifted table
-// returns, with the engine's stack still appended to its cause.
+// driftRefusalForTest is the refusal for the reported case's step
+// (gastownhall/beads#5699: migration 0035 copying events rows into the wisp
+// tables) in the form a sql-server returns it: a recovered panic with the
+// engine's stack still appended to its cause.
 func driftRefusalForTest() *schema.SchemaEncodingDriftError {
 	return &schema.SchemaEncodingDriftError{
-		Migration:   "0059_recompute_null_gate_is_blocked.up.sql",
-		Version:     59,
+		Migration:   "0035_migrate_infra_to_wisps.up.sql",
+		Version:     35,
 		CursorTable: "schema_migrations",
-		Cause: errors.New("migration 0059_recompute_null_gate_is_blocked.up.sql: " +
+		Cause: errors.New("migration 0035_migrate_infra_to_wisps.up.sql: " +
 			"Error 1105 (HY000): panic recovered: invalid hash length: 19\n" +
 			"goroutine 81 [running]:\nruntime/debug.Stack()"),
 	}
@@ -61,9 +63,20 @@ func assertDriftText(t *testing.T, refusal *schema.SchemaEncodingDriftError, std
 	}
 }
 
+// envelopeModes are the two JSON error shapes: flat, and with
+// BD_JSON_ENVELOPE=1 the error payload inside data.
+var envelopeModes = []struct {
+	name, env string
+	envelope  bool
+}{
+	{"flat", "", false},
+	{"envelope", "1", true},
+}
+
 // assertDriftJSON decodes the one JSON document the refusal wrote and checks
-// its schema_encoding_drift block.
-func assertDriftJSON(t *testing.T, stdout, stderr string) {
+// its schema_encoding_drift block, which sits beside error and hint: inside
+// data when the envelope is on.
+func assertDriftJSON(t *testing.T, refusal *schema.SchemaEncodingDriftError, envelope bool, stdout, stderr string) {
 	t.Helper()
 	if stdout != "" {
 		t.Errorf("JSON refusal wrote to stdout as well: %q", stdout)
@@ -76,6 +89,18 @@ func assertDriftJSON(t *testing.T, stdout, stderr string) {
 	if dec.More() {
 		t.Errorf("more than one JSON document on stderr:\n%s", stderr)
 	}
+	if envelope {
+		data, ok := got["data"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("envelope has no data object:\n%s", stderr)
+		}
+		for key := range got {
+			if key != "schema_version" && key != "data" {
+				t.Errorf("envelope carries %q outside data:\n%s", key, stderr)
+			}
+		}
+		got = data
+	}
 	msg, _ := got["error"].(string)
 	if strings.Contains(msg, "goroutine") || strings.Contains(msg, "\n") {
 		t.Errorf("JSON error carries the engine stack: %q", msg)
@@ -85,12 +110,12 @@ func assertDriftJSON(t *testing.T, stdout, stderr string) {
 	}
 	drift, ok := got["schema_encoding_drift"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("missing schema_encoding_drift object:\n%s", stderr)
+		t.Fatalf("missing schema_encoding_drift object beside error and hint:\n%s", stderr)
 	}
 	for key, want := range map[string]interface{}{
-		"migration":     "0059_recompute_null_gate_is_blocked.up.sql",
-		"version":       float64(59),
-		"cursor_source": "schema_migrations",
+		"migration":     refusal.Migration,
+		"version":       float64(refusal.Version),
+		"cursor_source": refusal.CursorTable,
 		"symptom":       "invalid hash length: 19",
 		"recovery_url":  schema.SchemaEncodingDriftRecoveryURL,
 	} {
@@ -125,15 +150,18 @@ func TestRenderTypedOpenErrorSchemaEncodingDrift(t *testing.T) {
 		assertDriftText(t, refusal, stdout, stderr)
 	})
 
-	t.Run("json", func(t *testing.T) {
-		pinJSONOutput(t, true)
-		var handled bool
-		stdout, stderr := captureDriftStdio(t, func() { handled = renderTypedOpenError(wrapped) })
-		if !handled {
-			t.Fatal("renderTypedOpenError did not handle a wrapped SchemaEncodingDriftError")
-		}
-		assertDriftJSON(t, stdout, stderr)
-	})
+	for _, mode := range envelopeModes {
+		t.Run("json "+mode.name, func(t *testing.T) {
+			pinJSONOutput(t, true)
+			t.Setenv("BD_JSON_ENVELOPE", mode.env)
+			var handled bool
+			stdout, stderr := captureDriftStdio(t, func() { handled = renderTypedOpenError(wrapped) })
+			if !handled {
+				t.Fatal("renderTypedOpenError did not handle a wrapped SchemaEncodingDriftError")
+			}
+			assertDriftJSON(t, refusal, mode.envelope, stdout, stderr)
+		})
+	}
 
 	// refuseUnverifiablePreviewOpen is a real caller that turns the rendered
 	// refusal into the command's exit status.
@@ -172,17 +200,21 @@ func TestSchemaEncodingDriftMigrateRendering(t *testing.T) {
 	store = &driftMigratorStore{err: fmt.Errorf("apply schema migrations: %w", refusal)}
 	t.Cleanup(func() { store = oldStore })
 
-	for _, jsonOn := range []bool{false, true} {
-		t.Run(fmt.Sprintf("json=%v", jsonOn), func(t *testing.T) {
-			pinJSONOutput(t, jsonOn)
+	t.Run("text", func(t *testing.T) {
+		pinJSONOutput(t, false)
+		var err error
+		stdout, stderr := captureDriftStdio(t, func() { err = handleSchemaMigrate() })
+		assertExit1(t, err)
+		assertDriftText(t, refusal, stdout, stderr)
+	})
+	for _, mode := range envelopeModes {
+		t.Run("json "+mode.name, func(t *testing.T) {
+			pinJSONOutput(t, true)
+			t.Setenv("BD_JSON_ENVELOPE", mode.env)
 			var err error
 			stdout, stderr := captureDriftStdio(t, func() { err = handleSchemaMigrate() })
 			assertExit1(t, err)
-			if jsonOn {
-				assertDriftJSON(t, stdout, stderr)
-			} else {
-				assertDriftText(t, refusal, stdout, stderr)
-			}
+			assertDriftJSON(t, refusal, mode.envelope, stdout, stderr)
 		})
 	}
 }

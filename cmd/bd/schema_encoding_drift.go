@@ -26,9 +26,16 @@ func renderSchemaEncodingDrift(err error) bool {
 	return true
 }
 
+// handleSchemaEncodingDriftJSON writes the refusal as a JSON error whose
+// schema_encoding_drift object sits beside error and hint, so with
+// BD_JSON_ENVELOPE=1 it is inside data, where the envelope puts the error
+// payload (docs/reference/json-schema.md).
 func handleSchemaEncodingDriftJSON(e *schema.SchemaEncodingDriftError) {
 	outer := buildJSONError(e.Error(), e.Hint())
 	if m, ok := outer.(map[string]interface{}); ok {
+		if inner, ok := m["data"].(map[string]interface{}); ok {
+			m = inner
+		}
 		m["schema_encoding_drift"] = map[string]interface{}{
 			"migration":     e.Migration,
 			"version":       e.Version,

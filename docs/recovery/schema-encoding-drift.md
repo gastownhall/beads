@@ -17,18 +17,22 @@ The first command after an upgrade, or an explicit `bd migrate schema`, exits
 1 with a refusal that names the migration it stopped in:
 
 ```
-schema migration 0059_recompute_null_gate_is_blocked.up.sql (schema_migrations v59) stopped: a stored value could not be read
+schema migration 0035_migrate_infra_to_wisps.up.sql (schema_migrations v35) stopped: a stored value could not be read
 
-  Symptom: invalid hash length: 19
+  Symptom: malformed out-of-band adaptive value: invalid address length: expected 20-byte address, got 19
 ```
 
 The symptom is one of the engine errors `invalid hash length` or
 `malformed out-of-band adaptive value`. With `--json`, the same refusal is a
 JSON error on stderr whose `schema_encoding_drift` object carries
-`migration`, `version`, `cursor_source`, `symptom` and `recovery_url`.
+`migration`, `version`, `cursor_source`, `symptom` and `recovery_url`. It
+sits beside `error` and `hint`, inside `data` when `BD_JSON_ENVELOPE=1`.
 
-Migration 0059 is the reported case, but the refusal covers every numbered
-migration in both migration series.
+The reported case
+([gastownhall/beads#5699](https://github.com/gastownhall/beads/issues/5699))
+is migration 0035 on a store whose migration cursor predates it: 0035 stops
+while it copies `events` rows. The refusal covers every numbered migration in
+both migration series.
 
 ## Before any further writes
 
@@ -40,20 +44,43 @@ remain from the one that stopped. Leave the store as it is:
 2. Preserve a full copy of the store and its configuration with the
    [whole-store preservation procedure](/recovery/database-corruption#2-preserve-the-damaged-store),
    keep the preserved copy outside any server `data_dir`, and keep the
-   original untouched as your fallback.
+   original untouched as your fallback. The store is not always inside
+   `.beads`: `bd context --json` shows where it lives.
 3. Do not commit the working set, do not delete rows, and do not drop or
    reset tables to get past the error. Each of these can make unreadable
    values permanent or discard the evidence a recovery needs.
-4. Do not push from this store or pull into it until it is recovered.
+4. A later run can stop before it reaches the migration, with
+   `pending schema migrations alter pre-existing dirty tables: <tables>; run 'bd dolt commit' ...`
+   instead of this refusal. Those tables hold the stopped migration's partial
+   changes: for 0059, `__bd_0059_recompute_wisp_deps`,
+   `__bd_0059_recompute_wisps` and, once its reset ran, `issues`. Do not run
+   `bd dolt commit` on this store. It would record the half-applied migration
+   in history, and a push would publish it.
+5. Do not push from this store or pull into it until it is recovered.
 
 Work only on the copy from here on, and make a fresh copy before each attempt.
 
 ## Diagnosis
 
 The refusal tells you which migration stopped and with what engine error. It
-does not tell you which table or row holds the unreadable value. Migration
-0059 reads `issues`, `dependencies`, `wisps` and `wisp_dependencies`; treat
-those as candidate tables, not confirmed corruption locations.
+does not tell you which table or row holds the unreadable value. The candidate
+tables are the ones that migration reads: the `FROM`, `JOIN` and `ALTER TABLE`
+targets in the file it names, which you can find among the
+[migration files](https://github.com/gastownhall/beads/tree/main/internal/storage/schema/migrations)
+(the `ignored/` directory holds the `ignored_schema_migrations` series). Treat
+them as candidate tables, not confirmed corruption locations. For example:
+
+- **0035, the reported case:** it copies infra rows into the wisp tables, and
+  reads `issues`, `labels`, `dependencies`, `events` and `comments` to do it.
+  The reported store stopped while 0035 copied `events` rows into
+  `wisp_events`, and `events` is where its unreadable text lives. Migrations
+  0057 and 0062 rewrite `events` as well.
+- **0059:** it recomputes `is_blocked`, and reads `issues`, `dependencies`,
+  `wisps` and `wisp_dependencies`.
+
+The wisp tables (`wisps` and every `wisp_*` table) are clone-local: bd keeps
+them out of Dolt history. From migration 0062 on, `events` is clone-local
+too, and history keeps only the `events` rows written before it.
 
 bd recognizes drift only by the error text the engine returns. It cannot
 detect readable garbage: a value that decodes without an error but holds the
@@ -72,11 +99,15 @@ and run every step on a preserved copy.
 The [reported procedure](https://github.com/gastownhall/beads/issues/4380#issuecomment-4899301060)
 uses stock Dolt history. On the copy, find an earlier commit at which the
 candidate tables read cleanly. Readability needs a full-value read of each
-table, for example `SELECT * FROM issues AS OF '<commit>'`, and the same for
-`dependencies`, `wisps` and `wisp_dependencies`: a `COUNT(*)` can succeed
-without decoding a single stored value, so it proves nothing here. Then
-restore an appropriate table root from that version and reconcile it against
-current data.
+table, for example `SELECT * FROM events AS OF '<commit>'`, and the same for
+every other candidate table: a `COUNT(*)` can succeed without decoding a
+single stored value, so it proves nothing here. Then restore an appropriate
+table root from that version and reconcile it against current data.
+
+History holds only versioned tables, so this route cannot restore a
+clone-local table: not the wisp tables, and not `events` rows written after
+migration 0062. If the unreadable value is in one of those, this route does
+not apply.
 
 History restores an older version, so account for:
 
@@ -111,12 +142,12 @@ and [the limits of sample-based checks](https://github.com/gastownhall/beads/iss
 Validate the recovered copy before it replaces anything:
 
 1. **Full reads:** read every row and every column of every relevant table,
-   not a sample: at least `issues`, `dependencies`, `wisps` and
-   `wisp_dependencies`, with full-value queries such as
-   `SELECT * FROM dependencies` on the copy. bd commands such as `bd list` or
-   `bd export` do not read every row of every table, so they are not this
-   check. Any read error, including either drift symptom, means the copy is
-   not recovered.
+   not a sample: every candidate table of the stopped migration, and at least
+   `issues`, `dependencies`, `labels`, `events`, `comments`, `wisps` and every
+   `wisp_*` table, with full-value queries such as `SELECT * FROM events` on
+   the copy. bd commands such as `bd list` or `bd export` do not read every
+   row of every table, so they are not this check. Any read error, including
+   either drift symptom, means the copy is not recovered.
 2. **Semantics:** separately, check issue and dependency semantics against
    what you expect, with bd pointed at the copy (`BEADS_DIR` set to the copy's
    `.beads`): issue counts by status, the dependency graph (`bd blocked`,
