@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -299,6 +300,16 @@ func TestBatchDepAddEdge(t *testing.T) {
 			want: &types.Dependency{IssueID: "bd-1", DependsOnID: "bd-2", Type: types.DepBlocks},
 		},
 		{
+			name:    "typo of a built-in type",
+			args:    []string{"bd-1", "bd-2", "blcoks"},
+			wantErr: `dep add: unknown dependency type "blcoks"; valid types: ` + createDepsAcceptedTypeList(),
+		},
+		{
+			name:    "custom type outside dep add's vocabulary",
+			args:    []string{"bd-1", "bd-2", "owned-by"},
+			wantErr: `dep add: unknown dependency type "owned-by"; valid types: ` + createDepsAcceptedTypeList(),
+		},
+		{
 			name:    "missing to-id",
 			args:    []string{"bd-1"},
 			wantErr: "dep add requires <from-id> <to-id>",
@@ -306,7 +317,7 @@ func TestBatchDepAddEdge(t *testing.T) {
 		{
 			name:    "invalid type",
 			args:    []string{"bd-1", "bd-2", tooLong},
-			wantErr: `dep add: invalid dependency type "` + tooLong + `"`,
+			wantErr: `dep add: invalid dependency type "` + tooLong + `" (must be non-empty, max ` + strconv.Itoa(types.MaxDependencyTypeLen) + ` chars); valid types: ` + createDepsAcceptedTypeList(),
 		},
 		{
 			name:       "dotted child gated on its own parent",
@@ -380,6 +391,25 @@ func TestBatchCmd_Registered(t *testing.T) {
 	}
 	if cmd.Flags().Lookup("message") == nil {
 		t.Error("batch missing --message flag")
+	}
+}
+
+// TestBatchDepAddEdgeCanonicalizesAliasesAndRejectsUnknownTypes pins bd-3073gm
+// (GH#5585): a batch `dep add` line must store the alias `blocked-by` as the
+// canonical `blocks` type that ready/blocked gating matches, and must refuse a
+// type outside the well-known vocabulary, as `bd dep add` does.
+func TestBatchDepAddEdgeCanonicalizesAliasesAndRejectsUnknownTypes(t *testing.T) {
+	for _, alias := range []string{"blocked-by", "depends-on"} {
+		got, err := batchDepAddEdge([]string{"bd-a", "bd-b", alias})
+		if err != nil {
+			t.Fatalf("batchDepAddEdge(%q): %v", alias, err)
+		}
+		if got.Type != types.DepBlocks {
+			t.Errorf("batchDepAddEdge(%q).Type = %q, want %q", alias, got.Type, types.DepBlocks)
+		}
+	}
+	if got, err := batchDepAddEdge([]string{"bd-a", "bd-b", "blokcs"}); err == nil {
+		t.Errorf("batchDepAddEdge(typo %q) = %+v, nil; want an unknown-type error", "blokcs", got)
 	}
 }
 
