@@ -1226,6 +1226,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The `.beads/.gitignore` that `bd init` writes now ignores
+  `dolt-backup.json`, `dolt-backup-state.json`, `dolt-config.log` and
+  `.auto-import-issues.jsonl`, and `bd doctor` flags an existing
+  `.beads/.gitignore` that lacks them as outdated. These per-machine files
+  showed as untracked after `bd backup init`, `bd backup sync`, a
+  server-mode `bd dolt set` or a JSONL auto-import, so a `git add .`
+  committed them; `dolt-backup.json` and `dolt-config.log` hold absolute
+  local paths (#8318).
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
