@@ -8,19 +8,28 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 )
 
+// deferredParentProbeRegex matches the per-table probe: an EXISTS per branch
+// of the deferred-parent rule, status deferred (plain `bd defer`, GH#7300) or
+// a future defer_until.
 func deferredParentProbeRegex(issueTable string) string {
-	return `SELECT 1 FROM ` + issueTable + ` WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP\(\) LIMIT 1`
+	return `^SELECT \(EXISTS \(SELECT 1 FROM ` + issueTable + ` WHERE status = 'deferred'\) OR ` +
+		`EXISTS \(SELECT 1 FROM ` + issueTable + ` WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP\(\)\)\)$`
 }
 
 func deferredEdgeRegex(e deferredParentEdge) string {
 	return `SELECT dep\.issue_id\s+FROM ` + e.depTable + ` dep\s+JOIN ` + e.issueTable +
-		` parent ON parent\.id = dep\.` + e.targetCol
+		` parent ON parent\.id = dep\.` + e.targetCol +
+		`\s+WHERE dep\.type = 'parent-child'\s+AND \(parent\.status = 'deferred' OR \(parent\.defer_until IS NOT NULL AND parent\.defer_until > UTC_TIMESTAMP\(\)\)\)`
+}
+
+func deferredProbeAnswer(found bool) *sqlmock.Rows {
+	return sqlmock.NewRows([]string{"deferred"}).AddRow(found)
 }
 
 func noDeferredChildren() *sqlmock.Rows { return sqlmock.NewRows([]string{"issue_id"}) }
 
 // TestDeferredParentEdgesBrokenDurablePlaneIsAnError is the domain/db twin of
-// the issueops guard on the same join. `descendantsOfFutureDeferredParents`
+// the issueops guard on the same join. `childrenOfDeferredParents`
 // walks four (dependency table, issue table) pairs, and three of the four name
 // a table every beads database must have. Its gate classified the error class
 // alone with no plane guard at all, and it continues rather than aborting, so
@@ -118,5 +127,69 @@ func TestDeferredParentEdgesUnrelatedErrorPropagates(t *testing.T) {
 
 	if _, err := repo.getChildrenOfDeferredParents(t.Context()); !errors.Is(err, boom) {
 		t.Fatalf("a failed deferred-parent edge did not propagate: %v", err)
+	}
+}
+
+// TestDeferredParentEdgesFalseProbesSkipTheScan: both tables answer false, so
+// there is no deferred parent and no edge is read.
+func TestDeferredParentEdgesFalseProbesSkipTheScan(t *testing.T) {
+	mock, repo := newMockRepo(t)
+	mock.ExpectQuery(deferredParentProbeRegex("issues")).WillReturnRows(deferredProbeAnswer(false))
+	mock.ExpectQuery(deferredParentProbeRegex("wisps")).WillReturnRows(deferredProbeAnswer(false))
+
+	got, err := repo.getChildrenOfDeferredParents(t.Context())
+	if err != nil {
+		t.Fatalf("getChildrenOfDeferredParents: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("children = %v, want none", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// TestDeferredParentEdgesFalseIssuesProbeFallsThroughToWisps: a false answer
+// for issues moves on to wisps; a true answer there reads every edge.
+func TestDeferredParentEdgesFalseIssuesProbeFallsThroughToWisps(t *testing.T) {
+	mock, repo := newMockRepo(t)
+	mock.ExpectQuery(deferredParentProbeRegex("issues")).WillReturnRows(deferredProbeAnswer(false))
+	mock.ExpectQuery(deferredParentProbeRegex("wisps")).WillReturnRows(deferredProbeAnswer(true))
+	var want []string
+	for _, e := range deferredParentEdges {
+		mock.ExpectQuery(deferredEdgeRegex(e)).WillReturnRows(
+			sqlmock.NewRows([]string{"issue_id"}).AddRow(e.depTable + "/" + e.issueTable))
+		want = append(want, e.depTable+"/"+e.issueTable)
+	}
+
+	got, err := repo.getChildrenOfDeferredParents(t.Context())
+	if err != nil {
+		t.Fatalf("getChildrenOfDeferredParents: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("children = %v, want %v", got, want)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// TestDeferredParentEdgesMissingWispsProbeIsTolerated: a database without the
+// wisp plane answers issues false and fails wisps with a missing table, which
+// means no deferred parent.
+func TestDeferredParentEdgesMissingWispsProbeIsTolerated(t *testing.T) {
+	mock, repo := newMockRepo(t)
+	mock.ExpectQuery(deferredParentProbeRegex("issues")).WillReturnRows(deferredProbeAnswer(false))
+	mock.ExpectQuery(deferredParentProbeRegex("wisps")).WillReturnError(missingTable("wisps"))
+
+	got, err := repo.getChildrenOfDeferredParents(t.Context())
+	if err != nil {
+		t.Fatalf("getChildrenOfDeferredParents: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("children = %v, want none", got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
 	}
 }

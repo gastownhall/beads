@@ -1019,7 +1019,7 @@ const (
 // assignee's is no reason for this listing to be empty. bd blocked applies the
 // label sets exactly as the listing does, but its --parent is one hop plus the
 // dotted ids under the parent where ready's is transitive, so under --parent an
-// empty answer proves nothing. A blocked child of a future-deferred parent,
+// empty answer proves nothing. A blocked child of a deferred parent,
 // which the listing leaves out, still counts: the issue alone cannot tell.
 func readyEmptyStateVerdict(f types.WorkFilter, blocked []*types.BlockedIssue, now time.Time) readyEmptyVerdict {
 	verdict := readyEmptyNoneBlocked

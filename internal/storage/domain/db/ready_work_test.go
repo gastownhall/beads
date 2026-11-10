@@ -27,6 +27,7 @@ func (s *testSuite) TestIssueGetReadyWork() {
 	s.Run("Unassigned", s.readyUnassigned)
 	s.Run("ExcludesDeferred", s.readyExcludesDeferred)
 	s.Run("IncludeDeferred", s.readyIncludeDeferred)
+	s.Run("ExcludesChildrenOfUndatedDeferredParent", s.readyExcludesChildrenOfUndatedDeferredParent)
 	s.Run("LabelFilter", s.readyLabelFilter)
 	s.Run("LimitRespected", s.readyLimitRespected)
 	s.Run("SortByPriority", s.readySortByPriority)
@@ -296,6 +297,32 @@ func (s *testSuite) readyIncludeDeferred() {
 	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{IncludeDeferred: true})
 	s.Require().NoError(err)
 	s.Contains(issueIDsFrom(out), "bd-rdy-idf-1")
+}
+
+// insertUndatedDeferredFamily inserts parent, its parent-child child, and an
+// unrelated control, then defers the parent the way plain `bd defer` does:
+// status deferred with no defer_until (GH#7300).
+func (s *testSuite) insertUndatedDeferredFamily(parentID, childID, controlID string) {
+	r := s.issueRepo()
+	for _, id := range []string{parentID, childID, controlID} {
+		s.Require().NoError(r.Insert(s.Ctx(), newTestIssue(id, id), "tester", domain.InsertIssueOpts{}))
+	}
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep(childID, parentID, types.DepParentChild), "tester", domain.DepInsertOpts{}))
+	_, err := s.Runner().ExecContext(s.Ctx(),
+		"UPDATE issues SET status = ?, defer_until = NULL WHERE id = ?", types.StatusDeferred, parentID)
+	s.Require().NoError(err)
+}
+
+func (s *testSuite) readyExcludesChildrenOfUndatedDeferredParent() {
+	s.insertUndatedDeferredFamily("bd-rdy-udf-p", "bd-rdy-udf-c", "bd-rdy-udf-free")
+
+	out, err := s.issueRepo().GetReadyWork(s.Ctx(), types.WorkFilter{})
+	s.Require().NoError(err)
+	got := issueIDsFrom(out)
+	s.NotContains(got, "bd-rdy-udf-c", "child of an undated deferred parent is not ready")
+	s.NotContains(got, "bd-rdy-udf-p")
+	s.Contains(got, "bd-rdy-udf-free")
 }
 
 func (s *testSuite) readyLabelFilter() {
