@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -107,8 +108,18 @@ func TestPersistentPostRunE_ClearsOnErrorPath(t *testing.T) {
 	setRootContext(ctx, cancel)
 
 	// "create" is not read-only, so post-run reaches the auto-export hook.
-	if err := rootCmd.PersistentPostRunE(&cobra.Command{Use: "create"}, nil); err == nil {
+	var err error
+	stderr := captureStderr(t, func() { err = rootCmd.PersistentPostRunE(&cobra.Command{Use: "create"}, nil) })
+	if err == nil {
 		t.Fatal("expected the stubbed auto-export failure to surface")
+	}
+	// GH#6163: an auto-export failure exits 1 through HandleError, which
+	// reports it exactly once.
+	if code, ok := exitCodeFromError(err); !ok || code != 1 {
+		t.Errorf("exit code = %d (reported %v), want 1", code, ok)
+	}
+	if n := strings.Count(stderr, "boom"); n != 1 || strings.Count(stderr, "Error: ") != 1 {
+		t.Errorf("stderr = %q, want the failure reported exactly once", stderr)
 	}
 
 	if err := ctx.Err(); !errors.Is(err, context.Canceled) {

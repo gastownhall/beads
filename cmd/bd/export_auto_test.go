@@ -2841,3 +2841,72 @@ func TestMaybeAutoExportStateHashUnsupportedSkips(t *testing.T) {
 	}
 	assertAutoExportUntouched(t, beadsDir, jsonl, exportRelationSeed, stateBytes)
 }
+
+// closeCountingStateHashStore is a failingStateHashStore that PostRunE's
+// deferred cleanup can close.
+type closeCountingStateHashStore struct {
+	failingStateHashStore
+	closeCalls int
+}
+
+func (f *closeCountingStateHashStore) Close() error {
+	f.closeCalls++
+	return nil
+}
+
+// GH#6163, end to end through PersistentPostRunE: a mutating command whose
+// real auto-export fails exits 1, reports the failure exactly once, and
+// still runs its deferred cleanup (context cancelled and cleared, store
+// closed).
+func TestPersistentPostRunE_ReportsAutoExportFailureOnce(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+	saveAndRestoreGlobals(t)
+	snapshotRootContext(t)
+	t.Setenv("BD_GIT_HOOK", "")
+	testModeUseGlobals = true
+	readonlyMode = false // let the maintenance block run
+
+	oldCommit, oldBackup, oldExport, oldPush := runPostRunAutoCommit, runPostRunAutoBackup, runPostRunAutoExport, runPostRunAutoPush
+	t.Cleanup(func() {
+		runPostRunAutoCommit, runPostRunAutoBackup, runPostRunAutoExport, runPostRunAutoPush = oldCommit, oldBackup, oldExport, oldPush
+	})
+	runPostRunAutoCommit = func(context.Context, doltAutoCommitParams) error { return nil }
+	runPostRunAutoBackup = func(context.Context) {}
+	runPostRunAutoExport = maybeAutoExport
+	pushCalls := 0
+	runPostRunAutoPush = func(context.Context) { pushCalls++ }
+
+	sentinel := errors.New("injected state hash failure")
+	fake := &closeCountingStateHashStore{failingStateHashStore: failingStateHashStore{err: sentinel}}
+	store = fake
+	beadsDir, jsonl, stateBytes := seedAutoExportFailureFixture(t, exportRelationSeed, &exportAutoState{LastDoltCommit: "hash-before-write"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	setRootContext(ctx, cancel)
+
+	var err error
+	stderr := captureStderr(t, func() { err = rootCmd.PersistentPostRunE(&cobra.Command{Use: "create"}, nil) })
+	if code, ok := exitCodeFromError(err); !ok || code != 1 {
+		t.Fatalf("PersistentPostRunE err = %v (exit code %d, reported %v), want exit 1", err, code, ok)
+	}
+	if strings.Count(stderr, "Error: ") != 1 || strings.Count(stderr, sentinel.Error()) != 1 || !strings.Contains(stderr, jsonl) {
+		t.Fatalf("stderr = %q, want one Error line naming %q and %q", stderr, sentinel, jsonl)
+	}
+	if strings.Contains(stderr, "Warning: auto-export") {
+		t.Fatalf("stderr = %q, want no auto-export warning beside the error", stderr)
+	}
+	if pushCalls != 0 {
+		t.Errorf("auto-push ran %d time(s) after the failed export, want 0", pushCalls)
+	}
+	if err := ctx.Err(); !errors.Is(err, context.Canceled) {
+		t.Errorf("post-run must cancel the context on the error path, got %v", err)
+	}
+	if rootCtx != nil || rootCancel != nil {
+		t.Errorf("post-run must clear the root context on the error path, got ctx=%v cancel!=nil=%v", rootCtx, rootCancel != nil)
+	}
+	if fake.closeCalls != 1 || store != nil {
+		t.Errorf("store close calls = %d, store = %v, want closed once and cleared", fake.closeCalls, store)
+	}
+	assertAutoExportUntouched(t, beadsDir, jsonl, exportRelationSeed, stateBytes)
+}

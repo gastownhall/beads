@@ -173,6 +173,17 @@ bd config set export.git-add true
 
 Use `bd dolt push` / `bd dolt pull` for sync and `bd backup` for restorable
 database backups.
+
+With `export.auto` on, a failed export makes the command exit 1, even though
+its own change may already be saved in the database. This covers a state hash
+that cannot be read, a pre-export check that cannot run (an unreadable or
+invalid existing JSONL, a failing store query), and the export itself failing.
+The change is not rolled back and nothing is pushed, so look at the result
+before you retry a command that is not idempotent. A failed export does not
+reset the `export.interval` clock, so the next eligible write retries it.
+Deliberate refusals stay warnings with exit 0: an export that would empty a
+populated JSONL, JSONL records the database cannot account for, records
+outside auto-export scope, and a backend that cannot report a state hash.
 </Warning>
 
 Routing note: `output.title-length` and `agents.file` are functionally tool-level settings, but `bd config set` writes them to the Dolt database. They are typically read from `config.yaml` when set there directly.
