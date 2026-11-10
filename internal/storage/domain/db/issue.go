@@ -575,6 +575,16 @@ func (r *issueSQLRepositoryImpl) Claim(ctx context.Context, id, actor string, op
 		}, nil
 	}
 
+	// The claim-blocked guard, run only after the CAS wins so a refused
+	// claim writes nothing that survives — the enclosing unit of work rolls
+	// back, mirroring the direct route's issueops.claimIssueInTx placement.
+	// A lost CAS disambiguated above and never reaches this.
+	if opts.RefuseBlocked {
+		if err := issueops.EnforceClaimPolicyInTx(ctx, r.runner, id); err != nil {
+			return domain.ClaimRowResult{}, fmt.Errorf("db: Claim %s: %w", id, err)
+		}
+	}
+
 	// Grant the lease in the ephemeral leases table, mirroring
 	// issueops.ClaimIssueInTx. Wisps are never leased. This dual must stay in
 	// lockstep with the primary path (see the row_lock comment above).

@@ -266,6 +266,8 @@ func proxiedClaimPoolAliases(ctx context.Context) func() []string {
 // A refused claim reads as the generic update failure, as it does on the direct
 // route: the external claim guard ignores --force but shares ErrCloseBlocked
 // with the close policy, so the hint could name an override that cannot work.
+// The LOCAL-blocker refusal is the exception: it honors --force and so carries
+// the hint itself, on its own ErrClaimBlocked sentinel.
 //
 // The one verdict it cannot reproduce is stage attribution: "opening unit of
 // work" and "committing" were told apart by watching the provider this path no
@@ -289,6 +291,13 @@ func proxiedUpdateFailure(id string, claim bool, err error) *updateIDFailure {
 	case errors.Is(err, storage.ErrCloseBlocked) && !claim:
 		fmt.Fprintf(os.Stderr, "%v (use --force to override)\n", err)
 		return &updateIDFailure{ID: id, Error: fmt.Sprintf("%v (use --force to override)", err)}
+	case errors.Is(err, storage.ErrClaimBlocked):
+		// The claim-blocked refusal carries its own --force hint, on a
+		// sentinel distinct from the close policy's — the direct route's
+		// claimBlockedRefusal renders the same text.
+		refusal, _ := claimBlockedRefusal(err)
+		fmt.Fprintf(os.Stderr, "%s\n", refusal)
+		return &updateIDFailure{ID: id, Error: refusal.Error()}
 	case errors.Is(err, storage.ErrNotesOverwrite):
 		// The contract's AuthorizeNotesOverwrite fence refused inside the
 		// mutation transaction. Print the advice, not the raw sentinel.

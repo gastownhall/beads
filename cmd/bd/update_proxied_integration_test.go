@@ -213,6 +213,37 @@ func TestProxiedServerUpdate(t *testing.T) {
 			t.Errorf("lost issue %s assignee = %q, want alice (unchanged)", lost.ID, gotLost.Assignee)
 		}
 	})
+	// bd-ltvqa9 AC-2: `bd update --claim` refuses an issue a live local blocker
+	// still blocks on the proxied-server route too, with the same text as the
+	// embedded route. In a batch the refusal is per-ID: the blocked ID fails
+	// with the claim-blocked class, the unblocked ID is still claimed, and the
+	// command exits non-zero.
+	t.Run("claim_blocked_refused_batch_partial", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ucbk")
+		blocker := bdProxiedCreate(t, bd, p.dir, "Claim blocker")
+		blocked := bdProxiedCreate(t, bd, p.dir, "Blocked claim target", "--deps", "depends-on:"+blocker.ID)
+		clear := bdProxiedCreate(t, bd, p.dir, "Clear claim target")
+
+		out := bdProxiedUpdateFail(t, bd, p.dir, blocked.ID, clear.ID, "--claim", "--actor", "bob")
+		for _, want := range []string{"cannot claim blocked issue", blocked.ID, blocker.ID, "use --force to override"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("refusal should contain %q, got: %s", want, out)
+			}
+		}
+
+		gotBlocked := bdProxiedShow(t, bd, p.dir, blocked.ID)
+		if gotBlocked.Status != types.StatusOpen || gotBlocked.Assignee != "" {
+			t.Errorf("blocked issue after refused claim: status=%s assignee=%q, want open and unassigned",
+				gotBlocked.Status, gotBlocked.Assignee)
+		}
+
+		gotClear := bdProxiedShow(t, bd, p.dir, clear.ID)
+		if gotClear.Status != types.StatusInProgress || gotClear.Assignee != "bob" {
+			t.Errorf("unblocked batch member %s: status=%s assignee=%q, want claimed by bob",
+				clear.ID, gotClear.Status, gotClear.Assignee)
+		}
+	})
 }
 
 // TestProxiedServerUpdateB holds more of TestProxiedServerUpdate's cases, split
