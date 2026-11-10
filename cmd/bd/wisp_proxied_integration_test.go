@@ -307,6 +307,48 @@ func TestProxiedServerWispGC(t *testing.T) {
 		}
 	})
 
+	t.Run("force_with_dry_run_previews_and_deletes_nothing", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "wgfd")
+		abandoned := bdProxiedCreate(t, bd, p.dir, "Abandoned wisp", "--ephemeral")
+
+		db := openProxiedDB(t, p)
+		if _, err := db.Exec("UPDATE wisps SET updated_at = ? WHERE id = ?",
+			time.Now().UTC().Add(-2*time.Hour), abandoned.ID); err != nil {
+			t.Fatalf("backdate wisp: %v", err)
+		}
+
+		// An explicit --dry-run must win over --force on the proxied route
+		// too (GH#5152 AC-2).
+		out, err := bdProxiedRun(t, bd, p.dir, "mol", "wisp", "gc", "--age", "1h", "--force", "--dry-run", "--json")
+		if err != nil {
+			t.Fatalf("bd mol wisp gc --force --dry-run --json: %v\n%s", err, out)
+		}
+		var got struct {
+			CleanedIDs   []string `json:"cleaned_ids"`
+			CleanedCount int      `json:"cleaned_count"`
+			Candidates   int      `json:"candidates"`
+			DryRun       bool     `json:"dry_run"`
+		}
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatalf("unmarshal: %v\n%s", err, out)
+		}
+		if !got.DryRun || got.CleanedCount != 0 || got.Candidates != 1 {
+			t.Fatalf("expected preview despite --force (dry_run=true, cleaned_count=0, candidates=1), got %+v\n%s", got, out)
+		}
+		if len(got.CleanedIDs) != 1 || got.CleanedIDs[0] != abandoned.ID {
+			t.Fatalf("expected preview to list only %s, got %v", abandoned.ID, got.CleanedIDs)
+		}
+
+		var count int
+		if err := db.QueryRow("SELECT COUNT(*) FROM wisps WHERE id = ?", abandoned.ID).Scan(&count); err != nil {
+			t.Fatalf("query wisp: %v", err)
+		}
+		if count != 1 {
+			t.Errorf("expected wisp %s to survive --force --dry-run", abandoned.ID)
+		}
+	})
+
 	t.Run("cascade_respects_age_for_dependent_step_wisps", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "wgc")

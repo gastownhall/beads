@@ -64,6 +64,76 @@ func TestEmbeddedWispGCAgeRequiresForce(t *testing.T) {
 
 	bd := buildEmbeddedBD(t)
 
+	t.Run("force_deletes_exactly_the_eligible_set", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gcfe")
+		idle := bdCreate(t, bd, dir, "idle wisp", "--ephemeral").ID
+		pinned := bdCreate(t, bd, dir, "pinned wisp", "--ephemeral").ID
+		bdCommand(t, bd, dir, "update", pinned, "--status", "pinned")
+		fresh := bdCreate(t, bd, dir, "fresh wisp", "--ephemeral").ID
+		backdateWispSQL(t, beadsDir, "gcfe", idle, 2*time.Hour)
+		// Pinned is age-eligible too, so the selector alone must protect it.
+		backdateWispSQL(t, beadsDir, "gcfe", pinned, 2*time.Hour)
+
+		out := bdCommand(t, bd, dir, "mol", "wisp", "gc", "--age", "1h", "--force", "--json")
+		var del struct {
+			Deleted      []string `json:"deleted"`
+			DeletedCount int      `json:"deleted_count"`
+		}
+		if err := json.Unmarshal([]byte(out[strings.Index(out, "{"):]), &del); err != nil {
+			t.Fatalf("parse gc --force --json output: %v\nraw:\n%s", err, out)
+		}
+		if len(del.Deleted) != 1 || del.Deleted[0] != idle || del.DeletedCount != 1 {
+			t.Fatalf("want --force to delete only %s, got %+v\n%s", idle, del, out)
+		}
+		for _, id := range []string{pinned, fresh} {
+			if !bdShowSucceeds(t, bd, dir, id) {
+				t.Errorf("wisp %s must survive a forced gc (pinned/too-young)", id)
+			}
+		}
+	})
+
+	t.Run("force_with_dry_run_deletes_nothing", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "gcff")
+		idle := bdCreate(t, bd, dir, "idle wisp", "--ephemeral").ID
+
+		out := bdCommand(t, bd, dir, "mol", "wisp", "gc", "--age", "0s", "--force", "--dry-run", "--json")
+		res := wispGCPreviewJSON(t, out)
+		if !res.DryRun || res.CleanedCount != 0 || res.Candidates != 1 || len(res.CleanedIDs) != 1 || res.CleanedIDs[0] != idle {
+			t.Fatalf("want --force --dry-run to preview %s and delete nothing, got %+v\n%s", idle, res, out)
+		}
+		if !bdShowSucceeds(t, bd, dir, idle) {
+			t.Fatalf("wisp %s was deleted by --force --dry-run", idle)
+		}
+	})
+
+	t.Run("exclude_type_still_applies_under_force", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gcfg")
+		bdCommand(t, bd, dir, "config", "set", "types.custom", "agent")
+		protected := bdCreate(t, bd, dir, "agent wisp", "--ephemeral", "--type", "agent").ID
+		unprotected := bdCreate(t, bd, dir, "plain wisp", "--ephemeral").ID
+		backdateWispSQL(t, beadsDir, "gcfg", protected, 2*time.Hour)
+		backdateWispSQL(t, beadsDir, "gcfg", unprotected, 2*time.Hour)
+
+		out := bdCommand(t, bd, dir, "mol", "wisp", "gc", "--age", "1h", "--force", "--exclude-type", "agent", "--json")
+		var del struct {
+			Deleted []string `json:"deleted"`
+		}
+		if err := json.Unmarshal([]byte(out[strings.Index(out, "{"):]), &del); err != nil {
+			t.Fatalf("parse gc --force --exclude-type --json output: %v\nraw:\n%s", err, out)
+		}
+		for _, id := range del.Deleted {
+			if id == protected {
+				t.Errorf("excluded-type wisp %s was deleted under --force", protected)
+			}
+		}
+		if len(del.Deleted) != 1 || del.Deleted[0] != unprotected {
+			t.Fatalf("want --force --exclude-type to delete only %s, got %v\n%s", unprotected, del.Deleted, out)
+		}
+		if !bdShowSucceeds(t, bd, dir, protected) {
+			t.Errorf("excluded-type wisp %s must survive a forced gc", protected)
+		}
+	})
+
 	t.Run("explicit_age_preview_names_ids_types_and_force_footer", func(t *testing.T) {
 		dir, _, _ := bdInit(t, bd, "--prefix", "gcfa")
 		idle := bdCreate(t, bd, dir, "idle wisp", "--ephemeral").ID
