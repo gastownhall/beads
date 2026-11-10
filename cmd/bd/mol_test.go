@@ -3695,3 +3695,50 @@ func TestBondProtoMolRefArmEmptyParentIsReadyImmediately(t *testing.T) {
 		})
 	}
 }
+
+// AC-4: a second sequential --ref arm waits on the same terminal steps, never
+// on the earlier arm (a sequential arm is not a member of the container), and
+// the snapshot is bond-time: a parent step added later retargets neither
+// existing arm.
+func TestBondProtoMolSecondRefArmWaitsOnSameTerminalsNotEarlierArm(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreWithPrefix(t, t.TempDir()+"/test.db", "patrol")
+	proto, mol, _, s2, s3, _ := bondRefArmSteps(t, ctx, s)
+
+	first, err := bondProtoMol(ctx, s, proto, mol, types.BondTypeSequential, map[string]string{"name": "ace"}, "arm-{{name}}", "test", false, false)
+	if err != nil {
+		t.Fatalf("bond first arm: %v", err)
+	}
+	armOne := first.IDMapping[proto.ID]
+
+	second, err := bondProtoMol(ctx, s, proto, mol, types.BondTypeSequential, map[string]string{"name": "nux"}, "arm-{{name}}", "test", false, false)
+	if err != nil {
+		t.Fatalf("bond second arm: %v", err)
+	}
+	armTwo := second.IDMapping[proto.ID]
+
+	want := []string{s2.ID, s3.ID}
+	sort.Strings(want)
+	if got := blocksTargetsOf(t, ctx, s, armTwo); !slices.Equal(got, want) {
+		t.Fatalf("second arm %s blocks on %v, want the same terminals %v as the first arm", armTwo, got, want)
+	}
+	for _, target := range blocksTargetsOf(t, ctx, s, armTwo) {
+		if target == armOne {
+			t.Fatalf("second arm %s waits on the earlier arm %s; sequential arms are not members of the container, so they must not chain", armTwo, armOne)
+		}
+	}
+
+	// A parent step bonded after the arms changes neither arm's set.
+	s4 := &types.Issue{Title: "Late patrol step", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2}
+	if err := s.CreateIssue(ctx, s4, "test"); err != nil {
+		t.Fatalf("create late step: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{IssueID: s4.ID, DependsOnID: mol.ID, Type: types.DepParentChild}, "test"); err != nil {
+		t.Fatalf("add late step parent-child: %v", err)
+	}
+	for arm, armID := range map[string]string{"first": armOne, "second": armTwo} {
+		if got := blocksTargetsOf(t, ctx, s, armID); !slices.Equal(got, want) {
+			t.Fatalf("after a later parent step was added, the %s arm %s blocks on %v, want the bond-time terminals %v unchanged", arm, armID, got, want)
+		}
+	}
+}
