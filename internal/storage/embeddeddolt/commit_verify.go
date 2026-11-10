@@ -23,6 +23,12 @@ var commitAllPolicyLoader = schema.LoadOwnedIgnorePolicy
 // required read) is never returned from the callback. commitAll surfaces it
 // only after withConn finished, when publication is confirmed.
 type commitAllVerification struct {
+	// committed records DOLT_COMMIT's own answer for the finding it
+	// carries: a residual error reports partial publication when the
+	// commit succeeded, and that nothing landed when it answered nothing
+	// to commit. The verification-failure path reports the same record
+	// outcome-sensitively (AC-5).
+	committed bool
 	// readFailed is the required status or policy read that could not run.
 	// Its typing is the caller's business (commitAll turns it into the
 	// verification failure error); it is never silently dropped.
@@ -50,7 +56,7 @@ type commitAllVerification struct {
 // returned: the caller decides what a failed completeness check means, after
 // publication is confirmed.
 func verifyCommitAllInTx(ctx context.Context, tx *sql.Tx, committed bool) *commitAllVerification {
-	v := &commitAllVerification{}
+	v := &commitAllVerification{committed: committed}
 	tables, err := residualStatusTables(ctx, tx)
 	if err != nil {
 		v.readFailed = err

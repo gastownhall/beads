@@ -144,7 +144,7 @@ func (s *EmbeddedDoltStore) commitAll(ctx context.Context, message string, toler
 		return committed, &storage.UncommittedChangesError{
 			Tables:    verification.residual,
 			Patterns:  verification.patterns,
-			Committed: committed,
+			Committed: verification.committed,
 		}
 	}
 	return committed, nil
