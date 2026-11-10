@@ -651,6 +651,10 @@ func handleSchemaMigrate() error {
 		}
 		return HandleError("schema migration failed: %v", err)
 	}
+	// This verb opens with migration consent, so on a shared server the
+	// store open applies the pending migrations and the pass above finds
+	// nothing left (gastownhall/beads#7283). Report the run's whole work.
+	applied += migrator.MigrationsAppliedAtOpen()
 
 	latest := schema.LatestVersion()
 	// Stamp the version markers the refused version-bump reconciliation
