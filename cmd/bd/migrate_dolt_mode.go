@@ -1123,8 +1123,13 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 			fmt.Println("Would enable dolt.shared-server")
 		}
 		fmt.Printf("Would remove %s\n", configfile.ProxiedServerClientInfoFileName)
-		for _, p := range proxy.ControlFilePaths(rootDir) {
+		for _, p := range proxy.PurgeableControlFilePaths(rootDir) {
 			fmt.Printf("Would remove %s\n", p)
+		}
+		// The two lifecycle lock markers are retained rather than removed:
+		// they stay on disk as reusable markers (GH#6884).
+		for _, name := range []string{proxy.LockFileName, server.LockFileName} {
+			fmt.Printf("Would retain %s (lifecycle lock marker, kept for reuse)\n", filepath.Join(rootDir, name))
 		}
 		for _, p := range logAssets {
 			fmt.Printf("Would remove %s\n", p)

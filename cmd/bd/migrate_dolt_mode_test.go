@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -578,6 +579,34 @@ func TestMigrateToServer_RefusesWhenLifecycleLockHeld(t *testing.T) {
 			free.Unlock()
 		})
 	}
+}
+
+// TestMigrateFromProxiedServer_DryRunOmitsLifecycleLocks covers the dry-run
+// side of the persistent-marker contract (GH#6884): planned removals list the
+// non-lock controls, never advertise removal of either lifecycle lock,
+// explain the retention, and leave the workspace untouched.
+func TestMigrateFromProxiedServer_DryRunOmitsLifecycleLocks(t *testing.T) {
+	beadsDir := migrateModeWorkspace(t, configfile.DoltModeProxiedServer)
+	rootDir := filepath.Join(beadsDir, "dolt")
+	require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, &configfile.ProxiedServerClientInfo{RootPath: rootDir}))
+	require.NoError(t, os.MkdirAll(filepath.Join(rootDir, ".dolt"), 0o755))
+	for _, n := range proxiedAssetNames() {
+		touchFile(t, filepath.Join(rootDir, n))
+	}
+	before := snapshotMigrationTree(t, beadsDir)
+
+	out, err := captureMigrationJSON(t, func() error { return runMigrateFromProxiedServer(true, false) })
+	require.NoError(t, err)
+
+	for _, name := range []string{proxy.PIDFileName, proxy.LogFileName, server.PIDFileName} {
+		assert.Contains(t, out, fmt.Sprintf("Would remove %s\n", filepath.Join(rootDir, name)), "planned removal of %s", name)
+	}
+	for _, name := range []string{proxy.LockFileName, server.LockFileName} {
+		assert.NotContains(t, out, fmt.Sprintf("Would remove %s\n", filepath.Join(rootDir, name)), "dry-run must not advertise removal of %s", name)
+		assert.Contains(t, out, fmt.Sprintf("Would retain %s (lifecycle lock marker, kept for reuse)\n", filepath.Join(rootDir, name)), "retention of %s must be explained", name)
+	}
+
+	assert.Equal(t, before, snapshotMigrationTree(t, beadsDir), "dry-run must leave the workspace unchanged")
 }
 
 func TestMigrateMode_DryRunIgnoresLock(t *testing.T) {
