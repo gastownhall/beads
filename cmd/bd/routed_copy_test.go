@@ -5,15 +5,21 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 // copyFixture is a maintainer checkout whose commands auto-route to a
@@ -35,9 +41,11 @@ const (
 // newCopyFixture builds a copyFixture: planning holds planningIDs, and the
 // project holds a copy of each of copiedIDs (a subset of planningIDs) as bd
 // repo sync imports it, source_repo naming the planning repository, plus its
-// own projectIDs. It installs the project as the command store and changes
-// into the project checkout.
-func newCopyFixture(t *testing.T, planningIDs, copiedIDs, projectIDs []string) *copyFixture {
+// own projectIDs. A copied id planning does not hold is copied as if planning
+// had held it then. Each of editCopies is applied to every copy before the
+// import. It installs the project as the command store and changes into the
+// project checkout.
+func newCopyFixture(t *testing.T, planningIDs, copiedIDs, projectIDs []string, editCopies ...func(f *copyFixture, c *types.Issue)) *copyFixture {
 	t.Helper()
 	saveStorageMode(t)
 	saveAndRestoreGlobals(t)
@@ -124,8 +132,15 @@ func newCopyFixture(t *testing.T, planningIDs, copiedIDs, projectIDs []string) *
 	}
 	var copies []*types.Issue
 	for _, id := range copiedIDs {
-		c := *originals[id]
+		original := originals[id]
+		if original == nil {
+			original = &types.Issue{ID: id, Title: "planning " + id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, CreatedAt: time.Now().UTC()}
+		}
+		c := *original
 		c.SourceRepo = f.planningDir
+		for _, edit := range editCopies {
+			edit(f, &c)
+		}
 		copies = append(copies, &c)
 	}
 	if len(copies) > 0 {
@@ -467,4 +482,252 @@ func TestShowOfLocalCopyReadsAutoRouteOwner(t *testing.T) {
 		t.Errorf("bd show pl-s = status %s, priority %d, assignee %q; want the planning workspace's in_progress, 0, \"bob\"", got.Status, got.Priority, got.Assignee)
 	}
 	f.requireCopyUnchanged(t, "pl-s")
+}
+
+// TestLocalRowsFailingCopyIdentityStayLocal pins that a local row that is not
+// an identifiable copy of the issue the auto-route target holds under its id
+// resolves locally: a write changes the local row and leaves the target's
+// row as it is.
+func TestLocalRowsFailingCopyIdentityStayLocal(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		planning []string
+		edit     func(f *copyFixture, c *types.Issue)
+		after    func(t *testing.T, f *copyFixture)
+	}{
+		{
+			name:     "source repo names another repository",
+			planning: []string{"pl-a"},
+			edit: func(f *copyFixture, c *types.Issue) {
+				c.SourceRepo = filepath.Join(filepath.Dir(f.planningDir), "elsewhere")
+			},
+		},
+		{
+			name:     "no source repo",
+			planning: []string{"pl-a"},
+			edit:     func(_ *copyFixture, c *types.Issue) { c.SourceRepo = "" },
+		},
+		{
+			name:     "created_at differs",
+			planning: []string{"pl-a"},
+			edit:     func(_ *copyFixture, c *types.Issue) { c.CreatedAt = c.CreatedAt.Add(-time.Hour) },
+		},
+		{
+			name:     "target lacks the id",
+			planning: []string{"pl-b"},
+		},
+		{
+			name:     "no route",
+			planning: []string{"pl-a"},
+			after: func(t *testing.T, f *copyFixture) {
+				if err := f.project.SetConfig(t.Context(), "routing.mode", ""); err != nil {
+					t.Fatalf("clear routing.mode: %v", err)
+				}
+			},
+		},
+		{
+			name:     "target is this workspace",
+			planning: []string{"pl-a"},
+			edit:     func(f *copyFixture, c *types.Issue) { c.SourceRepo = f.repoDir },
+			after: func(t *testing.T, f *copyFixture) {
+				if err := f.project.SetConfig(t.Context(), "routing.maintainer", f.repoDir); err != nil {
+					t.Fatalf("route to this workspace: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var edits []func(*copyFixture, *types.Issue)
+			if tc.edit != nil {
+				edits = append(edits, tc.edit)
+			}
+			f := newCopyFixture(t, tc.planning, []string{"pl-a"}, nil, edits...)
+			if tc.after != nil {
+				tc.after(t, f)
+			}
+
+			res := runCopyCmd(t, updateCmd, map[string]string{"priority": "0"}, "pl-a")
+			if res.exitCode != 0 {
+				t.Fatalf("bd update pl-a: exit %d, err %v\nstderr: %s", res.exitCode, res.err, res.stderr)
+			}
+			if got := f.projectIssue(t, "pl-a"); got == nil || got.Priority != 0 {
+				t.Errorf("project pl-a after bd update --priority 0 = %s, want the local row at priority 0", issuePriorityOrNil(got))
+			}
+			if got := f.planningIssue(t, "pl-a"); got != nil && got.Priority != 2 {
+				t.Errorf("planning pl-a changed to priority %d; a local row must not write the target's row", got.Priority)
+			}
+
+			res = runCopyCmd(t, deleteCmd, map[string]string{"force": "true"}, "pl-a")
+			if res.exitCode != 0 {
+				t.Fatalf("bd delete pl-a --force: exit %d, err %v\nstderr: %s", res.exitCode, res.err, res.stderr)
+			}
+			if got := f.projectIssue(t, "pl-a"); got != nil {
+				t.Errorf("project pl-a survived bd delete --force; the local row should be the one deleted")
+			}
+			if strings.Contains(res.stderr, "still holds the copy") {
+				t.Errorf("bd delete of a local row printed the retained-copy note:\n%s", res.stderr)
+			}
+			if slices.Contains(tc.planning, "pl-a") && f.planningIssue(t, "pl-a") == nil {
+				t.Errorf("bd delete of a local row deleted the target's pl-a")
+			}
+		})
+	}
+}
+
+func issuePriorityOrNil(issue *types.Issue) string {
+	if issue == nil {
+		return "absent"
+	}
+	return fmt.Sprintf("priority %d", issue.Priority)
+}
+
+// TestCopyIdentityEdgeCases pins the rest of the copy identity a redirect
+// needs, with controls that redirect so the local cases are not vacuous: a
+// source_repo naming the target through a symlink, or a target routing.default
+// selects, still redirects; a "." source_repo stays local. A row the target
+// never held stays local for reads too, a native row stays writable with the
+// target gone, and a partial id resolves locally once, then exactly in the
+// target, while exact resolution still refuses the abbreviation.
+func TestCopyIdentityEdgeCases(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		edit      func(f *copyFixture, c *types.Issue)
+		after     func(t *testing.T, f *copyFixture)
+		wantOwner bool
+	}{
+		{
+			name:      "identifiable copy (control)",
+			wantOwner: true,
+		},
+		{
+			name: "source repo names the target through a symlink (control)",
+			edit: func(f *copyFixture, c *types.Issue) {
+				alias := f.planningDir + "-alias"
+				if err := os.Symlink(f.planningDir, alias); err != nil {
+					t.Fatalf("symlink %s -> %s: %v", alias, f.planningDir, err)
+				}
+				c.SourceRepo = alias
+			},
+			wantOwner: true,
+		},
+		{
+			name: "routing.default selects the target (control)",
+			after: func(t *testing.T, f *copyFixture) {
+				for key, value := range map[string]string{"routing.maintainer": "", "routing.default": f.planningDir} {
+					if err := f.project.SetConfig(t.Context(), key, value); err != nil {
+						t.Fatalf("set %s: %v", key, err)
+					}
+				}
+			},
+			wantOwner: true,
+		},
+		{
+			name: "dot source repo",
+			edit: func(_ *copyFixture, c *types.Issue) { c.SourceRepo = "." },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var edits []func(*copyFixture, *types.Issue)
+			if tc.edit != nil {
+				edits = append(edits, tc.edit)
+			}
+			f := newCopyFixture(t, []string{"pl-a"}, []string{"pl-a"}, nil, edits...)
+			if tc.after != nil {
+				tc.after(t, f)
+			}
+
+			res := runCopyCmd(t, updateCmd, map[string]string{"priority": "0"}, "pl-a")
+			if res.exitCode != 0 {
+				t.Fatalf("bd update pl-a: exit %d, err %v\nstderr: %s", res.exitCode, res.err, res.stderr)
+			}
+			owner, local := f.planningIssue(t, "pl-a"), f.projectIssue(t, "pl-a")
+			if tc.wantOwner {
+				if owner == nil || owner.Priority != 0 {
+					t.Fatalf("planning pl-a after bd update --priority 0 = %s, want priority 0 at HEAD", issuePriorityOrNil(owner))
+				}
+				f.requireCopyUnchanged(t, "pl-a")
+				return
+			}
+			if local == nil || local.Priority != 0 {
+				t.Errorf("project pl-a after bd update --priority 0 = %s, want the local row at priority 0", issuePriorityOrNil(local))
+			}
+			if owner == nil || owner.Priority != 2 {
+				t.Errorf("planning pl-a after a local update = %s, want it untouched at priority 2", issuePriorityOrNil(owner))
+			}
+		})
+	}
+
+	t.Run("a row the target never held reads locally", func(t *testing.T) {
+		f := newCopyFixture(t, []string{"pl-a"}, []string{"pl-c"}, nil)
+		for _, resolve := range []struct {
+			what string
+			call func() (*RoutedResult, error)
+		}{
+			{"read", func() (*RoutedResult, error) { return resolveAndGetIssueWithRouting(t.Context(), f.project, "pl-c") }},
+			{"mutation", func() (*RoutedResult, error) { return resolveAndGetIssueForMutation(t.Context(), f.project, "pl-c") }},
+		} {
+			result, err := resolve.call()
+			if err != nil {
+				t.Fatalf("%s resolution of pl-c: %v", resolve.what, err)
+			}
+			if result.Routed || result.copyOwner != "" {
+				t.Errorf("%s resolution of pl-c routed to %q; want the local row", resolve.what, result.copyOwner)
+			}
+			result.Close()
+		}
+	})
+
+	t.Run("a native row stays writable with the target gone", func(t *testing.T) {
+		f := newCopyFixture(t, []string{"pl-a"}, []string{"pl-a"}, []string{"pr-n"})
+		if err := os.RemoveAll(f.planningDir); err != nil {
+			t.Fatalf("remove the planning workspace: %v", err)
+		}
+		res := runCopyCmd(t, closeCmd, map[string]string{"reason": "done"}, "pr-n")
+		if res.exitCode != 0 {
+			t.Fatalf("bd close pr-n with the target gone: exit %d, err %v\nstderr: %s", res.exitCode, res.err, res.stderr)
+		}
+		if got := f.projectIssue(t, "pr-n"); got == nil || got.Status != types.StatusClosed {
+			t.Fatalf("project pr-n after bd close = %s, want closed", issueStatusOrNil(got))
+		}
+	})
+
+	t.Run("a partial id resolves locally once, then exactly in the target", func(t *testing.T) {
+		f := newCopyFixture(t, []string{"pl-abc"}, []string{"pl-abc"}, nil)
+		res := runCopyCmd(t, updateCmd, map[string]string{"priority": "0"}, "pl-ab")
+		if res.exitCode != 0 {
+			t.Fatalf("bd update pl-ab: exit %d, err %v\nstderr: %s", res.exitCode, res.err, res.stderr)
+		}
+		if owner := f.planningIssue(t, "pl-abc"); owner == nil || owner.Priority != 0 {
+			t.Fatalf("planning pl-abc after bd update pl-ab --priority 0 = %s, want priority 0 at HEAD", issuePriorityOrNil(owner))
+		}
+		f.requireCopyUnchanged(t, "pl-abc")
+
+		if _, err := resolveAndGetIssueForMutationExact(t.Context(), f.project, "pl-ab"); !errors.Is(err, utils.ErrAbbreviatedIDNotAllowed) {
+			t.Fatalf("exact resolution of pl-ab: err %v, want utils.ErrAbbreviatedIDNotAllowed", err)
+		}
+	})
+}
+
+// TestSameCreatedAtIdentifiesOnlyKnownEqualSeconds pins the creation-time half
+// of the copy identity: equal to the second a DATETIME keeps, in any zone,
+// and never on a zero time, which no stored row can hold.
+func TestSameCreatedAtIdentifiesOnlyKnownEqualSeconds(t *testing.T) {
+	created := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name string
+		a, b time.Time
+		want bool
+	}{
+		{"same instant", created, created, true},
+		{"sub-second apart", created.Add(500 * time.Millisecond), created, true},
+		{"same instant in another zone", created.In(time.FixedZone("UTC+5", 5*3600)), created, true},
+		{"a minute apart", created.Add(time.Minute), created, false},
+		{"zero copy time", time.Time{}, created, false},
+		{"zero owner time", created, time.Time{}, false},
+		{"both zero", time.Time{}, time.Time{}, false},
+	} {
+		if got := sameCreatedAt(tc.a, tc.b); got != tc.want {
+			t.Errorf("%s: sameCreatedAt(%v, %v) = %v, want %v", tc.name, tc.a, tc.b, got, tc.want)
+		}
+	}
 }
