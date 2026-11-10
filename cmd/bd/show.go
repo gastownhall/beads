@@ -29,13 +29,32 @@ import (
 // that prefix, so the hint says so instead of suggesting the id never existed
 // (GH#5259). Any other miss gets showNotFoundHint.
 func showNotFoundHintIn(ctx context.Context, s prefixConfigReader, beadsDir, id string, routedSearched bool) string {
-	if routedSearched {
-		return showNotFoundHint(id)
-	}
-	if storePrefix, idPrefix, ok := unroutedForeignPrefix(ctx, s, beadsDir, id); ok {
-		return foreignPrefixMissHint(storePrefix, idPrefix, beadsDir)
+	if hint, ok := foreignPrefixMissHintIn(ctx, s, beadsDir, id, routedSearched); ok {
+		return hint
 	}
 	return showNotFoundHint(id)
+}
+
+// foreignPrefixMissHintIn returns foreignPrefixMissHint for a miss on id when
+// showNotFoundHintIn would print it, and ok false for any other miss.
+func foreignPrefixMissHintIn(ctx context.Context, s prefixConfigReader, beadsDir, id string, routedSearched bool) (string, bool) {
+	if routedSearched {
+		return "", false
+	}
+	storePrefix, idPrefix, ok := unroutedForeignPrefix(ctx, s, beadsDir, id)
+	if !ok {
+		return "", false
+	}
+	return foreignPrefixMissHint(storePrefix, idPrefix, beadsDir), true
+}
+
+// printForeignPrefixMissHint follows bd show --refs and --children's line for
+// a miss on id with the direct route's foreign-prefix hint, when that hint
+// applies; any other miss keeps its line alone.
+func printForeignPrefixMissHint(ctx context.Context, id string, routedSearched bool) {
+	if hint, ok := foreignPrefixMissHintIn(ctx, store, resolveCommandBeadsDir(dbPath), id, routedSearched); ok {
+		fmt.Fprintf(os.Stderr, "Hint: %s\n", hint)
+	}
 }
 
 // foreignPrefixMissHint states what a miss on an unrouted foreign prefix
