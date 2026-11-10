@@ -279,6 +279,10 @@ func TestReadyWorkStatementBudget(t *testing.T) {
 		// + one statement for every deferred-parent child leg
 		{"wisps_deferred_parent/limit0", readyTotalWorld{wisps: true, deferredParent: true}, 0, 4},
 		{"wisps_deferred_parent/limit1", readyTotalWorld{wisps: true, deferredParent: true}, 1, 6},
+		// The icebox world (undated defer, GH#7300) runs the same legs: the
+		// probe's deferred fact is one column however the parent is deferred.
+		{"wisps_icebox_parent/limit0", readyTotalWorld{wisps: true, iceboxParent: true}, 0, 4},
+		{"wisps_icebox_parent/limit1", readyTotalWorld{wisps: true, iceboxParent: true}, 1, 6},
 		// + the overlap count, only because an ID sits in both tables
 		{"wisps_collision/limit1", readyTotalWorld{wisps: true, collision: true}, 1, 6},
 	}
@@ -309,6 +313,67 @@ func TestReadyWorkStatementBudget(t *testing.T) {
 					len(stmts), tc.want, tc.want-len(stmts), strings.Join(stmts, "\n  "))
 			}
 		})
+	}
+}
+
+// TestReadyWorkUndatedDefersCostNoMoreStatements pins GH#7300's cost side: an
+// undated deferral (plain `bd defer`) must not need more statements than the
+// dated one it mirrors — the probe answers it with the same single fact — and
+// the read must actually exclude the child. A budget assertion alone can pass
+// while hiding nothing, so the exclusion is asserted in the same breath.
+//
+// Both worlds issue the same two reads in one transaction: a capped page with
+// its in-band total (the `bd ready --limit 1` shape), then the unbounded
+// listing that observes the exclusion. The worlds differ in prefix only, so
+// their statement counts compare like with like.
+func TestReadyWorkUndatedDefersCostNoMoreStatements(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+
+	read := func(prefix string, w readyTotalWorld) (listed []string, stmts []string) {
+		t.Helper()
+		te := newTestEnv(t, prefix)
+		seedReadyTotalWorld(t, te, prefix, w)
+		var page []*types.IssueWithCounts
+		var all []*types.IssueWithCounts
+		var total int
+		stmts = withCountingReadTx(t, te, func(tx issueops.DBTX) error {
+			var err error
+			page, total, err = issueops.GetReadyWorkWithCountsAndTotalInTx(t.Context(), tx, types.WorkFilter{IncludeEphemeral: true, Limit: 1})
+			if err != nil {
+				return err
+			}
+			all, err = issueops.GetReadyWorkWithCountsInTx(t.Context(), tx, types.WorkFilter{IncludeEphemeral: true})
+			return err
+		})
+		if total == 0 || len(page) == 0 {
+			t.Fatalf("%s: total = %d, page = %v; the seeded world has ready work", prefix, total, readyIDs(page))
+		}
+		return readyIDs(all), stmts
+	}
+
+	datedPage, datedStmts := read("sb", readyTotalWorld{wisps: true, deferredParent: true})
+	undatedPage, undatedStmts := read("sc", readyTotalWorld{wisps: true, iceboxParent: true})
+
+	if len(undatedStmts) > len(datedStmts) {
+		t.Errorf("undated icebox world issued %d statements, dated world %d:\n  undated:\n    %s\n  dated:\n    %s",
+			len(undatedStmts), len(datedStmts), strings.Join(undatedStmts, "\n    "), strings.Join(datedStmts, "\n    "))
+	}
+	for _, page := range []struct {
+		name   string
+		prefix string
+		ids    []string
+	}{
+		{"dated", "sb", datedPage},
+		{"undated", "sc", undatedPage},
+	} {
+		if child := page.prefix + "-dchild"; slices.Contains(page.ids, child) {
+			t.Errorf("%s: deferred parent's child %s listed as ready: %v", page.name, child, page.ids)
+		}
+		// The worlds differ in prefix only, so the shared control proves the
+		// read ran and was not merely empty.
+		if control := page.prefix + "-blocker"; !slices.Contains(page.ids, control) {
+			t.Errorf("%s: ready control %s missing: %v", page.name, control, page.ids)
+		}
 	}
 }
 
