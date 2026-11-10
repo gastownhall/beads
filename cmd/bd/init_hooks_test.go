@@ -1778,47 +1778,82 @@ func TestInstallHooks_RelocatedHooksPath(t *testing.T) {
 			return nil
 		}},
 	}
-	for _, tc := range installs {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("BEADS_DIR", "")
-			repo := newGitRepo(t)
-			stale, target := strandRepoHooksPath(t, repo)
-			userHook := "#!/bin/sh\necho user-before\n" +
+	contents := []struct {
+		name string
+		hook string
+		// check reports what the refreshed pre-commit lost, or "".
+		check func(text string) string
+	}{
+		{
+			// A marker-managed hook with user lines around the section.
+			name: "managed section",
+			hook: "#!/bin/sh\necho user-before\n" +
 				hookSectionBeginPrefix + " v0.0.1 ---\nbd hooks run pre-commit \"$@\"\n" + hookSectionEndPrefix + " v0.0.1 ---\n" +
-				"echo user-after\n"
-			if err := os.WriteFile(filepath.Join(target, "pre-commit"), []byte(userHook), 0755); err != nil {
-				t.Fatal(err)
-			}
-
-			runInDir(t, repo, func() {
-				if err := tc.install(); err != nil {
-					t.Fatalf("install failed: %v", err)
+				"echo user-after\n",
+			check: func(text string) string {
+				if !strings.HasPrefix(text, "#!/bin/sh\necho user-before\n") || !strings.HasSuffix(text, "echo user-after\n") {
+					return "user content around the managed section"
 				}
-			})
+				if !strings.Contains(text, hookSectionBeginLine()) || strings.Contains(text, "v0.0.1") {
+					return "a managed section refreshed to " + Version
+				}
+				return ""
+			},
+		},
+		{
+			// A pure user hook chaining to a framework (the other hooks
+			// establish ownership): the section goes in above the exec and
+			// every user line, the chained command included, survives.
+			name: "user hook chaining a framework",
+			hook: "#!/bin/sh\necho user pre-commit content\nexec ./pre-commit-framework \"$@\"\n",
+			check: func(text string) string {
+				if !strings.HasPrefix(text, "#!/bin/sh\necho user pre-commit content\n") ||
+					!strings.HasSuffix(text, "exec ./pre-commit-framework \"$@\"\n") {
+					return "the complete user hook and its chained command"
+				}
+				if begin := strings.Index(text, hookSectionBeginLine()); begin < 0 || begin > strings.Index(text, "exec ./pre-commit-framework") {
+					return "a managed section ahead of the exec"
+				}
+				return ""
+			},
+		},
+	}
+	for _, tc := range installs {
+		for _, hc := range contents {
+			t.Run(tc.name+"/"+hc.name, func(t *testing.T) {
+				t.Setenv("BEADS_DIR", "")
+				repo := newGitRepo(t)
+				stale, target := strandRepoHooksPath(t, repo)
+				if err := os.WriteFile(filepath.Join(target, "pre-commit"), []byte(hc.hook), 0755); err != nil {
+					t.Fatal(err)
+				}
 
-			cmd := exec.Command("git", "config", "--local", "--get", "core.hooksPath")
-			cmd.Dir = repo
-			out, err := cmd.Output()
-			if err != nil {
-				t.Fatalf("core.hooksPath unset after install: %v", err)
-			}
-			got := strings.TrimSpace(string(out))
-			if !filepath.IsAbs(got) || !utilsSameDir(got, target) {
-				t.Errorf("core.hooksPath = %q, want the absolute %s", got, target)
-			}
-			content, err := os.ReadFile(filepath.Join(target, "pre-commit"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			text := string(content)
-			if !strings.Contains(text, "echo user-before") || !strings.Contains(text, "echo user-after") {
-				t.Errorf("user content around the managed section was lost:\n%s", text)
-			}
-			if !strings.Contains(text, hookSectionBeginLine()) || strings.Contains(text, "v0.0.1") {
-				t.Errorf("managed section was not refreshed to %s:\n%s", Version, text)
-			}
-			assertStaleNotCreated(t, stale)
-		})
+				runInDir(t, repo, func() {
+					if err := tc.install(); err != nil {
+						t.Fatalf("install failed: %v", err)
+					}
+				})
+
+				cmd := exec.Command("git", "config", "--local", "--get", "core.hooksPath")
+				cmd.Dir = repo
+				out, err := cmd.Output()
+				if err != nil {
+					t.Fatalf("core.hooksPath unset after install: %v", err)
+				}
+				got := strings.TrimSpace(string(out))
+				if !filepath.IsAbs(got) || !utilsSameDir(got, target) {
+					t.Errorf("core.hooksPath = %q, want the absolute %s", got, target)
+				}
+				content, err := os.ReadFile(filepath.Join(target, "pre-commit"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if lost := hc.check(string(content)); lost != "" {
+					t.Errorf("refreshed pre-commit lacks %s:\n%s", lost, content)
+				}
+				assertStaleNotCreated(t, stale)
+			})
+		}
 	}
 }
 
