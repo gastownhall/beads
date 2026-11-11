@@ -388,6 +388,9 @@ func TestPersistDependenciesSkipsValidationErrorsWhenConfigured(t *testing.T) {
 	mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
 		WithArgs("source").
 		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
+		WithArgs("source").
+		WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery("SELECT 1 FROM issues WHERE id = \\?").
 		WithArgs("source").
 		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
@@ -477,6 +480,12 @@ func TestPersistDependenciesValidatesPlannedHierarchyBeforeBlocking(t *testing.T
 			DependsOnID: "bd-grand",
 			Type:        types.DepParentChild,
 		}},
+	}
+
+	for _, sourceID := range []string{"bd-child", "bd-child", "bd-parent"} {
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps WHERE id = ? LIMIT 1")).
+			WithArgs(sourceID).
+			WillReturnError(sql.ErrNoRows)
 	}
 
 	for _, pair := range [][2]string{{"bd-child", "bd-parent"}, {"bd-parent", "bd-grand"}} {

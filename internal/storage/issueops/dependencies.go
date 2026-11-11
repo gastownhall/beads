@@ -159,13 +159,13 @@ func ClassifyDepTargetFrom(sourceID, targetID string, presence DepTargetPresence
 	return DepTargetExternal, nil
 }
 
-// ClassifyDepTarget is ClassifyDepTargetFrom reading presence on tx. Wisp
-// presence keeps IsActiveWispInTx's tolerance of a missing wisps table; an
-// issue-presence read that fails is returned, not taken as absence.
+// ClassifyDepTarget is ClassifyDepTargetFrom reading presence on tx. Both
+// wisp and issue probe errors fail closed; only a missing optional wisps table
+// is treated as absence.
 func ClassifyDepTarget(ctx context.Context, tx DBTX, dep *types.Dependency) (DepTargetKind, error) {
 	return ClassifyDepTargetFrom(dep.IssueID, dep.DependsOnID, DepTargetPresence{
 		IsWisp: func(id string) (bool, error) {
-			return IsActiveWispInTx(ctx, tx, id), nil
+			return LookupWispInTx(ctx, tx, id)
 		},
 		IsIssue: func(id string) (bool, error) {
 			return IssueExistsInTx(ctx, tx, id)

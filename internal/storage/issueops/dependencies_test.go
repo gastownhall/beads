@@ -484,6 +484,52 @@ func TestClassifyDepTargetFrom(t *testing.T) {
 	}
 }
 
+// TestClassifyDepTargetWispProbeErrorFailsClosed ensures a failed wisp read
+// cannot silently turn a present cross-prefix wisp into an unverified external
+// dependency. Only a genuinely absent optional wisps table may be ignored.
+func TestClassifyDepTargetWispProbeErrorFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	t.Run("probe failure", func(t *testing.T) {
+		t.Parallel()
+		_, mock, tx := beginMockTx(t)
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps WHERE id = ? LIMIT 1")).
+			WithArgs("xp-target").
+			WillReturnError(errors.New("connection reset"))
+
+		_, err := ClassifyDepTarget(context.Background(), tx, &types.Dependency{
+			IssueID: "src-a", DependsOnID: "xp-target", Type: types.DepBlocks,
+		})
+		if err == nil || !strings.Contains(err.Error(), "connection reset") {
+			t.Fatalf("ClassifyDepTarget error = %v, want wisp probe failure", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("missing optional wisps table", func(t *testing.T) {
+		t.Parallel()
+		_, mock, tx := beginMockTx(t)
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps WHERE id = ? LIMIT 1")).
+			WithArgs("xp-target").
+			WillReturnError(errors.New("Error 1146 (42S02): Table 'db.wisps' doesn't exist"))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM issues WHERE id = ? LIMIT 1")).
+			WithArgs("xp-target").
+			WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+
+		kind, err := ClassifyDepTarget(context.Background(), tx, &types.Dependency{
+			IssueID: "src-a", DependsOnID: "xp-target", Type: types.DepBlocks,
+		})
+		if err != nil || kind != DepTargetIssue {
+			t.Fatalf("ClassifyDepTarget = (%v, %v), want local issue", kind, err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+}
+
 // TestAddDependencyInTxIssueProbeFailureWritesNothing pins that a failed
 // issue-presence read is an error, not "absent": taking it as absence would
 // file a local cross-prefix target as external.
