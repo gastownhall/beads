@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -289,6 +290,26 @@ func TestBatchDepAddEdge(t *testing.T) {
 			want: &types.Dependency{IssueID: "bd-1", DependsOnID: "bd-2", Type: types.DepRelated},
 		},
 		{
+			name: "blocked-by alias stores the gating blocks type",
+			args: []string{"bd-1", "bd-2", "blocked-by"},
+			want: &types.Dependency{IssueID: "bd-1", DependsOnID: "bd-2", Type: types.DepBlocks},
+		},
+		{
+			name: "depends-on alias stores the gating blocks type",
+			args: []string{"bd-1", "bd-2", "depends-on"},
+			want: &types.Dependency{IssueID: "bd-1", DependsOnID: "bd-2", Type: types.DepBlocks},
+		},
+		{
+			name:    "typo of a built-in type",
+			args:    []string{"bd-1", "bd-2", "blcoks"},
+			wantErr: `dep add: unknown dependency type "blcoks"; valid types: ` + createDepsAcceptedTypeList(),
+		},
+		{
+			name:    "custom type outside dep add's vocabulary",
+			args:    []string{"bd-1", "bd-2", "owned-by"},
+			wantErr: `dep add: unknown dependency type "owned-by"; valid types: ` + createDepsAcceptedTypeList(),
+		},
+		{
 			name:    "missing to-id",
 			args:    []string{"bd-1"},
 			wantErr: "dep add requires <from-id> <to-id>",
@@ -296,7 +317,7 @@ func TestBatchDepAddEdge(t *testing.T) {
 		{
 			name:    "invalid type",
 			args:    []string{"bd-1", "bd-2", tooLong},
-			wantErr: `dep add: invalid dependency type "` + tooLong + `"`,
+			wantErr: `dep add: invalid dependency type "` + tooLong + `" (must be non-empty, max ` + strconv.Itoa(types.MaxDependencyTypeLen) + ` chars); valid types: ` + createDepsAcceptedTypeList(),
 		},
 		{
 			name:       "dotted child gated on its own parent",
@@ -370,5 +391,57 @@ func TestBatchCmd_Registered(t *testing.T) {
 	}
 	if cmd.Flags().Lookup("message") == nil {
 		t.Error("batch missing --message flag")
+	}
+}
+
+// TestBatchDepAddEdgeCanonicalizesAliasesAndRejectsUnknownTypes pins bd-3073gm
+// (GH#5585): a batch `dep add` line must store the alias `blocked-by` as the
+// canonical `blocks` type that ready/blocked gating matches, and must refuse a
+// type outside the well-known vocabulary, as `bd dep add` does.
+func TestBatchDepAddEdgeCanonicalizesAliasesAndRejectsUnknownTypes(t *testing.T) {
+	for _, alias := range []string{"blocked-by", "depends-on"} {
+		got, err := batchDepAddEdge([]string{"bd-a", "bd-b", alias})
+		if err != nil {
+			t.Fatalf("batchDepAddEdge(%q): %v", alias, err)
+		}
+		if got.Type != types.DepBlocks {
+			t.Errorf("batchDepAddEdge(%q).Type = %q, want %q", alias, got.Type, types.DepBlocks)
+		}
+	}
+	if got, err := batchDepAddEdge([]string{"bd-a", "bd-b", "blokcs"}); err == nil {
+		t.Errorf("batchDepAddEdge(typo %q) = %+v, nil; want an unknown-type error", "blokcs", got)
+	}
+}
+
+// TestBatchDepAddEdgeCanonicalizesAliases pins GH#5585: a `dep.add` op with
+// the documented alias spellings must store the canonical "blocks" type, as
+// `bd dep add --type` does (canonicalDependencyType), or the edge never gates
+// bd ready.
+func TestBatchDepAddEdgeCanonicalizesAliases(t *testing.T) {
+	for _, alias := range []string{"blocked-by", "depends-on"} {
+		got, err := batchDepAddEdge([]string{"bd-1", "bd-2", alias})
+		if err != nil {
+			t.Fatalf("batchDepAddEdge(%q): %v", alias, err)
+		}
+		if got.Type != types.DepBlocks {
+			t.Errorf("batchDepAddEdge type %q stored as %q, want %q", alias, got.Type, types.DepBlocks)
+		}
+	}
+}
+
+// TestBatchHelpDescribesDepAddTypes pins bd batch's help on the dep add type
+// contract (GH#5585): the built-in vocabulary, the canonical aliases, and that
+// any other type is refused and rolls the batch back.
+func TestBatchHelpDescribesDepAddTypes(t *testing.T) {
+	long := strings.Join(strings.Fields(batchCmd.Long), " ")
+	for _, want := range []string{
+		"the built-ins 'bd dep add --type' accepts",
+		"default: blocks",
+		"The blocked-by and depends-on aliases are stored as blocks",
+		"any other type is refused and rolls the batch back",
+	} {
+		if !strings.Contains(long, want) {
+			t.Errorf("bd batch --help does not contain %q:\n%s", want, batchCmd.Long)
+		}
 	}
 }

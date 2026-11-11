@@ -1226,6 +1226,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The `depends-on`/`blocked-by` dependency aliases now gate `bd ready` and
+  `bd blocked` when written through `bd link` or `bd batch` (GH#5585). Both
+  stored the alias verbatim and checked only its length, so the edge sat as
+  an inert custom type that never blocked anything. `bd link --type` (direct,
+  http and proxied-server routes) and a batch `dep add` line now map both
+  aliases to the canonical `blocks` type before storing, and `bd link`
+  reports the stored type. `bd link` keeps taking any other non-empty type
+  of up to 32 characters as given (a custom type still does not gate), and
+  its `--type` help now lists the accepted types. `bd batch dep add` now
+  takes `bd dep add`'s vocabulary, as its help promised: an unknown or
+  custom type (e.g. a typo like `blcoks`, or `owned-by`) is refused with the
+  accepted types and the line number, and rolls the whole batch back on
+  both backends; write custom edges with `bd link --type`. An edge an
+  earlier version stored under an alias is not migrated and stays inert:
+  remove it with `bd dep remove` and add it again.
+
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

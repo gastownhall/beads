@@ -62,17 +62,15 @@ Examples:
 		}
 		defer toCleanup()
 
-		dt := types.DependencyType(depType)
 		// link's own checks run before anything is written, and over http
-		// before the dial: the dotted-child rule (the role raises it too) and
-		// the type's length. Unlike `bd dep add`, link takes any type a
-		// workspace spells, so it never asks validateDependencyType.
-		if err := issueops.CheckDottedChildDependency(fromID, toID, dt); err != nil {
+		// before the dial: the type's length and the dotted-child rule (the
+		// role raises it too), both on the canonical type.
+		dt, err := linkDependencyType(depType)
+		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
-
-		if !dt.IsValid() {
-			return HandleErrorRespectJSON("invalid dependency type %q: must be non-empty and at most %d characters", depType, types.MaxDependencyTypeLen)
+		if err := issueops.CheckDottedChildDependency(fromID, toID, dt); err != nil {
+			return HandleErrorRespectJSON("%v", err)
 		}
 
 		opsCtx, err := issueOpsContext(ctx)
@@ -113,17 +111,34 @@ Examples:
 				"status":        "added",
 				"issue_id":      fromID,
 				"depends_on_id": toID,
-				"type":          depType,
+				"type":          dt,
 			})
 		}
 		fmt.Printf("%s Linked: %s depends on %s (%s)\n",
-			ui.RenderPass("✓"), formatFeedbackIDParen(fromID, fromTitle), formatFeedbackIDParen(toID, toTitle), depType)
+			ui.RenderPass("✓"), formatFeedbackIDParen(fromID, fromTitle), formatFeedbackIDParen(toID, toTitle), dt)
 		return nil
 	},
 }
 
+// linkDependencyType resolves the --type value bd link stores. The documented
+// aliases "blocked-by" and "depends-on" become the canonical "blocks" that
+// ready/blocked gating matches, as they do for `bd dep add` (GH#5585). Unlike
+// `bd dep add`, link takes any other type a workspace spells, kept exactly as
+// given, so it never asks validateDependencyType: only the length is checked.
+func linkDependencyType(raw string) (types.DependencyType, error) {
+	dt := canonicalDependencyType(types.DependencyType(raw))
+	if !dt.IsValid() {
+		return "", fmt.Errorf("invalid dependency type %q: must be non-empty and at most %d characters", raw, types.MaxDependencyTypeLen)
+	}
+	return dt, nil
+}
+
 func init() {
-	linkCmd.Flags().StringP("type", "t", "blocks", "Dependency type (blocks|tracks|related|parent-child|discovered-from)")
+	// The list is the one validateDependencyType checks for `bd dep add`, so
+	// the help cannot drift from the types bd knows.
+	linkCmd.Flags().StringP("type", "t", "blocks", fmt.Sprintf(
+		"Dependency type: one of %s (blocked-by and depends-on are stored as blocks), or any non-empty custom type of at most %d characters, stored as given; a custom type does not gate ready work",
+		createDepsAcceptedTypeList(), types.MaxDependencyTypeLen))
 	linkCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(linkCmd)
 }

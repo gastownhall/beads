@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -170,6 +171,60 @@ func TestCanonicalDependencyType(t *testing.T) {
 				t.Errorf("canonicalDependencyType(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestLinkDependencyType pins the type bd link stores on every route
+// (GH#5585): the two documented aliases become the gating "blocks", any other
+// type a workspace spells is kept exactly as given, and only a structurally
+// invalid type is refused.
+func TestLinkDependencyType(t *testing.T) {
+	atLimit := strings.Repeat("x", types.MaxDependencyTypeLen)
+	tests := []struct {
+		in      string
+		want    types.DependencyType
+		wantErr bool
+	}{
+		{in: "blocked-by", want: types.DepBlocks},
+		{in: "depends-on", want: types.DepBlocks},
+		{in: "blocks", want: types.DepBlocks},
+		{in: "related", want: types.DepRelated},
+		{in: "owned-by", want: "owned-by"},
+		{in: "Blocked-By", want: "Blocked-By"},
+		{in: atLimit, want: types.DependencyType(atLimit)},
+		{in: atLimit + "x", wantErr: true},
+		{in: "", wantErr: true},
+	}
+	for _, tt := range tests {
+		got, err := linkDependencyType(tt.in)
+		if tt.wantErr {
+			if err == nil || !strings.Contains(err.Error(), "invalid dependency type") {
+				t.Errorf("linkDependencyType(%q) = %q, %v; want the invalid-type refusal", tt.in, got, err)
+			}
+			continue
+		}
+		if err != nil || got != tt.want {
+			t.Errorf("linkDependencyType(%q) = %q, %v; want %q", tt.in, got, err, tt.want)
+		}
+	}
+}
+
+// TestLinkTypeFlagUsage pins bd link's rendered --type help (GH#5585): it
+// lists the built-ins and both aliases from the list validateDependencyType
+// checks, so it cannot drift from the code, and states the custom-type
+// allowance, its length limit and that a custom type never gates ready work.
+func TestLinkTypeFlagUsage(t *testing.T) {
+	usage := linkCmd.Flags().FlagUsages()
+	for _, want := range []string{
+		createDepsAcceptedTypeList(),
+		"blocked-by and depends-on are stored as blocks",
+		"non-empty custom type",
+		fmt.Sprintf("at most %d characters", types.MaxDependencyTypeLen),
+		"does not gate ready work",
+	} {
+		if !strings.Contains(usage, want) {
+			t.Errorf("bd link --help --type usage does not contain %q:\n%s", want, usage)
+		}
 	}
 }
 

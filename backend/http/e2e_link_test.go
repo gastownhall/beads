@@ -55,6 +55,42 @@ func TestE2E_LinkOverHTTP(t *testing.T) {
 		}
 	})
 
+	// GH#5585: the documented aliases are stored as the canonical blocks type
+	// that ready/blocked gating matches, and every confirmation names that
+	// stored type, not the spelling the caller typed.
+	t.Run("aliases store and report blocks, which gates ready work", func(t *testing.T) {
+		for _, alias := range []string{"blocked-by", "depends-on"} {
+			from := f.create("alias link source " + alias)
+			to := f.create("alias link target " + alias)
+
+			r := f.mustRun(nil, "link", from, to, "--type", alias, "--json")
+			var out map[string]any
+			if err := json.Unmarshal([]byte(strings.TrimSpace(r.stdout)), &out); err != nil {
+				t.Fatalf("bd link --json: %v\n%s", err, r.stdout)
+			}
+			if out["type"] != "blocks" || out["issue_id"] != from || out["depends_on_id"] != to {
+				t.Errorf("bd link --type %s --json = %v, want %s -> %s (blocks)", alias, out, from, to)
+			}
+			list := f.mustRun(nil, "dep", "list", from, "--json").stdout
+			if !depListHas(t, list, to, "blocks") || depListHas(t, list, to, alias) {
+				t.Errorf("bd link --type %s stored %s, want one blocks edge to %s", alias, list, to)
+			}
+			if ready := f.mustRun(nil, "ready", "--limit", "0", "--json").stdout; strings.Contains(ready, `"`+from+`"`) {
+				t.Errorf("%s is ready while its %s target %s is open: %s", from, alias, to, ready)
+			}
+			if blocked := f.mustRun(nil, "blocked", "--json").stdout; !strings.Contains(blocked, `"`+from+`"`) {
+				t.Errorf("%s is not blocked by its open %s target %s: %s", from, alias, to, blocked)
+			}
+
+			textFrom := f.create("alias text source " + alias)
+			textTo := f.create("alias text target " + alias)
+			text := f.mustRun(nil, "link", textFrom, textTo, "--type", alias).stdout
+			if !strings.Contains(text, "(blocks)") || strings.Contains(text, "("+alias+")") {
+				t.Errorf("bd link --type %s output = %q, want the stored (blocks) type", alias, text)
+			}
+		}
+	})
+
 	t.Run("text output names both issues", func(t *testing.T) {
 		from := f.create("text link source")
 		to := f.create("text link target")
