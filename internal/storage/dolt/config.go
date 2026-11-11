@@ -3,6 +3,7 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -138,14 +139,12 @@ func (s *DoltStore) GetLocalMetadata(ctx context.Context, key string) (string, e
 	return value, err
 }
 
-func (s *DoltStore) loadCustomConfigCache(ctx context.Context) {
-	s.cacheMu.Lock()
-	if s.customStatusCached && s.customTypeCached {
-		s.cacheMu.Unlock()
-		return
-	}
-	s.cacheMu.Unlock()
-
+// loadCustomConfigCache resolves the custom status and type vocabulary in one
+// read and caches each half that is still uncached. It returns the resolved
+// snapshot so callers need not infer success from the cache flags. A failed
+// resolution caches nothing, so the next call reads the database again instead
+// of serving a degraded vocabulary for the store's lifetime (GH#5581).
+func (s *DoltStore) loadCustomConfigCache(ctx context.Context) ([]types.CustomStatus, []string, error) {
 	var statuses []types.CustomStatus
 	var customTypes []string
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
@@ -154,13 +153,7 @@ func (s *DoltStore) loadCustomConfigCache(ctx context.Context) {
 		return resolveErr
 	})
 	if err != nil {
-		log.Printf("warning: failed to resolve custom config: %v", err)
-		if yamlStatuses := config.GetCustomStatusesFromYAML(); len(yamlStatuses) > 0 {
-			statuses = issueops.ParseStatusFallback(yamlStatuses)
-		}
-		if yamlTypes := config.GetCustomTypesFromYAML(); len(yamlTypes) > 0 {
-			customTypes = yamlTypes
-		}
+		return nil, nil, fmt.Errorf("resolve custom config: %w", err)
 	}
 
 	s.cacheMu.Lock()
@@ -174,32 +167,87 @@ func (s *DoltStore) loadCustomConfigCache(ctx context.Context) {
 		s.customTypeCached = true
 	}
 	s.cacheMu.Unlock()
+	return statuses, customTypes, nil
 }
 
+// GetCustomStatuses returns the custom status names. See
+// GetCustomStatusesDetailed for caching and failure behavior.
 func (s *DoltStore) GetCustomStatuses(ctx context.Context) ([]string, error) {
-	s.loadCustomConfigCache(ctx)
 	s.cacheMu.Lock()
-	defer s.cacheMu.Unlock()
-	return s.customStatusCache, nil
+	if s.customStatusCached {
+		result := s.customStatusCache
+		s.cacheMu.Unlock()
+		return result, nil
+	}
+	s.cacheMu.Unlock()
+
+	statuses, err := s.resolveCustomStatuses(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return types.CustomStatusNames(statuses), nil
 }
 
+// GetCustomStatusesDetailed returns the custom statuses with their categories.
+// Results of a successful read are cached per DoltStore lifetime and
+// invalidated when SetConfig updates the "status.custom" key. A failed read is
+// never cached: the call falls back to config.yaml's status.custom, or returns
+// the error when config.yaml declares none.
 func (s *DoltStore) GetCustomStatusesDetailed(ctx context.Context) ([]types.CustomStatus, error) {
-	s.loadCustomConfigCache(ctx)
 	s.cacheMu.Lock()
-	defer s.cacheMu.Unlock()
-	return s.customStatusDetailedCache, nil
+	if s.customStatusCached {
+		result := s.customStatusDetailedCache
+		s.cacheMu.Unlock()
+		return result, nil
+	}
+	s.cacheMu.Unlock()
+
+	return s.resolveCustomStatuses(ctx)
+}
+
+// resolveCustomStatuses loads the custom statuses through the cache. When the
+// read fails it serves config.yaml's status.custom for this call only, and
+// returns the error when config.yaml declares no statuses: an unreadable
+// database must stay distinguishable from one with no custom statuses.
+func (s *DoltStore) resolveCustomStatuses(ctx context.Context) ([]types.CustomStatus, error) {
+	statuses, _, err := s.loadCustomConfigCache(ctx)
+	if err == nil {
+		return statuses, nil
+	}
+	if fallback := issueops.ParseStatusFallback(config.GetCustomStatusesFromYAML()); len(fallback) > 0 {
+		log.Printf("warning: %v; using config.yaml status.custom until the database is readable", err)
+		return fallback, nil
+	}
+	return nil, fmt.Errorf("get custom statuses: %w", err)
 }
 
 // GetCustomTypes returns custom issue type values from config.
 // If the database doesn't have custom types configured, falls back to config.yaml.
 // Returns an empty slice if no custom types are configured.
-// Results are cached per DoltStore lifetime and invalidated when SetConfig
-// updates the "types.custom" key.
+// Results of a successful read are cached per DoltStore lifetime and
+// invalidated when SetConfig updates the "types.custom" key. A failed read is
+// never cached: the call falls back to config.yaml's types.custom, or returns
+// the error when config.yaml declares none.
 func (s *DoltStore) GetCustomTypes(ctx context.Context) ([]string, error) {
-	s.loadCustomConfigCache(ctx)
 	s.cacheMu.Lock()
-	defer s.cacheMu.Unlock()
-	return s.customTypeCache, nil
+	if s.customTypeCached {
+		result := s.customTypeCache
+		s.cacheMu.Unlock()
+		return result, nil
+	}
+	s.cacheMu.Unlock()
+
+	_, customTypes, err := s.loadCustomConfigCache(ctx)
+	if err == nil {
+		return customTypes, nil
+	}
+	// Serve config.yaml's types.custom for this call only; see
+	// resolveCustomStatuses.
+	if fallback := issueops.ComposeCustomTypes(nil, "", config.GetCustomTypesFromYAML()); len(fallback) > 0 {
+		log.Printf("warning: %v; using config.yaml types.custom until the database is readable", err)
+		return fallback, nil
+	}
+	return nil, fmt.Errorf("get custom types: %w", err)
 }
 
 // GetInfraTypes returns infrastructure type names from config.
