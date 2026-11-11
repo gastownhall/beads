@@ -377,6 +377,12 @@ func selectProbeDatabase(ctx context.Context, conn schema.DBConn, database strin
 	return quoted, nil
 }
 
+// migrateUpWithLock is schema.MigrateUpWithLock, declared as a variable so a
+// test can stand in for its converged fast path — which issues no statement a
+// test could script without coupling to schema-private SQL. The same seam
+// pattern as dolt.ensureRunningDetailed / dolt.dialServer.
+var migrateUpWithLock = schema.MigrateUpWithLock
+
 func (p *doltSQLProvider) initSchema(ctx context.Context, database string) error {
 	bo := backoff.NewExponentialBackOff()
 	bo.InitialInterval = 25 * time.Millisecond
@@ -412,7 +418,7 @@ func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string
 	if p.preview {
 		return p.attachPreviewDatabase(ctx, conn, database)
 	}
-	if _, err := schema.MigrateUpWithLock(ctx, conn, database,
+	if _, err := migrateUpWithLock(ctx, conn, database,
 		schema.WithDatabaseSelector(selectProbeDatabase),
 		schema.WithLockedPreparation(p.serverEndpoint, preparer.prepare),
 		// This provider serves a shared database by definition — an external
@@ -447,7 +453,35 @@ func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string
 		}
 		return classifyInitSchemaError(err)
 	}
-	return nil
+	// Forward drift (gastownhall/beads#8121). MigrateUp treats a database AHEAD
+	// of this binary as having nothing to do, and the converged fast path —
+	// which never reaches the migration gate — answers "converged" for it too
+	// (schema.TestAlreadyConvergedOnForwardSkew): whether this binary may use
+	// that schema is the caller's question. Every other open path asks it with
+	// schema.CheckForwardDrift; ask it here on the session MigrateUpWithLock
+	// left on the database, so an older bd refuses a newer schema rather than
+	// reading and writing it unawares.
+	return checkProxiedForwardDrift(ctx, conn)
+}
+
+// checkProxiedForwardDrift runs schema.CheckForwardDrift for initSchemaAttempt
+// and classifies the result for backoff: a skew refusal is permanent (a retry
+// would read the same version and refuse again), a serialization failure is
+// retried, anything else is terminal — the same split verifyTeamServerSchema
+// uses. BD_IGNORE_SCHEMA_SKEW=1 is honored inside CheckForwardDrift, with its
+// usual warning.
+func checkProxiedForwardDrift(ctx context.Context, conn *sql.Conn) error {
+	err := schema.CheckForwardDrift(ctx, conn)
+	switch {
+	case err == nil:
+		return nil
+	case schema.IsSchemaSkewError(err):
+		return backoff.Permanent(err)
+	case isSerializationError(err):
+		return fmt.Errorf("uow: forward-drift check: %w", err)
+	default:
+		return backoff.Permanent(fmt.Errorf("uow: forward-drift check: %w", err))
+	}
 }
 
 // dataBehindAdopter injects the one ancestry fact the smart gate's #6575
