@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -309,6 +310,206 @@ func TestEmbeddedMigrate(t *testing.T) {
 		}
 		if !reflect.DeepEqual(first["latest_version"], second["latest_version"]) {
 			t.Errorf("migrate schema latest_version changed between idempotent runs: first %#v, second %#v", first["latest_version"], second["latest_version"])
+		}
+	})
+
+	// gastownhall/beads#7283: the verb's consent lets the store open apply
+	// the pending migration before the command's own pass runs, so that pass
+	// finds nothing left. The run that migrated must still report it.
+	t.Run("migrate_schema_reports_migrations_applied_by_open", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "mo")
+		setMigrateJSONConfigFalse(t, beadsDir)
+		regressEmbeddedSchemaCursor(t, beadsDir, "mo")
+		run := func() map[string]interface{} {
+			t.Helper()
+			out := bdMigrateJSON(t, bd, dir, "schema")
+			var result map[string]interface{}
+			if err := json.Unmarshal([]byte(out), &result); err != nil {
+				t.Fatalf("bd --format=json migrate schema returned invalid JSON: %v\n%s", err, out)
+			}
+			for _, key := range []string{"status", "applied", "latest_version"} {
+				if _, ok := result[key]; !ok {
+					t.Errorf("migrate schema JSON missing %q: %v", key, result)
+				}
+			}
+			return result
+		}
+
+		first := run()
+		if got, ok := first["status"].(string); !ok || got != "applied" {
+			t.Errorf("first migrate schema status = %#v, want applied", first["status"])
+		}
+		if got, ok := first["applied"].(float64); !ok || got != 1 {
+			t.Errorf("first migrate schema applied = %#v, want 1", first["applied"])
+		}
+		second := run()
+		if got, ok := second["status"].(string); !ok || got != "current" {
+			t.Errorf("second migrate schema status = %#v, want current", second["status"])
+		}
+		if got, ok := second["applied"].(float64); !ok || got != 0 {
+			t.Errorf("second migrate schema applied = %#v, want 0", second["applied"])
+		}
+	})
+
+	// gastownhall/beads#7283: a current schema still gets its version marker
+	// reconciled, but marker-only work is not a write, so the post-run
+	// auto-commit must not sweep an unrelated pending edit into a commit.
+	t.Run("migrate_schema_stamps_a_stale_marker_without_committing", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "sm")
+		setMigrateJSONConfigFalse(t, beadsDir)
+		issue := bdCreate(t, bd, dir, "Original title")
+		const editedTitle = "Edited but not committed"
+		bdCommand(t, bd, dir, "--dolt-auto-commit", "batch", "update", issue.ID, "--title", editedTitle)
+		withEmbeddedMigrateSQL(t, beadsDir, "sm", func(db *sql.DB) error {
+			result, err := db.ExecContext(t.Context(), "UPDATE local_metadata SET value = ? WHERE `key` = ?", "0.0.1", "bd_version")
+			if err != nil {
+				return fmt.Errorf("set fixture bd_version: %w", err)
+			}
+			if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+				return fmt.Errorf("set fixture bd_version affected %d rows, %v; want 1", rows, err)
+			}
+			return nil
+		})
+		type snapshot struct {
+			commits int
+			dirty   []string
+			title   string
+			marker  string
+		}
+		read := func() snapshot {
+			t.Helper()
+			var s snapshot
+			withEmbeddedMigrateSQL(t, beadsDir, "sm", func(db *sql.DB) error {
+				if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dolt_log").Scan(&s.commits); err != nil {
+					return fmt.Errorf("count commits: %w", err)
+				}
+				rows, err := db.QueryContext(t.Context(), "SELECT table_name FROM dolt_status ORDER BY table_name")
+				if err != nil {
+					return fmt.Errorf("read dolt_status: %w", err)
+				}
+				defer rows.Close()
+				for rows.Next() {
+					var name string
+					if err := rows.Scan(&name); err != nil {
+						return fmt.Errorf("scan dolt_status: %w", err)
+					}
+					s.dirty = append(s.dirty, name)
+				}
+				if err := rows.Err(); err != nil {
+					return fmt.Errorf("iterate dolt_status: %w", err)
+				}
+				if err := db.QueryRowContext(t.Context(), "SELECT title FROM issues WHERE id = ?", issue.ID).Scan(&s.title); err != nil {
+					return fmt.Errorf("read issue title: %w", err)
+				}
+				if err := db.QueryRowContext(t.Context(), "SELECT value FROM local_metadata WHERE `key` = ?", "bd_version").Scan(&s.marker); err != nil {
+					return fmt.Errorf("read bd_version: %w", err)
+				}
+				return nil
+			})
+			return s
+		}
+		before := read()
+		if before.title != editedTitle || len(before.dirty) == 0 {
+			t.Fatalf("precondition failed: want an uncommitted title edit, got title %q dirty %v", before.title, before.dirty)
+		}
+
+		out := bdMigrateJSON(t, bd, dir, "schema")
+		var result map[string]interface{}
+		if err := json.Unmarshal([]byte(out), &result); err != nil {
+			t.Fatalf("bd --format=json migrate schema returned invalid JSON: %v\n%s", err, out)
+		}
+		if got, ok := result["status"].(string); !ok || got != "current" {
+			t.Errorf("migrate schema status = %#v, want current", result["status"])
+		}
+		if got, ok := result["applied"].(float64); !ok || got != 0 {
+			t.Errorf("migrate schema applied = %#v, want 0", result["applied"])
+		}
+
+		after := read()
+		if after.marker != Version {
+			t.Errorf("bd_version marker = %q after migrate schema, want %q", after.marker, Version)
+		}
+		if after.commits != before.commits {
+			t.Errorf("migrate schema changed the commit count from %d to %d; marker-only repair must not commit", before.commits, after.commits)
+		}
+		if !reflect.DeepEqual(after.dirty, before.dirty) || after.title != editedTitle {
+			t.Errorf("migrate schema disturbed the pending edit: dirty %v -> %v, title %q", before.dirty, after.dirty, after.title)
+		}
+	})
+
+	// gastownhall/beads#7283: the migrations the store open applied are
+	// reported, but they do not make the run a write either. The open
+	// committed each step itself, so the post-run auto-commit would take
+	// only an unrelated pending edit with it.
+	t.Run("migrate_schema_counts_open_migrations_without_committing", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "oc")
+		setMigrateJSONConfigFalse(t, beadsDir)
+		issue := bdCreate(t, bd, dir, "Labeled while behind")
+		regressEmbeddedSchemaCursor(t, beadsDir, "oc")
+		// By SQL and after the regression: its -am commit would take an
+		// earlier edit, and bd refuses writes while the schema is behind. A
+		// label, not an issue edit: the open refuses to migrate while a
+		// pending migration alters a dirty table, and migrations alter
+		// issues far more often than labels.
+		withEmbeddedMigrateSQL(t, beadsDir, "oc", func(db *sql.DB) error {
+			if _, err := db.ExecContext(t.Context(), "INSERT INTO labels (issue_id, label) VALUES (?, ?)", issue.ID, "pending"); err != nil {
+				return fmt.Errorf("add pending label: %w", err)
+			}
+			return nil
+		})
+		type snapshot struct {
+			commits int
+			dirty   []string
+		}
+		read := func() snapshot {
+			t.Helper()
+			var s snapshot
+			withEmbeddedMigrateSQL(t, beadsDir, "oc", func(db *sql.DB) error {
+				if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dolt_log").Scan(&s.commits); err != nil {
+					return fmt.Errorf("count commits: %w", err)
+				}
+				rows, err := db.QueryContext(t.Context(), "SELECT table_name FROM dolt_status ORDER BY table_name")
+				if err != nil {
+					return fmt.Errorf("read dolt_status: %w", err)
+				}
+				defer rows.Close()
+				for rows.Next() {
+					var name string
+					if err := rows.Scan(&name); err != nil {
+						return fmt.Errorf("scan dolt_status: %w", err)
+					}
+					s.dirty = append(s.dirty, name)
+				}
+				if err := rows.Err(); err != nil {
+					return fmt.Errorf("iterate dolt_status: %w", err)
+				}
+				return nil
+			})
+			return s
+		}
+		before := read()
+		if !slices.Contains(before.dirty, "labels") {
+			t.Fatalf("precondition failed: want the label uncommitted, got dirty %v", before.dirty)
+		}
+
+		out := bdMigrateJSON(t, bd, dir, "schema")
+		var result map[string]interface{}
+		if err := json.Unmarshal([]byte(out), &result); err != nil {
+			t.Fatalf("bd --format=json migrate schema returned invalid JSON: %v\n%s", err, out)
+		}
+		if got, ok := result["status"].(string); !ok || got != "applied" {
+			t.Errorf("migrate schema status = %#v, want applied", result["status"])
+		}
+		if got, ok := result["applied"].(float64); !ok || got != 1 {
+			t.Errorf("migrate schema applied = %#v, want 1", result["applied"])
+		}
+
+		after := read()
+		if after.commits != before.commits+1 {
+			t.Errorf("migrate schema made %d commits, want 1: the migration's own, with no post-run auto-commit", after.commits-before.commits)
+		}
+		if !reflect.DeepEqual(after.dirty, before.dirty) {
+			t.Errorf("migrate schema committed the pending label: dirty %v -> %v", before.dirty, after.dirty)
 		}
 	})
 

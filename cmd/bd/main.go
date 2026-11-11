@@ -139,6 +139,13 @@ var (
 	// Thread-safe via atomic.Bool to avoid data races in concurrent flush operations.
 	commandDidWrite atomic.Bool
 
+	// versionBumpMigrationsApplied is how many schema migrations this
+	// command's version-bump reconciliation (autoMigrateOnVersionBump)
+	// applied in the root pre-run, before the main store open. Only a
+	// consented command migrates there; `bd migrate schema` reports the
+	// count as its own (gastownhall/beads#7283).
+	versionBumpMigrationsApplied int
+
 	// commandMayEmptyJSONLExport is set by destructive maintenance commands
 	// after they actually delete rows, allowing post-run auto-export to record
 	// an intentional empty JSONL artifact instead of treating it as ambiguous.
@@ -1372,6 +1379,7 @@ var rootCmd = &cobra.Command{
 
 		// Reset per-command write tracking (used by Dolt auto-commit).
 		commandDidWrite.Store(false)
+		versionBumpMigrationsApplied = 0
 		commandMayEmptyJSONLExport.Store(false)
 		commandDeletedIssueIDs.reset()
 		commandDidExplicitDoltCommit = false
@@ -2101,7 +2109,7 @@ var rootCmd = &cobra.Command{
 		// dry-run plan. frozenForMaintenance excludes it for the same reason
 		// as the trackBdVersion call above — see that comment.
 		if policy.runMaintenance && !previewMode && !frozenForMaintenance {
-			autoMigrateOnVersionBump(beadsDir)
+			versionBumpMigrationsApplied = autoMigrateOnVersionBump(beadsDir)
 		}
 
 		// Initialize direct storage access

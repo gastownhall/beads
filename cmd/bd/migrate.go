@@ -651,20 +651,41 @@ func handleSchemaMigrate() error {
 		}
 		return HandleError("schema migration failed: %v", err)
 	}
+	passApplied := applied
+	// This verb opens with migration consent, so on a shared server the
+	// store open applies the pending migrations and the pass above finds
+	// nothing left (gastownhall/beads#7283). The version-bump
+	// reconciliation's own open, which the root pre-run closes before the
+	// main one, can get there first. Report the run's whole work.
+	applied += migrator.MigrationsAppliedAtOpen() + versionBumpMigrationsApplied
 
 	latest := schema.LatestVersion()
+	// Stamp the version markers the refused version-bump reconciliation
+	// could not (gastownhall/beads#5920 review). autoMigrateOnVersionBump
+	// is the only automatic writer of bd_version, it was refused by the
+	// gate this command just satisfied, and its one-shot .local_version
+	// signal is already consumed — so without this, `bd doctor` and the
+	// git-hook health check keep reporting a version mismatch after the
+	// operator has done everything the refusal told them to.
+	//
+	// On every successful pass, not only one that counted migrations: the
+	// pending migrations may already have run during the store open (or in
+	// another client), and the reconciler skips a matching marker and
+	// refuses a downgrade on its own (gastownhall/beads#7283). Marker-only
+	// work is not a write: local_metadata is dolt-ignored, and setting
+	// commandDidWrite would let the post-run auto-commit sweep unrelated
+	// pending edits into a commit.
+	stampWorkspaceVersionAfterMigrate(store)
 	status := "current"
 	if applied > 0 {
 		status = "applied"
+	}
+	// Only this pass's own migrations mark the command as a write. The
+	// opens committed each migration step they applied, so counting theirs
+	// would leave the post-run auto-commit nothing to take but the user's
+	// unrelated pending edits (gastownhall/beads#7283).
+	if passApplied > 0 {
 		commandDidWrite.Store(true)
-		// Stamp the version markers the refused version-bump reconciliation
-		// could not (gastownhall/beads#5920 review). autoMigrateOnVersionBump
-		// is the only automatic writer of bd_version, it was refused by the
-		// gate this command just satisfied, and its one-shot .local_version
-		// signal is already consumed — so without this, `bd doctor` and the
-		// git-hook health check keep reporting a version mismatch after the
-		// operator has done everything the refusal told them to.
-		stampWorkspaceVersionAfterMigrate(store)
 	}
 
 	if jsonOutput {

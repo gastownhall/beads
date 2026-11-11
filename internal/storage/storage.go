@@ -861,6 +861,11 @@ type RemoteRefPruner interface {
 
 type SchemaMigrator interface {
 	ApplySchemaMigrations(ctx context.Context) (applied int, err error)
+	// MigrationsAppliedAtOpen reports how many migrations this store's own
+	// open applied: work ApplySchemaMigrations cannot see, because it only
+	// counts its own pass (gastownhall/beads#7283). Fixed at construction;
+	// zero for an open that migrated nothing or skipped migrations.
+	MigrationsAppliedAtOpen() int
 }
 
 // Compactor squashes old Dolt commits while preserving recent ones.

@@ -122,11 +122,36 @@ func TestDoltNew_SharedStoreMigrateGate_NoRemote(t *testing.T) {
 	t.Run("verb consent migrates", func(t *testing.T) {
 		schema.SetSharedMigrateConsent(true)
 		defer schema.SetSharedMigrateConsent(false)
-		if err := openWith(&Config{}); err != nil {
+		s, err := New(ctx, &Config{
+			Path:           tmpDir,
+			CommitterName:  "test",
+			CommitterEmail: "test@example.com",
+			Database:       dbName,
+		})
+		if err != nil {
 			t.Fatalf("New (writable, consented) = %v, want success", err)
 		}
+		defer s.Close()
 		if got := cursor(); got != schema.LatestVersion() {
 			t.Fatalf("cursor = %d after a consented open, want %d", got, schema.LatestVersion())
+		}
+
+		// gastownhall/beads#7283: `bd migrate schema` calls ApplySchemaMigrations
+		// on the store whose open just migrated. That pass finds nothing left,
+		// so the open's own work must stay visible through
+		// MigrationsAppliedAtOpen, or the command reports "already at vN" and
+		// skips the version stamp on the very run that migrated. The open count
+		// is fixed at construction: later passes never replay or consume it.
+		if got := s.MigrationsAppliedAtOpen(); got != 1 {
+			t.Fatalf("MigrationsAppliedAtOpen after the migrating open = %d, want 1", got)
+		}
+		for i := 1; i <= 2; i++ {
+			if applied, err := s.ApplySchemaMigrations(ctx); err != nil || applied != 0 {
+				t.Fatalf("ApplySchemaMigrations pass %d after the migrating open = (%d, %v), want (0, nil)", i, applied, err)
+			}
+		}
+		if got := s.MigrationsAppliedAtOpen(); got != 1 {
+			t.Fatalf("MigrationsAppliedAtOpen after explicit passes = %d, want 1 (fixed at construction)", got)
 		}
 	})
 }
