@@ -161,6 +161,7 @@ go_test(
         "expected_revision_contract_test.go",
         "external_dependencies_test.go",
         "federation_credentials_test.go",
+        "flatten_clone_local_fks_test.go",
         "get_issue_test.go",
         "git_ref_pin_test.go",
         "graph_counter_contract_test.go",
