@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -65,6 +66,46 @@ func TestManagedLocalProxiedBackupRoundTrip(t *testing.T) {
 	}
 
 	after := bdProxiedCreate(t, bd, p.dir, "must not survive the restore", "-p", "1")
+
+	// bd-jwaljq (GH#7098): a directory that holds no backup is refused before
+	// the restore quiesces the topology. Both processes keep running and the
+	// database keeps its issues; without the preflight the restore shut the
+	// topology down and DOLT_BACKUP replaced the database with nothing.
+	issueIDs := func() []string {
+		var ids []string
+		for _, issue := range bdProxiedListJSON(t, bd, p) {
+			ids = append(ids, issue.ID)
+		}
+		slices.Sort(ids)
+		return ids
+	}
+	livePIDs := func() map[string]string {
+		pids := map[string]string{}
+		for _, name := range []string{proxy.PIDFileName, server.PIDFileName} {
+			data, err := os.ReadFile(filepath.Join(p.proxyRoot, name))
+			if err != nil {
+				t.Fatalf("read %s: %v", name, err)
+			}
+			pids[name] = strings.TrimSpace(string(data))
+		}
+		return pids
+	}
+	idsBefore := issueIDs()
+	pidsBefore := livePIDs()
+	notABackup := t.TempDir()
+	if stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "backup", "restore", "--force", notABackup); err == nil {
+		t.Fatalf("bd backup restore --force %s succeeded from a directory with no backup\nstdout:\n%s\nstderr:\n%s", notABackup, stdout, stderr)
+	} else if !strings.Contains(stderr, "holds no Dolt backup") || !strings.Contains(stderr, notABackup) {
+		t.Fatalf("refusal does not name the source and the missing backup: %v\nstderr:\n%s", err, stderr)
+	}
+	// Read the PID files before any further command: the next one would
+	// relaunch a topology the restore had taken down.
+	if got := livePIDs(); !maps.Equal(got, pidsBefore) {
+		t.Fatalf("the refused restore touched the topology: PIDs %v, want %v", got, pidsBefore)
+	}
+	if got := issueIDs(); !slices.Equal(got, idsBefore) {
+		t.Fatalf("the refused restore changed the issues: got %v, want %v", got, idsBefore)
+	}
 
 	out, err := bdProxiedRun(t, bd, p.dir, "backup", "restore", dest, "--force", "--json")
 	if err != nil {

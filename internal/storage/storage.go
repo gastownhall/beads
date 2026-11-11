@@ -1101,6 +1101,9 @@ type BackupStore interface {
 	BackupDatabase(ctx context.Context, dir string) error
 	// RestoreDatabase restores the database from a Dolt backup at dir.
 	// When force is true, the existing database is dropped before restoring.
+	// dir must be a local directory holding a Dolt backup, at a path Dolt
+	// reads literally: anything else is refused before the existing database
+	// is touched.
 	RestoreDatabase(ctx context.Context, dir string, force bool) error
 }
 

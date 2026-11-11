@@ -13,6 +13,7 @@ import (
 	"log"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1083,8 +1084,32 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	if err != nil {
 		return 0, fmt.Errorf("checking dirty tables against pending migrations: %w", err)
 	}
-	if len(touchedDirtyTables) > 0 {
-		return 0, &DirtyTablesError{Tables: touchedDirtyTables}
+	// The ignored series is checked here too, before any numbered migration
+	// or rekey runs, so its refusal applies none of them (the seed and
+	// cursor-heal preparations above may already have run) and can be the
+	// same *DirtyTablesError the working-set-reconcile opens tolerate
+	// (gastownhall/beads#5816). The ignored cursor is read before the main
+	// series runs; no main migration advances it or leaves an ignored
+	// sentinel newly missing, so this early read is conservative: it may
+	// count more pending ignored migrations than a post-main read would,
+	// not fewer. It reads the same committable set: rows in
+	// dolt-ignored tables (wisps, wisp_comments, ...) are clone-local
+	// working-set data that stageSchemaTables never stages and
+	// unstageIgnoredTables keeps out of the migration commit, so the
+	// ignored migrations may alter them in place. Committable tables the
+	// ignored series touches (0002 deletes child_counters rows) still refuse.
+	touchedIgnoredDirtyTables, err := ignoredSource.pendingMigrationDirtyTables(ctx, db, dirtyBefore)
+	// A failed ignored read must not mask a main-series refusal: that typed
+	// error is what the reconcile opens recover from, and the open after the
+	// recovery reads the ignored series again. So the read error returns only
+	// when the main series has nothing to refuse.
+	if err != nil && len(touchedDirtyTables) == 0 {
+		return 0, fmt.Errorf("checking dirty tables against pending ignored migrations: %w", err)
+	}
+	if len(touchedDirtyTables) > 0 || len(touchedIgnoredDirtyTables) > 0 {
+		tables := append(touchedDirtyTables, touchedIgnoredDirtyTables...)
+		sort.Strings(tables)
+		return 0, &DirtyTablesError{Tables: slices.Compact(tables)}
 	}
 	dirtyBeforeSignatures, err := dirtyTableSignatures(ctx, db, dirtyBefore)
 	if err != nil {
@@ -1149,24 +1174,6 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 		return applied, fmt.Errorf("rekey aux row ids: %w", err)
 	}
 	backfilled = backfilled || auxRekeyed
-
-	touchedIgnoredDirtyTables, err := ignoredSource.pendingMigrationDirtyTables(ctx, db, dirtyBeforeAll)
-	if err != nil {
-		return applied, fmt.Errorf("checking dirty tables against pending ignored migrations: %w", err)
-	}
-	if len(touchedIgnoredDirtyTables) > 0 {
-		// Deliberately a plain, untyped error (unlike the main-source guard
-		// above, which returns *DirtyTablesError): this check fires mid-pass,
-		// after the main-source migrations have already applied. A lenient
-		// caller (embeddeddolt's openReadOnlyCommand / openWorkingSetReconcile
-		// intents) skipping this and returning as if the open succeeded would
-		// let a reconcile commit checkpoint a half-applied migration pass.
-		// The ignored source also tracks bd-internal state (dolt_ignore'd
-		// tables like ignored_schema_migrations), not expected user data, so
-		// there is no dirty-commit recovery story to support here the way
-		// there is for the main-source guard (#4566 scope).
-		return applied, fmt.Errorf("pending ignored schema migrations alter pre-existing dirty tables: %s", strings.Join(touchedIgnoredDirtyTables, ", "))
-	}
 
 	appliedIgnored, ignoredColumnAdded, err := ignoredSource.migrate(ctx, db, 0)
 	if err != nil {
