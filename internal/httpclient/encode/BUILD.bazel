@@ -26,6 +26,7 @@ go_test(
     name = "encode_test",
     srcs = [
         "bijection_test.go",
+        "ledger_pins_test.go",
         "ledger_render_test.go",
         "list_filters_test.go",
         "list_fold_test.go",
@@ -34,11 +35,15 @@ go_test(
         "roundtrip_test.go",
         "skew_test.go",
     ],
+    # The ledger doc, and exactly the files crossPackagePins
+    # (ledger_pins_test.go) registers; each is exported to this package by its
+    # own BUILD.bazel.
     data = [
         "//:engdocs/design/http-divergence-ledger.md",
-        "//cmd/bd:go_srcs",
+        "//cmd/bd:serve_test.go",
         "//internal/httpapi/spec:openapi.v0.yaml",
-        "//internal/httpclient:go_srcs",
+        "//internal/httpclient:bulk_roles_test.go",
+        "//internal/httpclient:gate_fields_test.go",
     ] + glob(["*.go"]),
     embed = [":encode"],
     deps = [

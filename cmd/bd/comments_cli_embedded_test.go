@@ -4,13 +4,17 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
 // bdComments runs "bd comments" with the given args and returns stdout.
@@ -214,6 +218,119 @@ func TestEmbeddedCommentsCLI(t *testing.T) {
 			}
 			if !found {
 				t.Error("expected 'Round trip comment' in listed comments")
+			}
+		}
+	})
+
+	// ===== Attribution =====
+
+	// Who `bd comments add` attributes a comment to, today: --author when it is
+	// given, else the actor (--actor > BEADS_ACTOR > BD_ACTOR > git user.name).
+	// The two flags are independent: --actor never overrides --author, and two
+	// different names are not refused. The Dolt commit each comment makes is
+	// the store's own (author "beads <beads@local>", message "bd: comment
+	// <id>"), whoever the author is. These are pins, not a ruling: native fix
+	// C2 (--author an alias of --actor; two different values refused before
+	// any write) flips the two-names row, and its PR changes that row and
+	// cites its decision record.
+	t.Run("comments_add_author_actor_precedence", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Attribution target", "--type", "task")
+		rows := []struct {
+			name     string
+			env      []string // appended to bdEnv, which strips every BEADS_ and BD_ variable
+			global   []string // flags before "comments"
+			flags    []string // flags after the text
+			wantExit int
+			want     string // the stored comment's author; "" when nothing is written
+		}{
+			{name: "git user.name when nothing names anyone", want: "Test"},
+			{name: "--author", flags: []string{"--author", "kim"}, want: "kim"},
+			{name: "--actor", global: []string{"--actor", "sam"}, want: "sam"},
+			{name: "--actor and --author name two people", global: []string{"--actor", "sam"}, flags: []string{"--author", "kim"}, want: "kim"},
+			{name: "--actor and --author name one person", global: []string{"--actor", "sam"}, flags: []string{"--author", "sam"}, want: "sam"},
+			{name: "BD_ACTOR", env: []string{"BD_ACTOR=env-bd"}, want: "env-bd"},
+			{name: "BEADS_ACTOR", env: []string{"BEADS_ACTOR=env-beads"}, want: "env-beads"},
+			{name: "BEADS_ACTOR over BD_ACTOR", env: []string{"BEADS_ACTOR=env-beads", "BD_ACTOR=env-bd"}, want: "env-beads"},
+			{name: "-a over BD_ACTOR", env: []string{"BD_ACTOR=env-bd"}, flags: []string{"-a", "kim"}, want: "kim"},
+			{name: "--actor over BD_ACTOR", env: []string{"BD_ACTOR=env-bd"}, global: []string{"--actor", "sam"}, want: "sam"},
+		}
+
+		// dolt_log, read in-process between commands (no bd process holds the store).
+		readLog := func(limit int) (int, [][3]string) {
+			t.Helper()
+			db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(dir, ".beads", "embeddeddolt"), "cc", "main")
+			if err != nil {
+				t.Fatalf("OpenSQL: %v", err)
+			}
+			defer cleanup()
+			var count int
+			if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dolt_log").Scan(&count); err != nil {
+				t.Fatalf("count dolt_log: %v", err)
+			}
+			rows, err := db.QueryContext(t.Context(), "SELECT author, author_email, message FROM dolt_log ORDER BY commit_order DESC LIMIT ?", limit)
+			if err != nil {
+				t.Fatalf("read dolt_log: %v", err)
+			}
+			defer rows.Close()
+			var heads [][3]string
+			for rows.Next() {
+				var h [3]string
+				if err := rows.Scan(&h[0], &h[1], &h[2]); err != nil {
+					t.Fatalf("scan dolt_log: %v", err)
+				}
+				heads = append(heads, h)
+			}
+			return count, heads
+		}
+
+		before, _ := readLog(0)
+		written := 0
+		for i, row := range rows {
+			args := append(append(slices.Clone(row.global), "comments", "add", issue.ID, fmt.Sprintf("attribution %d", i)), row.flags...)
+			cmd := exec.Command(bd, args...)
+			cmd.Dir = dir
+			cmd.Env = append(bdEnv(dir), row.env...)
+			out, err := cmd.CombinedOutput()
+			code := 0
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				code = exitErr.ExitCode()
+			} else if err != nil {
+				t.Fatalf("%s: bd %s: %v", row.name, strings.Join(args, " "), err)
+			}
+			if code != row.wantExit {
+				t.Errorf("%s: bd %s: exit %d, want %d\n%s", row.name, strings.Join(args, " "), code, row.wantExit, out)
+			}
+			if row.wantExit == 0 {
+				written++
+			}
+		}
+
+		var comments []struct {
+			Author string `json:"author"`
+			Text   string `json:"text"`
+		}
+		listed := bdComments(t, bd, dir, issue.ID, "--json")
+		if err := json.Unmarshal([]byte(listed[strings.Index(listed, "["):]), &comments); err != nil {
+			t.Fatalf("parse comments: %v\n%s", err, listed)
+		}
+		authors := make(map[string]string, len(comments))
+		for _, c := range comments {
+			authors[c.Text] = c.Author
+		}
+		for i, row := range rows {
+			if got := authors[fmt.Sprintf("attribution %d", i)]; got != row.want {
+				t.Errorf("%s: author = %q, want %q", row.name, got, row.want)
+			}
+		}
+
+		after, heads := readLog(written)
+		if after-before != written {
+			t.Errorf("dolt_log grew by %d over %d written comments, want one commit per comment", after-before, written)
+		}
+		for _, h := range heads {
+			if want := [3]string{"beads", "beads@local", "bd: comment " + issue.ID}; h != want {
+				t.Errorf("comment commit (author, email, message) = %q, want %q: the commit is the store's, whoever the comment's author is", h, want)
 			}
 		}
 	})

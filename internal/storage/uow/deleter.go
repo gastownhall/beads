@@ -88,24 +88,37 @@ func (d *deleter) Delete(ctx context.Context, req publicops.DeleteRequest) (publ
 	// (scoped to serverMode only) this one applies whenever a guard is
 	// present, with no mode check.
 	//
-	// d.provider is unwrapped first because the real chain
-	// (wireProxiedUOWProvider) wraps the bare *doltSQLProvider in a
-	// notifyingProvider and then an externaldeps uowProvider — both of which
-	// pass THEMSELVES, not the inner provider, to NewDeleter, so d.provider
-	// is a decorator here in every real deployment, never the bare provider.
+	// The fence is FOUND by walking d.provider with fenceTarget, because
+	// d.provider is a decorator in every real deployment, never the bare
+	// provider. The proxied chain (wireProxiedUOWProvider) wraps the bare
+	// *doltSQLProvider in a notifyingProvider and then an externaldeps
+	// uowProvider, both of which pass THEMSELVES to NewDeleter and peel with
+	// Unwrap. bd serve builds this role over a per-request timing wrapper
+	// above its externaldeps layer, and that wrapper answers FenceProvider
+	// instead (FenceProvider says why it is not an Unwrap). Only the lock comes
+	// from the provider found there: the write still runs through d.provider,
+	// so it is timed and policed exactly as an unguarded delete is.
+	//
+	// A GUARDED DELETE THAT FINDS NO FENCE IS REFUSED, not written unfenced.
+	// Every provider chain in this package ends in a *doltSQLProvider, so a
+	// miss means a decorator hides it, and writing anyway is the silent double
+	// delete the fence exists to stop: bd serve's v0 route did exactly that
+	// until its wrapper answered FenceProvider (GH#7243).
 	if req.ExpectedVersion != nil {
-		if sp, ok := UnwrapProvider(d.provider).(*doltSQLProvider); ok {
-			var result publicops.DeleteResult
-			err := withDeleteFence(ctx, sp, req.IDs[0], func() error {
-				var ferr error
-				result, ferr = write(ctx)
-				return ferr
-			})
-			if err != nil {
-				return publicops.DeleteResult{}, err
-			}
-			return result, nil
+		sp, ok := fenceTarget(d.provider)
+		if !ok {
+			return publicops.DeleteResult{}, fmt.Errorf("%w (%T)", errDeleteFenceUnreachable, d.provider)
 		}
+		var result publicops.DeleteResult
+		err := withDeleteFence(ctx, sp, req.IDs[0], func() error {
+			var ferr error
+			result, ferr = write(ctx)
+			return ferr
+		})
+		if err != nil {
+			return publicops.DeleteResult{}, err
+		}
+		return result, nil
 	}
 
 	return write(ctx)

@@ -311,6 +311,7 @@ go_test(
         "molecule_contract_test.go",
         "multistore_multiprocess_test.go",
         "open_test.go",
+        "pool_gauges_test.go",
         "pool_timeouts_test.go",
         "port_provenance_test.go",
         "portsource_propagation_test.go",
@@ -347,6 +348,7 @@ go_test(
         "role_test_helpers_test.go",
         "route_logging_integration_test.go",
         "route_logging_test.go",
+        "row_version_contract_test.go",
         "row_version_test.go",
         "schema_cli_parity_integration_test.go",
         "schema_cli_parity_test.go",
@@ -457,6 +459,8 @@ go_test(
         "@com_github_go_sql_driver_mysql//:mysql",
         "@com_github_google_uuid//:uuid",
         "@com_github_stretchr_testify//require",
+        "@io_opentelemetry_go_otel_sdk_metric//:metric",
+        "@io_opentelemetry_go_otel_sdk_metric//metricdata",
     ] + select({
         "@rules_go//go/platform:aix": [
             "//internal/testutil/integration",
