@@ -1,0 +1,8 @@
+{
+  "shape": "mc-list-assignee-status",
+  "requests": [
+    {"method":"GET","operation_id":"getContext","path":"/v0/beads/context","status":200},
+    {"method":"GET","operation_id":"listSettings","path":"/v0/beads/config","status":200},
+    {"method":"GET","operation_id":"listIssues","path":"/v0/beads/issues","query":["assignee","limit","sort","status"],"status":200}
+  ]
+}

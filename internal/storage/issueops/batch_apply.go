@@ -412,7 +412,7 @@ func (r *applyBatchRun) applyDepAdd(ctx context.Context, tx *sql.Tx, index int, 
 		Metadata:    metadata,
 		ThreadID:    item.ThreadID,
 	}
-	eventWritten, err := AddDependencyInTx(ctx, tx, dep, r.plan.Actor, AddDependencyOpts{
+	written, err := AddDependencyInTxWithResult(ctx, tx, dep, r.plan.Actor, AddDependencyOpts{
 		SourceTable:    sourceTable,
 		WriteTable:     depTable,
 		IsCrossPrefix:  types.ExtractPrefix(source) != types.ExtractPrefix(target),
@@ -422,17 +422,21 @@ func (r *applyBatchRun) applyDepAdd(ctx context.Context, tx *sql.Tx, index int, 
 	if err != nil {
 		return itemErr(err)
 	}
-	// Stage the source's dependency table always and its events table only when
-	// a row was recorded — the selective staging addDependencyEdgeInTx
-	// documents, so an idempotent re-add cannot sweep unrelated pending event
-	// rows into this commit (GH#2455).
+	// Stage the source's dependency table always, its events table only when a
+	// row was recorded, and `issues` only when the edge flipped a durable
+	// is_blocked — the staging addDependencyEdgeInTx documents, so the flag
+	// rides the edge's commit (GH#6647) and an idempotent or non-flipping add
+	// cannot sweep unrelated pending rows into it (GH#2455).
 	r.write.Tables.Add(depTable)
 	// The edge row was written EITHER WAY: a new edge is an insert, and a
 	// same-type re-add rewrites that row's metadata. So the transaction has
 	// something to commit even when the caller sees no change.
 	r.write.Changed = true
-	if eventWritten {
+	if written.EventWritten {
 		r.write.Tables.Add(eventTable)
+	}
+	if written.Blocked.IssueRowsChanged {
+		r.write.Tables.Add("issues")
 	}
 	r.edges = append(r.edges, appliedEdge{
 		index: index,
@@ -442,7 +446,7 @@ func (r *applyBatchRun) applyDepAdd(ctx context.Context, tx *sql.Tx, index int, 
 		Kind:        publicops.ItemDepAdd,
 		IssueID:     source,
 		DependsOnID: target,
-		Changed:     eventWritten,
+		Changed:     written.EventWritten,
 	}
 	return nil
 }

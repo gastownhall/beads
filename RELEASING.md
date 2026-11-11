@@ -174,9 +174,9 @@ tag burned on a freebsd compilation failure no pre-tag gate caught
 [#5662](https://github.com/gastownhall/beads/issues/5662)). PR CI now builds
 the whole tree for every target in `scripts/ci/release-targets.txt` with Bazel
 (`scripts/ci/bazel-release-cross-compile.sh`, in bazel.yml's pure-Go lane),
-but with cgo off, while linux/amd64, linux/arm64, windows/amd64 and the darwin
-pair ship with `CGO_ENABLED=1`. Build the real release configuration by hand
-before tagging:
+but with cgo off, while linux/amd64, linux/arm64, windows/amd64,
+android/arm64 and the darwin pair ship with `CGO_ENABLED=1`. Build the real
+release configuration by hand before tagging:
 
 ```bash
 goreleaser build --snapshot --clean
@@ -184,6 +184,25 @@ goreleaser build --snapshot --clean
 
 A failure here costs a rebase. The same failure after the tag is pushed costs
 the tag.
+
+The android/arm64 CGO snapshot is Linux x86_64 only. `bd-android-arm64`
+compiles with the Android NDK r30 clang through `scripts/ci/android-arm64-cc`
+and `-cxx`, which install the pinned NDK (`scripts/ci/install-android-ndk.sh`)
+on first use, so on Linux x86_64 the command above, or
+`goreleaser build --snapshot --clean --id bd-android-arm64` alone, needs no
+setup. To install the NDK once up front instead:
+
+```bash
+export "$(scripts/ci/install-android-ndk.sh "$HOME/.cache/beads-ndk")"
+```
+
+On macOS the full snapshot stops at the android id with the wrappers'
+"Linux x86_64 only" error: omit `--id bd-android-arm64` (pass `--id` for each
+of the other builds) and build the android id on a Linux machine, or rely on
+release.yml's Ubuntu `goreleaser` job. Its post hooks check the binary with
+`scripts/verify-cgo.sh` and `scripts/verify-android-elf.sh` (Bionic
+`/system/bin/linker64` interpreter, 16 KB `PT_LOAD` alignment; needs
+`readelf`).
 
 ## 1. Prepare Release
 
@@ -941,6 +960,10 @@ goreleaser check
 # Test build locally
 goreleaser build --snapshot --clean
 ```
+
+The `bd-android-arm64` build only runs on Linux x86_64 (see
+[Cross-compile before tagging](#cross-compile-before-tagging)). On macOS,
+omit `--id bd-android-arm64` and build that id on Linux.
 
 ## Version Numbering
 

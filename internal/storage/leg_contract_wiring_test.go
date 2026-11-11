@@ -768,10 +768,18 @@ func finalParamTypeName(fn *ast.FuncDecl) string {
 // reason instead of a bare t.Skip: a reviewer reading a wiring diff that adds
 // a conformance.RunX reference should expect it to pass for real, or to carry
 // a waiver in unwiredContractEntrypoints instead — not to compile a skip and
-// call it adopted. As of this lock's current counts, no leg does this: every
-// entrypoint a leg's sources name either has every hook that entrypoint's own
-// cases need, or the gap is a named waiver here rather than a nil hook left
-// standing behind a call this check would count as wired.
+// call it adopted. Legs do this today. For example, the dolt, embeddeddolt
+// and uow legs wire the expected-revision, cross-record-invariant and
+// retention contracts (and the http leg the expected-revision contract) with
+// hooks such as CompareAndSetVersion, Remove and AcquireAdvisoryLease left
+// nil; the http leg's counter (List) and journal-arrival
+// (JournalArrivalHooks.*) contracts and the uow leg's journal contract
+// (JournalArrivalHooks.Rename) do the same. Those cases run as skips this
+// check counts as wired. What this check cannot see,
+// the runtime skip census does: tools/bazel/skip_census.txt lists each such
+// case per leg target as a `nil-hook <Hook>` line, and the Dolt-tier lanes'
+// check_testcases.py --skip-census fails on a skip the census does not list
+// and on a listed case that runs again, so supplying a hook deletes its lines.
 func conformanceEntrypointsWiredBy(t *testing.T, dir string) (map[string]bool, []string) {
 	t.Helper()
 	files, err := filepath.Glob(filepath.Join(dir, "*_test.go"))
