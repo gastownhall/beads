@@ -1226,6 +1226,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd update` refuses an ID that has a row in both the issues and the wisps
+  table (GH#5991). Reads return the issues copy, but the update wrote the
+  wisp copy and exited 0, so the change never appeared in `bd show`. The
+  update now exits nonzero, writes nothing, and names the ID, both tables and
+  the server-mode repair, `bd doctor --check=validate --fix` (with `--yes`
+  when run non-interactively), which deletes the issues copy and keeps the
+  wisp copy without merging them, for every such ID at once. That delete
+  also removes every other issue's dependency on the issues copy, such as a
+  child's parent-child link or a blocks edge, so the refusal and
+  `bd update --help` say to list every such ID first with
+  `bd sql 'SELECT id FROM issues WHERE id IN (SELECT id FROM wisps)'`, to
+  record each one's dependents with `bd dep list <id> --direction=up`, and
+  to re-add with `bd dep add` any edge the repair removed. Embedded and
+  proxied-server workspaces refuse the update too but cannot run the repair:
+  embedded mode does not support `bd doctor --check=validate` yet, and
+  proxied-server mode does not run `bd doctor`. The same
+  typed refusal (`issueops.ErrDualPresence`, `*issueops.DualPresenceError`)
+  comes from each in-process update path: the Lifecycle role, the legacy map
+  update, the unit-of-work update and the persistence move. Over `bd serve`
+  HTTP the refusal arrives as a generic 500 `internal` error, not a typed
+  problem. Other writes that rewrite such an ID's row through the shared
+  updater are refused too: `bd batch` updates, merge-slot and metadata
+  writes, and `bd delete X` when a dependency neighbor of X is such an ID and
+  its text cites X. Close and reopen are unchanged.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

@@ -360,8 +360,14 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	// allowlist and be refused by name.
 	forceClosePolicy := PopForceClosePolicy(updates)
 
-	// Route to correct table.
-	isWisp := IsActiveWispInTx(ctx, tx, id)
+	// Route to correct table. An ID with a row in both tables is refused here,
+	// before the pre-image read below: that read is issues-first, so routing
+	// the write wisps-first would merge against one copy and change the other
+	// (GH#5991).
+	isWisp, err := ResolveUpdatePlaneInTx(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
 	issueTable, _, eventTable, _ := WispTableRouting(isWisp)
 
 	// Read the pre-update row inside the transaction and fold any

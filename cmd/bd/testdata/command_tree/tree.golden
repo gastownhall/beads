@@ -7227,6 +7227,18 @@ bd update
     | fail, the remaining issues are still updated, every failed ID is reported on
     | stderr, and the command exits nonzero.
     |
+    | An ID with a row in both the issues and the wisps table is refused and
+    | nothing is written: reads return the issues copy, so an update could change
+    | a copy no reader sees. In a server-mode workspace, `bd doctor --check=validate --fix`
+    | (with --yes when run non-interactively) repairs every such ID by deleting its
+    | issues copy and keeping the wisp copy, without merging the two. That delete
+    | also removes every other issue's dependency on the issues copy (a child's
+    | parent-child link, a blocks edge or any other type). Before the repair, list
+    | every such ID, not only the refused one, with
+    | `bd sql 'SELECT id FROM issues WHERE id IN (SELECT id FROM wisps)'`,
+    | record each one's dependents with `bd dep list <id> --direction=up`, and
+    | re-add with `bd dep add` any edge the repair removed.
+    |
     | Exit codes: 1 for general failures; 13 when every failure is a stale
     | --if-assignee/--if-status guard (the precondition no longer held, nothing was
     | written — another actor won the race, so retrying the same guard is

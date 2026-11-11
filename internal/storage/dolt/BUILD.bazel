@@ -386,6 +386,7 @@ go_test(
         "transaction_wisp_lifecycle_persistence_test.go",
         "tree_walker_contract_test.go",
         "tx_reads_test.go",
+        "update_dual_presence_test.go",
         "update_force_close_policy_test.go",
         "update_guards_test.go",
         "update_same_status_test.go",

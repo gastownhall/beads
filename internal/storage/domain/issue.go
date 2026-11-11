@@ -805,6 +805,20 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 	if err != nil {
 		return nil, fmt.Errorf("ApplyUpdate %s: %w", id, err)
 	}
+	// Every mutation below follows useWisp, but readers resolve an ID
+	// issues-first, so a wisp with a durable twin would take a write no reader
+	// returns (GH#5991). Refuse it before anything is written. A pure
+	// precondition probe (Close/Reopen's version-only call) mutates nothing
+	// and keeps its wisp-targeting answer.
+	if useWisp && updateSpecMutates(spec) {
+		durable, err := u.issueRepo.Exists(ctx, id, IssueTableOpts{})
+		if err != nil {
+			return nil, fmt.Errorf("ApplyUpdate %s: probe issues table: %w", id, err)
+		}
+		if durable {
+			return nil, &publicops.DualPresenceError{ID: id}
+		}
+	}
 
 	if spec.ExpectedVersion != nil || spec.ExpectedAssignee != nil || spec.ExpectedStatus != nil {
 		var current *types.Issue
@@ -933,6 +947,15 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 		return nil, fmt.Errorf("ApplyUpdate: re-fetch %s: %w", id, err)
 	}
 	return issue, nil
+}
+
+// updateSpecMutates reports whether spec asks ApplyUpdate to write anything:
+// fields, a claim, a label edit, a reparent or a persistence move. A spec that
+// is set but would change nothing still counts; only the compare-and-set
+// expectations alone do not.
+func updateSpecMutates(spec UpdateSpec) bool {
+	return len(spec.Fields) > 0 || spec.Claim || spec.SetLabels != nil || len(spec.AddLabels) > 0 ||
+		len(spec.RemoveLabels) > 0 || spec.Reparent != nil || spec.Persistence != nil
 }
 
 func (u *issueUseCaseImpl) isWispID(ctx context.Context, id string) (bool, error) {
