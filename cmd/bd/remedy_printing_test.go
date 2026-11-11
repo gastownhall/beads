@@ -845,6 +845,15 @@ func TestStoreReadIDHintsQuoteIDs(t *testing.T) {
 					PrintContinueResult(&ContinueResult{ClosedStep: &types.Issue{ID: "bd-1"}, NextStep: &types.Issue{ID: id, Title: "Step"}})
 				})
 			}},
+		{"bd close --suggest-next, blocked status", "<issue-id>",
+			"\nNewly unblocked:\n" +
+				"  • {shown} — Step (P1)\n" +
+				"    → still status 'blocked' (bd close leaves it). If ready to release: bd update {id} --status open{note}\n",
+			func(t *testing.T, id string) string {
+				return printed(t, func() {
+					printNewlyUnblocked([]*types.Issue{{ID: id, Title: "Step", Priority: 1, Status: types.StatusBlocked}})
+				})
+			}},
 		{"bd close --continue, molecule complete", "<molecule-id>",
 			"✓ Auto-closed completed molecule {shown} — Mol\n" +
 				"\n✓ Molecule {shown} complete! All steps closed.\n" +

@@ -1,8 +1,13 @@
 package doctor
 
 import (
+	"context"
+	"errors"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 func TestEnrichFreshClone_UsesBootstrapFirstGuidance(t *testing.T) {
@@ -61,5 +66,49 @@ func TestPruneEnrichmentsRecommendRealCommand(t *testing.T) {
 		if !strings.HasPrefix(enrichment.commands[0], "bd prune") {
 			t.Errorf("%s enrichment should recommend 'bd prune', got %#v", name, enrichment.commands)
 		}
+	}
+}
+
+// listedSearcher is an IssueSearcher whose search finds issues, or fails
+// with err.
+type listedSearcher struct {
+	issues []*types.Issue
+	err    error
+}
+
+func (s listedSearcher) SearchIssues(context.Context, string, types.IssueFilter) ([]*types.Issue, error) {
+	return s.issues, s.err
+}
+
+// TestEnrichBlockedStatusLeavesTheReleaseToReview pins bd doctor --agent's
+// form of the Blocked Status advisory (bd-e5d8fd). The generic fallback
+// reported it as degraded, expected the check to pass, and handed the agent
+// the check's Fix text, status release included, as a command. A hold may
+// be meant, so the agent gets an advisory whose commands inspect an issue or
+// record a blocker, with the release named only for after review. A failed
+// search lists nothing to review and stays degraded.
+func TestEnrichBlockedStatusLeavesTheReleaseToReview(t *testing.T) {
+	ctx := context.Background()
+
+	listed := EnrichForAgent(CheckBlockedStatus(ctx, listedSearcher{issues: []*types.Issue{{ID: "bd-held", Status: types.StatusBlocked}}}), FixGate{})
+	if listed.Name != BlockedStatusCheckName || listed.Severity != "advisory" {
+		t.Errorf("listed hold: %s severity %q, want %s advisory", listed.Name, listed.Severity, BlockedStatusCheckName)
+	}
+	if want := []string{"bd show <id>", "bd dep add <id> <blocker-id>"}; !slices.Equal(listed.Commands, want) {
+		t.Errorf("listed hold: commands %#v, want %#v: inspect or record a blocker, never release", listed.Commands, want)
+	}
+	if !strings.Contains(listed.Explanation, "Only after that review, and only when nothing holds the issue, release it with 'bd update <id> --status open'") {
+		t.Errorf("listed hold: explanation %q, want the release named for after review only", listed.Explanation)
+	}
+	if want := "Each listed hold reviewed: released, given a recorded blocker, or kept on purpose"; listed.Expected != want {
+		t.Errorf("listed hold: expected %q, want %q", listed.Expected, want)
+	}
+	if !strings.Contains(listed.Observed, "bd-held") {
+		t.Errorf("listed hold: observed %q, want it to name bd-held", listed.Observed)
+	}
+
+	failed := EnrichForAgent(CheckBlockedStatus(ctx, listedSearcher{err: errors.New("server gone")}), FixGate{})
+	if failed.Severity != "degraded" || len(failed.Commands) != 0 || !strings.Contains(failed.Explanation, "server gone") {
+		t.Errorf("failed search: severity %q, commands %#v, explanation %q; want degraded, no commands, the error named", failed.Severity, failed.Commands, failed.Explanation)
 	}
 }

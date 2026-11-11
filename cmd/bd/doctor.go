@@ -190,7 +190,7 @@ Examples:
   bd doctor --output diagnostics.json  # Export diagnostics to file
   bd doctor --check=artifacts           # Show classic artifacts (JSONL, SQLite, cruft dirs)
   bd doctor --check=artifacts --clean  # Delete safe-to-delete artifacts (with confirmation)
-  bd doctor --check=conventions        # Convention drift check (lint, stale, orphans)
+  bd doctor --check=conventions        # Convention drift check (lint, stale, orphans, blocked status)
   bd doctor --check=pollution          # Show potential test issues
   bd doctor --check=pollution --clean  # Delete test issues (with confirmation)
   bd doctor --check=validate         # Data-integrity checks only
@@ -830,6 +830,13 @@ func runDiagnostics(path string) doctorResult {
 	// surfacing it as actionable.
 	labelWhitespaceCheck := convertWithCategory(doctor.CheckLabelWhitespaceWithStore(sharedStore), doctor.CategoryData)
 	result.Checks = append(result.Checks, labelWhitespaceCheck)
+
+	// Check 10e: explicit status='blocked' with no stored dependency hold
+	// (bd-e5d8fd) — in neither bd ready nor bd blocked. Advisory and
+	// warn-only (does not fail OverallOK): a blocked status may be a hold
+	// set on purpose, so only the user can release it.
+	blockedStatusCheck := convertWithCategory(doctor.CheckBlockedStatusWithStore(sharedStore), doctor.CategoryData)
+	result.Checks = append(result.Checks, blockedStatusCheck)
 
 	// Check 11: Claude integration
 	claudeCheck := convertWithCategory(doctor.CheckClaude(path), doctor.CategoryIntegration)

@@ -799,10 +799,21 @@ func warnMoleculeAutoCloseRefusal(refusal string) {
 // printNewlyUnblocked prints bd close --suggest-next's list of the issues the
 // close unblocked, on both routes. The --continue hint follows it, so each
 // issue is named by printedFeedbackID.
+//
+// The list is the dependency graph's answer: a close never changes a
+// dependent's own status. An issue whose explicit status is still 'blocked'
+// (set by bd update or a tracker sync, which the graph cannot tell from a
+// hold that is still meant) stays out of bd ready, so its line says so and
+// names the command that releases it, for the user to run once they have
+// reviewed the hold (bd-e5d8fd).
 func printNewlyUnblocked(unblocked []*types.Issue) {
 	fmt.Printf("\nNewly unblocked:\n")
 	for _, issue := range unblocked {
 		fmt.Printf("  • %s (P%d)\n", printedFeedbackID(issue.ID, issue.Title), issue.Priority)
+		if issue.Status == types.StatusBlocked {
+			id, note := remedy.CommandArg(runtime.GOOS, issue.ID, "<issue-id>")
+			fmt.Printf("    %s still status 'blocked' (bd close leaves it). If ready to release: bd update %s --status open%s\n", ui.RenderWarn("→"), id, note)
+		}
 	}
 }
 

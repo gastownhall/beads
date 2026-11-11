@@ -116,6 +116,49 @@ bd blocked
 Shows every blocked issue and what blocks it. Use after closing an issue
 to see what just unblocked.
 
+### Blocked status vs. dependency blocking
+
+"Blocked" names two different things:
+
+| | Dependency blocking | Status `blocked` |
+|---|---|---|
+| Set by | an open blocker (`bd dep add`) | you (`bd update <id> --status blocked`) or a tracker sync |
+| Cleared by | closing the last blocker | you, after review |
+| Shown by | `bd blocked` | `bd list --status blocked` |
+
+Dependency blocking follows the graph: closing the last blocker clears it.
+Status `blocked` is an explicit hold, set by hand or by a tracker import
+(waiting on a person, a decision, or another tracker), so closing the last
+blocker clears the dependency blocking but leaves the status as it is.
+`bd close --suggest-next` flags each newly unblocked issue still in status
+`blocked`:
+
+```
+Newly unblocked:
+  • bd-8b — Held dependent (P2)
+    → still status 'blocked' (bd close leaves it). If ready to release: bd update bd-8b --status open
+```
+
+When nothing holds it any more, release it:
+
+```bash
+bd update <id> --status open
+```
+
+If a blocker is missing instead, record it with `bd dep add <id> <blocker-id>`.
+
+An issue in status `blocked` whose stored dependency-blocked flag is clear
+appears in neither `bd ready` nor `bd blocked`, unless a
+[cross-repo dependency](#cross-repo-dependencies) still holds it: the stored
+flag does not record those, and `bd blocked` lists the issue. `bd doctor`
+lists these issues in its Blocked Status check, and
+`bd doctor --check=conventions` lists them as `conventions.blocked-status`
+(the form embedded workspaces support). Both are advisory and change no
+status. They read the stored dependency-blocked flag rather than walking the
+graph, so their list is not proof that nothing holds an issue (a cross-repo
+dependency may); if `bd doctor` also reports stale Blocked State flags, run
+`bd recompute-blocked` first, then rerun the check.
+
 ## Visualizing Dependencies
 
 ### Dependency Tree

@@ -142,6 +142,7 @@ var agentEnrichers = map[string]enricher{
 	"Dolt Status":                  enrichDoltStatus,
 	"Dependency Cycles":            enrichDependencyCycles,
 	"Duplicate Issues":             enrichDuplicateIssues,
+	BlockedStatusCheckName:         enrichBlockedStatus,
 	"Test Pollution":               enrichTestPollution,
 	"Orphaned Dependencies":        enrichOrphanedDeps,
 	"Clone-Local FKs":              enrichCloneLocalFKs,
@@ -476,6 +477,35 @@ func enrichDuplicateIssues(dc DoctorCheck) agentEnrichment {
 		commands:    []string{"bd validate", "bd close <duplicate-id>"},
 		sourceFiles: []string{"cmd/bd/doctor/validation.go:CheckDuplicateIssues"},
 	}
+}
+
+// enrichBlockedStatus keeps the Blocked Status advisory advisory for agents
+// (bd-e5d8fd). A hold in status 'blocked' may be meant, and only its owner
+// can tell, so the commands inspect an issue or record its blocker and never
+// release it: the release is named in the explanation, for after that
+// review, as bd doctor --fix also leaves it. Without this, the generic
+// fallback reported the list as degraded and handed the check's Fix text,
+// release included, to the agent as a command.
+func enrichBlockedStatus(dc DoctorCheck) agentEnrichment {
+	e := agentEnrichment{
+		observed:    dc.Message,
+		sourceFiles: []string{"cmd/bd/doctor/blocked_status.go:CheckBlockedStatus"},
+	}
+	if dc.Message == blockedStatusSearchFailed {
+		// The search failed, so nothing was listed: there is no hold to review.
+		e.severity = "degraded"
+		e.explanation = fmt.Sprintf("The Blocked Status check could not search for issues in status 'blocked': %s. Until it can, a hold left in that status goes unreported.", dc.Detail)
+		e.expected = "The check searches the database for issues in status 'blocked' whose stored dependency-blocked flag is clear"
+	} else {
+		e.severity = "advisory"
+		e.explanation = fmt.Sprintf("Issues held in status 'blocked': %s. That status is an explicit hold, set by hand or by a tracker sync; closing a blocker never clears it, so these issues stay out of 'bd ready'. A hold may still be meant (waiting on a person, a decision or a tracker), so each issue needs its owner's review, not a repair. Review it with 'bd show <id>': the check reads the stored dependency-blocked flag, so a cross-repo dependency or a blocker behind a stale flag can still hold it. If a blocker is missing, record it with 'bd dep add <id> <blocker-id>'. Only after that review, and only when nothing holds the issue, release it with 'bd update <id> --status open'; a hold a tracker manages is released in that tracker.", dc.Message)
+		e.expected = "Each listed hold reviewed: released, given a recorded blocker, or kept on purpose"
+		e.commands = []string{"bd show <id>", "bd dep add <id> <blocker-id>"}
+	}
+	if dc.Detail != "" {
+		e.observed += "\n" + dc.Detail
+	}
+	return e
 }
 
 func enrichTestPollution(dc DoctorCheck) agentEnrichment {
