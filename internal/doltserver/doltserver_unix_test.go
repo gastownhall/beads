@@ -261,6 +261,9 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 			want:     []int{102},
 		},
 		{
+			// Whole-word matching cannot prove executable identity: a command
+			// that mentions a whole dolt word before a whole sql-server word
+			// still matches. Kept deliberately; see isDoltSQLServerCommand.
 			name:     "ordered loose false positive",
 			snapshot: "103 S some-tool says dolt then sql-server\n",
 			want:     []int{103},
@@ -274,13 +277,195 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 			snapshot: "105 S Dolt sql-server\n106 S dolt SQL-SERVER\n",
 		},
 		{
-			name:     "zombie and dead states including modifiers are rejected",
-			snapshot: "107 Z dolt sql-server\n108 Z+ dolt sql-server\n109 X dolt sql-server\n110 X< dolt sql-server\n",
+			name:     "zombie states including modifiers are rejected",
+			snapshot: "107 Z dolt sql-server\n108 Z+ dolt sql-server\n",
+		},
+		{
+			// macOS 26 can leave the state code blank, so a live server under
+			// a debugger shows only its modifiers: the traced X, after < when
+			// the process is reniced.
+			name:     "traced modifier X after a blank state keeps a live server",
+			snapshot: "109 X dolt sql-server\n110 X+ dolt sql-server\n119 <X dolt sql-server\n",
+			want:     []int{109, 110, 119},
 		},
 		{
 			name:     "valid state prefix with modifier is accepted",
 			snapshot: "111 S+ dolt sql-server\n",
 			want:     []int{111},
+		},
+		{
+			// GH#7121: macOS 26 prints an empty state column, so the state is
+			// optional and the executable must survive the missing field.
+			name: "empty and present states mix without losing rows",
+			snapshot: "114      /usr/local/bin/dolt sql-server --port 3306\n" +
+				"115 S    /usr/local/bin/dolt sql-server --port 3307\n" +
+				"1466      /Users/u/.nix-profile/bin/dolt sql-server --config /Users/u/.beads/shared-server/dolt-server-config.yaml\n",
+			want: []int{114, 115, 1466},
+		},
+		{
+			name:     "tab-separated empty-state row is accepted",
+			snapshot: "114\tdolt sql-server\n",
+			want:     []int{114},
+		},
+		{
+			// State letters across Linux, macOS and the BSDs, plus the
+			// empty-state macOS form, all leave a live row eligible: a state
+			// is a leading word the command matcher skips.
+			name: "live state codes are accepted across platforms",
+			snapshot: "301 S /usr/local/bin/dolt sql-server\n" +
+				"302 Ss /usr/local/bin/dolt sql-server\n" +
+				"303 Sl /usr/local/bin/dolt sql-server\n" +
+				"304 R+ /usr/local/bin/dolt sql-server\n" +
+				"305 D /usr/local/bin/dolt sql-server\n" +
+				"306 I /usr/local/bin/dolt sql-server\n" +
+				"307 U /usr/local/bin/dolt sql-server\n" +
+				"308 t /usr/local/bin/dolt sql-server\n" +
+				"309 L /usr/local/bin/dolt sql-server\n" +
+				"310 W /usr/local/bin/dolt sql-server\n" +
+				"311 SC /usr/local/bin/dolt sql-server\n" +
+				"312 SJ /usr/local/bin/dolt sql-server\n" +
+				"313 SX /usr/local/bin/dolt sql-server\n" +
+				"314 SsJ /usr/local/bin/dolt sql-server\n" +
+				"315 /usr/local/bin/dolt sql-server\n",
+			want: []int{301, 302, 303, 304, 305, 306, 307, 308, 309, 310, 311, 312, 313, 314, 315},
+		},
+		{
+			// The zombie exclusion reads only the first letter of the field
+			// after the PID, so a Z followed by any modifier, even an
+			// unfamiliar one such as a synthetic Zp, still marks a zombie,
+			// and an X followed by one is still a live traced process.
+			name:     "zombie states are excluded whatever modifiers follow",
+			snapshot: "316 Zs dolt sql-server\n317 Zp dolt sql-server\n318 Xp dolt sql-server\n",
+			want:     []int{318},
+		},
+		{
+			name:     "combined state modifiers keep a live server",
+			snapshot: "121 tl dolt sql-server\n124 Ls+ dolt sql-server\n126 SC+ dolt sql-server\n127 Ss+CJ dolt sql-server\n",
+			want:     []int{121, 124, 126, 127},
+		},
+		{
+			name: "zombie states are rejected for spaced executable path",
+			snapshot: "307 Z /Users/John Smith/bin/dolt sql-server\n" +
+				"308 Z+ /Users/u/Library/Application Support/tools/dolt sql-server\n",
+		},
+		{
+			name: "global flags between executable and subcommand",
+			snapshot: "402 S /usr/local/bin/dolt --prof cpu --prof-path /tmp/pprof sql-server\n" +
+				"403 /usr/local/bin/dolt --prof cpu --prof-path /tmp/pprof sql-server\n",
+			want: []int{402, 403},
+		},
+		{
+			name: "executable path containing a space",
+			snapshot: "404 S /Users/Jane Doe/bin/dolt sql-server\n" +
+				"405 /Users/Jane Doe/bin/dolt sql-server\n",
+			want: []int{404, 405},
+		},
+		{
+			name: "shell stand-in launches dolt by path",
+			snapshot: "406 S /bin/sh /tmp/checkpoint-stand-in/dolt sql-server\n" +
+				"407 /bin/sh /tmp/checkpoint-stand-in/dolt sql-server\n",
+			want: []int{406, 407},
+		},
+		{
+			// Sp is not a state ps prints. Like any state, it is a leading
+			// word the matcher skips, so the later whole dolt word matches.
+			name:     "unfamiliar state-like token is tolerated",
+			snapshot: "408 Sp /usr/local/bin/dolt sql-server\n",
+			want:     []int{408},
+		},
+		{
+			// A leading executable named t is indistinguishable from the
+			// traced state; either reading leaves the dolt match intact.
+			name:     "state-like leading executable is ambiguous but harmless",
+			snapshot: "409 t /usr/local/bin/dolt sql-server\n",
+			want:     []int{409},
+		},
+		{
+			name:     "bare dolt with and without state",
+			snapshot: "410 dolt sql-server\n411 S dolt sql-server\n",
+			want:     []int{410, 411},
+		},
+		{
+			name:     "global flag with an argument before sql-server",
+			snapshot: "412 dolt --data-dir /srv/dolt sql-server --port 3307\n",
+			want:     []int{412},
+		},
+		{
+			name: "absolute executable path containing spaces is recognised",
+			snapshot: "301 S /Users/John Smith/bin/dolt sql-server --config x.yaml\n" +
+				"302 S /Users/u/Library/Application Support/tools/dolt sql-server\n" +
+				"303 Sl /Users/John Smith/bin/dolt --prof cpu sql-server\n",
+			want: []int{301, 302, 303},
+		},
+		{
+			name: "empty state column with spaced executable path",
+			snapshot: "304 /Users/John Smith/bin/dolt sql-server\n" +
+				"305 /Users/u/Library/Application Support/tools/dolt sql-server --port 3307\n" +
+				"306 dolt sql-server\n",
+			want: []int{304, 305, 306},
+		},
+		{
+			// Like the ordered loose false positive above: a program whose
+			// arguments hold a whole dolt (or .../dolt) word before a whole
+			// sql-server word matches. Leading words stay allowed so shell
+			// stand-ins and spaced paths match; see isDoltSQLServerCommand.
+			name: "wrapper commands naming dolt sql-server still match",
+			snapshot: "1468 /usr/bin/python3 -c dolt sql-server\n" +
+				"315 S /usr/bin/cat /opt/bin/dolt sql-server\n" +
+				"316 S /usr/bin/tool --opt /opt/bin/dolt sql-server\n" +
+				"317 /usr/bin/env dolt sql-server\n" +
+				"318 S /usr/bin/python3 -c dolt sql-server\n",
+			want: []int{1468, 315, 316, 317, 318},
+		},
+		{
+			name: "substring mentions in file paths are rejected",
+			snapshot: "501 S /usr/bin/cat /etc/dolt/sql-server.yaml\n" +
+				"502 /usr/bin/cat /etc/dolt/sql-server.yaml\n",
+		},
+		{
+			name: "dolt-helper executable is rejected",
+			snapshot: "503 S /opt/dolt-tools/bin/dolt-helper sql-server\n" +
+				"504 /opt/dolt-tools/bin/dolt-helper sql-server\n",
+		},
+		{
+			name: "container image mention is rejected",
+			snapshot: "505 S docker run dolthub/dolt-sql-server\n" +
+				"506 docker run dolthub/dolt-sql-server\n",
+		},
+		{
+			name: "log file mention is rejected",
+			snapshot: "507 S vim /Users/u/.beads/dolt/sql-server.log\n" +
+				"508 vim /Users/u/.beads/dolt/sql-server.log\n",
+		},
+		{
+			name: "sql-server as a word prefix is rejected",
+			snapshot: "509 S /usr/local/bin/dolt sql-server-proxy\n" +
+				"510 /usr/local/bin/dolt sql-serverless\n",
+		},
+		{
+			name: "reversed order without state is rejected",
+			snapshot: "511 sql-server then dolt\n" +
+				"512 sql-server /usr/local/bin/dolt\n",
+		},
+		{
+			name:     "invalid pids without state are rejected",
+			snapshot: "not-a-pid dolt sql-server\n0 dolt sql-server\n-1 dolt sql-server\n",
+		},
+		{
+			name:     "incomplete dolt-only rows are rejected",
+			snapshot: "513 dolt\n514 S dolt\n",
+		},
+		{
+			name: "spaced path with a different executable name is rejected",
+			snapshot: "309 S /Users/John Smith/bin/dolt-helper sql-server\n" +
+				"310 /Users/John Smith/bin/not-dolt sql-server\n" +
+				"311 S /Users/John Smith/bin/dolt/helper sql-server\n",
+		},
+		{
+			name: "spaced path without a whole sql-server argument is rejected",
+			snapshot: "312 S /Users/John Smith/bin/dolt version\n" +
+				"313 S /Users/John Smith/bin/dolt sql-server.yaml\n" +
+				"314 /Users/John Smith/bin/dolt --config=sql-server\n",
 		},
 		{
 			name: "malformed and invalid rows are rejected",
@@ -290,7 +475,6 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 				"-1 S dolt sql-server\n" +
 				"112\n" +
 				"113 S\n" +
-				"114\tdolt sql-server\n" +
 				"115 S \n",
 		},
 		{
@@ -307,4 +491,58 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestParseDoltProcessPIDsEmptyState covers macOS ps rows whose state column
+// is blank (#7121): the live dolt sql-server must still be recognized.
+func TestParseDoltProcessPIDsEmptyState(t *testing.T) {
+	snapshot := "  114      /usr/local/bin/dolt sql-server --port 3306\n" +
+		"  115 S    /usr/local/bin/dolt sql-server --port 3307\n"
+	want := []int{114, 115}
+	if got := parseDoltProcessPIDs([]byte(snapshot)); !reflect.DeepEqual(got, want) {
+		t.Fatalf("parseDoltProcessPIDs() = %v, want %v", got, want)
+	}
+}
+
+// TestReadDoltProcessPIDsListsLiveServer runs the reader against the system
+// ps: ps must accept the requested columns, and the parser must find a live
+// process in what it prints. A shell blocked on stdin, with dolt and
+// sql-server as whole words in its arguments, stands in for a server. It
+// keeps /bin/sh as its argv[0] (busybox picks its applet by argv[0]), so its
+// command starts with /bin/sh: it shows that ps accepts the columns and that
+// a live process is found, not that a blank state parses. Blank states are
+// covered by the GH#7121 rows in TestParseDoltProcessPIDs.
+func TestReadDoltProcessPIDsListsLiveServer(t *testing.T) {
+	if _, err := exec.LookPath("ps"); err != nil {
+		t.Skip("ps not available")
+	}
+	cmd := exec.Command("/bin/sh", "-c", "read line", "dolt", "sql-server")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(exited)
+	}()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		<-exited
+	})
+
+	pids, err := readDoltProcessPIDs()
+	if err != nil {
+		t.Fatalf("readDoltProcessPIDs() error = %v", err)
+	}
+	for _, pid := range pids {
+		if pid == cmd.Process.Pid {
+			return
+		}
+	}
+	t.Fatalf("readDoltProcessPIDs() = %v, want it to include stand-in PID %d", pids, cmd.Process.Pid)
 }

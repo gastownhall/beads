@@ -12,8 +12,9 @@ import (
 
 // fakeDoltEnv, when set, makes this test binary act as a stand-in `dolt`
 // (see fakeDolt). TestMain checks it before anything else. Tests reach it
-// through a `dolt` shim on PATH that execs this binary; see
-// installFakeDolt in startowned_test.go, which repeats these names.
+// through a `dolt` shim on PATH that execs a `dolt`-named symlink to this
+// binary; see installFakeDolt in startowned_test.go, which repeats these
+// names.
 const (
 	fakeDoltEnv      = "BEADS_TEST_FAKE_DOLT"
 	fakeDoltDelayEnv = "BEADS_TEST_FAKE_DOLT_DELAY"

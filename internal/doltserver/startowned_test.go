@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -296,11 +297,25 @@ func TestAwaitOwnedListener_UnknownOwnershipRequiresReadyLine(t *testing.T) {
 }
 
 // installFakeDolt puts a `dolt` on PATH that runs this test binary as
-// fakeDolt.
+// fakeDolt: a shell shim that execs a `dolt`-named symlink to the binary,
+// kept off PATH. Through the symlink the process list shows a fake server
+// the way it shows one bd launched, `…/dolt sql-server …`, which
+// isDoltSQLServerCommand recognizes; a shim that exec'd the binary itself
+// showed the binary's own name, so IsRunning took the fake's PID as reused
+// and Stop found no server. The PATH entry stays a regular file, so a test
+// can rewrite it in place, the way a package manager replaces dolt.
 func installFakeDolt(t *testing.T) {
 	t.Helper()
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "dolt")
+	if err := os.Symlink(self, target); err != nil {
+		t.Fatal(err)
+	}
 	dir := t.TempDir()
-	shim := "#!/bin/sh\nexec " + shellQuote(os.Args[0]) + " \"$@\"\n"
+	shim := "#!/bin/sh\nexec " + shellQuote(target) + " \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(dir, "dolt"), []byte(shim), 0o700); err != nil { //nolint:gosec // G306: the shim must be executable
 		t.Fatal(err)
 	}
@@ -628,6 +643,42 @@ func TestStop_StopsServerStartedHereWhenProcessListUnreadable(t *testing.T) {
 				t.Errorf("port file = %+v (%v), want the snapshot %+v", got, err, snap)
 			}
 		})
+	}
+}
+
+// TestStop_StopsFakeServerFoundInProcessList checks installFakeDolt's server
+// through the real process list, the way IsRunning and Stop read it: the
+// list must name the server Start launched as a dolt sql-server, so
+// IsRunning reports it and Stop stops it. While the PATH shim exec'd the
+// test binary itself, the list showed the binary's own name, so IsRunning
+// removed the server's files as a reused PID's and Stop returned
+// ErrServerNotRunning.
+func TestStop_StopsFakeServerFoundInProcessList(t *testing.T) {
+	if _, err := exec.LookPath("ps"); err != nil {
+		t.Skip("ps not available")
+	}
+	beadsDir, _ := fakeStartWorkspace(t)
+	state, err := startForTest(t, beadsDir)
+	if err != nil {
+		log, _ := os.ReadFile(logPath(beadsDir))
+		t.Fatalf("Start: %v\nlog:\n%s", err, log)
+	}
+
+	pids, err := readDoltProcessPIDs()
+	if err != nil {
+		t.Fatalf("readDoltProcessPIDs: %v", err)
+	}
+	if !slices.Contains(pids, state.PID) {
+		t.Fatalf("process list names dolt servers %v, want the fake's PID %d among them", pids, state.PID)
+	}
+	if got, err := IsRunning(beadsDir); err != nil || !got.Running || got.PID != state.PID {
+		t.Fatalf("IsRunning = (%+v, %v), want PID %d running", got, err, state.PID)
+	}
+	if err := Stop(beadsDir); err != nil {
+		t.Fatalf("Stop = %v, want the fake server stopped", err)
+	}
+	if isProcessAlive(state.PID) {
+		t.Errorf("fake server PID %d is still running", state.PID)
 	}
 }
 

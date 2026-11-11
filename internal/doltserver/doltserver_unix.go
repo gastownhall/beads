@@ -8,11 +8,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
-	"unicode"
 )
 
 // portConflictHint is the platform-specific command to diagnose port conflicts.
@@ -55,51 +55,60 @@ func readDoltProcessPIDs() ([]int, error) {
 	return parseDoltProcessPIDs(out), nil
 }
 
-// parseDoltProcessPIDs returns matching, non-defunct Dolt server PIDs from a
+// parseDoltProcessPIDs returns matching, non-zombie Dolt server PIDs from a
 // `ps -axo pid=,state=,command=` snapshot. It preserves the source row order.
+// The state column is optional: macOS 26 leaves it empty for many rows
+// (#7121). Every word after the PID goes to isDoltSQLServerCommand, which
+// skips leading words, so a state, present or not, is just a leading word.
 func parseDoltProcessPIDs(snapshot []byte) []int {
 	var pids []int
 	for _, line := range strings.Split(string(snapshot), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+		words := strings.Fields(line)
+		if len(words) < 2 {
 			continue
 		}
 
-		pidText, rest, ok := splitPSField(line)
-		if !ok {
-			continue
-		}
-		state, command, ok := splitPSField(rest)
-		if !ok {
-			continue
-		}
-
-		pid, err := strconv.Atoi(pidText)
+		pid, err := strconv.Atoi(words[0])
 		if err != nil || pid <= 0 {
 			continue
 		}
-		if state[0] == 'Z' || state[0] == 'X' {
+		// Only a zombie is skipped: ps prints Z first for one on every
+		// platform, whatever modifiers follow. X is not skipped: where macOS
+		// 26 leaves the state code blank, a leading X is the traced modifier
+		// of a live process, and Linux's dead state X leaves no command line
+		// to match.
+		if words[1][0] == 'Z' {
 			continue
 		}
 
-		doltIndex := strings.Index(command, "dolt")
-		if doltIndex >= 0 && strings.Contains(command[doltIndex+len("dolt"):], "sql-server") {
+		if isDoltSQLServerCommand(words[1:]) {
 			pids = append(pids, pid)
 		}
 	}
 	return pids
 }
 
-// splitPSField separates the next whitespace-delimited ps field from the
-// remaining text, retaining whitespace within the final command column.
-func splitPSField(line string) (field, rest string, ok bool) {
-	fieldEnd := strings.IndexFunc(line, unicode.IsSpace)
-	if fieldEnd == -1 {
-		return "", "", false
+// isDoltSQLServerCommand reports whether the command words name the dolt
+// executable — the word "dolt" or a path ending in "/dolt" — followed by a
+// whole "sql-server" argument, so global flags between the two are fine. It
+// is deliberately not an exact argv match: leading words are allowed, which
+// keeps the shell stand-ins tests use (`sh …/dolt sql-server`) and
+// executable paths containing spaces recognizable, at the cost of still
+// matching a command that merely mentions both words in order (`some-tool
+// says dolt then sql-server`). A renamed executable (dolt-2.6) no longer
+// qualifies, and neither does a server started through a `dolt` wrapper on
+// PATH that execs a binary with another name (dolt.real): ps shows the
+// command the wrapper exec'd, so the wrapper must exec a binary named dolt or
+// keep argv[0] (bash's `exec -a "$0"`). Windows likewise requires the dolt.exe
+// image name. Every later dolt word's suffix is contained in the first one's,
+// so the first dolt word decides.
+func isDoltSQLServerCommand(words []string) bool {
+	for i, word := range words {
+		if word == "dolt" || strings.HasSuffix(word, "/dolt") {
+			return slices.Contains(words[i+1:], "sql-server")
+		}
 	}
-	field = line[:fieldEnd]
-	rest = strings.TrimLeftFunc(line[fieldEnd:], unicode.IsSpace)
-	return field, rest, rest != ""
+	return false
 }
 
 // isProcessInDir checks if a process's working directory matches the given path.
