@@ -36,10 +36,14 @@ How it works:
      committers and dates, so AS OF reads and dolt_history views at or
      after the newest squashed commit stay valid (an earlier time resolves
      to the initial commit)
-  4. Swaps main branch to the compacted version
-  5. Prunes remote-tracking refs (they would keep the old history alive;
+  4. Catches up commits that reached main while compact ran: when they
+     form one line of non-merge commits, replays them on top the same way,
+     each keeping its message, author, committer and dates, and checks the
+     result against the main it read for the catch-up
+  5. Swaps main branch to the compacted version
+  6. Prunes remote-tracking refs (they would keep the old history alive;
      the next push or fetch re-creates them at the new tip)
-  6. Runs a full Dolt GC (all storage generations) to reclaim the old history
+  7. Runs a full Dolt GC (all storage generations) to reclaim the old history
 
 Compact refuses, and changes nothing, when commit dates are out of history
 order across the cutoff: a recent commit that comes at or before an old commit
@@ -49,8 +53,16 @@ change data. The error names both commits; --force does not override it, and
 the replayed history holds the same committed data main held when compact read
 its history, and aborts without resetting main if it does not. A write that
 reaches main while compact runs is kept, not counted as a difference:
-uncommitted changes stay pending, and a commit that lands meanwhile is kept in
-one follow-up commit.
+uncommitted changes stay pending. Commits that land meanwhile are replayed onto
+the rebuilt history with their messages, authors, committers and dates (not
+their hashes) when they form one line of non-merge commits; otherwise (a merge,
+or a commit compact cannot replay) they are kept in one follow-up commit, and
+so is a commit that lands after compact read main for the catch-up. Moving
+main is not atomic, and the window lasts as long as the catch-up does: a commit
+whose writer was mid-transaction while main moved can be left pending instead
+of committed. When the writers changed different rows, those rows stay
+readable; compact makes no promise for writes to the same rows. Run
+'bd dolt commit' to commit changes left pending.
 
 The GC pass is a full collection: Dolt storage is generational, and a default
 GC never revisits data an earlier GC moved to the old generation. On any store
