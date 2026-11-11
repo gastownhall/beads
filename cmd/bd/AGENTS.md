@@ -92,6 +92,10 @@ no linter enforces it).
 - `TestCommandTreeGolden` and `TestCommandHelpGolden` — no unreviewed change
   to the command tree (every command and flag, hidden ones included) or to
   the pinned `--help` output in `testdata/command_tree/`.
+- `TestServePackagesInitStaysUnderBudget` — no package under `backend/http`,
+  `internal/httpapi` or `internal/httpclient` makes more than 512 allocations
+  or spends more than 10 ms in init, which every bd command pays; do the work
+  on first use (`sync.OnceValue`) instead of raising the budget.
 
 Fresh-workspace command fixtures call `isolateBeadsDirForTest(t)` before
 setup or dispatch and must not use `t.Parallel()`.

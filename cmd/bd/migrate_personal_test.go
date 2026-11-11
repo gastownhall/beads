@@ -1756,10 +1756,8 @@ func TestEmbeddedMigratePersonal_refusesUninitializablePlanningRepos(t *testing.
 		want   string
 		// setup shapes planningBeadsDir, which exists and is empty.
 		setup func(t *testing.T, planningBeadsDir string)
-		// wantStderr, when set, is the refusal's whole stderr, which exits
-		// wantCode, or 1 when wantCode is 0.
+		// wantStderr, when set, is the refusal's whole stderr, which exits 1.
 		wantStderr func(planningDir string) string
-		wantCode   int
 	}{
 		{name: "redirect stub", prefix: "mps", want: "; set routing.contributor to that repository instead", setup: writeRedirect},
 		{name: "redirect stub with metadata", prefix: "mpr", want: "; set routing.contributor to that repository instead", setup: func(t *testing.T, planningBeadsDir string) {
@@ -1803,18 +1801,6 @@ func TestEmbeddedMigratePersonal_refusesUninitializablePlanningRepos(t *testing.
 			writeServerModeWorkspace(t, planningBeadsDir)
 			createDatabase(t, planningBeadsDir, "beads", "")
 		}},
-		// A planning repo in a format this build cannot open is refused as
-		// that, exactly as bd's own admission refuses it, whatever mode its
-		// config selects: the format fence runs before the config is read.
-		{name: "graph format marker beside a server-mode config.yaml", prefix: "mpf", want: "graph-preview-format", setup: func(t *testing.T, planningBeadsDir string) {
-			writeServerModeWorkspace(t, planningBeadsDir)
-			if err := os.WriteFile(filepath.Join(planningBeadsDir, configfile.GraphFormatMarkerFile), nil, 0o600); err != nil {
-				t.Fatalf("write planning graph format marker: %v", err)
-			}
-		}, wantStderr: func(planningDir string) string {
-			formatErr := &configfile.UnsupportedWorkspaceFormatError{BeadsDir: filepath.Join(planningDir, ".beads"), FormatMarker: true}
-			return "Error: " + formatErr.Error() + "\nHint: " + formatErr.Hint() + "\n"
-		}, wantCode: ExitUnsupportedWorkspaceFormat},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1832,87 +1818,20 @@ func TestEmbeddedMigratePersonal_refusesUninitializablePlanningRepos(t *testing.
 			before := planningDirListing(t, planningBeadsDir)
 
 			out := requireMigratePersonalRefused(t, bd, dir, tc.want)
-			if tc.wantCode != ExitUnsupportedWorkspaceFormat {
-				// The format refusal names the planning repo's .beads, as bd's
-				// own admission does there; its wantStderr pins it whole.
-				requireCleanPlanningRefusal(t, out, planningDir)
-			}
+			requireCleanPlanningRefusal(t, out, planningDir)
 			requireStillInProject(t, beadsDir, tc.prefix, personal.ID)
 			if after := planningDirListing(t, planningBeadsDir); !slices.Equal(after, before) {
 				t.Errorf("planning .beads after a refused migrate-personal = %v, want unchanged %v", after, before)
 			}
 			requireInNoPlanningDatabase(t, planningBeadsDir, personal.ID)
 			if tc.wantStderr != nil {
-				wantCode := tc.wantCode
-				if wantCode == 0 {
-					wantCode = 1
-				}
 				stderr, code := migratePersonalStderr(t, bd, dir)
-				if want := tc.wantStderr(planningDir); stderr != want || code != wantCode {
-					t.Errorf("bd migrate-personal --yes exit %d, stderr:\n%s\nwant exit %d, stderr exactly:\n%s", code, stderr, wantCode, want)
+				if want := tc.wantStderr(planningDir); stderr != want || code != 1 {
+					t.Errorf("bd migrate-personal --yes exit %d, stderr:\n%s\nwant exit 1, stderr exactly:\n%s", code, stderr, want)
 				}
 			}
 		})
 	}
-}
-
-// TestEmbeddedMigratePersonal_unsupportedPlanningFormatExit16 verifies that a
-// planning repo in a format this build cannot open is refused the way bd's own
-// admission refuses it: exit ExitUnsupportedWorkspaceFormat, with only the
-// Error and Hint lines on stderr.
-func TestEmbeddedMigratePersonal_unsupportedPlanningFormatExit16(t *testing.T) {
-	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
-		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
-	}
-	t.Parallel()
-
-	bd := buildEmbeddedBD(t)
-	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "mpg")
-	planningDir := setupContributorRouting(t, bd, dir)
-	metadataPath := filepath.Join(planningDir, ".beads", "metadata.json")
-	raw, err := os.ReadFile(metadataPath)
-	if err != nil {
-		t.Fatalf("read planning metadata.json: %v", err)
-	}
-	var doc map[string]any
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		t.Fatalf("parse planning metadata.json: %v", err)
-	}
-	doc["graph_mode"] = "graph"
-	raw, err = json.Marshal(doc)
-	if err != nil {
-		t.Fatalf("encode planning metadata.json: %v", err)
-	}
-	if err := os.WriteFile(metadataPath, raw, 0o600); err != nil {
-		t.Fatalf("write planning metadata.json: %v", err)
-	}
-	personal := bdCreate(t, bd, dir, "Personal issue for a graph-format planning repo")
-
-	out := requireMigratePersonalRefused(t, bd, dir, "use a bd build that supports graph_mode")
-	if strings.Contains(out, "initialize planning repo") {
-		t.Errorf("format refusal carries the initialize prefix:\n%s", out)
-	}
-	cmd := exec.Command(bd, "migrate-personal", "--yes")
-	cmd.Dir = dir
-	cmd.Env = bdEnv(dir)
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	err = cmd.Run()
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) || exitErr.ExitCode() != ExitUnsupportedWorkspaceFormat {
-		t.Errorf("bd migrate-personal --yes err = %v, want exit %d", err, ExitUnsupportedWorkspaceFormat)
-	}
-	// stderr is exactly bd's own admission refusal: the Error and Hint lines,
-	// with no "Error: exit code 16" placeholder from cobra and no usage dump.
-	formatErr := &configfile.UnsupportedWorkspaceFormatError{
-		BeadsDir:  filepath.Join(planningDir, ".beads"),
-		GraphMode: "graph",
-	}
-	wantStderr := "Error: " + formatErr.Error() + "\nHint: " + formatErr.Hint() + "\n"
-	if got := stderr.String(); got != wantStderr {
-		t.Errorf("bd migrate-personal --yes stderr:\n%s\nwant exactly:\n%s", got, wantStderr)
-	}
-	requireStillInProject(t, beadsDir, "mpg", personal.ID)
 }
 
 // TestIsPlanningRepoMirror pins which project copies the phase-0 refusal

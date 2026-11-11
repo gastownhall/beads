@@ -1,0 +1,8 @@
+{
+  "shape": "mc-label-add",
+  "requests": [
+    {"method":"GET","operation_id":"getContext","path":"/v0/beads/context","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-t-l","status":200},
+    {"method":"PATCH","operation_id":"updateIssue","path":"/v0/beads/issues/e2e-t-l","body":["actor","patch"],"status":200}
+  ]
+}

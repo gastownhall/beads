@@ -14,10 +14,11 @@ import (
 
 func TestLexer(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
-		expected []TokenType
-		values   []string
+		name      string
+		input     string
+		expected  []TokenType
+		values    []string
+		positions []int
 	}{
 		{
 			name:     "simple equality",
@@ -213,6 +214,147 @@ func TestLexer(t *testing.T) {
 			expected: []TokenType{TokenIdent, TokenGreater, TokenDuration, TokenEOF},
 			values:   []string{"updated", ">", "+30d", ""},
 		},
+		{
+			name:     "quoted multi-byte value round-trips",
+			input:    `title="größe test"`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "größe test", ""},
+		},
+		{
+			name:     "quoted multi-byte label round-trips",
+			input:    `label="größe"`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"label", "=", "größe", ""},
+		},
+		{
+			name:     "quoted CJK value round-trips",
+			input:    `title="日本語"`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "日本語", ""},
+		},
+		{
+			name:     "single-quoted multi-byte value round-trips",
+			input:    `title='naïve café'`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "naïve café", ""},
+		},
+		{
+			name:     "quoted four-byte rune round-trips",
+			input:    `title="🐛 bug"`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "🐛 bug", ""},
+		},
+		{
+			name:     "quoted literal replacement character round-trips",
+			input:    "title=\"a\uFFFDb\"",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "a\uFFFDb", ""},
+		},
+		// Malformed UTF-8 inside quotes is copied byte for byte, not
+		// replaced with U+FFFD, so a query never silently becomes one for
+		// different (valid) text.
+		{
+			name:     "invalid byte in a quoted value passes through",
+			input:    "title=\"a\xffb\"",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "a\xffb", ""},
+		},
+		{
+			name:      "truncated lead byte in a quoted value passes through",
+			input:     "label=\"a\xc3\" AND x=1",
+			expected:  []TokenType{TokenIdent, TokenEquals, TokenString, TokenAnd, TokenIdent, TokenEquals, TokenNumber, TokenEOF},
+			values:    []string{"label", "=", "a\xc3", "AND", "x", "=", "1", ""},
+			positions: []int{0, 5, 6, 11, 15, 16, 17, 18},
+		},
+		{
+			name:     "unknown escape before an invalid byte keeps the byte",
+			input:    "title=\"\\\xff\"",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "\xff", ""},
+		},
+		{
+			name:     "unknown escape keeps a raw byte",
+			input:    "label=\"a\\\xffb\"",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"label", "=", "a\xffb", ""},
+		},
+		{
+			name:     "unknown escape before a multi-byte rune",
+			input:    `title="\é"`,
+			expected: []TokenType{TokenIdent, TokenEquals, TokenString, TokenEOF},
+			values:   []string{"title", "=", "é", ""},
+		},
+		{
+			name:     "bare multi-byte value is one identifier",
+			input:    "title=größe",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"title", "=", "größe", ""},
+		},
+		{
+			name:     "bare value with a multi-byte letter",
+			input:    "label=fête",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"label", "=", "fête", ""},
+		},
+		{
+			name:     "bare value starting with a multi-byte letter",
+			input:    "label=été",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"label", "=", "été", ""},
+		},
+		{
+			name:     "bare CJK value is one identifier",
+			input:    "label=日本語",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"label", "=", "日本語", ""},
+		},
+		{
+			name:     "bare non-ASCII digit is a number",
+			input:    "label=٣",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenNumber, TokenEOF},
+			values:   []string{"label", "=", "٣", ""},
+		},
+		{
+			name:     "no-break space after a bare multi-byte value",
+			input:    "label=fête\u00a0AND status=open",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"label", "=", "fête", "AND", "status", "=", "open", ""},
+		},
+		{
+			name:     "ideographic space separates tokens",
+			input:    "status=open\u3000AND\u3000label=x",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"status", "=", "open", "AND", "label", "=", "x", ""},
+		},
+		// The duration lookahead scans by decoded rune, so a multi-byte rune
+		// right after a number ends the unit run or joins it whole instead of
+		// being read byte by byte (#7539).
+		{
+			name:     "no-break space after a duration keeps the duration",
+			input:    "updated>7d\u00a0AND status=open",
+			expected: []TokenType{TokenIdent, TokenGreater, TokenDuration, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"updated", ">", "7d", "AND", "status", "=", "open", ""},
+		},
+		{
+			name:     "multi-byte rune after a duration prefix keeps it one identifier",
+			input:    "label=7dש",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"label", "=", "7dש", ""},
+		},
+		{
+			name:      "positions after a multi-byte value are byte offsets",
+			input:     "label=größe AND status=open",
+			expected:  []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:    []string{"label", "=", "größe", "AND", "status", "=", "open", ""},
+			positions: []int{0, 5, 6, 14, 18, 24, 25, 29},
+		},
+		{
+			name:      "positions after a quoted multi-byte value are byte offsets",
+			input:     "label=\"f\u00eate\" AND status=open",
+			expected:  []TokenType{TokenIdent, TokenEquals, TokenString, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:    []string{"label", "=", "f\u00eate", "AND", "status", "=", "open", ""},
+			positions: []int{0, 5, 6, 14, 18, 24, 25, 29},
+		},
 	}
 
 	for _, tt := range tests {
@@ -234,6 +376,9 @@ func TestLexer(t *testing.T) {
 				if tt.values != nil && tok.Value != tt.values[i] {
 					t.Errorf("token %d: got value %q, want %q", i, tok.Value, tt.values[i])
 				}
+				if tt.positions != nil && tok.Pos != tt.positions[i] {
+					t.Errorf("token %d: got pos %d, want %d", i, tok.Pos, tt.positions[i])
+				}
 			}
 		})
 	}
@@ -246,6 +391,8 @@ func TestLexerErrors(t *testing.T) {
 	}{
 		{"unterminated string", `title="hello`},
 		{"invalid character", "status@open"},
+		{"symbol is not an identifier character", "label=🐛"},
+		{"invalid UTF-8 in a bare value", "label=gr\xf6\xdfe"},
 	}
 
 	for _, tt := range tests {
@@ -254,6 +401,31 @@ func TestLexerErrors(t *testing.T) {
 			_, err := lexer.Tokenize()
 			if err == nil {
 				t.Error("expected error, got nil")
+			}
+		})
+	}
+}
+
+// TestLexerErrorMessages pins that a lexical error names the decoded rune at
+// its byte offset, not the raw input byte (#7539).
+func TestLexerErrorMessages(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{"multi-byte symbol in a bare value", "label=a€b", "unexpected character '€' at position 7"},
+		{"invalid byte in a bare value", "label=gr\xf6\xdfe", "unexpected character '\ufffd' at position 8"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewLexer(tt.input).Tokenize()
+			if err == nil {
+				t.Fatalf("Tokenize(%q) expected an error, got nil", tt.input)
+			}
+			if err.Error() != tt.expected {
+				t.Errorf("Tokenize(%q) error = %q, want %q", tt.input, err.Error(), tt.expected)
 			}
 		})
 	}
@@ -304,6 +476,16 @@ func TestParser(t *testing.T) {
 			name:     "NOT with parentheses",
 			input:    "NOT (status=closed OR status=deferred)",
 			expected: "NOT (status=closed OR status=deferred)",
+		},
+		{
+			name:     "quoted multi-byte label keeps its value",
+			input:    `label="größe"`,
+			expected: "label=größe",
+		},
+		{
+			name:     "single-quoted multi-byte title keeps its value",
+			input:    `title='naïve café'`,
+			expected: "title=naïve café",
 		},
 	}
 
@@ -437,6 +619,34 @@ func TestEvaluatorSimpleQueries(t *testing.T) {
 			query: "label=none",
 			expectFilter: func(f *types.IssueFilter) bool {
 				return f.NoLabels
+			},
+		},
+		{
+			name:  "quoted multi-byte label",
+			query: `label="größe"`,
+			expectFilter: func(f *types.IssueFilter) bool {
+				return len(f.Labels) == 1 && f.Labels[0] == "größe"
+			},
+		},
+		{
+			name:  "bare multi-byte label",
+			query: "label=größe",
+			expectFilter: func(f *types.IssueFilter) bool {
+				return len(f.Labels) == 1 && f.Labels[0] == "größe"
+			},
+		},
+		{
+			name:  "bare multi-byte title",
+			query: "title=fête",
+			expectFilter: func(f *types.IssueFilter) bool {
+				return f.TitleContains == "fête"
+			},
+		},
+		{
+			name:  "title contains a multi-byte value",
+			query: `title="größe test"`,
+			expectFilter: func(f *types.IssueFilter) bool {
+				return f.TitleContains == "größe test"
 			},
 		},
 		{
@@ -1308,5 +1518,35 @@ func TestMetadataPredicateEvaluation(t *testing.T) {
 	}
 	if !result.Predicate(issueClosed) {
 		t.Error("predicate should match closed issue via OR")
+	}
+}
+
+// TestLexerNonASCIIValues pins that non-ASCII query values reach the parser
+// unchanged, both quoted and bare (GitHub #7539).
+func TestLexerNonASCIIValues(t *testing.T) {
+	tests := []struct {
+		input string
+		want  []Token
+	}{
+		{`label="größe"`, []Token{{TokenIdent, "label", 0}, {TokenEquals, "=", 5}, {TokenString, "größe", 6}, {TokenEOF, "", 15}}},
+		{`title='日本語'`, []Token{{TokenIdent, "title", 0}, {TokenEquals, "=", 5}, {TokenString, "日本語", 6}, {TokenEOF, "", 17}}},
+		{`label=größe`, []Token{{TokenIdent, "label", 0}, {TokenEquals, "=", 5}, {TokenIdent, "größe", 6}, {TokenEOF, "", 13}}},
+		{`label=fête`, []Token{{TokenIdent, "label", 0}, {TokenEquals, "=", 5}, {TokenIdent, "fête", 6}, {TokenEOF, "", 11}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			tokens, err := NewLexer(tt.input).Tokenize()
+			if err != nil {
+				t.Fatalf("Tokenize(%q) error = %v", tt.input, err)
+			}
+			if len(tokens) != len(tt.want) {
+				t.Fatalf("Tokenize(%q) = %+v, want %+v", tt.input, tokens, tt.want)
+			}
+			for i := range tokens {
+				if tokens[i] != tt.want[i] {
+					t.Errorf("Tokenize(%q)[%d] = %+v (value bytes % x), want %+v", tt.input, i, tokens[i], tokens[i].Value, tt.want[i])
+				}
+			}
+		})
 	}
 }
