@@ -105,6 +105,85 @@ dep add tb-3 tb-2
 	}
 }
 
+// TestBatch_DepAddAliasGatesReadyWork pins bd-3073gm (GH#5585) on the classic
+// backend: a `dep add` line spelling the documented blocked-by or depends-on
+// alias stores the canonical blocks edge, which keeps its source out of ready
+// work while the target is open.
+func TestBatch_DepAddAliasGatesReadyWork(t *testing.T) {
+	tmpDir := t.TempDir()
+	st := newTestStoreWithPrefix(t, filepath.Join(tmpDir, ".beads", "beads.db"), "tba")
+	ctx := context.Background()
+
+	seedBatchTestIssues(t, ctx, st, "tba-1", "tba-2", "tba-3")
+
+	script := `dep add tba-1 tba-3 blocked-by
+dep add tba-2 tba-3 depends-on
+`
+	if err := runBatchScriptInTx(t, ctx, st, script); err != nil {
+		t.Fatalf("batch run: %v", err)
+	}
+
+	for _, from := range []string{"tba-1", "tba-2"} {
+		recs, err := st.GetDependencyRecords(ctx, from)
+		if err != nil {
+			t.Fatalf("GetDependencyRecords %s: %v", from, err)
+		}
+		if len(recs) != 1 || recs[0].DependsOnID != "tba-3" || recs[0].Type != types.DepBlocks {
+			for _, r := range recs {
+				t.Logf("%s -> %s (%s)", r.IssueID, r.DependsOnID, r.Type)
+			}
+			t.Errorf("%s has %d dependencies, want one blocks edge to tba-3", from, len(recs))
+		}
+	}
+	ready, err := st.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	for _, issue := range ready {
+		if issue.ID == "tba-1" || issue.ID == "tba-2" {
+			t.Errorf("%s is ready while its alias-spelled blocker tba-3 is open", issue.ID)
+		}
+	}
+}
+
+// TestBatch_DepAddUnknownTypeRollsBack pins bd-3073gm (GH#5585): a `dep add`
+// line naming a type outside `bd dep add`'s vocabulary (a typo, or a custom
+// type) is refused with the accepted types, and the earlier lines of the
+// batch are rolled back with it.
+func TestBatch_DepAddUnknownTypeRollsBack(t *testing.T) {
+	for _, bad := range []string{"blcoks", "owned-by"} {
+		t.Run(bad, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			st := newTestStoreWithPrefix(t, filepath.Join(tmpDir, ".beads", "beads.db"), "tbu")
+			ctx := context.Background()
+
+			seedBatchTestIssues(t, ctx, st, "tbu-1", "tbu-2")
+
+			err := runBatchScriptInTx(t, ctx, st, "update tbu-1 priority=0\ndep add tbu-1 tbu-2 "+bad+"\n")
+			if err == nil {
+				t.Fatalf("batch with dep add type %q succeeded, want a refusal", bad)
+			}
+			if !strings.Contains(err.Error(), `"`+bad+`"`) || !strings.Contains(err.Error(), "valid types:") {
+				t.Errorf("refusal = %v, want it to name %q and the accepted types", err, bad)
+			}
+			got, gerr := st.GetIssue(ctx, "tbu-1")
+			if gerr != nil {
+				t.Fatalf("GetIssue tbu-1: %v", gerr)
+			}
+			if got.Priority != 2 {
+				t.Errorf("tbu-1 priority = %d, want 2: the refused batch must roll back", got.Priority)
+			}
+			recs, rerr := st.GetDependencyRecords(ctx, "tbu-1")
+			if rerr != nil {
+				t.Fatalf("GetDependencyRecords tbu-1: %v", rerr)
+			}
+			for _, r := range recs {
+				t.Errorf("refused batch left %s -> %s (%s)", r.IssueID, r.DependsOnID, r.Type)
+			}
+		})
+	}
+}
+
 // TestBatch_RollbackOnError verifies that if any op in the batch fails the
 // entire transaction is rolled back and earlier writes are not visible.
 //

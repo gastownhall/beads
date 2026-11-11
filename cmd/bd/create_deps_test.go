@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -173,6 +175,167 @@ func TestCanonicalDependencyType(t *testing.T) {
 	}
 }
 
+// TestParseFormDeps pins the create form's dependency parsing (bd-3073gm,
+// GH#5560): the --deps vocabulary and alias canonicalization, the form's own
+// direction (the new issue is always the source, blocks:<id> included) pinned
+// before dedupe, and the refusals the form's field and a direct call share.
+func TestParseFormDeps(t *testing.T) {
+	blocksB := domain.DependencySpec{Type: types.DepBlocks, TargetID: "bd-b"}
+	tests := []struct {
+		name    string
+		in      []string
+		want    []domain.DependencySpec
+		wantErr string
+	}{
+		{name: "no entries", in: nil, want: nil},
+		{name: "blank entries are skipped", in: []string{" ", ""}, want: nil},
+		{name: "bare id blocks the new issue", in: []string{"bd-b"}, want: []domain.DependencySpec{blocksB}},
+		{name: "explicit blocks keeps the form's direction", in: []string{" blocks:bd-b "}, want: []domain.DependencySpec{blocksB}},
+		{name: "blocked-by alias", in: []string{"blocked-by:bd-b"}, want: []domain.DependencySpec{blocksB}},
+		{name: "depends-on alias", in: []string{"depends-on:bd-b"}, want: []domain.DependencySpec{blocksB}},
+		{
+			name: "other types name their relationship",
+			in:   []string{"discovered-from:bd-a", "related:bd-b"},
+			want: []domain.DependencySpec{
+				{Type: types.DepDiscoveredFrom, TargetID: "bd-a"},
+				{Type: types.DepRelated, TargetID: "bd-b"},
+			},
+		},
+		{name: "blocks and an alias are one edge", in: []string{"blocks:bd-b", "depends-on:bd-b"}, want: []domain.DependencySpec{blocksB}},
+		{name: "both aliases are one edge", in: []string{"blocked-by:bd-b", "depends-on:bd-b"}, want: []domain.DependencySpec{blocksB}},
+		{name: "a bare id and an alias are one edge", in: []string{"bd-b", "blocked-by:bd-b"}, want: []domain.DependencySpec{blocksB}},
+		{name: "an identical repeat is one edge", in: []string{"related:bd-b", "related:bd-b"}, want: []domain.DependencySpec{{Type: types.DepRelated, TargetID: "bd-b"}}},
+		{name: "every blocking spelling is one edge", in: []string{"bd-b", "blocked-by:bd-b", "blocks:bd-b", "depends-on:bd-b"}, want: []domain.DependencySpec{blocksB}},
+		{name: "unknown type", in: []string{"frobs:bd-b"}, wantErr: `unknown dependency type "frobs"`},
+		{name: "custom type", in: []string{"owned-by:bd-b"}, wantErr: `unknown dependency type "owned-by"`},
+		{name: "empty type", in: []string{":bd-b"}, wantErr: `invalid dependency type ""`},
+		{name: "typed entry without a target", in: []string{"blocks:"}, wantErr: `dependency "blocks:" names no issue`},
+		{name: "two types on one target", in: []string{"related:bd-b", "blocks:bd-b"}, wantErr: `cannot attach both "related" and "blocks" to the same target "bd-b"`},
+		{name: "two types on one target, blocks first", in: []string{"blocks:bd-b", "related:bd-b"}, wantErr: `cannot attach both "blocks" and "related" to the same target "bd-b"`},
+		{name: "an alias and another type on one target", in: []string{"discovered-from:bd-b", "blocked-by:bd-b"}, wantErr: `cannot attach both "discovered-from" and "blocks"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseFormDeps(tt.in)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("parseFormDeps(%q) = %+v, %v; want an error containing %q", tt.in, got, err, tt.wantErr)
+				}
+				if strings.Contains(err.Error(), "--deps") {
+					t.Errorf("parseFormDeps(%q) error %q names the --deps flag the form does not have", tt.in, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseFormDeps(%q): %v", tt.in, err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("parseFormDeps(%q) = %+v, want %+v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestFormDependencyValidation drives the create form's real Dependencies
+// field (bd-3073gm): input the form would refuse is reported on the field when
+// it loses focus, with the typed text left in place, and the accessible
+// prompt re-asks until the entry is corrected.
+func TestFormDependencyValidation(t *testing.T) {
+	for _, tt := range []struct {
+		value   string
+		wantErr string
+	}{
+		{value: "bd-a, blocks:bd-b", wantErr: ""},
+		{value: "blocked-by:bd-b, depends-on:bd-b, blocks:bd-b", wantErr: ""},
+		{value: "", wantErr: ""},
+		{value: "bd-a, frobs:bd-b", wantErr: `unknown dependency type "frobs"`},
+		{value: "blocks:", wantErr: "names no issue"},
+		{value: "related:bd-b, blocks:bd-b", wantErr: "cannot attach both"},
+	} {
+		value := tt.value
+		field := newFormDepsInput(&value)
+		field.Blur()
+		err := field.Error()
+		switch {
+		case tt.wantErr == "" && err != nil:
+			t.Errorf("Dependencies field %q: %v, want it accepted", tt.value, err)
+		case tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)):
+			t.Errorf("Dependencies field %q error = %v, want %q", tt.value, err, tt.wantErr)
+		}
+		if value != tt.value {
+			t.Errorf("Dependencies field %q holds %q after validation, want the entered text kept", tt.value, value)
+		}
+	}
+
+	var value string
+	var out bytes.Buffer
+	field := newFormDepsInput(&value)
+	in := strings.NewReader("related:bd-b, blocks:bd-b\nrelated:bd-b, blocked-by:bd-c\n")
+	if err := field.RunAccessible(&out, in); err != nil {
+		t.Fatalf("RunAccessible: %v", err)
+	}
+	if !strings.Contains(out.String(), "cannot attach both") {
+		t.Errorf("accessible prompt output %q does not report the conflict", out.String())
+	}
+	if value != "related:bd-b, blocked-by:bd-c" {
+		t.Errorf("Dependencies field = %q, want the corrected entry", value)
+	}
+}
+
+// TestLinkDependencyType pins the type bd link stores on every route
+// (bd-3073gm, GH#5585): the two documented aliases become the gating
+// "blocks", any other type a workspace spells is kept exactly as given, and
+// only a structurally invalid type is refused.
+func TestLinkDependencyType(t *testing.T) {
+	atLimit := strings.Repeat("x", types.MaxDependencyTypeLen)
+	tests := []struct {
+		in      string
+		want    types.DependencyType
+		wantErr bool
+	}{
+		{in: "blocked-by", want: types.DepBlocks},
+		{in: "depends-on", want: types.DepBlocks},
+		{in: "blocks", want: types.DepBlocks},
+		{in: "related", want: types.DepRelated},
+		{in: "owned-by", want: "owned-by"},
+		{in: "Blocked-By", want: "Blocked-By"},
+		{in: atLimit, want: types.DependencyType(atLimit)},
+		{in: atLimit + "x", wantErr: true},
+		{in: "", wantErr: true},
+	}
+	for _, tt := range tests {
+		got, err := linkDependencyType(tt.in)
+		if tt.wantErr {
+			if err == nil || !strings.Contains(err.Error(), "invalid dependency type") {
+				t.Errorf("linkDependencyType(%q) = %q, %v; want the invalid-type refusal", tt.in, got, err)
+			}
+			continue
+		}
+		if err != nil || got != tt.want {
+			t.Errorf("linkDependencyType(%q) = %q, %v; want %q", tt.in, got, err, tt.want)
+		}
+	}
+}
+
+// TestLinkTypeFlagUsage pins bd link's rendered --type help (bd-3073gm): it
+// lists the built-ins and both aliases from the list validateDependencyType
+// checks, so it cannot drift from the code, and states the custom-type
+// allowance, its length limit and that a custom type never gates ready work.
+func TestLinkTypeFlagUsage(t *testing.T) {
+	usage := linkCmd.Flags().FlagUsages()
+	for _, want := range []string{
+		createDepsAcceptedTypeList(),
+		"blocked-by and depends-on are stored as blocks",
+		"non-empty custom type",
+		fmt.Sprintf("at most %d characters", types.MaxDependencyTypeLen),
+		"does not gate ready work",
+	} {
+		if !strings.Contains(usage, want) {
+			t.Errorf("bd link --help --type usage does not contain %q:\n%s", want, usage)
+		}
+	}
+}
+
 // TestValidateDependencyType covers the shared validity/well-known-ness gate
 // used by both `bd create --deps` and `bd dep add --type`. Per the intent
 // documented on types.WellKnownDependencyTypes, both commands reject
@@ -264,24 +427,26 @@ func TestBuildWaitsFor(t *testing.T) {
 	})
 }
 
-func TestDiscoveredFromParent(t *testing.T) {
+func TestDiscoveredFromParentSpec(t *testing.T) {
+	spec := func(depType types.DependencyType, target string) domain.DependencySpec {
+		return domain.DependencySpec{Type: depType, TargetID: target}
+	}
 	tests := []struct {
 		name string
-		in   []string
+		in   []domain.DependencySpec
 		want string
 	}{
-		{"none", []string{"bd-1", "blocks:bd-2"}, ""},
-		{"present", []string{"bd-1", "discovered-from:bd-99", "blocks:bd-2"}, "bd-99"},
-		{"first wins", []string{"discovered-from:bd-7", "discovered-from:bd-8"}, "bd-7"},
-		{"empty target ignored", []string{"discovered-from:", "discovered-from:bd-9"}, "bd-9"},
-		{"whitespace trimmed", []string{"  discovered-from: bd-5 "}, "bd-5"},
+		{"none", []domain.DependencySpec{spec(types.DepBlocks, "bd-1"), spec(types.DepRelated, "bd-2")}, ""},
+		{"present", []domain.DependencySpec{spec(types.DepBlocks, "bd-1"), spec(types.DepDiscoveredFrom, "bd-99"), spec(types.DepBlocks, "bd-2")}, "bd-99"},
+		{"first wins", []domain.DependencySpec{spec(types.DepDiscoveredFrom, "bd-7"), spec(types.DepDiscoveredFrom, "bd-8")}, "bd-7"},
+		{"empty target ignored", []domain.DependencySpec{spec(types.DepDiscoveredFrom, ""), spec(types.DepDiscoveredFrom, "bd-9")}, "bd-9"},
 		{"empty input", nil, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := discoveredFromParent(tt.in)
+			got := discoveredFromParentSpec(tt.in)
 			if got != tt.want {
-				t.Errorf("discoveredFromParent(%v) = %q, want %q", tt.in, got, tt.want)
+				t.Errorf("discoveredFromParentSpec(%v) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}

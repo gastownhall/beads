@@ -55,7 +55,9 @@ Grammar (one command per line):
   #comment  (blank lines and '# ...' comments are ignored)
 
 Supported 'update' keys: status, priority, title, assignee, force
-Supported dependency types: see 'bd dep add --help' (default: blocks)
+Supported dependency types: the built-ins 'bd dep add --type' accepts (see
+'bd dep add --help'; default: blocks). The blocked-by and depends-on aliases
+are stored as blocks; any other type is refused and rolls the batch back.
 
 'force' is not a field. An update whose status moves the issue into closed
 (or a configured done status) is refused when it still has open children or
@@ -460,9 +462,12 @@ func batchDepAddEdge(args []string) (*types.Dependency, error) {
 	if len(args) >= 3 {
 		depType = args[2]
 	}
-	dt := types.DependencyType(depType)
-	if !dt.IsValid() {
-		return nil, fmt.Errorf("dep add: invalid dependency type %q", depType)
+	// A line takes `bd dep add --type`'s vocabulary (GH#5585): the documented
+	// aliases store as the canonical blocks type that ready/blocked gating
+	// matches, and a type outside the built-ins is refused, not stored.
+	dt := canonicalDependencyType(types.DependencyType(depType))
+	if err := validateDependencyType(dt); err != nil {
+		return nil, fmt.Errorf("dep add: %w", err)
 	}
 	if err := publicops.CheckDottedChildDependency(from, to, dt); err != nil {
 		return nil, err

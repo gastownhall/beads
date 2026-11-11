@@ -157,6 +157,7 @@
 34 16 TestProxiedServerUpdateHooks
 34 16 TestServerModeReadRefusesASchemaItsReadsCannotQuery
 
+34 17 TestProxiedServerBatchDepAddCanonicalizesAliasesAndRefusesUnknownTypes
 34 17 TestProxiedServerDep
 34 17 TestProxiedServerMultiStatementSQL
 34 17 TestProxiedServerOrphans

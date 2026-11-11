@@ -82,7 +82,7 @@ func dedupeDepSpecs(specs []domain.DependencySpec) ([]domain.DependencySpec, err
 			out = append(out, s)
 		case prev != s.Type:
 			return nil, fmt.Errorf(
-				"--deps cannot attach both %q and %q to the same target %q: a target can only carry one dependency type at a time. Pick one type, or open a separate issue for the second relationship (GH#4626)",
+				"cannot attach both %q and %q to the same target %q: a target can only carry one dependency type at a time. Pick one type, or open a separate issue for the second relationship (GH#4626)",
 				prev, s.Type, s.TargetID,
 			)
 		default:
@@ -213,30 +213,12 @@ func buildWaitsFor(spawnerID, gate string, gateExplicit bool) (*domain.WaitsForS
 	return &domain.WaitsForSpec{SpawnerID: spawnerID, Gate: gate}, nil
 }
 
-func discoveredFromParent(deps []string) string {
-	for _, raw := range deps {
-		raw = strings.TrimSpace(raw)
-		if raw == "" || !strings.Contains(raw, ":") {
-			continue
-		}
-		parts := strings.SplitN(raw, ":", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		depType := types.DependencyType(strings.TrimSpace(parts[0]))
-		target := strings.TrimSpace(parts[1])
-		if depType == types.DepDiscoveredFrom && target != "" {
-			return target
-		}
-	}
-	return ""
-}
-
-// discoveredFromParentSpec is discoveredFromParent's counterpart for callers
-// that already ran deps through parseDepSpecs. It reuses the canonical
-// parsed/normalized specs instead of re-deriving type:target parsing from
-// raw strings a second time, so it can't drift from parseDepSpec's rules
-// (e.g. the depends-on/blocked-by aliasing).
+// discoveredFromParentSpec returns the target of the first discovered-from
+// spec that names one, or "" if none does. Its callers have already parsed
+// deps with parseDepSpec, so it reads those canonical parsed/normalized specs
+// instead of re-deriving type:target parsing from raw strings a second time,
+// and can't drift from parseDepSpec's rules (e.g. the depends-on/blocked-by
+// aliasing).
 func discoveredFromParentSpec(specs []domain.DependencySpec) string {
 	for _, s := range specs {
 		if s.Type == types.DepDiscoveredFrom && s.TargetID != "" {
