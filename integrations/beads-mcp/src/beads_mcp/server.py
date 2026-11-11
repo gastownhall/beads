@@ -631,7 +631,10 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
 Actions:
 - set: Set the workspace root directory (default when workspace_root provided)
 - show: Show current workspace context and database path (default when no args)
-- init: Initialize beads in the current workspace directory""",
+- init: Initialize beads in the current workspace directory. It fails when git origin
+  already has Dolt issue history and no Dolt remote is configured: bd init does not
+  adopt that history without consent. Run `bd init --yes` (adopt it) or
+  `bd init --no-adopt` (fresh database) in a shell instead.""",
 )
 async def context(
     action: str | None = None,

@@ -16,7 +16,11 @@ package main
 // values and other friction-bearing arguments live in `bd help init-safety`
 // and `docs/recovery/init-safety.md` only.
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/steveyegge/beads/internal/remedy"
+)
 
 // Exit codes for init-safety refusals. Stable values so CI scripts can
 // branch on them without grep'ing stderr.
@@ -99,6 +103,25 @@ const (
 	// caller). Skip bootstrap; wire the remote so the caller can
 	// force-push local history on next operation.
 	ActionProceedWithDivergence
+
+	// ActionAskAdoption — the remote was derived from git origin, has Dolt
+	// history, no override was passed, and no consent was given ahead of
+	// time, but the caller can ask. The caller prompts before any workspace
+	// write; only an affirmative answer bootstraps (GH#6099).
+	ActionAskAdoption
+
+	// ActionRefuseAdoption — as ActionAskAdoption, but the caller cannot ask
+	// (non-interactive, JSON, or past the point where a prompt is allowed).
+	// Adoption is a consent decision, so the absence of consent refuses with
+	// exit 1 (GH#6099, the inbound twin of #5068).
+	ActionRefuseAdoption
+
+	// ActionSkipDerivedRemote — the remote would have been derived from git
+	// origin, but the caller opted out (--no-adopt / BD_NO_REMOTE_ADOPT).
+	// Callers apply initSkipsDerivedRemote before resolving or probing
+	// origin, so they never reach this; it is the matrix's statement that
+	// the opt-out outranks every remote-data and override column.
+	ActionSkipDerivedRemote
 )
 
 // RemoteSafetyInput is the minimal input to CheckRemoteSafety. Pure
@@ -134,6 +157,31 @@ type RemoteSafetyInput struct {
 	// token that WAS supplied is always validated regardless of this field:
 	// the caller's prompt only fires when no token was given (#6480).
 	IsInteractive bool
+
+	// Inbound adoption of a git-origin-derived remote (GH#6099). These
+	// fields matter only when DerivedFromGitOrigin is true. An explicit
+	// --remote or a configured sync.remote bootstraps without consent, as
+	// before. That includes a sync.remote committed to a cloned repository's
+	// .beads/config.yaml, which a plain bd init writes: gating it is a
+	// separate policy decision, not made here.
+	//
+	// DerivedFromGitOrigin reports that the URL came from git origin, not
+	// from --remote or sync.remote.
+	DerivedFromGitOrigin bool
+	// RemoteProbeUnknown reports that the refs/dolt/data probe failed.
+	// RemoteHasDoltData is then true (fail closed for the override guards),
+	// but a plain init keeps its warn-and-fresh fallback instead of asking
+	// to adopt history nobody could see.
+	RemoteProbeUnknown bool
+	// AdoptionDisabled is --no-adopt or BD_NO_REMOTE_ADOPT. It beats every
+	// other input, including AdoptionConsented.
+	AdoptionDisabled bool
+	// AdoptionConsented is --yes, or an affirmative answer to the early
+	// prompt for this exact URL.
+	AdoptionConsented bool
+	// AdoptionInteractive reports that the caller may prompt for adoption
+	// consent now: interactive, not JSON, and before any workspace write.
+	AdoptionInteractive bool
 }
 
 // RemoteSafetyDecision is the action + human-readable reason. UserMessage
@@ -151,6 +199,12 @@ type RemoteSafetyDecision struct {
 // function — never add a new `&& !someFlag` at the call site. See the
 // guard matrix test in init_safety_test.go.
 func CheckRemoteSafety(in RemoteSafetyInput) RemoteSafetyDecision {
+	// The opt-out precedes every other column: a skipped derived remote is
+	// not probed, not cloned and not wired, whatever it holds.
+	if in.DerivedFromGitOrigin && in.AdoptionDisabled {
+		return RemoteSafetyDecision{Action: ActionSkipDerivedRemote, Reason: "derived-remote-opted-out"}
+	}
+
 	// No remote data → no cross-boundary concern. Proceed.
 	if !in.RemoteHasDoltData {
 		return RemoteSafetyDecision{Action: ActionNoRemoteData, Reason: "no-remote-data"}
@@ -164,8 +218,30 @@ func CheckRemoteSafety(in RemoteSafetyInput) RemoteSafetyDecision {
 	userOverride := in.Force || in.ReinitLocal || in.FromJSONL || in.DiscardRemote
 
 	// Remote has data, user did not override anything. Bootstrap is the
-	// safe adoption path — this is the existing correct behavior.
+	// adoption path. A named remote (--remote, sync.remote) bootstraps as
+	// before; one derived from git origin needs consent, because on a
+	// fork-less clone origin is upstream and adopting it imports another
+	// project's whole issue history (GH#6099). An UNKNOWN probe keeps the
+	// caller's warn-and-fresh fallback: nothing will be cloned.
 	if !userOverride {
+		if in.DerivedFromGitOrigin && !in.RemoteProbeUnknown {
+			// The same consent policy as the outbound gate (#5068):
+			// consent proceeds, an interactive caller asks, anyone else
+			// refuses. The opt-out was handled above.
+			switch decision, _ := decideRemoteAdoption(adoptPolicy{
+				AssumeYes:   in.AdoptionConsented,
+				Interactive: in.AdoptionInteractive,
+			}); decision {
+			case adoptAsk:
+				return RemoteSafetyDecision{Action: ActionAskAdoption, Reason: "derived-adoption-needs-consent"}
+			case adoptRefuse:
+				return RemoteSafetyDecision{
+					Action:   ActionRefuseAdoption,
+					Reason:   "derived-adoption-without-consent",
+					ExitCode: 1,
+				}
+			}
+		}
 		return RemoteSafetyDecision{Action: ActionBootstrap, Reason: "bootstrap-from-remote"}
 	}
 
@@ -210,6 +286,50 @@ func CheckRemoteSafety(in RemoteSafetyInput) RemoteSafetyDecision {
 	}
 
 	return RemoteSafetyDecision{Action: ActionProceedWithDivergence, Reason: "authorized-divergence"}
+}
+
+// initSkipsDerivedRemote is the one predicate both init checkpoints and the
+// proxied-server route consult before resolving git origin: the opt-out means
+// no derived URL, no probe, no clone and no wiring (GH#6099). Explicit
+// --remote and configured sync.remote are not derived and are unaffected.
+func initSkipsDerivedRemote(noAdopt bool) bool {
+	return noAdopt || envNoRemoteAdopt()
+}
+
+// refusalMessageAdoption returns the What/Why/Next refusal text for adopting
+// a git-origin-derived remote's Dolt history without consent. It names the
+// URL (credentials stripped) because the reporter's complaint was not knowing
+// what was about to be imported. lateCheck marks the rare refusal that comes
+// after workspace scaffolding, where "nothing was written" would be false.
+func refusalMessageAdoption(remoteURL string, lateCheck bool) string {
+	written := "Nothing was written."
+	if lateCheck {
+		written = "The workspace was scaffolded, but no history was imported."
+	}
+	return adoptionRefusalText("bd init refuses: git origin already has Dolt history, and bd will not adopt it without consent.", remoteURL, written)
+}
+
+// refusalMessageAdoptionDeclined is the same text for an interactive caller
+// who answered anything but yes at the adoption prompt. A decline never falls
+// through to a fresh database: that would leave origin to be wired later.
+func refusalMessageAdoptionDeclined(remoteURL string) string {
+	return adoptionRefusalText("bd init stopped: adoption of git origin's Dolt history was declined.", remoteURL, "Nothing was written.")
+}
+
+func adoptionRefusalText(headline, remoteURL, written string) string {
+	return fmt.Sprintf(`%s
+
+  Derived from git origin: %s
+
+  Why: adopting imports that remote's entire issue history and project
+       identity into this workspace, wires it as Dolt remote "origin" and
+       persists it as sync.remote. On a fork-less clone, origin is the
+       upstream project. %s
+
+  Next:
+    Adopt the remote's history:       bd init --yes
+    Start a fresh local database:     bd init --no-adopt   (or BD_NO_REMOTE_ADOPT=1)
+    Bootstrap explicitly:             bd bootstrap`, headline, remedy.PrintedValue(redactRemoteURL(remoteURL)), written)
 }
 
 // refusalMessageDivergence returns the What/Why/Next refusal text for local

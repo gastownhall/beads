@@ -90,7 +90,14 @@ not a user-facing ceremony.
 ### Flag surface after this ADR
 
 ```
-bd init                         mint, or auto-bootstrap if origin has refs/dolt/data
+bd init                         mint; bootstrap from --remote or sync.remote
+                                if it has refs/dolt/data; for git origin with
+                                refs/dolt/data, ask once (interactive) or refuse
+bd init --yes                   consent to adopting git origin's refs/dolt/data
+                                (--non-interactive and --json are not consent)
+bd init --no-adopt              never derive a remote from git origin (no probe,
+                                clone or wiring); also BD_NO_REMOTE_ADOPT=1;
+                                wins over --yes
 bd init --reinit-local          local reinit; refuses remote divergence
 bd init --reinit-local \        local reinit, overwrite remote on next push
     --discard-remote            (interactive confirm or --destroy-token required)
@@ -112,6 +119,14 @@ bd bootstrap                    adopt remote — signposted by init refusal
 freezes (pinned in `cmd/bd/protocol/exit_codes_init_test.go`). 15 is stable
 in-repo but not §E3-frozen (GH#4635); it skips 13 and 14, which bd already
 uses for `ExitGuardMismatch` and `ExitMigrationFrozen`.
+
+Refusing to adopt git origin's Dolt history without consent (GH#6099)
+exits with the generic 1, by design. It mirrors `bd dolt push`'s adoption
+refusal (#5068), which also exits 1, and the way to avoid either is to state
+an adoption policy up front (`--yes`, or `--no-adopt` /
+`BD_NO_REMOTE_ADOPT=1`) rather than to branch on the code afterwards. A
+dedicated code (16) was considered and not allocated: a script that must not
+meet this refusal passes one of those flags.
 
 ### Deprecation cycle
 

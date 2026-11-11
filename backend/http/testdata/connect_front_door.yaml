@@ -620,6 +620,9 @@ commands:
         class: works
         args: [dolt, commit, '--json']
         compare: text
+  - command: bd dolt drop-database
+    class: local-only
+    reason: drops a named database on a Dolt sql-server it connects to directly; never run by the matrix
   - command: bd dolt killall
     class: local-only
     reason: manages local dolt sql-server processes; never run by the matrix

@@ -100,6 +100,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd dolt drop-database <name>` drops one named database from the
+  workspace's Dolt server.** Deleting a workspace's `.beads` directory never
+  removes its database from a shared server, and no command dropped a
+  project's database by name. It asks before dropping (`[y/N]`; pass `--yes`
+  in scripts and agents), and refuses the server's system databases,
+  `beads_global`, the workspace's own database, the one `--database`
+  selects, the connection's current database and test databases (`bd dolt
+  clean-databases` owns those). It never purges: the database stays
+  recoverable with `CALL DOLT_UNDROP('<name>')` until the server's dropped
+  databases are purged.
+  ([#6099](https://github.com/gastownhall/beads/issues/6099))
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
   While a workspace journals, every `ephemeral` or `no_history` bead it creates
   is stamped with the `seq` of its own `create` journal record, in the same
@@ -703,6 +714,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd init` asks before adopting the Dolt history of a remote it derived
+  from `git origin`, and refuses when it cannot ask.** On a fork-less clone,
+  `origin` is the upstream project, so a plain `bd init` imported that
+  project's whole issue history and identity, wired it as Dolt remote
+  `origin` and wrote it as `sync.remote`, without asking. Interactively,
+  `bd init` now names the URL and asks once (`[y/N]`, default no), and a
+  decline stops init. A run that cannot ask (no TTY, `CI`,
+  `--non-interactive`, `--json`) now exits 1 instead of adopting.
+  **Migration:** a script that relied on the automatic adoption passes
+  `bd init --yes` (`-y`); one that wants a fresh database passes
+  `--no-adopt` or sets `BD_NO_REMOTE_ADOPT=1`, which derives no remote from
+  `git origin` at all (no probe, clone or wiring) and wins over `--yes`. A
+  remote named with `--remote` or `sync.remote` still bootstraps without
+  asking, including a `sync.remote` committed to the cloned repository's
+  `.beads/config.yaml`, and so does `bd bootstrap`.
+  ([#6099](https://github.com/gastownhall/beads/issues/6099))
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add
@@ -1226,6 +1253,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd dolt clean-databases` connects to the server the workspace's store
+  uses when a unix socket is configured. It dialed TCP at the configured
+  host and port only, so beside a live socket it cleaned the test databases
+  of whatever server listened at that port, and it refused a server only a
+  socket names for want of a port. It now dials the live socket first, else
+  TCP, as the store does. `bd dolt drop-database` uses the same connection.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
