@@ -113,12 +113,12 @@ func isDoltWriteFunction(name string) bool {
 
 func classify(stmt sqlparser.Statement) Kind {
 	switch s := stmt.(type) {
-	case *sqlparser.Select:
-		if s.Into != nil {
+	case *sqlparser.Select, *sqlparser.SetOp:
+		if s.(sqlparser.SelectStatement).GetInto() != nil {
 			return Write
 		}
 		return Read
-	case *sqlparser.SetOp, *sqlparser.Show, *sqlparser.OtherRead:
+	case *sqlparser.Show, *sqlparser.OtherRead:
 		return Read
 	case *sqlparser.Explain:
 		if !s.Analyze {

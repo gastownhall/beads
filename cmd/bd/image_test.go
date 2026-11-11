@@ -182,7 +182,7 @@ func TestImageTakesTheNonMutatingOpenOnEveryRoute(t *testing.T) {
 	// Proxied: rootProviderOptions picks WithPreview (no CREATE DATABASE, no
 	// migration) whenever preview is set, ahead of WithReadOnly, which still
 	// creates and migrates; the integration test checks the effect.
-	if opts := rootProviderOptions(preview, policy.readOnly || preview); len(opts) != 1 {
+	if opts := rootProviderOptions(preview, policy.readOnly || preview, isWorkingSetReconcileCommand(imageCmd)); len(opts) != 1 {
 		t.Errorf("the proxied provider opens with %d options, want WithPreview alone", len(opts))
 	}
 	// Embedded and server: a preview open, with no classified-read sweep (the

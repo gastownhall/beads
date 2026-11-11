@@ -1574,8 +1574,24 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 //
 // Raising the floor to `warning` silences that chatter while still surfacing
 // warnings, errors, and fatal messages. Valid dolt levels are:
-// trace, debug, info, warning, error, fatal.
+// trace, debug, info, warning, error, fatal. Platforms without a listener
+// ownership check use info instead (serverLogLevel) so startup can require
+// Dolt's ready line.
 const doltServerLogLevel = "warning"
+
+func serverLogLevel(debug bool) string {
+	if debug {
+		return "debug"
+	}
+	if !listenerOwnershipChecked {
+		return "info"
+	}
+	return doltServerLogLevel
+}
+
+func startupReadyLineLogged(debug bool) bool {
+	return debug || !listenerOwnershipChecked
+}
 
 // ServerSpawnEnv returns the environment for a spawned dolt sql-server (the
 // directly-managed spawn here and the proxied one in dbproxy/server). The
@@ -1601,9 +1617,8 @@ func ServerSpawnEnv() []string {
 // (see ~/cursor_src/dolt/go/cmd/dolt/dolt.go runMain). The caller must
 // ensure profDir already exists — dolt panics if it does not.
 //
-// Debug mode also raises --loglevel from the default warning to debug;
-// the connection-log spam concern that motivated the warning floor is
-// the price of opting into debug.
+// Debug mode also raises the log level; platforms without listener ownership
+// proof use info so startup can require Dolt's ready line.
 func buildDoltServerArgs(host string, port, remotesAPIPort int, debug bool, profDir string) []string {
 	var args []string
 	if debug {
@@ -1617,11 +1632,7 @@ func buildDoltServerArgs(host string, port, remotesAPIPort int, debug bool, prof
 	if remotesAPIPort > 0 {
 		args = append(args, "--remotesapi-port", strconv.Itoa(remotesAPIPort))
 	}
-	if debug {
-		args = append(args, "--loglevel=debug")
-	} else {
-		args = append(args, "--loglevel="+doltServerLogLevel)
-	}
+	args = append(args, "--loglevel="+serverLogLevel(debug))
 	return args
 }
 
@@ -1739,10 +1750,7 @@ func resolveCfgDir(doltDir string) (string, error) {
 // unrecognized key is a hard parse error at server startup, not a
 // silently-ignored one.
 func buildDoltServerYAMLConfig(host string, port, remotesAPIPort int, debug bool, cfgDir string) ([]byte, error) {
-	logLevel := doltServerLogLevel
-	if debug {
-		logLevel = "debug"
-	}
+	logLevel := serverLogLevel(debug)
 	archiveLevel := 0
 	yc := &servercfg.YAMLConfig{
 		LogLevelStr: &logLevel,
@@ -2114,7 +2122,7 @@ func startLocked(beadsDir string) (*State, error) {
 				port:            actualPort,
 				logPath:         logPath(beadsDir),
 				logOffset:       logOffset,
-				readyLineLogged: debug,
+				readyLineLogged: startupReadyLineLogged(debug),
 				timeout:         readyTimeout(),
 			})
 			if waitErr != nil {
@@ -2238,10 +2246,13 @@ func EnsureGlobalDatabase(host string, port int, user, password string) error {
 	return nil
 }
 
-// FlushWorkingSet connects to the running Dolt server and commits any uncommitted
-// working set changes across all databases. This prevents data loss when the server
-// is about to be stopped or restarted. Returns nil if there's nothing to flush or
-// if the server is not reachable (best-effort).
+// FlushWorkingSet connects to the running Dolt server and records any pending
+// working set changes across all databases as Dolt history commits. It is a
+// best-effort recording, not a persistence step: with Dolt's default chunk
+// journal, SQL-committed changes are already durable on disk, so this flush
+// decides whether they also land in history before a stop or restart
+// (TestLifecycle_SharedServerSQLCommitSurvivesKill). Returns nil if there's
+// nothing to flush or if the server is not reachable (best-effort).
 func FlushWorkingSet(host string, port int) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -2430,8 +2441,10 @@ func stopLocked(beadsDir string) error {
 		return errors.Join(ErrServerNotRunning, cleanupStateFiles(beadsDir))
 	}
 
-	// Flush uncommitted working set changes before stopping the server.
-	// This prevents data loss when changes have been written but not yet committed.
+	// Record pending working set changes in Dolt history before stopping the
+	// server, best-effort. With Dolt's default chunk journal, SQL-committed
+	// changes are already durable; this flush preserves them in history, it
+	// does not save them from loss.
 	cfg := DefaultConfig(beadsDir)
 	if flushErr := FlushWorkingSet(cfg.Host, state.Port); flushErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not flush working set before stop: %v\n", flushErr)

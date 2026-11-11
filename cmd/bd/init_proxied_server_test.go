@@ -150,6 +150,59 @@ func TestProxiedInitRemoteURLUsesSelectedProject(t *testing.T) {
 	}
 }
 
+func TestRunInitProxiedServerRejectsOptionSyncRemoteBeforeWrites(t *testing.T) {
+	for _, remote := range []string{
+		"--upload-pack=touch /tmp/pwned;false #.git",
+		"git+--upload-pack=touch /tmp/pwned;false",
+		"-utouch /tmp/pwned;false",
+		"ssh://-oProxyCommand=touch%20%2Ftmp%2Fpwned@host/path",
+	} {
+		t.Run(remote, func(t *testing.T) {
+			beadsDir := newForgeSyncRemoteWorkspace(t, remote)
+			cwd, err := os.Getwd()
+			require.NoError(t, err)
+
+			err = runInitProxiedServer(&cobra.Command{}, t.Context(), initProxiedServerInput{
+				externalConfig: &configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: 3306},
+			})
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "sync.remote")
+
+			_, err = os.Stat(filepath.Join(cwd, ".git"))
+			require.ErrorIs(t, err, os.ErrNotExist, "rejected sync.remote must not initialize a git repository")
+			_, err = os.Stat(filepath.Join(beadsDir, "metadata.json"))
+			require.ErrorIs(t, err, os.ErrNotExist, "rejected sync.remote must not write .beads metadata")
+		})
+	}
+}
+
+func TestInitCommandRejectsOptionSyncRemoteBeforeWrites(t *testing.T) {
+	for _, remote := range []string{
+		"--upload-pack=touch /tmp/pwned;false #.git",
+		"git+--upload-pack=touch /tmp/pwned;false",
+		"-utouch /tmp/pwned;false",
+		// git refuses to probe this URL, so bd init would treat it as holding
+		// Dolt history and clone it through Dolt's ssh:// transport, which
+		// hands -oProxyCommand=<command>@host to ssh as an option.
+		"ssh://-oProxyCommand=touch%20%2Ftmp%2Fpwned@host/path",
+		"ssh://-oProxyCommand=touch$IFS.pwned/path",
+	} {
+		t.Run(remote, func(t *testing.T) {
+			beadsDir := newForgeSyncRemoteWorkspace(t, remote)
+			t.Setenv("BD_NON_INTERACTIVE", "1")
+			setInitFlag(t, "quiet", "true")
+
+			err := initCmd.RunE(initCmd, nil)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "sync.remote")
+			require.Contains(t, err.Error(), "must not start with '-'")
+
+			_, statErr := os.Stat(filepath.Join(beadsDir, "metadata.json"))
+			require.ErrorIs(t, statErr, os.ErrNotExist, "rejected sync.remote must not write .beads metadata")
+		})
+	}
+}
+
 func TestBuildProxiedServerClientInfo(t *testing.T) {
 	t.Run("all empty returns nil", func(t *testing.T) {
 		info, err := buildProxiedServerClientInfo("", "", "", 0, 0, nil)

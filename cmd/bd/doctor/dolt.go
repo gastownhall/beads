@@ -53,6 +53,14 @@ func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 	// ~/.config/beads/credentials fail doctor checks with "Access denied" while
 	// regular CRUD commands succeed (bd-h5k7).
 	password := ep.Password()
+	if password != "" {
+		// Refuse to send BEADS_DOLT_PASSWORD to a shared-config host (metadata
+		// dolt_server_host / config.yaml dolt.host) the workspace never pinned,
+		// as the store's open does (GH#7886).
+		if err := ep.EnsureTrustedForCredential(cfg); err != nil {
+			return nil, nil, err
+		}
+	}
 
 	connStr := doltutil.ServerDSN{
 		Host:     host,
@@ -129,7 +137,7 @@ func openDoltConn(beadsDir string) (*doltConn, error) {
 // config.json into metadata.json, so pass only the workspace doctor runs in,
 // which command admission has checked. Read a .beads that admission never saw,
 // such as a nested one the Classic Artifacts walk reaches, with
-// configfile.LoadAndCheckWorkspaceFormat instead.
+// configfile.LoadForDiscovery instead.
 func GetBackend(beadsDir string) string {
 	return dolt.GetBackendFromConfig(beadsDir)
 }

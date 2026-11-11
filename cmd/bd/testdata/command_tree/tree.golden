@@ -71,15 +71,16 @@ bd admin cleanup
     | - Skips pinned issues, and issues of a type the workspace's types.retained
     |   setting names (their ids are idempotency keys; only bd prune/purge
     |   --retain-ids deletes them); --json reports the latter as retention_required
-    | - Supports --cascade to delete dependents (refused while types.retained names
-    |   a type, since a cascade could reach a retained issue)
+    | - Supports --cascade, which also deletes
+    |   parent-child descendants; other dependents survive (refused while
+    |   types.retained names a type, since a cascade could reach a retained issue)
     | - Shows preview of what will be deleted
     | - Use --json for programmatic output
     |
     | SEE ALSO:
     |   bd doctor --fix    Automatic health checks and repairs (recommended for routine maintenance)
     |   bd admin compact   Compact old closed issues to save space
-  flag --cascade type=bool default="false" usage="Recursively delete all dependent issues"
+  flag --cascade type=bool default="false" usage="Also delete parent-child descendants; other dependents survive"
   flag --dry-run type=bool default="false" usage="Preview what would be deleted without making changes"
   flag --ephemeral type=bool default="false" usage="Only delete closed wisps (transient molecules)"
   flag --force -f type=bool default="false" usage="Actually delete (without this flag, shows error)"
@@ -537,6 +538,11 @@ bd bootstrap
     | If sync.remote points at a git repository, bootstrap verifies refs/dolt/data
     | before cloning. Bootstrap exits non-zero when it cannot set up a database.
     |
+    | Values starting with - in sync.remote or sync.git-remote are refused as invalid
+    | remote URLs: bd init returns an error naming the key; bd bootstrap restores a
+    | local backup or issues.jsonl when available, otherwise reports a blocked plan
+    | without contacting the remote.
+    |
     | This is the recommended command for:
     |   • Setting up beads on a fresh clone
     |   • Recovering after moving to a new machine
@@ -726,8 +732,12 @@ bd compact
     |
     | How it works:
     |   1. Identifies commits older than --days threshold
-    |   2. Creates a squashed base commit from all old history
-    |   3. Cherry-picks recent commits on top
+    |   2. Creates a squashed base commit from all old history, dated as the
+    |      newest squashed commit
+    |   3. Cherry-picks recent commits on top, keeping their original authors,
+    |      committers and dates, so AS OF reads and dolt_history views at or
+    |      after the newest squashed commit stay valid (an earlier time resolves
+    |      to the initial commit)
     |   4. Swaps main branch to the compacted version
     |   5. Prunes remote-tracking refs (they would keep the old history alive;
     |      the next push or fetch re-creates them at the new tip)
@@ -1512,7 +1522,8 @@ bd delete
     | Default: Fails if any issue has dependents not in deletion set
     |   bd delete bd-1 bd-2
     |
-    | Cascade: Recursively delete all dependents
+    | Cascade: Also delete parent-child descendants; other dependents survive
+    | (orphaned, as with --force). Preview first: --dry-run lists every id it deletes.
     |   bd delete bd-1 --cascade --force
     |
     | Force: Delete and orphan dependents
@@ -1544,7 +1555,7 @@ bd delete
     |    "ids": ["..."]}], "guard_mismatch": true}
     | --if-threads requires --force and refuses --cascade (exit 1). With --dry-run
     | the same guard runs in the preview's read and exits 13 the same way.
-  flag --cascade type=bool default="false" usage="Recursively delete all dependent issues"
+  flag --cascade type=bool default="false" usage="Also delete parent-child descendants; other dependents survive"
   flag --dry-run type=bool default="false" usage="Preview what would be deleted without making changes"
   flag --force -f type=bool default="false" usage="Actually delete (without this flag, shows preview)"
   flag --from-file type=string default="" usage="Read issue IDs from file (one per line)"
@@ -2720,8 +2731,20 @@ bd flatten
     | full collection reclaims the squashed history. A full GC can take minutes on
     | multi-gigabyte stores.
     |
-    | This is irreversible — all commit history is lost. The resulting database
-    | has exactly one commit containing all current data.
+    | Changes on main that are only in the working set stay pending. Staged
+    | changes, and the rows of a commit that reaches main mid-flatten, are kept in
+    | one preservation commit on the flattened history; the landed commit's own
+    | hash and message are not.
+    |
+    | If a run fails, bd flatten tries to return to main and delete its temporary
+    | branch within 30 seconds; if that cleanup fails, the error names the branch
+    | left behind. A failure after main has moved is not rolled back: main keeps
+    | the flattened history and bd flatten stops before pruning and GC. Inspect
+    | dolt_status, then commit what is staged with bd dolt commit when ready.
+    |
+    | This is irreversible — all commit history is lost. The resulting history is
+    | the initial commit plus one snapshot commit containing all current data, and
+    | a preservation commit when changes reached main mid-flatten.
     |
     | Use this when:
     |   - Your active database has grown very large
@@ -4503,10 +4526,11 @@ bd mail
     |
     | Configuration (checked in order):
     |   1. BEADS_MAIL_DELEGATE or BD_MAIL_DELEGATE environment variable
-    |   2. 'mail.delegate' config setting (bd config set mail.delegate "gt mail")
+    |   2. 'mail.delegate' in user-global config (~/.config/bd/config.yaml;
+    |      project .beads/config.yaml and workspace database settings are ignored)
     |
     | Examples:
-    |   # Configure delegation (one-time setup)
+    |   # Configure delegation (one-time setup in ~/.config/bd/config.yaml)
     |   export BEADS_MAIL_DELEGATE="gt mail"
     |   # or
     |   bd config set mail.delegate "gt mail"

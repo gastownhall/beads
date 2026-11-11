@@ -178,14 +178,14 @@ func TestDoctorChecksDialAConfiguredSocket(t *testing.T) {
 // TestDoctorFreshCloneReadsTheServerItsRepairWritesBesideAPort pins the
 // Fresh Clone check, when a live unix socket and a resolved port both name
 // the server, to the server its repair (fix.FreshCloneImport) writes, and its
-// report to the server it dialed. That repair's store open dials
-// BEADS_DOLT_SERVER_SOCKET socket first and never reads metadata.json's
-// dolt_server_socket, so the check dials the socket only from the
-// environment, and TCP at the port beside metadata.json's. It dialed
-// metadata.json's socket too, while --fix imported issues.jsonl into the
-// server at the port over its live rows; before that it named host:port for
-// the socket it dialed (#7874 review). Nothing answers either address here,
-// so the report names the one dialed.
+// report to the server it dialed. That repair's store open dials the socket
+// first, BEADS_DOLT_SERVER_SOCKET else metadata.json's dolt_server_socket, so
+// the check dials the socket from either. It dialed the socket while --fix
+// imported issues.jsonl into the server at the port over its live rows, and
+// before that it named host:port for the socket it dialed (#7874 review);
+// once the repair's open took metadata.json's socket, the check dialing TCP
+// beside it split them again. Nothing answers either address here, so the
+// report names the one dialed.
 func TestDoctorFreshCloneReadsTheServerItsRepairWritesBesideAPort(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix socket fixture")
@@ -195,7 +195,7 @@ func TestDoctorFreshCloneReadsTheServerItsRepairWritesBesideAPort(t *testing.T) 
 		inEnv bool // BEADS_DOLT_SERVER_SOCKET, else metadata.json dolt_server_socket
 	}{
 		{name: "BEADS_DOLT_SERVER_SOCKET, the socket", inEnv: true},
-		{name: "metadata.json dolt_server_socket, TCP at the port"},
+		{name: "metadata.json dolt_server_socket, the socket"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repo, beadsDir := doctorEndpointWorkspace(t)
@@ -214,7 +214,6 @@ func TestDoctorFreshCloneReadsTheServerItsRepairWritesBesideAPort(t *testing.T) 
 				if err := cfg.Save(beadsDir); err != nil {
 					t.Fatal(err)
 				}
-				dialed, other = other, socket
 			}
 			fresh := CheckFreshClone(repo)
 			report := fresh.Message + "\n" + fresh.Detail + "\n" + fresh.Fix

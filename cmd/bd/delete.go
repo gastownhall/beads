@@ -45,7 +45,8 @@ DEPENDENCY HANDLING (the same on a local database and against a team server):
 Default: Fails if any issue has dependents not in deletion set
   bd delete bd-1 bd-2
 
-Cascade: Recursively delete all dependents
+Cascade: Also delete parent-child descendants; other dependents survive
+(orphaned, as with --force). Preview first: --dry-run lists every id it deletes.
   bd delete bd-1 --cascade --force
 
 Force: Delete and orphan dependents
@@ -525,6 +526,13 @@ func deleteBatchGuarded(issueIDs []string, force, dryRun, cascade, jsonOutput bo
 			}
 			return err
 		}
+		// The front door hydrated only the REQUESTED rows; the preview below
+		// enumerates every row the role resolved — under --cascade the whole
+		// containment closure, plus the orphans it leaves (GH#6301). JSON
+		// and quiet never print the enumeration, so they skip the read.
+		if !jsonOutput && !isQuiet() {
+			hydrateDeletePreviewTitles(ctx, batchStore, issues, result)
+		}
 		if previewErr := outputDeletionPreviewReporting(resolvedIDs, issues, cascade, dryRun, &result, nil, jsonOutput, report); previewErr != nil {
 			return previewErr
 		}
@@ -567,6 +575,9 @@ func deleteBatchGuarded(issueIDs []string, force, dryRun, cascade, jsonOutput bo
 			"events_removed":       result.Events,
 			"references_updated":   result.ReferencesUpdated,
 			"orphaned_issues":      result.Orphaned,
+			// deleted stays the requested ids; deleted_ids names every row
+			// deleted_count counts, the cascade closure included (GH#6301).
+			"deleted_ids": result.DeletedIDs,
 		}
 		for key, value := range report {
 			answer[key] = value
@@ -576,6 +587,12 @@ func deleteBatchGuarded(issueIDs []string, force, dryRun, cascade, jsonOutput bo
 		}
 	} else {
 		fmt.Printf("%s Deleted %d issue(s)\n", ui.RenderPass("✓"), result.Deleted)
+		if cascade && len(result.DeletedIDs) > 0 {
+			// The cascade's reach named, not just counted (GH#6301): the
+			// confirmation is the last place a caller can still see which rows
+			// went with the request.
+			fmt.Printf("  Deleted: %s\n", strings.Join(result.DeletedIDs, ", "))
+		}
 		fmt.Printf("  Removed %d dependency link(s)\n", result.Dependencies)
 		fmt.Printf("  Removed %d label(s)\n", result.Labels)
 		fmt.Printf("  Removed %d event(s)\n", result.Events)
@@ -617,6 +634,11 @@ func outputDeletionPreviewReporting(issueIDs []string, issues map[string]*types.
 			preview["would_remove_labels"] = result.Labels
 			preview["would_remove_events"] = result.Events
 			preview["would_orphan"] = len(result.Orphaned)
+			// The ids beside the counts, named as the deletion will report
+			// them (deleted_ids, orphaned_issues), so a caller can check it
+			// got what it previewed (GH#6301).
+			preview["would_delete_ids"] = result.DeletedIDs
+			preview["would_orphan_ids"] = result.Orphaned
 		}
 		if depError != nil {
 			preview["error"] = depError.Error()
@@ -628,14 +650,26 @@ func outputDeletionPreviewReporting(issueIDs []string, issues map[string]*types.
 	}
 
 	fmt.Printf("\n%s\n", ui.RenderFail("⚠️  DELETE PREVIEW"))
-	fmt.Printf("\nIssues to delete (%d):\n", len(issueIDs))
-	for _, id := range issueIDs {
+	// The role's answer names every row the request would take (GH#6301):
+	// under --cascade that is the whole containment closure, and a preview
+	// listing only the requested ids with a count beside them is what let a
+	// 48-row deletion look like a bounded one. When the role refused
+	// (result == nil) there is no closure to name, so the requested ids stand
+	// in as before. A row whose title did not load is still listed, by id.
+	previewIDs := issueIDs
+	if result != nil && len(result.DeletedIDs) > 0 {
+		previewIDs = result.DeletedIDs
+	}
+	fmt.Printf("\nIssues to delete (%d):\n", len(previewIDs))
+	for _, id := range previewIDs {
+		title := ""
 		if issue := issues[id]; issue != nil {
-			fmt.Printf("  %s: %s\n", id, issue.Title)
+			title = issue.Title
 		}
+		fmt.Printf("  %s: %s\n", id, title)
 	}
 	if cascade {
-		fmt.Printf("\n%s Cascade mode enabled - will also delete all dependent issues\n", ui.RenderWarn("⚠"))
+		fmt.Printf("\n%s Cascade mode enabled - will also delete parent-child descendants; other dependents survive\n", ui.RenderWarn("⚠"))
 	}
 	if depError != nil {
 		fmt.Printf("\n%s\n", ui.RenderFail(depError.Error()))
@@ -646,12 +680,53 @@ func outputDeletionPreviewReporting(issueIDs []string, issues map[string]*types.
 			result.Dependencies, result.Labels, result.Events)
 		if len(result.Orphaned) > 0 {
 			fmt.Printf("Would orphan: %d issues\n", len(result.Orphaned))
+			for _, id := range result.Orphaned {
+				title := ""
+				if issue := issues[id]; issue != nil {
+					title = issue.Title
+				}
+				fmt.Printf("  %s: %s\n", id, title)
+			}
 		}
 		if dryRun {
 			fmt.Printf("\n(Dry-run mode - no changes made)\n")
 		}
 	}
 	return nil
+}
+
+// hydrateDeletePreviewTitles batch-loads the rows the preview enumerates but
+// the front door did not hydrate: the role's answer names the whole resolved
+// set — under --cascade the containment closure — and the orphans it leaves,
+// none of which the per-id resolution read (GH#6301).
+//
+// Titles are presentation, so a load that fails lists those rows by id alone
+// — the error is dropped on purpose. It never replaces a row the caller
+// already handed in: issues keeps the front door's rows.
+func hydrateDeletePreviewTitles(ctx context.Context, store storage.DoltStorage, issues map[string]*types.Issue, result issueops.DeleteResult) {
+	extra := make([]string, 0, len(result.DeletedIDs)+len(result.Orphaned))
+	for _, id := range result.DeletedIDs {
+		if issues[id] == nil {
+			extra = append(extra, id)
+		}
+	}
+	for _, id := range result.Orphaned {
+		if issues[id] == nil {
+			extra = append(extra, id)
+		}
+	}
+	if len(extra) == 0 {
+		return
+	}
+	rows, err := store.GetIssuesByIDs(ctx, extra)
+	if err != nil {
+		return
+	}
+	for _, row := range rows {
+		if row != nil {
+			issues[row.ID] = row
+		}
+	}
 }
 
 // loadDeleteThreadGuard reads `bd delete --if-threads`'s guard file, the JSON
@@ -735,7 +810,7 @@ func init() {
 	deleteCmd.Flags().BoolP("force", "f", false, "Actually delete (without this flag, shows preview)")
 	deleteCmd.Flags().String("from-file", "", "Read issue IDs from file (one per line)")
 	deleteCmd.Flags().Bool("dry-run", false, "Preview what would be deleted without making changes")
-	deleteCmd.Flags().Bool("cascade", false, "Recursively delete all dependent issues")
+	deleteCmd.Flags().Bool("cascade", false, "Also delete parent-child descendants; other dependents survive")
 	// A8 (beads#4682)
 	deleteCmd.Flags().String("if-revision", "", ifRevisionFlagHelp)
 	deleteCmd.Flags().String("if-threads", "", "Delete only if the archived threads in this JSON guard file are unchanged (exit 13 otherwise; requires --force)")

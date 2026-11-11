@@ -157,16 +157,29 @@ func ClassifyListener(pid, port int) Ownership {
 	return classifyListener(pid, port)
 }
 
+// listenerOwnershipProvable is ListenerOwnershipProvable; tests replace it.
+var listenerOwnershipProvable = ListenerOwnershipProvable
+
 // listenerOwnership is classifyListener as awaitOwnedListener reads it:
-// owned when the listener is pid's, known when that is shown either way. An
-// unlisted listener counts as unknown, which leaves server mode on its
-// fallback evidence.
+// owned when the listener is pid's, known when that is shown either way.
+//
+// An unlisted listener counts as another process's where the host is shown
+// to list this process's own listeners (ListenerOwnershipProvable), as the
+// proxied launcher counts it: the child runs as this user in this network
+// namespace, so its listener would be listed, and what answered is another
+// user's socket (darwin's lsof cannot see one without privilege) or one
+// reached through a forward. Accepting its greeting would hand every
+// server-mode connection to that listener. Where the host lists no sockets
+// at all (WSL1, some sandboxes), an unlisted listener stays unknown, which
+// leaves server mode on its fallback evidence.
 func listenerOwnership(pid, port int) (owned, known bool) {
 	switch classifyListener(pid, port) {
 	case OwnershipOwned:
 		return true, true
 	case OwnershipForeign:
 		return false, true
+	case OwnershipUnlisted:
+		return false, listenerOwnershipProvable()
 	}
 	return false, false
 }
@@ -202,7 +215,7 @@ type startupProbe struct {
 	logPath   string
 	logOffset int64
 	// readyLineLogged is true when the child's log level lets dolt log
-	// DoltReadyLine (debug mode); the default warning level does not.
+	// DoltReadyLine; the default warning level does not.
 	readyLineLogged bool
 	timeout         time.Duration
 	// owner is listenerOwnership; tests replace it.

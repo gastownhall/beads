@@ -106,16 +106,25 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 
 	// All-wisps fast path: one SQL transaction, no Dolt versioning.
 	// Covers both ephemeral issues and no-history issues (both skip DOLT_COMMIT).
+	// A create-time edge can still flip a durable row's is_blocked (a waiter
+	// on a wisp's durable spawner), and that row is committed (GH#6647).
 	if issueops.AllWisps(issues) {
 		for _, issue := range issues {
 			if !issue.NoHistory {
 				issue.Ephemeral = true
 			}
 		}
-		return s.withRetryTx(ctx, func(tx *sql.Tx) error {
-			_, err := issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
+		var result issueops.CreateIssuesResult
+		if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+			var err error
+			result, err = issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
 			return err
-		})
+		}); err != nil {
+			return err
+		}
+		s.commitWispDurable(ctx, wispDurable{issues: result.ChangedTables["issues"]},
+			fmt.Sprintf("bd: create %d issue(s)", len(issues)))
+		return nil
 	}
 
 	var result issueops.CreateIssuesResult
@@ -700,7 +709,8 @@ func (s *DoltStore) deleteIssue(ctx context.Context, id string) error {
 }
 
 // DeleteIssues deletes multiple issues in a single transaction.
-// If cascade is true, recursively deletes dependents.
+// If cascade is true, also deletes their parent-child descendants and orphans
+// every other dependent.
 // If cascade is false but force is true, deletes issues and orphans dependents.
 // If both are false, returns an error if any issue has dependents.
 // If dryRun is true, only computes statistics without deleting.
