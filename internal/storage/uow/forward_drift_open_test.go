@@ -311,6 +311,58 @@ func TestInitSchemaRefusesForwardDrift(t *testing.T) {
 		}
 	})
 
+	// AC-5: a BEHIND database the shared-store check refuses, or serves
+	// through read-only, never reaches the forward-drift read: the statement
+	// sequence is exactly the pre-existing one (no version read between the
+	// gate's probe and the lock release), and the outcome is unchanged.
+	for _, readOnly := range []bool{false, true} {
+		name := "behind database refused by the shared-store gate adds no drift read"
+		if readOnly {
+			name = "behind database read through on a read-only open adds no drift read"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("BD_IGNORE_SCHEMA_SKEW", "")
+			t.Setenv(schema.AllowRemoteMigrateEnv, "0")
+			t.Cleanup(func() {
+				schema.SetSharedMigrateConsent(false)
+				schema.SetForceAllowRemoteMigrate(false)
+			})
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("create sql mock: %v", err)
+			}
+			defer db.Close()
+
+			lockName := expectBehindDatabaseThroughPreparation(mock, "beads", 1)
+			expectSharedGateProbe(mock, 1, 0)
+			expectLockRelease(mock, lockName)
+			if readOnly {
+				mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
+					WillReturnResult(sqlmock.NewResult(0, 0))
+				expectIssuesProjection(mock, 1, "")
+			}
+
+			p := &doltSQLProvider{defaultBranch: defaultBranch, db: db, serverEndpoint: "tcp:127.0.0.1:3306", readOnly: readOnly}
+			var initErr error
+			_ = captureStderr(t, func() {
+				initErr = p.initSchema(context.Background(), "beads")
+			})
+			if readOnly {
+				if initErr != nil {
+					t.Fatalf("initSchema() error = %v, want the read-only read-through", initErr)
+				}
+			} else {
+				var gateErr *schema.RemoteMigrateGateError
+				if !errors.As(initErr, &gateErr) {
+					t.Fatalf("initSchema() error = %T (%v), want *schema.RemoteMigrateGateError", initErr, initErr)
+				}
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+		})
+	}
+
 	// A serialization failure on the added version read keeps the provider's
 	// ordinary retry; the next attempt reads a valid version and opens.
 	t.Run("serialization failure on the drift read is retried", func(t *testing.T) {
