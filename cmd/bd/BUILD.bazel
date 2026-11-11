@@ -1305,6 +1305,8 @@ go_test(
         "sync_is_scoped_test.go",
         "sync_issues_flag_test.go",
         "sync_parent_flag_test.go",
+        "sync_peer_rows_embedded_test.go",
+        "sync_peer_rows_server_test.go",
         "sync_push_pull_test.go",
         "sync_remote_fixture_test.go",
         "sync_remote_test.go",

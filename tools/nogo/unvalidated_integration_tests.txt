@@ -35,6 +35,7 @@ cmd/bd/migrate_dolt_mode_frontdoor_integration_test.go
 cmd/bd/reopen_defer_test.go
 cmd/bd/reparent_test.go
 cmd/bd/show_test.go
+cmd/bd/sync_peer_rows_server_test.go
 cmd/bd/test_helpers_integration_test.go
 internal/beads/beads_hash_multiclone_test.go
 internal/beads/beads_integration_test.go

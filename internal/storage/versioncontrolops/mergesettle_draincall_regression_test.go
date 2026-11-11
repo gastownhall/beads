@@ -634,17 +634,11 @@ func expectMergeSourceCommit(mock sqlmock.Sqlmock) {
 
 // expectMergeResult answers concludeMerge's stageMergeResult (GH#7811): the
 // open merge's source commit, then the merged-but-unstaged tables, each
-// staged with a drained DOLT_ADD.
+// staged with a drained DOLT_ADD, then the completeness re-read (GH#7757),
+// which finds nothing left unstaged.
 func expectMergeResult(mock sqlmock.Sqlmock, tables ...string) {
-	expectMergeSourceCommit(mock)
-	rows := sqlmock.NewRows([]string{"table_name"})
-	for _, table := range tables {
-		rows.AddRow(table)
-	}
-	mock.ExpectQuery(regexp.QuoteMeta(mergedTablesQueryPrefix)).WillReturnRows(rows)
-	for _, table := range tables {
-		expectDrainedCall(mock, "CALL DOLT_ADD(?)", table)
-	}
+	expectIncompleteMergeConclusion(mock, tables...)
+	expectUnstagedTables(mock)
 }
 
 // expectViolations answers one dolt_constraint_violations read with tables.
