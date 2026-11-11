@@ -824,9 +824,11 @@ func newWispIsBlockedDriftDB(t *testing.T, migrationFile string, wantCursorVersi
 	mock.ExpectQuery(indexQuery).WithArgs("wisps", "idx_wisps_is_blocked").
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
 
-	body, err := IgnoredMigrationSQL(migrationFile)
+	// The body the runner executes: the frozen bytes, or for ignored/0015
+	// those bytes with its registered execution plan applied (#6520).
+	body, err := ignoredSource.plannedMigrationSQL(migrationFile)
 	if err != nil {
-		t.Fatalf("IgnoredMigrationSQL(%s): %v", migrationFile, err)
+		t.Fatalf("plannedMigrationSQL(%s): %v", migrationFile, err)
 	}
 
 	return &wispIsBlockedDriftDB{
@@ -857,7 +859,7 @@ func (d *wispIsBlockedDriftDB) ExecContext(_ context.Context, query string, args
 		d.hasIsBlockedIndex = true
 		return execOK{}, nil
 	case d.migrationBody:
-		// The pending migration's real embedded body, byte-for-byte. A wisps
+		// The pending migration's executed body, byte-for-byte. A wisps
 		// table still missing is_blocked fails on its first statement with
 		// the same error a real engine gives; once the column exists (the
 		// repair ran first) it succeeds -- matching runMigrations' real

@@ -896,6 +896,32 @@ func IgnoredMigrationSQL(name string) (string, error) {
 	return string(data), nil
 }
 
+// PlannedMigrationSQL returns the SQL the runner executes for a main-source
+// migration file: its frozen bytes, or those bytes with the file's registered
+// execution plan applied (migration_body_plans.go). For tests outside this
+// package that compare the executed body with the frozen one.
+func PlannedMigrationSQL(name string) (string, error) {
+	return mainSource.plannedMigrationSQL(name)
+}
+
+// PlannedIgnoredMigrationSQL is PlannedMigrationSQL's ignored-lane
+// counterpart.
+func PlannedIgnoredMigrationSQL(name string) (string, error) {
+	return ignoredSource.plannedMigrationSQL(name)
+}
+
+func (m migrationSource) plannedMigrationSQL(name string) (string, error) {
+	data, err := m.files.ReadFile(m.dir + "/" + name)
+	if err != nil {
+		return "", err
+	}
+	version, err := parseVersion(name)
+	if err != nil {
+		return "", fmt.Errorf("parsing version of %s: %w", name, err)
+	}
+	return m.plannedMigrationBody(version, name, data)
+}
+
 func parseVersion(name string) (int, error) {
 	parts := strings.SplitN(name, "_", 2)
 	if len(parts) == 0 {
@@ -913,6 +939,15 @@ func parseVersion(name string) (int, error) {
 // it half-upgraded by design.
 func MigrateUpTo(ctx context.Context, db DBConn, maxVersion int) (int, error) {
 	applied, _, err := mainSource.migrate(ctx, db, maxVersion)
+	return applied, err
+}
+
+// MigrateIgnoredUpTo is MigrateUpTo for the dolt-ignored source: it applies
+// ignored-source migrations up to and including maxVersion and nothing else.
+// Test support only, for reconstructing a historical clone-local schema;
+// production code must use MigrateUp.
+func MigrateIgnoredUpTo(ctx context.Context, db DBConn, maxVersion int) (int, error) {
+	applied, _, err := ignoredSource.migrate(ctx, db, maxVersion)
 	return applied, err
 }
 
@@ -2191,8 +2226,10 @@ func scanRowByColumn(rows *sql.Rows) (CallRow, error) {
 // consumed; all other migrations keep the unchanged ExecContext path.
 //
 // sqlText is always a compile-time embedded migration body (go:embed above;
-// frozen once merged per scripts/check-migration-hygiene.sh) — never runtime
-// or user input. Executing it verbatim is the migration contract, so SAST
+// frozen once merged per scripts/check-migration-hygiene.sh), or that body
+// with a compile-time, hash-gated execution plan applied
+// (migration_body_plans.go) — never runtime or user input. Executing it
+// unaltered apart from those plans is the migration contract, so SAST
 // "SQL injection" findings on this call are accepted by design.
 func execMigrationBody(ctx context.Context, db DBConn, sqlText string) error {
 	if !procedureCallRe.MatchString(sqlText) {
@@ -2296,6 +2333,14 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 		if err != nil {
 			return count, fmt.Errorf("reading migration %s: %w", mf.name, err)
 		}
+		// Resolve the executed body before anything of this step runs, so a
+		// plan that no longer matches its frozen file fails the step before
+		// its repair, body or cursor row (#6520). The cursor below still
+		// hashes data, the frozen bytes.
+		body, err := src.plannedMigrationBody(mf.version, mf.name, data)
+		if err != nil {
+			return count, fmt.Errorf("planning migration %s: %w", mf.name, err)
+		}
 
 		// Snapshot the working set BEFORE the pre-migration repair runs, not
 		// just before the migration's own SQL. preMigrationRepair (below) can
@@ -2353,7 +2398,7 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 		// should carry. So a wedge inside the per-step commit is still silent;
 		// CHANGELOG.md scopes the user-facing promise to match.
 		if err := runMigrationWithWatchdog(ctx, watchdogStderr, mf.version, humanMigrationName(mf.name), migrationWatchdogIntervalDuration(),
-			func(ctx context.Context) error { return execMigrationBody(ctx, db, string(data)) },
+			func(ctx context.Context) error { return execMigrationBody(ctx, db, body) },
 		); err != nil {
 			return count, fmt.Errorf("migration %s: %w", mf.name, err)
 		}
