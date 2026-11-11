@@ -1,0 +1,1527 @@
+//go:build cgo
+
+package main
+
+import (
+	"encoding/json"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/steveyegge/beads/internal/types"
+)
+
+// importRejectJSON mirrors one entry of the import --json "rejected" array
+// (importRejection, cmd/bd/import_screen.go), for the tests below.
+type importRejectJSON struct {
+	Line   int    `json:"line"`
+	ID     string `json:"id"`
+	Reason string `json:"reason"`
+}
+
+// importSkipInvalidJSON mirrors the import --json result fields the
+// skip-invalid tests assert on (importResultJSON, cmd/bd/import.go).
+type importSkipInvalidJSON struct {
+	Source          string             `json:"source"`
+	Created         int                `json:"created"`
+	Updated         int                `json:"updated"`
+	Unchanged       int                `json:"unchanged"`
+	Skipped         int                `json:"skipped"`
+	DedupHits       int                `json:"dedup_skipped"`
+	Memories        int                `json:"memories"`
+	StaleSkippedIDs []string           `json:"stale_skipped_ids"`
+	Rejected        []importRejectJSON `json:"rejected"`
+	RejectsFile     string             `json:"rejects_file"`
+	DryRun          bool               `json:"dry_run"`
+}
+
+// bdImportBuffers runs "bd import" with the given stdin (nil for none) and
+// returns both streams and the exit error, without failing on a nonzero exit.
+func bdImportBuffers(t *testing.T, bd, dir string, stdin io.Reader, args ...string) (string, string, error) {
+	t.Helper()
+	cmd := exec.Command(bd, append([]string{"import"}, args...)...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	if stdin != nil {
+		cmd.Stdin = stdin
+	}
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	return stdout.String(), stderr.String(), err
+}
+
+// mixSkipInvalidJSONL builds the canonical mixed file for the skip-invalid
+// tests and returns its content. Line 1 valid, line 2 invalid status, line 3
+// blank, line 4 valid, line 5 invalid type, line 6 a memory record — so line
+// numbers count every physical line and the rejects file must echo lines 2
+// and 5 exactly, in source order.
+func mixSkipInvalidJSONL(t *testing.T, now time.Time) string {
+	t.Helper()
+	issueLine := func(id, title string, status types.Status, issueType types.IssueType) string {
+		b, err := json.Marshal(types.Issue{
+			ID: id, Title: title, Status: status, IssueType: issueType,
+			CreatedAt: now, UpdatedAt: now,
+		})
+		if err != nil {
+			t.Fatalf("marshal issue: %v", err)
+		}
+		return string(b)
+	}
+	return strings.Join([]string{
+		issueLine("imskip-aaa", "Valid A", types.StatusOpen, types.TypeTask),
+		issueLine("imskip-bad", "Invalid status", types.Status("verify"), types.TypeTask),
+		"",
+		issueLine("imskip-ccc", "Valid C", types.StatusOpen, types.TypeBug),
+		issueLine("imskip-bad2", "Invalid type", types.StatusOpen, types.IssueType("not-a-type")),
+		`{"_type":"memory","key":"skip-key","value":"skip-value"}`,
+	}, "\n") + "\n"
+}
+
+// skipInvalidMixRejected returns the two raw rejected lines of the given mix
+// content, in source order, LF-terminated — the exact bytes a --rejects file
+// must contain for that input.
+func skipInvalidMixRejected(content string) string {
+	var lines []string
+	for _, line := range strings.Split(content, "\n") {
+		if strings.Contains(line, "imskip-bad") || strings.Contains(line, "imskip-bad2") {
+			lines = append(lines, line)
+		}
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// assertImportSkipInvalidMix asserts the canonical mixed-file outcome: two
+// valid rows land, two rejects are reported in source order, the memory lands
+// and the rejects file holds exactly the rejected lines.
+func assertImportSkipInvalidMix(t *testing.T, bd, dir, content, stdout, stderr, rejectsPath string, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("bd import --skip-invalid should succeed; err=%v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	var result importSkipInvalidJSON
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &result); err != nil {
+		t.Fatalf("parse --json output %q: %v", stdout, err)
+	}
+	if result.Created != 2 {
+		t.Errorf("Created = %d, want 2 (the two valid records); result: %+v", result.Created, result)
+	}
+	if result.Memories != 1 {
+		t.Errorf("Memories = %d, want 1 (the memory record is kept)", result.Memories)
+	}
+	if result.Skipped != 2 {
+		t.Errorf("Skipped = %d, want 2 (both invalid records)", result.Skipped)
+	}
+	if len(result.Rejected) != 2 {
+		t.Fatalf("Rejected = %+v, want 2 entries", result.Rejected)
+	}
+	if result.Rejected[0].Line != 2 || result.Rejected[0].ID != "imskip-bad" || !strings.Contains(result.Rejected[0].Reason, "invalid status: verify") {
+		t.Errorf("Rejected[0] = %+v, want line 2 / imskip-bad / invalid status: verify", result.Rejected[0])
+	}
+	if result.Rejected[1].Line != 5 || result.Rejected[1].ID != "imskip-bad2" || !strings.Contains(result.Rejected[1].Reason, "invalid issue type") {
+		t.Errorf("Rejected[1] = %+v, want line 5 / imskip-bad2 / invalid issue type", result.Rejected[1])
+	}
+	if result.RejectsFile != rejectsPath {
+		t.Errorf("RejectsFile = %q, want the saved rejects path %q", result.RejectsFile, rejectsPath)
+	}
+	if !strings.Contains(stderr, "line 2") || !strings.Contains(stderr, "imskip-bad") {
+		t.Errorf("stderr should list the rejected records with their lines; stderr:\n%s", stderr)
+	}
+	saved, readErr := os.ReadFile(rejectsPath)
+	if readErr != nil {
+		t.Fatalf("read rejects file: %v", readErr)
+	}
+	if string(saved) != skipInvalidMixRejected(content) {
+		t.Errorf("rejects file should hold exactly the rejected lines in source order; got:\n%s", saved)
+	}
+	for _, id := range []string{"imskip-aaa", "imskip-ccc"} {
+		showCmd := exec.Command(bd, "show", id)
+		showCmd.Dir = dir
+		showCmd.Env = bdEnv(dir)
+		if _, _, showErr := runCommandBuffers(t, showCmd); showErr != nil {
+			t.Errorf("bd show %s should succeed after the skip-invalid import: %v", id, showErr)
+		}
+	}
+	for _, id := range []string{"imskip-bad", "imskip-bad2"} {
+		showCmd := exec.Command(bd, "show", id)
+		showCmd.Dir = dir
+		showCmd.Env = bdEnv(dir)
+		if _, _, showErr := runCommandBuffers(t, showCmd); showErr == nil {
+			t.Errorf("bd show %s should fail: the rejected record must not land", id)
+		}
+	}
+}
+
+// skippedTargetGraph is a three-record file whose dependencies all point at
+// the one record the screen rejects: b carries status "verify" (no built-in
+// status), a is blocked by b and c is b's child. As bd export writes them,
+// each edge is saved on its dependent's line, so the writer drops both when b
+// is skipped, and only a re-import of a's and c's lines restores them.
+type skippedTargetGraph struct {
+	a, b, c string // the ids
+	bLine   string // b's line, the one the screen rejects
+	content string
+}
+
+func newSkippedTargetGraph(t *testing.T, prefix string) skippedTargetGraph {
+	t.Helper()
+	now := time.Now().UTC().Truncate(time.Second)
+	g := skippedTargetGraph{a: prefix + "-a", b: prefix + "-b", c: prefix + "-c"}
+	line := func(issue types.Issue) string {
+		raw, err := json.Marshal(issue)
+		if err != nil {
+			t.Fatalf("marshal %s: %v", issue.ID, err)
+		}
+		return string(raw)
+	}
+	g.bLine = line(types.Issue{ID: g.b, Title: "Rejected epic", Status: types.Status("verify"), IssueType: types.TypeEpic, CreatedAt: now, UpdatedAt: now})
+	g.content = strings.Join([]string{
+		line(types.Issue{ID: g.a, Title: "Blocked by the epic", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now,
+			Dependencies: []*types.Dependency{{IssueID: g.a, DependsOnID: g.b, Type: types.DepBlocks, CreatedAt: now}}}),
+		g.bLine,
+		line(types.Issue{ID: g.c, Title: "Child of the epic", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now,
+			Dependencies: []*types.Dependency{{IssueID: g.c, DependsOnID: g.b, Type: types.DepParentChild, CreatedAt: now}}}),
+	}, "\n") + "\n"
+	return g
+}
+
+// assertEdgesIntoB checks whether a's blocks edge and c's parent-child edge
+// on b are stored (want) or not, through bd dep list.
+func (g skippedTargetGraph) assertEdgesIntoB(t *testing.T, bd, dir string, want bool) {
+	t.Helper()
+	for id, depType := range map[string]types.DependencyType{g.a: types.DepBlocks, g.c: types.DepParentChild} {
+		cmd := exec.Command(bd, "dep", "list", id, "--json")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd dep list %s --json failed: %v\nstdout:\n%s\nstderr:\n%s", id, err, stdout.String(), stderr.String())
+		}
+		// One entry per dependency: the issue depended on, with the edge's type.
+		var deps []struct {
+			ID             string               `json:"id"`
+			DependencyType types.DependencyType `json:"dependency_type"`
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &deps); err != nil {
+			t.Fatalf("parse bd dep list %s --json: %v\n%s", id, err, stdout.String())
+		}
+		stored := false
+		for _, dep := range deps {
+			if dep.ID == g.b && dep.DependencyType == depType {
+				stored = true
+			}
+		}
+		if stored != want {
+			t.Errorf("%s's %s dependency on %s stored = %v, want %v; bd dep list: %s", id, depType, g.b, stored, want, stdout.String())
+		}
+	}
+}
+
+// TestEmbeddedImportSkipInvalidCases extends TestEmbeddedImportSkipInvalid
+// across the inputs a --skip-invalid import meets: stdin, duplicate IDs, a
+// file with nothing valid (with and without memories), a file with nothing
+// invalid, CRLF and whitespace, and a repaired rejects file re-imported on
+// its own. Rejected rows are reported on stderr even under --json.
+func TestEmbeddedImportSkipInvalidCases(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt import tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	t.Run("stdin_import", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "imstdin")
+		content := mixSkipInvalidJSONL(t, time.Now().UTC())
+		rejectsPath := filepath.Join(t.TempDir(), "rejects.jsonl")
+
+		stdout, stderr, err := bdImportBuffers(t, bd, dir,
+			strings.NewReader(content),
+			"-", "--skip-invalid", "--rejects", rejectsPath, "--json")
+		assertImportSkipInvalidMix(t, bd, dir, content, stdout, stderr, rejectsPath, err)
+	})
+
+	t.Run("duplicate_ids_are_not_rejections", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "imdup")
+		now := time.Now().UTC()
+		later := now.Add(time.Hour)
+		older, err := json.Marshal(types.Issue{ID: "imdup-aaa", Title: "Older row", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now})
+		if err != nil {
+			t.Fatal(err)
+		}
+		newer, err := json.Marshal(types.Issue{ID: "imdup-aaa", Title: "Newer row", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: later})
+		if err != nil {
+			t.Fatal(err)
+		}
+		jsonlPath := filepath.Join(t.TempDir(), "dup.jsonl")
+		content := string(older) + "\n" + string(newer) + "\n" + `{"id":"imdup-bad","title":"Invalid","status":"verify","created_at":"` + now.Format(time.RFC3339) + `","updated_at":"` + now.Format(time.RFC3339) + `"}` + "\n"
+		if err := os.WriteFile(jsonlPath, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		rejectsPath := filepath.Join(t.TempDir(), "rejects.jsonl")
+
+		stdout, stderr, err := bdImportBuffers(t, bd, dir, nil, jsonlPath, "--skip-invalid", "--rejects", rejectsPath, "--json")
+		if err != nil {
+			t.Fatalf("bd import --skip-invalid should succeed; err=%v\nstderr:\n%s", err, stderr)
+		}
+		var result importSkipInvalidJSON
+		if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &result); err != nil {
+			t.Fatalf("parse --json output %q: %v", stdout, err)
+		}
+		if len(result.Rejected) != 1 || result.Rejected[0].ID != "imdup-bad" {
+			t.Errorf("Rejected = %+v, want only imdup-bad (duplicate IDs are upserts, not rejections)", result.Rejected)
+		}
+		if result.Created+result.Updated != 2 {
+			t.Errorf("both same-ID rows should land (one created, one updated); Created=%d Updated=%d", result.Created, result.Updated)
+		}
+	})
+
+	t.Run("all_invalid_with_memories", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "imallm")
+		now := time.Now().UTC()
+		content := `{"id":"imallm-bad1","title":"Bad status","status":"verify","created_at":"` + now.Format(time.RFC3339) + `","updated_at":"` + now.Format(time.RFC3339) + `"}` + "\n" +
+			`{"_type":"memory","key":"allm-key","value":"allm-value"}` + "\n"
+		jsonlPath := filepath.Join(t.TempDir(), "all-invalid.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		rejectsPath := filepath.Join(t.TempDir(), "rejects.jsonl")
+
+		stdout, stderr, err := bdImportBuffers(t, bd, dir, nil, jsonlPath, "--skip-invalid", "--rejects", rejectsPath, "--json")
+		if err != nil {
+			t.Fatalf("all-invalid skip import should still succeed (nothing to import, memory kept); err=%v\nstderr:\n%s", err, stderr)
+		}
+		var result importSkipInvalidJSON
+		if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &result); err != nil {
+			t.Fatalf("parse --json output %q: %v", stdout, err)
+		}
+		if result.Created != 0 {
+			t.Errorf("Created = %d, want 0 (every issue row was invalid)", result.Created)
+		}
+		if result.Memories != 1 {
+			t.Errorf("Memories = %d, want 1 (memories are kept when all issues are rejected)", result.Memories)
+		}
+		saved, readErr := os.ReadFile(rejectsPath)
+		if readErr != nil {
+			t.Fatalf("read rejects file: %v", readErr)
+		}
+		if want := strings.SplitAfter(content, "\n")[0]; string(saved) != want {
+			t.Errorf("rejects file = %q, want exactly the rejected line %q", saved, want)
+		}
+	})
+
+	t.Run("all_invalid_no_memories", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "imall")
+		now := time.Now().UTC()
+		content := `{"id":"imall-bad1","title":"Bad status","status":"verify","created_at":"` + now.Format(time.RFC3339) + `","updated_at":"` + now.Format(time.RFC3339) + `"}` + "\n" +
+			`{"id":"imall-bad2","title":"Bad type","issue_type":"not-a-type","status":"open","created_at":"` + now.Format(time.RFC3339) + `","updated_at":"` + now.Format(time.RFC3339) + `"}` + "\n"
+		jsonlPath := filepath.Join(t.TempDir(), "all-invalid.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		rejectsPath := filepath.Join(t.TempDir(), "rejects.jsonl")
+
+		stdout, stderr, err := bdImportBuffers(t, bd, dir, nil, jsonlPath, "--skip-invalid", "--rejects", rejectsPath, "--json")
+		if err != nil {
+			t.Fatalf("all-invalid skip import should still succeed; err=%v\nstderr:\n%s", err, stderr)
+		}
+		var result importSkipInvalidJSON
+		if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &result); err != nil {
+			t.Fatalf("parse --json output %q: %v", stdout, err)
+		}
+		if result.Created != 0 || result.Memories != 0 {
+			t.Errorf("Created=%d Memories=%d, want 0/0", result.Created, result.Memories)
+		}
+		if len(result.Rejected) != 2 {
+			t.Errorf("Rejected = %+v, want both invalid rows", result.Rejected)
+		}
+		if issues := bdListJSONAllowError(t, bd, dir); len(issues) != 0 {
+			t.Errorf("no rows should land; found %d", len(issues))
+		}
+	})
+
+	t.Run("no_rejects_writes_empty_file", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "imnone")
+		now := time.Now().UTC()
+		jsonlPath := filepath.Join(t.TempDir(), "all-valid.jsonl")
+		writeJSONLFile(t, jsonlPath, []types.Issue{
+			{ID: "imnone-aaa", Title: "Valid A", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+		})
+		rejectsPath := filepath.Join(t.TempDir(), "rejects.jsonl")
+
+		stdout, stderr, err := bdImportBuffers(t, bd, dir, nil, jsonlPath, "--skip-invalid", "--rejects", rejectsPath, "--json")
+		if err != nil {
+			t.Fatalf("bd import should succeed; err=%v\nstderr:\n%s", err, stderr)
+		}
+		var result importSkipInvalidJSON
+		if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &result); err != nil {
+			t.Fatalf("parse --json output %q: %v", stdout, err)
+		}
+		if result.Created != 1 {
+			t.Errorf("Created = %d, want 1", result.Created)
+		}
+		if len(result.Rejected) != 0 {
+			t.Errorf("Rejected = %+v, want none", result.Rejected)
+		}
+		saved, readErr := os.ReadFile(rejectsPath)
+		if readErr != nil {
+			t.Fatalf("an import with no rejects must still write the (empty) rejects file: %v", readErr)
+		}
+		if len(saved) != 0 {
+			t.Errorf("rejects file should be empty; got %q", saved)
+		}
+	})
+
+	t.Run("crlf_and_whitespace", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "imcrlf")
+		// Whole seconds: the file carries the same row twice, and Dolt's
+		// DATETIME(0) rounds a ≥.5 fraction up — the duplicate would then
+		// read as stale against its own first copy and the result assembly
+		// would drop both rows of the shared id.
+		now := time.Now().UTC().Truncate(time.Second)
+		valid, _ := json.Marshal(types.Issue{ID: "imcrlf-aaa", Title: "Valid A", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now})
+		invalid, _ := json.Marshal(types.Issue{ID: "imcrlf-bad", Title: "Invalid", Status: types.Status("verify"), IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now})
+		// CRLF terminators, a blank line, and a leading-whitespace line: line
+		// numbers count every physical line and raw lines are echoed without
+		// their terminator (the rejects file is LF-normalized).
+		content := "  " + string(valid) + "\r\n" + string(invalid) + "\r\n\r\n" + string(valid) + "\r\n"
+		jsonlPath := filepath.Join(t.TempDir(), "crlf.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		rejectsPath := filepath.Join(t.TempDir(), "rejects.jsonl")
+
+		stdout, stderr, err := bdImportBuffers(t, bd, dir, nil, jsonlPath, "--skip-invalid", "--rejects", rejectsPath, "--json")
+		if err != nil {
+			t.Fatalf("bd import --skip-invalid should succeed; err=%v\nstderr:\n%s", err, stderr)
+		}
+		var result importSkipInvalidJSON
+		if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &result); err != nil {
+			t.Fatalf("parse --json output %q: %v", stdout, err)
+		}
+		if result.Created != 2 {
+			t.Errorf("Created = %d, want 2 (both valid rows, whitespace tolerated)", result.Created)
+		}
+		if len(result.Rejected) != 1 || result.Rejected[0].Line != 2 {
+			t.Errorf("Rejected = %+v, want one entry on line 2 (line numbers count blank lines)", result.Rejected)
+		}
+		saved, readErr := os.ReadFile(rejectsPath)
+		if readErr != nil {
+			t.Fatalf("read rejects file: %v", readErr)
+		}
+		if want := string(invalid) + "\n"; string(saved) != want {
+			t.Errorf("rejects file = %q, want the rejected line LF-terminated without CR: %q", saved, want)
+		}
+	})
+
+	t.Run("repaired_rejects_file_reimports", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "imfix")
+		now := time.Now().UTC()
+		jsonlPath := filepath.Join(t.TempDir(), "import.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(mixSkipInvalidJSONL(t, now)), 0644); err != nil {
+			t.Fatal(err)
+		}
+		rejectsPath := filepath.Join(t.TempDir(), "rejects.jsonl")
+		if _, _, err := bdImportBuffers(t, bd, dir, nil, jsonlPath, "--skip-invalid", "--rejects", rejectsPath); err != nil {
+			t.Fatalf("first import: %v", err)
+		}
+
+		// Repair the saved lines and import them on their own, strictly.
+		repaired := filepath.Join(t.TempDir(), "repaired.jsonl")
+		raw, err := os.ReadFile(rejectsPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixed := strings.ReplaceAll(string(raw), `"verify"`, `"open"`)
+		fixed = strings.ReplaceAll(fixed, `"not-a-type"`, `"task"`)
+		if err := os.WriteFile(repaired, []byte(fixed), 0644); err != nil {
+			t.Fatal(err)
+		}
+		_, stderr, err := bdImportBuffers(t, bd, dir, nil, repaired)
+		if err != nil {
+			t.Fatalf("a repaired rejects file must import strictly without error; err=%v\nstderr:\n%s", err, stderr)
+		}
+		for _, id := range []string{"imskip-bad", "imskip-bad2"} {
+			showCmd := exec.Command(bd, "show", id)
+			showCmd.Dir = dir
+			showCmd.Env = bdEnv(dir)
+			if _, _, showErr := runCommandBuffers(t, showCmd); showErr != nil {
+				t.Errorf("bd show %s should succeed after the repaired re-import: %v", id, showErr)
+			}
+		}
+	})
+
+	// Dependencies kept records declare on a skipped one are dropped with
+	// it, and the report counts them. The repair the help gives (register
+	// the status, re-import the whole source) restores both edges; the
+	// saved line alone carries neither.
+	t.Run("dependencies_on_a_skipped_record_come_back_with_the_source", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "imedge")
+		g := newSkippedTargetGraph(t, "imedge")
+		jsonlPath := filepath.Join(t.TempDir(), "graph.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(g.content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		rejectsPath := filepath.Join(t.TempDir(), "rejects.jsonl")
+
+		stdout, stderr, err := bdImportBuffers(t, bd, dir, nil, jsonlPath, "--skip-invalid", "--rejects", rejectsPath, "--json")
+		if err != nil {
+			t.Fatalf("bd import --skip-invalid failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		var result importResultJSON
+		if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &result); err != nil {
+			t.Fatalf("parse --json output %q: %v", stdout, err)
+		}
+		if result.Created != 2 || len(result.Rejected) != 1 || result.Rejected[0].ID != g.b || len(result.SkippedDependencies) != 2 {
+			t.Fatalf("created %d, rejected %+v, skipped_dependencies %v; want 2 created, %s rejected, both edges on it skipped", result.Created, result.Rejected, result.SkippedDependencies, g.b)
+		}
+		if !strings.Contains(stderr, "Also skipped 2 dependencies other records declare on them") {
+			t.Errorf("stderr should count the dependencies skipped with the record; got:\n%s", stderr)
+		}
+		g.assertEdgesIntoB(t, bd, dir, false)
+
+		bdConfig(t, bd, dir, "set", "status.custom", "verify:active")
+		bdImport(t, bd, dir, jsonlPath)
+		g.assertEdgesIntoB(t, bd, dir, true)
+	})
+}
+
+// TestEmbeddedImportInvalidRegisteredVocabularyModes pins the vocabulary
+// half of #4492 source by source and in both modes, beside
+// TestEmbeddedImportInvalidRegisteredVocabulary's combined-source case: a
+// record using a custom status or type the workspace actually registered —
+// in the database (bd config set) or in config.yaml — is NOT a reject. The screen reads the writer's own vocabulary, so what the writer
+// accepts, the import accepts; a screen that rejected these would be worse
+// than the bug being fixed.
+func TestEmbeddedImportInvalidRegisteredVocabularyModes(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt import tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	// registeredVocabularyRows returns one row per custom combination: a
+	// custom status on a built-in type, a built-in status on a custom type,
+	// and both custom at once. Registered vocabulary must accept all three.
+	registeredVocabularyRows := func(prefix string, now time.Time) []types.Issue {
+		return []types.Issue{
+			{ID: prefix + "-cst", Title: "Custom status", Status: types.Status("verify"), IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+			{ID: prefix + "-ctp", Title: "Custom type", Status: types.StatusOpen, IssueType: types.IssueType("quest"), CreatedAt: now, UpdatedAt: now},
+			{ID: prefix + "-both", Title: "Both custom", Status: types.Status("verify"), IssueType: types.IssueType("quest"), CreatedAt: now, UpdatedAt: now},
+		}
+	}
+
+	// assertAllImported proves the registered-vocabulary file imports clean
+	// both ways: strictly (a registered record must not even be a reject
+	// under the default) and with --skip-invalid --rejects --json (zero
+	// rejects, empty rejects file). Each run gets a fresh workspace — with
+	// the vocabulary registered in IT, by register — so the first import
+	// cannot mask the second's counts and neither run borrows the other's
+	// registration.
+	assertAllImported := func(t *testing.T, prefix string, register func(t *testing.T, dir, beadsDir string), jsonlPath string) {
+		t.Helper()
+		strictDir, strictBeads, _ := bdInit(t, bd, "--prefix", prefix+"s")
+		register(t, strictDir, strictBeads)
+		strictOut, strictErrTxt, err := bdImportBuffers(t, bd, strictDir, nil, jsonlPath)
+		if err != nil {
+			t.Fatalf("strict import must succeed when the vocabulary is registered (a registered record is not a reject);\nstdout:\n%s\nstderr:\n%s", strictOut, strictErrTxt)
+		}
+		if issues := bdListJSONAllowError(t, bd, strictDir); len(issues) != 3 {
+			t.Errorf("strict import should land all 3 records; found %d", len(issues))
+		}
+
+		skipDir, skipBeads, _ := bdInit(t, bd, "--prefix", prefix+"k")
+		register(t, skipDir, skipBeads)
+		rejectsPath := filepath.Join(t.TempDir(), "rejects.jsonl")
+		stdout, stderr, err := bdImportBuffers(t, bd, skipDir, nil, jsonlPath, "--skip-invalid", "--rejects", rejectsPath, "--json")
+		if err != nil {
+			t.Fatalf("bd import --skip-invalid should succeed; err=%v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		var result importSkipInvalidJSON
+		if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &result); err != nil {
+			t.Fatalf("parse --json output %q: %v", stdout, err)
+		}
+		if result.Created != 3 {
+			t.Errorf("Created = %d, want 3 (registered vocabulary must not reject); result: %+v", result.Created, result)
+		}
+		if len(result.Rejected) != 0 {
+			t.Errorf("Rejected = %+v, want none — every record is in the registered vocabulary", result.Rejected)
+		}
+		saved, readErr := os.ReadFile(rejectsPath)
+		if readErr != nil {
+			t.Fatalf("read rejects file: %v", readErr)
+		}
+		if len(saved) != 0 {
+			t.Errorf("rejects file should be empty; got %q", saved)
+		}
+	}
+
+	t.Run("db_registered_status_and_type", func(t *testing.T) {
+		register := func(t *testing.T, dir, beadsDir string) {
+			t.Helper()
+			bdRunOK(t, bd, dir, "config", "set", "status.custom", "verify:active")
+			bdRunOK(t, bd, dir, "config", "set", "types.custom", "quest")
+		}
+		jsonlPath := filepath.Join(t.TempDir(), "import.jsonl")
+		writeJSONLFile(t, jsonlPath, registeredVocabularyRows("imreg", time.Now().UTC()))
+		assertAllImported(t, "imreg", register, jsonlPath)
+	})
+
+	t.Run("yaml_overlay_status_and_type", func(t *testing.T) {
+		register := func(t *testing.T, dir, beadsDir string) {
+			t.Helper()
+			yaml := "status:\n  custom: [verify:active]\ntypes:\n  custom: [quest]\n"
+			path := filepath.Join(beadsDir, "config.yaml")
+			existing, readErr := os.ReadFile(path)
+			if readErr != nil {
+				existing = nil // no config.yaml yet — the sections become the whole file
+			}
+			if err := os.WriteFile(path, append(existing, yaml...), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		jsonlPath := filepath.Join(t.TempDir(), "import.jsonl")
+		writeJSONLFile(t, jsonlPath, registeredVocabularyRows("imreg", time.Now().UTC()))
+		assertAllImported(t, "imyal", register, jsonlPath)
+	})
+}
+
+// TestEmbeddedImportInvalidStaleAndDedupCases pins the ordering half of
+// #4492's screen: the stale filter runs FIRST, so an invalid record that is
+// about to be skipped anyway is never a reject. A stale row will not be
+// written, so it cannot be rejected either — the strict default succeeds,
+// reports the row as stale-skipped, and the stored (newer) data survives
+// untouched. Only --allow-stale, which puts that row back on the write path,
+// puts it back under the screen.
+func TestEmbeddedImportInvalidStaleAndDedupCases(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt import tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	// seedNewerRow imports a fresh valid snapshot so the workspace holds a
+	// row for id with the given (newer) timestamps, then returns the dir.
+	seedNewerRow := func(t *testing.T, prefix, id, title string, at time.Time) string {
+		t.Helper()
+		dir, _, _ := bdInit(t, bd, "--prefix", prefix)
+		seedPath := filepath.Join(t.TempDir(), "seed.jsonl")
+		writeJSONLFile(t, seedPath, []types.Issue{
+			{ID: id, Title: title, Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: at, UpdatedAt: at},
+		})
+		bdImport(t, bd, dir, seedPath)
+		return dir
+	}
+
+	t.Run("stale_invalid_row_is_stale_skipped_not_rejected", func(t *testing.T) {
+		newer := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
+		dir := seedNewerRow(t, "imst", "imst-aaa", "Stored newer", newer)
+
+		// The incoming snapshot is older AND its imst-aaa row is invalid.
+		older := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
+		jsonlPath := filepath.Join(t.TempDir(), "import.jsonl")
+		writeJSONLFile(t, jsonlPath, []types.Issue{
+			{ID: "imst-aaa", Title: "Stale invalid", Status: types.Status("verify"), IssueType: types.TypeTask, CreatedAt: older, UpdatedAt: older},
+			{ID: "imst-bbb", Title: "Fresh valid", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: newer, UpdatedAt: newer},
+		})
+
+		stdout, stderr, err := bdImportBuffers(t, bd, dir, nil, jsonlPath, "--json")
+		if err != nil {
+			t.Fatalf("strict import must succeed: the invalid row is stale-skipped before the screen ever sees it;\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		var result importSkipInvalidJSON
+		if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &result); err != nil {
+			t.Fatalf("parse --json output %q: %v", stdout, err)
+		}
+		if len(result.Rejected) != 0 {
+			t.Errorf("Rejected = %+v, want none — a row that will not be written cannot be rejected", result.Rejected)
+		}
+		if len(result.StaleSkippedIDs) != 1 || result.StaleSkippedIDs[0] != "imst-aaa" {
+			t.Errorf("StaleSkippedIDs = %v, want [imst-aaa] (reported as stale-skipped, not rejected)", result.StaleSkippedIDs)
+		}
+		if result.Created != 1 {
+			t.Errorf("Created = %d, want 1 (only imst-bbb)", result.Created)
+		}
+		// The stored row is preserved: same title, same updated_at.
+		showCmd := exec.Command(bd, "show", "imst-aaa", "--json")
+		showCmd.Dir = dir
+		showCmd.Env = bdEnv(dir)
+		showOut, _, showErr := runCommandBuffers(t, showCmd)
+		if showErr != nil {
+			t.Fatalf("bd show imst-aaa: %v", showErr)
+		}
+		var shown []struct {
+			Title     string    `json:"title"`
+			UpdatedAt time.Time `json:"updated_at"`
+		}
+		if err := json.Unmarshal(showOut.Bytes(), &shown); err != nil || len(shown) != 1 {
+			t.Fatalf("parse bd show --json output %q: %v (len=%d)", showOut.String(), err, len(shown))
+		}
+		if shown[0].Title != "Stored newer" {
+			t.Errorf("stored row must keep its (newer) content; title = %q", shown[0].Title)
+		}
+		if shown[0].UpdatedAt.Unix() != newer.Unix() {
+			t.Errorf("stored row must keep its (newer) updated_at %s; got %s", newer.Format(time.RFC3339), shown[0].UpdatedAt.Format(time.RFC3339))
+		}
+	})
+
+	t.Run("dedup_hit_is_not_screened", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "imdd")
+		existingID := bdCreateSilent(t, bd, dir, "Dup Title")
+
+		now := time.Now().UTC().Truncate(time.Second)
+		jsonlPath := filepath.Join(t.TempDir(), "import.jsonl")
+		writeJSONLFile(t, jsonlPath, []types.Issue{
+			{ID: "imdd-bad", Title: "Dup Title", Status: types.Status("verify"), IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+			{ID: "imdd-ccc", Title: "Fresh valid", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+		})
+
+		stdout, stderr, err := bdImportBuffers(t, bd, dir, nil, jsonlPath, "--dedup", "--json")
+		if err != nil {
+			t.Fatalf("strict import must succeed: the invalid row is a dedup hit, removed before the screen;\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		var result importSkipInvalidJSON
+		if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &result); err != nil {
+			t.Fatalf("parse --json output %q: %v", stdout, err)
+		}
+		if result.DedupHits != 1 {
+			t.Errorf("DedupHits = %d, want 1 (the invalid duplicate is a dedup hit, not a reject)", result.DedupHits)
+		}
+		if len(result.Rejected) != 0 {
+			t.Errorf("Rejected = %+v, want none", result.Rejected)
+		}
+		if result.Created != 1 {
+			t.Errorf("Created = %d, want 1 (only imdd-ccc)", result.Created)
+		}
+		showCmd := exec.Command(bd, "show", existingID)
+		showCmd.Dir = dir
+		showCmd.Env = bdEnv(dir)
+		if _, _, showErr := runCommandBuffers(t, showCmd); showErr != nil {
+			t.Errorf("bd show %s: %v", existingID, showErr)
+		}
+	})
+
+	t.Run("allow_stale_puts_the_row_back_under_the_screen", func(t *testing.T) {
+		newer := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
+		dir := seedNewerRow(t, "imas", "imas-aaa", "Stored newer", newer)
+
+		older := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
+		jsonlPath := filepath.Join(t.TempDir(), "import.jsonl")
+		writeJSONLFile(t, jsonlPath, []types.Issue{
+			{ID: "imas-aaa", Title: "Stale invalid", Status: types.Status("verify"), IssueType: types.TypeTask, CreatedAt: older, UpdatedAt: older},
+			{ID: "imas-bbb", Title: "Fresh valid", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: newer, UpdatedAt: newer},
+		})
+
+		// Strict + --allow-stale: the invalid row would be written, so it is
+		// screened, and the strict default fails naming its line.
+		_, stderr, err := bdImportBuffers(t, bd, dir, nil, jsonlPath, "--allow-stale")
+		if err == nil {
+			t.Fatalf("strict --allow-stale import must fail on the invalid row that is about to land")
+		}
+		if !strings.Contains(stderr, "line 1") || !strings.Contains(stderr, "invalid status: verify") || !strings.Contains(stderr, "nothing was imported") {
+			t.Errorf("strict failure should name line 1, the reason, and say nothing was imported; got:\n%s", stderr)
+		}
+		if issues := bdListJSONAllowError(t, bd, dir); len(issues) != 1 {
+			t.Errorf("a failed strict import must not write anything; found %d issues", len(issues))
+		}
+
+		// Skip + --allow-stale: the row is rejected, the valid row lands.
+		rejectsPath := filepath.Join(t.TempDir(), "rejects.jsonl")
+		stdout, stderr, err := bdImportBuffers(t, bd, dir, nil, jsonlPath, "--allow-stale", "--skip-invalid", "--rejects", rejectsPath, "--json")
+		if err != nil {
+			t.Fatalf("bd import --allow-stale --skip-invalid should succeed; err=%v\nstderr:\n%s", err, stderr)
+		}
+		var result importSkipInvalidJSON
+		if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &result); err != nil {
+			t.Fatalf("parse --json output %q: %v", stdout, err)
+		}
+		if len(result.Rejected) != 1 || result.Rejected[0].Line != 1 || result.Rejected[0].ID != "imas-aaa" {
+			t.Errorf("Rejected = %+v, want one entry: line 1 / imas-aaa", result.Rejected)
+		}
+		if result.Created != 1 {
+			t.Errorf("Created = %d, want 1 (only imas-bbb)", result.Created)
+		}
+	})
+}
+
+// TestEmbeddedImportInvalidDryRunCases pins #4492's dry-run and flag-rail
+// contracts: a dry run previews the exact plan the real import would run —
+// the strict default fails on the same screening error the real import would
+// fail on, --skip-invalid reports the records it would reject without
+// writing the rejects file — and neither touches the database. The flag
+// rails: --rejects without --skip-invalid, a --rejects path that names the
+// input (plain, symlink, or hardlink), and an unwritable --rejects path all
+// abort before anything is written.
+func TestEmbeddedImportInvalidDryRunCases(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt import tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	mixedContent := func() string { return mixSkipInvalidJSONL(t, time.Now().UTC()) }
+
+	t.Run("strict_dry_run_reports_the_screening_error", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "imdry")
+		jsonlPath := filepath.Join(t.TempDir(), "import.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(mixedContent()), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		_, stderr, err := bdImportBuffers(t, bd, dir, nil, jsonlPath, "--dry-run")
+		if err == nil {
+			t.Fatalf("a strict dry run must fail on the same record the real import would fail on")
+		}
+		for _, want := range []string{"line 2", "invalid status: verify", "nothing was imported"} {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("strict dry-run error should contain %q; got:\n%s", want, stderr)
+			}
+		}
+		if issues := bdListJSONAllowError(t, bd, dir); len(issues) != 0 {
+			t.Errorf("a failed dry run must not write; found %d issues", len(issues))
+		}
+		if out := bdMemories(t, bd, dir); strings.Contains(out, "skip-key") {
+			t.Errorf("a failed dry run must not store the memory; bd memories:\n%s", out)
+		}
+	})
+
+	t.Run("skip_dry_run_previews_without_writing", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "imdrp")
+		jsonlPath := filepath.Join(t.TempDir(), "import.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(mixedContent()), 0644); err != nil {
+			t.Fatal(err)
+		}
+		// A rejects file that already exists must survive the dry run
+		// untouched — the dry run previews; it does not write.
+		rejectsPath := filepath.Join(t.TempDir(), "rejects.jsonl")
+		if err := os.WriteFile(rejectsPath, []byte("SENTINEL\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		stdout, stderr, err := bdImportBuffers(t, bd, dir, nil, jsonlPath, "--dry-run", "--skip-invalid", "--rejects", rejectsPath, "--json")
+		if err != nil {
+			t.Fatalf("skip dry run should succeed; err=%v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		var result importSkipInvalidJSON
+		if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &result); err != nil {
+			t.Fatalf("parse --json output %q: %v", stdout, err)
+		}
+		if !result.DryRun {
+			t.Errorf("DryRun = false, want true")
+		}
+		if result.Created != 2 {
+			t.Errorf("Created = %d, want 2 (the planned valid records)", result.Created)
+		}
+		if result.Memories != 1 {
+			t.Errorf("Memories = %d, want 1 (planned)", result.Memories)
+		}
+		if len(result.Rejected) != 2 || result.Rejected[0].Line != 2 || result.Rejected[1].Line != 5 {
+			t.Errorf("Rejected = %+v, want the two invalid records on lines 2 and 5", result.Rejected)
+		}
+		if want := len(result.Rejected) + len(result.StaleSkippedIDs) + result.DedupHits; result.Skipped != want {
+			t.Errorf("Skipped = %d, want %d (rejected + stale + dedup)", result.Skipped, want)
+		}
+		if result.RejectsFile != "" {
+			t.Errorf("RejectsFile = %q, want empty — a dry run must not claim a saved file", result.RejectsFile)
+		}
+		if issues := bdListJSONAllowError(t, bd, dir); len(issues) != 0 {
+			t.Errorf("a dry run must not write; found %d issues", len(issues))
+		}
+		if out := bdMemories(t, bd, dir); strings.Contains(out, "skip-key") {
+			t.Errorf("a dry run must not store the memory; bd memories:\n%s", out)
+		}
+		saved, readErr := os.ReadFile(rejectsPath)
+		if readErr != nil || string(saved) != "SENTINEL\n" {
+			t.Errorf("existing rejects file must survive a dry run untouched; content=%q err=%v", saved, readErr)
+		}
+	})
+
+	t.Run("rejects_requires_skip_invalid", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "imrrq")
+		jsonlPath := filepath.Join(t.TempDir(), "import.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(mixedContent()), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		_, stderr, err := bdImportBuffers(t, bd, dir, nil, jsonlPath, "--rejects", filepath.Join(t.TempDir(), "rejects.jsonl"))
+		if err == nil {
+			t.Fatalf("--rejects without --skip-invalid must be refused")
+		}
+		if !strings.Contains(stderr, "--rejects requires --skip-invalid") {
+			t.Errorf("error should explain that --rejects requires --skip-invalid; got:\n%s", stderr)
+		}
+		if issues := bdListJSONAllowError(t, bd, dir); len(issues) != 0 {
+			t.Errorf("the refused import must not write; found %d issues", len(issues))
+		}
+	})
+
+	t.Run("rejects_refuses_to_name_the_input", func(t *testing.T) {
+		for _, aliasKind := range []string{"same_path", "symlink", "hardlink"} {
+			t.Run(aliasKind, func(t *testing.T) {
+				dir, _, _ := bdInit(t, bd, "--prefix", "imal")
+				srcDir := t.TempDir()
+				jsonlPath := filepath.Join(srcDir, "import.jsonl")
+				if err := os.WriteFile(jsonlPath, []byte(mixedContent()), 0644); err != nil {
+					t.Fatal(err)
+				}
+				rejectsPath := jsonlPath
+				switch aliasKind {
+				case "symlink":
+					rejectsPath = filepath.Join(srcDir, "rejects-link.jsonl")
+					if err := os.Symlink(jsonlPath, rejectsPath); err != nil {
+						t.Fatal(err)
+					}
+				case "hardlink":
+					rejectsPath = filepath.Join(srcDir, "rejects-link.jsonl")
+					if err := os.Link(jsonlPath, rejectsPath); err != nil {
+						t.Fatal(err)
+					}
+				}
+
+				_, stderr, err := bdImportBuffers(t, bd, dir, nil, jsonlPath, "--skip-invalid", "--rejects", rejectsPath)
+				if err == nil {
+					t.Fatalf("--rejects naming the import source (%s) must be refused", aliasKind)
+				}
+				if !strings.Contains(stderr, "is the input file") {
+					t.Errorf("error should say --rejects is the input file; got:\n%s", stderr)
+				}
+				saved, readErr := os.ReadFile(jsonlPath)
+				if readErr != nil || !strings.Contains(string(saved), "imskip-aaa") {
+					t.Errorf("the import source must survive the refusal intact; err=%v", readErr)
+				}
+				if issues := bdListJSONAllowError(t, bd, dir); len(issues) != 0 {
+					t.Errorf("the refused import must not write; found %d issues", len(issues))
+				}
+			})
+		}
+	})
+
+	// `bd import - --rejects F < F` reads F through stdin: the rejects
+	// write would replace it before the import wrote anything (with an
+	// empty file when every row is valid), so it is refused like a named
+	// input, and F stays byte for byte. A piped stdin (stdin_import above)
+	// still works.
+	t.Run("rejects_refuses_the_file_stdin_reads", func(t *testing.T) {
+		now := time.Now().UTC()
+		valid, err := json.Marshal(types.Issue{ID: "imsin-aaa", Title: "Valid A", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tc := range []struct{ name, content string }{
+			{"mixed_rows", mixedContent()},
+			{"no_rejects", string(valid) + "\n"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				dir, _, _ := bdInit(t, bd, "--prefix", "imsin")
+				source := filepath.Join(t.TempDir(), "backup.jsonl")
+				if err := os.WriteFile(source, []byte(tc.content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				stdin, err := os.Open(source)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer stdin.Close()
+
+				_, stderr, err := bdImportBuffers(t, bd, dir, stdin, "-", "--skip-invalid", "--rejects", source)
+				if err == nil {
+					t.Fatalf("--rejects naming the file stdin reads must be refused; stderr:\n%s", stderr)
+				}
+				if !strings.Contains(stderr, "is the input file") {
+					t.Errorf("error should say --rejects is the input file; got:\n%s", stderr)
+				}
+				if got, readErr := os.ReadFile(source); readErr != nil || string(got) != tc.content {
+					t.Errorf("the input changed: err=%v content=%q, want %q", readErr, got, tc.content)
+				}
+				if issues := bdListJSONAllowError(t, bd, dir); len(issues) != 0 {
+					t.Errorf("the refused import must not write; found %d issues", len(issues))
+				}
+			})
+		}
+	})
+
+	t.Run("unwritable_rejects_output_aborts_import", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "imun")
+		jsonlPath := filepath.Join(t.TempDir(), "import.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(mixedContent()), 0644); err != nil {
+			t.Fatal(err)
+		}
+		rejectsPath := filepath.Join(t.TempDir(), "no-such-dir", "rejects.jsonl")
+
+		_, stderr, err := bdImportBuffers(t, bd, dir, nil, jsonlPath, "--skip-invalid", "--rejects", rejectsPath)
+		if err == nil {
+			t.Fatalf("an unwritable --rejects path must abort the import")
+		}
+		if !strings.Contains(stderr, "write rejects file") || !strings.Contains(stderr, "nothing was imported") {
+			t.Errorf("error should name the rejects path and say nothing was imported; got:\n%s", stderr)
+		}
+		if issues := bdListJSONAllowError(t, bd, dir); len(issues) != 0 {
+			t.Errorf("the aborted import must not write even its VALID records; found %d issues", len(issues))
+		}
+	})
+}
+
+// TestEmbeddedImportUndecodableLineCases pins AC-6 of GH#4492: a
+// malformed or undecodable line stops every import route before any issue
+// or memory write, and the error names the offending physical line —
+// counted across headers, blanks, memories and tombstones, in both readers
+// (bd import's parseImportRecords, recovery's parseJSONLFile). The
+// auto-import route is the exception by design: best-effort, it warns,
+// stamps the attempt and lets the outer command continue.
+func TestEmbeddedImportUndecodableLineCases(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt import tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	now := time.Now().UTC()
+	issueJSON := func(id, title string) string {
+		b, err := json.Marshal(types.Issue{ID: id, Title: title, Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now})
+		if err != nil {
+			t.Fatalf("marshaling issue %s: %v", id, err)
+		}
+		return string(b)
+	}
+	tombstoneJSON := func(id string) string {
+		b, err := json.Marshal(types.Issue{ID: id, Title: "Gone", Status: types.Status("tombstone"), IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now})
+		if err != nil {
+			t.Fatalf("marshaling tombstone %s: %v", id, err)
+		}
+		return string(b)
+	}
+
+	// The counting gauntlet: a header, a blank, a memory and a tombstone
+	// all precede the undecodable line, so a loop that numbers records
+	// instead of physical lines reports the wrong one. A valid row behind
+	// the garbage proves the import stops at the read, not mid-write.
+	undecodableContent := strings.Join([]string{
+		`{"_schema":"beads-jsonl/1","_dolt_branch":"main","_sort":"stable-v1"}`, // line 1: header
+		``,                                // line 2: blank
+		issueJSON("imund-aaa", "Valid A"), // line 3
+		`{"_type":"memory","key":"skip-me","value":"mem"}`, // line 4
+		tombstoneJSON("imund-gone"),                        // line 5
+		`<<<<<<< HEAD`,                                     // line 6: undecodable (merge-conflict marker)
+		issueJSON("imund-bbb", "Valid B"),                  // line 7
+	}, "\n") + "\n"
+
+	t.Run("file_import_names_line_and_writes_nothing", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "imund")
+		jsonlPath := filepath.Join(t.TempDir(), "import.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(undecodableContent), 0644); err != nil {
+			t.Fatal(err)
+		}
+		stdout, stderr, err := bdImportBuffers(t, bd, dir, nil, jsonlPath)
+		out := stdout + stderr
+		if err == nil {
+			t.Fatalf("import with an undecodable line must fail; output:\n%s", out)
+		}
+		if !strings.Contains(out, "line 6") {
+			t.Errorf("the error must name the undecodable physical line (line 6); got:\n%s", out)
+		}
+		if issues := bdListJSONAllowError(t, bd, dir); len(issues) != 0 {
+			t.Errorf("a parse failure must not leave rows behind; found %d issues", len(issues))
+		}
+		for _, id := range []string{"imund-aaa", "imund-bbb"} {
+			cmd := exec.Command(bd, "show", id)
+			cmd.Dir = dir
+			cmd.Env = bdEnv(dir)
+			if _, _, err := runCommandBuffers(t, cmd); err == nil {
+				t.Errorf("bd show %s must fail; the row must not exist", id)
+			}
+		}
+	})
+
+	t.Run("stdin_import_names_line", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "imund")
+		stdout, stderr, err := bdImportBuffers(t, bd, dir, strings.NewReader(undecodableContent), "-")
+		out := stdout + stderr
+		if err == nil {
+			t.Fatalf("bd import - with an undecodable line must fail")
+		}
+		if !strings.Contains(out, "line 6") {
+			t.Errorf("the stdin reader must name the undecodable physical line too; got:\n%s", out)
+		}
+		if issues := bdListJSONAllowError(t, bd, dir); len(issues) != 0 {
+			t.Errorf("a parse failure must not leave rows behind; found %d issues", len(issues))
+		}
+	})
+
+	t.Run("valid_json_that_cannot_decode_as_a_record_names_line", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "imund")
+		content := issueJSON("imund-ccc", "Valid C") + "\n" + `{"title": {"nested": true}}` + "\n"
+		jsonlPath := filepath.Join(t.TempDir(), "import.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		stdout, stderr, err := bdImportBuffers(t, bd, dir, nil, jsonlPath)
+		out := stdout + stderr
+		if err == nil {
+			t.Fatalf("valid JSON that cannot decode as a record must fail the import; output:\n%s", out)
+		}
+		if !strings.Contains(out, "line 2") {
+			t.Errorf("the error must name the record-shaped-but-undecodable line (line 2); got:\n%s", out)
+		}
+		if issues := bdListJSONAllowError(t, bd, dir); len(issues) != 0 {
+			t.Errorf("a decode failure must not leave rows behind; found %d issues", len(issues))
+		}
+	})
+
+	t.Run("memory_record_decode_error_names_line", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "imund")
+		content := issueJSON("imund-mem", "Valid M") + "\n" + `{"_type":"memory","key":123}` + "\n"
+		jsonlPath := filepath.Join(t.TempDir(), "import.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		stdout, stderr, err := bdImportBuffers(t, bd, dir, nil, jsonlPath)
+		out := stdout + stderr
+		if err == nil {
+			t.Fatalf("a memory record that cannot decode must fail the import; output:\n%s", out)
+		}
+		if !strings.Contains(out, "line 2") {
+			t.Errorf("the error must name the undecodable memory record's line (line 2); got:\n%s", out)
+		}
+		if issues := bdListJSONAllowError(t, bd, dir); len(issues) != 0 {
+			t.Errorf("a decode failure must not leave rows behind; found %d issues", len(issues))
+		}
+	})
+
+	t.Run("init_from_jsonl_propagates_the_line_error", func(t *testing.T) {
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		content := issueJSON("imund-init", "Valid I") + "\n" + `not-json-at-all` + "\n"
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "issues.jsonl"), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(bd, "init", "--from-jsonl", "--prefix", "imund", "--quiet", "--non-interactive")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		out := stdout.String() + stderr.String()
+		if err == nil {
+			t.Fatalf("bd init --from-jsonl with an undecodable line must fail; output:\n%s", out)
+		}
+		if !strings.Contains(out, "line 2") {
+			t.Errorf("the recovery import must name the undecodable line (line 2); got:\n%s", out)
+		}
+	})
+
+	t.Run("auto_import_warns_stamps_and_the_command_continues", func(t *testing.T) {
+		dstDir, dstBeadsDir, _ := bdInit(t, bd, "--prefix", "imund")
+		content := issueJSON("imund-ai", "Auto Import") + "\n" + `{"broken"` + "\n"
+		if err := os.WriteFile(filepath.Join(dstBeadsDir, "issues.jsonl"), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		cmd := exec.Command(bd, "create", "post-import marker", "--type", "task")
+		cmd.Dir = dstDir
+		cmd.Env = bdEnv(dstDir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		out := stdout.String() + stderr.String()
+		if err != nil {
+			t.Fatalf("the outer command must survive an undecodable auto-import source; output:\n%s", out)
+		}
+		if !strings.Contains(out, "warning: auto-import") {
+			t.Errorf("the failed auto-import must warn; got:\n%s", out)
+		}
+		if !strings.Contains(out, "line 2") {
+			t.Errorf("the auto-import warning must name the undecodable line (line 2); got:\n%s", out)
+		}
+		if issues := bdListJSON(t, bd, dstDir); len(issues) != 1 {
+			t.Fatalf("expected only the created marker issue (the import must have written nothing), got %d", len(issues))
+		}
+
+		// The failed attempt is stamped: a later command must not re-read
+		// (and re-warn about) the same broken source.
+		cmd2 := exec.Command(bd, "create", "second marker", "--type", "task")
+		cmd2.Dir = dstDir
+		cmd2.Env = bdEnv(dstDir)
+		stdout2, stderr2, err2 := runCommandBuffers(t, cmd2)
+		if err2 != nil {
+			t.Fatalf("the second command must succeed; output:\n%s%s", stdout2.String(), stderr2.String())
+		}
+		if out2 := stdout2.String() + stderr2.String(); strings.Contains(out2, "auto-import") {
+			t.Errorf("a stamped failed attempt must not be retried; got:\n%s", out2)
+		}
+	})
+}
+
+// TestEmbeddedRecoveryQuarantineCases pins AC-7 of GH#4492: the recovery
+// imports (bd init --from-jsonl, bd bootstrap, and auto-import on an empty
+// database) screen their records before writing, quarantine the rejects
+// beside the source as <source>.rejected.jsonl, warn with count, first
+// line/id/reason and the quarantine path, and restore the valid rows. A
+// quarantine that cannot be written only warns — the valid rows still
+// restore, with no false "saved" claim. An auto-import whose issue records
+// were all rejected warns, stamps the attempt, and claims no writes.
+func TestEmbeddedRecoveryQuarantineCases(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt import tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	rowJSON := func(id, title string, status types.Status) string {
+		b, err := json.Marshal(types.Issue{ID: id, Title: title, Status: status, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now})
+		if err != nil {
+			t.Fatalf("marshaling issue %s: %v", id, err)
+		}
+		return string(b)
+	}
+	validRow := func(id, title string) string { return rowJSON(id, title, types.StatusOpen) }
+	badRow := func(id string) string { return rowJSON(id, "Invalid", types.Status("verify")) }
+	const memoryRow = `{"_type":"memory","key":"recovery-key","value":"kept memory"}`
+
+	// valid, invalid, valid, memory: the invalid row is line 2, the memory
+	// line 4 — eligible memories must survive a quarantined import.
+	mixContent := strings.Join([]string{
+		validRow("imq-aaa", "Valid A"),
+		badRow("imq-bad"),
+		validRow("imq-ccc", "Valid C"),
+		memoryRow,
+	}, "\n") + "\n"
+	wantQuarantine := badRow("imq-bad") + "\n"
+
+	// assertMemoryRestored checks the eligible memory landed beside the
+	// valid rows.
+	assertMemoryRestored := func(t *testing.T, dir string) {
+		t.Helper()
+		recall := exec.Command(bd, "recall", "recovery-key")
+		recall.Dir = dir
+		recall.Env = bdEnv(dir)
+		memOut, memErr, err := runCommandBuffers(t, recall)
+		if err != nil {
+			t.Fatalf("bd recall of the imported memory must succeed; output:\n%s%s", memOut.String(), memErr.String())
+		}
+		if !strings.Contains(memOut.String(), "kept memory") {
+			t.Errorf("the memory record must survive the quarantined import; got:\n%s", memOut.String())
+		}
+	}
+
+	t.Run("init_from_jsonl_quarantines_rejects", func(t *testing.T) {
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		jsonlPath := filepath.Join(dir, ".beads", "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(mixContent), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(bd, "init", "--from-jsonl", "--prefix", "imq", "--quiet", "--non-interactive")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		out := stdout.String() + stderr.String()
+		if err != nil {
+			t.Fatalf("bd init --from-jsonl must skip invalid records, not fail; output:\n%s", out)
+		}
+		for _, want := range []string{"warning: skipped 1 invalid record", "line 2", "imq-bad", "invalid status: verify", "issues.jsonl.rejected.jsonl"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("the recovery warning must identify %q; got:\n%s", want, out)
+			}
+		}
+		issues := bdListJSON(t, bd, dir)
+		if len(issues) != 2 {
+			t.Fatalf("the valid records must restore; want 2 issues, got %d", len(issues))
+		}
+		quarantine, err := os.ReadFile(jsonlPath + ".rejected.jsonl")
+		if err != nil {
+			t.Fatalf("the rejects must be quarantined beside the source: %v", err)
+		}
+		if string(quarantine) != wantQuarantine {
+			t.Errorf("quarantine content = %q, want the rejected line verbatim %q", quarantine, wantQuarantine)
+		}
+		// The eligible memory restores alongside the valid rows.
+		assertMemoryRestored(t, dir)
+	})
+
+	t.Run("bootstrap_quarantines_rejects", func(t *testing.T) {
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+		beadsDir := filepath.Join(dir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(mixContent), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(bd, "bootstrap", "--yes")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		out := stdout.String() + stderr.String()
+		if err != nil {
+			t.Fatalf("bd bootstrap must skip invalid records, not fail; output:\n%s", out)
+		}
+		for _, want := range []string{"warning: skipped 1 invalid record", "line 2", "imq-bad", "invalid status: verify", "issues.jsonl.rejected.jsonl", "Imported 2 issues"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("bootstrap output must contain %q; got:\n%s", want, out)
+			}
+		}
+		if issues := bdListJSON(t, bd, dir); len(issues) != 2 {
+			t.Fatalf("the valid records must restore; want 2 issues, got %d", len(issues))
+		}
+		quarantine, err := os.ReadFile(jsonlPath + ".rejected.jsonl")
+		if err != nil {
+			t.Fatalf("the rejects must be quarantined beside the source: %v", err)
+		}
+		if string(quarantine) != wantQuarantine {
+			t.Errorf("quarantine content = %q, want %q", quarantine, wantQuarantine)
+		}
+		assertMemoryRestored(t, dir)
+	})
+
+	t.Run("auto_import_quarantines_rejects", func(t *testing.T) {
+		dstDir, dstBeadsDir, _ := bdInit(t, bd, "--prefix", "imq")
+		jsonlPath := filepath.Join(dstBeadsDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(mixContent), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(bd, "create", "post-import marker", "--type", "task")
+		cmd.Dir = dstDir
+		cmd.Env = bdEnv(dstDir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		out := stdout.String() + stderr.String()
+		if err != nil {
+			t.Fatalf("the outer command must survive quarantined auto-import rejects; output:\n%s", out)
+		}
+		for _, want := range []string{"warning: skipped 1 invalid record", "auto-imported 2 issues", "issues.jsonl.rejected.jsonl"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("auto-import must report %q; got:\n%s", want, out)
+			}
+		}
+		if issues := bdListJSON(t, bd, dstDir); len(issues) != 3 {
+			t.Fatalf("want 3 issues (2 imported + 1 created), got %d", len(issues))
+		}
+		quarantine, err := os.ReadFile(jsonlPath + ".rejected.jsonl")
+		if err != nil {
+			t.Fatalf("the rejects must be quarantined beside the source: %v", err)
+		}
+		if string(quarantine) != wantQuarantine {
+			t.Errorf("quarantine content = %q, want %q", quarantine, wantQuarantine)
+		}
+		assertMemoryRestored(t, dstDir)
+		// The attempt is stamped: a later command neither retries the
+		// import nor re-warns about the same rejects.
+		cmd2 := exec.Command(bd, "create", "second marker", "--type", "task")
+		cmd2.Dir = dstDir
+		cmd2.Env = bdEnv(dstDir)
+		stdout2, stderr2, err2 := runCommandBuffers(t, cmd2)
+		if err2 != nil {
+			t.Fatalf("the second command must succeed; output:\n%s%s", stdout2.String(), stderr2.String())
+		}
+		if out2 := stdout2.String() + stderr2.String(); strings.Contains(out2, "auto-import") {
+			t.Errorf("a stamped attempt must not be retried; got:\n%s", out2)
+		}
+	})
+
+	t.Run("all_rejected_auto_import_warns_and_stamps", func(t *testing.T) {
+		dstDir, dstBeadsDir, _ := bdInit(t, bd, "--prefix", "imq")
+		jsonlPath := filepath.Join(dstBeadsDir, "issues.jsonl")
+		allBad := badRow("imq-bad1") + "\n" + badRow("imq-bad2") + "\n"
+		if err := os.WriteFile(jsonlPath, []byte(allBad), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(bd, "create", "post-import marker", "--type", "task")
+		cmd.Dir = dstDir
+		cmd.Env = bdEnv(dstDir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		out := stdout.String() + stderr.String()
+		if err != nil {
+			t.Fatalf("the outer command must survive an all-rejected source; output:\n%s", out)
+		}
+		if !strings.Contains(out, "warning: skipped 2 invalid record") {
+			t.Errorf("an all-rejected import must warn with the count; got:\n%s", out)
+		}
+		if strings.Contains(out, "auto-imported") {
+			t.Errorf("an import that wrote no issues must not claim writes; got:\n%s", out)
+		}
+		if issues := bdListJSON(t, bd, dstDir); len(issues) != 1 {
+			t.Fatalf("want only the created marker (nothing imported), got %d", len(issues))
+		}
+		quarantine, err := os.ReadFile(jsonlPath + ".rejected.jsonl")
+		if err != nil {
+			t.Fatalf("the rejects must be quarantined: %v", err)
+		}
+		if string(quarantine) != allBad {
+			t.Errorf("quarantine content = %q, want %q", quarantine, allBad)
+		}
+		// Stamped: the next command does not retry.
+		cmd2 := exec.Command(bd, "create", "second marker", "--type", "task")
+		cmd2.Dir = dstDir
+		cmd2.Env = bdEnv(dstDir)
+		stdout2, stderr2, err2 := runCommandBuffers(t, cmd2)
+		if err2 != nil {
+			t.Fatalf("the second command must succeed; output:\n%s%s", stdout2.String(), stderr2.String())
+		}
+		if out2 := stdout2.String() + stderr2.String(); strings.Contains(out2, "auto-import") || strings.Contains(out2, "invalid record") {
+			t.Errorf("a stamped all-rejected attempt must not be retried; got:\n%s", out2)
+		}
+	})
+
+	t.Run("all_rejected_with_memory_auto_import_restores_the_memory", func(t *testing.T) {
+		dstDir, dstBeadsDir, _ := bdInit(t, bd, "--prefix", "imq")
+		jsonlPath := filepath.Join(dstBeadsDir, "issues.jsonl")
+		badLines := badRow("imq-bad1") + "\n"
+		if err := os.WriteFile(jsonlPath, []byte(badLines+memoryRow+"\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(bd, "create", "post-import marker", "--type", "task")
+		cmd.Dir = dstDir
+		cmd.Env = bdEnv(dstDir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		out := stdout.String() + stderr.String()
+		if err != nil {
+			t.Fatalf("the outer command must survive the rejected rows; output:\n%s", out)
+		}
+		for _, want := range []string{"warning: skipped 1 invalid record", "auto-imported 0 issues and 1 config entries"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("auto-import must report %q; got:\n%s", want, out)
+			}
+		}
+		if issues := bdListJSON(t, bd, dstDir); len(issues) != 1 {
+			t.Fatalf("want only the created marker, got %d", len(issues))
+		}
+		quarantine, err := os.ReadFile(jsonlPath + ".rejected.jsonl")
+		if err != nil || string(quarantine) != badLines {
+			t.Errorf("quarantine content = %q (err %v), want %q", quarantine, err, badLines)
+		}
+		assertMemoryRestored(t, dstDir)
+		if _, err := os.Stat(autoImportStampPath(dstBeadsDir)); err != nil {
+			t.Errorf("the attempt must be stamped: %v", err)
+		}
+	})
+
+	t.Run("quarantine_write_failure_still_restores", func(t *testing.T) {
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		jsonlPath := filepath.Join(dir, ".beads", "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(mixContent), 0644); err != nil {
+			t.Fatal(err)
+		}
+		// A directory where the quarantine file would land makes the
+		// atomic rename fail: the import must still restore the valid rows.
+		if err := os.Mkdir(jsonlPath+".rejected.jsonl", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(bd, "init", "--from-jsonl", "--prefix", "imq", "--quiet", "--non-interactive")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		out := stdout.String() + stderr.String()
+		if err != nil {
+			t.Fatalf("a quarantine-write failure must not abort the recovery; output:\n%s", out)
+		}
+		// The command runs with its own working directory, so the warning
+		// names the source relative to it.
+		if !strings.Contains(out, "could not save the skipped lines to") || !strings.Contains(out, "issues.jsonl.rejected.jsonl") {
+			t.Errorf("the warning must say the rejects could not be saved and name the path; got:\n%s", out)
+		}
+		if strings.Contains(out, "saved to") {
+			t.Errorf("a failed quarantine must not claim a save; got:\n%s", out)
+		}
+		if issues := bdListJSON(t, bd, dir); len(issues) != 2 {
+			t.Fatalf("the valid records must restore despite the failed quarantine; want 2, got %d", len(issues))
+		}
+	})
+
+	// A recovery that skips a record also drops the edges kept records
+	// declare on it. The warnings count them and point at re-importing the
+	// whole source, which, once the status is registered, restores the
+	// record and both edges. Two routes: init (the writer's own report) and
+	// the embedded auto-import (counted from the rows it writes).
+	t.Run("dependencies_on_a_skipped_record", func(t *testing.T) {
+		for _, route := range []string{"init_from_jsonl", "auto_import"} {
+			t.Run(route, func(t *testing.T) {
+				var dir, jsonlPath string
+				var cmd *exec.Cmd
+				g := newSkippedTargetGraph(t, "imqd")
+				if route == "init_from_jsonl" {
+					dir = t.TempDir()
+					initGitRepoAt(t, dir)
+					if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					jsonlPath = filepath.Join(dir, ".beads", "issues.jsonl")
+					cmd = exec.Command(bd, "init", "--from-jsonl", "--prefix", "imqd", "--quiet", "--non-interactive")
+				} else {
+					var beadsDir string
+					dir, beadsDir, _ = bdInit(t, bd, "--prefix", "imqd")
+					jsonlPath = filepath.Join(beadsDir, "issues.jsonl")
+					cmd = exec.Command(bd, "create", "post-import marker", "--type", "task")
+				}
+				if err := os.WriteFile(jsonlPath, []byte(g.content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				cmd.Dir = dir
+				cmd.Env = bdEnv(dir)
+				stdout, stderr, err := runCommandBuffers(t, cmd)
+				out := stdout.String() + stderr.String()
+				if err != nil {
+					t.Fatalf("%s must skip the invalid record, not fail; output:\n%s", route, out)
+				}
+				for _, want := range []string{
+					"warning: skipped 1 invalid record",
+					"re-import it: bd import ",
+					"warning: also skipped 2 dependencies other records declare on the skipped records",
+				} {
+					if !strings.Contains(out, want) {
+						t.Errorf("%s output must contain %q; got:\n%s", route, want, out)
+					}
+				}
+				g.assertEdgesIntoB(t, bd, dir, false)
+
+				bdConfig(t, bd, dir, "set", "status.custom", "verify:active")
+				bdImport(t, bd, dir, jsonlPath)
+				g.assertEdgesIntoB(t, bd, dir, true)
+			})
+		}
+	})
+
+	// The server-mode auto-import fallback, run in process on a real store
+	// (the unit tests stub it): it quarantines the rejected record and
+	// counts the dependencies skipped with it.
+	t.Run("conflict_skip_fallback_quarantines_and_counts_dependencies", func(t *testing.T) {
+		_, beadsDir, _ := bdInit(t, bd, "--prefix", "imqs")
+		g := newSkippedTargetGraph(t, "imqs")
+		jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(g.content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		store := openStore(t, beadsDir, "imqs")
+		res, err := importFromLocalJSONLConflictSkip(t.Context(), store, jsonlPath)
+		if err != nil {
+			t.Fatalf("importFromLocalJSONLConflictSkip: %v", err)
+		}
+		if res.Issues != 2 || len(res.Rejected) != 1 || res.Rejected[0].ID != g.b || res.Rejected[0].Line != 2 || res.DependenciesOnRejected != 2 {
+			t.Fatalf("result = {Issues:%d Rejected:%+v DependenciesOnRejected:%d}, want 2 imported, %s on line 2 rejected, 2 dependencies on it skipped",
+				res.Issues, res.Rejected, res.DependenciesOnRejected, g.b)
+		}
+		if res.QuarantinePath != jsonlPath+".rejected.jsonl" {
+			t.Errorf("QuarantinePath = %q, want the quarantine beside the source", res.QuarantinePath)
+		}
+		if quarantine, err := os.ReadFile(jsonlPath + ".rejected.jsonl"); err != nil || string(quarantine) != g.bLine+"\n" {
+			t.Errorf("quarantine = %q (err %v), want the rejected line %q", quarantine, err, g.bLine+"\n")
+		}
+		if _, err := store.GetIssue(t.Context(), g.a); err != nil {
+			t.Errorf("the valid record %s was not restored: %v", g.a, err)
+		}
+	})
+}

@@ -110,12 +110,13 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 	}
 
 	// Parse the JSONL file without touching the store.
-	issues, configEntries, err := parseJSONLFile(jsonlPath)
+	recs, configEntries, err := parseJSONLFile(jsonlPath)
 	if err != nil {
 		writeAutoImportStamp(beadsDir, info)
 		fmt.Fprintf(os.Stderr, "warning: auto-import: failed to parse %s: %v\n", jsonlPath, err)
 		return
 	}
+	issues := recs.issues
 	if len(issues) == 0 {
 		return // nothing to import
 	}
@@ -123,7 +124,26 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 	// Prefer single-transaction import (embedded mode) to avoid
 	// DOLT_COMMIT races with concurrent writers.
 	if importer, ok := s.(jsonlImporter); ok {
-		imported, retiredIDs, err := importer.ImportJSONLData(ctx, issues, configEntries, "auto-import")
+		// Screen before the import transaction, as every recovery import
+		// does: invalid rows are skipped and saved beside the file, so one
+		// bad row no longer keeps every valid one out. The database is
+		// empty here, so every row is in the write set.
+		kept, rejected, err := screenImportIssues(ctx, issues, recs.sources, storeImportVocabulary(s))
+		if err != nil {
+			writeAutoImportStamp(beadsDir, info)
+			fmt.Fprintf(os.Stderr, "warning: auto-import from %s failed: %v\n", jsonlPath, err)
+			fmt.Fprintf(os.Stderr, "\nYour issues are still safe in %s.\n", jsonlPath)
+			return
+		}
+		quarantineRecoveryRejects(os.Stderr, jsonlPath, rejected)
+		if len(kept) == 0 && len(configEntries) == 0 {
+			// Every row was rejected and there is nothing else to import:
+			// the rejects were saved and warned about above. Stamp the
+			// attempt so it is not retried, and claim no writes.
+			writeAutoImportStamp(beadsDir, info)
+			return
+		}
+		imported, retiredIDs, err := importer.ImportJSONLData(ctx, kept, configEntries, "auto-import")
 		if err != nil {
 			writeAutoImportStamp(beadsDir, info)
 			fmt.Fprintf(os.Stderr, "warning: auto-import from %s failed: %v\n", jsonlPath, err)
@@ -132,10 +152,16 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 			fmt.Fprintf(os.Stderr, "If this persists, please report at https://github.com/gastownhall/beads/issues\n\n")
 			return
 		}
-		// A file whose every row was retired imported nothing, but it was
-		// attempted: stamp it, or every command would re-read it.
-		if imported > 0 || len(retiredIDs) > 0 {
+		if imported > 0 {
+			warnRecoveryDependenciesOnRejected(os.Stderr, jsonlPath, declaredDependenciesOnRejected(kept, rejected, retiredIDs))
+		}
+		// A file whose every row was retired or rejected imported nothing,
+		// but it was attempted: stamp it, or every command would re-read it.
+		// Only what was written is reported (and committed).
+		if imported > 0 || len(retiredIDs) > 0 || len(rejected) > 0 || len(configEntries) > 0 {
 			writeAutoImportStamp(beadsDir, info)
+		}
+		if imported > 0 || len(retiredIDs) > 0 || len(configEntries) > 0 {
 			// Signal PersistentPostRun to auto-commit (no explicit DOLT_COMMIT here).
 			commandDidWrite.Store(true)
 			fmt.Fprintf(os.Stderr, "auto-imported %d issues", imported)
@@ -161,6 +187,16 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 		return
 	}
 
+	// Nothing was written (every row rejected, no memories): the rejects
+	// were saved and warned about by the import itself. Stamp the attempt
+	// so it is not retried, and skip the empty commit and success line.
+	if result.Issues == 0 && result.Memories == 0 && result.Retired == 0 {
+		if len(result.Rejected) > 0 {
+			writeAutoImportStamp(beadsDir, info)
+		}
+		return
+	}
+
 	// Commit the imported data to Dolt history (fallback path only).
 	commitMsg := fmt.Sprintf("auto-import: %d issues from %s (upgrade recovery, GH#2994)", result.Issues, filepath.Base(jsonlPath))
 	if result.Memories > 0 {
@@ -171,7 +207,7 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 		fmt.Fprintf(os.Stderr, "warning: auto-import: dolt commit failed: %v\n", err)
 		return
 	}
-	if result.Issues > 0 || result.Memories > 0 || result.Retired > 0 {
+	if result.Issues > 0 || result.Memories > 0 || result.Retired > 0 || len(result.Rejected) > 0 {
 		writeAutoImportStamp(beadsDir, info)
 	}
 

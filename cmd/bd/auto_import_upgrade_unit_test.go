@@ -27,6 +27,7 @@ type fakeFallbackStore struct {
 	statsTotalIssues    int
 	statsNil            bool
 	getStatistics       func(context.Context) (*types.Statistics, error)
+	commitHook          func(msg string)
 }
 
 func (f *fakeFallbackStore) GetStatistics(ctx context.Context) (*types.Statistics, error) {
@@ -39,7 +40,12 @@ func (f *fakeFallbackStore) GetStatistics(ctx context.Context) (*types.Statistic
 	return &types.Statistics{TotalIssues: f.statsTotalIssues}, nil
 }
 
-func (f *fakeFallbackStore) Commit(_ context.Context, _ string) error { return nil }
+func (f *fakeFallbackStore) Commit(_ context.Context, msg string) error {
+	if f.commitHook != nil {
+		f.commitHook(msg)
+	}
+	return nil
+}
 
 func writeAutoImportFixtureJSONL(t *testing.T, dir string) {
 	t.Helper()
@@ -541,4 +547,122 @@ func TestAutoImportFallbackSeamUsesConflictSkip(t *testing.T) {
 			t.Fatalf("bd bootstrap / init --from-jsonl must keep UPSERT (ConflictSkip=false); got true")
 		}
 	})
+}
+
+// TestMaybeAutoImportJSONL_FallbackImporter_AllRejectedStampsWithoutCommit
+// pins the fallback route's all-rejected behavior (GH#4492): an import whose
+// every issue record the screen rejected (nothing eligible written) warns
+// and stamps the attempt — so it is not retried — but claims no writes: no
+// empty "auto-import: 0 issues" commit, no success line.
+func TestMaybeAutoImportJSONL_FallbackImporter_AllRejectedStampsWithoutCommit(t *testing.T) {
+	dir := t.TempDir()
+	writeAutoImportFixtureJSONL(t, dir)
+
+	orig := fallbackImporter
+	var count atomic.Int32
+	fallbackImporter = func(_ context.Context, _ storage.DoltStorage, _ string) (*importLocalResult, error) {
+		count.Add(1)
+		return &importLocalResult{Rejected: make([]importRejection, 2)}, nil
+	}
+	t.Cleanup(func() { fallbackImporter = orig })
+
+	var commits []string
+	store := &fakeFallbackStore{statsTotalIssues: 0, commitHook: func(msg string) { commits = append(commits, msg) }}
+
+	maybeAutoImportJSONL(context.Background(), store, dir)
+	maybeAutoImportJSONL(context.Background(), store, dir)
+
+	if got := count.Load(); got != 1 {
+		t.Fatalf("a stamped all-rejected attempt must not be retried; fallback importer ran %d time(s)", got)
+	}
+	if len(commits) != 0 {
+		t.Errorf("an all-rejected import must not claim writes; commits: %v", commits)
+	}
+	if _, err := os.Stat(autoImportStampPath(dir)); err != nil {
+		t.Errorf("the all-rejected attempt must be stamped so it is not retried: %v", err)
+	}
+}
+
+// fakeVocabularyErrorStore is a fakeJSONLImporterStore whose custom
+// status/type vocabulary cannot be read.
+type fakeVocabularyErrorStore struct {
+	fakeJSONLImporterStore
+	readErr error
+	reads   atomic.Int32
+}
+
+func (f *fakeVocabularyErrorStore) ReadInsertVocabulary(context.Context) ([]string, []string, error) {
+	f.reads.Add(1)
+	return nil, nil, f.readErr
+}
+
+// TestMaybeAutoImportJSONL_VocabularyReadErrorWarnsAndStamps pins the
+// auto-import half of AC-8 (GH#4492) on the single-transaction path: when the
+// screen cannot read the custom statuses and types a row needs, nothing is
+// imported and the row is not rejected; the warning names the row and the
+// read error, and the attempt is stamped, so the outer command goes on and
+// the next one does not read the file again.
+func TestMaybeAutoImportJSONL_VocabularyReadErrorWarnsAndStamps(t *testing.T) {
+	prev := commandDidWrite.Load()
+	commandDidWrite.Store(false)
+	t.Cleanup(func() { commandDidWrite.Store(prev) })
+
+	dir := t.TempDir()
+	line := `{"id":"unit-1","title":"custom status","status":"verify","issue_type":"task"}`
+	if err := os.WriteFile(filepath.Join(dir, "issues.jsonl"), []byte(line+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := &fakeVocabularyErrorStore{fakeJSONLImporterStore: fakeJSONLImporterStore{imported: 1}, readErr: errors.New("custom_types unreadable")}
+
+	stderr := captureStderr(t, func() {
+		maybeAutoImportJSONL(context.Background(), store, dir)
+		maybeAutoImportJSONL(context.Background(), store, dir)
+	})
+
+	if got := store.calls.Load(); got != 0 {
+		t.Errorf("ImportJSONLData ran %d time(s); a vocabulary that cannot be read must stop the import before it writes", got)
+	}
+	if got := store.reads.Load(); got != 1 {
+		t.Errorf("the vocabulary was read %d time(s), want 1: the stamped attempt must not be retried", got)
+	}
+	for _, want := range []string{"auto-import from", "line 1 (issue unit-1)", "custom_types unreadable", "Your issues are still safe in"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want it to contain %q", stderr, want)
+		}
+	}
+	if strings.Contains(stderr, "invalid record") {
+		t.Errorf("a row whose vocabulary could not be read was reported as rejected: %q", stderr)
+	}
+	if _, err := os.Stat(autoImportStampPath(dir)); err != nil {
+		t.Errorf("the attempt must be stamped: %v", err)
+	}
+	if commandDidWrite.Load() {
+		t.Error("an import that wrote nothing claimed a write")
+	}
+}
+
+// TestMaybeAutoImportJSONL_FallbackImporter_RejectedRowsWithMemoriesCommit
+// pins the other side: when every issue row was rejected but the file's
+// eligible memories landed, the fallback route commits them and stamps.
+func TestMaybeAutoImportJSONL_FallbackImporter_RejectedRowsWithMemoriesCommit(t *testing.T) {
+	dir := t.TempDir()
+	writeAutoImportFixtureJSONL(t, dir)
+
+	orig := fallbackImporter
+	fallbackImporter = func(_ context.Context, _ storage.DoltStorage, _ string) (*importLocalResult, error) {
+		return &importLocalResult{Memories: 1, Rejected: make([]importRejection, 2)}, nil
+	}
+	t.Cleanup(func() { fallbackImporter = orig })
+
+	var commits []string
+	store := &fakeFallbackStore{statsTotalIssues: 0, commitHook: func(msg string) { commits = append(commits, msg) }}
+
+	maybeAutoImportJSONL(context.Background(), store, dir)
+
+	if len(commits) != 1 || !strings.Contains(commits[0], "1 memories") {
+		t.Errorf("the restored memory must be committed; commits: %v", commits)
+	}
+	if _, err := os.Stat(autoImportStampPath(dir)); err != nil {
+		t.Errorf("the attempt must be stamped: %v", err)
+	}
 }

@@ -88,6 +88,10 @@ dolt-pprof/
 # Backup data (auto-exported JSONL, local-only)
 backup/
 
+# Import quarantine: the lines a JSONL import (bootstrap, init --from-jsonl,
+# auto-import) skipped as invalid, saved beside the source for repair
+*.rejected.jsonl
+
 # Per-project environment file (Dolt connection config, GH#2520)
 .env
 
@@ -152,6 +156,7 @@ var requiredPatterns = []string{
 	"http_local_metadata.json",
 	".local_version",
 	"backup/",
+	"*.rejected.jsonl",
 }
 
 // CheckGitignore checks if .beads/.gitignore is up to date.
