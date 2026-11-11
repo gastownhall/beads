@@ -670,3 +670,49 @@ func TestHookFiringStoreReReadsOnlyForAnEventWithAHook(t *testing.T) {
 		t.Fatalf("with no hook installed the decorator re-read the row %d times; want none", gets)
 	}
 }
+
+// TestHookFiringStoreCreateAndCloseByIDReReadOnlyForAHook pins the by-id
+// completions a batch apply over http fires its created and closed rows through
+// (ledger row L-apply-snapshot). Each re-reads the row only when a hook it could
+// fire exists, and hands the row to the firing a snapshot would get: a created
+// row fires on_create and then on_update for its label, so on_update alone is
+// reason enough to read it.
+func TestHookFiringStoreCreateAndCloseByIDReReadOnlyForAHook(t *testing.T) {
+	createByID := func(s *HookFiringStore) { s.CompleteIssueOperationCreateByID(context.Background(), "bd-1") }
+	closeByID := func(s *HookFiringStore) { s.CompleteIssueOperationCloseByID(context.Background(), "bd-1") }
+	for _, tc := range []struct {
+		name   string
+		exists map[string]bool
+		fire   func(*HookFiringStore)
+		want   []string
+	}{
+		{"create with on_create", map[string]bool{hooks.EventCreate: true}, createByID, []string{hooks.EventCreate, hooks.EventUpdate}},
+		{"create with on_update alone", map[string]bool{hooks.EventUpdate: true}, createByID, []string{hooks.EventCreate, hooks.EventUpdate}},
+		{"create with on_close alone", map[string]bool{hooks.EventClose: true}, createByID, nil},
+		{"close with on_close", map[string]bool{hooks.EventClose: true}, closeByID, []string{hooks.EventClose}},
+		{"close with every hook but on_close", map[string]bool{hooks.EventCreate: true, hooks.EventUpdate: true}, closeByID, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &probingHookRunner{exists: tc.exists}
+			gets := 0
+			inner := countingHookStore{
+				fakeHookStore: fakeHookStore{issues: map[string]*types.Issue{"bd-1": {ID: "bd-1", Labels: []string{"patrol:muted"}}}},
+				gets:          &gets,
+			}
+			tc.fire(&HookFiringStore{DoltStorage: inner, inner: inner, runner: runner})
+
+			wantGets := 0
+			if tc.want != nil {
+				wantGets = 1
+			}
+			if gets != wantGets || !reflect.DeepEqual(runner.events, tc.want) {
+				t.Fatalf("re-read %d times and fired %v; want %d re-reads and %v", gets, runner.events, wantGets, tc.want)
+			}
+			for _, issue := range runner.issues {
+				if issue == nil || issue.ID != "bd-1" {
+					t.Fatalf("a hook was handed %+v, want the row read back", issue)
+				}
+			}
+		})
+	}
+}

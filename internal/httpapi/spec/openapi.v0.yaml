@@ -9175,6 +9175,10 @@ components:
             `dep_add` item on `POST /v0/beads/issues:batchApply` accepts
             `has_spawner` and `thread_id` (see `ApplyDepAddItem`) rather than
             a `400` naming the member unknown, and
+            `issues.batchApply.updateAllowTemplate`, which announces that an
+            `update` item on the same operation accepts `allow_template` (see
+            `ApplyUpdateItem`) rather than a `400` naming the member unknown,
+            and
             `issues.update.allowTemplate`, which announces that
             `PATCH /v0/beads/issues/{id}` accepts `allow_template` (see
             `UpdateIssueRequest`) rather than a `400` naming the member
@@ -11612,6 +11616,21 @@ components:
             exemption: there is no compare-and-set that authorizes a notes
             overwrite, so combining the two is legal and each answers its own
             question.
+        allow_template:
+          type: boolean
+          default: false
+          description: >-
+            The caller edits a template deliberately, so the template read-only
+            refusal (`409 template_read_only`) stands down for THIS item, under
+            `UpdateIssueRequest.allow_template`'s rules: it bypasses nothing
+            else and has no effect on an issue that is not a template. Without
+            it an item targeting a template refuses, and the whole request with
+            it. `bd set-state` sends it on the label patch of its one-request
+            state change. Advertised by the
+            `issues.batchApply.updateAllowTemplate` capability token (not
+            `issues.update.allowTemplate`, which names the single update's
+            member); a client refuses to send it to a server that has not
+            advertised the token, which would answer it as an unknown member.
 
     ApplyPatchBody:
       type: object
@@ -13194,8 +13213,9 @@ components:
           description: >-
             The caller edits a template deliberately, so the template read-only
             refusal (`409 template_read_only`) stands down for this request.
-            `bd label` and `bd set-state` send it: they have always written to
-            templates. It bypasses nothing else, and has no effect on an issue
+            `bd label` sends it: it has always written to templates (`bd
+            set-state` sends the batch item's `allow_template` instead). It
+            bypasses nothing else, and has no effect on an issue
             that is not a template. Advertised by the
             `issues.update.allowTemplate` capability token; a server that
             predates the member refuses it as an unknown parameter, and such a

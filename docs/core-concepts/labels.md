@@ -638,21 +638,20 @@ bd list --type event --label event-type:state-change
 1. **Use namespaced dimensions** - Prefix with role type if ambiguous
 2. **Keep value sets small** - 2-4 values per dimension
 3. **Document valid values** - List allowed values in role docs
-4. **Always create events first** - Never update labels without history
+4. **Let `bd set-state` create the event** - Never update labels without
+   history; the helper below records the transition and swaps the label in
+   one atomic write
 5. **Treat labels as ephemeral** - Rebuild from events if corrupted
 
-### Future Helpers
+### Helpers
 
-The pattern suggests helper commands (see bd-7l67):
-```bash
-# Query current state
-bd state beads/observer patrol     # → "muted"
-
-# Transition with automatic event creation
-bd set-state beads/observer patrol=active --reason "Debugging complete"
-```
-
-Until helpers exist, use the manual pattern above.
+The helpers this pattern suggested (see bd-7l67) exist — see
+[Helper Commands](#helper-commands) below for the full spelling. The
+manual `transition_state` pattern above remains a faithful fallback, but
+`bd set-state` improves on it: the event, the parent edge and the label
+swap are one transaction, so a command that succeeds always leaves the
+event beside its label, and a command that fails (a refused label, a
+vanished subject) leaves nothing behind.
 
 ## Advanced Patterns
 
@@ -830,6 +829,49 @@ The `set-state` command atomically:
 3. Adds the new dimension:value label (cache)
 
 See [bd set-state](/cli-reference/set-state) for full command reference.
+
+#### Compatibility notes
+
+The three writes above land in **one storage transaction** (GH#5637): the
+event, its parent edge to the subject and the label swap commit together
+or not at all, and a durable workspace records **one history entry**,
+labelled `bd: set-state <id>`, carrying all three. Before this, the event
+and the label were two independent lifecycle writes, so a failed label
+edit could leave a committed event recording a transition that never
+happened.
+
+Behavioral edges of the same change:
+
+- **Ordinary event ids.** The event's parentage is a parent-child edge
+  minted inside the transaction, no longer a dotted child id of the
+  subject, so a state change does not consume one of the subject's child
+  numbers.
+- **Templates.** A template subject remains settable exactly as before:
+  the command's pre-read of the subject carries the template waiver the
+  write needs, and a subject that *became* a template after the pre-read
+  refuses atomically rather than succeeding halfway.
+- **Hooks.** On success, hook-enabled workspaces see three firings, the
+  same on every route: `on_create` for the event, `on_update` for the
+  event once its parent edge lands, and `on_update` for the subject with
+  its new label. The event's `on_update` payload lists the parent-child
+  edge in its `dependencies`, which is how a script tells which bead
+  changed state now that the event id no longer names the subject. On
+  refusal, nothing fires and nothing is written.
+- **Over HTTP (`bd serve`).** The template waiver rides the batch's
+  update item as `allow_template`, announced by the server's
+  `issues.batchApply.updateAllowTemplate` capability; a client that needs
+  the waiver against a server that does not announce it reports the
+  missing capability before sending anything.
+- **Retention modes and a plane race.** An `--ephemeral` or
+  `--no-history` subject keeps its whole transition in the wisp plane
+  (no durable rows, no history entry) as long as its retention mode does
+  not change while the command runs. If the subject *moves* between the
+  durable and wisp planes between the command's pre-read and its write,
+  the event keeps the pre-read's mode while the label follows the
+  subject's current plane — so the parent edge can cross planes. This is
+  the batch's ordinary edge policy, not a co-location guarantee; a
+  subject that vanished instead refuses the whole command with nothing
+  written.
 
 ## Troubleshooting
 

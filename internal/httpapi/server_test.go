@@ -857,7 +857,7 @@ func TestCapabilitiesAdvertiseEveryImplementedOperation(t *testing.T) {
 	// oracle rather than a second call to the code under test.
 	want = append(want, "project.enforce", "issues.batchApplyLarge", "issues.list.sort", "issues.count.scope",
 		"issues.sweep.wispsPlane", "issues.sweep.liveDependents", "issues.sweep.limit", "issues.sweep.retainIds", "issues.sweep.retainedTypes",
-		"issues.batchApply.depAddLineage", "issues.update.allowTemplate", "issues.create.defaultPriority",
+		"issues.batchApply.depAddLineage", "issues.batchApply.updateAllowTemplate", "issues.update.allowTemplate", "issues.create.defaultPriority",
 		"issues.close.autoCloseMolecule", "issues.list.search",
 		"issues.list.noAssignee", "issues.list.title", "issues.list.ids", "issues.update.persistence", "dependencies.blocking.isBlocked", "issues.update.claim",
 		"issues.create.gates", "issues.update.gates", "issues.list.filters", "issues.arrivalSeq",

@@ -1746,7 +1746,9 @@ commands:
     cases:
       - id: set-state
         class: works
+        note: the state-change event takes an id minted per workspace; its parent edge, not a dotted id, makes it the subject's child
         args: [set-state, e2e-tstate, mode=fast, '--json']
+        ignore_fields: [event_id]
         verify: [[state, e2e-tstate, mode, '--json']]
   - command: bd setup
     class: local-only
