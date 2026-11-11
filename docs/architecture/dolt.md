@@ -310,6 +310,15 @@ server keeps the engine running (see
 damaged journal; for that, see
 [Engine won't open](/recovery/database-corruption#engine-wont-open).
 
+Within one process, a store starts the embedded engine once and reuses it
+across a burst of operations, serving it to one operation at a time, instead
+of paying the startup per operation. bd releases the engine once the store
+has been idle for about 200 ms, or when it closes the database, so another
+`bd` process can open the same database between bursts. That 200 ms targets
+idle time, not how long another process waits: scheduling, engine cleanup and
+contention can extend the wait, and a store that stays busy keeps the engine
+until it goes idle.
+
 ### Server Mode (Multi-Writer / Orchestrator)
 
 Connects to a running `dolt sql-server` for multi-client access.

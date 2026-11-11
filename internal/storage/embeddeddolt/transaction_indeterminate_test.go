@@ -5,6 +5,7 @@ package embeddeddolt_test
 import (
 	"context"
 	"errors"
+	"runtime"
 	"testing"
 
 	"github.com/steveyegge/beads"
@@ -16,6 +17,7 @@ func TestRunInTransactionPostCommitStageFailureIsIndeterminate(t *testing.T) {
 	te := newTestEnv(t, "eci")
 	ctx := context.Background()
 	calls := 0
+	closeDone := make(chan error, 1)
 
 	err := te.store.RunInTransaction(ctx, "test: indeterminate staged commit", func(tx storage.Transaction) error {
 		calls++
@@ -30,8 +32,17 @@ func TestRunInTransactionPostCommitStageFailureIsIndeterminate(t *testing.T) {
 		}
 		// Closing the store leaves this transaction's pinned SQL connection
 		// intact, but deterministically rejects the later staging connection.
-		return te.store.Close()
+		// Close waits for this transaction, so it runs beside it: once the
+		// store is marked closed, the transaction finishes.
+		go func() { closeDone <- te.store.Close() }()
+		for !te.store.IsClosed() {
+			runtime.Gosched()
+		}
+		return nil
 	})
+	if closeErr := <-closeDone; closeErr != nil {
+		t.Fatalf("Close: %v", closeErr)
+	}
 	if err == nil {
 		t.Fatal("post-commit stage failure returned nil")
 	}
