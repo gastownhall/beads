@@ -11,6 +11,7 @@ go_library(
         "converged.go",
         "dep_id_backfill.go",
         "dirty_tables_error.go",
+        "encoding_drift.go",
         "events_preflip_seed.go",
         "ignored_cursor_untrack.go",
         "lock.go",
@@ -172,6 +173,7 @@ go_test(
         "migration_0074_create_id_tombstones_test.go",
         "migration_body_drain_test.go",
         "migration_content_hashes_test.go",
+        "migration_drift_refusal_test.go",
         "migration_freeze_test.go",
         "migration_updated_at_census_test.go",
         "migration_updated_at_guard_test.go",
@@ -204,6 +206,16 @@ filegroup(
     name = "migrations",
     srcs = glob(["migrations/**"]),
     visibility = ["//internal/storage:__subpackages__"],
+)
+
+# The drift refusal's recovery URL, and the dirty-table guard message its
+# runbook quotes, pinned against the published runbook by //test/docsync.
+exports_files(
+    [
+        "dirty_tables_error.go",
+        "encoding_drift.go",
+    ],
+    visibility = ["//test/docsync:__pkg__"],
 )
 
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---

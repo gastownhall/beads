@@ -502,6 +502,11 @@ func renderTypedOpenError(err error) bool {
 		}
 		return true
 	}
+	// #5699: a migration stopped on schema-encoding drift names the step and
+	// the operator-supervised recovery instead of a raw engine error.
+	if renderSchemaEncodingDrift(err) {
+		return true
+	}
 	return false
 }
 

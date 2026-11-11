@@ -1226,6 +1226,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A schema migration that stops on a stored value the engine cannot read
+  (`invalid hash length`, `malformed out-of-band adaptive value`, consistent
+  with schema-encoding drift, dolthub/dolt#11131) now ends in a typed refusal
+  instead of a raw engine error (GH#5699). The refusal names the migration and
+  its cursor source, quotes the symptom without the engine stack, says that
+  partial changes may remain, warns that a later run's "pre-existing dirty
+  tables" advice to run `bd dolt commit` would commit them, and links the new
+  [Schema-Encoding Drift](https://beads.gascity.com/recovery/schema-encoding-drift)
+  runbook; `--json` adds a `schema_encoding_drift` object beside `error` and
+  `hint` on stderr, and the command exits 1. The migration still stops on its
+  first error and is never skipped. Raw engine panics are not intercepted.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

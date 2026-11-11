@@ -24,7 +24,13 @@ type DirtyTablesError struct {
 	Tables []string
 }
 
+// dirtyTablesGuardPrefix opens every DirtyTablesError message. A
+// SchemaEncodingDriftError quotes it: the pass after a drift stop can meet
+// this guard on the stopped step's own partial changes, which must not be
+// committed.
+const dirtyTablesGuardPrefix = "pending schema migrations alter pre-existing dirty tables"
+
 func (e *DirtyTablesError) Error() string {
-	return "pending schema migrations alter pre-existing dirty tables: " + strings.Join(e.Tables, ", ") +
+	return dirtyTablesGuardPrefix + ": " + strings.Join(e.Tables, ", ") +
 		"; run 'bd dolt commit' to commit the working set at the current schema, then re-run the migration (gastownhall/beads#4566)"
 }
