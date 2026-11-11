@@ -26,3 +26,10 @@ var ErrReadOnly = errors.New("embeddeddolt: store is read-only")
 // failed preview open, which it refuses. errors.Is(err, os.ErrNotExist) alone
 // cannot: a dial to a unix socket nothing listens on satisfies it too.
 var ErrNoEmbeddedDatabase = errors.New("embeddeddolt: no embedded database")
+
+// ErrOpenTimeout is wrapped, together with the driver's last open error, by
+// OpenSQL when the BEADS_EMBEDDED_OPEN_TIMEOUT retry budget ran out before
+// the database could be opened, typically because another process or open
+// handle holds it. It is declared here, without a cgo build tag, so callers
+// can recognize it whatever the build.
+var ErrOpenTimeout = errors.New("embedded open retry budget exhausted")

@@ -461,15 +461,16 @@ func logBlockedRecheckFailure(pending issueops.BlockedRecheck, err error) {
 // (gastownhall/beads#6716).
 //
 // Embedded transactions serialize: commitConn opens a fresh OpenSQL handle
-// per transaction, and OpenSQL (open.go) waits in a backoff with no elapsed
-// time limit for the engine, so a second handle blocks until the first has
-// been cleaned up. Two transactions therefore never run against overlapping
-// snapshots in one process, and the skew of #6716 cannot occur here; no
-// embedded reproduction exists. The recheck is kept so the embedded store
-// honors the same contract as the server store — a stale row recorded by
-// one transaction is settled after its commit — and it runs only after the
-// first handle's cleanup, so it cannot deadlock on itself. It runs no SQL
-// when nothing was recorded.
+// per transaction, and OpenSQL (open.go) waits in a backoff for the engine
+// until the first handle has been cleaned up, the BEADS_EMBEDDED_OPEN_TIMEOUT
+// retry budget runs out or the caller cancels; a second handle never opens
+// while the first is held. Two transactions therefore never run against
+// overlapping snapshots in one process, and the skew of #6716 cannot occur
+// here; no embedded reproduction exists. The recheck is kept so the
+// embedded store honors the same contract as the server store — a stale row
+// recorded by one transaction is settled after its commit — and it runs only
+// after the first handle's cleanup, so it cannot deadlock on itself. It runs
+// no SQL when nothing was recorded.
 //
 // It runs on issueops.BlockedRecheckContext: the write it follows is durable,
 // so the repair must outlive that write's cancellation, and a recheck must
