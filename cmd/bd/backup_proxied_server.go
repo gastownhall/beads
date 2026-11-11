@@ -197,17 +197,38 @@ func runBackupInitProxied(ctx context.Context, rawPath string) error {
 
 // runBackupSyncProxied pushes the database to the configured destination.
 func runBackupSyncProxied(ctx context.Context) error {
+	return runBackupSyncProxiedWithGracePeriod(ctx, 0)
+}
+
+func runBackupSyncProxiedWithPrune(ctx context.Context, gracePeriod time.Duration) error {
+	return runBackupSyncProxiedWithGracePeriod(ctx, gracePeriod)
+}
+
+func runBackupSyncProxiedWithGracePeriod(ctx context.Context, gracePeriod time.Duration) error {
 	if err := requireLocalProxiedBackup("backup sync"); err != nil {
 		return err
 	}
 
 	start := time.Now()
+	var pruneOutcome versioncontrolops.BackupPruneOutcome
 	err := runProxiedNonTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
+		if gracePeriod > 0 {
+			if err := requireFileBackupForPrune(ctx, func(ctx context.Context, name string) (string, error) {
+				return versioncontrolops.BackupRemoteURL(ctx, conn, name)
+			}); err != nil {
+				return err
+			}
+		}
 		if err := commitWorkingSetBeforeBackup(ctx, conn); err != nil {
 			// Same posture as the direct path: a failed pre-backup commit
 			// means the backup may miss the newest writes, which is worth
 			// saying out loud and is not worth refusing to back up over.
 			fmt.Fprintf(os.Stderr, "Warning: failed to commit pending changes: %v\n", err)
+		}
+		if gracePeriod > 0 {
+			var err error
+			pruneOutcome, err = versioncontrolops.BackupSyncWithPrune(ctx, conn, proxiedBackupTargetName, gracePeriod)
+			return err
 		}
 		return versioncontrolops.BackupSync(ctx, conn, proxiedBackupTargetName)
 	})
@@ -224,12 +245,19 @@ func runBackupSyncProxied(ctx context.Context) error {
 	}
 
 	if jsonOutput {
-		return outputJSON(map[string]interface{}{
+		result := map[string]interface{}{
 			"synced":   true,
 			"duration": elapsed.String(),
-		})
+		}
+		if gracePeriod > 0 {
+			result["prune"] = pruneOutcome
+		}
+		return outputJSON(result)
 	}
 	fmt.Printf("Backup synced in %s\n", elapsed.Round(time.Millisecond))
+	if gracePeriod > 0 {
+		fmt.Printf("Prune outcome: %s\n", pruneOutcome.Summary())
+	}
 	return nil
 }
 

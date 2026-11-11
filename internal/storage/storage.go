@@ -1104,6 +1104,42 @@ type BackupStore interface {
 	RestoreDatabase(ctx context.Context, dir string, force bool) error
 }
 
+// BackupPruneOutcome reports the prune details that Dolt exposes for a backup
+// sync. Counts are omitted when the SQL server does not return a summary.
+type BackupPruneOutcome struct {
+	Status         string   `json:"status"`
+	FilesDeleted   *int     `json:"files_deleted,omitempty"`
+	BytesReclaimed *int64   `json:"bytes_reclaimed,omitempty"`
+	Skipped        []string `json:"skipped,omitempty"`
+	Message        string   `json:"message,omitempty"`
+}
+
+// Summary renders the structured outcome for human command output.
+func (outcome BackupPruneOutcome) Summary() string {
+	if outcome.Status == "unavailable" || outcome.Status == "failed" {
+		if outcome.Message == "" {
+			return outcome.Status
+		}
+		return outcome.Status + ": " + outcome.Message
+	}
+	if outcome.FilesDeleted == nil || outcome.BytesReclaimed == nil {
+		return outcome.Status
+	}
+	result := fmt.Sprintf("deleted %d file(s), reclaimed %d bytes", *outcome.FilesDeleted, *outcome.BytesReclaimed)
+	for _, reason := range outcome.Skipped {
+		result += "; skipped " + reason
+	}
+	return result
+}
+
+// PrunableBackupStore supports Dolt's grace-period pruning for file:// backup
+// destinations. It is separate from BackupStore so callers that do not offer
+// this opt-in operation can keep the ordinary sync contract unchanged.
+type PrunableBackupStore interface {
+	BackupRemoteURL(ctx context.Context, name string) (string, error)
+	BackupSyncWithPrune(ctx context.Context, name string, gracePeriod time.Duration) (BackupPruneOutcome, error)
+}
+
 // ReadyWorkCounter sizes the total ready-work count for a filter without
 // materializing the counts mega-query. It is identical to
 // len(GetReadyWorkWithCounts(filter with Limit=0)) but computed with cheap

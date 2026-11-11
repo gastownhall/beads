@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -790,6 +791,26 @@ func (s *EmbeddedDoltStore) BackupSync(ctx context.Context, name string) error {
 	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		return versioncontrolops.BackupSync(ctx, db, name)
 	})
+}
+
+func (s *EmbeddedDoltStore) BackupRemoteURL(ctx context.Context, name string) (string, error) {
+	var backupURL string
+	err := s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		var err error
+		backupURL, err = versioncontrolops.BackupRemoteURL(ctx, db, name)
+		return err
+	})
+	return backupURL, err
+}
+
+func (s *EmbeddedDoltStore) BackupSyncWithPrune(ctx context.Context, name string, gracePeriod time.Duration) (versioncontrolops.BackupPruneOutcome, error) {
+	var outcome versioncontrolops.BackupPruneOutcome
+	err := s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		var err error
+		outcome, err = versioncontrolops.BackupSyncWithPrune(ctx, db, name, gracePeriod)
+		return err
+	})
+	return outcome, err
 }
 
 func (s *EmbeddedDoltStore) BackupRemove(ctx context.Context, name string) error {

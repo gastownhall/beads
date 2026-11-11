@@ -18,6 +18,7 @@ go_library(
         "flatten.go",
         "gc.go",
         "mergesettle.go",
+        "prune_output.go",
         "remoterefs.go",
         "remotes.go",
         "version_control.go",
@@ -31,6 +32,7 @@ go_library(
         "//internal/storage/issueops",
         "//internal/storage/kvkeys",
         "//internal/storage/schema",
+        "@com_github_dolthub_dolt_go//cmd/dolt/cli",
     ],
 )
 
@@ -48,6 +50,7 @@ go_test(
         "fastforward_test.go",
         "gc_test.go",
         "mergesettle_draincall_regression_test.go",
+        "prune_output_test.go",
         "remotes_githooks_test.go",
         "remotes_gittrace_test.go",
         "remotes_test.go",

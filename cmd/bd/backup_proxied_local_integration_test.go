@@ -63,10 +63,35 @@ func TestManagedLocalProxiedBackupRoundTrip(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dest, "manifest")); err != nil {
 		t.Fatalf("backup sync produced no manifest at %s: %v", dest, err)
 	}
+	orphan := filepath.Join(dest, "00000000000000000000000000000001")
+	if err := os.WriteFile(orphan, []byte("orphaned table file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ageBackupDestinationEntries(t, dest, 20*time.Minute)
+	out, err := bdProxiedRun(t, bd, p.dir, "backup", "sync", "--json", "--prune-with-grace-period", "10m")
+	if err != nil {
+		t.Fatalf("bd backup sync --prune-with-grace-period 10m: %v\n%s", err, out)
+	}
+	var pruneResult struct {
+		Synced bool `json:"synced"`
+		Prune  struct {
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		} `json:"prune"`
+	}
+	if err := json.Unmarshal(out, &pruneResult); err != nil {
+		t.Fatalf("parse proxied prune JSON: %v\n%s", err, out)
+	}
+	if !pruneResult.Synced || pruneResult.Prune.Status != "unavailable" || !strings.Contains(pruneResult.Prune.Message, "did not return a prune summary") {
+		t.Fatalf("proxied prune result = %+v, want successful sync with unavailable outcome explanation", pruneResult)
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("pruned sync left the orphan in place; stat error: %v", err)
+	}
 
 	after := bdProxiedCreate(t, bd, p.dir, "must not survive the restore", "-p", "1")
 
-	out, err := bdProxiedRun(t, bd, p.dir, "backup", "restore", dest, "--force", "--json")
+	out, err = bdProxiedRun(t, bd, p.dir, "backup", "restore", dest, "--force", "--json")
 	if err != nil {
 		t.Fatalf("bd backup restore %s --force: %v\n%s", dest, err, out)
 	}
