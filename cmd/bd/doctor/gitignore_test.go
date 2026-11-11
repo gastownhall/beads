@@ -417,6 +417,46 @@ func TestEnsureGitignoreForBeadsDir_AppendsMissingRuntimePatterns(t *testing.T) 
 	}
 }
 
+// TestEnsureGitignoreForBeadsDir_LegacyProxiedRootIgnoredAsAFile pins
+// GH#5104's ignore rule: the legacy proxied-server root is ignored by the
+// standalone "proxieddb" pattern, which also matches the regular-file marker
+// bd places there, in the template and as an append to an existing file that
+// only has the directory-only "proxieddb/".
+func TestEnsureGitignoreForBeadsDir_LegacyProxiedRootIgnoredAsAFile(t *testing.T) {
+	if !containsGitignorePattern(GitignoreTemplate, "proxieddb") {
+		t.Fatalf("GitignoreTemplate lacks the standalone proxieddb pattern")
+	}
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.Mkdir(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	var stale []string
+	for _, pattern := range requiredPatterns {
+		if pattern == "proxieddb" {
+			pattern = "proxieddb/"
+		}
+		stale = append(stale, pattern)
+	}
+	initial := strings.Join(stale, "\n") + "\n"
+	gitignorePath := filepath.Join(beadsDir, ".gitignore")
+	if err := os.WriteFile(gitignorePath, []byte(initial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if check := CheckGitignore(filepath.Dir(beadsDir)); check.Status != "warning" || !strings.Contains(check.Detail, "proxieddb") {
+		t.Fatalf("CheckGitignore = %+v, want a warning naming the missing proxieddb pattern", check)
+	}
+	if err := EnsureGitignoreForBeadsDir(beadsDir); err != nil {
+		t.Fatalf("EnsureGitignoreForBeadsDir: %v", err)
+	}
+	content, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(content), initial) || !containsGitignorePattern(string(content), "proxieddb") {
+		t.Fatalf("repair did not append the standalone proxieddb pattern to the existing file:\n%s", content)
+	}
+}
+
 // TestEnsureGitignoreForBeadsDir_TightensPermsWhenPatternComplete covers the
 // regression flagged (but not fixed) in PR #5285: a pattern-complete
 // .beads/.gitignore with loose permissions (0644) must still be tightened to

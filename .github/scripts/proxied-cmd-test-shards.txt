@@ -144,6 +144,7 @@
 
 34 15 TestProxiedServerDepConcurrent
 34 15 TestProxiedServerImport
+34 15 TestProxiedServerLegacyRootGuardRefusesReleasedBD
 34 15 TestProxiedServerMoleculeFrontDoorWriteParity
 34 15 TestProxiedServerReopenConcurrent
 34 15 TestProxiedServerSQL
@@ -276,6 +277,7 @@
 34 32 TestProxiedServerCleanDatabasesPurgeDropped
 34 32 TestProxiedServerConfigConcurrent
 34 32 TestProxiedServerDepB
+34 32 TestProxiedServerLegacyRootGuardArmsOnInit
 34 32 TestProxiedServerServeStreamsTheJournalItIsWriting
 34 32 TestProxiedServerServeUpdateClaim
 34 32 TestProxiedServerStorageClass

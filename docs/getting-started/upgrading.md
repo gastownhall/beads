@@ -818,6 +818,80 @@ bd migrate --dry-run
 bd migrate schema
 ```
 
+### Unrecognized `dolt_mode`
+
+Commands that open the workspace, and `bd doctor`, refuse before they open
+anything:
+
+```text
+dolt_mode "proxied-servr" in /path/to/project/.beads/metadata.json is not recognized or supported
+by this bd build; the supported modes are "embedded", "server" and
+"proxied-server"; no storage database was opened or modified; ...
+```
+
+The workspace names a storage mode this `bd` does not know, so `bd` stops
+instead of guessing one and opening a different database. No storage database
+was opened or modified, and no data directory was created. The case of the value
+does not matter (`Server` is `server`); a missing or empty `dolt_mode` still
+means the default.
+
+| Cause | Fix |
+|---|---|
+| A newer `bd` wrote a mode this build does not support | Upgrade every bd that opens this workspace: the one on `PATH`, the one your git hooks run, and the ones in CI and agent tooling. Then retry. |
+| A typo or hand edit in `.beads/metadata.json` (or a legacy `.beads/config.json`) | Restore `dolt_mode` to the mode this workspace was initialized with. |
+
+Do not delete the field or switch it to `"embedded"` to get past the error:
+that can open a different, empty database while the real issues sit elsewhere.
+
+This is not a root-layout problem: the next section covers a known mode whose
+data lives somewhere an older `bd` does not look.
+
+### Older bd fails with `proxieddb: not a directory`
+
+```text
+... .beads/proxieddb: not a directory
+```
+
+A proxied-server workspace keeps its Dolt data where the current `bd` resolves
+it, by default `.beads/dolt`. Older releases defaulted to `.beads/proxieddb`
+instead. Run in a workspace the current `bd` set up, such an older `bd` found
+nothing there, created a new, empty database and printed `No issues found.`
+(or crashed in `bd stats`).
+
+To stop that, the current `bd` places a small regular file named `proxieddb` in
+`.beads/`. An older `bd` cannot use a file as its data directory, so it refuses
+with `not a directory`. That error means the `bd` that printed it is too old for
+this workspace: upgrade every bd that opens it (on `PATH`, in git hooks, in CI
+and agent tooling). The file explains itself if you open it; leave it in place.
+
+`bd` writes the file only after it opens a proxied-server workspace with a
+managed local server, and only when all of these hold:
+
+- Nothing already exists at `.beads/proxieddb`: no file, directory or symlink.
+- `.beads/.gitignore` has `proxieddb` on a line of its own. A `proxieddb/` alone
+  is not enough, since it ignores only a directory. `bd doctor` warns when the
+  line is missing, and `bd doctor --fix` adds it.
+- Git agrees the path is ignored (`git check-ignore`): the workspace is inside a
+  Git worktree, the path is not tracked, and no later `!proxieddb` rule
+  re-includes it.
+
+A workspace whose proxied server is an external server has no local data
+directory, so `bd` writes no file there. A `--dry-run` or `--inspect` preview
+writes none either; the next ordinary command does.
+
+What the file does not cover:
+
+- An existing `.beads/proxieddb` directory is not protected or repaired. If an
+  older `bd` already created one, that `bd` keeps opening it. The current `bd`
+  never reads it, never moves your issues into it, and never deletes a
+  proxieddb directory. Upgrading that older `bd` is the fix. Check a directory
+  for issues before you remove it by hand.
+- A `bd` from before proxied-server mode existed does not look at
+  `.beads/proxieddb` at all, so the file cannot stop it. Upgrade it too.
+
+This is not an unrecognized `dolt_mode`: the mode is valid, and only the older
+`bd` looks in the wrong place for its data.
+
 ### Recovery after upgrade
 
 If you need to restore from a backup:

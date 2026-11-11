@@ -111,3 +111,24 @@ func TestOpensForBeadWrites(t *testing.T) {
 		t.Errorf("WithWorkingSetReconcile changed the open itself: %+v", got)
 	}
 }
+
+// TestOpensForPreview pins that only WithPreview marks an open as a preview,
+// alone or among other options: the ordinary, read-only, working-set
+// reconcile and proxied-server opens go on to write their workspace files.
+func TestOpensForPreview(t *testing.T) {
+	if OpensForPreview() {
+		t.Fatal("OpensForPreview() = true, want false for the ordinary open")
+	}
+	if !OpensForPreview(WithPreview()) || !OpensForPreview(WithPreview(), WithProxiedServerMode()) {
+		t.Fatal("OpensForPreview(WithPreview()...) = false, want true")
+	}
+	for name, opt := range map[string]ProviderOption{
+		"read-only":             WithReadOnly(),
+		"working-set reconcile": WithWorkingSetReconcile(),
+		"proxied-server mode":   WithProxiedServerMode(),
+	} {
+		if OpensForPreview(opt) {
+			t.Errorf("OpensForPreview(%s) = true, want false", name)
+		}
+	}
+}

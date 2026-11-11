@@ -209,6 +209,7 @@ go_library(
         "label_proxied_server.go",
         "label_whitespace_warn.go",
         "last_touched.go",
+        "legacy_proxied_root_guard.go",
         "legacy_sqlite_reader.go",
         "legacy_upgrade_guard.go",
         "linear.go",
@@ -779,6 +780,7 @@ go_test(
         "dolt_local_only_embedded_test.go",
         "dolt_local_only_test.go",
         "dolt_metadata_e2e_test.go",
+        "dolt_mode_admission_test.go",
         "dolt_proxied_lifecycle_test.go",
         "dolt_push_dangling_test.go",
         "dolt_remote_add_server_test.go",
@@ -985,6 +987,8 @@ go_test(
         "last_touched_guard_test.go",
         "last_touched_readonly_test.go",
         "last_touched_test.go",
+        "legacy_proxied_root_guard_proxied_test.go",
+        "legacy_proxied_root_guard_test.go",
         "legacy_upgrade_guard_config_yaml_test.go",
         "legacy_upgrade_guard_e2e_test.go",
         "legacy_upgrade_guard_empty_root_test.go",
@@ -1412,11 +1416,16 @@ go_test(
         "//cmd/bd/doctor:go_srcs",
         "//cmd/bd/doctor/fix:go_srcs",
         "//internal/storage/embeddeddolt/cmd:go_srcs",
+        # The released bd v1.1.0 (sha256-verified @bd_releases catalog pin),
+        # whose default proxied root the legacy proxied-root guard refuses
+        # (GH#5104): TestProxiedServerLegacyRootGuardRefusesReleasedBD runs it.
+        "@bd_releases//:v1.1.0",
         "@go_sdk//:bin/gofmt",
     ],
     embed = [":bd_lib"],
     env = {
         "BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)",
+        "BEADS_TEST_BD_V1110_BIN": "$(rlocationpath @bd_releases//:v1.1.0)",
         "BEADS_TEST_GOFMT": "$(rlocationpath @go_sdk//:bin/gofmt)",
         "BEADS_TEST_COMPACT_GC_FIXTURE": "$(rlocationpath :compact_gc_fixture)",
         "BEADS_TEST_PREFLIGHT_GO": "$(rlocationpath :preflight_go_fixture)",
@@ -1693,10 +1702,12 @@ sh_test(
         ":go_srcs",
         "//:.github/scripts/proxied-cmd-test-shards.txt",
         "//:.github/scripts/proxied-test-shard.sh",
+        "@bd_releases//:v1.1.0",
         "@go_sdk//:bin/gofmt",
     ],
     env = {
         "BEADS_TEST_BD_BINARY": "$(rlocationpath :bd_for_tests)",
+        "BEADS_TEST_BD_V1110_BIN": "$(rlocationpath @bd_releases//:v1.1.0)",
         "BEADS_TEST_DOLT_SERVER": "local",
         # The jobs' "Configure Git and Dolt identity" global git identity
         # (tools/bazel/test_env.sh).
