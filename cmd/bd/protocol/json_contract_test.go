@@ -410,3 +410,165 @@ func TestJSONContract_SchemaVersionPresent(t *testing.T) {
 		})
 	}
 }
+
+// TestJSONContract_WorkRowCountsAreBlocksOnlyShowCountsEveryEdge pins the two
+// meanings `dependency_count` and `dependent_count` carry on the --json wire
+// (bd-dh3uij, GH#5688), the ones docs/reference/json-schema.md documents: a
+// `bd list` row counts `blocks` edges only, `bd show` counts every edge type.
+//
+// This is a behavior pin, not a reproduction: the numbers are the existing
+// contract (backend/conformance RunReaderListCountsAreBlocksOnlyWhereGetCountsEveryEdge
+// pins the same split one layer down). What it adds is the CLI's own view, the
+// one an automation reads, so a change that made the two commands agree, or
+// made a list row's zero mean "no dependents", fails here before it reaches a
+// consumer's sweep.
+func TestJSONContract_WorkRowCountsAreBlocksOnlyShowCountsEveryEdge(t *testing.T) {
+	t.Parallel()
+	w := newWorkspace(t)
+
+	// E has three parent-child dependents and one blocks dependent, and one
+	// outgoing edge of each of two types.
+	e := w.create("Subject", "--type", "epic")
+	children := []string{
+		w.create("Child one", "--parent", e),
+		w.create("Child two", "--parent", e),
+		w.create("Child three", "--parent", e),
+	}
+	blockedByE := w.create("Blocked by the subject")
+	w.run("dep", "add", blockedByE, e)
+	blocker := w.create("Blocks the subject")
+	w.run("dep", "add", e, blocker)
+	origin := w.create("Where the subject was found")
+	w.run("dep", "add", e, origin, "--type", "discovered-from")
+
+	// A parent whose dependents are all children: the shape behind the
+	// reporter's list=0/show=24.
+	onlyChildren := w.create("Children only", "--type", "epic")
+	w.create("Its child", "--parent", onlyChildren)
+	lone := w.create("No edges")
+
+	listed := parseJSONOutput(t, w.run("list", "--json", "--all", "--limit", "0"))
+	count := func(issue map[string]any, field, where string) int {
+		t.Helper()
+		v, ok := issue[field].(float64)
+		if !ok {
+			t.Fatalf("%s: %s missing or not a number: %v", where, field, issue[field])
+		}
+		return int(v)
+	}
+	row := func(id string) map[string]any {
+		t.Helper()
+		issue := findByID(listed, id)
+		if issue == nil {
+			t.Fatalf("bd list --json did not return %s", id)
+		}
+		return issue
+	}
+
+	t.Run("list counts blocks edges only", func(t *testing.T) {
+		issue := row(e)
+		if got := count(issue, "dependent_count", "bd list"); got != 1 {
+			t.Errorf("bd list dependent_count = %d, want 1 (the one blocks dependent; the %d children are parent-child)", got, len(children))
+		}
+		if got := count(issue, "dependency_count", "bd list"); got != 1 {
+			t.Errorf("bd list dependency_count = %d, want 1 (the one outgoing blocks edge)", got)
+		}
+		deps := getObjectSlice(issue, "dependencies")
+		types := map[string]string{}
+		for _, dep := range deps {
+			target, _ := dep["depends_on_id"].(string)
+			typ, _ := dep["type"].(string)
+			types[target] = typ
+		}
+		want := map[string]string{blocker: "blocks", origin: "discovered-from"}
+		if len(deps) != 2 || types[blocker] != want[blocker] || types[origin] != want[origin] {
+			t.Errorf("bd list dependencies = %v, want both outgoing edges %v: the array carries every type, the count only blocks", types, want)
+		}
+	})
+
+	t.Run("show counts every edge type", func(t *testing.T) {
+		issue := w.showJSON(e)
+		if got := count(issue, "dependent_count", "bd show"); got != 4 {
+			t.Errorf("bd show dependent_count = %d, want 4 (three parent-child, one blocks)", got)
+		}
+		if got := count(issue, "dependency_count", "bd show"); got != 2 {
+			t.Errorf("bd show dependency_count = %d, want 2 (blocks and discovered-from)", got)
+		}
+	})
+
+	t.Run("non-blocks dependents read zero on list only", func(t *testing.T) {
+		if got := count(row(onlyChildren), "dependent_count", "bd list"); got != 0 {
+			t.Errorf("bd list dependent_count = %d, want 0: a parent-child dependent is not a blocks edge", got)
+		}
+		if got := count(w.showJSON(onlyChildren), "dependent_count", "bd show"); got != 1 {
+			t.Errorf("bd show dependent_count = %d, want 1", got)
+		}
+	})
+
+	t.Run("no edges reads zero on both", func(t *testing.T) {
+		for field, issue := range map[string]map[string]any{"bd list": row(lone), "bd show": w.showJSON(lone)} {
+			if got := count(issue, "dependent_count", field); got != 0 {
+				t.Errorf("%s dependent_count = %d, want 0", field, got)
+			}
+			if got := count(issue, "dependency_count", field); got != 0 {
+				t.Errorf("%s dependency_count = %d, want 0", field, got)
+			}
+		}
+	})
+
+	// The status-sensitive alternative the reference documents for "does E
+	// still have open dependents": list the incoming edges and keep the
+	// non-closed ones, the Go spelling of its
+	// `jq '[.[] | select(.status != "closed")] | length'`. Runs last: it closes
+	// a child, which the subtests above must not see.
+	t.Run("incoming listing with the non-closed predicate", func(t *testing.T) {
+		w.run("close", children[0], "--reason", "done")
+
+		dependents := parseJSONOutput(t, w.run("dep", "list", e, "--direction=up", "--json"))
+		got := map[string]string{}
+		nonClosed := 0
+		for _, dep := range dependents {
+			id, _ := dep["id"].(string)
+			status, hasStatus := dep["status"].(string)
+			depType, hasType := dep["dependency_type"].(string)
+			if !hasStatus || !hasType {
+				t.Fatalf("bd dep list --direction=up record %s lacks status or dependency_type: %v", id, dep)
+			}
+			got[id] = depType
+			if status != "closed" {
+				nonClosed++
+			}
+		}
+		want := map[string]string{
+			children[0]: "parent-child",
+			children[1]: "parent-child",
+			children[2]: "parent-child",
+			blockedByE:  "blocks",
+		}
+		if len(dependents) != len(want) {
+			t.Errorf("bd dep list --direction=up returned %d records %v, want the %d local dependents %v", len(dependents), got, len(want), want)
+		}
+		for id, typ := range want {
+			if got[id] != typ {
+				t.Errorf("bd dep list --direction=up: %s dependency_type = %q, want %q", id, got[id], typ)
+			}
+		}
+		if nonClosed != 3 {
+			t.Errorf("non-closed dependents = %d, want 3 (one of four closed)", nonClosed)
+		}
+		if listCount := count(row(e), "dependent_count", "bd list"); listCount == nonClosed {
+			t.Errorf("list's dependent_count %d equals the non-closed predicate's %d; the fixture is meant to tell them apart", listCount, nonClosed)
+		}
+	})
+
+	// The documented snippet keeps the listing's failure (`|| exit`), because
+	// a failed read must not be parsed as an empty list and so as zero
+	// dependents. That rests on the command failing.
+	t.Run("a failed listing is not an empty list", func(t *testing.T) {
+		missing := w.prefix + "-doesnotexist"
+		out, code := w.runExpectError("dep", "list", missing, "--direction=up", "--json")
+		if code == 0 {
+			t.Fatalf("bd dep list %s exited 0; want a failure, not an empty list:\n%s", missing, out)
+		}
+	})
+}

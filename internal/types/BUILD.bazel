@@ -28,6 +28,13 @@ go_test(
     embed = [":types"],
 )
 
+# //internal/httpapi:httpapi_test: the type comments whose count-field
+# vocabulary TestCountVocabularyIsStatedOnTheTypesAndTheJSONReference pins.
+exports_files(
+    ["types.go"],
+    visibility = ["//internal/httpapi:__pkg__"],
+)
+
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
 
 filegroup(

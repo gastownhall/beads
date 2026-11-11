@@ -8204,10 +8204,33 @@ components:
         # --- added by IssueWithCounts ---
         dependency_count:
           type: integer
-          description: Number of issues this one depends on.
+          description: >-
+            Outgoing `blocks` edges: how many issues this one depends on
+            through a `blocks` dependency edge. Edge types other than
+            `blocks` — a `parent-child` child, a `discovered-from` or
+            `relates-to` link — are NOT counted, and no status filter is
+            applied: this is an edge cardinality, not a number of open
+            dependencies. It can therefore differ from the same-named
+            detail field on `getIssue`, which counts every edge type, and a
+            row's `dependencies` array can hold more records than this
+            number because that array carries every outgoing edge type.
+            For every-type detail cardinalities read `getIssue`; for a
+            count over explicitly chosen edge types and directions use
+            `countDependencyEdges`.
         dependent_count:
           type: integer
-          description: Number of issues that depend on this one.
+          description: >-
+            Incoming `blocks` edges: how many issues depend on this one
+            through a `blocks` dependency edge. Edge types other than
+            `blocks` — a `parent-child` child, a `discovered-from` or
+            `relates-to` link — are NOT counted, and no status filter is
+            applied: this is an edge cardinality, not a number of open
+            dependents, so an epic whose children are its dependents reads
+            0 here. It can therefore differ from the same-named detail
+            field on `getIssue`, which counts every edge type. For
+            every-type detail cardinalities read `getIssue`; for a count
+            over explicitly chosen edge types and directions use
+            `countDependencyEdges`.
         comment_count:
           type: integer
         comments_omitted:
@@ -8331,9 +8354,33 @@ components:
         dependency_count:
           type: integer
           format: int64
+          description: >-
+            Every-type detail cardinality: how many DISTINCT issues this one
+            depends on, over every edge type — `blocks`, `parent-child`,
+            `discovered-from` and the rest — with every status included. An
+            edge stored in both the durable and the wisp dependency planes
+            counts once, and edges whose far end has no row in this database
+            are still counted (see `unresolvable_dependencies`). This is NOT
+            the number the same-named work row field reports: that one counts
+            outgoing `blocks` edges only, so the two can differ for the same
+            issue. `countDependencyEdges` answers a different question again —
+            a per-direction sum of edge rows over explicitly chosen types —
+            and is not guaranteed to equal this count.
         dependent_count:
           type: integer
           format: int64
+          description: >-
+            Every-type detail cardinality: how many DISTINCT issues depend
+            on this one, over every edge type — `blocks`, `parent-child`,
+            `discovered-from` and the rest — with every status included. An
+            edge stored in both the durable and the wisp dependency planes
+            counts once, and edges whose far end has no row in this database
+            are still counted (see `unresolvable_dependents`). This is NOT
+            the number the same-named work row field reports: that one counts
+            incoming `blocks` edges only, so the two can differ for the same
+            issue. `countDependencyEdges` answers a different question again —
+            a per-direction sum of edge rows over explicitly chosen types —
+            and is not guaranteed to equal this count.
         comment_count:
           type: integer
           format: int64
