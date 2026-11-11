@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -43,6 +44,87 @@ func TestBackupRestoreMissingDir(t *testing.T) {
 	err := runBackupRestore(ctx, s, "/nonexistent/path", false)
 	if err == nil {
 		t.Error("expected error for nonexistent backup dir")
+	}
+}
+
+// TestValidateBackupRestoreDir pins the restore preflight (bd-jwaljq, GH#7098):
+// an existing directory with no Dolt backup, or a backup at a path Dolt would
+// read as another directory, is refused before either restore path starts,
+// with the source named and a way forward, while a missing path keeps its
+// "not found" wording and a directory holding a manifest passes. The empty,
+// regular-file, missing and manifest cases are @rjgeng's from PR #7192.
+func TestValidateBackupRestoreDir(t *testing.T) {
+	root := t.TempDir()
+	mkdir := func(name string, files ...string) string {
+		t.Helper()
+		dir := filepath.Join(root, name)
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range files {
+			if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return dir
+	}
+	link := func(target, name string) {
+		t.Helper()
+		if err := os.Symlink(target, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	file := filepath.Join(root, "issues.jsonl")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	debris := mkdir("debris", "LOCK")
+	mkdir(filepath.Join("debris", "oldgen"))
+	manifestDir := mkdir("manifest_dir")
+	mkdir(filepath.Join("manifest_dir", "manifest"))
+	brokenLink := mkdir("broken_link")
+	link(filepath.Join(brokenLink, "absent"), filepath.Join(brokenLink, "manifest"))
+	linked := mkdir("linked", "manifest.real")
+	link(filepath.Join(linked, "manifest.real"), filepath.Join(linked, "manifest"))
+	// A backup at a path Dolt reads as another directory: it cuts a file://
+	// path at '#'. Windows paths skip that parse, but '%' is unescaped there.
+	misread := "proj#2"
+	if runtime.GOOS == "windows" {
+		misread = "proj%232"
+	}
+
+	for _, tc := range []struct {
+		name, dir string
+		want      []string
+	}{
+		{name: "missing", dir: filepath.Join(root, "absent"), want: []string{"backup directory not found", "bd backup sync"}},
+		{name: "regular_file", dir: file, want: []string{"is not a directory", "Restore was not attempted"}},
+		{name: "empty_dir", dir: mkdir("empty"), want: []string{"holds no Dolt backup", "Restore was not attempted", "bd backup init"}},
+		{name: "exports_only", dir: mkdir("exports", "issues.jsonl", "backup_state.json"), want: []string{"holds no Dolt backup"}},
+		{name: "lock_and_oldgen_debris", dir: debris, want: []string{"holds no Dolt backup"}},
+		{name: "manifest_is_a_directory", dir: manifestDir, want: []string{"holds no Dolt backup", "Restore was not attempted"}},
+		{name: "broken_manifest_symlink", dir: brokenLink, want: []string{"holds no Dolt backup"}},
+		{name: "backup_at_a_misread_path", dir: mkdir(misread, "manifest"), want: []string{"cannot be restored where it is", "move or rename the backup", "Restore was not attempted"}},
+		{name: "backup", dir: mkdir("backup", "manifest")},
+		{name: "manifest_symlink_to_regular_file", dir: linked},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateBackupRestoreDir(tc.dir)
+			if len(tc.want) == 0 {
+				if err != nil {
+					t.Fatalf("validateBackupRestoreDir(%q) = %v, want nil", tc.dir, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("validateBackupRestoreDir(%q) = nil, want a refusal", tc.dir)
+			}
+			for _, want := range append(tc.want, tc.dir) {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("validateBackupRestoreDir(%q) error = %q, want it to contain %q", tc.dir, err, want)
+				}
+			}
+		})
 	}
 }
 
@@ -291,7 +373,7 @@ func TestBackupRestoreStrictReadonlyServerMode(t *testing.T) {
 		return dir, env, backupDir
 	}
 
-	issueCount := func(t *testing.T, dir string, env []string) int {
+	issueIDs := func(t *testing.T, dir string, env []string) []string {
 		t.Helper()
 		stdout, stderr, code := runBDMigrationFreezeWithEnv(t, bd, dir, env, "list", "--json")
 		if code != 0 {
@@ -301,17 +383,38 @@ func TestBackupRestoreStrictReadonlyServerMode(t *testing.T) {
 		if start < 0 {
 			t.Fatalf("no JSON array in bd list --json output:\n%s", stdout)
 		}
-		var issues []json.RawMessage
+		var issues []struct {
+			ID string `json:"id"`
+		}
 		if err := json.Unmarshal([]byte(stdout[start:]), &issues); err != nil {
 			t.Fatalf("parse bd list --json output: %v\n%s", err, stdout)
 		}
-		return len(issues)
+		ids := make([]string, 0, len(issues))
+		for _, issue := range issues {
+			ids = append(ids, issue.ID)
+		}
+		sort.Strings(ids)
+		return ids
+	}
+	issueCount := func(t *testing.T, dir string, env []string) int {
+		t.Helper()
+		return len(issueIDs(t, dir, env))
 	}
 
 	// The control proves the fixture really does restore when --readonly is not
 	// asked for, so "the store is unchanged" below cannot be vacuous.
 	t.Run("control_restore_without_readonly", func(t *testing.T) {
 		dir, env, backupDir := newWorkspace(t)
+		// bd backup restore checks its source on the client before the server
+		// reads it (bd-jwaljq), so a real restore needs the backup the server
+		// wrote to be visible here too. The local backend shares this
+		// filesystem; a containerized server writes inside its container.
+		if _, err := os.Stat(filepath.Join(backupDir, "manifest")); err != nil {
+			if os.Getenv(testutil.EnvDoltServerBackend) == "local" {
+				t.Fatalf("the local test server's backup left no manifest visible at %s: %v", backupDir, err)
+			}
+			t.Skipf("the test server's backup is not visible to this client (%v): a positive restore needs %s=local", err, testutil.EnvDoltServerBackend)
+		}
 		stdout, stderr, code := runBDMigrationFreezeWithEnv(t, bd, dir, env, "backup", "restore", "--force", backupDir)
 		if code != 0 {
 			t.Fatalf("restore without --readonly exited %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
@@ -319,8 +422,32 @@ func TestBackupRestoreStrictReadonlyServerMode(t *testing.T) {
 		if !strings.Contains(stdout, "Restore complete") {
 			t.Errorf("stdout is missing %q:\n%s", "Restore complete", stdout)
 		}
-		if got := issueCount(t, dir, env); got != 2 {
-			t.Errorf("issue count after a real restore = %d, want 2: the backup holds two issues and the live store held three", got)
+		if got, want := issueIDs(t, dir, env), []string{"rr-1", "rr-2"}; !slices.Equal(got, want) {
+			t.Errorf("issues after a real restore = %v, want the backup's %v: the live store also held rr-3", got, want)
+		}
+	})
+
+	// bd-jwaljq (GH#7098): an existing directory that holds no Dolt backup must
+	// be refused before the restore runs, leaving the live store intact.
+	t.Run("force_restore_from_empty_dir_keeps_store", func(t *testing.T) {
+		dir, env, _ := newWorkspace(t)
+		emptyDir := t.TempDir()
+
+		stdout, stderr, code := runBDMigrationFreezeWithEnv(t, bd, dir, env, "backup", "restore", "--force", emptyDir)
+		if code == 0 {
+			t.Errorf("restore --force from an empty directory exited 0\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		for _, want := range []string{"holds no Dolt backup", emptyDir, "Restore was not attempted"} {
+			if !strings.Contains(stderr, want) {
+				t.Errorf("stderr is missing %q:\n%s", want, stderr)
+			}
+		}
+		stdout, stderr, code = runBDMigrationFreezeWithEnv(t, bd, dir, env, "list", "--json")
+		if code != 0 {
+			t.Fatalf("the live store is gone after restore --force from an empty directory: bd list --json exited %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+		if got := issueCount(t, dir, env); got != 3 {
+			t.Errorf("issue count after restore --force from an empty directory = %d, want 3", got)
 		}
 	})
 
