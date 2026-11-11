@@ -36,9 +36,13 @@ import (
 //	3  retries exhausted on a transient, self-healing condition (another replica
 //	   kept winning the push race, or a concurrent writer kept the working set
 //	   dirty); retry on the next tick.
-//	4  the dirty working set blocking the is_blocked repair is NOT transient: the
-//	   same pending graph edits have blocked every tick for a while and nothing
-//	   is advancing. Retrying will never publish; an operator must resolve it.
+//	4  operator-only work, nothing pushed: either the dirty working set blocking
+//	   the is_blocked repair is NOT transient (the same pending graph edits have
+//	   blocked every tick for a while, or constraint violations no writer will
+//	   commit are holding it dirty), or the pull was refused over table(s) this
+//	   clone ignores but the remote still tracks and storage could not prove the
+//	   pull a no-op (GH#6368). Retrying will never publish; an operator must
+//	   resolve it.
 const (
 	ExitSyncConflict         = 2
 	ExitSyncRetriesExhausted = 3
@@ -128,6 +132,13 @@ type syncOutcome struct {
 	// syncStuckTicks. Empty means this run's dirty-stuck status, if any, came
 	// from the tick-count inference instead (wy-mhouc).
 	ConstraintViolations []storage.ConstraintViolation `json:"constraint_violations,omitempty"`
+	// IgnoredTablesOnRemote names the tables, dolt_ignore'd here but still
+	// tracked by the remote's history, over which the pull's merge was
+	// refused (GH#6368). Set only with dirty-stuck, on the attempt that hit
+	// it: the same state refuses every retry, so only an operator clears it.
+	IgnoredTablesOnRemote []string `json:"ignored_tables_on_remote,omitempty"`
+	// IgnoredTablesError is that pull's original error.
+	IgnoredTablesError string `json:"ignored_tables_error,omitempty"`
 }
 
 // syncTransient is one attempt's transient failure.
@@ -315,6 +326,19 @@ func runSyncLoop(ctx context.Context, ops syncOps, maxAttempts int) (*syncOutcom
 				})
 				ops.report("pull behind a fast-forwardable remote tip (peer pushed after our fetch) — re-pulling and retrying")
 				continue
+			}
+			// GH#6368: the merge was refused over ignored working tables the
+			// remote still tracks, and the pull could not prove it a no-op.
+			// The same state refuses every retry, so stop here: exit 4, like
+			// any other condition only an operator can clear. Typed by the
+			// storage layer from positive evidence, never matched on text.
+			var ignoredErr *versioncontrolops.IgnoredTablesMergeError
+			if errors.As(pullErr, &ignoredErr) {
+				out.Status = syncStatusDirtyStuck
+				out.IgnoredTablesOnRemote = ignoredErr.Tables
+				out.IgnoredTablesError = pullErr.Error()
+				ops.report("pull refused over ignored tables the remote still tracks — escalating")
+				return out, nil
 			}
 			return out, fmt.Errorf("pull: %w", pullErr)
 		}
@@ -669,11 +693,16 @@ The repair in step 3 refuses to run while another writer has uncommitted changes
 to issues/dependencies. That is transient and not this sync's doing, so it is
 retried on the same budget as a push race rather than failing the run. A working
 set that is NOT transient exits 4 instead, because no amount of retrying will
-ever publish and only an operator can clear it. Two kinds of evidence say so:
-constraint violations on the dirty tables are detected positively and escalate
-on the very attempt that finds them; an abandoned uncommitted edit has no such
-positive signal, so it is only inferred once the same pending graph edits have
-blocked every attempt of several consecutive runs.
+ever publish and only an operator can clear it. Three kinds of evidence say
+so: constraint violations on the dirty tables are detected positively and
+escalate on the very attempt that finds them; a pull refused over table(s) this
+clone ignores but the remote still tracks (a table this clone keeps on Dolt's
+ignore plane while the remote's history has it versioned) is detected
+positively from engine-confirmed storage evidence (the refused tables are on
+this clone's ignored working plane) when the pull cannot be proven a no-op; and
+an abandoned uncommitted edit has no positive signal, so it is only inferred
+once the same pending graph edits have blocked every attempt of several
+consecutive runs.
 
 Conflicts sync cannot resolve safely are NEVER auto-resolved: it halts before
 recomputing or pushing and exits 2, and repeated runs keep halting the same way
@@ -690,9 +719,13 @@ Exit codes (a sync timer can branch on these without parsing output):
   2  merge conflict — halted, nothing pushed, resolve it by hand
   3  retries exhausted (push race, or a concurrent writer's dirty working set)
      — transient, nothing pushed, retry on the next tick
-  4  the dirty working set is stuck, not busy: identical pending graph edits
-     blocked every attempt of several consecutive runs — nothing pushed, and no
-     later tick will publish until an operator clears it
+  4  operator-only work, nothing pushed: identical pending graph edits blocked
+     every attempt of several consecutive runs, constraint violations no writer
+     will commit are holding the repair dirty, or the pull was refused over
+     table(s) this clone ignores but the remote still tracks (their names are in
+     the halt message and under ignored_tables_on_remote in --json; see
+     docs/recovery/sync-failures.md) — no later tick will publish until an
+     operator clears it
 
 On the default-remote path, a rig with no Dolt remote yet but a git origin
 configured adopts that origin as its Dolt remote first, exactly as 'bd dolt push'
@@ -1120,13 +1153,20 @@ func syncMixedTransientNote(out *syncOutcome) []string {
 // constraint violations no writer will ever commit, an abandoned uncommitted
 // edit — reports the same "transient, retry on the next tick" forever, so no
 // tick ever publishes and nothing in the output ever changes to say so
-// (wy-wub2s). Two distinct kinds of evidence can drive this: out.ConstraintViolations
+// (wy-wub2s). Three distinct kinds of evidence can drive this:
+// out.IgnoredTablesOnRemote names the tables a pull was refused over because
+// this clone ignores them while the remote still tracks them (GH#6368), read
+// from the typed storage error on the very attempt that found it, and is
+// reported first; out.ConstraintViolations
 // is a POSITIVE read, from storage.MergeBlockerInspector, naming exactly what
-// is stuck and why on the very attempt that found it (wy-mhouc); absent that,
+// is stuck and why on the very attempt that found it (wy-mhouc); absent both,
 // out.DirtyGraphStuckTicks is the fallback INFERENCE — the pending graph edits
 // have been byte-identical across every attempt of the last N runs, so this is
 // a stuck table rather than a busy fleet, without knowing the specific cause.
 func syncStuckMessage(out *syncOutcome) []string {
+	if len(out.IgnoredTablesOnRemote) > 0 {
+		return syncIgnoredTablesMessage(out)
+	}
 	if len(out.ConstraintViolations) > 0 {
 		lines := []string{
 			"Error: the is_blocked repair is blocked by constraint violations no writer will ever commit.",
@@ -1165,6 +1205,39 @@ func syncStuckMessage(out *syncOutcome) []string {
 		"  bd vc commit -m '...'        # commit the pending changes, if they are wanted",
 		"Nothing was pushed. This exit is deliberately distinct from exit 3 so a sync timer can page",
 		"instead of retrying forever.")
+	return append(lines, syncMixedTransientNote(out)...)
+}
+
+// syncIgnoredTablesMessage is the exit-4 report for a pull refused over
+// ignored tables the remote still tracks (GH#6368). A remote that is only
+// behind this clone never gets here — the pull proves that a no-op and sync
+// pushes as usual — so the remote either holds history this clone lacks or
+// the proof could not be completed.
+func syncIgnoredTablesMessage(out *syncOutcome) []string {
+	lines := []string{
+		"Error: the pull was refused because the remote still tracks table(s) this clone ignores: " + strings.Join(out.IgnoredTablesOnRemote, ", "),
+	}
+	if out.IgnoredTablesError != "" {
+		lines = append(lines, "  pull error: "+out.IgnoredTablesError)
+	}
+	lines = append(lines,
+		"Dolt will not merge history that tracks a table over this clone's unversioned rows of it,",
+		"so every retry is refused the same way. Nothing was pushed.",
+		"'dolt status' can look clean here: the protected rows sit on the ignored working plane,",
+		"not among uncommitted changes, so nothing this clone can commit clears the refusal.",
+		"Recovery, in order:",
+		"  1. If peers on an older release still push to this remote, stop them first, including",
+		"     their sync timers, or their next push restores the old history.",
+		"  2. If the remote holds nothing this clone lacks (only clones on this release write to it),",
+		"     an ordinary 'bd dolt push' (never a force push) publishes the migrated history and the",
+		"     next sync runs normally.",
+		"  3. If that push is rejected as non-fast-forward, or the remote holds peers' work, the",
+		"     remote carries history this clone lacks: migrate it as the runbook describes:",
+		"  https://github.com/gastownhall/beads/blob/main/docs/recovery/sync-failures.md#merge-blocked-on-the-events-table-migration-0062",
+		"Do not force-push, delete the local rows, or re-track the table to get past this: each one",
+		"discards or republishes data. Staging over the guard ('dolt add -f') or discarding the rows",
+		"('dolt checkout -- <table>') destroys the working data the refusal is protecting.",
+		"This exit is deliberately distinct from exit 3 so a sync timer can page instead of retrying forever.")
 	return append(lines, syncMixedTransientNote(out)...)
 }
 

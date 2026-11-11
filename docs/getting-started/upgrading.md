@@ -537,7 +537,7 @@ nothing left to pull, the clone is the first-mover it looked like and the
 migration proceeds on its own.
 
 If the clone already migrated past schema 61 and the pull then refuses with
-`local changes would be stomped by merge: events`, see
+`local changes would be stomped by merge: events` (`bd sync` exits 4), see
 [Merge blocked on the events table (migration 0062)](/recovery/sync-failures#merge-blocked-on-the-events-table-migration-0062)
 before trying anything else. A push from this clone publishes the migrated
 history, so every clone still on 1.2.2 or older first publishes its work and

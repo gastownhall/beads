@@ -196,6 +196,11 @@ local changes would be stomped by merge: events
 the table(s) events have schema conflicts
 ```
 
+`bd sync` reports the first error as exit code 4 (`dirty-stuck`), names the
+tables in its report, and lists them under `ignored_tables_on_remote` with
+`--json`. The names are storage evidence the engine confirms: the tables the
+merge refused that this clone holds as ignored working tables. Retrying never clears it, so a sync timer should stop and alert.
+
 The first error comes before any merge starts, so nothing is left open. The
 second leaves a merge open, and `dolt_schema_conflicts` names `events` with
 `cannot merge a table deletion with data modification`. The bead tables
@@ -207,8 +212,14 @@ working table that is never committed. Dolt refuses to merge a commit that
 still has the versioned table into a clone that holds the ignored one, and it
 refuses before it checks whether there is anything to merge. So the first
 error also appears when the remote is only behind this clone, still at a
-commit from before this clone migrated, with no new work in it. `bd sync`
-then fails on every run, because it pulls before it pushes.
+commit from before this clone migrated, with no new work in it. Older bd
+releases then fail `bd sync` on every run, because it pulls before it pushes.
+Current releases check for that case: when the remote's tip is already in this
+clone's history and no merge is open, the pull has nothing to merge, so
+`bd dolt pull` succeeds and `bd sync` goes on to push. A remote with commits
+this clone does not have still stops the pull, and so does a pull bd cannot
+prove is a no-op (the remote could not be refreshed, or containment or the
+merge state could not be read); both need the recovery below.
 
 When the remote does have new work from a peer that has not migrated (or
 whose history predates the migration, such as unpushed work on a laptop), that
@@ -230,7 +241,7 @@ from this clone publishes migrated history. A clone still on a release before
 that can no longer pull: see
 [Pull fails on a clone still on the old release](#pull-fails-on-a-clone-still-on-the-old-release).
 So first, on every such clone, publish its work with its current release, then
-stop writing on it until this recovery is done:
+stop writing on it, including any `bd sync` timer, until this recovery is done:
 
 ```bash
 bd dolt pull
@@ -245,8 +256,9 @@ leftover blocks the clone's later pull just as a new commit would. It prints
 the push is rejected because another clone pushed in the meantime, run the
 three commands again.
 
-**Then check whether the remote is only behind.** For the `stomped` error, run
-a plain push next:
+**Then check whether the remote is only behind.** On a release before this
+check, or when bd could not prove the pull a no-op, the remote may still be
+only behind. For the `stomped` error, run a plain push next:
 
 ```bash
 bd dolt push        # no --force
