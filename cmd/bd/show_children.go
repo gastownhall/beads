@@ -41,7 +41,7 @@ func showIssueChildren(ctx context.Context, args []string, jsonOut bool, shortMo
 
 	// Process each arg via routing-aware resolution
 	for _, id := range args {
-		result, err := resolveAndGetIssueWithRouting(ctx, store, id)
+		result, err := resolveAndGetOriginalWithRouting(ctx, store, id)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error resolving %s: %s\n", id, remedy.PrintedMessage(err))
 			continue

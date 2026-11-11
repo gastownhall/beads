@@ -81,7 +81,7 @@ Examples:
 		for _, id := range args {
 			// Resolve with routing, opening a routed target writable so the
 			// unclaim commits where the issue lives (as bd update --claim does).
-			result, err := resolveAndGetIssueForMutation(ctx, store, id)
+			result, err := resolveAndGetOriginalForMutation(ctx, store, id)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error resolving %s: %s\n", id, remedy.PrintedMessage(err))
 				hasError = true

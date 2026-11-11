@@ -179,6 +179,21 @@ in the molecule for you; add --no-auto to only show it.`,
 			}
 		}
 
+		// --claim-next claims inside the batch's transaction, in the first
+		// id's store. When that id is this project's own under an active
+		// auto-route, that store is this one, while bd ready lists the routing
+		// target: the claim would take work bd ready does not offer, a bd repo
+		// sync copy included, whose original bd show, bd heartbeat and bd
+		// unclaim act on instead. Claiming in the target once the close
+		// commits would split one transaction in two, which is why the HTTP
+		// route refuses --claim-next too (http-divergence-ledger.md, F-close),
+		// so refuse here, before anything closes.
+		if claimNext && !continueFlag && len(results) > 0 && !results[0].Routed {
+			if target, ok := activeAutoRouteTarget(ctx, store); ok && !isCommandWorkspace(target.beadsDir) {
+				return HandleErrorRespectJSON("--claim-next would claim from this project instead of %s, the auto-route target bd ready lists; nothing was closed (close without --claim-next, then run bd ready --claim)", remedy.PrintedValue(target.repoPath))
+			}
+		}
+
 		// THE BATCH. The CLI's own close policy runs first and read-only, then
 		// every id it passed goes to the BatchCloser role as one request per
 		// store: one transaction, one Dolt commit over N ids, and an id the
@@ -908,9 +923,10 @@ func resolveReasonFile(cmd *cobra.Command, hasExistingReason bool) (string, bool
 // resolveCloseTargets resolves a batch of partial issue IDs for `bd close`,
 // preserving input order. For each ID it tries the local store first, then
 // explicit prefix routing via routes.jsonl, then a shared auto-routed store.
-// This matches resolveAndGetIssueForMutation's routing precedence and write
-// intent, and like it returns a routing failure (an unreadable routes.jsonl, a
-// routed store that fails to open) as itself rather than as a not-found.
+// This matches resolveAndGetOriginalForMutation's routing precedence, write
+// intent and bd repo sync copy handling, and like it returns a routing
+// failure (an unreadable routes.jsonl, a routed store that fails to open) as
+// itself rather than as a not-found.
 //
 // The auto-routed handle is shared across the batch so bulk close does
 // not repeatedly open the same planning store and every result has a clear store
@@ -942,9 +958,17 @@ func resolveCloseTargets(ctx context.Context, localStore storage.DoltStorage, id
 // resolveCloseTarget resolves one ID of a bd close batch: the local store,
 // then a prefix route, then the batch's shared auto-routed store.
 func resolveCloseTarget(ctx context.Context, localStore storage.DoltStorage, shared *closeAutoRoute, id string) (*RoutedResult, error) {
-	// Local first.
+	// Local first. A local copy of an issue in the auto-route target
+	// resolves to that issue, through the batch's shared handle.
 	r, err := resolveAndGetFromStore(ctx, localStore, id, false)
 	if err == nil {
+		r, err = redirectLocalCopy(ctx, localStore, r, true, func(autoRouteTarget) (storage.DoltStorage, func(), error) {
+			rs, err := shared.open(ctx)
+			return rs, nil, err
+		})
+		if err != nil {
+			return nil, fmt.Errorf("resolving ID %s: %w", id, err)
+		}
 		return r, nil
 	}
 	if !isNotFoundErr(err) {
@@ -994,6 +1018,17 @@ type closeAutoRoute struct {
 // issue lives. The outcome of that open, failure included, holds for the rest
 // of the batch.
 func (a *closeAutoRoute) resolve(ctx context.Context, id string) (*RoutedResult, error) {
+	rs, err := a.open(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// Per-id RoutedResult does not own the shared handle; Close does.
+	return resolveAndGetFromStore(ctx, rs, id, true)
+}
+
+// open opens the shared auto-routed store on its first call; that outcome,
+// failure included, holds for the rest of the batch.
+func (a *closeAutoRoute) open(ctx context.Context) (storage.DoltStorage, error) {
 	if !a.tried {
 		a.tried = true
 		rs, routed, _, err := openAutoRoutedStore(ctx, a.localStore, true)
@@ -1006,11 +1041,7 @@ func (a *closeAutoRoute) resolve(ctx context.Context, id string) (*RoutedResult,
 			a.store = rs
 		}
 	}
-	if a.err != nil {
-		return nil, a.err
-	}
-	// Per-id RoutedResult does not own the shared handle; Close does.
-	return resolveAndGetFromStore(ctx, a.store, id, true)
+	return a.store, a.err
 }
 
 // Close closes the shared auto-routed store, if one was opened.

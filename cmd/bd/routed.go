@@ -9,7 +9,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -52,6 +54,46 @@ type RoutedResult struct {
 	Routed     bool                // true if the issue was found via routing
 	ResolvedID string              // The resolved (full) issue ID
 	closeFn    func()              // Function to close routed storage (if any)
+	// copyOwner is the repository the issue was resolved in when this
+	// workspace holds a bd repo sync copy of it (redirectLocalCopyToOwner),
+	// and "" otherwise.
+	copyOwner string
+	// beadsDir is the .beads directory of the workspace a routed result was
+	// resolved in, and database the database its open selected there.
+	beadsDir string
+	database string
+}
+
+// deleteDestination is the database a delete batch's id resolved in: key
+// identifies it, and where names it for the user.
+type deleteDestination struct {
+	key   string
+	where string
+}
+
+// deleteDestination identifies the database holding r's issue by the
+// canonical .beads directory r was routed to and the database selected
+// there, as resolution opened it, or "" for the command's own store. Results
+// with equal keys write to the same database, whichever handles they hold;
+// two databases of one workspace are two destinations.
+func (r *RoutedResult) deleteDestination() deleteDestination {
+	local := deleteDestination{where: "this workspace"}
+	if !r.Routed || r.beadsDir == "" {
+		return local
+	}
+	if isCommandWorkspace(r.beadsDir) {
+		if own, err := loadDoltDatabase(r.beadsDir); err == nil && own == r.database {
+			return local
+		}
+	}
+	where := remedy.PrintedValue(filepath.Dir(r.beadsDir))
+	if r.copyOwner != "" {
+		where = remedy.PrintedValue(r.copyOwner)
+	}
+	if r.database != "" {
+		where += " (database " + remedy.PrintedValue(r.database) + ")"
+	}
+	return deleteDestination{key: utils.CanonicalizePath(r.beadsDir) + "\x00" + r.database, where: where}
 }
 
 // Close closes any routed storage. Safe to call if Routed is false.
@@ -80,7 +122,9 @@ func commitRoutedWrite(ctx context.Context, result *RoutedResult, command string
 // Tries the local store first, then prefix-based routing via routes.jsonl,
 // then falls back to auto-routing (routing.mode=auto). A routing failure, such
 // as an unreadable routes.jsonl or a routed store that fails to open, is
-// returned as itself rather than as the local not-found.
+// returned as itself rather than as the local not-found. A local hit is the
+// local row, a bd repo sync copy included; resolveAndGetOriginalWithRouting
+// follows a copy to its original.
 //
 // Returns a RoutedResult containing the issue, resolved ID, and the store to use.
 // The caller MUST call result.Close() when done to release any routed storage.
@@ -141,6 +185,188 @@ func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage
 	}
 
 	return nil, err
+}
+
+// localCopyTarget reports the active auto-route target that issue, a row of
+// localStore, names as its source: a copy `bd repo sync` imported from the
+// repository `bd list` and `bd ready` read instead of this one. Such a row is
+// not the issue those commands show, so a command that changed it would
+// change a different row from the one the user sees. A native row (no
+// source_repo, or ".") and a copy of any other repository are not.
+func localCopyTarget(ctx context.Context, localStore storage.DoltStorage, issue *types.Issue) (autoRouteTarget, bool) {
+	if issue == nil || issue.SourceRepo == "" || issue.SourceRepo == "." {
+		return autoRouteTarget{}, false
+	}
+	target, ok := activeAutoRouteTarget(ctx, localStore)
+	if !ok || !isPlanningRepoMirror(issue, target.repoPath) || isCommandWorkspace(target.beadsDir) {
+		return autoRouteTarget{}, false
+	}
+	return target, true
+}
+
+// isCommandWorkspace reports whether beadsDir is the .beads directory of the
+// command's own store: a route back to it leads to the local row itself.
+func isCommandWorkspace(beadsDir string) bool {
+	if dbPath == "" {
+		return false
+	}
+	own := resolveBeadsDirForDBPath(dbPath)
+	if own == "" {
+		own = filepath.Dir(dbPath)
+	}
+	return utils.CanonicalizePath(beadsDir) == utils.CanonicalizePath(own)
+}
+
+// ownerRowFor returns the row ownerStore holds under local's id when it is
+// the issue local was copied from, or nil when it holds none or a different
+// issue under that id, in which case the local row stays the one resolved.
+// bd repo sync keeps created_at, so an issue and its copy share it.
+func ownerRowFor(ctx context.Context, ownerStore storage.DoltStorage, local *types.Issue) (*types.Issue, error) {
+	owner, err := ownerStore.GetIssue(ctx, local.ID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if !sameCreatedAt(owner.CreatedAt, local.CreatedAt) {
+		debug.Logf("[routing] %s: the routed target's row was created at %v, the local row at %v; using the local row\n", local.ID, owner.CreatedAt, local.CreatedAt)
+		return nil, nil
+	}
+	return owner, nil
+}
+
+// sameCreatedAt reports whether a and b are the same known creation time, to
+// the second a DATETIME column keeps.
+func sameCreatedAt(a, b time.Time) bool {
+	if a.IsZero() || b.IsZero() {
+		return false
+	}
+	return a.UTC().Truncate(time.Second).Equal(b.UTC().Truncate(time.Second))
+}
+
+// keepLocalCopy answers for a copy whose owner, target, could not be read. A
+// read falls back to the copy. A write fails, naming the target: changing the
+// copy would leave the issue itself as it was.
+func keepLocalCopy(local *RoutedResult, target autoRouteTarget, err error, writable bool) (*RoutedResult, error) {
+	if writable {
+		return nil, fmt.Errorf("%s is a copy of an issue in %s, which could not be read: %w", local.ResolvedID, remedy.PrintedValue(target.repoPath), err)
+	}
+	debug.Logf("[routing] %s is a copy of an issue in %s, which could not be read (%v); using the local copy\n", local.ResolvedID, target.repoPath, err)
+	return local, nil
+}
+
+// ownerOpener opens the store of target, a local copy's owner, and returns
+// what releases it; a nil release leaves the store open (a handle the caller
+// shares).
+type ownerOpener func(target autoRouteTarget) (store storage.DoltStorage, release func(), err error)
+
+// redirectLocalCopy hands back, in place of local, the issue a local copy was
+// imported from (localCopyTarget) when the active auto-route target, opened
+// through open, still holds it; the copy itself is left as it is. Anything
+// else keeps the local result, except that a write fails when the target
+// cannot be read (keepLocalCopy).
+func redirectLocalCopy(ctx context.Context, localStore storage.DoltStorage, local *RoutedResult, writable bool, open ownerOpener) (*RoutedResult, error) {
+	target, ok := localCopyTarget(ctx, localStore, local.Issue)
+	if !ok {
+		return local, nil
+	}
+	ownerStore, release, err := open(target)
+	if err != nil {
+		return keepLocalCopy(local, target, err, writable)
+	}
+	owner, err := ownerRowFor(ctx, ownerStore, local.Issue)
+	if err != nil || owner == nil {
+		if release != nil {
+			release()
+		}
+		if err != nil {
+			return keepLocalCopy(local, target, err, writable)
+		}
+		return local, nil
+	}
+	debug.Logf("[routing] %s is a copy of an issue in %s; resolving it there\n", local.ResolvedID, target.repoPath)
+	return &RoutedResult{
+		Issue:      owner,
+		Store:      ownerStore,
+		Routed:     true,
+		ResolvedID: local.ResolvedID,
+		closeFn:    release,
+		copyOwner:  target.repoPath,
+		beadsDir:   target.beadsDir,
+	}, nil
+}
+
+// redirectLocalCopyToOwner is redirectLocalCopy through an owner store of the
+// result's own, opened with the caller's write intent.
+func redirectLocalCopyToOwner(ctx context.Context, localStore storage.DoltStorage, local *RoutedResult, writable bool) (*RoutedResult, error) {
+	var database string
+	result, err := redirectLocalCopy(ctx, localStore, local, writable, func(target autoRouteTarget) (storage.DoltStorage, func(), error) {
+		ownerStore, db, err := openAutoRouteTarget(ctx, target, writable)
+		if err != nil {
+			return nil, nil, err
+		}
+		database = db
+		return ownerStore, func() { _ = ownerStore.Close() }, nil
+	})
+	if err == nil && result.copyOwner != "" {
+		result.database = database
+	}
+	return result, err
+}
+
+// resolveAndGetOriginalWithRouting is resolveAndGetIssueWithRouting for a
+// command that acts on the issue a bd repo sync copy was imported from rather
+// than on the copy (followLocalCopy): bd show and bd comments read it there.
+func resolveAndGetOriginalWithRouting(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, error) {
+	result, err := resolveAndGetIssueWithRouting(ctx, localStore, id)
+	return followLocalCopy(ctx, localStore, result, err, false)
+}
+
+// resolveAndGetOriginalForMutation is resolveAndGetIssueForMutation for such a
+// command: bd update, bd heartbeat, bd unclaim, bd reopen and bd close
+// --if-revision change the original.
+func resolveAndGetOriginalForMutation(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, error) {
+	result, err := resolveAndGetIssueForMutation(ctx, localStore, id)
+	return followLocalCopy(ctx, localStore, result, err, true)
+}
+
+// resolveAndGetOriginalForMutationExact is resolveAndGetIssueForMutationExact
+// for such a command: bd comment, bd comments add and bd delete change the
+// original.
+func resolveAndGetOriginalForMutationExact(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, error) {
+	result, err := resolveAndGetIssueForMutationExact(ctx, localStore, id)
+	return followLocalCopy(ctx, localStore, result, err, true)
+}
+
+// followLocalCopy hands back, when result is a local hit that is a bd repo
+// sync copy of an issue in the auto-route target, that issue
+// (redirectLocalCopyToOwner); any other result, or an error, passes through.
+// Only the commands docs/multi-agent/routing.md lists follow a copy, through
+// the resolveAndGetOriginal resolvers or, for bd close, resolveCloseTarget.
+// Every other command resolves the row this store holds: one that selected
+// its ids here (bd admin cleanup, bd mol burn, bd wisp gc) must delete what it
+// selected, not a row in another repository, and one that reads or writes
+// links (bd dep, bd link, bd mol bond) must find the edge where this store
+// keeps it.
+func followLocalCopy(ctx context.Context, localStore storage.DoltStorage, result *RoutedResult, err error, writable bool) (*RoutedResult, error) {
+	if err != nil || result.Routed {
+		return result, err
+	}
+	return redirectLocalCopyToOwner(ctx, localStore, result, writable)
+}
+
+// printRetainedCopyNote tells the user, after result's issue was deleted from
+// the repository a local copy was imported from, that the copy is still here
+// and how to remove it. Quiet mode suppresses it.
+func printRetainedCopyNote(result *RoutedResult) {
+	if result.copyOwner == "" || isQuiet() {
+		return
+	}
+	owner := remedy.PrintedValue(result.copyOwner)
+	idArg, idNote := remedy.CommandArg(runtime.GOOS, result.ResolvedID, "<id>")
+	fmt.Fprintf(os.Stderr, "note: deleted %s from %s; this project still holds the copy bd repo sync imported.\n", remedy.PrintedWord(result.ResolvedID), owner)
+	fmt.Fprintf(os.Stderr, "  While %s no longer holds it, bd delete %s --force removes the local copy.%s\n", owner, idArg, idNote)
 }
 
 // isRoutedResolutionRefusal reports whether a routed tier's resolution error
@@ -286,12 +512,13 @@ func resolveAndGetIssueForMutationExact(ctx context.Context, localStore storage.
 // tolerant resolver for the auto-routed store lookup, mirroring the local-store
 // distinction in resolveAndGetFromStore vs resolveAndGetFromStoreExact.
 func resolveViaAutoRoutingWithAccess(ctx context.Context, localStore storage.DoltStorage, id string, writable bool, exact bool) (*RoutedResult, error) {
-	routedStore, routed, _, err := openAutoRoutedStore(ctx, localStore, writable)
+	target, ok := activeAutoRouteTarget(ctx, localStore)
+	if !ok {
+		return nil, fmt.Errorf("%w: no auto-routed store available", errRoutingUnavailable)
+	}
+	routedStore, database, err := openAutoRouteTarget(ctx, target, writable)
 	if err != nil {
 		return nil, err
-	}
-	if !routed {
-		return nil, fmt.Errorf("%w: no auto-routed store available", errRoutingUnavailable)
 	}
 
 	var result *RoutedResult
@@ -305,6 +532,7 @@ func resolveViaAutoRoutingWithAccess(ctx context.Context, localStore storage.Dol
 		return nil, err
 	}
 	result.closeFn = func() { _ = routedStore.Close() }
+	result.beadsDir, result.database = target.beadsDir, database
 	return result, nil
 }
 
@@ -360,7 +588,7 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 
 	debug.Logf("[routing] Prefix %q matched route to %s (database: %s)\n", matchedRoute.Prefix, matchedRoute.Path, targetDB)
 
-	targetStore, err := openRoutedTargetStore(ctx, targetBeadsDir, targetDB, writable)
+	targetStore, err := openRoutedTargetStore(ctx, targetBeadsDir, targetDB, writable, "prefix route: "+matchedRoute.Prefix)
 	if err != nil {
 		return nil, fmt.Errorf("opening routed store for %s: %w", matchedRoute.Path, err)
 	}
@@ -376,6 +604,7 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 		return nil, err
 	}
 	result.closeFn = func() { _ = targetStore.Close() }
+	result.beadsDir, result.database = targetBeadsDir, targetDB
 
 	if os.Getenv("BD_DEBUG_ROUTING") != "" {
 		fmt.Fprintf(os.Stderr, "[routing] Resolved %s via prefix route to %s (database: %s)\n", id, remedy.PrintedValue(matchedRoute.Path), remedy.PrintedValue(targetDB))
@@ -456,7 +685,7 @@ func lookupPrefixRoute(id string) (*prefixRoute, string, error) {
 // open-time schema migrations on such a miss, as any bd command run in that
 // repository would; they bring it to the schema this bd writes, not to
 // anything the missed id asked for.
-func openRoutedTargetStore(ctx context.Context, beadsDir, database string, writable bool) (storage.DoltStorage, error) {
+func openRoutedTargetStore(ctx context.Context, beadsDir, database string, writable bool, reason string) (storage.DoltStorage, error) {
 	if database != "" {
 		origDB := os.Getenv("BEADS_DOLT_SERVER_DATABASE")
 		_ = os.Setenv("BEADS_DOLT_SERVER_DATABASE", database)
@@ -470,9 +699,9 @@ func openRoutedTargetStore(ctx context.Context, beadsDir, database string, writa
 		}()
 	}
 	if writable {
-		return openForeignStore(ctx, beadsDir, foreignWrite)
+		return openForeignStore(ctx, beadsDir, foreignWrite, reason)
 	}
-	return openForeignStore(ctx, beadsDir, foreignRead)
+	return openForeignStore(ctx, beadsDir, foreignRead, reason)
 }
 
 // matchPrefixRoute returns the route whose prefix is the longest leading match

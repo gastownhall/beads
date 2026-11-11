@@ -1193,6 +1193,7 @@ go_test(
         "retained_types_proxied_integration_test.go",
         "retained_types_test.go",
         "root_context_lifecycle_test.go",
+        "routed_copy_test.go",
         "routed_local_near_miss_test.go",
         "routed_mutation_test.go",
         "routed_test.go",

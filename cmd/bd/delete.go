@@ -106,7 +106,7 @@ Force: Delete and orphan dependents
 		}
 
 		if len(issueIDs) > 1 || cascade {
-			if err := deleteBatch(cmd, issueIDs, force, dryRun, cascade, jsonOutput, false, ifRevision); err != nil {
+			if err := deleteBatchReporting(issueIDs, force, dryRun, cascade, jsonOutput, ifRevision, nil, resolveAndGetOriginalForMutationExact); err != nil {
 				if ifRevision != nil {
 					if reported, ok := reportIfRevisionFailure("deleting", issueIDs[0], err, ifRevision); ok {
 						return reported
@@ -131,7 +131,7 @@ Force: Delete and orphan dependents
 		// gone (already deleted, a re-run script) would otherwise resolve to
 		// whichever surviving issue's id it begins, and the preview would
 		// print `bd delete <that issue> --force` as the next step.
-		routedResult, err := resolveAndGetIssueForMutationExact(ctx, store, issueID)
+		routedResult, err := resolveAndGetOriginalForMutationExact(ctx, store, issueID)
 		if err != nil {
 			// mc-zndi7.81: this pre-flight existence check runs before
 			// deleter.Delete() and the per-id lock fence #7244 added, so a
@@ -235,6 +235,7 @@ Force: Delete and orphan dependents
 			fmt.Printf("  Removed %d dependency link(s)\n", result.Dependencies)
 			fmt.Printf("  Updated text references in %d issue(s)\n", result.ReferencesUpdated)
 		}
+		printRetainedCopyNote(routedResult)
 		return nil
 	},
 }
@@ -347,60 +348,138 @@ func deleteIssue(ctx context.Context, issueID string) error {
 	return store.DeleteIssue(ctx, issueID)
 }
 
-// deleteBatch is the multi-id and cascade path, shared by `bd delete`,
-// `bd cleanup`, `bd wisp gc` and `bd mol burn`.
-//
-// It resolves the ids in the front door - exact-id matching and
-// cross-repository routing, which issueops.DeleteRequest deliberately does not
-// do - and hands the RESOLVED ids to the role. Never a leading-prefix
-// abbreviation: a re-run of a finished --from-file list would otherwise
-// delete every surviving issue whose id one of its ids begins.
-//
-// ifRevision is non-nil only via `bd delete`'s own --if-revision (beads#4682);
-// its other three callers always pass nil, and requireSingleIfRevisionID has
-// already refused this path if it were asked to guard more than one id.
+// deleteBatch is the multi-id and cascade path of `bd wisp gc` and `bd mol
+// burn`, which delete ids they selected from this workspace's store:
+// deleteBatchReporting with no report, each id resolved here first
+// (resolveAndGetIssueForMutationExact), so a bd repo sync copy among them is
+// the row deleted, not its original in another repository. Its callers pass a
+// nil ifRevision; `bd delete --if-revision` reaches deleteBatchReporting
+// itself.
 //
 //nolint:unparam // cmd parameter required for potential future use
 func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, cascade bool, jsonOutput bool, _ bool, ifRevision *int64, _ ...string) error {
-	return deleteBatchReporting(issueIDs, force, dryRun, cascade, jsonOutput, ifRevision, nil)
+	return deleteBatchReporting(issueIDs, force, dryRun, cascade, jsonOutput, ifRevision, nil, resolveAndGetIssueForMutationExact)
 }
 
-// deleteBatchReporting is deleteBatch for a bulk command that reports on its
-// own selection: report's members (`bd admin cleanup`'s retention_required) are added to the --json preview and result. A nil report
-// adds nothing, which is deleteBatch.
-func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput bool, ifRevision *int64, report map[string]interface{}) error {
+// deleteBatchResolution is what a delete batch's ids resolved to.
+type deleteBatchResolution struct {
+	issues      map[string]*types.Issue
+	resolvedIDs []string
+	notFound    []string
+	// destinations[i] is the database resolvedIDs[i] resolved in.
+	destinations []deleteDestination
+	// retainedCopies are the ids that resolved to the repository a local
+	// copy came from, whose copies the deletion leaves here
+	// (printRetainedCopyNote).
+	retainedCopies []*RoutedResult
+	// routed is the first routed resolution, whose store the batch runs on;
+	// nil when no id routed, and the batch runs on this workspace's store.
+	routed *RoutedResult
+}
+
+// resolveDeleteBatch resolves each of ids through resolve, keeping the first
+// routed resolution open for the batch and closing every other one as it
+// goes. An error closes the one it kept as well, so a later id's failure
+// leaves no store open.
+func resolveDeleteBatch(ids []string, resolve func(id string) (*RoutedResult, error)) (*deleteBatchResolution, error) {
+	batch := &deleteBatchResolution{issues: make(map[string]*types.Issue), resolvedIDs: make([]string, 0, len(ids))}
+	fail := func(err error) (*deleteBatchResolution, error) {
+		if batch.routed != nil {
+			batch.routed.Close()
+		}
+		return nil, err
+	}
+	for _, id := range ids {
+		result, err := resolve(id)
+		if err != nil {
+			if isNotFoundErr(err) {
+				batch.notFound = append(batch.notFound, id)
+				continue
+			}
+			if refusal := deleteAbbreviationRefusal(err); refusal != nil {
+				return fail(refusal)
+			}
+			return fail(fmt.Errorf("getting issue %s: %v", id, err))
+		}
+		batch.issues[result.ResolvedID] = result.Issue
+		batch.resolvedIDs = append(batch.resolvedIDs, result.ResolvedID)
+		batch.destinations = append(batch.destinations, result.deleteDestination())
+		if result.copyOwner != "" {
+			batch.retainedCopies = append(batch.retainedCopies, result)
+		}
+		if result.Routed && batch.routed == nil {
+			batch.routed = result
+		} else {
+			result.Close()
+		}
+	}
+	return batch, nil
+}
+
+// refuseMixedDeleteDestinations refuses a delete batch whose ids, resolved
+// in order, are held by more than one database (destinations[i] is
+// resolvedIDs[i]'s), naming each one's ids in the order first seen.
+func refuseMixedDeleteDestinations(resolvedIDs []string, destinations []deleteDestination) error {
+	var order []deleteDestination
+	byKey := map[string][]string{}
+	for i, id := range resolvedIDs {
+		dest := destinations[i]
+		if _, seen := byKey[dest.key]; !seen {
+			order = append(order, dest)
+		}
+		byKey[dest.key] = append(byKey[dest.key], id)
+	}
+	if len(order) < 2 {
+		return nil
+	}
+	parts := make([]string, 0, len(order))
+	for _, dest := range order {
+		parts = append(parts, fmt.Sprintf("%s in %s", strings.Join(byKey[dest.key], " "), dest.where))
+	}
+	return fmt.Errorf("these issues are in different workspaces (%s); nothing was deleted, submit a separate bd delete for each workspace", strings.Join(parts, "; "))
+}
+
+// deleteBatchReporting is the multi-id and cascade path of `bd delete`, `bd
+// admin cleanup` and deleteBatch.
+//
+// It resolves the ids in the front door through resolve - exact-id matching
+// and cross-repository routing, which issueops.DeleteRequest deliberately does
+// not do - and hands the RESOLVED ids to the role. Never a leading-prefix
+// abbreviation: a re-run of a finished --from-file list would otherwise
+// delete every surviving issue whose id one of its ids begins. `bd delete`
+// resolves the ids the user named through
+// resolveAndGetOriginalForMutationExact, so an id naming a bd repo sync copy
+// deletes its original, as a one-id delete does. A command that selected its
+// ids from this workspace's store resolves them through
+// resolveAndGetIssueForMutationExact and deletes the rows it selected.
+//
+// report's members (`bd admin cleanup`'s retention_required) are added to the
+// --json preview and result; a nil report adds nothing. ifRevision is non-nil
+// only via `bd delete`'s own --if-revision (beads#4682), and
+// requireSingleIfRevisionID has already refused this path if it were asked to
+// guard more than one id.
+func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput bool, ifRevision *int64, report map[string]interface{}, resolve func(context.Context, storage.DoltStorage, string) (*RoutedResult, error)) error {
 	if store == nil {
 		if err := ensureStoreActive(); err != nil {
 			return err
 		}
 	}
 	ctx := rootCtx
-	issues := make(map[string]*types.Issue)
-	resolvedIDs := make([]string, 0, len(issueIDs))
-	notFound := []string{}
-	var routedStore storage.DoltStorage
-	for _, id := range issueIDs {
-		result, err := resolveAndGetIssueForMutationExact(ctx, store, id)
-		if err != nil {
-			if isNotFoundErr(err) {
-				notFound = append(notFound, id)
-			} else if refusal := deleteAbbreviationRefusal(err); refusal != nil {
-				return refusal
-			} else {
-				return fmt.Errorf("getting issue %s: %v", id, err)
-			}
-		} else {
-			issues[result.ResolvedID] = result.Issue
-			resolvedIDs = append(resolvedIDs, result.ResolvedID)
-			if result.Routed && routedStore == nil {
-				routedStore = result.Store
-			} else {
-				result.Close()
-			}
-		}
+	batch, err := resolveDeleteBatch(issueIDs, func(id string) (*RoutedResult, error) {
+		return resolve(ctx, store, id)
+	})
+	if err != nil {
+		return err
 	}
-	if routedStore != nil {
-		defer func() { _ = routedStore.Close() }()
+	if batch.routed != nil {
+		defer batch.routed.Close()
+	}
+	issues, resolvedIDs, notFound := batch.issues, batch.resolvedIDs, batch.notFound
+	// The batch runs on one store, so every id must resolve in one
+	// database: run on the first routed store, an id another one holds
+	// would delete whatever that store has under it.
+	if err := refuseMixedDeleteDestinations(resolvedIDs, batch.destinations); err != nil {
+		return err
 	}
 	if len(notFound) > 0 {
 		// The role's own existence probe reports a missing id with this same
@@ -414,8 +493,8 @@ func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput 
 		return &issueops.NotFoundError{IDs: notFound}
 	}
 	batchStore := store
-	if routedStore != nil {
-		batchStore = routedStore
+	if batch.routed != nil {
+		batchStore = batch.routed.Store
 	}
 
 	deleter, err := batchStore.Deleter()
@@ -533,6 +612,9 @@ func deleteBatchReporting(issueIDs []string, force, dryRun, cascade, jsonOutput 
 			fmt.Printf("  %s Orphaned %d issue(s): %s\n",
 				ui.RenderWarn("⚠"), len(result.Orphaned), strings.Join(result.Orphaned, ", "))
 		}
+	}
+	for _, retained := range batch.retainedCopies {
+		printRetainedCopyNote(retained)
 	}
 	return nil
 }

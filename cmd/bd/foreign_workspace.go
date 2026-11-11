@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 )
@@ -206,8 +207,9 @@ const (
 // store through the metadata store factories (the three direct opens are
 // listed at the top of this file): it refuses what admitForeignWorkspace
 // refuses before the factory runs, so the factory writes nothing into a
-// workspace admitForeignWorkspace refuses.
-func openForeignStore(ctx context.Context, beadsDir string, access foreignAccess) (storage.DoltStorage, error) {
+// workspace admitForeignWorkspace refuses. reason says why the command opens
+// it, for the store-open log (logStoreOpen).
+func openForeignStore(ctx context.Context, beadsDir string, access foreignAccess, reason string) (storage.DoltStorage, error) {
 	if _, err := admitForeignWorkspace(beadsDir); err != nil {
 		return nil, err
 	}
@@ -224,16 +226,38 @@ func openForeignStore(ctx context.Context, beadsDir string, access foreignAccess
 	if access != foreignCreate && !beads.HasProjectFiles(beadsDir) {
 		return nil, fmt.Errorf("%w at %s", ErrNoBeadsDatabase, remedy.PrintedValue(beadsDir))
 	}
+	var (
+		s   storage.DoltStorage
+		err error
+	)
 	switch access {
 	case foreignRead:
-		return newReadOnlyStoreFromConfig(ctx, beadsDir)
+		s, err = newReadOnlyStoreFromConfig(ctx, beadsDir)
 	case foreignPreview:
-		return newPreviewStoreFromConfig(ctx, beadsDir)
+		s, err = newPreviewStoreFromConfig(ctx, beadsDir)
 	case foreignWrite:
-		return newExistingDoltStoreFromConfig(ctx, beadsDir)
+		s, err = newExistingDoltStoreFromConfig(ctx, beadsDir)
 	case foreignCreate:
-		return newDoltStoreFromConfig(ctx, beadsDir)
+		s, err = newDoltStoreFromConfig(ctx, beadsDir)
 	default:
 		return nil, fmt.Errorf("openForeignStore: unknown access %d", access)
 	}
+	if err != nil {
+		return s, err
+	}
+	logStoreOpen(beadsDir, access == foreignWrite || access == foreignCreate, reason)
+	return s, nil
+}
+
+// logStoreOpen logs, under --verbose or BD_DEBUG=1, a store the command
+// opened: its .beads directory, whether it opened for writing, and why. Each
+// opening site calls it once the open succeeded, so a failed open logs no
+// line. The directory and the reason (a prefix route's prefix comes from
+// routes.jsonl) are spelled by remedy.PrintedValue.
+func logStoreOpen(beadsDir string, writable bool, reason string) {
+	access := "read"
+	if writable {
+		access = "write"
+	}
+	debug.Logf("store: %s %s (%s)\n", remedy.PrintedValue(beadsDir), access, remedy.PrintedValue(reason))
 }

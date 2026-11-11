@@ -132,7 +132,7 @@ func watchIssueLoop(ctx context.Context, src issueWatchSource, poll func() <-cha
 
 // fetchIssue retrieves a single issue by ID without printing anything.
 func fetchIssue(ctx context.Context, issueID string) (*types.Issue, error) {
-	result, err := resolveAndGetIssueWithRouting(ctx, store, issueID)
+	result, err := resolveAndGetOriginalWithRouting(ctx, store, issueID)
 	if result != nil {
 		defer result.Close()
 	}
@@ -149,7 +149,7 @@ func fetchIssue(ctx context.Context, issueID string) (*types.Issue, error) {
 // Matches the full bd show output: header, metadata, content, labels, deps, comments.
 // commentsTail is the --comments-tail render cap; see printComments.
 func displayShowIssueReturn(ctx context.Context, issueID string, commentsTail int) *types.Issue {
-	result, err := resolveAndGetIssueWithRouting(ctx, store, issueID)
+	result, err := resolveAndGetOriginalWithRouting(ctx, store, issueID)
 	if result != nil {
 		defer result.Close()
 	}

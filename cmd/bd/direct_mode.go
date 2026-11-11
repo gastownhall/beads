@@ -50,6 +50,7 @@ func ensureStoreActiveWithContext(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("%w\nHint: %s", openStoreError(backendNameForErrorFraming(beadsDir), err), diagHint())
 	}
+	logStoreOpen(beadsDir, true, "project")
 
 	// Update the database path for compatibility with code that expects it
 	if dbPath := beads.FindDatabasePath(); dbPath != "" {
