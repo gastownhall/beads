@@ -111,6 +111,9 @@ func TestMigrateUpReturnsDirtyTablesErrorForPreExistingDirtyTable(t *testing.T) 
 	// migration 0043 touches the dirty `dependencies` table.
 	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", 42)
+	// The ignored series is intersected before either series migrates
+	// (#5816); with no ignored cursor table its read stops at the probe.
+	expectCursorProbe(mock, "ignored_schema_migrations", false)
 
 	_, err = MigrateUp(context.Background(), db)
 	if err == nil {
