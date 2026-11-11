@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -79,6 +80,10 @@ func expectAheadDatabaseThroughDriftCheck(mock sqlmock.Sqlmock, database string,
 	expectVersionQuery(mock, ahead)
 	return lockName
 }
+
+// skewIgnoredWarning is the leading text of the warning schema prints when
+// BD_IGNORE_SCHEMA_SKEW=1 lets an ahead database through.
+const skewIgnoredWarning = "Warning: schema skew ignored"
 
 // TestInitSchemaRefusesForwardDrift pins the proxied-server / `bd serve` open
 // (doltSQLProvider.initSchemaAttempt) to the forward-drift rule every other
@@ -194,6 +199,78 @@ func TestInitSchemaRefusesForwardDrift(t *testing.T) {
 		}
 		if *calls != 1 {
 			t.Errorf("MigrateUpWithLock called %d times, want 1: a skew refusal must not be retried", *calls)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+
+	// AC-3: BD_IGNORE_SCHEMA_SKEW=1 lets an ahead database through on either
+	// path, with schema's existing warning printed once per attempt.
+	t.Run("override opens an ahead database on the converged path with one warning", func(t *testing.T) {
+		t.Setenv("BD_IGNORE_SCHEMA_SKEW", "1")
+		calls := stubConvergedMigrateUp(t)
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("create sql mock: %v", err)
+		}
+		defer db.Close()
+
+		expectVersionQuery(mock, ahead)
+
+		p := &doltSQLProvider{defaultBranch: defaultBranch, db: db, serverEndpoint: "tcp:127.0.0.1:3306"}
+		var initErr error
+		stderr := captureStderr(t, func() {
+			initErr = p.initSchema(context.Background(), "beads")
+		})
+		if initErr != nil {
+			t.Fatalf("initSchema() error = %v, want BD_IGNORE_SCHEMA_SKEW=1 to open", initErr)
+		}
+		if got := strings.Count(stderr, skewIgnoredWarning); got != 1 {
+			t.Errorf("stderr carries %d skew-ignored warnings, want 1:\n%s", got, stderr)
+		}
+		if *calls != 1 {
+			t.Errorf("MigrateUpWithLock called %d times, want 1", *calls)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+
+	// On the locked path the gate's check allows the open with its warning and
+	// MigrateUp proceeds (here to its first statement, which the script fails
+	// so the run ends); the check is not asked a second time.
+	t.Run("override lets the locked path through to MigrateUp with one warning", func(t *testing.T) {
+		t.Setenv("BD_IGNORE_SCHEMA_SKEW", "1")
+		calls := countMigrateUpWithLock(t)
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("create sql mock: %v", err)
+		}
+		defer db.Close()
+
+		lockName := expectAheadDatabaseThroughDriftCheck(mock, "beads", ahead)
+		mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
+			WithArgs(sqlmock.AnyArg()).
+			WillReturnError(errors.New("reached the first migration statement"))
+		expectLockRelease(mock, lockName)
+
+		p := &doltSQLProvider{defaultBranch: defaultBranch, db: db, serverEndpoint: "tcp:127.0.0.1:3306"}
+		var initErr error
+		stderr := captureStderr(t, func() {
+			initErr = p.initSchema(context.Background(), "beads")
+		})
+		if initErr == nil || !strings.Contains(initErr.Error(), "reached the first migration statement") {
+			t.Fatalf("initSchema() error = %v, want BD_IGNORE_SCHEMA_SKEW=1 to let MigrateUp run", initErr)
+		}
+		if schema.IsSchemaSkewError(initErr) {
+			t.Errorf("initSchema() error = %v, want no SchemaSkewError under BD_IGNORE_SCHEMA_SKEW=1", initErr)
+		}
+		if got := strings.Count(stderr, skewIgnoredWarning); got != 1 {
+			t.Errorf("stderr carries %d skew-ignored warnings, want 1:\n%s", got, stderr)
+		}
+		if *calls != 1 {
+			t.Errorf("MigrateUpWithLock called %d times, want 1", *calls)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("unmet SQL expectations: %v", err)
