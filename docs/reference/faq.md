@@ -113,6 +113,8 @@ The default `bd init` uses **embedded mode**: Dolt runs in-process inside `bd`, 
 
 **Server mode** (`bd init --server`) connects to a running `dolt sql-server` and stores data at `.beads/dolt/`. Switch to it when multiple processes need concurrent write access to the same database — for example several agents on one machine. See [Dolt architecture](/architecture/dolt) for setup and migration between modes.
 
+The mode is chosen per process. A runtime override (`BEADS_DOLT_SHARED_SERVER`, `BEADS_DOLT_SERVER_MODE=1`, or a non-local `BEADS_DOLT_SERVER_HOST`) switches that process to server mode even when `.beads/metadata.json` sets `"dolt_mode": "embedded"`, so agents with different environments can read different stores. When an override contradicts an explicit embedded setting, bd prints a notice to stderr, once per process. The notice does not cover an implicit embedded default, a foreign `dolt sql-server`, or worktrees that resolve to different stores, and it does not fix stale reads. For many concurrent processes, configure server mode the same way for every session. See [Keep every session on the same store](/architecture/dolt#keep-every-session-on-the-same-store).
+
 ## Usage
 
 ### Should I run bd init myself or have my agent do it?

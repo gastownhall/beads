@@ -384,6 +384,50 @@ Switch to server mode when you need:
 - Orchestrator multi-rig setups
 - Federation with remote peers
 
+### Keep every session on the same store
+
+Each `bd` process picks its store when it starts, from `.beads/metadata.json`,
+`.beads/config.yaml` and its own environment. Runtime overrides win over the
+metadata file: shared-server mode (`BEADS_DOLT_SHARED_SERVER`, or
+`dolt.shared-server` in `config.yaml`), `BEADS_DOLT_SERVER_MODE=1`, or a
+`BEADS_DOLT_SERVER_HOST` that names a non-local host switches that process to
+server mode even when `.beads/metadata.json` pins `"dolt_mode": "embedded"`. A
+server-mode process reads the server's database, not `.beads/embeddeddolt/`,
+so agents whose environments differ can read different stores and see
+different issue state.
+
+When `.beads/metadata.json` explicitly sets `"dolt_mode": "embedded"` and one
+of those overrides selects server mode anyway, bd keeps the override for that
+run and prints a notice to stderr, once per process; stdout, JSON output, exit
+codes and `metadata.json` stay unchanged. For `BEADS_DOLT_SERVER_MODE=1` and a
+non-local `BEADS_DOLT_SERVER_HOST`, the notice names the deciding variable and
+the embedded directory it bypasses, and its remedy lists every active
+override; the shared-server notice names the shared-server settings instead.
+To resolve it, align every session on the intended mode: persist server mode
+by setting `dolt_mode` to `server` in `.beads/metadata.json` (see
+[Migrating Between Backends](#migrating-between-backends)), or remove the
+overrides if you mean to stay embedded. When a non-local
+`BEADS_DOLT_SERVER_HOST` is among them, persist that host too
+(`dolt_server_host` in `.beads/metadata.json`, or `dolt.host` in
+`config.yaml`): without it, server mode dials the host the workspace
+configures (`127.0.0.1` by default), so sessions without the variable can
+still reach a different server. A value bd took from `.beads/.env` stays in
+force until you remove it from that file.
+
+The notice has limits. It does not fire when the workspace leaves the mode
+implicit (no `dolt_mode` in `metadata.json`, the embedded default), and it
+does not detect a foreign `dolt sql-server` running over a data directory,
+worktrees that resolve to different `.beads` directories, or sessions pointed
+at different databases or branches. It is a configuration diagnostic, not a
+fix for stale reads: when agents disagree about an issue, first check that
+each one uses the same workspace, mode, database and branch.
+
+For many concurrent processes on one machine, use server mode, configured the
+same way for every session. Embedded mode serializes access through the Dolt
+driver: each `bd` operation opens a short-lived connection and transaction,
+and concurrent processes contend for the embedded engine's write lock. It
+suits solo work, CI and single-agent setups.
+
 ## Maintenance — `bd prune` and `bd purge`
 
 `bd prune` permanently deletes closed non-ephemeral beads to reclaim storage

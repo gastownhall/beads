@@ -1226,6 +1226,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A server-mode override no longer bypasses an explicit
+  `"dolt_mode": "embedded"` without a word (GH#4746).**
+  `BEADS_DOLT_SERVER_MODE=1`, or a `BEADS_DOLT_SERVER_HOST` that names a
+  non-local host, switches a bd process to server storage even when
+  `.beads/metadata.json` pins `"dolt_mode": "embedded"`, so sessions whose
+  environments differ can read different stores. bd printed a notice only for
+  shared-server mode; it now prints one for these two overrides as well, on
+  stderr and once per process, naming the variable, the metadata file and the
+  bypassed `.beads/embeddeddolt` directory. Its remedy lists every active
+  override (removing only one leaves the other in force), says to remove a
+  value bd took from `.beads/.env` from that file, and for a host override
+  says to persist the host along with server mode. The override still wins;
+  stdout, `--json` output, exit codes and `metadata.json` are unchanged. The
+  notice is a configuration diagnostic, not a fix for stale reads; see
+  [Keep every session on the same store](docs/architecture/dolt.md#keep-every-session-on-the-same-store).
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
