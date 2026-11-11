@@ -137,17 +137,18 @@ release branch as a cherry-pick PR.
    git cherry-pick -x <merge-commit-sha>
    ```
 
-   If `CHANGELOG.md` conflicts, keep the release branch's version. The
-   `(cherry picked from commit ...)` trailers are the ledger the release
-   CHANGELOG rollup is built from.
+   Keep the release branch's `CHANGELOG.md` (drop the pick's entry), so
+   concurrent backport PRs don't conflict there. The
+   `(cherry picked from commit ...)` trailers are the ledger the release-prep
+   PR rebuilds the release's CHANGELOG section from.
 3. Title the PR `[release/1.4.0] backport #<N>: <original title>`. The body
    links #<N> and says whether the pick was clean or lists each conflict
    resolution.
 4. A clean pick of a reviewed `main` commit merges once `CI Gate / Required` is
-   green, with no further review. A pick still counts as clean when its only
-   conflicts are in `CHANGELOG.md` (resolved by keeping the release branch's
-   version) or in generated files (`BUILD.bazel` srcs, shard manifests,
-   `tree.golden`) resolved by their generator. Check it: outside those files
+   green, with no further review. A pick still counts as clean when it differs
+   from the `main` commit only in `CHANGELOG.md` (the branch's version is kept)
+   or in generated files (`BUILD.bazel` srcs, shard manifests, `tree.golden`)
+   resolved by their generator. Check it: outside those files
    the pick's patch-id must equal the `main` commit's
    (`git show <sha> -- . ':!CHANGELOG.md' | git patch-id --stable`). Any other
    resolution gets `status/needs-review-auto`. Release branches have no merge
