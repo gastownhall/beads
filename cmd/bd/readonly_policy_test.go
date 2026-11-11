@@ -86,6 +86,28 @@ func (s *strictReadonlyPostRunStore) Close() error {
 }
 
 func TestPersistentPostRunStrictReadonlySuppressesMaintenance(t *testing.T) {
+	assertPostRunSuppressesMaintenance(t, "create", "strict readonly", func() { readonlyMode = true })
+}
+
+// TestPersistentPostRunReadOnlyCheckSuppressesMaintenance is the other way out
+// of the net: `bd doctor --check=export` runs without --readonly, but it
+// promised to write nothing, so it gets no commit, tip metadata, backup,
+// export or push on its way out either (GH#6955).
+func TestPersistentPostRunReadOnlyCheckSuppressesMaintenance(t *testing.T) {
+	originalSkip := commandSkipsPostRunMaintenance.Load()
+	t.Cleanup(func() { commandSkipsPostRunMaintenance.Store(originalSkip) })
+	assertPostRunSuppressesMaintenance(t, "doctor", "a read-only check", func() {
+		readonlyMode = false
+		commandSkipsPostRunMaintenance.Store(true)
+	})
+}
+
+// assertPostRunSuppressesMaintenance runs PersistentPostRunE for a cmdName
+// invocation that wrote, showed a tip and has auto-commit on, so every
+// maintenance step would run, with configure applied last, and fails if any
+// of them ran.
+func assertPostRunSuppressesMaintenance(t *testing.T, cmdName, who string, configure func()) {
+	t.Helper()
 	originalStore := store
 	originalReadonly := readonlyMode
 	originalProxied := proxiedServerMode
@@ -145,7 +167,6 @@ func TestPersistentPostRunStrictReadonlySuppressesMaintenance(t *testing.T) {
 
 	fake := &strictReadonlyPostRunStore{}
 	store = fake
-	readonlyMode = true
 	proxiedServerMode = false
 	rootCtx = context.Background()
 	rootCancel = nil
@@ -157,15 +178,16 @@ func TestPersistentPostRunStrictReadonlySuppressesMaintenance(t *testing.T) {
 	commandDidWriteTipMetadata = true
 	commandTipIDsShown = map[string]struct{}{"strict-readonly": {}}
 	doltAutoCommit = string(doltAutoCommitOn)
+	configure()
 
-	if err := rootCmd.PersistentPostRunE(&cobra.Command{Use: "create"}, nil); err != nil {
+	if err := rootCmd.PersistentPostRunE(&cobra.Command{Use: cmdName}, nil); err != nil {
 		t.Fatalf("PersistentPostRunE: %v", err)
 	}
 	if maintenanceCalls != 0 {
-		t.Fatalf("strict readonly ran %d automatic commit/backup/export/push operation(s)", maintenanceCalls)
+		t.Fatalf("%s ran %d automatic commit/backup/export/push operation(s)", who, maintenanceCalls)
 	}
 	if fake.metadataWrites != 0 {
-		t.Fatalf("strict readonly wrote %d tip metadata value(s)", fake.metadataWrites)
+		t.Fatalf("%s wrote %d tip metadata value(s)", who, fake.metadataWrites)
 	}
 	if fake.closeCalls != 1 {
 		t.Fatalf("store close calls = %d, want 1", fake.closeCalls)

@@ -375,6 +375,13 @@ func TestMaybeAutoExportUsesStateHashForChangeDetection(t *testing.T) {
 	}
 }
 
+// TestMaybeAutoExportExportsOnStateHashChange also pins cross-version state
+// compatibility: LastDoltCommit is an opaque change-detection token, and the
+// embedded store changed its form (HEAD commit → working-data hash, GH#6955)
+// without a state-format version bump. A state file written by an older
+// binary holds a token of the other form, the comparison below mismatches,
+// and the safe outcome is exactly this — an extra export if anything changed,
+// never a missed one.
 func TestMaybeAutoExportExportsOnStateHashChange(t *testing.T) {
 	initConfigForTest(t)
 	config.Set("export.auto", true)
@@ -2010,15 +2017,19 @@ func TestMaybeAutoExport_HistoryRewindDoesNotProveDeletion(t *testing.T) {
 }
 
 // TestMaybeAutoExport_EmbeddedModeFallsBackToFullExportCleanly documents and
-// locks in embedded mode's contract: EmbeddedDoltStore implements neither
-// StateHasher nor DiffStore, so it can never take the incremental path —
-// but per the fix (be-shbed / PR #5806 review item 3) it must still fall
-// back to a full export cleanly, rather than silently producing nothing.
-// This is deliberately a fake-store unit test, not a real embedded-mode
-// integration test: exercising a genuine EmbeddedDoltStore end-to-end is
-// out of scope (the bead explicitly excludes implementing DiffStore/
-// StateHasher on it), and fakeHeadOnlyStore already models exactly the
-// capability gap that matters here — no StateHasher, no DiffStore.
+// locks in embedded mode's export contract: EmbeddedDoltStore still has no
+// DiffStore, so it can never take the incremental path — but per the fix
+// (be-shbed / PR #5806 review item 3) it must still fall back to a full
+// export cleanly, rather than silently producing nothing. This is
+// deliberately a fake-store unit test, not a real embedded-mode integration
+// test: fakeHeadOnlyStore models a store with neither StateHasher nor
+// DiffStore (a server too old for DOLT_HASHOF_DB, or any store predating the
+// capability) so maybeAutoExport exercises its last-resort full-export arc.
+// Embedded mode itself now implements StateHasher (working-data hashing,
+// GH#6955, pinned for real in the embedded lane by the batch/off auto-commit
+// test and the embeddeddolt StateHasher contract test) but still no
+// DiffStore — a genuinely embedded-mode end-to-end test runs in the embedded
+// lane, not here.
 func TestMaybeAutoExport_EmbeddedModeFallsBackToFullExportCleanly(t *testing.T) {
 	initConfigForTest(t)
 	config.Set("export.auto", true)

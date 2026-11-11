@@ -43,7 +43,9 @@
 100 9 TestEmbeddedChildrenConcurrent
 
 100 10 TestEmbeddedCreateScalarAndRelationships
+100 10 TestEmbeddedDoctorExportCheckLeavesTheWorkspaceUntouched
 
+100 11 TestEmbeddedAutoExportFirstCreateAfterOptIn
 100 11 TestEmbeddedKVConcurrent
 
 100 12 TestEmbeddedAutoImportFallback_ConflictSkip_SkipsRetiredRows
@@ -73,6 +75,7 @@
 100 19 TestEmbeddedLabelConcurrent
 100 19 TestEmbeddedNewDoltStore_StrictReadOnlyRefusesWritesOnFreshDatabase
 
+100 20 TestEmbeddedDoctorExportCheckMissingFileWarns
 100 20 TestEmbeddedInitRoleRoutingRetainedFork
 100 20 TestEmbeddedMigrateSchema_IdentityMismatchRefusesBeforeApplying
 
@@ -101,6 +104,7 @@
 100 26 TestEmbeddedExternalMutationPolicy
 100 26 TestEmbeddedPersistentPreRunLogsAndSkipsIdentityCheckForFreshEmbeddedWorkspace
 
+100 27 TestEmbeddedDoctorExportCheckRefreshedFileIsClean
 100 27 TestEmbeddedDoltRemoteAdd_GitOriginCollision_RefusalMessageCopy
 100 27 TestEmbeddedNewDoltStoreFromConfig_DottedDBName
 100 27 TestEmbeddedShipConcurrent
@@ -163,10 +167,12 @@
 100 38 TestEmbeddedRoutedCreateJournalsIntoTheTargetWorkspace
 100 38 TestEmbeddedUnclaimIfAssigneeFlagValidation
 
+100 39 TestEmbeddedDoctorExportCheckStaleFileWarns
 100 39 TestEmbeddedIfRevisionRejectsLabelAndParentEdits
 100 39 TestEmbeddedMaxRowsGraph
 100 39 TestEmbeddedNewDoltStoreFromConfig_NoMetadata
 
+100 40 TestEmbeddedDoctorExportCheckScopes
 100 40 TestEmbeddedIfRevisionOutranksReassignFenceCLI
 100 40 TestEmbeddedNewDoltStoreFromConfig_HyphenatedDBName
 100 40 TestEmbeddedUpdateLifecycleClaimParentCommit
@@ -481,6 +487,7 @@
 100 83 TestEmbeddedPurgeFiltered
 100 83 TestEmbeddedReadyConcurrent
 
+100 84 TestEmbeddedAutoExportUncommittedWriteReachesJSONL
 100 84 TestEmbeddedDeleteCascadeFollowsOnlyParentChild
 100 84 TestEmbeddedDoltRemoteAdd_GitOriginCollision_Exits1
 100 84 TestEmbeddedInitGitBootstrapRoutingDecoyInvalid
