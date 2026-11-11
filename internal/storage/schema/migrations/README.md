@@ -8,6 +8,17 @@ pass before any higher version runs. The escape hatch is a **pre-migration
 repair** in Go, keyed to the pending version — see the header of
 `../migration_repairs.go` and the `preMigrationRepairs` registry.
 
+A frozen migration that is correct but too slow to finish gets the second
+escape hatch: an **execution plan** in `../migration_body_plans.go`
+(`migrationBodyPlans`). A plan is registered for one exact source, file name and
+SHA-256, keeps the text before and after a named anchor pair byte for byte, and
+replaces only what lies between with equivalent SQL (optionally after indexing
+tables the frozen body itself creates and drops). The cursor row still records
+the frozen file's hash, `AllMigrationsSQL` still emits the frozen bytes, and a
+plan that no longer matches its file fails the step before it touches anything.
+Main 0059 and its twin ignored/0015 have one (#6520): their correlated
+recompute did not finish in two hours on ~14k wisp dependencies.
+
 ## Measured Dolt behaviours
 
 These were measured against real Dolt (2.1.2 and 2.2.3) and confirmed against
