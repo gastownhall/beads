@@ -44,6 +44,7 @@ go_test(
         "cursor_test.go",
         "factory_test.go",
         "gemini_test.go",
+        "junie_docs_test.go",
         "junie_test.go",
         "mux_test.go",
         "opencode_test.go",
@@ -53,6 +54,8 @@ go_test(
     ],
     data = glob(["testdata/**"]) + [
         "//:.claude-plugin/marketplace.json",
+        "//:docs/integrations/junie.md",
+        "//:integrations/junie/README.md",
         "//plugins/beads:plugin_files",
     ],
     embed = [":setup"],

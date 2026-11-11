@@ -265,6 +265,16 @@ exports_files(
     visibility = ["//internal/httpclient/encode:__pkg__"],
 )
 
+# //cmd/bd/setup:setup_test checks that both Junie pages show the MCP entry
+# bd setup junie writes (TestJunieDocsShowTheUvxBeadsMCPEntry).
+exports_files(
+    [
+        "docs/integrations/junie.md",
+        "integrations/junie/README.md",
+    ],
+    visibility = ["//cmd/bd/setup:__pkg__"],
+)
+
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
 
 filegroup(

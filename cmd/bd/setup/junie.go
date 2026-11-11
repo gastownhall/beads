@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 )
 
 const junieGuidelinesTemplate = `# Beads Issue Tracking Instructions
@@ -96,13 +97,16 @@ If the MCP server is configured, you can use these tools directly:
 For more details, run ` + "`bd --help`" + ` or see the project's AGENTS.md file.
 `
 
-// junieMCPConfig generates the MCP configuration for Junie
+// junieMCPConfig generates the MCP configuration for Junie. bd has no
+// "mcp" subcommand: the beads MCP server is the separate beads-mcp package
+// (integrations/beads-mcp), launched here through uvx as
+// docs/integrations/junie.md documents.
 func junieMCPConfig() map[string]interface{} {
 	return map[string]interface{}{
 		"mcpServers": map[string]interface{}{
 			"beads": map[string]interface{}{
-				"command": "bd",
-				"args":    []string{"mcp"},
+				"command": "uvx",
+				"args":    []string{"beads-mcp"},
 			},
 		},
 	}
@@ -140,7 +144,12 @@ func InstallJunie() error {
 	fmt.Printf("  Guidelines: %s (agent instructions)\n", guidelinesPath)
 	fmt.Printf("  MCP Config: %s (MCP server configuration)\n", mcpPath)
 	fmt.Println("\nJunie will automatically read these files on session start.")
-	fmt.Println("The MCP server provides direct access to beads tools.")
+	fmt.Println("The MCP server (beads-mcp, launched with uvx) provides direct access to beads tools.")
+	// Only a hint about this shell: Junie may start the server with another
+	// PATH, and the config is the same whether uvx is here or not.
+	if _, err := exec.LookPath("uvx"); err != nil {
+		fmt.Println("\nNote: uvx not found on PATH. Junie runs 'uvx beads-mcp'; install uv: https://docs.astral.sh/uv/")
+	}
 	return nil
 }
 
