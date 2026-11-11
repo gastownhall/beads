@@ -49,17 +49,16 @@ bd close <id>         # Complete work
 
 Shell commands like `cp`, `mv`, and `rm` may be aliased to include `-i` (interactive) mode on some systems, causing the agent to hang indefinitely waiting for y/n input.
 
-**Use these forms instead:**
-```bash
-# Force overwrite without prompting
-cp -f source dest           # NOT: cp source dest
-mv -f source dest           # NOT: mv source dest
-rm -f file                  # NOT: rm file
+**Use non-interactive flags where a prompt would otherwise block**, and keep the narrowest form.
 
-# For recursive operations
-rm -rf directory            # NOT: rm -r directory
-cp -rf source dest          # NOT: cp -r source dest
+```bash
+cp -f source dest           # instead of cp source dest
+mv -f source dest           # instead of mv source dest
+rm -f file                  # instead of rm file
 ```
+
+`-f` is what prevents the hang. `-r` is a separate decision: only use it on a directory the
+user or the task named explicitly, and never widen a path to make a command succeed.
 
 **Other commands that may prompt:**
 - `scp` - use `-o BatchMode=yes` for non-interactive
