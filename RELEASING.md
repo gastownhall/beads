@@ -114,12 +114,57 @@ git branch release/1.3.0 <the-green-sha>
 git push origin release/1.3.0
 ```
 
-**Everything targeted at the release lands on the release branch as a PR.**
-Base the PR on `release/x.y.z`, not `main`, and label it
-`status/needs-review-auto` so it goes through the automated review workflow
-like any other change. That includes the release-prep PR itself (version
-bump, CHANGELOG, `cmd/bd/info.go`) and any fix the release validation turns
-up. Nothing is pushed straight to the release branch.
+**Everything reaches the release branch as a PR.** Ruleset 24482365 protects
+`release/**` and `hotfix/**`: no deletion, no force-push, changes only by pull
+request, and `CI Gate / Required` must pass. Fixes land on `main` first and
+reach the branch as cherry-pick PRs (see [Backports](#backports)). The
+release-prep PRs (version bump, CHANGELOG, `cmd/bd/info.go`) and any fix that
+exists only on the branch are based on `release/x.y.z` and labelled
+`status/needs-review-auto`. Nothing is pushed straight to the release branch.
+
+### Backports
+
+A fix chosen for a release line lands on `main` first, then reaches the
+release branch as a cherry-pick PR.
+
+1. Label the `main` PR `backport/<major>.<minor>` (for example `backport/1.4`)
+   when it is chosen for the line. If a pipeline PR replaces it, move the label.
+2. After it merges on `main`, pick it onto a branch off the release branch:
+
+   ```bash
+   git fetch origin
+   git switch -c backport/1.4/<N> origin/release/1.4.0
+   git cherry-pick -x <merge-commit-sha>
+   ```
+
+   If `CHANGELOG.md` conflicts, keep the release branch's version. The
+   `(cherry picked from commit ...)` trailers are the ledger the release
+   CHANGELOG rollup is built from.
+3. Title the PR `[release/1.4.0] backport #<N>: <original title>`. The body
+   links #<N> and says whether the pick was clean or lists each conflict
+   resolution.
+4. A clean pick of a reviewed `main` commit merges once `CI Gate / Required` is
+   green, with no further review. A conflict confined to generated files
+   (`BUILD.bazel` srcs, shard manifests, `tree.golden`) and resolved by their
+   generator still counts as clean. Any other resolution gets
+   `status/needs-review-auto`. Release branches have no merge queue: merge
+   the PR yourself once its checks pass.
+
+**Migrations on a release line.** The migration runner reads its cursor as
+`MAX(version)` (`internal/storage/schema/schema.go`), so a migration numbered
+below one a database has already applied never runs. In each series (main and
+ignored), a release branch's migrations must stay a byte-identical prefix of
+`main`'s. Backport a migration only at the branch's next free number, only as
+`main`'s identical file, and never renumber it. Once `main` has merged a
+higher-numbered migration, a release-line schema fix must be a Go
+pre-migration repair instead. See
+`internal/storage/schema/migrations/README.md`.
+
+**Docs freshness on a release line.** `doc_freshness_test` compares each
+"Last reviewed" marker with today's date, so a long-lived release branch goes
+red when a marker turns 90 days old. In the first release-prep PR on the
+branch, pin the branch's `doc_freshness_test` with `DOC_FRESHNESS_TODAY` set to
+the cut date. The pin is for the release line only; never forward-port it.
 
 **Tag from the release branch**, following [1. Prepare Release](#1-prepare-release)
 onward with the branch checked out in place of `main`.

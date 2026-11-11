@@ -150,3 +150,15 @@ constraint-named one. Text equality against a fresh store fails on correctly
 healed databases. Compare columns, primary key, unique keys, foreign keys with
 their referenced tables and actions, checks, and index coverage — see
 `migrate_wisp_dep_forward_repair_test.go`.
+
+## Release branches
+
+A release branch takes migrations only as cherry-picks of `main`'s, and the
+runner's cursor is `MAX(version)`: a migration numbered below one a database
+has already applied never runs. So in each series (main and ignored), a release
+branch's migrations stay a byte-identical prefix of `main`'s. Backport a
+migration only at the branch's next free number, only as `main`'s identical
+file, and never renumber it. Once `main` has merged a higher-numbered
+migration, a fix for the release line must be a Go pre-migration repair, not
+a new migration file. RELEASING.md ("Backports") has the full recipe.
+
