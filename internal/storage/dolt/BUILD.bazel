@@ -200,6 +200,8 @@ go_test(
         "demote_coordination_test.go",
         "demote_to_wisp_test.go",
         "dep_add_stages_is_blocked_test.go",
+        "dep_cross_prefix_hierarchy_test.go",
+        "dep_cross_prefix_local_test.go",
         "dependencies_conflict_test.go",
         "dependencies_extended_test.go",
         "dependencies_merge_test.go",

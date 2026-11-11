@@ -464,6 +464,9 @@ func expectOnePendingMigrationAtSetting(t *testing.T, mock sqlmock.Sqlmock, tran
 	// no-ops without scanning/updating rows.
 	expectColumnExists(mock, false)
 	expectColumnExists(mock, false)
+	// repairLocalExternalDepTargets probes for the typed target columns the
+	// same way, finds none, and no-ops.
+	expectColumnExists(mock, false)
 	// rekeyAuxRowIDsAllPasses reads the ignored cursor to see whether any
 	// pass's clone-local marker is pending; at latest none is. Each pass then
 	// reads the clone-local re-key state — its crash sentinel and the #4380

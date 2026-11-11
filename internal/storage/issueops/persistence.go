@@ -181,6 +181,15 @@ func moveIssuePersistenceInTx(ctx context.Context, tx DBTX, current *types.Issue
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE id = ?`, persistenceIssueTable(sourceWisp)), current.ID); err != nil {
 		return PersistenceMoveResult{}, fmt.Errorf("delete moved issue %s: %w", current.ID, err)
 	}
+	// Only the target plane holds the row now, so an edge filed external onto
+	// it moves to that plane's typed column (GH#8299).
+	refile, err := RefileArrivedDepTargetsInTx(ctx, tx, []string{current.ID})
+	if err != nil {
+		return PersistenceMoveResult{}, fmt.Errorf("re-file dependencies onto moved issue %s: %w", current.ID, err)
+	}
+	for table := range refile.ChangedTables() {
+		result.ChangedTables[table] = true
+	}
 	issues, wisps, err := affectedForPersistenceMove(ctx, tx, current.ID, targetWisp)
 	if err != nil {
 		return PersistenceMoveResult{}, err

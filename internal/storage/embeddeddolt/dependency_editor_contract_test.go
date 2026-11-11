@@ -195,6 +195,12 @@ func TestEmbeddedDependencyEditorWritesTheTargetIntoItsTypedColumn(t *testing.T)
 	conformance.RunDependencyEditorWritesTheTargetIntoItsTypedColumn(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "tcol"))
 }
 
+func TestEmbeddedDependencyEditorFilesAnArrivedTargetInItsTypedColumn(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorFilesAnArrivedTargetInItsTypedColumn(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "arr"))
+}
+
 func TestEmbeddedDependencyEditorRefusesBlockingEdgeAcrossAWispHierarchy(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()

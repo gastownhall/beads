@@ -1226,6 +1226,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A blocking dependency between two issues with different prefixes held in
+  the same database now blocks ready work (GH#8299). bd filed any target whose
+  prefix differed from the source's as an external reference, so `bd ready`
+  listed the dependent beside its open blocker. bd now stores a target this
+  database holds as a local edge and refuses a blocking edge across the
+  issues' own hierarchy, as it does for same-prefix issues. An explicit
+  `external:` reference is still external. So is a target the database does
+  not hold, until an issue with that ID arrives (created, imported, synced by
+  `bd repo sync`, pulled from another clone, or promoted): the edge then
+  becomes local, as it does when it is added again once the issue is here. A
+  blocking edge that would then block an issue on its own ancestor or
+  descendant stays external and is logged. `bd import`,
+  `bd init --from-jsonl` and `bd repo sync` skip such an edge in the data
+  they import, where they stored it external before (`bd import` and
+  `bd repo sync` name it on stderr), and `bd migrate legacy-sqlite` refuses
+  a legacy SQLite database that holds one, as it refuses one between issues
+  of the same prefix. `bd repo remove` keeps an edge onto a removed
+  repository's issue of another prefix as such an external ID, as it did
+  before, and syncing the repository again makes it local again. On upgrade,
+  opening an existing database converts the affected rows it holds and
+  recomputes blocked state once, committed as a migration, with the same
+  exception. With uncommitted edits to `issues` or `dependencies` it refuses
+  until you commit them.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

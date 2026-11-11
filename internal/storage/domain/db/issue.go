@@ -88,6 +88,9 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 		if err := issueops.RecordCreateEventInTx(ctx, r.runner, issue, actor); err != nil {
 			return err
 		}
+		if err := r.refileArrivedTarget(ctx, issue, opts); err != nil {
+			return err
+		}
 		// EnsureIssueIDAvailableInTx above already refused a collision, so this
 		// strict insert is unconditionally a new row.
 		return issueops.RecordVersionForCreateInTx(ctx, r.runner, issue.ID, actor)
@@ -143,10 +146,27 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 	if err := issueops.RecordCreateEventInTx(ctx, r.runner, issue, actor); err != nil {
 		return err
 	}
+	if err := r.refileArrivedTarget(ctx, issue, opts); err != nil {
+		return err
+	}
 	if existed || opts.UseWispsTable {
 		return issueops.RecordVersionInTx(ctx, r.runner, issue.ID, actor)
 	}
 	return issueops.RecordVersionForCreateInTx(ctx, r.runner, issue.ID, actor)
+}
+
+// refileArrivedTarget moves the edges an earlier write filed external onto
+// an explicit id, before this database held it, into their typed column
+// (GH#8299), as the store bodies' create does. A generated id is new here, so
+// no stored edge can name it.
+func (r *issueSQLRepositoryImpl) refileArrivedTarget(ctx context.Context, issue *types.Issue, opts domain.InsertIssueOpts) error {
+	if !opts.ExplicitID {
+		return nil
+	}
+	if _, err := issueops.RefileArrivedDepTargetsInTx(ctx, r.runner, []string{issue.ID}); err != nil {
+		return fmt.Errorf("db: Insert: %w", err)
+	}
+	return nil
 }
 
 func (r *issueSQLRepositoryImpl) InsertBatch(ctx context.Context, issues []*types.Issue, actor string, opts domain.InsertIssueOpts) error {

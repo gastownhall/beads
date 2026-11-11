@@ -44,6 +44,7 @@
 
 100 10 TestEmbeddedCreateScalarAndRelationships
 
+100 11 TestEmbeddedDepAddCrossPrefixLocalBlockerGatesReady
 100 11 TestEmbeddedKVConcurrent
 
 100 12 TestEmbeddedAutoImportFallback_ConflictSkip_SkipsRetiredRows
@@ -75,6 +76,7 @@
 
 100 20 TestEmbeddedInitRoleRoutingRetainedFork
 100 20 TestEmbeddedMigrateSchema_IdentityMismatchRefusesBeforeApplying
+100 20 TestEmbeddedReadyCrossPrefixSameDatabaseBlocker
 
 100 21 TestEmbeddedArrivalSeqOnEveryJSONRead
 100 21 TestEmbeddedConfigGetIsReadOnly
@@ -101,6 +103,7 @@
 100 26 TestEmbeddedExternalMutationPolicy
 100 26 TestEmbeddedPersistentPreRunLogsAndSkipsIdentityCheckForFreshEmbeddedWorkspace
 
+100 27 TestEmbeddedDepAddUnheldTargetsStayExternal
 100 27 TestEmbeddedDoltRemoteAdd_GitOriginCollision_RefusalMessageCopy
 100 27 TestEmbeddedNewDoltStoreFromConfig_DottedDBName
 100 27 TestEmbeddedShipConcurrent
@@ -169,6 +172,7 @@
 
 100 40 TestEmbeddedIfRevisionOutranksReassignFenceCLI
 100 40 TestEmbeddedNewDoltStoreFromConfig_HyphenatedDBName
+100 40 TestEmbeddedRepoSyncSkipsAnEdgeAcrossTwoReposHierarchy
 100 40 TestEmbeddedUpdateLifecycleClaimParentCommit
 
 100 41 TestEmbeddedCompactAbortsDivergentReplay

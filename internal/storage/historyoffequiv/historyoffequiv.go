@@ -208,6 +208,15 @@ var schemaAdditions = []schemaAddition{{
 	Migrations: map[string][]string{
 		"ignored_schema_migrations": {"31"},
 	},
+}, {
+	By: "the cross-prefix retype marker (#8299)",
+	// Ignored/0032 adds no schema either. Its pre-migration repair re-types
+	// the dependency rows the prefix-era classifier misfiled as external,
+	// and the scenario creates no such row, so the marker adds only its
+	// bookkeeping row.
+	Migrations: map[string][]string{
+		"ignored_schema_migrations": {"32"},
+	},
 }}
 
 // runWindow widens the span of the run on each side to bound the wall-clock

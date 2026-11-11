@@ -80,6 +80,16 @@ func TestServerSettlementSQLCommitResponseLossIsIndeterminate(t *testing.T) {
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT value FROM metadata WHERE `key` = ?")).
 			WithArgs("is_blocked_recompute_pending").
 			WillReturnRows(sqlmock.NewRows([]string{"value"}))
+		// The full pass first re-files external edges onto held targets
+		// (GH#8299): it probes for wisps, then plans both edge tables, and an
+		// empty plan moves nothing.
+		planColumns := []string{"table", "id", "issue_id", "depends_on_external", "type", "held_as_wisp", "held_as_issue"}
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps LIMIT 1")).
+			WillReturnRows(sqlmock.NewRows([]string{"1"}))
+		mock.ExpectQuery(`FROM dependencies d\s+WHERE d\.depends_on_issue_id IS NULL`).
+			WillReturnRows(sqlmock.NewRows(planColumns))
+		mock.ExpectQuery(`FROM wisp_dependencies d\s+WHERE d\.depends_on_issue_id IS NULL`).
+			WillReturnRows(sqlmock.NewRows(planColumns))
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT id FROM issues")).
 			WillReturnRows(sqlmock.NewRows([]string{"id"}))
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT id FROM wisps")).

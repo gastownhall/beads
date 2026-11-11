@@ -44,28 +44,17 @@ func pickDepTable(useWisps bool) string {
 }
 
 // pickDepTargetColumn classifies an edge's target the same way the in-tx store
-// bodies do, through issueops.IsExternalDepTarget: a target this database
-// cannot hold — an "external:" reference or an issue belonging to another
-// repository — goes to depends_on_external, which carries no foreign key.
-// Only a target that could plausibly be local is probed against wisps and
-// otherwise treated as a local issue, where fk_dep_issue_target still refuses
-// an id that is genuinely missing.
+// bodies do, through issueops.ClassifyDepTarget: a target this database holds
+// goes to its typed column whatever its prefix; an "external:" reference, or a
+// foreign-prefix target held nowhere here, goes to depends_on_external, which
+// carries no foreign key. A missing same-prefix target is treated as a local
+// issue, where fk_dep_issue_target still refuses it.
 func (r *dependencySQLRepositoryImpl) pickDepTargetColumn(ctx context.Context, issueID, dependsOnID string) (string, error) {
-	if issueops.IsExternalDepTarget(issueID, dependsOnID) {
-		return "depends_on_external", nil
+	kind, err := issueops.ClassifyDepTarget(ctx, r.runner, &types.Dependency{IssueID: issueID, DependsOnID: dependsOnID})
+	if err != nil {
+		return "", err
 	}
-	var probe int
-	err := r.runner.QueryRowContext(ctx, "SELECT 1 FROM wisps WHERE id = ? LIMIT 1", dependsOnID).Scan(&probe)
-	switch {
-	case err == nil:
-		return "depends_on_wisp_id", nil
-	case errors.Is(err, sql.ErrNoRows):
-		return "depends_on_issue_id", nil
-	case dberrors.IsTableNotExist(err):
-		return "depends_on_issue_id", nil
-	default:
-		return "", fmt.Errorf("classify dep target %s: %w", dependsOnID, err)
-	}
+	return kind.Column(), nil
 }
 
 func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dependency, actor string, opts domain.DepInsertOpts) error {
@@ -111,11 +100,12 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 
 	var existingType string
 	var existingMetadataNS, existingThreadNS sql.NullString
+	var storedExternal bool
 	err := r.runner.QueryRowContext(ctx,
 		//nolint:gosec // G201: table and depTargetExpr are hardcoded constants
-		fmt.Sprintf("SELECT type, metadata, thread_id FROM %s WHERE issue_id = ? AND %s = ?", table, depTargetExpr),
+		fmt.Sprintf("SELECT type, metadata, thread_id, depends_on_external IS NOT NULL FROM %s WHERE issue_id = ? AND %s = ?", table, depTargetExpr),
 		dep.IssueID, dep.DependsOnID,
-	).Scan(&existingType, &existingMetadataNS, &existingThreadNS)
+	).Scan(&existingType, &existingMetadataNS, &existingThreadNS, &storedExternal)
 	switch {
 	case err == nil:
 		existingMetadata := existingMetadataNS.String
@@ -123,6 +113,15 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 			existingMetadata = "{}"
 		}
 		if existingType == string(dep.Type) {
+			// A row filed external before this database held its target
+			// moves to its typed column, as the store bodies' re-add moves it,
+			// together with any other edge filed external onto that target
+			// (GH#8299). Nothing moves while the target is held nowhere.
+			if storedExternal && !strings.HasPrefix(dep.DependsOnID, "external:") {
+				if _, err := issueops.RefileArrivedDepTargetsInTx(ctx, r.runner, []string{dep.DependsOnID}); err != nil {
+					return fmt.Errorf("db: DependencySQLRepository.Insert: %w", err)
+				}
+			}
 			// A re-add naming a thread the row does not carry moves it; one
 			// naming none keeps the stored thread (the issueops twin's rule).
 			thread, threadChanged := issueops.ReAddedDependencyThread(existingThreadNS, dep.ThreadID)
@@ -323,7 +322,13 @@ func (r *dependencySQLRepositoryImpl) ValidateBlockingHierarchy(ctx context.Cont
 	if dep == nil {
 		return errors.New("db: DependencySQLRepository.ValidateBlockingHierarchy: dep must not be nil")
 	}
-	if issueops.IsExternalDepTarget(dep.IssueID, dep.DependsOnID) {
+	// Only a target this database does not hold has no local hierarchy to
+	// conflict with; a held one is checked whatever its prefix (GH#8299).
+	col, err := r.pickDepTargetColumn(ctx, dep.IssueID, dep.DependsOnID)
+	if err != nil {
+		return err
+	}
+	if col == issueops.DepTargetExternal.Column() {
 		return nil
 	}
 	return issueops.CheckBlockingHierarchyInTx(ctx, r.runner, dep, nil)

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
@@ -87,16 +88,17 @@ func depTargetColumns(t *testing.T) []string {
 // TestGetDescendantsCrossPrefixParent is the behavioural half of
 // TestBuildDescendantsCTEResolvesEveryDepTargetColumn: that test pins the
 // walk's query text, this one pins that the widened COALESCE matches real rows.
-// The write path classifies a target by prefix alone (issueops.IsExternalDepTarget),
-// so a parent-child edge between two prefixes lands in depends_on_external even
-// when both ends are local. Before be-qfm the walk coalesced only the issue and
+// Before GH#8299 the write path classified a target by prefix alone, so a
+// parent-child edge between two prefixes landed in depends_on_external even
+// when both ends were local, and databases still hold such rows until the
+// upgrade repair converts them. The edges are therefore seeded straight into
+// depends_on_external, the legacy shape. Before be-qfm the walk coalesced only the issue and
 // wisp columns, so each child below — and its subtree — was missing from the
 // proxied `bd list --parent` tree. Each one is reached through a different edge
 // member (issues and wisps, anchor and recursive), so dropping the column from
 // any one member loses a different child.
 func (s *testSuite) TestGetDescendantsCrossPrefixParent() {
 	r := s.issueRepo()
-	deps := s.depRepo()
 
 	const (
 		root   = "zz-xp-root"
@@ -121,9 +123,15 @@ func (s *testSuite) TestGetDescendantsCrossPrefixParent() {
 		{grand, child, false},
 		{grandW, child, true},
 	} {
-		s.Require().NoError(deps.Insert(s.Ctx(),
-			&types.Dependency{IssueID: e.child, DependsOnID: e.parent, Type: types.DepParentChild},
-			"tester", domain.DepInsertOpts{UseWispsTable: e.wisps}))
+		table := "dependencies"
+		if e.wisps {
+			table = "wisp_dependencies"
+		}
+		_, err := s.Runner().ExecContext(s.Ctx(),
+			//nolint:gosec // G202: table is one of two hardcoded constants for tests
+			"INSERT INTO "+table+" (id, issue_id, depends_on_external, type, created_at, created_by, metadata) VALUES (?, ?, ?, ?, NOW(), 'tester', '{}')",
+			depid.New(e.child, e.parent), e.child, e.parent, string(types.DepParentChild))
+		s.Require().NoError(err)
 	}
 
 	// Were the classifier ever to route one of these edges to another column,

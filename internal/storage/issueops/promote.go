@@ -138,6 +138,11 @@ func PromoteFromEphemeralInTx(ctx context.Context, tx DBTX, id string, actor str
 	if rows == 0 {
 		return fmt.Errorf("wisp %s not found", id)
 	}
+	// The issues plane holds id now, so an edge filed external onto it moves
+	// to its typed column (GH#8299).
+	if _, err := RefileArrivedDepTargetsInTx(ctx, tx, []string{id}); err != nil {
+		return fmt.Errorf("re-file dependencies onto promoted wisp %s: %w", id, err)
+	}
 
 	affectedIssues, affectedWisps, aerr := AffectedByStatusChangeInTx(ctx, tx, id)
 	if aerr != nil {

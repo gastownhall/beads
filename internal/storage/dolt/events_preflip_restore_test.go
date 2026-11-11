@@ -133,7 +133,7 @@ func TestPreflipEventsRestoreOnSQLServer(t *testing.T) {
 	exec("DELETE FROM issues WHERE id = 'srv-gone'")
 	exec("CALL DOLT_COMMIT('-Am', 'test: delete srv-gone after the upgrade')")
 	exec("DELETE FROM events")
-	exec("DELETE FROM ignored_schema_migrations WHERE version = 31")
+	exec("DELETE FROM ignored_schema_migrations WHERE version >= 31")
 
 	head := scalar("SELECT HASHOF('HEAD')")
 	statusBefore := status()

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -207,10 +208,19 @@ func DeleteIssuesBySourceRepoInTx(ctx context.Context, tx *sql.Tx, sourceRepo st
 		return 0, fmt.Errorf("delete leases: %w", err)
 	}
 
+	// An edge from an issue or wisp this delete keeps onto a removed issue
+	// outlives the delete as an external edge when the issue has another
+	// prefix or the edge was external already, so it is not journaled as
+	// removed.
+	kept, err := refileEdgesOntoRemovedIssuesInTx(ctx, tx, issueIDs)
+	if err != nil {
+		return 0, fmt.Errorf("re-file dependency edges for source-repo delete: %w", err)
+	}
+
 	// Edges are journaled before the rows go, while their source snapshots can
 	// still be read. The source-repo wipe surface (storage.DeleteIssuesBySourceRepo,
 	// behind `bd repo remove`) carries no actor, so these record none.
-	if err := RecordDependencyRemovalsForIssuesInTx(ctx, tx, issueIDs, ""); err != nil {
+	if err := recordDependencyRemovalsForIssuesExceptInTx(ctx, tx, issueIDs, kept, ""); err != nil {
 		return 0, fmt.Errorf("journal dependency removals for source-repo delete: %w", err)
 	}
 
@@ -240,6 +250,86 @@ func DeleteIssuesBySourceRepoInTx(ctx context.Context, tx *sql.Tx, sourceRepo st
 	NoteDeleteBlockedRecheck(tx, issueIDs, "from "+sourceRepo, affectedIssues, affectedWisps)
 
 	return int(rowsAffected), nil
+}
+
+// refileEdgesOntoRemovedIssuesInTx moves every edge from an issue or wisp
+// outside removed onto an issue in removed of another prefix into
+// depends_on_external, and returns every edge onto a removed issue that
+// outlives the delete, keyed by dependencyPairKey: the ones it moved, and the
+// ones from such a source that were external already.
+//
+// Once its target is gone, such an edge is what DepTargetKindFor files a
+// foreign id this database holds no row for as: the unverified multi-rig edge.
+// It is also where every edge of that shape sat before GH#8299, so `bd repo
+// remove`, which drops a hydrated repo's issues from this database and not
+// from the repo, kept it. Left in depends_on_issue_id, the edge would go with
+// its target through the foreign key, and re-syncing the repo could not bring
+// it back: the repo's export does not carry the edges another database holds
+// onto its issues. Re-syncing it re-files the edge as local
+// (RefileArrivedDepTargetsInTx). An edge onto a removed issue of its own
+// prefix is never external, so it still cascades. The row keeps its id, which
+// depid derives from source and target alone.
+//
+//nolint:gosec // G201: table is one of the two hardcoded dependency tables.
+func refileEdgesOntoRemovedIssuesInTx(ctx context.Context, tx *sql.Tx, removed []string) (map[string]bool, error) {
+	removing := make(map[string]bool, len(removed))
+	for _, id := range removed {
+		removing[id] = true
+	}
+	kept := make(map[string]bool)
+	for _, table := range []string{"dependencies", "wisp_dependencies"} {
+		var moves [][2]string
+		for start := 0; start < len(removed); start += deleteBatchSize {
+			end := min(start+deleteBatchSize, len(removed))
+			inClause, args := buildSQLInClause(removed[start:end])
+			// Two legs, one per indexed target column, rather than an OR across
+			// them, which plans a full scan.
+			rows, err := tx.QueryContext(ctx, fmt.Sprintf(
+				`SELECT issue_id, depends_on_issue_id, FALSE FROM %[1]s WHERE depends_on_issue_id IN (%[2]s)
+				UNION ALL
+				SELECT issue_id, depends_on_external, TRUE FROM %[1]s WHERE depends_on_external IN (%[2]s)`, table, inClause), slices.Concat(args, args)...)
+			if err != nil {
+				if optionalBlockedTable(table) && isTableNotExistError(err) {
+					break
+				}
+				return nil, fmt.Errorf("read edges onto removed issues from %s: %w", table, err)
+			}
+			for rows.Next() {
+				var source, target string
+				var external bool
+				if err := rows.Scan(&source, &target, &external); err != nil {
+					_ = rows.Close()
+					return nil, fmt.Errorf("scan edge onto a removed issue from %s: %w", table, err)
+				}
+				switch {
+				case removing[source]:
+				case external:
+					kept[dependencyPairKey(source, target)] = true
+				// Classified as the target will be once the delete has run:
+				// held nowhere.
+				case DepTargetKindFor(source, target, false, false) == DepTargetExternal:
+					moves = append(moves, [2]string{source, target})
+				}
+			}
+			if err := rows.Err(); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("iterate edges onto removed issues from %s: %w", table, err)
+			}
+			if err := rows.Close(); err != nil {
+				return nil, fmt.Errorf("close edges onto removed issues from %s: %w", table, err)
+			}
+		}
+		for _, move := range moves {
+			source, target := move[0], move[1]
+			if _, err := tx.ExecContext(ctx, fmt.Sprintf(
+				`UPDATE %s SET depends_on_issue_id = NULL, depends_on_external = ? WHERE issue_id = ? AND depends_on_issue_id = ?`, table),
+				target, source, target); err != nil {
+				return nil, fmt.Errorf("re-file edge %s -> %s in %s as external: %w", source, target, table, err)
+			}
+			kept[dependencyPairKey(source, target)] = true
+		}
+	}
+	return kept, nil
 }
 
 // UpdateIssueIDInTx renames the live row oldID to newID, in whichever plane

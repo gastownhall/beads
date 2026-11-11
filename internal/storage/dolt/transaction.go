@@ -570,10 +570,15 @@ func (t *doltTransaction) CreateIssue(ctx context.Context, issue *types.Issue, a
 	if err != nil {
 		return err
 	}
+	bc.TiersOnSeparateSessions = !t.journalPinned
 
 	if issueops.IsWisp(issue) {
-		_, err = issueops.CreateIssueInTxWithResult(ctx, t.ignoredTx, bc, issue, actor)
-		return err
+		result, err := issueops.CreateIssueInTxWithResult(ctx, t.ignoredTx, bc, issue, actor)
+		if err != nil {
+			return err
+		}
+		t.markWispCreateDurable(result.ChangedTables)
+		return nil
 	}
 
 	result, err := issueops.CreateIssueInTxWithResult(ctx, t.regularTx, bc, issue, actor)
@@ -617,6 +622,7 @@ func (t *doltTransaction) CreateIssues(ctx context.Context, issues []*types.Issu
 	if err != nil {
 		return err
 	}
+	bc.TiersOnSeparateSessions = !t.journalPinned
 
 	if len(regularIssues) > 0 {
 		result, err := issueops.CreateIssuesInTxWithContext(ctx, t.regularTx, bc, regularIssues, actor)
@@ -633,13 +639,21 @@ func (t *doltTransaction) CreateIssues(ctx context.Context, issues []*types.Issu
 		if err != nil {
 			return err
 		}
-		// A wisp's create-time edge can flip a durable row's is_blocked: a
-		// waiter on the wisp's durable spawner.
-		if result.ChangedTables["issues"] {
-			t.markIssuesChanged("wisps")
-		}
+		t.markWispCreateDurable(result.ChangedTables)
 	}
 	return nil
+}
+
+// markWispCreateDurable records the durable tables a wisp create changed: a
+// create-time edge can flip a durable row's is_blocked (a waiter on the
+// wisp's durable spawner), and a durable edge re-filed onto a new wisp
+// (issueops.RefileArrivedDepTargetsInTx) moves a dependencies row.
+func (t *doltTransaction) markWispCreateDurable(changed map[string]bool) {
+	for _, table := range []string{"dependencies", "issues"} {
+		if changed[table] {
+			t.markChanged("wisps", table)
+		}
+	}
 }
 
 // GetIssue retrieves an issue within the transaction.
@@ -986,24 +1000,20 @@ func (t *doltTransaction) AddDependencyWithOptions(ctx context.Context, dep *typ
 		eventTable = "wisp_events"
 	}
 
-	isCrossPrefix := isCrossPrefixDep(dep.IssueID, dep.DependsOnID)
+	// Probe each plane on its own session, so a target created earlier in
+	// this logical transaction is found on whichever tier holds it.
+	kind, err := issueops.ClassifyDepTargetAcross(ctx, t.txFor("wisps"), t.txFor("issues"), dep)
+	if err != nil {
+		return err
+	}
 	targetTable := "issues"
-	kind := issueops.DepTargetIssue
-	switch {
-	case isCrossPrefix, strings.HasPrefix(dep.DependsOnID, "external:"):
-		kind = issueops.DepTargetExternal
-	default:
-		if t.isActiveWisp(ctx, dep.DependsOnID) {
-			targetTable = "wisps"
-			kind = issueops.DepTargetWisp
-		}
+	if kind == issueops.DepTargetWisp {
+		targetTable = "wisps"
 	}
 
 	opts := issueops.AddDependencyOpts{
 		SourceTable:    sourceTable,
-		TargetTable:    targetTable,
 		WriteTable:     table,
-		IsCrossPrefix:  isCrossPrefix,
 		SkipCycleCheck: addOpts.SkipCycleCheck,
 		TargetKind:     &kind,
 		EmitEvent:      addOpts.EmitEvent,

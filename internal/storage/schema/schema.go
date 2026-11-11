@@ -1133,6 +1133,22 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	}
 	backfilled = backfilled || rekeyed
 
+	// GH#8299: move dependency rows a pre-fix write filed in
+	// depends_on_external, although this database holds the target, into the
+	// typed column readiness joins, and recompute the blocked state they move.
+	// Ignored migration 0032 forces one pass per clone; it sits above
+	// ignoredSource.migrate for the same reason as the re-key, and refuses a
+	// pre-existing dirty table at plan time the same way.
+	repaired, err := repairLocalExternalDepTargets(ctx, db, dirtyBefore)
+	if err != nil {
+		var dirtyErr *DirtyTablesError
+		if errors.As(err, &dirtyErr) {
+			return applied, err
+		}
+		return applied, fmt.Errorf("repair local dependency targets: %w", err)
+	}
+	backfilled = backfilled || repaired
+
 	// bd-6dnrw.2: converge the events/comments/snapshots primary keys that
 	// migration 0037 randomized per-clone, the same hazard class on the aux
 	// tables. Gated on the clone-local ignored marker (recorded later in this

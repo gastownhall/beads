@@ -439,7 +439,7 @@ var versionExemptions = map[string]string{
 	"RecomputeIsBlockedInTxWithResult": "is_blocked is derived state",
 	"RecomputeIsBlockedForIDsInTx":     "is_blocked is derived state",
 	"RecomputeIsBlockedForWispIDsInTx": "is_blocked is derived state",
-	"RecomputeIsBlockedAfterMergeInTx": "is_blocked is derived state",
+	"RecomputeIsBlockedAfterMergeInTx": "is_blocked is derived state; a dep row it re-files keeps its resolved target",
 	"RecomputeAllIsBlockedInTx":        "is_blocked is derived state",
 	"MarkIsBlockedInTx":                "is_blocked is derived state",
 	"MarkIsBlockedInTxWithResult":      "is_blocked is derived state",
@@ -463,6 +463,11 @@ var versionExemptions = map[string]string{
 	"UpdateIssueIDInTx":               "rename: out of contract by design (history stays keyed to the old id)",
 	"UpdateWispIDInDependenciesInTx":  "rename: dep-row rekey, out of contract by design",
 	"UpdateIssueIDInDependenciesInTx": "rename: dep-row rekey, out of contract by design",
+
+	// dependency-target re-file — a dep row's target moves between columns in
+	// place; durable_state carries the resolved target, so nothing changes.
+	"ApplyLocalExternalDepRepairInTx": "upgrade migration: dep-row target-column repair, out of contract by design",
+	"RefileArrivedDepTargetsInTx":     "dep-row target-column re-file when the target arrives; durable_state carries the resolved target",
 
 	// compaction bookkeeping and restore — outside the op vocabulary; the
 	// content rewrite that precedes compaction versions through UpdateIssue.
@@ -531,7 +536,7 @@ var versionNeverMints = map[string]string{
 	"RecomputeIsBlockedInTxWithResult": "is_blocked is derived state",
 	"RecomputeIsBlockedForIDsInTx":     "is_blocked is derived state",
 	"RecomputeIsBlockedForWispIDsInTx": "is_blocked is derived state",
-	"RecomputeIsBlockedAfterMergeInTx": "is_blocked is derived state",
+	"RecomputeIsBlockedAfterMergeInTx": "is_blocked is derived state; a dep row it re-files keeps its resolved target",
 	"RecomputeAllIsBlockedInTx":        "is_blocked is derived state",
 	"MarkIsBlockedInTx":                "is_blocked is derived state",
 	"MarkIsBlockedInTxWithResult":      "is_blocked is derived state",

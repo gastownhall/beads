@@ -394,15 +394,14 @@ func TestAddDependencyInTxReadsNullStoredMetadataAsEmptyObject(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_type FROM issues WHERE id = ?")).
 		WithArgs("dep-a").
 		WillReturnRows(sqlmock.NewRows([]string{"issue_type"}).AddRow("task"))
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT type, metadata, thread_id FROM dependencies")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT type, metadata, thread_id, "+storedDepTargetKindExpr+" FROM dependencies")).
 		WithArgs("dep-a", "dep-b").
-		WillReturnRows(sqlmock.NewRows([]string{"type", "metadata", "thread_id"}).AddRow(string(types.DepRelated), nil, nil))
+		WillReturnRows(sqlmock.NewRows([]string{"type", "metadata", "thread_id", "target_kind"}).AddRow(string(types.DepRelated), nil, nil, int(DepTargetIssue)))
 
 	kind := DepTargetIssue
 	dep := &types.Dependency{IssueID: "dep-a", DependsOnID: "dep-b", Type: types.DepRelated}
 	created, err := AddDependencyInTx(context.Background(), tx, dep, "writer", AddDependencyOpts{
 		SourceTable:      "issues",
-		TargetTable:      "issues",
 		WriteTable:       "dependencies",
 		SkipCycleCheck:   true,
 		TargetKind:       &kind,

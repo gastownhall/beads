@@ -55,6 +55,7 @@ func TestUOWDependencyEditorContract(t *testing.T) {
 		{name: "SkipPerEdgeCycleCheckDropsOnlyTheProbe", run: conformance.RunDependencyEditorSkipPerEdgeCycleCheckDropsOnlyTheProbe},
 		{name: "RecordsOneHistoryEntryForAMixedPlaneRequest", run: conformance.RunDependencyEditorRecordsOneHistoryEntryForAMixedPlaneRequest},
 		{name: "WritesTheTargetIntoItsTypedColumn", run: conformance.RunDependencyEditorWritesTheTargetIntoItsTypedColumn},
+		{name: "FilesAnArrivedTargetInItsTypedColumn", run: conformance.RunDependencyEditorFilesAnArrivedTargetInItsTypedColumn},
 		{name: "RefusesBlockingEdgeAcrossAWispHierarchy", run: conformance.RunDependencyEditorRefusesBlockingEdgeAcrossAWispHierarchy},
 		{name: "RefusesACycleThroughAParentChildHop", run: conformance.RunDependencyEditorRefusesACycleThroughAParentChildHop},
 		{name: "RefusesASamePlaneEdgeClosingACrossPlaneCycle", run: conformance.RunDependencyEditorRefusesASamePlaneEdgeClosingACrossPlaneCycle},
@@ -80,6 +81,15 @@ func TestUOWDependencyEditorContract(t *testing.T) {
 func newUOWDependencyEditorFixture(t *testing.T, ctx context.Context) conformance.DependencyEditorFixture {
 	t.Helper()
 	provider := newUOWRoleFixtureProvider(t, ctx, "bd")
+	// The typed-column case seeds a local issue of another prefix ("x" +
+	// IssuePrefix). This backend validates explicit create IDs against the
+	// configured prefixes, so the fixture allows that one the way a
+	// multi-prefix database does.
+	if err := RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
+		return "bd: allow the cross-prefix seed", uw.ConfigUseCase().SetConfig(ctx, "allowed_prefixes", "xbd")
+	}); err != nil {
+		t.Fatalf("set allowed_prefixes: %v", err)
+	}
 	editor, err := NewDependencyEditor(provider)
 	if err != nil {
 		t.Fatalf("NewDependencyEditor: %v", err)
