@@ -3,6 +3,7 @@ package setup
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -749,4 +750,102 @@ func TestRemoveCodexRemovesSkillDirsThroughEnv(t *testing.T) {
 		t.Fatalf("removeCodex err = %v, want the injected removal error for %s", err, agents)
 	}
 	requireDirKept(t, agents)
+}
+
+// bd init calls the Codex installer with quiet progress and treats its error
+// as a warning. A read-only AGENTS.md that needs the Codex section must come
+// back as an error naming the file, not be replaced behind init's back after
+// init's own guidance write left it alone (#7975).
+func TestInstallCodexProjectRefusesAReadOnlyAgentsFile(t *testing.T) {
+	env, _, _ := newCodexTestEnv(t)
+	orig := codexEnvProvider
+	codexEnvProvider = func() (codexEnv, error) { return env, nil }
+	t.Cleanup(func() { codexEnvProvider = orig })
+	path := codexInstructionsPath(env, false)
+	content := "# My Project\n\nUser text.\n"
+	seed := seedReadOnlyFile(t, path, content)
+
+	var stderr bytes.Buffer
+	err := InstallCodexProjectTo(ProjectInstallOutput{Stdout: io.Discard, Stderr: &stderr})
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("InstallCodexProjectTo error = %v, want a permission error", err)
+	}
+	if !strings.Contains(stderr.String(), "Error: write "+path) {
+		t.Errorf("stderr does not name %s: %q", path, stderr.String())
+	}
+	assertReadOnlyFileUntouched(t, path, content, seed)
+}
+
+// Removing the managed section rewrites the file, so a non-writable one with
+// a section to remove must fail without claiming removal.
+func TestRemoveCodexRefusesAReadOnlyInstructionsFile(t *testing.T) {
+	env, stdout, _ := newCodexTestEnv(t)
+	agentsPath := codexInstructionsPath(env, false)
+	if err := installCodexInstructions(env, false); err != nil {
+		t.Fatalf("seed install: %v", err)
+	}
+	data, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", agentsPath, err)
+	}
+	seed := seedReadOnlyFile(t, agentsPath, string(data))
+
+	if err := removeCodexInstructions(env, false); err == nil {
+		t.Fatal("removeCodexInstructions replaced a read-only AGENTS.md instead of failing")
+	}
+	if strings.Contains(stdout.String(), "✓ Codex instructions removed") {
+		t.Errorf("reported removing from a file it could not change:\n%s", stdout.String())
+	}
+	assertReadOnlyFileUntouched(t, agentsPath, string(data), seed)
+}
+
+// --remove rewrites a hooks.json that also holds a hook of the user's, so a
+// non-writable one must fail and say why. bd setup prints no error of its
+// own: an unprinted refusal made bd setup codex --remove exit 1 with no
+// message.
+func TestRemoveCodexReportsAReadOnlyHooksFile(t *testing.T) {
+	env, _, stderr := newCodexTestEnv(t)
+	path := codexHooksPath(env, false)
+	seedFileMode(t, path, `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo mine"}]}]}}`, 0o644)
+	if err := installCodex(env, false); err != nil {
+		t.Fatalf("installCodex: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	seed := seedReadOnlyFile(t, path, string(data))
+	stderr.Reset()
+
+	err = removeCodex(env, false)
+	if !errors.Is(err, errRefuseReadOnlyWrite) {
+		t.Fatalf("removeCodex error = %v, want the read-only refusal", err)
+	}
+	if !strings.Contains(stderr.String(), "Error: write "+path) {
+		t.Errorf("stderr does not name %s: %q", path, stderr.String())
+	}
+	assertReadOnlyFileUntouched(t, path, string(data), seed)
+}
+
+// A repeated Codex install over a read-only AGENTS.md that already holds the
+// current Codex section succeeds without touching it.
+func TestInstallCodexLeavesACurrentReadOnlyAgentsFileAlone(t *testing.T) {
+	env, _, stderr := newCodexTestEnv(t)
+	if err := installCodex(env, false); err != nil {
+		t.Fatalf("first installCodex: %v", err)
+	}
+	path := codexInstructionsPath(env, false)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	seed := seedReadOnlyFile(t, path, string(content))
+
+	if err := installCodex(env, false); err != nil {
+		t.Fatalf("repeated installCodex: %v", err)
+	}
+	assertReadOnlyFileUntouched(t, path, string(content), seed)
+	if stderr.Len() != 0 {
+		t.Errorf("unexpected stderr: %q", stderr.String())
+	}
 }

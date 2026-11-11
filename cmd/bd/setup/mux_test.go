@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -142,6 +143,53 @@ func TestCheckMuxReportsMissingHook(t *testing.T) {
 	if out := stdout.String(); !strings.Contains(out, "✗ Missing Mux hooks: "+initPath+"\n") ||
 		!strings.Contains(out, "Run: bd setup mux\n") {
 		t.Errorf("expected the missing hook and the setup hint, got:\n%s", out)
+	}
+}
+
+// A rerun over a current hook the user made read-only leaves it read-only
+// and says why it failed. A chmod after the writer gave such a hook its
+// writable mode back and reported it updated, so the next template change
+// replaced it.
+func TestInstallMuxKeepsACurrentReadOnlyHook(t *testing.T) {
+	stubDetectRenderOpts(t)
+	stubMuxHome(t)
+	for _, tt := range []struct {
+		hook, content  string
+		mode, readOnly os.FileMode
+	}{
+		{hook: "init", content: muxInitHookTemplate, mode: 0o755, readOnly: 0o555},
+		{hook: "tool_post", content: muxToolPostHookTemplate, mode: 0o755, readOnly: 0o555},
+		{hook: "tool_env", content: muxToolEnvHookTemplate, mode: 0o644, readOnly: 0o444},
+	} {
+		t.Run(tt.hook, func(t *testing.T) {
+			env, stdout, stderr := newFactoryTestEnv(t)
+			if err := installMux(env, false, false); err != nil {
+				t.Fatalf("first installMux: %v", err)
+			}
+			path := filepath.Join(muxProjectDir(env.agentsPath), tt.hook)
+			if runtime.GOOS != "windows" {
+				assertFileMode(t, path, tt.mode)
+			}
+			seedReadOnlyFile(t, path, tt.content)
+			if err := os.Chmod(path, tt.readOnly); err != nil {
+				t.Fatalf("chmod %s: %v", path, err)
+			}
+			seed := statFile(t, path)
+			stdout.Reset()
+			stderr.Reset()
+
+			err := installMux(env, false, false)
+			if !errors.Is(err, errRefuseReadOnlyWrite) {
+				t.Fatalf("installMux error = %v, want the read-only refusal", err)
+			}
+			assertReadOnlyFileUntouched(t, path, tt.content, seed)
+			if strings.Contains(stdout.String(), "Updated Mux hook: "+path) {
+				t.Errorf("reported updating a hook it left alone:\n%s", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "Error: write "+path) {
+				t.Errorf("stderr does not name %s: %q", path, stderr.String())
+			}
+		})
 	}
 }
 

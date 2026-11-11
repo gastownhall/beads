@@ -736,3 +736,57 @@ func TestInstallMuxFailsOnMalformedMarkers(t *testing.T) {
 		})
 	}
 }
+
+// A read-only agents file that an install or --remove would change is left
+// alone, the error comes back, and no success line claims the change.
+func TestInstallAgentsRefusesAReadOnlyAgentsFile(t *testing.T) {
+	stubDetectRenderOpts(t)
+	for _, tt := range []struct {
+		name    string
+		content string
+	}{
+		{name: "no beads section", content: "# My Project\n\nUser text.\n"},
+		{name: "stale beads section", content: "# My Project\n\n<!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:00000000 -->\nOlder guidance.\n<!-- END BEADS INTEGRATION -->\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			env, stdout, stderr := newFactoryTestEnv(t)
+			seed := seedReadOnlyFile(t, env.agentsPath, tt.content)
+
+			integration := agentsIntegration{name: "TestAgent", setupCommand: "bd setup testagent", profile: agents.ProfileFull}
+			err := installAgents(env, integration)
+			if !errors.Is(err, os.ErrPermission) {
+				t.Fatalf("installAgents error = %v, want a permission error", err)
+			}
+
+			assertReadOnlyFileUntouched(t, env.agentsPath, tt.content, seed)
+			for _, claim := range []string{"Added beads section", "Updated existing beads section", "integration installed"} {
+				if strings.Contains(stdout.String(), claim) {
+					t.Errorf("reported %q for a file it did not change:\n%s", claim, stdout.String())
+				}
+			}
+			if !strings.Contains(stderr.String(), "Error: write "+env.agentsPath) {
+				t.Errorf("stderr does not name %s: %q", env.agentsPath, stderr.String())
+			}
+		})
+	}
+}
+
+func TestRemoveAgentsRefusesAReadOnlyAgentsFile(t *testing.T) {
+	env, stdout, stderr := newFactoryTestEnv(t)
+	content := "# My Project\n\n" + agents.RenderSection(agents.ProfileFull) + "\n## Notes\n"
+	seed := seedReadOnlyFile(t, env.agentsPath, content)
+
+	integration := agentsIntegration{name: "TestAgent", setupCommand: "bd setup testagent", profile: agents.ProfileFull}
+	err := removeAgents(env, integration)
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("removeAgents error = %v, want a permission error", err)
+	}
+
+	assertReadOnlyFileUntouched(t, env.agentsPath, content, seed)
+	if strings.Contains(stdout.String(), "Removed beads section") {
+		t.Errorf("reported a removal from a file it did not change:\n%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "Error: write "+env.agentsPath) {
+		t.Errorf("stderr does not name %s: %q", env.agentsPath, stderr.String())
+	}
+}
