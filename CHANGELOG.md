@@ -1241,6 +1241,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the GitHub release redirect, the postinstall script scheduled a delete of
   the archive path and then downloaded to that same path, so the delete could
   remove the finished archive before extraction (#7791).
+- **Migration 0059 (and its wisp twin, ignored migration 0015) no longer runs
+  for hours on clones with many wisp dependencies** (#6520). Their
+  `is_blocked` recompute probed the wisp dependency graph with correlated
+  subqueries over an unindexed copy; a clone with ~14k wisp dependencies did
+  not finish 0059 in two hours. The runner now executes both through a
+  hash-gated, equivalent set-based plan (under a second on a 1/8-scale graph
+  in the server-lane tests).
+  The migration files and the content hashes recorded for them are
+  unchanged.
+
 - `bd backup restore` refuses a local source that holds no Dolt backup (no
   regular `manifest` file at its top level) before it touches the database.
   A `--force` restore from an empty or wrong directory, including the default
