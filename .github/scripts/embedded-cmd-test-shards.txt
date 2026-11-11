@@ -43,7 +43,9 @@
 100 9 TestEmbeddedChildrenConcurrent
 
 100 10 TestEmbeddedCreateScalarAndRelationships
+100 10 TestEmbeddedRecoveryQuarantinePreservesAndFailsClosed
 
+100 11 TestEmbeddedImportInvalidRecordDryRun
 100 11 TestEmbeddedKVConcurrent
 
 100 12 TestEmbeddedAutoImportFallback_ConflictSkip_SkipsRetiredRows
@@ -70,9 +72,11 @@
 100 18 TestEmbeddedLabelPropagateRename
 100 18 TestEmbeddedPrune_protectsBeadCitedByCustomStatusBead
 
+100 19 TestEmbeddedImportInvalidRecordStrictRefusesBeforeAnyWrite
 100 19 TestEmbeddedLabelConcurrent
 100 19 TestEmbeddedNewDoltStore_StrictReadOnlyRefusesWritesOnFreshDatabase
 
+100 20 TestEmbeddedImportInvalidRecordSkipKeepsRejects
 100 20 TestEmbeddedInitRoleRoutingRetainedFork
 100 20 TestEmbeddedMigrateSchema_IdentityMismatchRefusesBeforeApplying
 
@@ -100,7 +104,9 @@
 100 26 TestEmbeddedDoltRemoteAdd_JSON_AllowGitOrigin_WarningOnStderr
 100 26 TestEmbeddedExternalMutationPolicy
 100 26 TestEmbeddedPersistentPreRunLogsAndSkipsIdentityCheckForFreshEmbeddedWorkspace
+100 26 TestEmbeddedRecoveryImportReportsSkippedDependencies
 
+100 27 TestEmbeddedAutoImportSkipsInvalidRowsAndQuarantines
 100 27 TestEmbeddedDoltRemoteAdd_GitOriginCollision_RefusalMessageCopy
 100 27 TestEmbeddedNewDoltStoreFromConfig_DottedDBName
 100 27 TestEmbeddedShipConcurrent
@@ -166,8 +172,10 @@
 100 39 TestEmbeddedIfRevisionRejectsLabelAndParentEdits
 100 39 TestEmbeddedMaxRowsGraph
 100 39 TestEmbeddedNewDoltStoreFromConfig_NoMetadata
+100 39 TestEmbeddedRecoveryImportsReportInvalidRecords
 
 100 40 TestEmbeddedIfRevisionOutranksReassignFenceCLI
+100 40 TestEmbeddedImportCustomVocabularyAccepted
 100 40 TestEmbeddedNewDoltStoreFromConfig_HyphenatedDBName
 100 40 TestEmbeddedUpdateLifecycleClaimParentCommit
 

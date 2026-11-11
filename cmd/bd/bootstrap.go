@@ -140,7 +140,8 @@ Bootstrap auto-detects the right action:
   • If sync.remote is configured: clones from the remote
   • If git origin has Dolt data (refs/dolt/data): clones from git and wires origin for future push/pull
   • If .beads/backup/*.jsonl exists: restores from backup
-  • If .beads/issues.jsonl exists: imports from git-tracked JSONL
+  • If .beads/issues.jsonl exists: imports from git-tracked JSONL, skipping any
+    invalid record (see bd import) into issues.rejected.jsonl beside it
   • If no database exists: creates a fresh one — unless the workspace was already
     initialized (metadata.json has a project_id) and its server-mode database is
     missing, in which case bootstrap refuses rather than strand the existing data
@@ -1301,7 +1302,7 @@ func executeJSONLImportAction(ctx context.Context, plan BootstrapPlan, cfg *conf
 		return fmt.Errorf("commit init: %w", err)
 	}
 
-	count, err := importFromLocalJSONL(ctx, s, plan.JSONLFile)
+	imported, err := importFromLocalJSONLFull(ctx, s, plan.JSONLFile)
 	if err != nil {
 		return fmt.Errorf("import from JSONL: %w", err)
 	}
@@ -1311,7 +1312,9 @@ func executeJSONLImportAction(ctx context.Context, plan BootstrapPlan, cfg *conf
 	}
 
 	wireBootstrapDoltRemote(ctx, s, plan)
-	fmt.Fprintf(os.Stderr, "Imported %d issues from %s\n", count, plan.JSONLFile)
+	fmt.Fprintf(os.Stderr, "Imported %d issues from %s\n", imported.Issues, plan.JSONLFile)
+	warnImportInvalidSkipped(plan.JSONLFile, imported.Rejected, imported.RejectsPath)
+	warnImportSkippedDependencies(imported.SkippedDependencies)
 	return nil
 }
 

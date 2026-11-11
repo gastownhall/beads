@@ -529,7 +529,8 @@ bd bootstrap
     |   • If sync.remote is configured: clones from the remote
     |   • If git origin has Dolt data (refs/dolt/data): clones from git and wires origin for future push/pull
     |   • If .beads/backup/*.jsonl exists: restores from backup
-    |   • If .beads/issues.jsonl exists: imports from git-tracked JSONL
+    |   • If .beads/issues.jsonl exists: imports from git-tracked JSONL, skipping any
+    |     invalid record (see bd import) into issues.rejected.jsonl beside it
     |   • If no database exists: creates a fresh one — unless the workspace was already
     |     initialized (metadata.json has a project_id) and its server-mode database is
     |     missing, in which case bootstrap refuses rather than strand the existing data
@@ -3626,6 +3627,23 @@ bd import
     | re-running the same import is safe and converges (rows upsert,
     | labels/comments/dependencies deduplicate).
     |
+    | Before anything is written, every row gets the checks the writer makes on
+    | the record itself, such as its status and type (built-in, or configured in
+    | status.custom and types.custom), title, priority and timestamps, and the
+    | length of its assignee, owner and labels. By default a single invalid row
+    | fails the whole import, naming each one as <file>:<line>: <id>, and nothing
+    | is imported. --skip-invalid imports the valid rows instead and reports the
+    | skipped ones; add --rejects <file> to keep their original lines (merged into
+    | the file, never overwriting earlier records). --dry-run applies the same
+    | check and writes neither the database nor the rejects file. A line that is
+    | not valid JSON always fails the import with its location. Auto-import,
+    | 'bd init --from-jsonl', 'bd bootstrap' and the git-hook import always skip
+    | invalid rows into <name>.rejected.jsonl next to the source. The check does
+    | not cover the column sizes the database enforces: a value too long for its
+    | column (an external_ref over 255 characters, say) is refused by the write
+    | itself, so it still fails the import, even with --skip-invalid, and what was
+    | written before the failure stays (see above).
+    |
     | EXAMPLES:
     |   bd import                        # Import from configured import.path
     |   bd import backup.jsonl           # Import from a specific file
@@ -3633,6 +3651,8 @@ bd import
     |   bd import -                      # Read JSONL from stdin
     |   cat issues.jsonl | bd import -   # Pipe JSONL from another tool
     |   bd import --dry-run              # Show what would be imported
+    |   bd import --skip-invalid --rejects rejected.jsonl backup.jsonl
+    |                                    # Import the valid rows, keep the rest
     |   bd import --dedup                # Skip issues with duplicate titles
     |   bd import --allow-stale old.jsonl # Restore an older snapshot (overwrites newer local rows)
     |   bd import --json                 # Structured output with created and skipped IDs
@@ -3640,6 +3660,8 @@ bd import
   flag --dedup type=bool default="false" usage="Skip lines whose title matches an existing open issue"
   flag --dry-run type=bool default="false" usage="Show what would be imported without importing"
   flag --input -i type=string default="" usage="Read JSONL from a specific file"
+  flag --rejects type=string default="" usage="With --skip-invalid, save the skipped records' original lines to this file"
+  flag --skip-invalid type=bool default="false" usage="Import the valid records and skip the invalid ones (e.g. an unregistered status), reporting each"
 
 bd info
   use: "info"
@@ -3717,7 +3739,7 @@ bd init
   flag --discard-remote type=bool default="false" usage="Authorize discarding the configured remote's Dolt history when re-initializing. Requires --destroy-token in non-interactive mode; see 'bd help init-safety'."
   flag --external type=bool default="false" usage="Server is externally managed (skip server startup); use with --shared-server or --server"
   flag --force type=bool default="false" usage="Deprecated alias for --reinit-local. Bypasses only the LOCAL data-safety guard; does NOT authorize remote divergence or recreating a missing server-mode database (see 'bd help init-safety')."
-  flag --from-jsonl type=bool default="false" usage="Import issues from configured import.path; refuses remote history unless --discard-remote authorizes replacement"
+  flag --from-jsonl type=bool default="false" usage="Import issues from configured import.path, skipping invalid records (see bd import) into <name>.rejected.jsonl beside it; refuses remote history unless --discard-remote authorizes replacement"
   flag --init-if-missing type=bool default="false" usage="If the workspace is already initialized, skip init and exit 0 instead of failing (idempotent init for scaffolds)"
   flag --mysql-database type=string default="" hidden usage="Legacy MySQL database (removed backend compatibility only)"
   flag --mysql-url type=string default="" hidden usage="Legacy MySQL connection URL (removed backend compatibility only)"

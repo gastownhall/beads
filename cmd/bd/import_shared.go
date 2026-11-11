@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -71,6 +70,10 @@ type ImportOptions struct {
 	// guard otherwise silently no-ops per row (bd-6dnrw.9). Only settable
 	// via explicit `bd import --allow-stale`; auto-import paths never set it.
 	AllowStale bool
+	// Screened is the import screen the caller already ran over these rows
+	// (screenImportRecords). When it ran the stale pre-filter, the rows are
+	// its write set and its outcome is reported as is, not filtered again.
+	Screened *importScreen
 }
 
 // ImportResult describes what an import operation did.
@@ -149,8 +152,15 @@ var errImportRelationsUnavailable = errors.New("import relation lookup unavailab
 // importIssuesCore imports issues into the Dolt store.
 // This is a bridge function that delegates to the Dolt store's batch creation.
 func importIssuesCore(ctx context.Context, _ string, store storage.DoltStorage, issues []*types.Issue, opts ImportOptions) (*ImportResult, error) {
-	if opts.DryRun || len(issues) == 0 {
+	if opts.DryRun {
 		return &ImportResult{Skipped: len(issues)}, nil
+	}
+	if opts.Screened != nil && opts.Screened.Prefiltered && len(issues) == 0 {
+		screened := opts.Screened
+		return &ImportResult{Skipped: len(screened.StaleSkippedIDs), StaleSkippedIDs: screened.StaleSkippedIDs, Unchanged: len(screened.Plan.Unchanged)}, nil
+	}
+	if len(issues) == 0 {
+		return &ImportResult{}, nil
 	}
 
 	// The stale guard has two halves (bd-pkim8). This pre-filter reports the
@@ -161,7 +171,9 @@ func importIssuesCore(ctx context.Context, _ string, store storage.DoltStorage, 
 	// re-checking updated_at inside the upsert itself.
 	var staleSkippedIDs []string
 	var changePlan importChangePlan
-	if !opts.AllowStale {
+	if opts.Screened != nil && opts.Screened.Prefiltered {
+		staleSkippedIDs, changePlan = opts.Screened.StaleSkippedIDs, opts.Screened.Plan
+	} else if !opts.AllowStale {
 		filtered, skipped, plan, err := filterStaleImportIssues(ctx, store, issues)
 		if err != nil {
 			return nil, err
@@ -1297,6 +1309,13 @@ type importLocalResult struct {
 	// Retired counts the issue ids the import skipped because a retaining
 	// sweep retired them; they are not in Issues.
 	Retired int
+	// Rejected lists the records the screen skipped as invalid, saved to
+	// RejectsPath before the import wrote anything (GH#4492).
+	Rejected    []importRejection
+	RejectsPath string
+	// SkippedDependencies lists the dependency edges the writer skipped
+	// ("issue -> target: reason"), such as an edge to a rejected record.
+	SkippedDependencies []string
 }
 
 // memoryRecord represents a memory entry in the JSONL export.
@@ -1317,90 +1336,10 @@ func importFromLocalJSONL(ctx context.Context, store storage.DoltStorage, localP
 	return result.Issues, nil
 }
 
-// parseJSONLFile reads a JSONL file and returns parsed issues and config
-// entries (memories). Pure function — no store I/O.
-func parseJSONLFile(path string) ([]*types.Issue, map[string]string, error) {
-	//nolint:gosec // G304: path from user-provided CLI argument
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read JSONL file %s: %w", path, err)
-	}
-
-	scanner := bufio.NewScanner(strings.NewReader(string(data)))
-	// Allow up to 64MB per line for large descriptions
-	scanner.Buffer(make([]byte, 0, 1024*1024), 64*1024*1024)
-	var issues []*types.Issue
-	configEntries := make(map[string]string)
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-
-		// Peek at the record to check for _type field
-		var peek map[string]json.RawMessage
-		if err := json.Unmarshal([]byte(line), &peek); err != nil {
-			return nil, nil, fmt.Errorf("failed to parse JSONL line: %w", err)
-		}
-
-		// Skip the optional beads-jsonl metadata/header record.
-		// Canonical exports produced by the stable-ordering /
-		// git-merge convention prepend a schema+provenance line, e.g.
-		// {"_schema":"beads-jsonl/1","_dolt_branch":"main",
-		// "_dolt_commit":"...","_sort":"stable-v1"}. It carries no
-		// _type and no issue fields; without this guard it falls
-		// through to the issue path, unmarshals into an empty Issue,
-		// and aborts the whole import with "validation failed for
-		// issue : title is required". Identified by the _schema
-		// sentinel, which real issue/memory records never carry.
-		if _, isHeader := peek["_schema"]; isHeader {
-			continue
-		}
-
-		// Check if this is a memory record
-		if rawType, ok := peek["_type"]; ok {
-			var typeStr string
-			if err := json.Unmarshal(rawType, &typeStr); err == nil && typeStr == "memory" {
-				var mem memoryRecord
-				if err := json.Unmarshal([]byte(line), &mem); err != nil {
-					return nil, nil, fmt.Errorf("failed to parse memory record: %w", err)
-				}
-				if mem.Key != "" && mem.Value != "" {
-					configEntries[kvPrefix+memoryPrefix+mem.Key] = mem.Value
-				}
-				continue
-			}
-		}
-
-		// Regular issue record
-		var issue types.Issue
-		if err := json.Unmarshal([]byte(line), &issue); err != nil {
-			return nil, nil, fmt.Errorf("failed to parse issue from JSONL: %w", err)
-		}
-		// Skip tombstone entries: these are deleted issues exported by older
-		// versions (pre-v0.50) with status "tombstone" and deleted_at set.
-		// They are not valid for re-import since "tombstone" is not a real status.
-		if issue.Status == "tombstone" {
-			continue
-		}
-
-		applyImportWispPlane(peek, &issue)
-
-		issue.SetDefaults()
-		issues = append(issues, &issue)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, nil, fmt.Errorf("failed to scan JSONL: %w", err)
-	}
-
-	return issues, configEntries, nil
-}
-
 // applyImportWispPlane resolves which storage plane (wisps vs issues table) a
-// parsed import record routes to, shared by every JSONL parse loop
-// (parseImportRecords for `bd import` in both storage modes, parseJSONLFile
-// for bootstrap / init --from-jsonl / auto-import).
+// parsed import record routes to, in the one JSONL parse loop every import
+// shares (parseImportJSONL: `bd import` in both storage modes, bootstrap,
+// init --from-jsonl and auto-import).
 //
 // The "wisp_plane" peek key is the EXPLICIT wisps-plane marker (bd-r9uce):
 // export writes it for rows that live in the wisps table, precisely because
@@ -1473,17 +1412,30 @@ func importFromLocalJSONLConflictSkip(ctx context.Context, store storage.DoltSto
 	return importFromLocalJSONLWithOpts(ctx, store, localPath, true)
 }
 
-// importFromLocalJSONLWithOpts is the shared implementation. It detects
-// memory records (lines with "_type":"memory") and imports them via
-// SetConfig, while routing regular issue records through the normal path.
+// importFromLocalJSONLWithOpts parses and screens the file at localPath
+// (planRecoveryImportFile), then imports the plan (importRecoveryPlan).
 // conflictSkip selects insert-if-new (true) vs UPSERT (false) for issue rows.
 func importFromLocalJSONLWithOpts(ctx context.Context, store storage.DoltStorage, localPath string, conflictSkip bool) (*importLocalResult, error) {
-	issues, configEntries, err := parseJSONLFile(localPath)
+	plan, err := planRecoveryImportFile(ctx, storeImportVocabulary(store), localPath)
 	if err != nil {
 		return nil, err
 	}
+	return importRecoveryPlan(ctx, store, plan, conflictSkip)
+}
 
-	result := &importLocalResult{}
+// importRecoveryPlanConflictSkip is the production fallbackImporter: the
+// insert-if-new import of an auto-import's plan (GH#3955).
+func importRecoveryPlanConflictSkip(ctx context.Context, store storage.DoltStorage, plan *recoveryImportPlan) (*importLocalResult, error) {
+	return importRecoveryPlan(ctx, store, plan, true)
+}
+
+// importRecoveryPlan imports an already-screened recovery plan: the memories
+// via SetConfig, even when the screen rejected every issue, and the accepted
+// issue rows through the normal batch path. It never reads the source again.
+// conflictSkip selects insert-if-new (true) vs UPSERT (false) for issue rows.
+func importRecoveryPlan(ctx context.Context, store storage.DoltStorage, plan *recoveryImportPlan, conflictSkip bool) (*importLocalResult, error) {
+	issues, configEntries := plan.Issues, plan.ConfigEntries
+	result := &importLocalResult{Rejected: plan.Rejected, RejectsPath: plan.RejectsPath}
 
 	// Import memories
 	for key, value := range configEntries {
@@ -1520,6 +1472,7 @@ func importFromLocalJSONLWithOpts(ctx context.Context, store storage.DoltStorage
 		// not: it is counted apart.
 		result.Issues = importResult.Created + importResult.Unchanged
 		result.Retired = len(importResult.RetiredIDs)
+		result.SkippedDependencies = importResult.SkippedDependencies
 	}
 
 	return result, nil

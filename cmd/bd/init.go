@@ -2166,14 +2166,16 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				_ = store.Close()
 				return fmt.Errorf("--from-jsonl specified but %s does not exist", localJSONLPath)
 			}
-			issueCount, importErr := importFromLocalJSONL(ctx, store, localJSONLPath)
+			imported, importErr := importFromLocalJSONLFull(ctx, store, localJSONLPath)
 			if importErr != nil {
 				_ = store.Close()
 				return fmt.Errorf("failed to import from JSONL: %v", importErr)
 			}
 			if !quiet {
-				fmt.Printf("  Imported %d issues from %s\n", issueCount, localJSONLPath)
+				fmt.Printf("  Imported %d issues from %s\n", imported.Issues, localJSONLPath)
 			}
+			warnImportInvalidSkipped(localJSONLPath, imported.Rejected, imported.RejectsPath)
+			warnImportSkippedDependencies(imported.SkippedDependencies)
 		}
 
 		// projectRoleRepo is isInitRoleGitRepo held to keepHomeClean. The role,
@@ -2567,7 +2569,7 @@ func init() {
 	initCmd.Flags().Bool("reinit-local", false, "Re-initialize local .beads/ over existing local data. Does NOT authorize remote divergence (see --discard-remote) or recreating a missing server-mode database (see --recreate-missing).")
 	initCmd.Flags().Bool("discard-remote", false, "Authorize discarding the configured remote's Dolt history when re-initializing. Requires --destroy-token in non-interactive mode; see 'bd help init-safety'.")
 	initCmd.Flags().Bool("recreate-missing", false, "Explicitly authorize creating a fresh, empty database when this project's configured server-mode database is missing or unreachable. Opt-in per invocation only; never implied by --force, config, or env (see 'bd help init-safety').")
-	initCmd.Flags().Bool("from-jsonl", false, "Import issues from configured import.path; refuses remote history unless --discard-remote authorizes replacement")
+	initCmd.Flags().Bool("from-jsonl", false, "Import issues from configured import.path, skipping invalid records (see bd import) into <name>.rejected.jsonl beside it; refuses remote history unless --discard-remote authorizes replacement")
 	initCmd.Flags().Bool("init-if-missing", false, "If the workspace is already initialized, skip init and exit 0 instead of failing (idempotent init for scaffolds)")
 	initCmd.Flags().String("destroy-token", "", "Explicit confirmation token for destructive re-init in non-interactive mode (format: 'DESTROY-<prefix>')")
 	initCmd.Flags().String("agents-template", "", "Path to custom AGENTS.md template (overrides embedded default)")

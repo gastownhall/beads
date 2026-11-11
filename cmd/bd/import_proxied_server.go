@@ -29,8 +29,8 @@ func proxiedImporter() (publicops.Importer, error) {
 
 // runImportRecordsProxied is the proxied-server import pipeline over the
 // parsed records. It mirrors runImportRecordsClassic stage for stage — dedup,
-// dry-run classification, stale pre-filter, batch write, issue_prefix
-// reconciliation — through the SAME classification and reporting code, with
+// the import screen (stale pre-filter, validation), dry-run classification,
+// batch write, issue_prefix reconciliation — through the SAME classification and reporting code, with
 // two deliberate structural differences:
 //
 //   - ONE COMMIT PER INVOCATION. The classic path chunks a large import into
@@ -44,38 +44,55 @@ func proxiedImporter() (publicops.Importer, error) {
 //     its own read (reporting StaleSkippedIDs and keeping stale rows' aux data
 //     out of the batch), and RejectStaleUpserts re-checks updated_at inside
 //     the write transaction, closing the same race the classic path closes.
-func runImportRecordsProxied(ctx context.Context, issues []*types.Issue, memories []memoryRecord, source string) error {
+func runImportRecordsProxied(ctx context.Context, records []importRecord, memories []memoryRecord, source string) error {
 	if uowProvider == nil {
 		return fmt.Errorf("proxied-server UOW provider not initialized")
 	}
 
 	// Dedup: skip issues whose title matches an existing open issue.
 	dedupHits := 0
-	if importDedup && len(issues) > 0 {
+	if importDedup && len(records) > 0 {
 		type dedupOutcome struct {
 			kept []*types.Issue
 			hits int
 		}
 		out, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (dedupOutcome, error) {
-			kept, hits := filterDuplicatesByTitle(ctx, uowImportTitleSearcher{uw: uw}, issues)
+			kept, hits := filterDuplicatesByTitle(ctx, uowImportTitleSearcher{uw: uw}, importRecordIssues(records))
 			return dedupOutcome{kept: kept, hits: hits}, nil
 		})
 		if err != nil {
 			return err
 		}
-		issues = out.kept
+		records = keepImportRecords(records, out.kept)
 		dedupHits = out.hits
 	}
+
+	// The import screen, in one read: the pre-filter half of the stale guard
+	// (bd-pkim8) reports rows already known stale and keeps their
+	// labels/comments/dependencies out of the batch entirely, then the
+	// writer's validation runs over the rows left to write (GH#4492). A local
+	// update racing between this read and the batch write is caught by
+	// RejectStaleUpserts inside the write transaction.
+	screen, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (*importScreen, error) {
+		return screenImportRecords(ctx, uw.IssueUseCase(), uowImportVocabulary(uw), records, importAllowStale)
+	})
+	if err != nil {
+		return err
+	}
+	issues := screen.Kept(records)
 
 	result := importResultJSON{
 		Source:    source,
 		DedupHits: dedupHits,
 		DryRun:    importDryRun,
 	}
+	if err := applyImportRejections(&result, source, screen.Rejected, importSkipInvalid, importRejects); err != nil {
+		return err
+	}
 
 	if importDryRun {
 		result.Memories = len(memories)
-		result.Skipped = dedupHits
+		result.Skipped += dedupHits
 
 		classification, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (*ImportResult, error) {
 			return classifyDryRunImport(ctx, uw.IssueUseCase(), issues, importAllowStale)
@@ -87,32 +104,9 @@ func runImportRecordsProxied(ctx context.Context, issues []*types.Issue, memorie
 		return renderImportDryRun(result, len(memories), source, dedupHits)
 	}
 
-	// Pre-filter half of the stale guard (bd-pkim8): report rows already
-	// known stale and keep their labels/comments/dependencies out of the
-	// batch entirely. A local update racing between this read and the batch
-	// write is caught by RejectStaleUpserts inside the write transaction.
-	var staleSkippedIDs []string
-	var changePlan importChangePlan
-	if !importAllowStale && len(issues) > 0 {
-		type staleOutcome struct {
-			filtered []*types.Issue
-			skipped  []string
-			plan     importChangePlan
-		}
-		out, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (staleOutcome, error) {
-			filtered, skipped, plan, err := filterStaleImportIssues(ctx, uw.IssueUseCase(), issues)
-			if err != nil {
-				return staleOutcome{}, err
-			}
-			return staleOutcome{filtered: filtered, skipped: skipped, plan: plan}, nil
-		})
-		if err != nil {
-			return err
-		}
-		issues = out.filtered
-		staleSkippedIDs = out.skipped
-		changePlan = out.plan
-	}
+	issues = screen.Write
+	staleSkippedIDs := screen.StaleSkippedIDs
+	changePlan := screen.Plan
 
 	memoryEntries := make([]publicops.ImportMemory, 0, len(memories))
 	for _, mem := range memories {

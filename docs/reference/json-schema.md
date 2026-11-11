@@ -289,7 +289,8 @@ empty or false:
 - `created` (number): Issues created
 - `updated` (number, optional): Existing issues updated
 - `unchanged` (number, optional): Rows identical to local state, untouched
-- `skipped` (number): Issues skipped (stale rows + dedup)
+- `skipped` (number): Issues skipped (stale rows + dedup + invalid records
+  skipped under `--skip-invalid`; each invalid record is counted once)
 - `dedup_skipped` (number, optional): Issues skipped by `--dedup` title match
 - `memories` (number, optional): Memory records imported
 - `ids` (string[], optional): IDs of created issues
@@ -297,6 +298,13 @@ empty or false:
 - `tie_kept_local_ids` (string[], optional): Equal-`updated_at` rows where local state won
 - `stale_skipped_ids` (string[], optional): Rows older than the local issue, skipped
 - `skipped_dependencies` (string[], optional): Dependency edges whose target id was absent
+- `invalid_skipped` (number, optional): Records `--skip-invalid` skipped because
+  the writer would refuse them (an unregistered status, say); also counted in
+  `skipped`
+- `invalid_records` (object[], optional): The skipped records in file order,
+  each with `line` (the physical source line), `id` and `reason`
+- `rejects_file` (string, optional): Path `--rejects` saved the skipped records
+  to
 - `dry_run` (boolean, optional): Present (`true`) only when `--dry-run` was active
 
 ### bd export --json

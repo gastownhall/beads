@@ -767,7 +767,14 @@ func createBlockedRecomputeIDs(ctx context.Context, tx DBTX, issues []*types.Iss
 
 // PrepareIssueForInsert normalizes timestamps, validates, and computes the content hash.
 func PrepareIssueForInsert(issue *types.Issue, customStatuses, customTypes []string) error {
-	if err := ValidateMetadataIfConfigured(issue.Metadata); err != nil {
+	return prepareIssueForInsert(issue, customStatuses, customTypes, true)
+}
+
+// prepareIssueForInsert is PrepareIssueForInsert; warnMetadata says whether a
+// metadata schema violation in warn mode prints its warning
+// (validateMetadataIfConfigured).
+func prepareIssueForInsert(issue *types.Issue, customStatuses, customTypes []string, warnMetadata bool) error {
+	if err := validateMetadataIfConfigured(issue.Metadata, warnMetadata); err != nil {
 		return fmt.Errorf("metadata validation failed for issue %s: %w", issue.ID, err)
 	}
 

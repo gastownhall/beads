@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -1696,6 +1697,20 @@ func TestGitignore_ContainsHTTPTarget(t *testing.T) {
 		}
 	}
 	if !found {
+		t.Errorf("requiredPatterns should include %q", pattern)
+	}
+}
+
+// TestGitignore_ContainsImportQuarantine pins that the records a recovery
+// import keeps in .beads/issues.rejected.jsonl (GH#4492) stay local: they are
+// the input the database refused, not tracked issue data.
+func TestGitignore_ContainsImportQuarantine(t *testing.T) {
+	const pattern = "*.rejected.jsonl"
+
+	if !containsGitignorePattern(GitignoreTemplate, pattern) {
+		t.Errorf("GitignoreTemplate should contain %q", pattern)
+	}
+	if !slices.Contains(requiredPatterns, pattern) {
 		t.Errorf("requiredPatterns should include %q", pattern)
 	}
 }
