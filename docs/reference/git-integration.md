@@ -83,6 +83,19 @@ storage, is still supported.
 bd hooks list
 ```
 
+When an absolute `core.hooksPath`, the kind bd writes, names a directory
+that does not exist, git runs no hooks at all, and `bd hooks list` reports
+that fault first: it names the configured path, says git runs no hooks, and
+names the repair instead of listing every hook as "not installed". (Git
+resolves a relative value in each worktree, which is where `bd hooks list`
+already looks for the hooks.) `bd hooks list --json` keeps the
+`hooks` array and adds a `hooks_path` object (`configured`, `resolved`,
+`exists`, `relocated_to` when bd found the moved repository's hooks, and
+`inspect_error` when the path cannot be inspected). Listing never changes git
+config. See
+[Hooks not running](/reference/troubleshooting#hooks-not-running) for the
+repair.
+
 ### Uninstall
 
 ```bash

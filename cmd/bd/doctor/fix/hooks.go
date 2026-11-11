@@ -606,6 +606,15 @@ func GitHooks(path string) error {
 		return fmt.Errorf("not a git repository")
 	}
 
+	// A configured core.hooksPath naming a missing directory (a moved
+	// repository strands the absolute value bd writes) is the Hooks Path
+	// repair's to fix; the force-install below would recreate the stale
+	// destination. Re-inspect here, since the check that queued this fix may
+	// be stale, and skip (GH#5853).
+	if resolved, ok := missingHooksPath(path); ok {
+		return skipFix(fmt.Errorf("core.hooksPath points at %s, which does not exist; the Hooks Path repair owns it, so no hooks were force-installed", resolved))
+	}
+
 	// Detect external hook managers
 	externalManagers := DetectExternalHookManagers(path)
 
@@ -635,4 +644,36 @@ func GitHooks(path string) error {
 	}
 
 	return nil
+}
+
+// missingHooksPath reports the absolute core.hooksPath configured for the
+// repository at path, ~ expanded, when that directory is confirmed absent.
+// A relative value is never reported: git resolves it in the worktree it runs
+// in, which is where GitHooks's install writes, while an absolute one (the
+// kind bd writes, which a moved repository strands) names the same directory
+// from every worktree.
+func missingHooksPath(path string) (string, bool) {
+	cmd := exec.Command("git", "config", "--get", "core.hooksPath")
+	cmd.Dir = path
+	out, err := cmd.Output()
+	configured := strings.TrimSpace(string(out))
+	if err != nil || configured == "" {
+		return "", false
+	}
+	resolved := configured
+	if home, herr := os.UserHomeDir(); herr == nil {
+		switch {
+		case resolved == "~":
+			resolved = home
+		case strings.HasPrefix(resolved, "~/"), strings.HasPrefix(resolved, "~\\"):
+			resolved = filepath.Join(home, resolved[2:])
+		}
+	}
+	if !filepath.IsAbs(resolved) {
+		return "", false
+	}
+	if _, err := os.Stat(resolved); !os.IsNotExist(err) {
+		return "", false
+	}
+	return resolved, true
 }

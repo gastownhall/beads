@@ -542,12 +542,51 @@ See [Merge Conflicts](/recovery/merge-conflicts) for the full runbook.
 ### Hooks not running
 
 ```bash
-# Check if installed
-ls -la .git/hooks/
+# Check status; this names a missing core.hooksPath directory
+bd hooks list
 
 # Reinstall
 bd hooks install
 ```
+
+**Moved repository.** bd writes `core.hooksPath` as an absolute path, so
+linked worktrees resolve it. When you move or rename the repository, the
+value still names the old location, the directory no longer exists, and git
+silently runs no hooks. Check the value and where it is set:
+
+```bash
+git config --show-scope --get core.hooksPath
+```
+
+`bd hooks list`, `bd doctor` (Hooks Path and Git Hooks) report the stale
+path, the current beads hooks directory, and the repair. Ordinary bd
+commands never rewrite git configuration; only `bd hooks install` and
+`bd doctor --fix` do:
+
+```bash
+bd doctor --fix      # repoints core.hooksPath to the current hooks directory
+bd hooks install     # refreshes the hooks there, then repoints core.hooksPath
+```
+
+Both keep the value absolute, so it works from every worktree; from a linked
+worktree they point at the main repository's (or redirected storage's)
+hooks. Neither recreates the old directory, and `bd hooks install` keeps
+your own content around the managed section of each hook. Run
+`git worktree repair` first if the move also broke linked worktrees.
+
+bd repoints only a value it can prove is its own: an absolute
+`.beads/hooks` or `.beads-hooks` path that no longer exists, set in this
+repository's own local config file (not in a file it includes) and not
+overridden (global, worktree or command-line config), whose replacement is a
+real directory (not a symlink) holding beads hooks. Otherwise
+`bd doctor --fix` leaves the value alone and `bd hooks install` refuses with
+the reason, without creating anything; restore the directory or correct
+`core.hooksPath` where it is set
+(`git config --show-origin --get-all core.hooksPath` names the file). A
+`.beads/hooks` or `.beads-hooks` directory deleted in place (not moved) is
+still unset by `bd doctor --fix`. A relative value is resolved by git in
+each worktree, so `bd hooks install` installs into that worktree's
+directory, as it always has.
 
 ### Hook errors
 

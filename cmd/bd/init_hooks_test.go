@@ -1,12 +1,16 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/git"
 )
 
@@ -1543,4 +1547,523 @@ func TestCheckGitHooks_BeadsHookIsInstalled(t *testing.T) {
 			})
 		})
 	}
+}
+
+// TestHooksList_StrandedHooksPathNamesTheConfig reproduces GH#5853 (bd-m9es2y).
+// The .beads/hooks files are present and current, but core.hooksPath still
+// names the absolute path of the repo's old location, so git runs no hooks.
+// bd hooks list must name the stale core.hooksPath instead of reporting every
+// hook as "not installed", which sends the user to reinstall.
+func TestHooksList_StrandedHooksPathNamesTheConfig(t *testing.T) {
+	tmpDir := newGitRepo(t)
+	runInDir(t, tmpDir, func() {
+		beadsHooks := filepath.Join(tmpDir, ".beads", "hooks")
+		if err := os.MkdirAll(beadsHooks, 0750); err != nil {
+			t.Fatalf("mkdir .beads/hooks: %v", err)
+		}
+		for _, name := range managedHookNames {
+			body := "#!/bin/sh\n" + shimVersionPrefix + Version + "\nexec bd hooks run " + name + " \"$@\"\n"
+			if err := os.WriteFile(filepath.Join(beadsHooks, name), []byte(body), 0755); err != nil {
+				t.Fatalf("write hook %s: %v", name, err)
+			}
+		}
+
+		stale := filepath.Join(t.TempDir(), "moved-away", ".beads", "hooks")
+		if out, err := exec.Command("git", "config", "core.hooksPath", stale).CombinedOutput(); err != nil {
+			t.Fatalf("git config core.hooksPath: %v: %s", err, out)
+		}
+		resetRepoCaches()
+
+		out := captureStdout(t, func() error {
+			return hooksListCmd.RunE(hooksListCmd, nil)
+		})
+
+		if !strings.Contains(out, stale) {
+			t.Errorf("bd hooks list does not name the stranded core.hooksPath %q (GH#5853); output:\n%s", stale, out)
+		}
+		if strings.Count(out, "not installed") == len(managedHookNames) {
+			t.Errorf("bd hooks list reports every hook \"not installed\" although .beads/hooks holds all of them and the fault is core.hooksPath (GH#5853); output:\n%s", out)
+		}
+	})
+}
+
+// strandRepoHooksPath writes current beads hooks to repo/.beads/hooks and sets
+// core.hooksPath to the absolute path the repository had at a former location,
+// which does not exist (GH#5853). It returns the stale value and the target.
+func strandRepoHooksPath(t *testing.T, repo string) (stale, target string) {
+	t.Helper()
+	target = filepath.Join(repo, ".beads", "hooks")
+	if err := os.MkdirAll(target, 0750); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range managedHookNames {
+		body := "#!/bin/sh\n" + shimVersionPrefix + Version + "\nexec bd hooks run " + name + " \"$@\"\n"
+		if err := os.WriteFile(filepath.Join(target, name), []byte(body), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stale = filepath.Join(t.TempDir(), "moved-away", "repo", ".beads", "hooks")
+	gitConfigIn(t, repo, "core.hooksPath", stale)
+	return stale, target
+}
+
+// gitConfigIn runs git config args in dir, failing the test on error.
+func gitConfigIn(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"config"}, args...)...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git config %v: %v (%s)", args, err, strings.TrimSpace(string(out)))
+	}
+}
+
+// hooksPathConfig returns every core.hooksPath value with its scope, as git
+// lists them from dir.
+func hooksPathConfig(t *testing.T, dir string) string {
+	t.Helper()
+	cmd := exec.Command("git", "config", "--show-scope", "--get-all", "core.hooksPath")
+	cmd.Dir = dir
+	out, _ := cmd.Output()
+	return strings.TrimSpace(string(out))
+}
+
+// assertStaleNotCreated fails when the former location (or its parent) exists.
+func assertStaleNotCreated(t *testing.T, stale string) {
+	t.Helper()
+	if _, err := os.Lstat(filepath.Dir(stale)); !os.IsNotExist(err) {
+		t.Errorf("the former location %s was created (err=%v)", filepath.Dir(stale), err)
+	}
+}
+
+// TestHooksList_RelocatedHooksPath: bd hooks list names the stranded path,
+// says git runs no hooks, names the current beads hooks directory and the
+// repair, and keeps the --json hooks array while adding hooks_path; listing
+// changes nothing (GH#5853).
+func TestHooksList_RelocatedHooksPath(t *testing.T) {
+	t.Setenv("BEADS_DIR", "")
+	repo := newGitRepo(t)
+	stale, target := strandRepoHooksPath(t, repo)
+	before := hooksPathConfig(t, repo)
+
+	runInDir(t, repo, func() {
+		out := captureStdout(t, func() error { return hooksListCmd.RunE(hooksListCmd, nil) })
+		for _, want := range []string{stale, "Git runs no hooks", "bd hooks install", "bd doctor --fix"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("text output lacks %q:\n%s", want, out)
+			}
+		}
+		if !strings.Contains(out, "bd hooks are installed at ") || !strings.Contains(out, filepath.Join(".beads", "hooks")+";") {
+			t.Errorf("text output does not name the current hooks directory %s:\n%s", target, out)
+		}
+
+		old := jsonOutput
+		jsonOutput = true
+		defer func() { jsonOutput = old }()
+		raw := captureStdout(t, func() error { return hooksListCmd.RunE(hooksListCmd, nil) })
+		var got struct {
+			Hooks     []HookStatus `json:"hooks"`
+			HooksPath *struct {
+				Configured  string `json:"configured"`
+				Resolved    string `json:"resolved"`
+				Exists      bool   `json:"exists"`
+				RelocatedTo string `json:"relocated_to"`
+			} `json:"hooks_path"`
+		}
+		if err := json.Unmarshal([]byte(raw), &got); err != nil {
+			t.Fatalf("--json output is not JSON: %v\n%s", err, raw)
+		}
+		if len(got.Hooks) != len(managedHookNames) {
+			t.Errorf("hooks array has %d entries, want %d", len(got.Hooks), len(managedHookNames))
+		}
+		if got.HooksPath == nil {
+			t.Fatalf("--json output lacks hooks_path:\n%s", raw)
+		}
+		if got.HooksPath.Configured != stale || got.HooksPath.Resolved != stale || got.HooksPath.Exists {
+			t.Errorf("hooks_path = %+v, want configured and resolved %q with exists=false", *got.HooksPath, stale)
+		}
+		if rel := got.HooksPath.RelocatedTo; rel != target && !utilsSameDir(rel, target) {
+			t.Errorf("hooks_path.relocated_to = %q, want %q", rel, target)
+		}
+	})
+
+	if after := hooksPathConfig(t, repo); after != before {
+		t.Errorf("bd hooks list changed core.hooksPath: %q -> %q", before, after)
+	}
+	assertStaleNotCreated(t, stale)
+}
+
+// TestHooksList_UnownedHooksPath: a missing core.hooksPath bd cannot repoint,
+// or one it cannot inspect, is named without offering a repoint or claiming
+// hooks live elsewhere, and list changes nothing (GH#5853).
+func TestHooksList_UnownedHooksPath(t *testing.T) {
+	t.Run("third-party path", func(t *testing.T) {
+		t.Setenv("BEADS_DIR", "")
+		repo := newGitRepo(t)
+		stale := filepath.Join(t.TempDir(), "team-hooks")
+		gitConfigIn(t, repo, "core.hooksPath", stale)
+		before := hooksPathConfig(t, repo)
+		runInDir(t, repo, func() {
+			out := captureStdout(t, func() error { return hooksListCmd.RunE(hooksListCmd, nil) })
+			for _, want := range []string{stale, "Git runs no hooks", "bd will not change it"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("text output lacks %q:\n%s", want, out)
+				}
+			}
+			if strings.Contains(out, "repoint") || strings.Contains(out, "bd hooks are installed at") {
+				t.Errorf("no relocation may be offered for a path bd does not own:\n%s", out)
+			}
+		})
+		if after := hooksPathConfig(t, repo); after != before {
+			t.Errorf("bd hooks list changed core.hooksPath: %q -> %q", before, after)
+		}
+		if _, err := os.Lstat(stale); !os.IsNotExist(err) {
+			t.Errorf("bd hooks list created %s (err=%v)", stale, err)
+		}
+	})
+
+	t.Run("not a directory, json", func(t *testing.T) {
+		t.Setenv("BEADS_DIR", "")
+		repo := newGitRepo(t)
+		file := filepath.Join(t.TempDir(), "hooks-file")
+		if err := os.WriteFile(file, []byte("not a directory\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		gitConfigIn(t, repo, "core.hooksPath", file)
+		runInDir(t, repo, func() {
+			old := jsonOutput
+			jsonOutput = true
+			defer func() { jsonOutput = old }()
+			raw := captureStdout(t, func() error { return hooksListCmd.RunE(hooksListCmd, nil) })
+			var got struct {
+				Hooks     []HookStatus `json:"hooks"`
+				HooksPath *struct {
+					Configured   string `json:"configured"`
+					Exists       bool   `json:"exists"`
+					RelocatedTo  string `json:"relocated_to"`
+					InspectError string `json:"inspect_error"`
+				} `json:"hooks_path"`
+			}
+			if err := json.Unmarshal([]byte(raw), &got); err != nil {
+				t.Fatalf("--json output is not JSON: %v\n%s", err, raw)
+			}
+			if len(got.Hooks) != len(managedHookNames) {
+				t.Errorf("hooks array has %d entries, want %d", len(got.Hooks), len(managedHookNames))
+			}
+			if got.HooksPath == nil {
+				t.Fatalf("--json output lacks hooks_path:\n%s", raw)
+			}
+			if got.HooksPath.Configured != file || !got.HooksPath.Exists || got.HooksPath.RelocatedTo != "" ||
+				!strings.Contains(got.HooksPath.InspectError, "not a directory") {
+				t.Errorf("hooks_path = %+v, want %q reported as existing but not a directory", *got.HooksPath, file)
+			}
+		})
+	})
+}
+
+// TestInstallHooks_RelocatedHooksPath: a plain install and the config apply
+// reinstall refresh the hooks in the current beads hooks directory, keep the
+// user content around the managed section, repoint core.hooksPath there and
+// never recreate the former location (GH#5853).
+func TestInstallHooks_RelocatedHooksPath(t *testing.T) {
+	installs := []struct {
+		name    string
+		install func() error
+	}{
+		{"bd hooks install", func() error {
+			return installStandaloneHooks(managedHookNames, false, false, false, false)
+		}},
+		{"config apply", func() error {
+			if r := applyHooks(true, false); r.Status != applyStatusApplied {
+				return fmt.Errorf("applyHooks: %s %s", r.Message, r.Error)
+			}
+			return nil
+		}},
+	}
+	contents := []struct {
+		name string
+		hook string
+		// check reports what the refreshed pre-commit lost, or "".
+		check func(text string) string
+	}{
+		{
+			// A marker-managed hook with user lines around the section.
+			name: "managed section",
+			hook: "#!/bin/sh\necho user-before\n" +
+				hookSectionBeginPrefix + " v0.0.1 ---\nbd hooks run pre-commit \"$@\"\n" + hookSectionEndPrefix + " v0.0.1 ---\n" +
+				"echo user-after\n",
+			check: func(text string) string {
+				if !strings.HasPrefix(text, "#!/bin/sh\necho user-before\n") || !strings.HasSuffix(text, "echo user-after\n") {
+					return "user content around the managed section"
+				}
+				if !strings.Contains(text, hookSectionBeginLine()) || strings.Contains(text, "v0.0.1") {
+					return "a managed section refreshed to " + Version
+				}
+				return ""
+			},
+		},
+		{
+			// A pure user hook chaining to a framework (the other hooks
+			// establish ownership): the section goes in above the exec and
+			// every user line, the chained command included, survives.
+			name: "user hook chaining a framework",
+			hook: "#!/bin/sh\necho user pre-commit content\nexec ./pre-commit-framework \"$@\"\n",
+			check: func(text string) string {
+				if !strings.HasPrefix(text, "#!/bin/sh\necho user pre-commit content\n") ||
+					!strings.HasSuffix(text, "exec ./pre-commit-framework \"$@\"\n") {
+					return "the complete user hook and its chained command"
+				}
+				if begin := strings.Index(text, hookSectionBeginLine()); begin < 0 || begin > strings.Index(text, "exec ./pre-commit-framework") {
+					return "a managed section ahead of the exec"
+				}
+				return ""
+			},
+		},
+	}
+	for _, tc := range installs {
+		for _, hc := range contents {
+			t.Run(tc.name+"/"+hc.name, func(t *testing.T) {
+				t.Setenv("BEADS_DIR", "")
+				repo := newGitRepo(t)
+				stale, target := strandRepoHooksPath(t, repo)
+				if err := os.WriteFile(filepath.Join(target, "pre-commit"), []byte(hc.hook), 0755); err != nil {
+					t.Fatal(err)
+				}
+
+				runInDir(t, repo, func() {
+					if err := tc.install(); err != nil {
+						t.Fatalf("install failed: %v", err)
+					}
+				})
+
+				cmd := exec.Command("git", "config", "--local", "--get", "core.hooksPath")
+				cmd.Dir = repo
+				out, err := cmd.Output()
+				if err != nil {
+					t.Fatalf("core.hooksPath unset after install: %v", err)
+				}
+				got := strings.TrimSpace(string(out))
+				if !filepath.IsAbs(got) || !utilsSameDir(got, target) {
+					t.Errorf("core.hooksPath = %q, want the absolute %s", got, target)
+				}
+				content, err := os.ReadFile(filepath.Join(target, "pre-commit"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if lost := hc.check(string(content)); lost != "" {
+					t.Errorf("refreshed pre-commit lacks %s:\n%s", lost, content)
+				}
+				assertStaleNotCreated(t, stale)
+			})
+		}
+	}
+}
+
+// utilsSameDir reports whether two existing directories are the same.
+func utilsSameDir(a, b string) bool {
+	ai, aerr := os.Stat(a)
+	bi, berr := os.Stat(b)
+	return aerr == nil && berr == nil && os.SameFile(ai, bi)
+}
+
+// TestInstallHooks_MissingHooksPathRefusal: a plain install against a missing
+// core.hooksPath that is not provably a moved repository's beads hooks
+// creates nothing, repoints nothing and says why (GH#5853).
+func TestInstallHooks_MissingHooksPathRefusal(t *testing.T) {
+	cases := []struct {
+		name string
+		// arrange returns the missing value whose location must stay absent.
+		arrange func(t *testing.T, repo string) string
+		want    string
+	}{
+		{
+			name: "no replacement directory",
+			arrange: func(t *testing.T, repo string) string {
+				stale := filepath.Join(t.TempDir(), "moved-away", "repo", ".beads", "hooks")
+				gitConfigIn(t, repo, "core.hooksPath", stale)
+				return stale
+			},
+			want: "no beads hooks directory exists",
+		},
+		{
+			name: "third-party path",
+			arrange: func(t *testing.T, repo string) string {
+				strandRepoHooksPath(t, repo)
+				husky := filepath.Join(t.TempDir(), "moved-away", "repo", ".husky", "_")
+				gitConfigIn(t, repo, "core.hooksPath", husky)
+				return husky
+			},
+			want: "does not name a .beads/hooks or .beads-hooks directory",
+		},
+		{
+			name: "global-only value",
+			arrange: func(t *testing.T, repo string) string {
+				stale, _ := strandRepoHooksPath(t, repo)
+				gitConfigIn(t, repo, "--unset", "core.hooksPath")
+				home := t.TempDir()
+				t.Setenv("HOME", home)
+				t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+				t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(home, ".gitconfig"))
+				gitConfigIn(t, repo, "--global", "core.hooksPath", stale)
+				return stale
+			},
+			want: "global config",
+		},
+		{
+			name: "command-line override",
+			arrange: func(t *testing.T, repo string) string {
+				strandRepoHooksPath(t, repo)
+				other := filepath.Join(t.TempDir(), "elsewhere", ".beads", "hooks")
+				t.Setenv("GIT_CONFIG_COUNT", "1")
+				t.Setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+				t.Setenv("GIT_CONFIG_VALUE_0", other)
+				return other
+			},
+			want: "command config",
+		},
+		{
+			name: "included config file",
+			arrange: func(t *testing.T, repo string) string {
+				stale, _ := strandRepoHooksPath(t, repo)
+				gitConfigIn(t, repo, "--unset", "core.hooksPath")
+				included := filepath.Join(t.TempDir(), "included.gitconfig")
+				gitConfigIn(t, repo, "--file", included, "core.hooksPath", stale)
+				gitConfigIn(t, repo, "include.path", included)
+				return stale
+			},
+			want: "a file this repository's config includes",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BEADS_DIR", "")
+			repo := newGitRepo(t)
+			missing := tc.arrange(t, repo)
+			before := hooksPathConfig(t, repo)
+
+			var err error
+			runInDir(t, repo, func() {
+				err = installStandaloneHooks(managedHookNames, false, false, false, false)
+			})
+			if err == nil {
+				t.Fatal("install succeeded against a missing core.hooksPath bd may not repoint")
+			}
+			if !strings.Contains(err.Error(), "bd will not create it") || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not explain the refusal (%q)", err, tc.want)
+			}
+			if after := hooksPathConfig(t, repo); after != before {
+				t.Errorf("install changed core.hooksPath: %q -> %q", before, after)
+			}
+			assertStaleNotCreated(t, missing)
+		})
+	}
+}
+
+// TestHooksPath_RelativeValueInLinkedWorktree: git resolves a relative
+// core.hooksPath against the root of the worktree it runs in, so a linked
+// worktree uses its own directory even when the main worktree has none. From
+// that worktree bd hooks list and the doctor Git Hooks check report no missing
+// directory, and a plain install writes there as it did before GH#5853,
+// creating nothing in the main worktree and leaving core.hooksPath alone.
+func TestHooksPath_RelativeValueInLinkedWorktree(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell hook fixture")
+	}
+	t.Setenv("BEADS_DIR", "")
+	repo := newGitRepo(t)
+	gitIn := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-c", "commit.gpgsign=false"}, args...)...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, strings.TrimSpace(string(out)))
+		}
+	}
+	// Set first, so no global or template hook runs in the fixture commands.
+	gitConfigIn(t, repo, "core.hooksPath", "custom-hooks")
+	gitIn(repo, "commit", "-q", "--allow-empty", "-m", "init")
+	wt := filepath.Join(t.TempDir(), "wt")
+	gitIn(repo, "worktree", "add", "-q", "-b", "relative-hooks", wt)
+	wtHooks, mainHooks := filepath.Join(wt, "custom-hooks"), filepath.Join(repo, "custom-hooks")
+	if err := os.MkdirAll(wtHooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wtHooks, "pre-commit"), []byte("#!/bin/sh\nprintf ran > hook-ran\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A real commit, not hook presence: git runs the linked worktree's hook.
+	gitIn(wt, "commit", "-q", "--allow-empty", "-m", "hook proof")
+	if _, err := os.Stat(filepath.Join(wt, "hook-ran")); err != nil {
+		t.Fatalf("precondition: git did not run %s: %v", filepath.Join(wtHooks, "pre-commit"), err)
+	}
+
+	runInDir(t, wt, func() {
+		out := captureStdout(t, func() error { return hooksListCmd.RunE(hooksListCmd, nil) })
+		for _, wrong := range []string{"does not exist", "Git runs no hooks", "directory is missing"} {
+			if strings.Contains(out, wrong) {
+				t.Errorf("bd hooks list reports a missing core.hooksPath git just used (%q):\n%s", wrong, out)
+			}
+		}
+		raw := func() string {
+			old := jsonOutput
+			jsonOutput = true
+			defer func() { jsonOutput = old }()
+			return captureStdout(t, func() error { return hooksListCmd.RunE(hooksListCmd, nil) })
+		}()
+		if strings.Contains(raw, `"hooks_path"`) {
+			t.Errorf("bd hooks list --json reports a hooks_path fault for a directory git uses:\n%s", raw)
+		}
+		if check := doctor.CheckGitHooks(Version); strings.Contains(check.Message, "Git runs no hooks") {
+			t.Errorf("Git Hooks check = %q / %q, but git runs this worktree's hooks", check.Message, check.Detail)
+		}
+		if err := installStandaloneHooks(managedHookNames, false, false, false, false); err != nil {
+			t.Fatalf("plain install refused the directory git just ran a hook from: %v", err)
+		}
+	})
+
+	content, err := os.ReadFile(filepath.Join(wtHooks, "pre-commit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := string(content); !strings.Contains(text, hookSectionBeginLine()) || !strings.Contains(text, "printf ran") {
+		t.Errorf("the install did not refresh the worktree's pre-commit around the user's hook:\n%s", text)
+	}
+	if _, err := os.Lstat(mainHooks); !os.IsNotExist(err) {
+		t.Errorf("the install created %s in the main worktree (err=%v)", mainHooks, err)
+	}
+	local := exec.Command("git", "config", "--local", "--get", "core.hooksPath")
+	local.Dir = repo
+	if out, err := local.Output(); err != nil || strings.TrimSpace(string(out)) != "custom-hooks" {
+		t.Errorf("core.hooksPath = %q (%v), want the relative value left alone", out, err)
+	}
+}
+
+// TestDoctorGitHooks_RelocatedHooksPath: the doctor Git Hooks check names the
+// missing core.hooksPath instead of missing hook files, and its fix dispatch
+// does not force-install hooks into the stale destination (GH#5853).
+func TestDoctorGitHooks_RelocatedHooksPath(t *testing.T) {
+	t.Setenv("BEADS_DIR", "")
+	repo := newGitRepo(t)
+	stale, _ := strandRepoHooksPath(t, repo)
+
+	runInDir(t, repo, func() {
+		check := doctor.CheckGitHooks(Version)
+		if check.Status != doctor.StatusWarning || !strings.Contains(check.Message+check.Detail, "core.hooksPath") {
+			t.Errorf("Git Hooks check = %q %q / %q, want a warning naming core.hooksPath", check.Status, check.Message, check.Detail)
+		}
+		if !strings.Contains(check.Detail, stale) {
+			t.Errorf("Git Hooks detail %q does not name %s", check.Detail, stale)
+		}
+		if check.Fix != "" {
+			t.Errorf("Git Hooks check carries Fix %q; the Hooks Path check owns the repair", check.Fix)
+		}
+
+		out := captureStdout(t, func() error {
+			applyFixList(repo, []doctorCheck{{Name: "Git Hooks", Status: statusWarning, Message: check.Message}})
+			return nil
+		})
+		if !strings.Contains(out, "core.hooksPath") || strings.Contains(out, "Error") {
+			t.Errorf("Git Hooks fix dispatch did not name the config fault:\n%s", out)
+		}
+	})
+	assertStaleNotCreated(t, stale)
 }
