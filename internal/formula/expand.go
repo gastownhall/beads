@@ -518,6 +518,14 @@ func ExpansionVarRefs(f *Formula, targetID string) []string {
 // This differs from compose.Expand in that the expansion is declared inline on the
 // step itself rather than in a central compose section.
 //
+// As with compose.Expand, a step anywhere in the tree that names an expanded
+// step in Needs or DependsOn is rewritten to name the last step of that
+// expansion, once every inline expansion has been applied (GH#7637). The last
+// step is the last one the expansion declares, not every step that ends it.
+// When the expansion recreates the step's own ID, references to it are left
+// unchanged; a template step that names the step it replaces without
+// recreating it is an error wrapping ErrValidation.
+//
 // Returns a new steps slice with inline expansions applied.
 // The original steps slice is not modified.
 func ApplyInlineExpansions(steps []*Step, parser *Parser) ([]*Step, error) {
@@ -525,12 +533,35 @@ func ApplyInlineExpansions(steps []*Step, parser *Parser) ([]*Step, error) {
 		return steps, nil
 	}
 
-	return applyInlineExpansionsRecursive(steps, parser, 0)
+	var replaced []inlineReplacement
+	result, err := applyInlineExpansionsRecursive(steps, parser, 0, &replaced)
+	if err != nil {
+		return nil, err
+	}
+
+	// An expansion that recreates its target as a real step keeps that ID,
+	// so references to it stay as they are.
+	surviving := collectStepIDs(result)
+	for _, r := range replaced {
+		if surviving[r.targetID] {
+			continue
+		}
+		result = UpdateDependenciesForExpansion(result, r.targetID, r.lastStepID)
+	}
+	return result, nil
+}
+
+// inlineReplacement records that an inline expansion replaced step targetID,
+// whose last expanded step is lastStepID.
+type inlineReplacement struct {
+	targetID   string
+	lastStepID string
 }
 
 // applyInlineExpansionsRecursive handles inline expansions for a slice of steps.
-// depth tracks recursion to prevent infinite expansion loops.
-func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int) ([]*Step, error) {
+// depth tracks recursion to prevent infinite expansion loops. Each replaced
+// step is appended to replaced.
+func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int, replaced *[]inlineReplacement) ([]*Step, error) {
 	if depth > DefaultMaxExpansionDepth {
 		return nil, fmt.Errorf("inline expansion depth limit exceeded: max %d levels", DefaultMaxExpansionDepth)
 	}
@@ -564,13 +595,29 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int) ([
 				return nil, fmt.Errorf("inline expand on step %q: %w", step.ID, err)
 			}
 
+			// A template step that names the target, which the expansion
+			// removes unless it recreates it, would lose that edge. Checked
+			// before the target's own dependencies are propagated.
+			if !collectStepIDs(expandedSteps)[step.ID] {
+				if selfRef := findStepNaming(expandedSteps, step.ID); selfRef != "" {
+					return nil, fmt.Errorf("%w: inline expand on step %q: expanded step %q depends on the step it replaces",
+						ErrValidation, step.ID, selfRef)
+				}
+			}
+
 			// Propagate the original step's dependencies to root steps of the expansion
 			propagateTargetDeps(step, expandedSteps)
 
 			// Recursively process expanded steps for nested inline expansions
-			processedSteps, err := applyInlineExpansionsRecursive(expandedSteps, parser, depth+1)
+			processedSteps, err := applyInlineExpansionsRecursive(expandedSteps, parser, depth+1, replaced)
 			if err != nil {
 				return nil, err
+			}
+			if n := len(processedSteps); n > 0 {
+				*replaced = append(*replaced, inlineReplacement{
+					targetID:   step.ID,
+					lastStepID: processedSteps[n-1].ID,
+				})
 			}
 
 			result = append(result, processedSteps...)
@@ -579,7 +626,7 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int) ([
 			clone := cloneStep(step)
 
 			if len(step.Children) > 0 {
-				processedChildren, err := applyInlineExpansionsRecursive(step.Children, parser, depth)
+				processedChildren, err := applyInlineExpansionsRecursive(step.Children, parser, depth, replaced)
 				if err != nil {
 					return nil, err
 				}

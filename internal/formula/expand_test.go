@@ -1,6 +1,7 @@
 package formula
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1016,6 +1017,330 @@ func TestApplyInlineExpansionsCrossExpansionDeps(t *testing.T) {
 			t.Errorf("work.first.Needs = %v, want %v", got, want)
 		}
 	})
+
+	t.Run("dependencies on the expanded step point at its last step", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "work", Title: "Work", Expand: "inline-exp"},
+			{ID: "land", Title: "Land", Needs: []string{"work"}},
+			{ID: "notify", Title: "Notify", DependsOn: []string{"work"}},
+			{
+				ID:    "group",
+				Title: "Group",
+				Children: []*Step{
+					{ID: "child", Title: "Child", Needs: []string{"work"}},
+				},
+			},
+		}
+
+		result, err := ApplyInlineExpansions(steps, parser)
+		if err != nil {
+			t.Fatalf("ApplyInlineExpansions failed: %v", err)
+		}
+
+		stepMap := buildStepMap(result)
+		if got := stepMap["land"].Needs; len(got) != 1 || got[0] != "work.second" {
+			t.Errorf("land.Needs = %v, want [work.second]", got)
+		}
+		if got := stepMap["notify"].DependsOn; len(got) != 1 || got[0] != "work.second" {
+			t.Errorf("notify.DependsOn = %v, want [work.second]", got)
+		}
+		if got := stepMap["child"].Needs; len(got) != 1 || got[0] != "work.second" {
+			t.Errorf("child.Needs = %v, want [work.second]", got)
+		}
+		if got := steps[1].Needs; len(got) != 1 || got[0] != "work" {
+			t.Errorf("input land.Needs = %v, want [work] unchanged", got)
+		}
+	})
+
+	// GH#7637: a step that names an inline-expanded step in needs or
+	// depends_on waits for the expansion's last step, in the same list
+	// position, as with [[compose.expand]]. The expansion roots keep the
+	// target's own prerequisites, and the input steps are not modified.
+	t.Run("needs and depends_on on an inline-expanded step are retargeted in place", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "setup", Title: "Setup"},
+			{ID: "prepare", Title: "Prepare"},
+			{ID: "land", Title: "Land", Needs: []string{"setup", "work", "prepare"}},
+			{ID: "work", Title: "Work", Needs: []string{"setup", "prepare"}, DependsOn: []string{"prepare"}, Expand: "inline-exp"},
+			{ID: "notify", Title: "Notify", DependsOn: []string{"prepare", "work"}},
+			{ID: "other", Title: "Other", Needs: []string{"setup"}},
+		}
+		before := snapshotStepDeps(steps)
+
+		result, err := ApplyInlineExpansions(steps, parser)
+		if err != nil {
+			t.Fatalf("ApplyInlineExpansions failed: %v", err)
+		}
+		if after := snapshotStepDeps(steps); after != before {
+			t.Errorf("input steps modified:\nbefore %s\nafter  %s", before, after)
+		}
+
+		byID := buildStepMap(result)
+		if _, ok := byID["work"]; ok {
+			t.Fatalf("work still present after expansion: %v", collectStepIDsForTest(result))
+		}
+		if got, want := byID["land"].Needs, []string{"setup", "work.second", "prepare"}; !slices.Equal(got, want) {
+			t.Errorf("land.Needs = %v, want %v", got, want)
+		}
+		if got, want := byID["notify"].DependsOn, []string{"prepare", "work.second"}; !slices.Equal(got, want) {
+			t.Errorf("notify.DependsOn = %v, want %v", got, want)
+		}
+		if got, want := byID["other"].Needs, []string{"setup"}; !slices.Equal(got, want) {
+			t.Errorf("other.Needs = %v, want %v", got, want)
+		}
+		if got, want := byID["work.first"].Needs, []string{"setup", "prepare"}; !slices.Equal(got, want) {
+			t.Errorf("work.first.Needs = %v, want %v (work's own prerequisites)", got, want)
+		}
+		if got, want := byID["work.first"].DependsOn, []string{"prepare"}; !slices.Equal(got, want) {
+			t.Errorf("work.first.DependsOn = %v, want %v (work's own prerequisites)", got, want)
+		}
+		if got, want := byID["work.second"].Needs, []string{"work.first"}; !slices.Equal(got, want) {
+			t.Errorf("work.second.Needs = %v, want %v", got, want)
+		}
+	})
+
+	// Two expanded steps where the second needs the first: the second's
+	// roots inherit that need, and it names the first's last step.
+	t.Run("a need between two inline-expanded steps names the first's last step", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "a", Title: "A", Expand: "inline-exp"},
+			{ID: "b", Title: "B", Needs: []string{"a"}, Expand: "inline-exp"},
+		}
+
+		result, err := ApplyInlineExpansions(steps, parser)
+		if err != nil {
+			t.Fatalf("ApplyInlineExpansions failed: %v", err)
+		}
+		byID := buildStepMap(result)
+		if got, want := byID["b.first"].Needs, []string{"a.second"}; !slices.Equal(got, want) {
+			t.Errorf("b.first.Needs = %v, want %v", got, want)
+		}
+		if got, want := byID["b.second"].Needs, []string{"b.first"}; !slices.Equal(got, want) {
+			t.Errorf("b.second.Needs = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("an expanded step with no dependents", func(t *testing.T) {
+		result, err := ApplyInlineExpansions([]*Step{{ID: "work", Title: "Work", Expand: "inline-exp"}}, parser)
+		if err != nil {
+			t.Fatalf("ApplyInlineExpansions failed: %v", err)
+		}
+		if got := collectStepIDsForTest(result); !slices.Equal(got, []string{"work.first", "work.second"}) {
+			t.Errorf("result = %v, want [work.first work.second]", got)
+		}
+	})
+
+	// The replacement applies to the whole tree, so a dependent outside the
+	// group that holds the target is rewritten too, in either direction.
+	t.Run("a dependent in another part of the children tree names the last step", func(t *testing.T) {
+		t.Run("nested dependent", func(t *testing.T) {
+			steps := []*Step{
+				{ID: "work", Title: "Work", Expand: "inline-exp"},
+				{ID: "group", Title: "Group", Children: []*Step{
+					{ID: "child", Title: "Child", Needs: []string{"work"}},
+					{ID: "sibling", Title: "Sibling", DependsOn: []string{"work"}},
+				}},
+			}
+			before := snapshotStepDeps(steps)
+
+			result, err := ApplyInlineExpansions(steps, parser)
+			if err != nil {
+				t.Fatalf("ApplyInlineExpansions failed: %v", err)
+			}
+			if after := snapshotStepDeps(steps); after != before {
+				t.Errorf("input steps modified:\nbefore %s\nafter  %s", before, after)
+			}
+			byID := buildStepMap(result)
+			if got, want := byID["child"].Needs, []string{"work.second"}; !slices.Equal(got, want) {
+				t.Errorf("child.Needs = %v, want %v", got, want)
+			}
+			if got, want := byID["sibling"].DependsOn, []string{"work.second"}; !slices.Equal(got, want) {
+				t.Errorf("sibling.DependsOn = %v, want %v", got, want)
+			}
+		})
+
+		t.Run("nested target", func(t *testing.T) {
+			steps := []*Step{
+				{ID: "before", Title: "Before", Needs: []string{"work"}},
+				{ID: "group-a", Title: "Group A", Children: []*Step{
+					{ID: "work", Title: "Work", Expand: "inline-exp"},
+				}},
+				{ID: "land", Title: "Land", Needs: []string{"work"}},
+				{ID: "group-b", Title: "Group B", Children: []*Step{
+					{ID: "other", Title: "Other", DependsOn: []string{"work"}},
+				}},
+			}
+			before := snapshotStepDeps(steps)
+
+			result, err := ApplyInlineExpansions(steps, parser)
+			if err != nil {
+				t.Fatalf("ApplyInlineExpansions failed: %v", err)
+			}
+			if after := snapshotStepDeps(steps); after != before {
+				t.Errorf("input steps modified:\nbefore %s\nafter  %s", before, after)
+			}
+			byID := buildStepMap(result)
+			if _, ok := byID["work"]; ok {
+				t.Fatalf("work still present after expansion: %v", collectStepIDsForTest(result))
+			}
+			if got, want := collectStepIDsForTest(byID["group-a"].Children), []string{"work.first", "work.second"}; !slices.Equal(got, want) {
+				t.Errorf("group-a children = %v, want %v", got, want)
+			}
+			for _, id := range []string{"before", "land"} {
+				if got, want := byID[id].Needs, []string{"work.second"}; !slices.Equal(got, want) {
+					t.Errorf("%s.Needs = %v, want %v", id, got, want)
+				}
+			}
+			if got, want := byID["other"].DependsOn, []string{"work.second"}; !slices.Equal(got, want) {
+				t.Errorf("other.DependsOn = %v, want %v", got, want)
+			}
+		})
+	})
+
+	// A template that recreates {target} as a real step keeps that ID, so
+	// references to it, inside the expansion and outside, stay as they are:
+	// rewriting them would give the recreated step's dependents (or the
+	// step itself) a needless or self-referencing edge.
+	t.Run("references to a target the expansion recreates are unchanged", func(t *testing.T) {
+		dir := t.TempDir()
+		for name, template := range map[string]string{
+			"recreate-first": `[
+				{"id": "{target}", "title": "{target.title}"},
+				{"id": "{target}.review", "title": "Review {target.title}", "needs": ["{target}"]}
+			]`,
+			"recreate-last": `[
+				{"id": "{target}.prep", "title": "Prep {target.title}"},
+				{"id": "{target}", "title": "{target.title}", "needs": ["{target}.prep"]}
+			]`,
+		} {
+			src := fmt.Sprintf(`{"formula": %q, "type": "expansion", "version": 1, "template": %s}`, name, template)
+			if err := os.WriteFile(filepath.Join(dir, name+".formula.json"), []byte(src), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		recreateParser := NewParser(dir)
+
+		tests := []struct {
+			expand string
+			want   map[string][]string // step ID -> Needs
+		}{
+			{"recreate-first", map[string][]string{
+				"work":        {"setup"},
+				"work.review": {"work"},
+				"land":        {"work"},
+				"child":       {"work"},
+			}},
+			{"recreate-last", map[string][]string{
+				"work.prep": {"setup"},
+				"work":      {"work.prep"},
+				"land":      {"work"},
+				"child":     {"work"},
+			}},
+		}
+		for _, tt := range tests {
+			t.Run(tt.expand, func(t *testing.T) {
+				steps := []*Step{
+					{ID: "setup", Title: "Setup"},
+					{ID: "work", Title: "Work", Needs: []string{"setup"}, Expand: tt.expand},
+					{ID: "land", Title: "Land", Needs: []string{"work"}},
+					{ID: "group", Title: "Group", Children: []*Step{
+						{ID: "child", Title: "Child", Needs: []string{"work"}},
+					}},
+				}
+
+				result, err := ApplyInlineExpansions(steps, recreateParser)
+				if err != nil {
+					t.Fatalf("ApplyInlineExpansions failed: %v", err)
+				}
+				byID := buildStepMap(result)
+				for id, want := range tt.want {
+					s := byID[id]
+					if s == nil {
+						t.Fatalf("step %q missing from result: %v", id, collectStepIDsForTest(result))
+					}
+					if !slices.Equal(s.Needs, want) {
+						t.Errorf("%s.Needs = %v, want %v", id, s.Needs, want)
+					}
+				}
+			})
+		}
+	})
+
+	// A template step that names {target} without the template recreating
+	// it would depend on a step the expansion removes: the edge is lost, and
+	// retargeting it to the last step could make a step wait on itself. The
+	// expansion is refused as an invalid formula instead.
+	t.Run("a template step naming its own removed target is refused", func(t *testing.T) {
+		dir := t.TempDir()
+		templates := map[string]string{
+			"self-needs": `[
+				{"id": "{target}.a", "title": "A"},
+				{"id": "{target}.b", "title": "B", "needs": ["{target}.a", "{target}"]}
+			]`,
+			"self-depends-on": `[
+				{"id": "{target}.a", "title": "A"},
+				{"id": "{target}.b", "title": "B", "depends_on": ["{target}"]}
+			]`,
+			"self-child": `[
+				{"id": "{target}.group", "title": "Group", "children": [
+					{"id": "{target}.child", "title": "Child", "needs": ["{target}"]}
+				]}
+			]`,
+			"self-child-depends-on": `[
+				{"id": "{target}.first", "title": "First", "children": [
+					{"id": "{target}.first.check", "title": "Check", "depends_on": ["{target}"]}
+				]}
+			]`,
+		}
+		for name, template := range templates {
+			src := fmt.Sprintf(`{"formula": %q, "type": "expansion", "version": 1, "template": %s}`, name, template)
+			if err := os.WriteFile(filepath.Join(dir, name+".formula.json"), []byte(src), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		selfParser := NewParser(dir)
+
+		for _, tt := range []struct{ expand, offender string }{
+			{"self-needs", "work.b"},
+			{"self-depends-on", "work.b"},
+			{"self-child", "work.child"},
+			{"self-child-depends-on", "work.first.check"},
+		} {
+			t.Run(tt.expand, func(t *testing.T) {
+				steps := []*Step{
+					{ID: "setup", Title: "Setup"},
+					{ID: "group", Title: "Group", Children: []*Step{
+						{ID: "work", Title: "Work", Needs: []string{"setup"}, Expand: tt.expand},
+					}},
+					{ID: "land", Title: "Land", Needs: []string{"work"}},
+				}
+				before := snapshotStepDeps(steps)
+
+				_, err := ApplyInlineExpansions(steps, selfParser)
+				if !errors.Is(err, ErrValidation) {
+					t.Fatalf("ApplyInlineExpansions error = %v, want an ErrValidation", err)
+				}
+				for _, want := range []string{`inline expand on step "work"`, fmt.Sprintf("%q", tt.offender)} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error = %q, want it to contain %s", err, want)
+					}
+				}
+				if after := snapshotStepDeps(steps); after != before {
+					t.Errorf("input steps modified:\nbefore %s\nafter  %s", before, after)
+				}
+			})
+		}
+	})
+}
+
+// snapshotStepDeps renders the IDs, Needs and DependsOn of a step tree, to
+// check that a transform left its input unmodified.
+func snapshotStepDeps(steps []*Step) string {
+	var b strings.Builder
+	for _, s := range steps {
+		fmt.Fprintf(&b, "%s needs=%v depends_on=%v children=[%s] ", s.ID, s.Needs, s.DependsOn, snapshotStepDeps(s.Children))
+	}
+	return b.String()
 }
 
 func TestFindDuplicateStepIDs(t *testing.T) {
