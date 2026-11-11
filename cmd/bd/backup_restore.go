@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -56,13 +57,22 @@ To initialize and restore in one step, use: bd init && bd backup restore`,
 			}
 		}
 
+		proxied := usesProxiedServer()
+		// A store that cannot restore at all (a bd connect workspace) refuses
+		// before the source is checked, so its user is not sent off to write a
+		// backup that this workspace could never restore.
+		if !proxied {
+			if _, err := restoreBackupStore(store); err != nil {
+				return err
+			}
+		}
 		if err := validateBackupRestoreDir(dir); err != nil {
 			return err
 		}
 
 		force, _ := cmd.Flags().GetBool("force")
 
-		if usesProxiedServer() {
+		if proxied {
 			if err := runBackupRestoreProxied(ctx, dir, force); err != nil {
 				return err
 			}
@@ -89,15 +99,24 @@ func init() {
 	backupCmd.AddCommand(backupRestoreCmd)
 }
 
-// runBackupRestore restores the database from a Dolt-native backup.
-func runBackupRestore(ctx context.Context, s storage.DoltStorage, dir string, force bool) error {
+// restoreBackupStore returns the restore surface of s, or the refusal for a
+// store that has none.
+func restoreBackupStore(s storage.DoltStorage) (storage.BackupStore, error) {
 	if s == nil {
-		return fmt.Errorf("database is not initialized. Run 'bd init' first")
+		return nil, fmt.Errorf("database is not initialized. Run 'bd init' first")
 	}
-
 	bs, ok := storage.UnwrapStore(s).(storage.BackupStore)
 	if !ok {
-		return fmt.Errorf("storage backend does not support backup operations")
+		return nil, fmt.Errorf("storage backend does not support backup operations")
+	}
+	return bs, nil
+}
+
+// runBackupRestore restores the database from a Dolt-native backup.
+func runBackupRestore(ctx context.Context, s storage.DoltStorage, dir string, force bool) error {
+	bs, err := restoreBackupStore(s)
+	if err != nil {
+		return err
 	}
 
 	if err := bs.RestoreDatabase(ctx, dir, force); err != nil {
@@ -169,9 +188,25 @@ func syncProjectIDFromDB(ctx context.Context, s storage.DoltStorage) error {
 	return cfg.Save(beadsDir)
 }
 
+// backupRestoreRemedy is the hint every restore preflight refusal ends with.
+const backupRestoreRemedy = "Restore was not attempted. Pass a directory written by 'bd backup sync';\n" +
+	"to create one, run 'bd backup init <path>' and then 'bd backup sync'"
+
+// validateBackupRestoreDir refuses a restore source that holds no Dolt backup,
+// or sits at a path Dolt would read as another directory, before either
+// restore path starts. A forced restore opens the source, replaces the live
+// database, and only then syncs the backup into it, so an empty or wrong
+// directory (including the default .beads/backup, which backupDir creates)
+// would otherwise cost the database (GH#7098). The check itself is the
+// storage layer's (versioncontrolops.RestoreSourceURL), the one each restore
+// path builds its source URL with; running it here first refuses before the
+// proxied path quiesces the topology.
 func validateBackupRestoreDir(dir string) error {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		return fmt.Errorf("backup directory not found: %s\nRun 'bd backup' first to create a backup", dir)
+		return fmt.Errorf("backup directory not found: %s\n%s", dir, backupRestoreRemedy)
+	}
+	if _, err := versioncontrolops.RestoreSourceURL(dir); err != nil {
+		return fmt.Errorf("%w\n%s", err, backupRestoreRemedy)
 	}
 	return nil
 }

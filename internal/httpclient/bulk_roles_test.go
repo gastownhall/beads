@@ -472,7 +472,7 @@ func TestAPlainSweepAgainstAServerWithoutRetainedTypesReadsTheSetting(t *testing
 func TestDeleteResultCarriesEveryWireMember(t *testing.T) {
 	w := &stubWire{deleted: &apigen.DeleteIssuesResult{
 		DryRun: true, Deleted: 2, Dependencies: 3, Labels: 4, Events: 5,
-		ReferencesUpdated: 6, Orphaned: &[]string{"bd-9"},
+		ReferencesUpdated: 6, Orphaned: &[]string{"bd-9"}, DeletedIds: &[]string{"bd-1", "bd-1.1"},
 	}}
 	result, err := bulkDeleter(t, w).Delete(t.Context(), issueops.DeleteRequest{IDs: []string{"bd-1"}, Force: true})
 	if err != nil {
@@ -481,6 +481,9 @@ func TestDeleteResultCarriesEveryWireMember(t *testing.T) {
 	assertEveryFieldPopulated(t, "DeleteResult", reflect.ValueOf(result))
 	if !reflect.DeepEqual(result.Orphaned, []string{"bd-9"}) {
 		t.Errorf("Orphaned = %v, want [bd-9]", result.Orphaned)
+	}
+	if !reflect.DeepEqual(result.DeletedIDs, []string{"bd-1", "bd-1.1"}) {
+		t.Errorf("DeletedIDs = %v, want [bd-1 bd-1.1]", result.DeletedIDs)
 	}
 }
 
@@ -521,6 +524,48 @@ func TestDeleteSendsTheIDsVerbatim(t *testing.T) {
 	// shared backing array is one helper away from a write.
 	if len(w.lastDelete.Ids) > 0 && &w.lastDelete.Ids[0] == &ids[0] {
 		t.Error("the request body aliases the caller's id slice rather than copying it")
+	}
+}
+
+// TestDeleteCascadeRefusesAServerWithoutContainmentCascade is the skew half of
+// GH#6301. A server older than issues.delete.containmentCascade answers a
+// cascade by following EVERY dependency type, so a cascade sent to it — a
+// preview included, whose ids the caller is about to act on — would delete or
+// name rows this client promises survive. It refuses before dialing; a
+// request without cascade means the same thing on both and still goes.
+// The tokens are spelled literally, as an oracle independent of the code.
+func TestDeleteCascadeRefusesAServerWithoutContainmentCascade(t *testing.T) {
+	masked := &apigen.ContextResponse{Capabilities: []string{"issues.delete"}}
+
+	for _, dryRun := range []bool{false, true} {
+		w := &stubWire{}
+		deleter, err := New(testTarget(t), w, masked).Deleter()
+		if err != nil {
+			t.Fatalf("Deleter(): %v", err)
+		}
+		_, err = deleter.Delete(t.Context(), issueops.DeleteRequest{IDs: []string{"bd-1"}, Cascade: true, Force: true, DryRun: dryRun})
+		var unsup *storage.ErrUnsupported
+		if !errors.As(err, &unsup) {
+			t.Fatalf("DryRun=%v: Delete error = %v, want *storage.ErrUnsupported", dryRun, err)
+		}
+		if unsup.Capability != "issues.delete.containmentCascade" || unsup.Op != "Deleter.Delete" {
+			t.Errorf("DryRun=%v: refusal = %q/%q, want Deleter.Delete/issues.delete.containmentCascade", dryRun, unsup.Op, unsup.Capability)
+		}
+		if slices.Contains(w.calls, "deleteIssues") {
+			t.Errorf("DryRun=%v: calls = %v, want no deletion request", dryRun, w.calls)
+		}
+	}
+
+	w := &stubWire{}
+	deleter, err := New(testTarget(t), w, masked).Deleter()
+	if err != nil {
+		t.Fatalf("Deleter(): %v", err)
+	}
+	if _, err := deleter.Delete(t.Context(), issueops.DeleteRequest{IDs: []string{"bd-1"}, Force: true}); err != nil {
+		t.Fatalf("Delete without cascade: %v, want it sent", err)
+	}
+	if !slices.Contains(w.calls, "deleteIssues") {
+		t.Errorf("calls = %v, want the deletion request", w.calls)
 	}
 }
 

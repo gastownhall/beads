@@ -70,11 +70,18 @@ func applyInitGatewayCredential(ctx context.Context, beadsDir string, doltCfg *d
 	if fileCfg == nil {
 		fileCfg = configfile.DefaultConfig()
 	}
-	applied, err := dolt.ApplyGatewayCredential(ctx, fileCfg, doltCfg)
+	gatewayCfg := *doltCfg
+	if gatewayCfg.BeadsDir == "" {
+		gatewayCfg.BeadsDir = beadsDir
+	}
+	applied, err := dolt.ApplyGatewayCredential(ctx, fileCfg, &gatewayCfg)
 	if err != nil {
 		return err
 	}
 	if applied {
+		doltCfg.ServerUser = gatewayCfg.ServerUser
+		doltCfg.Gateway = gatewayCfg.Gateway
+		doltCfg.DisableAutoStart = gatewayCfg.DisableAutoStart
 		// ApplyGatewayCredential sets DisableAutoStart, but the hand-built init
 		// config path never runs ApplyCLIAutoStart to translate that into the
 		// AutoStart field the store's auto-start block actually consults.
@@ -1103,6 +1110,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			earlyRemoteSource := initSyncRemoteNone
 			earlyRemoteHasDoltData := false
 			var earlyProbeNote string
+			if !initRemoteChanged {
+				if _, err := resolveSyncRemoteChecked(); err != nil {
+					return err
+				}
+			}
 			earlySyncURL, earlyRemoteSource = resolveInitConfiguredSyncRemote(initRemote, initRemoteChanged, resolveSyncRemote)
 			if earlyRemoteSource == initSyncRemoteExplicit {
 				// An explicit --remote is intent to bootstrap or wire that URL,
@@ -3517,6 +3529,13 @@ func getBeadsRole() (string, bool) {
 // setBeadsRole writes the beads.role git config value. See getBeadsRole for
 // why the pair shares the role-authority environment boundary.
 func setBeadsRole(role string) error {
+	// #nosec G702 -- no shell is involved: the binary is the literal "git"
+	// and the role value is its own argv element, so it cannot inject a
+	// command; the value is bd's own beads.role setting (see getBeadsRole),
+	// local operator state rather than request data. gosec only reaches this
+	// line because the doctorEnsureGitignoreForBeadsDir seam's opaque
+	// indirect call widens taint propagation to package function
+	// parameters (#6225).
 	cmd := exec.Command("git", "config", "beads.role", role)
 	cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
 	return cmd.Run()

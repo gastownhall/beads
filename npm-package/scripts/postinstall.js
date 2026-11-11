@@ -72,7 +72,7 @@ function downloadFile(url, dest) {
             reject(closeErr);
             return;
           }
-          fs.unlink(dest, () => {});
+          // The recursive stream truncates dest; an asynchronous unlink could remove its download.
           downloadFile(redirectUrl, dest).then(resolve).catch(reject);
         });
         return;
@@ -306,9 +306,14 @@ async function install() {
   }
 }
 
-// Run installation if not in CI environment
-if (!process.env.CI) {
-  install();
-} else {
-  console.log('Skipping binary download in CI environment');
+// Run installation if not in CI environment. Guarded so the module can be
+// required (for tests) without starting an installation.
+if (require.main === module) {
+  if (!process.env.CI) {
+    install();
+  } else {
+    console.log('Skipping binary download in CI environment');
+  }
 }
+
+module.exports = { downloadFile };

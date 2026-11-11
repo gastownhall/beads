@@ -62,9 +62,13 @@ func leaseTTL(ctx context.Context) time.Duration {
 // INVARIANT: any path that mutates status, assignee, or started_at on an
 // in_progress issue MUST rewrite row_lock — that is the set the reclaim/close
 // races care about (claim, close, updateIssueInTx, reclaim, unclaim all do).
-// Paths that touch only orthogonal cells (is_blocked, compaction_level,
-// dependency metadata, rename, or reopen — which acts on closed rows) are safe
-// to merge with a reclaim and intentionally do NOT rewrite it. A heartbeat
+// Reopen rewrites it too (reopen.go): it acts on a closed row, so no reclaim
+// races it, but it is a status change, and a caller holding the closed row's
+// RowVersion must see its guard go stale. Paths that touch only orthogonal
+// cells (is_blocked, compaction_level, dependency metadata, labels, rename)
+// are safe to merge with a reclaim and intentionally do NOT rewrite it;
+// backend/conformance/row_version_contract.go pins each kind's answer on every
+// backend. A heartbeat
 // REFRESH does not touch the issues row (bd-lrgn1): the lease lives in the
 // ephemeral leases table, where a racing heartbeat and reclaim contend on the
 // SAME lease row and conflict without any help. A heartbeat RE-ARM (a lease

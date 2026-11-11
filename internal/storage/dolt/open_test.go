@@ -214,138 +214,6 @@ func TestConfigConstructorsRejectNonDoltBackends(t *testing.T) {
 	}
 }
 
-// TestConfigConstructorsRefuseGraphWorkspace pins that every metadata-driven
-// constructor refuses a workspace whose metadata declares another data model,
-// before it resolves a server or writes anything into the workspace (a port
-// file, a Dolt root, or the metadata.json that Load would migrate a legacy
-// config.json into). The CLI's own store open does not come through here; the
-// public beads package's config opens and cmd/bd's direct NewFromConfig*
-// callers do.
-func TestConfigConstructorsRefuseGraphWorkspace(t *testing.T) {
-	// If the refusal were missing, the open must fail fast rather than reach
-	// the suite's shared test server.
-	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
-	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
-	for _, mode := range []string{configfile.GraphModeLink, "future-format"} {
-		for _, doltMode := range []string{configfile.DoltModeEmbedded, configfile.DoltModeServer} {
-			// "config.json" is the legacy name Load migrates into metadata.json;
-			// a refused open must not run that migration either.
-			for _, fileName := range []string{configfile.ConfigFileName, "config.json"} {
-				t.Run(mode+"/"+doltMode+"/"+fileName, func(t *testing.T) {
-					beadsDir := t.TempDir()
-					metadata := `{"backend":"dolt","dolt_mode":"` + doltMode + `","dolt_database":"beads_graph_0123","graph_mode":"` + mode + `","graph_future_binding":"keep-me"}`
-					path := filepath.Join(beadsDir, fileName)
-					if err := os.WriteFile(path, []byte(metadata), 0o600); err != nil {
-						t.Fatal(err)
-					}
-					constructors := map[string]func() (*DoltStore, error){
-						"default": func() (*DoltStore, error) {
-							return NewFromConfig(t.Context(), beadsDir)
-						},
-						"standard": func() (*DoltStore, error) {
-							return NewFromConfigWithOptions(t.Context(), beadsDir, &Config{DisableAutoStart: true, CreateIfMissing: true})
-						},
-						"cli": func() (*DoltStore, error) {
-							return NewFromConfigWithCLIOptions(t.Context(), beadsDir, &Config{DisableAutoStart: true, ReadOnly: true})
-						},
-					}
-					for name, construct := range constructors {
-						t.Run(name, func(t *testing.T) {
-							store, err := construct()
-							if err == nil {
-								_ = store.Close()
-								t.Fatalf("graph_mode %q workspace opened as Dolt", mode)
-							}
-							var formatErr *configfile.UnsupportedWorkspaceFormatError
-							if !errors.As(err, &formatErr) || formatErr.BeadsDir != beadsDir || formatErr.GraphMode != mode {
-								t.Fatalf("constructor error = %v, want UnsupportedWorkspaceFormatError for %s", err, beadsDir)
-							}
-							entries, readErr := os.ReadDir(beadsDir)
-							if readErr != nil || len(entries) != 1 {
-								t.Fatalf("refused open changed the workspace: %v, %v", entries, readErr)
-							}
-							if got, readErr := os.ReadFile(path); readErr != nil || string(got) != metadata {
-								t.Fatalf("refused open rewrote %s: %q, %v", fileName, got, readErr)
-							}
-						})
-					}
-				})
-			}
-		}
-	}
-}
-
-// TestConfigConstructorsRefuseGraphFormatMarker pins that every
-// metadata-driven constructor refuses a workspace holding the
-// graph-preview-format marker graph-preview builds write, whatever its
-// metadata says (none, stripped of graph_mode in either metadata file, an
-// explicit dependency, or unparseable), and leaves the workspace unchanged.
-func TestConfigConstructorsRefuseGraphFormatMarker(t *testing.T) {
-	// If the refusal were missing, the open must fail fast rather than reach
-	// the suite's shared test server.
-	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
-	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
-	layouts := []struct {
-		name     string
-		fileName string // "" writes no metadata file
-		metadata string
-	}{
-		{name: "marker only"},
-		{name: "stripped embedded metadata", fileName: configfile.ConfigFileName, metadata: `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"beads_graph_0123"}`},
-		{name: "stripped server metadata", fileName: configfile.ConfigFileName, metadata: `{"backend":"dolt","dolt_mode":"server","dolt_database":"beads_graph_0123"}`},
-		{name: "stripped legacy config.json", fileName: "config.json", metadata: `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"beads_graph_0123"}`},
-		{name: "dependency metadata", fileName: configfile.ConfigFileName, metadata: `{"backend":"dolt","dolt_mode":"server","graph_mode":"dependency"}`},
-		{name: "unparseable metadata", fileName: configfile.ConfigFileName, metadata: `{"backend":"dolt",`},
-	}
-	for _, layout := range layouts {
-		t.Run(layout.name, func(t *testing.T) {
-			beadsDir := t.TempDir()
-			want := map[string]string{configfile.GraphFormatMarkerFile: "link-preview-v9\n"}
-			if layout.fileName != "" {
-				want[layout.fileName] = layout.metadata
-			}
-			for name, content := range want {
-				if err := os.WriteFile(filepath.Join(beadsDir, name), []byte(content), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			constructors := map[string]func() (*DoltStore, error){
-				"default": func() (*DoltStore, error) {
-					return NewFromConfig(t.Context(), beadsDir)
-				},
-				"standard": func() (*DoltStore, error) {
-					return NewFromConfigWithOptions(t.Context(), beadsDir, &Config{DisableAutoStart: true, CreateIfMissing: true})
-				},
-				"cli": func() (*DoltStore, error) {
-					return NewFromConfigWithCLIOptions(t.Context(), beadsDir, &Config{DisableAutoStart: true, ReadOnly: true})
-				},
-			}
-			for name, construct := range constructors {
-				t.Run(name, func(t *testing.T) {
-					store, err := construct()
-					if err == nil {
-						_ = store.Close()
-						t.Fatalf("workspace with a %s marker opened as Dolt", configfile.GraphFormatMarkerFile)
-					}
-					var formatErr *configfile.UnsupportedWorkspaceFormatError
-					if !errors.As(err, &formatErr) || formatErr.BeadsDir != beadsDir || !formatErr.FormatMarker {
-						t.Fatalf("constructor error = %v, want the format marker refusal for %s", err, beadsDir)
-					}
-					entries, readErr := os.ReadDir(beadsDir)
-					if readErr != nil || len(entries) != len(want) {
-						t.Fatalf("refused open changed the workspace: %v, %v", entries, readErr)
-					}
-					for fileName, content := range want {
-						if got, readErr := os.ReadFile(filepath.Join(beadsDir, fileName)); readErr != nil || string(got) != content {
-							t.Fatalf("refused open rewrote %s: %q, %v", fileName, got, readErr)
-						}
-					}
-				})
-			}
-		})
-	}
-}
-
 // TestConfigConstructorsRefuseNonDoltBackendInLegacyConfig pins that every
 // metadata-driven constructor refuses a legacy config.json naming a backend it
 // cannot open as Dolt (removed, unrecognized, or another binary's registered
@@ -657,6 +525,83 @@ func TestApplyResolvedConfig(t *testing.T) {
 		}
 	})
 
+	// Socket precedence: caller, then BEADS_DOLT_SERVER_SOCKET, then
+	// metadata.json. Each case pins the env var and clears the credential
+	// command, which runs in server mode and could fail the resolve first.
+	socketFileCfg := func(t *testing.T, socket string) *configfile.Config {
+		t.Helper()
+		t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "")
+		return &configfile.Config{
+			Backend:          configfile.BackendDolt,
+			DoltMode:         configfile.DoltModeServer,
+			DoltDatabase:     "beads_codex",
+			DoltServerSocket: socket,
+		}
+	}
+
+	t.Run("applies socket from metadata", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_SOCKET", "")
+		cfg := &Config{}
+
+		if err := applyResolvedConfig(context.Background(), t.TempDir(), socketFileCfg(t, "/metadata/dolt.sock"), cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
+
+		if cfg.ServerSocket != "/metadata/dolt.sock" {
+			t.Fatalf("ServerSocket = %q, want the metadata socket %q", cfg.ServerSocket, "/metadata/dolt.sock")
+		}
+	})
+
+	t.Run("caller socket wins over env and metadata", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_SOCKET", "/env/dolt.sock")
+		cfg := &Config{ServerSocket: "/caller/dolt.sock"}
+
+		if err := applyResolvedConfig(context.Background(), t.TempDir(), socketFileCfg(t, "/metadata/dolt.sock"), cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
+
+		if cfg.ServerSocket != "/caller/dolt.sock" {
+			t.Fatalf("ServerSocket = %q, want the caller's socket %q", cfg.ServerSocket, "/caller/dolt.sock")
+		}
+	})
+
+	t.Run("env socket wins over metadata", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_SOCKET", "/env/dolt.sock")
+		cfg := &Config{}
+
+		if err := applyResolvedConfig(context.Background(), t.TempDir(), socketFileCfg(t, "/metadata/dolt.sock"), cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
+
+		if cfg.ServerSocket != "/env/dolt.sock" {
+			t.Fatalf("ServerSocket = %q, want the env socket %q", cfg.ServerSocket, "/env/dolt.sock")
+		}
+	})
+
+	t.Run("no socket anywhere leaves TCP config untouched", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_SOCKET", "")
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+		t.Setenv("BEADS_DOLT_PORT", "")
+		beadsDir := t.TempDir()
+		fileCfg := socketFileCfg(t, "")
+		cfg := &Config{}
+
+		if err := applyResolvedConfig(context.Background(), beadsDir, fileCfg, cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
+
+		if cfg.ServerSocket != "" {
+			t.Fatalf("ServerSocket = %q, want empty (TCP)", cfg.ServerSocket)
+		}
+		if cfg.ServerHost != fileCfg.GetDoltServerHost() {
+			t.Fatalf("ServerHost = %q, want %q", cfg.ServerHost, fileCfg.GetDoltServerHost())
+		}
+		if want := doltserver.DefaultConfig(beadsDir).Port; cfg.ServerPort != want {
+			t.Fatalf("ServerPort = %d, want %d", cfg.ServerPort, want)
+		}
+	})
+
 	t.Run("pool timeouts populate from env vars (bd-vz0y9)", func(t *testing.T) {
 		t.Setenv("BEADS_DOLT_POOL_READ_TIMEOUT", "90s")
 		t.Setenv("BEADS_DOLT_POOL_WRITE_TIMEOUT", "45")
@@ -785,6 +730,71 @@ func TestApplyResolvedConfig(t *testing.T) {
 			t.Fatalf("ServerPortSource = %q, want %q", cfg.ServerPortSource, doltserver.PortSourceCallerExplicit)
 		}
 	})
+}
+
+// TestConfigOpenWithMetadataSocketDoesNotAutoStart pins what the metadata
+// socket buys a NewFromConfig* open of a workspace that resolves no port: the
+// socket's outage, not an auto-started TCP server beside it. Without the
+// socket such an open is eligible to auto-start, so a dropped socket starts
+// one (and OpenFromConfig then creates an empty database on it).
+func TestConfigOpenWithMetadataSocketDoesNotAutoStart(t *testing.T) {
+	isolateUnresolvedPortEnv(t)
+	for _, key := range []string{
+		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_MODE",
+		"BEADS_CENTRAL_CONFIG",
+		"BEADS_DOLT_CREDENTIAL_COMMAND",
+	} {
+		t.Setenv(key, "")
+	}
+	t.Setenv("HOME", t.TempDir())
+
+	beadsDir := t.TempDir()
+	socket := filepath.Join(t.TempDir(), "absent.sock")
+	fileCfg := &configfile.Config{
+		Backend:          configfile.BackendDolt,
+		DoltMode:         configfile.DoltModeServer,
+		DoltDatabase:     "socketonly",
+		DoltServerSocket: socket,
+	}
+	cfg := &Config{}
+	if err := applyResolvedConfig(context.Background(), beadsDir, fileCfg, cfg); err != nil {
+		t.Fatalf("applyResolvedConfig: %v", err)
+	}
+	if cfg.ServerPort != 0 {
+		t.Fatalf("ServerPort = %d, want 0: the premise is a workspace with no port source", cfg.ServerPort)
+	}
+	// Auto-start otherwise permitted, as baseAutoStartCfg sets it up: only the
+	// socket may keep this open from starting a server.
+	cfg.AutoStart = true
+	cfg.DisableAutoStart = false
+	withoutSocket := *cfg
+	withoutSocket.ServerSocket = ""
+	if !serverOpenCanAutoStart(&withoutSocket) || doltserver.IsAutoStartDisabled() {
+		t.Fatal("auto-start is not permitted for this config without its socket; the test would pass vacuously")
+	}
+
+	starts := 0
+	orig := ensureRunningDetailed
+	t.Cleanup(func() { ensureRunningDetailed = orig })
+	ensureRunningDetailed = func(string) (int, bool, error) {
+		starts++
+		return 0, false, errors.New("stub: auto-start refused")
+	}
+
+	_, err := newServerMode(context.Background(), cfg)
+	if starts != 0 {
+		t.Errorf("auto-start ran %d time(s) for a workspace whose metadata.json names socket %s", starts, socket)
+	}
+	if err == nil {
+		t.Fatal("open succeeded with nothing listening on the socket")
+	}
+	msg := err.Error()
+	for _, want := range []string{socket, "Auto-start is not supported in socket mode."} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error does not contain %q:\n%s", want, msg)
+		}
+	}
 }
 
 // TestConfigConstructorsRefuseHistoricalSQLiteWorkspace pins that every

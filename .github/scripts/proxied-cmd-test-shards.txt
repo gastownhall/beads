@@ -104,7 +104,7 @@
 34 10 TestProxiedServerContext
 34 10 TestProxiedServerCreate2B
 34 10 TestProxiedServerGateCheckB
-34 10 TestProxiedServerImageRoutesAgreeOnOneDataset
+34 10 TestProxiedServerServeDeleteIfRevisionSingleWinner
 34 10 TestProxiedServerServeRefusesAStreamOnADisabledJournal
 34 10 TestProxiedServerTypes
 34 10 TestProxiedServerUpdate2C
@@ -112,7 +112,6 @@
 34 11 TestProxiedServerBatchParity
 34 11 TestProxiedServerCompactHistory
 34 11 TestProxiedServerCompactKeepsPendingWrite
-34 11 TestProxiedServerImageAutoBackupWritesNothing
 34 11 TestProxiedServerPour
 34 11 TestProxiedServerQuery
 34 11 TestProxiedServerReady
@@ -144,6 +143,7 @@
 34 14 TestProxiedServerMolReadyGated
 
 34 15 TestProxiedServerDepConcurrent
+34 15 TestProxiedServerImageRoutesAgreeOnOneDataset
 34 15 TestProxiedServerImport
 34 15 TestProxiedServerMoleculeFrontDoorWriteParity
 34 15 TestProxiedServerReopenConcurrent
@@ -164,7 +164,7 @@
 34 17 TestProxiedServerPrime
 34 17 TestProxiedServerSQLDatabaseFlag
 34 17 TestProxiedServerServeModeGate
-34 17 TestServerModeServeIgnoresGraphModeDependency
+34 17 TestProxiedServerTemplateGuardAcrossWriteVerbs
 
 34 18 TestProxiedServerClose3
 34 18 TestProxiedServerCount
@@ -180,6 +180,7 @@
 34 19 TestServerModeTypesAgreeWithCreate
 
 34 20 TestProxiedServerDelete
+34 20 TestProxiedServerImageStartupWritesNothing
 34 20 TestProxiedServerLint
 34 20 TestProxiedServerPriority
 34 20 TestProxiedServerShow2B
@@ -277,7 +278,7 @@
 34 32 TestProxiedServerCleanDatabasesPurgeDropped
 34 32 TestProxiedServerConfigConcurrent
 34 32 TestProxiedServerDepB
-34 32 TestProxiedServerImageStartupWritesNothing
+34 32 TestProxiedServerImageAutoBackupWritesNothing
 34 32 TestProxiedServerServeStreamsTheJournalItIsWriting
 34 32 TestProxiedServerServeUpdateClaim
 34 32 TestProxiedServerStorageClass

@@ -1,0 +1,8 @@
+{
+  "shape": "mc-update-meta-status",
+  "requests": [
+    {"method":"GET","operation_id":"getContext","path":"/v0/beads/context","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-t-ms","status":200},
+    {"method":"PATCH","operation_id":"updateIssue","path":"/v0/beads/issues/e2e-t-ms","body":["actor","patch"],"status":200}
+  ]
+}
