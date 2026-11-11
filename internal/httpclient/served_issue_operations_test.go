@@ -6,9 +6,11 @@
 package httpclient
 
 import (
+	"context"
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // The Lifecycle PERSISTENCE-SEAM contracts, run through client → in-process bd
@@ -120,7 +122,7 @@ func TestServedIssueOperationsCreateWithDependenciesSettlesInTheCreatingTransact
 	conformance.RunIssueOperationsCreateWithDependenciesSettlesInTheCreatingTransaction(t, t.Context(), newServedIssueOperationsFixture(t, "hio4"))
 }
 
-// The two STAGING cases, which are the only ones in this package that read
+// The two create STAGING cases, which like the reopen case below read
 // `AS OF 'HEAD'`. They dirty an unrelated durable row in the working set, then
 // create, then ask what the create's own commit swept in — and over this wire
 // the commit is entirely the server's, made in a process that never saw the
@@ -134,6 +136,33 @@ func TestServedIssueOperationsCreateReverseNonBlockingStagesConcreteTables(t *te
 
 func TestServedIssueOperationsCreateParentChildRecomputesWaitsForClosure(t *testing.T) {
 	conformance.RunIssueOperationsCreateParentChildRecomputesWaitsForClosure(t, t.Context(), newServedIssueOperationsFixture(t, "hio6"))
+}
+
+// TestServedReopenCommentIsCommittedWithTheReopen is the reopen's staging case
+// (GH#5593). The client sends a reasoned reopen, and the commit the server makes
+// for it has to carry the reason comment together with the status: HEAD shows
+// both, and no comments change is left in the working set for the next commit
+// to sweep up. The seeds, their commit and the reads all go through the
+// reference store, so the request is the only part the client plays.
+func TestServedReopenCommentIsCommittedWithTheReopen(t *testing.T) {
+	env := newServedEnv(t, "hrcm")
+	lifecycle, err := env.subject.IssueLifecycle()
+	if err != nil {
+		t.Fatalf("IssueLifecycle(): %v", err)
+	}
+	conformance.RunReopenCommentIsCommittedWithTheReopen(t, t.Context(), conformance.ReopenCommentCommitFixture{
+		IssuePrefix: env.prefix,
+		CreateIssue: env.createIssue,
+		CloseIssue:  env.reference.CloseIssue,
+		Commit:      env.commitMessage,
+		QueryScalar: env.queryScalar,
+		Routes: map[string]func(ctx context.Context, id, reason, actor string) error{
+			"served lifecycle Reopen": func(ctx context.Context, id, reason, actor string) error {
+				_, err := lifecycle.Reopen(ctx, issueops.ReopenRequest{Actor: actor, IssueID: id, Reason: reason})
+				return err
+			},
+		},
+	})
 }
 
 // ── The update half ─────────────────────────────────────────────────────────

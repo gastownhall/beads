@@ -1226,6 +1226,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd reopen --reason` now adds the reason as a comment on the issue,
+  authored by the reopening actor, so `bd comments`, `bd show` and `bd export`
+  show it (GH#5593). bd echoed the reason, then kept it only on the reopened
+  audit event in the clone-local event log, which none of those read and
+  which never syncs. The comment commits together with the reopen on every
+  route. The reason is still kept on the reopened event
+  (`bd history <id> --events`). Plain `bd history` now prints each snapshot's
+  close reason, which a reopen clears from the live issue.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -18,6 +19,10 @@ type ReopenResult struct {
 	// IssueRowsChanged is the concrete SQL fact that at least one issues row
 	// changed in this transaction, either the reopened row or a recomputed row.
 	IssueRowsChanged bool
+	// CommentTable names the table the reopen reason comment was written to
+	// ("comments" or "wisp_comments"); empty when the reopen wrote none.
+	// Callers that stage only the tables they changed must include it.
+	CommentTable string
 }
 
 // ReopenIssueInTx reopens only statuses in the done category. It leaves all
@@ -105,9 +110,18 @@ func reopenIssueInTx(ctx context.Context, tx DBTX, id, reason, actor string, ret
 		return nil, fmt.Errorf("record reopen event: %w", err)
 	}
 
-	if reason != "" {
-		if err := AddCommentEventInTx(ctx, tx, id, actor, reason); err != nil {
+	// GH#5593: the reason goes on the issue's comment thread, a versioned
+	// table every read surface shows (bd comments, bd show, export). The
+	// reopened event above is clone-local audit, so it cannot be the only
+	// durable copy.
+	var commentTable string
+	if strings.TrimSpace(reason) != "" {
+		if _, err := addIssueCommentInTx(ctx, tx, id, actor, reason, now.Truncate(time.Second), true); err != nil {
 			return nil, fmt.Errorf("add reopen comment: %w", err)
+		}
+		commentTable = "comments"
+		if isWisp {
+			commentTable = "wisp_comments"
 		}
 	}
 
@@ -131,5 +145,6 @@ func reopenIssueInTx(ctx context.Context, tx DBTX, id, reason, actor string, ret
 		IsWisp:           isWisp,
 		Changed:          true,
 		IssueRowsChanged: !isWisp || recompute.IssueRowsChanged,
+		CommentTable:     commentTable,
 	}, nil
 }

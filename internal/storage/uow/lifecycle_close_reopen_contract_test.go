@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // TestLifecycleCloseReopenContract runs the Close/Reopen half of the Lifecycle
@@ -127,4 +128,40 @@ func newUOWLifecycleCloseReopenFixture(t *testing.T, ctx context.Context, prefix
 			})
 		},
 	}
+}
+
+// TestReopenCommentIsCommittedWithTheReopen runs the GH#5593 staging contract
+// on the unit-of-work leg, through the Lifecycle role's Reopen. Every unit of
+// work makes its own Dolt commit, so the seeds are already in HEAD when
+// CreateIssue and CloseIssue return and Commit has nothing left to publish;
+// what the case pins is that the reopen's own commit carries its reason
+// comment.
+func TestReopenCommentIsCommittedWithTheReopen(t *testing.T) {
+	ctx := context.Background()
+	provider := newUOWRoleFixtureProvider(t, ctx, "rcm")
+	source, ok := provider.(IssueLifecycleSource)
+	if !ok {
+		t.Fatalf("provider %T does not offer the IssueLifecycle accessor", provider)
+	}
+	lifecycle, err := source.IssueLifecycle()
+	if err != nil {
+		t.Fatalf("IssueLifecycle(): %v", err)
+	}
+	kit := newUOWRoleFixtureKit(provider, "rcm")
+	conformance.RunReopenCommentIsCommittedWithTheReopen(t, ctx, conformance.ReopenCommentCommitFixture{
+		IssuePrefix: kit.IssuePrefix,
+		CreateIssue: kit.CreateIssue,
+		CloseIssue: func(ctx context.Context, id, reason, actor, session string) error {
+			_, err := lifecycle.Close(ctx, publicops.CloseRequest{Actor: actor, IssueID: id, Reason: reason, Session: session})
+			return err
+		},
+		Commit:      func(context.Context, string) error { return nil },
+		QueryScalar: kit.QueryScalar,
+		Routes: map[string]func(ctx context.Context, id, reason, actor string) error{
+			"lifecycle Reopen": func(ctx context.Context, id, reason, actor string) error {
+				_, err := lifecycle.Reopen(ctx, publicops.ReopenRequest{Actor: actor, IssueID: id, Reason: reason})
+				return err
+			},
+		},
+	})
 }

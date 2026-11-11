@@ -118,6 +118,12 @@ func runHistory(ctx context.Context, backend historyBackend, issueID string, lim
 				entry.Issue.Title,
 				entry.Issue.Priority,
 				entry.Issue.Status)
+			// GH#5593: reopening clears the current close fields, so the
+			// retained committed snapshots are where a close reason
+			// survives. Say it in the snapshot that still holds it.
+			if entry.Issue.CloseReason != "" {
+				fmt.Printf("  Close reason: %s\n", entry.Issue.CloseReason)
+			}
 		}
 
 		if i < len(history)-1 {

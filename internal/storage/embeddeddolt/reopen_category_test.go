@@ -59,11 +59,18 @@ func TestEmbeddedReopenIssueCategorySemantics(t *testing.T) {
 				statusChanged++
 			}
 		}
-		if reopened != 1 || commented != 1 || statusChanged != 0 {
+		if reopened != 1 || commented != 0 || statusChanged != 0 {
 			t.Fatalf(
-				"reopen events for %s = reopened:%d commented:%d status_changed:%d, want 1, 1, 0",
+				"reopen events for %s = reopened:%d commented:%d status_changed:%d, want 1, 0, 0",
 				id, reopened, commented, statusChanged,
 			)
+		}
+		comments, err := te.store.GetIssueComments(ctx, id)
+		if err != nil {
+			t.Fatalf("GetIssueComments(%s): %v", id, err)
+		}
+		if len(comments) != 1 || comments[0].Author != "tester" || comments[0].Text != "needs work" {
+			t.Fatalf("reopen comments for %s = %+v, want one by tester reading %q", id, comments, "needs work")
 		}
 	}
 

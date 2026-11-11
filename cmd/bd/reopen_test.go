@@ -53,12 +53,6 @@ func (h *reopenTestHelper) getIssue(issueID string) *types.Issue {
 	return issue
 }
 
-func (h *reopenTestHelper) addComment(issueID, comment string) {
-	if err := h.s.AddComment(h.ctx, issueID, "test-user", comment); err != nil {
-		h.t.Fatalf("Failed to add comment: %v", err)
-	}
-}
-
 func (h *reopenTestHelper) assertStatus(issueID string, expected types.Status) {
 	issue := h.getIssue(issueID)
 	if issue.Status != expected {
@@ -78,20 +72,6 @@ func (h *reopenTestHelper) assertClosedAtNil(issueID string) {
 	if issue.ClosedAt != nil {
 		h.t.Errorf("Expected ClosedAt to be nil, got %v", issue.ClosedAt)
 	}
-}
-
-func (h *reopenTestHelper) assertCommentEvent(issueID, comment string) {
-	events, err := h.s.GetEvents(h.ctx, issueID, 100)
-	if err != nil {
-		h.t.Fatalf("Failed to get events: %v", err)
-	}
-
-	for _, e := range events {
-		if e.EventType == types.EventCommented && e.Comment != nil && *e.Comment == comment {
-			return
-		}
-	}
-	h.t.Errorf("Expected to find comment event with reason '%s'", comment)
 }
 
 func TestReopenCommand(t *testing.T) {
@@ -121,10 +101,21 @@ func TestReopenCommand(t *testing.T) {
 	t.Run("reopen with reason adds comment", func(t *testing.T) {
 		issue := h.createIssue("Test Issue 2", types.TypeTask, 1)
 		h.closeIssue(issue.ID, "Done")
-		h.reopenIssue(issue.ID)
 		reason := "Found a regression"
-		h.addComment(issue.ID, reason)
-		h.assertCommentEvent(issue.ID, reason)
+		if err := h.s.ReopenIssue(h.ctx, issue.ID, reason, "test-user"); err != nil {
+			h.t.Fatalf("Failed to reopen issue: %v", err)
+		}
+		comments, err := h.s.GetIssueComments(h.ctx, issue.ID)
+		if err != nil {
+			h.t.Fatalf("Failed to get comments: %v", err)
+		}
+		if len(comments) != 1 {
+			h.t.Fatalf("Expected exactly 1 comment after a reasoned reopen, got %d", len(comments))
+		}
+		if comments[0].Text != reason || comments[0].Author != "test-user" {
+			h.t.Errorf("Reopen comment = {author: %q, text: %q}, want {author: %q, text: %q}",
+				comments[0].Author, comments[0].Text, "test-user", reason)
+		}
 	})
 
 	t.Run("reopen multiple issues", func(t *testing.T) {

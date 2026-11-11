@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -223,4 +224,76 @@ func TestEmbeddedReopenConcurrent(t *testing.T) {
 			t.Errorf("expected %s to be open after reopen, got %s", id, got.Status)
 		}
 	}
+}
+
+// TestEmbeddedReopenReasonIsReadable pins GH#5593: `bd reopen --reason` must
+// leave the reason on the issue's comment thread, written by the reopening
+// actor, where every read surface shows it: `bd comments`, `bd show` and
+// `bd export`. Before the fix the reason was echoed and then only kept as a
+// clone-local audit event none of them read.
+func TestEmbeddedReopenReasonIsReadable(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "rr")
+
+	const reason = "REOPEN_REASON_MARKER"
+	issue := bdCreate(t, bd, dir, "probe issue", "--type", "task")
+	bdClose(t, bd, dir, issue.ID, "--reason", "CLOSE_REASON_MARKER")
+	out := bdReopen(t, bd, dir, issue.ID, "--reason", reason, "--actor", "alice")
+	if !strings.Contains(out, reason) {
+		t.Fatalf("reopen did not echo the reason: %s", out)
+	}
+
+	assertOneReasonComment := func(surface string, comments []*types.Comment) {
+		t.Helper()
+		var matching int
+		for _, c := range comments {
+			if c.Text == reason {
+				matching++
+				if c.Author != "alice" {
+					t.Errorf("%s: reopen comment author = %q, want alice", surface, c.Author)
+				}
+			}
+		}
+		if matching != 1 {
+			t.Errorf("%s: %d comments read %q, want exactly 1; comments = %+v", surface, matching, reason, comments)
+		}
+	}
+
+	raw := bdComments(t, bd, dir, issue.ID, "--json")
+	start := strings.Index(raw, "[")
+	if start < 0 {
+		t.Fatalf("no JSON array in `bd comments %s --json`:\n%s", issue.ID, raw)
+	}
+	var comments []*types.Comment
+	if err := json.Unmarshal([]byte(raw[start:]), &comments); err != nil {
+		t.Fatalf("parse `bd comments --json`: %v\n%s", err, raw)
+	}
+	assertOneReasonComment("bd comments", comments)
+
+	// bd show --json is count-only by default; the thread needs --include-comments.
+	shown := parseIssueJSON(t, []byte(bdShowRaw(t, bd, dir, issue.ID, "--json", "--include-comments")))
+	assertOneReasonComment("bd show", shown.Comments)
+
+	var exported *types.Issue
+	for _, line := range strings.Split(bdExport(t, bd, dir), "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "{") {
+			continue
+		}
+		var candidate types.Issue
+		if err := json.Unmarshal([]byte(line), &candidate); err != nil {
+			continue
+		}
+		if candidate.ID == issue.ID {
+			exported = &candidate
+		}
+	}
+	if exported == nil {
+		t.Fatalf("bd export did not include %s", issue.ID)
+	}
+	assertOneReasonComment("bd export", exported.Comments)
 }

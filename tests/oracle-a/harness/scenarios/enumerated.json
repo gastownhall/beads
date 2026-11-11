@@ -13579,7 +13579,7 @@
     "--json"
    ]
   ],
-  "pins": "reopen.go reason -> ReopenIssue; reopen.go:68-72 adds comment event when reason!=''; non-json prints '↻ Reopened ror-1: regression found'.",
+  "pins": "reopen.go reason -> ReopenIssue; a nonblank reason is added as a structured comment by the reopening actor (GH#5593: before, only an audit commented event no read surface showed), so the show step's comment_count is 1 where the pre-fix reference reports 0 (intentional divergence); the reopened audit event still carries the reason; non-json prints '↻ Reopened ror-1: regression found'.",
   "deterministic": true
  },
  {
