@@ -1523,6 +1523,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before it checks the rest for dependents, and a dry run, which deletes
   nothing, counted those children as dependents left outside the request
   and refused. The embedded store was already right.
+- bd no longer publishes Dolt's `refs/heads/__dolt_remote_info__` branch on
+  git-hosted remotes, which by default are your code remote (GH#6484). Every
+  push, fetch, pull and clone bd runs, and every `dolt sql-server` bd starts,
+  sets `DOLT_REMOTE_INFO_BRANCH` to empty unless you set it yourself; set it
+  to a branch name to publish the branch again. A sql-server bd does not
+  start needs the variable in its own environment. Leftover-branch cleanup is
+  in [Git Integration](docs/reference/git-integration.md#the-__dolt_remote_info__-branch),
+  and the history-squash data-plane reset no longer fails when the branch is
+  absent.
 - A server-mode open from a `dolt.Config` that sets only `Path` (no
   `BeadsDir`), such as the public `beads.Open`, now runs the project-identity
   check against the `.beads` directory above `Path`, and refuses a database

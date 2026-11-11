@@ -16,6 +16,7 @@ import (
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
+	"github.com/steveyegge/beads/internal/doltinfoenv"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/testutil"
@@ -168,6 +169,56 @@ func TestPrepareDoltCLITransferCommandAppliesCredentialsAndS3Env(t *testing.T) {
 	}
 	if gotUser != "user" || gotPassword != "pass" {
 		t.Fatalf("credential env = user:%q password:%q", gotUser, gotPassword)
+	}
+}
+
+// TestPrepareDoltCLITransferCommandDisablesDoltRemoteInfoBranch covers every
+// CLI push, pull and fetch: with no DOLT_REMOTE_INFO_BRANCH of the user's, the
+// dolt child gets it empty so it never publishes __dolt_remote_info__
+// (GH#6484), and applyNoGitHooksToCmd, which some push callers run after,
+// keeps it.
+func TestPrepareDoltCLITransferCommandDisablesDoltRemoteInfoBranch(t *testing.T) {
+	withNoDoltOnPath(t)
+	t.Setenv(doltinfoenv.EnvVar, "") // restored after the test
+	if err := os.Unsetenv(doltinfoenv.EnvVar); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd, _, cancel, err := prepareDoltCLITransferCommand(context.Background(), t.TempDir(),
+		&remoteCredentials{username: "user", password: "pass"}, true, "push", "origin", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+
+	want := []string{doltinfoenv.EnvVar + "="}
+	if got := doltInfoBranchEntries(cmd.Env); !slices.Equal(got, want) {
+		t.Errorf("prepareDoltCLITransferCommand() %s entries = %q, want %q", doltinfoenv.EnvVar, got, want)
+	}
+	applyNoGitHooksToCmd(cmd)
+	if got := doltInfoBranchEntries(cmd.Env); !slices.Equal(got, want) {
+		t.Errorf("after applyNoGitHooksToCmd, %s entries = %q, want %q", doltinfoenv.EnvVar, got, want)
+	}
+}
+
+// TestPrepareDoltCLITransferCommandKeepsUserDoltRemoteInfoBranch: a DOLT_REMOTE_INFO_BRANCH the user set (a branch name to opt in,
+// or empty) reaches the child unchanged as its only entry (GH#6484).
+func TestPrepareDoltCLITransferCommandKeepsUserDoltRemoteInfoBranch(t *testing.T) {
+	for _, value := range []string{"dolt-info", ""} {
+		t.Run("value="+value, func(t *testing.T) {
+			t.Setenv(doltinfoenv.EnvVar, value)
+			withNoDoltOnPath(t)
+			cmd, _, cancel, err := prepareDoltCLITransferCommand(context.Background(), t.TempDir(), nil, false, "fetch", "origin")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cancel()
+			applyNoGitHooksToCmd(cmd)
+			env := cmd.Env
+			if got, want := doltInfoBranchEntries(env), []string{doltinfoenv.EnvVar + "=" + value}; !slices.Equal(got, want) {
+				t.Errorf("prepareDoltCLITransferCommand() + applyNoGitHooksToCmd %s entries = %q, want %q", doltinfoenv.EnvVar, got, want)
+			}
+		})
 	}
 }
 

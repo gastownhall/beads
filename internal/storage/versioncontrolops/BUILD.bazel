@@ -25,6 +25,7 @@ go_library(
     importpath = "github.com/steveyegge/beads/internal/storage/versioncontrolops",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/doltinfoenv",
         "//internal/githooksenv",
         "//internal/gittraceenv",
         "//internal/storage",
@@ -50,10 +51,12 @@ go_test(
         "mergesettle_draincall_regression_test.go",
         "remotes_githooks_test.go",
         "remotes_gittrace_test.go",
+        "remotes_infobranch_test.go",
         "remotes_test.go",
     ],
     embed = [":versioncontrolops"],
     deps = [
+        "//internal/doltinfoenv",
         "//internal/githooksenv",
         "//internal/testutil",
         "@com_github_data_dog_go_sqlmock//:go-sqlmock",
