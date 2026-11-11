@@ -252,50 +252,140 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 	}{
 		{
 			name:     "ordinary command",
-			snapshot: "  101 S /usr/local/bin/dolt sql-server --port 3306\n",
+			snapshot: "S  101 /usr/local/bin/dolt sql-server --port 3306\n",
 			want:     []int{101},
 		},
 		{
 			name:     "profiled command",
-			snapshot: "102 Sl dolt --prof cpu --prof-path /tmp/dolt-pprof sql-server\n",
+			snapshot: "Sl 102 dolt --prof cpu --prof-path /tmp/dolt-pprof sql-server\n",
 			want:     []int{102},
 		},
 		{
 			name:     "ordered loose false positive",
-			snapshot: "103 S some-tool says dolt then sql-server\n",
+			snapshot: "S 103 some-tool says dolt then sql-server\n",
 			want:     []int{103},
 		},
 		{
 			name:     "sql server before dolt is rejected",
-			snapshot: "104 S sql-server then dolt\n",
+			snapshot: "S 104 sql-server then dolt\n",
 		},
 		{
 			name:     "case sensitive command matching",
-			snapshot: "105 S Dolt sql-server\n106 S dolt SQL-SERVER\n",
+			snapshot: "S 105 Dolt sql-server\nS 106 dolt SQL-SERVER\n",
 		},
 		{
-			name:     "zombie and dead states including modifiers are rejected",
-			snapshot: "107 Z dolt sql-server\n108 Z+ dolt sql-server\n109 X dolt sql-server\n110 X< dolt sql-server\n",
+			name:     "zombie states including modifiers are rejected",
+			snapshot: "Z 107 dolt sql-server\nZ+ 108 dolt sql-server\n",
+		},
+		{
+			// macOS 26 can leave the state code blank, so a live server
+			// under a debugger shows only its traced modifier X.
+			name:     "traced modifier X after a blank state keeps a live server",
+			snapshot: "X 109 dolt sql-server\nX+ 110 dolt sql-server\n",
+			want:     []int{109, 110},
 		},
 		{
 			name:     "valid state prefix with modifier is accepted",
-			snapshot: "111 S+ dolt sql-server\n",
+			snapshot: "S+ 111 dolt sql-server\n",
 			want:     []int{111},
 		},
 		{
 			name: "malformed and invalid rows are rejected",
 			snapshot: "\n" +
-				"not-a-pid S dolt sql-server\n" +
-				"0 S dolt sql-server\n" +
-				"-1 S dolt sql-server\n" +
+				"S not-a-pid dolt sql-server\n" +
+				"S 0 dolt sql-server\n" +
+				"S -1 dolt sql-server\n" +
 				"112\n" +
-				"113 S\n" +
-				"114\tdolt sql-server\n" +
-				"115 S \n",
+				"S 113\n" +
+				"S 115 \n",
+		},
+		{
+			// GH#7121: macOS 26 prints an empty state column for many
+			// processes; the path must not be consumed as the state.
+			name:     "blank state keeps the whole command",
+			snapshot: "      1466 /Users/u/.nix-profile/bin/dolt sql-server --config /Users/u/.beads/shared-server/dolt-server-config.yaml\n",
+			want:     []int{1466},
+		},
+		{
+			name:     "blank state separated by a tab",
+			snapshot: "114\tdolt sql-server\n",
+			want:     []int{114},
+		},
+		{
+			name:     "blank state with bare dolt and extra spaces",
+			snapshot: "  117   dolt   sql-server  \n",
+			want:     []int{117},
+		},
+		{
+			name:     "blank state command starting with a state-like word",
+			snapshot: "116 Z dolt sql-server\n",
+			want:     []int{116},
+		},
+		{
+			name:     "blank state profiled command",
+			snapshot: "123 dolt --prof cpu sql-server\n1469 /Users/u/.nix-profile/bin/dolt --prof cpu sql-server\n",
+			want:     []int{123, 1469},
+		},
+		{
+			name:     "blank state keeps ordered case sensitive matching",
+			snapshot: "121 sql-server then dolt\n122 Dolt sql-server\n124 dolt SQL-SERVER\n",
+		},
+		{
+			name:     "mixed populated and blank states",
+			snapshot: "Ss 301 dolt sql-server\n302 dolt sql-server\nZ 303 dolt sql-server\nS 304 dolt sql-server\n",
+			want:     []int{301, 302, 304},
+		},
+		{
+			name:     "running state with modifier is accepted",
+			snapshot: "R+ 118 dolt sql-server\n",
+			want:     []int{118},
+		},
+		{
+			name:     "linux tracing-stop state t keeps a live server",
+			snapshot: "t 401 dolt sql-server\ntl 402 dolt sql-server\n",
+			want:     []int{401, 402},
+		},
+		{
+			name:     "historical and freebsd primary states L and W keep a live server",
+			snapshot: "L 403 dolt sql-server\nW 404 dolt sql-server\nLs+ 405 dolt sql-server\n",
+			want:     []int{403, 404, 405},
+		},
+		{
+			name:     "freebsd capability and jail modifiers keep a live server",
+			snapshot: "SJ 406 dolt sql-server\nSC+ 407 dolt sql-server\nSs+CJ 408 dolt sql-server\n",
+			want:     []int{406, 407, 408},
+		},
+		{
+			name: "absolute executable path containing spaces is recognised",
+			snapshot: "S 409 /Users/John Smith/bin/dolt sql-server --config x.yaml\n" +
+				"S 410 /Users/u/Library/Application Support/tools/dolt sql-server\n" +
+				"Sl 411 /Users/John Smith/bin/dolt --prof cpu sql-server\n",
+			want: []int{409, 410, 411},
+		},
+		{
+			name: "blank state with spaced executable path",
+			snapshot: "412 /Users/John Smith/bin/dolt sql-server\n" +
+				"413 /Users/u/Library/Application Support/tools/dolt sql-server --port 3307\n",
+			want: []int{412, 413},
+		},
+		{
+			name: "zombie states are rejected for spaced executable path",
+			snapshot: "Z 415 /Users/John Smith/bin/dolt sql-server\n" +
+				"Z+ 416 /Users/u/Library/Application Support/tools/dolt sql-server\n",
+		},
+		{
+			name: "numeric-looking malformed fields are rejected",
+			snapshot: "+119 dolt sql-server\n" +
+				"-120 dolt sql-server\n" +
+				"1x2 dolt sql-server\n" +
+				"0 dolt sql-server\n" +
+				"99999999999999999999 dolt sql-server\n" +
+				"S 99999999999999999999 dolt sql-server\n" +
+				"S dolt sql-server\n",
 		},
 		{
 			name:     "preserves source order",
-			snapshot: "202 S dolt sql-server\n201 S dolt sql-server\n203 R dolt sql-server\n",
+			snapshot: "S 202 dolt sql-server\nS 201 dolt sql-server\nR 203 dolt sql-server\n",
 			want:     []int{202, 201, 203},
 		},
 	}
@@ -306,5 +396,82 @@ func TestParseDoltProcessPIDs(t *testing.T) {
 				t.Fatalf("parseDoltProcessPIDs() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestReadDoltProcessPIDsListsLiveServer runs the reader against the system
+// ps: ps must accept the requested columns, and the parser must find a live
+// process in what it prints. A shell blocked on stdin, with dolt and
+// sql-server in its arguments, stands in for a server. It keeps /bin/sh as
+// its argv[0] (busybox picks its applet by argv[0]), so its command starts
+// with /bin/sh: even under a blank state, a parser that took the field after
+// the PID as the state would still find it. Blank states are covered by the
+// GH#7121 rows in TestParseDoltProcessPIDs and
+// TestReadDoltProcessPIDsRequestsStateFirst.
+func TestReadDoltProcessPIDsListsLiveServer(t *testing.T) {
+	if _, err := exec.LookPath("ps"); err != nil {
+		t.Skip("ps not available")
+	}
+	cmd := exec.Command("/bin/sh", "-c", "read line", "dolt", "sql-server")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(exited)
+	}()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		<-exited
+	})
+
+	pids, err := readDoltProcessPIDs()
+	if err != nil {
+		t.Fatalf("readDoltProcessPIDs() error = %v", err)
+	}
+	for _, pid := range pids {
+		if pid == cmd.Process.Pid {
+			return
+		}
+	}
+	t.Fatalf("readDoltProcessPIDs() = %v, want it to include stand-in PID %d", pids, cmd.Process.Pid)
+}
+
+// TestReadDoltProcessPIDsRequestsStateFirst puts a fake ps on PATH that
+// answers only the state, pid, command column order. A reader that asked for
+// the PID first would still find the live stand-in above, with the state read
+// as part of the command and the zombie check skipped; here it fails.
+func TestReadDoltProcessPIDsRequestsStateFirst(t *testing.T) {
+	dir := t.TempDir()
+	fakePS := `#!/bin/sh
+if [ "$*" != '-ax -o state= -o pid= -o command=' ]; then
+	echo "unexpected ps arguments: $*" >&2
+	exit 2
+fi
+printf '%s\n' 'Z 301 dolt sql-server' \
+	'      1466 /Users/u/.nix-profile/bin/dolt sql-server --config /Users/u/.beads/shared-server/dolt-server-config.yaml' \
+	'Ss 303 dolt sql-server'
+`
+	if err := os.WriteFile(filepath.Join(dir, "ps"), []byte(fakePS), 0o700); err != nil { //nolint:gosec // G306: the fake must be executable
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+
+	pids, err := readDoltProcessPIDs()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			t.Fatalf("readDoltProcessPIDs() error = %v: %s", err, exitErr.Stderr)
+		}
+		t.Fatalf("readDoltProcessPIDs() error = %v", err)
+	}
+	if want := []int{1466, 303}; !reflect.DeepEqual(pids, want) {
+		t.Fatalf("readDoltProcessPIDs() = %v, want %v", pids, want)
 	}
 }
