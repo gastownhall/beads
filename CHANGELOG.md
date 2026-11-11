@@ -1226,6 +1226,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Server-mode circuit-breaker state is now private to each Unix user. It
+  moved from the host-shared `${TMPDIR:-/tmp}/beads-circuit/` to
+  `${TMPDIR:-/tmp}/beads-circuit-<uid>/` (created 0700, state files 0600),
+  so another local user's breaker files can no longer block this user's
+  breaker from persisting or trip it from outside (GH#4223). Processes of one
+  user still share breaker state; users on one host no longer do, and old
+  and new `bd` binaries keep separate state until the old ones are gone.
+  Windows keeps `%TEMP%\beads-circuit\`, which is already per user.
+  If the directory already exists as a symlink, a non-directory, another
+  user's directory or one writable by group or others, `bd` runs without a
+  breaker and logs one `[circuit-breaker] disabled:` warning per process
+  instead of reading or writing state through it.
+  The stale-state sweep still ages out files in the old shared directories,
+  but only in one that is a real directory you own and that group and others
+  cannot write. Any other one, such as a shared `/tmp/beads-circuit/` another
+  user created, is left unread. The sweep never creates the old directories,
+  follows a symlink to them, changes their permissions or migrates their
+  state. `bd doctor` checks the same per-user directory; over an unsafe one
+  it reports the breaker disabled without reading the directory, and
+  `bd doctor --fix` reports that repair skipped.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

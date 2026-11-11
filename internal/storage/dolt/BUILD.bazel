@@ -15,6 +15,8 @@ go_library(
         "bootstrap.go",
         "bootstrapper.go",
         "circuit.go",
+        "circuit_dir_other.go",
+        "circuit_dir_unix.go",
         "claim_verify.go",
         "commenter.go",
         "compact.go",
@@ -157,6 +159,7 @@ go_test(
         "bootstrapper_contract_test.go",
         "central_config_integration_test.go",
         "checked_wrapper_smoke_test.go",
+        "circuit_dir_unix_test.go",
         "circuit_test.go",
         "claim_commit_boundary_test.go",
         "claim_custom_status_test.go",
@@ -465,31 +468,38 @@ go_test(
         "@rules_go//go/platform:aix": [
             "//internal/testutil/integration",
             "@org_golang_x_sync//errgroup",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:android": [
             "//internal/testutil/bazeltest",
             "//internal/testutil/integration",
             "@org_golang_x_sync//errgroup",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:darwin": [
             "//internal/testutil/integration",
             "@org_golang_x_sync//errgroup",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:dragonfly": [
             "//internal/testutil/integration",
             "@org_golang_x_sync//errgroup",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:freebsd": [
             "//internal/testutil/integration",
             "@org_golang_x_sync//errgroup",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:illumos": [
             "//internal/testutil/integration",
             "@org_golang_x_sync//errgroup",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:ios": [
             "//internal/testutil/integration",
             "@org_golang_x_sync//errgroup",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:js": [
             "//internal/testutil/integration",
@@ -499,14 +509,17 @@ go_test(
             "//internal/testutil/bazeltest",
             "//internal/testutil/integration",
             "@org_golang_x_sync//errgroup",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:netbsd": [
             "//internal/testutil/integration",
             "@org_golang_x_sync//errgroup",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:openbsd": [
             "//internal/testutil/integration",
             "@org_golang_x_sync//errgroup",
+            "@org_golang_x_sys//unix",
         ],
         "@rules_go//go/platform:osx": [
             "//internal/testutil/integration",
@@ -523,6 +536,7 @@ go_test(
         "@rules_go//go/platform:solaris": [
             "//internal/testutil/integration",
             "@org_golang_x_sync//errgroup",
+            "@org_golang_x_sys//unix",
         ],
         "//conditions:default": [],
     }),

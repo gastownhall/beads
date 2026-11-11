@@ -46,23 +46,23 @@ const (
 
 	// closedSweepTTL is how long a CLOSED breaker file must sit unmodified
 	// before the sweep removes it, in the live directory and the legacy
-	// "/tmp/beads-circuit" one alike. Every host:port:db a process opens
-	// leaves a closed file behind, and ephemeral ports (test servers above
-	// all) mint a distinct name each time that nothing ever reuses, so
-	// without an age-out both directories only grow (GH#4636) — and the sweep
-	// reads every file on every run. A closed file nobody has written for
-	// this long is indistinguishable from no file: readState reads an absent
-	// file as closed, and a closed state's failure count only matters inside
-	// circuitFailureWindow. A breaker in use is rewritten on every successful
-	// open, so its mtime stays fresh and it is never swept.
+	// shared ones alike (see legacyCircuitBreakerDirs). Every host:port:db a
+	// process opens leaves a closed file behind, and ephemeral ports (test
+	// servers above all) mint a distinct name each time that nothing ever
+	// reuses, so without an age-out every one of these directories only grows
+	// (GH#4636) — and the sweep reads every file on every run. A closed file
+	// nobody has written for this long is indistinguishable from no file:
+	// readState reads an absent file as closed, and a closed state's failure
+	// count only matters inside circuitFailureWindow. A breaker in use is
+	// rewritten on every successful open, so its mtime stays fresh and it is
+	// never swept.
 	//
-	// The age-out is by mtime, never unconditional: the legacy directory is
-	// not abandoned wherever os.TempDir() still resolves to /tmp — any
-	// TMPDIR-less process (launchd, cron, a bare ssh command) uses it as its
-	// LIVE directory — and an unconditional remove fought those writers
-	// forever: recreate, delete, log, on every alternation of TMPDIR-set and
-	// TMPDIR-less invocations. Generous on purpose: a writer that runs even
-	// once a day keeps its state.
+	// The age-out is by mtime, never unconditional: the legacy directories are
+	// still LIVE for older bd binaries, which keep their state there (their
+	// TMPDIR-less processes — launchd, cron, a bare ssh command — in
+	// /tmp/beads-circuit), and an unconditional remove fought such writers
+	// forever: recreate, delete, log, on every run. Generous on purpose: a
+	// writer that runs even once a day keeps its state.
 	closedSweepTTL = 24 * time.Hour
 )
 
@@ -112,9 +112,10 @@ func maybeNewCircuitBreaker(host string, port int, database string) *circuitBrea
 // contain millions of entries) when cleaning up stale breaker files on
 // startup. Derived from os.TempDir() so it is correct on every platform:
 // hardcoding "/tmp" resolved to C:\tmp on Windows, silently accumulating
-// breaker files there forever (GH#4636).
+// breaker files there forever (GH#4636). The directory is private to the
+// current user (see circuitBreakerDirName, GH#4223), so it is created 0700.
 func circuitBreakerDir() string {
-	return filepath.Join(os.TempDir(), "beads-circuit")
+	return filepath.Join(os.TempDir(), circuitBreakerDirName())
 }
 
 const (
@@ -132,9 +133,71 @@ func circuitBreakerPaths() (dir, legacyFile string) {
 	return circuitBreakerDir(), legacyCircuitBreakerFile
 }
 
+// unsafeCircuitDirWarned holds the unsafe live directories this process has
+// already warned about: a process opens stores more than once, and one
+// warning per path says all there is to say.
+var unsafeCircuitDirWarned sync.Map
+
+// ensureCircuitBreakerDir creates the live directory (0700) when it is absent
+// and reports whether breaker state may be kept in it. An existing path that
+// is a symlink, not a directory, or (on Unix) another user's or writable by
+// others could be another local user's plant: its state would gate this
+// user's dial and its entries could redirect the state write (GH#4223). It
+// is never repaired in place, which would keep whatever was planted in it;
+// the breaker is disabled instead, with one warning per path. A directory
+// that cannot be created at all disables the breaker silently, like any
+// other breaker I/O failure. Both fail open: the server is dialed.
+func ensureCircuitBreakerDir(dir string) bool {
+	_ = os.MkdirAll(dir, 0o700)
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return false
+	}
+	problem := circuitDirProblem(info)
+	if problem == "" {
+		return true
+	}
+	if _, warned := unsafeCircuitDirWarned.LoadOrStore(dir, struct{}{}); !warned {
+		log.Printf("[circuit-breaker] disabled: %s %s; have its owner remove it, or point TMPDIR at a directory only you can write", dir, problem)
+	}
+	return false
+}
+
+// circuitDirProblem reports why the Lstat result of a breaker directory, live
+// or legacy, makes it unsafe to keep or read breaker state in, or "" when it
+// is safe.
+func circuitDirProblem(info os.FileInfo) string {
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "is a symlink"
+	}
+	if !info.IsDir() {
+		return "is not a directory"
+	}
+	return circuitDirOwnershipProblem(info)
+}
+
+// CircuitBreakerStateDirProblem returns the directory circuit breaker state
+// files are written to, honoring the BEADS_TEST_CIRCUIT_DIR test override, and
+// why the breaker refuses to keep state in it (see ensureCircuitBreakerDir).
+// The problem is "" when the directory is safe or cannot be stat-ed (absent,
+// above all); it is never created here. cmd/bd/doctor reads it so diagnosis
+// follows the same per-user location the storage layer writes (GH#4223), and
+// reports a breaker disabled over an unsafe directory without reading any of
+// its entries.
+func CircuitBreakerStateDirProblem() (dir, problem string) {
+	dir, _ = circuitBreakerPaths()
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return dir, ""
+	}
+	return dir, circuitDirProblem(info)
+}
+
 // newCircuitBreaker creates a circuit breaker for the given Dolt server
 // host:port:database. The database name is included in the file path so each
 // project gets independent circuit breaker state on shared servers (GH#3140).
+// It returns nil, which callers treat as no breaker, when the live directory
+// is unavailable or unsafe (see ensureCircuitBreakerDir).
 func newCircuitBreaker(host string, port int, database string) *circuitBreaker {
 	// Sanitize host and database for use in filename
 	sanitize := strings.NewReplacer(".", "-", ":", "-", "/", "-")
@@ -153,7 +216,9 @@ func newCircuitBreaker(host string, port int, database string) *circuitBreaker {
 	}
 
 	dir, _ := circuitBreakerPaths()
-	_ = os.MkdirAll(dir, 0755)
+	if !ensureCircuitBreakerDir(dir) {
+		return nil
+	}
 	return &circuitBreaker{
 		host:     host,
 		port:     port,
@@ -402,9 +467,9 @@ func (cb *circuitBreaker) writeState(state circuitState) {
 //   - Closed-state files no writer has modified in closedSweepTTL
 //   - Corrupt files that do not parse as breaker state
 //
-// The same rules apply in the live directory and the legacy
-// "/tmp/beads-circuit" one; setting BEADS_TEST_CIRCUIT_DIR (tests) skips the
-// legacy directory.
+// The same rules apply in the live directory and in each legacy shared one
+// that is safe to read (see sweepCircuitBreakerDirs); setting
+// BEADS_TEST_CIRCUIT_DIR (tests) skips the legacy directories.
 //
 // Called during init to ensure a clean starting state (GH#2598). Store open
 // reaches it at most once per process, through
@@ -423,23 +488,60 @@ func CleanStaleCircuitBreakerFiles() {
 		_ = os.Remove(filepath.Join("/tmp", "beads-dolt-circuit-0.json"))
 	}
 
-	// Clean stale files in the dedicated subdirectory: open/half-open state
-	// past circuitStaleTTL, and closed files no writer has touched in
-	// closedSweepTTL. A recently written closed file is a breaker some
-	// process is using and is left alone.
-	_ = os.MkdirAll(dir, 0755)
-	cleanStaleCircuitBreakerFilesIn(dir)
-
-	// Also sweep the legacy hardcoded "/tmp/beads-circuit" location
-	// (C:\tmp\beads-circuit on Windows) where older builds accumulated files
-	// before the os.TempDir() fix (GH#4636), by the same rules: any
-	// TMPDIR-less process (launchd, cron, a bare ssh command) still resolves
-	// os.TempDir() to /tmp and uses it as its live directory, so its closed
-	// files age out by mtime here too (see closedSweepTTL).
+	// The test override isolates the sweep from every legacy directory.
+	var legacyDirs []string
 	if os.Getenv(testCircuitBreakerDirEnv) == "" {
-		if legacy := filepath.Join("/tmp", "beads-circuit"); legacy != dir {
-			cleanStaleCircuitBreakerFilesIn(legacy)
+		legacyDirs = legacyCircuitBreakerDirs()
+	}
+	sweepCircuitBreakerDirs(dir, legacyDirs)
+}
+
+// legacyCircuitBreakerDirs returns the shared directories older builds kept
+// breaker state in: the unsuffixed one under the current temp root, live
+// before the per-user directory (GH#4223), and the hardcoded
+// "/tmp/beads-circuit" (C:\tmp\beads-circuit on Windows) from before the
+// os.TempDir() fix (GH#4636). Old binaries still write to both, so their
+// closed files age out by mtime there too (see closedSweepTTL).
+func legacyCircuitBreakerDirs() []string {
+	return []string{
+		filepath.Join(os.TempDir(), "beads-circuit"),
+		filepath.Join("/tmp", "beads-circuit"),
+	}
+}
+
+// sweepCircuitBreakerDirs is the testable body of
+// CleanStaleCircuitBreakerFiles: it sweeps the live directory, once it passes
+// ensureCircuitBreakerDir (no breaker uses an unsafe one), and then each
+// legacy directory that passes the same circuitDirProblem check, by the same
+// rules: open/half-open state past circuitStaleTTL, closed files no writer has
+// touched in closedSweepTTL, corrupt files and legacy port-0 files. Retained
+// entries are left exactly as they are.
+//
+// Any other legacy directory is skipped silently, without reading an entry:
+// one that another user owns or can write may hold their plant, and the sweep
+// runs ahead of the dial when a process sets up its first server-mode
+// breaker, so a FIFO there would hang every such bd command and a symlink to
+// /dev/zero would exhaust its memory (GH#4223). Skipping is the common case,
+// not an attack: on a shared host /tmp/beads-circuit belongs to whichever
+// user's old binary created it first. A legacy directory is never created,
+// never chmod-ed and never migrated into the live one; the live directory is
+// skipped among the legacy ones (they coincide on Windows), as are
+// duplicates.
+func sweepCircuitBreakerDirs(live string, legacy []string) {
+	if ensureCircuitBreakerDir(live) {
+		cleanStaleCircuitBreakerFilesIn(live)
+	}
+	seen := map[string]bool{filepath.Clean(live): true}
+	for _, dir := range legacy {
+		dir = filepath.Clean(dir)
+		if seen[dir] {
+			continue
 		}
+		seen[dir] = true
+		if info, err := os.Lstat(dir); err != nil || circuitDirProblem(info) != "" {
+			continue
+		}
+		cleanStaleCircuitBreakerFilesIn(dir)
 	}
 }
 
