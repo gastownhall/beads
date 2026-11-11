@@ -10,12 +10,16 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltremote"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 var querySQLRemotesForDoctor = querySQLRemotes
 
-// CheckDoltRemoteGitOrigin warns when any configured Dolt remote URL matches
-// the git origin — a likely misconfiguration since beads syncs via Dolt, not git.
+// CheckDoltRemoteGitOrigin reviews the Dolt remotes whose URL matches the git
+// origin. The remote named origin over a git transport is the default
+// git-backed sync remote bd itself wires up: Dolt keeps its data under
+// refs/dolt/data, apart from the source branches, so it is OK (GH#6150).
+// Any other matching remote is reported.
 func CheckDoltRemoteGitOrigin(repoPath string) DoctorCheck {
 	name := "Dolt Remote vs Git Origin"
 	beadsDir := ResolveBeadsDirForRepo(repoPath)
@@ -52,28 +56,57 @@ func CheckDoltRemoteGitOrigin(repoPath string) DoctorCheck {
 	}
 
 	normalizedOrigin := doltremote.CanonicalForComparison(originURL)
-	var colliding []string
+	var aliases []string
+	gitSyncOrigin, originOffGit := false, false
 	for _, r := range sqlRemotes {
-		if doltremote.CanonicalForComparison(r.URL) == normalizedOrigin {
-			colliding = append(colliding, r.Name)
+		if doltremote.CanonicalForComparison(r.URL) != normalizedOrigin {
+			continue
+		}
+		switch {
+		case doltutil.IsGitSyncRemote(r.Name, r.URL):
+			gitSyncOrigin = true
+		case r.Name == "origin":
+			originOffGit = true
+		default:
+			aliases = append(aliases, r.Name)
 		}
 	}
 
-	if len(colliding) == 0 {
+	if len(aliases) == 0 && !originOffGit {
+		message := "No Dolt remote matches git origin"
+		if gitSyncOrigin {
+			message = "Dolt remote origin is the git-backed sync remote for the git origin"
+		}
 		return DoctorCheck{
 			Name:     name,
 			Status:   StatusOK,
-			Message:  "No Dolt remote matches git origin",
+			Message:  message,
 			Category: CategoryDolt,
 		}
+	}
+
+	var messages, details, fixes []string
+	if originOffGit {
+		messages = append(messages, "Dolt remote origin matches the git origin URL but does not use a git transport")
+		details = append(details, "Dolt keeps a remote's data under refs/dolt/data on the git repository only when its URL is git+https://, git+http://, git+ssh:// or git+file://. Over raw http(s):// it talks to a remotesapi server, over ssh:// it runs its own transfer, over file:// it writes a native file store, and it has no git:// transport.")
+		fixes = append(fixes, "Point origin at the git transport form of the git origin, e.g. 'bd dolt remote add origin git+https://<host>/<org>/<repo>.git' or 'bd dolt remote add origin git+ssh://git@<host>/<org>/<repo>.git' (bd asks before replacing the current URL).")
+	}
+	if len(aliases) > 0 {
+		names := strings.Join(aliases, ", ")
+		messages = append(messages, fmt.Sprintf("%d Dolt remote(s) besides origin match the git origin URL: %s", len(aliases), names))
+		details = append(details, "bd syncs through the Dolt remote named origin by default and treats every other remote as a federation peer, even one that points at the same git repository.")
+		fixes = append(fixes, fmt.Sprintf("Review %s: if a remote only duplicates the git origin, remove it with 'bd dolt remote remove <name>' and sync through origin.", names))
+	}
+	if gitSyncOrigin {
+		details = append(details, "Dolt remote origin is the git-backed sync remote and needs no change.")
 	}
 
 	return DoctorCheck{
 		Name:     name,
 		Status:   StatusWarning,
-		Message:  fmt.Sprintf("%d Dolt remote(s) match the git origin URL: %s", len(colliding), strings.Join(colliding, ", ")),
-		Detail:   "Using the git origin as a Dolt remote causes git and Dolt sync to share the same endpoint, which can cause conflicts.",
-		Fix:      "Remove the conflicting remote(s) with 'bd dolt remote remove <name>', or set dolt.local-only=true to disable remote sync.",
+		Message:  strings.Join(messages, "; "),
+		Detail:   strings.Join(details, " "),
+		Fix:      strings.Join(fixes, " "),
 		Category: CategoryDolt,
 	}
 }

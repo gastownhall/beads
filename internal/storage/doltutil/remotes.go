@@ -74,6 +74,67 @@ func IsGitProtocolURL(url string) bool {
 		strings.HasPrefix(url, "git://")
 }
 
+// gitBackedRemoteSchemes are the URL schemes Dolt's git remote factory
+// serves.
+var gitBackedRemoteSchemes = []string{"git+https://", "git+http://", "git+ssh://", "git+file://"}
+
+// IsGitBackedRemoteURL reports whether url, a remote URL as Dolt stored it,
+// is git-backed: Dolt keeps the remote's data under refs/dolt/data on a git
+// repository. Dolt picks a remote's transport from the scheme of its stored
+// URL, and only git+https, git+http, git+ssh and git+file reach its git
+// remote factory. Over raw http(s):// it talks to a remotesapi server, over
+// ssh:// it runs its own transfer, over file:// it writes a native file
+// store, and it has no git:// transport and cannot parse an scp-style
+// address. IsGitProtocolURL, which routes a remote through the dolt CLI,
+// accepts several of those.
+func IsGitBackedRemoteURL(url string) bool {
+	lower := strings.ToLower(url)
+	for _, scheme := range gitBackedRemoteSchemes {
+		if strings.HasPrefix(lower, scheme) {
+			return true
+		}
+	}
+	return false
+}
+
+// AddsAsGitBackedRemote reports whether Dolt stores url git-backed
+// (IsGitBackedRemoteURL) when it adds the remote, through DOLT_REMOTE('add')
+// or dolt remote add. Dolt rewrites a URL that ends in .git, once a ?query or
+// #fragment is cut, to its git+ form when it is an http(s)://, ssh:// or
+// file:// URL, an scp-style address or a path, so it stores
+// https://github.com/org/repo.git as git+https://github.com/org/repo.git. It
+// stores every other URL as given.
+func AddsAsGitBackedRemote(url string) bool {
+	url = strings.TrimSpace(url)
+	if IsGitBackedRemoteURL(url) {
+		return true
+	}
+	base, _, _ := strings.Cut(url, "#")
+	base, _, _ = strings.Cut(base, "?")
+	if !strings.HasSuffix(base, ".git") {
+		return false
+	}
+	scheme, _, hasScheme := strings.Cut(url, "://")
+	if !hasScheme {
+		return true
+	}
+	switch strings.ToLower(scheme) {
+	case "http", "https", "ssh", "file":
+		return true
+	}
+	return false
+}
+
+// IsGitSyncRemote reports whether the Dolt remote name/url, with url as Dolt
+// stored it, is the default git-backed sync remote bd wires up: the remote
+// named origin that is git-backed (IsGitBackedRemoteURL), which keeps Dolt
+// data under refs/dolt/data on the git repository. origin over any other
+// transport does not qualify. For a URL not yet added, ask
+// AddsAsGitBackedRemote, since Dolt may store it in another form.
+func IsGitSyncRemote(name, url string) bool {
+	return name == "origin" && IsGitBackedRemoteURL(url)
+}
+
 // PersistedRemotes reads the Dolt remotes recorded in
 // <dbPath>/.dolt/repo_state.json directly, without shelling out to the dolt
 // CLI — so it works when the dolt binary is absent and its failure modes are

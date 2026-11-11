@@ -36,6 +36,9 @@ func setGitOrigin(t *testing.T, dir, url string) {
 
 // TestEmbeddedDoltRemoteAdd_GitOriginCollision_Exits1 asserts that adding a Dolt remote
 // whose URL matches the git origin exits non-zero and prints the refusal message.
+// The URL is https:// without .git, which Dolt keeps as given (a remotesapi
+// server), so origin is refused and pointed at its git transport form
+// (GH#6150).
 func TestEmbeddedDoltRemoteAdd_GitOriginCollision_Exits1(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded integration tests")
@@ -44,7 +47,7 @@ func TestEmbeddedDoltRemoteAdd_GitOriginCollision_Exits1(t *testing.T) {
 	bd := buildEmbeddedBD(t)
 	dir, _, _ := bdInit(t, bd, "--prefix", "rg")
 
-	originURL := "https://github.com/org/repo.git"
+	originURL := "https://github.com/org/repo"
 	setGitOrigin(t, dir, originURL)
 
 	_, stderr, err := remoteAdd(t, bd, dir, "origin", originURL)
@@ -57,10 +60,15 @@ func TestEmbeddedDoltRemoteAdd_GitOriginCollision_Exits1(t *testing.T) {
 	if !strings.Contains(stderr, originURL) {
 		t.Errorf("expected rejected URL %q in stderr\ngot:\n%s", originURL, stderr)
 	}
+	if hint := "bd dolt remote add origin git+" + originURL; !strings.Contains(stderr, hint) {
+		t.Errorf("expected the git transport hint %q in stderr\ngot:\n%s", hint, stderr)
+	}
 }
 
 // TestEmbeddedDoltRemoteAdd_GitOriginCollision_RefusalMessageCopy verifies exact phrases
-// from the UX spec (be-fxwbm §2.1) appear in the refusal output.
+// from the UX spec (be-fxwbm §2.1) appear in the refusal output. The remote
+// is an alias of the git origin: origin itself gets the git transport hint
+// instead (GitOriginCollision_Exits1).
 func TestEmbeddedDoltRemoteAdd_GitOriginCollision_RefusalMessageCopy(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded integration tests")
@@ -72,7 +80,7 @@ func TestEmbeddedDoltRemoteAdd_GitOriginCollision_RefusalMessageCopy(t *testing.
 	originURL := "https://github.com/org/repo.git"
 	setGitOrigin(t, dir, originURL)
 
-	_, stderr, _ := remoteAdd(t, bd, dir, "origin", originURL)
+	_, stderr, _ := remoteAdd(t, bd, dir, "backup", originURL)
 
 	wantPhrases := []string{
 		"refusing to add",    // §2.1 first line
@@ -228,4 +236,70 @@ func TestEmbeddedDoltRemoteAdd_JSON_AllowGitOrigin_WarningOnStderr(t *testing.T)
 		t.Errorf("--json --allow-git-origin: expected Warning on stderr, got:\nstderr: %s\nstdout: %s",
 			stderr.String(), stdout.String())
 	}
+}
+
+// TestEmbeddedDoltRemoteAdd_GitBackedOrigin_Accepted asserts that the default
+// git-backed sync remote, origin over a git transport naming the git origin's
+// repository, is added without --allow-git-origin and without the collision
+// warning: Dolt keeps its data under refs/dolt/data, apart from the source
+// branches (GH#6150). That includes the git origin's own https:// URL ending
+// in .git, which Dolt stores as git+https://. The remote is stored and
+// sync.remote persisted. https:// without .git, which Dolt keeps as given, is
+// still refused (GitOriginCollision_Exits1).
+func TestEmbeddedDoltRemoteAdd_GitBackedOrigin_Accepted(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded integration tests")
+	}
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	originURL := "https://github.com/org/repo.git"
+	doltURL := "git+https://github.com/org/repo.git"
+	for _, tc := range []struct {
+		name, prefix, url string
+		flags             []string
+	}{
+		{"without the flag", "gb", doltURL, nil},
+		{"with a redundant --allow-git-origin", "gf", doltURL, []string{"--allow-git-origin"}},
+		{"the git origin's own URL", "gp", originURL, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, _, _ := bdInit(t, bd, "--prefix", tc.prefix)
+			setGitOrigin(t, dir, originURL)
+
+			_, stderr, err := remoteAdd(t, bd, dir, append(tc.flags, "origin", tc.url)...)
+			if err != nil {
+				t.Fatalf("bd dolt remote add origin %s: %v\nstderr: %s", tc.url, err, stderr)
+			}
+			if strings.Contains(stderr, "refusing to add") || strings.Contains(stderr, "matches the git origin") {
+				t.Errorf("git-backed origin drew the git-origin collision guard\nstderr:\n%s", stderr)
+			}
+
+			// Dolt stores the git+ form whichever spelling was added.
+			list, listErr, err := bdDoltSeparate(t, bd, dir, "remote", "list")
+			if err != nil {
+				t.Fatalf("bd dolt remote list: %v\nstderr: %s", err, listErr)
+			}
+			if !strings.Contains(list, "origin") || !strings.Contains(list, doltURL) {
+				t.Errorf("remote list does not show origin %s:\n%s", doltURL, list)
+			}
+
+			if got := strings.TrimSpace(bdConfig(t, bd, dir, "get", "sync.remote")); got != tc.url {
+				t.Errorf("sync.remote = %q, want %q", got, tc.url)
+			}
+		})
+	}
+
+	t.Run("an alias at the same URL still requires the flag", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "gal")
+		setGitOrigin(t, dir, originURL)
+
+		_, stderr, err := remoteAdd(t, bd, dir, "backup", doltURL)
+		if err == nil {
+			t.Fatalf("an alias at the git origin URL must still be refused without the flag\nstderr: %s", stderr)
+		}
+		if !strings.Contains(stderr, "refusing to add") {
+			t.Errorf("expected 'refusing to add' in stderr\ngot:\n%s", stderr)
+		}
+	})
 }

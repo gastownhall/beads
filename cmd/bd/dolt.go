@@ -2125,14 +2125,8 @@ var doltRemoteAddCmd = &cobra.Command{
 			return SilentExit()
 		}
 		allowGitOrigin, _ := cmd.Flags().GetBool("allow-git-origin")
-		if doltRemoteMatchesGitOrigin(args[1]) {
-			if !allowGitOrigin {
-				fmt.Fprintf(os.Stderr, "Error: refusing to add %q as a Dolt remote — this URL matches the git origin.\n", args[1])
-				fmt.Fprintln(os.Stderr, "  Hint: use --allow-git-origin to proceed anyway (e.g. monorepo layout).")
-				fmt.Fprintln(os.Stderr, "  Hint: or set dolt.local-only=true to disable remote sync entirely.")
-				return SilentExit()
-			}
-			fmt.Fprintf(os.Stderr, "Warning: %q matches the git origin — proceeding because --allow-git-origin is set.\n", args[1])
+		if refuseGitOriginDoltRemote(args[0], args[1], allowGitOrigin) {
+			return SilentExit()
 		}
 		ctx := context.Background()
 		st := getStore()

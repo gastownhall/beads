@@ -79,6 +79,87 @@ func TestIsGitProtocolURL(t *testing.T) {
 	}
 }
 
+// TestIsGitSyncRemote pins the default git-backed sync remote: named origin,
+// with a stored URL that Dolt serves through its git remote factory
+// (GH#6150).
+func TestIsGitSyncRemote(t *testing.T) {
+	tests := []struct {
+		name, url string
+		want      bool
+	}{
+		{"origin", "git+https://github.com/org/repo.git", true},
+		{"origin", "git+https://github.com/org/repo", true},
+		{"origin", "git+ssh://git@github.com/org/repo.git", true},
+		{"origin", "git+ssh://git@github.com/./org/repo.git", true},
+		{"origin", "git+http://127.0.0.1:3000/repo.git", true},
+		{"origin", "git+file:///tmp/repo.git", true},
+
+		// Named origin but stored under a transport that is not git: a
+		// remotesapi server, Dolt's own ssh transfer, a native file store,
+		// no git:// transport at all, and an scp-style address Dolt cannot
+		// parse.
+		{"origin", "https://github.com/org/repo.git", false},
+		{"origin", "http://localhost:50051/repo", false},
+		{"origin", "ssh://git@github.com/org/repo", false},
+		{"origin", "file:///tmp/repo.git", false},
+		{"origin", "/tmp/repo.git", false},
+		{"origin", "git://127.0.0.1/repo.git", false},
+		{"origin", "git@github.com:org/repo.git", false},
+		{"origin", "", false},
+
+		// A git-backed remote under any other name is a federation peer.
+		{"backup", "git+https://github.com/org/repo.git", false},
+		{"Origin", "git+https://github.com/org/repo.git", false},
+		{"", "git+https://github.com/org/repo.git", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name+" "+tt.url, func(t *testing.T) {
+			if got := IsGitSyncRemote(tt.name, tt.url); got != tt.want {
+				t.Errorf("IsGitSyncRemote(%q, %q) = %v, want %v", tt.name, tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestAddsAsGitBackedRemote pins which URLs Dolt stores git-backed when it
+// adds a remote. Each comment is what dolt 2.6.0's dolt remote add stored.
+func TestAddsAsGitBackedRemote(t *testing.T) {
+	tests := []struct {
+		url  string
+		want bool
+	}{
+		{"git+https://github.com/org/repo", true},       // as given
+		{"GIT+HTTPS://github.com/org/repo.git", true},   // git+https://github.com/org/repo.git
+		{"https://github.com/org/repo.git", true},       // git+https://github.com/org/repo.git
+		{"HTTPS://github.com/org/repo.git", true},       // git+https://github.com/org/repo.git
+		{"https://github.com/org/repo.git?ref=x", true}, // git+https://github.com/org/repo.git?ref=x
+		{"http://127.0.0.1:3000/repo.git", true},        // git+http://127.0.0.1:3000/repo.git
+		{"ssh://git@github.com/org/repo.git", true},     // git+ssh://git@github.com/org/repo.git
+		{"git@github.com:org/repo.git", true},           // git+ssh://git@github.com/./org/repo.git
+		{"github.com:org/repo.git", true},               // git+ssh://github.com/./org/repo.git
+		{"github.com/org/repo.git", true},               // git+https://github.com/org/repo.git
+		{"file:///srv/git/repo.git", true},              // git+file:///srv/git/repo.git
+		{"/srv/git/repo.git", true},                     // git+file:///srv/git/repo.git
+		{"./rel/repo.git", true},                        // git+file://<cwd>/rel/repo.git
+
+		{"https://github.com/org/repo", false},      // as given: a remotesapi server
+		{"https://github.com/org/repo.git/", false}, // as given
+		{"ssh://git@github.com/org/repo", false},    // as given: Dolt's own ssh transfer
+		{"git://127.0.0.1:9418/repo.git", false},    // as given: no git:// transport
+		{"file:///srv/git/repo", false},             // as given: a native file store
+		{"/srv/git/repo", false},                    // https://doltremoteapi.dolthub.com/srv/git/repo
+		{"git@github.com:org/repo", false},          // refused: Dolt cannot parse it
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.url, func(t *testing.T) {
+			if got := AddsAsGitBackedRemote(tt.url); got != tt.want {
+				t.Errorf("AddsAsGitBackedRemote(%q) = %v, want %v", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRemoteURLsMatchNormalizesGitURLs(t *testing.T) {
 	tests := []struct {
 		name string

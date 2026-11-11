@@ -1226,6 +1226,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd doctor` no longer tells you to remove the Dolt remote `origin` or set
+  `dolt.local-only=true` when `origin` is the git-backed sync remote bd sets
+  up, which keeps Dolt data under `refs/dolt/data` on the git origin's
+  repository (GH#6150). `Dolt Remote vs Git Origin` reports an `origin` over
+  `git+https://`, `git+http://`, `git+ssh://` or `git+file://` OK. It still
+  warns when another remote points at the git origin, now advising only to
+  review that remote, and when `origin` does over another transport, now
+  advising its `git+` form. `Federation remotesapi` no longer counts
+  `origin` as a peer when the server is down, reports a failed remote
+  listing instead of "no peers", and shows the peer count beside the
+  listener state. `bd dolt remote add origin` now accepts the git-backed
+  origin it used to refuse, including the git origin's own URL when it ends
+  in `.git` (Dolt stores it as `git+`). For `origin` over another transport
+  it points to the git transport instead of advising to disable sync.
+
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
