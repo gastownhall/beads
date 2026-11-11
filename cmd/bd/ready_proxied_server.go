@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
@@ -197,6 +198,8 @@ func runReadyProxiedClaim(ctx context.Context, in readyInput) error {
 		return nil
 	}
 
+	// As on the direct route: the claimed post-state, no pre-image (GH#6146).
+	audit.LogClaimed(res.Claimed.ID, currentActor(), string(res.Claimed.Status), res.Claimed.Assignee)
 	SetLastTouchedID(res.Claimed.ID)
 
 	if in.jsonOut {

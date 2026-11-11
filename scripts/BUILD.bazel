@@ -313,6 +313,7 @@ go_test(
 go_test(
     name = "tracked_files_test",
     srcs = [
+        "audit_sidecar_docs_test.go",
         "repo_helpers_test.go",
         "tracked_files_test.go",
     ],
