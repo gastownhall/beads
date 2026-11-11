@@ -8413,6 +8413,22 @@ components:
             reads dependents unconditionally and therefore always discloses
             the inbound direction on stderr, while a client of this field sees
             it only when it asked for `include_dependents`.
+        unresolvable_dependency_edges:
+          type: array
+          description: >-
+            The edges `unresolvable_dependencies` counts, as stored: each is
+            the raw outbound edge record (target id and type) whose far end
+            has no row in this database, sorted by `depends_on_id` then
+            `type`. `dependencies` stays the list of LOCAL neighbors; these
+            are not issues and carry no status or title.
+
+
+            BEST EFFORT, NOT EXHAUSTIVE, and ABSENT, NEVER EMPTY, when there is
+            nothing to name. It is read only when `unresolvable_dependencies`
+            is present, is absent when that raw read failed, and covers the
+            issue's own plane only, so it can name fewer edges than the count.
+            An absent member is not proof that no edge went unrepresented.
+          items: { $ref: '#/components/schemas/Dependency' }
         epic_total_children:
           type: integer
         epic_closed_children:

@@ -638,6 +638,7 @@ var roleContractCases = []roleContract{
 		RunReaderGetOptionalRowListsAreOffByDefault,
 		RunReaderGetBriefDepsProjectsTheDependencyRows,
 		RunReaderGetDetailShapeMatchesTheSeededIssue,
+		RunReaderGetListsUnresolvableDependencyEdges,
 		RunReaderDoesNotMutateTheCallerRequest,
 		RunReaderListLimitBoundaryUnderASortTheDatabaseCanExpress,
 		RunReaderReadySetOwnsItsStatusPinnedAndTemplateDecisions,

@@ -43,6 +43,9 @@ func (s skewSource) Labels(_ context.Context, _ string, _ bool) ([]string, error
 func (s skewSource) Dependencies(_ context.Context, _ string, _ bool) ([]*types.IssueWithDependencyMetadata, error) {
 	return s.deps, s.depsErr
 }
+func (s skewSource) DependencyRecords(_ context.Context, _ string, _ bool) ([]*types.Dependency, error) {
+	return nil, nil
+}
 func (s skewSource) CountDependencies(_ context.Context, _ string, _ bool) (int64, error) {
 	return s.depCount, s.depCountErr
 }
@@ -243,6 +246,9 @@ func (m *mutatingSource) Dependencies(_ context.Context, _ string, _ bool) ([]*t
 		out = append(out, depRow(fmt.Sprintf("rp-%d", i+2), types.DepBlocks))
 	}
 	return out, nil
+}
+func (m *mutatingSource) DependencyRecords(_ context.Context, _ string, _ bool) ([]*types.Dependency, error) {
+	return nil, nil
 }
 func (m *mutatingSource) CountDependencies(_ context.Context, _ string, _ bool) (int64, error) {
 	return int64(m.observe()), nil

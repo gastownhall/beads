@@ -1438,6 +1438,10 @@ func (s *EmbeddedDoltStore) PartitionWispIDs(ctx context.Context, ids []string) 
 // storage.DependencyQueryStore
 // ---------------------------------------------------------------------------
 
+// GetDependencyRecords returns the raw stored edge rows of issueID,
+// unhydrated, including the edges whose far end has no row in this database,
+// which GetDependenciesWithMetadata drops. The detail view reads them to
+// enumerate what the unresolvable counts name (bd-hkpas7, #5272).
 func (s *EmbeddedDoltStore) GetDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error) {
 	var result []*types.Dependency
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {

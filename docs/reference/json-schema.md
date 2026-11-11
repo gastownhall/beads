@@ -243,6 +243,18 @@ items, plus:
 - `comments_omitted` (boolean, optional): `true` only when `comment_count` is
   nonzero and `comments` was left out of the response (no `--include-comments`).
   Absent when comments were included or when there are none to omit (ga-clgh)
+- `unresolvable_dependencies` (number, optional): How many of
+  `dependency_count`'s edges `dependencies` could not show, because the far end
+  has no row in this database (a cross-repo id or an `external:` reference).
+  Absent when there are none, or when a read failed. `unresolvable_dependents`
+  is the inbound counterpart, present only with `--include-dependents`
+- `unresolvable_dependency_edges` (object[], optional): The edges
+  `unresolvable_dependencies` counts, as stored dependency records
+  (`issue_id`, `depends_on_id`, `type`, ...), sorted by `depends_on_id` then
+  `type`. They are edges, not issues: no status or title is invented for a far
+  end bd cannot read, and `dependencies` keeps listing local issues only. Best
+  effort: absent when the raw read failed, and it can name fewer edges than the
+  count, so an absent member does not prove there is no gap
 - `gated_by` (object[], optional): The gates actively blocking this issue, each
   `{id, type, reason}` — the gate bead to resolve, its await condition (`human`,
   `timer`, `gh:run`, `gh:pr`, `bead`, or `gate` when it carries none), and the

@@ -3291,6 +3291,13 @@
     },
     {
       "schema": "IssueDetails",
+      "member": "unresolvable_dependency_edges",
+      "type": "array",
+      "required": false,
+      "item_type": "object"
+    },
+    {
+      "schema": "IssueDetails",
       "member": "unresolvable_dependents",
       "type": "integer",
       "format": "int64",

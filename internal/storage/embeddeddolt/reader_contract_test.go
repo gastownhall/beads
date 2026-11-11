@@ -169,6 +169,12 @@ func TestEmbeddedReaderGetDetailShapeMatchesTheSeededIssue(t *testing.T) {
 	conformance.RunReaderGetDetailShapeMatchesTheSeededIssue(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
 }
 
+func TestEmbeddedReaderGetListsUnresolvableDependencyEdges(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunReaderGetListsUnresolvableDependencyEdges(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
+}
+
 func TestEmbeddedReaderDoesNotMutateTheCallerRequest(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()

@@ -1354,6 +1354,20 @@ type IssueDetails struct {
 	UnresolvableDependencies *int64 `json:"unresolvable_dependencies,omitempty"`
 	UnresolvableDependents   *int64 `json:"unresolvable_dependents,omitempty"`
 
+	// UnresolvableDependencyEdges names the edges UnresolvableDependencies
+	// counts: the raw outbound edge records whose target is absent from
+	// Dependencies, sorted by target id then type (#5272). Dependencies stays
+	// the list of LOCAL neighbors (issueops.Relations' contract); these are the
+	// stored edges themselves, so no issue field is invented for a far end
+	// this database cannot read.
+	//
+	// BEST EFFORT, NOT EXHAUSTIVE. It is read only after the count and the
+	// listing both succeeded and disagreed, and a failed raw read leaves it
+	// unset beside the count. The raw read covers the issue's own plane only,
+	// so an opposite-plane remnant can stay counted and unnamed. An absent
+	// member is therefore not proof that UnresolvableDependencies is zero.
+	UnresolvableDependencyEdges []*Dependency `json:"unresolvable_dependency_edges,omitempty"`
+
 	// Epic progress fields (populated only for issue_type=epic with children)
 	EpicTotalChildren  *int  `json:"epic_total_children,omitempty"`
 	EpicClosedChildren *int  `json:"epic_closed_children,omitempty"`
