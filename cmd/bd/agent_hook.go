@@ -62,14 +62,7 @@ func resolvePrimeExecutable() (string, error) {
 		if resolved, linkErr := filepath.EvalSymlinks(exe); linkErr == nil {
 			exe = resolved
 		}
-		// testing.Testing() is the authoritative signal and must come first:
-		// rules_go links test binaries as <name>_test (cmd/bd's is bd_test),
-		// which no ".test" name check can see, so under the Bazel lane the
-		// name checks alone would let an unstubbed call re-exec the test
-		// binary. The name checks remain for binaries built with `go test -c`
-		// and run outside the harness. Mirrors doctor/fix's isTestBinary.
-		base := filepath.Base(exe)
-		if testing.Testing() || strings.HasSuffix(base, ".test") || strings.Contains(base, ".test.") {
+		if isTestExecutable(exe) {
 			return "", errPrimeTestBinary
 		}
 		return exe, nil
@@ -80,6 +73,18 @@ func resolvePrimeExecutable() (string, error) {
 		return "", fmt.Errorf("bd binary not found in PATH: %w", lookErr)
 	}
 	return bdPath, nil
+}
+
+// isTestExecutable reports whether exe, the running binary, is a Go test
+// binary that must never be re-executed as bd. testing.Testing() is the
+// authoritative signal and must come first: rules_go links test binaries as
+// <name>_test (cmd/bd's is bd_test), which no ".test" name check can see, so
+// under the Bazel lane the name checks alone would let an unstubbed call
+// re-exec the test binary. The name checks remain for binaries built with
+// `go test -c` and run outside the harness. Mirrors doctor/fix's isTestBinary.
+func isTestExecutable(exe string) bool {
+	base := filepath.Base(exe)
+	return testing.Testing() || strings.HasSuffix(base, ".test") || strings.Contains(base, ".test.")
 }
 
 // validatePrimeArgs rejects any argument outside allowedPrimeArgs so the

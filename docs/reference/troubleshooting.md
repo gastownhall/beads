@@ -50,6 +50,9 @@ This happens when a binary from an earlier `go install` sits in `~/go/bin/`
 ahead of a newer package-manager install. Choose one installation method
 (Homebrew recommended) and stick with it.
 
+Git hooks can select a different `bd` than your interactive shell does; see
+[Hooks run a different bd than your shell](#hooks-run-a-different-bd-than-your-shell).
+
 ### `zsh: killed bd` on macOS
 
 CGO/SQLite compatibility issue:
@@ -557,6 +560,70 @@ cat .git/hooks/pre-commit
 
 # Run manually
 .git/hooks/pre-commit
+```
+
+### Hooks run a different bd than your shell
+
+**Symptom:** commits warn `beads: pre-commit export warning: exit status 1`
+(sometimes after an error such as `check wisps table … table has unknown
+fields`), or `bd hooks install` / `bd init` prints
+`⚠ Git hooks run the bd that PATH selects, a different file from this bd` or
+`⚠ Git hooks run bd from PATH, but PATH has no bd`.
+
+**Cause:** installed hooks start `bd` by name, so they run whichever `bd` the
+hook's shell finds first on `PATH`. Git, an IDE, or a GUI client can start
+hooks with a different `PATH` than your terminal, and an older `bd` there
+cannot open a database a newer `bd` wrote. The quoted `check wisps table` /
+`table has unknown fields` chain comes from older 1.0.x-era `bd` code that
+current `bd` no longer contains, so seeing it only from git means an old
+binary is being selected. A generic `Error 1105` by itself does not prove
+that; compare the selected binaries as shown below.
+
+Once the hook is running, its `bd export` and `bd import` steps run the same
+`bd` as the hook itself. The hook's first `bd` is still found on `PATH`: the
+hooks stay portable and pin no machine-specific path, so no update to `bd`
+can repair a stale `bd` the hook's `PATH` already selects. Fix the selection.
+
+**Check:** compare the `bd` you run with the one the hook shell selects:
+
+```bash
+# Your interactive bd: path and version
+command -v bd
+bd version
+
+# Every bd on PATH, in order
+type -a bd          # or: which -a bd
+
+# What a git hook's shell selects
+sh -c 'command -v bd; bd version'
+
+# The same check under git's own environment
+git -c alias.bdcheck='!command -v bd; bd version' bdcheck
+```
+
+If the paths or versions differ, the hooks run the other one.
+
+**Fix:** upgrade or remove the stale `bd` (see
+[Wrong version of bd running](#wrong-version-of-bd-running)), or put the
+directory of the `bd` you use first on the `PATH` your git client starts with.
+For a GUI client, that is the `PATH` of its login environment, not your shell
+startup file. Then run `bd hooks install` again: it prints no warning once
+`PATH` selects this `bd`, a link to it, or a launcher installed beside it (as
+an npm install's `bd` is). A wrapper script or shim in another directory, such
+as a version manager's, is a different file, so it still draws the warning
+even when it runs this `bd`; the version check above tells the two apart.
+
+**Skipped export or failed export?** The pre-commit export runs only when
+`export.auto` is on and the commit stages a path under `.beads/`. A commit of
+code alone skips it silently and leaves `.beads/issues.jsonl` unchanged; that
+is expected. A `beads: pre-commit export warning: …` line means the export did
+run and its `bd export` child failed, often because it could not open the
+database. To see which happened, run the commit with debug logging:
+
+```bash
+BD_DEBUG=1 git commit ...
+# pre-commit: skipping JSONL export — no staged .beads paths   <- skipped
+# pre-commit: exporting JSONL to …                             <- ran
 ```
 
 ### Hook timeout kills chained pre-commit hooks

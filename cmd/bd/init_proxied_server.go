@@ -662,6 +662,7 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 						fmt.Fprintf(os.Stderr, "\n%s Failed to install jj hooks: %v\n", ui.RenderWarn("⚠"), err)
 					} else if !in.quiet {
 						fmt.Printf("  Hooks installed (jujutsu mode - no staging)\n")
+						warnHookPATHBinary()
 					}
 				} else {
 					hooksParams := domain.HooksInstallParams{HookNames: managedHookNames, BeadsHooks: true}
@@ -669,6 +670,7 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 						fmt.Fprintf(os.Stderr, "\n%s Failed to install git hooks to .beads/hooks/: %v\n", ui.RenderWarn("⚠"), err)
 					} else if !in.quiet {
 						fmt.Printf("  Hooks installed to: .beads/hooks/\n")
+						warnHookPATHBinary()
 					}
 				}
 			}

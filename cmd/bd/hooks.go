@@ -812,6 +812,9 @@ Installed hooks:
 				fmt.Printf("  - %s\n", hookName)
 			}
 		}
+		if !quietFlag {
+			warnHookPATHBinary()
+		}
 		return nil
 	},
 }
@@ -1980,7 +1983,9 @@ func exportJSONLForCommit() {
 	// Run from the project root, not .beads/. Embedded Dolt discovery starts
 	// from cwd, so cwd=.beads/ can make the export subprocess look for a
 	// nested .beads/.beads workspace and warn on every commit (GH#3454).
-	cmd := exec.Command("bd", "export", "-o", fullPath)
+	// The child is this bd, not PATH's: an older bd earlier on git's PATH
+	// cannot open the database this one wrote (GH#5922).
+	cmd := exec.Command(hookSubprocessBinary(), "export", "-o", fullPath)
 	cmd.Dir = exportSubprocessDir(beadsDir)
 	cmd.Env = hookSubprocessEnv(os.Environ())
 	cmd.Stderr = os.Stderr
@@ -2357,8 +2362,9 @@ func importJSONLForSync(reason string) {
 	// post-run export would write one worktree's branch state over another
 	// checkout's tracked file: GH#6680's second symptom, from the fix for its
 	// first. Keeping the marker also suppresses the subprocess's auto-backup,
-	// matching the export lane (hookSubprocessEnv).
-	cmd := exec.Command("bd", "import", "--quiet", fullPath)
+	// matching the export lane (hookSubprocessEnv). The child is this bd, as
+	// on the export lane (GH#5922).
+	cmd := exec.Command(hookSubprocessBinary(), "import", "--quiet", fullPath)
 	cmd.Dir = exportSubprocessDir(beadsDir)
 	cmd.Env = hookSubprocessEnv(os.Environ())
 
