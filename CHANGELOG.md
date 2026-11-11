@@ -1226,6 +1226,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd create-form` now checks its Dependencies field the way `bd create
+  --deps` checks its entries (GH#5560). Two types on one target
+  (`blocked-by:X, related:X`) are refused with the GH#4626 guidance before
+  anything is written, instead of failing late in storage after a child
+  number under `--parent` was spent; an unknown type or an entry with no id
+  is refused instead of stored or skipped; and the `blocked-by`/`depends-on`
+  aliases are stored as the gating `blocks` type, with equivalent spellings
+  collapsed into one edge. The field reports the refusal while the entered
+  text is still there to correct. The form's `blocks:id` still makes the
+  new issue depend on id.
+
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

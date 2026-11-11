@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -477,6 +478,41 @@ func TestCreateIssueFromFormValues(t *testing.T) {
 		}
 	})
 
+	// GH#5560 (bd-fom9ed): distinct targets keep their typed edges exactly,
+	// new->A blocks and new->B related, with no reversed edge: the form's
+	// blocks:<id> keeps its historical direction, unlike --deps'.
+	t.Run("TypedDependenciesOnDistinctTargets", func(t *testing.T) {
+		a := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Typed target A"})
+		b := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Typed target B"})
+		child := createFormIssueForTest(t, ctx, s, &createFormValues{
+			Title:        "Typed child on distinct targets",
+			Dependencies: []string{"blocks:" + a.ID, "related:" + b.ID},
+		})
+		recs, err := s.GetDependencyRecords(ctx, child.ID)
+		if err != nil {
+			t.Fatalf("GetDependencyRecords %s: %v", child.ID, err)
+		}
+		if len(recs) != 2 {
+			t.Fatalf("%s has %d dependencies, want 2", child.ID, len(recs))
+		}
+		got := map[string]types.DependencyType{}
+		for _, r := range recs {
+			got[r.DependsOnID] = r.Type
+		}
+		if got[a.ID] != types.DepBlocks || got[b.ID] != types.DepRelated {
+			t.Errorf("%s edges %v, want blocks on %s and related on %s", child.ID, got, a.ID, b.ID)
+		}
+		for _, rev := range []string{a.ID, b.ID} {
+			back, err := s.GetDependencyRecords(ctx, rev)
+			if err != nil {
+				t.Fatalf("GetDependencyRecords %s: %v", rev, err)
+			}
+			for _, r := range back {
+				t.Errorf("reversed edge written: %s -> %s (%s)", r.IssueID, r.DependsOnID, r.Type)
+			}
+		}
+	})
+
 	t.Run("DiscoveredFromInheritsSourceRepo", func(t *testing.T) {
 		// Create a parent issue with a custom source_repo
 		parent := &types.Issue{
@@ -512,6 +548,107 @@ func TestCreateIssueFromFormValues(t *testing.T) {
 		if retrievedIssue.SourceRepo != parent.SourceRepo {
 			t.Errorf("expected source_repo %q, got %q", parent.SourceRepo, retrievedIssue.SourceRepo)
 		}
+	})
+
+	// GH#5560: the reporter's pair names one target with two types. The
+	// form refuses it with the shared GH#4626 guidance before it reserves a
+	// child ID or writes an issue or an edge, instead of failing late in
+	// storage after the child number is spent.
+	t.Run("ReporterPairRefusedBeforeAnyWrite", func(t *testing.T) {
+		parent := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Reporter pair parent", IssueType: "epic"})
+		target := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Reporter pair target"})
+		for _, tt := range []struct {
+			deps    []string
+			wantErr string
+		}{
+			{[]string{"blocked-by:" + target.ID, "related:" + target.ID}, `cannot attach both "blocks" and "related" to the same target`},
+			{[]string{"related:" + target.ID, "blocks:" + target.ID}, `cannot attach both "related" and "blocks" to the same target`},
+			{[]string{"discovered-from:" + target.ID, "blocked-by:" + target.ID}, `cannot attach both "discovered-from" and "blocks" to the same target`},
+		} {
+			fv := &createFormValues{Title: "Reporter pair child", Priority: 2, IssueType: "task", ParentID: parent.ID, Dependencies: tt.deps}
+			issue, err := CreateIssueFromFormValues(ctx, s, fv, "test")
+			if err == nil {
+				t.Errorf("CreateIssueFromFormValues(deps %q) created %s, want a refusal", tt.deps, issue.ID)
+				continue
+			}
+			for _, want := range []string{tt.wantErr, "GH#4626"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("CreateIssueFromFormValues(deps %q) error %q, want it to contain %q", tt.deps, err, want)
+				}
+			}
+			if strings.Contains(err.Error(), "--deps") {
+				t.Errorf("CreateIssueFromFormValues(deps %q) error %q names the --deps flag the form does not have", tt.deps, err)
+			}
+		}
+		assertNoFormWrites(t, ctx, s, parent.ID, target.ID)
+	})
+
+	// bd-3073gm (GH#5585): every blocking spelling the form takes makes the
+	// new issue depend on its target with the canonical, gating blocks type.
+	// The form's blocks:<id> keeps its historical direction, unlike --deps'.
+	t.Run("BlockingSpellingsGateTheNewIssue", func(t *testing.T) {
+		for _, spelling := range []string{"", "blocks:", "blocked-by:", "depends-on:"} {
+			target := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Gate target " + spelling})
+			child := createFormIssueForTest(t, ctx, s, &createFormValues{
+				Title:        "Gated by " + spelling,
+				Dependencies: []string{spelling + target.ID},
+			})
+			assertFormBlocksEdge(t, ctx, s, child.ID, target.ID)
+		}
+	})
+
+	// bd-3073gm: spellings that resolve to the same edge collapse to it
+	// instead of colliding as two types on one target.
+	t.Run("EquivalentSpellingsCollapse", func(t *testing.T) {
+		target := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Collapse target"})
+		child := createFormIssueForTest(t, ctx, s, &createFormValues{
+			Title:        "Collapse child",
+			Dependencies: []string{"blocked-by:" + target.ID, "depends-on:" + target.ID, "blocks:" + target.ID, target.ID},
+		})
+		assertFormBlocksEdge(t, ctx, s, child.ID, target.ID)
+	})
+
+	// bd-3073gm: each equivalent pair on its own stores one blocks edge, so
+	// no single pairing can collide as two types on one target.
+	t.Run("EquivalentPairsCollapse", func(t *testing.T) {
+		for _, pair := range [][2]string{
+			{"blocked-by:", "depends-on:"},
+			{"blocks:", "depends-on:"},
+			{"", "blocked-by:"},
+		} {
+			target := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Pair target " + pair[0] + pair[1]})
+			child := createFormIssueForTest(t, ctx, s, &createFormValues{
+				Title:        "Pair child " + pair[0] + pair[1],
+				Dependencies: []string{pair[0] + target.ID, pair[1] + target.ID},
+			})
+			assertFormBlocksEdge(t, ctx, s, child.ID, target.ID)
+		}
+	})
+
+	// bd-3073gm: a type outside the --deps vocabulary or an entry with no
+	// target fails a direct call with the parser's diagnostic before it
+	// reserves a child ID or writes an issue or an edge.
+	t.Run("InvalidDependenciesFailBeforeAnyWrite", func(t *testing.T) {
+		parent := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Refusal parent", IssueType: "epic"})
+		target := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Refusal target"})
+		for _, tt := range []struct {
+			deps    []string
+			wantErr string
+		}{
+			{[]string{"frobs:" + target.ID}, `unknown dependency type "frobs"`},
+			{[]string{"owned-by:" + target.ID}, `unknown dependency type "owned-by"`},
+			{[]string{":" + target.ID}, `invalid dependency type ""`},
+			{[]string{"blocks:"}, `dependency "blocks:" names no issue`},
+		} {
+			fv := &createFormValues{Title: "Refused child", Priority: 2, IssueType: "task", ParentID: parent.ID, Dependencies: tt.deps}
+			issue, err := CreateIssueFromFormValues(ctx, s, fv, "test")
+			if err == nil {
+				t.Errorf("CreateIssueFromFormValues(deps %q) created %s, want a refusal", tt.deps, issue.ID)
+			} else if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("CreateIssueFromFormValues(deps %q) error %q, want it to contain %q", tt.deps, err, tt.wantErr)
+			}
+		}
+		assertNoFormWrites(t, ctx, s, parent.ID, target.ID)
 	})
 
 	t.Run("AllPriorities", func(t *testing.T) {
@@ -770,4 +907,74 @@ func TestFormValuesIntegration(t *testing.T) {
 			t.Errorf("expected 2 labels, got %d", len(labels))
 		}
 	})
+}
+
+// createFormIssueForTest creates an issue through CreateIssueFromFormValues,
+// defaulting the fields the dependency tests do not care about.
+func createFormIssueForTest(t *testing.T, ctx context.Context, s storage.DoltStorage, fv *createFormValues) *types.Issue {
+	t.Helper()
+	if fv.IssueType == "" {
+		fv.IssueType = "task"
+	}
+	if fv.Priority == 0 {
+		fv.Priority = 2
+	}
+	issue, err := CreateIssueFromFormValues(ctx, s, fv, "test")
+	if err != nil {
+		t.Fatalf("CreateIssueFromFormValues(%q, deps %q): %v", fv.Title, fv.Dependencies, err)
+	}
+	return issue
+}
+
+// assertNoFormWrites checks that refused form creates under parent left no
+// child, no edge on target and no reserved child number: the next accepted
+// child of parent is parent.1.
+func assertNoFormWrites(t *testing.T, ctx context.Context, s storage.DoltStorage, parent, target string) {
+	t.Helper()
+	for _, id := range []string{parent, target} {
+		dependents, err := s.GetDependents(ctx, id)
+		if err != nil {
+			t.Fatalf("GetDependents %s: %v", id, err)
+		}
+		for _, d := range dependents {
+			t.Errorf("refused create left %s depending on %s", d.ID, id)
+		}
+	}
+	child := createFormIssueForTest(t, ctx, s, &createFormValues{Title: "Accepted child", ParentID: parent})
+	if want := parent + ".1"; child.ID != want {
+		t.Errorf("first accepted child of %s is %s, want %s: a refused create reserved a child ID", parent, child.ID, want)
+	}
+}
+
+// assertFormBlocksEdge checks that from has exactly one dependency, a blocks
+// edge on to, that no edge runs the other way, and that the edge keeps from
+// out of ready work while to is open.
+func assertFormBlocksEdge(t *testing.T, ctx context.Context, s storage.DoltStorage, from, to string) {
+	t.Helper()
+	recs, err := s.GetDependencyRecords(ctx, from)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords %s: %v", from, err)
+	}
+	if len(recs) != 1 || recs[0].DependsOnID != to || recs[0].Type != types.DepBlocks {
+		for _, r := range recs {
+			t.Logf("%s -> %s (%s)", r.IssueID, r.DependsOnID, r.Type)
+		}
+		t.Errorf("%s has %d dependencies, want one blocks edge on %s", from, len(recs), to)
+	}
+	back, err := s.GetDependencyRecords(ctx, to)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords %s: %v", to, err)
+	}
+	for _, r := range back {
+		t.Errorf("reversed edge written: %s -> %s (%s)", r.IssueID, r.DependsOnID, r.Type)
+	}
+	ready, err := s.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	for _, issue := range ready {
+		if issue.ID == from {
+			t.Errorf("%s is ready while its blocker %s is open", from, to)
+		}
+	}
 }
