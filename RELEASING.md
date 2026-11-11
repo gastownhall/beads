@@ -144,11 +144,14 @@ release branch as a cherry-pick PR.
    links #<N> and says whether the pick was clean or lists each conflict
    resolution.
 4. A clean pick of a reviewed `main` commit merges once `CI Gate / Required` is
-   green, with no further review. A conflict confined to generated files
-   (`BUILD.bazel` srcs, shard manifests, `tree.golden`) and resolved by their
-   generator still counts as clean. Any other resolution gets
-   `status/needs-review-auto`. Release branches have no merge queue: merge
-   the PR yourself once its checks pass.
+   green, with no further review. A pick still counts as clean when its only
+   conflicts are in `CHANGELOG.md` (resolved by keeping the release branch's
+   version) or in generated files (`BUILD.bazel` srcs, shard manifests,
+   `tree.golden`) resolved by their generator. Check it: outside those files
+   the pick's patch-id must equal the `main` commit's
+   (`git show <sha> -- . ':!CHANGELOG.md' | git patch-id --stable`). Any other
+   resolution gets `status/needs-review-auto`. Release branches have no merge
+   queue: merge the PR yourself once its checks pass.
 
 **Migrations on a release line.** The migration runner reads its cursor as
 `MAX(version)` (`internal/storage/schema/schema.go`), so a migration numbered
@@ -156,15 +159,22 @@ below one a database has already applied never runs. In each series (main and
 ignored), a release branch's migrations must stay a byte-identical prefix of
 `main`'s. Backport a migration only at the branch's next free number, only as
 `main`'s identical file, and never renumber it. Once `main` has merged a
-higher-numbered migration, a release-line schema fix must be a Go
-pre-migration repair instead. See
-`internal/storage/schema/migrations/README.md`.
+higher-numbered migration, a release-line schema fix can't be a new migration
+file. A Go pre-migration repair reaches only stores whose version is still
+pending. For stores already at the branch's latest version, the fix must be
+an open-time repair gated by its own `migrationWorkNeeded` term (which
+`alreadyConverged` inherits), as `ensureBackfilledCustomStatusesCustomTypes`
+does. `main`'s migration for the same fix must then tolerate the repaired
+shape. See `internal/storage/schema/migrations/README.md`.
 
 **Docs freshness on a release line.** `doc_freshness_test` compares each
 "Last reviewed" marker with today's date, so a long-lived release branch goes
-red when a marker turns 90 days old. In the first release-prep PR on the
-branch, pin the branch's `doc_freshness_test` with `DOC_FRESHNESS_TODAY` set to
-the cut date. The pin is for the release line only; never forward-port it.
+red when a marker turns 90 days old. Right after the cut, give the branch's
+`//scripts/repochecks:doc_freshness_test` an
+`env = {"DOC_FRESHNESS_MAX_AGE_DAYS": "3650"}` so markers stop expiring there.
+Don't pin `DOC_FRESHNESS_TODAY` instead: a backport that refreshes a marker
+after the pinned date would then fail the future-date check. The pin is for
+the release line only; never forward-port it.
 
 **Tag from the release branch**, following [1. Prepare Release](#1-prepare-release)
 onward with the branch checked out in place of `main`.

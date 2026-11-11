@@ -159,6 +159,10 @@ has already applied never runs. So in each series (main and ignored), a release
 branch's migrations stay a byte-identical prefix of `main`'s. Backport a
 migration only at the branch's next free number, only as `main`'s identical
 file, and never renumber it. Once `main` has merged a higher-numbered
-migration, a fix for the release line must be a Go pre-migration repair, not
-a new migration file. RELEASING.md ("Backports") has the full recipe.
+migration, a fix for the release line can't be a new migration file. A Go
+pre-migration repair reaches only stores whose version is still pending; for
+stores already at the branch's latest version, use an open-time repair gated
+by its own `migrationWorkNeeded` term, as `ensureBackfilledCustomStatusesCustomTypes`
+does, and make `main`'s migration tolerate the repaired shape. RELEASING.md
+("Backports") has the full recipe.
 
