@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -137,8 +138,19 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 	// throttle: when there are no changes, there is nothing to throttle.
 	currentCommit, err := storeStateHash(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to get current commit: %v\n", err)
-		return nil
+		// A backend that cannot hash its state at all (the HTTP client's
+		// typed refusal) is missing a capability, not failing an export:
+		// that stays a warning-only skip. Any other failure means this
+		// command's writes may never reach the JSONL, so the caller must
+		// see it (GH#6163). Without a hash there is no comparing against
+		// commandAutoExportBaseline either, so this fails whatever the
+		// command did.
+		var unsupported *storage.ErrUnsupported
+		if errors.As(err, &unsupported) {
+			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to get current commit: %v\n", err)
+			return nil
+		}
+		return fmt.Errorf("auto-export to %s: read store state hash: %w", fullPath, err)
 	}
 	if currentCommit == state.LastDoltCommit && state.LastDoltCommit != "" {
 		debug.Logf("auto-export: no changes since last export\n")
@@ -161,14 +173,12 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 	if !allowEmptyOverwrite {
 		rec, err := reconcileAutoExportJSONL(ctx, fullPath, state.LastDiffAnchor)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to compare existing JSONL against local store: %v\n", err)
-			return nil
+			return autoExportFailure(fmt.Errorf("auto-export to %s: compare existing JSONL against local store: %w", fullPath, err), currentCommit)
 		}
 		provenDeleted = rec.provenDeleted
 
 		if skip, existingCount, err := shouldSkipEmptyAutoExport(ctx, rec); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to check existing JSONL: %v\n", err)
-			return nil
+			return autoExportFailure(fmt.Errorf("auto-export to %s: check for an empty export over existing JSONL: %w", fullPath, err), currentCommit)
 		} else if skip {
 			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: current database would export 0 issues, but %s already contains %d issue(s); refusing to overwrite. Run `bd init --from-jsonl` to import the JSONL file, or move it aside and retry.\n", fullPath, existingCount)
 			return nil
@@ -215,8 +225,17 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 	if !didIncremental {
 		issueCount, memoryCount, err = exportToFile(ctx, fullPath, false)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: auto-export failed: %v\n", err)
-			return nil
+			// The shrink guard's deliberate refusal protects records
+			// outside auto-export scope; like the refusals above it stays
+			// a warning-only skip. Anything else is a failed export that
+			// leaves the JSONL behind the store, so the caller must see
+			// it (GH#6163).
+			var refusal *autoExportOverwriteRefusal
+			if errors.As(err, &refusal) {
+				fmt.Fprintf(os.Stderr, "Warning: auto-export failed: %v\n", err)
+				return nil
+			}
+			return autoExportFailure(fmt.Errorf("auto-export to %s: %w", fullPath, err), currentCommit)
 		}
 		dirtyIDs = nil
 	}
@@ -284,6 +303,23 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 		Memories:       memoryCount,
 	}
 	saveExportAutoState(beadsDir, &newState)
+	return nil
+}
+
+// autoExportFailure decides what err, a failed auto-export of the store state
+// currentHash, does to the command. When currentHash still matches
+// commandAutoExportBaseline, the command changed nothing the JSONL tracks: the
+// export was failing before it ran and none of its own changes are missing,
+// so this warns and returns nil, as before GH#6163. Otherwise every later
+// command outside the read-only list would retry the failed export (it saves
+// no state) and exit 1 with nothing of its own lost; the next command that
+// changes the store reports it instead. An unknown (empty) baseline returns
+// err, as a change does.
+func autoExportFailure(err error, currentHash string) error {
+	if commandAutoExportBaseline == "" || commandAutoExportBaseline != currentHash {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
 	return nil
 }
 
@@ -904,8 +940,18 @@ func guardAutoExportOverwrite(path string, infraTypes map[string]bool, includeMe
 	if stats.FilteredRecords == 0 {
 		return nil
 	}
-	return fmt.Errorf("auto-export shrink guard: refusing to overwrite %s because it contains %d record(s) outside auto-export scope (%d memories, %d infra/template/ephemeral issues, %d unknown); run an explicit export if you want to replace it", path, stats.FilteredRecords, stats.Memories, stats.FilteredIssues, stats.UnknownRecords)
+	return &autoExportOverwriteRefusal{msg: fmt.Sprintf("auto-export shrink guard: refusing to overwrite %s because it contains %d record(s) outside auto-export scope (%d memories, %d infra/template/ephemeral issues, %d unknown); run an explicit export if you want to replace it", path, stats.FilteredRecords, stats.Memories, stats.FilteredIssues, stats.UnknownRecords)}
 }
+
+// autoExportOverwriteRefusal is the shrink guard's deliberate refusal to
+// overwrite a JSONL holding records outside auto-export scope. It is typed
+// so maybeAutoExport can keep it a warning-only skip while every failure to
+// inspect that JSONL stays an error.
+type autoExportOverwriteRefusal struct {
+	msg string
+}
+
+func (e *autoExportOverwriteRefusal) Error() string { return e.msg }
 
 type autoExportOverwriteStats struct {
 	FilteredRecords int // blocking total: Memories + FilteredIssues + UnknownRecords

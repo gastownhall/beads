@@ -230,3 +230,71 @@ func TestEmbeddedExportConcurrent(t *testing.T) {
 	}
 	t.Logf("%d/%d export workers succeeded", successes, numWorkers)
 }
+
+// TestEmbeddedAutoExportFailureExitStatus pins GH#6163's failure policy end to
+// end through the binary, so the store state hash PersistentPreRunE records
+// before each command is part of what it checks. With the JSONL left broken
+// (merge conflict markers), a write exits 1 with the hint that its change is
+// saved; a read outside the read-only list only warns, since it changed
+// nothing; a --dry-run preview and the export.auto off switch run no export
+// at all. None of them touches the JSONL.
+func TestEmbeddedAutoExportFailureExitStatus(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt export tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "axf")
+	for _, args := range [][]string{
+		{"config", "set", "export.auto", "true"},
+		// Keeps the last good export's throttle from hiding the failures.
+		{"config", "set", "export.interval", "1ms"},
+	} {
+		if _, stderr, exit := bdRunStreams(t, bd, dir, args...); exit != 0 {
+			t.Fatalf("bd %s: exit %d\n%s", strings.Join(args, " "), exit, stderr)
+		}
+	}
+	bdCreate(t, bd, dir, "Exported before the conflict")
+	jsonl := filepath.Join(beadsDir, "issues.jsonl")
+	if _, err := os.Stat(jsonl); err != nil {
+		t.Fatalf("auto-export did not write %s: %v", jsonl, err)
+	}
+	if err := os.WriteFile(jsonl, []byte(conflictedJSONL), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, step := range []struct {
+		args     []string
+		wantExit int
+		want     []string // in stderr; none means no auto-export output at all
+	}{
+		{
+			args:     []string{"create", "Written while the JSONL is broken"},
+			wantExit: 1,
+			want:     []string{"Error: auto-export to " + jsonl, "Hint: any change this command made is saved"},
+		},
+		{args: []string{"memories"}, want: []string{"Warning: auto-export to " + jsonl}},
+		{args: []string{"create", "Previewed only", "--dry-run"}},
+		{args: []string{"config", "set", "export.auto", "false"}},
+	} {
+		_, stderr, exit := bdRunStreams(t, bd, dir, step.args...)
+		if exit != step.wantExit {
+			t.Errorf("bd %s: exit %d, want %d\nstderr:\n%s", strings.Join(step.args, " "), exit, step.wantExit, stderr)
+		}
+		for _, want := range step.want {
+			if strings.Count(stderr, want) != 1 {
+				t.Errorf("bd %s: stderr does not hold %q once:\n%s", strings.Join(step.args, " "), want, stderr)
+			}
+		}
+		if len(step.want) == 0 && strings.Contains(stderr, "auto-export") {
+			t.Errorf("bd %s ran the auto-export:\n%s", strings.Join(step.args, " "), stderr)
+		}
+	}
+	if got, err := os.ReadFile(jsonl); err != nil || string(got) != conflictedJSONL {
+		t.Errorf("%s = %q (err %v), want it left as the conflicted file", jsonl, got, err)
+	}
+	if out := bdList(t, bd, dir, "--json"); !strings.Contains(out, "Written while the JSONL is broken") || strings.Contains(out, "Previewed only") {
+		t.Errorf("bd list = %s, want the failed-export write saved and the preview not", out)
+	}
+}

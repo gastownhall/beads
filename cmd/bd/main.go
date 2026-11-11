@@ -151,6 +151,13 @@ var (
 	// (GH#5896). See deletedIssueIDSet for why it is not persisted.
 	commandDeletedIssueIDs deletedIssueIDSet
 
+	// commandAutoExportBaseline is the store state hash read at the end of
+	// PersistentPreRunE, before the command's own work, when this invocation
+	// runs post-run auto-export. A failed export whose state hash still
+	// matches it was not caused by this command, so it stays a warning (see
+	// autoExportFailure). Empty means unknown.
+	commandAutoExportBaseline string
+
 	// commandDidExplicitDoltCommit is set when a command already created a Dolt commit
 	// explicitly (e.g., bd sync in dolt-native mode, hook flows, bd vc commit).
 	// This prevents a redundant auto-commit attempt in PersistentPostRun.
@@ -1374,6 +1381,7 @@ var rootCmd = &cobra.Command{
 		commandDidWrite.Store(false)
 		commandMayEmptyJSONLExport.Store(false)
 		commandDeletedIssueIDs.reset()
+		commandAutoExportBaseline = ""
 		commandDidExplicitDoltCommit = false
 		commandDidWriteTipMetadata = false
 		commandTipIDsShown = make(map[string]struct{})
@@ -2477,6 +2485,10 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
+		// Last, so the auto-import and molecule loads above count as
+		// before the command: the state its post-run auto-export compares.
+		captureAutoExportBaseline(rootCtx, cmd, args)
+
 		// Sync all state to CommandContext for unified access.
 		syncCommandContext()
 
@@ -2629,9 +2641,9 @@ var rootCmd = &cobra.Command{
 				// Auto-export: write git-tracked JSONL for portability if enabled and due.
 				// Read-only commands must not perform post-run maintenance writes or emit
 				// sync guidance after machine-readable output.
-				if shouldRunPostCommandAutoExport(cmd) {
+				if shouldRunPostCommandAutoExport(cmd, args) {
 					if err := runPostRunAutoExport(rootCtx, commandAllowsEmptyAutoExport(cmd)); err != nil {
-						return HandleError("%v", err)
+						return reportAutoExportFailure(cmd, err)
 					}
 				}
 
@@ -2774,11 +2786,54 @@ func writeMemDiagnostics(memProfileFlag string) {
 	}
 }
 
-func shouldRunPostCommandAutoExport(cmd *cobra.Command) bool {
+// shouldRunPostCommandAutoExport reports whether post-run auto-export runs
+// for this invocation. Besides the read-only commands it skips two more:
+//
+//   - A preview (--dry-run, --inspect) promised not to mutate, and rewriting
+//     the JSONL is a mutation, the same judgement the journal prune makes.
+//   - "bd config set export.auto false" is the off switch. config set writes
+//     config.yaml, but this process read export.auto before it ran, so
+//     without the exemption the switch would still run the export it turns
+//     off, and fail with it.
+func shouldRunPostCommandAutoExport(cmd *cobra.Command, args []string) bool {
 	if cmd == nil {
 		return true
 	}
-	return !isReadOnlyCommand(cmd.Name())
+	if isReadOnlyCommand(cmd.Name()) || isPreviewCommand(cmd) {
+		return false
+	}
+	return !isDisablingSettingViaConfigCommand(cmd, args, "export.auto")
+}
+
+// captureAutoExportBaseline sets commandAutoExportBaseline for an invocation
+// whose post-run auto-export may run. It costs one state hash read, and a
+// read that fails leaves the baseline unknown.
+func captureAutoExportBaseline(ctx context.Context, cmd *cobra.Command, args []string) {
+	if store == nil || !config.GetBool("export.auto") || !shouldRunPostCommandAutoExport(cmd, args) {
+		return
+	}
+	hash, err := storeStateHash(ctx)
+	if err != nil {
+		debug.Logf("auto-export: no baseline state hash: %v\n", err)
+		return
+	}
+	commandAutoExportBaseline = hash
+}
+
+// reportAutoExportFailure prints a failed post-run auto-export once and
+// returns its exit-1 error. The command itself succeeded, so the hint says its
+// changes are saved: after a bare "Error:" a user would run a create again.
+// Cobra also prints a returned error, and the usage text, for a command that
+// does not silence them itself (dep relate, duplicate, batch, ...), so this
+// silences both, as migrationFreezeGate does.
+func reportAutoExportFailure(cmd *cobra.Command, err error) error {
+	if cmd != nil {
+		cmd.SilenceErrors = true
+		cmd.SilenceUsage = true
+	}
+	return HandleErrorWithHint(err.Error(),
+		"any change this command made is saved; only the JSONL export failed, so check the result before you run the command again. "+
+			"Fix the cause and the next write exports again, or run `bd config set export.auto false` to turn auto-export off.")
 }
 
 func shouldRunAutoImportJSONL(cmd *cobra.Command, s storage.DoltStorage, useReadOnly, globalFlag, serverMode bool) bool {
@@ -2804,16 +2859,23 @@ func shouldRunAutoImportJSONL(cmd *cobra.Command, s storage.DoltStorage, useRead
 // trigger the very auto-import it is meant to disable on its own invocation
 // when a stale .beads/issues.jsonl sits next to an empty database (GH#4304).
 func isDisablingImportAutoViaConfigCommand(cmd *cobra.Command, args []string) bool {
+	return isDisablingSettingViaConfigCommand(cmd, args, "import.auto")
+}
+
+// isDisablingSettingViaConfigCommand reports whether the command about to run
+// is "bd config set <key> false" (or an equivalent "bd config set-many ...
+// <key>=false" pair).
+func isDisablingSettingViaConfigCommand(cmd *cobra.Command, args []string, key string) bool {
 	if cmd == nil || cmd.Parent() == nil || cmd.Parent().Name() != "config" {
 		return false
 	}
 	switch cmd.Name() {
 	case "set":
-		return len(args) >= 2 && args[0] == "import.auto" && isFalsyConfigValue(args[1])
+		return len(args) >= 2 && args[0] == key && isFalsyConfigValue(args[1])
 	case "set-many":
 		for _, arg := range args {
-			key, value, ok := strings.Cut(arg, "=")
-			if ok && key == "import.auto" && isFalsyConfigValue(value) {
+			k, value, ok := strings.Cut(arg, "=")
+			if ok && k == key && isFalsyConfigValue(value) {
 				return true
 			}
 		}
