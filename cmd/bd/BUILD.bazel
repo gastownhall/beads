@@ -416,6 +416,7 @@ go_library(
         "//internal/endpointtrust",
         "//internal/eventsjournal",
         "//internal/execenv",
+        "//internal/execwin",
         "//internal/formula",
         "//internal/git",
         "//internal/gitenv",

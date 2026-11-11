@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/execenv"
+	"github.com/steveyegge/beads/internal/execwin"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/metrics"
@@ -1036,7 +1037,7 @@ func gitTrackedFileContextWithEnv(path string, clean, inherited []string) string
 	for index, env := range [][]string{clean, inherited} {
 		// #nosec G204 G702 - fixed "git" command; dir/base come from the hooks
 		// directory bd itself resolved, not user input
-		cmd := exec.Command("git", "-C", dir, "ls-files", "--error-unmatch", "--", base)
+		cmd := execwin.Hide(exec.Command("git", "-C", dir, "ls-files", "--error-unmatch", "--", base))
 		cmd.Env = env
 		err := cmd.Run()
 		if err == nil {
@@ -1073,7 +1074,7 @@ func resolveStandaloneHooksContext() (*initHooksContext, error) {
 		}
 		return &initHooksContext{workDir: workDir, paths: git.HooksContext{HooksDir: dir}, env: clean, inheritedEnv: inherited}, nil
 	}
-	cmd := exec.Command("git", "rev-parse", "--absolute-git-dir")
+	cmd := execwin.Hide(exec.Command("git", "rev-parse", "--absolute-git-dir"))
 	cmd.Dir, cmd.Env = workDir, inherited
 	gitDir, err := cmd.Output()
 	if err != nil {
@@ -1590,7 +1591,7 @@ func configureSharedHooksPath() error {
 		return fmt.Errorf("not in a git repository")
 	}
 	absHooksPath := filepath.Join(repoRoot, ".beads-hooks")
-	cmd := exec.Command("git", "config", "core.hooksPath", absHooksPath)
+	cmd := execwin.Hide(exec.Command("git", "config", "core.hooksPath", absHooksPath))
 	cmd.Dir = repoRoot
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git config failed: %w (output: %s)", err, string(output))
@@ -1612,7 +1613,7 @@ func configureBeadsHooksPath() error {
 		return fmt.Errorf("not in a git repository")
 	}
 	absHooksPath := filepath.Join(repoRoot, ".beads", "hooks")
-	cmd := exec.Command("git", "config", "core.hooksPath", absHooksPath)
+	cmd := execwin.Hide(exec.Command("git", "config", "core.hooksPath", absHooksPath))
 	cmd.Dir = repoRoot
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git config failed: %w (output: %s)", err, string(output))
@@ -1771,7 +1772,7 @@ func resetHooksPathAt(repoRoot, commonDir, storageHooksDir string, configEnv []s
 	roleConfigEnv := gitenv.ScrubRoutingAndSuppression(configEnv)
 	var failures []string
 
-	cmd := exec.Command("git", "--git-dir", commonDir, "config", "--local", "--get", "core.hooksPath")
+	cmd := execwin.Hide(exec.Command("git", "--git-dir", commonDir, "config", "--local", "--get", "core.hooksPath"))
 	cmd.Dir = repoRoot
 	cmd.Env = configEnv
 	if out, err := cmd.Output(); err == nil {
@@ -1782,7 +1783,7 @@ func resetHooksPathAt(repoRoot, commonDir, storageHooksDir string, configEnv []s
 		// forms. Shared with doctor.CheckHooksPath/FixHooksPath so uninstall and
 		// `bd doctor --fix` cannot disagree about what "beads-managed" means.
 		if doctor.IsBeadsManagedHooksPath(repoRoot, storageHooksDir, hooksPath) {
-			unsetCmd := exec.Command("git", "--git-dir", commonDir, "config", "--local", "--unset", "core.hooksPath")
+			unsetCmd := execwin.Hide(exec.Command("git", "--git-dir", commonDir, "config", "--local", "--unset", "core.hooksPath"))
 			unsetCmd.Dir = repoRoot
 			unsetCmd.Env = configEnv
 			if output, err := unsetCmd.CombinedOutput(); err != nil {
@@ -1811,11 +1812,11 @@ func resetHooksPathAt(repoRoot, commonDir, storageHooksDir string, configEnv []s
 	// ScrubRouting keeps: beads.role is an authority value whose absence reads
 	// as maintainer, so a suppressed config file would report a clean uninstall
 	// while leaving the key set here.
-	getRoleCmd := exec.Command("git", "--git-dir", commonDir, "config", "--local", "--get", "beads.role")
+	getRoleCmd := execwin.Hide(exec.Command("git", "--git-dir", commonDir, "config", "--local", "--get", "beads.role"))
 	getRoleCmd.Dir = repoRoot
 	getRoleCmd.Env = roleConfigEnv
 	if out, err := getRoleCmd.CombinedOutput(); err == nil {
-		roleCmd := exec.Command("git", "--git-dir", commonDir, "config", "--local", "--unset", "beads.role")
+		roleCmd := execwin.Hide(exec.Command("git", "--git-dir", commonDir, "config", "--local", "--unset", "beads.role"))
 		roleCmd.Dir = repoRoot
 		roleCmd.Env = roleConfigEnv
 		if output, err := roleCmd.CombinedOutput(); err != nil {
@@ -1873,7 +1874,7 @@ func runChainedHook(hookName string, args []string) int {
 
 	// Run the chained hook
 	// #nosec G204 -- hookName is from controlled list, path is from git directory
-	cmd := exec.Command(oldHookPath, args...)
+	cmd := execwin.Hide(exec.Command(oldHookPath, args...))
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
@@ -1980,7 +1981,7 @@ func exportJSONLForCommit() {
 	// Run from the project root, not .beads/. Embedded Dolt discovery starts
 	// from cwd, so cwd=.beads/ can make the export subprocess look for a
 	// nested .beads/.beads workspace and warn on every commit (GH#3454).
-	cmd := exec.Command("bd", "export", "-o", fullPath)
+	cmd := execwin.Hide(exec.Command("bd", "export", "-o", fullPath))
 	cmd.Dir = exportSubprocessDir(beadsDir)
 	cmd.Env = hookSubprocessEnv(os.Environ())
 	cmd.Stderr = os.Stderr
@@ -2128,7 +2129,7 @@ func hookLinkedWorktreePrimaryRoot(hookRoot string) string {
 	}
 	// #nosec G702 - fixed "git" command; args are constant subcommands plus an internal
 	// hookRoot derived from the hook's own beads dir, never attacker-controlled input.
-	cmd := exec.Command("git", "-C", hookRoot, "rev-parse", "--git-common-dir")
+	cmd := execwin.Hide(exec.Command("git", "-C", hookRoot, "rev-parse", "--git-common-dir"))
 	// Scrub the inherited GIT_* vars so git describes hookRoot itself rather
 	// than whatever repository GIT_DIR happens to name.
 	cmd.Env = scrubGitHookEnv(os.Environ())
@@ -2227,7 +2228,7 @@ func isExportFileStagedForDeletion(fullPath string) bool {
 		debug.Logf("pre-commit: failed to resolve the commit index: %v\n", err)
 	}
 	for _, index := range stagingIndexes(indexFile) {
-		checkCmd := exec.Command("git", "diff", "--cached", "--diff-filter=D", "--name-only", "--", rel)
+		checkCmd := execwin.Hide(exec.Command("git", "diff", "--cached", "--diff-filter=D", "--name-only", "--", rel))
 		checkCmd.Dir = dir
 		checkCmd.Env = envForIndex(env, indexFile, index)
 		if out, _ := checkCmd.Output(); len(out) > 0 {
@@ -2263,7 +2264,7 @@ func preCommitHasStagedBeadsFiles(beadsDir string) bool {
 	if err != nil {
 		debug.Logf("pre-commit: failed to resolve the commit index: %v\n", err)
 	}
-	cmd := exec.Command("git", "diff", "--cached", "--name-only", "--", ".beads")
+	cmd := execwin.Hide(exec.Command("git", "diff", "--cached", "--name-only", "--", ".beads"))
 	cmd.Dir = cmdDir
 	cmd.Env = env
 	out, err := cmd.Output()
@@ -2358,7 +2359,7 @@ func importJSONLForSync(reason string) {
 	// checkout's tracked file: GH#6680's second symptom, from the fix for its
 	// first. Keeping the marker also suppresses the subprocess's auto-backup,
 	// matching the export lane (hookSubprocessEnv).
-	cmd := exec.Command("bd", "import", "--quiet", fullPath)
+	cmd := execwin.Hide(exec.Command("bd", "import", "--quiet", fullPath))
 	cmd.Dir = exportSubprocessDir(beadsDir)
 	cmd.Env = hookSubprocessEnv(os.Environ())
 

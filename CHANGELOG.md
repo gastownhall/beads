@@ -1226,6 +1226,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **On Windows, bd no longer opens console windows when it has no console of
+  its own** (started by an editor, an agent host, a GUI hook runner or a
+  scheduled task). Each `dolt` or `git` command such a bd started got a new
+  console, which Windows Terminal, as the default terminal, opened as a window
+  that took focus. A short-lived child such as `dolt init` could exit before
+  Windows Terminal attached, leaving its launch error `0x800700E8` ("The pipe
+  is being closed") in the window, and Windows Terminal could replay that
+  session later from `C:\Windows\System32`. A console-less bd now starts its
+  ordinary commands with a hidden console (`CREATE_NO_WINDOW`); a bd with a
+  console leaves them as before. The shared `dolt sql-server`,
+  `bd db-proxy-child` and the proxy's managed `dolt sql-server` always get a
+  hidden console of their own, which dolt's `uname` children inherit, so the
+  auto-started shared `dolt sql-server` no longer exits when the terminal
+  that started it closes. A build-time policy test keeps new commands in that
+  code hidden too (#6076, reported and first fixed by @davidcforbes in #6077,
+  with the spawn guard from @Zireael's #7572).
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

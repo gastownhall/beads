@@ -29,6 +29,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/steveyegge/beads/internal/execwin"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/utils"
@@ -408,7 +409,7 @@ func getGitCommonDirForPath(path string) (string, error) {
 	case ok && !isRepo:
 		return "", fmt.Errorf("failed to get git common dir for %s: not a git repository", path)
 	case !ok:
-		cmd := exec.Command("git", "-C", path, "rev-parse", "--git-common-dir")
+		cmd := execwin.Hide(exec.Command("git", "-C", path, "rev-parse", "--git-common-dir"))
 		output, err := cmd.Output()
 		if err != nil {
 			return "", fmt.Errorf("failed to get git common dir for %s: %w", path, err)
@@ -482,7 +483,7 @@ func RepoRootFor(dir string) string {
 
 // getRepoRootFromPath returns the git repository root for a given path.
 func getRepoRootFromPath(path string) (string, error) {
-	cmd := exec.Command("git", "-C", path, "rev-parse", "--show-toplevel")
+	cmd := execwin.Hide(exec.Command("git", "-C", path, "rev-parse", "--show-toplevel"))
 	output, err := cmd.Output()
 	if err != nil {
 		err = fmt.Errorf("failed to get git root for %s: %w", path, err)
@@ -521,7 +522,7 @@ func (rc *RepoContext) GitCmd(ctx context.Context, args ...string) *exec.Cmd {
 // gitCmdWithEnv applies the existing repository pins after the caller policy.
 func (rc *RepoContext) gitCmdWithEnv(ctx context.Context, env []string, args ...string) *exec.Cmd {
 	gitArgs := append([]string{"-c", "core.hooksPath="}, args...)
-	cmd := exec.CommandContext(ctx, "git", gitArgs...)
+	cmd := execwin.Hide(exec.CommandContext(ctx, "git", gitArgs...))
 	cmd.Dir = rc.RepoRoot
 
 	// GH#2538: Ensure git uses the target repository, not the worktree we may be running from.
@@ -545,7 +546,7 @@ func (rc *RepoContext) gitCmdWithEnv(ctx context.Context, env []string, args ...
 //
 // If CWD is not in a git repository, cmd.Dir is left unset (uses process CWD).
 func (rc *RepoContext) GitCmdCWD(ctx context.Context, args ...string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := execwin.Hide(exec.CommandContext(ctx, "git", args...))
 	if rc.CWDRepoRoot != "" {
 		cmd.Dir = rc.CWDRepoRoot
 	}

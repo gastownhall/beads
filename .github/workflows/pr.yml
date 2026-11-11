@@ -288,6 +288,16 @@ jobs:
   # loudly (dolt is not installed on the Windows runners), and the
   # unix-socket cases skip on Windows by design.
   #
+  # internal/execwin keeps the commands a console-less bd starts from opening
+  # console windows (#6076). Its Windows half (the attached-console probe,
+  # the merge onto a copy of the caller's attributes, and the subprocess test
+  # that checks a console-less launcher's children and their descendants get a
+  # console with no visible window) builds only for Windows, so the Ubuntu
+  # lanes never run it: run the whole package here. The creation-flag pins of
+  # the shared sql-server and the proxy child run by name: their packages are
+  # not Windows-clean as a whole. The managed sql-server's pin runs with the
+  # dbproxy server package.
+  #
   # F7a: fold of two small, independent windows-latest jobs
   # (test-windows-doltversion, test-windows-dbproxy-server) into one. Neither
   # was in ci-gate's needs/CI_GATE_REQUIRED before the fold (promoting either
@@ -296,16 +306,16 @@ jobs:
   # Windows jobs F4 touches (test-windows-liveness, worktree-remove-windows,
   # the preflight/doc-freshness matrices, the twins).
   #
-  # Review SF-1 (2026-10-03): neither step carries continue-on-error, so a
+  # Review SF-1 (2026-10-03): no test step carries continue-on-error, so a
   # failing test already fails the job on its own; `if: ${{ !cancelled() }}`
-  # on the second step only ensures it still runs after the first fails,
-  # giving both packages' results in one log instead of stopping at the
+  # on each test step only ensures it still runs after an earlier one fails,
+  # giving every package's results in one log instead of stopping at the
   # first failure. No aggregator step is needed.
-  # Blacksmith Windows (blacksmith-2vcpu-windows-2025) for every PR; both steps
-  # build with CGO_ENABLED=0 (or no cgo at all for doltversion), so this job
-  # carries none of test-windows-liveness's cgo-toolchain risk.
+  # Blacksmith Windows (blacksmith-2vcpu-windows-2025) for every PR; every test
+  # step builds with CGO_ENABLED=0 (or no cgo at all for doltversion), so this
+  # job carries none of test-windows-liveness's cgo-toolchain risk.
   test-windows-small:
-    name: Test (Windows) small packages (doltversion, dbproxy server)
+    name: Test (Windows) small packages (doltversion, dbproxy server, execwin)
     needs: scope
     if: ${{ needs.scope.outputs.platforms == 'true' }}
     runs-on: ${{ 'blacksmith-2vcpu-windows-2025' }}
@@ -321,7 +331,7 @@ jobs:
           cache: false
 
       # F7b review fix (S9): see test-windows-liveness's identical step for
-      # the full rationale. Both packages here build with CGO_ENABLED=0 (or
+      # the full rationale. Every package here builds with CGO_ENABLED=0 (or
       # no cgo at all), so this is lower-risk than test-windows-liveness, but
       # printing the toolchain state costs nothing and keeps the diagnostic
       # convention uniform across every moved Windows job.
@@ -340,6 +350,20 @@ jobs:
         env:
           CGO_ENABLED: "0"
         run: go test -tags gms_pure_go -count=1 -v ./internal/storage/dbproxy/server/
+
+      - name: Run execwin package tests on Windows
+        id: execwin
+        if: ${{ !cancelled() }}
+        env:
+          CGO_ENABLED: "0"
+        run: go test -tags gms_pure_go -count=1 -v ./internal/execwin/
+
+      - name: Run long-lived child console pins on Windows
+        id: console-pins
+        if: ${{ !cancelled() }}
+        env:
+          CGO_ENABLED: "0"
+        run: go test -tags gms_pure_go -count=1 -v -run '^TestProcAttrDetached' ./internal/doltserver/ ./internal/storage/dbproxy/proxy/
 
   # Destructive worktree removal depends on native Windows path identity.
   # This focused process suite requires NTFS per-directory case sensitivity

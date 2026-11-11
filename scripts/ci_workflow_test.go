@@ -2735,6 +2735,21 @@ func TestPRWindowsSmallDbproxyServerIsCGODisabled(t *testing.T) {
 	}
 }
 
+// The Windows console tests (#6076) build only for Windows: internal/execwin's
+// Windows half, its subprocess test and the long-lived children's
+// creation-flag pins run nowhere but test-windows-small, CGO-disabled like its
+// other steps.
+func TestPRWindowsSmallRunsTheConsoleTests(t *testing.T) {
+	job := readCIWorkflow(t, "pr.yml").job(t, "test-windows-small")
+	for step, want := range map[string]string{
+		"Run execwin package tests on Windows":         "go test -tags gms_pure_go -count=1 -v ./internal/execwin/",
+		"Run long-lived child console pins on Windows": "go test -tags gms_pure_go -count=1 -v -run '^TestProcAttrDetached' ./internal/doltserver/ ./internal/storage/dbproxy/proxy/",
+	} {
+		assertStepRunsExactly(t, job, step, want)
+		assertStepEnvValue(t, job, step, "CGO_ENABLED", "0")
+	}
+}
+
 // stepContinueOnError reports whether a step's continue-on-error is truthy
 // (the field unmarshals as `any` because the YAML schema also allows an
 // expression string, which GitHub itself treats as whatever it evaluates to
@@ -2776,6 +2791,7 @@ func TestPRWindowsMakeShellLegsFailTheJob(t *testing.T) {
 		},
 		"test-windows-small": {
 			"Run doltversion package tests on Windows", "Run dbproxy server package tests on Windows",
+			"Run execwin package tests on Windows", "Run long-lived child console pins on Windows",
 		},
 	}
 	for jobName, names := range legSteps {

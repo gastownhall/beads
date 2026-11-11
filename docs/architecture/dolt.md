@@ -707,6 +707,64 @@ If you accidentally committed a Dolt data directory:
 Embedded mode is single-writer (enforced via file lock). If you need concurrent
 access, switch to server mode. See [Migrating Between Backends](#migrating-between-backends).
 
+### Stray Console Windows on Windows
+
+**Symptom:** on Windows, terminal windows flash or steal focus while bd runs,
+most often when bd is started by something with no console of its own (an
+editor, an agent host, a GUI hook runner, a scheduled task). A window can also
+show Windows Terminal's own launch error, such as
+`[error 2147942632 (0x800700E8) when launching ...dolt.exe init]` ("The pipe
+is being closed"): a short-lived child exited before Windows Terminal attached
+to it.
+
+**Cause:** a console program started by a process without a console gets a
+brand-new console. With Windows Terminal as the default terminal, each new
+console opens as a window (gastownhall/beads#6076).
+
+**What bd does:**
+
+- **Ordinary commands** such as git, dolt CLI calls and hooks go through
+  `execwin.Hide`. If bd has a console, children share it as before, so
+  prompts, Ctrl+C and output work unchanged. If bd has no console, the child
+  is started with `CREATE_NO_WINDOW` and gets a hidden console instead of a
+  visible one.
+- **The three long-lived children always get exactly
+  `CREATE_NO_WINDOW|CREATE_NEW_PROCESS_GROUP`, never `DETACHED_PROCESS`:**
+  - the shared `dolt sql-server` (`internal/doltserver`)
+  - the dbproxy child (`internal/storage/dbproxy/proxy`)
+  - the proxy's managed `dolt sql-server` (`internal/storage/dbproxy/server`)
+
+  This gives each a hidden console of its own, which its console descendants
+  (such as dolt's `uname` probes) inherit. `DETACHED_PROCESS` would leave them
+  without one, so each of those descendants would open a window.
+
+**Scope:** `scripts/console_spawn_policy_test.go` fails the build if any of
+these files starts a command without `execwin.Hide` or the exact pin above:
+
+- every non-test file under `internal/beads`, `internal/doltserver`,
+  `internal/doltversion`, `internal/git`, `internal/remotecache`,
+  `internal/storage/dbproxy`, `internal/storage/dolt` and
+  `internal/storage/doltutil`
+- the single files `cmd/bd/{agent_hook,compact,export_auto,gate,hooks,main,prime,proxied_server}.go`,
+  `internal/config/config.go` (the `git rev-parse` bd runs at startup when it
+  finds no `.beads/config.yaml` and `BEADS_DIR` is unset),
+  `internal/hooks/hooks_windows.go` and `internal/metrics/spawn.go`
+
+Files outside that list, such as editor, pager, credential and setup paths, are
+not covered. That does not mean they are never run without a console.
+
+**Prompts:** a child of a bd with no console has no window to show a prompt in.
+A command that stops to ask for input, such as an SSH host-key or passphrase
+prompt or git asking for credentials in the terminal, waits for an answer
+nobody can give, and bd waits with it until that command's timeout, if it has
+one. Give such tools their credentials non-interactively (an SSH agent, a git
+credential manager) when bd runs without a console.
+
+**If you still see windows:** bd cannot hide its own first window; whatever
+launched bd owns that one. To find a window's source, record its parent
+process chain (for example with Process Explorer). If the parent is bd or
+`dolt.exe`, report the command line and how bd was started.
+
 ## Configuration Reference
 
 ```yaml

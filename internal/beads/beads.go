@@ -22,6 +22,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/execwin"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/storage"
@@ -298,7 +299,7 @@ func selectedBeadsGitOutput(dir string, args ...string) (string, error) {
 func gitOutputEnv(env []string, dir string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...) //nolint:gosec // args are internal, not user-supplied
+	cmd := execwin.Hide(exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)) //nolint:gosec // args are internal, not user-supplied
 	cmd.Env = env
 	output, err := cmd.Output()
 	if err != nil {
@@ -1505,7 +1506,7 @@ func ResolveBeadsDirForRepo(repoPath string) string {
 }
 
 func worktreeFallbackBeadsDirForRepo(repoPath string) string {
-	cmd := exec.Command("git", "-C", repoPath, "rev-parse", "--git-dir", "--git-common-dir")
+	cmd := execwin.Hide(exec.Command("git", "-C", repoPath, "rev-parse", "--git-dir", "--git-common-dir"))
 	cmd.Env = gitenv.ScrubRouting(os.Environ())
 	output, err := cmd.Output()
 	if err != nil {

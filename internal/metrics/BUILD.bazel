@@ -15,6 +15,7 @@ go_library(
     deps = [
         "//internal/config",
         "//internal/execenv",
+        "//internal/execwin",
         "@com_github_dolthub_eventkit//:eventkit",
         "@com_github_dolthub_eventkit//transport/ga4",
         "@in_gopkg_yaml_v3//:yaml_v3",
