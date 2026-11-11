@@ -883,9 +883,10 @@ func TestRunSyncLoopConflictAfterPushRaceRecordsPulled(t *testing.T) {
 }
 
 // Whether the conflicted merge was aborted or left live in the working set is
-// read from WHICH detection source fired, never assumed: the SQL pull route
-// aborts and restores, while the CLI/git-protocol route deliberately leaves the
-// conflict rows in place for the operator (finishCLIPull).
+// read from WHICH detection source fired, never assumed: both pull routes merge
+// in bd's own transaction and roll back a conflicted merge they opened, which
+// restores the working set, but a merge another client left open stays live
+// (see mergeFetchedInTx).
 func TestRunSyncLoopConflictLivenessComesFromTheSource(t *testing.T) {
 	t.Run("captured-only conflicts were aborted away", func(t *testing.T) {
 		r := &syncOpsRecorder{pullConflicts: [][]string{{"issues"}}}
@@ -1008,6 +1009,32 @@ func TestSyncConflictMessage(t *testing.T) {
 		}
 		if strings.Contains(got, "bd conflicts resolve") {
 			t.Errorf("aborted-merge halt must not send the operator to resolve a conflict that is not live:\n%s", got)
+		}
+	})
+
+	// GH#7839: every pull route now aborts a declined merge it opened, so the
+	// restored-merge halt, the sync help and the pull help must point at
+	// reconciling the two histories with an explicit side, never at conflict
+	// rows a merge would leave live; the live halt keeps the live commands.
+	t.Run("restored merge guidance reconciles histories without promising live rows", func(t *testing.T) {
+		const reconcile = "bd vc merge <remote>/<branch> --strategy ours|theirs"
+		for name, text := range map[string]string{
+			"restored halt": joined(&syncOutcome{Conflicts: []string{"issues"}}),
+			"sync help":     syncCmd.Long,
+			"pull help":     doltPullCmd.Long,
+		} {
+			if !strings.Contains(text, reconcile) {
+				t.Errorf("%s does not name the reconciliation %q:\n%s", name, reconcile, text)
+			}
+			for _, promise := range []string{"leaves conflicts live", "use 'bd conflicts resolve' after a pull"} {
+				if strings.Contains(text, promise) {
+					t.Errorf("%s still promises live conflict rows (%q):\n%s", name, promise, text)
+				}
+			}
+		}
+		live := joined(&syncOutcome{Conflicts: []string{"issues"}, ConflictsLive: true})
+		if strings.Contains(live, reconcile) || !strings.Contains(live, "bd conflicts resolve") {
+			t.Errorf("live halt must keep the live resolution commands, not the reconciliation:\n%s", live)
 		}
 	})
 }

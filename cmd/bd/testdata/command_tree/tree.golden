@@ -2021,9 +2021,11 @@ bd dolt pull
     |
     | Use --strategy ours|theirs to resolve conflicts the auto-resolver declines
     | (e.g. both sides edited the same issue since the last sync) instead of
-    | aborting the pull for manual resolution. Embedded storage only (#4992); on
-    | server-mode/sql-server storage use 'bd conflicts resolve' after a pull that
-    | reports conflicts.
+    | aborting the pull for manual resolution. Embedded storage only (#4992). On
+    | server-mode/sql-server storage a pull with conflicts it cannot resolve aborts
+    | the merge and restores the working set, leaving no conflict rows to resolve;
+    | reconcile the histories with
+    | 'bd vc merge <remote>/<branch> --strategy ours|theirs', then pull again.
   flag --remote type=string default="" usage="Pull from a specific named remote instead of the default"
   flag --strategy type=string default="" usage="Conflict resolution strategy for conflicts the auto-resolver declines: 'ours' or 'theirs' (embedded storage only, #4992)"
 
@@ -7041,8 +7043,11 @@ bd sync
     | until an operator resolves the divergence. (The pull underneath does auto-settle
     | the conflict classes it can settle convergently — machine-local metadata,
     | audit-only dependency rows, and last-write-wins on issue cells. Anything beyond
-    | those halts here.) Whether the halted merge was aborted or left live in the
-    | working set depends on the pull route, so the halt message reports which.
+    | those halts here.) A conflicted merge the pull itself opened is aborted and the
+    | working set restored, so there are no conflict rows to resolve: reconcile the two
+    | histories with 'bd vc merge <remote>/<branch> --strategy ours|theirs', then sync
+    | again. A merge bd did not open (another client's, already open in the working
+    | set) stays live; the halt message reports which case applies.
     |
     | Exit codes (a sync timer can branch on these without parsing output):
     |

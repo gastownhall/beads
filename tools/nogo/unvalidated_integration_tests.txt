@@ -49,6 +49,7 @@ internal/doltserver/lifecycle_integration_test.go
 internal/doltserver/port_race_test.go
 internal/doltserver/socket_integration_test.go
 internal/doltserver/testmain_integration_test.go
+internal/storage/dolt/cli_pull_decline_integration_test.go
 internal/storage/dolt/federation_test.go
 internal/storage/dolt/fresh_bootstrap_heal_integration_test.go
 internal/storage/dolt/git_remote_shared_server_test.go

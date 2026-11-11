@@ -35,11 +35,11 @@ const doltMergeSucceededMessage = "merge successful"
 //
 // This is the TRANSPORT's own report and nothing more. It is not proof the
 // merge landed where the caller reads — a merge that succeeded on the wrong
-// branch reports "merge successful" quite truthfully — and it exists only on
-// the SQL routes, because `dolt pull` as a subprocess exits 0 either way and
-// says nothing structured. Reported is false in both of those cases and in
-// every other case where no row came back; a caller that treats !Reported as
-// "nothing merged" has misread it.
+// branch reports "merge successful" quite truthfully. Every route merges over
+// SQL and has one, the CLI routes included since GH#7839: they fetch through
+// the `dolt` subprocess and merge what it fetched with CALL DOLT_MERGE.
+// Reported is false whenever no row came back, as when the merge statement
+// failed; a caller that treats !Reported as "nothing merged" has misread it.
 type pullReport struct {
 	// Reported is true when a transport handed back an engine row at all.
 	// When it is false every other field is meaningless, not merely zero.
