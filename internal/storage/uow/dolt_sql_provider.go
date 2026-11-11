@@ -418,6 +418,11 @@ func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string
 	if p.preview {
 		return p.attachPreviewDatabase(ctx, conn, database)
 	}
+	// driftAsked records that the migration gate below already ran
+	// schema.CheckForwardDrift on this attempt, so the check after the call
+	// does not read the version (or print the BD_IGNORE_SCHEMA_SKEW warning)
+	// twice. Per attempt: a retry asks again.
+	driftAsked := false
 	if _, err := migrateUpWithLock(ctx, conn, database,
 		schema.WithDatabaseSelector(selectProbeDatabase),
 		schema.WithLockedPreparation(p.serverEndpoint, preparer.prepare),
@@ -430,8 +435,20 @@ func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string
 		// ever reached. Preparation has already CREATEd and USEd the
 		// database by the time it runs, so a fresh bootstrap reads version 0
 		// and passes.
+		//
+		// Forward drift is asked here too, after the shared-store check passes
+		// (gastownhall/beads#8121). That check finds nothing pending on a
+		// database AHEAD of this binary and lets it through, and MigrateUp
+		// then seeds dolt_ignore and reconciles before deciding it has no
+		// work — writes into the newer schema. Asking inside the gate refuses
+		// before the first of them. A behind database the shared-store check
+		// refuses (or reads through) never reaches this read.
 		schema.WithMigrationGate(func(ctx context.Context, c *sql.Conn) error {
-			return schema.CheckSharedStoreMigrateGate(ctx, c, "", nil, dataBehindAdopter(p.readOnly))
+			if err := schema.CheckSharedStoreMigrateGate(ctx, c, "", nil, dataBehindAdopter(p.readOnly)); err != nil {
+				return err
+			}
+			driftAsked = true
+			return schema.CheckForwardDrift(ctx, c)
 		})); err != nil {
 		var gateErr *schema.RemoteMigrateGateError
 		if errors.As(err, &gateErr) {
@@ -451,16 +468,27 @@ func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string
 			// would be an attempt to perform the migration it just refused.
 			return backoff.Permanent(gateErr)
 		}
+		// A forward-drift refusal from the gate is permanent even when the
+		// lock release also failed: that failure wraps it in a migration-lock
+		// error, which classifyInitSchemaError would retry. The whole error
+		// is kept, so both stay reachable.
+		if schema.IsSchemaSkewError(err) {
+			return backoff.Permanent(err)
+		}
 		return classifyInitSchemaError(err)
 	}
-	// Forward drift (gastownhall/beads#8121). MigrateUp treats a database AHEAD
-	// of this binary as having nothing to do, and the converged fast path —
-	// which never reaches the migration gate — answers "converged" for it too
+	if driftAsked {
+		return nil
+	}
+	// Forward drift (gastownhall/beads#8121) on the paths that did not run the
+	// gate: the converged fast path, which returns before the lock, and a fresh
+	// bootstrap, whose capability skips the gate. The fast path answers
+	// "converged" for a database AHEAD of this binary
 	// (schema.TestAlreadyConvergedOnForwardSkew): whether this binary may use
-	// that schema is the caller's question. Every other open path asks it with
-	// schema.CheckForwardDrift; ask it here on the session MigrateUpWithLock
+	// that schema is the caller's question, and every other open path asks it
+	// with schema.CheckForwardDrift. Ask it on the session MigrateUpWithLock
 	// left on the database, so an older bd refuses a newer schema rather than
-	// reading and writing it unawares.
+	// reading and writing it unawares. This path wrote nothing to get here.
 	return checkProxiedForwardDrift(ctx, conn)
 }
 
