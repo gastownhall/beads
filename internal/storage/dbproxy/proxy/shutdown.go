@@ -158,9 +158,30 @@ func ControlFilePaths(rootDir string) []string {
 	return paths
 }
 
+// PurgeableControlFilePaths is ControlFilePaths without the two lifecycle
+// locks (proxy.lock and proxy-child.lock). A caller retiring the controls
+// holds those locks to exclude a concurrent start, so they stay as unlocked
+// markers: Windows cannot delete a file its holder has open, and a POSIX
+// unlink would let a starter lock a new file at the same path while the old
+// one is still held.
+func PurgeableControlFilePaths(rootDir string) []string {
+	var paths []string
+	for _, path := range ControlFilePaths(rootDir) {
+		switch filepath.Base(path) {
+		case LockFileName, server.LockFileName:
+			continue
+		}
+		paths = append(paths, path)
+	}
+	return paths
+}
+
+// PurgeControlFiles removes PurgeableControlFilePaths and reports every
+// removal failure other than a missing file. The lifecycle lock markers are
+// kept.
 func PurgeControlFiles(rootDir string) []error {
 	var errs []error
-	for _, path := range ControlFilePaths(rootDir) {
+	for _, path := range PurgeableControlFilePaths(rootDir) {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			errs = append(errs, err)
 		}

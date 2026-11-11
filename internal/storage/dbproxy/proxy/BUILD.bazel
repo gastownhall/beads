@@ -81,6 +81,7 @@ go_test(
     deps = [
         "//internal/configfile",
         "//internal/doltserver",
+        "//internal/lockfile",
         "//internal/procid",
         "//internal/storage/dbproxy/identity",
         "//internal/storage/dbproxy/pidfile",

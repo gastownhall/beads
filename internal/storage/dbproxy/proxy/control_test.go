@@ -7,17 +7,106 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/identity"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestPurgeControlFilesWithHeldLocks mirrors reverse migration, which holds
+// both lifecycle locks while it retires the other proxy controls (GH#6884).
+// The purge must not remove a held lock: Windows refuses to delete the open
+// file, and POSIX unlink would let a competing starter lock a new file at the
+// same path while the migration still holds the old one.
+func TestPurgeControlFilesWithHeldLocks(t *testing.T) {
+	root := t.TempDir()
+	removable := []string{
+		filepath.Join(root, LogFileName),
+		filepath.Join(root, LogFileName+".1"),
+		filepath.Join(root, identity.SecretFileName),
+		filepath.Join(root, spawnMarkerFileName),
+		filepath.Join(root, stopEpochFileName),
+		pidfile.Path(root, PIDFileName),
+		pidfile.Path(root, server.PIDFileName),
+		pidfile.Path(root, PIDFileName) + ".stale-100",
+		pidfile.Path(root, server.PIDFileName) + ".stale-200",
+	}
+	for _, path := range removable {
+		require.NoError(t, os.WriteFile(path, []byte("retire"), 0o600))
+	}
+
+	lockPaths := []string{filepath.Join(root, LockFileName), filepath.Join(root, server.LockFileName)}
+	held := map[string]*util.Lock{}
+	t.Cleanup(func() {
+		for _, lock := range held {
+			lock.Unlock()
+		}
+	})
+	before := map[string]os.FileInfo{}
+	for _, path := range lockPaths {
+		lock, err := util.TryLock(path)
+		require.NoError(t, err)
+		held[path] = lock
+		info, err := os.Stat(path)
+		require.NoError(t, err)
+		before[path] = info
+	}
+
+	require.Empty(t, PurgeControlFiles(root), "retiring controls while the lifecycle locks are held")
+	for _, path := range removable {
+		assert.NoFileExists(t, path)
+	}
+	for _, path := range lockPaths {
+		info, err := os.Stat(path)
+		require.NoError(t, err, "%s must survive the purge", filepath.Base(path))
+		assert.True(t, os.SameFile(before[path], info), "%s must still be the held file", filepath.Base(path))
+		other, err := util.TryLock(path)
+		if other != nil {
+			other.Unlock()
+		}
+		require.Error(t, err, "%s must stay exclusive until its holder releases it", filepath.Base(path))
+		assert.True(t, lockfile.IsLocked(err), "contention on %s: %v", filepath.Base(path), err)
+	}
+
+	for _, path := range lockPaths {
+		held[path].Unlock()
+		delete(held, path)
+		again, err := util.TryLock(path)
+		require.NoError(t, err, "%s must be lockable once released", filepath.Base(path))
+		info, statErr := os.Stat(path)
+		again.Unlock()
+		require.NoError(t, statErr)
+		assert.True(t, os.SameFile(before[path], info), "%s must be reacquired in place", filepath.Base(path))
+	}
+}
+
+// TestPurgeControlFilesReportsRemovalError comes from PR #6888 (Ewen
+// Cuthiell): a non-empty directory at a control path is a removal failure
+// even when the test runs as root.
+func TestPurgeControlFilesReportsRemovalError(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, LogFileName)
+	require.NoError(t, os.Mkdir(path, 0o700))
+	child := filepath.Join(path, "retain")
+	require.NoError(t, os.WriteFile(child, []byte("retain"), 0o600))
+	errs := PurgeControlFiles(root)
+	require.Len(t, errs, 1)
+	var pathErr *os.PathError
+	require.ErrorAs(t, errs[0], &pathErr)
+	assert.Equal(t, path, pathErr.Path)
+	assert.FileExists(t, child)
+}
 
 func newControlServer(t *testing.T) (*controlServer, string, identity.IdentReply) {
 	t.Helper()

@@ -1226,6 +1226,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd migrate from-proxied-server-to-server` and
+  `bd migrate from-proxied-server-to-shared-server` no longer fail on native
+  Windows with "failed to retire proxy controls: remove ...proxy.lock: The
+  process cannot access the file because it is being used by another
+  process" (GH#6884). The migration holds `proxy.lock` and
+  `proxy-child.lock` so no proxy starts while it works, and then tried to
+  delete them. It now leaves both in place as unlocked marker files and
+  still removes every other proxy control.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
