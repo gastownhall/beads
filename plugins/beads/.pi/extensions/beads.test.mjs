@@ -2,8 +2,7 @@ import assert from "node:assert/strict"
 import { mkdtemp, rm } from "node:fs/promises"
 import test from "node:test"
 import { tmpdir } from "node:os"
-import { dirname, resolve } from "node:path"
-import { fileURLToPath } from "node:url"
+import { resolve } from "node:path"
 
 function createPi(execResult = { stdout: "# Beads Workflow Context\n", stderr: "", code: 0, killed: false }) {
   const executions = []
@@ -17,6 +16,7 @@ function createPi(execResult = { stdout: "# Beads Workflow Context\n", stderr: "
     pi: {
       async exec(command, args, options) {
         executions.push({ command, args, options })
+        if (execResult instanceof Error) throw execResult
         return execResult
       },
       on(name, callback) {
@@ -29,7 +29,7 @@ function createPi(execResult = { stdout: "# Beads Workflow Context\n", stderr: "
   }
 }
 
-test("discovers the Beads skill and refreshes lifecycle context", async (t) => {
+test("refreshes Beads lifecycle context from an unrelated directory", async (t) => {
   const originalCwd = process.cwd()
   const unrelatedCwd = await mkdtemp(resolve(tmpdir(), "beads-pi-cwd-"))
 
@@ -38,17 +38,11 @@ test("discovers the Beads skill and refreshes lifecycle context", async (t) => {
     const extensionUrl = new URL(`./beads.ts?cwd=${Date.now()}`, import.meta.url)
     const { default: beadsPiExtension } = await import(extensionUrl)
 
-    await t.test("registers the shared skills directory for resource discovery", async () => {
+    await t.test("leaves skill discovery to the package manifest", () => {
       const { handlers, pi } = createPi()
       beadsPiExtension(pi)
 
-      const handler = handlers.get("resources_discover")
-      assert.equal(typeof handler, "function")
-
-      const result = await handler({ cwd: unrelatedCwd, reason: "startup" }, {})
-      const extensionDir = dirname(fileURLToPath(import.meta.url))
-      const expectedSkillsDir = resolve(extensionDir, "../..", "skills")
-      assert.deepEqual(result, { skillPaths: [expectedSkillsDir] })
+      assert.equal(handlers.has("resources_discover"), false)
     })
 
     await t.test("injects fresh bd prime context when a session starts", async () => {
@@ -93,6 +87,18 @@ test("discovers the Beads skill and refreshes lifecycle context", async (t) => {
             details: { event: "session_compact", reason },
           },
         ])
+      }
+    })
+
+    await t.test("stays quiet when bd cannot be spawned", async () => {
+      for (const type of ["session_start", "session_compact"]) {
+        const error = Object.assign(new Error("spawn bd ENOENT"), { code: "ENOENT" })
+        const { executions, handlers, messages, pi } = createPi(error)
+        beadsPiExtension(pi)
+
+        await handlers.get(type)({ type, reason: "manual" }, { cwd: unrelatedCwd })
+        assert.equal(executions.length, 1)
+        assert.deepEqual(messages, [])
       }
     })
 

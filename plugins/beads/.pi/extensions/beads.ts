@@ -4,12 +4,6 @@ import type {
   SessionCompactEvent,
   SessionStartEvent,
 } from "@earendil-works/pi-coding-agent"
-import { dirname, resolve } from "node:path"
-import { fileURLToPath } from "node:url"
-
-const extensionDir = dirname(fileURLToPath(import.meta.url))
-const packageRoot = resolve(extensionDir, "../..")
-const skillsDir = resolve(packageRoot, "skills")
 
 type BeadsLifecycleEvent = SessionStartEvent | SessionCompactEvent
 
@@ -18,11 +12,17 @@ async function refreshBeadsContext(
   context: ExtensionContext,
   event: BeadsLifecycleEvent,
 ) {
-  const result = await pi.exec("bd", ["prime"], {
-    cwd: context.cwd,
-    signal: context.signal,
-    timeout: 10_000,
-  })
+  let result
+  try {
+    result = await pi.exec("bd", ["prime"], {
+      cwd: context.cwd,
+      signal: context.signal,
+      timeout: 10_000,
+    })
+  } catch {
+    // The plugin may be installed where bd is unavailable.
+    return
+  }
   if (result.code !== 0 || result.killed || result.stdout.trim() === "") return
 
   pi.sendMessage({
@@ -41,8 +41,4 @@ export default function beadsPiExtension(pi: ExtensionAPI) {
   pi.on("session_compact", async (event, context) => {
     await refreshBeadsContext(pi, context, event)
   })
-
-  pi.on("resources_discover", async () => ({
-    skillPaths: [skillsDir],
-  }))
 }
