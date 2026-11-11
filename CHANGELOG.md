@@ -97,6 +97,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is sent. Dolt remote credentials
   (`DOLT_REMOTE_USER`/`DOLT_REMOTE_PASSWORD` for `sync.remote` and federation
   peers) are not covered by these pins.
+- **Failed Dolt pushes, pulls and fetches no longer print a remote's
+  credentials (#8089, from #7644 by @hexsprite).** When `sync.remote` or a
+  federation peer is a URL such as
+  `git+https://x-access-token:<token>@github.com/org/repo`, Dolt names that
+  stored URL, token included, in the error of a failed transfer, and `bd`
+  passed it on to the terminal, agent transcripts, the `dolt auto-push failed`
+  warning and trace spans. `bd` now redacts URL credentials from these errors
+  in embedded and server mode: HTTP(S) userinfo is dropped whole, an SSH remote
+  keeps its account but loses any password, and the host, path and rejection
+  detail are kept.
 
 ### Added
 
