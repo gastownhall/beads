@@ -3,11 +3,17 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/formula"
+	"github.com/steveyegge/beads/internal/storage/uow"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 func twoStepFormula(name, stepTitle string) *formula.Formula {
@@ -175,6 +181,109 @@ func TestProxiedServerMolBond(t *testing.T) {
 		}
 	})
 
+	// AC-5 (bd-lrkpd3): the proxied route orders a sequential --ref arm
+	// after the same terminal steps the direct route does
+	// (TestBondProtoMolRefArmWaitsForTerminalSteps): S2 and S3, not S1, which
+	// S2 waits on, and not the patrol, which would deadlock.
+	t.Run("ref_arm_waits_for_terminal_steps", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "mbterm")
+		writeFormulaFixture(t, p, twoStepFormula("arm", "Capture {{worker_name}}"))
+		patrol, s1, s2, s3 := seedProxiedRefArmParent(t, bd, p)
+
+		out, err := bdProxiedRun(t, bd, p.dir, "mol", "bond", "arm", patrol,
+			"--ref", "arm-{{worker_name}}", "--var", "worker_name=ace", "--json")
+		if err != nil {
+			t.Fatalf("bd mol bond --ref --json: %v\n%s", err, out)
+		}
+		arm := patrol + ".arm-ace"
+		db := openProxiedDB(t, p)
+		if got, want := proxiedOutgoingDeps(t, db, arm), wantDeps("blocks:"+s2, "blocks:"+s3); !slices.Equal(got, want) {
+			t.Fatalf("arm %s deps = %v, want %v (no edge onto S1 %s or the patrol %s)", arm, got, want, s1, patrol)
+		}
+	})
+
+	// AC-5's failure leg on the proxied route: bondProtoMolAttachInto runs in
+	// the caller's unit of work, so an ordering edge that fails after another
+	// was written rolls the whole arm back with it.
+	t.Run("ref_arm_terminal_edge_failure_rolls_back", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "mbroll")
+		patrol, _, _, _ := seedProxiedRefArmParent(t, bd, p)
+
+		ctx := context.Background()
+		provider, err := newProxiedServerUOWProvider(ctx, p.beadsDir, "")
+		if err != nil {
+			t.Fatalf("open proxied UOW provider: %v", err)
+		}
+		t.Cleanup(func() { _ = provider.Close(context.Background()) })
+		sub, err := cookFormulaToSubgraph(twoStepFormula("arm", "Capture {{worker_name}}"), "arm")
+		if err != nil {
+			t.Fatalf("cook arm: %v", err)
+		}
+		arm := patrol + ".arm-ace"
+		injected := errors.New("injected ordering failure")
+		var w *secondOrderingEdgeFails
+		_, err = uow.RunTxResult(ctx, provider, func(ctx context.Context, uw uow.UnitOfWork) (*BondResult, string, error) {
+			mol, err := newUOWMolWriter(uw).GetIssue(ctx, patrol)
+			if err != nil {
+				return nil, "", err
+			}
+			w = &secondOrderingEdgeFails{molWriter: newUOWMolWriter(uw), armID: arm, err: injected}
+			r, err := bondProtoMolAttachInto(ctx, w, uow.MoleculeReaderInUOW(uw), sub, sub.Root, mol, types.BondTypeSequential,
+				map[string]string{"worker_name": "ace"}, "arm-{{worker_name}}", "test", false, false)
+			return r, "bd: mol bond rollback test", err
+		})
+		if !errors.Is(err, injected) {
+			t.Fatalf("bond error = %v, want the injected ordering failure", err)
+		}
+		if w == nil || w.written != 1 {
+			t.Fatalf("ordering edges written before the failure = %v, want 1 (the failure must follow a write)", w)
+		}
+
+		db := openProxiedDB(t, p)
+		var issues, deps int
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues WHERE id = ? OR id LIKE ?", arm, arm+".%").Scan(&issues); err != nil {
+			t.Fatalf("count arm issues: %v", err)
+		}
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dependencies WHERE issue_id = ? OR issue_id LIKE ?", arm, arm+".%").Scan(&deps); err != nil {
+			t.Fatalf("count arm edges: %v", err)
+		}
+		if issues != 0 || deps != 0 {
+			t.Fatalf("after the failed bond, %d arm issues and %d arm edges persisted, want none", issues, deps)
+		}
+	})
+
+	// AC-6 on the proxied route: --ref with --type conditional is refused
+	// for a real bond and a dry run alike, and neither creates anything.
+	t.Run("conditional_ref_arm_is_refused_and_creates_nothing", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "mbcond")
+		writeFormulaFixture(t, p, twoStepFormula("arm", "Capture {{worker_name}}"))
+		patrol, _, s2, _ := seedProxiedRefArmParent(t, bd, p)
+		db := openProxiedDB(t, p)
+		before := bdProxiedListJSON(t, bd, p, "--all")
+		depsBefore := proxiedOutgoingDeps(t, db, s2)
+
+		for _, extra := range [][]string{nil, {"--dry-run"}} {
+			args := append([]string{"mol", "bond", "arm", patrol, "--type", "conditional",
+				"--ref", "arm-{{worker_name}}", "--var", "worker_name=ace"}, extra...)
+			stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, args...)
+			if err == nil {
+				t.Fatalf("bd %v succeeded, want the conditional --ref refusal: %s", args, stdout)
+			}
+			if !strings.Contains(stdout+stderr, "--ref cannot be combined with --type conditional") {
+				t.Fatalf("bd %v: want the conditional --ref refusal, got stdout:%s stderr:%s", args, stdout, stderr)
+			}
+		}
+		if after := bdProxiedListJSON(t, bd, p, "--all"); len(after) != len(before) {
+			t.Fatalf("refused bonds changed the issue count: %d -> %d", len(before), len(after))
+		}
+		if got := proxiedOutgoingDeps(t, db, s2); !slices.Equal(got, depsBefore) {
+			t.Fatalf("refused bonds changed S2's edges: %v -> %v", depsBefore, got)
+		}
+	})
+
 	t.Run("dry_run_creates_nothing", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "mbdr")
@@ -194,4 +303,61 @@ func TestProxiedServerMolBond(t *testing.T) {
 			t.Errorf("expected no new issues from --dry-run: before=%d after=%d", len(before), len(after))
 		}
 	})
+}
+
+// seedProxiedRefArmParent creates the AC-1 parent graph through the proxied
+// bd: a patrol epic with direct steps S1, S2 and S3, S2 blocked by S1.
+func seedProxiedRefArmParent(t *testing.T, bd string, p proxiedProject) (patrol, s1, s2, s3 string) {
+	t.Helper()
+	patrol = bdProxiedCreate(t, bd, p.dir, "Patrol", "--type", "epic").ID
+	s1 = bdProxiedCreate(t, bd, p.dir, "S1", "--parent", patrol).ID
+	s2 = bdProxiedCreate(t, bd, p.dir, "S2", "--parent", patrol).ID
+	s3 = bdProxiedCreate(t, bd, p.dir, "S3", "--parent", patrol).ID
+	if out, err := bdProxiedRun(t, bd, p.dir, "dep", "add", s2, s1); err != nil {
+		t.Fatalf("bd dep add %s %s: %v\n%s", s2, s1, err, out)
+	}
+	return patrol, s1, s2, s3
+}
+
+// proxiedOutgoingDeps answers id's stored edges as sorted "type:target".
+func proxiedOutgoingDeps(t *testing.T, db *sql.DB, id string) []string {
+	t.Helper()
+	rows, err := db.QueryContext(context.Background(),
+		"SELECT type, COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) FROM dependencies WHERE issue_id = ?", id)
+	if err != nil {
+		t.Fatalf("query deps of %s: %v", id, err)
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var typ, target string
+		if err := rows.Scan(&typ, &target); err != nil {
+			t.Fatalf("scan dep of %s: %v", id, err)
+		}
+		out = append(out, typ+":"+target)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("dep rows of %s: %v", id, err)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// secondOrderingEdgeFails passes the first ordering edge from armID through
+// and fails the second with err, so a test sees a failure after a write.
+type secondOrderingEdgeFails struct {
+	molWriter
+	armID   string
+	err     error
+	written int
+}
+
+func (w *secondOrderingEdgeFails) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
+	if dep.IssueID == w.armID && dep.Type == types.DepBlocks {
+		if w.written > 0 {
+			return w.err
+		}
+		w.written++
+	}
+	return w.molWriter.AddDependency(ctx, dep, actor)
 }

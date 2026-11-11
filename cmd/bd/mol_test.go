@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -3407,4 +3408,419 @@ func advanceForTest(ctx context.Context, s storage.DoltStorage, closedStepID str
 		return nil, err
 	}
 	return continueResultOf(result), nil
+}
+
+// TestBondProtoMolSequentialRefArmRunsAfterParentSteps reproduces bd-lrkpd3
+// (GH#6210): a sequential --ref arm is nested under the molecule, so its
+// blocking edge cannot point at the molecule itself, but it must still run
+// after the molecule's steps. The expected shape re-attaches the edge to the
+// parent's terminal step(s) instead of dropping it.
+func TestBondProtoMolSequentialRefArmRunsAfterParentSteps(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreWithPrefix(t, t.TempDir()+"/test.db", "patrol")
+
+	proto := &types.Issue{Title: "Arm: {{name}}", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2, Labels: []string{MoleculeLabel}}
+	if err := s.CreateIssue(ctx, proto, "test"); err != nil {
+		t.Fatalf("create proto: %v", err)
+	}
+	patrol := &types.Issue{Title: "Patrol", IssueType: types.TypeEpic, Status: types.StatusOpen, Priority: 1}
+	if err := s.CreateIssue(ctx, patrol, "test"); err != nil {
+		t.Fatalf("create patrol: %v", err)
+	}
+	step := &types.Issue{Title: "Patrol step", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2}
+	if err := s.CreateIssue(ctx, step, "test"); err != nil {
+		t.Fatalf("create step: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{IssueID: step.ID, DependsOnID: patrol.ID, Type: types.DepParentChild}, "test"); err != nil {
+		t.Fatalf("add step parent-child: %v", err)
+	}
+
+	result, err := bondProtoMol(ctx, s, proto, patrol, types.BondTypeSequential, map[string]string{"name": "ace"}, "arm-{{name}}", "test", false, false)
+	if err != nil {
+		t.Fatalf("bondProtoMol: %v", err)
+	}
+	armID := result.IDMapping[proto.ID]
+
+	deps, err := s.GetDependencyRecords(ctx, armID)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords(%s): %v", armID, err)
+	}
+	for _, d := range deps {
+		if d.Type == types.DepBlocks && d.DependsOnID == step.ID {
+			return
+		}
+	}
+	t.Fatalf("sequential --ref arm %s has no blocks edge onto the parent's terminal step %s (deps: %+v); the edge was dropped, so the arm is ready before the parent's steps run", armID, step.ID, deps)
+}
+
+// refArmFixture is the AC-1 parent graph for sequential --ref arm ordering:
+// molecule M with direct steps S1, S2 and S3, S2 blocked by S1 and S3
+// independent, plus a two-issue proto (root epic and one executable step).
+type refArmFixture struct {
+	proto, protoStep *types.Issue
+	mol, s1, s2, s3  *types.Issue
+}
+
+func seedRefArmFixture(t *testing.T, ctx context.Context, s storage.DoltStorage, ephemeralMol bool) refArmFixture {
+	t.Helper()
+	create := func(issue *types.Issue) *types.Issue {
+		t.Helper()
+		if err := s.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("create %q: %v", issue.Title, err)
+		}
+		return issue
+	}
+	link := func(from, to string, typ types.DependencyType) {
+		t.Helper()
+		if err := s.AddDependency(ctx, &types.Dependency{IssueID: from, DependsOnID: to, Type: typ}, "test"); err != nil {
+			t.Fatalf("add %s %s -> %s: %v", typ, from, to, err)
+		}
+	}
+	f := refArmFixture{
+		proto:     create(&types.Issue{Title: "Arm: {{name}}", IssueType: types.TypeEpic, Status: types.StatusOpen, Priority: 2, Labels: []string{MoleculeLabel}}),
+		protoStep: create(&types.Issue{Title: "Work {{name}}", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2}),
+		mol:       create(&types.Issue{Title: "Patrol", IssueType: types.TypeEpic, Status: types.StatusOpen, Priority: 1, Ephemeral: ephemeralMol}),
+	}
+	link(f.protoStep.ID, f.proto.ID, types.DepParentChild)
+	f.s1 = create(&types.Issue{Title: "S1", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2, Ephemeral: ephemeralMol})
+	f.s2 = create(&types.Issue{Title: "S2", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2, Ephemeral: ephemeralMol})
+	f.s3 = create(&types.Issue{Title: "S3", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2, Ephemeral: ephemeralMol})
+	for _, step := range []*types.Issue{f.s1, f.s2, f.s3} {
+		link(step.ID, f.mol.ID, types.DepParentChild)
+	}
+	link(f.s2.ID, f.s1.ID, types.DepBlocks)
+	return f
+}
+
+// outgoingDeps answers id's stored edges as "type:target" strings, sorted.
+func outgoingDeps(t *testing.T, ctx context.Context, s storage.DoltStorage, id string) []string {
+	t.Helper()
+	deps, err := s.GetDependencyRecords(ctx, id)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords(%s): %v", id, err)
+	}
+	out := make([]string, 0, len(deps))
+	for _, d := range deps {
+		out = append(out, string(d.Type)+":"+d.DependsOnID)
+	}
+	slices.Sort(out)
+	return out
+}
+
+func wantDeps(pairs ...string) []string {
+	out := slices.Clone(pairs)
+	slices.Sort(out)
+	if out == nil {
+		out = []string{}
+	}
+	return out
+}
+
+func isReadyWork(t *testing.T, ctx context.Context, s storage.DoltStorage, id string) bool {
+	t.Helper()
+	ready, err := s.GetReadyWork(ctx, types.WorkFilter{IncludeEphemeral: true})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	for _, issue := range ready {
+		if issue.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func closeForTest(t *testing.T, ctx context.Context, s storage.DoltStorage, ids ...string) {
+	t.Helper()
+	for _, id := range ids {
+		if err := s.CloseIssue(ctx, id, "done", "test", ""); err != nil {
+			t.Fatalf("close %s: %v", id, err)
+		}
+	}
+}
+
+// TestBondProtoMolRefArmWaitsForTerminalSteps pins AC-1 of bd-lrkpd3: a
+// sequential --ref arm waits on the parent's terminal steps (S2 and S3, not
+// S1, which S2 already waits on, and not the molecule, which would deadlock)
+// and gains no membership edge.
+func TestBondProtoMolRefArmWaitsForTerminalSteps(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreWithPrefix(t, t.TempDir()+"/test.db", "patrol")
+	f := seedRefArmFixture(t, ctx, s, false)
+
+	result, err := bondProtoMol(ctx, s, f.proto, f.mol, types.BondTypeSequential, map[string]string{"name": "ace"}, "arm-{{name}}", "test", false, false)
+	if err != nil {
+		t.Fatalf("bondProtoMol: %v", err)
+	}
+	armID := result.IDMapping[f.proto.ID]
+	if got, want := outgoingDeps(t, ctx, s, armID), wantDeps("blocks:"+f.s2.ID, "blocks:"+f.s3.ID); !slices.Equal(got, want) {
+		t.Fatalf("arm %s deps = %v, want %v (no edge onto S1 %s or the molecule %s)", armID, got, want, f.s1.ID, f.mol.ID)
+	}
+	// The spawned executable step keeps its place inside the arm.
+	armStepID := result.IDMapping[f.protoStep.ID]
+	if got := outgoingDeps(t, ctx, s, armStepID); !slices.Contains(got, "parent-child:"+armID) {
+		t.Errorf("arm step %s deps = %v, want a parent-child edge onto the arm root %s", armStepID, got, armID)
+	}
+}
+
+// TestBondProtoMolRefArmStepWaitsForEveryTerminalStep pins AC-2 of
+// bd-lrkpd3: the arm's executable step stays out of ready work while any
+// terminal step is open, even once the steps before it closed, and becomes
+// ready when the last terminal closes.
+func TestBondProtoMolRefArmStepWaitsForEveryTerminalStep(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreWithPrefix(t, t.TempDir()+"/test.db", "patrol")
+	f := seedRefArmFixture(t, ctx, s, false)
+
+	result, err := bondProtoMol(ctx, s, f.proto, f.mol, types.BondTypeSequential, map[string]string{"name": "ace"}, "arm-{{name}}", "test", false, false)
+	if err != nil {
+		t.Fatalf("bondProtoMol: %v", err)
+	}
+	armStep := result.IDMapping[f.protoStep.ID]
+	if isReadyWork(t, ctx, s, armStep) {
+		t.Fatalf("arm step %s is ready before any parent step closed", armStep)
+	}
+	closeForTest(t, ctx, s, f.s1.ID, f.s2.ID)
+	if isReadyWork(t, ctx, s, armStep) {
+		t.Fatalf("arm step %s is ready while terminal step S3 %s is still open", armStep, f.s3.ID)
+	}
+	closeForTest(t, ctx, s, f.s3.ID)
+	if !isReadyWork(t, ctx, s, armStep) {
+		t.Fatalf("arm step %s is not ready after every parent step closed", armStep)
+	}
+}
+
+// TestBondProtoMolRefArmWaitsForTerminalStepsAcrossPlanes repeats AC-1 and
+// AC-2 on the wisp plane, where a patrol's per-worker arms live, and across
+// planes: whichever side is ephemeral, the arm gets the same blocks edges
+// onto S2 and S3, and its step stays out of ready work until both close.
+func TestBondProtoMolRefArmWaitsForTerminalStepsAcrossPlanes(t *testing.T) {
+	for _, tc := range []struct {
+		name                          string
+		ephemeralMol, ephemeral, pour bool
+	}{
+		{name: "wisp molecule, wisp arm", ephemeralMol: true},
+		{name: "durable molecule, --ephemeral arm", ephemeral: true},
+		{name: "wisp molecule, --pour arm", ephemeralMol: true, pour: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			s := newTestStoreWithPrefix(t, t.TempDir()+"/test.db", "patrol")
+			f := seedRefArmFixture(t, ctx, s, tc.ephemeralMol)
+
+			result, err := bondProtoMol(ctx, s, f.proto, f.mol, types.BondTypeSequential, map[string]string{"name": "ace"}, "arm-{{name}}", "test", tc.ephemeral, tc.pour)
+			if err != nil {
+				t.Fatalf("bondProtoMol: %v", err)
+			}
+			armID := result.IDMapping[f.proto.ID]
+			if got, want := outgoingDeps(t, ctx, s, armID), wantDeps("blocks:"+f.s2.ID, "blocks:"+f.s3.ID); !slices.Equal(got, want) {
+				t.Fatalf("arm %s deps = %v, want %v", armID, got, want)
+			}
+			armStep := result.IDMapping[f.protoStep.ID]
+			if isReadyWork(t, ctx, s, armStep) {
+				t.Fatalf("arm step %s is ready before any parent step closed", armStep)
+			}
+			closeForTest(t, ctx, s, f.s1.ID, f.s2.ID)
+			if isReadyWork(t, ctx, s, armStep) {
+				t.Fatalf("arm step %s is ready while terminal step S3 %s is still open", armStep, f.s3.ID)
+			}
+			closeForTest(t, ctx, s, f.s3.ID)
+			if !isReadyWork(t, ctx, s, armStep) {
+				t.Fatalf("arm step %s is not ready after every parent step closed", armStep)
+			}
+		})
+	}
+}
+
+// TestBondProtoMolRefArmsShareTerminalsAndKeepTheirEdges pins AC-4: a second
+// sequential --ref arm waits on the same terminals as the first, not on the
+// first arm (a sequential arm is not a member of its container), and a step
+// added to the parent later retargets neither arm.
+func TestBondProtoMolRefArmsShareTerminalsAndKeepTheirEdges(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreWithPrefix(t, t.TempDir()+"/test.db", "patrol")
+	f := seedRefArmFixture(t, ctx, s, false)
+
+	bond := func(name string) string {
+		t.Helper()
+		result, err := bondProtoMol(ctx, s, f.proto, f.mol, types.BondTypeSequential, map[string]string{"name": name}, "arm-{{name}}", "test", false, false)
+		if err != nil {
+			t.Fatalf("bondProtoMol(%s): %v", name, err)
+		}
+		return result.IDMapping[f.proto.ID]
+	}
+	first := bond("ace")
+	second := bond("bee")
+
+	want := wantDeps("blocks:"+f.s2.ID, "blocks:"+f.s3.ID)
+	for _, arm := range []string{first, second} {
+		if got := outgoingDeps(t, ctx, s, arm); !slices.Equal(got, want) {
+			t.Fatalf("arm %s deps = %v, want %v", arm, got, want)
+		}
+	}
+
+	later := &types.Issue{Title: "S4", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2}
+	if err := s.CreateIssue(ctx, later, "test"); err != nil {
+		t.Fatalf("create S4: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{IssueID: later.ID, DependsOnID: f.mol.ID, Type: types.DepParentChild}, "test"); err != nil {
+		t.Fatalf("link S4: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{IssueID: later.ID, DependsOnID: f.s3.ID, Type: types.DepBlocks}, "test"); err != nil {
+		t.Fatalf("order S4 after S3: %v", err)
+	}
+	for _, arm := range []string{first, second} {
+		if got := outgoingDeps(t, ctx, s, arm); !slices.Equal(got, want) {
+			t.Fatalf("after adding S4, arm %s deps = %v, want unchanged %v", arm, got, want)
+		}
+	}
+}
+
+// TestBondProtoMolRefArmWithNothingToWaitFor pins AC-3: a parent with no
+// active direct steps (root only, or every step closed or pinned) still takes
+// a sequential --ref arm, with no ordering edges, and the arm's first step is
+// ready at once. The wisp case is a root-only ephemeral parent.
+func TestBondProtoMolRefArmWithNothingToWaitFor(t *testing.T) {
+	cases := []struct {
+		name      string
+		ephemeral bool
+		finish    func(t *testing.T, ctx context.Context, s storage.DoltStorage, f refArmFixture) string
+	}{
+		{name: "root_only", finish: rootOnlyParent},
+		{name: "root_only_wisp", ephemeral: true, finish: rootOnlyParent},
+		{name: "closed_and_pinned_steps", finish: func(t *testing.T, ctx context.Context, s storage.DoltStorage, f refArmFixture) string {
+			closeForTest(t, ctx, s, f.s1.ID, f.s2.ID)
+			if err := s.UpdateIssue(ctx, f.s3.ID, map[string]interface{}{"status": string(types.StatusPinned)}, "test"); err != nil {
+				t.Fatalf("pin S3: %v", err)
+			}
+			return f.mol.ID
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			s := newTestStoreWithPrefix(t, t.TempDir()+"/test.db", "patrol")
+			f := seedRefArmFixture(t, ctx, s, tc.ephemeral)
+			molID := tc.finish(t, ctx, s, f)
+			mol, err := s.GetIssue(ctx, molID)
+			if err != nil {
+				t.Fatalf("GetIssue(%s): %v", molID, err)
+			}
+
+			result, err := bondProtoMol(ctx, s, f.proto, mol, types.BondTypeSequential, map[string]string{"name": "ace"}, "arm-{{name}}", "test", false, false)
+			if err != nil {
+				t.Fatalf("bondProtoMol: %v", err)
+			}
+			armID := result.IDMapping[f.proto.ID]
+			if got := outgoingDeps(t, ctx, s, armID); len(got) != 0 {
+				t.Fatalf("arm %s deps = %v, want none", armID, got)
+			}
+			if armStep := result.IDMapping[f.protoStep.ID]; !isReadyWork(t, ctx, s, armStep) {
+				t.Fatalf("arm step %s is not ready though the parent has nothing left to wait for", armStep)
+			}
+		})
+	}
+}
+
+// rootOnlyParent answers a fresh molecule root with no steps, in the
+// fixture's plane.
+func rootOnlyParent(t *testing.T, ctx context.Context, s storage.DoltStorage, f refArmFixture) string {
+	t.Helper()
+	root := &types.Issue{Title: "Bare patrol", IssueType: types.TypeEpic, Status: types.StatusOpen, Priority: 1, Ephemeral: f.mol.Ephemeral}
+	if err := s.CreateIssue(ctx, root, "test"); err != nil {
+		t.Fatalf("create bare patrol: %v", err)
+	}
+	return root.ID
+}
+
+// TestBondProtoMolRefArmTerminalsOnlyForSequentialRef pins that the terminal
+// edges belong to the sequential --ref arm alone: a parallel --ref arm keeps
+// its single membership edge, and a sequential sibling (no --ref) keeps its
+// single edge onto the molecule.
+func TestBondProtoMolRefArmTerminalsOnlyForSequentialRef(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreWithPrefix(t, t.TempDir()+"/test.db", "patrol")
+	f := seedRefArmFixture(t, ctx, s, false)
+
+	parallel, err := bondProtoMol(ctx, s, f.proto, f.mol, types.BondTypeParallel, map[string]string{"name": "par"}, "arm-{{name}}", "test", false, false)
+	if err != nil {
+		t.Fatalf("parallel bond: %v", err)
+	}
+	if got, want := outgoingDeps(t, ctx, s, parallel.IDMapping[f.proto.ID]), wantDeps("parent-child:"+f.mol.ID); !slices.Equal(got, want) {
+		t.Fatalf("parallel arm deps = %v, want %v", got, want)
+	}
+
+	sibling, err := bondProtoMol(ctx, s, f.proto, f.mol, types.BondTypeSequential, map[string]string{"name": "sib"}, "", "test", false, false)
+	if err != nil {
+		t.Fatalf("sibling bond: %v", err)
+	}
+	if got, want := outgoingDeps(t, ctx, s, sibling.IDMapping[f.proto.ID]), wantDeps("blocks:"+f.mol.ID); !slices.Equal(got, want) {
+		t.Fatalf("sequential sibling deps = %v, want %v", got, want)
+	}
+}
+
+// TestCloneSubgraphTerminalEdgeFailureRollsBackTheArm pins AC-5's direct
+// route: when an ordering edge cannot be written after another already was,
+// the clone transaction leaves no arm issue and no partial edge behind.
+func TestCloneSubgraphTerminalEdgeFailureRollsBackTheArm(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreWithPrefix(t, t.TempDir()+"/test.db", "patrol")
+	f := seedRefArmFixture(t, ctx, s, false)
+
+	subgraph, err := loadTemplateSubgraph(ctx, s, f.proto.ID)
+	if err != nil {
+		t.Fatalf("loadTemplateSubgraph: %v", err)
+	}
+	opts, err := buildAttachCloneOpts(subgraph, f.mol, types.BondTypeSequential, map[string]string{"name": "ace"}, "arm-{{name}}", "test", false, false)
+	if err != nil {
+		t.Fatalf("buildAttachCloneOpts: %v", err)
+	}
+	missing := f.mol.ID + "-gone"
+	opts.AttachBlocksOn = []string{f.s2.ID, missing}
+
+	if _, err := cloneSubgraph(ctx, s, subgraph, opts); err == nil || !strings.Contains(err.Error(), missing) {
+		t.Fatalf("cloneSubgraph error = %v, want a failure naming the unwritable terminal %s", err, missing)
+	}
+	armID := f.mol.ID + ".arm-ace"
+	if issue, err := s.GetIssue(ctx, armID); err == nil && issue != nil {
+		t.Fatalf("arm %s persisted after a failed ordering edge", armID)
+	}
+	dependents, err := s.GetDependents(ctx, f.s2.ID)
+	if err != nil {
+		t.Fatalf("GetDependents(%s): %v", f.s2.ID, err)
+	}
+	for _, d := range dependents {
+		if strings.HasPrefix(d.ID, armID) {
+			t.Fatalf("partial ordering edge %s -> %s persisted after rollback", d.ID, f.s2.ID)
+		}
+	}
+}
+
+// TestBondProtoMolConditionalRefArmCreatesNothing pins AC-6 on the direct
+// route: the refusal of --ref with --type conditional stands, and the refused
+// bond writes no issue and no edge.
+func TestBondProtoMolConditionalRefArmCreatesNothing(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreWithPrefix(t, t.TempDir()+"/test.db", "patrol")
+	f := seedRefArmFixture(t, ctx, s, false)
+	before, err := s.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("SearchIssues: %v", err)
+	}
+	depsBefore := outgoingDeps(t, ctx, s, f.s2.ID)
+
+	_, err = bondProtoMol(ctx, s, f.proto, f.mol, types.BondTypeConditional, map[string]string{"name": "ace"}, "arm-{{name}}", "test", false, false)
+	if err == nil || !strings.Contains(err.Error(), "--ref cannot be combined with --type conditional") {
+		t.Fatalf("bondProtoMol error = %v, want the conditional --ref refusal", err)
+	}
+	after, err := s.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("SearchIssues: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("refused bond changed the issue count: %d -> %d", len(before), len(after))
+	}
+	if got := outgoingDeps(t, ctx, s, f.s2.ID); !slices.Equal(got, depsBefore) {
+		t.Fatalf("refused bond changed S2's edges: %v -> %v", depsBefore, got)
+	}
 }

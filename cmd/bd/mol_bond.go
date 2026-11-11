@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var molBondCmd = &cobra.Command{
@@ -41,13 +42,20 @@ Bond types:
   conditional         - B runs only if A fails
 
   With --ref, the spawned proto arm is nested inside the molecule operand
-  rather than ordered against it - whichever side of the bond that is - so a
-  sequential --ref arm carries no ordering: it is ready as soon as it is
-  spawned. Ordering a nested arm against its own container is unsatisfiable
-  in both directions (the arm waits for the molecule to close; the molecule
-  cannot close while it holds an open arm). --ref is refused with --type
-  conditional, which has no safe degradation - omit --ref to bond a
-  conditional arm as a sibling.
+  rather than ordered against it - whichever side of the bond that is.
+  Ordering a nested arm against its own container is unsatisfiable in both
+  directions (the arm waits for the molecule to close; the molecule cannot
+  close while it holds an open arm), so a sequential --ref arm instead waits
+  on the molecule's terminal steps: every direct step that is neither closed
+  nor pinned and that no other such step waits on. The arm runs once ALL of
+  them close. The set is read once, at bond time: steps added later do not
+  retarget the arm, and a molecule with no open steps takes an arm that is
+  ready at once. The arm is not made a member of the molecule (no
+  parent-child edge). --ref is refused with --type conditional, which has no
+  safe degradation - omit --ref to bond a conditional arm as a sibling.
+  An arm that must run while its molecule is still running, such as a
+  per-worker arm its patrol waits on, needs --type parallel, which keeps the
+  parent-child edge and adds no ordering.
 
 Phase control:
   By default, spawned protos follow the target's phase:
@@ -69,7 +77,8 @@ Dynamic bonding (Christmas Ornament pattern):
 Use cases:
   - Found important bug during patrol? Use --pour to persist it
   - Need ephemeral diagnostic on persistent feature? Use --ephemeral
-  - Spawning per-worker arms on a patrol? Use --ref for readable IDs
+  - Spawning per-worker arms on a patrol? Use --ref for readable IDs, plus
+    --type parallel when the arms must run while the patrol does
 
 Examples:
   bd mol bond mol-feature mol-deploy                    # Compound proto
@@ -504,6 +513,18 @@ func bondProtoMolWithSubgraph(ctx context.Context, s storage.DoltStorage, protoS
 	if err != nil {
 		return nil, err
 	}
+	// Read the terminal steps before cloneSubgraph opens its transaction: a
+	// store read from inside it would take a second pool connection, which
+	// deadlocks embedded mode (see storeMolWriter.GetConfig).
+	if refArmNeedsTerminalSteps(bondType, childRef) {
+		mr, err := issueops.NewMoleculeReader(s)
+		if err != nil {
+			return nil, fmt.Errorf("reading the steps of %s: %w", mol.ID, err)
+		}
+		if opts.AttachBlocksOn, err = refArmTerminalSteps(ctx, mr, mol.ID); err != nil {
+			return nil, err
+		}
+	}
 	spawnResult, err := cloneSubgraph(ctx, s, protoSubgraph, opts)
 	if err != nil {
 		return nil, fmt.Errorf("spawning and attaching proto: %w", err)
@@ -519,8 +540,10 @@ func bondProtoMolWithSubgraph(ctx context.Context, s storage.DoltStorage, protoS
 
 // bondProtoMolAttachInto is bondProtoMolWithSubgraph's counterpart for
 // callers that already have an open molWriter (the proxied-server duals),
-// so spawn + attach happen inside the caller's own transaction.
-func bondProtoMolAttachInto(ctx context.Context, w molWriter, protoSubgraph *TemplateSubgraph, proto, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, ephemeralFlag, pourFlag bool) (*BondResult, error) {
+// so spawn + attach happen inside the caller's own transaction. mr is the
+// molecule reader bound to that same transaction (uow.MoleculeReaderInUOW);
+// a sequential --ref arm reads its parent's terminal steps through it.
+func bondProtoMolAttachInto(ctx context.Context, w molWriter, mr issueops.MoleculeReader, protoSubgraph *TemplateSubgraph, proto, mol *types.Issue, bondType string, vars map[string]string, childRef string, actorName string, ephemeralFlag, pourFlag bool) (*BondResult, error) {
 	if protoSubgraph == nil {
 		var err error
 		protoSubgraph, err = loadTemplateSubgraph(ctx, w, proto.ID)
@@ -531,6 +554,11 @@ func bondProtoMolAttachInto(ctx context.Context, w molWriter, protoSubgraph *Tem
 	opts, err := buildAttachCloneOpts(protoSubgraph, mol, bondType, vars, childRef, actorName, ephemeralFlag, pourFlag)
 	if err != nil {
 		return nil, err
+	}
+	if refArmNeedsTerminalSteps(bondType, childRef) {
+		if opts.AttachBlocksOn, err = refArmTerminalSteps(ctx, mr, mol.ID); err != nil {
+			return nil, err
+		}
 	}
 	spawnResult, err := cloneSubgraphInto(ctx, w, protoSubgraph, opts)
 	if err != nil {
@@ -549,12 +577,13 @@ func bondProtoMolAttachInto(ctx context.Context, w molWriter, protoSubgraph *Tem
 //
 // A --ref arm is nested inside its target, so an ordering edge onto that
 // target can never be satisfied (see buildAttachCloneOpts). A sequential bond
-// degrades gracefully: the edge is dropped and the arm carries no ordering. A
-// conditional edge means "run only if the target fails", so dropping it would
-// turn an arm that should almost never run into one that always runs - a
-// silent false dispatch, which is worse than the deadlock it replaced. There
-// is no reading of the two flags together that is both safe and useful, so
-// refuse rather than guess.
+// re-attaches its edge to the target's terminal steps instead
+// (refArmTerminalSteps): "after them" is what "after the target" meant. A
+// conditional edge means "run only if the target fails", and no set of steps
+// answers that: one terminal failing is not the target failing, and dropping
+// the edge would turn an arm that should almost never run into one that
+// always runs - a silent false dispatch. There is no reading of the two flags
+// together that is both safe and useful, so refuse rather than guess.
 //
 // Both gatherMolBondInput (which also covers --dry-run and the proxied route)
 // and buildAttachCloneOpts consult this, so a caller that skips flag
@@ -624,20 +653,18 @@ func buildAttachCloneOpts(subgraph *TemplateSubgraph, mol *types.Issue, bondType
 		opts.ParentID = mol.ID
 		opts.ChildRef = childRef
 
-		// A --ref arm is nested INSIDE mol, and its ID already records that.
-		// Blocking it on mol as well is unsatisfiable in both directions: the
-		// arm waits for mol to close, and mol cannot close while it holds an
-		// open arm. Nesting carries the attachment, so the blocking edge is
-		// dropped rather than deadlocking the molecule it was bonded into.
-		//
-		// The arm therefore carries NO ordering relative to mol - it is ready
-		// as soon as it is spawned. That is a real loss of the "B runs after A
-		// completes" promise, documented in the place that makes it: this
+		// A --ref arm is nested under mol by its ID. Blocking it on mol as
+		// well is unsatisfiable in both directions: the arm waits for mol to
+		// close, and mol cannot close while it holds an open arm. So the edge
+		// onto mol is dropped here, and the bond routes order the arm after
+		// mol's terminal steps instead (refArmTerminalSteps into
+		// AttachBlocksOn), which keeps "B runs after A's steps" without the
+		// deadlock. The ID is not membership: no parent-child edge is added,
+		// so the arm does not count toward mol's progress or close, and a later
+		// arm does not wait on this one. That contract lives in this
 		// command's long help. docs/cli-reference/mol.md is generated from the
 		// release named in docs/cli-docs.pin, so it will carry the same text
 		// once that pin advances past this change - do not hand-write it there.
-		// The loss is the deliberate trade: a nested arm's only satisfiable
-		// relationship to its container is containment.
 		//
 		// Only DepBlocks is dropped. DepConditionalBlocks never arrives here -
 		// refuseConditionalRefArm above rejects it - and keeping the check
@@ -653,6 +680,27 @@ func buildAttachCloneOpts(subgraph *TemplateSubgraph, mol *types.Issue, bondType
 		// arm bonded so far, and it is satisfiable, so it stays.
 	}
 	return opts, nil
+}
+
+// refArmNeedsTerminalSteps reports whether a proto+mol bond orders its arm
+// after the molecule's terminal steps: a sequential bond with --ref, the one
+// shape whose edge onto the molecule buildAttachCloneOpts drops. Every other
+// bond keeps its own attachment and reads nothing extra.
+func refArmNeedsTerminalSteps(bondType, childRef string) bool {
+	return childRef != "" && bondType == types.BondTypeSequential
+}
+
+// refArmTerminalSteps reads molecule molID as it stands now and answers the
+// steps a sequential --ref arm bonded into it must wait for
+// (issueops.MoleculeTerminalSteps). The answer is a bond-time snapshot: steps
+// added later do not retarget the arm. An empty answer (no open steps) is not
+// an error - the arm simply has nothing to wait for.
+func refArmTerminalSteps(ctx context.Context, mr issueops.MoleculeReader, molID string) ([]string, error) {
+	g, err := issueops.LoadMolecule(ctx, mr, molID)
+	if err != nil {
+		return nil, fmt.Errorf("reading the steps of %s: %w", molID, err)
+	}
+	return issueops.MoleculeTerminalSteps(g), nil
 }
 
 // bondMolProto bonds a molecule to a proto (symmetric with bondProtoMol)

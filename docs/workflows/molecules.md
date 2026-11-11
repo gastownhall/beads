@@ -274,6 +274,25 @@ bd mol bond mol-worker-arm bd-patrol --ref arm-{{name}} --var name=ace
 # Creates: bd-patrol.arm-ace (and children like bd-patrol.arm-ace.capture)
 ```
 
+The dotted ID only names the arm; it does not make the arm a member of
+`bd-patrol` (no parent-child edge), and an arm cannot wait on the molecule it
+is nested in without deadlocking it. So a sequential `--ref` arm (the default
+type) waits on the molecule's **terminal steps** instead: every direct step
+that is neither closed nor pinned and that no other such step waits on. It
+gets one `blocks` edge onto each and becomes ready when **all** of them close.
+
+- The set is read once, at bond time. Steps added to the molecule later do
+  not retarget arms already bonded, and an earlier sequential arm is not a
+  step, so a later arm does not wait on it.
+- A molecule with no open steps (a bare root, or every step closed or
+  pinned) still takes the arm, with no ordering edges: it is ready at once.
+- `--type parallel --ref` keeps its parent-child edge and no ordering. Use it
+  for an arm that must run while its molecule is still running, such as a
+  per-worker arm its patrol waits on. `--type conditional --ref` is refused;
+  omit `--ref` to bond a conditional arm as a sibling.
+
+Inspect an arm's edges with `bd dep list bd-patrol.arm-ace`.
+
 ## Advanced Features
 
 ### Bond Points

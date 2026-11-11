@@ -4926,13 +4926,20 @@ bd mol bond
     |   conditional         - B runs only if A fails
     |
     |   With --ref, the spawned proto arm is nested inside the molecule operand
-    |   rather than ordered against it - whichever side of the bond that is - so a
-    |   sequential --ref arm carries no ordering: it is ready as soon as it is
-    |   spawned. Ordering a nested arm against its own container is unsatisfiable
-    |   in both directions (the arm waits for the molecule to close; the molecule
-    |   cannot close while it holds an open arm). --ref is refused with --type
-    |   conditional, which has no safe degradation - omit --ref to bond a
-    |   conditional arm as a sibling.
+    |   rather than ordered against it - whichever side of the bond that is.
+    |   Ordering a nested arm against its own container is unsatisfiable in both
+    |   directions (the arm waits for the molecule to close; the molecule cannot
+    |   close while it holds an open arm), so a sequential --ref arm instead waits
+    |   on the molecule's terminal steps: every direct step that is neither closed
+    |   nor pinned and that no other such step waits on. The arm runs once ALL of
+    |   them close. The set is read once, at bond time: steps added later do not
+    |   retarget the arm, and a molecule with no open steps takes an arm that is
+    |   ready at once. The arm is not made a member of the molecule (no
+    |   parent-child edge). --ref is refused with --type conditional, which has no
+    |   safe degradation - omit --ref to bond a conditional arm as a sibling.
+    |   An arm that must run while its molecule is still running, such as a
+    |   per-worker arm its patrol waits on, needs --type parallel, which keeps the
+    |   parent-child edge and adds no ordering.
     |
     | Phase control:
     |   By default, spawned protos follow the target's phase:
@@ -4954,7 +4961,8 @@ bd mol bond
     | Use cases:
     |   - Found important bug during patrol? Use --pour to persist it
     |   - Need ephemeral diagnostic on persistent feature? Use --ephemeral
-    |   - Spawning per-worker arms on a patrol? Use --ref for readable IDs
+    |   - Spawning per-worker arms on a patrol? Use --ref for readable IDs, plus
+    |     --type parallel when the arms must run while the patrol does
     |
     | Examples:
     |   bd mol bond mol-feature mol-deploy                    # Compound proto

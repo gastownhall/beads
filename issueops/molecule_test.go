@@ -593,3 +593,258 @@ func TestActiveMoleculeIDsFallsBackToHookedWork(t *testing.T) {
 		t.Fatalf("ActiveMoleculeIDs (nobody's work) = %v, %v, want none", ids, err)
 	}
 }
+
+// MoleculeTerminalSteps answers the direct steps a sequential arm bonded into
+// the molecule must wait for: every active direct step no other active direct
+// step is known to finish after. Each case is read through LoadMolecule, so
+// membership is the parent-child edge exactly as a bond sees it.
+func TestMoleculeTerminalSteps(t *testing.T) {
+	type issue struct {
+		id     string
+		status types.Status
+	}
+	type edge struct {
+		from, to string
+		typ      types.DependencyType
+	}
+	open := func(id string) issue { return issue{id, types.StatusOpen} }
+	closed := func(id string) issue { return issue{id, types.StatusClosed} }
+	pinned := func(id string) issue { return issue{id, types.StatusPinned} }
+	child := func(id, parent string) edge { return edge{id, parent, types.DepParentChild} }
+	blocks := func(from, to string) edge { return edge{from, to, types.DepBlocks} }
+
+	tests := []struct {
+		name   string
+		issues []issue
+		edges  []edge
+		want   []string
+	}{
+		{
+			name:   "linear chain ends at its last step",
+			issues: []issue{open("a"), open("b"), open("c")},
+			edges:  []edge{child("a", "m"), child("b", "m"), child("c", "m"), blocks("b", "a"), blocks("c", "b")},
+			want:   []string{"c"},
+		},
+		{
+			name:   "parallel branches each end",
+			issues: []issue{open("s1"), open("s2"), open("s3")},
+			edges:  []edge{child("s1", "m"), child("s2", "m"), child("s3", "m"), blocks("s2", "s1")},
+			want:   []string{"s2", "s3"},
+		},
+		{
+			name: "root only has nothing to wait for",
+			want: []string{},
+		},
+		{
+			name:   "closed and pinned steps hold nothing",
+			issues: []issue{closed("a"), pinned("b")},
+			edges:  []edge{child("a", "m"), child("b", "m"), blocks("b", "a")},
+			want:   []string{},
+		},
+		{
+			name:   "an in-progress step still runs",
+			issues: []issue{{"a", types.StatusInProgress}},
+			edges:  []edge{child("a", "m")},
+			want:   []string{"a"},
+		},
+		{
+			name:   "the root's own edge onto a step orders nobody",
+			issues: []issue{open("a"), open("b")},
+			edges:  []edge{child("a", "m"), child("b", "m"), blocks("m", "a")},
+			want:   []string{"a", "b"},
+		},
+		{
+			name:   "force-closed successor leaves its open predecessor terminal",
+			issues: []issue{open("a"), closed("b")},
+			edges:  []edge{child("a", "m"), child("b", "m"), blocks("b", "a")},
+			want:   []string{"a"},
+		},
+		{
+			name:   "active nested descendant orders its compound after the step it waits on",
+			issues: []issue{open("a"), open("x"), open("x1")},
+			edges:  []edge{child("a", "m"), child("x", "m"), child("x1", "x"), blocks("x1", "a")},
+			want:   []string{"x"},
+		},
+		{
+			name:   "closed descendant's stale edge orders nothing",
+			issues: []issue{open("a"), open("x"), closed("x1")},
+			edges:  []edge{child("a", "m"), child("x", "m"), child("x1", "x"), blocks("x1", "a")},
+			want:   []string{"a", "x"},
+		},
+		{
+			name:   "pinned descendant's stale edge orders nothing",
+			issues: []issue{open("a"), open("x"), pinned("x1")},
+			edges:  []edge{child("a", "m"), child("x", "m"), child("x1", "x"), blocks("x1", "a")},
+			want:   []string{"a", "x"},
+		},
+		{
+			name:   "closed intermediate ancestor cuts the implication",
+			issues: []issue{open("a"), open("x"), closed("x1"), open("x11")},
+			edges:  []edge{child("a", "m"), child("x", "m"), child("x1", "x"), child("x11", "x1"), blocks("x11", "a")},
+			want:   []string{"a", "x"},
+		},
+		{
+			name:   "waiting on another compound's child is not waiting on the compound",
+			issues: []issue{open("a"), open("y"), open("y1")},
+			edges:  []edge{child("a", "m"), child("y", "m"), child("y1", "y"), blocks("a", "y1")},
+			want:   []string{"a", "y"},
+		},
+		{
+			name:   "waits-for does not order direct steps",
+			issues: []issue{open("a"), open("b")},
+			edges:  []edge{child("a", "m"), child("b", "m"), {"b", "a", types.DepWaitsFor}},
+			want:   []string{"a", "b"},
+		},
+		{
+			name:   "conditional-blocks orders like blocks",
+			issues: []issue{open("a"), open("b")},
+			edges:  []edge{child("a", "m"), child("b", "m"), {"b", "a", types.DepConditionalBlocks}},
+			want:   []string{"b"},
+		},
+		{
+			name:   "non-blocking relations order nothing",
+			issues: []issue{open("a"), open("b")},
+			edges:  []edge{child("a", "m"), child("b", "m"), {"b", "a", types.DepRelated}},
+			want:   []string{"a", "b"},
+		},
+		{
+			name:   "edges outside the molecule order nothing",
+			issues: []issue{open("a"), open("b"), open("outside")},
+			edges:  []edge{child("a", "m"), child("b", "m"), blocks("b", "outside"), blocks("outside", "a")},
+			want:   []string{"a", "b"},
+		},
+		{
+			name:   "duplicate edges are one ordering",
+			issues: []issue{open("a"), open("b")},
+			edges:  []edge{child("a", "m"), child("b", "m"), blocks("b", "a"), blocks("b", "a")},
+			want:   []string{"b"},
+		},
+		{
+			name:   "self edge orders nothing",
+			issues: []issue{open("a")},
+			edges:  []edge{child("a", "m"), blocks("a", "a")},
+			want:   []string{"a"},
+		},
+		{
+			name:   "parent-child cycle terminates",
+			issues: []issue{open("x"), open("x1")},
+			edges:  []edge{child("x", "m"), child("x1", "x"), child("x", "x1")},
+			want:   []string{"x"},
+		},
+		{
+			name:   "ordering cycle alone keeps every member",
+			issues: []issue{open("a"), open("b")},
+			edges:  []edge{child("a", "m"), child("b", "m"), blocks("a", "b"), blocks("b", "a")},
+			want:   []string{"a", "b"},
+		},
+		{
+			name:   "ordering cycle survives beside an independent terminal",
+			issues: []issue{open("a"), open("b"), open("c")},
+			edges:  []edge{child("a", "m"), child("b", "m"), child("c", "m"), blocks("a", "b"), blocks("b", "a")},
+			want:   []string{"a", "b", "c"},
+		},
+		{
+			name:   "ordering cycle with an outside waiter yields to the waiter",
+			issues: []issue{open("a"), open("b"), open("c")},
+			edges:  []edge{child("a", "m"), child("b", "m"), child("c", "m"), blocks("a", "b"), blocks("b", "a"), blocks("c", "a")},
+			want:   []string{"c"},
+		},
+		{
+			name:   "output follows the graph's issue order (ID order once loaded)",
+			issues: []issue{open("z"), open("y"), open("x")},
+			edges:  []edge{child("z", "m"), child("y", "m"), child("x", "m")},
+			want:   []string{"x", "y", "z"},
+		},
+		{
+			name:   "an earlier parallel arm is a member and participates",
+			issues: []issue{open("a"), open("m.arm-p")},
+			edges:  []edge{child("a", "m"), child("m.arm-p", "m"), blocks("m.arm-p", "a")},
+			want:   []string{"m.arm-p"},
+		},
+		{
+			name:   "an earlier sequential arm is dotted only and does not participate",
+			issues: []issue{open("a"), open("m.arm-s")},
+			edges:  []edge{child("a", "m"), blocks("m.arm-s", "a")},
+			want:   []string{"a"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeMolecules()
+			f.add("m", types.TypeMolecule, types.StatusOpen)
+			for _, is := range tc.issues {
+				f.add(is.id, types.TypeTask, is.status)
+			}
+			for _, e := range tc.edges {
+				f.edge(e.from, e.to, e.typ)
+			}
+			g, err := issueops.LoadMolecule(context.Background(), f.reader(), "m")
+			if err != nil {
+				t.Fatalf("LoadMolecule: %v", err)
+			}
+			got := issueops.MoleculeTerminalSteps(g)
+			if got == nil {
+				got = []string{}
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("MoleculeTerminalSteps = %v, want %v", got, tc.want)
+			}
+			assertTerminalsCoverEveryStep(t, g, got)
+		})
+	}
+}
+
+// assertTerminalsCoverEveryStep checks the frontier invariant independently
+// of the expected list: every active direct step left out must be one a kept
+// step waits on, directly or through other direct steps, so an arm waiting
+// on the kept steps also waits on it. Only direct step-to-step edges are
+// followed here; a case whose omission rests on a descendant's edge
+// (the nested-descendant case) counts that edge as its compound's.
+func assertTerminalsCoverEveryStep(t *testing.T, g *issueops.MoleculeGraph, terminals []string) {
+	t.Helper()
+	seen := map[string]bool{}
+	for _, id := range terminals {
+		if seen[id] {
+			t.Fatalf("terminal %s emitted twice in %v", id, terminals)
+		}
+		seen[id] = true
+	}
+	parentOf := map[string]string{}
+	for _, dep := range g.Dependencies {
+		if dep.Type == types.DepParentChild {
+			parentOf[dep.IssueID] = dep.DependsOnID
+		}
+	}
+	// directOf lifts a node to the direct step it sits under.
+	directOf := func(id string) string {
+		for hops := 0; hops < len(g.Issues) && parentOf[id] != "" && parentOf[id] != g.Root.ID; hops++ {
+			id = parentOf[id]
+		}
+		return id
+	}
+	waitsOn := map[string][]string{}
+	for _, dep := range g.Dependencies {
+		if types.IsGateEdge(dep.Type) && g.IssueMap[dep.IssueID].Status == types.StatusOpen {
+			waitsOn[directOf(dep.IssueID)] = append(waitsOn[directOf(dep.IssueID)], dep.DependsOnID)
+		}
+	}
+	covered := map[string]bool{}
+	stack := slices.Clone(terminals)
+	for len(stack) > 0 {
+		id := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if covered[id] {
+			continue
+		}
+		covered[id] = true
+		stack = append(stack, waitsOn[id]...)
+	}
+	for _, issue := range g.Issues {
+		if issue.ID == g.Root.ID || parentOf[issue.ID] != g.Root.ID || issue.Status != types.StatusOpen {
+			continue
+		}
+		if !covered[issue.ID] {
+			t.Errorf("active direct step %s is neither terminal nor waited on by a terminal (terminals %v)", issue.ID, terminals)
+		}
+	}
+}

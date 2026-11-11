@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 func bondSubgraph() *TemplateSubgraph {
@@ -132,5 +135,96 @@ func TestBuildAttachCloneOptsParallelRefArmKeepsAttachment(t *testing.T) {
 	}
 	if opts.AttachDepType != types.DepParentChild {
 		t.Errorf("AttachDepType = %q, want %q", opts.AttachDepType, types.DepParentChild)
+	}
+}
+
+// Only a sequential --ref arm loses its edge onto the molecule, so only it
+// reads the molecule's terminal steps; every other bond keeps its own
+// attachment and must not pick up extra edges.
+func TestRefArmNeedsTerminalStepsOnlyForSequentialRef(t *testing.T) {
+	cases := []struct {
+		bondType, childRef string
+		want               bool
+	}{
+		{types.BondTypeSequential, "arm-ace", true},
+		{types.BondTypeSequential, "", false},
+		{types.BondTypeParallel, "arm-ace", false},
+		{types.BondTypeParallel, "", false},
+		{types.BondTypeConditional, "", false},
+		{types.BondTypeConditional, "arm-ace", false},
+	}
+	for _, tc := range cases {
+		if got := refArmNeedsTerminalSteps(tc.bondType, tc.childRef); got != tc.want {
+			t.Errorf("refArmNeedsTerminalSteps(%q, %q) = %v, want %v", tc.bondType, tc.childRef, got, tc.want)
+		}
+	}
+}
+
+// failingMoleculeReader refuses every read with err.
+type failingMoleculeReader struct{ err error }
+
+func (r failingMoleculeReader) GetMany(context.Context, issueops.GetManyRequest) (issueops.GetManyResult, error) {
+	return issueops.GetManyResult{}, r.err
+}
+
+func (r failingMoleculeReader) Related(context.Context, issueops.RelatedRequest) ([]*issueops.RelatedIssue, error) {
+	return nil, r.err
+}
+
+func (r failingMoleculeReader) ReadEdges(context.Context, issueops.EdgeReadRequest) (issueops.EdgeReadResult, error) {
+	return issueops.EdgeReadResult{}, r.err
+}
+
+// refusingMolWriter fails the test on any write: the reads it embeds are
+// never reached by the paths that use it.
+type refusingMolWriter struct {
+	molWriter
+	t *testing.T
+}
+
+func (w refusingMolWriter) CreateIssue(_ context.Context, issue *types.Issue, _ string) error {
+	w.t.Errorf("CreateIssue(%q) reached after a failed terminal-step read", issue.Title)
+	return nil
+}
+
+func (w refusingMolWriter) AddDependency(_ context.Context, dep *types.Dependency, _ string) error {
+	w.t.Errorf("AddDependency(%s -> %s) reached after a failed terminal-step read", dep.IssueID, dep.DependsOnID)
+	return nil
+}
+
+// A terminal-step read that fails is the bond's error, returned before the
+// arm is spawned, never an empty target set that would leave the arm
+// unordered.
+func TestBondProtoMolAttachIntoReturnsATerminalReadFailureBeforeSpawning(t *testing.T) {
+	readErr := errors.New("edge read refused")
+	mol := &types.Issue{ID: "bd-patrol", Title: "patrol"}
+	sub := bondSubgraph()
+
+	_, err := bondProtoMolAttachInto(context.Background(), refusingMolWriter{t: t}, issueops.MoleculeReaderOver(failingMoleculeReader{err: readErr}),
+		sub, sub.Root, mol, types.BondTypeSequential, nil, "arm-ace", "tester", false, false)
+	if !errors.Is(err, readErr) {
+		t.Fatalf("bondProtoMolAttachInto() error = %v, want the read failure %v", err, readErr)
+	}
+}
+
+// The long help is where the sequential --ref contract is documented (the
+// CLI reference is generated from it): wait for every terminal step, read
+// once at bond time, ready at once with nothing to wait for, no membership.
+func TestMolBondHelpDocumentsRefArmTerminalOrdering(t *testing.T) {
+	long := strings.Join(strings.Fields(molBondCmd.Long), " ")
+	for _, want := range []string{
+		"a sequential --ref arm instead waits on the molecule's terminal steps",
+		"The arm runs once ALL of them close.",
+		"The set is read once, at bond time: steps added later do not retarget the arm",
+		"a molecule with no open steps takes an arm that is ready at once",
+		"The arm is not made a member of the molecule",
+		"An arm that must run while its molecule is still running, such as a per-worker arm its patrol waits on, needs --type parallel",
+	} {
+		if !strings.Contains(long, want) {
+			t.Errorf("mol bond --help does not say %q", want)
+		}
+	}
+	if strings.Contains(long, "carries no ordering") {
+		t.Errorf("mol bond --help still says a sequential --ref arm carries no ordering")
 	}
 }

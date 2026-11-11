@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"slices"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/formula"
@@ -171,5 +172,36 @@ func TestEmbeddedSpawnMolecule_SubstitutesTemplatedStepFields(t *testing.T) {
 	}
 	if err := validation.AssigneeMatches(actor, false)(newQAID, issue); err != nil {
 		t.Errorf("spawned issue is not closable by the pouring actor %q: %v", actor, err)
+	}
+}
+
+// TestEmbeddedBondProtoMolRefArmWaitsForTerminalSteps is the embedded-mode leg
+// of AC-5 (bd-lrkpd3). Embedded Dolt runs on one connection, so a terminal
+// step read issued through the store while cloneSubgraph's transaction holds
+// it would hang rather than fail; the bond must read first, then clone, and
+// land the same terminal edges as the server route.
+func TestEmbeddedBondProtoMolRefArmWaitsForTerminalSteps(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+
+	ctx := t.Context()
+	s, err := embeddeddolt.Open(ctx, t.TempDir(), "beads", "main")
+	if err != nil {
+		t.Fatalf("embeddeddolt.Open failed: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "patrol"); err != nil {
+		t.Fatalf("SetConfig failed: %v", err)
+	}
+	f := seedRefArmFixture(t, ctx, s, false)
+
+	result, err := bondProtoMol(ctx, s, f.proto, f.mol, types.BondTypeSequential, map[string]string{"name": "ace"}, "arm-{{name}}", "test", false, false)
+	if err != nil {
+		t.Fatalf("bondProtoMol: %v", err)
+	}
+	armID := result.IDMapping[f.proto.ID]
+	if got, want := outgoingDeps(t, ctx, s, armID), wantDeps("blocks:"+f.s2.ID, "blocks:"+f.s3.ID); !slices.Equal(got, want) {
+		t.Fatalf("arm %s deps = %v, want %v", armID, got, want)
 	}
 }
