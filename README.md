@@ -193,7 +193,9 @@ schema version mismatch: database is at v45, binary knows up to v42 (3 migration
 **When this fires:** only when the database schema is *ahead* of the binary
 (a newer binary migrated the database; this binary doesn't know those
 migrations). Normal upgrades, where the binary migrates the database forward,
-are unaffected.
+are unaffected. Every open path checks: embedded, server mode, and also a
+proxied-server workspace or `bd serve`, so an older `bd` left running against
+a shared database stops instead of writing into the newer schema.
 
 **Escape hatch:** `BD_IGNORE_SCHEMA_SKEW=1` (or `--ignore-schema-skew`) bypasses
 the guard with a warning on stderr. Use this only if you know the forward
