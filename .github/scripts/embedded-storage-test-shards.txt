@@ -567,6 +567,7 @@
 40 32 TestEmbeddedReadyClaimerEmptyFrontIsNormal
 40 32 TestEmbeddedRecomputeAllBlockedWiring
 40 32 TestEventsJournal_EmbeddedConcurrentGaplessNoDup
+40 32 TestFlattenKeepsCloneLocalFKs
 40 32 TestGetNextChildID
 40 32 TestRemoteVerbPlainRemoteKeepsAmbientEnv
 40 32 TestRowVersionContract
