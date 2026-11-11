@@ -79,6 +79,13 @@ exports_files(
     visibility = ["//scripts:__pkg__"],
 )
 
+# //internal/storage/embeddeddolt:embeddeddolt_test runs the upgrade guide's
+# dependency read recipe against a real store (GH#5107).
+exports_files(
+    ["docs/getting-started/upgrading.md"],
+    visibility = ["//internal/storage/embeddeddolt:__pkg__"],
+)
+
 # //scripts:shell_scripts_test: scripts/test.sh's skip list.
 exports_files(
     [".test-skip"],

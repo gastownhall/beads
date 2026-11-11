@@ -1226,6 +1226,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The upgrade notes no longer promise a `depends_on_id` read column that
+  1.0.5 removed.** The 1.0.5 CHANGELOG entry and the 1.0.5 notes `bd upgrade
+  review` prints said `dependencies.depends_on_id` stayed as a generated column
+  for readers, but migrations `0043` and `ignored/0005` in that same release
+  drop it from `dependencies` and `wisp_dependencies`, so SQL readers that
+  still select it fail on every migrated or newly created store. Both notes are
+  corrected, and the upgrade guide's new
+  [Dependency target columns](docs/getting-started/upgrading.md#dependency-target-columns)
+  section explains the typed target columns and gives a tested read recipe
+  ([#5107](https://github.com/gastownhall/beads/issues/5107)).
+
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
@@ -10493,7 +10504,8 @@ gate that rc.1 introduced, and ships the validated upgrade documentation.
 
 - **Large content columns widened to `LONGTEXT`.** Issue content and event/wisp-event value columns are migrated from `TEXT` to `LONGTEXT`, lifting the previous ~64 KB per-field ceiling. ([#4027](https://github.com/gastownhall/beads/pull/4027), [#3682](https://github.com/gastownhall/beads/pull/3682))
 
-- **`dependencies.depends_on_id` is now a STORED generated column.** The polymorphic target has been split into three typed columns: `depends_on_issue_id`, `depends_on_wisp_id`, `depends_on_external`. `depends_on_id` remains as `COALESCE(...) STORED` for read paths; **writes to `depends_on_id` will fail** — code that inserts dependencies must populate exactly one typed column (enforced by a new `ck_dep_one_target` CHECK). Same split mirrored to `wisp_dependencies` with a corresponding `ck_wisp_dep_one_target`. Migrations `0041` (tracked) and `ignored/0003` (wisps) perform the column split, copy existing rows by classifying their targets against `issues` / `wisps`, and add the new typed-target indexes. ([#3952](https://github.com/gastownhall/beads/pull/3952))
+- **`dependencies.depends_on_id` is split into three typed target columns, and the SQL column is removed.** The polymorphic target has been split into three typed columns: `depends_on_issue_id`, `depends_on_wisp_id`, `depends_on_external`; code that inserts dependencies must populate exactly one typed column (enforced by a new `ck_dep_one_target` CHECK). Same split mirrored to `wisp_dependencies` with a corresponding `ck_wisp_dep_one_target`. Migrations `0041` (tracked) and `ignored/0003` (wisps) perform the column split, copy existing rows by classifying their targets against `issues` / `wisps`, and add the new typed-target indexes. ([#3952](https://github.com/gastownhall/beads/pull/3952))
+  *Corrected ([#5107](https://github.com/gastownhall/beads/issues/5107)):* this entry originally said `depends_on_id` remains as a `COALESCE(...) STORED` generated column for read paths. That column was only temporary: migrations `0043` (`dependencies`) and `ignored/0005` (`wisp_dependencies`), shipped in this same release, drop it, so neither table has a `depends_on_id` column once migrated and SQL that reads it fails. Read the typed columns instead; see [Dependency target columns](docs/getting-started/upgrading.md#dependency-target-columns) for a read recipe.
 - **Most existing dependency-table FKs now use `ON UPDATE CASCADE`.** Migration `0042` rebuilds `fk_dep_issue`, `fk_labels_issue`, `fk_comments_issue`, `fk_events_issue`, `fk_snapshots_issue`, and `fk_comp_snap_issue` to cascade on both delete and update. Same treatment for the wisp-side FKs in `ignored/0003`. Prefix rename and ID-update paths rely on this cascade instead of touching aux tables manually. ([#3952](https://github.com/gastownhall/beads/pull/3952))
 - **Migrations `0041` and `0042` are intentionally irreversible.** The matching `.down.sql` files are documented no-ops because rebuilding the polymorphic column from typed columns would require schema-aware backfill that the storage layer no longer performs. Restore from a prior `dolt` commit if rollback is required. ([#3952](https://github.com/gastownhall/beads/pull/3952))
 - **`BEADS_MAX_ROWS` / `--max-rows` defensive row cap** — ops can now set `BEADS_MAX_ROWS=N` (or pass `bd list --max-rows N`) to bound `SearchIssues` result sets. Default is disabled; on overage, `bd` exits with code 2 and writes a two-line error to stderr (stdout stays empty so `jq` pipelines don't get half-rendered JSON). The flag is wired on `bd list`, `bd ready`, `bd dep tree`, `bd find-duplicates`, and `bd graph`. The env var is also honored by `bd doctor`, `bd lint`, `bd doctor-conventions`, and `bd doctor-pollution`. `bd cleanup`, `bd gc`, `bd export`, `bd export --auto`, `bd migrate-issues`, and `bd jira` explicitly opt out so a misconfigured env can't abort a sweep partway. (be-x42v)
