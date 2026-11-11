@@ -863,3 +863,90 @@ func TestFreshRowLockDistinctFrom(t *testing.T) {
 		}
 	}
 }
+
+// TestMergeIssuesConflictRow_DeleteOverDerivedEdit pins GH#7890's settle rule:
+// their delete against our change to derived is_blocked only resolves to the
+// delete, since a recomputed value records no edit to keep. A federation
+// filtered push makes exactly this row when a peer deletes an issue the
+// filter commit unblocked. Every other delete/modify stays the operator's.
+func TestMergeIssuesConflictRow_DeleteOverDerivedEdit(t *testing.T) {
+	t.Run("their delete beats our is_blocked recompute", func(t *testing.T) {
+		row := conflictRowFor(t, map[string][3]any{
+			"id":         {"bd-30", "bd-30", nil},
+			"title":      {"waiter", "waiter", nil},
+			"is_blocked": {int64(0), int64(1), nil},
+			"row_lock":   {int64(7), int64(7), nil},
+			"updated_at": {tsBase, tsBase, nil},
+		})
+		m, ok := mergeIssuesConflictRow(row)
+		if !ok {
+			t.Fatal("a delete against an is_blocked-only change must resolve to the delete")
+		}
+		if !m.deleteRow || m.ourKey != "bd-30" || len(m.columns) != 0 {
+			t.Errorf("merge = %+v, want a delete of bd-30 and no write", m)
+		}
+	})
+	for name, ours := range map[string]map[string][3]any{
+		"our edit beside the recompute": {
+			"title": {"waiter", "renamed", nil}, "is_blocked": {int64(0), int64(1), nil},
+		},
+		"our updated_at moved": {
+			"is_blocked": {int64(0), int64(1), nil}, "updated_at": {tsBase, tsOurs, nil},
+		},
+		"our row_lock reminted": {
+			"is_blocked": {int64(0), int64(1), nil}, "row_lock": {int64(7), int64(8), nil},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ours["id"] = [3]any{"bd-31", "bd-31", nil}
+			if _, ok := mergeIssuesConflictRow(conflictRowFor(t, ours)); ok {
+				t.Error("a delete against a real edit must be left for the operator")
+			}
+		})
+	}
+	t.Run("our delete against their recompute", func(t *testing.T) {
+		row := conflictRowFor(t, map[string][3]any{
+			"id":         {"bd-32", nil, "bd-32"},
+			"is_blocked": {int64(0), nil, int64(1)},
+		})
+		if _, ok := mergeIssuesConflictRow(row); ok {
+			t.Error("a delete on our side is left for the operator")
+		}
+	})
+}
+
+// TestResolveIssuesFieldMerge_DeleteRow pins how a deleteRow merge lands: the
+// conflict is cleared while dolt_conflicts_issues still names the row by
+// our_id, then the row is deleted, and a delete that matches no row refuses.
+func TestResolveIssuesFieldMerge_DeleteRow(t *testing.T) {
+	ctx := context.Background()
+	plan := []issuesRowMerge{{ourKey: "bd-30", deleteRow: true}}
+	const clearSQL = "DELETE FROM dolt_conflicts_issues WHERE our_id = ?"
+	const deleteSQL = "DELETE FROM `issues` WHERE `id` = ?"
+
+	t.Run("clears the conflict, then deletes the row", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		mock.ExpectExec(regexp.QuoteMeta(clearSQL)).WithArgs("bd-30").
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectExec(regexp.QuoteMeta(deleteSQL)).WithArgs("bd-30").
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		if err := resolveIssuesFieldMerge(ctx, db, plan); err != nil {
+			t.Fatalf("resolveIssuesFieldMerge: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("a vanished row refuses", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		mock.ExpectExec(regexp.QuoteMeta(clearSQL)).WithArgs("bd-30").
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectExec(regexp.QuoteMeta(deleteSQL)).WithArgs("bd-30").
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		err := resolveIssuesFieldMerge(ctx, db, plan)
+		if err == nil || !strings.Contains(err.Error(), "matched 0 row(s)") {
+			t.Fatalf("err = %v, want the no-row refusal", err)
+		}
+	})
+}
