@@ -1226,6 +1226,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `bd setup junie` no longer writes an MCP config that runs `bd mcp`, a
+  command bd has never had, so Junie's beads MCP server failed to start
+  (GH#5563). `.junie/mcp/mcp.json` now launches the `beads-mcp` server with
+  `uvx beads-mcp`, which needs [uv](https://docs.astral.sh/uv/) installed;
+  re-run `bd setup junie` to replace an existing config.
+
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
