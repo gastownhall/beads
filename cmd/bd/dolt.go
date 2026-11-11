@@ -782,6 +782,7 @@ or 'bd dolt push --remote <remote>'. The remote must already exist (see
 		}
 		if remote != "" {
 			fmt.Printf("Pushing to Dolt remote %q...\n", remote)
+			prePush := prePushCommit(ctx, remote, st)
 			if err := st.PushRemote(ctx, remote, force); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				if isRemoteNotFoundErr(err) {
@@ -797,6 +798,9 @@ or 'bd dolt push --remote <remote>'. The remote must already exist (see
 				}
 				return SilentExit()
 			}
+			if remote == pushStateRemote {
+				recordManualPushSuccess(ctx, st, prePush)
+			}
 			fmt.Println("Push complete.")
 			return nil
 		}
@@ -810,6 +814,7 @@ or 'bd dolt push --remote <remote>'. The remote must already exist (see
 		}
 		fmt.Println("Pushing to Dolt remote...")
 
+		prePush := prePushCommit(ctx, "", st)
 		var pushErr error
 		if force {
 			pushErr = st.ForcePush(ctx)
@@ -835,6 +840,7 @@ or 'bd dolt push --remote <remote>'. The remote must already exist (see
 			}
 			return SilentExit()
 		}
+		recordManualPushSuccess(ctx, st, prePush)
 		fmt.Println("Push complete.")
 		return nil
 	},

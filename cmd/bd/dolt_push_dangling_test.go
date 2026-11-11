@@ -96,16 +96,6 @@ func requireRemoteDanglingGuidance(t *testing.T, stderr, remote string) {
 	}
 }
 
-// pinStorageMode makes usesSQLServer report server mode when server is true,
-// and embedded mode, bd's default, otherwise.
-func pinStorageMode(t *testing.T, server bool) {
-	t.Helper()
-	oldServer, oldProxied := serverMode, proxiedServerMode
-	t.Cleanup(func() { serverMode, proxiedServerMode = oldServer, oldProxied })
-	serverMode, proxiedServerMode = server, false
-	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
-}
-
 // failingPushStore is a store with an origin remote whose pushes fail with
 // pushErr. It reads HEAD as both Dolt stores do.
 type failingPushStore struct {

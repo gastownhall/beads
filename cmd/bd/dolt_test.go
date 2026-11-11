@@ -3108,6 +3108,12 @@ func (m *positionalRemotePushStore) Push(context.Context) error {
 	return nil
 }
 
+// GetCurrentCommit serves the HEAD read a push to origin takes for
+// push-state.json (GH#6289).
+func (m *positionalRemotePushStore) GetCurrentCommit(context.Context) (string, error) {
+	return "head", nil
+}
+
 func (m *positionalRemotePushStore) ForcePush(context.Context) error {
 	m.calls = append(m.calls, "ForcePush")
 	return nil
@@ -3298,6 +3304,16 @@ func TestDoltPushPositionalRemoteIsNotSilentlyIgnored(t *testing.T) {
 
 			fake := &positionalRemotePushStore{}
 			store = fake
+			// A push to origin records push-state.json (GH#6289): keep it
+			// in a temp workspace.
+			beadsDir := filepath.Join(t.TempDir(), ".beads")
+			if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("BEADS_DIR", beadsDir)
 
 			config.ResetForTesting()
 			t.Cleanup(func() { config.ResetForTesting() })

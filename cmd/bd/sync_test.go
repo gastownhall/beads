@@ -1457,6 +1457,9 @@ func (f *fakeSyncStore) PullRemote(_ context.Context, remote string) error {
 	return f.pullRemoteErr
 }
 func (f *fakeSyncStore) Push(context.Context) error { f.pushCalls++; return f.pushErr }
+
+// GetCurrentCommit serves the push-state bookkeeping around a successful push.
+func (f *fakeSyncStore) GetCurrentCommit(context.Context) (string, error) { return "head", nil }
 func (f *fakeSyncStore) PushRemote(_ context.Context, remote string, _ bool) error {
 	f.pushRemoteCalls++
 	f.lastRemoteArg = remote

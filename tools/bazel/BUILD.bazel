@@ -235,6 +235,7 @@ release_cross_build(
         "//internal/molecules:molecules",
         "//internal/notion:notion",
         "//internal/procid:procid",
+        "//internal/pushstate:pushstate",
         "//internal/query:query",
         "//internal/recipes:recipes",
         "//internal/remedy:remedy",

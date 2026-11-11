@@ -114,7 +114,7 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `memories.budget-chars` | — | `BD_MEMORIES_BUDGET_CHARS` | `0` | Ceiling on the whole persistent-memory corpus, in bytes of `len(key)+len(content)` summed over every memory (0 = off). `bd remember` refuses a write that would cross it — pass `--force` to store anyway — and warns on a write that lands at or above 80% of it. Read at `bd remember` time only; `bd prime` injection is capped separately by `prime.max-memory-chars` |
 | `dolt.auto-commit` | `--dolt-auto-commit` | `BD_DOLT_AUTO_COMMIT` | `on` | `off\|on\|batch`: `on` creates a Dolt history commit after each successful write; `batch`/`off` defer it to `bd dolt commit` (see [below](#auto-commit-sql-commits-vs-dolt-commits)) |
 | `dolt.auto-push` | — | `BD_DOLT_AUTO_PUSH` | `false` | Auto-push to Dolt remote after writes (opt-in; see [below](#auto-push)) |
-| `dolt.auto-push-interval` | — | `BD_DOLT_AUTO_PUSH_INTERVAL` | `5m` | Minimum time between auto-pushes |
+| `dolt.auto-push-interval` | — | `BD_DOLT_AUTO_PUSH_INTERVAL` | `5m` | Minimum time from the last recorded push attempt or successful push to the next auto-push |
 | `dolt.auto-push-timeout` | — | `BD_DOLT_AUTO_PUSH_TIMEOUT` | `30s` | Timeout for a single auto-push attempt |
 | `dolt.local-only` | — | `BD_DOLT_LOCAL_ONLY` | `false` | Keep Dolt data off the network: skip remote wiring at `bd init`, suppress auto-push, have `bd dolt push`/`pull` and `bd sync` report remote sync as disabled without contacting a remote, and refuse `bd dolt remote add` |
 | `dolt.shared-server` | `--shared-server` | `BEADS_DOLT_SHARED_SERVER` | `false` | Share one Dolt server at `~/.beads/shared-server/` |
@@ -264,17 +264,32 @@ By default, `bd` does not push automatically after write commands. Auto-push is 
 ```yaml
 dolt:
   auto-push: true         # Explicit opt-in; safe for single-writer setups
-  auto-push-interval: 5m  # Minimum time between auto-pushes
+  auto-push-interval: 5m  # Minimum time from the last recorded attempt or success to the next auto-push
   auto-push-timeout: 30s  # Bound one push attempt when the remote is unreachable
 ```
 
 How it works:
 
 - After each write command (after auto-commit and auto-backup), `bd` checks whether a push is due.
-- Pushes are debounced: skipped if the last push was less than `dolt.auto-push-interval` ago.
-- Change detection: skipped if the Dolt HEAD commit hasn't changed since the last push.
-- Push failures are warnings only (non-fatal), and failed attempts are throttled too.
-- Last push time and commit are tracked in `.beads/push-state.json`, a per-machine file (not in the database, to avoid merge conflicts across machines).
+- Pushes are debounced: skipped if the later of the last recorded attempt and the last successful push was less than `dolt.auto-push-interval` ago.
+- Change detection: skipped if the Dolt HEAD commit hasn't changed since the last successful push.
+- Push failures and timeouts are warnings only (non-fatal), and failed attempts are throttled too.
+- Push bookkeeping lives in `.beads/push-state.json`, a per-machine file (not in the database, to avoid merge conflicts across machines).
+
+`.beads/push-state.json` describes the default remote, `origin`:
+
+| Field | Meaning |
+|-------|---------|
+| `last_push` | When a push to `origin` last succeeded |
+| `last_commit` | The HEAD commit that successful push published |
+| `last_attempt` | When bd last attempted a push to `origin`: a successful push or a failed auto-push |
+| `last_error` | Why the last attempt failed (one line, credentials removed); absent after a success |
+
+A failed or timed-out auto-push records `last_attempt` and `last_error` and leaves `last_push` and `last_commit` alone, so a failure never reads as a successful push. A successful auto-push, `bd dolt push` (to the default remote or `origin`, with or without `--force`) or `bd sync` (default remote or `--remote origin`) sets both timestamps, records the pushed HEAD and clears `last_error`. A push to any other remote, a failed `bd dolt push` or `bd sync` push (its own error reports the failure), and a push skipped by `no-push` or `dolt.local-only` leave the file unchanged. Pushing to `origin` with plain `dolt push`, outside bd, does not update the file; run `bd dolt push` once afterwards to record it.
+
+Older bd versions record a failed auto-push as a success and do not record manual pushes. When versions mix on one machine, an older bd may overwrite the file and drop `last_attempt` and `last_error`. An older file that holds only `last_push` and `last_commit` still throttles auto-push.
+
+`bd doctor`'s **Sync Staleness** check reads this file and the cached `origin` ref locally, without contacting the remote. It warns when the last push attempt failed (even if HEAD matches the cached ref), when the file cannot be read, and when local history is ahead of, behind, or diverged from the cached `origin` ref, or the comparison is unavailable (no cached ref yet, or the comparison failed). A pass means only that no local evidence of staleness was found: the cached ref is as fresh as the last `bd dolt pull`, `bd dolt push` or `bd sync`, and does not prove what `origin` holds now. With `dolt.local-only` set, or `no-push` set while `dolt.auto-push` is off, no bd push reaches `origin`, so the check reports the `origin` comparison as skipped and still checks federation peers. Auto-push ignores `no-push`: with both `no-push` and `dolt.auto-push` on, the check still covers `origin` and says why. It reads these settings from the workspace's `.beads/config.yaml`, with a `config.local.yaml` beside it taking precedence, as for any bd command there; it does not see environment variables or user-level config.
 
 Before pushing, `bd` verifies the local chunk store with `dolt fsck --quiet`, bounded by a 30-second timeout. For large stores, raise it with the runtime-only `BEADS_FSCK_TIMEOUT` environment variable (accepts durations like `2m` or bare seconds like `90`).
 

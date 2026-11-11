@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -211,6 +212,37 @@ func TestEmbeddedDoltRemoteAndPush(t *testing.T) {
 		bdCreate(t, bd, pfDir, "Force push issue", "--type", "task")
 		bdDolt(t, bd, pfDir, "commit", "-m", "force push commit")
 		bdDolt(t, bd, pfDir, "push", "--force")
+	})
+
+	t.Run("push_records_push_state", func(t *testing.T) {
+		// GH#6289: a successful push to origin records success in
+		// push-state.json, clearing the failure an earlier auto-push left.
+		psDir, psBeadsDir, _ := bdInit(t, bd, "--prefix", "ps")
+		remoteDir := t.TempDir()
+		bdDolt(t, bd, psDir, "remote", "add", "origin", "file://"+remoteDir)
+		bdCreate(t, bd, psDir, "Push state issue", "--type", "task")
+		bdDolt(t, bd, psDir, "commit", "-m", "push state commit")
+
+		statePath := filepath.Join(psBeadsDir, "push-state.json")
+		const stale = `{"last_push":"2026-01-01T00:00:00Z","last_commit":"c0","last_attempt":"2026-01-01T00:00:00Z","last_error":"timed out after 30s"}`
+		if err := os.WriteFile(statePath, []byte(stale), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		bdDolt(t, bd, psDir, "push")
+
+		data, err := os.ReadFile(statePath)
+		if err != nil {
+			t.Fatalf("read push-state.json: %v", err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("parse push-state.json %q: %v", data, err)
+		}
+		if _, ok := got["last_error"]; ok || got["last_push"] == "2026-01-01T00:00:00Z" ||
+			got["last_push"] != got["last_attempt"] || got["last_commit"] == "c0" || got["last_commit"] == "" {
+			t.Errorf("push-state.json after a successful push = %s, want a recorded success with last_error cleared", data)
+		}
 	})
 
 	t.Run("push_no_remote", func(t *testing.T) {

@@ -2,11 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
@@ -437,4 +441,334 @@ func TestPushedCommitForState(t *testing.T) {
 			t.Fatalf("pushedCommitForState() = %q, want %q (pre-push fallback)", got, "before")
 		}
 	})
+}
+
+// failingAutoPushStore is a fakeAutoPushStore whose Push always fails.
+type failingAutoPushStore struct {
+	fakeAutoPushStore
+}
+
+func (f *failingAutoPushStore) Push(context.Context) error {
+	f.pushCalls++
+	return errors.New("remote unreachable")
+}
+
+// TestMaybeAutoPush_FailedPushDoesNotAdvanceLastPush pins GH#6289: a failed
+// auto-push must not rewrite push-state.json's last_push success watermark,
+// otherwise the file claims a push happened that never reached the remote.
+func TestMaybeAutoPush_FailedPushDoesNotAdvanceLastPush(t *testing.T) {
+	beadsDir, _ := setupNoGitOpsAutoPushWorkspace(t, "no-git-ops: true\ndolt:\n  auto-push: true\n")
+	failing := &failingAutoPushStore{fakeAutoPushStore{commit: "newcommit"}}
+	setStore(failing)
+
+	const prevPush = "2026-01-01T00:00:00Z"
+	if err := savePushState(&pushState{LastPush: prevPush, LastCommit: "oldcommit"}); err != nil {
+		t.Fatalf("savePushState: %v", err)
+	}
+
+	maybeAutoPush(context.Background())
+
+	if failing.pushCalls != 1 {
+		t.Fatalf("Push calls = %d, want 1", failing.pushCalls)
+	}
+	data, err := os.ReadFile(filepath.Join(beadsDir, "push-state.json"))
+	if err != nil {
+		t.Fatalf("read push-state.json: %v", err)
+	}
+	got, err := loadPushState()
+	if err != nil || got == nil {
+		t.Fatalf("loadPushState: %v (state %v)", err, got)
+	}
+	if got.LastPush != prevPush {
+		t.Errorf("last_push = %q after a FAILED auto-push, want unchanged %q (failure must not look like success; GH#6289)\npush-state.json: %s",
+			got.LastPush, prevPush, data)
+	}
+	if got.LastCommit != "oldcommit" {
+		t.Errorf("last_commit = %q, want unchanged %q", got.LastCommit, "oldcommit")
+	}
+}
+
+// scriptedAutoPushStore is a fakeAutoPushStore whose Push runs push. Push
+// runs on pushWithContext's goroutine, which can outlive a timed-out call, so
+// the count is atomic.
+type scriptedAutoPushStore struct {
+	fakeAutoPushStore
+	push  func(context.Context) error
+	calls atomic.Int32
+}
+
+func (f *scriptedAutoPushStore) Push(ctx context.Context) error {
+	f.calls.Add(1)
+	return f.push(ctx)
+}
+
+// readPushStateMap reads push-state.json as raw JSON, so the assertions see
+// exactly the keys on disk rather than what the Go struct makes of them.
+func readPushStateMap(t *testing.T, beadsDir string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(beadsDir, "push-state.json"))
+	if err != nil {
+		t.Fatalf("read push-state.json: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("parse push-state.json %q: %v", data, err)
+	}
+	return m
+}
+
+// TestMaybeAutoPush_FailureKeepsLastPush pins AC-1 of GH#6289: a failed or
+// timed-out auto-push leaves the success fields (last_push, last_commit)
+// exactly as they were and records the failure in last_attempt plus a
+// credential-scrubbed, single-line, bounded last_error.
+func TestMaybeAutoPush_FailureKeepsLastPush(t *testing.T) {
+	const (
+		oldPush   = "2026-01-01T00:00:00Z"
+		oldCommit = "c0"
+	)
+	longUTF8 := strings.Repeat("é", 400) // 800 bytes of two-byte runes
+
+	tests := []struct {
+		name      string
+		config    string
+		seed      *pushState
+		push      func(context.Context) error
+		wantError func(t *testing.T, got string)
+	}{
+		{
+			name: "push error",
+			seed: &pushState{LastPush: oldPush, LastCommit: oldCommit},
+			push: func(context.Context) error { return errors.New("remote unreachable") },
+			wantError: func(t *testing.T, got string) {
+				if got != "remote unreachable" {
+					t.Errorf("last_error = %q, want %q", got, "remote unreachable")
+				}
+			},
+		},
+		{
+			name:   "context-driven timeout",
+			config: "  auto-push-timeout: 20ms\n",
+			seed:   &pushState{LastPush: oldPush, LastCommit: oldCommit},
+			push: func(ctx context.Context) error {
+				<-ctx.Done()
+				return ctx.Err()
+			},
+			wantError: func(t *testing.T, got string) {
+				if got != "timed out after 20ms" {
+					t.Errorf("last_error = %q, want %q", got, "timed out after 20ms")
+				}
+			},
+		},
+		{
+			name: "credentials and multiline output",
+			seed: &pushState{LastPush: oldPush, LastCommit: oldCommit},
+			push: func(context.Context) error {
+				return errors.New("fatal: could not push\n  to https://alice:s3cret@example.com/org/repo.git\n\tretry later")
+			},
+			wantError: func(t *testing.T, got string) {
+				if strings.Contains(got, "s3cret") || strings.Contains(got, "alice") {
+					t.Errorf("last_error = %q, want URL credentials scrubbed", got)
+				}
+				if strings.ContainsAny(got, "\n\r\t") || strings.Contains(got, "  ") {
+					t.Errorf("last_error = %q, want a single line with collapsed whitespace", got)
+				}
+				if !strings.Contains(got, "example.com/org/repo.git") || !strings.HasPrefix(got, "fatal: could not push to ") {
+					t.Errorf("last_error = %q, want the scrubbed diagnostic kept", got)
+				}
+			},
+		},
+		{
+			name: "long UTF-8 error",
+			seed: &pushState{LastPush: oldPush, LastCommit: oldCommit},
+			push: func(context.Context) error { return errors.New(longUTF8) },
+			wantError: func(t *testing.T, got string) {
+				if len(got) > 512 {
+					t.Errorf("len(last_error) = %d, want at most 512", len(got))
+				}
+				if !utf8.ValidString(got) || !strings.HasPrefix(longUTF8, got) || len(got) < 512-utf8.UTFMax {
+					t.Errorf("last_error = %q, want a prefix of the error cut on a rune boundary", got)
+				}
+			},
+		},
+		{
+			// 510 ASCII bytes then three-byte runes: byte 512 falls inside
+			// the first rune, so the cut must back up to 510.
+			name: "long error cut inside a three-byte rune",
+			seed: &pushState{LastPush: oldPush, LastCommit: oldCommit},
+			push: func(context.Context) error {
+				return errors.New(strings.Repeat("a", 510) + strings.Repeat("世", 10))
+			},
+			wantError: func(t *testing.T, got string) {
+				if want := strings.Repeat("a", 510); got != want {
+					t.Errorf("last_error = %q (len %d), want the 510-byte ASCII prefix", got, len(got))
+				}
+			},
+		},
+		{
+			name: "absent state",
+			push: func(context.Context) error { return errors.New("remote unreachable") },
+			wantError: func(t *testing.T, got string) {
+				if got != "remote unreachable" {
+					t.Errorf("last_error = %q, want %q", got, "remote unreachable")
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			beadsDir, _ := setupNoGitOpsAutoPushWorkspace(t, "no-git-ops: true\ndolt:\n  auto-push: true\n"+tt.config)
+			fake := &scriptedAutoPushStore{fakeAutoPushStore: fakeAutoPushStore{commit: "c1"}, push: tt.push}
+			setStore(fake)
+			if tt.seed != nil {
+				if err := savePushState(tt.seed); err != nil {
+					t.Fatalf("savePushState: %v", err)
+				}
+			}
+
+			before := time.Now().UTC().Truncate(time.Second)
+			_ = captureStderr(t, func() { maybeAutoPush(context.Background()) })
+			after := time.Now().UTC()
+
+			if n := fake.calls.Load(); n != 1 {
+				t.Fatalf("Push calls = %d, want 1", n)
+			}
+			got := readPushStateMap(t, beadsDir)
+			wantPush, wantCommit := "", ""
+			if tt.seed != nil {
+				wantPush, wantCommit = tt.seed.LastPush, tt.seed.LastCommit
+			}
+			if got["last_push"] != wantPush || got["last_commit"] != wantCommit {
+				t.Errorf("success fields = (%v, %v), want unchanged (%q, %q) after a failed push; state %v",
+					got["last_push"], got["last_commit"], wantPush, wantCommit, got)
+			}
+			attempt, _ := got["last_attempt"].(string)
+			at, err := time.Parse(time.RFC3339, attempt)
+			if err != nil || at.Before(before) || at.After(after) {
+				t.Errorf("last_attempt = %q, want an RFC3339 time of this attempt; state %v", attempt, got)
+			}
+			lastErr, _ := got["last_error"].(string)
+			tt.wantError(t, lastErr)
+		})
+	}
+}
+
+// TestMaybeAutoPush_ThrottlesAfterFailure pins AC-2 of GH#6289: the debounce
+// keys off the later valid timestamp of last_attempt and last_push, so a
+// recent failed attempt still throttles retries even though it no longer
+// moves last_push, and legacy last_push-only files keep throttling as before.
+func TestMaybeAutoPush_ThrottlesAfterFailure(t *testing.T) {
+	now := time.Now().UTC()
+	recent := now.Add(-time.Minute).Format(time.RFC3339)
+	expired := now.Add(-time.Hour).Format(time.RFC3339)
+
+	tests := []struct {
+		name     string
+		seed     pushState
+		wantPush bool
+	}{
+		{name: "recent attempt, old success", seed: pushState{LastPush: expired, LastCommit: "c0", LastAttempt: recent, LastError: "boom"}},
+		{name: "recent attempt, no success yet", seed: pushState{LastAttempt: recent, LastError: "boom"}},
+		{name: "recent attempt, malformed success", seed: pushState{LastPush: "yesterday", LastCommit: "c0", LastAttempt: recent}},
+		{name: "newer success, older attempt", seed: pushState{LastPush: recent, LastCommit: "c0", LastAttempt: expired}},
+		{name: "recent success, malformed attempt", seed: pushState{LastPush: recent, LastCommit: "c0", LastAttempt: "garbage"}},
+		{name: "legacy last_push-only file", seed: pushState{LastPush: recent, LastCommit: "c0"}},
+		{name: "both expired", seed: pushState{LastPush: expired, LastCommit: "c0", LastAttempt: expired, LastError: "boom"}, wantPush: true},
+		{name: "expired legacy file", seed: pushState{LastPush: expired, LastCommit: "c0"}, wantPush: true},
+		{name: "both malformed", seed: pushState{LastPush: "x", LastCommit: "c0", LastAttempt: "y"}, wantPush: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, fake := setupNoGitOpsAutoPushWorkspace(t, "no-git-ops: true\ndolt:\n  auto-push: true\n")
+			fake.commit = "c1"
+			seed := tt.seed
+			if err := savePushState(&seed); err != nil {
+				t.Fatalf("savePushState: %v", err)
+			}
+
+			maybeAutoPush(context.Background())
+
+			if got := fake.pushCalls == 1; got != tt.wantPush {
+				t.Errorf("Push calls = %d with state %+v, want pushed=%v", fake.pushCalls, tt.seed, tt.wantPush)
+			}
+		})
+	}
+}
+
+// headMovingAutoPushStore is a fakeAutoPushStore whose Push moves HEAD (as
+// the real Push's pre-push commit does, GH#5433) and whose post-push HEAD read
+// can fail.
+type headMovingAutoPushStore struct {
+	fakeAutoPushStore
+	afterPush    string
+	afterPushErr error
+	pushed       bool
+}
+
+func (f *headMovingAutoPushStore) GetCurrentCommit(context.Context) (string, error) {
+	if f.pushed {
+		return f.afterPush, f.afterPushErr
+	}
+	return f.commit, nil
+}
+
+func (f *headMovingAutoPushStore) Push(context.Context) error {
+	f.pushCalls++
+	f.pushed = true
+	return nil
+}
+
+// TestMaybeAutoPush_SuccessClearsLastError pins AC-3 of GH#6289: once the
+// throttle of a failed attempt has expired and HEAD has moved, a successful
+// auto-push records success in both timestamps, records the post-push HEAD
+// (or the pre-push HEAD when the re-read fails) and clears last_error.
+func TestMaybeAutoPush_SuccessClearsLastError(t *testing.T) {
+	expired := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	failed := pushState{LastPush: expired, LastCommit: "c0", LastAttempt: expired, LastError: "timed out after 30s"}
+
+	tests := []struct {
+		name         string
+		afterPushErr error
+		wantCommit   string
+	}{
+		{name: "post-push HEAD", wantCommit: "c2"},
+		{name: "re-read fails, pre-push fallback", afterPushErr: errors.New("engine closed"), wantCommit: "c1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			beadsDir, _ := setupNoGitOpsAutoPushWorkspace(t, "no-git-ops: true\ndolt:\n  auto-push: true\n")
+			fake := &headMovingAutoPushStore{fakeAutoPushStore: fakeAutoPushStore{commit: "c1"}, afterPush: "c2", afterPushErr: tt.afterPushErr}
+			setStore(fake)
+			seed := failed
+			if err := savePushState(&seed); err != nil {
+				t.Fatalf("savePushState: %v", err)
+			}
+
+			before := time.Now().UTC().Truncate(time.Second)
+			maybeAutoPush(context.Background())
+			after := time.Now().UTC()
+
+			if fake.pushCalls != 1 {
+				t.Fatalf("Push calls = %d, want 1 (throttle expired and HEAD moved)", fake.pushCalls)
+			}
+			got := readPushStateMap(t, beadsDir)
+			for _, key := range []string{"last_push", "last_attempt"} {
+				v, _ := got[key].(string)
+				at, err := time.Parse(time.RFC3339, v)
+				if err != nil || at.Before(before) || at.After(after) {
+					t.Errorf("%s = %q, want this successful push's time; state %v", key, v, got)
+				}
+			}
+			if got["last_push"] != got["last_attempt"] {
+				t.Errorf("last_push %v != last_attempt %v, want both set to the success time", got["last_push"], got["last_attempt"])
+			}
+			if got["last_commit"] != tt.wantCommit {
+				t.Errorf("last_commit = %v, want %q", got["last_commit"], tt.wantCommit)
+			}
+			if v, ok := got["last_error"]; ok {
+				t.Errorf("last_error = %v, want it cleared by the successful push", v)
+			}
+		})
+	}
 }

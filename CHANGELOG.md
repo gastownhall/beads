@@ -1226,6 +1226,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A failed or timed-out Dolt auto-push no longer reads as a successful push
+  ([GH#6289](https://github.com/gastownhall/beads/issues/6289)). A failed
+  auto-push advanced `last_push` in `.beads/push-state.json` while
+  `last_commit` stayed unchanged, so the file read as a recent successful
+  push. A failed auto-push now records `last_attempt` and a one-line,
+  credential-scrubbed `last_error` instead and leaves `last_push` and
+  `last_commit` alone; the auto-push interval runs from the later of the
+  last attempt and the last success. A successful push sets both
+  timestamps and clears `last_error`. Successful `bd dolt push` and
+  `bd sync` pushes to the default remote or `origin` now record success
+  too; a failed `bd dolt push` or `bd sync` leaves the file unchanged (the
+  command's own error reports it), and pushes to other remotes do not touch
+  the file. A push made with the `dolt` CLI outside bd is not
+  recorded, and an older bd on the same machine may rewrite the file without
+  the new fields.
+- `bd doctor`'s Sync Staleness check now covers `origin`, not just federation
+  peers. It warns on a recorded push failure (even when HEAD matches the
+  cached origin ref), an unreadable push record, local history ahead of,
+  behind or diverged from the cached `origin` ref, or a comparison that is
+  unavailable (no cached ref yet, or the comparison failed). It reports the
+  origin check as skipped under `dolt.local-only`, or under `no-push` while
+  `dolt.auto-push` is off (auto-push ignores `no-push`), and reads those
+  settings from the workspace's `config.yaml` with `config.local.yaml`
+  taking precedence. It still makes no network call, so a pass reads "No
+  local sync staleness detected" and does not prove what the remote holds.
+  The ahead/behind count behind this check and server-mode `bd federation
+  status` now walks only the commits that differ, not the whole history.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

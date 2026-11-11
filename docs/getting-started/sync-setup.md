@@ -284,6 +284,23 @@ bd doctor --fix --yes
 `noms/LOCK`). These are Dolt-internal files and removing them **will cause
 unrecoverable data corruption**. Dolt manages these files itself.
 
+### bd doctor warns about Sync Staleness
+
+`bd doctor`'s Sync Staleness check compares your local history with the cached `origin` ref and reads the push record in `.beads/push-state.json`. It does not contact the remote, so the cached ref is only as fresh as your last `bd dolt pull`, `bd dolt push` or `bd sync`.
+
+An `origin` problem reports "Origin sync staleness detected" ("Origin and peer sync staleness detected" when federation peers are also behind). Each detail line names one finding:
+
+- **origin: last push attempt at ... failed**: the last auto-push failed or timed out. Fix the cause it names, then run `bd dolt push` (or `bd sync`); a successful push clears the recorded error. Under `no-push`, which turns off `bd dolt push` and `bd sync`'s push, auto-push retries on the first write after `dolt.auto-push-interval`. A failed manual `bd dolt push` or `bd sync` reports its own error and does not change the record.
+- **origin: local push history could not be read**: `.beads/push-state.json` is damaged. Repair or delete it; the next successful push to `origin` rewrites it.
+- **origin: local is N commit(s) ahead of the cached origin tracking ref**: local commits are absent from the cached `origin` ref. Check that the push went through, or retry it with `bd dolt push`.
+- **origin: local is N commit(s) behind the cached origin tracking ref**: run `bd dolt pull`.
+- **origin: local history and the cached origin tracking ref have diverged**: run `bd dolt pull`, resolve any conflicts, then `bd dolt push`.
+- **origin: comparison with cached remote refs unavailable**: there is no cached `origin` ref yet, or the comparison failed. If this workspace has never pushed to or pulled from `origin`, run `bd dolt pull` or `bd dolt push` once to create the ref; otherwise re-run `bd doctor`.
+
+A pass reads "No local sync staleness detected". With `dolt.local-only` set, or `no-push` set while `dolt.auto-push` is off, no bd push reaches `origin`, so the check reports "Origin check skipped (dolt.local-only: true)" (or `no-push: true`); a federation peer warning keeps its own message and names the skip in its detail. Auto-push ignores `no-push`, so with both `no-push` and `dolt.auto-push` on the check still covers `origin`, and its detail says so. The check reads these settings from `.beads/config.yaml` and a `config.local.yaml` beside it, which takes precedence, but not from environment variables or user-level config.
+
+If you push to `origin` with the `dolt` CLI instead of bd, the push record is not updated; run `bd dolt push` afterwards. See [Auto-push](/reference/configuration#auto-push) for what the push record holds.
+
 ### "fatal: Unable to read current working directory"
 
 The Dolt server's working directory no longer exists (common after branch switches). Restart it:
