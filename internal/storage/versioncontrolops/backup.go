@@ -6,6 +6,7 @@ import (
 	neturl "net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -200,6 +201,80 @@ func BackupToDir(ctx context.Context, register, sync DBConn, dir string) error {
 		return fmt.Errorf("sync to backup: %w", err)
 	}
 	return nil
+}
+
+// backupManifestName is the file a Dolt backup keeps at the top of its
+// directory: Dolt's file manifest (store/nbs/file_manifest.go in the pinned
+// Dolt names it "manifest"). `bd backup sync` writes it on every sync.
+const backupManifestName = "manifest"
+
+// RestoreSourceURL returns the file:// URL a restore from the local directory
+// dir hands DOLT_BACKUP, after checking that the directory it names holds a
+// Dolt backup, so a restore can refuse a source before replacing anything. A
+// forced DOLT_BACKUP('restore') opens the source, drops the live database, and
+// only then syncs the backup into its replacement; an existing directory
+// without a manifest opens as an empty store, so without this check an empty
+// or wrong directory costs the database.
+//
+// The checks run on the path in the returned URL, the directory Dolt opens,
+// not on dir as typed: filepath.Abs resolves a ".." lexically where the
+// kernel would follow a symlink first. A path Dolt does not read literally
+// (fileURLSyntax) is refused before anything is checked.
+//
+// It checks only that the backup's manifest is present as a regular file, not
+// that the backup is complete or readable. That check is an interim guard for
+// the engine's drop-before-sync order, kept in this storage package so the
+// commands never handle the backup layout; it can go once the pinned Dolt
+// restores into a staging database and swaps it in only after the transfer
+// succeeds (dolthub/dolt#11951). The path refusal stays: staging does not
+// change which directory Dolt reads.
+func RestoreSourceURL(dir string) (string, error) {
+	url, err := DirToFileURL(dir)
+	if err != nil {
+		return "", err
+	}
+	path := strings.TrimPrefix(url, "file://")
+	if i := strings.IndexAny(path, fileURLSyntax()); i >= 0 {
+		return "", fmt.Errorf("backup source %s cannot be restored where it is: Dolt does not take '%c' in a file:// URL literally and would restore from a different directory; move or rename the backup to a path without '%c'", path, path[i], path[i])
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("backup source does not exist: %w", err)
+		}
+		return "", fmt.Errorf("check backup source %s: %w", path, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("backup source is not a directory: %s", path)
+	}
+	info, err = os.Stat(filepath.Join(path, backupManifestName))
+	switch {
+	case err == nil && info.Mode().IsRegular():
+		return url, nil
+	case err == nil, os.IsNotExist(err):
+		return "", fmt.Errorf("backup source %s holds no Dolt backup: it has no regular %q file at its top level", path, backupManifestName)
+	default:
+		return "", fmt.Errorf("check backup source %s: %w", path, err)
+	}
+}
+
+// fileURLSyntax returns the characters a restore source's absolute path must
+// not hold. Dolt parses the file:// URL DirToFileURL builds with net/url,
+// which ends the path at '#' (a fragment) or '?' (a query) and decodes a
+// '%XX' escape (any other '%' fails the parse), then turns each '\' into '/',
+// and opens the directory that is left, creating it when it is missing. A
+// restore from a backup at such a path therefore reads another directory:
+// under --force Dolt drops the live database before it finds that one empty,
+// or restores whatever backup it holds. Escaping the path does not help:
+// Dolt rebuilds the URL from the decoded path and parses it again. A
+// Windows drive-letter path skips net/url and takes '\' as its separator, but
+// Dolt's file store unescapes the path a second time, so '%' is refused on
+// every platform.
+func fileURLSyntax() string {
+	if runtime.GOOS == "windows" {
+		return "%"
+	}
+	return `#?%\`
 }
 
 // DirToFileURL resolves dir to an absolute path and returns a file:// URL.

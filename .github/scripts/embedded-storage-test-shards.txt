@@ -581,6 +581,7 @@
 40 33 TestFirstMintLeavesTheEpochTablesCommitted
 40 33 TestGetDependentRecordsEmbedded
 40 33 TestPruneEventsBatchDeletesTheLowestSeqsOnly
+40 33 TestRestoreDatabaseRefusesNonBackupDirBeforeConnecting
 40 33 TestTreeWalkerContract
 
 40 34 TestAddLabel
