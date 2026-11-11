@@ -277,6 +277,40 @@ func TestInitSchemaRefusesForwardDrift(t *testing.T) {
 		}
 	})
 
+	// AC-4: the steady-state open — a database at this binary's latest schema
+	// on the converged fast path — still opens, and pays exactly one added
+	// CurrentVersion read (the cursor existence probe, SHOW TABLES, and the
+	// MAX(version) read) on the pinned session: no lock, no write.
+	t.Run("converged path at latest opens with exactly one added version read", func(t *testing.T) {
+		t.Setenv("BD_IGNORE_SCHEMA_SKEW", "")
+		calls := stubConvergedMigrateUp(t)
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("create sql mock: %v", err)
+		}
+		defer db.Close()
+
+		expectVersionQuery(mock, schema.LatestVersion())
+
+		p := &doltSQLProvider{defaultBranch: defaultBranch, db: db, serverEndpoint: "tcp:127.0.0.1:3306"}
+		var initErr error
+		stderr := captureStderr(t, func() {
+			initErr = p.initSchema(context.Background(), "beads")
+		})
+		if initErr != nil {
+			t.Fatalf("initSchema() error = %v, want the steady-state open to succeed", initErr)
+		}
+		if strings.Contains(stderr, skewIgnoredWarning) {
+			t.Errorf("a database at latest printed the skew warning:\n%s", stderr)
+		}
+		if *calls != 1 {
+			t.Errorf("MigrateUpWithLock called %d times, want 1", *calls)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+
 	// A serialization failure on the added version read keeps the provider's
 	// ordinary retry; the next attempt reads a valid version and opens.
 	t.Run("serialization failure on the drift read is retried", func(t *testing.T) {
