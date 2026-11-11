@@ -301,6 +301,9 @@ sh_test(
         "scripts/check-doc-freshness.sh",
     ],
     data = [":doc_freshness_files"],
+    # Release line only; never forward-port. Markers must not expire on a
+    # long-lived release branch (RELEASING.md "Docs freshness on a release line").
+    env = {"DOC_FRESHNESS_MAX_AGE_DAYS": "3650"},
 )
 
 repo_subset(
