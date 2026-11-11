@@ -579,6 +579,8 @@ Blocked commands exit **14** — a stable code scripts branch on to tell "someon
 
 Reads (`bd list`, `bd show`, `bd ready`, …) keep working during a freeze, and bd's own background maintenance stands down with them — version-bump migration, JSONL auto-import, Dolt auto-commit, auto-backup, auto-export and auto-push are all skipped, so running a read does not leave a commit in the store you are migrating.
 
+In releases after v1.3.2, `bd ready` and `bd list --ready` in server mode also wake deferred issues whose defer date has passed. During a freeze they skip that write: those issues stay deferred and are left out of the list until the first such read after you thaw.
+
 <Warning>
 A `bd serve` process started before the marker appeared keeps accepting HTTP writes: the freeze is a CLI-invocation gate, and a running server never re-reads it. Stop the server before you freeze.
 </Warning>
