@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
@@ -26,6 +27,7 @@ type molReader interface {
 	GetIssuesByLabel(ctx context.Context, label string) ([]*types.Issue, error)
 	GetDependents(ctx context.Context, issueID string) ([]*types.Issue, error)
 	GetDependentsWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error)
+	GetDependentRecordsForIssues(ctx context.Context, targetIDs []string) (map[string][]*types.Dependency, error)
 	GetDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error)
 	GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error)
 	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
@@ -185,6 +187,30 @@ func (r uowMolReader) GetDependents(ctx context.Context, issueID string) ([]*typ
 func (r uowMolReader) GetDependentsWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
 	filter := domain.DepListFilter{Direction: domain.DepDirectionIn}
 	return r.uw.DependencyUseCase().ListWithIssueMetadata(ctx, issueID, filter)
+}
+
+// GetDependentRecordsForIssues reads the edges pointing at targetIDs from
+// both dependency tables, keyed by target: a wisp's edges live in
+// wisp_dependencies and an issue's in dependencies, and either can point at a
+// target. A workspace without the wisp table has no wisp edges.
+func (r uowMolReader) GetDependentRecordsForIssues(ctx context.Context, targetIDs []string) (map[string][]*types.Dependency, error) {
+	filter := domain.DepListFilter{Direction: domain.DepDirectionIn}
+	durable, err := r.uw.DependencyUseCase().ListByIssueIDs(ctx, targetIDs, filter)
+	if err != nil {
+		return nil, err
+	}
+	wisp, err := r.uw.DependencyUseCase().ListByWispIDs(ctx, targetIDs, filter)
+	if err != nil && !dberrors.IsTableNotExist(err) {
+		return nil, err
+	}
+	out := make(map[string][]*types.Dependency, len(durable.Incoming)+len(wisp.Incoming))
+	for target, deps := range durable.Incoming {
+		out[target] = append(out[target], deps...)
+	}
+	for target, deps := range wisp.Incoming {
+		out[target] = append(out[target], deps...)
+	}
+	return out, nil
 }
 
 func (r uowMolReader) GetDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error) {

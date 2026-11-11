@@ -45,6 +45,7 @@
 100 10 TestEmbeddedCreateScalarAndRelationships
 
 100 11 TestEmbeddedKVConcurrent
+100 11 TestEmbeddedWispGCAgeRequiresForce
 
 100 12 TestEmbeddedAutoImportFallback_ConflictSkip_SkipsRetiredRows
 100 12 TestEmbeddedConfigGetYamlKeyWithServerDown
@@ -75,6 +76,7 @@
 
 100 20 TestEmbeddedInitRoleRoutingRetainedFork
 100 20 TestEmbeddedMigrateSchema_IdentityMismatchRefusesBeforeApplying
+100 20 TestEmbeddedWispGCAgeForceDeletesSelection
 
 100 21 TestEmbeddedArrivalSeqOnEveryJSONRead
 100 21 TestEmbeddedConfigGetIsReadOnly
@@ -104,6 +106,7 @@
 100 27 TestEmbeddedDoltRemoteAdd_GitOriginCollision_RefusalMessageCopy
 100 27 TestEmbeddedNewDoltStoreFromConfig_DottedDBName
 100 27 TestEmbeddedShipConcurrent
+100 27 TestEmbeddedWispGCPurgeClosedHoldsBackLiveChildren
 
 100 28 TestEmbeddedDoltLocalOnly_RemoteAdd_RefusesExitOne
 100 28 TestEmbeddedForeignPreDoltCloneLeftUnchanged
@@ -163,6 +166,7 @@
 100 38 TestEmbeddedRoutedCreateJournalsIntoTheTargetWorkspace
 100 38 TestEmbeddedUnclaimIfAssigneeFlagValidation
 
+100 39 TestEmbeddedCloseWhitespaceIDHint
 100 39 TestEmbeddedIfRevisionRejectsLabelAndParentEdits
 100 39 TestEmbeddedMaxRowsGraph
 100 39 TestEmbeddedNewDoltStoreFromConfig_NoMetadata
@@ -170,6 +174,7 @@
 100 40 TestEmbeddedIfRevisionOutranksReassignFenceCLI
 100 40 TestEmbeddedNewDoltStoreFromConfig_HyphenatedDBName
 100 40 TestEmbeddedUpdateLifecycleClaimParentCommit
+100 40 TestEmbeddedWispGCPurgeClosedReclaimsBlocksOnlyAndClosedMolecules
 
 100 41 TestEmbeddedCompactAbortsDivergentReplay
 100 41 TestEmbeddedDuplicateConcurrent

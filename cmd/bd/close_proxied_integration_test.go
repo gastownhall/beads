@@ -356,6 +356,33 @@ func TestProxiedServerCloseB(t *testing.T) {
 		if !strings.Contains(out, "not found") {
 			t.Errorf("expected 'not found' error, got: %s", out)
 		}
+		if strings.Contains(out, "pass each ID as its own argument") {
+			t.Errorf("single unknown ID gained the whitespace hint: %s", out)
+		}
+	})
+
+	// GH#5152: several IDs passed as one word keep their not-found error
+	// and gain a hint to pass each ID separately; nothing closes.
+	t.Run("close_whitespace_id_hints_separate_args", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cws")
+		a := bdProxiedCreate(t, bd, p.dir, "Joined A")
+		b := bdProxiedCreate(t, bd, p.dir, "Joined B")
+		for _, sep := range []string{" ", "\t", "\n"} {
+			joined := a.ID + sep + b.ID
+			for _, extra := range [][]string{nil, {"--json"}} {
+				out := bdProxiedCloseFail(t, bd, p.dir, append([]string{joined}, extra...)...)
+				if !strings.Contains(out, "not found") || !strings.Contains(out, "pass each ID as its own argument") {
+					t.Errorf("bd close %q %v: want not-found plus the separate-argument hint, got: %s", joined, extra, out)
+				}
+			}
+		}
+		db := openProxiedDB(t, p)
+		for _, id := range []string{a.ID, b.ID} {
+			if got := readStatus(t, db, id); got != types.StatusOpen {
+				t.Errorf("%s status = %q after the failed close, want open", id, got)
+			}
+		}
 	})
 }
 

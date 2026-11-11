@@ -5384,29 +5384,46 @@ bd mol wisp gc
     | spared and loses its edge to the deleted wisp: an open one is collected once
     | it ages out, a closed one only by --all, --closed or 'bd purge'.
     |
+    | Nothing is deleted without --force: every form, bare 'bd mol wisp gc'
+    | included, previews the wisps it would delete (ID, title, type) and exits 0.
+    | Add --force to delete, keeping the same selection flags; --dry-run always
+    | previews, even beside --force (GH#5152). Automation that ran 'bd mol wisp gc'
+    | to clean up must add --force.
+    |
     | Abandoned wisps are deleted without creating a digest. Use 'bd mol squash'
     | if you want to preserve a summary before garbage collection.
     |
-    | Use --closed to purge ALL closed wisps (regardless of age). This is the
-    | fastest way to reclaim space from accumulated wisp bloat. Safe by default:
-    | requires --force to actually delete.
+    | Use --closed to purge closed wisps regardless of age. This is the fastest
+    | way to reclaim space from accumulated wisp bloat. A closed wisp that a live
+    | (not done) issue or wisp depends on through parent-child or tracks is held
+    | back, and so are its closed ancestors, so a closed molecule root never
+    | strands its open steps; it is collected by a later run once they close. The
+    | count held back is reported (live_dependent_skipped in --json). blocks
+    | edges do not hold a wisp back: a closed blocker blocks nothing.
+    |
+    | Scope: gc selects ephemeral issues of any type, not only molecule steps.
+    | Pinned wisps and the configured infrastructure types are never collected;
+    | types.infra defaults to agent, role and message, and setting it REPLACES
+    | that list, so keep the defaults when extending it. Labels confer no
+    | protection, and types.retained does not apply to wisp gc. Use
+    | --exclude-type to protect more types for one run.
     |
     | Note: This uses time-based cleanup, appropriate for ephemeral wisps.
     | For graph-pressure staleness detection (blocking other work), see 'bd mol stale'.
     |
     | Examples:
-    |   bd mol wisp gc                                    # Clean abandoned wisps (default: 1h threshold)
-    |   bd mol wisp gc --dry-run                          # Preview what would be cleaned
-    |   bd mol wisp gc --age 24h                          # Custom age threshold
-    |   bd mol wisp gc --all                              # Also clean closed wisps older than threshold
+    |   bd mol wisp gc                                    # Preview abandoned wisps (default: 1h threshold)
+    |   bd mol wisp gc --force                            # Delete abandoned wisps
+    |   bd mol wisp gc --age 24h --force                  # Custom age threshold
+    |   bd mol wisp gc --all --force                      # Also delete closed wisps older than threshold
     |   bd mol wisp gc --closed                           # Preview closed wisp deletion
-    |   bd mol wisp gc --closed --force                   # Delete all closed wisps
+    |   bd mol wisp gc --closed --force                   # Delete closed wisps no live work depends on
     |   bd mol wisp gc --closed --dry-run                 # Explicit dry-run (same as no --force)
-    |   bd mol wisp gc --exclude-type agent,rig           # Protect agent and rig wisps from GC
+    |   bd mol wisp gc --exclude-type agent,rig --force   # Protect agent and rig wisps from GC
     |   bd mol wisp gc --closed --force --exclude-type mol # Delete closed wisps except mol type
   flag --age type=string default="1h" usage="Age threshold for abandoned wisp detection"
   flag --all type=bool default="false" usage="Also clean closed wisps older than threshold"
-  flag --closed type=bool default="false" usage="Delete all closed wisps (ignores --age threshold)"
+  flag --closed type=bool default="false" usage="Delete closed wisps regardless of --age, holding back those live work depends on"
   flag --dry-run type=bool default="false" usage="Preview what would be cleaned"
   flag --exclude-type type=stringSlice default="[]" usage="Exclude wisps of these types from GC (comma-separated, e.g., agent,rig)"
   flag --force -f type=bool default="false" usage="Actually delete (default: preview only)"
