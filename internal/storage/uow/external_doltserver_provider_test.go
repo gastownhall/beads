@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -290,8 +291,9 @@ func TestNewExternalDoltServerUOWProvider_FreshInitSelfHealsAfterMidPassFailure(
 
 // TestNewExternalDoltServerUOWProvider_PreexistingDirtyDatabaseIsNotHealed is
 // the ownership-negative counterpart of the fresh-init self-heal: an
-// initializer that did NOT create the database (its bare CREATE DATABASE loses
-// to an existing one) must keep the #4566 guard's refusal and must not
+// initializer that did NOT create the database (its locked preparation finds
+// the database visible and never sends CREATE DATABASE, so it captures no heal
+// authority) must keep the #4566 guard's refusal and must not
 // DOLT_RESET the working set — the dirt it sees could be another actor's
 // legitimate uncommitted state, which only the proven creator may discard.
 func TestNewExternalDoltServerUOWProvider_PreexistingDirtyDatabaseIsNotHealed(t *testing.T) {
@@ -417,4 +419,271 @@ func TestExternalProviderRediscoversAfterProxyRetirement(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, fresh)
 	assert.NotEqual(t, old.Port, fresh.Port, "replacement proxy port")
+}
+
+// leastPrivilegeFixture is an external server holding one beads database
+// provisioned by root, plus scratch accounts whose grants never include
+// CREATE — the accounts gastownhall/beads#5079 could not use at all.
+type leastPrivilegeFixture struct {
+	h        *teamServerHarness
+	database string
+	admin    *sql.DB
+}
+
+func newLeastPrivilegeFixture(t *testing.T, ctx context.Context, database string) *leastPrivilegeFixture {
+	t.Helper()
+	h := newTeamServerHarness(t)
+	provisioner, err := h.openProvider(ctx, database, false, "")
+	require.NoError(t, err, "root must provision the database")
+	require.NoError(t, provisioner.Close(ctx))
+	return &leastPrivilegeFixture{h: h, database: database, admin: h.directDB(t, "")}
+}
+
+// account creates user with the given database-scoped privileges on the
+// fixture's database and nothing else: no global CREATE.
+func (f *leastPrivilegeFixture) account(t *testing.T, ctx context.Context, user, privileges string) {
+	t.Helper()
+	_, err := f.admin.ExecContext(ctx, "CREATE USER '"+user+"'@'%' IDENTIFIED BY 'pw'")
+	require.NoError(t, err)
+	_, err = f.admin.ExecContext(ctx, "GRANT "+privileges+" ON `"+f.database+"`.* TO '"+user+"'@'%'")
+	require.NoError(t, err)
+}
+
+func (f *leastPrivilegeFixture) open(ctx context.Context, database, user string, opts ...ProviderOption) (UnitOfWorkProvider, error) {
+	return NewExternalDoltServerUOWProvider(ctx, f.h.storeRootDir, database, f.h.logPath,
+		configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: f.h.port},
+		user, "pw", 0, 0, false, "", opts...)
+}
+
+func countIssues(t *testing.T, ctx context.Context, p UnitOfWorkProvider) int {
+	t.Helper()
+	sqlProv, ok := p.(*doltSQLProvider)
+	require.True(t, ok, "expected *doltSQLProvider, got %T", p)
+	var n int
+	require.NoError(t, sqlProv.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues").Scan(&n))
+	return n
+}
+
+// waitForUserGetLock waits, bounded, until a session of user is visibly
+// blocked in GET_LOCK on the server.
+func waitForUserGetLock(t *testing.T, ctx context.Context, observer *sql.DB, user string, done <-chan struct{}) {
+	t.Helper()
+	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			t.Fatalf("the %s open finished before it was seen waiting in GET_LOCK", user)
+		default:
+		}
+		rows, err := observer.QueryContext(waitCtx, "SELECT user, info FROM information_schema.processlist")
+		require.NoError(t, err)
+		seen := false
+		for rows.Next() {
+			var who, info sql.NullString
+			require.NoError(t, rows.Scan(&who, &info))
+			if who.String == user && strings.Contains(strings.ToUpper(info.String), "GET_LOCK") {
+				seen = true
+			}
+		}
+		require.NoError(t, rows.Err())
+		require.NoError(t, rows.Close())
+		if seen {
+			return
+		}
+		select {
+		case <-waitCtx.Done():
+			t.Fatalf("timed out waiting for the %s open to block in GET_LOCK", user)
+		case <-ticker.C:
+		}
+	}
+}
+
+// TestNewExternalDoltServerUOWProvider_LeastPrivilegeAccounts is the
+// gastownhall/beads#5079 integration regression: a SELECT-only account reads
+// a converged database even when a peer holding the migration lock forces its
+// open off the lock-free fast path and through locked bootstrap preparation,
+// which used to send CREATE DATABASE and be refused.
+func TestNewExternalDoltServerUOWProvider_LeastPrivilegeAccounts(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	f := newLeastPrivilegeFixture(t, ctx, "beads_lp")
+	f.account(t, ctx, "reader", "SELECT")
+	f.account(t, ctx, "writer", "SELECT, INSERT, UPDATE, DELETE")
+
+	// The visibility probe asks the server by its own name rule: a name
+	// spelled in another case than the server stored it is still visible.
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{
+		{name: f.database, want: true},
+		{name: strings.ToUpper(f.database), want: true},
+		{name: f.database + "_absent", want: false},
+	} {
+		exists, err := schema.DatabaseExists(ctx, f.admin, tc.name)
+		require.NoError(t, err)
+		assert.Equal(t, tc.want, exists, "DatabaseExists(%q) on a server that stores %q", tc.name, f.database)
+	}
+
+	// Quiet baseline: the converged fast path never reaches preparation.
+	baseline, err := f.open(ctx, f.database, "reader", WithReadOnly())
+	require.NoError(t, err, "a quiet converged open needs no CREATE")
+	countIssues(t, ctx, baseline)
+	require.NoError(t, baseline.Close(ctx))
+
+	// A DML account without CREATE opens the existing database for writes.
+	writer, err := f.open(ctx, f.database, "writer")
+	require.NoError(t, err, "opening an existing, converged database as a DML account must succeed")
+	writerProv, ok := writer.(*doltSQLProvider)
+	require.True(t, ok, "expected *doltSQLProvider, got %T", writer)
+	var got string
+	require.NoError(t, writerProv.db.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&got))
+	assert.Equal(t, f.database, got)
+	var one int
+	require.NoError(t, writerProv.db.QueryRowContext(ctx, "SELECT 1").Scan(&one))
+	assert.Equal(t, 1, one)
+	require.NoError(t, writer.Close(ctx))
+
+	// A peer holds the migration lock, so the reader's convergence probe
+	// declines and its open queues on GET_LOCK, then runs locked preparation.
+	holder, err := f.admin.Conn(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = holder.Close() })
+	lockName := schema.MigrationLockName(f.database)
+	require.NoError(t, schema.AcquireMigrationLock(ctx, holder, lockName))
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			_ = schema.ReleaseMigrationLock(holder, lockName)
+		}
+	})
+
+	type result struct {
+		p   UnitOfWorkProvider
+		err error
+	}
+	done := make(chan struct{})
+	resCh := make(chan result, 1)
+	go func() {
+		defer close(done)
+		p, err := f.open(ctx, f.database, "reader", WithReadOnly())
+		resCh <- result{p, err}
+	}()
+	waitForUserGetLock(t, ctx, f.admin, "reader", done)
+	require.NoError(t, schema.ReleaseMigrationLock(holder, lockName))
+	released = true
+
+	res := <-resCh
+	if res.p != nil {
+		t.Cleanup(func() { _ = res.p.Close(context.Background()) })
+	}
+	require.NoError(t, res.err, "a SELECT-only read through the locked path must not need CREATE")
+	countIssues(t, ctx, res.p)
+}
+
+// TestNewExternalDoltServerUOWProvider_LeastPrivilegeMissingDatabase pins the
+// refusal a CREATE-less account gets for a database it cannot see — absent, or
+// present but not granted, which the server deliberately makes look the same:
+// a permanent, honest error naming both and the administrator remedy, and no
+// database created behind its back.
+func TestNewExternalDoltServerUOWProvider_LeastPrivilegeMissingDatabase(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	f := newLeastPrivilegeFixture(t, ctx, "beads_lp")
+	f.account(t, ctx, "reader", "SELECT")
+
+	for _, tc := range []struct {
+		name     string
+		database string
+		exists   bool
+	}{
+		{name: "absent database", database: "beads_lp_absent"},
+		// The container pre-creates beads_test; reader has no grant on it.
+		{name: "ungranted existing database", database: "beads_test", exists: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := f.open(ctx, tc.database, "reader", WithReadOnly())
+			if p != nil {
+				t.Cleanup(func() { _ = p.Close(context.Background()) })
+			}
+			require.Error(t, err)
+			assert.Nil(t, p)
+			msg := err.Error()
+			assert.Contains(t, msg, strconv.Quote(tc.database)+" is not visible to this credential and creating it was denied")
+			assert.Contains(t, msg, "not provisioned")
+			assert.Contains(t, msg, "not been granted")
+			assert.Contains(t, msg, "ask the server administrator to provision the database and grant access")
+			assert.Contains(t, strings.ToLower(msg), "denied to user", "the driver error must be preserved")
+
+			var n int
+			require.NoError(t, f.admin.QueryRowContext(ctx,
+				"SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = ?", tc.database).Scan(&n))
+			want := 0
+			if tc.exists {
+				want = 1
+			}
+			assert.Equal(t, want, n, "a refused open must not create the database")
+		})
+	}
+}
+
+// TestNewExternalDoltServerUOWProvider_LeastPrivilegeBehindDatabase pins the
+// existing shared-store migration gate for CREATE-less accounts on a database
+// one migration behind with no remote and no consent: a SELECT-only read
+// warns and reads through, and a DML write open gets the shared-no-remote
+// refusal — both reached only because preparation no longer demands CREATE,
+// and neither touching the migration state.
+func TestNewExternalDoltServerUOWProvider_LeastPrivilegeBehindDatabase(t *testing.T) {
+	t.Setenv(schema.AllowRemoteMigrateEnv, "0")
+	schema.SetSharedMigrateConsent(false)
+	schema.SetForceAllowRemoteMigrate(false)
+	t.Cleanup(func() {
+		schema.SetSharedMigrateConsent(false)
+		schema.SetForceAllowRemoteMigrate(false)
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	f := newLeastPrivilegeFixture(t, ctx, "beads_lp_behind")
+	f.account(t, ctx, "reader", "SELECT")
+	f.account(t, ctx, "writer", "SELECT, INSERT, UPDATE, DELETE")
+
+	// Simulate one pending migration on an otherwise latest, readable schema.
+	direct := f.h.directDB(t, f.database)
+	_, err := direct.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version = ?", schema.LatestVersion())
+	require.NoError(t, err)
+	_, err = direct.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'test: one migration behind')")
+	require.NoError(t, err)
+	before := snapshotMigrations(t, ctx, direct)
+	require.Equal(t, schema.LatestVersion()-1, before.maxVersion)
+
+	t.Run("SELECT-only read-only open warns and reads through", func(t *testing.T) {
+		var p UnitOfWorkProvider
+		var openErr error
+		stderr := captureStderr(t, func() {
+			p, openErr = f.open(ctx, f.database, "reader", WithReadOnly())
+		})
+		if p != nil {
+			t.Cleanup(func() { _ = p.Close(context.Background()) })
+		}
+		require.NoError(t, openErr)
+		assert.Contains(t, stderr, "Read-only command")
+		assert.Contains(t, stderr, "without migrating")
+		countIssues(t, ctx, p)
+		assert.Equal(t, before, snapshotMigrations(t, ctx, direct))
+	})
+
+	t.Run("DML write open is refused by the shared-store gate", func(t *testing.T) {
+		p, err := f.open(ctx, f.database, "writer")
+		if p != nil {
+			t.Cleanup(func() { _ = p.Close(context.Background()) })
+		}
+		var gateErr *schema.RemoteMigrateGateError
+		require.ErrorAs(t, err, &gateErr)
+		assert.Equal(t, "shared-no-remote", gateErr.Decision)
+		assert.Equal(t, before, snapshotMigrations(t, ctx, direct))
+	})
 }

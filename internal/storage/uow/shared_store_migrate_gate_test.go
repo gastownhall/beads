@@ -9,7 +9,6 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/cenkalti/backoff/v4"
-	mysql "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 )
@@ -46,11 +45,10 @@ func expectBehindDatabaseThroughPreparation(mock sqlmock.Sqlmock, database strin
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
 		WithArgs(lockName, 5).
 		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
-	// Locked preparation on a pre-existing database: the bare CREATE loses, so
-	// this init captures no fresh-bootstrap heal authority, and the USE is all
-	// it contributes.
-	mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE `" + database + "`")).
-		WillReturnError(&mysql.MySQLError{Number: 1007, Message: "database exists"})
+	// Locked preparation on a pre-existing database: the probe finds it
+	// visible, so no CREATE DATABASE is sent, this init captures no
+	// fresh-bootstrap heal authority, and the USE is all it contributes.
+	expectDatabaseExistsProbe(mock, database, true)
 	mock.ExpectExec(regexp.QuoteMeta("USE `" + database + "`")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	return lockName
@@ -174,6 +172,7 @@ func TestInitSchemaSharedStoreGate(t *testing.T) {
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
 			WithArgs(lockName, 5).
 			WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+		expectDatabaseExistsProbe(mock, "beads", false)
 		mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE `beads`")).
 			WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).

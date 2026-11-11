@@ -193,13 +193,15 @@ type providerOptions struct {
 	// path.
 	preview bool
 	// readOnly opens for a command that only reads (bd list, show, …). It is
-	// deliberately weaker than preview: the open still creates and migrates as
-	// usual, because a read command on a fresh or behind workspace has always
-	// been served by the ordinary open. It changes exactly one thing — when
-	// the shared-store migration gate refuses, the open warns and attaches to
-	// the database at its current schema instead of failing, so reads keep
-	// working through the upgrade window. That is the same warn-and-continue
-	// contract embeddeddolt gives its read-only-command intent.
+	// deliberately weaker than preview: the open still migrates as usual, and
+	// creates a database only when locked preparation cannot see it
+	// (gastownhall/beads#5079), because a read command on a fresh or behind
+	// workspace has always been served by the ordinary open. It changes
+	// exactly one thing — when the shared-store migration gate refuses, the
+	// open warns and attaches to the database at its current schema instead
+	// of failing, so reads keep working through the upgrade window. That is
+	// the same warn-and-continue contract embeddeddolt gives its
+	// read-only-command intent.
 	readOnly bool
 	// workingSetReconcile opens for a command that commits the working set
 	// rather than writing beads (bd dolt commit; the provider-side
@@ -356,10 +358,10 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 // The USE MUST remain the DDL repository's own UseDatabase — the exact
 // statement prepareBootstrap issues below. That identity is the reason the
 // probe may skip locked preparation when it reports converged: preparation's
-// contribution on an existing database is precisely this USE (its bare CREATE
-// DATABASE can only have failed with "database exists" and captured no heal
-// authority). Reimplementing the statement here, or letting the two quote
-// identifiers differently, would silently break that argument.
+// contribution on a visible database is precisely this USE (its visibility
+// probe skips CREATE DATABASE and captures no heal authority). Reimplementing
+// the statement here, or letting the two quote identifiers differently, would
+// silently break that argument.
 //
 // It is injected rather than reached for from schema/: domain/db's own test
 // suite migrates a scratch database with schema, so a schema -> domain/db
@@ -421,9 +423,9 @@ func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string
 		// #5043). Passing it as a lock option rather than calling the gate
 		// before MigrateUpWithLock is what keeps the steady-state open free:
 		// the converged fast path returns before the lock, and the gate, are
-		// ever reached. Preparation has already CREATEd and USEd the
-		// database by the time it runs, so a fresh bootstrap reads version 0
-		// and passes.
+		// ever reached. Preparation has already selected the database (and
+		// created it, when it was not visible) by the time it runs, so a
+		// fresh bootstrap reads version 0 and passes.
 		schema.WithMigrationGate(func(ctx context.Context, c *sql.Conn) error {
 			return schema.CheckSharedStoreMigrateGate(ctx, c, "", nil, dataBehindAdopter(p.readOnly))
 		})); err != nil {
@@ -697,11 +699,17 @@ func assertSessionDatabase(ctx context.Context, q rowQuerier, want string) error
 // retry attempts of a single initSchema call and runs as MigrateUpWithLock's
 // locked-preparation callback (see prepare).
 //
+// Preparation looks before it leaps (gastownhall/beads#5079): a database the
+// credential can already see is only selected, never created, so an account
+// without CREATE can open one it was granted. Visibility proves nothing about
+// ownership and grants no heal authority.
+//
 // Fresh-bootstrap ownership proof for the #4566 guard self-heal
-// (gastownhall/beads#5012): the first attempt issues a bare CREATE DATABASE (no
-// IF NOT EXISTS), so the server arbitrates creation atomically — success proves
-// THIS init created the database, and an already-exists refusal (1007) proves it
-// did not. Only the proven creator captures and passes a one-shot
+// (gastownhall/beads#5012): for a database the credential cannot see, the first
+// attempt issues a bare CREATE DATABASE (no IF NOT EXISTS), so the server
+// arbitrates creation atomically — success proves THIS init created the
+// database, and an already-exists refusal (1007) proves it did not. Only the
+// proven creator captures and passes a one-shot
 // FreshBootstrapHealCapability: on a database this init created, a retry attempt
 // that finds dirty tables can only be seeing a previous attempt's own
 // half-applied migration step (a session that died between a step's SQL and its
@@ -723,20 +731,38 @@ type bootstrapPreparer struct {
 	heal *schema.FreshBootstrapHealCapability
 }
 
-// prepare is MigrateUpWithLock's locked-preparation callback. It (re)creates and
-// selects the target database and, only in the attempt that won the bare CREATE,
-// captures the fresh-bootstrap heal capability. See bootstrapPreparer.
+// prepare is MigrateUpWithLock's locked-preparation callback. It probes whether
+// the target database is visible, (re)creates it only when it is not, selects
+// it and, only in the attempt that won the bare CREATE, captures the
+// fresh-bootstrap heal capability. See bootstrapPreparer.
 func (b *bootstrapPreparer) prepare(ctx context.Context, conn *sql.Conn) (*schema.FreshBootstrapHealCapability, error) {
+	// Refuse a bad name before any statement, the probe included.
+	if err := db.ValidateIdentifier(b.database); err != nil {
+		return nil, &bootstrapPreparationError{err: fmt.Errorf("uow: preparing database: %w", err)}
+	}
+	visible, probeErr := schema.DatabaseExists(ctx, conn, b.database)
+	if probeErr != nil {
+		// Never fall through to CREATE on an unanswered probe: that is the
+		// statement a least-privilege credential is refused.
+		return nil, &bootstrapPreparationError{
+			err:       fmt.Errorf("uow: preparing database: %w", probeErr),
+			retryable: isSerializationError(probeErr),
+		}
+	}
 	ddl := db.NewDDLSQLRepository(conn)
 	justCreated := false
-	if b.created {
+	switch {
+	case visible:
+		// Already there for this credential: only the USE below is needed.
+		// Creation state and any captured capability carry over unchanged.
+	case b.created:
 		// Re-assert on retries so a database dropped between attempts
 		// (e.g. a concurrent clean-databases) is recreated rather than
 		// failing the USE below.
 		if err := ddl.CreateDatabaseIfNotExists(ctx, b.database); err != nil {
 			return nil, &bootstrapPreparationError{err: fmt.Errorf("uow: creating database: %w", err)}
 		}
-	} else {
+	default:
 		switch err := ddl.CreateDatabase(ctx, b.database); {
 		case err == nil:
 			b.created = true
@@ -754,12 +780,13 @@ func (b *bootstrapPreparer) prepare(ctx context.Context, conn *sql.Conn) (*schem
 				retryable: true,
 			}
 		case isAccessDeniedError(err):
-			// A server that provisions databases itself denies CREATE to the
-			// credentials it hands out. Say so instead of surfacing the raw
-			// driver error, and do not retry or fall back: bd must not go
-			// looking for another way to create a database it was refused.
+			// The credential cannot see the database and may not create it.
+			// A server hides databases a credential was not granted, so bd
+			// cannot tell "never provisioned" from "not granted to you": name
+			// both. Do not retry or fall back: bd must not go looking for
+			// another way to create a database it was refused.
 			return nil, &bootstrapPreparationError{err: fmt.Errorf(
-				"uow: creating database %q was denied for this credential — this server provisions databases server-side; ask the server administrator to provision it, then re-run init: %w",
+				"uow: database %q is not visible to this credential and creating it was denied — either the database is not provisioned on the server or this credential has not been granted access to it; ask the server administrator to provision the database and grant access: %w",
 				b.database, err)}
 		default:
 			return nil, &bootstrapPreparationError{err: fmt.Errorf("uow: creating database: %w", err)}
@@ -1078,8 +1105,8 @@ func openAndInitSchema(ctx context.Context, network string, ep proxy.Endpoint, b
 	// a database that already exists, which is every open but the very
 	// first — costs ONE MySQL session instead of two: initSchema runs on
 	// this pool (USE + the converged-schema reads, or a real migration
-	// when one is pending; the bare CREATE DATABASE inside the locked
-	// preparation is refused with 1007 exactly as it is on a no-database
+	// when one is pending; the locked preparation finds the database
+	// visible and skips CREATE DATABASE exactly as it does on a no-database
 	// connection, so `created` stays false and fresh-bootstrap heal can
 	// never be armed by a database this call did not create), and the
 	// same pool is then handed to the provider.

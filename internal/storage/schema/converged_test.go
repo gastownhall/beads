@@ -345,6 +345,55 @@ func TestAlreadyConvergedFallsThroughOnAMissingDatabase(t *testing.T) {
 	}
 }
 
+// TestDatabaseExists pins the visibility probe that both the convergence fast
+// path and uow's locked bootstrap preparation ask before they USE or CREATE:
+// one parameterized catalog read that always succeeds, so a missing database
+// never costs the session a failing statement (be-bv7x).
+func TestDatabaseExists(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		exists bool
+	}{
+		{name: "visible", exists: true},
+		{name: "not visible", exists: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			db, mock := newMockDB(t)
+			expectDatabaseExistsProbe(mock, "testdb", tt.exists)
+
+			got, err := DatabaseExists(context.Background(), db, "testdb")
+			if err != nil {
+				t.Fatalf("DatabaseExists() error = %v", err)
+			}
+			if got != tt.exists {
+				t.Fatalf("DatabaseExists() = %t, want %t", got, tt.exists)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+		})
+	}
+
+	t.Run("query failure is wrapped", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		queryErr := errors.New("catalog unavailable")
+		mock.ExpectQuery(`SELECT COUNT\(\*\) FROM information_schema\.schemata`).
+			WithArgs("testdb").
+			WillReturnError(queryErr)
+
+		got, err := DatabaseExists(context.Background(), db, "testdb")
+		if got || !errors.Is(err, queryErr) {
+			t.Fatalf("DatabaseExists() = %t, %v; want false and the wrapped query error", got, err)
+		}
+		if !strings.Contains(err.Error(), `probing database "testdb" existence`) {
+			t.Fatalf("DatabaseExists() error = %v, want the probe context", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+}
+
 // TestAlreadyConvergedWithoutASelectorNeverSelects pins the default for
 // callers that inject nothing. The probe has no legal way to issue USE on its
 // own — selecting a database and quoting an identifier belong to the DDL
