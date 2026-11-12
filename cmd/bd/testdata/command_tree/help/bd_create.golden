@@ -29,7 +29,7 @@ Flags:
       --external-ref string       External reference (e.g., 'gh-9', 'jira-ABC', Linear URL)
   -f, --file string               Create one issue per ## heading (### fields attach to that issue); for title plus description-from-file, use --body-file
       --force                     Force creation even if prefix doesn't match database prefix
-      --graph string              Create a graph of issues with dependencies from JSON plan file
+      --graph string              Create a graph of issues with dependencies from JSON plan file (schema: bd help --doc create)
   -h, --help                      help for create
       --id string                 Explicit issue ID (e.g., 'bd-42' for partitioning)
   -l, --labels strings            Labels (comma-separated)

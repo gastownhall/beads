@@ -1248,6 +1248,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd create --graph` scales to medium plans and closes several plan-format
+  pitfalls** (#3879). Each plan edge no longer pays its own recursive SQL
+  cycle probe: the plan-local check and the batch's end gate still refuse
+  every cycle, once per plan. Edges and node `deps` typed `"blocked-by"` or
+  `"depends-on"` are now stored as `blocks` (direction unchanged) and gate
+  `bd ready`, as with `bd dep add --type`; a respelling of a known type such
+  as `"blocked_by"` or `"Blocks"` is refused before any write with the
+  spelling bd recognizes, instead of being stored as an inert custom type.
+  Node `priority` accepts `"1"` and `"P1"` like `--priority`. Node fields
+  such as `blockedBy` or `depends_on` get a hint saying where dependencies
+  go, and `bd help --doc create` (named by `--graph`'s help) now documents
+  the edge direction rule, `deps`, the type rules, priority forms and the
+  1000-item cap.
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
