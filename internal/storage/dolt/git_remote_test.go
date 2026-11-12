@@ -2354,3 +2354,81 @@ func TestGitRemoteDeclinedConflictPullLeavesStoreWritable(t *testing.T) {
 		t.Errorf("fresh session after the retry: is_merging=%v, %d conflict table(s); want a settled store", isMerging, tables)
 	}
 }
+
+// TestGitRemotePeerDeclinedConflictPullAbortsMerge covers the federation
+// peer's CLI pull (pullFromPeer's git-protocol branch): the same
+// declined-conflict pull, but PullFrom's contract — conflicts as data with a
+// nil error — must hold, and the merge behind them must be settled, not left
+// open. On the bug the peer pull also reported conflicts-as-data (its
+// post-hoc GetConflicts found the open merge's conflicts), so the contract
+// held; the merge it left behind wedged the store for every later writer,
+// which is what the fresh-session assertion pins.
+func TestGitRemotePeerDeclinedConflictPullAbortsMerge(t *testing.T) {
+	store, setup, cleanup := setupEmbeddedGitRemote(t)
+	defer cleanup()
+	requireGitProtocolRemote(t, store, "origin")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	// The peer is a second name for the same bare git repo: a git-protocol
+	// remote, exactly the topology PullFrom's CLI branch routes.
+	if err := store.AddRemote(ctx, "peer", setup.remoteURL); err != nil {
+		t.Fatalf("AddRemote peer: %v", err)
+	}
+	requireGitProtocolRemote(t, store, "peer")
+
+	preHead := seedGitRemoteDeclinedNotesConflict(t, store, setup, "gh7839-ac3")
+
+	// The production peer-CLI sequence with the lane-proof form of the
+	// settlement entry: pullFromPeer routes this through runCLIPullSettled
+	// with the peer named; finishCLIPull is the same settlement with
+	// remote-agnostic attribution, and the ownership the peer name narrows is
+	// pinned by the settlement unit tests.
+	cliErr := store.doltCLIPullFromPeer(ctx, "peer", nil)
+	if cliErr == nil {
+		t.Fatal("the peer CLI pull succeeded: no conflict was constructed, the fixture is broken")
+	}
+	if !strings.Contains(strings.ToLower(cliErr.Error()), "conflict") {
+		t.Fatalf("the peer CLI pull failed for an unrelated reason: %v", cliErr)
+	}
+	pullErr := store.finishCLIPull(ctx, cliErr)
+
+	var conflicts []storage.Conflict
+	if err := store.peerPullOutcome(ctx, "peer", pullErr, &conflicts); err != nil {
+		t.Fatalf("PullFrom contract broken: a declined peer conflict settled to %v, want conflicts-as-data with nil error", err)
+	}
+	if len(conflicts) == 0 {
+		t.Fatal("PullFrom reported no conflicts for a declined peer conflict")
+	}
+	named := false
+	for _, c := range conflicts {
+		if c.Field == "issues" {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("peer-reported conflicts %+v do not name the issues table", conflicts)
+	}
+
+	// The merge behind the reported conflicts is settled: a fresh session
+	// sees no open merge (this is the part the bug left open), and the local
+	// branch and edit are intact.
+	if isMerging, tables := freshSessionMergeState(t, store); isMerging || tables != 0 {
+		t.Errorf("fresh session after the declined peer pull: is_merging=%v, %d conflict table(s); want the merge aborted and conflicts captured pre-abort", isMerging, tables)
+	}
+	var head string
+	if err := store.db.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&head); err != nil {
+		t.Fatalf("read post-pull HEAD: %v", err)
+	}
+	if head != preHead {
+		t.Errorf("HEAD = %s after the declined peer pull; want the pre-pull %s", head, preHead)
+	}
+	var notes string
+	if err := store.db.QueryRowContext(ctx, "SELECT notes FROM issues WHERE id = 'gh7839-ac3'").Scan(&notes); err != nil {
+		t.Fatalf("read local notes: %v", err)
+	}
+	if notes != "from A local" {
+		t.Errorf("local notes = %q after the declined peer pull; want %q", notes, "from A local")
+	}
+}
