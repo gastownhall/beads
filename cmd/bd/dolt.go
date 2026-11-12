@@ -770,7 +770,9 @@ or 'bd dolt push --remote <remote>'. The remote must already exist (see
 			fmt.Println("To re-enable remote sync: bd config unset dolt.local-only")
 			return nil
 		}
-		ctx := context.Background()
+		// The signal-aware root context: the first SIGINT/SIGTERM cancels the
+		// transfer so the engine stops its transport before bd exits (GH#7989).
+		ctx := getRootContext()
 		st := getStore()
 		if st == nil {
 			return HandleError("no store available")
@@ -874,7 +876,9 @@ reports conflicts.`,
 			fmt.Println("To re-enable remote sync: bd config unset dolt.local-only")
 			return nil
 		}
-		ctx := context.Background()
+		// The signal-aware root context: the first SIGINT/SIGTERM cancels the
+		// transfer so the engine stops its transport before bd exits (GH#7989).
+		ctx := getRootContext()
 		st := getStore()
 		if st == nil {
 			return HandleError("no store available")

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -163,8 +164,10 @@ func TestPushWithContextBoundsIgnoredContext(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 
+	// The production unwind grace is 15s; a short per-call grace keeps this
+	// test about the bound, not about waiting it out.
 	start := time.Now()
-	err := pushWithContext(ctx, target)
+	err := pushWithContextGrace(ctx, target, 50*time.Millisecond)
 	elapsed := time.Since(start)
 
 	if !errors.Is(err, context.DeadlineExceeded) {
@@ -435,6 +438,136 @@ func TestPushedCommitForState(t *testing.T) {
 		target := &fakeAutoPushTarget{commit: "after", commitErr: errors.New("engine closed")}
 		if got := pushedCommitForState(ctx, target, "before"); got != "before" {
 			t.Fatalf("pushedCommitForState() = %q, want %q (pre-push fallback)", got, "before")
+		}
+	})
+}
+
+// TestPushWithContextCancellationGrace pins AC-4 of GH#7989: once the push
+// context ends, pushWithContext gives the push a bounded unwind grace to
+// finish its cancellation cleanup (the engine stopping its transport) before
+// returning, and it still reports the context error even when the late push
+// result is nil. A push that ignores cancellation is abandoned when the grace
+// ends; the fake keeps running, since the grace proves nothing stopped.
+func TestPushWithContextCancellationGrace(t *testing.T) {
+	// call runs pushWithContextGrace and fails the test, rather than hanging
+	// it, when the call does not return within a generous watchdog.
+	call := func(t *testing.T, ctx context.Context, target autoPushTarget, grace time.Duration) (error, time.Duration) {
+		t.Helper()
+		type result struct {
+			err     error
+			elapsed time.Duration
+		}
+		done := make(chan result, 1)
+		go func() {
+			start := time.Now()
+			err := pushWithContextGrace(ctx, target, grace)
+			done <- result{err, time.Since(start)}
+		}()
+		select {
+		case r := <-done:
+			return r.err, r.elapsed
+		case <-time.After(10 * time.Second):
+			t.Fatal("pushWithContextGrace did not return within 10s")
+			return nil, 0
+		}
+	}
+
+	for _, late := range []struct {
+		name string
+		err  error
+	}{
+		{"late result nil", nil},
+		{"late result error", errors.New("engine: transfer interrupted")},
+	} {
+		t.Run("waits for cooperative cleanup/"+late.name, func(t *testing.T) {
+			cleanupStarted := make(chan struct{})
+			release := make(chan struct{})
+			var cleanupDone atomic.Bool
+			target := &fakeAutoPushTarget{push: func(ctx context.Context) error {
+				<-ctx.Done()
+				close(cleanupStarted)
+				<-release
+				cleanupDone.Store(true)
+				return late.err
+			}}
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			defer cancel()
+
+			// Hold the cleanup until the call has had a fair chance to return
+			// early; a correct call stays blocked until release.
+			go func() {
+				<-cleanupStarted
+				time.Sleep(200 * time.Millisecond)
+				close(release)
+			}()
+			err, _ := call(t, ctx, target, time.Minute)
+
+			if !cleanupDone.Load() {
+				t.Fatal("pushWithContext returned before the push finished its cancellation cleanup")
+			}
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("pushWithContext() = %v, want the context's DeadlineExceeded", err)
+			}
+		})
+	}
+
+	t.Run("ignored cancellation is bounded by the grace", func(t *testing.T) {
+		const grace = 50 * time.Millisecond
+		started := make(chan struct{})
+		stop := make(chan struct{})
+		var returned atomic.Bool
+		t.Cleanup(func() { close(stop) })
+		target := &fakeAutoPushTarget{push: func(context.Context) error {
+			close(started)
+			<-stop // ignores its context; only test cleanup frees it
+			returned.Store(true)
+			return nil
+		}}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+
+		err, elapsed := call(t, ctx, target, grace)
+
+		<-started
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("pushWithContext() = %v, want the context's DeadlineExceeded", err)
+		}
+		if elapsed < grace {
+			t.Errorf("pushWithContext returned after %s, want it to wait the %s grace", elapsed, grace)
+		}
+		if elapsed > 5*time.Second {
+			t.Errorf("pushWithContext returned after %s, want it bounded by the %s grace", elapsed, grace)
+		}
+		if returned.Load() {
+			t.Error("the non-cooperative push returned; the fixture no longer models an ignored cancellation")
+		}
+	})
+
+	t.Run("successful push returns promptly", func(t *testing.T) {
+		target := &fakeAutoPushTarget{push: func(context.Context) error { return nil }}
+		err, elapsed := call(t, context.Background(), target, time.Hour)
+		if err != nil {
+			t.Fatalf("pushWithContext() = %v, want nil", err)
+		}
+		if elapsed > 5*time.Second {
+			t.Errorf("successful push took %s", elapsed)
+		}
+	})
+
+	t.Run("result and cancellation race", func(t *testing.T) {
+		for i := 0; i < 200; i++ {
+			ctx, cancel := context.WithCancel(context.Background())
+			target := &fakeAutoPushTarget{push: func(context.Context) error {
+				go cancel()
+				return nil
+			}}
+			// The push has returned by the time the call sees the cancellation,
+			// so the hour-long grace must never be spent waiting for it.
+			err, _ := call(t, ctx, target, time.Hour)
+			cancel()
+			if err != nil && !errors.Is(err, context.Canceled) {
+				t.Fatalf("iteration %d: pushWithContext() = %v, want nil or context.Canceled", i, err)
+			}
 		}
 	})
 }

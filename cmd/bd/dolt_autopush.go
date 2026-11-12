@@ -84,9 +84,26 @@ func isDoltAutoPushEnabled(_ context.Context) bool {
 	return config.GetBool("dolt.auto-push")
 }
 
+// autoPushUnwindGrace bounds how long pushWithContext waits, after the push
+// context ends, for the push to finish its cancellation cleanup. The engine
+// stops its git transport when the statement's context is canceled; returning
+// before that finishes lets the process exit while the transport (and the
+// embedded database lock) is still being torn down.
+const autoPushUnwindGrace = 15 * time.Second
+
 // pushWithContext is a caller-side guard. Push implementations should honor
 // ctx directly, but this keeps auto-push from blocking forever if one does not.
 func pushWithContext(ctx context.Context, target autoPushTarget) error {
+	return pushWithContextGrace(ctx, target, autoPushUnwindGrace)
+}
+
+// pushWithContextGrace runs target.Push(ctx). A push that finishes first
+// returns its own result. Once ctx ends, it waits up to grace for the push to
+// unwind and then returns ctx.Err(), even when the late result is nil: the
+// push was cut short, so the caller must not record it as complete. When the
+// grace ends first, the push is abandoned still running; returning then does
+// not prove the engine or its transport children stopped.
+func pushWithContextGrace(ctx context.Context, target autoPushTarget, grace time.Duration) error {
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- target.Push(ctx)
@@ -96,8 +113,19 @@ func pushWithContext(ctx context.Context, target autoPushTarget) error {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
-		return ctx.Err()
 	}
+
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			debug.Logf("dolt auto-push: push unwound after cancellation: %v\n", err)
+		}
+	case <-timer.C:
+		debug.Logf("dolt auto-push: push still running %s after cancellation; not waiting further (its transport may not have stopped)\n", grace)
+	}
+	return ctx.Err()
 }
 
 // pushedCommitForState returns the commit to record as LastCommit after a
