@@ -1051,15 +1051,35 @@ func (s *Store) GetDependencyTree(ctx context.Context, issueID string, maxDepth 
 }
 
 func (s *Store) appendTreeExternalReferences(ctx context.Context, tree []*types.TreeNode, deps map[string][]*types.Dependency, maxDepth int) ([]*types.TreeNode, error) {
+	inTree := make(map[string]bool, len(tree))
+	for _, node := range tree {
+		if node != nil {
+			inTree[node.ID] = true
+		}
+	}
 	refs := make([]reference, 0)
+	var foreign []string
 	for _, issueDeps := range deps {
 		for _, dep := range issueDeps {
-			if dep != nil && isExternalReference(dep.DependsOnID) {
+			if dep == nil {
+				continue
+			}
+			if isExternalReference(dep.DependsOnID) {
 				refs = append(refs, parseReference(dep.DependsOnID))
+			} else if isForeignIssueTarget(dep.IssueID, dep.DependsOnID) && !inTree[dep.DependsOnID] && !slices.Contains(foreign, dep.DependsOnID) {
+				foreign = append(foreign, dep.DependsOnID)
 			}
 		}
 	}
 	satisfied, err := s.resolveReferences(ctx, refs)
+	if err != nil {
+		return nil, err
+	}
+	// Foreign leaves of every edge type are display (GH#5784): read without
+	// the policy's "remains blocking" warning, which only a blocking edge
+	// earns, and never followed into the foreign graph.
+	sort.Strings(foreign)
+	foreignIssues, unreadable, err := s.readForeignIssues(ctx, foreign)
 	if err != nil {
 		return nil, err
 	}
@@ -1071,7 +1091,7 @@ func (s *Store) appendTreeExternalReferences(ctx context.Context, tree []*types.
 	// An external id already in the tree gets a Deduped stub for each further
 	// parent, as the walk does for a shared issue; an edge the tree already
 	// holds (a server that hung the leaves itself) is not added again.
-	seen := make(map[string]bool, len(tree)+len(refs))
+	seen := make(map[string]bool, len(tree)+len(refs)+len(foreign))
 	edges := make(map[[2]string]bool, len(tree))
 	for _, node := range tree {
 		if node != nil {
@@ -1081,35 +1101,47 @@ func (s *Store) appendTreeExternalReferences(ctx context.Context, tree []*types.
 	}
 	for _, parent := range tree {
 		// A stub has no descendants: its leaves hang under its expanded twin.
-		if parent == nil || parent.Deduped || parent.Depth >= effectiveMaxDepth {
+		if parent == nil || parent.Deduped || parent.External || parent.Depth >= effectiveMaxDepth {
 			continue
 		}
 		for _, dep := range deps[parent.ID] {
-			if dep == nil || !isExternalReference(dep.DependsOnID) {
+			if dep == nil || edges[[2]string{parent.ID, dep.DependsOnID}] {
 				continue
 			}
-			if edges[[2]string{parent.ID, dep.DependsOnID}] {
-				continue
-			}
-			ref := parseReference(dep.DependsOnID)
-			status := types.StatusOpen
-			title := "○ " + externalTitle(ref)
-			if satisfied[ref.raw] {
-				status = types.StatusClosed
-				title = "✓ " + externalTitle(ref)
-			}
-			tree = append(tree, &types.TreeNode{
-				Issue: types.Issue{
+			var leaf *types.TreeNode
+			switch {
+			case isExternalReference(dep.DependsOnID):
+				ref := parseReference(dep.DependsOnID)
+				status := types.StatusOpen
+				title := "○ " + externalTitle(ref)
+				if satisfied[ref.raw] {
+					status = types.StatusClosed
+					title = "✓ " + externalTitle(ref)
+				}
+				leaf = &types.TreeNode{Issue: types.Issue{
 					ID:        dep.DependsOnID,
 					Title:     title,
 					Status:    status,
 					IssueType: types.TypeTask,
-				},
-				Depth:          parent.Depth + 1,
-				ParentID:       parent.ID,
-				EdgeFromParent: dep.Type,
-				Deduped:        seen[dep.DependsOnID],
-			})
+				}}
+			case isForeignIssueTarget(dep.IssueID, dep.DependsOnID) && !inTree[dep.DependsOnID]:
+				if issue := foreignIssues[dep.DependsOnID]; issue != nil {
+					leaf = &types.TreeNode{Issue: *issue, External: true}
+				} else {
+					leaf = &types.TreeNode{
+						Issue:      types.Issue{ID: dep.DependsOnID, Title: dep.DependsOnID},
+						External:   true,
+						Unresolved: unreadable[dep.DependsOnID],
+					}
+				}
+			default:
+				continue
+			}
+			leaf.Depth = parent.Depth + 1
+			leaf.ParentID = parent.ID
+			leaf.EdgeFromParent = dep.Type
+			leaf.Deduped = seen[dep.DependsOnID]
+			tree = append(tree, leaf)
 			seen[dep.DependsOnID] = true
 			edges[[2]string{parent.ID, dep.DependsOnID}] = true
 		}

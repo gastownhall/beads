@@ -298,65 +298,87 @@ func foreignIssueSatisfies(issue *types.Issue) bool {
 	return issue != nil && (issue.Status == types.StatusClosed || issue.Status == types.StatusPinned)
 }
 
-// resolveForeignIssues reads each bare cross-rig target in the source store
+// readForeignIssues reads each bare cross-rig target in the source store
 // first (a differently prefixed row may live here), then the rest through the
-// issue resolver. An unreadable target stays unsatisfied, with a warning.
-func (s *Store) resolveForeignIssues(ctx context.Context, ids []string, res *resolution) error {
+// issue resolver. Every id lands in exactly one of the two maps: its observed
+// row, or the reason it could not be read. It warns about nothing.
+func (s *Store) readForeignIssues(ctx context.Context, ids []string) (map[string]*types.Issue, map[string]string, error) {
+	issues := make(map[string]*types.Issue, len(ids))
+	unavailable := make(map[string]string)
 	if len(ids) == 0 {
-		return nil
+		return issues, unavailable, nil
 	}
 	local, err := s.localIssues(ctx, ids)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
+			return nil, nil, ctxErr
 		}
-		return fmt.Errorf("read cross-rig dependency targets in the source store: %w", err)
+		return nil, nil, fmt.Errorf("read cross-rig dependency targets in the source store: %w", err)
 	}
 	for _, issue := range local {
 		if issue != nil && slices.Contains(ids, issue.ID) {
-			res.issues[issue.ID] = issue
+			issues[issue.ID] = issue
 		}
 	}
 	remaining := make([]string, 0, len(ids))
 	for _, id := range ids {
-		if res.issues[id] == nil {
+		if issues[id] == nil {
 			remaining = append(remaining, id)
 		}
 	}
 	if len(remaining) > 0 {
 		if err := ctx.Err(); err != nil {
-			return err
+			return nil, nil, err
 		}
 		var found map[string]*types.Issue
-		unavailable := map[string]string{}
+		reasons := map[string]string{}
 		if s.resolveIssues == nil {
 			for _, id := range remaining {
-				unavailable[id] = "no cross-rig routing is available here"
+				reasons[id] = "no cross-rig routing is available here"
 			}
 		} else {
 			var resolveErr error
-			found, unavailable, resolveErr = s.resolveIssues(ctx, remaining)
+			found, reasons, resolveErr = s.resolveIssues(ctx, remaining)
 			if resolveErr != nil {
 				if ctxErr := ctx.Err(); ctxErr != nil {
-					return ctxErr
+					return nil, nil, ctxErr
 				}
-				found, unavailable = nil, make(map[string]string, len(remaining))
+				found, reasons = nil, make(map[string]string, len(remaining))
 				for _, id := range remaining {
-					unavailable[id] = resolveErr.Error()
+					reasons[id] = resolveErr.Error()
 				}
 			}
 		}
 		for _, id := range remaining {
 			if issue := found[id]; issue != nil {
-				res.issues[id] = issue
+				issues[id] = issue
 				continue
 			}
-			reason := unavailable[id]
+			reason := reasons[id]
 			if reason == "" {
 				reason = "not found"
 			}
-			res.unavailable[id] = reason
+			unavailable[id] = reason
 		}
+	}
+	return issues, unavailable, nil
+}
+
+// resolveForeignIssues is readForeignIssues for a policy evaluation: an
+// unreadable target stays unsatisfied, with a warning.
+func (s *Store) resolveForeignIssues(ctx context.Context, ids []string, res *resolution) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	issues, unavailable, err := s.readForeignIssues(ctx, ids)
+	if err != nil {
+		return err
+	}
+	for id, issue := range issues {
+		res.issues[id] = issue
+	}
+	for id, reason := range unavailable {
+		res.unavailable[id] = reason
 	}
 	for _, id := range ids {
 		res.satisfied[id] = foreignIssueSatisfies(res.issues[id])

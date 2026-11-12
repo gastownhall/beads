@@ -8692,6 +8692,18 @@ components:
             into an issue already expanded earlier in the same answer, with no
             descendants of its own. Absent, never false, on every other row.
             Drop the rows carrying it to get each issue once.
+        external:
+          type: boolean
+          description: >-
+            True on a leaf for a bare cross-prefix target this workspace does
+            not hold: its issue members are the foreign row read through the
+            prefix routes at query time, unless `unresolved` is set. The walk
+            never descends below it. Absent on every other row.
+        unresolved:
+          type: string
+          description: >-
+            On an `external` leaf, why the target could not be read. That leaf
+            carries only the stored id (as `id` and `title`) and no `status`.
 
     Dependency:
       type: object

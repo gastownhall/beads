@@ -190,3 +190,52 @@ func TestShowForeignDependencyDetailsTakeRowsOffTheUnresolvedCount(t *testing.T)
 		t.Fatalf("short text listing = %d rows, want aa-2, bb-1, bb-2", len(got))
 	}
 }
+
+// TestDepTreeMarksForeignLeavesAndBadgesByThePolicyRule pins the dep tree
+// text for GH#5784 AC-7: a foreign leaf reads "(external)", an unresolved one
+// names its id and reason, and only a foreign blocks or conditional-blocks
+// edge (open or unreadable) badges the root [BLOCKED]; waits-for, tracks,
+// related and parent-child foreign leaves leave it [READY].
+func TestDepTreeMarksForeignLeavesAndBadgesByThePolicyRule(t *testing.T) {
+	root := func() *types.TreeNode {
+		return &types.TreeNode{Issue: types.Issue{ID: "aa-1", Title: "Source", Status: types.StatusOpen}}
+	}
+	leaf := func(id string, edge types.DependencyType, status types.Status, unresolved string) *types.TreeNode {
+		node := &types.TreeNode{Issue: types.Issue{ID: id, Title: "Foreign " + id, Status: status}, Depth: 1, ParentID: "aa-1", EdgeFromParent: edge, External: true, Unresolved: unresolved}
+		if unresolved != "" {
+			node.Title = id
+		}
+		return node
+	}
+	render := func(nodes ...*types.TreeNode) string {
+		return captureStdout(t, func() error { renderTree(nodes, 10, "down"); return nil })
+	}
+
+	out := render(root(),
+		leaf("bb-1", types.DepWaitsFor, types.StatusOpen, ""),
+		leaf("bb-2", types.DepTracks, types.StatusOpen, ""),
+		leaf("bb-3", types.DepRelated, "", "database is locked"),
+		leaf("bb-4", types.DepParentChild, types.StatusOpen, ""),
+		leaf("bb-5", types.DepBlocks, types.StatusClosed, ""))
+	if !strings.Contains(out, "[READY]") || strings.Contains(out, "[BLOCKED]") {
+		t.Fatalf("non-blocking foreign leaves badged the root:\n%s", out)
+	}
+	for _, want := range []string{"bb-1: Foreign bb-1", "bb-5: Foreign bb-5", "bb-3: unresolved: database is locked"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("tree lacks %q:\n%s", want, out)
+		}
+	}
+	if got := strings.Count(out, "(external)"); got != 5 {
+		t.Fatalf("(external) markers = %d, want 5:\n%s", got, out)
+	}
+
+	for _, blocker := range []*types.TreeNode{
+		leaf("bb-6", types.DepBlocks, types.StatusOpen, ""),
+		leaf("bb-6", types.DepConditionalBlocks, types.StatusBlocked, ""),
+		leaf("bb-6", types.DepBlocks, "", `no route for prefix "bb"`),
+	} {
+		if out := render(root(), blocker); !strings.Contains(out, "[BLOCKED]") {
+			t.Fatalf("foreign %s leaf (%q, unresolved %q) left the root unbadged:\n%s", blocker.EdgeFromParent, blocker.Status, blocker.Unresolved, out)
+		}
+	}
+}

@@ -282,3 +282,148 @@ func TestCrossRigOpenBlockerRefusesClaimAndClose(t *testing.T) {
 		t.Fatalf("served refused close reached the store: %v", issues.closed)
 	}
 }
+
+// treeDependencyUseCase answers the walk with tree; the rest is the fake.
+type treeDependencyUseCase struct {
+	*fakeDependencyUseCase
+	tree []*types.TreeNode
+}
+
+func (u *treeDependencyUseCase) GetDependencyTree(context.Context, string, domain.DepTreeOpts) ([]*types.TreeNode, error) {
+	return slices.Clone(u.tree), nil
+}
+
+// crossRigRemote is the served store with a BatchGetter, which the policy
+// reads a differently prefixed source row through first.
+type crossRigRemote struct{ *remoteStore }
+
+func (r crossRigRemote) BatchGetter() (publicops.BatchGetter, error) { return crossRigBatchGetter{r.remoteStore}, nil }
+
+type crossRigBatchGetter struct{ s *remoteStore }
+
+func (g crossRigBatchGetter) GetMany(ctx context.Context, req publicops.GetManyRequest) (publicops.GetManyResult, error) {
+	issues, err := g.s.GetIssuesByIDs(ctx, req.IDs)
+	return publicops.GetManyResult{Issues: issues}, err
+}
+
+// GH#5784 AC-7: a foreign edge of every type hangs a marked leaf under its
+// source in the dependency tree: the observed foreign row when the target
+// reads, else an unresolved leaf naming the stored id and the reason with no
+// status. Display reads warn nothing and leaves are never walked further, on
+// the direct store, bd serve's unit-of-work arm and the served walker.
+func TestCrossRigTreeShowsMarkedForeignLeavesOfEveryType(t *testing.T) {
+	edges := []*types.Dependency{
+		externalDep("aa-1", "bb-1", types.DepTracks),
+		externalDep("aa-1", "bb-2", types.DepRelated),
+		externalDep("aa-1", "bb-3", types.DepParentChild),
+		externalDep("aa-1", "bb-4", types.DepWaitsFor),
+		externalDep("aa-1", "bb-5", types.DepBlocks),
+		externalDep("aa-1", "aa-2", types.DepBlocks),
+	}
+	foreignDeps := map[string][]*types.Dependency{
+		"bb-1": {externalDep("bb-1", "bb-9", types.DepBlocks)},
+	}
+	newResolver := func() *fakeIssueResolver {
+		return &fakeIssueResolver{
+			issues: map[string]*types.Issue{
+				"bb-1": foreignIssue("bb-1", types.StatusOpen),
+				"bb-2": foreignIssue("bb-2", types.StatusClosed),
+				"bb-3": foreignIssue("bb-3", types.StatusInProgress),
+			},
+			unavailable: map[string]string{"bb-4": `no route for prefix "bb"`, "bb-5": "database is locked"},
+		}
+	}
+	tree := func() []*types.TreeNode {
+		return []*types.TreeNode{
+			{Issue: *issue("aa-1")},
+			{Issue: *issue("aa-2"), Depth: 1, ParentID: "aa-1", EdgeFromParent: types.DepBlocks},
+		}
+	}
+	check := func(t *testing.T, nodes []*types.TreeNode, resolver *fakeIssueResolver, warned []string) {
+		t.Helper()
+		var got []string
+		for _, node := range nodes {
+			got = append(got, node.ID+" "+string(node.EdgeFromParent)+" "+string(node.Status)+" "+node.Title+" "+node.Unresolved)
+			if node.ID == "bb-9" {
+				t.Fatalf("the walk descended into the foreign graph: %+v", node)
+			}
+			if strings.HasPrefix(node.ID, "bb-") && (!node.External || node.Depth != 1 || node.ParentID != "aa-1") {
+				t.Errorf("foreign leaf %s = %+v, want an External leaf under aa-1", node.ID, node)
+			}
+			if strings.HasPrefix(node.ID, "aa-") && node.External {
+				t.Errorf("local node %s marked External", node.ID)
+			}
+		}
+		want := []string{
+			"aa-1  open aa-1 ",
+			"aa-2 blocks open aa-2 ",
+			"bb-1 tracks open foreign bb-1 ",
+			"bb-2 related closed foreign bb-2 ",
+			"bb-3 parent-child in_progress foreign bb-3 ",
+			`bb-4 waits-for  bb-4 no route for prefix "bb"`,
+			"bb-5 blocks  bb-5 database is locked",
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("tree =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+		}
+		if want := [][]string{{"bb-1", "bb-2", "bb-3", "bb-4", "bb-5"}}; !slices.EqualFunc(resolver.calls, want, slices.Equal[[]string]) {
+			t.Fatalf("resolver calls = %v, want %v", resolver.calls, want)
+		}
+		if len(warned) != 0 {
+			t.Fatalf("tree display warned %v, want nothing", warned)
+		}
+	}
+
+	t.Run("direct", func(t *testing.T) {
+		resolver := newResolver()
+		raw := &fakeStore{tree: tree(), deps: map[string][]*types.Dependency{"aa-1": edges, "bb-1": foreignDeps["bb-1"]}}
+		store := crossRigStore(raw, resolver)
+		var warned []string
+		store.warnings.issue = func(id, _ string) { warned = append(warned, id) }
+		nodes, err := store.GetDependencyTree(t.Context(), "aa-1", 10, false, false)
+		if err != nil {
+			t.Fatalf("GetDependencyTree: %v", err)
+		}
+		check(t, nodes, resolver, warned)
+		if reversed, err := store.GetDependencyTree(t.Context(), "aa-1", 10, false, true); err != nil || len(reversed) != 2 {
+			t.Fatalf("reverse tree = %d nodes, %v; want the walk as it came", len(reversed), err)
+		}
+	})
+
+	t.Run("serve unit of work", func(t *testing.T) {
+		resolver := newResolver()
+		uw := crossRigProvider(t, &fakeUOW{
+			issues: &fakeIssueUseCase{},
+			deps: &treeDependencyUseCase{
+				fakeDependencyUseCase: &fakeDependencyUseCase{records: map[string][]*types.Dependency{"aa-1": edges}},
+				tree:                  tree(),
+			},
+		}, resolver)
+		var warned []string
+		uw.policy.warnings.issue = func(id, _ string) { warned = append(warned, id) }
+		nodes, err := uw.DependencyUseCase().GetDependencyTree(t.Context(), "aa-1", domain.DepTreeOpts{MaxDepth: 10})
+		if err != nil {
+			t.Fatalf("GetDependencyTree: %v", err)
+		}
+		check(t, nodes, resolver, warned)
+	})
+
+	t.Run("served walker", func(t *testing.T) {
+		resolver := newResolver()
+		raw := newRemoteStore()
+		raw.tree = tree()
+		raw.deps["aa-1"] = edges
+		store := New(crossRigRemote{raw}, func(ProjectName) (string, bool) { return "", false }, nil, WithIssueResolver(resolver.resolve))
+		var warned []string
+		store.warnings.issue = func(id, _ string) { warned = append(warned, id) }
+		walker, err := store.TreeWalker()
+		if err != nil {
+			t.Fatalf("TreeWalker: %v", err)
+		}
+		result, err := walker.WalkTree(t.Context(), publicops.WalkTreeRequest{RootID: "aa-1", MaxDepth: 50})
+		if err != nil {
+			t.Fatalf("WalkTree: %v", err)
+		}
+		check(t, result.Nodes, resolver, warned)
+	})
+}
