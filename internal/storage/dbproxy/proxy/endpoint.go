@@ -321,9 +321,10 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 // pre-upgrade proxy that cannot answer the request-MAC handshake: its
 // pidfile predates the ControlProto marker MAC-capable proxies publish. A
 // current proxy can also close a probe silently — its control handler
-// drops requests once the ident slots are full or the read deadline trips
-// — so refusal alone is never evidence enough to send a kill; a marked
-// record falls back to the normal bounded poll instead.
+// evicts the oldest connection when its pool is full and drops a request
+// whose read deadline trips — so refusal alone is never evidence enough to
+// send a kill; a marked record falls back to the normal bounded poll
+// instead.
 func isPreMACIdentRefusal(discovery adoptionResult) bool {
 	return discovery.status == adoptionIdentityMismatch &&
 		errors.Is(discovery.err, identity.ErrIdentRefused) &&

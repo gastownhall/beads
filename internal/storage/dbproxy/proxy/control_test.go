@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -349,7 +351,10 @@ func TestControl_RejectsOversizedAndGarbageRequests(t *testing.T) {
 
 func TestControl_ConcurrentIdentify(t *testing.T) {
 	control, secret, want := newControlServer(t)
-	const calls = maxConcurrentIdentRequests
+	// Above the old pool of 8, but well below maxConcurrentIdentRequests, so
+	// the pool never evicts one of these probes, and below macOS's 128-entry
+	// listen backlog, so no dial waits out a dropped SYN.
+	const calls = 32
 	errs := make(chan error, calls)
 	var wg sync.WaitGroup
 	for range calls {
@@ -371,8 +376,11 @@ func TestControl_ConcurrentIdentify(t *testing.T) {
 	}
 }
 
-func TestControl_CapsConcurrentHandshakes(t *testing.T) {
-	control, _, _ := newControlServer(t)
+// bd-g4xtvt (GH#5697): the control listener is loopback TCP, reachable by any
+// local uid. A full pool of idle connections that never send a request must
+// not lock a legitimate secret holder out of the identity handshake.
+func TestControl_IdleConnectionsDoNotStarveIdentify(t *testing.T) {
+	control, secret, want := newControlServer(t)
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(control.Port()))
 	conns := make([]net.Conn, 0, maxConcurrentIdentRequests)
 	t.Cleanup(func() {
@@ -380,24 +388,25 @@ func TestControl_CapsConcurrentHandshakes(t *testing.T) {
 			_ = conn.Close()
 		}
 	})
+	firstDial := time.Now()
 	for range maxConcurrentIdentRequests {
 		conn, err := net.DialTimeout("tcp", addr, time.Second)
 		require.NoError(t, err)
 		conns = append(conns, conn)
 	}
 	require.Eventually(t, func() bool {
-		return len(control.slots) == maxConcurrentIdentRequests
-	}, time.Second, 10*time.Millisecond)
+		return activeControlConns(control) == maxConcurrentIdentRequests
+	}, time.Second, time.Millisecond)
 
-	extra, err := net.DialTimeout("tcp", addr, time.Second)
-	require.NoError(t, err)
-	defer extra.Close()
-	require.NoError(t, extra.SetDeadline(time.Now().Add(time.Second)))
-	_, err = io.WriteString(extra, "IDENT blocked blocked\n")
-	require.NoError(t, err)
-	buf := make([]byte, 1)
-	_, err = extra.Read(buf)
-	require.Error(t, err)
+	// The idle holders keep their connections for identDeadline; the
+	// caller's budget is shorter, so it must be served without waiting
+	// them out.
+	got, err := identity.Identify("127.0.0.1", control.Port(), secret, identityProbeTimeout)
+	require.NoError(t, err, "idle unauthenticated connections exhausted the control listener")
+	require.Less(t, time.Since(firstDial), identDeadline,
+		"an idle holder may have timed out before the probe, so the pool was not full")
+	got.MAC = ""
+	assert.Equal(t, &want, got)
 }
 
 // Persistent transient Accept failures (e.g. EMFILE) must not tear down the
@@ -409,7 +418,6 @@ func TestControl_AcceptLoopSurvivesPersistentErrors(t *testing.T) {
 		listener: listener,
 		done:     make(chan struct{}),
 		closing:  make(chan struct{}),
-		slots:    make(chan struct{}, maxConcurrentIdentRequests),
 	}
 	immediately := make(chan time.Time)
 	close(immediately)
@@ -474,4 +482,462 @@ func (l *failingListener) Close() error {
 
 func (l *failingListener) Addr() net.Addr {
 	return &net.TCPAddr{}
+}
+
+// activeControlConns reports how many connections control holds in its pool.
+func activeControlConns(control *controlServer) int {
+	control.mu.Lock()
+	defer control.mu.Unlock()
+	return control.active.Len()
+}
+
+// AC-2 (bd-g4xtvt): a full pool admits the newcomer by closing its oldest
+// connection; the pool never holds more than maxConcurrentIdentRequests.
+func TestControl_FullPoolEvictsOldest(t *testing.T) {
+	control, listener, _ := startSyntheticControl(t, time.After)
+	firstAdmitted := time.Now()
+	peers := make([]*testControlConn, 0, maxConcurrentIdentRequests+3)
+	for range maxConcurrentIdentRequests {
+		conn, _ := newTestControlConn(t)
+		feedControlConn(t, listener, conn)
+		peers = append(peers, conn)
+		require.LessOrEqual(t, activeControlConns(control), maxConcurrentIdentRequests)
+	}
+	require.Eventually(t, func() bool {
+		return activeControlConns(control) == maxConcurrentIdentRequests
+	}, time.Second, time.Millisecond)
+
+	for evicted := range 3 {
+		newcomer, _ := newTestControlConn(t)
+		feedControlConn(t, listener, newcomer)
+		peers = append(peers, newcomer)
+		requireClosed(t, peers[evicted], "the oldest connection was not evicted")
+		require.Less(t, time.Since(firstAdmitted), identDeadline,
+			"the oldest connection may have timed out rather than been evicted")
+		assert.Equal(t, maxConcurrentIdentRequests, activeControlConns(control))
+		for _, kept := range []*testControlConn{peers[evicted+1], peers[len(peers)-2], newcomer} {
+			assert.False(t, kept.isClosed(), "a connection newer than the oldest was closed")
+		}
+	}
+}
+
+// chanListener hands the control accept loop the connections and errors a
+// test feeds it, in order.
+type chanListener struct {
+	conns  chan net.Conn
+	errs   chan error
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newChanListener() *chanListener {
+	return &chanListener{conns: make(chan net.Conn), errs: make(chan error), closed: make(chan struct{})}
+}
+
+func (l *chanListener) Accept() (net.Conn, error) {
+	select {
+	case conn := <-l.conns:
+		return conn, nil
+	case err := <-l.errs:
+		return nil, err
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *chanListener) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (l *chanListener) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)}
+}
+
+// startSyntheticControl runs a control server whose accept loop serves the
+// connections fed to the returned listener. It returns the control secret.
+func startSyntheticControl(t *testing.T, after func(time.Duration) <-chan time.Time) (*controlServer, *chanListener, string) {
+	t.Helper()
+	listener := newChanListener()
+	secret := testDataSecret
+	control := &controlServer{
+		listener: listener,
+		secret:   secret,
+		done:     make(chan struct{}),
+		closing:  make(chan struct{}),
+		reply: func() identity.IdentReply {
+			return identity.IdentReply{Schema: pidfile.SchemaV2, Role: pidfile.KindProxy, RootID: "workspace-root"}
+		},
+	}
+	go control.acceptLoopWithAfter(after)
+	t.Cleanup(func() { _ = control.Close() })
+	return control, listener, secret
+}
+
+// feedControlConn hands conn to the accept loop.
+func feedControlConn(t *testing.T, listener *chanListener, conn net.Conn) {
+	t.Helper()
+	select {
+	case listener.conns <- conn:
+	case <-time.After(time.Second):
+		t.Fatal("control accept loop did not accept the connection")
+	}
+}
+
+// testControlConn is the proxy side of a net.Pipe. It records closes, can
+// fail SetDeadline or shorten the deadline the handler sets, and reports
+// when a reply write starts and returns.
+type testControlConn struct {
+	net.Conn
+	deadlineErr error
+	deadline    time.Duration // nonzero: replaces the handler's deadline
+
+	closes     atomic.Int32
+	closed     chan struct{}
+	closeOnce  sync.Once
+	writing    chan struct{}
+	written    chan struct{}
+	writeStart sync.Once
+	writeEnd   sync.Once
+}
+
+// newTestControlConn returns the proxy side of a pipe and the client side,
+// which the test closes at cleanup.
+func newTestControlConn(t *testing.T) (*testControlConn, net.Conn) {
+	t.Helper()
+	server, client := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+	return &testControlConn{
+		Conn:    server,
+		closed:  make(chan struct{}),
+		writing: make(chan struct{}),
+		written: make(chan struct{}),
+	}, client
+}
+
+func (c *testControlConn) SetDeadline(deadline time.Time) error {
+	if c.deadlineErr != nil {
+		return c.deadlineErr
+	}
+	if c.deadline != 0 {
+		deadline = time.Now().Add(c.deadline)
+	}
+	return c.Conn.SetDeadline(deadline)
+}
+
+func (c *testControlConn) Write(p []byte) (int, error) {
+	c.writeStart.Do(func() { close(c.writing) })
+	defer c.writeEnd.Do(func() { close(c.written) })
+	return c.Conn.Write(p)
+}
+
+func (c *testControlConn) Close() error {
+	c.closes.Add(1)
+	c.closeOnce.Do(func() { close(c.closed) })
+	return c.Conn.Close()
+}
+
+func (c *testControlConn) isClosed() bool {
+	select {
+	case <-c.closed:
+		return true
+	default:
+		return false
+	}
+}
+
+func requireClosed(t *testing.T, conn *testControlConn, msg string) {
+	t.Helper()
+	select {
+	case <-conn.closed:
+	case <-time.After(time.Second):
+		t.Fatal(msg)
+	}
+}
+
+// AC-3 (bd-g4xtvt): however a handler ends, its connection is closed and
+// leaves the pool exactly once, without taking another connection's place.
+func TestControl_ConnectionCleanup(t *testing.T) {
+	nonce := strings.Repeat("ab", 16)
+	writeAsync := func(client net.Conn, request string) {
+		go func() { _, _ = io.WriteString(client, request) }()
+	}
+	for _, tc := range []struct {
+		name   string
+		setup  func(conn *testControlConn)
+		client func(t *testing.T, client net.Conn, secret string)
+	}{
+		{name: "success", client: func(t *testing.T, client net.Conn, secret string) {
+			writeAsync(client, identRequest(t, secret, nonce))
+			_, err := bufio.NewReader(client).ReadString('\n')
+			require.NoError(t, err)
+		}},
+		{name: "missing newline", client: func(t *testing.T, client net.Conn, secret string) {
+			_, err := io.WriteString(client, "IDENT "+nonce)
+			require.NoError(t, err)
+			_ = client.Close()
+		}},
+		{name: "oversize", client: func(t *testing.T, client net.Conn, secret string) {
+			writeAsync(client, "IDENT "+strings.Repeat("x", maxIdentRequestBytes)+"\n")
+		}},
+		{name: "wrong verb", client: func(t *testing.T, client net.Conn, secret string) {
+			writeAsync(client, "WHOAMI "+strings.Repeat("0", 64)+" "+nonce+"\n")
+		}},
+		{name: "invalid MAC", client: func(t *testing.T, client net.Conn, secret string) {
+			writeAsync(client, identRequest(t, "not-the-secret", nonce))
+		}},
+		{name: "peer close", client: func(t *testing.T, client net.Conn, secret string) {
+			_ = client.Close()
+		}},
+		{name: "deadline setup fails", setup: func(conn *testControlConn) {
+			conn.deadlineErr = errors.New("set deadline failed")
+		}},
+		{name: "deadline expiry", setup: func(conn *testControlConn) {
+			conn.deadline = 20 * time.Millisecond
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			control, listener, secret := startSyntheticControl(t, time.After)
+			conn, client := newTestControlConn(t)
+			if tc.setup != nil {
+				tc.setup(conn)
+			}
+			feedControlConn(t, listener, conn)
+			if tc.client != nil {
+				tc.client(t, client, secret)
+			}
+			requireClosed(t, conn, "the handler did not close its connection")
+			require.Eventually(t, func() bool {
+				return activeControlConns(control) == 0
+			}, time.Second, time.Millisecond)
+		})
+	}
+
+	t.Run("tracked through a blocked reply write", func(t *testing.T) {
+		control, listener, secret := startSyntheticControl(t, time.After)
+		conn, client := newTestControlConn(t)
+		feedControlConn(t, listener, conn)
+		writeAsync(client, identRequest(t, secret, nonce))
+		select {
+		case <-conn.writing:
+		case <-time.After(time.Second):
+			t.Fatal("the handler did not start its reply")
+		}
+		// The client has not read the reply, so the write is still blocked.
+		assert.Equal(t, 1, activeControlConns(control), "a handler writing its reply left the pool early")
+		assert.False(t, conn.isClosed())
+
+		_, err := bufio.NewReader(client).ReadString('\n')
+		require.NoError(t, err)
+		requireClosed(t, conn, "the handler did not close its connection")
+		require.Eventually(t, func() bool {
+			return activeControlConns(control) == 0
+		}, time.Second, time.Millisecond)
+	})
+
+	t.Run("an evicted handler leaves its replacement in place", func(t *testing.T) {
+		control, listener, secret := startSyntheticControl(t, time.After)
+		victim, victimClient := newTestControlConn(t)
+		feedControlConn(t, listener, victim)
+		writeAsync(victimClient, identRequest(t, secret, nonce))
+		select {
+		case <-victim.writing:
+		case <-time.After(time.Second):
+			t.Fatal("the handler did not start its reply")
+		}
+		for range maxConcurrentIdentRequests - 1 {
+			conn, _ := newTestControlConn(t)
+			feedControlConn(t, listener, conn)
+		}
+		newcomer, _ := newTestControlConn(t)
+		feedControlConn(t, listener, newcomer)
+
+		requireClosed(t, victim, "the oldest connection was not evicted")
+		select {
+		case <-victim.written:
+		case <-time.After(time.Second):
+			t.Fatal("eviction did not unblock the victim's reply write")
+		}
+		// The second close is the victim handler's own cleanup.
+		require.Eventually(t, func() bool {
+			return victim.closes.Load() == 2
+		}, time.Second, time.Millisecond)
+		assert.Equal(t, maxConcurrentIdentRequests, activeControlConns(control))
+		assert.False(t, newcomer.isClosed())
+	})
+}
+
+// identRequest renders an IDENT request for nonce, authenticated by secret.
+func identRequest(t *testing.T, secret, nonce string) string {
+	t.Helper()
+	mac, err := identity.IdentRequestMAC(secret, nonce)
+	require.NoError(t, err)
+	return "IDENT " + mac + " " + nonce + "\n"
+}
+
+// AC-5 (bd-g4xtvt): below capacity the listener answers as before: a valid
+// client gets the signed reply without the secret crossing the wire, and a
+// malformed or unauthenticated request gets no reply bytes.
+func TestControl_AnswersOnlyAuthenticatedRequests(t *testing.T) {
+	control, secret, want := newControlServer(t)
+	relayPort, sent := recordingRelay(t, control.Port())
+	got, err := identity.Identify("127.0.0.1", relayPort, secret, identityProbeTimeout)
+	require.NoError(t, err)
+	assert.Len(t, got.MAC, 64)
+	got.MAC = ""
+	assert.Equal(t, &want, got)
+	wire := sent()
+	require.True(t, strings.HasPrefix(wire, "IDENT "), "relay recorded %q", wire)
+	assert.NotContains(t, wire, secret, "the request disclosed the secret")
+
+	nonce := strings.Repeat("ab", 16)
+	mac := strings.Fields(identRequest(t, secret, nonce))[1]
+	for _, tc := range []struct {
+		name    string
+		request string
+	}{
+		{name: "wrong secret", request: identRequest(t, "not-the-secret", nonce)},
+		{name: "raw secret", request: "IDENT " + secret + " " + nonce + "\n"},
+		{name: "malformed nonce", request: "IDENT " + mac + " zz\n"},
+		{name: "missing newline", request: "IDENT " + mac + " " + nonce},
+		{name: "wrong verb", request: "WHOAMI " + mac + " " + nonce + "\n"},
+		{name: "oversized", request: "IDENT " + strings.Repeat("x", maxIdentRequestBytes) + "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(control.Port())), time.Second)
+			require.NoError(t, err)
+			defer conn.Close()
+			require.NoError(t, conn.SetDeadline(time.Now().Add(time.Second)))
+			_, err = io.WriteString(conn, tc.request)
+			require.NoError(t, err)
+			// The listener closes an oversized request with bytes still unread,
+			// so the kernel may reset the connection before this half-close.
+			_ = conn.(*net.TCPConn).CloseWrite()
+			reply, err := io.ReadAll(conn)
+			var netErr net.Error
+			require.False(t, errors.As(err, &netErr) && netErr.Timeout(), "the listener kept the connection open")
+			assert.Empty(t, reply)
+		})
+	}
+}
+
+// recordingRelay forwards one connection to the control port and returns
+// its own port and a func reporting what the client sent once it is done.
+func recordingRelay(t *testing.T, controlPort int) (int, func() string) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	var sent strings.Builder
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		client, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer client.Close()
+		upstream, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(controlPort)))
+		if err != nil {
+			return
+		}
+		defer upstream.Close()
+		go func() { _, _ = io.Copy(client, upstream) }()
+		_, _ = io.Copy(upstream, io.TeeReader(client, &sent))
+	}()
+	return ln.Addr().(*net.TCPAddr).Port, func() string {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("relay did not finish")
+		}
+		return sent.String()
+	}
+}
+
+// Below capacity the revised listener must keep serving valid clients the
+// existing signed reply and closing invalid ones without reply bytes, with
+// the request secret still absent from the wire (pinned client-side by
+// TestIdentifyRequestCarriesFreshNonce in the identity package).
+func TestControl_BelowCapacityServesValidAndRefusesInvalidClients(t *testing.T) {
+	control, secret, want := newControlServer(t)
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(control.Port()))
+	const parked = 64 // below maxConcurrentIdentRequests, above the old pool of 8
+	conns := make([]net.Conn, 0, parked)
+	t.Cleanup(func() {
+		for _, conn := range conns {
+			_ = conn.Close()
+		}
+	})
+	for range parked {
+		conn, err := net.DialTimeout("tcp", addr, time.Second)
+		require.NoError(t, err)
+		conns = append(conns, conn)
+	}
+	require.Eventually(t, func() bool {
+		return activeControlConns(control) == parked
+	}, 5*time.Second, 5*time.Millisecond)
+
+	got, err := identity.Identify("127.0.0.1", control.Port(), secret, time.Second)
+	require.NoError(t, err, "a valid client must be served below capacity")
+	assert.Len(t, got.MAC, 64)
+	got.MAC = ""
+	assert.Equal(t, &want, got)
+
+	_, err = identity.Identify("127.0.0.1", control.Port(), "not-the-secret", time.Second)
+	require.ErrorIs(t, err, identity.ErrIdentRefused, "an unauthenticated client must get no reply bytes")
+}
+
+// AC-6 (bd-g4xtvt): closing the control server stops admission and closes
+// and drains every connection it holds, idle or blocked in a reply write,
+// also while the accept loop is backing off after a transient failure.
+func TestControl_CloseDrainsConnections(t *testing.T) {
+	never := func(time.Duration) <-chan time.Time { return nil }
+	control, listener, secret := startSyntheticControl(t, never)
+	idle, _ := newTestControlConn(t)
+	feedControlConn(t, listener, idle)
+	writer, writerClient := newTestControlConn(t)
+	feedControlConn(t, listener, writer)
+	request := identRequest(t, secret, strings.Repeat("ab", 16))
+	go func() { _, _ = io.WriteString(writerClient, request) }()
+	select {
+	case <-writer.writing:
+	case <-time.After(time.Second):
+		t.Fatal("the handler did not start its reply")
+	}
+	require.Equal(t, 2, activeControlConns(control))
+	// The loop now waits out a backoff that never ends: Close must wake it.
+	select {
+	case listener.errs <- errors.New("transient accept failure"):
+	case <-time.After(time.Second):
+		t.Fatal("control accept loop did not take the accept error")
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- control.Close() }()
+	select {
+	case err := <-closed:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return")
+	}
+	for _, conn := range []*testControlConn{idle, writer} {
+		assert.True(t, conn.isClosed(), "Close left a tracked connection open")
+		// The second close is the handler's own cleanup: it finished
+		// before Close returned.
+		assert.EqualValues(t, 2, conn.closes.Load(), "Close returned before the handler drained")
+	}
+	select {
+	case <-writer.written:
+	default:
+		t.Fatal("the blocked reply write was still pending after Close")
+	}
+	assert.Equal(t, 0, activeControlConns(control))
+
+	late, _ := newTestControlConn(t)
+	select {
+	case listener.conns <- late:
+		t.Fatal("the control server accepted a connection after Close")
+	case <-time.After(50 * time.Millisecond):
+	}
 }
