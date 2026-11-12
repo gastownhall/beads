@@ -147,14 +147,15 @@ func TestJSONContract_ShowCountOnlyOmitsPayloads(t *testing.T) {
 		assertFieldFloat(t, issue, "dependent_count", 1)
 	})
 
-	t.Run("include_comments_does_not_drag_in_dependents", func(t *testing.T) {
+	t.Run("count_only_include_comments_does_not_drag_in_dependents", func(t *testing.T) {
 		issue := showOnce("--include-comments")
 		requireCommentTextsEqual(t, getObjectSlice(issue, "comments"),
-			[]string{"First note"}, "comments under --include-comments")
-		assertAbsent(t, issue, "dependents", "--include-comments")
+			[]string{"First note"}, "comments under --count-only --include-comments")
+		assertAbsent(t, issue, "dependents", "--count-only --include-comments")
+		assertAbsent(t, issue, "comments_omitted", "--count-only --include-comments (nothing was left out)")
 	})
 
-	t.Run("include_dependents_does_not_drag_in_comments", func(t *testing.T) {
+	t.Run("count_only_include_dependents_does_not_drag_in_comments", func(t *testing.T) {
 		issue := showOnce("--include-dependents")
 		dependents := getObjectSlice(issue, "dependents")
 		found := false
@@ -164,10 +165,13 @@ func TestJSONContract_ShowCountOnlyOmitsPayloads(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Errorf("--include-dependents: parent %s does not list child %s (got %d dependents)",
+			t.Errorf("--count-only --include-dependents: parent %s does not list child %s (got %d dependents)",
 				parent, child, len(dependents))
 		}
-		assertAbsent(t, issue, "comments", "--include-dependents")
+		assertAbsent(t, issue, "comments", "--count-only --include-dependents")
+		if v := issue["comments_omitted"]; v != true {
+			t.Errorf("--count-only --include-dependents with comment_count=1: comments_omitted = %v, want true", v)
+		}
 	})
 }
 
