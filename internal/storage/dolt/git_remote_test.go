@@ -2398,3 +2398,36 @@ func TestGitRemoteResolvedConflictPullStillLands(t *testing.T) {
 		t.Errorf("after the clean pull a fresh session sees is_merging=%v and %d conflicted table(s); want neither", merging, n)
 	}
 }
+
+// TestGitRemoteDeclinedConflictStrategyMergeRecovers pins AC-7, the recovery
+// the server-mode guidance names now that a declined pull no longer leaves a
+// live merge to resolve row by row: the pull fetched the remote branch, so
+// `bd vc merge origin/<branch> --strategy theirs` (MergeWithStrategy) applies
+// the remote edit and concludes the merge, with no strategy support on pull.
+func TestGitRemoteDeclinedConflictStrategyMergeRecovers(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+	defer cancel()
+	store, _, _ := setupDeclinedCLIPullConflict(t, ctx)
+
+	if err := store.Pull(ctx); err == nil {
+		t.Fatal("the pull over a declined conflict returned nil; the fixture built no conflict")
+	}
+
+	conflicts, err := store.MergeWithStrategy(ctx, "origin/"+store.branch, "theirs")
+	if err != nil {
+		t.Fatalf("MergeWithStrategy(origin/%s, theirs) after the declined pull: %v", store.branch, err)
+	}
+	if len(conflicts) == 0 {
+		t.Error("MergeWithStrategy resolved no conflicts; want the issues conflict the pull declined")
+	}
+	var notes string
+	if err := store.db.QueryRowContext(ctx, "SELECT notes FROM issues WHERE id = ?", declinedConflictIssueID).Scan(&notes); err != nil {
+		t.Fatalf("read notes: %v", err)
+	}
+	if notes != "from B" {
+		t.Errorf("notes after the theirs merge = %q; want the remote edit %q", notes, "from B")
+	}
+	if merging, n := freshSessionMergeState(t, ctx, store); merging || n != 0 {
+		t.Errorf("after the strategy merge a fresh session sees is_merging=%v and %d conflicted table(s); want it concluded", merging, n)
+	}
+}
