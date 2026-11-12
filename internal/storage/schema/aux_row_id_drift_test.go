@@ -318,29 +318,47 @@ func TestRekeyAuxRowIDsSkipsDolt26Drift(t *testing.T) {
 
 // TestRekeyAuxRowIDsAbortsOnNonDriftError: the tolerance is narrow. An ordinary
 // table failure must still propagate and keep the sentinel, exactly as before
-// #4380 — otherwise it would swallow real migration bugs.
+// #4380 — otherwise it would swallow real migration bugs. That includes the
+// Dolt 2.6 adaptive-value errors that are caller misuse rather than drift.
+// sqlmock rejects any drift-record or sentinel-clear statement, since none is
+// expected.
 func TestRekeyAuxRowIDsAbortsOnNonDriftError(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("sqlmock.New: %v", err)
+	cases := []struct {
+		name    string
+		scanErr error
+	}{
+		{"duplicate entry", errors.New("Error 1062 (23000): duplicate entry")},
+		{"inline adaptive value misuse", errInlineAdaptiveValue},
 	}
-	defer db.Close()
-	captureLog(t)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+			captureLog(t)
 
-	expectCursorProbe(mock, "ignored_schema_migrations", true)
-	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations",
-		"version", auxRekeyPassInitial.markerVersion-1)
-	expectIgnoredSentinelProbes(mock, true)
-	expectAuxRekeyState(mock, false)
-	expectSetAuxRekeySentinel(mock)
-	expectColumnExists(mock, true)
-	expectEventsSelect(mock).WillReturnError(errors.New("Error 1062 (23000): duplicate entry"))
+			expectCursorProbe(mock, "ignored_schema_migrations", true)
+			expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations",
+				"version", auxRekeyPassInitial.markerVersion-1)
+			expectIgnoredSentinelProbes(mock, true)
+			expectAuxRekeyState(mock, false)
+			expectSetAuxRekeySentinel(mock)
+			expectColumnExists(mock, true)
+			expectEventsSelect(mock).WillReturnError(tc.scanErr)
 
-	if _, err := rekeyAuxRowIDs(context.Background(), db, auxRekeyPassInitial.shippedMainVersion-1, auxRekeyPassInitial); err == nil {
-		t.Fatal("expected a non-drift table failure to propagate")
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet sql expectations: %v", err)
+			_, err = rekeyAuxRowIDs(context.Background(), db, auxRekeyPassInitial.shippedMainVersion-1, auxRekeyPassInitial)
+			if err == nil {
+				t.Fatal("expected a non-drift table failure to propagate")
+			}
+			if !errors.Is(err, tc.scanErr) || !strings.HasPrefix(err.Error(), "events: ") {
+				t.Fatalf("err = %v, want an \"events: \"-prefixed error wrapping %v", err, tc.scanErr)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet sql expectations: %v", err)
+			}
+		})
 	}
 }
 
