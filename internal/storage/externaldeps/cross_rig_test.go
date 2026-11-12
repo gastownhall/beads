@@ -2,10 +2,15 @@ package externaldeps
 
 import (
 	"context"
+	"errors"
 	"slices"
+	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // fakeIssueResolver stands in for the cross-rig route lookup: it answers each
@@ -206,5 +211,74 @@ func TestCrossRigUnreadableBlockerStaysBlockingWithOneWarning(t *testing.T) {
 	}
 	if len(warned) != 1 || warned[0][0] != "bb-1" || warned[0][1] == "" {
 		t.Fatalf("warnings without resolver = %v, want one naming bb-1 with a reason", warned)
+	}
+}
+
+// GH#5784 AC-4: claiming or closing an issue an open cross-rig issue blocks
+// is refused, naming the foreign id, on the direct store and on bd serve's
+// unit-of-work arm; a forced close still goes through.
+func TestCrossRigOpenBlockerRefusesClaimAndClose(t *testing.T) {
+	newRaw := func() (*fakeStore, *fakeLifecycle) {
+		lifecycle := &fakeLifecycle{}
+		return &fakeStore{
+			lifecycle: lifecycle,
+			ready:     []*types.Issue{issue("aa-1")},
+			deps: map[string][]*types.Dependency{
+				"aa-1": {externalDep("aa-1", "bb-1", types.DepBlocks)},
+			},
+		}, lifecycle
+	}
+	resolver := &fakeIssueResolver{issues: map[string]*types.Issue{"bb-1": foreignIssue("bb-1", types.StatusOpen)}}
+	const refusal = "cannot close blocked issue: aa-1 is blocked by [bb-1]"
+	refused := func(t *testing.T, what string, err error) {
+		t.Helper()
+		if !errors.Is(err, storage.ErrCloseBlocked) || !strings.Contains(err.Error(), "bb-1") {
+			t.Fatalf("%s: err = %v, want ErrCloseBlocked naming bb-1", what, err)
+		}
+	}
+
+	raw, lifecycle := newRaw()
+	store := crossRigStore(raw, resolver)
+	lc, err := store.IssueLifecycle()
+	if err != nil {
+		t.Fatalf("IssueLifecycle: %v", err)
+	}
+	_, err = lc.Close(t.Context(), publicops.CloseRequest{IssueID: "aa-1"})
+	refused(t, "lifecycle close", err)
+	if err.Error() != refusal {
+		t.Fatalf("lifecycle close refusal = %q, want %q", err.Error(), refusal)
+	}
+	_, err = lc.Update(t.Context(), publicops.UpdateRequest{IssueID: "aa-1", Claim: true})
+	refused(t, "lifecycle claim", err)
+	_, err = store.CloseIssueChecked(t.Context(), "aa-1", "tester", storage.CloseIssueOptions{})
+	refused(t, "checked close", err)
+	if claimed, err := store.ClaimReadyIssue(t.Context(), types.WorkFilter{}, "tester"); err != nil || claimed != nil {
+		t.Fatalf("ClaimReadyIssue = %v %v, want nothing claimable", claimed, err)
+	}
+	if lifecycle.closed != 0 || lifecycle.updated != 0 || len(raw.closed) != 0 || len(raw.claimed) != 0 {
+		t.Fatalf("a refused write reached the store: lifecycle closed=%d updated=%d, closed=%v claimed=%v",
+			lifecycle.closed, lifecycle.updated, raw.closed, raw.claimed)
+	}
+
+	if _, err := lc.Close(t.Context(), publicops.CloseRequest{IssueID: "aa-1", Force: true}); err != nil || lifecycle.closed != 1 {
+		t.Fatalf("forced lifecycle close = %v (closes %d), want it through", err, lifecycle.closed)
+	}
+	if _, err := store.CloseIssueChecked(t.Context(), "aa-1", "tester", storage.CloseIssueOptions{Force: true}); err != nil || !slices.Equal(raw.closed, []string{"aa-1"}) {
+		t.Fatalf("forced checked close = %v (closed %v), want aa-1 closed", err, raw.closed)
+	}
+
+	issues := &fakeIssueUseCase{ready: []*types.Issue{issue("aa-1")}}
+	uw := crossRigProvider(t, &fakeUOW{
+		issues: issues,
+		deps: &fakeDependencyUseCase{external: map[string][]*types.Dependency{
+			"aa-1": {externalDep("aa-1", "bb-1", types.DepBlocks)},
+		}},
+	}, resolver)
+	_, err = uw.IssueUseCase().CloseIssueChecked(t.Context(), "aa-1", domain.CloseIssueParams{}, "tester", false)
+	refused(t, "served close", err)
+	_, err = uw.IssueUseCase().ClaimIssue(t.Context(), "aa-1", "tester")
+	refused(t, "served claim", err)
+	if len(issues.closed) != 0 {
+		t.Fatalf("served refused close reached the store: %v", issues.closed)
 	}
 }
