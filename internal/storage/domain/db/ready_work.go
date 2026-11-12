@@ -35,6 +35,19 @@ func (r *issueSQLRepositoryImpl) buildReadyWorkPredicates(ctx context.Context, f
 		return nil, fmt.Errorf("get ready work: stale blocked flags in %s: %w", tables.Main, err)
 	}
 	inputs.StaleBlockedIDs = map[string][]string{tables.Main: staleIDs}
+	// GH#5784: bare cross-prefix blockers hold their sources out of ready
+	// work unless a settled local row satisfies them. A policy-composing
+	// caller (WorkFilter.CrossRigBlockerPolicyDelegated) owns the exclusion
+	// itself, so it resolves nothing here.
+	if !filter.CrossRigBlockerPolicyDelegated {
+		crossRigIDs, err := r.crossRigBlockedIDs(ctx, tables)
+		if err != nil {
+			return nil, fmt.Errorf("get ready work: cross-rig blocked sources in %s: %w", tables.Main, err)
+		}
+		if len(crossRigIDs) > 0 {
+			inputs.CrossRigBlockedIDs = map[string][]string{tables.Main: crossRigIDs}
+		}
+	}
 	if !filter.IncludeDeferred {
 		deferredChildIDs, dcErr := r.getChildrenOfDeferredParents(ctx)
 		if dcErr != nil {
@@ -64,6 +77,25 @@ func (r *issueSQLRepositoryImpl) buildReadyWorkPredicates(ctx context.Context, f
 // decides there as it always did.
 func (r *issueSQLRepositoryImpl) staleBlockedIDs(ctx context.Context, tables filterTables) ([]string, error) {
 	rows, err := r.runner.QueryContext(ctx, sqlbuild.StaleBlockedIDsSQL(tables))
+	if err != nil {
+		if tables.Main == wispsFilterTables.Main && missingOptionalWispTable(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var ids []string
+	if err := scanStringsInto(rows, &ids); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+// crossRigBlockedIDs reads sqlbuild.CrossRigBlockedIDsSQL for one table
+// family: the sources a bare cross-prefix blocking edge (GH#5784) holds out
+// of ready work. A database without the wisp dependency table has no
+// cross-rig wisp edges to exclude on.
+func (r *issueSQLRepositoryImpl) crossRigBlockedIDs(ctx context.Context, tables filterTables) ([]string, error) {
+	rows, err := r.runner.QueryContext(ctx, sqlbuild.CrossRigBlockedIDsSQL(tables))
 	if err != nil {
 		if tables.Main == wispsFilterTables.Main && missingOptionalWispTable(err) {
 			return nil, nil

@@ -19,10 +19,17 @@ import (
 // WrapUOWProvider installs the external capability policy on the server UOW
 // path. Proxied commands otherwise bypass storage decorators entirely.
 func WrapUOWProvider(inner uow.UnitOfWorkProvider, locate ProjectLocator, open StoreOpener) uow.UnitOfWorkProvider {
+	return WrapUOWProviderWithForeignResolver(inner, locate, open, nil)
+}
+
+// WrapUOWProviderWithForeignResolver is WrapUOWProvider with the resolver bare
+// cross-prefix blocking targets (GH#5784) are settled through; without one
+// they fail closed and remain blocking.
+func WrapUOWProviderWithForeignResolver(inner uow.UnitOfWorkProvider, locate ProjectLocator, open StoreOpener, resolveForeign ForeignIssueResolver) uow.UnitOfWorkProvider {
 	if inner == nil {
 		return nil
 	}
-	return &uowProvider{UnitOfWorkProvider: inner, policy: New(nil, locate, open)}
+	return &uowProvider{UnitOfWorkProvider: inner, policy: NewWithForeignResolver(nil, locate, open, resolveForeign)}
 }
 
 type uowProvider struct {
@@ -283,6 +290,7 @@ func (u *unitOfWork) DependencyUseCase() domain.DependencyUseCase {
 	if u.deps == nil {
 		u.deps = &dependencyUseCase{
 			DependencyUseCase: u.UnitOfWork.DependencyUseCase(),
+			issues:            u.UnitOfWork.IssueUseCase(),
 			policy:            u.policy,
 		}
 	}
@@ -300,7 +308,11 @@ func (u *issueUseCase) blockingState(ctx context.Context) (blockingState, error)
 	if err != nil {
 		return blockingState{}, err
 	}
-	return u.policy.blockingStateFromRecords(ctx, deps)
+	return u.policy.blockingStateFromRecords(ctx, deps, blockingStateOpts{
+		localRead: func(ctx context.Context, ids []string) ([]*types.Issue, error) {
+			return getManyChunked(ctx, u.IssueUseCase, ids)
+		},
+	})
 }
 
 func (u *issueUseCase) GetReadyWork(ctx context.Context, filter types.WorkFilter) (domain.SearchPage, error) {
@@ -474,6 +486,10 @@ func (u *issueUseCase) guardExternalClose(ctx context.Context, id string, force 
 
 type dependencyUseCase struct {
 	domain.DependencyUseCase
+	// issues reads local rows for the cross-rig satisfaction probe
+	// (blockingStateOpts.localRead). It is the raw inner issue use case, not
+	// the policy-decorated one: a local read decides no policy question.
+	issues domain.IssueUseCase
 	policy *Store
 }
 
@@ -500,7 +516,11 @@ func (u *dependencyUseCase) IsBlockedBatch(ctx context.Context, ids []string) (m
 			answered[id] = deps
 		}
 	}
-	state, err := u.policy.blockingStateFromRecords(ctx, answered)
+	state, err := u.policy.blockingStateFromRecords(ctx, answered, blockingStateOpts{
+		localRead: func(ctx context.Context, ids []string) ([]*types.Issue, error) {
+			return getManyChunked(ctx, u.issues, ids)
+		},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("external dependencies: %w", err)
 	}

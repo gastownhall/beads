@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "batch_closer.go",
         "blocked_lister.go",
+        "crossrig.go",
         "decorator.go",
         "remote_roles.go",
         "resolver.go",
@@ -33,6 +34,7 @@ go_test(
         "advertise_test.go",
         "blocked_lister_test.go",
         "blocking_annotator_batch_test.go",
+        "crossrig_test.go",
         "decorator_test.go",
         "live_probe_test.go",
         "ready_wake_test.go",

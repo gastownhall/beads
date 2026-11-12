@@ -47,6 +47,10 @@ type fakeStore struct {
 	// readyFilters records every GetReadyWorkWithCountsAndTotal filter, in
 	// order.
 	readyFilters []types.WorkFilter
+	// local holds rows this store owns that no ready or blocked listing
+	// returns: a settled row for a bare cross-rig target (GH#5784), the way a
+	// closed foreign-prefix issue can live in the local issues table.
+	local []*types.Issue
 }
 
 func (f *fakeStore) IssueLifecycle() (publicops.Lifecycle, error) { return f.lifecycle, nil }
@@ -262,6 +266,11 @@ func (f *fakeStore) GetIssue(_ context.Context, id string) (*types.Issue, error)
 	for _, blocked := range f.blocked {
 		if blocked.ID == id {
 			return &blocked.Issue, nil
+		}
+	}
+	for _, issue := range f.local {
+		if issue.ID == id {
+			return issue, nil
 		}
 	}
 	return nil, nil

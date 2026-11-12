@@ -27,9 +27,16 @@ func GetAllDependencyRecordsInTx(ctx context.Context, tx DBTX) (map[string][]*ty
 	return result, nil
 }
 
-// GetExternalBlockingDependencyRecordsInTx returns explicit external: edges
-// whose dependency type can block ready work. Cross-prefix issue IDs may share
-// depends_on_external storage, so the external: prefix check is intentional.
+// GetExternalBlockingDependencyRecordsInTx returns the blocking-typed edges
+// whose target is stored in depends_on_external: explicit external:
+// capability references AND bare cross-prefix issue IDs, which share that one
+// target column (GH#5784, backend/conformance/batch_apply_contract.go). The
+// type filter is deliberately a candidate superset — waits-for rides along
+// for the callers that resolve explicit external: capability refs, while the
+// bare cross-rig enforcement predicate (exactly blocks and
+// conditional-blocks) is applied by the policy layer over these records, not
+// here. Callers consuming the fallback over raw records
+// (GetAllDependencyRecordsInTx) must classify identically.
 func GetExternalBlockingDependencyRecordsInTx(ctx context.Context, tx DBTX) (map[string][]*types.Dependency, error) {
 	result := make(map[string][]*types.Dependency)
 	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
@@ -48,7 +55,7 @@ func getExternalBlockingDependencyRecordsIntoFromTable(ctx context.Context, tx D
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 		SELECT issue_id, %s AS depends_on_id, type, created_at, created_by, metadata, thread_id
 		FROM %s
-		WHERE depends_on_external LIKE 'external:%%'
+		WHERE depends_on_external IS NOT NULL
 		  AND type IN ('blocks', 'conditional-blocks', 'waits-for')
 		ORDER BY issue_id
 	`, DepTargetExpr, depTable))

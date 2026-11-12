@@ -36,6 +36,10 @@ type readyWorkProbe struct {
 	// stale rows are read only when the probe statement saw one, so the common
 	// case, no stale flag, adds no statement of its own. Its EXISTS still
 	// visits every flagged row to prove that (StaleBlockedIDsSQL).
+	// CrossRigBlockedIDs follows the same shape for bare cross-prefix
+	// blockers (GH#5784), resolved only when the probe saw an edge and the
+	// caller does not compose the policy itself
+	// (WorkFilter.CrossRigBlockerPolicyDelegated).
 	inputs sqlbuild.ReadyWorkWhereInputs
 }
 
@@ -81,6 +85,15 @@ func probeReadyWorkInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, w
 	appendFact("EXISTS (SELECT 1 FROM wisp_dependencies)")
 	iIssuesStale := appendFact("EXISTS (" + sqlbuild.StaleBlockedIDsSQL(IssuesFilterTables) + ")")
 	iWispsStale := appendFact("EXISTS (" + sqlbuild.StaleBlockedIDsSQL(WispsFilterTables) + ")")
+	// GH#5784: the bare cross-prefix blockers a policy-composing caller
+	// (WorkFilter.CrossRigBlockerPolicyDelegated) owns itself are not this
+	// probe's to resolve, so their legs join the statement only for a caller
+	// that wants them.
+	iIssuesCrossRig, iWispsCrossRig := -1, -1
+	if !filter.CrossRigBlockerPolicyDelegated {
+		iIssuesCrossRig = appendFact(sqlbuild.CrossRigBlockedEdgeExistsSQL(IssuesFilterTables))
+		iWispsCrossRig = appendFact(sqlbuild.CrossRigBlockedEdgeExistsSQL(WispsFilterTables))
+	}
 
 	iIssuesDeferred, iWispsDeferred := -1, -1
 	if excludeDeferred {
@@ -123,8 +136,13 @@ func probeReadyWorkInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, w
 		if err := p.readStaleBlockedInTx(ctx, tx, flags[iIssuesStale], flags[iWispsStale]); err != nil {
 			return nil, err
 		}
+		if iIssuesCrossRig >= 0 {
+			if err := p.readCrossRigBlockedInTx(ctx, tx, flags[iIssuesCrossRig], flags[iWispsCrossRig]); err != nil {
+				return nil, err
+			}
+		}
 	case isTableNotExistError(err):
-		if err := p.probeTableByTableInTx(ctx, tx, excludeDeferred); err != nil {
+		if err := p.probeTableByTableInTx(ctx, tx, excludeDeferred, !filter.CrossRigBlockerPolicyDelegated); err != nil {
 			return nil, err
 		}
 		// Not probed exactly; assume the worst so a total is never
@@ -147,7 +165,7 @@ func probeReadyWorkInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, w
 
 // probeTableByTableInTx is the per-table fallback for a database missing part
 // of the wisp plane.
-func (p *readyWorkProbe) probeTableByTableInTx(ctx context.Context, tx DBTX, excludeDeferred bool) error {
+func (p *readyWorkProbe) probeTableByTableInTx(ctx context.Context, tx DBTX, excludeDeferred, readCrossRig bool) error {
 	wispDepsExist, err := optionalTableExistsInTx(ctx, tx, "wisp_dependencies")
 	if err != nil {
 		return fmt.Errorf("wisp dependency probe: %w", err)
@@ -167,7 +185,43 @@ func (p *readyWorkProbe) probeTableByTableInTx(ctx context.Context, tx DBTX, exc
 	}
 	// No probe answered whether a flag is stale, so read both sets; the wisp
 	// one only where the wisp family is read at all.
-	return p.readStaleBlockedInTx(ctx, tx, true, p.readsWisps())
+	if err := p.readStaleBlockedInTx(ctx, tx, true, p.readsWisps()); err != nil {
+		return err
+	}
+	if readCrossRig {
+		return p.readCrossRigBlockedInTx(ctx, tx, true, p.readsWisps())
+	}
+	return nil
+}
+
+// readCrossRigBlockedInTx reads the sources each family it is told holds any
+// bare cross-prefix blocking edge (GH#5784) that hold out of ready work
+// (sqlbuild.CrossRigBlockedIDsSQL), for a caller that does not compose the
+// policy itself. The wisp set is read only for a ready set that reads wisps.
+func (p *readyWorkProbe) readCrossRigBlockedInTx(ctx context.Context, tx DBTX, issues, wisps bool) error {
+	read := func(tables FilterTables) error {
+		ids, err := queryIDs(ctx, tx, sqlbuild.CrossRigBlockedIDsSQL(tables))
+		if err != nil {
+			return fmt.Errorf("cross-rig blocked sources in %s: %w", tables.Main, err)
+		}
+		if len(ids) == 0 {
+			return nil
+		}
+		if p.inputs.CrossRigBlockedIDs == nil {
+			p.inputs.CrossRigBlockedIDs = make(map[string][]string, 2)
+		}
+		p.inputs.CrossRigBlockedIDs[tables.Main] = ids
+		return nil
+	}
+	if issues {
+		if err := read(IssuesFilterTables); err != nil {
+			return err
+		}
+	}
+	if wisps && p.readsWisps() {
+		return read(WispsFilterTables)
+	}
+	return nil
 }
 
 // readStaleBlockedInTx reads the stale-flagged rows (sqlbuild.StaleBlockedIDsSQL)

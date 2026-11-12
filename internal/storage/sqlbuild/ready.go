@@ -127,6 +127,58 @@ func readyBlockedClause(staleIDs []string) (string, []any) {
 	return "(is_blocked = 0 OR " + strings.Join(staleClauses, " OR ") + ")", args
 }
 
+// crossRigBareEdgePredicate renders the bare cross-prefix edge test for the
+// dependency rows aliased alias (GH#5784): an edge stored in
+// depends_on_external whose target names an ID another rig owns, of the
+// ready-affecting types. It names only the dependency table, so the probe leg
+// (CrossRigBlockedEdgeExistsSQL) stays on the (type, depends_on_external)
+// index and never reads issues.
+func crossRigBareEdgePredicate(alias string) string {
+	return fmt.Sprintf(`%s.depends_on_external IS NOT NULL
+		AND %s.depends_on_external NOT LIKE 'external:%%'
+		AND %s.type IN ('blocks', 'conditional-blocks')`, alias, alias, alias)
+}
+
+// CrossRigBlockedPredicate renders the bare cross-prefix blocker test for the
+// dependency rows aliased alias (GH#5784): crossRigBareEdgePredicate plus
+// the satisfaction probe, a settled local issues row for the target (closed
+// or pinned). The probe reads the issues table only: wisps may be absent, and
+// a bare target that names a local WISP therefore stays blocked even once the
+// WISP closes — a conservative divergence the decorated ready paths correct,
+// since their policy layer resolves the target through prefix routes and
+// applies the real status. Exported so the classic stack's per-page wisp
+// exclusion renders the exact same predicate.
+func CrossRigBlockedPredicate(alias string) string {
+	return fmt.Sprintf(`%s
+		AND NOT EXISTS (
+			SELECT 1 FROM issues t
+			WHERE t.id = %s.depends_on_external
+			AND (t.status = 'closed' OR t.status = 'pinned')
+		)`, crossRigBareEdgePredicate(alias), alias)
+}
+
+// CrossRigBlockedEdgeExistsSQL is the probe leg that tells whether one
+// family's dependency table holds any bare cross-prefix blocking edge at all
+// (GH#5784): indexed on (type, depends_on_external), it stops at the first
+// row so the common case, none, costs one EXISTS and reads no issues row.
+func CrossRigBlockedEdgeExistsSQL(tables FilterTables) string {
+	return fmt.Sprintf("EXISTS (SELECT 1 FROM %s d WHERE %s)", tables.Dependencies, crossRigBareEdgePredicate("d"))
+}
+
+// CrossRigBlockedIDsSQL selects the ids of one family's sources that a bare
+// cross-prefix blocking edge (GH#5784) holds out of ready work. Callers
+// resolve it once per ready read — after CrossRigBlockedEdgeExistsSQL saw an
+// edge — and hand the ids to BuildReadyWorkWhere in
+// ReadyWorkWhereInputs.CrossRigBlockedIDs, the same shape StaleBlockedIDs
+// uses; folding the probe into the ready WHERE would put a dependency-table
+// read behind every ready statement (GH#3268's cost finding). Callers that
+// compose that policy themselves
+// (WorkFilter.CrossRigBlockerPolicyDelegated) resolve nothing and the ready
+// WHERE drops the exclusion.
+func CrossRigBlockedIDsSQL(tables FilterTables) string {
+	return fmt.Sprintf("SELECT DISTINCT d.issue_id FROM %s d WHERE %s", tables.Dependencies, CrossRigBlockedPredicate("d"))
+}
+
 // idBatchClauses renders ids as one format clause per QueryBatchSize batch
 // (format's one verb takes the batch's placeholders), with the batches' args
 // in clause order, so no IN list grows past QueryBatchSize. Every batch lands
@@ -160,6 +212,14 @@ type ReadyWorkWhereInputs struct {
 	// like the sets above because an id can name a row in both tables and
 	// only one of them may be stale.
 	StaleBlockedIDs map[string][]string
+	// CrossRigBlockedIDs holds each family's sources a bare cross-prefix
+	// blocking edge holds out of ready work (CrossRigBlockedIDsSQL over that
+	// family's tables, GH#5784), keyed by the family's main table. Consulted
+	// only when !filter.CrossRigBlockerPolicyDelegated: a policy-composing
+	// caller (the externaldeps decorator and its arms) owns the exclusion
+	// itself and must be able to release a source whose foreign target
+	// closes, which a raw NOT IN cannot observe.
+	CrossRigBlockedIDs map[string][]string
 }
 
 // readyStatusClause renders the ready-work status predicate and its args.
@@ -212,6 +272,11 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 		statusClause,
 		"(pinned = 0 OR pinned IS NULL)",
 		blockedClause,
+	}
+	if !filter.CrossRigBlockerPolicyDelegated {
+		crossRigClauses, crossRigArgs := idBatchClauses("id NOT IN (%s)", in.CrossRigBlockedIDs[tables.Main])
+		whereClauses = append(whereClauses, crossRigClauses...)
+		args = append(args, crossRigArgs...)
 	}
 	if !filter.IncludeEphemeral {
 		whereClauses = append(whereClauses, "(ephemeral = 0 OR ephemeral IS NULL)")

@@ -2539,6 +2539,18 @@ type WorkFilter struct {
 	// query-time blockers that cannot be represented by local is_blocked state.
 	ExcludeIDs []string
 
+	// CrossRigBlockerPolicyDelegated marks a ready-work filter issued by a
+	// layer that composes the query-time cross-rig blocking policy itself —
+	// the externaldeps decorator, its unit-of-work wrapper, or a served
+	// policy store. The raw ready predicate then does NOT exclude sources
+	// whose bare cross-prefix blocking edges cannot be satisfied by a local
+	// row: only the policy layer can observe a foreign close or reopen
+	// through prefix routes and release the source, so pre-filtering in raw
+	// SQL would make the exclusion permanent. Callers without a policy layer
+	// keep the conservative default: a bare cross-prefix blocker this store
+	// cannot resolve is blocking (GH#5784).
+	CrossRigBlockerPolicyDelegated bool
+
 	// Metadata field filtering (GH#1406)
 	MetadataFields map[string]string // Top-level key=value equality; AND semantics (all must match)
 	HasMetadataKey string            // Existence check: issue has this top-level key set (non-null)

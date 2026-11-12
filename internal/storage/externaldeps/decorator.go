@@ -19,23 +19,44 @@ import (
 // Store decorates a local store with query-time external capability handling.
 type Store struct {
 	storage.DoltStorage
-	inner         storage.DoltStorage
-	locateProject ProjectLocator
-	openProject   StoreOpener
-	warnProject   func(ProjectName)
-	warnMu        sync.Mutex
-	warned        map[ProjectName]struct{}
+	inner          storage.DoltStorage
+	locateProject  ProjectLocator
+	openProject    StoreOpener
+	warnProject    func(ProjectName)
+	resolveForeign ForeignIssueResolver
+	warnCrossRig   func(target, reason string)
+	warnMu         sync.Mutex
+	warned         map[ProjectName]struct{}
 }
 
-// New constructs an external-capability-aware storage decorator.
+// New constructs an external-capability-aware storage decorator. Without a
+// ForeignIssueResolver, bare cross-prefix blocking targets (GH#5784) cannot be
+// settled from their own rig: they fail closed and remain blocking.
 func New(inner storage.DoltStorage, locateProject ProjectLocator, openProject StoreOpener) *Store {
+	return NewWithForeignResolver(inner, locateProject, openProject, nil)
+}
+
+// NewWithForeignResolver is New with the resolver bare cross-prefix targets
+// are settled through (see ForeignIssueResolver).
+func NewWithForeignResolver(inner storage.DoltStorage, locateProject ProjectLocator, openProject StoreOpener, resolveForeign ForeignIssueResolver) *Store {
 	return &Store{
-		DoltStorage:   inner,
-		inner:         inner,
-		locateProject: locateProject,
-		openProject:   openProject,
-		warnProject:   defaultProjectWarning,
-		warned:        make(map[ProjectName]struct{}),
+		DoltStorage:    inner,
+		inner:          inner,
+		locateProject:  locateProject,
+		openProject:    openProject,
+		warnProject:    defaultProjectWarning,
+		resolveForeign: resolveForeign,
+		warnCrossRig:   defaultCrossRigWarning,
+		warned:         make(map[ProjectName]struct{}),
+	}
+}
+
+// warnCrossRigTarget reports an unresolved bare cross-prefix target once per
+// policy evaluation. The warnCrossRig field is swappable so tests can capture
+// warnings; this helper keeps the nil check in one place.
+func (s *Store) warnCrossRigTarget(target, reason string) {
+	if s.warnCrossRig != nil {
+		s.warnCrossRig(target, reason)
 	}
 }
 
@@ -169,7 +190,18 @@ func (s *Store) loadBlockingState(ctx context.Context) (blockingState, error) {
 		return blockingState{}, fmt.Errorf("external dependencies: list blocking records: %w", err)
 	}
 
-	return s.blockingStateFromRecords(ctx, allDeps)
+	// The local half of the cross-rig satisfaction probe (GH#5784): a local
+	// row for a bare target settles it without a foreign read. A store that
+	// serves its roles refuses the legacy GetIssuesByIDs (httpclient's
+	// unsupported_gen), so over one the same read goes through the served
+	// BatchGetter, as the remote roles' own composition does.
+	localRead := func(ctx context.Context, ids []string) ([]*types.Issue, error) {
+		return s.inner.GetIssuesByIDs(ctx, ids)
+	}
+	if s.rolesAreRemote() {
+		localRead = s.remoteIssuesByIDs
+	}
+	return s.blockingStateFromRecords(ctx, allDeps, blockingStateOpts{localRead: localRead})
 }
 
 // serverEnforcesPolicy asks the inner store's ExternalDependencyPolicyProber,
@@ -186,16 +218,33 @@ func (s *Store) serverEnforcesPolicy(ctx context.Context) (bool, error) {
 	return enforced, nil
 }
 
-func (s *Store) blockingStateFromRecords(ctx context.Context, allDeps map[string][]*types.Dependency) (blockingState, error) {
+// blockingStateFromRecords folds a store's blocking-typed dependency records
+// into the per-issue unsatisfied-blocker set the ready paths exclude by.
+// Besides explicit external: references it now carries the bare cross-prefix
+// targets GH#5784 stores in the same column: each blocks its source unless a
+// settled row is known for it (bareTargetSatisfaction). The raw ready
+// predicate excludes unsatisfied ones itself; every caller of this method is
+// a policy layer that opted OUT of that exclusion
+// (types.WorkFilter.CrossRigBlockerPolicyDelegated), so it must reproduce the
+// exclusion here — on its own verdict, which can release a source whose
+// foreign target closes.
+func (s *Store) blockingStateFromRecords(ctx context.Context, allDeps map[string][]*types.Dependency, opts blockingStateOpts) (blockingState, error) {
 	refs := make([]reference, 0)
 	refsByIssue := make(map[string][]string)
+	bareTargets := make([]string, 0)
 	for issueID, deps := range allDeps {
 		for _, dep := range deps {
-			if dep == nil || !dep.Type.IsBlockingEdge() || !isExternalReference(dep.DependsOnID) {
+			if dep == nil {
 				continue
 			}
-			refs = append(refs, parseReference(dep.DependsOnID))
-			refsByIssue[issueID] = appendUnique(refsByIssue[issueID], dep.DependsOnID)
+			switch {
+			case dep.Type.IsBlockingEdge() && isExternalReference(dep.DependsOnID):
+				refs = append(refs, parseReference(dep.DependsOnID))
+				refsByIssue[issueID] = appendUnique(refsByIssue[issueID], dep.DependsOnID)
+			case bareCrossRigBlockingEdge(dep):
+				refsByIssue[issueID] = appendUnique(refsByIssue[issueID], dep.DependsOnID)
+				bareTargets = appendUnique(bareTargets, dep.DependsOnID)
+			}
 		}
 	}
 
@@ -203,10 +252,14 @@ func (s *Store) blockingStateFromRecords(ctx context.Context, allDeps map[string
 	if err != nil {
 		return blockingState{}, fmt.Errorf("external dependencies: resolve blockers: %w", err)
 	}
+	bareSatisfied, err := s.bareTargetSatisfaction(ctx, bareTargets, opts.localRead)
+	if err != nil {
+		return blockingState{}, fmt.Errorf("external dependencies: resolve cross-rig blockers: %w", err)
+	}
 	for issueID, issueRefs := range refsByIssue {
 		unsatisfied := issueRefs[:0]
 		for _, ref := range issueRefs {
-			if !satisfied[ref] {
+			if !satisfied[ref] && !bareSatisfied[ref] {
 				unsatisfied = append(unsatisfied, ref)
 			}
 		}
@@ -310,6 +363,12 @@ func (s *Store) GetReadyWorkWithCountsAndTotal(ctx context.Context, filter types
 // more rather than the whole ready set. Its refusal reaches the caller as the
 // caller's own (innerCapError).
 func (s *Store) readyExclusion(filter types.WorkFilter, refsByIssue map[string][]string) (queryFilter types.WorkFilter, blockedIDs map[string]bool) {
+	// This layer composes the cross-rig blocking policy itself (the bare
+	// cross-prefix blockers in refsByIssue), so the inner query must not
+	// pre-exclude them: the raw predicate cannot observe a foreign close, and
+	// a satisfied bare target would stay excluded forever. The inner query
+	// trusts this layer's own exclusion instead.
+	filter.CrossRigBlockerPolicyDelegated = true
 	if len(refsByIssue) == 0 {
 		return filter, nil
 	}
@@ -403,6 +462,10 @@ func dropBlockedIssuesWithCounts(rows []*types.IssueWithCounts, blockedIDs map[s
 }
 
 func withExternalExclusions(filter types.WorkFilter, refsByIssue map[string][]string) types.WorkFilter {
+	// Same contract as readyExclusion: the caller composes the cross-rig
+	// policy, so the raw ready predicate beneath must not pre-exclude bare
+	// cross-prefix blockers it can never release.
+	filter.CrossRigBlockerPolicyDelegated = true
 	filter.ExcludeIDs = slices.Clone(filter.ExcludeIDs)
 	newIDs := make([]string, 0, len(refsByIssue))
 	for issueID := range refsByIssue {
@@ -473,6 +536,9 @@ func (s *Store) readyWorkWithCountsAndTotal(ctx context.Context, filter types.Wo
 // overstate how much ready work remains.
 func (s *Store) refetchedReadyTotal(ctx context.Context, filter types.WorkFilter, total int, blockedIDs map[string]bool) (int, error) {
 	full := filter
+	// This refetch is readyExclusion's inner query: the cross-rig policy is
+	// this layer's, so the raw predicate must not pre-exclude bare blockers.
+	full.CrossRigBlockerPolicyDelegated = true
 	full.Offset = 0
 	full.Limit = total + len(blockedIDs)
 	full.MaxRows = 0

@@ -1785,3 +1785,40 @@ func TestGetBlockedIssues_WithBlockerDetails(t *testing.T) {
 }
 
 // Note: testContext is already defined in dolt_test.go for this package
+
+// TestAddDependency_CrossPrefix_BlocksReadyWork reproduces bd-ncw9bo (GH#5784):
+// a cross-prefix blocks edge is stored in depends_on_external, but ready work
+// only counts "external:" targets as blockers, so the source issue is offered
+// as ready even though its cross-rig blocker was never seen closed.
+func TestAddDependency_CrossPrefix_BlocksReadyWork(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	source := &types.Issue{
+		ID:        "test-xrig",
+		Title:     "Depends on a bead in another rig",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, source, "tester"); err != nil {
+		t.Fatalf("failed to create source issue: %v", err)
+	}
+	dep := &types.Dependency{IssueID: "test-xrig", DependsOnID: "other-200", Type: types.DepBlocks}
+	if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+		t.Fatalf("AddDependency cross-prefix: %v", err)
+	}
+
+	ready, err := store.GetReadyWork(ctx, types.WorkFilter{Status: types.StatusOpen})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	for _, issue := range ready {
+		if issue.ID == "test-xrig" {
+			t.Fatalf("test-xrig is offered as ready although it has a stored cross-prefix blocks edge on other-200 (an open blocker in another rig)")
+		}
+	}
+}

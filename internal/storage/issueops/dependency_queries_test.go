@@ -26,7 +26,7 @@ func dependencyRecordsForIssuesQueryRegex(table string) string {
 
 func externalBlockingDependencyRecordsQueryRegex(table string) string {
 	return `(?s)SELECT issue_id, COALESCE\(depends_on_issue_id, depends_on_wisp_id, depends_on_external\) AS depends_on_id, type, created_at, created_by, metadata, thread_id\s+FROM ` +
-		regexp.QuoteMeta(table) + `\s+WHERE depends_on_external LIKE 'external:%'\s+AND type IN \('blocks', 'conditional-blocks', 'waits-for'\)\s+ORDER BY issue_id`
+		regexp.QuoteMeta(table) + `\s+WHERE depends_on_external IS NOT NULL\s+AND type IN \('blocks', 'conditional-blocks', 'waits-for'\)\s+ORDER BY issue_id`
 }
 
 func dependencyRows() *sqlmock.Rows {
@@ -102,9 +102,11 @@ func TestGetExternalBlockingDependencyRecordsInTxReadsPermanentAndWispEdges(t *t
 	_, mock, tx := beginMockTx(t)
 	now := time.Now()
 	mock.ExpectQuery(externalBlockingDependencyRecordsQueryRegex("dependencies")).
-		WillReturnRows(dependencyRows().AddRow(
-			"perm-source", "external:remote:payments", types.DepBlocks, now, "tester", "{}", "",
-		))
+		WillReturnRows(dependencyRows().
+			AddRow("perm-source", "external:remote:payments", types.DepBlocks, now, "tester", "{}", "").
+			// A bare cross-prefix target shares depends_on_external storage
+			// (GH#5784) and must ride the same query out.
+			AddRow("xrig-source", "other-200", types.DepBlocks, now, "tester", "{}", ""))
 	mock.ExpectQuery(externalBlockingDependencyRecordsQueryRegex("wisp_dependencies")).
 		WillReturnRows(dependencyRows().AddRow(
 			"wisp-source", "external:remote:identity", types.DepWaitsFor, now, "tester", "{}", "",
@@ -116,6 +118,9 @@ func TestGetExternalBlockingDependencyRecordsInTxReadsPermanentAndWispEdges(t *t
 	}
 	if dep := onlyDependency(t, got, "perm-source"); dep.DependsOnID != "external:remote:payments" {
 		t.Fatalf("permanent external target = %q", dep.DependsOnID)
+	}
+	if dep := onlyDependency(t, got, "xrig-source"); dep.DependsOnID != "other-200" {
+		t.Fatalf("bare cross-prefix target = %q", dep.DependsOnID)
 	}
 	if dep := onlyDependency(t, got, "wisp-source"); dep.DependsOnID != "external:remote:identity" {
 		t.Fatalf("wisp external target = %q", dep.DependsOnID)

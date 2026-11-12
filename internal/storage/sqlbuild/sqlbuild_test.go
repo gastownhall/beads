@@ -399,6 +399,126 @@ func TestBuildReadyWorkWhereIsBlockedGuard(t *testing.T) {
 	}
 }
 
+// GH#5784: the bare cross-prefix blockers each stack resolves per read
+// (CrossRigBlockedIDsSQL) reach the ready WHERE as batched id NOT IN clauses —
+// the same shape the stale set uses — and a policy-composing caller
+// (CrossRigBlockerPolicyDelegated) owns the exclusion itself, so the WHERE
+// drops it and reads no dependency table.
+func TestBuildReadyWorkWhereCrossRigBlockedIDs(t *testing.T) {
+	t.Parallel()
+
+	terms := func(where string) []string {
+		s := strings.TrimPrefix(where, "WHERE ")
+		out := []string{}
+		for _, term := range strings.Split(s, " AND ") {
+			out = append(out, strings.TrimSpace(term))
+		}
+		return out
+	}
+
+	for _, tables := range []FilterTables{IssuesFilterTables, WispsFilterTables} {
+		t.Run(tables.Main, func(t *testing.T) {
+			t.Run("cross_rig_ids_render_batched_not_in", func(t *testing.T) {
+				blocked := make([]string, QueryBatchSize+2)
+				for i := range blocked {
+					blocked[i] = fmt.Sprintf("xr-%d", i)
+				}
+				where, args, err := BuildReadyWorkWhere(types.WorkFilter{}, tables,
+					ReadyWorkWhereInputs{CrossRigBlockedIDs: map[string][]string{tables.Main: blocked}})
+				if err != nil {
+					t.Fatalf("BuildReadyWorkWhere: %v", err)
+				}
+				var notIn []string
+				for _, term := range terms(where) {
+					if strings.HasPrefix(term, "id NOT IN (?") {
+						notIn = append(notIn, term)
+					}
+				}
+				if len(notIn) != 2 {
+					t.Fatalf("%d ids rendered %d NOT IN batches, want 2: %s", len(blocked), len(notIn), where)
+				}
+				// The cross-rig ids follow the blocked clause, before the
+				// exclude-types args, in batch order.
+				wantPrefix := len(blocked)
+				if len(args) < wantPrefix+len(ReadyWorkExcludeTypes(nil)) {
+					t.Fatalf("args = %v, want the %d cross-rig ids then the type args", args, len(blocked))
+				}
+				for i, id := range blocked {
+					if args[i] != any(id) {
+						t.Fatalf("args[%d] = %v, want cross-rig id %q", i, args[i], id)
+					}
+				}
+			})
+
+			t.Run("delegated_policy_drops_the_exclusion", func(t *testing.T) {
+				where, args, err := BuildReadyWorkWhere(
+					types.WorkFilter{CrossRigBlockerPolicyDelegated: true}, tables,
+					ReadyWorkWhereInputs{CrossRigBlockedIDs: map[string][]string{tables.Main: {"xr-1"}}})
+				if err != nil {
+					t.Fatalf("BuildReadyWorkWhere: %v", err)
+				}
+				for _, term := range terms(where) {
+					if strings.HasPrefix(term, "id NOT IN (?") {
+						t.Fatalf("delegated policy must own the cross-rig exclusion, but the WHERE still carries %q", term)
+					}
+				}
+				if slices.Contains(args, any("xr-1")) {
+					t.Errorf("delegated policy must drop the cross-rig ids; args = %v", args)
+				}
+			})
+
+			t.Run("other_familys_ids_ignored", func(t *testing.T) {
+				other := IssuesFilterTables.Main
+				if tables.Main == other {
+					other = WispsFilterTables.Main
+				}
+				where, args, err := BuildReadyWorkWhere(types.WorkFilter{}, tables,
+					ReadyWorkWhereInputs{CrossRigBlockedIDs: map[string][]string{other: {"xr-1"}}})
+				if err != nil {
+					t.Fatalf("BuildReadyWorkWhere: %v", err)
+				}
+				for _, term := range terms(where) {
+					if strings.HasPrefix(term, "id NOT IN (?") {
+						t.Fatalf("the WHERE must not carry the %s family's cross-rig ids: %s", other, term)
+					}
+				}
+				if slices.Contains(args, any("xr-1")) {
+					t.Errorf("args carry the other family's cross-rig id: %v", args)
+				}
+			})
+
+			t.Run("ids_query_shape", func(t *testing.T) {
+				q := CrossRigBlockedIDsSQL(tables)
+				if !strings.HasPrefix(q, "SELECT DISTINCT d.issue_id FROM "+tables.Dependencies+" d WHERE ") {
+					t.Fatalf("cross-rig query must select the sources from %s: %s", tables.Dependencies, q)
+				}
+				for _, part := range []string{
+					"d.depends_on_external IS NOT NULL",
+					"d.depends_on_external NOT LIKE 'external:%'",
+					"d.type IN ('blocks', 'conditional-blocks')",
+					"NOT EXISTS",
+					"SELECT 1 FROM issues t",
+					"t.id = d.depends_on_external",
+					"(t.status = 'closed' OR t.status = 'pinned')",
+				} {
+					if !strings.Contains(q, part) {
+						t.Errorf("cross-rig query omits %q: %s", part, q)
+					}
+				}
+				// The probe leg must be the same predicate without the
+				// satisfaction probe or the DISTINCT projection.
+				exists := CrossRigBlockedEdgeExistsSQL(tables)
+				if !strings.HasPrefix(exists, "EXISTS (SELECT 1 FROM "+tables.Dependencies+" d WHERE d.depends_on_external IS NOT NULL") {
+					t.Fatalf("cross-rig probe must scan %s for any bare edge: %s", tables.Dependencies, exists)
+				}
+				if strings.Contains(exists, "NOT EXISTS") {
+					t.Errorf("the probe asks only whether an edge exists, so it must not probe satisfaction: %s", exists)
+				}
+			})
+		})
+	}
+}
+
 func TestBuildReadyWorkWhereAppliesPolicyIDExclusions(t *testing.T) {
 	t.Parallel()
 

@@ -70,6 +70,20 @@ func buildReadyWorkPredicates(ctx context.Context, tx DBTX, filter types.WorkFil
 		return nil, fmt.Errorf("get ready work: stale blocked flags in %s: %w", tables.Main, err)
 	}
 	inputs.StaleBlockedIDs = map[string][]string{tables.Main: staleIDs}
+	// GH#5784: sources with a bare cross-prefix blocking edge no settled local
+	// row satisfies are excluded from ready work. A policy-composing caller
+	// (WorkFilter.CrossRigBlockerPolicyDelegated) owns the exclusion itself
+	// and must be able to release a source whose foreign target closes, so it
+	// resolves nothing here.
+	if !filter.CrossRigBlockerPolicyDelegated {
+		crossRigIDs, err := queryIDs(ctx, tx, sqlbuild.CrossRigBlockedIDsSQL(tables))
+		if err != nil {
+			return nil, fmt.Errorf("get ready work: cross-rig blocked sources in %s: %w", tables.Main, err)
+		}
+		if len(crossRigIDs) > 0 {
+			inputs.CrossRigBlockedIDs = map[string][]string{tables.Main: crossRigIDs}
+		}
+	}
 	return buildReadyWorkPredicatesFrom(filter, tables, inputs)
 }
 
@@ -441,6 +455,12 @@ func filterReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter,
 		return nil, err
 	}
 
+	if !filter.CrossRigBlockerPolicyDelegated {
+		if err := excludeCrossRigBlockedWispsInTx(ctx, tx, wispIDs, excluded); err != nil {
+			return nil, err
+		}
+	}
+
 	ready := wisps[:0]
 	for _, wisp := range wisps {
 		if wisp.Pinned {
@@ -485,6 +505,57 @@ func excludeBlockedWispsInTx(ctx context.Context, tx DBTX, wispIDs []string, sta
 		_ = rows.Close()
 		if err := rows.Err(); err != nil {
 			return fmt.Errorf("blocked wisp rows: %w", err)
+		}
+	}
+	return nil
+}
+
+// excludeCrossRigBlockedWispsInTx adds to excluded the ids among wispIDs that
+// carry a bare cross-prefix blocks/conditional-blocks edge stored in
+// depends_on_external (GH#5784) and are not satisfied by a local closed or
+// pinned issues row — the wisp family's counterpart of the ID set the issues
+// family resolves through sqlbuild.CrossRigBlockedIDsSQL, rendered from the
+// same shared predicate. Policy-delegated ready paths skip it via
+// WorkFilter.CrossRigBlockerPolicyDelegated: their policy layer resolves the
+// foreign target and must be able to release the wisp on a foreign close,
+// which a pre-filter here would make permanent.
+//
+// The satisfaction probe reads issues only, like the issues-family clause:
+// it keeps the same conservative divergence (a bare target naming a local
+// WISP stays excluded) and stays identical across both families.
+func excludeCrossRigBlockedWispsInTx(ctx context.Context, tx DBTX, wispIDs []string, excluded map[string]struct{}) error {
+	for start := 0; start < len(wispIDs); start += queryBatchSize {
+		end := start + queryBatchSize
+		if end > len(wispIDs) {
+			end = len(wispIDs)
+		}
+		placeholders, args := buildSQLInClause(wispIDs[start:end])
+		//nolint:gosec // G201: only IN-clause placeholders are formatted in; the predicate is shared SQL text.
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+			SELECT dx.issue_id
+			FROM wisp_dependencies dx
+			WHERE dx.issue_id IN (%s)
+				AND %s
+		`, placeholders, sqlbuild.CrossRigBlockedPredicate("dx")), args...)
+		if err != nil {
+			if isTableNotExistError(err) {
+				// wisp_dependencies is optional (dolt_ignore'd); a database
+				// without it has no cross-rig wisp edges to exclude on.
+				return nil
+			}
+			return fmt.Errorf("get ready work: filter cross-rig blocked wisps: %w", err)
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("scan cross-rig blocked wisp: %w", err)
+			}
+			excluded[id] = struct{}{}
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("cross-rig blocked wisp rows: %w", err)
 		}
 	}
 	return nil

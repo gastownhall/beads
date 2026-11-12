@@ -113,6 +113,31 @@ func (r *remoteStore) BlockingAnnotator() (publicops.BlockingAnnotator, error) {
 	return servedAnnotator{r}, nil
 }
 
+// BatchGetter serves the served multi-id read the way httpclient's role does:
+// every named row answered, missing ones reported, no legacy fan-out.
+func (r *remoteStore) BatchGetter() (publicops.BatchGetter, error) {
+	return servedBatchGetter{r}, nil
+}
+
+type servedBatchGetter struct{ s *remoteStore }
+
+func (g servedBatchGetter) GetMany(ctx context.Context, req publicops.GetManyRequest) (publicops.GetManyResult, error) {
+	g.s.served = append(g.s.served, "GetMany")
+	result := publicops.GetManyResult{Issues: []*publicops.Issue{}, Missing: []string{}}
+	for _, id := range req.IDs {
+		issue, err := g.s.GetIssue(ctx, id)
+		if err != nil {
+			return publicops.GetManyResult{}, err
+		}
+		if issue == nil {
+			result.Missing = append(result.Missing, id)
+			continue
+		}
+		result.Issues = append(result.Issues, issue)
+	}
+	return result, nil
+}
+
 type servedReader struct{ s *remoteStore }
 
 // Ready serves the ready rows the way a server that knows nothing of the

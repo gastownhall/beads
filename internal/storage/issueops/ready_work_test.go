@@ -22,6 +22,13 @@ func staleBlockedQueryRegex(table string) string {
 	return `^SELECT t\.id FROM ` + table + ` t WHERE t\.is_blocked = 1 AND NOT EXISTS`
 }
 
+// crossRigBlockedQueryRegex matches sqlbuild.CrossRigBlockedIDsSQL for one
+// table family (depTable is its dependency table): the read of its sources a
+// bare cross-prefix blocking edge holds out of ready work (GH#5784).
+func crossRigBlockedQueryRegex(depTable string) string {
+	return `^SELECT DISTINCT d\.issue_id FROM ` + depTable + ` d WHERE`
+}
+
 func deferredChildrenQueryRegex(depTable, issueTable string) string {
 	targetCol := "depends_on_issue_id"
 	if issueTable == "wisps" {
@@ -257,6 +264,7 @@ func TestGetReadyWorkInTxOpenIncludesCustomActive(t *testing.T) {
 	mock.ExpectQuery(deferredParentProbeRegex("issues")).WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery(deferredParentProbeRegex("wisps")).WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery(staleBlockedQueryRegex("issues")).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectQuery(crossRigBlockedQueryRegex("dependencies")).WillReturnRows(sqlmock.NewRows([]string{"id"}))
 	mock.ExpectQuery(`SELECT id FROM issues\s+WHERE \(status = \? OR status IN \(SELECT name FROM custom_statuses WHERE category = 'active'\)\)`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 	mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).WillReturnError(sql.ErrNoRows)
@@ -284,6 +292,7 @@ func TestGetReadyWorkInTxStatusesSingleQuery(t *testing.T) {
 	mock.ExpectQuery(deferredParentProbeRegex("issues")).WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery(deferredParentProbeRegex("wisps")).WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery(staleBlockedQueryRegex("issues")).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectQuery(crossRigBlockedQueryRegex("dependencies")).WillReturnRows(sqlmock.NewRows([]string{"id"}))
 	mock.ExpectQuery(`SELECT id FROM issues\s+WHERE status IN \(\?,\?\)`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}))
 	mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).WillReturnError(sql.ErrNoRows)

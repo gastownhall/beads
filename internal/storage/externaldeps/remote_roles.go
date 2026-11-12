@@ -89,7 +89,9 @@ func (s *Store) externalBlockersFor(ctx context.Context, ids []string) (map[stri
 	if err != nil {
 		return nil, fmt.Errorf("external dependencies: read blocking edges: %w", err)
 	}
-	state, err := s.blockingStateFromRecords(ctx, deps)
+	state, err := s.blockingStateFromRecords(ctx, deps, blockingStateOpts{
+		localRead: s.remoteIssuesByIDs,
+	})
 	if err != nil {
 		return nil, err
 	}
