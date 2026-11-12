@@ -23,8 +23,9 @@
 // out). handler() puts the Host policy in front of the whole router, and
 // TestEveryMountedHandlerRunsTheRequestPipeline holds every mount to that
 // policy and to the posture its rows declare: the bearer credential, the
-// project stamp, the wire-revision floor and a database slot, in that order,
-// on a server that checks a credential as well as on one that does not. A new
+// Config.RequestContext hook, the project stamp, the wire-revision floor and
+// a database slot, in that order, on a server that checks a credential as well
+// as on one that does not. A new
 // surface is served by adding mounts there, never beside them.
 //
 // Two rows answer from the process itself and touch no database (GET /healthz

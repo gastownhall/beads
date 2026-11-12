@@ -4,9 +4,10 @@ package httpapi
 // stage of the request pipeline to the posture its row declares.
 //
 // route() runs the pipeline for an operation: the bearer credential, the
-// Bd-Project-Id stamp, the Bd-Wire-Revision floor and a database slot, in that
-// order, each unless the row declares itself exempt; handler() puts the Host
-// policy in front of every mount. Each stage has tests of its own, but before
+// embedder's Config.RequestContext hook, the Bd-Project-Id stamp, the
+// Bd-Wire-Revision floor and a database slot, in that order, each unless the
+// row declares itself exempt (the hook has no exemption: it runs for every
+// routed request); handler() puts the Host policy in front of every mount. Each stage has tests of its own, but before
 // the mount table every "every route" loop ranged over routeTable, so a
 // handler mounted beside the table, or a second pipeline that re-implemented
 // some stages and not others, went unseen.
@@ -49,6 +50,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -61,6 +63,9 @@ const pipelineProbe = "pipeline_probe"
 
 // censusToken is the credential a census server checks.
 const censusToken = "census-token"
+
+// censusRefused is the code the census's RequestContext hook refuses with.
+const censusRefused = "census_refused"
 
 // pipelineStage is one stage of the request pipeline, and how to arm it.
 type pipelineStage struct {
@@ -82,17 +87,6 @@ type pipelineStage struct {
 }
 
 // pipelineStages are the stages in the order the pipeline runs them.
-//
-// WAITING ON #7987 (RequestContext hook): once Config.RequestContext exists,
-// add a "hook" stage between auth and project. Its config installs a hook
-// that counts its calls and returns &RequestRefusal{Status: 403, Code:
-// "census_refused"}; refused is 403 census_refused; exempt is the unrouted
-// answers only (the hook runs for every routed request, liveness included);
-// booksOp is true; pipelineExemptions["hook"] lists the two unrouted answers;
-// and the census also asserts the hook ran exactly once per routed endpoint
-// that reached it and never for an unrouted one. pipelineRounds then runs its
-// rounds behind the bearer as well, and the falsification's expected reports
-// follow the rounds.
 var pipelineStages = []pipelineStage{
 	{
 		name:    "host",
@@ -108,6 +102,22 @@ var pipelineStages = []pipelineStage{
 		exempt: func(e mountEndpoint) bool { return e.row == nil || e.row.authExempt },
 		refused: func(a pipelineAnswer) bool {
 			return a.status == http.StatusUnauthorized && a.code == string(CodeUnauthenticated)
+		},
+		booksOp: true,
+	},
+	{
+		// The embedder's hook, refusing everything it is handed. It runs for
+		// every routed request, liveness and the auth-exempt rows included, so
+		// only an unrouted answer skips it. probePipeline counts its calls.
+		name: "hook",
+		config: func(_ *testing.T, cfg *Config) {
+			cfg.RequestContext = func(*http.Request) (context.Context, error) {
+				return nil, &RequestRefusal{Status: http.StatusForbidden, Code: censusRefused}
+			}
+		},
+		exempt: func(e mountEndpoint) bool { return e.row == nil },
+		refused: func(a pipelineAnswer) bool {
+			return a.status == http.StatusForbidden && a.code == censusRefused
 		},
 		booksOp: true,
 	},
@@ -186,6 +196,9 @@ var pipelineExemptions = map[string][]string{
 	// Liveness answers with no credential; a path no operation owns is
 	// public spec.
 	"auth": {OpHealth, unroutedCatchAll, unroutedCustomMethod},
+	// The hook runs for every routed request; only a path no operation owns
+	// never reaches it.
+	"hook": {unroutedCatchAll, unroutedCustomMethod},
 	// Liveness, and the handshake where a client learns the id to stamp.
 	"project": {OpGetContext, OpHealth, unroutedCatchAll, unroutedCustomMethod},
 	// Liveness only: the handshake is where a floor violation is cheapest.
@@ -204,6 +217,9 @@ type pipelineAnswer struct {
 	cacheControl        []string
 	logged              bool
 	op                  string
+	// hookCalls is how many times the server's RequestContext hook ran for
+	// this request; always 0 on a server with no hook.
+	hookCalls int
 }
 
 // same reports whether two answers are the same answer: status, problem
@@ -254,6 +270,18 @@ func probePipeline(t *testing.T, armed []*pipelineStage, rig censusRig) ([]mount
 		}
 		if st.tune != nil {
 			tunes = append(tunes, st.tune)
+		}
+	}
+	// Every call of the hook an armed stage installed, by method and path:
+	// the census holds it to once per routed request that reaches it.
+	var hookMu sync.Mutex
+	hookCalls := map[string]int{}
+	if hook := cfg.RequestContext; hook != nil {
+		cfg.RequestContext = func(r *http.Request) (context.Context, error) {
+			hookMu.Lock()
+			hookCalls[r.Method+" "+r.URL.Path]++
+			hookMu.Unlock()
+			return hook(r)
 		}
 	}
 	var ms []mount
@@ -323,10 +351,13 @@ func probePipeline(t *testing.T, armed []*pipelineStage, rig censusRig) ([]mount
 		}
 		lines[key] = f
 	}
+	hookMu.Lock()
+	defer hookMu.Unlock()
 	for i, e := range eps {
 		if f, ok := lines[e.method+" "+e.path]; ok {
 			answers[i].logged, answers[i].op = true, f["op"]
 		}
+		answers[i].hookCalls = hookCalls[e.method+" "+e.path]
 	}
 	return eps, answers, len(provider.openedUOWs())
 }
@@ -373,7 +404,7 @@ func firstRun(armed []*pipelineStage, e mountEndpoint) *pipelineStage {
 	return nil
 }
 
-// roundName is "auth" for one stage, "auth+project+wire+slot" for a run.
+// roundName is "auth" for one stage, "auth+hook+project+wire+slot" for a run.
 func roundName(armed []*pipelineStage) string {
 	var names []string
 	for _, st := range armed {
@@ -444,6 +475,17 @@ func censusPipeline(t *testing.T, rig censusRig) []pipelineViolation {
 				note(round, e.name(), "was refused by %s, but its request line booked op %q, want %q", first.name, a.op, e.op())
 			case first != nil && !first.booksOp && a.op != "":
 				note(round, e.name(), "was refused by %s, which answers before the router, but its request line booked op %q", first.name, a.op)
+			}
+			// The hook runs once for a request that reaches it, which is
+			// one whose first armed stage is the hook (it refuses, so nothing
+			// behind it runs), and never for any other: not for a request an
+			// earlier stage refused, nor for an unrouted one.
+			wantCalls := 0
+			if first != nil && first.name == "hook" {
+				wantCalls = 1
+			}
+			if a.hookCalls != wantCalls {
+				note(round, e.name(), "ran the RequestContext hook %d times, want %d", a.hookCalls, wantCalls)
 			}
 		}
 		if len(armed) != 1 {
