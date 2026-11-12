@@ -32,10 +32,12 @@ type ExternalRefHistoryQuerier interface {
 	// PreviousExternalRef returns the external_ref value recorded for
 	// issueID as of the most recent commit at or before asOf.
 	//
-	// found is false when no history entry exists for issueID at or
-	// before asOf (e.g. the issue was created after asOf); callers should
-	// treat that as "changed" since there is nothing to compare against.
-	// ref is the empty string when the historical row's external_ref
-	// column was NULL.
+	// found is false when no comparable history entry exists for issueID
+	// at or before asOf: the issue may have been created after asOf, or
+	// the history that held it may have been compacted, flattened or
+	// otherwise rewritten (#7294). It says nothing about whether the ref
+	// changed; callers decide how to treat it. ref is the empty string,
+	// with found true, when the historical row's external_ref column was
+	// NULL. A query failure returns err, never found=false.
 	PreviousExternalRef(ctx context.Context, issueID string, asOf time.Time) (ref string, found bool, err error)
 }

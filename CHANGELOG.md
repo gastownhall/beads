@@ -1248,6 +1248,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A tracker pull after `bd compact` or `bd flatten` no longer overwrites
+  unpushed local edits.** When history at the tracker's `last_sync` was gone,
+  the pull treated every linked issue as newly linked, fetched it again and
+  applied the remote copy past the conflict guard, so local edits made since
+  the last sync were lost (a dry run listed every linked issue as a
+  candidate). An issue with no history at `last_sync` is now re-fetched only
+  when it was created after that sync; older issues go through the normal
+  conflict checks, and the pull warns once that their links could not be
+  verified. An older issue that really was linked to another remote issue
+  since that sync is not re-fetched: review such links before pushing.
+  (#7294)
+
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
