@@ -272,6 +272,14 @@ func UpdateIssueIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, iss
 	} else if err := updateIssueIDInTx(ctx, tx, oldID, newID, issue, actor); err != nil {
 		return err
 	}
+	// Both ends of the rename are live suffixes now: the new id holds one
+	// going forward, the old id held one until this rename. Raise the parent's
+	// counter over both, so neither can be minted again while the parent
+	// survives (GH#4750). Reserving the OLD id is what makes a rename away
+	// from P.5 leave the counter a true high-water mark.
+	if _, err := ReserveChildSuffixesInTx(ctx, tx, []string{oldID, newID}, nil); err != nil {
+		return fmt.Errorf("reserve child suffixes for rename %s -> %s: %w", oldID, newID, err)
+	}
 	return recordRenameInJournal(ctx, tx, oldID, newID, actor, renameEdges)
 }
 

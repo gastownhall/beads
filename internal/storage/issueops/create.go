@@ -2,7 +2,6 @@ package issueops
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -1379,13 +1378,7 @@ func recordSkippedDependencyEdge(opts storage.BatchCreateOptions, issueID, depen
 }
 
 func ReconcileChildCounters(ctx context.Context, tx DBTX, issues []*types.Issue) (map[string]bool, error) {
-	type bucket struct {
-		maxChild int
-		isWisp   bool
-		known    bool
-	}
-	parents := make(map[string]*bucket)
-	var changed map[string]bool
+	parents := make(map[string]*childCounterBucket)
 
 	for _, issue := range issues {
 		if issue == nil {
@@ -1395,7 +1388,7 @@ func ReconcileChildCounters(ctx context.Context, tx DBTX, issues []*types.Issue)
 			if b, ok := parents[issue.ID]; ok {
 				b.isWisp, b.known = true, true
 			} else {
-				parents[issue.ID] = &bucket{isWisp: true, known: true}
+				parents[issue.ID] = &childCounterBucket{isWisp: true, known: true}
 			}
 		}
 	}
@@ -1410,7 +1403,7 @@ func ReconcileChildCounters(ctx context.Context, tx DBTX, issues []*types.Issue)
 		}
 		b, exists := parents[parentID]
 		if !exists {
-			b = &bucket{}
+			b = &childCounterBucket{}
 			parents[parentID] = b
 		}
 		if childNum > b.maxChild {
@@ -1418,69 +1411,5 @@ func ReconcileChildCounters(ctx context.Context, tx DBTX, issues []*types.Issue)
 		}
 	}
 
-	unknownParentIDs := make([]string, 0, len(parents))
-	for parentID, b := range parents {
-		if b.maxChild > 0 && !b.known {
-			unknownParentIDs = append(unknownParentIDs, parentID)
-		}
-	}
-	wispParents, err := WispIDSetInTx(ctx, tx, unknownParentIDs)
-	if err != nil {
-		return nil, fmt.Errorf("failed to route child counter parents: %w", err)
-	}
-	for _, parentID := range unknownParentIDs {
-		_, parents[parentID].isWisp = wispParents[parentID]
-	}
-
-	for parentID, b := range parents {
-		if b.maxChild == 0 {
-			continue
-		}
-		table := "child_counters"
-		parentTable := "issues"
-		if b.isWisp {
-			table = "wisp_child_counters"
-			parentTable = "wisps"
-		}
-		var parentExists int
-		// Orphaned hierarchical IDs are valid import input when the parent was
-		// deleted before export. Their auxiliary counter has no owner and must
-		// not be inserted: both counter tables enforce a parent foreign key.
-		//nolint:gosec // G201: parentTable is one of two hardcoded constants.
-		err := tx.QueryRowContext(ctx, fmt.Sprintf(`
-			SELECT 1 FROM %s WHERE id = ?
-		`, parentTable), parentID).Scan(&parentExists)
-		if err == sql.ErrNoRows {
-			continue
-		}
-		if err != nil {
-			return nil, fmt.Errorf("failed to check child counter parent %s: %w", parentID, err)
-		}
-		var current int
-		//nolint:gosec // G201: table is one of two hardcoded constants.
-		err = tx.QueryRowContext(ctx, fmt.Sprintf(`
-			SELECT last_child FROM %s WHERE parent_id = ?
-		`, table), parentID).Scan(&current)
-		if err != nil && err != sql.ErrNoRows {
-			return nil, fmt.Errorf("failed to read child counter for %s: %w", parentID, err)
-		}
-		if err == nil && current >= b.maxChild {
-			continue
-		}
-		// Qualify the existing-row column with the table name so the canonical
-		// MySQL form and SQLite's translated ON CONFLICT form both unambiguously
-		// refer to the target row rather than the incoming value.
-		//nolint:gosec // G201: table is one of two hardcoded constants.
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
-			INSERT INTO %[1]s (parent_id, last_child) VALUES (?, ?)
-			ON DUPLICATE KEY UPDATE last_child = GREATEST(%[1]s.last_child, ?)
-		`, table), parentID, b.maxChild, b.maxChild); err != nil {
-			return nil, fmt.Errorf("failed to reconcile child counter for %s: %w", parentID, err)
-		}
-		if changed == nil {
-			changed = map[string]bool{}
-		}
-		changed[table] = true
-	}
-	return changed, nil
+	return applyChildCounterBuckets(ctx, tx, parents)
 }

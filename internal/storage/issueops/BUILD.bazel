@@ -20,6 +20,7 @@ go_library(
         "bootstrap.go",
         "bulk_ops.go",
         "child_id.go",
+        "child_suffix_reserve.go",
         "claim.go",
         "claim_next.go",
         "close.go",
