@@ -442,3 +442,51 @@ func TestEmbeddedFederationConcurrent(t *testing.T) {
 	}
 	t.Logf("%d/%d federation workers succeeded", successes, numWorkers)
 }
+
+// GH#5213: repairing a peer's credentials after the local credential key
+// was replaced (the peer row replicated with the database, the machine-
+// local key did not) must succeed without --sovereignty and keep the
+// stored tier. GetFederationPeer cannot decrypt the old password here, so
+// a pre-read of the stored tier is not available as an implementation.
+func TestEmbeddedFederationAddPeerRepairsCredentialsKeepingSovereignty(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt federation tests")
+	}
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "fdsovrep")
+
+	bdFederation(t, bd, dir, "add-peer", "keypeer", "file:///tmp/keypeer",
+		"--user", "admin", "--password", "oldsecret", "--sovereignty", "T2")
+
+	// Machine B: a fresh local key cannot read the stored password (same
+	// fixture shape as status_credential_key_mismatch).
+	otherKey := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, otherKey); err != nil {
+		t.Fatalf("generate replacement key: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, ".beads-credential-key"), otherKey, 0600); err != nil {
+		t.Fatalf("write replacement key: %v", err)
+	}
+
+	// The mismatch is visible before the repair.
+	if out := bdFederation(t, bd, dir, "status"); !strings.Contains(out, "Local credential error") {
+		t.Errorf("expected the local-credential label before repair, got: %s", out)
+	}
+
+	// The repair: re-run add-peer without --sovereignty.
+	out := bdFederation(t, bd, dir, "add-peer", "keypeer", "file:///tmp/keypeer",
+		"--user", "admin", "--password", "newsecret")
+	if !strings.Contains(out, "Sovereignty: T2") {
+		t.Errorf("credential repair should report the preserved tier, got: %s", out)
+	}
+
+	// The replacement credentials are readable and the stored tier survived.
+	if statusOut := bdFederation(t, bd, dir, "status"); strings.Contains(statusOut, "Local credential error") {
+		t.Errorf("new credentials should be readable after repair, got: %s", statusOut)
+	}
+	tiers := readFederationTiers(t, beadsDir)
+	if tiers["keypeer"] != "T2" {
+		t.Errorf("stored sovereignty after credential repair = %q, want %q", tiers["keypeer"], "T2")
+	}
+}
