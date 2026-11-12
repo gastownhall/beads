@@ -39,9 +39,11 @@ type ForeignIssueResult struct {
 
 // defaultCrossRigWarning is the default warning for an unresolved bare target:
 // like a foreign project that cannot be opened (defaultProjectWarning), the
-// edge fails closed, never silently.
+// edge fails closed, never silently. The second line names the remedy the
+// design requires alongside the diagnosis: fix the route, or remove the edge
+// (GH#5784 §200) — the target stays blocking until one of the two happens.
 func defaultCrossRigWarning(target, reason string) {
-	fmt.Fprintf(os.Stderr, "Warning: cross-rig dependency target %q is unresolved (%s); it remains blocking\n", target, reason)
+	fmt.Fprintf(os.Stderr, "Warning: cross-rig dependency target %q is unresolved (%s); it remains blocking\n  Fix its route in .beads/routes.jsonl, or remove the edge with `bd dep remove <issue-id> %s`\n", target, reason, target)
 }
 
 // bareCrossRigBlockingEdge reports whether dep is a bare cross-prefix edge
