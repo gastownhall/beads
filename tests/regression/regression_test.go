@@ -533,12 +533,11 @@ func (w *workspace) snapshot(listArgs ...string) string {
 	return buf.String()
 }
 
+// showJSONForSnapshot runs plain `bd show <id> --json` on both binaries: the
+// candidate's default payload must carry the comments and dependents arrays
+// v0.49.6 emitted (#4122), so no flag is added to make the shapes agree.
 func (w *workspace) showJSONForSnapshot(id string) string {
-	args := []string{"show", id, "--json"}
-	if w.supportsStreamedShowPayloads() {
-		args = append(args, "--include-dependents", "--include-comments")
-	}
-	return w.run(args...)
+	return w.run("show", id, "--json")
 }
 
 // isCandidate reports whether this workspace runs the candidate binary rather
@@ -546,10 +545,6 @@ func (w *workspace) showJSONForSnapshot(id string) string {
 // candidate detection lives in one place.
 func (w *workspace) isCandidate() bool {
 	return candidateBin != "" && w.bdPath == candidateBin
-}
-
-func (w *workspace) supportsStreamedShowPayloads() bool {
-	return w.isCandidate()
 }
 
 // requiresNotesOverwriteForce reports whether this binary refuses `update
