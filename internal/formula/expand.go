@@ -205,6 +205,16 @@ func expandStep(target *Step, template []*Step, vars map[string]string) ([]*Step
 // after the {target} placeholders in it are replaced, where those apply. It
 // exists so ExpansionVarRefs can see exactly those strings without keeping a
 // second list of the fields that carry them.
+//
+// Each expanded step starts as a copy of its template step (GH#6433):
+//   - substituted: ID, Title, Description, Notes, WaitsFor, Labels, DependsOn,
+//     Needs, the Gate strings, metadata string leaves (keys are kept), and
+//     Assignee ({varname} only);
+//   - kept as written, for the later phases that own them: Condition, Loop and
+//     OnComplete, plus Type, Priority and the source tracing fields;
+//   - cleared: Expand and ExpandVars, so an expanded step never re-expands.
+//
+// Children are expanded recursively against the same target.
 func expandStepWith(target *Step, template []*Step, depth int, subst func(string) string) ([]*Step, error) {
 	if depth > DefaultMaxExpansionDepth {
 		return nil, fmt.Errorf("expansion depth limit exceeded: max %d levels (currently at %d) - step %q",
@@ -223,6 +233,25 @@ func expandStepWith(target *Step, template []*Step, depth int, subst func(string
 		expanded.Title = subst(substituteTargetPlaceholders(tmpl.Title, target))
 		expanded.Description = subst(substituteTargetPlaceholders(tmpl.Description, target))
 		expanded.Assignee = subst(tmpl.Assignee)
+
+		// Strings the expansion substitutes into, like Title. Cook resolves
+		// only {{var}} later, so a {target} or {var} left here never would.
+		sub := func(s string) string { return subst(substituteTargetPlaceholders(s, target)) }
+		expanded.Notes = sub(tmpl.Notes)
+		expanded.WaitsFor = sub(tmpl.WaitsFor)
+		expanded.Metadata = expandMetadata(tmpl.Metadata, sub)
+		if tmpl.Gate != nil {
+			// Copy the whole gate, then substitute its strings: a fresh value
+			// so nothing leaks into the template or a sibling expansion, and
+			// a copy so a Gate field added later is carried, not dropped.
+			gate := *tmpl.Gate
+			gate.Type = sub(gate.Type)
+			gate.ID = sub(gate.ID)
+			gate.AwaitID = sub(gate.AwaitID)
+			gate.Timeout = sub(gate.Timeout)
+			gate.Repo = sub(gate.Repo)
+			expanded.Gate = &gate
+		}
 
 		// An expanded step never re-expands: ApplyInlineExpansions re-scans
 		// its results for Expand, so carrying these would newly recurse.
@@ -279,6 +308,61 @@ func expandStepWith(target *Step, template []*Step, depth int, subst func(string
 	}
 
 	return result, nil
+}
+
+// expandMetadata returns a copy of a template step's metadata with sub
+// applied to every string leaf; nil for nil metadata.
+func expandMetadata(md map[string]interface{}, sub func(string) string) map[string]interface{} {
+	if md == nil {
+		return nil
+	}
+	return expandMetadataValue(md, sub, 0).(map[string]interface{})
+}
+
+// expandMetadataValue copies a decoded metadata value, applying sub to its
+// string leaves. It allocates fresh maps, arrays and arrays of tables, so the
+// expanded step does not share them with the template or a sibling expansion;
+// keys, other scalars and nil containers are kept as they are. A value
+// maxMetadataScanDepth levels down is returned as it is (and stays shared),
+// which also ends the walk on a cyclic value built in code.
+func expandMetadataValue(v interface{}, sub func(string) string, depth int) interface{} {
+	if depth >= maxMetadataScanDepth {
+		return v
+	}
+	switch val := v.(type) {
+	case string:
+		return sub(val)
+	case map[string]interface{}:
+		if val == nil {
+			return val
+		}
+		out := make(map[string]interface{}, len(val))
+		for k, elem := range val {
+			out[k] = expandMetadataValue(elem, sub, depth+1)
+		}
+		return out
+	case []interface{}:
+		if val == nil {
+			return val
+		}
+		out := make([]interface{}, len(val))
+		for i, elem := range val {
+			out[i] = expandMetadataValue(elem, sub, depth+1)
+		}
+		return out
+	case []map[string]interface{}:
+		// A TOML array of tables.
+		if val == nil {
+			return val
+		}
+		out := make([]map[string]interface{}, len(val))
+		for i, elem := range val {
+			out[i] = expandMetadataValue(elem, sub, depth+1).(map[string]interface{})
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 // substituteTargetPlaceholders replaces {target} and {target.*} placeholders.
