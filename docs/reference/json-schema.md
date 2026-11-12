@@ -238,11 +238,20 @@ items, plus:
   decimal string compared by equality and echoed back verbatim; always present,
   including a legacy `"0"`
 - `dependencies` (object[]): Full dependency records
-- `comments` (object[]): Comment thread — present only with `--include-comments`;
-  the default response returns `comment_count` only (count-only, be-ijck6q)
+- `comments` (object[]): Comment thread — present by default whenever the
+  issue has comments (#4122). `--count-only` leaves it out and reports
+  `comment_count` only (be-ijck6q); `--count-only --include-comments` adds it back
+- `dependents` (object[]): Shallow rows for the issues that depend on this one,
+  each carrying its `dependency_type` (be-4d36f2) — present by default whenever
+  the issue has dependents. `--count-only` leaves it out and reports
+  `dependent_count` only; `--count-only --include-dependents` adds it back.
+  Epic progress (`epic_total_children`, `epic_closed_children`,
+  `epic_closeable`) and `unresolvable_dependents` appear whenever dependents
+  are read
 - `comments_omitted` (boolean, optional): `true` only when `comment_count` is
-  nonzero and `comments` was left out of the response (no `--include-comments`).
-  Absent when comments were included or when there are none to omit (ga-clgh)
+  nonzero and `comments` was left out of the response (`--count-only` without
+  `--include-comments`). Absent when comments were included or when there are
+  none to omit (ga-clgh)
 - `gated_by` (object[], optional): The gates actively blocking this issue, each
   `{id, type, reason}` — the gate bead to resolve, its await condition (`human`,
   `timer`, `gh:run`, `gh:pr`, `bead`, or `gate` when it carries none), and the

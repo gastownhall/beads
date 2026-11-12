@@ -23,20 +23,18 @@ import (
 )
 
 type showProxiedInput struct {
-	ids             []string
-	thread          bool
-	shortMode       bool
-	longMode        bool
-	refs            bool
-	children        bool
-	asOfRef         string
-	localTime       bool
-	watchMode       bool
-	currentMode     bool
-	includeDepends  bool
-	briefDeps       bool
-	includeComments bool
-	commentsTail    int
+	ids          []string
+	thread       bool
+	shortMode    bool
+	longMode     bool
+	refs         bool
+	children     bool
+	asOfRef      string
+	localTime    bool
+	watchMode    bool
+	currentMode  bool
+	detail       showDetailFlags
+	commentsTail int
 }
 
 func gatherShowProxiedInput(cmd *cobra.Command, args []string) *showProxiedInput {
@@ -50,9 +48,7 @@ func gatherShowProxiedInput(cmd *cobra.Command, args []string) *showProxiedInput
 	in.localTime, _ = cmd.Flags().GetBool("local-time")
 	in.watchMode, _ = cmd.Flags().GetBool("watch")
 	in.currentMode, _ = cmd.Flags().GetBool("current")
-	in.includeDepends, _ = cmd.Flags().GetBool("include-dependents")
-	in.briefDeps, _ = cmd.Flags().GetBool("brief-deps")
-	in.includeComments, _ = cmd.Flags().GetBool("include-comments")
+	in.detail = showDetailFlagsFrom(cmd)
 	in.commentsTail, _ = cmd.Flags().GetInt("comments-tail")
 
 	idFlags, _ := cmd.Flags().GetStringArray("id")
@@ -468,7 +464,7 @@ func runShowProxiedDefault(ctx context.Context, uw uow.UnitOfWork, in *showProxi
 
 	// Shaping the detail view belongs to the reader role, not the CLI, and
 	// this route reaches it the same way the direct one does: through the
-	// provider's own accessor. The count-only default (be-ijck6q), the
+	// provider's own accessor. The --count-only view (be-ijck6q), the
 	// comments-omitted flag (ga-clgh) and the shallow dependent rows
 	// (be-4d36f2) then read the same from every frontend by construction
 	// rather than by everyone remembering to call the same helper. The
@@ -640,8 +636,8 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 	fmt.Println()
 }
 
-// getRequest carries the proxied show flags onto the read contract. See
-// showGetRequest: the two routes build this independently.
+// getRequest carries the proxied show flags onto the read contract through
+// the same showGetRequest mapping the direct route uses.
 func (in *showProxiedInput) getRequest(id string) issueops.GetRequest {
-	return showGetRequest(id, in.includeDepends, in.includeComments, in.briefDeps)
+	return showGetRequest(id, in.detail)
 }

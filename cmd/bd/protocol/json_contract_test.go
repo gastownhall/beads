@@ -55,6 +55,47 @@ func TestJSONContract_ShowOutputHasRequiredFields(t *testing.T) {
 	}
 }
 
+// TestJSONContract_ShowDefaultIncludesFullPayload pins the v0.49.6 machine
+// contract of plain bd show --json (#4122): with no flags the payload carries
+// the full comments and dependents arrays alongside their counts, and no
+// comments_omitted marker. The count-only fast path is opt-in (--count-only,
+// TestJSONContract_ShowCountOnlyOmitsPayloads).
+func TestJSONContract_ShowDefaultIncludesFullPayload(t *testing.T) {
+	t.Parallel()
+	w := newWorkspace(t)
+	id := w.create("--title", "Full payload target", "--type", "task")
+	dependent := w.create("--title", "Full payload dependent", "--type", "task")
+	w.run("dep", "add", dependent, id)
+	w.run("comments", "add", id, "First note")
+
+	showOnce := func(id string, flags ...string) map[string]any {
+		t.Helper()
+		out := w.run(append([]string{"show", id, "--json"}, flags...)...)
+		items := parseJSONOutput(t, out)
+		if len(items) == 0 {
+			t.Fatalf("bd show %s --json %v returned no items", id, flags)
+		}
+		return items[0]
+	}
+
+	t.Run("default_carries_comments_and_dependents", func(t *testing.T) {
+		issue := showOnce(id)
+		requireCommentTextsEqual(t, getObjectSlice(issue, "comments"),
+			[]string{"First note"}, "default payload comments")
+		dependents := getObjectSlice(issue, "dependents")
+		if len(dependents) != 1 {
+			t.Fatalf("default payload: want 1 dependent, got %d (%v)", len(dependents), issue["dependents"])
+		}
+		assertField(t, dependents[0], "id", dependent)
+		assertField(t, dependents[0], "dependency_type", "blocks")
+		assertFieldFloat(t, issue, "comment_count", 1)
+		assertFieldFloat(t, issue, "dependent_count", 1)
+		if v, present := issue["comments_omitted"]; present {
+			t.Errorf("default payload: comments_omitted must be absent when comments are present, got %v", v)
+		}
+	})
+}
+
 // TestJSONContract_ShowOmitsOptInPayloadsByDefault pins the NEGATIVE half of the
 // count-only contract (be-ijck6q): by default, bd show --json must OMIT the
 // "comments" and "dependents" arrays entirely, and each --include-* flag must
