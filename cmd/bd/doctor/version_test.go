@@ -116,8 +116,10 @@ func TestUpgradeCommandForPath(t *testing.T) {
 		{"homebrew intel mac", "/usr/local/Cellar/beads/0.49.4/bin/bd", "brew upgrade beads"},
 		{"homebrew linux", "/home/linuxbrew/.linuxbrew/Cellar/beads/0.49.4/bin/bd", "brew upgrade beads"},
 		{"legacy tap formula", "/opt/homebrew/Cellar/bd/0.49.0/bin/bd", "brew upgrade beads"},
-		{"usr local bin symlink", "/usr/local/bin/bd", installScriptCommand},
-		{"go install", "/home/user/go/bin/bd", installScriptCommand},
+		{"usr local bin symlink", "/usr/local/bin/bd",
+			"curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash"},
+		{"go install", "/home/user/go/bin/bd",
+			"curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash"},
 	}
 
 	for _, tt := range tests {
@@ -127,6 +129,16 @@ func TestUpgradeCommandForPath(t *testing.T) {
 				t.Errorf("upgradeCommandForPath(%q)\n  got:  %q\n  want: %q", tt.execPath, result, tt.expected)
 			}
 		})
+	}
+}
+
+// TestLatestReleaseAPIURL pins the latest-release lookup URL: it must
+// query the current gastownhall/beads repository, not the pre-move one,
+// whose API answers only through GitHub's transfer redirect (GH#3059).
+func TestLatestReleaseAPIURL(t *testing.T) {
+	want := "https://api.github.com/repos/gastownhall/beads/releases/latest"
+	if latestReleaseAPIURL != want {
+		t.Fatalf("latestReleaseAPIURL = %q, want %q", latestReleaseAPIURL, want)
 	}
 }
 

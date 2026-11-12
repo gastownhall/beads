@@ -76,7 +76,12 @@ func CheckCLIVersionLocalOnly(cliVersion string) DoctorCheck {
 }
 
 // installScriptCommand is the default upgrade/install command for non-Homebrew installations.
-const installScriptCommand = "curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash"
+const installScriptCommand = "curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash"
+
+// latestReleaseAPIURL is where doctor looks up the latest release. It names
+// the current gastownhall/beads repository (GH#3059); the pre-move one
+// answers only through GitHub's transfer redirect.
+const latestReleaseAPIURL = "https://api.github.com/repos/gastownhall/beads/releases/latest"
 
 // getUpgradeCommand returns the appropriate upgrade command based on how bd was installed.
 // Detects Homebrew on macOS/Linux, and falls back to the install script on all platforms.
@@ -227,7 +232,7 @@ func CheckMetadataVersionTracking(path string, currentVersion string) DoctorChec
 
 // fetchLatestGitHubRelease fetches the latest release version from GitHub API.
 func fetchLatestGitHubRelease() (string, error) {
-	url := "https://api.github.com/repos/steveyegge/beads/releases/latest"
+	url := latestReleaseAPIURL
 
 	client := &http.Client{
 		Timeout: 5 * time.Second,
