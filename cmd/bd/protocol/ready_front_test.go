@@ -75,6 +75,30 @@ func TestProtocol_ChildOfInProgressParentRefusalAgreesWithReadyFront(t *testing.
 	if ready := parseReadyIDs(t, w); !ready[child] {
 		t.Errorf("#5036: child %s of in_progress parent %s is not in the ready front; the hierarchy must not gate on parent completion (G2.2)", child, parent)
 	}
+
+	// The reporter's exact case: the explicit blocks edge is refused —
+	// non-zero exit, no edge written — and the refusal must no longer claim
+	// the hierarchy already provides the gate. It keeps its stable prefix
+	// and names the supported shape instead.
+	out, code := w.runExpectError("dep", "add", child, parent, "--type", "blocks")
+	if code == 0 {
+		t.Fatalf("#5036: dep add %s %s --type blocks exited 0, want non-zero\n%s", child, parent, out)
+	}
+	prefix := "cannot add dependency: " + child + " is already a child of " + parent + "."
+	if !strings.Contains(out, prefix) {
+		t.Errorf("#5036: refusal should keep the stable prefix %q; got:\n%s", prefix, out)
+	}
+	if !strings.Contains(out, "sibling") {
+		t.Errorf("#5036: refusal should name the sibling-issue shape to block on instead; got:\n%s", out)
+	}
+	if strings.Contains(out, "inherit") {
+		t.Errorf("#5036: refusal still claims the hierarchy gates the child on its parent; got:\n%s", out)
+	}
+	// The refusal wrote no edge: the child still holds only the parent-child
+	// edge that `--parent` recorded.
+	requireDepEdgesEqual(t, getObjectSlice(w.showJSON(child), "dependencies"),
+		[]depEdge{{issueID: child, dependsOnID: parent}},
+		"#5036: dependencies after the refused dep add")
 }
 
 // TestProtocol_ReadyParentFilterIsTransitive pins protocol clause R3:
