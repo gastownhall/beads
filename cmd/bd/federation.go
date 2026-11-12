@@ -136,7 +136,7 @@ func init() {
 	// Flags for add-peer (SQL user authentication)
 	federationAddPeerCmd.Flags().StringVarP(&federationUser, "user", "u", "", "SQL username for authentication")
 	federationAddPeerCmd.Flags().StringVarP(&federationPassword, "password", "p", "", "SQL password (prompted if --user set without --password)")
-	federationAddPeerCmd.Flags().StringVar(&federationSov, "sovereignty", "", "Sovereignty tier (T1, T2, T3, T4)")
+	federationAddPeerCmd.Flags().StringVar(&federationSov, "sovereignty", "", "Sovereignty tier (T1, T2, T3, T4); omit to keep the stored tier, or pass an empty value to clear it")
 
 	rootCmd.AddCommand(federationCmd)
 }
@@ -412,17 +412,25 @@ func runFederationAddPeer(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// An explicitly supplied empty tier is the deliberate clear operation;
+	// an omitted flag means no intent to change the stored tier (GH#5213).
+	clearSov := cmd.Flags().Changed("sovereignty") && federationSov == ""
+
 	if federationUser != "" {
 		peer := &storage.FederationPeer{
-			Name:        name,
-			RemoteURL:   url,
-			Username:    federationUser,
-			Password:    password,
-			Sovereignty: sov,
+			Name:             name,
+			RemoteURL:        url,
+			Username:         federationUser,
+			Password:         password,
+			Sovereignty:       sov,
+			ClearSovereignty: clearSov,
 		}
 		if err := store.AddFederationPeer(ctx, peer); err != nil {
 			return HandleErrorRespectJSON("failed to add peer: %v", err)
 		}
+		// Report the effective stored tier: a re-run without --sovereignty
+		// preserves it, so the supplied value is not the result.
+		sov = peer.Sovereignty
 	} else {
 		if err := store.AddRemote(ctx, name, url); err != nil {
 			return HandleErrorRespectJSON("failed to add peer: %v", err)
@@ -444,6 +452,10 @@ func runFederationAddPeer(cmd *cobra.Command, args []string) error {
 	}
 	if sov != "" {
 		fmt.Printf("  Sovereignty: %s\n", sov)
+	} else if federationUser != "" && clearSov {
+		// The peer row was written and its tier explicitly emptied; say so,
+		// because a silent empty is what silently losing a tier looked like.
+		fmt.Printf("  Sovereignty: cleared\n")
 	}
 	return nil
 }

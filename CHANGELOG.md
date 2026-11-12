@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Re-running `bd federation add-peer` no longer silently clears a stored
+  sovereignty tier.** The peer upsert overwrote `federation_peers.sovereignty`
+  unconditionally, so repairing a peer's credentials by re-running `add-peer`
+  without `--sovereignty` emptied the tier (which replicates to peers with the
+  database) with exit 0 and no warning. An omitted `--sovereignty` now
+  preserves the stored tier; a non-empty value replaces it; an explicit
+  `--sovereignty ""` is the deliberate clear operation, confirmed in text mode
+  with `Sovereignty: cleared`. Both text and `--json` output now report the
+  tier actually stored after the write. The storage contract is expressed by
+  a write-only `ClearSovereignty` field on `storage.FederationPeer` (a
+  behavioral API change for direct implementers of `FederationStore`), and
+  embedded and server mode share one conditional upsert. (#5213)
+
 ### Security
 
 - **Release binaries are built with Go 1.27.4.** Go 1.27.0-1.27.3 (and

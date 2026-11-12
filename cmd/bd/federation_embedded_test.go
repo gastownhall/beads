@@ -14,7 +14,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
 // bdFederation runs "bd federation" with extra args. Returns combined output.
@@ -296,6 +298,97 @@ func TestEmbeddedFederationStatus(t *testing.T) {
 			t.Error("missing 'peers' in status JSON")
 		}
 	})
+}
+
+// readFederationTiers reads every peer's stored sovereignty tier straight
+// out of the embedded Dolt database, independent of any bd command's own
+// reporting (GH#5213).
+func readFederationTiers(t *testing.T, beadsDir string) map[string]string {
+	t.Helper()
+
+	cfg, _ := configfile.Load(beadsDir)
+	database := ""
+	if cfg != nil {
+		database = cfg.GetDoltDatabase()
+	}
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer cleanup()
+
+	rows, err := db.QueryContext(t.Context(),
+		"SELECT name, COALESCE(sovereignty, '') FROM federation_peers ORDER BY name")
+	if err != nil {
+		t.Fatalf("query federation_peers: %v", err)
+	}
+	defer rows.Close()
+
+	tiers := map[string]string{}
+	for rows.Next() {
+		var name, tier string
+		if err := rows.Scan(&name, &tier); err != nil {
+			t.Fatalf("scan federation peer: %v", err)
+		}
+		tiers[name] = tier
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate federation peers: %v", err)
+	}
+	return tiers
+}
+
+// GH#5213: re-running add-peer without --sovereignty (the documented way to
+// re-store peer credentials) must not clear the peer's stored tier: text
+// and JSON both report the preserved tier, and an independent SQL readback
+// still returns it.
+func TestEmbeddedFederationAddPeerRerunKeepsSovereignty(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt federation tests")
+	}
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "fdsovk")
+
+	// Townbeta is re-run without the flag; towngamma is an untouched control
+	// proving the readback is live.
+	bdFederation(t, bd, dir, "add-peer", "townbeta", "file:///tmp/townbeta",
+		"--user", "syncbot", "--password", "s3cret", "--sovereignty", "T2")
+	bdFederation(t, bd, dir, "add-peer", "towngamma", "file:///tmp/towngamma",
+		"--user", "gammabot", "--password", "g4mma", "--sovereignty", "T3")
+
+	// Text mode: the re-run reports the preserved tier.
+	out := bdFederation(t, bd, dir, "add-peer", "townbeta", "file:///tmp/townbeta",
+		"--user", "syncbot", "--password", "s3cret")
+	if !strings.Contains(out, "Sovereignty: T2") {
+		t.Errorf("text re-run should report the preserved tier, got: %s", out)
+	}
+
+	// JSON mode: the existing key set, with sovereignty carrying the tier
+	// actually stored.
+	jsonOut := bdFederation(t, bd, dir, "add-peer", "townbeta", "file:///tmp/townbeta",
+		"--user", "syncbot", "--password", "s3cret", "--json")
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(jsonOut), &payload); err != nil {
+		t.Fatalf("failed to parse add-peer --json: %v\n%s", err, jsonOut)
+	}
+	assertExactJSONKeys(t, "add-peer --json", payload, "added", "url", "has_auth", "sovereignty", "schema_version")
+	var sov string
+	if err := json.Unmarshal(payload["sovereignty"], &sov); err != nil {
+		t.Fatalf("failed to parse add-peer --json sovereignty: %v\n%s", err, jsonOut)
+	}
+	if sov != "T2" {
+		t.Errorf("json re-run sovereignty = %q, want %q", sov, "T2")
+	}
+
+	// Independent readback, not add-peer's own output as the only oracle.
+	tiers := readFederationTiers(t, beadsDir)
+	if tiers["townbeta"] != "T2" {
+		t.Errorf("stored townbeta sovereignty after re-run without --sovereignty = %q, want %q (tier silently cleared)", tiers["townbeta"], "T2")
+	}
+	if tiers["towngamma"] != "T3" {
+		t.Errorf("untouched control peer towngamma = %q, want %q", tiers["towngamma"], "T3")
+	}
 }
 
 func TestEmbeddedFederationConcurrent(t *testing.T) {

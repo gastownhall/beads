@@ -241,10 +241,12 @@ func warnStoredPeerSuppressesAmbientPassword(peer string, p *storage.FederationP
 	if os.Getenv("DOLT_REMOTE_PASSWORD") == "" {
 		return
 	}
-	// add-peer upserts the whole row, so a re-run without --sovereignty
-	// clears a stored tier (GH#5213): carry the stored tier into the
-	// suggested command. The password is left to add-peer's no-echo prompt
-	// rather than suggested as an argument that lands in shell history.
+	// add-peer preserves a stored tier when --sovereignty is omitted
+	// (GH#5213), but keep the stored tier in the suggested command anyway:
+	// it names the tier the peer runs under, and the command stays correct
+	// even for an older bd that clears on omission. The password is left
+	// to add-peer's no-echo prompt rather than suggested as an argument
+	// that lands in shell history.
 	//
 	// The peer name, username and tier are fields of a federation_peers row,
 	// which travels with a pull, and this line is written straight to stderr,

@@ -109,6 +109,28 @@ Stored credentials are used automatically during sync:
 bd federation add-peer town-gamma 192.168.1.100:3306/beads --user sync-bot
 ```
 
+### Sovereignty Tiers on Re-Add
+
+For a peer stored with credentials, re-running `add-peer` follows
+preserve-or-clear semantics for `--sovereignty` (GH#5213):
+
+- **Omitted** — the stored tier is left alone. Re-running `add-peer` to
+  repair a peer's credentials never changes the tier.
+- **Non-empty** (`T1`–`T4`, case-insensitive) — replaces the stored tier.
+- **Explicitly empty** (`--sovereignty ""`) — clears the stored tier. Text
+  mode confirms with `Sovereignty: cleared`.
+
+```bash
+# Repair stored credentials without touching the tier
+bd federation add-peer town-beta 192.168.1.100:3306/beads --user sync-bot
+
+# Deliberately clear a stored tier
+bd federation add-peer town-beta 192.168.1.100:3306/beads --user sync-bot --sovereignty ""
+```
+
+Both `--json` and text output report the tier actually stored after the
+write, not the value supplied on the command line.
+
 ### JSON Output
 
 For scripting, use the `--json` flag:
