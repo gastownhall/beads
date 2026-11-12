@@ -23,8 +23,12 @@ import (
 const gitCmdTimeout = 30 * time.Second
 
 const (
-	hooksExamplesURL = "https://github.com/steveyegge/beads/tree/main/examples/git-hooks"
-	hooksUpgradeURL  = "https://github.com/steveyegge/beads/issues/615"
+	// hooksDocsURL is the published hooks reference; doctor usually runs
+	// outside a beads checkout, so repo-relative docs paths do not resolve.
+	hooksDocsURL = "https://beads.gascity.com/cli-reference/hooks"
+	// hooksUpgradeURL names the issue that walks through upgrading hooks to
+	// call bd; issue numbers survive repository moves (GH#3059).
+	hooksUpgradeURL = "https://github.com/gastownhall/beads/issues/615"
 )
 
 // bdShimMarker identifies bd shim hooks (GH#946)
@@ -171,7 +175,7 @@ func CheckGitHooks(cliVersion string) DoctorCheck {
 		}
 	}
 
-	hookInstallMsg := "Install hooks with 'bd hooks install'. See " + hooksExamplesURL
+	hookInstallMsg := "Install hooks with 'bd hooks install'. See " + hooksDocsURL
 
 	if len(installedHooks) > 0 {
 		return DoctorCheck{
