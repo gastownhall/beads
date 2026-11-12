@@ -103,6 +103,16 @@ func (e *childSuffixEnv) committedCounter(t *testing.T, parent string) int {
 	return n
 }
 
+// counterRows counts parent's counter rows across both planes.
+func (e *childSuffixEnv) counterRows(t *testing.T, parent string) int {
+	t.Helper()
+	var n int
+	if err := e.store.db.QueryRowContext(e.ctx, "SELECT (SELECT COUNT(*) FROM child_counters WHERE parent_id = ?) + (SELECT COUNT(*) FROM wisp_child_counters WHERE parent_id = ?)", parent, parent).Scan(&n); err != nil {
+		t.Fatalf("count counter rows for %s: %v", parent, err)
+	}
+	return n
+}
+
 // TestChildSuffixReservation pins GH#4750's live-database leg on the
 // server-backed store: the create, rename and removal paths preserve a
 // parent's child suffixes in its counter, so a counter that was missing or
@@ -218,6 +228,48 @@ func TestChildSuffixReservation(t *testing.T) {
 		}
 		e.assertNext(t, "csr-nd-p", "csr-nd-p.11")
 	})
+
+	// AC-7: a parent removed together with its children is departing, so the
+	// children's suffixes are not reserved under it and no counter row
+	// outlives it in either plane.
+	cascades := []struct {
+		name                  string
+		parentWisp, childWisp bool
+	}{
+		{"DurableParentAndChildren", false, false},
+		{"DurableParentAndWispChildren", false, true},
+		{"WispParentAndChildren", true, true},
+	}
+	for i, tc := range cascades {
+		t.Run("CascadeDeleteOf"+tc.name+"LeavesNoParentCounter", func(t *testing.T) {
+			e := newChildSuffixEnv(t)
+			parent := "csr-cd" + string(rune('a'+i)) + "-p"
+			e.create(t, parent, tc.parentWisp)
+			e.create(t, parent+".1", tc.childWisp)
+			e.create(t, parent+".2", tc.childWisp)
+			// Link each child to the parent and select all three for the
+			// cascade, so the parent and its children depart together.
+			// (Selecting the parent alone would not do on every plane: the
+			// server routes a wisp parent to deleteWispBatch, which does not
+			// expand a cascade.)
+			children := []string{parent + ".1", parent + ".2"}
+			for _, child := range children {
+				if err := e.store.AddDependency(e.ctx, &types.Dependency{IssueID: child, DependsOnID: parent, Type: types.DepParentChild}, "tester"); err != nil {
+					t.Fatalf("AddDependency(%s -> %s): %v", child, parent, err)
+				}
+			}
+			res, err := e.store.DeleteIssues(e.ctx, append([]string{parent}, children...), true, true, false)
+			if err != nil {
+				t.Fatalf("DeleteIssues(%s, cascade): %v", parent, err)
+			}
+			if res.DeletedCount != 3 {
+				t.Fatalf("DeleteIssues(%s, cascade) deleted %d issues, want 3 (the parent and its 2 children)", parent, res.DeletedCount)
+			}
+			if got := e.counterRows(t, parent); got != 0 {
+				t.Fatalf("%d counter rows for %s after a cascade delete of it and its children, want 0", got, parent)
+			}
+		})
+	}
 }
 
 func csrDeleteIssue(t *testing.T, e *childSuffixEnv, id string) {

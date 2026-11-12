@@ -84,6 +84,19 @@ reusable; `types.retained` (below) keeps the retention commands away from the
 types whose ids must stay retired. Over HTTP, the server must advertise `issues.sweep.retainIds`;
 without it, bd refuses the sweep before sending anything.
 
+Reusable does not mean re-minted. A generated child id never repeats a
+suffix its parent already used: after `bd-a3f8.3` is deleted, renamed away,
+or swept by a plain `bd purge`/`bd prune`, the next child of `bd-a3f8` is
+`bd-a3f8.4`. That is only a counter on the parent, not a tombstone, so
+`bd create --id bd-a3f8.3` still succeeds.
+
+The counter only protects a parent that survives. Deleting and recreating
+the parent drops its counter with it, raw SQL deletes bypass the
+reservation, and a rebuild from `issues.jsonl` loses the counter because
+the export format carries no counter state. Suffix history already lost
+before this change (from a counter that was missing or behind) is not
+recovered.
+
 ### Keeping key-bearing types out of plain sweeps
 
 A plain `bd prune` that happens to match key-bearing rows would delete them
