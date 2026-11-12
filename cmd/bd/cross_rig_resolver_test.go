@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -80,5 +82,45 @@ func TestCrossRigIssueResolverReadsRoutedRigAtEachCall(t *testing.T) {
 	}
 	if opens != 4 || closes != 4 {
 		t.Fatalf("opens=%d closes=%d, want one open and one close per call (4)", opens, closes)
+	}
+}
+
+// GH#5784 AC-3: every target the routes cannot reach is answered unavailable
+// with a reason naming why, and none fails the call.
+func TestCrossRigIssueResolverExplainsUnreadableTargets(t *testing.T) {
+	sourceBeadsDir, targetBeadsDir := writeCrossRigTown(t)
+	closes := 0
+	resolve := newCrossRigIssueResolver(func() string { return sourceBeadsDir }, func(context.Context, string, string) (storage.DoltStorage, error) {
+		return &crossRigTargetStore{issues: map[string]*types.Issue{}, closed: &closes}, nil
+	})
+	found, unavailable, err := resolve(t.Context(), []string{"cc-1", "bb-9", "aa-404"})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if len(found) != 0 {
+		t.Fatalf("found = %v, want none", found)
+	}
+	for id, want := range map[string]string{
+		"cc-1":   `no route for prefix "cc"`,
+		"bb-9":   "not found in " + targetBeadsDir,
+		"aa-404": "route points to this workspace",
+	} {
+		if !strings.Contains(unavailable[id], want) {
+			t.Errorf("unavailable[%s] = %q, want it to contain %q", id, unavailable[id], want)
+		}
+	}
+
+	failing := newCrossRigIssueResolver(func() string { return sourceBeadsDir }, func(context.Context, string, string) (storage.DoltStorage, error) {
+		return nil, errors.New("database is locked")
+	})
+	_, unavailable, err = failing(t.Context(), []string{"bb-1"})
+	if err != nil || !strings.Contains(unavailable["bb-1"], "database is locked") {
+		t.Fatalf("open failure: unavailable=%v err=%v, want bb-1 unavailable naming the open error", unavailable, err)
+	}
+
+	noRoutes := newCrossRigIssueResolver(func() string { return t.TempDir() }, nil)
+	_, unavailable, err = noRoutes(t.Context(), []string{"bb-1"})
+	if err != nil || !strings.Contains(unavailable["bb-1"], "no routes.jsonl") {
+		t.Fatalf("no routes: unavailable=%v err=%v, want bb-1 unavailable naming routes.jsonl", unavailable, err)
 	}
 }
