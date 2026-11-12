@@ -119,3 +119,46 @@ func TestCrossRigOpenBlockerExcludesSourceFromReady(t *testing.T) {
 		})
 	}
 }
+
+// GH#5784 AC-2: the policy keeps no answer between evaluations, so closing,
+// pinning or reopening the foreign blocker changes the next query with no
+// write or sync in the source workspace.
+func TestCrossRigBlockerStatusIsReadAtEachQuery(t *testing.T) {
+	source := issue("aa-1")
+	raw := &fakeStore{
+		ready: []*types.Issue{source},
+		deps: map[string][]*types.Dependency{
+			source.ID: {externalDep(source.ID, "bb-1", types.DepBlocks)},
+		},
+	}
+	blocker := foreignIssue("bb-1", types.StatusOpen)
+	resolver := &fakeIssueResolver{issues: map[string]*types.Issue{"bb-1": blocker}}
+	store := crossRigStore(raw, resolver)
+
+	for i, step := range []struct {
+		status    types.Status
+		wantReady bool
+	}{
+		{types.StatusOpen, false},
+		{types.StatusClosed, true},
+		{types.StatusOpen, false}, // reopened
+		{types.StatusPinned, true},
+		{types.StatusInProgress, false},
+	} {
+		blocker.Status = step.status
+		ready, err := store.GetReadyWork(t.Context(), types.WorkFilter{})
+		if err != nil {
+			t.Fatalf("step %d GetReadyWork: %v", i, err)
+		}
+		if got := slices.Contains(issueIDs(ready), "aa-1"); got != step.wantReady {
+			t.Fatalf("step %d: bb-1 %s, aa-1 ready = %v, want %v", i, step.status, got, step.wantReady)
+		}
+		blocked, _, err := store.IsBlocked(t.Context(), "aa-1")
+		if err != nil || blocked == step.wantReady {
+			t.Fatalf("step %d: bb-1 %s, IsBlocked = %v %v, want %v", i, step.status, blocked, err, !step.wantReady)
+		}
+	}
+	if len(resolver.calls) != 10 {
+		t.Fatalf("resolver calls = %d, want one per evaluation (10)", len(resolver.calls))
+	}
+}

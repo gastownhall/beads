@@ -55,6 +55,21 @@ func AppliedToProvider(provider uow.UnitOfWorkProvider) bool {
 	return false
 }
 
+// ProviderEnforcesCrossRig is EnforcesCrossRig for the unit-of-work chain.
+func ProviderEnforcesCrossRig(provider uow.UnitOfWorkProvider) bool {
+	for provider != nil {
+		if p, ok := provider.(*uowProvider); ok {
+			return p.policy.resolveIssues != nil
+		}
+		u, ok := provider.(uow.ProviderUnwrapper)
+		if !ok {
+			return false
+		}
+		provider = u.Unwrap()
+	}
+	return false
+}
+
 // RunNonTx preserves the optional maintenance capability exposed by the
 // proxied provider. Wrapping the provider must not make unrelated commands
 // such as compact lose access to their pinned connection.

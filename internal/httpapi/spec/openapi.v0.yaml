@@ -9250,7 +9250,7 @@ components:
             parent-child descendants and orphans every other dependent (see
             `DeleteIssuesRequest.cascade`; a server without it deletes every
             transitive dependent, so a client refuses to send `cascade` to
-            one). One behavior token is
+            one). Two behavior tokens are
             CONDITIONAL rather than build-level: `policy.external_dependencies`
             announces that this server's ready, blocked-listing, claim,
             claim-next, close, blocking and dependency-tree operations already
@@ -9261,14 +9261,22 @@ components:
             `blocked_by`). A server advertises it
             only when it enforces that policy; a client that sees it must not
             apply the policy again, and a client that does not see it applies
-            the policy itself. The
+            the policy itself. `policy.cross_rig_dependencies`, advertised
+            only beside it, announces that the same policy also enforces a
+            bare cross-rig issue id stored as a `blocks` or
+            `conditional-blocks` target (a cross-prefix dependency): its
+            source stays blocked until that issue, read through this
+            server's prefix routes, is closed or pinned. A client that sees
+            `policy.external_dependencies` without it applies the cross-rig
+            part itself. The
             list grows additively, and an operation never appears here unless
             it is fully implemented. This is how a client checks for an
             operation or a behavior — never the version string.
 
 
             THIS LIST IS BUILD-LEVEL, NOT WORKSPACE-LEVEL, apart from the
-            conditional `policy.external_dependencies` above, which depends on
+            conditional `policy.external_dependencies` and
+            `policy.cross_rig_dependencies` above, which depend on
             how this server composed its roles rather than on the build. It
             says which operations this binary serves, and for every entry but
             two that is the whole answer. `events.list` and `events.watch` are
