@@ -2136,6 +2136,16 @@ const declinedConflictStamp = "2026-01-02 03:04:05"
 // would exercise the SQL route, which already aborted correctly.
 func setupDeclinedCLIPullConflict(t *testing.T, ctx context.Context) (*DoltStore, *gitRemoteSetup, string) {
 	t.Helper()
+	return setupCLIPullDivergence(t, ctx,
+		fmt.Sprintf("UPDATE issues SET notes = 'from B', updated_at = '%s' WHERE id = '%s'", declinedConflictStamp, declinedConflictIssueID),
+		fmt.Sprintf("UPDATE issues SET notes = 'from A', updated_at = '%s' WHERE id = '%s'", declinedConflictStamp, declinedConflictIssueID))
+}
+
+// setupCLIPullDivergence is setupDeclinedCLIPullConflict's topology with the
+// two writers' edits as parameters: peerSQL runs in the peer clone, which
+// commits and pushes it; localSQL runs on the store, which commits it.
+func setupCLIPullDivergence(t *testing.T, ctx context.Context, peerSQL, localSQL string) (*DoltStore, *gitRemoteSetup, string) {
+	t.Helper()
 	// A port the environment names counts as the store's own server only
 	// with bd's state files for it (cliDirServesServer), which this fixture's
 	// hand-started server has none of; clear them, as
@@ -2184,17 +2194,13 @@ func setupDeclinedCLIPullConflict(t *testing.T, ctx context.Context) (*DoltStore
 
 	cloneDir := filepath.Join(setup.baseDir, "writer-b")
 	doltClone(t, setup.remoteURL, cloneDir)
-	runDoltSQL(t, cloneDir, fmt.Sprintf(
-		"UPDATE issues SET notes = 'from B', updated_at = '%s' WHERE id = '%s'",
-		declinedConflictStamp, declinedConflictIssueID))
-	sourceCommitAndPush(t, cloneDir, "writer B notes")
+	runDoltSQL(t, cloneDir, peerSQL)
+	sourceCommitAndPush(t, cloneDir, "writer B edit")
 
-	if _, err := store.db.ExecContext(ctx,
-		"UPDATE issues SET notes = 'from A', updated_at = ? WHERE id = ?",
-		declinedConflictStamp, declinedConflictIssueID); err != nil {
-		t.Fatalf("local notes edit: %v", err)
+	if _, err := store.db.ExecContext(ctx, localSQL); err != nil {
+		t.Fatalf("local edit: %v", err)
 	}
-	if err := store.Commit(ctx, "writer A notes"); err != nil {
+	if err := store.Commit(ctx, "writer A edit"); err != nil {
 		t.Fatalf("Commit local edit: %v", err)
 	}
 
@@ -2280,5 +2286,41 @@ func TestGitRemoteDeclinedConflictPullAbortsMerge(t *testing.T) {
 	}
 	if notes != "from A" {
 		t.Errorf("local notes = %q after the declined pull; want %q", notes, "from A")
+	}
+}
+
+// TestGitRemoteDeclinedConflictPullLeavesWritesWorking pins GH#7839's outage
+// (AC-2): after a declined CLI-route pull returns, the database must take
+// writes again, and a retried pull must report the same conflict rather than
+// fail staging the pre-pull commit over a conflicted working set ("Merge
+// conflict detected, @autocommit transaction rolled back").
+func TestGitRemoteDeclinedConflictPullLeavesWritesWorking(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+	defer cancel()
+	store, _, _ := setupDeclinedCLIPullConflict(t, ctx)
+
+	if err := store.Pull(ctx); err == nil {
+		t.Fatal("the first pull over a declined conflict returned nil; the fixture built no conflict")
+	}
+
+	issue := &types.Issue{ID: "gr-after", Title: "written after the declined pull", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue after the declined pull: %v", err)
+	}
+	if err := store.Commit(ctx, "add gr-after"); err != nil {
+		t.Fatalf("Commit after the declined pull: %v", err)
+	}
+
+	waitOutGitRemoteReadCache()
+	retryErr := store.Pull(ctx)
+	var mce *versioncontrolops.MergeConflictsError
+	if !errors.As(retryErr, &mce) {
+		t.Fatalf("retried Pull error = %v; want the conflict reported again as a *versioncontrolops.MergeConflictsError", retryErr)
+	}
+	if got, err := store.GetIssue(ctx, "gr-after"); err != nil || got == nil {
+		t.Fatalf("gr-after, written between the pulls, is gone after the retry (err=%v)", err)
+	}
+	if merging, n := freshSessionMergeState(t, ctx, store); merging || n != 0 {
+		t.Errorf("after the retried pull a fresh session sees is_merging=%v and %d conflicted table(s); want neither", merging, n)
 	}
 }
