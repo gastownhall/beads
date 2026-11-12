@@ -4,6 +4,7 @@ package dolt
 
 import (
 	"context"
+	"database/sql"
 	"encoding/csv"
 	"errors"
 	"fmt"
@@ -2108,5 +2109,325 @@ func TestPushPullAtAHostBdDoesNotRunMoveTheServersData(t *testing.T) {
 	}
 	if _, err := store.GetIssue(ctx, "lo-third"); err != nil {
 		t.Fatalf("the server lacks the remote's lo-third after Pull: %v", err)
+	}
+}
+
+// declinedConflictIssueID is the issue both writers edit in the GH#7839
+// fixtures below.
+const declinedConflictIssueID = "gr-conflict"
+
+// declinedConflictStamp is the updated_at both writers stamp on their edit.
+// The issues resolver settles a cell both sides changed by last-write-wins on
+// updated_at and leaves equal stamps for the operator (automerge.go), so an
+// equal stamp is what makes the resolver DECLINE the conflict instead of
+// settling it, which is the case GH#7839 is about.
+const declinedConflictStamp = "2026-01-02 03:04:05"
+
+// setupDeclinedCLIPullConflict builds the GH#7839 topology: a store whose
+// sql-server serves its own directory, a git-protocol origin, and a peer
+// clone. Both sides commit a different notes value on the same issue with the
+// same updated_at; the peer pushes. The returned clone directory is the peer.
+// The store is left with its own edit committed, so the next pull is a
+// conflicting merge the auto-resolver declines.
+//
+// It also pins the route: dolt normalizes the fixture's file:// URL to
+// git+file:// (a git-protocol URL), and the store routes pulls from origin
+// through the CLI subprocess, not CALL DOLT_PULL. Without that this fixture
+// would exercise the SQL route, which already aborted correctly.
+func setupDeclinedCLIPullConflict(t *testing.T, ctx context.Context) (*DoltStore, *gitRemoteSetup, string) {
+	t.Helper()
+	return setupCLIPullDivergence(t, ctx,
+		fmt.Sprintf("UPDATE issues SET notes = 'from B', updated_at = '%s' WHERE id = '%s'", declinedConflictStamp, declinedConflictIssueID),
+		fmt.Sprintf("UPDATE issues SET notes = 'from A', updated_at = '%s' WHERE id = '%s'", declinedConflictStamp, declinedConflictIssueID))
+}
+
+// setupCLIPullDivergence is setupDeclinedCLIPullConflict's topology with the
+// two writers' edits as parameters: peerSQL runs in the peer clone, which
+// commits and pushes it; localSQL runs on the store, which commits it.
+func setupCLIPullDivergence(t *testing.T, ctx context.Context, peerSQL, localSQL string) (*DoltStore, *gitRemoteSetup, string) {
+	t.Helper()
+	// A port the environment names counts as the store's own server only
+	// with bd's state files for it (cliDirServesServer), which this fixture's
+	// hand-started server has none of; clear them, as
+	// TestPushPullAtAHostBdDoesNotRunMoveTheServersData does, so the store
+	// proves its server by the lock and info file alone.
+	for _, env := range []string{"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT", "BEADS_TEST_MODE", "BEADS_DOLT_SHARED_SERVER"} {
+		t.Setenv(env, "")
+	}
+	store, setup, cleanup := setupEmbeddedGitRemote(t)
+	t.Cleanup(cleanup)
+
+	remotes, err := store.ListRemotes(ctx)
+	if err != nil {
+		t.Fatalf("ListRemotes: %v", err)
+	}
+	var originURL string
+	for _, r := range remotes {
+		if r.Name == "origin" {
+			originURL = r.URL
+		}
+	}
+	if !doltutil.IsGitProtocolURL(originURL) {
+		t.Fatalf("origin URL %q is not a git-protocol URL; the fixture would not take the CLI pull route", originURL)
+	}
+	useCLI, err := store.prepareCLIRouteForGitProtocol(ctx, "origin")
+	if err != nil || !useCLI {
+		t.Fatalf("prepareCLIRouteForGitProtocol(origin) = %v, %v; want the CLI route", useCLI, err)
+	}
+
+	issue := &types.Issue{
+		ID:        declinedConflictIssueID,
+		Title:     "conflict target",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  2,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if err := store.Commit(ctx, "add "+declinedConflictIssueID); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := store.Push(ctx); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+
+	cloneDir := filepath.Join(setup.baseDir, "writer-b")
+	doltClone(t, setup.remoteURL, cloneDir)
+	runDoltSQL(t, cloneDir, peerSQL)
+	sourceCommitAndPush(t, cloneDir, "writer B edit")
+
+	if _, err := store.db.ExecContext(ctx, localSQL); err != nil {
+		t.Fatalf("local edit: %v", err)
+	}
+	if err := store.Commit(ctx, "writer A edit"); err != nil {
+		t.Fatalf("Commit local edit: %v", err)
+	}
+
+	// The peer pushed from its own process; this store's sql-server last read
+	// the remote during store.Push() above and caches that view briefly.
+	waitOutGitRemoteReadCache()
+	return store, setup, cloneDir
+}
+
+// freshSessionMergeState reads the merge state of the store's database from a
+// brand-new connection, the way the issue's reporter checked it: the pull's
+// merge state is on the server's working set, so a session that did not run
+// the pull must not see it.
+func freshSessionMergeState(t *testing.T, ctx context.Context, store *DoltStore) (merging bool, conflictTables int) {
+	t.Helper()
+	db, err := sql.Open("mysql", store.connStr)
+	if err != nil {
+		t.Fatalf("open fresh session: %v", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if err := db.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&merging); err != nil {
+		t.Fatalf("fresh session merge status: %v", err)
+	}
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_conflicts").Scan(&conflictTables); err != nil {
+		t.Fatalf("fresh session conflicts: %v", err)
+	}
+	return merging, conflictTables
+}
+
+// TestGitRemoteDeclinedConflictPullAbortsMerge pins GH#7839 (AC-1): a pull
+// over a git-protocol remote runs `dolt pull` as a subprocess against the
+// server's own directory, and on a conflict the resolver declines it used to
+// leave the merge open on the server's working set. It must instead end where
+// the SQL route ends: a MergeConflictsError naming issues that wraps the CLI
+// pull's own error, no open merge or conflict rows for any session, and the
+// branch and local edit exactly as they were before the pull.
+func TestGitRemoteDeclinedConflictPullAbortsMerge(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+	defer cancel()
+	store, _, _ := setupDeclinedCLIPullConflict(t, ctx)
+
+	preHead, err := store.branchHash(ctx, store.branch)
+	if err != nil {
+		t.Fatalf("pre-pull head: %v", err)
+	}
+
+	pullErr := store.Pull(ctx)
+
+	var mce *versioncontrolops.MergeConflictsError
+	if !errors.As(pullErr, &mce) {
+		t.Fatalf("Pull error = %v; want a *versioncontrolops.MergeConflictsError", pullErr)
+	}
+	var tables []string
+	for _, c := range mce.Conflicts {
+		tables = append(tables, c.Field)
+	}
+	if len(tables) != 1 || tables[0] != "issues" {
+		t.Errorf("MergeConflictsError conflicts = %v; want exactly [issues]", tables)
+	}
+	if mce.MergeErr == nil || !strings.Contains(mce.MergeErr.Error(), "dolt pull") {
+		t.Errorf("MergeConflictsError.MergeErr = %v; want the CLI pull's own error", mce.MergeErr)
+	}
+
+	merging, conflictTables := freshSessionMergeState(t, ctx, store)
+	if merging {
+		t.Error("a fresh session sees dolt_merge_status.is_merging = 1 after the declined pull; want the merge aborted")
+	}
+	if conflictTables != 0 {
+		t.Errorf("a fresh session sees %d conflicted table(s) after the declined pull; want 0", conflictTables)
+	}
+
+	postHead, err := store.branchHash(ctx, store.branch)
+	if err != nil {
+		t.Fatalf("post-pull head: %v", err)
+	}
+	if postHead != preHead {
+		t.Errorf("branch head moved from %s to %s; want the pre-pull head", preHead, postHead)
+	}
+	var notes string
+	if err := store.db.QueryRowContext(ctx, "SELECT notes FROM issues WHERE id = ?", declinedConflictIssueID).Scan(&notes); err != nil {
+		t.Fatalf("read local notes: %v", err)
+	}
+	if notes != "from A" {
+		t.Errorf("local notes = %q after the declined pull; want %q", notes, "from A")
+	}
+}
+
+// TestGitRemoteDeclinedConflictPullLeavesWritesWorking pins GH#7839's outage
+// (AC-2): after a declined CLI-route pull returns, the database must take
+// writes again, and a retried pull must report the same conflict rather than
+// fail staging the pre-pull commit over a conflicted working set ("Merge
+// conflict detected, @autocommit transaction rolled back").
+func TestGitRemoteDeclinedConflictPullLeavesWritesWorking(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+	defer cancel()
+	store, _, _ := setupDeclinedCLIPullConflict(t, ctx)
+
+	if err := store.Pull(ctx); err == nil {
+		t.Fatal("the first pull over a declined conflict returned nil; the fixture built no conflict")
+	}
+
+	issue := &types.Issue{ID: "gr-after", Title: "written after the declined pull", IssueType: types.TypeTask, Status: types.StatusOpen, Priority: 2}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue after the declined pull: %v", err)
+	}
+	if err := store.Commit(ctx, "add gr-after"); err != nil {
+		t.Fatalf("Commit after the declined pull: %v", err)
+	}
+
+	waitOutGitRemoteReadCache()
+	retryErr := store.Pull(ctx)
+	var mce *versioncontrolops.MergeConflictsError
+	if !errors.As(retryErr, &mce) {
+		t.Fatalf("retried Pull error = %v; want the conflict reported again as a *versioncontrolops.MergeConflictsError", retryErr)
+	}
+	if got, err := store.GetIssue(ctx, "gr-after"); err != nil || got == nil {
+		t.Fatalf("gr-after, written between the pulls, is gone after the retry (err=%v)", err)
+	}
+	if merging, n := freshSessionMergeState(t, ctx, store); merging || n != 0 {
+		t.Errorf("after the retried pull a fresh session sees is_merging=%v and %d conflicted table(s); want neither", merging, n)
+	}
+}
+
+// TestGitRemotePeerDeclinedConflictPullAbortsMerge pins AC-3: the same
+// declined conflict through PullFrom over a git-protocol peer (the CLI peer
+// route, doltCLIPullFromPeer) returns the conflicts as data with a nil error,
+// PullFrom's contract, and leaves no conflicted merge open.
+func TestGitRemotePeerDeclinedConflictPullAbortsMerge(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+	defer cancel()
+	store, _, _ := setupDeclinedCLIPullConflict(t, ctx)
+
+	useCLI, err := store.prepareCLIRouteForPeerGitProtocol(ctx, "origin")
+	if err != nil || !useCLI {
+		t.Fatalf("prepareCLIRouteForPeerGitProtocol(origin) = %v, %v; want the CLI peer route", useCLI, err)
+	}
+	preHead, err := store.branchHash(ctx, store.branch)
+	if err != nil {
+		t.Fatalf("pre-pull head: %v", err)
+	}
+
+	conflicts, pullErr := store.PullFrom(ctx, "origin")
+	if pullErr != nil {
+		t.Fatalf("PullFrom error = %v; want the conflicts as data with a nil error", pullErr)
+	}
+	if len(conflicts) != 1 || conflicts[0].Field != "issues" {
+		t.Errorf("PullFrom conflicts = %+v; want exactly the issues table", conflicts)
+	}
+	if merging, n := freshSessionMergeState(t, ctx, store); merging || n != 0 {
+		t.Errorf("after PullFrom a fresh session sees is_merging=%v and %d conflicted table(s); want the merge aborted", merging, n)
+	}
+	if postHead, err := store.branchHash(ctx, store.branch); err != nil || postHead != preHead {
+		t.Errorf("branch head after PullFrom = %s (err=%v); want the pre-pull head %s", postHead, err, preHead)
+	}
+}
+
+// TestGitRemoteResolvedConflictPullStillLands pins AC-6: settlement changes
+// nothing for a CLI-route pull the resolver CAN settle. A title both sides
+// edited with different updated_at stamps is resolved last-write-wins and the
+// merge concludes; a later pull with nothing contested merges cleanly. Both
+// return nil, deliver the merged data, and leave no merge open.
+func TestGitRemoteResolvedConflictPullStillLands(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+	defer cancel()
+	store, _, cloneDir := setupCLIPullDivergence(t, ctx,
+		fmt.Sprintf("UPDATE issues SET title = 'title from B', updated_at = '2026-01-02 03:04:09' WHERE id = '%s'", declinedConflictIssueID),
+		fmt.Sprintf("UPDATE issues SET title = 'title from A', updated_at = '2026-01-02 03:04:05' WHERE id = '%s'", declinedConflictIssueID))
+
+	if err := store.Pull(ctx); err != nil {
+		t.Fatalf("Pull over a resolvable title conflict: %v", err)
+	}
+	got, err := store.GetIssue(ctx, declinedConflictIssueID)
+	if err != nil || got == nil {
+		t.Fatalf("GetIssue after the resolved pull: %v", err)
+	}
+	if got.Title != "title from B" {
+		t.Errorf("title after the resolved pull = %q; want the later edit %q", got.Title, "title from B")
+	}
+	if merging, n := freshSessionMergeState(t, ctx, store); merging || n != 0 {
+		t.Errorf("after the resolved pull a fresh session sees is_merging=%v and %d conflicted table(s); want neither", merging, n)
+	}
+
+	// A clean merge: the peer adds an issue nobody else touched.
+	sourceInsertIssue(t, cloneDir, "gr-clean", "clean addition from B")
+	sourceCommitAndPush(t, cloneDir, "add gr-clean")
+	waitOutGitRemoteReadCache()
+	if err := store.Pull(ctx); err != nil {
+		t.Fatalf("clean Pull: %v", err)
+	}
+	if clean, err := store.GetIssue(ctx, "gr-clean"); err != nil || clean == nil {
+		t.Fatalf("the clean pull did not deliver gr-clean (err=%v)", err)
+	}
+	if merging, n := freshSessionMergeState(t, ctx, store); merging || n != 0 {
+		t.Errorf("after the clean pull a fresh session sees is_merging=%v and %d conflicted table(s); want neither", merging, n)
+	}
+}
+
+// TestGitRemoteDeclinedConflictStrategyMergeRecovers pins AC-7, the recovery
+// the server-mode guidance names now that a declined pull no longer leaves a
+// live merge to resolve row by row: the pull fetched the remote branch, so
+// `bd vc merge origin/<branch> --strategy theirs` (MergeWithStrategy) applies
+// the remote edit and concludes the merge, with no strategy support on pull.
+func TestGitRemoteDeclinedConflictStrategyMergeRecovers(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+	defer cancel()
+	store, _, _ := setupDeclinedCLIPullConflict(t, ctx)
+
+	if err := store.Pull(ctx); err == nil {
+		t.Fatal("the pull over a declined conflict returned nil; the fixture built no conflict")
+	}
+
+	conflicts, err := store.MergeWithStrategy(ctx, "origin/"+store.branch, "theirs")
+	if err != nil {
+		t.Fatalf("MergeWithStrategy(origin/%s, theirs) after the declined pull: %v", store.branch, err)
+	}
+	if len(conflicts) == 0 {
+		t.Error("MergeWithStrategy resolved no conflicts; want the issues conflict the pull declined")
+	}
+	var notes string
+	if err := store.db.QueryRowContext(ctx, "SELECT notes FROM issues WHERE id = ?", declinedConflictIssueID).Scan(&notes); err != nil {
+		t.Fatalf("read notes: %v", err)
+	}
+	if notes != "from B" {
+		t.Errorf("notes after the theirs merge = %q; want the remote edit %q", notes, "from B")
+	}
+	if merging, n := freshSessionMergeState(t, ctx, store); merging || n != 0 {
+		t.Errorf("after the strategy merge a fresh session sees is_merging=%v and %d conflicted table(s); want it concluded", merging, n)
 	}
 }

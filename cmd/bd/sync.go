@@ -282,11 +282,12 @@ func runSyncLoop(ctx context.Context, ops syncOps, maxAttempts int) (*syncOutcom
 			// Which source fired decides what the operator is told about the
 			// state of the database, and the two answers are opposites. Live
 			// rows mean the conflict is sitting in the working set right now:
-			// that is what the CLI/git-protocol pull route leaves behind, since
-			// it deliberately does not abort for the operator (see
-			// finishCLIPull). Captured-only means the settle pass aborted the
-			// merge and restored the working set. Guessing either way sends the
-			// operator looking in the wrong place.
+			// a conflicted merge already open before the pull, or one bd could
+			// not attribute to the pull and so did not abort (GH#7839).
+			// Captured-only means the settle pass aborted the merge and restored
+			// the working set, as every pull route now does for a declined
+			// conflict. Guessing either way sends the operator looking in the
+			// wrong place.
 			out.ConflictsLive = len(live) > 0
 			// pullErr only describes the conflict itself when the merge
 			// captured it (merged is non-empty). If merged is empty, this

@@ -3340,3 +3340,18 @@ func TestDoltPushPositionalRemoteIsNotSilentlyIgnored(t *testing.T) {
 		})
 	}
 }
+
+// TestDoltPullHelpNamesServerModeStrategyMerge pins AC-7 of GH#7839: a
+// server-mode pull the auto-resolver declines now aborts its merge, so there is
+// no live conflict left for 'bd conflicts resolve' to act on. The help must
+// send server-mode users to the merge that decides the fetched branch in bulk
+// instead of advertising a remedy for a merge that no longer exists.
+func TestDoltPullHelpNamesServerModeStrategyMerge(t *testing.T) {
+	long := doltPullCmd.Long
+	if !strings.Contains(long, "bd vc merge <remote>/<branch> --strategy ours|theirs") {
+		t.Errorf("bd dolt pull help does not name the server-mode recovery 'bd vc merge <remote>/<branch> --strategy ours|theirs':\n%s", long)
+	}
+	if strings.Contains(long, "'bd conflicts resolve' after a pull") {
+		t.Errorf("bd dolt pull help still sends server-mode users to 'bd conflicts resolve' after a pull, which now leaves no live conflict:\n%s", long)
+	}
+}
