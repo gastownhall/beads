@@ -199,6 +199,25 @@ func TestChildSuffixReservation(t *testing.T) {
 		}
 		e.assertNext(t, "csr-sr-p", "csr-sr-p.4", "csr-sr-p.5")
 	})
+
+	// AC-5: the reservation only raises a counter. With the parent's counter
+	// at 10, creating P.8, renaming into P.9 and removing P.3 all leave it at
+	// 10, and the next child is P.11.
+	t.Run("ReservationNeverLowersTheCounter", func(t *testing.T) {
+		e := newChildSuffixEnv(t)
+		e.seedChildren(t, "csr-nd-p", false, false, 3)
+		e.create(t, "csr-nd-x", false)
+		if _, err := e.store.db.ExecContext(e.ctx, "REPLACE INTO child_counters (parent_id, last_child) VALUES (?, 10)", "csr-nd-p"); err != nil {
+			t.Fatalf("set child_counters[csr-nd-p] = 10: %v", err)
+		}
+		e.create(t, "csr-nd-p.8", false)
+		e.rename(t, "csr-nd-x", "csr-nd-p.9")
+		csrDeleteIssue(t, e, "csr-nd-p.3")
+		if got := e.counter(t, "child_counters", "csr-nd-p"); got != 10 {
+			t.Fatalf("child_counters[csr-nd-p] = %d after create, rename and removal below 10, want 10", got)
+		}
+		e.assertNext(t, "csr-nd-p", "csr-nd-p.11")
+	})
 }
 
 func csrDeleteIssue(t *testing.T, e *childSuffixEnv, id string) {
