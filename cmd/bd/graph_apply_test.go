@@ -674,8 +674,8 @@ func TestValidateGraphApplyPlanNodeFieldRules(t *testing.T) {
 		{name: "custom status accepted", customStatuses: []string{"triage"}, mutate: func(n *GraphApplyNode) { n.Status = "triage" }},
 		{name: "custom status rejected without config", mutate: func(n *GraphApplyNode) { n.Status = "triage" }, wantErr: "invalid status"},
 		{name: "negative estimate", mutate: func(n *GraphApplyNode) { n.EstimatedMinutes = &neg }, wantErr: "estimated_minutes"},
-		{name: "priority out of range", mutate: func(n *GraphApplyNode) { p := 9; n.Priority = &p }, wantErr: "priority must be between 0 and 4"},
-		{name: "priority bounds accepted", mutate: func(n *GraphApplyNode) { p := 0; n.Priority = &p }},
+		{name: "priority out of range", mutate: func(n *GraphApplyNode) { p := GraphPlanPriority(9); n.Priority = &p }, wantErr: "priority must be between 0 and 4"},
+		{name: "priority bounds accepted", mutate: func(n *GraphApplyNode) { p := GraphPlanPriority(0); n.Priority = &p }},
 		{name: "invalid wisp_type", mutate: func(n *GraphApplyNode) { n.WispType = "bogus" }, wantErr: "invalid wisp_type"},
 		{name: "valid wisp_type", mutate: func(n *GraphApplyNode) { n.WispType = "heartbeat" }},
 		{name: "invalid mol_type", mutate: func(n *GraphApplyNode) { n.MolType = "bogus" }, wantErr: "invalid mol_type"},
@@ -1624,7 +1624,7 @@ func TestBuildGraphApplyBatchRequestFieldsSurvive(t *testing.T) {
 // (CreateItem.DefaultPriority) with a zero Issue.Priority, and a node naming 0
 // stays P0 with the flag off. `bd create --graph` no longer spells the default.
 func TestBuildGraphApplyBatchRequestLeavesAnAbsentPriorityToTheRole(t *testing.T) {
-	zero := 0
+	zero := GraphPlanPriority(0)
 	req, err := buildGraphApplyBatchRequest(&GraphApplyPlan{Nodes: []GraphApplyNode{
 		{Key: "a", Title: "absent"},
 		{Key: "z", Title: "zero", Priority: &zero},
@@ -1948,5 +1948,78 @@ func TestValidateGraphApplyPlanRefusesRespelledDependencyTypes(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+// TestGraphPlanPriorityAcceptsCLIForms pins bd-esm0t5 (GH#3879 pitfall a): a
+// plan node's priority takes the same forms as `bd create --priority` — an
+// integer, or a string "1", "P1" or "p1" — and the built request stores 1. An
+// absent or null priority stays unset so the role applies its default.
+func TestGraphPlanPriorityAcceptsCLIForms(t *testing.T) {
+	for _, raw := range []string{`1`, `"1"`, `"P1"`, `"p1"`} {
+		t.Run(raw, func(t *testing.T) {
+			planJSON := `{"nodes":[{"key":"a","title":"A","priority":` + raw + `}]}`
+			var plan GraphApplyPlan
+			if err := json.Unmarshal([]byte(planJSON), &plan); err != nil {
+				t.Fatalf("parsing plan with priority %s: %v", raw, err)
+			}
+			if plan.Nodes[0].Priority == nil || int(*plan.Nodes[0].Priority) != 1 {
+				t.Fatalf("decoded priority = %v, want 1", plan.Nodes[0].Priority)
+			}
+			if err := validateGraphApplyPlan(&plan, nil, nil, GraphApplyOptions{}); err != nil {
+				t.Fatalf("validateGraphApplyPlan: %v", err)
+			}
+			req, err := buildGraphApplyBatchRequest(&plan, GraphApplyOptions{}, "actor", "")
+			if err != nil {
+				t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+			}
+			create := req.Items[0].Create
+			if create.DefaultPriority || create.Issue.Priority != 1 {
+				t.Fatalf("create item priority = %d (default %v), want 1", create.Issue.Priority, create.DefaultPriority)
+			}
+		})
+	}
+	for _, raw := range []string{`null`, ``} {
+		t.Run("unset "+raw, func(t *testing.T) {
+			field := ""
+			if raw != "" {
+				field = `,"priority":` + raw
+			}
+			var plan GraphApplyPlan
+			if err := json.Unmarshal([]byte(`{"nodes":[{"key":"a","title":"A"`+field+`}]}`), &plan); err != nil {
+				t.Fatalf("parsing plan: %v", err)
+			}
+			if plan.Nodes[0].Priority != nil {
+				t.Fatalf("decoded priority = %v, want nil (role default)", *plan.Nodes[0].Priority)
+			}
+		})
+	}
+}
+
+// TestGraphPlanPriorityRejectsBadForms pins the other half of bd-esm0t5 AC-5:
+// words, fractions and out-of-range P-forms are refused while the plan is
+// parsed, before any write, with an error naming the value; an in-range-typed
+// integer out of range still fails node validation with its existing message.
+func TestGraphPlanPriorityRejectsBadForms(t *testing.T) {
+	for raw, want := range map[string]string{`"high"`: `"high"`, `1.5`: `1.5`, `"P7"`: `"P7"`} {
+		t.Run(raw, func(t *testing.T) {
+			var plan GraphApplyPlan
+			err := json.Unmarshal([]byte(`{"nodes":[{"key":"a","title":"A","priority":`+raw+`}]}`), &plan)
+			if err == nil {
+				t.Fatalf("parsing plan accepted priority %s", raw)
+			}
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("error = %q, want it to name the value %s", err, want)
+			}
+		})
+	}
+
+	var plan GraphApplyPlan
+	if err := json.Unmarshal([]byte(`{"nodes":[{"key":"a","title":"A","priority":9}]}`), &plan); err != nil {
+		t.Fatalf("parsing plan with priority 9: %v", err)
+	}
+	err := validateGraphApplyPlan(&plan, nil, nil, GraphApplyOptions{})
+	if err == nil || !strings.Contains(err.Error(), "priority must be between 0 and 4") {
+		t.Fatalf("validateGraphApplyPlan(priority 9) = %v, want the range refusal", err)
 	}
 }

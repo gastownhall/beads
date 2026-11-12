@@ -44,7 +44,7 @@ type GraphApplyNode struct {
 	Assignee           string                     `json:"assignee,omitempty"`
 	AssignAfterCreate  bool                       `json:"assign_after_create,omitempty"`
 	Owner              string                     `json:"owner,omitempty"`
-	Priority           *int                       `json:"priority,omitempty"`          // nil defaults to P2
+	Priority           *GraphPlanPriority         `json:"priority,omitempty"`          // 0-4, "0"-"4" or "P0"-"P4"; nil defaults to P2
 	Estimate           *int                       `json:"estimate,omitempty"`          // minutes (alias for estimated_minutes)
 	EstimatedMinutes   *int                       `json:"estimated_minutes,omitempty"` // minutes
 	DueAt              *time.Time                 `json:"due_at,omitempty"`            // RFC3339
@@ -66,6 +66,42 @@ type GraphApplyNode struct {
 	Actor              string                     `json:"actor,omitempty"`      // type=event only
 	Target             string                     `json:"target,omitempty"`     // type=event only
 	Payload            string                     `json:"payload,omitempty"`    // type=event only
+}
+
+// GraphPlanPriority is a plan node's priority. It decodes the forms
+// `bd create --priority` accepts: a JSON integer, or a string "0"-"4" or
+// "P0"-"P4" (any case), checked by validation.ValidatePriority (GH#3879). It
+// encodes as a plain JSON number, so producers that send integers see no
+// change. The 0-4 range of an integer is checked by node validation.
+type GraphPlanPriority int
+
+// UnmarshalJSON implements json.Unmarshaler. A JSON null never reaches it:
+// encoding/json leaves the *GraphPlanPriority field nil, which asks the role
+// for its default priority.
+func (p *GraphPlanPriority) UnmarshalJSON(data []byte) error {
+	raw := strings.TrimSpace(string(data))
+	switch {
+	case strings.HasPrefix(raw, `"`):
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return fmt.Errorf("invalid priority %s: %w", raw, err)
+		}
+		v, err := validation.ValidatePriority(s)
+		if err != nil {
+			return err
+		}
+		*p = GraphPlanPriority(v)
+		return nil
+	case raw != "" && (raw[0] == '-' || (raw[0] >= '0' && raw[0] <= '9')):
+		v, err := json.Number(raw).Int64()
+		if err != nil {
+			return fmt.Errorf("invalid priority %s (expected an integer 0-4, or a string like \"P1\" or \"1\")", raw)
+		}
+		*p = GraphPlanPriority(v)
+		return nil
+	default:
+		return fmt.Errorf("invalid priority %s (expected an integer 0-4, or a string like \"P1\" or \"1\")", raw)
+	}
 }
 
 // effectiveParentKey resolves the parent alias: parent_key wins, then parent.
@@ -812,7 +848,7 @@ func graphApplyNodeIssue(node GraphApplyNode, opts GraphApplyOptions, createdBy,
 	// (CreateItem.DefaultPriority); the number is not spelled here.
 	priority := 0
 	if node.Priority != nil {
-		priority = *node.Priority
+		priority = int(*node.Priority)
 	}
 
 	ephemeral, noHistory, storageClass, err := graphApplyNodeStorageClass(node, opts)
