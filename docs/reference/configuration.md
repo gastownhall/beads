@@ -82,6 +82,8 @@ Unrecognized keys produce a warning with a did-you-mean suggestion; use the `cus
 
 These keys must live in `config.yaml`, not the database, because they are read before the database is opened. Writing them with `bd config set` automatically updates `config.yaml`.
 
+The `bd serve` settings surface (`PUT /v0/beads/config/{key}`, and the dashboard behind it) cannot write your `config.yaml`, so it refuses every one of these keys with a `400` and stores nothing: the database's config table is replicated by `bd dolt push`, and a secret stored there would reach every remote. Set them with `bd config set` in the workspace instead. `DELETE /v0/beads/config/{key}` still removes a row an older bd or server stored under one of these keys; rotate any secret that was already pushed.
+
 The full namespaces routed to YAML are:
 
 `routing.*`, `sync.*`, `git.*`, `directory.*`, `repos.*`, `external_projects.*`, `validation.*`, `lint.*`, `hierarchy.*`, `ai.*`, `backup.*`, `export.*`, `dolt.*`, `federation.*`, `metrics.*`, `list.*`, `audit.*`, `storage-class.*`
