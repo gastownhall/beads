@@ -3555,3 +3555,57 @@ func TestCheckGitignore_FlagsMissingMachineLocalStatePatterns(t *testing.T) {
 		t.Errorf("CheckGitignore Detail = %q, want Missing: %s", check.Detail, strings.Join(machineLocalStateFiles, ", "))
 	}
 }
+
+// TestFixGitignore_AppendsMissingMachineLocalStatePatterns checks that
+// bd doctor --fix heals a pre-GH#8318 .beads/.gitignore append-only: the
+// user's content survives as a prefix, each machine-local state name is
+// added once, the check then passes, and a second fix changes nothing.
+func TestFixGitignore_AppendsMissingMachineLocalStatePatterns(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	gitignorePath := filepath.Join(beadsDir, ".gitignore")
+	old := preMachineLocalStateTemplate(t)
+	if err := os.WriteFile(gitignorePath, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := FixGitignore(tmpDir); err != nil {
+		t.Fatalf("FixGitignore: %v", err)
+	}
+	fixed, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(fixed), old) {
+		t.Errorf("FixGitignore rewrote the existing content; want it kept as a prefix, got:\n%s", fixed)
+	}
+	lines := strings.Split(string(fixed), "\n")
+	for _, name := range machineLocalStateFiles {
+		n := 0
+		for _, line := range lines {
+			if strings.TrimSpace(line) == name {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("fixed .gitignore has %d lines for %q, want 1", n, name)
+		}
+	}
+	if check := CheckGitignore(tmpDir); check.Status != StatusOK {
+		t.Errorf("CheckGitignore after fix = %q, want %q (detail: %s)", check.Status, StatusOK, check.Detail)
+	}
+
+	if err := FixGitignore(tmpDir); err != nil {
+		t.Fatalf("second FixGitignore: %v", err)
+	}
+	again, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(again, fixed) {
+		t.Errorf("second FixGitignore changed the file:\nbefore:\n%s\nafter:\n%s", fixed, again)
+	}
+}
