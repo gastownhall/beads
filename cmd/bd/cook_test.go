@@ -1444,6 +1444,99 @@ func TestCookFormulaToSubgraph_StandaloneExpansionWithWorkflowVars(t *testing.T)
 	}
 }
 
+// TestCookFormulaToSubgraph_StandaloneExpansionTemplateGateAndWaitsFor checks
+// that a standalone expansion's waits_for, gate, notes and metadata reach the
+// cooked subgraph with the expansion's {target} and {var} placeholders
+// resolved (GH#6433).
+func TestCookFormulaToSubgraph_StandaloneExpansionTemplateGateAndWaitsFor(t *testing.T) {
+	f := &formula.Formula{
+		Formula: "release",
+		Version: 1,
+		Type:    formula.TypeExpansion,
+		Template: []*formula.Step{
+			{ID: "{target}.survey", Title: "Survey"},
+			{ID: "{target}.collect", Title: "Collect", WaitsFor: "children-of({target}.survey)"},
+			{
+				ID:       "{target}.approve",
+				Title:    "Approve",
+				Needs:    []string{"{target}.collect"},
+				Notes:    "Approve {target} for {env}",
+				Metadata: map[string]interface{}{"owner": "{owner}", "nested": map[string]interface{}{"env": "{env}"}},
+				Gate:     &formula.Gate{Type: "gh:pr", AwaitID: "{target}-{pr}", Timeout: "{timeout}", Repo: "{org}/beads"},
+			},
+		},
+	}
+	vars := map[string]string{"env": "prod", "owner": "alice", "pr": "42", "timeout": "2h", "org": "acme"}
+	if err := formula.MaterializeExpansion(f, "main", vars); err != nil {
+		t.Fatalf("MaterializeExpansion failed: %v", err)
+	}
+
+	subgraph, err := cookFormulaToSubgraph(f, "release")
+	if err != nil {
+		t.Fatalf("cookFormulaToSubgraph failed: %v", err)
+	}
+
+	const (
+		surveyID  = "release.main.survey"
+		collectID = "release.main.collect"
+		approveID = "release.main.approve"
+	)
+	var approve, gate *types.Issue
+	for _, issue := range subgraph.Issues {
+		switch {
+		case issue.ID == approveID:
+			approve = issue
+		case issue.IssueType == "gate":
+			gate = issue
+		}
+	}
+
+	var depList []string
+	for _, dep := range subgraph.Dependencies {
+		depList = append(depList, dep.IssueID+" -"+string(dep.Type)+"-> "+dep.DependsOnID)
+	}
+	hasDep := func(from, to string, depType types.DependencyType) bool {
+		for _, dep := range subgraph.Dependencies {
+			if dep.IssueID == from && dep.DependsOnID == to && dep.Type == depType {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasDep(collectID, surveyID, types.DepWaitsFor) {
+		t.Errorf("no waits-for edge %s -> %s; deps: %v", collectID, surveyID, depList)
+	}
+
+	if gate == nil {
+		t.Fatalf("no gate issue in the subgraph")
+	}
+	if gate.AwaitType != "gh:pr" || gate.AwaitID != "main-42" || gate.Timeout != 2*time.Hour {
+		t.Errorf("gate await = %q %q timeout %v, want gh:pr main-42 2h", gate.AwaitType, gate.AwaitID, gate.Timeout)
+	}
+	var gateMeta map[string]string
+	if err := json.Unmarshal(gate.Metadata, &gateMeta); err != nil || gateMeta["repo"] != "acme/beads" {
+		t.Errorf("gate metadata = %s (%v), want repo acme/beads", gate.Metadata, err)
+	}
+	if !hasDep(approveID, gate.ID, types.DepBlocks) {
+		t.Errorf("gate %s does not block %s; deps: %v", gate.ID, approveID, depList)
+	}
+
+	if approve == nil {
+		t.Fatalf("%s not found in the subgraph", approveID)
+	}
+	if approve.Notes != "Approve main for prod" {
+		t.Errorf("approve Notes = %q, want %q", approve.Notes, "Approve main for prod")
+	}
+	var meta map[string]interface{}
+	if err := json.Unmarshal(approve.Metadata, &meta); err != nil {
+		t.Fatalf("approve Metadata = %s: %v", approve.Metadata, err)
+	}
+	nested, _ := meta["nested"].(map[string]interface{})
+	if meta["owner"] != "alice" || nested["env"] != "prod" {
+		t.Errorf("approve Metadata = %v, want owner alice and nested env prod", meta)
+	}
+}
+
 // TestCookFormulaToSubgraph_StepMetadata verifies that a step's Metadata flows
 // through cook onto the resulting Issue.Metadata as a JSON object. Regression
 // for gastownhall/beads#3341.
