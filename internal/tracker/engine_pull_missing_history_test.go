@@ -262,3 +262,55 @@ func TestEnginePullMissingHistoryBulkRowsKeepGuards(t *testing.T) {
 		}
 	})
 }
+
+// TestEnginePullMissingHistoryHydratesNewStub pins AC-3 of #7294: a pre-linked
+// stub created after last_sync with no history row, and an older stub whose
+// historical ref was NULL or another issue's, keep their hydration, through a
+// single FetchIssue or by reusing an overlap-only bulk row, without the
+// missing-history warning.
+func TestEnginePullMissingHistoryHydratesNewStub(t *testing.T) {
+	for _, stub := range []struct {
+		name    string
+		created time.Time
+		// history is the stub's historical ref at last_sync; nil means no row.
+		history *string
+	}{
+		{name: "new stub without history", created: overlapLastSync.Add(time.Minute)},
+		{name: "older stub with NULL historical ref", created: overlapLastSync.Add(-24 * time.Hour), history: strPtr("")},
+		{name: "older stub with another historical ref", created: overlapLastSync.Add(-24 * time.Hour), history: strPtr("https://test.test/EXT-OLD")},
+	} {
+		for _, source := range []struct {
+			name        string
+			updated     time.Time
+			wantFetches int
+		}{
+			{name: "single fetch", updated: overlapLastSync.Add(-2 * time.Hour), wantFetches: 1},
+			{name: "overlap-only row", updated: overlapLastSync.Add(-30 * time.Second), wantFetches: 0},
+		} {
+			t.Run(stub.name+"/"+source.name, func(t *testing.T) {
+				ctx := context.Background()
+				local := linkedIssue("bd-stub", "EXT-1", "stub", stub.created, overlapLastSync.Add(10*time.Minute))
+				store := newMissingHistoryStore(local)
+				if stub.history != nil {
+					store.previousRefs[local.ID] = *stub.history
+				}
+				mock, _ := newOverlapTracker(staleRemote("EXT-1", source.updated))
+
+				result, err := NewEngine(mock, store, "sync").Sync(ctx, SyncOptions{Pull: true})
+				if err != nil {
+					t.Fatalf("Sync: %v", err)
+				}
+				if mock.fetchCalls != source.wantFetches {
+					t.Errorf("FetchIssue calls = %d, want %d", mock.fetchCalls, source.wantFetches)
+				}
+				if result.PullStats.Updated != 1 || local.Title != "stale remote title EXT-1" || local.Description != "stale remote body" {
+					t.Errorf("PullStats = %+v, stub = %q/%q, want the stub hydrated from the remote",
+						result.PullStats, local.Title, local.Description)
+				}
+				if len(result.Warnings) != 0 {
+					t.Errorf("Warnings = %q, want none", result.Warnings)
+				}
+			})
+		}
+	}
+}
