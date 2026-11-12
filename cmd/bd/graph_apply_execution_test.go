@@ -859,3 +859,91 @@ func TestExecuteGraphApplyRejectsBlockingThroughPlannedHierarchyRegardlessOfOrde
 		})
 	}
 }
+
+// TestExecuteGraphApplyEndGateRefusesCycleThroughStoredEdgeViaNewNode pins
+// that, with the per-edge probe dropped (bd-esm0t5), the role's end gate still
+// refuses a cycle that runs through a stored edge and a plan-local node: X and
+// Y are stored with Y depending on X; the plan adds n, makes X depend on n and
+// n depend on Y, closing X -> n -> Y -> X. Nothing from the plan may persist.
+func TestExecuteGraphApplyEndGateRefusesCycleThroughStoredEdgeViaNewNode(t *testing.T) {
+	ctx, db := withGraphApplyTestStore(t)
+
+	for _, id := range []string{"ga-stored-x", "ga-stored-y"} {
+		if err := store.CreateIssue(ctx, &types.Issue{
+			ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+		}, actor); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", id, err)
+		}
+	}
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID: "ga-stored-y", DependsOnID: "ga-stored-x", Type: types.DepBlocks,
+	}, actor); err != nil {
+		t.Fatalf("AddDependency(y -> x): %v", err)
+	}
+
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{{Key: "n", Title: "New node", Type: "task"}},
+		Edges: []GraphApplyEdge{
+			{FromID: "ga-stored-x", ToKey: "n", Type: "blocks"},
+			{FromKey: "n", ToID: "ga-stored-y", Type: "blocks"},
+		},
+	}
+	if err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{}); err != nil {
+		t.Fatalf("validateGraphApplyPlan: %v", err)
+	}
+
+	_, err := executeGraphApply(ctx, plan, GraphApplyOptions{})
+	// The end gate's wording; the per-edge probe would have said "adding
+	// dependency would create a cycle" against a single item instead.
+	if err == nil || !strings.Contains(err.Error(), "dependency cycle would be created") {
+		t.Fatalf("executeGraphApply error = %v, want the end gate's whole-graph cycle rejection", err)
+	}
+
+	var issues int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues WHERE title = ?", "New node").Scan(&issues); err != nil {
+		t.Fatalf("query plan node rows: %v", err)
+	}
+	if issues != 0 {
+		t.Fatalf("rows for plan node n after rejected plan = %d, want 0", issues)
+	}
+	var deps int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dependencies").Scan(&deps); err != nil {
+		t.Fatalf("query dependency rows: %v", err)
+	}
+	if deps != 1 {
+		t.Fatalf("dependency rows after rejected plan = %d, want 1 (only the stored y -> x edge)", deps)
+	}
+}
+
+// TestExecuteGraphApplyLateItemFailureLeavesNoRows guards the all-or-nothing
+// promise GH#3879 questioned: when the LAST item of a plan fails (an inline
+// dep naming an issue id that does not exist), every create and edge applied
+// before it is rolled back with it.
+func TestExecuteGraphApplyLateItemFailureLeavesNoRows(t *testing.T) {
+	ctx, db := withGraphApplyTestStore(t)
+
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "a", Title: "A", Type: "task"},
+			{Key: "b", Title: "B", Type: "task"},
+			{Key: "c", Title: "C", Type: "task", Deps: []GraphApplyNodeDep{{Target: "ga-does-not-exist"}}},
+		},
+		Edges: []GraphApplyEdge{{FromKey: "b", ToKey: "a", Type: "blocks"}},
+	}
+	if err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{}); err != nil {
+		t.Fatalf("validateGraphApplyPlan: %v", err)
+	}
+	if _, err := executeGraphApply(ctx, plan, GraphApplyOptions{}); err == nil {
+		t.Fatal("executeGraphApply succeeded with an inline dep on a missing issue; want an error")
+	}
+
+	for _, table := range []string{"issues", "dependencies"} {
+		var count int
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table).Scan(&count); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		if count != 0 {
+			t.Fatalf("%s rows after failed plan = %d, want 0", table, count)
+		}
+	}
+}
