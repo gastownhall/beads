@@ -7,6 +7,7 @@ package httpclient
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"io"
 	"net/url"
@@ -50,14 +51,41 @@ import (
 // workspace (servedTemplateWorkspace), not a fresh init of its own: creating
 // the schema is most of a case's cost under -race, and it is the same schema
 // every time.
+//
+// TWO DATABASE SOURCES. Which composition serves a case is a dimension of the
+// tier (served_source_switch_test.go). By default (BEADS_HTTP_SERVED_SOURCE
+// unset or "roles") the server binds the Roles arm over the embedded workspace
+// described above. With BEADS_HTTP_SERVED_SOURCE=provider it serves through
+// httpapi's Provider arm over a local dolt sql-server, the composition
+// production `bd serve` runs (served_provider_source_test.go), and the seeding
+// side is a server-mode store on the same database. Only newServedEnvExpecting
+// follows the switch; the shared composition stays on roles.
+
+// servedReference is the seeding side of a served case: the store every hook
+// seeds and reads through. On the roles source it is the embedded store the
+// server serves; on the provider source it is a server-mode store on the
+// provider's database (providerReference). Besides storage.DoltStorage it
+// carries the per-instance switches and the journal prune the journal and
+// heartbeat cases drive on the reference directly.
+type servedReference interface {
+	storage.DoltStorage
+	SetEventsJournalEnabled(enabled bool)
+	SetVersionedHistoryEnabled(enabled bool)
+	PruneEventsJournal(ctx context.Context, before int64, retainDays, retainRows int) (int64, error)
+}
+
+var _ servedReference = (*embeddeddolt.EmbeddedDoltStore)(nil)
 
 // servedEnv is one client-server-store triple and the hooks a fixture needs.
 type servedEnv struct {
-	reference *embeddeddolt.EmbeddedDoltStore
+	reference servedReference
 	subject   *Store
-	dataDir   string
-	database  string
-	prefix    string
+	// sqlDB is the provider source's raw handle on the case's database; nil on
+	// the roles source, whose hooks open a per-call embedded handle on dataDir.
+	sqlDB    *sql.DB
+	dataDir  string
+	database string
+	prefix   string
 	// base is the in-process server's URL, for a case that dials its own
 	// client the way the product does rather than through subject.
 	base *url.URL
@@ -95,16 +123,30 @@ func init() { servedTierLinked = true }
 // stopped being invoked at all, which no in-process check can see, is a
 // failure of scripts' TestBazelRetiredLanesCannotBeNarrowed, which pins
 // httpclient_served_test's env to both variables.
+//
+// The database-source switch (served_source_switch_test.go) changes what the
+// tier needs: a case newServedEnvExpecting serves from the provider source
+// needs a dolt sql-server, not the embedded engine. This gate is for the cases
+// that open embedded Dolt THEMSELVES, which the switch does not reach; they
+// keep the embedded gate under every source. servedGateDecision is the whole
+// decision and its table.
 func skipUnlessEmbeddedDolt(t *testing.T) {
 	t.Helper()
-	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") == "1" {
-		return
+	applyServedGate(t, true)
+}
+
+// applyServedGate applies servedGateDecision to the process environment: it
+// fails or skips the case, or returns the source the case is served from.
+func applyServedGate(t *testing.T, embeddedOnly bool) servedSource {
+	t.Helper()
+	source, gate, msg := servedGateDecision(os.Getenv, embeddedOnly)
+	switch gate {
+	case servedGateFail:
+		t.Fatal(msg)
+	case servedGateSkip:
+		t.Skip(msg)
 	}
-	if os.Getenv("BEADS_HTTP_TEST_REQUIRED") == "1" {
-		t.Fatal("BEADS_HTTP_TEST_REQUIRED=1 but BEADS_TEST_EMBEDDED_DOLT is not 1; " +
-			"the served-surface conformance tier is not enforced")
-	}
-	t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run the served-surface conformance tier")
+	return source
 }
 
 // newServedEnv boots a reference store, serves its roles over an in-process
@@ -130,29 +172,27 @@ func newServedEnv(t *testing.T, prefix string, opts ...func(*httpapi.Config)) *s
 // the client's wire witness is judged at the case's cleanup.
 func newServedEnvExpecting(t *testing.T, prefix, expectID string, opts ...func(*httpapi.Config)) *servedEnv {
 	t.Helper()
-	skipUnlessEmbeddedDolt(t)
+	source := applyServedGate(t, false)
 	// Registered first so its check runs last, after the server shuts down.
 	witness := newServedWitness(t, "newServedEnv("+prefix+")")
 
-	template, err := servedTemplateWorkspace()
-	if err != nil {
-		t.Fatalf("initialize the reference workspace template: %v", err)
-	}
-	beadsDir := t.TempDir()
-	if err := os.CopyFS(beadsDir, os.DirFS(template)); err != nil {
-		t.Fatalf("copy the reference workspace template: %v", err)
-	}
-	ctx := t.Context()
-	reference, err := embeddeddolt.Open(ctx, beadsDir, servedDatabase, "main")
-	if err != nil {
-		t.Fatalf("open the reference store: %v", err)
-	}
-	t.Cleanup(func() { _ = reference.Close() })
-	if err := reference.SetConfig(ctx, "issue_prefix", prefix); err != nil {
-		t.Fatalf("set the issue prefix: %v", err)
+	var (
+		cfg       httpapi.Config
+		reference servedReference
+		sqlDB     *sql.DB
+		dataDir   string
+		database  = servedDatabase
+	)
+	switch source {
+	case servedSourceProvider:
+		p := newServedProviderSource(t, prefix)
+		cfg, reference, sqlDB, database = p.config(), p.reference, p.sqlDB, p.database
+	default:
+		var ref *embeddeddolt.EmbeddedDoltStore
+		cfg, ref, dataDir = servedRolesSource(t, prefix)
+		reference = ref
 	}
 
-	cfg := serveConfig(t, reference)
 	servedServerConfig(&cfg)
 	for _, opt := range opts {
 		opt(&cfg)
@@ -189,14 +229,41 @@ func newServedEnvExpecting(t *testing.T, prefix, expectID string, opts ...func(*
 	return &servedEnv{
 		reference: reference,
 		subject:   subject,
-		// The SQL handle addresses the engine's data directory, which the
-		// store creates one level under the workspace. Passing beadsDir here
-		// finds no database at all.
-		dataDir:  filepath.Join(beadsDir, "embeddeddolt"),
-		database: servedDatabase,
-		prefix:   prefix,
-		base:     base,
+		sqlDB:     sqlDB,
+		dataDir:   dataDir,
+		database:  database,
+		prefix:    prefix,
+		base:      base,
 	}
+}
+
+// servedRolesSource is the roles source: a private copy of the template
+// workspace, opened as the reference store, with every role bound to it. It
+// returns the served config, the reference, and the data directory the raw
+// hooks open their per-call handle on.
+func servedRolesSource(t *testing.T, prefix string) (httpapi.Config, *embeddeddolt.EmbeddedDoltStore, string) {
+	t.Helper()
+	template, err := servedTemplateWorkspace()
+	if err != nil {
+		t.Fatalf("initialize the reference workspace template: %v", err)
+	}
+	beadsDir := t.TempDir()
+	if err := os.CopyFS(beadsDir, os.DirFS(template)); err != nil {
+		t.Fatalf("copy the reference workspace template: %v", err)
+	}
+	ctx := t.Context()
+	reference, err := embeddeddolt.Open(ctx, beadsDir, servedDatabase, "main")
+	if err != nil {
+		t.Fatalf("open the reference store: %v", err)
+	}
+	t.Cleanup(func() { _ = reference.Close() })
+	if err := reference.SetConfig(ctx, "issue_prefix", prefix); err != nil {
+		t.Fatalf("set the issue prefix: %v", err)
+	}
+	// The SQL handle addresses the engine's data directory, which the store
+	// creates one level under the workspace. Passing beadsDir here finds no
+	// database at all.
+	return serveConfig(t, reference), reference, filepath.Join(beadsDir, "embeddeddolt")
 }
 
 var (
@@ -459,7 +526,7 @@ func (e *servedEnv) getIssue(ctx context.Context, id string) (*types.Issue, erro
 // spelling at all (a raw delete and a raw dependency remove are on the
 // unsupported allowlist), and the question both contracts ask is whether the
 // client can READ — page or stream — the journal a server wrote.
-func servedJournalMutations(reference *embeddeddolt.EmbeddedDoltStore) conformance.JournalMutations {
+func servedJournalMutations(reference servedReference) conformance.JournalMutations {
 	return conformance.JournalMutations{
 		Create: func(ctx context.Context, id string) error {
 			return reference.CreateIssue(ctx, &types.Issue{
@@ -524,7 +591,7 @@ func (e *servedEnv) wispExists(ctx context.Context, id string) (bool, error) {
 // — so the per-call open is load-bearing, and a future refactor that hoists it
 // out for tidiness would reintroduce a deadlock, not a slowdown.
 func (e *servedEnv) queryScalar(ctx context.Context, query string, args []any, dest ...any) error {
-	db, cleanup, err := embeddeddolt.OpenSQL(ctx, e.dataDir, e.database, "main")
+	db, cleanup, err := e.openSQL(ctx)
 	if err != nil {
 		return err
 	}
@@ -572,8 +639,19 @@ func (e *servedEnv) commitPending(ctx context.Context) error {
 // commitMessage is the same act under the caller's own message, which the
 // staging fixture's Commit hook takes: those cases read `AS OF 'HEAD'` and the
 // entry they settle the seeds into is named after what it settled.
+//
+// It is CommitWithConfig, not Commit, so both sources settle the same thing.
+// The embedded store's Commit is DOLT_COMMIT('-Am'), config included; a
+// server-mode store's Commit leaves pending config out by design (GH#2455), and
+// on the provider source the provider's next '-Am' commit then sweeps that
+// config into the call under test. With the setup write left pending,
+// TestServedMetadataCASAWispSwapRecordsNoDurableHistory fails "a swap on a wisp
+// recorded 1 version-control entries, want none"; newServedProviderSource
+// settles the setup write, and this keeps a case's own config writes settled
+// too. CommitWithConfig is '-Am' on server mode and an alias of Commit on
+// embedded.
 func (e *servedEnv) commitMessage(ctx context.Context, message string) error {
-	return e.reference.Commit(ctx, message)
+	return e.reference.CommitWithConfig(ctx, message)
 }
 
 // execRaw is the single-statement spelling of exec, which is the shape the
@@ -587,7 +665,7 @@ func (e *servedEnv) execRaw(ctx context.Context, query string, args ...any) erro
 // exec runs a seeding script as ONE session, for the close/reopen cases that
 // need a state no supported verb can produce.
 func (e *servedEnv) exec(ctx context.Context, statements []conformance.SQLStatement) error {
-	db, cleanup, err := embeddeddolt.OpenSQL(ctx, e.dataDir, e.database, "main")
+	db, cleanup, err := e.openSQL(ctx)
 	if err != nil {
 		return err
 	}
@@ -603,4 +681,16 @@ func (e *servedEnv) exec(ctx context.Context, statements []conformance.SQLStatem
 		}
 	}
 	return nil
+}
+
+// openSQL is the raw handle the hooks read and write through. On the roles
+// source it is the per-call embedded handle queryScalar's comment explains. On
+// the provider source it is the case's MySQL pool on the dolt sql-server, which
+// keeps no idle connection, so each call still gets a fresh session; its
+// cleanup is a no-op because the pool closes with the case.
+func (e *servedEnv) openSQL(ctx context.Context) (*sql.DB, func() error, error) {
+	if e.sqlDB != nil {
+		return e.sqlDB, func() error { return nil }, nil
+	}
+	return embeddeddolt.OpenSQL(ctx, e.dataDir, e.database, "main")
 }
