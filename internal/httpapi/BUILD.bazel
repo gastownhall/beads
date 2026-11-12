@@ -105,6 +105,8 @@ go_test(
         "memories_test.go",
         "metadata_cas_test.go",
         "mount_census_test.go",
+        "mount_table_test.go",
+        "pipeline_census_test.go",
         "problem_test.go",
         "project_stamp_test.go",
         "reads_test.go",
@@ -130,6 +132,7 @@ go_test(
     ],
     data = [
         "claim.go",
+        ":repo_go_srcs",
         "//cmd/bd:list.go",
         "//cmd/bd:ready.go",
     ] + glob(["testdata/**"]),
