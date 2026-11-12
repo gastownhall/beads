@@ -167,6 +167,13 @@ var requiredPatterns = []string{
 	"http_local_metadata.json",
 	".local_version",
 	"backup/",
+	// Machine-local state beside backup/ (GH#8318): bd writes these at the
+	// top level of .beads/, and several hold absolute paths.
+	"dolt-backup.json",
+	"dolt-backup-state.json",
+	"dolt-config.log",
+	".auto-import-issues.jsonl",
+	"dolt-mode-migration.json",
 }
 
 // CheckGitignore checks if .beads/.gitignore is up to date.

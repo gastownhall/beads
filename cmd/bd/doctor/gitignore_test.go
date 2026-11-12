@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -3503,6 +3504,74 @@ func TestGitignoreTemplate_IgnoresMachineLocalStateFiles(t *testing.T) {
 		exitErr, ok := err.(*exec.ExitError)
 		if !ok || exitErr.ExitCode() != 1 {
 			t.Errorf("git check-ignore %s: unexpected exit (want 1), err = %v", name, err)
+		}
+	}
+}
+
+// strippedMachineLocalTemplate returns GitignoreTemplate with the five
+// machine-local state lines removed and a local custom rule on top, the file
+// a workspace created before GH#8318 (plus one local addition) has today.
+func strippedMachineLocalTemplate() string {
+	var b strings.Builder
+	b.WriteString("# my local rule\n")
+	for _, line := range strings.Split(GitignoreTemplate, "\n") {
+		if slices.Contains(machineLocalStateFiles, line) {
+			continue
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// TestCheckGitignore_FlagsMissingMachineLocalStatePatterns verifies doctor
+// flags a pre-GH#8318 .beads/.gitignore as outdated, naming exactly the five
+// machine-local state files as missing (AC-2), and that FixGitignore repairs
+// it append-only and idempotently (AC-3).
+func TestCheckGitignore_FlagsMissingMachineLocalStatePatterns(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	gitignorePath := filepath.Join(beadsDir, ".gitignore")
+	stripped := strippedMachineLocalTemplate()
+	if err := os.WriteFile(gitignorePath, []byte(stripped), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckGitignore(tmpDir)
+	if check.Status != "warning" {
+		t.Fatalf("expected warning status, got %s: %s", check.Status, check.Detail)
+	}
+	wantDetail := "Missing: " + strings.Join(machineLocalStateFiles, ", ")
+	if check.Detail != wantDetail {
+		t.Errorf("detail = %q, want %q", check.Detail, wantDetail)
+	}
+}
+
+// TestGitignoreCoversBackupAndAutoImportState pins the four-name subset of
+// GH#8318 that PR #8364 reported: the names must be in the template bd init
+// writes and in the patterns CheckGitignore requires.
+func TestGitignoreCoversBackupAndAutoImportState(t *testing.T) {
+	names := []string{
+		"dolt-backup.json",
+		"dolt-backup-state.json",
+		"dolt-config.log",
+		".auto-import-issues.jsonl",
+	}
+	for _, name := range names {
+		if !containsGitignorePattern(GitignoreTemplate, name) {
+			t.Errorf("GitignoreTemplate does not ignore %q", name)
+		}
+		found := false
+		for _, p := range requiredPatterns {
+			if p == name {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("requiredPatterns lacks %q", name)
 		}
 	}
 }
