@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
@@ -563,5 +564,160 @@ func TestRunCLIPullSettledRefusesOverOpenMerge(t *testing.T) {
 	}
 	if head != preHead {
 		t.Errorf("HEAD = %s after the refusal; want the untouched %s", head, preHead)
+	}
+}
+
+// TestRunCLIPullSettledLeavesUnownedMergeUntouched is AC-5's ownership
+// leg: a CLI pull whose subprocess leaves a merge open that is NOT sourced
+// from the pulled remote — another session racing a local-branch merge in
+// beside the pull — cannot be attributed to the pull, so settlement reports
+// an actionable settlement error and leaves the merge completely untouched:
+// no abort, no reset, conflicts intact, HEAD unmoved (GH#7839).
+func TestRunCLIPullSettledLeavesUnownedMergeUntouched(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+	db := store.db
+
+	var currentBranch string
+	if err := db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&currentBranch); err != nil {
+		t.Fatalf("active branch: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES ('w5-unowned', 'Local Title', '', '', '', '', 'open', 2, 'task')"); err != nil {
+		t.Fatalf("insert local issue: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'local issue')"); err != nil {
+		t.Fatalf("commit local: %v", err)
+	}
+	sourceBranch := currentBranch + "_w5_unowned_source"
+	if _, err := db.ExecContext(ctx, "CALL DOLT_BRANCH(?, 'HEAD~1')", sourceBranch); err != nil {
+		t.Fatalf("create source branch: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", sourceBranch); err != nil {
+		t.Fatalf("checkout source branch: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES ('w5-unowned', 'Source Title', '', '', '', '', 'open', 2, 'task')"); err != nil {
+		t.Fatalf("insert source issue: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'source issue')"); err != nil {
+		t.Fatalf("commit source: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", currentBranch); err != nil {
+		t.Fatalf("checkout current branch: %v", err)
+	}
+
+	var preHead string
+	if err := db.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&preHead); err != nil {
+		t.Fatalf("pre-pull head: %v", err)
+	}
+
+	// The pull "subprocess" runs AFTER the pre-pull check (no merge is open
+	// yet) and leaves behind an open conflicted merge sourced from a local
+	// branch — not a refs/remotes/origin/* ref the pull could own.
+	pullRan := false
+	err := store.runCLIPullSettled(ctx, "origin", func() error {
+		pullRan = true
+		tx, txErr := db.BeginTx(ctx, nil)
+		if txErr != nil {
+			return txErr
+		}
+		if _, txErr := tx.ExecContext(ctx, "SET @@dolt_allow_commit_conflicts = 1"); txErr != nil {
+			_ = tx.Rollback()
+			return txErr
+		}
+		_, mergeErr := tx.ExecContext(ctx, "CALL DOLT_MERGE(?)", sourceBranch)
+		if txErr := tx.Commit(); txErr != nil {
+			return errors.Join(txErr, mergeErr)
+		}
+		return errors.New("dolt pull failed: CONFLICT (content): Merge conflict in issues: exit status 1")
+	})
+	if !pullRan {
+		t.Fatal("the pull did not run; the test no longer exercises post-pull ownership attribution")
+	}
+	var settled *cliPullSettlementError
+	if !errors.As(err, &settled) {
+		t.Fatalf("runCLIPullSettled error = %v; want *cliPullSettlementError", err)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "cannot attribute to itself") {
+		t.Errorf("settlement error = %q; want it to say the merge cannot be attributed to the pull", msg)
+	}
+
+	// The unowned merge is preserved exactly: still open, conflicts intact,
+	// HEAD unmoved. Aborting it here would destroy the other session's work.
+	var isMerging bool
+	if err := db.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&isMerging); err != nil || !isMerging {
+		t.Errorf("is_merging=%v err=%v after the settlement; want the unowned open merge preserved", isMerging, err)
+	}
+	var conflicts int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_conflicts_issues").Scan(&conflicts); err != nil {
+		t.Fatalf("count conflicts after the settlement: %v", err)
+	}
+	if conflicts == 0 {
+		t.Error("the unowned merge's conflicts were cleared by the settlement")
+	}
+	var head string
+	if err := db.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&head); err != nil {
+		t.Fatalf("read HEAD after the settlement: %v", err)
+	}
+	if head != preHead {
+		t.Errorf("HEAD = %s after the settlement; want the untouched %s", head, preHead)
+	}
+}
+
+// TestPeerPullOutcomeKeepsSettlementErrorsAnError is AC-5's federation
+// leg: peerPullOutcome turns MergeConflictsError — and any live conflicts it
+// can read post-hoc — into conflicts-as-data for the caller, but a
+// cliPullSettlementError must stay an error. The refusal here leaves the
+// operator's merge open, so its conflicts ARE live and readable; without
+// the settlement precedence, GetConflicts would silently downgrade an
+// actionable settlement failure to a nil-error data return (GH#7839).
+func TestPeerPullOutcomeKeepsSettlementErrorsAnError(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	seedLocalBranchConflictedMerge(t, store)
+
+	// A peer pull refused over that merge: the transport never runs, and
+	// the refusal is a settlement error naming the open merge.
+	settleErr := store.runCLIPullSettled(ctx, "peer", func() error {
+		t.Error("the peer pull transport ran over an already-open merge")
+		return nil
+	})
+	var settled *cliPullSettlementError
+	if !errors.As(settleErr, &settled) {
+		t.Fatalf("runCLIPullSettled error = %v; want *cliPullSettlementError", settleErr)
+	}
+
+	// The refusal preserved the merge, so its conflicts are live: exactly
+	// the state that makes the settlement precedence load-bearing.
+	live, err := store.GetConflicts(ctx)
+	if err != nil {
+		t.Fatalf("GetConflicts: %v", err)
+	}
+	if len(live) == 0 {
+		t.Fatal("setup: expected live conflicts from the preserved open merge")
+	}
+
+	var conflicts []storage.Conflict
+	outcome := store.peerPullOutcome(ctx, "peer", settleErr, &conflicts)
+	if outcome == nil {
+		t.Fatal("peerPullOutcome converted a settlement error into conflicts-as-data; want an error")
+	}
+	if len(conflicts) != 0 {
+		t.Errorf("peerPullOutcome reported %d conflict(s) as data; want none — settlement errors are not conflicts-as-data", len(conflicts))
+	}
+	var kept *cliPullSettlementError
+	if !errors.As(outcome, &kept) {
+		t.Errorf("peerPullOutcome error = %v; want the settlement error preserved through the wrap", outcome)
+	}
+	if msg := outcome.Error(); !strings.Contains(msg, "failed to pull from peer peer") {
+		t.Errorf("peerPullOutcome error = %q; want it wrapped with the peer context", msg)
 	}
 }

@@ -141,6 +141,13 @@ func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Co
 // the conflicted merge back before returning, so its conflicts arrive only via
 // MergeConflictsError, captured pre-rollback (bd-578h9.15); the CLI route's
 // settlement captures them before its abort, for the same contract (GH#7839).
+// A cliPullSettlementError is never conflicts-as-data: it is either an unrestorable
+// settlement (the merge could not be verified clean after the abort, or the
+// open merge is not this pull's to settle) or a refusal over a pre-existing
+// merge, and in all three cases the right outcome is an actionable error.
+// Post-hoc GetConflicts is unreachable for it anyway — the aborted merge left
+// no live conflicts — so without this precedence it would silently degrade to
+// the wrapped pull error and lose the settlement diagnosis.
 func (s *DoltStore) peerPullOutcome(ctx context.Context, peer string, pullErr error, conflicts *[]storage.Conflict) error {
 	if pullErr == nil {
 		return nil
@@ -149,6 +156,10 @@ func (s *DoltStore) peerPullOutcome(ctx context.Context, peer string, pullErr er
 	if errors.As(pullErr, &mce) {
 		*conflicts = mce.Conflicts
 		return nil
+	}
+	var unsettled *cliPullSettlementError
+	if errors.As(pullErr, &unsettled) {
+		return fmt.Errorf("failed to pull from peer %s: %w", peer, pullErr)
 	}
 	if c, conflictErr := s.GetConflicts(ctx); conflictErr == nil && len(c) > 0 {
 		*conflicts = c
