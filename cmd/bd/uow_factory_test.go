@@ -551,3 +551,53 @@ func writeProxiedMetadata(t *testing.T, beadsDir string, fields map[string]strin
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(configfile.ConfigPath(beadsDir), data, 0o644))
 }
+
+// TestManagedProxiedServerOldDoltRefusedBeforeArchiveLevelConfig pins
+// gastownhall/beads#5627 (bd-n627z0): a dolt older than
+// doltserver.MinDoltVersionForArchiveLevelConfig strict-parses the managed
+// config and refuses to start on auto_gc_behavior.archive_level (#4986).
+// The managed proxied-server open must instead fail fast with an actionable
+// version error (the doltversion.RequiredMin floor, #7836), before
+// renderProxiedServerConfig writes that key — so a binary the floor refuses
+// never gets a config it cannot parse. Unlike
+// TestResolveAndProbeDoltRefusesBinaryBelowRequiredMin, which pins the
+// shared probe alone, this pins the probe-before-write ordering inside the
+// provider that owns the config write.
+func TestManagedProxiedServerOldDoltRefusedBeforeArchiveLevelConfig(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script dolt stub")
+	}
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(dir, "cache"))
+	// Clear inherited managed root/config overrides so the config-path
+	// assertions below target this workspace, not whatever the host
+	// environment points bd at.
+	t.Setenv("BEADS_PROXIED_SERVER_ROOT_PATH", "")
+	t.Setenv("BEADS_PROXIED_SERVER_CONFIG", "")
+
+	old := filepath.Join(dir, "dolt-old")
+	require.NoError(t, os.WriteFile(old, []byte("#!/bin/sh\necho 'dolt version 1.50.0'\n"), 0o755))
+	t.Setenv(doltversion.DoltBinEnvVar, old)
+
+	beadsDir := filepath.Join(dir, ".beads")
+	require.NoError(t, os.MkdirAll(beadsDir, 0o755))
+
+	// Resolve the config path without creating it (ensureProxiedServerConfig
+	// would); the refusal must happen before anything writes there.
+	configPath, isCustom, err := resolveProxiedServerConfigPath(beadsDir)
+	require.NoError(t, err)
+	require.False(t, isCustom, "the default managed config path, not a custom one, must be under test")
+
+	_, err = newManagedProxiedServerUOWProvider(context.Background(), beadsDir, sqlServerUOWTopology{})
+	require.ErrorIs(t, err, doltversion.ErrBelowRequiredMin)
+	// The refusal quotes the path with %q, which escapes a backslash (in
+	// TMPDIR, say), so match it quoted.
+	for _, want := range []string{fmt.Sprintf("%q", old), "1.50.0", "requires dolt " + doltversion.RequiredMin.String(), "Upgrade dolt"} {
+		assert.Contains(t, err.Error(), want)
+	}
+
+	_, statErr := os.Stat(configPath)
+	require.True(t, os.IsNotExist(statErr),
+		"no archive_level config may be written for a dolt that cannot parse it: %s exists", configPath)
+}
