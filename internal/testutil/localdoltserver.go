@@ -20,22 +20,6 @@ import (
 	"time"
 )
 
-// EnvDoltServerBackend selects where the test Dolt SQL server comes from:
-//
-//	container  the dolthub/dolt-sql-server image through testcontainers
-//	           (needs a docker daemon and the pulled image)
-//	local      `dolt sql-server` from the pinned dolt CLI, started by the test
-//	           process itself (no docker; works under remote execution)
-//
-// Unset means container, under plain `go test` and `bazel test` alike. A
-// Bazel action has no docker daemon, so there an unset target keeps the
-// pre-existing "Dolt unavailable, skipping" behavior; only targets (or
-// invocations, via --test_env) that set local explicitly start servers from
-// the pinned CLI that tools/bazel/test_env.sh puts on PATH. Defaulting to
-// local under Bazel would light up every Dolt suite that no lane runs with a
-// server today in every non-ci `bazel test`.
-const EnvDoltServerBackend = "BEADS_TEST_DOLT_SERVER"
-
 // EnvDoltServerGOMAXPROCS caps the CPUs a local test server uses. The
 // container jobs run on 4-vCPU GitHub runners; a remote worker runs many test
 // actions side by side, and an uncapped Go server sizes itself for the whole

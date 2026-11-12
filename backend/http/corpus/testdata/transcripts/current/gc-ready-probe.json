@@ -1,0 +1,9 @@
+{
+  "shape": "gc-ready-probe",
+  "exit": 0,
+  "requests": [
+    {"method":"GET","operation_id":"listReadyWork","path":"/v0/beads/ready","query":["limit","sort"],"status":200},
+    {"method":"GET","operation_id":"getContext","path":"/v0/beads/context","status":200},
+    {"method":"GET","operation_id":"countReadyWork","path":"/v0/beads/ready:count","status":200}
+  ]
+}

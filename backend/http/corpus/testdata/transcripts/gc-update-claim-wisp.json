@@ -1,0 +1,9 @@
+{
+  "shape": "gc-update-claim-wisp",
+  "requests": [
+    {"method":"GET","operation_id":"getContext","path":"/v0/beads/context","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-wisp-c","status":200},
+    {"method":"POST","operation_id":"claimIssue","path":"/v0/beads/issues/e2e-wisp-c:claim","body":["actor"],"status":404},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-wisp-c","status":200}
+  ]
+}

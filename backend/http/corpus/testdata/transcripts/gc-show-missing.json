@@ -1,0 +1,6 @@
+{
+  "shape": "gc-show-missing",
+  "requests": [
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-nonexistent","status":404}
+  ]
+}

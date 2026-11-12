@@ -102,7 +102,7 @@ func (s *InstrumentedStorage) op(ctx context.Context, name string, attrs ...attr
 // done ends the span and records the operation's duration and, on failure,
 // its error, both keyed by db.operation alone.
 func (s *InstrumentedStorage) done(ctx context.Context, span trace.Span, started opStart, err error) {
-	ms := float64(time.Since(started.at).Milliseconds())
+	ms := Milliseconds(time.Since(started.at))
 	s.dur.Record(ctx, ms, started.metric)
 	if err != nil {
 		span.RecordError(err)

@@ -57,8 +57,8 @@
 100 14 TestEmbeddedMigratePersonal_batchLeavesTheMoveUncommitted
 100 14 TestEmbeddedReopenConcurrent
 
-100 15 TestEmbeddedMigratePersonal_unsupportedPlanningFormatExit16
 100 15 TestEmbeddedPurgeWispsPlaneRetention
+100 15 TestEmbeddedTemplateGuardAcrossWriteVerbs
 
 100 16 TestEmbeddedMemoryConcurrent
 100 16 TestEmbeddedMigratePersonal_refusesIssueAlreadyInPlanningRepo
@@ -239,7 +239,6 @@
 
 100 54 TestEmbeddedDiscoveryPinsEnvFileReadonly
 100 54 TestEmbeddedFormatJSONAliasMatchesJSON
-100 54 TestEmbeddedGraphModeDependencyWorkspaceUnaffected
 100 54 TestEmbeddedInitAgentArtifactsGolden
 100 54 TestEmbeddedSearchConcurrent
 100 54 TestEmbeddedShowAsOfFailureExitCodes

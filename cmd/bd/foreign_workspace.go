@@ -44,9 +44,9 @@ import (
 // factories are reached from a foreign path only through openForeignStore.
 
 // admitForeignWorkspace refuses, without writing anything, the layouts bd
-// run inside beadsDir refuses from its contents: a workspace format this build
-// cannot open, a historical SQLite workspace, a removed or unrecognized
-// backend (checkDiscoveredBackend), and a legacy Dolt workspace
+// run inside beadsDir refuses from its contents: a historical SQLite
+// workspace, a removed or unrecognized backend (checkDiscoveredBackend), and
+// a legacy Dolt workspace
 // (guardForeignLegacyDoltWorkspace, which admits some legacy Dolt layouts bd
 // run inside refuses, and refuses some that bd run inside admits; see there
 // and targetSelectsServerMode). It returns beadsDir's metadata as
@@ -58,7 +58,7 @@ import (
 // bootstrap's ancestor walk and bd connect, which report the load error
 // themselves). A caller that writes into beadsDir before any Load runs, such
 // as a create or planning target being initialized, must refuse it first, as
-// admission does (refuseUninitializableTarget runs loadAndCheckWorkspaceFormat).
+// admission does (refuseUninitializableTarget runs configfile.LoadForDiscovery).
 func admitForeignWorkspace(beadsDir string) (*configfile.Config, error) {
 	cfg, err := checkDiscoveredBackend(beadsDir)
 	if err != nil {
