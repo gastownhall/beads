@@ -109,13 +109,16 @@ Examples:
 		SetLastTouchedID(fromID)
 
 		if jsonOutput {
-			return outputJSON(map[string]interface{}{
+			out := map[string]interface{}{
 				"status":        "added",
 				"issue_id":      fromID,
 				"depends_on_id": toID,
 				"type":          depType,
-			})
+			}
+			markExternalJSON(out, fromID, toID)
+			return outputJSON(out)
 		}
+		printCrossRigBlockingSemantics(fromID, toID, dt)
 		fmt.Printf("%s Linked: %s depends on %s (%s)\n",
 			ui.RenderPass("✓"), formatFeedbackIDParen(fromID, fromTitle), formatFeedbackIDParen(toID, toTitle), depType)
 		return nil

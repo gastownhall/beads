@@ -277,15 +277,18 @@ func runDepBlocksProxiedServer(cmd *cobra.Command, ctx context.Context, blockerI
 	warnProxiedUnresolvedDepTarget(ctx, blockedID, blockerID)
 
 	if jsonOutput {
-		_ = outputJSON(map[string]interface{}{
+		out := map[string]interface{}{
 			"status":     "added",
 			"blocker_id": blockerID,
 			"blocked_id": blockedID,
 			"type":       string(types.DepBlocks),
-		})
+		}
+		markExternalJSON(out, blockedID, blockerID)
+		_ = outputJSON(out)
 		return nil
 	}
 
+	printCrossRigBlockingSemantics(blockedID, blockerID, types.DepBlocks)
 	fmt.Printf("%s Added dependency: %s blocks %s\n",
 		ui.RenderPass("✓"),
 		formatFeedbackIDParen(blockerID, res.toTitle),
@@ -352,15 +355,18 @@ func runDepAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	warnProxiedUnresolvedDepTarget(ctx, fromID, toID)
 
 	if jsonOutput {
-		_ = outputJSON(map[string]interface{}{
+		out := map[string]interface{}{
 			"status":        "added",
 			"issue_id":      fromID,
 			"depends_on_id": toID,
 			"type":          string(dt),
-		})
+		}
+		markExternalJSON(out, fromID, toID)
+		_ = outputJSON(out)
 		return nil
 	}
 
+	printCrossRigBlockingSemantics(fromID, toID, dt)
 	fmt.Printf("%s Added dependency: %s %s %s (%s)\n",
 		ui.RenderPass("✓"),
 		formatFeedbackIDParen(fromID, res.fromTitle),
@@ -421,11 +427,13 @@ func runDepAddBulkProxied(cmd *cobra.Command, ctx context.Context, file, default
 	if jsonOutput {
 		out := make([]map[string]interface{}, 0, len(depEdges))
 		for _, edge := range depEdges {
-			out = append(out, map[string]interface{}{
+			row := map[string]interface{}{
 				"issue_id":      edge.IssueID,
 				"depends_on_id": edge.DependsOnID,
 				"type":          string(edge.Type),
-			})
+			}
+			markExternalJSON(row, edge.IssueID, edge.DependsOnID)
+			out = append(out, row)
 		}
 		_ = outputJSON(map[string]interface{}{
 			"status":       "added",
@@ -436,6 +444,9 @@ func runDepAddBulkProxied(cmd *cobra.Command, ctx context.Context, file, default
 	}
 
 	fmt.Printf("%s Added %d dependencies\n", ui.RenderPass("✓"), len(depEdges))
+	for _, edge := range depEdges {
+		printCrossRigBlockingSemantics(edge.IssueID, edge.DependsOnID, edge.Type)
+	}
 	return nil
 }
 

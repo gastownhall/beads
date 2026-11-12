@@ -17,10 +17,45 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
+	storeissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/issueops"
 )
+
+// markExternalJSON adds the GH#5784 feedback marker to a dep-add success
+// payload: `external: true` when the edge's target classification selected
+// external storage — an explicit external: reference, or a bare ID whose
+// prefix belongs to another rig — and no marker for a local edge. The marker
+// is classification's answer, not the command's guess, so every add form
+// reports the same edge the same way.
+func markExternalJSON(out map[string]interface{}, sourceID, targetID string) {
+	if storeissueops.IsExternalDepTarget(sourceID, targetID) {
+		out["external"] = true
+	}
+}
+
+// printCrossRigBlockingSemantics is the human counterpart of
+// markExternalJSON for an edge that actually gates readiness: a bare
+// cross-prefix blocks or conditional-blocks edge is stored in this rig's
+// database, and bd ready checks its target live through the routes the
+// dependent workspace configures — holding the source while the target is
+// open or unreadable. Informational types never get the note: their edges
+// cannot gate, and the feedback must not promise otherwise. Honors --quiet
+// like the package's other non-error notices.
+func printCrossRigBlockingSemantics(sourceID, targetID string, dt types.DependencyType) {
+	if quietFlag || IsExternalRef(targetID) {
+		return
+	}
+	if dt != types.DepBlocks && dt != types.DepConditionalBlocks {
+		return
+	}
+	if !storeissueops.IsExternalDepTarget(sourceID, targetID) {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "note: this rig's database stores the edge; bd ready checks %s live through .beads/routes.jsonl and holds %s while the target is open or unreadable\n", //nolint:gosec // G705: stderr, not a browser context
+		printedIssueID(targetID), printedIssueID(sourceID))
+}
 
 // addDependencyEdgesDirect asserts edges through the DependencyEditor role on
 // st — the store that owns the source issue.
@@ -340,14 +375,17 @@ Examples:
 			}
 
 			if jsonOutput {
-				return outputJSON(map[string]interface{}{
+				out := map[string]interface{}{
 					"status":     "added",
 					"blocker_id": toID,
 					"blocked_id": fromID,
 					"type":       depType,
-				})
+				}
+				markExternalJSON(out, fromID, toID)
+				return outputJSON(out)
 			}
 
+			printCrossRigBlockingSemantics(fromID, toID, types.DepBlocks)
 			fmt.Printf("%s Added dependency: %s blocks %s\n",
 				ui.RenderPass("✓"), formatFeedbackIDParen(toID, lookupTitle(toID)), formatFeedbackIDParen(fromID, lookupTitle(fromID)))
 			return nil
@@ -382,6 +420,12 @@ object with "from" and "to" fields, and may include "type". The aliases
 External references are stored as-is and resolved at query time using
 the external_projects config. They block the issue until the capability
 is "shipped" in the target project.
+
+A target whose ID prefix belongs to another rig (a bare cross-prefix ID)
+is stored in this database and gates readiness like a local edge: bd
+ready checks its target live through the routes in .beads/routes.jsonl,
+holding the source while the target is open or unreadable. Informational
+types (tracks, related, and the rest) never gate readiness.
 
 With no -t/--type the edge is created as type=blocks, which excludes the
 dependent from bd ready. When stderr is an interactive terminal, an advisory
@@ -545,14 +589,17 @@ Examples:
 		}
 
 		if jsonOutput {
-			return outputJSON(map[string]interface{}{
+			out := map[string]interface{}{
 				"status":        "added",
 				"issue_id":      fromID,
 				"depends_on_id": toID,
 				"type":          string(dt),
-			})
+			}
+			markExternalJSON(out, fromID, toID)
+			return outputJSON(out)
 		}
 
+		printCrossRigBlockingSemantics(fromID, toID, dt)
 		fmt.Printf("%s Added dependency: %s %s %s (%s)\n",
 			ui.RenderPass("✓"), formatFeedbackIDParen(fromID, fromTitle), depRelationFor(dt).phrase, formatFeedbackIDParen(toID, toTitle), dt)
 		return nil
@@ -764,11 +811,13 @@ func addBulkDependencies(cmd *cobra.Command, file string, defaultType string) er
 	if jsonOutput {
 		out := make([]map[string]interface{}, 0, len(resolved))
 		for _, edge := range resolved {
-			out = append(out, map[string]interface{}{
+			row := map[string]interface{}{
 				"issue_id":      edge.IssueID,
 				"depends_on_id": edge.DependsOnID,
 				"type":          string(edge.Type),
-			})
+			}
+			markExternalJSON(row, edge.IssueID, edge.DependsOnID)
+			out = append(out, row)
 		}
 		return outputJSON(map[string]interface{}{
 			"status":       "added",
@@ -778,6 +827,9 @@ func addBulkDependencies(cmd *cobra.Command, file string, defaultType string) er
 	}
 
 	fmt.Printf("%s Added %d dependencies\n", ui.RenderPass("✓"), len(resolved))
+	for _, edge := range resolved {
+		printCrossRigBlockingSemantics(edge.IssueID, edge.DependsOnID, edge.Type)
+	}
 	return nil
 }
 
