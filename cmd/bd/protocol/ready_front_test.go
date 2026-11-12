@@ -54,6 +54,29 @@ func TestProtocol_OpenParentDoesNotBlockChildren(t *testing.T) {
 	}
 }
 
+// TestProtocol_ChildOfInProgressParentRefusalAgreesWithReadyFront settles
+// gastownhall/beads#5036 end to end, where `bd dep add` refused a child's
+// blocking edge onto its parent claiming "Children inherit dependency on
+// parent completion via hierarchy" while `bd ready` listed that same child.
+// The two views must agree: the ready front has NO parent-completion gate
+// (G2.2), the refusal stays — the parent cannot close until its children
+// finish, so the gate would never clear — and it now says so instead of
+// advertising a gate that does not exist.
+func TestProtocol_ChildOfInProgressParentRefusalAgreesWithReadyFront(t *testing.T) {
+	t.Parallel()
+	w := newWorkspace(t)
+
+	parent := w.create("--title", "Parent in progress", "--type", "task")
+	w.run("update", parent, "--status", "in_progress")
+	child := w.create("--title", "Child of in-progress parent", "--type", "task", "--parent", parent)
+
+	// The reporter's observation, pinned as intended (#5036): an open or
+	// in-progress parent does not hold its children out of bd ready.
+	if ready := parseReadyIDs(t, w); !ready[child] {
+		t.Errorf("#5036: child %s of in_progress parent %s is not in the ready front; the hierarchy must not gate on parent completion (G2.2)", child, parent)
+	}
+}
+
 // TestProtocol_ReadyParentFilterIsTransitive pins protocol clause R3:
 // `bd ready --parent <id>` restricts to TRANSITIVE descendants, not just direct
 // children (GH#3396 — a one-hop subquery silently dropped grandchildren while
