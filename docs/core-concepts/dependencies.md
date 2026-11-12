@@ -189,6 +189,62 @@ rig in proxied-server mode yet
 ([#5861](https://github.com/gastownhall/beads/issues/5861)), so bd cannot check
 an ID routed to such a rig and stores it without a warning.
 
+### How a cross-rig ID blocks
+
+A bare cross-rig `blocks` or `conditional-blocks` edge gates its dependent the
+way a local blocker does. The edge lives only in the dependent's database; bd
+reads the target's status each time it asks whether the dependent is ready,
+so nothing needs syncing when the other rig closes or reopens it:
+
+```text
+bd-abc  ──blocks──▶  gt-123   (stored in bd's database)
+                       │
+   bd ready, bd blocked, bd close, bd update --claim
+   read gt-123 through bd's routes.jsonl at each check
+```
+
+- **Satisfied** when the target is `closed` or `pinned`; any other status
+  blocks. A target this database holds itself is read here first.
+- **Routed from the dependent's workspace.** The lookup follows the
+  `routes.jsonl` of the workspace bd runs in, the same routes `bd show <id>`
+  follows there. A target with no route there stays blocking.
+- **Unreadable stays blocking.** A target with no route, a missing database,
+  an ID the routed rig does not hold, or a failed read keeps the dependent
+  out of `bd ready`. The command still succeeds and prints one warning per
+  target on stderr, naming the ID and the reason:
+
+  ```text
+  Warning: cross-rig dependency target gt-123 cannot be read (no route for prefix "gt"); it remains blocking. Add a route for prefix "gt" to routes.jsonl, or remove the dependency with `bd dep remove`
+  ```
+
+  `bd close --force` still overrides the close guard.
+- **Other types never gate.** `tracks`, `related`, `parent-child`, and
+  `waits-for` edges to another rig leave the dependent ready, and bd does not
+  open the other rig to answer `bd ready` for them. A cross-rig `waits-for`
+  does not wait on the foreign bead's children; use a `blocks` edge, or a
+  [bead gate](/workflows/gates), to wait on another rig.
+- **Existing edges count after upgrading.** An edge added by an older bd,
+  which ignored it, starts blocking on the first check: an open target
+  removes its dependent from `bd ready`.
+
+`bd dep add` says when an edge is cross-rig: JSON output carries
+`"external": true`, and for a gating type the text names the rig that holds
+the edge and the target it waits on. `bd show` and `bd dep list` list a
+readable foreign target as a row marked `(external)`. `bd dep tree` hangs
+every foreign edge under its dependent as a marked leaf: the target's own
+fields when it reads, otherwise `<id>: unresolved: <reason>`. The tree never
+walks into the other rig's graph, and an unresolved leaf of a non-gating type
+does not mark its dependent blocked.
+
+Against `bd serve`, a server that applies the cross-rig policy itself
+advertises `policy.cross_rig_dependencies` and answers directly. Against an
+older server that applies only the `external:` capability policy, the newer
+client adds the cross-rig check to `bd ready`, `bd blocked`, and `bd dep tree`
+itself. It refuses `bd close --claim-next`, which it cannot check atomically,
+with an unsupported-operation error before anything is closed: close without
+`--claim-next`, then run `bd ready --claim`. An older client does not enforce
+cross-rig IDs.
+
 `bd doctor` cannot check such an edge either: it counts it as a
 cross-repository edge not verifiable here instead of reporting it as an
 orphaned dependency, and `bd doctor --fix` keeps it. An edge whose target is
