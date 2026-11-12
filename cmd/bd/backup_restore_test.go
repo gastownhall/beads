@@ -834,3 +834,78 @@ func TestRunBackupRestoreUnknownFieldsCommitGuidance(t *testing.T) {
 		})
 	}
 }
+
+// TestRunBackupRestoreCommitOutcomes pins the direct restore sequence the
+// unknown-fields hint must leave alone: restore, identity sync (only with
+// --force), backup registration, then the commit; a clean or empty commit
+// succeeds, an ordinary commit error keeps the plain wrapper with no hint, and
+// a failed restore stops before anything else runs.
+func TestRunBackupRestoreCommitOutcomes(t *testing.T) {
+	ordinaryCause := errors.New("Error 1105: lock wait timeout")
+	restoreCause := errors.New("restore refused")
+	forceCalls := []string{"RestoreDatabase", "GetMetadata:_project_id", "BackupRemove", "BackupAdd", "Commit"}
+	plainCalls := []string{"RestoreDatabase", "BackupRemove", "BackupAdd", "Commit"}
+	cases := []struct {
+		name         string
+		force        bool
+		restoreErr   error
+		backupAddErr error
+		commitErr    error
+		wantErr      error
+		wantCalls    []string
+	}{
+		{name: "success force", force: true, wantCalls: forceCalls},
+		{name: "success", wantCalls: plainCalls},
+		{name: "nothing to commit", force: true, commitErr: errors.New("dolt commit: nothing to commit"), wantCalls: forceCalls},
+		{name: "ordinary commit error", force: true, commitErr: ordinaryCause, wantErr: ordinaryCause, wantCalls: forceCalls},
+		{name: "ordinary commit error without force", commitErr: ordinaryCause, wantErr: ordinaryCause, wantCalls: plainCalls},
+		{name: "registration error then success", force: true, backupAddErr: errors.New("remote add refused"), wantCalls: forceCalls},
+		{
+			name:         "registration error then unknown fields",
+			force:        true,
+			backupAddErr: errors.New("remote add refused"),
+			commitErr:    fmt.Errorf("dolt commit: %w: %w", errors.New("table has unknown fields"), storage.ErrCommitIndeterminate),
+			wantErr:      storage.ErrCommitIndeterminate,
+			wantCalls:    forceCalls,
+		},
+		{name: "restore fails", force: true, restoreErr: restoreCause, wantErr: restoreCause, wantCalls: []string{"RestoreDatabase"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateRestoreWorkspace(t)
+			st := &restoreFlowStore{
+				restoreErr:   tc.restoreErr,
+				backupAddErr: tc.backupAddErr,
+				commitErr:    tc.commitErr,
+			}
+
+			err := runBackupRestore(context.Background(), st, t.TempDir(), tc.force)
+			if !slices.Equal(st.calls, tc.wantCalls) {
+				t.Errorf("calls = %v, want %v", st.calls, tc.wantCalls)
+			}
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("runBackupRestore = %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("runBackupRestore = %v, want an error wrapping %v", err, tc.wantErr)
+			}
+			msg := err.Error()
+			switch {
+			case tc.restoreErr != nil:
+				if msg != tc.restoreErr.Error() {
+					t.Errorf("restore error = %q, want the store's error unchanged", msg)
+				}
+			case tc.commitErr == ordinaryCause:
+				if want := "failed to commit restore: " + ordinaryCause.Error(); msg != want {
+					t.Errorf("ordinary commit error = %q, want %q", msg, want)
+				}
+			}
+			if tc.backupAddErr != nil && strings.Contains(msg, "regist") {
+				t.Errorf("error mentions backup registration after it failed:\n%s", msg)
+			}
+		})
+	}
+}
