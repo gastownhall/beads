@@ -1474,6 +1474,39 @@ func TestAddFederationPeerSovereignty(t *testing.T) {
 		}
 	})
 
+	t.Run("ClearSovereignty empties the stored tier", func(t *testing.T) {
+		add(t, &storage.FederationPeer{
+			Name: "towndelta", RemoteURL: "file:///tmp/towndelta", Username: "u", Password: "p", Sovereignty: "T2",
+		})
+		peer := &storage.FederationPeer{
+			Name: "towndelta", RemoteURL: "file:///tmp/towndelta", Username: "u", Password: "p", ClearSovereignty: true,
+		}
+		add(t, peer)
+		if peer.Sovereignty != "" {
+			t.Errorf("returned peer.Sovereignty = %q, want empty", peer.Sovereignty)
+		}
+		if got := stored(t, "towndelta").Sovereignty; got != "" {
+			t.Errorf("stored sovereignty = %q, want empty after an explicit clear", got)
+		}
+	})
+
+	t.Run("non-empty tier wins over ClearSovereignty", func(t *testing.T) {
+		add(t, &storage.FederationPeer{
+			Name: "townepsilon", RemoteURL: "file:///tmp/townepsilon", Username: "u", Password: "p", Sovereignty: "T2",
+		})
+		peer := &storage.FederationPeer{
+			Name: "townepsilon", RemoteURL: "file:///tmp/townepsilon", Username: "u", Password: "p",
+			Sovereignty: "T4", ClearSovereignty: true,
+		}
+		add(t, peer)
+		if peer.Sovereignty != "T4" {
+			t.Errorf("returned peer.Sovereignty = %q, want %q", peer.Sovereignty, "T4")
+		}
+		if got := stored(t, "townepsilon").Sovereignty; got != "T4" {
+			t.Errorf("stored sovereignty = %q, want %q", got, "T4")
+		}
+	})
+
 	t.Run("new and existing untiered peers stay untiered", func(t *testing.T) {
 		for i := 0; i < 2; i++ {
 			peer := &storage.FederationPeer{Name: "plain", RemoteURL: "file:///tmp/plain", Username: "u", Password: "p"}

@@ -236,6 +236,37 @@ func TestEmbeddedFederationPeers(t *testing.T) {
 			t.Errorf("stored tier after credential repair = %q, want %q (tier silently cleared)", got, "T2")
 		}
 	})
+
+	// An explicit empty --sovereignty is the deliberate way to clear a tier.
+	t.Run("add_peer_explicit_empty_sovereignty_clears_tier", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "fdsovc")
+		bdFederation(t, bd, dir, "add-peer", "townbeta", "file:///tmp/townbeta",
+			"--user", "syncbot", "--password", "s3cret", "--sovereignty", "T2")
+
+		out := bdFederation(t, bd, dir, "add-peer", "townbeta", "file:///tmp/townbeta",
+			"--user", "syncbot", "--password", "s3cret", "--sovereignty", "")
+		if !strings.Contains(out, "Sovereignty: cleared") {
+			t.Errorf("text clear should confirm 'Sovereignty: cleared', got: %s", out)
+		}
+		if got := storedPeerTier(t, beadsDir, "townbeta"); got != "" {
+			t.Errorf("stored tier after explicit clear = %q, want empty", got)
+		}
+	})
+
+	t.Run("add_peer_explicit_empty_sovereignty_clears_tier_json", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "fdsovj")
+		bdFederation(t, bd, dir, "add-peer", "townbeta", "file:///tmp/townbeta",
+			"--user", "syncbot", "--password", "s3cret", "--sovereignty", "T2")
+
+		out := bdFederation(t, bd, dir, "add-peer", "townbeta", "file:///tmp/townbeta",
+			"--user", "syncbot", "--password", "s3cret", "--sovereignty=", "--json")
+		if sov := addPeerJSONSovereignty(t, assertAddPeerJSON(t, out)); sov != "" {
+			t.Errorf("JSON clear sovereignty = %q, want empty", sov)
+		}
+		if got := storedPeerTier(t, beadsDir, "townbeta"); got != "" {
+			t.Errorf("stored tier after explicit clear = %q, want empty", got)
+		}
+	})
 }
 
 func TestEmbeddedFederationStatus(t *testing.T) {

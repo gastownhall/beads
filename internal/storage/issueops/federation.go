@@ -33,8 +33,8 @@ func ValidatePeerName(name string) error {
 //
 // A new peer stores the supplied tier, even an empty one. For an existing
 // peer, a non-empty tier replaces the stored one and an empty tier keeps it
-// (GH#5213): re-adding a peer to repair its credentials expresses no intent to
-// change its tier. The keep happens inside the upsert itself, so it needs no
+// unless peer.ClearSovereignty asks to clear it (GH#5213): re-adding a peer to
+// repair its credentials expresses no intent to change its tier. The keep happens inside the upsert itself, so it needs no
 // prior read of the row (whose password may not decrypt on this machine) and
 // does not race a concurrent tier change.
 func AddFederationPeerInTx(ctx context.Context, tx *sql.Tx, peer *storage.FederationPeer, encryptedPwd []byte) (string, error) {
@@ -42,7 +42,7 @@ func AddFederationPeerInTx(ctx context.Context, tx *sql.Tx, peer *storage.Federa
 		return "", fmt.Errorf("invalid peer name: %w", err)
 	}
 
-	replaceTier := peer.Sovereignty != ""
+	replaceTier := peer.Sovereignty != "" || peer.ClearSovereignty
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO federation_peers (name, remote_url, username, password_encrypted, sovereignty)
 		VALUES (?, ?, ?, ?, ?)

@@ -71,4 +71,9 @@ type FederationPeer struct {
 	LastSync    *time.Time // Last successful sync time
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+
+	// ClearSovereignty is a write-only request flag for AddFederationPeer: an
+	// empty Sovereignty clears an existing peer's stored tier only when it is
+	// set; otherwise the stored tier is kept. Reads leave it false.
+	ClearSovereignty bool `json:"-"`
 }

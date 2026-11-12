@@ -801,6 +801,51 @@ func TestAddFederationPeerSovereignty(t *testing.T) {
 		}
 	})
 
+	t.Run("ClearSovereignty empties the stored tier", func(t *testing.T) {
+		store := newPeerAuthTestStore(t)
+		ctx := t.Context()
+		if err := store.AddFederationPeer(ctx, &storage.FederationPeer{
+			Name: "townbeta", RemoteURL: "file:///tmp/townbeta", Username: "u", Password: "p", Sovereignty: "T2",
+		}); err != nil {
+			t.Fatalf("seed AddFederationPeer: %v", err)
+		}
+		peer := &storage.FederationPeer{
+			Name: "townbeta", RemoteURL: "file:///tmp/townbeta", Username: "u", Password: "p", ClearSovereignty: true,
+		}
+		if err := store.AddFederationPeer(ctx, peer); err != nil {
+			t.Fatalf("AddFederationPeer: %v", err)
+		}
+		if peer.Sovereignty != "" {
+			t.Errorf("returned peer.Sovereignty = %q, want empty", peer.Sovereignty)
+		}
+		if sov := storedPeerSovereignty(t, store, "townbeta"); sov != "" {
+			t.Errorf("federation_peers.sovereignty = %q, want empty after an explicit clear", sov)
+		}
+	})
+
+	t.Run("non-empty tier wins over ClearSovereignty", func(t *testing.T) {
+		store := newPeerAuthTestStore(t)
+		ctx := t.Context()
+		if err := store.AddFederationPeer(ctx, &storage.FederationPeer{
+			Name: "townbeta", RemoteURL: "file:///tmp/townbeta", Username: "u", Password: "p", Sovereignty: "T2",
+		}); err != nil {
+			t.Fatalf("seed AddFederationPeer: %v", err)
+		}
+		peer := &storage.FederationPeer{
+			Name: "townbeta", RemoteURL: "file:///tmp/townbeta", Username: "u", Password: "p",
+			Sovereignty: "T4", ClearSovereignty: true,
+		}
+		if err := store.AddFederationPeer(ctx, peer); err != nil {
+			t.Fatalf("AddFederationPeer: %v", err)
+		}
+		if peer.Sovereignty != "T4" {
+			t.Errorf("returned peer.Sovereignty = %q, want %q", peer.Sovereignty, "T4")
+		}
+		if sov := storedPeerSovereignty(t, store, "townbeta"); sov != "T4" {
+			t.Errorf("federation_peers.sovereignty = %q, want %q", sov, "T4")
+		}
+	})
+
 	t.Run("new and existing untiered peers stay untiered", func(t *testing.T) {
 		store := newPeerAuthTestStore(t)
 		ctx := t.Context()
