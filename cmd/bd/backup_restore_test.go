@@ -777,6 +777,19 @@ func TestRunBackupRestoreUnknownFieldsCommitGuidance(t *testing.T) {
 					t.Errorf("restore error promises %q, which the restore has not established:\n%s", notWant, msg)
 				}
 			}
+			// The diagnostic wraps rather than replaces the commit error, so
+			// errors.Is keeps matching the store's own error — and, through
+			// it, the engine cause and the ErrCommitIndeterminate sentinel a
+			// retry layer must check before replaying the write.
+			if !errors.Is(err, tc.commitErr) {
+				t.Errorf("errors.Is(err, the store's commit error) = false, want the original error preserved:\n%s", msg)
+			}
+			if tc.causeInChan && !errors.Is(err, cause) {
+				t.Errorf("errors.Is(err, the engine cause) = false, want the cause preserved:\n%s", msg)
+			}
+			if got, want := errors.Is(err, storage.ErrCommitIndeterminate), errors.Is(tc.commitErr, storage.ErrCommitIndeterminate); got != want {
+				t.Errorf("errors.Is(err, ErrCommitIndeterminate) = %t, want %t (whatever the commit error carried):\n%s", got, want, msg)
+			}
 		})
 	}
 }
