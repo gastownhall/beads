@@ -247,6 +247,7 @@ go_test(
         "remote_migrate_gate_test.go",
         "remote_peer_auth_test.go",
         "remote_sync_gate_test.go",
+        "rename_child_counter_away_test.go",
         "rename_child_counter_test.go",
         "reopen_category_test.go",
         "restore_database_test.go",

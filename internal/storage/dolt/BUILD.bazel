@@ -340,6 +340,7 @@ go_test(
         "remedy_printing_test.go",
         "remote_migrate_gate_test.go",
         "remote_routing_test.go",
+        "rename_child_counter_away_test.go",
         "rename_child_counter_test.go",
         "rename_test.go",
         "reopen_category_test.go",
