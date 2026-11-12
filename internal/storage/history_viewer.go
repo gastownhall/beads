@@ -33,9 +33,14 @@ type ExternalRefHistoryQuerier interface {
 	// issueID as of the most recent commit at or before asOf.
 	//
 	// found is false when no history entry exists for issueID at or
-	// before asOf (e.g. the issue was created after asOf); callers should
-	// treat that as "changed" since there is nothing to compare against.
-	// ref is the empty string when the historical row's external_ref
-	// column was NULL.
+	// before asOf. That can mean the issue was created after asOf, or
+	// that the store's history no longer reaches back to asOf (a history
+	// rewrite such as bd compact or an import discards the baseline row).
+	// found=false is absence of evidence, not a verdict: callers decide
+	// what it means, weighing what they know about the issue (the
+	// tracker engine consults its CreatedAt and keeps a pre-asOf issue
+	// under its ordinary guards instead of treating it as re-linked,
+	// GH#7294). ref is the empty string when the historical row's
+	// external_ref column was NULL.
 	PreviousExternalRef(ctx context.Context, issueID string, asOf time.Time) (ref string, found bool, err error)
 }

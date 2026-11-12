@@ -195,23 +195,89 @@ func TestEngineExternalRefChangedAfter_FastPathDifferentRef(t *testing.T) {
 }
 
 func TestEngineExternalRefChangedAfter_FastPathNotFound(t *testing.T) {
-	// No history entry at or before lastSync for an issue that existed
-	// before the cursor: the baseline is gone (a history rewrite such as a
-	// compaction discards it), which is unknown evidence, not a change
-	// (#7294). The caller keeps such an issue under the ordinary conflict
-	// guards instead of granting a hydration exemption.
-	querier := &historyQuerierStore{prevFound: false}
-	e := &Engine{Store: querier}
+	// No history entry at or before lastSync. The decision table (#7294)
+	// depends only on the local issue's CreatedAt: an issue created after
+	// lastSync is new (its linking is post-sync, so hydrating it is safe);
+	// anything else - including a locally edited, a boundary-equal, a zero
+	// timestamp, or a differently zoned issue - is unknown evidence, not a
+	// change, and the caller keeps it under the ordinary conflict guards.
 	lastSync := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
-	local := newTestIssue("bd-1", lastSync.Add(-time.Hour), lastSync.Add(-time.Minute))
+	est := time.FixedZone("EST", -5*60*60)
+	run := func(t *testing.T, local *types.Issue, wantChanged, wantUnknown bool) {
+		t.Helper()
+		querier := &historyQuerierStore{prevFound: false}
+		e := &Engine{Store: querier}
+		changed, historyUnknown, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", lastSync)
+		if err != nil {
+			t.Fatalf("externalRefChangedAfter: %v", err)
+		}
+		if changed != wantChanged || historyUnknown != wantUnknown {
+			t.Fatalf("externalRefChangedAfter(%s: created %s) = (%v, %v, nil), want (%v, %v, nil)",
+				local.ID, local.CreatedAt.Format(time.RFC3339), changed, historyUnknown, wantChanged, wantUnknown)
+		}
+		if querier.calls != 1 {
+			t.Fatalf("PreviousExternalRef calls = %d, want 1 (the fast path always queries first)", querier.calls)
+		}
+	}
 
-	changed, historyUnknown, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", lastSync)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if changed || !historyUnknown {
-		t.Fatalf("externalRefChangedAfter(older issue, missing row) = (%v, %v, nil), want (false, true, nil)", changed, historyUnknown)
-	}
+	t.Run("older unchanged issue is unknown", func(t *testing.T) {
+		// The baseline row is gone (a history rewrite such as bd compact
+		// discards it): unknown evidence, not a change.
+		run(t, newTestIssue("bd-1", lastSync.Add(-time.Hour), lastSync.Add(-time.Minute)), false, true)
+	})
+
+	t.Run("older locally edited issue is unknown", func(t *testing.T) {
+		// UpdatedAt after lastSync must not turn missing history into a
+		// change: a local edit to the issue row says nothing about its
+		// external_ref, and the missing-history verdict is decided by
+		// CreatedAt alone.
+		run(t, newTestIssue("bd-1", lastSync.Add(-time.Hour), lastSync.Add(time.Minute)), false, true)
+	})
+
+	t.Run("issue created after lastSync changed", func(t *testing.T) {
+		// A stub created after the sync was linked after it: its linking
+		// is post-sync, so it is a hydration candidate.
+		run(t, newTestIssue("bd-1", lastSync.Add(time.Second), lastSync.Add(time.Minute)), true, false)
+	})
+
+	t.Run("issue created exactly at lastSync is unknown", func(t *testing.T) {
+		// lastSync is the moment the previous sync finished; an issue
+		// stamped exactly with it cannot be proven post-sync, so it stays
+		// under the ordinary guards.
+		run(t, newTestIssue("bd-1", lastSync, lastSync), false, true)
+	})
+
+	t.Run("zero CreatedAt is unknown", func(t *testing.T) {
+		// A store that never stamps CreatedAt must not fall into the
+		// "created after lastSync" bucket.
+		run(t, newTestIssue("bd-1", time.Time{}, time.Time{}), false, true)
+	})
+
+	t.Run("timezone of lastSync does not matter", func(t *testing.T) {
+		// The same instants expressed in a fixed non-UTC offset decide
+		// identically: After compares instants, not wall clocks.
+		querier := &historyQuerierStore{prevFound: false}
+		e := &Engine{Store: querier}
+		estSync := lastSync.In(est)
+		for _, test := range []struct {
+			name        string
+			created     time.Time
+			wantChanged bool
+		}{
+			{"older", estSync.Add(-time.Hour), false},
+			{"newer", estSync.Add(time.Second), true},
+		} {
+			changed, historyUnknown, err := e.externalRefChangedAfter(context.Background(),
+				newTestIssue("bd-1", test.created.In(est), test.created), "https://tracker.test/EXT-1", estSync)
+			if err != nil {
+				t.Fatalf("%s: %v", test.name, err)
+			}
+			if changed != test.wantChanged || historyUnknown == test.wantChanged {
+				t.Errorf("%s: externalRefChangedAfter = (%v, %v), want (changed=%v, historyUnknown=%v)",
+					test.name, changed, historyUnknown, test.wantChanged, !test.wantChanged)
+			}
+		}
+	})
 }
 
 // Locks the NULL-historical contract: a NULL external_ref column surfaces
