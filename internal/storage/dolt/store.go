@@ -5399,11 +5399,17 @@ func (s *DoltStore) mergeTrackingRefAfterCLIFetch(ctx context.Context, ref strin
 		return fmt.Errorf("merge %s: set dolt_force_transaction_commit: %w", ref, err)
 	}
 	varSet = true
-	_, mergeErr := schema.CallReturningRow(ctx, conn, "CALL DOLT_MERGE(?)", ref)
+	mergeRow, mergeErr := schema.CallReturningRow(ctx, conn, "CALL DOLT_MERGE(?)", ref)
 	// As in fetchAndMergeTrackingRefInTx: the ordinary no-op arrives as a
 	// message, and only the squash path's "Already up to date." as an error.
 	if mergeErr != nil && !strings.Contains(mergeErr.Error(), "up to date") {
 		return fmt.Errorf("merge %s: %w", ref, mergeErr)
+	}
+	// A conflicted merge left its conflicts in the working set. Fail, as a
+	// conflicted `dolt pull` did, so finishCLIPull reports the pull as failed
+	// unless its resolver settles every conflict.
+	if parseMergeReport(mergeRow).Conflicted {
+		return fmt.Errorf("merge %s: conflicts found", ref)
 	}
 	return nil
 }

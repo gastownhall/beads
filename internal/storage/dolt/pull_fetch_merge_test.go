@@ -343,3 +343,29 @@ func TestCLIPeerPullFetchesThenMergesTrackingRef(t *testing.T) {
 		})
 	}
 }
+
+// TestCLIPullMergeConflictLeavesWorkingSetAndFails pins the CLI route's
+// conflict contract after the fetch+merge change (bd-e2q8zs): a DOLT_MERGE
+// that reports conflicts the resolver declines leaves them in the working set
+// and fails the pull, as a conflicted `dolt pull` did. Without the error,
+// finishCLIPull would report a pull that merged nothing as a success.
+func TestCLIPullMergeConflictLeavesWorkingSetAndFails(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	expectCLIMerge(mock, "origin/main", 1)
+	// The resolver finds nothing it may settle, so it rolls back untouched.
+	expectCleanCLIResolve(mock)
+
+	store := &DoltStore{db: db, branch: "main"}
+	ctx := context.Background()
+	err = store.finishCLIPull(ctx, store.mergeTrackingRefAfterCLIFetch(ctx, "origin/main"))
+	if err == nil || !strings.Contains(err.Error(), "merge origin/main: conflicts found") {
+		t.Fatalf("finishCLIPull after a conflicted merge = %v, want the merge's conflicts error", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("statements: %v", err)
+	}
+}
