@@ -16,9 +16,20 @@ import (
 
 var eventsTable = auxRekeyTables[0]
 
-// driftErr is the error a drifted table returns: dolt recovers the decode panic
-// per query and surfaces it as a 1105.
+// driftErr is the error a drifted table returns under the Dolt <=2.2 engine
+// (bd 1.3.4): dolt recovers the hash.New decode panic per query and surfaces it
+// as a 1105.
 var driftErr = errors.New("Error 1105 (HY000): panic recovered: invalid hash length: 19")
+
+// driftErrDolt26 is the same drift as reported by the Dolt 2.6 engine: the
+// adaptive-value decoder rejects the wrong-width address (ErrInvalidAddressLen)
+// before it ever reaches hash.New (#8372).
+var driftErrDolt26 = errors.New("Error 1105 (HY000): malformed out-of-band adaptive value: invalid address length: expected 20-byte address, got 19")
+
+// errInlineAdaptiveValue is a Dolt 2.6 adaptive-value error that is caller
+// misuse, not on-disk drift: it shares the "adaptive value" wording but not the
+// "malformed out-of-band" prefix, so the re-key must keep aborting on it.
+var errInlineAdaptiveValue = errors.New("Error 1105 (HY000): cannot get address from inline adaptive value")
 
 func expectEventsSelect(mock sqlmock.Sqlmock) *sqlmock.ExpectedQuery {
 	return mock.ExpectQuery(regexp.QuoteMeta(
@@ -64,10 +75,58 @@ func TestIsSchemaEncodingDriftErr(t *testing.T) {
 			errors.New("panic: invalid hash length: 19"),
 			true,
 		},
+		{
+			// The Dolt <=2.2 phrase must survive the 2.6 widening: 2.6 still
+			// panics with it for the opposite tag flip (store/hash/hash.go).
+			"wrapped insert/merge side of the flip",
+			fmt.Errorf("re-key id a -> b: %w", errors.New("Error 1105 (HY000): panic recovered: invalid hash length: 1")),
+			true,
+		},
+		{
+			"unwrapped panic text width 1",
+			errors.New("panic: invalid hash length: 1"),
+			true,
+		},
+		// Dolt 2.6 (#8372): the adaptive-value decoder reports the same drift
+		// before hash.New, under a different message.
+		{"dolt 2.6 server 1105 drift", driftErrDolt26, true},
+		{
+			"dolt 2.6 insert/merge side of the flip",
+			errors.New("Error 1105 (HY000): malformed out-of-band adaptive value: invalid address length: expected 20-byte address, got 1"),
+			true,
+		},
+		{
+			"dolt 2.6 wrapped drift",
+			fmt.Errorf("scan rows of events: %w", driftErrDolt26),
+			true,
+		},
+		{
+			"dolt 2.6 bare engine text",
+			errors.New("malformed out-of-band adaptive value: invalid address length: expected 20-byte address, got 19"),
+			true,
+		},
+		{
+			"dolt 2.6 truncated length varint",
+			errors.New("Error 1105 (HY000): malformed out-of-band adaptive value: truncated length varint"),
+			true,
+		},
+		{
+			"dolt 2.6 upper-cased",
+			errors.New("ERROR 1105 (HY000): MALFORMED OUT-OF-BAND ADAPTIVE VALUE: INVALID ADDRESS LENGTH: EXPECTED 20-BYTE ADDRESS, GOT 19"),
+			true,
+		},
 		{"plain sql error", errors.New("Error 1062 (23000): duplicate entry"), false},
 		{"connection drop", errors.New("invalid connection"), false},
 		{"unrelated panic", errors.New("Error 1105 (HY000): panic recovered: index out of range"), false},
 		{"lock timeout", errors.New("Error 1205 (HY000): lock wait timeout exceeded"), false},
+		// The engine's adaptive-value caller-misuse errors are not on-disk
+		// drift: they lack the "malformed out-of-band" prefix and must abort.
+		{"inline adaptive value misuse", errInlineAdaptiveValue, false},
+		{
+			"null adaptive value misuse",
+			errors.New("Error 1105 (HY000): cannot get address from null adaptive value"),
+			false,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -169,31 +228,137 @@ func TestRekeyAuxRowIDsSkipsDriftDuringRewrite(t *testing.T) {
 	}
 }
 
+// TestRekeyAuxRowIDsSkipsDolt26Drift is #8372: under the Dolt 2.6 engine the
+// same dolthub/dolt#11131 drift surfaces as "malformed out-of-band adaptive
+// value", not the 2.2 "invalid hash length" panic. Every surface the drift can
+// take must still be skipped with the existing warning, recorded, and the
+// sentinel cleared — not abort the pass on every open (#4380).
+func TestRekeyAuxRowIDsSkipsDolt26Drift(t *testing.T) {
+	eventsCols := []string{
+		"id", "issue_id", "event_type", "actor", "old_value", "new_value", "comment", "created_at",
+	}
+	cases := []struct {
+		name      string
+		expect    func(sqlmock.Sqlmock)
+		wantWrote bool
+	}{
+		{
+			// Server mode: the SELECT itself fails with the 1105.
+			name: "query",
+			expect: func(mock sqlmock.Sqlmock) {
+				expectEventsSelect(mock).WillReturnError(driftErrDolt26)
+			},
+		},
+		{
+			// Embedded mode: the engine error is raised partway through the
+			// scan, after a healthy row, and reaches the re-key via rows.Err().
+			name: "mid-stream",
+			expect: func(mock sqlmock.Sqlmock) {
+				rows := sqlmock.NewRows(eventsCols).
+					AddRow("random-a", "bd-1", "status", "steve", "open", "closed", "", "2026-06-09 12:00:00").
+					AddRow("random-b", "bd-2", "status", "steve", "open", "closed", "", "2026-06-09 12:00:01").
+					RowError(1, driftErrDolt26)
+				expectEventsSelect(mock).WillReturnRows(rows)
+			},
+		},
+		{
+			// The scan succeeds and the id-rewrite UPDATE hits the drifted
+			// cell; the match must survive the "re-key id ... -> ...: %w" wrap.
+			name: "rewrite",
+			expect: func(mock sqlmock.Sqlmock) {
+				expectEventsSelect(mock).WillReturnRows(sqlmock.NewRows(eventsCols).
+					AddRow("random-a", "bd-1", "status", "steve", "open", "closed", "", "2026-06-09 12:00:00"))
+				mock.ExpectExec(regexp.QuoteMeta("UPDATE events SET id = ? WHERE id = ?")).
+					WithArgs(sqlmock.AnyArg(), "random-a").
+					WillReturnError(driftErrDolt26)
+			},
+			wantWrote: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+			logged := captureLog(t)
+
+			expectCursorProbe(mock, "ignored_schema_migrations", true)
+			expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations",
+				"version", auxRekeyPassInitial.markerVersion-1)
+			expectIgnoredSentinelProbes(mock, true)
+			expectAuxRekeyState(mock, false)
+			expectSetAuxRekeySentinel(mock)
+			expectColumnExists(mock, true)
+			tc.expect(mock)
+			for range auxRekeyTables[1:] {
+				expectColumnExists(mock, false)
+			}
+			expectSetAuxRekeyDrifted(mock, "events")
+			expectClearAuxRekeySentinel(mock)
+
+			wrote, err := rekeyAuxRowIDs(context.Background(), db, auxRekeyPassInitial.shippedMainVersion-1, auxRekeyPassInitial)
+			if err != nil {
+				t.Fatalf("Dolt 2.6 drift must not abort the pass: %v", err)
+			}
+			if wrote != tc.wantWrote {
+				t.Errorf("wrote = %v, want %v", wrote, tc.wantWrote)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet sql expectations: %v", err)
+			}
+			if got := logged.String(); !strings.Contains(got, `skipped "events"`) ||
+				!strings.Contains(got, "malformed out-of-band adaptive value") {
+				t.Errorf("log = %q\nwant a skip warning naming events and carrying the Dolt 2.6 error", got)
+			}
+		})
+	}
+}
+
 // TestRekeyAuxRowIDsAbortsOnNonDriftError: the tolerance is narrow. An ordinary
 // table failure must still propagate and keep the sentinel, exactly as before
-// #4380 — otherwise it would swallow real migration bugs.
+// #4380 — otherwise it would swallow real migration bugs. That includes the
+// Dolt 2.6 adaptive-value errors that are caller misuse rather than drift.
+// sqlmock rejects any drift-record or sentinel-clear statement, since none is
+// expected.
 func TestRekeyAuxRowIDsAbortsOnNonDriftError(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("sqlmock.New: %v", err)
+	cases := []struct {
+		name    string
+		scanErr error
+	}{
+		{"duplicate entry", errors.New("Error 1062 (23000): duplicate entry")},
+		{"inline adaptive value misuse", errInlineAdaptiveValue},
 	}
-	defer db.Close()
-	captureLog(t)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+			captureLog(t)
 
-	expectCursorProbe(mock, "ignored_schema_migrations", true)
-	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations",
-		"version", auxRekeyPassInitial.markerVersion-1)
-	expectIgnoredSentinelProbes(mock, true)
-	expectAuxRekeyState(mock, false)
-	expectSetAuxRekeySentinel(mock)
-	expectColumnExists(mock, true)
-	expectEventsSelect(mock).WillReturnError(errors.New("Error 1062 (23000): duplicate entry"))
+			expectCursorProbe(mock, "ignored_schema_migrations", true)
+			expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations",
+				"version", auxRekeyPassInitial.markerVersion-1)
+			expectIgnoredSentinelProbes(mock, true)
+			expectAuxRekeyState(mock, false)
+			expectSetAuxRekeySentinel(mock)
+			expectColumnExists(mock, true)
+			expectEventsSelect(mock).WillReturnError(tc.scanErr)
 
-	if _, err := rekeyAuxRowIDs(context.Background(), db, auxRekeyPassInitial.shippedMainVersion-1, auxRekeyPassInitial); err == nil {
-		t.Fatal("expected a non-drift table failure to propagate")
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet sql expectations: %v", err)
+			_, err = rekeyAuxRowIDs(context.Background(), db, auxRekeyPassInitial.shippedMainVersion-1, auxRekeyPassInitial)
+			if err == nil {
+				t.Fatal("expected a non-drift table failure to propagate")
+			}
+			if !errors.Is(err, tc.scanErr) || !strings.HasPrefix(err.Error(), "events: ") {
+				t.Fatalf("err = %v, want an \"events: \"-prefixed error wrapping %v", err, tc.scanErr)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet sql expectations: %v", err)
+			}
+		})
 	}
 }
 
