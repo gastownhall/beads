@@ -70,6 +70,18 @@ func TestIsSchemaEncodingDriftErr(t *testing.T) {
 			errors.New("panic: invalid hash length: 19"),
 			true,
 		},
+		{
+			// The Dolt <=2.2 phrase must survive the 2.6 widening: 2.6 still
+			// panics with it for the opposite tag flip (store/hash/hash.go).
+			"wrapped insert/merge side of the flip",
+			fmt.Errorf("re-key id a -> b: %w", errors.New("Error 1105 (HY000): panic recovered: invalid hash length: 1")),
+			true,
+		},
+		{
+			"unwrapped panic text width 1",
+			errors.New("panic: invalid hash length: 1"),
+			true,
+		},
 		// Dolt 2.6 (#8372): the adaptive-value decoder reports the same drift
 		// before hash.New, under a different message.
 		{"dolt 2.6 server 1105 drift", driftErrDolt26, true},
