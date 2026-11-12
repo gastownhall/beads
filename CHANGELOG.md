@@ -94,13 +94,13 @@ start with the [1.3.0] **Upgrade notes**.
   `bd migrate schema`, with `--force` on `bd migrate` or `bd migrate schema`,
   or with `BD_ALLOW_MIGRATE=1` for scripts and CI. A database that `bd init`,
   `bd init --remote` or `bd bootstrap` creates still migrates without asking.
-  The run of `bd migrate schema` that migrates prints
-  `Schema already at v74`. Outside embedded mode it can also leave the
-  recorded bd version at the release you upgraded from (always on a shared or
-  external server; on bd's own server when another bd command ran first), so
-  `bd doctor` and `bd doctor --check-health` report a version mismatch. The
-  schema is migrated: run `bd migrate` (no subcommand) once per database to
-  record the new version
+  Except in proxied-server mode, the run of `bd migrate schema` that migrates
+  prints `Schema already at v74` and can leave the recorded bd version at the
+  release you upgraded from. In server mode `bd doctor` and
+  `bd doctor --check-health` then report a version mismatch (always on a
+  shared or external server; on bd's own server when another bd command ran
+  first). The schema is migrated: run `bd migrate` (no subcommand) once per
+  database to record the new version
   ([#7283](https://github.com/gastownhall/beads/issues/7283)).
 - **Shared and gateway servers:** upgrade every client first, then run
   `bd migrate schema` once per database (through a gateway server, ask its
@@ -5604,9 +5604,10 @@ These are not fixed in 1.4.0-rc.1.
   and rotate any you find: a remote that already has the commit keeps it.
 - **`bd backup restore --force` can still drop the database when the Dolt
   server has its own filesystem.** In plain server mode bd checks the restore
-  source on its own machine, but the server opens the path on its own: a
-  server on another host, or in a container (even one you reach at localhost)
-  without the backup mounted at the same path. There a backup that only bd's
+  source on its own machine, but the server opens the path on its own
+  filesystem, which differs for a server on another host or for one in a
+  container (even one you reach at localhost) without the backup mounted at
+  the same path. There a backup that only bd's
   machine holds passes the check, and a `--force` restore drops the database
   before the server finds nothing to restore
   ([#7098](https://github.com/gastownhall/beads/issues/7098) in that
@@ -5753,13 +5754,14 @@ These are not fixed in 1.4.0-rc.1.
   `is_blocked`, and upgrading does not repair it. Workaround: run
   `bd recompute-blocked` once per workspace (it is idempotent;
   `rows_corrected` above 0 means the store was affected).
-- **`bd migrate schema` can leave the recorded bd version stale outside
-  embedded mode** ([#7283](https://github.com/gastownhall/beads/issues/7283)).
-  The migrations apply while the command opens the store, so the run that
-  migrates prints `Schema already at v74` and skips recording the new
-  version. On a shared or external Dolt server this happens every time; on
-  bd's own server, when another bd command ran after the upgrade first.
-  `bd doctor` then warns, for example,
+- **`bd migrate schema` can leave the recorded bd version stale**
+  ([#7283](https://github.com/gastownhall/beads/issues/7283)). The
+  migrations apply while the command opens the store, so the run that
+  migrates prints `Schema already at v74` and skips recording the new version
+  (proxied-server mode records it). Server mode reports the stale version: on
+  a shared or external Dolt server it stays stale every time, and on bd's own
+  server when another bd command ran after the upgrade first. `bd doctor`
+  then warns, for example,
   `Database: version 1.3.4 (CLI: 1.4.0-rc.1)` (its advice to update bd does
   not help), and `bd doctor --check-health` reports a version mismatch and
   exits 1. The schema itself is migrated. Workaround: run `bd migrate` with no
