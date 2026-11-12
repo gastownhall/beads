@@ -9,14 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- **Release binaries are built with Go 1.27.4.** Go 1.27.3's `net/http` can
-  crash a server whose handler reads a request body while writing response
-  headers concurrently (GO-2026-6859, CVE-2026-97054), and its `go` command
-  had eleven build-time advisories (GO-2026-6848 through GO-2026-6858).
-  `bd serve` reads request bodies before it writes, so it is not known to be
-  reachable, but scanners flag every binary built with 1.27.3. `go.mod` keeps
-  `go 1.27.3`, the minimum for programs that import beads, and adds
-  `toolchain go1.27.4`; Bazel's Go SDK moves with it.
+- **Release binaries are built with Go 1.27.4.** Go 1.27.0-1.27.3 (and
+  releases before 1.26.11) can crash an HTTP/1 server that bounds request
+  bodies with `http.MaxBytesReader` when a handler reads past the limit while
+  response headers are written concurrently (GO-2026-6859, CVE-2026-97054).
+  `bd serve` bounds its JSON bodies with `MaxBytesReader` but reads them fully
+  before writing any header, so no bd handler is known to hit the race;
+  govulncheck still reports it reachable through `net/http`. 1.27.4 also fixes
+  eleven build-time advisories in the go command, cgo, the compiler and the
+  linker (GO-2026-6848 through GO-2026-6858). `go.mod` keeps `go 1.27.3`, the
+  minimum for programs that import beads, and adds `toolchain go1.27.4`, so
+  building from a checkout selects Go 1.27.4 (fetched automatically unless
+  `GOTOOLCHAIN=local`; offline builders need it installed). Builds through
+  `go install ...@version`, Nix and Homebrew use the installing Go: use Go
+  1.27.4 or newer there. (#8431)
 
 - **The `bd serve` settings surface no longer stores config.yaml-only keys.**
   `PUT /v0/beads/config/{key}` (and the dashboard behind it) wrote any key,
