@@ -13901,7 +13901,7 @@
  },
  {
   "name": "show_default_omits_comments",
-  "purpose": "Show an issue that HAS a comment but WITHOUT --include-comments. Pins that 'comments' slice is omitted (count-only mode) while comment_count=1 is still emitted. Guards the default count-only contract for comments.",
+  "purpose": "Show an issue that HAS a comment under the --count-only fast path. Pins that 'comments' slice is omitted (count-only mode) while comment_count=1 is still emitted. Guards the count-only contract for comments, which since #4122 lives behind --count-only (the default streams the rows).",
   "prefix": "sh",
   "steps": [
    [
@@ -13923,10 +13923,11 @@
    [
     "show",
     "sh-hc",
+    "--count-only",
     "--json"
    ]
   ],
-  "pins": "default --json with a comment present: comment_count=1 but no 'comments' array key",
+  "pins": "--count-only --json with a comment present: comment_count=1 but no 'comments' array key",
   "deterministic": true
  },
  {
@@ -14003,7 +14004,7 @@
  },
  {
   "name": "show_epic_default_no_progress_fields",
-  "purpose": "Show an epic with children WITHOUT --include-dependents. Pins that in default count-only mode the epic_total_children/epic_closed_children/epic_closeable fields are NOT emitted (they are only computed inside the --include-dependents block, show.go:183-199) but dependent_count reflects the 2 children.",
+  "purpose": "Show an epic with children under the --count-only fast path. Pins that in count-only mode the epic_total_children/epic_closed_children/epic_closeable fields are NOT emitted (they are computed only when dependents are read, which since #4122 is the default; plain --count-only reads none) but dependent_count reflects the 2 children.",
   "prefix": "sh",
   "steps": [
    [
@@ -14057,10 +14058,11 @@
    [
     "show",
     "sh-ep",
+    "--count-only",
     "--json"
    ]
   ],
-  "pins": "epic --json (default): dependent_count=2, no epic_total_children/epic_closed_children/epic_closeable keys (count-only mode)",
+  "pins": "epic --json --count-only: dependent_count=2, no epic_total_children/epic_closed_children/epic_closeable keys (count-only mode)",
   "deterministic": true
  },
  {

@@ -1,6 +1,7 @@
 {
   "shape": "gc-show-json",
   "requests": [
-    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-blk","status":200}
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-blk","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-blk","query":["include_comments","include_dependents"],"status":200}
   ]
 }
