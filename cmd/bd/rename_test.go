@@ -20,6 +20,7 @@ func TestRenameTargetIDPattern(t *testing.T) {
 		{"GPUPolynomials_jl-abc", true},
 		{"_scratch-abc", true},
 		{"abc", false},
+		{"", false},
 		{"-abc", false},
 		{"abc-", false},
 		{"8ball-abc", false},
