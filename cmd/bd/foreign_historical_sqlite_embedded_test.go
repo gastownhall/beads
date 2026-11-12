@@ -130,11 +130,11 @@ func TestEmbeddedForeignHistoricalSQLiteWorkspaceLeftUnchanged(t *testing.T) {
 		// worktree with none of its own is the main checkout's, a workspace
 		// admission never checked. Nothing listens on the url.
 		{name: "connect from a linked worktree",
-			dir:  func(t *testing.T, repo string) string { return graphModeLinkedWorktree(t, repo) },
+			dir:  func(t *testing.T, repo string) string { return addLinkedWorktree(t, repo) },
 			args: func(string) []string { return []string{"connect", "http://127.0.0.1:1"} },
 			want: func(string) string { return "Error: " }, namesBeadsDir: true},
 		{name: "connect --clear from a linked worktree",
-			dir:  func(t *testing.T, repo string) string { return graphModeLinkedWorktree(t, repo) },
+			dir:  func(t *testing.T, repo string) string { return addLinkedWorktree(t, repo) },
 			args: func(string) []string { return []string{"connect", "--clear"} },
 			want: func(string) string { return "Error: " }, namesBeadsDir: true},
 		// --db selects the workspace admission then checks: already refused.
@@ -194,6 +194,17 @@ func TestEmbeddedForeignHistoricalSQLiteWorkspaceLeftUnchanged(t *testing.T) {
 			})
 		}
 	}
+}
+
+// addLinkedWorktree commits once in repoDir and adds a linked worktree of it.
+// The worktree has no .beads of its own: the workspace fixture under repoDir
+// is not committed.
+func addLinkedWorktree(t *testing.T, repoDir string) string {
+	t.Helper()
+	worktreeDir := filepath.Join(t.TempDir(), "worktree")
+	runGitForWorktreeTest(t, repoDir, "commit", "--allow-empty", "--quiet", "-m", "init")
+	runGitForWorktreeTest(t, repoDir, "worktree", "add", "--quiet", "--detach", worktreeDir)
+	return worktreeDir
 }
 
 // TestEmbeddedRoutedTargetRefusesLegacyDoltWorkspace pins, at each

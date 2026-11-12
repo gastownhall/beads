@@ -358,13 +358,12 @@ var createCmd = &cobra.Command{
 		}
 
 		if dryRun && parentID == "" {
-			// The preview opens no target, but it refuses a local one in a
-			// format this build cannot open or that admission refuses as a
-			// historical SQLite workspace, as the create it previews would and
-			// in its words,
-			// and one with no metadata.json the create would refuse to
-			// initialize (refuseUninitializableTarget). Neither check writes.
-			if err := checkRepoTargetFormat(repoPath); err != nil {
+			// The preview opens no target, but it refuses a local one that
+			// admission refuses as a historical SQLite workspace, as the
+			// create it previews would and in its words, and one with no
+			// metadata.json the create would refuse to initialize
+			// (refuseUninitializableTarget). Neither check writes.
+			if err := checkRepoTargetForOpen(repoPath); err != nil {
 				return handleRepoTargetInitError(routing.ExpandPath(repoPath), err)
 			}
 			allowCreate := !isAmbiguousRepoTarget(cmd.Flags().Changed("repo"), repoOverride)
@@ -971,14 +970,10 @@ func init() {
 
 // handleCreateTargetStoreError preserves the existing text path for ordinary
 // store failures while rendering capability refusals as typed JSON when asked,
-// a target in a format this build cannot open as the workspace refusal, and a
-// target bd's admission refuses as a legacy layout, or that
+// and a target bd's admission refuses as a legacy layout, or that
 // refuseExistingCreateTarget refuses, as handleRepoTargetInitError renders it
 // ("target repo X: ..."). targetPath is the target's .beads, or a remote URL.
 func handleCreateTargetStoreError(err error, targetPath, fallbackFormat string) error {
-	if isUnsupportedWorkspaceFormat(err) {
-		return handleWorkspaceGuardError(err)
-	}
 	var existing *existingTargetRefusal
 	if isLegacyUpgradeRefusal(err) || errors.As(err, &existing) {
 		repo := targetPath
@@ -1038,10 +1033,9 @@ func openDryRunTargetStore(ctx context.Context, repoPath string) (storage.DoltSt
 
 	targetPath := routing.ExpandPath(repoPath)
 	beadsDir := filepath.Join(targetPath, ".beads")
-	// A target in a format this build cannot open, or one admission refuses
-	// as a historical SQLite workspace, is refused as that, even one marked
-	// only by a legacy config.json, which the check below would report as
-	// not initialized.
+	// A target admission refuses as a historical SQLite workspace is refused
+	// as that, even one marked only by a legacy config.json, which the check
+	// below would report as not initialized.
 	if err := checkDiscoveredForOpen(beadsDir); err != nil {
 		return nil, err
 	}
@@ -1065,13 +1059,12 @@ func openDryRunTargetStore(ctx context.Context, repoPath string) (storage.DoltSt
 	return store, nil
 }
 
-// checkRepoTargetFormat refuses a local create target in a format this build
-// cannot open, or one admission refuses as a historical SQLite workspace
-// (checkDiscoveredForOpen), reading its metadata without opening or migrating
-// it. The
-// command's own workspace (".") has passed admission already, and a remote
-// target has no local metadata to read, so both pass.
-func checkRepoTargetFormat(repoPath string) error {
+// checkRepoTargetForOpen refuses a local create target admission refuses as a
+// historical SQLite workspace (checkDiscoveredForOpen), reading its metadata
+// without opening or migrating it. The command's own workspace (".") has
+// passed admission already, and a remote target has no local metadata to
+// read, so both pass.
+func checkRepoTargetForOpen(repoPath string) error {
 	if repoPath == "." || remotecache.IsRemoteURL(repoPath) {
 		return nil
 	}
@@ -1106,9 +1099,6 @@ func checkRepoTargetInitializable(repoPath string, allowCreate bool) (string, er
 // handleRepoTargetInitError renders a create target's initialization failure
 // (ensureBeadsDirForPath, or the preview's checkRepoTargetInitializable).
 func handleRepoTargetInitError(targetPath string, err error) error {
-	if isUnsupportedWorkspaceFormat(err) {
-		return handleWorkspaceGuardError(err)
-	}
 	if isLegacyUpgradeRefusal(err) {
 		// bd's own admission refusal of the target, named, as bd renders it
 		// there: nothing was initialized.
@@ -1161,13 +1151,12 @@ func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore s
 	beadsDir := filepath.Join(targetPath, ".beads")
 	metadataPath := filepath.Join(beadsDir, "metadata.json")
 
-	// A target in a format this build cannot open, or a historical SQLite
-	// workspace, is refused before anything below: one marked only by a
-	// legacy config.json or by the graph format marker file has no
-	// metadata.json, so it would otherwise be initialized here, with an Issue
-	// database and a metadata.json written beside it, and one whose
-	// metadata.json names its SQLite database would be opened by the create,
-	// which creates an empty embedded database beside it.
+	// A historical SQLite workspace is refused before anything below: one
+	// marked only by a legacy config.json has no metadata.json, so it would
+	// otherwise be initialized here, with an Issue database and a
+	// metadata.json written beside it, and one whose metadata.json names its
+	// SQLite database would be opened by the create, which creates an empty
+	// embedded database beside it.
 	if err := checkDiscoveredForOpen(beadsDir); err != nil {
 		return err
 	}
@@ -1271,15 +1260,14 @@ func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore s
 //     holds the issues (bd run there opens the default database).
 //
 // A .beads holding one embedded database is left to adoptTargetDatabase. A
-// .beads in a format this build cannot open is refused as that first, as bd's
-// admission refuses it (checkDiscoveredForOpen). Its own refusals are
-// targetRefusals; bd's admission refusals are returned as that admission
-// returns them, and the no-workspace one wraps ErrNoBeadsDatabase, as
-// openForeignStore's does.
+// historical SQLite workspace is refused as that first, as bd's admission
+// refuses it (checkDiscoveredForOpen). Its own refusals are targetRefusals;
+// bd's admission refusals are returned as that admission returns them, and
+// the no-workspace one wraps ErrNoBeadsDatabase, as openForeignStore's does.
 func refuseUninitializableTarget(beadsDir string) error {
-	// A workspace in a format this build cannot open is refused as that,
-	// before its config is read: the format fence's refusal (and its exit
-	// code) does not depend on the mode the config selects.
+	// A historical SQLite workspace is refused as that, before its config is
+	// read: admission's refusal does not depend on the mode the config
+	// selects.
 	if err := checkDiscoveredForOpen(beadsDir); err != nil {
 		return err
 	}
@@ -1328,8 +1316,8 @@ func refuseUninitializableTarget(beadsDir string) error {
 	// config: ..."). admitForeignWorkspace leaves it to the caller's own
 	// Load, which fails without writing; the caller here writes a
 	// metadata.json and a database before any Load runs.
-	if _, err := loadAndCheckWorkspaceFormat(beadsDir); err != nil {
-		return err
+	if _, err := configfile.LoadForDiscovery(beadsDir); err != nil {
+		return fmt.Errorf("loading config: %w", err)
 	}
 	if _, err := admitForeignWorkspace(beadsDir); err != nil {
 		return err
@@ -1373,11 +1361,10 @@ func refuseUninitializableTarget(beadsDir string) error {
 // migrate-personal's routed open, which would open one bd run there does not
 // read, or fail for the one it lacks). It writes nothing. Refused are:
 //
-//   - one bd run inside it refuses as a legacy Dolt workspace, or in a format
-//     this build cannot open, or as a historical SQLite workspace
-//     (admitForeignWorkspace), with that refusal: an embedded database beside
-//     a legacy Dolt root hides that data and turns the refusal bd prints there
-//     into an empty workspace;
+//   - one bd run inside it refuses as a legacy Dolt workspace, or as a
+//     historical SQLite workspace (admitForeignWorkspace), with that refusal:
+//     an embedded database beside a legacy Dolt root hides that data and
+//     turns the refusal bd prints there into an empty workspace;
 //   - one whose own config selects Dolt server mode, where its metadata names
 //     no dolt_mode, when this process would open it embedded
 //     (existingTargetRefusal): store selection takes dolt.mode from the
@@ -1390,7 +1377,7 @@ func refuseUninitializableTarget(beadsDir string) error {
 func refuseExistingCreateTarget(beadsDir string) error {
 	cfg, err := admitForeignWorkspace(beadsDir)
 	if err != nil {
-		if isLegacyUpgradeRefusal(err) || isUnsupportedWorkspaceFormat(err) {
+		if isLegacyUpgradeRefusal(err) {
 			return err
 		}
 		return nil

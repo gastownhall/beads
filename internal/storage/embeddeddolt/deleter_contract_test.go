@@ -70,6 +70,9 @@ func TestDeleterContract(t *testing.T) {
 	t.Run("RewritesReferencesInNeighbors", func(t *testing.T) {
 		conformance.RunDeleterRewritesReferencesInNeighbors(t, ctx, fixture)
 	})
+	t.Run("AttributesTheRewriteToTheActor", func(t *testing.T) {
+		conformance.RunDeleterAttributesTheRewriteToTheActor(t, ctx, fixture)
+	})
 	t.Run("DryRunChangesNothing", func(t *testing.T) {
 		conformance.RunDeleterDryRunChangesNothing(t, ctx, fixture)
 	})
@@ -99,6 +102,15 @@ func TestDeleterContract(t *testing.T) {
 	})
 	t.Run("RefusesAnExpectedVersionAcrossSeveralIDs", func(t *testing.T) {
 		conformance.RunDeleterRefusesAnExpectedVersionAcrossSeveralIDs(t, ctx, fixture)
+	})
+	// The engine admits one writer at a time, so on this leg the two races are
+	// serialized below the role: they pin the outcome and the history entry,
+	// not a fence (the embedded body has none).
+	t.Run("ExpectedVersionSingleWinnerUnderConcurrency", func(t *testing.T) {
+		conformance.RunDeleterExpectedVersionSingleWinnerUnderConcurrency(t, ctx, fixture)
+	})
+	t.Run("ExpectedVersionCascadeSingleWinnerUnderConcurrency", func(t *testing.T) {
+		conformance.RunDeleterExpectedVersionCascadeSingleWinnerUnderConcurrency(t, ctx, fixture)
 	})
 }
 

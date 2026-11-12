@@ -5,6 +5,8 @@ import (
 	"go/parser"
 	"go/token"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage/uow"
 )
 
 // TestEveryTimedProviderAccessorBindsToTheWrapper is the regression pin for the
@@ -45,8 +47,10 @@ func TestEveryTimedProviderAccessorBindsToTheWrapper(t *testing.T) {
 			continue
 		}
 		// NewUOW is the layer itself and Close is lifecycle; neither constructs
-		// a role. Everything else on this type is an accessor.
-		if fn.Name.Name == "NewUOW" || fn.Name.Name == "Close" {
+		// a role. FenceProvider constructs none either: it answers which provider
+		// holds the GET_LOCK fence, and that fence is no unit of work to time.
+		// Everything else on this type is an accessor.
+		if fn.Name.Name == "NewUOW" || fn.Name.Name == "Close" || fn.Name.Name == "FenceProvider" {
 			continue
 		}
 		recv := "p"
@@ -113,5 +117,23 @@ func exprText(e ast.Expr) string {
 		return exprText(v.Fun) + "(...)"
 	default:
 		return "an expression that is not the receiver"
+	}
+}
+
+// TestTimedProviderLeadsTheDeleteFenceToTheProviderItWraps: a guarded delete
+// built over this wrapper finds its GET_LOCK fence by walking FenceProvider
+// (uow's fenceTarget), so the method must hand back the provider the wrapper
+// wraps. Handing back the receiver would send that walk round in a circle on
+// every guarded delete, and anything that is not the wrapped chain would lead
+// it to the wrong fence or to none.
+func TestTimedProviderLeadsTheDeleteFenceToTheProviderItWraps(t *testing.T) {
+	inner := &fakeProvider{}
+	var p uow.UnitOfWorkProvider = timedProvider{inner: inner}
+	fence, ok := p.(uow.FenceProvider)
+	if !ok {
+		t.Fatal("timedProvider does not answer uow.FenceProvider: a guarded delete served over it cannot find its fence")
+	}
+	if got := fence.FenceProvider(); got != uow.UnitOfWorkProvider(inner) {
+		t.Fatalf("FenceProvider() = %T, want the wrapped %T itself", got, inner)
 	}
 }

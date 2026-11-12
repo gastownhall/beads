@@ -1,0 +1,218 @@
+# The default surface of internal/httpapi: what a server built from Config{}
+# answers, with no credential sent, on paths no v0 operation owns. Every
+# answer is v0's unrouted 404 (TestDefaultSurfaceAnswersV0sUnrouted404 holds
+# that whatever this file says). A diff here changes what every default
+# bd serve answers; regenerate only for a reviewed change:
+#   BD_UPDATE_GOLDEN=1 go test -tags gms_pure_go ./internal/httpapi -run '^TestDefaultSurfaceAnswersV0sUnrouted404$'
+# Normalized: Date is dropped, this server's request ids read <request-id>
+# and its address <addr>.
+
+== answers ==
+
+answer 84681f2c1e74
+status: 404
+header: Cache-Control: "no-store"
+header: Content-Length: "125"
+header: Content-Type: "application/problem+json; charset=utf-8"
+body: "{\"code\":\"not_found\",\"detail\":\"no such route on this server\",\"request_id\":\"<request-id>\",\"status\":404,\"title\":\"Not Found\"}\n"
+
+answer 92add2d48d99
+status: 404
+header: Cache-Control: "no-store"
+header: Content-Length: "125"
+header: Content-Type: "application/problem+json; charset=utf-8"
+body: ""
+
+== requests ==
+no-auth    GET     /                          84681f2c1e74
+no-auth    HEAD    /                          92add2d48d99
+no-auth    POST    /                          84681f2c1e74
+no-auth    PUT     /                          84681f2c1e74
+no-auth    PATCH   /                          84681f2c1e74
+no-auth    DELETE  /                          84681f2c1e74
+no-auth    OPTIONS /                          84681f2c1e74
+no-auth    TRACE   /                          84681f2c1e74
+no-auth    GET     /bdp                       84681f2c1e74
+no-auth    HEAD    /bdp                       92add2d48d99
+no-auth    POST    /bdp                       84681f2c1e74
+no-auth    PUT     /bdp                       84681f2c1e74
+no-auth    PATCH   /bdp                       84681f2c1e74
+no-auth    DELETE  /bdp                       84681f2c1e74
+no-auth    OPTIONS /bdp                       84681f2c1e74
+no-auth    TRACE   /bdp                       84681f2c1e74
+no-auth    GET     /bdp/                      84681f2c1e74
+no-auth    HEAD    /bdp/                      92add2d48d99
+no-auth    POST    /bdp/                      84681f2c1e74
+no-auth    PUT     /bdp/                      84681f2c1e74
+no-auth    PATCH   /bdp/                      84681f2c1e74
+no-auth    DELETE  /bdp/                      84681f2c1e74
+no-auth    OPTIONS /bdp/                      84681f2c1e74
+no-auth    TRACE   /bdp/                      84681f2c1e74
+no-auth    GET     /bdp/call                  84681f2c1e74
+no-auth    HEAD    /bdp/call                  92add2d48d99
+no-auth    POST    /bdp/call                  84681f2c1e74
+no-auth    PUT     /bdp/call                  84681f2c1e74
+no-auth    PATCH   /bdp/call                  84681f2c1e74
+no-auth    DELETE  /bdp/call                  84681f2c1e74
+no-auth    OPTIONS /bdp/call                  84681f2c1e74
+no-auth    TRACE   /bdp/call                  84681f2c1e74
+no-auth    GET     /bdp/call/issue/show       84681f2c1e74
+no-auth    HEAD    /bdp/call/issue/show       92add2d48d99
+no-auth    POST    /bdp/call/issue/show       84681f2c1e74
+no-auth    PUT     /bdp/call/issue/show       84681f2c1e74
+no-auth    PATCH   /bdp/call/issue/show       84681f2c1e74
+no-auth    DELETE  /bdp/call/issue/show       84681f2c1e74
+no-auth    OPTIONS /bdp/call/issue/show       84681f2c1e74
+no-auth    TRACE   /bdp/call/issue/show       84681f2c1e74
+no-auth    GET     /bdp/beads                 84681f2c1e74
+no-auth    HEAD    /bdp/beads                 92add2d48d99
+no-auth    POST    /bdp/beads                 84681f2c1e74
+no-auth    PUT     /bdp/beads                 84681f2c1e74
+no-auth    PATCH   /bdp/beads                 84681f2c1e74
+no-auth    DELETE  /bdp/beads                 84681f2c1e74
+no-auth    OPTIONS /bdp/beads                 84681f2c1e74
+no-auth    TRACE   /bdp/beads                 84681f2c1e74
+no-auth    GET     /bdp/links                 84681f2c1e74
+no-auth    HEAD    /bdp/links                 92add2d48d99
+no-auth    POST    /bdp/links                 84681f2c1e74
+no-auth    PUT     /bdp/links                 84681f2c1e74
+no-auth    PATCH   /bdp/links                 84681f2c1e74
+no-auth    DELETE  /bdp/links                 84681f2c1e74
+no-auth    OPTIONS /bdp/links                 84681f2c1e74
+no-auth    TRACE   /bdp/links                 84681f2c1e74
+no-auth    GET     /bdp/operations/createBead 84681f2c1e74
+no-auth    HEAD    /bdp/operations/createBead 92add2d48d99
+no-auth    POST    /bdp/operations/createBead 84681f2c1e74
+no-auth    PUT     /bdp/operations/createBead 84681f2c1e74
+no-auth    PATCH   /bdp/operations/createBead 84681f2c1e74
+no-auth    DELETE  /bdp/operations/createBead 84681f2c1e74
+no-auth    OPTIONS /bdp/operations/createBead 84681f2c1e74
+no-auth    TRACE   /bdp/operations/createBead 84681f2c1e74
+no-auth    GET     /bd-1                      84681f2c1e74
+no-auth    HEAD    /bd-1                      92add2d48d99
+no-auth    POST    /bd-1                      84681f2c1e74
+no-auth    PUT     /bd-1                      84681f2c1e74
+no-auth    PATCH   /bd-1                      84681f2c1e74
+no-auth    DELETE  /bd-1                      84681f2c1e74
+no-auth    OPTIONS /bd-1                      84681f2c1e74
+no-auth    TRACE   /bd-1                      84681f2c1e74
+no-auth    GET     /a/b                       84681f2c1e74
+no-auth    HEAD    /a/b                       92add2d48d99
+no-auth    POST    /a/b                       84681f2c1e74
+no-auth    PUT     /a/b                       84681f2c1e74
+no-auth    PATCH   /a/b                       84681f2c1e74
+no-auth    DELETE  /a/b                       84681f2c1e74
+no-auth    OPTIONS /a/b                       84681f2c1e74
+no-auth    TRACE   /a/b                       84681f2c1e74
+no-auth    GET     /v1/beads/ready            84681f2c1e74
+no-auth    HEAD    /v1/beads/ready            92add2d48d99
+no-auth    POST    /v1/beads/ready            84681f2c1e74
+no-auth    PUT     /v1/beads/ready            84681f2c1e74
+no-auth    PATCH   /v1/beads/ready            84681f2c1e74
+no-auth    DELETE  /v1/beads/ready            84681f2c1e74
+no-auth    OPTIONS /v1/beads/ready            84681f2c1e74
+no-auth    TRACE   /v1/beads/ready            84681f2c1e74
+no-auth    GET     /v0/nonsense               84681f2c1e74
+no-auth    HEAD    /v0/nonsense               92add2d48d99
+no-auth    POST    /v0/nonsense               84681f2c1e74
+no-auth    PUT     /v0/nonsense               84681f2c1e74
+no-auth    PATCH   /v0/nonsense               84681f2c1e74
+no-auth    DELETE  /v0/nonsense               84681f2c1e74
+no-auth    OPTIONS /v0/nonsense               84681f2c1e74
+no-auth    TRACE   /v0/nonsense               84681f2c1e74
+token-file GET     /                          84681f2c1e74
+token-file HEAD    /                          92add2d48d99
+token-file POST    /                          84681f2c1e74
+token-file PUT     /                          84681f2c1e74
+token-file PATCH   /                          84681f2c1e74
+token-file DELETE  /                          84681f2c1e74
+token-file OPTIONS /                          84681f2c1e74
+token-file TRACE   /                          84681f2c1e74
+token-file GET     /bdp                       84681f2c1e74
+token-file HEAD    /bdp                       92add2d48d99
+token-file POST    /bdp                       84681f2c1e74
+token-file PUT     /bdp                       84681f2c1e74
+token-file PATCH   /bdp                       84681f2c1e74
+token-file DELETE  /bdp                       84681f2c1e74
+token-file OPTIONS /bdp                       84681f2c1e74
+token-file TRACE   /bdp                       84681f2c1e74
+token-file GET     /bdp/                      84681f2c1e74
+token-file HEAD    /bdp/                      92add2d48d99
+token-file POST    /bdp/                      84681f2c1e74
+token-file PUT     /bdp/                      84681f2c1e74
+token-file PATCH   /bdp/                      84681f2c1e74
+token-file DELETE  /bdp/                      84681f2c1e74
+token-file OPTIONS /bdp/                      84681f2c1e74
+token-file TRACE   /bdp/                      84681f2c1e74
+token-file GET     /bdp/call                  84681f2c1e74
+token-file HEAD    /bdp/call                  92add2d48d99
+token-file POST    /bdp/call                  84681f2c1e74
+token-file PUT     /bdp/call                  84681f2c1e74
+token-file PATCH   /bdp/call                  84681f2c1e74
+token-file DELETE  /bdp/call                  84681f2c1e74
+token-file OPTIONS /bdp/call                  84681f2c1e74
+token-file TRACE   /bdp/call                  84681f2c1e74
+token-file GET     /bdp/call/issue/show       84681f2c1e74
+token-file HEAD    /bdp/call/issue/show       92add2d48d99
+token-file POST    /bdp/call/issue/show       84681f2c1e74
+token-file PUT     /bdp/call/issue/show       84681f2c1e74
+token-file PATCH   /bdp/call/issue/show       84681f2c1e74
+token-file DELETE  /bdp/call/issue/show       84681f2c1e74
+token-file OPTIONS /bdp/call/issue/show       84681f2c1e74
+token-file TRACE   /bdp/call/issue/show       84681f2c1e74
+token-file GET     /bdp/beads                 84681f2c1e74
+token-file HEAD    /bdp/beads                 92add2d48d99
+token-file POST    /bdp/beads                 84681f2c1e74
+token-file PUT     /bdp/beads                 84681f2c1e74
+token-file PATCH   /bdp/beads                 84681f2c1e74
+token-file DELETE  /bdp/beads                 84681f2c1e74
+token-file OPTIONS /bdp/beads                 84681f2c1e74
+token-file TRACE   /bdp/beads                 84681f2c1e74
+token-file GET     /bdp/links                 84681f2c1e74
+token-file HEAD    /bdp/links                 92add2d48d99
+token-file POST    /bdp/links                 84681f2c1e74
+token-file PUT     /bdp/links                 84681f2c1e74
+token-file PATCH   /bdp/links                 84681f2c1e74
+token-file DELETE  /bdp/links                 84681f2c1e74
+token-file OPTIONS /bdp/links                 84681f2c1e74
+token-file TRACE   /bdp/links                 84681f2c1e74
+token-file GET     /bdp/operations/createBead 84681f2c1e74
+token-file HEAD    /bdp/operations/createBead 92add2d48d99
+token-file POST    /bdp/operations/createBead 84681f2c1e74
+token-file PUT     /bdp/operations/createBead 84681f2c1e74
+token-file PATCH   /bdp/operations/createBead 84681f2c1e74
+token-file DELETE  /bdp/operations/createBead 84681f2c1e74
+token-file OPTIONS /bdp/operations/createBead 84681f2c1e74
+token-file TRACE   /bdp/operations/createBead 84681f2c1e74
+token-file GET     /bd-1                      84681f2c1e74
+token-file HEAD    /bd-1                      92add2d48d99
+token-file POST    /bd-1                      84681f2c1e74
+token-file PUT     /bd-1                      84681f2c1e74
+token-file PATCH   /bd-1                      84681f2c1e74
+token-file DELETE  /bd-1                      84681f2c1e74
+token-file OPTIONS /bd-1                      84681f2c1e74
+token-file TRACE   /bd-1                      84681f2c1e74
+token-file GET     /a/b                       84681f2c1e74
+token-file HEAD    /a/b                       92add2d48d99
+token-file POST    /a/b                       84681f2c1e74
+token-file PUT     /a/b                       84681f2c1e74
+token-file PATCH   /a/b                       84681f2c1e74
+token-file DELETE  /a/b                       84681f2c1e74
+token-file OPTIONS /a/b                       84681f2c1e74
+token-file TRACE   /a/b                       84681f2c1e74
+token-file GET     /v1/beads/ready            84681f2c1e74
+token-file HEAD    /v1/beads/ready            92add2d48d99
+token-file POST    /v1/beads/ready            84681f2c1e74
+token-file PUT     /v1/beads/ready            84681f2c1e74
+token-file PATCH   /v1/beads/ready            84681f2c1e74
+token-file DELETE  /v1/beads/ready            84681f2c1e74
+token-file OPTIONS /v1/beads/ready            84681f2c1e74
+token-file TRACE   /v1/beads/ready            84681f2c1e74
+token-file GET     /v0/nonsense               84681f2c1e74
+token-file HEAD    /v0/nonsense               92add2d48d99
+token-file POST    /v0/nonsense               84681f2c1e74
+token-file PUT     /v0/nonsense               84681f2c1e74
+token-file PATCH   /v0/nonsense               84681f2c1e74
+token-file DELETE  /v0/nonsense               84681f2c1e74
+token-file OPTIONS /v0/nonsense               84681f2c1e74
+token-file TRACE   /v0/nonsense               84681f2c1e74
