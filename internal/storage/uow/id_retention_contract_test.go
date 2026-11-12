@@ -25,6 +25,9 @@ func TestIDRetentionContract(t *testing.T) {
 	t.Run("APlainSweepLeavesTheIDReusable", func(t *testing.T) {
 		conformance.RunIDRetentionAPlainSweepLeavesTheIDReusable(t, ctx, fixture)
 	})
+	t.Run("APlainSweepLeavesAHierarchicalIDExplicitlyRecreatable", func(t *testing.T) {
+		conformance.RunIDRetentionAPlainSweepLeavesAHierarchicalIDExplicitlyRecreatable(t, ctx, fixture)
+	})
 	t.Run("ARetainingSweepRetiresEverySweptID", func(t *testing.T) {
 		conformance.RunIDRetentionARetainingSweepRetiresEverySweptID(t, ctx, fixture)
 	})

@@ -178,6 +178,36 @@ func RunIDRetentionAPlainSweepLeavesTheIDReusable(t *testing.T, ctx context.Cont
 	}
 }
 
+// RunIDRetentionAPlainSweepLeavesAHierarchicalIDExplicitlyRecreatable is the
+// hierarchical twin of APlainSweepLeavesTheIDReusable, and the boundary pin
+// for GH#4750's fix: keeping a swept child suffix out of the MINT must not
+// keep it out of an EXPLICIT recreate. The reservation raises the parent's
+// counter, which only the generator reads; a plain sweep writes no
+// tombstone, so `bd create --id P.3` on a plainly swept P.3 must still
+// succeed.
+func RunIDRetentionAPlainSweepLeavesAHierarchicalIDExplicitlyRecreatable(t *testing.T, ctx context.Context, fixture IDRetentionFixture) {
+	t.Helper()
+	parent := idRetentionID(fixture, "plainhier", "parent")
+	if _, err := fixture.Lifecycle.Create(ctx, idRetentionCreate(parent, false)); err != nil {
+		t.Fatalf("Create(%s) = %v", parent, err)
+	}
+	id := parent + ".3"
+	if _, err := fixture.Lifecycle.Create(ctx, idRetentionCreate(id, false)); err != nil {
+		t.Fatalf("Create(%s) = %v", id, err)
+	}
+	if _, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: idRetentionActor, IssueID: id, Reason: "id-retention"}); err != nil {
+		t.Fatalf("Close(%s) = %v", id, err)
+	}
+	result := sweeperSweep(t, ctx, fixture.Sweep, publicops.SweepRequest{Tier: publicops.SweepDurable, IDPattern: id})
+	if result.Swept != 1 {
+		t.Fatalf("plain sweep of %s Swept = %d, want 1", id, result.Swept)
+	}
+	idRetentionAssertTombstones(t, ctx, fixture, id, 0, 0)
+	if _, err := fixture.Lifecycle.Create(ctx, idRetentionCreate(id, false)); err != nil {
+		t.Fatalf("Create(%s) after a plain sweep = %v, want nil: a reserved suffix blocks the mint, not an explicit recreate (GH#4750)", id, err)
+	}
+}
+
 // RunIDRetentionARetainingSweepRetiresEverySweptID pins the write half: a
 // retaining durable sweep that deletes an issues-plane row and a no-history
 // row of the wisps plane leaves one tombstone per row, in the tombstone table
