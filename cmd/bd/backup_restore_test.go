@@ -794,6 +794,111 @@ func TestRunBackupRestoreUnknownFieldsCommitGuidance(t *testing.T) {
 	}
 }
 
+// TestRunBackupRestoreCommitOutcomes pins the direct restore's behavior
+// around the unknown-fields hint (AC-3 of bd-nll4d4): a successful commit and
+// Dolt's "nothing to commit" are both successes, an ordinary commit error
+// keeps the generic wrapper without the incompatibility hint, a restore that
+// fails never reaches the identity sync, registration or commit, and --force
+// keeps its identity-sync-then-registration-then-commit order. Registration
+// stays best-effort: its failure never fails the restore and the report never
+// claims it succeeded.
+func TestRunBackupRestoreCommitOutcomes(t *testing.T) {
+	newStore := func() *stubRestoreStore { return &stubRestoreStore{} }
+
+	t.Run("successful_commit", func(t *testing.T) {
+		beadsDir := isolateRestoreWorkspace(t)
+		s := newStore()
+		if err := runBackupRestore(context.Background(), s, filepath.Join(beadsDir, "backup"), false); err != nil {
+			t.Fatalf("runBackupRestore = %v, want nil", err)
+		}
+		// Without --force there is no identity sync; registration still runs
+		// before the commit.
+		if want := []string{"restore", "unregister", "register", "commit"}; !slices.Equal(s.calls, want) {
+			t.Errorf("call order = %v, want %v", s.calls, want)
+		}
+	})
+
+	t.Run("nothing_to_commit_is_success", func(t *testing.T) {
+		beadsDir := isolateRestoreWorkspace(t)
+		s := newStore()
+		s.commitErr = errors.New("dolt commit: no changes added to commit; nothing to commit")
+		if err := runBackupRestore(context.Background(), s, filepath.Join(beadsDir, "backup"), false); err != nil {
+			t.Fatalf("runBackupRestore = %v, want nil for a clean working set", err)
+		}
+	})
+
+	t.Run("ordinary_commit_error_keeps_generic_wrapper", func(t *testing.T) {
+		beadsDir := isolateRestoreWorkspace(t)
+		s := newStore()
+		s.commitErr = errors.New("Error 1105: server has gone away")
+		err := runBackupRestore(context.Background(), s, filepath.Join(beadsDir, "backup"), false)
+		if err == nil {
+			t.Fatal("runBackupRestore = nil, want the commit error")
+		}
+		for _, want := range []string{"failed to commit restore", "server has gone away"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("restore error is missing %q:\n%s", want, err)
+			}
+		}
+		// An ordinary failure is not an incompatibility report.
+		for _, notWant := range []string{"may be newer than the engine", "For embedded mode, upgrade bd"} {
+			if strings.Contains(err.Error(), notWant) {
+				t.Errorf("restore error carries the unknown-fields hint %q without the diagnostic:\n%s", notWant, err)
+			}
+		}
+		if !errors.Is(err, s.commitErr) {
+			t.Errorf("errors.Is(err, the store's commit error) = false, want the chain preserved:\n%s", err)
+		}
+	})
+
+	t.Run("failed_registration_does_not_fail_the_restore", func(t *testing.T) {
+		beadsDir := isolateRestoreWorkspace(t)
+		s := newStore()
+		s.registerErr = errors.New("the test store refuses remotes")
+		if err := runBackupRestore(context.Background(), s, filepath.Join(beadsDir, "backup"), false); err != nil {
+			t.Fatalf("runBackupRestore = %v, want nil: registration is best-effort", err)
+		}
+	})
+
+	t.Run("restore_failure_makes_no_later_calls", func(t *testing.T) {
+		beadsDir := isolateRestoreWorkspace(t)
+		s := newStore()
+		s.restoreErr = errors.New("the source holds no Dolt backup")
+		err := runBackupRestore(context.Background(), s, filepath.Join(beadsDir, "backup"), true)
+		if err == nil {
+			t.Fatal("runBackupRestore = nil, want the restore error")
+		}
+		if !errors.Is(err, s.restoreErr) {
+			t.Errorf("errors.Is(err, the restore error) = false, want it unwrapped:\n%s", err)
+		}
+		if want := []string{"restore"}; !slices.Equal(s.calls, want) {
+			t.Errorf("call order = %v, want %v: a failed restore must not sync identity, register or commit", s.calls, want)
+		}
+	})
+
+	t.Run("force_syncs_identity_before_registration_and_commit", func(t *testing.T) {
+		beadsDir := isolateRestoreWorkspace(t)
+		s := newStore()
+		s.projectID = "restored-project"
+
+		if err := runBackupRestore(context.Background(), s, filepath.Join(beadsDir, "backup"), true); err != nil {
+			t.Fatalf("runBackupRestore = %v, want nil", err)
+		}
+		if want := []string{"restore", "identity-sync", "unregister", "register", "commit"}; !slices.Equal(s.calls, want) {
+			t.Errorf("call order = %v, want %v", s.calls, want)
+		}
+		// The restored database's project id was synced into the workspace
+		// metadata, in the isolated workspace only.
+		cfg, err := configfile.Load(beadsDir)
+		if err != nil {
+			t.Fatalf("configfile.Load: %v", err)
+		}
+		if cfg == nil || cfg.ProjectID != "restored-project" {
+			t.Errorf("workspace ProjectID = %v, want restored-project", cfg)
+		}
+	})
+}
+
 // forwardFromOtherLoopback listens on 127.0.0.2 and forwards each connection
 // to the test Dolt server on 127.0.0.1:port, returning the port it listens on.
 // A workspace pointed at it reaches the same server at an address bd does not
