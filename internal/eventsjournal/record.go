@@ -50,7 +50,7 @@ type Record struct {
 	// of the request whose mutation caused it, the same value that
 	// mutation's own record carries. Absent when no actor is behind the row:
 	// no request at all (system maintenance: a pull's or merge's recompute,
-	// `bd recompute-blocked`, `bd doctor --fix`; system cleanup: wisp gc,
+	// `bd recompute-blocked`, `bd doctor --fix`; system cleanup: `bd gc` wisp deletes,
 	// `bd repo remove`); a request that named none (a served delete or sweep
 	// sent without an actor, storage.DeleteIssue, which takes none); a
 	// post-commit blocked recheck settling writes by different actors in one

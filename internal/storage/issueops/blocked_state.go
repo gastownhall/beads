@@ -160,7 +160,7 @@ type RecomputeIsBlockedResult struct {
 // one, which a journal consumer reads as system/unknown
 // (eventsjournal.Record.Actor). Only the genuinely system-originated paths pass
 // it — a pull's or merge's recompute, `bd recompute-blocked`, `bd doctor --fix`,
-// federation, and the delete surfaces that carry no actor of their own (wisp gc,
+// federation, and the delete surfaces that carry no actor of their own (`bd gc` wisp deletes,
 // `bd repo remove`). A path a user request drives passes that request's actor,
 // the same value its own record carries: a derived
 // record a user's change caused is that user's change.

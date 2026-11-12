@@ -298,11 +298,12 @@ caller's verified subject gets that subject on every record of the change,
 derived ones included, from the same source, and never a caller-supplied
 value. A record carries no `actor` only when no actor is behind it: no request
 at all (a pull's or merge's recompute, `bd recompute-blocked`,
-`bd doctor --fix`, wisp gc, `bd repo remove`); a request that named none (a
-`delete` or `sweep` sent without `actor`, which both accept); or a post-commit
-recheck that settles writes by different actors in one transaction, which
-names no one rather than one of them. This is not a wire-shape change: `actor` was already an
-optional member of every record, so `wire_revision` does not move.
+`bd doctor --fix`, `bd gc` wisp deletes, `bd repo remove`); a request that
+named none (a `delete` or `sweep` sent without `actor`, which both accept); or
+a post-commit recheck that settles writes by different actors in one
+transaction, which names no one rather than one of them. This is not a
+wire-shape change: `actor` was already an optional member of every record, so
+`wire_revision` does not move.
 
 ## No hooks
 
