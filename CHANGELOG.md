@@ -1545,10 +1545,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   warns that the audit history is incomplete and carries on, and a shallow
   clone that ends at the upgrade has nothing to restore. A cancelled,
   transient or live-table failure leaves the restore to retry on the next
-  open. Reads and writes are batched: 100,000 events restore in about 20
-  seconds rather than several minutes, which is how long a shared server's
-  migration lock is held. It makes no Dolt commit, and the restored rows
-  stay clone-local.
+  open. Every clone pays the check once, including the clone that ran 0062
+  itself, where nothing is restored. The restore reads the history before
+  each drop commit a page of rows at a time and writes in batches, so the
+  cost grows with the number of pre-upgrade events and drop commits, never
+  per issue. In embedded mode, 15,000 events over 3,000 issues take about
+  1.6 seconds to check on the migrating clone, and about 8 seconds to
+  restore on an adopting one, mostly writing. A shared server holds its
+  migration lock for that long. It makes no Dolt commit, and the restored
+  rows stay clone-local.
   [Upgrading](docs/getting-started/upgrading.md) gives a manual recipe for
   v1.3.4 and earlier, and how to retry a restore that skipped history
   (#7039).
