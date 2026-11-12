@@ -26,6 +26,11 @@ var driftErr = errors.New("Error 1105 (HY000): panic recovered: invalid hash len
 // before it ever reaches hash.New (#8372).
 var driftErrDolt26 = errors.New("Error 1105 (HY000): malformed out-of-band adaptive value: invalid address length: expected 20-byte address, got 19")
 
+// errInlineAdaptiveValue is a Dolt 2.6 adaptive-value error that is caller
+// misuse, not on-disk drift: it shares the "adaptive value" wording but not the
+// "malformed out-of-band" prefix, so the re-key must keep aborting on it.
+var errInlineAdaptiveValue = errors.New("Error 1105 (HY000): cannot get address from inline adaptive value")
+
 func expectEventsSelect(mock sqlmock.Sqlmock) *sqlmock.ExpectedQuery {
 	return mock.ExpectQuery(regexp.QuoteMeta(
 		fmt.Sprintf("SELECT id, %s FROM %s", eventsTable.columns, eventsTable.name)))
@@ -114,6 +119,14 @@ func TestIsSchemaEncodingDriftErr(t *testing.T) {
 		{"connection drop", errors.New("invalid connection"), false},
 		{"unrelated panic", errors.New("Error 1105 (HY000): panic recovered: index out of range"), false},
 		{"lock timeout", errors.New("Error 1205 (HY000): lock wait timeout exceeded"), false},
+		// The engine's adaptive-value caller-misuse errors are not on-disk
+		// drift: they lack the "malformed out-of-band" prefix and must abort.
+		{"inline adaptive value misuse", errInlineAdaptiveValue, false},
+		{
+			"null adaptive value misuse",
+			errors.New("Error 1105 (HY000): cannot get address from null adaptive value"),
+			false,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
