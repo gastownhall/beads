@@ -852,8 +852,10 @@ func TestRemoteBatchCloserAnswersAFailedReadWithIt(t *testing.T) {
 // workspace holds an open holder of an external ref, only a closed one, or
 // none, and with Force too. The refusal leads with that wire fact, reads
 // nothing, closes nothing and names the commands that do the same work. A
-// server that enforces the policy itself gets the request as it came, and its
-// closer answers.
+// server that enforces the whole policy itself — both halves, the
+// crossrig_capability_test cases name the old-token server that must still be
+// refused (GH#5784 AC-10) — gets the request as it came, and its closer
+// answers.
 func TestRemoteBatchCloserRefusesANextClaim(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -872,6 +874,7 @@ func TestRemoteBatchCloserRefusesANextClaim(t *testing.T) {
 			free, holder := issue("be-free"), issue("be-holder")
 			raw := newRemoteStore(free, holder)
 			raw.enforced = tc.enforced
+			raw.crossRigEnforced = tc.enforced
 			if tc.holder != "" {
 				holder.Status = tc.holder
 				blockOnPayments(raw, holder.ID)

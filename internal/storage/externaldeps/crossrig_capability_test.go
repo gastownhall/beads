@@ -1,9 +1,12 @@
 package externaldeps
 
 import (
+	"errors"
 	"slices"
+	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
@@ -120,6 +123,59 @@ func TestOldTokenServerKeepsCrossRigEnforcement(t *testing.T) {
 				if leaf.ID != xrigTarget || !leaf.External || leaf.Unresolved {
 					t.Fatalf("leaf = %+v, want the resolved external leaf for %s", leaf, xrigTarget)
 				}
+			}
+		})
+	}
+}
+
+// TestOldTokenServerRefusesCloseAndClaimNext pins GH#5784 AC-10: a combined
+// close/claim-next against an old-token server cannot compose the foreign
+// guard atomically — the served close and the served claim are two requests,
+// and a bare cross-rig blocker that opens between them would put foreign-
+// blocked work into the claim. The client must return the explicit
+// unsupported-operation refusal BEFORE anything is closed or read, and the
+// old token must not buy its way past that refusal. A server that advertises
+// both tokens has the whole policy in its own closer and still answers.
+func TestOldTokenServerRefusesCloseAndClaimNext(t *testing.T) {
+	for _, server := range []struct {
+		name       string
+		enforced   bool
+		crossRig   bool
+		wantServed []string
+	}{
+		{name: "old token", enforced: true, crossRig: false},
+		{name: "new token", enforced: true, crossRig: true, wantServed: []string{"CloseBatch ClaimNext"}},
+	} {
+		t.Run(server.name, func(t *testing.T) {
+			raw := newRemoteStore(issue("be-free"))
+			raw.enforced = server.enforced
+			raw.crossRigEnforced = server.crossRig
+			closer, err := testStore(raw, &fakeStore{}, true).BatchCloser()
+			if err != nil {
+				t.Fatalf("BatchCloser: %v", err)
+			}
+
+			_, err = closer.CloseBatch(t.Context(), publicops.CloseBatchRequest{
+				Actor: "worker", Items: closeItems("be-free"), ClaimNext: &publicops.ReadyRequest{},
+			})
+			if server.crossRig {
+				if !errors.Is(err, errServedClaimNextRefused) {
+					t.Fatalf("CloseBatch with ClaimNext = %v, want the served closer's own answer", err)
+				}
+			} else {
+				var unsupported *storage.ErrUnsupported
+				if !errors.As(err, &unsupported) || unsupported.Op != "CloseBatchRequest.ClaimNext" {
+					t.Fatalf("CloseBatch with ClaimNext = %v, want the CloseBatchRequest.ClaimNext refusal", err)
+				}
+				if msg := err.Error(); !strings.Contains(msg, "cannot carry a next claim") || !strings.Contains(msg, "nothing was closed") || !strings.Contains(msg, "then run `bd ready --claim`") {
+					t.Fatalf("refusal %q does not say why, that nothing closed, and what to run instead", msg)
+				}
+			}
+			if !slices.Equal(raw.served, server.wantServed) {
+				t.Fatalf("served calls = %v, want %v", raw.served, server.wantServed)
+			}
+			if len(raw.closes) != 0 || len(raw.edgeReads) != 0 || raw.scans != 0 {
+				t.Fatalf("closes %v, edge reads %v, scans %d; want nothing read or closed before the refusal", raw.closes, raw.edgeReads, raw.scans)
 			}
 		})
 	}

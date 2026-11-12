@@ -634,11 +634,17 @@ var (
 
 // closeAndClaimNext answers a batch with a next claim. A request that is
 // invalid on every backend is still ErrValidation. Against a server that does
-// not apply the policy the batch is refused whole, before anything is read or
-// closed: a served close cannot keep externally blocked work out of its claim,
-// and the v0 wire's batch close cannot carry a next claim at all (ledger row
-// W-CloseBatchRequest.ClaimNext). A server that applies the policy gets the
-// request as it came; over the v0 wire its closer refuses the claim too.
+// not apply the WHOLE policy the batch is refused whole, before anything is
+// read or closed: a served close cannot keep externally blocked work out of
+// its claim, and the v0 wire's batch close cannot carry a next claim at all
+// (ledger row W-CloseBatchRequest.ClaimNext). The refusal asks for both
+// halves (GH#5784 AC-10): an old-token server applies the capability-reference
+// half in its own closer but leaves the bare cross-prefix half to its clients,
+// and this client's composed guard cannot ride the server's atomic close —
+// the two requests a composed close-and-claim would make leave a window a
+// foreign blocker opens in, so its token buys nothing here. A server that
+// applies both halves gets the request as it came; over the v0 wire its closer
+// refuses the claim too.
 func (c *remoteBatchCloser) closeAndClaimNext(ctx context.Context, request issueops.CloseBatchRequest) (issueops.CloseBatchResult, error) {
 	if err := storageissueops.ValidateCloseBatchRequest(request); err != nil {
 		return issueops.CloseBatchResult{}, err
@@ -646,11 +652,11 @@ func (c *remoteBatchCloser) closeAndClaimNext(ctx context.Context, request issue
 	if _, err := workapi.BuildReadyFilter(*request.ClaimNext); err != nil {
 		return issueops.CloseBatchResult{}, err
 	}
-	enforced, err := c.policy.serverEnforcesPolicy(ctx)
+	kinds, err := c.policy.enforcedPolicyKinds(ctx)
 	if err != nil {
 		return issueops.CloseBatchResult{}, err
 	}
-	if !enforced {
+	if !kinds.both() {
 		return issueops.CloseBatchResult{}, fmt.Errorf(
 			"close with a next claim: the served batch close cannot carry a next claim, so nothing was closed; close without --claim-next, then run `bd ready --claim` (%w)",
 			&storage.ErrUnsupported{Op: "CloseBatchRequest.ClaimNext", Backend: fmt.Sprintf("%T", storage.UnwrapStore(c.policy.inner))})
