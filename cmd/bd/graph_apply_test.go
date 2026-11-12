@@ -1810,3 +1810,55 @@ func TestBuildGraphApplyBatchRequestSkipsPerEdgeCycleProbe(t *testing.T) {
 		t.Fatal("SkipPerEdgeCycleCheck = false, want true: the per-edge SQL cycle probe is the O(E·N) hot path the end gate already covers")
 	}
 }
+
+// TestBuildGraphApplyBatchRequestCanonicalizesBlockingAliases pins bd-esm0t5
+// (GH#3879, AC-3 at request level): a --graph edge typed "blocked-by" and an
+// inline dep typed "depends-on" — the documented alias spellings `bd dep add
+// --type` and `bd create --deps` already normalize (GH#5069) — must be stored
+// as "blocks" with the direction unchanged (from_key/source stays the
+// dependent), instead of inert custom types that never gate `bd ready`.
+func TestBuildGraphApplyBatchRequestCanonicalizesBlockingAliases(t *testing.T) {
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "a", Title: "A"},
+			{Key: "b", Title: "B"},
+			{Key: "c", Title: "C", Deps: []GraphApplyNodeDep{{Type: "depends-on", Target: "a"}}},
+		},
+		Edges: []GraphApplyEdge{{FromKey: "b", ToKey: "a", Type: "blocked-by"}},
+	}
+	req, err := buildGraphApplyBatchRequest(plan, GraphApplyOptions{}, "actor", "")
+	if err != nil {
+		t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+	}
+
+	var edgeItem, depItem *issueops.DepAddItem
+	for _, item := range req.Items {
+		if item.Kind != issueops.ItemDepAdd {
+			continue
+		}
+		switch item.DepAdd.Source {
+		case issueops.Ref{Key: "b"}:
+			edgeItem = item.DepAdd
+		case issueops.Ref{Key: "c"}:
+			depItem = item.DepAdd
+		}
+	}
+	if edgeItem == nil {
+		t.Fatal("no dep_add item found for edge b -> a")
+	}
+	if edgeItem.Type != types.DepBlocks {
+		t.Errorf("edge b -> a type = %q, want %q (blocked-by canonicalized like bd dep add --type)", edgeItem.Type, types.DepBlocks)
+	}
+	if edgeItem.Source != (issueops.Ref{Key: "b"}) || edgeItem.Target != (issueops.Ref{Key: "a"}) {
+		t.Errorf("edge refs = %v -> %v, want b -> a unchanged (from_key stays the dependent)", edgeItem.Source, edgeItem.Target)
+	}
+	if depItem == nil {
+		t.Fatal("no dep_add item found for c's inline dep on a")
+	}
+	if depItem.Type != types.DepBlocks {
+		t.Errorf("inline dep c -> a type = %q, want %q (depends-on canonicalized like --deps)", depItem.Type, types.DepBlocks)
+	}
+	if depItem.Source != (issueops.Ref{Key: "c"}) || depItem.Target != (issueops.Ref{Key: "a"}) {
+		t.Errorf("inline dep refs = %v -> %v, want c -> a unchanged", depItem.Source, depItem.Target)
+	}
+}

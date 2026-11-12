@@ -912,3 +912,63 @@ func TestExecuteGraphApplyEndGateRefusesCycleThroughStoredEdgeViaNewNode(t *test
 		t.Fatalf("plan issue rows after rejected cycle = %d, want 0 (the whole batch rolled back)", count)
 	}
 }
+
+// TestExecuteGraphApplyBlockingAliasesGateReady pins bd-esm0t5 (GH#3879,
+// AC-3): an edge typed "blocked-by" and an inline dep typed "depends-on" are
+// stored as "blocks" rows that gate ready work, the same GH#5069 semantics
+// `bd dep add --type` and `bd create --deps` apply — not inert custom types
+// that leave `bd ready` and `dep tree` disagreeing about the same issue.
+func TestExecuteGraphApplyBlockingAliasesGateReady(t *testing.T) {
+	ctx, _ := withGraphApplyTestStore(t)
+
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "a", Title: "A", Type: "task"},
+			{Key: "b", Title: "B", Type: "task"},
+			{Key: "c", Title: "C", Type: "task", Deps: []GraphApplyNodeDep{{Type: "depends-on", Target: "a"}}},
+		},
+		Edges: []GraphApplyEdge{{FromKey: "b", ToKey: "a", Type: "blocked-by"}},
+	}
+	result, err := executeGraphApply(ctx, plan, GraphApplyOptions{})
+	if err != nil {
+		t.Fatalf("executeGraphApply: %v", err)
+	}
+
+	for _, row := range []struct{ source, target string }{{"b", "a"}, {"c", "a"}} {
+		deps, err := store.GetDependenciesWithMetadata(ctx, result.IDs[row.source])
+		if err != nil {
+			t.Fatalf("GetDependenciesWithMetadata(%s): %v", row.source, err)
+		}
+		if len(deps) != 1 {
+			t.Fatalf("node %q dependency count = %d, want 1 (on a)", row.source, len(deps))
+		}
+		if deps[0].DependencyType != types.DepBlocks {
+			t.Errorf("node %q stored dependency type = %q, want %q", row.source, deps[0].DependencyType, types.DepBlocks)
+		}
+		if deps[0].ID != result.IDs[row.target] {
+			t.Errorf("node %q depends on %q, want %q (a)", row.source, deps[0].ID, result.IDs[row.target])
+		}
+	}
+
+	ready, err := store.GetReadyWork(ctx, types.WorkFilter{
+		Status:        "open",
+		MaxRows:       100,
+		MaxRowsSource: "--max-rows",
+	})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	readyIDs := make(map[string]bool, len(ready))
+	for _, issue := range ready {
+		readyIDs[issue.ID] = true
+	}
+	if !readyIDs[result.IDs["a"]] {
+		t.Errorf("a (no blockers) missing from ready work: %v", readyIDs)
+	}
+	if readyIDs[result.IDs["b"]] {
+		t.Error("b (blocks-aliased edge on a) is ready, want gated")
+	}
+	if readyIDs[result.IDs["c"]] {
+		t.Error("c (depends-on inline dep on a) is ready, want gated")
+	}
+}

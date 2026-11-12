@@ -1107,10 +1107,7 @@ func buildGraphApplyBatchRequest(plan *GraphApplyPlan, opts GraphApplyOptions, a
 	// types.NewGraphNodeDependency applied on the old embedded path.
 	for _, node := range plan.Nodes {
 		for _, dep := range node.Deps {
-			depType := types.DependencyType(dep.Type)
-			if depType == "" {
-				depType = types.DepBlocks
-			}
+			depType := graphApplyDependencyType(dep.Type)
 			target := issueops.Ref{ID: dep.Target}
 			if planKeys[dep.Target] {
 				target = issueops.Ref{Key: dep.Target}
@@ -1227,11 +1224,20 @@ func graphApplyEdgeIsLocalCycleRelevant(edge GraphApplyEdge, depType types.Depen
 	return graphApplyCycleRelevantDependencyType(depType)
 }
 
+// graphApplyDependencyType canonicalizes a plan edge or inline dep type the
+// same way `bd dep add --type` and `bd create --deps` do (canonicalDependencyType,
+// GH#5069): "" means blocks, and the documented alias spellings "depends-on"
+// and "blocked-by" become blocks with the direction unchanged (from_key /
+// the carrying node stays the dependent). Any other type — well-known or
+// custom — passes through verbatim, so `related-to` and friends keep their
+// meaning. Every consumer of a plan edge's type (the batch request, the
+// plan-local cycle preflight, the waits-for gate rule) goes through here so
+// an alias always gates ready work exactly like the canonical type.
 func graphApplyDependencyType(depType string) types.DependencyType {
 	if depType == "" {
 		return types.DepBlocks
 	}
-	return types.DependencyType(depType)
+	return canonicalDependencyType(types.DependencyType(depType))
 }
 
 func graphApplyCycleRelevantDependencyType(depType types.DependencyType) bool {
