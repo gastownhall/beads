@@ -267,7 +267,7 @@ func TestEmbeddedShowBasicsAndJSON(t *testing.T) {
 
 	// GH#5565: the direct/embedded twin of the proxied
 	// show_wisp_comments_default_count_only. A wisp's comments live in
-	// wisp_comments; the default count-only view must count them there.
+	// wisp_comments; the count-only fast path must count them there.
 	t.Run("show_json_wisp_comment_count", func(t *testing.T) {
 		wisp := bdCreate(t, bd, dir, "Wisp w/comments", "--type", "task", "--ephemeral")
 		for i := 0; i < 2; i++ {
@@ -276,15 +276,55 @@ func TestEmbeddedShowBasicsAndJSON(t *testing.T) {
 			}
 		}
 
-		m := bdShowDetails(t, bd, dir, wisp.ID)
+		m := bdShowDetails(t, bd, dir, wisp.ID, "--count-only")
 		if got, _ := m["comment_count"].(float64); got != 2 {
 			t.Errorf("comment_count: got %v, want 2", m["comment_count"])
 		}
 		if _, ok := m["comments"]; ok {
-			t.Errorf("comments slice should be absent by default")
+			t.Errorf("comments slice should be absent under --count-only")
 		}
 		if omitted, _ := m["comments_omitted"].(bool); !omitted {
 			t.Errorf("comments_omitted: got %v, want true beside a nonzero comment_count and no rows", m["comments_omitted"])
+		}
+	})
+
+	// #4122: the default --json payload is the full detail view — comments
+	// and dependents inline — with no comments_omitted. The count-only shape
+	// above is what --count-only buys.
+	t.Run("show_json_default_includes_comments_and_dependents", func(t *testing.T) {
+		hub := bdCreate(t, bd, dir, "Default payload hub", "--type", "task")
+		spoke := bdCreate(t, bd, dir, "Default payload spoke", "--type", "task", "--deps", "blocked-by:"+hub.ID)
+		if out, err := bdRunWithFlockRetry(t, bd, dir, "comments", "add", hub.ID, "hub comment"); err != nil {
+			t.Fatalf("bd comments add failed: %v\n%s", err, out)
+		}
+
+		m := bdShowDetails(t, bd, dir, hub.ID)
+		comments, _ := m["comments"].([]interface{})
+		if len(comments) != 1 {
+			t.Errorf("default payload: got %d comments, want 1 (%v)", len(comments), m["comments"])
+		}
+		dependents, _ := m["dependents"].([]interface{})
+		found := false
+		for _, d := range dependents {
+			row, _ := d.(map[string]interface{})
+			if row["id"] == spoke.ID {
+				found = true
+				if row["dependency_type"] != "blocks" {
+					t.Errorf("dependent dependency_type: got %v, want blocks", row["dependency_type"])
+				}
+			}
+		}
+		if !found {
+			t.Errorf("default payload: hub %s does not list dependent %s (%v)", hub.ID, spoke.ID, m["dependents"])
+		}
+		if got, _ := m["comment_count"].(float64); got != 1 {
+			t.Errorf("comment_count: got %v, want 1", m["comment_count"])
+		}
+		if got, _ := m["dependent_count"].(float64); got != 1 {
+			t.Errorf("dependent_count: got %v, want 1", m["dependent_count"])
+		}
+		if v, ok := m["comments_omitted"]; ok {
+			t.Errorf("comments_omitted should be absent in the default payload, got %v", v)
 		}
 	})
 
