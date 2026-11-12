@@ -123,7 +123,7 @@ func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Co
 			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
 		}
 		return withEnvCredentials(creds, func() error {
-			pullErr := s.pullWithAutoResolve(ctx, peer, "CALL DOLT_PULL(?)", peer)
+			pullErr := s.pullWithAutoResolve(ctx, peer, "")
 			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
 		})
 	})

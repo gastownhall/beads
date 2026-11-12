@@ -325,6 +325,8 @@ go_test(
         "pull_branch_tracking_test.go",
         "pull_config_wedge_test.go",
         "pull_conflict_test.go",
+        "pull_fetch_merge_test.go",
+        "pull_merge_message_test.go",
         "pull_report_sql_route_test.go",
         "pull_report_test.go",
         "querier_contract_test.go",
