@@ -240,7 +240,8 @@ func TestEmbeddedShowBasicsAndJSON(t *testing.T) {
 		_, _ = store.AddIssueComment(t.Context(), issue.ID, "tester", "A comment")
 		store.Close() // release flock before subprocess
 
-		// Comments are count-only by default; --include-comments streams them.
+		// Comments are in the default payload (#4122); --include-comments
+		// changes nothing without --count-only.
 		out, err := bdRunWithFlockRetry(t, bd, dir, "show", issue.ID, "--json", "--include-comments")
 		if err != nil {
 			t.Fatalf("bd show --include-comments failed: %v\n%s", err, out)
@@ -266,8 +267,8 @@ func TestEmbeddedShowBasicsAndJSON(t *testing.T) {
 	})
 
 	// GH#5565: the direct/embedded twin of the proxied
-	// show_wisp_comments_default_count_only. A wisp's comments live in
-	// wisp_comments; the default count-only view must count them there.
+	// show_wisp_comments_count_only. A wisp's comments live in
+	// wisp_comments; the --count-only view must count them there.
 	t.Run("show_json_wisp_comment_count", func(t *testing.T) {
 		wisp := bdCreate(t, bd, dir, "Wisp w/comments", "--type", "task", "--ephemeral")
 		for i := 0; i < 2; i++ {
@@ -276,12 +277,12 @@ func TestEmbeddedShowBasicsAndJSON(t *testing.T) {
 			}
 		}
 
-		m := bdShowDetails(t, bd, dir, wisp.ID)
+		m := bdShowDetails(t, bd, dir, wisp.ID, "--count-only")
 		if got, _ := m["comment_count"].(float64); got != 2 {
 			t.Errorf("comment_count: got %v, want 2", m["comment_count"])
 		}
 		if _, ok := m["comments"]; ok {
-			t.Errorf("comments slice should be absent by default")
+			t.Errorf("comments slice should be absent under --count-only")
 		}
 		if omitted, _ := m["comments_omitted"].(bool); !omitted {
 			t.Errorf("comments_omitted: got %v, want true beside a nonzero comment_count and no rows", m["comments_omitted"])
