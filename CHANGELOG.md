@@ -1306,8 +1306,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refuses a source whose absolute path holds `%`, or outside Windows `#`, `?`
   or `\`: Dolt reads such a path as a different directory, so a `--force`
   restore from a real backup there dropped the database the same way. Move or
-  rename such a backup before restoring it. In plain server mode the source
-  must also be visible to the bd client, since bd now checks it locally.
+  rename such a backup before restoring it. bd checks the source on its own
+  machine, and in plain server mode the Dolt server reads the path on its own
+  filesystem: against a server at a host other than a loopback address, which
+  bd cannot check, the restore is refused with a pointer to run it on the
+  server's machine. A server at a loopback address is taken to share bd's
+  filesystem, which a server in a container does not unless the backup is
+  mounted at the same path in both; there a `--force` restore from a backup
+  that only bd's machine holds can still drop the database.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
