@@ -391,6 +391,26 @@ const CapCloseAutoCloseMolecule = "issues.close.autoCloseMolecule"
 // because the store is remote.
 const CapExternalDependencies = "policy.external_dependencies"
 
+// CapCrossRigDependencies is the CONDITIONAL behavior capability announcing
+// that the ready, claim, claim-next, close, blocking-annotation and tree
+// operations of this server also apply the BARE CROSS-PREFIX half of bd's
+// external-dependency policy (GH#5784: a source blocked by an issue ID whose
+// prefix routes to another rig is not ready, not claimable and not closable
+// without force), spelled exactly as httpapi's constant of the same name.
+//
+// It exists as a token of its own — not a revision of the old token —
+// because a server of the build between the two advertises
+// CapExternalDependencies without knowing bare cross-prefix targets exist:
+// a new client that read the old token as the whole policy would skip its
+// own pass and let a foreign-blocked source through. A client that sees
+// BOTH tokens passes those operations through untouched; one that sees
+// only the old token keeps composing the bare half itself, per kind; the
+// token is never a blanket refusal of anything. Advertised exactly when
+// the serving process composed its roles through the policy layer with the
+// cross-rig half in force (httpapi.Config.CrossRigDependencyPolicy), so it
+// is never advertised by a server that does not enforce it.
+const CapCrossRigDependencies = "policy.cross_rig_dependencies"
+
 // ClientWireRevision is the wire shape this client was built to speak and
 // decode, mirroring internal/httpapi/wire_revision.go's CurrentWireRevision.
 // It is sent as the Bd-Wire-Revision request header on every request

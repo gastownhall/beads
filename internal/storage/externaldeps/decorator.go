@@ -81,6 +81,18 @@ func Applied(store storage.DoltStorage) bool {
 	return false
 }
 
+// CrossRigApplied reports whether store's decorator chain includes this
+// policy layer with its bare cross-prefix half in force (GH#5784). Today the
+// decorator always gates bare cross-prefix blockers, so it agrees with
+// Applied; it is its own walk — not a call to Applied — because the two
+// halves are advertised as separate capability tokens and a composition that
+// carries only one must answer exactly that. bd serve reads it to decide
+// whether its handshake may advertise policy.cross_rig_dependencies
+// (httpapi.Config.CrossRigDependencyPolicy).
+func CrossRigApplied(store storage.DoltStorage) bool {
+	return Applied(store)
+}
+
 // IssueLifecycle preserves the external close policy for public lifecycle
 // operations. Returning the inner lifecycle directly would promote around the
 // decorator when bd close or bd update uses the lifecycle seam.
@@ -163,22 +175,29 @@ type blockingState struct {
 }
 
 func (s *Store) loadBlockingState(ctx context.Context) (blockingState, error) {
-	// Design 3.6: a remote server that already enforces this policy itself
-	// (advertised as the handshake's wire.CapExternalDependencies capability,
-	// probed here through storage.ExternalDependencyPolicyProber) has already
-	// applied it before answering, so this decorator's own pass would be
-	// redundant — skip to an empty blocking state. A store that does not
-	// implement the prober, or that implements it and reports false (a remote
-	// server silent on the capability included), falls through to the
-	// ordinary client-side enforcement below: the policy is never silently
-	// skipped merely because the inner store is remote.
-	if enforced, err := s.serverEnforcesPolicy(ctx); err != nil || enforced {
+	// Design 3.6, split per kind by GH#5784 AC-8: a remote server that
+	// already enforces a half of this policy itself — advertised as the
+	// handshake's wire.CapExternalDependencies and
+	// wire.CapCrossRigDependencies capabilities, probed here through
+	// storage.ExternalDependencyPolicyProber and
+	// storage.CrossRigDependencyPolicyProber — has already applied it
+	// before answering, so this decorator's own pass over that half would
+	// be redundant and is skipped. The halves are probed independently: a
+	// server of the build between the two tokens answers the old one alone,
+	// and only the capability-reference half is skipped — the bare
+	// cross-prefix half is still composed here, judged against THIS
+	// machine's routes, never bypassed and never refused wholesale. A store
+	// that implements no prober, or whose probes report false, falls
+	// through to the ordinary client-side enforcement below for both
+	// halves: the policy is never silently skipped merely because the
+	// inner store is remote.
+	kinds, err := s.enforcedPolicyKinds(ctx)
+	if err != nil || kinds.both() {
 		return blockingState{}, err
 	}
 
 	queryStore, ok := storage.UnwrapStore(s.inner).(storage.ExternalDependencyQueryStore)
 	var allDeps map[string][]*types.Dependency
-	var err error
 	if ok {
 		allDeps, err = queryStore.GetExternalBlockingDependencyRecords(ctx)
 	} else {
@@ -201,11 +220,12 @@ func (s *Store) loadBlockingState(ctx context.Context) (blockingState, error) {
 	if s.rolesAreRemote() {
 		localRead = s.remoteIssuesByIDs
 	}
-	return s.blockingStateFromRecords(ctx, allDeps, blockingStateOpts{localRead: localRead})
+	return s.blockingStateFromRecords(ctx, allDeps, blockingStateOpts{localRead: localRead, skip: kinds})
 }
 
 // serverEnforcesPolicy asks the inner store's ExternalDependencyPolicyProber,
-// if it has one, whether its server already enforced this policy.
+// if it has one, whether its server already enforced the capability-reference
+// half of this policy (design 3.6, wire.CapExternalDependencies).
 func (s *Store) serverEnforcesPolicy(ctx context.Context) (bool, error) {
 	prober, ok := storage.UnwrapStore(s.inner).(storage.ExternalDependencyPolicyProber)
 	if !ok {
@@ -216,6 +236,45 @@ func (s *Store) serverEnforcesPolicy(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("external dependencies: probe server policy: %w", err)
 	}
 	return enforced, nil
+}
+
+// serverEnforcesCrossRigPolicy asks the inner store's
+// CrossRigDependencyPolicyProber, if it has one, whether its server already
+// enforced the bare cross-prefix half (GH#5784, wire.CapCrossRigDependencies).
+// A store that does not implement the prober — a local backend, or a remote
+// store of the build between the two tokens — is answered false, and the half
+// is composed here: never silently skipped.
+func (s *Store) serverEnforcesCrossRigPolicy(ctx context.Context) (bool, error) {
+	if s.inner == nil {
+		return false, nil
+	}
+	prober, ok := storage.UnwrapStore(s.inner).(storage.CrossRigDependencyPolicyProber)
+	if !ok {
+		return false, nil
+	}
+	enforced, err := prober.ServerEnforcesCrossRigDependencyPolicy(ctx)
+	if err != nil {
+		return false, fmt.Errorf("external dependencies: probe server cross-rig policy: %w", err)
+	}
+	return enforced, nil
+}
+
+// enforcedPolicyKinds probes the two halves of the policy independently
+// (GH#5784 AC-8): the old token names the capability-reference half alone,
+// and a server of the build between the two enforces that half without
+// knowing bare cross-prefix targets exist. A caller skips only what the
+// server folded in and composes the rest itself — the old capability is
+// never read as the whole policy and never a blanket refusal.
+func (s *Store) enforcedPolicyKinds(ctx context.Context) (enforcedKinds, error) {
+	capabilityRefs, err := s.serverEnforcesPolicy(ctx)
+	if err != nil {
+		return enforcedKinds{}, err
+	}
+	crossRig, err := s.serverEnforcesCrossRigPolicy(ctx)
+	if err != nil {
+		return enforcedKinds{}, err
+	}
+	return enforcedKinds{capabilityRefs: capabilityRefs, crossRig: crossRig}, nil
 }
 
 // blockingStateFromRecords folds a store's blocking-typed dependency records
@@ -239,9 +298,18 @@ func (s *Store) blockingStateFromRecords(ctx context.Context, allDeps map[string
 			}
 			switch {
 			case dep.Type.IsBlockingEdge() && isExternalReference(dep.DependsOnID):
+				// The server already folded this half in (GH#5784 AC-8):
+				// judging it here too would re-resolve this machine's
+				// projects over the server's own answer.
+				if opts.skip.capabilityRefs {
+					continue
+				}
 				refs = append(refs, parseReference(dep.DependsOnID))
 				refsByIssue[issueID] = appendUnique(refsByIssue[issueID], dep.DependsOnID)
 			case bareCrossRigBlockingEdge(dep):
+				if opts.skip.crossRig {
+					continue
+				}
 				refsByIssue[issueID] = appendUnique(refsByIssue[issueID], dep.DependsOnID)
 				bareTargets = appendUnique(bareTargets, dep.DependsOnID)
 			}
@@ -1013,10 +1081,10 @@ func (s *Store) GetDependencyTree(ctx context.Context, issueID string, maxDepth 
 	if err != nil {
 		return nil, fmt.Errorf("external dependencies: load tree edges: %w", err)
 	}
-	return s.appendTreeExternalReferences(ctx, tree, deps, maxDepth)
+	return s.appendTreeExternalReferences(ctx, tree, deps, maxDepth, enforcedKinds{})
 }
 
-func (s *Store) appendTreeExternalReferences(ctx context.Context, tree []*types.TreeNode, deps map[string][]*types.Dependency, maxDepth int) ([]*types.TreeNode, error) {
+func (s *Store) appendTreeExternalReferences(ctx context.Context, tree []*types.TreeNode, deps map[string][]*types.Dependency, maxDepth int, skip enforcedKinds) ([]*types.TreeNode, error) {
 	refs := make([]reference, 0)
 	bareTargets := make([]string, 0)
 	bareSeen := make(map[string]bool, len(deps))
@@ -1026,13 +1094,17 @@ func (s *Store) appendTreeExternalReferences(ctx context.Context, tree []*types.
 				continue
 			}
 			if isExternalReference(dep.DependsOnID) {
-				refs = append(refs, parseReference(dep.DependsOnID))
+				if !skip.capabilityRefs {
+					refs = append(refs, parseReference(dep.DependsOnID))
+				}
 				continue
 			}
 			// GH#5784: a bare cross-prefix target names a row another rig
 			// owns. Every type renders a leaf, matching the external: refs
-			// above, and one resolver call answers all of them at once.
-			if bareCrossRigEdge(dep) && !bareSeen[dep.DependsOnID] {
+			// above, and one resolver call answers all of them at once. A
+			// half the server already rendered (skip) is not asked for
+			// again — and an edge the tree already holds is dropped below.
+			if bareCrossRigEdge(dep) && !skip.crossRig && !bareSeen[dep.DependsOnID] {
 				bareSeen[dep.DependsOnID] = true
 				bareTargets = append(bareTargets, dep.DependsOnID)
 			}
@@ -1079,7 +1151,7 @@ func (s *Store) appendTreeExternalReferences(ctx context.Context, tree []*types.
 				// names the stored ID, carries the reason in its title and
 				// the Unresolved view flag, and stays blocking (open), the
 				// same fail-closed verdict as readiness.
-				if !bareCrossRigEdge(dep) || edges[[2]string{parent.ID, dep.DependsOnID}] {
+				if !bareCrossRigEdge(dep) || skip.crossRig || edges[[2]string{parent.ID, dep.DependsOnID}] {
 					continue
 				}
 				result := bare[dep.DependsOnID]
@@ -1110,7 +1182,9 @@ func (s *Store) appendTreeExternalReferences(ctx context.Context, tree []*types.
 				edges[[2]string{parent.ID, dep.DependsOnID}] = true
 				continue
 			}
-			if edges[[2]string{parent.ID, dep.DependsOnID}] {
+			if skip.capabilityRefs || edges[[2]string{parent.ID, dep.DependsOnID}] {
+				// The server's own walker hung these leaves; an edge the
+				// tree already holds is never added twice either way.
 				continue
 			}
 			ref := parseReference(dep.DependsOnID)

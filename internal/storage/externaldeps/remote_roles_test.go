@@ -112,11 +112,17 @@ func (r *recordingReader) Get(context.Context, issueops.GetRequest) (*issueops.I
 	return nil, issueops.ErrNotFound
 }
 
+// newRemotePolicyStore models a server of the CURRENT build: whatever it
+// enforces, it enforces both halves of the policy together, so the two
+// probe fields move in lockstep (GH#5784). The server of the build between
+// the two tokens — old half enforced, cross-rig half not — is modeled by
+// crossrig_capability_test.go.
 func newRemotePolicyStore(enforced bool) (*Store, *recordingReader) {
 	reader := &recordingReader{ready: []string{"be-x", "be-a", "be-b"}}
 	raw := &remoteFake{
 		fakeStore: &fakeStore{
-			enforced: enforced,
+			enforced:         enforced,
+			crossRigEnforced: enforced,
 			deps: map[string][]*types.Dependency{
 				"be-x": {externalDep("be-x", "external:remote:payments", types.DepBlocks)},
 			},

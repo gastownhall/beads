@@ -9250,7 +9250,7 @@ components:
             parent-child descendants and orphans every other dependent (see
             `DeleteIssuesRequest.cascade`; a server without it deletes every
             transitive dependent, so a client refuses to send `cascade` to
-            one). One behavior token is
+            one). Two behavior tokens are
             CONDITIONAL rather than build-level: `policy.external_dependencies`
             announces that this server's ready, blocked-listing, claim,
             claim-next, close, blocking and dependency-tree operations already
@@ -9258,17 +9258,26 @@ components:
             unsatisfied `external:<project>:<capability>` dependency is
             neither ready, claimable nor closable without force, and the
             blocked listing lists it with that dependency in its
-            `blocked_by`). A server advertises it
-            only when it enforces that policy; a client that sees it must not
-            apply the policy again, and a client that does not see it applies
-            the policy itself. The
+            `blocked_by`), and `policy.cross_rig_dependencies` announces that
+            they apply its bare cross-prefix half too (an issue blocked by a
+            dependency target whose ID routes to another rig, stored as a
+            bare ID in `depends_on_external`, is withheld the same way). The
+            two are advertised independently because a server of a build
+            between them enforces the first without knowing the second's
+            targets exist: a client probes each on its own and skips only the
+            half the server folded in — never a blanket pass-through and
+            never a blanket refusal. A server advertises a token only when
+            it enforces that half; a client that sees one must not
+            apply it again, and a client that does not see it applies the
+            half itself. The
             list grows additively, and an operation never appears here unless
             it is fully implemented. This is how a client checks for an
             operation or a behavior — never the version string.
 
 
             THIS LIST IS BUILD-LEVEL, NOT WORKSPACE-LEVEL, apart from the
-            conditional `policy.external_dependencies` above, which depends on
+            conditional `policy.external_dependencies` and
+            `policy.cross_rig_dependencies` above, which depend on
             how this server composed its roles rather than on the build. It
             says which operations this binary serves, and for every entry but
             two that is the whole answer. `events.list` and `events.watch` are

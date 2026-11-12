@@ -24,7 +24,9 @@ const PolicyCacheTTLEnv = "BEADS_HTTP_POLICY_CACHE_TTL"
 const DefaultPolicyCacheTTL = 5 * time.Minute
 
 // policyCache remembers, per server URL and pinned project, whether that
-// server enforces bd's external-dependency policy itself. Without it every
+// server enforces bd's external-dependency policy itself — each half of it
+// the handshake has its own token for (ServerEnforcesExternalDependencyPolicy
+// and ServerEnforcesCrossRigDependencyPolicy, GH#5784). Without it every
 // short-lived `bd ready` against a remote store pays a GET /v0/beads/context
 // before its listing only to learn this one bit, which listReadyWork itself
 // never needs a handshake for.
@@ -41,9 +43,14 @@ type policyCache struct {
 }
 
 type policyCacheEntry struct {
-	URL                  string    `json:"url"`
-	ProjectID            string    `json:"project_id"`
-	ExternalDependencies bool      `json:"external_dependencies"`
+	URL                  string `json:"url"`
+	ProjectID            string `json:"project_id"`
+	ExternalDependencies bool   `json:"external_dependencies"`
+	// CrossRigDependencies is absent from an entry the previous build wrote,
+	// which decodes as false: the client composes that half itself — correct
+	// against any server, at the cost of one redundant pass until the entry
+	// is rewritten (GH#5784).
+	CrossRigDependencies bool      `json:"cross_rig_dependencies,omitempty"`
 	CheckedAt            time.Time `json:"checked_at"`
 }
 
@@ -90,34 +97,34 @@ func policyCacheTTL() time.Duration {
 	return d
 }
 
-// load returns the cached answer while it is fresh. An entry written in the
-// future (a clock that stepped back) is not trusted.
-func (c *policyCache) load() (enforced, ok bool) {
+// load returns the cached answers while they are fresh. An entry written in
+// the future (a clock that stepped back) is not trusted.
+func (c *policyCache) load() (enforced, crossRig, ok bool) {
 	if c == nil {
-		return false, false
+		return false, false, false
 	}
 	raw, err := os.ReadFile(c.path)
 	if err != nil {
-		return false, false
+		return false, false, false
 	}
 	var e policyCacheEntry
 	if json.Unmarshal(raw, &e) != nil || e.URL != c.url || e.ProjectID != c.projectID {
-		return false, false
+		return false, false, false
 	}
 	age := c.now().Sub(e.CheckedAt)
 	if age < 0 || age >= c.ttl {
-		return false, false
+		return false, false, false
 	}
-	return e.ExternalDependencies, true
+	return e.ExternalDependencies, e.CrossRigDependencies, true
 }
 
-// store records an answer the handshake just gave. It is best effort: a
+// store records the answers the handshake just gave. It is best effort: a
 // cache that cannot be written only costs the next process a handshake.
-func (c *policyCache) store(enforced bool) {
+func (c *policyCache) store(enforced, crossRig bool) {
 	if c == nil {
 		return
 	}
-	raw, err := json.Marshal(policyCacheEntry{URL: c.url, ProjectID: c.projectID, ExternalDependencies: enforced, CheckedAt: c.now().UTC()})
+	raw, err := json.Marshal(policyCacheEntry{URL: c.url, ProjectID: c.projectID, ExternalDependencies: enforced, CrossRigDependencies: crossRig, CheckedAt: c.now().UTC()})
 	if err != nil {
 		return
 	}

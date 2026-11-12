@@ -23,6 +23,13 @@ func testPolicyCache(t *testing.T, path, projectID string, now time.Time) *polic
 }
 
 func enforcingContext() *apigen.ContextResponse {
+	return &apigen.ContextResponse{Capabilities: []string{wire.CapExternalDependencies, wire.CapCrossRigDependencies}}
+}
+
+// oldTokenContext models a server of the build between the two tokens (GH#5784
+// AC-8): it enforces the capability-reference half only, so the client must
+// learn cross-rig=false even while external-dependencies=true.
+func oldTokenContext() *apigen.ContextResponse {
 	return &apigen.ContextResponse{Capabilities: []string{wire.CapExternalDependencies}}
 }
 
@@ -41,6 +48,9 @@ func TestPolicyProbeIsAnsweredFromTheCacheAcrossStores(t *testing.T) {
 	if enforced, err := s.ServerEnforcesExternalDependencyPolicy(ctx); err != nil || !enforced {
 		t.Fatalf("first probe = %v, %v; want true from the handshake", enforced, err)
 	}
+	if crossRig, err := s.ServerEnforcesCrossRigDependencyPolicy(ctx); err != nil || !crossRig {
+		t.Fatalf("first cross-rig probe = %v, %v; want true from the same handshake", crossRig, err)
+	}
 	if first.hits != 1 {
 		t.Fatalf("first store dialed %d handshakes, want 1", first.hits)
 	}
@@ -51,21 +61,27 @@ func TestPolicyProbeIsAnsweredFromTheCacheAcrossStores(t *testing.T) {
 	if enforced, err := s.ServerEnforcesExternalDependencyPolicy(ctx); err != nil || !enforced {
 		t.Fatalf("cached probe = %v, %v; want true without a handshake", enforced, err)
 	}
+	if crossRig, err := s.ServerEnforcesCrossRigDependencyPolicy(ctx); err != nil || !crossRig {
+		t.Fatalf("cached cross-rig probe = %v, %v; want true without a handshake", crossRig, err)
+	}
 	if second.hits != 0 {
 		t.Fatalf("second store dialed %d handshakes, want 0", second.hits)
 	}
 
-	expired := &fakeWire{res: &apigen.ContextResponse{}}
+	expired := &fakeWire{res: oldTokenContext()}
 	s = New(target, expired, nil)
 	s.policy = testPolicyCache(t, path, "prj_a", now.Add(time.Minute))
-	if enforced, err := s.ServerEnforcesExternalDependencyPolicy(ctx); err != nil || enforced {
-		t.Fatalf("probe past the TTL = %v, %v; want the handshake's false", enforced, err)
+	if enforced, err := s.ServerEnforcesExternalDependencyPolicy(ctx); err != nil || !enforced {
+		t.Fatalf("probe past the TTL = %v, %v; want the handshake's true", enforced, err)
+	}
+	if crossRig, err := s.ServerEnforcesCrossRigDependencyPolicy(ctx); err != nil || crossRig {
+		t.Fatalf("cross-rig probe past the TTL = %v, %v; want the handshake's false", crossRig, err)
 	}
 	if expired.hits != 1 {
 		t.Fatalf("store past the TTL dialed %d handshakes, want 1", expired.hits)
 	}
-	if enforced, ok := testPolicyCache(t, path, "prj_a", now.Add(time.Minute)).load(); !ok || enforced {
-		t.Fatalf("cache after the refresh = %v, %v; want the fresh false", enforced, ok)
+	if enforced, crossRig, ok := testPolicyCache(t, path, "prj_a", now.Add(time.Minute)).load(); !ok || !enforced || crossRig {
+		t.Fatalf("cache after the refresh = %v, %v, %v; want the fresh true/false split", enforced, crossRig, ok)
 	}
 }
 
@@ -76,24 +92,24 @@ func TestPolicyCacheRefusesEntriesItCannotTrust(t *testing.T) {
 	now := time.Now()
 
 	path := filepath.Join(dir, "a.json")
-	testPolicyCache(t, path, "prj_a", now).store(true)
-	if _, ok := testPolicyCache(t, path, "prj_b", now).load(); ok {
+	testPolicyCache(t, path, "prj_a", now).store(true, true)
+	if _, _, ok := testPolicyCache(t, path, "prj_b", now).load(); ok {
 		t.Error("an entry written for another project was trusted")
 	}
-	if _, ok := testPolicyCache(t, path, "prj_a", now.Add(-time.Second)).load(); ok {
+	if _, _, ok := testPolicyCache(t, path, "prj_a", now.Add(-time.Second)).load(); ok {
 		t.Error("an entry written in the future was trusted")
 	}
 	otherURL := testPolicyCache(t, path, "prj_a", now)
 	otherURL.url = "https://other.example"
-	if _, ok := otherURL.load(); ok {
+	if _, _, ok := otherURL.load(); ok {
 		t.Error("an entry written for another server URL was trusted")
 	}
-	if _, ok := testPolicyCache(t, filepath.Join(dir, "missing.json"), "prj_a", now).load(); ok {
+	if _, _, ok := testPolicyCache(t, filepath.Join(dir, "missing.json"), "prj_a", now).load(); ok {
 		t.Error("a missing entry was trusted")
 	}
 	var disabled *policyCache
-	disabled.store(true)
-	if _, ok := disabled.load(); ok {
+	disabled.store(true, true)
+	if _, _, ok := disabled.load(); ok {
 		t.Error("a disabled cache answered")
 	}
 }
@@ -103,7 +119,7 @@ func TestPolicyCacheRefusesEntriesItCannotTrust(t *testing.T) {
 func TestHeldHandshakeWinsOverThePolicyCache(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "policy.json")
 	now := time.Now()
-	testPolicyCache(t, path, "prj_a", now).store(true)
+	testPolicyCache(t, path, "prj_a", now).store(true, true)
 
 	target := Target{BaseURL: mustParseURL(t, "https://example.com"), ExpectProjectID: "prj_a"}
 	s := New(target, &fakeWire{err: errors.New("must not dial")}, &apigen.ContextResponse{})
@@ -111,8 +127,8 @@ func TestHeldHandshakeWinsOverThePolicyCache(t *testing.T) {
 	if enforced, err := s.ServerEnforcesExternalDependencyPolicy(t.Context()); err != nil || enforced {
 		t.Fatalf("probe = %v, %v; want the held handshake's false", enforced, err)
 	}
-	if enforced, ok := testPolicyCache(t, path, "prj_a", now).load(); !ok || enforced {
-		t.Fatalf("cache = %v, %v; want it corrected to false", enforced, ok)
+	if enforced, crossRig, ok := testPolicyCache(t, path, "prj_a", now).load(); !ok || enforced || crossRig {
+		t.Fatalf("cache = %v, %v, %v; want it corrected to false", enforced, crossRig, ok)
 	}
 }
 
@@ -141,7 +157,7 @@ func TestNewPolicyCacheNeedsAProjectPinAndATTL(t *testing.T) {
 func TestALiveProbeSkipsThePolicyCache(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "policy.json")
 	now := time.Now()
-	testPolicyCache(t, path, "prj_a", now).store(true)
+	testPolicyCache(t, path, "prj_a", now).store(true, true)
 
 	target := Target{BaseURL: mustParseURL(t, "https://example.com"), ExpectProjectID: "prj_a"}
 	w := &fakeWire{res: &apigen.ContextResponse{}}
@@ -153,7 +169,7 @@ func TestALiveProbeSkipsThePolicyCache(t *testing.T) {
 	if w.hits != 1 {
 		t.Fatalf("live probe dialed %d handshakes, want 1", w.hits)
 	}
-	if enforced, ok := testPolicyCache(t, path, "prj_a", now).load(); !ok || enforced {
-		t.Fatalf("cache = %v, %v; want it corrected to false", enforced, ok)
+	if enforced, crossRig, ok := testPolicyCache(t, path, "prj_a", now).load(); !ok || enforced || crossRig {
+		t.Fatalf("cache = %v, %v, %v; want it corrected to false", enforced, crossRig, ok)
 	}
 }

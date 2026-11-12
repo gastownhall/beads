@@ -349,7 +349,10 @@ func runServe() error {
 			// The roles above come from the storage chain, which interposes
 			// the external-dependency policy (wireStorageDecorators); the
 			// handshake advertises it only if that layer is really there.
+			// The bare cross-prefix half (GH#5784) is its own token, probed
+			// separately by clients, so it is derived on its own.
 			ExternalDependencyPolicy: externaldeps.Applied(store),
+			CrossRigDependencyPolicy: externaldeps.CrossRigApplied(store),
 			Workspace:                info,
 			SchemaVersion:            JSONSchemaVersion,
 			Mode:                     serveResolvedMode(info, db),
@@ -428,6 +431,7 @@ func runServe() error {
 		// one.
 		EventsJournalEnabled:     eventsjournal.EnabledFor(info.BeadsDir),
 		ExternalDependencyPolicy: externaldeps.AppliedToProvider(provider),
+		CrossRigDependencyPolicy: externaldeps.CrossRigAppliedToProvider(provider),
 		Workspace:                info,
 		SchemaVersion:            JSONSchemaVersion,
 		Mode:                     serveResolvedMode(info, db),

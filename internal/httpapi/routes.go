@@ -378,12 +378,34 @@ const CapIssuesUpdateGates = "issues.update.gates"
 // provider through. Listen advertises it exactly when Config says the roles it
 // was handed were composed that way (Config.ExternalDependencyPolicy), so the
 // token is never advertised by a server that does not enforce the policy.
+//
+// To a client of a build before GH#5784 this token names the whole policy,
+// and that reading still holds: the pass-through it buys is the same. To a
+// client of this build it names the capability-REFERENCE half only, because
+// a server of the build between the two enforces that half without knowing
+// bare cross-prefix targets exist — the bare half has its own token
+// (CapCrossRigDependencies), and a client probes the two independently.
 const CapExternalDependencies = "policy.external_dependencies"
+
+// CapCrossRigDependencies is the CONDITIONAL behavior capability announcing
+// that the same operations also apply the BARE CROSS-PREFIX half of the
+// policy (GH#5784): a source blocked by an issue ID whose prefix routes to
+// another rig — a bare target stored in depends_on_external — is not ready,
+// not claimable and not closable without force, exactly like an unsatisfied
+// external: reference. It is a token of its own because a server of the
+// build between the two advertises CapExternalDependencies without knowing
+// bare cross-prefix targets exist: a client that read the old token as the
+// whole policy would skip its own pass and let a foreign-blocked source
+// through, so clients probe the two halves independently and skip only what
+// the server actually folded in. Advertised exactly when Config says the
+// composition also enforces that half (Config.CrossRigDependencyPolicy), so
+// the token is never advertised by a server that does not enforce it.
+const CapCrossRigDependencies = "policy.cross_rig_dependencies"
 
 // conditionalCapabilities are the behavior tokens a server advertises only
 // when its configuration says the behavior is in force. Capabilities() never
 // lists them; advertisedCapabilities adds each one whose condition holds.
-var conditionalCapabilities = []string{CapExternalDependencies}
+var conditionalCapabilities = []string{CapExternalDependencies, CapCrossRigDependencies}
 
 // CapIssuesCloseAutoCloseMolecule is the behavior capability that advertises
 // CloseIssueRequest.auto_close_molecule and BatchCloseRequest.auto_close_molecule
@@ -1214,10 +1236,18 @@ func Capabilities() []string {
 
 // advertisedCapabilities is what this server's handshake publishes: the
 // build-level Capabilities() plus each conditional token cfg puts in force.
+// The two policy halves are advertised independently, so a server composed
+// through the policy of a build without its cross-rig half advertises the
+// old token alone and a client probes each half on its own (GH#5784).
 func advertisedCapabilities(cfg Config) []string {
 	out := Capabilities()
 	if cfg.ExternalDependencyPolicy {
 		out = append(out, CapExternalDependencies)
+	}
+	if cfg.CrossRigDependencyPolicy {
+		out = append(out, CapCrossRigDependencies)
+	}
+	if cfg.ExternalDependencyPolicy || cfg.CrossRigDependencyPolicy {
 		slices.Sort(out)
 	}
 	return out

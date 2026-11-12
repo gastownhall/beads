@@ -68,14 +68,37 @@ func bareCrossRigBlockingEdge(dep *types.Dependency) bool {
 		(dep.Type == types.DepBlocks || dep.Type == types.DepConditionalBlocks)
 }
 
+// enforcedKinds names which halves of the external-dependency policy the
+// server a composition reads through already applied before answering, so
+// the client-side pass skips them (GH#5784 AC-8). The zero value composes
+// both halves: no server stands behind them.
+type enforcedKinds struct {
+	// capabilityRefs is the explicit external:<project>:<capability> half
+	// (design 3.6, wire.CapExternalDependencies).
+	capabilityRefs bool
+	// crossRig is the bare cross-prefix half (wire.CapCrossRigDependencies).
+	// A server that advertises only the old token has NOT folded this in.
+	crossRig bool
+}
+
+// both reports whether the server applied the whole policy.
+func (k enforcedKinds) both() bool { return k.capabilityRefs && k.crossRig }
+
 // blockingStateOpts carries the reads blockingStateFromRecords needs beyond
-// the dependency records it is handed.
+// the dependency records it is handed, and which halves of the policy a
+// server upstream already folded in.
 type blockingStateOpts struct {
 	// localRead fetches local issue rows by id. The decorator passes its
 	// inner store's GetIssuesByIDs; the remote roles their BatchGetter-backed
 	// read; the UOW wrapper its chunked GetMany. A nil localRead answers no
 	// target locally.
 	localRead func(context.Context, []string) ([]*types.Issue, error)
+	// skip names the halves the server already enforced (enforcedKinds):
+	// each is left out of the fold below instead of judged a second time on
+	// this machine's configuration. A server of the build between the two
+	// tokens answers capabilityRefs alone, so the bare half is still folded
+	// here — the old token never bypasses enforcement (GH#5784 AC-8).
+	skip enforcedKinds
 }
 
 // bareTargetSatisfaction answers, for every bare cross-prefix blocking target,

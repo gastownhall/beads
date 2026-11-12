@@ -31,6 +31,13 @@ type fakeStore struct {
 	batch       *fakeBatchCloser
 	enforced    bool
 	enforcedErr error
+	// crossRigEnforced models a server of THIS build, which advertises the
+	// bare cross-prefix half of the policy too (wire.CapCrossRigDependencies,
+	// GH#5784). The zero value models the previous build: its probe answers
+	// the old token (enforced) but not the new one, so the client must keep
+	// composing the cross-rig half itself.
+	crossRigEnforced    bool
+	crossRigEnforcedErr error
 	// liveProbes records storage.LivePolicyProbe for every policy probe, in
 	// order.
 	liveProbes []bool
@@ -63,6 +70,15 @@ func (f *fakeStore) IssueLifecycle() (publicops.Lifecycle, error) { return f.lif
 func (f *fakeStore) ServerEnforcesExternalDependencyPolicy(ctx context.Context) (bool, error) {
 	f.liveProbes = append(f.liveProbes, storage.LivePolicyProbe(ctx))
 	return f.enforced, f.enforcedErr
+}
+
+// ServerEnforcesCrossRigDependencyPolicy makes every fakeStore satisfy
+// storage.CrossRigDependencyPolicyProber. Defaulting to (false, nil) keeps
+// every existing test's raw store on the client-side-enforcement path for the
+// bare cross-prefix half, whatever the old token's probe answers — the shape
+// of a server of the build between the two tokens (GH#5784 AC-8).
+func (f *fakeStore) ServerEnforcesCrossRigDependencyPolicy(ctx context.Context) (bool, error) {
+	return f.crossRigEnforced, f.crossRigEnforcedErr
 }
 
 // ExcludeIDsUnsupported likewise makes every fakeStore satisfy

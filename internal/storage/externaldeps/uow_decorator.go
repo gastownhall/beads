@@ -62,6 +62,15 @@ func AppliedToProvider(provider uow.UnitOfWorkProvider) bool {
 	return false
 }
 
+// CrossRigAppliedToProvider is CrossRigApplied for the unit-of-work chain: it
+// reports whether provider's decorator chain includes WrapUOWProvider's
+// policy layer with its bare cross-prefix half in force (GH#5784). It agrees
+// with AppliedToProvider today, for the reason CrossRigApplied gives, and is
+// its own function for the same reason.
+func CrossRigAppliedToProvider(provider uow.UnitOfWorkProvider) bool {
+	return AppliedToProvider(provider)
+}
+
 // RunNonTx preserves the optional maintenance capability exposed by the
 // proxied provider. Wrapping the provider must not make unrelated commands
 // such as compact lose access to their pinned connection.
@@ -547,5 +556,9 @@ func (u *dependencyUseCase) GetDependencyTree(ctx context.Context, rootID string
 	if err != nil {
 		return nil, fmt.Errorf("external dependencies: load tree edges: %w", err)
 	}
-	return u.policy.appendTreeExternalReferences(ctx, tree, deps, opts.MaxDepth)
+	// The zero kinds compose both halves: this wrapper's policy store has no
+	// inner store to probe (the server, if any, is behind the use case it
+	// wraps), and an edge the tree already holds is dropped inside, so a
+	// server that hung its own leaves renders no duplicates.
+	return u.policy.appendTreeExternalReferences(ctx, tree, deps, opts.MaxDepth, enforcedKinds{})
 }

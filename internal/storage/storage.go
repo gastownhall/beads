@@ -1203,6 +1203,24 @@ type ExternalDependencyPolicyProber interface {
 	ServerEnforcesExternalDependencyPolicy(ctx context.Context) (bool, error)
 }
 
+// CrossRigDependencyPolicyProber is implemented by a DoltStorage that can
+// answer whether the remote server it talks to already enforces the bare
+// cross-prefix half of bd's external-dependency policy itself (GH#5784:
+// a source blocked by an issue ID another rig owns is not ready, not
+// claimable and not closable without force). The half has its own token —
+// httpapi's policy.cross_rig_dependencies — because a server of the build
+// between the two enforces the capability-reference half (it advertises
+// policy.external_dependencies) without knowing bare targets exist, and a
+// client that read the old token as the whole policy would skip its own
+// pass and let a foreign-blocked source through. The decorator therefore
+// probes the two halves independently and skips only what the server
+// actually folded in. A store that does not implement this interface is
+// answered false — the bare cross-prefix half is composed client-side —
+// never silently skipped.
+type CrossRigDependencyPolicyProber interface {
+	ServerEnforcesCrossRigDependencyPolicy(ctx context.Context) (bool, error)
+}
+
 type livePolicyProbeKey struct{}
 
 // WithLivePolicyProbe marks ctx as carrying a claim or a close: an

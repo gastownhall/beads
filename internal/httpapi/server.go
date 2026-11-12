@@ -425,6 +425,23 @@ type Config struct {
 	// a server that advertises the token without enforcing the policy makes
 	// every client skip it.
 	ExternalDependencyPolicy bool
+	// CrossRigDependencyPolicy reports that every ready, claim, claim-next,
+	// close, blocking-annotation and tree role this server answers from —
+	// the Provider's, or the individual role fields' — was composed through
+	// the external-dependency policy INCLUDING its bare cross-prefix half
+	// (GH#5784): a source blocked by an issue ID whose prefix routes to
+	// another rig is withheld like an unsatisfied external: reference. It
+	// makes the handshake advertise CapCrossRigDependencies, which tells a
+	// client of this build that half is the server's and needs no
+	// client-side pass. The halves are separate fields because the tokens
+	// are advertised independently: a client probes each on its own, so a
+	// server composed through a policy that lacks this half still truthfully
+	// advertises the old token alone. Set it only from the composition
+	// actually handed in (cmd/bd's serve derives it with
+	// externaldeps.CrossRigApplied / externaldeps.CrossRigAppliedToProvider):
+	// a server that advertises the token without enforcing the half makes
+	// every client skip its own pass.
+	CrossRigDependencyPolicy bool
 	// Workspace is the startup snapshot GET /v0/beads/context answers from.
 	// Only the allowlisted fields are ever serialized — see contextResponse,
 	// which names the whole set and the reasons for the exclusions.

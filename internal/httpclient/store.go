@@ -107,7 +107,7 @@ var _ storage.RemoteBackendStore = (*Store)(nil)
 // handshake this process already holds wins over the cache and refreshes it.
 func (s *Store) ServerEnforcesExternalDependencyPolicy(ctx context.Context) (bool, error) {
 	if s.cachedSnapshot() == nil && !storage.LivePolicyProbe(ctx) {
-		if enforced, ok := s.policy.load(); ok {
+		if enforced, _, ok := s.policy.load(); ok {
 			return enforced, nil
 		}
 	}
@@ -119,11 +119,43 @@ func (s *Store) ServerEnforcesExternalDependencyPolicy(ctx context.Context) (boo
 		return false, nil
 	}
 	enforced := slices.Contains(snap.Capabilities, wire.CapExternalDependencies)
-	s.policy.store(enforced)
+	s.policy.store(enforced, slices.Contains(snap.Capabilities, wire.CapCrossRigDependencies))
 	return enforced, nil
 }
 
+// ServerEnforcesCrossRigDependencyPolicy satisfies
+// storage.CrossRigDependencyPolicyProber (GH#5784): it answers whether the
+// server this store dials already enforces the bare cross-prefix half of
+// bd's external-dependency policy itself, by checking the handshake for
+// wire.CapCrossRigDependencies. The token is separate from
+// wire.CapExternalDependencies because a server of the build between the
+// two enforces the capability-reference half without knowing bare
+// cross-prefix targets exist: a client that read the old token as the whole
+// policy would skip its own pass and let a foreign-blocked source through.
+//
+// The caching and the live-probe asymmetry are ServerEnforcesExternalDependencyPolicy's,
+// verbatim: a claim or a close must never stand its refusal down on a stale
+// answer, while a read may trust the cache for its TTL.
+func (s *Store) ServerEnforcesCrossRigDependencyPolicy(ctx context.Context) (bool, error) {
+	if s.cachedSnapshot() == nil && !storage.LivePolicyProbe(ctx) {
+		if _, crossRig, ok := s.policy.load(); ok {
+			return crossRig, nil
+		}
+	}
+	snap, err := s.snapshot(ctx)
+	if err != nil {
+		return false, err
+	}
+	if snap == nil {
+		return false, nil
+	}
+	crossRig := slices.Contains(snap.Capabilities, wire.CapCrossRigDependencies)
+	s.policy.store(slices.Contains(snap.Capabilities, wire.CapExternalDependencies), crossRig)
+	return crossRig, nil
+}
+
 var _ storage.ExternalDependencyPolicyProber = (*Store)(nil)
+var _ storage.CrossRigDependencyPolicyProber = (*Store)(nil)
 
 // ExcludeIDsUnsupported satisfies storage.ExcludeIDsUnsupportedStore: the v0
 // wire's listReadyWork and countReadyWork operations publish no id-exclusion

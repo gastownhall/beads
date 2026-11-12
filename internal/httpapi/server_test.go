@@ -879,10 +879,12 @@ func TestCapabilitiesAdvertiseEveryImplementedOperation(t *testing.T) {
 	}
 }
 
-// TestExternalDependencyPolicyIsAdvertisedOnlyWhenEnforced pins the one
-// conditional token: policy.external_dependencies rides the handshake exactly
-// when Config says the roles were composed through the policy, and the rest of
-// the list is unchanged either way.
+// TestExternalDependencyPolicyIsAdvertisedOnlyWhenEnforced pins the two
+// conditional tokens: policy.external_dependencies and
+// policy.cross_rig_dependencies each ride the handshake exactly when Config
+// says the roles were composed through that half of the policy (GH#5784 —
+// a server of the build between the two tokens advertises the old one
+// alone), and the rest of the list is unchanged either way.
 func TestExternalDependencyPolicyIsAdvertisedOnlyWhenEnforced(t *testing.T) {
 	read := func(cfg Config) []string {
 		ts := newTestServer(t, cfg)
@@ -893,13 +895,17 @@ func TestExternalDependencyPolicyIsAdvertisedOnlyWhenEnforced(t *testing.T) {
 		}
 		return got
 	}
+	has := func(caps []string, token string) bool { return slices.Contains(caps, token) }
 	without := read(Config{})
-	if slices.Contains(without, "policy.external_dependencies") {
+	if has(without, "policy.external_dependencies") || has(without, "policy.cross_rig_dependencies") {
 		t.Errorf("a server not composed through the policy advertises it: %v", without)
 	}
 	with := read(Config{ExternalDependencyPolicy: true})
-	if !slices.Contains(with, "policy.external_dependencies") {
+	if !has(with, "policy.external_dependencies") {
 		t.Errorf("a server composed through the policy does not advertise it: %v", with)
+	}
+	if has(with, "policy.cross_rig_dependencies") {
+		t.Errorf("the capability-reference half alone advertises the cross-rig half: %v", with)
 	}
 	if !slices.IsSorted(with) {
 		t.Errorf("capabilities = %v, want them sorted", with)
@@ -907,6 +913,17 @@ func TestExternalDependencyPolicyIsAdvertisedOnlyWhenEnforced(t *testing.T) {
 	rest := slices.DeleteFunc(slices.Clone(with), func(c string) bool { return c == "policy.external_dependencies" })
 	if !slices.Equal(rest, without) {
 		t.Errorf("the policy flag changed other tokens: with=%v without=%v", with, without)
+	}
+	crossRig := read(Config{CrossRigDependencyPolicy: true})
+	if !has(crossRig, "policy.cross_rig_dependencies") || has(crossRig, "policy.external_dependencies") {
+		t.Errorf("cross-rig-only composition = %v, want exactly policy.cross_rig_dependencies", crossRig)
+	}
+	if !slices.IsSorted(crossRig) {
+		t.Errorf("cross-rig capabilities = %v, want them sorted", crossRig)
+	}
+	both := read(Config{ExternalDependencyPolicy: true, CrossRigDependencyPolicy: true})
+	if !has(both, "policy.external_dependencies") || !has(both, "policy.cross_rig_dependencies") {
+		t.Errorf("a server composed through both halves = %v, want both tokens", both)
 	}
 }
 

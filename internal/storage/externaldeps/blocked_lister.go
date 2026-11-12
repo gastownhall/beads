@@ -61,16 +61,18 @@ type remoteBlockedLister struct {
 	policy *Store
 }
 
-// ListBlocked is the server's listing when the server applies the policy.
-// Against any other server it is that listing with the external blockers
-// added here, the decoration GetBlockedIssues makes over a local store.
+// ListBlocked is the server's listing when the server applies the whole
+// policy. Against any other server — including one that applies only the
+// old token's capability-reference half (GH#5784 AC-8) — it is that listing
+// with the halves the server left out added here, the decoration
+// GetBlockedIssues makes over a local store.
 func (l *remoteBlockedLister) ListBlocked(ctx context.Context, req issueops.BlockedRequest) (issueops.BlockedResult, error) {
-	enforced, err := l.policy.serverEnforcesPolicy(ctx)
+	kinds, err := l.policy.enforcedPolicyKinds(ctx)
 	if err != nil {
 		return issueops.BlockedResult{}, err
 	}
 	result, err := l.inner.ListBlocked(ctx, req)
-	if err != nil || enforced {
+	if err != nil || kinds.both() {
 		return result, err
 	}
 	items, err := l.policy.decorateBlocked(ctx, storageissueops.BlockedFilter(req), result.Items,

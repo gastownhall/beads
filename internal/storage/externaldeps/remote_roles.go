@@ -81,9 +81,16 @@ func (s *Store) externalBlockersFor(ctx context.Context, ids []string) (map[stri
 		}
 		return out, nil
 	}
-	enforced, err := s.serverEnforcesPolicy(ctx)
-	if err != nil || enforced {
+	// The two halves are probed independently (GH#5784 AC-8): a server of
+	// the build between the two tokens answers the old one alone, and only
+	// its half is skipped — the bare cross-prefix half is still composed
+	// here from these rows' own edges.
+	kinds, err := s.enforcedPolicyKinds(ctx)
+	if err != nil {
 		return nil, err
+	}
+	if kinds.both() {
+		return nil, nil
 	}
 	deps, err := s.remoteEdges(ctx, ids)
 	if err != nil {
@@ -91,6 +98,7 @@ func (s *Store) externalBlockersFor(ctx context.Context, ids []string) (map[stri
 	}
 	state, err := s.blockingStateFromRecords(ctx, deps, blockingStateOpts{
 		localRead: s.remoteIssuesByIDs,
+		skip:      kinds,
 	})
 	if err != nil {
 		return nil, err
@@ -392,14 +400,16 @@ type remoteReadyCounter struct {
 	policy   *Store
 }
 
-// CountReady is the server's count when the server applies the policy. Against
-// any other server it is the decorator's externally filtered count.
+// CountReady is the server's count when the server applies the whole policy.
+// Against any other server — including one that applies only the old token's
+// capability-reference half (GH#5784 AC-8) — it is the decorator's externally
+// filtered count, which composes exactly the halves the server left out.
 func (c *remoteReadyCounter) CountReady(ctx context.Context, req issueops.ReadyRequest) (issueops.ReadyCountResult, error) {
-	enforced, err := c.policy.serverEnforcesPolicy(ctx)
+	kinds, err := c.policy.enforcedPolicyKinds(ctx)
 	if err != nil {
 		return issueops.ReadyCountResult{}, err
 	}
-	if enforced {
+	if kinds.both() {
 		return c.inner.CountReady(ctx, req)
 	}
 	return c.fallback.CountReady(ctx, req)
@@ -414,13 +424,16 @@ type remoteBlockingAnnotator struct {
 
 // AnnotateBlocking adds each listed row's unsatisfied external blockers to the
 // server's derived answer, reading the edges of those rows only. A server that
-// applies the policy has already added them, and its answer is returned as is.
+// applies the whole policy has already added them, and its answer is returned
+// as is; a server that applies only the old token's capability-reference half
+// (GH#5784 AC-8) still gets the bare cross-prefix half added here.
 func (a *remoteBlockingAnnotator) AnnotateBlocking(ctx context.Context, req issueops.BlockingRequest) (issueops.BlockingResult, error) {
 	result, err := a.inner.AnnotateBlocking(ctx, req)
 	if err != nil {
 		return issueops.BlockingResult{}, err
 	}
-	if enforced, err := a.policy.serverEnforcesPolicy(ctx); err != nil || enforced {
+	kinds, err := a.policy.enforcedPolicyKinds(ctx)
+	if err != nil || kinds.both() {
 		return result, err
 	}
 	ids := make([]string, 0, len(result.Items))
@@ -446,9 +459,12 @@ func (a *remoteBlockingAnnotator) AnnotateBlocking(ctx context.Context, req issu
 
 // remoteExternalBlocked adds the external-dependency invariant to a remote
 // store's IsBlockedBatch answer: an id with an unsatisfied external blocker
-// is blocked. A server that enforces the policy already folded it in.
+// is blocked. A server that enforces the whole policy already folded it in;
+// one that enforces only the old token's half leaves the bare cross-prefix
+// half for this pass (GH#5784 AC-8).
 func (s *Store) remoteExternalBlocked(ctx context.Context, ids []string, blocked map[string]bool) (map[string]bool, error) {
-	if enforced, err := s.serverEnforcesPolicy(ctx); err != nil || enforced {
+	kinds, err := s.enforcedPolicyKinds(ctx)
+	if err != nil || kinds.both() {
 		if err != nil {
 			return nil, err
 		}
@@ -475,7 +491,11 @@ type remoteTreeWalker struct {
 
 // WalkTree is the server's walk. For the plain down-tree request it also hangs
 // the synthetic external leaves the local walker shows — unless the server
-// enforces the external-dependency policy, whose own walker already does.
+// enforces the whole external-dependency policy, whose own walker already
+// does. The halves are probed independently (GH#5784 AC-8): a server that
+// enforces only the old token's capability-reference half hung those leaves
+// but not the bare cross-prefix ones, so the client still hangs the half the
+// server left out.
 //
 // The probe only spares the edge reads: a leaf is display, not enforcement,
 // and appendTreeExternalReferences skips an edge the tree already holds. So a
@@ -489,7 +509,8 @@ func (t *remoteTreeWalker) WalkTree(ctx context.Context, req issueops.WalkTreeRe
 	if (req.Direction != "" && req.Direction != issueops.TreeDown) || req.Status != "" || req.MaxRows != 0 {
 		return result, nil
 	}
-	if enforced, err := t.policy.serverEnforcesPolicy(ctx); err == nil && enforced {
+	kinds, probeErr := t.policy.enforcedPolicyKinds(ctx)
+	if probeErr == nil && kinds.both() {
 		return result, nil
 	}
 	ids := make([]string, 0, len(result.Nodes))
@@ -502,7 +523,7 @@ func (t *remoteTreeWalker) WalkTree(ctx context.Context, req issueops.WalkTreeRe
 	if err != nil {
 		return issueops.TreeResult{}, fmt.Errorf("external dependencies: load tree edges: %w", err)
 	}
-	nodes, err := t.policy.appendTreeExternalReferences(ctx, result.Nodes, deps, req.MaxDepth)
+	nodes, err := t.policy.appendTreeExternalReferences(ctx, result.Nodes, deps, req.MaxDepth, kinds)
 	if err != nil {
 		return issueops.TreeResult{}, err
 	}
