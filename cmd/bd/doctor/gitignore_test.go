@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -3434,4 +3435,76 @@ func TestEnsureGitignoreForBeadsDir_TightenFailureIsPermissionOnly(t *testing.T)
 			t.Errorf("template not written:\n%s", got)
 		}
 	})
+}
+
+// machineLocalStateFiles are the per-clone files bd writes at the top level of
+// .beads/ after init (GH#8318): the bd backup init/sync destination and
+// last-sync state, the bd dolt set audit log, the JSONL auto-import stamp and
+// the bd dolt migrate resume journal. Kept as a literal list so a test never
+// derives its expectation from the production lists it checks.
+var machineLocalStateFiles = []string{
+	"dolt-backup.json",
+	"dolt-backup-state.json",
+	"dolt-config.log",
+	".auto-import-issues.jsonl",
+	"dolt-mode-migration.json",
+}
+
+// TestGitignoreTemplate_IgnoresMachineLocalStateFiles checks with real git
+// matching that the .beads/.gitignore bd init writes ignores every
+// machine-local state file, while the tracked issue data and config stay
+// visible (GH#8318). backup/ only matches that directory, not files beside it.
+func TestGitignoreTemplate_IgnoresMachineLocalStateFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping git-based test on Windows")
+	}
+
+	dir := setupGitRepo(t)
+	disableGlobalGitIgnore(t, dir)
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.WriteFile(filepath.Join(beadsDir, ".gitignore"), []byte(GitignoreTemplate), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tracked := []string{"issues.jsonl", "metadata.json", "config.yaml"}
+	for _, name := range append(append([]string{}, machineLocalStateFiles...), tracked...) {
+		if err := os.WriteFile(filepath.Join(beadsDir, name), []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	checkIgnore := func(name string) int {
+		t.Helper()
+		cmd := gitCommand("check-ignore", "-q", "--", ".beads/"+name)
+		cmd.Dir = dir
+		err := cmd.Run()
+		if err == nil {
+			return 0
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return exitErr.ExitCode()
+		}
+		t.Fatalf("git check-ignore .beads/%s: %v", name, err)
+		return -1
+	}
+
+	for _, name := range machineLocalStateFiles {
+		switch code := checkIgnore(name); code {
+		case 0:
+		case 1:
+			t.Errorf(".beads/%s is not ignored by GitignoreTemplate", name)
+		default:
+			t.Errorf("git check-ignore .beads/%s exited %d", name, code)
+		}
+	}
+	for _, name := range tracked {
+		switch code := checkIgnore(name); code {
+		case 1:
+		case 0:
+			t.Errorf(".beads/%s is ignored by GitignoreTemplate but must stay tracked", name)
+		default:
+			t.Errorf("git check-ignore .beads/%s exited %d", name, code)
+		}
+	}
 }
