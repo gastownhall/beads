@@ -674,8 +674,8 @@ func TestValidateGraphApplyPlanNodeFieldRules(t *testing.T) {
 		{name: "custom status accepted", customStatuses: []string{"triage"}, mutate: func(n *GraphApplyNode) { n.Status = "triage" }},
 		{name: "custom status rejected without config", mutate: func(n *GraphApplyNode) { n.Status = "triage" }, wantErr: "invalid status"},
 		{name: "negative estimate", mutate: func(n *GraphApplyNode) { n.EstimatedMinutes = &neg }, wantErr: "estimated_minutes"},
-		{name: "priority out of range", mutate: func(n *GraphApplyNode) { p := 9; n.Priority = &p }, wantErr: "priority must be between 0 and 4"},
-		{name: "priority bounds accepted", mutate: func(n *GraphApplyNode) { p := 0; n.Priority = &p }},
+		{name: "priority out of range", mutate: func(n *GraphApplyNode) { p := GraphPlanPriority(9); n.Priority = &p }, wantErr: "priority must be between 0 and 4"},
+		{name: "priority bounds accepted", mutate: func(n *GraphApplyNode) { p := GraphPlanPriority(0); n.Priority = &p }},
 		{name: "invalid wisp_type", mutate: func(n *GraphApplyNode) { n.WispType = "bogus" }, wantErr: "invalid wisp_type"},
 		{name: "valid wisp_type", mutate: func(n *GraphApplyNode) { n.WispType = "heartbeat" }},
 		{name: "invalid mol_type", mutate: func(n *GraphApplyNode) { n.MolType = "bogus" }, wantErr: "invalid mol_type"},
@@ -1624,7 +1624,7 @@ func TestBuildGraphApplyBatchRequestFieldsSurvive(t *testing.T) {
 // (CreateItem.DefaultPriority) with a zero Issue.Priority, and a node naming 0
 // stays P0 with the flag off. `bd create --graph` no longer spells the default.
 func TestBuildGraphApplyBatchRequestLeavesAnAbsentPriorityToTheRole(t *testing.T) {
-	zero := 0
+	zero := GraphPlanPriority(0)
 	req, err := buildGraphApplyBatchRequest(&GraphApplyPlan{Nodes: []GraphApplyNode{
 		{Key: "a", Title: "absent"},
 		{Key: "z", Title: "zero", Priority: &zero},
@@ -1885,6 +1885,88 @@ func TestGraphPlanRejectsUnknownEdgeDependencyType(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), `"blocked-by"`) {
 		t.Errorf("refusal does not suggest the canonical spelling: %q", err.Error())
+	}
+}
+
+// TestGraphPlanPriorityAcceptsCLIForms pins bd-esm0t5 (GH#3879 pitfall a): a
+// plan node's `priority` accepts the same forms the --priority flag does —
+// the integer 1 and the strings "1", "P1", "p1" — instead of only int.
+// `null` or an absent priority decode to nil, which asks the role for its
+// default (P2).
+func TestGraphPlanPriorityAcceptsCLIForms(t *testing.T) {
+	for _, tc := range []struct {
+		jsonValue string
+		want      int
+	}{
+		{jsonValue: `1`, want: 1},
+		{jsonValue: `"1"`, want: 1},
+		{jsonValue: `"P1"`, want: 1},
+		{jsonValue: `"p1"`, want: 1},
+	} {
+		var plan GraphApplyPlan
+		raw := fmt.Sprintf(`{"nodes":[{"key":"n","title":"N","priority":%s}]}`, tc.jsonValue)
+		if err := json.Unmarshal([]byte(raw), &plan); err != nil {
+			t.Errorf("priority %s: decode failed: %v", tc.jsonValue, err)
+			continue
+		}
+		if plan.Nodes[0].Priority == nil || int(*plan.Nodes[0].Priority) != tc.want {
+			got := "nil"
+			if plan.Nodes[0].Priority != nil {
+				got = fmt.Sprint(*plan.Nodes[0].Priority)
+			}
+			t.Errorf("priority %s: decoded %s, want %d", tc.jsonValue, got, tc.want)
+		}
+	}
+
+	for _, raw := range []string{
+		`{"nodes":[{"key":"n","title":"N","priority":null}]}`,
+		`{"nodes":[{"key":"n","title":"N"}]}`,
+	} {
+		var plan GraphApplyPlan
+		if err := json.Unmarshal([]byte(raw), &plan); err != nil {
+			t.Fatalf("%s: decode failed: %v", raw, err)
+		}
+		if plan.Nodes[0].Priority != nil {
+			t.Errorf("%s: priority = %v, want nil (the role's default)", raw, *plan.Nodes[0].Priority)
+		}
+		// The default is spelled by the role, and the dry-run preview shows it.
+		issue, err := graphApplyNodeIssue(plan.Nodes[0], GraphApplyOptions{}, "actor", "")
+		if err != nil {
+			t.Fatalf("graphApplyNodeIssue: %v", err)
+		}
+		if got := graphApplyPreviewPriority(plan.Nodes[0], issue); got != issueops.DefaultCreatePriority {
+			t.Errorf("%s: preview priority = %d, want the role default %d", raw, got, issueops.DefaultCreatePriority)
+		}
+	}
+}
+
+// TestGraphPlanPriorityRejectsBadForms pins bd-esm0t5 (GH#3879 pitfall a):
+// a plan node priority that is neither an integer nor a valid CLI form is
+// refused at decode time with an error naming the value. An out-of-range
+// integer still fails node validation with the issue model's existing
+// message.
+func TestGraphPlanPriorityRejectsBadForms(t *testing.T) {
+	for _, raw := range []string{`"high"`, `1.5`, `"P7"`} {
+		var plan GraphApplyPlan
+		planJSON := fmt.Sprintf(`{"nodes":[{"key":"n","title":"N","priority":%s}]}`, raw)
+		err := json.Unmarshal([]byte(planJSON), &plan)
+		if err == nil {
+			t.Errorf("priority %s: decoded without error, want a refusal", raw)
+			continue
+		}
+		if !strings.Contains(err.Error(), raw) {
+			t.Errorf("priority %s: refusal does not name the value: %v", raw, err)
+		}
+	}
+
+	// 9 decodes (an integer) and is refused by node validation's range check.
+	var plan GraphApplyPlan
+	if err := json.Unmarshal([]byte(`{"nodes":[{"key":"n","title":"N","priority":9}]}`), &plan); err != nil {
+		t.Fatalf("priority 9: decode failed: %v", err)
+	}
+	err := validateGraphApplyPlan(&plan, nil, nil, GraphApplyOptions{})
+	if err == nil || !strings.Contains(err.Error(), "priority must be between 0 and 4") {
+		t.Fatalf("priority 9: error = %v, want the node-validation range refusal", err)
 	}
 }
 

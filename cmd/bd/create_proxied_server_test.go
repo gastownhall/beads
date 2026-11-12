@@ -154,7 +154,7 @@ func TestGraphApplyNodeIssue_DefaultsAndOpts(t *testing.T) {
 	})
 
 	t.Run("explicit priority and type", func(t *testing.T) {
-		p := 0
+		p := GraphPlanPriority(0)
 		issue := nodeIssueFromInput(t, GraphApplyNode{
 			Key: "n", Title: "N", Type: "bug", Priority: &p,
 		}, createInput{})

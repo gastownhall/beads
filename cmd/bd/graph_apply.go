@@ -9,6 +9,7 @@ import (
 	"os"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +25,50 @@ type GraphApplyPlan struct {
 	CommitMessage string           `json:"commit_message,omitempty"`
 	Nodes         []GraphApplyNode `json:"nodes"`
 	Edges         []GraphApplyEdge `json:"edges,omitempty"`
+}
+
+// GraphPlanPriority is a graph plan node's `priority` as decoded from JSON:
+// an integer number, or one of the CLI's string forms ("1", "P1", "p1") —
+// the same forms `bd create --priority` accepts, decoded through
+// validation.ValidatePriority so the flag and the plan cannot disagree
+// (GH#3879 pitfall a). JSON `null` and an absent field leave the node-level
+// pointer nil, which asks the role for its default. The value still
+// marshals as a number, so producers that send integers are unaffected;
+// the node-level materialization keeps owning the 0-4 range check.
+type GraphPlanPriority int
+
+// UnmarshalJSON decodes a plan node's priority. A JSON string goes through
+// validation.ValidatePriority, whose error names the refused value; a JSON
+// number must be an integer (1.5 is refused, naming the value); anything
+// else is refused with the raw JSON text in the message.
+func (p *GraphPlanPriority) UnmarshalJSON(data []byte) error {
+	raw := strings.TrimSpace(string(data))
+	if raw == "null" {
+		*p = 0
+		return nil
+	}
+	if len(raw) > 0 && raw[0] == '"' {
+		var s string
+		if err := json.Unmarshal([]byte(raw), &s); err != nil {
+			return fmt.Errorf("priority must be an integer 0-4 or a \"P0\"-\"P4\" string, not %s", raw)
+		}
+		n, err := validation.ValidatePriority(s)
+		if err != nil {
+			return err
+		}
+		*p = GraphPlanPriority(n)
+		return nil
+	}
+	var num json.Number
+	if err := json.Unmarshal([]byte(raw), &num); err != nil {
+		return fmt.Errorf("priority must be an integer 0-4 or a \"P0\"-\"P4\" string, not %s", raw)
+	}
+	i, err := strconv.ParseInt(num.String(), 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid priority %s (expected an integer 0-4 or a \"P0\"-\"P4\" string)", num.String())
+	}
+	*p = GraphPlanPriority(i)
+	return nil
 }
 
 // GraphApplyNode describes a single bead to create. Field names follow the
@@ -44,7 +89,7 @@ type GraphApplyNode struct {
 	Assignee           string                     `json:"assignee,omitempty"`
 	AssignAfterCreate  bool                       `json:"assign_after_create,omitempty"`
 	Owner              string                     `json:"owner,omitempty"`
-	Priority           *int                       `json:"priority,omitempty"`          // nil defaults to P2
+	Priority           *GraphPlanPriority         `json:"priority,omitempty"`          // nil defaults to P2; accepts int or the CLI's "P1"/"1" string forms
 	Estimate           *int                       `json:"estimate,omitempty"`          // minutes (alias for estimated_minutes)
 	EstimatedMinutes   *int                       `json:"estimated_minutes,omitempty"` // minutes
 	DueAt              *time.Time                 `json:"due_at,omitempty"`            // RFC3339
@@ -812,7 +857,7 @@ func graphApplyNodeIssue(node GraphApplyNode, opts GraphApplyOptions, createdBy,
 	// (CreateItem.DefaultPriority); the number is not spelled here.
 	priority := 0
 	if node.Priority != nil {
-		priority = *node.Priority
+		priority = int(*node.Priority)
 	}
 
 	ephemeral, noHistory, storageClass, err := graphApplyNodeStorageClass(node, opts)
