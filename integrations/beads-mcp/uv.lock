@@ -140,7 +140,7 @@ wheels = [
 
 [[package]]
 name = "beads-mcp"
-version = "1.4.0rc1"
+version = "1.4.0rc2"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
