@@ -420,6 +420,10 @@ func TestServedLifecycleCloseAndReopenRequireActorAndIssueID(t *testing.T) {
 	conformance.RunLifecycleCloseAndReopenRequireActorAndIssueID(t, t.Context(), newServedCloseReopenFixture(t, "hlra"))
 }
 
+func TestServedLifecycleEventActorMatchesTheRequest(t *testing.T) {
+	conformance.RunLifecycleEventActorMatchesTheRequest(t, t.Context(), newServedCloseReopenFixture(t, "hlea"))
+}
+
 // TestServedLifecycleReopenProvenanceLabelsHistory is PARKED: reopenIssue
 // publishes no provenance member and the server writes its own fixed label, so
 // the client refuses the field rather than letting a caller believe their label
@@ -641,6 +645,8 @@ func (env *servedEnv) updateClaimSubject(t *testing.T, advertised bool) (*Store,
 			return token == wire.CapIssuesUpdateClaim
 		})
 	}
+	// Deliberately v0 and outside the protocol seam; servedDialsOutsideTheSwitch
+	// (served_protocol_seam_test.go) records why.
 	client, err := wire.New(env.subject.target.BaseURL, nil, wire.Options{HTTPClient: &http.Client{Transport: transport}})
 	if err != nil {
 		t.Fatalf("build the client: %v", err)

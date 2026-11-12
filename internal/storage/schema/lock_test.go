@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -596,6 +597,24 @@ func expectDirtyGuardRefusal(t *testing.T, mock sqlmock.Sqlmock) {
 func expectDirtyGuardRefusalAtSetting(t *testing.T, mock sqlmock.Sqlmock, transactionCommit int, restoreErr error) {
 	t.Helper()
 
+	expectDirtyGuardMainIntersection(t, mock, transactionCommit)
+	// The ignored series is intersected before either series migrates
+	// (#5816); no ignored cursor table here, so its read stops at the
+	// existence probe and the merged list is the DirtyTablesError.
+	expectCursorProbe(mock, "ignored_schema_migrations", false)
+	if transactionCommit != 0 {
+		// The deferred restoration runs as the pass unwinds from the
+		// refusal (#4470): it is the mocked flow's last statement.
+		expectTransactionCommitRestore(mock, transactionCommit, restoreErr)
+	}
+}
+
+// expectDirtyGuardMainIntersection is expectDirtyGuardRefusalAtSetting up to
+// and including the main series' pending-migration intersection, which finds
+// `events`; the ignored series' read is the next statement.
+func expectDirtyGuardMainIntersection(t *testing.T, mock sqlmock.Sqlmock, transactionCommit int) {
+	t.Helper()
+
 	cursor := eventsFlipVersion - 1
 
 	expectIgnorePatternSeedNoop(mock, cursor)
@@ -627,14 +646,9 @@ func expectDirtyGuardRefusalAtSetting(t *testing.T, mock sqlmock.Sqlmock, transa
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	}
 	// pendingMigrationDirtyTables: cursor read, then pending 0062's SQL
-	// touches `events` -> DirtyTablesError.
+	// touches `events`.
 	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", cursor)
-	if transactionCommit != 0 {
-		// The deferred restoration runs as the pass unwinds from the
-		// refusal (#4470): it is the mocked flow's last statement.
-		expectTransactionCommitRestore(mock, transactionCommit, restoreErr)
-	}
 }
 
 func expectDoltStatusDirtyEvents(mock sqlmock.Sqlmock) {
@@ -1347,4 +1361,78 @@ func TestMigrateUpWithLockMigrationGate(t *testing.T) {
 			t.Fatalf("unmet SQL expectations: %v", err)
 		}
 	})
+}
+
+// TestMigrateUpMergesMainAndIgnoredDirtyTables pins the #5816 refusal shape:
+// both series are intersected with the committable dirty set before either
+// migrates, and a table both touch (`events`: main 0062 drops and recreates
+// it, ignored 0019 creates it) is named once in the sorted list.
+func TestMigrateUpMergesMainAndIgnoredDirtyTables(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin mock connection: %v", err)
+	}
+	defer conn.Close()
+
+	expectDirtyGuardRefusal(t, mock)
+	applied, err := MigrateUp(ctx, conn)
+	if applied != 0 {
+		t.Fatalf("MigrateUp() applied = %d, want 0", applied)
+	}
+	var dirtyErr *DirtyTablesError
+	if !errors.As(err, &dirtyErr) {
+		t.Fatalf("MigrateUp() error = %v (%T), want *DirtyTablesError", err, err)
+	}
+	if !slices.Equal(dirtyErr.Tables, []string{"events"}) {
+		t.Fatalf("DirtyTablesError.Tables = %v, want [events]", dirtyErr.Tables)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestMigrateUpIgnoredReadFailureKeepsTheMainRefusal pins the precedence the
+// #5816 reordering keeps: the ignored series is now read before the main
+// refusal returns, and when that read fails while the main series already
+// refuses, MigrateUp still returns the typed refusal the reconcile opens
+// recover from, not the untyped read error.
+func TestMigrateUpIgnoredReadFailureKeepsTheMainRefusal(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin mock connection: %v", err)
+	}
+	defer conn.Close()
+
+	expectDirtyGuardMainIntersection(t, mock, 0)
+	// The ignored cursor's existence probe fails.
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = DATABASE()")).
+		WillReturnError(errors.New("connection reset"))
+	applied, err := MigrateUp(ctx, conn)
+	if applied != 0 {
+		t.Fatalf("MigrateUp() applied = %d, want 0", applied)
+	}
+	var dirtyErr *DirtyTablesError
+	if !errors.As(err, &dirtyErr) {
+		t.Fatalf("MigrateUp() error = %v (%T), want *DirtyTablesError", err, err)
+	}
+	if !slices.Equal(dirtyErr.Tables, []string{"events"}) {
+		t.Fatalf("DirtyTablesError.Tables = %v, want [events]", dirtyErr.Tables)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
 }

@@ -21,7 +21,42 @@ npm test
 
 **Duration**: <1 second
 
-### 2. Integration Tests (`npm run test:integration`)
+### 2. Postinstall Download Tests (`npm run test:postinstall`)
+
+**Location**: `test/redirect-race.test.js`
+
+**Purpose**: Deterministic regression tests for `downloadFile()` in
+`scripts/postinstall.js`, run against a local HTTP server (no network access)
+
+**Tests**:
+- A 302 redirect, a 301 -> 302 chain and a direct 200 leave the exact served
+  bytes, even when every `fs.unlink` the download scheduled runs after it
+  resolves (the late schedule that used to delete the finished archive)
+- A redirected download truncates longer stale content at the destination
+- A redirect to a 404 rejects and leaves no file behind
+- Requiring `scripts/postinstall.js` exports `downloadFile` without starting
+  an installation
+- Running `scripts/postinstall.js` directly with `CI=1` still prints the skip
+  message and exits 0
+- `npm run test:all` runs this suite
+
+**Run**:
+```bash
+npm run test:postinstall
+```
+
+**Duration**: <1 second
+
+**Supplementary stress run**: `test/redirect-stress.test.js` (from #7791)
+runs many redirected downloads concurrently and checks every archive's bytes.
+It depends on thread-pool timing, so a pass is supporting evidence only and
+it is not part of `npm run test:all`:
+
+```bash
+node test/redirect-stress.test.js [iterations] [concurrency]
+```
+
+### 3. Integration Tests (`npm run test:integration`)
 
 **Location**: `test/integration.test.js`
 
@@ -70,9 +105,10 @@ npm run test:integration
 
 **Duration**: ~30-60 seconds (downloads binaries)
 
-### 3. All Tests (`npm run test:all`)
+### 4. All Tests (`npm run test:all`)
 
-Runs both unit and integration tests sequentially.
+Runs the unit, postinstall download and integration tests sequentially,
+stopping at the first suite that fails.
 
 ```bash
 npm run test:all

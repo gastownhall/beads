@@ -72,6 +72,7 @@ go_test(
         "endpoint_test.go",
         "fix_edge_cases_test.go",
         "fix_test.go",
+        "flatten_clone_local_fks_cgo_test.go",
         "fs_test.go",
         "git_repo_template_test.go",
         "hooks_test.go",

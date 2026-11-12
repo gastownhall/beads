@@ -125,15 +125,7 @@ func FillServerEndpoint(beadsDir string, fileCfg *configfile.Config, cfg *Config
 // closed instead of opening a new, empty Dolt database. beadsDir is the workspace
 // the config came from, so the refusal can offer the metadata heal when that
 // workspace already holds a Dolt database.
-//
-// It first refuses a workspace whose metadata or graph format marker declares a
-// data model this build cannot open (configfile.CheckWorkspaceFormat): such a
-// workspace keeps another model's database behind an ordinary Dolt backend,
-// and opening it here would run Issue migrations into that database.
 func requireDoltBackend(fileCfg *configfile.Config, beadsDir string) error {
-	if err := configfile.CheckWorkspaceFormat(fileCfg, beadsDir); err != nil {
-		return err
-	}
 	switch fileCfg.Backend {
 	case configfile.BackendPostgres, configfile.BackendMySQL, configfile.BackendSQLite:
 		return fmt.Errorf("configured storage backend %q is no longer supported and cannot be opened as Dolt: %s", fileCfg.Backend, configfile.RemovedBackendDetailAt(fileCfg.Backend, beadsDir, fileCfg))
@@ -152,15 +144,14 @@ func requireDoltBackend(fileCfg *configfile.Config, beadsDir string) error {
 // as configfile.LoadForDiscovery reads it, which never rewrites the workspace.
 // The metadata-driven constructors run it before configfile.Load, which
 // migrates a legacy config.json into metadata.json and drops the keys Config
-// does not know, so a workspace they refuse (another data model, a
-// historical SQLite workspace, or a backend other than Dolt) is refused before
-// that rewrite rather than after it, with the text command admission prints
-// for it (configfile.LoadDiscoveredForOpen). A
+// does not know, so a workspace they refuse (a historical SQLite workspace,
+// or a backend other than Dolt) is refused before that rewrite rather than
+// after it, with the text command admission prints for it
+// (configfile.LoadDiscoveredForOpen). A
 // caller that writes into the workspace before it reaches a constructor
 // (beads.OpenGated's gates) runs it first too. Metadata that does not load is
-// left to Load to report, unless the graph format marker sits beside it
-// (configfile.LoadDiscoveredForOpen); no metadata at all (and no format
-// marker) selects Dolt.
+// left to Load to report (configfile.LoadDiscoveredForOpen); no metadata at
+// all (and no SQLite database) selects Dolt.
 func RequireDiscoveredDoltBackend(beadsDir string) error {
 	fileCfg, err := configfile.LoadDiscoveredForOpen(beadsDir)
 	if err != nil {

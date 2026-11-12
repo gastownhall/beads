@@ -21,13 +21,12 @@ import (
 // keeps beside its runtime leftovers included) and a summary on out.
 //
 // It never migrates a .beads directory's metadata, and leaves a .beads
-// directory in a format this build cannot open, or one whose ownership it
-// cannot establish, untouched.
+// directory whose ownership it cannot establish untouched.
 func ClassicArtifacts(path string, out io.Writer) error {
 	var removed, skipped, errCount int
 
 	err := WalkBeadsDirs(path, func(beadsDir string) {
-		findings, _ := PlanArtifacts(beadsDir)
+		findings := PlanArtifacts(beadsDir)
 		for _, f := range findings {
 			if !f.SafeDelete {
 				fmt.Fprintf(out, "  Skip (needs review): %s: %s\n", f.Path, f.Description)

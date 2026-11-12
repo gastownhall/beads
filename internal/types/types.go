@@ -86,12 +86,22 @@ type Issue struct {
 	// survive a JSON number in a JavaScript consumer. Go consumers read
 	// RowVersion directly and never see the string.
 	//
-	// Coverage is deliberately partial: it changes on claim/close/unclaim and the
-	// generic update path, but NOT on direct-UPDATE paths that rewrite text
-	// without touching row_lock (RestoreFromSnapshotInTx, the compaction
-	// text-truncation path). For a complete change-detection key, combine it with
-	// updated_at (which those paths DO bump), status, and the label set
-	// (label-only and reopen writes change those, not row_lock).
+	// Coverage is deliberately partial. It changes on every write to the issue
+	// row's lifecycle or content columns: create, claim, release/unclaim, close,
+	// reopen, a heartbeat that re-arms a missing lease, a metadata
+	// compare-and-set that lands, and every update or batch-apply update item
+	// that changes a column (a same-value patch writes nothing and leaves it).
+	// It does NOT change on writes that leave the issue row alone or touch only
+	// a derived cell: label edits (a label-only update included), dependency
+	// edits (a ParentID-only update included), comments, a heartbeat refresh,
+	// the is_blocked recompute a write settles on OTHER rows (a closed
+	// blocker's dependents included), and the direct-UPDATE paths that rewrite
+	// text without touching row_lock (RestoreFromSnapshotInTx, the compaction
+	// text-truncation path). For a complete change-detection key, combine it
+	// with updated_at (which those direct paths DO bump), the label set and the
+	// dependency edges. The per-kind answers are pinned on every backend by
+	// backend/conformance/row_version_contract.go; change one there and here
+	// together.
 	//
 	// 0 appears only on legacy rows backfilled by migration 0054 (DEFAULT 0) that
 	// have not been mutated since; any issue created by the current code path is
