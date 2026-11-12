@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -633,6 +634,148 @@ func TestBackupRestoreStrictReadonlyServerMode(t *testing.T) {
 			assertWorkspaceUnchanged(t, dir, before)
 			if got := issueCount(t, dir, env); got != 3 {
 				t.Errorf("issue count after the refused restore = %d, want 3: the restore replaced the store", got)
+			}
+		})
+	}
+}
+
+// stubRestoreStore is a minimal DoltStorage stand-in for the direct restore
+// path, patterned on failingBackupStore (backup_export_failure_test.go): it
+// embeds a nil DoltStorage for identity and overrides only the surface
+// runBackupRestore touches, recording the order of every call so the tests
+// can pin the restore, identity-sync, registration and commit sequence.
+type stubRestoreStore struct {
+	storage.DoltStorage
+	projectID   string
+	restoreErr  error
+	commitErr   error
+	registerErr error
+	calls       []string
+}
+
+func (s *stubRestoreStore) note(call string) { s.calls = append(s.calls, call) }
+
+func (s *stubRestoreStore) RestoreDatabase(context.Context, string, bool) error {
+	s.note("restore")
+	return s.restoreErr
+}
+
+func (s *stubRestoreStore) GetMetadata(context.Context, string) (string, error) {
+	s.note("identity-sync")
+	return s.projectID, nil
+}
+
+func (s *stubRestoreStore) BackupAdd(context.Context, string, string) error {
+	s.note("register")
+	return s.registerErr
+}
+
+func (s *stubRestoreStore) BackupRemove(context.Context, string) error {
+	s.note("unregister")
+	return nil
+}
+
+func (s *stubRestoreStore) BackupSync(context.Context, string) error      { return nil }
+func (s *stubRestoreStore) BackupDatabase(context.Context, string) error { return nil }
+
+func (s *stubRestoreStore) Commit(context.Context, string) error {
+	s.note("commit")
+	return s.commitErr
+}
+
+// isolateRestoreWorkspace points BEADS_DIR at an empty workspace under
+// t.TempDir() holding only a metadata.json, so a direct restore's identity
+// sync and backup registration read and write there and nowhere else.
+func isolateRestoreWorkspace(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	beadsDir := filepath.Join(root, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+	return beadsDir
+}
+
+// TestRunBackupRestoreUnknownFieldsCommitGuidance pins the report a direct
+// restore gives when the post-restore commit fails with Dolt's "table has
+// unknown fields" (GH#7569): a qualified hint that the backup's format may be
+// newer than the restoring engine, upgrade guidance for embedded and server
+// mode, and an honest account that the workspace may already have been
+// replaced — promising neither that the restored data is usable nor that a
+// version commit did or did not land. The injected error tests the reporting
+// contract through runBackupRestore itself; it is not a real
+// storage-incompatibility reproduction.
+func TestRunBackupRestoreUnknownFieldsCommitGuidance(t *testing.T) {
+	// The engine's diagnostic, as the reporter saw it wrapped by the
+	// indeterminate-commit sentinel.
+	cause := errors.New("Error 1105: table has unknown fields")
+
+	for _, tc := range []struct {
+		name        string
+		commitErr   error
+		causeInChan bool // the case's commit error wraps cause
+	}{
+		{name: "mysql_prefix_and_sentinel",
+			commitErr:   fmt.Errorf("dolt commit: %w: %w", cause, storage.ErrCommitIndeterminate),
+			causeInChan: true},
+		{name: "bare_diagnostic",
+			commitErr: errors.New("table has unknown fields")},
+		{name: "outer_wrap",
+			commitErr:   fmt.Errorf("run backup restore: %w", fmt.Errorf("dolt commit: %w: %w", cause, storage.ErrCommitIndeterminate)),
+			causeInChan: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir := isolateRestoreWorkspace(t)
+			// Registration is best-effort and fails here; the report must not
+			// claim it succeeded.
+			s := &stubRestoreStore{
+				registerErr: errors.New("the test store refuses remotes"),
+				commitErr:   tc.commitErr,
+			}
+
+			err := runBackupRestore(context.Background(), s, filepath.Join(beadsDir, "backup"), false)
+			if err == nil {
+				t.Fatal("runBackupRestore returned nil, want the commit failure")
+			}
+			msg := err.Error()
+			for _, want := range []string{
+				"failed to commit restore",
+				// The engine's own detail is not buried by the hint.
+				"table has unknown fields",
+				// A qualified incompatibility explanation, not a verdict.
+				"may be newer than the engine that restored it",
+				// Upgrade guidance for both modes.
+				"For embedded mode, upgrade bd",
+				"for server mode",
+				// Replacement may already have happened, with nothing promised
+				// about usability or the commit's durable outcome: the note's
+				// "neither the restored data's usability nor whether a version
+				// commit landed has been verified" clause.
+				"may already have been replaced",
+				"indeterminate",
+				"the restored data's usability nor whether a version commit landed has been verified",
+				// Recovery advice that keeps the source intact.
+				"separate initialized workspace",
+			} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("restore error is missing %q:\n%s", want, msg)
+				}
+			}
+			for _, notWant := range []string{
+				// No promise that the restored data can be read.
+				"readable",
+				// No claim that registration succeeded.
+				"registered",
+				// No claim about whether a commit landed either way.
+				"no commit was",
+			} {
+				if strings.Contains(msg, notWant) {
+					t.Errorf("restore error promises %q, which the restore has not established:\n%s", notWant, msg)
+				}
 			}
 		})
 	}

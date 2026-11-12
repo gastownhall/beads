@@ -144,12 +144,37 @@ func runBackupRestore(ctx context.Context, s storage.DoltStorage, dir string, fo
 
 	if err := s.Commit(ctx, "bd backup restore"); err != nil {
 		if !strings.Contains(err.Error(), "nothing to commit") {
+			// A commit the engine refused because a table "has unknown
+			// fields" is what a backup written by a newer Dolt looks like
+			// (GH#7569): the restore already replaced the database, so the
+			// report says so instead of leaving only the generic wrapper.
+			// The original error stays wrapped for errors.Is.
+			if strings.Contains(err.Error(), "table has unknown fields") {
+				return fmt.Errorf("failed to commit restore: %w\n%s", err, unknownFieldsRestoreNote)
+			}
 			return fmt.Errorf("failed to commit restore: %w", err)
 		}
 	}
 
 	return nil
 }
+
+// unknownFieldsRestoreNote qualifies a post-restore commit failure that Dolt
+// reported as "table has unknown fields" (GH#7569): the restoring engine could
+// not decode a serialized table schema the backup's writer understood, which
+// is what a backup format newer than the restoring engine looks like. The
+// engine's literal text is matched only to add this hint — it is not a format
+// or version classification — and the note stays mode-neutral so it is true
+// for the engine embedded in bd and for a Dolt SQL server alike. It promises
+// neither that the restored data is usable nor anything about whether the
+// commit landed: the workspace may already have been replaced, and the commit
+// outcome stays indeterminate.
+const unknownFieldsRestoreNote = "the backup's format may be newer than the engine that restored it.\n" +
+	"The workspace may already have been replaced; the commit outcome is indeterminate, and neither\n" +
+	"the restored data's usability nor whether a version commit landed has been verified.\n" +
+	"For embedded mode, upgrade bd to a build whose embedded Dolt understands the backup's format;\n" +
+	"for server mode, restore through a Dolt server compatible with the backup's writer instead.\n" +
+	"Keep the source backup, and verify recovery in a separate initialized workspace before relying on it."
 
 // registerBackupRemote registers dir as the default backup remote and saves
 // the local backup config. Errors are non-fatal warnings.
