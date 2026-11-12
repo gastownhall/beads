@@ -201,8 +201,10 @@ func testWithPeerAuthWarnsWhenStoredPeerSuppressesAmbientPassword(t *testing.T, 
 			wantLine: wantOpenPwdWarning,
 		},
 		{
-			// add-peer upserts sovereignty along with the credentials, so the
-			// suggested re-run must carry the stored tier or it clears it.
+			// add-peer preserves a stored tier on re-run without
+			// --sovereignty (GH#5213), but the suggested command still
+			// carries it: pinned verbatim so the wording change that removed
+			// the tier (and lost it on older bd builds) is caught here.
 			name: "suggested re-add keeps the stored sovereignty tier",
 			peer: &storage.FederationPeer{
 				Name:        "tiered",
