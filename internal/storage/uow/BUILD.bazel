@@ -131,6 +131,7 @@ go_test(
         "expected_revision_contract_test.go",
         "export_test.go",
         "external_doltserver_provider_test.go",
+        "forward_drift_open_test.go",
         "graph_counter_contract_test.go",
         "heartbeater_contract_test.go",
         "history_off_differential_test.go",
