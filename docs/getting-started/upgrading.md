@@ -573,15 +573,17 @@ apply, but they run from two places. The workspace refuses `bd dolt pull`
 (`proxy.dolt_pull.unsupported`) and `bd conflicts`, so the pull, and any
 conflict resolution it needs, runs where the database lives: on the server
 host, from a workspace with direct database access. The consent step can then
-be run from the proxied workspace, but only once that pull has landed:
+be run from the proxied workspace, but only once that pull has landed, and
+with the library clients of the proxy's backend stopped (see
+[Shared servers](#shared-servers)):
 
 ```bash
 bd dolt pull                     # on the server host, with direct database access
-bd migrate schema --force        # then, from the proxied workspace
+bd migrate schema --force        # then, from the proxied workspace; restart the clients after
 ```
 
 Nothing in the proxied workspace enforces that order. It refuses the bare
-`bd migrate` verb but not `bd migrate schema --force`, and
+`bd migrate` and `bd migrate schema` verbs but not `bd migrate schema --force`, and
 `BD_ALLOW_REMOTE_MIGRATE=1` grants the same consent to any command. Both are
 honored before this stop is reached, so the stop never sees them: run either
 one before the pull and it migrates the database while it is still behind.
@@ -647,7 +649,16 @@ there: do step 2 from a client that is already set up, or join and migrate in
 one step with `BD_ALLOW_REMOTE_MIGRATE=1 bd init …`.
 
 The same rules apply in **proxied-server mode**, which is a shared server
-reached through a local proxy. Three differences worth knowing:
+reached through a local proxy. Four differences worth knowing:
+
+- step 2 is `bd migrate schema --force`. The bare `bd migrate schema` is
+  refused (`proxy.migrate.unsupported`), and `BD_ALLOW_REMOTE_MIGRATE=1` does
+  not get past that refusal: in this mode opening the store applies the
+  migration, which changes the schema underneath every library client
+  connected to the proxy's backend, and the proxy does not track those
+  clients. Stop them, run the forced command (it prints a reminder to stderr),
+  then restart them. Because the bare command is refused, it is not a CI
+  check here;
 
 - read commands print a warning and keep serving the current schema, rather
   than the read simply not touching it;
