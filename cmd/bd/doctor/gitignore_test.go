@@ -3548,6 +3548,45 @@ func TestCheckGitignore_FlagsMissingMachineLocalStatePatterns(t *testing.T) {
 	if check.Detail != wantDetail {
 		t.Errorf("detail = %q, want %q", check.Detail, wantDetail)
 	}
+
+	// AC-3: the fix appends each name exactly once, keeps the original
+	// content as a prefix, and is idempotent.
+	if err := FixGitignore(tmpDir); err != nil {
+		t.Fatalf("FixGitignore: %v", err)
+	}
+	fixed, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(fixed), stripped) {
+		t.Errorf("original content did not survive as a prefix:\n%s", fixed)
+	}
+	for _, name := range machineLocalStateFiles {
+		count := 0
+		for _, line := range strings.Split(string(fixed), "\n") {
+			if strings.TrimSpace(line) == name {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf("%s appended %d times, want exactly 1", name, count)
+		}
+	}
+	check = CheckGitignore(tmpDir)
+	if check.Status != "ok" {
+		t.Errorf("after fix, status = %s (%s), want ok", check.Status, check.Detail)
+	}
+
+	if err := FixGitignore(tmpDir); err != nil {
+		t.Fatalf("second FixGitignore: %v", err)
+	}
+	again, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(fixed, again) {
+		t.Error("second FixGitignore changed the file")
+	}
 }
 
 // TestGitignoreCoversBackupAndAutoImportState pins the four-name subset of
