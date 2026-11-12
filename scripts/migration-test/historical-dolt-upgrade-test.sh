@@ -1160,17 +1160,17 @@ run_v0554_default_embedded_dolt_upgrade() {
 # Old-binary capabilities, probed against each pinned release rather than
 # assumed, so the lane can stay one shape across both regimes:
 #
-#   v1.0.1  v1.1.0  v1.1.2
-#     yes     yes     yes    bd create --ephemeral
-#     yes     yes     yes    dep add: wisp->issue, wisp->wisp, conditional-blocks
-#     yes     yes     yes    dep add: issue->wisp (main dependencies table)
-#     yes     yes     yes    comments add / label add on a wisp
-#     yes     yes     yes    bd mol wisp list --all --json
-#     yes     yes     yes    bd dolt remote add / push over file://
-#      no     yes     yes    a pre-upgrade remote the candidate will still migrate
-#      no     yes     yes    wisps.is_blocked column
-#      no     yes     yes    post-split wisp_dependencies target columns
-#      no     yes     yes    ignored_schema_migrations cursor
+#   v1.0.1  v1.1.0  v1.1.2  v1.3.3  v1.3.4
+#     yes     yes     yes     yes     yes    bd create --ephemeral
+#     yes     yes     yes     yes     yes    dep add: wisp->issue, wisp->wisp, conditional-blocks
+#     yes     yes     yes     yes     yes    dep add: issue->wisp (main dependencies table)
+#     yes     yes     yes     yes     yes    comments add / label add on a wisp
+#     yes     yes     yes     yes     yes    bd mol wisp list --all --json
+#     yes     yes     yes     yes     yes    bd dolt remote add / push over file://
+#      no     yes     yes     yes     yes    a pre-upgrade remote the candidate will still migrate
+#      no     yes     yes     yes     yes    wisps.is_blocked column
+#      no     yes     yes     yes     yes    post-split wisp_dependencies target columns
+#      no     yes     yes     yes     yes    ignored_schema_migrations cursor
 #
 # The two "no" rows in the last block are the point of keeping v1.0.1: it is the
 # only regime that makes the candidate perform the split and bootstrap the
