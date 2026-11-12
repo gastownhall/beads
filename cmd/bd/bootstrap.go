@@ -1593,13 +1593,21 @@ func printInitJoinGuidance(w io.Writer, e *schema.RemoteMigrateGateError) {
 	if e.Decision != "shared-no-remote" {
 		return
 	}
+	// GH#6656: the workspace this guidance points at may be proxied, where
+	// the bare verb is refused at that workspace's front door — name the
+	// forced form so the operator is not sent to type the command the gate
+	// itself refuses.
+	consent := schema.SharedConsentCommand
+	if e.Proxied {
+		consent = schema.SharedConsentCommandForced
+	}
 	fmt.Fprintf(w,
 		"\n  This workspace was NOT created — bd init stopped before writing\n"+
 			"  .beads/metadata.json, so `%s` cannot be run from here yet.\n"+
 			"  Either run it from a workspace already set up against this server, or\n"+
 			"  join and migrate in one step once every client is upgraded:\n"+
 			"        %s=1 bd init …\n",
-		schema.SharedConsentCommand, schema.AllowRemoteMigrateEnv)
+		consent, schema.AllowRemoteMigrateEnv)
 }
 
 // printBootstrapRemoteBehindGuidance explains a remote-migrate gate refusal in
