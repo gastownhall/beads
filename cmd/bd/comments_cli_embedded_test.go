@@ -228,16 +228,17 @@ func TestEmbeddedCommentsCLI(t *testing.T) {
 	// given, else the actor (--actor > BEADS_ACTOR > BD_ACTOR > git user.name).
 	// The two flags are independent: --actor never overrides --author, and two
 	// different names are not refused. The Dolt commit each comment makes is
-	// the store's own (author "beads <beads@local>", message "bd: comment
-	// <id>"), whoever the author is. These are pins, not a ruling: native fix
-	// C2 (--author an alias of --actor; two different values refused before
-	// any write) flips the two-names row, and its PR changes that row and
-	// cites its decision record.
+	// the store's own (message "bd: comment <id>", author the GIT_AUTHOR_*
+	// identity, "beads <beads@local>" with GIT_AUTHOR_* unset as here),
+	// whoever the comment's author is. These are pins, not a ruling: native
+	// fix C2 (--author an alias of --actor; two different values refused
+	// before any write) flips the two-names row, and its PR changes that row
+	// and cites its decision record.
 	t.Run("comments_add_author_actor_precedence", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Attribution target", "--type", "task")
 		rows := []struct {
 			name     string
-			env      []string // appended to bdEnv, which strips every BEADS_ and BD_ variable
+			env      []string // appended to bdEnv (which strips every BEADS_ and BD_ variable) with GIT_AUTHOR_* removed
 			global   []string // flags before "comments"
 			flags    []string // flags after the text
 			wantExit int
@@ -289,7 +290,9 @@ func TestEmbeddedCommentsCLI(t *testing.T) {
 			args := append(append(slices.Clone(row.global), "comments", "add", issue.ID, fmt.Sprintf("attribution %d", i)), row.flags...)
 			cmd := exec.Command(bd, args...)
 			cmd.Dir = dir
-			cmd.Env = append(bdEnv(dir), row.env...)
+			// The commit author follows GIT_AUTHOR_* (#7628), so a caller's
+			// exported identity must not reach the pin below.
+			cmd.Env = append(envWithout(envWithout(bdEnv(dir), "GIT_AUTHOR_NAME"), "GIT_AUTHOR_EMAIL"), row.env...)
 			out, err := cmd.CombinedOutput()
 			code := 0
 			var exitErr *exec.ExitError

@@ -15,6 +15,8 @@ import (
 
 	"github.com/cenkalti/backoff/v4"
 	doltembed "github.com/dolthub/driver/v2"
+
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 // validIdentifier matches safe SQL identifiers (letters, digits, underscores).
@@ -22,15 +24,21 @@ import (
 // variable identifiers (@@<db>_head_ref) where hyphens are invalid.
 var validIdentifier = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
-const (
-	commitName  = "beads"
-	commitEmail = "beads@local"
-)
-
 // OpenSQL opens an embedded Dolt database at dir. The returned cleanup
-// function closes both the *sql.DB and the underlying connector.
+// function closes both the *sql.DB and the underlying connector. The DSN
+// carries the identity versioncontrolops.ResolveCommitter resolves now
+// (GIT_AUTHOR_*, else beads/beads@local) as the engine's user.name/user.email,
+// which Dolt uses for commits the engine makes itself, such as a new
+// database's initial commit. A DOLT_COMMIT or DOLT_MERGE issued on the
+// handle records the SQL user unless it passes --author, so store commits
+// always pass their identity explicitly. A store's own connections use the
+// identity it captured at construction instead.
 func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func() error, error) {
-	dsn := buildDSN(dir, database)
+	return openSQL(ctx, dir, database, branch, versioncontrolops.ResolveCommitter("", ""))
+}
+
+func openSQL(ctx context.Context, dir, database, branch string, committer versioncontrolops.Committer) (*sql.DB, func() error, error) {
+	dsn := buildDSN(dir, database, committer)
 
 	cfg, err := doltembed.ParseDSN(dsn)
 	if err != nil {
@@ -95,10 +103,10 @@ func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func()
 	return db, cleanup, nil
 }
 
-func buildDSN(dir, database string) string {
+func buildDSN(dir, database string, committer versioncontrolops.Committer) string {
 	v := url.Values{}
-	v.Set(doltembed.CommitNameParam, commitName)
-	v.Set(doltembed.CommitEmailParam, commitEmail)
+	v.Set(doltembed.CommitNameParam, committer.Name)
+	v.Set(doltembed.CommitEmailParam, committer.Email)
 	v.Set(doltembed.MultiStatementsParam, "true")
 	if strings.TrimSpace(database) != "" {
 		v.Set(doltembed.DatabaseParam, database)

@@ -159,17 +159,25 @@ type sqlServerUOWTopology struct {
 // how a refused migration is handled. Preview wins, then readOnly. reconcile
 // (bd dolt commit) changes nothing about the open; it only tells events-journal
 // activation that the command writes no beads (uow.OpensForBeadWrites).
-func rootProviderOptions(preview, readOnly, reconcile bool) []uow.ProviderOption {
+//
+// frozen is not a posture and combines with any of them: under a
+// MIGRATION-FREEZE the provider runs no lazy defer-wake sweep, whichever route
+// reaches it (bd ready, bd list --ready, the reader role), so a read leaves no
+// commit in the store being migrated (#7634).
+func rootProviderOptions(preview, readOnly, reconcile, frozen bool) []uow.ProviderOption {
+	var opts []uow.ProviderOption
 	switch {
 	case preview:
-		return []uow.ProviderOption{uow.WithPreview()}
+		opts = append(opts, uow.WithPreview())
 	case readOnly:
-		return []uow.ProviderOption{uow.WithReadOnly()}
+		opts = append(opts, uow.WithReadOnly())
 	case reconcile:
-		return []uow.ProviderOption{uow.WithWorkingSetReconcile()}
-	default:
-		return nil
+		opts = append(opts, uow.WithWorkingSetReconcile())
 	}
+	if frozen {
+		opts = append(opts, uow.WithoutDeferWakeSweep())
+	}
+	return opts
 }
 
 // newProxiedServerUOWProvider opens the proxied-server provider and, in

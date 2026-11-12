@@ -161,3 +161,75 @@ func TestBothReaderImplementationsAgreeOnTheListEpilogue(t *testing.T) {
 		})
 	}
 }
+
+// sweepCountingIssues is readerIssues that counts the defer-wake sweeps
+// reaching it.
+type sweepCountingIssues struct {
+	readerIssues
+	sweeps *int
+}
+
+func (f sweepCountingIssues) WakeExpiredDefers(context.Context) (issues, wisps int, err error) {
+	*f.sweeps++
+	return 0, 0, nil
+}
+
+// sweepSwitchedProvider stands in for the doltSQLProvider the CLI opens: a
+// mock provider carrying WithoutDeferWakeSweep's switch.
+type sweepSwitchedProvider struct {
+	*mockUnitOfWorkProvider
+	off bool
+}
+
+func (p sweepSwitchedProvider) deferWakeSweepDisabled() bool { return p.off }
+
+// TestWithoutDeferWakeSweepHoldsEveryReadyRouteOff pins the proxied half of
+// #7634. Under a MIGRATION-FREEZE the CLI opens its provider
+// WithoutDeferWakeSweep, and then no route sweeps before its ready read:
+// Reader.Ready, Reader.List with --ready (bd list --ready) and the advisory
+// call bd ready makes itself, each reached through the hook decorator the CLI
+// wraps the provider in. An ordinary provider sweeps once per route, so a
+// switch that never sweeps cannot pass.
+func TestWithoutDeferWakeSweepHoldsEveryReadyRouteOff(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		off        bool
+		wantSweeps int
+	}{
+		{name: "opened without the sweep", off: true, wantSweeps: 0},
+		{name: "ordinary open", off: false, wantSweeps: 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var sweeps int
+			uw := &mockUnitOfWork{
+				issueUseCase:  sweepCountingIssues{readerIssues: readerIssues{rows: readerRows()}, sweeps: &sweeps},
+				configUseCase: readerConfig{},
+			}
+			// One mock for every unit of work the routes open: once the pool
+			// runs dry the provider hands out zero-valued mocks, which count
+			// nothing.
+			inner := sweepSwitchedProvider{
+				mockUnitOfWorkProvider: &mockUnitOfWorkProvider{uows: slices.Repeat([]*mockUnitOfWork{uw}, 8)},
+				off:                    tc.off,
+			}
+			provider := NewNotifyingProvider(inner, Sinks{Hook: &notifyRunner{}})
+			reader, err := provider.(IssueReaderSource).IssueReader()
+			if err != nil {
+				t.Fatalf("IssueReader: %v", err)
+			}
+
+			ctx := context.Background()
+			if _, err := reader.Ready(ctx, publicops.ReadyRequest{}); err != nil {
+				t.Fatalf("Ready: %v", err)
+			}
+			if _, err := reader.List(ctx, publicops.ListRequest{ReadyFlag: true}); err != nil {
+				t.Fatalf("List --ready: %v", err)
+			}
+			WakeExpiredDefersAdvisory(ctx, provider)
+
+			if sweeps != tc.wantSweeps {
+				t.Errorf("the ready routes ran %d defer-wake sweeps, want %d", sweeps, tc.wantSweeps)
+			}
+		})
+	}
+}

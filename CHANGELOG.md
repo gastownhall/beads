@@ -1261,6 +1261,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restore from a real backup there dropped the database the same way. Move or
   rename such a backup before restoring it. In plain server mode the source
   must also be visible to the bd client, since bd now checks it locally.
+- `bd ready` and `bd list --ready` no longer write to a workspace under a
+  `MIGRATION-FREEZE`. Their lazy defer-wake sweep reopened issues whose
+  `--until` date had passed and committed `bd: wake N expired defer(s)` while
+  the freeze held, in embedded, direct-server and proxied-server workspaces
+  alike. The sweep now waits: those issues stay deferred and out of the ready
+  list until the first ready read after the marker is removed (#7634).
+
+- Embedded-mode commits for issue writes, pending changes, merges and
+  blocked-state recomputes now record the `GIT_AUTHOR_NAME` /
+  `GIT_AUTHOR_EMAIL` identity, as server mode already did. Embedded stores
+  committed them as `beads <beads@local>`, and the pending-changes commit
+  recorded the SQL user `root <root@%>` as its author. With neither variable
+  set, commits are still authored by `beads <beads@local>`. Schema-migration,
+  compaction and flatten commits still record the SQL user, in both modes
+  (#7628).
+
+- A `GIT_AUTHOR_NAME` or `GIT_AUTHOR_EMAIL` that Dolt cannot store in a
+  commit author no longer fails or rewrites commits. Dolt rejects a name that
+  ends in `)`, such as `Jane Doe (CI)`, so every server-mode commit failed,
+  and any other `)` cut the name or email short. bd now skips such a value (a
+  `)` in either variable, or a `<` or `>` in the email), prints a warning that
+  names the variable, and uses `beads` or `beads@local` in its place.
+
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
