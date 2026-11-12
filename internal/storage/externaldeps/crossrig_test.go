@@ -419,3 +419,80 @@ func TestUOWBlockedFlagAgreesWithBareCrossRigVerdict(t *testing.T) {
 		t.Fatalf("%s is_blocked = false, want the bare foreign blocker counted", blocked.ID)
 	}
 }
+
+// TestRemoteReaderLeavesNonBlockingBareCrossRigEdgesReady (GH#5784 AC-9): a
+// source whose only bare cross-prefix edges are non-blocking types stays
+// ready on the served composition, and readiness never asks the resolver
+// about those targets: no foreign store is opened for an edge that cannot
+// gate, so a rig that is unreachable at read time costs nothing and warns
+// nothing. waits-for is the sharpest case — the records query returns it as
+// a candidate superset (GetExternalBlockingDependencyRecordsInTx), so this
+// pins that the policy layer, not the query, owns the exact blocking-type
+// predicate.
+func TestRemoteReaderLeavesNonBlockingBareCrossRigEdgesReady(t *testing.T) {
+	for _, depType := range []types.DependencyType{types.DepWaitsFor, types.DepTracks, types.DepRelated, types.DepParentChild} {
+		t.Run(string(depType), func(t *testing.T) {
+			a, b := issue("be-a"), issue("be-b")
+			raw := newRemoteStore(a, b)
+			raw.deps[a.ID] = []*types.Dependency{externalDep(a.ID, xrigTarget, depType)}
+			resolver := &fakeResolver{}
+			store := testStore(raw, &fakeStore{}, true)
+			store.resolveForeign = resolver
+			warned := captureCrossRigWarnings(store)
+			reader, err := store.IssueReader()
+			if err != nil {
+				t.Fatalf("IssueReader: %v", err)
+			}
+
+			ready, err := reader.Ready(t.Context(), publicops.ReadyRequest{})
+			if err != nil {
+				t.Fatalf("Ready: %v", err)
+			}
+			if len(ready.Items) != 2 || ready.Items[0].ID != a.ID || ready.Items[1].ID != b.ID {
+				t.Fatalf("Ready = %d items, want both %s and %s offered: a %s edge cannot gate readiness", len(ready.Items), a.ID, b.ID, depType)
+			}
+			if len(resolver.calls) != 0 {
+				t.Fatalf("resolver asked about %v; readiness must open no foreign store for %s edges", resolver.calls, depType)
+			}
+			if len(warned()) != 0 {
+				t.Fatalf("warnings = %v, want none for non-blocking bare cross-rig edges", warned())
+			}
+		})
+	}
+}
+
+// TestUOWNonBlockingBareCrossRigEdgesStayReady: the proxied unit-of-work arm
+// of AC-9 — the same verdict as the served reader, through the wrapper the
+// proxied routes use.
+func TestUOWNonBlockingBareCrossRigEdgesStayReady(t *testing.T) {
+	for _, depType := range []types.DependencyType{types.DepWaitsFor, types.DepTracks, types.DepRelated, types.DepParentChild} {
+		t.Run(string(depType), func(t *testing.T) {
+			source, other := issue("be-source"), issue("be-other")
+			inner := &fakeUOW{
+				issues: &fakeIssueUseCase{ready: []*types.Issue{source, other}},
+				deps: &fakeDependencyUseCase{external: map[string][]*types.Dependency{
+					source.ID: {externalDep(source.ID, xrigTarget, depType)},
+				}},
+			}
+			resolver := &fakeResolver{}
+			provider := WrapUOWProviderWithForeignResolver(&fakeUOWProvider{uw: inner}, func(ProjectName) (string, bool) {
+				return "", false
+			}, nil, resolver)
+			uow, err := provider.NewUOW(t.Context())
+			if err != nil {
+				t.Fatalf("NewUOW: %v", err)
+			}
+
+			got, err := uow.IssueUseCase().GetReadyWork(t.Context(), types.WorkFilter{})
+			if err != nil {
+				t.Fatalf("GetReadyWork: %v", err)
+			}
+			if ids := issueIDs(got.Items); !slices.Equal(ids, []string{source.ID, other.ID}) {
+				t.Fatalf("proxied ready IDs = %v, want both offered: a %s edge cannot gate readiness", ids, depType)
+			}
+			if len(resolver.calls) != 0 {
+				t.Fatalf("resolver asked about %v; readiness must open no foreign store for %s edges", resolver.calls, depType)
+			}
+		})
+	}
+}
