@@ -502,6 +502,62 @@ func RunIDRetentionNeverMintsARetiredChildID(t *testing.T, ctx context.Context, 
 	idRetentionAssertAbsent(t, ctx, fixture, retired)
 }
 
+// RunIDRetentionAPlainSweepKeepsTheChildSuffixReserved pins GH#4750 on the
+// sweep's removal path: a plain sweep (no RetainIDs) of P.3, the highest of
+// P.1-P.3, leaves no tombstone but keeps suffix 3 used in P's counter, so the
+// next generated children are P.4 and P.5 even when the counter was missing
+// before the sweep. The case drops the counter by hand (Sweep.Exec), the shape
+// a database written before GH#4750 leaves. Without the reservation the mint's
+// high-water mark is the highest LIVE child, P.2, and it hands out P.3 again:
+// the id the swept row's history, links and references still name.
+func RunIDRetentionAPlainSweepKeepsTheChildSuffixReserved(t *testing.T, ctx context.Context, fixture IDRetentionFixture) {
+	t.Helper()
+	if fixture.Sweep.Exec == nil {
+		t.Skip("fixture has no Sweep.Exec; this case cannot drop the child counter")
+	}
+	parent := idRetentionID(fixture, "suffix", "parent")
+	if _, err := fixture.Lifecycle.Create(ctx, idRetentionCreate(parent, false)); err != nil {
+		t.Fatalf("Create(%s) = %v", parent, err)
+	}
+	for i := 1; i <= 3; i++ {
+		if got, want := idRetentionCreateChild(t, ctx, fixture, parent), fmt.Sprintf("%s.%d", parent, i); got != want {
+			t.Fatalf("child %d of %s = %s, want %s", i, parent, got, want)
+		}
+	}
+	if err := fixture.Sweep.Exec(ctx, []SQLStatement{{Query: "DELETE FROM child_counters WHERE parent_id = ?", Args: []any{parent}}}); err != nil {
+		t.Fatalf("dropping the child counter of %s: %v", parent, err)
+	}
+	swept := parent + ".3"
+	if _, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: idRetentionActor, IssueID: swept, Reason: "id-retention"}); err != nil {
+		t.Fatalf("Close(%s) = %v", swept, err)
+	}
+	if result := sweeperSweep(t, ctx, fixture.Sweep, publicops.SweepRequest{Tier: publicops.SweepDurable, IDPattern: swept}); result.Swept != 1 {
+		t.Fatalf("plain sweep of %s Swept = %d, want 1", swept, result.Swept)
+	}
+	idRetentionAssertTombstones(t, ctx, fixture, swept, 0, 0)
+	for _, want := range []string{parent + ".4", parent + ".5"} {
+		if got := idRetentionCreateChild(t, ctx, fixture, parent); got != want {
+			t.Fatalf("next child of %s after a plain sweep of %s = %s, want %s: the swept child's suffix was re-minted", parent, swept, got, want)
+		}
+	}
+}
+
+// idRetentionCreateChild creates the next generated child of parent and
+// returns its id.
+func idRetentionCreateChild(t *testing.T, ctx context.Context, fixture IDRetentionFixture, parent string) string {
+	t.Helper()
+	result, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
+		Actor:         idRetentionActor,
+		ParentID:      parent,
+		ForceIDPrefix: true,
+		Issue:         &types.Issue{Title: "id retention child of " + parent, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+	})
+	if err != nil {
+		t.Fatalf("Create(child of %s) = %v", parent, err)
+	}
+	return result.Issue.ID
+}
+
 // RunIDRetentionDryRunRetiresNothing pins that a dry run writes no tombstone
 // while echoing RetainIDs and counting what it would sweep.
 func RunIDRetentionDryRunRetiresNothing(t *testing.T, ctx context.Context, fixture IDRetentionFixture) {
