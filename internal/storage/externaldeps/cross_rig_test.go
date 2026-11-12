@@ -162,3 +162,49 @@ func TestCrossRigBlockerStatusIsReadAtEachQuery(t *testing.T) {
 		t.Fatalf("resolver calls = %d, want one per evaluation (10)", len(resolver.calls))
 	}
 }
+
+// GH#5784 AC-3: a cross-rig blocker the resolver cannot read fails closed
+// without failing the query: its source stays out of ready work, and one
+// warning (stderr, never the JSON stream) names the target and the reason.
+func TestCrossRigUnreadableBlockerStaysBlockingWithOneWarning(t *testing.T) {
+	source, other := issue("aa-1"), issue("aa-2")
+	raw := &fakeStore{
+		ready: []*types.Issue{source, other},
+		deps: map[string][]*types.Dependency{
+			source.ID: {externalDep(source.ID, "bb-1", types.DepBlocks)},
+		},
+	}
+	resolver := &fakeIssueResolver{unavailable: map[string]string{"bb-1": `no route for prefix "bb"`}}
+	store := crossRigStore(raw, resolver)
+	var warned [][2]string
+	store.warnings.issue = func(id, reason string) { warned = append(warned, [2]string{id, reason}) }
+
+	for range 2 {
+		ready, err := store.GetReadyWork(t.Context(), types.WorkFilter{})
+		if err != nil {
+			t.Fatalf("GetReadyWork: %v", err)
+		}
+		if ids := issueIDs(ready); !slices.Equal(ids, []string{"aa-2"}) {
+			t.Fatalf("ready IDs = %v, want [aa-2]", ids)
+		}
+	}
+	if want := [][2]string{{"bb-1", `no route for prefix "bb"`}}; !slices.Equal(warned, want) {
+		t.Fatalf("warnings = %v, want %v once", warned, want)
+	}
+
+	// Without any resolver (a policy built with no routes) the target is
+	// still blocking, with its own reason.
+	bare := New(raw, func(ProjectName) (string, bool) { return "", false }, nil)
+	warned = nil
+	bare.warnings.issue = func(id, reason string) { warned = append(warned, [2]string{id, reason}) }
+	ready, err := bare.GetReadyWork(t.Context(), types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork without resolver: %v", err)
+	}
+	if ids := issueIDs(ready); !slices.Equal(ids, []string{"aa-2"}) {
+		t.Fatalf("ready IDs without resolver = %v, want [aa-2]", ids)
+	}
+	if len(warned) != 1 || warned[0][0] != "bb-1" || warned[0][1] == "" {
+		t.Fatalf("warnings without resolver = %v, want one naming bb-1 with a reason", warned)
+	}
+}
