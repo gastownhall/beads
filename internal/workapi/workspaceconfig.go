@@ -24,7 +24,9 @@ var CommandSettingKeys = config.CommandSettingKeys
 //
 // It is deliberately NOT the whole of `bd config set`. Which SOURCE a key
 // belongs to (config.yaml, git config, this plane) is resolved by the front
-// door; see issueops/workspaceconfig.go.
+// door; see issueops/workspaceconfig.go. The one routing fact the write rule
+// does state is the refusal: a config.yaml-only key is never stored here,
+// whichever door sent it (#7559).
 
 // ValidateSettingKey checks a key a caller wants to READ or REMOVE, and
 // returns it unchanged.
@@ -71,19 +73,25 @@ func ValidateSettingWrite(key, value string) (string, error) {
 	if config.IsCommandSettingKey(key) {
 		return "", fmt.Errorf("%w: %q must come from your shell environment or user config", issueops.ErrValidation, key)
 	}
-	// config.YamlOnlyKeys — startup settings and the tracker secrets
-	// (github.token, linear.api_key, jira.api_token, gitlab.token, ado.pat) —
-	// must live in the workspace's local config.yaml, never in this plane's
-	// row-per-key storage: that storage is the Dolt config table, which is a
-	// SYNCED table (bd dolt push/pull, DOLT_CLONE, DOLT_PULL all replicate
-	// it). `bd config set` already refuses these at its own door; this is
-	// the only other door onto this plane (the settings HTTP surface bd
-	// serve and its dashboard expose), and it had no such rule, so a secret
-	// PUT through it landed in the synced table and reached every remote on
-	// the next push (GH#7559).
+	// A CONFIG.YAML-ONLY KEY NEVER BECOMES A ROW (#7559). These are the
+	// startup settings and the tracker secrets (github.token, linear.api_key,
+	// jira.api_token, ...), and this table is replicated by bd dolt push, pull
+	// and clone, so a secret stored here reaches every remote. `bd config set`
+	// routes these keys to config.yaml before it reaches this role, but it is
+	// not the only door: the settings HTTP surface (PUT /v0/beads/config/{key})
+	// has no config.yaml it could write for the caller, so the refusal belongs
+	// HERE, where every leg passes — the issue_prefix precedent below. It is
+	// unconditional rather than limited to secrets: a non-secret yaml-only key
+	// stored here is a write that reports success and that no reader consults
+	// (the GH#536 class). The message never carries the value.
+	//
+	// After the command-setting check, so mail.delegate (on both lists) keeps
+	// that rule's more precise message, and after the length bounds, so an
+	// over-long key still carries types.ErrFieldTooLong. ValidateSettingKey is
+	// left alone, so a legacy row can still be read (redacted) and removed.
 	if config.IsYamlOnlyKey(key) {
-		return "", fmt.Errorf("%w: %q must be set in the workspace's local config.yaml (bd config set %s <value>), not written here: "+
-			"this plane is the Dolt config table, which syncs to every remote on push/pull",
+		return "", fmt.Errorf("%w: %q is a config.yaml-only key and is never stored in the workspace settings table, "+
+			"whose rows bd dolt push replicates to every remote; set it with \"bd config set %s <value>\" in the workspace instead",
 			issueops.ErrValidation, key, key)
 	}
 	// The prefix is owned by bd init --prefix, bd bootstrap and bd

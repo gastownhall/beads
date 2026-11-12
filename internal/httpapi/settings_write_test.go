@@ -21,6 +21,42 @@ func TestSetSettingRefusesCommandSetting(t *testing.T) {
 	}
 }
 
+// TestSetSettingRefusesYamlOnlyKey is #7559 at the wire: a config.yaml-only
+// key — here a tracker secret — is refused with a 400 that names the key and
+// config.yaml, and the response bytes never carry the submitted value. The
+// removal of the same key still succeeds, so a row an older bd or server
+// stored can be deleted through this door.
+func TestSetSettingRefusesYamlOnlyKey(t *testing.T) {
+	const sentinel = "ghp-SENTINEL-7559"
+	ts := newSettingsServer(t, &roleSettings{validateWrite: true})
+	resp := ts.setSetting(t, "/v0/beads/config/github.token", fmt.Sprintf(`{"value":%q}`, sentinel))
+	raw := readAll(t, resp)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", resp.StatusCode, raw)
+	}
+	var body map[string]any
+	if err := json.Unmarshal([]byte(raw), &body); err != nil {
+		t.Fatalf("decode %q: %v", raw, err)
+	}
+	if body["code"] != "invalid_argument" {
+		t.Errorf("code = %v, want invalid_argument: %s", body["code"], raw)
+	}
+	detail, _ := body["detail"].(string)
+	for _, want := range []string{"github.token", "config.yaml"} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("detail %q does not name %q", detail, want)
+		}
+	}
+	if strings.Contains(raw, sentinel) {
+		t.Errorf("the refusal echoes the submitted secret: %s", raw)
+	}
+
+	del := ts.unsetSetting(t, "/v0/beads/config/github.token")
+	if del.StatusCode != http.StatusOK {
+		t.Fatalf("DELETE status = %d, want 200 — a legacy yaml-only row must stay removable: %s", del.StatusCode, readAll(t, del))
+	}
+}
+
 // The wire edge of the two settings WRITES, on a fake role.
 //
 // Which keys the plane refuses, what the projection of status.custom does, and
@@ -147,13 +183,6 @@ func TestSetSettingProjectsTheWholeRequest(t *testing.T) {
 // one place — and `Setting.redacted` would mean two different things depending on
 // which operation produced it. Comparing the two responses is what makes a second
 // projection impossible to add without failing here.
-//
-// THE CREDENTIAL-BEARING CASE RUNS AGAINST A FAKE ROLE (`&roleSettings{}`,
-// which accepts any write), not workapi.ValidateSettingWrite. Since GH#7559
-// the real role refuses notion.token — and every other config.IsYamlOnlyKey
-// key — before this projection ever runs, so this case now exercises only the
-// redaction PROJECTION in isolation: if a real server's role ever did accept
-// a credential write, this is the shape the response would have to take.
 func TestSetSettingAnswersWhatTheReadWouldAnswer(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -161,7 +190,10 @@ func TestSetSettingAnswersWhatTheReadWouldAnswer(t *testing.T) {
 		value string
 	}{
 		{name: "an ordinary key", key: "status.custom", value: "awaiting_review:active"},
-		{name: "a credential-bearing key, against a fake role that accepts it", key: "notion.token", value: "shhh-real-secret"},
+		// Not a tracker secret such as notion.token: those are config.yaml-only
+		// keys the role refuses (#7559). A credential-named key outside that
+		// set is still this plane's, and is what redaction has to cover.
+		{name: "a credential-bearing key", key: "notes.api_token", value: "shhh-real-secret"},
 		{name: "a key stored empty", key: "notes", value: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -188,23 +220,25 @@ func TestSetSettingAnswersWhatTheReadWouldAnswer(t *testing.T) {
 }
 
 // TestSetSettingWithholdsACredentialItJustAccepted is the doctrine, asserted
-// directly rather than only through the equality above: AGAINST A ROLE THAT
-// ACCEPTS THE WRITE, the response is PERMITTED and the value does not come
-// back.
+// directly rather than only through the equality above: the write is PERMITTED
+// and the value does not come back.
 //
-// IT RUNS AGAINST A FAKE ROLE (`&roleSettings{}`), not
-// workapi.ValidateSettingWrite. Since GH#7559 the real role refuses every
-// config.IsYamlOnlyKey key — including every tracker credential, writing
-// them to a git-tracked config.yaml instead via `bd config set`'s own guard
-// — because that plane is the Dolt config table, synced to every remote on
-// push/pull. What this test pins is narrower: IF a role's write succeeds,
-// the HTTP layer's redaction projection must withhold the value from its own
-// answer regardless, which is what the handler owns and the only part of
-// this doctrine the httpapi package can prove on its own.
+// PERMITTED because redaction is a rule about DISCLOSURE. The role refuses no
+// credential-bearing key for being one — `bd config set`'s own secret guard is
+// about writing one into a git-tracked config.yaml, a different plane with a
+// different hazard — and a writer already holds the value, so refusing here
+// would protect nothing while leaving a workspace's credentials visible as
+// PRESENT and permanently unconfigurable through this door. The tracker
+// secrets (notion.token, github.token, ...) are refused for a different
+// reason: they are config.yaml-only keys, which never become rows (#7559), so
+// the key here is a credential-named one outside that set.
 func TestSetSettingWithholdsACredentialItJustAccepted(t *testing.T) {
-	const key = "notion.token"
+	const key = "notes.api_token"
 	if !config.IsSecretKey(key) {
 		t.Fatalf("%q is no longer a credential-bearing key; this test proves nothing", key)
+	}
+	if config.IsYamlOnlyKey(key) {
+		t.Fatalf("%q is now a config.yaml-only key the role refuses; this test proves nothing", key)
 	}
 	settings := &roleSettings{}
 	ts := newSettingsServer(t, settings)
