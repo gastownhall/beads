@@ -536,3 +536,135 @@ func TestEnginePullMissingHistoryHydratesNewStub(t *testing.T) {
 		}
 	})
 }
+
+// TestEnginePullMissingHistoryWarnsOnce pins the pull-level shape of the
+// #7294 fix: one pull with several unverified older links warns once (not per
+// issue), names the tracker and the original sync time, and skips only the
+// unverified issues — a re-link the history does answer and a genuinely new
+// stub in the same pull still hydrate. Both issue orders must behave the
+// same, so a memoized "warned once" flag cannot silently skip hydration too.
+func TestEnginePullMissingHistoryWarnsOnce(t *testing.T) {
+	newLocal := func(id, ref string, created time.Time) *types.Issue {
+		linked := ref
+		return &types.Issue{
+			ID:          id,
+			Title:       "local " + id,
+			Description: "local body",
+			Assignee:    "alice",
+			Status:      types.StatusOpen,
+			Priority:    2,
+			IssueType:   types.TypeTask,
+			ExternalRef: &linked,
+			CreatedAt:   created,
+			UpdatedAt:   overlapLastSync.Add(10 * time.Second),
+		}
+	}
+	remoteFor := func(identifier string) TrackerIssue {
+		return TrackerIssue{
+			ID:          identifier,
+			Identifier:  identifier,
+			Title:       "remote " + identifier,
+			Description: "remote body",
+			UpdatedAt:   overlapLastSync.Add(-30 * time.Second),
+		}
+	}
+	// bd-old1/bd-old2 predate the cursor with no history row (#7294);
+	// bd-chg's history answers a different ref (a known re-link); bd-new was
+	// created after the cursor (a genuinely new stub).
+	newIssues := func() (old1, old2, chg, newb *types.Issue) {
+		old1 = newLocal("bd-old1", "https://test.test/EXT-1", overlapLastSync.Add(-time.Hour))
+		old2 = newLocal("bd-old2", "https://test.test/EXT-2", overlapLastSync.Add(-time.Hour))
+		chg = newLocal("bd-chg", "https://test.test/EXT-CHG", overlapLastSync.Add(-time.Hour))
+		newb = newLocal("bd-new", "https://test.test/EXT-NEW", overlapLastSync.Add(30*time.Second))
+		return
+	}
+
+	// The remotes for the unverified links exist too, so on the unfixed base
+	// they are fetched and would overwrite the locals.
+	remotes := []TrackerIssue{remoteFor("EXT-1"), remoteFor("EXT-2"), remoteFor("EXT-CHG"), remoteFor("EXT-NEW")}
+
+	for _, order := range []struct {
+		name  string
+		first func(old1, old2, chg, newb *types.Issue) []*types.Issue
+	}{
+		{"unverified first", func(old1, old2, chg, newb *types.Issue) []*types.Issue {
+			return []*types.Issue{old1, old2, chg, newb}
+		}},
+		{"known first", func(old1, old2, chg, newb *types.Issue) []*types.Issue {
+			return []*types.Issue{chg, newb, old1, old2}
+		}},
+	} {
+		t.Run(order.name, func(t *testing.T) {
+			ctx := context.Background()
+			old1, old2, chg, newb := newIssues()
+			store := newMissingHistoryStore(order.first(old1, old2, chg, newb)...)
+			store.previousRefs[chg.ID] = "https://test.test/EXT-OLD"
+			store.localMetadata["test.last_sync"] = overlapLastSync.Format(time.RFC3339)
+			mock := newMockTracker("test")
+			mock.issues = remotes
+			var fetchSince *time.Time
+			mock.fetchIssues = func(_ context.Context, opts FetchOptions) ([]TrackerIssue, error) {
+				fetchSince = opts.Since
+				return nil, nil
+			}
+
+			result, err := NewEngine(mock, store, "sync").Sync(ctx, SyncOptions{Pull: true})
+			if err != nil {
+				t.Fatalf("Sync: %v", err)
+			}
+			if result.PullStats.Updated != 2 || result.PullStats.Candidates != 2 {
+				t.Fatalf("PullStats = %+v, want exactly the known re-link and the new stub updated",
+					result.PullStats)
+			}
+			if store.commits != 2 || len(store.updatedIDs) != 2 {
+				t.Fatalf("commits = %d, updated IDs = %v, want exactly bd-chg and bd-new",
+					store.commits, store.updatedIDs)
+			}
+			updated := map[string]bool{}
+			for _, id := range store.updatedIDs {
+				updated[id] = true
+			}
+			if !updated["bd-chg"] || !updated["bd-new"] || updated["bd-old1"] || updated["bd-old2"] {
+				t.Fatalf("updated IDs = %v, want [bd-chg bd-new]", store.updatedIDs)
+			}
+			if chg.Title != "remote EXT-CHG" || newb.Title != "remote EXT-NEW" {
+				t.Fatalf("chg/newb titles = %q/%q, want both hydrated from their remotes",
+					chg.Title, newb.Title)
+			}
+			for _, old := range []*types.Issue{old1, old2} {
+				if old.Title != "local "+old.ID || old.Assignee != "alice" {
+					t.Fatalf("issue %s = %q/%q, want the unpushed local edit kept",
+						old.ID, old.Title, old.Assignee)
+				}
+			}
+			if mock.fetchCalls != 2 {
+				t.Fatalf("FetchIssue calls = %d, want 2 (only bd-chg and bd-new)", mock.fetchCalls)
+			}
+			if fetchSince == nil || !fetchSince.Equal(overlapLastSync.Add(-pullFetchOverlap)) {
+				t.Fatalf("FetchOptions.Since = %v, want the original cursor %s",
+					fetchSince, overlapLastSync.Add(-pullFetchOverlap).Format(time.RFC3339))
+			}
+
+			warnings := 0
+			for _, warning := range result.Warnings {
+				if strings.Contains(warning, "cannot verify whether issues linked before the last sync") {
+					warnings++
+				}
+			}
+			if warnings != 1 {
+				t.Fatalf("unverified-links warnings = %d (%v), want exactly one", warnings, result.Warnings)
+			}
+			warning, _ := missingHistoryWarning(result)
+			if !strings.Contains(warning, "test") {
+				t.Errorf("warning %q does not name the tracker", warning)
+			}
+			if !strings.Contains(warning, overlapLastSync.Format(time.RFC3339)) {
+				t.Errorf("warning %q does not name the original sync time %s",
+					warning, overlapLastSync.Format(time.RFC3339))
+			}
+			if !strings.Contains(warning, "review") {
+				t.Errorf("warning %q does not ask for review before pushing", warning)
+			}
+		})
+	}
+}
