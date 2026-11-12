@@ -2151,6 +2151,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or `.beads/dolt-server.activity`.** Both were already gitignored, but the
   tracked-runtime-files check did not list them, so a copy committed before
   the ignore rule stayed tracked (#6191).
+- **`.beads/.gitignore` now ignores the machine-local files bd writes
+  after init.** `dolt-backup.json` and `dolt-backup-state.json`
+  (`bd backup init`/`sync`), `dolt-config.log` (`bd dolt set`),
+  `.auto-import-issues.jsonl` (the JSONL auto-import stamp) and
+  `dolt-mode-migration.json` (the `bd dolt migrate` resume journal) sat
+  beside `backup/`, which matches only that directory, so a `git add .`
+  committed them; three of them hold absolute local paths. New workspaces
+  ignore all five. `bd doctor --fix` appends the names to an existing
+  `.beads/.gitignore` and untracks copies already committed; until it runs,
+  older workspaces see a one-time "Outdated .beads/.gitignore" warning
+  (#8318, builds on PR #8364 by rjgeng).
 
 - `bd admin reset` now removes the `prepare-commit-msg` hook bd installs.
   Reset scanned only four of the five hooks bd manages, so a bd-installed
