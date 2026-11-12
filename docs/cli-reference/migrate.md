@@ -221,24 +221,9 @@ bd migrate legacy-sqlite --source-db PATH --output PATH|- [flags]
 
 Apply pending schema migrations idempotently.
 
-bd does not apply pending schema migrations to an existing database without
-the operator's consent, and running this command is that consent
-(BD_ALLOW_MIGRATE=1 is the scripted form). On a remote-backed database the
-remote-migrate gate still applies: --force confirms you are the single
-designated migrator. Migrating is one-way: bd releases built for an older
-schema refuse the migrated database.
-
-On a proxied-server workspace it is refused unless you pass --force:
-there, opening the store applies the migration, which changes the schema
-underneath every library client connected to the proxy's backend, and the
-proxy does not track those clients. Stop them, run
-"bd migrate schema --force", then restart them. BD_ALLOW_REMOTE_MIGRATE=1
-does not get past that refusal. On a team-server workspace the team server
-owns the schema, so even --force only verifies it.
-
-Outside proxied-server mode, on an up-to-date database this is a no-op, so
-it is safe to run in CI, release gates, and recovery scenarios. In
-proxied-server mode the bare command is refused, so it is not a CI check.
+Schema migrations also run automatically on store open, so this subcommand
+is typically a no-op. It exists to make migration explicit and observable
+in CI, release gates, and recovery scenarios.
 
 Example:
   bd migrate schema
