@@ -317,6 +317,7 @@ go_test(
         "pool_gauges_test.go",
         "pool_read_timeout_socket_test.go",
         "pool_timeouts_test.go",
+        "pooled_read_retry_test.go",
         "pooled_read_timeout_test.go",
         "port_provenance_test.go",
         "portsource_propagation_test.go",
