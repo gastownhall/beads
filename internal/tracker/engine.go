@@ -110,7 +110,9 @@ type PushHooks struct {
 	// its fingerprint to the pulled content, which is what the remote then
 	// holds. A pull by an engine without ContentHash (or one that returns "" for
 	// the pulled content) clears a stored fingerprint instead, so a later push
-	// never trusts the last push.
+	// never trusts the last push. A pull whose content still matches the stored
+	// fingerprint keeps the labels changed locally since then and leaves the
+	// fingerprint alone, so the next push sends them.
 	ContentHash func(local *types.Issue) string
 
 	// TargetScope returns the canonical remote namespace in which external issue
@@ -533,8 +535,17 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			dryRunIssues = append(dryRunIssues, &dryRunIssue)
 		}
 
+		// A label edit moves no updated_at, so the conflict guard above lets
+		// the issue through. While the remote still holds the content of the
+		// last push, the pull keeps the labels changed locally since then and
+		// leaves the push hash alone, so the push sends them.
+		keepLocalLabels := e.pullKeepsLocalLabels(ctx, existing, conv.Issue, ref)
+		if keepLocalLabels {
+			conv.Issue.Labels = existing.Labels
+		}
+
 		if existing != nil && pullIssueEqual(existing, conv.Issue, ref) {
-			if !opts.DryRun {
+			if !opts.DryRun && !keepLocalLabels {
 				// Both sides can reach this content without a push, which
 				// leaves the hash of the last push stale.
 				e.refreshPushHashAfterPull(ctx, existing, conv.Issue, ref)
@@ -569,7 +580,11 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				stats.Errors++
 				continue
 			}
-			if err := updater.ApplyIssueUpdate(ctx, existing.ID, updates, conv.Issue.Labels, e.Actor); err != nil {
+			labels := conv.Issue.Labels
+			if keepLocalLabels {
+				labels = nil // ApplyIssueUpdate leaves the labels alone
+			}
+			if err := updater.ApplyIssueUpdate(ctx, existing.ID, updates, labels, e.Actor); err != nil {
 				e.warn("Failed to update %s: %v", existing.ID, err)
 				stats.Errors++
 				if pulledIDs != nil {
@@ -578,6 +593,11 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				continue
 			}
 			stats.Updated++
+			if keepLocalLabels {
+				// The stored hash still describes the remote, and the push
+				// must send the kept labels.
+				continue
+			}
 			if pulledIDs != nil {
 				pulledIDs[existing.ID] = true
 			}
@@ -1220,6 +1240,34 @@ func (e *Engine) refreshPushHashAfterPull(ctx context.Context, row, pulled *type
 	if err := e.Store.SetLocalMetadata(ctx, key, value); err != nil {
 		e.warn("Failed to refresh push hash for %s: %v", row.ID, err)
 	}
+}
+
+// pullKeepsLocalLabels reports whether a pull must leave the labels of
+// existing alone instead of writing pulled's. That holds when the stored push
+// hash matches the pulled content: the remote still holds what the last push
+// (or a later pull) left there, so the labels that differ were changed
+// locally since then. bd label add and remove move no updated_at, so the
+// conflict guard cannot see such an edit. The labels are kept only when the
+// hash tells them apart from the pulled ones, so that the next push sends
+// them. With no stored hash, or when the remote changed too, the pull writes
+// the remote's labels.
+func (e *Engine) pullKeepsLocalLabels(ctx context.Context, existing, pulled *types.Issue, ref string) bool {
+	if existing == nil || pulled == nil || pulled.Labels == nil || equalNormalizedStrings(existing.Labels, pulled.Labels) {
+		return false
+	}
+	hashed := *pulled
+	hashed.ID = existing.ID
+	hashed.ExternalRef = strPtr(ref)
+	remote := e.pushCacheValue(&hashed, ref)
+	if remote == "" {
+		return false
+	}
+	hashed.Labels = existing.Labels
+	if e.pushCacheValue(&hashed, ref) == remote {
+		return false
+	}
+	stored, err := e.Store.GetLocalMetadata(ctx, e.pushHashKey(existing.ID))
+	return err == nil && stored == remote
 }
 
 func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs map[string]bool) (*PushStats, error) {

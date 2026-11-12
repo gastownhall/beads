@@ -391,3 +391,175 @@ func TestEnginePullRecordsPushHash(t *testing.T) {
 		})
 	})
 }
+
+// stampingTracker applies each push to the remote issue and dates the issue
+// then, as GitHub's PATCH does. The overlap window of the next incremental
+// pull therefore fetches the row of bd's own push again.
+type stampingTracker struct {
+	*mockTracker
+}
+
+func (s *stampingTracker) UpdateIssue(ctx context.Context, externalID string, issue *types.Issue) (*TrackerIssue, error) {
+	updated, err := s.mockTracker.UpdateIssue(ctx, externalID, issue)
+	if err != nil {
+		return nil, err
+	}
+	for i := range s.issues {
+		if s.issues[i].Identifier == externalID {
+			s.issues[i].Title = issue.Title
+			s.issues[i].Labels = append([]string{}, issue.Labels...)
+			s.issues[i].UpdatedAt = time.Now().UTC()
+		}
+	}
+	return updated, nil
+}
+
+// newLabelPushFixture is newPushHashFixture with labels handled the way the
+// GitHub tracker handles them: the conversion carries the remote's label set,
+// empty rather than nil when it has none, and the push sends the labels and
+// fingerprints them. Both sides start with the given labels. The local issue
+// has a title edit, so the first push sends it and dates the remote row
+// (stampingTracker).
+func newLabelPushFixture(labels ...string) *pushHashFixture {
+	f := newPushHashFixture()
+	f.local.Title = "edited"
+	f.local.Labels = append([]string(nil), labels...)
+	f.mock.issues[0].Labels = append([]string(nil), labels...)
+	f.mock.fieldMapper = &mockMapper{issueToBeads: func(ti *TrackerIssue) *IssueConversion {
+		return &IssueConversion{Issue: &types.Issue{
+			Title: ti.Title, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+			Assignee: ti.Assignee, Labels: append([]string{}, ti.Labels...),
+		}}
+	}}
+	f.engine.Tracker = &stampingTracker{mockTracker: f.mock}
+	f.engine.PushHooks = labelPushHooks()
+	return f
+}
+
+// labelPushHooks compare and fingerprint the title and the label set, as
+// GitHub's PushFieldsEqual and PushContentHash do.
+func labelPushHooks() *PushHooks {
+	fingerprint := func(title string, labels []string) string {
+		return "h:" + title + ":" + strings.Join(normalizedStringSlice(labels), ",")
+	}
+	return &PushHooks{
+		ContentEqual: func(l *types.Issue, r *TrackerIssue) bool {
+			return fingerprint(l.Title, l.Labels) == fingerprint(r.Title, r.Labels)
+		},
+		ContentHash: func(l *types.Issue) string { return fingerprint(l.Title, l.Labels) },
+	}
+}
+
+// TestEnginePullKeepsLabelsChangedSinceThePush pins that a pull leaves alone
+// the labels changed locally since the last push while the remote still holds
+// that push, so the push sends them. bd label add and remove move no
+// updated_at, so the conflict guard lets the issue through, and the overlap
+// window of the next incremental pull fetches the row of bd's own push again.
+// A pull that wrote the remote's labels and refreshed the push hash dropped
+// the edit on both sides: no later push sent it.
+func TestEnginePullKeepsLabelsChangedSinceThePush(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		pushed         []string // labels on both sides after the first push
+		local          []string // local labels after the edit
+		remoteAssignee string   // a remote edit of a field the push does not send
+		pullThenPush   bool     // `bd github pull`, then `bd github push`; else one `bd github sync`
+	}{
+		{name: "sync/added", local: []string{"local"}},
+		{name: "sync/added_beside_a_pushed_label", pushed: []string{"pushed"}, local: []string{"local", "pushed"}},
+		{name: "sync/removed", pushed: []string{"pushed"}},
+		{name: "sync/added_while_the_remote_changed_the_assignee", local: []string{"local"}, remoteAssignee: "alice"},
+		{name: "pull_then_push/added", local: []string{"local"}, pullThenPush: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newLabelPushFixture(test.pushed...)
+			key := f.engine.pushHashKey(f.local.ID)
+			runSync(t, f.engine, SyncOptions{Push: true})
+			pushedHash := f.store.localMetadata[key]
+			if f.mock.issues[0].Title != "edited" || pushedHash == "" {
+				t.Fatalf("first push: remote title=%q push hash=%q", f.mock.issues[0].Title, pushedHash)
+			}
+
+			f.local.Labels = append([]string(nil), test.local...)
+			if test.remoteAssignee != "" {
+				f.mock.issues[0].Assignee = test.remoteAssignee
+				f.mock.issues[0].UpdatedAt = time.Now().UTC().Add(time.Hour)
+			}
+			if test.pullThenPush {
+				preview := runSync(t, f.engine, SyncOptions{Pull: true, DryRun: true})
+				pull := runSync(t, f.engine, SyncOptions{Pull: true})
+				for _, stats := range []PullStats{preview.PullStats, pull.PullStats} {
+					if stats.Updated != 0 || stats.Skipped != 1 {
+						t.Fatalf("pull stats = %+v, want the issue skipped", stats)
+					}
+				}
+				if !equalNormalizedStrings(f.local.Labels, test.local) || f.store.localMetadata[key] != pushedHash {
+					t.Fatalf("pull: labels=%q push hash=%q, want %q and the hash of the first push %q",
+						f.local.Labels, f.store.localMetadata[key], test.local, pushedHash)
+				}
+				runSync(t, f.engine, SyncOptions{Push: true})
+			} else {
+				runSync(t, f.engine, SyncOptions{})
+			}
+
+			if !equalNormalizedStrings(f.local.Labels, test.local) {
+				t.Fatalf("local labels = %q, want %q", f.local.Labels, test.local)
+			}
+			if got := f.mock.issues[0].Labels; !equalNormalizedStrings(got, test.local) {
+				t.Fatalf("remote labels = %q, want the local edit %q pushed", got, test.local)
+			}
+			if f.local.Assignee != test.remoteAssignee {
+				t.Fatalf("local assignee = %q, want the remote's %q", f.local.Assignee, test.remoteAssignee)
+			}
+
+			// The push recorded what it sent, so the next one is a no-op.
+			f.mock.fetchCalls = 0
+			f.mock.updated = make(map[string]*types.Issue)
+			runSync(t, f.engine, SyncOptions{Push: true})
+			if f.mock.fetchCalls != 0 || len(f.mock.updated) != 0 {
+				t.Fatalf("push after the sync: fetchCalls=%d updated=%d, want both 0", f.mock.fetchCalls, len(f.mock.updated))
+			}
+		})
+	}
+}
+
+// TestEnginePullWritesRemoteLabelsUnlessOnlyLocalChanged pins where
+// pullKeepsLocalLabels stops: without proof that the remote still holds the
+// last push, or when the push hash cannot tell the labels apart, a pull
+// writes the remote's labels over a local label edit.
+func TestEnginePullWritesRemoteLabelsUnlessOnlyLocalChanged(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		hooks *PushHooks               // replaces labelPushHooks
+		setup func(f *pushHashFixture) // after the push and the local label edit
+	}{
+		// Both sides changed since the push. The pull cannot tell a local
+		// label edit from a remote one, so the remote wins.
+		{name: "remote_changed_too", setup: func(f *pushHashFixture) { f.editRemote("remote edit") }},
+		// No stored push hash, as on a fresh clone: nothing proves that the
+		// remote still holds the last push.
+		{name: "no_push_hash", setup: func(f *pushHashFixture) {
+			delete(f.store.localMetadata, f.engine.pushHashKey(f.local.ID))
+		}},
+		// A push hash without the labels: the next push would skip the
+		// issue, so a kept label would never reach the remote.
+		{name: "push_hash_without_labels", hooks: titlePushHooks()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newLabelPushFixture()
+			if test.hooks != nil {
+				f.engine.PushHooks = test.hooks
+			}
+			runSync(t, f.engine, SyncOptions{Push: true})
+
+			f.local.Labels = []string{"local"}
+			if test.setup != nil {
+				test.setup(f)
+			}
+			runSync(t, f.engine, SyncOptions{Pull: true})
+			if len(f.local.Labels) != 0 {
+				t.Fatalf("local labels after the pull = %q, want the remote's none", f.local.Labels)
+			}
+		})
+	}
+}

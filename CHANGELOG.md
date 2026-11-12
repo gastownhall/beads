@@ -1676,10 +1676,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   labels, and no longer replaces an unmapped `priority::urgent`.
 - A GitHub pull (`bd github pull`, `bd github sync`) now removes the plain
   labels of a local issue when the GitHub issue has none left. It used to keep
-  them, so a later push of the issue put them back on GitHub. As for an issue
-  that still has plain labels on GitHub, a pull that fetches the issue now
-  replaces its local plain labels with GitHub's, so a label added locally
-  since the last push is dropped instead of pushed.
+  them, so a later push of the issue put them back on GitHub. A label added or
+  removed locally since the last push or pull of the issue survives a pull
+  that finds the GitHub issue unchanged since then, and the next push sends
+  it. A pull used to undo such an edit when the GitHub issue had plain labels.
+  When the GitHub issue changed too, the pull takes GitHub's labels.
 - `bd dolt pull --strategy ours|theirs`, `bd vc merge --strategy`, and pulls
   whose conflicts bd auto-resolves or whose foreign-key violations it repairs
   now commit the tables that merged cleanly alongside them. Previously the
