@@ -371,7 +371,7 @@ and rename each `<name>.md.backup` back to `<name>.md`.
 
 `bd github sync` (and `bd github pull`/`push`) syncs the one repository named
 by `github.owner` and `github.repo`, but a database can hold beads from
-several repositories. In releases after v1.3.4, sync matches, fetches and
+several repositories. In releases after v1.3.2, sync matches, fetches and
 updates only beads whose issue URL points at the configured repository, so
 pulling issue 1313 from a second repository creates a new bead instead of
 overwriting the bead linked to the first repository's issue 1313. A

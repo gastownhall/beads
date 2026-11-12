@@ -1513,9 +1513,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repository's: push and conflict detection skipped them without a warning
   while `github.last_sync` moved past their local edits, and once the lookup
   worked again a later run could pull a remote edit over an unpushed one, or
-  push a stale bead over a remote edit, with no conflict. Such a failure now
-  stops the command with an error that names the repository and says what to
-  do, as does a failure to list the local beads.
+  push a stale bead over a remote edit, with no conflict. v1.3.3 and v1.3.4
+  work this way: they carry #8068 through its backport, #8083. Such a failure
+  now stops the command with an error that names the repository and says
+  what to do, as does a failure to list the local beads.
 - `bd compact` no longer discards writes that reach `main` while it runs. It
   finished by hard-resetting `main` onto the rebuilt history, which dropped
   changes in `main`'s working set that no Dolt commit held yet (a batch under
