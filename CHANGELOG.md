@@ -37,8 +37,8 @@ rebuilds the binaries with Go 1.27.4. The changes below also correct rc.1's
   `bd list --all --external-contains /<owner>/<repo>/issues/` and run
   `bd update <id> --external-ref <current-url>`. Do not point another
   repository's beads at the configured repository, and do not clear their
-  links to get past the error: the next push or sync creates every unlinked
-  bead as a new issue in the configured repository.
+  links to get past the error: the next sync (or a push naming them) creates
+  each unlinked bead as a new issue in the configured repository.
 - **Server-mode pulls need different SQL privileges**
   ([#8438](https://github.com/gastownhall/beads/pull/8438), backport of
   [#8407](https://github.com/gastownhall/beads/pull/8407)). A pull now fetches
@@ -53,13 +53,13 @@ rebuilds the binaries with Go 1.27.4. The changes below also correct rc.1's
   ([#8430](https://github.com/gastownhall/beads/pull/8430), backport of
   [#8413](https://github.com/gastownhall/beads/pull/8413)). In plain server
   mode against a server at any host other than `localhost`, `127.0.0.1`,
-  `0.0.0.0` or `::1` (a hostname, even this machine's own, and other `127.x`
-  addresses count as another host), bd cannot check the directory the server
-  reads, so it refuses the restore, with or without `--force`, shared mounts
-  included. Run `bd backup restore` on the server's machine, in a workspace
-  that reaches the server at `127.0.0.1` or `localhost` and names the same
-  `dolt_database` as this one: the restore, and a `--force` drop, target the
-  database that workspace names.
+  `0.0.0.0`, `::1` or `::` (a hostname, even this machine's own, and other
+  `127.x` addresses count as another host), bd cannot check the directory the
+  server reads, so it refuses the restore, with or without `--force`, shared
+  mounts included. Run `bd backup restore` on the server's machine, in a
+  workspace that reaches the server at `127.0.0.1` or `localhost` and names
+  the same `dolt_database` as this one: the restore, and a `--force` drop,
+  target the database that workspace names.
 - **Building from a checkout selects Go 1.27.4**
   ([#8441](https://github.com/gastownhall/beads/pull/8441), backport of
   [#8431](https://github.com/gastownhall/beads/pull/8431)). `go.mod` keeps
@@ -79,7 +79,7 @@ rebuilds the binaries with Go 1.27.4. The changes below also correct rc.1's
   server-mode pull route (default remote, Hosted Dolt `--user`, the
   git-protocol, credential and cloud-auth CLI routes, and the Go API's
   `PullFrom` for federation peers) now fetches and merges the tracking ref
-  itself, as embedded mode and `bd federation sync` always have, so the
+  itself, as embedded mode and `bd federation sync` already do, so the
   message reads `Merge branch 'origin/main' into main`. Merge commits made by
   older versions stay in history that is already pushed: find them with
   `bd sql "SELECT commit_hash, message FROM dolt_log WHERE message LIKE '%@%'"`
@@ -124,8 +124,8 @@ rebuilds the binaries with Go 1.27.4. The changes below also correct rc.1's
   restore source on bd's machine only, so a backup that only bd's machine held
   passed the check and the server dropped the database before finding nothing
   to restore. A server on another host is now refused (see **Upgrade notes**).
-  At a loopback address bd still checks its own filesystem, and every
-  refusal now says which side was checked.
+  At `localhost`, `127.0.0.1`, `0.0.0.0`, `::1` or `::` bd still checks its
+  own filesystem, and every refusal now says which side was checked.
 
 ### Changed
 
