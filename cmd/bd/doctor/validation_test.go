@@ -1046,6 +1046,26 @@ func addDepTestEdge(t *testing.T, store interface {
 	}
 }
 
+// insertExternalTargetDep writes a raw edge whose target sits in
+// depends_on_external, the shape migrations 0041/0047/0035 leave for every
+// missing target, same-prefix ones included.
+func insertExternalTargetDep(t *testing.T, db *sql.DB, table, source, target, depType string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 0"); err != nil {
+		t.Fatal(err)
+	}
+	//nolint:gosec // G202: table is a fixed test-chosen name.
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO "+table+" (id, issue_id, depends_on_external, type, created_at, created_by) VALUES (UUID(), ?, ?, ?, NOW(), 'test')",
+		source, target, depType); err != nil {
+		t.Fatalf("insert %s %s→%s: %v", table, source, target, err)
+	}
+	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 1"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestCheckOrphanedDependenciesDB_CrossPrefixTargetIsNotOrphan: an edge bd dep
 // add stored to another repository's prefix is counted as not verifiable
 // here, not reported as an orphan (bd-zcpo44, AC-1).
@@ -1063,5 +1083,38 @@ func TestCheckOrphanedDependenciesDB_CrossPrefixTargetIsNotOrphan(t *testing.T) 
 	}
 	if check.Detail != "" || check.Fix != "" {
 		t.Fatalf("Detail = %q, Fix = %q, want both empty", check.Detail, check.Fix)
+	}
+}
+
+// TestCheckOrphanedDependenciesDB_WarningCarriesCrossRepoNote: both union
+// legs' cross-repository edges are counted in the note, and only the
+// same-prefix edge whose target is gone is an orphan, even though its target
+// sits in depends_on_external (bd-zcpo44, AC-3).
+func TestCheckOrphanedDependenciesDB_WarningCarriesCrossRepoNote(t *testing.T) {
+	store := newTestDoltStore(t, "bd")
+	db := store.DB()
+	createDepTestIssue(t, store, "bd-1", false)
+	addDepTestEdge(t, store, "bd-1", "gt-9", types.DepBlocks)
+	createDepTestIssue(t, store, "bd-wisp-src", true)
+	addDepTestEdge(t, store, "bd-wisp-src", "gt-8", types.DepBlocks)
+	insertExternalTargetDep(t, db, "dependencies", "bd-1", "bd-gone", "blocks")
+
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id = 'bd-wisp-src' AND depends_on_external = 'gt-8'").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("fixture: wisp_dependencies bd-wisp-src→gt-8 rows = %d, want 1", n)
+	}
+
+	check := checkOrphanedDependenciesDB(db)
+	if check.Status != StatusWarning {
+		t.Fatalf("Status = %q, want %q; message=%q detail=%q", check.Status, StatusWarning, check.Message, check.Detail)
+	}
+	if want := "1 orphaned dependency reference(s) (2 cross-repository edge(s) not verifiable here)"; check.Message != want {
+		t.Fatalf("Message = %q, want %q", check.Message, want)
+	}
+	if check.Detail != "bd-1→bd-gone" {
+		t.Fatalf("Detail = %q, want %q", check.Detail, "bd-1→bd-gone")
 	}
 }
