@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -1327,4 +1328,225 @@ func TestExpansionVarRefs(t *testing.T) {
 			t.Errorf("expansion without a template: ExpansionVarRefs() = %v, want nil", got)
 		}
 	})
+}
+
+// gatedExpansionJSON is an expansion whose approve step sets every field
+// expandStep used to drop (GH#6433), with values that hold no placeholder, so
+// they read the same whether or not they are substituted.
+const gatedExpansionJSON = `{
+	"formula": "gated",
+	"type": "expansion",
+	"version": 1,
+	"template": [
+		{"id": "{target}.survey", "title": "Survey"},
+		{
+			"id": "{target}.approve",
+			"title": "Approve",
+			"needs": ["{target}.survey"],
+			"notes": "Check the release notes",
+			"metadata": {"owner": "team-a", "attempts": 3},
+			"waits_for": "all-children",
+			"condition": "{{run_review}}",
+			"gate": {"type": "human", "id": "gid", "await_id": "approval", "timeout": "1h", "repo": "acme/beads"},
+			"loop": {"count": 2, "body": [{"id": "body", "title": "Body"}]},
+			"on_complete": {"for_each": "output.items", "bond": "mol-item", "vars": {"k": "{item}"}},
+			"expand": "never-loaded",
+			"expand_vars": {"x": "y"},
+			"children": [
+				{
+					"id": "{target}.approve.child",
+					"title": "Child",
+					"needs": ["{target}.survey"],
+					"notes": "Child notes",
+					"condition": "{{child_flag}}",
+					"waits_for": "any-children"
+				}
+			]
+		}
+	]
+}`
+
+// TestExpandStepPreservesTemplateFields checks that every materialization
+// path keeps the template fields expandStep used to drop - Notes, Metadata,
+// WaitsFor, Condition, Gate, Loop and OnComplete, on the step and on its
+// children - and keeps clearing Expand/ExpandVars (GH#6433).
+func TestExpandStepPreservesTemplateFields(t *testing.T) {
+	newParser := func(t *testing.T) *Parser {
+		t.Helper()
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "gated.formula.json"), []byte(gatedExpansionJSON), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return NewParser(dir)
+	}
+
+	paths := []struct {
+		name   string
+		expand func(t *testing.T, p *Parser) []*Step
+	}{
+		{"compose.expand", func(t *testing.T, p *Parser) []*Step {
+			steps, err := ApplyExpansions([]*Step{{ID: "impl", Title: "Impl"}},
+				&ComposeRules{Expand: []*ExpandRule{{Target: "impl", With: "gated"}}}, p)
+			if err != nil {
+				t.Fatalf("ApplyExpansions failed: %v", err)
+			}
+			return steps
+		}},
+		{"compose.map", func(t *testing.T, p *Parser) []*Step {
+			steps, err := ApplyExpansions([]*Step{{ID: "impl", Title: "Impl"}},
+				&ComposeRules{Map: []*MapRule{{Select: "impl", With: "gated"}}}, p)
+			if err != nil {
+				t.Fatalf("ApplyExpansions failed: %v", err)
+			}
+			return steps
+		}},
+		{"inline expand", func(t *testing.T, p *Parser) []*Step {
+			steps, err := ApplyInlineExpansions([]*Step{{ID: "impl", Title: "Impl", Expand: "gated"}}, p)
+			if err != nil {
+				t.Fatalf("ApplyInlineExpansions failed: %v", err)
+			}
+			return steps
+		}},
+		{"standalone materialization", func(t *testing.T, p *Parser) []*Step {
+			f, err := p.LoadByName("gated")
+			if err != nil {
+				t.Fatalf("LoadByName failed: %v", err)
+			}
+			if err := MaterializeExpansion(f, "impl", nil); err != nil {
+				t.Fatalf("MaterializeExpansion failed: %v", err)
+			}
+			return f.Steps
+		}},
+	}
+
+	for _, path := range paths {
+		t.Run(path.name, func(t *testing.T) {
+			byID := buildStepMap(path.expand(t, newParser(t)))
+			got := byID["impl.approve"]
+			if got == nil {
+				t.Fatalf("impl.approve missing; steps: %v", byID)
+			}
+
+			if got.Notes != "Check the release notes" {
+				t.Errorf("Notes = %q, want the template's notes", got.Notes)
+			}
+			if got.Metadata == nil {
+				t.Errorf("Metadata = nil, want the template's metadata")
+			} else if got.Metadata["owner"] != "team-a" || fmt.Sprint(got.Metadata["attempts"]) != "3" {
+				t.Errorf("Metadata = %v, want owner=team-a attempts=3", got.Metadata)
+			}
+			if got.WaitsFor != "all-children" {
+				t.Errorf("WaitsFor = %q, want all-children", got.WaitsFor)
+			}
+			if got.Condition != "{{run_review}}" {
+				t.Errorf("Condition = %q, want {{run_review}}", got.Condition)
+			}
+			wantGate := Gate{Type: "human", ID: "gid", AwaitID: "approval", Timeout: "1h", Repo: "acme/beads"}
+			if got.Gate == nil || *got.Gate != wantGate {
+				t.Errorf("Gate = %+v, want %+v", got.Gate, wantGate)
+			}
+			if got.Loop == nil || got.Loop.Count != 2 || len(got.Loop.Body) != 1 || got.Loop.Body[0].Title != "Body" {
+				t.Errorf("Loop = %+v, want count 2 over one Body step", got.Loop)
+			}
+			if oc := got.OnComplete; oc == nil || oc.ForEach != "output.items" || oc.Bond != "mol-item" || oc.Vars["k"] != "{item}" {
+				t.Errorf("OnComplete = %+v, want the template's for-each", got.OnComplete)
+			}
+			if got.Expand != "" || got.ExpandVars != nil {
+				t.Errorf("Expand/ExpandVars = %q/%v, want cleared (an expanded step never re-expands)", got.Expand, got.ExpandVars)
+			}
+
+			child := byID["impl.approve.child"]
+			if child == nil {
+				t.Fatalf("impl.approve.child missing")
+			}
+			if child.Notes != "Child notes" || child.Condition != "{{child_flag}}" || child.WaitsFor != "any-children" {
+				t.Errorf("child Notes/Condition/WaitsFor = %q/%q/%q, want the template's", child.Notes, child.Condition, child.WaitsFor)
+			}
+		})
+	}
+}
+
+// TestExpandStepCoversAllStepFields fills every exported Step field and fails
+// when the expanded step comes back with one of them zero, so a Step field
+// added later is either carried through expansion or deliberately listed here.
+// Adapted from PR #6635's guard.
+func TestExpandStepCoversAllStepFields(t *testing.T) {
+	// An expanded step must never re-expand (see expandStepWith).
+	allowZero := map[string]bool{"Expand": true, "ExpandVars": true}
+
+	prio := 2
+	tmpl := &Step{}
+	v := reflect.ValueOf(tmpl).Elem()
+	for i := 0; i < v.NumField(); i++ {
+		field, f := v.Type().Field(i), v.Field(i)
+		if !field.IsExported() {
+			continue // generatedNeeds: TestExpandStepKeepsGeneratedNeeds
+		}
+		switch f.Type() {
+		case reflect.TypeOf(""):
+			f.SetString("x")
+		case reflect.TypeOf(&prio):
+			f.Set(reflect.ValueOf(&prio))
+		case reflect.TypeOf([]string{}):
+			f.Set(reflect.ValueOf([]string{"x"}))
+		case reflect.TypeOf(map[string]string{}):
+			f.Set(reflect.ValueOf(map[string]string{"k": "v"}))
+		case reflect.TypeOf(map[string]interface{}{}):
+			f.Set(reflect.ValueOf(map[string]interface{}{"k": "v"}))
+		case reflect.TypeOf([]*Step{}):
+			f.Set(reflect.ValueOf([]*Step{{ID: "child", Title: "Child"}}))
+		case reflect.TypeOf(&Gate{}):
+			f.Set(reflect.ValueOf(&Gate{Type: "timer"}))
+		case reflect.TypeOf(&LoopSpec{}):
+			f.Set(reflect.ValueOf(&LoopSpec{Count: 1, Body: []*Step{{ID: "b"}}}))
+		case reflect.TypeOf(&OnCompleteSpec{}):
+			f.Set(reflect.ValueOf(&OnCompleteSpec{Bond: "b"}))
+		default:
+			t.Fatalf("Step.%s has unhandled type %s; extend this test", field.Name, f.Type())
+		}
+	}
+
+	result, err := expandStep(&Step{ID: "t"}, []*Step{tmpl}, nil)
+	if err != nil {
+		t.Fatalf("expandStep failed: %v", err)
+	}
+	got := reflect.ValueOf(result[0]).Elem()
+	for i := 0; i < got.NumField(); i++ {
+		field := got.Type().Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		zero := got.Field(i).IsZero()
+		if allowZero[field.Name] && !zero {
+			t.Errorf("expandStep carried Step.%s; want it cleared", field.Name)
+		}
+		if !allowZero[field.Name] && zero {
+			t.Errorf("expandStep dropped Step.%s: zero in the expanded step although set in the template", field.Name)
+		}
+	}
+}
+
+// TestExpandStepKeepsGeneratedNeeds checks that a template need a transform
+// added stays generated after expansion, with the same substitution as Needs.
+func TestExpandStepKeepsGeneratedNeeds(t *testing.T) {
+	tmpl := &Step{ID: "{target}.b", Title: "B", Needs: []string{"{target}.a", "{target}.{stage}"}}
+	tmpl.generatedNeeds = []string{"{target}.{stage}"}
+
+	result, err := expandStep(&Step{ID: "impl"}, []*Step{tmpl}, map[string]string{"stage": "prep"})
+	if err != nil {
+		t.Fatalf("expandStep failed: %v", err)
+	}
+	got := result[0]
+	if want := []string{"impl.a", "impl.prep"}; !slices.Equal(got.Needs, want) {
+		t.Errorf("Needs = %v, want %v", got.Needs, want)
+	}
+	if want := []string{"impl.prep"}; !slices.Equal(got.generatedNeeds, want) {
+		t.Errorf("generatedNeeds = %v, want %v", got.generatedNeeds, want)
+	}
+	if !isGeneratedNeed(got, "impl.prep") || isGeneratedNeed(got, "impl.a") {
+		t.Errorf("generated provenance moved: generatedNeeds = %v", got.generatedNeeds)
+	}
+	if want := []string{"{target}.{stage}"}; !slices.Equal(tmpl.generatedNeeds, want) {
+		t.Errorf("template generatedNeeds = %v, want it untouched", tmpl.generatedNeeds)
+	}
 }
