@@ -40,6 +40,11 @@ type Tracker struct {
 	// empty when unknown.
 	currentName string
 	formerNames []string
+	// unresolvedNames are the other names local refs use that GitHub did not
+	// answer for at Init, and unresolvedErr is the first of those failures
+	// (see InitWarnings).
+	unresolvedNames []string
+	unresolvedErr   error
 }
 
 // LinkResolver returns a relationship resolver bound to this tracker's
@@ -102,8 +107,7 @@ func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 	}
 
 	t.config = DefaultMappingConfig()
-	t.resolveRepositoryNames(ctx)
-	return nil
+	return t.resolveRepositoryNames(ctx)
 }
 
 // resolveRepositoryNames records the names other than the configured one
@@ -122,25 +126,72 @@ func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 // can only be recognized by asking GitHub, so each other repository that a
 // local ref names on the configured host is read once, and its name counts
 // when GitHub answers with the configured repository's ID; another
-// repository answers with its own ID, and a deleted or inaccessible one not
-// at all. A failed lookup adds no name, and a failed lookup of the configured
-// repository leaves the configured name as the only one.
-func (t *Tracker) resolveRepositoryNames(ctx context.Context) {
+// repository answers with its own ID, and a deleted or inaccessible one with
+// a 404. A 404 for the configured name leaves that name the only one.
+//
+// Any other failure (a 5xx, a dropped connection, a rate limit) says nothing
+// about a name, and going on as if it had would narrow the scope without a
+// word: beads linked under the repository's other names would count as
+// another repository's, so push and conflict detection would skip them while
+// github.last_sync moved past their local edits, and a pull would import
+// their issues again. So such a failure for the configured name fails Init,
+// as does a failed scan of the local beads. For another name it leaves that
+// name unresolved, and InitWarnings names it.
+func (t *Tracker) resolveRepositoryNames(ctx context.Context) error {
 	repo, err := t.client.FetchRepository(ctx)
 	if err != nil {
-		return
+		if IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("looking up repository %s/%s on GitHub: %w", t.client.Owner, t.client.Repo, err)
 	}
 	t.currentName = repo.FullName
 	if repo.ID == 0 || t.store == nil {
-		return
+		return nil
 	}
-	for _, name := range t.otherRepositoryNames(ctx) {
-		owner, repoName, _ := strings.Cut(name, "/")
-		other, err := t.client.fetchRepositoryNamed(ctx, owner, repoName)
-		if err == nil && other != nil && other.ID == repo.ID {
+	names, err := t.otherRepositoryNames(ctx)
+	if err != nil {
+		return fmt.Errorf("listing local beads to find other names of repository %s/%s: %w", t.client.Owner, t.client.Repo, err)
+	}
+	for _, name := range names {
+		t.resolveOtherName(ctx, name, repo.ID)
+	}
+	return nil
+}
+
+// resolveOtherName asks GitHub which repository name, a lowercase
+// "owner/repo", belongs to now. The name counts as the repository's when
+// GitHub answers with its ID, id; another repository's ID or a 404 rules it
+// out. Any other failure leaves it unresolved.
+func (t *Tracker) resolveOtherName(ctx context.Context, name string, id int) {
+	owner, repo, _ := strings.Cut(name, "/")
+	other, err := t.client.fetchRepositoryNamed(ctx, owner, repo)
+	switch {
+	case err == nil:
+		if other != nil && other.ID == id {
 			t.formerNames = append(t.formerNames, name)
 		}
+	case !IsNotFound(err):
+		t.unresolvedNames = append(t.unresolvedNames, name)
+		if t.unresolvedErr == nil {
+			t.unresolvedErr = err
+		}
 	}
+}
+
+// InitWarnings implements tracker.InitWarner. When GitHub did not answer at
+// Init for some of the other names local refs use (see
+// resolveRepositoryNames), it returns one warning that names them: the sync
+// cannot tell whether the beads linked under them are the repository's, so it
+// leaves them alone, and a pull may import their issues again as new beads.
+func (t *Tracker) InitWarnings() []string {
+	if len(t.unresolvedNames) == 0 {
+		return nil
+	}
+	return []string{fmt.Sprintf("could not look up %s on GitHub (%v), so this sync cannot tell whether "+
+		"beads linked to issues there belong to %s/%s and leaves them alone; a pull may import their issues "+
+		"again as new beads. Run the sync again, or relink each such bead: bd update <id> --external-ref <new-url>",
+		strings.Join(t.unresolvedNames, ", "), t.unresolvedErr, t.client.Owner, t.client.Repo)}
 }
 
 // repositoryNamePattern matches a lowercase "owner/repo" made of the
@@ -150,10 +201,10 @@ var repositoryNamePattern = regexp.MustCompile(`^[a-z0-9_.-]+/[a-z0-9_.-]+$`)
 // otherRepositoryNames returns, sorted, the lowercase "owner/repo" of each
 // repository other than this one that a local issue's external_ref names on
 // the configured host.
-func (t *Tracker) otherRepositoryNames(ctx context.Context) []string {
+func (t *Tracker) otherRepositoryNames(ctx context.Context) ([]string, error) {
 	issues, err := t.store.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	scope := t.RefScope()
 	seen := make(map[string]bool)
@@ -174,7 +225,7 @@ func (t *Tracker) otherRepositoryNames(ctx context.Context) []string {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	return names
+	return names, nil
 }
 
 func (t *Tracker) Validate() error {
