@@ -706,6 +706,7 @@ go_test(
         "create_timestamp_precision_embedded_test.go",
         "critical_paths_test.go",
         "cross_mode_parity_harness_test.go",
+        "crossrig_close_embedded_test.go",
         "crossrig_depadd_feedback_embedded_test.go",
         "crossrig_display_embedded_test.go",
         "crossrig_nonblocking_embedded_test.go",

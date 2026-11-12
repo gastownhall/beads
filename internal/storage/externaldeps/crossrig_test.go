@@ -496,3 +496,106 @@ func TestUOWNonBlockingBareCrossRigEdgesStayReady(t *testing.T) {
 		})
 	}
 }
+
+// TestIssueLifecycleGuardsBareCrossRigBlockers pins AC-4 on the guard the
+// explicit lifecycle moves go through: a bare cross-prefix blocks edge names a
+// foreign issue, and `bd close` / `bd update --claim` must refuse on its open
+// row exactly as they do on an explicit external: reference — naming the bare
+// target — while --force keeps its override on the move that HAS one and a
+// settled (closed or pinned) foreign row releases the source. Claim has no
+// force arm by design (starting held work is not something --force waives).
+// The guard is guardExternalClose → externalBlockersFor →
+// blockingStateFromRecords → bareTargetSatisfaction, so this pins that the
+// chain's blocker set carries the bare target, not just its ready-read
+// exclusion.
+func TestIssueLifecycleGuardsBareCrossRigBlockers(t *testing.T) {
+	issueRow := func(id string, status types.Status) *types.Issue {
+		iss := issue(id)
+		iss.Status = status
+		return iss
+	}
+	for _, tc := range []struct {
+		name           string
+		foreign        *ForeignIssueResult
+		closeForce     bool
+		wantCloseBlock bool
+		wantClaimBlock bool
+	}{
+		{name: "open foreign issue blocks", foreign: &ForeignIssueResult{Issue: issueRow(xrigTarget, types.StatusOpen)}, wantCloseBlock: true, wantClaimBlock: true},
+		{name: "unresolved foreign target blocks (fail closed)", foreign: nil, wantCloseBlock: true, wantClaimBlock: true},
+		{name: "closed foreign issue releases", foreign: &ForeignIssueResult{Issue: issueRow(xrigTarget, types.StatusClosed)}},
+		{name: "pinned foreign issue releases", foreign: &ForeignIssueResult{Issue: issueRow(xrigTarget, types.StatusPinned)}},
+		{name: "force keeps its close override; claim has none", foreign: &ForeignIssueResult{Issue: issueRow(xrigTarget, types.StatusOpen)}, closeForce: true, wantClaimBlock: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := issue("be-src")
+			lifecycle := &fakeLifecycle{}
+			raw := &fakeStore{
+				ready:     []*types.Issue{source},
+				lifecycle: lifecycle,
+				deps: map[string][]*types.Dependency{
+					source.ID: {externalDep(source.ID, xrigTarget, types.DepBlocks)},
+				},
+			}
+			resolver := &fakeResolver{}
+			if tc.foreign != nil {
+				resolver.results = map[string]*ForeignIssueResult{xrigTarget: tc.foreign}
+			}
+			store := crossRigStore(raw, resolver)
+			ops, err := store.IssueLifecycle()
+			if err != nil {
+				t.Fatalf("IssueLifecycle: %v", err)
+			}
+
+			_, closeErr := ops.Close(t.Context(), publicops.CloseRequest{IssueID: source.ID, Force: tc.closeForce})
+			if errors.Is(closeErr, storage.ErrCloseBlocked) != tc.wantCloseBlock {
+				t.Fatalf("Close(force=%v) = %v, want blocked=%v", tc.closeForce, closeErr, tc.wantCloseBlock)
+			}
+			if tc.wantCloseBlock {
+				assertBareCloseBlockers(t, closeErr, source.ID, xrigTarget)
+				if lifecycle.closed != 0 {
+					t.Fatalf("inner close calls = %d, want zero on a refusal", lifecycle.closed)
+				}
+			} else if closeErr != nil {
+				t.Fatalf("Close(force=%v): %v", tc.closeForce, closeErr)
+			}
+
+			_, claimErr := ops.Update(t.Context(), publicops.UpdateRequest{IssueID: source.ID, Actor: "worker", Claim: true})
+			if errors.Is(claimErr, storage.ErrCloseBlocked) != tc.wantClaimBlock {
+				t.Fatalf("Claim = %v, want blocked=%v", claimErr, tc.wantClaimBlock)
+			}
+			if tc.wantClaimBlock {
+				assertBareCloseBlockers(t, claimErr, source.ID, xrigTarget)
+				if lifecycle.updated != 0 {
+					t.Fatalf("inner update calls = %d, want zero on a refusal", lifecycle.updated)
+				}
+			} else if claimErr != nil {
+				t.Fatalf("Claim: %v", claimErr)
+			}
+		})
+	}
+}
+
+// assertBareCloseBlockers is the bare-target counterpart of
+// assertExternalCloseBlockers (decorator_test.go): the refusal names the
+// foreign issue as an ISSUE ID — not as an `external:` reference — because
+// that is what the stored edge carries and what `bd dep list` renders.
+func assertBareCloseBlockers(t *testing.T, err error, issueID, target string) {
+	t.Helper()
+	var blocked *publicops.BlockedError
+	if !errors.As(err, &blocked) {
+		t.Fatalf("close refusal %v carries no *BlockedError", err)
+	}
+	// Unlike an `external:` reference, whose blocker the guard reports bare,
+	// a bare cross-prefix blocker carries its edge type alongside the ID.
+	want := []publicops.Blocker{{ID: target, Type: types.DepBlocks}}
+	if blocked.IssueID != issueID || !slices.Equal(blocked.Blockers, want) {
+		t.Errorf("BlockedError issueID=%q blockers=%#v, want issue %s blocked by %#v", blocked.IssueID, blocked.Blockers, issueID, want)
+	}
+	if blocked.Blockers[0].External() {
+		t.Errorf("a bare cross-prefix blocker must read as the issue ID %s, not as an external reference", target)
+	}
+	if wantText := "cannot close blocked issue: " + issueID + " is blocked by [" + target + "]"; err.Error() != wantText {
+		t.Errorf("refusal = %q, want %q", err.Error(), wantText)
+	}
+}
