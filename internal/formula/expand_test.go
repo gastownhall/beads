@@ -1271,9 +1271,9 @@ func TestExpansionVarRefs(t *testing.T) {
 					Labels:      []string{"team:{team}"},
 					DependsOn:   []string{"{target}.prep-{stage}"},
 					Needs:       []string{"{target.id}.gate-{gate}"},
-					// Neither field is carried into the expanded step, so
-					// nothing in them is ever substituted.
-					Notes:     "{notes_only}",
+					Notes:       "{notes_only}",
+					// The condition evaluator owns this field, so expansion
+					// substitutes nothing in it.
 					Condition: "{{condition_only}}",
 					Children: []*Step{
 						{ID: "{target}.child", Title: "Work on {{feature}}"},
@@ -1288,7 +1288,7 @@ func TestExpansionVarRefs(t *testing.T) {
 		// single-brace pattern also matches inside {{feature}}, so a
 		// --var feature=x is consumed there too.
 		got := strings.Join(ExpansionVarRefs(f, "main"), " ")
-		if want := "component env feature gate owner release stage team"; got != want {
+		if want := "component env feature gate notes_only owner release stage team"; got != want {
 			t.Errorf("ExpansionVarRefs() = %q, want %q", got, want)
 		}
 		if f.Steps != nil {
@@ -1548,5 +1548,156 @@ func TestExpandStepKeepsGeneratedNeeds(t *testing.T) {
 	}
 	if want := []string{"{target}.{stage}"}; !slices.Equal(tmpl.generatedNeeds, want) {
 		t.Errorf("template generatedNeeds = %v, want it untouched", tmpl.generatedNeeds)
+	}
+}
+
+// TestExpandStepSubstitutesTemplateFields checks that Notes, WaitsFor, the
+// Gate strings and metadata string leaves get the same {target}/{var}
+// substitution as Title, while metadata keys and scalars and the Condition,
+// Loop and OnComplete expressions - owned by later phases - are kept as written
+// (GH#6433).
+func TestExpandStepSubstitutesTemplateFields(t *testing.T) {
+	target := &Step{ID: "impl", Title: "Implement", Description: "Do it"}
+	vars := map[string]string{
+		"env": "prod", "owner": "alice", "gate_type": "human", "timeout": "1h", "org": "acme",
+		// Names the later phases own; expansion must not consume them.
+		"deploy": "yes", "n": "3", "item": "X", "i": "7",
+	}
+
+	cyclic := map[string]interface{}{"name": "{env}"}
+	cyclic["self"] = cyclic
+
+	// deep nests 40 maps, each with a {env} leaf; the walk stops at the
+	// metadata depth bound and keeps the rest as written.
+	deep := map[string]interface{}{"v": "{env}"}
+	level := deep
+	for i := 1; i < 40; i++ {
+		next := map[string]interface{}{"v": "{env}"}
+		level["next"] = next
+		level = next
+	}
+
+	tmpl := &Step{
+		ID:       "{target}.approve",
+		Title:    "Approve",
+		Notes:    "Notes for {target} ({target.title}: {target.description}) in {env}, {{keep}}",
+		WaitsFor: "children-of({target.id}.survey-{env})",
+		Gate: &Gate{
+			Type:    "{gate_type}",
+			ID:      "{target}-gate",
+			AwaitID: "await-{target.id}-{env}",
+			Timeout: "{timeout}",
+			Repo:    "{org}/{target}",
+		},
+		Metadata: map[string]interface{}{
+			"owner":      "{owner}",
+			"{env}":      "keys are never rewritten",
+			"count":      3,
+			"ratio":      1.5,
+			"flag":       true,
+			"none":       nil,
+			"nested":     map[string]interface{}{"desc": "{target.description}", "deeper": map[string]interface{}{"env": "{env}"}},
+			"list":       []interface{}{"{env}", 7, map[string]interface{}{"k": "{owner}"}, []interface{}{"{target}"}},
+			"tables":     []map[string]interface{}{{"name": "{env}"}, {"n": 2}},
+			"empty_map":  map[string]interface{}{},
+			"empty_list": []interface{}{},
+			"nil_map":    map[string]interface{}(nil),
+			"nil_list":   []interface{}(nil),
+			"cyclic":     cyclic,
+			"deep":       deep,
+		},
+		Condition:  "{{deploy}}",
+		Loop:       &LoopSpec{Range: "1..{n}", Var: "i", Body: []*Step{{ID: "body-{i}", Title: "Body {i} in {env}"}}},
+		OnComplete: &OnCompleteSpec{ForEach: "output.items", Bond: "mol-{item}", Vars: map[string]string{"k": "{item}"}},
+	}
+	inferred := &Step{ID: "{target}.collect", Title: "Collect", WaitsFor: "all-children", Needs: []string{"{target}.survey-{env}"}}
+
+	result, err := expandStep(target, []*Step{tmpl, inferred}, vars)
+	if err != nil {
+		t.Fatalf("expandStep failed: %v", err)
+	}
+	got, collect := result[0], result[1]
+
+	if want := "Notes for impl (Implement: Do it) in prod, {{keep}}"; got.Notes != want {
+		t.Errorf("Notes = %q, want %q", got.Notes, want)
+	}
+	if want := "children-of(impl.survey-prod)"; got.WaitsFor != want {
+		t.Errorf("WaitsFor = %q, want %q", got.WaitsFor, want)
+	}
+	if collect.WaitsFor != "all-children" || !slices.Equal(collect.Needs, []string{"impl.survey-prod"}) {
+		t.Errorf("inferred waits_for = %q needs %v, want all-children over [impl.survey-prod]", collect.WaitsFor, collect.Needs)
+	}
+	wantGate := Gate{Type: "human", ID: "impl-gate", AwaitID: "await-impl-prod", Timeout: "1h", Repo: "acme/impl"}
+	if got.Gate == nil || *got.Gate != wantGate {
+		t.Errorf("Gate = %+v, want %+v", got.Gate, wantGate)
+	}
+
+	if got.Condition != "{{deploy}}" {
+		t.Errorf("Condition = %q, want {{deploy}} unchanged", got.Condition)
+	}
+	if l := got.Loop; l == nil || l.Range != "1..{n}" || l.Var != "i" || len(l.Body) != 1 ||
+		l.Body[0].ID != "body-{i}" || l.Body[0].Title != "Body {i} in {env}" {
+		t.Errorf("Loop = %+v, want range/var/body unchanged", got.Loop)
+	}
+	if oc := got.OnComplete; oc == nil || oc.Bond != "mol-{item}" || oc.Vars["k"] != "{item}" {
+		t.Errorf("OnComplete = %+v, want bond/vars unchanged", got.OnComplete)
+	}
+
+	md := got.Metadata
+	if md == nil {
+		t.Fatalf("Metadata = nil, want the template's metadata substituted")
+	}
+	wantMD := map[string]interface{}{
+		"owner":      "alice",
+		"{env}":      "keys are never rewritten",
+		"count":      3,
+		"ratio":      1.5,
+		"flag":       true,
+		"none":       nil,
+		"nested":     map[string]interface{}{"desc": "Do it", "deeper": map[string]interface{}{"env": "prod"}},
+		"list":       []interface{}{"prod", 7, map[string]interface{}{"k": "alice"}, []interface{}{"impl"}},
+		"tables":     []map[string]interface{}{{"name": "prod"}, {"n": 2}},
+		"empty_map":  map[string]interface{}{},
+		"empty_list": []interface{}{},
+		"nil_map":    map[string]interface{}(nil),
+		"nil_list":   []interface{}(nil),
+	}
+	for k, want := range wantMD {
+		if v, ok := md[k]; !ok || !reflect.DeepEqual(v, want) {
+			t.Errorf("Metadata[%q] = %#v, want %#v", k, v, want)
+		}
+	}
+
+	// The cyclic map is never printed: fmt does not detect cycles.
+	if c, ok := md["cyclic"].(map[string]interface{}); !ok || c["name"] != "prod" {
+		t.Errorf("Metadata[cyclic][name] = %v, want prod", c["name"])
+	}
+
+	// Leaves above the bound are substituted; the tail past it is kept as
+	// written (it may share storage with the template).
+	first, last := 0, ""
+	for lvl, i := md["deep"], 0; lvl != nil; i++ {
+		m, ok := lvl.(map[string]interface{})
+		if !ok {
+			t.Fatalf("Metadata[deep] level %d = %#v, want a map", i, lvl)
+		}
+		if m["v"] == "prod" {
+			first = i + 1
+		}
+		last = fmt.Sprint(m["v"])
+		lvl = m["next"]
+		if i > 40 {
+			t.Fatalf("Metadata[deep] runs past its 40 levels")
+		}
+	}
+	if first < 30 || last != "{env}" {
+		t.Errorf("Metadata[deep]: %d levels substituted, deepest leaf %q; want the first 30+ substituted and the tail past the bound unchanged", first, last)
+	}
+
+	// The template is left as written.
+	if tmpl.Notes != "Notes for {target} ({target.title}: {target.description}) in {env}, {{keep}}" ||
+		tmpl.Gate.AwaitID != "await-{target.id}-{env}" || tmpl.Metadata["owner"] != "{owner}" ||
+		tmpl.Metadata["tables"].([]map[string]interface{})[0]["name"] != "{env}" {
+		t.Errorf("expanding rewrote the template's notes, gate or metadata")
 	}
 }
