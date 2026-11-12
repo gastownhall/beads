@@ -56,6 +56,7 @@ go_test(
         "ci_workflow_apt_get_timeout_test.go",
         "ci_workflow_core_test.go",
         "ci_workflow_test.go",
+        "check_legacy_repo_refs_test.go",
         "embedded_shard_count_test.go",
         "host_tools_test.go",
         "main_ci_alert_test.go",
@@ -76,6 +77,7 @@ go_test(
         "worker_env_sync_automerge_test.go",
     ],  # keep
     data = [
+        "check-legacy-repo-refs.sh",
         "//:repo_other_files",
         "//internal/testutil:testdoltcommon.go",
         "@go_sdk//:bin/go",
