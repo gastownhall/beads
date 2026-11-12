@@ -490,3 +490,50 @@ func TestEmbeddedFederationAddPeerRepairsCredentialsKeepingSovereignty(t *testin
 		t.Errorf("stored sovereignty after credential repair = %q, want %q", tiers["keypeer"], "T2")
 	}
 }
+
+// GH#5213: an explicit empty --sovereignty is the deliberate clear
+// operation; it must empty the stored tier and say so in both output modes.
+func TestEmbeddedFederationAddPeerClearSovereigntyExplicitly(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt federation tests")
+	}
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "fdsovclr")
+
+	// Text mode on a freshly seeded peer.
+	bdFederation(t, bd, dir, "add-peer", "clearpeer", "file:///tmp/clearpeer",
+		"--user", "admin", "--password", "secret", "--sovereignty", "T2")
+	out := bdFederation(t, bd, dir, "add-peer", "clearpeer", "file:///tmp/clearpeer",
+		"--user", "admin", "--password", "secret", "--sovereignty", "")
+	if !strings.Contains(out, "Sovereignty: cleared") {
+		t.Errorf("explicit clear should be confirmed in text mode, got: %s", out)
+	}
+
+	// JSON mode on its own freshly seeded peer.
+	bdFederation(t, bd, dir, "add-peer", "clearjson", "file:///tmp/clearjson",
+		"--user", "admin", "--password", "secret", "--sovereignty", "T3")
+	jsonOut := bdFederation(t, bd, dir, "add-peer", "clearjson", "file:///tmp/clearjson",
+		"--user", "admin", "--password", "secret", "--sovereignty", "", "--json")
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(jsonOut), &payload); err != nil {
+		t.Fatalf("failed to parse add-peer --json: %v\n%s", err, jsonOut)
+	}
+	assertExactJSONKeys(t, "add-peer --json", payload, "added", "url", "has_auth", "sovereignty", "schema_version")
+	var sov string
+	if err := json.Unmarshal(payload["sovereignty"], &sov); err != nil {
+		t.Fatalf("failed to parse add-peer --json sovereignty: %v\n%s", err, jsonOut)
+	}
+	if sov != "" {
+		t.Errorf("json sovereignty after explicit clear = %q, want empty", sov)
+	}
+
+	// Both stored tiers are now empty.
+	tiers := readFederationTiers(t, beadsDir)
+	if tiers["clearpeer"] != "" {
+		t.Errorf("stored clearpeer sovereignty after explicit clear = %q, want empty", tiers["clearpeer"])
+	}
+	if tiers["clearjson"] != "" {
+		t.Errorf("stored clearjson sovereignty after explicit clear = %q, want empty", tiers["clearjson"])
+	}
+}
