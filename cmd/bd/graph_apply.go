@@ -231,6 +231,18 @@ var graphFieldHints = map[string]string{
 	"event_actor":    "use 'actor' (matching the issue model's JSON field)",
 	"event_target":   "use 'target' (matching the issue model's JSON field)",
 	"event_payload":  "use 'payload' (matching the issue model's JSON field)",
+	// Dependency fields people write from memory (GH#3879 pitfall b): the
+	// plan has no per-node "blockedBy"/"dependencies" array; a node's
+	// outgoing dependencies live in its own 'deps' or in an edge whose
+	// 'from_key' names this node.
+	"blockedby":    "this node's dependencies go in its own 'deps' (e.g. {\"deps\": [{\"target\": \"a\"}]} means this node waits on a) or in an edge whose 'from_key' is this node",
+	"blocked_by":   "this node's dependencies go in its own 'deps' (e.g. {\"deps\": [{\"target\": \"a\"}]} means this node waits on a) or in an edge whose 'from_key' is this node",
+	"blocked-by":   "this node's dependencies go in its own 'deps' (e.g. {\"deps\": [{\"target\": \"a\"}]} means this node waits on a) or in an edge whose 'from_key' is this node",
+	"dependson":    "this node's dependencies go in its own 'deps' (e.g. {\"deps\": [{\"target\": \"a\"}]} means this node waits on a) or in an edge whose 'from_key' is this node",
+	"depends_on":   "this node's dependencies go in its own 'deps' (e.g. {\"deps\": [{\"target\": \"a\"}]} means this node waits on a) or in an edge whose 'from_key' is this node",
+	"depends-on":   "this node's dependencies go in its own 'deps' (e.g. {\"deps\": [{\"target\": \"a\"}]} means this node waits on a) or in an edge whose 'from_key' is this node",
+	"dependencies": "this node's dependencies go in its own 'deps' (e.g. {\"deps\": [{\"target\": \"a\"}]} means this node waits on a) or in an edge whose 'from_key' is this node",
+	"needs":        "this node's dependencies go in its own 'deps' (e.g. {\"deps\": [{\"target\": \"a\"}]} means this node waits on a) or in an edge whose 'from_key' is this node",
 }
 
 // detectUnknownGraphFields scans the raw plan JSON and returns unknown field
@@ -328,7 +340,7 @@ func warnUnknownGraphFields(w io.Writer, unknown map[string][]string) []string {
 	for _, loc := range locations {
 		fields := append([]string(nil), unknown[loc]...)
 		sort.Strings(fields)
-		fmt.Fprintf(w, "warning: graph plan %s has unknown field(s): %v (silently dropped — see 'bd create --graph' schema)\n", loc, fields)
+		fmt.Fprintf(w, "warning: graph plan %s has unknown field(s): %v (silently dropped — see the graph plan schema: 'bd help --doc create')\n", loc, fields)
 		for _, f := range fields {
 			distinct[f] = struct{}{}
 		}

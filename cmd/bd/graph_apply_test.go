@@ -355,6 +355,40 @@ func TestWarnUnknownGraphFields_HintsForReporterFields(t *testing.T) {
 	}
 }
 
+// TestWarnUnknownGraphFields_HintsForDependencyFields pins bd-esm0t5
+// (GH#3879 pitfall b): the natural-but-ignored node spellings for
+// dependencies — blockedBy, blocked_by, depends_on, dependencies, needs —
+// each get a hint saying the node's dependencies go in its own `deps` or in
+// an edge whose `from_key` is this node, and the warning points at the
+// schema page `bd help --doc create`.
+func TestWarnUnknownGraphFields_HintsForDependencyFields(t *testing.T) {
+	fields := []string{"blockedBy", "blocked_by", "depends_on", "dependencies", "needs"}
+	var buf bytes.Buffer
+	hinted := warnUnknownGraphFields(&buf, map[string][]string{
+		`node["b"]`: fields,
+	})
+	out := buf.String()
+	if !strings.Contains(out, "bd help --doc create") {
+		t.Errorf("warning does not point at the schema page: %q", out)
+	}
+	for _, field := range fields {
+		if !strings.Contains(out, fmt.Sprintf("hint: %q is not part of the schema", field)) {
+			t.Errorf("field %q got no hint line: %q", field, out)
+		}
+	}
+	if !strings.Contains(out, "'deps'") || !strings.Contains(out, "edge whose 'from_key' is this node") {
+		t.Errorf("hints do not say where node dependencies belong: %q", out)
+	}
+
+	got := append([]string(nil), hinted...)
+	sort.Strings(got)
+	want := append([]string(nil), fields...)
+	sort.Strings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("hinted fields: got %v, want %v", got, want)
+	}
+}
+
 // TestWarnUnknownGraphFields_NoUnknownsIsSilent verifies the warning function
 // emits nothing when the input map is empty (the common path for well-formed
 // plans).
