@@ -43,6 +43,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/doltremote"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/gittraceenv"
@@ -416,11 +417,12 @@ type Config struct {
 	// or a foreign-project lookup. Only a classified-read open is eligible for
 	// the lazy defer-wake sweep (be-vbhpf) — the others must never mutate.
 	//
-	// Strict --readonly and preview are excluded by the policy expression that
-	// computes this field; foreign-project and auxiliary opens are excluded
-	// because they construct their own Config and leave this at its false zero
-	// value. That default is the guarantee — setting it true on such an open
-	// would make it eligible to sweep.
+	// Strict --readonly, preview, and an active migration freeze (bd-6zf0q5)
+	// are excluded by the policy expression that computes this field
+	// (classifiedReadOpen in cmd/bd); foreign-project and auxiliary opens are
+	// excluded because they construct their own Config and leave this at its
+	// false zero value. That default is the guarantee — setting it true on
+	// such an open would make it eligible to sweep.
 	ClassifiedRead bool
 
 	// RequireReadableSchema makes an open that will not migrate the database
@@ -1768,17 +1770,12 @@ func (s *DoltStore) BackupDatabase(ctx context.Context, dir string) error {
 }
 
 // RestoreDatabase restores the database from a Dolt backup at dir.
-// When force is true, an existing database is overwritten.
+// The dir must exist locally and contain a Dolt backup at a path Dolt reads
+// literally; anything else is refused before the restore connection opens
+// (versioncontrolops.RestoreSourceURL). When force is true, an existing
+// database is overwritten.
 func (s *DoltStore) RestoreDatabase(ctx context.Context, dir string, force bool) error {
-	info, err := os.Stat(dir)
-	if err != nil {
-		return fmt.Errorf("backup source does not exist: %w", err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("backup source is not a directory: %s", dir)
-	}
-
-	backupURL, err := versioncontrolops.DirToFileURL(dir)
+	backupURL, err := versioncontrolops.RestoreSourceURL(dir)
 	if err != nil {
 		return err
 	}
@@ -3050,6 +3047,10 @@ func buildServerDSN(cfg *Config, database string) string {
 // GetRefSpecs), which are remote config rather than session state, and a
 // fetch writes only remote-tracking refs, never the working branch. Neither
 // depends on this fresh connection's default checkout.
+//
+// The statement's error is redacted (doltremote.RedactError): Dolt's transfer
+// procedures quote the stored remote URL, credentials included, in their
+// errors, which reach the terminal and agent transcripts.
 func (s *DoltStore) execWithLongTimeout(ctx context.Context, query string, args ...any) error {
 	cfg, err := mysql.ParseDSN(s.connStr)
 	if err != nil {
@@ -3068,7 +3069,7 @@ func (s *DoltStore) execWithLongTimeout(ctx context.Context, query string, args 
 	}
 	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 		_ = tx.Rollback()
-		return err
+		return doltremote.RedactError(err)
 	}
 	return tx.Commit()
 }
@@ -3081,6 +3082,8 @@ func (s *DoltStore) execWithLongTimeout(ctx context.Context, query string, args 
 // Audited for be-b0am's fresh-connection branch hazard: safe. Every caller
 // passes s.branch explicitly as a CALL DOLT_PUSH(...) arg, so this fresh
 // connection's default checkout never matters.
+//
+// The statement's error is redacted as in execWithLongTimeout.
 func (s *DoltStore) execWithLongTimeoutNoTx(ctx context.Context, query string, args ...any) error {
 	db, err := s.oneShotConn(5 * time.Minute)
 	if err != nil {
@@ -3088,7 +3091,7 @@ func (s *DoltStore) execWithLongTimeoutNoTx(ctx context.Context, query string, a
 	}
 	defer db.Close()
 	_, err = db.ExecContext(ctx, query, args...)
-	return err
+	return doltremote.RedactError(err)
 }
 
 // oneShotConn opens a one-shot connection with the given read deadline
@@ -5328,12 +5331,21 @@ func (s *DoltStore) doltCLIPush(ctx context.Context, remote string, force bool, 
 // cliTransferError wraps a failed CLI transfer, distinguishing a transfer that
 // hit the bounded timeout (actionable: raise BEADS_CLI_TRANSFER_TIMEOUT, or
 // check what holds the database directory busy) from an ordinary failure.
+//
+// URL credentials are redacted from the operation, the remote and dolt's
+// output before formatting: a rejection echoes the stored remote, token and
+// all, and this error reaches the terminal, agent transcripts and auto-push
+// warnings. The remote is redacted before %q so its escaped form need not be
+// recognized.
 func cliTransferError(op, remote string, transferCtx context.Context, out []byte, err error) error {
+	op = doltremote.RedactText(op)
+	remote = doltremote.Redact(remote)
+	detail := doltremote.RedactText(strings.TrimSpace(string(out)))
 	if errors.Is(transferCtx.Err(), context.DeadlineExceeded) {
 		return fmt.Errorf("%s to %q timed out after %s (override with %s=<duration>; large transfers to cloud remotes can run long, and a busy dolt sql-server serving the database directory can stall CLI transfers): %s: %w",
-			op, remote, cliExecTimeoutDuration(), cliExecTimeoutEnv, strings.TrimSpace(string(out)), err)
+			op, remote, cliExecTimeoutDuration(), cliExecTimeoutEnv, detail, err)
 	}
-	return fmt.Errorf("%s failed: %s: %w", op, strings.TrimSpace(string(out)), err)
+	return fmt.Errorf("%s failed: %s: %w", op, detail, err)
 }
 
 // doltCLIPull shells out to `dolt pull` from the database directory.
@@ -5769,7 +5781,8 @@ func (s *DoltStore) refreshTrackingRef(ctx context.Context, remote string) error
 	}
 	defer db.Close()
 	return withRemoteOperationEnv(s.credentialsForRemote(remote), s.isS3Remote(ctx, remote), func() error {
-		return schema.DrainCall(ctx, db, "CALL DOLT_FETCH(?, ?)", remote, s.branch)
+		// Redacted as in execWithLongTimeout: verifyPullLanded logs this error.
+		return doltremote.RedactError(schema.DrainCall(ctx, db, "CALL DOLT_FETCH(?, ?)", remote, s.branch))
 	})
 }
 
@@ -5883,6 +5896,9 @@ func (s *DoltStore) pullWithAutoResolve(ctx context.Context, remote string, quer
 // pullWithAutoResolveReporting is pullWithAutoResolve plus the row the pull (or
 // the fetch+merge fallback) returned — the engine's own account of whether
 // anything merged. See pullReport.
+//
+// Its error is redacted as in execWithLongTimeout: DOLT_PULL's and the
+// fallback DOLT_FETCH's errors quote the stored remote URL.
 func (s *DoltStore) pullWithAutoResolveReporting(ctx context.Context, remote string, query string, args ...any) (pullReport, error) {
 	var report pullReport
 	err := s.withCircuitWrite(ctx, func(ctx context.Context) error {
@@ -5890,7 +5906,7 @@ func (s *DoltStore) pullWithAutoResolveReporting(ctx context.Context, remote str
 		report, err = s.pullWithAutoResolveUnchecked(ctx, remote, query, args...)
 		return err
 	})
-	return report, err
+	return report, doltremote.RedactError(err)
 }
 
 func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote string, query string, args ...any) (pullReport, error) {
