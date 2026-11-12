@@ -1503,6 +1503,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reports beads linked elsewhere as skipped, and `bd github pull <bead-id>`
   says their link is not an issue the tracker can address (#7781, reported
   and first fixed by @NahumLitvin in #7794).
+- GitHub sync no longer narrows its scope when GitHub does not answer a
+  lookup of the repository's names (follow-up to #8068). `bd github sync`,
+  `push` and `pull` read the configured repository, and each other name a
+  bead links under, to learn the names the repository goes by. When one of
+  those lookups failed with anything but a 404 (a 5xx, a dropped connection,
+  a rate limit, a refused token), the run went on without the answer, so
+  beads linked under the repository's other names could count as another
+  repository's: push and conflict detection skipped them without a warning
+  while `github.last_sync` moved past their local edits, and once the lookup
+  worked again a later run could pull a remote edit over an unpushed one, or
+  push a stale bead over a remote edit, with no conflict. v1.3.3 and v1.3.4
+  work this way: they carry #8068 through its backport, #8083. Such a failure
+  now stops the command with an error that names the repository and says
+  what to do, as does a failure to list the local beads.
 - `bd compact` no longer discards writes that reach `main` while it runs. It
   finished by hard-resetting `main` onto the rebuilt history, which dropped
   changes in `main`'s working set that no Dolt commit held yet (a batch under

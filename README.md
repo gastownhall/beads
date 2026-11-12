@@ -381,10 +381,19 @@ names the config holds: GitHub redirects a former name to the repository, and
 sync asks GitHub which repository each other name your beads link under
 belongs to now (one request per name), so beads linked under the old name and
 under the new one stay matched to their issues, and a pull relinks them to the
-current URL. If that request fails, or the old name now belongs to another
-repository, beads still linked under it count as another repository's: relink
-them (`bd update <id> --external-ref <new-url>`), or the next pull imports
-their issues again as new beads.
+current URL. If the old name now belongs to another repository, beads still
+linked under it count as another repository's: relink them
+(`bd update <id> --external-ref <new-url>`), or the next pull imports their
+issues again as new beads. If GitHub gives no answer to one of these requests
+(any failure but a 404: an outage, a dropped connection, a rate limit, a
+refused token), the command stops with an error that names the repository,
+instead of syncing without knowing which beads are the configured
+repository's: a sync that skipped them would move its cursor past their edits,
+and a later sync could overwrite those edits with no conflict. If the failure
+is temporary, run the command again. If the error names another repository
+your beads link to and GitHub refuses the token for it (a 403), give the token
+read access to it. If the name is a former name of the configured repository,
+relinking those beads to their issues' current URLs also ends the lookup.
 
 ## 🌐 Community Tools
 
