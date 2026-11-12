@@ -267,6 +267,29 @@ func TestEmbeddedFederationPeers(t *testing.T) {
 			t.Errorf("stored tier after explicit clear = %q, want empty", got)
 		}
 	})
+
+	// A given tier still replaces the stored one (normalized to upper case),
+	// and an invalid tier is refused before anything is written.
+	t.Run("add_peer_explicit_sovereignty_replaces_tier", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "fdsovt")
+		bdFederation(t, bd, dir, "add-peer", "townbeta", "file:///tmp/townbeta",
+			"--user", "syncbot", "--password", "s3cret", "--sovereignty", "T2")
+
+		bdFederationFail(t, bd, dir, "add-peer", "townbeta", "file:///tmp/townbeta",
+			"--user", "syncbot", "--password", "s3cret", "--sovereignty", "T9")
+		if got := storedPeerTier(t, beadsDir, "townbeta"); got != "T2" {
+			t.Errorf("stored tier after a refused invalid tier = %q, want %q", got, "T2")
+		}
+
+		out := bdFederation(t, bd, dir, "add-peer", "townbeta", "file:///tmp/townbeta",
+			"--user", "syncbot", "--password", "s3cret", "--sovereignty", "t3", "--json")
+		if sov := addPeerJSONSovereignty(t, assertAddPeerJSON(t, out)); sov != "T3" {
+			t.Errorf("JSON replace sovereignty = %q, want %q", sov, "T3")
+		}
+		if got := storedPeerTier(t, beadsDir, "townbeta"); got != "T3" {
+			t.Errorf("stored tier after replace = %q, want %q", got, "T3")
+		}
+	})
 }
 
 func TestEmbeddedFederationStatus(t *testing.T) {
