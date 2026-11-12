@@ -427,3 +427,97 @@ func TestCrossRigTreeShowsMarkedForeignLeavesOfEveryType(t *testing.T) {
 		check(t, result.Nodes, resolver, warned)
 	})
 }
+
+// crossRigServedRemote adds the served blocked listing, which answers what a
+// server that does not apply the cross-rig policy derives: nothing blocked.
+type crossRigServedRemote struct{ crossRigRemote }
+
+func (r crossRigServedRemote) BlockedLister() (publicops.BlockedLister, error) {
+	return crossRigServedBlocked{r.remoteStore}, nil
+}
+
+type crossRigServedBlocked struct{ s *remoteStore }
+
+func (b crossRigServedBlocked) ListBlocked(context.Context, publicops.BlockedRequest) (publicops.BlockedResult, error) {
+	b.s.served = append(b.s.served, "ListBlocked")
+	return publicops.BlockedResult{Items: []*publicops.BlockedIssue{}}, nil
+}
+
+// GH#5784 AC-8: a server that advertises capability-reference enforcement but
+// not cross-rig enforcement leaves the bare cross-rig edge to the client.
+// Ready, the blocked listing, is-blocked and the tree each succeed and report
+// the source blocked by the open foreign target: the old token neither
+// bypasses the client's enforcement nor turns those reads into refusals.
+func TestCrossRigOldTokenServerGetsClientComposedReads(t *testing.T) {
+	source, other := issue("aa-1"), issue("aa-2")
+	raw := newRemoteStore(source, other)
+	raw.enforced, raw.capabilityOnly = true, true
+	raw.deps["aa-1"] = []*types.Dependency{externalDep("aa-1", "bb-1", types.DepBlocks)}
+	raw.tree = []*types.TreeNode{{Issue: *source}}
+	resolver := &fakeIssueResolver{issues: map[string]*types.Issue{"bb-1": foreignIssue("bb-1", types.StatusOpen)}}
+	store := New(crossRigServedRemote{crossRigRemote{raw}}, func(ProjectName) (string, bool) { return "", false }, nil,
+		WithIssueResolver(resolver.resolve))
+	ctx := t.Context()
+
+	reader, err := store.IssueReader()
+	if err != nil {
+		t.Fatalf("IssueReader: %v", err)
+	}
+	page, err := reader.Ready(ctx, publicops.ReadyRequest{})
+	if err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+	var ready []string
+	for _, row := range page.Items {
+		ready = append(ready, row.ID)
+	}
+	if !slices.Equal(ready, []string{"aa-2"}) {
+		t.Fatalf("ready IDs = %v, want [aa-2]", ready)
+	}
+
+	lister, err := store.BlockedLister()
+	if err != nil {
+		t.Fatalf("BlockedLister: %v", err)
+	}
+	listed, err := lister.ListBlocked(ctx, publicops.BlockedRequest{})
+	if err != nil {
+		t.Fatalf("ListBlocked: %v", err)
+	}
+	if len(listed.Items) != 1 || listed.Items[0].ID != "aa-1" || !slices.Equal(listed.Items[0].BlockedBy, []string{"bb-1"}) {
+		t.Fatalf("blocked = %+v, want aa-1 blocked by [bb-1]", listed.Items)
+	}
+
+	annotator, err := store.BlockingAnnotator()
+	if err != nil {
+		t.Fatalf("BlockingAnnotator: %v", err)
+	}
+	annotated, err := annotator.AnnotateBlocking(ctx, publicops.BlockingRequest{IDs: []string{"aa-1", "aa-2"}, IncludeIsBlocked: true})
+	if err != nil {
+		t.Fatalf("AnnotateBlocking: %v", err)
+	}
+	if len(annotated.Items) != 2 || annotated.Items[0].IsBlocked == nil || !*annotated.Items[0].IsBlocked ||
+		!slices.Equal(annotated.Items[0].BlockedBy, []string{"bb-1"}) || len(annotated.Items[1].BlockedBy) != 0 {
+		t.Fatalf("AnnotateBlocking = %+v, want aa-1 alone blocked by [bb-1]", annotated.Items)
+	}
+	isBlocked, err := store.IsBlockedBatch(ctx, []string{"aa-1", "aa-2"})
+	if err != nil || !isBlocked["aa-1"] || isBlocked["aa-2"] {
+		t.Fatalf("IsBlockedBatch = %v, %v; want aa-1 alone blocked", isBlocked, err)
+	}
+
+	walker, err := store.TreeWalker()
+	if err != nil {
+		t.Fatalf("TreeWalker: %v", err)
+	}
+	tree, err := walker.WalkTree(ctx, publicops.WalkTreeRequest{RootID: "aa-1", MaxDepth: 10})
+	if err != nil {
+		t.Fatalf("WalkTree: %v", err)
+	}
+	if len(tree.Nodes) != 2 || tree.Nodes[1].ID != "bb-1" || !tree.Nodes[1].External ||
+		tree.Nodes[1].Status != types.StatusOpen || tree.Nodes[1].EdgeFromParent != types.DepBlocks {
+		t.Fatalf("tree = %+v, want aa-1 with the open foreign blocker bb-1 as its leaf", tree.Nodes)
+	}
+
+	if want := []string{"Ready", "ListBlocked", "AnnotateBlocking", "WalkTree"}; !slices.Equal(raw.served, want) {
+		t.Fatalf("served calls = %v, want %v", raw.served, want)
+	}
+}
