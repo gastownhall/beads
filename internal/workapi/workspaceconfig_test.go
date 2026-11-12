@@ -2,9 +2,11 @@ package workapi
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -157,6 +159,14 @@ func TestValidateSettingWriteReturnsTheValueUnchanged(t *testing.T) {
 		{"types.custom", "research,session"},
 		{"status.custom", "awaiting_review:active"},
 		{"claim.pools", ""},
+		// Keys beside the config.yaml-only set that stay this plane's: a
+		// credential-named key that is not yaml-only, a tracker key that is
+		// not a secret, and the case and separator variants of github.token,
+		// which no reader consults (keys are case-sensitive).
+		{"notes.api_token", "sk-live-not-yaml-only"},
+		{"jira.url", "https://example.atlassian.net"},
+		{"GITHUB.TOKEN", "x"},
+		{"github_token", "x"},
 	} {
 		got, err := ValidateSettingWrite(test.key, test.value)
 		if err != nil {
@@ -339,5 +349,69 @@ func TestFilterSettingsPointReadLeavesASettingToTheStore(t *testing.T) {
 		if result != (issueops.SettingResult{}) {
 			t.Errorf("FilterSettingsPointRead(%q) = %+v alongside refused=false, want the zero result the caller ignores", key, result)
 		}
+	}
+}
+
+// TestValidateSettingWriteRefusesYamlOnlyKeys pins #7559 (PR #7567): a key
+// config.yaml owns — startup settings and the tracker secrets alike — must
+// never become a row in the settings table, which bd dolt push replicates to
+// every remote. `bd config set` routes these keys to config.yaml before the
+// role; the settings HTTP surface has no config.yaml to write, so the role
+// refuses them for every leg.
+//
+// THE REFUSAL NEVER ECHOES THE VALUE: it is a credential for most of these
+// keys, and the message travels to a problem body and to logs.
+func TestValidateSettingWriteRefusesYamlOnlyKeys(t *testing.T) {
+	const sentinel = "sk-live-SENTINEL-7559"
+	keys := make([]string, 0, len(config.YamlOnlyKeys)+20)
+	for key := range config.YamlOnlyKeys {
+		keys = append(keys, key)
+	}
+	// One sample under each prefix IsYamlOnlyKey matches.
+	for _, prefix := range []string{"routing.", "sync.", "git.", "directory.", "repos.", "external_projects.",
+		"validation.", "lint.", "hierarchy.", "ai.", "backup.", "export.", "dolt.", "federation.", "metrics.",
+		"list.", "audit.", "storage-class."} {
+		keys = append(keys, prefix+"sample")
+	}
+	for _, key := range keys {
+		if !config.IsYamlOnlyKey(key) {
+			t.Fatalf("%q is not yaml-only; the table is stale", key)
+		}
+		for _, value := range []string{sentinel, ""} {
+			_, err := ValidateSettingWrite(key, value)
+			if !errors.Is(err, issueops.ErrValidation) {
+				t.Errorf("ValidateSettingWrite(%q, %q) error = %v, want ErrValidation", key, value, err)
+				continue
+			}
+			if strings.Contains(err.Error(), "SENTINEL") {
+				t.Errorf("ValidateSettingWrite(%q) error echoes the submitted value: %v", key, err)
+			}
+			if config.IsCommandSettingKey(key) {
+				continue // mail.delegate keeps its own, more precise message
+			}
+			for _, want := range []string{strconv.Quote(key), "config.yaml"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("ValidateSettingWrite(%q) message %q does not name %s", key, err, want)
+				}
+			}
+		}
+	}
+
+	// The length bound is checked first, so an over-long yaml-only key still
+	// carries the typed too-long error a caller can classify.
+	_, err := ValidateSettingWrite("dolt."+strings.Repeat("k", types.MaxFieldLen), "v")
+	if !errors.Is(err, types.ErrFieldTooLong) {
+		t.Errorf("over-long dolt.* key error = %v, want types.ErrFieldTooLong", err)
+	}
+	// mail.delegate is on both lists; the command-setting message is the more
+	// precise one and it is kept.
+	_, err = ValidateSettingWrite("mail.delegate", "gt mail")
+	if err == nil || !strings.Contains(err.Error(), "shell environment or user config") {
+		t.Errorf("mail.delegate error = %v, want the command-setting message", err)
+	}
+	// READ and REMOVE are untouched, so a legacy secret row can still be
+	// deleted through the same plane.
+	if _, err := ValidateSettingKey("github.token"); err != nil {
+		t.Errorf("ValidateSettingKey(github.token) = %v, want it accepted: a legacy row must stay removable", err)
 	}
 }
