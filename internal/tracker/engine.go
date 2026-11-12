@@ -968,6 +968,10 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 	}
 
 	var hydrated []TrackerIssue
+	// warnedUnknownHistory only keeps the missing-history warning to one per
+	// pull. Each issue is still decided on its own history: one missing row
+	// says nothing about the next issue's.
+	warnedUnknownHistory := false
 	for _, local := range localIssues {
 		if local == nil || local.ExternalRef == nil {
 			continue
@@ -976,9 +980,14 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 		if ref == "" || !e.Tracker.IsExternalRef(ref) {
 			continue
 		}
-		changedAfterLastSync, _, err := e.externalRefChangedAfter(ctx, local, ref, *lastSync)
+		changedAfterLastSync, historyUnknown, err := e.externalRefChangedAfter(ctx, local, ref, *lastSync)
 		if err != nil {
 			return hydrated, hydratedLocalIDs, fmt.Errorf("checking pre-linked local issue %s: %w", local.ID, err)
+		}
+		if historyUnknown && !warnedUnknownHistory {
+			warnedUnknownHistory = true
+			e.warn("%s: the history of older linked issues at the last sync (%s) is missing, so links changed since then cannot be verified (the history may have been compacted or rewritten). Pre-link hydration of those issues was skipped and their local content kept; review any link changed since that sync before pushing, or the push may write local content to that remote.",
+				e.Tracker.DisplayName(), lastSync.UTC().Format(time.RFC3339))
 		}
 		if !changedAfterLastSync {
 			// An issue whose history at lastSync is missing is not hydrated:
