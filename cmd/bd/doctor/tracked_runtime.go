@@ -55,6 +55,14 @@ var trackedRuntimePatterns = []string{
 	"ephemeral.sqlite3-journal",
 	"ephemeral.sqlite3-wal",
 	"ephemeral.sqlite3-shm",
+
+	// Machine-local state beside backup/ (GH#8318): gitignored, but gitignore
+	// cannot untrack already-committed copies
+	"dolt-backup.json",
+	"dolt-backup-state.json",
+	"dolt-config.log",
+	".auto-import-issues.jsonl",
+	"dolt-mode-migration.json",
 }
 
 // trackedRuntimeDirPrefixes are directory prefixes under .beads/ that should

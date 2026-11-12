@@ -3,6 +3,7 @@ package doctor
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -34,6 +35,12 @@ func TestShouldFlagTrackedFile_RuntimeArtifacts(t *testing.T) {
 		{"bd.lock", true},
 		{"dolt-server-config.yaml", true}, // GH#6191: absolute cfg_dir + per-machine port
 		{"dolt-server.activity", true},    // GH#6191
+		{"dolt-backup.json", true},        // GH#8318: gitignored, but gitignore cannot untrack already-committed copies
+		{"dolt-backup-state.json", true},  // GH#8318
+		{"dolt-config.log", true},         // GH#8318
+		{".auto-import-issues.jsonl", true},
+		{"dolt-mode-migration.json", true}, // GH#8318
+		{"sub/dolt-config.log", false},     // patterns apply to top-level .beads/ files only
 		{"dolt/noms/manifest", true},
 		{"issues.jsonl", false},
 		{"config.json", false},
@@ -124,5 +131,80 @@ func TestFixTrackedRuntimeFiles_WorktreeFallbackUsesSharedBeads(t *testing.T) {
 
 	if _, err := os.Stat(lastTouched); err != nil {
 		t.Fatalf("expected runtime file to remain on disk after git rm --cached: %v", err)
+	}
+}
+
+// TestFixTrackedRuntimeFiles_UntracksMachineLocalStateFiles verifies the
+// GH#8318 end-to-end path: copies of the machine-local state files committed
+// before the ignore rule existed are flagged by the check, untracked by the
+// fix (git rm --cached keeps them on disk), while issues.jsonl stays tracked.
+func TestFixTrackedRuntimeFiles_UntracksMachineLocalStateFiles(t *testing.T) {
+	dir := setupGitRepo(t)
+	disableGlobalGitIgnore(t, dir)
+	beadsDir := filepath.Join(dir, ".beads")
+
+	allNames := append([]string{}, machineLocalStateFiles...)
+	allNames = append(allNames, "issues.jsonl")
+	for _, name := range allNames {
+		if err := os.WriteFile(filepath.Join(beadsDir, name), []byte("state"), 0644); err != nil {
+			t.Fatalf("failed to write %s: %v", name, err)
+		}
+	}
+
+	// Committed before the ignore rule existed: force past .beads/.gitignore.
+	add := gitCommand("add", "-f", "--", ".beads")
+	add.Dir = dir
+	if out, err := add.CombinedOutput(); err != nil {
+		t.Fatalf("git add failed: %v\n%s", err, out)
+	}
+	commit := gitCommand("commit", "-m", "Track machine-local state for test")
+	commit.Dir = dir
+	if out, err := commit.CombinedOutput(); err != nil {
+		t.Fatalf("git commit failed: %v\n%s", err, out)
+	}
+
+	clearResolveBeadsDirCache()
+
+	check := CheckTrackedRuntimeFiles(dir)
+	if check.Status != "warning" {
+		t.Fatalf("expected warning status, got %s: %s", check.Status, check.Detail)
+	}
+	for _, name := range machineLocalStateFiles {
+		if !contains(check.Detail, ".beads/"+name) {
+			t.Errorf("check detail does not name .beads/%s: %s", name, check.Detail)
+		}
+	}
+	if contains(check.Detail, ".beads/issues.jsonl") {
+		t.Errorf("check detail names .beads/issues.jsonl, which must stay tracked: %s", check.Detail)
+	}
+
+	if err := FixTrackedRuntimeFiles(dir); err != nil {
+		t.Fatalf("FixTrackedRuntimeFiles() error = %v", err)
+	}
+
+	ls := gitCommand("ls-files", "--", ".beads")
+	ls.Dir = dir
+	out, err := ls.Output()
+	if err != nil {
+		t.Fatalf("git ls-files failed: %v", err)
+	}
+	tracked := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for _, name := range machineLocalStateFiles {
+		if contains(string(out), ".beads/"+name) {
+			t.Errorf(".beads/%s still tracked: %s", name, tracked)
+		}
+		path := filepath.Join(beadsDir, name)
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("%s removed from disk (git rm --cached must keep it): %v", name, err)
+		}
+	}
+	foundIssues := false
+	for _, line := range tracked {
+		if strings.TrimSpace(line) == ".beads/issues.jsonl" {
+			foundIssues = true
+		}
+	}
+	if !foundIssues {
+		t.Errorf(".beads/issues.jsonl is no longer tracked: %v", tracked)
 	}
 }
