@@ -1732,11 +1732,11 @@ func (s *Server) handler() http.Handler {
 // (wireRevisionExempt), takes a database slot (bypassSemaphore), and which op
 // its request line books. A request a mount holds but no row claims (the
 // catch-all, or a custom-method suffix no row registers) gets the unrouted
-// answer: 404 not_found, with no credential asked, no stamp or floor compared,
-// no slot taken and no op booked. The Host policy, the request id, the
-// response-wide headers, panic recovery and the request line are not part of
-// any posture: handler() wraps them around the whole router, so no mount can
-// opt out of them.
+// answer: 404 not_found, with no credential asked, no RequestContext hook run,
+// no stamp or floor compared, no slot taken and no op booked. The Host policy,
+// the request id, the response-wide headers, panic recovery and the request
+// line are not part of any posture: handler() wraps them around the whole
+// router, so no mount can opt out of them.
 type mount struct {
 	// pattern is exactly what the router registers.
 	pattern string
