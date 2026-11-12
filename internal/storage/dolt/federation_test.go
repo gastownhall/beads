@@ -1633,18 +1633,6 @@ func federationDBName(t *testing.T, town string) string {
 	return uniqueTestDBName(t) + "_" + town
 }
 
-// setupFederationStore is the single-goroutine convenience wrapper around
-// newFederationStore for callers (e.g. pull_branch_tracking_integration_test.go)
-// that don't need concurrent town setup and can use t.Fatalf directly.
-func setupFederationStore(t *testing.T, ctx context.Context, path, prefix string) (*DoltStore, func()) {
-	t.Helper()
-	store, cleanup, err := newFederationStore(ctx, path, federationDBName(t, prefix), prefix)
-	if err != nil {
-		t.Fatalf("%v", err)
-	}
-	return store, cleanup
-}
-
 // newFederationStore creates a Dolt store for federation testing against the
 // given pre-generated database name. Each town gets its own database (not
 // just its own `path`): dolt.New has a single exit, newServerMode, where
