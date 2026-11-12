@@ -102,12 +102,16 @@ in total before any individual status trips it.`,
 			return HandleErrorWithHintRespectJSON("issue ID required", "Use --all for all open issues")
 		}
 
+		// The cap is resolved once, ahead of either route and of any lookup,
+		// so a negative --max-rows is a usage error before an ID is resolved.
+		maxRows, maxRowsSource, err := resolveMaxRows(cmd)
+		if err != nil {
+			return err
+		}
+
 		out := cmd.OutOrStdout()
 		if usesProxiedServer() {
-			if err := rejectMaxRowsUnderProxiedServer(cmd); err != nil {
-				return err
-			}
-			return runGraphProxiedServer(rootCtx, out, args)
+			return runGraphProxiedServer(rootCtx, out, args, maxRows, maxRowsSource)
 		}
 
 		ctx := rootCtx
@@ -116,10 +120,6 @@ in total before any individual status trips it.`,
 		}
 
 		if graphAll {
-			maxRows, maxRowsSource, err := resolveMaxRows(cmd)
-			if err != nil {
-				return err
-			}
 			subgraphs, err := loadAllGraphSubgraphs(ctx, store, maxRows, maxRowsSource)
 			if err != nil {
 				if capErr := handleMaxRowsError(err); capErr != nil {
@@ -140,27 +140,22 @@ in total before any individual status trips it.`,
 			return HandleErrorRespectJSON("loading graph: %v", err)
 		}
 
-		// Apply the defensive row cap (be-x42v) on the connected-component
-		// node count. loadGraphSubgraph is a BFS over GetDependents/
-		// GetDependencies (per-ID lookups, no IssueFilter to thread MaxRows
-		// through), so — like `bd dep tree` — the cap is checked post-hoc
-		// against the final node set rather than during traversal.
-		graphMaxRows, graphMaxRowsSource, err := resolveMaxRows(cmd)
-		if err != nil {
-			return err
+		if capErr := enforceGraphSubgraphCap(subgraph, maxRows, maxRowsSource); capErr != nil {
+			return capErr
 		}
-		if graphMaxRows > 0 && len(subgraph.Issues) > graphMaxRows {
-			if capErr := handleMaxRowsError(&issueops.ErrTooManyRows{
-				Found:  len(subgraph.Issues),
-				Cap:    graphMaxRows,
-				Source: graphMaxRowsSource,
-			}); capErr != nil {
-				return capErr
-			}
-		}
-
 		return renderGraphSingleSubgraph(out, subgraph)
 	},
+}
+
+// enforceGraphSubgraphCap applies the defensive row cap (be-x42v) to a
+// single-issue graph's connected-component node count, on both routes. Each
+// loads the component by a BFS over per-ID dependency lookups (no IssueFilter
+// to thread MaxRows through), so — like `bd dep tree` — the cap is checked
+// post-hoc against the final node set rather than during traversal. It returns
+// the exit-2 error after printing the diagnostic, or nil when the component
+// fits.
+func enforceGraphSubgraphCap(subgraph *TemplateSubgraph, maxRows int, source string) error {
+	return handleMaxRowsError(issueops.EnforceMaxRowsCap(len(subgraph.Issues), maxRows, source))
 }
 
 func writeGraphLine(out io.Writer, value string) error {
@@ -367,7 +362,7 @@ func init() {
 	graphCmd.Flags().BoolVar(&graphHTML, "html", false, "Output self-contained interactive HTML (redirect to file)")
 	graphCmd.Flags().BoolVar(&graphOpen, "open", false, "Show only open issues (filters out closed/deferred), forces compact layer format")
 	// Defensive row cap (be-x42v): exits 2 on overage, default disabled.
-	addMaxRowsFlag(graphCmd)
+	addRoutedMaxRowsFlag(graphCmd)
 	graphCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(graphCmd)
 	graphCmd.AddCommand(graphCheckCmd)

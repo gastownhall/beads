@@ -239,8 +239,9 @@ func TestGatherReadyInputResolvesCapWhereTheDirectBuilderDid(t *testing.T) {
 		}
 	})
 
-	// The proxied route passes no resolver: it cannot enforce a cap, and its
-	// RunE has already resolved the flag to reject it.
+	// The gate-resume arm is handed no resolver on the proxied route (see
+	// readyGatedArm): it takes no cap on either route, so a cap set beside it
+	// must neither land on the filter nor be read.
 	t.Run("no_resolver_leaves_the_filter_uncapped", func(t *testing.T) {
 		t.Setenv(maxRowsEnvVar, "5")
 
