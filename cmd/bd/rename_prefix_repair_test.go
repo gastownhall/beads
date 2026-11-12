@@ -7,10 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -229,6 +232,106 @@ func withRenameStore(st storage.DoltStorage, run func() error) error {
 		storeMutex.Unlock()
 	}()
 	return run()
+}
+
+// renameNewIDCheckStore records every GetIssue it receives and answers
+// not-found, so runRename stops right after the old-issue lookup. Reaching
+// that lookup proves the new ID passed format validation; the stub
+// deliberately goes no further.
+type renameNewIDCheckStore struct {
+	storage.DoltStorage
+	lookups []string
+}
+
+func (s *renameNewIDCheckStore) GetIssue(_ context.Context, id string) (*types.Issue, error) {
+	s.lookups = append(s.lookups, id)
+	return nil, storage.ErrNotFound
+}
+
+// captureRenameStderr runs fn with os.Stderr captured and returns what fn
+// wrote alongside what it returned.
+func captureRenameStderr(fn func() error) (string, error) {
+	stdioMutex.Lock()
+	defer stdioMutex.Unlock()
+	r, w, err := os.Pipe()
+	if err != nil {
+		return "", err
+	}
+	old := os.Stderr
+	os.Stderr = w
+	runErr := fn()
+	os.Stderr = old
+	_ = w.Close()
+	buf := make([]byte, 1<<16)
+	n, _ := r.Read(buf)
+	_ = r.Close()
+	return string(buf[:n]), runErr
+}
+
+// TestRenameNewIDCheck drives runRename itself: a target ID whose prefix
+// carries the digit, uppercase or underscore characters bd init's
+// normalizeIssuePrefix mints must pass format validation and reach the
+// old-issue lookup (GH#6068), while malformed targets are refused before
+// the store is touched.
+func TestRenameNewIDCheck(t *testing.T) {
+	// Cannot be parallel: withRenameStore and this save/restore mutate the
+	// store, actor and proxiedServerMode globals.
+	origProxied := proxiedServerMode
+	proxiedServerMode = false
+	t.Cleanup(func() { proxiedServerMode = origProxied })
+
+	// Every raw prefix below is one ordinary bd init would accept: derive it
+	// the way init does and confirm init's own database-name check passes,
+	// so a failure below is rename's, not init's.
+	for _, raw := range []string{"probe", "probe8", "MyApp2", "001", "my.app", "_scratch", "web3-app"} {
+		prefix := normalizeIssuePrefix(raw)
+		if err := dolt.ValidateDatabaseName(dbNameFromPrefix(prefix)); err != nil {
+			t.Fatalf("%q: init would not mint prefix %q: %v", raw, prefix, err)
+		}
+
+		st := &renameNewIDCheckStore{}
+		oldID, newID := prefix+"-4b0", prefix+"-abc"
+		stderr, runErr := captureRenameStderr(func() error {
+			return withRenameStore(st, func() error {
+				return runRename(renameCmd, []string{oldID, newID})
+			})
+		})
+
+		var exitErr *exitError
+		if !errors.As(runErr, &exitErr) || exitErr.Code != 1 {
+			t.Errorf("%s -> %s: rename error = %v, want the old-issue-not-found exit error", oldID, newID, runErr)
+		}
+		if len(st.lookups) != 1 || st.lookups[0] != oldID {
+			t.Errorf("%s -> %s: store lookups = %v, want exactly [%s]: the target did not pass format validation", oldID, newID, st.lookups, oldID)
+		}
+		if want := fmt.Sprintf("issue %s not found", oldID); !strings.Contains(stderr, want) {
+			t.Errorf("%s -> %s: stderr = %q, want it to contain %q", oldID, newID, stderr, want)
+		}
+	}
+
+	// Malformed targets: bare, empty, empty component, leading digit, and
+	// targets with a space or dollar sign are refused with the existing
+	// diagnostic before the store is accessed.
+	for _, newID := range []string{"abc", "", "-abc", "abc-", "8ball-abc", "a b-c", "bd-$1"} {
+		st := &renameNewIDCheckStore{}
+		stderr, runErr := captureRenameStderr(func() error {
+			return withRenameStore(st, func() error {
+				return runRename(renameCmd, []string{"probe-4b0", newID})
+			})
+		})
+
+		var exitErr *exitError
+		if !errors.As(runErr, &exitErr) || exitErr.Code != 1 {
+			t.Errorf("target %q: rename error = %v, want an exit error with code 1", newID, runErr)
+			continue
+		}
+		if len(st.lookups) != 0 {
+			t.Errorf("target %q: store lookups = %v, want none: the target was validated after accessing the store", newID, st.lookups)
+		}
+		if want := fmt.Sprintf("invalid new ID format %q: must be prefix-suffix (e.g., bd-dolt)", newID); !strings.Contains(stderr, want) {
+			t.Errorf("target %q: stderr = %q, want it to contain %q", newID, stderr, want)
+		}
+	}
 }
 
 func TestRenameFailureLeavesBeadGatesPending(t *testing.T) {

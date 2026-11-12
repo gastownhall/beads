@@ -41,6 +41,13 @@ func init() {
 	rootCmd.AddCommand(renameCmd)
 }
 
+// renameTargetIDPattern accepts the prefix alphabet bd init's
+// normalizeIssuePrefix mints — letters, digits, uppercase letters and
+// underscores, not just lowercase letters — so a project can rename an issue
+// within its own namespace. Hyphens inside a prefix are consumed by the
+// suffix character class, so the pattern needs no prefix parsing.
+var renameTargetIDPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*-[a-zA-Z0-9._-]+$`)
+
 func runRename(cmd *cobra.Command, args []string) error {
 	if usesProxiedServer() {
 		return HandleErrorRespectJSON("rename is not supported in proxied-server mode")
@@ -59,8 +66,7 @@ func runRename(cmd *cobra.Command, args []string) error {
 		return HandleError("old and new IDs are the same")
 	}
 
-	idPattern := regexp.MustCompile(`^[a-z]+-[a-zA-Z0-9._-]+$`)
-	if !idPattern.MatchString(newID) {
+	if !renameTargetIDPattern.MatchString(newID) {
 		return HandleError("invalid new ID format %q: must be prefix-suffix (e.g., bd-dolt)", newID)
 	}
 
