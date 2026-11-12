@@ -391,10 +391,27 @@ func noticeSharedMigrateRefusal(err error) {
 	if globalFlag {
 		consent = schema.SharedConsentCommandGlobal
 	}
+	// GH#6656: on a proxied workspace the bare consent verb is refused at
+	// the front door, so the notice prescribes the forced form — the one
+	// route through that refusal — with the client-close precondition that
+	// form declares. usesProxiedServer() is checked alongside the gate's own
+	// marker because the version-bump probe that raises this notice does not
+	// run through the provider path that sets it.
+	proxied := gateErr.Proxied || usesProxiedServer()
+	if proxied {
+		consent = schema.SharedConsentCommandForced
+		if globalFlag {
+			consent = schema.SharedConsentCommandForcedGlobal
+		}
+	}
 	var remedy string
 	switch gateErr.Decision {
 	case "shared-no-remote":
-		remedy = fmt.Sprintf("Run '%s' once every client of this server is upgraded; reads keep working meanwhile.", consent)
+		if proxied {
+			remedy = fmt.Sprintf("Run '%s' once every client of this server is upgraded and the co-resident library clients are stopped; reads keep working meanwhile.", consent)
+		} else {
+			remedy = fmt.Sprintf("Run '%s' once every client of this server is upgraded; reads keep working meanwhile.", consent)
+		}
 	case "adopt", "adopt-ff":
 		// The remote is already migrated: migrating here would fork it, and
 		// the verb consent deliberately does not unlock this arm.

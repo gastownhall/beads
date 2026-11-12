@@ -451,6 +451,11 @@ func printGlobalDatabaseConsentHint(w io.Writer, e *schema.RemoteMigrateGateErro
 	if e != nil && e.IsDataBehind() && e.Shared {
 		consent = schema.SharedConsentCommandForcedGlobal
 	}
+	// A proxied front door refuses the bare verb (gastownhall/beads#6656), so
+	// the shared-no-remote stop there names the forced one, as its block does.
+	if e != nil && e.Proxied && e.Decision == "shared-no-remote" {
+		consent = schema.SharedConsentCommandForcedGlobal
+	}
 	fmt.Fprintf(w,
 		"\n  This command targeted the global database (--global), so run the\n"+
 			"  migrate step with the same flag:\n"+
