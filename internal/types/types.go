@@ -2148,6 +2148,15 @@ type TreeNode struct {
 	// into an issue already expanded earlier in the same list, and it has no
 	// descendants. Drop these rows to get each issue once.
 	Deduped bool `json:"deduped,omitempty"`
+	// External marks a synthetic leaf composed on behalf of a bare
+	// cross-prefix edge (GH#5784): the row belongs to another rig, this node
+	// only renders it. View-only metadata, omitted when false.
+	External bool `json:"external,omitempty"`
+	// Unresolved marks a synthetic leaf whose bare cross-prefix target no
+	// route could answer (GH#5784): it names the stored ID and carries the
+	// reason in its title, and it stays blocking. View-only metadata, omitted
+	// when false.
+	Unresolved bool `json:"unresolved,omitempty"`
 }
 
 // MoleculeProgressStats provides efficient progress info for large molecules.

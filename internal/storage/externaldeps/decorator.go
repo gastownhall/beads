@@ -1018,14 +1018,31 @@ func (s *Store) GetDependencyTree(ctx context.Context, issueID string, maxDepth 
 
 func (s *Store) appendTreeExternalReferences(ctx context.Context, tree []*types.TreeNode, deps map[string][]*types.Dependency, maxDepth int) ([]*types.TreeNode, error) {
 	refs := make([]reference, 0)
+	bareTargets := make([]string, 0)
+	bareSeen := make(map[string]bool, len(deps))
 	for _, issueDeps := range deps {
 		for _, dep := range issueDeps {
-			if dep != nil && isExternalReference(dep.DependsOnID) {
+			if dep == nil {
+				continue
+			}
+			if isExternalReference(dep.DependsOnID) {
 				refs = append(refs, parseReference(dep.DependsOnID))
+				continue
+			}
+			// GH#5784: a bare cross-prefix target names a row another rig
+			// owns. Every type renders a leaf, matching the external: refs
+			// above, and one resolver call answers all of them at once.
+			if bareCrossRigEdge(dep) && !bareSeen[dep.DependsOnID] {
+				bareSeen[dep.DependsOnID] = true
+				bareTargets = append(bareTargets, dep.DependsOnID)
 			}
 		}
 	}
 	satisfied, err := s.resolveReferences(ctx, refs)
+	if err != nil {
+		return nil, err
+	}
+	bare, err := s.resolveBareDisplayTargets(ctx, bareTargets)
 	if err != nil {
 		return nil, err
 	}
@@ -1051,7 +1068,46 @@ func (s *Store) appendTreeExternalReferences(ctx context.Context, tree []*types.
 			continue
 		}
 		for _, dep := range deps[parent.ID] {
-			if dep == nil || !isExternalReference(dep.DependsOnID) {
+			if dep == nil {
+				continue
+			}
+			if !isExternalReference(dep.DependsOnID) {
+				// A bare cross-prefix leaf (GH#5784): the foreign row
+				// rendered, not walked — no recursion into its rig, no
+				// invented reverse edges. A readable target carries its
+				// real row and the External view flag; an unreadable one
+				// names the stored ID, carries the reason in its title and
+				// the Unresolved view flag, and stays blocking (open), the
+				// same fail-closed verdict as readiness.
+				if !bareCrossRigEdge(dep) || edges[[2]string{parent.ID, dep.DependsOnID}] {
+					continue
+				}
+				result := bare[dep.DependsOnID]
+				leaf := types.TreeNode{
+					Depth:          parent.Depth + 1,
+					ParentID:       parent.ID,
+					EdgeFromParent: dep.Type,
+					Deduped:        seen[dep.DependsOnID],
+				}
+				if result != nil && result.Issue != nil {
+					leaf.Issue = *result.Issue
+					leaf.External = true
+				} else {
+					reason := "no cross-rig resolver is configured"
+					if result != nil {
+						reason = crossRigReason(result)
+					}
+					leaf.Issue = types.Issue{
+						ID:        dep.DependsOnID,
+						Title:     reason,
+						Status:    types.StatusOpen,
+						IssueType: types.TypeTask,
+					}
+					leaf.Unresolved = true
+				}
+				tree = append(tree, &leaf)
+				seen[dep.DependsOnID] = true
+				edges[[2]string{parent.ID, dep.DependsOnID}] = true
 				continue
 			}
 			if edges[[2]string{parent.ID, dep.DependsOnID}] {

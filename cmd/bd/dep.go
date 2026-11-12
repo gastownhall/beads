@@ -1737,6 +1737,17 @@ func formatTreeNode(node *types.TreeNode, isBlocked bool) string {
 
 	line += treeEdgeLabel(node)
 
+	// View-only markers on synthetic foreign leaves (GH#5784): a readable
+	// cross-rig target renders its real row and is marked (external); a
+	// target no route could answer names the stored ID and reason and is
+	// marked (unresolved).
+	if node.External {
+		line += " " + ui.RenderMuted("(external)")
+	}
+	if node.Unresolved {
+		line += " " + ui.RenderWarn("(unresolved)")
+	}
+
 	// Add READY/BLOCKED indicator for root node
 	if node.Status == types.StatusOpen && node.Depth == 0 {
 		if isBlocked {

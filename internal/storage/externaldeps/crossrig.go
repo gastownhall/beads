@@ -46,6 +46,17 @@ func defaultCrossRigWarning(target, reason string) {
 	fmt.Fprintf(os.Stderr, "Warning: cross-rig dependency target %q is unresolved (%s); it remains blocking\n  Fix its route in .beads/routes.jsonl, or remove the edge with `bd dep remove <issue-id> %s`\n", target, reason, target)
 }
 
+// bareCrossRigEdge reports whether dep is any bare cross-prefix edge
+// (GH#5784): a target stored in depends_on_external because it names an ID
+// whose prefix belongs to another rig. Display paths (the dependency-tree
+// leaves) render every type; the ready predicate is bareCrossRigBlockingEdge.
+func bareCrossRigEdge(dep *types.Dependency) bool {
+	return dep != nil &&
+		dep.DependsOnID != "" &&
+		!isExternalReference(dep.DependsOnID) &&
+		types.ExtractPrefix(dep.DependsOnID) != types.ExtractPrefix(dep.IssueID)
+}
+
 // bareCrossRigBlockingEdge reports whether dep is a bare cross-prefix edge
 // that gates readiness (GH#5784): a target stored in depends_on_external
 // because it names an ID whose prefix belongs to another rig. Only blocks and
@@ -53,10 +64,7 @@ func defaultCrossRigWarning(target, reason string) {
 // readiness, exactly as a local one does not (the ready predicate reads the
 // is_blocked flag, which only ready-affecting types set).
 func bareCrossRigBlockingEdge(dep *types.Dependency) bool {
-	return dep != nil &&
-		dep.DependsOnID != "" &&
-		!isExternalReference(dep.DependsOnID) &&
-		types.ExtractPrefix(dep.DependsOnID) != types.ExtractPrefix(dep.IssueID) &&
+	return bareCrossRigEdge(dep) &&
 		(dep.Type == types.DepBlocks || dep.Type == types.DepConditionalBlocks)
 }
 
@@ -149,6 +157,43 @@ func (s *Store) bareTargetSatisfaction(ctx context.Context, targets []string, lo
 		}
 	}
 	return satisfied, nil
+}
+
+// resolveBareDisplayTargets answers every bare cross-prefix target a display
+// pass (the dependency-tree leaves, GH#5784 AC-7) saw, in one resolver call,
+// in-band: a target no route could answer comes back with a nil Issue and its
+// reason — a Store built without a resolver answers that for every target —
+// so the tree renders an unresolved leaf rather than failing a walk the
+// local store already answered. A resolver error is the operation failing
+// only when the context is done; otherwise the targets read as unresolved,
+// the same fallback resolveReferences has for a project that cannot be
+// opened (display cannot fail closed the way blockingStateFromRecords does).
+func (s *Store) resolveBareDisplayTargets(ctx context.Context, targets []string) (map[string]*ForeignIssueResult, error) {
+	results := make(map[string]*ForeignIssueResult, len(targets))
+	for _, target := range targets {
+		results[target] = &ForeignIssueResult{Reason: "no cross-rig resolver is configured"}
+	}
+	if len(targets) == 0 || s.resolveForeign == nil {
+		return results, nil
+	}
+	resolved, err := s.resolveForeign.ResolveForeignIssues(ctx, targets)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		for _, target := range targets {
+			results[target] = &ForeignIssueResult{Reason: fmt.Sprintf("resolver failed: %v", err)}
+		}
+		return results, nil
+	}
+	for _, target := range targets {
+		if result := resolved[target]; result != nil {
+			results[target] = result
+		} else {
+			results[target] = &ForeignIssueResult{Reason: "the owning rig did not answer for it"}
+		}
+	}
+	return results, nil
 }
 
 // crossRigReason renders a resolver's in-band refusal for a warning.
