@@ -371,7 +371,7 @@ and rename each `<name>.md.backup` back to `<name>.md`.
 
 `bd github sync` (and `bd github pull`/`push`) syncs the one repository named
 by `github.owner` and `github.repo`, but a database can hold beads from
-several repositories. In releases after v1.3.2, sync matches, fetches and
+several repositories. In releases after v1.3.4, sync matches, fetches and
 updates only beads whose issue URL points at the configured repository, so
 pulling issue 1313 from a second repository creates a new bead instead of
 overwriting the bead linked to the first repository's issue 1313. A
@@ -384,13 +384,16 @@ under the new one stay matched to their issues, and a pull relinks them to the
 current URL. If the old name now belongs to another repository, beads still
 linked under it count as another repository's: relink them
 (`bd update <id> --external-ref <new-url>`), or the next pull imports their
-issues again as new beads. If GitHub gives no answer for the configured
-repository itself (any failure but a 404: an outage, a dropped connection, a
-rate limit, a refused token), the command stops with an error instead of
-syncing without the repository's other names; run it again. If a request for
-another name fails, the sync goes on but warns which name it could not look
-up: it leaves the beads linked under that name alone, and a pull may import
-their issues again as new beads, so run it again or relink those beads.
+issues again as new beads. If GitHub gives no answer to one of these requests
+(any failure but a 404: an outage, a dropped connection, a rate limit, a
+refused token), the command stops with an error that names the repository,
+instead of syncing without knowing which beads are the configured
+repository's: a sync that skipped them would move its cursor past their edits,
+and a later sync could overwrite those edits with no conflict. If the failure
+is temporary, run the command again. If the error names another repository
+your beads link to and GitHub refuses the token for it (a 403), give the token
+read access to it. If the name is a former name of the configured repository,
+relinking those beads to their issues' current URLs also ends the lookup.
 
 ## 🌐 Community Tools
 

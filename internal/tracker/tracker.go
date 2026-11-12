@@ -89,16 +89,6 @@ type SinceGranularityProvider interface {
 	SinceGranularity() time.Duration
 }
 
-// InitWarner is implemented by trackers whose Init can go on without an
-// answer it asked the remote for (GitHub: whether another name that local
-// refs use is the configured repository's). InitWarnings says what each
-// missing answer leaves the sync unable to do, and Sync reports every warning
-// as it starts, so the refs it leaves alone because of one are not skipped
-// without a word.
-type InitWarner interface {
-	InitWarnings() []string
-}
-
 // MatchKeyer is implemented by trackers whose ExtractIdentifier values are
 // not unique across the namespace a single pull can span (e.g. GitLab IIDs
 // are project-scoped). MatchKey returns the fallback-dedup key for an

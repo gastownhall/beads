@@ -788,9 +788,6 @@ func TestRenamedRepository_ConfigMovedToCurrentName(t *testing.T) {
 		if !slices.Equal(tr.formerNames, []string{"old-owner/repo-b"}) {
 			t.Fatalf("former names = %q, want [old-owner/repo-b]", tr.formerNames)
 		}
-		if w := tr.InitWarnings(); len(w) != 0 {
-			t.Fatalf("InitWarnings() = %q, want none: GitHub answered for every name", w)
-		}
 		stub.mu.Lock()
 		stub.calls = nil
 		stub.mu.Unlock()
@@ -865,10 +862,10 @@ func TestRenamedRepository_ConfigMovedToCurrentName(t *testing.T) {
 // repository. When the configured name redirects, as a renamed or transferred
 // repository's does, refs under the current name address the repository too.
 // When GitHub answers 404 for it, Init still succeeds and only the configured
-// name does, as before; any other failure of that lookup fails Init. Another
-// name whose lookup fails without an answer (a 403 here, a 5xx or a dropped
-// connection in TestResolveRepositoryNames_FailedLookups) stays unresolved,
-// and Init warns about it instead of narrowing the scope without a word.
+// name does, as before. Any other failure fails Init, for the configured name
+// and for another name local refs use alike (a 403 here, a 5xx or a dropped
+// connection in TestResolveRepositoryNames_FailedLookups), rather than
+// narrowing the scope.
 func TestInit_ResolvesRenamedRepositoryName(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "tok")
 	var mu sync.Mutex
@@ -898,13 +895,12 @@ func TestInit_ResolvesRenamedRepositoryName(t *testing.T) {
 	web := srv.URL
 
 	for _, tc := range []struct {
-		name        string
-		owner       string
-		refs        []string // external_refs of the local beads
-		wantCalls   []string
-		wantErr     string            // part of the error Init returns
-		wantWarning string            // part of the one warning Init leaves
-		want        map[string]string // ref -> ExtractIdentifier
+		name      string
+		owner     string
+		refs      []string // external_refs of the local beads
+		wantCalls []string
+		wantErr   string            // part of the error Init returns
+		want      map[string]string // ref -> ExtractIdentifier
 	}{
 		{
 			// The config names the current name; local refs name the old one
@@ -973,9 +969,9 @@ func TestInit_ResolvesRenamedRepositoryName(t *testing.T) {
 			wantErr:   "looking up repository locked-owner/repo-b on GitHub",
 		},
 		{
-			// GitHub refuses another name local refs use: Init goes on and
-			// warns about that name. Repository A, which GitHub answered with
-			// its own ID, goes unmentioned.
+			// GitHub refuses another name local refs use. It may be a former
+			// name of the configured repository, so Init fails at once,
+			// before it reads repository A's name, which sorts after it.
 			name:  "other-name lookup refused",
 			owner: "owner-b",
 			refs: []string{
@@ -985,14 +981,8 @@ func TestInit_ResolvesRenamedRepositoryName(t *testing.T) {
 			wantCalls: []string{
 				"GET /api/v3/repos/owner-b/repo-b",
 				"GET /api/v3/repos/locked-owner/repo-b",
-				"GET /api/v3/repos/owner-a/repo-a",
 			},
-			wantWarning: "could not look up locked-owner/repo-b on GitHub",
-			want: map[string]string{
-				web + "/locked-owner/repo-b/issues/5": "",
-				web + "/owner-a/repo-a/issues/5":      "",
-				web + "/owner-b/repo-b/issues/5":      "5",
-			},
+			wantErr: "looking up repository locked-owner/repo-b on GitHub",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1029,13 +1019,6 @@ func TestInit_ResolvesRenamedRepositoryName(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Init: %v", err)
 			}
-			warnings := tr.InitWarnings()
-			switch {
-			case tc.wantWarning == "" && len(warnings) != 0:
-				t.Errorf("InitWarnings() = %q, want none: GitHub answered for every name", warnings)
-			case tc.wantWarning != "" && (len(warnings) != 1 || !strings.Contains(warnings[0], tc.wantWarning) || strings.Contains(warnings[0], "owner-a")):
-				t.Errorf("InitWarnings() = %q, want one warning containing %q and not owner-a/repo-a", warnings, tc.wantWarning)
-			}
 			for ref, want := range tc.want {
 				if got := tr.ExtractIdentifier(ref); got != want {
 					t.Errorf("ExtractIdentifier(%q) = %q, want %q", ref, got, want)
@@ -1048,40 +1031,57 @@ func TestInit_ResolvesRenamedRepositoryName(t *testing.T) {
 	}
 }
 
+// failedLookupOldRef and failedLookupOldID are the bead of
+// newFailedLookupFixture that is linked under the repository's old name.
+const (
+	failedLookupOldRef = "https://github.com/old-owner/repo-b/issues/1313"
+	failedLookupOldID  = "bd-old1313"
+)
+
+// newFailedLookupFixture sets up the case of
+// TestRenamedRepository_ConfigMovedToCurrentName with a bead edited locally
+// since github.last_sync: the config names the repository's current name,
+// owner-b/repo-b, GitHub redirects its old name, old-owner/repo-b, and the
+// bead bd-old1313 ("Local edit") is linked under the old name, next to
+// repository A's bead. The stub fails the requests fail names (see
+// githubAPIStub.fail), each on its one attempt.
+func newFailedLookupFixture(t *testing.T, fail map[string]int) (*githubAPIStub, *Tracker, *crossRepoStore) {
+	t.Helper()
+	stub, tr := newGitHubAPIStub(t)
+	// One attempt, and a millisecond's backoff after a 5xx.
+	tr.client.Retry = RetryConfig{BaseDelay: time.Millisecond}
+	stub.renamedFrom = "/repos/old-owner/repo-b" // GitHub redirects the old name
+	stub.issues[1313] = gitHubIssueJSON(1313, "Repo B issue 1313", crossRepoRemote)
+	stub.list = []int{1313}
+	stub.fail = fail
+	ref := failedLookupOldRef
+	store := newCrossRepoStore(repoABead(crossRepoLocal), &types.Issue{ID: failedLookupOldID, Title: "Local edit",
+		Status: types.StatusOpen, IssueType: types.TypeTask, ExternalRef: &ref, UpdatedAt: crossRepoLocal})
+	store.meta["github.last_sync"] = crossRepoSync.Format(time.RFC3339)
+	tr.store = store
+	return stub, tr, store
+}
+
+// syncLikeCLI runs what one bd github sync, push or pull runs: Init's
+// repository-name resolution, then, only if that succeeds, the sync.
+func syncLikeCLI(ctx context.Context, tr *Tracker, store *crossRepoStore, opts tracker.SyncOptions) (*tracker.SyncResult, error) {
+	tr.store = store
+	if err := tr.resolveRepositoryNames(ctx); err != nil {
+		return nil, err
+	}
+	return tracker.NewEngine(tr, store, "test").Sync(ctx, opts)
+}
+
 // TestResolveRepositoryNames_FailedLookups: only a 404 or an answer with
 // another repository's ID settles a name. A 5xx or a dropped connection
-// answers nothing, and must not narrow the scope without a word. The config
-// names the current name, and a bead edited locally is linked under the old
-// one, as in TestRenamedRepository_ConfigMovedToCurrentName:
-//
-//   - a failed lookup of the configured repository fails
-//     resolveRepositoryNames, and so Init, before any other lookup;
-//   - so does a failed scan of the local beads;
-//   - a failed lookup of the old name lets the sync go on, but each sync
-//     warns, through OnWarning and in its result, that it leaves the beads
-//     linked under that name alone, so the push and the conflict detection
-//     that pass over the edited bead do not do so silently.
+// answers nothing, so resolveRepositoryNames, and so Init, fails at the first
+// lookup that fails instead of narrowing the scope: the configured
+// repository's, or that of another name local refs use, which may be a former
+// name of the repository (TestFailedNameLookup_NextSyncStillReportsTheConflict
+// shows what going on without it would cost). A failed scan of the local
+// beads fails it too.
 func TestResolveRepositoryNames_FailedLookups(t *testing.T) {
 	ctx := context.Background()
-	const oldRef = "https://github.com/old-owner/repo-b/issues/1313"
-	const oldID = "bd-old1313"
-	setup := func(t *testing.T, fail map[string]int) (*githubAPIStub, *Tracker, *crossRepoStore) {
-		t.Helper()
-		stub, tr := newGitHubAPIStub(t)
-		// One attempt, and a millisecond's backoff after a 5xx.
-		tr.client.Retry = RetryConfig{BaseDelay: time.Millisecond}
-		stub.renamedFrom = "/repos/old-owner/repo-b" // GitHub redirects the old name
-		stub.issues[1313] = gitHubIssueJSON(1313, "Repo B issue 1313", crossRepoRemote)
-		stub.list = []int{1313}
-		stub.fail = fail
-		ref := oldRef
-		store := newCrossRepoStore(repoABead(crossRepoLocal), &types.Issue{ID: oldID, Title: "Local edit",
-			Status: types.StatusOpen, IssueType: types.TypeTask, ExternalRef: &ref, UpdatedAt: crossRepoLocal})
-		store.meta["github.last_sync"] = crossRepoSync.Format(time.RFC3339)
-		tr.store = store
-		return stub, tr, store
-	}
-
 	for _, failure := range []struct {
 		name   string
 		status int
@@ -1090,85 +1090,66 @@ func TestResolveRepositoryNames_FailedLookups(t *testing.T) {
 		{"503", http.StatusServiceUnavailable},
 		{"dropped connection", dropConnection},
 	} {
-		t.Run("configured repository/"+failure.name, func(t *testing.T) {
-			stub, tr, _ := setup(t, map[string]int{"/repos/owner-b/repo-b": failure.status})
-
-			err := tr.resolveRepositoryNames(ctx)
-			if err == nil || !strings.Contains(err.Error(), "looking up repository owner-b/repo-b on GitHub") {
-				t.Fatalf("resolveRepositoryNames() = %v, want an error naming owner-b/repo-b", err)
-			}
-			if got, want := stub.requestLog(), []string{"GET /repos/owner-b/repo-b"}; !slices.Equal(got, want) {
-				t.Errorf("requests = %q, want only %q", got, want)
-			}
-		})
-
-		for _, run := range []struct {
-			name string
-			opts tracker.SyncOptions
+		for _, lookup := range []struct {
+			name, path, wantErr string
+			wantCalls           []string
 		}{
-			{"push", tracker.SyncOptions{Push: true}},
-			{"push preview", tracker.SyncOptions{Push: true, DryRun: true}},
-			{"sync", tracker.SyncOptions{Pull: true, Push: true, ConflictResolution: tracker.ConflictTimestamp}},
+			{"configured repository", "/repos/owner-b/repo-b",
+				"looking up repository owner-b/repo-b on GitHub: ",
+				[]string{"GET /repos/owner-b/repo-b"}},
+			// The old name sorts before repository A's, which is never read.
+			{"other name", "/repos/old-owner/repo-b",
+				"looking up repository old-owner/repo-b on GitHub, which local beads link to: ",
+				[]string{"GET /repos/owner-b/repo-b", "GET /repos/old-owner/repo-b"}},
 		} {
-			t.Run("other name/"+failure.name+"/"+run.name, func(t *testing.T) {
-				stub, tr, store := setup(t, map[string]int{"/repos/old-owner/repo-b": failure.status})
+			t.Run(lookup.name+"/"+failure.name, func(t *testing.T) {
+				stub, tr, _ := newFailedLookupFixture(t, map[string]int{lookup.path: failure.status})
 
-				if err := tr.resolveRepositoryNames(ctx); err != nil {
-					t.Fatalf("resolveRepositoryNames() = %v, want nil: another name's lookup does not stop the sync", err)
+				err := tr.resolveRepositoryNames(ctx)
+				if err == nil || !strings.Contains(err.Error(), lookup.wantErr) {
+					t.Fatalf("resolveRepositoryNames() = %v, want an error containing %q", err, lookup.wantErr)
 				}
-				if len(tr.formerNames) != 0 || !slices.Equal(tr.unresolvedNames, []string{"old-owner/repo-b"}) {
-					t.Fatalf("former names %q, unresolved names %q; want none and [old-owner/repo-b]", tr.formerNames, tr.unresolvedNames)
+				if got := stub.requestLog(); !slices.Equal(got, lookup.wantCalls) {
+					t.Errorf("requests = %q, want %q", got, lookup.wantCalls)
 				}
-				warnings := tr.InitWarnings()
-				if len(warnings) != 1 {
-					t.Fatalf("InitWarnings() = %q, want one warning", warnings)
-				}
-				for _, want := range []string{"old-owner/repo-b", "owner-b/repo-b", "bd update <id> --external-ref <new-url>"} {
-					if !strings.Contains(warnings[0], want) {
-						t.Errorf("warning %q does not mention %q", warnings[0], want)
-					}
-				}
-				if strings.Contains(warnings[0], "owner-a") {
-					t.Errorf("warning %q names owner-a/repo-a, which GitHub answered as another repository", warnings[0])
-				}
-
-				stub.mu.Lock()
-				stub.calls = nil
-				stub.mu.Unlock()
-				var reported []string
-				engine := tracker.NewEngine(tr, store, "test")
-				engine.OnWarning = func(msg string) { reported = append(reported, msg) }
-				result, err := engine.Sync(ctx, run.opts)
-				if err != nil {
-					t.Fatalf("Sync: %v", err)
-				}
-				if !slices.Equal(reported, warnings) || !slices.Contains(result.Warnings, warnings[0]) {
-					t.Errorf("sync reported %q, result warnings %q; want the Init warning in both", reported, result.Warnings)
-				}
-
-				// The warning says what the sync did: it left the bead linked
-				// under the unresolved name alone.
-				store.assertUntouched(t, oldID, "Local edit", oldRef)
-				store.assertUntouched(t, crossRepoAID, crossRepoAT, crossRepoARef)
-				if run.opts.Pull {
-					if result.Stats.Conflicts != 0 {
-						t.Errorf("conflicts = %d, want 0: the old-name bead is not compared with its issue", result.Stats.Conflicts)
-					}
-					return
-				}
-				if got := stub.requestLog(); len(got) != 0 {
-					t.Errorf("push requests = %q, want none", got)
-				}
-				if got := result.PushStats; got.Skipped != 2 || got.Updated != 0 {
-					t.Errorf("push stats skipped=%d updated=%d, want skipped=2 (the old-name bead and repo A's) updated=0",
-						got.Skipped, got.Updated)
+				if len(tr.formerNames) != 0 {
+					t.Errorf("former names = %q, want none", tr.formerNames)
 				}
 			})
 		}
 	}
 
+	// The error for another name gives each remedy with the case it fits:
+	// run the command again after a temporary failure, give the token read
+	// access when the name is another repository that refuses it, and relink
+	// the beads when it is a former name of the repository. Relinking a bead
+	// of another repository would point it at the configured repository's
+	// issue with the same number (#7781), and rerunning does not clear a
+	// refusal, so neither may be advised unconditionally.
+	t.Run("other name/advice", func(t *testing.T) {
+		_, tr, _ := newFailedLookupFixture(t, map[string]int{"/repos/old-owner/repo-b": http.StatusBadGateway})
+
+		err := tr.resolveRepositoryNames(ctx)
+		if err == nil {
+			t.Fatal("resolveRepositoryNames() = nil, want an error")
+		}
+		for _, want := range []string{
+			"cannot tell whether those beads belong to owner-b/repo-b",
+			"If the failure is temporary, run the command again.",
+			"If old-owner/repo-b is another repository and GitHub refuses this token for it (a 403), give the token read access to it.",
+			"If it is a former name of owner-b/repo-b, relinking those beads to their issues' current URLs (bd update <id> --external-ref <url>)",
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not say %q", err, want)
+			}
+		}
+		if strings.Contains(err.Error(), "owner-a") {
+			t.Errorf("error %q names owner-a/repo-a, which it never looked up", err)
+		}
+	})
+
 	t.Run("local scan", func(t *testing.T) {
-		stub, tr, store := setup(t, nil)
+		stub, tr, store := newFailedLookupFixture(t, nil)
 		store.searchErr = errors.New("database is closed")
 
 		err := tr.resolveRepositoryNames(ctx)
@@ -1179,6 +1160,92 @@ func TestResolveRepositoryNames_FailedLookups(t *testing.T) {
 			t.Errorf("requests = %q, want only %q", got, want)
 		}
 	})
+}
+
+// TestFailedNameLookup_NextSyncStillReportsTheConflict: a command whose
+// lookup of the old name fails stops before it syncs, so it leaves
+// github.last_sync and every bead as they were, and the next command, once
+// GitHub answers, still compares the edited bead with its issue: it reports
+// the conflict and resolves it by the strategy, as a sync without the failed
+// command does. Had the failed command synced without the old name, it would
+// have skipped the bead while moving the cursor past its local edit (and,
+// when GitHub's issue was edited first, imported that edit as a duplicate
+// bead); the next sync would then find no conflict, and pull the remote edit
+// over the local one or push the stale bead over the remote edit.
+func TestFailedNameLookup_NextSyncStillReportsTheConflict(t *testing.T) {
+	ctx := context.Background()
+	for _, strategy := range []struct {
+		name      string
+		resolve   tracker.ConflictResolution
+		wantTitle string // the edited bead's title after the second command
+		wantPatch bool   // whether the second command pushes the local edit
+	}{
+		// The remote edit is the newer one.
+		{"timestamp", tracker.ConflictTimestamp, "Remote edit", false},
+		{"local", tracker.ConflictLocal, "Local edit", true},
+	} {
+		for _, first := range []struct {
+			name string
+			opts tracker.SyncOptions
+			// editedFirst: GitHub's issue is edited before the failed
+			// command, not after it.
+			editedFirst bool
+		}{
+			{"push, then a remote edit", tracker.SyncOptions{Push: true}, false},
+			{"a remote edit, then sync", tracker.SyncOptions{Pull: true, Push: true, ConflictResolution: strategy.resolve}, true},
+		} {
+			t.Run(strategy.name+"/"+first.name, func(t *testing.T) {
+				stub, tr, store := newFailedLookupFixture(t, map[string]int{"/repos/old-owner/repo-b": http.StatusBadGateway})
+				editRemote := func(at time.Time) {
+					stub.mu.Lock()
+					defer stub.mu.Unlock()
+					stub.issues[1313] = gitHubIssueJSON(1313, "Remote edit", at)
+				}
+				if first.editedFirst {
+					editRemote(crossRepoLocal.Add(24 * time.Hour))
+				}
+
+				if _, err := syncLikeCLI(ctx, tr, store, first.opts); err == nil {
+					t.Errorf("first command: no error, want the failed lookup of old-owner/repo-b")
+				}
+				if got, want := store.meta["github.last_sync"], crossRepoSync.Format(time.RFC3339); got != want {
+					t.Errorf("first command moved github.last_sync to %s, want it left at %s", got, want)
+				}
+				if len(store.issues) != 2 {
+					t.Errorf("first command left %d beads, want 2 (no duplicate)", len(store.issues))
+				}
+				store.assertUntouched(t, failedLookupOldID, "Local edit", failedLookupOldRef)
+				if !first.editedFirst {
+					// Edited after any cursor the first command could have set.
+					editRemote(time.Now().UTC().Add(time.Hour))
+				}
+
+				stub.mu.Lock()
+				stub.fail = nil
+				stub.calls = nil
+				stub.mu.Unlock()
+				result, err := syncLikeCLI(ctx, &Tracker{client: tr.client, config: DefaultMappingConfig()}, store,
+					tracker.SyncOptions{Pull: true, Push: true, ConflictResolution: strategy.resolve})
+				if err != nil {
+					t.Fatalf("second command: %v", err)
+				}
+				if result.Stats.Conflicts != 1 {
+					t.Errorf("second command: conflicts = %d, want 1", result.Stats.Conflicts)
+				}
+				if got := store.issues[failedLookupOldID].Title; got != strategy.wantTitle {
+					t.Errorf("bead title = %q after the second command, want %q", got, strategy.wantTitle)
+				}
+				patched := slices.Contains(stub.requests(1313), "PATCH /repos/owner-b/repo-b/issues/1313")
+				if patched != strategy.wantPatch {
+					t.Errorf("second command pushed the local edit: %v, want %v (requests %q)", patched, strategy.wantPatch, stub.requests(1313))
+				}
+				if len(store.issues) != 2 {
+					t.Errorf("store holds %d beads, want 2 (no duplicate)", len(store.issues))
+				}
+				store.assertUntouched(t, crossRepoAID, crossRepoAT, crossRepoARef)
+			})
+		}
+	}
 }
 
 // setupEndpointTrustWorkspace gives the endpoint trust gate a workspace to

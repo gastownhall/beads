@@ -188,7 +188,6 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 
 	result := &SyncResult{Success: true}
 	e.warnings = nil
-	e.warnInit()
 
 	// Default to bidirectional if neither specified
 	if !opts.Pull && !opts.Push {
@@ -1987,14 +1986,5 @@ func (e *Engine) warn(format string, args ...interface{}) {
 	e.warnings = append(e.warnings, msg)
 	if e.OnWarning != nil {
 		e.OnWarning(msg)
-	}
-}
-
-// warnInit reports the warnings the tracker's Init left (see InitWarner).
-func (e *Engine) warnInit() {
-	if w, ok := e.Tracker.(InitWarner); ok {
-		for _, msg := range w.InitWarnings() {
-			e.warn("%s", msg)
-		}
 	}
 }

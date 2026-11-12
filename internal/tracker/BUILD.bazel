@@ -37,7 +37,6 @@ go_test(
         "engine_create_warnings_test.go",
         "engine_external_ref_history_test.go",
         "engine_history_gate_cgo_test.go",
-        "engine_init_warnings_test.go",
         "engine_match_key_test.go",
         "engine_pull_failure_test.go",
         "engine_pull_overlap_test.go",
