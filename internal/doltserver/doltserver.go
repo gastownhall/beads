@@ -1742,14 +1742,17 @@ func resolveCfgDir(doltDir string) (string, error) {
 // sibling "enable" key is omitted, which Dolt defaults to true). cfgDir must
 // be pre-resolved via resolveCfgDir — --config mode skips Dolt's own
 // flag-mode .doltcfg discovery entirely, so this is the one place that
-// behavior must be replicated.
+// behavior must be replicated. A non-empty serverUUID is set as the
+// server_uuid system variable, the server identity bd keeps for the data
+// directory (pinServerIdentity, GH#4637); a server config's value wins over
+// one persisted in the local or global Dolt config.
 //
 // Callers MUST only use this when SupportsArchiveLevelConfig(doltBin)
 // reports true — an older external dolt's own YAMLConfig struct may lack
 // this field, and Dolt's YAML loader uses yaml.UnmarshalStrict, so an
 // unrecognized key is a hard parse error at server startup, not a
 // silently-ignored one.
-func buildDoltServerYAMLConfig(host string, port, remotesAPIPort int, debug bool, cfgDir string) ([]byte, error) {
+func buildDoltServerYAMLConfig(host string, port, remotesAPIPort int, debug bool, cfgDir, serverUUID string) ([]byte, error) {
 	logLevel := serverLogLevel(debug)
 	archiveLevel := 0
 	yc := &servercfg.YAMLConfig{
@@ -1767,6 +1770,9 @@ func buildDoltServerYAMLConfig(host string, port, remotesAPIPort int, debug bool
 	}
 	if remotesAPIPort > 0 {
 		yc.RemotesapiConfig.Port_ = &remotesAPIPort
+	}
+	if serverUUID != "" {
+		yc.SystemVars_ = map[string]interface{}{"server_uuid": serverUUID}
 	}
 	return yaml.Marshal(yc)
 }
@@ -1946,11 +1952,18 @@ func startLocked(beadsDir string) (*State, error) {
 		notReady    error
 		notReadyPID int
 		started     *startedServer
+		// pinnedUUID is the server UUID the launch gives the server
+		// (pinServerIdentity), or "" when it gives none.
+		pinnedUUID string
 	)
 	{
 		// Ensure dolt database directory is initialized
 		if err := ensureDoltInit(doltDir); err != nil {
 			return nil, fmt.Errorf("initializing dolt database: %w", err)
+		}
+
+		if pinnedUUID, err = pinServerIdentity(beadsDir, doltDir, useArchiveLevelConfig); err != nil {
+			return nil, err
 		}
 
 		// Rotate the log if it has grown past the configured ceiling. This is a
@@ -2045,7 +2058,7 @@ func startLocked(beadsDir string) (*State, error) {
 
 			var cmdArgs []string
 			if useArchiveLevelConfig {
-				cfgBody, cfgErr := buildDoltServerYAMLConfig(cfg.Host, actualPort, cfg.RemotesAPIPort, debug, cfgDir)
+				cfgBody, cfgErr := buildDoltServerYAMLConfig(cfg.Host, actualPort, cfg.RemotesAPIPort, debug, cfgDir, pinnedUUID)
 				if cfgErr != nil {
 					lastErr = fmt.Errorf("rendering managed sql-server config: %w", cfgErr)
 					if movable {
@@ -2185,6 +2198,18 @@ func startLocked(beadsDir string) (*State, error) {
 			pid, cfg.RemotesAPIPort, err, logPath(beadsDir))
 	}
 
+	// Check that the server this launch proved its own reports the identity
+	// bd keeps for doltDir, recording it when the launch pinned none, so a
+	// later open can tell it from a foreign one on the same port (GH#4637).
+	// Only this path pairs: an adopted or already-running server never does.
+	if ServerIdentityVerificationEnabled(beadsDir) {
+		if err := pairServerIdentity(beadsDir, started, cfg.Host, actualPort, doltDir, pinnedUUID); err != nil {
+			started.killAndWait()
+			removeServerStateFiles(beadsDir)
+			return nil, err
+		}
+	}
+
 	return &State{
 		Running:        true,
 		PID:            pid,
@@ -2202,8 +2227,11 @@ func startLocked(beadsDir string) (*State, error) {
 //
 // Returns nil if the database already exists or was successfully created,
 // and an error wrapping doltversion.ErrBelowRequiredMin, before creating
-// anything, if the server is older than bd's minimum.
-func EnsureGlobalDatabase(host string, port int, user, password string) error {
+// anything, if the server is older than bd's minimum. With a non-nil
+// identity it first checks that the server is the one identity's record
+// names (VerifyServerIdentity), and refuses with an error wrapping
+// ErrServerIdentityMismatch, before creating anything, when it is not.
+func EnsureGlobalDatabase(host string, port int, user, password string, identity *ServerIdentityExpectation) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -2230,6 +2258,10 @@ func EnsureGlobalDatabase(host string, port int, user, password string) error {
 	// empty database behind. A version it cannot determine is not refused
 	// (doltversion.CheckServer).
 	if err := doltversion.CheckServer(ctx, db, "dolt sql-server at "+doltutil.PrintedServerAddr(host, port), nil); err != nil {
+		return err
+	}
+	// And a server that is not bd's shared server (GH#4637).
+	if err := VerifyServerIdentity(ctx, db, identity); err != nil {
 		return err
 	}
 

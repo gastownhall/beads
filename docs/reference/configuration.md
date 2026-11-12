@@ -5,9 +5,9 @@ description: Complete reference for bd configuration across config.yaml and data
 
 Complete configuration reference for beads.
 
-Last reviewed: 2026-10-26
+Last reviewed: 2026-11-09
 
-Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, `internal/config/`, `internal/configfile/`, and `internal/endpointtrust/`.
+Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, `internal/config/`, `internal/configfile/`, `internal/endpointtrust/`, and `internal/doltserver/server_identity.go`.
 
 beads has two complementary configuration systems:
 
@@ -120,6 +120,7 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `dolt.auto-push-timeout` | — | `BD_DOLT_AUTO_PUSH_TIMEOUT` | `30s` | Timeout for a single auto-push attempt |
 | `dolt.local-only` | — | `BD_DOLT_LOCAL_ONLY` | `false` | Keep Dolt data off the network: skip remote wiring at `bd init`, suppress auto-push, have `bd dolt push`/`pull` and `bd sync` report remote sync as disabled without contacting a remote, and refuse `bd dolt remote add` |
 | `dolt.shared-server` | `--shared-server` | `BEADS_DOLT_SHARED_SERVER` | `false` | Share one Dolt server at `~/.beads/shared-server/` |
+| `dolt.verify-server-identity` | — | `BEADS_DOLT_VERIFY_SERVER_IDENTITY` | `true` | Refuse a Dolt server bd manages when the server answering its port is not the one bd started there (see [Dolt server identity](#dolt-server-identity)) |
 | `dolt.max-conns` | — | `BEADS_DOLT_MAX_CONNS` | `10` | Connection pool size |
 | `git.author` | — | `BD_GIT_AUTHOR` | (none) | Override commit author for beads commits |
 | `git.no-gpg-sign` | — | `BD_GIT_NO_GPG_SIGN` | `false` | Disable GPG signing for beads commits |
@@ -279,6 +280,95 @@ How it works:
 - Last push time and commit are tracked in `.beads/push-state.json`, a per-machine file (not in the database, to avoid merge conflicts across machines).
 
 Before pushing, `bd` verifies the local chunk store with `dolt fsck --quiet`, bounded by a 30-second timeout. For large stores, raise it with the runtime-only `BEADS_FSCK_TIMEOUT` environment variable (accepts durations like `2m` or bare seconds like `90`).
+
+## Dolt Server Identity
+
+bd gives each Dolt server data directory a server UUID (`@@server_uuid`) of
+its own, kept in `.bd-server-uuid` in that directory:
+`.beads/dolt/.bd-server-uuid` for a project's own server,
+`~/.beads/shared-server/dolt/.bd-server-uuid` for the shared server. bd
+starts the server there with that UUID, and every later open of that
+endpoint asks the answering server for its UUID and refuses, before it
+lists, creates, reads or writes any database there, when it is not the
+recorded one or there is no usable record. Without the check, another
+process on the same port (another bd, for example one in WSL2 whose loopback
+ports Windows shares, a port forward or a container) would receive your
+project's databases without any error.
+
+bd sets the UUID itself because Dolt's own does not tell servers apart on
+every host: a `server_uuid` persisted in your global Dolt config
+(`sqlserver.global.server_uuid`, which one `dolt sql-server` run in a
+directory of several databases writes) is the UUID every server on that host
+reports.
+
+The check covers the endpoints bd manages:
+
+- the shared server (`dolt.shared-server` / `BEADS_DOLT_SHARED_SERVER`),
+  including a shared port set in `BEADS_DOLT_SERVER_PORT`
+- a project's own server, which bd starts on `127.0.0.1` / `localhost`
+
+It does not apply to endpoints bd does not start:
+
+- a server that something other than bd runs (Docker, systemd, an
+  orchestrator), the shared server included, which you declare by turning
+  auto-start off (`dolt.auto-start: false` or `BEADS_DOLT_AUTO_START=0`) or
+  with external server mode (`BEADS_DOLT_SERVER_MODE=1`);
+  `bd init --external` declares it for you by writing
+  `dolt.auto-start: false` to the workspace's `config.yaml`, which git
+  tracks, so clones of the project inherit it; to declare it on one machine
+  only, remove that line and set `BEADS_DOLT_AUTO_START=0` in the gitignored
+  `.beads/.env`
+- external server mode that the configuration implies (a remote `dolt.host`,
+  or a `BEADS_DOLT_SERVER_PORT` outside shared mode)
+- a port you name yourself, such as `bd init --server-port`
+- unix sockets, TLS connections, proxied servers and gateways
+
+Turning auto-start off exempts every endpoint of the workspace, so a server
+you then start yourself with `bd dolt start` is not checked either.
+
+Turn it off with `dolt.verify-server-identity: false` in `config.yaml`
+(`bd config set dolt.verify-server-identity false`) or
+`BEADS_DOLT_VERIFY_SERVER_IDENTITY=false`. The environment variable wins over
+`config.yaml`. Only `false`, `0`, `off` and the other false spellings turn it
+off; a value bd cannot read leaves it on. With the check off, bd records no
+UUID but still starts its server with the one already recorded for the data
+directory, so a server started with the check off, for one command or by a
+project on the shared server whose `config.yaml` turns it off, passes the
+check of later commands.
+
+**Upgrading:** a server started by an older bd does not report the UUID bd
+keeps for its data directory, so the first command after the upgrade is
+refused. Stop it and start it again so bd starts it with that UUID:
+
+```bash
+bd dolt stop && bd dolt start
+```
+
+The same goes for any server started on that data directory without bd's
+UUID, such as a `dolt sql-server` you run there yourself. A server that
+something other than bd runs never gets a record: declare it as above
+(auto-start off or external server mode) instead of restarting it.
+
+When bd starts a server, it checks that the server reports the data
+directory's UUID, and it looks up which processes hold the listeners that
+receive connections to the address and port it dialed: through `/proc` on
+Linux, `lsof` and `ps` on macOS, and `netstat -aon` and the process tree on
+Windows. Each must be the server or a process it started, such as the real
+`dolt.exe` behind a launcher shim; when another process holds one, or the
+server reports another UUID, the launch fails. Where the host cannot show
+which process holds a listener (FreeBSD and other platforms with no such
+lookup, WSL1, a sandbox whose `/proc` lists no sockets), the UUID check
+decides alone. If bd cannot tell the version of your `dolt` binary, it
+starts the server with command-line flags, which cannot set the UUID: it
+then records the UUID the server reports, and where the host cannot show a
+listener's owner it does so on the evidence of the server's startup and
+prints a warning. See
+[Troubleshooting](/reference/troubleshooting#refusing-the-dolt-server-its-identity-cannot-be-verified).
+
+The check runs when bd opens its store and when `bd init` creates
+`beads_global` on the shared server. These administrative paths still
+connect without it: `bd doctor --fix`'s metadata and remote repairs,
+`bd bootstrap`, and the working-set flush bd runs before it stops a server.
 
 ## Actor Identity Resolution
 
@@ -544,6 +634,7 @@ Selected commonly-used variables:
 | `BEADS_INIT_GATE_TIMEOUT` | How long `bd init` waits for another bd process (another init, or live commands on the same workspace or shared server) to release the workspace gate before refusing (default `60s`; accepts durations like `2m` or bare seconds like `90`) |
 | `BEADS_GATE_WAIT_TIMEOUT` | How long an ordinary bd command waits while a maintenance operation (`bd init`, backup restore, migrate, bootstrap — on the same workspace, or on any project sharing the server in shared-server mode) holds or is queued for the workspace gate, before failing (default `30s`; accepts durations like `1m` or bare seconds like `90`; `0` fails immediately, for scripts that want the old fail-fast behavior). Queued maintenance operations run one after another and a waiting command waits for all of them; a queued one only delays a command, never fails it, and stops queueing others after 10s if it cannot get in. Git hooks always fail fast |
 | `BEADS_MIGRATION_WATCHDOG_INTERVAL` | Interval between soft WARN lines while a schema migration's SQL keeps running (default `5m`; accepts durations like `10m` or bare seconds like `90`). Observability only — it never aborts a migration |
+| `BEADS_DOLT_VERIFY_SERVER_IDENTITY` | Override `dolt.verify-server-identity`: `false` (or `0`, `off`) turns the server identity check off, `true` turns it on; any other value leaves it on |
 | `BEADS_DOLT_SERVER_MODE`, `BEADS_DOLT_SHARED_SERVER`, `BEADS_DOLT_DATA_DIR`, `BEADS_DOLT_PORT`, ... | Embedded/server Dolt overrides |
 | `BEADS_DOLT_BIN` | Pin the exact external `dolt` CLI binary managed proxied-server mode spawns, overriding PATH lookup (highest precedence; an explicit path that fails validation is an error, not a silent fallback to PATH). On Windows the executable extension may be omitted — `C:\tools\dolt` finds `C:\tools\dolt.exe` via PATHEXT, though a file at the exact spelled path wins if both exist. The binary must be dolt 2.6.0 or newer; an older one is refused |
 

@@ -112,7 +112,7 @@ func TestOpenServerConnectionRefusesBelowRequiredMin(t *testing.T) {
 				Gateway:         tc.gateway,
 				MaxOpenConns:    1,
 			}
-			db, _, _, err := openServerConnection(context.Background(), cfg)
+			db, _, _, err := openServerConnection(context.Background(), cfg, nil)
 			if db != nil {
 				_ = db.Close()
 				t.Error("openServerConnection returned a pool along with its refusal")

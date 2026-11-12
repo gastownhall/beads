@@ -18,7 +18,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -812,5 +814,52 @@ func runProvisionerCell(t *testing.T, form, autoStart string, reachable bool) {
 	}
 	if meta.DoltServerHost != "127.0.0.1" || meta.DoltServerPort != testDoltServerPort {
 		t.Errorf("metadata.json names %s:%d, want the endpoint init was given, %s", meta.DoltServerHost, meta.DoltServerPort, ep.addr)
+	}
+}
+
+// TestInitExternalDeclaresTheServerManagedOutsideBD: --external alone, with
+// auto-start unset and the server identity check on, declares that something
+// other than bd runs the server, for the stores init opens and for every
+// later command. The server identity check (GH#4637) has no record of a
+// server bd never launched, so without the declaration it refuses one: here a
+// reachable shared server, and a server only a port file names, neither ever
+// paired. Init launches no dolt, writes dolt.auto-start: false to the
+// workspace's config.yaml, and a later command opens the store and creates
+// an issue.
+func TestInitExternalDeclaresTheServerManagedOutsideBD(t *testing.T) {
+	for _, mode := range []string{"--shared-server", "--server"} {
+		t.Run(mode, func(t *testing.T) {
+			server := testutil.StartIsolatedDoltContainerHandle(t)
+			f := newExternalInitFixture(t)
+			beadsDir := filepath.Join(f.repoDir, ".beads")
+			if mode == "--shared-server" {
+				f.env = append(f.env, "BEADS_SHARED_SERVER_DIR="+t.TempDir(), "BEADS_DOLT_SERVER_PORT="+server.Port)
+			} else {
+				if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(beadsDir, doltserver.PortFileName), []byte(server.Port), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			res := f.run("", "init", "--quiet", mode, "--external", "--prefix", "ext", "--skip-hooks", "--skip-agents")
+			if res.failed {
+				t.Fatalf("bd init %s --external against the reachable server on port %s failed:\n%s", mode, server.Port, res.output)
+			}
+			requireNoLaunch(t, res)
+			if got := config.GetStringFromDir(beadsDir, "dolt.auto-start"); got != "false" {
+				t.Errorf("config.yaml dolt.auto-start = %q after bd init --external, want \"false\"", got)
+			}
+
+			later := f.run("", "create", "declared external", "--json")
+			if later.failed {
+				t.Fatalf("bd create after bd init %s --external failed:\n%s", mode, later.output)
+			}
+			requireNoLaunch(t, later)
+			if strings.Contains(later.output, "refusing the Dolt server") {
+				t.Errorf("bd create was refused by the server identity check:\n%s", later.output)
+			}
+		})
 	}
 }

@@ -181,7 +181,10 @@ func TestE2E_BootstrapProvisionsTheWorkspaceServer(t *testing.T) {
 			if tc.metaPort {
 				meta["dolt_server_port"] = port
 			} else if !tc.embedded && !tc.ownServer {
-				if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(fmt.Sprintf("dolt:\n  port: %d\n", port)), 0o600); err != nil {
+				// The server on that port is one bd does not run, so the
+				// workspace says so (auto-start off), as the server identity
+				// check requires of it (GH#4637).
+				if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(fmt.Sprintf("dolt:\n  port: %d\n  auto-start: false\n", port)), 0o600); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -357,7 +360,13 @@ func TestE2E_InitRemoteClonesThroughAServerOnAConfigPort(t *testing.T) {
 			if tc.where == "project" {
 				cfgPath = filepath.Join(beadsDir, "config.yaml")
 			}
-			writeClonePortFile(t, cfgPath, fmt.Sprintf("dolt:\n  mode: server\n  host: 127.0.0.1\n  port: %d\n", port))
+			portCfg := fmt.Sprintf("dolt:\n  mode: server\n  host: 127.0.0.1\n  port: %d\n", port)
+			if tc.foreign {
+				// A server you run, which the config declares (auto-start
+				// off), as the server identity check requires (GH#4637).
+				portCfg += "  auto-start: false\n"
+			}
+			writeClonePortFile(t, cfgPath, portCfg)
 			env := append(os.Environ(), "HOME="+home, "XDG_CONFIG_HOME="+filepath.Join(home, ".config"), "BEADS_DIR=",
 				"BEADS_TEST_MODE=", "BEADS_DOLT_AUTO_START=", "BEADS_DOLT_SERVER_PORT=", "BEADS_DOLT_PORT=", "BEADS_DOLT_SERVER_HOST=",
 				"BEADS_DOLT_SERVER_SOCKET=", "BEADS_DOLT_SERVER_MODE=", "BEADS_DOLT_SHARED_SERVER=", "BEADS_CEILING_DIRECTORIES="+filepath.Dir(dir),
