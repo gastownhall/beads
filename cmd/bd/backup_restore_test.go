@@ -747,21 +747,31 @@ func isolateRestoreWorkspace(t *testing.T) string {
 // readability unknown. The injected error tests the reporting contract; it is
 // not a real storage incompatibility.
 func TestRunBackupRestoreUnknownFieldsCommitGuidance(t *testing.T) {
+	mysqlCause := errors.New("Error 1105: table has unknown fields")
+	bareCause := errors.New("table has unknown fields")
+	wrappedCause := errors.New("table has unknown fields")
 	cases := []struct {
-		name      string
-		commitErr error
+		name              string
+		commitErr         error
+		cause             error
+		wantIndeterminate bool
 	}{
 		{
-			name:      "mysql error with indeterminate marker",
-			commitErr: fmt.Errorf("dolt commit: %w: %w", errors.New("Error 1105: table has unknown fields"), storage.ErrCommitIndeterminate),
+			name:              "mysql error with indeterminate marker",
+			commitErr:         fmt.Errorf("dolt commit: %w: %w", mysqlCause, storage.ErrCommitIndeterminate),
+			cause:             mysqlCause,
+			wantIndeterminate: true,
 		},
 		{
 			name:      "bare engine diagnostic",
-			commitErr: errors.New("table has unknown fields"),
+			commitErr: bareCause,
+			cause:     bareCause,
 		},
 		{
-			name:      "outer wrapped error",
-			commitErr: fmt.Errorf("commit restore: %w", fmt.Errorf("dolt commit: %w: %w", errors.New("table has unknown fields"), storage.ErrCommitIndeterminate)),
+			name:              "outer wrapped error",
+			commitErr:         fmt.Errorf("commit restore: %w", fmt.Errorf("dolt commit: %w: %w", wrappedCause, storage.ErrCommitIndeterminate)),
+			cause:             wrappedCause,
+			wantIndeterminate: true,
 		},
 	}
 	for _, tc := range cases {
@@ -802,6 +812,21 @@ func TestRunBackupRestoreUnknownFieldsCommitGuidance(t *testing.T) {
 				if strings.Contains(msg, unwanted) {
 					t.Errorf("error makes an unsupported claim (%q):\n%s", unwanted, msg)
 				}
+			}
+			// AC-2: the diagnostic keeps the original cause and the
+			// indeterminate marker in the chain, so callers never read a
+			// possibly-durable commit as a clean failure.
+			if !errors.Is(err, tc.commitErr) {
+				t.Errorf("errors.Is(err, commitErr) = false: %v", err)
+			}
+			if !errors.Is(err, tc.cause) {
+				t.Errorf("errors.Is(err, cause) = false: %v", err)
+			}
+			if got := errors.Is(err, storage.ErrCommitIndeterminate); got != tc.wantIndeterminate {
+				t.Errorf("errors.Is(err, ErrCommitIndeterminate) = %v, want %v: %v", got, tc.wantIndeterminate, err)
+			}
+			if tc.wantIndeterminate && !strings.Contains(msg, "indeterminate") {
+				t.Errorf("error drops the indeterminate wording:\n%s", msg)
 			}
 			if got := st.calls[len(st.calls)-1]; got != "Commit" {
 				t.Errorf("last call = %s, want Commit (calls %v)", got, st.calls)
