@@ -170,6 +170,16 @@ type Config struct {
 	// service DNS name, which the rebinding defense would otherwise refuse;
 	// see newHostPolicy. Empty leaves today's policy exactly as it was.
 	AllowedHosts []string
+	// RequestContext, when non-nil, is called for every routed request, after
+	// the bearer check on a route that requires one (an auth-exempt route, and
+	// every route on a server without bearer authentication, reaches it with no
+	// credential checked) and before it is dispatched to its handler. It
+	// returns the context the handler runs with. A non-nil error refuses the request:
+	// the server answers with the status and code of a *RequestRefusal found
+	// via errors.As, or 403 "request_refused" otherwise, and the handler never
+	// runs. See request_context.go for the full contract. Nil leaves every
+	// request exactly as it was.
+	RequestContext func(r *http.Request) (context.Context, error)
 	// LargeApplyCeiling bounds how long POST /v0/beads/issues:batchApply may
 	// hold a write transaction for a request over largeApplyItemThreshold
 	// items (batch_apply.go). Zero takes DefaultLargeApplyCeiling (5
@@ -1948,6 +1958,11 @@ func (s *Server) closeStreams() {
 // id (server_project_id), so it must sit behind the authentication gate — an
 // unauthenticated caller is turned away by the 401 before the stamp is ever
 // compared, and so learns nothing about the workspace's identity.
+//
+// Config.RequestContext, when set, runs between the credential check and the
+// stamp check for every routed request — the auth-exempt ones too, which reach
+// it with no credential checked — and the context it returns is the one every
+// later check and the handler receive.
 func (s *Server) route(rt route) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec := requestInfo(r.Context())
@@ -1966,6 +1981,13 @@ func (s *Server) route(rt route) http.Handler {
 
 		if !rt.authExempt && s.auth != nil && !s.authorize(w, r, rec) {
 			return
+		}
+
+		if s.cfg.RequestContext != nil {
+			var ok bool
+			if r, ok = s.applyRequestContext(w, r, rec); !ok {
+				return
+			}
 		}
 
 		// Identity before resources: a stamp for the wrong workspace is turned

@@ -1,0 +1,2022 @@
+# The bd connect front door (G3): what every runnable command in
+# cmd/bd/testdata/command_tree/tree.golden does on a workspace attached to a
+# bd serve with `bd connect`, recorded as it is on main.
+#
+# TestConnectFrontDoorClassifiesEveryCommand (test lane, connect_front_door_test.go)
+# fails on a runnable command with no row, a row for a command tree.golden no
+# longer lists, a malformed case, a ledger citation that does not resolve, and
+# a live F- ledger row that no case pins. TestE2E_ConnectFrontDoorMatrixPart1..N
+# (embedded lane, e2e_connect_front_door_test.go) run every case.
+#
+# A row is one command path. It has cases, or a class and a reason:
+#   local-only      not run: the command reads and writes no issue-store data
+#                   through the backend (help, local files, local processes).
+#                   It may still open the store, which over connect is one
+#                   GET /v0/beads/context handshake; a reason that says "never
+#                   opens the issue store" means the command is exempt from
+#                   bd's store gate (noDbCommands or bd:skip_store), and one
+#                   that says "opens the store" names the handshake.
+#   pending-ruling  not run: the matrix cannot run it (a tracker's network, a
+#                   TTY). This count may only shrink (maxUnrunPendingRulings).
+# A case is one argv with one class:
+#   works           the served run and the embedded twin's run both exit
+#                   `exit` (default 0) and print the same stdout under
+#                   `compare` (json, the default; text; lines; exit), after
+#                   revisions and `ignore_fields` are dropped and timestamps
+#                   are scrubbed: when each side wrote does not count, but a
+#                   zeroed or missing stamp does, and a deadline (defer_until,
+#                   due_at) is compared as it is, so a case sets one to an
+#                   absolute date; then every `verify` read answers the same
+#                   JSON on both sides.
+#                   `expect_stdout` also holds the served stdout to a regexp.
+#   refuses         the served run exits `exit` (nonzero); its stderr, stdout
+#                   and the string members of any JSON object they carry match
+#                   `words` (and carry a JSON `code`, when one is given); and it
+#                   writes nothing: not the server's store (its HEAD, its
+#                   working-set status, and, by content, its config table and
+#                   its dolt_ignore'd wisps with their labels, which status
+#                   cannot see; its other dolt_ignore'd tables, such as events,
+#                   leases and the wisps' dependencies and comments, are not
+#                   compared) and not the workspace's .beads. The same argv on an
+#                   embedded oracle exits `embedded_exit` (default 0), so a
+#                   refusal is the backend's and not a broken argv; a case whose
+#                   oracle exit would depend on other cases sets skip_embedded
+#                   and says why in `note`.
+#   pending-ruling  today's served behavior, pinned while the decision that
+#                   changes it is open (`ruling`): `observed` holds the exit (or
+#                   `listens`: the command serves until stopped), regexps the
+#                   stdout and stderr must and must not match, and `writes`:
+#                   none (as refuses), or local (.beads may change, the
+#                   server's store may not; needs fresh).
+#
+# Placeholders: {file:NAME} is that side's copy of asset NAME ({file:.} its
+# assets directory). An asset with install_to is also copied to that path in
+# both workspaces. seed runs on both sides after attach; seed_kv keys go into
+# the server's store directly (bd kv set refuses over connect) and through bd kv
+# set on the embedded sides.
+#
+# Each part attaches its own server, served workspace, embedded twin and
+# embedded oracle, and seeds all three. The served side and the twin receive
+# exactly the same works cases, and refuses and pending-ruling cases never
+# write either (checked), so the two stay identical and a case's order in its
+# part cannot change a comparison. A `fresh` case runs in its own unseeded pair
+# (a works case gets its own server too): for commands that rewrite the
+# workspace itself, and for a works case whose minted ids would otherwise reach
+# every later whole-store read.
+#
+# Flipping cases is how a native fix proves itself: its PR changes exactly the
+# cases its decision record names (native_fix: B1-B16, C1, D1-D8, E1-E4) and
+# their ledger citations, and nothing else.
+
+files:
+  - name: seed.json
+    content: |
+      {"commit_message": "front door seed", "nodes": [
+        {"key": "epic", "id": "e2e-fdepic", "title": "FD epic", "type": "epic"},
+        {"key": "epic.1", "id": "e2e-fdepic.1", "title": "FD epic child one", "type": "task", "parent_key": "epic"},
+        {"key": "epic.2", "id": "e2e-fdepic.2", "title": "FD epic child two", "type": "task", "parent_key": "epic"},
+        {"key": "alpha", "id": "e2e-fdalpha", "title": "FD alpha", "type": "task", "priority": 1, "labels": ["fd:a"], "assignee": "alice", "description": "alpha description"},
+        {"key": "bravo", "id": "e2e-fdbravo", "title": "FD bravo", "type": "bug", "labels": ["fd:b", "fd:shared"]},
+        {"key": "charlie", "id": "e2e-fdcharlie", "title": "FD charlie", "type": "feature", "priority": 3, "labels": ["fd:shared"]},
+        {"key": "blocked", "id": "e2e-fdblocked", "title": "FD blocked by alpha", "type": "task", "deps": [{"target": "alpha"}]},
+        {"key": "closed", "id": "e2e-fdclosed", "title": "FD closed", "type": "task"},
+        {"key": "deferred", "id": "e2e-fddeferred", "title": "FD deferred", "type": "task", "defer_until": "2099-01-01T00:00:00Z"},
+        {"key": "gate", "id": "e2e-fdgate", "title": "FD gate", "type": "gate"},
+        {"key": "mol", "id": "e2e-fdmol", "title": "FD molecule", "type": "molecule"},
+        {"key": "mol.1", "id": "e2e-fdmol.1", "title": "FD molecule step one", "type": "task", "parent_key": "mol", "assignee": "worker"},
+        {"key": "mol.2", "id": "e2e-fdmol.2", "title": "FD molecule step two", "type": "task", "parent_key": "mol", "deps": [{"target": "mol.1"}]},
+        {"key": "wisp", "id": "e2e-fdwisp", "title": "FD wisp", "type": "task", "ephemeral": true},
+        {"key": "same1", "id": "e2e-fdsame1", "title": "FD same title", "type": "task", "description": "same body"},
+        {"key": "same2", "id": "e2e-fdsame2", "title": "FD same title", "type": "task", "description": "same body"},
+        {"key": "human", "id": "e2e-fdhuman", "title": "FD needs a human", "type": "task", "labels": ["human"]},
+        {"key": "gated", "id": "e2e-fdgated", "title": "FD gated", "type": "task", "deps": [{"target": "gate"}]},
+        {"key": "tassign", "id": "e2e-tassign", "title": "FD target assign", "type": "task"},
+        {"key": "tclose", "id": "e2e-tclose", "title": "FD target close", "type": "task"},
+        {"key": "tclaimnext", "id": "e2e-tclaimnext", "title": "FD target claimnext", "type": "task"},
+        {"key": "tcomment", "id": "e2e-tcomment", "title": "FD target comment", "type": "task"},
+        {"key": "tcomments", "id": "e2e-tcomments", "title": "FD target comments", "type": "task"},
+        {"key": "tdelete", "id": "e2e-tdelete", "title": "FD target delete", "type": "task"},
+        {"key": "tdelprev", "id": "e2e-tdelprev", "title": "FD target delprev", "type": "task"},
+        {"key": "tdepadd", "id": "e2e-tdepadd", "title": "FD target depadd", "type": "task"},
+        {"key": "trel1", "id": "e2e-trel1", "title": "FD target rel1", "type": "task"},
+        {"key": "trel2", "id": "e2e-trel2", "title": "FD target rel2", "type": "task"},
+        {"key": "tunrel1", "id": "e2e-tunrel1", "title": "FD target unrel1", "type": "task"},
+        {"key": "tunrel2", "id": "e2e-tunrel2", "title": "FD target unrel2", "type": "task"},
+        {"key": "tlink1", "id": "e2e-tlink1", "title": "FD target link1", "type": "task"},
+        {"key": "tlink2", "id": "e2e-tlink2", "title": "FD target link2", "type": "task"},
+        {"key": "tdup", "id": "e2e-tdup", "title": "FD target dup", "type": "task"},
+        {"key": "tdupof", "id": "e2e-tdupof", "title": "FD target dupof", "type": "task"},
+        {"key": "tsup", "id": "e2e-tsup", "title": "FD target sup", "type": "task"},
+        {"key": "tsupw", "id": "e2e-tsupw", "title": "FD target supw", "type": "task"},
+        {"key": "tedit", "id": "e2e-tedit", "title": "FD target edit", "type": "task"},
+        {"key": "tlabadd", "id": "e2e-tlabadd", "title": "FD target labadd", "type": "task"},
+        {"key": "tnote", "id": "e2e-tnote", "title": "FD target note", "type": "task"},
+        {"key": "tprio", "id": "e2e-tprio", "title": "FD target prio", "type": "task"},
+        {"key": "treopen", "id": "e2e-treopen", "title": "FD target reopen", "type": "task"},
+        {"key": "tstate", "id": "e2e-tstate", "title": "FD target state", "type": "task"},
+        {"key": "ttag", "id": "e2e-ttag", "title": "FD target tag", "type": "task"},
+        {"key": "tupdate", "id": "e2e-tupdate", "title": "FD target update", "type": "task"},
+        {"key": "tclaim", "id": "e2e-tclaim", "title": "FD target claim", "type": "task"},
+        {"key": "tgateblk", "id": "e2e-tgateblk", "title": "FD target gateblk", "type": "task"},
+        {"key": "ttodo", "id": "e2e-ttodo", "title": "FD target todo", "type": "task"},
+        {"key": "trename", "id": "e2e-trename", "title": "FD target rename", "type": "task"},
+        {"key": "tprov", "id": "e2e-tprov", "title": "FD target prov", "type": "task"},
+        {"key": "tbatch", "id": "e2e-tbatch", "title": "FD target batch", "type": "task"},
+        {"key": "trestore", "id": "e2e-trestore", "title": "FD target restore", "type": "task"},
+        {"key": "tdefer", "id": "e2e-tdefer", "title": "FD target defer", "type": "task"},
+        {"key": "tundefer", "id": "e2e-tundefer", "title": "FD target undefer", "type": "task", "defer_until": "2099-01-01T00:00:00Z"},
+        {"key": "tdeprm", "id": "e2e-tdeprm", "title": "FD target deprm", "type": "task", "deps": [{"target": "bravo"}]},
+        {"key": "theartbeat", "id": "e2e-theartbeat", "title": "FD target heartbeat", "type": "task", "assignee": "worker"},
+        {"key": "tunclaim", "id": "e2e-tunclaim", "title": "FD target unclaim", "type": "task", "assignee": "worker"},
+        {"key": "tlabrm", "id": "e2e-tlabrm", "title": "FD target labrm", "type": "task", "labels": ["fd:rm"]},
+        {"key": "tpropagate", "id": "e2e-tpropagate", "title": "FD target propagate", "type": "task"},
+        {"key": "tpropagate.1", "id": "e2e-tpropagate.1", "title": "FD target propagate.1", "type": "task", "parent_key": "tpropagate"},
+        {"key": "tpromote", "id": "e2e-tpromote", "title": "FD target promote", "type": "task", "ephemeral": true},
+        {"key": "tgate1", "id": "e2e-tgate1", "title": "FD target gate1", "type": "gate"},
+        {"key": "tgate2", "id": "e2e-tgate2", "title": "FD target gate2", "type": "gate"},
+        {"key": "thumanr", "id": "e2e-thumanr", "title": "FD target humanr", "type": "task", "labels": ["human"]},
+        {"key": "thumand", "id": "e2e-thumand", "title": "FD target humand", "type": "task", "labels": ["human"]},
+        {"key": "tburn", "id": "e2e-tburn", "title": "FD target burn", "type": "molecule"},
+        {"key": "tsquash", "id": "e2e-tsquash", "title": "FD target squash", "type": "molecule"},
+        {"key": "tsquash.1", "id": "e2e-tsquash.1", "title": "FD target squash.1", "type": "task", "parent_key": "tsquash"},
+        {"key": "tbond1", "id": "e2e-tbond1", "title": "FD target bond1", "type": "molecule"},
+        {"key": "tbond2", "id": "e2e-tbond2", "title": "FD target bond2", "type": "molecule"},
+        {"key": "tswarm", "id": "e2e-tswarm", "title": "FD target swarm", "type": "epic"},
+        {"key": "tswarm.1", "id": "e2e-tswarm.1", "title": "FD target swarm.1", "type": "task", "parent_key": "tswarm"},
+        {"key": "tship", "id": "e2e-tship", "title": "FD target ship", "type": "task", "labels": ["export:fd-cap"]},
+        {"key": "thread", "id": "e2e-fdthread", "title": "FD thread root", "type": "task"},
+        {"key": "reply", "id": "e2e-fdreply", "title": "FD thread reply", "type": "task", "deps": [{"target": "thread", "type": "replies-to"}]}
+      ]}
+  - name: graph-extra.json
+    content: |
+      {"nodes": [{"key": "g", "id": "e2e-ngraph", "title": "FD graph root", "type": "epic"}, {"key": "g.1", "id": "e2e-ngraph.1", "title": "FD graph step", "type": "task", "parent_key": "g"}]}
+  - name: fd-check.formula.toml
+    install_to: .beads/formulas/fd-check.formula.toml
+    content: |
+      formula = "fd-check"
+      description = "front door formula"
+      version = 1
+      type = "workflow"
+
+      [[steps]]
+      id = "one"
+      title = "Step one"
+      description = "first"
+
+      [[steps]]
+      id = "two"
+      title = "Step two"
+      needs = ["one"]
+      description = "second"
+  - name: editor.sh
+    content: |
+      printf "edited by the front door" > "$1"
+  - name: batch.txt
+    content: |
+      update e2e-tbatch priority=1
+  - name: import.jsonl
+    content: |
+      {"id": "e2e-nimport", "title": "FD imported", "issue_type": "task", "status": "open", "priority": 2}
+  - name: create.md
+    content: |
+      ## FD from a file
+
+      body of the file issue
+
+seed:
+  - [create, '--graph', '{file:seed.json}', '--json']
+  - [update, e2e-fdalpha, e2e-fdmol.1, e2e-theartbeat, e2e-tunclaim, '--status', in_progress]
+  - [close, '--force', e2e-fdclosed, e2e-fdepic.2, e2e-treopen, e2e-tsquash.1, e2e-tship]
+  - [comments, add, e2e-fdalpha, seed comment]
+  - [dep, add, e2e-tunrel1, e2e-tunrel2, '--type', relates-to]
+  - [remember, FD insight, '--key', fdmem]
+
+seed_kv:
+  - {key: fd.key, value: fd-value}
+
+commands:
+  - command: bd
+    class: local-only
+    reason: the root command prints help; never opens the issue store
+  - command: bd admin cleanup
+    cases:
+      - id: admin-cleanup
+        class: refuses
+        note: 'the words name embedded mode, which a connect workspace is not (the defect E1 fixes for bd sql)'
+        args: [admin, cleanup, '--dry-run', '--json']
+        exit: 1
+        words: '''bd admin cleanup'' is not yet supported in embedded mode'
+        embedded_exit: 1
+  - command: bd admin compact
+    cases:
+      - id: admin-compact
+        class: refuses
+        args: [admin, compact, '--stats', '--json']
+        exit: 1
+        words: 'operation "GetTier1Candidates" not supported by the http backend'
+  - command: bd admin reset
+    cases:
+      - id: admin-reset
+        class: refuses
+        fresh: true
+        note: 'fresh: a reset that ever succeeded would take the part''s served workspace with it; the words name embedded mode, which a connect workspace is not'
+        args: [admin, reset, '--json']
+        exit: 1
+        words: '''bd admin reset'' is not yet supported in embedded mode'
+        embedded_exit: 1
+  - command: bd ado projects
+    class: pending-ruling
+    reason: 'tracker integration: it needs a configured Azure DevOps project and its network API, which no test lane has, so its behavior over bd connect is unexercised'
+  - command: bd ado pull
+    class: pending-ruling
+    reason: 'tracker integration: it needs a configured Azure DevOps project and its network API, which no test lane has, so its behavior over bd connect is unexercised'
+  - command: bd ado push
+    class: pending-ruling
+    reason: 'tracker integration: it needs a configured Azure DevOps project and its network API, which no test lane has, so its behavior over bd connect is unexercised'
+  - command: bd ado status
+    cases:
+      - id: ado-status
+        class: works
+        args: [ado, status, '--json']
+  - command: bd ado sync
+    class: pending-ruling
+    reason: 'tracker integration: it needs a configured Azure DevOps project and its network API, which no test lane has, so its behavior over bd connect is unexercised'
+  - command: bd assign
+    cases:
+      - id: assign
+        class: works
+        args: [assign, e2e-tassign, bob, '--json']
+        verify: [[show, e2e-tassign, '--json']]
+  - command: bd audit label
+    class: local-only
+    reason: 'opens the store (the context handshake), then labels an entry of the workspace-local .beads/interactions.jsonl audit sidecar; writes no the issue store'
+  - command: bd audit record
+    cases:
+      - id: audit-record
+        class: works
+        note: 'appends to the workspace-local .beads/interactions.jsonl audit sidecar; it opens the store (the context handshake) first'
+        env: [BD_AUDIT_ENABLED=1]
+        args: [audit, record, '--kind', tool_call, '--tool-name', fd-front-door, '--exit-code', '0']
+        compare: exit
+  - command: bd backup init
+    cases:
+      - id: backup-init
+        class: refuses
+        note: 'the embedded oracle''s backup state depends on the other backup cases'
+        args: [backup, init, '{file:backup-dir}']
+        exit: 1
+        words: storage backend does not support backup operations
+        skip_embedded: true
+  - command: bd backup remove
+    cases:
+      - id: backup-remove
+        class: refuses
+        note: 'the embedded oracle''s backup state depends on the other backup cases'
+        args: [backup, remove, '--json']
+        exit: 1
+        words: storage backend does not support backup operations
+        skip_embedded: true
+  - command: bd backup restore
+    cases:
+      - id: backup-restore
+        class: refuses
+        note: 'the embedded oracle''s backup state depends on the other backup cases'
+        args: [backup, restore, '{file:.}', '--json']
+        exit: 1
+        words: storage backend does not support backup operations
+        skip_embedded: true
+  - command: bd backup status
+    cases:
+      - id: backup-status
+        class: works
+        note: a connect workspace has no local database to size
+        args: [backup, status, '--json']
+        ignore_fields: [database_size]
+  - command: bd backup sync
+    cases:
+      - id: backup-sync
+        class: refuses
+        note: 'the embedded oracle''s backup state depends on the other backup cases'
+        args: [backup, sync, '--json']
+        exit: 1
+        words: storage backend does not support backup operations
+        skip_embedded: true
+  - command: bd batch
+    cases:
+      - id: batch
+        class: refuses
+        native_fix: [B11]
+        args: [batch, '-f', '{file:batch.txt}', '--json']
+        exit: 1
+        words: 'operation "RunInTransaction" not supported by the http backend'
+        code: batch_error
+  - command: bd blocked
+    cases:
+      - id: blocked
+        class: works
+        args: [blocked, '--json']
+  - command: bd bootstrap
+    cases:
+      - id: bootstrap
+        class: refuses
+        args: [bootstrap, '--json']
+        exit: 1
+        words: 'backend "http" cannot be bootstrapped by bd bootstrap'
+  - command: bd branch
+    cases:
+      - id: branch-list
+        class: refuses
+        args: [branch, '--json']
+        exit: 1
+        words: 'operation "ListBranches" not supported by the http backend'
+  - command: bd children
+    cases:
+      - id: children
+        class: works
+        args: [children, e2e-fdepic, '--json']
+  - command: bd close
+    cases:
+      - id: close
+        class: works
+        args: [close, e2e-tclose, '--json']
+        verify: [[show, e2e-tclose, '--json']]
+      - id: close-claim-next
+        class: refuses
+        native_fix: [B10]
+        ledger: [F-close]
+        args: [close, e2e-tclaimnext, '--claim-next', '--json']
+        exit: 1
+        words: 'the served batch close cannot carry a next claim, so nothing was closed'
+  - command: bd codex-hook
+    cases:
+      - id: codex-hook-session-start
+        class: works
+        stdin: '{}'
+        args: [codex-hook, SessionStart]
+  - command: bd comment
+    cases:
+      - id: comment
+        class: works
+        args: [comment, e2e-tcomment, hello, '--json']
+        ignore_fields: [id]
+        verify: [[comments, e2e-tcomment, '--json']]
+  - command: bd comments
+    cases:
+      - id: comments
+        class: works
+        note: comment ids are minted per workspace
+        args: [comments, e2e-fdalpha, '--json']
+        ignore_fields: [id]
+  - command: bd comments add
+    cases:
+      - id: comments-add
+        class: works
+        args: [comments, add, e2e-tcomments, hello there, '--json']
+        ignore_fields: [id]
+        verify: [[comments, e2e-tcomments, '--json']]
+  - command: bd comments list
+    cases:
+      - id: comments-list
+        class: works
+        note: 'a stub that always exits 1 pointing at bd comments <issue-id>; it never opens the store (no request)'
+        args: [comments, list]
+        exit: 1
+        compare: text
+  - command: bd compact
+    cases:
+      - id: compact
+        class: refuses
+        args: [compact, '--dry-run', '--json']
+        exit: 1
+        words: 'operation "Log" not supported by the http backend'
+  - command: bd completion bash
+    class: local-only
+    reason: prints a shell completion script; never opens the issue store
+  - command: bd completion fish
+    class: local-only
+    reason: prints a shell completion script; never opens the issue store
+  - command: bd completion powershell
+    class: local-only
+    reason: prints a shell completion script; never opens the issue store
+  - command: bd completion zsh
+    class: local-only
+    reason: prints a shell completion script; never opens the issue store
+  - command: bd config apply
+    class: local-only
+    reason: 'opens the store (the context handshake), then reconciles the local checkout (git hooks, Dolt remotes) with config.yaml; no issue-store state'
+  - command: bd config drift
+    class: local-only
+    reason: 'opens the store (the context handshake), then inspects the local checkout (git hooks, Dolt remotes) against config.yaml; no issue-store state. Not a works case: its checks read how each workspace was attached, not the backend (the embedded twin reports missing git hooks and exits 1; the served workspace reports no git repository and exits 0)'
+  - command: bd config get
+    cases:
+      - id: config-get
+        class: works
+        args: [config, get, issue_prefix, '--json']
+  - command: bd config list
+    cases:
+      - id: config-list
+        class: works
+        args: [config, list, '--json']
+  - command: bd config set
+    cases:
+      - id: config-set
+        class: works
+        args: [config, set, fd.set, x, '--json']
+        verify: [[config, get, fd.set, '--json']]
+  - command: bd config set-many
+    cases:
+      - id: config-set-many
+        class: refuses
+        note: bd config set works over connect; set-many refuses
+        args: [config, set-many, fd.many=y, '--json']
+        exit: 1
+        words: 'operation "SetConfig" not supported by the http backend'
+  - command: bd config show
+    cases:
+      - id: config-show
+        class: works
+        note: 'a connect workspace has no metadata.json-sourced keys (dolt_mode, dolt_database, project_id) and here no git checkout (beads.role)'
+        args: [config, show, '--json']
+        compare: exit
+        expect_stdout: '"key": "issue_prefix"'
+  - command: bd config unset
+    cases:
+      - id: config-unset
+        class: works
+        setup: [[config, set, fd.unset, x]]
+        args: [config, unset, fd.unset, '--json']
+        verify: [[config, get, fd.unset, '--json']]
+  - command: bd config validate
+    cases:
+      - id: config-validate
+        class: works
+        note: 'the embedded side also checks federation.remote, which only a Dolt workspace has'
+        args: [config, validate, '--json']
+        compare: exit
+        expect_stdout: '"valid": true'
+  - command: bd conflicts list
+    cases:
+      - id: conflicts-list
+        class: refuses
+        args: [conflicts, list, '--json']
+        exit: 1
+        words: 'operation "GetConflicts" not supported by the http backend'
+  - command: bd conflicts resolve
+    cases:
+      - id: conflicts-resolve
+        class: refuses
+        args: [conflicts, resolve, '--all', '--ours', '--json']
+        exit: 1
+        words: 'operation "GetConflicts" not supported by the http backend'
+  - command: bd conflicts show
+    cases:
+      - id: conflicts-show
+        class: refuses
+        args: [conflicts, show, '--json']
+        exit: 1
+        words: 'operation "GetConflicts" not supported by the http backend'
+  - command: bd connect
+    class: local-only
+    reason: 'the front door itself: every part''s setup runs it, and TestE2E_Connect* in e2e_cli_test.go pin its refusals, redaction, reconnect and --clear'
+  - command: bd context
+    cases:
+      - id: context
+        class: works
+        note: 'reports the workspace''s own identity, which differs by backend by design'
+        args: [context, '--json']
+        compare: exit
+        expect_stdout: '"backend": "http"'
+  - command: bd cook
+    cases:
+      - id: cook
+        class: works
+        args: [cook, '{file:fd-check.formula.toml}', '--json']
+        ignore_fields: [source]
+  - command: bd count
+    cases:
+      - id: count
+        class: works
+        args: [count, '--json']
+  - command: bd create
+    cases:
+      - id: create
+        class: works
+        args: [create, FD created, '--id', e2e-ncreate, '--json']
+        verify: [[show, e2e-ncreate, '--json']]
+      - id: create-parent
+        class: works
+        args: [create, FD child of the epic, '--parent', e2e-fdepic, '--json']
+        verify: [[show, e2e-fdepic.3, '--json']]
+      - id: create-graph
+        class: works
+        args: [create, '--graph', '{file:graph-extra.json}', '--json']
+        verify: [[show, e2e-ngraph, e2e-ngraph.1, '--json']]
+      - id: create-file
+        class: refuses
+        native_fix: [B13]
+        args: [create, '-f', '{file:create.md}', '--json']
+        exit: 1
+        words: CreateBatchRequest\.Provenance is not expressible on the v0 wire
+  - command: bd create-form
+    class: pending-ruling
+    reason: 'interactive: it needs a TTY, which the matrix cannot give it; its write is bd create''s (cases create, create-parent)'
+  - command: bd cursor-hook
+    cases:
+      - id: cursor-hook-session-start
+        class: works
+        stdin: '{}'
+        args: [cursor-hook, sessionStart]
+  - command: bd db-proxy-child
+    class: local-only
+    reason: 'internal: the proxied-server database proxy''s child process; never run by hand'
+  - command: bd defer
+    cases:
+      - id: defer
+        class: pending-ruling
+        native_fix: [B8, C1]
+        ruling: 'B8 + C1: over connect bd defer prints the per-id error, exits 0 and writes nothing; B8 writes through the Lifecycle role, C1 makes a failed id exit 1'
+        args: [defer, e2e-tdefer, '--until', '2099-02-01', '--json']
+        observed: {exit: 0, stdout: '^\s*$', stderr: 'Error deferring e2e-tdefer: operation "UpdateIssue" not supported by the http backend', writes: none}
+  - command: bd delete
+    cases:
+      - id: delete
+        class: works
+        args: [delete, e2e-tdelete, '--force', '--json']
+        verify: [[show, e2e-tdelete, '--json']]
+      - id: delete-dry-run
+        class: works
+        args: [delete, e2e-tdelprev, '--dry-run', '--json']
+      - id: delete-preview
+        class: refuses
+        native_fix: [B15]
+        args: [delete, e2e-tdelprev]
+        exit: 1
+        words: 'operation "GetDependencies" not supported by the http backend'
+  - command: bd dep
+    cases:
+      - id: dep-bare
+        class: works
+        args: [dep, e2e-fdblocked, '--json']
+        compare: text
+  - command: bd dep add
+    cases:
+      - id: dep-add
+        class: works
+        args: [dep, add, e2e-tdepadd, e2e-fdbravo, '--json']
+        verify: [[dep, list, e2e-tdepadd, '--json']]
+  - command: bd dep cycles
+    cases:
+      - id: dep-cycles
+        class: works
+        args: [dep, cycles, '--json']
+  - command: bd dep list
+    cases:
+      - id: dep-list
+        class: works
+        args: [dep, list, e2e-fdblocked, '--json']
+  - command: bd dep relate
+    cases:
+      - id: dep-relate
+        class: refuses
+        native_fix: [B7]
+        args: [dep, relate, e2e-trel1, e2e-trel2, '--json']
+        exit: 1
+        words: 'operation "AddDependencyWithOptions" not supported by the http backend'
+  - command: bd dep remove
+    cases:
+      - id: dep-remove
+        class: works
+        args: [dep, remove, e2e-tdeprm, e2e-fdbravo, '--json']
+        verify: [[dep, list, e2e-tdeprm, '--json']]
+  - command: bd dep tree
+    cases:
+      - id: dep-tree
+        class: works
+        args: [dep, tree, e2e-fdblocked, '--json']
+  - command: bd dep unrelate
+    cases:
+      - id: dep-unrelate
+        class: refuses
+        native_fix: [B7]
+        args: [dep, unrelate, e2e-tunrel1, e2e-tunrel2, '--json']
+        exit: 1
+        words: 'operation "RemoveDependencyWithOptions" not supported by the http backend'
+  - command: bd diff
+    cases:
+      - id: diff
+        class: refuses
+        args: [diff, main, main, '--json']
+        exit: 1
+        words: 'operation "Diff" not supported by the http backend'
+  - command: bd doctor
+    class: local-only
+    reason: 'checks the local installation (annotated bd:skip_store); it makes no request to the server'
+  - command: bd dolt clean-databases
+    class: local-only
+    reason: manages local dolt sql-server processes; never run by the matrix
+  - command: bd dolt commit
+    cases:
+      - id: dolt-commit
+        class: works
+        args: [dolt, commit, '--json']
+        compare: text
+  - command: bd dolt killall
+    class: local-only
+    reason: manages local dolt sql-server processes; never run by the matrix
+  - command: bd dolt pull
+    cases:
+      - id: dolt-pull
+        class: refuses
+        args: [dolt, pull, '--json']
+        exit: 1
+        words: 'operation "Pull" not supported by the http backend'
+        embedded_exit: 1
+  - command: bd dolt push
+    cases:
+      - id: dolt-push
+        class: refuses
+        args: [dolt, push, '--json']
+        exit: 1
+        words: 'operation "ListRemotes" not supported by the http backend'
+  - command: bd dolt remote add
+    cases:
+      - id: dolt-remote-add
+        class: refuses
+        note: 'the embedded oracle''s remotes depend on the host and the other remote cases'
+        args: [dolt, remote, add, fdbackup, 'file:///nonexistent/fd', '--json']
+        exit: 1
+        words: 'operation "ListRemotes" not supported by the http backend'
+        code: remote_add_failed
+        skip_embedded: true
+  - command: bd dolt remote list
+    cases:
+      - id: dolt-remote-list
+        class: refuses
+        args: [dolt, remote, list, '--json']
+        exit: 1
+        words: 'operation "ListRemotes" not supported by the http backend'
+        code: remote_list_failed
+  - command: bd dolt remote remove
+    cases:
+      - id: dolt-remote-remove
+        class: refuses
+        note: 'the embedded oracle''s remotes depend on the other remote cases'
+        args: [dolt, remote, remove, fdbackup, '--json']
+        exit: 1
+        words: 'operation "RemoveRemote" not supported by the http backend'
+        code: remote_remove_failed
+        skip_embedded: true
+  - command: bd dolt remote reset-data
+    cases:
+      - id: dolt-remote-reset-data
+        class: refuses
+        note: 'the embedded oracle''s remotes depend on the other remote cases'
+        args: [dolt, remote, reset-data, fdbackup, '--json']
+        exit: 1
+        words: 'operation "ListRemotes" not supported by the http backend'
+        skip_embedded: true
+  - command: bd dolt set
+    cases:
+      - id: dolt-set
+        class: refuses
+        args: [dolt, set, port, '3399', '--json']
+        exit: 1
+        words: 'not using Dolt backend \(configured backend "http"\)'
+        embedded_exit: 1
+  - command: bd dolt show
+    cases:
+      - id: dolt-show
+        class: works
+        args: [dolt, show, '--json']
+        compare: exit
+        expect_stdout: '"backend": "http"'
+  - command: bd dolt start
+    class: local-only
+    reason: manages local dolt sql-server processes; never run by the matrix
+  - command: bd dolt status
+    cases:
+      - id: dolt-status
+        class: pending-ruling
+        ruling: '--json is ignored over connect: it prints the text line ''Backend: http (no Dolt engine)'''
+        args: [dolt, status, '--json']
+        observed: {exit: 0, stdout: '^Backend: http \(no Dolt engine\)', writes: none}
+  - command: bd dolt stop
+    class: local-only
+    reason: manages local dolt sql-server processes; never run by the matrix
+  - command: bd dolt test
+    cases:
+      - id: dolt-test
+        class: refuses
+        args: [dolt, test, '--json']
+        exit: 1
+        words: 'not using Dolt backend \(configured backend "http"\)'
+        embedded_exit: 1
+  - command: bd duplicate
+    cases:
+      - id: duplicate
+        class: refuses
+        native_fix: [B6]
+        args: [duplicate, e2e-tdup, '--of', e2e-tdupof, '--json']
+        exit: 1
+        words: 'operation "AddDependency" not supported by the http backend'
+  - command: bd duplicates
+    cases:
+      - id: duplicates
+        class: refuses
+        native_fix: [B16]
+        ledger: [E-IssueFilter.noShape]
+        args: [duplicates, '--json']
+        exit: 1
+        words: a raw SearchIssues call matching neither expressible shape refuses
+  - command: bd edit
+    cases:
+      - id: edit
+        class: refuses
+        note: 'no native-fix row covers bd edit; the edited text is left in a temp file, outside .beads'
+        env: ['EDITOR=sh {file:editor.sh}']
+        args: [edit, e2e-tedit, '--title']
+        exit: 1
+        words: 'updating issue: operation "UpdateIssue" not supported by the http backend'
+  - command: bd epic close-eligible
+    cases:
+      - id: epic-close-eligible
+        class: refuses
+        native_fix: [B15]
+        args: [epic, close-eligible, '--dry-run', '--json']
+        exit: 1
+        words: 'operation "GetEpicsEligibleForClosure" not supported by the http backend'
+  - command: bd epic status
+    cases:
+      - id: epic-status
+        class: refuses
+        native_fix: [B15]
+        args: [epic, status, '--json']
+        exit: 1
+        words: 'operation "GetEpicsEligibleForClosure" not supported by the http backend'
+  - command: bd events export
+    cases:
+      - id: events-export
+        class: refuses
+        native_fix: [B14]
+        args: [events, export]
+        exit: 1
+        words: storage backend does not support the events journal
+  - command: bd events prune
+    cases:
+      - id: events-prune
+        class: refuses
+        native_fix: [B14]
+        args: [events, prune, '--before', '1', '--json']
+        exit: 1
+        words: storage backend does not support the events journal
+  - command: bd events tail
+    cases:
+      - id: events-tail
+        class: refuses
+        native_fix: [B14]
+        args: [events, tail, '--json']
+        exit: 1
+        words: storage backend does not support the events journal
+  - command: bd export
+    cases:
+      - id: export
+        class: works
+        note: 'the rows match; their order differs (served by id, embedded by creation). Comment ids are minted per workspace, so comments are dropped here; case comments pins them'
+        args: [export]
+        compare: lines
+        ignore_fields: [comments]
+  - command: bd federation add-peer
+    cases:
+      - id: federation-add-peer
+        class: refuses
+        note: 'the embedded oracle''s peers depend on the other federation cases'
+        args: [federation, add-peer, fdpeer, 'https://example.invalid/peer', '--json']
+        exit: 1
+        words: 'operation "AddRemote" not supported by the http backend'
+        skip_embedded: true
+  - command: bd federation list-peers
+    cases:
+      - id: federation-list-peers
+        class: refuses
+        args: [federation, list-peers, '--json']
+        exit: 1
+        words: 'operation "ListRemotes" not supported by the http backend'
+  - command: bd federation remove-peer
+    cases:
+      - id: federation-remove-peer
+        class: refuses
+        note: 'the embedded oracle''s peers depend on the other federation cases'
+        args: [federation, remove-peer, fdpeer, '--json']
+        exit: 1
+        words: 'operation "RemoveRemote" not supported by the http backend'
+        skip_embedded: true
+  - command: bd federation status
+    cases:
+      - id: federation-status
+        class: refuses
+        args: [federation, status, '--json']
+        exit: 1
+        words: 'operation "ListRemotes" not supported by the http backend'
+  - command: bd federation sync
+    cases:
+      - id: federation-sync
+        class: refuses
+        args: [federation, sync, '--json']
+        exit: 1
+        words: 'operation "ListRemotes" not supported by the http backend'
+        embedded_exit: 1
+  - command: bd find-duplicates
+    cases:
+      - id: find-duplicates
+        class: refuses
+        native_fix: [B16]
+        ledger: [E-IssueFilter.noShape]
+        args: [find-duplicates, '--json']
+        exit: 1
+        words: a raw SearchIssues call matching neither expressible shape refuses
+  - command: bd flatten
+    cases:
+      - id: flatten
+        class: refuses
+        args: [flatten, '--json']
+        exit: 1
+        words: storage backend does not support flatten
+        embedded_exit: 1
+  - command: bd forget
+    cases:
+      - id: forget
+        class: works
+        setup: [[remember, FD forget me, '--key', fdforget]]
+        args: [forget, fdforget, '--json']
+        verify: [[recall, fdforget, '--json']]
+  - command: bd formula convert
+    class: local-only
+    reason: reads and writes formula files on the local search path; never opens the issue store
+  - command: bd formula list
+    class: local-only
+    reason: reads and writes formula files on the local search path; never opens the issue store
+  - command: bd formula schema
+    class: local-only
+    reason: reads and writes formula files on the local search path; never opens the issue store
+  - command: bd formula show
+    class: local-only
+    reason: reads and writes formula files on the local search path; never opens the issue store
+  - command: bd gate add-waiter
+    cases:
+      - id: gate-add-waiter
+        class: works
+        args: [gate, add-waiter, e2e-tgate1, fdwaiter, '--json']
+        compare: text
+        verify: [[gate, show, e2e-tgate1, '--json']]
+  - command: bd gate check
+    cases:
+      - id: gate-check
+        class: works
+        args: [gate, check, '--json']
+        compare: text
+  - command: bd gate create
+    cases:
+      - id: gate-create
+        class: works
+        fresh: true
+        note: 'fresh: the gate''s id is minted, and a minted id in the part''s shared workspaces would make every later whole-store read differ'
+        setup: [[create, FD gate target, '--id', e2e-tgateblk, '--json']]
+        args: [gate, create, '--blocks', e2e-tgateblk, '--type', human, '--title', FD human gate, '--json']
+        ignore_fields: [id]
+  - command: bd gate discover
+    cases:
+      - id: gate-discover
+        class: works
+        args: [gate, discover, '--json']
+        compare: text
+  - command: bd gate list
+    cases:
+      - id: gate-list
+        class: works
+        args: [gate, list, '--json']
+  - command: bd gate resolve
+    cases:
+      - id: gate-resolve
+        class: works
+        args: [gate, resolve, e2e-tgate2, '--json']
+        compare: text
+        verify: [[show, e2e-tgate2, '--json']]
+  - command: bd gate show
+    cases:
+      - id: gate-show
+        class: works
+        args: [gate, show, e2e-fdgate, '--json']
+  - command: bd gc
+    cases:
+      - id: gc
+        class: refuses
+        native_fix: [E2]
+        ledger: [E-IssueFilter.noShape]
+        args: [gc, '--dry-run', '--json']
+        exit: 1
+        words: a raw SearchIssues call matching neither expressible shape refuses
+  - command: bd github pull
+    class: pending-ruling
+    reason: 'tracker integration: it needs a configured GitHub repository and its network API, which no test lane has, so its behavior over bd connect is unexercised'
+  - command: bd github push
+    class: pending-ruling
+    reason: 'tracker integration: it needs a configured GitHub repository and its network API, which no test lane has, so its behavior over bd connect is unexercised'
+  - command: bd github repos
+    class: pending-ruling
+    reason: 'tracker integration: it needs a configured GitHub repository and its network API, which no test lane has, so its behavior over bd connect is unexercised'
+  - command: bd github status
+    cases:
+      - id: github-status
+        class: works
+        args: [github, status, '--json']
+        compare: text
+  - command: bd github sync
+    class: pending-ruling
+    reason: 'tracker integration: it needs a configured GitHub repository and its network API, which no test lane has, so its behavior over bd connect is unexercised'
+  - command: bd gitlab projects
+    class: pending-ruling
+    reason: 'tracker integration: it needs a configured GitLab project and its network API, which no test lane has, so its behavior over bd connect is unexercised'
+  - command: bd gitlab pull
+    class: pending-ruling
+    reason: 'tracker integration: it needs a configured GitLab project and its network API, which no test lane has, so its behavior over bd connect is unexercised'
+  - command: bd gitlab push
+    class: pending-ruling
+    reason: 'tracker integration: it needs a configured GitLab project and its network API, which no test lane has, so its behavior over bd connect is unexercised'
+  - command: bd gitlab status
+    cases:
+      - id: gitlab-status
+        class: works
+        args: [gitlab, status, '--json']
+        compare: text
+  - command: bd gitlab sync
+    class: pending-ruling
+    reason: 'tracker integration: it needs a configured GitLab project and its network API, which no test lane has, so its behavior over bd connect is unexercised'
+  - command: bd graph
+    cases:
+      - id: graph-id
+        class: pending-ruling
+        native_fix: [D3]
+        ruling: 'D3: over connect bd graph <id> answers with the root alone, because a refused dependents read is skipped (continue); D3 reads them and makes a failed read the command''s failure'
+        args: [graph, e2e-fdepic, '--json']
+        observed: {exit: 0, stdout_absent: e2e-fdepic\.1, writes: none}
+      - id: graph-all
+        class: refuses
+        native_fix: [B16]
+        ledger: [E-IssueFilter.noShape]
+        args: [graph, '--all', '--json']
+        exit: 1
+        words: a raw SearchIssues call matching neither expressible shape refuses
+  - command: bd graph check
+    cases:
+      - id: graph-check
+        class: refuses
+        native_fix: [B15]
+        args: [graph, check, '--json']
+        exit: 1
+        words: 'operation "DetectCycles" not supported by the http backend'
+  - command: bd heartbeat
+    cases:
+      - id: heartbeat
+        class: works
+        args: [heartbeat, e2e-theartbeat, '--json']
+  - command: bd help
+    class: local-only
+    reason: prints help; never opens the issue store
+  - command: bd history
+    cases:
+      - id: history
+        class: refuses
+        args: [history, e2e-fdalpha, '--json']
+        exit: 1
+        words: 'operation "History" not supported by the http backend'
+  - command: bd hooks install
+    class: local-only
+    reason: 'manages the local git checkout''s hooks; no issue-store state'
+  - command: bd hooks list
+    class: local-only
+    reason: 'manages the local git checkout''s hooks; no issue-store state'
+  - command: bd hooks run
+    class: local-only
+    reason: 'manages the local git checkout''s hooks; no issue-store state'
+  - command: bd hooks uninstall
+    class: local-only
+    reason: 'manages the local git checkout''s hooks; no issue-store state'
+  - command: bd human
+    class: local-only
+    reason: prints the essential-commands guide; never opens the issue store
+  - command: bd human dismiss
+    cases:
+      - id: human-dismiss
+        class: works
+        args: [human, dismiss, e2e-thumand, '--json']
+        compare: text
+        verify: [[show, e2e-thumand, '--json']]
+  - command: bd human list
+    cases:
+      - id: human-list
+        class: refuses
+        native_fix: [B16]
+        ledger: [E-IssueFilter.noShape]
+        args: [human, list, '--json']
+        exit: 1
+        words: a raw SearchIssues call matching neither expressible shape refuses
+  - command: bd human respond
+    cases:
+      - id: human-respond
+        class: refuses
+        args: [human, respond, e2e-thumanr, ok, '--json']
+        exit: 1
+        words: 'operation "AddIssueComment" not supported by the http backend'
+  - command: bd human stats
+    cases:
+      - id: human-stats
+        class: refuses
+        native_fix: [B16]
+        ledger: [E-IssueFilter.noShape]
+        args: [human, stats, '--json']
+        exit: 1
+        words: a raw SearchIssues call matching neither expressible shape refuses
+  - command: bd import
+    cases:
+      - id: import
+        class: refuses
+        native_fix: [B12]
+        args: [import, '{file:import.jsonl}', '--json']
+        exit: 1
+        words: 'operation "GetIssuesByIDs" not supported by the http backend'
+      - id: import-dry-run
+        class: refuses
+        native_fix: [B15]
+        args: [import, '{file:import.jsonl}', '--dry-run', '--json']
+        exit: 1
+        words: 'operation "GetIssuesByIDs" not supported by the http backend'
+  - command: bd info
+    cases:
+      - id: info
+        class: pending-ruling
+        native_fix: [D5]
+        ruling: 'D5: over connect bd info --json omits issue_count; D5 sends the listing that fills it'
+        args: [info, '--json']
+        observed: {exit: 0, stdout_absent: '"issue_count"', writes: none}
+  - command: bd init
+    cases:
+      - id: init
+        class: pending-ruling
+        fresh: true
+        ruling: 'bd init on a connect workspace exits 0, creates an embedded database in .beads and rewrites metadata.json, so the workspace silently stops being attached (an embedded workspace refuses the same re-init); refuse, or require bd connect --clear first'
+        args: [init, '--prefix', e2e, '--quiet', '--non-interactive', '--skip-hooks', '--skip-agents']
+        embedded_exit: 1
+        observed: {exit: 0, writes: local}
+  - command: bd init-safety
+    cases:
+      - id: init-safety
+        class: works
+        note: 'prints how bd init''s destructive flags work; it opens the store (the context handshake) first'
+        args: [init-safety]
+        compare: text
+  - command: bd jira pull
+    class: pending-ruling
+    reason: 'tracker integration: it needs a configured Jira project and its network API, which no test lane has, so its behavior over bd connect is unexercised'
+  - command: bd jira push
+    class: pending-ruling
+    reason: 'tracker integration: it needs a configured Jira project and its network API, which no test lane has, so its behavior over bd connect is unexercised'
+  - command: bd jira status
+    cases:
+      - id: jira-status
+        class: refuses
+        ledger: [E-IssueFilter.noShape]
+        args: [jira, status, '--json']
+        exit: 1
+        words: a raw SearchIssues call matching neither expressible shape refuses
+  - command: bd jira sync
+    class: pending-ruling
+    reason: 'tracker integration: it needs a configured Jira project and its network API, which no test lane has, so its behavior over bd connect is unexercised'
+  - command: bd kv clear
+    cases:
+      - id: kv-clear
+        class: refuses
+        native_fix: [D8]
+        note: 'clearing the oracle''s key would change the other kv cases'' oracle runs'
+        args: [kv, clear, fd.key, '--json']
+        exit: 1
+        words: 'operation "DeleteConfig" not supported by the http backend'
+        skip_embedded: true
+  - command: bd kv get
+    cases:
+      - id: kv-get
+        class: refuses
+        native_fix: [D8]
+        ledger: [L9]
+        args: [kv, get, fd.key, '--json']
+        exit: 1
+        words: 'withholds \W*kv\.fd\.key\W*: the key marks it credential-bearing'
+  - command: bd kv list
+    cases:
+      - id: kv-list
+        class: pending-ruling
+        native_fix: [D8]
+        ledger: [L9]
+        ruling: 'D8: silently wrong: lists no pairs although the server holds kv.fd.key (bd serve withholds kv.* as credential-bearing); D8 refuses every bd kv subcommand up front'
+        args: [kv, list, '--json']
+        observed: {exit: 0, stdout: '^\{\s*"schema_version": 1\s*\}\s*$', writes: none}
+  - command: bd kv set
+    cases:
+      - id: kv-set
+        class: refuses
+        native_fix: [D8]
+        args: [kv, set, fd.new, v2, '--json']
+        exit: 1
+        words: 'operation "SetConfig" not supported by the http backend'
+  - command: bd label add
+    cases:
+      - id: label-add
+        class: works
+        args: [label, add, e2e-tlabadd, 'fd:added', '--json']
+        verify: [[show, e2e-tlabadd, '--json']]
+  - command: bd label list
+    cases:
+      - id: label-list
+        class: works
+        args: [label, list, e2e-fdalpha, '--json']
+  - command: bd label list-all
+    cases:
+      - id: label-list-all
+        class: refuses
+        native_fix: [B16]
+        ledger: [E-IssueFilter.noShape]
+        args: [label, list-all, '--json']
+        exit: 1
+        words: a raw SearchIssues call matching neither expressible shape refuses
+  - command: bd label propagate
+    cases:
+      - id: label-propagate
+        class: refuses
+        args: [label, propagate, e2e-tpropagate, 'fd:prop', '--json']
+        exit: 1
+        words: 'operation "RunInTransaction" not supported by the http backend'
+  - command: bd label remove
+    cases:
+      - id: label-remove
+        class: works
+        args: [label, remove, e2e-tlabrm, 'fd:rm', '--json']
+        verify: [[show, e2e-tlabrm, '--json']]
+  - command: bd label rename
+    cases:
+      - id: label-rename-dry-run
+        class: refuses
+        args: [label, rename, 'fd:shared', 'fd:common', '--dry-run', '--json']
+        exit: 1
+        words: 'operation "GetIssuesByLabel" not supported by the http backend'
+      - id: label-rename
+        class: refuses
+        note: renaming on the oracle would change the shared labels of its later runs
+        args: [label, rename, 'fd:shared', 'fd:common', '--json']
+        exit: 1
+        words: 'operation "RenameLabel" not supported by the http backend'
+        skip_embedded: true
+  - command: bd linear pull
+    class: pending-ruling
+    reason: 'tracker integration: it needs a configured Linear team and its network API, which no test lane has, so its behavior over bd connect is unexercised'
+  - command: bd linear push
+    class: pending-ruling
+    reason: 'tracker integration: it needs a configured Linear team and its network API, which no test lane has, so its behavior over bd connect is unexercised'
+  - command: bd linear status
+    cases:
+      - id: linear-status
+        class: refuses
+        ledger: [E-IssueFilter.noShape]
+        args: [linear, status, '--json']
+        exit: 1
+        words: a raw SearchIssues call matching neither expressible shape refuses
+  - command: bd linear sync
+    class: pending-ruling
+    reason: 'tracker integration: it needs a configured Linear team and its network API, which no test lane has, so its behavior over bd connect is unexercised'
+  - command: bd linear teams
+    class: pending-ruling
+    reason: 'tracker integration: it needs a configured Linear team and its network API, which no test lane has, so its behavior over bd connect is unexercised'
+  - command: bd link
+    cases:
+      - id: link
+        class: works
+        args: [link, e2e-tlink1, e2e-tlink2, '--json']
+        verify: [[dep, list, e2e-tlink1, '--json']]
+  - command: bd lint
+    cases:
+      - id: lint
+        class: refuses
+        native_fix: [B16]
+        ledger: [E-IssueFilter.noShape]
+        args: [lint, '--json']
+        exit: 1
+        words: a raw SearchIssues call matching neither expressible shape refuses
+  - command: bd list
+    cases:
+      - id: list
+        class: works
+        note: '--limit 0: the default limit (50) would cut through rows created in the same second, which land in a different order on two workspaces seeded seconds apart'
+        args: [list, '--limit', '0', '--json']
+      - id: list-text
+        class: pending-ruling
+        native_fix: [D1]
+        ruling: 'D1: over connect pretty bd list renders no row as gated (the gate-target read is refused and swallowed), so e2e-fdgated shows as open and the legend has no gated entry; D1 reads the gate targets and renders the marker'
+        args: [list, '--limit', '0']
+        observed: {exit: 0, stdout: ○ e2e-fdgated P2 FD gated, stdout_absent: ⊘, writes: none}
+      - id: list-watch
+        class: refuses
+        ledger: [L10, E-IssueFilter.noShape]
+        note: on an embedded workspace --watch never exits
+        args: [list, '--watch']
+        exit: 1
+        words: a raw SearchIssues call matching neither expressible shape refuses
+        skip_embedded: true
+  - command: bd mail
+    class: local-only
+    reason: 'opens the store (the context handshake), then runs the external mail program mail.delegate names; no issue-store state'
+  - command: bd memories
+    cases:
+      - id: memories
+        class: works
+        args: [memories, '--json']
+  - command: bd merge-slot acquire
+    cases:
+      - id: merge-slot-acquire
+        class: refuses
+        note: 'the oracle''s slot depends on the other merge-slot cases'
+        args: [merge-slot, acquire, '--json']
+        exit: 1
+        words: 'operation "MergeSlotAcquire" not supported by the http backend'
+        skip_embedded: true
+  - command: bd merge-slot check
+    cases:
+      - id: merge-slot-check
+        class: refuses
+        args: [merge-slot, check, '--json']
+        exit: 1
+        words: 'operation "MergeSlotCheck" not supported by the http backend'
+  - command: bd merge-slot create
+    cases:
+      - id: merge-slot-create
+        class: refuses
+        note: 'the oracle''s slot depends on the other merge-slot cases'
+        args: [merge-slot, create, '--json']
+        exit: 1
+        words: 'operation "MergeSlotCreate" not supported by the http backend'
+        skip_embedded: true
+  - command: bd merge-slot release
+    cases:
+      - id: merge-slot-release
+        class: refuses
+        note: 'the oracle''s slot depends on the other merge-slot cases'
+        args: [merge-slot, release, '--json']
+        exit: 1
+        words: 'operation "MergeSlotRelease" not supported by the http backend'
+        skip_embedded: true
+  - command: bd metrics
+    class: local-only
+    reason: the local anonymous-metrics setting; never opens the issue store
+  - command: bd metrics example
+    class: local-only
+    reason: the local anonymous-metrics setting; never opens the issue store
+  - command: bd metrics off
+    class: local-only
+    reason: the local anonymous-metrics setting; never opens the issue store
+  - command: bd metrics on
+    class: local-only
+    reason: the local anonymous-metrics setting; never opens the issue store
+  - command: bd migrate
+    cases:
+      - id: migrate
+        class: pending-ruling
+        fresh: true
+        ruling: 'bd migrate on a connect workspace reports a Dolt workspace (backend dolt, current_database beads.db), says it updated the version, and writes .beads/http_local_metadata.json; refuse, or report the http backend'
+        args: [migrate, '--json']
+        observed: {exit: 0, stdout: '"backend": "dolt"', writes: local}
+  - command: bd migrate from-proxied-server-to-server
+    cases:
+      - id: migrate-from-proxied-server-to-server
+        class: refuses
+        fresh: true
+        note: 'fresh: a mode switch that ever succeeded would rewrite the part''s served workspace; the words come from the mode checks, before anything names the http backend'
+        args: [migrate, from-proxied-server-to-server, '--json']
+        exit: 1
+        words: migration sidecar is missing
+        embedded_exit: 1
+  - command: bd migrate from-proxied-server-to-shared-server
+    cases:
+      - id: migrate-from-proxied-server-to-shared-server
+        class: refuses
+        fresh: true
+        note: 'fresh: a mode switch that ever succeeded would rewrite the part''s served workspace; the words come from the mode checks, before anything names the http backend'
+        args: [migrate, from-proxied-server-to-shared-server, '--json']
+        exit: 1
+        words: migration sidecar is missing
+        embedded_exit: 1
+  - command: bd migrate from-server-to-proxied-server
+    cases:
+      - id: migrate-from-server-to-proxied-server
+        class: refuses
+        fresh: true
+        note: 'fresh: a mode switch that ever succeeded would rewrite the part''s served workspace; the words come from the mode checks, before anything names the http backend'
+        args: [migrate, from-server-to-proxied-server, '--json']
+        exit: 1
+        words: 'repo is not in server mode \(dolt_mode="embedded"\)'
+        embedded_exit: 1
+  - command: bd migrate from-shared-server-to-proxied-server
+    cases:
+      - id: migrate-from-shared-server-to-proxied-server
+        class: refuses
+        fresh: true
+        note: 'fresh: a mode switch that ever succeeded would rewrite the part''s served workspace; the words come from the mode checks, before anything names the http backend'
+        args: [migrate, from-shared-server-to-proxied-server, '--json']
+        exit: 1
+        words: migration command topology does not match live shared-server configuration
+        embedded_exit: 1
+  - command: bd migrate hooks
+    class: local-only
+    reason: 'opens the store (the context handshake), then plans or applies the local git hooks'' migration; no issue-store state'
+  - command: bd migrate issues
+    class: pending-ruling
+    reason: 'moves issues between two repositories'' stores (--from/--to), which needs a second workspace the matrix does not build'
+  - command: bd migrate legacy-sqlite
+    class: local-only
+    reason: 'reads a legacy SQLite file into JSONL (annotated bd:skip_store); never opens the issue store'
+  - command: bd migrate schema
+    cases:
+      - id: migrate-schema
+        class: refuses
+        args: [migrate, schema, '--json']
+        exit: 1
+        words: current storage backend does not support schema migration
+  - command: bd migrate sync
+    cases:
+      - id: migrate-sync
+        class: refuses
+        fresh: true
+        note: 'fresh: it sets sync.branch and prepares a sync worktree when it succeeds'
+        args: [migrate, sync, fd-sync, '--json']
+        exit: 1
+        words: 'operation "SetConfig" not supported by the http backend'
+  - command: bd migrate-issues
+    class: pending-ruling
+    reason: the deprecated spelling of bd migrate issues (same reason)
+  - command: bd migrate-personal
+    cases:
+      - id: migrate-personal
+        class: refuses
+        fresh: true
+        ledger: [E-IssueFilter.noShape]
+        note: 'fresh: it moves the actor''s issues out of the project database when it succeeds; only the workspaces are fresh, and the served one still attaches to the part''s server, which the no-write check guards'
+        args: [migrate-personal, '--json']
+        exit: 1
+        words: a raw SearchIssues call matching neither expressible shape refuses
+  - command: bd mol bond
+    cases:
+      - id: mol-bond
+        class: refuses
+        args: [mol, bond, e2e-tbond1, e2e-tbond2, '--json']
+        exit: 1
+        words: 'operation "RunInTransaction" not supported by the http backend'
+  - command: bd mol burn
+    cases:
+      - id: mol-burn
+        class: works
+        args: [mol, burn, e2e-tburn, '--force', '--json']
+        verify: [[show, e2e-tburn, '--json']]
+  - command: bd mol current
+    cases:
+      - id: mol-current
+        class: works
+        args: [mol, current, e2e-fdmol, '--json']
+  - command: bd mol distill
+    cases:
+      - id: mol-distill
+        class: works
+        args: [mol, distill, e2e-fdepic, fd-distilled, '--json']
+        ignore_fields: [formula_path]
+  - command: bd mol last-activity
+    cases:
+      - id: mol-last-activity
+        class: refuses
+        args: [mol, last-activity, e2e-fdmol, '--json']
+        exit: 1
+        words: 'operation "GetMoleculeLastActivity" not supported by the http backend'
+  - command: bd mol pour
+    cases:
+      - id: mol-pour-dry-run
+        class: works
+        args: [mol, pour, fd-check, '--dry-run', '--json']
+        compare: text
+  - command: bd mol progress
+    cases:
+      - id: mol-progress
+        class: works
+        args: [mol, progress, e2e-fdmol, '--json']
+  - command: bd mol ready
+    cases:
+      - id: mol-ready
+        class: refuses
+        native_fix: [B16]
+        ledger: [F-mol-ready, E-IssueFilter.noShape]
+        args: [mol, ready, '--gated', '--json']
+        exit: 1
+        words: a raw SearchIssues call matching neither expressible shape refuses
+  - command: bd mol seed
+    cases:
+      - id: mol-seed
+        class: works
+        args: [mol, seed, fd-check, '--json']
+  - command: bd mol show
+    cases:
+      - id: mol-show
+        class: works
+        args: [mol, show, e2e-fdmol, '--json']
+  - command: bd mol squash
+    cases:
+      - id: mol-squash
+        class: works
+        args: [mol, squash, e2e-tsquash, '--json']
+        verify: [[show, e2e-tsquash, '--json']]
+  - command: bd mol stale
+    cases:
+      - id: mol-stale
+        class: refuses
+        native_fix: [B15]
+        args: [mol, stale, '--json']
+        exit: 1
+        words: 'operation "GetEpicsEligibleForClosure" not supported by the http backend'
+  - command: bd mol wisp
+    cases:
+      - id: mol-wisp
+        class: works
+        args: [mol, wisp, '--json']
+        compare: text
+  - command: bd mol wisp create
+    cases:
+      - id: mol-wisp-create-dry-run
+        class: works
+        args: [mol, wisp, create, fd-check, '--dry-run', '--json']
+        compare: text
+  - command: bd mol wisp gc
+    cases:
+      - id: mol-wisp-gc
+        class: refuses
+        ledger: [E-IssueFilter.noShape]
+        args: [mol, wisp, gc, '--json']
+        exit: 1
+        words: a raw SearchIssues call matching neither expressible shape refuses
+  - command: bd mol wisp list
+    cases:
+      - id: mol-wisp-list
+        class: refuses
+        ledger: [E-IssueFilter.noShape]
+        args: [mol, wisp, list, '--json']
+        exit: 1
+        words: a raw SearchIssues call matching neither expressible shape refuses
+  - command: bd note
+    cases:
+      - id: note
+        class: refuses
+        native_fix: [B3]
+        args: [note, e2e-tnote, a note, '--json']
+        exit: 1
+        words: 'operation "UpdateIssue" not supported by the http backend'
+  - command: bd notion connect
+    class: pending-ruling
+    reason: 'tracker integration: it needs a configured Notion database and its network API, which no test lane has, so its behavior over bd connect is unexercised'
+  - command: bd notion init
+    class: pending-ruling
+    reason: 'tracker integration: it needs a configured Notion database and its network API, which no test lane has, so its behavior over bd connect is unexercised'
+  - command: bd notion pull
+    class: pending-ruling
+    reason: 'tracker integration: it needs a configured Notion database and its network API, which no test lane has, so its behavior over bd connect is unexercised'
+  - command: bd notion push
+    class: pending-ruling
+    reason: 'tracker integration: it needs a configured Notion database and its network API, which no test lane has, so its behavior over bd connect is unexercised'
+  - command: bd notion status
+    cases:
+      - id: notion-status
+        class: works
+        args: [notion, status, '--json']
+  - command: bd notion sync
+    class: pending-ruling
+    reason: 'tracker integration: it needs a configured Notion database and its network API, which no test lane has, so its behavior over bd connect is unexercised'
+  - command: bd onboard
+    class: local-only
+    reason: prints an agent-instructions snippet; never opens the issue store
+  - command: bd orphans
+    cases:
+      - id: orphans
+        class: works
+        note: 'the served workspace has no git history, so orphans never reaches the raw SearchIssues read B16 names; a git-backed case is future work'
+        args: [orphans, '--json']
+  - command: bd ping
+    cases:
+      - id: ping
+        class: works
+        args: [ping, '--json']
+        ignore_fields: [query_ms, total_ms]
+  - command: bd preflight
+    class: local-only
+    reason: 'opens the store (the context handshake), then runs the local checkout''s PR-readiness checklist; no issue-store state'
+  - command: bd prime
+    cases:
+      - id: prime
+        class: works
+        args: [prime]
+        compare: text
+  - command: bd priority
+    cases:
+      - id: priority
+        class: refuses
+        native_fix: [B1]
+        args: [priority, e2e-tprio, '0', '--json']
+        exit: 1
+        words: 'operation "UpdateIssue" not supported by the http backend'
+  - command: bd promote
+    cases:
+      - id: promote
+        class: works
+        args: [promote, e2e-tpromote, '--json']
+        verify: [[show, e2e-tpromote, '--json']]
+  - command: bd provenance by-ref
+    cases:
+      - id: provenance-by-ref
+        class: refuses
+        args: [provenance, by-ref, 'x:ref', '--json']
+        exit: 1
+        words: 'operation "GetProvenanceByRef" not supported by the http backend'
+  - command: bd provenance log
+    cases:
+      - id: provenance-log
+        class: refuses
+        args: [provenance, log, e2e-fdalpha, '--json']
+        exit: 1
+        words: 'operation "GetProvenanceEvents" not supported by the http backend'
+  - command: bd provenance record
+    cases:
+      - id: provenance-record
+        class: refuses
+        args: [provenance, record, '--issue', e2e-tprov, '--kind', commit, '--source', fd, '--ref', 'x:ref', '--json']
+        exit: 1
+        words: 'operation "RecordProvenanceEvent" not supported by the http backend'
+  - command: bd prune
+    cases:
+      - id: prune-dry-run
+        class: works
+        args: [prune, '--pattern', '*', '--dry-run', '--json']
+  - command: bd purge
+    cases:
+      - id: purge-dry-run
+        class: works
+        args: [purge, '--dry-run', '--json']
+  - command: bd q
+    cases:
+      - id: q
+        class: refuses
+        native_fix: [B4]
+        args: [q, FD quick]
+        exit: 1
+        words: 'operation "CreateIssue" not supported by the http backend'
+      - id: q-parent
+        class: refuses
+        native_fix: [B4]
+        args: [q, FD quick child, '--parent', e2e-fdepic]
+        exit: 1
+        words: 'operation "GetNextChildID" not supported by the http backend'
+  - command: bd query
+    cases:
+      - id: query
+        class: works
+        args: [query, status=open, '--json']
+  - command: bd quickstart
+    class: local-only
+    reason: prints the quick-start guide; never opens the issue store
+  - command: bd ready
+    cases:
+      - id: ready
+        class: works
+        args: [ready, '--json']
+      - id: ready-text
+        class: pending-ruling
+        native_fix: [D2]
+        ledger: [L13]
+        ruling: 'D2 / L13: pretty bd ready over connect shows no parent-epic context; D2 reads edges and epics to show it'
+        args: [ready]
+        observed: {exit: 0, stdout: e2e-fdepic\.1 P2 FD epic child one, stdout_absent: ←, writes: none}
+      - id: ready-explain
+        class: pending-ruling
+        native_fix: [D4]
+        ledger: [F-ready-explain]
+        ledger_drift: F-ready-explain says the flag refuses; it exits 0 with blank blockers
+        ruling: 'D4: over connect --explain answers with zeroed blocker rows (priority 0) and no unblock counts, because its raw reads are refused and logged at debug; D4 reads them and makes a failed read the command''s failure'
+        args: [ready, '--explain', '--json']
+        observed: {exit: 0, stdout: '"title": ""', writes: none}
+      - id: ready-gated
+        class: refuses
+        native_fix: [B16]
+        ledger: [F-ready-gated, E-IssueFilter.noShape]
+        args: [ready, '--gated', '--json']
+        exit: 1
+        words: a raw SearchIssues call matching neither expressible shape refuses
+      - id: ready-mol
+        class: works
+        ledger: [F-ready-mol]
+        ledger_drift: F-ready-mol says the flag refuses; it answers like an embedded workspace
+        args: [ready, '--mol', e2e-fdmol, '--json']
+  - command: bd recall
+    cases:
+      - id: recall
+        class: works
+        args: [recall, fdmem, '--json']
+  - command: bd reclaim
+    cases:
+      - id: reclaim
+        class: works
+        args: [reclaim, '--json']
+  - command: bd recompute-blocked
+    cases:
+      - id: recompute-blocked
+        class: works
+        note: over connect the server maintains is_blocked and says so
+        args: [recompute-blocked, '--json']
+        ignore_fields: [maintained_by]
+        expect_stdout: '"maintained_by": "server"'
+  - command: bd remember
+    cases:
+      - id: remember
+        class: works
+        args: [remember, FD remembered, '--key', fdremember, '--json']
+        verify: [[recall, fdremember, '--json']]
+  - command: bd rename
+    cases:
+      - id: rename
+        class: refuses
+        ledger: [E-IssueFilter.noShape]
+        note: 'it refuses listing the gates that reference the id, before the rename itself (UpdateIssueID has no operation either); rename''s new id must match ^[a-z]+-, so no e2e-* id is a valid target'
+        args: [rename, e2e-trename, fdx-renamed, '--json']
+        exit: 1
+        words: 'failed to list gates: listIssues: a raw SearchIssues call matching neither expressible shape refuses'
+  - command: bd rename-prefix
+    cases:
+      - id: rename-prefix-dry-run
+        class: refuses
+        native_fix: [B16]
+        ledger: [E-IssueFilter.noShape]
+        args: [rename-prefix, zz, '--dry-run', '--json']
+        exit: 1
+        words: a raw SearchIssues call matching neither expressible shape refuses
+  - command: bd reopen
+    cases:
+      - id: reopen
+        class: works
+        args: [reopen, e2e-treopen, '--json']
+        verify: [[show, e2e-treopen, '--json']]
+  - command: bd repo add
+    cases:
+      - id: repo-add
+        class: refuses
+        note: 'bd connect writes no config.yaml, where repos.additional lives; whether multi-repo sync applies over connect is unruled'
+        args: [repo, add, '.', '--json']
+        exit: 1
+        words: no \.beads/config\.yaml found
+  - command: bd repo list
+    cases:
+      - id: repo-list
+        class: refuses
+        note: see repo-add
+        args: [repo, list, '--json']
+        exit: 1
+        words: no \.beads/config\.yaml found
+  - command: bd repo remove
+    cases:
+      - id: repo-remove
+        class: refuses
+        args: [repo, remove, '{file:other-repo}', '--json']
+        exit: 1
+        words: 'operation "DeleteIssuesBySourceRepo" not supported by the http backend'
+        embedded_exit: 1
+  - command: bd repo sync
+    cases:
+      - id: repo-sync
+        class: refuses
+        note: see repo-add
+        args: [repo, sync, '--json']
+        exit: 1
+        words: no \.beads/config\.yaml found
+  - command: bd restore
+    cases:
+      - id: restore
+        class: works
+        note: 'no issue can be compacted over connect (admin compact refuses), so the not-compacted refusal is the reachable path'
+        args: [restore, e2e-trestore, '--json']
+        compare: exit
+        exit: 1
+  - command: bd rules audit
+    cases:
+      - id: rules-audit
+        class: works
+        args: [rules, audit, '--json']
+  - command: bd rules compact
+    cases:
+      - id: rules-compact
+        class: works
+        args: [rules, compact, '--auto', '--dry-run', '--json']
+  - command: bd schema
+    class: local-only
+    reason: 'prints the JSON Schema of bd''s output (annotated bd:skip_store); never opens the issue store'
+  - command: bd search
+    cases:
+      - id: search
+        class: works
+        args: [search, alpha, '--json']
+  - command: bd send-metrics
+    class: local-only
+    reason: 'internal: flushes queued telemetry; never run by the matrix'
+  - command: bd serve
+    cases:
+      - id: serve
+        class: pending-ruling
+        ledger: [F-serve]
+        ledger_drift: F-serve says it refuses; it serves
+        ruling: 'F-serve says bd serve refuses against an http workspace; on main it binds and serves the remote store through the roles source (a bd serve re-serving a bd serve, the proxy chain F-serve calls undesigned). Refuse, as F-serve says, or support it'
+        args: [serve, '--addr', '127.0.0.1:0']
+        embedded_exit: 1
+        observed: {listens: true, writes: none}
+  - command: bd set-state
+    cases:
+      - id: set-state
+        class: works
+        args: [set-state, e2e-tstate, mode=fast, '--json']
+        verify: [[state, e2e-tstate, mode, '--json']]
+  - command: bd setup
+    class: local-only
+    reason: writes agent-integration files into the local checkout and home; no issue-store state
+  - command: bd ship
+    cases:
+      - id: ship
+        class: refuses
+        args: [ship, fd-cap, '--dry-run', '--json']
+        exit: 1
+        words: 'operation "GetIssuesByLabel" not supported by the http backend'
+  - command: bd show
+    cases:
+      - id: show
+        class: works
+        args: [show, e2e-fdalpha, '--json']
+      - id: show-text
+        class: works
+        args: [show, e2e-fdalpha]
+        compare: text
+      - id: show-thread
+        class: pending-ruling
+        ledger: [F-show-thread]
+        ledger_drift: F-show-thread says the flag refuses; it answers, with shallow reply rows
+        ruling: 'over connect --thread answers its reply rows shallow (no created_by, zeroed timestamps): findReplies reads GetDependentsWithMetadata, which the http backend answers from the shallow dependents projection; no native fix names it (D6 hydrates only --refs and --children)'
+        args: [show, e2e-fdthread, '--thread', '--json']
+        observed: {exit: 0, stdout: e2e-fdreply, stdout_absent: '(?s)"created_by".*"created_by"', writes: none}
+      - id: show-refs
+        class: pending-ruling
+        native_fix: [D6]
+        ledger: [F-show-refs]
+        ledger_drift: F-show-refs says the flag refuses; it answers shallow rows
+        ruling: 'D6: over connect --refs answers shallow rows (no created_by, zeroed fields); D6 hydrates them through batchGetIssues'
+        args: [show, e2e-fdalpha, '--refs', '--json']
+        observed: {exit: 0, stdout: e2e-fdblocked, stdout_absent: '"created_by"', writes: none}
+      - id: show-children
+        class: pending-ruling
+        native_fix: [D6]
+        ledger: [F-show-children]
+        ledger_drift: F-show-children says the flag refuses; it answers shallow rows
+        ruling: 'D6: over connect --children answers shallow rows; D6 hydrates them'
+        args: [show, e2e-fdepic, '--children', '--json']
+        observed: {exit: 0, stdout: e2e-fdepic\.1, stdout_absent: '"created_by"', writes: none}
+      - id: show-as-of
+        class: refuses
+        native_fix: [E4]
+        args: [show, e2e-fdalpha, '--as-of', HEAD, '--json']
+        exit: 1
+        words: 'operation "AsOf" not supported by the http backend'
+      - id: show-partial-id
+        class: refuses
+        ledger: [F-partial-id]
+        note: the embedded oracle resolves the partial id to e2e-fdalpha
+        args: [show, e2e-fdalp, '--json']
+        exit: 1
+        words: Issue e2e-fdalp not found
+  - command: bd sql
+    cases:
+      - id: sql
+        class: refuses
+        native_fix: [E1]
+        args: [sql, SELECT 1, '--json']
+        exit: 1
+        words: '''bd sql'' is not yet supported in embedded mode'
+        embedded_exit: 1
+  - command: bd stale
+    cases:
+      - id: stale
+        class: refuses
+        native_fix: [B15]
+        args: [stale, '--json']
+        exit: 1
+        words: 'operation "GetStaleIssues" not supported by the http backend'
+  - command: bd state
+    cases:
+      - id: state
+        class: works
+        args: [state, e2e-fdalpha, mode, '--json']
+  - command: bd state list
+    cases:
+      - id: state-list
+        class: works
+        args: [state, list, e2e-fdalpha, '--json']
+  - command: bd status
+    cases:
+      - id: status
+        class: works
+        args: [status, '--json']
+  - command: bd statuses
+    cases:
+      - id: statuses
+        class: works
+        args: [statuses, '--json']
+  - command: bd supersede
+    cases:
+      - id: supersede
+        class: refuses
+        native_fix: [B6]
+        args: [supersede, e2e-tsup, '--with', e2e-tsupw, '--json']
+        exit: 1
+        words: 'operation "AddDependency" not supported by the http backend'
+  - command: bd swarm create
+    cases:
+      - id: swarm-create
+        class: refuses
+        args: [swarm, create, e2e-tswarm, '--json']
+        exit: 1
+        words: 'operation "GetDependents" not supported by the http backend'
+  - command: bd swarm list
+    cases:
+      - id: swarm-list
+        class: refuses
+        native_fix: [B16]
+        ledger: [E-IssueFilter.noShape]
+        args: [swarm, list, '--json']
+        exit: 1
+        words: a raw SearchIssues call matching neither expressible shape refuses
+  - command: bd swarm status
+    cases:
+      - id: swarm-status
+        class: refuses
+        args: [swarm, status, e2e-fdepic, '--json']
+        exit: 1
+        words: 'operation "GetDependents" not supported by the http backend'
+  - command: bd swarm validate
+    cases:
+      - id: swarm-validate
+        class: refuses
+        args: [swarm, validate, e2e-fdepic, '--json']
+        exit: 1
+        words: 'operation "GetDependents" not supported by the http backend'
+  - command: bd sync
+    cases:
+      - id: sync
+        class: refuses
+        native_fix: [E3]
+        args: [sync, '--json']
+        exit: 1
+        words: storage backend does not support is_blocked recompute
+  - command: bd tag
+    cases:
+      - id: tag
+        class: refuses
+        native_fix: [B2]
+        args: [tag, e2e-ttag, 'fd:tagged', '--json']
+        exit: 1
+        words: 'operation "AddLabel" not supported by the http backend'
+  - command: bd todo
+    cases:
+      - id: todo
+        class: refuses
+        native_fix: [B16]
+        ledger: [E-IssueFilter.noShape]
+        args: [todo, '--json']
+        exit: 1
+        words: a raw SearchIssues call matching neither expressible shape refuses
+  - command: bd todo add
+    cases:
+      - id: todo-add
+        class: refuses
+        native_fix: [B5]
+        args: [todo, add, FD todo, '--json']
+        exit: 1
+        words: 'operation "CreateIssue" not supported by the http backend'
+  - command: bd todo done
+    cases:
+      - id: todo-done
+        class: works
+        args: [todo, done, e2e-ttodo, '--json']
+        verify: [[show, e2e-ttodo, '--json']]
+  - command: bd todo list
+    cases:
+      - id: todo-list
+        class: refuses
+        native_fix: [B16]
+        ledger: [E-IssueFilter.noShape]
+        args: [todo, list, '--json']
+        exit: 1
+        words: a raw SearchIssues call matching neither expressible shape refuses
+  - command: bd types
+    cases:
+      - id: types
+        class: works
+        args: [types, '--json']
+  - command: bd unclaim
+    cases:
+      - id: unclaim
+        class: refuses
+        native_fix: [B9]
+        args: [unclaim, e2e-tunclaim, '--json']
+        exit: 1
+        words: 'operation "UnclaimIssue" not supported by the http backend'
+  - command: bd undefer
+    cases:
+      - id: undefer
+        class: pending-ruling
+        native_fix: [B8, C1]
+        ruling: 'B8 + C1: over connect bd undefer prints the per-id error, exits 0 and writes nothing; B8 writes through the Lifecycle role, C1 makes a failed id exit 1'
+        args: [undefer, e2e-tundefer, '--json']
+        observed: {exit: 0, stdout: '^\s*$', stderr: 'Error undeferring e2e-tundefer: operation "UpdateIssue" not supported by the http backend', writes: none}
+  - command: bd update
+    cases:
+      - id: update
+        class: works
+        args: [update, e2e-tupdate, '--priority', '1', '--json']
+        verify: [[show, e2e-tupdate, '--json']]
+      - id: update-claim
+        class: works
+        native_fix: [D7]
+        note: 'D7 changes the request (claimIssue for PATCH updateIssue), not the answer; G2(b)''s corpus transcripts pin requests'
+        args: [update, e2e-tclaim, '--claim', '--json']
+        verify: [[show, e2e-tclaim, '--json']]
+  - command: bd upgrade ack
+    class: local-only
+    reason: 'opens the store (the context handshake), then reads or writes the bd version this workspace last acknowledged, kept in the local metadata.json; no issue-store state'
+  - command: bd upgrade review
+    class: local-only
+    reason: 'opens the store (the context handshake), then reads or writes the bd version this workspace last acknowledged, kept in the local metadata.json; no issue-store state'
+  - command: bd upgrade status
+    cases:
+      - id: upgrade-status
+        class: works
+        note: 'the bd version this workspace last acknowledged, kept in the local metadata.json; it opens the store (the context handshake) first'
+        args: [upgrade, status, '--json']
+  - command: bd vc commit
+    cases:
+      - id: vc-commit
+        class: works
+        args: [vc, commit, '-m', fd, '--json']
+  - command: bd vc merge
+    cases:
+      - id: vc-merge
+        class: refuses
+        args: [vc, merge, feature, '--json']
+        exit: 1
+        words: 'operation "Merge" not supported by the http backend'
+        embedded_exit: 1
+  - command: bd vc status
+    cases:
+      - id: vc-status
+        class: refuses
+        args: [vc, status, '--json']
+        exit: 1
+        words: 'operation "CurrentBranch" not supported by the http backend'
+  - command: bd version
+    class: local-only
+    reason: 'prints the binary''s version; never opens the issue store'
+  - command: bd versions
+    cases:
+      - id: versions
+        class: refuses
+        args: [versions, e2e-fdalpha, '--json']
+        exit: 1
+        words: this storage backend cannot serve version history
+        embedded_exit: 1
+  - command: bd where
+    cases:
+      - id: where
+        class: works
+        args: [where, '--json']
+        ignore_fields: [path, database_path]
+  - command: bd worktree create
+    class: local-only
+    reason: manages the local git worktrees; no issue-store state
+  - command: bd worktree info
+    class: local-only
+    reason: manages the local git worktrees; no issue-store state
+  - command: bd worktree list
+    class: local-only
+    reason: manages the local git worktrees; no issue-store state
+  - command: bd worktree remove
+    class: local-only
+    reason: manages the local git worktrees; no issue-store state

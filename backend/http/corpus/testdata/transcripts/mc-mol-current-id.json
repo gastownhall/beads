@@ -1,0 +1,12 @@
+{
+  "shape": "mc-mol-current-id",
+  "requests": [
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-mol","status":200},
+    {"method":"GET","operation_id":"getContext","path":"/v0/beads/context","status":200},
+    {"method":"GET","operation_id":"listRelatedIssues","path":"/v0/beads/issues/e2e-mol/related","query":["direction","type"],"status":200},
+    {"method":"GET","operation_id":"listRelatedIssues","path":"/v0/beads/issues/e2e-mol.1/related","query":["direction","type"],"status":200},
+    {"method":"GET","operation_id":"listRelatedIssues","path":"/v0/beads/issues/e2e-mol.2/related","query":["direction","type"],"status":200},
+    {"method":"GET","operation_id":"listRelatedIssues","path":"/v0/beads/issues/e2e-mol.3/related","query":["direction","type"],"status":200},
+    {"method":"GET","operation_id":"listDependencies","path":"/v0/beads/dependencies","query":["issue_id"],"status":200}
+  ]
+}

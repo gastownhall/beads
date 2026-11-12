@@ -277,8 +277,8 @@ in; 13 is the HTTP surface, which lands with the command rather than after it.
     provider can never be, so a case placed there silently never runs on the
     backend most likely to diverge.
 
-    **TWO GATES NOW FAIL THE BUILD IF YOU SKIP THIS STEP, and both take a
-    reasoned waiver rather than silence.** They exist because coverage used to
+    **THREE GATES NOW FAIL THE BUILD IF YOU SKIP THIS STEP, and all three take
+    a reasoned waiver rather than silence.** They exist because coverage used to
     be aspirational: `issueops.Importer.ImportBatch` had no contract case from
     the day it was written and nothing noticed.
 
@@ -293,6 +293,17 @@ in; 13 is the HTTP surface, which lands with the command rather than after it.
       way that matters: it fails on an entry naming no real method AND on an
       entry the package has since covered, so the change that writes the first
       case deletes the waiver in the same diff.
+    - **`TestEveryRoleRequestFieldHasAContractCase`**
+      (`backend/conformance/request_field_coverage_gate_test.go`). The same
+      question one level down: every exported field of every struct a role
+      method's parameters reach — `IssuePatch`, an `ApplyItem`'s `CreateItem` —
+      must be SET by a contract case, as a keyed literal element or an
+      assignment. Setters are attributed by TYPE, so a case that sets
+      `CloseRequest.ExpectedVersion` never covers `UpdateRequest`'s, and a new
+      request field reaches this gate on its own. To waive, add an entry to
+      `uncoveredRequestFields` keyed `"<Struct>.<Field>"` with its package
+      qualifier (`"issueops.UpdateRequest.ExpectedVersion"`) and a reason; it
+      is shrink-only by the same two rules.
     - **`unwiredContractEntrypoints`**
       (`internal/storage/contract_leg_registry_test.go`). The mirror question,
       per LEG: a registered leg is held to every entrypoint the conformance
@@ -589,7 +600,11 @@ names. So the demand side is where an accessorless role is added —
 role with three accessors. The supply side needs nothing: `#5499`'s per-leg
 lock is ENTRYPOINT-scoped, so the six new `Run…` functions were demanded of all
 three legs the moment the contract file existed. Check which of the two gates
-your role is invisible to before assuming both.
+your role is invisible to before assuming both. An accessorless role also
+takes one line in `rolesNoAccessorHandsOut`
+(`backend/conformance/request_field_coverage_gate_test.go`): the request-field
+census is checked against reflection for every facade role, and reflection
+reaches a role only through an accessor or through that table.
 
 Nothing else in the accessor apparatus applies, and the absences should read as
 decisions: no row in either `role_accessor_decorator_test.go`, because there is

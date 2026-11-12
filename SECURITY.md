@@ -2,9 +2,12 @@
 
 ## Reporting Security Issues
 
-If you discover a security vulnerability in bd, please report it responsibly:
-
-**Email**: security@steveyegge.com (or open a private security advisory on GitHub)
+If you discover a security vulnerability in bd, please report it privately
+through GitHub: open this repository's **Security** tab and choose
+**Report a vulnerability**
+([direct link](https://github.com/gastownhall/beads/security/advisories/new)).
+Only the maintainers can see the report. Please don't open a public issue,
+pull request or discussion for a security problem.
 
 Please include:
 - Description of the vulnerability

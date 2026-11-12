@@ -78,6 +78,9 @@ func TestJournalContract(t *testing.T) {
 	t.Run("ArrivalRenameKeepsTheStamp", func(t *testing.T) {
 		conformance.RunJournalArrivalRenameKeepsTheStamp(t, ctx, fixture)
 	})
+	t.Run("EveryMutationKindRecordsItsActor", func(t *testing.T) {
+		conformance.RunJournalEveryMutationKindRecordsItsActor(t, ctx, fixture)
+	})
 	t.Run("EveryMutationKindLandsARow", func(t *testing.T) {
 		conformance.RunJournalEveryMutationKindLandsARow(t, ctx, fixture)
 	})
@@ -174,6 +177,9 @@ func newUOWJournalFixture(t *testing.T, ctx context.Context, prefix string) conf
 					return "comment " + id, err
 				})
 			},
+			// Every hook above acts as "actor", Delete included: the unit of
+			// work's DeleteIssue takes the actor.
+			Actor: "actor",
 		},
 	}
 }
