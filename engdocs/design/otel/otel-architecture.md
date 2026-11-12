@@ -248,7 +248,7 @@ Version control operations emit spans directly in `store.go` via `doltTracer.Sta
 Implemented spans (see Appendix for exact source locations):
 - `dolt.commit` — `CALL DOLT_COMMIT`
 - `dolt.push` — `CALL DOLT_PUSH`
-- `dolt.pull` — `CALL DOLT_PULL`
+- `dolt.pull` — a fetch of the remote branch, then `CALL DOLT_MERGE` of its tracking ref (never `DOLT_PULL`, bd-e2q8zs)
 - `dolt.merge` — `CALL DOLT_MERGE`
 - `dolt.branch` — `CALL DOLT_BRANCH`
 - `dolt.checkout` — `CALL DOLT_CHECKOUT`
@@ -345,7 +345,7 @@ OTel SDK uses dot-notation internally. Prometheus-compatible backends (VictoriaM
 | `dolt.query_row` | Single-row queries (`queryRowContext`) | `db.operation`, `db.statement` |
 | `dolt.commit` | DOLT_COMMIT operation | `commit_msg` |
 | `dolt.push` | DOLT_PUSH operation | `dolt.branch` |
-| `dolt.pull` | DOLT_PULL operation | `dolt.branch` |
+| `dolt.pull` | Pull: fetch, then DOLT_MERGE of the tracking ref | `dolt.branch` |
 | `dolt.merge` | DOLT_MERGE operation | `dolt.merge_branch` |
 | `dolt.branch` | DOLT_BRANCH operation | `dolt.branch` |
 | `dolt.checkout` | DOLT_CHECKOUT operation | `dolt.branch` |
