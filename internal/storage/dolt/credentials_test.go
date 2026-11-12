@@ -1384,3 +1384,116 @@ func TestDecryptWithKeyStaysUnwrappedForRotation(t *testing.T) {
 		t.Errorf("error = %v, want the bare cipher error; classification belongs to decryptPassword", err)
 	}
 }
+
+// GH#5213: the server store shares the embedded store's conditional upsert, so
+// a credential-repair re-add without a tier keeps the stored tier, and the
+// write is committed (federation_peers absent from dolt_status).
+func TestAddFederationPeerSovereignty(t *testing.T) {
+	skipIfNoServer(t)
+
+	ctx := context.Background()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	dbName := fmt.Sprintf("test_federation_sovereignty_%d", testServerPort)
+
+	assertDatabaseNotExists(t, testServerPort, dbName)
+	t.Cleanup(func() { dropTestDatabase(t, testServerPort, dbName) })
+
+	store, err := New(ctx, &Config{
+		Path:            filepath.Join(beadsDir, "dolt"),
+		BeadsDir:        beadsDir,
+		ServerHost:      "127.0.0.1",
+		ServerPort:      testServerPort,
+		Database:        dbName,
+		MaxOpenConns:    1,
+		CreateIfMissing: true,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer store.Close()
+
+	add := func(t *testing.T, peer *storage.FederationPeer) {
+		t.Helper()
+		if err := store.AddFederationPeer(ctx, peer); err != nil {
+			t.Fatalf("AddFederationPeer(%s) error = %v", peer.Name, err)
+		}
+		var dirty int
+		if err := store.db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM dolt_status WHERE table_name = 'federation_peers'").Scan(&dirty); err != nil {
+			t.Fatalf("read dolt_status: %v", err)
+		}
+		if dirty != 0 {
+			t.Errorf("federation_peers left uncommitted after AddFederationPeer(%s)", peer.Name)
+		}
+	}
+	stored := func(t *testing.T, name string) *storage.FederationPeer {
+		t.Helper()
+		got, err := store.GetFederationPeer(ctx, name)
+		if err != nil {
+			t.Fatalf("GetFederationPeer(%s) error = %v", name, err)
+		}
+		return got
+	}
+
+	t.Run("empty tier preserves stored tier and updates credentials", func(t *testing.T) {
+		add(t, &storage.FederationPeer{
+			Name: "townbeta", RemoteURL: "file:///tmp/townbeta-old",
+			Username: "olduser", Password: "oldpass", Sovereignty: "T2",
+		})
+		repair := &storage.FederationPeer{
+			Name: "townbeta", RemoteURL: "file:///tmp/townbeta-new",
+			Username: "newuser", Password: "newpass",
+		}
+		add(t, repair)
+		if repair.Sovereignty != "T2" {
+			t.Errorf("returned peer.Sovereignty = %q, want the preserved tier %q", repair.Sovereignty, "T2")
+		}
+		got := stored(t, "townbeta")
+		if got.RemoteURL != "file:///tmp/townbeta-new" || got.Username != "newuser" || got.Password != "newpass" {
+			t.Errorf("stored peer = {url %q, user %q, pwd %q}, want the repaired URL and credentials",
+				got.RemoteURL, got.Username, got.Password)
+		}
+		if got.Sovereignty != "T2" {
+			t.Errorf("stored sovereignty = %q, want %q (tier silently cleared)", got.Sovereignty, "T2")
+		}
+	})
+
+	t.Run("non-empty tier replaces stored tier", func(t *testing.T) {
+		add(t, &storage.FederationPeer{
+			Name: "towngamma", RemoteURL: "file:///tmp/towngamma", Username: "u", Password: "p", Sovereignty: "T2",
+		})
+		peer := &storage.FederationPeer{
+			Name: "towngamma", RemoteURL: "file:///tmp/towngamma", Username: "u", Password: "p", Sovereignty: "T3",
+		}
+		add(t, peer)
+		if peer.Sovereignty != "T3" {
+			t.Errorf("returned peer.Sovereignty = %q, want %q", peer.Sovereignty, "T3")
+		}
+		if got := stored(t, "towngamma").Sovereignty; got != "T3" {
+			t.Errorf("stored sovereignty = %q, want %q", got, "T3")
+		}
+	})
+
+	t.Run("new and existing untiered peers stay untiered", func(t *testing.T) {
+		for i := 0; i < 2; i++ {
+			peer := &storage.FederationPeer{Name: "plain", RemoteURL: "file:///tmp/plain", Username: "u", Password: "p"}
+			add(t, peer)
+			if peer.Sovereignty != "" {
+				t.Errorf("AddFederationPeer #%d returned peer.Sovereignty = %q, want empty", i+1, peer.Sovereignty)
+			}
+			if got := stored(t, "plain").Sovereignty; got != "" {
+				t.Errorf("AddFederationPeer #%d stored sovereignty = %q, want empty", i+1, got)
+			}
+		}
+	})
+
+	t.Run("failed call leaves the caller's tier untouched", func(t *testing.T) {
+		peer := &storage.FederationPeer{Name: "1-invalid", RemoteURL: "file:///tmp/x", Username: "u", Password: "p"}
+		if err := store.AddFederationPeer(ctx, peer); err == nil {
+			t.Fatal("AddFederationPeer with an invalid name succeeded, want an error")
+		}
+		if peer.Sovereignty != "" {
+			t.Errorf("peer.Sovereignty after a failed call = %q, want it untouched (empty)", peer.Sovereignty)
+		}
+	})
+}

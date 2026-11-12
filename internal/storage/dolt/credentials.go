@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/beads/internal/execenv"
 	"github.com/steveyegge/beads/internal/githooksenv"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
 // Credential storage and encryption for federation peers.
@@ -308,19 +309,16 @@ func (s *DoltStore) addFederationPeer(ctx context.Context, peer *storage.Federat
 		}
 	}
 
-	// Upsert the peer credentials
-	_, err = s.execContext(ctx, `
-		INSERT INTO federation_peers (name, remote_url, username, password_encrypted, sovereignty)
-		VALUES (?, ?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
-			remote_url = VALUES(remote_url),
-			username = VALUES(username),
-			password_encrypted = VALUES(password_encrypted),
-			sovereignty = VALUES(sovereignty),
-			updated_at = CURRENT_TIMESTAMP
-	`, peer.Name, peer.RemoteURL, peer.Username, encryptedPwd, peer.Sovereignty)
-
-	if err != nil {
+	// Upsert the peer credentials through the helper the embedded store uses,
+	// so both modes keep a stored tier the same way and report the effective
+	// one. The transaction body may replay, so tier is assigned on every
+	// attempt and handed to the caller only after the whole method succeeds.
+	var tier string
+	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		var addErr error
+		tier, addErr = issueops.AddFederationPeerInTx(ctx, tx, peer, encryptedPwd)
+		return addErr
+	}); err != nil {
 		return fmt.Errorf("failed to add federation peer: %w", err)
 	}
 
@@ -336,6 +334,7 @@ func (s *DoltStore) addFederationPeer(ctx context.Context, peer *storage.Federat
 		return fmt.Errorf("failed to commit federation peer: %w", err)
 	}
 
+	peer.Sovereignty = tier
 	return nil
 }
 

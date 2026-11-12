@@ -128,15 +128,19 @@ func (s *EmbeddedDoltStore) AddFederationPeer(ctx context.Context, peer *storage
 		return fmt.Errorf("encrypt password: %w", err)
 	}
 
+	var tier string
 	if err := s.withConn(ctx, true, func(tx *sql.Tx) error {
-		if err := issueops.AddFederationPeerInTx(ctx, tx, peer, encryptedPwd); err != nil {
-			return err
+		var addErr error
+		if tier, addErr = issueops.AddFederationPeerInTx(ctx, tx, peer, encryptedPwd); addErr != nil {
+			return addErr
 		}
 		// Also add the Dolt remote.
 		return issueops.AddRemoteIfNotExists(ctx, tx, peer.Name, peer.RemoteURL)
 	}); err != nil {
 		return err
 	}
+	// Report the effective tier only once the whole write has landed.
+	peer.Sovereignty = tier
 	return nil
 }
 
@@ -233,9 +237,10 @@ func warnStoredPeerSuppressesAmbientPassword(peer string, p *storage.FederationP
 	if os.Getenv("DOLT_REMOTE_PASSWORD") == "" {
 		return
 	}
-	// add-peer upserts the whole row, so a re-run without --sovereignty
-	// clears a stored tier (GH#5213): carry the stored tier into the
-	// suggested command. The password is left to add-peer's no-echo prompt
+	// add-peer keeps a stored tier when --sovereignty is omitted (GH#5213),
+	// but the suggested command still names the stored tier so it reads as
+	// the peer's full definition and works against older bd releases, whose
+	// re-run cleared it. The password is left to add-peer's no-echo prompt
 	// rather than suggested as an argument that lands in shell history.
 	//
 	// The peer name, username and tier are fields of a federation_peers row,
