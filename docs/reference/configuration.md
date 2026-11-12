@@ -82,6 +82,8 @@ Unrecognized keys produce a warning with a did-you-mean suggestion; use the `cus
 
 These keys must live in `config.yaml`, not the database, because they are read before the database is opened. Writing them with `bd config set` automatically updates `config.yaml`.
 
+The `bd serve` settings surface (`PUT /v0/beads/config/{key}`, and the dashboard behind it) cannot write your `config.yaml`, so it refuses every one of these keys with a `400` and stores nothing: the database's config table is replicated by `bd dolt push`, and a secret stored there would reach every remote. Set them with `bd config set` in the workspace instead. `DELETE /v0/beads/config/{key}` still removes a row an older bd or server stored under one of these keys; rotate any secret that was already pushed.
+
 The full namespaces routed to YAML are:
 
 `routing.*`, `sync.*`, `git.*`, `directory.*`, `repos.*`, `external_projects.*`, `validation.*`, `lint.*`, `hierarchy.*`, `ai.*`, `backup.*`, `export.*`, `dolt.*`, `federation.*`, `metrics.*`, `list.*`, `audit.*`, `storage-class.*`
@@ -578,6 +580,8 @@ rm MIGRATION-FREEZE        # thaw
 Blocked commands exit **14** — a stable code scripts branch on to tell "someone is migrating this workspace, come back later" from a generic failure worth an immediate retry. That includes the destructive ones: `bd init --reinit-local` and `bd bootstrap` are refused too.
 
 Reads (`bd list`, `bd show`, `bd ready`, …) keep working during a freeze, and bd's own background maintenance stands down with them — version-bump migration, JSONL auto-import, Dolt auto-commit, auto-backup, auto-export and auto-push are all skipped, so running a read does not leave a commit in the store you are migrating.
+
+In releases after v1.3.2, `bd ready` and `bd list --ready` in server mode also wake deferred issues whose defer date has passed. During a freeze they skip that write: those issues stay deferred and are left out of the list until the first such read after you thaw.
 
 <Warning>
 A `bd serve` process started before the marker appeared keeps accepting HTTP writes: the freeze is a CLI-invocation gate, and a running server never re-reads it. Stop the server before you freeze.
