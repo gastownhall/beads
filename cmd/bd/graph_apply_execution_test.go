@@ -947,3 +947,55 @@ func TestExecuteGraphApplyLateItemFailureLeavesNoRows(t *testing.T) {
 		}
 	}
 }
+
+// TestExecuteGraphApplyBlockingAliasesGateReady pins bd-esm0t5 end to end: an
+// edge typed "blocked-by" and an inline dep typed "depends-on" are stored as
+// "blocks" rows (b and c depend on a), so `bd ready` holds b and c back while
+// a is open, instead of storing inert custom types that never gate.
+func TestExecuteGraphApplyBlockingAliasesGateReady(t *testing.T) {
+	ctx, _ := withGraphApplyTestStore(t)
+
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "a", Title: "A", Type: "task"},
+			{Key: "b", Title: "B", Type: "task"},
+			{Key: "c", Title: "C", Type: "task", Deps: []GraphApplyNodeDep{{Target: "a", Type: "depends-on"}}},
+		},
+		Edges: []GraphApplyEdge{{FromKey: "b", ToKey: "a", Type: "blocked-by"}},
+	}
+	if err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{}); err != nil {
+		t.Fatalf("validateGraphApplyPlan: %v", err)
+	}
+	result, err := executeGraphApply(ctx, plan, GraphApplyOptions{})
+	if err != nil {
+		t.Fatalf("executeGraphApply: %v", err)
+	}
+	a, b, c := result.IDs["a"], result.IDs["b"], result.IDs["c"]
+
+	for _, dependent := range []string{b, c} {
+		deps, err := store.GetDependenciesWithMetadata(ctx, dependent)
+		if err != nil {
+			t.Fatalf("GetDependenciesWithMetadata(%s): %v", dependent, err)
+		}
+		if len(deps) != 1 || deps[0].ID != a || deps[0].DependencyType != types.DepBlocks {
+			t.Fatalf("%s dependencies = %+v, want one blocks row on %s", dependent, deps, a)
+		}
+	}
+
+	ready, err := store.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	readyIDs := make(map[string]bool, len(ready))
+	for _, issue := range ready {
+		readyIDs[issue.ID] = true
+	}
+	if !readyIDs[a] {
+		t.Errorf("ready set %v lacks the unblocked node a (%s)", readyIDs, a)
+	}
+	for key, id := range map[string]string{"b": b, "c": c} {
+		if readyIDs[id] {
+			t.Errorf("node %s (%s) is ready while a is open; the alias edge must gate it", key, id)
+		}
+	}
+}
