@@ -1678,9 +1678,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   labels of a local issue when the GitHub issue has none left. It used to keep
   them, so a later push of the issue put them back on GitHub. A label added or
   removed locally since the last push or pull of the issue survives a pull
-  that finds the GitHub issue unchanged since then, and the next push sends
-  it. A pull used to undo such an edit when the GitHub issue had plain labels.
-  When the GitHub issue changed too, the pull takes GitHub's labels.
+  that finds GitHub's labels unchanged since then, even when GitHub changed
+  the title, body or state, and the next push sends it. A pull used to undo
+  such an edit when the GitHub issue had plain labels. When GitHub's labels
+  changed too, the pull takes GitHub's labels.
 - `bd dolt pull --strategy ours|theirs`, `bd vc merge --strategy`, and pulls
   whose conflicts bd auto-resolves or whose foreign-key violations it repairs
   now commit the tables that merged cleanly alongside them. Previously the

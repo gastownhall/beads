@@ -523,19 +523,89 @@ func TestEnginePullKeepsLabelsChangedSinceThePush(t *testing.T) {
 	}
 }
 
+// TestEnginePullKeepsLocalLabelsWhileTheRemoteChangedOtherFields pins that a
+// pull merges a local label edit with a remote edit of other pushed fields:
+// the local issue takes the remote's title and keeps its labels, and the push
+// sends them. The local issue with the remote's labels still matches the
+// stored push hash, which proves that the remote's labels did not change since
+// the push. A pull that wrote the remote's labels and refreshed the push hash
+// dropped the local edit on both sides.
+func TestEnginePullKeepsLocalLabelsWhileTheRemoteChangedOtherFields(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		pushed []string // labels on both sides after the first push
+		local  []string // local labels after the edit
+		pulls  int      // `bd github pull` runs before `bd github push`; 0 runs one `bd github sync`
+	}{
+		{name: "sync/added", local: []string{"local"}},
+		{name: "sync/added_beside_a_pushed_label", pushed: []string{"pushed"}, local: []string{"local", "pushed"}},
+		{name: "sync/removed", pushed: []string{"pushed"}},
+		// The first pull records the remote's labels in the push hash, so the
+		// second finds the remote unchanged since then and keeps the labels.
+		{name: "pull_pull_push/added", local: []string{"local"}, pulls: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newLabelPushFixture(test.pushed...)
+			runSync(t, f.engine, SyncOptions{Push: true})
+
+			f.local.Labels = append([]string(nil), test.local...)
+			f.editRemote("remote edit")
+			if test.pulls == 0 {
+				runSync(t, f.engine, SyncOptions{})
+			}
+			for pull := 1; pull <= test.pulls; pull++ {
+				runSync(t, f.engine, SyncOptions{Pull: true})
+				if f.local.Title != "remote edit" || !equalNormalizedStrings(f.local.Labels, test.local) {
+					t.Fatalf("pull %d: local title=%q labels=%q, want %q and %q",
+						pull, f.local.Title, f.local.Labels, "remote edit", test.local)
+				}
+			}
+			if test.pulls > 0 {
+				runSync(t, f.engine, SyncOptions{Push: true})
+			}
+
+			if f.local.Title != "remote edit" || !equalNormalizedStrings(f.local.Labels, test.local) {
+				t.Fatalf("local title=%q labels=%q, want the remote's title and the local labels %q",
+					f.local.Title, f.local.Labels, test.local)
+			}
+			if remote := f.mock.issues[0]; remote.Title != "remote edit" || !equalNormalizedStrings(remote.Labels, test.local) {
+				t.Fatalf("remote title=%q labels=%q, want its own title and the local labels %q pushed",
+					remote.Title, remote.Labels, test.local)
+			}
+
+			// The push recorded what it sent, so the next one is a no-op.
+			f.mock.fetchCalls = 0
+			f.mock.updated = make(map[string]*types.Issue)
+			runSync(t, f.engine, SyncOptions{Push: true})
+			if f.mock.fetchCalls != 0 || len(f.mock.updated) != 0 {
+				t.Fatalf("push after the sync: fetchCalls=%d updated=%d, want both 0", f.mock.fetchCalls, len(f.mock.updated))
+			}
+		})
+	}
+}
+
 // TestEnginePullWritesRemoteLabelsUnlessOnlyLocalChanged pins where
-// pullKeepsLocalLabels stops: without proof that the remote still holds the
-// last push, or when the push hash cannot tell the labels apart, a pull
-// writes the remote's labels over a local label edit.
+// pullKeepsLocalLabels stops: when the remote's labels changed too, without
+// proof that the remote still holds the labels of the last push, or when the
+// push hash cannot tell the labels apart, a sync writes the remote's labels
+// over a local label edit and pushes nothing.
 func TestEnginePullWritesRemoteLabelsUnlessOnlyLocalChanged(t *testing.T) {
 	for _, test := range []struct {
-		name  string
-		hooks *PushHooks               // replaces labelPushHooks
-		setup func(f *pushHashFixture) // after the push and the local label edit
+		name   string
+		pushed []string                 // labels on both sides after the first push
+		hooks  *PushHooks               // replaces labelPushHooks
+		setup  func(f *pushHashFixture) // after the push and the local label edit
 	}{
-		// Both sides changed since the push. The pull cannot tell a local
-		// label edit from a remote one, so the remote wins.
-		{name: "remote_changed_too", setup: func(f *pushHashFixture) { f.editRemote("remote edit") }},
+		// The remote changed its title and its labels since the push, so a
+		// local label edit conflicts with the remote's, which wins.
+		{name: "remote_changed_the_title_and_added_a_label", setup: func(f *pushHashFixture) {
+			f.editRemote("remote edit")
+			f.mock.issues[0].Labels = []string{"remote"}
+		}},
+		{name: "remote_changed_the_title_and_removed_a_label", pushed: []string{"pushed"}, setup: func(f *pushHashFixture) {
+			f.editRemote("remote edit")
+			f.mock.issues[0].Labels = nil
+		}},
 		// No stored push hash, as on a fresh clone: nothing proves that the
 		// remote still holds the last push.
 		{name: "no_push_hash", setup: func(f *pushHashFixture) {
@@ -546,19 +616,25 @@ func TestEnginePullWritesRemoteLabelsUnlessOnlyLocalChanged(t *testing.T) {
 		{name: "push_hash_without_labels", hooks: titlePushHooks()},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			f := newLabelPushFixture()
+			f := newLabelPushFixture(test.pushed...)
 			if test.hooks != nil {
 				f.engine.PushHooks = test.hooks
 			}
 			runSync(t, f.engine, SyncOptions{Push: true})
 
-			f.local.Labels = []string{"local"}
+			f.local.Labels = append(append([]string(nil), test.pushed...), "local")
 			if test.setup != nil {
 				test.setup(f)
 			}
-			runSync(t, f.engine, SyncOptions{Pull: true})
-			if len(f.local.Labels) != 0 {
-				t.Fatalf("local labels after the pull = %q, want the remote's none", f.local.Labels)
+			want := append([]string(nil), f.mock.issues[0].Labels...)
+			f.mock.updated = make(map[string]*types.Issue)
+			runSync(t, f.engine, SyncOptions{})
+			if !equalNormalizedStrings(f.local.Labels, want) {
+				t.Fatalf("local labels after the sync = %q, want the remote's %q", f.local.Labels, want)
+			}
+			if got := f.mock.issues[0].Labels; len(f.mock.updated) != 0 || !equalNormalizedStrings(got, want) {
+				t.Fatalf("sync pushed %d issues, leaving remote labels %q; want no push and %q",
+					len(f.mock.updated), got, want)
 			}
 		})
 	}
