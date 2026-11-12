@@ -1236,6 +1236,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The aux row id re-key again skips tables with dolthub/dolt#11131
+  encoding drift instead of aborting the migration on every open** (#8372).
+  The Dolt 2.6 engine reports the drift as `malformed out-of-band adaptive
+  value`, which the drift check did not recognize, so a drifted store that
+  1.3.4 upgraded past with a warning failed to open. The re-key now treats
+  that text as drift too: it warns, records the table, and retries it on later
+  passes, as for the older engine's `invalid hash length` (#4380).
 - **Upgrading a clone whose local `wisps` table lacks `started_at` or
   `no_history` no longer stops at schema v52** (#6080, reported by @dmcp718;
   fix from #8099 by @kyoto-bonsai). Migrations 0023 and 0027 add those
