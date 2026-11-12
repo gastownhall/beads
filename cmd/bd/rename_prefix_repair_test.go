@@ -349,4 +349,12 @@ func TestRenameNewIDCheck(t *testing.T) {
 			accepted(t, prefix+"-4b0", prefix+"-abc")
 		})
 	}
+
+	// Targets the previous ^[a-z]+- pattern accepted stay accepted:
+	// letters-only, hyphenated and hierarchical IDs.
+	for _, newID := range []string{"bd-dolt", "gt-auth", "bd-a3f8e9.1", "web-app-abc123", "bd-a_b.c-d"} {
+		t.Run("compat/"+newID, func(t *testing.T) {
+			accepted(t, "bd-4b0", newID)
+		})
+	}
 }
