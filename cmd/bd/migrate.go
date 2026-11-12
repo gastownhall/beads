@@ -892,8 +892,12 @@ there, opening the store applies the migration, which changes the schema
 underneath every library client connected to the proxy's backend, and the
 proxy does not track those clients. Stop them, run
 "bd migrate schema --force", then restart them. BD_ALLOW_REMOTE_MIGRATE=1
-does not get past that refusal. On a team-server workspace the team server
-owns the schema, so even --force only verifies it.
+does not get past that refusal. If the database has a Dolt remote, that
+--force is also the designated-migrator confirmation above, so the gate's
+adopt and pull-first stops do not run: run a read command such as "bd list"
+first, and if it prints one of those stops, follow it instead of forcing.
+On a team-server workspace the team server owns the schema, so even --force
+only verifies it.
 
 Outside proxied-server mode, on an up-to-date database this is a no-op, so
 it is safe to run in CI, release gates, and recovery scenarios. In
@@ -948,8 +952,11 @@ func init() {
 	migrateCmd.AddCommand(migrateHooksCmd)
 
 	// --force on migrate schema mirrors the parent command's flag; both trip the
-	// same isForcedMigrate check in main.go's PersistentPreRunE.
-	migrateSchemaCmd.Flags().Bool("force", false, "Bypass the remote-migrate gate as the single designated migrator (equivalent to BD_ALLOW_REMOTE_MIGRATE=1)")
+	// same isForcedMigrate check in main.go's PersistentPreRunE. On a
+	// proxied-server workspace it is also the capability registry's force
+	// opt-in past this command's refusal (gastownhall/beads#6656), which the
+	// environment variable deliberately is not, so its usage says so.
+	migrateSchemaCmd.Flags().Bool("force", false, "Bypass the remote-migrate gate as the single designated migrator, as BD_ALLOW_REMOTE_MIGRATE=1 does; in proxied-server mode, also the opt-in past this command's refusal, which BD_ALLOW_REMOTE_MIGRATE=1 does not give")
 	migrateCmd.AddCommand(migrateSchemaCmd)
 
 	migrateToProxiedServerCmd.Flags().Bool("dry-run", false, "Show what would be done without making changes")

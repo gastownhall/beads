@@ -454,9 +454,12 @@ func pinProxiedServerGlobals(t *testing.T, on bool) {
 // version-bump notice's shared-no-remote remedy on proxied workspaces
 // (gastownhall/beads#6656): the bare `bd migrate schema` is refused there
 // unless --force, so the notice names the forced verb and the co-resident
-// client-stop precondition. The version-bump probe does not always run
-// through the provider path that sets the gate's Proxied marker, so the
-// workspace's own proxied mode counts too. Off the proxy the bare verb stays.
+// client-stop precondition. The branch is defensive: the notice's only
+// caller, autoMigrateOnVersionBump, returns before any open on a
+// proxied-server workspace, so this calls the notice directly. The
+// dolt.NewFromConfig open that caller uses never sets the gate's Proxied
+// marker, so the workspace's own proxied mode counts too. Off the proxy the
+// bare verb stays.
 func TestNoticeSharedMigrateRefusalProxiedPrescribesTheForcedVerb(t *testing.T) {
 	pinJSONOutput(t, false)
 	for _, tt := range []struct {
@@ -499,9 +502,11 @@ func TestNoticeSharedMigrateRefusalProxiedPrescribesTheForcedVerb(t *testing.T) 
 }
 
 // TestInitJoinGuidanceProxiedPrescribesTheForcedVerb pins the bd init join
-// guidance (gastownhall/beads#6656): when the refusing gate is proxied, the
-// workspace it sends the operator to refuses the bare verb, so the guidance
-// names the forced one; off the proxy it keeps the bare verb.
+// guidance (gastownhall/beads#6656): when the refusing gate is marked proxied,
+// the guidance names the forced verb, which a proxied front door lets
+// through; off the proxy it keeps the bare verb. The branch is defensive: the
+// guidance's only caller is init's non-proxied open, which never returns a
+// refusal marked proxied, so this calls the guidance directly.
 func TestInitJoinGuidanceProxiedPrescribesTheForcedVerb(t *testing.T) {
 	for _, tt := range []struct {
 		proxied bool

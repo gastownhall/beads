@@ -497,7 +497,30 @@ var allProxiedTopologies = []ProxyTopology{
 // typed, before the provider is built — and the refusal is not a dead end: it
 // names the route (stop the clients, force, restart), and only a true --force
 // is let through to take it.
+//
+// The route's --force is also the remote-migrate gate's designated-migrator
+// override, which skips the gate's adopt, pull-first and fork stops on a
+// remote-backed store (TestSharedStoreGateForcedVerbSkipsTheAdoptStop). The
+// front door cannot see remotes, so every refusal that prescribes the force
+// says so. Team-server is refused with its own words: its open only verifies,
+// so there is no migration to stop clients for and no gate to skip.
 func TestProxyMigrateSchemaRefusedUnlessForced(t *testing.T) {
+	migratingText := []string{
+		"migrate schema is not supported in proxied-server mode without --force",
+		"Stop those clients",
+		"bd migrate schema --force",
+		"restart them",
+		"If this database has a Dolt remote, --force also confirms you are its single designated migrator",
+		"(adopt, pull first, forked schema)",
+		"run a read command such as `bd list` first",
+	}
+	teamServerText := []string{
+		"migrate schema is not supported in proxied-server mode without --force",
+		"the team server owns the schema",
+		"only verifies it and migrates nothing",
+		"bd migrate schema --force",
+		"no client needs to stop",
+	}
 	refusedCases := []struct {
 		name   string
 		force  []string // the --force values set in order; empty = omitted
@@ -533,14 +556,18 @@ func TestProxyMigrateSchemaRefusedUnlessForced(t *testing.T) {
 				if got.Code != "proxy.migrate.unsupported" || got.Mutates || got.Reason != string(ProxyReasonDesign) {
 					t.Fatalf("refusal = %+v; want code proxy.migrate.unsupported, mutates false, reason design", got)
 				}
-				for _, want := range []string{
-					"migrate schema is not supported in proxied-server mode without --force",
-					"Stop those clients",
-					"bd migrate schema --force",
-					"restart them",
-				} {
+				wantText, absent := migratingText, []string{"team server"}
+				if topology == ProxyTopologyTeamServer {
+					wantText, absent = teamServerText, []string{"Stop those clients", "Dolt remote", "promotes the schema"}
+				}
+				for _, want := range wantText {
 					if !strings.Contains(got.Error, want) {
 						t.Errorf("refusal message %q lacks %q", got.Error, want)
+					}
+				}
+				for _, notWant := range absent {
+					if strings.Contains(got.Error, notWant) {
+						t.Errorf("refusal message %q on %s says %q, which is not true there", got.Error, topology, notWant)
 					}
 				}
 			})
@@ -571,14 +598,24 @@ type refusalJSONForTest struct {
 // TestProxyMigrateSchemaForceWarnsBeforeTheOpen pins what --force buys on a
 // proxied workspace: the gate lets it through to the provider open, and before
 // that open — the gate is the last thing to run ahead of it — it prints one
-// generic warning to close co-resident library clients. stderr only, so a
-// --json caller's stdout still carries the command's single report and nothing
-// else. Generic on purpose: the proxy does not track its clients, so there are
-// none to name.
+// generic warning to close co-resident library clients, and says once more
+// that on a remote-backed store the same flag skips the remote-migrate gate's
+// adopt and pull-first checks. stderr only, so a --json caller's stdout still
+// carries the command's single report and nothing else. Generic on purpose:
+// the proxy does not track its clients, so there are none to name. On
+// team-server, whose open only verifies, the note says that instead.
 func TestProxyMigrateSchemaForceWarnsBeforeTheOpen(t *testing.T) {
-	const want = "Warning: before forcing schema migration, close co-resident library clients; " +
-		"restart them after this command completes.\n"
+	const migrating = "Warning: before forcing schema migration, close co-resident library clients; " +
+		"restart them after this command completes.\n" +
+		"  If this database has a Dolt remote, --force also confirms you are its single designated migrator, " +
+		"so the remote-migrate gate's adopt and pull-first checks do not run.\n"
+	const teamServer = "Note: the team server owns this workspace's schema; " +
+		"--force only verifies it and migrates nothing.\n"
 	for _, topology := range allProxiedTopologies {
+		want := migrating
+		if topology == ProxyTopologyTeamServer {
+			want = teamServer
+		}
 		t.Run(string(topology), func(t *testing.T) {
 			setMigrateSchemaForce(t, "true")
 			stdout, stderr, err := runProxyRegistryGate(t, migrateSchemaCmd, topology)

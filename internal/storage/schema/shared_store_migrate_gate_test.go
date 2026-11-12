@@ -479,3 +479,138 @@ func TestSharedNoRemoteProxiedConsentGuidance(t *testing.T) {
 		}
 	})
 }
+
+// TestSharedDataBehindProxiedConsentGuidance pins the shared data-behind
+// stop's consent step on a proxied-server workspace (gastownhall/beads#6656).
+// That step prescribes `bd migrate schema --force` directly, so an operator
+// following it never meets the front door's refusal of the bare verb, which is
+// where the stop-the-library-clients route is otherwise stated. So the block,
+// the migrate-shared-after-pulling option and the agent directive carry that
+// step themselves. Off the proxy none of them mention library clients.
+func TestSharedDataBehindProxiedConsentGuidance(t *testing.T) {
+	stop := func(proxied bool) *RemoteMigrateGateError {
+		return &RemoteMigrateGateError{
+			CurrentVersion: 1, LatestVersion: LatestVersion(), Pending: 2,
+			FallbackReason: fallbackReasonDataBehind, Shared: true, Proxied: proxied,
+		}
+	}
+	consentOption := func(t *testing.T, e *RemoteMigrateGateError) GateOption {
+		t.Helper()
+		if !e.IsDataBehind() {
+			t.Fatal("the fixture is not the data-behind stop; its FallbackReason drifted")
+		}
+		opts := e.Options()
+		if len(opts) != 2 || opts[1].ID != "migrate-shared-after-pulling" {
+			t.Fatalf("Options = %+v, want the pull and then migrate-shared-after-pulling", opts)
+		}
+		return opts[1]
+	}
+
+	t.Run("proxied", func(t *testing.T) {
+		e := stop(true)
+		opt := consentOption(t, e)
+		msg := e.UserMessage()
+		for _, want := range []string{
+			"        " + SharedConsentCommandForced + "\n",
+			"Stop every library client connected to this proxy's backend before it",
+			"restart them once it completes",
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("UserMessage missing %q:\n%s", want, msg)
+			}
+		}
+		if got := opt.Commands; len(got) != 1 || got[0] != SharedConsentCommandForced {
+			t.Errorf("migrate-shared-after-pulling Commands = %q, want [%q]", got, SharedConsentCommandForced)
+		}
+		if !strings.Contains(opt.When, "every library client connected to this proxy's backend is stopped first and restarted after") {
+			t.Errorf("migrate-shared-after-pulling When must carry the client-stop precondition: %q", opt.When)
+		}
+		if !strings.Contains(opt.Risk, "library clients left running") {
+			t.Errorf("migrate-shared-after-pulling Risk must name what happens to clients left running: %q", opt.Risk)
+		}
+		if d := e.AgentDirective(); !strings.Contains(d, "stop every library client connected to the proxy's backend") {
+			t.Errorf("AgentDirective must tell the agent the operator stops the library clients first: %q", d)
+		}
+	})
+
+	t.Run("not proxied", func(t *testing.T) {
+		e := stop(false)
+		opt := consentOption(t, e)
+		for name, text := range map[string]string{
+			"UserMessage":    e.UserMessage(),
+			"When":           opt.When,
+			"Risk":           opt.Risk,
+			"AgentDirective": e.AgentDirective(),
+		} {
+			if strings.Contains(text, "library client") {
+				t.Errorf("%s carries the proxied client-stop step off the proxy:\n%s", name, text)
+			}
+		}
+	})
+}
+
+// TestSharedStoreGateForcedVerbSkipsTheAdoptStop pins what the proxied front
+// door's prescribed `bd migrate schema --force` (gastownhall/beads#6656) does on
+// a remote-backed shared store, the shape proxied `bd init` sets up by default.
+// That invocation carries two consents into this gate: the verb's own
+// (SetSharedMigrateConsent) and, through cmd/bd's isForcedMigrate, the
+// designated-migrator override (SetForceAllowRemoteMigrate). With a remote the
+// verb's consent is never read, so on its own it leaves the smart gate's adopt
+// stop in place. The override is read before the smart gate routes at all, so
+// the forced verb migrates in place over a remote another clone has already
+// migrated: the #4259 fork the adopt stop exists to prevent. That is why every
+// proxied surface that prescribes the forced verb says what it also does on a
+// remote-backed store (cmd/bd's migrateSchemaRefusal and
+// migrateSchemaForceWarning).
+func TestSharedStoreGateForcedVerbSkipsTheAdoptStop(t *testing.T) {
+	floor := LastNonDeterministicMigration
+	local := map[int]string{floor - 1: "h1", floor: "h2"}
+	remoteAhead := map[int]string{floor - 1: "h1", floor: "h2", floor + 1: "h3"}
+
+	t.Run("verb consent alone keeps the adopt stop", func(t *testing.T) {
+		resetConsent(t)
+		t.Setenv(SmartGateEnv, "1")
+		t.Setenv(AllowRemoteMigrateEnv, "0")
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		expectSmartFiringGate(mock, floor)
+		expectSmartRemoteRead(mock, local, remoteAhead)
+		SetSharedMigrateConsent(true)
+
+		var gateErr *RemoteMigrateGateError
+		if err := sharedGate(t, mock, db); !errors.As(err, &gateErr) {
+			t.Fatalf("verb consent must not get past a remote-backed store's adopt stop, got %v", err)
+		}
+		if gateErr.Decision != gateDecisionAdopt || !gateErr.Shared {
+			t.Fatalf("refusal = %+v, want the shared adopt stop", gateErr)
+		}
+	})
+
+	t.Run("the forced verb's override skips the adopt stop and migrates", func(t *testing.T) {
+		resetConsent(t)
+		t.Setenv(SmartGateEnv, "1")
+		t.Setenv(AllowRemoteMigrateEnv, "0")
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		// The same remote-ahead store, but no smart-gate read is expected:
+		// the override returns before the smart gate routes, so the adopt
+		// decision is never reached.
+		expectSmartFiringGate(mock, floor)
+		SetSharedMigrateConsent(true)
+		SetForceAllowRemoteMigrate(true)
+
+		var err error
+		stderr := captureStderr(t, func() {
+			err = CheckSharedStoreMigrateGate(context.Background(), db, "", nil, nil)
+		})
+		if err != nil {
+			t.Fatalf("the forced verb is the designated-migrator override, so the gate lets it migrate; got %v", err)
+		}
+		if !strings.Contains(stderr, "to a remote-backed database") {
+			t.Errorf("the forced migration must announce that it migrates a remote-backed database:\n%s", stderr)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+}

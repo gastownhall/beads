@@ -138,7 +138,9 @@ type RemoteMigrateGateError struct {
 	// so the surfaces that name it say to run it where the database lives.
 	// The same front door refuses `bd migrate schema` unless --force
 	// (gastownhall/beads#6656), so the shared-no-remote stop names the forced
-	// verb, and the clients to stop first, when this is set.
+	// verb when this is set, and every stop that prescribes the forced verb
+	// (shared-no-remote, and the shared data-behind consent step) names the
+	// library clients to stop first.
 	//
 	// Deliberately set by the provider after the gate returns rather than
 	// plumbed into the gate: the topology is the caller's fact, and every
@@ -411,6 +413,15 @@ func (e *RemoteMigrateGateError) dataBehindBody() string {
 				"  door refuses the bare `bd migrate` verb, not `" + SharedConsentCommandForced + "`,\n" +
 				"  and the provider open applies the migration under it. That is exactly why\n" +
 				"  it has to wait — run it only after the pull on the server host completes.\n"
+			// gastownhall/beads#6656: the same open changes the schema
+			// underneath every library client of the proxy's backend. The
+			// front door's refusal of the bare verb names that route, but an
+			// operator following this block types the forced verb and never
+			// sees that refusal.
+			body += "" +
+				"  Stop every library client connected to this proxy's backend before it,\n" +
+				"  and restart them once it completes: the proxy does not track them, and\n" +
+				"  the migration changes the schema underneath them.\n"
 		}
 	} else {
 		body += "" +
@@ -613,6 +624,14 @@ func (e *RemoteMigrateGateError) AgentDirective() string {
 				" — this store is remote-backed, so the bare verb does not unlock it; see SharedConsentCommandForced): " +
 				"this database is shared with co-resident bd clients and migrating promotes the schema for all of " +
 				"them at once (#5920). Do NOT auto-run it, and do NOT run it before the pull has completed."
+			if e.Proxied {
+				// gastownhall/beads#6656: on this topology the consent step
+				// also changes the schema underneath the library clients the
+				// proxy does not track, and only the operator can stop them.
+				d += " On this proxied workspace the operator also has to stop every library client connected to " +
+					"the proxy's backend before it and restart them after: the proxy does not track them, and the " +
+					"migration changes the schema underneath them."
+			}
 		} else {
 			d += " After the pull, re-running the original command migrates on its own; nothing else is needed."
 		}
@@ -732,6 +751,11 @@ func (e *RemoteMigrateGateError) Options() []GateOption {
 				// consent is honored before this stop is routed at all.
 				consentWhen += ". Unlike the pull this one IS runnable from this proxied workspace — the front door refuses the bare `bd migrate`, not this two-word path — so the pull-first half of this precondition is load-bearing here, not a formality"
 				consentRisk += ". Running it from this proxied workspace does NOT fail closed the way the pull does: the consent is honored before this stop is routed, and the provider open applies the migration"
+				// gastownhall/beads#6656: the precondition the front door's
+				// refusal of the bare verb states, carried onto the forced
+				// verb this option hands out directly.
+				consentWhen += ", AND every library client connected to this proxy's backend is stopped first and restarted after it completes (the proxy does not track them)"
+				consentRisk += "; library clients left running have the schema changed underneath them"
 			}
 			return []GateOption{pull, {
 				ID:       "migrate-shared-after-pulling",
