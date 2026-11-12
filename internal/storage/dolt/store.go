@@ -395,6 +395,14 @@ type DoltStore struct {
 	// referencing it is closed (tracked via autoStartRefs).
 	autoStartedServerDir string
 
+	// poolReadDeadline is the effective per-I/O read deadline on the SHARED
+	// server pool, captured once at construction by parsing the store's final
+	// DSN (so the default/fallback/override precedence buildServerDSN already
+	// applied is preserved, never duplicated). Zero — embedded stores and
+	// no-deadline opens — disables pool-read-timeout classification, and a
+	// dedicated long-timeout connection is never judged against it.
+	poolReadDeadline time.Duration
+
 	// createdDatabase reports whether this store's open created its database
 	// (serverConnFacts.created); see CreatedDatabase.
 	createdDatabase bool
@@ -722,6 +730,15 @@ func isRetryableError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// A classified pool read timeout is a decided non-retry, not a transient
+	// connection error: its message still carries the cause's "invalid
+	// connection" text, which the substring checks below would match and
+	// replay. The retry boundary that classified it already decided the
+	// opposite (GH#5258).
+	var readTimeout *storage.ReadTimeoutError
+	if errors.As(err, &readTimeout) {
+		return false
+	}
 	if schema.IsMigrationLockError(err) {
 		return true
 	}
@@ -939,6 +956,23 @@ func (s *DoltStore) classifyManagedRetry(ctx context.Context, err error, retryab
 	// An indeterminate commit is never replayed — replay could double-apply —
 	// but a connection loss still feeds the breaker before we stop.
 	if errors.Is(err, ErrCommitIndeterminate) {
+		if tripped := s.recordRetryFailure(ctx, err); tripped != nil {
+			return tripped
+		}
+		return backoff.Permanent(err)
+	}
+	// A classified pool read timeout (storage.ReadTimeoutError) is terminal
+	// evidence about THIS attempt: the read was not retried, so replaying it
+	// re-runs the same doomed statement against the same deadline — the
+	// resubmission amplifier GH#5258 measured (~10s per attempt, each
+	// abandoning another server session). Recognize the type BEFORE the
+	// generic connection matching below, which would otherwise resubmit on
+	// the "invalid connection" text the typed message still carries. It is
+	// still a dead connection from the breaker's point of view, so exactly
+	// one failure is recorded — through recordRetryFailure, whose
+	// breaker-trip wrapper preserves the type with %w, so errors.As survives.
+	var readTimeout *storage.ReadTimeoutError
+	if errors.As(err, &readTimeout) {
 		if tripped := s.recordRetryFailure(ctx, err); tripped != nil {
 			return tripped
 		}
@@ -1215,6 +1249,14 @@ var ErrStoreClosed = errors.New("store is closed")
 // that has been idle past its wait_timeout) is retried rather than surfaced to
 // the caller. This is safe because fn is read-only and the transaction is always
 // rolled back, so re-running the operation has no side effects.
+//
+// A read that outlives the pool's per-I/O read deadline is NOT retried: the
+// resubmission would re-run the same doomed statement against the same
+// deadline, which is exactly the amplifier GH#5258 measured (~10s per
+// attempt, each attempt abandoning another server session). Such a failure
+// is classified per attempt — BeginTx errors, callback errors and Rows.Err
+// failures alike, measured before the deferred rollback — and returned as a
+// typed storage.ReadTimeoutError (see classifyPooledRead).
 func (s *DoltStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	if s.closed.Load() {
 		return ErrStoreClosed
@@ -1222,20 +1264,29 @@ func (s *DoltStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) e
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.withRetry(ctx, func() error {
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("begin read tx: %w", err)
-		}
-		defer func() { _ = tx.Rollback() }()
-		// ReadEventsJournal/ReadEventsJournalPage read through this helper, and
-		// the column list they SELECT depends on the probed shape, not on
-		// whether the journal is enabled for writes — scope the shape only, so
-		// readEventsRowsInTx sees this store's actual table instead of
-		// defaulting to canonicalJournalShape (PR A1).
-		clearShape := issueops.ScopeEventsJournalShape(tx, s.journalShape.Load())
-		defer clearShape()
-		return fn(tx)
+		attemptStart := time.Now()
+		err := s.runReadTxOnce(ctx, fn)
+		return s.classifyPooledRead("read transaction", attemptStart, err)
 	})
+}
+
+// runReadTxOnce is one withReadTx attempt: BeginTx, fn, and the rollback that
+// always follows. Split from withReadTx so the attempt can be timed separately
+// from the retry boundary's backoff and the store lock.
+func (s *DoltStore) runReadTxOnce(ctx context.Context, fn func(tx *sql.Tx) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin read tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	// ReadEventsJournal/ReadEventsJournalPage read through this helper, and
+	// the column list they SELECT depends on the probed shape, not on
+	// whether the journal is enabled for writes — scope the shape only, so
+	// readEventsRowsInTx sees this store's actual table instead of
+	// defaulting to canonicalJournalShape (PR A1).
+	clearShape := issueops.ScopeEventsJournalShape(tx, s.journalShape.Load())
+	defer clearShape()
+	return fn(tx)
 }
 
 // execer is satisfied by both *sql.DB and *sql.Conn, letting pinStoreBranch
@@ -1795,6 +1846,11 @@ func (s *DoltStore) QueryContext(ctx context.Context, query string, args ...any)
 }
 
 // queryContext wraps s.db.QueryContext with retry for transient errors.
+// A read that outlives the pool's per-I/O read deadline is classified and not
+// resubmitted (see withReadTx). The classification covers errors OBTAINING
+// the Rows, not later consumer iteration: errors from rows.Next/rows.Err
+// after a successful return keep their raw driver form, and this helper
+// makes no promise about them.
 func (s *DoltStore) queryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
 	if s.closed.Load() {
 		return nil, ErrStoreClosed
@@ -1813,9 +1869,10 @@ func (s *DoltStore) queryContext(ctx context.Context, query string, args ...any)
 			_ = rows.Close()
 			rows = nil
 		}
+		attemptStart := time.Now()
 		var queryErr error
 		rows, queryErr = s.db.QueryContext(ctx, query, args...)
-		return queryErr
+		return s.classifyPooledRead("query", attemptStart, queryErr)
 	})
 	finalErr := wrapLockError(err)
 	endSpan(span, finalErr)
@@ -1823,7 +1880,10 @@ func (s *DoltStore) queryContext(ctx context.Context, query string, args ...any)
 }
 
 // queryRowContext wraps s.db.QueryRowContext with retry for transient errors.
-// The scan function receives the *sql.Row and should call .Scan() on it.
+// The scan function receives the *sql.Row and should call .Scan() on it. The
+// scan is part of the attempt: its failures (including the deferred rows read
+// a Scan performs) are classified like any other pooled read failure, and a
+// read that outlives the pool's per-I/O read deadline is not resubmitted.
 func (s *DoltStore) queryRowContext(ctx context.Context, scan func(*sql.Row) error, query string, args ...any) error {
 	if s.closed.Load() {
 		return ErrStoreClosed
@@ -1836,8 +1896,9 @@ func (s *DoltStore) queryRowContext(ctx context.Context, scan func(*sql.Row) err
 		)...),
 	)
 	finalErr := wrapLockError(s.withRetry(ctx, func() error {
+		attemptStart := time.Now()
 		row := s.db.QueryRowContext(ctx, query, args...)
-		return scan(row)
+		return s.classifyPooledRead("query row", attemptStart, scan(row))
 	}))
 	endSpan(span, finalErr)
 	return finalErr
@@ -2535,6 +2596,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		classifiedRead:         cfg.ClassifiedRead,
 		autoStartedServerDir:   autoStartedDir,
 		createdDatabase:        dbFacts.created,
+		poolReadDeadline:       effectivePoolReadDeadline(connStr),
 	}
 
 	// Forward-drift guard runs on read-only AND writable opens. A binary older
@@ -3028,6 +3090,130 @@ func buildServerDSN(cfg *Config, database string) string {
 		parsed.WriteTimeout = cfg.PoolWriteTimeout
 	}
 	return parsed.FormatDSN()
+}
+
+// effectivePoolReadDeadline extracts the per-I/O read deadline the final
+// server DSN gives the shared pool. Parsing the DSN (rather than re-deriving
+// from Config fields) preserves the default/fallback/override precedence
+// buildServerDSN already applied — whatever the pool's connections actually
+// run under is what classification compares elapsed time against. A DSN
+// without a positive ReadTimeout, or one that does not parse, yields zero:
+// classification off, existing behavior everywhere.
+func effectivePoolReadDeadline(connStr string) time.Duration {
+	parsed, err := mysql.ParseDSN(connStr)
+	if err != nil || parsed.ReadTimeout <= 0 {
+		return 0
+	}
+	return parsed.ReadTimeout
+}
+
+// classifyPooledReadFailure decides whether a failed pooled read attempt is
+// the pool's per-I/O read deadline firing. It returns a storage.ReadTimeoutError
+// wrapping err when it is (nil when it is not), and is pure — elapsed comes in
+// from the caller's measurement — so the elapsed threshold is testable without
+// sleeping.
+//
+// What it preserves before any error-text handling (context cancellation and
+// deadlines, already-permanent errors, decoded MySQL errors): these keep their
+// existing retry semantics and their existing messages, whatever they say.
+//
+// What counts:
+//   - Confirmed: the chain still carries a network read timeout — the only
+//     proof a deadline fired that the driver did not already erase. A timeout
+//     on a dial or write operation is never one: the driver renders write-side
+//     failures identically, but they say nothing about the read deadline.
+//   - Suspected (Confirmed=false): the MySQL driver converts a read that
+//     outlived its deadline into ErrInvalidConn ("invalid connection") and
+//     drops the cause, so the identity is gone and only elapsed time is left.
+//     ErrInvalidConn — typed, or the driver's exact text where a wrap lost
+//     the identity — counts only once the attempt has run at least the
+//     configured deadline; a fast invalid connection is the ordinary stale
+//     pool entry and keeps its existing retry. A connection reset after a
+//     long attempt is the same ambiguity: acquisition waits, earlier
+//     statements or healthy streaming can precede a later reset, so it also
+//     stops — saying "possible", never claiming the deadline fired.
+//
+// Elapsed time is a conservative replay policy, not a timeout detector: a
+// slow ambiguous failure is not resubmitted because a second attempt would
+// re-run the same doomed statement against the same deadline. It does not
+// make the diagnosis certain, which is why inferred cases say "possible" and
+// set Confirmed=false. A slow attempt that SUCCEEDS never reaches this
+// function; a slow failure that is none of the recognized shapes keeps its
+// existing behavior.
+func classifyPooledReadFailure(elapsed time.Duration, err error, deadline time.Duration) error {
+	if err == nil || deadline <= 0 {
+		return nil
+	}
+	// An already-permanent error is terminal for its own reason (e.g. a
+	// callback-entered write failure); do not re-wrap it.
+	var permanent *backoff.PermanentError
+	if errors.As(err, &permanent) {
+		return nil
+	}
+	// A decoded MySQL error is a server response; wording that merely sounds
+	// like a timeout does not turn one into a pool deadline firing.
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) {
+		return nil
+	}
+	// Context cancellation and caller deadlines are the caller's own signal;
+	// they are preserved verbatim and never diagnosed as a pool timeout.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return nil
+	}
+	// A retained network read timeout proves the deadline fired. Only "read"
+	// operations carry that proof; a dial or write timeout never does.
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Timeout() && opErr.Op == "read" {
+		return &storage.ReadTimeoutError{Timeout: deadline, Confirmed: true, Err: err}
+	}
+	// Identity lost: only elapsed time is left, and it is only evidence once
+	// the attempt has run at least the configured deadline.
+	if elapsed < deadline {
+		return nil
+	}
+	if lostPoolReadTimeoutIdentity(err) {
+		return &storage.ReadTimeoutError{Timeout: deadline, Err: err}
+	}
+	return nil
+}
+
+// lostPoolReadTimeoutIdentity reports whether err is one of the failure
+// shapes a read that outlived the pool deadline can be flattened into once
+// the driver drops the network cause. It matches the driver's exact
+// identities — mysql.ErrInvalidConn, its "invalid connection" text where a
+// wrap lost the identity, and a connection reset — never arbitrary
+// timeout-flavored wording ("i/o timeout" alone can be a dial or write
+// timeout, and is deliberately not matched here).
+func lostPoolReadTimeoutIdentity(err error) bool {
+	if errors.Is(err, mysql.ErrInvalidConn) {
+		return true
+	}
+	// Same driver text, reached through a wrap that lost the sentinel
+	// identity (%v-style): match the exact phrase, not a fuzzy timeout
+	// substring.
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "invalid connection") ||
+		strings.Contains(errStr, "connection reset")
+}
+
+// classifyPooledRead classifies one failed pooled read attempt and returns
+// the error the retry boundary should see: err unchanged when the failure is
+// not a pool read timeout, or the typed error wrapped with op (a short
+// operation label, so the surfaced line names the operation even when the
+// cause carries no context of its own) when it is. attemptStart is taken
+// inside the attempt, after lock acquisition and before the first statement,
+// so backoff waits from earlier attempts are excluded; each retry measures
+// itself.
+func (s *DoltStore) classifyPooledRead(op string, attemptStart time.Time, err error) error {
+	if err == nil {
+		return nil
+	}
+	typed := classifyPooledReadFailure(time.Since(attemptStart), err, s.poolReadDeadline)
+	if typed == nil {
+		return err
+	}
+	return fmt.Errorf("%s: %w", op, typed)
 }
 
 // execWithLongTimeout opens a one-shot database connection with readTimeout=5m
