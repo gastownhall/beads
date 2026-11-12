@@ -1787,3 +1787,26 @@ func TestBuildGraphApplyBatchRequestCreationStampSurvivesCreatePreparation(t *te
 		t.Errorf("open item's created_at = %v, want zero in the built request", next.Issue.CreatedAt)
 	}
 }
+
+// TestBuildGraphApplyBatchRequestSkipsPerEdgeCycleProbe pins bd-esm0t5 (GH#3879):
+// the batch request both `bd create --graph` legs send must set
+// SkipPerEdgeCycleCheck, so a plan with many edges does not pay one recursive
+// SQL cycle probe per edge inside the transaction (the reporter's 27-minute
+// hang on a 698-edge plan). Cycles stay authoritative through the role's end
+// gate, the plan-local in-memory preflight, and the per-item
+// self-dependency refusal; see buildGraphApplyBatchRequest's doc comment.
+func TestBuildGraphApplyBatchRequestSkipsPerEdgeCycleProbe(t *testing.T) {
+	req, err := buildGraphApplyBatchRequest(&GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "a", Title: "A"},
+			{Key: "b", Title: "B"},
+		},
+		Edges: []GraphApplyEdge{{FromKey: "a", ToKey: "b", Type: "blocks"}},
+	}, GraphApplyOptions{}, "actor", "")
+	if err != nil {
+		t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+	}
+	if !req.SkipPerEdgeCycleCheck {
+		t.Fatal("SkipPerEdgeCycleCheck = false, want true: the per-edge SQL cycle probe is the O(E·N) hot path the end gate already covers")
+	}
+}

@@ -973,6 +973,20 @@ func (e *GraphApplyTooLargeError) Error() string {
 // re-deriving them here would be a second, divergeable copy of a check the
 // role already owns.
 //
+// The request sets SkipPerEdgeCycleCheck, dropping BatchApplier's per-edge
+// recursive SQL cycle probe: at one probe per edge over a growing graph it is
+// the O(E·N) hot path that left `bd create --graph` hanging for tens of
+// minutes on a ~700-edge plan (GH#3879). Cycles stay caught, in order:
+//
+//   - validateGraphApplyLocalCycles, the in-memory plan-local preflight
+//     (runs before any write, also under --dry-run);
+//   - the per-item self-dependency refusal (BatchApplier resolves both refs
+//     before writing an edge, so key/id aliases of one row are still caught);
+//   - the role's end gate, which walks the stored plus added scheduling graph
+//     once and reports the cycle path ("dependency cycle would be created");
+//   - the per-edge blocking-hierarchy check, which SkipPerEdgeCycleCheck does
+//     not gate.
+//
 // One consequence is accepted on purpose: the end gate walks the scheduling
 // edges only (types.IsSchedulingEdge leaves waits-for out), so a plan whose
 // path from a node's parent to the node runs through a waits-for hop is now
@@ -1157,6 +1171,11 @@ func buildGraphApplyBatchRequest(plan *GraphApplyPlan, opts GraphApplyOptions, a
 		Items:         items,
 		Provenance:    commitMsg,
 		ForceIDPrefix: opts.Force,
+		// GH#3879: one recursive SQL cycle probe per edge is the O(E·N) hot
+		// path behind the 27-minute hang on a 698-edge plan. The end gate's
+		// single whole-graph walk keeps the cycle invariant; see the doc
+		// comment above for the full list of what still catches cycles.
+		SkipPerEdgeCycleCheck: true,
 	}, nil
 }
 
