@@ -500,6 +500,49 @@ func TestPooledReadTimeoutPolicy(t *testing.T) {
 		}
 	})
 
+	t.Run("classified failure records exactly one breaker failure and errors.As survives a trip", func(t *testing.T) {
+		breaker := newTestCircuitBreaker(t)
+		// One failure short of tripping, inside the failure window: the
+		// single RecordFailure the classified path performs must be the one
+		// that trips the breaker — no double recording through the outer
+		// generic-connection matching.
+		breaker.mu.Lock()
+		breaker.writeState(circuitState{
+			State:        circuitClosed,
+			Failures:     circuitFailureThreshold - 1,
+			FirstFailure: time.Now(),
+			LastFailure:  time.Now(),
+		})
+		breaker.mu.Unlock()
+		store, drv := newPoolReadPolicyStore(
+			[]poolReadPolicyStep{{delay: policyDelayedQuery, err: mysql.ErrInvalidConn}},
+			policyTestDeadline)
+		store.breaker = breaker
+
+		err := store.withReadTx(ctx, func(tx *sql.Tx) error {
+			return scanOneRow(ctx, tx)
+		})
+
+		// The trip wrapper preserves the type: errors.As must reach the
+		// storage.ReadTimeoutError through "%w (circuit breaker tripped)".
+		readTimeoutFrom(t, err)
+		if !strings.Contains(err.Error(), "(circuit breaker tripped)") {
+			t.Errorf("expected the breaker-trip wrapper, got: %v", err)
+		}
+		breaker.mu.Lock()
+		state := breaker.readState()
+		breaker.mu.Unlock()
+		if state.State != circuitOpen {
+			t.Errorf("breaker state = %q, want open after exactly one recorded failure", state.State)
+		}
+		if state.Failures != circuitFailureThreshold {
+			t.Errorf("failures = %d, want exactly %d (one record, not one per retry layer)", state.Failures, circuitFailureThreshold)
+		}
+		if queries, begins := drv.counts(); queries != 1 || begins != 1 {
+			t.Errorf("the failed read ran %d queries in %d attempts; tripping the breaker must not replay it", queries, begins)
+		}
+	})
+
 	t.Run("SearchIssuesWithCounts operation context survives the typed wrap", func(t *testing.T) {
 		store, _ := newPoolReadPolicyStore(
 			[]poolReadPolicyStep{{delay: policyDelayedQuery, err: mysql.ErrInvalidConn}},
