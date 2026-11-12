@@ -214,16 +214,27 @@ func expandStepWith(target *Step, template []*Step, depth int, subst func(string
 	result := make([]*Step, 0, len(template))
 
 	for _, tmpl := range template {
-		expanded := &Step{
-			ID:             subst(substituteTargetPlaceholders(tmpl.ID, target)),
-			Title:          subst(substituteTargetPlaceholders(tmpl.Title, target)),
-			Description:    subst(substituteTargetPlaceholders(tmpl.Description, target)),
-			Type:           tmpl.Type,
-			Priority:       tmpl.Priority,
-			Assignee:       subst(tmpl.Assignee),
-			SourceFormula:  tmpl.SourceFormula,  // Preserve source from template
-			SourceLocation: tmpl.SourceLocation, // Preserve source location
-		}
+		// Start from a copy of the template step so every field survives
+		// expansion (GH#6433); the fields below are then substituted or
+		// rebuilt. Type, Priority, Condition, OnComplete and the source
+		// tracing fields are carried as they are.
+		expanded := cloneStep(tmpl)
+		expanded.ID = subst(substituteTargetPlaceholders(tmpl.ID, target))
+		expanded.Title = subst(substituteTargetPlaceholders(tmpl.Title, target))
+		expanded.Description = subst(substituteTargetPlaceholders(tmpl.Description, target))
+		expanded.Assignee = subst(tmpl.Assignee)
+
+		// An expanded step never re-expands: ApplyInlineExpansions re-scans
+		// its results for Expand, so carrying these would newly recurse.
+		expanded.Expand = ""
+		expanded.ExpandVars = nil
+
+		// Rebuilt with substitution below; nil when the template has none.
+		expanded.Labels = nil
+		expanded.DependsOn = nil
+		expanded.Needs = nil
+		expanded.generatedNeeds = nil
+		expanded.Children = nil
 
 		// Substitute placeholders in labels
 		if len(tmpl.Labels) > 0 {
@@ -245,6 +256,13 @@ func expandStepWith(target *Step, template []*Step, depth int, subst func(string
 			expanded.Needs = make([]string, len(tmpl.Needs))
 			for i, n := range tmpl.Needs {
 				expanded.Needs[i] = subst(substituteTargetPlaceholders(n, target))
+			}
+		}
+		// A need a transform added stays generated, under its substituted ID.
+		if len(tmpl.generatedNeeds) > 0 {
+			expanded.generatedNeeds = make([]string, len(tmpl.generatedNeeds))
+			for i, n := range tmpl.generatedNeeds {
+				expanded.generatedNeeds[i] = subst(substituteTargetPlaceholders(n, target))
 			}
 		}
 
