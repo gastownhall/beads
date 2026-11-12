@@ -976,11 +976,14 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 		if ref == "" || !e.Tracker.IsExternalRef(ref) {
 			continue
 		}
-		changedAfterLastSync, err := e.externalRefChangedAfter(ctx, local, ref, *lastSync)
+		changedAfterLastSync, _, err := e.externalRefChangedAfter(ctx, local, ref, *lastSync)
 		if err != nil {
 			return hydrated, hydratedLocalIDs, fmt.Errorf("checking pre-linked local issue %s: %w", local.ID, err)
 		}
 		if !changedAfterLastSync {
+			// An issue whose history at lastSync is missing is not hydrated:
+			// hydration exempts it from the conflict and overlap guards,
+			// which would let a stale remote overwrite unpushed local edits.
 			continue
 		}
 		identifier := strings.TrimSpace(e.Tracker.ExtractIdentifier(ref))
@@ -1033,23 +1036,38 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 // dolt_history_issues query without a pooled *sql.DB, and a non-Dolt SQL
 // backend could expose *sql.DB without having that Dolt system table at
 // all. Gating on the capability keeps this correct in both directions.
-func (e *Engine) externalRefChangedAfter(ctx context.Context, local *types.Issue, currentRef string, lastSync time.Time) (bool, error) {
+//
+// A history-capable store that holds no row for the issue at or before
+// lastSync cannot say what the ref was then (#7294): the issue may be newer
+// than lastSync, or the history that held its baseline was compacted,
+// flattened or otherwise rewritten. An issue created after lastSync is
+// reported changed, so a new pre-linked stub is still hydrated. An older
+// issue, or one with no creation time, reports historyUnknown instead: it
+// is not hydrated, so the pull's conflict and overlap guards keep its local
+// edits. UpdatedAt never decides this case, because a local edit after
+// lastSync is exactly what those guards protect. A store without the
+// history capability keeps the timestamp heuristic and never reports
+// historyUnknown.
+func (e *Engine) externalRefChangedAfter(ctx context.Context, local *types.Issue, currentRef string, lastSync time.Time) (changed, historyUnknown bool, err error) {
 	if local == nil {
-		return false, nil
+		return false, false, nil
 	}
 	querier, ok := externalRefHistoryQuerier(e.Store)
 	if !ok {
-		return local.CreatedAt.After(lastSync) || local.UpdatedAt.After(lastSync), nil
+		return local.CreatedAt.After(lastSync) || local.UpdatedAt.After(lastSync), false, nil
 	}
 
 	previousRef, found, err := querier.PreviousExternalRef(ctx, local.ID, lastSync)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	if !found {
-		return true, nil
+		if local.CreatedAt.After(lastSync) {
+			return true, false, nil
+		}
+		return false, true, nil
 	}
-	return strings.TrimSpace(previousRef) != strings.TrimSpace(currentRef), nil
+	return strings.TrimSpace(previousRef) != strings.TrimSpace(currentRef), false, nil
 }
 
 // externalRefHistoryQuerier type-asserts store to storage.ExternalRefHistoryQuerier,

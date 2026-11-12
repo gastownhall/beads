@@ -92,7 +92,7 @@ func TestEmbeddedDoltExternalRefChangedAfterUsesHistoryFastPath(t *testing.T) {
 		UpdatedAt: asOf.Add(-time.Hour),
 	}
 
-	changed, err := e.externalRefChangedAfter(ctx, local, "new-ref", asOf)
+	changed, _, err := e.externalRefChangedAfter(ctx, local, "new-ref", asOf)
 	if err != nil {
 		t.Fatalf("externalRefChangedAfter: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestEmbeddedDoltExternalRefChangedAfterUsesHistoryFastPath(t *testing.T) {
 
 	// Complementary check: currentRef matching the historical value as of
 	// asOf should report unchanged.
-	changed, err = e.externalRefChangedAfter(ctx, local, "old-ref", asOf)
+	changed, _, err = e.externalRefChangedAfter(ctx, local, "old-ref", asOf)
 	if err != nil {
 		t.Fatalf("externalRefChangedAfter: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestDoltStoreExternalRefChangedAfterUsesHistoryFastPath(t *testing.T) {
 		UpdatedAt: asOf.Add(-time.Hour),
 	}
 
-	changed, err := e.externalRefChangedAfter(ctx, local, "new-ref", asOf)
+	changed, _, err := e.externalRefChangedAfter(ctx, local, "new-ref", asOf)
 	if err != nil {
 		t.Fatalf("externalRefChangedAfter: %v", err)
 	}
