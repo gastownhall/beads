@@ -725,6 +725,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd show --json` carries the full `comments` and `dependents` arrays by
+  default again (#4122).** Since #4010 the default had been count-only, which
+  dropped arrays that v0.49.6 emitted and that scripts read. The count-only
+  view is now opt-in with the new `--count-only` flag: it reports
+  `comment_count` / `dependent_count` (plus `comments_omitted`) instead of the
+  arrays, and `--include-comments` / `--include-dependents` re-add one array
+  under it. Without `--count-only` the `--include-*` flags change nothing.
+  Over `bd connect`, a default show makes one extra request per id, which
+  `--count-only` avoids. The library, HTTP API and `bd list --json` defaults
+  are unchanged.
+
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add

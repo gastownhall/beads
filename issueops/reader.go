@@ -598,7 +598,8 @@ type GetRequest struct {
 	ID string
 	// IncludeDependents and IncludeComments populate the two expensive row
 	// lists. Both default off: the detail view carries counts, and a caller
-	// that wants the rows asks for them.
+	// that wants the rows asks for them. bd show --json sets both unless the
+	// caller passes --count-only (#4122).
 	IncludeDependents bool
 	IncludeComments   bool
 

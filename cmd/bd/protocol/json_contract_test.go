@@ -7,6 +7,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -55,18 +56,95 @@ func TestJSONContract_ShowOutputHasRequiredFields(t *testing.T) {
 	}
 }
 
-// TestJSONContract_ShowOmitsOptInPayloadsByDefault pins the NEGATIVE half of the
-// count-only contract (be-ijck6q): by default, bd show --json must OMIT the
-// "comments" and "dependents" arrays entirely, and each --include-* flag must
-// populate its own array and only its own.
+// TestJSONContract_ShowDefaultIncludesFullPayload pins the v0.49.6 machine
+// contract of plain bd show --json (#4122): with no flags the payload carries
+// the full comments and dependents arrays alongside their counts, and no
+// comments_omitted marker. The count-only fast path is opt-in (--count-only,
+// TestJSONContract_ShowCountOnlyOmitsPayloads).
+func TestJSONContract_ShowDefaultIncludesFullPayload(t *testing.T) {
+	t.Parallel()
+	w := newWorkspace(t)
+	id := w.create("--title", "Full payload target", "--type", "task")
+	dependent := w.create("--title", "Full payload dependent", "--type", "task")
+	w.run("dep", "add", dependent, id)
+	w.run("comments", "add", id, "First note")
+
+	showOnce := func(id string, flags ...string) map[string]any {
+		t.Helper()
+		out := w.run(append([]string{"show", id, "--json"}, flags...)...)
+		items := parseJSONOutput(t, out)
+		if len(items) == 0 {
+			t.Fatalf("bd show %s --json %v returned no items", id, flags)
+		}
+		return items[0]
+	}
+
+	t.Run("default_carries_comments_and_dependents", func(t *testing.T) {
+		issue := showOnce(id)
+		requireCommentTextsEqual(t, getObjectSlice(issue, "comments"),
+			[]string{"First note"}, "default payload comments")
+		dependents := getObjectSlice(issue, "dependents")
+		if len(dependents) != 1 {
+			t.Fatalf("default payload: want 1 dependent, got %d (%v)", len(dependents), issue["dependents"])
+		}
+		assertField(t, dependents[0], "id", dependent)
+		assertField(t, dependents[0], "dependency_type", "blocks")
+		assertFieldFloat(t, issue, "comment_count", 1)
+		assertFieldFloat(t, issue, "dependent_count", 1)
+		if v, present := issue["comments_omitted"]; present {
+			t.Errorf("default payload: comments_omitted must be absent when comments are present, got %v", v)
+		}
+	})
+
+	// The --include-* flags predate the full default; without --count-only
+	// they must change nothing, so scripts written against the count-only
+	// default keep getting the same bytes.
+	t.Run("include_flags_without_count_only_change_nothing", func(t *testing.T) {
+		plain := normalizeShowJSON(t, w.run("show", id, "--json"))
+		for _, flags := range [][]string{
+			{"--include-comments", "--include-dependents"},
+			{"--include-comments"},
+			{"--include-dependents"},
+		} {
+			got := normalizeShowJSON(t, w.run(append([]string{"show", id, "--json"}, flags...)...))
+			if got != plain {
+				t.Errorf("show --json %v differs from plain show --json:\n got: %s\nwant: %s", flags, got, plain)
+			}
+		}
+	})
+
+	t.Run("epic_progress_by_default_not_under_count_only", func(t *testing.T) {
+		epic := w.create("--title", "Full payload epic", "--type", "epic")
+		w.create("--title", "Epic child one", "--type", "task", "--parent", epic)
+		w.create("--title", "Epic child two", "--type", "task", "--parent", epic)
+
+		issue := showOnce(epic)
+		assertFieldFloat(t, issue, "epic_total_children", 2)
+		assertFieldFloat(t, issue, "epic_closed_children", 0)
+		if v, present := issue["epic_closeable"]; !present || v != false {
+			t.Errorf("default payload: epic_closeable = %v (present=%v), want false", v, present)
+		}
+
+		lean := showOnce(epic, "--count-only")
+		for _, key := range []string{"epic_total_children", "epic_closed_children", "epic_closeable"} {
+			if v, present := lean[key]; present {
+				t.Errorf("--count-only: %q must be absent, got %v", key, v)
+			}
+		}
+	})
+}
+
+// TestJSONContract_ShowCountOnlyOmitsPayloads pins the NEGATIVE half of the
+// count-only contract (be-ijck6q): under --count-only, bd show --json must OMIT
+// the "comments" and "dependents" arrays entirely, and each --include-* flag
+// must populate its own array and only its own.
 //
-// Every other test that touches comments or dependents asks for them with
-// showJSONFull, so all of them would stay green if the default silently went
-// back to materializing both lists eagerly — which is precisely the pathological
-// hub-bead slowness cfcc95799 removed. Omission is the invariant with no other
-// witness, so it needs one of its own: a perf contract that nothing asserts is a
-// perf contract that will be regressed.
-func TestJSONContract_ShowOmitsOptInPayloadsByDefault(t *testing.T) {
+// The default payload carries both arrays (#4122), so --count-only is the one
+// way a hub-bead caller avoids materializing them — the pathological slowness
+// cfcc95799 removed. Omission under the flag is the invariant with no other
+// witness, so it needs one of its own: a perf contract that nothing asserts is
+// a perf contract that will be regressed.
+func TestJSONContract_ShowCountOnlyOmitsPayloads(t *testing.T) {
 	t.Parallel()
 	w := newWorkspace(t)
 	parent := w.create("--title", "Count-only parent", "--type", "epic", "--priority", "1")
@@ -76,7 +154,7 @@ func TestJSONContract_ShowOmitsOptInPayloadsByDefault(t *testing.T) {
 	// showOnce runs show --json with the given extra flags and returns the issue.
 	showOnce := func(flags ...string) map[string]any {
 		t.Helper()
-		out := w.run(append([]string{"show", parent, "--json"}, flags...)...)
+		out := w.run(append([]string{"show", parent, "--json", "--count-only"}, flags...)...)
 		items := parseJSONOutput(t, out)
 		if len(items) == 0 {
 			t.Fatalf("bd show %s --json %v returned no items", parent, flags)
@@ -93,24 +171,28 @@ func TestJSONContract_ShowOmitsOptInPayloadsByDefault(t *testing.T) {
 		}
 	}
 
-	t.Run("default_omits_both_arrays", func(t *testing.T) {
+	t.Run("count_only_omits_both_arrays", func(t *testing.T) {
 		issue := showOnce()
-		assertAbsent(t, issue, "comments", "default payload")
-		assertAbsent(t, issue, "dependents", "default payload")
+		assertAbsent(t, issue, "comments", "--count-only")
+		assertAbsent(t, issue, "dependents", "--count-only")
+		if v := issue["comments_omitted"]; v != true {
+			t.Errorf("--count-only with comment_count=1: comments_omitted = %v, want true", v)
+		}
 
-		// The counts are what the default carries instead.
+		// The counts are what --count-only carries instead.
 		assertFieldFloat(t, issue, "comment_count", 1)
 		assertFieldFloat(t, issue, "dependent_count", 1)
 	})
 
-	t.Run("include_comments_does_not_drag_in_dependents", func(t *testing.T) {
+	t.Run("count_only_include_comments_does_not_drag_in_dependents", func(t *testing.T) {
 		issue := showOnce("--include-comments")
 		requireCommentTextsEqual(t, getObjectSlice(issue, "comments"),
-			[]string{"First note"}, "comments under --include-comments")
-		assertAbsent(t, issue, "dependents", "--include-comments")
+			[]string{"First note"}, "comments under --count-only --include-comments")
+		assertAbsent(t, issue, "dependents", "--count-only --include-comments")
+		assertAbsent(t, issue, "comments_omitted", "--count-only --include-comments (nothing was left out)")
 	})
 
-	t.Run("include_dependents_does_not_drag_in_comments", func(t *testing.T) {
+	t.Run("count_only_include_dependents_does_not_drag_in_comments", func(t *testing.T) {
 		issue := showOnce("--include-dependents")
 		dependents := getObjectSlice(issue, "dependents")
 		found := false
@@ -120,10 +202,13 @@ func TestJSONContract_ShowOmitsOptInPayloadsByDefault(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Errorf("--include-dependents: parent %s does not list child %s (got %d dependents)",
+			t.Errorf("--count-only --include-dependents: parent %s does not list child %s (got %d dependents)",
 				parent, child, len(dependents))
 		}
-		assertAbsent(t, issue, "comments", "--include-dependents")
+		assertAbsent(t, issue, "comments", "--count-only --include-dependents")
+		if v := issue["comments_omitted"]; v != true {
+			t.Errorf("--count-only --include-dependents with comment_count=1: comments_omitted = %v, want true", v)
+		}
 	})
 }
 
@@ -131,8 +216,8 @@ func TestJSONContract_ShowOmitsOptInPayloadsByDefault(t *testing.T) {
 // comment_count with no "comments" key is a third state that neither of the two
 // natural readings gets right — `.comments` absent reads as "none" (false), and
 // comment_count alone gives no way to know the array was left out on purpose.
-// comments_omitted closes that gap without touching the count-only default
-// TestJSONContract_ShowOmitsOptInPayloadsByDefault protects.
+// comments_omitted closes that gap without touching the --count-only view
+// TestJSONContract_ShowCountOnlyOmitsPayloads protects.
 func TestJSONContract_ShowCommentsOmittedFlag(t *testing.T) {
 	t.Parallel()
 	w := newWorkspace(t)
@@ -158,31 +243,40 @@ func TestJSONContract_ShowCommentsOmittedFlag(t *testing.T) {
 		}
 	}
 
-	t.Run("mutation_default_flags_the_omission", func(t *testing.T) {
-		issue := showOnce(withComments)
-		assertAbsent(t, issue, "comments", "default payload")
+	t.Run("mutation_count_only_flags_the_omission", func(t *testing.T) {
+		issue := showOnce(withComments, "--count-only")
+		assertAbsent(t, issue, "comments", "--count-only payload")
 		assertFieldFloat(t, issue, "comment_count", 3)
 		omitted, present := issue["comments_omitted"]
 		if !present {
-			t.Fatal("default payload with comment_count=3: comments_omitted must be present and true")
+			t.Fatal("--count-only payload with comment_count=3: comments_omitted must be present and true")
 		}
 		if omitted != true {
-			t.Errorf("default payload with comment_count=3: comments_omitted = %v, want true", omitted)
+			t.Errorf("--count-only payload with comment_count=3: comments_omitted = %v, want true", omitted)
 		}
+	})
+
+	t.Run("default_carries_comments_unflagged", func(t *testing.T) {
+		issue := showOnce(withComments)
+		requireCommentTextsEqual(t, getObjectSlice(issue, "comments"),
+			[]string{"First note", "Second note", "Third note"}, "default payload comments")
+		assertAbsent(t, issue, "comments_omitted", "default payload (nothing was left out)")
 	})
 
 	t.Run("include_comments_clears_the_flag", func(t *testing.T) {
-		issue := showOnce(withComments, "--include-comments")
+		issue := showOnce(withComments, "--count-only", "--include-comments")
 		requireCommentTextsEqual(t, getObjectSlice(issue, "comments"),
-			[]string{"First note", "Second note", "Third note"}, "comments under --include-comments")
-		assertAbsent(t, issue, "comments_omitted", "--include-comments (nothing was left out)")
+			[]string{"First note", "Second note", "Third note"}, "comments under --count-only --include-comments")
+		assertAbsent(t, issue, "comments_omitted", "--count-only --include-comments (nothing was left out)")
 	})
 
 	t.Run("regression_true_empty_stays_unflagged", func(t *testing.T) {
-		issue := showOnce(empty)
-		assertFieldFloat(t, issue, "comment_count", 0)
-		assertAbsent(t, issue, "comments", "zero-comment default payload")
-		assertAbsent(t, issue, "comments_omitted", "zero-comment payload (nothing was omitted)")
+		for _, flags := range [][]string{nil, {"--count-only"}} {
+			issue := showOnce(empty, flags...)
+			assertFieldFloat(t, issue, "comment_count", 0)
+			assertAbsent(t, issue, "comments", fmt.Sprintf("zero-comment payload %v", flags))
+			assertAbsent(t, issue, "comments_omitted", fmt.Sprintf("zero-comment payload %v (nothing was omitted)", flags))
+		}
 	})
 }
 
@@ -409,4 +503,38 @@ func TestJSONContract_SchemaVersionPresent(t *testing.T) {
 			assertSchemaVersion(t, obj, "bd "+tt.name+" --json")
 		})
 	}
+}
+
+// normalizeShowJSON decodes bd show --json output and re-encodes it with the
+// revision token and every *_at timestamp removed, so two reads of the same
+// issue compare equal unless their shape or content differs.
+func normalizeShowJSON(t *testing.T, out string) string {
+	t.Helper()
+	items := parseJSONOutput(t, out)
+	var strip func(v any) any
+	strip = func(v any) any {
+		switch x := v.(type) {
+		case map[string]any:
+			for k, val := range x {
+				if k == "revision" || strings.HasSuffix(k, "_at") {
+					delete(x, k)
+					continue
+				}
+				x[k] = strip(val)
+			}
+		case []any:
+			for i := range x {
+				x[i] = strip(x[i])
+			}
+		}
+		return v
+	}
+	for _, item := range items {
+		strip(item)
+	}
+	b, err := json.Marshal(items)
+	if err != nil {
+		t.Fatalf("re-encode show JSON: %v", err)
+	}
+	return string(b)
 }

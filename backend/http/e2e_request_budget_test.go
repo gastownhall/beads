@@ -57,7 +57,11 @@ func TestE2E_PerCommandRequestBudget(t *testing.T) {
 				// prints their count: one listing, no ready:count after it.
 				{"ready --limit 1", 2, []string{"ready", "--json", "--limit", "1"}},
 				{"list", 4, []string{"list", "--json"}},
-				{"show", 1, []string{"show", target, "--json"}},
+				// The default show --json reads the full detail view (#4122):
+				// one bare read for resolution, one with the include_*
+				// parameters; --count-only keeps the single read.
+				{"show", 2, []string{"show", target, "--json"}},
+				{"show --count-only", 1, []string{"show", target, "--json", "--count-only"}},
 				// The first ready learned the server's external-dependency
 				// policy from the handshake; a later process reads it from the
 				// policy cache instead of fetching the context again.
