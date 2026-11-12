@@ -56,7 +56,7 @@ func TestProtocol_CommentsPreservedAcrossUpdate(t *testing.T) {
 		[]string{"Important design note", "Follow-up from review"},
 		"comments after title update")
 
-	// The count-only default payload must agree with the streamed bodies.
+	// The counts in the default payload must agree with the streamed rows.
 	assertFieldFloat(t, w.showJSON(id), "comment_count", 2)
 }
 

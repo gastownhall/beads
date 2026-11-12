@@ -226,7 +226,7 @@ func TestProtocol_ParentChildDepShowRoundTrip(t *testing.T) {
 				parent, child, len(parentDependents))
 		}
 
-		// The count-only default payload must agree with the streamed list.
+		// The counts in the default payload must agree with the streamed rows.
 		assertFieldFloat(t, w.showJSON(parent), "dependent_count", 1)
 	})
 }

@@ -338,10 +338,9 @@ func (w *workspace) create(args ...string) string {
 
 // showJSON runs bd show <id> --json and returns the first issue object.
 //
-// The payload is count-only: labels and dependencies are inline, but comments
-// and dependents are reported as comment_count / dependent_count and their
-// bodies are omitted. Use showJSONFull to assert on comment or dependent
-// content.
+// The payload is the full detail view (#4122): labels, dependencies,
+// dependents and comments are all inline. A test that wants the counts-only
+// fast path passes --count-only to w.run itself.
 func (w *workspace) showJSON(id string) map[string]any {
 	w.t.Helper()
 	out := w.run("show", id, "--json")
@@ -352,15 +351,16 @@ func (w *workspace) showJSON(id string) map[string]any {
 	return items[0]
 }
 
-// showJSONFull runs bd show <id> --json with the opt-in relational payloads and
-// returns the first issue object — the shape to assert against when a test
-// cares about comment or dependent CONTENT rather than counts.
+// showJSONFull runs bd show <id> --json with the relational payloads asked for
+// explicitly and returns the first issue object — the shape to assert against
+// when a test cares about comment or dependent CONTENT rather than counts.
 //
-// bd show --json has been count-only by default since cfcc95799 ("count-only
-// JSON details with opt-in streamed payloads", be-ijck6q): materializing every
-// comment and dependent made show pathologically slow on hub beads, so the full
-// lists moved behind --include-comments / --include-dependents. The data is
-// still there — these flags are how you ask for it.
+// Since #4122 the default payload is already the full view, so this helper and
+// showJSON read the same shape. It stays as the explicit spelling, guarding
+// that the --include-* flags keep working: they date from cfcc95799
+// ("count-only JSON details with opt-in streamed payloads", be-ijck6q), which
+// made the full lists opt-in, and under the default they are now no-ops; the
+// lean shape they once produced lives behind --count-only.
 func (w *workspace) showJSONFull(id string) map[string]any {
 	w.t.Helper()
 	out := w.run("show", id, "--json", "--include-comments", "--include-dependents")
