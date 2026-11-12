@@ -2538,3 +2538,95 @@ func TestPullRefusesOverConflictedWorkingSet(t *testing.T) {
 		t.Errorf("HEAD = %s after the refused pull; want the untouched %s", head, preHead)
 	}
 }
+
+// TestGitRemoteResolvedConflictPullStillLands is AC-6, the retention half of
+// GH#7839's settlement: aborting declined conflicts must not cost the pulls
+// that should land. A modify/modify title conflict the auto-resolver settles
+// by last-write-wins (remote newer) lands with the remote title and a nil
+// error, and a follow-up clean merge lands too — both through the same
+// production CLI pull + settlement sequence as the declined-conflict tests.
+func TestGitRemoteResolvedConflictPullStillLands(t *testing.T) {
+	store, setup, cleanup := setupEmbeddedGitRemote(t)
+	defer cleanup()
+	requireGitProtocolRemote(t, store, "origin")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	pullCLI := func() error {
+		cliErr := store.doltCLIPull(ctx, "origin", store.credentialsForRemote("origin"))
+		return store.finishCLIPull(ctx, cliErr)
+	}
+
+	// A publishes the issue; B clones and rewrites its title with a NEWER
+	// updated_at, which is what makes the conflict LWW-resolvable.
+	issue := &types.Issue{
+		ID:        "gh7839-ac6-lww",
+		Title:     "A title",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  2,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if err := store.Commit(ctx, "add lww issue"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := store.Push(ctx); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	cloneDir := filepath.Join(setup.baseDir, "clone-gh7839-ac6")
+	doltClone(t, setup.remoteURL, cloneDir)
+	runDoltSQL(t, cloneDir,
+		"UPDATE issues SET title = 'B title', updated_at = '2026-01-02 00:00:00' WHERE id = 'gh7839-ac6-lww'")
+	sourceCommitAndPush(t, cloneDir, "B rewrites title")
+
+	waitOutGitRemoteReadCache()
+
+	// A diverges with an OLDER updated_at: LWW must pick the remote row, so
+	// this pull lands instead of being declined and aborted.
+	if _, err := store.db.ExecContext(ctx,
+		"UPDATE issues SET title = 'A local title', updated_at = '2026-01-01 00:00:00' WHERE id = 'gh7839-ac6-lww'"); err != nil {
+		t.Fatalf("local title rewrite: %v", err)
+	}
+	if err := store.Commit(ctx, "A rewrites title older"); err != nil {
+		t.Fatalf("Commit local divergence: %v", err)
+	}
+
+	if err := pullCLI(); err != nil {
+		t.Fatalf("a resolvable (LWW) conflict pull failed instead of landing: %v", err)
+	}
+	var title string
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT title FROM issues WHERE id = 'gh7839-ac6-lww'").Scan(&title); err != nil {
+		t.Fatalf("read landed title: %v", err)
+	}
+	if title != "B title" {
+		t.Errorf("title = %q after the resolvable pull; want the remote %q (LWW)", title, "B title")
+	}
+	if isMerging, tables := freshSessionMergeState(t, store); isMerging || tables != 0 {
+		t.Errorf("fresh session after the resolvable pull: is_merging=%v, %d conflict table(s); want the merge concluded", isMerging, tables)
+	}
+
+	// A clean merge must keep landing too: B adds a brand-new issue.
+	runDoltSQL(t, cloneDir,
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES ('gh7839-ac6-clean', 'B clean issue', '', '', '', '', 'open', 2, 'task')")
+	sourceCommitAndPush(t, cloneDir, "B adds clean issue")
+	waitOutGitRemoteReadCache()
+
+	if err := pullCLI(); err != nil {
+		t.Fatalf("a clean pull failed instead of landing: %v", err)
+	}
+	var n int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM issues WHERE id = 'gh7839-ac6-clean'").Scan(&n); err != nil {
+		t.Fatalf("count clean issue: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("the cleanly merged issue did not land (rows=%d)", n)
+	}
+	if isMerging, tables := freshSessionMergeState(t, store); isMerging || tables != 0 {
+		t.Errorf("fresh session after the clean pull: is_merging=%v, %d conflict table(s); want a settled store", isMerging, tables)
+	}
+}
