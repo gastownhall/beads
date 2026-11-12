@@ -126,7 +126,7 @@ func TestRemoteClaimsAndClosesAskForALivePolicyProbe(t *testing.T) {
 			base, _ := newRemotePolicyStore(true)
 			raw := &passthroughFake{remoteFake: base.inner.(*remoteFake), claimer: &recordingClaimer{}}
 			store := New(raw, func(ProjectName) (string, bool) { return "", false }, nil)
-			store.warnProject = nil
+			store.warnings.project = nil
 			tc.run(t, store)
 			probes := raw.liveProbes
 			if len(probes) == 0 {

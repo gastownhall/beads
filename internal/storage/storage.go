@@ -1122,8 +1122,9 @@ type ReadyWorkCounter interface {
 	CountReadyWork(ctx context.Context, filter types.WorkFilter) (int, error)
 }
 
-// ExternalDependencyQueryStore returns the narrow set of explicit external
-// blocking edges. Policy decorators use this instead of scanning every graph
+// ExternalDependencyQueryStore returns the narrow set of out-of-store
+// blocking edges: those stored in depends_on_external (explicit external:
+// capability refs and bare cross-rig issue IDs) whose type can block. Policy decorators use this instead of scanning every graph
 // edge on each ready-work query.
 type ExternalDependencyQueryStore interface {
 	GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error)
@@ -1201,6 +1202,19 @@ type Pinger interface {
 // is remote.
 type ExternalDependencyPolicyProber interface {
 	ServerEnforcesExternalDependencyPolicy(ctx context.Context) (bool, error)
+}
+
+// CrossRigDependencyPolicyProber is ExternalDependencyPolicyProber for the
+// second reference kind the external-deps decorator enforces: a bare issue id
+// in another rig (a cross-prefix `bd dep add` stores one in
+// depends_on_external). A server advertises it separately
+// (httpapi's policy.cross_rig_dependencies), because a server that predates it
+// enforces `external:` capability refs only. A store that implements
+// ExternalDependencyPolicyProber but not this interface, or that reports
+// false, gets client-side enforcement of bare cross-rig ids even when its
+// server enforces capability refs.
+type CrossRigDependencyPolicyProber interface {
+	ServerEnforcesCrossRigDependencyPolicy(ctx context.Context) (bool, error)
 }
 
 type livePolicyProbeKey struct{}

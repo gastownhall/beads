@@ -81,15 +81,15 @@ func (s *Store) externalBlockersFor(ctx context.Context, ids []string) (map[stri
 		}
 		return out, nil
 	}
-	enforced, err := s.serverEnforcesPolicy(ctx)
-	if err != nil || enforced {
+	kinds, err := s.clientKinds(ctx)
+	if err != nil || kinds.none() {
 		return nil, err
 	}
 	deps, err := s.remoteEdges(ctx, ids)
 	if err != nil {
 		return nil, fmt.Errorf("external dependencies: read blocking edges: %w", err)
 	}
-	state, err := s.blockingStateFromRecords(ctx, deps)
+	state, err := s.blockingStateFromRecords(ctx, deps, kinds)
 	if err != nil {
 		return nil, err
 	}

@@ -26,7 +26,7 @@ func dependencyRecordsForIssuesQueryRegex(table string) string {
 
 func externalBlockingDependencyRecordsQueryRegex(table string) string {
 	return `(?s)SELECT issue_id, COALESCE\(depends_on_issue_id, depends_on_wisp_id, depends_on_external\) AS depends_on_id, type, created_at, created_by, metadata, thread_id\s+FROM ` +
-		regexp.QuoteMeta(table) + `\s+WHERE depends_on_external LIKE 'external:%'\s+AND type IN \('blocks', 'conditional-blocks', 'waits-for'\)\s+ORDER BY issue_id`
+		regexp.QuoteMeta(table) + `\s+WHERE depends_on_external IS NOT NULL\s+AND type IN \('blocks', 'conditional-blocks', 'waits-for'\)\s+ORDER BY issue_id`
 }
 
 func dependencyRows() *sqlmock.Rows {

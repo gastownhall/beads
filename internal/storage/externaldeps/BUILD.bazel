@@ -33,6 +33,7 @@ go_test(
         "advertise_test.go",
         "blocked_lister_test.go",
         "blocking_annotator_batch_test.go",
+        "cross_rig_test.go",
         "decorator_test.go",
         "live_probe_test.go",
         "ready_wake_test.go",
