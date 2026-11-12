@@ -3508,3 +3508,50 @@ func TestGitignoreTemplate_IgnoresMachineLocalStateFiles(t *testing.T) {
 		}
 	}
 }
+
+// preMachineLocalStateTemplate returns GitignoreTemplate as it was before
+// GH#8318: every line naming a machine-local state file removed, with a
+// local custom rule on top as an existing workspace would have.
+func preMachineLocalStateTemplate(t *testing.T) string {
+	t.Helper()
+	drop := make(map[string]bool, len(machineLocalStateFiles))
+	for _, name := range machineLocalStateFiles {
+		drop[name] = true
+	}
+	var kept []string
+	for _, line := range strings.Split(GitignoreTemplate, "\n") {
+		if !drop[strings.TrimSpace(line)] {
+			kept = append(kept, line)
+		}
+	}
+	old := "# local rule kept by the user\nscratch-notes.md\n\n" + strings.Join(kept, "\n")
+	for _, name := range machineLocalStateFiles {
+		if containsGitignorePattern(old, name) {
+			t.Fatalf("test setup: stripped template still contains %q", name)
+		}
+	}
+	return old
+}
+
+// TestCheckGitignore_FlagsMissingMachineLocalStatePatterns checks that an
+// existing .beads/.gitignore written before GH#8318 is reported outdated, and
+// that the missing list is exactly the five machine-local state files.
+func TestCheckGitignore_FlagsMissingMachineLocalStatePatterns(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, ".gitignore"), []byte(preMachineLocalStateTemplate(t)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckGitignore(tmpDir)
+	if check.Status != StatusWarning {
+		t.Fatalf("CheckGitignore status = %q, want %q (detail: %s)", check.Status, StatusWarning, check.Detail)
+	}
+	got := strings.Split(strings.TrimPrefix(check.Detail, "Missing: "), ", ")
+	if !strings.HasPrefix(check.Detail, "Missing: ") || strings.Join(got, "\n") != strings.Join(machineLocalStateFiles, "\n") {
+		t.Errorf("CheckGitignore Detail = %q, want Missing: %s", check.Detail, strings.Join(machineLocalStateFiles, ", "))
+	}
+}

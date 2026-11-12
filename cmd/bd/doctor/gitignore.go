@@ -167,6 +167,12 @@ var requiredPatterns = []string{
 	"http_local_metadata.json",
 	".local_version",
 	"backup/",
+	// GH#8318: machine-local files beside backup/, which only matches the directory.
+	"dolt-backup.json",
+	"dolt-backup-state.json",
+	"dolt-config.log",
+	".auto-import-issues.jsonl",
+	"dolt-mode-migration.json",
 }
 
 // CheckGitignore checks if .beads/.gitignore is up to date.
