@@ -20,6 +20,9 @@
 # pending: {slice, reason} marks a known failure. The shape still runs; when it
 # passes the subtest FAILS until the mark is removed. That is how a slice proves
 # itself. Permanent refusals live in allowlist.yaml instead.
+#
+# Each shape's served requests are also held to testdata/transcripts/<id>.json
+# (README.md, "Wire transcripts"): a new or changed shape regenerates them.
 
 files:
   - name: seed-core.json
@@ -199,49 +202,65 @@ shapes:
   # sends the wrong assignee or drops --include-ephemeral returns a different
   # list. The wisp is P1 and the task P2, so --limit=1 picks the wisp on both
   # sides by priority alone.
+  #
+  # requests pins each ready's round trips with the served side's policy cache
+  # warm, as gc's polling finds it (the harness warms it after the seed): a
+  # listing is one listReadyWork, the bare text probe adds the handshake and
+  # countReadyWork, and --mol walks the molecule first.
   - id: gc-ready-unlimited
     source: gc bdstore.go bdReadyArgs (BdStore.Ready, ready --json --limit 0)
     args: [ready, --json, --limit, "0"]
     compare: ids
+    requests: 1
   - id: gc-ready-ephemeral-assignee-unlimited
     source: gc bdstore.go bdReadyArgs with --include-ephemeral --assignee
     args: [ready, --json, --include-ephemeral, --assignee, worker, --limit, "0"]
     compare: ids
+    requests: 1
   - id: gc-ready-pool-demand
     source: gc workquery.go bdReadyPoolDemandShell (scale_check, --limit=20)
     args: [ready, --metadata-field, gc.routed_to=pool-a, --unassigned, --exclude-type=epic, --exclude-label, "hold:mayor", --exclude-label, "hold:external", --json, --limit=20]
     compare: ids
+    requests: 1
   - id: gc-ready-pool-demand-unlimited
     source: gc workquery.go bdReadyPoolDemandShell (work_query, --include-ephemeral --limit 0)
     args: [ready, --include-ephemeral, --metadata-field, gc.routed_to=pool-a, --unassigned, --exclude-type=epic, --exclude-label, "hold:mayor", --exclude-label, "hold:external", --json, --limit, "0"]
     compare: ids
+    requests: 1
   - id: gc-ready-workflow-migration
     source: gc workquery.go bdReadyPoolDemandMigrationShell (--sort oldest --limit 0)
     args: [ready, --include-ephemeral, --metadata-field, gc.run_target=pool-a, --metadata-field, gc.kind=workflow, --unassigned, --exclude-type=epic, --exclude-label, "hold:mayor", --exclude-label, "hold:external", --json, --sort, oldest, --limit, "0"]
     compare: ids
+    requests: 1
   - id: gc-ready-graph-anchor
     source: gc workquery.go assignedGraphWorkflowAnchorReadyFunctionScript
     args: [ready, --include-ephemeral, --metadata-field, gc.root_bead_id=e2e-mol, --metadata-field, gc.routed_to=pool-a, --exclude-type=epic, --exclude-label, "hold:mayor", --exclude-label, "hold:external", --json, --sort, oldest, --limit=20]
     compare: ids
+    requests: 1
   - id: gc-ready-assigned-tier
     source: gc workquery.go assignedReadyTierCommand (--assignee=<id> --limit=1)
     args: [ready, --include-ephemeral, --assignee=worker, --json, --limit=1]
     compare: ids
+    requests: 1
   - id: gc-ready-probe
     source: gc examples/bd gc-beads-bd.sh (bare bd ready probe)
     args: [ready]
     compare: exit
+    requests: 3
   - id: mc-ready-json
     source: mc scripts/prompts (bd ready --json, ~36)
     args: [ready, --json]
     compare: ids
+    requests: 1
   - id: mc-ready-mol
     source: mc skills/pr-review (bd ready --mol <root>)
     args: [ready, --mol, e2e-mol, --json]
+    requests: 7
   - id: mc-ready-parent
     source: mc skills/pr-review (bd ready --parent <root>)
     args: [ready, --parent, e2e-ep, --json]
     compare: ids
+    requests: 1
 
   # ---------------------------------------------------------------- list
   - id: gc-list-full-filters
@@ -348,10 +367,17 @@ shapes:
     source: mc normalized_child_launch.py (list --label)
     args: [list, --label, "lane:a"]
     compare: text
+    requests: 4
+  # requests: 5 is getContext, listSettings, listIssues and two
+  # listDependencies: the client reads edges in chunks of 100 ids
+  # (roles_graph.go maxEdgeReadAnchors) and piped `bd list` is unlimited, so
+  # the two chunks are the ~190 seed rows it lists. Growing the seed past 200
+  # listed rows adds a third; that is data volume, not a list change.
   - id: mc-list-plain
     source: mc scripts (bare bd list)
     args: [list]
     compare: exit
+    requests: 5
   - id: mc-children
     source: mc prompts (bd children <epic>)
     args: [children, e2e-ep, --json]
@@ -583,22 +609,51 @@ shapes:
     args: [update, --json, e2e-t-m1, e2e-t-m2, --set-metadata, gc.batch=1, --priority, "3"]
     compare: exit
     verify: [[show, --json, e2e-t-m1, e2e-t-m2]]
+  # gc parses update --claim --json, so the claimed row is compared as json
+  # (timestamps and revision tokens are dropped as for every json shape; no
+  # other member differs). requests pins the reference profile's claim path:
+  # the handshake, the template pre-read, claimIssue, and the read-back that
+  # hydrates labels (httpclient lifecycle.go claimOnlyUpdate); the
+  # current-capability transcripts pin the updateIssue path.
   - id: gc-update-claim
     source: gc bdstore.go BdStore.Claim and gc hook --claim (update <id> --claim --json)
     args: [update, e2e-t-claim, --claim, --json]
-    compare: exit
     verify: [[show, --json, e2e-t-claim]]
+    requests: 4
   - id: gc-update-claim-actor
     source: gc cmd_agent_script.go bd_claim (update <id> --claim --actor X)
     args: [update, e2e-t-claim2, --claim, --actor, alice]
-    compare: exit
+    compare: text
     verify: [[show, --json, e2e-t-claim2]]
+    requests: 4
   - id: gc-update-claim-wisp
     source: gc ready queues include ephemeral work; claiming a wisp
     args: [update, e2e-wisp-c, --claim, --json]
-    compare: exit
     verify: [[show, --json, e2e-wisp-c]]
+    requests: 4
     pending: {slice: "SRV-1", reason: "the reference server lacks UpdateIssueRequest.claim, and the claimIssue fallback excludes wisps (B3 #6); remove the mark when reference_server.json is upgraded"}
+  # A claim the store refuses: another actor holds the bead, or it is closed.
+  # Both sides refuse with the same class (expect_stderr matches the embedded
+  # "already claimed by alice" and the served "already_claimed" problem alike;
+  # the served text does not name the holder) and leave the row alone.
+  - id: gc-update-claim-conflict
+    source: gc bdstore.go BdStore.Claim on a bead another worker holds (update <id> --claim --json)
+    setup: [[create, "claim conflict target", -t, task, --id, e2e-t-claimx, --json], [update, e2e-t-claimx, --claim, --actor, alice]]
+    args: [update, e2e-t-claimx, --claim, --json]
+    expect_exit: 1
+    expect_stderr: "already.claimed"
+    compare: exit
+    verify: [[show, --json, e2e-t-claimx]]
+    requests: 3
+  - id: gc-update-claim-closed
+    source: gc bdstore.go BdStore.Claim on a bead closed under it (update <id> --claim --json)
+    setup: [[create, "closed claim target", -t, task, --id, e2e-t-claimc, --json], [close, e2e-t-claimc]]
+    args: [update, e2e-t-claimc, --claim, --json]
+    expect_exit: 1
+    expect_stderr: "not.claimable"
+    compare: exit
+    verify: [[show, --json, e2e-t-claimc]]
+    requests: 3
   - id: gc-update-if-revision
     source: gc bdstore_conditional.go UpdateIfMatch / CompareAndSetMetadataKey
     args: [update, e2e-t-rev, --set-metadata, k=v, --if-revision, "{rev:e2e-t-rev}"]
@@ -881,3 +936,18 @@ shapes:
     compare: exit
     verify: [[show, --json, e2e-t-gaw]]
     pending: {slice: "SRV-1", reason: "bd update --await-id sends await_id on updateIssue behind issues.update.gates, which the reference server does not advertise, so the client refuses before dialing (pinned passing against the current server by backend/http TestE2E_GatesOverHTTP); remove the mark when reference_server.json is upgraded"}
+
+  # ---------------------------------------------------------------- close --claim-next (keep last)
+  # Over bd connect the client refuses CloseBatchRequest.ClaimNext before it
+  # closes anything; the embedded run closes e2e-t-cnx and claims e2e-t-cn,
+  # the P0 its setup makes the top of the ready queue. Until the served run
+  # does the same, the two sides' stores differ after this shape, so it stays
+  # the last shape of the corpus: nothing in its part runs after it
+  # (TestCorpusFileIsWellFormed fails while it is pending and not last).
+  - id: gc-close-claim-next
+    source: bd close --claim-next (close the finished bead and claim the next ready one)
+    setup: [[create, "claim-next candidate", -t, task, --id, e2e-t-cn, --priority, "0", --json], [create, "claim-next target", -t, task, --id, e2e-t-cnx, --json]]
+    args: [close, e2e-t-cnx, --claim-next, --json]
+    verify: [[show, --json, e2e-t-cnx, e2e-t-cn]]
+    requests: 2
+    pending: {slice: "native-fix-B10", reason: "WAITING ON donnabox fixes-b B10 (bd close --claim-next over bd connect closes, then claims) and its ruling: today the http client refuses CloseBatchRequest.ClaimNext before closing anything (ledger row W-CloseBatchRequest.ClaimNext; backend/http TestE2E_BDOverHTTP pins the refusal), so the served run exits 1 where the embedded one closes e2e-t-cnx and claims e2e-t-cn; with B10, regenerate this shape's transcripts, update its requests pin and remove the mark"}

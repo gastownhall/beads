@@ -1,0 +1,10 @@
+{
+  "shape": "gc-dep-add",
+  "requests": [
+    {"method":"GET","operation_id":"getContext","path":"/v0/beads/context","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-t-da","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-t-db","status":200},
+    {"method":"POST","operation_id":"addDependencies","path":"/v0/beads/dependencies:add","body":["actor","edges"],"status":200},
+    {"method":"GET","operation_id":"listDependencyCycles","path":"/v0/beads/dependencies/cycles","status":200}
+  ]
+}

@@ -203,7 +203,11 @@ func TestRepoFingerprint_Choice2RefusesUnconfinedDatabaseBeforeConfirmation(t *t
 // them: the parent is confined, and an outside sidecar target survives.
 func TestRepoFingerprint_Choice2KeepsOutsideSidecarTargets(t *testing.T) {
 	t.Setenv("BEADS_DOLT_DATA_DIR", "")
-	dir := setupTestWorkspace(t)
+	// RepoFingerprint resolves the workspace to its canonical path, and an
+	// absolute database path is admitted only when spelled below that
+	// .beads. Spell it from the canonical workspace: on macOS the temp dir
+	// is under /var, a symlink to /private/var.
+	dir := resolvePathForTest(t, setupTestWorkspace(t))
 	beadsDir := filepath.Join(dir, ".beads")
 	outside := t.TempDir()
 	db := filepath.Join(beadsDir, "beads.db")
@@ -224,9 +228,11 @@ func TestRepoFingerprint_Choice2KeepsOutsideSidecarTargets(t *testing.T) {
 		return answer, nil
 	}
 
-	_ = RepoFingerprint(dir, false) // reinitializing a sqlite workspace fails; only the removal matters
+	// Reinitializing a sqlite workspace fails, so the error is expected; it
+	// is reported only to explain a database that was not removed.
+	fixErr := RepoFingerprint(dir, false)
 	if _, err := os.Lstat(db); !os.IsNotExist(err) {
-		t.Fatalf("expected the admitted database removed, got %v", err)
+		t.Fatalf("expected the admitted database removed, got %v (RepoFingerprint: %v)", err, fixErr)
 	}
 	confineTreesEqual(t, outsideBefore, confineTree(t, outside), "outside sidecar targets")
 }

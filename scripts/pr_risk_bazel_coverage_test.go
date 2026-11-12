@@ -1078,6 +1078,17 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 			"-test.run=^(TestDocFreshness.*|TestRequiredSuiteContract)$$",
 			"-required-suite=doc-freshness",
 		},
+		// The served write roles through bd serve's production Provider arm (C6
+		// of the bringup test plan): a second run, on the provider source, of
+		// tests httpclient_served_test runs in full on the roles source. The
+		// env is pinned by scripts/served_provider_lane_test.go.
+		"//internal/httpclient:httpclient_served_provider_test": {
+			"$(rootpath :httpclient_test)",
+			"-test.v",
+			"-test.count=1",
+			"-test.timeout=14m",
+			"-test.run=^(TestServedDeleter|TestServedLifecycle|TestServedMetadataCAS|TestServedClaimer|TestServedReleaser|TestServedReadyClaimer|TestServedBatchCloser|TestServedTierServesFromTheSourceItNames)",
+		},
 	}
 	err = walkBazelFiles(root, true, func(path string, d os.DirEntry) error {
 		isBzl := strings.HasSuffix(d.Name(), ".bzl")
