@@ -1145,3 +1145,41 @@ func TestCheckOrphanedDependenciesDB_DeletedHeldPrefixTargetIsOrphan(t *testing.
 		}
 	}
 }
+
+// TestCheckOrphanedDependenciesDB_OutputUnchangedWithoutUnverifiableTargets:
+// with no bare cross-repository edge the check's output is exactly what it was
+// before the note existed (bd-zcpo44, AC-5).
+func TestCheckOrphanedDependenciesDB_OutputUnchangedWithoutUnverifiableTargets(t *testing.T) {
+	t.Run("external_ref_and_same_prefix_orphan", func(t *testing.T) {
+		store := newTestDoltStore(t, "bd")
+		db := store.DB()
+		createDepTestIssue(t, store, "bd-1", false)
+		insertExternalTargetDep(t, db, "dependencies", "bd-1", "external:gt:cap", "blocks")
+		insertExternalTargetDep(t, db, "dependencies", "bd-1", "bd-gone", "blocks")
+
+		got := checkOrphanedDependenciesDB(db)
+		want := DoctorCheck{
+			Name:    "Orphaned Dependencies",
+			Status:  StatusWarning,
+			Message: "1 orphaned dependency reference(s)",
+			Detail:  "bd-1→bd-gone",
+			Fix:     "Run 'bd doctor --fix' to remove orphaned dependencies",
+		}
+		if got != want {
+			t.Fatalf("check = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("external_ref_only", func(t *testing.T) {
+		store := newTestDoltStore(t, "bd")
+		db := store.DB()
+		createDepTestIssue(t, store, "bd-1", false)
+		insertExternalTargetDep(t, db, "dependencies", "bd-1", "external:gt:cap", "blocks")
+
+		got := checkOrphanedDependenciesDB(db)
+		want := DoctorCheck{Name: "Orphaned Dependencies", Status: StatusOK, Message: "No orphaned dependencies"}
+		if got != want {
+			t.Fatalf("check = %#v, want %#v", got, want)
+		}
+	})
+}
