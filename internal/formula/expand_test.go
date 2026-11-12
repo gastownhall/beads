@@ -1272,9 +1272,17 @@ func TestExpansionVarRefs(t *testing.T) {
 					DependsOn:   []string{"{target}.prep-{stage}"},
 					Needs:       []string{"{target.id}.gate-{gate}"},
 					Notes:       "{notes_only}",
-					// The condition evaluator owns this field, so expansion
-					// substitutes nothing in it.
-					Condition: "{{condition_only}}",
+					WaitsFor:    "children-of({target}.{waits_only})",
+					Gate:        &Gate{Type: "human", AwaitID: "{gate_only}"},
+					Metadata: map[string]interface{}{
+						"nested": map[string]interface{}{"k": "{meta_only}"},
+						"list":   []interface{}{"{meta_list}"},
+					},
+					// Later phases own these fields, so expansion substitutes
+					// nothing in them.
+					Condition:  "{{condition_only}}",
+					Loop:       &LoopSpec{Range: "1..{loop_only}", Body: []*Step{{ID: "b", Title: "{loop_body_only}"}}},
+					OnComplete: &OnCompleteSpec{ForEach: "output.items", Vars: map[string]string{"k": "{on_complete_only}"}},
 					Children: []*Step{
 						{ID: "{target}.child", Title: "Work on {{feature}}"},
 					},
@@ -1288,7 +1296,7 @@ func TestExpansionVarRefs(t *testing.T) {
 		// single-brace pattern also matches inside {{feature}}, so a
 		// --var feature=x is consumed there too.
 		got := strings.Join(ExpansionVarRefs(f, "main"), " ")
-		if want := "component env feature gate notes_only owner release stage team"; got != want {
+		if want := "component env feature gate gate_only meta_list meta_only notes_only owner release stage team waits_only"; got != want {
 			t.Errorf("ExpansionVarRefs() = %q, want %q", got, want)
 		}
 		if f.Steps != nil {
