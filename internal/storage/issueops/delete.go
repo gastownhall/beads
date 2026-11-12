@@ -56,6 +56,13 @@ func DeleteIssueInTxWithResult(ctx context.Context, tx *sql.Tx, id string, actor
 		return DeleteIssueResult{}, fmt.Errorf("affected by delete for %s: %w", id, aerr)
 	}
 
+	// The suffix this delete frees must stay out of the mint (GH#4750), so
+	// reserve it BEFORE the row goes: the reservation routes the parent's
+	// plane by reading the parent, and the delete removes that row.
+	if _, err := ReserveChildSuffixesInTx(ctx, tx, []string{id}, map[string]bool{id: true}); err != nil {
+		return DeleteIssueResult{}, fmt.Errorf("reserve child suffixes for delete %s: %w", id, err)
+	}
+
 	// Edges are journaled before the rows go, while their source snapshots can
 	// still be read.
 	if err := RecordDependencyRemovalsForIssuesInTx(ctx, tx, []string{id}, actor); err != nil {
@@ -375,6 +382,15 @@ func DeleteResolvedSetInTx(ctx context.Context, tx *sql.Tx, set DeletionSet, dry
 
 	if dryRun {
 		return result, nil
+	}
+
+	// The suffixes this delete frees must stay out of the mint (GH#4750), so
+	// reserve them BEFORE any row goes: the reservation routes each parent's
+	// plane by reading the parent, and a cascade set can hold both a parent
+	// and the children whose suffixes reserve against it — those parents are
+	// departing and get no new counter row.
+	if _, err := ReserveChildSuffixesInTx(ctx, tx, set.All, deletedSet); err != nil {
+		return nil, fmt.Errorf("reserve child suffixes for batch delete: %w", err)
 	}
 
 	affectedIssues, affectedWisps, aerr := AffectedByDeletionInTx(ctx, tx, set.RegularIDs, set.WispIDs)

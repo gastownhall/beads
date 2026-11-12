@@ -502,6 +502,76 @@ func RunIDRetentionNeverMintsARetiredChildID(t *testing.T, ctx context.Context, 
 	idRetentionAssertAbsent(t, ctx, fixture, retired)
 }
 
+// RunIDRetentionAPlainSweepKeepsTheChildSuffixReserved pins the removal half
+// of the child-id high-water mark (GH#4750): a PLAIN sweep — the one that
+// writes no tombstone — must still keep the swept child's suffix out of the
+// mint. The case drops the parent's counter row by hand (Sweep.Exec) BEFORE
+// the sweep, the shape a database written before GH#4750 leaves (or an
+// explicit child created through a door that does not advance the counter),
+// then closes and plainly sweeps the highest child. With no tombstone the
+// counter row is the only record the suffix was used, so the removal entry
+// itself has to raise it. Two creates afterwards pin both that the freed
+// suffix was skipped (P.4, not a recycled P.3) and that the counter kept
+// moving (P.5).
+func RunIDRetentionAPlainSweepKeepsTheChildSuffixReserved(t *testing.T, ctx context.Context, fixture IDRetentionFixture) {
+	t.Helper()
+	if fixture.Sweep.Exec == nil {
+		t.Skip("fixture has no Sweep.Exec; this case cannot make the child counter lag the swept child")
+	}
+	parent := idRetentionID(fixture, "plainchild", "parent")
+	if _, err := fixture.Lifecycle.Create(ctx, idRetentionCreate(parent, false)); err != nil {
+		t.Fatalf("Create(%s) = %v", parent, err)
+	}
+	createChild := func() (string, error) {
+		result, err := fixture.Lifecycle.Create(ctx, publicops.CreateRequest{
+			Actor:         idRetentionActor,
+			ParentID:      parent,
+			ForceIDPrefix: true,
+			Issue:         &types.Issue{Title: "id retention child of " + parent, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		})
+		if err != nil {
+			return "", err
+		}
+		return result.Issue.ID, nil
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := createChild(); err != nil {
+			t.Fatalf("Create(child %d of %s) = %v", i+1, parent, err)
+		}
+	}
+	swept, err := createChild()
+	if err != nil {
+		t.Fatalf("Create(child 3 of %s) = %v", parent, err)
+	}
+	if want := parent + ".3"; swept != want {
+		t.Fatalf("third child of %s = %s, want %s", parent, swept, want)
+	}
+	if _, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: idRetentionActor, IssueID: swept, Reason: "id-retention"}); err != nil {
+		t.Fatalf("Close(%s) = %v", swept, err)
+	}
+	// Drop the parent's counter BEFORE the sweep: this is the pre-GH#4750
+	// shape, and the sweep's reservation is what must put it back.
+	if err := fixture.Sweep.Exec(ctx, []SQLStatement{{Query: "DELETE FROM child_counters WHERE parent_id = ?", Args: []any{parent}}}); err != nil {
+		t.Fatalf("dropping the child counter of %s: %v", parent, err)
+	}
+	if result := sweeperSweep(t, ctx, fixture.Sweep, publicops.SweepRequest{Tier: publicops.SweepDurable, IDPattern: swept}); result.Swept != 1 {
+		t.Fatalf("plain sweep of %s Swept = %d, want 1", swept, result.Swept)
+	}
+	// A plain sweep retires nothing: the swept id has no tombstone, so the
+	// counter the sweep raised is the suffix's only protection.
+	idRetentionAssertTombstones(t, ctx, fixture, swept, 0, 0)
+	for i := 0; i < 2; i++ {
+		minted, err := createChild()
+		if err != nil {
+			t.Fatalf("Create(child %d of %s) after its child %s was plainly swept = %v, want a fresh child id", i+4, parent, swept, err)
+		}
+		if want := fmt.Sprintf("%s.%d", parent, i+4); minted != want {
+			t.Fatalf("Create(child %d of %s) minted %s, want %s: a plainly swept suffix must stay reserved (GH#4750)", i+4, parent, minted, want)
+		}
+	}
+	idRetentionAssertAbsent(t, ctx, fixture, swept)
+}
+
 // RunIDRetentionDryRunRetiresNothing pins that a dry run writes no tombstone
 // while echoing RetainIDs and counting what it would sweep.
 func RunIDRetentionDryRunRetiresNothing(t *testing.T, ctx context.Context, fixture IDRetentionFixture) {

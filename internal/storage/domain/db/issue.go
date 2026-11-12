@@ -1135,6 +1135,12 @@ func (r *issueSQLRepositoryImpl) Delete(ctx context.Context, id string, opts dom
 	if err := issueops.RecordDependencyRemovalsForIssuesInTx(ctx, r.runner, []string{id}, actor); err != nil {
 		return fmt.Errorf("db: IssueSQLRepository.Delete %s: journal dependency removals: %w", id, err)
 	}
+	// The suffix this delete frees must stay out of the mint (GH#4750), so
+	// reserve it BEFORE the row goes: the reservation routes the parent's
+	// plane by reading the parent, and the delete removes that row.
+	if _, err := issueops.ReserveChildSuffixesInTx(ctx, r.runner, []string{id}, map[string]bool{id: true}); err != nil {
+		return fmt.Errorf("db: IssueSQLRepository.Delete %s: reserve child suffixes: %w", id, err)
+	}
 	//nolint:gosec // G201: table is a hardcoded constant.
 	res, err := r.runner.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = ?", table), id)
 	if err != nil {
@@ -1175,6 +1181,20 @@ func (r *issueSQLRepositoryImpl) DeleteByIDs(ctx context.Context, ids []string, 
 	// still be read.
 	if err := issueops.RecordDependencyRemovalsForIssuesInTx(ctx, r.runner, actualIDs, actor); err != nil {
 		return 0, fmt.Errorf("db: IssueSQLRepository.DeleteByIDs journal dependency removals: %w", err)
+	}
+	// The suffixes this delete frees must stay out of the mint (GH#4750), so
+	// reserve them BEFORE the rows go: the reservation routes each parent's
+	// plane by reading the parent, and the whole set is departing. The unit of
+	// work's deleteMany reaches this in two plane-split calls, so a wisp child
+	// of a deleted durable parent can arrive after its parent went — its
+	// reservation then finds no parent row and skips, the one counter gap a
+	// plane-split delete leaves.
+	departing := make(map[string]bool, len(actualIDs))
+	for _, id := range actualIDs {
+		departing[id] = true
+	}
+	if _, err := issueops.ReserveChildSuffixesInTx(ctx, r.runner, actualIDs, departing); err != nil {
+		return 0, fmt.Errorf("db: IssueSQLRepository.DeleteByIDs reserve child suffixes: %w", err)
 	}
 	total := 0
 	for start := 0; start < len(ids); start += deleteBatchSize {

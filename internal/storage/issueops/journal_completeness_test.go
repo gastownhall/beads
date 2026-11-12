@@ -165,6 +165,7 @@ var beadDMLExemptions = map[string]string{
 	// is_blocked is part of the exported bead snapshot and its recompute helpers
 	// structurally journal every value that actually changes.
 	"ReconcileChildCounters": "recomputes denormalized child-counter state, not a bead mutation",
+	"ReserveChildSuffixesInTx": "raises denormalized child-counter high-water state, not a bead mutation",
 
 	// (2) aux tables matched via templated %s, not work-bead state.
 	"RecordEventInTable":            "writes the events audit table (templated %s), not work-bead state",

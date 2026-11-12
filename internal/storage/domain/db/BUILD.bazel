@@ -66,6 +66,7 @@ go_test(
         "is_blocked_test.go",
         "issue_as_of_test.go",
         "issue_cross_tier_test.go",
+        "issue_delete_reserve_test.go",
         "issue_descendants_test.go",
         "issue_force_close_policy_test.go",
         "issue_insert_history_off_test.go",

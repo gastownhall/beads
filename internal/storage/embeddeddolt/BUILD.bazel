@@ -125,6 +125,7 @@ go_test(
         "cache_cleanup_test.go",
         "cache_test.go",
         "checked_wrapper_smoke_test.go",
+        "child_counter_delete_test.go",
         "child_id_test.go",
         "claim_wrapper_smoke_test.go",
         "claimer_contract_test.go",
