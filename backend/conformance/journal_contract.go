@@ -172,6 +172,14 @@ type JournalMutations struct {
 	// RunJournalDerivedRecordsCarryTheCausingActor skips those steps when it is
 	// nil.
 	SetStatus func(ctx context.Context, id string, status types.Status) error
+	// As returns this same kit acting as actor: every hook drives the same
+	// verb, passing actor wherever this kit passes Actor, and the returned
+	// kit's Actor is actor. RunJournalDerivedRecordsCarryTheCausingActor seeds
+	// with this kit and mutates with As of a second identity, so a derived
+	// record that took the identity of whoever created or last touched the
+	// bead it updates (the seeder) cannot pass for the request's. That case
+	// fails when As is nil.
+	As func(actor string) JournalMutations
 
 	// Actor is the acting identity every hook above passes to the verb it
 	// drives — the comment's author, for Comment. It is what
@@ -990,6 +998,13 @@ func RunJournalEveryMutationKindRecordsItsActor(t *testing.T, ctx context.Contex
 //     --force`): the subject's own flag settles, and the dependent and the
 //     child re-derive unblocked.
 //
+// The graphs are SEEDED by one identity (the kit's Actor) and every judged
+// step is MUTATED by another (the kit's As of a second actor), and each
+// window is held to the mutating identity. With one identity throughout, a
+// derived record that took the actor of the bead's creator or of the last
+// write to its edges would carry the right value by coincidence; with two it
+// carries the seeder's and fails.
+//
 // It also holds that those derived records still EXIST, each as an update of
 // the bead whose readiness flipped: dropping them would satisfy the
 // attribution rule vacuously and take the dependents' readiness away from
@@ -997,17 +1012,28 @@ func RunJournalEveryMutationKindRecordsItsActor(t *testing.T, ctx context.Contex
 // rebaselines like every case here.
 func RunJournalDerivedRecordsCarryTheCausingActor(t *testing.T, ctx context.Context, fixture JournalFixture) {
 	journalBaseline(t, ctx, fixture)
-	m := fixture.Mutations
-	actor := m.Actor
-	if actor == "" {
+	seeder := fixture.Mutations
+	seedActor := seeder.Actor
+	if seedActor == "" {
 		t.Fatalf("JournalMutations.Actor is empty: name the identity this leg's hooks pass to their verbs, " +
 			"or this case would hold every record to nobody")
+	}
+	if seeder.As == nil {
+		t.Fatalf("JournalMutations.As is nil: this case seeds as one identity and mutates as another, so " +
+			"supply the kit acting as a given actor; with one identity a derived record that took the " +
+			"seeder's actor would pass")
+	}
+	actor := seedActor + "-mutator"
+	m := seeder.As(actor)
+	if m.Actor != actor {
+		t.Fatalf("JournalMutations.As(%q) returned a kit whose Actor is %q", actor, m.Actor)
 	}
 	id := func(name string) string { return fixture.IssuePrefix + "-drv-" + name }
 	subject, blocker, dependent, child := id("subject"), id("blocker"), id("dependent"), id("child")
 	statusSubject, statusDependent := id("status"), id("status-dependent")
 
-	// Seeding, judged by no window: what the steps below re-derive.
+	// Seeding, judged by no window and done as seedActor: what the steps
+	// below, done as actor, re-derive.
 	seed := func(what string, err error) {
 		t.Helper()
 		if err != nil {
@@ -1015,23 +1041,23 @@ func RunJournalDerivedRecordsCarryTheCausingActor(t *testing.T, ctx context.Cont
 		}
 	}
 	for _, issue := range []string{subject, blocker, dependent} {
-		seed(issue, m.Create(ctx, issue))
+		seed(issue, seeder.Create(ctx, issue))
 	}
-	seed(dependent+"'s wait on "+subject, m.AddDependency(ctx, dependent, subject))
+	seed(dependent+"'s wait on "+subject, seeder.AddDependency(ctx, dependent, subject))
 	// withChild is the child, when the leg can hang one under the subject: the
 	// derived rows a step must leave for it.
 	var withChild []string
-	if m.AddParentChild != nil {
-		seed(child, m.Create(ctx, child))
-		seed(child+" under "+subject, m.AddParentChild(ctx, child, subject))
+	if seeder.AddParentChild != nil {
+		seed(child, seeder.Create(ctx, child))
+		seed(child+" under "+subject, seeder.AddParentChild(ctx, child, subject))
 		withChild = []string{child}
 	} else {
 		t.Logf("AddParentChild is nil: no descendant, so the dependency adds below reach only their source")
 	}
-	if m.SetStatus != nil {
-		seed(statusSubject, m.Create(ctx, statusSubject))
-		seed(statusDependent, m.Create(ctx, statusDependent))
-		seed(statusDependent+"'s wait on "+statusSubject, m.AddDependency(ctx, statusDependent, statusSubject))
+	if seeder.SetStatus != nil {
+		seed(statusSubject, seeder.Create(ctx, statusSubject))
+		seed(statusDependent, seeder.Create(ctx, statusDependent))
+		seed(statusDependent+"'s wait on "+statusSubject, seeder.AddDependency(ctx, statusDependent, statusSubject))
 	} else {
 		t.Logf("SetStatus is nil: the status-crossing update steps are skipped")
 	}
@@ -1089,7 +1115,11 @@ func RunJournalDerivedRecordsCarryTheCausingActor(t *testing.T, ctx context.Cont
 				updated[row.IssueID] = true
 			}
 			if row.Actor != actor {
-				unattributed = append(unattributed, fmt.Sprintf("seq %d %s(%s) actor=%q", row.Seq, row.Op, row.IssueID, row.Actor))
+				who := ""
+				if row.Actor == seedActor {
+					who = " (the seeding identity)"
+				}
+				unattributed = append(unattributed, fmt.Sprintf("seq %d %s(%s) actor=%q%s", row.Seq, row.Op, row.IssueID, row.Actor, who))
 			}
 		}
 		if !own {
@@ -1105,9 +1135,9 @@ func RunJournalDerivedRecordsCarryTheCausingActor(t *testing.T, ctx context.Cont
 		}
 		if len(unattributed) > 0 {
 			t.Errorf("%s: %d record(s) in its window do not name the request's actor %q: %v. A derived record "+
-				"the request caused must carry the request's actor; an absent actor reads as system/unknown. "+
-				"The whole window: %v",
-				step.what, len(unattributed), actor, unattributed, journalActorsOf(page.Rows))
+				"the request caused must carry the request's actor, not the actor that seeded the bead (%q); "+
+				"an absent actor reads as system/unknown. The whole window: %v",
+				step.what, len(unattributed), actor, unattributed, seedActor, journalActorsOf(page.Rows))
 		}
 	}
 }
