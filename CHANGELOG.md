@@ -122,6 +122,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Library embedders can reach a bd db-proxy's data port again.** Since the
+  data port began requiring a `BDPROXY1` handshake before any MySQL byte
+  (#7885), only bd's own unexported dialer could speak it, so a program that
+  links beads and connects to a bd-managed proxy stalled until the proxy
+  dropped it. The SDK gains `beads.DialProxyData(ctx, proxyRoot, host,
+  port)`, which completes the handshake under the secret in the proxy's root
+  directory (bd reads `proxy.secret`; the caller never does) and returns the
+  connection only once the proxy has proven it holds that secret, and
+  `beads.ErrProxyDataAuth`, which the error wraps when the listener does not
+  (another workspace's root, a rotated secret, or another process on the
+  port). A server-mode open dials its server as a proxy data port when
+  `BEADS_DOLT_SERVER_PROXY_ROOT` names the proxy root (the Dolt store's
+  `Config.ServerProxyRoot`); such an open never auto-starts a server and
+  refuses a Unix socket beside the proxy root. Like the other settings that
+  choose which credential bd presents, `.beads/.env` cannot set it.
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
   While a workspace journals, every `ephemeral` or `no_history` bead it creates
   is stamped with the `seq` of its own `create` journal record, in the same

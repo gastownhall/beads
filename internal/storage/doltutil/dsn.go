@@ -55,7 +55,11 @@ func PrintedServerAddr(host string, port int) string {
 // ServerDSN holds connection parameters for building a MySQL DSN to a Dolt server.
 // All DSNs built with this struct set parseTime=true and multiStatements=true.
 type ServerDSN struct {
-	Socket   string // Unix domain socket path; when set, Net="unix" and Host/Port are ignored
+	Socket string // Unix domain socket path; when set, the network is "unix" and Net, Host and Port are ignored
+	// Net is the driver network Host and Port are dialed over: "tcp" when
+	// empty, else a network registered with mysql.RegisterDialContext, such
+	// as the bd db-proxy's authenticated data network (proxy.DataNetwork).
+	Net      string
 	Host     string // an IPv6 literal bare or bracketed; see ServerAddr
 	Port     int
 	User     string
@@ -74,6 +78,9 @@ func (d ServerDSN) String() string {
 	}
 
 	network := "tcp"
+	if d.Net != "" {
+		network = d.Net
+	}
 	addr := ServerAddr(d.Host, d.Port)
 	if d.Socket != "" {
 		network = "unix"

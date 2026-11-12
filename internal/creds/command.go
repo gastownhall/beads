@@ -74,6 +74,13 @@ var CredentialRedirectEnvKeys = []string{
 	// and having one is what lets serve bind beyond loopback; a .beads/.env that
 	// pointed it at a committed file would admit tokens the file's author knows.
 	"BEADS_SERVE_TOKEN_FILE",
+	// BEADS_DOLT_SERVER_PROXY_ROOT names the db-proxy root whose secret
+	// bd's server-mode open presents to the data port. The token is bound
+	// to the port, not the host, so a .beads/.env that named another
+	// workspace's root while the clone named a listener at that proxy's
+	// port on another loopback address would hand that listener a token
+	// the real proxy accepts.
+	"BEADS_DOLT_SERVER_PROXY_ROOT",
 }
 
 // OutputFileEnvKeys names environment settings whose value is the path of a
