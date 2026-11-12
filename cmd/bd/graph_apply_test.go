@@ -1821,3 +1821,44 @@ func TestBuildGraphApplyBatchRequestSkipsPerEdgeCycleProbe(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildGraphApplyBatchRequestCanonicalizesBlockingAliases pins bd-esm0t5
+// (GH#3879 pitfall c): the documented dash aliases "blocked-by" and
+// "depends-on" are stored as "blocks" — the type that gates `bd ready` — with
+// source and target unchanged, the same GH#5069 mapping `bd dep add --type`
+// and `bd create --deps` apply. It covers a top-level edge and an inline dep.
+func TestBuildGraphApplyBatchRequestCanonicalizesBlockingAliases(t *testing.T) {
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "a", Title: "A"},
+			{Key: "b", Title: "B"},
+			{Key: "c", Title: "C", Deps: []GraphApplyNodeDep{{Target: "a", Type: "depends-on"}}},
+		},
+		Edges: []GraphApplyEdge{{FromKey: "b", ToKey: "a", Type: "blocked-by"}},
+	}
+	if err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{}); err != nil {
+		t.Fatalf("validateGraphApplyPlan: %v", err)
+	}
+	req, err := buildGraphApplyBatchRequest(plan, GraphApplyOptions{}, "actor", "owner")
+	if err != nil {
+		t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+	}
+	var deps []*issueops.DepAddItem
+	for _, item := range req.Items {
+		if item.Kind == issueops.ItemDepAdd {
+			deps = append(deps, item.DepAdd)
+		}
+	}
+	if len(deps) != 2 {
+		t.Fatalf("dep_add items = %d, want 2", len(deps))
+	}
+	want := []struct{ source, target string }{{"b", "a"}, {"c", "a"}}
+	for i, dep := range deps {
+		if dep.Type != types.DepBlocks {
+			t.Errorf("dep_add %d type = %q, want %q", i, dep.Type, types.DepBlocks)
+		}
+		if dep.Source != (issueops.Ref{Key: want[i].source}) || dep.Target != (issueops.Ref{Key: want[i].target}) {
+			t.Errorf("dep_add %d = %s -> %s, want %s -> %s (direction unchanged)", i, dep.Source.Key, dep.Target.Key, want[i].source, want[i].target)
+		}
+	}
+}
