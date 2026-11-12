@@ -9,6 +9,7 @@ package tracker
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -310,6 +311,82 @@ func TestEnginePullMissingHistoryHydratesNewStub(t *testing.T) {
 				if len(result.Warnings) != 0 {
 					t.Errorf("Warnings = %q, want none", result.Warnings)
 				}
+			})
+		}
+	}
+}
+
+// TestEnginePullMissingHistoryWarnsOnce pins AC-4 of #7294: several older
+// issues with missing history, mixed with an older issue whose historical ref
+// shows it was linked after last_sync and a new stub, produce exactly one
+// warning naming the tracker, the cursor and the review before pushing, while
+// the known changed ref and the new stub are still hydrated and the bulk
+// fetch keeps the cursor minus the overlap window. Both issue orders run, so
+// a missing row never stands for the issues after it.
+func TestEnginePullMissingHistoryWarnsOnce(t *testing.T) {
+	for _, order := range []string{"missing first", "missing last"} {
+		for _, dryRun := range []bool{true, false} {
+			name := order + "/real"
+			if dryRun {
+				name = order + "/dry-run"
+			}
+			t.Run(name, func(t *testing.T) {
+				ctx := context.Background()
+				old := overlapLastSync.Add(-24 * time.Hour)
+				missing := []*types.Issue{
+					linkedIssue("bd-old-1", "EXT-1", "old one", old, overlapLastSync.Add(10*time.Minute)),
+					linkedIssue("bd-old-2", "EXT-2", "old two", old, overlapLastSync.Add(-time.Hour)),
+					linkedIssue("bd-old-3", "EXT-3", "old three", old, overlapLastSync.Add(20*time.Minute)),
+				}
+				relinked := linkedIssue("bd-relinked", "EXT-4", "relinked", old, overlapLastSync.Add(10*time.Minute))
+				stub := linkedIssue("bd-new", "EXT-5", "new stub", overlapLastSync.Add(time.Minute), overlapLastSync.Add(time.Minute))
+				issues := append(append([]*types.Issue{}, missing...), relinked, stub)
+				if order == "missing last" {
+					issues = append([]*types.Issue{relinked, stub}, missing...)
+				}
+				store := newMissingHistoryStore(issues...)
+				store.previousRefs[relinked.ID] = "" // unlinked at last_sync
+				before := snapshotIssues(missing...)
+				var remotes []TrackerIssue
+				for _, ext := range []string{"EXT-1", "EXT-2", "EXT-3", "EXT-4", "EXT-5"} {
+					remotes = append(remotes, staleRemote(ext, overlapLastSync.Add(-2*time.Hour)))
+				}
+				mock, since := newOverlapTracker(remotes...)
+
+				result, err := NewEngine(mock, store, "sync").Sync(ctx, SyncOptions{Pull: true, DryRun: dryRun})
+				if err != nil {
+					t.Fatalf("Sync: %v", err)
+				}
+				wantSince := overlapLastSync.Add(-pullFetchOverlap)
+				if *since == nil || !(*since).Equal(wantSince) {
+					t.Errorf("FetchOptions.Since = %v, want %s", *since, wantSince)
+				}
+				if mock.fetchCalls != 2 {
+					t.Errorf("FetchIssue calls = %d, want 2 (the relinked issue and the new stub)", mock.fetchCalls)
+				}
+				if result.PullStats.Candidates != 2 || result.PullStats.Updated != 2 {
+					t.Errorf("PullStats = %+v, want the relinked issue and the new stub as the only updates", result.PullStats)
+				}
+				var missingWarnings []string
+				for _, w := range result.Warnings {
+					if strings.Contains(w, "history of older linked issues") {
+						missingWarnings = append(missingWarnings, w)
+					}
+				}
+				if len(missingWarnings) != 1 {
+					t.Fatalf("missing-history warnings = %q (all warnings %q), want exactly one", missingWarnings, result.Warnings)
+				}
+				for _, want := range []string{"test", overlapLastSync.Format(time.RFC3339), "before pushing"} {
+					if !strings.Contains(missingWarnings[0], want) {
+						t.Errorf("warning %q does not mention %q", missingWarnings[0], want)
+					}
+				}
+				if !dryRun {
+					if relinked.Title != "stale remote title EXT-4" || stub.Title != "stale remote title EXT-5" {
+						t.Errorf("relinked = %q, stub = %q, want both hydrated from their remotes", relinked.Title, stub.Title)
+					}
+				}
+				assertIssuesUnchanged(t, before, missing...)
 			})
 		}
 	}
