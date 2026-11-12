@@ -1862,3 +1862,90 @@ func TestBuildGraphApplyBatchRequestCanonicalizesBlockingAliases(t *testing.T) {
 		t.Errorf("inline dep refs = %v -> %v, want c -> a unchanged", depItem.Source, depItem.Target)
 	}
 }
+
+// TestGraphPlanRejectsUnknownEdgeDependencyType reproduces bd-esm0t5 (GH#3879
+// pitfall c): a --graph edge typed "blocked_by" — a respelling of the
+// documented "blocked-by" alias — must be refused at validation time, naming
+// the raw type and suggesting the canonical spelling, instead of being
+// stored as an inert custom type that never gates `bd ready`.
+func TestGraphPlanRejectsUnknownEdgeDependencyType(t *testing.T) {
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "a", Title: "A", Type: "task"},
+			{Key: "b", Title: "B", Type: "task"},
+		},
+		Edges: []GraphApplyEdge{{FromKey: "b", ToKey: "a", Type: "blocked_by"}},
+	}
+	err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{})
+	if err == nil {
+		t.Fatalf("validateGraphApplyPlan accepted edge type %q; want the respelling refusal", "blocked_by")
+	}
+	if !strings.Contains(err.Error(), `"blocked_by"`) {
+		t.Errorf("refusal does not name the raw type: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), `"blocked-by"`) {
+		t.Errorf("refusal does not suggest the canonical spelling: %q", err.Error())
+	}
+}
+
+// TestValidateGraphApplyPlanRefusesRespelledDependencyTypes pins bd-esm0t5
+// (GH#3879, AC-4): an edge or inline dep whose type only respells a known
+// type or alias (case, "-" vs "_" vs " ") is refused before any write, on
+// both legs (validateFullGraphPlan runs with requireUniform both false —
+// the embedded leg — and true — the proxied leg). Exact spellings of known
+// types and the two documented aliases, and custom types that respell
+// nothing, still validate.
+func TestValidateGraphApplyPlanRefusesRespelledDependencyTypes(t *testing.T) {
+	mustValidate := []string{"related-to", "custom-edge-type", "implements", "blocked-by", "depends-on", ""}
+	mustRefuse := map[string]string{
+		"BLOCKED-BY":   "blocked-by",
+		"waits_for":    "waits-for",
+		"depends_on":   "depends-on",
+		"parent_child": "parent-child",
+		"Blocks":       "blocks",
+	}
+
+	edgePlan := func(depType string) *GraphApplyPlan {
+		return &GraphApplyPlan{
+			Nodes: []GraphApplyNode{
+				{Key: "a", Title: "A", Type: "task"},
+				{Key: "b", Title: "B", Type: "task"},
+			},
+			Edges: []GraphApplyEdge{{FromKey: "b", ToKey: "a", Type: depType}},
+		}
+	}
+	inlineDepPlan := func(depType string) *GraphApplyPlan {
+		return &GraphApplyPlan{
+			Nodes: []GraphApplyNode{
+				{Key: "a", Title: "A", Type: "task"},
+				{Key: "b", Title: "B", Type: "task", Deps: []GraphApplyNodeDep{{Type: depType, Target: "a"}}},
+			},
+		}
+	}
+
+	for _, requireUniform := range []bool{false, true} {
+		for _, shape := range []struct {
+			name string
+			plan func(string) *GraphApplyPlan
+		}{{"edge", edgePlan}, {"inline dep", inlineDepPlan}} {
+			for _, depType := range mustValidate {
+				if _, err := validateFullGraphPlan(shape.plan(depType), graphPlanConfig{}, GraphApplyOptions{}, requireUniform); err != nil {
+					t.Errorf("requireUniform=%v %s type %q refused: %v", requireUniform, shape.name, depType, err)
+				}
+			}
+			for raw, canonical := range mustRefuse {
+				_, err := validateFullGraphPlan(shape.plan(raw), graphPlanConfig{}, GraphApplyOptions{}, requireUniform)
+				if err == nil {
+					t.Errorf("requireUniform=%v %s type %q accepted; want the respelling refusal", requireUniform, shape.name, raw)
+					continue
+				}
+				if !strings.Contains(err.Error(), fmt.Sprintf("%q", raw)) {
+					t.Errorf("requireUniform=%v %s type %q: refusal does not name the raw type: %v", requireUniform, shape.name, raw, err)
+				}
+				if !strings.Contains(err.Error(), fmt.Sprintf("%q", canonical)) {
+					t.Errorf("requireUniform=%v %s type %q: refusal does not suggest the canonical spelling %q: %v", requireUniform, shape.name, raw, canonical, err)
+				}
+			}
+		}
+	}
+}

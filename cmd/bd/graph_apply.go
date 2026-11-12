@@ -583,6 +583,10 @@ func validateGraphApplyPlan(plan *GraphApplyPlan, customTypes, customStatuses []
 				if !dt.IsValid() {
 					return fmt.Errorf("node %q: dep %d: invalid dependency type %q", node.Key, j, dep.Type)
 				}
+				if matched, ok := graphPlanTypeRespelling(dep.Type); ok {
+					return fmt.Errorf("node %q: dep %d: dependency type %q is not recognized; did you mean %q (stored as %q: this node depends on the target, like bd dep add <node> <target>)?",
+						node.Key, j, dep.Type, matched, canonicalDependencyType(types.DependencyType(matched)))
+				}
 			}
 		}
 	}
@@ -604,6 +608,10 @@ func validateGraphApplyPlan(plan *GraphApplyPlan, customTypes, customStatuses []
 			dt := types.DependencyType(edge.Type)
 			if !dt.IsValid() {
 				return fmt.Errorf("edge %d: invalid dependency type %q", i, edge.Type)
+			}
+			if matched, ok := graphPlanTypeRespelling(edge.Type); ok {
+				return fmt.Errorf("edge %d: dependency type %q is not recognized; did you mean %q (stored as %q: from_key depends on to_key, like bd dep add <from> <to>)?",
+					i, edge.Type, matched, canonicalDependencyType(types.DependencyType(matched)))
 			}
 		}
 		if edge.Gate != "" || edge.SpawnerKey != "" || edge.SpawnerID != "" {
@@ -1238,6 +1246,42 @@ func graphApplyDependencyType(depType string) types.DependencyType {
 		return types.DepBlocks
 	}
 	return canonicalDependencyType(types.DependencyType(depType))
+}
+
+// graphPlanTypeRespelling reports whether raw is a respelling of a
+// well-known dependency type or one of the two documented dash aliases
+// ("depends-on", "blocked-by"): it compares a squashed form (lowercased,
+// with "-", "_" and spaces removed) so "blocked_by", "blocked by" and
+// "BLOCKED-BY" all match "blocked-by", while an exact spelling of a known
+// type or alias is never a respelling. The returned canonical string is the
+// exact spelling the plan should use; ok is false for custom types that
+// squash-match nothing (which stay accepted verbatim) and for exact
+// spellings (which canonicalDependencyType already maps). This closes the
+// GH#3879 silent-inert-edge split: a respelling used to validate as a
+// custom type (or, with an alias's exact spelling, silently gate work)
+// when the author meant the known type. validateGraphApplyPlan refuses it
+// before any write on both legs, live and --dry-run.
+func graphPlanTypeRespelling(raw string) (canonical string, ok bool) {
+	if raw == "" {
+		return "", false
+	}
+	squash := func(s string) string {
+		return strings.NewReplacer("-", "", "_", "", " ", "").Replace(strings.ToLower(s))
+	}
+	key := squash(raw)
+	if key == "" {
+		return "", false
+	}
+	known := types.WellKnownDependencyTypes()
+	for _, candidate := range append(known, "depends-on", "blocked-by") {
+		if raw == string(candidate) {
+			return "", false // exact spelling of a known type or alias
+		}
+		if key == squash(string(candidate)) {
+			return string(candidate), true
+		}
+	}
+	return "", false
 }
 
 func graphApplyCycleRelevantDependencyType(depType types.DependencyType) bool {
