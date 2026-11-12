@@ -402,18 +402,19 @@ func TestSweepLiveDependentsCountOnlyProtectingEdgesFromLiveSources(t *testing.T
 		"root":    {dep("step-open", "root", types.DepParentChild), dep("step-done", "root", types.DepParentChild)},
 		"tracked": {dep("convoy", "tracked", types.DepTracks)},
 		"gate":    {dep("waiter", "gate", types.DepBlocks)},
+		"main":    {dep("fallback", "main", types.DepConditionalBlocks)},
 		"linked":  {dep("reader", "linked", types.DepRelated)},
 		"orphan":  {dep("step-done", "orphan", types.DepParentChild), nil},
 	}
 
 	sources := SweepLiveDependentSources(incoming)
-	if want := []string{"convoy", "step-done", "step-open", "waiter"}; strings.Join(sources, ",") != strings.Join(want, ",") {
+	if want := []string{"convoy", "fallback", "step-done", "step-open", "waiter"}; strings.Join(sources, ",") != strings.Join(want, ",") {
 		t.Fatalf("SweepLiveDependentSources = %v, want %v (sorted, protecting edges only)", sources, want)
 	}
 
-	live := map[string]bool{"step-open": true, "convoy": true, "waiter": true, "reader": true}
+	live := map[string]bool{"step-open": true, "convoy": true, "waiter": true, "fallback": true, "reader": true}
 	protected := SweepLiveDependentTargets(incoming, live)
-	for _, id := range []string{"root", "tracked", "gate"} {
+	for _, id := range []string{"root", "tracked", "gate", "main"} {
 		if !protected[id] {
 			t.Errorf("%s not protected; a live source depends on it through a protecting edge", id)
 		}

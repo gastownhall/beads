@@ -88,6 +88,73 @@ func ManageClosedAt(oldIssue *types.Issue, updates map[string]interface{}, setCl
 	return setClauses, args
 }
 
+// BlockingHoldTransition is what a generic update does to its row as a
+// blocking target: the status and close reason the row lands, and whether its
+// hold on a blocks or a conditional-blocks dependent changes with them.
+type BlockingHoldTransition struct {
+	NewStatus types.Status
+	// NewActive is "the landed row is neither closed nor pinned": the row
+	// itself is settled (is_blocked forced to 0) exactly when it is false.
+	NewActive bool
+	// Changed reports whether either edge type's hold flips
+	// (types.BlockingEdgeHolds), so the row's dependents must be recomputed.
+	// For a blocks edge that is the old active/inactive crossing; a
+	// conditional-blocks edge adds reason-only edits on a closed row that
+	// change its failure classification, and closed<->pinned moves.
+	Changed bool
+}
+
+// BlockingHoldTransitionFor computes the transition for an update that has
+// already been merged and no-op filtered, as both update funnels hold it when
+// they call ManageClosedAt. The landed close reason follows ManageClosedAt: an
+// explicit close_reason wins; otherwise a status key landing closed, or
+// leaving closed, defaults it to empty; any other update keeps the row's
+// reason. Shared by issueops.updateIssueInTx and the domain/db issue
+// repository so the two stacks cannot disagree on when to recompute.
+func BlockingHoldTransitionFor(oldIssue *types.Issue, updates map[string]interface{}) BlockingHoldTransition {
+	newStatus := oldIssue.Status
+	statusVal, hasStatus := updates["status"]
+	if hasStatus {
+		switch v := statusVal.(type) {
+		case string:
+			newStatus = types.Status(v)
+		case types.Status:
+			newStatus = v
+		}
+	}
+	newReason := oldIssue.CloseReason
+	if hasStatus && (newStatus == types.StatusClosed || oldIssue.Status == types.StatusClosed) {
+		newReason = ""
+	}
+	if v, explicit := updates["close_reason"]; explicit {
+		switch r := v.(type) {
+		case string:
+			newReason = r
+		case *string:
+			newReason = ""
+			if r != nil {
+				newReason = *r
+			}
+		case nil:
+			newReason = ""
+		default:
+			newReason = fmt.Sprint(r)
+		}
+	}
+	changed := false
+	for _, depType := range []types.DependencyType{types.DepBlocks, types.DepConditionalBlocks} {
+		if types.BlockingEdgeHolds(depType, oldIssue.Status, oldIssue.CloseReason) !=
+			types.BlockingEdgeHolds(depType, newStatus, newReason) {
+			changed = true
+		}
+	}
+	return BlockingHoldTransition{
+		NewStatus: newStatus,
+		NewActive: newStatus != types.StatusClosed && newStatus != types.StatusPinned,
+		Changed:   changed,
+	}
+}
+
 // ValidateClosedAtCoherence refuses an explicit closed_at write that would
 // leave the row violating the closed-iff-closed_at invariant
 // types.Issue.Validate enforces: a closed issue has a closed_at, a non-closed
@@ -521,43 +588,38 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	}
 
 	updateResult := &UpdateResult{OldIssue: oldIssue, IsWisp: isWisp, Changed: true, IssueRowsChanged: !isWisp, WispRowsChanged: isWisp}
-	if rawStatus, hasStatus := updates["status"]; hasStatus {
-		var newStatus string
-		switch v := rawStatus.(type) {
-		case string:
-			newStatus = v
-		case types.Status:
-			newStatus = string(v)
+	// The dependents are recomputed whenever the row's hold on a blocks or
+	// conditional-blocks edge flips: an active/inactive crossing, and also a
+	// reason-only edit or closed<->pinned move that changes a conditional
+	// target's failure classification.
+	if transition := BlockingHoldTransitionFor(oldIssue, updates); transition.Changed {
+		newStatus := string(transition.NewStatus)
+		newActive := transition.NewActive
+		var affectedIssues, affectedWisps []string
+		var aerr error
+		if isWisp {
+			affectedIssues, affectedWisps, aerr = AffectedByStatusChangeForWispInTx(ctx, tx, id)
+		} else {
+			affectedIssues, affectedWisps, aerr = AffectedByStatusChangeInTx(ctx, tx, id)
 		}
-		oldActive := oldIssue.Status != types.StatusClosed && oldIssue.Status != types.StatusPinned
-		newActive := newStatus != string(types.StatusClosed) && newStatus != string(types.StatusPinned)
-		if oldActive != newActive {
-			var affectedIssues, affectedWisps []string
-			var aerr error
-			if isWisp {
-				affectedIssues, affectedWisps, aerr = AffectedByStatusChangeForWispInTx(ctx, tx, id)
-			} else {
-				affectedIssues, affectedWisps, aerr = AffectedByStatusChangeInTx(ctx, tx, id)
-			}
-			if aerr != nil {
-				return nil, fmt.Errorf("affected by status change for %s: %w", id, aerr)
-			}
-			// A change to closed or pinned settles the row itself without
-			// its union statements (planRecomputeInTx); a reactivation must
-			// recompute it, and its dependents are recomputed either way.
-			var opts recomputeOptions
-			if !newActive {
-				opts = settledRowRecompute(id, isWisp)
-			}
-			recompute, err := recomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps, opts)
-			if err != nil {
-				return nil, fmt.Errorf("recompute is_blocked after status change for %s: %w", id, err)
-			}
-			updateResult.IssueRowsChanged = !isWisp || recompute.IssueRowsChanged
-			updateResult.WispRowsChanged = isWisp || recompute.WispRowsChanged
-			if !newActive {
-				NoteStatusChangeBlockedRecheck(tx, id, newStatus, affectedIssues, affectedWisps)
-			}
+		if aerr != nil {
+			return nil, fmt.Errorf("affected by status change for %s: %w", id, aerr)
+		}
+		// A change to closed or pinned settles the row itself without
+		// its union statements (planRecomputeInTx); a reactivation must
+		// recompute it, and its dependents are recomputed either way.
+		var opts recomputeOptions
+		if !newActive {
+			opts = settledRowRecompute(id, isWisp)
+		}
+		recompute, err := recomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps, opts)
+		if err != nil {
+			return nil, fmt.Errorf("recompute is_blocked after status change for %s: %w", id, err)
+		}
+		updateResult.IssueRowsChanged = !isWisp || recompute.IssueRowsChanged
+		updateResult.WispRowsChanged = isWisp || recompute.WispRowsChanged
+		if !newActive {
+			NoteStatusChangeBlockedRecheck(tx, id, newStatus, affectedIssues, affectedWisps)
 		}
 	}
 

@@ -12,8 +12,10 @@ import "strings"
 // (internal/storage/issueops/blocked_consistency.go) a gate can account for:
 //
 //   - the EDGE clause, from the recompute's first two union legs: the edge is
-//     'blocks' or 'conditional-blocks' and the target is neither closed nor
-//     pinned (IsGateEdge + the status test in GateIsHolding);
+//     'blocks' or 'conditional-blocks' and the target still holds it
+//     (IsGateEdge + BlockingEdgeHolds in GateIsHolding): neither closed nor
+//     pinned, or, for conditional-blocks only, closed without a failure
+//     reason;
 //   - the SUBJECT clause, from unmarkAllBlockedSQL, which forces is_blocked=0
 //     for a closed or pinned subject whatever its edges say (SubjectCanBeGated).
 //
@@ -79,7 +81,7 @@ func GateIsHolding(depType DependencyType, target *Issue) bool {
 	if !IsGateEdge(depType) {
 		return false
 	}
-	return target.Status != StatusClosed && target.Status != StatusPinned
+	return BlockingEdgeHolds(depType, target.Status, target.CloseReason)
 }
 
 // GatesHolding selects, from subject's hydrated dependencies, the gates that

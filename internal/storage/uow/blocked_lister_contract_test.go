@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
+	"github.com/steveyegge/beads/internal/storage/domain"
 )
 
 // TestBlockedListerContract runs the BlockedLister contract against the
@@ -27,5 +28,11 @@ func TestBlockedListerContract(t *testing.T) {
 		CreateIssue:   kit.CreateIssue,
 		CreateWisp:    kit.CreateWisp,
 		AddDependency: kit.AddDependency,
+		CloseIssue: func(ctx context.Context, id, reason, actor string) error {
+			return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
+				_, err := uw.IssueUseCase().CloseIssue(ctx, id, domain.CloseIssueParams{Reason: reason}, actor)
+				return "close " + id, err
+			})
+		},
 	})
 }

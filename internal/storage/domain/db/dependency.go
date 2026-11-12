@@ -234,7 +234,7 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 		return fmt.Errorf("db: DependencySQLRepository.Insert: affected set: %w", aerr)
 	}
 	if dep.Type == types.DepBlocks || dep.Type == types.DepConditionalBlocks {
-		if err := r.markDirectBlockedSource(ctx, dep.IssueID, srcIsWisp, dep.DependsOnID, targetCol); err != nil {
+		if err := r.markDirectBlockedSource(ctx, dep.IssueID, srcIsWisp, dep.DependsOnID, dep.Type, targetCol); err != nil {
 			return fmt.Errorf("db: DependencySQLRepository.Insert: mark is_blocked: %w", err)
 		}
 		affectedIssues, affectedWisps = issueops.RemoveSourceFromAffected(dep.IssueID, srcIsWisp, affectedIssues, affectedWisps)
@@ -332,9 +332,10 @@ func (r *dependencySQLRepositoryImpl) ValidateBlockingHierarchy(ctx context.Cont
 // markDirectBlockedSource mirrors issueops.markDirectBlockingDependencySourceInTx:
 // is_blocked is derived state, and ready-work queries filter on it directly
 // (is_blocked = 0), so a blocking edge insert must set it on the source row
-// while the target is still open. updated_at is pinned because recomputing
-// derived state is not an edit.
-func (r *dependencySQLRepositoryImpl) markDirectBlockedSource(ctx context.Context, source string, srcIsWisp bool, target, targetCol string) error {
+// while the target still holds it (open, or, for conditional-blocks, closed
+// without a failure reason: issueops.BlockingTargetHoldsSQL). updated_at is
+// pinned because recomputing derived state is not an edit.
+func (r *dependencySQLRepositoryImpl) markDirectBlockedSource(ctx context.Context, source string, srcIsWisp bool, target string, depType types.DependencyType, targetCol string) error {
 	sourceTable := "issues"
 	if srcIsWisp {
 		sourceTable = "wisps"
@@ -350,7 +351,7 @@ func (r *dependencySQLRepositoryImpl) markDirectBlockedSource(ctx context.Contex
 		return nil
 	}
 
-	//nolint:gosec // G201: sourceTable/targetTable are hardcoded constants
+	//nolint:gosec // G201: sourceTable/targetTable are hardcoded constants; the target predicate is generated from constants
 	_, err := r.runner.ExecContext(ctx, fmt.Sprintf(`
 		UPDATE %s s SET s.is_blocked = 1, s.updated_at = s.updated_at
 		WHERE s.id = ?
@@ -359,9 +360,11 @@ func (r *dependencySQLRepositoryImpl) markDirectBlockedSource(ctx context.Contex
 		  AND EXISTS (
 		    SELECT 1 FROM %s t
 		    WHERE t.id = ?
-		      AND t.status <> 'closed' AND t.status <> 'pinned'
+		      AND %s
 		  )
-	`, sourceTable, targetTable), source, target)
+	`, sourceTable, targetTable,
+		issueops.BlockingTargetHoldsSQL(issueops.DepTypeLiteralSQL(depType), "t.status", "t.close_reason")),
+		source, target)
 	return err
 }
 

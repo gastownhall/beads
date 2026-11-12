@@ -26,6 +26,7 @@ func TestMoleculeContract(t *testing.T) {
 		{"BatchCloseAutoClosesTheRootOnce", conformance.RunMoleculeBatchCloseAutoClosesTheRootOnce},
 		{"RefusedRootKeepsTheStepClose", conformance.RunMoleculeRefusedRootKeepsTheStepClose},
 		{"GuardedRootKeepsTheStepClose", conformance.RunMoleculeGuardedRootKeepsTheStepClose},
+		{"ConditionalEdgesFollowTheCloseReason", conformance.RunMoleculeConditionalEdgesFollowTheCloseReason},
 		{"StepperClaimsTheNextReadyStepForTheActor", conformance.RunMoleculeStepperClaimsTheNextReadyStepForTheActor},
 		{"StepperNeverTakesAStepAnotherActorHolds", conformance.RunMoleculeStepperNeverTakesAStepAnotherActorHolds},
 		{"StepperAnswersCompleteAndOutsideAMolecule", conformance.RunMoleculeStepperAnswersCompleteAndOutsideAMolecule},

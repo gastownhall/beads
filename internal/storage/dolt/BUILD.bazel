@@ -178,6 +178,7 @@ go_test(
         "commit_dirty_wisp_test.go",
         "compact_test.go",
         "concurrent_test.go",
+        "conditional_blocks_test.go",
         "conflicts_integration_test.go",
         "conflicts_unwrap_test.go",
         "conformance_test.go",

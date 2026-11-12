@@ -486,3 +486,348 @@ func TestIsBlocked_ClosedDependerNotRemarkedActive(t *testing.T) {
 		t.Fatal("closed depender should be is_blocked = 0")
 	}
 }
+
+// TestIsBlocked_ConditionalBlocksHoldsOnSuccessClose pins conditional-blocks'
+// documented rule, B runs only if A fails: closing the precondition releases
+// the fallback (stored bit 0, in ready work) exactly when the close reason is
+// a failure (types.IsFailureClose); any other reason, the default "Closed" and
+// the empty reason included, keeps it blocked.
+func TestIsBlocked_ConditionalBlocksHoldsOnSuccessClose(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	cases := []struct {
+		name, reason string
+	}{
+		{"success", "completed successfully"},
+		{"default", "Closed"},
+		{"empty", ""},
+		{"failure", "failed: upstream returned 500"},
+		{"wontfix", "Won't fix"},
+	}
+	for i, tc := range cases {
+		a := "isb-cbs-a" + string(rune('0'+i))
+		b := "isb-cbs-b" + string(rune('0'+i))
+		createPerm(t, ctx, store, a)
+		createPerm(t, ctx, store, b)
+		if err := store.AddDependency(ctx, &types.Dependency{
+			IssueID: b, DependsOnID: a, Type: types.DepConditionalBlocks,
+		}, "tester"); err != nil {
+			t.Fatalf("%s: AddDependency: %v", tc.name, err)
+		}
+		if err := store.CloseIssue(ctx, a, tc.reason, "tester", ""); err != nil {
+			t.Fatalf("%s: CloseIssue: %v", tc.name, err)
+		}
+
+		wantBlocked := !types.IsFailureClose(tc.reason)
+		if got := getIsBlocked(t, ctx, store, "issues", b); got != wantBlocked {
+			t.Errorf("%s: close reason %q: stored is_blocked(%s) = %v, want %v", tc.name, tc.reason, b, got, wantBlocked)
+		}
+		ready, err := store.GetReadyWork(ctx, types.WorkFilter{Status: types.StatusOpen})
+		if err != nil {
+			t.Fatalf("%s: GetReadyWork: %v", tc.name, err)
+		}
+		inReady := false
+		for _, issue := range ready {
+			if issue.ID == b {
+				inReady = true
+			}
+		}
+		if inReady == wantBlocked {
+			t.Errorf("%s: close reason %q: %s in ready work = %v, want %v", tc.name, tc.reason, b, inReady, !wantBlocked)
+		}
+	}
+
+	// Compatibility control: an ordinary blocks edge releases on any close.
+	createPerm(t, ctx, store, "isb-cbs-plain-a")
+	createPerm(t, ctx, store, "isb-cbs-plain-b")
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID: "isb-cbs-plain-b", DependsOnID: "isb-cbs-plain-a", Type: types.DepBlocks,
+	}, "tester"); err != nil {
+		t.Fatalf("AddDependency blocks: %v", err)
+	}
+	if err := store.CloseIssue(ctx, "isb-cbs-plain-a", "completed successfully", "tester", ""); err != nil {
+		t.Fatalf("CloseIssue plain: %v", err)
+	}
+	if getIsBlocked(t, ctx, store, "issues", "isb-cbs-plain-b") {
+		t.Error("ordinary blocks dependent should be released by a success close")
+	}
+}
+
+// TestIsBlocked_ConditionalBlocksWispRoutes runs the conditional-blocks close
+// rule through every source/target combination that contains a wisp: the
+// fallback B is released (stored bit 0, in ready work) only when A closes with
+// a failure reason.
+func TestIsBlocked_ConditionalBlocksWispRoutes(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	type route struct {
+		name               string
+		sourceWisp, tgtWsp bool
+	}
+	routes := []route{
+		{"issue-to-wisp", false, true},
+		{"wisp-to-issue", true, false},
+		{"wisp-to-wisp", true, true},
+	}
+	reasons := []string{"completed successfully", "aborted by operator"}
+	for ri, r := range routes {
+		for oi, reason := range reasons {
+			a := "isb-cbw-a" + string(rune('0'+ri)) + string(rune('0'+oi))
+			b := "isb-cbw-b" + string(rune('0'+ri)) + string(rune('0'+oi))
+			if r.tgtWsp {
+				createWisp(t, ctx, store, a)
+			} else {
+				createPerm(t, ctx, store, a)
+			}
+			table := "issues"
+			if r.sourceWisp {
+				createWisp(t, ctx, store, b)
+				table = "wisps"
+			} else {
+				createPerm(t, ctx, store, b)
+			}
+			if err := store.AddDependency(ctx, &types.Dependency{
+				IssueID: b, DependsOnID: a, Type: types.DepConditionalBlocks,
+			}, "tester"); err != nil {
+				t.Fatalf("%s: AddDependency: %v", r.name, err)
+			}
+			if !getIsBlocked(t, ctx, store, table, b) {
+				t.Fatalf("%s: %s should be blocked while %s is open", r.name, b, a)
+			}
+			if err := store.CloseIssue(ctx, a, reason, "tester", ""); err != nil {
+				t.Fatalf("%s: CloseIssue: %v", r.name, err)
+			}
+
+			wantBlocked := !types.IsFailureClose(reason)
+			if got := getIsBlocked(t, ctx, store, table, b); got != wantBlocked {
+				t.Errorf("%s: close reason %q: stored is_blocked(%s) = %v, want %v", r.name, reason, b, got, wantBlocked)
+			}
+			ready, err := store.GetReadyWork(ctx, types.WorkFilter{Status: types.StatusOpen, IncludeEphemeral: true})
+			if err != nil {
+				t.Fatalf("%s: GetReadyWork: %v", r.name, err)
+			}
+			inReady := false
+			for _, issue := range ready {
+				if issue.ID == b {
+					inReady = true
+				}
+			}
+			if inReady == wantBlocked {
+				t.Errorf("%s: close reason %q: %s in ready work = %v, want %v", r.name, reason, b, inReady, !wantBlocked)
+			}
+		}
+	}
+}
+
+// TestIsBlocked_ConditionalBlocksInsertOntoClosedTarget inserts a
+// conditional-blocks edge onto an already-closed precondition through the
+// store's direct-insertion writer, on every issue/wisp route: the source is
+// blocked exactly when the target's close reason is not a failure.
+func TestIsBlocked_ConditionalBlocksInsertOntoClosedTarget(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	routes := []struct {
+		name                   string
+		sourceWisp, targetWisp bool
+	}{
+		{"issue-to-issue", false, false},
+		{"issue-to-wisp", false, true},
+		{"wisp-to-issue", true, false},
+		{"wisp-to-wisp", true, true},
+	}
+	reasons := []string{"completed successfully", "rejected by review"}
+	for ri, r := range routes {
+		for oi, reason := range reasons {
+			suffix := string(rune('0'+ri)) + string(rune('0'+oi))
+			a, b := "isb-cbi-a"+suffix, "isb-cbi-b"+suffix
+			if r.targetWisp {
+				createWisp(t, ctx, store, a)
+			} else {
+				createPerm(t, ctx, store, a)
+			}
+			if err := store.CloseIssue(ctx, a, reason, "tester", ""); err != nil {
+				t.Fatalf("%s: CloseIssue: %v", r.name, err)
+			}
+			table := "issues"
+			if r.sourceWisp {
+				createWisp(t, ctx, store, b)
+				table = "wisps"
+			} else {
+				createPerm(t, ctx, store, b)
+			}
+			if err := store.AddDependency(ctx, &types.Dependency{
+				IssueID: b, DependsOnID: a, Type: types.DepConditionalBlocks,
+			}, "tester"); err != nil {
+				t.Fatalf("%s: AddDependency: %v", r.name, err)
+			}
+			want := !types.IsFailureClose(reason)
+			if got := getIsBlocked(t, ctx, store, table, b); got != want {
+				t.Errorf("%s: insert onto target closed %q: stored is_blocked(%s) = %v, want %v", r.name, reason, b, got, want)
+			}
+		}
+	}
+
+	// Cross-session precheck: inside one transaction, an issue source and a
+	// wisp target live on different sessions, so the writer gates on the
+	// target row read through readDepTargetForPrecheck.
+	for oi, reason := range reasons {
+		suffix := string(rune('0' + oi))
+		a, b := "isb-cbi-tx-a"+suffix, "isb-cbi-tx-b"+suffix
+		if err := store.RunInTransaction(ctx, "conditional insert "+suffix, func(tx storage.Transaction) error {
+			if err := tx.CreateIssue(ctx, &types.Issue{ID: a, Title: "wisp " + a, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: true}, "tester"); err != nil {
+				return err
+			}
+			if err := tx.CloseIssue(ctx, a, reason, "tester", ""); err != nil {
+				return err
+			}
+			if err := tx.CreateIssue(ctx, &types.Issue{ID: b, Title: "perm " + b, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "tester"); err != nil {
+				return err
+			}
+			return tx.AddDependency(ctx, &types.Dependency{IssueID: b, DependsOnID: a, Type: types.DepConditionalBlocks}, "tester")
+		}); err != nil {
+			t.Fatalf("tx route %q: %v", reason, err)
+		}
+		want := !types.IsFailureClose(reason)
+		if got := getIsBlocked(t, ctx, store, "issues", b); got != want {
+			t.Errorf("tx issue-to-wisp: insert onto target closed %q: stored is_blocked(%s) = %v, want %v", reason, b, got, want)
+		}
+	}
+}
+
+// TestIsBlocked_ConditionalBlocksReasonEditFlipsDependent edits only a closed
+// target's close reason through UpdateIssue: crossing between a non-failure
+// and a failure reason flips the conditional dependent's stored bit in the
+// same write, without touching the dependent's updated_at.
+func TestIsBlocked_ConditionalBlocksReasonEditFlipsDependent(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	updatedAt := func(id string) string {
+		t.Helper()
+		var s string
+		if err := store.db.QueryRowContext(ctx, "SELECT CAST(updated_at AS CHAR) FROM issues WHERE id = ?", id).Scan(&s); err != nil {
+			t.Fatalf("read updated_at for %s: %v", id, err)
+		}
+		return s
+	}
+
+	for i, targetWisp := range []bool{false, true} {
+		suffix := string(rune('0' + i))
+		a, b := "isb-cbr-a"+suffix, "isb-cbr-b"+suffix
+		if targetWisp {
+			createWisp(t, ctx, store, a)
+		} else {
+			createPerm(t, ctx, store, a)
+		}
+		createPerm(t, ctx, store, b)
+		if err := store.AddDependency(ctx, &types.Dependency{
+			IssueID: b, DependsOnID: a, Type: types.DepConditionalBlocks,
+		}, "tester"); err != nil {
+			t.Fatalf("AddDependency: %v", err)
+		}
+		if err := store.CloseIssue(ctx, a, "completed successfully", "tester", ""); err != nil {
+			t.Fatalf("CloseIssue: %v", err)
+		}
+		if !getIsBlocked(t, ctx, store, "issues", b) {
+			t.Fatalf("target wisp=%v: success close should leave %s blocked", targetWisp, b)
+		}
+		before := updatedAt(b)
+
+		steps := []struct {
+			reason      string
+			wantBlocked bool
+		}{
+			{"failed downstream", false},
+			{"done after all", true},
+		}
+		for _, step := range steps {
+			if err := store.UpdateIssue(ctx, a, map[string]interface{}{"close_reason": step.reason}, "tester"); err != nil {
+				t.Fatalf("UpdateIssue close_reason %q: %v", step.reason, err)
+			}
+			if got := getIsBlocked(t, ctx, store, "issues", b); got != step.wantBlocked {
+				t.Errorf("target wisp=%v: reason edited to %q: stored is_blocked(%s) = %v, want %v", targetWisp, step.reason, b, got, step.wantBlocked)
+			}
+			if after := updatedAt(b); after != before {
+				t.Errorf("target wisp=%v: reason edit to %q touched %s updated_at: %s -> %s", targetWisp, step.reason, b, before, after)
+			}
+		}
+	}
+}
+
+// TestIsBlocked_ConditionalBlocksSuccessHoldIsListedButClosable pins the
+// read surfaces for a dependent held only by a success-closed conditional
+// target: the blocked listing names the target as the blocker, the blocked
+// reads report blocked with no live blockers (the target is closed, so it
+// cannot be worked), and a manual close without force goes through.
+func TestIsBlocked_ConditionalBlocksSuccessHoldIsListedButClosable(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	a, b := "isb-cbl-a", "isb-cbl-b"
+	createPerm(t, ctx, store, a)
+	createPerm(t, ctx, store, b)
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID: b, DependsOnID: a, Type: types.DepConditionalBlocks,
+	}, "tester"); err != nil {
+		t.Fatalf("AddDependency: %v", err)
+	}
+	if err := store.CloseIssue(ctx, a, "completed successfully", "tester", ""); err != nil {
+		t.Fatalf("CloseIssue A: %v", err)
+	}
+
+	listed, err := store.GetBlockedIssues(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetBlockedIssues: %v", err)
+	}
+	var entry *types.BlockedIssue
+	for _, item := range listed {
+		if item.ID == b {
+			entry = item
+		}
+	}
+	if entry == nil {
+		t.Fatalf("blocked listing omits %s held by success-closed conditional %s", b, a)
+	}
+	if len(entry.BlockedBy) != 1 || entry.BlockedBy[0] != a || entry.BlockedByCount != 1 {
+		t.Errorf("blocked listing names %v (count %d) as %s's blockers, want [%s]", entry.BlockedBy, entry.BlockedByCount, b, a)
+	}
+
+	blocked, blockers, err := store.IsBlocked(ctx, b)
+	if err != nil {
+		t.Fatalf("IsBlocked: %v", err)
+	}
+	if !blocked || len(blockers) != 0 {
+		t.Errorf("IsBlocked(%s) = %v, %v; want true with no live blockers", b, blocked, blockers)
+	}
+	batch, err := store.IsBlockedBatch(ctx, []string{b})
+	if err != nil {
+		t.Fatalf("IsBlockedBatch: %v", err)
+	}
+	if !batch[b] {
+		t.Errorf("IsBlockedBatch(%s) = false, want true", b)
+	}
+	withBlockers, err := store.IsBlockedWithBlockersBatch(ctx, []string{b})
+	if err != nil {
+		t.Fatalf("IsBlockedWithBlockersBatch: %v", err)
+	}
+	if got, ok := withBlockers[b]; !ok || len(got) != 0 {
+		t.Errorf("IsBlockedWithBlockersBatch(%s) = %v (present %v), want present with no live blockers", b, got, ok)
+	}
+
+	if _, err := store.CloseIssueChecked(ctx, b, "tester", storage.CloseIssueOptions{Reason: "done by hand"}); err != nil {
+		t.Fatalf("manual close of %s without force: %v", b, err)
+	}
+}
