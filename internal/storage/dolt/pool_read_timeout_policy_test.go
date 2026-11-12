@@ -282,6 +282,47 @@ func TestPooledReadTimeoutPolicy(t *testing.T) {
 		})
 	})
 
+	t.Run("fast stale-connection failure then success keeps retry recovery", func(t *testing.T) {
+		// A fast invalid connection is the ordinary stale-pool case (the
+		// server reaped an idle pooled connection): it has not run anywhere
+		// near the read deadline, so it is not classified, and the existing
+		// retry recovery — not the new no-replay policy — answers it.
+		helpers := []struct {
+			name string
+			run  func(*DoltStore) error
+		}{
+			{"withReadTx", func(s *DoltStore) error {
+				return s.withReadTx(ctx, func(tx *sql.Tx) error { return scanOneRow(ctx, tx) })
+			}},
+			{"queryContext", func(s *DoltStore) error {
+				rows, err := s.queryContext(ctx, "SELECT 1")
+				if err != nil {
+					return err
+				}
+				return rows.Close()
+			}},
+			{"queryRowContext", func(s *DoltStore) error {
+				return s.queryRowContext(ctx, func(row *sql.Row) error {
+					var v int64
+					return row.Scan(&v)
+				}, "SELECT 1")
+			}},
+		}
+		for _, h := range helpers {
+			t.Run(h.name, func(t *testing.T) {
+				store, drv := newPoolReadPolicyStore(
+					[]poolReadPolicyStep{{err: mysql.ErrInvalidConn}, {value: 1}},
+					policyTestDeadline)
+				if err := h.run(store); err != nil {
+					t.Fatalf("existing retry recovery should have answered the fast failure: %v", err)
+				}
+				if queries, _ := drv.counts(); queries != 2 {
+					t.Errorf("queries = %d; a fast stale-connection failure must be retried (fail once, succeed once), not classified", queries)
+				}
+			})
+		}
+	})
+
 	t.Run("retained network read timeout is confirmed even without elapsed time", func(t *testing.T) {
 		store, _ := newPoolReadPolicyStore(
 			[]poolReadPolicyStep{{err: netReadTimeout()}},
