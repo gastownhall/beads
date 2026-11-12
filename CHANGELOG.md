@@ -1248,6 +1248,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`.beads/.gitignore` now covers the per-machine files bd writes inside
+  `.beads/`** (#8318, PR #8365 by @zichen0116). `dolt-backup.json` (holds the
+  absolute backup destination), `dolt-backup-state.json` (last backup sync
+  state), `dolt-config.log` (the `bd dolt set` audit log, whose entries record
+  the absolute `.beads` path) and `.auto-import-issues.jsonl` (this clone's
+  auto-import stamp) are all machine-local, but no pattern ignored them, so a
+  `git add .` committed them and published local paths. New workspaces ignore
+  all four from `bd init`; on workspaces created earlier, `bd doctor` warns
+  "Outdated .beads/.gitignore" until `bd doctor --fix` appends the four lines,
+  and `--fix` also untracks copies that were already committed
+  (`git rm --cached`).
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
