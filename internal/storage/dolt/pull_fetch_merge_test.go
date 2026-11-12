@@ -2,9 +2,13 @@ package dolt
 
 import (
 	"context"
+	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -125,4 +129,165 @@ func toDriverValues(args []any) []driver.Value {
 		out[i] = a
 	}
 	return out
+}
+
+// cliPullStore is a server-mode store whose CLI pull route runs the dolt on
+// PATH in its served database directory, on a sqlmock pool that answers the
+// route's remote listings with origin at remoteURL.
+func cliPullStore(t *testing.T, mock sqlmock.Sqlmock, db *sql.DB, beadsDir, remoteURL string) *DoltStore {
+	t.Helper()
+	mock.MatchExpectationsInOrder(false)
+	for i := 0; i < 8; i++ {
+		mock.ExpectQuery("SELECT name, url, params FROM dolt_remotes").
+			WillReturnRows(sqlmock.NewRows([]string{"name", "url", "params"}).AddRow("origin", remoteURL, nil))
+	}
+	store := &DoltStore{
+		serverMode: true,
+		beadsDir:   beadsDir,
+		dbPath:     filepath.Join(beadsDir, "dolt"),
+		database:   "beads",
+		remote:     "origin",
+		branch:     "main",
+		db:         db,
+		cfg:        &Config{ServerHost: "127.0.0.1", ServerPort: 3310, BeadsDir: beadsDir},
+		// The SQL route's own connection fails at once, so a pull that left
+		// the CLI route would fail instead of passing.
+		connStr: unroutableConnStr,
+	}
+	serveDoltDatabase(t, store, store.dbPath, 3310)
+	if err := os.MkdirAll(filepath.Join(store.CLIDir(), ".dolt", "noms"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return store
+}
+
+// expectCLIMerge expects the SQL merge the CLI pull route runs after its
+// fetch, answering with a row whose conflicts flag is conflicts.
+func expectCLIMerge(mock sqlmock.Sqlmock, ref string, conflicts int) {
+	mock.ExpectExec("SET @@dolt_force_transaction_commit = 1").WillReturnResult(sqlmock.NewResult(0, 0))
+	message := doltMergeSucceededMessage
+	if conflicts != 0 {
+		message = "conflicts found"
+	}
+	mock.ExpectQuery("CALL DOLT_MERGE(?)").WithArgs(ref).
+		WillReturnRows(sqlmock.NewRows([]string{"hash", "fast_forward", "conflicts", "message"}).
+			AddRow("abc", 0, conflicts, message))
+	mock.ExpectExec("SET @@dolt_force_transaction_commit = 0").WillReturnResult(sqlmock.NewResult(0, 0))
+}
+
+// expectCleanCLIResolve expects finishCLIPull's resolver to find nothing to
+// resolve or repair.
+func expectCleanCLIResolve(mock sqlmock.Sqlmock) {
+	mock.ExpectExec("SET @@dolt_allow_commit_conflicts = 1").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT `table`, num_conflicts FROM dolt_conflicts").
+		WillReturnRows(sqlmock.NewRows([]string{"table", "num_conflicts"}))
+	mock.ExpectQuery("SELECT `table` FROM dolt_constraint_violations WHERE num_violations > 0").
+		WillReturnRows(sqlmock.NewRows([]string{"table"}))
+	mock.ExpectRollback()
+	mock.ExpectExec("SET @@dolt_allow_commit_conflicts = 0").WillReturnResult(sqlmock.NewResult(0, 0))
+}
+
+func readCallLog(t *testing.T, callLog string) string {
+	t.Helper()
+	raw, err := os.ReadFile(callLog)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(raw))
+}
+
+// TestCLIPullRoutesFetchThenMergeTrackingRef pins the CLI pull routes
+// (bd-e2q8zs): a `dolt pull` subprocess forwards to the server's DOLT_PULL,
+// whose merge message copies the stored remote URL, credentials included. The
+// git-protocol and credential routes now run `dolt fetch [--user u] <remote>
+// <branch>` with the same credential environment, then merge
+// <remote>/<branch> themselves with CALL DOLT_MERGE.
+func TestCLIPullRoutesFetchThenMergeTrackingRef(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fake")
+	}
+	clearPredicateEnv(t)
+	clearCloudAuthEnv(t)
+
+	for _, tc := range []struct {
+		name      string
+		remoteURL string
+		user      string
+		password  string
+		// portVar names the store's port, which sends a credential route to
+		// the CLI only for bd's own server.
+		portVar   bool
+		workspace func(*testing.T) string
+		wantCall  string
+	}{
+		{
+			name:      "git-protocol",
+			remoteURL: "git+ssh://git@example.com/org/repo.git",
+			workspace: unmanagedWorkspace,
+			wantCall:  "|fetch origin main|DOLT_REMOTE_PASSWORD=",
+		},
+		{
+			name:      "credential",
+			remoteURL: "https://doltremoteapi.dolthub.com/org/repo",
+			user:      "user",
+			password:  "client-secret",
+			portVar:   true,
+			workspace: func(t *testing.T) string { return doltManagedWorkspace(t, 3310) },
+			wantCall:  "|fetch --user user origin main|DOLT_REMOTE_PASSWORD=client-secret",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.portVar {
+				t.Setenv("BEADS_DOLT_SERVER_PORT", "3310")
+			}
+			callLog := fakeDoltOnPath(t, tc.remoteURL)
+			db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+			if err != nil {
+				t.Fatalf("sqlmock: %v", err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			store := cliPullStore(t, mock, db, tc.workspace(t), tc.remoteURL)
+			store.remoteUser = tc.user
+			store.remotePassword = tc.password
+			expectCLIMerge(mock, "origin/main", 0)
+			expectCleanCLIResolve(mock)
+
+			if _, err := store.pullTransportReporting(context.Background(), "origin"); err != nil {
+				t.Fatalf("pull: %v", err)
+			}
+
+			calls := readCallLog(t, callLog)
+			cliDir, err := filepath.EvalSymlinks(store.CLIDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(calls, cliDir+tc.wantCall) {
+				t.Errorf("dolt calls %q lack the fetch %q", calls, cliDir+tc.wantCall)
+			}
+			if strings.Contains(calls, "|pull ") {
+				t.Errorf("the pull ran `dolt pull`, whose merge message records the remote URL:\n%s", calls)
+			}
+			if err := expectationsMetBesideSpareListings(db, mock); err != nil {
+				t.Errorf("the CLI route did not merge origin/main itself: %v", err)
+			}
+		})
+	}
+}
+
+// expectationsMetBesideSpareListings is mock.ExpectationsWereMet for a pool
+// that cliPullStore over-provisioned with remote listings: it consumes the
+// listings the route did not need, then reports any other unmet expectation.
+func expectationsMetBesideSpareListings(db *sql.DB, mock sqlmock.Sqlmock) error {
+	for i := 0; i < 8; i++ {
+		if mock.ExpectationsWereMet() == nil {
+			return nil
+		}
+		rows, err := db.Query("SELECT name, url, params FROM dolt_remotes")
+		if err != nil {
+			break
+		}
+		_ = rows.Close()
+	}
+	return mock.ExpectationsWereMet()
 }

@@ -5348,18 +5348,62 @@ func cliTransferError(op, remote string, transferCtx context.Context, out []byte
 	return fmt.Errorf("%s failed: %s: %w", op, detail, err)
 }
 
-// doltCLIPull shells out to `dolt pull` from the database directory.
-// Used for git-protocol remotes where CALL DOLT_PULL times out through the SQL connection.
-// If creds is non-nil, credentials are set on the subprocess environment only.
+// doltCLIPull pulls remote's s.branch on the CLI route: it shells out to
+// `dolt fetch <remote> <branch>` from the database directory, then merges the
+// tracking ref <remote>/<branch> in SQL (mergeTrackingRefAfterCLIFetch).
+// Used for git-protocol remotes, where a transfer through the SQL connection
+// times out, and for the credential and cloud-auth routes. If creds is
+// non-nil, credentials are set on the subprocess environment only.
+//
+// Never `dolt pull`: it forwards to the server's DOLT_PULL, whose merge
+// message copies the stored remote URL, credentials included (bd-e2q8zs).
+// `dolt fetch` forwards to DOLT_FETCH, which advances the server's tracking
+// ref, and the network transfer still runs under the CLI timeout.
 func (s *DoltStore) doltCLIPull(ctx context.Context, remote string, creds *remoteCredentials) error {
-	cmd, transferCtx, cancel, err := s.prepareDoltCLITransfer(ctx, remote, creds, "pull", remote, s.branch)
+	cmd, transferCtx, cancel, err := s.prepareDoltCLITransfer(ctx, remote, creds, "fetch", remote, s.branch)
 	if err != nil {
 		return err
 	}
 	defer cancel()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return cliTransferError("dolt pull", remote, transferCtx, out, err)
+		return cliTransferError("dolt fetch", remote, transferCtx, out, err)
+	}
+	return s.mergeTrackingRefAfterCLIFetch(ctx, remote+"/"+s.branch)
+}
+
+// mergeTrackingRefAfterCLIFetch merges ref, a tracking ref a CLI fetch just
+// advanced, into the store's branch with CALL DOLT_MERGE, whose default
+// message names only the ref. It runs on a pinned pool connection, which is
+// on the branch finishCLIPull's resolver settles, with
+// @@dolt_force_transaction_commit set as `dolt pull` sets it, so a conflicted
+// merge stays in the working set for the resolver and the operator, as a CLI
+// pull's did. The variable is session-scoped: it is reset before the
+// connection goes back to the pool, and a connection whose reset fails is
+// discarded rather than returned dirty.
+func (s *DoltStore) mergeTrackingRefAfterCLIFetch(ctx context.Context, ref string) error {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("merge %s: acquire connection: %w", ref, err)
+	}
+	varSet := false
+	defer func() {
+		if varSet {
+			if _, err := conn.ExecContext(ctx, "SET @@dolt_force_transaction_commit = 0"); err != nil {
+				_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+			}
+		}
+		_ = conn.Close()
+	}()
+	if _, err := conn.ExecContext(ctx, "SET @@dolt_force_transaction_commit = 1"); err != nil {
+		return fmt.Errorf("merge %s: set dolt_force_transaction_commit: %w", ref, err)
+	}
+	varSet = true
+	_, mergeErr := schema.CallReturningRow(ctx, conn, "CALL DOLT_MERGE(?)", ref)
+	// As in fetchAndMergeTrackingRefInTx: the ordinary no-op arrives as a
+	// message, and only the squash path's "Already up to date." as an error.
+	if mergeErr != nil && !strings.Contains(mergeErr.Error(), "up to date") {
+		return fmt.Errorf("merge %s: %w", ref, mergeErr)
 	}
 	return nil
 }

@@ -289,7 +289,7 @@ func TestCLITransferErrorRedactsRemoteCredentials(t *testing.T) {
 	// federation peer push/pull/fetch, whose op names the peer argument.
 	for name, op := range map[string]string{
 		"push":       "dolt push",
-		"pull":       "dolt pull",
+		"fetch":      "dolt fetch",
 		"peer push":  "push to peer " + tokenRemote,
 		"peer pull":  "pull from peer " + tokenRemote,
 		"peer fetch": "fetch from peer " + tokenRemote,
