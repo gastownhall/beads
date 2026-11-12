@@ -2630,3 +2630,59 @@ func TestGitRemoteResolvedConflictPullStillLands(t *testing.T) {
 		t.Errorf("fresh session after the clean pull: is_merging=%v, %d conflict table(s); want a settled store", isMerging, tables)
 	}
 }
+
+// TestGitRemoteStrategyMergeRecoversAfterDeclinedPull is AC-7: after a
+// declined pull is settled (merge aborted, branch restored), the documented
+// server-mode recovery — bd vc merge <remote>/<branch> --strategy theirs on
+// the refs the pull fetched — applies the remote edit and concludes. On the
+// bug the declined pull left its merge open, so this recovery could not
+// even start: every route into the merge failed on the wedged working set.
+func TestGitRemoteStrategyMergeRecoversAfterDeclinedPull(t *testing.T) {
+	store, setup, cleanup := setupEmbeddedGitRemote(t)
+	defer cleanup()
+	requireGitProtocolRemote(t, store, "origin")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	preHead := seedGitRemoteDeclinedNotesConflict(t, store, setup, "gh7839-ac7")
+
+	// The declined pull settles: merge aborted, branch restored, conflict
+	// reported (pinned end-to-end by the AC-1 test; here it is the setup).
+	if err := cliPullAndSettle(t, store, "origin"); err == nil {
+		t.Fatal("the declined pull reported success; the fixture is broken")
+	}
+
+	// The precondition the recovery needs: a settled store. The merge behind
+	// the declined conflict is aborted and no conflicts remain — on the bug
+	// this is exactly what was left open, and the recovery below ran over a
+	// wedged working set instead of a clean branch.
+	if isMerging, tables := freshSessionMergeState(t, store); isMerging || tables != 0 {
+		t.Fatalf("the declined pull left the store wedged: is_merging=%v, %d conflict table(s)", isMerging, tables)
+	}
+
+	// The documented server-mode recovery, on the refs the pull fetched.
+	if _, err := store.MergeWithStrategy(ctx, "origin/main", "theirs"); err != nil {
+		t.Fatalf("bd vc merge origin/main --strategy theirs after a declined pull failed: %v", err)
+	}
+
+	// The remote edit is applied and the merge concluded.
+	var notes string
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT notes FROM issues WHERE id = 'gh7839-ac7'").Scan(&notes); err != nil {
+		t.Fatalf("read merged notes: %v", err)
+	}
+	if notes != "from B" {
+		t.Errorf("notes = %q after the strategy merge; want the remote %q (theirs)", notes, "from B")
+	}
+	if isMerging, tables := freshSessionMergeState(t, store); isMerging || tables != 0 {
+		t.Errorf("fresh session after the strategy merge: is_merging=%v, %d conflict table(s); want the merge concluded", isMerging, tables)
+	}
+	var head string
+	if err := store.db.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&head); err != nil {
+		t.Fatalf("read post-merge HEAD: %v", err)
+	}
+	if head == preHead {
+		t.Errorf("HEAD still %s after the strategy merge; want the merge concluded with a new commit", head)
+	}
+}

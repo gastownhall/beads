@@ -856,11 +856,18 @@ Name a remote to pull from it instead of the default: 'bd dolt pull <remote>'
 or 'bd dolt pull --remote <remote>'. The remote must already exist (see
 'bd dolt remote add').
 
+A pull whose conflict the auto-resolver declines is settled before it
+returns: the merge is aborted, the branch and working set are restored to
+the pre-pull state, and the conflicts are reported for manual resolution
+(GH#7839) — the store keeps accepting writes.
+
 Use --strategy ours|theirs to resolve conflicts the auto-resolver declines
 (e.g. both sides edited the same issue since the last sync) instead of
 aborting the pull for manual resolution. Embedded storage only (#4992); on
-server-mode/sql-server storage use 'bd conflicts resolve' after a pull that
-reports conflicts.`,
+server-mode/sql-server storage, recover from a declined pull with
+'bd vc merge <remote>/<branch> --strategy ours|theirs' on the refs the pull
+fetched, or resolve the reported conflicts per row with 'bd conflicts
+resolve'.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if isDoltLocalOnly() {
 			if jsonOutput {
@@ -894,7 +901,7 @@ reports conflicts.`,
 			var ok bool
 			puller, ok = storage.UnwrapStore(st).(storage.StrategicPuller)
 			if !ok {
-				return HandleError("storage backend %T does not support --strategy pulls (#4992): only embedded storage does; on server-mode/sql-server storage, resolve conflicts with 'bd conflicts resolve' or the raw dolt CLI", storage.UnwrapStore(st))
+				return HandleError("storage backend %T does not support --strategy pulls (#4992): only embedded storage does; on server-mode/sql-server storage, recover from a declined pull with 'bd vc merge <remote>/<branch> --strategy ours|theirs' on the refs the pull fetched, or resolve per row with 'bd conflicts resolve'", storage.UnwrapStore(st))
 			}
 		}
 		if remote != "" {

@@ -5624,6 +5624,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for it, so upgrade every bd that shares the workspace, or run `bd dolt stop`
   before going back to an older one.
 
+### Fixed
+
+- **A declined pull conflict no longer wedges every later write.** A CLI-route
+  `bd dolt pull` (git-protocol, credentialed or cloud-auth remotes) whose
+  conflict the auto-resolver declined left its merge open in
+  `dolt_merge_status`, after which every bd write and every later pull failed
+  with Dolt's "Merge conflict detected" autocommit rejection until an operator
+  intervened. The pull now settles its result: a declined conflict's merge is
+  aborted with `DOLT_MERGE('--abort')`, the branch and working set are
+  verified back at the pre-pull state, and the conflicts are reported as a
+  `MergeConflictsError` — the contract the SQL route always had. A merge the
+  pull cannot attribute to itself (another session's work) is never aborted,
+  a pull over a merge that is already open is refused before staging or any
+  transport with the inspect/abort/resolve remedy, and federation keeps these
+  settlement failures as errors instead of converting them to
+  conflicts-as-data. Server-mode users recover from a declined pull with
+  `bd vc merge <remote>/<branch> --strategy ours|theirs` on the refs the pull
+  fetched, or per row with `bd conflicts resolve`. (#7839)
+
 ## [1.3.4] - 2026-11-04
 
 First stable release of the 1.3.4 patch line. It ships the same code as

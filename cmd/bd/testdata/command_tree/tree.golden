@@ -2019,11 +2019,18 @@ bd dolt pull
     | or 'bd dolt pull --remote <remote>'. The remote must already exist (see
     | 'bd dolt remote add').
     |
+    | A pull whose conflict the auto-resolver declines is settled before it
+    | returns: the merge is aborted, the branch and working set are restored to
+    | the pre-pull state, and the conflicts are reported for manual resolution
+    | (GH#7839) — the store keeps accepting writes.
+    |
     | Use --strategy ours|theirs to resolve conflicts the auto-resolver declines
     | (e.g. both sides edited the same issue since the last sync) instead of
     | aborting the pull for manual resolution. Embedded storage only (#4992); on
-    | server-mode/sql-server storage use 'bd conflicts resolve' after a pull that
-    | reports conflicts.
+    | server-mode/sql-server storage, recover from a declined pull with
+    | 'bd vc merge <remote>/<branch> --strategy ours|theirs' on the refs the pull
+    | fetched, or resolve the reported conflicts per row with 'bd conflicts
+    | resolve'.
   flag --remote type=string default="" usage="Pull from a specific named remote instead of the default"
   flag --strategy type=string default="" usage="Conflict resolution strategy for conflicts the auto-resolver declines: 'ours' or 'theirs' (embedded storage only, #4992)"
 
