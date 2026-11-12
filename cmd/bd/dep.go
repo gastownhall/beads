@@ -17,22 +17,31 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
-	storeissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/issueops"
 )
 
 // markExternalJSON adds the GH#5784 feedback marker to a dep-add success
-// payload: `external: true` when the edge's target classification selected
-// external storage — an explicit external: reference, or a bare ID whose
-// prefix belongs to another rig — and no marker for a local edge. The marker
-// is classification's answer, not the command's guess, so every add form
-// reports the same edge the same way.
+// payload: `external: true` for an edge whose target lives outside this rig —
+// an explicit external: reference, or a bare ID whose prefix belongs to
+// another rig (crossRigDepTarget) — and no marker for a local edge. Every add
+// form asks the same predicate, so they report the same edge the same way.
 func markExternalJSON(out map[string]interface{}, sourceID, targetID string) {
-	if storeissueops.IsExternalDepTarget(sourceID, targetID) {
+	if IsExternalRef(targetID) || crossRigDepTarget(sourceID, targetID) {
 		out["external"] = true
 	}
+}
+
+// crossRigDepTarget reports whether targetID is a bare issue ID whose prefix
+// differs from sourceID's: the cross-rig shape the readiness policy resolves
+// through routes when the source's own database does not hold it (GH#5784).
+// The feedback spells the prefix rule here rather than calling storage's
+// write-side classifier: open PRs #8300 and #8338 replace that classifier
+// with one that also asks whether this database holds the target, and the
+// feedback must not depend on which of them lands first.
+func crossRigDepTarget(sourceID, targetID string) bool {
+	return !IsExternalRef(targetID) && types.ExtractPrefix(sourceID) != types.ExtractPrefix(targetID)
 }
 
 // printCrossRigBlockingSemantics is the human counterpart of
@@ -50,7 +59,7 @@ func printCrossRigBlockingSemantics(sourceID, targetID string, dt types.Dependen
 	if dt != types.DepBlocks && dt != types.DepConditionalBlocks {
 		return
 	}
-	if !storeissueops.IsExternalDepTarget(sourceID, targetID) {
+	if !crossRigDepTarget(sourceID, targetID) {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "note: this rig's database stores the edge; bd ready checks %s live through .beads/routes.jsonl and holds %s while the target is open or unreadable\n", //nolint:gosec // G705: stderr, not a browser context

@@ -191,8 +191,10 @@ an ID routed to such a rig and stores it without a warning.
 
 ### How a cross-rig ID blocks
 
-A bare cross-rig `blocks` or `conditional-blocks` edge gates its dependent the
-way a local blocker does. The edge lives only in the dependent's database; bd
+A bare cross-rig `blocks` or `conditional-blocks` edge gates the dependent
+itself the way a local blocker does; unlike a local blocker, it does not hold
+the dependent's children, which stay ready. The edge lives only in the
+dependent's database; bd
 reads the target's status each time it asks whether the dependent is ready,
 so nothing needs syncing when the other rig closes or reopens it:
 
@@ -207,7 +209,11 @@ bd-abc  ──blocks──▶  gt-123   (stored in bd's database)
   blocks. A target this database holds itself is read here first.
 - **Routed from the dependent's workspace.** The lookup follows the
   `routes.jsonl` of the workspace bd runs in, the same routes `bd show <id>`
-  follows there. A target with no route there stays blocking.
+  follows there. A rig with no `routes.jsonl` of its own follows its
+  orchestrator's, `$GT_ROOT/.beads/routes.jsonl`, with paths taken from that
+  town root: Gas Town writes routes only there, so `bd ready` in a rig reads a
+  sibling rig's target the way the town root does. A target with no route
+  stays blocking.
 - **Unreadable stays blocking.** A target with no route, a missing database,
   an ID the routed rig does not hold, or a failed read keeps the dependent
   out of `bd ready`. The command still succeeds and prints one warning per
@@ -240,8 +246,12 @@ Against `bd serve`, a server that applies the cross-rig policy itself
 advertises `policy.cross_rig_dependencies` and answers directly. Against an
 older server that applies only the `external:` capability policy, the newer
 client adds the cross-rig check to `bd ready`, `bd blocked`, and `bd dep tree`
-itself. It refuses `bd close --claim-next`, which it cannot check atomically,
-with an unsupported-operation error before anything is closed: close without
+itself, with bounded reads: a ready page is judged by the edges its rows
+already carry, `bd close` and `bd update --claim` read the one issue's edges,
+and only `bd blocked` pages the open issues. The "of N" ready count is that
+server's own and can include a dependent a cross-rig blocker holds. The client
+refuses `bd close --claim-next`, which it cannot check atomically, with an
+unsupported-operation error before anything is closed: close without
 `--claim-next`, then run `bd ready --claim`. An older client does not enforce
 cross-rig IDs.
 

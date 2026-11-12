@@ -393,18 +393,16 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 
 // lookupPrefixRoute finds the routes.jsonl route for id and returns it with
 // the target rig's .beads directory, resolving from the LAUNCHING command's
-// beads directory. Cross-rig dependency resolution needs the same lookup from
-// another workspace's directory (the cross-rig resolver, GH#5784 §208), so the
-// body lives in lookupPrefixRouteFrom and this is its command-directory shell.
+// beads directory; lookupPrefixRouteFrom holds the body. The cross-rig
+// dependency resolver does not share it: it reads its routes through
+// crossRigRoutes (cross_rig_resolver.go), which also falls back to the town
+// root's routes ($GT_ROOT) when the workspace has none.
 func lookupPrefixRoute(id string) (*prefixRoute, string, error) {
 	return lookupPrefixRouteFrom(id, resolveCommandBeadsDir(dbPath))
 }
 
 // lookupPrefixRouteFrom is lookupPrefixRoute resolving routes from the given
-// beads directory: the source workspace whose routes.jsonl governs, not the
-// launching command's own (GH#5784 §208 — a dependency of a town-root workspace
-// resolves through that workspace's routes, not the directory the process
-// happens to have been launched from).
+// beads directory.
 //
 // Having no route to follow (no prefix in the ID, no beads directory, no
 // routes, no matching route, or a route back to the current database) wraps

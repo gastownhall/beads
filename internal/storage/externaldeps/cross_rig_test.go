@@ -3,6 +3,7 @@ package externaldeps
 import (
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -283,6 +284,152 @@ func TestCrossRigOpenBlockerRefusesClaimAndClose(t *testing.T) {
 	}
 }
 
+// GH#5784: a closed source's cross-rig edge is no candidate, and a guard
+// about one issue reads only that issue's own edges. aa-9 is closed and names
+// zz-9; live aa-5 names zz-5; neither target can be read. A ready read
+// resolves zz-5 alone (holding aa-5), and claiming or closing unrelated aa-2
+// resolves nothing at all, so no foreign rig is opened and nothing warns
+// "remains blocking" for an edge that cannot change the answer. On the direct
+// store, bd serve's unit-of-work arm and the served store of an old-token
+// server, whose blocked listing pages the live listing (a closed row the
+// server returns anyway is dropped).
+func TestCrossRigClosedSourceAndUnrelatedGuardsResolveNothing(t *testing.T) {
+	closedEdge := map[string][]*types.Dependency{"aa-9": {externalDep("aa-9", "zz-9", types.DepBlocks)}}
+	liveEdge := map[string][]*types.Dependency{"aa-5": {externalDep("aa-5", "zz-5", types.DepBlocks)}}
+	allEdges := func() map[string][]*types.Dependency {
+		edges := maps.Clone(closedEdge)
+		maps.Copy(edges, liveEdge)
+		return edges
+	}
+	closedSource := func() *types.Issue {
+		closed := issue("aa-9")
+		closed.Status = types.StatusClosed
+		return closed
+	}
+	unreadable := func() *fakeIssueResolver {
+		return &fakeIssueResolver{unavailable: map[string]string{"zz-5": "no route for prefix zz", "zz-9": "no route for prefix zz"}}
+	}
+	readZZ5Only := func(t *testing.T, what string, resolver *fakeIssueResolver) {
+		t.Helper()
+		for _, call := range resolver.calls {
+			if !slices.Equal(call, []string{"zz-5"}) {
+				t.Fatalf("%s: resolver calls %v, want zz-5 alone (aa-9 is closed)", what, resolver.calls)
+			}
+		}
+		if len(resolver.calls) == 0 {
+			t.Fatalf("%s: zz-5 was never resolved, want it to hold aa-5", what)
+		}
+		resolver.calls = nil
+	}
+	readNothing := func(t *testing.T, what string, resolver *fakeIssueResolver) {
+		t.Helper()
+		if len(resolver.calls) != 0 {
+			t.Fatalf("%s: resolver calls %v, want none for unrelated aa-2", what, resolver.calls)
+		}
+	}
+
+	t.Run("direct", func(t *testing.T) {
+		resolver := unreadable()
+		raw := &fakeStore{
+			lifecycle: &fakeLifecycle{}, batch: &fakeBatchCloser{},
+			ready: []*types.Issue{issue("aa-2"), issue("aa-5")}, others: []*types.Issue{closedSource()}, deps: allEdges(),
+		}
+		store := crossRigStore(raw, resolver)
+		ready, err := store.GetReadyWork(t.Context(), types.WorkFilter{})
+		if err != nil || !slices.Equal(issueIDs(ready), []string{"aa-2"}) {
+			t.Fatalf("GetReadyWork = %v, %v; want [aa-2]", issueIDs(ready), err)
+		}
+		readZZ5Only(t, "direct ready", resolver)
+		lc, err := store.IssueLifecycle()
+		if err != nil {
+			t.Fatalf("IssueLifecycle: %v", err)
+		}
+		if _, err := lc.Update(t.Context(), publicops.UpdateRequest{IssueID: "aa-2", Claim: true}); err != nil {
+			t.Fatalf("claim aa-2: %v", err)
+		}
+		if _, err := lc.Close(t.Context(), publicops.CloseRequest{IssueID: "aa-2"}); err != nil {
+			t.Fatalf("close aa-2: %v", err)
+		}
+		closer, err := store.BatchCloser()
+		if err != nil {
+			t.Fatalf("BatchCloser: %v", err)
+		}
+		if _, err := closer.CloseBatch(t.Context(), publicops.CloseBatchRequest{Actor: "tester", Items: closeItems("aa-2")}); err != nil {
+			t.Fatalf("batch close aa-2: %v", err)
+		}
+		readNothing(t, "direct guards", resolver)
+	})
+
+	t.Run("serve unit of work", func(t *testing.T) {
+		resolver := unreadable()
+		// The narrow read is the SQL one, which keeps live sources only, so
+		// aa-9's edge is a stored record alone.
+		uw := crossRigProvider(t, &fakeUOW{
+			issues: &fakeIssueUseCase{ready: []*types.Issue{issue("aa-2"), issue("aa-5")}},
+			deps:   &fakeDependencyUseCase{external: liveEdge, records: closedEdge},
+		}, resolver)
+		ready, err := uw.IssueUseCase().GetReadyWork(t.Context(), types.WorkFilter{})
+		if err != nil || !slices.Equal(issueIDs(ready.Items), []string{"aa-2"}) {
+			t.Fatalf("GetReadyWork = %v, %v; want [aa-2]", issueIDs(ready.Items), err)
+		}
+		readZZ5Only(t, "served ready", resolver)
+		if _, err := uw.IssueUseCase().ApplyUpdate(t.Context(), "aa-2", domain.UpdateSpec{Claim: true}, "tester"); err != nil {
+			t.Fatalf("served claim aa-2: %v", err)
+		}
+		if _, err := uw.IssueUseCase().CloseIssueChecked(t.Context(), "aa-2", domain.CloseIssueParams{}, "tester", false); err != nil {
+			t.Fatalf("served close aa-2: %v", err)
+		}
+		readNothing(t, "served guards", resolver)
+	})
+
+	t.Run("old-token served store", func(t *testing.T) {
+		resolver := unreadable()
+		raw := newRemoteStore(issue("aa-2"), issue("aa-5"))
+		raw.enforced, raw.capabilityOnly = true, true
+		raw.others = []*types.Issue{closedSource()}
+		raw.deps = allEdges()
+		store := New(crossRigServedRemote{crossRigRemote{raw}}, func(ProjectName) (string, bool) { return "", false }, nil,
+			WithIssueResolver(resolver.resolve))
+		ctx := t.Context()
+		reader, err := store.IssueReader()
+		if err != nil {
+			t.Fatalf("IssueReader: %v", err)
+		}
+		page, err := reader.Ready(ctx, publicops.ReadyRequest{})
+		if err != nil || len(page.Items) != 1 || page.Items[0].ID != "aa-2" {
+			t.Fatalf("Ready = %+v, %v; want aa-2 alone", page.Items, err)
+		}
+		readZZ5Only(t, "old-token ready", resolver)
+		lister, err := store.BlockedLister()
+		if err != nil {
+			t.Fatalf("BlockedLister: %v", err)
+		}
+		listed, err := lister.ListBlocked(ctx, publicops.BlockedRequest{})
+		if err != nil || len(listed.Items) != 1 || listed.Items[0].ID != "aa-5" {
+			t.Fatalf("ListBlocked = %+v, %v; want aa-5 alone", listed.Items, err)
+		}
+		readZZ5Only(t, "old-token blocked listing", resolver)
+		claimer, err := store.IssueClaimer()
+		if err != nil {
+			t.Fatalf("IssueClaimer: %v", err)
+		}
+		if _, err := claimer.Claim(ctx, publicops.ClaimRequest{Actor: "worker", IssueID: "aa-2"}); err != nil {
+			t.Fatalf("claim aa-2: %v", err)
+		}
+		closer, err := store.BatchCloser()
+		if err != nil {
+			t.Fatalf("BatchCloser: %v", err)
+		}
+		if _, err := closer.CloseBatch(ctx, publicops.CloseBatchRequest{Actor: "worker", Items: closeItems("aa-2")}); err != nil {
+			t.Fatalf("batch close aa-2: %v", err)
+		}
+		readNothing(t, "old-token guards", resolver)
+		if raw.scans != 0 {
+			t.Fatalf("workspace-wide dependency walks = %d, want none", raw.scans)
+		}
+	})
+}
+
 // treeDependencyUseCase answers the walk with tree; the rest is the fake.
 type treeDependencyUseCase struct {
 	*fakeDependencyUseCase
@@ -297,7 +444,9 @@ func (u *treeDependencyUseCase) GetDependencyTree(context.Context, string, domai
 // reads a differently prefixed source row through first.
 type crossRigRemote struct{ *remoteStore }
 
-func (r crossRigRemote) BatchGetter() (publicops.BatchGetter, error) { return crossRigBatchGetter{r.remoteStore}, nil }
+func (r crossRigRemote) BatchGetter() (publicops.BatchGetter, error) {
+	return crossRigBatchGetter{r.remoteStore}, nil
+}
 
 type crossRigBatchGetter struct{ s *remoteStore }
 
@@ -324,9 +473,14 @@ func TestCrossRigTreeShowsMarkedForeignLeavesOfEveryType(t *testing.T) {
 		"bb-1": {externalDep("bb-1", "bb-9", types.DepBlocks)},
 	}
 	newResolver := func() *fakeIssueResolver {
+		// bb-1's row carries fields its leaf must not show (foreignLeafIssue):
+		// a served tree answers every client the token admits.
+		bb1 := foreignIssue("bb-1", types.StatusOpen)
+		bb1.Description, bb1.Notes, bb1.Assignee = "foreign description", "foreign notes", "foreign-agent"
+		bb1.Metadata = []byte(`{"secret":true}`)
 		return &fakeIssueResolver{
 			issues: map[string]*types.Issue{
-				"bb-1": foreignIssue("bb-1", types.StatusOpen),
+				"bb-1": bb1,
 				"bb-2": foreignIssue("bb-2", types.StatusClosed),
 				"bb-3": foreignIssue("bb-3", types.StatusInProgress),
 			},
@@ -352,6 +506,9 @@ func TestCrossRigTreeShowsMarkedForeignLeavesOfEveryType(t *testing.T) {
 			}
 			if strings.HasPrefix(node.ID, "aa-") && node.External {
 				t.Errorf("local node %s marked External", node.ID)
+			}
+			if node.ID == "bb-1" && (node.Description != "" || node.Notes != "" || node.Assignee != "" || len(node.Metadata) != 0) {
+				t.Errorf("foreign leaf bb-1 = %+v, want only the row's display fields", node.Issue)
 			}
 		}
 		want := []string{
@@ -517,8 +674,69 @@ func TestCrossRigOldTokenServerGetsClientComposedReads(t *testing.T) {
 		t.Fatalf("tree = %+v, want aa-1 with the open foreign blocker bb-1 as its leaf", tree.Nodes)
 	}
 
-	if want := []string{"Ready", "ListBlocked", "AnnotateBlocking", "WalkTree"}; !slices.Equal(raw.served, want) {
+	// The request count against an old-token server: each read is the
+	// server's own request plus, for the blocked listing, one page of the
+	// live listing (its rows carry their edges), and an edge read only for
+	// the rows a per-issue question names. Nothing walks every issue and edge
+	// in the workspace.
+	if want := []string{"Ready", "ListBlocked", "List", "AnnotateBlocking", "WalkTree"}; !slices.Equal(raw.served, want) {
 		t.Fatalf("served calls = %v, want %v", raw.served, want)
+	}
+	if want := []int{2, 2, 1}; !slices.Equal(raw.edgeReads, want) || raw.scans != 0 {
+		t.Fatalf("edge reads = %v (anchors each), workspace walks = %d; want %v and none", raw.edgeReads, raw.scans, want)
+	}
+}
+
+// TestCrossRigOldTokenTreeLeavesCapabilityLeavesToTheServer: a server that
+// advertises policy.external_dependencies but not the cross-rig token hangs
+// the external: leaves itself, so the client hangs only the bare cross-rig
+// ones. It resolves no capability ref (its locator is never asked, so a client
+// without that external_projects entry opens and warns nothing) and keeps the
+// server's leaf as it came.
+func TestCrossRigOldTokenTreeLeavesCapabilityLeavesToTheServer(t *testing.T) {
+	raw := newRemoteStore()
+	raw.enforced, raw.capabilityOnly = true, true
+	raw.deps["aa-1"] = []*types.Dependency{
+		externalDep("aa-1", paymentsRef, types.DepBlocks),
+		externalDep("aa-1", "bb-1", types.DepBlocks),
+	}
+	raw.tree = []*types.TreeNode{
+		{Issue: *issue("aa-1")},
+		{
+			Issue: types.Issue{ID: paymentsRef, Title: "✓ payments", Status: types.StatusClosed, IssueType: types.TypeTask},
+			Depth: 1, ParentID: "aa-1", EdgeFromParent: types.DepBlocks,
+		},
+	}
+	resolver := &fakeIssueResolver{issues: map[string]*types.Issue{"bb-1": foreignIssue("bb-1", types.StatusOpen)}}
+	var located []ProjectName
+	store := New(crossRigRemote{raw}, func(project ProjectName) (string, bool) {
+		located = append(located, project)
+		return "", false
+	}, func(context.Context, string) (storage.DoltStorage, error) {
+		t.Error("the tree opened an external project")
+		return nil, errors.New("unexpected open")
+	}, WithIssueResolver(resolver.resolve))
+	walker, err := store.TreeWalker()
+	if err != nil {
+		t.Fatalf("TreeWalker: %v", err)
+	}
+
+	result, err := walker.WalkTree(t.Context(), publicops.WalkTreeRequest{RootID: "aa-1", MaxDepth: 10})
+	if err != nil {
+		t.Fatalf("WalkTree: %v", err)
+	}
+	var got []string
+	for _, node := range result.Nodes {
+		got = append(got, node.ID+" "+node.Title)
+	}
+	if want := []string{"aa-1 aa-1", paymentsRef + " ✓ payments", "bb-1 foreign bb-1"}; !slices.Equal(got, want) {
+		t.Fatalf("tree = %v, want the server's capability leaf as it came and the client's foreign leaf", got)
+	}
+	if len(located) != 0 {
+		t.Fatalf("located external projects %v, want none: the server applies capability refs", located)
+	}
+	if want := [][]string{{"bb-1"}}; !slices.EqualFunc(resolver.calls, want, slices.Equal[[]string]) {
+		t.Fatalf("resolver calls = %v, want %v", resolver.calls, want)
 	}
 }
 

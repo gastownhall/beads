@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/steveyegge/beads/internal/storage/externaldeps"
-	storeissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/issueops"
@@ -15,12 +14,19 @@ import (
 // anchor's own workspace (a prefix-routed result's .beads directory), so a
 // bare cross-rig target resolves through the DEPENDENT workspace's routes the
 // same way the readiness policy does; empty falls back to the launching
-// command's workspace.
+// command's workspace. When no route leads to another workspace
+// (crossRigRoutesFollowable) no foreign row is possible, and the nil resolver
+// spares the view its edge read: `bd show` of an issue with an external: ref
+// costs no request for a row it could never show.
 var crossRigPresentationResolver = func(beadsDir string) externaldeps.IssueResolver {
-	if beadsDir == "" {
-		return crossRigIssueResolver(crossRigRoutesDir)
+	dir := beadsDir
+	if dir == "" {
+		dir = crossRigRoutesDir()
 	}
-	return crossRigIssueResolver(func() string { return beadsDir })
+	if !crossRigRoutesFollowable(dir) {
+		return nil
+	}
+	return crossRigIssueResolver(func() string { return dir })
 }
 
 // foreignDependencyRows returns one view-only row per stored outgoing edge of
@@ -53,7 +59,7 @@ func foreignDependencyRows(ctx context.Context, reader issueops.EdgeReader, anch
 			continue
 		}
 		target := dep.DependsOnID
-		if _, ok := known[target]; ok || IsExternalRef(target) || !storeissueops.IsExternalDepTarget(dep.IssueID, target) {
+		if _, ok := known[target]; ok || !crossRigDepTarget(dep.IssueID, target) {
 			continue
 		}
 		edges = append(edges, dep)

@@ -36,13 +36,23 @@ import (
 //     hands the request to the inner role UNTOUCHED: no client validation, no
 //     edge reads, and claim-next stays the server's atomic operation;
 //   - only against a server that does not advertise it (an older bd serve, or
-//     another implementation) does the policy run here, client-side. Ready reads and the
-//     ready claim exclude externally blocked sources, which needs the
-//     workspace-wide blocker set (loadBlockingState). Every per-issue question
-//     — may this issue be claimed or closed, what blocks these listed rows,
-//     which external leaves hang off this tree — reads only the edges of the
-//     issues it names, through the inner EdgeReader, instead of walking every
-//     edge in the workspace.
+//     another implementation) does the policy run here, client-side — and
+//     only for the reference kinds that server leaves to its clients
+//     (clientKinds: a server that advertises policy.external_dependencies but
+//     not policy.cross_rig_dependencies leaves the bare cross-rig ids). Ready
+//     reads and the ready claim judge the rows the server returned by those
+//     rows' own edges, which a ready row carries (remoteRowBlockers), so a
+//     page with nothing externally blocked costs no request beyond the
+//     server's. Every per-issue question — may this issue be claimed or
+//     closed, what blocks these listed rows, which external leaves hang off
+//     this tree — reads only the edges of the issues it names, through the
+//     inner EdgeReader. The blocked listing, which must see every live
+//     source, pages the live listing (remoteLiveSourceEdges). The ready count
+//     does not (remoteReadyCounter): where only bare cross-rig ids are left to
+//     the client it is the server's own, which can count a source a cross-rig
+//     blocker holds, and otherwise a judged one-row ready read, whose total
+//     still counts a blocked row past the rows it read. Nothing here walks
+//     every edge in the workspace (GetAllDependencyRecords).
 
 // maxRemoteEdgeAnchors is how many anchors one EdgeReader read names. It is
 // the server's own per-request anchor bound (internal/httpapi's
@@ -60,32 +70,34 @@ func (s *Store) rolesAreRemote() bool {
 // external references block each of them. An issue with none is absent from
 // the map.
 //
-// A remote store reads only those issues' edges (one EdgeReader request per
-// maxRemoteEdgeAnchors ids); a local store keeps the indexed workspace-wide
-// read loadBlockingState already makes, which is cheaper there than a
-// per-issue one.
+// It reads only those issues' own edges and resolves only their references:
+// a remote store through the inner EdgeReader (one request per
+// maxRemoteEdgeAnchors ids), a local one through GetDependencyRecordsForIssues.
+// A guard about one issue (close, claim, a batch close) must not resolve
+// every other reference in the workspace: that opened every foreign rig any
+// cross-rig edge names, long-closed sources' included, and warned about each
+// unreachable one, on every close.
 func (s *Store) externalBlockersFor(ctx context.Context, ids []string) (map[string][]string, error) {
 	if len(ids) == 0 {
 		return nil, nil
-	}
-	if !s.rolesAreRemote() {
-		state, err := s.loadBlockingState(ctx)
-		if err != nil {
-			return nil, err
-		}
-		out := make(map[string][]string, len(ids))
-		for _, id := range ids {
-			if refs := state.refsByIssue[id]; len(refs) > 0 {
-				out[id] = refs
-			}
-		}
-		return out, nil
 	}
 	kinds, err := s.clientKinds(ctx)
 	if err != nil || kinds.none() {
 		return nil, err
 	}
-	deps, err := s.remoteEdges(ctx, ids)
+	return s.externalBlockersOf(ctx, kinds, ids)
+}
+
+// externalBlockersOf is externalBlockersFor under kinds the caller already
+// probed.
+func (s *Store) externalBlockersOf(ctx context.Context, kinds policyKinds, ids []string) (map[string][]string, error) {
+	var deps map[string][]*types.Dependency
+	var err error
+	if s.rolesAreRemote() {
+		deps, err = s.remoteEdges(ctx, ids)
+	} else {
+		deps, err = s.inner.GetDependencyRecordsForIssues(ctx, distinctAnchors(ids))
+	}
 	if err != nil {
 		return nil, fmt.Errorf("external dependencies: read blocking edges: %w", err)
 	}
@@ -96,11 +108,8 @@ func (s *Store) externalBlockersFor(ctx context.Context, ids []string) (map[stri
 	return state.refsByIssue, nil
 }
 
-// remoteEdges reads the stored outgoing edges of ids through the inner
-// EdgeReader, keyed by source id. Each id is named once, and an empty one not
-// at all: the http EdgeReader refuses an empty anchor, which would answer a
-// batch close's own validation question with an edge-read error.
-func (s *Store) remoteEdges(ctx context.Context, ids []string) (map[string][]*types.Dependency, error) {
+// distinctAnchors is ids with each id named once and no empty one.
+func distinctAnchors(ids []string) []string {
 	anchors := make([]string, 0, len(ids))
 	named := make(map[string]bool, len(ids))
 	for _, id := range ids {
@@ -109,6 +118,15 @@ func (s *Store) remoteEdges(ctx context.Context, ids []string) (map[string][]*ty
 			anchors = append(anchors, id)
 		}
 	}
+	return anchors
+}
+
+// remoteEdges reads the stored outgoing edges of ids through the inner
+// EdgeReader, keyed by source id. Each id is named once, and an empty one not
+// at all: the http EdgeReader refuses an empty anchor, which would answer a
+// batch close's own validation question with an edge-read error.
+func (s *Store) remoteEdges(ctx context.Context, ids []string) (map[string][]*types.Dependency, error) {
+	anchors := distinctAnchors(ids)
 	deps := make(map[string][]*types.Dependency, len(anchors))
 	if len(anchors) == 0 {
 		return deps, nil
@@ -132,22 +150,85 @@ func (s *Store) remoteEdges(ctx context.Context, ids []string) (map[string][]*ty
 	return deps, nil
 }
 
-// externallyBlockedIDs is the workspace-wide set of issues an unsatisfied
-// external reference blocks — what a ready read has to exclude. Empty when the
-// server already enforces the policy (loadBlockingState's own probe).
-func (s *Store) externallyBlockedIDs(ctx context.Context) (map[string]bool, error) {
-	state, err := s.loadBlockingState(ctx)
+// remoteRowEdges is the outgoing edges of rows a remote read returned, keyed
+// by row id. A ready or list row carries every edge its source stores (the
+// counts query's deps_json, on the wire since before either policy token), so
+// the rows themselves are the read: a row without edges has none. Only a row
+// that came back without them although its blocks count says it has some (a
+// server that projects them away) costs an EdgeReader read, of those rows only.
+func (s *Store) remoteRowEdges(ctx context.Context, rows []*types.IssueWithCounts) (map[string][]*types.Dependency, error) {
+	deps := make(map[string][]*types.Dependency)
+	var unread []string
+	for _, row := range rows {
+		if row == nil || row.Issue == nil || row.ID == "" {
+			continue
+		}
+		if len(row.Dependencies) == 0 {
+			if row.DependencyCount > 0 {
+				unread = append(unread, row.ID)
+			}
+			continue
+		}
+		for _, dep := range row.Dependencies {
+			if dep != nil {
+				deps[row.ID] = append(deps[row.ID], dep)
+			}
+		}
+	}
+	if len(unread) > 0 {
+		read, err := s.remoteEdges(ctx, unread)
+		if err != nil {
+			return nil, fmt.Errorf("external dependencies: read blocking edges: %w", err)
+		}
+		for id, edges := range read {
+			deps[id] = edges
+		}
+	}
+	return deps, nil
+}
+
+// remoteRowBlockers is externalBlockersFor for rows a remote read already
+// returned: which unsatisfied references block each row, read from the rows'
+// own edges (remoteRowEdges). Only a gating reference is resolved, so a row
+// whose edges are all local or non-blocking costs no request; a gating one
+// costs its resolution on every evaluation, satisfied or not (a cross-rig
+// target's read through its route).
+func (s *Store) remoteRowBlockers(ctx context.Context, kinds policyKinds, rows []*types.IssueWithCounts) (map[string][]string, error) {
+	deps, err := s.remoteRowEdges(ctx, rows)
+	if err != nil || len(deps) == 0 {
+		return nil, err
+	}
+	state, err := s.blockingStateFromRecords(ctx, deps, kinds)
 	if err != nil {
 		return nil, err
 	}
-	if len(state.refsByIssue) == 0 {
-		return nil, nil
+	return state.refsByIssue, nil
+}
+
+// remoteLiveSourceEdges is loadBlockingState's candidate read over a remote
+// store: the outgoing edges of every live issue, the only sources a ready,
+// blocked, count or claim evaluation can return. It pages the server's
+// default listing (closed and pinned rows excluded, ephemeral rows included),
+// whose rows carry their own edges, so it costs one request per page of live
+// issues and no edge read; GetAllDependencyRecords' walk crossed every closed
+// issue too and then read every edge in the workspace.
+func (s *Store) remoteLiveSourceEdges(ctx context.Context) (map[string][]*types.Dependency, error) {
+	reader, err := s.inner.IssueReader()
+	if err != nil {
+		return nil, err
 	}
-	blocked := make(map[string]bool, len(state.refsByIssue))
-	for id := range state.refsByIssue {
-		blocked[id] = true
+	unlimited := 0
+	page, err := reader.List(ctx, issueops.ListRequest{Limit: &unlimited, IncludeEphemeral: true})
+	if err != nil {
+		return nil, err
 	}
-	return blocked, nil
+	live := page.Items[:0:0]
+	for _, row := range page.Items {
+		if row != nil && row.Issue != nil && row.Status != types.StatusClosed && row.Status != types.StatusPinned {
+			live = append(live, row)
+		}
+	}
+	return s.remoteRowEdges(ctx, live)
 }
 
 // ── Reader ──────────────────────────────────────────────────────────
@@ -182,29 +263,78 @@ func (r *remoteReader) List(ctx context.Context, req issueops.ListRequest) (issu
 	return ready.List(ctx, req)
 }
 
-// Ready excludes externally blocked sources.
+// Ready excludes externally blocked sources, judged from the rows the server
+// returns rather than from a workspace-wide blocker set.
 //
-// No remote ready read can carry an id exclusion (L12), so the exclusion is
-// applied to a widened window instead: from offset 0, Offset+Limit plus one
-// row per blocked id. At most that many rows of the window can be dropped,
-// so the caller's page is exact whenever enough unblocked rows exist.
+// Against a server that applies the whole policy it is the server's read,
+// untouched. Otherwise each returned row is judged by its own edges, which a
+// ready row carries (remoteRowBlockers), so a page holding no externally
+// blocked row costs exactly the server's one request: the request budgets
+// Gas City's probes are pinned to hold against an older server too.
+//
+// No remote ready read can carry an id exclusion (L12), so a page that loses
+// rows is refilled from a widened window instead: from offset 0, Offset+Limit
+// plus one row per blocked id found so far, judging only rows not judged yet,
+// until a window turns up no newly blocked row (it then holds the caller's
+// page) or the ready set ends.
 func (r *remoteReader) Ready(ctx context.Context, req issueops.ReadyRequest) (issueops.IssuePage, error) {
-	blocked, err := r.policy.externallyBlockedIDs(ctx)
+	kinds, err := r.policy.clientKinds(ctx)
 	if err != nil {
 		return issueops.IssuePage{}, err
 	}
-	if len(blocked) == 0 {
+	if kinds.none() {
 		return r.inner.Ready(ctx, req)
 	}
 	limit := workapi.LimitOr(req.Limit, workapi.DefaultReadyLimit)
-	widened := req
-	widened.Offset = 0
-	widened.Limit = widenedLimit(req.Offset, limit, len(blocked))
-	page, err := r.inner.Ready(ctx, widened)
-	if err != nil {
-		return issueops.IssuePage{}, err
+	window := req
+	if req.Offset > 0 {
+		// The rows before the page decide where it starts, so they are read
+		// and judged too.
+		window.Offset = 0
+		window.Limit = widenedLimit(req.Offset, limit, 0)
 	}
-	return excludeAndPage(page, blocked, req.Offset, limit), nil
+	blocked := make(map[string]bool)
+	judged := make(map[string]bool)
+	for {
+		page, err := r.inner.Ready(ctx, window)
+		if err != nil {
+			return issueops.IssuePage{}, err
+		}
+		grew, err := r.policy.judgeNewRows(ctx, kinds, page.Items, judged, blocked)
+		if err != nil {
+			return issueops.IssuePage{}, err
+		}
+		if !grew || limit <= 0 || !page.HasMore {
+			return excludeAndPage(page, blocked, req.Offset, limit), nil
+		}
+		window.Offset = 0
+		window.Limit = widenedLimit(req.Offset, limit, len(blocked))
+	}
+}
+
+// judgeNewRows judges the rows of a remote read that no earlier read of the
+// same evaluation judged, by their own edges (remoteRowBlockers), marks them
+// judged, and adds the externally blocked ones to blocked. grew reports
+// whether any row joined blocked.
+func (s *Store) judgeNewRows(ctx context.Context, kinds policyKinds, rows []*types.IssueWithCounts, judged, blocked map[string]bool) (grew bool, err error) {
+	fresh := make([]*types.IssueWithCounts, 0, len(rows))
+	for _, row := range rows {
+		if row != nil && row.Issue != nil && !judged[row.ID] {
+			judged[row.ID] = true
+			fresh = append(fresh, row)
+		}
+	}
+	refs, err := s.remoteRowBlockers(ctx, kinds, fresh)
+	if err != nil {
+		return false, err
+	}
+	for id := range refs {
+		if !blocked[id] {
+			blocked[id] = true
+			grew = true
+		}
+	}
+	return grew, nil
 }
 
 // widenedLimit is the window a client-side exclusion reads: 0 (unlimited)
@@ -276,25 +406,30 @@ type remoteReadyClaimer struct {
 }
 
 // ClaimNext is the server's atomic claim-next, untouched, against a server
-// that applies the policy itself, and against any server while nothing is
-// externally blocked. Only an older server with externally blocked work
-// cannot be told what to skip, so there the choice is made here, among the
-// candidates a local claim-next selects (ClaimReadyIssueInTx): read the open,
-// unassigned ready rows in the requested order, skip the blocked ones, and
-// claim each remaining candidate by id until one is won. A candidate another
-// actor took in between is a lost race and the next one is tried. A full
-// window lost end to end is read once more: claimed rows leave the unassigned
-// set, so the second pass reads the candidates behind them. Only a claim that
+// that applies the policy itself. An older server cannot be told what to
+// skip, so there the choice is made here, among the candidates a local
+// claim-next selects (ClaimReadyIssueInTx): read the open, unassigned ready
+// rows in the requested order and judge each by its own edges
+// (remoteRowBlockers, no workspace-wide read).
+//
+// While nothing judged is externally blocked, the server's atomic claim-next
+// is still the one request that claims, and its pick is checked
+// (serverClaimNext): it re-reads the ready set when it claims, so it can take
+// a row this read never judged, which is then judged and given back if it is
+// blocked. Otherwise, and after such a release, the blocked rows are skipped
+// and each remaining candidate is claimed by id until one is won. A window
+// whose rows are all blocked is widened past them. A candidate another actor
+// took in between is a lost race and the next one is tried. A full window
+// lost end to end is read once more: claimed rows leave the unassigned set,
+// so the second pass reads the candidates behind them. Only a claim that
 // tried candidates and won none is an error.
 func (c *remoteReadyClaimer) ClaimNext(ctx context.Context, req issueops.ClaimNextRequest) (issueops.ClaimNextResult, error) {
 	ctx = storage.WithLivePolicyProbe(ctx)
-	// externallyBlockedIDs is empty against a server that applies the policy
-	// (loadBlockingState's probe), so that server's atomic claim answers.
-	blocked, err := c.policy.externallyBlockedIDs(ctx)
+	kinds, err := c.policy.clientKinds(ctx)
 	if err != nil {
 		return issueops.ClaimNextResult{}, err
 	}
-	if len(blocked) == 0 {
+	if kinds.none() {
 		return c.inner.ClaimNext(ctx, req)
 	}
 	if err := storageissueops.ValidateClaimNextRequest(req); err != nil {
@@ -310,18 +445,29 @@ func (c *remoteReadyClaimer) ClaimNext(ctx context.Context, req issueops.ClaimNe
 	}
 	// Unassigned whatever assignee the request names, as locally: a row
 	// another actor holds is never a candidate. Each window holds
-	// remoteClaimPage candidates past the blocked rows it may also hold.
+	// remoteClaimPage candidates past the blocked rows found so far.
 	filter := req.Filter
 	filter.Unassigned = true
 	filter.Assignee = ""
 	filter.Offset = 0
-	window := remoteClaimPage + len(blocked)
+	window := remoteClaimPage
 	filter.Limit = &window
-	lost := 0
-	for range 2 {
+	blocked := make(map[string]bool)
+	judged := make(map[string]bool)
+	lost, passes := 0, 0
+	for {
 		page, err := reader.Ready(ctx, filter)
 		if err != nil {
 			return issueops.ClaimNextResult{}, err
+		}
+		if _, err := c.policy.judgeNewRows(ctx, kinds, page.Items, judged, blocked); err != nil {
+			return issueops.ClaimNextResult{}, err
+		}
+		if len(blocked) == 0 {
+			res, kept, err := c.serverClaimNext(ctx, kinds, req, judged, blocked)
+			if err != nil || kept {
+				return res, err
+			}
 		}
 		claimed, tried, err := claimFirstCandidate(ctx, claimer, req.Actor, page.Items, blocked)
 		if err != nil {
@@ -330,20 +476,82 @@ func (c *remoteReadyClaimer) ClaimNext(ctx context.Context, req issueops.ClaimNe
 		if claimed != nil {
 			return issueops.ClaimNextResult{Claimed: claimed}, nil
 		}
+		full := len(page.Items) >= window
 		if tried == 0 {
-			// Nothing unblocked is left to take, whatever an earlier pass lost.
-			return issueops.ClaimNextResult{}, nil
+			if !full {
+				// Nothing unblocked is left to take, whatever an earlier pass lost.
+				return issueops.ClaimNextResult{}, nil
+			}
+			// Every row of a full window is blocked: read past them. The
+			// window grows with the blocked set, and the ready set is finite.
+			window = remoteClaimPage + len(blocked)
+			filter.Limit = &window
+			continue
 		}
 		lost += tried
-		if len(page.Items) < window {
+		passes++
+		if passes >= 2 || !full {
 			// A short window is the whole front: reading it again would only
 			// re-read the rows that just refused.
 			break
 		}
+		window = remoteClaimPage + len(blocked)
+		filter.Limit = &window
 	}
 	// There was work, and every candidate went to another actor first: an
 	// empty answer would say there is no work.
 	return issueops.ClaimNextResult{}, fmt.Errorf("claim ready: lost %d races for externally unblocked ready work; re-run to take the next one", lost)
+}
+
+// serverClaimNext claims through the server's atomic claim-next and checks
+// what it took. The server re-reads the ready set when it claims and applies
+// none of the client's policy, so it can take a row this evaluation never
+// judged: rivals took the judged rows first, or a row became ready ahead of
+// them. Such a row is judged now, by an edge read of it alone. kept reports
+// that res is the answer: no work, the server's error, a judged pick, or an
+// unjudged one that nothing external blocks. An unjudged pick that an
+// unsatisfied reference blocks, or that cannot be judged, is not kept: its
+// claim is released (failing closed), and a blocked one joins blocked so the
+// caller claims a judged candidate by id instead.
+func (c *remoteReadyClaimer) serverClaimNext(ctx context.Context, kinds policyKinds, req issueops.ClaimNextRequest, judged, blocked map[string]bool) (res issueops.ClaimNextResult, kept bool, err error) {
+	res, err = c.inner.ClaimNext(ctx, req)
+	if err != nil || res.Claimed == nil || res.Claimed.Issue == nil || judged[res.Claimed.ID] {
+		return res, true, err
+	}
+	id := res.Claimed.ID
+	refs, judgeErr := c.policy.externalBlockersOf(ctx, kinds, []string{id})
+	if judgeErr == nil && len(refs[id]) == 0 {
+		return res, true, nil
+	}
+	cause := judgeErr
+	if cause == nil {
+		cause = fmt.Errorf("%w: %s is blocked by %v", storage.ErrCloseBlocked, id, refs[id])
+	}
+	if err := c.release(ctx, req.Actor, res.Claimed); err != nil {
+		return issueops.ClaimNextResult{}, true, fmt.Errorf("claim ready: the server claimed %s, which this claim must not keep (%w), and releasing it failed: %w", id, cause, err)
+	}
+	if judgeErr != nil {
+		return issueops.ClaimNextResult{}, true, fmt.Errorf("claim ready: the server claimed %s, and judging it failed, so the claim was released: %w", id, judgeErr)
+	}
+	judged[id] = true
+	blocked[id] = true
+	return issueops.ClaimNextResult{}, false, nil
+}
+
+// release gives back the claim the server's claim-next made on claimed. It
+// names the holder that claim set (ExpectedAssignee), so it releases exactly
+// that claim and never one that has moved since.
+func (c *remoteReadyClaimer) release(ctx context.Context, actor string, claimed *issueops.IssueWithCounts) error {
+	releaser, err := c.policy.inner.Releaser()
+	if err != nil {
+		return err
+	}
+	req := issueops.ReleaseRequest{Actor: actor, IssueID: claimed.ID}
+	if holder := claimed.Assignee; holder != "" {
+		req.ExpectedAssignee = &holder
+	}
+	_, err = releaser.Release(ctx, req)
+	return err
 }
 
 // claimFirstCandidate claims, by id and in order, the first row that is not
@@ -390,14 +598,22 @@ type remoteReadyCounter struct {
 	policy   *Store
 }
 
-// CountReady is the server's count when the server applies the policy. Against
-// any other server it is the decorator's externally filtered count.
+// CountReady is the server's count when the server applies the policy, and
+// also when it applies all of it but the bare cross-rig ids (a server that
+// advertises policy.external_dependencies without
+// policy.cross_rig_dependencies). There an exact client-side count would have
+// to judge every ready row's edges, a read the size of the ready set, for a
+// number that only decorates the page; so the count, unlike the page, can
+// include a source an open cross-rig blocker holds. Against a server that
+// applies none of the policy it is the decorator's judged count
+// (judgedReadyCount): a one-row ready read whose total drops the blocked rows
+// that read judged, so a blocked row past it still counts.
 func (c *remoteReadyCounter) CountReady(ctx context.Context, req issueops.ReadyRequest) (issueops.ReadyCountResult, error) {
-	enforced, err := c.policy.serverEnforcesPolicy(ctx)
+	kinds, err := c.policy.clientKinds(ctx)
 	if err != nil {
 		return issueops.ReadyCountResult{}, err
 	}
-	if enforced {
+	if !kinds.capability {
 		return c.inner.CountReady(ctx, req)
 	}
 	return c.fallback.CountReady(ctx, req)
@@ -472,13 +688,16 @@ type remoteTreeWalker struct {
 }
 
 // WalkTree is the server's walk. For the plain down-tree request it also hangs
-// the synthetic external leaves the local walker shows — unless the server
-// enforces the external-dependency policy, whose own walker already does.
+// the external leaves the local walker shows, of the reference kinds the
+// server leaves to the client (clientKinds): the server's own walker hangs the
+// leaves of each kind it applies, so a server that applies them all is
+// answered as is, and an older one that applies only capability refs has its
+// external: leaves left alone, unresolved here.
 //
-// The probe only spares the edge reads: a leaf is display, not enforcement,
-// and appendTreeExternalReferences skips an edge the tree already holds. So a
-// probe that fails renders the leaves here rather than failing a walk the
-// server has already answered.
+// The probe only spares reads: a leaf is display, not enforcement, and
+// appendTreeExternalReferences skips an edge the tree already holds. So a
+// probe that fails renders every kind's leaves here rather than failing a walk
+// the server has already answered.
 func (t *remoteTreeWalker) WalkTree(ctx context.Context, req issueops.WalkTreeRequest) (issueops.TreeResult, error) {
 	result, err := t.inner.WalkTree(ctx, req)
 	if err != nil || len(result.Nodes) == 0 {
@@ -487,7 +706,11 @@ func (t *remoteTreeWalker) WalkTree(ctx context.Context, req issueops.WalkTreeRe
 	if (req.Direction != "" && req.Direction != issueops.TreeDown) || req.Status != "" || req.MaxRows != 0 {
 		return result, nil
 	}
-	if enforced, err := t.policy.serverEnforcesPolicy(ctx); err == nil && enforced {
+	kinds, err := t.policy.clientKinds(ctx)
+	if err != nil {
+		kinds = allKinds
+	}
+	if kinds.none() {
 		return result, nil
 	}
 	ids := make([]string, 0, len(result.Nodes))
@@ -500,7 +723,7 @@ func (t *remoteTreeWalker) WalkTree(ctx context.Context, req issueops.WalkTreeRe
 	if err != nil {
 		return issueops.TreeResult{}, fmt.Errorf("external dependencies: load tree edges: %w", err)
 	}
-	nodes, err := t.policy.appendTreeExternalReferences(ctx, result.Nodes, deps, req.MaxDepth)
+	nodes, err := t.policy.appendTreeExternalReferences(ctx, kinds, result.Nodes, deps, req.MaxDepth)
 	if err != nil {
 		return issueops.TreeResult{}, err
 	}

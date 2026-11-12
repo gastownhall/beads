@@ -3,6 +3,7 @@ package externaldeps
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -81,10 +82,12 @@ func (r *remoteFake) IsRemoteBackendStore() bool { return true }
 
 func (r *remoteFake) IssueReader() (issueops.Reader, error) { return r.reader, nil }
 
-// recordingReader serves a fixed ready set in order and records the limits it
-// was asked for, so the widened window is observable.
+// recordingReader serves a fixed ready set in order, each row carrying its
+// stored edges as a served ready row does, and records the limits it was
+// asked for, so the widened window is observable.
 type recordingReader struct {
 	ready  []string
+	deps   map[string][]*types.Dependency
 	limits []int
 	lists  int
 }
@@ -100,7 +103,11 @@ func (r *recordingReader) Ready(_ context.Context, req issueops.ReadyRequest) (i
 	if limit > 0 && len(ids) > limit {
 		ids, hasMore = ids[:limit], true
 	}
-	return pageOf(hasMore, ids...), nil
+	page := pageOf(hasMore, ids...)
+	for _, row := range page.Items {
+		row.Dependencies = r.deps[row.ID]
+	}
+	return page, nil
 }
 
 func (r *recordingReader) List(context.Context, issueops.ListRequest) (issueops.IssuePage, error) {
@@ -113,15 +120,13 @@ func (r *recordingReader) Get(context.Context, issueops.GetRequest) (*issueops.I
 }
 
 func newRemotePolicyStore(enforced bool) (*Store, *recordingReader) {
-	reader := &recordingReader{ready: []string{"be-x", "be-a", "be-b"}}
+	deps := map[string][]*types.Dependency{
+		"be-x": {externalDep("be-x", "external:remote:payments", types.DepBlocks)},
+	}
+	reader := &recordingReader{ready: []string{"be-x", "be-a", "be-b"}, deps: deps}
 	raw := &remoteFake{
-		fakeStore: &fakeStore{
-			enforced: enforced,
-			deps: map[string][]*types.Dependency{
-				"be-x": {externalDep("be-x", "external:remote:payments", types.DepBlocks)},
-			},
-		},
-		reader: reader,
+		fakeStore: &fakeStore{enforced: enforced, deps: deps},
+		reader:    reader,
 	}
 	store := New(raw, func(ProjectName) (string, bool) { return "", false }, nil)
 	store.warnings.project = nil
@@ -130,8 +135,9 @@ func newRemotePolicyStore(enforced bool) (*Store, *recordingReader) {
 
 // TestRemoteReaderReadyExcludesExternallyBlocked is the role-level half of
 // S6c's ready exclusion (bd ready itself reads through the legacy seam): the
-// reader the decorator hands out for a remote store drops the externally
-// blocked row from a widened window and still fills the page.
+// reader the decorator hands out for a remote store judges the page it read
+// by the rows' own edges, drops the externally blocked row, and fills the page
+// from one window widened past it.
 func TestRemoteReaderReadyExcludesExternallyBlocked(t *testing.T) {
 	store, reader := newRemotePolicyStore(false)
 	rd, err := store.IssueReader()
@@ -149,8 +155,8 @@ func TestRemoteReaderReadyExcludesExternallyBlocked(t *testing.T) {
 	if idsOf(page) != "be-a" || !page.HasMore {
 		t.Errorf("Ready(limit 1) = %q hasMore=%v, want \"be-a\" with more", idsOf(page), page.HasMore)
 	}
-	if len(reader.limits) != 1 || reader.limits[0] != 2 {
-		t.Errorf("inner ready limits = %v, want one read widened to 2", reader.limits)
+	if !slices.Equal(reader.limits, []int{1, 2}) {
+		t.Errorf("inner ready limits = %v, want the page as asked, then one read widened to 2", reader.limits)
 	}
 	if _, err := rd.List(t.Context(), issueops.ListRequest{}); err != nil || reader.lists != 1 {
 		t.Errorf("an ordinary List did not pass through: lists=%d err=%v", reader.lists, err)

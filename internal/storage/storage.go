@@ -1127,8 +1127,10 @@ type ReadyWorkCounter interface {
 
 // ExternalDependencyQueryStore returns the narrow set of out-of-store
 // blocking edges: those stored in depends_on_external (explicit external:
-// capability refs and bare cross-rig issue IDs) whose type can block. Policy decorators use this instead of scanning every graph
-// edge on each ready-work query.
+// capability refs and bare cross-rig issue IDs) whose type can block and whose
+// source is neither closed nor pinned. Policy decorators use this instead of
+// scanning every graph edge on each ready-work query; a guard about named
+// issues reads those issues' own edges instead.
 type ExternalDependencyQueryStore interface {
 	GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error)
 }

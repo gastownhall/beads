@@ -3,10 +3,13 @@
 package main
 
 import (
+	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestEmbeddedCrossRigReadyReleasesAndWithholdsOnForeignStateChange pins
@@ -94,5 +97,94 @@ func TestEmbeddedCrossRigReadyReleasesAndWithholdsOnForeignStateChange(t *testin
 	}
 	if !strings.Contains(out, unblocked.ID) {
 		t.Errorf("bd ready lost locally free %s after the foreign reopen:\n%s", unblocked.ID, out)
+	}
+}
+
+// TestEmbeddedCrossRigReadyFollowsTheTownRoutes is GH#5784's own layout: an
+// orchestrator writes routes.jsonl only at its town root, the rigs are
+// siblings under it with no routes of their own, the edge is written from the
+// town root, and `bd ready` runs in the rig. The rig follows the town's routes
+// ($GT_ROOT/.beads/routes.jsonl, paths from the town root): the source is
+// held while the sibling rig's target is open and released once it closes.
+// Without GT_ROOT the rig has no routes to follow, so the source stays held
+// and the warning names the rig's missing routes.jsonl.
+func TestEmbeddedCrossRigReadyFollowsTheTownRoutes(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt cross-rig ready tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	town, townBeads, _ := bdInit(t, bd, "--prefix", "hq")
+	rig := func(name, prefix string) string {
+		t.Helper()
+		dir := filepath.Join(town, name)
+		if err := os.MkdirAll(dir, 0750); err != nil {
+			t.Fatal(err)
+		}
+		initGitRepoAt(t, dir)
+		runBDInit(t, bd, dir, "--prefix", prefix)
+		return dir
+	}
+	rigA, rigB := rig("aaa", "aa"), rig("bbb", "bb")
+	routes := `{"prefix":"hq-","path":"."}` + "\n" + `{"prefix":"aa-","path":"aaa"}` + "\n" + `{"prefix":"bb-","path":"bbb"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townBeads, "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(rigA, ".beads", "routes.jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("rig aaa has a routes.jsonl of its own (stat: %v); the layout under test has none", err)
+	}
+
+	foreign := bdCreate(t, bd, rigB, "foreign blocker")
+	source := bdCreate(t, bd, rigA, "source with cross-rig blocker")
+	free := bdCreate(t, bd, rigA, "locally free source")
+
+	// Written at the town root, which routes the source to rig aaa.
+	if out, err := bdRunWithFlockRetry(t, bd, town, "dep", "add", source.ID, foreign.ID); err != nil {
+		t.Fatalf("bd dep add (from the town root): %v\n%s", err, out)
+	}
+
+	ready := func(env ...string) (string, string) {
+		t.Helper()
+		var stdout, stderr string
+		var err error
+		for attempt := 0; attempt < 10; attempt++ {
+			cmd := exec.Command(bd, "ready")
+			cmd.Dir = rigA
+			cmd.Env = append(envWithout(bdEnv(rigA), "GT_ROOT"), env...)
+			var outBuf, errBuf bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &outBuf, &errBuf
+			err = cmd.Run()
+			stdout, stderr = outBuf.String(), errBuf.String()
+			if err == nil || !isEmbeddedLockOutput(stdout+stderr) {
+				break
+			}
+			time.Sleep(time.Duration(500*(1<<min(attempt, 4))) * time.Millisecond)
+		}
+		if err != nil {
+			t.Fatalf("bd ready in the rig: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		return stdout, stderr
+	}
+
+	underTown := "GT_ROOT=" + town
+	out, _ := ready(underTown)
+	if strings.Contains(out, source.ID) || !strings.Contains(out, free.ID) {
+		t.Fatalf("bd ready in the rig while %s is open: want %s held and %s offered:\n%s", foreign.ID, source.ID, free.ID, out)
+	}
+	if out, err := bdRunWithFlockRetry(t, bd, rigB, "close", foreign.ID); err != nil {
+		t.Fatalf("bd close (sibling rig): %v\n%s", err, out)
+	}
+	out, _ = ready(underTown)
+	if !strings.Contains(out, source.ID) {
+		t.Fatalf("bd ready in the rig withheld %s after its cross-rig blocker %s closed in its own rig:\n%s", source.ID, foreign.ID, out)
+	}
+
+	out, stderr := ready()
+	if strings.Contains(out, source.ID) {
+		t.Fatalf("bd ready without GT_ROOT offered %s, whose blocker it has no route to read:\n%s", source.ID, out)
+	}
+	if !strings.Contains(stderr, foreign.ID) || !strings.Contains(stderr, "no routes.jsonl") {
+		t.Fatalf("bd ready without GT_ROOT: want the warning to name %s and the missing routes.jsonl, stderr:\n%s", foreign.ID, stderr)
 	}
 }

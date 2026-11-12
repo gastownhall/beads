@@ -24,9 +24,18 @@ func dependencyRecordsForIssuesQueryRegex(table string) string {
 		regexp.QuoteMeta(table) + ` WHERE issue_id IN \(\?\) ORDER BY issue_id, depends_on_id, type, id`
 }
 
+// externalBlockingDependencyRecordsQueryRegex matches the narrow candidate
+// read of table, joined to the table its sources live in so that a closed or
+// pinned source's edges never become candidates.
 func externalBlockingDependencyRecordsQueryRegex(table string) string {
-	return `(?s)SELECT issue_id, COALESCE\(depends_on_issue_id, depends_on_wisp_id, depends_on_external\) AS depends_on_id, type, created_at, created_by, metadata, thread_id\s+FROM ` +
-		regexp.QuoteMeta(table) + `\s+WHERE depends_on_external IS NOT NULL\s+AND type IN \('blocks', 'conditional-blocks', 'waits-for'\)\s+ORDER BY issue_id`
+	sourceTable := "issues"
+	if table == "wisp_dependencies" {
+		sourceTable = "wisps"
+	}
+	return `(?s)SELECT d\.issue_id, COALESCE\(depends_on_issue_id, depends_on_wisp_id, depends_on_external\) AS depends_on_id, d\.type, d\.created_at, d\.created_by, d\.metadata, d\.thread_id\s+FROM ` +
+		regexp.QuoteMeta(table) + ` d\s+JOIN ` + regexp.QuoteMeta(sourceTable) + ` src ON src\.id = d\.issue_id` +
+		`\s+WHERE d\.depends_on_external IS NOT NULL\s+AND d\.type IN \('blocks', 'conditional-blocks', 'waits-for'\)` +
+		`\s+AND src\.status NOT IN \('closed', 'pinned'\)\s+ORDER BY d\.issue_id`
 }
 
 func dependencyRows() *sqlmock.Rows {

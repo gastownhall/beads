@@ -670,55 +670,91 @@ func TestE2E_ClaimOfAbsentIDIsGCNotFound(t *testing.T) {
 }
 
 // TestE2E_AdvertisedExternalPolicyIsPassedThrough is the other half of the
-// design 3.6 rule, against the MC server's handshake shape: a server that
-// advertises policy.external_dependencies has applied it, so the client reads
-// no dependency edges for it on list, ready, claim, show or close.
+// design 3.6 rule: a server that advertises the whole policy
+// (policy.external_dependencies and policy.cross_rig_dependencies, as every
+// bd serve that composes it does) has applied it, so the client reads no
+// dependency edges for it on list, ready, claim, show or close.
+//
+// The MC server's own handshake predates policy.cross_rig_dependencies, so
+// there the client enforces bare cross-rig ids itself (GH#5784 AC-8), with
+// bounded reads only: the ready reads judge the rows the server returned by
+// the edges those rows carry, and only the per-issue guards (the claim and
+// the close) read edges, each of the one issue it names. Nothing walks the
+// workspace's issues.
 func TestE2E_AdvertisedExternalPolicyIsPassedThrough(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	bin := buildBD(t)
-	proxyAddr, counter := startMaskingProxy(t, startE2EServer(t), mcContextMask)
-	f := newHTTPFixture(t, bin, proxyAddr)
-	id := f.create("plain")
-	other := f.create("other")
-	f.mustRun(nil, "dep", "add", id, "external:other:cap")
+	addr := startE2EServer(t)
+	for _, tc := range []struct {
+		name string
+		mask func(map[string]any)
+		// guardReads is how many edge reads the claim and close guards may
+		// make before the close request.
+		guardReads int
+	}{
+		{"MC server mask with the cross-rig token", func(body map[string]any) {
+			mcContextMask(body)
+			body["capabilities"] = append(body["capabilities"].([]any), "policy.cross_rig_dependencies")
+		}, 0},
+		{"MC server mask", mcContextMask, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			proxyAddr, counter := startMaskingProxy(t, addr, tc.mask)
+			f := newHTTPFixture(t, bin, proxyAddr)
+			id := f.create("plain")
+			other := f.create("other")
+			f.mustRun(nil, "dep", "add", id, "external:other:cap")
 
-	counter.reset()
-	f.mustRun(nil, "list", "--json", "--limit", "50")
-	f.mustRun(nil, "ready", "--json", "--limit", "10")
-	f.mustRun(nil, "show", id, "--json")
-	f.mustRun(nil, "update", other, "--claim", "--json")
-	// claim-next is the server's ONE atomic operation, not a client-side
-	// read-then-claim loop. Only its own requests count: the MC handshake
-	// lacks issues.update.claim, so the claim of other above went to
-	// claimIssue by design.
-	readyClaimFrom := len(counter.snapshot())
-	f.mustRun(nil, "ready", "--claim", "--json")
-	var claimNexts, byID int
-	for _, p := range counter.snapshot()[readyClaimFrom:] {
-		switch {
-		case p == "POST /v0/beads/issues:claimNext":
-			claimNexts++
-		case strings.HasPrefix(p, "POST /v0/beads/issues/") && strings.HasSuffix(p, ":claim"):
-			byID++
-		}
-	}
-	if claimNexts != 1 || byID != 0 {
-		t.Errorf("claimNext requests = %d, by-id claims = %d; want one atomic claim-next and no by-id claim: %v", claimNexts, byID, counter.snapshot())
-	}
-	f.mustRun(nil, "close", other, "--json")
-	// The close policy check is the client-side policy's last chance: it runs
-	// before the close request, so only the reads up to that request count
-	// here. The molecule auto-close is not a client read any more; it rides on
-	// the close request itself (auto_close_molecule) and the server performs
-	// it inside the close.
-	paths := counter.snapshot()
-	for _, p := range paths {
-		if strings.HasPrefix(p, "POST /v0/beads/issues:batchClose") {
-			break
-		}
-		if strings.HasPrefix(p, "GET /v0/beads/dependencies") {
-			t.Errorf("client-side policy ran against a server advertising policy.external_dependencies: %s in %v", p, paths)
-			break
-		}
+			counter.reset()
+			f.mustRun(nil, "list", "--json", "--limit", "50")
+			listed := len(counter.snapshot())
+			f.mustRun(nil, "ready", "--json", "--limit", "10")
+			f.mustRun(nil, "show", id, "--json")
+			f.mustRun(nil, "update", other, "--claim", "--json")
+			// claim-next is the server's ONE atomic operation, not a
+			// client-side read-then-claim loop. Only its own requests count:
+			// the MC handshake lacks issues.update.claim, so the claim of
+			// other above went to claimIssue by design.
+			readyClaimFrom := len(counter.snapshot())
+			f.mustRun(nil, "ready", "--claim", "--json")
+			var claimNexts, byID int
+			for _, p := range counter.snapshot()[readyClaimFrom:] {
+				switch {
+				case p == "POST /v0/beads/issues:claimNext":
+					claimNexts++
+				case strings.HasPrefix(p, "POST /v0/beads/issues/") && strings.HasSuffix(p, ":claim"):
+					byID++
+				}
+			}
+			if claimNexts != 1 || byID != 0 {
+				t.Errorf("claimNext requests = %d, by-id claims = %d; want one atomic claim-next and no by-id claim: %v", claimNexts, byID, counter.snapshot())
+			}
+			f.mustRun(nil, "close", other, "--json")
+			// The close policy check is the client-side policy's last chance:
+			// it runs before the close request, so only the reads up to that
+			// request count here. The molecule auto-close is not a client read
+			// any more; it rides on the close request itself
+			// (auto_close_molecule) and the server performs it inside the
+			// close.
+			uris := counter.uriSnapshot()
+			var guards []string
+			for i, uri := range uris {
+				if strings.HasPrefix(uri, "POST /v0/beads/issues:batchClose") {
+					break
+				}
+				if strings.HasPrefix(uri, "GET /v0/beads/dependencies") {
+					guards = append(guards, uri)
+					if strings.Count(uri, "issue_id=") != 1 {
+						t.Errorf("an edge read named more than the one issue a guard asks about: %s", uri)
+					}
+				}
+				if i >= listed && (uri == "GET /v0/beads/issues" || strings.HasPrefix(uri, "GET /v0/beads/issues?")) {
+					t.Errorf("a policy read listed the workspace's issues: %s in %v", uri, uris)
+				}
+			}
+			if len(guards) != tc.guardReads {
+				t.Errorf("edge reads before the close = %v, want %d (the claim and close guards' own)", guards, tc.guardReads)
+			}
+		})
 	}
 }

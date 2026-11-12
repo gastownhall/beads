@@ -3,6 +3,7 @@
 package bdhttp_test
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -29,15 +30,20 @@ func TestE2E_PerCommandRequestBudget(t *testing.T) {
 		over map[string]int
 	}{
 		// The in-process server composes no external-dependency policy, so
-		// its handshake lacks policy.external_dependencies and the client
-		// applies the policy itself with extra reads. A deployed bd serve
-		// (hosted included) enforces it and says so; advertise it here so
-		// the budget measures that shape.
+		// its handshake lacks both policy tokens and the client applies the
+		// policy itself with extra reads. A deployed bd serve (hosted
+		// included) enforces the whole policy and says so; advertise it here
+		// so the budget measures that shape.
 		{"current server", advertiseExternalPolicy, nil},
 		// The MC server predates issues.close.autoCloseMolecule, so a close
 		// there also runs the molecule auto-close check client side (an edge
-		// read and a re-read of the closed row).
-		{"MC server mask", mcContextMask, map[string]int{"close": 5}},
+		// read and a re-read of the closed row). It also predates
+		// policy.cross_rig_dependencies, so the client guards the close
+		// against an open cross-rig blocker itself, reading the closed
+		// issue's own edges first (GH#5784): one request, whatever the
+		// workspace's size. Its ready reads judge the rows the server
+		// returned by the edges those rows carry, so they cost nothing more.
+		{"MC server mask", mcContextMask, map[string]int{"close": 6}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			proxyAddr, counter := startMaskingProxy(t, addr, tc.mask)
@@ -85,14 +91,16 @@ func TestE2E_PerCommandRequestBudget(t *testing.T) {
 	}
 }
 
-// advertiseExternalPolicy adds policy.external_dependencies to the handshake's
-// capabilities, the shape of a deployed bd serve that enforces the policy.
+// advertiseExternalPolicy adds policy.external_dependencies and
+// policy.cross_rig_dependencies to the handshake's capabilities: the shape of
+// a deployed bd serve, which composes the whole external-dependency policy
+// (cmd/bd/serve.go) and so leaves no reference kind to its clients.
 func advertiseExternalPolicy(body map[string]any) {
 	caps, _ := body["capabilities"].([]any)
-	for _, c := range caps {
-		if c == "policy.external_dependencies" {
-			return
+	for _, token := range []string{"policy.external_dependencies", "policy.cross_rig_dependencies"} {
+		if !slices.Contains(caps, any(token)) {
+			caps = append(caps, token)
 		}
 	}
-	body["capabilities"] = append(caps, "policy.external_dependencies")
+	body["capabilities"] = caps
 }

@@ -168,8 +168,8 @@ func (s *Store) guardExternalClose(ctx context.Context, id string, force bool) e
 	if force {
 		return nil
 	}
-	// externalBlockersFor reads only this issue's edges on a remote store
-	// rather than every edge in the workspace.
+	// externalBlockersFor reads and resolves only this issue's own edges,
+	// never every edge in the workspace.
 	refs, err := s.externalBlockersFor(ctx, []string{id})
 	if err != nil {
 		return err
@@ -229,11 +229,20 @@ func (s *Store) loadBlockingState(ctx context.Context) (blockingState, error) {
 		return blockingState{}, err
 	}
 
-	queryStore, ok := storage.UnwrapStore(s.inner).(storage.ExternalDependencyQueryStore)
 	var allDeps map[string][]*types.Dependency
-	if ok {
+	queryStore, ok := storage.UnwrapStore(s.inner).(storage.ExternalDependencyQueryStore)
+	switch {
+	case ok:
 		allDeps, err = queryStore.GetExternalBlockingDependencyRecords(ctx)
-	} else {
+	case s.rolesAreRemote():
+		// A remote store has no narrow query (httpclient.Store), and its
+		// GetAllDependencyRecords walks every issue in the workspace, closed
+		// ones included, then reads every edge: about 150 requests per
+		// evaluation at 10k issues, against every server that leaves a
+		// reference kind to its clients. The live sources' own edges are
+		// enough (remoteLiveSourceEdges).
+		allDeps, err = s.remoteLiveSourceEdges(ctx)
+	default:
 		// Compatibility fallback for third-party stores that predate the narrow
 		// optional capability. First-party stores implement the indexed query.
 		// enforcedReference classifies these raw records exactly as the narrow
@@ -322,6 +331,21 @@ func (s *Store) blockingStateFromRecords(ctx context.Context, allDeps map[string
 
 // GetReadyWork excludes sources with unsatisfied external blocking edges.
 func (s *Store) GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*types.Issue, error) {
+	if s.judgesReadyRows() {
+		// The same one inner read as below (httpclient's GetReadyWork is its
+		// counts listing with the counts dropped), judged by its rows' edges.
+		rows, err := s.GetReadyWorkWithCounts(ctx, filter)
+		if err != nil {
+			return nil, err
+		}
+		issues := make([]*types.Issue, 0, len(rows))
+		for _, row := range rows {
+			if row != nil {
+				issues = append(issues, row.Issue)
+			}
+		}
+		return issues, nil
+	}
 	state, err := s.loadBlockingState(ctx)
 	if err != nil {
 		return nil, err
@@ -340,6 +364,9 @@ func (s *Store) GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*t
 
 // GetReadyWorkWithCounts is the counts-bearing equivalent of GetReadyWork.
 func (s *Store) GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, error) {
+	if s.judgesReadyRows() {
+		return s.judgedReadyWorkWithCounts(ctx, filter)
+	}
 	state, err := s.loadBlockingState(ctx)
 	if err != nil {
 		return nil, err
@@ -347,9 +374,87 @@ func (s *Store) GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFil
 	return s.readyWorkWithCounts(ctx, filter, state)
 }
 
+// judgesReadyRows reports whether the ready reads judge the rows a read
+// returns by those rows' own edges instead of by a workspace-wide blocker
+// set: over a remote store with no narrow query (httpclient.Store), whose
+// ready rows carry every edge their source stores. A ready page with nothing
+// externally blocked then costs exactly the inner read, and no ready read
+// walks the workspace's issues.
+func (s *Store) judgesReadyRows() bool {
+	if _, ok := storage.UnwrapStore(s.inner).(storage.ExternalDependencyQueryStore); ok {
+		return false
+	}
+	return s.rolesAreRemote()
+}
+
+// judgedReadyRead runs read, one inner ready read under a blocking state that
+// returns every row it fetched, and judges the rows no earlier pass judged by
+// their own edges (remoteRowBlockers). A pass that finds a newly blocked row
+// grows the state and reads again, so readyExclusion widens the next window
+// past it; the first pass that finds none ends the loop, so the caller's
+// last read is the answer. The ready set is finite, so the loop ends.
+func (s *Store) judgedReadyRead(ctx context.Context, kinds policyKinds, read func(blockingState) ([]*types.IssueWithCounts, error)) error {
+	state := blockingState{refsByIssue: make(map[string][]string)}
+	judged := make(map[string]bool)
+	for {
+		window, err := read(state)
+		if err != nil {
+			return err
+		}
+		fresh := make([]*types.IssueWithCounts, 0, len(window))
+		for _, row := range window {
+			if row != nil && row.Issue != nil && !judged[row.ID] {
+				judged[row.ID] = true
+				fresh = append(fresh, row)
+			}
+		}
+		refs, err := s.remoteRowBlockers(ctx, kinds, fresh)
+		if err != nil {
+			return err
+		}
+		if len(refs) == 0 {
+			return nil
+		}
+		for id, blockers := range refs {
+			state.refsByIssue[id] = blockers
+		}
+	}
+}
+
+// judgedReadyWorkWithCounts is GetReadyWorkWithCounts over a store whose
+// ready rows are judged by their own edges (judgesReadyRows).
+func (s *Store) judgedReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, error) {
+	kinds, err := s.clientKinds(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if kinds.none() {
+		return s.inner.GetReadyWorkWithCounts(ctx, filter)
+	}
+	var rows []*types.IssueWithCounts
+	var blockedIDs map[string]bool
+	err = s.judgedReadyRead(ctx, kinds, func(state blockingState) ([]*types.IssueWithCounts, error) {
+		var queryFilter types.WorkFilter
+		queryFilter, blockedIDs = s.readyExclusion(filter, state.refsByIssue)
+		read, err := s.inner.GetReadyWorkWithCounts(ctx, queryFilter)
+		if err != nil {
+			return nil, innerCapError(err, filter, blockedIDs)
+		}
+		rows = read
+		return read, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	kept, _ := dropBlockedIssuesWithCounts(rows, blockedIDs, filter.Limit)
+	if err := capKeptRows(len(kept), filter, blockedIDs); err != nil {
+		return nil, err
+	}
+	return kept, nil
+}
+
 // readyWorkWithCounts is GetReadyWorkWithCounts' body against an
-// already-loaded blockingState, which remoteReadyClaimer reuses across its
-// passes.
+// already-loaded blockingState.
 func (s *Store) readyWorkWithCounts(ctx context.Context, filter types.WorkFilter, state blockingState) ([]*types.IssueWithCounts, error) {
 	queryFilter, blockedIDs := s.readyExclusion(filter, state.refsByIssue)
 	rows, err := s.inner.GetReadyWorkWithCounts(ctx, queryFilter)
@@ -367,12 +472,50 @@ func (s *Store) readyWorkWithCounts(ctx context.Context, filter types.WorkFilter
 // GetReadyWorkWithCounts, so the page and its total describe one ready set.
 // It must be overridden here: the embedded passthrough would reach the inner
 // store without the exclusions.
+//
+// Over a store whose ready rows are judged by their own edges
+// (judgesReadyRows) the total subtracts the externally blocked rows among
+// the rows the reads fetched; a truncated page's total can still count an
+// externally blocked row past the window, which no read looked at. The page
+// itself is exact.
 func (s *Store) GetReadyWorkWithCountsAndTotal(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, int, error) {
+	if s.judgesReadyRows() {
+		return s.judgedReadyWorkWithCountsAndTotal(ctx, filter)
+	}
 	state, err := s.loadBlockingState(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
 	return s.readyWorkWithCountsAndTotal(ctx, filter, state)
+}
+
+// judgedReadyWorkWithCountsAndTotal is GetReadyWorkWithCountsAndTotal over a
+// store whose ready rows are judged by their own edges (judgesReadyRows).
+func (s *Store) judgedReadyWorkWithCountsAndTotal(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, int, error) {
+	kinds, err := s.clientKinds(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	if kinds.none() {
+		return s.inner.GetReadyWorkWithCountsAndTotal(ctx, filter)
+	}
+	var rows []*types.IssueWithCounts
+	var total int
+	var blockedIDs map[string]bool
+	err = s.judgedReadyRead(ctx, kinds, func(state blockingState) ([]*types.IssueWithCounts, error) {
+		var queryFilter types.WorkFilter
+		queryFilter, blockedIDs = s.readyExclusion(filter, state.refsByIssue)
+		read, readTotal, err := s.inner.GetReadyWorkWithCountsAndTotal(ctx, queryFilter)
+		if err != nil {
+			return nil, innerCapError(err, filter, blockedIDs)
+		}
+		rows, total = read, readTotal
+		return read, nil
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	return s.finishReadyWorkWithTotal(ctx, filter, blockedIDs, rows, total)
 }
 
 // readyExclusion resolves how this decorator applies its OWN additional
@@ -524,6 +667,13 @@ func (s *Store) readyWorkWithCountsAndTotal(ctx context.Context, filter types.Wo
 	if err != nil {
 		return nil, 0, innerCapError(err, filter, blockedIDs)
 	}
+	return s.finishReadyWorkWithTotal(ctx, filter, blockedIDs, rows, total)
+}
+
+// finishReadyWorkWithTotal drops blockedIDs from the rows and the total one
+// inner read returned for filter, and trims the caller's page.
+func (s *Store) finishReadyWorkWithTotal(ctx context.Context, filter types.WorkFilter, blockedIDs map[string]bool, rows []*types.IssueWithCounts, total int) ([]*types.IssueWithCounts, int, error) {
+	var err error
 	kept, blockedSeen := dropBlockedIssuesWithCounts(rows, blockedIDs, filter.Limit)
 	if len(blockedIDs) == 0 {
 		return kept, total, nil
@@ -593,6 +743,9 @@ func (s *Store) refetchedReadyTotal(ctx context.Context, filter types.WorkFilter
 func (s *Store) CountReadyWork(ctx context.Context, filter types.WorkFilter) (int, error) {
 	filter.Limit = 0
 	filter.Offset = 0
+	if s.judgesReadyRows() {
+		return s.judgedReadyCount(ctx, filter)
+	}
 	state, err := s.loadBlockingState(ctx)
 	if err != nil {
 		return 0, err
@@ -612,6 +765,18 @@ func (s *Store) CountReadyWork(ctx context.Context, filter types.WorkFilter) (in
 	page.Limit = 1
 	page.Lite = true
 	_, total, err := s.readyWorkWithCountsAndTotal(ctx, page, state)
+	return total, err
+}
+
+// judgedReadyCount is CountReadyWork over a store whose ready rows are judged
+// by their own edges (judgesReadyRows): the one-row page's total, as
+// GetReadyWorkWithCountsAndTotal reports it there. That total drops only the
+// blocked rows the read judged, so a blocked row past them still counts.
+func (s *Store) judgedReadyCount(ctx context.Context, filter types.WorkFilter) (int, error) {
+	page := filter
+	page.Limit = 1
+	page.Lite = true
+	_, total, err := s.judgedReadyWorkWithCountsAndTotal(ctx, page)
 	return total, err
 }
 
@@ -1047,51 +1212,155 @@ func (s *Store) GetDependencyTree(ctx context.Context, issueID string, maxDepth 
 	if err != nil {
 		return nil, fmt.Errorf("external dependencies: load tree edges: %w", err)
 	}
-	return s.appendTreeExternalReferences(ctx, tree, deps, maxDepth)
+	return s.appendTreeExternalReferences(ctx, allKinds, tree, deps, maxDepth)
 }
 
-func (s *Store) appendTreeExternalReferences(ctx context.Context, tree []*types.TreeNode, deps map[string][]*types.Dependency, maxDepth int) ([]*types.TreeNode, error) {
-	inTree := make(map[string]bool, len(tree))
+// appendTreeExternalReferences hangs the external leaves the client owes
+// under the tree's nodes, for the reference kinds it applies (kinds): an
+// external: capability ref as a synthetic ○/✓ leaf, a bare cross-rig target
+// outside the tree as a marked foreign leaf. A kind the server applies is
+// left to the server's own walker, which hangs those leaves itself, so its
+// references are neither resolved nor opened here.
+func (s *Store) appendTreeExternalReferences(ctx context.Context, kinds policyKinds, tree []*types.TreeNode, deps map[string][]*types.Dependency, maxDepth int) ([]*types.TreeNode, error) {
+	leaves, err := s.loadTreeLeaves(ctx, kinds, tree, deps)
+	if err != nil {
+		return nil, err
+	}
+	return leaves.hang(tree, deps, maxDepth), nil
+}
+
+// treeLeaves is what the external leaves under one tree are built from.
+type treeLeaves struct {
+	kinds policyKinds
+	// inTree names the tree's own nodes: a foreign target the walk already
+	// reached is not hung again as a leaf.
+	inTree map[string]bool
+	// satisfied is each capability ref's resolution.
+	satisfied map[string]bool
+	// foreign holds the readable foreign targets' rows, unreadable the reason
+	// each other one could not be read.
+	foreign    map[string]*types.Issue
+	unreadable map[string]string
+}
+
+// treeLeafKind is the kind of external leaf an edge hangs.
+type treeLeafKind int
+
+const (
+	noTreeLeaf treeLeafKind = iota
+	capabilityTreeLeaf
+	foreignTreeLeaf
+)
+
+// loadTreeLeaves resolves the capability refs and reads the foreign targets
+// the tree's edges name, of the kinds the client hangs.
+func (s *Store) loadTreeLeaves(ctx context.Context, kinds policyKinds, tree []*types.TreeNode, deps map[string][]*types.Dependency) (treeLeaves, error) {
+	leaves := treeLeaves{kinds: kinds, inTree: make(map[string]bool, len(tree))}
 	for _, node := range tree {
 		if node != nil {
-			inTree[node.ID] = true
+			leaves.inTree[node.ID] = true
 		}
 	}
 	refs := make([]reference, 0)
 	var foreign []string
 	for _, issueDeps := range deps {
 		for _, dep := range issueDeps {
-			if dep == nil {
-				continue
-			}
-			if isExternalReference(dep.DependsOnID) {
+			switch leaves.kindOf(dep) {
+			case capabilityTreeLeaf:
 				refs = append(refs, parseReference(dep.DependsOnID))
-			} else if isForeignIssueTarget(dep.IssueID, dep.DependsOnID) && !inTree[dep.DependsOnID] && !slices.Contains(foreign, dep.DependsOnID) {
-				foreign = append(foreign, dep.DependsOnID)
+			case foreignTreeLeaf:
+				if !slices.Contains(foreign, dep.DependsOnID) {
+					foreign = append(foreign, dep.DependsOnID)
+				}
 			}
 		}
 	}
 	satisfied, err := s.resolveReferences(ctx, refs)
 	if err != nil {
-		return nil, err
+		return treeLeaves{}, err
 	}
+	leaves.satisfied = satisfied
 	// Foreign leaves of every edge type are display (GH#5784): read without
 	// the policy's "remains blocking" warning, which only a blocking edge
 	// earns, and never followed into the foreign graph.
 	sort.Strings(foreign)
-	foreignIssues, unreadable, err := s.readForeignIssues(ctx, foreign)
+	leaves.foreign, leaves.unreadable, err = s.readForeignIssues(ctx, foreign)
 	if err != nil {
-		return nil, err
+		return treeLeaves{}, err
 	}
+	return leaves, nil
+}
 
-	effectiveMaxDepth := maxDepth
-	if effectiveMaxDepth <= 0 {
-		effectiveMaxDepth = 50
+// kindOf is the leaf dep hangs under its source: an external: ref when the
+// client applies capability refs, a bare cross-rig target outside the tree
+// when it applies cross-rig ids, else none.
+func (l treeLeaves) kindOf(dep *types.Dependency) treeLeafKind {
+	switch {
+	case dep == nil:
+		return noTreeLeaf
+	case isExternalReference(dep.DependsOnID):
+		if l.kinds.capability {
+			return capabilityTreeLeaf
+		}
+	case l.kinds.foreign && isForeignIssueTarget(dep.IssueID, dep.DependsOnID) && !l.inTree[dep.DependsOnID]:
+		return foreignTreeLeaf
 	}
-	// An external id already in the tree gets a Deduped stub for each further
-	// parent, as the walk does for a shared issue; an edge the tree already
-	// holds (a server that hung the leaves itself) is not added again.
-	seen := make(map[string]bool, len(tree)+len(refs)+len(foreign))
+	return noTreeLeaf
+}
+
+// leaf is the external leaf dep hangs, before its place in the tree is set,
+// or nil when dep hangs none.
+func (l treeLeaves) leaf(dep *types.Dependency) *types.TreeNode {
+	switch l.kindOf(dep) {
+	case capabilityTreeLeaf:
+		ref := parseReference(dep.DependsOnID)
+		status, mark := types.StatusOpen, "○ "
+		if l.satisfied[ref.raw] {
+			status, mark = types.StatusClosed, "✓ "
+		}
+		return &types.TreeNode{Issue: types.Issue{
+			ID:        dep.DependsOnID,
+			Title:     mark + externalTitle(ref),
+			Status:    status,
+			IssueType: types.TypeTask,
+		}}
+	case foreignTreeLeaf:
+		if issue := l.foreign[dep.DependsOnID]; issue != nil {
+			return &types.TreeNode{Issue: foreignLeafIssue(issue), External: true}
+		}
+		return &types.TreeNode{
+			Issue:      types.Issue{ID: dep.DependsOnID, Title: dep.DependsOnID},
+			External:   true,
+			Unresolved: l.unreadable[dep.DependsOnID],
+		}
+	}
+	return nil
+}
+
+// foreignLeafIssue is the part of a foreign rig's row its tree leaf shows. A
+// leaf is display: a served tree answers every client the token admits, and
+// any of them can add an edge to a routed rig's issue, so the leaf carries
+// none of the row's other fields (description, notes, assignee, metadata).
+func foreignLeafIssue(issue *types.Issue) types.Issue {
+	return types.Issue{
+		ID:        issue.ID,
+		Title:     issue.Title,
+		Status:    issue.Status,
+		Priority:  issue.Priority,
+		IssueType: issue.IssueType,
+		ClosedAt:  issue.ClosedAt,
+	}
+}
+
+// hang appends each node's external leaves to tree. An external id already
+// in the tree gets a Deduped stub for each further parent, as the walk does
+// for a shared issue; an edge the tree already holds (a server that hung the
+// leaves itself) is not added again.
+func (l treeLeaves) hang(tree []*types.TreeNode, deps map[string][]*types.Dependency, maxDepth int) []*types.TreeNode {
+	if maxDepth <= 0 {
+		maxDepth = 50
+	}
+	seen := make(map[string]bool, len(tree))
 	edges := make(map[[2]string]bool, len(tree))
 	for _, node := range tree {
 		if node != nil {
@@ -1101,40 +1370,15 @@ func (s *Store) appendTreeExternalReferences(ctx context.Context, tree []*types.
 	}
 	for _, parent := range tree {
 		// A stub has no descendants: its leaves hang under its expanded twin.
-		if parent == nil || parent.Deduped || parent.External || parent.Depth >= effectiveMaxDepth {
+		if parent == nil || parent.Deduped || parent.External || parent.Depth >= maxDepth {
 			continue
 		}
 		for _, dep := range deps[parent.ID] {
 			if dep == nil || edges[[2]string{parent.ID, dep.DependsOnID}] {
 				continue
 			}
-			var leaf *types.TreeNode
-			switch {
-			case isExternalReference(dep.DependsOnID):
-				ref := parseReference(dep.DependsOnID)
-				status := types.StatusOpen
-				title := "○ " + externalTitle(ref)
-				if satisfied[ref.raw] {
-					status = types.StatusClosed
-					title = "✓ " + externalTitle(ref)
-				}
-				leaf = &types.TreeNode{Issue: types.Issue{
-					ID:        dep.DependsOnID,
-					Title:     title,
-					Status:    status,
-					IssueType: types.TypeTask,
-				}}
-			case isForeignIssueTarget(dep.IssueID, dep.DependsOnID) && !inTree[dep.DependsOnID]:
-				if issue := foreignIssues[dep.DependsOnID]; issue != nil {
-					leaf = &types.TreeNode{Issue: *issue, External: true}
-				} else {
-					leaf = &types.TreeNode{
-						Issue:      types.Issue{ID: dep.DependsOnID, Title: dep.DependsOnID},
-						External:   true,
-						Unresolved: unreadable[dep.DependsOnID],
-					}
-				}
-			default:
+			leaf := l.leaf(dep)
+			if leaf == nil {
 				continue
 			}
 			leaf.Depth = parent.Depth + 1
@@ -1146,7 +1390,7 @@ func (s *Store) appendTreeExternalReferences(ctx context.Context, tree []*types.
 			edges[[2]string{parent.ID, dep.DependsOnID}] = true
 		}
 	}
-	return tree, nil
+	return tree
 }
 
 func externalTitle(ref reference) string {

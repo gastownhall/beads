@@ -17,8 +17,11 @@ import (
 
 type fakeStore struct {
 	storage.DoltStorage
-	ready       []*types.Issue
-	blocked     []*types.BlockedIssue
+	ready   []*types.Issue
+	blocked []*types.BlockedIssue
+	// others are issues neither ready nor blocked (a closed one, say):
+	// GetIssue finds them, and a served listing returns them.
+	others      []*types.Issue
 	tree        []*types.TreeNode
 	deps        map[string][]*types.Dependency
 	labels      map[string][]*types.Issue
@@ -217,8 +220,18 @@ func (f *fakeStore) GetAllDependencyRecords(_ context.Context) (map[string][]*ty
 	return f.deps, nil
 }
 
-func (f *fakeStore) GetExternalBlockingDependencyRecords(_ context.Context) (map[string][]*types.Dependency, error) {
-	return f.deps, nil
+// GetExternalBlockingDependencyRecords models the narrow candidate read: the
+// stored edges of every source except a closed or pinned one. An edge whose
+// source the fake does not hold stays a candidate.
+func (f *fakeStore) GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {
+	result := make(map[string][]*types.Dependency, len(f.deps))
+	for id, deps := range f.deps {
+		if source, _ := f.GetIssue(ctx, id); source != nil && (source.Status == types.StatusClosed || source.Status == types.StatusPinned) {
+			continue
+		}
+		result[id] = deps
+	}
+	return result, nil
 }
 
 func (f *fakeStore) GetDependencyRecordsForIssues(_ context.Context, issueIDs []string) (map[string][]*types.Dependency, error) {
@@ -276,6 +289,11 @@ func (f *fakeStore) GetIssue(_ context.Context, id string) (*types.Issue, error)
 	for _, blocked := range f.blocked {
 		if blocked.ID == id {
 			return &blocked.Issue, nil
+		}
+	}
+	for _, issue := range f.others {
+		if issue.ID == id {
+			return issue, nil
 		}
 	}
 	return nil, nil

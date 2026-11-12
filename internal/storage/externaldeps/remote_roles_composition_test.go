@@ -18,16 +18,25 @@ import (
 // knows nothing of the policy answers it, and each legacy method a base
 // accessor builds on is refused, so a composition that reaches one fails the
 // test instead of passing on a fake that answers it. Like httpclient.Store it
-// cannot express ExcludeIDs and has no BatchCloserWithPolicy.
+// cannot express ExcludeIDs, has no BatchCloserWithPolicy and no narrow
+// external-edge query, and its ready and list rows carry their own edges.
 type remoteStore struct {
 	*fakeStore
+	// GetExternalBlockingDependencyRecords hides the embedded fakeStore's
+	// narrow query: httpclient.Store has none (storage.ExternalDependencyQueryStore),
+	// and a field at this depth keeps the promoted method out of the method set.
+	GetExternalBlockingDependencyRecords struct{}
+	// omitRowEdges models a server whose ready and list rows come back with
+	// their blocks count but without the edges themselves.
+	omitRowEdges bool
 	// served logs each served role call, in order.
 	served []string
 	// closes logs the item ids of each served batch close.
 	closes [][]string
 	// edgeReads logs how many anchors each served edge read named.
 	edgeReads []int
-	// scans counts the whole-workspace dependency scans read through it.
+	// scans counts the whole-workspace dependency walks asked of it, each
+	// refused (GetAllDependencyRecords).
 	scans int
 	// localBlockers is the served annotation's own BlockedBy, per id.
 	localBlockers map[string][]string
@@ -39,9 +48,18 @@ type remoteStore struct {
 	takenFirst map[string]bool
 	// getErrs, per id, fails the GetIssue read of that id.
 	getErrs map[string]error
+	// arriving are rows that become ready after the client's read and sort
+	// ahead of the rows it read: the served claim-next, which re-reads the
+	// ready set when it claims, sees them first.
+	arriving []*types.Issue
+	// releaseErr, when set, answers every served Release.
+	releaseErr error
 }
 
-var errLegacyRefused = errors.New("remoteStore: legacy method refused")
+var (
+	errLegacyRefused = errors.New("remoteStore: legacy method refused")
+	errWorkspaceWalk = errors.New("remoteStore: the workspace-wide dependency walk is refused")
+)
 
 // wireEdgeAnchorCap is the most anchors the wire's listDependencies accepts.
 const wireEdgeAnchorCap = 100
@@ -90,14 +108,55 @@ func (r *remoteStore) ClaimReadyIssue(context.Context, types.WorkFilter, string)
 	return nil, errLegacyRefused
 }
 
-func (r *remoteStore) GetAllDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {
+// GetAllDependencyRecords is httpclient.Store's walk of every issue in the
+// workspace, closed ones included, and then of every edge: about 150 requests
+// at 10k issues. No policy read may cost that, so the walk is counted and
+// refused.
+func (r *remoteStore) GetAllDependencyRecords(context.Context) (map[string][]*types.Dependency, error) {
 	r.scans++
-	return r.fakeStore.GetAllDependencyRecords(ctx)
+	return nil, errWorkspaceWalk
 }
 
-func (r *remoteStore) GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {
-	r.scans++
-	return r.fakeStore.GetExternalBlockingDependencyRecords(ctx)
+// GetReadyWorkWithCounts is httpclient's legacy ready listing, whose rows
+// come off the same wire as the served Ready's and carry their edges too.
+func (r *remoteStore) GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, error) {
+	rows, err := r.fakeStore.GetReadyWorkWithCounts(ctx, filter)
+	return r.servedRows(rows), err
+}
+
+// GetReadyWorkWithCountsAndTotal is GetReadyWorkWithCounts with the total.
+func (r *remoteStore) GetReadyWorkWithCountsAndTotal(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, int, error) {
+	rows, total, err := r.fakeStore.GetReadyWorkWithCountsAndTotal(ctx, filter)
+	return r.servedRows(rows), total, err
+}
+
+func (r *remoteStore) servedRows(rows []*types.IssueWithCounts) []*types.IssueWithCounts {
+	for i, row := range rows {
+		if row != nil && row.Issue != nil {
+			rows[i] = r.servedRow(row.Issue)
+		}
+	}
+	return rows
+}
+
+// servedRow is issue as a served ready or list row: like the counts query's
+// deps_json it carries every edge its source stores, with its blocks count
+// (dependency_count counts type blocks only), unless omitRowEdges leaves the
+// edges out.
+func (r *remoteStore) servedRow(issue *types.Issue) *types.IssueWithCounts {
+	row := &types.IssueWithCounts{Issue: issue}
+	edges := r.deps[issue.ID]
+	for _, dep := range edges {
+		if dep.Type == types.DepBlocks {
+			row.DependencyCount++
+		}
+	}
+	if len(edges) > 0 && !r.omitRowEdges {
+		served := *issue
+		served.Dependencies = slices.Clone(edges)
+		row.Issue = &served
+	}
+	return row
 }
 
 func (r *remoteStore) IssueReader() (publicops.Reader, error)   { return servedReader{r}, nil }
@@ -118,7 +177,7 @@ type servedReader struct{ s *remoteStore }
 // Ready serves the ready rows the way a server that knows nothing of the
 // policy does: in order, narrowed by the request's assignee rule (Unassigned
 // wins over Assignee, as in workapi.BuildReadyFilter), up to its limit, with
-// has_more past it.
+// has_more past it, each row carrying its edges (servedRow).
 func (r servedReader) Ready(_ context.Context, req publicops.ReadyRequest) (publicops.IssuePage, error) {
 	r.s.served = append(r.s.served, "Ready")
 	items := make([]*types.IssueWithCounts, 0, len(r.s.ready))
@@ -130,7 +189,7 @@ func (r servedReader) Ready(_ context.Context, req publicops.ReadyRequest) (publ
 		} else if req.Assignee != "" && issue.Assignee != req.Assignee {
 			continue
 		}
-		items = append(items, &types.IssueWithCounts{Issue: issue})
+		items = append(items, r.s.servedRow(issue))
 	}
 	if req.Limit != nil && *req.Limit >= 0 && *req.Limit < len(items) {
 		return publicops.IssuePage{Items: items[:*req.Limit], HasMore: true}, nil
@@ -142,12 +201,13 @@ func (r servedReader) List(_ context.Context, req publicops.ListRequest) (public
 	if req.ReadyFlag {
 		// Like httpclient: listIssues cannot carry ReadyFlag (ledger row
 		// E-ListRequest.ReadyFlag); a ready listing is listReadyWork's question.
+		r.s.served = append(r.s.served, "List ready")
 		return publicops.IssuePage{}, &storage.ErrUnsupported{Op: "ListRequest.ReadyFlag", Backend: "http"}
 	}
 	r.s.served = append(r.s.served, "List")
-	items := make([]*types.IssueWithCounts, 0, len(r.s.ready))
-	for _, issue := range r.s.ready {
-		items = append(items, &types.IssueWithCounts{Issue: issue})
+	items := make([]*types.IssueWithCounts, 0, len(r.s.ready)+len(r.s.others))
+	for _, issue := range slices.Concat(r.s.ready, r.s.others) {
+		items = append(items, r.s.servedRow(issue))
 	}
 	return publicops.IssuePage{Items: items}, nil
 }
@@ -189,6 +249,10 @@ type servedReadyClaimer struct{ s *remoteStore }
 
 func (c servedReadyClaimer) ClaimNext(ctx context.Context, req publicops.ClaimNextRequest) (publicops.ClaimNextResult, error) {
 	c.s.served = append(c.s.served, "ClaimNext")
+	if len(c.s.arriving) > 0 {
+		c.s.ready = slices.Concat(c.s.arriving, c.s.ready)
+		c.s.arriving = nil
+	}
 	for _, issue := range c.s.ready {
 		if issue.Assignee != "" {
 			continue
@@ -199,6 +263,35 @@ func (c servedReadyClaimer) ClaimNext(ctx context.Context, req publicops.ClaimNe
 		return publicops.ClaimNextResult{Claimed: &types.IssueWithCounts{Issue: issue}}, nil
 	}
 	return publicops.ClaimNextResult{}, nil
+}
+
+func (r *remoteStore) Releaser() (publicops.Releaser, error) { return servedReleaser{r}, nil }
+
+// servedReleaser gives a claim back as the served release does: only while
+// the holder the request names (ExpectedAssignee, else the actor) holds it.
+type servedReleaser struct{ s *remoteStore }
+
+func (rl servedReleaser) Release(_ context.Context, req publicops.ReleaseRequest) (publicops.ReleaseResult, error) {
+	rl.s.served = append(rl.s.served, "Release "+req.IssueID)
+	if rl.s.releaseErr != nil {
+		return publicops.ReleaseResult{}, rl.s.releaseErr
+	}
+	holder := req.Actor
+	if req.ExpectedAssignee != nil {
+		holder = *req.ExpectedAssignee
+	}
+	for _, issue := range rl.s.ready {
+		if issue.ID != req.IssueID {
+			continue
+		}
+		if issue.Assignee == "" || issue.Assignee != holder {
+			return publicops.ReleaseResult{}, publicops.ErrAssigneeMismatch
+		}
+		issue.Assignee, issue.Status = "", types.StatusOpen
+		released := *issue
+		return publicops.ReleaseResult{Issue: &released, Changed: true}, nil
+	}
+	return publicops.ReleaseResult{}, publicops.ErrNotFound
 }
 
 type servedAnnotator struct{ s *remoteStore }
@@ -340,11 +433,17 @@ func TestRemoteRolesAnswerWithoutTheLegacyMethods(t *testing.T) {
 		t.Fatalf("CloseBatch = %+v, %v; want 2 outcomes", result.Outcomes, err)
 	}
 
-	if want := []string{"List", "Get be-a", "Ready", "Claim be-a", "ClaimNext", "AnnotateBlocking", "WalkTree"}; !slices.Equal(raw.served, want) {
+	// The claim-next reads the front of the queue first ("Ready"): this
+	// server does not apply the policy, so the rows it would claim from are
+	// judged by their own edges before its atomic claim-next takes one.
+	if want := []string{"List", "Get be-a", "Ready", "Claim be-a", "Ready", "ClaimNext", "AnnotateBlocking", "WalkTree"}; !slices.Equal(raw.served, want) {
 		t.Fatalf("served calls = %v, want %v", raw.served, want)
 	}
 	if want := [][]string{{a.ID, b.ID}}; !slices.EqualFunc(raw.closes, want, slices.Equal[[]string]) {
 		t.Fatalf("served closes = %v, want %v", raw.closes, want)
+	}
+	if raw.scans != 0 {
+		t.Fatalf("workspace-wide dependency walks = %d, want none", raw.scans)
 	}
 }
 
@@ -410,8 +509,14 @@ func TestRemoteReaderAnswersAReadyListingWithoutTheWireFlag(t *testing.T) {
 			if !slices.Equal(got, tc.want) {
 				t.Fatalf("List(ReadyFlag) = %v, want %v", got, tc.want)
 			}
-			if slices.Contains(raw.served, "List") {
+			// The ready read is judged by its own rows' edges: neither the
+			// ready listing nor a walk of the plain one reaches the served
+			// List.
+			if slices.ContainsFunc(raw.served, func(call string) bool { return strings.HasPrefix(call, "List") }) {
 				t.Fatalf("served calls = %v: a ready listing reached the served List", raw.served)
+			}
+			if raw.scans != 0 {
+				t.Fatalf("workspace-wide dependency walks = %d, want none", raw.scans)
 			}
 		})
 	}
@@ -549,7 +654,9 @@ func TestRemoteReadyClaimerWalksAContendedFront(t *testing.T) {
 		{name: "three lost ahead", rivals: 3, last: true, wantLast: true, wantReads: 1},
 		{name: "a full window lost", rivals: remoteClaimPage, last: true, wantLast: true, wantReads: 2},
 		{name: "both passes lost", rivals: remoteClaimPage, last: true, lastTaken: true, wantErr: "lost 26 races", wantReads: 2},
-		{name: "nothing behind a lost window", rivals: remoteClaimPage, wantReads: 2},
+		// be-blocked takes the first window's last slot, so its other rows
+		// are every candidate there is.
+		{name: "nothing behind a lost window", rivals: remoteClaimPage - 1, wantReads: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			blocked, last := issue("be-blocked"), issue("be-last")
@@ -593,6 +700,82 @@ func TestRemoteReadyClaimerWalksAContendedFront(t *testing.T) {
 			}
 			if reads != tc.wantReads {
 				t.Fatalf("served ready reads = %d, want %d", reads, tc.wantReads)
+			}
+		})
+	}
+}
+
+// TestRemoteReadyClaimerChecksTheServersPick: with nothing judged blocked the
+// claim is still the server's one atomic claim-next, but the server re-reads
+// the ready set when it claims and applies no cross-rig policy, so it can take
+// a row the client never judged (rivals took the judged rows, or a row became
+// ready ahead of them). Against an old-token server that leaves bare cross-rig
+// ids to the client (GH#5784 AC-8), such a pick is judged by an edge read of it
+// alone: kept when nothing blocks it, else released and replaced by a judged
+// candidate claimed by id. A pick that can be neither kept nor released is an
+// error naming its blocker. A judged pick costs no read.
+func TestRemoteReadyClaimerChecksTheServersPick(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		arriving    string // the row the served claim-next sees first, unread by the client
+		blocked     bool   // an open cross-rig blocker holds it
+		releaseErr  error
+		wantClaimed string
+		wantServed  []string
+		wantReads   []int
+		wantErr     string
+	}{
+		{name: "a judged pick", wantClaimed: "aa-1", wantServed: []string{"Ready", "ClaimNext"}},
+		{
+			name: "an unjudged pick nothing blocks", arriving: "aa-new", wantClaimed: "aa-new",
+			wantServed: []string{"Ready", "ClaimNext"}, wantReads: []int{1},
+		},
+		{
+			name: "an unjudged pick a cross-rig blocker holds", arriving: "aa-late", blocked: true, wantClaimed: "aa-1",
+			wantServed: []string{"Ready", "ClaimNext", "Release aa-late", "Claim aa-1"}, wantReads: []int{1},
+		},
+		{
+			name: "a blocked pick that cannot be released", arriving: "aa-late", blocked: true,
+			releaseErr: errors.New("release refused"), wantErr: "releasing it failed",
+			wantServed: []string{"Ready", "ClaimNext", "Release aa-late"}, wantReads: []int{1},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := newRemoteStore(issue("aa-1"), issue("aa-2"))
+			raw.enforced, raw.capabilityOnly = true, true
+			raw.releaseErr = tc.releaseErr
+			var late *types.Issue
+			if tc.arriving != "" {
+				late = issue(tc.arriving)
+				raw.arriving = []*types.Issue{late}
+				if tc.blocked {
+					raw.deps[late.ID] = []*types.Dependency{externalDep(late.ID, "bb-1", types.DepBlocks)}
+				}
+			}
+			resolver := &fakeIssueResolver{issues: map[string]*types.Issue{"bb-1": foreignIssue("bb-1", types.StatusOpen)}}
+			store := New(crossRigRemote{raw}, func(ProjectName) (string, bool) { return "", false }, nil,
+				WithIssueResolver(resolver.resolve))
+			claimer, err := store.ReadyClaimer()
+			if err != nil {
+				t.Fatalf("ReadyClaimer: %v", err)
+			}
+
+			next, err := claimer.ClaimNext(t.Context(), publicops.ClaimNextRequest{Actor: "worker"})
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "bb-1") || next.Claimed != nil {
+					t.Fatalf("ClaimNext = %+v, %v; want a %q error naming the blocker bb-1", next.Claimed, err, tc.wantErr)
+				}
+			} else if err != nil || next.Claimed == nil || next.Claimed.ID != tc.wantClaimed || next.Claimed.Assignee != "worker" {
+				t.Fatalf("ClaimNext = %+v, %v; want %s claimed for worker", next.Claimed, err, tc.wantClaimed)
+			}
+			if !slices.Equal(raw.served, tc.wantServed) {
+				t.Fatalf("served calls = %v, want %v", raw.served, tc.wantServed)
+			}
+			if !slices.Equal(raw.edgeReads, tc.wantReads) || raw.scans != 0 {
+				t.Fatalf("edge reads = %v (anchors each), workspace walks = %d; want %v and none", raw.edgeReads, raw.scans, tc.wantReads)
+			}
+			if tc.blocked && tc.releaseErr == nil && (late.Assignee != "" || late.Status != types.StatusOpen) {
+				t.Fatalf("%s = %q/%s, want its claim released: an open cross-rig blocker holds it", late.ID, late.Assignee, late.Status)
 			}
 		})
 	}
