@@ -390,6 +390,48 @@ bd list
 On macOS, `/tmp` is a symlink to `/private/tmp`, which is not always cleared
 on restart — the state file can persist across reboots.
 
+### Read timeout: "possible pool read timeout"
+
+**Symptom (server mode):** A read command such as `bd list` fails once,
+without retrying:
+
+```
+Error: search count issues: invalid connection: possible pool read timeout (configured 10s); read not retried; check BEADS_DOLT_POOL_READ_TIMEOUT or dolt.pool-read-timeout
+```
+
+**Cause:** bd waits at most `dolt.pool-read-timeout` (default `10s`) for each
+read from the Dolt server. It is a per-I/O deadline, not a budget for the
+whole query. When a read runs past it, the driver drops the connection, but
+the server may still be running the query, so bd does not send it again:
+every resend would leave one more session busy on the server. The failure
+counts once toward the
+[circuit breaker](#circuit-breaker-server-appears-down-failing-fast).
+
+*possible* means bd inferred the timeout: the driver reports only "invalid
+connection", so bd judges by how long the read took, and any connection
+failure that came after the deadline reads the same way. *pool read timed
+out* means the driver reported the timeout itself.
+
+**Telling a failure from an empty list:** the command exits 1, stdout is
+empty, and stderr carries one `Error:` line, with or without `--json`. An
+empty result exits 0 and prints `[]` under `--json`. Scripts should check the
+exit code before parsing stdout.
+
+**Fix:** choose by how often it happens.
+
+- *Occasional, on a slow or shared server* (a large workspace, many
+  worktrees on one server): raise the deadline.
+
+  ```bash
+  export BEADS_DOLT_POOL_READ_TIMEOUT=30s
+  ```
+
+  Or set `dolt.pool-read-timeout` in `config.yaml` (see
+  [Configuration](/reference/configuration)).
+- *Recurring, on reads that are normally fast:* a longer deadline only hides
+  the stall. Look at what the server is doing (its load, other clients, long
+  queries) before changing the setting.
+
 ## Dolt Server Issues
 
 ### Server not starting
