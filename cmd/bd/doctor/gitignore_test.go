@@ -3435,3 +3435,65 @@ func TestEnsureGitignoreForBeadsDir_TightenFailureIsPermissionOnly(t *testing.T)
 		}
 	})
 }
+
+// machineLocalStateFiles are the per-machine files bd writes inside .beads/
+// that GH#8318 found missing from the gitignore: bd backup's destination
+// (an absolute file:// URL) and last-sync state, the bd dolt set audit log
+// (records the absolute .beads path), and the JSONL auto-import stamp.
+var machineLocalStateFiles = []string{
+	"dolt-backup.json",
+	"dolt-backup-state.json",
+	"dolt-config.log",
+	".auto-import-issues.jsonl",
+}
+
+// TestGitignoreTemplate_IgnoresMachineLocalState checks GH#8318 end to end
+// through git: a .beads/.gitignore written on the bd init path must make git
+// ignore every per-machine state file, so `git add .` never commits them.
+func TestGitignoreTemplate_IgnoresMachineLocalState(t *testing.T) {
+	dir := t.TempDir()
+	initCmd := gitCommand("init")
+	initCmd.Dir = dir
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init failed: %v\n%s", err, out)
+	}
+	// A host excludes file must not make this pass without the template.
+	disableGlobalGitIgnore(t, dir)
+
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.Mkdir(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureGitignoreForBeadsDir(beadsDir); err != nil {
+		t.Fatalf("EnsureGitignoreForBeadsDir: %v", err)
+	}
+	for _, name := range machineLocalStateFiles {
+		if err := os.WriteFile(filepath.Join(beadsDir, name), []byte("per-machine\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, name := range machineLocalStateFiles {
+		check := gitCommand("check-ignore", "-q", ".beads/"+name)
+		check.Dir = dir
+		if err := check.Run(); err != nil {
+			t.Errorf("git check-ignore .beads/%s: %v (want ignored)", name, err)
+		}
+	}
+
+	status := gitCommand("status", "--porcelain", "--untracked-files=all", "--", ".beads")
+	status.Dir = dir
+	out, err := status.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git status failed: %v\n%s", err, out)
+	}
+	for _, name := range machineLocalStateFiles {
+		if strings.Contains(string(out), name) {
+			t.Errorf("git status lists .beads/%s as untracked:\n%s", name, out)
+		}
+	}
+
+	if missing := missingGitignorePatterns(GitignoreTemplate); len(missing) != 0 {
+		t.Errorf("GitignoreTemplate lacks required patterns: %v", missing)
+	}
+}
