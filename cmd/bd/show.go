@@ -57,9 +57,7 @@ var showCmd = &cobra.Command{
 		localTime, _ := cmd.Flags().GetBool("local-time")
 		watchMode, _ := cmd.Flags().GetBool("watch")
 		currentMode, _ := cmd.Flags().GetBool("current")
-		includeDepends, _ := cmd.Flags().GetBool("include-dependents")
-		includeComments, _ := cmd.Flags().GetBool("include-comments")
-		briefDeps, _ := cmd.Flags().GetBool("brief-deps")
+		detailFlags := showDetailFlagsFrom(cmd)
 		commentsTail, _ := cmd.Flags().GetInt("comments-tail")
 		if err := validateCommentsTail(commentsTail); err != nil {
 			return err
@@ -169,7 +167,7 @@ var showCmd = &cobra.Command{
 
 			if jsonOutput {
 				// Shaping the detail view belongs to the reader role, not the
-				// CLI: the count-only default (be-ijck6q), the
+				// CLI: the --count-only view (be-ijck6q), the
 				// comments-omitted flag (ga-clgh), and the shallow dependent
 				// rows (be-4d36f2) have to read the same from every frontend,
 				// and going through the accessor is what makes that true by
@@ -186,7 +184,7 @@ var showCmd = &cobra.Command{
 					result.Close()
 					return HandleErrorRespectJSON("%v", rerr)
 				}
-				details, derr := rd.Get(ctx, showGetRequest(issue.ID, includeDepends, includeComments, briefDeps))
+				details, derr := rd.Get(ctx, showGetRequest(issue.ID, detailFlags))
 				if derr != nil {
 					result.Close()
 					return HandleErrorRespectJSON("%v", derr)
@@ -328,24 +326,50 @@ func init() {
 	showCmd.Flags().Bool("local-time", false, "Show timestamps in local time instead of UTC (date-only fields are always local)")
 	showCmd.Flags().BoolP("watch", "w", false, "Watch for changes and auto-refresh display")
 	showCmd.Flags().Bool("current", false, "Show the currently active issue (in-progress, hooked, or last touched)")
-	showCmd.Flags().Bool("include-dependents", false, "Stream full dependent issues in JSON output (--json only; may be slow on hub beads)")
-	showCmd.Flags().Bool("include-comments", false, "Stream full comment bodies in JSON output (--json only; may be slow on issues with many comments). "+
-		"Without it the comments field is absent entirely, not truncated: an issue with comments carries "+
-		"comment_count and comments_omitted=true, so check those before reading an absent comments field as none.")
+	showCmd.Flags().Bool("count-only", false, "Leave the dependents and comments arrays out of JSON output and report them only as dependent_count and comment_count "+
+		"(--json only; the fast path for hub beads and polling callers). An issue whose comments were left out carries comments_omitted=true, "+
+		"so check it before reading an absent comments field as none. --include-dependents / --include-comments add their array back.")
+	showCmd.Flags().Bool("include-dependents", false, "With --count-only, stream the dependent rows anyway (--json only). The default JSON output already includes them.")
+	showCmd.Flags().Bool("include-comments", false, "With --count-only, stream the full comment bodies anyway (--json only). The default JSON output already includes them.")
 	showCmd.Flags().Bool("brief-deps", false, "Reduce each dependency to its identity fields in JSON output (--json only; drops description, design, notes and acceptance criteria)")
 	showCmd.Flags().Int("comments-tail", 0, "Render only the last N comments in text output, preceded by one elision line naming how many older ones were hidden (text output only; 0, the default, renders every comment unchanged; N must be >= 0)")
 	showCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(showCmd)
 }
 
+// showDetailFlags are the show flags that shape the JSON detail view. Both
+// show routes read them through showDetailFlagsFrom, so a flag cannot reach
+// only one route.
+type showDetailFlags struct {
+	countOnly         bool
+	includeDependents bool
+	includeComments   bool
+	briefDeps         bool
+}
+
+// showDetailFlagsFrom reads the detail-view flags off the show command.
+func showDetailFlagsFrom(cmd *cobra.Command) showDetailFlags {
+	var f showDetailFlags
+	f.countOnly, _ = cmd.Flags().GetBool("count-only")
+	f.includeDependents, _ = cmd.Flags().GetBool("include-dependents")
+	f.includeComments, _ = cmd.Flags().GetBool("include-comments")
+	f.briefDeps, _ = cmd.Flags().GetBool("brief-deps")
+	return f
+}
+
 // showGetRequest carries the show flags onto the read contract. Extracted so
-// the hop is reachable from a test: both show routes build this request
-// independently, and a dropped field here is invisible to every other test.
-func showGetRequest(id string, includeDependents, includeComments, briefDeps bool) issueops.GetRequest {
+// the hop is reachable from a test: a dropped field here is invisible to every
+// other test.
+//
+// bd show --json defaults to the full detail view, the v0.49.6 contract
+// (#4122); --count-only opts into the counts-only view a zero GetRequest
+// names, and --include-* re-add one relation under it. Without --count-only
+// the --include-* flags change nothing.
+func showGetRequest(id string, f showDetailFlags) issueops.GetRequest {
 	return issueops.GetRequest{
 		ID:                id,
-		IncludeDependents: includeDependents,
-		IncludeComments:   includeComments,
-		BriefDeps:         briefDeps,
+		IncludeDependents: !f.countOnly || f.includeDependents,
+		IncludeComments:   !f.countOnly || f.includeComments,
+		BriefDeps:         f.briefDeps,
 	}
 }

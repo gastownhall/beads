@@ -91,9 +91,11 @@ and a non-blocking edge (a plain subject hides a role result that adds
 - `bd sql` is **not supported in embedded mode** (this harness's mode), so it is
   not in the corpus. A downstream consumer's ready-projection enrichment depends on `bd sql`
   against a managed Dolt server; covering it needs a server-mode generation path.
-- The `show` blob pins the **count-only** default payload (`comment_count`,
-  `dependent_count`); the opt-in `--include-comments` / `--include-dependents`
-  shapes are not in the corpus. They are covered at the CLI level by the
+- The `show` blob pins the default payload of an issue with no comments and
+  no dependents, which is byte-identical to the `--count-only` shape
+  (`comment_count`, `dependent_count`); the shapes with populated `comments` /
+  `dependents` arrays, and `--count-only` over an issue that has them, are not
+  in the corpus. They are covered at the CLI level by the
   preservation and round-trip tests, not byte-pinned for a consumer.
 - The native-fix captures run in direct embedded mode, like the rest of the
   corpus: not in direct server mode, and not over `bd connect`. Each write has

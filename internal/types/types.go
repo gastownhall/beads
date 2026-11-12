@@ -1294,15 +1294,18 @@ type IssueDetails struct {
 	Comments     []*Comment                     `json:"comments,omitempty"`
 	Parent       *string                        `json:"parent,omitempty"`
 
-	// Cardinality fields — emitted by default (count-only mode).
-	// Slice fields (Dependents, Comments) are nil when count-only is active.
-	// Use --include-dependents / --include-comments to populate the slices.
+	// Cardinality fields — always emitted. The slice fields (Dependents,
+	// Comments) are nil in count-only mode: a zero issueops.GetRequest, or
+	// bd show --json --count-only. Plain bd show --json populates both
+	// (#4122); under --count-only, --include-dependents / --include-comments
+	// populate their own slice.
 	DependentCount  *int64 `json:"dependent_count,omitempty"`
 	DependencyCount *int64 `json:"dependency_count,omitempty"`
 	CommentCount    *int64 `json:"comment_count,omitempty"`
 
 	// CommentsOmitted is set true only when CommentCount is nonzero AND
-	// Comments was left nil (count-only mode, no --include-comments). Without
+	// Comments was left nil (count-only mode: --count-only without
+	// --include-comments, or a request that did not ask for comments). Without
 	// it, a positive CommentCount with no Comments key reads as a client bug,
 	// and a caller checking only `.comments` sees `null`/absent and concludes
 	// "no comments" — both wrong (ga-clgh). Never set alongside a populated
@@ -1347,7 +1350,8 @@ type IssueDetails struct {
 	// That gate is on this field only, and the two planes disagree because of
 	// it: `bd show` in text mode reads dependents unconditionally, so a human
 	// always sees the inbound notice, while a --json caller sees this field
-	// only with --include-dependents (itself --json only). Recorded rather
+	// whenever dependents are read: by default, and under --count-only only
+	// with --include-dependents. Recorded rather
 	// than fixed — the per-field restriction above is the correct half, and
 	// suppressing the text notice to match would lose a disclosure that is
 	// already sound.

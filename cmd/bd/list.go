@@ -471,7 +471,8 @@ func init() {
 
 	// Projection toggle. Like --skip-labels it trades data for bytes, and
 	// unlike it the dropped fields leave a mark on the row (IsLitePartial).
-	// Hydration toggle, the list twin of `bd show --include-comments`. Like
+	// Hydration toggle. Unlike bd show --json, which carries comment bodies
+	// by default (#4122), list stays opt-in: v0.49.6 list never emitted them. Like
 	// --skip-labels and --brief it changes what is HYDRATED and never which
 	// rows match. It costs a query per row that has comments, which is why it
 	// is opt-in on the most-run command in the tree.

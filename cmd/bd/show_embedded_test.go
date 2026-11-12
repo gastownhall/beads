@@ -288,6 +288,46 @@ func TestEmbeddedShowBasicsAndJSON(t *testing.T) {
 		}
 	})
 
+	// #4122: the default --json payload is the full detail view — comments
+	// and dependents inline — with no comments_omitted. The count-only shape
+	// above is what --count-only buys.
+	t.Run("show_json_default_includes_comments_and_dependents", func(t *testing.T) {
+		hub := bdCreate(t, bd, dir, "Default payload hub", "--type", "task")
+		spoke := bdCreate(t, bd, dir, "Default payload spoke", "--type", "task", "--deps", "blocked-by:"+hub.ID)
+		if out, err := bdRunWithFlockRetry(t, bd, dir, "comments", "add", hub.ID, "hub comment"); err != nil {
+			t.Fatalf("bd comments add failed: %v\n%s", err, out)
+		}
+
+		m := bdShowDetails(t, bd, dir, hub.ID)
+		comments, _ := m["comments"].([]interface{})
+		if len(comments) != 1 {
+			t.Errorf("default payload: got %d comments, want 1 (%v)", len(comments), m["comments"])
+		}
+		dependents, _ := m["dependents"].([]interface{})
+		found := false
+		for _, d := range dependents {
+			row, _ := d.(map[string]interface{})
+			if row["id"] == spoke.ID {
+				found = true
+				if row["dependency_type"] != "blocks" {
+					t.Errorf("dependent dependency_type: got %v, want blocks", row["dependency_type"])
+				}
+			}
+		}
+		if !found {
+			t.Errorf("default payload: hub %s does not list dependent %s (%v)", hub.ID, spoke.ID, m["dependents"])
+		}
+		if got, _ := m["comment_count"].(float64); got != 1 {
+			t.Errorf("comment_count: got %v, want 1", m["comment_count"])
+		}
+		if got, _ := m["dependent_count"].(float64); got != 1 {
+			t.Errorf("dependent_count: got %v, want 1", m["dependent_count"])
+		}
+		if v, ok := m["comments_omitted"]; ok {
+			t.Errorf("comments_omitted should be absent in the default payload, got %v", v)
+		}
+	})
+
 	// GH#5565 / bd-u96si: direct/embedded twin of proxied
 	// show_wisp_comments_include_streams. --include-comments must stream the
 	// wisp's comments from wisp_comments, the count in the same payload must
