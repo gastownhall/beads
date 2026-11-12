@@ -423,6 +423,9 @@ func runFederationAddPeer(cmd *cobra.Command, args []string) error {
 		if err := store.AddFederationPeer(ctx, peer); err != nil {
 			return HandleErrorRespectJSON("failed to add peer: %v", err)
 		}
+		// Report the peer's effective tier: an omitted --sovereignty keeps
+		// the stored one (GH#5213), which the store hands back here.
+		sov = peer.Sovereignty
 	} else {
 		if err := store.AddRemote(ctx, name, url); err != nil {
 			return HandleErrorRespectJSON("failed to add peer: %v", err)
