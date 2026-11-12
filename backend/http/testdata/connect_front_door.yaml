@@ -1537,7 +1537,10 @@ commands:
       - id: promote
         class: works
         args: [promote, e2e-tpromote, '--json']
+        # #4122: the promote's comment rides in the show verify's default
+        # payload now, and each side mints the comment id itself.
         verify: [[show, e2e-tpromote, '--json']]
+        ignore_fields: [id]
   - command: bd provenance by-ref
     cases:
       - id: provenance-by-ref
@@ -1763,6 +1766,9 @@ commands:
       - id: show
         class: works
         args: [show, e2e-fdalpha, '--json']
+        # #4122: the default show --json payload carries e2e-fdalpha's seed
+        # comment, whose id each side mints itself.
+        ignore_fields: [id]
       - id: show-text
         class: works
         args: [show, e2e-fdalpha]
