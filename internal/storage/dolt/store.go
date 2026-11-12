@@ -3034,10 +3034,10 @@ func buildServerDSN(cfg *Config, database string) string {
 // and executes the given query. Push/pull operations can exceed the default
 // readTimeout when the server performs network I/O to git remotes.
 //
-// The query is wrapped in an explicit transaction (BEGIN/COMMIT) so that
-// DOLT_PULL merge operations succeed even when the server runs with
-// autocommit=1. Without this, Dolt rejects merges under autocommit because
-// it cannot expose conflict-resolution tables to the caller.
+// The query is wrapped in an explicit transaction (BEGIN/COMMIT). That was
+// added for DOLT_PULL merges, which Dolt rejects under autocommit=1 because it
+// cannot expose conflict-resolution tables to the caller; no pull runs here
+// now (bd-e2q8zs: pulls fetch and then merge the tracking ref).
 //
 // Audited for be-b0am's fresh-connection branch hazard: safe — but the two
 // callers are safe for different reasons, so the annotation names both.
@@ -5348,18 +5348,18 @@ func cliTransferError(op, remote string, transferCtx context.Context, out []byte
 	return fmt.Errorf("%s failed: %s: %w", op, detail, err)
 }
 
-// doltCLIPull pulls remote's s.branch on the CLI route: it shells out to
-// `dolt fetch <remote> <branch>` from the database directory, then merges the
-// tracking ref <remote>/<branch> in SQL (mergeTrackingRefAfterCLIFetch).
-// Used for git-protocol remotes, where a transfer through the SQL connection
-// times out, and for the credential and cloud-auth routes. If creds is
-// non-nil, credentials are set on the subprocess environment only.
+// doltCLIFetchBranch shells out to `dolt fetch <remote> <s.branch>` from the
+// database directory: the transfer of a CLI-routed pull, whose tracking ref
+// mergeTrackingRefAfterCLIFetch then merges over SQL. Used for git-protocol
+// remotes, where a transfer through the SQL connection times out, and for the
+// credential and cloud-auth routes. If creds is non-nil, credentials are set
+// on the subprocess environment only. op names the transfer in its error.
 //
 // Never `dolt pull`: it forwards to the server's DOLT_PULL, whose merge
 // message copies the stored remote URL, credentials included (bd-e2q8zs).
 // `dolt fetch` forwards to DOLT_FETCH, which advances the server's tracking
 // ref, and the network transfer still runs under the CLI timeout.
-func (s *DoltStore) doltCLIPull(ctx context.Context, remote string, creds *remoteCredentials) error {
+func (s *DoltStore) doltCLIFetchBranch(ctx context.Context, op, remote string, creds *remoteCredentials) error {
 	cmd, transferCtx, cancel, err := s.prepareDoltCLITransfer(ctx, remote, creds, "fetch", remote, s.branch)
 	if err != nil {
 		return err
@@ -5367,45 +5367,88 @@ func (s *DoltStore) doltCLIPull(ctx context.Context, remote string, creds *remot
 	defer cancel()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return cliTransferError("dolt fetch", remote, transferCtx, out, err)
+		return cliTransferError(op, remote, transferCtx, out, err)
+	}
+	return nil
+}
+
+// doltCLIPull pulls remote's s.branch on the CLI route: doltCLIFetchBranch
+// runs the transfer, then mergeTrackingRefAfterCLIFetch merges the tracking
+// ref <remote>/<branch> it advanced.
+func (s *DoltStore) doltCLIPull(ctx context.Context, remote string, creds *remoteCredentials) error {
+	if err := s.doltCLIFetchBranch(ctx, "dolt fetch", remote, creds); err != nil {
+		return err
 	}
 	return s.mergeTrackingRefAfterCLIFetch(ctx, remote+"/"+s.branch)
 }
 
+// openCLIMergeDB opens the database mergeTrackingRefAfterCLIFetch merges on:
+// openLongTimeoutConn. Declared as a var so unit tests can hand the merge a
+// sqlmock database.
+var openCLIMergeDB = (*DoltStore).openLongTimeoutConn
+
 // mergeTrackingRefAfterCLIFetch merges ref, a tracking ref a CLI fetch just
 // advanced, into the store's branch with CALL DOLT_MERGE, whose default
-// message names only the ref. It runs on a pinned pool connection, which is
-// on the branch finishCLIPull's resolver settles, with
-// @@dolt_force_transaction_commit set as `dolt pull` sets it, so a conflicted
-// merge stays in the working set for the resolver and the operator, as a CLI
-// pull's did. The variable is session-scoped: it is reset before the
-// connection goes back to the pool, and a connection whose reset fails is
-// discarded rather than returned dirty.
+// message names only the ref (bd-e2q8zs).
+//
+// The merge runs on a dedicated long-timeout session (openLongTimeoutConn),
+// as the SQL route's merge does, not on a pool connection. `dolt pull` merged
+// under the CLI transfer timeout; a pool connection's per-I/O read deadline
+// (10s by default, see Config.PoolReadTimeout) is short enough that a
+// three-way merge of a large divergence, or one stalled behind a server
+// auto_gc pause, would fail on every retry. The session is pinned to the
+// store's branch (pinStoreBranch), the branch finishCLIPull's resolver
+// settles on its pool connection.
+//
+// @@dolt_force_transaction_commit is set, and the merge runs in an explicit
+// transaction that is committed, as `dolt pull` set the variable and sent
+// COMMIT, so a conflicted merge commits to the working set with its
+// conflicts, where finishCLIPull's resolver settles what it can. Without the
+// explicit COMMIT, a server started with --no-auto-commit would discard the
+// conflicted merge when the session closes, and the resolver would never see
+// it. A merge the resolver declines stays open there, as a declined `dolt
+// pull` left it: that is GH#7839, which #7849 fixes by merging and settling in
+// bd's own transaction. The session is discarded after the merge, so the
+// variable never reaches another caller.
 func (s *DoltStore) mergeTrackingRefAfterCLIFetch(ctx context.Context, ref string) error {
-	conn, err := s.db.Conn(ctx)
+	db, err := openCLIMergeDB(s)
 	if err != nil {
-		return fmt.Errorf("merge %s: acquire connection: %w", ref, err)
+		return fmt.Errorf("merge %s: %w", ref, err)
 	}
-	varSet := false
-	defer func() {
-		if varSet {
-			if _, err := conn.ExecContext(ctx, "SET @@dolt_force_transaction_commit = 0"); err != nil {
-				_ = conn.Raw(func(any) error { return driver.ErrBadConn })
-			}
-		}
-		_ = conn.Close()
-	}()
+	defer db.Close()
+	// See recomputeAllBlocked: pin a single physical connection and reproduce
+	// the store's real active branch on it before the merge runs (be-b0am).
+	// With no idle connection kept, closing it ends the session.
+	db.SetMaxIdleConns(0)
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("merge %s: acquire long-timeout connection: %w", ref, err)
+	}
+	defer conn.Close()
+	if err := s.pinStoreBranch(ctx, conn); err != nil {
+		return fmt.Errorf("merge %s: %w", ref, err)
+	}
 	if _, err := conn.ExecContext(ctx, "SET @@dolt_force_transaction_commit = 1"); err != nil {
 		return fmt.Errorf("merge %s: set dolt_force_transaction_commit: %w", ref, err)
 	}
-	varSet = true
-	mergeRow, mergeErr := schema.CallReturningRow(ctx, conn, "CALL DOLT_MERGE(?)", ref)
-	// As in fetchAndMergeTrackingRefInTx: the ordinary no-op arrives as a
-	// message, and only the squash path's "Already up to date." as an error.
-	if mergeErr != nil && !strings.Contains(mergeErr.Error(), "up to date") {
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("merge %s: begin transaction: %w", ref, err)
+	}
+	mergeRow, mergeErr := schema.CallReturningRow(ctx, tx, "CALL DOLT_MERGE(?)", ref)
+	if mergeErr != nil {
+		_ = tx.Rollback()
+		// As in fetchAndMergeTrackingRefInTx: the ordinary no-op arrives as a
+		// message, and only the squash path's "Already up to date." as an error.
+		if strings.Contains(mergeErr.Error(), "up to date") {
+			return nil
+		}
 		return fmt.Errorf("merge %s: %w", ref, mergeErr)
 	}
-	// A conflicted merge left its conflicts in the working set. Fail, as a
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("merge %s: commit: %w", ref, err)
+	}
+	// A conflicted merge committed its conflicts to the working set. Fail, as a
 	// conflicted `dolt pull` did, so finishCLIPull reports the pull as failed
 	// unless its resolver settles every conflict.
 	if parseMergeReport(mergeRow).Conflicted {
@@ -5549,10 +5592,14 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 	})
 }
 
-// Pull pulls changes from the remote.
-// Passes branch explicitly to avoid "did not specify a branch" errors.
-// For git-protocol remotes (SSH, git+https://, git://), uses CLI `dolt pull` to avoid MySQL connection timeouts.
-// For non-SSH Hosted Dolt (remoteUser set), uses CALL DOLT_PULL with --user authentication.
+// Pull pulls changes from the remote: it fetches the store's branch and merges
+// the tracking ref <remote>/<branch> (pullTransportReporting).
+// For git-protocol remotes (SSH, git+https://, git://), the fetch runs as a CLI
+// `dolt fetch` to avoid MySQL connection timeouts.
+// For non-SSH Hosted Dolt (remoteUser set), the fetch is CALL DOLT_FETCH with
+// --user authentication.
+// No route runs `dolt pull` or CALL DOLT_PULL: Dolt's pull writes the stored
+// remote URL, credentials included, into its merge commit message (bd-e2q8zs).
 //
 // If the pull results in merge conflicts on the metadata table only (e.g., from
 // stale dolt_auto_push_* rows on multi-machine setups), the conflicts are
@@ -5669,12 +5716,13 @@ func (s *DoltStore) branchHash(ctx context.Context, branch string) (string, erro
 // merge (ga-ivaps).
 //
 // WHY A POST-CONDITION AND NOT A BETTER TRANSPORT CHECK. Pull() has several
-// routes (CLI subprocess, CALL DOLT_PULL, the fetch+merge fallback) and each
-// reports success its own way; `dolt pull` exits 0 both when it merged and when
-// it was already up to date, and CALL DOLT_PULL's (fast_forward, conflicts,
-// message) row is discarded by the shared DrainCall helper. Rather than teach
-// every route a new dialect, this asserts the one thing all of them promise:
-// after a successful pull, the branch you read contains what was fetched.
+// routes (a CLI `dolt fetch` then a merge on its own session, or a SQL fetch
+// and merge in one transaction) and each reports success its own way: the CLI
+// routes report nothing of what they merged, and when this check was written
+// the routes ran Dolt's own pull, and `dolt pull` exited 0 both when it merged
+// and when it was already up to date. Rather than teach every route a new
+// dialect, this asserts the one thing all of them promise: after a successful
+// pull, the branch you read contains what was fetched.
 //
 // THE THREE OUTCOMES, AND WHY THE NO-OP STAYS QUIET:
 //
@@ -5865,9 +5913,9 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 		return pullReport{}, err
 	} else if useCLI {
 		logRouteDecision("pull", remote, true)
-		// CLI pull leaves any conflicts in the working set; run the auto-resolver so
-		// git-protocol remotes get the same audit-only dependency / metadata repair
-		// as the SQL DOLT_PULL path (#4259).
+		// The CLI route's merge leaves any conflicts in the working set; run the
+		// auto-resolver so git-protocol remotes get the same audit-only
+		// dependency / metadata repair as the SQL route (#4259).
 		return pullReport{}, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
 	}
 	// Credential CLI routing: mirrors git-protocol path, including post-pull
@@ -6069,7 +6117,7 @@ func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote, us
 // why the violation gate here is mandatory: with the force flag on, committing
 // without it would persist a violated working set.
 func (s *DoltStore) settleMergeInTx(ctx context.Context, tx *sql.Tx, pullErr error) error {
-	// Check for merge conflicts regardless of whether DOLT_PULL errored.
+	// Check for merge conflicts regardless of whether the merge errored.
 	// Some Dolt versions error on conflicts, others leave them in the working set.
 	resolved, resolveErr := s.tryAutoResolveMergeConflicts(ctx, tx)
 	if resolveErr != nil {
@@ -6324,10 +6372,12 @@ func (s *DoltStore) markBlockedRecomputePending(ctx context.Context, fromCommit 
 }
 
 // finishCLIPull runs the merge-conflict auto-resolver after a CLI-based pull
-// (git-protocol, credentialed, or cloud-auth remotes). CLI `dolt pull` writes any
-// merge conflicts into the shared working set but, unlike the SQL DOLT_PULL path,
-// returns without a transaction we can inspect — so these remotes historically
-// skipped the resolver entirely. With deterministic dependency ids (#4259) a
+// (git-protocol, credentialed, or cloud-auth remotes). The CLI route's merge
+// (mergeTrackingRefAfterCLIFetch, which replaced a `dolt pull` subprocess,
+// bd-e2q8zs) commits any merge conflicts into the shared working set but,
+// unlike the SQL route, leaves no transaction we can inspect — so these
+// remotes historically skipped the resolver entirely. With deterministic
+// dependency ids (#4259) a
 // same-edge conflict that differs only in audit columns is safe to auto-resolve, and
 // the git remote topology in #4259 is exactly this CLI path; route it through the
 // same resolver as the SQL path. pullErr is what doltCLIPull returned: a pull that
@@ -6357,9 +6407,9 @@ func (s *DoltStore) finishCLIPull(ctx context.Context, pullErr error) error {
 // conflict classes that are safe without operator input (#4259 audit-only dependency
 // edges, GH#2466 metadata, GH#4698 issues-table LWW). It runs on a connection from
 // the store pool (s.db) on
-// purpose: those connections are on the same branch the CLI `dolt pull` merged into,
-// whereas a separately opened connection would default to the base branch and never
-// see the conflicts. The pull's
+// purpose: those connections are on the store's branch, which the CLI route's merge
+// session was pinned to (pinStoreBranch), whereas a separately opened connection would
+// default to the base branch and never see the conflicts. The pull's
 // network transfer already completed in the subprocess, so no long-timeout connection
 // is needed for the local resolve. Returns (true, nil) only if all conflicts were
 // resolved and committed; (false, nil) when there is nothing to resolve or a conflict

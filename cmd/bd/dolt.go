@@ -227,9 +227,9 @@ type persistedRemoteProber interface {
 }
 
 // isConfirmedNoRemote reports whether a push/pull failure is the benign
-// "no remote configured" case that may exit 0. The sound half,
-// isNoRemoteConfiguredErr (the sync classifier, itself a superset of
-// isRemoteNotFoundErr), is a loose string match that also fires on
+// "no remote configured" case that may exit 0. isNoRemoteConfiguredErr (the
+// sync classifier, itself a superset of isRemoteNotFoundErr) is only a loose
+// string match that also fires on
 // deleted/renamed remote-side repos, missing remote branches, and typoed
 // remote names — real sync failures that must keep a non-zero exit so agents
 // and CI notice (bd-6dnrw.7). Only an actually-empty dolt_remotes table makes
@@ -242,6 +242,9 @@ type persistedRemoteProber interface {
 // (bd-e2q8zs) keeps the `bd dolt pull` exit-0 gate in step with the
 // fetch+merge route's error wordings, including the bare `no remote` error
 // DOLT_FETCH produces for a default remote that was never configured.
+// Embedded mode's pull has always fetched first and failed with that bare
+// error, so an embedded `bd dolt pull` with no remote now exits 0 as well,
+// where it used to exit 1.
 func isConfirmedNoRemote(ctx context.Context, st remoteLister, err error) bool {
 	if !isNoRemoteConfiguredErr(err) {
 		return false

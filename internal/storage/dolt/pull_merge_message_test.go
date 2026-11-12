@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 // pullMergeMessageMarker is the stand-in for a token in the remote URL. A
@@ -17,9 +19,11 @@ const pullMergeMessageMarker = "SECRETe2q8zs"
 
 // divergedPullFixture is a server-mode store and a peer clone of the store's
 // file remote, whose histories have diverged: each holds a commit the other
-// lacks, so the store's next pull has to make a merge commit.
+// lacks, so the store's next pull has to make a merge commit. peer is a
+// session on the peer clone, which pushes to the same remote.
 type divergedPullFixture struct {
 	store     *DoltStore
+	peer      *sql.DB
 	remoteURL string
 }
 
@@ -131,7 +135,7 @@ func newPullFixture(t *testing.T, ctx context.Context, remoteName string, setUps
 		}
 	}
 
-	return divergedPullFixture{store: store, remoteURL: remoteURL}
+	return divergedPullFixture{store: store, peer: peer, remoteURL: remoteURL}
 }
 
 // assertMergeMessageOmitsRemoteURL checks what a merging pull left behind:
@@ -309,4 +313,170 @@ func TestServerPullFastForwardAndNoOpMakeNoMergeCommit(t *testing.T) {
 	if merges != 0 {
 		t.Errorf("%d merge commit(s) in history after a fast-forward and a no-op pull", merges)
 	}
+}
+
+// execAllOn runs queries on db in order, failing the test on the first error.
+func execAllOn(t *testing.T, ctx context.Context, db *sql.DB, who string, queries ...string) {
+	t.Helper()
+	for _, q := range queries {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s %q: %v", who, q, err)
+		}
+	}
+}
+
+// fetchAndMergeAsCLIPull runs the CLI pull route after its subprocess: `dolt
+// fetch origin main` forwards to the server's DOLT_FETCH, which advances the
+// tracking ref every session of the database reads, so CALL DOLT_FETCH stands
+// in for it. Then come the route's own merge and finishCLIPull's resolver.
+func fetchAndMergeAsCLIPull(t *testing.T, ctx context.Context, store *DoltStore) error {
+	t.Helper()
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_FETCH('origin', 'main')"); err != nil {
+		t.Fatalf("fetch origin main: %v", err)
+	}
+	return store.finishCLIPull(ctx, store.mergeTrackingRefAfterCLIFetch(ctx, "origin/main"))
+}
+
+// cliMergeSessionWithAutocommitOff makes the CLI pull route's merge
+// (mergeTrackingRefAfterCLIFetch) dial its session as production does, with
+// autocommit off, for the rest of the test: a server started with
+// --no-auto-commit runs every session that way. The driver sends the DSN's
+// autocommit=0 as SET autocommit = 0 on each connection it opens. A test that
+// uses it must not run in parallel: openCLIMergeDB is package state.
+func cliMergeSessionWithAutocommitOff(t *testing.T) {
+	t.Helper()
+	prev := openCLIMergeDB
+	openCLIMergeDB = func(s *DoltStore) (*sql.DB, error) {
+		cfg, err := mysql.ParseDSN(s.connStr)
+		if err != nil {
+			return nil, err
+		}
+		if cfg.Params == nil {
+			cfg.Params = map[string]string{}
+		}
+		cfg.Params["autocommit"] = "0"
+		db, err := prev(&DoltStore{connStr: cfg.FormatDSN()})
+		if err != nil {
+			return nil, err
+		}
+		var autocommit int
+		if err := db.QueryRowContext(context.Background(), "SELECT @@autocommit").Scan(&autocommit); err != nil || autocommit != 0 {
+			_ = db.Close()
+			return nil, fmt.Errorf("fixture broken: the merge session's @@autocommit = %d (%v), want 0", autocommit, err)
+		}
+		return db, nil
+	}
+	t.Cleanup(func() { openCLIMergeDB = prev })
+}
+
+// settleMetadataConflictOnCLIRoute pulls a metadata conflict (GH#2466's
+// class, which the resolver accepts) through the CLI route and checks that it
+// settled: the remote's value won, the rest of the merge landed, no conflict
+// or open merge is left, and no commit message records the remote URL.
+func settleMetadataConflictOnCLIRoute(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	fx := newPullFixture(t, ctx, "origin", false, false)
+	execAllOn(t, ctx, fx.peer, "peer",
+		"INSERT INTO metadata (`key`, value) VALUES ('e2q8zs_cli_merge', 'theirs')",
+		"CALL DOLT_COMMIT('-Am', 'peer: metadata')",
+		"CALL DOLT_PUSH('origin', 'main')")
+	execAllOn(t, ctx, fx.store.db, "local",
+		"INSERT INTO metadata (`key`, value) VALUES ('e2q8zs_cli_merge', 'ours')",
+		"CALL DOLT_COMMIT('-Am', 'local: metadata')")
+
+	if err := fetchAndMergeAsCLIPull(t, ctx, fx.store); err != nil {
+		t.Fatalf("CLI-route merge with a metadata conflict: %v", err)
+	}
+	db := fx.store.db
+	var value, peerRow string
+	if err := db.QueryRowContext(ctx, "SELECT value FROM metadata WHERE `key` = 'e2q8zs_cli_merge'").Scan(&value); err != nil {
+		t.Fatalf("read settled metadata: %v", err)
+	}
+	if value != "theirs" {
+		t.Errorf("settled metadata = %q, want the remote's %q", value, "theirs")
+	}
+	if err := db.QueryRowContext(ctx, "SELECT v FROM pull_msg_marker WHERE id = 1").Scan(&peerRow); err != nil || peerRow != "from peer" {
+		t.Errorf("the rest of the merge did not land: peer row = %q (%v)", peerRow, err)
+	}
+	var conflicts, merging int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_conflicts").Scan(&conflicts); err != nil {
+		t.Fatalf("count dolt_conflicts: %v", err)
+	}
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_merge_status WHERE is_merging").Scan(&merging); err != nil {
+		t.Fatalf("read dolt_merge_status: %v", err)
+	}
+	if conflicts != 0 || merging != 0 {
+		t.Errorf("settled merge left %d conflicted table(s), merge open: %v", conflicts, merging != 0)
+	}
+	var leaking int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_log WHERE message LIKE ?",
+		"%"+pullMergeMessageMarker+"%").Scan(&leaking); err != nil {
+		t.Fatalf("scan dolt_log: %v", err)
+	}
+	if leaking != 0 {
+		t.Errorf("%d commit message(s) record the remote URL", leaking)
+	}
+}
+
+// TestCLIPullMergeSettlesOnRealDolt runs the CLI pull route's merge against a
+// real Dolt server (bd-e2q8zs). mergeTrackingRefAfterCLIFetch merges
+// origin/main on a long-timeout session of its own and commits the merge in
+// its own transaction, and finishCLIPull's resolver settles on a pool
+// connection; they meet on the working set of the store's branch. A clean
+// merge must land there with a message that names the tracking ref and not
+// the remote URL, a conflict the resolver accepts (GH#2466's metadata class)
+// must settle, also when the merge session runs with autocommit off, and one
+// it declines must fail the pull with nothing committed. What is left of a
+// declined merge is not pinned (GH#7839).
+//
+// The fixture's store sits on the database's default branch, where a fresh
+// session starts too, so this test cannot tell the branch pin
+// (pinStoreBranch) from no pin; TestCLIPullMergeRunsOnAPinnedLongTimeoutSession
+// pins that.
+func TestCLIPullMergeSettlesOnRealDolt(t *testing.T) {
+	t.Run("a clean merge lands on the store's branch", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		fx := newDivergedPullFixture(t, ctx, "origin", false)
+
+		if err := fetchAndMergeAsCLIPull(t, ctx, fx.store); err != nil {
+			t.Fatalf("CLI-route merge: %v", err)
+		}
+		assertMergeMessageOmitsRemoteURL(t, ctx, fx.store.db, "origin/main")
+	})
+
+	t.Run("a conflict the resolver accepts settles", settleMetadataConflictOnCLIRoute)
+
+	// A merge left to autocommit lost its conflicts on a session with
+	// autocommit off: they ended with the session, the resolver found none,
+	// and every retry failed. The merge's own transaction commits them, as the
+	// `dolt pull` it replaced did.
+	t.Run("a conflict the resolver accepts settles with autocommit off", func(t *testing.T) {
+		cliMergeSessionWithAutocommitOff(t)
+		settleMetadataConflictOnCLIRoute(t)
+	})
+
+	t.Run("a conflict the resolver declines fails the pull", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		fx := newPullFixture(t, ctx, "origin", false, false)
+		// The peer already pushed row 1; writing it differently here makes a
+		// pull_msg_marker conflict, a table the resolver never settles.
+		execAllOn(t, ctx, fx.store.db, "local",
+			"INSERT INTO pull_msg_marker VALUES (1, 'local')",
+			"CALL DOLT_COMMIT('-Am', 'local: conflicting row')")
+		preHead, err := fx.store.GetCurrentCommit(ctx)
+		if err != nil {
+			t.Fatalf("read HEAD: %v", err)
+		}
+
+		err = fetchAndMergeAsCLIPull(t, ctx, fx.store)
+		if err == nil || !strings.Contains(err.Error(), "merge origin/main: conflicts found") {
+			t.Fatalf("CLI-route merge with a declined conflict = %v, want the merge's conflicts error", err)
+		}
+		if head, headErr := fx.store.GetCurrentCommit(ctx); headErr != nil || head != preHead {
+			t.Errorf("HEAD moved from %s to %s (%v); a declined merge must not be committed", preHead, head, headErr)
+		}
+	})
 }

@@ -727,6 +727,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd dolt pull` on an embedded rig with no remote exits 0 (bd-e2q8zs).**
+  It prints `No remote is configured — skipping.` and the setup guidance,
+  as server mode already did; in embedded mode it used to exit 1. A pull
+  from a configured remote that fails still exits 1.
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add

@@ -136,8 +136,8 @@ func (s *DoltStore) pullFromPeer(ctx context.Context, peer string) ([]storage.Co
 // as data for the caller, anything else stays an error. The SQL route rolls
 // the conflicted merge back before returning, so its conflicts arrive only via
 // MergeConflictsError, captured pre-rollback (bd-578h9.15); the CLI route's
-// subprocess writes conflicts to the on-disk working set where GetConflicts
-// still sees them.
+// merge (mergeTrackingRefAfterCLIFetch) commits its conflicts to the working
+// set, where GetConflicts still sees them.
 func (s *DoltStore) peerPullOutcome(ctx context.Context, peer string, pullErr error, conflicts *[]storage.Conflict) error {
 	if pullErr == nil {
 		return nil
@@ -723,21 +723,16 @@ func (s *DoltStore) doltCLIPushRefToPeer(ctx context.Context, peer string, refsp
 	return nil
 }
 
-// doltCLIPullFromPeer pulls a specific peer remote on the CLI route: it shells
-// out to `dolt fetch <peer> <branch>`, then merges <peer>/<branch> in SQL.
-// Used for git-protocol remotes where a transfer through the SQL connection
-// times out. Credentials are set on the subprocess environment only via
-// cmd.Env. Never `dolt pull`, whose merge message copies the stored peer URL,
-// credentials included (bd-e2q8zs); see doltCLIPull.
+// doltCLIPullFromPeer pulls a specific peer remote on the CLI route:
+// doltCLIFetchBranch runs `dolt fetch <peer> <branch>`, then
+// mergeTrackingRefAfterCLIFetch merges <peer>/<branch> over SQL. Used for
+// git-protocol remotes where a transfer through the SQL connection times out.
+// Credentials are set on the subprocess environment only via cmd.Env. Never
+// `dolt pull`, whose merge message copies the stored peer URL, credentials
+// included (bd-e2q8zs).
 func (s *DoltStore) doltCLIPullFromPeer(ctx context.Context, peer string, creds *remoteCredentials) error {
-	cmd, transferCtx, cancel, err := s.prepareDoltCLITransfer(ctx, peer, creds, "fetch", peer, s.branch)
-	if err != nil {
+	if err := s.doltCLIFetchBranch(ctx, "fetch from peer "+peer, peer, creds); err != nil {
 		return err
-	}
-	defer cancel()
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return cliTransferError(fmt.Sprintf("fetch from peer %s", peer), peer, transferCtx, out, err)
 	}
 	return s.mergeTrackingRefAfterCLIFetch(ctx, peer+"/"+s.branch)
 }
