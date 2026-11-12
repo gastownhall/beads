@@ -1536,7 +1536,9 @@ commands:
     cases:
       - id: promote
         class: works
+        note: the verify show carries the promotion comment, whose id is minted per workspace
         args: [promote, e2e-tpromote, '--json']
+        ignore_fields: [id]
         verify: [[show, e2e-tpromote, '--json']]
   - command: bd provenance by-ref
     cases:
@@ -1762,7 +1764,9 @@ commands:
     cases:
       - id: show
         class: works
+        note: the default payload carries e2e-fdalpha's seed comment (#4122), and comment ids are minted per workspace
         args: [show, e2e-fdalpha, '--json']
+        ignore_fields: [id]
       - id: show-text
         class: works
         args: [show, e2e-fdalpha]
