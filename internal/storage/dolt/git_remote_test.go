@@ -2324,3 +2324,36 @@ func TestGitRemoteDeclinedConflictPullLeavesWritesWorking(t *testing.T) {
 		t.Errorf("after the retried pull a fresh session sees is_merging=%v and %d conflicted table(s); want neither", merging, n)
 	}
 }
+
+// TestGitRemotePeerDeclinedConflictPullAbortsMerge pins AC-3: the same
+// declined conflict through PullFrom over a git-protocol peer (the CLI peer
+// route, doltCLIPullFromPeer) returns the conflicts as data with a nil error,
+// PullFrom's contract, and leaves no conflicted merge open.
+func TestGitRemotePeerDeclinedConflictPullAbortsMerge(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+	defer cancel()
+	store, _, _ := setupDeclinedCLIPullConflict(t, ctx)
+
+	useCLI, err := store.prepareCLIRouteForPeerGitProtocol(ctx, "origin")
+	if err != nil || !useCLI {
+		t.Fatalf("prepareCLIRouteForPeerGitProtocol(origin) = %v, %v; want the CLI peer route", useCLI, err)
+	}
+	preHead, err := store.branchHash(ctx, store.branch)
+	if err != nil {
+		t.Fatalf("pre-pull head: %v", err)
+	}
+
+	conflicts, pullErr := store.PullFrom(ctx, "origin")
+	if pullErr != nil {
+		t.Fatalf("PullFrom error = %v; want the conflicts as data with a nil error", pullErr)
+	}
+	if len(conflicts) != 1 || conflicts[0].Field != "issues" {
+		t.Errorf("PullFrom conflicts = %+v; want exactly the issues table", conflicts)
+	}
+	if merging, n := freshSessionMergeState(t, ctx, store); merging || n != 0 {
+		t.Errorf("after PullFrom a fresh session sees is_merging=%v and %d conflicted table(s); want the merge aborted", merging, n)
+	}
+	if postHead, err := store.branchHash(ctx, store.branch); err != nil || postHead != preHead {
+		t.Errorf("branch head after PullFrom = %s (err=%v); want the pre-pull head %s", postHead, err, preHead)
+	}
+}
