@@ -198,6 +198,47 @@ func TestProxiedServerShow(t *testing.T) {
 		}
 	})
 
+	// #4122: the proxied route's plain show --json carries the full payload,
+	// as the direct route does; the count-only view is opt-in (--count-only).
+	t.Run("show_json_full_payload_default", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sjfp")
+		target := bdProxiedCreate(t, bd, p.dir, "Full payload", "--type", "task")
+		dependent := bdProxiedCreate(t, bd, p.dir, "Dependent",
+			"--type", "task", "--deps", "blocked-by:"+target.ID)
+
+		db := openProxiedDB(t, p)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := db.ExecContext(ctx,
+			"INSERT INTO comments (id, issue_id, author, text, created_at) VALUES (?, ?, ?, ?, NOW())",
+			fmt.Sprintf("cmt-%d", time.Now().UnixNano()), target.ID, "tester", "Full note"); err != nil {
+			t.Fatalf("insert comment: %v", err)
+		}
+
+		m := bdProxiedShowDetailsFirst(t, bd, p.dir, target.ID)
+		comments, _ := m["comments"].([]interface{})
+		if len(comments) != 1 {
+			t.Fatalf("default JSON: want 1 comment, got %v", m["comments"])
+		}
+		if c, _ := comments[0].(map[string]interface{}); c["text"] != "Full note" {
+			t.Errorf("comment text: got %v, want Full note", c["text"])
+		}
+		dependents, _ := m["dependents"].([]interface{})
+		if len(dependents) != 1 {
+			t.Fatalf("default JSON: want 1 dependent, got %v", m["dependents"])
+		}
+		if d, _ := dependents[0].(map[string]interface{}); d["id"] != dependent.ID || d["dependency_type"] != "blocks" {
+			t.Errorf("dependent: got id=%v type=%v, want id=%v type=blocks", d["id"], d["dependency_type"], dependent.ID)
+		}
+		if m["comment_count"] != float64(1) || m["dependent_count"] != float64(1) {
+			t.Errorf("counts: comment_count=%v dependent_count=%v, want 1 and 1", m["comment_count"], m["dependent_count"])
+		}
+		if v, ok := m["comments_omitted"]; ok {
+			t.Errorf("comments_omitted must be absent beside populated comments, got %v", v)
+		}
+	})
+
 	t.Run("show_json_includes_comments_under_flag", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "sjic")
