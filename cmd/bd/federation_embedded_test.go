@@ -537,3 +537,44 @@ func TestEmbeddedFederationAddPeerClearSovereigntyExplicitly(t *testing.T) {
 		t.Errorf("stored clearjson sovereignty after explicit clear = %q, want empty", tiers["clearjson"])
 	}
 }
+
+// GH#5213: an explicit lowercase tier still normalizes to its uppercase
+// form, and an invalid tier leaves the stored row unchanged.
+func TestEmbeddedFederationAddPeerReplacesSovereigntyLowercase(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt federation tests")
+	}
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "fdsovlc")
+
+	bdFederation(t, bd, dir, "add-peer", "sovpeer", "file:///tmp/sovpeer",
+		"--user", "admin", "--password", "secret", "--sovereignty", "T2")
+
+	// Lowercase replacement normalizes and is reported uppercase.
+	jsonOut := bdFederation(t, bd, dir, "add-peer", "sovpeer", "file:///tmp/sovpeer",
+		"--user", "admin", "--password", "secret", "--sovereignty", "t3", "--json")
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(jsonOut), &payload); err != nil {
+		t.Fatalf("failed to parse add-peer --json: %v\n%s", err, jsonOut)
+	}
+	var sov string
+	if err := json.Unmarshal(payload["sovereignty"], &sov); err != nil {
+		t.Fatalf("failed to parse add-peer --json sovereignty: %v\n%s", err, jsonOut)
+	}
+	if sov != "T3" {
+		t.Errorf("json sovereignty after lowercase replacement = %q, want %q", sov, "T3")
+	}
+	tiers := readFederationTiers(t, beadsDir)
+	if tiers["sovpeer"] != "T3" {
+		t.Errorf("stored sovereignty after lowercase replacement = %q, want %q", tiers["sovpeer"], "T3")
+	}
+
+	// Edge guard: an invalid tier is refused and leaves the row unchanged.
+	bdFederationFail(t, bd, dir, "add-peer", "sovpeer", "file:///tmp/sovpeer",
+		"--user", "admin", "--password", "secret", "--sovereignty", "T9")
+	tiers = readFederationTiers(t, beadsDir)
+	if tiers["sovpeer"] != "T3" {
+		t.Errorf("stored sovereignty after invalid tier refused = %q, want unchanged %q", tiers["sovpeer"], "T3")
+	}
+}
