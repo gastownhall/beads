@@ -407,3 +407,132 @@ func TestEnginePullMissingHistoryBulkRowsKeepGuards(t *testing.T) {
 		}
 	})
 }
+
+// TestEnginePullMissingHistoryHydratesNewStub pins the other side of #7294's
+// fix: hydration is withheld only where history is missing AND the issue is
+// older than the cursor. A genuinely new pre-linked stub (created after the
+// last sync) still hydrates, and an older issue whose recorded history does
+// answer — a NULL or a different external ref at the cursor — still hydrates
+// from it, without any warning.
+func TestEnginePullMissingHistoryHydratesNewStub(t *testing.T) {
+	const ref = "https://test.test/EXT-1"
+	newStub := func(created time.Time) *types.Issue {
+		linked := ref
+		return &types.Issue{
+			ID:          "bd-stub",
+			Title:       "stub",
+			Status:      types.StatusOpen,
+			Priority:    2,
+			IssueType:   types.TypeTask,
+			ExternalRef: &linked,
+			CreatedAt:   created,
+			UpdatedAt:   created.Add(time.Second),
+		}
+	}
+	remote := TrackerIssue{
+		ID:          "EXT-1",
+		Identifier:  "EXT-1",
+		Title:       "remote title",
+		Description: "remote body",
+		UpdatedAt:   overlapLastSync.Add(-30 * time.Second),
+	}
+
+	t.Run("new stub hydrates through a single fetch", func(t *testing.T) {
+		ctx := context.Background()
+		stub := newStub(overlapLastSync.Add(30 * time.Second)) // created after the cursor
+		store := newOverlapStore(stub)                          // no previousRefs entry: the stub is new
+		mock := newMockTracker("test")
+		mock.issues = []TrackerIssue{remote}
+		mock.fetchIssues = func(_ context.Context, _ FetchOptions) ([]TrackerIssue, error) {
+			return nil, nil
+		}
+
+		result, err := NewEngine(mock, store, "sync").Sync(ctx, SyncOptions{Pull: true})
+		if err != nil {
+			t.Fatalf("Sync: %v", err)
+		}
+		if result.PullStats.Updated != 1 || stub.Title != "remote title" || stub.Description != "remote body" {
+			t.Fatalf("PullStats = %+v, stub = %q/%q, want the new stub hydrated from the remote",
+				result.PullStats, stub.Title, stub.Description)
+		}
+		if mock.fetchCalls != 1 {
+			t.Fatalf("FetchIssue calls = %d, want 1", mock.fetchCalls)
+		}
+		if _, found := missingHistoryWarning(result); found {
+			t.Fatalf("warnings = %v, want none for a new stub", result.Warnings)
+		}
+	})
+
+	t.Run("new stub hydrates from an overlap-only row", func(t *testing.T) {
+		ctx := context.Background()
+		stub := newStub(overlapLastSync.Add(30 * time.Second)) // created after the cursor
+		store := newOverlapStore(stub)                          // no previousRefs entry: the stub is new
+		mock, _ := newOverlapTracker(remote)                    // overlap-only bulk row
+
+		result, err := NewEngine(mock, store, "sync").Sync(ctx, SyncOptions{Pull: true})
+		if err != nil {
+			t.Fatalf("Sync: %v", err)
+		}
+		if result.PullStats.Updated != 1 || stub.Title != "remote title" {
+			t.Fatalf("PullStats = %+v, stub title = %q, want the bulk row applied to the new stub",
+				result.PullStats, stub.Title)
+		}
+		if mock.fetchCalls != 0 {
+			t.Fatalf("FetchIssue calls = %d, want 0 (the overlap-only row is reused)", mock.fetchCalls)
+		}
+		if _, found := missingHistoryWarning(result); found {
+			t.Fatalf("warnings = %v, want none for a new stub", result.Warnings)
+		}
+	})
+
+	t.Run("older stub with a historical NULL ref hydrates without warning", func(t *testing.T) {
+		ctx := context.Background()
+		stub := newStub(overlapLastSync.Add(-time.Hour)) // existed before the cursor, unlinked at it
+		store := newOverlapStore(stub)
+		store.previousRefs[stub.ID] = "" // issueops answers ("", found=true)
+		mock := newMockTracker("test")
+		mock.issues = []TrackerIssue{remote}
+		mock.fetchIssues = func(_ context.Context, _ FetchOptions) ([]TrackerIssue, error) {
+			return nil, nil
+		}
+
+		result, err := NewEngine(mock, store, "sync").Sync(ctx, SyncOptions{Pull: true})
+		if err != nil {
+			t.Fatalf("Sync: %v", err)
+		}
+		if result.PullStats.Updated != 1 || stub.Title != "remote title" {
+			t.Fatalf("PullStats = %+v, stub title = %q, want the known pre-existing unlinked row hydrated",
+				result.PullStats, stub.Title)
+		}
+		if mock.fetchCalls != 1 {
+			t.Fatalf("FetchIssue calls = %d, want 1", mock.fetchCalls)
+		}
+		if _, found := missingHistoryWarning(result); found {
+			t.Fatalf("warnings = %v, want none when history answers NULL", result.Warnings)
+		}
+	})
+
+	t.Run("older issue with a historical different ref hydrates without warning", func(t *testing.T) {
+		ctx := context.Background()
+		stub := newStub(overlapLastSync.Add(-time.Hour)) // existed before the cursor
+		store := newOverlapStore(stub)
+		store.previousRefs[stub.ID] = "https://test.test/EXT-OLD" // a different ref at the cursor: a re-link
+		mock := newMockTracker("test")
+		mock.issues = []TrackerIssue{remote}
+		mock.fetchIssues = func(_ context.Context, _ FetchOptions) ([]TrackerIssue, error) {
+			return nil, nil
+		}
+
+		result, err := NewEngine(mock, store, "sync").Sync(ctx, SyncOptions{Pull: true})
+		if err != nil {
+			t.Fatalf("Sync: %v", err)
+		}
+		if result.PullStats.Updated != 1 || stub.Title != "remote title" {
+			t.Fatalf("PullStats = %+v, stub title = %q, want the known re-link hydrated",
+				result.PullStats, stub.Title)
+		}
+		if _, found := missingHistoryWarning(result); found {
+			t.Fatalf("warnings = %v, want none when history answers a different ref", result.Warnings)
+		}
+	})
+}
