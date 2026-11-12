@@ -416,3 +416,20 @@ func TestCheckParentConsistency_CrossPrefixParentIsValid(t *testing.T) {
 		t.Fatalf("check = %#v, want ok / All parent-child relationships valid", check)
 	}
 }
+
+// TestCheckDependencyIntegrity_MissingSourceStillBroken: the exemption covers
+// only the target; an edge whose source issue is gone stays broken even when
+// its target is another repository's (bd-zcpo44, AC-7).
+func TestCheckDependencyIntegrity_MissingSourceStillBroken(t *testing.T) {
+	store := newTestDoltStore(t, "bd")
+	db := store.DB()
+	insertExternalTargetDep(t, db, "dependencies", "bd-gone", "gt-9", "blocks")
+
+	check := checkDependencyIntegrity(db)
+	if check.Status != StatusError {
+		t.Fatalf("check = %#v, want error", check)
+	}
+	if !strings.Contains(check.Detail, "bd-gone→gt-9") {
+		t.Fatalf("Detail = %q, want it to name bd-gone→gt-9", check.Detail)
+	}
+}
