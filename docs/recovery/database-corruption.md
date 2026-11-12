@@ -166,6 +166,22 @@ bd init
 bd backup restore /path/to/backup --force   # replaces whatever bd init created
 ```
 
+A restore runs through the engine behind the workspace: the Dolt embedded in
+your `bd` binary in embedded mode, or the Dolt SQL server the workspace
+connects to in server mode. An installed Dolt CLI is a separate engine — that
+it can read and query a backup does not prove the workspace's engine can. A
+backup from the same Dolt version, or an older one, is the supported
+direction, subject to the formats Dolt itself supports; a backup written by a
+newer Dolt is not guaranteed to restore, and no version comparison alone can
+validate a backup's contents. If the restore finishes replacing the database
+but the commit after it fails with `table has unknown fields`, the restoring
+engine could not decode a table schema the backup's writer understood: the
+workspace may already have been replaced and the commit outcome is
+indeterminate. Keep the source backup untouched, restore with a compatible
+engine instead — in embedded mode a newer `bd` build, in server mode a
+compatible Dolt server — and verify the result in a separate initialized
+recovery workspace before relying on it.
+
 ### From a JSONL export
 
 A JSONL file from `bd export` is an issue export, not a Dolt backup: it has no
