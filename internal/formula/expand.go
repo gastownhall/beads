@@ -265,6 +265,17 @@ func expandStepWith(target *Step, template []*Step, depth int, subst func(string
 		if tmpl.Metadata != nil {
 			expanded.Metadata = substituteExpansionMetadata(tmpl.Metadata, target, subst)
 		}
+		if tmpl.Loop != nil {
+			// cloneStep copies the Loop pointer, so replace it with a deep
+			// copy: cook mutates loop specs in place while expanding loop
+			// bodies (cloneLoopSpec also deep-copies the body steps), and
+			// an aliased loop would leak every expansion's runtime state
+			// into the template and its siblings. The clone keeps
+			// Range/Until/Vars strings for the cook-time evaluator that
+			// owns them; a loop body's own fields are handled when the
+			// body is expanded, not here.
+			expanded.Loop = cloneLoopSpec(tmpl.Loop)
+		}
 
 		// Expand/ExpandVars are never carried into expanded output: the
 		// inline-expansion path re-scans the steps it produces, so an

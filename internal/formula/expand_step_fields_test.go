@@ -549,3 +549,133 @@ func TestExpandStepSubstitutesTemplateFields(t *testing.T) {
 		}
 	})
 }
+
+// TestApplyExpansionsMapDoesNotShareTemplateState pins that expanded steps
+// never alias the template's mutable state (GH#6433): two expansions of one
+// template — directly and through a compose map rule that expands two
+// targets from the same loaded template — must not observe each other's or
+// the template's mutations of metadata containers, gate fields, loop
+// count/body or OnComplete vars. A maps.Clone-style shallow metadata copy
+// fails the nested-container mutations; an aliased gate or loop fails the
+// rest. Priority's shared pointer is longstanding behavior and not asserted.
+func TestApplyExpansionsMapDoesNotShareTemplateState(t *testing.T) {
+	// firstTable returns the first element of a tables array in either shape
+	// it can arrive in: []map[string]interface{} straight from a Go template
+	// or []interface{} after a JSON round-trip (a compose-map leg parses the
+	// template from a formula file).
+	firstTable := func(t *testing.T, v interface{}) map[string]interface{} {
+		t.Helper()
+		switch val := v.(type) {
+		case []map[string]interface{}:
+			return val[0]
+		case []interface{}:
+			m, ok := val[0].(map[string]interface{})
+			if !ok {
+				t.Fatalf("tables[0] = %T, want a map", val[0])
+			}
+			return m
+		default:
+			t.Fatalf("tables = %T, want an array of tables", v)
+			return nil
+		}
+	}
+	mutateFirst := func(t *testing.T, first *Step) {
+		t.Helper()
+		first.Metadata["added"] = "changed"
+		first.Metadata["nested"].(map[string]interface{})["leaf"] = "changed"
+		first.Metadata["list"].([]interface{})[0].(map[string]interface{})["shard"] = "changed"
+		firstTable(t, first.Metadata["tables"])["region"] = "changed"
+		first.Gate.Type = "timer"
+		first.Gate.ID = "changed-gate"
+		first.Loop.Count = 99
+		first.Loop.Body[0].Title = "Changed"
+		first.OnComplete.Vars["note"] = "changed"
+	}
+	assertOriginal := func(t *testing.T, label string, got *Step) {
+		t.Helper()
+		if got.Metadata["nested"].(map[string]interface{})["leaf"] != "orig" {
+			t.Errorf("%s nested metadata leaf = %v, want orig: expansions share state", label, got.Metadata["nested"])
+		}
+		if got.Metadata["list"].([]interface{})[0].(map[string]interface{})["shard"] != "orig" {
+			t.Errorf("%s array metadata shard = %v, want orig: expansions share state", label, got.Metadata["list"])
+		}
+		if firstTable(t, got.Metadata["tables"])["region"] != "orig" {
+			t.Errorf("%s table metadata region = %v, want orig: expansions share state", label, got.Metadata["tables"])
+		}
+		if _, leaked := got.Metadata["added"]; leaked {
+			t.Errorf("%s metadata gained the sibling expansion's key: expansions share state", label)
+		}
+		if got.Gate.Type != "human" || got.Gate.ID != "orig-gate" {
+			t.Errorf("%s Gate = %+v, want the original human/orig-gate: expansions share state", label, got.Gate)
+		}
+		if got.Loop.Count != 2 || got.Loop.Body[0].Title != "Original" {
+			t.Errorf("%s Loop = %+v, want count 2 and original body title: expansions share state", label, got.Loop)
+		}
+		if got.OnComplete.Vars["note"] != "orig" {
+			t.Errorf("%s OnComplete.Vars = %v, want orig: expansions share state", label, got.OnComplete.Vars)
+		}
+	}
+	newTemplate := func() *Step {
+		return &Step{
+			ID:    "{target}.work",
+			Title: "Work on {target.title}",
+			Metadata: map[string]interface{}{
+				"nested": map[string]interface{}{"leaf": "orig"},
+				"list":   []interface{}{map[string]interface{}{"shard": "orig"}},
+				"tables": []map[string]interface{}{{"region": "orig"}},
+			},
+			Gate:       &Gate{Type: "human", ID: "orig-gate"},
+			Loop:       &LoopSpec{Count: 2, Body: []*Step{{ID: "{target}.iter", Title: "Original"}}},
+			OnComplete: &OnCompleteSpec{Vars: map[string]string{"note": "orig"}},
+		}
+	}
+
+	t.Run("direct expansion of one template", func(t *testing.T) {
+		tmpl := newTemplate()
+		target := &Step{ID: "tgt", Title: "Target"}
+		res1, err := expandStep(target, []*Step{tmpl}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res2, err := expandStep(target, []*Step{tmpl}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mutateFirst(t, res1[0])
+		assertOriginal(t, "template", tmpl)
+		assertOriginal(t, "second expansion", res2[0])
+	})
+
+	t.Run("compose map over two targets", func(t *testing.T) {
+		f := &Formula{
+			Formula:  "isolation-template",
+			Version:  1,
+			Type:     TypeExpansion,
+			Template: []*Step{newTemplate()},
+		}
+		data, err := json.Marshal(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "isolation-template.formula.json"), data, 0644); err != nil {
+			t.Fatal(err)
+		}
+		steps := []*Step{
+			{ID: "impl.alpha", Title: "Alpha"},
+			{ID: "impl.beta", Title: "Beta"},
+		}
+		compose := &ComposeRules{
+			Map: []*MapRule{{Select: "impl.*", With: "isolation-template"}},
+		}
+		res, err := ApplyExpansions(steps, compose, NewParser(dir))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res) != 2 {
+			t.Fatalf("ApplyExpansions returned %d steps, want the two expanded steps", len(res))
+		}
+		mutateFirst(t, res[0])
+		assertOriginal(t, "second target's expansion", res[1])
+	})
+}
