@@ -415,17 +415,46 @@ The route the refusal names is stop, force, restart:
 2. Run `bd migrate schema --force`.
 3. Restart the clients.
 
+That `--force` is also the §7 gate's designated-migrator override (see the
+first bullet below), so on a database with a Dolt remote it skips the gate's
+adopt, pull-first and fork-skew stops: the gate honors it before it routes
+any of them. The bare verb used to reach those stops. The front door now
+answers it first, and because it runs before the provider it cannot read
+`dolt_remotes`, so the refusal says this unconditionally, after the route:
+"If this database has a Dolt remote, --force also confirms you are its single
+designated migrator and skips the remote-migrate gate's own stops (adopt,
+pull first, forked schema): run a read command such as `bd list` first, and if
+it prints one of those stops, follow it instead of forcing". A read command
+runs the gate and prints the stop that applies (`readThroughRefusedMigration`
+in `internal/storage/uow`). It does so even when this binary's reads cannot
+query the database's current schema, as on every 1.3.4 database (which lacks
+`issues.arrival_seq`): the read then fails with the adopt, adopt-ff,
+fork-skew or data-behind stop, joined to the `SchemaBehindError`, instead of
+the drift error alone, whose remedy names the refused bare verb. The
+shared-no-remote stop and the blunt fallback still fail with the drift error
+there. When the blunt remote-backed stop lets the read carry on, its warning
+names the proxied route: adopt if another clone already migrated and pushed;
+otherwise, as the single designated migrator, stop the clients, run
+`bd migrate schema --force`, restart them, and push from a workspace with
+direct access to the database.
+
 The forced invocation prints one warning to **stderr**, before the provider open:
 
 ```text
 Warning: before forcing schema migration, close co-resident library clients; restart them after this command completes.
+  If this database has a Dolt remote, --force also confirms you are its single designated migrator, so the remote-migrate gate's adopt and pull-first checks do not run.
 ```
 
 The warning is generic on purpose. The proxy is a byte pump (§3) and does not
 track who is connected, so there is no truthful list of clients to print. stdout
 still carries only the command's report, so a `--json` caller can parse it as
-before. On a team-server workspace the team server owns the schema, so the
-forced verb only verifies it.
+before.
+
+On a team-server workspace the team server owns the schema, so the forced verb
+only verifies it. The refusal stands there too, with the same code and reason,
+but the row words it for that shape (`rewordedOn`): it says the command only
+verifies and that no client needs to stop, and the forced invocation prints a
+one-line note to stderr instead of the warning above.
 
 What has **not** changed is what happens after the front door:
 
@@ -435,8 +464,9 @@ What has **not** changed is what happens after the front door:
   the §7 gate on **one arm only**, the no-remote arm (`sharedNoRemoteGate`).
   With a remote configured the gate consults only `--force` (which the forced
   verb carries, via `isForcedMigrate`) and the `BD_ALLOW_REMOTE_MIGRATE`
-  override. The public twin of this knob, `beads.AllowSharedSchemaMigration`,
-  documents the same scope.
+  override, and it consults them before the smart gate routes adopt,
+  pull-first or fork-skew, so either one migrates in place. The public twin of
+  this knob, `beads.AllowSharedSchemaMigration`, documents the same scope.
 - The **provider open then performs the migration**, before `RunE` runs.
 - `RunE`'s proxied arm (`reportProxiedSchemaMigrate` in `cmd/bd/migrate.go`)
   therefore only reports, and it reports a **different JSON shape** from the

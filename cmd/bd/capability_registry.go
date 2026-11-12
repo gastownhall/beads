@@ -167,6 +167,24 @@ func (r capabilityRow) forceableWith(flag, warning string) capabilityRow {
 	return r
 }
 
+// rewordedOn keeps the row's rule on one proxied shape — same outcome, code,
+// reason and force opt-in — and changes only what it says there, for a shape
+// where the default words would be false. Unlike honoredOn it never changes
+// what the gate does. Call it after withMessage and forceableWith: it copies
+// the rule as it stands.
+func (r capabilityRow) rewordedOn(topology ProxyTopology, message, forceWarning string) capabilityRow {
+	rule := r.Rule
+	rule.Message = message
+	rule.ForceWarning = forceWarning
+	overrides := make(map[ProxyTopology]proxyCapabilityRule, len(r.Topology)+1)
+	for t, existing := range r.Topology {
+		overrides[t] = existing
+	}
+	overrides[topology] = rule
+	r.Topology = overrides
+	return r
+}
+
 // refusedPath builds a typed front-door refusal for a bare command path.
 func refusedPath(path, code string, reason ProxyRefusalReason, tracking string) capabilityRow {
 	return refusedArgs(path, "", code, reason, tracking)
@@ -405,13 +423,13 @@ var proxyCapabilityRegistry = []capabilityRow{
 	// them to stand down, so the operator has to: the refusal names that route
 	// and --force is the operator saying they took it. It is refused on every
 	// proxied shape, team-server included, where the open only verifies: the
-	// command policy is the same wherever the store is shared.
+	// command policy is the same wherever the store is shared. Only the words
+	// differ there, because the default ones describe a migration team-server
+	// never runs.
 	refusedPath("migrate schema", "proxy.migrate.unsupported", ProxyReasonDesign, "").
-		withMessage("migrate schema is not supported in proxied-server mode without --force: "+
-			"it promotes the schema underneath every library client connected to this proxy's backend, "+
-			"and the proxy does not track them. Stop those clients, run `bd migrate schema --force`, "+
-			"then restart them").
-		forceableWith("force", migrateSchemaForceWarning),
+		withMessage(migrateSchemaRefusal).
+		forceableWith("force", migrateSchemaForceWarning).
+		rewordedOn(ProxyTopologyTeamServer, migrateSchemaTeamServerRefusal, migrateSchemaTeamServerForceWarning),
 
 	// --- destructive admin --------------------------------------------------
 	// Same topology-blind rationale as the migrate block above, and the same
@@ -706,12 +724,48 @@ func validateProxyRegistryBeforeProvider(cmd *cobra.Command, topology ProxyTopol
 	return HandleProxyCapabilityError(proxyCapabilityErrorFor(rule))
 }
 
+// migrateSchemaRefusal is the front door's answer to a bare
+// `bd migrate schema` on a proxied workspace whose provider open migrates
+// (every shape but team-server). It names the stop/force/restart route, and
+// then the other thing --force is. On a remote-backed store the same flag is
+// the remote-migrate gate's designated-migrator override (isForcedMigrate sets
+// schema.SetForceAllowRemoteMigrate), which that gate honors before it decides
+// adopt, pull-first or fork-skew. Before #6656 the bare verb reached those
+// stops; now the front door answers it first. The front door runs before the
+// provider and cannot read dolt_remotes, so the caveat is unconditional. It
+// sends the operator to a read command, which runs the gate and prints the
+// stop that applies (uow's readThroughRefusedMigration).
+const migrateSchemaRefusal = "migrate schema is not supported in proxied-server mode without --force: " +
+	"it promotes the schema underneath every library client connected to this proxy's backend, " +
+	"and the proxy does not track them. Stop those clients, run `bd migrate schema --force`, " +
+	"then restart them. If this database has a Dolt remote, --force also confirms you are its single " +
+	"designated migrator and skips the remote-migrate gate's own stops (adopt, pull first, forked schema): " +
+	"run a read command such as `bd list` first, and if it prints one of those stops, follow it instead of forcing"
+
 // migrateSchemaForceWarning is what `bd migrate schema --force` prints on a
 // proxied workspace before the provider open applies the migration. It names
 // no clients because bd knows none: the proxy is a byte pump and does not
 // track who is connected, and adding that tracking to say so is not worth it.
+// Its second line is migrateSchemaRefusal's remote caveat, said once more
+// where the forced run starts, since the front door cannot tell whether it
+// applies.
 const migrateSchemaForceWarning = "Warning: before forcing schema migration, close co-resident library clients; " +
-	"restart them after this command completes."
+	"restart them after this command completes.\n" +
+	"  If this database has a Dolt remote, --force also confirms you are its single designated migrator, " +
+	"so the remote-migrate gate's adopt and pull-first checks do not run."
+
+// migrateSchemaTeamServerRefusal and migrateSchemaTeamServerForceWarning are
+// the same refusal and opt-in, worded for a team-server workspace. There the
+// provider open never migrates: the team server owns the schema, and bd only
+// verifies it (uow's verifyTeamServerSchema). So the default words would be
+// false twice: there is no promotion to stop clients for, and no
+// remote-migrate gate for --force to skip.
+const migrateSchemaTeamServerRefusal = "migrate schema is not supported in proxied-server mode without --force: " +
+	"on a team-server workspace the team server owns the schema, so this command only verifies it and " +
+	"migrates nothing. Run `bd migrate schema --force` to verify it; no client needs to stop"
+
+const migrateSchemaTeamServerForceWarning = "Note: the team server owns this workspace's schema; " +
+	"--force only verifies it and migrates nothing."
 
 // forcedPastRefusal reports whether the invocation set the rule's ForceFlag to
 // true. Only a successful bool read of true counts: a false value, a flag the

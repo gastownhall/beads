@@ -636,6 +636,14 @@ migrating, as described under
 server, adopting also promotes the schema for every client of that server, so
 step 1 still comes first either way.
 
+In proxied-server mode, which refuses `bd migrate` and `bd dolt push`, the
+designated migrator stops every library client connected to the proxy's
+backend, runs `bd migrate schema --force` instead, restarts the clients, and
+pushes from the server host. That `--force` skips the adopt and pull-first
+stops just as `bd migrate --force` does, so run a read command such as
+`bd list` first: if it prints one of those stops, follow it instead of
+forcing.
+
 <Warning>
 Migrating is one-way for the fleet: after step 2, a client still on the older
 `bd` refuses the database until it is upgraded. Do step 1 first, and confirm it
@@ -657,9 +665,9 @@ reached through a local proxy. Four differences worth knowing:
   migration, which changes the schema underneath every library client
   connected to the proxy's backend, and the proxy does not track those
   clients. Stop them, run the forced command (it prints a reminder to stderr),
-  then restart them. Because the bare command is refused, it is not a CI
-  check here;
-
+  then restart them. With a Dolt remote, that `--force` is also the
+  designated-migrator consent described above. Because the bare command is
+  refused, it is not a CI check here;
 - read commands print a warning and keep serving the current schema, rather
   than the read simply not touching it;
 - `bd serve` refuses to start against a database with pending migrations,

@@ -1593,10 +1593,15 @@ func printInitJoinGuidance(w io.Writer, e *schema.RemoteMigrateGateError) {
 	if e.Decision != "shared-no-remote" {
 		return
 	}
-	// GH#6656: the workspace this guidance points at may be proxied, where
-	// the bare verb is refused at that workspace's front door — name the
-	// forced form so the operator is not sent to type the command the gate
-	// itself refuses.
+	// GH#6656: a proxied front door refuses the bare verb, so a refusal
+	// marked proxied names the forced form. Defensive today: the only caller
+	// is init's non-proxied path, which opens through newDoltStore (that
+	// refuses a proxied config with errProxiedStoreUnrouted, and proxied init
+	// returns from runInitProxiedServer before it), and only the uow provider
+	// sets Proxied. So no refusal that reaches here is marked. The branch
+	// keeps the guidance from naming the refused bare verb if a proxied open
+	// ever does. It keys on the refusing open, not on the workspace the
+	// guidance points the operator at, whose mode is unknown here.
 	consent := schema.SharedConsentCommand
 	if e.Proxied {
 		consent = schema.SharedConsentCommandForced

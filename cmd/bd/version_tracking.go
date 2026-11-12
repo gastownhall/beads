@@ -392,11 +392,15 @@ func noticeSharedMigrateRefusal(err error) {
 		consent = schema.SharedConsentCommandGlobal
 	}
 	// GH#6656: on a proxied workspace the bare consent verb is refused at
-	// the front door, so the notice prescribes the forced form — the one
-	// route through that refusal — with the client-close precondition that
-	// form declares. usesProxiedServer() is checked alongside the gate's own
-	// marker because the version-bump probe that raises this notice does not
-	// run through the provider path that sets it.
+	// the front door, so the notice would have to prescribe the forced form,
+	// the one route through that refusal, with the client-close precondition
+	// that form declares. Defensive today: autoMigrateOnVersionBump, this
+	// notice's only caller, returns before opening anything on a
+	// proxied-server workspace (cfg.IsDoltProxiedServerMode), so no proxied
+	// refusal reaches here. The branch keeps the notice from naming the
+	// refused bare verb if that early return ever goes. usesProxiedServer()
+	// is read alongside the gate's marker because the dolt.NewFromConfig open
+	// that probe uses never sets gateErr.Proxied (only the uow provider does).
 	proxied := gateErr.Proxied || usesProxiedServer()
 	if proxied {
 		consent = schema.SharedConsentCommandForced

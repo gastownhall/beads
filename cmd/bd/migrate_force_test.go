@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 // TestIsForcedMigrate covers the root-PersistentPreRunE helpers behind
 // `bd migrate --force`: only the migrate and migrate-schema commands report
@@ -59,24 +62,22 @@ func TestIsForcedMigrate(t *testing.T) {
 // TestMigrateSchemaRefusedOnProxiedServerWithoutForce pins bd-n5e58c (GH#6656):
 // on a proxied-server workspace the schema is promoted during provider open,
 // underneath library clients the proxy cannot see, so `bd migrate schema`
-// without --force must be refused, typed, by the pre-provider gate.
+// without --force must be refused, typed, by the pre-provider gate. It drives
+// the gate through runProxyRegistryGate, which holds stdioMutex and captures
+// the rendered refusal instead of letting it reach the test binary's stdout;
+// TestProxyMigrateSchemaRefusedUnlessForced pins the refusal's words.
 func TestMigrateSchemaRefusedOnProxiedServerWithoutForce(t *testing.T) {
-	t.Cleanup(func() {
-		_ = migrateSchemaCmd.Flags().Set("force", "false")
-		migrateSchemaCmd.Flags().Lookup("force").Changed = false
-	})
-	_ = migrateSchemaCmd.Flags().Set("force", "false")
-	for _, topo := range []ProxyTopology{
-		ProxyTopologyManagedLocal, ProxyTopologyExternalTCP, ProxyTopologyExternalUnix,
-		ProxyTopologyTeamServer, ProxyTopologyUnknown,
-	} {
-		err := validateProxyRegistryBeforeProvider(migrateSchemaCmd, topo)
-		if err == nil {
-			t.Errorf("%s: migrate schema without --force was permitted before provider open; want a typed refusal", topo)
-			continue
-		}
-		if code, ok := exitCodeFromError(err); !ok || code == 0 {
-			t.Errorf("%s: refusal = %#v; want a typed non-zero exit", topo, err)
-		}
+	for _, topo := range allProxiedTopologies {
+		t.Run(string(topo), func(t *testing.T) {
+			setMigrateSchemaForce(t, "false")
+			stdout, _, err := runProxyRegistryGate(t, migrateSchemaCmd, topo)
+			if code, ok := exitCodeFromError(err); !ok || code != 1 {
+				t.Fatalf("refusal = %#v; want a typed refusal exiting 1 before provider open", err)
+			}
+			var got refusalJSONForTest
+			if err := json.Unmarshal([]byte(stdout), &got); err != nil || got.Code != "proxy.migrate.unsupported" {
+				t.Fatalf("refusal JSON = %q (%v), want code proxy.migrate.unsupported", stdout, err)
+			}
+		})
 	}
 }

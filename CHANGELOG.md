@@ -712,13 +712,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   anything is opened, and `BD_ALLOW_REMOTE_MIGRATE=1` does not get past it.
   Stop the clients, run `bd migrate schema --force`, then restart them; the
   forced command prints a generic reminder to stderr and leaves stdout to its
-  report. CI jobs that ran the bare command as a proxied check must stop
-  doing so. The forced `--json` report still has no `applied` count; treat
-  its absence as unknown, not zero. Guidance that prescribed the bare command
-  for proxied workspaces now names the forced form: the shared-no-remote gate
-  block, its JSON `expected` field and options, the version-bump notice, the
-  `--global` consent hint, and the init join guidance. Direct workspaces are
-  unchanged.
+  report. If the database has a Dolt remote, that `--force` also confirms you
+  are its single designated migrator, so the remote-migrate gate's adopt and
+  pull-first stops do not run. The refusal says so and tells you to run a
+  read command such as `bd list` first and to follow any of those stops it
+  prints instead of forcing; the reminder repeats the caveat. That read
+  prints the stop even when it cannot run on the database's current schema,
+  as on a 1.3.4 database, and then fails with it. On a team-server
+  workspace, where the forced command only verifies the schema, the refusal
+  and the reminder say that instead. CI jobs that ran the bare command as a
+  proxied check must stop doing so. The forced `--json` report still has no
+  `applied` count; treat its absence as unknown, not zero. Guidance that
+  prescribed the bare command for proxied workspaces now names the forced
+  form: the shared-no-remote gate block, its JSON `expected` field and
+  options, the `--global` consent hint, and a read command's warning on the
+  blunt remote-backed stop, which also names adopting instead, stopping the
+  library clients and pushing from the server host. The shared data-behind
+  stop, which already named the forced form, now also says to stop the
+  library clients first. Direct workspaces are unchanged.
   ([#6656](https://github.com/gastownhall/beads/issues/6656))
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
