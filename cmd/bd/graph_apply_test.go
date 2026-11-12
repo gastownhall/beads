@@ -23,7 +23,9 @@ import (
 // actually accepts (review caught it shipping with event fields on a task
 // node and edges duplicating parent_key). The embedded supplement is the
 // source of truth; the docs drift gate keeps the generated CLI reference
-// byte-equal to it.
+// byte-equal to it. GH#3879: the example must also exercise per-node `deps`
+// and the supplement must state the from_key/to_key direction rule, since
+// neither can be guessed from `bd create --help`.
 func TestDocsGraphPlanExampleValidates(t *testing.T) {
 	const fence = "```json\n"
 	start := strings.Index(createGraphPlanSupplement, fence)
@@ -49,6 +51,18 @@ func TestDocsGraphPlanExampleValidates(t *testing.T) {
 	}
 	if _, err := validateGraphApplyStorageClasses(&plan, GraphApplyOptions{}, false); err != nil {
 		t.Errorf("documented example rejected by storage-class validation: %v", err)
+	}
+	withDeps := false
+	for _, node := range plan.Nodes {
+		if len(node.Deps) > 0 {
+			withDeps = true
+		}
+	}
+	if !withDeps {
+		t.Error("documented example has no node carrying 'deps'; the docs must exercise the inline-dependency shape")
+	}
+	if !strings.Contains(createGraphPlanSupplement, "bd dep add <from_key> <to_key>") {
+		t.Error("supplement does not state the edge direction rule (bd dep add <from_key> <to_key>)")
 	}
 }
 
