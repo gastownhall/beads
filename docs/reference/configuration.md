@@ -579,9 +579,9 @@ rm MIGRATION-FREEZE        # thaw
 
 Blocked commands exit **14** — a stable code scripts branch on to tell "someone is migrating this workspace, come back later" from a generic failure worth an immediate retry. That includes the destructive ones: `bd init --reinit-local` and `bd bootstrap` are refused too.
 
-Reads (`bd list`, `bd show`, `bd ready`, …) keep working during a freeze, and bd's own background maintenance stands down with them — version-bump migration, JSONL auto-import, Dolt auto-commit, auto-backup, auto-export and auto-push are all skipped, so running a read does not leave a commit in the store you are migrating.
+Reads (`bd list`, `bd show`, `bd ready`, …) keep working during a freeze, and bd's own background maintenance stands down with them — version-bump migration, JSONL auto-import, Dolt auto-commit, auto-backup, auto-export and auto-push are all skipped, so running a read does not leave a commit in the store you are migrating. In embedded mode (the default) and proxied-server mode, `bd ready` and `bd list --ready` are an exception: they still wake deferred issues whose defer date has passed and commit that change to the frozen store ([#7634](https://github.com/gastownhall/beads/issues/7634)), so do not run either command in those modes until you thaw.
 
-In releases after v1.3.2, `bd ready` and `bd list --ready` in server mode also wake deferred issues whose defer date has passed. During a freeze they skip that write: those issues stay deferred and are left out of the list until the first such read after you thaw.
+In bd v1.4.0 and later, `bd ready` and `bd list --ready` in server mode also wake deferred issues whose defer date has passed. During a freeze they skip that write: those issues stay deferred and are left out of the list until the first such read after you thaw.
 
 <Warning>
 A `bd serve` process started before the marker appeared keeps accepting HTTP writes: the freeze is a CLI-invocation gate, and a running server never re-reads it. Stop the server before you freeze.
