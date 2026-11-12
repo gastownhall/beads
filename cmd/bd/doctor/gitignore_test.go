@@ -3497,3 +3497,123 @@ func TestGitignoreTemplate_IgnoresMachineLocalState(t *testing.T) {
 		t.Errorf("GitignoreTemplate lacks required patterns: %v", missing)
 	}
 }
+
+// TestGitignore_ContainsBackupStateFiles reproduces bd-g6fd4y (GH#8318):
+// bd writes per-machine files inside .beads/ (dolt-backup.json holds the
+// absolute backup destination) that the template must ignore, and
+// requiredPatterns must carry them so bd doctor --fix heals old gitignores.
+func TestGitignore_ContainsBackupStateFiles(t *testing.T) {
+	for _, pattern := range []string{
+		"dolt-backup.json",
+		"dolt-backup-state.json",
+		"dolt-config.log",
+		".auto-import-issues.jsonl",
+	} {
+		if !containsGitignorePattern(GitignoreTemplate, pattern) {
+			t.Errorf("GitignoreTemplate should contain %q", pattern)
+		}
+		found := false
+		for _, p := range requiredPatterns {
+			if p == pattern {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("requiredPatterns should include %q", pattern)
+		}
+	}
+}
+
+// templateWithoutMachineLocalState is GitignoreTemplate as it was before
+// GH#8318: every line naming a machine-local state file removed, so the
+// fixture follows future template edits.
+func templateWithoutMachineLocalState() string {
+	var kept []string
+	for _, line := range strings.Split(GitignoreTemplate, "\n") {
+		drop := false
+		for _, name := range machineLocalStateFiles {
+			if strings.TrimSpace(line) == name {
+				drop = true
+				break
+			}
+		}
+		if !drop {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
+}
+
+// TestFixGitignore_AppendsMachineLocalStatePatterns checks that workspaces
+// created before GH#8318 heal: bd doctor flags the old .beads/.gitignore
+// and --fix appends the four names without touching local rules.
+func TestFixGitignore_AppendsMachineLocalStatePatterns(t *testing.T) {
+	t.Run("outdated gitignore is flagged and healed", func(t *testing.T) {
+		dir := t.TempDir()
+		beadsDir := filepath.Join(dir, ".beads")
+		if err := os.Mkdir(beadsDir, 0750); err != nil {
+			t.Fatal(err)
+		}
+		original := "# local rule\ncustom-local/\n\n" + templateWithoutMachineLocalState()
+		gitignorePath := filepath.Join(beadsDir, ".gitignore")
+		if err := os.WriteFile(gitignorePath, []byte(original), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		check := CheckGitignore(dir)
+		if check.Status != "warning" {
+			t.Fatalf("CheckGitignore status = %q (%s), want warning", check.Status, check.Message)
+		}
+		for _, name := range machineLocalStateFiles {
+			if !strings.Contains(check.Detail, name) {
+				t.Errorf("CheckGitignore detail %q does not name %q", check.Detail, name)
+			}
+		}
+
+		if err := FixGitignore(dir); err != nil {
+			t.Fatalf("FixGitignore: %v", err)
+		}
+		got, err := os.ReadFile(gitignorePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(string(got), original) {
+			t.Errorf("FixGitignore changed the original content:\n%s", got)
+		}
+		for _, name := range machineLocalStateFiles {
+			if !containsGitignorePattern(string(got), name) {
+				t.Errorf("FixGitignore did not append %q", name)
+			}
+		}
+
+		if again := CheckGitignore(dir); again.Status != "ok" {
+			t.Errorf("CheckGitignore after fix = %q (%s: %s), want ok", again.Status, again.Message, again.Detail)
+		}
+	})
+
+	t.Run("manual workaround is left byte-identical", func(t *testing.T) {
+		dir := t.TempDir()
+		beadsDir := filepath.Join(dir, ".beads")
+		if err := os.Mkdir(beadsDir, 0750); err != nil {
+			t.Fatal(err)
+		}
+		original := templateWithoutMachineLocalState() + "\n# workaround for GH#8318\n" +
+			strings.Join(machineLocalStateFiles, "\n") + "\n"
+		gitignorePath := filepath.Join(beadsDir, ".gitignore")
+		if err := os.WriteFile(gitignorePath, []byte(original), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := FixGitignore(dir); err != nil {
+			t.Fatalf("FixGitignore: %v", err)
+		}
+		got, err := os.ReadFile(gitignorePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != original {
+			t.Errorf("FixGitignore rewrote a file that already ignores the four names:\n%s", got)
+		}
+	})
+}

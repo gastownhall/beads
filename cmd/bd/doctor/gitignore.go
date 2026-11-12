@@ -163,6 +163,10 @@ var requiredPatterns = []string{
 	"http_local_metadata.json",
 	".local_version",
 	"backup/",
+	"dolt-backup.json",
+	"dolt-backup-state.json",
+	"dolt-config.log",
+	".auto-import-issues.jsonl",
 }
 
 // CheckGitignore checks if .beads/.gitignore is up to date.
