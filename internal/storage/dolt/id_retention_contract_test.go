@@ -58,6 +58,9 @@ func TestIDRetentionContract(t *testing.T) {
 	t.Run("APlainSweepKeepsTheChildSuffixReserved", func(t *testing.T) {
 		conformance.RunIDRetentionAPlainSweepKeepsTheChildSuffixReserved(t, ctx, fixture)
 	})
+	t.Run("APlainSweptChildIDStaysReusable", func(t *testing.T) {
+		conformance.RunIDRetentionAPlainSweptChildIDStaysReusable(t, ctx, fixture)
+	})
 	t.Run("DryRunRetiresNothing", func(t *testing.T) {
 		conformance.RunIDRetentionDryRunRetiresNothing(t, ctx, fixture)
 	})

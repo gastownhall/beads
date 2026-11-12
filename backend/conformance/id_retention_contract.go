@@ -542,6 +542,29 @@ func RunIDRetentionAPlainSweepKeepsTheChildSuffixReserved(t *testing.T, ctx cont
 	}
 }
 
+// RunIDRetentionAPlainSweptChildIDStaysReusable pins the other half of
+// GH#4750's design: keeping a removed child's suffix reserved is a counter
+// floor, not a tombstone. A plain sweep of P.1 leaves no tombstone, and an
+// explicit create of P.1 succeeds afterwards; only RetainIDs retires an id.
+func RunIDRetentionAPlainSweptChildIDStaysReusable(t *testing.T, ctx context.Context, fixture IDRetentionFixture) {
+	t.Helper()
+	parent := idRetentionID(fixture, "reuse", "parent")
+	if _, err := fixture.Lifecycle.Create(ctx, idRetentionCreate(parent, false)); err != nil {
+		t.Fatalf("Create(%s) = %v", parent, err)
+	}
+	child := idRetentionCreateChild(t, ctx, fixture, parent)
+	if _, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: idRetentionActor, IssueID: child, Reason: "id-retention"}); err != nil {
+		t.Fatalf("Close(%s) = %v", child, err)
+	}
+	if result := sweeperSweep(t, ctx, fixture.Sweep, publicops.SweepRequest{Tier: publicops.SweepDurable, IDPattern: child}); result.Swept != 1 {
+		t.Fatalf("plain sweep of %s Swept = %d, want 1", child, result.Swept)
+	}
+	idRetentionAssertTombstones(t, ctx, fixture, child, 0, 0)
+	if _, err := fixture.Lifecycle.Create(ctx, idRetentionCreate(child, false)); err != nil {
+		t.Fatalf("Create(%s) after a plain sweep = %v, want nil: a reserved suffix must not refuse an explicit recreate", child, err)
+	}
+}
+
 // idRetentionCreateChild creates the next generated child of parent and
 // returns its id.
 func idRetentionCreateChild(t *testing.T, ctx context.Context, fixture IDRetentionFixture, parent string) string {
