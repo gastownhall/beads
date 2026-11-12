@@ -1701,3 +1701,124 @@ func TestExpandStepSubstitutesTemplateFields(t *testing.T) {
 		t.Errorf("expanding rewrote the template's notes, gate or metadata")
 	}
 }
+
+// sharedTemplateTOML is an expansion whose work step carries every kind of
+// mutable state an expanded step could share with the template: metadata in
+// each container type (table, array, array of tables), a Gate, a Loop with a
+// body step, and OnComplete vars.
+const sharedTemplateTOML = `
+formula = "shared"
+type = "expansion"
+version = 1
+
+[[template]]
+id = "{target}.work"
+title = "Work on {target.title}"
+
+[template.metadata]
+owner = "{owner}"
+list = ["{env}", { k = "{owner}" }]
+
+[template.metadata.nested]
+env = "{env}"
+
+[[template.metadata.tables]]
+name = "{env}"
+
+[[template.metadata.tables]]
+name = "second"
+
+[template.gate]
+type = "human"
+await_id = "approve-{target}"
+timeout = "1h"
+
+[template.loop]
+count = 2
+
+[[template.loop.body]]
+id = "body"
+title = "Body"
+
+[template.on_complete]
+for_each = "output.items"
+bond = "mol-item"
+
+[template.on_complete.vars]
+k = "{item}"
+`
+
+// TestApplyExpansionsMapDoesNotShareTemplateState changes everything mutable
+// on one compose.map result and checks that the template and the sibling
+// result keep their values.
+func TestApplyExpansionsMapDoesNotShareTemplateState(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "shared.formula.toml"), []byte(sharedTemplateTOML), 0644); err != nil {
+		t.Fatal(err)
+	}
+	parser := NewParser(dir)
+
+	steps, err := ApplyExpansions(
+		[]*Step{{ID: "impl.a", Title: "A"}, {ID: "impl.b", Title: "B"}},
+		&ComposeRules{Map: []*MapRule{{Select: "impl.*", With: "shared", Vars: map[string]string{"owner": "alice", "env": "prod"}}}},
+		parser,
+	)
+	if err != nil {
+		t.Fatalf("ApplyExpansions failed: %v", err)
+	}
+	byID := buildStepMap(steps)
+	a, b := byID["impl.a.work"], byID["impl.b.work"]
+	if a == nil || b == nil {
+		t.Fatalf("expanded steps missing: %v", byID)
+	}
+	f, err := parser.LoadByName("shared")
+	if err != nil {
+		t.Fatalf("LoadByName failed: %v", err)
+	}
+	tmpl := f.Template[0]
+
+	// snapshot reads every value the test changes on a.
+	snapshot := func(s *Step) (string, bool) {
+		md := s.Metadata
+		nested, _ := md["nested"].(map[string]interface{})
+		list, _ := md["list"].([]interface{})
+		tables, _ := md["tables"].([]map[string]interface{})
+		if md == nil || nested == nil || len(list) != 2 || len(tables) != 2 || s.Gate == nil ||
+			s.Loop == nil || len(s.Loop.Body) != 1 || s.OnComplete == nil {
+			return fmt.Sprintf("metadata %v gate %v loop %v on_complete %v", md, s.Gate, s.Loop, s.OnComplete), false
+		}
+		listMap, _ := list[1].(map[string]interface{})
+		return fmt.Sprint(md["owner"], "|", nested["env"], "|", list[0], "|", listMap["k"], "|", tables[0]["name"], "|",
+			s.Gate.AwaitID, "|", s.Gate.Timeout, "|", s.Loop.Count, "|", s.Loop.Body[0].Title, "|", s.OnComplete.Vars["k"]), true
+	}
+	tmplBefore, ok := snapshot(tmpl)
+	if !ok {
+		t.Fatalf("template lacks the state under test: %s", tmplBefore)
+	}
+	bBefore, ok := snapshot(b)
+	if !ok {
+		t.Fatalf("impl.b.work lacks the template's state: %s", bBefore)
+	}
+	if _, ok := snapshot(a); !ok {
+		t.Fatalf("impl.a.work lacks the template's state")
+	}
+
+	a.Metadata["owner"] = "changed"
+	a.Metadata["nested"].(map[string]interface{})["env"] = "changed"
+	list := a.Metadata["list"].([]interface{})
+	list[0] = "changed"
+	list[1].(map[string]interface{})["k"] = "changed"
+	a.Metadata["tables"].([]map[string]interface{})[0]["name"] = "changed"
+	a.Gate.AwaitID = "changed"
+	a.Gate.Timeout = "changed"
+	a.Loop.Count = 99
+	a.Loop.Body[0].Title = "changed"
+	a.OnComplete.Vars["k"] = "changed"
+
+	if after, _ := snapshot(tmpl); after != tmplBefore {
+		t.Errorf("changing impl.a.work changed the template:\n before %s\n after  %s", tmplBefore, after)
+	}
+	if after, _ := snapshot(b); after != bBefore {
+		t.Errorf("changing impl.a.work changed impl.b.work:\n before %s\n after  %s", bBefore, after)
+	}
+}

@@ -1281,6 +1281,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Expansion templates keep their steps' gates, waits_for, conditions,
+  notes and metadata** (#6433, builds on PR #6635 by vishnujayvel). A
+  template step expanded by `compose.expand`, `compose.map`, an inline
+  `expand` or a standalone expansion formula lost its `notes`, `metadata`,
+  `waits_for`, `condition`, `gate`, `loop` and `on_complete`, so the gating
+  and ordering the author wrote were silently absent from the cooked
+  molecule. They are now carried through. `notes`, `waits_for`, the gate
+  fields and metadata string values resolve `{target}` and expansion
+  `{var}` placeholders like `title` does; `condition`, `loop` and
+  `on_complete` are kept as written for the phases that evaluate them. A
+  template step's own `expand` is still ignored.
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc

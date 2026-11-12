@@ -252,6 +252,8 @@ func expandStepWith(target *Step, template []*Step, depth int, subst func(string
 			gate.Repo = sub(gate.Repo)
 			expanded.Gate = &gate
 		}
+		// cloneStep shares Loop; give each expanded step its own.
+		expanded.Loop = cloneLoopSpec(tmpl.Loop)
 
 		// An expanded step never re-expands: ApplyInlineExpansions re-scans
 		// its results for Expand, so carrying these would newly recurse.
