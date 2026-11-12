@@ -1275,14 +1275,24 @@ Examples:
 		// this database (the doc comment above the batch branch says so).
 		// EdgeReader doesn't have that gap, and batchMode&&"down" already
 		// used it above, so this is reached for "down" only when there is
-		// exactly one resolved anchor — warn on stderr (never stdout/--json,
-		// so the documented single-id shape and any script parsing it are
-		// untouched) naming any edge Relations left out, so a `bd link`
-		// across databases doesn't look indistinguishable from no link at
-		// all (bd-mtla). "up" has the same gap but no inbound EdgeReader
-		// role exists to detect it from here — tracked separately.
+		// exactly one resolved anchor — first resolve each dropped edge's
+		// bare cross-prefix target through the anchor's own routes and put
+		// the answered rows BACK in the listing (GH#5784 §224), then warn on
+		// stderr (never stdout/--json, so the documented single-id shape and
+		// any script parsing it are untouched) naming any edge that is still
+		// left out, so a `bd link` across databases doesn't look
+		// indistinguishable from no link at all (bd-mtla). "up" has the same
+		// gap but no inbound EdgeReader role exists to detect it from here —
+		// tracked separately.
 		if direction == "down" && len(resolved) == 1 {
 			if reader, err := resolved[0].store.EdgeReader(); err == nil {
+				var anchorBeadsDir string
+				if resolved[0].result != nil {
+					anchorBeadsDir = resolved[0].result.BeadsDir
+				}
+				allIssues = enrichWithForeignDepRows(ctx,
+					displayForeignResolver(anchorBeadsDir), reader,
+					resolved[0].fullID, typeFilter, allIssues)
 				warnDroppedDepEdges(ctx, reader, resolved[0].fullID, typeFilter, allIssues)
 			}
 		}
@@ -1321,8 +1331,15 @@ Examples:
 			default:
 				idStr = iss.ID
 			}
+			via := string(iss.DependencyType)
+			if iss.External {
+				// A row this listing resolved on the anchor's behalf from
+				// another rig's database (GH#5784 §226): named, never silent,
+				// because its issue fields live elsewhere.
+				via += " (external)"
+			}
 			fmt.Printf("  %s: %s [P%d] (%s) via %s\n",
-				idStr, iss.Title, iss.Priority, iss.Status, iss.DependencyType)
+				idStr, iss.Title, iss.Priority, iss.Status, via)
 		}
 		fmt.Println()
 		return nil

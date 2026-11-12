@@ -191,6 +191,20 @@ var showCmd = &cobra.Command{
 					result.Close()
 					return HandleErrorRespectJSON("%v", derr)
 				}
+				// GH#5784 §224, the --json arm of the enrichment the text
+				// path above does: a bare cross-prefix edge's target,
+				// resolved through the anchor's routes, rides along as a
+				// dependency row carrying external: true, and the
+				// unresolvable_dependencies delta shrinks to the targets
+				// that could not be answered. BriefDeps trims each row to
+				// identity fields inside the role, so the brief view stays
+				// as the contract defined it — no enrichment there.
+				if !briefDeps {
+					if depReader, depReaderErr := issueStore.EdgeReader(); depReaderErr == nil {
+						details = enrichShowDetailsForeignDeps(ctx,
+							displayForeignResolver(result.BeadsDir), depReader, details)
+					}
+				}
 				allDetails = append(allDetails, details)
 				result.Close()
 				continue
@@ -209,6 +223,26 @@ var showCmd = &cobra.Command{
 			depCountsSnapshot := readDepCounts(ctx, issueStore, issue.ID)
 			depsWithMeta, depsErr := issueStore.GetDependenciesWithMetadata(ctx, issue.ID)
 			gates := types.GatesHolding(issue, depsWithMeta)
+
+			// A bare cross-prefix edge stored in this rig's database is a
+			// real dependency the listing above dropped because its far end
+			// has no row here (GH#5784 §224). Resolve each one through the
+			// anchor's own routes and put the answered rows BACK, marked
+			// (external) in the rendered sections and by their External view
+			// flag in --json. AFTER GatesHolding, on purpose: the GATED
+			// header decoration stays derived from this database's rows
+			// alone, and the unresolvable-edge warning below sees the
+			// enriched rows, so a resolved foreign row stops being counted
+			// as an edge that could not be shown. Best effort like the read
+			// above it — and only on a listing that SUCCEEDED, so a failed
+			// read keeps rendering undecorated rather than half-resolved.
+			if depsErr == nil {
+				if depReader, depReaderErr := issueStore.EdgeReader(); depReaderErr == nil {
+					depsWithMeta = enrichWithForeignDepRows(ctx,
+						displayForeignResolver(result.BeadsDir), depReader,
+						issue.ID, "", depsWithMeta)
+				}
+			}
 
 			if idx > 0 {
 				fmt.Println("\n" + ui.RenderMuted(strings.Repeat("─", 60)))

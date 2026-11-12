@@ -505,6 +505,19 @@ func runShowProxiedDefault(ctx context.Context, uw uow.UnitOfWork, in *showProxi
 				return HandleErrorRespectJSON("%v", derr)
 			}
 			foundCount++
+			// The --json arm of the cross-rig row the text path below
+			// restores (show.go, GH#5784 §224): a bare cross-prefix edge's
+			// target, resolved through this workspace's routes, rides along
+			// as a dependency row carrying external: true, and the
+			// unresolvable_dependencies delta shrinks to the targets that
+			// could not be answered. BriefDeps trims each row inside the
+			// role, so the brief view stays as the contract defined it.
+			if !in.briefDeps {
+				if depReader, depReaderErr := proxiedEdgeReader(); depReaderErr == nil {
+					details = enrichShowDetailsForeignDeps(ctx,
+						displayForeignResolver(""), depReader, details)
+				}
+			}
 			allDetails = append(allDetails, details)
 			continue
 		}
@@ -551,6 +564,21 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 	depCountsSnapshot := readDepCounts(ctx, proxiedDepCounter{src: workapi.NewUOWDetailSource(uw), isWisp: isWisp}, issue.ID)
 	depsWithMeta, depsErr := proxiedListDeps(ctx, uw, issue.ID, isWisp, domain.DepListFilter{Direction: domain.DepDirectionOut})
 	gates := types.GatesHolding(issue, depsWithMeta)
+
+	// The same cross-rig row the direct route restores (show.go, GH#5784
+	// §224): a bare cross-prefix edge's target resolved through this
+	// workspace's routes and put back in the listing, marked (external) in
+	// the rendered sections. AFTER GatesHolding, so the GATED header stays
+	// derived from this database's rows alone; BEST EFFORT like the read
+	// above it, and only on a listing that SUCCEEDED, so a failed read keeps
+	// rendering undecorated rather than half-resolved.
+	if depsErr == nil {
+		if depReader, depReaderErr := proxiedEdgeReader(); depReaderErr == nil {
+			depsWithMeta = enrichWithForeignDepRows(ctx,
+				displayForeignResolver(""), depReader,
+				issue.ID, "", depsWithMeta)
+		}
+	}
 
 	if idx > 0 {
 		fmt.Println("\n" + ui.RenderMuted(strings.Repeat("─", 60)))

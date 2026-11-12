@@ -259,13 +259,22 @@ func formatDependencyLine(prefix string, dep *types.IssueWithDependencyMetadata)
 	// Status icon (always rendered with semantic color)
 	statusIcon := ui.GetStatusIcon(string(dep.Status))
 
+	// A row resolved from another rig's database on this workspace's behalf
+	// (GH#5784 §226): its fields live elsewhere, so the line names it rather
+	// than letting it read as a row this database owns.
+	externalTag := ""
+	if dep.External {
+		externalTag = " " + ui.RenderMuted("(external)")
+	}
+
 	// Closed items: mute entire row since the work is complete
 	if dep.Status == types.StatusClosed {
-		return fmt.Sprintf("  %s %s %s: %s %s",
+		return fmt.Sprintf("  %s %s %s: %s %s%s",
 			prefix, statusIcon,
 			ui.RenderMuted(dep.ID),
 			ui.RenderMuted(dep.Title),
-			ui.RenderMuted(fmt.Sprintf("P%d", dep.Priority)))
+			ui.RenderMuted(fmt.Sprintf("P%d", dep.Priority)),
+			externalTag)
 	}
 
 	// Active items: ID with status color, priority with semantic color
@@ -281,7 +290,7 @@ func formatDependencyLine(prefix string, dep *types.IssueWithDependencyMetadata)
 		typeStr = ui.TypeBugStyle.Render("(BUG)") + " "
 	}
 
-	return fmt.Sprintf("  %s %s %s: %s%s %s", prefix, statusIcon, idStr, typeStr, dep.Title, priorityTag)
+	return fmt.Sprintf("  %s %s %s: %s%s %s%s", prefix, statusIcon, idStr, typeStr, dep.Title, priorityTag, externalTag)
 }
 
 // printDepSection prints one dependency section: bold heading, then a line per

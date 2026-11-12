@@ -10,15 +10,20 @@ import (
 	"testing"
 )
 
-// TestEmbeddedDepListSingleIDWarnsOnDroppedExternalEdge is the regression
-// guard for bd-mtla: `bd link` across two databases writes the dependency
-// correctly (into depends_on_external), but the single-id `bd dep list <id>`
-// a caller naturally runs right after silently showed nothing for it —
-// indistinguishable from no dependency ever being created. This verifies the
-// fix: stdout/--json stay byte-for-byte what they were before the fix for the
-// local-only case (no schema/shape change), while stderr now names the edge
-// Relations could not resolve locally.
-func TestEmbeddedDepListSingleIDWarnsOnDroppedExternalEdge(t *testing.T) {
+// TestEmbeddedDepListSingleIDRendersResolvableForeignEdge is the evolved
+// regression guard for bd-mtla and GH#5784 §224: `bd link` across two
+// databases writes the dependency correctly (into depends_on_external), but
+// the single-id `bd dep list <id>` a caller naturally runs right after showed
+// nothing for it — indistinguishable from no dependency ever being created.
+// bd-mtla closed the gap as a disclosure: stderr named the edge Relations
+// could not resolve. GH#5784 AC-6 goes further for the case that has an
+// answer: a bare cross-prefix target the anchor's routes can resolve renders
+// as a row again — real issue fields, its edge type, an (external) marker in
+// text and an external: true view flag in --json — and the dropped-edge
+// warning is reserved for targets no route can answer (pinned alongside the
+// rendering contract in crossrig_display_embedded_test.go). Batch mode keeps
+// showing the raw edge records for every target, answerable or not.
+func TestEmbeddedDepListSingleIDRendersResolvableForeignEdge(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt dep tests")
 	}
@@ -64,14 +69,17 @@ func TestEmbeddedDepListSingleIDWarnsOnDroppedExternalEdge(t *testing.T) {
 	if !strings.Contains(stdout.String(), local.ID) {
 		t.Errorf("stdout missing local dep %s:\n%s", local.ID, stdout.String())
 	}
-	if strings.Contains(stdout.String(), external.ID) {
-		t.Errorf("stdout unexpectedly contains external target %s (shape must stay unchanged):\n%s", external.ID, stdout.String())
+	if !strings.Contains(stdout.String(), external.ID) {
+		t.Errorf("stdout must render the resolvable foreign dep %s:\n%s", external.ID, stdout.String())
 	}
-	if !strings.Contains(stderr.String(), external.ID+" via related") {
-		t.Errorf("stderr should warn about dropped external target %s with its type, got:\n%s", external.ID, stderr.String())
+	if !strings.Contains(stdout.String(), "(external)") {
+		t.Errorf("stdout must mark the foreign dep (external):\n%s", stdout.String())
+	}
+	if strings.Contains(stderr.String(), external.ID+" via related") {
+		t.Errorf("a resolvable foreign edge is shown, not dropped; no warning for it:\n%s", stderr.String())
 	}
 
-	// --json: must stay exactly what it was before the fix for the local-only case.
+	// --json: the foreign row rides along with the external view flag.
 	jsonCmd := exec.Command(bd, "dep", "list", source.ID, "--json")
 	jsonCmd.Dir = dir
 	jsonCmd.Env = bdEnv(dir)
@@ -79,8 +87,11 @@ func TestEmbeddedDepListSingleIDWarnsOnDroppedExternalEdge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bd dep list --json: %v", err)
 	}
-	if strings.Contains(jsonStdout.String(), external.ID) {
-		t.Errorf("--json output unexpectedly contains external target %s:\n%s", external.ID, jsonStdout.String())
+	if !strings.Contains(jsonStdout.String(), external.ID) {
+		t.Errorf("--json output must list the resolvable foreign dep %s:\n%s", external.ID, jsonStdout.String())
+	}
+	if !strings.Contains(jsonStdout.String(), `"external": true`) {
+		t.Errorf("--json output must carry the external view flag on the foreign row:\n%s", jsonStdout.String())
 	}
 	if !strings.Contains(jsonStdout.String(), local.ID) {
 		t.Errorf("--json output missing local dep %s:\n%s", local.ID, jsonStdout.String())

@@ -1244,6 +1244,13 @@ type DependencyCounts struct {
 type IssueWithDependencyMetadata struct {
 	Issue
 	DependencyType DependencyType `json:"dependency_type"`
+	// External marks a row this command layer rendered on behalf of a bare
+	// cross-prefix edge (GH#5784): the issue lives in another rig's database
+	// and was resolved through .beads/routes.jsonl purely so the worker can
+	// see it. Storage never sets it — every row it builds names an issue in
+	// the store's own database — so it is additive view metadata, omitted
+	// when false and absent from every pre-existing JSON shape.
+	External bool `json:"external,omitempty"`
 }
 
 // IssueWithCounts extends Issue with dependency relationship counts

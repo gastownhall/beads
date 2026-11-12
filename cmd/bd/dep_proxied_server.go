@@ -543,11 +543,16 @@ func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 	// drops "down" edges whose target has no row in this database, and the
 	// `len(args) > 1 && direction == "down"` branch above already uses the
 	// (non-dropping) EdgeReader role for batch mode — so this loop only runs
-	// for "down" with exactly one arg. Warn on stderr so a cross-database
-	// `bd link` isn't indistinguishable from no link at all (bd-mtla); never
-	// touches stdout/--json.
+	// for "down" with exactly one arg. First resolve each dropped edge's bare
+	// cross-prefix target through this workspace's routes and put the answered
+	// rows BACK in the listing (GH#5784 §224), then warn on stderr so a
+	// cross-database `bd link` isn't indistinguishable from no link at all
+	// (bd-mtla); never touches stdout/--json.
 	if direction == "down" && len(args) == 1 {
 		if reader, err := proxiedEdgeReader(); err == nil {
+			allIssues = enrichWithForeignDepRows(ctx,
+				displayForeignResolver(""), reader,
+				args[0], typeFilter, allIssues)
 			warnDroppedDepEdges(ctx, reader, args[0], typeFilter, allIssues)
 		}
 	}
@@ -587,8 +592,14 @@ func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 		default:
 			idStr = iss.ID
 		}
+		via := string(iss.DependencyType)
+		if iss.External {
+			// A row this listing resolved on this workspace's behalf from
+			// another rig's database (GH#5784 §226): named, never silent.
+			via += " (external)"
+		}
 		fmt.Printf("  %s: %s [P%d] (%s) via %s\n",
-			idStr, iss.Title, iss.Priority, iss.Status, iss.DependencyType)
+			idStr, iss.Title, iss.Priority, iss.Status, via)
 	}
 	fmt.Println()
 	return nil
