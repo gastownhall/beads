@@ -1281,6 +1281,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd federation add-peer` no longer clears a peer's stored sovereignty
+  tier when re-run without `--sovereignty`** (#5213). Re-running add-peer is
+  how you re-store a peer's credentials, including credentials this machine's
+  key cannot decrypt, but the upsert overwrote the tier with an empty string
+  and `--json` reported `"sovereignty": ""`. An omitted `--sovereignty` now
+  keeps the stored tier, and the text and `--json` output report the kept
+  tier. To clear a tier on purpose, pass `--sovereignty ""`, which prints
+  `Sovereignty: cleared`. For Go callers of the `FederationStore` interface
+  (aliased as `backend.FederationStore`), `AddFederationPeer` now keeps an
+  existing peer's tier when `Sovereignty` is empty unless the new
+  `FederationPeer.ClearSovereignty` field is set, and on success sets
+  `peer.Sovereignty` to the effective tier. Callers that cleared a tier by
+  passing an empty string must set `ClearSovereignty`, and other
+  implementations of the interface must adopt the new behavior.
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
