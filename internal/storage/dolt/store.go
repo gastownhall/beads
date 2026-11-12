@@ -4119,7 +4119,13 @@ func (s *DoltStore) Commit(ctx context.Context, message string) error {
 // Committing this clone's own kv.* rows as the merge basis is the same explicit,
 // user-initiated action CommitPending ('bd dolt commit') already performs, so it
 // does not widen the concurrent-writer race GH#2455 guards against.
+//
+// A conflicted merge already open on the branch is refused before anything is
+// staged (refuseOpenConflictedMerge, GH#7839).
 func (s *DoltStore) commitBeforePull(ctx context.Context, message string) error {
+	if err := s.refuseOpenConflictedMerge(ctx); err != nil {
+		return err
+	}
 	return s.commitWorkingSet(ctx, message, configIncludeUserKVOnly)
 }
 

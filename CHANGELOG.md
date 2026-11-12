@@ -1254,7 +1254,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the working set, so every later write and pull failed with `Merge conflict
   detected, @autocommit transaction rolled back`. The pull now aborts the
   merge it opened, as the SQL and embedded routes already did, and reports
-  the conflicted tables; `bd federation sync` gets them as data. To decide
+  the conflicted tables; `bd federation sync` gets them as data. A pull that
+  finds a conflicted merge already open refuses before staging anything,
+  leaves that merge alone, and names `bd conflicts list` and the abort
+  command. To decide
   the conflicts in bulk on a server store, merge the fetched branch:
   `bd vc merge <remote>/<branch> --strategy ours|theirs`.
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,

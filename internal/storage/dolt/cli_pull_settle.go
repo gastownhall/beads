@@ -107,13 +107,62 @@ func (s *DoltStore) readStoreMergeState(ctx context.Context) (cliMergeState, err
 	return readCLIMergeState(ctx, conn)
 }
 
+// pullMergeStateError reports merge state a pull will not settle on its own.
+// It never claims the working set was restored.
+type pullMergeStateError struct {
+	remote string // empty when the refusal came before a remote was chosen
+	state  cliMergeState
+}
+
+func (e *pullMergeStateError) Error() string {
+	what := "a merge"
+	if e.state.source != "" {
+		what = "a merge of " + e.state.source
+	}
+	detail := ""
+	if tables := e.state.tables(); len(tables) > 0 {
+		detail = " with conflicts in " + strings.Join(tables, ", ")
+	}
+	from := ""
+	if e.remote != "" {
+		from = " from " + e.remote
+	}
+	return fmt.Sprintf("cannot pull%s: %s is already open on this database%s; "+
+		"bd will not pull over it or abort a merge it did not start. "+
+		"Inspect it with 'bd conflicts list', then resolve and commit it, "+
+		`or abandon it with: bd sql "CALL DOLT_MERGE('--abort')"`, from, what, detail)
+}
+
+// refuseOpenConflictedMerge stops a pull before it stages anything when the
+// branch already carries an unconcluded merge with row conflicts, schema
+// conflicts or constraint violations (GH#7839): committing over it fails with
+// an opaque "tables are in conflict", and a pull must never abort a merge it
+// did not start. A merge with nothing left to resolve is the pre-pull commit's
+// to conclude, as before. The read is a diagnosis only: when it fails, the
+// pull proceeds and reports whatever the commit or transport reports.
+func (s *DoltStore) refuseOpenConflictedMerge(ctx context.Context) error {
+	st, err := s.readStoreMergeState(ctx)
+	if err != nil {
+		return nil //nolint:nilerr // diagnosis only; never a gate
+	}
+	if len(st.conflicts) > 0 || st.blockers.Blocked() {
+		return &pullMergeStateError{state: st}
+	}
+	return nil
+}
+
 // runCLIPull runs one CLI-route pull (pull is the doltCLIPull or
 // doltCLIPullFromPeer call) and settles what it left on the branch. All five
 // CLI pull call sites go through it. A read-only store cannot resolve, abort
-// or commit, so it surfaces the transport's result as-is.
+// or commit, so it surfaces the transport's result as-is. A merge already open
+// before the transport is reported without running it: what the pull leaves
+// behind could not be told apart from it.
 func (s *DoltStore) runCLIPull(ctx context.Context, remote string, pull func() error) error {
 	if s.readOnly {
 		return pull()
+	}
+	if pre, err := s.readStoreMergeState(ctx); err == nil && pre.merging {
+		return &pullMergeStateError{remote: remote, state: pre}
 	}
 	return s.settleCLIPull(ctx, remote, pull())
 }
