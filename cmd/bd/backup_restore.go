@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/ui"
@@ -263,17 +264,18 @@ func validateBackupRestoreDir(dir string, reader restoreSourceReader) error {
 		return fmt.Errorf("backup source %s is read by the Dolt server at %s from its own filesystem, which bd cannot check from this machine;\n"+
 			"a --force restore from a directory that holds no Dolt backup there drops the database\n"+
 			"Restore was not attempted. Run 'bd backup restore' on the server's machine, in a workspace\n"+
-			"that reaches the server at localhost, so bd checks the directory the server reads", dir, backupServerHost())
+			"that reaches the server at localhost, so bd checks the directory the server reads",
+			remedy.PrintedValue(dir), remedy.PrintedValue(backupServerHost()))
 	}
-	remedy := backupRestoreRemedy
+	hint := backupRestoreRemedy
 	if reader == restoreSourceReadByLocalServer {
-		remedy += "\n" + backupRestoreServerNote
+		hint += "\n" + backupRestoreServerNote
 	}
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		return fmt.Errorf("backup directory not found: %s\n%s", dir, remedy)
+		return fmt.Errorf("backup directory not found: %s\n%s", dir, hint)
 	}
 	if _, err := versioncontrolops.RestoreSourceURL(dir); err != nil {
-		return fmt.Errorf("%w\n%s", err, remedy)
+		return fmt.Errorf("%w\n%s", err, hint)
 	}
 	return nil
 }
