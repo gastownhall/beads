@@ -5810,25 +5810,34 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 		return pullReport{}, err
 	} else if useCLI {
 		logRouteDecision("pull", remote, true)
-		// CLI pull leaves any conflicts in the working set; run the auto-resolver so
-		// git-protocol remotes get the same audit-only dependency / metadata repair
-		// as the SQL DOLT_PULL path (#4259).
-		return pullReport{}, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
+		// CLI pull leaves any conflicts in the working set; runCLIPullSettled
+		// runs the auto-resolver so git-protocol remotes get the same
+		// audit-only dependency / metadata repair as the SQL DOLT_PULL path
+		// (#4259), and aborts the merge a declined conflict leaves open
+		// (GH#7839).
+		return pullReport{}, s.runCLIPullSettled(ctx, remote, func() error {
+			return s.doltCLIPull(ctx, remote, creds)
+		})
 	}
 	// Credential CLI routing: mirrors git-protocol path, including post-pull
-	// auto-resolution.
+	// auto-resolution and settlement.
 	if useCLI, err := s.prepareCLIRouteForCredentials(ctx, remote, creds); err != nil {
 		return pullReport{}, err
 	} else if useCLI {
 		logRouteDecision("pull", remote, true)
-		return pullReport{}, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
+		return pullReport{}, s.runCLIPullSettled(ctx, remote, func() error {
+			return s.doltCLIPull(ctx, remote, creds)
+		})
 	}
-	// Cloud auth CLI routing (GH#6), including post-pull auto-resolution.
+	// Cloud auth CLI routing (GH#6), including post-pull auto-resolution and
+	// settlement.
 	if useCLI, err := s.prepareCLIRouteForCloudAuth(ctx, remote); err != nil {
 		return pullReport{}, err
 	} else if useCLI {
 		logRouteDecision("pull", remote, true)
-		return pullReport{}, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
+		return pullReport{}, s.runCLIPullSettled(ctx, remote, func() error {
+			return s.doltCLIPull(ctx, remote, creds)
+		})
 	}
 	// Local file:// pulls intentionally stay on the SQL path. The matching CLI
 	// guard is a push-only optimization; SQL pull keeps pullWithAutoResolve in
@@ -6254,36 +6263,6 @@ func (s *DoltStore) markBlockedRecomputePending(ctx context.Context, fromCommit 
 		return
 	}
 	_ = tx.Commit()
-}
-
-// finishCLIPull runs the merge-conflict auto-resolver after a CLI-based pull
-// (git-protocol, credentialed, or cloud-auth remotes). CLI `dolt pull` writes any
-// merge conflicts into the shared working set but, unlike the SQL DOLT_PULL path,
-// returns without a transaction we can inspect — so these remotes historically
-// skipped the resolver entirely. With deterministic dependency ids (#4259) a
-// same-edge conflict that differs only in audit columns is safe to auto-resolve, and
-// the git remote topology in #4259 is exactly this CLI path; route it through the
-// same resolver as the SQL path. pullErr is what doltCLIPull returned: a pull that
-// fails *because* of conflicts is recoverable once they resolve, so we inspect the
-// working set regardless and only surface pullErr when nothing was resolved.
-func (s *DoltStore) finishCLIPull(ctx context.Context, pullErr error) error {
-	if s.readOnly {
-		// A read-only store cannot resolve or commit; surface the pull result as-is.
-		return pullErr
-	}
-	resolved, resolveErr := s.autoResolveConflictsAfterCLIPull(ctx)
-	if resolveErr != nil {
-		if pullErr != nil {
-			return pullErr
-		}
-		return resolveErr
-	}
-	if pullErr != nil && !resolved {
-		// Pull failed for a non-conflict reason, or conflicts are not auto-resolvable;
-		// leave them in the working set for the operator.
-		return pullErr
-	}
-	return nil
 }
 
 // autoResolveConflictsAfterCLIPull inspects the working set and auto-resolves the

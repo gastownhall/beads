@@ -1,7 +1,10 @@
 package dolt
 
 import (
+	"errors"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 // TestPullAutoResolveMetadataConflicts verifies that merge conflicts limited to
@@ -347,5 +350,104 @@ func TestSettleMergeInTxKeepsCleanMergedTables(t *testing.T) {
 	}
 	if dirty != 0 {
 		t.Errorf("%d table(s) left uncommitted after the settlement", dirty)
+	}
+}
+
+// TestFinishCLIPull_DeclinedConflictAbortsMerge pins GH#7839: a CLI-route
+// (git-protocol) pull whose conflict the auto-resolver declines must leave the
+// branch and working set as they were before the pull and report a
+// MergeConflictsError, exactly like the SQL route — not leave the merge open
+// so every later write and pull fails.
+func TestFinishCLIPull_DeclinedConflictAbortsMerge(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+	db := store.db
+
+	var currentBranch string
+	if err := db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&currentBranch); err != nil {
+		t.Fatalf("active branch: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES ('cli-conflict', 'Local Title', '', '', '', '', 'open', 2, 'task')"); err != nil {
+		t.Fatalf("insert local issue: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'local issue')"); err != nil {
+		t.Fatalf("commit local: %v", err)
+	}
+	remoteBranch := currentBranch + "_cli_remote"
+	if _, err := db.ExecContext(ctx, "CALL DOLT_BRANCH(?, 'HEAD~1')", remoteBranch); err != nil {
+		t.Fatalf("create remote branch: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", remoteBranch); err != nil {
+		t.Fatalf("checkout remote branch: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES ('cli-conflict', 'Remote Title', '', '', '', '', 'open', 2, 'task')"); err != nil {
+		t.Fatalf("insert remote issue: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'remote issue')"); err != nil {
+		t.Fatalf("commit remote: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", currentBranch); err != nil {
+		t.Fatalf("checkout current branch: %v", err)
+	}
+
+	var preHead string
+	if err := db.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&preHead); err != nil {
+		t.Fatalf("pre-pull head: %v", err)
+	}
+
+	// Persist the conflicted merge into the working set, as the `dolt pull`
+	// subprocess does when it runs against the server's database directory.
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, "SET @@dolt_allow_commit_conflicts = 1"); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("allow commit conflicts: %v", err)
+	}
+	_, mergeErr := tx.ExecContext(ctx, "CALL DOLT_MERGE(?)", remoteBranch)
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("persist conflicted working set: %v (merge: %v)", err, mergeErr)
+	}
+	var n int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_conflicts_issues").Scan(&n); err != nil {
+		t.Fatalf("count conflicts: %v", err)
+	}
+	if n == 0 {
+		t.Fatal("setup: expected a persisted issues conflict")
+	}
+
+	pullErr := errors.New("dolt pull failed: CONFLICT (content): Merge conflict in issues: exit status 1")
+	gotErr := store.finishCLIPull(ctx, pullErr)
+
+	var isMerging bool
+	if err := db.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&isMerging); err != nil {
+		t.Fatalf("merge status: %v", err)
+	}
+	var postHead string
+	if err := db.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&postHead); err != nil {
+		t.Fatalf("post-pull head: %v", err)
+	}
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_conflicts").Scan(&n); err != nil {
+		t.Fatalf("count conflicts after: %v", err)
+	}
+
+	var mce *versioncontrolops.MergeConflictsError
+	if !errors.As(gotErr, &mce) {
+		t.Errorf("finishCLIPull error = %v; want *versioncontrolops.MergeConflictsError", gotErr)
+	}
+	if isMerging {
+		t.Errorf("dolt_merge_status.is_merging = 1 after a declined CLI pull conflict; want the merge aborted")
+	}
+	if n != 0 {
+		t.Errorf("dolt_conflicts has %d table(s) after a declined CLI pull conflict; want 0", n)
+	}
+	if postHead != preHead {
+		t.Errorf("HEAD moved from %s to %s; want the pre-pull branch", preHead, postHead)
 	}
 }

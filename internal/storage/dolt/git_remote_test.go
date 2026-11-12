@@ -4,6 +4,7 @@ package dolt
 
 import (
 	"context"
+	"database/sql"
 	"encoding/csv"
 	"errors"
 	"fmt"
@@ -2108,5 +2109,196 @@ func TestPushPullAtAHostBdDoesNotRunMoveTheServersData(t *testing.T) {
 	}
 	if _, err := store.GetIssue(ctx, "lo-third"); err != nil {
 		t.Fatalf("the server lacks the remote's lo-third after Pull: %v", err)
+	}
+}
+
+// --- GH#7839: CLI-route declined pull conflicts ---
+
+// requireGitProtocolRemote asserts that the named remote's URL is git
+// protocol as this Dolt reports it (a file:// bare-git URL is normalized to
+// git+file://). Pulls from it therefore take the CLI `dolt pull` subprocess
+// route, the subject of GH#7839 — a remote that stops routing CLI would make
+// these tests exercise the SQL settlement route and silently stop testing the
+// bug entirely.
+func requireGitProtocolRemote(t *testing.T, store *DoltStore, remote string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	remotes, err := store.ListRemotes(ctx)
+	if err != nil {
+		t.Fatalf("list remotes: %v", err)
+	}
+	for _, r := range remotes {
+		if r.Name == remote {
+			if !doltutil.IsGitProtocolURL(r.URL) {
+				t.Fatalf("remote %q URL %q is not git protocol; its pulls would not route the CLI subprocess and this test would not exercise GH#7839", remote, r.URL)
+			}
+			return
+		}
+	}
+	t.Fatalf("remote %q not configured", remote)
+}
+
+// freshSessionMergeState reads merge state the way another bd process would
+// see it after this one returns: on a brand-new connection, not the store's
+// pooled session. dolt_merge_status and dolt_conflicts are branch working-set
+// state, so a wedged store (GH#7839) is visible exactly here — which is the
+// bug's blast radius, not one session's private view.
+func freshSessionMergeState(t *testing.T, store *DoltStore) (isMerging bool, conflictTables int) {
+	t.Helper()
+	fresh, err := sql.Open("mysql", store.connStr)
+	if err != nil {
+		t.Fatalf("open fresh session: %v", err)
+	}
+	defer fresh.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := fresh.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&isMerging); err != nil {
+		t.Fatalf("fresh session: read dolt_merge_status: %v", err)
+	}
+	if err := fresh.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_conflicts").Scan(&conflictTables); err != nil {
+		t.Fatalf("fresh session: count dolt_conflicts: %v", err)
+	}
+	return isMerging, conflictTables
+}
+
+// seedGitRemoteDeclinedNotesConflict builds GH#7839's scenario end-to-end over
+// the git-protocol remote: A publishes an issue, B rewrites its notes from a
+// clone and pushes, A rewrites the same notes locally and commits, and the
+// next pull from A hits a modify/modify conflict on notes. notes is a
+// non-scalar issues column the auto-resolver always declines
+// (issuesNonScalarColumns), so the CLI pull's merge halts on a conflict the
+// resolver refuses — the exact state the bug left open. Returns A's pre-pull
+// HEAD, captured after the local commit and before any pull.
+func seedGitRemoteDeclinedNotesConflict(t *testing.T, store *DoltStore, setup *gitRemoteSetup, issueID string) (preHead string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	// A creates the issue with its notes and publishes it.
+	issue := &types.Issue{
+		ID:        issueID,
+		Title:     "GH7839 declined conflict " + issueID,
+		Notes:     "from A",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  2,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if err := store.Commit(ctx, "Add "+issueID); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := store.Push(ctx); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+
+	// B clones and rewrites the notes, then publishes.
+	cloneDir := filepath.Join(setup.baseDir, "clone-"+issueID)
+	doltClone(t, setup.remoteURL, cloneDir)
+	runDoltSQL(t, cloneDir, fmt.Sprintf("UPDATE issues SET notes = 'from B' WHERE id = '%s'", escapeSQL(issueID)))
+	sourceCommitAndPush(t, cloneDir, "notes from B")
+
+	// The clone pushed from its own process; this store's sql-server last
+	// read the remote during store.Push() above and caches that view briefly.
+	waitOutGitRemoteReadCache()
+
+	// A diverges locally: rewrite the same notes. The working set is
+	// committed so the divergence is branch history, not a dirty pull
+	// precondition.
+	if _, err := store.db.ExecContext(ctx,
+		fmt.Sprintf("UPDATE issues SET notes = 'from A local' WHERE id = '%s'", escapeSQL(issueID))); err != nil {
+		t.Fatalf("local notes rewrite: %v", err)
+	}
+	if err := store.Commit(ctx, "notes from A"); err != nil {
+		t.Fatalf("Commit local divergence: %v", err)
+	}
+	var head string
+	if err := store.db.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&head); err != nil {
+		t.Fatalf("read pre-pull HEAD: %v", err)
+	}
+	return head
+}
+
+// cliPullAndSettle runs the production git-protocol pull sequence directly
+// against the served database: the real `dolt pull <remote> <branch>`
+// subprocess (which a served directory hands to the running sql-server), then
+// the settlement the transport applies to its result. It stands in for
+// Pull()/PullFrom()'s git-protocol route because that route is only selected
+// when the store's server is bd-managed (cliDirServesServer), which never
+// holds on a test lane that sets BEADS_DOLT_SERVER_PORT for its shared
+// server — store.Pull() there takes the SQL route and never exercises the
+// subprocess topology GH#7839 is about.
+func cliPullAndSettle(t *testing.T, store *DoltStore, remote string) error {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	cliErr := store.doltCLIPull(ctx, remote, store.credentialsForRemote(remote))
+	if cliErr == nil {
+		t.Fatalf("the CLI pull from %q succeeded: no conflict was constructed, the fixture is broken", remote)
+	}
+	if !strings.Contains(strings.ToLower(cliErr.Error()), "conflict") {
+		t.Fatalf("the CLI pull from %q failed for an unrelated reason: %v", remote, cliErr)
+	}
+	return store.finishCLIPull(ctx, cliErr)
+}
+
+// TestGitRemoteDeclinedConflictPullAbortsMerge is the end-to-end AC for
+// GH#7839: a CLI-route (git-protocol) pull whose conflict the auto-resolver
+// declines must report a MergeConflictsError, leave no merge open for a
+// fresh session, and preserve the pre-pull branch — exactly what the SQL
+// route's rollback already guaranteed. On the bug, the pull returned the
+// subprocess's raw conflict message with the merge left open, and every
+// later write and pull failed with Dolt's "Merge conflict detected"
+// autocommit rejection.
+func TestGitRemoteDeclinedConflictPullAbortsMerge(t *testing.T) {
+	store, setup, cleanup := setupEmbeddedGitRemote(t)
+	defer cleanup()
+	requireGitProtocolRemote(t, store, "origin")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	preHead := seedGitRemoteDeclinedNotesConflict(t, store, setup, "gh7839-ac1")
+
+	pullErr := cliPullAndSettle(t, store, "origin")
+	var mce *versioncontrolops.MergeConflictsError
+	if !errors.As(pullErr, &mce) {
+		t.Fatalf("settling a declined CLI conflict = %v; want *versioncontrolops.MergeConflictsError", pullErr)
+	}
+	if len(mce.Conflicts) == 0 {
+		t.Fatal("the MergeConflictsError carries no conflicts")
+	}
+	named := false
+	for _, c := range mce.Conflicts {
+		if c.Field == "issues" {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("conflicts %+v do not name the issues table", mce.Conflicts)
+	}
+
+	// A fresh session — the blast radius of the bug — must see a settled
+	// store: no open merge, no conflict tables.
+	if isMerging, tables := freshSessionMergeState(t, store); isMerging || tables != 0 {
+		t.Errorf("fresh session after a declined CLI pull: is_merging=%v, %d conflict table(s); want the merge aborted and conflicts cleared", isMerging, tables)
+	}
+
+	// The branch is exactly what it was before the pull, local edit intact.
+	var head string
+	if err := store.db.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&head); err != nil {
+		t.Fatalf("read post-pull HEAD: %v", err)
+	}
+	if head != preHead {
+		t.Errorf("HEAD = %s after the declined pull; want the pre-pull %s", head, preHead)
+	}
+	var notes string
+	if err := store.db.QueryRowContext(ctx, "SELECT notes FROM issues WHERE id = 'gh7839-ac1'").Scan(&notes); err != nil {
+		t.Fatalf("read local notes: %v", err)
+	}
+	if notes != "from A local" {
+		t.Errorf("local notes = %q after the declined pull; want %q", notes, "from A local")
 	}
 }
