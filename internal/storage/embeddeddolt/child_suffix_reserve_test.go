@@ -93,6 +93,15 @@ func (e *childSuffixEnv) committedCounter(t *testing.T, parent string) int {
 	return n
 }
 
+// counterRows counts parent's counter rows across both planes.
+func (e *childSuffixEnv) counterRows(t *testing.T, parent string) int {
+	t.Helper()
+	var n, w int
+	e.te.queryScalar(t, e.ctx, "SELECT COUNT(*) FROM child_counters WHERE parent_id = ?", []any{parent}, &n)
+	e.te.queryScalar(t, e.ctx, "SELECT COUNT(*) FROM wisp_child_counters WHERE parent_id = ?", []any{parent}, &w)
+	return n + w
+}
+
 // TestChildSuffixReservation pins GH#4750's live-database leg on the embedded
 // store: the create, rename and removal paths preserve a parent's child
 // suffixes in its counter, so a counter that was missing or lagging cannot let
@@ -207,6 +216,34 @@ func TestChildSuffixReservation(t *testing.T) {
 		}
 		e.assertNext(t, "nd-p", "nd-p.11")
 	})
+
+	// AC-7: a parent removed together with its children is departing, so the
+	// children's suffixes are not reserved under it and no counter row
+	// outlives it in either plane.
+	cascades := []struct {
+		name                  string
+		parentWisp, childWisp bool
+	}{
+		{"DurableParentAndChildren", false, false},
+		{"DurableParentAndWispChildren", false, true},
+		{"WispParentAndChildren", true, true},
+	}
+	for i, tc := range cascades {
+		t.Run("CascadeDeleteOf"+tc.name+"LeavesNoParentCounter", func(t *testing.T) {
+			prefix := "cd" + string(rune('a'+i))
+			e := newChildSuffixEnv(t, prefix)
+			parent := prefix + "-p"
+			e.create(t, parent, tc.parentWisp)
+			e.create(t, parent+".1", tc.childWisp)
+			e.create(t, parent+".2", tc.childWisp)
+			if _, err := e.te.store.DeleteIssues(e.ctx, []string{parent}, true, true, false); err != nil {
+				t.Fatalf("DeleteIssues(%s, cascade): %v", parent, err)
+			}
+			if got := e.counterRows(t, parent); got != 0 {
+				t.Fatalf("%d counter rows for %s after a cascade delete of it and its children, want 0", got, parent)
+			}
+		})
+	}
 }
 
 func removeByDeleteIssue(t *testing.T, e *childSuffixEnv, id string) {
