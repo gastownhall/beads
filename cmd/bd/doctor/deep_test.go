@@ -381,3 +381,38 @@ func TestDeepValidationResultJSON(t *testing.T) {
 		t.Error("JSON should contain overall_ok")
 	}
 }
+
+// TestCheckDependencyIntegrity_CrossPrefixTargetIsValid: an edge bd dep add
+// stored to another repository's prefix is not a broken dependency under
+// --deep (bd-zcpo44, AC-6).
+func TestCheckDependencyIntegrity_CrossPrefixTargetIsValid(t *testing.T) {
+	store := newTestDoltStore(t, "bd")
+	db := store.DB()
+	createDepTestIssue(t, store, "bd-1", false)
+	createDepTestIssue(t, store, "bd-2", false)
+	addDepTestEdge(t, store, "bd-1", "gt-9", types.DepBlocks)
+	insertExternalTargetDep(t, db, "dependencies", "bd-2", "gt-8", "parent-child")
+
+	check := checkDependencyIntegrity(db)
+	if check.Status != StatusOK || check.Message != "All dependencies point to existing issues" {
+		t.Fatalf("check = %#v, want ok / All dependencies point to existing issues", check)
+	}
+}
+
+// TestCheckParentConsistency_CrossPrefixParentIsValid: a parent-child edge to
+// another repository's prefix, or to an external: ref, cannot be verified
+// here and is not reported as orphaned (bd-zcpo44, AC-6).
+func TestCheckParentConsistency_CrossPrefixParentIsValid(t *testing.T) {
+	store := newTestDoltStore(t, "bd")
+	db := store.DB()
+	createDepTestIssue(t, store, "bd-1", false)
+	createDepTestIssue(t, store, "bd-2", false)
+	addDepTestEdge(t, store, "bd-1", "gt-9", types.DepBlocks)
+	insertExternalTargetDep(t, db, "dependencies", "bd-2", "gt-8", "parent-child")
+	insertExternalTargetDep(t, db, "dependencies", "bd-2", "external:gt:epic", "parent-child")
+
+	check := checkParentConsistency(db)
+	if check.Status != StatusOK || check.Message != "All parent-child relationships valid" {
+		t.Fatalf("check = %#v, want ok / All parent-child relationships valid", check)
+	}
+}
