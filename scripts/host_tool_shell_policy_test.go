@@ -39,7 +39,8 @@ package scripts_test
 //                                    directly with gofmt/go shims on PATH
 //   scripts/check-build-tags.sh      PROGRAM of repochecks:build_tags_test
 //   scripts/check-go-install-guidance.sh  PROGRAM of repochecks:go_install_guidance_test
-//   scripts/check-legacy-repo-refs.sh  exec'd directly (bash) by
+//   scripts/check-legacy-repo-refs.sh  PROGRAM of repochecks:legacy_repo_refs_test;
+//                                    exec'd directly (bash) by
 //                                    check_legacy_repo_refs_test.go in :shell_scripts_test
 //   scripts/check-winget-portable-alias.sh  PROGRAM of repochecks:winget_portable_alias_test
 //   scripts/check-migration-hygiene.sh  PROGRAM of repochecks:migration_hygiene_test

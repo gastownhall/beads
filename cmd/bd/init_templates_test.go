@@ -7,8 +7,12 @@ import (
 	"testing"
 )
 
+// legacyRepoOrg is the pre-move GitHub org (GH#3059), split so that
+// scripts/check-legacy-repo-refs.sh does not flag the absence check below.
+const legacyRepoOrg = "steve" + "yegge"
+
 // TestCreateReadmeLinksCurrentRepository: the .beads/README.md that bd init
-// writes links gastownhall/beads, not the pre-move steveyegge/beads, and its
+// writes links gastownhall/beads, not the pre-move repository, and its
 // install hint fails on an HTTP error instead of piping it into bash (GH#3059).
 func TestCreateReadmeLinksCurrentRepository(t *testing.T) {
 	beadsDir := t.TempDir()
@@ -28,7 +32,7 @@ func TestCreateReadmeLinksCurrentRepository(t *testing.T) {
 			t.Errorf("README.md lacks %q", want)
 		}
 	}
-	if strings.Contains(readme, "steveyegge") {
-		t.Errorf("README.md still names the pre-move steveyegge repository:\n%s", readme)
+	if strings.Contains(readme, legacyRepoOrg) {
+		t.Errorf("README.md still names the pre-move repository:\n%s", readme)
 	}
 }

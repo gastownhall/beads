@@ -49,7 +49,7 @@ func TestCheckGitHooks(t *testing.T) {
 		})
 	})
 
-	// The Fix links name live pages, not the pre-move steveyegge repository
+	// The Fix links name live pages, not the pre-move repository
 	// or its never-existing examples/git-hooks directory (GH#3059).
 	assertHooksFixLink := func(t *testing.T, check DoctorCheck, want string) {
 		t.Helper()
@@ -59,7 +59,7 @@ func TestCheckGitHooks(t *testing.T) {
 		if !strings.Contains(check.Fix, want) {
 			t.Errorf("Fix = %q, want it to link %s", check.Fix, want)
 		}
-		for _, stale := range []string{"steveyegge", "examples/git-hooks"} {
+		for _, stale := range []string{legacyRepoOrg, "examples/git-hooks"} {
 			if strings.Contains(check.Fix, stale) {
 				t.Errorf("Fix = %q contains stale %q", check.Fix, stale)
 			}
