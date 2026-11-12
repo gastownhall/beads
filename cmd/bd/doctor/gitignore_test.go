@@ -3522,3 +3522,99 @@ func TestGitignoreTemplate_IgnoresMachineLocalState(t *testing.T) {
 		t.Errorf("GitignoreTemplate is missing required patterns: %s", strings.Join(missing, ", "))
 	}
 }
+
+// TestFixGitignore_AppendsMachineLocalStatePatterns covers AC-2 (bd-g6fd4y,
+// GH#8318): a .beads/.gitignore from before the fix — every other required
+// pattern present plus a local custom rule — must be flagged by CheckGitignore
+// naming the four machine-local files, and FixGitignore must append them
+// without touching the existing content.
+func TestFixGitignore_AppendsMachineLocalStatePatterns(t *testing.T) {
+	// Build the pre-fix file from the template so the fixture follows future
+	// template edits: drop the four machine-local lines, keep everything else,
+	// and prepend a local custom rule that must survive the append.
+	var keep []string
+	for _, line := range strings.Split(GitignoreTemplate, "\n") {
+		trimmed := strings.TrimSpace(line)
+		drop := false
+		for _, name := range machineLocalBackupStateFiles {
+			if trimmed == name {
+				drop = true
+				break
+			}
+		}
+		if !drop {
+			keep = append(keep, line)
+		}
+	}
+	original := "custom-local/\n" + strings.Join(keep, "\n")
+
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	gitignorePath := filepath.Join(beadsDir, ".gitignore")
+	if err := os.WriteFile(gitignorePath, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	clearResolveBeadsDirCache()
+
+	check := CheckGitignore(dir)
+	if check.Status != "warning" {
+		t.Fatalf("expected warning status from CheckGitignore, got %s: %s", check.Status, check.Detail)
+	}
+	for _, name := range machineLocalBackupStateFiles {
+		if !contains(check.Detail, name) {
+			t.Errorf("CheckGitignore detail should name %q, got: %s", name, check.Detail)
+		}
+	}
+
+	if err := FixGitignore(dir); err != nil {
+		t.Fatalf("FixGitignore failed: %v", err)
+	}
+
+	fixed, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(fixed), original) {
+		t.Errorf("original .gitignore content was not preserved:\n%s", fixed)
+	}
+	for _, name := range machineLocalBackupStateFiles {
+		if !containsGitignorePattern(string(fixed), name) {
+			t.Errorf("expected %q in fixed .gitignore:\n%s", name, fixed)
+		}
+	}
+
+	after := CheckGitignore(dir)
+	if after.Status != "ok" {
+		t.Fatalf("expected ok after FixGitignore, got %s: %s", after.Status, after.Detail)
+	}
+
+	// Edge case: a file that already holds the four bare names (the manual
+	// workaround from the issue) is left byte-identical, with no duplicates.
+	dir2 := t.TempDir()
+	beadsDir2 := filepath.Join(dir2, ".beads")
+	if err := os.MkdirAll(beadsDir2, 0750); err != nil {
+		t.Fatal(err)
+	}
+	workaround := "dolt-backup.json\ndolt-backup-state.json\ndolt-config.log\n.auto-import-issues.jsonl\n"
+	preFixContent := original + "\n" + workaround
+	gitignorePath2 := filepath.Join(beadsDir2, ".gitignore")
+	if err := os.WriteFile(gitignorePath2, []byte(preFixContent), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	clearResolveBeadsDirCache()
+	if err := FixGitignore(dir2); err != nil {
+		t.Fatalf("FixGitignore (workaround) failed: %v", err)
+	}
+	postFix, err := os.ReadFile(gitignorePath2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(postFix) != preFixContent {
+		t.Errorf("workaround file was modified by FixGitignore.\nbefore:\n%s\nafter:\n%s", preFixContent, postFix)
+	}
+}
