@@ -1387,7 +1387,7 @@ bd create
   flag --external-ref type=string default="" usage="External reference (e.g., 'gh-9', 'jira-ABC', Linear URL)"
   flag --file -f type=string default="" usage="Create one issue per ## heading (### fields attach to that issue); for title plus description-from-file, use --body-file"
   flag --force type=bool default="false" usage="Force creation even if prefix doesn't match database prefix"
-  flag --graph type=string default="" usage="Create a graph of issues with dependencies from JSON plan file"
+  flag --graph type=string default="" usage="Create a graph of issues with dependencies from JSON plan file (schema: bd help --doc create)"
   flag --id type=string default="" usage="Explicit issue ID (e.g., 'bd-42' for partitioning)"
   flag --label type=stringSlice default="[]" hidden usage="Alias for --labels"
   flag --labels -l type=stringSlice default="[]" usage="Labels (comma-separated)"
