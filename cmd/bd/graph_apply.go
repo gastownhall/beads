@@ -1096,10 +1096,7 @@ func buildGraphApplyBatchRequest(plan *GraphApplyPlan, opts GraphApplyOptions, a
 	// types.NewGraphNodeDependency applied on the old embedded path.
 	for _, node := range plan.Nodes {
 		for _, dep := range node.Deps {
-			depType := types.DependencyType(dep.Type)
-			if depType == "" {
-				depType = types.DepBlocks
-			}
+			depType := graphApplyDependencyType(dep.Type)
 			target := issueops.Ref{ID: dep.Target}
 			if planKeys[dep.Target] {
 				target = issueops.Ref{Key: dep.Target}
@@ -1222,11 +1219,18 @@ func graphApplyEdgeIsLocalCycleRelevant(edge GraphApplyEdge, depType types.Depen
 	return graphApplyCycleRelevantDependencyType(depType)
 }
 
+// graphApplyDependencyType is the storage type of a plan edge or inline dep:
+// empty defaults to "blocks", and the documented aliases "blocked-by" and
+// "depends-on" become "blocks" with the direction unchanged (from depends on
+// to), the same canonicalDependencyType mapping `bd dep add --type` and
+// `bd create --deps` apply (GH#5069). Every reader — the batch request, the
+// plan-local cycle check and the waits-for gate rule — goes through here, so
+// they all see one canonical type. Other values pass through verbatim.
 func graphApplyDependencyType(depType string) types.DependencyType {
 	if depType == "" {
 		return types.DepBlocks
 	}
-	return types.DependencyType(depType)
+	return canonicalDependencyType(types.DependencyType(depType))
 }
 
 func graphApplyCycleRelevantDependencyType(depType types.DependencyType) bool {
