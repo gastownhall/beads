@@ -79,6 +79,9 @@ func TestJournalContract(t *testing.T) {
 	t.Run("ArrivalRenameKeepsTheStamp", func(t *testing.T) {
 		conformance.RunJournalArrivalRenameKeepsTheStamp(t, ctx, fixture)
 	})
+	t.Run("EveryMutationKindRecordsItsActor", func(t *testing.T) {
+		conformance.RunJournalEveryMutationKindRecordsItsActor(t, ctx, fixture)
+	})
 	t.Run("EveryMutationKindLandsARow", func(t *testing.T) {
 		conformance.RunJournalEveryMutationKindLandsARow(t, ctx, fixture)
 	})
@@ -134,6 +137,10 @@ func newEmbeddedJournalFixture(t *testing.T, te *testEnv, prefix string) conform
 			Comment: func(ctx context.Context, id, text string) error {
 				return store.AddComment(ctx, id, "actor", text)
 			},
+			// Every hook above acts as "actor" except Delete: storage.DeleteIssue
+			// takes no actor, so its record names none.
+			Actor:           "actor",
+			ActorlessDelete: true,
 		},
 	}
 }

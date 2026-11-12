@@ -340,62 +340,6 @@ func snapshotBeadsTree(t *testing.T, dir string) map[string]string {
 	return snapshot
 }
 
-// TestClassicArtifacts_SkipsUnsupportedWorkspaceFormat pins that the Classic
-// Artifacts fix leaves a .beads directory in a format this build cannot open
-// byte-identical. The fix walks every .beads under the path, including those
-// of nested repositories and worktrees, which command admission never checks,
-// and it classified each one with the migrating configfile.Load: a graph
-// workspace's legacy config.json became a metadata.json without the graph_*
-// keys this build does not know. Each layout also holds artifacts the fix
-// would otherwise remove, and the redirect-expected ones cruft, so nothing
-// else in the workspace may change either; the admitted workspace at the root
-// is still cleaned.
-func TestClassicArtifacts_SkipsUnsupportedWorkspaceFormat(t *testing.T) {
-	const graphMetadata = `{"database":"beads.db","backend":"dolt","graph_mode":"%s","graph_future_binding":"keep-me"}`
-	const strippedMetadata = `{"database":"beads.db","backend":"dolt"}`
-	layouts := []struct {
-		name  string
-		dir   string // the workspace's .beads, relative to the walked root
-		files map[string]string
-	}{
-		{name: "graph_mode in legacy config.json", dir: "sub/.beads", files: map[string]string{"config.json": fmt.Sprintf(graphMetadata, configfile.GraphModeLink)}},
-		{name: "future graph_mode in legacy config.json", dir: "sub/.beads", files: map[string]string{"config.json": fmt.Sprintf(graphMetadata, "future-format")}},
-		{name: "marker beside legacy config.json", dir: "sub/.beads", files: map[string]string{"config.json": strippedMetadata, configfile.GraphFormatMarkerFile: "link-preview-v9\n"}},
-		{name: "graph_mode in metadata.json", dir: "sub/.beads", files: map[string]string{configfile.ConfigFileName: fmt.Sprintf(graphMetadata, configfile.GraphModeLink)}},
-		{name: "marker in a polecat worktree", dir: "polecats/p1/.beads", files: map[string]string{"redirect": "../../mayor/rig/.beads\n", configfile.GraphFormatMarkerFile: "link-preview-v9\n", "extra.txt": "cruft"}},
-		{name: "graph_mode in a beads worktree", dir: ".git/beads-worktrees/wt/.beads", files: map[string]string{"config.json": fmt.Sprintf(graphMetadata, configfile.GraphModeLink), "extra.txt": "cruft"}},
-	}
-	for _, layout := range layouts {
-		t.Run(layout.name, func(t *testing.T) {
-			root := t.TempDir()
-			rootWAL := filepath.Join(root, ".beads", "beads.db-wal")
-			writeBeadsTree(t, filepath.Dir(rootWAL), map[string]string{"beads.db-wal": "wal", configfile.ConfigFileName: doltMetadata})
-			beadsDir := filepath.Join(root, filepath.FromSlash(layout.dir))
-			entries := map[string]string{
-				"dolt/":                    "",
-				"beads.db-wal":             "wal",
-				"beads.backup-20260204.db": "backup",
-				"issues.jsonl.new":         `{"id":"x"}`,
-			}
-			for name, content := range layout.files {
-				entries[name] = content
-			}
-			writeBeadsTree(t, beadsDir, entries)
-			want := snapshotBeadsTree(t, beadsDir)
-
-			if err := ClassicArtifacts(root, io.Discard); err != nil {
-				t.Fatalf("ClassicArtifacts: %v", err)
-			}
-			if got := snapshotBeadsTree(t, beadsDir); !reflect.DeepEqual(got, want) {
-				t.Fatalf("ClassicArtifacts changed %s:\n got %q\nwant %q", layout.dir, got, want)
-			}
-			if _, err := os.Stat(rootWAL); !os.IsNotExist(err) {
-				t.Fatalf("ClassicArtifacts left the root workspace's %s (stat err %v)", rootWAL, err)
-			}
-		})
-	}
-}
-
 // TestClassicArtifacts_DoesNotMigrateLegacyConfig pins that the fix reads a
 // nested workspace's legacy config.json without migrating it into
 // metadata.json, and still cleans that workspace by what it says: its

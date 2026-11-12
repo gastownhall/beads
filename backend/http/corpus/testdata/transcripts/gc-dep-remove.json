@@ -1,0 +1,11 @@
+{
+  "shape": "gc-dep-remove",
+  "requests": [
+    {"method":"GET","operation_id":"getContext","path":"/v0/beads/context","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-t-dr","status":200},
+    {"method":"GET","operation_id":"listDependencies","path":"/v0/beads/dependencies","query":["issue_id"],"status":200},
+    {"method":"POST","operation_id":"removeDependency","path":"/v0/beads/dependencies:remove","body":["actor","depends_on_id","issue_id"],"status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-t-dr","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-t-db","status":200}
+  ]
+}

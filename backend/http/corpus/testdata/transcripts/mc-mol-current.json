@@ -1,0 +1,27 @@
+{
+  "shape": "mc-mol-current",
+  "requests": [
+    {"method":"GET","operation_id":"listIssues","path":"/v0/beads/issues","query":["assignee","include_ephemeral","include_gates","include_infra","include_templates","limit","status"],"status":200},
+    {"method":"GET","operation_id":"getContext","path":"/v0/beads/context","status":200},
+    {"method":"GET","operation_id":"listDependencies","path":"/v0/beads/dependencies","query":["issue_id","type"],"status":200},
+    {"method":"GET","operation_id":"listDependencies","path":"/v0/beads/dependencies","query":["issue_id","type"],"status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-ip1","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-mac","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-mol","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-t-death","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-t-ifa","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-t-rc","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-t-rel","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-t-xfer","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-wisp-2","status":200},
+    {"method":"GET","operation_id":"listRelatedIssues","path":"/v0/beads/issues/e2e-mac/related","query":["direction","type"],"status":200},
+    {"method":"GET","operation_id":"listRelatedIssues","path":"/v0/beads/issues/e2e-mac.1/related","query":["direction","type"],"status":200},
+    {"method":"GET","operation_id":"listRelatedIssues","path":"/v0/beads/issues/e2e-mac.2/related","query":["direction","type"],"status":200},
+    {"method":"GET","operation_id":"listDependencies","path":"/v0/beads/dependencies","query":["issue_id"],"status":200},
+    {"method":"GET","operation_id":"listRelatedIssues","path":"/v0/beads/issues/e2e-mol/related","query":["direction","type"],"status":200},
+    {"method":"GET","operation_id":"listRelatedIssues","path":"/v0/beads/issues/e2e-mol.1/related","query":["direction","type"],"status":200},
+    {"method":"GET","operation_id":"listRelatedIssues","path":"/v0/beads/issues/e2e-mol.2/related","query":["direction","type"],"status":200},
+    {"method":"GET","operation_id":"listRelatedIssues","path":"/v0/beads/issues/e2e-mol.3/related","query":["direction","type"],"status":200},
+    {"method":"GET","operation_id":"listDependencies","path":"/v0/beads/dependencies","query":["issue_id"],"status":200}
+  ]
+}

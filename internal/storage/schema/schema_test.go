@@ -107,6 +107,9 @@ func TestMigrateUpReturnsDirtyTablesErrorForPreExistingDirtyTable(t *testing.T) 
 	// pendingMigrationDirtyTables re-reads the current version and finds
 	// migration 0043 touches the dirty `dependencies` table.
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", 42)
+	// The ignored series is intersected before either series migrates
+	// (#5816); with no ignored cursor table its one read fails with 1146.
+	expectCursorTableMissing(mock, "ignored_schema_migrations")
 
 	_, err = MigrateUp(context.Background(), db)
 	if err == nil {
@@ -816,9 +819,11 @@ func newWispIsBlockedDriftDB(t *testing.T, migrationFile string, wantCursorVersi
 	mock.ExpectQuery(indexQuery).WithArgs("wisps", "idx_wisps_is_blocked").
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
 
-	body, err := IgnoredMigrationSQL(migrationFile)
+	// The body the runner executes: the frozen bytes, or for ignored/0015
+	// those bytes with its registered execution plan applied (#6520).
+	body, err := ignoredSource.plannedMigrationSQL(migrationFile)
 	if err != nil {
-		t.Fatalf("IgnoredMigrationSQL(%s): %v", migrationFile, err)
+		t.Fatalf("plannedMigrationSQL(%s): %v", migrationFile, err)
 	}
 
 	return &wispIsBlockedDriftDB{
@@ -849,7 +854,7 @@ func (d *wispIsBlockedDriftDB) ExecContext(_ context.Context, query string, args
 		d.hasIsBlockedIndex = true
 		return execOK{}, nil
 	case d.migrationBody:
-		// The pending migration's real embedded body, byte-for-byte. A wisps
+		// The pending migration's executed body, byte-for-byte. A wisps
 		// table still missing is_blocked fails on its first statement with
 		// the same error a real engine gives; once the column exists (the
 		// repair ran first) it succeeds -- matching runMigrations' real

@@ -1,0 +1,8 @@
+{
+  "shape": "mc-mol-progress",
+  "requests": [
+    {"method":"GET","operation_id":"getContext","path":"/v0/beads/context","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-mol","status":200},
+    {"method":"GET","operation_id":"listRelatedIssues","path":"/v0/beads/issues/e2e-mol/related","query":["direction","type"],"status":200}
+  ]
+}
