@@ -166,6 +166,7 @@ go_test(
         "claim_wrapper_smoke_test.go",
         "claimer_contract_test.go",
         "cli_mirror_ref_test.go",
+        "cli_pull_settle_test.go",
         "cli_transfer_timeout_test.go",
         "close_issue_checked_test.go",
         "close_policy_gate_test.go",
