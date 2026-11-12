@@ -170,31 +170,83 @@ func TestProxiedServerShow(t *testing.T) {
 		}
 	})
 
-	t.Run("show_json_count_fields_default", func(t *testing.T) {
+	// #4122: the count-only fast path keeps the lean shape the default used
+	// to have — counts only, no arrays. The default itself now streams the
+	// rows (show_json_default_includes_comments_and_dependents below).
+	t.Run("show_json_count_only_omits_arrays", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "sjc")
 		blocker := bdProxiedCreate(t, bd, p.dir, "Blocker", "--type", "task")
-		blocked := bdProxiedCreate(t, bd, p.dir, "Blocked",
+		bdProxiedCreate(t, bd, p.dir, "Blocked",
 			"--type", "task", "--deps", "blocked-by:"+blocker.ID)
 
-		m := bdProxiedShowDetailsFirst(t, bd, p.dir, blocked.ID)
+		m := bdProxiedShowDetailsFirst(t, bd, p.dir, blocker.ID, "--count-only")
 		if _, ok := m["dependency_count"]; !ok {
-			t.Errorf("expected dependency_count present in default JSON")
+			t.Errorf("expected dependency_count present in count-only JSON")
 		}
 		if _, ok := m["dependent_count"]; !ok {
-			t.Errorf("expected dependent_count present in default JSON")
+			t.Errorf("expected dependent_count present in count-only JSON")
 		}
 		if _, ok := m["comment_count"]; !ok {
-			t.Errorf("expected comment_count present in default JSON")
+			t.Errorf("expected comment_count present in count-only JSON")
 		}
 		if _, ok := m["dependents"]; ok {
-			t.Errorf("dependents slice should be absent by default (count-only)")
+			t.Errorf("dependents slice should be absent under --count-only")
 		}
 		if _, ok := m["comments"]; ok {
-			t.Errorf("comments slice should be absent by default (count-only)")
+			t.Errorf("comments slice should be absent under --count-only")
 		}
-		if m["dependency_count"] != float64(1) {
-			t.Errorf("dependency_count: got %v, want 1", m["dependency_count"])
+		if m["dependent_count"] != float64(1) {
+			t.Errorf("dependent_count: got %v, want 1", m["dependent_count"])
+		}
+	})
+
+	// #4122: the proxied route's default --json payload is the full detail
+	// view — the comments and dependents rows inline beside their counts, no
+	// comments_omitted.
+	t.Run("show_json_default_includes_comments_and_dependents", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sjdflt")
+		hub := bdProxiedCreate(t, bd, p.dir, "Default payload hub", "--type", "task")
+		spoke := bdProxiedCreate(t, bd, p.dir, "Default payload spoke",
+			"--type", "task", "--deps", "blocked-by:"+hub.ID)
+
+		db := openProxiedDB(t, p)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := db.ExecContext(ctx,
+			"INSERT INTO comments (id, issue_id, author, text, created_at) VALUES (?, ?, ?, ?, NOW())",
+			fmt.Sprintf("cmt-%d", time.Now().UnixNano()), hub.ID, "tester", "Hub note"); err != nil {
+			t.Fatalf("insert comment: %v", err)
+		}
+
+		m := bdProxiedShowDetailsFirst(t, bd, p.dir, hub.ID)
+		comments, _ := m["comments"].([]interface{})
+		if len(comments) != 1 {
+			t.Errorf("default payload: got %d comments, want 1 (%v)", len(comments), m["comments"])
+		}
+		dependents, _ := m["dependents"].([]interface{})
+		found := false
+		for _, d := range dependents {
+			row, _ := d.(map[string]interface{})
+			if row["id"] == spoke.ID {
+				found = true
+				if row["dependency_type"] != "blocks" {
+					t.Errorf("dependent dependency_type: got %v, want blocks", row["dependency_type"])
+				}
+			}
+		}
+		if !found {
+			t.Errorf("default payload: hub %s does not list dependent %s (%v)", hub.ID, spoke.ID, m["dependents"])
+		}
+		if m["comment_count"] != float64(1) {
+			t.Errorf("comment_count: got %v, want 1", m["comment_count"])
+		}
+		if m["dependent_count"] != float64(1) {
+			t.Errorf("dependent_count: got %v, want 1", m["dependent_count"])
+		}
+		if v, present := m["comments_omitted"]; present {
+			t.Errorf("comments_omitted should be absent in the default payload, got %v", v)
 		}
 	})
 
@@ -230,6 +282,8 @@ func TestProxiedServerShowB(t *testing.T) {
 	// ga-clgh: proxied path mirror of the direct-path fix (a2a69f5e9). The
 	// proxied handler used to leave comments_omitted unset entirely, so a
 	// caller reading only `.comments` couldn't tell "none" from "left out".
+	// Since #4122 the omission belongs to the --count-only fast path; the
+	// default payload carries the comments.
 	t.Run("show_json_comments_omitted_flag_set", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "sjco1")
@@ -244,13 +298,13 @@ func TestProxiedServerShowB(t *testing.T) {
 			t.Fatalf("insert comment: %v", err)
 		}
 
-		m := bdProxiedShowDetailsFirst(t, bd, p.dir, issue.ID)
+		m := bdProxiedShowDetailsFirst(t, bd, p.dir, issue.ID, "--count-only")
 		if _, ok := m["comments"]; ok {
-			t.Errorf("comments slice should be absent by default: %v", m)
+			t.Errorf("comments slice should be absent under --count-only: %v", m)
 		}
 		omitted, present := m["comments_omitted"]
 		if !present {
-			t.Fatalf("expected comments_omitted present when comment_count>0 without --include-comments: %v", m)
+			t.Fatalf("expected comments_omitted present when comment_count>0 under --count-only without --include-comments: %v", m)
 		}
 		if omitted != true {
 			t.Errorf("comments_omitted: got %v, want true", omitted)
