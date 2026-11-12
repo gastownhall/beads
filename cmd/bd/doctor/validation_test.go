@@ -1118,3 +1118,30 @@ func TestCheckOrphanedDependenciesDB_WarningCarriesCrossRepoNote(t *testing.T) {
 		t.Fatalf("Detail = %q, want %q", check.Detail, "bd-1→bd-gone")
 	}
 }
+
+// TestCheckOrphanedDependenciesDB_DeletedHeldPrefixTargetIsOrphan: a missing
+// target under allowed_prefixes (multi-hyphen ones included) is this
+// database's own and so an orphan (bd-zcpo44, AC-4).
+func TestCheckOrphanedDependenciesDB_DeletedHeldPrefixTargetIsOrphan(t *testing.T) {
+	store := newTestDoltStore(t, "bd")
+	db := store.DB()
+	createDepTestIssue(t, store, "bd-1", false)
+	if err := store.SetConfig(context.Background(), "allowed_prefixes", "gt, hq-cv"); err != nil {
+		t.Fatal(err)
+	}
+	insertExternalTargetDep(t, db, "dependencies", "bd-1", "gt-9", "blocks")
+	insertExternalTargetDep(t, db, "dependencies", "bd-1", "hq-cv-9", "blocks")
+
+	check := checkOrphanedDependenciesDB(db)
+	if check.Status != StatusWarning {
+		t.Fatalf("Status = %q, want %q; message=%q detail=%q", check.Status, StatusWarning, check.Message, check.Detail)
+	}
+	if want := "2 orphaned dependency reference(s)"; check.Message != want {
+		t.Fatalf("Message = %q, want %q", check.Message, want)
+	}
+	for _, edge := range []string{"bd-1→gt-9", "bd-1→hq-cv-9"} {
+		if !strings.Contains(check.Detail, edge) {
+			t.Errorf("Detail = %q, want it to name %s", check.Detail, edge)
+		}
+	}
+}

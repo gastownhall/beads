@@ -625,3 +625,37 @@ func TestOrphanedDependencies_RemovesOnlySamePrefixOrphan(t *testing.T) {
 		t.Fatalf("bd-wisp-src→gt-8 rows = %d, want 1", n)
 	}
 }
+
+// TestOrphanedDependencies_RemovesDeletedHeldPrefixTarget: a missing target
+// under issue_prefix or allowed_prefixes (multi-hyphen ones included) is this
+// database's own and so a genuine orphan; only another repository's prefix is
+// kept (bd-zcpo44, AC-4).
+func TestOrphanedDependencies_RemovesDeletedHeldPrefixTarget(t *testing.T) {
+	dir := t.TempDir()
+	store := newFixTestStore(t, dir, "bd")
+	createFixIssue(t, store, "bd-1", false)
+	db := store.UnderlyingDB()
+	if err := store.SetConfig(context.Background(), "allowed_prefixes", "gt, hq-cv"); err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{"bd-gone", "gt-9", "hq-cv-9", "zz-5"} {
+		insertFixExternalTargetDep(t, db, "dependencies", "bd-1", target)
+	}
+
+	var fixErr error
+	out := captureFixStdout(t, func() { fixErr = OrphanedDependencies(dir, false) })
+	if fixErr != nil {
+		t.Fatalf("OrphanedDependencies: %v", fixErr)
+	}
+	if !strings.Contains(out, "Fixed 3 orphaned dependency reference(s)") {
+		t.Fatalf("output = %q, want three removals", out)
+	}
+	for _, target := range []string{"bd-gone", "gt-9", "hq-cv-9"} {
+		if n := countFixDepRows(t, db, "dependencies", "bd-1", target); n != 0 {
+			t.Errorf("bd-1→%s rows = %d, want 0 (held-prefix orphan kept)", target, n)
+		}
+	}
+	if n := countFixDepRows(t, db, "dependencies", "bd-1", "zz-5"); n != 1 {
+		t.Errorf("bd-1→zz-5 rows = %d, want 1 (cross-repository edge deleted)", n)
+	}
+}
