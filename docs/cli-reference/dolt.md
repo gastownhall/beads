@@ -166,8 +166,9 @@ The remote must already exist (see 'bd dolt remote add').
 Use --strategy ours|theirs to resolve conflicts the auto-resolver declines
 (e.g. both sides edited the same issue since the last sync) instead of
 aborting the pull for manual resolution. Embedded storage only (#4992); on
-server-mode/sql-server storage use 'bd conflicts resolve' after a pull that
-reports conflicts.
+server-mode/sql-server storage a pull that reports conflicts aborts its merge
+and leaves the remote branch fetched, so decide the conflicts in bulk with
+'bd vc merge <remote>/<branch> --strategy ours|theirs'.
 
 ```
 bd dolt pull [flags]

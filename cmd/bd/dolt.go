@@ -859,8 +859,9 @@ or 'bd dolt pull --remote <remote>'. The remote must already exist (see
 Use --strategy ours|theirs to resolve conflicts the auto-resolver declines
 (e.g. both sides edited the same issue since the last sync) instead of
 aborting the pull for manual resolution. Embedded storage only (#4992); on
-server-mode/sql-server storage use 'bd conflicts resolve' after a pull that
-reports conflicts.`,
+server-mode/sql-server storage a pull that reports conflicts aborts its merge
+and leaves the remote branch fetched, so decide the conflicts in bulk with
+'bd vc merge <remote>/<branch> --strategy ours|theirs'.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if isDoltLocalOnly() {
 			if jsonOutput {
@@ -894,7 +895,7 @@ reports conflicts.`,
 			var ok bool
 			puller, ok = storage.UnwrapStore(st).(storage.StrategicPuller)
 			if !ok {
-				return HandleError("storage backend %T does not support --strategy pulls (#4992): only embedded storage does; on server-mode/sql-server storage, resolve conflicts with 'bd conflicts resolve' or the raw dolt CLI", storage.UnwrapStore(st))
+				return HandleError("storage backend %T does not support --strategy pulls (#4992): only embedded storage does; on server-mode/sql-server storage, pull without --strategy, then merge the fetched branch with 'bd vc merge <remote>/<branch> --strategy ours|theirs'", storage.UnwrapStore(st))
 			}
 		}
 		if remote != "" {
