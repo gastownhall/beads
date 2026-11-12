@@ -184,7 +184,8 @@ func TestDataPortDoesNotCountUnauthenticatedConnectionsAsActive(t *testing.T) {
 // can exit, and another local user can bind the freed port): such a
 // listener gets the hello and nothing more, whether it stays silent, hangs
 // up, answers garbage or a MySQL greeting, or replays an answer from an
-// earlier connection. proxy.pid is never consulted (the test writes none):
+// earlier connection, and every refusal but a silent listener's is
+// ErrDataAuth, which an embedder classifies. proxy.pid is never consulted (the test writes none):
 // the proxy removes it first at shutdown, and a pooled dial must not race
 // that into a refusal.
 func TestDialDataRequiresTheProxysProof(t *testing.T) {
@@ -284,7 +285,7 @@ func TestDialDataRequiresTheProxysProof(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			received := serveOne(tc.answer)
 			conn, err := dialData(context.Background(), addr)
-			require.Error(t, err)
+			require.ErrorIs(t, err, ErrDataAuth)
 			assert.Nil(t, conn)
 			got := <-received
 			assert.Len(t, got, dataHelloLen, "the listener received more than the hello: %q", got)
