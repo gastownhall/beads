@@ -88,6 +88,9 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 		if err := issueops.RecordCreateEventInTx(ctx, r.runner, issue, actor); err != nil {
 			return err
 		}
+		if err := r.reconcileChildCounterForInsert(ctx, issue); err != nil {
+			return err
+		}
 		// EnsureIssueIDAvailableInTx above already refused a collision, so this
 		// strict insert is unconditionally a new row.
 		return issueops.RecordVersionForCreateInTx(ctx, r.runner, issue.ID, actor)
@@ -143,10 +146,30 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 	if err := issueops.RecordCreateEventInTx(ctx, r.runner, issue, actor); err != nil {
 		return err
 	}
+	if err := r.reconcileChildCounterForInsert(ctx, issue); err != nil {
+		return err
+	}
 	if existed || opts.UseWispsTable {
 		return issueops.RecordVersionInTx(ctx, r.runner, issue.ID, actor)
 	}
 	return issueops.RecordVersionForCreateInTx(ctx, r.runner, issue.ID, actor)
+}
+
+// reconcileChildCounterForInsert advances the parent's child counter when an
+// insert materializes a hierarchical ID (e.g. bd create --id P.8). The
+// singular issueops create path does the same at its own seam (issueops
+// create.go); without this, an explicit hierarchical create through the
+// unit-of-work insert door leaves last_child behind the live suffix
+// high-water mark, and the next --parent create can recycle lower suffixes
+// (GH#4750). ReconcileChildCounters routes the counter by the PARENT's
+// plane, so a child whose row lands on the other plane still advances the
+// parent's own counter table.
+func (r *issueSQLRepositoryImpl) reconcileChildCounterForInsert(ctx context.Context, issue *types.Issue) error {
+	if _, childNum, ok := issueops.ParseHierarchicalID(issue.ID); !ok || childNum == 0 {
+		return nil
+	}
+	_, err := issueops.ReconcileChildCounters(ctx, r.runner, []*types.Issue{issue})
+	return err
 }
 
 func (r *issueSQLRepositoryImpl) InsertBatch(ctx context.Context, issues []*types.Issue, actor string, opts domain.InsertIssueOpts) error {
