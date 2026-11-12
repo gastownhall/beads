@@ -1281,6 +1281,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Expansion templates no longer drop `notes`, `metadata`, `waits_for`,
+  `condition`, `gate`, `loop` and `on_complete` from the steps they
+  produce** (#6433, PR #6635 by @vishnujayvel). `expandStep` built each
+  expanded step from a partial field list, so a template's ordering,
+  gating and annotation fields silently vanished from every expansion
+  path — compose `expand` and `map`, inline `step.expand`, and standalone
+  materialization (`bd pour` on an expansion formula). All template step
+  fields are now carried; `notes`, an explicit `waits_for` spawner
+  reference (so `children-of({target}.survey)` resolves), the gate
+  strings and metadata string leaves additionally get the expansion's own
+  `{target}` and `{varname}` substitution, and metadata containers are
+  copied per expansion so two expansions of one template no longer share
+  state. `expand`/`expand_vars` stay deliberately cleared on expanded
+  output, so an expansion template still cannot recursively re-expand
+  itself.
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
