@@ -313,17 +313,17 @@ func TestInit_StdoutExporters(t *testing.T) {
 	t.Setenv("OTEL_TRACES_EXPORTER", "console")
 	t.Setenv("OTEL_METRICS_EXPORTER", "console")
 
-	// Console exporters write to stdout on shutdown; redirect to keep test
+	// Console exporters write to stderr on shutdown; redirect to keep test
 	// output pristine.
-	origStdout := os.Stdout
+	origStderr := os.Stderr
 	_, w, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("pipe: %v", err)
 	}
-	os.Stdout = w
+	os.Stderr = w
 	t.Cleanup(func() {
 		_ = w.Close()
-		os.Stdout = origStdout
+		os.Stderr = origStderr
 	})
 
 	if err := Init(context.Background(), "bd", "v0.0.0"); err != nil {
@@ -370,6 +370,56 @@ func containsSubstr(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// TestInit_ConsoleExportersWriteToStderr pins that the console span and
+// metric exporters write to stderr. On stdout their JSON would interleave
+// with a command's own output and break `bd ... --json` consumers.
+func TestInit_ConsoleExportersWriteToStderr(t *testing.T) {
+	clearAllEnv(t)
+	resetTelemetryState(t)
+	t.Setenv("BD_OTEL_ENABLED", "true")
+	t.Setenv("OTEL_TRACES_EXPORTER", "console")
+	t.Setenv("OTEL_METRICS_EXPORTER", "console")
+
+	dir := t.TempDir()
+	stdout, err := os.Create(dir + "/stdout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderr, err := os.Create(dir + "/stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	origStdout, origStderr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = stdout, stderr
+	t.Cleanup(func() {
+		os.Stdout, os.Stderr = origStdout, origStderr
+		_ = stdout.Close()
+		_ = stderr.Close()
+	})
+
+	ctx := context.Background()
+	if err := Init(ctx, "bd", "v0.0.0"); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	_, span := Tracer("").Start(ctx, "console-exporter-canary-span")
+	span.End()
+	counter, _ := Meter("").Int64Counter("console.exporter.canary.metric")
+	counter.Add(ctx, 1)
+	Shutdown(ctx)
+	os.Stdout, os.Stderr = origStdout, origStderr
+
+	out, _ := os.ReadFile(stdout.Name())
+	errOut, _ := os.ReadFile(stderr.Name())
+	if len(out) != 0 {
+		t.Errorf("console exporters wrote %d bytes to stdout, want none:\n%s", len(out), out)
+	}
+	for _, want := range []string{"console-exporter-canary-span", "console.exporter.canary.metric"} {
+		if !strings.Contains(string(errOut), want) {
+			t.Errorf("stderr lacks %q:\n%s", want, errOut)
+		}
+	}
 }
 
 // TestBuildResource_NeverCarriesCommandLine pins the privacy contract of the

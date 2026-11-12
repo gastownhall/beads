@@ -39,7 +39,7 @@ Each lane, as bazel.yml runs it (add your `--config=fork-cache` or
 | Pure-Go (`bazel-pure`) | `bazel build --config=pure //cmd/bd:bd //cmd/bd:bd_test` | cgo off. The job's cmd/bd test subset (`PURE_CMD_BD_TESTS`) and js/wasm step are in bazel.yml. |
 | Release cross-compile (`bazel-release-cross`) | `./scripts/ci/bazel-release-cross-compile.sh` | Every `go_library`/`go_binary` for each row of `scripts/ci/release-targets.txt`, cgo off, with nogo. |
 | Integration (`bazel-integration`) | `bazel test //... --config=integration` | The `integration`-tagged build. Runs with the read-only cache too. |
-| Dolt server (`bazel-doltserver`) | `bazel test //... --config=doltserver` | Starts its own `dolt sql-server` from the pinned binary; no docker. |
+| Dolt server (`bazel-doltserver`) | `bazel test //... --config=doltserver` | Starts its own `dolt sql-server` from the pinned binary; no docker. Also runs `//internal/httpclient:httpclient_served_provider_test`: the served write-role contracts through `bd serve`'s production Provider arm (`BEADS_HTTP_SERVED_SOURCE=provider`). |
 | cmd/bd Dolt server (`bazel-cmd-dolt`) | `bazel test //cmd/bd:bd_dolt_server_test --config=doltserver-cmd` | 32 shards of the integration-tagged cmd/bd suite (the slowest tests pinned to 16 of them). |
 | Embedded Dolt (`bazel-embedded`) | `bazel test //... --config=embedded` | Remote execution only in CI; locally it is slow. Also runs the served http tiers with `BEADS_HTTP_TEST_REQUIRED=1`: `//backend/http:http_served_test`, `//internal/httpclient:httpclient_served_test` and the command corpus `//backend/http/corpus:corpus_served_test`, each sharded through `tools/bazel/go_test_pinned_shard.sh`. |
 | Proxied server (`bazel-proxied`) | `bazel test //... --config=doltserver-proxied` | Remote execution only: 34 shards, each with a Dolt server. |
@@ -606,6 +606,27 @@ make that reason apparent.
 already listed, report it rather than silently broadening the skip. Before
 adding a new skip, record the issue it tracks and remove the skip when the
 underlying failure is fixed.
+
+The Dolt-tier lanes (embedded, dolt-server, proxied-server, server-Dolt
+storage and cmd/bd Dolt-server) run a runtime skip census: every test or
+subtest they skip is a line of `tools/bazel/skip_census.txt`
+(`<label> <test path> <class>`), and each lane's "Every target and shard ran
+tests" step (`check_testcases.py --skip-census`) fails on a skip the census
+does not list and on a listed skip whose test now runs. Park a conformance
+case with `skipKnownDivergence` (a ledger row) or
+`t.Skip("WAITING ON <PR or slice> (<what it waits for>)")`, add the line the
+failing step prints, and delete the line when you unpark the case.
+`python3 tools/bazel/check_skip_census.py --write --testlogs-dir DIR`
+regenerates the lines of the targets in a lane's "Upload test logs" artifact,
+and `--lint` checks the file. The dolt-int job uploads no test logs when only
+the census fails (its check steps are continue-on-error), so for that lane
+copy the "delete from"/"add to" lines the step prints instead. Runs that
+execute on the runner (rbe modes cache and local) only report census
+differences; they never fail on them. A skip must not depend on process-global
+state left by earlier tests in the same binary: rules_go assigns tests to
+shards round-robin by index, so adding any test elsewhere in the package
+reshuffles which tests run before it, and such a skip comes and goes on
+unrelated PRs. Make the test set up the state it needs instead.
 
 Before opening a PR:
 

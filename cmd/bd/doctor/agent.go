@@ -503,7 +503,7 @@ func enrichOrphanedDeps(dc DoctorCheck) agentEnrichment {
 func enrichCloneLocalFKs(dc DoctorCheck) agentEnrichment {
 	return agentEnrichment{
 		severity:    "advisory",
-		explanation: fmt.Sprintf("Severed clone-local FK(s): %s. A hard reset (flatten/compact squash, merge abort, migration error recovery) silently drops foreign keys from dolt_ignored tables onto the tracked plane; enforcement stays off across server restarts and orphaned rows accumulate until the constraint is re-added.", dc.Message),
+		explanation: fmt.Sprintf("Severed clone-local FK(s): %s. A hard reset, such as merge-abort or migration error recovery (or bd flatten and bd compact in older bd releases), can silently drop foreign keys from dolt_ignored tables onto the tracked plane; enforcement stays off across server restarts and orphaned rows accumulate until the constraint is re-added. Repair it explicitly with 'bd doctor --fix', which deletes the orphaned rows and then re-adds each constraint.", dc.Message),
 		observed:    dc.Message + "\n" + dc.Detail,
 		expected:    "Every FK on clone-local tables (events, wisp_dependencies, wisp_labels, wisp_comments, wisp_events, wisp_child_counters) present and enforcing",
 		commands:    []string{"bd doctor --fix"},
