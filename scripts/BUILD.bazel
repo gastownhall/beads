@@ -282,6 +282,7 @@ go_test(
         "check-build-tags.sh",
         "check-doc-freshness.sh",
         "check-go-install-guidance.sh",
+        "check-legacy-repo-refs.sh",
         "check-migration-hygiene.sh",
         "check-testing-short.sh",
         "check-versions.sh",

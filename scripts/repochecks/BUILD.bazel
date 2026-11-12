@@ -143,6 +143,23 @@ sh_test(
     ],
 )
 
+# check-legacy-repo-refs.sh `git grep`s the whole checkout for pre-move
+# repository references (GH#3059), so its slice is the whole tree, exactly
+# as for go_install_guidance_test.
+sh_test(
+    name = "legacy_repo_refs_test",
+    srcs = ["run_check.sh"],
+    args = [
+        "--tree",
+        "$(rlocationpath :all_files)",
+        "--",
+        "scripts/check-legacy-repo-refs.sh",
+    ],
+    data = [
+        ":all_files",
+    ],
+)
+
 repo_subset(
     name = "winget_files",
     srcs = [
