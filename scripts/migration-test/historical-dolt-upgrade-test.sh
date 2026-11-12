@@ -26,8 +26,8 @@ Usage: historical-dolt-upgrade-test.sh [--version VERSION]
 
 Runs the authentic historical SQLite bridges (v0.9.1, v0.17.0, v0.49.6, v0.50.3), historical server-Dolt corpus
 (v0.55.4, v0.56.1, v0.57.0, v0.62.0), and direct embedded-Dolt corpus
-(v0.63.3, v1.0.0, v1.0.1, v1.1.0, v1.1.2, v1.2.2) against CANDIDATE_BIN. Every release archive is pinned and verified.
-The wisp-capable sources (v1.0.1, v1.1.0, v1.1.2, v1.2.2) additionally run a wisp-plane lane in a fresh workspace,
+(v0.63.3, v1.0.0, v1.0.1, v1.1.0, v1.1.2, v1.2.2, v1.3.3, v1.3.4) against CANDIDATE_BIN. Every release archive is pinned and verified.
+The wisp-capable sources (v1.0.1, v1.1.0, v1.1.2, v1.2.2, v1.3.3, v1.3.4) additionally run a wisp-plane lane in a fresh workspace,
 which needs the pinned external Dolt runtime as a read-only oracle.
 EOF
 }
