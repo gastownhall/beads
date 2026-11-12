@@ -222,7 +222,20 @@ var graphFieldHints = map[string]string{
 	"event_actor":    "use 'actor' (matching the issue model's JSON field)",
 	"event_target":   "use 'target' (matching the issue model's JSON field)",
 	"event_payload":  "use 'payload' (matching the issue model's JSON field)",
+	// Dependency-shaped node fields (GH#3879): the natural shape for a plan
+	// written from memory, so each one says where a node's dependencies go.
+	"blockedby":    graphDependencyFieldHint,
+	"blocked_by":   graphDependencyFieldHint,
+	"blocked-by":   graphDependencyFieldHint,
+	"dependson":    graphDependencyFieldHint,
+	"depends_on":   graphDependencyFieldHint,
+	"depends-on":   graphDependencyFieldHint,
+	"dependencies": graphDependencyFieldHint,
+	"needs":        graphDependencyFieldHint,
 }
+
+// graphDependencyFieldHint is the hint for a dependency-shaped node field.
+const graphDependencyFieldHint = `this node's dependencies go in its own "deps" ({"deps": [{"target": "a"}]} means this node waits on a), or in a top-level edge whose "from_key" is this node`
 
 // detectUnknownGraphFields scans the raw plan JSON and returns unknown field
 // names grouped by their location in the plan. The returned map keys describe
@@ -319,7 +332,7 @@ func warnUnknownGraphFields(w io.Writer, unknown map[string][]string) []string {
 	for _, loc := range locations {
 		fields := append([]string(nil), unknown[loc]...)
 		sort.Strings(fields)
-		fmt.Fprintf(w, "warning: graph plan %s has unknown field(s): %v (silently dropped — see 'bd create --graph' schema)\n", loc, fields)
+		fmt.Fprintf(w, "warning: graph plan %s has unknown field(s): %v (silently dropped — see 'bd help --doc create')\n", loc, fields)
 		for _, f := range fields {
 			distinct[f] = struct{}{}
 		}

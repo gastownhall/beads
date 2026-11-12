@@ -2023,3 +2023,68 @@ func TestGraphPlanPriorityRejectsBadForms(t *testing.T) {
 		t.Fatalf("validateGraphApplyPlan(priority 9) = %v, want the range refusal", err)
 	}
 }
+
+// TestWarnUnknownGraphFields_HintsForDependencyFields pins bd-esm0t5 (GH#3879
+// pitfall b): dependency-shaped node fields ("blockedBy", "depends_on", ...)
+// are the natural shape for a plan written from memory, and were dropped
+// with no pointer at where dependencies go. The warning stays warn-only
+// (GH#3367) but points at `bd help --doc create`, and each such field gets a
+// hint naming the node's own deps and an edge whose from_key is the node. The
+// dry-run path of `bd create --graph` writes it to stderr.
+func TestWarnUnknownGraphFields_HintsForDependencyFields(t *testing.T) {
+	fields := []string{"blockedBy", "blocked_by", "depends_on", "dependencies", "needs"}
+	nodes := []string{`{"key": "a", "title": "A"}`}
+	for i, f := range fields {
+		nodes = append(nodes, fmt.Sprintf(`{"key": "n%d", "title": "N%d", %q: ["a"]}`, i, i, f))
+	}
+	planJSON := `{"nodes": [` + strings.Join(nodes, ",") + `]}`
+
+	checkStderr := func(t *testing.T, out string) {
+		t.Helper()
+		if !strings.Contains(out, "bd help --doc create") {
+			t.Errorf("unknown-field warning does not point at `bd help --doc create`:\n%s", out)
+		}
+		for _, f := range fields {
+			var hint string
+			for _, line := range strings.Split(out, "\n") {
+				if strings.Contains(line, fmt.Sprintf("hint: %q", f)) {
+					hint = line
+				}
+			}
+			if hint == "" {
+				t.Errorf("no hint for field %q:\n%s", f, out)
+				continue
+			}
+			for _, want := range []string{`"deps"`, "from_key"} {
+				if !strings.Contains(hint, want) {
+					t.Errorf("hint for %q = %q, want it to mention %s", f, hint, want)
+				}
+			}
+		}
+	}
+
+	t.Run("warn", func(t *testing.T) {
+		var buf bytes.Buffer
+		warnUnknownGraphFields(&buf, detectUnknownGraphFields([]byte(planJSON)))
+		checkStderr(t, buf.String())
+	})
+
+	t.Run("bd create --graph --dry-run", func(t *testing.T) {
+		oldStore := store
+		store = nil
+		defer func() { store = oldStore }()
+
+		planFile := t.TempDir() + "/plan.json"
+		if err := os.WriteFile(planFile, []byte(planJSON), 0o600); err != nil {
+			t.Fatalf("write plan file: %v", err)
+		}
+		var runErr error
+		out := captureStderr(t, func() {
+			runErr = createIssuesFromGraph(planFile, true, GraphApplyOptions{})
+		})
+		if runErr != nil {
+			t.Fatalf("createIssuesFromGraph dry run: %v", runErr)
+		}
+		checkStderr(t, out)
+	})
+}
