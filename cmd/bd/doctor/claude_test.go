@@ -1033,3 +1033,38 @@ func TestCheckClaude_ClaudeCodeWithoutClaude(t *testing.T) {
 		t.Errorf("Expected message %q, got %q", "CLI-only mode", check.Message)
 	}
 }
+
+// TestCheckClaudePlugin_NotInstalledFixHint pins the install hint both plugin
+// checks print when ~/.claude exists but the beads plugin is not installed:
+// the marketplace is gastownhall/beads, not the pre-move steveyegge/beads
+// (GH#3059). An empty ~/.claude/ makes isClaudePresent() true without a
+// claude binary on PATH; no installed_plugins.json means "not installed".
+func TestCheckClaudePlugin_NotInstalledFixHint(t *testing.T) {
+	for name, check := range map[string]func() DoctorCheck{
+		"CheckClaudePlugin":          CheckClaudePlugin,
+		"CheckClaudePluginLocalOnly": CheckClaudePluginLocalOnly,
+	} {
+		t.Run(name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			if err := os.Mkdir(filepath.Join(tmpDir, ".claude"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Chdir(tmpDir)
+			t.Setenv("HOME", tmpDir)
+			t.Setenv("USERPROFILE", tmpDir)
+			t.Setenv("CLAUDECODE", "1")
+
+			got := check()
+
+			if got.Status != StatusWarning {
+				t.Fatalf("Status = %s (%s), want %s", got.Status, got.Message, StatusWarning)
+			}
+			if !strings.Contains(got.Fix, "/plugin marketplace add gastownhall/beads") {
+				t.Errorf("Fix = %q, want the gastownhall/beads marketplace", got.Fix)
+			}
+			if strings.Contains(got.Fix, "steveyegge") {
+				t.Errorf("Fix = %q still names the pre-move steveyegge repository", got.Fix)
+			}
+		})
+	}
+}
