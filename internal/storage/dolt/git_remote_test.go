@@ -2357,3 +2357,44 @@ func TestGitRemotePeerDeclinedConflictPullAbortsMerge(t *testing.T) {
 		t.Errorf("branch head after PullFrom = %s (err=%v); want the pre-pull head %s", postHead, err, preHead)
 	}
 }
+
+// TestGitRemoteResolvedConflictPullStillLands pins AC-6: settlement changes
+// nothing for a CLI-route pull the resolver CAN settle. A title both sides
+// edited with different updated_at stamps is resolved last-write-wins and the
+// merge concludes; a later pull with nothing contested merges cleanly. Both
+// return nil, deliver the merged data, and leave no merge open.
+func TestGitRemoteResolvedConflictPullStillLands(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+	defer cancel()
+	store, _, cloneDir := setupCLIPullDivergence(t, ctx,
+		fmt.Sprintf("UPDATE issues SET title = 'title from B', updated_at = '2026-01-02 03:04:09' WHERE id = '%s'", declinedConflictIssueID),
+		fmt.Sprintf("UPDATE issues SET title = 'title from A', updated_at = '2026-01-02 03:04:05' WHERE id = '%s'", declinedConflictIssueID))
+
+	if err := store.Pull(ctx); err != nil {
+		t.Fatalf("Pull over a resolvable title conflict: %v", err)
+	}
+	got, err := store.GetIssue(ctx, declinedConflictIssueID)
+	if err != nil || got == nil {
+		t.Fatalf("GetIssue after the resolved pull: %v", err)
+	}
+	if got.Title != "title from B" {
+		t.Errorf("title after the resolved pull = %q; want the later edit %q", got.Title, "title from B")
+	}
+	if merging, n := freshSessionMergeState(t, ctx, store); merging || n != 0 {
+		t.Errorf("after the resolved pull a fresh session sees is_merging=%v and %d conflicted table(s); want neither", merging, n)
+	}
+
+	// A clean merge: the peer adds an issue nobody else touched.
+	sourceInsertIssue(t, cloneDir, "gr-clean", "clean addition from B")
+	sourceCommitAndPush(t, cloneDir, "add gr-clean")
+	waitOutGitRemoteReadCache()
+	if err := store.Pull(ctx); err != nil {
+		t.Fatalf("clean Pull: %v", err)
+	}
+	if clean, err := store.GetIssue(ctx, "gr-clean"); err != nil || clean == nil {
+		t.Fatalf("the clean pull did not deliver gr-clean (err=%v)", err)
+	}
+	if merging, n := freshSessionMergeState(t, ctx, store); merging || n != 0 {
+		t.Errorf("after the clean pull a fresh session sees is_merging=%v and %d conflicted table(s); want neither", merging, n)
+	}
+}
