@@ -360,6 +360,13 @@ type DoltStore struct {
 	classifiedRead   bool         // True if readOnly came from command classification (GH#804), not strict --readonly/preview/foreign-project; still eligible for the defer-wake sweep (be-vbhpf)
 	credentialKey    []byte       // Random encryption key for federation credentials
 
+	// poolReadTimeout is the per-I/O read deadline the pooled connections
+	// (s.db) were opened with, parsed once from connStr at construction so it
+	// keeps buildServerDSN's default/fallback/override precedence. Zero means
+	// the pool has no read deadline, and then no pooled read is classified as
+	// a read timeout (classifyPooledReadFailure).
+	poolReadTimeout time.Duration
+
 	// localActiveDatabaseDir is the exact active database directory when this
 	// store instance has authoritative local filesystem access. It is resolved
 	// once at construction; empty means sizing is unsupported for this instance.
@@ -724,6 +731,12 @@ func isRetryableError(err error) bool {
 	}
 	if schema.IsMigrationLockError(err) {
 		return true
+	}
+	// A pooled read that ran its read deadline is never replayed, by this loop
+	// or an outer one: the server may still be running it (GH#5258).
+	var readTimeout *storage.ReadTimeoutError
+	if errors.As(err, &readTimeout) {
+		return false
 	}
 	// A decoded 1105 is a definite server response. Preserve the two explicit
 	// server-startup recoveries below, but do not let any other 1105 enter the
@@ -1214,7 +1227,9 @@ var ErrStoreClosed = errors.New("store is closed")
 // (e.g. "invalid connection" when the dolt sql-server reaps a pooled connection
 // that has been idle past its wait_timeout) is retried rather than surfaced to
 // the caller. This is safe because fn is read-only and the transaction is always
-// rolled back, so re-running the operation has no side effects.
+// rolled back, so re-running the operation has no side effects. The exception
+// is an attempt that failed after running the pool read deadline: it returns a
+// *storage.ReadTimeoutError instead of being re-sent (classifyPooledRead).
 func (s *DoltStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	if s.closed.Load() {
 		return ErrStoreClosed
@@ -1222,9 +1237,13 @@ func (s *DoltStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) e
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.withRetry(ctx, func() error {
+		// Each attempt is classified on its own time (classifyPooledRead): an
+		// attempt that ran the pool read deadline is not replayed (GH#5258).
+		// The callback's error is classified before the deferred rollback runs.
+		start := time.Now()
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
-			return fmt.Errorf("begin read tx: %w", err)
+			return s.classifyPooledRead(ctx, fmt.Errorf("begin read tx: %w", err), start, "")
 		}
 		defer func() { _ = tx.Rollback() }()
 		// ReadEventsJournal/ReadEventsJournalPage read through this helper, and
@@ -1234,7 +1253,7 @@ func (s *DoltStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) e
 		// defaulting to canonicalJournalShape (PR A1).
 		clearShape := issueops.ScopeEventsJournalShape(tx, s.journalShape.Load())
 		defer clearShape()
-		return fn(tx)
+		return s.classifyPooledRead(ctx, fn(tx), start, "")
 	})
 }
 
@@ -1813,9 +1832,12 @@ func (s *DoltStore) queryContext(ctx context.Context, query string, args ...any)
 			_ = rows.Close()
 			rows = nil
 		}
+		// Only the error obtaining rows is classified; a failure the caller
+		// meets later, iterating them, is outside this helper.
+		start := time.Now()
 		var queryErr error
 		rows, queryErr = s.db.QueryContext(ctx, query, args...)
-		return queryErr
+		return s.classifyPooledRead(ctx, queryErr, start, "query")
 	})
 	finalErr := wrapLockError(err)
 	endSpan(span, finalErr)
@@ -1836,8 +1858,9 @@ func (s *DoltStore) queryRowContext(ctx context.Context, scan func(*sql.Row) err
 		)...),
 	)
 	finalErr := wrapLockError(s.withRetry(ctx, func() error {
+		start := time.Now()
 		row := s.db.QueryRowContext(ctx, query, args...)
-		return scan(row)
+		return s.classifyPooledRead(ctx, scan(row), start, "query row")
 	}))
 	endSpan(span, finalErr)
 	return finalErr
@@ -2521,6 +2544,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		database:               cfg.Database,
 		localActiveDatabaseDir: resolveLocalActiveDatabaseDir(cfg),
 		connStr:                connStr,
+		poolReadTimeout:        poolReadTimeoutFromDSN(connStr),
 		cfg:                    cfg,
 		serverEndpoint:         serverEndpointIdentity(cfg),
 		breaker:                breaker,

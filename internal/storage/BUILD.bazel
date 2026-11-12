@@ -62,6 +62,7 @@ go_library(
         "merge_slot.go",
         "metadata.go",
         "metadata_cas.go",
+        "read_timeout_error.go",
         "remote.go",
         "remote_ref.go",
         "storage.go",
