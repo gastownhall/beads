@@ -194,20 +194,88 @@ func TestEngineExternalRefChangedAfter_FastPathDifferentRef(t *testing.T) {
 	}
 }
 
+// TestEngineExternalRefChangedAfter_FastPathNotFound pins the missing-row
+// decision (#7294): no history entry at or before lastSync reports changed
+// only for an issue created after lastSync (a new pre-linked stub to
+// hydrate). An older issue, one created exactly at lastSync, or one with no
+// creation time reports historyUnknown instead, whatever its UpdatedAt says:
+// the row may be missing because history was compacted or rewritten, and a
+// local edit after lastSync is what the pull's guards must keep.
 func TestEngineExternalRefChangedAfter_FastPathNotFound(t *testing.T) {
-	// No history entry at or before lastSync for an issue created after it:
-	// a new pre-linked issue, reported changed so it is hydrated.
-	querier := &historyQuerierStore{prevFound: false}
-	e := &Engine{Store: querier}
-	lastSync := time.Now()
-	local := newTestIssue("bd-1", lastSync.Add(time.Hour), lastSync.Add(time.Hour))
+	lastSync := time.Date(2026, time.March, 4, 5, 6, 7, 0, time.UTC)
+	plus5 := time.FixedZone("UTC+5", 5*60*60)
+	for _, test := range []struct {
+		name               string
+		created, updated   time.Time
+		wantChanged        bool
+		wantHistoryUnknown bool
+	}{
+		{name: "old unchanged", created: lastSync.Add(-24 * time.Hour), updated: lastSync.Add(-time.Hour), wantHistoryUnknown: true},
+		{name: "old locally edited", created: lastSync.Add(-24 * time.Hour), updated: lastSync.Add(time.Hour), wantHistoryUnknown: true},
+		{name: "newly created", created: lastSync.Add(time.Hour), updated: lastSync.Add(time.Hour), wantChanged: true},
+		{name: "created at lastSync", created: lastSync, updated: lastSync.Add(time.Hour), wantHistoryUnknown: true},
+		{name: "zero creation time", updated: lastSync.Add(time.Hour), wantHistoryUnknown: true},
+		{name: "created at lastSync in another zone", created: lastSync.In(plus5), updated: lastSync.Add(time.Hour).In(plus5), wantHistoryUnknown: true},
+		{name: "created after lastSync in another zone", created: lastSync.Add(time.Second).In(plus5), updated: lastSync.Add(time.Second).In(plus5), wantChanged: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			querier := &historyQuerierStore{prevFound: false}
+			e := &Engine{Store: querier}
+			local := newTestIssue("bd-1", test.created, test.updated)
 
-	changed, _, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", lastSync)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+			changed, historyUnknown, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", lastSync)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if changed != test.wantChanged || historyUnknown != test.wantHistoryUnknown {
+				t.Errorf("externalRefChangedAfter = (changed %v, historyUnknown %v), want (%v, %v)",
+					changed, historyUnknown, test.wantChanged, test.wantHistoryUnknown)
+			}
+			if querier.calls != 1 {
+				t.Errorf("PreviousExternalRef calls = %d, want 1", querier.calls)
+			}
+		})
 	}
-	if !changed {
-		t.Error("expected changed=true when no prior history entry is found for an issue created after lastSync")
+}
+
+// TestEngineExternalRefChangedAfter_KnownAnswersReportHistoryKnown pins that
+// every case other than a missing history row keeps its prior answer and
+// never reports historyUnknown: exact history (same, different and NULL
+// refs), a propagated error, a decorated store and the no-capability
+// heuristic.
+func TestEngineExternalRefChangedAfter_KnownAnswersReportHistoryKnown(t *testing.T) {
+	lastSync := time.Date(2026, time.March, 4, 5, 6, 7, 0, time.UTC)
+	old := newTestIssue("bd-1", lastSync.Add(-24*time.Hour), lastSync.Add(time.Hour))
+	boom := errors.New("boom")
+	inner := &doltLikeStore{prevRef: "https://tracker.test/EXT-1", prevFound: true}
+	decorated := &fakeStoreDecorator{DoltStorage: inner, inner: inner}
+	for _, test := range []struct {
+		name        string
+		store       Store
+		local       *types.Issue
+		currentRef  string
+		wantChanged bool
+		wantErr     error
+	}{
+		{name: "nil local", store: &historyQuerierStore{}, currentRef: "ref"},
+		{name: "same historical ref", store: &historyQuerierStore{prevRef: "https://tracker.test/EXT-1", prevFound: true}, local: old, currentRef: "https://tracker.test/EXT-1"},
+		{name: "different historical ref", store: &historyQuerierStore{prevRef: "https://tracker.test/EXT-OLD", prevFound: true}, local: old, currentRef: "https://tracker.test/EXT-1", wantChanged: true},
+		{name: "NULL historical ref", store: &historyQuerierStore{prevRef: "", prevFound: true}, local: old, currentRef: "https://tracker.test/EXT-1", wantChanged: true},
+		{name: "history error", store: &historyQuerierStore{prevErr: boom}, local: old, currentRef: "ref", wantErr: boom},
+		{name: "decorated store", store: decorated, local: old, currentRef: "https://tracker.test/EXT-1"},
+		{name: "no capability, touched after lastSync", store: newPureTestStore(), local: old, currentRef: "ref", wantChanged: true},
+		{name: "no capability, untouched", store: newPureTestStore(), local: newTestIssue("bd-2", lastSync.Add(-2*time.Hour), lastSync.Add(-time.Hour)), currentRef: "ref"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			e := &Engine{Store: test.store}
+			changed, historyUnknown, err := e.externalRefChangedAfter(context.Background(), test.local, test.currentRef, lastSync)
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("error = %v, want %v", err, test.wantErr)
+			}
+			if changed != test.wantChanged || historyUnknown {
+				t.Errorf("externalRefChangedAfter = (changed %v, historyUnknown %v), want (%v, false)", changed, historyUnknown, test.wantChanged)
+			}
+		})
 	}
 }
 

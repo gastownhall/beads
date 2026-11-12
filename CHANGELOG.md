@@ -1731,6 +1731,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   included) against it with an unsupported-capability error and sends nothing;
   deletions without `--cascade` are unaffected. Upgrade the server first.
 
+- **A tracker pull after `bd compact` or `bd flatten` no longer overwrites
+  unpushed local edits.** When history at the tracker's `last_sync` was gone,
+  the pull treated every linked issue as newly linked, fetched it again and
+  applied the remote copy past the conflict guard, so local edits made since
+  the last sync were lost (a dry run listed every linked issue as a
+  candidate). An issue with no history at `last_sync` is now re-fetched only
+  when it was created after that sync; older issues go through the normal
+  conflict checks, and the pull warns once that their links could not be
+  verified. An older issue that really was linked to another remote issue
+  since that sync is not re-fetched: review such links before pushing.
+  (#7294)
+
 - `bd compact` no longer silently changes row data when commit dates are out
   of history order across the cutoff. When a recent-dated commit came before
   an old-dated one in history (a host clock that jumped back), the squashed
