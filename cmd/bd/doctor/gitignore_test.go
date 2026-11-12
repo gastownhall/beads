@@ -3435,3 +3435,90 @@ func TestEnsureGitignoreForBeadsDir_TightenFailureIsPermissionOnly(t *testing.T)
 		}
 	})
 }
+
+// machineLocalBackupStateFiles are the per-machine files bd writes inside
+// .beads/ that GH#8318 added to the gitignore template.
+var machineLocalBackupStateFiles = []string{
+	"dolt-backup.json",
+	"dolt-backup-state.json",
+	"dolt-config.log",
+	".auto-import-issues.jsonl",
+}
+
+// TestGitignore_ContainsBackupStateFiles reproduces bd-g6fd4y (GH#8318):
+// bd writes per-machine files inside .beads/ (dolt-backup.json holds the
+// absolute backup destination) that the template must ignore, and
+// requiredPatterns must carry them so bd doctor --fix heals old gitignores.
+func TestGitignore_ContainsBackupStateFiles(t *testing.T) {
+	for _, pattern := range machineLocalBackupStateFiles {
+		if !containsGitignorePattern(GitignoreTemplate, pattern) {
+			t.Errorf("GitignoreTemplate should contain %q", pattern)
+		}
+		found := false
+		for _, p := range requiredPatterns {
+			if p == pattern {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("requiredPatterns should include %q", pattern)
+		}
+	}
+}
+
+// TestGitignoreTemplate_IgnoresMachineLocalState covers AC-1 (bd-g6fd4y,
+// GH#8318): a .beads/.gitignore written by the bd init path must make git
+// actually ignore the four per-machine state files, not merely contain their
+// names somewhere.
+func TestGitignoreTemplate_IgnoresMachineLocalState(t *testing.T) {
+	dir := t.TempDir()
+	run := func(args ...string) {
+		cmd := gitCommand(args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+	}
+	run("init")
+	// A host-level global excludes file could make the unignored base pass
+	// vacuously, so point core.excludesFile at nothing.
+	disableGlobalGitIgnore(t, dir)
+
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureGitignoreForBeadsDir(beadsDir); err != nil {
+		t.Fatalf("EnsureGitignoreForBeadsDir failed: %v", err)
+	}
+	for _, name := range machineLocalBackupStateFiles {
+		if err := os.WriteFile(filepath.Join(beadsDir, name), []byte("machine-local"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, name := range machineLocalBackupStateFiles {
+		check := gitCommand("check-ignore", "-q", filepath.Join(".beads", name))
+		check.Dir = dir
+		if err := check.Run(); err != nil {
+			t.Errorf("git check-ignore did not match .beads/%s", name)
+		}
+	}
+
+	status := gitCommand("status", "--porcelain", "--untracked-files=all", "--", ".beads")
+	status.Dir = dir
+	out, err := status.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git status failed: %v\n%s", err, out)
+	}
+	for _, name := range machineLocalBackupStateFiles {
+		if contains(string(out), filepath.Join(".beads", name)) {
+			t.Errorf("git status lists ignored file .beads/%s:\n%s", name, out)
+		}
+	}
+
+	if missing := missingGitignorePatterns(GitignoreTemplate); len(missing) > 0 {
+		t.Errorf("GitignoreTemplate is missing required patterns: %s", strings.Join(missing, ", "))
+	}
+}

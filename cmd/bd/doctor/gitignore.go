@@ -88,6 +88,16 @@ dolt-pprof/
 # Backup data (auto-exported JSONL, local-only)
 backup/
 
+# Machine-local backup / audit / import state (per-machine, GH#8318)
+# dolt-backup.json: backup destination path (bd backup)
+# dolt-backup-state.json: last backup sync state (bd backup)
+# dolt-config.log: bd dolt set audit log; entries record the absolute .beads path
+# .auto-import-issues.jsonl: size/mtime stamp of this clone's issues.jsonl
+dolt-backup.json
+dolt-backup-state.json
+dolt-config.log
+.auto-import-issues.jsonl
+
 # Per-project environment file (Dolt connection config, GH#2520)
 .env
 
@@ -152,6 +162,10 @@ var requiredPatterns = []string{
 	"http_local_metadata.json",
 	".local_version",
 	"backup/",
+	"dolt-backup.json",
+	"dolt-backup-state.json",
+	"dolt-config.log",
+	".auto-import-issues.jsonl",
 }
 
 // CheckGitignore checks if .beads/.gitignore is up to date.
