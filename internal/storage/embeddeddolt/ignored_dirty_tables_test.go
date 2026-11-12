@@ -493,3 +493,54 @@ func TestEmbeddedIgnoredCommittableDirtyReconcileRecovers(t *testing.T) {
 		t.Fatalf("unrelated wisp: working = %d, at HEAD = %d; want 1 and 0 (it must stay local)", working, atHead)
 	}
 }
+
+// TestEmbeddedIgnoredCommittableDirtyReadOnlyCommandTolerates is the
+// read-only pin for the same refusal (#5168/#5816 test plan): the read-only
+// command open must not be bricked by the ignored-series dirty-table
+// refusal either. It warns, opens at the current (unmigrated) schema, and
+// runs no migration — every cursor row, HEAD and the dirty user rows stay
+// exactly as they were, so the read serves the old schema until the
+// operator commits the working set.
+func TestEmbeddedIgnoredCommittableDirtyReadOnlyCommandTolerates(t *testing.T) {
+	ctx := t.Context()
+	beadsDir, dataDir := committableIgnoredDirtyFixture(t, false)
+
+	db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	before := committableIgnoredDirtySnapshot(t, ctx, db)
+	_ = cleanup()
+
+	var (
+		readOnly *embeddeddolt.EmbeddedDoltStore
+		openErr  error
+	)
+	warning := captureStderr(t, func() {
+		readOnly, openErr = embeddeddolt.OpenForReadOnlyCommand(ctx, beadsDir, "testdb", "main")
+	})
+	if openErr != nil {
+		t.Fatalf("OpenForReadOnlyCommand = %v, want the DirtyTablesError refusal tolerated (a read-only command must not be bricked by dirty tables)", openErr)
+	}
+	if !strings.Contains(warning, "Warning:") || !strings.Contains(warning, "child_counters") {
+		readOnly.Close()
+		t.Fatalf("read-only open stderr = %q, want a warning naming child_counters", warning)
+	}
+	readOnly.Close()
+
+	db, cleanup, err = embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL (after tolerated open): %v", err)
+	}
+	defer func() { _ = cleanup() }()
+	if after := committableIgnoredDirtySnapshot(t, ctx, db); after != before {
+		t.Fatalf("state after tolerated read-only open =\n%s\nwant unchanged\n%s", after, before)
+	}
+	// Refused holds: the ignored series never ran, so its cursor is still 1
+	// and both reads and (blocked) writes stay on the pre-migration schema
+	// until a commit clears the working set (the reconcile-open recovery
+	// AC-3 pins).
+	if got := ignoredCursorVersion(t, ctx, db); got != 1 {
+		t.Fatalf("ignored cursor = %d, want 1 (no ignored migration may run past the tolerated refusal)", got)
+	}
+}
