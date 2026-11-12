@@ -96,6 +96,23 @@ func TestJSONContract_ShowDefaultIncludesFullPayload(t *testing.T) {
 		}
 	})
 
+	// The --include-* flags predate the full default; without --count-only
+	// they must change nothing, so scripts written against the count-only
+	// default keep getting the same bytes.
+	t.Run("include_flags_without_count_only_change_nothing", func(t *testing.T) {
+		plain := normalizeShowJSON(t, w.run("show", id, "--json"))
+		for _, flags := range [][]string{
+			{"--include-comments", "--include-dependents"},
+			{"--include-comments"},
+			{"--include-dependents"},
+		} {
+			got := normalizeShowJSON(t, w.run(append([]string{"show", id, "--json"}, flags...)...))
+			if got != plain {
+				t.Errorf("show --json %v differs from plain show --json:\n got: %s\nwant: %s", flags, got, plain)
+			}
+		}
+	})
+
 	t.Run("epic_progress_by_default_not_under_count_only", func(t *testing.T) {
 		epic := w.create("--title", "Full payload epic", "--type", "epic")
 		w.create("--title", "Epic child one", "--type", "task", "--parent", epic)
@@ -486,4 +503,38 @@ func TestJSONContract_SchemaVersionPresent(t *testing.T) {
 			assertSchemaVersion(t, obj, "bd "+tt.name+" --json")
 		})
 	}
+}
+
+// normalizeShowJSON decodes bd show --json output and re-encodes it with the
+// revision token and every *_at timestamp removed, so two reads of the same
+// issue compare equal unless their shape or content differs.
+func normalizeShowJSON(t *testing.T, out string) string {
+	t.Helper()
+	items := parseJSONOutput(t, out)
+	var strip func(v any) any
+	strip = func(v any) any {
+		switch x := v.(type) {
+		case map[string]any:
+			for k, val := range x {
+				if k == "revision" || strings.HasSuffix(k, "_at") {
+					delete(x, k)
+					continue
+				}
+				x[k] = strip(val)
+			}
+		case []any:
+			for i := range x {
+				x[i] = strip(x[i])
+			}
+		}
+		return v
+	}
+	for _, item := range items {
+		strip(item)
+	}
+	b, err := json.Marshal(items)
+	if err != nil {
+		t.Fatalf("re-encode show JSON: %v", err)
+	}
+	return string(b)
 }
