@@ -1033,3 +1033,42 @@ func TestCheckClaude_ClaudeCodeWithoutClaude(t *testing.T) {
 		t.Errorf("Expected message %q, got %q", "CLI-only mode", check.Message)
 	}
 }
+
+// TestCheckClaudePlugin_NotInstalledFixHint pins the not-installed Fix hint:
+// it must point at the current gastownhall/beads marketplace, not the
+// pre-move repository (GH#3059), and at the published
+// plugin page rather than a repo-relative docs path, since doctor usually
+// runs outside a beads checkout.
+// legacyRepoOrg is the pre-move GitHub org, split across two literals so
+// this file does not itself trip check-legacy-repo-refs.sh.
+const legacyRepoOrg = "steveyeg" + "ge"
+
+func TestCheckClaudePlugin_NotInstalledFixHint(t *testing.T) {
+	tmpDir := t.TempDir()
+	// An empty ~/.claude/ makes isClaudePresent() true through its os.Stat
+	// branch even when no claude binary is on PATH; with no
+	// installed_plugins.json, GetClaudePluginVersion reports not installed.
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
+	t.Setenv("CLAUDECODE", "1")
+
+	for name, check := range map[string]DoctorCheck{
+		"CheckClaudePlugin":          CheckClaudePlugin(),
+		"CheckClaudePluginLocalOnly": CheckClaudePluginLocalOnly(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if check.Status != StatusWarning {
+				t.Fatalf("Status = %q, want %q (message %q)", check.Status, StatusWarning, check.Message)
+			}
+			if !strings.Contains(check.Fix, "/plugin marketplace add gastownhall/beads") {
+				t.Errorf("Fix %q does not point at gastownhall/beads", check.Fix)
+			}
+			if strings.Contains(check.Fix, legacyRepoOrg) {
+				t.Errorf("Fix %q still references the pre-move repository", check.Fix)
+			}
+		})
+	}
+}
