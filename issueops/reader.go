@@ -597,8 +597,14 @@ type GetRequest struct {
 	// corrupt store rather than an ordering question (bd-yby99.22).
 	ID string
 	// IncludeDependents and IncludeComments populate the two expensive row
-	// lists. Both default off: the detail view carries counts, and a caller
-	// that wants the rows asks for them.
+	// lists. Both default off: the zero value of this request is the
+	// counts-only view, which the library, the HTTP door
+	// (GET /v0/beads/issues/{id} without include_*) and the reader
+	// conformance suite all keep. The CLI is the one caller that sets both
+	// by default — `bd show --json` ships the full payload, the v0.49.6
+	// contract (#4122) — and reaches this zero only through its explicit
+	// `--count-only` fast path, where each --include-* adds one relation
+	// back (cmd/bd/show.go).
 	IncludeDependents bool
 	IncludeComments   bool
 

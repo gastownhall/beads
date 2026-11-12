@@ -1294,19 +1294,22 @@ type IssueDetails struct {
 	Comments     []*Comment                     `json:"comments,omitempty"`
 	Parent       *string                        `json:"parent,omitempty"`
 
-	// Cardinality fields — emitted by default (count-only mode).
-	// Slice fields (Dependents, Comments) are nil when count-only is active.
-	// Use --include-dependents / --include-comments to populate the slices.
+	// Cardinality fields — always emitted. The CLI's default full view
+	// populates the slices beside them (#4122); under `bd show --count-only`
+	// (and on a zero GetRequest everywhere else) the slices stay nil and the
+	// counts are all a caller gets, with --include-dependents /
+	// --include-comments adding one relation back under the flag.
 	DependentCount  *int64 `json:"dependent_count,omitempty"`
 	DependencyCount *int64 `json:"dependency_count,omitempty"`
 	CommentCount    *int64 `json:"comment_count,omitempty"`
 
 	// CommentsOmitted is set true only when CommentCount is nonzero AND
-	// Comments was left nil (count-only mode, no --include-comments). Without
-	// it, a positive CommentCount with no Comments key reads as a client bug,
-	// and a caller checking only `.comments` sees `null`/absent and concludes
-	// "no comments" — both wrong (ga-clgh). Never set alongside a populated
-	// Comments slice or a zero count: a true empty stays plain omission.
+	// Comments was left nil (count-only mode: --count-only, no
+	// --include-comments). Without it, a positive CommentCount with no
+	// Comments key reads as a client bug, and a caller checking only
+	// `.comments` sees `null`/absent and concludes "no comments" — both wrong
+	// (ga-clgh). Never set alongside a populated Comments slice or a zero
+	// count: a true empty stays plain omission.
 	CommentsOmitted *bool `json:"comments_omitted,omitempty"`
 
 	// GatedBy names the gates actively blocking this issue — the derived
@@ -1347,10 +1350,11 @@ type IssueDetails struct {
 	// That gate is on this field only, and the two planes disagree because of
 	// it: `bd show` in text mode reads dependents unconditionally, so a human
 	// always sees the inbound notice, while a --json caller sees this field
-	// only with --include-dependents (itself --json only). Recorded rather
-	// than fixed — the per-field restriction above is the correct half, and
-	// suppressing the text notice to match would lose a disclosure that is
-	// already sound.
+	// whenever dependents are read — by default since #4122 restored the full
+	// payload, and under --count-only only with --include-dependents.
+	// Recorded rather than fixed — the per-field restriction above is the
+	// correct half, and suppressing the text notice to match would lose a
+	// disclosure that is already sound.
 	UnresolvableDependencies *int64 `json:"unresolvable_dependencies,omitempty"`
 	UnresolvableDependents   *int64 `json:"unresolvable_dependents,omitempty"`
 

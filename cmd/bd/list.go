@@ -471,10 +471,12 @@ func init() {
 
 	// Projection toggle. Like --skip-labels it trades data for bytes, and
 	// unlike it the dropped fields leave a mark on the row (IsLitePartial).
-	// Hydration toggle, the list twin of `bd show --include-comments`. Like
+	// Hydration toggle, the list twin of show's comment hydration: it costs a
+	// query per row that has comments, which is why `bd list` keeps it
+	// opt-in while `bd show --json` includes comments by default (#4122) —
+	// one issue pays one read, a thousand-row listing pays a thousand. Like
 	// --skip-labels and --brief it changes what is HYDRATED and never which
-	// rows match. It costs a query per row that has comments, which is why it
-	// is opt-in on the most-run command in the tree.
+	// rows match.
 	listCmd.Flags().Bool("include-comments", false,
 		"Populate each row's comments field with full comment bodies in JSON output "+
 			"(--json only; costs one query per row that has comments). Without it, a row "+

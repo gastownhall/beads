@@ -33,6 +33,7 @@ type showProxiedInput struct {
 	localTime       bool
 	watchMode       bool
 	currentMode     bool
+	countOnly       bool
 	includeDepends  bool
 	briefDeps       bool
 	includeComments bool
@@ -50,9 +51,10 @@ func gatherShowProxiedInput(cmd *cobra.Command, args []string) *showProxiedInput
 	in.localTime, _ = cmd.Flags().GetBool("local-time")
 	in.watchMode, _ = cmd.Flags().GetBool("watch")
 	in.currentMode, _ = cmd.Flags().GetBool("current")
-	in.includeDepends, _ = cmd.Flags().GetBool("include-dependents")
-	in.briefDeps, _ = cmd.Flags().GetBool("brief-deps")
-	in.includeComments, _ = cmd.Flags().GetBool("include-comments")
+	// The detail-shaping flags come from the same helper the direct route
+	// reads, so no show flag can reach one route only.
+	f := showDetailFlagsFrom(cmd)
+	in.countOnly, in.includeDepends, in.briefDeps, in.includeComments = f.countOnly, f.includeDependents, f.briefDeps, f.includeComments
 	in.commentsTail, _ = cmd.Flags().GetInt("comments-tail")
 
 	idFlags, _ := cmd.Flags().GetStringArray("id")
@@ -468,12 +470,13 @@ func runShowProxiedDefault(ctx context.Context, uw uow.UnitOfWork, in *showProxi
 
 	// Shaping the detail view belongs to the reader role, not the CLI, and
 	// this route reaches it the same way the direct one does: through the
-	// provider's own accessor. The count-only default (be-ijck6q), the
-	// comments-omitted flag (ga-clgh) and the shallow dependent rows
-	// (be-4d36f2) then read the same from every frontend by construction
-	// rather than by everyone remembering to call the same helper. The
-	// role opens one unit of work per call; the one this function holds stays
-	// for the terminal rendering below, which is not on the contract.
+	// provider's own accessor. The count-only fast path (--count-only,
+	// be-ijck6q), the comments-omitted flag (ga-clgh) and the shallow
+	// dependent rows (be-4d36f2) then read the same from every frontend by
+	// construction rather than by everyone remembering to call the same
+	// helper. The role opens one unit of work per call; the one this function
+	// holds stays for the terminal rendering below, which is not on the
+	// contract.
 	var rd issueops.Reader
 	if jsonOutput && !in.shortMode {
 		var rerr error
@@ -641,7 +644,13 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 }
 
 // getRequest carries the proxied show flags onto the read contract. See
-// showGetRequest: the two routes build this independently.
+// showGetRequest: the two routes build this independently, through the same
+// flag-to-request mapping.
 func (in *showProxiedInput) getRequest(id string) issueops.GetRequest {
-	return showGetRequest(id, in.includeDepends, in.includeComments, in.briefDeps)
+	return showGetRequest(id, showDetailFlags{
+		countOnly:         in.countOnly,
+		includeDependents: in.includeDepends,
+		includeComments:   in.includeComments,
+		briefDeps:         in.briefDeps,
+	})
 }

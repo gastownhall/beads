@@ -725,6 +725,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd show --json` emits the full detail payload again, and the count-only
+  fast path is opt-in via `--count-only`.** PR #4010 (be-ijck6q) made plain
+  `bd show --json` return `comment_count` / `dependent_count` and omit the
+  `comments` and `dependents` arrays unless `--include-comments` /
+  `--include-dependents` were passed, breaking the v0.49.6 machine-readable
+  contract that scripts and the regression parity suite pin (#4122). The
+  default is restored: `comments` and `dependents` (shallow rows) are back,
+  along with epic progress and `unresolvable_dependents`. The performance
+  work is kept as an explicit opt-in: `bd show ID --json --count-only`
+  reproduces the lean shape (counts plus `comments_omitted`), and
+  `--count-only --include-comments` / `--include-dependents` re-add one
+  relation under it. Without `--count-only`, the `--include-*` flags change
+  nothing (the default already includes both arrays). The reader, HTTP and
+  `bd list` defaults are untouched: a zero `issueops.GetRequest` and
+  `GET /v0/beads/issues/{id}` without `include_*` stay counts-only, and
+  `bd list --json` keeps its own opt-in `--include-comments`. Over `bd
+  connect`, a default show now makes one extra request per id (the full read
+  is a different URL than the resolution read), which `--count-only` avoids.
+  ([#4122](https://github.com/gastownhall/beads/issues/4122))
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add

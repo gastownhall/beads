@@ -238,11 +238,25 @@ items, plus:
   decimal string compared by equality and echoed back verbatim; always present,
   including a legacy `"0"`
 - `dependencies` (object[]): Full dependency records
-- `comments` (object[]): Comment thread — present only with `--include-comments`;
-  the default response returns `comment_count` only (count-only, be-ijck6q)
+- `dependents` (object[]): Shallow dependent rows — `id`, `status`, `type`,
+  `priority`, `title` and the edge's `dependency_type` (be-4d36f2) — present
+  by default. `--count-only` omits the array and returns `dependent_count`
+  only; `--count-only --include-dependents` adds it back
+- `comments` (object[]): Comment thread — present by default. `--count-only`
+  omits the array and returns `comment_count` only (the count-only fast path,
+  be-ijck6q); `--count-only --include-comments` adds it back
 - `comments_omitted` (boolean, optional): `true` only when `comment_count` is
-  nonzero and `comments` was left out of the response (no `--include-comments`).
-  Absent when comments were included or when there are none to omit (ga-clgh)
+  nonzero and `comments` was left out of the response (`--count-only` without
+  `--include-comments`). Absent when comments were included or when there are
+  none to omit (ga-clgh)
+- `unresolvable_dependents` (number, optional): inbound dependency edges whose
+  far end has no row in this database (cross-repo or `external:` targets) —
+  present whenever the dependents array is read, so by default and under
+  `--count-only --include-dependents`, absent under plain `--count-only`
+- `epic_total_children`, `epic_closed_children`, `epic_closeable` (for
+  `issue_type=epic` with children): present whenever dependents are read — by
+  default, or under `--count-only --include-dependents`; none of the three
+  appears under plain `--count-only`
 - `gated_by` (object[], optional): The gates actively blocking this issue, each
   `{id, type, reason}` — the gate bead to resolve, its await condition (`human`,
   `timer`, `gh:run`, `gh:pr`, `bead`, or `gate` when it carries none), and the

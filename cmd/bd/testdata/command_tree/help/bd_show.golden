@@ -11,11 +11,12 @@ Flags:
       --brief-deps           Reduce each dependency to its identity fields in JSON output (--json only; drops description, design, notes and acceptance criteria)
       --children             Show only the children of this issue
       --comments-tail int    Render only the last N comments in text output, preceded by one elision line naming how many older ones were hidden (text output only; 0, the default, renders every comment unchanged; N must be >= 0)
+      --count-only           Leave the dependents and comments arrays out of JSON output and report them only as dependent_count and comment_count (--json only; the fast path for hub beads and polling callers). An issue whose comments were left out carries comments_omitted=true, so check it before reading an absent comments field as none. --include-dependents / --include-comments add their array back.
       --current              Show the currently active issue (in-progress, hooked, or last touched)
   -h, --help                 help for show
       --id stringArray       Issue ID (use for IDs that look like flags, e.g., --id=gt--xyz)
-      --include-comments     Stream full comment bodies in JSON output (--json only; may be slow on issues with many comments). Without it the comments field is absent entirely, not truncated: an issue with comments carries comment_count and comments_omitted=true, so check those before reading an absent comments field as none.
-      --include-dependents   Stream full dependent issues in JSON output (--json only; may be slow on hub beads)
+      --include-comments     With --count-only, stream the full comment bodies anyway (--json only). The default JSON output already includes them.
+      --include-dependents   With --count-only, stream the dependent rows anyway (--json only). The default JSON output already includes them.
       --local-time           Show timestamps in local time instead of UTC (date-only fields are always local)
       --long                 Show all available fields (extended metadata, agent identity, gate fields, etc.)
       --refs                 Show issues that reference this issue (reverse lookup)
