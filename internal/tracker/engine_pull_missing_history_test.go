@@ -298,3 +298,112 @@ func TestEnginePullMissingHistoryPreservesLocalEdits(t *testing.T) {
 		})
 	}
 }
+
+// TestEnginePullMissingHistoryBulkRowsKeepGuards pins that a missing-history
+// issue is never granted the hydration exemption a bulk row would apply:
+// when the stale remote comes back from the overlap window, and when it
+// comes back from the ordinary post-cursor fetch, the conflict and overlap
+// guards keep the unpushed local edit. Only an explicit conflict resolution
+// that authorizes the overwrite still applies the remote.
+func TestEnginePullMissingHistoryBulkRowsKeepGuards(t *testing.T) {
+	const ref = "https://test.test/EXT-1"
+	newLocal := func() *types.Issue {
+		linked := ref
+		return &types.Issue{
+			ID:          "bd-1",
+			Title:       "unpushed local edit",
+			Description: "local body",
+			Status:      types.StatusOpen,
+			Priority:    2,
+			IssueType:   types.TypeTask,
+			ExternalRef: &linked,
+			CreatedAt:   overlapLastSync.Add(-time.Hour),
+			UpdatedAt:   overlapLastSync.Add(10 * time.Second),
+		}
+	}
+	remoteAt := func(updated time.Time) TrackerIssue {
+		return TrackerIssue{
+			ID:          "EXT-1",
+			Identifier:  "EXT-1",
+			Title:       "stale remote title",
+			Description: "stale remote body",
+			UpdatedAt:   updated,
+		}
+	}
+
+	t.Run("overlap window row", func(t *testing.T) {
+		ctx := context.Background()
+		for _, dryRun := range []bool{false, true} {
+			name := "real pull"
+			if dryRun {
+				name = "dry run"
+			}
+			t.Run(name, func(t *testing.T) {
+				local := newLocal()
+				store := newOverlapStore(local) // no previousRefs entry: missing history (#7294)
+				mock, _ := newOverlapTracker(remoteAt(overlapLastSync.Add(-30 * time.Second)))
+
+				result, err := NewEngine(mock, store, "sync").Sync(ctx, SyncOptions{Pull: true, DryRun: dryRun})
+				if err != nil {
+					t.Fatalf("Sync: %v", err)
+				}
+				if result.PullStats.Updated != 0 || store.commits != 0 {
+					t.Fatalf("PullStats = %+v, commits = %d, want the local edit kept", result.PullStats, store.commits)
+				}
+				if local.Title != "unpushed local edit" {
+					t.Fatalf("local title = %q, want the unpushed local edit kept", local.Title)
+				}
+				if mock.fetchCalls != 0 {
+					t.Fatalf("FetchIssue calls = %d, want 0", mock.fetchCalls)
+				}
+				if _, found := missingHistoryWarning(result); !found {
+					t.Fatalf("warnings = %v, want the unverified-links warning", result.Warnings)
+				}
+			})
+		}
+	})
+
+	t.Run("post-cursor bulk row", func(t *testing.T) {
+		ctx := context.Background()
+		local := newLocal()
+		store := newOverlapStore(local) // no previousRefs entry: missing history (#7294)
+		mock, _ := newOverlapTracker(remoteAt(overlapLastSync.Add(30 * time.Second)))
+
+		result, err := NewEngine(mock, store, "sync").Sync(ctx, SyncOptions{Pull: true})
+		if err != nil {
+			t.Fatalf("Sync: %v", err)
+		}
+		if result.PullStats.Updated != 0 || store.commits != 0 {
+			t.Fatalf("PullStats = %+v, commits = %d, want the local edit kept", result.PullStats, store.commits)
+		}
+		if local.Title != "unpushed local edit" {
+			t.Fatalf("local title = %q, want the unpushed local edit kept", local.Title)
+		}
+		if _, found := missingHistoryWarning(result); !found {
+			t.Fatalf("warnings = %v, want the unverified-links warning", result.Warnings)
+		}
+	})
+
+	// Control: an explicit resolution that keeps the external version still
+	// authorizes the overwrite; missing history only removes the automatic
+	// exemption, never the deliberate one.
+	t.Run("overwrite authorized still applies", func(t *testing.T) {
+		ctx := context.Background()
+		local := newLocal()
+		store := newOverlapStore(local) // no previousRefs entry: missing history (#7294)
+		mock, _ := newOverlapTracker(remoteAt(overlapLastSync.Add(30 * time.Second)))
+
+		result, err := NewEngine(mock, store, "sync").Sync(ctx, SyncOptions{
+			Pull:               true,
+			Push:               true,
+			ConflictResolution: ConflictExternal,
+		})
+		if err != nil {
+			t.Fatalf("Sync: %v", err)
+		}
+		if result.PullStats.Updated != 1 || local.Title != "stale remote title" {
+			t.Fatalf("PullStats = %+v, local title = %q, want the authorized overwrite applied",
+				result.PullStats, local.Title)
+		}
+	})
+}
