@@ -4,7 +4,16 @@
 JSON plan. Node field names follow the issue model's JSON tags (the same
 names `bd show --json` emits), and every field single-issue `bd create` can
 set is addressable from a plan — plus an initial `status` and `pinned`,
-which `bd create` has no flags for:
+which `bd create` has no flags for.
+
+**Direction rule.** Every dependency in a plan reads like `bd dep add`: an
+edge `{"from_key": "b", "to_key": "a", "type": "blocks"}` is
+`bd dep add <from_key> <to_key> --type <type>`, so `from_key` is the
+dependent (it waits) and `to_key` is what it depends on. A node's own
+`deps` entry `{"target": "a"}` means the same thing: this node waits on `a`.
+Put dependencies in `edges` or in `deps`; fields such as `blockedBy` or
+`depends_on` on a node are not part of the schema and are dropped with a
+warning.
 
 ```json
 {
@@ -33,6 +42,8 @@ which `bd create` has no flags for:
     },
     { "key": "impl", "title": "Implement it", "parent_key": "api" },
     { "key": "gate", "title": "Fanout gate" },
+    { "key": "docs", "title": "Document it", "priority": "P3",
+      "deps": [{ "target": "impl" }] },
     { "key": "launch", "title": "Launch announced", "type": "event",
       "event_kind": "agent.started", "actor": "agent://a", "target": "bead://b", "payload": "{}" }
   ],
@@ -54,6 +65,12 @@ Node notes:
   `parent-child` dependency on the created node.
 - `parent` and `estimate` are accepted aliases for `parent_key` and
   `estimated_minutes`; the canonical field wins when both spellings are set.
+- `priority` takes the same forms as `--priority`: an integer `0`-`4`, or
+  a string such as `"1"` or `"P1"` (any case). Words like `"high"` are
+  refused. A node without one gets the default, P2.
+- `deps` lists this node's own dependencies: each entry has a `target` (a
+  plan node key, or else an existing issue ID) and an optional `type`
+  (default `blocks`). This node is the dependent.
 - `status` sets the initial status (default `open`, or `deferred` when
   `defer_until` is in the future). Nodes created `closed` get `closed_at`
   auto-filled. Timestamps are RFC3339; relative forms like `+6h` are not
@@ -72,6 +89,12 @@ Edge notes:
 
 - `type` defaults to `blocks`. `parent_key`/`parent_id` on nodes already
   create `parent-child` edges; don't repeat them in `edges`.
+- The same type rules apply to edges and node `deps`. The aliases
+  `"blocked-by"` and `"depends-on"` are stored as `blocks` with the
+  direction unchanged, as with `bd dep add --type`. A respelling of a
+  known type or alias (`"blocked_by"`, `"Blocks"`, `"waits_for"`) is
+  refused with the spelling bd recognizes. Other custom types are stored
+  verbatim and do not gate `bd ready`.
 - `gate` (`all-children` | `any-children`) and `spawner_key`/`spawner_id`
   attach fanout-gate metadata to `waits-for` edges, mirroring
   `--waits-for`/`--waits-for-gate`. The `to` endpoint of a `waits-for` edge
@@ -83,6 +106,13 @@ Edge notes:
   duplicate or reverse a `parent_key`/`parent_id` relationship, and a parent
   may not be connected to its own child through them.
 - `thread_id` threads conversation edges (e.g. `replies-to`).
+
+Plan notes:
+
+- A plan applies as one batch of at most 1000 items: one per node, one per
+  parent link, edge and `deps` entry, and one per `assign_after_create`
+  node. A larger plan is refused; split it into several plans.
+- `--dry-run` validates the whole plan and prints a preview without writing.
 
 Comments cannot be created from a plan; use `bd comments add` after creation.
 Model fields without `bd create` flags (`sender`, `work_type`, `is_template`,

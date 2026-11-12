@@ -50,6 +50,34 @@ func TestDocsGraphPlanExampleValidates(t *testing.T) {
 	if _, err := validateGraphApplyStorageClasses(&plan, GraphApplyOptions{}, false); err != nil {
 		t.Errorf("documented example rejected by storage-class validation: %v", err)
 	}
+
+	// bd-esm0t5 (GH#3879): the example shows a node's inline deps, and the
+	// page states the edge direction rule and the other rules a plan author
+	// otherwise finds by trial and error.
+	hasDeps := false
+	for _, node := range plan.Nodes {
+		hasDeps = hasDeps || len(node.Deps) > 0
+	}
+	if !hasDeps {
+		t.Error("documented example has no node with inline \"deps\"")
+	}
+	for what, want := range map[string]string{
+		"edge direction rule":      "bd dep add <from_key> <to_key>",
+		"inline deps":              `"deps"`,
+		"alias rule":               `"blocked-by"`,
+		"respelling refusal":       `"blocked_by"`,
+		"custom types do not gate": "do not gate `bd ready`",
+		"priority string forms":    `"P1"`,
+		"item cap":                 "1000",
+		"dry run":                  "--dry-run",
+	} {
+		if !strings.Contains(createGraphPlanSupplement, want) {
+			t.Errorf("create_graph_plan.md does not document the %s (want %q)", what, want)
+		}
+	}
+	if flag := createCmd.Flags().Lookup("graph"); flag == nil || !strings.Contains(flag.Usage, "bd help --doc create") {
+		t.Errorf("--graph flag usage does not point at `bd help --doc create`: %+v", flag)
+	}
 }
 
 func TestValidateGraphApplyPlanAcceptsCustomTypes(t *testing.T) {
