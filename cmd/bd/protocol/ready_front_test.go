@@ -99,6 +99,24 @@ func TestProtocol_ChildOfInProgressParentRefusalAgreesWithReadyFront(t *testing.
 	requireDepEdgesEqual(t, getObjectSlice(w.showJSON(child), "dependencies"),
 		[]depEdge{{issueID: child, dependsOnID: parent}},
 		"#5036: dependencies after the refused dep add")
+
+	// The supported shape the refusal names: track the awaited work in a
+	// sibling issue under the same parent and block on that. C leaves
+	// bd ready until the sibling closes — with no status edit, so nothing
+	// has to be reverted by hand when the work lands (the status=blocked
+	// workaround rots exactly that way).
+	sibling := w.create("--title", "Sibling holding the awaited work", "--type", "task", "--parent", parent)
+	w.run("dep", "add", child, sibling)
+	if ready := parseReadyIDs(t, w); ready[child] {
+		t.Errorf("#5036: child %s stayed ready after blocking on sibling %s", child, sibling)
+	}
+	w.run("close", sibling, "--reason", "done")
+	if ready := parseReadyIDs(t, w); !ready[child] {
+		t.Errorf("#5036: child %s did not return to the ready front after sibling %s closed", child, sibling)
+	}
+	if status, _ := w.showJSON(child)["status"].(string); status != "open" {
+		t.Errorf("#5036: child %s status = %q, want \"open\"; the sibling gate replaces the status edit, so it must never touch the status", child, status)
+	}
 }
 
 // TestProtocol_ReadyParentFilterIsTransitive pins protocol clause R3:
