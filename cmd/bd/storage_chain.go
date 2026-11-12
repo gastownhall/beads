@@ -38,7 +38,7 @@ func wireStorageDecorators(store storage.DoltStorage, hookRunner *hooks.Runner, 
 		return nil
 	}
 	store = telemetry.WrapStorage(store)
-	store = wireExternalDependencyPolicy(store)
+	store = wireExternalDependencyPolicy(store, crossRigRoutesDir)
 	if hookRunner != nil && !hooksDisabled {
 		store = storage.NewHookFiringStore(store, hookRunner)
 	}
@@ -58,7 +58,11 @@ func wireStorageDecorators(store storage.DoltStorage, hookRunner *hooks.Runner, 
 // place. Skipping the wrap here for every remote backend (the pre-S6-fix
 // behavior) silently dropped the policy entirely against such a server; the
 // capability-aware skip now lives inside the decorator, not at wrap time.
-func wireExternalDependencyPolicy(store storage.DoltStorage) storage.DoltStorage {
+//
+// routesDir names the .beads directory whose routes.jsonl a bare cross-rig
+// blocking target is read through (crossRigIssueResolver); nil leaves such a
+// target the store does not hold blocking.
+func wireExternalDependencyPolicy(store storage.DoltStorage, routesDir func() string) storage.DoltStorage {
 	if store == nil {
 		return nil
 	}
@@ -71,6 +75,7 @@ func wireExternalDependencyPolicy(store storage.DoltStorage) storage.DoltStorage
 		func(ctx context.Context, projectRoot string) (storage.DoltStorage, error) {
 			return openForeignStore(ctx, filepath.Join(projectRoot, ".beads"), foreignRead)
 		},
+		externaldeps.WithIssueResolver(crossRigIssueResolver(routesDir)),
 	)
 }
 
@@ -102,10 +107,12 @@ func waitForCommandHooks() {
 // The notifying layer is present only when sinks carry a hook runner;
 // uow.NewNotifyingProvider returns the provider unwrapped otherwise.
 func wireProxiedUOWProvider(provider uow.UnitOfWorkProvider, sinks uow.Sinks) uow.UnitOfWorkProvider {
-	return wireExternalDependencyUOWProvider(uow.NewNotifyingProvider(provider, sinks))
+	return wireExternalDependencyUOWProvider(uow.NewNotifyingProvider(provider, sinks), crossRigRoutesDir)
 }
 
-func wireExternalDependencyUOWProvider(provider uow.UnitOfWorkProvider) uow.UnitOfWorkProvider {
+// wireExternalDependencyUOWProvider is wireExternalDependencyPolicy for the
+// unit-of-work chain, with the same routesDir.
+func wireExternalDependencyUOWProvider(provider uow.UnitOfWorkProvider, routesDir func() string) uow.UnitOfWorkProvider {
 	return externaldeps.WrapUOWProvider(
 		provider,
 		func(project externaldeps.ProjectName) (string, bool) {
@@ -115,5 +122,6 @@ func wireExternalDependencyUOWProvider(provider uow.UnitOfWorkProvider) uow.Unit
 		func(ctx context.Context, projectRoot string) (storage.DoltStorage, error) {
 			return openForeignStore(ctx, filepath.Join(projectRoot, ".beads"), foreignRead)
 		},
+		externaldeps.WithIssueResolver(crossRigIssueResolver(routesDir)),
 	)
 }

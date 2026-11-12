@@ -212,7 +212,7 @@ func openMolBondHome(ctx context.Context, localStore storage.DoltStorage, plan *
 	}
 	home := rr.Store
 	if !externaldeps.Applied(home) {
-		home = wireExternalDependencyPolicy(home)
+		home = wireExternalDependencyPolicy(home, crossRigRoutesDir)
 	}
 	return home, rr.Close, nil
 }

@@ -98,6 +98,23 @@ func Applied(store storage.DoltStorage) bool {
 	return false
 }
 
+// EnforcesCrossRig reports whether store's policy layer also resolves bare
+// cross-rig targets (it was built WithIssueResolver), so bd serve may
+// advertise policy.cross_rig_dependencies beside policy.external_dependencies.
+func EnforcesCrossRig(store storage.DoltStorage) bool {
+	for store != nil {
+		if s, ok := store.(*Store); ok {
+			return s.resolveIssues != nil
+		}
+		u, ok := store.(storage.Unwrapper)
+		if !ok {
+			return false
+		}
+		store = u.Unwrap()
+	}
+	return false
+}
+
 // IssueLifecycle preserves the external close policy for public lifecycle
 // operations. Returning the inner lifecycle directly would promote around the
 // decorator when bd close or bd update uses the lifecycle seam.

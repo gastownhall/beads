@@ -212,5 +212,5 @@ func openAutoRoutedStore(ctx context.Context, store storage.DoltStorage, writabl
 	if err != nil {
 		return nil, false, rule, fmt.Errorf("failed to open routed store at %s: %w", remedy.PrintedValue(targetRepoPath), err)
 	}
-	return wireExternalDependencyPolicy(targetStore), true, rule, nil
+	return wireExternalDependencyPolicy(targetStore, func() string { return targetBeadsDir }), true, rule, nil
 }
