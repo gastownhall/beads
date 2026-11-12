@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.4.0-rc.1] - 2026-11-19
+## [1.4.0-rc.1] - 2026-11-13
 
 First release candidate for 1.4.0, the first minor release since 1.3. It is a
 hardening-branch release: `release/1.4.0` was cut from `main` on 2026-11-11
@@ -25,9 +25,10 @@ known issues ([#7886](https://github.com/gastownhall/beads/issues/7886), the
 stale-copy push and pull, `bd dolt remote reset-data` through a sql-server,
 and the [#7039](https://github.com/gastownhall/beads/issues/7039) events
 restore). The fixes picked since the cut stop `bd backup restore --force` from
-dropping the live database
+dropping the live database when bd and the Dolt server share a filesystem
 ([#7098](https://github.com/gastownhall/beads/issues/7098),
-[#5972](https://github.com/gastownhall/beads/issues/5972)) and `bd flatten`
+[#5972](https://github.com/gastownhall/beads/issues/5972); see **Known
+issues** for a server with its own filesystem). They also stop `bd flatten`
 and `bd doctor --fix` from destroying data, close two credential leaks
 (tracker secrets stored through `bd serve`'s settings and remote URLs printed
 by failed transfers), and finish upgrades that stranded older stores. Entries
@@ -93,6 +94,14 @@ start with the [1.3.0] **Upgrade notes**.
   `bd migrate schema`, with `--force` on `bd migrate` or `bd migrate schema`,
   or with `BD_ALLOW_MIGRATE=1` for scripts and CI. A database that `bd init`,
   `bd init --remote` or `bd bootstrap` creates still migrates without asking.
+  Except in proxied-server mode, the run of `bd migrate schema` that migrates
+  prints `Schema already at v74` and can leave the recorded bd version at the
+  release you upgraded from. In server mode `bd doctor` and
+  `bd doctor --check-health` then report a version mismatch (always on a
+  shared or external server; on bd's own server when another bd command ran
+  first). The schema is migrated: run `bd migrate` (no subcommand) once per
+  database to record the new version
+  ([#7283](https://github.com/gastownhall/beads/issues/7283)).
 - **Shared and gateway servers:** upgrade every client first, then run
   `bd migrate schema` once per database (through a gateway server, ask its
   administrator). Until then, read-only commands on server-mode and proxied
@@ -103,13 +112,16 @@ start with the [1.3.0] **Upgrade notes**.
   although recording (`bd versions`, `versioned-history.enabled`) is off by
   default. Recording is single-writer: turn it on for every writer of a store
   or for none.
-- **The first open restores missing events**
+- **The migration restores missing events**
   ([#7039](https://github.com/gastownhall/beads/issues/7039)). A clone that
   adopted migration 0062 by `bd dolt pull` or `bd bootstrap`, or was cloned
-  after it, restores its pre-upgrade events from its own Dolt history on its
-  first 1.4.0 open (clone-local, no Dolt commit, about 20s per 100k events
-  while it holds a shared server's migration lock). Let that open finish
-  before running `bd compact` or `bd flatten`.
+  after it, restores its pre-upgrade events from its own Dolt history when
+  1.4.0 migrates it (clone-local, no Dolt commit). Every clone pays the check
+  once: in embedded mode, 15,000 events over 3,000 issues take about 8
+  seconds to restore on an adopting clone, mostly writing, and about 1.6
+  seconds to check on the clone that ran 0062 itself. A shared server holds
+  its migration lock while it runs. Let it finish before running
+  `bd compact` or `bd flatten`.
 - **Stores that could not upgrade before now can:** clones stuck at v52 whose
   `wisps` table lacks `started_at` or `no_history`
   ([#6080](https://github.com/gastownhall/beads/issues/6080)), stores whose
@@ -239,8 +251,10 @@ start with the [1.3.0] **Upgrade notes**.
 - **New refusals that guard data:** `bd backup restore` refuses a local source
   that holds no Dolt backup (no regular `manifest` file at its top level), or
   whose absolute path holds `%` (or, outside Windows, `#`, `?` or `\`), before
-  it touches the database; in plain server mode the source must be visible to
-  the bd client ([#7098](https://github.com/gastownhall/beads/issues/7098),
+  it touches the database; in plain server mode bd checks the source on its
+  own machine, so the Dolt server must read the same directory at that path
+  (see **Known issues**)
+  ([#7098](https://github.com/gastownhall/beads/issues/7098),
   [#5972](https://github.com/gastownhall/beads/issues/5972)).
   `bd update --notes` over different existing notes exits 1 (HTTP
   `409 notes_overwrite_refused`): pass `--force` (`force_notes_overwrite`), or
@@ -2375,8 +2389,9 @@ start with the [1.3.0] **Upgrade notes**.
   refuses a source whose absolute path holds `%`, or outside Windows `#`, `?`
   or `\`: Dolt reads such a path as a different directory, so a `--force`
   restore from a real backup there dropped the database the same way. Move or
-  rename such a backup before restoring it. In plain server mode the source
-  must also be visible to the bd client, since bd now checks it locally.
+  rename such a backup before restoring it. In plain server mode bd checks
+  the source on its own machine, so the Dolt server must read the same
+  directory at that path (see **Known issues**).
 
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
@@ -2571,10 +2586,15 @@ start with the [1.3.0] **Upgrade notes**.
   warns that the audit history is incomplete and carries on, and a shallow
   clone that ends at the upgrade has nothing to restore. A cancelled,
   transient or live-table failure leaves the restore to retry on the next
-  open. Reads and writes are batched: 100,000 events restore in about 20
-  seconds rather than several minutes, which is how long a shared server's
-  migration lock is held. It makes no Dolt commit, and the restored rows
-  stay clone-local.
+  open. Every clone pays the check once, including the clone that ran 0062
+  itself, where nothing is restored. The restore reads the history before
+  each drop commit a page of rows at a time and writes in batches, so the
+  cost grows with the number of pre-upgrade events and drop commits, never
+  per issue. In embedded mode, 15,000 events over 3,000 issues take about
+  1.6 seconds to check on the migrating clone, and about 8 seconds to
+  restore on an adopting one, mostly writing. A shared server holds its
+  migration lock for that long. It makes no Dolt commit, and the restored
+  rows stay clone-local.
   [Upgrading](docs/getting-started/upgrading.md) gives a manual recipe for
   v1.3.4 and earlier, and how to retry a restore that skipped history
   (#7039).
@@ -5582,6 +5602,25 @@ These are not fixed in 1.4.0-rc.1.
   `DOLT_REMOTE_PASSWORD`), look for tokens already in history with
   `bd sql "SELECT commit_hash, message FROM dolt_log WHERE message LIKE '%@%'"`,
   and rotate any you find: a remote that already has the commit keeps it.
+- **`bd backup restore --force` can still drop the database when the Dolt
+  server has its own filesystem.** In plain server mode bd checks the restore
+  source on its own machine, but the server opens the path on its own
+  filesystem, which differs for a server on another host or for one in a
+  container (even one you reach at localhost) without the backup mounted at
+  the same path. There a backup that only bd's
+  machine holds passes the check, and a `--force` restore drops the database
+  before the server finds nothing to restore
+  ([#7098](https://github.com/gastownhall/beads/issues/7098) in that
+  topology), or restores a different backup that the server holds at that
+  path. A backup that only the server holds is refused. A fix for a server on
+  another host is open in
+  [#8413](https://github.com/gastownhall/beads/pull/8413) for a later
+  release; it is not in 1.4.0. Workaround: before passing `--force`, make
+  sure the server reads the directory bd checks. For a server on another
+  host, run `bd backup restore` on that host, in a workspace that reaches the
+  server at localhost and names the same `dolt_database`. For a server in a
+  container, mount the backup at the same path in the container and on the
+  host.
 - **`bd doctor --fix` can point a workspace at another project's database**
   ([#5576](https://github.com/gastownhall/beads/issues/5576)). When
   `.beads/metadata.json` names no `dolt_database`, the repair adopts the first
@@ -5715,6 +5754,19 @@ These are not fixed in 1.4.0-rc.1.
   `is_blocked`, and upgrading does not repair it. Workaround: run
   `bd recompute-blocked` once per workspace (it is idempotent;
   `rows_corrected` above 0 means the store was affected).
+- **`bd migrate schema` can leave the recorded bd version stale**
+  ([#7283](https://github.com/gastownhall/beads/issues/7283)). The
+  migrations apply while the command opens the store, so the run that
+  migrates prints `Schema already at v74` and skips recording the new version
+  (proxied-server mode records it). Server mode reports the stale version: on
+  a shared or external Dolt server it stays stale every time, and on bd's own
+  server when another bd command ran after the upgrade first. `bd doctor`
+  then warns, for example,
+  `Database: version 1.3.4 (CLI: 1.4.0-rc.1)` (its advice to update bd does
+  not help), and `bd doctor --check-health` reports a version mismatch and
+  exits 1. The schema itself is migrated. Workaround: run `bd migrate` with no
+  subcommand (`--dry-run` previews it) once per database; it writes only
+  metadata, in the database the workspace already uses.
 - **With no `issue_prefix` row in the database, `bd create` fails**
   ([#3494](https://github.com/gastownhall/beads/issues/3494)), for example
   after a tool wrote the prefix only to `config.yaml`; `bd config set`,
