@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -1441,13 +1442,19 @@ func ReconcileChildCounters(ctx context.Context, tx DBTX, issues []*types.Issue)
 // counter never decreases. This is not retention: plain removal writes no
 // tombstone, and an explicit create may still reuse the removed id.
 //
+// A suffix above math.MaxInt32 (a legacy P.3000000000) is skipped. The INT
+// counter column cannot hold it, and the allocator stores every suffix it
+// mints in that column, so it can never mint such a suffix again. Skipping
+// keeps the create, rename or removal that names it working; clamping the
+// counter to math.MaxInt32 instead would leave the parent no suffix to mint.
+//
 // The returned set names the counter tables written, for callers that stage
 // tables for a Dolt commit.
 func ReserveChildSuffixesInTx(ctx context.Context, tx DBTX, ids []string, departing map[string]bool) (map[string]bool, error) {
 	parents := make(map[string]*childCounterBucket)
 	for _, id := range ids {
 		parentID, childNum, ok := ParseHierarchicalID(id)
-		if !ok || childNum <= 0 || departing[parentID] {
+		if !ok || childNum <= 0 || childNum > math.MaxInt32 || departing[parentID] {
 			continue
 		}
 		b, exists := parents[parentID]

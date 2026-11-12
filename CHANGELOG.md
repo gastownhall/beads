@@ -1273,8 +1273,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drops its counter, raw SQL deletes bypass the reservation, a rebuild from
   `issues.jsonl` loses the counter (the export format carries no counter
   state), and suffix history already lost before the upgrade is not
-  recovered.
-
+  recovered. On clones synced with `bd dolt pull`, a delete or rename that
+  raises a parent's missing or lagging counter can now conflict with a
+  child another clone created under the same parent: the pull fails on a
+  conflict in that parent's `child_counters` row, as parallel child creates
+  already do ([#4796](https://github.com/gastownhall/beads/issues/4796)).
 - **The aux row id re-key again skips tables with dolthub/dolt#11131
   encoding drift instead of aborting the migration on every open** (#8372).
   The Dolt 2.6 engine reports the drift as `malformed out-of-band adaptive
