@@ -65,7 +65,7 @@
     },
     "envelope/update": {
       "cmd": "bd update corpus-root --json --priority 0 --add-label corpus-label --set-metadata phase=2 --description \"updated corpus root\"",
-      "sha256": "8f7693350a4e122e2bf38c4aa5c0439b50281b2bae4f2b18b437735c67e6db1d"
+      "sha256": "7ab3eb202956501b9cbdff5c8cfd1014100a3cedfd2ddae21f27e368ae49b9bd"
     },
     "envelope/version": {
       "cmd": "bd version --json",
@@ -133,7 +133,7 @@
     },
     "flat/update": {
       "cmd": "bd update corpus-root --json --priority 0 --add-label corpus-label --set-metadata phase=2 --description \"updated corpus root\"",
-      "sha256": "1d1f8e21df93df7a1885430fd804d2435cd3d7289cfcfcd1f4f511e241a8d805"
+      "sha256": "6611a34b5254a7720799319a873ecfa44aa36f16da90909bd37201f04f2538b5"
     },
     "flat/version": {
       "cmd": "bd version --json",
