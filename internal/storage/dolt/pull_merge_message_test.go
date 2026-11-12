@@ -74,6 +74,24 @@ func newDivergedPullFixture(t *testing.T, ctx context.Context, remoteName string
 	store.remote = remoteName
 	store.branch = "main"
 
+	if setUpstream {
+		// Fatal precondition: upstream tracking is in effect. Base's peer SQL
+		// route was a remote-only CALL DOLT_PULL(<remote>); with tracking that
+		// call takes Dolt's own merge, the one that writes the remote URL into
+		// the message. Without tracking it fails and base took the URL-free
+		// GH#3144 fallback, so the fixture would not reproduce the leak. Run
+		// that call here, with nothing to merge yet, and roll it back.
+		probe, err := store.db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("begin tracking probe: %v", err)
+		}
+		if _, err := probe.ExecContext(ctx, "CALL DOLT_PULL(?)", remoteName); err != nil {
+			_ = probe.Rollback()
+			t.Fatalf("fixture broken: remote-only DOLT_PULL(?) failed (%v); upstream tracking from --set-upstream is not in effect", err)
+		}
+		_ = probe.Rollback()
+	}
+
 	var storedURL string
 	if err := store.db.QueryRowContext(ctx, "SELECT url FROM dolt_remotes WHERE name = ?", remoteName).Scan(&storedURL); err != nil {
 		t.Fatalf("read stored remote url: %v", err)
@@ -190,4 +208,25 @@ func TestServerPullMergeMessageOmitsRemoteURL(t *testing.T) {
 			assertMergeMessageOmitsRemoteURL(t, ctx, store.db, "origin/main")
 		})
 	}
+}
+
+// TestFederationPullFromMergeMessageOmitsPeerURL is the federation peer twin
+// of TestServerPullMergeMessageOmitsRemoteURL (bd-e2q8zs). The store's branch
+// tracks the peer (pushed with --set-upstream), which is what sent the peer
+// route's bare CALL DOLT_PULL(<peer>) through Dolt's own merge, the one that
+// writes the peer URL into the message. PullFrom now fetches the peer's
+// branch and merges <peer>/<branch>.
+func TestFederationPullFromMergeMessageOmitsPeerURL(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	fx := newDivergedPullFixture(t, ctx, "origin", true)
+	conflicts, err := fx.store.PullFrom(ctx, "origin")
+	if err != nil {
+		t.Fatalf("PullFrom: %v", err)
+	}
+	if len(conflicts) != 0 {
+		t.Fatalf("PullFrom returned conflicts %+v for disjoint rows", conflicts)
+	}
+	assertMergeMessageOmitsRemoteURL(t, ctx, fx.store.db, "origin/main")
 }

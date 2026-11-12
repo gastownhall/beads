@@ -291,3 +291,55 @@ func expectationsMetBesideSpareListings(db *sql.DB, mock sqlmock.Sqlmock) error 
 	}
 	return mock.ExpectationsWereMet()
 }
+
+// TestCLIPeerPullFetchesThenMergesTrackingRef pins the federation peer CLI
+// route (bd-e2q8zs): it runs `dolt fetch [--user <u>] <peer> <branch>` with
+// today's credential environment, never `dolt pull`, and merges
+// <peer>/<branch> itself with CALL DOLT_MERGE.
+func TestCLIPeerPullFetchesThenMergesTrackingRef(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fake")
+	}
+	clearPredicateEnv(t)
+	const peerURL = "git+ssh://git@example.com/org/peer.git"
+
+	for _, tc := range []struct {
+		name     string
+		creds    *remoteCredentials
+		wantCall string
+	}{
+		{"default", nil, "|fetch peer main|DOLT_REMOTE_PASSWORD="},
+		{"credentialed", &remoteCredentials{username: "user", password: "client-secret"},
+			"|fetch --user user peer main|DOLT_REMOTE_PASSWORD=client-secret"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			callLog := fakeDoltOnPath(t, peerURL)
+			db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+			if err != nil {
+				t.Fatalf("sqlmock: %v", err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			store := cliPullStore(t, mock, db, unmanagedWorkspace(t), peerURL)
+			expectCLIMerge(mock, "peer/main", 0)
+
+			if err := store.doltCLIPullFromPeer(context.Background(), "peer", tc.creds); err != nil {
+				t.Fatalf("peer pull: %v", err)
+			}
+
+			calls := readCallLog(t, callLog)
+			cliDir, err := filepath.EvalSymlinks(store.CLIDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := cliDir + tc.wantCall; !strings.Contains(calls, want) {
+				t.Errorf("dolt calls %q lack the peer fetch %q", calls, want)
+			}
+			if strings.Contains(calls, "|pull ") {
+				t.Errorf("the peer pull ran `dolt pull`, whose merge message records the peer URL:\n%s", calls)
+			}
+			if err := expectationsMetBesideSpareListings(db, mock); err != nil {
+				t.Errorf("the peer CLI route did not merge peer/main itself: %v", err)
+			}
+		})
+	}
+}

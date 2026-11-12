@@ -64,7 +64,8 @@ func (s *DoltStore) pushRefToPeer(ctx context.Context, peer string, refspec stri
 
 // PullFrom pulls changes from a specific peer remote.
 // If credentials are stored for this peer, they are used automatically.
-// For git-protocol remotes, uses CLI `dolt pull` to avoid MySQL connection timeouts.
+// For git-protocol remotes, uses CLI `dolt fetch` to avoid MySQL connection
+// timeouts. Every route fetches and merges <peer>/<branch> (bd-e2q8zs).
 // Returns any merge conflicts if present.
 func (s *DoltStore) PullFrom(ctx context.Context, peer string) ([]storage.Conflict, error) {
 	var conflicts []storage.Conflict
@@ -722,20 +723,23 @@ func (s *DoltStore) doltCLIPushRefToPeer(ctx context.Context, peer string, refsp
 	return nil
 }
 
-// doltCLIPullFromPeer shells out to `dolt pull` for a specific peer remote.
-// Used for git-protocol remotes where CALL DOLT_PULL times out through the SQL connection.
-// Credentials are set on the subprocess environment only via cmd.Env.
+// doltCLIPullFromPeer pulls a specific peer remote on the CLI route: it shells
+// out to `dolt fetch <peer> <branch>`, then merges <peer>/<branch> in SQL.
+// Used for git-protocol remotes where a transfer through the SQL connection
+// times out. Credentials are set on the subprocess environment only via
+// cmd.Env. Never `dolt pull`, whose merge message copies the stored peer URL,
+// credentials included (bd-e2q8zs); see doltCLIPull.
 func (s *DoltStore) doltCLIPullFromPeer(ctx context.Context, peer string, creds *remoteCredentials) error {
-	cmd, transferCtx, cancel, err := s.prepareDoltCLITransfer(ctx, peer, creds, "pull", peer, s.branch)
+	cmd, transferCtx, cancel, err := s.prepareDoltCLITransfer(ctx, peer, creds, "fetch", peer, s.branch)
 	if err != nil {
 		return err
 	}
 	defer cancel()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return cliTransferError(fmt.Sprintf("pull from peer %s", peer), peer, transferCtx, out, err)
+		return cliTransferError(fmt.Sprintf("fetch from peer %s", peer), peer, transferCtx, out, err)
 	}
-	return nil
+	return s.mergeTrackingRefAfterCLIFetch(ctx, peer+"/"+s.branch)
 }
 
 // doltCLIFetchFromPeer shells out to `dolt fetch` for a specific peer remote.
