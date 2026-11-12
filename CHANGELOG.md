@@ -11,41 +11,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Second release candidate for 1.4.0. It adds no schema migration, so upgrading
 from 1.4.0-rc.1 is a binary swap; coming from 1.3.x, the consented migration
-and everything in the [1.4.0-rc.1] **Upgrade notes** still apply. It adds five
-fixes on top of rc.1, among them a 1.4.0 regression that lost GitHub label
-edits and the token leak through server-mode pull merge commits, and its
-binaries are built with Go 1.27.4. The changes below also correct rc.1's
+and the [1.4.0-rc.1] **Upgrade notes** still apply, as amended below. It adds
+four fixes on top of rc.1, among them a 1.4.0 regression that lost GitHub
+label edits and the token leak through server-mode pull merge commits, and
+rebuilds the binaries with Go 1.27.4. The changes below also correct rc.1's
 **Known issues**.
 
 ### Upgrade notes
 
-- **`bd github` stops when a repository lookup gets no answer**
+- **`bd github` stops when a repository lookup fails**
   ([#8437](https://github.com/gastownhall/beads/pull/8437), backport of
   [#8399](https://github.com/gastownhall/beads/pull/8399)). `bd github sync`,
-  `push` and `pull`, `--dry-run` included, now stop before syncing when
-  GitHub answers anything but a 404 for the configured repository or for any
-  other repository on the same host that a bead's issue URL names. This
-  replaces the best-effort lookup the [1.3.3-rc.1] notes describe. If GitHub
-  refuses the token for such a repository (a 403, for example SAML SSO or an
-  IP allow list), every run stops until the token can read it. Otherwise list
-  those beads with `bd list --all --external-contains <owner>/<repo>/issues/`
-  and relink them with `bd update <id> --external-ref <url>`, or clear the
-  link with `--external-ref ""`.
+  `push` and `pull`, `--dry-run` included, now stop before syncing, leaving
+  `github.last_sync` and the beads as they were, when the lookup of the
+  configured repository, or of any other repository on the same host that a
+  bead's issue URL names (closed beads included), fails with anything but a
+  404: a 5xx after retries, a dropped connection, a rate limit or a refused
+  token. This replaces the best-effort lookup the [1.3.3-rc.1] notes
+  describe. After a temporary failure, run the command again. If GitHub
+  refuses the token for another repository the beads link to (a 403, for
+  example SAML SSO), every run stops until the token can read it; an IP allow
+  list refuses it from this machine whatever the token. If that repository is
+  a former name of the configured one, relinking its beads to their issues'
+  current URLs also ends the lookup: list them with
+  `bd list --all --external-contains /<owner>/<repo>/issues/` and run
+  `bd update <id> --external-ref <current-url>`. Do not point another
+  repository's beads at the configured repository, and do not clear their
+  links to get past the error: the next push or sync creates every unlinked
+  bead as a new issue in the configured repository.
 - **Server-mode pulls need different SQL privileges**
   ([#8438](https://github.com/gastownhall/beads/pull/8438), backport of
   [#8407](https://github.com/gastownhall/beads/pull/8407)). A pull now fetches
   and then merges the tracking ref, so a least-privilege server user needs
   EXECUTE on `dolt_fetch` and `dolt_merge` (plus `dolt_checkout` when the
-  store is off the default branch) instead of `dolt_pull`. On bd's own server
-  with a git remote, the merge now runs as bd's SQL user rather than Dolt's
-  local superuser, and its merge commit carries the SQL session's identity.
+  store is off the default branch) instead of `dolt_pull`. When bd runs the
+  transfer through the local `dolt` (git-protocol, credential and cloud-auth
+  remotes on bd's own server), the merge now runs as bd's SQL user rather
+  than Dolt's local superuser, and its merge commit carries the SQL session's
+  identity.
 - **`bd backup restore` refuses a Dolt server on another host**
   ([#8430](https://github.com/gastownhall/beads/pull/8430), backport of
   [#8413](https://github.com/gastownhall/beads/pull/8413)). In plain server
-  mode against a server at a non-loopback address, bd cannot check the
-  directory the server reads, so it refuses the restore, with or without
-  `--force`, shared mounts included. Run `bd backup restore` on the server's
-  machine, in a workspace that reaches the server at localhost.
+  mode against a server at any host other than `localhost`, `127.0.0.1`,
+  `0.0.0.0` or `::1` (a hostname, even this machine's own, and other `127.x`
+  addresses count as another host), bd cannot check the directory the server
+  reads, so it refuses the restore, with or without `--force`, shared mounts
+  included. Run `bd backup restore` on the server's machine, in a workspace
+  that reaches the server at `127.0.0.1` or `localhost` and names the same
+  `dolt_database` as this one: the restore, and a `--force` drop, target the
+  database that workspace names.
 - **Building from a checkout selects Go 1.27.4**
   ([#8441](https://github.com/gastownhall/beads/pull/8441), backport of
   [#8431](https://github.com/gastownhall/beads/pull/8431)). `go.mod` keeps
@@ -59,14 +73,15 @@ binaries are built with Go 1.27.4. The changes below also correct rc.1's
 - **Server-mode pulls no longer write the remote URL into merge commits**
   ([#8438](https://github.com/gastownhall/beads/pull/8438), backport of
   [#8407](https://github.com/gastownhall/beads/pull/8407)). A merging
-  `bd dolt pull` (and federation sync) in server mode ran `DOLT_PULL`, whose
-  merge message `Merge branch '<branch>' of <url> into <branch>` carried a
-  token stored in the remote URL, and the next `bd dolt push` published it.
-  Every server-mode pull route (default remote, Hosted Dolt `--user`,
-  git-protocol and credential CLI routes, federation peers) now fetches and
-  merges the tracking ref itself, as embedded mode always has, so the message
-  reads `Merge branch 'origin/main' into main`. Merge commits made by older
-  versions stay in history that is already pushed: find them with
+  `bd dolt pull` or `bd sync` in server mode ran `DOLT_PULL`, whose merge
+  message `Merge branch '<branch>' of <url> into <branch>` carried a token
+  stored in the remote URL, and the next `bd dolt push` published it. Every
+  server-mode pull route (default remote, Hosted Dolt `--user`, the
+  git-protocol, credential and cloud-auth CLI routes, and the Go API's
+  `PullFrom` for federation peers) now fetches and merges the tracking ref
+  itself, as embedded mode and `bd federation sync` always have, so the
+  message reads `Merge branch 'origin/main' into main`. Merge commits made by
+  older versions stay in history that is already pushed: find them with
   `bd sql "SELECT commit_hash, message FROM dolt_log WHERE message LIKE '%@%'"`
   and rotate any token that was in a remote URL. See
   [Sync failures](docs/recovery/sync-failures.md#credentials-in-a-remote-url-and-merge-commits).
@@ -128,9 +143,14 @@ The [1.4.0-rc.1] **Known issues** still apply, with these changes:
   pulls are fixed (see **Security**), but `bd create --repo <remote-url>`
   still refreshes its cached clone with Dolt's own `dolt pull`, whose merge
   commit names the URL, and publishes it on its next push
-  ([#8434](https://github.com/gastownhall/beads/issues/8434)). The other
-  leftovers of [#8089](https://github.com/gastownhall/beads/pull/8089) listed
-  in rc.1 are unchanged. Workaround: keep credentials out of remote URLs.
+  ([#8434](https://github.com/gastownhall/beads/issues/8434)). Pulls that
+  other tools make on a bd database still use Dolt's own pull (Gas City's
+  `gc dolt pull`, per #8434), and the next `bd dolt push` publishes their
+  merge commits too. The `--repo` cache, which `bd repo sync` also refreshes
+  for a remote `repos.additional` entry, leaks into the target repository's
+  history: run the `dolt_log` check there. The redaction gaps of
+  [#8089](https://github.com/gastownhall/beads/pull/8089) listed in rc.1 are
+  unchanged. Workaround: keep credentials out of remote URLs.
 - **`bd backup restore --force` against a server in a container** reached at
   localhost still checks bd's own filesystem, so the rc.1 workaround stands
   for it: mount the backup at the same path in the container and on the host.
@@ -138,8 +158,10 @@ The [1.4.0-rc.1] **Known issues** still apply, with these changes:
   Since rc.1 the proxy's data port accepts only bd (the BDPROXY1 handshake),
   no dialer is exported yet
   ([#8412](https://github.com/gastownhall/beads/pull/8412)), and
-  `OpenBestAvailable` on such a workspace opens an empty embedded store
-  instead ([#8323](https://github.com/gastownhall/beads/issues/8323)).
+  `OpenBestAvailable` on such a workspace returns no error and opens a new,
+  empty embedded store in `.beads/embeddeddolt/` instead, so reads see no
+  issues and writes land where bd never reads them
+  ([#8323](https://github.com/gastownhall/beads/issues/8323)).
   `engdocs/EMBEDDING_OVER_PROXIED_SERVER.md` still describes the old
   plain-MySQL connection. Workaround: use the bd CLI, or the EXPERIMENTAL
   `bd serve` with `bd connect` or `backend/http`. Server mode is unaffected.
