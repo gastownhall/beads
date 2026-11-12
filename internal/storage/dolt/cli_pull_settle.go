@@ -29,6 +29,13 @@ import (
 // captured first and returned as a MergeConflictsError. Only an abort is ever
 // issued: never DOLT_RESET('--hard'), since nothing sampled before a subprocess
 // on a shared server can prove a reset would destroy nothing but the merge.
+//
+// The server is shared, so settlement acts only on a merge it can attribute to
+// the pull it just ran: none open before the transport, and the open one
+// merging the fetched refs/remotes/<remote>/<branch> into the store's branch.
+// A merge it cannot attribute, a state it cannot read, and an abort it cannot
+// confirm by re-reading are all left as they are and reported as a
+// *pullMergeStateError, which never claims a restoration.
 
 // cliMergeState is the merge state of the store's branch as one session reads
 // it: dolt_merge_status plus the row conflicts and the non-row blockers
@@ -107,30 +114,97 @@ func (s *DoltStore) readStoreMergeState(ctx context.Context) (cliMergeState, err
 	return readCLIMergeState(ctx, conn)
 }
 
-// pullMergeStateError reports merge state a pull will not settle on its own.
-// It never claims the working set was restored.
+// pullMergeStateKind says why settlement left a pull's merge state alone.
+type pullMergeStateKind int
+
+const (
+	// mergeAlreadyOpen: a merge was open before the pull started.
+	mergeAlreadyOpen pullMergeStateKind = iota
+	// mergeUnattributed: the open merge cannot be proven to be the one this
+	// pull started (another source or target, or an unreadable pre-pull state).
+	mergeUnattributed
+	// mergeStateUnknown: the branch's merge state could not be read.
+	mergeStateUnknown
+	// mergeUnrestored: the abort failed or could not be confirmed.
+	mergeUnrestored
+	// mergeBlockersWithoutMerge: conflicts or violations with no merge open.
+	mergeBlockersWithoutMerge
+)
+
+// pullMergeStateRemedy is the operator's way out of every kind.
+const pullMergeStateRemedy = "Inspect it with 'bd conflicts list', then resolve and commit it, " +
+	`or abandon an open merge with: bd sql "CALL DOLT_MERGE('--abort')"`
+
+// pullMergeStateError reports merge state a pull would not, or could not,
+// settle on its own (GH#7839). It never claims the working set was restored,
+// and it wraps both the transport's error and the settlement step that failed.
 type pullMergeStateError struct {
-	remote string // empty when the refusal came before a remote was chosen
-	state  cliMergeState
+	kind       pullMergeStateKind
+	remote     string // empty when the refusal came before a remote was chosen
+	state      cliMergeState
+	pullErr    error
+	cleanupErr error
 }
 
 func (e *pullMergeStateError) Error() string {
-	what := "a merge"
-	if e.state.source != "" {
-		what = "a merge of " + e.state.source
-	}
-	detail := ""
-	if tables := e.state.tables(); len(tables) > 0 {
-		detail = " with conflicts in " + strings.Join(tables, ", ")
-	}
 	from := ""
 	if e.remote != "" {
 		from = " from " + e.remote
 	}
-	return fmt.Sprintf("cannot pull%s: %s is already open on this database%s; "+
-		"bd will not pull over it or abort a merge it did not start. "+
-		"Inspect it with 'bd conflicts list', then resolve and commit it, "+
-		`or abandon it with: bd sql "CALL DOLT_MERGE('--abort')"`, from, what, detail)
+	merge := "a merge"
+	if e.state.source != "" {
+		merge = "a merge of " + e.state.source
+		if e.state.target != "" {
+			merge += " into " + e.state.target
+		}
+	}
+	tables := ""
+	if t := e.state.tables(); len(t) > 0 {
+		tables = " with conflicts in " + strings.Join(t, ", ")
+	}
+	var msg string
+	switch e.kind {
+	case mergeAlreadyOpen:
+		msg = fmt.Sprintf("cannot pull%s: %s is already open on this database%s; "+
+			"bd will not pull over it or abort a merge it did not start", from, merge, tables)
+	case mergeUnattributed:
+		msg = fmt.Sprintf("pull%s left %s open%s that bd cannot attribute to this pull, "+
+			"so it neither resolved nor aborted it", from, merge, tables)
+	case mergeStateUnknown:
+		msg = fmt.Sprintf("pull%s: bd could not read the database's merge state afterwards (%v), "+
+			"so it neither resolved nor aborted anything; a conflicted merge may be open", from, e.cleanupErr)
+	case mergeUnrestored:
+		msg = fmt.Sprintf("pull%s left %s open%s and bd could not confirm aborting it (%v); "+
+			"the database may still be conflicted", from, merge, tables, e.cleanupErr)
+	case mergeBlockersWithoutMerge:
+		msg = fmt.Sprintf("pull%s left %s with no merge in progress; bd did not resolve them",
+			from, strings.TrimPrefix(tables, " with "))
+	}
+	msg += ". " + pullMergeStateRemedy
+	if e.pullErr != nil {
+		msg += fmt.Sprintf(" (pull error: %v)", e.pullErr)
+	}
+	return msg
+}
+
+func (e *pullMergeStateError) Unwrap() []error {
+	var errs []error
+	for _, err := range []error{e.pullErr, e.cleanupErr} {
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errs
+}
+
+// ownsCLIPullMerge reports whether st is the merge `dolt pull <remote>
+// <branch>` starts: the fetched refs/remotes/<remote>/<branch> merged into
+// refs/heads/<branch>. Dolt names both refs in full; the short forms are
+// accepted so a renderer change cannot turn the pull's own merge foreign.
+func (s *DoltStore) ownsCLIPullMerge(remote string, st cliMergeState) bool {
+	source := strings.TrimPrefix(strings.TrimPrefix(st.source, "refs/"), "remotes/")
+	target := strings.TrimPrefix(st.target, "refs/heads/")
+	return st.merging && source == remote+"/"+s.branch && target == s.branch
 }
 
 // refuseOpenConflictedMerge stops a pull before it stages anything when the
@@ -146,7 +220,7 @@ func (s *DoltStore) refuseOpenConflictedMerge(ctx context.Context) error {
 		return nil //nolint:nilerr // diagnosis only; never a gate
 	}
 	if len(st.conflicts) > 0 || st.blockers.Blocked() {
-		return &pullMergeStateError{state: st}
+		return &pullMergeStateError{kind: mergeAlreadyOpen, state: st}
 	}
 	return nil
 }
@@ -161,20 +235,34 @@ func (s *DoltStore) runCLIPull(ctx context.Context, remote string, pull func() e
 	if s.readOnly {
 		return pull()
 	}
-	if pre, err := s.readStoreMergeState(ctx); err == nil && pre.merging {
-		return &pullMergeStateError{remote: remote, state: pre}
+	pre, preErr := s.readStoreMergeState(ctx)
+	if preErr == nil && pre.merging {
+		return &pullMergeStateError{kind: mergeAlreadyOpen, remote: remote, state: pre}
 	}
-	return s.settleCLIPull(ctx, remote, pull())
+	return s.settleCLIPull(ctx, remote, preErr == nil, pull())
 }
 
 // settleCLIPull settles a CLI pull whose transport returned pullErr. A pull
 // that fails because of conflicts is recoverable once they resolve, so the
-// branch's state is inspected whatever pullErr is.
-func (s *DoltStore) settleCLIPull(ctx context.Context, remote string, pullErr error) error {
+// branch's state is inspected whatever pullErr is. preClean is true when the
+// branch was read before the transport and no merge was open, which with an
+// owned source and target is what attributes an open merge to this pull.
+// Anything settlement cannot attribute, read or confirm is reported as a
+// *pullMergeStateError and left exactly as it is.
+func (s *DoltStore) settleCLIPull(ctx context.Context, remote string, preClean bool, pullErr error) error {
 	post, err := s.readStoreMergeState(ctx)
-	if err == nil && !post.unsettled() {
+	if err != nil {
+		return &pullMergeStateError{kind: mergeStateUnknown, remote: remote, pullErr: pullErr, cleanupErr: err}
+	}
+	if !post.unsettled() {
 		// Nothing open: the transport's own result stands.
 		return pullErr
+	}
+	if !post.merging {
+		return &pullMergeStateError{kind: mergeBlockersWithoutMerge, remote: remote, state: post, pullErr: pullErr}
+	}
+	if !preClean || !s.ownsCLIPullMerge(remote, post) {
+		return &pullMergeStateError{kind: mergeUnattributed, remote: remote, state: post, pullErr: pullErr}
 	}
 
 	resolved, resolveErr := s.autoResolveConflictsAfterCLIPull(ctx)
@@ -191,7 +279,10 @@ func (s *DoltStore) settleCLIPull(ctx context.Context, remote string, pullErr er
 	// path can report true over row conflicts it never resolved, so the
 	// branch is re-read before anything is called settled.
 	remaining, remErr := s.readStoreMergeState(ctx)
-	if remErr == nil && !remaining.unsettled() {
+	if remErr != nil {
+		return &pullMergeStateError{kind: mergeStateUnknown, remote: remote, pullErr: pullErr, cleanupErr: remErr}
+	}
+	if !remaining.unsettled() {
 		if resolveErr != nil {
 			if pullErr != nil {
 				return pullErr
@@ -204,26 +295,47 @@ func (s *DoltStore) settleCLIPull(ctx context.Context, remote string, pullErr er
 		// A successful resolution suppresses the transport's conflict exit.
 		return nil
 	}
-	return s.abortCLIPullMerge(ctx, remote, pullErr, resolveErr)
-}
-
-// abortCLIPullMerge captures the conflicts of the merge a CLI pull left open,
-// aborts it, and verifies the abort, all on one pinned session.
-func (s *DoltStore) abortCLIPullMerge(ctx context.Context, remote string, pullErr, resolveErr error) error {
 	mergeErr := pullErr
 	if mergeErr == nil {
 		mergeErr = resolveErr
 	}
+	return s.abortCLIPullMerge(ctx, remote, mergeErr)
+}
+
+// abortCLIPullMerge captures the conflicts of the merge a CLI pull left open,
+// aborts it, and verifies the abort, all on one pinned session. Only a merge
+// re-read as the pull's own is aborted, and only an abort re-read as gone is
+// reported as a restoration.
+func (s *DoltStore) abortCLIPullMerge(ctx context.Context, remote string, mergeErr error) error {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return fmt.Errorf("pull from %s left a conflicted merge open and bd could not abort it: acquire connection: %w (pull error: %v)", remote, err, mergeErr)
+		return &pullMergeStateError{kind: mergeUnrestored, remote: remote, pullErr: mergeErr,
+			cleanupErr: fmt.Errorf("acquire connection: %w", err)}
 	}
 	defer conn.Close()
 
-	captured, _ := readCLIMergeState(ctx, conn)
-	abortErr := schema.DrainCall(ctx, conn, "CALL DOLT_MERGE('--abort')")
-	if abortErr != nil {
-		return fmt.Errorf("pull from %s left a conflicted merge open and bd could not abort it: %w (pull error: %v)", remote, abortErr, mergeErr)
+	captured, err := readCLIMergeState(ctx, conn)
+	if err != nil {
+		return &pullMergeStateError{kind: mergeStateUnknown, remote: remote, pullErr: mergeErr, cleanupErr: err}
+	}
+	if !captured.merging {
+		return &pullMergeStateError{kind: mergeBlockersWithoutMerge, remote: remote, state: captured, pullErr: mergeErr}
+	}
+	if !s.ownsCLIPullMerge(remote, captured) {
+		return &pullMergeStateError{kind: mergeUnattributed, remote: remote, state: captured, pullErr: mergeErr}
+	}
+	if err := schema.DrainCall(ctx, conn, "CALL DOLT_MERGE('--abort')"); err != nil {
+		return &pullMergeStateError{kind: mergeUnrestored, remote: remote, state: captured, pullErr: mergeErr,
+			cleanupErr: fmt.Errorf("DOLT_MERGE('--abort'): %w", err)}
+	}
+	after, err := readCLIMergeState(ctx, conn)
+	if err != nil {
+		return &pullMergeStateError{kind: mergeUnrestored, remote: remote, state: captured, pullErr: mergeErr,
+			cleanupErr: fmt.Errorf("verify the abort: %w", err)}
+	}
+	if after.unsettled() {
+		return &pullMergeStateError{kind: mergeUnrestored, remote: remote, state: after, pullErr: mergeErr,
+			cleanupErr: errors.New("the merge was still open after DOLT_MERGE('--abort')")}
 	}
 	if len(captured.conflicts) > 0 {
 		return &versioncontrolops.MergeConflictsError{Conflicts: captured.conflicts, MergeErr: mergeErr}
