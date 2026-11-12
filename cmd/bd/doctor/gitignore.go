@@ -88,12 +88,15 @@ dolt-pprof/
 # Backup data (auto-exported JSONL, local-only)
 backup/
 
-# Backup state and auto-import logs (per-machine state, GH#8318)
-# dolt-backup.json carries the absolute backup destination path, and
-# dolt-config.log records absolute paths in its audit entries.
+# bd backup destination and last-sync state (per-machine: the destination
+# is stored as an absolute file:// URL, GH#8318)
 dolt-backup.json
 dolt-backup-state.json
+
+# bd dolt set audit log (per-machine: entries record the absolute .beads path)
 dolt-config.log
+
+# JSONL auto-import stamp (size/mtime of this clone's issues.jsonl)
 .auto-import-issues.jsonl
 
 # Per-project environment file (Dolt connection config, GH#2520)

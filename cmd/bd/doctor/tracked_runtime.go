@@ -33,6 +33,12 @@ var trackedRuntimePatterns = []string{
 	"dolt-server.activity",    // GH#6191: gitignored, but gitignore cannot untrack already-committed copies
 	"dolt-server-config.yaml", // GH#6191: absolute cfg_dir + per-machine port; a committed copy breaks other clones
 
+	// Per-machine backup / audit / import state
+	"dolt-backup.json",          // GH#8318: absolute backup destination path; gitignore cannot untrack committed copies
+	"dolt-backup-state.json",    // GH#8318: per-machine last backup sync state
+	"dolt-config.log",           // GH#8318: bd dolt set audit log records the absolute .beads path
+	".auto-import-issues.jsonl", // GH#8318: size/mtime stamp of this clone's issues.jsonl
+
 	// Socket files
 	"bd.sock",
 	"bd.sock.startlock",
@@ -42,10 +48,6 @@ var trackedRuntimePatterns = []string{
 	"push-state.json",
 	"export-state.json",
 	"sync-state.json",
-	"dolt-backup.json",          // GH#8318: absolute backup destination path
-	"dolt-backup-state.json",    // GH#8318: per-machine backup progress
-	"dolt-config.log",           // GH#8318: audit entries carry absolute local paths
-	".auto-import-issues.jsonl", // GH#8318: per-machine auto-import state
 	"last-touched",
 	"last_pull", // bd-578h9.6: gitignored since 7ebf4df6a, but gitignore cannot untrack already-committed copies
 	".local_version",
