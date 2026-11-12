@@ -295,6 +295,26 @@ func TestWispsLateColumns0053(t *testing.T) {
 			ctx, cancel := testContext(t)
 			defer cancel()
 
+			// The freshly migrated shape is the reference the repaired
+			// columns must match, so definition drift fails here without
+			// duplicating the DDL in the test.
+			columnShape := func(col string) string {
+				t.Helper()
+				var colType, nullable, def string
+				if err := store.db.QueryRowContext(ctx, `
+					SELECT COLUMN_TYPE, IS_NULLABLE, COALESCE(COLUMN_DEFAULT, '<NULL>')
+					FROM INFORMATION_SCHEMA.COLUMNS
+					WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisps' AND COLUMN_NAME = ?
+				`, col).Scan(&colType, &nullable, &def); err != nil {
+					t.Fatalf("read wisps.%s shape: %v", col, err)
+				}
+				return fmt.Sprintf("type=%s nullable=%s default=%s", colType, nullable, def)
+			}
+			freshShape := map[string]string{}
+			for _, col := range tc.dropped {
+				freshShape[col] = columnShape(col)
+			}
+
 			for _, col := range tc.dropped {
 				if _, err := store.db.ExecContext(ctx, "ALTER TABLE wisps DROP COLUMN "+col); err != nil {
 					t.Fatalf("drop wisps.%s: %v", col, err)
@@ -360,6 +380,11 @@ func TestWispsLateColumns0053(t *testing.T) {
 				}
 				if present != 1 {
 					t.Fatalf("wisps.%s present = %d after MigrateUp, want 1", col, present)
+				}
+			}
+			for _, col := range tc.dropped {
+				if got, want := columnShape(col), freshShape[col]; got != want {
+					t.Errorf("repaired wisps.%s shape = %q, want fresh-store %q", col, got, want)
 				}
 			}
 		})
