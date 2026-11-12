@@ -488,7 +488,9 @@ func (p *doltSQLProvider) initSchemaAttempt(ctx context.Context, database string
 	// that schema is the caller's question, and every other open path asks it
 	// with schema.CheckForwardDrift. Ask it on the session MigrateUpWithLock
 	// left on the database, so an older bd refuses a newer schema rather than
-	// reading and writing it unawares. This path wrote nothing to get here.
+	// reading and writing it unawares. The converged fast path wrote nothing
+	// to get here; a fresh bootstrap has just migrated its own new database to
+	// latest, so the check passes there.
 	return checkProxiedForwardDrift(ctx, conn)
 }
 
