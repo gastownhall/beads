@@ -1236,6 +1236,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd doctor` no longer flags cross-repository dependencies as orphans,
+  and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
+  a bare target under another repository's prefix (`bd dep add bd-abc
+  gt-123`) without verifying it, but the Orphaned Dependencies check, its
+  `--fix` repair and the `--deep` Dependency Integrity and Parent Consistency
+  checks exempted only `external:` refs. They now also leave such a target
+  alone when its prefix differs from its source's and is neither this
+  database's `issue_prefix` nor in `allowed_prefixes`; the check counts these
+  edges as "not verifiable here". A missing target under a held prefix is
+  still an orphan, and under `--deep` an edge whose source is missing is
+  still broken.
 - `npm install @beads/bd` no longer intermittently fails with
   `tar: ... No such file or directory` after a successful download. Following
   the GitHub release redirect, the postinstall script scheduled a delete of
