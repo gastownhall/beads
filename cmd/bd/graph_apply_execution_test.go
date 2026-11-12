@@ -497,7 +497,9 @@ func TestExecuteGraphApplyFinalGateCatchesCycleHiddenFromPerEdgeChecks(t *testin
 			if err != nil {
 				t.Fatalf("buildGraphApplyBatchRequest: %v", err)
 			}
-			req.SkipPerEdgeCycleCheck = true
+			if !req.SkipPerEdgeCycleCheck {
+				t.Fatal("buildGraphApplyBatchRequest left SkipPerEdgeCycleCheck false; the per-edge probe would shadow the end gate this test exercises")
+			}
 			applier, err := store.BatchApplier()
 			if err != nil {
 				t.Fatalf("BatchApplier: %v", err)
@@ -853,5 +855,60 @@ func TestExecuteGraphApplyRejectsBlockingThroughPlannedHierarchyRegardlessOfOrde
 				t.Fatalf("issue rows after rejected plan = %d, want 0", count)
 			}
 		})
+	}
+}
+
+// TestExecuteGraphApplyEndGateRefusesCycleThroughStoredEdgeViaNewNode pins
+// bd-esm0t5 (GH#3879) AC-2: with the per-edge SQL probe skipped, a plan that
+// routes a cycle through a stored edge and a brand-new node — invisible to the
+// plan-local preflight, whose edges all carry an existing ID — is still
+// refused by the role's end gate, and its transaction leaves no row for the
+// new node. Before the SkipPerEdgeCycleCheck flip this shape was refused by
+// the per-edge probe with a different message.
+func TestExecuteGraphApplyEndGateRefusesCycleThroughStoredEdgeViaNewNode(t *testing.T) {
+	ctx, db := withGraphApplyTestStore(t)
+
+	// Stored issues X and Y with a stored blocks edge Y→X (Y depends on X).
+	for _, id := range []string{"ga-cycle-x", "ga-cycle-y"} {
+		if err := store.CreateIssue(ctx, &types.Issue{
+			ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+		}, actor); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", id, err)
+		}
+	}
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID:     "ga-cycle-y",
+		DependsOnID: "ga-cycle-x",
+		Type:        types.DepBlocks,
+	}, actor); err != nil {
+		t.Fatalf("AddDependency(y -> x): %v", err)
+	}
+
+	// n would close X → n → Y → X: X depends on the new node n, n depends on
+	// stored Y, and stored Y already depends on X.
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{{Key: "n", Title: "Cycle closer", Type: "task"}},
+		Edges: []GraphApplyEdge{
+			{FromID: "ga-cycle-x", ToKey: "n"},
+			{FromKey: "n", ToID: "ga-cycle-y"},
+		},
+	}
+
+	_, err := executeGraphApply(ctx, plan, GraphApplyOptions{})
+	if err == nil {
+		t.Fatal("expected cycle through a stored edge and a new node to be rejected")
+	}
+	// The end gate's own wording; the per-edge probe (now skipped) would have
+	// answered "adding dependency would create a cycle" against one edge.
+	if got, want := err.Error(), "dependency cycle would be created"; !strings.Contains(got, want) {
+		t.Fatalf("error = %q, want the end gate's %q rejection", got, want)
+	}
+
+	var count int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues WHERE title = 'Cycle closer'").Scan(&count); err != nil {
+		t.Fatalf("query plan issue rows: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("plan issue rows after rejected cycle = %d, want 0 (the whole batch rolled back)", count)
 	}
 }
