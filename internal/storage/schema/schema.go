@@ -1124,10 +1124,10 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	// cursor-heal preparations above may already have run) and can be the
 	// same *DirtyTablesError the working-set-reconcile opens tolerate
 	// (gastownhall/beads#5816). The ignored cursor is read before the main
-	// series runs; no main migration advances it or leaves an ignored
-	// sentinel newly missing, so this early read is conservative: it may
-	// count more pending ignored migrations than a post-main read would,
-	// not fewer. It reads the same committable set: rows in
+	// series runs; no main migration advances it, but a sentinel table that
+	// goes missing mid-pass can leave more ignored migrations pending, so a
+	// plain-error backstop re-checks just before ignoredSource.migrate
+	// (gastownhall/beads#5168). It reads the same committable set: rows in
 	// dolt-ignored tables (wisps, wisp_comments, ...) are clone-local
 	// working-set data that stageSchemaTables never stages and
 	// unstageIgnoredTables keeps out of the migration commit, so the
@@ -1209,6 +1209,24 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 		return applied, fmt.Errorf("rekey aux row ids: %w", err)
 	}
 	backfilled = backfilled || auxRekeyed
+
+	// Backstop for the ignored-series check before the migrations: that read
+	// came before the main series ran, and the ignored cursor is clamped by
+	// sentinel tables, so anything that removes one mid-pass (a main step, a
+	// rekey, a concurrent writer) can leave ignored migrations newly pending
+	// that touch a dirty committable table. Refuse before they apply. This is
+	// deliberately a plain error, not *DirtyTablesError: main steps have
+	// already committed, and the working-set-reconcile opens that tolerate
+	// that type must not let a commit checkpoint a half-applied pass. The
+	// next open re-reads the ignored cursor before migrating and so returns
+	// the typed, recoverable refusal (gastownhall/beads#5168).
+	lateIgnoredDirtyTables, err := ignoredSource.pendingMigrationDirtyTables(ctx, db, dirtyBefore)
+	if err != nil {
+		return applied, fmt.Errorf("checking dirty tables against pending ignored migrations: %w", err)
+	}
+	if len(lateIgnoredDirtyTables) > 0 {
+		return applied, fmt.Errorf("ignored schema migrations that became pending during the migration pass alter pre-existing dirty tables: %s; re-run to retry", strings.Join(lateIgnoredDirtyTables, ", "))
+	}
 
 	appliedIgnored, ignoredColumnAdded, err := ignoredSource.migrate(ctx, db, 0)
 	if err != nil {
