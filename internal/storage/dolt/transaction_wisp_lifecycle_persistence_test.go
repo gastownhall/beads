@@ -62,6 +62,184 @@ func TestRunInTransactionWispLifecyclePersistsDurableDependent(t *testing.T) {
 	})
 }
 
+// TestRunInTransactionWispLifecycleOnIgnoredSessionPersistsDurableDependent
+// is the split-session form of the test above. With the events journal off,
+// RunInTransaction writes a wisp on its dolt-ignored session, which commits
+// after the transaction's Dolt commit, so the durable dependent the wisp's
+// close (or a status update into closed) recomputes must still reach HEAD
+// rather than land in the working set after the commit was cut (GH#6647).
+func TestRunInTransactionWispLifecycleOnIgnoredSessionPersistsDurableDependent(t *testing.T) {
+	ctx, store := newTransactionWispLifecycleStore(t)
+
+	for _, test := range []struct {
+		name string
+		run  func(tx storage.Transaction, wispID string) error
+	}{
+		{
+			name: "close",
+			run: func(tx storage.Transaction, wispID string) error {
+				return tx.CloseIssue(ctx, wispID, "done", "tester", "session")
+			},
+		},
+		{
+			name: "update_close",
+			run: func(tx storage.Transaction, wispID string) error {
+				return tx.UpdateIssue(ctx, wispID, map[string]interface{}{"status": types.StatusClosed}, "tester")
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dependerID := "tx-split-" + test.name + "-depender"
+			wispID := "tx-split-" + test.name + "-blocker"
+			seedTransactionWispBlocker(t, ctx, store, dependerID, wispID)
+			before := transactionWispLifecycleHead(t, ctx, store)
+
+			if err := store.RunInTransaction(ctx, "test: "+test.name+" wisp blocker", func(tx storage.Transaction) error {
+				return test.run(tx, wispID)
+			}); err != nil {
+				t.Fatalf("RunInTransaction: %v", err)
+			}
+
+			assertTransactionWispLifecyclePostState(t, ctx, store, dependerID, before, false)
+			requireCleanTables(ctx, t, store, "issues")
+		})
+	}
+}
+
+// TestWispStoreLifecyclePersistsDurableDependent is GH#6647 on the store's own
+// wisp writers. They commit the dolt-ignored wisp tables with the SQL
+// transaction and need no Dolt commit for them, but closing a wisp, or moving
+// it into or out of a closed status through an update, recomputes the durable
+// issues that depend on it, and that issues row must reach HEAD rather than
+// sit in the working set.
+func TestWispStoreLifecyclePersistsDurableDependent(t *testing.T) {
+	ctx, store := newTransactionWispLifecycleStore(t)
+
+	for _, test := range []struct {
+		name        string
+		closedSeed  bool
+		wantBlocked bool
+		run         func(wispID string) error
+	}{
+		{
+			name: "close",
+			run: func(wispID string) error {
+				return store.CloseIssue(ctx, wispID, "done", "tester", "session")
+			},
+		},
+		{
+			name: "close_checked",
+			run: func(wispID string) error {
+				_, err := store.CloseIssueChecked(ctx, wispID, "tester", storage.CloseIssueOptions{Reason: "done", Session: "session"})
+				return err
+			},
+		},
+		{
+			name: "update_close",
+			run: func(wispID string) error {
+				return store.UpdateIssue(ctx, wispID, map[string]interface{}{"status": types.StatusClosed}, "tester")
+			},
+		},
+		{
+			name:        "update_checked_reopen",
+			closedSeed:  true,
+			wantBlocked: true,
+			run: func(wispID string) error {
+				return store.UpdateIssueChecked(ctx, wispID, map[string]interface{}{"status": types.StatusOpen}, "tester", storage.UpdateIssueOptions{})
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dependerID := "store-wisp-" + test.name + "-depender"
+			wispID := "store-wisp-" + test.name + "-blocker"
+			seedTransactionWispBlocker(t, ctx, store, dependerID, wispID)
+			if test.closedSeed {
+				if err := store.CloseIssue(ctx, wispID, "done", "tester", "session"); err != nil {
+					t.Fatalf("seed CloseIssue: %v", err)
+				}
+				if err := store.Commit(ctx, "test: seed closed wisp blocker"); err != nil {
+					t.Fatalf("Commit closed seed: %v", err)
+				}
+			}
+			before := transactionWispLifecycleHead(t, ctx, store)
+
+			if err := test.run(wispID); err != nil {
+				t.Fatalf("%s: %v", test.name, err)
+			}
+
+			assertTransactionWispLifecyclePostState(t, ctx, store, dependerID, before, test.wantBlocked)
+			requireCleanTables(ctx, t, store, "issues")
+		})
+	}
+}
+
+// TestWispDeletePersistsDurableDependent is GH#6647 on deleting a wisp that a
+// durable issue depends on. The wisp tables need no Dolt commit, but the
+// delete also removes the durable edge that pointed at the wisp and unblocks
+// the durable dependent, and both must reach HEAD rather than sit in the
+// working set: on the store's single and batch delete arms, on a journal-off
+// transaction, which deletes on its dolt-ignored session after the
+// transaction's Dolt commit, and on a journal-on one.
+func TestWispDeletePersistsDurableDependent(t *testing.T) {
+	ctx, store := newTransactionWispLifecycleStore(t)
+
+	txDelete := func(wispID string) error {
+		return store.RunInTransaction(ctx, "test: delete wisp blocker", func(tx storage.Transaction) error {
+			return tx.DeleteIssue(ctx, wispID)
+		})
+	}
+	for _, test := range []struct {
+		name string
+		run  func(wispID string) error
+	}{
+		{
+			name: "store",
+			run: func(wispID string) error {
+				return store.DeleteIssue(ctx, wispID)
+			},
+		},
+		{
+			name: "store_batch",
+			run: func(wispID string) error {
+				_, err := store.DeleteIssues(ctx, []string{wispID}, false, true, false)
+				return err
+			},
+		},
+		{
+			name: "tx_ignored_session",
+			run:  txDelete,
+		},
+		{
+			name: "tx_journal",
+			run: func(wispID string) error {
+				return withEventsJournal(store, func() error { return txDelete(wispID) })
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dependerID := "wisp-delete-" + test.name + "-depender"
+			wispID := "wisp-delete-" + test.name + "-blocker"
+			seedTransactionWispBlocker(t, ctx, store, dependerID, wispID)
+			before := transactionWispLifecycleHead(t, ctx, store)
+
+			if err := test.run(wispID); err != nil {
+				t.Fatalf("%s: %v", test.name, err)
+			}
+
+			assertTransactionWispLifecyclePostState(t, ctx, store, dependerID, before, false)
+			requireCleanTables(ctx, t, store, "issues", "dependencies")
+			var headEdges int
+			if err := store.db.QueryRowContext(ctx,
+				"SELECT COUNT(*) FROM dependencies AS OF 'HEAD' WHERE issue_id = ?", dependerID).Scan(&headEdges); err != nil {
+				t.Fatalf("read durable depender's edges AS OF HEAD: %v", err)
+			}
+			if headEdges != 0 {
+				t.Errorf("HEAD still has %d edge(s) from %s to the deleted wisp", headEdges, dependerID)
+			}
+		})
+	}
+}
+
 // TestRunInIssueLifecycleTransactionStandaloneWispPersistsWithoutDoltCommit
 // verifies that ignored-only lifecycle work commits its SQL transaction without
 // attempting a version-control commit.

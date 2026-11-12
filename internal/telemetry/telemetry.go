@@ -132,9 +132,18 @@ func translateLegacyEnv() []string {
 
 // buildResource assembles the OTel Resource describing this bd process.
 //
-// Defaults are merged with the host/process detectors and finally with the
-// FromEnv detector, so OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES can
+// Defaults are merged with the host and process detectors and finally with
+// the FromEnv detector, so OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES can
 // override anything set by the caller.
+//
+// The process detectors are listed one by one instead of resource.WithProcess:
+// the resource rides on every exported metric and span, and WithProcess would
+// add process.command_args (the raw os.Args, bypassing the scrubbed bd.args
+// span attribute, so a --password=... or a search string would reach the
+// receiver), process.executable.path (often under the user's home directory)
+// and process.owner (the OS user name). Only the non-identifying process
+// attributes are kept: pid, executable name and Go runtime name/version/
+// description.
 func buildResource(ctx context.Context, serviceName, version string) (*resource.Resource, error) {
 	return resource.New(ctx,
 		resource.WithAttributes(
@@ -142,7 +151,11 @@ func buildResource(ctx context.Context, serviceName, version string) (*resource.
 			semconv.ServiceVersionKey.String(version),
 		),
 		resource.WithHost(),
-		resource.WithProcess(),
+		resource.WithProcessPID(),
+		resource.WithProcessExecutableName(),
+		resource.WithProcessRuntimeName(),
+		resource.WithProcessRuntimeVersion(),
+		resource.WithProcessRuntimeDescription(),
 		resource.WithFromEnv(),
 	)
 }
@@ -151,9 +164,11 @@ func buildResource(ctx context.Context, serviceName, version string) (*resource.
 // When no opt-in is in effect (BD_OTEL_ENABLED=true or any legacy BD_OTEL_*
 // selector), installs no-op providers and returns immediately (zero overhead).
 //
-// Traces are exported only when OTEL_TRACES_EXPORTER=console (stdout, for
+// Traces are exported only when OTEL_TRACES_EXPORTER=console (stderr, for
 // local debugging); there is no remote trace backend.
-// Metrics are exported to OTEL_EXPORTER_OTLP_METRICS_ENDPOINT and/or stdout.
+// Metrics are exported to OTEL_EXPORTER_OTLP_METRICS_ENDPOINT and/or stderr.
+// The console exporters write to stderr, never stdout, so their JSON does not
+// mix into a command's own output (bd ... --json).
 func Init(ctx context.Context, serviceName, version string) error {
 	if mappings := translateLegacyEnv(); len(mappings) > 0 {
 		fmt.Fprintf(os.Stderr,
@@ -194,7 +209,7 @@ func Init(ctx context.Context, serviceName, version string) error {
 }
 
 func buildTraceProvider(_ context.Context, res *resource.Resource) (*sdktrace.TracerProvider, error) {
-	exp, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
+	exp, err := stdouttrace.New(stdouttrace.WithWriter(os.Stderr), stdouttrace.WithPrettyPrint())
 	if err != nil {
 		return nil, err
 	}
@@ -211,7 +226,7 @@ func buildMetricProvider(ctx context.Context, res *resource.Resource) (*sdkmetri
 	console, otlp := selectedMetricExporters()
 
 	if console {
-		exp, err := stdoutmetric.New()
+		exp, err := stdoutmetric.New(stdoutmetric.WithWriter(os.Stderr))
 		if err != nil {
 			return nil, err
 		}
@@ -285,4 +300,11 @@ func Shutdown(ctx context.Context) {
 		_ = fn(ctx)
 	}
 	shutdownFns = nil
+}
+
+// Milliseconds returns d in fractional milliseconds, the unit of bd's
+// duration histograms and *_ms attributes. time.Duration.Milliseconds
+// truncates to a whole number, which records a sub-millisecond call as 0.
+func Milliseconds(d time.Duration) float64 {
+	return float64(d) / float64(time.Millisecond)
 }

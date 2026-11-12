@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/httpclient/wire"
 	storageops "github.com/steveyegge/beads/internal/storage/issueops"
@@ -222,7 +223,8 @@ func validateSettingKey(key string) error {
 }
 
 // validateSettingWrite is the role's own write rules, restated: the key rule
-// above, the two storage length bounds, the protected key, the one value whose
+// above, the two storage length bounds, the config.yaml-only keys (#7559), the
+// protected key, the one value whose
 // shape is checked because it is PROJECTED rather than merely stored, and the
 // one checked because it is a SAFETY rule every sweep reads (types.retained,
 // whose check is the shared syntax validator itself rather than a restatement
@@ -254,6 +256,17 @@ func validateSettingWrite(key, value string) error {
 	}
 	if err := types.CheckTextLen("config value", value); err != nil {
 		return fmt.Errorf("%w: %w", issueops.ErrValidation, err)
+	}
+	// A CONFIG.YAML-ONLY KEY NEVER BECOMES A ROW (#7559): this table is
+	// replicated by bd dolt push, and these keys include the tracker secrets.
+	// The role refuses them on every leg; this leg restates the refusal for a
+	// reason of its own as well — a server that predates the rule would store
+	// the secret and push it. Exactly the role's predicate, so the refused set
+	// is the same; mail.delegate (also a command setting) is refused here too,
+	// with the role naming the more precise rule. The value is never echoed.
+	if config.IsYamlOnlyKey(key) {
+		return invalid("%q is a config.yaml-only key and is never stored in the workspace settings table, "+
+			"whose rows bd dolt push replicates to every remote; set it with \"bd config set %s <value>\" in the workspace instead", key, key)
 	}
 	// The prefix is owned by `bd init --prefix`, `bd bootstrap` and
 	// `bd rename-prefix`, each of which does work this plane cannot: rewriting
@@ -305,9 +318,11 @@ const settingKeyIssuePrefixDashed = "issue-prefix"
 //
 // A REDACTED KEY IS THE ONE PLACE THE PROJECTION CANNOT ANSWER, and the fallback
 // is the request rather than a guess. The operation PERMITS writing a
-// credential-bearing key — refusing would leave a workspace's credentials
-// visible as present and permanently unconfigurable through this door — and then
-// withholds the value from its own answer, exactly as the read withholds it. So
+// credential-bearing key that is not config.yaml-only — refusing would leave a
+// workspace's credentials visible as present and permanently unconfigurable
+// through this door; the tracker secrets are config.yaml-only and are refused
+// before the dial (#7559) — and then withholds the value from its own answer,
+// exactly as the read withholds it. So
 // `value` is absent on a write that certainly stored something, and reporting ""
 // would tell a caller the plane holds nothing there: the write-side spelling of
 // the confusion RedactedSettingError exists to prevent on the read side (L9).

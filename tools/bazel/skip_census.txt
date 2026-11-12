@@ -1,0 +1,322 @@
+# Runtime skip census (tools/bazel/check_skip_census.py; C7(a) of the bringup
+# test plan): every Go test or subtest the Dolt-tier lanes skip.
+# One skip per line, sorted: <label> <test path> <class>.
+# Classes: KNOWN DIVERGENCE <row> | KNOWN BDP DIVERGENCE <row> |
+#   WAITING ON <ref> | nil-hook <Hook> | env-gate <VAR> (test path *) | other.
+# A new skip, or a line whose test runs again, fails the lane's
+# "Every target and shard ran tests" step (check_testcases.py --skip-census).
+# Lines naming a target a run did not test are not judged, so one file serves
+# every lane. '#' starts a comment only at the start of a line (WAITING ON
+# refs contain '#').
+# To park a case: copy the line the failing step prints under "add to", keep
+# the file sorted, and delete the line again when the case is unparked.
+# Regenerate: python3 tools/bazel/check_skip_census.py --write --testlogs-dir DIR
+#   (DIR: a lane's "Upload test logs" artifact from a run on rbe-west; the
+#   dolt-int job uploads nothing when only the census fails, so for it copy the
+#   printed "delete from"/"add to" lines). Modes cache and local only report.
+# A skip that depends on process-global state left by earlier tests is not
+# stable: rules_go shards tests round-robin by index, so any added or removed
+# test in the package changes what ran first. Fix such a test, do not list it.
+# Only these header comments survive --write.
+# Check:      python3 tools/bazel/check_skip_census.py --lint
+
+//backend/http/corpus:corpus_served_test TestServedCorpusPart1/gc-blocked-flags other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart1/gc-heartbeat-wisp other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart1/gc-list-on-boot-workflow other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart1/gc-polecat-title-contains-closed-after other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart1/gc-purge-dry-run other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart1/gc-reclaim other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart1/list-filter-exclude-type-no-parent other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart1/mc-gate-check-timer-resolves other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart2/gc-blocked-flags-raw other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart2/gc-heartbeat other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart2/gc-polecat-closed-after other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart2/list-filter-updated-after other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart2/mc-gate-add-waiter other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart2/mc-list-title other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart2/mc-promote other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart2/mc-search other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart3/gc-blocked-parent other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart3/gc-delete-cascade other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart3/gc-heartbeat-non-holder other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart3/mc-list-id other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart3/mc-mol-burn other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart3/mc-update-await-id other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart3/wf-session-cleanup other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart4/gc-blocked other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart4/gc-close-claim-next WAITING ON donnabox fixes-b B10
+//backend/http/corpus:corpus_served_test TestServedCorpusPart4/gc-heartbeat-closed other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart4/gc-list-on-boot other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart4/gc-polecat-title-contains other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart4/gc-update-claim-wisp other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart4/list-filter-priority-range other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart4/mc-gate-create-timer other
+//backend/http/corpus:corpus_served_test TestServedCorpusPart4/mc-update-meta-status-closed other
+//cmd/bd/doctor/fix:fix_dolt_test TestGitHooksWithExistingHooks_E2E other
+//cmd/bd/doctor/fix:fix_dolt_test TestGitHooks_E2E other
+//cmd/bd/doctor/fix:fix_dolt_test TestGitHooks_EdgeCases other
+//cmd/bd/doctor/fix:fix_dolt_test TestUntrackedJSONLWithUncommittedChanges_E2E other
+//cmd/bd/doctor/fix:fix_dolt_test TestUntrackedJSONL_E2E other
+//cmd/bd/doctor/fix:fix_dolt_test TestUntrackedJSONL_EdgeCases other
+//cmd/bd/doctor/fix:fix_dolt_test TestUntrackedJSONL_Validation other
+//cmd/bd:bd_dolt_server_test * env-gate BEADS_TEST_EMBEDDED_DOLT
+//cmd/bd:bd_dolt_server_test * env-gate BEADS_TEST_MIGRATION_FRONTDOOR
+//cmd/bd:bd_dolt_server_test * env-gate BEADS_TEST_PROXIED_LOCAL
+//cmd/bd:bd_dolt_server_test * env-gate BEADS_TEST_PROXIED_SERVER
+//cmd/bd:bd_dolt_server_test TestApplyNoCOW_Linux other
+//cmd/bd:bd_dolt_server_test TestApplyNoCOW_NonLinuxNoError other
+//cmd/bd:bd_dolt_server_test TestCheckIDFormat other
+//cmd/bd:bd_dolt_server_test TestDetectHashBasedIDs other
+//cmd/bd:bd_dolt_server_test TestDoctorFix_UpgradesLegacySchemaWithoutSpecID other
+//cmd/bd:bd_dolt_server_test TestDoctorRepair_CorruptDatabase_RebuildFromJSONL other
+//cmd/bd:bd_dolt_server_test TestDoltShowConfigDefaultMode/json_output other
+//cmd/bd:bd_dolt_server_test TestDoltShowConfigServerMode/json_output other
+//cmd/bd:bd_dolt_server_test TestEmbeddedRestoreConcurrent other
+//cmd/bd:bd_dolt_server_test TestEmbeddedVersionedHistorySwitchRefusesAnUnrecordableGateTimeout other
+//cmd/bd:bd_dolt_server_test TestGOMODCACHENotUnderTestHome other
+//cmd/bd:bd_dolt_server_test TestGeneratedHookTimeoutProcessBoundary/Windows_checkout_rejects_System32_timeout other
+//cmd/bd:bd_dolt_server_test TestGetActorWithGit/USER_fallback_when_no_git_config other
+//cmd/bd:bd_dolt_server_test TestGetActorWithGit/unknown_as_final_fallback other
+//cmd/bd:bd_dolt_server_test TestGoBuildBDCommandIsCWDIndependent other
+//cmd/bd:bd_dolt_server_test TestInitBEADS_DIR/BEADS_DB_OverridesBeadsDir other
+//cmd/bd:bd_dolt_server_test TestInitForceDiscardRemoteProceedsWithToken other
+//cmd/bd:bd_dolt_server_test TestInitWithCustomDBPath other
+//cmd/bd:bd_dolt_server_test TestLinearRoundTripRelationships other
+//cmd/bd:bd_dolt_server_test TestMatchGateToRun_NeutralizesLocalHeuristicsForForeignRepo other
+//cmd/bd:bd_dolt_server_test TestMigrateRespectsConfigJSON other
+//cmd/bd:bd_dolt_server_test TestProxiedServerHistoryRemoteSupportedFrontDoorParity other
+//cmd/bd:bd_embedded_part2_test TestEmbeddedMaxRowsDoctorAndConfig/ConventionsMaxRows_EnvOnly_Exits2 other
+//cmd/bd:bd_embedded_part2_test TestEmbeddedMaxRowsDoctorAndConfig/PollutionMaxRows_EnvOnly_Exits2 other
+//cmd/bd:bd_embedded_part2_test TestEmbeddedRestoreConcurrent other
+//cmd/bd:bd_proxied_test * env-gate BEADS_TEST_PROXIED_LOCAL
+//cmd/bd:bd_proxied_test TestProxiedServerReadyWisp/mol_on_wisp_molecule_currently_errors other
+//cmd/bd:bd_proxied_test TestServerModeReadRefusesASchemaItsReadsCannotQuery other
+//internal/httpclient:httpclient_served_provider_test TestServedBatchCloserAllIdempotentBatchLandsNothing KNOWN DIVERGENCE W-CloseBatchRequest.ClaimNext
+//internal/httpclient:httpclient_served_provider_test TestServedBatchCloserClaimNextHydratesWhenSomethingClosed KNOWN DIVERGENCE W-CloseBatchRequest.ClaimNext
+//internal/httpclient:httpclient_served_provider_test TestServedBatchCloserClaimNextIsNilWhenNothingClosed KNOWN DIVERGENCE W-CloseBatchRequest.ClaimNext
+//internal/httpclient:httpclient_served_provider_test TestServedBatchCloserClaimNextIsNilWhenTheFrontIsEmpty KNOWN DIVERGENCE W-CloseBatchRequest.ClaimNext
+//internal/httpclient:httpclient_served_provider_test TestServedBatchCloserClaimNextSeesAnUnblockingFromItsOwnBatch KNOWN DIVERGENCE W-CloseBatchRequest.ClaimNext
+//internal/httpclient:httpclient_served_provider_test TestServedBatchCloserDoesNotMutateTheCallerRequest KNOWN DIVERGENCE W-CloseBatchRequest.ClaimNext
+//internal/httpclient:httpclient_served_provider_test TestServedBatchCloserWispItemClosesAndEarnsTheClaim KNOWN DIVERGENCE W-CloseBatchRequest.ClaimNext
+//internal/httpclient:httpclient_served_provider_test TestServedDeleterGuardsADurableNamedWithAWispDependent KNOWN DIVERGENCE L-delete-dependents
+//internal/httpclient:httpclient_served_provider_test TestServedDeleterGuardsAWispNamedWithADurableDependent KNOWN DIVERGENCE L-delete-dependents
+//internal/httpclient:httpclient_served_provider_test TestServedDeleterRefusesAnAbsentID KNOWN DIVERGENCE L-delete-notfound
+//internal/httpclient:httpclient_served_provider_test TestServedDeleterRefusesDependentsOutsideTheRequest KNOWN DIVERGENCE L-delete-dependents
+//internal/httpclient:httpclient_served_provider_test TestServedLifecycleCreateEchoesSubSecondTimestamps KNOWN DIVERGENCE W-CreateRequest.Issue
+//internal/httpclient:httpclient_served_provider_test TestServedLifecycleCreateRefusesAForeignIDPrefix KNOWN DIVERGENCE L-create-prefix
+//internal/httpclient:httpclient_served_provider_test TestServedLifecycleCreateRejectsMissingDependencyTargets KNOWN DIVERGENCE L-create-notfound
+//internal/httpclient:httpclient_served_provider_test TestServedLifecycleCreateWritesEveryScalarField KNOWN DIVERGENCE W-CreateRequest.Issue
+//internal/httpclient:httpclient_served_provider_test TestServedLifecycleReopenProvenanceLabelsHistory KNOWN DIVERGENCE W-ReopenRequest.Provenance
+//internal/httpclient:httpclient_served_provider_test TestServedLifecycleUpdateProvenanceLabelsHistory KNOWN DIVERGENCE W-UpdateRequest.Provenance
+//internal/httpclient:httpclient_served_provider_test TestServedLifecycleUpdateResolvesBothPlanesUnlessRestricted KNOWN DIVERGENCE W-UpdateRequest.IssuePlaneOnly
+//internal/httpclient:httpclient_served_provider_test TestServedReleaserRefusesAForeignClaimUntilForced KNOWN DIVERGENCE L-release-notowner
+//internal/httpclient:httpclient_served_provider_test TestServedReleaserRefusesAnUnheldIssue KNOWN DIVERGENCE L-release-notclaimed
+//internal/httpclient:httpclient_served_test TestCAFileHygieneRefusesGroupWritableFile other
+//internal/httpclient:httpclient_served_test TestExpectedRevisionContract/AcceptsAWriteNamingNoVersion nil-hook CompareAndSetVersion
+//internal/httpclient:httpclient_served_test TestExpectedRevisionContract/AcceptsAWriteNamingTheCurrentVersion nil-hook CompareAndSetVersion
+//internal/httpclient:httpclient_served_test TestExpectedRevisionContract/CoversFieldsOutsideAnyWatchedSubset nil-hook CompareAndSetVersion
+//internal/httpclient:httpclient_served_test TestExpectedRevisionContract/RefusalIsATypedOutcomeNotAGenericError nil-hook CompareAndSetVersion
+//internal/httpclient:httpclient_served_test TestExpectedRevisionContract/RefusalIsDistinguishableFromAnAcceptedWrite nil-hook CompareAndSetVersion
+//internal/httpclient:httpclient_served_test TestExpectedRevisionContract/RefusalIsDistinguishableFromNotFound nil-hook CompareAndSetVersion
+//internal/httpclient:httpclient_served_test TestExpectedRevisionContract/RefusalIsDistinguishableFromValidationFailure nil-hook CompareAndSetVersion
+//internal/httpclient:httpclient_served_test TestExpectedRevisionContract/RefusalNeverSilentlyPicksAWinner nil-hook CompareAndSetVersion
+//internal/httpclient:httpclient_served_test TestExpectedRevisionContract/RefusalReportsTheRefusingVersionAddress nil-hook CompareAndSetVersion
+//internal/httpclient:httpclient_served_test TestExpectedRevisionContract/RefusalReportsTheRefusingVersionsChangeAttribution nil-hook CompareAndSetVersion
+//internal/httpclient:httpclient_served_test TestServedBatchApplyRefusesAMetadataRefNoItemDeclares KNOWN DIVERGENCE L-apply-ref
+//internal/httpclient:httpclient_served_test TestServedBatchApplySplicesTheMetadataOfATemplateItCreates KNOWN DIVERGENCE W-CreateItem.Issue
+//internal/httpclient:httpclient_served_test TestServedBatchCloserAllIdempotentBatchLandsNothing KNOWN DIVERGENCE W-CloseBatchRequest.ClaimNext
+//internal/httpclient:httpclient_served_test TestServedBatchCloserClaimNextHydratesWhenSomethingClosed KNOWN DIVERGENCE W-CloseBatchRequest.ClaimNext
+//internal/httpclient:httpclient_served_test TestServedBatchCloserClaimNextIsNilWhenNothingClosed KNOWN DIVERGENCE W-CloseBatchRequest.ClaimNext
+//internal/httpclient:httpclient_served_test TestServedBatchCloserClaimNextIsNilWhenTheFrontIsEmpty KNOWN DIVERGENCE W-CloseBatchRequest.ClaimNext
+//internal/httpclient:httpclient_served_test TestServedBatchCloserClaimNextSeesAnUnblockingFromItsOwnBatch KNOWN DIVERGENCE W-CloseBatchRequest.ClaimNext
+//internal/httpclient:httpclient_served_test TestServedBatchCloserDoesNotMutateTheCallerRequest KNOWN DIVERGENCE W-CloseBatchRequest.ClaimNext
+//internal/httpclient:httpclient_served_test TestServedBatchCloserWispItemClosesAndEarnsTheClaim KNOWN DIVERGENCE W-CloseBatchRequest.ClaimNext
+//internal/httpclient:httpclient_served_test TestServedBatchCreatorAcceptsAForeignEdgeTarget KNOWN DIVERGENCE W-BatchCreateItem.Issue
+//internal/httpclient:httpclient_served_test TestServedBatchCreatorDoesNotMutateTheCallerRequest KNOWN DIVERGENCE W-CreateBatchRequest.Provenance
+//internal/httpclient:httpclient_served_test TestServedBatchCreatorEchoesSubSecondTimestamps KNOWN DIVERGENCE W-BatchCreateItem.Issue
+//internal/httpclient:httpclient_served_test TestServedBatchCreatorKeepsAnEphemeralItemsLabelsOffTheDurablePlane KNOWN DIVERGENCE W-BatchCreateItem.Issue
+//internal/httpclient:httpclient_served_test TestServedBatchCreatorLinksAnEarlierItemOfTheSameBatch KNOWN DIVERGENCE L-batchcreate-inbatch
+//internal/httpclient:httpclient_served_test TestServedBatchCreatorLinksAnEarlierItemOnTheEphemeralPlane KNOWN DIVERGENCE L-batchcreate-inbatch
+//internal/httpclient:httpclient_served_test TestServedBatchCreatorMintsADistinctIDForEachIdenticalItem KNOWN DIVERGENCE W-BatchCreateItem.Issue
+//internal/httpclient:httpclient_served_test TestServedBatchCreatorMintsPastAnIDALaterItemNames KNOWN DIVERGENCE W-BatchCreateItem.Issue
+//internal/httpclient:httpclient_served_test TestServedBatchCreatorRecordsNoHistoryForAnEphemeralBatch KNOWN DIVERGENCE W-BatchCreateItem.Issue
+//internal/httpclient:httpclient_served_test TestServedBatchCreatorRecordsOneHistoryEntry KNOWN DIVERGENCE W-CreateBatchRequest.Provenance
+//internal/httpclient:httpclient_served_test TestServedBatchCreatorRefusesACrossPlaneInBatchEdge KNOWN DIVERGENCE W-BatchCreateItem.Issue
+//internal/httpclient:httpclient_served_test TestServedBatchCreatorRefusesAnAbsentEdgeTarget KNOWN DIVERGENCE L-batchcreate-target
+//internal/httpclient:httpclient_served_test TestServedBatchCreatorRefusesEverythingWhenOneItemRefuses KNOWN DIVERGENCE W-BatchCreateItem.Issue
+//internal/httpclient:httpclient_served_test TestServedBlockedListerContract/OmitsAStaleFlagWithNoNameableBlocker other
+//internal/httpclient:httpclient_served_test TestServedClaimRefusalMessagesCarryTheirFragments KNOWN DIVERGENCE L-claim-prose
+//internal/httpclient:httpclient_served_test TestServedCounterContract/ExcludeTypesMatchesListCardinality nil-hook List
+//internal/httpclient:httpclient_served_test TestServedCounterContract/NoParentMatchesListCardinality nil-hook List
+//internal/httpclient:httpclient_served_test TestServedCounterContract/ParentIDMatchesListCardinality nil-hook List
+//internal/httpclient:httpclient_served_test TestServedDeleterGuardsADurableNamedWithAWispDependent KNOWN DIVERGENCE L-delete-dependents
+//internal/httpclient:httpclient_served_test TestServedDeleterGuardsAWispNamedWithADurableDependent KNOWN DIVERGENCE L-delete-dependents
+//internal/httpclient:httpclient_served_test TestServedDeleterRefusesAnAbsentID KNOWN DIVERGENCE L-delete-notfound
+//internal/httpclient:httpclient_served_test TestServedDeleterRefusesDependentsOutsideTheRequest KNOWN DIVERGENCE L-delete-dependents
+//internal/httpclient:httpclient_served_test TestServedDependencyEditorRefusalWritesNothing KNOWN DIVERGENCE W-AddDependenciesRequest.SkipPerEdgeCycleCheck
+//internal/httpclient:httpclient_served_test TestServedDependencyEditorRefusesAGhostSource KNOWN DIVERGENCE L-dep-endpoint
+//internal/httpclient:httpclient_served_test TestServedDependencyEditorRefusesAMissingLocalTarget KNOWN DIVERGENCE L-dep-endpoint
+//internal/httpclient:httpclient_served_test TestServedDependencyEditorRefusesCrossPlaneCycle KNOWN DIVERGENCE W-AddDependenciesRequest.SkipPerEdgeCycleCheck
+//internal/httpclient:httpclient_served_test TestServedDependencyEditorRefusesSelfDependencyWithTheProbeSkipped KNOWN DIVERGENCE W-AddDependenciesRequest.SkipPerEdgeCycleCheck
+//internal/httpclient:httpclient_served_test TestServedDependencyEditorSkipPerEdgeCycleCheckDropsOnlyTheProbe KNOWN DIVERGENCE W-AddDependenciesRequest.SkipPerEdgeCycleCheck
+//internal/httpclient:httpclient_served_test TestServedIDRetentionNeverMintsARetiredID KNOWN DIVERGENCE W-CreateRequest.Issue
+//internal/httpclient:httpclient_served_test TestServedIDRetentionRefusesThroughABatchCreate KNOWN DIVERGENCE W-BatchCreateItem.Issue
+//internal/httpclient:httpclient_served_test TestServedIssueOperationsCreateClosedDerivesTheClosedStamp KNOWN DIVERGENCE W-CreateRequest.Issue
+//internal/httpclient:httpclient_served_test TestServedIssueOperationsUpdateIssuePlaneOnlyRefusesWisps KNOWN DIVERGENCE W-UpdateRequest.IssuePlaneOnly
+//internal/httpclient:httpclient_served_test TestServedIssueOperationsUpdateLabelPatchValueRules KNOWN DIVERGENCE L-update-fieldlen
+//internal/httpclient:httpclient_served_test TestServedIssueOperationsUpdateWritesEveryScalarPatchField KNOWN DIVERGENCE W-IssuePatch.SpecID
+//internal/httpclient:httpclient_served_test TestServedJournalContract/ArrivalFirstCreateRecordStampsAnUnstampedRow nil-hook JournalArrivalHooks.Import
+//internal/httpclient:httpclient_served_test TestServedJournalContract/ArrivalIgnoresSuppliedValues nil-hook JournalArrivalHooks
+//internal/httpclient:httpclient_served_test TestServedJournalContract/ArrivalOrdersABatchByItem nil-hook JournalArrivalHooks.CreateWispBatch
+//internal/httpclient:httpclient_served_test TestServedJournalContract/ArrivalReimportKeepsTheStamp nil-hook JournalArrivalHooks.Import
+//internal/httpclient:httpclient_served_test TestServedJournalContract/ArrivalRenameKeepsTheStamp nil-hook JournalArrivalHooks.Rename
+//internal/httpclient:httpclient_served_test TestServedJournalContract/EveryMutationKindRecordsItsActor WAITING ON donnabox fixes-b B14
+//internal/httpclient:httpclient_served_test TestServedLifecycleCreateEchoesSubSecondTimestamps KNOWN DIVERGENCE W-CreateRequest.Issue
+//internal/httpclient:httpclient_served_test TestServedLifecycleCreateRefusesAForeignIDPrefix KNOWN DIVERGENCE L-create-prefix
+//internal/httpclient:httpclient_served_test TestServedLifecycleCreateRejectsMissingDependencyTargets KNOWN DIVERGENCE L-create-notfound
+//internal/httpclient:httpclient_served_test TestServedLifecycleCreateWritesEveryScalarField KNOWN DIVERGENCE W-CreateRequest.Issue
+//internal/httpclient:httpclient_served_test TestServedLifecycleReopenProvenanceLabelsHistory KNOWN DIVERGENCE W-ReopenRequest.Provenance
+//internal/httpclient:httpclient_served_test TestServedLifecycleUpdateProvenanceLabelsHistory KNOWN DIVERGENCE W-UpdateRequest.Provenance
+//internal/httpclient:httpclient_served_test TestServedLifecycleUpdateResolvesBothPlanesUnlessRestricted KNOWN DIVERGENCE W-UpdateRequest.IssuePlaneOnly
+//internal/httpclient:httpclient_served_test TestServedQuerierOffsetSkipsMatches KNOWN DIVERGENCE E-QueryRequest.Offset
+//internal/httpclient:httpclient_served_test TestServedReaderListMaxRowsBoundaryIsLimitPlusOffset KNOWN DIVERGENCE E-ListRequest.Offset
+//internal/httpclient:httpclient_served_test TestServedReaderListMaxRowsIsHonored KNOWN DIVERGENCE E-ListRequest.Offset
+//internal/httpclient:httpclient_served_test TestServedReaderListReadyFlagAnswersTheBlockerAwareSet KNOWN DIVERGENCE E-ListRequest.ReadyFlag
+//internal/httpclient:httpclient_served_test TestServedReaderListReadyFlagCarriesTheAssigneeAndPriorityFilters KNOWN DIVERGENCE E-ListRequest.ReadyFlag
+//internal/httpclient:httpclient_served_test TestServedReaderListReadyFlagRefusesAFilterItCannotCarry KNOWN DIVERGENCE E-ListRequest.ReadyFlag
+//internal/httpclient:httpclient_served_test TestServedReaderListSkipCountsDropsTheCardinalitiesAndNothingElse KNOWN DIVERGENCE E-ListRequest.SkipCounts
+//internal/httpclient:httpclient_served_test TestServedReaderOffsetSkipsTheRowsBeforeThePage KNOWN DIVERGENCE E-ListRequest.Offset
+//internal/httpclient:httpclient_served_test TestServedReaderReadySetOwnsItsStatusPinnedAndTemplateDecisions KNOWN DIVERGENCE E-ListRequest.ReadyFlag
+//internal/httpclient:httpclient_served_test TestServedReleaserRefusesAForeignClaimUntilForced KNOWN DIVERGENCE L-release-notowner
+//internal/httpclient:httpclient_served_test TestServedReleaserRefusesAnUnheldIssue KNOWN DIVERGENCE L-release-notclaimed
+//internal/storage/dolt:dolt_server_full_test * env-gate BEADS_BENCH_LARGE_GRAPH
+//internal/storage/dolt:dolt_server_full_test * env-gate BEADS_RUN_DOLT_UPSTREAM_REPRO
+//internal/storage/dolt:dolt_server_full_test * env-gate BEADS_RUN_EXPLAIN_CAPTURE
+//internal/storage/dolt:dolt_server_full_test TestApplyConfigDefaults_TestModeBlocksNonDefaultProductionPort other
+//internal/storage/dolt:dolt_server_full_test TestCrossRecordInvariantContract/AdvisoryLeaseAloneDoesNotPreventTheInvariantViolation nil-hook AcquireAdvisoryLease
+//internal/storage/dolt:dolt_server_full_test TestCrossRecordInvariantContract/InvariantRefusalNamesTheViolatedInvariant nil-hook EnforceCrossRecordInvariant
+//internal/storage/dolt:dolt_server_full_test TestCrossRecordInvariantContract/LeaseAcquisitionRecordsNoHistoryEntry nil-hook AcquireAdvisoryLease
+//internal/storage/dolt:dolt_server_full_test TestCrossRecordInvariantContract/MaximumEndpointMultiplicityIsAStoreInvariantNotACAS nil-hook GraphEdgeWrite
+//internal/storage/dolt:dolt_server_full_test TestCrossRecordInvariantContract/MemoryKeyAliasUniquenessIsAStoreInvariantNotACAS nil-hook MemoryKeyAliasWrite
+//internal/storage/dolt:dolt_server_full_test TestCrossRecordInvariantContract/StoreInvariantTransactionScopesExactlyTheSpanningRecords nil-hook EnforceCrossRecordInvariant
+//internal/storage/dolt:dolt_server_full_test TestCrossRecordInvariantContract/SurvivesTwoPassingPerRecordGuards nil-hook GuardedWrite
+//internal/storage/dolt:dolt_server_full_test TestExpectedRevisionContract/AcceptsAWriteNamingNoVersion nil-hook CompareAndSetVersion
+//internal/storage/dolt:dolt_server_full_test TestExpectedRevisionContract/AcceptsAWriteNamingTheCurrentVersion nil-hook CompareAndSetVersion
+//internal/storage/dolt:dolt_server_full_test TestExpectedRevisionContract/CoversFieldsOutsideAnyWatchedSubset nil-hook CompareAndSetVersion
+//internal/storage/dolt:dolt_server_full_test TestExpectedRevisionContract/RefusalIsATypedOutcomeNotAGenericError nil-hook CompareAndSetVersion
+//internal/storage/dolt:dolt_server_full_test TestExpectedRevisionContract/RefusalIsDistinguishableFromAnAcceptedWrite nil-hook CompareAndSetVersion
+//internal/storage/dolt:dolt_server_full_test TestExpectedRevisionContract/RefusalIsDistinguishableFromNotFound nil-hook CompareAndSetVersion
+//internal/storage/dolt:dolt_server_full_test TestExpectedRevisionContract/RefusalIsDistinguishableFromValidationFailure nil-hook CompareAndSetVersion
+//internal/storage/dolt:dolt_server_full_test TestExpectedRevisionContract/RefusalNeverSilentlyPicksAWinner nil-hook CompareAndSetVersion
+//internal/storage/dolt:dolt_server_full_test TestExpectedRevisionContract/RefusalReportsTheRefusingVersionAddress nil-hook CompareAndSetVersion
+//internal/storage/dolt:dolt_server_full_test TestExpectedRevisionContract/RefusalReportsTheRefusingVersionsChangeAttribution nil-hook CompareAndSetVersion
+//internal/storage/dolt:dolt_server_full_test TestGetInternalConflicts_NoConflicts other
+//internal/storage/dolt:dolt_server_full_test TestGetIssuesByLabel other
+//internal/storage/dolt:dolt_server_full_test TestHistoryPresenceContract/OmitsAnUncommittedCreateAndDelete other
+//internal/storage/dolt:dolt_server_full_test TestJoinIterPanic_Spike/correlated_exists_subquery other
+//internal/storage/dolt:dolt_server_full_test TestJoinIterPanic_Spike/double_correlated_exists other
+//internal/storage/dolt:dolt_server_full_test TestJoinIterPanic_Spike/inner_join_issues_deps other
+//internal/storage/dolt:dolt_server_full_test TestJoinIterPanic_Spike/multi_column_filter_with_type_subquery other
+//internal/storage/dolt:dolt_server_full_test TestProductionPortReasons_BlindWithoutBeadsDir other
+//internal/storage/dolt:dolt_server_full_test TestPullAutoResolveSkipsNonMetadataConflicts other
+//internal/storage/dolt:dolt_server_full_test TestPullWithAutoResolve_BranchTrackingFallback other
+//internal/storage/dolt:dolt_server_full_test TestPullWithAutoResolve_BranchTrackingFallbackSuccess other
+//internal/storage/dolt:dolt_server_full_test TestPullWithAutoResolve_BranchTrackingSuccess other
+//internal/storage/dolt:dolt_server_full_test TestRetentionContract/ADestructiveOperationEnumeratesAffectedAddressesFirst nil-hook Remove
+//internal/storage/dolt:dolt_server_full_test TestRetentionContract/AHoldPreventsRemovalAndReportsInRetainedBounds nil-hook Hold
+//internal/storage/dolt:dolt_server_full_test TestRetentionContract/AStoreThatRemovesStateStillAnswersGoneDurably nil-hook Remove
+//internal/storage/dolt:dolt_server_full_test TestRetentionContract/AStoreWithNoLineageKnowledgeAnswersUnknownNotGone nil-hook Resolve
+//internal/storage/dolt:dolt_server_full_test TestRetentionContract/AnAddressNeverResolvesToADifferentState nil-hook Remove
+//internal/storage/dolt:dolt_server_full_test TestRetentionContract/ErasureMintsACorrectedVersionRatherThanEditingInPlace nil-hook Erase
+//internal/storage/dolt:dolt_server_full_test TestRetentionContract/EveryRetentionAnswerNamesItsProducingStore nil-hook Resolve
+//internal/storage/dolt:dolt_server_full_test TestRetentionContract/ForcingAHeldRemovalRecordsWhoWhenWhy nil-hook Hold
+//internal/storage/dolt:dolt_server_full_test TestRetentionContract/GoneIsDistinguishableFromUnknown nil-hook Remove
+//internal/storage/dolt:dolt_server_full_test TestRetentionContract/RemovalLeavesTheAddressAbleToAnswer nil-hook Remove
+//internal/storage/dolt:dolt_server_full_test TestRetentionContract/RemovalNeverReassignsASurvivingAddress nil-hook Remove
+//internal/storage/dolt:dolt_server_full_test TestRetentionContract/RemovalReasonIsRetentionErasureOrReorganizationDistinctly nil-hook Remove
+//internal/storage/dolt:dolt_server_full_test TestRetentionContract/RemovalReportsTheSurvivingRetainedWindow nil-hook Remove
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test * env-gate BEADS_BENCH_LARGE_GRAPH
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestCreateBatchFastPathsMatchPerRowLarge_Embedded other
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestCreateBatchParticipationGeneration/BrandNewRowsAreStampedAndMatchPerRow/SpansThreeInsertStatements other
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestCrossRecordInvariantContract/AdvisoryLeaseAloneDoesNotPreventTheInvariantViolation nil-hook AcquireAdvisoryLease
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestCrossRecordInvariantContract/InvariantRefusalNamesTheViolatedInvariant nil-hook EnforceCrossRecordInvariant
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestCrossRecordInvariantContract/LeaseAcquisitionRecordsNoHistoryEntry nil-hook AcquireAdvisoryLease
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestCrossRecordInvariantContract/MaximumEndpointMultiplicityIsAStoreInvariantNotACAS nil-hook GraphEdgeWrite
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestCrossRecordInvariantContract/MemoryKeyAliasUniquenessIsAStoreInvariantNotACAS nil-hook MemoryKeyAliasWrite
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestCrossRecordInvariantContract/StoreInvariantTransactionScopesExactlyTheSpanningRecords nil-hook EnforceCrossRecordInvariant
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestCrossRecordInvariantContract/SurvivesTwoPassingPerRecordGuards nil-hook GuardedWrite
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestExpectedRevisionContract/AcceptsAWriteNamingNoVersion nil-hook CompareAndSetVersion
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestExpectedRevisionContract/AcceptsAWriteNamingTheCurrentVersion nil-hook CompareAndSetVersion
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestExpectedRevisionContract/CoversFieldsOutsideAnyWatchedSubset nil-hook CompareAndSetVersion
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestExpectedRevisionContract/RefusalIsATypedOutcomeNotAGenericError nil-hook CompareAndSetVersion
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestExpectedRevisionContract/RefusalIsDistinguishableFromAnAcceptedWrite nil-hook CompareAndSetVersion
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestExpectedRevisionContract/RefusalIsDistinguishableFromNotFound nil-hook CompareAndSetVersion
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestExpectedRevisionContract/RefusalIsDistinguishableFromValidationFailure nil-hook CompareAndSetVersion
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestExpectedRevisionContract/RefusalNeverSilentlyPicksAWinner nil-hook CompareAndSetVersion
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestExpectedRevisionContract/RefusalReportsTheRefusingVersionAddress nil-hook CompareAndSetVersion
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestExpectedRevisionContract/RefusalReportsTheRefusingVersionsChangeAttribution nil-hook CompareAndSetVersion
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestLargeBatchApplyStatementCounts712_Embedded/712_(mol_2x) other
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestLargeBatchApplyWallClock_Embedded/1000 other
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestRetentionContract/ADestructiveOperationEnumeratesAffectedAddressesFirst nil-hook Remove
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestRetentionContract/AHoldPreventsRemovalAndReportsInRetainedBounds nil-hook Hold
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestRetentionContract/AStoreThatRemovesStateStillAnswersGoneDurably nil-hook Remove
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestRetentionContract/AStoreWithNoLineageKnowledgeAnswersUnknownNotGone nil-hook Resolve
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestRetentionContract/AnAddressNeverResolvesToADifferentState nil-hook Remove
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestRetentionContract/ErasureMintsACorrectedVersionRatherThanEditingInPlace nil-hook Erase
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestRetentionContract/EveryRetentionAnswerNamesItsProducingStore nil-hook Resolve
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestRetentionContract/ForcingAHeldRemovalRecordsWhoWhenWhy nil-hook Hold
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestRetentionContract/GoneIsDistinguishableFromUnknown nil-hook Remove
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestRetentionContract/RemovalLeavesTheAddressAbleToAnswer nil-hook Remove
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestRetentionContract/RemovalNeverReassignsASurvivingAddress nil-hook Remove
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestRetentionContract/RemovalReasonIsRetentionErasureOrReorganizationDistinctly nil-hook Remove
+//internal/storage/embeddeddolt:embeddeddolt_embedded_test TestRetentionContract/RemovalReportsTheSurvivingRetainedWindow nil-hook Remove
+//internal/storage/uow:uow_dolt_test TestBlockedListerContract/OmitsAStaleFlagWithNoNameableBlocker other
+//internal/storage/uow:uow_dolt_test TestCrossRecordInvariantContract/AdvisoryLeaseAloneDoesNotPreventTheInvariantViolation nil-hook AcquireAdvisoryLease
+//internal/storage/uow:uow_dolt_test TestCrossRecordInvariantContract/InvariantRefusalNamesTheViolatedInvariant nil-hook EnforceCrossRecordInvariant
+//internal/storage/uow:uow_dolt_test TestCrossRecordInvariantContract/LeaseAcquisitionRecordsNoHistoryEntry nil-hook AcquireAdvisoryLease
+//internal/storage/uow:uow_dolt_test TestCrossRecordInvariantContract/MaximumEndpointMultiplicityIsAStoreInvariantNotACAS nil-hook GraphEdgeWrite
+//internal/storage/uow:uow_dolt_test TestCrossRecordInvariantContract/MemoryKeyAliasUniquenessIsAStoreInvariantNotACAS nil-hook MemoryKeyAliasWrite
+//internal/storage/uow:uow_dolt_test TestCrossRecordInvariantContract/StoreInvariantTransactionScopesExactlyTheSpanningRecords nil-hook EnforceCrossRecordInvariant
+//internal/storage/uow:uow_dolt_test TestCrossRecordInvariantContract/SurvivesTwoPassingPerRecordGuards nil-hook GuardedWrite
+//internal/storage/uow:uow_dolt_test TestExpectedRevisionContract/AcceptsAWriteNamingNoVersion nil-hook CompareAndSetVersion
+//internal/storage/uow:uow_dolt_test TestExpectedRevisionContract/AcceptsAWriteNamingTheCurrentVersion nil-hook CompareAndSetVersion
+//internal/storage/uow:uow_dolt_test TestExpectedRevisionContract/CoversFieldsOutsideAnyWatchedSubset nil-hook CompareAndSetVersion
+//internal/storage/uow:uow_dolt_test TestExpectedRevisionContract/RefusalIsATypedOutcomeNotAGenericError nil-hook CompareAndSetVersion
+//internal/storage/uow:uow_dolt_test TestExpectedRevisionContract/RefusalIsDistinguishableFromAnAcceptedWrite nil-hook CompareAndSetVersion
+//internal/storage/uow:uow_dolt_test TestExpectedRevisionContract/RefusalIsDistinguishableFromNotFound nil-hook CompareAndSetVersion
+//internal/storage/uow:uow_dolt_test TestExpectedRevisionContract/RefusalIsDistinguishableFromValidationFailure nil-hook CompareAndSetVersion
+//internal/storage/uow:uow_dolt_test TestExpectedRevisionContract/RefusalNeverSilentlyPicksAWinner nil-hook CompareAndSetVersion
+//internal/storage/uow:uow_dolt_test TestExpectedRevisionContract/RefusalReportsTheRefusingVersionAddress nil-hook CompareAndSetVersion
+//internal/storage/uow:uow_dolt_test TestExpectedRevisionContract/RefusalReportsTheRefusingVersionsChangeAttribution nil-hook CompareAndSetVersion
+//internal/storage/uow:uow_dolt_test TestJournalContract/ArrivalRenameKeepsTheStamp nil-hook JournalArrivalHooks.Rename
+//internal/storage/uow:uow_dolt_test TestRetentionContract/ADestructiveOperationEnumeratesAffectedAddressesFirst nil-hook Remove
+//internal/storage/uow:uow_dolt_test TestRetentionContract/AHoldPreventsRemovalAndReportsInRetainedBounds nil-hook Hold
+//internal/storage/uow:uow_dolt_test TestRetentionContract/AStoreThatRemovesStateStillAnswersGoneDurably nil-hook Remove
+//internal/storage/uow:uow_dolt_test TestRetentionContract/AStoreWithNoLineageKnowledgeAnswersUnknownNotGone nil-hook Resolve
+//internal/storage/uow:uow_dolt_test TestRetentionContract/AnAddressNeverResolvesToADifferentState nil-hook Remove
+//internal/storage/uow:uow_dolt_test TestRetentionContract/ErasureMintsACorrectedVersionRatherThanEditingInPlace nil-hook Erase
+//internal/storage/uow:uow_dolt_test TestRetentionContract/EveryRetentionAnswerNamesItsProducingStore nil-hook Resolve
+//internal/storage/uow:uow_dolt_test TestRetentionContract/ForcingAHeldRemovalRecordsWhoWhenWhy nil-hook Hold
+//internal/storage/uow:uow_dolt_test TestRetentionContract/GoneIsDistinguishableFromUnknown nil-hook Remove
+//internal/storage/uow:uow_dolt_test TestRetentionContract/RemovalLeavesTheAddressAbleToAnswer nil-hook Remove
+//internal/storage/uow:uow_dolt_test TestRetentionContract/RemovalNeverReassignsASurvivingAddress nil-hook Remove
+//internal/storage/uow:uow_dolt_test TestRetentionContract/RemovalReasonIsRetentionErasureOrReorganizationDistinctly nil-hook Remove
+//internal/storage/uow:uow_dolt_test TestRetentionContract/RemovalReportsTheSurvivingRetainedWindow nil-hook Remove
+//internal/testutil:testutil_dolt_test TestDoltServerFingerprint/container other
+//internal/testutil:testutil_dolt_test TestSweepStaleDoltContainers other
+//tests/regression:regression_test TestCreateWithDepsExplicitBlocks other
+//tests/regression:regression_test TestDeferredParentExcludesChildren other
+//tests/regression:regression_test TestDeleteAndRestoreRoundTrip other
+//tests/regression:regression_test TestExportByAssigneeFilter other
+//tests/regression:regression_test TestExportImportRoundTrip other
+//tests/regression:regression_test TestExternalRefSpecID other
+//tests/regression:regression_test TestMetadataRoundTrip other
+//tests/regression:regression_test TestQueryDSLParity/assignee:alice other
+//tests/regression:regression_test TestQueryDSLParity/status:closed other
+//tests/regression:regression_test TestQueryDSLParity/status:open_priority:1 other
+//tests/regression:regression_test TestQueryDSLParity/type:bug_status:open other
+//tests/regression:regression_test TestQueryDSLParity/type:task other
+//tests/regression:regression_test TestSearchByTitleSubstring other
+//tests/regression:regression_test TestSortingInvariants other
+//tests/regression:regression_test TestTypeExclusionInReady other
+//tests/regression:regression_test TestWaitsForDepBlocksReady other

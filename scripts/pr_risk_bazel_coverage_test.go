@@ -1007,6 +1007,13 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 				"BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1", "BEADS_TEST_SUBPROCESS_BINARY": "$(rlocationpath :dolt_race_off)", "GOMAXPROCS": "4",
 			},
 		},
+		// No legacy job's: the server storage tier's one target that PR Risk
+		// never ran, the whole versioncontrolops_test binary on a required
+		// local dolt sql-server (its Compact tests skip everywhere else).
+		"//internal/storage/versioncontrolops:versioncontrolops_dolt_test": {
+			[]string{"$(rootpath :versioncontrolops_test)"},
+			map[string]string{"BEADS_TEST_DOLT_SERVER": "local", "BEADS_TEST_REQUIRE_DOLT_CONTAINER": "1"},
+		},
 	}
 	laneTags := regexp.MustCompile(`"(embedded|dolt-server-proxied|dolt-server-integration)"`)
 	quoted := regexp.MustCompile(`"([^"]*)"`)
@@ -1070,6 +1077,17 @@ func TestBazelRetiredLanesCannotBeNarrowed(t *testing.T) {
 			"-test.count=1",
 			"-test.run=^(TestDocFreshness.*|TestRequiredSuiteContract)$$",
 			"-required-suite=doc-freshness",
+		},
+		// The served write roles through bd serve's production Provider arm (C6
+		// of the bringup test plan): a second run, on the provider source, of
+		// tests httpclient_served_test runs in full on the roles source. The
+		// env is pinned by scripts/served_provider_lane_test.go.
+		"//internal/httpclient:httpclient_served_provider_test": {
+			"$(rootpath :httpclient_test)",
+			"-test.v",
+			"-test.count=1",
+			"-test.timeout=14m",
+			"-test.run=^(TestServedDeleter|TestServedLifecycle|TestServedMetadataCAS|TestServedClaimer|TestServedReleaser|TestServedReadyClaimer|TestServedBatchCloser|TestServedTierServesFromTheSourceItNames)",
 		},
 	}
 	err = walkBazelFiles(root, true, func(path string, d os.DirEntry) error {

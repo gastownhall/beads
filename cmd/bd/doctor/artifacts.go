@@ -139,13 +139,9 @@ func ScanForArtifacts(rootPath string) (ArtifactReport, error) {
 
 // scanBeadsDir reports a single .beads directory's findings from
 // fix.PlanArtifacts, which reads its metadata as discovery reads it, without
-// migrating a legacy config.json into metadata.json, and skips a workspace in
-// a format this build cannot open.
+// migrating a legacy config.json into metadata.json.
 func scanBeadsDir(beadsDir string, report *ArtifactReport) {
-	findings, skip := fix.PlanArtifacts(beadsDir)
-	if skip {
-		return
-	}
+	findings := fix.PlanArtifacts(beadsDir)
 	for _, f := range findings {
 		finding := ArtifactFinding{Path: f.Path, Type: f.Type, Description: f.Description, SafeDelete: f.SafeDelete}
 		switch f.Type {

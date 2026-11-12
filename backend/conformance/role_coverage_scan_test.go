@@ -254,8 +254,28 @@ func roleFacade() (map[string][]string, error) {
 // not a skip. That is the shape a third facade package would arrive in, and a
 // skip would drop every role in it while every other check stayed green.
 func reflectRoleAccessors() (map[string][]string, error) {
-	surface := reflect.TypeOf((*storage.DoltStorage)(nil)).Elem()
+	roleTypes, err := accessorRoleTypes()
+	if err != nil {
+		return nil, err
+	}
 	roles := map[string][]string{}
+	for name, role := range roleTypes {
+		methods := make([]string, 0, role.NumMethod())
+		for j := range role.NumMethod() {
+			methods = append(methods, role.Method(j).Name)
+		}
+		sort.Strings(methods)
+		roles[name] = methods
+	}
+	return roles, nil
+}
+
+// accessorRoleTypes is the accessor census itself, keyed by qualified role
+// name: reflectRoleAccessors reads method sets off it, and the request-field
+// cross-check reads parameter types.
+func accessorRoleTypes() (map[string]reflect.Type, error) {
+	surface := reflect.TypeOf((*storage.DoltStorage)(nil)).Elem()
+	roles := map[string]reflect.Type{}
 	for i := range surface.NumMethod() {
 		accessor := surface.Method(i)
 		signature := accessor.Type
@@ -272,12 +292,7 @@ func reflectRoleAccessors() (map[string][]string, error) {
 				"add that package to facadePackages, or this census silently omits every role in it",
 				accessor.Name, role.PkgPath(), role.Name())
 		}
-		methods := make([]string, 0, role.NumMethod())
-		for j := range role.NumMethod() {
-			methods = append(methods, role.Method(j).Name)
-		}
-		sort.Strings(methods)
-		roles[qualifier+"."+role.Name()] = methods
+		roles[qualifier+"."+role.Name()] = role
 	}
 	return roles, nil
 }

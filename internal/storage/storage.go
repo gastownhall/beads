@@ -890,8 +890,10 @@ type SchemaMigrator interface {
 
 // Compactor squashes old Dolt commits while preserving recent ones.
 // Callers should type-assert to this interface for selective history compaction.
+// headHash is main's HEAD in the log the plan was read from; the replay is
+// verified against it (see versioncontrolops.Compact).
 type Compactor interface {
-	Compact(ctx context.Context, initialHash, boundaryHash string, oldCommits int, recentHashes []string) error
+	Compact(ctx context.Context, initialHash, boundaryHash, headHash string, oldCommits int, recentHashes []string) error
 }
 
 // BlockedRecomputer recomputes the denormalized is_blocked column for every
@@ -1005,6 +1007,36 @@ type EventsJournalConfigurer interface {
 	SetEventsJournalEnabled(enabled bool)
 }
 
+// EventsJournalShapeChecker reports whether the LAST SetEventsJournalEnabled
+// call on this instance found a table shape the journal cannot run against.
+//
+// It exists because SetEventsJournalEnabled itself stays void: dozens of
+// tests across three backends already call it as a bare statement, and
+// adaptive I/O (PR A1) must not force every one of them to start checking an
+// error it never had before. Instead, enabling the journal probes the table's
+// shape internally and caches the verdict; this is the seam a factory's open
+// path checks immediately afterward. Only a typed shape verdict
+// (issueops.JournalShapeError: a missing required column, or a missing table)
+// is reported. A probe that could not run at all says nothing about the
+// table, so it degrades to the canonical shape with a warning and reports nil.
+//
+// The journal stays enabled either way, and an enabled store with an
+// unsupported shape is NOT a no-op for writes: it writes with the canonical
+// column list, so each journaled write fails loudly on its INSERT and rolls
+// back with the mutation it records — never a mutation committed with no
+// journal row. eventsjournal.Apply turns the verdict into a refused open for
+// an open that is going to write beads, so that path fails once, at open,
+// instead of on every write (the gci failure mode this interface exists to
+// avoid); an open that writes no beads is not refused. Reads are never gated
+// by the enabled flag: a table that cannot answer fails the read with a loud
+// SQL error, never a silently wrong answer.
+//
+// A store that does not implement it is assumed never to fail activation
+// (today, every implementation does).
+type EventsJournalShapeChecker interface {
+	EventsJournalActivationError() error
+}
+
 // VersionedHistoryConfigurer controls dual-write issue-version history
 // activation on ONE storage instance. Implementations must never use
 // process-global state, for the same reason as EventsJournalConfigurer:
@@ -1094,6 +1126,12 @@ type BackupStore interface {
 	BackupDatabase(ctx context.Context, dir string) error
 	// RestoreDatabase restores the database from a Dolt backup at dir.
 	// When force is true, the existing database is dropped before restoring.
+	// dir must be a directory on the caller's filesystem holding a Dolt
+	// backup, at a path Dolt reads literally: anything else is refused before
+	// the existing database is touched. A store served by a Dolt SQL server
+	// hands the path to the server, which opens it on its own filesystem, so
+	// that check speaks for the directory restored from only when the server
+	// shares the caller's filesystem at that path.
 	RestoreDatabase(ctx context.Context, dir string, force bool) error
 }
 

@@ -1,0 +1,7 @@
+{
+  "shape": "mc-gate-check-timer",
+  "requests": [
+    {"method":"GET","operation_id":"getContext","path":"/v0/beads/context","status":200},
+    {"method":"GET","operation_id":"queryIssues","path":"/v0/beads/issues:query","query":["limit","q"],"status":200}
+  ]
+}

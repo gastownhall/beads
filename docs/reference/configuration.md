@@ -5,9 +5,9 @@ description: Complete reference for bd configuration across config.yaml and data
 
 Complete configuration reference for beads.
 
-Last reviewed: 2026-09-10
+Last reviewed: 2026-10-26
 
-Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, and `internal/configfile/`.
+Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, `internal/config/`, `internal/configfile/`, and `internal/endpointtrust/`.
 
 beads has two complementary configuration systems:
 
@@ -39,6 +39,8 @@ For Viper-managed (YAML) keys, highest to lowest:
 4. **Built-in defaults**
 
 Project-level keys written via `bd config set` (Jira, Linear, GitHub, status maps, etc.) live in the Dolt database. They are read at command time and have no env var override.
+
+bd pins the AI, tracker (GitHub, GitLab, Azure DevOps, Jira, Linear) and remote Dolt server endpoint each workspace sends credentials to, in `~/.config/beads/trusted-endpoints.json` (`$XDG_CONFIG_HOME/beads/` when set, `%APPDATA%\beads\` on Windows). That location is resolved from your shell environment only — a committed `.beads/.env` that sets `XDG_CONFIG_HOME`, `APPDATA` or `HOME` cannot relocate the pin store. The vendor default endpoint and bd's local Dolt server pin on first use; a custom endpoint from shared configuration is refused until a private source confirms it, and the confirmation pins it. The comparison covers scheme, host, port and path. If an endpoint from shared configuration (`.beads/config.yaml`, `.beads/config.local.yaml`, `.beads/.env`, `.beads/metadata.json` or the synced database) later differs from the pin, bd refuses to send the credential. The Dolt server pin is enforced wherever `BEADS_DOLT_PASSWORD` would be sent, including the `bd dolt status` and `bd dolt clean-databases` diagnostics and the `bd doctor` checks and repairs. To confirm an intended change, set the endpoint's environment variable in your shell (not in `.beads/.env`) or the key in `~/.config/bd/config.yaml`; to reset, delete the workspace's entry from the pin file. Dolt remote credentials (`DOLT_REMOTE_USER`/`DOLT_REMOTE_PASSWORD` for `sync.remote` and federation peers) are not covered by these pins.
 
 When a config.yaml value or environment variable shadows a database key, `bd config list` prints an override warning, and `bd config show` reports the source of every effective key.
 
@@ -79,6 +81,8 @@ Unrecognized keys produce a warning with a did-you-mean suggestion; use the `cus
 ## YAML-only Keys (Startup Settings)
 
 These keys must live in `config.yaml`, not the database, because they are read before the database is opened. Writing them with `bd config set` automatically updates `config.yaml`.
+
+The `bd serve` settings surface (`PUT /v0/beads/config/{key}`, and the dashboard behind it) cannot write your `config.yaml`, so it refuses every one of these keys with a `400` and stores nothing: the database's config table is replicated by `bd dolt push`, and a secret stored there would reach every remote. Set them with `bd config set` in the workspace instead. `DELETE /v0/beads/config/{key}` still removes a row an older bd or server stored under one of these keys; rotate any secret that was already pushed.
 
 The full namespaces routed to YAML are:
 
@@ -575,7 +579,9 @@ rm MIGRATION-FREEZE        # thaw
 
 Blocked commands exit **14** — a stable code scripts branch on to tell "someone is migrating this workspace, come back later" from a generic failure worth an immediate retry. That includes the destructive ones: `bd init --reinit-local` and `bd bootstrap` are refused too.
 
-Reads (`bd list`, `bd show`, `bd ready`, …) keep working during a freeze, and bd's own background maintenance stands down with them — version-bump migration, JSONL auto-import, Dolt auto-commit, auto-backup, auto-export and auto-push are all skipped, so running a read does not leave a commit in the store you are migrating.
+Reads (`bd list`, `bd show`, `bd ready`, …) keep working during a freeze, and bd's own background maintenance stands down with them — version-bump migration, JSONL auto-import, Dolt auto-commit, auto-backup, auto-export and auto-push are all skipped, so running a read does not leave a commit in the store you are migrating. In embedded mode (the default) and proxied-server mode, `bd ready` and `bd list --ready` are an exception: they still wake deferred issues whose defer date has passed and commit that change to the frozen store ([#7634](https://github.com/gastownhall/beads/issues/7634)), so do not run either command in those modes until you thaw.
+
+In bd v1.4.0 and later, `bd ready` and `bd list --ready` in server mode also wake deferred issues whose defer date has passed. During a freeze they skip that write: those issues stay deferred and are left out of the list until the first such read after you thaw.
 
 <Warning>
 A `bd serve` process started before the marker appeared keeps accepting HTTP writes: the freeze is a CLI-invocation gate, and a running server never re-reads it. Stop the server before you freeze.

@@ -88,10 +88,15 @@ no linter enforces it).
   call the Cobra methods in `cobraParallelUnsafeMethods`; drop `t.Parallel()`
   or serialize the call under `stdioMutex`.
 - `TestCorpusGolden` (`protocol/`) — no unreviewed change to the `--json`
-  wire shapes.
+  wire shapes, or to the audit events and Dolt commit counts
+  (`protocol/testdata/corpus_commits.golden`) of the native-fix captures.
 - `TestCommandTreeGolden` and `TestCommandHelpGolden` — no unreviewed change
   to the command tree (every command and flag, hidden ones included) or to
   the pinned `--help` output in `testdata/command_tree/`.
+- `TestServePackagesInitStaysUnderBudget` — no package under `backend/http`,
+  `internal/httpapi` or `internal/httpclient` makes more than 512 allocations
+  or spends more than 10 ms in init, which every bd command pays; do the work
+  on first use (`sync.OnceValue`) instead of raising the budget.
 
 Fresh-workspace command fixtures call `isolateBeadsDirForTest(t)` before
 setup or dispatch and must not use `t.Parallel()`.

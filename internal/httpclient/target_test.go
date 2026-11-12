@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -67,6 +68,254 @@ func TestSaveTargetHoldsNoToken(t *testing.T) {
 		if strings.Contains(strings.ToLower(string(body)), field) {
 			t.Errorf("sidecar carries a %q field:\n%s", field, body)
 		}
+	}
+}
+
+// sidecarGoldenCAFile is the ca_file the v0 sidecar goldens record. It is
+// absolute on every GOOS, as SaveTarget requires (checkCAFileAbsolute):
+// path/filepath reads a leading "//" as absolute on Unix and as a UNC share
+// on Windows, where "/etc/..." is relative. So each golden is the same bytes
+// on every platform. SaveTarget records the path; it never opens it.
+const sidecarGoldenCAFile = "//certs.example/beads/serve-ca.pem"
+
+// sidecarGoldenEveryMember is the v0 sidecar with every targetFile member
+// set. It is the one golden that fixes those members' order relative to one
+// another, and the one TestEverySidecarMemberHasAV0Golden holds to the
+// struct.
+const sidecarGoldenEveryMember = `{
+  "url": "https://bd.example.com:8443/team-a",
+  "expect_project_id": "proj-1",
+  "api": "v0",
+  "ca_file": "//certs.example/beads/serve-ca.pem",
+  "previous_backend": "dolt",
+  "allow_plaintext": true
+}`
+
+// sidecarMembersV0NeverWrites declares, each with its reason, the targetFile
+// members SaveTarget never writes for a v0 connection, which
+// sidecarGoldenEveryMember therefore cannot show. A member added to
+// targetFile goes into the every_member case of
+// TestSaveTargetV0SidecarBytesAreFrozen when some v0 connection writes it,
+// or here when none does. Empty today: a v0 connection can write every
+// member.
+var sidecarMembersV0NeverWrites = map[string]string{}
+
+// TestSaveTargetV0SidecarBytesAreFrozen pins, byte for byte, the
+// http_target.json SaveTarget writes for v0 connections. The sidecar outlives
+// the bd that wrote it: older and newer bds read it back (LoadTarget; see
+// TestLoadTargetIgnoresUnknownMembers for the members a bd does not know). A
+// member added, dropped, renamed or reordered, an omitempty gained or lost,
+// or a value spelled differently is a cross-version change to every v0
+// connection, so it must arrive as a reviewed edit of a want below, never as
+// a side effect of another change to the encoder.
+func TestSaveTargetV0SidecarBytesAreFrozen(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		target Target
+		want   string
+	}{
+		{
+			// The floor: every optional member omitted; api is always written.
+			name:   "url_only",
+			target: Target{BaseURL: mustParseURL(t, "https://bd.example.com")},
+			want: `{
+  "url": "https://bd.example.com",
+  "api": "v0"
+}`,
+		},
+		{
+			// A connection pinned to its workspace identity, and nothing else.
+			name: "plain",
+			target: Target{
+				BaseURL:         mustParseURL(t, "https://bd.example.com"),
+				ExpectProjectID: "proj-1",
+			},
+			want: `{
+  "url": "https://bd.example.com",
+  "expect_project_id": "proj-1",
+  "api": "v0"
+}`,
+		},
+		{
+			// bd connect --ca-file.
+			name: "ca_file",
+			target: Target{
+				BaseURL:         mustParseURL(t, "https://bd.example.com"),
+				ExpectProjectID: "proj-1",
+				CAFile:          sidecarGoldenCAFile,
+			},
+			want: `{
+  "url": "https://bd.example.com",
+  "expect_project_id": "proj-1",
+  "api": "v0",
+  "ca_file": "//certs.example/beads/serve-ca.pem"
+}`,
+		},
+		{
+			// A workspace's first bd connect: Attach records the backend
+			// metadata.json selected before (dolt, the default), and the
+			// project id is the one the handshake reported.
+			name: "previous_backend",
+			target: Target{
+				BaseURL:         mustParseURL(t, "http://127.0.0.1:8080"),
+				ExpectProjectID: "proj-1",
+				PreviousBackend: "dolt",
+			},
+			want: `{
+  "url": "http://127.0.0.1:8080",
+  "expect_project_id": "proj-1",
+  "api": "v0",
+  "previous_backend": "dolt"
+}`,
+		},
+		{
+			// bd connect --allow-plaintext to a non-loopback http server.
+			name: "allow_plaintext",
+			target: Target{
+				BaseURL:                 mustParseURL(t, "http://bd.internal:8080"),
+				ExpectProjectID:         "proj-1",
+				AllowInsecureCredential: true,
+			},
+			want: `{
+  "url": "http://bd.internal:8080",
+  "expect_project_id": "proj-1",
+  "api": "v0",
+  "allow_plaintext": true
+}`,
+		},
+		{
+			name: "every_member",
+			target: Target{
+				BaseURL:                 mustParseURL(t, "https://bd.example.com:8443/team-a"),
+				ExpectProjectID:         "proj-1",
+				CAFile:                  sidecarGoldenCAFile,
+				PreviousBackend:         "dolt",
+				AllowInsecureCredential: true,
+			},
+			want: sidecarGoldenEveryMember,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := SaveTarget(dir, tc.target); err != nil {
+				t.Fatalf("SaveTarget: %v", err)
+			}
+			got, err := os.ReadFile(TargetPath(dir))
+			if err != nil {
+				t.Fatalf("reading the sidecar: %v", err)
+			}
+			if string(got) != tc.want {
+				t.Errorf("SaveTarget wrote a v0 %s other than the frozen one.\n--- want ---\n%s\n--- got ---\n%s\n"+
+					"Every bd that opens this workspace reads these bytes. If the change is intended, make the got "+
+					"bytes this case's want, and say in the PR how older and newer bds read them.",
+					TargetFileName, tc.want, got)
+			}
+		})
+	}
+}
+
+// TestEverySidecarMemberHasAV0Golden keeps those goldens complete: every
+// member targetFile defines appears in sidecarGoldenEveryMember or is
+// declared, with a reason, in sidecarMembersV0NeverWrites. Without it, a
+// member added with omitempty and set by no case above would change what
+// some v0 connections write while every golden stayed green.
+func TestEverySidecarMemberHasAV0Golden(t *testing.T) {
+	members := map[string]bool{}
+	typ := reflect.TypeOf(targetFile{})
+	for i := range typ.NumField() {
+		field := typ.Field(i)
+		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		switch name {
+		case "-":
+			continue // encoding/json never writes it
+		case "":
+			name = field.Name // encoding/json's default spelling
+		}
+		members[name] = true
+		_, declared := sidecarMembersV0NeverWrites[name]
+		shown := strings.Contains(sidecarGoldenEveryMember, `"`+name+`": `)
+		switch {
+		case shown && declared:
+			t.Errorf("%q is in sidecarGoldenEveryMember and declared in sidecarMembersV0NeverWrites; it is one or the other", name)
+		case !shown && !declared:
+			t.Errorf("targetFile member %q is in no v0 sidecar golden: set it in TestSaveTargetV0SidecarBytesAreFrozen's every_member case if a v0 connection can write it, or declare in sidecarMembersV0NeverWrites why none does", name)
+		}
+	}
+	for name, why := range sidecarMembersV0NeverWrites {
+		if !members[name] {
+			t.Errorf("sidecarMembersV0NeverWrites declares %q, which targetFile does not define; drop it", name)
+		}
+		if strings.TrimSpace(why) == "" {
+			t.Errorf("sidecarMembersV0NeverWrites declares %q without a reason; say why no v0 connection writes it", name)
+		}
+	}
+}
+
+// TestLoadTargetIgnoresUnknownMembers is the other half of the sidecar's
+// cross-version contract: LoadTarget reads the members it knows and ignores
+// the rest. A workspace whose sidecar a newer bd wrote, with members this bd
+// has never heard of, still opens and dials the server it names; a decoder
+// that refused unknown members would strand it until someone reconnected it.
+func TestLoadTargetIgnoresUnknownMembers(t *testing.T) {
+	// One unknown member of each JSON kind, named so no bd will define it.
+	const unknown = `
+  "x_unknown_string": "v9",
+  "x_unknown_number": 7,
+  "x_unknown_bool": false,
+  "x_unknown_null": null,
+  "x_unknown_array": [1, "two", {"three": 3}],
+  "x_unknown_object": {"nested": {"deeper": ["a"]}}`
+
+	for _, tc := range []struct {
+		name    string
+		sidecar string
+		want    Target
+	}{
+		{
+			name:    "beside every known member",
+			sidecar: strings.TrimSuffix(sidecarGoldenEveryMember, "\n}") + "," + unknown + "\n}",
+			want: Target{
+				BaseURL:                 mustParseURL(t, "https://bd.example.com:8443/team-a"),
+				ExpectProjectID:         "proj-1",
+				CAFile:                  sidecarGoldenCAFile,
+				PreviousBackend:         "dolt",
+				AllowInsecureCredential: true,
+			},
+		},
+		{
+			name:    "beside the url alone",
+			sidecar: `{"url": "http://127.0.0.1:8080",` + unknown + "\n}",
+			want:    Target{BaseURL: mustParseURL(t, "http://127.0.0.1:8080")},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(TargetPath(dir), []byte(tc.sidecar), 0o600); err != nil {
+				t.Fatalf("seed sidecar: %v", err)
+			}
+			got, err := LoadTarget(dir)
+			if err != nil {
+				t.Fatalf("LoadTarget refused a sidecar carrying members it does not know: %v\n%s", err, tc.sidecar)
+			}
+			// Field by field rather than the whole Target: a field a later bd
+			// adds, and fills with its own default when the sidecar is silent,
+			// is not an unknown member being read.
+			if got.String() != tc.want.String() {
+				t.Errorf("BaseURL = %q, want %q", got.String(), tc.want.String())
+			}
+			if got.ExpectProjectID != tc.want.ExpectProjectID {
+				t.Errorf("ExpectProjectID = %q, want %q", got.ExpectProjectID, tc.want.ExpectProjectID)
+			}
+			if got.CAFile != tc.want.CAFile {
+				t.Errorf("CAFile = %q, want %q", got.CAFile, tc.want.CAFile)
+			}
+			if got.PreviousBackend != tc.want.PreviousBackend {
+				t.Errorf("PreviousBackend = %q, want %q", got.PreviousBackend, tc.want.PreviousBackend)
+			}
+			if got.AllowInsecureCredential != tc.want.AllowInsecureCredential {
+				t.Errorf("AllowInsecureCredential = %t, want %t", got.AllowInsecureCredential, tc.want.AllowInsecureCredential)
+			}
+		})
 	}
 }
 

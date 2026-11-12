@@ -23,6 +23,16 @@ import (
 // syncTracer is the OTel tracer for tracker sync spans.
 var syncTracer = otel.Tracer("github.com/steveyegge/beads/tracker")
 
+// pullFetchOverlap widens an incremental pull's fetch window to start before
+// the stored last_sync. That cursor is the end-of-sync wall time, but tracker
+// list endpoints lag behind writes, clocks drift, and a remote write can land
+// during a sync's post-fetch phases, so an issue updated just before the
+// cursor would otherwise never be fetched again (#6806). Only the fetch moves:
+// the conflict guard, DetectConflicts and pre-linked hydration keep the exact
+// stored cursor, and a row a fetch from that cursor returns keeps the
+// treatment it had before (pullOverlapOnly).
+const pullFetchOverlap = 5 * time.Minute
+
 // rateLimitExhaustedError is implemented by tracker errors (e.g.
 // linear.ErrRateLimitExhausted) that signal the API quota floor has been
 // hit and the sync loop should abort immediately rather than cascade the
@@ -75,6 +85,16 @@ type PushHooks struct {
 	// Returns true if content is identical (skip update). If nil, uses timestamp comparison.
 	ContentEqual func(local *types.Issue, remote *TrackerIssue) bool
 
+	// PushFieldsEqual reports whether remote already holds every field a push
+	// of local sends, comparing content only and never timestamps (unlike
+	// ContentEqual, which may keep a timestamp skip). A pull uses it to tell a
+	// re-fetched echo of an earlier push from a remote edit among the rows
+	// only its overlap window returned (#6806). A remote edit of a field the
+	// push does not send (the assignee, which GitHub, GitLab and Linear do
+	// not push) counts as an echo there. If nil, no overlap row counts as an
+	// echo.
+	PushFieldsEqual func(local *types.Issue, remote *TrackerIssue) bool
+
 	// ContentHash, if set, returns a stable fingerprint of the issue's pushable
 	// fields. When present, the engine binds the hash to the issue's external_ref
 	// and TargetScope (when provided), and persists that fingerprint in local_metadata
@@ -85,6 +105,16 @@ type PushHooks struct {
 	// still incurs, so a no-op `--push-only` run does not drain the API rate limit
 	// (gastownhall/beads#4214). Returning "" disables the short-circuit for that
 	// issue (the engine falls back to the fetch + ContentEqual path).
+	//
+	// A pull that writes an issue, or finds it equal to the remote, refreshes
+	// its fingerprint to the pulled content, which is what the remote then
+	// holds. A pull by an engine without ContentHash (or one that returns "" for
+	// the pulled content) clears a stored fingerprint instead, so a later push
+	// never trusts the last push. While the stored fingerprint shows that the
+	// remote's labels have not changed since the last push or pull, a pull keeps
+	// the labels changed locally since then and still writes the remote's other
+	// fields. The fingerprint it refreshes holds the remote's labels, so the
+	// next push sends the kept ones.
 	ContentHash func(local *types.Issue) string
 
 	// TargetScope returns the canonical remote namespace in which external issue
@@ -341,7 +371,8 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 	key := e.Tracker.ConfigPrefix() + ".last_sync"
 	if lastSyncStr, err := e.Store.GetLocalMetadata(ctx, key); err == nil && lastSyncStr != "" {
 		if t, err := parseSyncTime(lastSyncStr); err == nil {
-			fetchOpts.Since = &t
+			fetchSince := t.Add(-pullFetchOverlap)
+			fetchOpts.Since = &fetchSince
 			lastSync = &t
 			stats.Incremental = true
 			stats.SyncedSince = lastSyncStr
@@ -364,20 +395,18 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 
 	prelinkedHydrateIDs := make(map[string]bool)
 
-	// Fetch issues from external tracker
+	// Fetch issues from external tracker. The first bulkRows rows come from
+	// the bulk FetchIssues call; only those can be overlap-only.
 	var extIssues []TrackerIssue
+	bulkRows := 0
 	if len(opts.IssueIDs) > 0 {
 		// Selective pull: fetch only requested issues via FetchIssue()
 		prefix, _ := e.Store.GetConfig(ctx, "issue_prefix")
 		for _, id := range opts.IssueIDs {
 			var identifier string
 			if isBeadID(id, prefix) {
-				// Look up the local issue to find its external ref
-				if local, ok := localByID[id]; ok && local.ExternalRef != nil {
-					identifier = e.Tracker.ExtractIdentifier(*local.ExternalRef)
-				}
-				if identifier == "" {
-					e.warn("No external ref found for local issue %s, skipping pull", id)
+				var ok bool
+				if identifier, ok = e.selectivePullIdentifier(id, localByID[id]); !ok {
 					stats.Skipped++
 					continue
 				}
@@ -405,6 +434,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			return nil, fmt.Errorf("fetching issues: %w", err)
 		}
 		stats.Candidates = len(extIssues)
+		bulkRows = len(extIssues)
 		if provider, ok := e.Tracker.(PullStatsProvider); ok {
 			stats.Queried, stats.Candidates = provider.LastPullStats()
 		}
@@ -424,7 +454,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 	var pendingDeps []DependencyInfo
 	var dryRunIssues []*types.Issue
 
-	for _, extIssue := range extIssues {
+	for i, extIssue := range extIssues {
 		// ShouldImport hook: filter before conversion
 		if e.PullHooks != nil && e.PullHooks.ShouldImport != nil {
 			if !e.PullHooks.ShouldImport(&extIssue) {
@@ -475,6 +505,14 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				stats.Skipped++
 				continue
 			}
+			// A row only the overlap window returned must not rewrite a
+			// linked issue the old exact-cursor fetch would have left alone:
+			// skip it when it is an echo of our own push, or older than the
+			// local issue (an edit a later sync never pushed).
+			if i < bulkRows && !allowOverwriteIDs[existing.ID] && !prelinkedHydrateIDs[existing.ID] && e.skipOverlapRow(existing, &extIssue, lastSync) {
+				stats.Skipped++
+				continue
+			}
 		}
 
 		if e.PullHooks != nil && e.PullHooks.AfterConvert != nil {
@@ -499,7 +537,23 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			dryRunIssues = append(dryRunIssues, &dryRunIssue)
 		}
 
+		// A label edit moves no updated_at, so the conflict guard above lets
+		// the issue through. While the remote's labels are still those of the
+		// last push or pull, the pull keeps the labels changed locally since
+		// then, so the push sends them. The push hash keeps fingerprinting the
+		// remote, which holds the pulled labels.
+		pulledLabels := conv.Issue.Labels
+		keepLocalLabels := e.pullKeepsLocalLabels(ctx, existing, conv.Issue, ref)
+		if keepLocalLabels {
+			conv.Issue.Labels = existing.Labels
+		}
+
 		if existing != nil && pullIssueEqual(existing, conv.Issue, ref) {
+			if !opts.DryRun {
+				// Both sides can reach this content without a push, which
+				// leaves the hash of the last push stale.
+				e.refreshPushHashAfterPull(ctx, existing, withLabels(conv.Issue, pulledLabels), ref)
+			}
 			stats.Skipped++
 			continue
 		}
@@ -519,6 +573,8 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			updates := buildPullIssueUpdates(existing, conv.Issue, ref)
 			if raw, ok := marshalTrackerMetadata(extIssue.Metadata); ok {
 				updates["metadata"] = raw
+				// The push hash below fingerprints the row this update writes.
+				conv.Issue.Metadata = raw
 			}
 
 			markPullIssueFields(updates)
@@ -528,7 +584,11 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				stats.Errors++
 				continue
 			}
-			if err := updater.ApplyIssueUpdate(ctx, existing.ID, updates, conv.Issue.Labels, e.Actor); err != nil {
+			labels := conv.Issue.Labels
+			if keepLocalLabels {
+				labels = nil // ApplyIssueUpdate leaves the labels alone
+			}
+			if err := updater.ApplyIssueUpdate(ctx, existing.ID, updates, labels, e.Actor); err != nil {
 				e.warn("Failed to update %s: %v", existing.ID, err)
 				stats.Errors++
 				if pulledIDs != nil {
@@ -537,6 +597,11 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				continue
 			}
 			stats.Updated++
+			e.refreshPushHashAfterPull(ctx, existing, withLabels(conv.Issue, pulledLabels), ref)
+			if keepLocalLabels {
+				// The push must send the kept labels.
+				continue
+			}
 			if pulledIDs != nil {
 				pulledIDs[existing.ID] = true
 			}
@@ -553,6 +618,10 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			stats.Created++
 			if pulledIDs != nil {
 				pulledIDs[conv.Issue.ID] = true
+			}
+			// A new row has no stale entry to clear, so only record.
+			if conv.Issue.ID != "" {
+				e.recordPushHash(ctx, conv.Issue, ref)
 			}
 		}
 	}
@@ -572,6 +641,73 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		attribute.Int("sync.skipped", stats.Skipped),
 	)
 	return stats, nil
+}
+
+// selectivePullIdentifier returns the tracker identifier that local's external
+// ref addresses, for a pull that selects the bead by ID. When there is none it
+// warns why and reports false: the bead has no ref, or the tracker cannot
+// address the one it has (gastownhall/beads#7781: another repository's issue).
+func (e *Engine) selectivePullIdentifier(id string, local *types.Issue) (string, bool) {
+	extRef := ""
+	if local != nil {
+		extRef = derefStr(local.ExternalRef)
+	}
+	if strings.TrimSpace(extRef) == "" {
+		e.warn("No external ref found for local issue %s, skipping pull", id)
+		return "", false
+	}
+	identifier := e.Tracker.ExtractIdentifier(extRef)
+	if identifier == "" {
+		e.warn("External ref %q of local issue %s is not an issue %s can address with its current configuration (another repository?), skipping pull",
+			extRef, id, e.Tracker.DisplayName())
+		return "", false
+	}
+	return identifier, true
+}
+
+// pullOverlapOnly reports whether a bulk incremental fetch row is one only
+// the pullFetchOverlap window returned: it was updated before the earliest
+// time a fetch from the stored last_sync returns (fetchFloor). A tracker that
+// matches Since coarsely returned the rest of the cursor's minute or day
+// before the window was widened, and those rows keep that treatment.
+func (e *Engine) pullOverlapOnly(issue *TrackerIssue, lastSync *time.Time) bool {
+	return lastSync != nil && !issue.UpdatedAt.IsZero() && issue.UpdatedAt.Before(e.fetchFloor(*lastSync))
+}
+
+// fetchFloor returns the earliest update time FetchIssues returns for since:
+// since itself, or since truncated to the tracker's SinceGranularity.
+func (e *Engine) fetchFloor(since time.Time) time.Time {
+	if coarse, ok := e.Tracker.(SinceGranularityProvider); ok {
+		if granularity := coarse.SinceGranularity(); granularity > 0 {
+			return since.UTC().Truncate(granularity)
+		}
+	}
+	return since
+}
+
+// skipOverlapRow reports whether extIssue is a row only the overlap window
+// returned that must leave existing untouched: existing is linked to this
+// tracker and the row predates the window itself, holds what a push of
+// existing sends (PushHooks.PushFieldsEqual), or is older than existing. A
+// tracker that matches Since coarsely returns rows before the window when the
+// widened Since falls in the previous minute or day: Azure DevOps returns the
+// whole previous UTC day for a last_sync in a day's first five minutes.
+// ContentEqual never decides it: a push-side hook may skip by timestamp
+// (GitLab's does), which would drop every remote edit in the window.
+func (e *Engine) skipOverlapRow(existing *types.Issue, extIssue *TrackerIssue, lastSync *time.Time) bool {
+	if !e.pullOverlapOnly(extIssue, lastSync) {
+		return false
+	}
+	if _, linked := e.trackerRef(existing); !linked {
+		return false
+	}
+	if extIssue.UpdatedAt.Before(lastSync.Add(-pullFetchOverlap)) {
+		return true
+	}
+	if e.PushHooks != nil && e.PushHooks.PushFieldsEqual != nil && e.PushHooks.PushFieldsEqual(existing, extIssue) {
+		return true
+	}
+	return extIssue.UpdatedAt.Before(existing.UpdatedAt)
 }
 
 func applyPullIssueFields(ctx context.Context, tx storage.IssueLifecycleTransaction, id string, updates map[string]interface{}, actor string) error {
@@ -809,15 +945,24 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 		return nil, hydratedLocalIDs, nil
 	}
 
+	// seen holds the remotes a fetch from lastSync itself returns, which a
+	// pull treats as changed after it. A row only the overlap window returned
+	// (pullOverlapOnly) predates that fetch, so a pre-linked local matching it
+	// is still hydrated, from that row instead of a FetchIssue.
 	seen := make(map[string]struct{}, len(fetched))
+	overlapOnly := make(map[string]struct{})
 	for _, issue := range fetched {
+		into := seen
+		if e.pullOverlapOnly(&issue, lastSync) {
+			into = overlapOnly
+		}
 		for _, id := range []string{
 			strings.TrimSpace(issue.Identifier),
 			strings.TrimSpace(e.Tracker.ExtractIdentifier(e.Tracker.BuildExternalRef(&issue))),
 		} {
 			if id != "" {
-				seen[id] = struct{}{}
-				seen[strings.ToLower(id)] = struct{}{}
+				into[id] = struct{}{}
+				into[strings.ToLower(id)] = struct{}{}
 			}
 		}
 	}
@@ -846,6 +991,18 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 			continue
 		}
 		if _, ok := seen[strings.ToLower(identifier)]; ok {
+			continue
+		}
+		_, inOverlap := overlapOnly[identifier]
+		if _, ok := overlapOnly[strings.ToLower(identifier)]; ok {
+			inOverlap = true
+		}
+		if inOverlap {
+			// The bulk row is already in the pull; marking the local lets the
+			// conflict guard apply it instead of skipping the stub.
+			hydratedLocalIDs[local.ID] = true
+			seen[identifier] = struct{}{}
+			seen[strings.ToLower(identifier)] = struct{}{}
 			continue
 		}
 
@@ -1059,6 +1216,83 @@ func (e *Engine) recordPushHash(ctx context.Context, issue *types.Issue, externa
 	}
 }
 
+// refreshPushHashAfterPull keeps the stored push hash of a pulled issue in
+// step with the remote. After a pull the remote holds the pulled content, not
+// the content of the last push. The hash fingerprints that content under the
+// ID of row, the local issue the pull wrote or found equal (a GenerateID hook
+// may have given pulled a fresh ID), with row's own labels when pulled.Labels
+// is nil, because ApplyIssueUpdate leaves the labels alone for a nil set. A
+// pull that keeps local labels passes the pulled ones, so the next push sends
+// the kept labels. Without a fingerprint, a stored hash is cleared so the next
+// push fetches and compares instead of trusting the last push. The entry is
+// written only when it changes, so a pull of unchanged issues writes none.
+func (e *Engine) refreshPushHashAfterPull(ctx context.Context, row, pulled *types.Issue, ref string) {
+	if row == nil || row.ID == "" || pulled == nil {
+		return
+	}
+	hashed := *pulled
+	hashed.ID = row.ID
+	hashed.ExternalRef = strPtr(ref)
+	if hashed.Labels == nil {
+		hashed.Labels = row.Labels
+	}
+	key := e.pushHashKey(row.ID)
+	value := e.pushCacheValue(&hashed, ref)
+	if stored, err := e.Store.GetLocalMetadata(ctx, key); err == nil && stored == value {
+		return
+	}
+	if err := e.Store.SetLocalMetadata(ctx, key, value); err != nil {
+		e.warn("Failed to refresh push hash for %s: %v", row.ID, err)
+	}
+}
+
+// pullKeepsLocalLabels reports whether a pull must leave the labels of
+// existing alone instead of writing pulled's. bd label add and remove move no
+// updated_at, so the conflict guard cannot see such an edit. The stored push
+// hash fingerprints the issue as the remote held it after the last push or
+// pull. The labels that differ were changed locally since then, and the
+// remote's labels were not, when the stored hash matches either the pulled
+// content (the remote is unchanged) or the local issue with the pulled labels
+// (the remote changed fields other than its labels, and the local issue
+// changed only its labels). The labels are kept only when the hash tells them
+// apart from the pulled ones, so that the next push sends them. With no stored
+// hash, or when the remote's labels changed too, the pull writes the remote's
+// labels.
+func (e *Engine) pullKeepsLocalLabels(ctx context.Context, existing, pulled *types.Issue, ref string) bool {
+	if existing == nil || pulled == nil || pulled.Labels == nil || equalNormalizedStrings(existing.Labels, pulled.Labels) {
+		return false
+	}
+	hashed := *pulled
+	hashed.ID = existing.ID
+	hashed.ExternalRef = strPtr(ref)
+	remote := e.pushCacheValue(&hashed, ref)
+	if remote == "" {
+		return false
+	}
+	hashed.Labels = existing.Labels
+	if e.pushCacheValue(&hashed, ref) == remote {
+		return false
+	}
+	stored, err := e.Store.GetLocalMetadata(ctx, e.pushHashKey(existing.ID))
+	if err != nil || stored == "" {
+		return false
+	}
+	if stored == remote {
+		return true
+	}
+	local := *existing
+	local.ExternalRef = strPtr(ref)
+	local.Labels = pulled.Labels
+	return e.pushCacheValue(&local, ref) == stored
+}
+
+// withLabels returns a copy of issue that carries labels.
+func withLabels(issue *types.Issue, labels []string) *types.Issue {
+	copied := *issue
+	copied.Labels = labels
+	return &copied
+}
+
 func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs map[string]bool) (*PushStats, error) {
 	ctx, span := syncTracer.Start(ctx, "tracker.push",
 		trace.WithAttributes(
@@ -1198,6 +1432,11 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 			} else if opts.CreateOnly && !forceIDs[issue.ID] {
 				// A real --create-only run leaves linked issues alone, so the
 				// preview must skip them too (gastownhall/beads#6337).
+				stats.Skipped++
+			} else if e.Tracker.ExtractIdentifier(extRef) == "" {
+				// A real run skips a linked issue whose ref the tracker
+				// cannot address (e.g. another repository's issue), so the
+				// preview must skip it too (gastownhall/beads#7781).
 				stats.Skipped++
 			} else if !forceIDs[issue.ID] && e.storedPushHashMatches(ctx, issue, extRef) {
 				// Content unchanged since last push: a real run would skip this

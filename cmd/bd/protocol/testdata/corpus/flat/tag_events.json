@@ -1,0 +1,24 @@
+[
+  {
+    "actor": "protocol-test",
+    "comment": "Added label: corpus-native",
+    "created_at": "<TS>",
+    "event_type": "label_added",
+    "issue_id": "corpus-tag"
+  },
+  {
+    "actor": "protocol-test",
+    "comment": "Added label: corpus-tag-label",
+    "created_at": "<TS>",
+    "event_type": "label_added",
+    "issue_id": "corpus-tag"
+  },
+  {
+    "actor": "protocol-test",
+    "created_at": "<TS>",
+    "event_type": "created",
+    "issue_id": "corpus-tag",
+    "new_value": "",
+    "old_value": ""
+  }
+]

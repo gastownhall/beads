@@ -242,10 +242,12 @@ database after a restart, with a healthy database on the same server as the
 control. A restart re-rolls the dice for every database, though, so the
 durable fix is to move to the pinned version.
 
-This matters because `bd flatten` and the Dolt-history compaction in
-`bd admin compact` both finish by hard-resetting `main` onto a temporary
-branch, and the merge-settle path behind `bd dolt pull` / `bd sync` falls
-back to a hard reset when it has to abandon a merge. See
+This matters because the merge-settle path behind `bd dolt pull` / `bd sync`
+falls back to a hard reset when it has to abandon a merge. `bd flatten` and
+the Dolt-history compaction, `bd compact`, also hard-reset `main` in older
+releases (`bd compact` in v1.3.2 and earlier); builds with the fixes listed in
+the CHANGELOG move `main` with a soft reset, which this breakage does not
+affect. See
 [Maintenance](#maintenance--bd-prune-and-bd-purge).
 
 ### New Project
@@ -297,6 +299,16 @@ standalone Beads users. The `bd` binary includes everything; just `bd init` and 
 - Data lives in `.beads/embeddeddolt/` alongside your code
 - Push to GitHub with `bd dolt push` — code and issues in one repo
 - Zero ops: no server, no ports, no PID files
+
+Each `bd` command starts the embedded engine, so a script or agent loop that
+calls `bd` hundreds of times pays that startup every time. bd batch runs a
+limited set of write commands (`close`, `update`, `create`, `dep add`,
+`dep remove`; see `bd batch --help`) in one transaction and one process. For
+sustained concurrent agents, use server or proxied-server mode, where one Dolt
+server keeps the engine running (see
+[Migrating Between Backends](#migrating-between-backends)). Neither repairs a
+damaged journal; for that, see
+[Engine won't open](/recovery/database-corruption#engine-wont-open).
 
 ### Server Mode (Multi-Writer / Orchestrator)
 
@@ -356,6 +368,17 @@ control is simpler than network allowlists. The Dolt server must be started
 with `dolt sql-server --socket <path>`. Auto-start is not supported in socket
 mode.
 
+`bd init --server-socket` records the path as `dolt_server_socket` in
+`.beads/metadata.json`. `BEADS_DOLT_SERVER_SOCKET` wins over it. The socket is
+a preference, not a requirement: if it does not answer but the TCP host and
+port do, bd connects over TCP. If neither answers, the error names the socket.
+In releases after v1.3.2, opens that read metadata.json (`beads.OpenFromConfig`
+and the other config-based library opens, `bd doctor` and its repairs, and
+routed stores) take the socket the same way, after a socket the library
+caller passes directly. Earlier releases read only `BEADS_DOLT_SERVER_SOCKET`
+on those opens and dialed TCP beside a metadata.json socket. `beads.Open`
+does not read metadata.json.
+
 Switch to server mode when you need:
 - Multiple agents writing simultaneously
 - Orchestrator multi-rig setups
@@ -388,15 +411,51 @@ bd prune --older-than 90d --ignore-references --force
 transient. For full Dolt storage reclaim after deleting many rows, follow
 with `bd flatten`.
 
-**On Dolt 2.3.x, storage-reclaim operations can fail partway.** `bd flatten`
-and the Dolt-history compaction in `bd admin compact` both build a temporary
-branch and then hard-reset `main` onto it, and the merge-settle path behind
-`bd dolt pull` / `bd sync` falls back to a hard reset when it abandons a
-merge. On an affected database that hard reset returns
-`Error 1105 (HY000): context canceled`: `bd flatten` and `bd admin compact`
-stop at that step, and an abandoned merge is left without its rollback. See
-[Which Dolt version to install](#which-dolt-version-to-install) for the check
-and the fix.
+**On Dolt 2.3.x, storage-reclaim operations can fail partway.** In older
+releases `bd flatten` builds a temporary branch and then hard-resets `main`
+onto it, as does the Dolt-history compaction, `bd compact`, in v1.3.2 and
+earlier, and the merge-settle path behind `bd dolt pull` / `bd sync` falls
+back to a hard reset when it abandons a merge. On an affected database that
+hard reset returns `Error 1105 (HY000): context canceled`: those `bd flatten`
+and `bd compact` releases stop at that step, and an abandoned merge is left
+without its rollback. See [Which Dolt version to install](#which-dolt-version-to-install)
+for the check and the fix.
+
+**Writes that reach `main` while `bd compact` runs.** In v1.3.2 and earlier,
+`bd compact`'s hard reset discards them: changes in `main`'s working set that
+no Dolt commit holds yet (a batch under batched or disabled auto-commit), and
+a commit that lands on `main` while the history is being rebuilt. Builds with
+the fix listed in the CHANGELOG move `main` with a soft reset and keep both.
+The check that the rebuilt history reproduces `main`'s data compares it with
+`main` as `bd compact` read it, so such a write is not mistaken for a divergent
+replay. Working-set changes stay pending, as they were. A commit that landed during
+the rebuild is kept in one follow-up commit,
+`compact: commit changes that reached main during compaction`, so it does not
+keep its own hash, message or author on `main`; changes that were already
+staged when `bd compact` started go into that commit too. If that follow-up
+commit fails, `bd compact` stops after `main` has moved and before garbage
+collection, says so, and leaves the changes staged: commit them with
+`bd dolt commit` when you are ready.
+
+**Writes that reach `main` while `bd flatten` runs.** Older releases'
+`bd flatten` hard-resets `main` onto the flattened branch, which discards the
+same two kinds of write and also drops the foreign keys of the clone-local
+(`dolt_ignored`) tables, `events` and the `wisp_*` tables. Builds with the fix
+listed in the CHANGELOG move `main` with a soft reset: the foreign keys stay,
+working-set changes stay pending, and a commit that landed during the flatten,
+with any changes already staged, is kept in one follow-up commit,
+`flatten: commit changes that reached main during flatten`. If checking for or
+making that commit fails, `bd flatten` stops after `main` has moved and before
+pruning and garbage collection, says so, and leaves the changes staged:
+inspect `dolt_status` and commit them with `bd dolt commit` when you are
+ready. If `bd flatten` fails or is interrupted after creating its temporary
+branch, it tries, within 30 seconds, to return to `main` and delete that
+branch so the next `bd flatten` can run; if that cleanup fails, the error
+keeps the original failure and names the branch left behind. A foreign key
+an older release already dropped stays dropped after a flatten. In server
+mode, `bd doctor` reports it, and `bd doctor --fix` deletes the rows it
+orphaned and re-adds it. Embedded mode has no check or repair for it yet:
+`bd doctor` and `bd doctor --fix` do not run there.
 
 ### Why a garbage collection can reclaim nothing
 
@@ -632,27 +691,25 @@ bd list                    # Re-triggers bootstrap
 
 ### Database Corruption
 
-**Symptom:** Queries fail, inconsistent data.
+**Symptom:** Queries fail, inconsistent data, or every `bd` command fails while
+opening the database.
 
-**Diagnosis:**
+**Diagnosis and logical repair (server mode):**
 ```bash
 bd doctor                  # Basic checks
 bd doctor --deep           # Full validation
-bd doctor --server         # Server mode checks (if applicable)
+bd doctor --server         # Server mode checks
+bd doctor --fix            # Repair logical inconsistencies
 ```
 
-**Recovery options:**
+Embedded mode runs only `bd doctor --check=artifacts`, `--check=conventions`
+and `--check=pollution`.
 
-1. **Repair what's fixable:**
-   ```bash
-   bd doctor --fix
-   ```
-
-2. **Rebuild from remote:**
-   ```bash
-   rm -rf .beads/dolt
-   bd list                  # Re-triggers bootstrap
-   ```
+**Recovery:** `bd doctor --fix` does not rebuild a damaged store, and deleting
+the data directory destroys any work your remote or backups lack. Follow
+[Engine won't open](/recovery/database-corruption#engine-wont-open): preserve
+the damaged store and its configuration first, then recover into a fresh store
+from a Dolt remote, a Dolt-native backup, or a JSONL export.
 
 ### Already Committed `.beads/dolt/` to Git
 
@@ -886,6 +943,56 @@ bd dolt status
 # Show full configuration including shared mode
 bd dolt show
 ```
+
+#### Durability and Dolt history
+
+Saving a write and recording it in Dolt history are separate steps:
+
+- **SQL commit (saved).** When a `bd` write succeeds, its SQL transaction has
+  committed and Dolt has synced it to the shared server's local data
+  directory through its chunk journal. With supported journal-backed Dolt and
+  the journal left at its default (enabled), the write survives the server
+  being killed (SIGKILL, out-of-memory, an ungraceful logout) and is there
+  after the next start. Surviving power loss also depends on the filesystem
+  and device honoring sync. A write still in an open transaction when the
+  server dies is lost, as in any database.
+- **Dolt commit (history).** A Dolt commit records saved changes in version
+  history: what `bd history` shows and what `bd dolt push` sends. With
+  `dolt.auto-commit` set to `batch` or `off`, saved changes wait in the working
+  set (`bd doctor` reports them under "Dolt Status") until you record them
+  yourself:
+
+  ```bash
+  bd dolt commit -m "record pending changes"
+  ```
+
+  A graceful `bd dolt stop` also records them, best-effort. A crash does not
+  discard them: they are still pending after the restart.
+
+A local commit of either kind is not a backup. To keep a copy off the
+machine, push history to a remote, or point `bd backup` at a separate or
+off-machine destination: run `bd backup init <path-or-url>` once, then
+`bd backup sync`. Only `bd backup sync` writes to that destination, so run it
+again to bring the copy up to date.
+
+bd does not turn on Dolt's `behavior.dolt_transaction_commit`, and saving
+writes does not need it. It would turn every SQL transaction into its own Dolt
+commit: history grows faster, Dolt's generic transaction commits take the
+place of bd's per-command messages and authors, and `batch` and `off` modes
+stop batching.
+
+**Server config file.** For a server bd launches with its default
+configuration, bd writes the shared server's config to
+`~/.beads/shared-server/dolt-server-config.yaml` and passes it with
+`--config`. bd rewrites it on every start, so edits to it do not last. With a
+Dolt too old for that config, bd passes command-line flags instead, and Dolt
+then writes a template to `~/.beads/shared-server/dolt/config.yaml` that
+records those flag values and leaves its other settings commented out. The
+bd-launched server does not read that template, so its server settings have no
+effect. bd itself still reads the template's `listener.port` when it resolves
+the shared server's port: after `BEADS_DOLT_SERVER_PORT` and bd's port file,
+ahead of `dolt.port` in config.yaml. Servers you configure and run yourself
+(external or proxied) use whatever config you give them.
 
 ### Data Location (Orchestrator)
 

@@ -365,7 +365,10 @@ func runBackupRestoreProxied(ctx context.Context, dir string, force bool) error 
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
-	backupURL, err := versioncontrolops.DirToFileURL(dir)
+	// The command's preflight already checked dir; checking it again here,
+	// while the topology is still up, keeps the URL restored from the one
+	// checked, and covers any other caller.
+	backupURL, err := versioncontrolops.RestoreSourceURL(dir)
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
@@ -469,7 +472,7 @@ func (e *proxiedTeardownError) Unwrap() error { return e.err }
 // precisely the operation after which the workspace's recorded project id and
 // the database's may legitimately differ, and asserting the old one would
 // refuse the connection that is supposed to reconcile them. That makes this the
-// third caller of newProxiedServerUOWProviderAdopting; its doc comment is the
+// second caller of newProxiedServerUOWProviderAdopting; its doc comment is the
 // register of identity-assertion bypasses and names this one.
 //
 // A teardown failure is returned wrapped in *proxiedTeardownError, and only

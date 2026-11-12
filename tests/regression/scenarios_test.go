@@ -649,8 +649,12 @@ func TestDeleteWithDependencies(t *testing.T) {
 	})
 }
 
-// TestDeleteCascade creates a chain A←B←C, cascade-deletes A, and verifies
-// all three are removed from the export.
+// TestDeleteCascade creates a containment chain A←B←C (B a child of A, C a
+// child of B), cascade-deletes A, and verifies all three are removed from the
+// export. The chain is parent-child because --cascade follows only
+// parent-child edges (GH#6301): a blocks chain survives the candidate's
+// cascade but not the baseline's, a deliberate divergence the deleter
+// contract pins (RunDeleterCascadeFollowsOnlyContainment).
 func TestDeleteCascade(t *testing.T) {
 	compareExports(t, func(w *workspace) {
 		idA := w.create("--title", "Root task", "--type", "task")
@@ -658,8 +662,8 @@ func TestDeleteCascade(t *testing.T) {
 		idC := w.create("--title", "Dependent C", "--type", "task")
 		standalone := w.create("--title", "Standalone", "--type", "task")
 
-		w.run("dep", "add", idB, idA) // B depends on A
-		w.run("dep", "add", idC, idB) // C depends on B
+		w.run("dep", "add", idB, idA, "--type", "parent-child") // B is a child of A
+		w.run("dep", "add", idC, idB, "--type", "parent-child") // C is a child of B
 		w.run("delete", idA, "--cascade", "--force")
 
 		_ = standalone // ensure at least one issue survives
