@@ -392,6 +392,15 @@ func TestEnsureWispsLateColumns(t *testing.T) {
 		wantErr string
 	}{
 		{
+			// AC-5: no wisps table. 0053 skips every wisps statement then,
+			// so the repair stops after the table probe: no column probe,
+			// CREATE or ALTER.
+			name: "wisps_absent",
+			expect: func(mock sqlmock.Sqlmock) {
+				mock.ExpectQuery(tableQuery).WithArgs("wisps").WillReturnRows(count(0))
+			},
+		},
+		{
 			// AC-4: a fresh store, or a second call right after a repair:
 			// three probes and no ALTER.
 			name: "both_present",
