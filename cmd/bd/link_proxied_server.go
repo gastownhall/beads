@@ -54,13 +54,16 @@ func runLinkProxiedServer(cmd *cobra.Command, ctx context.Context, args []string
 	printCycleWarnings(res.cycles)
 
 	if jsonOutput {
-		return outputJSON(map[string]interface{}{
+		out := map[string]interface{}{
 			"status":        "added",
 			"issue_id":      id1,
 			"depends_on_id": id2,
 			"type":          depType,
-		})
+		}
+		markExternalJSON(out, id1, id2)
+		return outputJSON(out)
 	}
+	printCrossRigBlockingSemantics(id1, id2, dt)
 	fmt.Printf("%s Linked: %s depends on %s (%s)\n",
 		ui.RenderPass("✓"),
 		formatFeedbackIDParen(id1, res.fromTitle),

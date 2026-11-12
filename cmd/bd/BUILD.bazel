@@ -707,6 +707,7 @@ go_test(
         "cross_mode_parity_harness_test.go",
         "cross_rig_resolver_test.go",
         "crossrig_close_embedded_test.go",
+        "crossrig_depadd_feedback_embedded_test.go",
         "crossrig_ready_embedded_test.go",
         "crossrig_unreadable_embedded_test.go",
         "cursor_hook_test.go",
