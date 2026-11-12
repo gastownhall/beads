@@ -16,9 +16,15 @@ import (
 
 var eventsTable = auxRekeyTables[0]
 
-// driftErr is the error a drifted table returns: dolt recovers the decode panic
-// per query and surfaces it as a 1105.
+// driftErr is the error a drifted table returns under the Dolt <=2.2 engine
+// (bd 1.3.4): dolt recovers the hash.New decode panic per query and surfaces it
+// as a 1105.
 var driftErr = errors.New("Error 1105 (HY000): panic recovered: invalid hash length: 19")
+
+// driftErrDolt26 is the same drift as reported by the Dolt 2.6 engine: the
+// adaptive-value decoder rejects the wrong-width address (ErrInvalidAddressLen)
+// before it ever reaches hash.New (#8372).
+var driftErrDolt26 = errors.New("Error 1105 (HY000): malformed out-of-band adaptive value: invalid address length: expected 20-byte address, got 19")
 
 func expectEventsSelect(mock sqlmock.Sqlmock) *sqlmock.ExpectedQuery {
 	return mock.ExpectQuery(regexp.QuoteMeta(
@@ -62,6 +68,34 @@ func TestIsSchemaEncodingDriftErr(t *testing.T) {
 		{
 			"unwrapped panic text",
 			errors.New("panic: invalid hash length: 19"),
+			true,
+		},
+		// Dolt 2.6 (#8372): the adaptive-value decoder reports the same drift
+		// before hash.New, under a different message.
+		{"dolt 2.6 server 1105 drift", driftErrDolt26, true},
+		{
+			"dolt 2.6 insert/merge side of the flip",
+			errors.New("Error 1105 (HY000): malformed out-of-band adaptive value: invalid address length: expected 20-byte address, got 1"),
+			true,
+		},
+		{
+			"dolt 2.6 wrapped drift",
+			fmt.Errorf("scan rows of events: %w", driftErrDolt26),
+			true,
+		},
+		{
+			"dolt 2.6 bare engine text",
+			errors.New("malformed out-of-band adaptive value: invalid address length: expected 20-byte address, got 19"),
+			true,
+		},
+		{
+			"dolt 2.6 truncated length varint",
+			errors.New("Error 1105 (HY000): malformed out-of-band adaptive value: truncated length varint"),
+			true,
+		},
+		{
+			"dolt 2.6 upper-cased",
+			errors.New("ERROR 1105 (HY000): MALFORMED OUT-OF-BAND ADAPTIVE VALUE: INVALID ADDRESS LENGTH: EXPECTED 20-BYTE ADDRESS, GOT 19"),
 			true,
 		},
 		{"plain sql error", errors.New("Error 1062 (23000): duplicate entry"), false},
