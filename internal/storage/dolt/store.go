@@ -1770,10 +1770,15 @@ func (s *DoltStore) BackupDatabase(ctx context.Context, dir string) error {
 }
 
 // RestoreDatabase restores the database from a Dolt backup at dir.
-// The dir must exist locally and contain a Dolt backup at a path Dolt reads
-// literally; anything else is refused before the restore connection opens
-// (versioncontrolops.RestoreSourceURL). When force is true, an existing
-// database is overwritten.
+// The dir must exist on this process's filesystem and contain a Dolt backup
+// at a path Dolt reads literally; anything else is refused before the restore
+// connection opens (versioncontrolops.RestoreSourceURL). The SQL server then
+// opens dir on its own filesystem, so the check speaks for the directory
+// restored from only when the server shares this filesystem at that path. A
+// server in a container or on another host restores from whatever it holds
+// there, dropping the database under force before the transfer starts
+// (dolthub/dolt#11951). When force is true, an existing database is
+// overwritten.
 func (s *DoltStore) RestoreDatabase(ctx context.Context, dir string, force bool) error {
 	backupURL, err := versioncontrolops.RestoreSourceURL(dir)
 	if err != nil {
