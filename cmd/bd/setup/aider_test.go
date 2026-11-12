@@ -17,6 +17,10 @@ func TestAiderConfigTemplate(t *testing.T) {
 	}
 }
 
+// legacyRepoOrg is the pre-move GitHub org, split across two literals so
+// this file does not itself trip scripts/check-legacy-repo-refs.sh.
+const legacyRepoOrg = "steveyeg" + "ge"
+
 func TestAiderBeadsInstructions(t *testing.T) {
 	requiredContent := []string{
 		"bd ready",
@@ -46,12 +50,16 @@ func TestAiderReadmeTemplate(t *testing.T) {
 		"bd create",
 		"bd close",
 		"bd dolt push",
+		"https://github.com/gastownhall/beads",
 	}
 
 	for _, req := range requiredContent {
 		if !strings.Contains(aiderReadmeTemplate, req) {
 			t.Errorf("aiderReadmeTemplate missing required content: %q", req)
 		}
+	}
+	if strings.Contains(aiderReadmeTemplate, legacyRepoOrg) {
+		t.Errorf("aiderReadmeTemplate still references the pre-move repository")
 	}
 }
 
