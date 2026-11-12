@@ -95,6 +95,26 @@ func TestJSONContract_ShowDefaultIncludesFullPayload(t *testing.T) {
 			t.Errorf("default payload: comments_omitted must be absent when comments are present, got %v", v)
 		}
 	})
+
+	t.Run("epic_progress_by_default_not_under_count_only", func(t *testing.T) {
+		epic := w.create("--title", "Full payload epic", "--type", "epic")
+		w.create("--title", "Epic child one", "--type", "task", "--parent", epic)
+		w.create("--title", "Epic child two", "--type", "task", "--parent", epic)
+
+		issue := showOnce(epic)
+		assertFieldFloat(t, issue, "epic_total_children", 2)
+		assertFieldFloat(t, issue, "epic_closed_children", 0)
+		if v, present := issue["epic_closeable"]; !present || v != false {
+			t.Errorf("default payload: epic_closeable = %v (present=%v), want false", v, present)
+		}
+
+		lean := showOnce(epic, "--count-only")
+		for _, key := range []string{"epic_total_children", "epic_closed_children", "epic_closeable"} {
+			if v, present := lean[key]; present {
+				t.Errorf("--count-only: %q must be absent, got %v", key, v)
+			}
+		}
+	})
 }
 
 // TestJSONContract_ShowCountOnlyOmitsPayloads pins the NEGATIVE half of the
