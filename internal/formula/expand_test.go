@@ -1270,10 +1270,20 @@ func TestExpansionVarRefs(t *testing.T) {
 					Labels:      []string{"team:{team}"},
 					DependsOn:   []string{"{target}.prep-{stage}"},
 					Needs:       []string{"{target.id}.gate-{gate}"},
-					// Neither field is carried into the expanded step, so
-					// nothing in them is ever substituted.
-					Notes:     "{notes_only}",
-					Condition: "{{condition_only}}",
+					// Every newly substituted field reports its names too:
+					// Notes, metadata string leaves (nested included), the
+					// gate strings and an explicit waits-for spawner
+					// reference.
+					Notes:    "Sign off by {notes_only}",
+					Metadata: map[string]interface{}{"outer": map[string]interface{}{"deep": "{deep_only}"}},
+					WaitsFor: "children-of({waits_only}.spawner)",
+					Gate:     &Gate{Type: "human", ID: "approver-{gate_only}"},
+					// Condition, Loop and OnComplete are carried unchanged,
+					// so names used only in them are never substituted and
+					// must not be reported.
+					Condition:  "{{condition_only}}",
+					Loop:       &LoopSpec{Range: "1..{loop_only}"},
+					OnComplete: &OnCompleteSpec{Vars: map[string]string{"note": "{oc_only}"}},
 					Children: []*Step{
 						{ID: "{target}.child", Title: "Work on {{feature}}"},
 					},
@@ -1285,9 +1295,12 @@ func TestExpansionVarRefs(t *testing.T) {
 		// variable is, so none of them is a name; {target.description} pulls
 		// in the formula's description, whose {release} IS substituted. The
 		// single-brace pattern also matches inside {{feature}}, so a
-		// --var feature=x is consumed there too.
+		// --var feature=x is consumed there too. {{condition_only}} stays
+		// unsubstituted because the condition evaluator owns that syntax,
+		// and {loop_only}/{oc_only} stay unsubstituted because Loop and
+		// OnComplete bind their placeholders for their own runtime phases.
 		got := strings.Join(ExpansionVarRefs(f, "main"), " ")
-		if want := "component env feature gate owner release stage team"; got != want {
+		if want := "component deep_only env feature gate gate_only notes_only owner release stage team waits_only"; got != want {
 			t.Errorf("ExpansionVarRefs() = %q, want %q", got, want)
 		}
 		if f.Steps != nil {
