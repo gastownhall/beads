@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
@@ -152,7 +153,9 @@ func WaitForServer(port int, timeout time.Duration) bool {
 		// #nosec G704 -- addr is always loopback (127.0.0.1) with a test-selected local port.
 		conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
 		if err == nil {
-			_ = conn.Close()
+			// Read the greeting before closing: an unread close resets the
+			// connection, which dolt treats as an aborted handshake (#5589).
+			_ = doltutil.DrainAndCloseProbe(conn)
 			return true
 		}
 		time.Sleep(200 * time.Millisecond)

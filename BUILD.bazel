@@ -245,6 +245,7 @@ go_test(
         "//internal/storage",
         "//internal/storage/backends",
         "//internal/storage/dolt",
+        "//internal/storage/doltutil",
         "//internal/storage/domain",
         "//internal/storage/embeddeddolt",
         "//internal/telemetry",
