@@ -206,6 +206,36 @@ func TestEmbeddedFederationPeers(t *testing.T) {
 			t.Errorf("untouched control peer tier = %q, want %q", got, "T3")
 		}
 	})
+
+	// GH#5213: the credential-key repair path. The old password cannot be
+	// decrypted with this machine's key, so the tier must be kept without
+	// reading the old row through the decrypting peer read.
+	t.Run("add_peer_key_mismatch_repair_keeps_tier", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "fdsovr")
+		bdFederation(t, bd, dir, "add-peer", "townbeta", "file:///tmp/townbeta",
+			"--user", "syncbot", "--password", "s3cret", "--sovereignty", "T2")
+
+		otherKey := make([]byte, 32)
+		if _, err := io.ReadFull(rand.Reader, otherKey); err != nil {
+			t.Fatalf("generate replacement key: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, ".beads-credential-key"), otherKey, 0600); err != nil {
+			t.Fatalf("write replacement key: %v", err)
+		}
+		if out := bdFederation(t, bd, dir, "status"); !strings.Contains(out, "Local credential error") {
+			t.Fatalf("precondition: stored credentials should not decrypt with the replaced key, got: %s", out)
+		}
+
+		bdFederation(t, bd, dir, "add-peer", "townbeta", "file:///tmp/townbeta",
+			"--user", "syncbot", "--password", "n3wsecret")
+
+		if out := bdFederation(t, bd, dir, "status"); strings.Contains(out, "Local credential error") {
+			t.Errorf("repaired credentials should decrypt with this machine's key, got: %s", out)
+		}
+		if got := storedPeerTier(t, beadsDir, "townbeta"); got != "T2" {
+			t.Errorf("stored tier after credential repair = %q, want %q (tier silently cleared)", got, "T2")
+		}
+	})
 }
 
 func TestEmbeddedFederationStatus(t *testing.T) {
