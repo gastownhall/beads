@@ -327,6 +327,178 @@ func committableIgnoredDirtyFixture(t *testing.T, rewindMain bool) (beadsDir, da
 	return beadsDir, dataDir
 }
 
+// midPassIgnoredExpansionFixture builds a fully migrated, committed embedded
+// database (both series at latest), holds one dirty child_counters row for a
+// committed durable parent, and rewinds the main cursor to 73 so migration
+// 0074 — which touches no dirty table — is pending again. The mid-pass
+// expansion is injected by the caller through the per-step migration hook.
+func midPassIgnoredExpansionFixture(t *testing.T) (beadsDir, dataDir string) {
+	t.Helper()
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
+	}
+	ctx := t.Context()
+	beadsDir = filepath.Join(t.TempDir(), ".beads")
+	dataDir = filepath.Join(beadsDir, "embeddeddolt")
+
+	store, err := embeddeddolt.Open(ctx, beadsDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := store.SetConfig(ctx, "issue_prefix", "testdb"); err != nil {
+		store.Close()
+		t.Fatalf("SetConfig(issue_prefix): %v", err)
+	}
+	parent := &types.Issue{
+		ID:        committableParentID,
+		Title:     "durable parent",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeEpic,
+	}
+	if err := store.CreateIssue(ctx, parent, "tester"); err != nil {
+		store.Close()
+		t.Fatalf("CreateIssue(parent): %v", err)
+	}
+	if _, err := store.CommitAll(ctx, "test: durable parent"); err != nil {
+		store.Close()
+		t.Fatalf("CommitAll: %v", err)
+	}
+	store.Close()
+
+	db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer func() { _ = cleanup() }()
+	for _, q := range []string{
+		"INSERT INTO child_counters (parent_id, last_child) VALUES ('" + committableParentID + "', 7) " +
+			"ON DUPLICATE KEY UPDATE last_child = 7",
+		// Pin migration 0074 back to pending. Absolute on purpose, not
+		// LatestVersion()-relative, mirroring eventsFlipVersion in the schema
+		// package's mock tests: the injected mid-pass expansion uses the
+		// migrateStepFaultHook at THIS version, so a future migration landing
+		// must re-pin this fixture and the hook below together (a newer
+		// cursor row left recorded would make migrationWorkNeeded see no
+		// work and the test fails loudly with "MigrateUp = nil").
+		"DELETE FROM schema_migrations WHERE version > 73",
+	} {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			t.Fatalf("fixture %q: %v", q, err)
+		}
+	}
+	return beadsDir, dataDir
+}
+
+// TestEmbeddedIgnoredDirtyTablesGate_MidPassExpansionRefusesLockedDirtyTable
+// covers the mid-pass backstop the #5168 design keeps: the preflight reads the
+// ignored series' pending set once, before the main series runs, so the pass
+// can only reach a table the newly-pending ignored migrations touch if that
+// pending set GREW mid-pass — here by dropping the sentinel wisps table right
+// after main 0074 applies, which re-clamps the ignored cursor to 0 and makes
+// ignored/0002 (DELETE FROM child_counters) pending over the dirty committable
+// child_counters table. The refusal is deliberately NOT *DirtyTablesError:
+// the main series has already applied and committed its steps, so a lenient
+// (working-set-reconcile) open that tolerated it would checkpoint the
+// half-applied pass. The recovery is the next open, where the preflight
+// refuses with the typed error before anything applies.
+func TestEmbeddedIgnoredDirtyTablesGate_MidPassExpansionRefusesLockedDirtyTable(t *testing.T) {
+	ctx := t.Context()
+	beadsDir, dataDir := midPassIgnoredExpansionFixture(t)
+
+	const midPassDropVersion = 74 // main 0074; see the fixture's pin note
+	restore := schema.SetMigrateStepFaultHookForTest(func(ctx context.Context, db schema.DBConn, version int) error {
+		if version != midPassDropVersion {
+			return nil
+		}
+		// Drop the ignored series' sentinel table with FK checks off: the
+		// wisp_aux FKs reference wisps, and the drop is the injected
+		// out-of-band act that expands the pending set after the preflight
+		// read it. wisp_dependencies stays, so the dependency re-key ahead
+		// of the backstop plans quietly.
+		for _, stmt := range []string{
+			"SET FOREIGN_KEY_CHECKS = 0",
+			"DROP TABLE wisps",
+			"SET FOREIGN_KEY_CHECKS = 1",
+		} {
+			if _, err := db.ExecContext(ctx, stmt); err != nil {
+				return fmt.Errorf("mid-pass expansion %q: %w", stmt, err)
+			}
+		}
+		return nil
+	})
+	defer restore()
+
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	applied, migErr := schema.MigrateUp(ctx, conn)
+	closeConn()
+
+	if migErr == nil {
+		t.Fatal("MigrateUp = nil, want the mid-pass backstop to refuse the newly pending ignored migrations over the dirty child_counters table")
+	}
+	var dirtyErr *schema.DirtyTablesError
+	if errors.As(migErr, &dirtyErr) {
+		t.Fatalf("MigrateUp error = *DirtyTablesError %v; the mid-pass refusal must stay untyped so no lenient open tolerates a half-applied pass", dirtyErr.Tables)
+	}
+	if !strings.Contains(migErr.Error(), "child_counters") || !strings.Contains(migErr.Error(), "mid-pass") {
+		t.Fatalf("MigrateUp error = %v, want a plain refusal naming child_counters as newly pending mid-pass", migErr)
+	}
+	if applied != 1 {
+		t.Fatalf("MigrateUp applied = %d, want 1 (main 0074 applied and committed before the backstop refused)", applied)
+	}
+
+	db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL (post-refusal): %v", err)
+	}
+	// The refusal applies none of the newly pending ignored migrations:
+	// ignored/0001 would re-create wisps, and the cursor rows stay as they
+	// were.
+	if got, want := ignoredCursorVersion(t, ctx, db), schema.LatestIgnoredVersion(); got != want {
+		t.Fatalf("raw ignored cursor after refusal = %d, want %d untouched", got, want)
+	}
+	var wispsTable int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisps'").Scan(&wispsTable); err != nil {
+		t.Fatalf("probe wisps: %v", err)
+	}
+	if wispsTable != 0 {
+		t.Fatal("wisps re-created, want the ignored replay to never have started")
+	}
+	// The dirty child_counters row is left uncommitted and untouched.
+	var lastChild int
+	if err := db.QueryRowContext(ctx,
+		"SELECT last_child FROM child_counters WHERE parent_id = '" + committableParentID + "'").Scan(&lastChild); err != nil {
+		t.Fatalf("read working child_counters: %v", err)
+	}
+	if lastChild != 7 {
+		t.Fatalf("working child_counters.last_child = %d, want 7", lastChild)
+	}
+	var committed int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM child_counters AS OF 'HEAD' WHERE parent_id = '" + committableParentID + "'").Scan(&committed); err != nil {
+		t.Fatalf("count committed child_counters: %v", err)
+	}
+	if committed != 0 {
+		t.Fatalf("committed child_counters rows = %d, want the dirty row to stay uncommitted", committed)
+	}
+	_ = cleanup()
+
+	// Recovery is the next open: the preflight refuses with the typed error
+	// the reconcile opens tolerate, before anything applies.
+	_, openErr := embeddeddolt.Open(ctx, beadsDir, "testdb", "main")
+	if openErr == nil {
+		t.Fatal("Open = nil, want the next open's preflight typed refusal naming child_counters")
+	}
+	var typed *schema.DirtyTablesError
+	if !errors.As(openErr, &typed) {
+		t.Fatalf("Open error = %T (%v), want error wrapping *schema.DirtyTablesError", openErr, openErr)
+	}
+	if !slices.Equal(typed.Tables, []string{"child_counters"}) {
+		t.Fatalf("DirtyTablesError.Tables = %v, want [child_counters]", typed.Tables)
+	}
+}
+
 // committableIgnoredDirtySnapshot renders everything the refused pass must
 // leave alone: both cursors row by row, HEAD, the dirty child_counters row
 // and the unrelated wisp.

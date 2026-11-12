@@ -1210,6 +1210,35 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	}
 	backfilled = backfilled || auxRekeyed
 
+	// Mid-pass backstop for the ignored series (#5168). The preflight above
+	// read the ignored series' pending set once, before the main series ran,
+	// and nothing in this pass expands it: no main migration records an
+	// ignored cursor row or removes an ignored sentinel, so the effective
+	// ignored version can only RISE mid-pass, which shrinks the pending set.
+	// This re-read defends the one claim the preflight cannot make on its
+	// own: that the pending set it judged is still the truth when the
+	// ignored series is about to apply. An out-of-band write between the two
+	// reads — a sentinel table dropped under this pass, re-clamping the
+	// cursor the reality floor way — can make ignored migrations newly
+	// pending over dirty committable tables, and replaying them would apply
+	// a DELETE/ALTER over rows whose only recovery is an ordinary commit.
+	//
+	// Deliberately a plain, untyped error, unlike the preflight: the main
+	// series has already applied and committed its steps by the time this
+	// fires, so a *DirtyTablesError here would let the lenient
+	// (working-set-reconcile) opens tolerate the refusal and their CommitAll
+	// checkpoint this half-applied pass. Recovery is the next open, whose
+	// preflight refuses with the typed error before anything applies.
+	touchedIgnoredMidPass, err := ignoredSource.pendingMigrationDirtyTables(ctx, db, dirtyBefore)
+	if err != nil {
+		return applied, fmt.Errorf("checking dirty tables against ignored migrations mid-pass: %w", err)
+	}
+	if len(touchedIgnoredMidPass) > 0 {
+		return applied, fmt.Errorf(
+			"pending ignored schema migrations became newly pending mid-pass over pre-existing dirty tables: %s (the main migrations already applied; re-run the open to refuse before any migration runs)",
+			strings.Join(touchedIgnoredMidPass, ", "))
+	}
+
 	appliedIgnored, ignoredColumnAdded, err := ignoredSource.migrate(ctx, db, 0)
 	if err != nil {
 		return applied, fmt.Errorf("ignored migrations: %w", err)
