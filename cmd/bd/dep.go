@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
+	storeissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/issueops"
@@ -340,16 +341,17 @@ Examples:
 			}
 
 			if jsonOutput {
-				return outputJSON(map[string]interface{}{
+				return outputJSON(markExternalDepEdge(map[string]interface{}{
 					"status":     "added",
 					"blocker_id": toID,
 					"blocked_id": fromID,
 					"type":       depType,
-				})
+				}, fromID, toID))
 			}
 
 			fmt.Printf("%s Added dependency: %s blocks %s\n",
 				ui.RenderPass("✓"), formatFeedbackIDParen(toID, lookupTitle(toID)), formatFeedbackIDParen(fromID, lookupTitle(fromID)))
+			fmt.Print(crossRigDepNote(fromID, toID, types.DepBlocks))
 			return nil
 		}
 
@@ -545,18 +547,49 @@ Examples:
 		}
 
 		if jsonOutput {
-			return outputJSON(map[string]interface{}{
+			return outputJSON(markExternalDepEdge(map[string]interface{}{
 				"status":        "added",
 				"issue_id":      fromID,
 				"depends_on_id": toID,
 				"type":          string(dt),
-			})
+			}, fromID, toID))
 		}
 
 		fmt.Printf("%s Added dependency: %s %s %s (%s)\n",
 			ui.RenderPass("✓"), formatFeedbackIDParen(fromID, fromTitle), depRelationFor(dt).phrase, formatFeedbackIDParen(toID, toTitle), dt)
+		fmt.Print(crossRigDepNote(fromID, toID, dt))
 		return nil
 	},
+}
+
+// markExternalDepEdge adds "external": true to the JSON a successful dep add
+// reports for one edge whose target is stored as an external reference
+// (storeissueops.IsExternalDepTarget, the rule every backend classifies by):
+// an external: capability ref or a bare id in another rig (GH#5784). A local
+// edge's shape is unchanged.
+func markExternalDepEdge(out map[string]interface{}, fromID, toID string) map[string]interface{} {
+	if storeissueops.IsExternalDepTarget(fromID, toID) {
+		out["external"] = true
+	}
+	return out
+}
+
+// crossRigDepNote is the line a successful dep add prints under its
+// confirmation for a bare cross-rig blocks or conditional-blocks edge
+// (GH#5784): the dependent's rig holds the edge, and every readiness check
+// reads the target through that rig's routes.jsonl, holding the dependent
+// while the target is open or cannot be read. A local edge, an external:
+// capability ref and an informational type, which never gates readiness, get
+// none; so does --quiet.
+func crossRigDepNote(fromID, toID string, dt types.DependencyType) string {
+	if quietFlag || IsExternalRef(toID) || !storeissueops.IsExternalDepTarget(fromID, toID) {
+		return ""
+	}
+	if dt != types.DepBlocks && dt != types.DepConditionalBlocks {
+		return ""
+	}
+	return fmt.Sprintf("  %s is in another rig: %s holds the edge, and bd ready reads %s through routes.jsonl at each check, holding %s while %s is open or cannot be read\n",
+		toID, fromID, toID, fromID, toID)
 }
 
 // warnImplicitBlocksDefault is the D1 guard: when a dep add edge is created
@@ -764,11 +797,11 @@ func addBulkDependencies(cmd *cobra.Command, file string, defaultType string) er
 	if jsonOutput {
 		out := make([]map[string]interface{}, 0, len(resolved))
 		for _, edge := range resolved {
-			out = append(out, map[string]interface{}{
+			out = append(out, markExternalDepEdge(map[string]interface{}{
 				"issue_id":      edge.IssueID,
 				"depends_on_id": edge.DependsOnID,
 				"type":          string(edge.Type),
-			})
+			}, edge.IssueID, edge.DependsOnID))
 		}
 		return outputJSON(map[string]interface{}{
 			"status":       "added",
@@ -778,6 +811,9 @@ func addBulkDependencies(cmd *cobra.Command, file string, defaultType string) er
 	}
 
 	fmt.Printf("%s Added %d dependencies\n", ui.RenderPass("✓"), len(resolved))
+	for _, edge := range resolved {
+		fmt.Print(crossRigDepNote(edge.IssueID, edge.DependsOnID, edge.Type))
+	}
 	return nil
 }
 

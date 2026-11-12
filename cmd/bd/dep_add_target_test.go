@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -848,5 +849,132 @@ func TestDepBlocksProxiedServerWarnsOnUnresolvedBlocker(t *testing.T) {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("stderr = %q, want it to contain %q", stderr, want)
 		}
+	}
+}
+
+// TestDepAddReportsCrossRigEdges is GH#5784 AC-5 over the proxied add forms
+// (positional, --blocks, --file), which share markExternalDepEdge and
+// crossRigDepNote with their direct twins: a stored cross-rig edge reports
+// "external": true in JSON, and a bare cross-rig blocks edge explains in text
+// that the dependent waits on the target; a local edge's output is unchanged.
+func TestDepAddReportsCrossRigEdges(t *testing.T) {
+	const note = "xy-999 is in another rig: be-abc holds the edge, and bd ready reads xy-999 through routes.jsonl at each check, holding be-abc while xy-999 is open or cannot be read\n"
+	present := proxiedDepAddIssues{present: map[string]bool{"xy-999": true, "xy-111": true}}
+	run := func(t *testing.T, asJSON bool, fn func(cmd *cobra.Command) error) string {
+		t.Helper()
+		withProxiedDepAddServer(t, present)
+		jsonOutput = asJSON
+		cmd := proxiedDepAddCmd(t)
+		return captureStdout(t, func() error { return fn(cmd) })
+	}
+	positional := func(target string) func(*cobra.Command) error {
+		return func(cmd *cobra.Command) error {
+			return runDepAddProxiedServer(cmd, context.Background(), []string{"be-abc", target})
+		}
+	}
+	decode := func(t *testing.T, out string) map[string]any {
+		t.Helper()
+		var got map[string]any
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatalf("stdout is not one JSON object: %v\n%s", err, out)
+		}
+		return got
+	}
+
+	t.Run("positional cross-rig", func(t *testing.T) {
+		if got := decode(t, run(t, true, positional("xy-999"))); got["external"] != true {
+			t.Errorf("JSON = %v, want external: true", got)
+		}
+		if out := run(t, false, positional("xy-999")); !strings.HasSuffix(out, note) {
+			t.Errorf("text = %q, want it to end with the cross-rig note %q", out, note)
+		}
+	})
+	t.Run("positional local is unchanged", func(t *testing.T) {
+		got := decode(t, run(t, true, positional("be-def")))
+		if _, ok := got["external"]; ok {
+			t.Errorf("JSON = %v, want no external key on a local edge", got)
+		}
+		if out := run(t, false, positional("be-def")); strings.Contains(out, "another rig") {
+			t.Errorf("text = %q, want no cross-rig note on a local edge", out)
+		}
+	})
+	t.Run("capability ref is external without a note", func(t *testing.T) {
+		if got := decode(t, run(t, true, positional("external:proj:cap"))); got["external"] != true {
+			t.Errorf("JSON = %v, want external: true", got)
+		}
+		if out := run(t, false, positional("external:proj:cap")); strings.Contains(out, "another rig") {
+			t.Errorf("text = %q, want no cross-rig note for a capability ref", out)
+		}
+	})
+	t.Run("--blocks", func(t *testing.T) {
+		blocks := func(cmd *cobra.Command) error {
+			return runDepBlocksProxiedServer(cmd, context.Background(), "xy-999", "be-abc")
+		}
+		if got := decode(t, run(t, true, blocks)); got["external"] != true {
+			t.Errorf("JSON = %v, want external: true", got)
+		}
+		if out := run(t, false, blocks); !strings.HasSuffix(out, note) {
+			t.Errorf("text = %q, want it to end with %q", out, note)
+		}
+	})
+	t.Run("--quiet drops the note, not the confirmation", func(t *testing.T) {
+		withProxiedDepAddServer(t, present)
+		quietFlag = true
+		out := captureStdout(t, func() error { return positional("xy-999")(proxiedDepAddCmd(t)) })
+		if !strings.Contains(out, "Added dependency") || strings.Contains(out, "another rig") {
+			t.Errorf("text = %q, want the confirmation without the cross-rig note", out)
+		}
+	})
+	t.Run("--file", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "edges.jsonl")
+		body := `{"from":"be-abc","to":"be-def"}` + "\n" +
+			`{"from":"be-abc","to":"xy-999"}` + "\n" +
+			`{"from":"be-abc","to":"xy-111","type":"tracks"}` + "\n"
+		if err := os.WriteFile(file, []byte(body), 0o600); err != nil {
+			t.Fatalf("write bulk edge file: %v", err)
+		}
+		bulk := func(cmd *cobra.Command) error {
+			return runDepAddBulkProxied(cmd, context.Background(), file, "blocks")
+		}
+		var got struct {
+			Dependencies []map[string]any `json:"dependencies"`
+		}
+		if err := json.Unmarshal([]byte(run(t, true, bulk)), &got); err != nil {
+			t.Fatalf("bulk JSON: %v", err)
+		}
+		if len(got.Dependencies) != 3 {
+			t.Fatalf("bulk JSON dependencies = %v, want three", got.Dependencies)
+		}
+		for i, want := range []bool{false, true, true} {
+			if _, has := got.Dependencies[i]["external"]; has != want {
+				t.Errorf("line %d JSON = %v, want external present = %v", i+1, got.Dependencies[i], want)
+			}
+		}
+		out := run(t, false, bulk)
+		if !strings.HasSuffix(out, note) || strings.Count(out, "another rig") != 1 {
+			t.Errorf("text = %q, want one note, for the blocks line only (tracks never gates readiness)", out)
+		}
+	})
+}
+
+// TestCrossRigDepNoteNamesOnlyGatingTypes pins which stored edges get the
+// cross-rig note: the two blocking types gate readiness on the target, the
+// informational ones never do, so they get none.
+func TestCrossRigDepNoteNamesOnlyGatingTypes(t *testing.T) {
+	quietFlag = false
+	for dt, want := range map[types.DependencyType]bool{
+		types.DepBlocks:            true,
+		types.DepConditionalBlocks: true,
+		types.DepWaitsFor:          false,
+		types.DepTracks:            false,
+		types.DepRelated:           false,
+		types.DepParentChild:       false,
+	} {
+		if got := crossRigDepNote("aa-1", "bb-1", dt) != ""; got != want {
+			t.Errorf("%s: note = %v, want %v", dt, got, want)
+		}
+	}
+	if note := crossRigDepNote("aa-1", "aa-2", types.DepBlocks); note != "" {
+		t.Errorf("local edge note = %q, want none", note)
 	}
 }

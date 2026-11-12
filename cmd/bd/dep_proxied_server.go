@@ -277,12 +277,12 @@ func runDepBlocksProxiedServer(cmd *cobra.Command, ctx context.Context, blockerI
 	warnProxiedUnresolvedDepTarget(ctx, blockedID, blockerID)
 
 	if jsonOutput {
-		_ = outputJSON(map[string]interface{}{
+		_ = outputJSON(markExternalDepEdge(map[string]interface{}{
 			"status":     "added",
 			"blocker_id": blockerID,
 			"blocked_id": blockedID,
 			"type":       string(types.DepBlocks),
-		})
+		}, blockedID, blockerID))
 		return nil
 	}
 
@@ -290,6 +290,7 @@ func runDepBlocksProxiedServer(cmd *cobra.Command, ctx context.Context, blockerI
 		ui.RenderPass("✓"),
 		formatFeedbackIDParen(blockerID, res.toTitle),
 		formatFeedbackIDParen(blockedID, res.fromTitle))
+	fmt.Print(crossRigDepNote(blockedID, blockerID, types.DepBlocks))
 	return nil
 }
 
@@ -352,12 +353,12 @@ func runDepAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	warnProxiedUnresolvedDepTarget(ctx, fromID, toID)
 
 	if jsonOutput {
-		_ = outputJSON(map[string]interface{}{
+		_ = outputJSON(markExternalDepEdge(map[string]interface{}{
 			"status":        "added",
 			"issue_id":      fromID,
 			"depends_on_id": toID,
 			"type":          string(dt),
-		})
+		}, fromID, toID))
 		return nil
 	}
 
@@ -367,6 +368,7 @@ func runDepAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 		depRelationFor(dt).phrase,
 		formatFeedbackIDParen(toID, res.toTitle),
 		dt)
+	fmt.Print(crossRigDepNote(fromID, toID, dt))
 	return nil
 }
 
@@ -421,11 +423,11 @@ func runDepAddBulkProxied(cmd *cobra.Command, ctx context.Context, file, default
 	if jsonOutput {
 		out := make([]map[string]interface{}, 0, len(depEdges))
 		for _, edge := range depEdges {
-			out = append(out, map[string]interface{}{
+			out = append(out, markExternalDepEdge(map[string]interface{}{
 				"issue_id":      edge.IssueID,
 				"depends_on_id": edge.DependsOnID,
 				"type":          string(edge.Type),
-			})
+			}, edge.IssueID, edge.DependsOnID))
 		}
 		_ = outputJSON(map[string]interface{}{
 			"status":       "added",
@@ -436,6 +438,9 @@ func runDepAddBulkProxied(cmd *cobra.Command, ctx context.Context, file, default
 	}
 
 	fmt.Printf("%s Added %d dependencies\n", ui.RenderPass("✓"), len(depEdges))
+	for _, edge := range depEdges {
+		fmt.Print(crossRigDepNote(edge.IssueID, edge.DependsOnID, edge.Type))
+	}
 	return nil
 }
 
