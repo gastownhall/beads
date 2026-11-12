@@ -29,6 +29,8 @@ go_test(
         "advice_test.go",
         "condition_test.go",
         "controlflow_test.go",
+        "expand_repro_test.go",
+        "expand_step_fields_test.go",
         "expand_test.go",
         "intent_test.go",
         "parser_test.go",

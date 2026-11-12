@@ -214,16 +214,45 @@ func expandStepWith(target *Step, template []*Step, depth int, subst func(string
 	result := make([]*Step, 0, len(template))
 
 	for _, tmpl := range template {
-		expanded := &Step{
-			ID:             subst(substituteTargetPlaceholders(tmpl.ID, target)),
-			Title:          subst(substituteTargetPlaceholders(tmpl.Title, target)),
-			Description:    subst(substituteTargetPlaceholders(tmpl.Description, target)),
-			Type:           tmpl.Type,
-			Priority:       tmpl.Priority,
-			Assignee:       subst(tmpl.Assignee),
-			SourceFormula:  tmpl.SourceFormula,  // Preserve source from template
-			SourceLocation: tmpl.SourceLocation, // Preserve source location
-		}
+		// Start from a clone of the template step so every Step field the
+		// substitution blocks below do not name is carried rather than
+		// silently zeroed: the partial struct literal this loop used to
+		// build dropped Notes, Metadata, WaitsFor, Condition, Gate, Loop and
+		// OnComplete from every expanded step (GH#6433).
+		//
+		// Field groups, per Step's doc comments:
+		//   - substituted: ID, Title, Description, Assignee, Labels,
+		//     DependsOn, Needs (below) and, with the expansion's own
+		//     {target}/{var} placeholders, the expansion-facing strings
+		//     added with the carry fix.
+		//   - carried unchanged: Type, Priority, Condition (its {{var}}
+		//     syntax belongs to the condition evaluator, not to
+		//     expansion), Loop (Range/Until bind at cook/runtime), the
+		//     clone's OnComplete copy, and provenance.
+		//   - cleared: Expand/ExpandVars (below) and the slices the blocks
+		//     below rebuild.
+		expanded := cloneStep(tmpl)
+
+		// Fields the expansion substitutes (existing behavior).
+		expanded.ID = subst(substituteTargetPlaceholders(tmpl.ID, target))
+		expanded.Title = subst(substituteTargetPlaceholders(tmpl.Title, target))
+		expanded.Description = subst(substituteTargetPlaceholders(tmpl.Description, target))
+		expanded.Assignee = subst(tmpl.Assignee)
+
+		// Expand/ExpandVars are never carried into expanded output: the
+		// inline-expansion path re-scans the steps it produces, so an
+		// expansion template that kept them would recursively re-expand
+		// itself. Honoring them is a feature decision, out of scope here.
+		expanded.Expand = ""
+		expanded.ExpandVars = nil
+
+		// The dependency-ish slices are rebuilt with substitution below;
+		// clear the clone's copies so an absent field keeps its nil
+		// behavior.
+		expanded.Labels = nil
+		expanded.DependsOn = nil
+		expanded.Needs = nil
+		expanded.Children = nil
 
 		// Substitute placeholders in labels
 		if len(tmpl.Labels) > 0 {
@@ -245,6 +274,17 @@ func expandStepWith(target *Step, template []*Step, depth int, subst func(string
 			expanded.Needs = make([]string, len(tmpl.Needs))
 			for i, n := range tmpl.Needs {
 				expanded.Needs[i] = subst(substituteTargetPlaceholders(n, target))
+			}
+		}
+
+		// Transform-added Needs provenance rebuilds with the same
+		// substitution as Needs, so a carried generated edge stays a
+		// subset of it (expand.go's propagateTargetDeps and
+		// FilterStepsByCondition depend on that classification).
+		if len(tmpl.generatedNeeds) > 0 {
+			expanded.generatedNeeds = make([]string, len(tmpl.generatedNeeds))
+			for i, n := range tmpl.generatedNeeds {
+				expanded.generatedNeeds[i] = subst(substituteTargetPlaceholders(n, target))
 			}
 		}
 
