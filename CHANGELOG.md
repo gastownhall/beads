@@ -1240,13 +1240,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
   gt-123`) without verifying it, but the Orphaned Dependencies check, its
-  `--fix` repair and the `--deep` Dependency Integrity and Parent Consistency
-  checks exempted only `external:` refs. They now also leave such a target
-  alone when its prefix differs from its source's and is neither this
-  database's `issue_prefix` nor in `allowed_prefixes`; the check counts these
-  edges as "not verifiable here". A missing target under a held prefix is
-  still an orphan, and under `--deep` an edge whose source is missing is
-  still broken.
+  `--fix` repair and the `--deep` Dependency Integrity check exempted only
+  `external:` refs, and `--deep` Parent Consistency exempted nothing. They now
+  leave such a target alone when its prefix differs from its source's and is
+  neither this database's `issue_prefix` nor in `allowed_prefixes`, and Parent
+  Consistency also skips `external:` parents; the checks count these edges as
+  "not verifiable here". A missing target under a held prefix is still an
+  orphan, and under `--deep` an edge whose source is missing is still broken.
 - **The aux row id re-key again skips tables with dolthub/dolt#11131
   encoding drift instead of aborting the migration on every open** (#8372).
   The Dolt 2.6 engine reports the drift as `malformed out-of-band adaptive
