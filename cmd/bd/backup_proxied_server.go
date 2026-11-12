@@ -365,7 +365,10 @@ func runBackupRestoreProxied(ctx context.Context, dir string, force bool) error 
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
-	backupURL, err := versioncontrolops.DirToFileURL(dir)
+	// The command's preflight already checked dir; checking it again here,
+	// while the topology is still up, keeps the URL restored from the one
+	// checked, and covers any other caller.
+	backupURL, err := versioncontrolops.RestoreSourceURL(dir)
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}

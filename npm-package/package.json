@@ -9,8 +9,9 @@
   "scripts": {
     "postinstall": "node scripts/postinstall.js",
     "test": "node scripts/test.js",
+    "test:postinstall": "node test/redirect-race.test.js",
     "test:integration": "node test/integration.test.js",
-    "test:all": "npm test && npm run test:integration"
+    "test:all": "npm test && npm run test:postinstall && npm run test:integration"
   },
   "keywords": [
     "issue-tracker",
