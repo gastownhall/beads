@@ -141,6 +141,89 @@ func TestEmbeddedDirtyTablesGate_BlocksReopenThenWorkingSetReconcileRecovers(t *
 	}
 }
 
+// TestEmbeddedIgnoredDirtyTablesGate_WorkingSetReconcileRecovers covers
+// gastownhall/beads#5168: the ignored-source twin of the #4566 guard. A
+// dolt_ignore'd wisp table that is tracked and dirty, touched by a pending
+// ignored migration, must not leave "bd dolt commit" (a working-set-reconcile
+// open) unable to open the store: the reconcile open must succeed, its commit
+// must clear the dirty state, and a plain reopen must then migrate.
+func TestEmbeddedIgnoredDirtyTablesGate_WorkingSetReconcileRecovers(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
+	}
+
+	ctx := t.Context()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	dataDir := filepath.Join(beadsDir, "embeddeddolt")
+
+	store, err := embeddeddolt.Open(ctx, beadsDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := store.SetConfig(ctx, "issue_prefix", "testdb"); err != nil {
+		store.Close()
+		t.Fatalf("SetConfig(issue_prefix): %v", err)
+	}
+	if err := store.Commit(ctx, "bd init"); err != nil {
+		store.Close()
+		t.Fatalf("Commit (init): %v", err)
+	}
+	wisp := &types.Issue{
+		ID:        "testdb-wisp-1",
+		Title:     "wisp with real comments",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+		Ephemeral: true,
+	}
+	if err := store.CreateIssue(ctx, wisp, "tester"); err != nil {
+		store.Close()
+		t.Fatalf("CreateIssue(wisp): %v", err)
+	}
+	if _, err := store.AddIssueComment(ctx, wisp.ID, "tester", "first"); err != nil {
+		store.Close()
+		t.Fatalf("AddIssueComment(first): %v", err)
+	}
+	store.Close()
+
+	// Track the wisp tables despite dolt_ignore (the reporter's store had
+	// them in HEAD), then leave wisp_comments dirty with a second comment.
+	db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	for _, stmt := range []string{
+		"CALL DOLT_ADD('-f', 'wisps', 'wisp_comments')",
+		"CALL DOLT_COMMIT('-m', 'track wisp tables')",
+		"INSERT INTO wisp_comments (id, issue_id, author, text, created_at) VALUES ('wc-dirty', 'testdb-wisp-1', 'tester', 'second', NOW())",
+		// Regress the ignored cursor so ignored/0024 (ALTER TABLE
+		// wisp_comments) is pending again.
+		"DELETE FROM ignored_schema_migrations WHERE version > 23",
+	} {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			_ = cleanup()
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	_ = cleanup()
+
+	reconcileStore, err := embeddeddolt.OpenForWorkingSetReconcile(ctx, beadsDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenForWorkingSetReconcile = %v; want the reconcile open (bd dolt commit) to recover dirty dolt_ignore'd wisp tables like the #4566 main-source guard", err)
+	}
+	if err := reconcileStore.Commit(ctx, "checkpoint"); err != nil {
+		reconcileStore.Close()
+		t.Fatalf("Commit: %v", err)
+	}
+	reconcileStore.Close()
+
+	migrated, err := embeddeddolt.Open(ctx, beadsDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("Open (post-commit reopen): %v", err)
+	}
+	migrated.Close()
+}
+
 // schemaVersion reads the current main-source schema cursor via a short-lived
 // raw SQL connection.
 func schemaVersion(ctx context.Context, dataDir, database string) (int, error) {
