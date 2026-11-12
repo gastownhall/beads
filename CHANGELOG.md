@@ -1270,8 +1270,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   request's actor, the same value the request's own record carries, on every
   engine and on the post-commit recheck. A derived record still names no one
   when no request is behind it (a pull's or merge's recompute,
-  `bd recompute-blocked`, `bd doctor --fix`, `bd gc` wisp deletes,
-  `bd repo remove`), when the request itself named no actor (for example a
+  `bd recompute-blocked`, `bd doctor --fix`, the Decay-phase deletes of
+  `bd gc` outside proxied-server mode, `bd repo remove`), when the request itself named no actor (for example a
   served delete or sweep sent without one), or when it comes from a
   post-commit recheck covering writes by different actors. No wire shape
   changes: `actor` was already an optional member of every record, so

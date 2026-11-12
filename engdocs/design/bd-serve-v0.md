@@ -298,7 +298,8 @@ caller's verified subject gets that subject on every record of the change,
 derived ones included, from the same source, and never a caller-supplied
 value. A record carries no `actor` only when no actor is behind it: no request
 at all (a pull's or merge's recompute, `bd recompute-blocked`,
-`bd doctor --fix`, `bd gc` wisp deletes, `bd repo remove`); a request that
+`bd doctor --fix`, the Decay-phase deletes of `bd gc` outside proxied-server
+mode, `bd repo remove`); a request that
 named none (a `delete` or `sweep` sent without `actor`, which both accept); or
 a post-commit recheck that settles writes by different actors in one
 transaction, which names no one rather than one of them. This is not a
