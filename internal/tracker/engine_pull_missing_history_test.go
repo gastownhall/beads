@@ -195,3 +195,70 @@ func TestEnginePullMissingHistoryPreservesLocalEdits(t *testing.T) {
 		})
 	}
 }
+
+// TestEnginePullMissingHistoryBulkRowsKeepGuards pins AC-2 of #7294: when the
+// incremental bulk fetch returns the stale remote of an older issue with
+// missing history and unpushed local edits, as an overlap-only row or as a
+// row updated after last_sync, missing history grants no hydration exemption
+// and the conflict and overlap guards keep the local edits. Conflict
+// resolution's explicit overwrite authorization still applies.
+func TestEnginePullMissingHistoryBulkRowsKeepGuards(t *testing.T) {
+	for _, row := range []struct {
+		name    string
+		updated time.Time
+	}{
+		{name: "overlap-only row", updated: overlapLastSync.Add(-30 * time.Second)},
+		{name: "row updated after last_sync", updated: overlapLastSync.Add(5 * time.Minute)},
+	} {
+		for _, dryRun := range []bool{true, false} {
+			name := row.name + "/real"
+			if dryRun {
+				name = row.name + "/dry-run"
+			}
+			t.Run(name, func(t *testing.T) {
+				ctx := context.Background()
+				edited := linkedIssue("bd-edited", "EXT-1", "local edit not yet pushed",
+					overlapLastSync.Add(-24*time.Hour), overlapLastSync.Add(10*time.Minute))
+				store := newMissingHistoryStore(edited)
+				before := snapshotIssues(edited)
+				mock, _ := newOverlapTracker(staleRemote("EXT-1", row.updated))
+
+				result, err := NewEngine(mock, store, "sync").Sync(ctx, SyncOptions{Pull: true, DryRun: dryRun})
+				if err != nil {
+					t.Fatalf("Sync: %v", err)
+				}
+				if mock.fetchCalls != 0 {
+					t.Errorf("FetchIssue calls = %d, want 0", mock.fetchCalls)
+				}
+				if result.PullStats.Candidates != 1 || result.PullStats.Updated != 0 || result.PullStats.Skipped != 1 {
+					t.Errorf("PullStats = %+v, want the bulk row a candidate the guards skip", result.PullStats)
+				}
+				if len(store.updates) != 0 {
+					t.Errorf("transaction writes = %v, want none", store.updates)
+				}
+				assertIssuesUnchanged(t, before, edited)
+			})
+		}
+	}
+
+	// Control: conflict resolution that picks the external side still
+	// authorizes the overwrite, history or not.
+	t.Run("external conflict resolution still overwrites", func(t *testing.T) {
+		ctx := context.Background()
+		edited := linkedIssue("bd-edited", "EXT-1", "local edit not yet pushed",
+			overlapLastSync.Add(-24*time.Hour), overlapLastSync.Add(10*time.Minute))
+		store := newMissingHistoryStore(edited)
+		mock, _ := newOverlapTracker(staleRemote("EXT-1", overlapLastSync.Add(5*time.Minute)))
+
+		result, err := NewEngine(mock, store, "sync").Sync(ctx, SyncOptions{
+			Pull: true, Push: true, ConflictResolution: ConflictExternal,
+		})
+		if err != nil {
+			t.Fatalf("Sync: %v", err)
+		}
+		if result.Stats.Conflicts != 1 || result.PullStats.Updated != 1 || edited.Title != "stale remote title EXT-1" {
+			t.Fatalf("Stats = %+v, PullStats = %+v, title = %q, want the external side applied by conflict resolution",
+				result.Stats, result.PullStats, edited.Title)
+		}
+	})
+}
