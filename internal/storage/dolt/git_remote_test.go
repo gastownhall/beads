@@ -2432,3 +2432,109 @@ func TestGitRemotePeerDeclinedConflictPullAbortsMerge(t *testing.T) {
 		t.Errorf("local notes = %q after the declined peer pull; want %q", notes, "from A local")
 	}
 }
+
+// seedOpenConflictedMerge persists an operator's open conflicted merge on the
+// store's branch — the state a session is left in after a halted DOLT_MERGE it
+// has not resolved or aborted — with nothing remote involved. This is the
+// precondition the AC-4 behavior must protect: a pull that stages or merges
+// over it destroys work the operator still has in flight. Returns the branch
+// HEAD, which the conflict leaves unmoved.
+func seedOpenConflictedMerge(t *testing.T, store *DoltStore, issueID string) (preHead string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	db := store.db
+
+	// The store's session must end on main, the branch this store pulls into.
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := db.ExecContext(ctx, q, args...); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	ins := func(title string) {
+		t.Helper()
+		exec("INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES (?, ?, '', '', '', '', 'open', 2, 'task')", issueID, title)
+	}
+	ins("Operator issue")
+	exec("CALL DOLT_COMMIT('-Am', 'operator base')")
+	localBranch := "operator_wip"
+	exec("CALL DOLT_BRANCH(?, 'HEAD~1')", localBranch)
+	exec("CALL DOLT_CHECKOUT(?)", localBranch)
+	ins("Operator issue (wip)")
+	exec("CALL DOLT_COMMIT('-Am', 'operator wip')")
+	exec("CALL DOLT_CHECKOUT('main')")
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, "SET @@dolt_allow_commit_conflicts = 1"); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("allow commit conflicts: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, "CALL DOLT_MERGE(?)", localBranch); err != nil {
+		_ = tx.Rollback()
+		t.Logf("merge returned: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("persist conflicted working set: %v", err)
+	}
+	var head string
+	if err := db.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&head); err != nil {
+		t.Fatalf("read HEAD: %v", err)
+	}
+	var isMerging bool
+	if err := db.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&isMerging); err != nil {
+		t.Fatalf("read merge status: %v", err)
+	}
+	if !isMerging {
+		t.Fatal("setup: the persisted conflicted merge is not open — the fixture is broken")
+	}
+	return head
+}
+
+// TestPullRefusesOverConflictedWorkingSet is AC-4: a pull over an
+// already-open conflicted merge — an operator's halted DOLT_MERGE they have
+// not resolved or aborted — must report that merge with its inspect/abort
+// remedy and refuse BEFORE staging or running any transport, preserving the
+// merge untouched. On the bug, the pull's pre-pull auto-commit staged over
+// the conflict and failed with Dolt's bare "Merge conflict detected"
+// autocommit rejection, naming neither the merge nor any remedy — the exact
+// message every later write also produced, which is why one open merge read
+// as a dead store.
+func TestPullRefusesOverConflictedWorkingSet(t *testing.T) {
+	store, _, cleanup := setupEmbeddedGitRemote(t)
+	defer cleanup()
+	requireGitProtocolRemote(t, store, "origin")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	preHead := seedOpenConflictedMerge(t, store, "gh7839-ac4")
+
+	pullErr := store.Pull(ctx)
+	if pullErr == nil {
+		t.Fatal("Pull over an open conflicted merge reported success")
+	}
+	// The refusal names the open merge and the operator's remedies. The
+	// message, not the error type, is asserted so this test also pins the
+	// bug's bare autocommit rejection as its red.
+	msg := pullErr.Error()
+	for _, want := range []string{"merge is open", "bd conflicts list", "DOLT_MERGE('--abort')"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the pull-over-open-merge refusal %q does not name %q", msg, want)
+		}
+	}
+
+	// The merge is preserved untouched, exactly as the operator left it.
+	if isMerging, tables := freshSessionMergeState(t, store); !isMerging || tables == 0 {
+		t.Errorf("fresh session after the refused pull: is_merging=%v, %d conflict table(s); want the operator's open merge preserved with its conflicts", isMerging, tables)
+	}
+	var head string
+	if err := store.db.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&head); err != nil {
+		t.Fatalf("read post-pull HEAD: %v", err)
+	}
+	if head != preHead {
+		t.Errorf("HEAD = %s after the refused pull; want the untouched %s", head, preHead)
+	}
+}

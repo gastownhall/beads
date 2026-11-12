@@ -4120,6 +4120,13 @@ func (s *DoltStore) Commit(ctx context.Context, message string) error {
 // user-initiated action CommitPending ('bd dolt commit') already performs, so it
 // does not widen the concurrent-writer race GH#2455 guards against.
 func (s *DoltStore) commitBeforePull(ctx context.Context, message string) error {
+	// GH#7839: never stage over an already-open conflicted merge — that is
+	// the write outage, not the recovery. The diagnosis names the merge and
+	// its remedy; an unblocked open merge falls through and is concluded by
+	// the commit below (the operator resolved it).
+	if err := s.refuseOverOpenMerge(ctx); err != nil {
+		return err
+	}
 	return s.commitWorkingSet(ctx, message, configIncludeUserKVOnly)
 }
 

@@ -458,3 +458,34 @@ func (s *DoltStore) abortDeclinedCLIPullMerge(ctx context.Context, state openMer
 		}
 	}
 }
+
+// refuseOverOpenMerge is the narrow, read-only diagnosis commitBeforePull runs
+// before staging (GH#7839): pulling over an already-open conflicted merge is
+// what turns one declined conflict into a write outage — staging over the
+// conflict fails with Dolt's "Merge conflict detected" autocommit rejection,
+// which names neither the open merge nor any remedy. The diagnosis names the
+// merge's refs and conflicted tables and the operator's choices, and the
+// caller refuses the pull without staging anything, preserving the merge and
+// its conflicts untouched. A merge with no row, schema or constraint blockers
+// is NOT refused: today's commit path concludes it normally (the operator
+// resolved it; the pre-pull commit is exactly the concluding commit). A
+// diagnostic read failure falls through to today's commit path rather than
+// failing the pull.
+func (s *DoltStore) refuseOverOpenMerge(ctx context.Context) error {
+	state, err := s.readOpenMergeState(ctx)
+	if err != nil || !state.merging {
+		return nil
+	}
+	conflicts, cErr := versioncontrolops.GetConflicts(ctx, s.db)
+	blockers, bErr := versioncontrolops.GetMergeBlockers(ctx, s.db)
+	if cErr != nil || bErr != nil {
+		return nil
+	}
+	if len(conflicts) == 0 && !blockers.Blocked() {
+		// Unblocked open merge: the commit below concludes it.
+		return nil
+	}
+	return &cliPullSettlementError{
+		state: state.describe() + " with conflicts in " + strings.Join(conflictTables(conflicts, blockers), ", ") + "; the pre-pull auto-commit was refused so the merge and its conflicts are preserved",
+	}
+}

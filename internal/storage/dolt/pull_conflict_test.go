@@ -2,6 +2,7 @@ package dolt
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
@@ -449,5 +450,118 @@ func TestFinishCLIPull_DeclinedConflictAbortsMerge(t *testing.T) {
 	}
 	if postHead != preHead {
 		t.Errorf("HEAD moved from %s to %s; want the pre-pull branch", preHead, postHead)
+	}
+}
+
+// seedLocalBranchConflictedMerge persists an open conflicted merge on the
+// store's branch, sourced from a local branch — another session's deliberate
+// work — and returns the branch HEAD with the merge open.
+func seedLocalBranchConflictedMerge(t *testing.T, store *DoltStore) (preHead string) {
+	t.Helper()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	db := store.db
+
+	var currentBranch string
+	if err := db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&currentBranch); err != nil {
+		t.Fatalf("active branch: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES ('w5-open-merge', 'Local Title', '', '', '', '', 'open', 2, 'task')"); err != nil {
+		t.Fatalf("insert local issue: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'local issue')"); err != nil {
+		t.Fatalf("commit local: %v", err)
+	}
+	remoteBranch := currentBranch + "_w5_source"
+	if _, err := db.ExecContext(ctx, "CALL DOLT_BRANCH(?, 'HEAD~1')", remoteBranch); err != nil {
+		t.Fatalf("create source branch: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", remoteBranch); err != nil {
+		t.Fatalf("checkout source branch: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES ('w5-open-merge', 'Source Title', '', '', '', '', 'open', 2, 'task')"); err != nil {
+		t.Fatalf("insert source issue: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'source issue')"); err != nil {
+		t.Fatalf("commit source: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", currentBranch); err != nil {
+		t.Fatalf("checkout current branch: %v", err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, "SET @@dolt_allow_commit_conflicts = 1"); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("allow commit conflicts: %v", err)
+	}
+	_, mergeErr := tx.ExecContext(ctx, "CALL DOLT_MERGE(?)", remoteBranch)
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("persist conflicted working set: %v (merge: %v)", err, mergeErr)
+	}
+	var head string
+	if err := db.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&head); err != nil {
+		t.Fatalf("read HEAD: %v", err)
+	}
+	return head
+}
+
+// TestRunCLIPullSettledRefusesOverOpenMerge is AC-4's transport half: with a
+// merge already open on the store branch, the CLI pull wrapper refuses
+// BEFORE the subprocess runs — a pull that merged over an operator's open
+// conflicted merge would destroy work they still have in flight — and the
+// refusal preserves the merge and its conflicts untouched (GH#7839).
+func TestRunCLIPullSettledRefusesOverOpenMerge(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+	db := store.db
+
+	preHead := seedLocalBranchConflictedMerge(t, store)
+	var isMerging bool
+	if err := db.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&isMerging); err != nil || !isMerging {
+		t.Fatalf("setup: open conflicted merge expected, got is_merging=%v err=%v", isMerging, err)
+	}
+
+	pullRan := false
+	err := store.runCLIPullSettled(ctx, "origin", func() error {
+		pullRan = true
+		return nil
+	})
+	if pullRan {
+		t.Error("the CLI pull subprocess ran over an already-open merge")
+	}
+	if err == nil {
+		t.Fatal("runCLIPullSettled over an open merge returned nil; want the refusal")
+	}
+	if msg := err.Error(); !strings.Contains(msg, "already open before this pull") {
+		t.Errorf("refusal = %q; want it to say the merge was already open before this pull", msg)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "DOLT_MERGE('--abort')") {
+		t.Errorf("refusal = %q; want it to name the operator's abort remedy", msg)
+	}
+
+	// The merge is preserved exactly: still open, conflicts intact, HEAD unmoved.
+	if err := db.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&isMerging); err != nil || !isMerging {
+		t.Errorf("is_merging=%v err=%v after the refusal; want the open merge preserved", isMerging, err)
+	}
+	var conflicts int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_conflicts_issues").Scan(&conflicts); err != nil {
+		t.Fatalf("count conflicts after the refusal: %v", err)
+	}
+	if conflicts == 0 {
+		t.Error("the operator's conflicts were cleared by the refused pull")
+	}
+	var head string
+	if err := db.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&head); err != nil {
+		t.Fatalf("read HEAD after the refusal: %v", err)
+	}
+	if head != preHead {
+		t.Errorf("HEAD = %s after the refusal; want the untouched %s", head, preHead)
 	}
 }
