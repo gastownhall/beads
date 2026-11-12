@@ -193,7 +193,11 @@ schema version mismatch: database is at v45, binary knows up to v42 (3 migration
 **When this fires:** only when the database schema is *ahead* of the binary
 (a newer binary migrated the database; this binary doesn't know those
 migrations). Normal upgrades, where the binary migrates the database forward,
-are unaffected.
+are unaffected. The check runs whenever a store opens: embedded, server mode,
+a proxied-server workspace, and `bd serve` at startup. A `bd serve` that was
+already running when a newer `bd` migrated the database keeps serving until it
+is restarted, and proxied `--dry-run`/`--inspect` previews don't check, so
+restart long-running servers after migrating with a newer `bd`.
 
 **Escape hatch:** `BD_IGNORE_SCHEMA_SKEW=1` (or `--ignore-schema-skew`) bypasses
 the guard with a warning on stderr. Use this only if you know the forward

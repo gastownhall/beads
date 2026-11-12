@@ -5915,6 +5915,20 @@ paths:
         ## What this plane refuses, and what it does not
 
 
+        A key `config.yaml` owns is a `400` and NOTHING is written: the
+        startup settings and the tracker secrets (`github.token`,
+        `linear.api_key`, `jira.api_token`, `gitlab.token`, `ado.pat`,
+        `notion.token`, ...) and every key under `export.`, `dolt.`,
+        `routing.`, `sync.` and the rest of the yaml-only list. This plane's
+        table is replicated by `bd dolt push`, `pull` and clone, so a secret
+        stored here would reach every remote, and a non-secret yaml-only key
+        stored here is a row no reader consults. The `detail` names the key and
+        `config.yaml` and never the value; set the key with
+        `bd config set <key> <value>` in the workspace instead. A row an older
+        server stored under such a key is still removed by
+        `DELETE /v0/beads/config/{key}`.
+
+
         `issue_prefix` — in either spelling — is a `400` and NOTHING is written.
         The prefix is owned by `bd init --prefix`, `bd bootstrap` and
         `bd rename-prefix`, each of which does work this plane cannot: rewriting
@@ -5933,15 +5947,16 @@ paths:
         and the projection are one durable act or neither happens.
 
 
-        A KEY WHOSE NAME MARKS IT CREDENTIAL-BEARING IS WRITABLE, and that is
+        A KEY WHOSE NAME MARKS IT CREDENTIAL-BEARING AND THAT `config.yaml`
+        DOES NOT OWN IS WRITABLE, and that is
         deliberate rather than an oversight in the redaction posture. Redaction
         is a rule about DISCLOSURE: it withholds a value from a reader because a
         bearer on this surface is shared and surface-wide and cannot decide that
         one caller may read a credential and another may not. A writer supplies
         the value, so refusing the write protects nothing that is not already in
         the caller's hand — and it would leave a workspace whose credentials can
-        be seen to EXIST and never configured. The role refuses no such key
-        either; `bd config set`'s own secret guard is about writing a credential
+        be seen to EXIST and never configured. The role refuses no key for being
+        credential-bearing either; `bd config set`'s own secret guard is about writing a credential
         into a git-tracked `config.yaml`, which is a different plane with a
         different hazard, and it returns clean for every key this operation
         reaches.
@@ -5957,14 +5972,12 @@ paths:
         two different things about `redacted`.
 
 
-        A key belonging to another SOURCE is not refused here and is worth
-        knowing about: `export.*`, `dolt.*`, `federation.*`, `storage-class.*`
-        and the rest of the yaml-only list live in `config.yaml`, and
-        `beads.role` lives in git config. Written through this operation they
-        land a row no reader consults. The role does not police that routing and
-        neither can this server — three of the five sources `bd config show`
-        reads are files on the CLIENT's machine, which is the same reason that
-        command has no operation here.
+        This server cannot ROUTE a key to another source — three of the five
+        sources `bd config show` reads are files on the CLIENT's machine, which
+        is the same reason that command has no operation here — so a yaml-only
+        key is refused rather than redirected. `beads.role`, which lives in git
+        config, is not refused: written through this operation it lands a row no
+        reader consults, and carries no secret.
 
 
         Hooks do not fire, as for every write on this surface — and on this plane
@@ -5998,12 +6011,13 @@ paths:
             is not a string or is longer than the 65535-byte column, a `key`
             that is empty after trimming, carries a
             control character or is longer than the 255-character column — or a
-            value this workspace's own validation refuses, which is `issue_prefix`
-            in either spelling and a `status.custom` that does not parse. NOTHING
-            IS WRITTEN in any of these cases.
+            value this workspace's own validation refuses, which is a key
+            `config.yaml` owns, `issue_prefix` in either spelling and a
+            `status.custom` that does not parse. NOTHING IS WRITTEN in any of
+            these cases.
 
 
-            The role's two refusals carry no `param`, unlike the transport's
+            The role's refusals carry no `param`, unlike the transport's
             above: telling them apart would take a second copy of the protected-key
             vocabulary on this side of the seam, and `detail` carries the role's
             own sentence, which names what to send instead.

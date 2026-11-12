@@ -3,11 +3,13 @@ package httpapi
 // The default surface: what a server built from a zero Config answers on paths
 // no v0 operation owns.
 //
-// Every other server invariant in this package iterates routeTable, so a
-// handler mounted outside the table, or a catch-all wrapper that answers
-// instead of falling through, is invisible to all of them on a default server.
-// A whole call namespace mounted on every server once passed the entire suite
-// that way. This file closes that hole by asking the wire.
+// Before the mount table (mount_table_test.go), every other server invariant
+// in this package iterated routeTable, so a handler mounted outside the table,
+// or a catch-all wrapper that answers instead of falling through, was
+// invisible to all of them on a default server. A whole call namespace mounted
+// on every server once passed the entire suite that way. This file closes that
+// hole by asking the wire, which still sees what the mount censuses cannot:
+// what a default server answers on a path no mount names.
 //
 // The sweep sends real loopback requests through newTestServer: two postures
 // (no auth; a token file, with no credential sent) times twelve paths times

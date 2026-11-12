@@ -111,6 +111,16 @@ func TestProjectStampMismatchRefusesEveryEnforcedRoute(t *testing.T) {
 			assertProjectMismatch(t, resp, serverProjectID)
 		})
 	}
+	// And every other operation a mount answers, with no body: the stamp is
+	// compared before the handler reads one.
+	for _, e := range mountEndpoints(t, ts.mounts()) {
+		if e.row == nil || e.row.projectExempt {
+			continue
+		}
+		t.Run(e.row.op, func(t *testing.T) {
+			assertProjectMismatch(t, ts.stamped(t, e.method, e.path, "other-proj", ""), serverProjectID)
+		})
+	}
 
 	// The whole point of putting the check ahead of the semaphore and the
 	// handler: a misdirected request buys no database work.
@@ -261,7 +271,7 @@ func TestCapabilitiesAdvertiseProjectEnforce(t *testing.T) {
 // workspace data at all, liveness and the identity handshake, are exempt.
 func TestProjectExemptRoutesAreExactlyHealthAndContext(t *testing.T) {
 	var exempt []string
-	for _, rt := range routeTable {
+	for _, rt := range defaultRows(t) {
 		if rt.projectExempt {
 			exempt = append(exempt, rt.op)
 		}
@@ -278,7 +288,7 @@ func TestProjectExemptRoutesAreExactlyHealthAndContext(t *testing.T) {
 	// project-stamp-enforced. Guard it by name so a future edit cannot quietly
 	// exempt the stream by flipping the column it no longer tracks.
 	var sawWatch bool
-	for _, rt := range routeTable {
+	for _, rt := range defaultRows(t) {
 		if rt.op != OpWatchEvents {
 			continue
 		}

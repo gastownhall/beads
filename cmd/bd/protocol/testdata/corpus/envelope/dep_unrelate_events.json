@@ -1,0 +1,36 @@
+{
+  "data": [
+    {
+      "actor": "protocol-test",
+      "comment": "Added label: corpus-native",
+      "created_at": "<TS>",
+      "event_type": "label_added",
+      "issue_id": "corpus-relfrom"
+    },
+    {
+      "actor": "protocol-test",
+      "created_at": "<TS>",
+      "event_type": "created",
+      "issue_id": "corpus-relfrom",
+      "new_value": "",
+      "old_value": ""
+    },
+    {
+      "actor": "protocol-test",
+      "created_at": "<TS>",
+      "event_type": "dependency_added",
+      "issue_id": "corpus-relfrom",
+      "new_value": "Added dependency: corpus-relfrom relates-to corpus-relto",
+      "old_value": ""
+    },
+    {
+      "actor": "protocol-test",
+      "created_at": "<TS>",
+      "event_type": "dependency_removed",
+      "issue_id": "corpus-relfrom",
+      "new_value": "Removed dependency on corpus-relto",
+      "old_value": ""
+    }
+  ],
+  "schema_version": 1
+}

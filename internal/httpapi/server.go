@@ -1709,29 +1709,68 @@ func (s *Server) admitLargeApply(ctx context.Context) (runCtx context.Context, r
 	return runCtx, release, nil
 }
 
-// handler builds the whole request path: the route table's registrations, the
-// catch-all that keeps unrouted paths on the same error shape, and the
-// middleware in front of both.
+// handler builds the whole request path: every registration s.mounts() lists,
+// and the middleware in front of all of them.
+//
+// This loop is the only registration on the router
+// (TestNothingIsMountedOutsideTheMountTable): a handler mounted anywhere else
+// would be invisible to every census that ranges over s.mounts().
 func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
+	for _, m := range s.mounts() {
+		mux.Handle(m.pattern, m.handler)
+	}
+	return s.withRequestContext(s.checkHost(mux))
+}
+
+// mount is one registration on the router: a ServeMux pattern, the handler
+// behind it, and the operations that handler answers.
+//
+// The posture each answer owes the request pipeline is declared by its route
+// row: whether it asks for the bearer credential (authExempt), compares the
+// Bd-Project-Id stamp (projectExempt) and the Bd-Wire-Revision floor
+// (wireRevisionExempt), takes a database slot (bypassSemaphore), and which op
+// its request line books. A request a mount holds but no row claims (the
+// catch-all, or a custom-method suffix no row registers) gets the unrouted
+// answer: 404 not_found, with no credential asked, no RequestContext hook run,
+// no stamp or floor compared, no slot taken and no op booked. The Host policy,
+// the request id, the response-wide headers, panic recovery and the request
+// line are not part of any posture: handler() wraps them around the whole
+// router, so no mount can opt out of them.
+type mount struct {
+	// pattern is exactly what the router registers.
+	pattern string
+	handler http.Handler
+	// rows are the operations answered here, in dispatch order: the one row
+	// for a pattern the router can spell, every row sharing a custom-method
+	// key, and none for the catch-all.
+	rows []route
+}
+
+// mounts lists every registration the router holds: one per route row the
+// router can spell, one per custom-method key the rows share, and the
+// catch-all. It builds handlers and nothing else, so a test can range over it
+// to ask what the server answers.
+func (s *Server) mounts() []mount {
+	var out []mount
 	// Rows carrying a customMethod SHARE a pattern, so they get one
 	// registration between them and a dispatcher in front. Collected in table
 	// order, which is the order customMethodTarget tries the suffixes in.
 	shared := map[string][]route{}
 	var sharedOrder []string
 	for _, rt := range routeTable {
+		key := rt.method + " " + rt.pattern
 		if rt.customMethod == "" {
-			mux.Handle(rt.method+" "+rt.pattern, s.route(rt))
+			out = append(out, mount{pattern: key, handler: s.route(rt), rows: []route{rt}})
 			continue
 		}
-		key := rt.method + " " + rt.pattern
 		if _, seen := shared[key]; !seen {
 			sharedOrder = append(sharedOrder, key)
 		}
 		shared[key] = append(shared[key], rt)
 	}
 	for _, key := range sharedOrder {
-		mux.Handle(key, s.dispatchCustomMethod(shared[key]))
+		out = append(out, mount{pattern: key, handler: s.dispatchCustomMethod(shared[key]), rows: shared[key]})
 	}
 
 	// Not an operation and deliberately not in the route table: it exists so
@@ -1739,11 +1778,10 @@ func (s *Server) handler() http.Handler {
 	// net/http's text/plain default, which the document promises for EVERY
 	// non-2xx byte. A method mismatch on a known path lands here too and
 	// answers 404 rather than 405, because 405 is not in the v0 vocabulary.
-	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	out = append(out, mount{pattern: "/", handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, newResult(CodeNotFound, "no such route on this server"))
-	}))
-
-	return s.withRequestContext(s.checkHost(mux))
+	})})
+	return out
 }
 
 // reqInfo is the per-request record the log line is assembled from. Layers fill
