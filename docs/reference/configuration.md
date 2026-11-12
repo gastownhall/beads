@@ -121,6 +121,8 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `dolt.local-only` | — | `BD_DOLT_LOCAL_ONLY` | `false` | Keep Dolt data off the network: skip remote wiring at `bd init`, suppress auto-push, have `bd dolt push`/`pull` and `bd sync` report remote sync as disabled without contacting a remote, and refuse `bd dolt remote add` |
 | `dolt.shared-server` | `--shared-server` | `BEADS_DOLT_SHARED_SERVER` | `false` | Share one Dolt server at `~/.beads/shared-server/` |
 | `dolt.max-conns` | — | `BEADS_DOLT_MAX_CONNS` | `10` | Connection pool size |
+| `dolt.pool-read-timeout` | — | `BEADS_DOLT_POOL_READ_TIMEOUT` | `10s` | Per-I/O read deadline on pooled server connections. Each batch of bytes resets it, so it fires only when one read stays silent the whole deadline; the failed read is not retried. Raise it on an overloaded shared server whose ordinary queries die mid-flight (see [Troubleshooting](/reference/troubleshooting#possible-pool-read-timeout-failures)) |
+| `dolt.pool-write-timeout` | — | `BEADS_DOLT_POOL_WRITE_TIMEOUT` | `10s` | Per-I/O write deadline on pooled server connections, the write-side twin of `dolt.pool-read-timeout` |
 | `git.author` | — | `BD_GIT_AUTHOR` | (none) | Override commit author for beads commits |
 | `git.no-gpg-sign` | — | `BD_GIT_NO_GPG_SIGN` | `false` | Disable GPG signing for beads commits |
 | `create.require-description` | — | `BD_CREATE_REQUIRE_DESCRIPTION` | `false` | Require description on `bd create` |

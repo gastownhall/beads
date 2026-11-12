@@ -406,6 +406,53 @@ bd dolt stop
 bd dolt start
 ```
 
+### `possible pool read timeout` failures
+
+**Symptom (server mode):** a command such as `bd list` fails — exit code 1,
+nothing on stdout — with an error like:
+
+```
+Error: read transaction: search issues with counts: invalid connection: possible pool read timeout (configured 10s); read not retried; check BEADS_DOLT_POOL_READ_TIMEOUT or dolt.pool-read-timeout
+```
+
+**Cause:** every pooled server connection carries a per-I/O read deadline
+(`dolt.pool-read-timeout`, default 10s). The deadline is per I/O, not per
+query: each batch of bytes a server sends resets it, so a slow query that
+keeps streaming results never trips it. It fires only when one read stays
+silent for the whole deadline — and when it does, the read is deliberately
+not retried: replaying the same statement against the same deadline would
+re-run the same doomed read.
+
+The word "possible" is honest. The MySQL driver converts a dead read into
+"invalid connection" and drops the timeout identity, so bd reports the
+inferred cause — the read ran at least the configured deadline — instead of
+claiming a certainty the evidence does not carry.
+
+A timed-out read is a failure, never an empty listing: exit code 1 and no
+output rows. If a command prints "no issues" you did not expect, that is a
+different problem, not this one.
+
+**Slow server → raise the deadline.** If the errors appear only while a
+shared server is busy (auto_gc, large imports, other clients' heavy queries)
+and commands succeed when it is idle, raise the deadline:
+
+```bash
+bd config set dolt.pool-read-timeout 60s
+# or for one session, without touching config.yaml:
+export BEADS_DOLT_POOL_READ_TIMEOUT=60s
+```
+
+**Recurrent hang on an idle server → investigate, do not tune.** If a read
+hangs past the deadline while the server is otherwise idle and this keeps
+happening, the deadline is doing its job: something server-side is wedging
+that read, and raising the deadline only moves the hang. Look at the server
+itself — `bd dolt status`, the server log (`.beads/dolt-server.log`), and
+whether the same query is slow through `dolt sql` directly.
+
+Each trip of this deadline counts as one circuit-breaker failure, so
+repeated timeouts can also open the breaker (see
+[Circuit breaker](#circuit-breaker-server-appears-down-failing-fast)).
+
 ### Version mismatch
 
 After upgrading bd:
