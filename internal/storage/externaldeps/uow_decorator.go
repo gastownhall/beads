@@ -18,11 +18,11 @@ import (
 
 // WrapUOWProvider installs the external capability policy on the server UOW
 // path. Proxied commands otherwise bypass storage decorators entirely.
-func WrapUOWProvider(inner uow.UnitOfWorkProvider, locate ProjectLocator, open StoreOpener) uow.UnitOfWorkProvider {
+func WrapUOWProvider(inner uow.UnitOfWorkProvider, locate ProjectLocator, open StoreOpener, opts ...Option) uow.UnitOfWorkProvider {
 	if inner == nil {
 		return nil
 	}
-	return &uowProvider{UnitOfWorkProvider: inner, policy: New(nil, locate, open)}
+	return &uowProvider{UnitOfWorkProvider: inner, policy: New(nil, locate, open, opts...)}
 }
 
 type uowProvider struct {
@@ -71,7 +71,12 @@ func (p *uowProvider) NewUOW(ctx context.Context) (uow.UnitOfWork, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &unitOfWork{UnitOfWork: inner, policy: p.policy}, nil
+	// A bare cross-rig blocker id may name an issue this workspace holds, so
+	// the policy reads the source store through the same unit of work first.
+	policy := p.policy.bindLocal(func(ctx context.Context, ids []string) ([]*types.Issue, error) {
+		return getManyChunked(ctx, inner.IssueUseCase(), ids)
+	})
+	return &unitOfWork{UnitOfWork: inner, policy: policy}, nil
 }
 
 // Provider capability accessors build roles on this wrapper. Delegating them
@@ -300,7 +305,7 @@ func (u *issueUseCase) blockingState(ctx context.Context) (blockingState, error)
 	if err != nil {
 		return blockingState{}, err
 	}
-	return u.policy.blockingStateFromRecords(ctx, deps)
+	return u.policy.blockingStateFromRecords(ctx, deps, allKinds)
 }
 
 func (u *issueUseCase) GetReadyWork(ctx context.Context, filter types.WorkFilter) (domain.SearchPage, error) {
@@ -500,7 +505,7 @@ func (u *dependencyUseCase) IsBlockedBatch(ctx context.Context, ids []string) (m
 			answered[id] = deps
 		}
 	}
-	state, err := u.policy.blockingStateFromRecords(ctx, answered)
+	state, err := u.policy.blockingStateFromRecords(ctx, answered, allKinds)
 	if err != nil {
 		return nil, fmt.Errorf("external dependencies: %w", err)
 	}

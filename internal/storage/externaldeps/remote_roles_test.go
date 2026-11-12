@@ -124,7 +124,7 @@ func newRemotePolicyStore(enforced bool) (*Store, *recordingReader) {
 		reader: reader,
 	}
 	store := New(raw, func(ProjectName) (string, bool) { return "", false }, nil)
-	store.warnProject = nil
+	store.warnings.project = nil
 	return store, reader
 }
 
@@ -212,7 +212,7 @@ func TestRemoteClaimerRefusesExternallyBlocked(t *testing.T) {
 	store, _ := newRemotePolicyStore(false)
 	raw := &remoteClaimFake{remoteFake: store.inner.(*remoteFake), claimer: &recordingClaimer{}}
 	store = New(raw, func(ProjectName) (string, bool) { return "", false }, nil)
-	store.warnProject = nil
+	store.warnings.project = nil
 	claimer, err := store.IssueClaimer()
 	if err != nil {
 		t.Fatal(err)
@@ -282,7 +282,7 @@ func TestRemoteRolesPassThroughWhenServerEnforces(t *testing.T) {
 	base, reader := newRemotePolicyStore(true)
 	raw := &passthroughFake{remoteFake: base.inner.(*remoteFake), claimer: &recordingClaimer{}}
 	store := New(raw, func(ProjectName) (string, bool) { return "", false }, nil)
-	store.warnProject = nil
+	store.warnings.project = nil
 	ctx := t.Context()
 
 	rc, err := store.ReadyClaimer()

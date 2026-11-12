@@ -31,6 +31,10 @@ type fakeStore struct {
 	batch       *fakeBatchCloser
 	enforced    bool
 	enforcedErr error
+	// capabilityOnly models a server that advertises
+	// policy.external_dependencies but predates policy.cross_rig_dependencies:
+	// it enforces capability refs while bare cross-rig ids stay the client's.
+	capabilityOnly bool
 	// liveProbes records storage.LivePolicyProbe for every policy probe, in
 	// order.
 	liveProbes []bool
@@ -58,6 +62,16 @@ func (f *fakeStore) IssueLifecycle() (publicops.Lifecycle, error) { return f.lif
 // pins loadBlockingState's skip branch.
 func (f *fakeStore) ServerEnforcesExternalDependencyPolicy(ctx context.Context) (bool, error) {
 	f.liveProbes = append(f.liveProbes, storage.LivePolicyProbe(ctx))
+	return f.enforced, f.enforcedErr
+}
+
+// ServerEnforcesCrossRigDependencyPolicy makes every fakeStore satisfy
+// storage.CrossRigDependencyPolicyProber with the same answer as the
+// capability probe, unless capabilityOnly models an older server.
+func (f *fakeStore) ServerEnforcesCrossRigDependencyPolicy(ctx context.Context) (bool, error) {
+	if f.capabilityOnly {
+		return false, nil
+	}
 	return f.enforced, f.enforcedErr
 }
 
@@ -1172,7 +1186,7 @@ func TestUnavailableProjectWarnsOnce(t *testing.T) {
 	}
 	store := testStore(raw, &fakeStore{}, false)
 	var warnings []ProjectName
-	store.warnProject = func(project ProjectName) { warnings = append(warnings, project) }
+	store.warnings.project = func(project ProjectName) { warnings = append(warnings, project) }
 
 	for range 2 {
 		if _, err := store.GetReadyWork(t.Context(), types.WorkFilter{}); err != nil {

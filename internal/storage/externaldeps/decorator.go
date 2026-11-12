@@ -16,26 +16,64 @@ import (
 	publicops "github.com/steveyegge/beads/issueops"
 )
 
-// Store decorates a local store with query-time external capability handling.
+// Store decorates a local store with query-time out-of-store dependency
+// handling: explicit external capability references and bare cross-rig issue
+// IDs.
 type Store struct {
 	storage.DoltStorage
 	inner         storage.DoltStorage
 	locateProject ProjectLocator
 	openProject   StoreOpener
-	warnProject   func(ProjectName)
-	warnMu        sync.Mutex
-	warned        map[ProjectName]struct{}
+	resolveIssues IssueResolver
+	// localLookup, when set, reads source-store rows on behalf of a unit of
+	// work, whose policy Store has no inner store (bindLocal).
+	localLookup func(context.Context, []string) ([]*types.Issue, error)
+	warnings    *warnings
+}
+
+// warnings deduplicates the policy's stderr diagnostics across the Store
+// views that share them.
+type warnings struct {
+	project func(ProjectName)
+	issue   func(id, reason string)
+	mu      sync.Mutex
+	warned  map[ProjectName]struct{}
+	issues  map[[2]string]struct{}
 }
 
 // New constructs an external-capability-aware storage decorator.
-func New(inner storage.DoltStorage, locateProject ProjectLocator, openProject StoreOpener) *Store {
-	return &Store{
+func New(inner storage.DoltStorage, locateProject ProjectLocator, openProject StoreOpener, opts ...Option) *Store {
+	s := &Store{
 		DoltStorage:   inner,
 		inner:         inner,
 		locateProject: locateProject,
 		openProject:   openProject,
-		warnProject:   defaultProjectWarning,
-		warned:        make(map[ProjectName]struct{}),
+		warnings: &warnings{
+			project: defaultProjectWarning,
+			issue:   defaultIssueWarning,
+			warned:  make(map[ProjectName]struct{}),
+			issues:  make(map[[2]string]struct{}),
+		},
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(s)
+		}
+	}
+	return s
+}
+
+// bindLocal returns a view of the policy whose source-store reads go through
+// lookup. The view shares this Store's resolvers and warning state.
+func (s *Store) bindLocal(lookup func(context.Context, []string) ([]*types.Issue, error)) *Store {
+	return &Store{
+		DoltStorage:   s.DoltStorage,
+		inner:         s.inner,
+		locateProject: s.locateProject,
+		openProject:   s.openProject,
+		resolveIssues: s.resolveIssues,
+		localLookup:   lookup,
+		warnings:      s.warnings,
 	}
 }
 
@@ -126,14 +164,31 @@ func (s *Store) guardExternalClose(ctx context.Context, id string, force bool) e
 }
 
 func (s *Store) warnUnresolvedProject(project ProjectName) {
-	s.warnMu.Lock()
-	defer s.warnMu.Unlock()
-	if _, warned := s.warned[project]; warned {
+	w := s.warnings
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if _, warned := w.warned[project]; warned {
 		return
 	}
-	s.warned[project] = struct{}{}
-	if s.warnProject != nil {
-		s.warnProject(project)
+	w.warned[project] = struct{}{}
+	if w.project != nil {
+		w.project(project)
+	}
+}
+
+// warnUnresolvedIssue reports, once per target and reason, a bare cross-rig
+// target the policy could not read and therefore holds as blocking.
+func (s *Store) warnUnresolvedIssue(id, reason string) {
+	w := s.warnings
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	key := [2]string{id, reason}
+	if _, warned := w.issues[key]; warned {
+		return
+	}
+	w.issues[key] = struct{}{}
+	if w.issue != nil {
+		w.issue(id, reason)
 	}
 }
 
@@ -143,58 +198,86 @@ type blockingState struct {
 
 func (s *Store) loadBlockingState(ctx context.Context) (blockingState, error) {
 	// Design 3.6: a remote server that already enforces this policy itself
-	// (advertised as the handshake's wire.CapExternalDependencies capability,
-	// probed here through storage.ExternalDependencyPolicyProber) has already
-	// applied it before answering, so this decorator's own pass would be
-	// redundant — skip to an empty blocking state. A store that does not
-	// implement the prober, or that implements it and reports false (a remote
-	// server silent on the capability included), falls through to the
-	// ordinary client-side enforcement below: the policy is never silently
-	// skipped merely because the inner store is remote.
-	if enforced, err := s.serverEnforcesPolicy(ctx); err != nil || enforced {
+	// (advertised on the handshake and probed through
+	// storage.ExternalDependencyPolicyProber for capability refs and
+	// storage.CrossRigDependencyPolicyProber for bare cross-rig IDs) has
+	// already applied that part before answering, so this decorator enforces
+	// only the reference kinds the server does not. A store that implements
+	// neither prober, or that reports false (a remote server silent on a
+	// capability included), gets ordinary client-side enforcement of that
+	// kind: the policy is never silently skipped merely because the inner
+	// store is remote.
+	kinds, err := s.clientKinds(ctx)
+	if err != nil || kinds.none() {
 		return blockingState{}, err
 	}
 
 	queryStore, ok := storage.UnwrapStore(s.inner).(storage.ExternalDependencyQueryStore)
 	var allDeps map[string][]*types.Dependency
-	var err error
 	if ok {
 		allDeps, err = queryStore.GetExternalBlockingDependencyRecords(ctx)
 	} else {
 		// Compatibility fallback for third-party stores that predate the narrow
 		// optional capability. First-party stores implement the indexed query.
+		// enforcedReference classifies these raw records exactly as the narrow
+		// query's candidates are classified.
 		allDeps, err = s.inner.GetAllDependencyRecords(ctx)
 	}
 	if err != nil {
 		return blockingState{}, fmt.Errorf("external dependencies: list blocking records: %w", err)
 	}
 
-	return s.blockingStateFromRecords(ctx, allDeps)
+	return s.blockingStateFromRecords(ctx, allDeps, kinds)
 }
 
-// serverEnforcesPolicy asks the inner store's ExternalDependencyPolicyProber,
-// if it has one, whether its server already enforced this policy.
-func (s *Store) serverEnforcesPolicy(ctx context.Context) (bool, error) {
-	prober, ok := storage.UnwrapStore(s.inner).(storage.ExternalDependencyPolicyProber)
+// clientKinds reports which reference kinds this decorator must enforce
+// itself over its inner store. Capability refs are the server's when it
+// advertises policy.external_dependencies; bare cross-rig IDs only when it
+// also advertises policy.cross_rig_dependencies. An older server that knows
+// only the first token therefore still gets client-side cross-rig
+// enforcement.
+func (s *Store) clientKinds(ctx context.Context) (policyKinds, error) {
+	base := storage.UnwrapStore(s.inner)
+	prober, ok := base.(storage.ExternalDependencyPolicyProber)
 	if !ok {
-		return false, nil
+		return allKinds, nil
 	}
 	enforced, err := prober.ServerEnforcesExternalDependencyPolicy(ctx)
 	if err != nil {
-		return false, fmt.Errorf("external dependencies: probe server policy: %w", err)
+		return policyKinds{}, fmt.Errorf("external dependencies: probe server policy: %w", err)
 	}
-	return enforced, nil
+	kinds := policyKinds{capability: !enforced, foreign: true}
+	if crossRig, ok := base.(storage.CrossRigDependencyPolicyProber); ok {
+		enforcesCrossRig, err := crossRig.ServerEnforcesCrossRigDependencyPolicy(ctx)
+		if err != nil {
+			return policyKinds{}, fmt.Errorf("external dependencies: probe server cross-rig policy: %w", err)
+		}
+		kinds.foreign = !enforcesCrossRig
+	}
+	return kinds, nil
 }
 
-func (s *Store) blockingStateFromRecords(ctx context.Context, allDeps map[string][]*types.Dependency) (blockingState, error) {
+// serverEnforcesPolicy reports whether the inner store's server already
+// enforces every reference kind, so a view may hand its request through
+// untouched.
+func (s *Store) serverEnforcesPolicy(ctx context.Context) (bool, error) {
+	kinds, err := s.clientKinds(ctx)
+	if err != nil {
+		return false, err
+	}
+	return kinds.none(), nil
+}
+
+func (s *Store) blockingStateFromRecords(ctx context.Context, allDeps map[string][]*types.Dependency, kinds policyKinds) (blockingState, error) {
 	refs := make([]reference, 0)
 	refsByIssue := make(map[string][]string)
 	for issueID, deps := range allDeps {
 		for _, dep := range deps {
-			if dep == nil || !dep.Type.IsBlockingEdge() || !isExternalReference(dep.DependsOnID) {
+			ref, ok := enforcedReference(dep, kinds)
+			if !ok {
 				continue
 			}
-			refs = append(refs, parseReference(dep.DependsOnID))
+			refs = append(refs, ref)
 			refsByIssue[issueID] = appendUnique(refsByIssue[issueID], dep.DependsOnID)
 		}
 	}
@@ -763,8 +846,8 @@ func (s *Store) IsBlocked(ctx context.Context, issueID string) (bool, []string, 
 	}
 	refs := make([]reference, 0)
 	for _, dep := range deps[issueID] {
-		if dep != nil && dep.Type.IsBlockingEdge() && isExternalReference(dep.DependsOnID) {
-			refs = append(refs, parseReference(dep.DependsOnID))
+		if ref, ok := enforcedReference(dep, allKinds); ok {
+			refs = append(refs, ref)
 		}
 	}
 	satisfied, err := s.resolveReferences(ctx, refs)
@@ -812,8 +895,8 @@ func (s *Store) blockedStates(ctx context.Context, ids []string) (map[string]blo
 	refs := make([]reference, 0)
 	for _, id := range distinct {
 		for _, dep := range deps[id] {
-			if dep != nil && dep.Type.IsBlockingEdge() && isExternalReference(dep.DependsOnID) {
-				refs = append(refs, parseReference(dep.DependsOnID))
+			if ref, ok := enforcedReference(dep, allKinds); ok {
+				refs = append(refs, ref)
 			}
 		}
 	}
@@ -824,7 +907,7 @@ func (s *Store) blockedStates(ctx context.Context, ids []string) (map[string]blo
 	for _, id := range distinct {
 		state := states[id]
 		for _, dep := range deps[id] {
-			if dep != nil && dep.Type.IsBlockingEdge() && isExternalReference(dep.DependsOnID) && !satisfied[dep.DependsOnID] {
+			if _, ok := enforcedReference(dep, allKinds); ok && !satisfied[dep.DependsOnID] {
 				state.blockers = appendUnique(state.blockers, dep.DependsOnID)
 			}
 		}
@@ -883,8 +966,8 @@ func (s *Store) IsBlockedBatch(ctx context.Context, issueIDs []string) (map[stri
 	refs := make([]reference, 0)
 	for _, issueDeps := range deps {
 		for _, dep := range issueDeps {
-			if dep != nil && dep.Type.IsBlockingEdge() && isExternalReference(dep.DependsOnID) {
-				refs = append(refs, parseReference(dep.DependsOnID))
+			if ref, ok := enforcedReference(dep, allKinds); ok {
+				refs = append(refs, ref)
 			}
 		}
 	}
@@ -894,7 +977,7 @@ func (s *Store) IsBlockedBatch(ctx context.Context, issueIDs []string) (map[stri
 	}
 	for issueID, issueDeps := range deps {
 		for _, dep := range issueDeps {
-			if dep != nil && dep.Type.IsBlockingEdge() && isExternalReference(dep.DependsOnID) && !satisfied[dep.DependsOnID] {
+			if _, ok := enforcedReference(dep, allKinds); ok && !satisfied[dep.DependsOnID] {
 				blocked[issueID] = true
 			}
 		}
