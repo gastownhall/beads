@@ -1,0 +1,25 @@
+[
+  {
+    "actor": "protocol-test",
+    "comment": "Added label: corpus-native",
+    "created_at": "<TS>",
+    "event_type": "label_added",
+    "issue_id": "corpus-deferred"
+  },
+  {
+    "actor": "protocol-test",
+    "created_at": "<TS>",
+    "event_type": "created",
+    "issue_id": "corpus-deferred",
+    "new_value": "",
+    "old_value": ""
+  },
+  {
+    "actor": "protocol-test",
+    "created_at": "<TS>",
+    "event_type": "status_changed",
+    "issue_id": "corpus-deferred",
+    "new_value": "{\"defer_until\":\"<TS>\",\"notes\":\"corpus-deferred notes\\ncorpus defer reason\",\"status\":\"deferred\"}",
+    "old_value": "{\"id\":\"corpus-deferred\",\"title\":\"Corpus deferred subject\",\"description\":\"deterministic corpus-deferred\",\"notes\":\"corpus-deferred notes\",\"status\":\"open\",\"priority\":3,\"issue_type\":\"task\",\"owner\":\"test@protocol.test\",\"created_at\":\"<TS>\",\"created_by\":\"protocol-test\",\"updated_at\":\"<TS>\",\"metadata\":{\"corpus\":\"native\"},\"labels\":[\"corpus-native\"]}"
+  }
+]

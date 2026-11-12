@@ -119,6 +119,7 @@ func TestDeletePublishesTheWholeResult(t *testing.T) {
 		Events:            9,
 		ReferencesUpdated: 3,
 		Orphaned:          []string{"bd-orphan-a", "bd-orphan-b"},
+		DeletedIDs:        []string{"bd-1", "bd-1.1", "bd-1.2", "bd-1.2.1"},
 	}}
 	ts := newTestServer(t, rolesConfig(Config{Deleter: deleter}))
 
@@ -135,6 +136,7 @@ func TestDeletePublishesTheWholeResult(t *testing.T) {
 		"events":             float64(9),
 		"references_updated": float64(3),
 		"orphaned":           []any{"bd-orphan-a", "bd-orphan-b"},
+		"deleted_ids":        []any{"bd-1", "bd-1.1", "bd-1.2", "bd-1.2.1"},
 	}
 	if !reflect.DeepEqual(body, want) {
 		t.Errorf("body = %#v, want %#v", body, want)

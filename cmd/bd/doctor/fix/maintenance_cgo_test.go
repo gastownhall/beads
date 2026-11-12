@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -211,31 +210,4 @@ func TestStaleClosedIssues_KeepsRetainedTypes(t *testing.T) {
 	if _, err := verifyStore.GetIssue(ctx, "bd-stale"); err == nil {
 		t.Errorf("bd-stale survived the fix; want it deleted")
 	}
-}
-
-// captureFixStdout runs fn with os.Stdout redirected and returns what it
-// printed there, which is where a fix handler reports.
-func captureFixStdout(t *testing.T, fn func()) string {
-	t.Helper()
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
-	}
-	printed := make(chan string)
-	go func() {
-		b, _ := io.ReadAll(r)
-		printed <- string(b)
-	}()
-	orig := os.Stdout
-	os.Stdout = w
-	func() {
-		defer func() {
-			os.Stdout = orig
-			_ = w.Close()
-		}()
-		fn()
-	}()
-	out := <-printed
-	_ = r.Close()
-	return out
 }

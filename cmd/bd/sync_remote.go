@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"regexp"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/beads"
@@ -132,50 +131,20 @@ func doltRemoteURL(remote string) string {
 // already scrubs userinfo before reporting (versioncontrolops.sanitizeURL);
 // diagnostics must not be the hole in that convention.
 //
-// HTTP(S) userinfo is transport credentials and is dropped whole. SSH userinfo
-// selects the remote account (git@host is not a secret and is needed for the
-// hint to be runnable), so only a password component is dropped.
+// See doltremote.Redact for the rule (HTTP(S) userinfo is dropped whole, an SSH
+// account is kept and only its password dropped). Like normalizeRemoteURL, this
+// wrapper adds nothing: the storage layer redacts Dolt's transfer errors with
+// the same function, so the rule has one copy to fix.
 func redactRemoteURL(raw string) string {
-	sep := strings.Index(raw, "://")
-	if sep < 0 {
-		// scp-style (git@host:path) or a bare path: no place for a password.
-		return raw
-	}
-	scheme, rest := raw[:sep], raw[sep+3:]
-	authority, tail := rest, ""
-	if slash := strings.Index(rest, "/"); slash >= 0 {
-		authority, tail = rest[:slash], rest[slash:]
-	}
-	at := strings.LastIndex(authority, "@")
-	if at < 0 {
-		return raw
-	}
-	userinfo, host := authority[:at], authority[at+1:]
-	if isDoltSSHScheme(scheme) {
-		if colon := strings.Index(userinfo, ":"); colon >= 0 {
-			userinfo = userinfo[:colon]
-		}
-		return scheme + "://" + userinfo + "@" + host + tail
-	}
-	return scheme + "://" + host + tail
+	return doltremote.Redact(raw)
 }
 
-func isDoltSSHScheme(scheme string) bool {
-	return scheme == "ssh" || scheme == "git+ssh"
-}
-
-// urlWithUserinfoRe matches the "scheme://userinfo@host" span of a URL embedded
-// anywhere in free-form text — for example the git stderr line bootstrap folds
-// into a probe error, which can echo the very remote (credentials and all) that
-// git failed to reach. The userinfo run stops at the first "@" and the host run
-// at the first "/" so a trailing path is left for redactRemoteURL to keep.
-var urlWithUserinfoRe = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^@\s'"]*@[^/\s'"]*`)
-
-// scrubURLCredentials redacts credential-bearing URLs embedded anywhere in s by
-// running each match through redactRemoteURL, so the same rule applied to the
-// plan's own URL fields (http(s) drops userinfo, ssh drops only a password) also
-// covers URLs that arrive inside arbitrary text. Text with no "userinfo@" URL is
-// returned unchanged, so credential-free git diagnostics keep their full detail.
+// scrubURLCredentials redacts credential-bearing URLs embedded anywhere in s,
+// for example the git stderr line bootstrap folds into a probe error, which can
+// echo the very remote (credentials and all) that git failed to reach. Each URL
+// gets redactRemoteURL's rule, and text with no "userinfo@" URL is returned
+// unchanged, so credential-free git diagnostics keep their full detail. See
+// doltremote.RedactText.
 func scrubURLCredentials(s string) string {
-	return urlWithUserinfoRe.ReplaceAllStringFunc(s, redactRemoteURL)
+	return doltremote.RedactText(s)
 }

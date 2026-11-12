@@ -1,0 +1,18 @@
+{
+  "corpus-parent": [
+    {
+      "created_at": "<TS>",
+      "dependency_type": "parent-child",
+      "id": "corpus-parent.1",
+      "issue_type": "task",
+      "labels": [
+        "corpus-native"
+      ],
+      "priority": 2,
+      "status": "open",
+      "title": "Corpus quick child",
+      "updated_at": "<TS>"
+    }
+  ],
+  "schema_version": 1
+}

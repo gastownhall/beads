@@ -1,0 +1,9 @@
+{
+  "shape": "gc-list-all-created-before",
+  "requests": [
+    {"method":"GET","operation_id":"getContext","path":"/v0/beads/context","status":200},
+    {"method":"GET","operation_id":"listSettings","path":"/v0/beads/config","status":200},
+    {"method":"GET","operation_id":"listIssues","path":"/v0/beads/issues","query":["all","created_before","include_gates","include_infra","include_templates","limit"],"status":200},
+    {"method":"GET","operation_id":"listIssues","path":"/v0/beads/issues","query":["all","created_before","cursor","include_gates","include_infra","include_templates","limit"],"status":200}
+  ]
+}

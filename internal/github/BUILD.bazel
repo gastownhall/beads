@@ -27,6 +27,7 @@ go_test(
         "client_ratelimit_test.go",
         "links_test.go",
         "mapping_test.go",
+        "pull_push_hash_test.go",
         "push_dedup_test.go",
         "review_fixes_test.go",
         "tracker_cross_repo_test.go",
@@ -38,6 +39,7 @@ go_test(
         "//internal/config",
         "//internal/storage",
         "//internal/tracker",
+        "//internal/tracker/conformance",
         "//internal/types",
     ],
 )

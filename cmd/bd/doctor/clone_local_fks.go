@@ -45,7 +45,13 @@ func CheckCloneLocalFKs(path string) DoctorCheck {
 		Name:    "Clone-Local FKs",
 		Status:  StatusWarning,
 		Message: fmt.Sprintf("%d severed FK(s) on clone-local tables: %s", len(severed), strings.Join(parts, ", ")),
-		Detail:  fmt.Sprintf("A hard reset (squash, merge abort) drops FKs from dolt_ignored tables; %d orphaned row(s) accumulated while enforcement was off", orphans),
+		Detail:  severedCloneLocalFKDetail(orphans),
 		Fix:     "Run 'bd doctor --fix' to remove orphaned rows and re-link the constraint(s) in place",
 	}
+}
+
+// severedCloneLocalFKDetail is CheckCloneLocalFKs' detail line for orphans
+// orphaned rows.
+func severedCloneLocalFKDetail(orphans int) string {
+	return fmt.Sprintf("A hard reset (a merge abort, or a squash by an older bd release) drops FKs from dolt_ignored tables; %d orphaned row(s) accumulated while enforcement was off", orphans)
 }

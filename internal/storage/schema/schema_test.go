@@ -78,6 +78,8 @@ func TestMigrateUpReturnsDirtyTablesErrorForPreExistingDirtyTable(t *testing.T) 
 	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", 42)
 
+	// The pass reads @@dolt_transaction_commit before its first write (#4470).
+	expectTransactionCommitRead(mock, 0)
 	// dirtyTables(ctx, db, false): `dependencies` has an uncommitted, unstaged
 	// change in the working set.
 	expectDirtyDoltStatusRow(mock, "dependencies", false)
@@ -109,6 +111,9 @@ func TestMigrateUpReturnsDirtyTablesErrorForPreExistingDirtyTable(t *testing.T) 
 	// migration 0043 touches the dirty `dependencies` table.
 	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", 42)
+	// The ignored series is intersected before either series migrates
+	// (#5816); with no ignored cursor table its read stops at the probe.
+	expectCursorProbe(mock, "ignored_schema_migrations", false)
 
 	_, err = MigrateUp(context.Background(), db)
 	if err == nil {
@@ -124,6 +129,13 @@ func TestMigrateUpReturnsDirtyTablesErrorForPreExistingDirtyTable(t *testing.T) 
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}
+}
+
+// expectTransactionCommitRead mocks the migration pass's read of the session's
+// @@dolt_transaction_commit (#4470). A value of 0 issues no SET.
+func expectTransactionCommitRead(mock sqlmock.Sqlmock, value int) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT @@SESSION.dolt_transaction_commit")).
+		WillReturnRows(sqlmock.NewRows([]string{"@@SESSION.dolt_transaction_commit"}).AddRow(value))
 }
 
 // expectDirtyDoltStatusRow mocks a dolt_status query returning a single dirty
@@ -812,9 +824,11 @@ func newWispIsBlockedDriftDB(t *testing.T, migrationFile string, wantCursorVersi
 	mock.ExpectQuery(indexQuery).WithArgs("wisps", "idx_wisps_is_blocked").
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
 
-	body, err := IgnoredMigrationSQL(migrationFile)
+	// The body the runner executes: the frozen bytes, or for ignored/0015
+	// those bytes with its registered execution plan applied (#6520).
+	body, err := ignoredSource.plannedMigrationSQL(migrationFile)
 	if err != nil {
-		t.Fatalf("IgnoredMigrationSQL(%s): %v", migrationFile, err)
+		t.Fatalf("plannedMigrationSQL(%s): %v", migrationFile, err)
 	}
 
 	return &wispIsBlockedDriftDB{
@@ -845,7 +859,7 @@ func (d *wispIsBlockedDriftDB) ExecContext(_ context.Context, query string, args
 		d.hasIsBlockedIndex = true
 		return execOK{}, nil
 	case d.migrationBody:
-		// The pending migration's real embedded body, byte-for-byte. A wisps
+		// The pending migration's executed body, byte-for-byte. A wisps
 		// table still missing is_blocked fails on its first statement with
 		// the same error a real engine gives; once the column exists (the
 		// repair ran first) it succeeds -- matching runMigrations' real
