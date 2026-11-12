@@ -1378,14 +1378,16 @@ func recordSkippedDependencyEdge(opts storage.BatchCreateOptions, issueID, depen
 	opts.OnSkippedDependency(issueID, dependsOnID, reason)
 }
 
+// childCounterBucket is one parent's pending counter reservation: the highest
+// direct child suffix to preserve, and the parent's plane once known.
+type childCounterBucket struct {
+	maxChild int
+	isWisp   bool
+	known    bool
+}
+
 func ReconcileChildCounters(ctx context.Context, tx DBTX, issues []*types.Issue) (map[string]bool, error) {
-	type bucket struct {
-		maxChild int
-		isWisp   bool
-		known    bool
-	}
-	parents := make(map[string]*bucket)
-	var changed map[string]bool
+	parents := make(map[string]*childCounterBucket)
 
 	for _, issue := range issues {
 		if issue == nil {
@@ -1395,7 +1397,7 @@ func ReconcileChildCounters(ctx context.Context, tx DBTX, issues []*types.Issue)
 			if b, ok := parents[issue.ID]; ok {
 				b.isWisp, b.known = true, true
 			} else {
-				parents[issue.ID] = &bucket{isWisp: true, known: true}
+				parents[issue.ID] = &childCounterBucket{isWisp: true, known: true}
 			}
 		}
 	}
@@ -1410,13 +1412,65 @@ func ReconcileChildCounters(ctx context.Context, tx DBTX, issues []*types.Issue)
 		}
 		b, exists := parents[parentID]
 		if !exists {
-			b = &bucket{}
+			b = &childCounterBucket{}
 			parents[parentID] = b
 		}
 		if childNum > b.maxChild {
 			b.maxChild = childNum
 		}
 	}
+
+	return applyChildCounterBuckets(ctx, tx, parents)
+}
+
+// ReserveChildSuffixesInTx preserves, in each surviving immediate parent's
+// existing child counter, the highest direct child suffix among ids: the ids a
+// create or rename just materialized, or the ids a removal is about to delete
+// or a rename just vacated (GH#4750). The counter is the parent's
+// automatic-allocation high-water mark, and once a row is gone it is the only
+// record that its suffix was used; without this a plain removal of the
+// highest child, under a counter that lagged it (a database written before
+// the singular create reconciled, or a child created through a door that did
+// not advance it), let the next generated child re-mint the removed id.
+//
+// The counter is written in the parent's own plane (child_counters for an
+// issues-plane parent, wisp_child_counters for a wisps-plane one), never the
+// child's. A parent named in departing (the complete set a removal deletes)
+// gets no counter, nor does a parent with no row: both counter tables require
+// an owner. An adequate counter is left alone and a raise is GREATEST, so the
+// counter never decreases. This is not retention: plain removal writes no
+// tombstone, and an explicit create may still reuse the removed id.
+//
+// The returned set names the counter tables written, for callers that stage
+// tables for a Dolt commit.
+func ReserveChildSuffixesInTx(ctx context.Context, tx DBTX, ids []string, departing map[string]bool) (map[string]bool, error) {
+	parents := make(map[string]*childCounterBucket)
+	for _, id := range ids {
+		parentID, childNum, ok := ParseHierarchicalID(id)
+		if !ok || childNum <= 0 || departing[parentID] {
+			continue
+		}
+		b, exists := parents[parentID]
+		if !exists {
+			b = &childCounterBucket{}
+			parents[parentID] = b
+		}
+		if childNum > b.maxChild {
+			b.maxChild = childNum
+		}
+	}
+	if len(parents) == 0 {
+		return nil, nil
+	}
+	return applyChildCounterBuckets(ctx, tx, parents)
+}
+
+// applyChildCounterBuckets routes every bucket whose plane is not yet known by
+// its parent's live row, then raises each existing parent's counter to at
+// least the bucket's maximum. It is the shared write half of
+// ReconcileChildCounters and ReserveChildSuffixesInTx.
+func applyChildCounterBuckets(ctx context.Context, tx DBTX, parents map[string]*childCounterBucket) (map[string]bool, error) {
+	var changed map[string]bool
 
 	unknownParentIDs := make([]string, 0, len(parents))
 	for parentID, b := range parents {
