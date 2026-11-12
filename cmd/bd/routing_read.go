@@ -212,5 +212,8 @@ func openAutoRoutedStore(ctx context.Context, store storage.DoltStorage, writabl
 	if err != nil {
 		return nil, false, rule, fmt.Errorf("failed to open routed store at %s: %w", remedy.PrintedValue(targetRepoPath), err)
 	}
-	return wireExternalDependencyPolicy(targetStore), true, rule, nil
+	// The policy resolves bare cross-prefix targets through the ROUTED
+	// TARGET's own prefix routes (GH#5784 §208/§210), never the launching
+	// workspace's.
+	return wireExternalDependencyPolicy(targetStore, targetBeadsDir), true, rule, nil
 }

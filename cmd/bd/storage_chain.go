@@ -38,7 +38,10 @@ func wireStorageDecorators(store storage.DoltStorage, hookRunner *hooks.Runner, 
 		return nil
 	}
 	store = telemetry.WrapStorage(store)
-	store = wireExternalDependencyPolicy(store)
+	// The policy resolves bare cross-prefix targets through THIS workspace's
+	// prefix routes (GH#5784 §208): the store wired here is the command's own,
+	// so its beads directory is the command's resolved one.
+	store = wireExternalDependencyPolicy(store, resolveCommandBeadsDir(dbPath))
 	if hookRunner != nil && !hooksDisabled {
 		store = storage.NewHookFiringStore(store, hookRunner)
 	}
@@ -58,11 +61,20 @@ func wireStorageDecorators(store storage.DoltStorage, hookRunner *hooks.Runner, 
 // place. Skipping the wrap here for every remote backend (the pre-S6-fix
 // behavior) silently dropped the policy entirely against such a server; the
 // capability-aware skip now lives inside the decorator, not at wrap time.
-func wireExternalDependencyPolicy(store storage.DoltStorage) storage.DoltStorage {
+//
+// sourceBeadsDir is the workspace the wrapped store belongs to — the
+// dependent's own workspace, not the launching command's directory (GH#5784
+// §208) — and its prefix routes resolve the bare cross-prefix targets the
+// policy gates on (§210). The foreign stores the resolver opens are raw:
+// they carry no policy wrapper of their own, so resolution never recurses
+// (§210 again). An empty sourceBeadsDir leaves every bare target without a
+// route: it fails closed with a warning, the same contract as an unconfigured
+// external project.
+func wireExternalDependencyPolicy(store storage.DoltStorage, sourceBeadsDir string) storage.DoltStorage {
 	if store == nil {
 		return nil
 	}
-	return externaldeps.New(
+	return externaldeps.NewWithForeignResolver(
 		store,
 		func(project externaldeps.ProjectName) (string, bool) {
 			path := config.ResolveExternalProjectPath(string(project))
@@ -71,6 +83,7 @@ func wireExternalDependencyPolicy(store storage.DoltStorage) storage.DoltStorage
 		func(ctx context.Context, projectRoot string) (storage.DoltStorage, error) {
 			return openForeignStore(ctx, filepath.Join(projectRoot, ".beads"), foreignRead)
 		},
+		newPrefixRouteResolver(sourceBeadsDir),
 	)
 }
 
@@ -106,7 +119,9 @@ func wireProxiedUOWProvider(provider uow.UnitOfWorkProvider, sinks uow.Sinks) uo
 }
 
 func wireExternalDependencyUOWProvider(provider uow.UnitOfWorkProvider) uow.UnitOfWorkProvider {
-	return externaldeps.WrapUOWProvider(
+	// The proxied provider serves this command's own workspace, so its
+	// prefix routes resolve the bare cross-prefix targets (GH#5784 §208/§210).
+	return externaldeps.WrapUOWProviderWithForeignResolver(
 		provider,
 		func(project externaldeps.ProjectName) (string, bool) {
 			path := config.ResolveExternalProjectPath(string(project))
@@ -115,5 +130,6 @@ func wireExternalDependencyUOWProvider(provider uow.UnitOfWorkProvider) uow.Unit
 		func(ctx context.Context, projectRoot string) (storage.DoltStorage, error) {
 			return openForeignStore(ctx, filepath.Join(projectRoot, ".beads"), foreignRead)
 		},
+		newPrefixRouteResolver(resolveCommandBeadsDir(dbPath)),
 	)
 }

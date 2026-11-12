@@ -299,7 +299,20 @@ func migrateHyphenatedDB(beadsDir string, cfg *configfile.Config, oldName, newNa
 // only — no directory renames or metadata.json writes. This prevents cross-repo
 // hydration from mutating foreign projects (GH#3231).
 func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
-	return openNonMutatingStoreFromConfig(ctx, beadsDir, false)
+	return openNonMutatingStoreFromConfig(ctx, beadsDir, false, "")
+}
+
+// newReadOnlyStoreFromConfigWithDatabase is newReadOnlyStoreFromConfig with
+// the database selected per open: database names the target's own
+// dolt_database, and it must outrank the launching process's
+// BEADS_DOLT_SERVER_DATABASE without the environment swap
+// openRoutedTargetStore used to make — a concurrent read (the cross-rig
+// resolver among them, GH#5784) cannot swap a process-global variable around
+// other threads' opens, so the routed read factory carries the value through
+// this configuration boundary instead. An empty database leaves the
+// workspace's own resolution in place, exactly as the swap did.
+func newReadOnlyStoreFromConfigWithDatabase(ctx context.Context, beadsDir, database string) (storage.DoltStorage, error) {
+	return openNonMutatingStoreFromConfig(ctx, beadsDir, false, database)
 }
 
 // newPreviewStoreFromConfig is newReadOnlyStoreFromConfig for a preview
@@ -311,7 +324,7 @@ func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.D
 // refuses because that repo has not been migrated yet — and it must certainly
 // not migrate it.
 func newPreviewStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
-	return openNonMutatingStoreFromConfig(ctx, beadsDir, true)
+	return openNonMutatingStoreFromConfig(ctx, beadsDir, true, "")
 }
 
 // openNonMutatingStoreFromConfig deliberately does NOT activate the events
@@ -329,7 +342,17 @@ func newPreviewStoreFromConfig(ctx context.Context, beadsDir string) (storage.Do
 // it, and the client has no journal of its own to activate. A separate
 // OpenNonMutating hook on backends.Backend, which this function would call
 // instead, is the follow-up that closes the exception.
-func openNonMutatingStoreFromConfig(ctx context.Context, beadsDir string, preview bool) (storage.DoltStorage, error) {
+// openNonMutatingStoreFromConfig's database parameter selects the workspace's
+// database per open when non-empty (GH#5784): it outranks
+// BEADS_DOLT_SERVER_DATABASE and metadata.json alike, which is what the
+// routed read factory needs — the launching process's environment names the
+// LAUNCHER's database, never the target's. Empty leaves each arm's own
+// resolution untouched. Only the dolt-server and embedded arms honor it; the
+// registry arm's OpenReadOnly opens a workspace a server owns (the http
+// client backend among them), where metadata.json plus the server identity
+// select the workspace and the environment never did — for that arm the
+// value is a no-op by design.
+func openNonMutatingStoreFromConfig(ctx context.Context, beadsDir string, preview bool, database string) (storage.DoltStorage, error) {
 	if _, err := checkDiscoveredBackend(beadsDir); err != nil {
 		return nil, err
 	}
@@ -363,11 +386,15 @@ func openNonMutatingStoreFromConfig(ctx context.Context, beadsDir string, previe
 	if effectiveServerMode(beadsDir, cfg) {
 		// A read refuses a schema too old for this binary's issue reads at
 		// open; a preview tolerates a behind schema, as on the embedded arms.
-		return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true, RequireReadableSchema: !preview})
+		// Config.Database is the per-open selection: applyConfigDefaults only
+		// consults the environment when it is empty.
+		return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true, RequireReadableSchema: !preview, Database: database})
 	}
-	database := configfile.DefaultDoltDatabase
-	if cfg != nil {
-		database = cfg.GetDoltDatabase()
+	if database == "" {
+		database = configfile.DefaultDoltDatabase
+		if cfg != nil {
+			database = cfg.GetDoltDatabase()
+		}
 	}
 	if sanitized := sanitizeDBName(database); sanitized != database {
 		database = sanitized
