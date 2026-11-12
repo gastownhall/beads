@@ -357,4 +357,26 @@ func TestRenameNewIDCheck(t *testing.T) {
 			accepted(t, "bd-4b0", newID)
 		})
 	}
+
+	// Malformed targets fail the format check before the store is read:
+	// bare, empty or empty-component, leading digit, space, dollar sign.
+	for _, newID := range []string{"abc", "", "-abc", "abc-", "8ball-abc", "a b-c", "bd-$1"} {
+		t.Run(fmt.Sprintf("reject/%q", newID), func(t *testing.T) {
+			st := &lookupOnlyRenameStore{}
+			var err error
+			stderr := captureStderr(t, func() {
+				err = withRenameStore(st, func() error { return runRename(renameCmd, []string{"bd-old1", newID}) })
+			})
+			var exitErr *exitError
+			if !errors.As(err, &exitErr) || exitErr.Code != 1 {
+				t.Fatalf("rename bd-old1 -> %q returned %v, want exit code 1", newID, err)
+			}
+			if want := fmt.Sprintf("invalid new ID format %q", newID); !strings.Contains(stderr, want) {
+				t.Fatalf("rename bd-old1 -> %q: stderr %q, want it to contain %q", newID, stderr, want)
+			}
+			if len(st.lookups) != 0 {
+				t.Fatalf("rename bd-old1 -> %q read the store %q before refusing the target", newID, st.lookups)
+			}
+		})
+	}
 }
