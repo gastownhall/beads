@@ -27,12 +27,23 @@ func ValidatePeerName(name string) error {
 	return nil
 }
 
-// AddFederationPeerInTx upserts a federation peer record. The encryptedPwd
-// should already be encrypted by the caller; pass nil for no password.
-func AddFederationPeerInTx(ctx context.Context, tx *sql.Tx, peer *storage.FederationPeer, encryptedPwd []byte) error {
+// AddFederationPeerInTx upserts a federation peer record and returns the
+// peer's effective stored sovereignty tier. The encryptedPwd should already
+// be encrypted by the caller; pass nil for no password.
+//
+// Sovereignty contract (GH#5213, see FederationStore.AddFederationPeer): an
+// insert stores the supplied tier, including empty. For an existing peer, a
+// non-empty tier replaces the stored tier; an empty tier preserves it unless
+// peer.ClearSovereignty is true, which clears it. The conditional upsert
+// keeps the stored value in place without pre-reading the old password, so
+// credential repair works even when the old credentials cannot be decrypted
+// on this machine; the tier is read back inside the same transaction.
+func AddFederationPeerInTx(ctx context.Context, tx *sql.Tx, peer *storage.FederationPeer, encryptedPwd []byte) (string, error) {
 	if err := ValidatePeerName(peer.Name); err != nil {
-		return fmt.Errorf("invalid peer name: %w", err)
+		return "", fmt.Errorf("invalid peer name: %w", err)
 	}
+
+	replaceTier := peer.Sovereignty != "" || peer.ClearSovereignty
 
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO federation_peers (name, remote_url, username, password_encrypted, sovereignty)
@@ -41,14 +52,21 @@ func AddFederationPeerInTx(ctx context.Context, tx *sql.Tx, peer *storage.Federa
 			remote_url = VALUES(remote_url),
 			username = VALUES(username),
 			password_encrypted = VALUES(password_encrypted),
-			sovereignty = VALUES(sovereignty),
+			sovereignty = IF(?, VALUES(sovereignty), sovereignty),
 			updated_at = CURRENT_TIMESTAMP
-	`, peer.Name, peer.RemoteURL, peer.Username, encryptedPwd, peer.Sovereignty)
+	`, peer.Name, peer.RemoteURL, peer.Username, encryptedPwd, peer.Sovereignty, replaceTier)
 
 	if err != nil {
-		return fmt.Errorf("add federation peer: %w", err)
+		return "", fmt.Errorf("add federation peer: %w", err)
 	}
-	return nil
+
+	var tier string
+	if err := tx.QueryRowContext(ctx,
+		"SELECT COALESCE(sovereignty, '') FROM federation_peers WHERE name = ?", peer.Name,
+	).Scan(&tier); err != nil {
+		return "", fmt.Errorf("read federation peer sovereignty: %w", err)
+	}
+	return tier, nil
 }
 
 // FederationPeerRow holds raw database fields for a federation peer.

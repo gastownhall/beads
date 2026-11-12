@@ -122,14 +122,21 @@ func (s *EmbeddedDoltStore) decryptPassword(encrypted []byte) (string, error) {
 // FederationStore implementation
 // ---------------------------------------------------------------------------
 
+// AddFederationPeer upserts a federation peer with credentials and adds the
+// matching Dolt remote. See FederationStore.AddFederationPeer for the
+// sovereignty tier contract (GH#5213): a successful call copies the
+// effective stored tier into peer.Sovereignty.
 func (s *EmbeddedDoltStore) AddFederationPeer(ctx context.Context, peer *storage.FederationPeer) error {
 	encryptedPwd, err := s.encryptPassword(peer.Password)
 	if err != nil {
 		return fmt.Errorf("encrypt password: %w", err)
 	}
 
+	var tier string
 	if err := s.withConn(ctx, true, func(tx *sql.Tx) error {
-		if err := issueops.AddFederationPeerInTx(ctx, tx, peer, encryptedPwd); err != nil {
+		var err error
+		tier, err = issueops.AddFederationPeerInTx(ctx, tx, peer, encryptedPwd)
+		if err != nil {
 			return err
 		}
 		// Also add the Dolt remote.
@@ -137,6 +144,7 @@ func (s *EmbeddedDoltStore) AddFederationPeer(ctx context.Context, peer *storage
 	}); err != nil {
 		return err
 	}
+	peer.Sovereignty = tier
 	return nil
 }
 
