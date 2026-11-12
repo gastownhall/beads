@@ -957,6 +957,17 @@ func (s *DoltStore) classifyManagedRetry(ctx context.Context, err error, retryab
 		}
 		return backoff.Permanent(err)
 	}
+	// A pooled read that ran its read deadline (classifyPooledRead) is a
+	// connection failure for the breaker, recorded once here, but it is never
+	// replayed: the server may still be running it (GH#5258). This sits ahead
+	// of retryable, whose text matching would otherwise see its cause.
+	var readTimeout *storage.ReadTimeoutError
+	if errors.As(err, &readTimeout) {
+		if tripped := s.recordRetryFailure(ctx, err); tripped != nil {
+			return tripped
+		}
+		return backoff.Permanent(err)
+	}
 	if retryable(err) {
 		if tripped := s.recordRetryFailure(ctx, err); tripped != nil {
 			return tripped
