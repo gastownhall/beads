@@ -1680,3 +1680,145 @@ func newFederationStore(ctx context.Context, path, dbName, prefix string) (*Dolt
 
 	return store, cleanup, nil
 }
+
+// GH#5213: server-mode AddFederationPeer must preserve a stored
+// sovereignty tier when the caller supplies none (re-adding a peer is the
+// documented way to repair its credentials), replace it when a non-empty
+// tier is supplied, and clear it only when ClearSovereignty says so. A
+// successful call reports the effective tier through peer.Sovereignty and
+// leaves federation_peers committed.
+func TestAddFederationPeerSovereignty(t *testing.T) {
+	skipIfNoDolt(t)
+
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	const (
+		urlA = "file:///tmp/sov-alpha"
+		urlB = "file:///tmp/sov-beta"
+	)
+
+	cases := []struct {
+		name     string
+		seed     *storage.FederationPeer // first write; nil to skip
+		readd    *storage.FederationPeer // second write; nil to skip
+		wantErr  string                  // non-empty: the readd call must fail
+		wantTier string                  // stored tier after the last write
+		wantURL  string
+		wantUser string
+		wantPwd  string
+	}{
+		{
+			name:     "insert stores the supplied tier",
+			seed:     &storage.FederationPeer{Name: "sovtx-ins", RemoteURL: urlA, Username: "u1", Password: "p1", Sovereignty: "T2"},
+			wantTier: "T2", wantURL: urlA, wantUser: "u1", wantPwd: "p1",
+		},
+		{
+			name:     "empty tier preserves the stored one while replacing url and credentials",
+			seed:     &storage.FederationPeer{Name: "sovtx-pre", RemoteURL: urlA, Username: "u1", Password: "p1", Sovereignty: "T2"},
+			readd:    &storage.FederationPeer{Name: "sovtx-pre", RemoteURL: urlB, Username: "u2", Password: "p2"},
+			wantTier: "T2", wantURL: urlB, wantUser: "u2", wantPwd: "p2",
+		},
+		{
+			name:     "non-empty tier replaces the stored one",
+			seed:     &storage.FederationPeer{Name: "sovtx-rep", RemoteURL: urlA, Username: "u1", Password: "p1", Sovereignty: "T2"},
+			readd:    &storage.FederationPeer{Name: "sovtx-rep", RemoteURL: urlB, Username: "u2", Password: "p2", Sovereignty: "T3"},
+			wantTier: "T3", wantURL: urlB, wantUser: "u2", wantPwd: "p2",
+		},
+		{
+			name:     "ClearSovereignty clears the stored tier",
+			seed:     &storage.FederationPeer{Name: "sovtx-clr", RemoteURL: urlA, Username: "u1", Password: "p1", Sovereignty: "T2"},
+			readd:    &storage.FederationPeer{Name: "sovtx-clr", RemoteURL: urlB, Username: "u2", Password: "p2", ClearSovereignty: true},
+			wantTier: "", wantURL: urlB, wantUser: "u2", wantPwd: "p2",
+		},
+		{
+			name:     "non-empty tier wins over a set ClearSovereignty",
+			seed:     &storage.FederationPeer{Name: "sovtx-win", RemoteURL: urlA, Username: "u1", Password: "p1", Sovereignty: "T2"},
+			readd:    &storage.FederationPeer{Name: "sovtx-win", RemoteURL: urlB, Username: "u2", Password: "p2", Sovereignty: "T3", ClearSovereignty: true},
+			wantTier: "T3", wantURL: urlB, wantUser: "u2", wantPwd: "p2",
+		},
+		{
+			name:     "new peer without a tier stores empty",
+			seed:     &storage.FederationPeer{Name: "sovtx-non", RemoteURL: urlA, Username: "u1", Password: "p1"},
+			wantTier: "", wantURL: urlA, wantUser: "u1", wantPwd: "p1",
+		},
+		{
+			name:     "untiered peer stays empty",
+			seed:     &storage.FederationPeer{Name: "sovtx-emp", RemoteURL: urlA, Username: "u1", Password: "p1"},
+			readd:    &storage.FederationPeer{Name: "sovtx-emp", RemoteURL: urlB, Username: "u2", Password: "p2"},
+			wantTier: "", wantURL: urlB, wantUser: "u2", wantPwd: "p2",
+		},
+		{
+			name:     "invalid name fails without touching the caller's tier",
+			readd:    &storage.FederationPeer{Name: "9bad", RemoteURL: urlA, Username: "u1", Password: "p1", Sovereignty: "T2"},
+			wantErr:  "invalid peer name",
+			wantTier: "T2",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.seed != nil {
+				if err := store.AddFederationPeer(ctx, tc.seed); err != nil {
+					t.Fatalf("seed AddFederationPeer: %v", err)
+				}
+				stored, err := store.GetFederationPeer(ctx, tc.seed.Name)
+				if err != nil {
+					t.Fatalf("seed GetFederationPeer: %v", err)
+				}
+				if tc.seed.Sovereignty != stored.Sovereignty {
+					t.Errorf("seed call returned tier %q, want effective tier %q", tc.seed.Sovereignty, stored.Sovereignty)
+				}
+			}
+
+			if tc.readd != nil {
+				err := store.AddFederationPeer(ctx, tc.readd)
+				if tc.wantErr != "" {
+					if err == nil {
+						t.Fatalf("readd succeeded, want error %q", tc.wantErr)
+					}
+					if !strings.Contains(err.Error(), tc.wantErr) {
+						t.Errorf("readd error %q does not contain %q", err, tc.wantErr)
+					}
+					if tc.readd.Sovereignty != tc.wantTier {
+						t.Errorf("failed call mutated caller peer.Sovereignty to %q, want untouched %q", tc.readd.Sovereignty, tc.wantTier)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("readd AddFederationPeer: %v", err)
+				}
+			}
+
+			name := tc.seed.Name
+			if tc.readd != nil {
+				name = tc.readd.Name
+			}
+			stored, err := store.GetFederationPeer(ctx, name)
+			if err != nil {
+				t.Fatalf("GetFederationPeer: %v", err)
+			}
+			if stored.Sovereignty != tc.wantTier {
+				t.Errorf("stored sovereignty = %q, want %q", stored.Sovereignty, tc.wantTier)
+			}
+			if tc.readd != nil && tc.readd.Sovereignty != stored.Sovereignty {
+				t.Errorf("caller peer.Sovereignty = %q, want effective tier %q", tc.readd.Sovereignty, stored.Sovereignty)
+			}
+			if stored.RemoteURL != tc.wantURL {
+				t.Errorf("stored remote_url = %q, want %q", stored.RemoteURL, tc.wantURL)
+			}
+			if stored.Username != tc.wantUser {
+				t.Errorf("stored username = %q, want %q", stored.Username, tc.wantUser)
+			}
+			if stored.Password != tc.wantPwd {
+				t.Errorf("stored password = %q, want %q", stored.Password, tc.wantPwd)
+			}
+
+			// The write must be committed, not left dirty in the working set.
+			requireCleanTables(ctx, t, store, "federation_peers")
+		})
+	}
+}
