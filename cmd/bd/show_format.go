@@ -265,7 +265,7 @@ func formatDependencyLine(prefix string, dep *types.IssueWithDependencyMetadata)
 			prefix, statusIcon,
 			ui.RenderMuted(dep.ID),
 			ui.RenderMuted(dep.Title),
-			ui.RenderMuted(fmt.Sprintf("P%d", dep.Priority)))
+			ui.RenderMuted(fmt.Sprintf("P%d", dep.Priority))) + mutedExternalRowMarker(dep)
 	}
 
 	// Active items: ID with status color, priority with semantic color
@@ -281,7 +281,7 @@ func formatDependencyLine(prefix string, dep *types.IssueWithDependencyMetadata)
 		typeStr = ui.TypeBugStyle.Render("(BUG)") + " "
 	}
 
-	return fmt.Sprintf("  %s %s %s: %s%s %s", prefix, statusIcon, idStr, typeStr, dep.Title, priorityTag)
+	return fmt.Sprintf("  %s %s %s: %s%s %s%s", prefix, statusIcon, idStr, typeStr, dep.Title, priorityTag, externalRowMarker(dep))
 }
 
 // printDepSection prints one dependency section: bold heading, then a line per

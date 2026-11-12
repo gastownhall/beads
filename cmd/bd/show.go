@@ -191,6 +191,7 @@ var showCmd = &cobra.Command{
 					result.Close()
 					return HandleErrorRespectJSON("%v", derr)
 				}
+				appendForeignDependencyDetails(ctx, issueStore.EdgeReader, details, briefDeps)
 				allDetails = append(allDetails, details)
 				result.Close()
 				continue
@@ -209,6 +210,9 @@ var showCmd = &cobra.Command{
 			depCountsSnapshot := readDepCounts(ctx, issueStore, issue.ID)
 			depsWithMeta, depsErr := issueStore.GetDependenciesWithMetadata(ctx, issue.ID)
 			gates := types.GatesHolding(issue, depsWithMeta)
+			// Foreign rows (GH#5784) join the listing after the gate read, which
+			// stays the --json view's gated_by.
+			depsWithMeta = withForeignDependencyRows(ctx, issueStore.EdgeReader, issue.ID, depCountsSnapshot, depsWithMeta, depsErr)
 
 			if idx > 0 {
 				fmt.Println("\n" + ui.RenderMuted(strings.Repeat("─", 60)))

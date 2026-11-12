@@ -4031,6 +4031,12 @@
     },
     {
       "schema": "IssueWithDependencyMetadata",
+      "member": "external",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
       "member": "external_ref",
       "type": "string",
       "required": false
