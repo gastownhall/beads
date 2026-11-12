@@ -964,6 +964,9 @@ func (e *GraphApplyTooLargeError) Error() string {
 // order the plan itself declares nodes and edges in (Ref.Key "reaches
 // backward only" — issueops/batchapplier.go).
 //
+// The request always sets SkipPerEdgeCycleCheck (see the return below): the
+// end gate, not a per-edge probe, is the authoritative store-wide cycle check.
+//
 // What this function does NOT do, deliberately: re-check for dependency
 // cycles, parent-child blocking paths, or duplicate/reverse parent-child
 // pairs. BatchApplier's own end gate re-validates the whole scheduling graph
@@ -1152,11 +1155,22 @@ func buildGraphApplyBatchRequest(plan *GraphApplyPlan, opts GraphApplyOptions, a
 		commitMsg = fmt.Sprintf("bd: graph-apply %d nodes", len(plan.Nodes))
 	}
 
+	// SkipPerEdgeCycleCheck drops only the per-edge recursive SQL cycle probe,
+	// which ran one reachability query per dep_add item and made a medium
+	// plan's edge phase cost O(edges x graph) (GH#3879). Cycles are still
+	// refused by:
+	//   - validateGraphApplyLocalCycles, before any write (also under --dry-run);
+	//   - the role's end gate, which re-checks stored plus added edges once per
+	//     batch with one table load and an in-memory walk, and names the path;
+	//   - the per-item self-dependency refusal;
+	//   - the per-edge hierarchy check, which this flag does not gate.
+	// `bd dep add --file --no-cycle-check` makes the same trade.
 	return issueops.ApplyBatchRequest{
-		Actor:         actor,
-		Items:         items,
-		Provenance:    commitMsg,
-		ForceIDPrefix: opts.Force,
+		Actor:                 actor,
+		Items:                 items,
+		Provenance:            commitMsg,
+		ForceIDPrefix:         opts.Force,
+		SkipPerEdgeCycleCheck: true,
 	}, nil
 }
 

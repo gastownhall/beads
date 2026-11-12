@@ -1787,3 +1787,37 @@ func TestBuildGraphApplyBatchRequestCreationStampSurvivesCreatePreparation(t *te
 		t.Errorf("open item's created_at = %v, want zero in the built request", next.Issue.CreatedAt)
 	}
 }
+
+// TestBuildGraphApplyBatchRequestSkipsPerEdgeCycleProbe pins bd-esm0t5 (GH#3879
+// symptom 1): a graph plan pays one recursive SQL cycle probe per edge unless
+// the request sets SkipPerEdgeCycleCheck. Every plan that reaches the builder
+// has already passed validateGraphApplyLocalCycles, and the role's end gate
+// re-checks stored plus added edges once per batch, so the builder sets it
+// for every plan, on every leg that shares this request.
+func TestBuildGraphApplyBatchRequestSkipsPerEdgeCycleProbe(t *testing.T) {
+	plans := map[string]*GraphApplyPlan{
+		"nodes only": {Nodes: []GraphApplyNode{{Key: "a", Title: "A"}}},
+		"edges and inline deps": {
+			Nodes: []GraphApplyNode{
+				{Key: "a", Title: "A"},
+				{Key: "b", Title: "B", Deps: []GraphApplyNodeDep{{Target: "a"}}},
+				{Key: "c", Title: "C", ParentKey: "a"},
+			},
+			Edges: []GraphApplyEdge{{FromKey: "c", ToKey: "b", Type: "blocks"}},
+		},
+	}
+	for name, plan := range plans {
+		t.Run(name, func(t *testing.T) {
+			if err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{}); err != nil {
+				t.Fatalf("validateGraphApplyPlan: %v", err)
+			}
+			req, err := buildGraphApplyBatchRequest(plan, GraphApplyOptions{}, "actor", "owner")
+			if err != nil {
+				t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+			}
+			if !req.SkipPerEdgeCycleCheck {
+				t.Fatal("request SkipPerEdgeCycleCheck = false; want true (the end gate and the plan-local check cover cycles)")
+			}
+		})
+	}
+}

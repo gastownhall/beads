@@ -451,7 +451,7 @@ func TestExecuteGraphApplyAcceptsParentToChildPathThroughWaitsFor(t *testing.T) 
 // TestExecuteGraphApplyUnitFinalGateCatchesCycleHiddenFromPerEdgeChecks. That
 // test blinded the fake store's per-edge cycle probe; the real request has the
 // same switch, SkipPerEdgeCycleCheck, which drops the per-edge probe but never
-// the end gate. With it set, the plans TestExecuteGraphApplyRejectsCombinedSchedulingCycle
+// the end gate, and the builder now always sets it. With it set, the plans TestExecuteGraphApplyRejectsCombinedSchedulingCycle
 // and TestExecuteGraphApplyRejectsCycleHiddenInInlineDep send through
 // executeGraphApply must still be refused, by the end gate alone.
 func TestExecuteGraphApplyFinalGateCatchesCycleHiddenFromPerEdgeChecks(t *testing.T) {
@@ -497,7 +497,11 @@ func TestExecuteGraphApplyFinalGateCatchesCycleHiddenFromPerEdgeChecks(t *testin
 			if err != nil {
 				t.Fatalf("buildGraphApplyBatchRequest: %v", err)
 			}
-			req.SkipPerEdgeCycleCheck = true
+			// The builder itself sets the switch for every graph plan
+			// (bd-esm0t5), so this request is exactly what executeGraphApply sends.
+			if !req.SkipPerEdgeCycleCheck {
+				t.Fatal("buildGraphApplyBatchRequest left SkipPerEdgeCycleCheck unset")
+			}
 			applier, err := store.BatchApplier()
 			if err != nil {
 				t.Fatalf("BatchApplier: %v", err)
