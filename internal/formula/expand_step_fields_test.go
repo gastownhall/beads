@@ -295,3 +295,257 @@ func TestExpandStepCoversAllStepFields(t *testing.T) {
 		}
 	})
 }
+
+// TestExpandStepSubstitutesTemplateFields covers the expansion-time
+// substitution of the fields the carry fix (GH#6433) began moving into
+// expanded output: Notes, metadata string leaves at any nesting depth, the
+// five gate strings, and an explicit waits_for spawner reference. Condition,
+// Loop and OnComplete keep their values untouched, including placeholders
+// whose names collide with expansion vars: those bind in their own phases.
+func TestExpandStepSubstitutesTemplateFields(t *testing.T) {
+	target := &Step{ID: "deploy", Title: "Deploy service", Description: "Ship the service"}
+	vars := map[string]string{
+		"env":     "prod",
+		"owner":   "alice",
+		"release": "v2",
+		"deploy":  "yes",  // collides with Condition's {{deploy}}: must not touch it
+		"n":       "5",    // collides with Loop.Range: must not touch it
+		"item":    "unit", // collides with OnComplete's {item}: must not touch it
+	}
+
+	newTemplate := func() *Step {
+		return &Step{
+			ID:    "{target}.approval",
+			Title: "Approve {env} for {target.title}",
+			Notes: "Ask {owner} to approve {target.description} in {env} (keep {{keep}} as-is)",
+			Metadata: map[string]interface{}{
+				"origin": "{target.id}",
+				"nested": map[string]interface{}{
+					"release": "release-1-{release}",
+					"count":   3,
+					"on":      true,
+					"nothing": nil,
+					"keep":    "{{keep}}",
+				},
+				"list": []interface{}{
+					"{env}",
+					42,
+					map[string]interface{}{"shard": "{target.title}"},
+					nil,
+				},
+				// TOML array-of-tables decodes to []map[string]interface{}.
+				"tables": []map[string]interface{}{
+					{"region": "{env}"},
+				},
+			},
+			WaitsFor: "children-of({target}.survey)",
+			Needs:    []string{"{target}.survey"},
+			Gate: &Gate{
+				Type:    "human",
+				ID:      "approver-{owner}",
+				AwaitID: "await-{env}",
+				Timeout: "1h-{release}",
+				Repo:    "acme/{target}",
+			},
+			Condition:  "{{deploy}}",
+			Loop:       &LoopSpec{Range: "1..{n}"},
+			OnComplete: &OnCompleteSpec{Vars: map[string]string{"note": "{item}"}},
+		}
+	}
+
+	res, err := expandStep(target, []*Step{newTemplate()}, vars)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := res[0]
+
+	t.Run("notes", func(t *testing.T) {
+		if want := "Ask alice to approve Ship the service in prod (keep {{keep}} as-is)"; got.Notes != want {
+			t.Errorf("expanded step Notes = %q, want %q", got.Notes, want)
+		}
+	})
+
+	t.Run("metadata string leaves", func(t *testing.T) {
+		if got.Metadata == nil {
+			t.Fatal("expanded step Metadata = nil, want substituted copy")
+		}
+		if got.Metadata["origin"] != "deploy" {
+			t.Errorf("Metadata[origin] = %v, want %q ({target.id} resolved)", got.Metadata["origin"], "deploy")
+		}
+		nested, ok := got.Metadata["nested"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Metadata[nested] = %T, want a map", got.Metadata["nested"])
+		}
+		if nested["release"] != "release-1-v2" {
+			t.Errorf("Metadata[nested][release] = %v, want %q", nested["release"], "release-1-v2")
+		}
+		// Keys and non-string scalars are never rewritten.
+		if nested["count"] != 3 || nested["on"] != true || nested["nothing"] != nil {
+			t.Errorf("Metadata[nested] non-string leaves = %v/%v/%v, want 3/true/<nil> unchanged", nested["count"], nested["on"], nested["nothing"])
+		}
+		if nested["keep"] != "{{keep}}" {
+			t.Errorf("Metadata[nested][keep] = %v, want {{keep}}: an unresolved name stays literal", nested["keep"])
+		}
+
+		list, ok := got.Metadata["list"].([]interface{})
+		if !ok || len(list) != 4 {
+			t.Fatalf("Metadata[list] = %T, want a 4-element array", got.Metadata["list"])
+		}
+		if list[0] != "prod" || list[1] != 42 || list[3] != nil {
+			t.Errorf("Metadata[list] scalars = %v/%v/%v, want prod/42/<nil>", list[0], list[1], list[3])
+		}
+		if shard, ok := list[2].(map[string]interface{}); !ok || shard["shard"] != "Deploy service" {
+			t.Errorf("Metadata[list][2] = %v, want a map with shard %q", list[2], "Deploy service")
+		}
+
+		tables, ok := got.Metadata["tables"].([]map[string]interface{})
+		if !ok || len(tables) != 1 {
+			t.Fatalf("Metadata[tables] = %T, want a 1-element array of tables", got.Metadata["tables"])
+		}
+		if tables[0]["region"] != "prod" {
+			t.Errorf("Metadata[tables][0][region] = %v, want %q", tables[0]["region"], "prod")
+		}
+	})
+
+	t.Run("waits_for", func(t *testing.T) {
+		if want := "children-of(deploy.survey)"; got.WaitsFor != want {
+			t.Errorf("expanded step WaitsFor = %q, want %q (spawner reference resolved)", got.WaitsFor, want)
+		}
+	})
+
+	t.Run("gate strings", func(t *testing.T) {
+		if got.Gate == nil {
+			t.Fatal("expanded step Gate = nil, want substituted copy")
+		}
+		want := &Gate{Type: "human", ID: "approver-alice", AwaitID: "await-prod", Timeout: "1h-v2", Repo: "acme/deploy"}
+		if *got.Gate != *want {
+			t.Errorf("expanded step Gate = %+v, want %+v", got.Gate, want)
+		}
+	})
+
+	t.Run("condition loop and on_complete keep their placeholders", func(t *testing.T) {
+		if got.Condition != "{{deploy}}" {
+			t.Errorf("expanded step Condition = %q, want %q (the condition evaluator owns that syntax)", got.Condition, "{{deploy}}")
+		}
+		if got.Loop == nil || got.Loop.Range != "1..{n}" {
+			t.Errorf("expanded step Loop.Range = %+v, want %q (bound at cook time)", got.Loop, "1..{n}")
+		}
+		if got.OnComplete == nil || got.OnComplete.Vars["note"] != "{item}" {
+			t.Errorf("expanded step OnComplete.Vars = %v, want {item} bound at runtime", got.OnComplete.Vars)
+		}
+	})
+
+	// A bare waits_for gate names no spawner, so nothing in it resolves
+	// against the target; it must come through unchanged.
+	t.Run("inferred waits_for form unchanged", func(t *testing.T) {
+		tmpl := &Step{ID: "{target}.fan", Title: "Fan", Needs: []string{"{target}.survey"}, WaitsFor: "all-children"}
+		res, err := expandStep(target, []*Step{tmpl}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res[0].WaitsFor != "all-children" {
+			t.Errorf("WaitsFor = %q, want %q", res[0].WaitsFor, "all-children")
+		}
+	})
+
+	// Absent metadata stays nil; nil and empty containers keep their shape.
+	t.Run("metadata container shapes", func(t *testing.T) {
+		var nilMap map[string]interface{}
+		var nilList []interface{}
+		tmpl := &Step{
+			ID:    "{target}.shapes",
+			Title: "Shapes",
+			Metadata: map[string]interface{}{
+				"nilmap":   nilMap,
+				"nillist":  nilList,
+				"emptymap": map[string]interface{}{},
+				"emptyarr": []interface{}{},
+			},
+		}
+		res, err := expandStep(target, []*Step{tmpl}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		meta := res[0].Metadata
+		if m, ok := meta["nilmap"].(map[string]interface{}); !ok || m != nil {
+			t.Errorf("nil map = %v (%T), want a preserved nil map", meta["nilmap"], meta["nilmap"])
+		}
+		if l, ok := meta["nillist"].([]interface{}); !ok || l != nil {
+			t.Errorf("nil array = %v (%T), want a preserved nil array", meta["nillist"], meta["nillist"])
+		}
+		if m, ok := meta["emptymap"].(map[string]interface{}); !ok || m == nil || len(m) != 0 {
+			t.Errorf("empty map = %v (%T), want a fresh non-nil empty map", meta["emptymap"], meta["emptymap"])
+		}
+		if l, ok := meta["emptyarr"].([]interface{}); !ok || l == nil || len(l) != 0 {
+			t.Errorf("empty array = %v (%T), want a fresh non-nil empty array", meta["emptyarr"], meta["emptyarr"])
+		}
+
+		// A step without metadata keeps Metadata nil.
+		res, err = expandStep(target, []*Step{{ID: "{target}.bare", Title: "Bare"}}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res[0].Metadata != nil {
+			t.Errorf("Metadata = %v, want nil for a template without metadata", res[0].Metadata)
+		}
+	})
+
+	// At the depth bound the remaining value is returned unchanged: a leaf
+	// nested deeper than the bound ships with its placeholders still in it.
+	t.Run("depth-bound tail unchanged", func(t *testing.T) {
+		deep := map[string]interface{}{"leaf": "deep-{env}"}
+		for range 50 {
+			deep = map[string]interface{}{"d": deep}
+		}
+		tmpl := &Step{
+			ID:       "{target}.deep",
+			Title:    "Deep",
+			Metadata: map[string]interface{}{"shallow": "shallow-{env}", "deep": deep},
+		}
+		res, err := expandStep(target, []*Step{tmpl}, vars)
+		if err != nil {
+			t.Fatal(err)
+		}
+		meta := res[0].Metadata
+		if meta["shallow"] != "shallow-prod" {
+			t.Errorf("shallow leaf = %v, want %q", meta["shallow"], "shallow-prod")
+		}
+		node, ok := meta["deep"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("deep chain = %T, want a map", meta["deep"])
+		}
+		for range 50 {
+			next, ok := node["d"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("deep chain broke before the leaf at %v", node)
+			}
+			node = next
+		}
+		if node["leaf"] != "deep-{env}" {
+			t.Errorf("deep leaf = %v, want %q: the tail past the bound is untouched", node["leaf"], "deep-{env}")
+		}
+	})
+
+	// A metadata map that contains itself must not hang the expansion; the
+	// depth bound stops the recursion, and the tail may share storage.
+	t.Run("cyclic metadata terminates", func(t *testing.T) {
+		cycle := map[string]interface{}{}
+		cycle["self"] = cycle
+		tmpl := &Step{
+			ID:       "{target}.cycle",
+			Title:    "Cycle",
+			Metadata: map[string]interface{}{"cycle": cycle},
+		}
+		res, err := expandStep(target, []*Step{tmpl}, vars)
+		if err != nil {
+			t.Fatal(err)
+		}
+		outer, ok := res[0].Metadata["cycle"].(map[string]interface{})
+		if !ok || len(outer) != 1 {
+			t.Fatalf("expanded cyclic metadata = %T, want a single-key map", res[0].Metadata["cycle"])
+		}
+		if _, ok := outer["self"].(map[string]interface{}); !ok {
+			t.Errorf("expanded cyclic metadata[self] = %T, want a map", outer["self"])
+		}
+	})
+}

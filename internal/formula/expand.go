@@ -239,6 +239,33 @@ func expandStepWith(target *Step, template []*Step, depth int, subst func(string
 		expanded.Description = subst(substituteTargetPlaceholders(tmpl.Description, target))
 		expanded.Assignee = subst(tmpl.Assignee)
 
+		// Substituted expansion-facing strings, added with the carry fix
+		// (GH#6433): Notes per its own doc comment, an explicit waits_for
+		// spawner reference (children-of({target}.survey) cannot resolve
+		// later: cook looks the spawner up by its literal step ID), the
+		// gate's five strings, and metadata string leaves. Condition, Loop
+		// and OnComplete are carried unchanged (see the field groups
+		// above): their consumers bind {var}/{{var}} placeholders in their
+		// own evaluation phases, so substituting here could corrupt a
+		// condition or bind a runtime placeholder early.
+		expanded.Notes = subst(substituteTargetPlaceholders(tmpl.Notes, target))
+		expanded.WaitsFor = subst(substituteTargetPlaceholders(tmpl.WaitsFor, target))
+		if tmpl.Gate != nil {
+			// Fresh gate value, never an alias: substituting the template's
+			// gate in place would leak this expansion's substitutions into
+			// every other expansion of the same template.
+			gate := *tmpl.Gate
+			gate.Type = subst(substituteTargetPlaceholders(gate.Type, target))
+			gate.ID = subst(substituteTargetPlaceholders(gate.ID, target))
+			gate.AwaitID = subst(substituteTargetPlaceholders(gate.AwaitID, target))
+			gate.Timeout = subst(substituteTargetPlaceholders(gate.Timeout, target))
+			gate.Repo = subst(substituteTargetPlaceholders(gate.Repo, target))
+			expanded.Gate = &gate
+		}
+		if tmpl.Metadata != nil {
+			expanded.Metadata = substituteExpansionMetadata(tmpl.Metadata, target, subst)
+		}
+
 		// Expand/ExpandVars are never carried into expanded output: the
 		// inline-expansion path re-scans the steps it produces, so an
 		// expansion template that kept them would recursively re-expand
@@ -322,6 +349,83 @@ func substituteTargetPlaceholders(s string, target *Step) string {
 	s = strings.ReplaceAll(s, "{target.description}", target.Description)
 
 	return s
+}
+
+// maxExpansionMetadataDepth bounds substituteExpansionMetadata's recursion,
+// mirroring cook's maxMetadataSubstitutionDepth convention (cmd/bd): metadata
+// is arbitrary decoded data, and a programmatically cyclic value (a map that
+// contains itself) must not blow the stack. At the bound the remaining value
+// is returned unchanged, and that untouched tail may still share storage
+// with the template: the isolation guarantee covers exactly the containers
+// above the bound.
+const maxExpansionMetadataDepth = 32
+
+// substituteExpansionMetadata returns a copy of a decoded template metadata
+// map with its string leaves substituted for the expansion, using the same
+// subst(substituteTargetPlaceholders(...)) composition the scalar string
+// fields use. Containers (map[string]interface{}, []interface{} and TOML's
+// []map[string]interface{}) are allocated fresh, so an expanded step never
+// aliases the template's metadata, another expansion's, or a sibling
+// container within its own metadata. Map keys and non-string scalars are
+// kept unchanged — a substituted value can never collide with a rewritten
+// key — and nil containers stay nil.
+func substituteExpansionMetadata(m map[string]interface{}, target *Step, subst func(string) string) map[string]interface{} {
+	out := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		out[k] = substituteExpansionMetadataValue(v, target, subst, 1)
+	}
+	return out
+}
+
+// substituteExpansionMetadataValue is substituteExpansionMetadata's
+// recursive value walker; its depth starts at 1 because the top-level map
+// was already entered by the caller.
+func substituteExpansionMetadataValue(v interface{}, target *Step, subst func(string) string, depth int) interface{} {
+	if depth >= maxExpansionMetadataDepth {
+		return v
+	}
+	switch val := v.(type) {
+	case string:
+		return subst(substituteTargetPlaceholders(val, target))
+	case map[string]interface{}:
+		if val == nil {
+			return val
+		}
+		out := make(map[string]interface{}, len(val))
+		for k, elem := range val {
+			out[k] = substituteExpansionMetadataValue(elem, target, subst, depth+1)
+		}
+		return out
+	case []interface{}:
+		if val == nil {
+			return val
+		}
+		out := make([]interface{}, len(val))
+		for i, elem := range val {
+			out[i] = substituteExpansionMetadataValue(elem, target, subst, depth+1)
+		}
+		return out
+	case []map[string]interface{}:
+		if val == nil {
+			return val
+		}
+		out := make([]map[string]interface{}, len(val))
+		for i, elem := range val {
+			copied, ok := substituteExpansionMetadataValue(elem, target, subst, depth+1).(map[string]interface{})
+			if !ok {
+				// elem is nil or of a shape the walker does not reproduce;
+				// keep it as-is rather than dropping it.
+				out[i] = elem
+				continue
+			}
+			out[i] = copied
+		}
+		return out
+	default:
+		// Non-string scalars (numbers, booleans, null) carry unchanged;
+		// their decoded shape is what cook serializes to JSON.
+		return v
+	}
 }
 
 // mergeVars merges formula default vars with rule overrides.
