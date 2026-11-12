@@ -1283,6 +1283,17 @@ Examples:
 		// role exists to detect it from here — tracked separately.
 		if direction == "down" && len(resolved) == 1 {
 			if reader, err := resolved[0].store.EdgeReader(); err == nil {
+				var depTypes []types.DependencyType
+				if typeFilter != "" {
+					depTypes = []types.DependencyType{types.DependencyType(typeFilter)}
+				}
+				// The anchor's own workspace routes its foreign targets: a
+				// prefix-routed anchor's, else the command's (GH#5784).
+				var anchorBeadsDir string
+				if resolved[0].result != nil {
+					anchorBeadsDir = resolved[0].result.BeadsDir
+				}
+				allIssues = append(allIssues, foreignDependencyRows(ctx, reader, resolved[0].fullID, depTypes, allIssues, crossRigPresentationResolver(anchorBeadsDir))...)
 				warnDroppedDepEdges(ctx, reader, resolved[0].fullID, typeFilter, allIssues)
 			}
 		}
@@ -1321,8 +1332,8 @@ Examples:
 			default:
 				idStr = iss.ID
 			}
-			fmt.Printf("  %s: %s [P%d] (%s) via %s\n",
-				idStr, iss.Title, iss.Priority, iss.Status, iss.DependencyType)
+			fmt.Printf("  %s: %s [P%d] (%s) via %s%s\n",
+				idStr, iss.Title, iss.Priority, iss.Status, iss.DependencyType, externalRowMarker(iss))
 		}
 		fmt.Println()
 		return nil

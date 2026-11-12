@@ -8567,6 +8567,12 @@ components:
           description: >-
             The edge type, e.g. `blocks`, `parent-child`, `related`,
             `discovered-from`. Not a closed vocabulary.
+        external:
+          type: boolean
+          description: >-
+            True when the issue is a foreign one: a bare cross-prefix target
+            this workspace does not hold, read through its prefix routes at
+            query time. Omitted for a local issue.
 
     TreeNode:
       type: object

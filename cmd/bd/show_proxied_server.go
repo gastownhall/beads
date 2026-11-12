@@ -504,6 +504,7 @@ func runShowProxiedDefault(ctx context.Context, uw uow.UnitOfWork, in *showProxi
 				// error swallowed is indistinguishable from a complete one.
 				return HandleErrorRespectJSON("%v", derr)
 			}
+			appendForeignDependencyDetails(ctx, proxiedEdgeReader, "", details, in.briefDeps)
 			foundCount++
 			allDetails = append(allDetails, details)
 			continue
@@ -551,6 +552,7 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 	depCountsSnapshot := readDepCounts(ctx, proxiedDepCounter{src: workapi.NewUOWDetailSource(uw), isWisp: isWisp}, issue.ID)
 	depsWithMeta, depsErr := proxiedListDeps(ctx, uw, issue.ID, isWisp, domain.DepListFilter{Direction: domain.DepDirectionOut})
 	gates := types.GatesHolding(issue, depsWithMeta)
+	depsWithMeta = withForeignDependencyRows(ctx, proxiedEdgeReader, "", issue.ID, depCountsSnapshot, depsWithMeta, depsErr)
 
 	if idx > 0 {
 		fmt.Println("\n" + ui.RenderMuted(strings.Repeat("─", 60)))

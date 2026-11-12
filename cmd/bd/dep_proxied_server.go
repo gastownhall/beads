@@ -548,6 +548,11 @@ func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 	// touches stdout/--json.
 	if direction == "down" && len(args) == 1 {
 		if reader, err := proxiedEdgeReader(); err == nil {
+			var depTypes []types.DependencyType
+			if typeFilter != "" {
+				depTypes = []types.DependencyType{types.DependencyType(typeFilter)}
+			}
+			allIssues = append(allIssues, foreignDependencyRows(ctx, reader, args[0], depTypes, allIssues, crossRigPresentationResolver(""))...)
 			warnDroppedDepEdges(ctx, reader, args[0], typeFilter, allIssues)
 		}
 	}
@@ -587,8 +592,8 @@ func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 		default:
 			idStr = iss.ID
 		}
-		fmt.Printf("  %s: %s [P%d] (%s) via %s\n",
-			idStr, iss.Title, iss.Priority, iss.Status, iss.DependencyType)
+		fmt.Printf("  %s: %s [P%d] (%s) via %s%s\n",
+			idStr, iss.Title, iss.Priority, iss.Status, iss.DependencyType, externalRowMarker(iss))
 	}
 	fmt.Println()
 	return nil

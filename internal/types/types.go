@@ -1244,6 +1244,10 @@ type DependencyCounts struct {
 type IssueWithDependencyMetadata struct {
 	Issue
 	DependencyType DependencyType `json:"dependency_type"`
+	// External is true on a view-only row for a foreign issue: a bare
+	// cross-prefix target this workspace does not hold, read through its
+	// prefix routes (GH#5784). The row is never written back.
+	External bool `json:"external,omitempty"`
 }
 
 // IssueWithCounts extends Issue with dependency relationship counts
