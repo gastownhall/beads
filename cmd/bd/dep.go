@@ -1601,6 +1601,17 @@ func renderTree(tree []*types.TreeNode, maxDepth int, direction string) {
 	if root != nil {
 		hasOpenBlockers := false
 		for _, child := range children[root.ID] {
+			if child.External {
+				// A foreign leaf holds the root under the policy's own rule
+				// (GH#5784): blocks and conditional-blocks only, and an
+				// unreadable target holds it too.
+				if (child.EdgeFromParent == types.DepBlocks || child.EdgeFromParent == types.DepConditionalBlocks) &&
+					(child.Unresolved != "" || (child.Status != types.StatusClosed && child.Status != types.StatusPinned)) {
+					hasOpenBlockers = true
+					break
+				}
+				continue
+			}
 			if (child.Status == types.StatusOpen || child.Status == types.StatusInProgress) &&
 				child.EdgeFromParent.IsBlockingEdge() {
 				hasOpenBlockers = true
@@ -1687,6 +1698,10 @@ func formatTreeNode(node *types.TreeNode, isBlocked bool) string {
 		}
 		return fmt.Sprintf("%s (external)", idStr)
 	}
+	if node.External && node.Unresolved != "" {
+		return fmt.Sprintf("%s: %s%s (external)", ui.RenderWarn(node.ID),
+			ui.RenderMuted("unresolved: "+node.Unresolved), treeEdgeLabel(node))
+	}
 
 	// Color the ID based on status
 	var idStr string
@@ -1708,6 +1723,9 @@ func formatTreeNode(node *types.TreeNode, isBlocked bool) string {
 		idStr, node.Title, node.Priority, node.Status)
 
 	line += treeEdgeLabel(node)
+	if node.External {
+		line += " (external)"
+	}
 
 	// Add READY/BLOCKED indicator for root node
 	if node.Status == types.StatusOpen && node.Depth == 0 {
