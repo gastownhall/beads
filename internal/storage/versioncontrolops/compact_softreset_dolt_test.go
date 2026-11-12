@@ -683,3 +683,45 @@ func TestCompactRefusesDivergentReplayWhileMainMoves(t *testing.T) {
 	f.wantStatus("config:false", "u:false")
 	f.wantNoTempBranch()
 }
+
+// bd-nnkvz2 (#7294): the commits Compact replays must keep their original
+// commit dates. A tracker's last_sync marker is compared with commit dates;
+// re-dating every kept commit to the compaction time leaves the marker before
+// all of them, so the next pull treats every linked issue as changed.
+func TestCompactReplayKeepsCommitDates(t *testing.T) {
+	port := startCompactTestServer(t)
+	f := newCompactFixture(t, port)
+
+	dates := func() map[string]string {
+		rows, err := f.db.QueryContext(f.ctx, "SELECT message, CAST(date AS CHAR) FROM dolt_log")
+		if err != nil {
+			t.Fatalf("read dolt_log dates: %v", err)
+		}
+		defer rows.Close()
+		out := map[string]string{}
+		for rows.Next() {
+			var m, d string
+			if err := rows.Scan(&m, &d); err != nil {
+				t.Fatalf("scan dolt_log dates: %v", err)
+			}
+			out[m] = d
+		}
+		return out
+	}
+	before := dates()
+
+	// Let the clock move past the kept commits' dates so a re-dated replay
+	// is visible.
+	time.Sleep(2 * time.Second)
+
+	if err := f.compact(&compactHookConn{}); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	f.wantLog(replayedLog)
+	after := dates()
+	for _, msg := range []string{"t 2", "u 1"} {
+		if after[msg] != before[msg] {
+			t.Errorf("replayed commit %q date = %s, want original %s", msg, after[msg], before[msg])
+		}
+	}
+}
