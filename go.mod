@@ -1,6 +1,6 @@
 module github.com/steveyegge/beads
 
-go 1.27.3
+go 1.27.4
 
 require (
 	charm.land/glamour/v2 v2.0.1

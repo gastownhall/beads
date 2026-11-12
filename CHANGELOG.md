@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **bd is built with Go 1.27.4.** Go 1.27.3's `net/http` server can crash
+  on a `MaxBytesReader` `Connection: close` header race (GO-2026-6859,
+  CVE-2026-97054), which `bd serve`'s HTTP API reaches. Go 1.27.4 also fixes
+  the cgo, `cmd/go` and `cmd/link` flag-injection bugs CVE-2026-97033 through
+  CVE-2026-97043, which run code during `go build` of a malicious module. The
+  `go` line of `go.mod` (and of `tools/nogo`, `gazelle.go.work` and the
+  example modules), the Bazel `go_sdk` and its lockfile entry, and the
+  gazelle tool pins move to 1.27.4, so a program that imports
+  `github.com/steveyegge/beads` now needs Go 1.27.4 or newer.
+
 - **The `bd serve` settings surface no longer stores config.yaml-only keys.**
   `PUT /v0/beads/config/{key}` (and the dashboard behind it) wrote any key,
   so a tracker secret such as `github.token`, `linear.api_key`,
