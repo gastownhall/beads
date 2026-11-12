@@ -19,10 +19,10 @@ import (
 //
 //  1. A remote is added via DOLT_REMOTE('add', ...) rather than `dolt clone`,
 //     so repo_state.json's 'branches' map is empty (no tracking config).
-//  2. DOLT_PULL('origin', 'main') fails with the branch-tracking error.
-//  3. pullWithAutoResolve detects the error and falls back to
-//     DOLT_FETCH('origin', 'main') + DOLT_MERGE('origin/main').
-//  4. The pull succeeds and the local store reflects the remote content.
+//  2. pullWithAutoResolve runs DOLT_FETCH('origin', 'main') +
+//     DOLT_MERGE('origin/main'), its only path since bd-e2q8zs, which needs
+//     no tracking config.
+//  3. The pull succeeds and the local store reflects the remote content.
 //
 // Prerequisites (all satisfied by the integration CI environment):
 //   - `dolt` CLI ≥ 1.81 available in PATH
@@ -79,29 +79,10 @@ func TestPullWithAutoResolve_BranchTrackingSuccess(t *testing.T) {
 	localStore.remote = "origin"
 	localStore.branch = "main"
 
-	// ── Confirm the bug scenario is present ────────────────────────────────────
-	// DOLT_PULL('origin', 'main') must fail with the tracking error, otherwise
-	// we are not actually testing the fallback — we are testing a working pull.
-	// If Dolt has fixed GH#3144 upstream, skip gracefully.
-	tx, txErr := localStore.db.BeginTx(ctx, nil)
-	if txErr != nil {
-		t.Fatalf("begin tx for bug-check: %v", txErr)
-	}
-	_, rawPullErr := tx.ExecContext(ctx, "CALL DOLT_PULL(?, ?)", "origin", "main")
-	_ = tx.Rollback()
-
-	if rawPullErr == nil {
-		t.Skip("DOLT_PULL succeeded without tracking config — GH#3144 may be fixed upstream; skipping fallback test")
-	}
-	if !isBranchTrackingError(rawPullErr) {
-		t.Skipf("DOLT_PULL failed with unexpected error (not a tracking error) — skipping: %v", rawPullErr)
-	}
-	t.Logf("confirmed GH#3144 scenario: DOLT_PULL produced tracking error: %v", rawPullErr)
-
-	// ── Verify the fix: pullWithAutoResolve succeeds via fallback ──────────────
+	// ── Verify the fix: the single fetch+merge path needs no tracking ─────────
 	err = localStore.pullWithAutoResolve(ctx, "origin", "")
 	if err != nil {
-		t.Errorf("pullWithAutoResolve should succeed via DOLT_FETCH+DOLT_MERGE fallback, got: %v", err)
+		t.Errorf("pullWithAutoResolve should succeed via DOLT_FETCH+DOLT_MERGE without upstream tracking, got: %v", err)
 	}
 	var got string
 	if err := localStore.db.QueryRowContext(ctx, "SELECT value FROM branch_tracking_marker WHERE id = 1").Scan(&got); err != nil {

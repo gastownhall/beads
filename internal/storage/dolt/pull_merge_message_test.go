@@ -25,8 +25,9 @@ type divergedPullFixture struct {
 
 // newDivergedPullFixture builds the fixture. remoteName is the remote both
 // sides name; setUpstream pushes with --set-upstream so the store's branch
-// tracks remoteName/main, which is what sends a bare CALL DOLT_PULL(<remote>)
-// through Dolt's own merge rather than the URL-free GH#3144 fallback.
+// tracks remoteName/main, which is what sent the old bare CALL
+// DOLT_PULL(<remote>) through Dolt's own merge rather than the URL-free GH#3144
+// fallback; without it the store's branch has no upstream tracking.
 func newDivergedPullFixture(t *testing.T, ctx context.Context, remoteName string, setUpstream bool) divergedPullFixture {
 	t.Helper()
 	return newPullFixture(t, ctx, remoteName, setUpstream, true)
