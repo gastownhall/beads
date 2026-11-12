@@ -168,7 +168,7 @@ func (t *embeddedTransaction) DeleteIssue(ctx context.Context, id string) error 
 		t.dirty.MarkDirty(cascaded)
 	}
 	// storage.Tx.DeleteIssue carries no actor, so the journal rows record none.
-	result, err := issueops.DeleteIssueInTxWithResult(ctx, t.tx, id, "")
+	result, err := issueops.DeleteIssueInTxWithResult(ctx, t.tx, id, issueops.NoRequestActor)
 	if err != nil {
 		return err
 	}

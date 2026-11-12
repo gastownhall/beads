@@ -951,7 +951,7 @@ func (t *doltTransaction) DeleteIssue(ctx context.Context, id string) error {
 	}
 	// storage.Tx.DeleteIssue carries no actor (it is the actorless system
 	// surface), so the journal rows record none — 0066's "system/unknown".
-	result, err := issueops.DeleteIssueInTxWithResult(ctx, t.txFor(table), id, "")
+	result, err := issueops.DeleteIssueInTxWithResult(ctx, t.txFor(table), id, issueops.NoRequestActor)
 	if err != nil {
 		return wrapExecError("delete issue in tx", err)
 	}

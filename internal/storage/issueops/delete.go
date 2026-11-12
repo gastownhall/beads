@@ -30,8 +30,9 @@ type DeleteIssueResult struct {
 // DeleteIssueInTx removes one row and everything that hangs off it, journaling
 // the delete, its edge removals and the derived is_blocked updates of the
 // dependents it unblocks to actor. Callers with a request behind them pass its
-// actor; the actorless system surfaces (storage.DeleteIssue, Tx.DeleteIssue)
-// pass "" — see the 0066 contract in journal.go.
+// actor; the actorless storage surfaces (storage.DeleteIssue, Tx.DeleteIssue)
+// pass NoRequestActor — see the 0066 contract in journal.go — and are listed
+// in derivedActorSystemCallers (journal_completeness_test.go).
 func DeleteIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string) error {
 	_, err := DeleteIssueInTxWithResult(ctx, tx, id, actor)
 	return err
