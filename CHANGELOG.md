@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Release binaries are built with Go 1.27.4.** Go 1.27.3's `net/http` can
+  crash a server whose handler reads a request body while writing response
+  headers concurrently (GO-2026-6859, CVE-2026-97054), and its `go` command
+  had eleven build-time advisories (GO-2026-6848 through GO-2026-6858).
+  `bd serve` reads request bodies before it writes, so it is not known to be
+  reachable, but scanners flag every binary built with 1.27.3. `go.mod` keeps
+  `go 1.27.3`, the minimum for programs that import beads, and adds
+  `toolchain go1.27.4`; Bazel's Go SDK moves with it.
+
 - **The `bd serve` settings surface no longer stores config.yaml-only keys.**
   `PUT /v0/beads/config/{key}` (and the dashboard behind it) wrote any key,
   so a tracker secret such as `github.token`, `linear.api_key`,
