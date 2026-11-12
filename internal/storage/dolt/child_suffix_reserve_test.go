@@ -229,6 +229,27 @@ func TestChildSuffixReservation(t *testing.T) {
 		e.assertNext(t, "csr-nd-p", "csr-nd-p.11")
 	})
 
+	// A legacy suffix above math.MaxInt32 does not fit the INT counter column
+	// (an upsert of it is out of range), and the allocator can never mint it.
+	// Renaming into such an id and removing it in a batch with an in-range
+	// sibling both succeed, and the sibling's suffix is still reserved.
+	t.Run("SuffixBeyondTheCounterColumnIsSkipped", func(t *testing.T) {
+		e := newChildSuffixEnv(t)
+		e.seedChildren(t, "csr-big-p", false, false, 2)
+		e.create(t, "csr-big-x", false)
+		e.rename(t, "csr-big-x", "csr-big-p.3000000000")
+		if got := e.counter(t, "child_counters", "csr-big-p"); got != 0 {
+			t.Fatalf("child_counters[csr-big-p] = %d after renaming into csr-big-p.3000000000, want 0: the suffix does not fit the counter", got)
+		}
+		if _, err := e.store.DeleteIssues(e.ctx, []string{"csr-big-p.2", "csr-big-p.3000000000"}, false, true, false); err != nil {
+			t.Fatalf("DeleteIssues(csr-big-p.2, csr-big-p.3000000000): %v", err)
+		}
+		if got := e.counter(t, "child_counters", "csr-big-p"); got != 2 {
+			t.Fatalf("child_counters[csr-big-p] = %d after removing csr-big-p.2 and csr-big-p.3000000000, want 2", got)
+		}
+		e.assertNext(t, "csr-big-p", "csr-big-p.3")
+	})
+
 	// AC-7: a parent removed together with its children is departing, so the
 	// children's suffixes are not reserved under it and no counter row
 	// outlives it in either plane.
