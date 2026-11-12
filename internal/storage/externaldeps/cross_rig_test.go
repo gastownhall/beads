@@ -596,3 +596,51 @@ func TestCrossRigNonBlockingTypesNeverReadTheForeignRig(t *testing.T) {
 		check(t, "served reader", ready, resolver)
 	})
 }
+
+// GH#5784 AC-10: against a server that enforces capability references but not
+// cross-rig ids, a close with a next claim cannot keep the foreign-blocked
+// source out of its claim atomically, so the client refuses it as unsupported
+// before anything reaches the server: nothing is closed and nothing claimed.
+// A server that enforces both gets the request as it came.
+func TestCrossRigOldTokenServerRefusesCloseWithClaimNext(t *testing.T) {
+	newRaw := func(capabilityOnly bool) *remoteStore {
+		raw := newRemoteStore(issue("aa-1"), issue("aa-2"))
+		raw.enforced, raw.capabilityOnly = true, capabilityOnly
+		raw.deps["aa-1"] = []*types.Dependency{externalDep("aa-1", "bb-1", types.DepBlocks)}
+		return raw
+	}
+	closeAndClaim := func(t *testing.T, raw *remoteStore, resolver *fakeIssueResolver) error {
+		t.Helper()
+		store := New(crossRigRemote{raw}, func(ProjectName) (string, bool) { return "", false }, nil, WithIssueResolver(resolver.resolve))
+		closer, err := store.BatchCloser()
+		if err != nil {
+			t.Fatalf("BatchCloser: %v", err)
+		}
+		_, err = closer.CloseBatch(t.Context(), publicops.CloseBatchRequest{
+			Actor: "worker", Items: closeItems("aa-2"), ClaimNext: &publicops.ReadyRequest{},
+		})
+		return err
+	}
+
+	raw := newRaw(true)
+	resolver := &fakeIssueResolver{issues: map[string]*types.Issue{"bb-1": foreignIssue("bb-1", types.StatusOpen)}}
+	err := closeAndClaim(t, raw, resolver)
+	var unsupported *storage.ErrUnsupported
+	if !errors.As(err, &unsupported) || unsupported.Op != "CloseBatchRequest.ClaimNext" {
+		t.Fatalf("CloseBatch with ClaimNext = %v, want the client's ErrUnsupported for CloseBatchRequest.ClaimNext", err)
+	}
+	if len(raw.served) != 0 || len(raw.closes) != 0 || len(raw.closed) != 0 || len(raw.claimed) != 0 {
+		t.Fatalf("a refused close reached the server: served=%v closes=%v closed=%v claimed=%v",
+			raw.served, raw.closes, raw.closed, raw.claimed)
+	}
+	for _, row := range raw.ready {
+		if row.Status != types.StatusOpen || row.Assignee != "" {
+			t.Fatalf("%s = %s assigned %q after a refused close, want open and unassigned", row.ID, row.Status, row.Assignee)
+		}
+	}
+
+	both := newRaw(false)
+	if err := closeAndClaim(t, both, resolver); !errors.Is(err, errServedClaimNextRefused) || !slices.Equal(both.served, []string{"CloseBatch ClaimNext"}) {
+		t.Fatalf("enforcing server: CloseBatch = %v, served %v; want the request handed to the server", err, both.served)
+	}
+}
