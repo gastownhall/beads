@@ -19,6 +19,9 @@ import (
 // Text show's dependents and comments sections are separate reads of the same
 // row with include_dependents and include_comments, which the memo cannot
 // collapse; a later change that reads them in one request updates that step.
+// show --json reads the full detail view by default (#4122), one
+// include_comments&include_dependents request per id after the bare read that
+// resolution makes; --count-only keeps the single bare read.
 func TestE2E_ShowFetchesTheIssueOnce(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	bin := buildBD(t)
@@ -45,14 +48,16 @@ func TestE2E_ShowFetchesTheIssueOnce(t *testing.T) {
 				}
 				return uri
 			}
+			const full = "include_comments=true&include_dependents=true"
 			for _, step := range []struct {
 				args []string
 				want []string
 			}{
-				{[]string{"show", target, "--json"}, []string{get(target, "")}},
-				{[]string{"show", "--json", "--id=" + target}, []string{get(target, "")}},
+				{[]string{"show", target, "--json"}, []string{get(target, ""), get(target, full)}},
+				{[]string{"show", target, "--json", "--count-only"}, []string{get(target, "")}},
+				{[]string{"show", "--json", "--id=" + target}, []string{get(target, ""), get(target, full)}},
 				{[]string{"show", target, "--short"}, []string{get(target, "")}},
-				{[]string{"show", target, other, "--json"}, []string{get(target, ""), get(other, "")}},
+				{[]string{"show", target, other, "--json"}, []string{get(target, ""), get(target, full), get(other, ""), get(other, full)}},
 				{[]string{"show", target}, []string{
 					get(target, ""),
 					get(target, "include_dependents=true"),
