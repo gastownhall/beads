@@ -52,8 +52,7 @@ func TestDocsGraphPlanExampleValidates(t *testing.T) {
 	}
 
 	// bd-esm0t5 (GH#3879): the example shows a node's inline deps, and the
-	// page states the edge direction rule and the other rules a plan author
-	// otherwise finds by trial and error.
+	// page states the rules a plan author otherwise finds by trial and error.
 	hasDeps := false
 	for _, node := range plan.Nodes {
 		hasDeps = hasDeps || len(node.Deps) > 0
@@ -62,14 +61,15 @@ func TestDocsGraphPlanExampleValidates(t *testing.T) {
 		t.Error("documented example has no node with inline \"deps\"")
 	}
 	for what, want := range map[string]string{
-		"edge direction rule":      "bd dep add <from_key> <to_key>",
-		"inline deps":              `"deps"`,
-		"alias rule":               `"blocked-by"`,
-		"respelling refusal":       `"blocked_by"`,
-		"custom types do not gate": "do not gate `bd ready`",
-		"priority string forms":    `"P1"`,
-		"item cap":                 "1000",
-		"dry run":                  "--dry-run",
+		"inline deps":                   `"deps"`,
+		"dependency-shaped node fields": "dropped with a warning",
+		"alias rule":                    `"blocked-by"`,
+		"respelling refusal":            `"blocked_by"`,
+		"custom types do not gate":      "do not gate `bd ready`",
+		"priority string forms":         `"P1"`,
+		"item cap":                      "1000",
+		"dry run":                       "--dry-run",
+		"dry run limits":                "not a full rehearsal",
 	} {
 		if !strings.Contains(createGraphPlanSupplement, want) {
 			t.Errorf("create_graph_plan.md does not document the %s (want %q)", what, want)

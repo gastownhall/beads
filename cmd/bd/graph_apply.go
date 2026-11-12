@@ -1213,12 +1213,17 @@ func buildGraphApplyBatchRequest(plan *GraphApplyPlan, opts GraphApplyOptions, a
 	// which ran one reachability query per dep_add item and made a medium
 	// plan's edge phase cost O(edges x graph) (GH#3879). Cycles are still
 	// refused by:
-	//   - validateGraphApplyLocalCycles, before any write (also under --dry-run);
+	//   - validateGraphApplyLocalCycles, before any write (also under --dry-run),
+	//     over parent links and edges (not node deps);
 	//   - the role's end gate, which re-checks stored plus added edges once per
 	//     batch with one table load and an in-memory walk, and names the path;
 	//   - the per-item self-dependency refusal;
 	//   - the per-edge hierarchy check, which this flag does not gate.
-	// `bd dep add --file --no-cycle-check` makes the same trade.
+	// `bd dep add --file --no-cycle-check` makes the same trade. The saving is
+	// the store applier's (embedded and server mode): the uow applier behind a
+	// proxied-server workspace still runs AddDependencies' own final
+	// CycleThroughEdges, which loads both dependency tables for every dep_add
+	// item.
 	return issueops.ApplyBatchRequest{
 		Actor:                 actor,
 		Items:                 items,

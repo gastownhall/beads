@@ -4,16 +4,7 @@
 JSON plan. Node field names follow the issue model's JSON tags (the same
 names `bd show --json` emits), and every field single-issue `bd create` can
 set is addressable from a plan — plus an initial `status` and `pinned`,
-which `bd create` has no flags for.
-
-**Direction rule.** Every dependency in a plan reads like `bd dep add`: an
-edge `{"from_key": "b", "to_key": "a", "type": "blocks"}` is
-`bd dep add <from_key> <to_key> --type <type>`, so `from_key` is the
-dependent (it waits) and `to_key` is what it depends on. A node's own
-`deps` entry `{"target": "a"}` means the same thing: this node waits on `a`.
-Put dependencies in `edges` or in `deps`; fields such as `blockedBy` or
-`depends_on` on a node are not part of the schema and are dropped with a
-warning.
+which `bd create` has no flags for:
 
 ```json
 {
@@ -70,7 +61,9 @@ Node notes:
   refused. A node without one gets the default, P2.
 - `deps` lists this node's own dependencies: each entry has a `target` (a
   plan node key, or else an existing issue ID) and an optional `type`
-  (default `blocks`). This node is the dependent.
+  (default `blocks`). This node is the dependent. Dependencies go in `deps`
+  or in `edges`: node fields such as `blockedBy` or `depends_on` are not
+  part of the schema and are dropped with a warning.
 - `status` sets the initial status (default `open`, or `deferred` when
   `defer_until` is in the future). Nodes created `closed` get `closed_at`
   auto-filled. Timestamps are RFC3339; relative forms like `+6h` are not
@@ -112,7 +105,10 @@ Plan notes:
 - A plan applies as one batch of at most 1000 items: one per node, one per
   parent link, edge and `deps` entry, and one per `assign_after_create`
   node. A larger plan is refused; split it into several plans.
-- `--dry-run` validates the whole plan and prints a preview without writing.
+- `--dry-run` validates the plan and prints a preview without writing, but
+  it is not a full rehearsal. Only the real apply checks the 1000-item cap,
+  that the issue IDs the plan links to exist, cycles through node `deps`,
+  and cycles or parent-child blocking paths through stored dependencies.
 
 Comments cannot be created from a plan; use `bd comments add` after creation.
 Model fields without `bd create` flags (`sender`, `work_type`, `is_template`,
