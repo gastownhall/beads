@@ -149,6 +149,58 @@ func TestBatchWispDeleteReservesTheFreedChildSuffix(t *testing.T) {
 	}
 }
 
+// TestCascadeDeleteDropsTheDepartingParentsChildCounter pins GH#4750's
+// cascade half: migration 0039 dropped the child_counters foreign key, so a
+// cascade delete that removes a parent together with its children must drop
+// the parent's counter row itself — no orphaned high-water row may survive
+// its owner in the versioned table.
+func TestCascadeDeleteDropsTheDepartingParentsChildCounter(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Parent + children with real parent-child edges, so a cascade delete
+	// from the parent expands to them. The create path leaves the parent's
+	// counter row at the highest live suffix (last_child = 3).
+	if err := store.CreateIssue(ctx, &types.Issue{
+		ID: "ccd-cascade", Title: "ccd-cascade", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeEpic,
+	}, "tester"); err != nil {
+		t.Fatalf("CreateIssue parent: %v", err)
+	}
+	for i := 1; i <= 3; i++ {
+		child := fmt.Sprintf("ccd-cascade.%d", i)
+		if err := store.CreateIssue(ctx, &types.Issue{
+			ID: child, Title: child, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+		}, "tester"); err != nil {
+			t.Fatalf("CreateIssue %s: %v", child, err)
+		}
+		if err := store.AddDependency(ctx, &types.Dependency{
+			IssueID: child, DependsOnID: "ccd-cascade", Type: types.DepParentChild,
+		}, "tester"); err != nil {
+			t.Fatalf("AddDependency %s: %v", child, err)
+		}
+	}
+
+	result, err := store.DeleteIssues(ctx, []string{"ccd-cascade"}, true, false, false)
+	if err != nil {
+		t.Fatalf("DeleteIssues cascade: %v", err)
+	}
+	if result.DeletedCount != 4 {
+		t.Fatalf("DeletedCount = %d, want 4 (parent + 3 children)", result.DeletedCount)
+	}
+
+	var count int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM child_counters WHERE parent_id = ?", "ccd-cascade").Scan(&count); err != nil {
+		t.Fatalf("read counter after cascade delete: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("child_counters rows for deleted parent = %d, want 0: a cascade delete must drop the departing parent's counter row (GH#4750)", count)
+	}
+}
+
 // TestDeleteIssuesBySourceRepoReservesTheFreedChildSuffix pins the source-repo
 // wipe entry (issueops.DeleteIssuesBySourceRepoInTx, behind `bd repo remove`):
 // a child it removes reserves its suffix against a parent it leaves behind.
