@@ -154,7 +154,7 @@ func TestExternalRefHistoryQuerier_UnwrapsDecorator(t *testing.T) {
 
 func TestEngineExternalRefChangedAfter_NilLocalIssue(t *testing.T) {
 	e := &Engine{Store: newPureTestStore()}
-	changed, err := e.externalRefChangedAfter(context.Background(), nil, "ref", time.Now())
+	changed, _, err := e.externalRefChangedAfter(context.Background(), nil, "ref", time.Now())
 	if err != nil || changed {
 		t.Fatalf("externalRefChangedAfter(nil local) = (%v, %v), want (false, nil)", changed, err)
 	}
@@ -165,7 +165,7 @@ func TestEngineExternalRefChangedAfter_FastPathSameRef(t *testing.T) {
 	e := &Engine{Store: querier}
 	local := newTestIssue("bd-1", time.Now(), time.Now())
 
-	changed, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", time.Now())
+	changed, _, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestEngineExternalRefChangedAfter_FastPathDifferentRef(t *testing.T) {
 	e := &Engine{Store: querier}
 	local := newTestIssue("bd-1", time.Now(), time.Now())
 
-	changed, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-NEW", time.Now())
+	changed, _, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-NEW", time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -195,18 +195,19 @@ func TestEngineExternalRefChangedAfter_FastPathDifferentRef(t *testing.T) {
 }
 
 func TestEngineExternalRefChangedAfter_FastPathNotFound(t *testing.T) {
-	// No history entry at or before lastSync: treat as changed, per the
-	// documented contract on storage.ExternalRefHistoryQuerier.PreviousExternalRef.
+	// No history entry at or before lastSync for an issue created after it:
+	// a new pre-linked issue, reported changed so it is hydrated.
 	querier := &historyQuerierStore{prevFound: false}
 	e := &Engine{Store: querier}
-	local := newTestIssue("bd-1", time.Now(), time.Now())
+	lastSync := time.Now()
+	local := newTestIssue("bd-1", lastSync.Add(time.Hour), lastSync.Add(time.Hour))
 
-	changed, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", time.Now())
+	changed, _, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", lastSync)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !changed {
-		t.Error("expected changed=true when no prior history entry is found")
+		t.Error("expected changed=true when no prior history entry is found for an issue created after lastSync")
 	}
 }
 
@@ -221,7 +222,7 @@ func TestEngineExternalRefChangedAfter_FastPathNullHistoricalRef(t *testing.T) {
 	e := &Engine{Store: querier}
 	local := newTestIssue("bd-1", time.Now(), time.Now())
 
-	changed, err := e.externalRefChangedAfter(context.Background(), local, "", time.Now())
+	changed, _, err := e.externalRefChangedAfter(context.Background(), local, "", time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -236,7 +237,7 @@ func TestEngineExternalRefChangedAfter_FastPathPropagatesError(t *testing.T) {
 	e := &Engine{Store: querier}
 	local := newTestIssue("bd-1", time.Now(), time.Now())
 
-	_, err := e.externalRefChangedAfter(context.Background(), local, "ref", time.Now())
+	_, _, err := e.externalRefChangedAfter(context.Background(), local, "ref", time.Now())
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("externalRefChangedAfter error = %v, want %v", err, wantErr)
 	}
@@ -255,7 +256,7 @@ func TestEngineExternalRefChangedAfter_EmbeddedDoltTakesFastPath(t *testing.T) {
 	lastSync := time.Now()
 	local := newTestIssue("bd-1", lastSync.Add(-time.Hour), lastSync.Add(time.Hour))
 
-	changed, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", lastSync)
+	changed, _, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", lastSync)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -276,7 +277,7 @@ func TestEngineExternalRefChangedAfter_NoHistoryCapabilityFallsBack(t *testing.T
 
 	t.Run("touched after lastSync reports changed", func(t *testing.T) {
 		local := newTestIssue("bd-1", lastSync.Add(-time.Hour), lastSync.Add(time.Hour))
-		changed, err := e.externalRefChangedAfter(context.Background(), local, "ref", lastSync)
+		changed, _, err := e.externalRefChangedAfter(context.Background(), local, "ref", lastSync)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -287,7 +288,7 @@ func TestEngineExternalRefChangedAfter_NoHistoryCapabilityFallsBack(t *testing.T
 
 	t.Run("untouched since lastSync reports unchanged", func(t *testing.T) {
 		local := newTestIssue("bd-2", lastSync.Add(-2*time.Hour), lastSync.Add(-time.Hour))
-		changed, err := e.externalRefChangedAfter(context.Background(), local, "ref", lastSync)
+		changed, _, err := e.externalRefChangedAfter(context.Background(), local, "ref", lastSync)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -306,7 +307,7 @@ func TestEngineExternalRefChangedAfter_DecoratedDoltServerStoreUnchanged(t *test
 	e := &Engine{Store: dec}
 	local := newTestIssue("bd-1", time.Now(), time.Now())
 
-	changed, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", time.Now())
+	changed, _, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

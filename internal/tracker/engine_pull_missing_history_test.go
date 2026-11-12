@@ -1,0 +1,197 @@
+package tracker
+
+// Regression tests for #7294 (bd-nnkvz2): a history-capable store that holds
+// no row for a linked issue at last_sync (compaction or flatten removed the
+// baseline) must not make the pull hydrate that issue, because hydration
+// exempts it from the conflict and overlap guards that keep unpushed local
+// edits.
+
+import (
+	"context"
+	"reflect"
+	"testing"
+	"time"
+
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/types"
+)
+
+// missingHistoryStore is a pure store holding several issues. Its
+// transactions route each write to the issue it names and count it, and its
+// PreviousExternalRef answers from previousRefs: an ID absent from it has no
+// history row at the asked time (found=false), as after a compaction whose
+// squashed base postdates last_sync.
+type missingHistoryStore struct {
+	*pureTestStore
+	previousRefs map[string]string
+	updates      map[string]int
+}
+
+func newMissingHistoryStore(issues ...*types.Issue) *missingHistoryStore {
+	pure := newPureTestStore(issues...)
+	pure.localMetadata["test.last_sync"] = overlapLastSync.Format(time.RFC3339)
+	return &missingHistoryStore{
+		pureTestStore: pure,
+		previousRefs:  make(map[string]string),
+		updates:       make(map[string]int),
+	}
+}
+
+func (s *missingHistoryStore) PreviousExternalRef(_ context.Context, id string, _ time.Time) (string, bool, error) {
+	ref, ok := s.previousRefs[id]
+	return ref, ok, nil
+}
+
+func (s *missingHistoryStore) GetIssueByExternalRef(_ context.Context, ref string) (*types.Issue, error) {
+	for _, issue := range s.issues {
+		if issue.ExternalRef != nil && *issue.ExternalRef == ref {
+			return issue, nil
+		}
+	}
+	return nil, nil
+}
+
+func (s *missingHistoryStore) RunInTransaction(_ context.Context, _ string, fn func(storage.Transaction) error) error {
+	return fn(&missingHistoryTx{store: s})
+}
+
+func (s *missingHistoryStore) RunInIssueLifecycleTransaction(_ context.Context, _ string, fn func(storage.IssueLifecycleTransaction) error) error {
+	return fn(&missingHistoryTx{store: s})
+}
+
+// missingHistoryTx routes each call to a pullTestTransaction over the issue
+// it names.
+type missingHistoryTx struct {
+	storage.Transaction
+	store *missingHistoryStore
+}
+
+func (t *missingHistoryTx) on(id string) *pullTestTransaction {
+	for _, issue := range t.store.issues {
+		if issue.ID == id {
+			return &pullTestTransaction{issue: issue}
+		}
+	}
+	return &pullTestTransaction{issue: &types.Issue{}}
+}
+
+func (t *missingHistoryTx) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
+	t.store.updates[id]++
+	return t.on(id).UpdateIssue(ctx, id, updates, actor)
+}
+
+func (t *missingHistoryTx) ReopenIssueWithResult(ctx context.Context, id, reason, actor string) (bool, error) {
+	t.store.updates[id]++
+	return t.on(id).ReopenIssueWithResult(ctx, id, reason, actor)
+}
+
+func (t *missingHistoryTx) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
+	return t.on(id).GetIssue(ctx, id)
+}
+
+func (t *missingHistoryTx) GetLabels(ctx context.Context, id string) ([]string, error) {
+	return t.on(id).GetLabels(ctx, id)
+}
+
+func (t *missingHistoryTx) AddLabel(ctx context.Context, id, label, actor string) error {
+	t.store.updates[id]++
+	return t.on(id).AddLabel(ctx, id, label, actor)
+}
+
+func (t *missingHistoryTx) RemoveLabel(ctx context.Context, id, label, actor string) error {
+	t.store.updates[id]++
+	return t.on(id).RemoveLabel(ctx, id, label, actor)
+}
+
+// linkedIssue returns a local issue linked to the test tracker's EXT-<n>.
+func linkedIssue(id, ext, title string, created, updated time.Time) *types.Issue {
+	ref := "https://test.test/" + ext
+	return &types.Issue{
+		ID:          id,
+		Title:       title,
+		Description: title + " body",
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+		ExternalRef: &ref,
+		CreatedAt:   created,
+		UpdatedAt:   updated,
+	}
+}
+
+// staleRemote returns the remote counterpart of a linked issue, holding
+// content the local issue no longer has.
+func staleRemote(ext string, updated time.Time) TrackerIssue {
+	return TrackerIssue{
+		ID:          ext,
+		Identifier:  ext,
+		Title:       "stale remote title " + ext,
+		Description: "stale remote body",
+		UpdatedAt:   updated,
+	}
+}
+
+// snapshotIssues copies every issue so a test can assert none changed.
+func snapshotIssues(issues ...*types.Issue) []types.Issue {
+	out := make([]types.Issue, len(issues))
+	for i, issue := range issues {
+		out[i] = *issue
+		if issue.ExternalRef != nil {
+			ref := *issue.ExternalRef
+			out[i].ExternalRef = &ref
+		}
+	}
+	return out
+}
+
+func assertIssuesUnchanged(t *testing.T, before []types.Issue, issues ...*types.Issue) {
+	t.Helper()
+	for i, issue := range issues {
+		if !reflect.DeepEqual(*issue, before[i]) {
+			t.Errorf("issue %s changed by the pull:\n got  %+v\n want %+v", issue.ID, *issue, before[i])
+		}
+	}
+}
+
+// TestEnginePullMissingHistoryPreservesLocalEdits pins AC-1 of #7294: older
+// linked issues with no history row at last_sync, one edited locally after
+// it, are neither fetched for hydration nor written, in a dry run or a real
+// pull, when the incremental bulk fetch returns no remote change.
+func TestEnginePullMissingHistoryPreservesLocalEdits(t *testing.T) {
+	for _, dryRun := range []bool{true, false} {
+		name := "real"
+		if dryRun {
+			name = "dry-run"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			edited := linkedIssue("bd-edited", "EXT-1", "local edit not yet pushed",
+				overlapLastSync.Add(-24*time.Hour), overlapLastSync.Add(10*time.Minute))
+			unchanged := linkedIssue("bd-unchanged", "EXT-2", "local unchanged",
+				overlapLastSync.Add(-24*time.Hour), overlapLastSync.Add(-time.Hour))
+			store := newMissingHistoryStore(edited, unchanged)
+			before := snapshotIssues(edited, unchanged)
+			// Both remotes were last updated well before the overlap window,
+			// so the incremental bulk fetch returns neither.
+			mock, _ := newOverlapTracker(
+				staleRemote("EXT-1", overlapLastSync.Add(-2*time.Hour)),
+				staleRemote("EXT-2", overlapLastSync.Add(-2*time.Hour)),
+			)
+
+			result, err := NewEngine(mock, store, "sync").Sync(ctx, SyncOptions{Pull: true, DryRun: dryRun})
+			if err != nil {
+				t.Fatalf("Sync: %v", err)
+			}
+			if mock.fetchCalls != 0 {
+				t.Errorf("FetchIssue calls = %d, want 0: missing history must not hydrate older issues", mock.fetchCalls)
+			}
+			if result.PullStats.Candidates != 0 || result.PullStats.Updated != 0 || result.PullStats.Created != 0 {
+				t.Errorf("PullStats = %+v, want no candidates, updates or creates", result.PullStats)
+			}
+			if len(store.updates) != 0 {
+				t.Errorf("transaction writes = %v, want none", store.updates)
+			}
+			assertIssuesUnchanged(t, before, edited, unchanged)
+		})
+	}
+}
