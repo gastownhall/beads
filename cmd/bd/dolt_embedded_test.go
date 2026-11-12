@@ -226,14 +226,18 @@ func TestEmbeddedDoltRemoteAndPush(t *testing.T) {
 	})
 
 	t.Run("pull_no_remote", func(t *testing.T) {
-		cmd := exec.Command(bd, "dolt", "pull")
-		cmd.Dir = dir
-		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
-		if err == nil {
-			t.Log("pull without remote succeeded unexpectedly")
+		// bd-e2q8zs: a rig with no remote skips the pull with the no-remote
+		// guidance and exits 0, as server mode does. Embedded mode's fetch
+		// fails with the bare "no remote" error, which the shared no-remote
+		// gate (isConfirmedNoRemote) accepts since the server-mode pull moved
+		// onto the same fetch; the pull used to exit 1 here. A fresh rig, so
+		// no remote the subtests above added or removed is in play; bdDolt
+		// fails the subtest on a non-zero exit.
+		npDir, _, _ := bdInit(t, bd, "--prefix", "np")
+		out := bdDolt(t, bd, npDir, "pull")
+		if !strings.Contains(out, "No remote is configured — skipping.") {
+			t.Errorf("bd dolt pull with no remote: want the no-remote guidance on stdout, got:\n%s", out)
 		}
-		_ = out
 	})
 
 	// ===== Push/Pull between two repos via shared file remote =====

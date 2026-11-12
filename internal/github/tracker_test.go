@@ -30,6 +30,11 @@ func (s endpointTestStore) GetConfig(_ context.Context, key string) (string, err
 	return "", nil
 }
 
+// SearchIssues lists no local beads, so Init looks up no other repository.
+func (s endpointTestStore) SearchIssues(context.Context, string, types.IssueFilter) ([]*types.Issue, error) {
+	return nil, nil
+}
+
 func TestInitRejectsChangedEndpointBeforeRequest(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -55,7 +60,10 @@ func TestInitRejectsChangedEndpointBeforeRequest(t *testing.T) {
 	}
 
 	var secondRequests int
-	serverA := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	// serverA serves the configured repository, which Init reads.
+	serverA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"id":1,"name":"repo","full_name":"owner/repo"}`))
+	}))
 	defer serverA.Close()
 	serverB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		secondRequests++

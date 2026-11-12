@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Release binaries are built with Go 1.27.4.** Go 1.27.0-1.27.3 (and
+  releases before 1.26.11) can crash an HTTP/1 server that bounds request
+  bodies with `http.MaxBytesReader` when a handler reads past the limit while
+  response headers are written concurrently (GO-2026-6859, CVE-2026-97054).
+  `bd serve` bounds its JSON bodies with `MaxBytesReader` but reads them fully
+  before writing any header, so no bd handler is known to hit the race;
+  govulncheck still reports it reachable through `net/http`. 1.27.4 also fixes
+  eleven build-time advisories in the go command, cgo, the compiler and the
+  linker (GO-2026-6848 through GO-2026-6858). `go.mod` keeps `go 1.27.3`, the
+  minimum for programs that import beads, and adds `toolchain go1.27.4`, so
+  building from a checkout selects Go 1.27.4 (fetched automatically unless
+  `GOTOOLCHAIN=local`; offline builders need it installed). Builds through
+  `go install ...@version`, Nix and Homebrew use the installing Go: use Go
+  1.27.4 or newer there. (#8431)
+
 - **The `bd serve` settings surface no longer stores config.yaml-only keys.**
   `PUT /v0/beads/config/{key}` (and the dashboard behind it) wrote any key,
   so a tracker secret such as `github.token`, `linear.api_key`,
@@ -119,6 +134,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in embedded and server mode: HTTP(S) userinfo is dropped whole, an SSH remote
   keeps its account but loses any password, and the host, path and rejection
   detail are kept.
+
+- **Server-mode `bd dolt pull` no longer writes the remote URL, token
+  included, into its merge commits (bd-e2q8zs).** When local and remote
+  histories had diverged, a server-mode pull ran Dolt's own pull, whose merge
+  commit reads `Merge branch 'main' of <stored remote URL> into main`, so a
+  URL such as `git+https://x-access-token:<token>@github.com/org/repo` landed
+  in history and the next `bd dolt push` published it. Every server-mode pull
+  route (default remote, Hosted Dolt `--user`, git-protocol and credential CLI
+  routes, federation peers) now fetches and merges the tracking ref itself, as
+  embedded mode always has, so the message reads
+  `Merge branch 'origin/main' into main`. Merge commits made by older versions
+  stay in history that is already pushed: rotate any token that was in a
+  remote URL. See
+  [Sync failures](docs/recovery/sync-failures.md#credentials-in-a-remote-url-and-merge-commits).
 
 ### Added
 
@@ -725,6 +754,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd dolt pull` on an embedded rig with no remote exits 0 (bd-e2q8zs).**
+  It prints `No remote is configured — skipping.` and the setup guidance,
+  as server mode already did; in embedded mode it used to exit 1. A pull
+  from a configured remote that fails still exits 1.
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add
@@ -1503,6 +1536,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reports beads linked elsewhere as skipped, and `bd github pull <bead-id>`
   says their link is not an issue the tracker can address (#7781, reported
   and first fixed by @NahumLitvin in #7794).
+- GitHub sync no longer narrows its scope when GitHub does not answer a
+  lookup of the repository's names (follow-up to #8068). `bd github sync`,
+  `push` and `pull` read the configured repository, and each other name a
+  bead links under, to learn the names the repository goes by. When one of
+  those lookups failed with anything but a 404 (a 5xx, a dropped connection,
+  a rate limit, a refused token), the run went on without the answer, so
+  beads linked under the repository's other names could count as another
+  repository's: push and conflict detection skipped them without a warning
+  while `github.last_sync` moved past their local edits, and once the lookup
+  worked again a later run could pull a remote edit over an unpushed one, or
+  push a stale bead over a remote edit, with no conflict. v1.3.3 and v1.3.4
+  work this way: they carry #8068 through its backport, #8083. Such a failure
+  now stops the command with an error that names the repository and says
+  what to do, as does a failure to list the local beads.
 - `bd compact` no longer discards writes that reach `main` while it runs. It
   finished by hard-resetting `main` onto the rebuilt history, which dropped
   changes in `main`'s working set that no Dolt commit held yet (a batch under

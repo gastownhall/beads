@@ -2,6 +2,8 @@ module github.com/steveyegge/beads
 
 go 1.27.3
 
+toolchain go1.27.4
+
 require (
 	charm.land/glamour/v2 v2.0.1
 	charm.land/huh/v2 v2.0.3
