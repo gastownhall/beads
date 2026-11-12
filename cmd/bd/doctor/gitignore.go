@@ -88,12 +88,20 @@ dolt-pprof/
 # Backup data (auto-exported JSONL, local-only)
 backup/
 
-# Backup and auto-import state (per-machine; dolt-backup.json and
-# dolt-config.log carry absolute local paths, GH#8318)
+# Dolt-native backup destination and last-sync state (bd backup init/sync).
+# dolt-backup.json holds an absolute path for a filesystem destination.
 dolt-backup.json
 dolt-backup-state.json
+
+# Audit log of bd dolt set changes (each line records the .beads path)
 dolt-config.log
+
+# JSONL auto-import stamp (size and mtime of the issues.jsonl last attempted)
 .auto-import-issues.jsonl
+
+# bd dolt migrate resume journal (absolute paths; kept only while a
+# migration is unfinished)
+dolt-mode-migration.json
 
 # Per-project environment file (Dolt connection config, GH#2520)
 .env
@@ -150,10 +158,6 @@ var requiredPatterns = []string{
 	"dolt-server.port",
 	"dolt-server.activity",
 	"dolt-server-config.yaml",
-	"dolt-backup.json",
-	"dolt-backup-state.json",
-	"dolt-config.log",
-	".auto-import-issues.jsonl",
 	"daemon.*",
 	"*.lock",
 	"*.corrupt.backup/",
@@ -163,6 +167,12 @@ var requiredPatterns = []string{
 	"http_local_metadata.json",
 	".local_version",
 	"backup/",
+	// GH#8318: machine-local files beside backup/, which only matches the directory.
+	"dolt-backup.json",
+	"dolt-backup-state.json",
+	"dolt-config.log",
+	".auto-import-issues.jsonl",
+	"dolt-mode-migration.json",
 }
 
 // CheckGitignore checks if .beads/.gitignore is up to date.
