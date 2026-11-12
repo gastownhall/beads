@@ -347,29 +347,44 @@ func (operationsProbe) Reopen(context.Context, issueops.ReopenRequest) (issueops
 // DependencyEditor and BatchApplier enforces. It absorbs the CLI's former
 // isChildOf / isDisallowedHierarchicalDependency tables.
 func TestCheckDottedChildDependency(t *testing.T) {
+	// The reason a refusal gives is keyed on this explicit column, not on
+	// IsBlockingEdge, so a change to the blocking set shows up here. gate: a
+	// blocking edge that could never clear; link: a non-blocking edge the
+	// hierarchy already makes redundant.
+	const (
+		none = ""
+		gate = "gate"
+		link = "link"
+	)
 	for _, tt := range []struct {
 		name    string
 		from    string
 		to      string
 		depType issueops.DependencyType
 		want    bool
+		reason  string
 	}{
-		{"direct child blocks on parent", "bd-abc.1", "bd-abc", issueops.DepBlocks, true},
-		{"grandchild blocks on grandparent", "bd-abc.1.2", "bd-abc", issueops.DepBlocks, true},
-		{"grandchild blocks on immediate parent", "bd-abc.1.2", "bd-abc.1", issueops.DepBlocks, true},
-		{"deeply nested child blocks on root", "bd-abc.1.2.3", "bd-abc", issueops.DepBlocks, true},
-		{"child relates to parent", "bd-abc.1", "bd-abc", issueops.DepRelated, true},
-		{"child waits-for parent", "bd-abc.1", "bd-abc", issueops.DepWaitsFor, true},
-		{"grandchild parent-child to grandparent", "bd-root.1.2", "bd-root", issueops.DepParentChild, true},
-		{"immediate parent-child allowed", "bd-root.1.2", "bd-root.1", issueops.DepParentChild, false},
-		{"same id", "bd-abc", "bd-abc", issueops.DepBlocks, false},
-		{"unrelated ids", "bd-xyz", "bd-abc", issueops.DepBlocks, false},
-		{"unrelated target from a dotted child", "bd-root.1.2", "bd-other", issueops.DepBlocks, false},
-		{"sibling", "bd-abc.2", "bd-abc.1", issueops.DepBlocks, false},
-		{"parent on its child", "bd-abc", "bd-abc.1", issueops.DepBlocks, false},
-		{"prefix but not hierarchical", "bd-abcd", "bd-abc", issueops.DepBlocks, false},
-		{"textual prefix of a dotted id is not an ancestor", "bd-abc.10", "bd-abc.1", issueops.DepBlocks, false},
-		{"external target", "bd-abc.1", "external:bd-abc", issueops.DepBlocks, false},
+		{"direct child blocks on parent", "bd-abc.1", "bd-abc", issueops.DepBlocks, true, gate},
+		{"grandchild blocks on grandparent", "bd-abc.1.2", "bd-abc", issueops.DepBlocks, true, gate},
+		{"grandchild blocks on immediate parent", "bd-abc.1.2", "bd-abc.1", issueops.DepBlocks, true, gate},
+		{"deeply nested child blocks on root", "bd-abc.1.2.3", "bd-abc", issueops.DepBlocks, true, gate},
+		{"child relates to parent", "bd-abc.1", "bd-abc", issueops.DepRelated, true, link},
+		{"child waits-for parent", "bd-abc.1", "bd-abc", issueops.DepWaitsFor, true, gate},
+		{"child conditional-blocks on parent", "bd-abc.1", "bd-abc", issueops.DependencyType("conditional-blocks"), true, gate},
+		{"grandchild waits-for grandparent", "bd-abc.1.2", "bd-abc", issueops.DepWaitsFor, true, gate},
+		{"child discovered-from parent", "bd-abc.1", "bd-abc", issueops.DepDiscoveredFrom, true, link},
+		{"child tracks parent", "bd-abc.1", "bd-abc", issueops.DepTracks, true, link},
+		{"child custom type to parent", "bd-abc.1", "bd-abc", issueops.DependencyType("implements"), true, link},
+		{"grandchild parent-child to grandparent", "bd-root.1.2", "bd-root", issueops.DepParentChild, true, link},
+		{"immediate parent-child allowed", "bd-root.1.2", "bd-root.1", issueops.DepParentChild, false, none},
+		{"same id", "bd-abc", "bd-abc", issueops.DepBlocks, false, none},
+		{"unrelated ids", "bd-xyz", "bd-abc", issueops.DepBlocks, false, none},
+		{"unrelated target from a dotted child", "bd-root.1.2", "bd-other", issueops.DepBlocks, false, none},
+		{"sibling", "bd-abc.2", "bd-abc.1", issueops.DepBlocks, false, none},
+		{"parent on its child", "bd-abc", "bd-abc.1", issueops.DepBlocks, false, none},
+		{"prefix but not hierarchical", "bd-abcd", "bd-abc", issueops.DepBlocks, false, none},
+		{"textual prefix of a dotted id is not an ancestor", "bd-abc.10", "bd-abc.1", issueops.DepBlocks, false, none},
+		{"external target", "bd-abc.1", "external:bd-abc", issueops.DepBlocks, false, none},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := issueops.IsDottedChildDependency(tt.from, tt.to, tt.depType); got != tt.want {
@@ -392,16 +407,31 @@ func TestCheckDottedChildDependency(t *testing.T) {
 			// The CLI prints this sentence verbatim, so it is behaviour. It must
 			// not claim the hierarchy gates a child on its parent's completion:
 			// a child of an open parent is ready (gastownhall/beads#5036).
-			want := "cannot add dependency: " + tt.from + " is already a child of " + tt.to +
-				". The hierarchy already links them, so an explicit edge back up the tree is refused"
-			if tt.depType == issueops.DepBlocks || tt.depType == issueops.DepWaitsFor {
+			var want string
+			switch tt.reason {
+			case gate:
 				want = "cannot add dependency: " + tt.from + " is already a child of " + tt.to +
 					". A child does not wait for its parent to close, and " + tt.to +
 					" cannot close until its children finish, so this gate would never clear. To make " + tt.from +
 					" wait for work, put that work in a sibling issue and block on that"
+			case link:
+				want = "cannot add dependency: " + tt.from + " is already a child of " + tt.to +
+					". The hierarchy already links them, so an explicit edge back up the tree is refused"
+			default:
+				t.Fatalf("refused row %q has no expected reason", tt.name)
 			}
 			if err.Error() != want {
 				t.Fatalf("message = %q, want %q", err.Error(), want)
+			}
+			if strings.Contains(err.Error(), "inherit") {
+				t.Fatalf("message = %q claims the child inherits its parent's completion", err.Error())
+			}
+			if tt.reason == link {
+				for _, claim := range []string{"deadlock", "never clear"} {
+					if strings.Contains(err.Error(), claim) {
+						t.Fatalf("message = %q makes a %q claim for the non-blocking type %q", err.Error(), claim, tt.depType)
+					}
+				}
 			}
 		})
 	}
