@@ -367,6 +367,19 @@ func renderProxiedServerConfigAtLevel(port int, level servercfg.LogLevel) ([]byt
 			PortNumber: &port,
 		},
 	}
+	// This key is emitted unconditionally on purpose. Managed startup is
+	// safe without a gate here: newManagedProxiedServerUOWProvider probes
+	// the resolved dolt binary and refuses one below doltversion.RequiredMin
+	// before this renderer's output is written, and that floor is at least
+	// doltserver.MinDoltVersionForArchiveLevelConfig
+	// (TestRequiredMinCoversProxiedArchiveLevelConfig pins the pair), so a
+	// binary a config with archive_level could brick never receives one. The
+	// gate is not in the renderer itself because not every caller probes:
+	// legacy rendering (renderLegacyProxiedServerConfig) shares this
+	// function, and a binary whose version cannot be parsed is admitted
+	// with a warning by deliberate policy (ProbeWithPolicy) rather than
+	// refused — gating here would need its own answer for both. See #4986
+	// and #5627.
 	archiveLevel := 0
 	yc.BehaviorConfig.AutoGCBehavior = &servercfg.AutoGCBehaviorYAMLConfig{
 		ArchiveLevel_: &archiveLevel,
