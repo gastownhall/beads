@@ -1444,6 +1444,115 @@ func TestCookFormulaToSubgraph_StandaloneExpansionWithWorkflowVars(t *testing.T)
 	}
 }
 
+// TestCookFormulaToSubgraph_StandaloneExpansionTemplateGateAndWaitsFor pins
+// that an expansion template's carried fields survive materialization into
+// working cook output (GH#6433): a collector's explicit
+// waits_for: children-of({target}.survey) resolves against the target so the
+// cooked collector waits for the survey's children, and an approval step's
+// parameterized gate blocks it with the substitution applied. Notes and
+// metadata land on the cooked issue resolved, not as raw placeholders.
+func TestCookFormulaToSubgraph_StandaloneExpansionTemplateGateAndWaitsFor(t *testing.T) {
+	f := &formula.Formula{
+		Formula:     "survey-expansion",
+		Description: "Survey then approve",
+		Version:     1,
+		Type:        formula.TypeExpansion,
+		Template: []*formula.Step{
+			{ID: "{target}.survey", Title: "Survey: {target.title}"},
+			{
+				ID:       "{target}.collect",
+				Title:    "Collect results",
+				Needs:    []string{"{target}.survey"},
+				WaitsFor: "children-of({target}.survey)",
+			},
+			{
+				ID:    "{target}.approval",
+				Title: "Approve: {target.title}",
+				Notes: "Approval for {target.title}, asked of {approver}",
+				Metadata: map[string]interface{}{
+					"origin":   "expansion",
+					"approver": "{approver}",
+				},
+				Gate: &formula.Gate{Type: "human", ID: "approval-{approver}"},
+			},
+		},
+	}
+
+	// {target.title} is the expansion's own name; {approver} comes from vars.
+	if err := formula.MaterializeExpansion(f, "deploy", map[string]string{"approver": "oncall"}); err != nil {
+		t.Fatalf("MaterializeExpansion failed: %v", err)
+	}
+
+	subgraph, err := cookFormulaToSubgraph(f, "survey-expansion")
+	if err != nil {
+		t.Fatalf("cookFormulaToSubgraph failed: %v", err)
+	}
+
+	surveyID := "survey-expansion.deploy.survey"
+	collectID := "survey-expansion.deploy.collect"
+	approvalID := "survey-expansion.deploy.approval"
+	gateID := "survey-expansion.gate-deploy.approval"
+
+	// The collector waits for the survey's dynamic children: the spawner
+	// reference resolved through {target}, so the waits-for edge names the
+	// survey issue. Its needs edge onto the same target collapsed into this
+	// edge (also_blocks), so no separate blocks edge may exist either.
+	if got := waitsForEdgesFrom(subgraph, collectID); len(got) != 1 || got[0] != surveyID {
+		t.Errorf("collector waits-for edges = %v, want [%s]", got, surveyID)
+	}
+	if got := blocksEdgesFrom(subgraph, collectID); len(got) != 0 {
+		t.Errorf("collector blocks edges = %v, want none (the waits-for edge subsumes them)", got)
+	}
+	var waitsForEdge *types.Dependency
+	for _, dep := range subgraph.Dependencies {
+		if dep.Type == types.DepWaitsFor && dep.IssueID == collectID && dep.DependsOnID == surveyID {
+			waitsForEdge = dep
+			break
+		}
+	}
+	if waitsForEdge == nil {
+		t.Fatalf("no waits-for edge from %s to %s (deps: %v)", collectID, surveyID, subgraph.Dependencies)
+	}
+	if !strings.Contains(waitsForEdge.Metadata, `"gate":"all-children"`) {
+		t.Errorf("waits-for edge metadata = %s, want gate all-children", waitsForEdge.Metadata)
+	}
+
+	// The gate blocks the approval: a companion gate issue exists, wired to
+	// block the approval step, with the parameterized condition resolved.
+	if got := blocksEdgesFrom(subgraph, approvalID); len(got) != 1 || got[0] != gateID {
+		t.Errorf("approval blocks edges = %v, want [%s]", got, gateID)
+	}
+	gate := subgraph.IssueMap[gateID]
+	if gate == nil || gate.IssueType != types.TypeGate {
+		t.Fatalf("companion %s missing or not a gate: %+v (issues: %v)", gateID, gate, allIssueIDs(subgraph))
+	}
+	if gate.AwaitType != "human" {
+		t.Errorf("companion AwaitType = %q, want %q", gate.AwaitType, "human")
+	}
+	if gate.AwaitID != "approval-oncall" {
+		t.Errorf("companion AwaitID = %q, want %q ({approver} resolved)", gate.AwaitID, "approval-oncall")
+	}
+
+	// The approval carries its substituted Notes and Metadata.
+	approval := subgraph.IssueMap[approvalID]
+	if approval == nil {
+		t.Fatalf("approval issue %s not found (issues: %v)", approvalID, allIssueIDs(subgraph))
+	}
+	if want := "Approval for survey-expansion, asked of oncall"; approval.Notes != want {
+		t.Errorf("approval Notes = %q, want %q", approval.Notes, want)
+	}
+	var approvalMeta map[string]interface{}
+	if err := json.Unmarshal(approval.Metadata, &approvalMeta); err != nil {
+		t.Fatalf("approval Metadata is not valid JSON: %v (raw: %s)", err, string(approval.Metadata))
+	}
+	if got := approvalMeta["origin"]; got != "expansion" {
+		t.Errorf("approval Metadata[origin] = %v, want \"expansion\"", got)
+	}
+	if got := approvalMeta["approver"]; got != "oncall" {
+		t.Errorf("approval Metadata[approver] = %v, want \"oncall\" ({approver} resolved)", got)
+	}
+}
+
 // TestCookFormulaToSubgraph_StepMetadata verifies that a step's Metadata flows
 // through cook onto the resulting Issue.Metadata as a JSON object. Regression
 // for gastownhall/beads#3341.
