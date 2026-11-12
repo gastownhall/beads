@@ -141,6 +141,12 @@ func (s *DoltStore) peerPullOutcome(ctx context.Context, peer string, pullErr er
 	if pullErr == nil {
 		return nil
 	}
+	// A merge settlement would not or could not settle stays an error: its
+	// live conflicts are not this pull's data (GH#7839).
+	var settleErr *pullMergeStateError
+	if errors.As(pullErr, &settleErr) {
+		return fmt.Errorf("failed to pull from peer %s: %w", peer, pullErr)
+	}
 	var mce *versioncontrolops.MergeConflictsError
 	if errors.As(pullErr, &mce) {
 		*conflicts = mce.Conflicts

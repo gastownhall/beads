@@ -1257,8 +1257,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the conflicted tables; `bd federation sync` gets them as data. A pull that
   finds a conflicted merge already open refuses before staging anything,
   leaves that merge alone, and names `bd conflicts list` and the abort
-  command. To decide
-  the conflicts in bulk on a server store, merge the fetched branch:
+  command; so does a pull whose merge bd cannot attribute to itself on the
+  shared server, or whose abort it cannot confirm, without claiming the
+  working set was restored. To decide the conflicts in bulk on a server
+  store, merge the fetched branch:
   `bd vc merge <remote>/<branch> --strategy ours|theirs`.
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
