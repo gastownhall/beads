@@ -234,7 +234,7 @@ var advisoryBlacksmithRunnerJobs = []struct {
 // TestSameRepoBlacksmithExpressionSemantics (ci_blacksmith_runner_test.go)
 // covers the shared sameRepoBlacksmith{2,4,8}vcpu consts themselves.
 func TestF7cAdvisorySameRepoBlacksmithExpressionSemantics(t *testing.T) {
-	const ownRepo = "steveyegge/beads"
+	const ownRepo = "gastownhall/beads"
 	type tc struct {
 		name           string
 		event          string

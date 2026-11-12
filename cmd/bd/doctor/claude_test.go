@@ -1034,9 +1034,13 @@ func TestCheckClaude_ClaudeCodeWithoutClaude(t *testing.T) {
 	}
 }
 
+// legacyRepoOrg is the pre-move GitHub org (GH#3059), split so that
+// scripts/check-legacy-repo-refs.sh does not flag the absence checks below.
+const legacyRepoOrg = "steve" + "yegge"
+
 // TestCheckClaudePlugin_NotInstalledFixHint pins the install hint both plugin
 // checks print when ~/.claude exists but the beads plugin is not installed:
-// the marketplace is gastownhall/beads, not the pre-move steveyegge/beads
+// the marketplace is gastownhall/beads, not the pre-move repository
 // (GH#3059). An empty ~/.claude/ makes isClaudePresent() true without a
 // claude binary on PATH; no installed_plugins.json means "not installed".
 func TestCheckClaudePlugin_NotInstalledFixHint(t *testing.T) {
@@ -1062,8 +1066,8 @@ func TestCheckClaudePlugin_NotInstalledFixHint(t *testing.T) {
 			if !strings.Contains(got.Fix, "/plugin marketplace add gastownhall/beads") {
 				t.Errorf("Fix = %q, want the gastownhall/beads marketplace", got.Fix)
 			}
-			if strings.Contains(got.Fix, "steveyegge") {
-				t.Errorf("Fix = %q still names the pre-move steveyegge repository", got.Fix)
+			if strings.Contains(got.Fix, legacyRepoOrg) {
+				t.Errorf("Fix = %q still names the pre-move repository", got.Fix)
 			}
 		})
 	}

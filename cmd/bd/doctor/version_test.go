@@ -135,7 +135,7 @@ func TestUpgradeCommandForPath(t *testing.T) {
 }
 
 // TestLatestReleaseAPIURL pins the release lookup to the current repository
-// rather than relying on GitHub's transfer redirect from steveyegge/beads.
+// rather than relying on GitHub's transfer redirect from the pre-move repository.
 func TestLatestReleaseAPIURL(t *testing.T) {
 	const want = "https://api.github.com/repos/gastownhall/beads/releases/latest"
 	if latestReleaseAPIURL != want {
