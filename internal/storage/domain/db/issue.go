@@ -169,6 +169,22 @@ func reserveCreatedChildSuffix(ctx context.Context, runner Runner, id string) er
 	return nil
 }
 
+// reserveRemovedChildSuffixes keeps each removed row's hierarchical suffix
+// used in its surviving parent's counter (GH#4750), so the next generated
+// child never re-mints it. A parent removed in the same call keeps no counter
+// to raise; one removed by a later call (the other plane's DeleteByIDs) takes
+// its counter row with it through the counter table's foreign key.
+func reserveRemovedChildSuffixes(ctx context.Context, runner Runner, ids []string) error {
+	departing := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		departing[id] = true
+	}
+	if _, err := issueops.ReserveChildSuffixesInTx(ctx, runner, ids, departing); err != nil {
+		return fmt.Errorf("reserve child suffixes: %w", err)
+	}
+	return nil
+}
+
 func (r *issueSQLRepositoryImpl) InsertBatch(ctx context.Context, issues []*types.Issue, actor string, opts domain.InsertIssueOpts) error {
 	for _, issue := range issues {
 		if err := r.Insert(ctx, issue, actor, opts); err != nil {
@@ -1132,6 +1148,9 @@ func (r *issueSQLRepositoryImpl) Delete(ctx context.Context, id string, opts dom
 	if err := issueops.RecordDependencyRemovalsForIssuesInTx(ctx, r.runner, []string{id}, actor); err != nil {
 		return fmt.Errorf("db: IssueSQLRepository.Delete %s: journal dependency removals: %w", id, err)
 	}
+	if err := reserveRemovedChildSuffixes(ctx, r.runner, []string{id}); err != nil {
+		return fmt.Errorf("db: IssueSQLRepository.Delete %s: %w", id, err)
+	}
 	//nolint:gosec // G201: table is a hardcoded constant.
 	res, err := r.runner.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = ?", table), id)
 	if err != nil {
@@ -1172,6 +1191,9 @@ func (r *issueSQLRepositoryImpl) DeleteByIDs(ctx context.Context, ids []string, 
 	// still be read.
 	if err := issueops.RecordDependencyRemovalsForIssuesInTx(ctx, r.runner, actualIDs, actor); err != nil {
 		return 0, fmt.Errorf("db: IssueSQLRepository.DeleteByIDs journal dependency removals: %w", err)
+	}
+	if err := reserveRemovedChildSuffixes(ctx, r.runner, actualIDs); err != nil {
+		return 0, fmt.Errorf("db: IssueSQLRepository.DeleteByIDs: %w", err)
 	}
 	total := 0
 	for start := 0; start < len(ids); start += deleteBatchSize {

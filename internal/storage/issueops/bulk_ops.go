@@ -214,6 +214,16 @@ func DeleteIssuesBySourceRepoInTx(ctx context.Context, tx *sql.Tx, sourceRepo st
 		return 0, fmt.Errorf("journal dependency removals for source-repo delete: %w", err)
 	}
 
+	// GH#4750: a removed child's suffix stays used under a parent that
+	// survives this wipe (one in another source repo).
+	departing := make(map[string]bool, len(issueIDs))
+	for _, id := range issueIDs {
+		departing[id] = true
+	}
+	if _, err := ReserveChildSuffixesInTx(ctx, tx, issueIDs, departing); err != nil {
+		return 0, fmt.Errorf("source-repo delete: reserve child suffixes: %w", err)
+	}
+
 	result, err := tx.ExecContext(ctx, `DELETE FROM issues WHERE source_repo = ?`, sourceRepo)
 	if err != nil {
 		return 0, fmt.Errorf("delete issues: %w", err)

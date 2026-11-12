@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -78,6 +79,30 @@ func (e *childSuffixEnv) rename(t *testing.T, oldID, newID string) {
 	}
 }
 
+// seedChildren creates parent and its children parent.1..parent.n, then drops
+// parent's counter: the legacy shape, where the highest live child is the only
+// record of the suffixes used.
+func (e *childSuffixEnv) seedChildren(t *testing.T, parent string, parentWisp, childWisp bool, n int) {
+	t.Helper()
+	e.create(t, parent, parentWisp)
+	for i := 1; i <= n; i++ {
+		e.create(t, parent+"."+string(rune('0'+i)), childWisp)
+	}
+	e.dropCounter(t, parent)
+}
+
+// committedCounter reads parent's child_counters row as of HEAD: the
+// reservation must ride the removal's own Dolt commit (for a wisp removal,
+// the post-transaction commit of the durable rows it changed).
+func (e *childSuffixEnv) committedCounter(t *testing.T, parent string) int {
+	t.Helper()
+	var n int
+	if err := e.store.db.QueryRowContext(e.ctx, "SELECT COALESCE(MAX(last_child), 0) FROM child_counters AS OF 'HEAD' WHERE parent_id = ?", parent).Scan(&n); err != nil {
+		t.Fatalf("read committed child_counters[%s]: %v", parent, err)
+	}
+	return n
+}
+
 // TestChildSuffixReservation pins GH#4750's live-database leg on the
 // server-backed store: the create, rename and removal paths preserve a
 // parent's child suffixes in its counter, so a counter that was missing or
@@ -120,4 +145,81 @@ func TestChildSuffixReservation(t *testing.T) {
 		}
 		e.assertNext(t, "csr-rw-p", "csr-rw-p.6")
 	})
+
+	// AC-4: removing P.3, the highest of P.1-P.3, through each removal entry
+	// keeps suffix 3 used, so the next children are P.4 and P.5. A wisp row
+	// routes DeleteIssue to deleteWisp and DeleteIssues to deleteWispBatchTx.
+	removals := []struct {
+		name                  string
+		parentWisp, childWisp bool
+		remove                func(t *testing.T, e *childSuffixEnv, id string)
+	}{
+		{"DeleteIssue", false, false, csrDeleteIssue},
+		{"DeleteWispOfADurableParent", false, true, csrDeleteIssue},
+		{"DeleteWispUnderAWispParent", true, true, csrDeleteIssue},
+		{"DeleteIssues", false, false, csrDeleteIssues},
+		{"DeleteWispBatchOfADurableParent", false, true, csrDeleteIssues},
+		{"DeleteWispBatchUnderAWispParent", true, true, csrDeleteIssues},
+		{"TxDeleteIssue", false, false, csrTxDeleteIssue},
+		{"TxDeleteWispOfADurableParent", false, true, csrTxDeleteIssue},
+	}
+	for i, tc := range removals {
+		t.Run("RemoveThrough"+tc.name+"KeepsTheSuffixReserved", func(t *testing.T) {
+			e := newChildSuffixEnv(t)
+			parent := "csr-rm" + string(rune('a'+i)) + "-p"
+			e.seedChildren(t, parent, tc.parentWisp, tc.childWisp, 3)
+			tc.remove(t, e, parent+".3")
+			if !tc.parentWisp {
+				if got := e.committedCounter(t, parent); got < 3 {
+					t.Fatalf("child_counters[%s] AS OF HEAD = %d after removing %s.3, want >= 3", parent, got, parent)
+				}
+			}
+			e.assertNext(t, parent, parent+".4", parent+".5")
+		})
+	}
+
+	// AC-4 through DeleteIssuesBySourceRepo: the child leaves with its source
+	// repo while the parent, owned by another repo, survives.
+	t.Run("RemoveThroughDeleteIssuesBySourceRepoKeepsTheSuffixReserved", func(t *testing.T) {
+		e := newChildSuffixEnv(t)
+		e.create(t, "csr-sr-p", false)
+		e.create(t, "csr-sr-p.1", false)
+		e.create(t, "csr-sr-p.2", false)
+		other := &types.Issue{ID: "csr-sr-p.3", Title: "child suffix csr-sr-p.3", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, SourceRepo: "csr-other-repo"}
+		if err := e.store.CreateIssue(e.ctx, other, "tester"); err != nil {
+			t.Fatalf("CreateIssue(csr-sr-p.3): %v", err)
+		}
+		e.dropCounter(t, "csr-sr-p")
+		n, err := e.store.DeleteIssuesBySourceRepo(e.ctx, "csr-other-repo")
+		if err != nil || n != 1 {
+			t.Fatalf("DeleteIssuesBySourceRepo(csr-other-repo) = %d, %v; want 1, nil", n, err)
+		}
+		if got := e.committedCounter(t, "csr-sr-p"); got < 3 {
+			t.Fatalf("child_counters[csr-sr-p] AS OF HEAD = %d after removing csr-sr-p.3, want >= 3", got)
+		}
+		e.assertNext(t, "csr-sr-p", "csr-sr-p.4", "csr-sr-p.5")
+	})
+}
+
+func csrDeleteIssue(t *testing.T, e *childSuffixEnv, id string) {
+	t.Helper()
+	if err := e.store.DeleteIssue(e.ctx, id); err != nil {
+		t.Fatalf("DeleteIssue(%s): %v", id, err)
+	}
+}
+
+func csrDeleteIssues(t *testing.T, e *childSuffixEnv, id string) {
+	t.Helper()
+	if _, err := e.store.DeleteIssues(e.ctx, []string{id}, false, true, false); err != nil {
+		t.Fatalf("DeleteIssues(%s): %v", id, err)
+	}
+}
+
+func csrTxDeleteIssue(t *testing.T, e *childSuffixEnv, id string) {
+	t.Helper()
+	if err := e.store.RunInTransaction(e.ctx, "child suffix: delete "+id, func(tx storage.Transaction) error {
+		return tx.DeleteIssue(e.ctx, id)
+	}); err != nil {
+		t.Fatalf("Tx.DeleteIssue(%s): %v", id, err)
+	}
 }
