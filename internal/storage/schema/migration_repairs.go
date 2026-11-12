@@ -669,6 +669,7 @@ func ensureWispsLateColumns(ctx context.Context, db DBConn) error {
 		return nil
 	}
 	columns := []struct{ name, definition string }{
+		{"no_history", "TINYINT(1) DEFAULT 0"},
 		{"started_at", "DATETIME"},
 	}
 	for _, col := range columns {

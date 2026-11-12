@@ -285,6 +285,7 @@ func TestWispsLateColumns0053(t *testing.T) {
 	}{
 		// The real 2026-04 shape: no_history present, started_at missing.
 		{name: "started_at_only", dropped: []string{"started_at"}},
+		{name: "both_missing", dropped: []string{"no_history", "started_at"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -347,6 +348,19 @@ func TestWispsLateColumns0053(t *testing.T) {
 			}
 			if remaining != 0 {
 				t.Fatalf("rig wisp rows left in wisps = %d, want 0", remaining)
+			}
+
+			for _, col := range []string{"no_history", "started_at"} {
+				var present int
+				if err := store.db.QueryRowContext(ctx, `
+					SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+					WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisps' AND COLUMN_NAME = ?
+				`, col).Scan(&present); err != nil {
+					t.Fatalf("probe wisps.%s: %v", col, err)
+				}
+				if present != 1 {
+					t.Fatalf("wisps.%s present = %d after MigrateUp, want 1", col, present)
+				}
 			}
 		})
 	}
