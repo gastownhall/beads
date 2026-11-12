@@ -54,6 +54,59 @@ func TestProtocol_OpenParentDoesNotBlockChildren(t *testing.T) {
 	}
 }
 
+// TestProtocol_ChildOfInProgressParentRefusalAgreesWithReadyFront pins
+// gastownhall/beads#5036: `bd ready` and the `bd dep add` dotted-child refusal
+// tell one story. A child of an in-progress parent is ready (G2.2), so the
+// refusal of a child-on-parent blocks edge must not claim the child already
+// inherits a wait on its parent's completion; it names the shape that does
+// work, a sibling issue the child blocks on, which holds the child out of the
+// ready front until the sibling closes without anyone editing its status.
+func TestProtocol_ChildOfInProgressParentRefusalAgreesWithReadyFront(t *testing.T) {
+	t.Parallel()
+	w := newWorkspace(t)
+
+	parent := w.create("--title", "Parent in progress", "--type", "task")
+	w.run("update", parent, "--status", "in_progress")
+	child := w.create("--title", "Child of in-progress parent", "--type", "task", "--parent", parent)
+
+	// The reporter's observation, pinned as intended: no parent-completion gate.
+	if !parseReadyIDs(t, w)[child] {
+		t.Fatalf("G2.2: child %s of in-progress parent %s is not in the ready front", child, parent)
+	}
+
+	out, code := w.runExpectError("dep", "add", child, parent, "--type", "blocks")
+	if code == 0 {
+		t.Fatalf("dep add %s %s --type blocks exited 0, want a refusal", child, parent)
+	}
+	if prefix := "cannot add dependency: " + child + " is already a child of " + parent + "."; !strings.Contains(out, prefix) {
+		t.Errorf("refusal output lacks the stable prefix %q:\n%s", prefix, out)
+	}
+	if strings.Contains(out, "inherit") {
+		t.Errorf("refusal claims %s inherits a wait on %s, yet bd ready lists it:\n%s", child, parent, out)
+	}
+	if !strings.Contains(out, "sibling") {
+		t.Errorf("refusal does not name the sibling-issue shape:\n%s", out)
+	}
+	requireDepEdgesEqual(t, getObjectSlice(w.showJSON(child), "dependencies"),
+		[]depEdge{{issueID: child, dependsOnID: parent}},
+		"#5036: dependencies after the refused child-on-parent blocks edge")
+
+	// The supported shape: the awaited work is a sibling the child blocks on.
+	sibling := w.create("--title", "Work the child waits for", "--type", "task", "--parent", parent)
+	w.run("dep", "add", child, sibling)
+	if parseReadyIDs(t, w)[child] {
+		t.Errorf("child %s stayed ready while it blocks on open sibling %s", child, sibling)
+	}
+
+	w.run("close", sibling, "--reason", "done")
+	if !parseReadyIDs(t, w)[child] {
+		t.Errorf("child %s did not return to the ready front after sibling %s closed", child, sibling)
+	}
+	if status, _ := w.showJSON(child)["status"].(string); status != "open" {
+		t.Errorf("child %s status = %q, want open: nobody edited it", child, status)
+	}
+}
+
 // TestProtocol_ReadyParentFilterIsTransitive pins protocol clause R3:
 // `bd ready --parent <id>` restricts to TRANSITIVE descendants, not just direct
 // children (GH#3396 — a one-hop subquery silently dropped grandchildren while
