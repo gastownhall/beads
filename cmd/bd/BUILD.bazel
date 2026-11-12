@@ -711,6 +711,7 @@ go_test(
         "crossrig_close_embedded_test.go",
         "crossrig_depadd_feedback_embedded_test.go",
         "crossrig_display_embedded_test.go",
+        "crossrig_nonblocking_embedded_test.go",
         "crossrig_ready_embedded_test.go",
         "crossrig_tree_embedded_test.go",
         "crossrig_unreadable_embedded_test.go",

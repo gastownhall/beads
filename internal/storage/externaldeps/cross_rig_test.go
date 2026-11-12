@@ -521,3 +521,78 @@ func TestCrossRigOldTokenServerGetsClientComposedReads(t *testing.T) {
 		t.Fatalf("served calls = %v, want %v", raw.served, want)
 	}
 }
+
+// GH#5784 AC-9: tracks, related, parent-child and waits-for edges to a foreign
+// issue never gate, so an otherwise-ready source stays ready and no foreign
+// workspace is read for them: on the direct store, bd serve's unit-of-work arm
+// and the served reader against a server that leaves the policy to the client.
+func TestCrossRigNonBlockingTypesNeverReadTheForeignRig(t *testing.T) {
+	nonBlocking := []types.DependencyType{types.DepTracks, types.DepRelated, types.DepParentChild, types.DepWaitsFor}
+	edges := make([]*types.Dependency, 0, len(nonBlocking))
+	for i, depType := range nonBlocking {
+		edges = append(edges, externalDep("aa-1", "bb-"+string(rune('1'+i)), depType))
+	}
+	open := func() *fakeIssueResolver {
+		issues := make(map[string]*types.Issue)
+		for _, dep := range edges {
+			issues[dep.DependsOnID] = foreignIssue(dep.DependsOnID, types.StatusOpen)
+		}
+		return &fakeIssueResolver{issues: issues}
+	}
+	check := func(t *testing.T, what string, ready []string, resolver *fakeIssueResolver) {
+		t.Helper()
+		if !slices.Equal(ready, []string{"aa-1"}) {
+			t.Fatalf("%s ready IDs = %v, want [aa-1]", what, ready)
+		}
+		if len(resolver.calls) != 0 {
+			t.Fatalf("%s read the foreign rig: resolver calls %v, want none", what, resolver.calls)
+		}
+	}
+
+	t.Run("direct", func(t *testing.T) {
+		resolver := open()
+		store := crossRigStore(&fakeStore{ready: []*types.Issue{issue("aa-1")}, deps: map[string][]*types.Dependency{"aa-1": edges}}, resolver)
+		ready, err := store.GetReadyWork(t.Context(), types.WorkFilter{})
+		if err != nil {
+			t.Fatalf("GetReadyWork: %v", err)
+		}
+		check(t, "direct", issueIDs(ready), resolver)
+		if blocked, _, err := store.IsBlocked(t.Context(), "aa-1"); err != nil || blocked {
+			t.Fatalf("IsBlocked = %v, %v; want unblocked", blocked, err)
+		}
+		check(t, "direct is-blocked", issueIDs(ready), resolver)
+	})
+
+	t.Run("serve unit of work", func(t *testing.T) {
+		resolver := open()
+		uw := crossRigProvider(t, &fakeUOW{
+			issues: &fakeIssueUseCase{ready: []*types.Issue{issue("aa-1")}},
+			deps:   &fakeDependencyUseCase{external: map[string][]*types.Dependency{"aa-1": edges}},
+		}, resolver)
+		ready, err := uw.IssueUseCase().GetReadyWork(t.Context(), types.WorkFilter{})
+		if err != nil {
+			t.Fatalf("GetReadyWork: %v", err)
+		}
+		check(t, "served unit of work", issueIDs(ready.Items), resolver)
+	})
+
+	t.Run("served reader", func(t *testing.T) {
+		resolver := open()
+		raw := newRemoteStore(issue("aa-1"))
+		raw.deps["aa-1"] = edges
+		store := New(crossRigRemote{raw}, func(ProjectName) (string, bool) { return "", false }, nil, WithIssueResolver(resolver.resolve))
+		reader, err := store.IssueReader()
+		if err != nil {
+			t.Fatalf("IssueReader: %v", err)
+		}
+		page, err := reader.Ready(t.Context(), publicops.ReadyRequest{})
+		if err != nil {
+			t.Fatalf("Ready: %v", err)
+		}
+		var ready []string
+		for _, row := range page.Items {
+			ready = append(ready, row.ID)
+		}
+		check(t, "served reader", ready, resolver)
+	})
+}
