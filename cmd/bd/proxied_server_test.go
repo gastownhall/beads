@@ -15,6 +15,7 @@ import (
 	"github.com/dolthub/dolt/go/libraries/utils/filesys"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 	"github.com/stretchr/testify/assert"
@@ -90,6 +91,26 @@ func TestRenderProxiedServerConfig_ArchiveLevel(t *testing.T) {
 	require.NotNil(t, gc, "AutoGCBehavior must always be set")
 	assert.Equal(t, 0, gc.ArchiveLevel())
 	assert.True(t, gc.Enable(), "auto-GC must remain enabled")
+}
+
+// TestRequiredMinCoversProxiedArchiveLevelConfig pins the invariant that
+// makes renderProxiedServerConfigAtLevel's unconditional
+// auto_gc_behavior.archive_level write safe: it emits the key with no
+// version gate (the gate was removed in 68afa3d51, and #4986 showed an
+// older dolt's strict YAML parse fails hard on it), so the protection is
+// that the managed open refuses a detected dolt below doltversion.RequiredMin
+// before it renders or writes the config (#7836). RequiredMin must stay at
+// or above doltserver.MinDoltVersionForArchiveLevelConfig; a dolt between
+// the two would pass the floor and then brick server start on the default
+// rendered config — the #5627 report.
+func TestRequiredMinCoversProxiedArchiveLevelConfig(t *testing.T) {
+	assert.True(t, doltversion.RequiredMin.AtLeast(doltversion.MustParse(doltserver.MinDoltVersionForArchiveLevelConfig)),
+		"doltversion.RequiredMin (%s) is below doltserver.MinDoltVersionForArchiveLevelConfig (%s): "+
+			"renderProxiedServerConfigAtLevel writes auto_gc_behavior.archive_level unconditionally, "+
+			"so a dolt between the two would pass the version floor and strict-parse-fail on the "+
+			"managed config (#4986, #5627); restore a version gate on the archive_level emission "+
+			"before lowering the floor below the cutoff",
+		doltversion.RequiredMin.String(), doltserver.MinDoltVersionForArchiveLevelConfig)
 }
 
 func TestEnsureProxiedServerConfig_CreatesAndIsIdempotent(t *testing.T) {
