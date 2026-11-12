@@ -6,6 +6,7 @@
 package protocol
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -128,6 +129,107 @@ func TestJSONContract_ShowCountOnlyOmitsPayloads(t *testing.T) {
 				parent, child, len(dependents))
 		}
 		assertAbsent(t, issue, "comments", "--count-only --include-dependents")
+	})
+}
+
+// TestJSONContract_ShowDefaultIncludesFullPayload pins the restored default of
+// #4122: plain bd show --json carries the full detail payload — the comments
+// and dependents arrays beside their counts, no comments_omitted, epic
+// progress for epics — and the --include-* flags without --count-only change
+// nothing (byte-equal output after canonicalization).
+func TestJSONContract_ShowDefaultIncludesFullPayload(t *testing.T) {
+	t.Parallel()
+	w := newWorkspace(t)
+	hub := w.create("--title", "Full payload hub", "--type", "task")
+	spoke := w.create("--title", "Full payload spoke", "--type", "task", "--deps", "blocked-by:"+hub)
+	w.run("comments", "add", hub, "Hub comment")
+
+	showOnce := func(id string, flags ...string) map[string]any {
+		t.Helper()
+		out := w.run(append([]string{"show", id, "--json"}, flags...)...)
+		items := parseJSONOutput(t, out)
+		if len(items) == 0 {
+			t.Fatalf("bd show %s --json %v returned no items", id, flags)
+		}
+		return items[0]
+	}
+	assertAbsent := func(t *testing.T, issue map[string]any, key, context string) {
+		t.Helper()
+		if v, present := issue[key]; present {
+			t.Errorf("%s: expected %q to be absent, got %v", context, key, v)
+		}
+	}
+
+	t.Run("default_carries_comments_and_dependents", func(t *testing.T) {
+		issue := showOnce(hub)
+		requireCommentTextsEqual(t, getObjectSlice(issue, "comments"),
+			[]string{"Hub comment"}, "comments in the default payload")
+		dependents := getObjectSlice(issue, "dependents")
+		found := false
+		for _, dep := range dependents {
+			if id, _ := dep["id"].(string); id == spoke {
+				found = true
+				if dt, _ := dep["dependency_type"].(string); dt != "blocks" {
+					t.Errorf("dependent %s dependency_type = %q, want blocks", spoke, dt)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("default payload: hub %s does not list dependent %s (got %d dependents)",
+				hub, spoke, len(dependents))
+		}
+		assertFieldFloat(t, issue, "comment_count", 1)
+		assertFieldFloat(t, issue, "dependent_count", 1)
+		assertAbsent(t, issue, "comments_omitted", "default payload (nothing was left out)")
+	})
+
+	t.Run("epic_progress_by_default_absent_under_count_only", func(t *testing.T) {
+		epic := w.create("--title", "Epic default", "--type", "epic")
+		w.create("--title", "Epic kid one", "--type", "task", "--parent", epic)
+		w.create("--title", "Epic kid two", "--type", "task", "--parent", epic)
+
+		issue := showOnce(epic)
+		assertFieldFloat(t, issue, "epic_total_children", 2)
+		assertFieldFloat(t, issue, "epic_closed_children", 0)
+		if closeable, present := issue["epic_closeable"]; !present {
+			t.Fatal("default payload: epic_closeable must be present for an epic with children")
+		} else if closeable != false {
+			t.Errorf("default payload: epic_closeable = %v, want false with two open children", closeable)
+		}
+
+		lean := showOnce(epic, "--count-only")
+		assertAbsent(t, lean, "epic_total_children", "count-only payload")
+		assertAbsent(t, lean, "epic_closed_children", "count-only payload")
+		assertAbsent(t, lean, "epic_closeable", "count-only payload")
+	})
+
+	t.Run("include_flags_without_count_only_equal_the_default", func(t *testing.T) {
+		base, err := json.Marshal(showOnce(hub))
+		if err != nil {
+			t.Fatalf("marshal default payload: %v", err)
+		}
+		canonicalBase, err := CanonicalizeJSON(base)
+		if err != nil {
+			t.Fatalf("canonicalize default payload: %v", err)
+		}
+		for _, flags := range [][]string{
+			{"--include-comments"},
+			{"--include-dependents"},
+			{"--include-comments", "--include-dependents"},
+		} {
+			got, err := json.Marshal(showOnce(hub, flags...))
+			if err != nil {
+				t.Fatalf("marshal payload %v: %v", flags, err)
+			}
+			canonicalGot, err := CanonicalizeJSON(got)
+			if err != nil {
+				t.Fatalf("canonicalize payload %v: %v", flags, err)
+			}
+			if !bytes.Equal(canonicalBase, canonicalGot) {
+				t.Errorf("bd show --json %v differs from the plain default:\n%s\nvs\n%s",
+					flags, canonicalBase, canonicalGot)
+			}
+		}
 	})
 }
 
