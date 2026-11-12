@@ -2302,3 +2302,55 @@ func TestGitRemoteDeclinedConflictPullAbortsMerge(t *testing.T) {
 		t.Errorf("local notes = %q after the declined pull; want %q", notes, "from A local")
 	}
 }
+
+// TestGitRemoteDeclinedConflictPullLeavesStoreWritable is GH#7839's blast
+// radius AC: the declined-pull merge left open is what turned one conflict
+// into a full write outage — every later bd write failed with Dolt's
+// "Merge conflict detected" autocommit rejection. With the settlement, a
+// create+commit right after the declined pull succeeds, and retrying the
+// pull reports the conflict itself, not a staging or autocommit failure from
+// a wedged merge.
+func TestGitRemoteDeclinedConflictPullLeavesStoreWritable(t *testing.T) {
+	store, setup, cleanup := setupEmbeddedGitRemote(t)
+	defer cleanup()
+	requireGitProtocolRemote(t, store, "origin")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	seedGitRemoteDeclinedNotesConflict(t, store, setup, "gh7839-ac2")
+
+	// The store stays writable: a create+commit right after the declined
+	// pull succeeds — the first thing the wedged merge broke.
+	pullErr := cliPullAndSettle(t, store, "origin")
+	after := &types.Issue{
+		ID:        "gh7839-ac2-after",
+		Title:     "written after the declined pull",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  2,
+	}
+	if err := store.CreateIssue(ctx, after, "tester"); err != nil {
+		t.Fatalf("CreateIssue after a declined pull failed — the store is wedged: %v", err)
+	}
+	if err := store.Commit(ctx, "write after declined pull"); err != nil {
+		t.Fatalf("Commit after a declined pull failed — the store is wedged: %v", err)
+	}
+
+	// The pull this store made reported the conflict as data, not as a raw
+	// transport failure.
+	var mce *versioncontrolops.MergeConflictsError
+	if !errors.As(pullErr, &mce) {
+		t.Fatalf("the declined pull = %v; want *versioncontrolops.MergeConflictsError", pullErr)
+	}
+
+	// Retrying the pull reports the conflict again — the branch still
+	// diverges from the remote — and never a staging/autocommit failure.
+	retryErr := cliPullAndSettle(t, store, "origin")
+	if !errors.As(retryErr, &mce) {
+		t.Fatalf("retry after a declined pull = %v; want the conflict reported again as *versioncontrolops.MergeConflictsError", retryErr)
+	}
+	if isMerging, tables := freshSessionMergeState(t, store); isMerging || tables != 0 {
+		t.Errorf("fresh session after the retry: is_merging=%v, %d conflict table(s); want a settled store", isMerging, tables)
+	}
+}
