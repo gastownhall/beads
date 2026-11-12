@@ -555,7 +555,7 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 	}
 	// The ids are this batch's rows, most of them fresh and edgeless: let the
 	// recompute skip the union statements for those (planRecomputeInTx).
-	recomputed, err := recomputeIsBlockedInTxWithResult(ctx, tx, issueIDs, wispIDs, recomputeOptions{splitEdgeless: true})
+	recomputed, err := recomputeIsBlockedInTxWithResult(ctx, tx, issueIDs, wispIDs, actor, recomputeOptions{splitEdgeless: true})
 	if err != nil {
 		return CreateIssuesResult{}, err
 	}

@@ -81,6 +81,9 @@ func TestJournalContract(t *testing.T) {
 	t.Run("EveryMutationKindRecordsItsActor", func(t *testing.T) {
 		conformance.RunJournalEveryMutationKindRecordsItsActor(t, ctx, fixture)
 	})
+	t.Run("DerivedRecordsCarryTheCausingActor", func(t *testing.T) {
+		conformance.RunJournalDerivedRecordsCarryTheCausingActor(t, ctx, fixture)
+	})
 	t.Run("EveryMutationKindLandsARow", func(t *testing.T) {
 		conformance.RunJournalEveryMutationKindLandsARow(t, ctx, fixture)
 	})
@@ -175,6 +178,19 @@ func newUOWJournalFixture(t *testing.T, ctx context.Context, prefix string) conf
 				return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
 					_, err := uw.CommentUseCase().AddCommentToIssue(ctx, id, "actor", text)
 					return "comment " + id, err
+				})
+			},
+			AddParentChild: func(ctx context.Context, child, parent string) error {
+				return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
+					return "dep add " + child, uw.DependencyUseCase().AddDependency(ctx, &types.Dependency{
+						IssueID: child, DependsOnID: parent, Type: types.DepParentChild,
+					}, "actor")
+				})
+			},
+			SetStatus: func(ctx context.Context, id string, status types.Status) error {
+				return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
+					return "update " + id, uw.IssueUseCase().UpdateIssue(ctx, id,
+						map[string]any{"status": string(status)}, "actor")
 				})
 			},
 			// Every hook above acts as "actor", Delete included: the unit of

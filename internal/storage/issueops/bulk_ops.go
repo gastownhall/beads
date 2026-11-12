@@ -234,10 +234,10 @@ func DeleteIssuesBySourceRepoInTx(ctx context.Context, tx *sql.Tx, sourceRepo st
 		}
 	}
 
-	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
+	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps, NoRequestActor); err != nil {
 		return int(rowsAffected), fmt.Errorf("recompute is_blocked after source-repo delete: %w", err)
 	}
-	NoteDeleteBlockedRecheck(tx, issueIDs, "from "+sourceRepo, affectedIssues, affectedWisps)
+	NoteDeleteBlockedRecheck(tx, issueIDs, "from "+sourceRepo, NoRequestActor, affectedIssues, affectedWisps)
 
 	return int(rowsAffected), nil
 }

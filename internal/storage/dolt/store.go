@@ -1522,7 +1522,7 @@ func (s *DoltStore) recheckBlockedAfterCommit(ctx context.Context, pending issue
 		// and the rolled-back attempt's verdict must not survive into the
 		// publication decision below (the closure contract on withRetryTx).
 		rowsChanged = false
-		result, err := issueops.RecomputeIsBlockedInTxWithResult(ctx, tx, pending.IssueIDs, pending.WispIDs)
+		result, err := issueops.RecomputeIsBlockedInTxWithResult(ctx, tx, pending.IssueIDs, pending.WispIDs, pending.Actor)
 		if err != nil {
 			return err
 		}

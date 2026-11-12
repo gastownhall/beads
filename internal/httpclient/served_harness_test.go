@@ -553,6 +553,14 @@ func servedJournalMutations(reference servedReference) conformance.JournalMutati
 		Comment: func(ctx context.Context, id, text string) error {
 			return reference.AddComment(ctx, id, "actor", text)
 		},
+		AddParentChild: func(ctx context.Context, child, parent string) error {
+			return reference.AddDependency(ctx, &types.Dependency{
+				IssueID: child, DependsOnID: parent, Type: types.DepParentChild,
+			}, "actor")
+		},
+		SetStatus: func(ctx context.Context, id string, status types.Status) error {
+			return reference.UpdateIssue(ctx, id, map[string]any{"status": string(status)}, "actor")
+		},
 		// Every hook above acts as "actor" except Delete: the reference store's
 		// DeleteIssue takes no actor, so its record names none.
 		Actor:           "actor",

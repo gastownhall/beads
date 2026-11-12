@@ -1,6 +1,12 @@
 package issueops
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/journalscan"
@@ -365,4 +371,124 @@ func TestEveryBeadMutatorJournalsOrIsExempt(t *testing.T) {
 			t.Errorf("exemption %q no longer matches an exported bead-writing function — remove it", m)
 		}
 	}
+}
+
+// derivedActorParam is, for each member of the readiness family and the
+// recheck recorders, the position of its actor argument: the identity every
+// derived is_blocked record the call journals (or a post-commit recheck later
+// journals) carries.
+var derivedActorParam = map[string]int{
+	"RecomputeIsBlockedInTx":              4,
+	"RecomputeIsBlockedInTxWithResult":    4,
+	"MarkIsBlockedInTx":                   4,
+	"MarkIsBlockedInTxWithResult":         4,
+	"RecomputeIsBlockedForIDsInTx":        3,
+	"RecomputeIsBlockedForWispIDsInTx":    3,
+	"RecomputeIsBlockedAfterDelete":       4,
+	"recomputeIsBlockedInTxWithResult":    4,
+	"recordBlockedJournalChanges":         5,
+	"NoteStatusChangeBlockedRecheck":      3,
+	"NoteDependencyRemovalBlockedRecheck": 3,
+	"NoteDeleteBlockedRecheck":            3,
+	"noteBlockedRecheck":                  2,
+}
+
+// derivedActorSystemCallers are the only functions under internal/storage that
+// may hand the readiness family NoRequestActor (or a literal ""): the paths
+// with no request behind them, each with why. Every other caller passes the
+// actor of the request whose mutation caused the maintenance.
+var derivedActorSystemCallers = map[string]string{
+	"issueops/blocked_consistency.go:recomputeIsBlockedCounting":   "the full repair behind `bd recompute-blocked` and `bd doctor --fix`",
+	"issueops/blocked_merge.go:recomputeIsBlockedAfterMergeScoped": "a pull's or merge's recompute: the rows came from another clone",
+	"issueops/blocked_merge.go:recomputeIsBlockedForAll":           "a pull's or merge's recompute: the rows came from another clone",
+	"issueops/bulk_ops.go:DeleteIssuesBySourceRepoInTx":            "`bd repo remove`: storage.DeleteIssuesBySourceRepo carries no actor",
+	"dolt/wisps.go:deleteWisp":                                     "the wisp delete surface carries no actor (its delete row names none)",
+	"dolt/wisps.go:deleteWispBatchTx":                              "the wisp delete surface carries no actor (its delete rows name none)",
+	"createbatchequiv/scenario_waitsfor.go:runWaitsFor":            "an equivalence scenario's raw-SQL repair step, not a request",
+}
+
+// TestNoRequestActorReachesTheReadinessFamilyOnlyFromSystemPaths is the census
+// behind the explicit actor parameter: the parameter makes every caller of
+// the readiness family decide attribution at compile time, and this holds
+// which callers may decide "no one". A derived record a user's request caused
+// but that names no one reads as system/unknown, so a consumer holding every
+// record of a user's change to that user fails the change. A new caller that passes
+// NoRequestActor or "" fails here until it is listed in
+// derivedActorSystemCallers with its reason.
+func TestNoRequestActorReachesTheReadinessFamilyOnlyFromSystemPaths(t *testing.T) {
+	root := ".."
+	seen := map[string]bool{}
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(root, path)
+		rel = filepath.ToSlash(rel)
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			key := rel + ":" + fn.Name.Name
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				var name string
+				switch fun := call.Fun.(type) {
+				case *ast.Ident:
+					name = fun.Name
+				case *ast.SelectorExpr:
+					name = fun.Sel.Name
+				}
+				idx, family := derivedActorParam[name]
+				if !family || idx >= len(call.Args) {
+					return true
+				}
+				if !namesNoRequestActor(call.Args[idx]) {
+					return true
+				}
+				seen[key] = true
+				if _, ok := derivedActorSystemCallers[key]; !ok {
+					t.Errorf("%s (%s) passes no request actor to %s: a path a request drives must pass that "+
+						"request's actor, so the derived is_blocked records it causes name the user who caused "+
+						"them; a genuinely system path is listed in derivedActorSystemCallers with its reason",
+						key, fset.Position(call.Pos()), name)
+				}
+				return true
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+	for key := range derivedActorSystemCallers {
+		if !seen[key] {
+			t.Errorf("derivedActorSystemCallers lists %s, which no longer passes NoRequestActor: delete the entry", key)
+		}
+	}
+}
+
+// namesNoRequestActor reports whether expr is NoRequestActor (bare or
+// package-qualified) or the empty string literal.
+func namesNoRequestActor(expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.Ident:
+		return e.Name == "NoRequestActor"
+	case *ast.SelectorExpr:
+		return e.Sel.Name == "NoRequestActor"
+	case *ast.BasicLit:
+		return e.Kind == token.STRING && (e.Value == `""` || e.Value == "``")
+	}
+	return false
 }

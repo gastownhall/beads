@@ -394,11 +394,11 @@ func closeIssueInTx(ctx context.Context, tx DBTX, id string, reason, actor, sess
 
 	// The UPDATE above just closed id, so the recompute settles the row itself
 	// without its union statements; the rows it unblocks are recomputed in full.
-	recompute, err := recomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps, settledRowRecompute(id, isWisp))
+	recompute, err := recomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps, actor, settledRowRecompute(id, isWisp))
 	if err != nil {
 		return nil, fmt.Errorf("recompute is_blocked after close for %s: %w", id, err)
 	}
-	NoteStatusChangeBlockedRecheck(tx, id, string(types.StatusClosed), affectedIssues, affectedWisps)
+	NoteStatusChangeBlockedRecheck(tx, id, string(types.StatusClosed), actor, affectedIssues, affectedWisps)
 
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// recordEvent gates the human audit event, never the journal — nor the

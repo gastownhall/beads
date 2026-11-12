@@ -60,11 +60,11 @@ func readJournalOpActors(t *testing.T, env *testEnv) []journalOpActor {
 // forgets to thread its actor fails here even if its own test does not exist
 // yet.
 //
-// The empty cases are asserted as deliberately as the attributed ones. A
-// derived is_blocked recompute is bd's own bookkeeping, not something the actor
-// who tripped it did, and the 0066 contract says a consumer must read an empty
-// actor as system/unknown rather than as a conflicting writer — so a test that
-// let an empty actor pass anywhere would be pinning nothing.
+// The derived cases are asserted as deliberately as the direct ones. The 0066
+// contract says a consumer must read an empty actor as system/unknown rather
+// than as a conflicting writer, so a derived is_blocked recompute a user's
+// request caused names that user: every mutation
+// here is alice's, so no row may name anyone else, or no one.
 func TestEventsJournal_ActorMatrixOnEmbedded(t *testing.T) {
 	env := newTestEnv(t, "am")
 	store := env.store
@@ -160,21 +160,21 @@ func TestEventsJournal_ActorMatrixOnEmbedded(t *testing.T) {
 		}
 	}
 
-	// The other half of the contract: derived readiness maintenance is bd's own
-	// bookkeeping and stays unattributed. Removing am-b's only blocker flips its
-	// persisted is_blocked, which journals as an update carrying no actor.
-	if !has("update", "am-b", "") {
-		t.Errorf("no unattributed derived is_blocked update for am-b; the '' half of the contract is not being exercised\njournal: %+v", rows)
+	// The derived half of the contract: readiness
+	// maintenance a request caused is that request's change and names its
+	// actor. Removing am-b's only blocker flips its persisted is_blocked, which
+	// journals as a separate update carrying alice — never as a row naming no
+	// one, which a consumer reads as system/unknown.
+	if !has("update", "am-b", "alice") {
+		t.Errorf("no derived is_blocked update for am-b naming alice; the derived half of the contract is not being exercised\njournal: %+v", rows)
 	}
 
-	// Nothing may carry an actor bd never saw, and no attributed op may slip
-	// through empty. Every '' row in this workspace is a derived update.
+	// Every row in this workspace was caused by one of alice's requests, so
+	// every row names alice: none may carry an actor bd never saw, and none —
+	// derived maintenance included — may slip through empty.
 	for _, r := range rows {
-		if r.actor == "" && r.op != "update" {
-			t.Errorf("op %q for %s recorded no actor; only derived is_blocked updates may\njournal: %+v", r.op, r.id, rows)
-		}
-		if r.actor != "" && r.actor != "alice" {
-			t.Errorf("row %+v names an actor no mutation used", r)
+		if r.actor != "alice" {
+			t.Errorf("row %+v names actor %q, want alice: every record a request causes carries that request's actor\njournal: %+v", r, r.actor, rows)
 		}
 	}
 }

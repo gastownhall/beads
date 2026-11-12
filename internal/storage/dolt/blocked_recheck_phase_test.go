@@ -20,8 +20,8 @@ func scopeAndRecordDependent(t *testing.T, tx *doltTransaction) {
 	t.Helper()
 	t.Cleanup(issueops.ScopeBlockedRecheckTransaction(tx.regularTx))
 	t.Cleanup(issueops.ScopeBlockedRecheckTransaction(tx.ignoredTx))
-	issueops.NoteStatusChangeBlockedRecheck(tx.regularTx, "rp-a", string(types.StatusClosed), []string{"rp-c"}, nil)
-	issueops.NoteStatusChangeBlockedRecheck(tx.ignoredTx, "rp-wa", string(types.StatusClosed), nil, []string{"rp-wc"})
+	issueops.NoteStatusChangeBlockedRecheck(tx.regularTx, "rp-a", string(types.StatusClosed), "actor", []string{"rp-c"}, nil)
+	issueops.NoteStatusChangeBlockedRecheck(tx.ignoredTx, "rp-wa", string(types.StatusClosed), "actor", nil, []string{"rp-wc"})
 }
 
 // TestFinishDoltTransactionRecordingKeepsRecheckWhenDoltCommitFails pins the

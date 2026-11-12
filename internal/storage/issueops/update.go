@@ -545,18 +545,18 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 			// A change to closed or pinned settles the row itself without
 			// its union statements (planRecomputeInTx); a reactivation must
 			// recompute it, and its dependents are recomputed either way.
-			var opts recomputeOptions
+			opts := recomputeOptions{}
 			if !newActive {
 				opts = settledRowRecompute(id, isWisp)
 			}
-			recompute, err := recomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps, opts)
+			recompute, err := recomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps, actor, opts)
 			if err != nil {
 				return nil, fmt.Errorf("recompute is_blocked after status change for %s: %w", id, err)
 			}
 			updateResult.IssueRowsChanged = !isWisp || recompute.IssueRowsChanged
 			updateResult.WispRowsChanged = isWisp || recompute.WispRowsChanged
 			if !newActive {
-				NoteStatusChangeBlockedRecheck(tx, id, newStatus, affectedIssues, affectedWisps)
+				NoteStatusChangeBlockedRecheck(tx, id, newStatus, actor, affectedIssues, affectedWisps)
 			}
 		}
 	}

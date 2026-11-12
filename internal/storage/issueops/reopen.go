@@ -111,7 +111,7 @@ func reopenIssueInTx(ctx context.Context, tx DBTX, id, reason, actor string, ret
 		}
 	}
 
-	recompute, err := RecomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps)
+	recompute, err := RecomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps, actor)
 	if err != nil {
 		return nil, fmt.Errorf("recompute is_blocked after reopen for %s: %w", id, err)
 	}

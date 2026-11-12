@@ -482,7 +482,7 @@ func (s *EmbeddedDoltStore) recheckBlockedAfterCommit(ctx context.Context, pendi
 	ctx, cancel := issueops.BlockedRecheckContext(ctx)
 	defer cancel()
 	if _, err := s.commitConn(ctx, true, func(tx *sql.Tx) error {
-		return issueops.RecomputeIsBlockedInTx(ctx, tx, pending.IssueIDs, pending.WispIDs)
+		return issueops.RecomputeIsBlockedInTx(ctx, tx, pending.IssueIDs, pending.WispIDs, pending.Actor)
 	}); err != nil {
 		return issueops.BlockedRecheckFailed(err)
 	}

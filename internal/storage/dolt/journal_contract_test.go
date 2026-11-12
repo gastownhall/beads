@@ -79,6 +79,9 @@ func TestJournalContract(t *testing.T) {
 	t.Run("EveryMutationKindRecordsItsActor", func(t *testing.T) {
 		conformance.RunJournalEveryMutationKindRecordsItsActor(t, ctx, fixture)
 	})
+	t.Run("DerivedRecordsCarryTheCausingActor", func(t *testing.T) {
+		conformance.RunJournalDerivedRecordsCarryTheCausingActor(t, ctx, fixture)
+	})
 	t.Run("EveryMutationKindLandsARow", func(t *testing.T) {
 		conformance.RunJournalEveryMutationKindLandsARow(t, ctx, fixture)
 	})
@@ -136,6 +139,14 @@ func newDoltJournalFixture(t *testing.T, prefix string) (conformance.JournalFixt
 			},
 			Comment: func(ctx context.Context, id, text string) error {
 				return store.AddComment(ctx, id, "actor", text)
+			},
+			AddParentChild: func(ctx context.Context, child, parent string) error {
+				return store.AddDependency(ctx, &types.Dependency{
+					IssueID: child, DependsOnID: parent, Type: types.DepParentChild,
+				}, "actor")
+			},
+			SetStatus: func(ctx context.Context, id string, status types.Status) error {
+				return store.UpdateIssue(ctx, id, map[string]any{"status": string(status)}, "actor")
 			},
 			// Every hook above acts as "actor" except Delete: storage.DeleteIssue
 			// takes no actor, so its record names none.

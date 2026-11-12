@@ -146,7 +146,7 @@ func runWaitsFor(ctx context.Context, tx *sql.Tx) ([]string, error) {
 			if _, err := tx.ExecContext(ctx, "UPDATE wisps SET status = 'open' WHERE id IN (?, ?, ?)", id("fws.c1"), id("fws.c2"), id("fwc")); err != nil {
 				return err
 			}
-			return issueops.RecomputeIsBlockedInTx(ctx, tx, waiters, wispWaiters)
+			return issueops.RecomputeIsBlockedInTx(ctx, tx, waiters, wispWaiters, issueops.NoRequestActor)
 		}},
 		{"raw: close the wisp children and fs.c2, plant stale flags, full repair", func() error {
 			if _, err := tx.ExecContext(ctx, "UPDATE wisps SET status = 'closed' WHERE id IN (?, ?, ?)", id("fws.c1"), id("fws.c2"), id("fwc")); err != nil {

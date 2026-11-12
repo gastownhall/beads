@@ -447,7 +447,7 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 	if dep.Type == types.DepParentChild {
 		// Parent-child adds are not monotonic: adding an already-closed child can
 		// satisfy an any-children waits-for gate and unblock the waiter.
-		recomputed, err := RecomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps)
+		recomputed, err := RecomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps, actor)
 		if err != nil {
 			return false, fmt.Errorf("recompute is_blocked after add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 		}
@@ -458,7 +458,7 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		}
 		return eventWritten, mintDependencyVersion(ctx, tx, dep.IssueID, actor, mintVersion)
 	}
-	marked, err := MarkIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps)
+	marked, err := MarkIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps, actor)
 	if err != nil {
 		return false, fmt.Errorf("mark is_blocked after add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 	}
@@ -1254,12 +1254,12 @@ func removeDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID,
 	if aerr != nil {
 		return false, fmt.Errorf("affected by remove dependency %s -> %s: %w", issueID, dependsOnID, aerr)
 	}
-	recomputed, err := RecomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps)
+	recomputed, err := RecomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps, actor)
 	if err != nil {
 		return false, fmt.Errorf("recompute is_blocked after remove dependency %s -> %s: %w", issueID, dependsOnID, err)
 	}
 	mergeRecomputeIsBlockedResult(recomputeResult, recomputed)
-	NoteDependencyRemovalBlockedRecheck(tx, issueID, dependsOnID, affectedIssues, affectedWisps)
+	NoteDependencyRemovalBlockedRecheck(tx, issueID, dependsOnID, actor, affectedIssues, affectedWisps)
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// Never gated on emitEvent — a structural removal is as real to a replaying
 	// consumer as one from an explicit dep verb. The same holds for the

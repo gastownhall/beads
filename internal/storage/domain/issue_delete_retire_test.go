@@ -42,7 +42,7 @@ func (r *retireOrderIssueRepo) RetireIDs(context.Context, map[string]time.Time, 
 	return nil
 }
 
-func (r *retireOrderIssueRepo) RecomputeIsBlockedAfterDelete(context.Context, []string, []string, []string) error {
+func (r *retireOrderIssueRepo) RecomputeIsBlockedAfterDelete(context.Context, []string, []string, []string, string) error {
 	return nil
 }
 
