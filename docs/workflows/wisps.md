@@ -84,6 +84,19 @@ reusable; `types.retained` (below) keeps the retention commands away from the
 types whose ids must stay retired. Over HTTP, the server must advertise `issues.sweep.retainIds`;
 without it, bd refuses the sweep before sending anything.
 
+### Child suffixes of a surviving parent
+
+A plain delete leaves a *child suffix* reserved even while it leaves the id
+itself reusable. While the parent survives, every supported create, rename,
+and removal keeps the parent's suffix high-water mark covering the highest
+dotted suffix it touched, so `bd create --parent` continues above it: after
+`P.1`–`P.3` are swept away, the next automatic children are `P.4`, `P.5`, …
+even though `bd create --id P.3` still succeeds, because a plain sweep
+creates no tombstone. The limits: deleting and recreating the parent itself
+drops its counter with it, raw SQL deletes bypass the reservation, and a
+rebuild from `issues.jsonl` loses the high-water mark — the export format
+carries no counter state (#4750).
+
 ### Keeping key-bearing types out of plain sweeps
 
 A plain `bd prune` that happens to match key-bearing rows would delete them

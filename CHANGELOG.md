@@ -1248,6 +1248,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Automatic child ids no longer recycle a suffix a supported mutation
+  removed.** `bd create --parent` allocates above a high-water mark, but
+  creates through the unit-of-work backend, `bd update --id` renames into and
+  out of dotted ids, and every supported removal — `bd delete`, plain sweeps,
+  `bd repo remove`, wisp garbage collection — left the parent's
+  `child_counters` row behind the highest suffix they touched, so the next
+  `bd create --parent` could mint `P.4` for a parent whose `P.1`–`P.3` had
+  just been swept away (#4750). Every such path now raises the surviving
+  parent's counter to cover the suffix it materializes or vacates, in the
+  parent's own storage plane, before the row goes. Plain deletion is
+  unchanged — it still creates no tombstone, so `bd create --id P.3` after a
+  plain delete still succeeds — and a cascade delete still leaves no counter
+  row behind for a deleted parent. Deleting and recreating the parent itself
+  drops its counter with it, and rebuilding from `issues.jsonl` still loses
+  the high-water mark (the export format carries no counter state), so the
+  full durability leg of #4750 remains open.
 - **The aux row id re-key again skips tables with dolthub/dolt#11131
   encoding drift instead of aborting the migration on every open** (#8372).
   The Dolt 2.6 engine reports the drift as `malformed out-of-band adaptive
