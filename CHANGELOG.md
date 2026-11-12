@@ -2602,6 +2602,16 @@ start with the [1.3.0] **Upgrade notes**.
   `--remote`, an empty name, or a second argument is now an error (#3720,
   reported by @bryanhirsch).
 
+- In embedded mode, `bd dolt push`, the push of `bd sync`, auto-push,
+  `bd dolt remote reset-data` and `bd federation sync` now commit pending
+  working-set changes before they push, as every pull already did (#5795,
+  part of #5433). A write left uncommitted (with `dolt.auto-commit` off, or
+  by a session that ended right after it) stayed out of the push while
+  `bd dolt push` printed "Push complete." and exited 0. The commit is made
+  even with `dolt.auto-commit` off, with the message
+  `bd: commit pending changes by beads`. Server mode does not commit before
+  a push.
+
 - `bd dolt remote add` now registers a matching remote that exists only in
   the served database's on-disk state (`.dolt/repo_state.json`) on the
   server, instead of reporting success while SQL `dolt_remotes` stayed
@@ -2727,6 +2737,16 @@ start with the [1.3.0] **Upgrade notes**.
   `bd blocked`, `bd list`, `bd doctor` and `bd recompute-blocked`. An empty
   `--offset` page (`--proxied-server`) says only that the offset is past the
   last ready issue.
+
+- In server mode, `bd ready` and `bd list --ready` now wake expired dated
+  defers, as embedded and proxied-server mode already did (#6424). Both open
+  the store read-only for the command, and the wake sweep added in 1.2.1
+  skipped every read-only open, so an issue deferred with `--until` stayed
+  hidden from them after its date. The wake is a write: the issue returns to
+  `open` with a `status_changed` event and a Dolt commit
+  `bd: wake N expired defer(s)`. Strict `--readonly` and a migration freeze
+  skip it: under a freeze the read still answers, and the issue stays
+  deferred until the first such read after the thaw (#8086).
 
 - The `### Dependencies` (or `### Deps`) section of a `bd create --file`
   batch now reads its entries the way `bd create --deps` does (#7508).
@@ -5673,10 +5693,13 @@ These are not fixed in 1.4.0-rc.1.
 - **Embedded mode can silently stop creating Dolt commits**
   ([#5433](https://github.com/gastownhall/beads/issues/5433)): writes reach
   the working set, `bd dolt commit` says there is nothing to commit, and
-  `bd dolt push` reports success without moving the remote. Workaround: after
-  a write, check that `bd history <id>` shows it, or that the remote's ref
-  moves after a push; the issue describes a recovery by re-bootstrapping from
-  the remote.
+  `bd dolt push` reports success without moving the remote. A push now
+  commits pending changes first
+  ([#5795](https://github.com/gastownhall/beads/pull/5795), under Fixed),
+  which covers writes that were only left uncommitted, but not this state,
+  where that commit finds nothing either. Workaround: after a write, check
+  that `bd history <id>` shows it, or that the remote's ref moves after a
+  push; the issue describes a recovery by re-bootstrapping from the remote.
 - **An embedded-mode run that misses the workspace's config can create a
   sibling database**
   ([#4381](https://github.com/gastownhall/beads/issues/4381)). An invocation
