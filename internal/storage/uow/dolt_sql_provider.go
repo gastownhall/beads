@@ -561,6 +561,9 @@ func dataBehindAdopter(readOnly bool) *schema.FastForwardAdopter {
 // would newly brick every read on a workspace waiting for its operator to
 // consent — which is the opposite of the contract the gate's own message
 // promises ("read commands keep working against the current schema").
+// A read that cannot carry on, because this binary's reads cannot query the
+// current schema, still reports a stop the smart gate shaped
+// (reportsStopOnDrift) rather than only the drift.
 // It is a free function rather than a provider method on purpose: it needs no
 // provider state, and the parity test that enumerates doltSQLProvider's method
 // set as the capability surface a caller can reach through a
@@ -583,6 +586,18 @@ func readThroughRefusedMigration(ctx context.Context, conn *sql.Conn, database s
 	if err := schema.CheckReadableDrift(ctx, conn, "issues", sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns)); err != nil {
 		if isSerializationError(err) {
 			return err
+		}
+		// The read cannot run, but a stop the smart gate shaped is still the
+		// actionable half, as when the database cannot be attached at all. On
+		// a proxied workspace a read like this one is where the operator is
+		// sent to see that stop: the front door refuses the bare
+		// `bd migrate schema` whose open used to print it, and the forced verb
+		// skips it (gastownhall/beads#6656). The drift error alone would hide
+		// the stop behind a remedy that names the refused bare verb. So the
+		// open fails with the refusal, which cmd/bd's renderTypedOpenError and
+		// its JSON twin print, and the drift stays in the chain for errors.As.
+		if reportsStopOnDrift(gateErr) && schema.IsSchemaBehindError(err) {
+			return backoff.Permanent(errors.Join(gateErr, err))
 		}
 		return backoff.Permanent(err)
 	}
@@ -607,10 +622,50 @@ func readThroughRefusedMigration(ctx context.Context, conn *sql.Conn, database s
 	fmt.Fprintf(os.Stderr,
 		"Warning: %[1]v\n"+
 			"  Read-only command: continuing on schema v%[2]d without migrating.\n"+
-			"  Writes are blocked until the schema is reconciled. Run '%[3]s'\n"+
-			"  once every client of this server is upgraded.\n",
-		gateErr, gateErr.CurrentVersion, schema.SharedConsentCommand)
+			"%[3]s",
+		gateErr, gateErr.CurrentVersion, bluntReadThroughRemedy(gateErr))
 	return nil
+}
+
+// reportsStopOnDrift reports whether a read that the drift check stops must
+// still report gateErr: a stop the smart gate shaped, by the predicate the
+// read-through warning keys on, except shared-no-remote. That body says read
+// commands keep working, which is false once the drift check has stopped
+// this one, and its remedy is the forced verb the proxied front door's
+// refusal names anyway. The blunt fallback is left out too. It is none of
+// the stops (adopt, pull first, forked schema) that the forced verb's caveat
+// sends the operator to look for, and its UserMessage body prescribes the
+// bare `bd migrate --force` and `bd dolt push`, which a proxied front door
+// refuses.
+func reportsStopOnDrift(gateErr *schema.RemoteMigrateGateError) bool {
+	if gateErr.IsDataBehind() {
+		return true
+	}
+	return gateErr.Decision != "" && gateErr.Decision != "shared-no-remote"
+}
+
+// bluntReadThroughRemedy is how the blunt read-through warning says to
+// reconcile the schema the gate would not migrate. The blunt stop is
+// remote-backed by construction (with no remote the shared gate decides
+// shared-no-remote instead), so its choice is adopt or migrate as the single
+// designated migrator. On a proxied workspace the front door refuses the bare
+// `bd migrate schema` and `bd dolt push` (gastownhall/beads#6656), so the
+// migrate route there is the forced verb, with the library clients of the
+// proxy's backend stopped around it, and the push runs from a workspace with
+// direct access to the database.
+func bluntReadThroughRemedy(gateErr *schema.RemoteMigrateGateError) string {
+	if !gateErr.Proxied {
+		return "  Writes are blocked until the schema is reconciled. Run '" + schema.SharedConsentCommand + "'\n" +
+			"  once every client of this server is upgraded.\n"
+	}
+	return "" +
+		"  Writes are blocked until the schema is reconciled. If another clone has\n" +
+		"  already migrated and pushed, adopt its database instead of migrating here.\n" +
+		"  Otherwise, and only as the single designated migrator, once every client\n" +
+		"  of this server is upgraded: stop every library client connected to this\n" +
+		"  proxy's backend, run '" + schema.SharedConsentCommandForced + "', restart them, and push\n" +
+		"  with 'bd dolt push' from a workspace with direct access to the database\n" +
+		"  (this proxied-server workspace refuses it).\n"
 }
 
 // verifyTeamServerSchema is the team-server open path: the schema is owned by

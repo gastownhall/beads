@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 // TestIsForcedMigrate covers the root-PersistentPreRunE helpers behind
 // `bd migrate --force`: only the migrate and migrate-schema commands report
@@ -53,5 +56,28 @@ func TestIsForcedMigrate(t *testing.T) {
 	}
 	if got := forcedMigratePreviewFlag(migrateSchemaCmd); got != "" {
 		t.Errorf("migrate schema has no preview flags: want \"\", got %q", got)
+	}
+}
+
+// TestMigrateSchemaRefusedOnProxiedServerWithoutForce pins bd-n5e58c (GH#6656):
+// on a proxied-server workspace the schema is promoted during provider open,
+// underneath library clients the proxy cannot see, so `bd migrate schema`
+// without --force must be refused, typed, by the pre-provider gate. It drives
+// the gate through runProxyRegistryGate, which holds stdioMutex and captures
+// the rendered refusal instead of letting it reach the test binary's stdout;
+// TestProxyMigrateSchemaRefusedUnlessForced pins the refusal's words.
+func TestMigrateSchemaRefusedOnProxiedServerWithoutForce(t *testing.T) {
+	for _, topo := range allProxiedTopologies {
+		t.Run(string(topo), func(t *testing.T) {
+			setMigrateSchemaForce(t, "false")
+			stdout, _, err := runProxyRegistryGate(t, migrateSchemaCmd, topo)
+			if code, ok := exitCodeFromError(err); !ok || code != 1 {
+				t.Fatalf("refusal = %#v; want a typed refusal exiting 1 before provider open", err)
+			}
+			var got refusalJSONForTest
+			if err := json.Unmarshal([]byte(stdout), &got); err != nil || got.Code != "proxy.migrate.unsupported" {
+				t.Fatalf("refusal JSON = %q (%v), want code proxy.migrate.unsupported", stdout, err)
+			}
+		})
 	}
 }

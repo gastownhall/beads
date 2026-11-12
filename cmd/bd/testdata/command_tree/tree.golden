@@ -4794,13 +4794,26 @@ bd migrate schema
     | designated migrator. Migrating is one-way: bd releases built for an older
     | schema refuse the migrated database.
     |
-    | On an up-to-date database this is a no-op, so it is safe to run in CI,
-    | release gates, and recovery scenarios.
+    | On a proxied-server workspace it is refused unless you pass --force:
+    | there, opening the store applies the migration, which changes the schema
+    | underneath every library client connected to the proxy's backend, and the
+    | proxy does not track those clients. Stop them, run
+    | "bd migrate schema --force", then restart them. BD_ALLOW_REMOTE_MIGRATE=1
+    | does not get past that refusal. If the database has a Dolt remote, that
+    | --force is also the designated-migrator confirmation above, so the gate's
+    | adopt and pull-first stops do not run: run a read command such as "bd list"
+    | first, and if it prints one of those stops, follow it instead of forcing.
+    | On a team-server workspace the team server owns the schema, so even --force
+    | only verifies it.
+    |
+    | Outside proxied-server mode, on an up-to-date database this is a no-op, so
+    | it is safe to run in CI, release gates, and recovery scenarios. In
+    | proxied-server mode the bare command is refused, so it is not a CI check.
     |
     | Example:
     |   bd migrate schema
     |   bd migrate schema --json
-  flag --force type=bool default="false" usage="Bypass the remote-migrate gate as the single designated migrator (equivalent to BD_ALLOW_REMOTE_MIGRATE=1)"
+  flag --force type=bool default="false" usage="Bypass the remote-migrate gate as the single designated migrator, as BD_ALLOW_REMOTE_MIGRATE=1 does; in proxied-server mode, also the opt-in past this command's refusal, which BD_ALLOW_REMOTE_MIGRATE=1 does not give"
 
 bd migrate sync
   use: "sync <branch>"

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"regexp"
@@ -149,10 +150,10 @@ func TestNoticeSharedMigrateRefusalPerDecision(t *testing.T) {
 
 // TestSharedRefusalPrescribesAWorkingVerb closes the loop the review flagged:
 // the shared-store refusal names a command, and that command must actually run
-// wherever the refusal can appear. In proxied-server mode `bd migrate schema`
-// used to hard-refuse, so the only remedy the gate offered there was a dead
-// end — worse, the root pre-run would have consumed the consent on the open
-// before RunE ever printed "not supported".
+// wherever the refusal can appear. Off the proxy that is the bare
+// `bd migrate schema`. In proxied-server mode the front door refuses the bare
+// verb unless --force (gastownhall/beads#6656), so there the refusal has to
+// prescribe the forced verb, and that verb has to get past the front door.
 //
 // The pairing is checked structurally rather than by driving a proxied
 // workspace: the command the gate prescribes IS SharedConsentCommand, and the
@@ -183,6 +184,80 @@ func TestSharedRefusalPrescribesAWorkingVerb(t *testing.T) {
 	if !isSchemaMigrateVerb(migrateSchemaCmd) {
 		t.Fatal("the command the gate prescribes must be the one that grants consent")
 	}
+
+	t.Run("proxied", func(t *testing.T) {
+		proxied := *refusal
+		proxied.Proxied = true
+		if got := proxied.EscapeHint(); got != schema.SharedConsentCommandForced {
+			t.Fatalf("EscapeHint = %q, want %q", got, schema.SharedConsentCommandForced)
+		}
+		opts := proxied.Options()
+		if len(opts) != 1 || len(opts[0].Commands) != 1 || opts[0].Commands[0] != schema.SharedConsentCommandForced {
+			t.Fatalf("Options = %+v, want the single %q remedy", opts, schema.SharedConsentCommandForced)
+		}
+
+		// The prescribed command, parsed the way the CLI would, gets past the
+		// proxied front door on every topology; the bare verb does not.
+		for _, topology := range allProxiedTopologies {
+			for _, tc := range []struct {
+				command string
+				passes  bool
+			}{
+				{schema.SharedConsentCommandForced, true},
+				{schema.SharedConsentCommand, false},
+			} {
+				t.Run(string(topology)+"/"+tc.command, func(t *testing.T) {
+					args := strings.Fields(strings.TrimPrefix(tc.command, "bd "))
+					target, flagArgs, err := rootCmd.Find(args)
+					if err != nil || target != migrateSchemaCmd {
+						t.Fatalf("%q resolves to %v (%v), want migrate schema", tc.command, target, err)
+					}
+					setMigrateSchemaForce(t, "")
+					if err := target.ParseFlags(flagArgs); err != nil {
+						t.Fatalf("parse %q: %v", tc.command, err)
+					}
+					_, _, err = runProxyRegistryGate(t, target, topology)
+					if passes := err == nil; passes != tc.passes {
+						t.Errorf("%q on %s: front door err = %v, want passes=%v", tc.command, topology, err, tc.passes)
+					}
+				})
+			}
+		}
+
+		// Under --global both channels name the forced global verb, not the
+		// bare global one the front door would refuse.
+		origGlobal := globalFlag
+		globalFlag = true
+		t.Cleanup(func() { globalFlag = origGlobal })
+
+		var hint bytes.Buffer
+		printGlobalDatabaseConsentHint(&hint, &proxied)
+		if !strings.Contains(hint.String(), schema.SharedConsentCommandForcedGlobal) {
+			t.Errorf("--global hint must name %q:\n%s", schema.SharedConsentCommandForcedGlobal, hint.String())
+		}
+
+		stdioMutex.Lock()
+		_, stderr := captureStdio(t, func() { handleRemoteMigrateGateJSON(&proxied) })
+		stdioMutex.Unlock()
+		var parsed struct {
+			Gate struct {
+				Expected string `json:"expected"`
+				Options  []struct {
+					Commands []string `json:"commands"`
+				} `json:"options"`
+			} `json:"remote_migrate_gate"`
+		}
+		if err := json.Unmarshal([]byte(stderr), &parsed); err != nil {
+			t.Fatalf("gate JSON: %v\n%s", err, stderr)
+		}
+		if !strings.Contains(parsed.Gate.Expected, schema.SharedConsentCommandForcedGlobal) {
+			t.Errorf("expected = %q, want the forced --global verb %q", parsed.Gate.Expected, schema.SharedConsentCommandForcedGlobal)
+		}
+		if opts := parsed.Gate.Options; len(opts) != 1 || len(opts[0].Commands) != 1 ||
+			opts[0].Commands[0] != schema.SharedConsentCommandForcedGlobal {
+			t.Errorf("options = %+v, want the single %q command", opts, schema.SharedConsentCommandForcedGlobal)
+		}
+	})
 }
 
 // TestPrintGlobalDatabaseConsentHint pins the one fact the gate's own block
@@ -363,4 +438,100 @@ func TestDataBehindSharedConsentCommandUnlocks(t *testing.T) {
 			}
 		}
 	})
+}
+
+// pinProxiedServerGlobals makes usesProxiedServer() answer `on` from the
+// package globals for the rest of the test, so a leak from an earlier test
+// cannot decide which verb a renderer prescribes.
+func pinProxiedServerGlobals(t *testing.T, on bool) {
+	t.Helper()
+	origGlobals, origProxied := testModeUseGlobals, proxiedServerMode
+	testModeUseGlobals, proxiedServerMode = true, on
+	t.Cleanup(func() { testModeUseGlobals, proxiedServerMode = origGlobals, origProxied })
+}
+
+// TestNoticeSharedMigrateRefusalProxiedPrescribesTheForcedVerb pins the
+// version-bump notice's shared-no-remote remedy on proxied workspaces
+// (gastownhall/beads#6656): the bare `bd migrate schema` is refused there
+// unless --force, so the notice names the forced verb and the co-resident
+// client-stop precondition. The branch is defensive: the notice's only
+// caller, autoMigrateOnVersionBump, returns before any open on a
+// proxied-server workspace, so this calls the notice directly. The
+// dolt.NewFromConfig open that caller uses never sets the gate's Proxied
+// marker, so the workspace's own proxied mode counts too. Off the proxy the
+// bare verb stays.
+func TestNoticeSharedMigrateRefusalProxiedPrescribesTheForcedVerb(t *testing.T) {
+	pinJSONOutput(t, false)
+	for _, tt := range []struct {
+		name          string
+		gateProxied   bool
+		workspaceProx bool
+		global        bool
+		want          string
+		proxied       bool
+	}{
+		{name: "direct keeps the bare verb", want: schema.SharedConsentCommand},
+		{name: "direct global keeps the bare global verb", global: true, want: schema.SharedConsentCommandGlobal},
+		{name: "gate marks proxied", gateProxied: true, want: schema.SharedConsentCommandForced, proxied: true},
+		{name: "workspace is proxied", workspaceProx: true, want: schema.SharedConsentCommandForced, proxied: true},
+		{name: "proxied global", gateProxied: true, global: true, want: schema.SharedConsentCommandForcedGlobal, proxied: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			pinProxiedServerGlobals(t, tt.workspaceProx)
+			origGlobal := globalFlag
+			globalFlag = tt.global
+			t.Cleanup(func() { globalFlag = origGlobal })
+
+			out := captureNoticeStderr(t, func() {
+				noticeSharedMigrateRefusal(&schema.RemoteMigrateGateError{
+					CurrentVersion: 65, LatestVersion: 66, Pending: 1,
+					Decision: "shared-no-remote", Proxied: tt.gateProxied,
+				})
+			})
+			if !strings.Contains(out, "'"+tt.want+"'") {
+				t.Errorf("notice must prescribe '%s':\n%s", tt.want, out)
+			}
+			if got := strings.Contains(out, "--force"); got != tt.proxied {
+				t.Errorf("notice names --force = %t, want %t:\n%s", got, tt.proxied, out)
+			}
+			if got := strings.Contains(out, "co-resident library clients are stopped"); got != tt.proxied {
+				t.Errorf("notice names the client-stop precondition = %t, want %t:\n%s", got, tt.proxied, out)
+			}
+		})
+	}
+}
+
+// TestInitJoinGuidanceProxiedPrescribesTheForcedVerb pins the bd init join
+// guidance (gastownhall/beads#6656): when the refusing gate is marked proxied,
+// the guidance names the forced verb, which a proxied front door lets
+// through; off the proxy it keeps the bare verb. The branch is defensive: the
+// guidance's only caller is init's non-proxied open, which never returns a
+// refusal marked proxied, so this calls the guidance directly.
+func TestInitJoinGuidanceProxiedPrescribesTheForcedVerb(t *testing.T) {
+	for _, tt := range []struct {
+		proxied bool
+		want    string
+	}{
+		{proxied: false, want: schema.SharedConsentCommand},
+		{proxied: true, want: schema.SharedConsentCommandForced},
+	} {
+		name := "direct"
+		if tt.proxied {
+			name = "proxied"
+		}
+		t.Run(name, func(t *testing.T) {
+			var buf bytes.Buffer
+			printInitJoinGuidance(&buf, &schema.RemoteMigrateGateError{
+				CurrentVersion: 65, LatestVersion: 66, Pending: 1,
+				Decision: "shared-no-remote", Proxied: tt.proxied,
+			})
+			out := buf.String()
+			if !strings.Contains(out, "`"+tt.want+"`") {
+				t.Errorf("init join guidance must name `%s`:\n%s", tt.want, out)
+			}
+			if got := strings.Contains(out, "--force"); got != tt.proxied {
+				t.Errorf("init join guidance names --force = %t, want %t:\n%s", got, tt.proxied, out)
+			}
+		})
+	}
 }

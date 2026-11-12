@@ -284,6 +284,9 @@ func TestReadThroughRefusedMigrationWarning(t *testing.T) {
 		// forceOK marks data-behind, whose "Do NOT use `bd migrate --force`"
 		// paragraph names the command it forbids.
 		forceOK bool
+		// also and absent are further text the warning must and must not
+		// carry, beyond the marker.
+		also, absent []string
 	}{
 		{
 			name: "fork-skew",
@@ -324,13 +327,35 @@ func TestReadThroughRefusedMigrationWarning(t *testing.T) {
 			forceOK: true,
 		},
 		{
+			// gastownhall/beads#6656: the proxied front door refuses the bare
+			// verb, and the forced one is also the designated-migrator
+			// override this remote-backed stop is about, so the warning names
+			// the forced verb with the client-stop step, the adopt branch,
+			// and the push the proxied workspace cannot run.
 			name: "blunt shared-store fallback",
 			gateErr: &schema.RemoteMigrateGateError{
 				CurrentVersion: 65, LatestVersion: 70, Pending: 5,
 				FallbackReason: "shared-store", Shared: true, Proxied: true,
 			},
+			marker: "run '" + schema.SharedConsentCommandForced + "'",
+			also: []string{
+				"adopt its database instead of migrating here",
+				"only as the single designated migrator",
+				"stop every library client connected to this",
+				"restart them",
+				"'bd dolt push' from a workspace with direct access to the database",
+			},
+		},
+		{
+			// Off the proxy the template is unchanged.
+			name: "blunt shared-store fallback, not proxied",
+			gateErr: &schema.RemoteMigrateGateError{
+				CurrentVersion: 65, LatestVersion: 70, Pending: 5,
+				FallbackReason: "shared-store", Shared: true,
+			},
 			marker:        "Run '" + schema.SharedConsentCommand + "'",
 			consentVerbOK: true,
+			absent:        []string{"--force", "library client", "bd dolt push"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -359,8 +384,15 @@ func TestReadThroughRefusedMigrationWarning(t *testing.T) {
 			if readErr != nil {
 				t.Fatalf("readThroughRefusedMigration() = %v, want nil — the read proceeds on the old schema", readErr)
 			}
-			if !strings.Contains(stderr, tc.marker) {
-				t.Errorf("warning missing %q:\n%s", tc.marker, stderr)
+			for _, want := range append([]string{tc.marker}, tc.also...) {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("warning missing %q:\n%s", want, stderr)
+				}
+			}
+			for _, unwanted := range tc.absent {
+				if strings.Contains(stderr, unwanted) {
+					t.Errorf("warning carries %q:\n%s", unwanted, stderr)
+				}
 			}
 			// Body first, then the mode line, as on embedded: the shaped body
 			// leads the warning rather than being replaced by the summary.
@@ -399,43 +431,81 @@ func TestReadThroughRefusedMigrationWarning(t *testing.T) {
 // selects (arrival_seq, on one the previous release migrated) every read would
 // fail on the unknown column. So the open refuses, permanently, with
 // SchemaBehindError, and never prints that the read carries on.
+//
+// What else the refusal carries depends on the stop (gastownhall/beads#6656).
+// A stop the smart gate shaped (adopt, adopt-ff, fork-skew, data-behind) rides
+// along with the drift, so cmd/bd prints that stop: a proxied read is where
+// the forced verb's caveat sends the operator to see it, and the drift error
+// alone names the bare verb the front door refuses. shared-no-remote, whose
+// body says reads keep working, and the blunt fallback keep the drift alone.
 func TestReadThroughRefusesASchemaItsReadsCannotQuery(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("create sql mock: %v", err)
-	}
-	defer db.Close()
-	ctx := context.Background()
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		t.Fatalf("pin connection: %v", err)
-	}
-	defer conn.Close()
 	behind := schema.LatestVersion() - 1
-	mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	expectIssuesProjection(mock, behind, "arrival_seq")
+	for _, tc := range []struct {
+		name    string
+		gateErr *schema.RemoteMigrateGateError
+		// reportsStop marks the refusals the failed open must carry.
+		reportsStop bool
+	}{
+		{name: "adopt", gateErr: &schema.RemoteMigrateGateError{Decision: "adopt"}, reportsStop: true},
+		{name: "adopt-ff", gateErr: &schema.RemoteMigrateGateError{Decision: "adopt-ff"}, reportsStop: true},
+		{name: "fork-skew", gateErr: &schema.RemoteMigrateGateError{Decision: "fork-skew", SkewVersions: []int{behind}}, reportsStop: true},
+		{name: "data-behind", gateErr: &schema.RemoteMigrateGateError{FallbackReason: "data-behind", DataDiverged: true}, reportsStop: true},
+		{name: "shared-no-remote", gateErr: &schema.RemoteMigrateGateError{Decision: "shared-no-remote"}},
+		{name: "blunt shared-store fallback", gateErr: &schema.RemoteMigrateGateError{FallbackReason: "shared-store"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gateErr := tc.gateErr
+			gateErr.CurrentVersion, gateErr.LatestVersion, gateErr.Pending = behind, schema.LatestVersion(), 1
+			gateErr.Shared, gateErr.Proxied = true, true
+			// The literals must land on the arms they name, or a drifted one
+			// passes here while production takes the other branch.
+			if want := tc.name == "data-behind"; gateErr.IsDataBehind() != want {
+				t.Fatalf("IsDataBehind() = %v, want %v: the fixture's FallbackReason literal drifted", !want, want)
+			}
+			if want := tc.name == "shared-no-remote"; strings.Contains(gateErr.Error(), "shared server database") != want {
+				t.Fatalf("Error() = %q: the shared-no-remote literal drifted from the schema's decision", gateErr.Error())
+			}
 
-	gateErr := &schema.RemoteMigrateGateError{
-		CurrentVersion: behind, LatestVersion: schema.LatestVersion(), Pending: 1,
-		Decision: "shared-no-remote", Shared: true, Proxied: true,
-	}
-	var readErr error
-	stderr := captureStderr(t, func() {
-		readErr = readThroughRefusedMigration(ctx, conn, "beads", gateErr)
-	})
-	var permanent *backoff.PermanentError
-	if !errors.As(readErr, &permanent) {
-		t.Fatalf("readThroughRefusedMigration() = %T (%v), want a permanent refusal: a retry reads the same schema", readErr, readErr)
-	}
-	var behindErr *schema.SchemaBehindError
-	if !errors.As(readErr, &behindErr) || behindErr.DBVersion != behind {
-		t.Fatalf("readThroughRefusedMigration() = %v, want *schema.SchemaBehindError at v%d", readErr, behind)
-	}
-	if strings.Contains(stderr, "continuing on schema") {
-		t.Errorf("the refused read-through still announced that the read carries on:\n%s", stderr)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet SQL expectations: %v", err)
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("create sql mock: %v", err)
+			}
+			defer db.Close()
+			ctx := context.Background()
+			conn, err := db.Conn(ctx)
+			if err != nil {
+				t.Fatalf("pin connection: %v", err)
+			}
+			defer conn.Close()
+			mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
+				WillReturnResult(sqlmock.NewResult(0, 0))
+			expectIssuesProjection(mock, behind, "arrival_seq")
+
+			var readErr error
+			stderr := captureStderr(t, func() {
+				readErr = readThroughRefusedMigration(ctx, conn, "beads", gateErr)
+			})
+			var permanent *backoff.PermanentError
+			if !errors.As(readErr, &permanent) {
+				t.Fatalf("readThroughRefusedMigration() = %T (%v), want a permanent refusal: a retry reads the same schema", readErr, readErr)
+			}
+			var behindErr *schema.SchemaBehindError
+			if !errors.As(readErr, &behindErr) || behindErr.DBVersion != behind {
+				t.Fatalf("readThroughRefusedMigration() = %v, want *schema.SchemaBehindError at v%d", readErr, behind)
+			}
+			var reported *schema.RemoteMigrateGateError
+			if got := errors.As(readErr, &reported); got != tc.reportsStop {
+				t.Fatalf("refusal carries the gate stop = %v, want %v: %v", got, tc.reportsStop, readErr)
+			}
+			if tc.reportsStop && reported != gateErr {
+				t.Errorf("refusal carries %+v, want the gate's own stop %+v", reported, gateErr)
+			}
+			if strings.Contains(stderr, "continuing on schema") {
+				t.Errorf("the refused read-through still announced that the read carries on:\n%s", stderr)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+		})
 	}
 }

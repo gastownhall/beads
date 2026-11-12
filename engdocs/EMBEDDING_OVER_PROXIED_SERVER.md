@@ -39,9 +39,11 @@ It is not a compatibility contract. Nothing here is a published interface with a
 deprecation policy behind it. Every surface below is an implementation detail
 that bd's own code reaches through, and each one may change in any release,
 including a patch release. Five of the eleven are moving in 1.3.1 itself and say
-so in place: §7 and §10 have landed and are described in their new shape, and
-§5, §6 and §11 are decided for 1.3.1 but had not landed at the commit above, so
-each is given as before/after with the current behaviour marked as current. Read
+so in place: §7 and §10 have landed and are described in their new shape, §6
+has landed since (after 1.3.4, gastownhall/beads#6656) and is given as
+before/after, and §5 and §11 are decided for 1.3.1 but had not landed at the
+commit above, so each is given as before/after with the current behaviour marked
+as current. Read
 this as a snapshot with the commit it was taken at, and re-read it against the
 source before an upgrade.
 
@@ -376,51 +378,95 @@ is `> 0` (§10) — so both "default 30s" and "never" render as an absent key.
 After: the key is expected to be present with the effective value. An embedder
 should read an absent key as "ask this bd, do not assume", not as "no timeout".
 
-## 6. `bd migrate schema` on a proxied workspace — changing in 1.3.1
+## 6. `bd migrate schema` on a proxied workspace — refused unless `--force`
 
-**Observed at this commit: the verb is permitted, and on a served database with
-no remote it migrates. With a remote configured it is still permitted — it
-reaches the store open — but the §7 gate refuses the migration there, because
-the verb's own consent is not read on that arm.**
+**Before (through 1.3.4):** the verb was permitted. On a served database
+with no remote it migrated, and with a remote configured it reached the store
+open, where the §7 gate refused the migration because the verb's own consent is
+not read on that arm. Nothing told the operator that library clients connected
+to the same backend were about to have their schema changed under them.
 
-`proxyMaintenanceRefusals` in `cmd/bd/proxy_capability.go` refuses the bare
-`migrate` command with code `proxy.migrate.unsupported`, and its `init()`
-expands child rows for `migrate hooks` and `migrate issues`. The same table
-carries `migrate sync`, `migrate-personal` and `migrate-issues` as rows of their
-own — the `migrate` neighbourhood is enumerated, not covered by a prefix rule.
-`migrate schema` is in none of it.
+**After (gastownhall/beads#6656):** the bare verb is a typed refusal at the front door, before the
+provider is built, so nothing is opened and nothing migrates:
 
-Two gates then stand between an unmatched path and the store open, and only the
-second is a fall-through: `validateProxyMaintenanceBeforeProvider` consults
-`LookupHistoryCapability` first and refuses anything classed `HistoryDirectOnly`
-with `proxy.history.unsupported`; *after* that it returns `nil` for any
-unmatched multi-word command path. `migrate schema` matches neither gate, so the
-verb reaches the store open. A reader predicting some other multi-word verb from
-this section should apply both gates in that order — the multi-word `return nil`
-on its own over-predicts "permitted".
+```json
+{
+  "code": "proxy.migrate.unsupported",
+  "error": "migrate schema is not supported in proxied-server mode without --force: ...",
+  "mutates": false,
+  "reason": "design"
+}
+```
 
-The mechanics matter, because they are not "a command that applies a migration":
+It exits 1 on every proxied topology, including one bd cannot classify. The
+row is `migrate schema` in `proxyCapabilityRegistry`
+(`cmd/bd/capability_registry.go`), next to the refusals for the bare `migrate`
+and its `hooks`/`issues`/`sync` children. It is the one row with a force opt-in
+(`ForceFlag`): `validateProxyRegistryBeforeProvider` lets the invocation through
+only when that command's own `--force` is true. `--force=false`, `--force` on
+`bd migrate` or any other refused path, and `BD_ALLOW_REMOTE_MIGRATE=1` all
+leave the refusal in place. The environment override is standing
+configuration, not this invocation's consent, so it still unlocks the §7 gate
+for other commands but never this front door.
+
+The route the refusal names is stop, force, restart:
+
+1. Stop every library client connected to the proxy's backend.
+2. Run `bd migrate schema --force`.
+3. Restart the clients.
+
+That `--force` is also the §7 gate's designated-migrator override (see the
+first bullet below), so on a database with a Dolt remote it skips the gate's
+adopt, pull-first and fork-skew stops: the gate honors it before it routes
+any of them. The bare verb used to reach those stops. The front door now
+answers it first, and because it runs before the provider it cannot read
+`dolt_remotes`, so the refusal says this unconditionally, after the route:
+"If this database has a Dolt remote, --force also confirms you are its single
+designated migrator and skips the remote-migrate gate's own stops (adopt,
+pull first, forked schema): run a read command such as `bd list` first, and if
+it prints one of those stops, follow it instead of forcing". A read command
+runs the gate and prints the stop that applies (`readThroughRefusedMigration`
+in `internal/storage/uow`). It does so even when this binary's reads cannot
+query the database's current schema, as on every 1.3.4 database (which lacks
+`issues.arrival_seq`): the read then fails with the adopt, adopt-ff,
+fork-skew or data-behind stop, joined to the `SchemaBehindError`, instead of
+the drift error alone, whose remedy names the refused bare verb. The
+shared-no-remote stop and the blunt fallback still fail with the drift error
+there. When the blunt remote-backed stop lets the read carry on, its warning
+names the proxied route: adopt if another clone already migrated and pushed;
+otherwise, as the single designated migrator, stop the clients, run
+`bd migrate schema --force`, restart them, and push from a workspace with
+direct access to the database.
+
+The forced invocation prints one warning to **stderr**, before the provider open:
+
+```text
+Warning: before forcing schema migration, close co-resident library clients; restart them after this command completes.
+  If this database has a Dolt remote, --force also confirms you are its single designated migrator, so the remote-migrate gate's adopt and pull-first checks do not run.
+```
+
+The warning is generic on purpose. The proxy is a byte pump (§3) and does not
+track who is connected, so there is no truthful list of clients to print. stdout
+still carries only the command's report, so a `--json` caller can parse it as
+before.
+
+On a team-server workspace the team server owns the schema, so the forced verb
+only verifies it. The refusal stands there too, with the same code and reason,
+but the row words it for that shape (`rewordedOn`): it says the command only
+verifies and that no client needs to stop, and the forced invocation prints a
+one-line note to stderr instead of the warning above.
+
+What has **not** changed is what happens after the front door:
 
 - `cmd/bd/main.go` sets `schema.SetSharedMigrateConsent(...)` in the root
   pre-run for this one verb (`isSchemaMigrateVerb` matches `bd migrate schema`
   and deliberately nothing else in the `migrate` tree). That consent satisfies
-  the shared-store gate in §7 on **one arm only**. Its single non-test read site
-  is `sharedNoRemoteGate`, reached from that gate's `if !hasRemote` branch, and
-  the comment there scopes it deliberately: the verb "unlocks ONLY here: with a
-  remote configured, #4259's cross-clone fork risk still demands the stronger
-  designated-migrator confirmation". When the served database *does* have a
-  remote — on the proxied path that is read from its own `dolt_remotes` alone,
-  because `dolt_sql_provider.go` calls the gate as
-  `CheckSharedStoreMigrateGate(ctx, c, "", nil, nil)` and so supplies no on-disk
-  fallback probe — the gate takes the other arm, which consults only `--force`
-  (`bd migrate schema --force` trips `isForcedMigrate`; `bd migrate --force`
-  trips it too, but only off a proxied workspace, since the bare verb is
-  refused before the store open per the refusal above) and the
-  `BD_ALLOW_REMOTE_MIGRATE` environment override.
-  Without one of those, a main-lane pending migration is refused at the store
-  open, carrying the shared-store reason wherever the smart gate would otherwise
-  have auto-migrated. The public twin of this knob,
-  `beads.AllowSharedSchemaMigration`, documents the same scope.
+  the §7 gate on **one arm only**, the no-remote arm (`sharedNoRemoteGate`).
+  With a remote configured the gate consults only `--force` (which the forced
+  verb carries, via `isForcedMigrate`) and the `BD_ALLOW_REMOTE_MIGRATE`
+  override, and it consults them before the smart gate routes adopt,
+  pull-first or fork-skew, so either one migrates in place. The public twin of
+  this knob, `beads.AllowSharedSchemaMigration`, documents the same scope.
 - The **provider open then performs the migration**, before `RunE` runs.
 - `RunE`'s proxied arm (`reportProxiedSchemaMigrate` in `cmd/bd/migrate.go`)
   therefore only reports, and it reports a **different JSON shape** from the
@@ -440,28 +486,22 @@ the value, do not hard-code it.) The direct path emits `{"status", "applied",
 "latest_version"}`; the proxied arm drops `applied` and adds `mode` and `note`,
 so only `status` and `latest_version` are common to both. No applied count is
 reported because by the time `RunE` runs the work belongs to an open that has
-already returned — there is no number for it to have. An embedder decoding this
-payload into one struct across both topologies should treat `applied` as
-absent-not-zero on the proxied route, and should not infer "nothing was applied"
-from its absence.
+already returned — there is no number for it to have. That holds for the forced
+verb too. An embedder decoding this payload into one struct across both
+topologies should treat `applied` as absent-not-zero on the proxied route, and
+should not infer "nothing was applied" from its absence.
+
+The §7 shared-no-remote refusal follows the front door. On a proxied workspace
+its human block, `EscapeHint` and `migrate-shared` option name
+`bd migrate schema --force`, with the stop-the-clients step as the option's
+precondition. Off the proxy they still name the bare verb.
 
 **What an embedder can observe.** The DDL lands under co-resident clients that
-already hold connections and prepared state, with no coordination of any kind —
-the proxy is a byte pump (§3) and has no notion of who is connected. An embedder
-whose process outlives a `bd migrate schema` should treat the schema as changed
-beneath it and re-establish its connections; in practice, restart.
-
-**What is changing in 1.3.1.** Refusing `bd migrate schema` on a proxied
-workspace is approved for 1.3.1: a flat typed refusal by default, with `--force`
-emitting a **generic** warning to close co-resident library clients first. The
-approved scope is a generic warning with no enumeration of connected clients, for
-the reason above — the proxy does not track them, so there is nothing truthful to
-list. This had not landed at `e1e1158dd`, and there is no tracking issue for it
-at the time of writing.
-
-So an embedder should expect the verb to stop working on proxied workspaces
-rather than build a workflow on it, and should not read the absence of a refusal
-today as the absence of one tomorrow.
+already hold connections and prepared state, with no coordination of any kind.
+An embedder that cannot be stopped for a `bd migrate schema --force` should treat
+the schema as changed beneath it and re-establish its connections; in practice,
+restart. An embedder that scripted the bare verb as a proxied CI check gets an
+exit 1 now and should branch on `proxy.migrate.unsupported` instead.
 
 ## 7. The shared-store migration gate — main lane only, new stop in 1.3.1
 
@@ -831,10 +871,11 @@ adoption succeeding while the backend is absent.
 
 Not all eleven carry the same risk, and it is worth saying which is which.
 
-**Most likely to move, and already in motion:** §6 (`bd migrate schema` becomes
-a refusal), §11 (clean-backend-exit handling and backend-probing adoption), §5
-(the sidecar starts writing its effective `idle_timeout`). All three are decided
-for 1.3.1 and described above as before/after.
+**Most likely to move, and already in motion:** §11 (clean-backend-exit handling
+and backend-probing adoption) and §5 (the sidecar starts writing its effective
+`idle_timeout`). Both are decided for 1.3.1 and described above as before/after.
+§6 has landed (`bd migrate schema` is refused unless `--force`); what is still
+open there is the forced payload's missing `applied` count.
 
 **Likely to move:** §2, the `db-proxy-child` argv. It is a hidden internal
 command whose flags exist to serve the parent that spawns it, and flags have
