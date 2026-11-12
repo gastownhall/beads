@@ -37,9 +37,13 @@ import (
 //
 // REDACTION IS A RULE ABOUT DISCLOSURE, WHICH IS WHY IT DOES NOT REACH THE
 // WRITES. A credential-bearing key is writable and removable here: the role
-// refuses no such key, a writer already holds the value, and a refusal would
-// leave a workspace's credentials visible as PRESENT and permanently
-// unconfigurable through this door. What the writes owe is the projection —
+// refuses no key for being credential-bearing, a writer already holds the
+// value, and a refusal would leave a workspace's credentials visible as PRESENT
+// and permanently unconfigurable through this door. The tracker secrets
+// (github.token, linear.api_key, notion.token, ...) are refused for a
+// different reason: they are config.yaml-only keys, and the role refuses every
+// such key with a 400 because this table is replicated by bd dolt push (#7559).
+// A row an older server stored under one is still removable. What the writes owe is the projection —
 // every answer that carries a stored value goes through wireSetting, so there is
 // one statement of the rule and the response to a write is what the read that
 // follows it returns.
@@ -118,11 +122,18 @@ var setSettingRequestMembers = []string{setSettingValueMember}
 // A handler that projected for itself would put the table write outside that
 // transaction, which is the split the projection exists to prevent.
 //
+// THE YAML-ONLY REFUSAL IS THE ROLE'S, not this handler's: a config.yaml-only
+// key (the startup settings and the tracker secrets) comes back from the role
+// as ErrValidation and leaves here as a 400 whose detail names the key and
+// config.yaml and never the value (#7559). This server cannot write the
+// caller's config.yaml, and this table is replicated by bd dolt push.
+//
 // THE REDACTION IS THIS FILE'S, and the write half reuses it rather than
-// restating it. A key whose NAME marks it credential-bearing is perfectly
-// writable — the role refuses no such key, and refusing here would protect
-// nothing the caller does not already hold while leaving a workspace's
-// credentials permanently unconfigurable through this door. What the wire owes
+// restating it. A key whose NAME marks it credential-bearing and that is not
+// config.yaml-only is perfectly writable — the role refuses no key for being
+// credential-bearing, and refusing here would protect nothing the caller does
+// not already hold while leaving a workspace's credentials permanently
+// unconfigurable through this door. What the wire owes
 // is that the RESPONSE not hand the value back: wireSetting is the same
 // projection the read uses, so the answer to a write is byte-identical to the
 // read that follows it, and redaction stays one rule decided on the key alone.

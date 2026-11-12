@@ -1254,15 +1254,15 @@ WHERE l.message = ? AND l.commit_hash <> ? AND a.parent_index = 0`,
 		t.Fatalf("find 0062's drop commit parent: %v", err)
 	}
 
-	// One row per page: pre-2's second page from the second source drifts.
+	// One row per page, so one issue per page: the second source's page of
+	// pre-2, whose two rows it reads whole, drifts.
 	defer schema.SetPreflipEventsBatchSizesForTest(1, 1)()
 	pages, reads := 0, 0
 	defer schema.SetPreflipEventsSourceFaultHookForTest(func(ref, issue string) error {
 		reads++
 		if ref == second && issue == "pre-2" {
-			if pages++; pages == 2 {
-				return errors.New("panic: invalid hash length: 19")
-			}
+			pages++
+			return errors.New("panic: invalid hash length: 19")
 		}
 		return nil
 	})()
@@ -1271,8 +1271,8 @@ WHERE l.message = ? AND l.commit_hash <> ? AND a.parent_index = 0`,
 	if _, err := schema.MigrateUp(ctx, conn); err != nil {
 		t.Fatalf("MigrateUp with a source failing midway: %v", err)
 	}
-	if pages != 2 {
-		t.Fatalf("the second source's pre-2 was read in %d pages, want the failing 2nd", pages)
+	if pages != 1 {
+		t.Fatalf("the second source's pre-2 was read in %d pages, want the one failing page", pages)
 	}
 	got := liveEvents(t, ctx, conn)
 	requireContent(t, got, map[string]int{
@@ -1535,43 +1535,89 @@ func seedManyPreflipEvents(t *testing.T, ctx context.Context, conn *sql.Conn, is
 }
 
 // TestEmbeddedIgnoredMigration0031BatchesItsStatements pins the restore's
-// cost: its statement count grows with the number of issues, never with the
-// number of rows. It used to probe the live table once per missing row and
-// write each issue separately, about 1 ms per event in embedded mode and more
-// on a sql-server, where the restore holds the migration lock that every
-// other writable open waits on for at most 30 s.
+// cost on both clones it runs on: its statement count grows with the number
+// of pages and batches, never with the number of issues or rows. It used to
+// probe the live table once per missing row and write each issue separately,
+// about 1 ms per event in embedded mode, and then still read every issue on
+// its own: twice on a clone that ran 0062 itself, where every issue holds its
+// events and nothing is restored. On a sql-server the restore holds the
+// migration lock that every other writable open waits on for at most 30 s.
 func TestEmbeddedIgnoredMigration0031BatchesItsStatements(t *testing.T) {
 	requireEmbedded(t)
-	ctx := t.Context()
 
-	const issues, events = 60, 12
-	dataDir := seedMainSchemaAt(t, ctx, 61)
-	conn, closeConn := openPinnedConn(t, ctx, dataDir)
-	defer closeConn()
-	seedManyPreflipEvents(t, ctx, conn, issues, events)
-	adoptPreflipLineage(t, ctx, conn)
+	// 240 source rows a page, which 12 and 1 events an issue both divide.
+	const page, rows = 240, 720
+	defer schema.SetPreflipEventsBatchSizesForTest(page, 1000)()
 
-	counter := &preflipStatementCounter{DBConn: conn}
-	if err := schema.RestorePreflipEventsForTest(ctx, counter); err != nil {
-		t.Fatalf("restore: %v", err)
+	// restore seeds rows events, spread evenly over issues, on a database at
+	// main 61 and runs the migrator's pass. For an adopting clone it then
+	// empties events and leaves 0031 pending. It runs the restore alone,
+	// counting its statements, and returns the count and the live events
+	// before and after.
+	restore := func(t *testing.T, issues int, adopt bool) (*preflipStatementCounter, map[string][]string, map[string][]string) {
+		t.Helper()
+		ctx := t.Context()
+		dataDir := seedMainSchemaAt(t, ctx, 61)
+		conn, closeConn := openPinnedConn(t, ctx, dataDir)
+		t.Cleanup(closeConn)
+		seedManyPreflipEvents(t, ctx, conn, issues, rows/issues)
+		if adopt {
+			adoptPreflipLineage(t, ctx, conn)
+		} else if _, err := schema.MigrateUp(ctx, conn); err != nil {
+			t.Fatalf("MigrateUp (migrator): %v", err)
+		}
+		before := liveEvents(t, ctx, conn)
+		counter := &preflipStatementCounter{DBConn: conn}
+		if err := schema.RestorePreflipEventsForTest(ctx, counter); err != nil {
+			t.Fatalf("restore: %v", err)
+		}
+		return counter, before, liveEvents(t, ctx, conn)
 	}
-	got := liveEvents(t, ctx, conn)
-	total := 0
-	for _, ids := range got {
-		total += len(ids)
-	}
-	if total != issues*events {
-		t.Fatalf("restored %d events, want %d", total, issues*events)
-	}
-	requireDerivedIDs(t, got)
-	// One read per issue, plus a handful per page and per batch (75 today;
-	// probing and writing per row took 908).
-	if limit := issues + 30; counter.statements > limit {
-		t.Fatalf("restoring %d events of %d issues took %d statements, want at most %d", issues*events, issues, counter.statements, limit)
-	}
-	if counter.inserts != 1 {
-		t.Fatalf("restore wrote %d INSERTs for %d rows, want 1", counter.inserts, issues*events)
-	}
+
+	t.Run("adopting clone", func(t *testing.T) {
+		const issues = 60
+		counter, _, got := restore(t, issues, true)
+		total := 0
+		for _, ids := range got {
+			total += len(ids)
+		}
+		if total != rows {
+			t.Fatalf("restored %d events, want %d", total, rows)
+		}
+		requireDerivedIDs(t, got)
+		// Four per page (the page, its live issues, its source content, its
+		// live content), the empty page that ends the source, five to find
+		// the source and check its shape, then the batch's probe and INSERT
+		// and a read per page of copied rows: 23 today. Reading each issue on
+		// its own took 74.
+		if limit := 26; counter.statements > limit {
+			t.Fatalf("restoring %d events of %d issues took %d statements, want at most %d", rows, issues, counter.statements, limit)
+		}
+		if counter.inserts != 1 {
+			t.Fatalf("restore wrote %d INSERTs for %d rows, want 1", counter.inserts, rows)
+		}
+	})
+
+	t.Run("migrating clone", func(t *testing.T) {
+		// Every issue still holds its events, so nothing is restored, and the
+		// pass costs the same whether the rows belong to 60 issues or 720.
+		var statements []int
+		for _, issues := range []int{60, rows} {
+			counter, before, after := restore(t, issues, false)
+			if counter.inserts != 0 {
+				t.Fatalf("restore on the migrating clone wrote %d INSERTs, want none", counter.inserts)
+			}
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("restore on the migrating clone changed events: %d contents before, %d after", len(before), len(after))
+			}
+			statements = append(statements, counter.statements)
+		}
+		// The same as an adopting clone's reads: 18 today. Reading each issue
+		// twice took 129 for 60 issues and 1,455 for 720.
+		if limit := 21; statements[0] > limit || statements[1] != statements[0] {
+			t.Fatalf("checking %d events took %d statements over 60 issues and %d over %d, want the same, at most %d", rows, statements[0], statements[1], rows, limit)
+		}
+	})
 }
 
 // TestEmbeddedIgnoredMigration0031SplitsInsertsByContentSize pins the byte
