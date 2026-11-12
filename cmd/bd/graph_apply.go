@@ -583,6 +583,10 @@ func validateGraphApplyPlan(plan *GraphApplyPlan, customTypes, customStatuses []
 				if !dt.IsValid() {
 					return fmt.Errorf("node %q: dep %d: invalid dependency type %q", node.Key, j, dep.Type)
 				}
+				if canonical, ok := graphPlanTypeRespelling(dep.Type); ok {
+					return fmt.Errorf("node %q: dep %d: dependency type %q is not recognized; did you mean %q%s?",
+						node.Key, j, dep.Type, canonical, graphPlanAliasNote(canonical, "this node depends on the target"))
+				}
 			}
 		}
 	}
@@ -604,6 +608,10 @@ func validateGraphApplyPlan(plan *GraphApplyPlan, customTypes, customStatuses []
 			dt := types.DependencyType(edge.Type)
 			if !dt.IsValid() {
 				return fmt.Errorf("edge %d: invalid dependency type %q", i, edge.Type)
+			}
+			if canonical, ok := graphPlanTypeRespelling(edge.Type); ok {
+				return fmt.Errorf("edge %d: dependency type %q is not recognized; did you mean %q%s?",
+					i, edge.Type, canonical, graphPlanAliasNote(canonical, "from_key depends on to_key, like bd dep add <from> <to>"))
 			}
 		}
 		if edge.Gate != "" || edge.SpawnerKey != "" || edge.SpawnerID != "" {
@@ -1217,6 +1225,55 @@ func graphApplyEdgeIsLocalCycleRelevant(edge GraphApplyEdge, depType types.Depen
 		return false
 	}
 	return graphApplyCycleRelevantDependencyType(depType)
+}
+
+// graphPlanTypeRespelling reports whether raw respells a dependency type bd
+// recognizes — a well-known type or one of the canonicalDependencyType
+// aliases — without matching it exactly: the same word once case, '-', '_'
+// and spaces are ignored ("blocked_by", "Blocks", "waits_for"). Such a type
+// would otherwise be stored verbatim as a custom type that never gates
+// `bd ready` (GH#3879), so plan validation refuses it and names canonical.
+// Custom types that respell nothing ("related-to", "implements") are not
+// matched and stay accepted verbatim.
+func graphPlanTypeRespelling(raw string) (canonical string, ok bool) {
+	squashed := squashDependencyTypeSpelling(raw)
+	known := make([]string, 0, len(types.WellKnownDependencyTypes())+len(graphPlanDependencyTypeAliases))
+	for _, t := range types.WellKnownDependencyTypes() {
+		known = append(known, string(t))
+	}
+	known = append(known, graphPlanDependencyTypeAliases...)
+	for _, k := range known {
+		if raw == k {
+			return "", false
+		}
+		if squashed == squashDependencyTypeSpelling(k) {
+			canonical, ok = k, true
+		}
+	}
+	return canonical, ok
+}
+
+// graphPlanDependencyTypeAliases are the alias spellings canonicalDependencyType
+// maps to "blocks".
+var graphPlanDependencyTypeAliases = []string{"blocked-by", "depends-on"}
+
+func squashDependencyTypeSpelling(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '-', '_', ' ':
+			return -1
+		}
+		return r
+	}, strings.ToLower(s))
+}
+
+// graphPlanAliasNote explains, for a suggested alias, what it is stored as
+// and which way it points; it is empty for a non-alias suggestion.
+func graphPlanAliasNote(canonical, direction string) string {
+	if stored := canonicalDependencyType(types.DependencyType(canonical)); string(stored) != canonical {
+		return fmt.Sprintf(" (stored as %q: %s)", stored, direction)
+	}
+	return ""
 }
 
 // graphApplyDependencyType is the storage type of a plan edge or inline dep:
