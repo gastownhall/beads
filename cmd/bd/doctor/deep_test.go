@@ -4,6 +4,7 @@ package doctor
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -431,5 +432,42 @@ func TestCheckDependencyIntegrity_MissingSourceStillBroken(t *testing.T) {
 	}
 	if !strings.Contains(check.Detail, "bd-gone→gt-9") {
 		t.Fatalf("Detail = %q, want it to name bd-gone→gt-9", check.Detail)
+	}
+}
+
+// TestCheckDependencyIntegrity_GenuineBrokenEdgeBehindExemptRows: ten exempt
+// cross-repository edges ahead of a genuinely broken one in scan order must
+// not fill the ten-row cap and hide it (bd-zcpo44, AC-8).
+func TestCheckDependencyIntegrity_GenuineBrokenEdgeBehindExemptRows(t *testing.T) {
+	store := newTestDoltStore(t, "bd")
+	db := store.DB()
+	ctx := context.Background()
+	createDepTestIssue(t, store, "bd-1", false)
+	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 0"); err != nil {
+		t.Fatal(err)
+	}
+	insert := func(id, target string) {
+		t.Helper()
+		if _, err := db.ExecContext(ctx,
+			"INSERT INTO dependencies (id, issue_id, depends_on_external, type, created_at, created_by) VALUES (?, 'bd-1', ?, 'blocks', NOW(), 'test')",
+			id, target); err != nil {
+			t.Fatalf("insert bd-1→%s: %v", target, err)
+		}
+	}
+	// Primary-key order puts every exempt row ahead of the broken one.
+	for i := 0; i < 10; i++ {
+		insert(fmt.Sprintf("00000000-0000-0000-0000-%012d", i), fmt.Sprintf("gt-%d", i))
+	}
+	insert("ffffffff-ffff-ffff-ffff-ffffffffffff", "bd-gone")
+	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 1"); err != nil {
+		t.Fatal(err)
+	}
+
+	check := checkDependencyIntegrity(db)
+	if check.Status != StatusError || check.Message != "Found 1 broken dependencies" {
+		t.Fatalf("check = %#v, want error / Found 1 broken dependencies", check)
+	}
+	if !strings.Contains(check.Detail, "bd-1→bd-gone (blocks)") {
+		t.Fatalf("Detail = %q, want it to name bd-1→bd-gone (blocks)", check.Detail)
 	}
 }
