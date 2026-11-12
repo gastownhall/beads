@@ -968,6 +968,11 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 	}
 
 	var hydrated []TrackerIssue
+	// warnedUnknownHistory suppresses the missing-history warning after its
+	// first issue: one pull can sweep thousands of affected issues (every
+	// pre-linked issue right after a compaction), and the remedy is the same
+	// for all of them.
+	var warnedUnknownHistory bool
 	for _, local := range localIssues {
 		if local == nil || local.ExternalRef == nil {
 			continue
@@ -976,9 +981,22 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 		if ref == "" || !e.Tracker.IsExternalRef(ref) {
 			continue
 		}
-		changedAfterLastSync, err := e.externalRefChangedAfter(ctx, local, ref, *lastSync)
+		changedAfterLastSync, historyUnknown, err := e.externalRefChangedAfter(ctx, local, ref, *lastSync)
 		if err != nil {
 			return hydrated, hydratedLocalIDs, fmt.Errorf("checking pre-linked local issue %s: %w", local.ID, err)
+		}
+		if historyUnknown {
+			// The baseline this issue's link would be compared against is
+			// gone, so this pull cannot tell a re-link from an untouched
+			// link. Each issue is judged on its own row: a later issue may
+			// still have a real historical NULL or different ref, so one
+			// missing row never memoizes the whole database.
+			if !warnedUnknownHistory {
+				warnedUnknownHistory = true
+				e.warn("%s: cannot verify whether issues linked before the last sync on %s were re-linked since then (the local store has no issue history that reaches back to that sync; a history rewrite such as bd compact or an import can cause this); their automatic pre-link hydration was skipped to protect unpushed local edits — review any links changed since that sync before the next push",
+					e.Tracker.DisplayName(), lastSync.Format(time.RFC3339))
+			}
+			continue
 		}
 		if !changedAfterLastSync {
 			continue
@@ -1027,29 +1045,46 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 // expose dolt_history_issues), it does; otherwise it falls back to a
 // coarser timestamp heuristic.
 //
+// historyUnknown is true when the fast path found no comparable historical
+// row for an issue that existed at or before lastSync: the row the cursor
+// would compare against is gone, most plausibly because the store's commit
+// history was rewritten since the sync (bd compact, bd dolt flatten, an
+// import), so the missing row is not evidence of a re-link. The caller
+// treats that as "not changed", without a hydration exemption, and warns;
+// only an issue created after lastSync keeps the new-issue hydration.
+//
 // The fast path is gated on the ExternalRefHistoryQuerier capability, not on
 // whether the store happens to expose a raw *sql.DB: some Dolt-shaped
 // backends (e.g. embeddeddolt.EmbeddedDoltStore) support the
 // dolt_history_issues query without a pooled *sql.DB, and a non-Dolt SQL
 // backend could expose *sql.DB without having that Dolt system table at
 // all. Gating on the capability keeps this correct in both directions.
-func (e *Engine) externalRefChangedAfter(ctx context.Context, local *types.Issue, currentRef string, lastSync time.Time) (bool, error) {
+func (e *Engine) externalRefChangedAfter(ctx context.Context, local *types.Issue, currentRef string, lastSync time.Time) (changed, historyUnknown bool, err error) {
 	if local == nil {
-		return false, nil
+		return false, false, nil
 	}
 	querier, ok := externalRefHistoryQuerier(e.Store)
 	if !ok {
-		return local.CreatedAt.After(lastSync) || local.UpdatedAt.After(lastSync), nil
+		return local.CreatedAt.After(lastSync) || local.UpdatedAt.After(lastSync), false, nil
 	}
 
 	previousRef, found, err := querier.PreviousExternalRef(ctx, local.ID, lastSync)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	if !found {
-		return true, nil
+		// No comparable row at or before lastSync. An issue created after
+		// the cursor is a new pre-link whose only hydration chance this is;
+		// an issue that existed at or before it has lost its baseline
+		// (history rewrite), which is unknown evidence, not a change.
+		// UpdatedAt does not participate: an unpushed local edit is exactly
+		// the content the unknown answer must protect.
+		if !local.CreatedAt.IsZero() && local.CreatedAt.After(lastSync) {
+			return true, false, nil
+		}
+		return false, true, nil
 	}
-	return strings.TrimSpace(previousRef) != strings.TrimSpace(currentRef), nil
+	return strings.TrimSpace(previousRef) != strings.TrimSpace(currentRef), false, nil
 }
 
 // externalRefHistoryQuerier type-asserts store to storage.ExternalRefHistoryQuerier,

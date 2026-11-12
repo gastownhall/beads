@@ -248,6 +248,11 @@ func TestEnginePullOverlapHydratesPrelinkedStub(t *testing.T) {
 		UpdatedAt:   overlapLastSync.Add(10 * time.Second),
 	}
 	store := newOverlapStore(stub) // created before last_sync, no ref at it: linked after it
+	// The stub existed at last_sync, so the store's history answers for it:
+	// a NULL external_ref then (issueops.PreviousExternalRefInTx returns
+	// ("", found=true)), which is a known pre-existing unlinked row, not the
+	// missing history of #7294's rewritten stores.
+	store.previousRefs[stub.ID] = ""
 	mock, _ := newOverlapTracker(TrackerIssue{
 		ID:          "EXT-1",
 		Identifier:  "EXT-1",

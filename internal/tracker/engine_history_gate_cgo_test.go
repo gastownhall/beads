@@ -92,21 +92,21 @@ func TestEmbeddedDoltExternalRefChangedAfterUsesHistoryFastPath(t *testing.T) {
 		UpdatedAt: asOf.Add(-time.Hour),
 	}
 
-	changed, err := e.externalRefChangedAfter(ctx, local, "new-ref", asOf)
+	changed, historyUnknown, err := e.externalRefChangedAfter(ctx, local, "new-ref", asOf)
 	if err != nil {
 		t.Fatalf("externalRefChangedAfter: %v", err)
 	}
-	if !changed {
+	if !changed || historyUnknown {
 		t.Fatal("expected changed=true: external_ref differs from its value as of asOf, even though local's timestamps predate asOf")
 	}
 
 	// Complementary check: currentRef matching the historical value as of
 	// asOf should report unchanged.
-	changed, err = e.externalRefChangedAfter(ctx, local, "old-ref", asOf)
+	changed, historyUnknown, err = e.externalRefChangedAfter(ctx, local, "old-ref", asOf)
 	if err != nil {
 		t.Fatalf("externalRefChangedAfter: %v", err)
 	}
-	if changed {
+	if changed || historyUnknown {
 		t.Fatal("expected changed=false: currentRef matches the historical value as of asOf")
 	}
 }
@@ -164,11 +164,11 @@ func TestDoltStoreExternalRefChangedAfterUsesHistoryFastPath(t *testing.T) {
 		UpdatedAt: asOf.Add(-time.Hour),
 	}
 
-	changed, err := e.externalRefChangedAfter(ctx, local, "new-ref", asOf)
+	changed, historyUnknown, err := e.externalRefChangedAfter(ctx, local, "new-ref", asOf)
 	if err != nil {
 		t.Fatalf("externalRefChangedAfter: %v", err)
 	}
-	if !changed {
+	if !changed || historyUnknown {
 		t.Fatal("expected changed=true via the (behaviorally unchanged) Dolt server fast path")
 	}
 }

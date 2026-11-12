@@ -1248,6 +1248,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A tracker pull no longer treats every linked issue as re-linked after the
+  store's history was rewritten, and no longer overwrites unpushed local
+  edits on them** (#7294). A history rewrite (`bd compact`, `bd dolt
+  flatten`, an import) can remove the row a tracker's stored last-sync
+  cursor compares an issue's link against, so the next pull saw "no history
+  at or before the last sync" as a re-link on every pre-linked issue and
+  exempted each one from the pull's conflict guards — a pull right after a
+  compaction could overwrite thousands of unpushed local edits with stale
+  remote content. A missing historical row for an issue created at or before
+  the last sync is now read as unverifiable, not as a change: the issue
+  keeps the ordinary conflict and overlap protection, the pull warns once —
+  naming the tracker and the stored sync time — that links changed since that
+  sync should be reviewed before the next push, and a genuinely re-linked
+  older issue stays unhydrated until its link is verified (an older issue
+  that really was re-linked cannot be told apart in this state, which is the
+  price of protecting the local edits; the warning names the sync time to
+  check). A newly created pre-linked issue, and any issue whose recorded
+  history does answer, keep the previous hydration behavior, and `bd compact`
+  itself already replays kept commits with their original commit dates.
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc

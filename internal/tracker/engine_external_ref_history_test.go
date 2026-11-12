@@ -154,9 +154,9 @@ func TestExternalRefHistoryQuerier_UnwrapsDecorator(t *testing.T) {
 
 func TestEngineExternalRefChangedAfter_NilLocalIssue(t *testing.T) {
 	e := &Engine{Store: newPureTestStore()}
-	changed, err := e.externalRefChangedAfter(context.Background(), nil, "ref", time.Now())
-	if err != nil || changed {
-		t.Fatalf("externalRefChangedAfter(nil local) = (%v, %v), want (false, nil)", changed, err)
+	changed, historyUnknown, err := e.externalRefChangedAfter(context.Background(), nil, "ref", time.Now())
+	if err != nil || changed || historyUnknown {
+		t.Fatalf("externalRefChangedAfter(nil local) = (%v, %v, %v), want (false, false, nil)", changed, historyUnknown, err)
 	}
 }
 
@@ -165,11 +165,11 @@ func TestEngineExternalRefChangedAfter_FastPathSameRef(t *testing.T) {
 	e := &Engine{Store: querier}
 	local := newTestIssue("bd-1", time.Now(), time.Now())
 
-	changed, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", time.Now())
+	changed, historyUnknown, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if changed {
+	if changed || historyUnknown {
 		t.Error("expected changed=false when previous ref matches current ref")
 	}
 	if querier.calls != 1 {
@@ -182,11 +182,11 @@ func TestEngineExternalRefChangedAfter_FastPathDifferentRef(t *testing.T) {
 	e := &Engine{Store: querier}
 	local := newTestIssue("bd-1", time.Now(), time.Now())
 
-	changed, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-NEW", time.Now())
+	changed, historyUnknown, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-NEW", time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !changed {
+	if !changed || historyUnknown {
 		t.Error("expected changed=true when previous ref differs from current ref")
 	}
 	if querier.calls != 1 {
@@ -195,18 +195,22 @@ func TestEngineExternalRefChangedAfter_FastPathDifferentRef(t *testing.T) {
 }
 
 func TestEngineExternalRefChangedAfter_FastPathNotFound(t *testing.T) {
-	// No history entry at or before lastSync: treat as changed, per the
-	// documented contract on storage.ExternalRefHistoryQuerier.PreviousExternalRef.
+	// No history entry at or before lastSync for an issue that existed
+	// before the cursor: the baseline is gone (a history rewrite such as a
+	// compaction discards it), which is unknown evidence, not a change
+	// (#7294). The caller keeps such an issue under the ordinary conflict
+	// guards instead of granting a hydration exemption.
 	querier := &historyQuerierStore{prevFound: false}
 	e := &Engine{Store: querier}
-	local := newTestIssue("bd-1", time.Now(), time.Now())
+	lastSync := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	local := newTestIssue("bd-1", lastSync.Add(-time.Hour), lastSync.Add(-time.Minute))
 
-	changed, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", time.Now())
+	changed, historyUnknown, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", lastSync)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !changed {
-		t.Error("expected changed=true when no prior history entry is found")
+	if changed || !historyUnknown {
+		t.Fatalf("externalRefChangedAfter(older issue, missing row) = (%v, %v, nil), want (false, true, nil)", changed, historyUnknown)
 	}
 }
 
@@ -221,11 +225,11 @@ func TestEngineExternalRefChangedAfter_FastPathNullHistoricalRef(t *testing.T) {
 	e := &Engine{Store: querier}
 	local := newTestIssue("bd-1", time.Now(), time.Now())
 
-	changed, err := e.externalRefChangedAfter(context.Background(), local, "", time.Now())
+	changed, historyUnknown, err := e.externalRefChangedAfter(context.Background(), local, "", time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if changed {
+	if changed || historyUnknown {
 		t.Error("expected changed=false: NULL historical ref (\"\", found=true) compared equal to an empty currentRef")
 	}
 }
@@ -236,7 +240,7 @@ func TestEngineExternalRefChangedAfter_FastPathPropagatesError(t *testing.T) {
 	e := &Engine{Store: querier}
 	local := newTestIssue("bd-1", time.Now(), time.Now())
 
-	_, err := e.externalRefChangedAfter(context.Background(), local, "ref", time.Now())
+	_, _, err := e.externalRefChangedAfter(context.Background(), local, "ref", time.Now())
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("externalRefChangedAfter error = %v, want %v", err, wantErr)
 	}
@@ -255,11 +259,11 @@ func TestEngineExternalRefChangedAfter_EmbeddedDoltTakesFastPath(t *testing.T) {
 	lastSync := time.Now()
 	local := newTestIssue("bd-1", lastSync.Add(-time.Hour), lastSync.Add(time.Hour))
 
-	changed, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", lastSync)
+	changed, historyUnknown, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", lastSync)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if changed {
+	if changed || historyUnknown {
 		t.Error("expected changed=false: fast path found matching ref, heuristic would have said true")
 	}
 	if querier.calls != 1 {
@@ -276,22 +280,22 @@ func TestEngineExternalRefChangedAfter_NoHistoryCapabilityFallsBack(t *testing.T
 
 	t.Run("touched after lastSync reports changed", func(t *testing.T) {
 		local := newTestIssue("bd-1", lastSync.Add(-time.Hour), lastSync.Add(time.Hour))
-		changed, err := e.externalRefChangedAfter(context.Background(), local, "ref", lastSync)
+		changed, historyUnknown, err := e.externalRefChangedAfter(context.Background(), local, "ref", lastSync)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !changed {
+		if !changed || historyUnknown {
 			t.Error("expected changed=true when UpdatedAt is after lastSync (heuristic fallback)")
 		}
 	})
 
 	t.Run("untouched since lastSync reports unchanged", func(t *testing.T) {
 		local := newTestIssue("bd-2", lastSync.Add(-2*time.Hour), lastSync.Add(-time.Hour))
-		changed, err := e.externalRefChangedAfter(context.Background(), local, "ref", lastSync)
+		changed, historyUnknown, err := e.externalRefChangedAfter(context.Background(), local, "ref", lastSync)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if changed {
+		if changed || historyUnknown {
 			t.Error("expected changed=false when created/updated both before lastSync (heuristic fallback)")
 		}
 	})
@@ -306,11 +310,11 @@ func TestEngineExternalRefChangedAfter_DecoratedDoltServerStoreUnchanged(t *test
 	e := &Engine{Store: dec}
 	local := newTestIssue("bd-1", time.Now(), time.Now())
 
-	changed, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", time.Now())
+	changed, historyUnknown, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if changed {
+	if changed || historyUnknown {
 		t.Error("expected changed=false: decorated Dolt-server store should take the fast path via UnwrapStore")
 	}
 	if inner.calls != 1 {
