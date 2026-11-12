@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/beads/internal/execenv"
 	"github.com/steveyegge/beads/internal/githooksenv"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
 // Credential storage and encryption for federation peers.
@@ -308,19 +309,17 @@ func (s *DoltStore) addFederationPeer(ctx context.Context, peer *storage.Federat
 		}
 	}
 
-	// Upsert the peer credentials
-	_, err = s.execContext(ctx, `
-		INSERT INTO federation_peers (name, remote_url, username, password_encrypted, sovereignty)
-		VALUES (?, ?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
-			remote_url = VALUES(remote_url),
-			username = VALUES(username),
-			password_encrypted = VALUES(password_encrypted),
-			sovereignty = VALUES(sovereignty),
-			updated_at = CURRENT_TIMESTAMP
-	`, peer.Name, peer.RemoteURL, peer.Username, encryptedPwd, peer.Sovereignty)
-
-	if err != nil {
+	// Upsert the peer credentials and read the effective sovereignty tier
+	// back inside the same transaction (GH#5213: an omitted tier preserves
+	// the stored one; the shared issueops helper keeps embedded and server
+	// mode identical). The plain assignment to tier replays the whole body
+	// on a retried attempt, per withRetryTx's closure contract.
+	var tier string
+	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		tier, err = issueops.AddFederationPeerInTx(ctx, tx, peer, encryptedPwd)
+		return err
+	}); err != nil {
 		return fmt.Errorf("failed to add federation peer: %w", err)
 	}
 
@@ -336,6 +335,8 @@ func (s *DoltStore) addFederationPeer(ctx context.Context, peer *storage.Federat
 		return fmt.Errorf("failed to commit federation peer: %w", err)
 	}
 
+	// Only report the effective tier after the complete method succeeded.
+	peer.Sovereignty = tier
 	return nil
 }
 
