@@ -73,6 +73,14 @@ Dependencies have a type that determines whether they block work.
 | `validates` | Test or verification link |
 | `supersedes` | Replaced by a different issue (`bd supersede old --with new`) |
 
+Parent-child is structure, not a completion gate: a child of a blocked or
+deferred parent is held back, but a child of an open or in-progress parent
+is ready. A child also cannot depend on one of its own ancestors with an
+explicit edge — the parent cannot close until its children finish, so the
+gate would never clear — which is why `bd dep add child parent` is refused.
+To make a child wait for work that lives in its parent, see
+[Child Waits for Work in Its Parent](#child-waits-for-work-in-its-parent).
+
 Specify with `--type`:
 
 ```bash
@@ -356,6 +364,30 @@ bd dep add <test> <implement>
 bd dep tree <epic>
 bd ready                         # Only "Design" is ready
 ```
+
+### Child Waits for Work in Its Parent
+
+A child of an open or in-progress parent is ready: the hierarchy organizes
+work, it does not hold a child until its parent completes, and `bd dep add
+child parent` is refused because the parent cannot close until its children
+finish. When a child needs something that only arrives with the parent's
+work, track that work as a sibling issue and block on it — no status edit,
+and nothing to revert by hand when the work lands:
+
+```bash
+bd create "Parser refactor" -t epic
+bd create "Fix the call sites" --parent <parser-refactor>      # child C
+bd create "Parser file lands here" --parent <parser-refactor> # sibling S holds the awaited work
+bd dep add <fix-call-sites> <parser-file>                    # C leaves bd ready
+bd ready                                                     # C not listed
+# ... the sibling closes when the awaited work lands ...
+bd ready                                                     # C is back
+```
+
+To wait for a merge instead, use the [PR Merge Gate](#pr-merge-gate-common)
+recipe above. This replaces setting the child to `status=blocked` by hand,
+which removes it from `bd ready` but is a status lie that must be reverted
+manually when the parent lands.
 
 ## See Also
 

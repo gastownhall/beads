@@ -87,7 +87,9 @@ bd ready
 
 ### Structural Relationships
 
-These don't affect the ready queue:
+Parent-child organizes work; it holds a child back only while the parent
+itself is blocked or deferred. An open or in-progress parent does not keep
+its children out of the ready queue:
 
 ```bash
 # Parent-child (epic subtasks)
@@ -101,12 +103,19 @@ bd create "Found bug" --deps discovered-from:bd-42
 bd dep relate bd-1 bd-2
 ```
 
+To make a child wait for work that lives in its parent, track that work in
+a sibling issue and block on that — see
+[Child Waits for Work in Its Parent](/core-concepts/dependencies#child-waits-for-work-in-its-parent).
+A child also cannot depend on one of its own ancestors with an explicit
+edge: the parent cannot close until its children finish, so the gate would
+never clear, and `bd dep add` refuses it.
+
 ### Dependency Types
 
 | Type | Description | Ready Queue Impact |
 |------|-------------|-------------------|
 | `blocks` | Hard dependency | Yes - blocked items not ready |
-| `parent-child` | Epic/subtask hierarchy | No |
+| `parent-child` | Epic/subtask hierarchy | Indirectly - a blocked or deferred parent holds its children; an open or in-progress parent does not |
 | `discovered-from` | Tracks origin of discovery | No |
 | `related` | Soft relationship | No |
 
