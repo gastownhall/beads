@@ -32,13 +32,18 @@ func TestShouldFlagTrackedFile_RuntimeArtifacts(t *testing.T) {
 		{"sync-state.json", true},
 		{"daemon.pid", true},
 		{"bd.lock", true},
-		{"dolt-server-config.yaml", true}, // GH#6191: absolute cfg_dir + per-machine port
-		{"dolt-server.activity", true},    // GH#6191
+		{"dolt-server-config.yaml", true},   // GH#6191: absolute cfg_dir + per-machine port
+		{"dolt-server.activity", true},      // GH#6191
+		{"dolt-backup.json", true},          // GH#8318: absolute file:// backup URL
+		{"dolt-backup-state.json", true},    // GH#8318
+		{"dolt-config.log", true},           // GH#8318: records the absolute .beads path
+		{".auto-import-issues.jsonl", true}, // GH#8318
 		{"dolt/noms/manifest", true},
 		{"issues.jsonl", false},
 		{"config.json", false},
 		{"config.yaml", false},   // user config, tracked on purpose
 		{"sub/last_pull", false}, // patterns apply to top-level .beads/ files only
+		{"sub/dolt-config.log", false},
 	}
 	for _, tc := range cases {
 		if got := shouldFlagTrackedFile(tc.rel); got != tc.flag {
@@ -124,5 +129,73 @@ func TestFixTrackedRuntimeFiles_WorktreeFallbackUsesSharedBeads(t *testing.T) {
 
 	if _, err := os.Stat(lastTouched); err != nil {
 		t.Fatalf("expected runtime file to remain on disk after git rm --cached: %v", err)
+	}
+}
+
+// TestCheckTrackedRuntimeFiles_FlagsCommittedBackupConfig covers GH#8318
+// for clones that already committed bd backup's per-machine config: the
+// gitignore cannot untrack it, so doctor must flag it and --fix must untrack
+// it while keeping the local copy.
+func TestCheckTrackedRuntimeFiles_FlagsCommittedBackupConfig(t *testing.T) {
+	repoDir := t.TempDir()
+	initCmd := gitCommand("init")
+	initCmd.Dir = repoDir
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init failed: %v\n%s", err, out)
+	}
+	for _, kv := range [][2]string{{"user.email", "test@example.com"}, {"user.name", "Test"}} {
+		cfg := gitCommand("config", kv[0], kv[1])
+		cfg.Dir = repoDir
+		if out, err := cfg.CombinedOutput(); err != nil {
+			t.Fatalf("git config %s failed: %v\n%s", kv[0], err, out)
+		}
+	}
+	disableGlobalGitIgnore(t, repoDir)
+
+	beadsDir := filepath.Join(repoDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("failed to create .beads dir: %v", err)
+	}
+	backupConfig := filepath.Join(beadsDir, "dolt-backup.json")
+	if err := os.WriteFile(backupConfig, []byte(`{"url":"file:///home/someone/backups/beads"}`), 0o644); err != nil {
+		t.Fatalf("failed to write dolt-backup.json: %v", err)
+	}
+
+	add := gitCommand("add", "-f", ".beads/dolt-backup.json")
+	add.Dir = repoDir
+	if out, err := add.CombinedOutput(); err != nil {
+		t.Fatalf("git add failed: %v\n%s", err, out)
+	}
+	commit := gitCommand("commit", "-m", "Track backup config for test")
+	commit.Dir = repoDir
+	if out, err := commit.CombinedOutput(); err != nil {
+		t.Fatalf("git commit failed: %v\n%s", err, out)
+	}
+
+	clearResolveBeadsDirCache()
+
+	check := CheckTrackedRuntimeFiles(repoDir)
+	if check.Status != "warning" {
+		t.Fatalf("expected warning status, got %s: %s (%s)", check.Status, check.Message, check.Detail)
+	}
+	if !contains(check.Detail, ".beads/dolt-backup.json") {
+		t.Fatalf("expected detail to name .beads/dolt-backup.json, got: %s", check.Detail)
+	}
+
+	if err := FixTrackedRuntimeFiles(repoDir); err != nil {
+		t.Fatalf("FixTrackedRuntimeFiles() error = %v", err)
+	}
+
+	status := gitCommand("status", "--short", "--", ".beads/dolt-backup.json")
+	status.Dir = repoDir
+	out, err := status.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git status failed: %v\n%s", err, out)
+	}
+	if !contains(string(out), "D  .beads/dolt-backup.json") {
+		t.Fatalf("expected staged untrack of dolt-backup.json, got:\n%s", out)
+	}
+	if _, err := os.Stat(backupConfig); err != nil {
+		t.Fatalf("expected dolt-backup.json to remain on disk after git rm --cached: %v", err)
 	}
 }
