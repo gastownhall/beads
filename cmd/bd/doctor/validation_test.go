@@ -996,3 +996,72 @@ func TestTruncateDetail_CutsOnARuneBoundary(t *testing.T) {
 		t.Errorf("short detail was rewritten: %q", got)
 	}
 }
+
+// TestCheckOrphanedDependenciesDB_CrossPrefixTargetIsNotOrphanRepro: a
+// cross-repository edge (target prefix differs from the source's and is not
+// held here) cannot be verified locally, so it must not be flagged (bd-zcpo44).
+func TestCheckOrphanedDependenciesDB_CrossPrefixTargetIsNotOrphanRepro(t *testing.T) {
+	store := newTestDoltStore(t, "test")
+	ctx := context.Background()
+
+	issue := &types.Issue{ID: "test-src", Title: "Source", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatalf("CreateIssue source: %v", err)
+	}
+	dep := &types.Dependency{
+		IssueID:     issue.ID,
+		DependsOnID: "other-xyz",
+		Type:        types.DepBlocks,
+		CreatedAt:   time.Now(),
+		CreatedBy:   "test",
+	}
+	if err := store.AddDependency(ctx, dep, "test"); err != nil {
+		t.Fatalf("AddDependency cross-prefix: %v", err)
+	}
+
+	check := checkOrphanedDependenciesDB(store.DB())
+	if check.Status != StatusOK {
+		t.Fatalf("Status = %q, want %q (cross-prefix target is not verifiable here); message=%q detail=%q",
+			check.Status, StatusOK, check.Message, check.Detail)
+	}
+}
+
+func createDepTestIssue(t *testing.T, store interface {
+	CreateIssue(context.Context, *types.Issue, string) error
+}, id string, ephemeral bool) {
+	t.Helper()
+	issue := &types.Issue{ID: id, Title: "Issue " + id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: ephemeral, CreatedAt: time.Now()}
+	if err := store.CreateIssue(context.Background(), issue, "test"); err != nil {
+		t.Fatalf("CreateIssue %s: %v", id, err)
+	}
+}
+
+func addDepTestEdge(t *testing.T, store interface {
+	AddDependency(context.Context, *types.Dependency, string) error
+}, source, target string, depType types.DependencyType) {
+	t.Helper()
+	dep := &types.Dependency{IssueID: source, DependsOnID: target, Type: depType, CreatedAt: time.Now(), CreatedBy: "test"}
+	if err := store.AddDependency(context.Background(), dep, "test"); err != nil {
+		t.Fatalf("AddDependency %s→%s: %v", source, target, err)
+	}
+}
+
+// TestCheckOrphanedDependenciesDB_CrossPrefixTargetIsNotOrphan: an edge bd dep
+// add stored to another repository's prefix is counted as not verifiable
+// here, not reported as an orphan (bd-zcpo44, AC-1).
+func TestCheckOrphanedDependenciesDB_CrossPrefixTargetIsNotOrphan(t *testing.T) {
+	store := newTestDoltStore(t, "bd")
+	createDepTestIssue(t, store, "bd-1", false)
+	addDepTestEdge(t, store, "bd-1", "gt-9", types.DepBlocks)
+
+	check := checkOrphanedDependenciesDB(store.DB())
+	if check.Status != StatusOK {
+		t.Fatalf("Status = %q, want %q; message=%q detail=%q", check.Status, StatusOK, check.Message, check.Detail)
+	}
+	if want := "No orphaned dependencies (1 cross-repository edge(s) not verifiable here)"; check.Message != want {
+		t.Fatalf("Message = %q, want %q", check.Message, want)
+	}
+	if check.Detail != "" || check.Fix != "" {
+		t.Fatalf("Detail = %q, Fix = %q, want both empty", check.Detail, check.Fix)
+	}
+}
