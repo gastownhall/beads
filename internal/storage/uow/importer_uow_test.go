@@ -488,6 +488,14 @@ func TestImporterUOWReplayReMintsUnsetIDs(t *testing.T) {
 		}
 		return n
 	}
+	queryString := func(t *testing.T, query string, args ...any) string {
+		t.Helper()
+		var s string
+		if err := kit.QueryScalar(ctx, query, args, &s); err != nil {
+			t.Fatalf("QueryScalar %q: %v", query, err)
+		}
+		return s
+	}
 	// counterFor reads a subtest counter's committed last_id — 0 when the
 	// row does not exist, the state a replay that upserted under the
 	// aborted mint leaves behind (its seed rolled back with attempt 1).
@@ -532,6 +540,18 @@ func TestImporterUOWReplayReMintsUnsetIDs(t *testing.T) {
 			Comments:     []*types.Comment{{ID: id + "-c1", Author: "importer-test", Text: "kept comment", CreatedAt: when}},
 			CreatedAt:    when, UpdatedAt: when,
 		}
+	}
+
+	seedCompetitor := func(t *testing.T, ctx context.Context, sub string) *types.Issue {
+		t.Helper()
+		competitor := &types.Issue{
+			Title: "concurrent competitor row", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2,
+			IDPrefix: sub,
+		}
+		if err := kit.CreateIssue(ctx, competitor, "competitor-writer"); err != nil {
+			t.Fatalf("the concurrent writer's create: %v", err)
+		}
+		return competitor
 	}
 
 	// runReplayedBatch imports the two rows through a provider whose first
@@ -603,4 +623,89 @@ func TestImporterUOWReplayReMintsUnsetIDs(t *testing.T) {
 		}
 	})
 
+	t.Run("competitor_stale_guard", func(t *testing.T) {
+		idless, kept := rowA("re-minted past a concurrent writer", "cg"), rowB("cg")
+		result, x := runReplayedBatch(t, idless, kept, func(ctx context.Context, minted string) {
+			competitor := seedCompetitor(t, ctx, "cg")
+			if competitor.ID != minted {
+				t.Fatalf("the competitor minted %q; want the rolled-back attempt's %q — the race did not reproduce", competitor.ID, minted)
+			}
+		}, false)
+
+		// AC-2: the other writer's row is untouched and the import re-minted
+		// past it under the stale guard.
+		if len(result.StaleRejectedIDs) != 0 || result.Created != 2 {
+			t.Errorf("result = Created %d, StaleRejectedIDs %v — want Created 2 with nothing rejected", result.Created, result.StaleRejectedIDs)
+		}
+		if idless.ID == "" || idless.ID == x {
+			t.Fatalf("the caller's struct id = %q, want a fresh re-mint other than the aborted %q", idless.ID, x)
+		}
+		if got := queryString(t, "SELECT title FROM issues WHERE id = ?", x); got != "concurrent competitor row" {
+			t.Errorf("the competitor's row at %s = %q, want its own title", x, got)
+		}
+		if got := queryInt(t, "SELECT COUNT(*) FROM issues WHERE id = ?", idless.ID); got != 1 {
+			t.Errorf("rows stored under the re-minted %s = %d, want 1", idless.ID, got)
+		}
+	})
+
+	t.Run("competitor_allow_stale", func(t *testing.T) {
+		// The stale guard is off; the replay still re-mints, so the import
+		// lands under its own id and the competitor keeps its columns.
+		// Before the fix the replay upserted under the aborted mint and
+		// overwrote the competitor's row wholesale.
+		idless, kept := rowA("allow-stale keeps the other writer's columns", "as"), rowB("as")
+		_, x := runReplayedBatch(t, idless, kept, func(ctx context.Context, minted string) {
+			competitor := seedCompetitor(t, ctx, "as")
+			if competitor.ID != minted {
+				t.Fatalf("the competitor minted %q; want the rolled-back attempt's %q — the race did not reproduce", competitor.ID, minted)
+			}
+		}, true)
+
+		if got := queryString(t, "SELECT title FROM issues WHERE id = ?", x); got != "concurrent competitor row" {
+			t.Errorf("the competitor's row at %s = %q, want its own title (--allow-stale must not overwrite another writer's row)", x, got)
+		}
+		if idless.ID == "" || idless.ID == x {
+			t.Fatalf("the caller's struct id = %q, want a fresh re-mint other than the aborted %q", idless.ID, x)
+		}
+		if got := queryInt(t, "SELECT COUNT(*) FROM issues WHERE id = ?", idless.ID); got != 1 {
+			t.Errorf("rows stored under the re-minted %s = %d, want 1", idless.ID, got)
+		}
+	})
+
+	t.Run("hash_mode_competitor", func(t *testing.T) {
+		// Default hash mode: the mint is content-derived, so the replay's
+		// first candidate IS the aborted attempt's id, now held by another
+		// writer. The replay must step to the next nonce instead of
+		// upserting under it.
+		if err := kit.SetConfig(ctx, "issue_id_mode", ""); err != nil {
+			t.Fatalf("switch to hash mode: %v", err)
+		}
+		t.Cleanup(func() {
+			if err := kit.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+				t.Errorf("restore counter mode: %v", err)
+			}
+		})
+		idless, kept := rowA("hash-mode replay steps to the next nonce", "hm"), rowB("hm")
+		_, x := runReplayedBatch(t, idless, kept, func(ctx context.Context, minted string) {
+			// The competitor takes the aborted mint's id explicitly: in
+			// hash mode an explicit id does not disturb the candidate
+			// ladder, and the deterministic candidate order is what the
+			// replay must walk past.
+			if err := kit.CreateIssue(ctx, &types.Issue{
+				ID: minted, Title: "hash competitor row", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2,
+			}, "competitor-writer"); err != nil {
+				t.Fatalf("seed the hash competitor at %s: %v", minted, err)
+			}
+		}, false)
+
+		if idless.ID == "" || idless.ID == x {
+			t.Fatalf("the caller's struct id = %q, want the next nonce candidate after the taken %q", idless.ID, x)
+		}
+		if got := queryString(t, "SELECT title FROM issues WHERE id = ?", x); got != "hash competitor row" {
+			t.Errorf("the competitor's row at %s = %q, want its own title", x, got)
+		}
+		if got := queryInt(t, "SELECT COUNT(*) FROM issues WHERE id = ?", idless.ID); got != 1 {
+			t.Errorf("rows stored under the re-minted %s = %d, want 1", idless.ID, got)
+		}
+	})
 }
