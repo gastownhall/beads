@@ -234,6 +234,26 @@ func TestParseUpdateKVs(t *testing.T) {
 			want: map[string]interface{}{"assignee": ""},
 		},
 		{
+			name: "assignee spaced dash kept verbatim",
+			in:   []string{"assignee= - "},
+			want: map[string]interface{}{"assignee": " - "},
+		},
+		{
+			name: "assignee names kept verbatim",
+			in:   []string{"assignee=a-b", "title=t"},
+			want: map[string]interface{}{"assignee": "a-b", "title": "t"},
+		},
+		{
+			name: "assignee double dash kept verbatim",
+			in:   []string{"assignee=--"},
+			want: map[string]interface{}{"assignee": "--"},
+		},
+		{
+			name: "assignee spaced name kept verbatim",
+			in:   []string{"assignee= alice "},
+			want: map[string]interface{}{"assignee": " alice "},
+		},
+		{
 			name:    "unsupported key",
 			in:      []string{"description=foo"},
 			wantErr: true,
