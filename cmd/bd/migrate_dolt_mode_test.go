@@ -918,6 +918,25 @@ func TestMigrateJournal_SaveRoundTrip(t *testing.T) {
 	require.False(t, entries[0].IsDir())
 }
 
+// TestMigrateJournal_Remove pins that removing the migration journal succeeds,
+// leaves the journal path absent and its directory in place, and that removing
+// an already-absent journal is a no-op. On native Windows an unconditional
+// directory Sync failed this removal after the journal was gone (GH#6882).
+func TestMigrateJournal_Remove(t *testing.T) {
+	beadsDir := t.TempDir()
+	path := migrateJournalPath(beadsDir)
+	// Seed directly so removal exercises its own directory flush independently
+	// of saveMigrateJournal.
+	require.NoError(t, os.WriteFile(path, []byte("{}"), 0o600))
+	require.NoError(t, removeMigrateJournal(beadsDir))
+	_, err := os.Stat(path)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	require.NoError(t, removeMigrateJournal(beadsDir), "missing journal is a no-op")
+	info, err := os.Stat(beadsDir)
+	require.NoError(t, err)
+	require.True(t, info.IsDir())
+}
+
 func TestMigrateJournal_UnknownPhaseFailsClosed(t *testing.T) {
 	beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
 	path := migrateJournalPath(beadsDir)
