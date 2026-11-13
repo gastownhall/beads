@@ -625,12 +625,30 @@ func handleSchemaMigrate() error {
 		return HandleError("current storage backend does not support schema migration")
 	}
 
-	applied, err := migrator.ApplySchemaMigrations(rootCtx)
+	// Explicit `bd migrate schema` also repairs recorded migration
+	// post-conditions when the backend can (GH#5269); ordinary opens never do.
+	var applied int
+	var repaired []string
+	var err error
+	if repairer, canRepair := storage.UnwrapStore(store).(storage.SchemaPostConditionRepairer); canRepair {
+		applied, repaired, err = repairer.ApplySchemaMigrationsAndRepair(rootCtx)
+	} else {
+		applied, err = migrator.ApplySchemaMigrations(rootCtx)
+	}
+	if repaired == nil {
+		repaired = []string{}
+	}
 	if err != nil {
+		if applied > 0 || len(repaired) > 0 {
+			// Part of the work landed before the failure; the command wrote.
+			commandDidWrite.Store(true)
+		}
 		if jsonOutput {
 			if jerr := outputJSON(map[string]interface{}{
-				"error":   "schema_migration_failed",
-				"message": err.Error(),
+				"error":    "schema_migration_failed",
+				"message":  err.Error(),
+				"applied":  applied,
+				"repaired": repaired,
 			}); jerr != nil {
 				return jerr
 			}
@@ -654,6 +672,10 @@ func handleSchemaMigrate() error {
 
 	latest := schema.LatestVersion()
 	status := "current"
+	if len(repaired) > 0 {
+		status = "repaired"
+		commandDidWrite.Store(true)
+	}
 	if applied > 0 {
 		status = "applied"
 		commandDidWrite.Store(true)
@@ -671,15 +693,20 @@ func handleSchemaMigrate() error {
 		return outputJSON(map[string]interface{}{
 			"status":         status,
 			"applied":        applied,
+			"repaired":       repaired,
 			"latest_version": latest,
 		})
 	}
 
-	if applied == 0 {
+	switch {
+	case applied > 0:
+		fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Applied %d schema migration(s); schema now at v%d", applied, latest)))
+	case len(repaired) == 0:
 		fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Schema already at v%d", latest)))
-		return nil
 	}
-	fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Applied %d schema migration(s); schema now at v%d", applied, latest)))
+	if len(repaired) > 0 {
+		fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Repaired %d recorded migration post-condition(s): %s", len(repaired), strings.Join(repaired, ", "))))
+	}
 	return nil
 }
 
@@ -887,8 +914,14 @@ remote-migrate gate still applies: --force confirms you are the single
 designated migrator. Migrating is one-way: bd releases built for an older
 schema refuse the migrated database.
 
-On an up-to-date database this is a no-op, so it is safe to run in CI,
-release gates, and recovery scenarios.
+It also repairs recorded migration post-conditions: a column default that a
+recorded migration drops but that is still in place (GH#5269) is dropped and
+the change committed on its own. It refuses, before changing anything, if a
+table it would repair holds uncommitted changes. Ordinary commands never do
+this repair; ` + "`bd doctor`" + ` reports when it is needed.
+
+On an up-to-date, healthy database this is a no-op, so it is safe to run in
+CI, release gates, and recovery scenarios.
 
 Example:
   bd migrate schema

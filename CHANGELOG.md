@@ -1447,10 +1447,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   column through a guarded statement. If that statement returned no error
   but left the default in place, the version was recorded anyway, every
   later `bd migrate` skipped the migration, and an insert that omits `id`
-  still got a clone-random id instead of failing. The migration now fails
-  with an error that names the column and the `ALTER` to run, records
-  nothing, and runs again on the next pass. A store that already carries
-  such a version is not repaired by this change.
+  still got a clone-random id instead of failing. Before recording the
+  version, the migration now drops a default it left in place directly,
+  checks it is gone, and commits that change with the version. If that
+  cannot be confirmed for any column, it fails with an error naming every
+  such column, records nothing, and runs again on the next pass. A store that
+  already carries such a version is repaired by an explicit
+  `bd migrate schema`: it drops each such default, commits the tracked tables
+  on their own (ignored tables such as `events` and the wisp tables are
+  changed but not committed), reports the columns in its text and JSON
+  (`repaired`) output, and refuses before changing anything if a table it
+  would repair has uncommitted changes. Ordinary commands do not repair.
 - **bd again reads `GT_ROOT` from a rig's `.beads/.env`** (#8117; also
   shipped in 1.3.4). `gc rig add` writes the city root there, and the
   `.beads/.env` allowlist from #7879 (also in 1.3.3) dropped it, printing
