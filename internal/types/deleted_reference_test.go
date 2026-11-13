@@ -1,6 +1,9 @@
 package types
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // deletedReferenceCase is one input to the citation rule and the exact bytes
 // RewriteDeletedReferences must return.
@@ -81,4 +84,54 @@ func TestCitesIDAgreesWithRewrite(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRewriteDeletedReferencesIsOrderIndependent runs the rewrite once per
+// deleted id, the way both delete bodies do, in every order of the ids. A
+// cascade hands the ids ancestor first and a request may name them in any
+// order, so the result must not depend on it.
+func TestRewriteDeletedReferencesIsOrderIndependent(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+		ids  []string
+		want string
+	}{
+		{
+			name: "child and grandchild",
+			text: "step fx-k0008.1.2 failed; parent fx-k0008.1 is gone",
+			ids:  []string{"fx-k0008.1", "fx-k0008.1.2"},
+			want: "step [deleted:fx-k0008.1.2] failed; parent [deleted:fx-k0008.1] is gone",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, order := range permutations(tc.ids) {
+				text := tc.text
+				for _, id := range order {
+					text, _ = RewriteDeletedReferences(text, id)
+				}
+				if text != tc.want {
+					t.Errorf("rewrite in order [%s] = %q, want %q", strings.Join(order, " "), text, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// permutations returns every ordering of ids.
+func permutations(ids []string) [][]string {
+	if len(ids) <= 1 {
+		return [][]string{append([]string(nil), ids...)}
+	}
+	var out [][]string
+	for i := range ids {
+		rest := make([]string, 0, len(ids)-1)
+		rest = append(rest, ids[:i]...)
+		rest = append(rest, ids[i+1:]...)
+		for _, tail := range permutations(rest) {
+			out = append(out, append([]string{ids[i]}, tail...))
+		}
+	}
+	return out
 }
