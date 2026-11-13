@@ -136,4 +136,51 @@ func TestEmbeddedAssigneeHiddenEmptyClears(t *testing.T) {
 			}
 		}
 	})
+
+	// AC-4: the bd-98s5c live-claim fence treats a hidden-empty clear exactly
+	// like an explicit clear: refused without --force (claim preserved,
+	// exit 1), applied with it.
+	t.Run("live_claim_fence_on_hidden_empty_clear", func(t *testing.T) {
+		t.Parallel()
+		claimAs := func(t *testing.T, title string) *types.Issue {
+			t.Helper()
+			issue := bdCreate(t, bd, dir, title, "--type", "task")
+			bdUpdate(t, bd, dir, issue.ID, "--actor", "holder", "--assignee", "holder", "--status", "in_progress")
+			return issue
+		}
+
+		t.Run("update_refused_then_force_clears", func(t *testing.T) {
+			t.Parallel()
+			issue := claimAs(t, "Fence update dash")
+			out, code := bdUpdateFailCode(t, bd, dir, issue.ID, "--actor", "thief", "--assignee", "-")
+			if code != 1 {
+				t.Errorf("fence refusal exit code = %d, want 1:\n%s", code, out)
+			}
+			if got := bdShow(t, bd, dir, issue.ID); got.Assignee != "holder" || got.Status != types.StatusInProgress {
+				t.Errorf("refused hidden-empty clear clobbered the row: assignee=%q status=%s", got.Assignee, got.Status)
+			}
+
+			bdUpdate(t, bd, dir, issue.ID, "--actor", "thief", "--assignee", "-", "--force")
+			if got := bdShow(t, bd, dir, issue.ID); got.Assignee != "" {
+				t.Errorf("--force hidden-empty clear left assignee %q, want cleared", got.Assignee)
+			}
+		})
+
+		t.Run("assign_refused_then_force_clears", func(t *testing.T) {
+			t.Parallel()
+			issue := claimAs(t, "Fence assign space")
+			out, code := bdRunFailCode(t, bd, dir, "assign", issue.ID, " ", "--actor", "thief")
+			if code != 1 {
+				t.Errorf("assign fence exit code = %d, want 1:\n%s", code, out)
+			}
+			if got := bdShow(t, bd, dir, issue.ID).Assignee; got != "holder" {
+				t.Errorf("refused hidden-empty assign clobbered the row: assignee=%q", got)
+			}
+
+			bdRunOK(t, bd, dir, "assign", issue.ID, " ", "--actor", "thief", "--force")
+			if got := bdShow(t, bd, dir, issue.ID); got.Assignee != "" {
+				t.Errorf("--force hidden-empty assign left assignee %q, want cleared", got.Assignee)
+			}
+		})
+	})
 }

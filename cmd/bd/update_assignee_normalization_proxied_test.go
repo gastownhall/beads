@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // bdProxiedRunStdin runs bd in a proxied-server workspace with the given
@@ -107,5 +109,54 @@ func TestProxiedServerAssigneeHiddenEmptyClears(t *testing.T) {
 				t.Errorf("token %s: proxied batch stored assignee %q, want cleared", token, got)
 			}
 		}
+	})
+
+	// AC-4: the live-claim fence treats a hidden-empty clear like an
+	// explicit one: refused without --force, applied with it.
+	t.Run("live_claim_fence_on_hidden_empty_clear", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "anf")
+		claimAs := func(t *testing.T, title string) *types.Issue {
+			t.Helper()
+			issue := bdProxiedCreate(t, bd, p.dir, title)
+			bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--actor", "holder", "--assignee", "holder", "--status", "in_progress")
+			return issue
+		}
+
+		t.Run("update_refused_then_force_clears", func(t *testing.T) {
+			t.Parallel()
+			issue := claimAs(t, "Proxied fence update")
+			out, code := bdProxiedUpdateFailCode(t, bd, p.dir, issue.ID, "--actor", "thief", "--assignee", "-")
+			if code != 1 {
+				t.Errorf("fence refusal exit code = %d, want 1:\n%s", code, out)
+			}
+			if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Assignee != "holder" || got.Status != types.StatusInProgress {
+				t.Errorf("refused hidden-empty clear clobbered the row: assignee=%q status=%s", got.Assignee, got.Status)
+			}
+
+			bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--actor", "thief", "--assignee", "-", "--force")
+			if got := bdProxiedShow(t, bd, p.dir, issue.ID).Assignee; got != "" {
+				t.Errorf("--force hidden-empty clear left assignee %q, want cleared", got)
+			}
+		})
+
+		t.Run("assign_refused_then_force_clears", func(t *testing.T) {
+			t.Parallel()
+			issue := claimAs(t, "Proxied fence assign")
+			out, err := bdProxiedRun(t, bd, p.dir, "assign", issue.ID, " ", "--actor", "thief")
+			if err == nil {
+				t.Fatalf("proxied hidden-empty assign over a live foreign claim should fail, got:\n%s", out)
+			}
+			if got := bdProxiedShow(t, bd, p.dir, issue.ID).Assignee; got != "holder" {
+				t.Errorf("refused hidden-empty assign clobbered the row: assignee=%q", got)
+			}
+
+			if out, err := bdProxiedRun(t, bd, p.dir, "assign", issue.ID, " ", "--actor", "thief", "--force"); err != nil {
+				t.Fatalf("proxied assign --force failed: %v\n%s", err, out)
+			}
+			if got := bdProxiedShow(t, bd, p.dir, issue.ID).Assignee; got != "" {
+				t.Errorf("--force hidden-empty assign left assignee %q, want cleared", got)
+			}
+		})
 	})
 }
