@@ -31,6 +31,7 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("CounterModeFreeNextValueStaysSequential", s.useCaseMintCounterFreeNextValueStaysSequential)
 	s.Run("CounterModeCrossesAHeldRunLongerThanTheSkipBound", s.useCaseMintCounterCrossesLongHeldRun)
 	s.Run("MintedIDTakesTheCreateOnlyGuard", s.useCaseMintedIDTakesTheCreateOnlyGuard)
+	s.Run("ExplicitIDWithoutCreateOnlyStillUpserts", s.useCaseExplicitIDWithoutCreateOnlyStillUpserts)
 }
 
 func (s *testSuite) issueUseCase() domain.IssueUseCase {
@@ -1122,4 +1123,48 @@ func (s *testSuite) useCaseMintedIDTakesTheCreateOnlyGuard() {
 				"minted %s must rewrite its shard's coordination cell (strict create), not upsert unguarded", res.Issue.ID)
 		})
 	}
+}
+
+// useCaseExplicitIDWithoutCreateOnlyStillUpserts pins bd-wnp679 AC-5: forcing
+// create-only applies to MINTED ids alone. A caller-named id (ExplicitID or a
+// prepopulated Issue.ID) with CreateOnly unset keeps the upsert import relies
+// on, and a caller-selected CreateOnly still refuses the occupied id.
+func (s *testSuite) useCaseExplicitIDWithoutCreateOnlyStillUpserts() {
+	s.resetMintConfig("upx", "counter")
+	uc := s.issueUseCase()
+	for _, tc := range []struct {
+		name   string
+		params func(title string) domain.CreateIssueParams
+	}{
+		{name: "ExplicitID", params: func(title string) domain.CreateIssueParams {
+			return domain.CreateIssueParams{
+				ExplicitID: "upx-7",
+				Issue:      &types.Issue{Title: title, IssueType: types.TypeTask, Priority: 2},
+			}
+		}},
+		{name: "PrepopulatedIssueID", params: func(title string) domain.CreateIssueParams {
+			return domain.CreateIssueParams{
+				Issue: &types.Issue{ID: "upx-8", Title: title, IssueType: types.TypeTask, Priority: 2},
+			}
+		}},
+	} {
+		s.Run(tc.name, func() {
+			first, err := uc.CreateIssue(s.Ctx(), tc.params("original"), "tester")
+			s.Require().NoError(err)
+			id := first.Issue.ID
+
+			again, err := uc.CreateIssue(s.Ctx(), tc.params("re-imported"), "tester")
+			s.Require().NoError(err, "explicit re-create without CreateOnly must upsert")
+			s.Equal(id, again.Issue.ID)
+			s.Equal(map[string]string{"issues": "re-imported"}, s.planeTitles(id))
+
+			strict := tc.params("refused")
+			strict.CreateOnly = true
+			_, err = uc.CreateIssue(s.Ctx(), strict, "tester")
+			s.Require().ErrorIs(err, storage.ErrAlreadyExists)
+			s.Equal(map[string]string{"issues": "re-imported"}, s.planeTitles(id))
+		})
+	}
+	_, ok := s.counterRow("upx")
+	s.False(ok, "explicit creates must not touch the counter")
 }
