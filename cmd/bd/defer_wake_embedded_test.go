@@ -268,4 +268,36 @@ func TestEmbeddedDeferAutoWake(t *testing.T) {
 		// the sweep ran.
 		assertDeferUnchanged(t, bd, dir, wisp.ID, wispDeferUntil)
 	})
+
+	// GH#7634: the freeze only postpones the sweep. Once the marker is gone,
+	// the next bd ready wakes what the frozen read left deferred and records
+	// the normal wake commit.
+	t.Run("thawed_ready_wakes_after_freeze", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Expired snooze across a thaw", "--type", "task")
+		bdDefer(t, bd, dir, issue.ID, "--until", "2020-01-01")
+		_ = wakeReadyIDsWithEnv(t, bd, dir, frozenEnv)
+
+		thawed := readEmbeddedDoltHistory(t, beadsDir)
+		ids := wakeReadyIDs(t, bd, dir)
+		after := readEmbeddedDoltHistory(t, beadsDir)
+
+		if !ids[issue.ID] {
+			t.Errorf("expected %s in bd ready once the freeze lifted", issue.ID)
+		}
+		status, deferUntil := showDeferState(t, bd, dir, issue.ID)
+		if status != "open" {
+			t.Errorf("expected status=open after the thawed wake, got %q", status)
+		}
+		if deferUntil != nil {
+			t.Errorf("expected defer_until cleared after the thawed wake, got %v", deferUntil)
+		}
+		if after.count != thawed.count+1 || after.head == thawed.head {
+			t.Errorf("thawed bd ready: commits %d -> %d, HEAD %s -> %s; want exactly one new wake commit",
+				thawed.count, after.count, thawed.head, after.head)
+		}
+		if !strings.HasPrefix(after.message, "bd: wake ") || !strings.HasSuffix(after.message, " expired defer(s)") {
+			t.Errorf("HEAD message after the thawed wake = %q, want the normal wake commit (%q)",
+				after.message, "bd: wake N expired defer(s)")
+		}
+	})
 }

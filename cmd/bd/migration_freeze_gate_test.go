@@ -1249,4 +1249,23 @@ func TestDeferWakeSweepSkippedDuringMigrationFreeze(t *testing.T) {
 	if deferAfter == nil || *deferAfter != *deferBefore {
 		t.Errorf("defer_until changed under the freeze: was %q, now %v", *deferBefore, deferAfter)
 	}
+
+	// Thaw and confirm the sweep resumes normally — a guard that simply never
+	// wakes anything would also pass the assertions above, for the wrong
+	// reason. The walk stays enabled, so this read sees only the absence of
+	// the marker.
+	if err := os.Remove(filepath.Join(dir, migration.FileName)); err != nil {
+		t.Fatalf("removing freeze marker: %v", err)
+	}
+	stdout, stderr, code = runBDFrozen(t, bd, dir, "ready", "--json")
+	if code != 0 {
+		t.Fatalf("bd ready failed after thaw (exit %d):\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if !freezeReadyIDs(t, stdout)[issue.ID] {
+		t.Errorf("expired defer %s missing from bd ready after thaw: the sweep never ran even unfrozen", issue.ID)
+	}
+	status, deferAfter = freezeShowDefer(t, runBDFrozen, bd, dir, issue.ID)
+	if status != "open" || deferAfter != nil {
+		t.Errorf("after thaw + bd ready: status=%q defer_until=%v, want open with defer_until cleared", status, deferAfter)
+	}
 }
