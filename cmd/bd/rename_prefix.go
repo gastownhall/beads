@@ -43,7 +43,11 @@ Prefix validation rules:
 Multiple prefix detection and repair:
 If issues have multiple prefixes (corrupted database), use --repair to consolidate them.
 The --repair flag will rename all issues with incorrect prefixes to the new prefix,
-preserving issues that already have the correct prefix.
+preserving issues that already have the correct prefix. Each renamed issue keeps
+its suffix (taxdb-u6ch -> mtg-u6ch, cre-db-c2a.3 -> mtg-c2a.3); source IDs are
+split by issue_prefix, allowed_prefixes and the prefixes found on the rows. When
+a family's root is already live, claimed by another family or retired, the whole
+family moves to one new hash root (mtg-<8 hex>) and the move is reported.
 
 Changing the prefix for new issues only:
 --mint-only makes new issues use the new prefix and leaves every existing ID
