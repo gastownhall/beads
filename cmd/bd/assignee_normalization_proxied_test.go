@@ -40,6 +40,12 @@ func TestProxiedServerAssigneeHiddenEmptyClears(t *testing.T) {
 		t.Helper()
 		return bdProxiedCreate(t, bd, p.dir, title, "--assignee", "holder")
 	}
+	claimAs := func(t *testing.T, p proxiedProject, holder string) *types.Issue {
+		t.Helper()
+		issue := bdProxiedCreate(t, bd, p.dir, "Held via proxy")
+		bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--actor", holder, "--assignee", holder, "--status", "in_progress")
+		return issue
+	}
 
 	t.Run("AC1_update_clears_like_explicit_empty", func(t *testing.T) {
 		t.Parallel()
@@ -91,6 +97,45 @@ func TestProxiedServerAssigneeHiddenEmptyClears(t *testing.T) {
 			bdProxiedBatchOK(t, bd, p.dir, "update "+issue.ID+" "+kv+"\n")
 			if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Assignee != "" {
 				t.Errorf("batch update %s: assignee=%q, want cleared", kv, got.Assignee)
+			}
+		}
+	})
+
+	t.Run("AC4_live_claim_fence_holds_then_force_clears", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "hpd")
+		baseline := claimAs(t, p, "holder")
+		bdProxiedUpdateOne(t, bd, p.dir, baseline.ID, "--actor", "thief", "--assignee", "", "--force")
+		want := bdProxiedShow(t, bd, p.dir, baseline.ID)
+		if want.Assignee != "" {
+			t.Fatalf("explicit-empty --force baseline: assignee=%q, want cleared", want.Assignee)
+		}
+
+		for _, value := range []string{"-", " "} {
+			issue := claimAs(t, p, "holder")
+			if out, code := bdProxiedUpdateFailCode(t, bd, p.dir, issue.ID, "--actor", "thief", "--assignee", value); code != 1 || !strings.Contains(out, "holder") {
+				t.Errorf("update --assignee %q over a live claim: exit=%d, want 1 naming the holder\n%s", value, code, out)
+			}
+			if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Assignee != "holder" || got.Status != types.StatusInProgress {
+				t.Errorf("refused update --assignee %q clobbered the claim: assignee=%q status=%s", value, got.Assignee, got.Status)
+			}
+			bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--actor", "thief", "--assignee", value, "--force")
+			if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Assignee != want.Assignee || got.Status != want.Status {
+				t.Errorf("update --assignee %q --force: assignee=%q status=%s, want %q/%s like --assignee ''", value, got.Assignee, got.Status, want.Assignee, want.Status)
+			}
+
+			issue = claimAs(t, p, "holder")
+			if out, err := bdProxiedRun(t, bd, p.dir, "assign", issue.ID, value, "--actor", "thief"); err == nil || !strings.Contains(string(out), "holder") {
+				t.Errorf("assign %q over a live claim: err=%v, want a refusal naming the holder\n%s", value, err, out)
+			}
+			if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Assignee != "holder" {
+				t.Errorf("refused assign %q clobbered the claim: assignee=%q", value, got.Assignee)
+			}
+			if out, err := bdProxiedRun(t, bd, p.dir, "assign", issue.ID, value, "--actor", "thief", "--force"); err != nil {
+				t.Fatalf("assign %q --force failed: %v\n%s", value, err, out)
+			}
+			if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Assignee != want.Assignee || got.Status != want.Status {
+				t.Errorf("assign %q --force: assignee=%q status=%s, want %q/%s like --assignee ''", value, got.Assignee, got.Status, want.Assignee, want.Status)
 			}
 		}
 	})
