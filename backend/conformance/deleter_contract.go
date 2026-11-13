@@ -905,7 +905,7 @@ func RunDeleterRewritesOnlyTheDeletedIDInAHierarchy(t *testing.T, ctx context.Co
 		deleterSeed(t, ctx, fixture, blocker)
 		deleterAddEdge(t, ctx, fixture, h.grandchild, blocker.ID)
 
-		deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
+		result := deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
 			IDs:     []string{h.root},
 			Cascade: true,
 			Actor:   "deleter-contract",
@@ -915,6 +915,9 @@ func RunDeleterRewritesOnlyTheDeletedIDInAHierarchy(t *testing.T, ctx context.Co
 		want := "unblocks [deleted:" + h.grandchild + "] when done"
 		if got := deleterText(t, ctx, fixture, blocker.ID, "description"); got != want {
 			t.Errorf("blocker description = %q, want %q", got, want)
+		}
+		if result.ReferencesUpdated != 1 {
+			t.Errorf("ReferencesUpdated = %d, want 1 — the blocker is the one surviving row with text to change", result.ReferencesUpdated)
 		}
 	})
 
