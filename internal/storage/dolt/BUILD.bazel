@@ -388,6 +388,7 @@ go_test(
         "transaction_borrow_test.go",
         "transaction_ignored_checkout_test.go",
         "transaction_phase_test.go",
+        "transaction_single_session_test.go",
         "transaction_test.go",
         "transaction_wisp_lifecycle_persistence_test.go",
         "tree_walker_contract_test.go",
