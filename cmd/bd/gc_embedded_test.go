@@ -57,8 +57,8 @@ func TestEmbeddedGCDryRunAndSkips(t *testing.T) {
 
 	t.Run("gc_dry_run", func(t *testing.T) {
 		out := bdGC(t, bd, dir, "--dry-run")
-		if !strings.Contains(out, "Phase 1/3") {
-			t.Errorf("expected 'Phase 1/3' in dry-run output: %s", out)
+		if !strings.Contains(out, "Phase 1/4") {
+			t.Errorf("expected 'Phase 1/4' in dry-run output: %s", out)
 		}
 		if !strings.Contains(out, "DRY RUN") {
 			t.Errorf("expected 'DRY RUN' in output: %s", out)
@@ -93,7 +93,7 @@ func TestEmbeddedGCDryRunAndSkips(t *testing.T) {
 	t.Run("gc_older_than", func(t *testing.T) {
 		out := bdGC(t, bd, dir, "--dry-run", "--older-than", "0")
 		// With --older-than 0, all closed issues would be candidates
-		if !strings.Contains(out, "Phase 1/3") {
+		if !strings.Contains(out, "Phase 1/4") {
 			t.Errorf("expected phase output: %s", out)
 		}
 	})
