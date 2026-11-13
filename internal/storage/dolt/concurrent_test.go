@@ -27,9 +27,7 @@ func realDoltTestServerRequired() bool {
 // The rejected merge must leave the working set clean before a fresh replay
 // converges on its intended state.
 func TestDoltAutocommitRollbackContentionConverges(t *testing.T) {
-	if testServerPort == 0 && realDoltTestServerRequired() {
-		t.Fatal("real Dolt contention test required but the test server did not start")
-	}
+	requireDoltTestServer(t)
 	const issueID = "autocommit-rollback-contention"
 	store, peerBranch := setupIssueMergeConflict(t, issueID,
 		"base", "2026-08-04 14:00:00",
