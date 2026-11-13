@@ -797,6 +797,10 @@ func TestSetupClaudeSettings_NoExistingFile(t *testing.T) {
 	if !strings.Contains(string(content), "bd prime") {
 		t.Error("File should contain bd prime prompt")
 	}
+	// GH#6185: the written JSON keeps a trailing newline.
+	if !strings.HasSuffix(string(content), "\n") {
+		t.Errorf("settings.local.json must end in a newline, got %q", content)
+	}
 }
 
 // TestInitPromptRoleConfig tests the beads.role git config read/write functions
