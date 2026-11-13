@@ -444,3 +444,71 @@ func TestUpdateClearFlagsConflictWithContentFlagsGH8149(t *testing.T) {
 		})
 	}
 }
+
+// TestGatherUpdateInputEmptyExternalDescriptionGH8149: empty description input
+// from stdin or a file keeps its --allow-empty-description opt-in on update;
+// without it the refusal names the opt-in and --clear-description, and no
+// longer recommends the inline empty value that is now refused.
+func TestGatherUpdateInputEmptyExternalDescriptionGH8149(t *testing.T) {
+	emptyFile := writeEmptyFile(t)
+	inputs := []struct {
+		name  string
+		args  []string
+		stdin bool
+	}{
+		{"stdin", []string{"--stdin"}, true},
+		{"description_dash", []string{"--description", "-"}, true},
+		{"body_dash", []string{"--body", "-"}, true},
+		{"message_dash", []string{"--message", "-"}, true},
+		{"body_file_stdin", []string{"--body-file", "-"}, true},
+		{"body_file", []string{"--body-file", emptyFile}, false},
+		{"description_file", []string{"--description-file", emptyFile}, false},
+	}
+	for _, tc := range inputs {
+		run := func(t *testing.T, args []string, fn func(*updateInput, error, string)) {
+			if tc.stdin {
+				withTestStdin(t, "", func() { fn(gatherUpdateInputFor(t, args...)) })
+				return
+			}
+			fn(gatherUpdateInputFor(t, args...))
+		}
+		t.Run(tc.name+"_refused", func(t *testing.T) {
+			run(t, tc.args, func(in *updateInput, err error, stderr string) {
+				if err == nil {
+					t.Fatalf("%v: expected refusal, got fields %#v", tc.args, in.fields)
+				}
+				for _, want := range []string{"--allow-empty-description", "--clear-description"} {
+					if !strings.Contains(stderr, want) {
+						t.Errorf("%v: expected refusal naming %s, got: %q", tc.args, want, stderr)
+					}
+				}
+				if strings.Contains(stderr, `--description ""`) {
+					t.Errorf("%v: refusal still recommends the refused inline empty value: %q", tc.args, stderr)
+				}
+			})
+		})
+		t.Run(tc.name+"_opt_in", func(t *testing.T) {
+			args := append(append([]string(nil), tc.args...), "--allow-empty-description")
+			run(t, args, func(in *updateInput, err error, stderr string) {
+				if err != nil {
+					t.Fatalf("%v: unexpected refusal: %v %s", args, err, stderr)
+				}
+				if got, ok := in.fields["description"]; !ok || got != "" {
+					t.Fatalf("%v: fields[description] = %#v (present=%v), want empty", args, got, ok)
+				}
+			})
+		})
+	}
+
+	t.Run("nonempty_stdin", func(t *testing.T) {
+		withTestStdin(t, "from stdin\n", func() {
+			in, err, stderr := gatherUpdateInputFor(t, "--stdin")
+			if err != nil {
+				t.Fatalf("unexpected refusal: %v %s", err, stderr)
+			}
+			if got := in.fields["description"]; got != "from stdin\n" {
+				t.Fatalf("fields[description] = %#v, want stdin content", got)
+			}
+		})
+	})
+}
