@@ -371,6 +371,68 @@ func TestGatherUpdateInputClearTextFlagsGH8149(t *testing.T) {
 	})
 }
 
+// TestUpdateClearTextFlagPairsAreMutuallyExclusive exercises each pairwise
+// clear/content conflict through cobra's own flag-group validation, on a
+// command built by the same registration call the real updateCmd uses. Only
+// the clear/content pairs of the same field conflict: different clear flags
+// compose, and a clear of one field composes with content for another.
+func TestUpdateClearTextFlagPairsAreMutuallyExclusive(t *testing.T) {
+	newCmd := func(t *testing.T, args ...string) *cobra.Command {
+		t.Helper()
+		cmd := &cobra.Command{Use: "update"}
+		registerCommonIssueFlags(cmd)
+		cmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")
+		registerUpdateClearTextFlags(cmd)
+		if err := cmd.ParseFlags(args); err != nil {
+			t.Fatalf("parse update flags %v: %v", args, err)
+		}
+		return cmd
+	}
+
+	for _, tt := range []struct {
+		clear   string
+		content string
+		asStdin bool
+	}{
+		{"clear-description", "description", false},
+		{"clear-description", "body", false},
+		{"clear-description", "message", false},
+		{"clear-description", "body-file", false},
+		{"clear-description", "description-file", false},
+		{"clear-description", "stdin", true},
+		{"clear-design", "design", false},
+		{"clear-design", "design-file", false},
+		{"clear-acceptance", "acceptance", false},
+		{"clear-acceptance", "acceptance-criteria", false},
+	} {
+		t.Run(tt.clear+"_with_"+tt.content, func(t *testing.T) {
+			var args []string
+			if tt.asStdin {
+				args = []string{"--" + tt.clear, "--stdin"}
+			} else {
+				args = []string{"--" + tt.clear, "--" + tt.content, "kept"}
+			}
+			if err := newCmd(t, args...).ValidateFlagGroups(); err == nil {
+				t.Errorf("expected %v to be mutually exclusive", args)
+			}
+		})
+	}
+
+	for _, args := range [][]string{
+		{"--clear-description", "--clear-design"},
+		{"--clear-design", "--clear-acceptance"},
+		{"--clear-description", "--design=kept"},
+		{"--clear-design", "--acceptance=kept"},
+		{"--clear-acceptance", "--notes", "kept"},
+	} {
+		t.Run("compose_"+strings.Join(args, "_"), func(t *testing.T) {
+			if err := newCmd(t, args...).ValidateFlagGroups(); err != nil {
+				t.Errorf("expected %v to compose, got: %v", args, err)
+			}
+		})
+	}
+}
+
 // TestGatherUpdateInputRefusesEmptyTextFieldsGH8149 is the input-gathering
 // half of the GH#8149 guard (the proxied route's boundary; the direct route
 // validates the same values in RunE): an exactly empty replacement for a

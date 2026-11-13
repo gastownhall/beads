@@ -219,6 +219,31 @@ func TestProxiedServerUpdate(t *testing.T) {
 		}
 	})
 
+	t.Run("clear_text_flag_conflicts_gh8149", func(t *testing.T) {
+		// GH#8149 on the proxied route: cobra rejects the contradictory
+		// combination before any request leaves the CLI.
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "u89x")
+		issue := bdProxiedCreate(t, bd, p.dir, "Clear conflicts", "--description", "desc", "--design", "design")
+		for _, extra := range [][]string{
+			{"--clear-description", "--description", "replacement"},
+			{"--clear-design", "--design", "replacement"},
+			{"--clear-acceptance", "--acceptance", "replacement"},
+		} {
+			args := append([]string{"update", issue.ID}, extra...)
+			stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, args...)
+			if err == nil {
+				t.Fatalf("expected %v to fail\nstdout:\n%s\nstderr:\n%s", extra, stdout, stderr)
+			}
+			if !strings.Contains(stdout+stderr, "none of the others can be") {
+				t.Errorf("expected mutual-exclusion error for %v, got stdout:\n%s\nstderr:\n%s", extra, stdout, stderr)
+			}
+		}
+		if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Description != "desc" || got.Design != "design" {
+			t.Errorf("expected fields preserved through refused conflicts, got description=%q design=%q", got.Description, got.Design)
+		}
+	})
+
 	t.Run("claim_sets_assignee_and_in_progress", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "uc")

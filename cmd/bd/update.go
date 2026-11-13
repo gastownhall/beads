@@ -1093,19 +1093,21 @@ func init() {
 	updateCmd.Flags().Bool("clear-notes", false, "Clear the notes field (--notes \"\" is refused: an empty value is usually a dead command substitution)")
 	updateCmd.MarkFlagsMutuallyExclusive("clear-notes", "notes")
 	updateCmd.MarkFlagsMutuallyExclusive("clear-notes", "append-notes")
+	updateCmd.Flags().String("spec-id", "", "Link to specification document")
+	updateCmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")
+	_ = updateCmd.Flags().MarkHidden("acceptance-criteria") // Only fails if flag missing (caught in tests)
 	// GH#8149: the same deliberate-clear contract for the other three
 	// long-form text fields. An exactly empty replacement value is refused
 	// (see validateDescriptionUpdate/validateDesignUpdate/
-	// validateAcceptanceUpdate); clearing is an explicit verb.
+	// validateAcceptanceUpdate); clearing is an explicit verb. Registered
+	// after acceptance-criteria above: the pairwise content conflicts
+	// reference every alias, including the hidden one.
 	registerUpdateClearTextFlags(updateCmd)
 	// Update replaces these fields, so their help names the refusal and the
 	// clear verb; create keeps the shared "Issue description" wording.
 	updateCmd.Flags().Lookup("description").Usage = "Replace the description (--description \"\" is refused: use --clear-description to clear)"
 	updateCmd.Flags().Lookup("design").Usage = "Replace the design (--design \"\" and empty --design-file are refused: use --clear-design to clear)"
 	updateCmd.Flags().Lookup("acceptance").Usage = "Replace the acceptance criteria (--acceptance \"\" is refused: use --clear-acceptance to clear)"
-	updateCmd.Flags().String("spec-id", "", "Link to specification document")
-	updateCmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")
-	_ = updateCmd.Flags().MarkHidden("acceptance-criteria") // Only fails if flag missing (caught in tests)
 	updateCmd.Flags().IntP("estimate", "e", 0, "Time estimate in minutes (e.g., 60 for 1 hour)")
 	// -l is the shorthand for --add-label, matching `bd create -l`.
 	//

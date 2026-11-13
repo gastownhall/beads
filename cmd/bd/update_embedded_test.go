@@ -716,6 +716,44 @@ func TestEmbeddedUpdateFieldsNotesClearAndDefer(t *testing.T) {
 		}
 	})
 
+	t.Run("update_clear_text_flags_conflict_gh8149", func(t *testing.T) {
+		// GH#8149: a clear verb with a content input for the same field is
+		// contradictory, so cobra's mutual-exclusion validation rejects the
+		// command before anything runs; the issue keeps its content.
+		issue := bdCreate(t, bd, dir, "Text clear conflict test", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--description", "desc", "--design", "design", "--acceptance", "acceptance")
+
+		conflicts := [][]string{
+			{"--clear-description", "--description", "replacement"},
+			{"--clear-description", "--body", "replacement"},
+			{"--clear-description", "--message", "replacement"},
+			{"--clear-description", "--stdin"},
+			{"--clear-design", "--design", "replacement"},
+			{"--clear-acceptance", "--acceptance", "replacement"},
+			{"--clear-acceptance", "--acceptance-criteria", "replacement"},
+		}
+		filePath := filepath.Join(t.TempDir(), "content.md")
+		if err := os.WriteFile(filePath, []byte("replacement"), 0644); err != nil {
+			t.Fatalf("write content file: %v", err)
+		}
+		conflicts = append(conflicts,
+			[]string{"--clear-description", "--body-file", filePath},
+			[]string{"--clear-description", "--description-file", filePath},
+			[]string{"--clear-design", "--design-file", filePath},
+		)
+		for _, extra := range conflicts {
+			args := append([]string{issue.ID}, extra...)
+			out := bdUpdateFail(t, bd, dir, args...)
+			if !strings.Contains(out, "none of the others can be") {
+				t.Errorf("expected mutual-exclusion error for %v, got:\n%s", extra, out)
+			}
+		}
+		if got := bdShow(t, bd, dir, issue.ID); got.Description != "desc" || got.Design != "design" || got.AcceptanceCriteria != "acceptance" {
+			t.Errorf("expected every field preserved through refused conflicts, got description=%q design=%q acceptance=%q",
+				got.Description, got.Design, got.AcceptanceCriteria)
+		}
+	})
+
 	t.Run("update_defer", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Defer test", "--type", "task")
 		bdUpdate(t, bd, dir, issue.ID, "--defer", "2099-01-15")

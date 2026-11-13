@@ -104,16 +104,32 @@ func validateAcceptanceUpdate(acceptance string, acceptanceChanged bool) error {
 }
 
 // registerUpdateClearTextFlags registers the GH#8149 deliberate-clear verbs
-// for the three long-form text fields on update commands only. Call it after
-// the content flags it pairs with are registered; validateDescriptionUpdate
-// reads the --clear-description registration as the update-contract marker,
-// and the mutual-exclusion pairs with every content alias of each field are
-// registered alongside. Create never calls this (AC-5: creation keeps
-// omitted and explicitly empty values working, with no clear verbs).
+// for the three long-form text fields on update commands only, with a
+// mutual-exclusion pair for each clear/content combination of the same
+// field. Call it after every content flag it pairs with is registered
+// (MarkFlagsMutuallyExclusive panics on an unknown name), including the
+// hidden acceptance-criteria alias; validateDescriptionUpdate reads the
+// --clear-description registration as the update-contract marker. Create
+// never calls this (AC-5: creation keeps omitted and explicitly empty
+// values working, with no clear verbs).
 func registerUpdateClearTextFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("clear-description", false, `Clear the description (--description "" is refused: an empty value is usually a dead command substitution)`)
 	cmd.Flags().Bool("clear-design", false, `Clear the design (--design "" and an empty --design-file are refused: an empty value is usually a dead command substitution)`)
 	cmd.Flags().Bool("clear-acceptance", false, `Clear the acceptance criteria (--acceptance "" is refused: an empty value is usually a dead command substitution)`)
+	// A separate call per clear/content pair, as with clear-notes. Content
+	// aliases of one field stay composable with one another (their own
+	// precedence lives in getDescriptionFlag), and different clear flags
+	// compose with one another and with other fields' content.
+	cmd.MarkFlagsMutuallyExclusive("clear-description", "description")
+	cmd.MarkFlagsMutuallyExclusive("clear-description", "body")
+	cmd.MarkFlagsMutuallyExclusive("clear-description", "message")
+	cmd.MarkFlagsMutuallyExclusive("clear-description", "body-file")
+	cmd.MarkFlagsMutuallyExclusive("clear-description", "description-file")
+	cmd.MarkFlagsMutuallyExclusive("clear-description", "stdin")
+	cmd.MarkFlagsMutuallyExclusive("clear-design", "design")
+	cmd.MarkFlagsMutuallyExclusive("clear-design", "design-file")
+	cmd.MarkFlagsMutuallyExclusive("clear-acceptance", "acceptance")
+	cmd.MarkFlagsMutuallyExclusive("clear-acceptance", "acceptance-criteria")
 }
 
 // clearDescriptionRequested, clearDesignRequested and clearAcceptanceRequested
