@@ -63,8 +63,6 @@ func expectDegradedJournalWrite(mock sqlmock.Sqlmock) {
 
 func TestDoltTransactionWritesTheProbedJournalShape(t *testing.T) {
 	store, mock := newDegradedJournalStore(t)
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT active_branch()")).
-		WillReturnRows(sqlmock.NewRows([]string{"active_branch()"}).AddRow("main"))
 	mock.ExpectBegin()
 	expectDegradedJournalWrite(mock)
 	mock.ExpectRollback()
@@ -82,7 +80,7 @@ func TestDoltTransactionWritesTheProbedJournalShape(t *testing.T) {
 		if !ok {
 			return fmt.Errorf("callback got a %T, want *doltTransaction", tx)
 		}
-		writeErr = issueops.RecordDeleteInTx(ctx, dtx.regularTx, "bd-1", "test-actor")
+		writeErr = issueops.RecordDeleteInTx(ctx, dtx.tx, "bd-1", "test-actor")
 		return errStop
 	})
 	require.ErrorIs(t, err, errStop)
