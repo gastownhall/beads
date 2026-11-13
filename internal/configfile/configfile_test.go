@@ -2,8 +2,10 @@ package configfile
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1452,6 +1454,29 @@ func TestSyncSidecarDir(t *testing.T) {
 		missing := filepath.Join(t.TempDir(), "no", "such", "dir")
 		if err := syncSidecarDir("windows", missing); err != nil {
 			t.Fatalf("syncSidecarDir(windows, %q) = %v; want nil without opening the directory", missing, err)
+		}
+	})
+	t.Run("missing directory wraps ErrNotExist with the sync prefix", func(t *testing.T) {
+		for _, goos := range []string{"linux", "darwin"} {
+			missing := filepath.Join(t.TempDir(), "no", "such", "dir")
+			err := syncSidecarDir(goos, missing)
+			if !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("syncSidecarDir(%s, %q) = %v; want os.ErrNotExist", goos, missing, err)
+			}
+			if err == nil {
+				t.Fatalf("syncSidecarDir(%s, %q) = nil; want an error", goos, missing)
+			}
+			if !strings.HasPrefix(err.Error(), "syncing proxied_server_client_info.json directory:") {
+				t.Fatalf("syncSidecarDir(%s, %q) error %q lacks the directory-sync prefix", goos, missing, err)
+			}
+		}
+	})
+	t.Run("real directory sync succeeds", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("a Windows host cannot sync a read-only directory handle; the windows row covers the skip")
+		}
+		if err := syncSidecarDir("linux", t.TempDir()); err != nil {
+			t.Fatalf("syncSidecarDir(linux, real dir) = %v; want nil", err)
 		}
 	})
 }
