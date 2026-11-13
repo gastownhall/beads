@@ -389,6 +389,12 @@ func TestSharedPathModel(t *testing.T) {
 		}
 	}
 
+	// The copilot recipe pins the frozen legacy content for its shared path.
+	if copilot.LegacyContents[".github/copilot-instructions.md"] != CopilotInstructionsLegacy {
+		t.Errorf("LegacyContents pin for the instructions file is not CopilotInstructionsLegacy: %q",
+			copilot.LegacyContents[".github/copilot-instructions.md"])
+	}
+
 	// Neither field is persisted: recipes.toml cannot spell them.
 	var buf bytes.Buffer
 	if err := toml.NewEncoder(&buf).Encode(UserRecipes{Recipes: map[string]Recipe{"copilot": copilot}}); err != nil {

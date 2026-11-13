@@ -1271,3 +1271,63 @@ func TestRunRecipe_CopilotMalformedRefusedBeforeMutating(t *testing.T) {
 		})
 	}
 }
+
+// A whole-file install an earlier bd release wrote is still recognized:
+// --check passes and setup converts it to one marked section with the
+// current template, without duplicating the guidance (GH#7431). The seed
+// is the frozen legacy pin, so a later template edit leaves this install
+// recognized.
+func TestRunRecipe_CopilotLegacyConverted(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	t.Chdir(tmpDir)
+	t.Setenv("BEADS_DIR", "")
+	resetSetupResolutionCaches(t)
+	resetSetupGlobals(t)
+
+	instructions := filepath.Join(tmpDir, ".github", "copilot-instructions.md")
+	if err := os.MkdirAll(filepath.Dir(instructions), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(instructions, []byte(recipes.CopilotInstructionsLegacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := filepath.Join(tmpDir, ".copilot-plugin", "plugin.json")
+	if err := os.MkdirAll(filepath.Dir(manifest), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifest, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// --check recognizes the legacy install.
+	setupCheck = true
+	t.Cleanup(func() { setupCheck = false })
+	var checkErr error
+	_ = captureStdout(t, func() error {
+		checkErr = runRecipe("copilot")
+		return nil
+	})
+	if checkErr != nil {
+		t.Fatalf("--check refused a recognized legacy install: %v", checkErr)
+	}
+
+	// Setup converts it: one marked section, the guidance exactly once.
+	setupCheck = false
+	_ = captureStdout(t, func() error {
+		return runRecipe("copilot")
+	})
+	got, err := os.ReadFile(instructions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "<!-- BEGIN BEADS INTEGRATION -->\n" +
+		recipes.CopilotInstructionsTemplate +
+		"<!-- END BEADS INTEGRATION -->\n"
+	if string(got) != want {
+		t.Fatalf("instructions =\n%q\nwant\n%q", got, want)
+	}
+	if n := strings.Count(string(got), "## Context Loading"); n != 1 {
+		t.Fatalf("guidance appears %d times after conversion; want 1:\n%s", n, got)
+	}
+}

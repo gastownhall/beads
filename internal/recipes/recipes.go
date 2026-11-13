@@ -131,8 +131,12 @@ var BuiltinRecipes = map[string]Recipe{
 		},
 		// The plugin manifest is bd's own file, but the instructions file is
 		// the standard place for a repository's own Copilot guidance, so bd
-		// manages a marked section inside it (GH#7431).
+		// manages a marked section inside it (GH#7431). A file an earlier
+		// release wrote whole is recognized by the frozen legacy template.
 		SharedPaths: []string{".github/copilot-instructions.md"},
+		LegacyContents: map[string]string{
+			".github/copilot-instructions.md": CopilotInstructionsLegacy,
+		},
 	},
 	"factory": {
 		Name:        "Factory.ai (Droid)",
