@@ -224,3 +224,51 @@ func TestEmbeddedMigrateSchemaRepairRefusesDirtyTrackedTarget_5269(t *testing.T)
 		t.Fatalf("user's uncommitted comment lost: count %d, err %v", n, err)
 	}
 }
+
+// AC-5: recorded obligations on dolt-ignored tables (events since main 0062,
+// the wisp tables of ignored 0010) are repaired in place: the default goes,
+// rows stay, and nothing is staged or committed.
+func TestEmbeddedMigrateSchemaRepairsIgnoredTablesWithoutCommitting_5269(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	dataDir := seedCurrentSchema(t, ctx)
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+
+	execAll(t, ctx, conn,
+		"ALTER TABLE events ALTER COLUMN id SET DEFAULT (UUID())",
+		"ALTER TABLE wisp_comments ALTER COLUMN id SET DEFAULT (UUID())",
+		"INSERT INTO wisps (id, title, description) VALUES ('w-1', 'wisp fixture', '')",
+		"INSERT INTO wisp_comments (issue_id, author, text) VALUES ('w-1', 'a', 'minted under drift')",
+	)
+	if dirty := dirtyTableNames(t, ctx, conn); len(dirty) != 0 {
+		t.Fatalf("precondition: ignored-table changes show as dirty %v", dirty)
+	}
+	headBefore, _ := headCommit(t, ctx, conn)
+	wispIDs := stringColumn(t, ctx, conn, "SELECT id FROM wisp_comments ORDER BY id")
+
+	_, report, err := schema.MigrateUpAndRepairPostConditions(ctx, conn)
+	if err != nil {
+		t.Fatalf("MigrateUpAndRepairPostConditions: %v", err)
+	}
+	if got, want := report.Names(), []string{"events.id", "wisp_comments.id"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("repaired %v, want %v", got, want)
+	}
+	if report.Committed {
+		t.Fatalf("report.Committed = true, want no commit for ignored tables")
+	}
+	for _, tc := range [][2]string{{"events", "id"}, {"wisp_comments", "id"}} {
+		if def := columnDefault(t, ctx, conn, tc[0], tc[1]); def.Valid {
+			t.Fatalf("%s.%s still has DEFAULT %q after the repair", tc[0], tc[1], def.String)
+		}
+	}
+	if hash, _ := headCommit(t, ctx, conn); hash != headBefore {
+		t.Fatalf("repair of ignored tables moved HEAD")
+	}
+	if staged := stringColumn(t, ctx, conn, "SELECT table_name FROM dolt_status WHERE staged = 1"); len(staged) != 0 {
+		t.Fatalf("repair staged %v", staged)
+	}
+	if got := stringColumn(t, ctx, conn, "SELECT id FROM wisp_comments ORDER BY id"); !reflect.DeepEqual(got, wispIDs) {
+		t.Fatalf("wisp_comments ids %v after repair, want %v", got, wispIDs)
+	}
+}
