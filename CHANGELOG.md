@@ -1281,6 +1281,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A server user that may not write `dolt_ignore` can open a current
+  database again after an upgrade adds a `dolt_ignore` pattern**
+  ([#6169](https://github.com/gastownhall/beads/issues/6169)). A new pattern
+  makes the next open write it, and a least-privilege user (read access plus
+  write access to the data tables) was refused that write, so every one of its
+  opens failed with `command denied` until a privileged `bd` opened the
+  database. When the database needs no migration and `dolt_status` shows no
+  new table, the open now prints one warning naming the missing pattern and
+  continues without writing anything. The pattern stays missing, and each such
+  open repeats the warning and waits for the schema migration lock, until a
+  `bd` running as a user that may write `dolt_ignore` opens the database once
+  and commits it. Pending migrations, a new table, or any error other than a
+  privilege refusal still fail the open. See [Server users that cannot write
+  `dolt_ignore`](docs/getting-started/upgrading.md#server-users-that-cannot-write-dolt_ignore).
+
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
@@ -4516,7 +4531,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `INSERT IGNORE INTO dolt_ignore`; a hosted or box-fenced wire client that is
   denied that INSERT fails its open until one privileged `bd` opens the store
   and heals the pattern — self-healing, one privileged open per upgrade
-  (degrading a denied seed to a skip is tracked separately).
+  (a denied seed on an otherwise-current database now degrades to a warning,
+  [#6169](https://github.com/gastownhall/beads/issues/6169)).
 
 - **`bd ready --parent` and `bd blocked --parent` no longer re-scan the whole
   parent-child edge relation for every descendant they find.** The transitive
