@@ -22,6 +22,10 @@ const (
 // shared file whose beads markers do not make exactly one section.
 var ErrMalformedSection = errors.New("malformed beads integration markers")
 
+// ErrRefuseSymlinkWrite is the error for a shared file that is a symbolic
+// link, which install and remove do not write or delete through.
+var ErrRefuseSymlinkWrite = errRefuseSymlinkWrite
+
 // SharedSectionState is what a shared file holds of bd's.
 type SharedSectionState int
 
@@ -246,10 +250,14 @@ func RemoveSharedFile(path, legacy string) (SharedRemoval, error) {
 }
 
 // PreflightSharedFile reports, by a nil error, that install and remove can
-// work on path: it is missing or readable, and its beads markers are not
-// malformed. A recipe runs it on every shared file before changing any of
-// its files, so a refusal leaves them all as they were.
+// work on path: it is not a symbolic link (a dangling one included), it is
+// missing or readable, and its beads markers are not malformed. A recipe
+// runs it on every shared file before changing any of its files, so a
+// refusal leaves them all as they were.
 func PreflightSharedFile(path string) error {
+	if err := refuseSharedSymlink(path); err != nil {
+		return err
+	}
 	content, _, err := readSharedFile(path)
 	if err != nil {
 		return err
