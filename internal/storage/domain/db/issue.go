@@ -69,6 +69,18 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 	if issue.ID == "" {
 		return errors.New("db: Insert: explicit ID required (ID generation belongs to CreateIssueUseCase)")
 	}
+	// Bound the VARCHAR(255) assignment columns ahead of both insert
+	// branches, so every proxied-server (uow) create (single, batch, import,
+	// and the create-only branch every minted id takes) rejects an over-length
+	// assignee/owner with a typed ErrFieldTooLong before it writes anything,
+	// instead of a raw backend "data too long" error. Mirrors
+	// ValidateWithCustom on the embedded create path.
+	if err := types.CheckFieldLen("assignee", issue.Assignee); err != nil {
+		return err
+	}
+	if err := types.CheckFieldLen("owner", issue.Owner); err != nil {
+		return err
+	}
 
 	table := pickIssueTable(opts.UseWispsTable)
 	if opts.CreateOnly {
@@ -807,6 +819,66 @@ func (r *issueSQLRepositoryImpl) NextCounterID(ctx context.Context, prefix strin
 	return nextID, nil
 }
 
+// AdvanceCounterPastHeldIDs raises prefix's counter to the highest top-level
+// numeric suffix held by a live row of either plane or a tombstone of either
+// tombstone table (domain.IssueSQLRepository.AdvanceCounterPastHeldIDs). It
+// runs in the caller's transaction, only after the counter mint met a held
+// candidate, and never lowers the counter.
+func (r *issueSQLRepositoryImpl) AdvanceCounterPastHeldIDs(ctx context.Context, prefix string) error {
+	if prefix == "" {
+		return errors.New("db: AdvanceCounterPastHeldIDs: prefix must not be empty")
+	}
+	pfxDash := prefix + "-"
+	pattern := escapeLikePattern(pfxDash) + "%"
+	rows, err := r.runner.QueryContext(ctx, `
+		SELECT id FROM issues WHERE id LIKE ?
+		UNION ALL SELECT id FROM wisps WHERE id LIKE ?
+		UNION ALL SELECT id FROM id_tombstones WHERE id LIKE ?
+		UNION ALL SELECT id FROM wisp_id_tombstones WHERE id LIKE ?
+	`, pattern, pattern, pattern, pattern)
+	if err != nil {
+		return fmt.Errorf("db: AdvanceCounterPastHeldIDs: scan %q: %w", prefix, err)
+	}
+	maxNum := 0
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("db: AdvanceCounterPastHeldIDs: scan row %q: %w", prefix, err)
+		}
+		suffix, ok := strings.CutPrefix(id, pfxDash)
+		if !ok || strings.Contains(suffix, ".") {
+			continue
+		}
+		if n, err := strconv.Atoi(suffix); err == nil && n > maxNum {
+			maxNum = n
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("db: AdvanceCounterPastHeldIDs: iterate %q: %w", prefix, err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("db: AdvanceCounterPastHeldIDs: close %q: %w", prefix, err)
+	}
+	if maxNum == 0 {
+		return nil
+	}
+	if _, err := r.runner.ExecContext(ctx, `
+		INSERT INTO issue_counter (prefix, last_id) VALUES (?, ?)
+		ON DUPLICATE KEY UPDATE last_id = GREATEST(last_id, VALUES(last_id))
+	`, prefix, maxNum); err != nil {
+		return fmt.Errorf("db: AdvanceCounterPastHeldIDs: advance %q to %d: %w", prefix, maxNum, err)
+	}
+	return nil
+}
+
+// escapeLikePattern escapes LIKE's wildcards and escape character in s, so a
+// prefix holding '_' or '%' matches only itself.
+func escapeLikePattern(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
+}
+
 func (r *issueSQLRepositoryImpl) seedCounterFromExisting(ctx context.Context, prefix string) error {
 	var existing int
 	err := r.runner.QueryRowContext(ctx, "SELECT last_id FROM issue_counter WHERE prefix = ?", prefix).Scan(&existing)
@@ -877,17 +949,6 @@ func pickIssueTable(useWisps bool) string {
 
 //nolint:gosec // G201: table is a hardcoded constant ("issues" or "wisps")
 func insertIssueRow(ctx context.Context, runner Runner, table string, issue *types.Issue) error {
-	// Bound the VARCHAR(255) assignment columns at the raw-SQL chokepoint, so
-	// every proxied-server (uow) create — single, batch, and import — rejects an
-	// over-length assignee/owner with a typed ErrFieldTooLong instead of a raw
-	// backend "data too long" error. Mirrors ValidateWithCustom on the embedded
-	// create path.
-	if err := types.CheckFieldLen("assignee", issue.Assignee); err != nil {
-		return err
-	}
-	if err := types.CheckFieldLen("owner", issue.Owner); err != nil {
-		return err
-	}
 	// The column list must stay in step with the classic writer
 	// (issueops.insertIssueIntoTable) — the shared scanner hydrates whatever
 	// either writer stored, so a column present there and missing here is not
@@ -895,9 +956,10 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 	// what closed_by_session was: the schema defaults it to '', so an issue
 	// written by this statement read back an empty closing session while the
 	// classic writer kept it. Only Insert without CreateOnly reaches this
-	// statement (CreateIssue callers that leave CreateOnly unset, such as the
-	// quick, todo, gate and batch proxied servers); CreateOnly creates, import
-	// and promotion go through the classic writer.
+	// statement: an explicit or child id whose CreateIssue caller leaves
+	// CreateOnly unset (such as the quick, todo, gate and batch proxied
+	// servers). A minted top-level id is always create-only, and CreateOnly
+	// creates, import and promotion go through the classic writer.
 	//
 	// Stamp a fresh non-zero row_lock at create, exactly like the classic
 	// insertIssueIntoTable (issueops/helpers.go). Without it a proxied-server

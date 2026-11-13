@@ -103,6 +103,13 @@ type IssueSQLRepository interface {
 	CoordinateCreates(ctx context.Context, ids []string) error
 	CountForPrefix(ctx context.Context, prefix string, opts IssueTableOpts) (int, error)
 	NextCounterID(ctx context.Context, prefix string) (int, error)
+	// AdvanceCounterPastHeldIDs raises prefix's issue_counter to the highest
+	// top-level numeric suffix (prefix-N, no dotted child) that a live row of
+	// either plane or a tombstone of either tombstone table holds. It never
+	// lowers the counter and does nothing when no such id exists. The counter
+	// mint calls it once, on its first held candidate, so an explicit create
+	// or import ahead of a lagging counter is crossed in one step.
+	AdvanceCounterPastHeldIDs(ctx context.Context, prefix string) error
 	SearchAcrossIssuesAndWisps(ctx context.Context, query string, filter types.IssueFilter) (SearchPage, error)
 	SearchAcrossIssuesAndWispsWithCounts(ctx context.Context, query string, filter types.IssueFilter) (SearchCountsPage, error)
 	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)
@@ -1048,6 +1055,11 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 	}
 
 	explicitID := createIDNamedByCaller(params)
+	// A minted top-level id always inserts create-only: between the mint's
+	// occupancy probe and the insert another writer can take the id, and the
+	// upsert writer would then overwrite that row or twin it in the other
+	// plane. Explicit ids keep the caller's choice (import relies on upsert).
+	mintedTopLevel := false
 	switch {
 	case params.ExplicitID != "":
 		issue.ID = params.ExplicitID
@@ -1063,6 +1075,7 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 			return CreateIssueResult{}, fmt.Errorf("create: mint top-level ID: %w", err)
 		}
 		issue.ID = minted
+		mintedTopLevel = true
 	}
 
 	if params.CreateOnly && params.ExplicitID != "" && !params.ForcePrefix {
@@ -1085,7 +1098,7 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 		}
 	}
 
-	insertOpts := InsertIssueOpts{UseWispsTable: useWisp, CreateOnly: params.CreateOnly, ExplicitID: explicitID}
+	insertOpts := InsertIssueOpts{UseWispsTable: useWisp, CreateOnly: params.CreateOnly || mintedTopLevel, ExplicitID: explicitID}
 	if err := u.issueRepo.Insert(ctx, issue, actor, insertOpts); err != nil {
 		return CreateIssueResult{}, fmt.Errorf("create: insert: %w", err)
 	}
@@ -1782,15 +1795,21 @@ func (u *issueUseCaseImpl) mintTopLevelID(ctx context.Context, issue *types.Issu
 	return "", fmt.Errorf("failed to generate unique ID for prefix %q after lengths %d..%d with 10 nonces each", prefix, baseLength, cfg.MaxLength)
 }
 
-// maxRetiredCounterSkips bounds how many retired counter values one
+// maxRetiredCounterSkips bounds how many claimed or held counter values one
 // counter-mode mint walks past (issueops.GenerateIssueIDInTable's bound).
 const maxRetiredCounterSkips = 1000
 
-// nextUnretiredCounterID is the counter-mode mint skipping values a retaining
-// sweep retired or the caller's batch claimed, so a fresh create is never
-// handed an id it would be refused. The counter only advances, so a skipped
-// value is never offered again.
+// nextUnretiredCounterID is the counter-mode mint skipping values the
+// caller's batch claimed or that are taken (a live row of either plane holds
+// them, or a retaining sweep retired them), so a fresh create is never handed
+// an id it would overwrite, twin in the other plane, or be refused. The first
+// taken value advances the counter past every held numeric id at once
+// (AdvanceCounterPastHeldIDs): explicit creates and imports never move the
+// counter, so a lagging one can sit behind a held run longer than the skip
+// bound, and a walk's progress would roll back with the failed transaction.
+// The counter only advances, so a skipped value is never offered again.
 func (u *issueUseCaseImpl) nextUnretiredCounterID(ctx context.Context, prefix string, claimed map[string]bool) (string, error) {
+	advanced := false
 	for skips := 0; ; skips++ {
 		n, err := u.issueRepo.NextCounterID(ctx, prefix)
 		if err != nil {
@@ -1798,16 +1817,22 @@ func (u *issueUseCaseImpl) nextUnretiredCounterID(ctx context.Context, prefix st
 		}
 		candidate := fmt.Sprintf("%s-%d", prefix, n)
 		if !claimed[candidate] {
-			retired, err := u.issueRepo.Retired(ctx, candidate)
+			taken, err := u.issueRepo.Taken(ctx, candidate)
 			if err != nil {
 				return "", err
 			}
-			if !retired {
+			if !taken {
 				return candidate, nil
+			}
+			if !advanced {
+				advanced = true
+				if err := u.issueRepo.AdvanceCounterPastHeldIDs(ctx, prefix); err != nil {
+					return "", err
+				}
 			}
 		}
 		if skips >= maxRetiredCounterSkips {
-			return "", fmt.Errorf("issue counter for prefix %q walked past %d retired or claimed ids without finding a free one", prefix, maxRetiredCounterSkips)
+			return "", fmt.Errorf("issue counter for prefix %q walked past %d held, retired or claimed ids without finding a free one", prefix, maxRetiredCounterSkips)
 		}
 	}
 }
