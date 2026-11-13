@@ -583,6 +583,32 @@ func TestImporterUOWReplayReMintsUnsetIDs(t *testing.T) {
 			t.Errorf("row A not stored under the caller's struct id %q", a.ID)
 		}
 	}
+	// AC-3: the edge and comment follow the replay's id on the rows and on
+	// the caller's structs, and nothing of row A sits under attempt 1's id.
+	assertRowAAuxFollowsReMint := func(t *testing.T, run replayRun) {
+		t.Helper()
+		a, x := run.rowA, run.attempt1ID
+		if dep := a.Dependencies[0]; dep.IssueID != a.ID {
+			t.Errorf("dep.IssueID = %q, want the re-minted %q", dep.IssueID, a.ID)
+		}
+		if got := queryInt(t, "SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ?", a.ID, anchor); got != 1 {
+			t.Errorf("row A edges under %q = %d, want 1", a.ID, got)
+		}
+		// Only when the replay drew a different id: with no competitor the
+		// re-mint IS attempt 1's id.
+		if a.ID != x {
+			if got := queryInt(t, "SELECT COUNT(*) FROM dependencies WHERE issue_id = ?", x); got != 0 {
+				t.Errorf("edges under attempt 1's %q = %d, want 0", x, got)
+			}
+			if got := queryInt(t, "SELECT COUNT(*) FROM comments WHERE issue_id = ?", x); got != 0 {
+				t.Errorf("comments under attempt 1's %q = %d, want 0", x, got)
+			}
+		}
+		c := a.Comments[0]
+		if got := queryString(t, "SELECT id FROM comments WHERE issue_id = ? AND text = ?", a.ID, c.Text); got != c.ID {
+			t.Errorf("stored comment id = %q, caller's comment.ID = %q; want equal", got, c.ID)
+		}
+	}
 	assertCleanResult := func(t *testing.T, run replayRun) {
 		t.Helper()
 		if run.result.Created != 2 || len(run.result.StaleRejectedIDs) != 0 || len(run.result.RetiredIDs) != 0 {
@@ -607,6 +633,7 @@ func TestImporterUOWReplayReMintsUnsetIDs(t *testing.T) {
 		run := importWithReplay(t, "no_competitor", false, nil)
 		assertCleanResult(t, run)
 		assertRowALanded(t, run)
+		assertRowAAuxFollowsReMint(t, run)
 		x := run.attempt1ID
 		if run.rowA.ID != x {
 			t.Errorf("row A id = %q, want the replay to re-mint attempt 1's counter value %q", run.rowA.ID, x)
@@ -631,6 +658,7 @@ func TestImporterUOWReplayReMintsUnsetIDs(t *testing.T) {
 		assertCleanResult(t, run)
 		assertCompetitorKept(t, run)
 		assertRowALanded(t, run)
+		assertRowAAuxFollowsReMint(t, run)
 	})
 
 	// Edge: with --allow-stale the pre-fix replay overwrote the competitor's
@@ -640,6 +668,7 @@ func TestImporterUOWReplayReMintsUnsetIDs(t *testing.T) {
 		assertCleanResult(t, run)
 		assertCompetitorKept(t, run)
 		assertRowALanded(t, run)
+		assertRowAAuxFollowsReMint(t, run)
 	})
 
 	// Edge: hash mode. A row lands under attempt 1's hash id in between; the
@@ -660,5 +689,6 @@ func TestImporterUOWReplayReMintsUnsetIDs(t *testing.T) {
 		assertCleanResult(t, run)
 		assertCompetitorKept(t, run)
 		assertRowALanded(t, run)
+		assertRowAAuxFollowsReMint(t, run)
 	})
 }
