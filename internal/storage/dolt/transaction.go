@@ -230,44 +230,23 @@ func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg s
 	}
 	defer conn.Close()
 
-	var currentBranch string
-	if err := conn.QueryRowContext(ctx, "SELECT active_branch()").Scan(&currentBranch); err != nil {
-		return issueops.BlockedRecheck{}, fmt.Errorf("failed to read active branch: %w", err)
-	}
-
 	regularTx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return issueops.BlockedRecheck{}, fmt.Errorf("failed to begin regular tx: %w", err)
 	}
 
-	// The journal counter and rows must commit in the SAME SQL transaction as
-	// every mutation they describe. bd_events_journal and bd_events_seq are
-	// dolt_ignored, so on the default split-transaction shape they would land in
-	// the ignored transaction while the mutation lands in the regular one: a
-	// mixed durable+wisp callback would then make the two transactions contend
-	// with each other on the single bd_events_seq row, and the ignored commit
-	// can fail AFTER the regular side has already committed — a mutation with no
-	// journal record, which is exactly the state the same-transaction guarantee
-	// exists to make impossible. In journal mode both planes therefore share the
-	// pinned regular transaction. The default journal-off path keeps the
-	// established split transactions untouched.
+	// Both planes run in this one pinned SQL transaction, whether or not the
+	// events journal is on. The dolt-ignored tables (wisps, wisp_*,
+	// local_metadata, repo_mtimes, and the journal's bd_events_journal and
+	// bd_events_seq) never enter a Dolt commit anyway: DirtyTableTracker drops
+	// them and StageAndCommit stages only the tables it is given. Sharing the
+	// session is what makes a mixed durable+wisp callback read its own wisp
+	// writes, commit or roll back as a whole (a commit-time conflict on a wisp
+	// row refuses the durable half too, determinately), and stage the durable
+	// rows a wisp write changes (a dependent's is_blocked) into its own Dolt
+	// commit. The journal switch decides only whether journal rows are written.
 	journalEnabled := s.eventsJournalEnabled.Load()
 	ignoredTx := regularTx
-	if !journalEnabled {
-		// NOTE (GH#3140 metrics skew): the pool-wait bracket above measures only
-		// the FIRST acquisition (the regular conn). A borrow inside
-		// beginIgnoredTxOnBranch that has to wait increments the pool's global
-		// WaitCount, which the NEXT transaction's delta then misattributes. Rare
-		// given the InUse pre-check in borrowConnForIgnoredTx; not worth
-		// restructuring the metrics for.
-		var ignoredCleanup func()
-		ignoredCleanup, ignoredTx, err = s.beginIgnoredTxOnBranch(ctx, currentBranch)
-		if err != nil {
-			_ = regularTx.Rollback()
-			return issueops.BlockedRecheck{}, err
-		}
-		defer ignoredCleanup()
-	}
 	clearJournalScope := issueops.ScopeEventsJournalTransaction(regularTx, journalEnabled)
 	defer clearJournalScope()
 	// Shape counterpart of the activation switch just above (PR A1):
@@ -295,40 +274,26 @@ func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg s
 	versioned, err := s.versionedHistory.ResolveIn(ctx, regularTx)
 	if err != nil {
 		_ = regularTx.Rollback()
-		if !journalEnabled {
-			_ = ignoredTx.Rollback()
-		}
 		return issueops.BlockedRecheck{}, err
 	}
 	clearVersionScope := issueops.ScopeVersionedHistoryTransaction(regularTx, versioned)
 	defer clearVersionScope()
-	// Unblocking writes record their dependents on whichever transaction they
-	// ran in: the regular one, or the ignored one wisps use when the journal
-	// does not pin both planes together.
+	// Unblocking writes on either plane record their dependents on the one
+	// transaction.
 	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(regularTx)
 	defer clearRecheckScope()
-	if !journalEnabled {
-		clearIgnoredRecheckScope := issueops.ScopeBlockedRecheckTransaction(ignoredTx)
-		defer clearIgnoredRecheckScope()
-	}
 
-	tx := &doltTransaction{regularTx: regularTx, ignoredTx: ignoredTx, store: s, journalPinned: journalEnabled}
+	tx := &doltTransaction{regularTx: regularTx, ignoredTx: ignoredTx, store: s, journalPinned: true}
 
 	defer func() {
 		if r := recover(); r != nil {
 			_ = regularTx.Rollback()
-			if !journalEnabled {
-				_ = ignoredTx.Rollback()
-			}
 			panic(r)
 		}
 	}()
 
 	if err := fn(tx); err != nil {
 		_ = regularTx.Rollback()
-		if !journalEnabled {
-			_ = ignoredTx.Rollback()
-		}
 		return issueops.BlockedRecheck{}, err
 	}
 
