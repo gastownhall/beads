@@ -42,6 +42,7 @@ var deletedReferenceCases = []deletedReferenceCase{
 	{"start of text", "be-1 closes", "be-1", "[deleted:be-1] closes"},
 	{"end of text", "see be-1", "be-1", "see [deleted:be-1]"},
 	{"sentence-ending dot", "see fx-k0008.1.", "fx-k0008.1", "see [deleted:fx-k0008.1]."},
+	{"dotted id at sentence end", "see be-1.2.", "be-1.2", "see [deleted:be-1.2]."},
 	{"parentheses", "(be-1)", "be-1", "([deleted:be-1])"},
 	{"colon", "be-1: done", "be-1", "[deleted:be-1]: done"},
 	{"comma", "be-1, be-2", "be-1", "[deleted:be-1], be-2"},
@@ -59,6 +60,7 @@ var deletedReferenceCases = []deletedReferenceCase{
 	{"dot space adjacent", "see be-1. be-1", "be-1", "see [deleted:be-1]. [deleted:be-1]"},
 	{"dot newline adjacent", "be-1.\nbe-1", "be-1", "[deleted:be-1].\n[deleted:be-1]"},
 	{"rejected then accepted", "be-12 be-1", "be-1", "be-12 [deleted:be-1]"},
+	{"three in a row", "be-1 be-1 be-1", "be-1", "[deleted:be-1] [deleted:be-1] [deleted:be-1]"},
 
 	// Degenerate inputs.
 	{"empty text", "", "be-1", ""},
@@ -67,6 +69,7 @@ var deletedReferenceCases = []deletedReferenceCase{
 	{"no occurrence", "nothing here", "be-1", "nothing here"},
 	{"regex metacharacters are literal", "see a+b(1) and aab(1)", "a+b(1)", "see [deleted:a+b(1)] and aab(1)"},
 	{"replacement template is literal", "see $1x", "$1x", "see [deleted:$1x]"},
+	{"replacement template bytes survive", "be-1 $1 ${id} be-1", "be-1", "[deleted:be-1] $1 ${id} [deleted:be-1]"},
 	{"metacharacter id does not match as a pattern", "see bdx1", "bd.1", "see bdx1"},
 }
 
@@ -92,6 +95,28 @@ func TestCitesIDAgreesWithRewrite(t *testing.T) {
 				t.Errorf("CitesID(%q, %q) = %v, want %v (whether the rewrite changes the text)", tc.text, tc.id, got, want)
 			}
 		})
+	}
+}
+
+// TestCitesIDAgreesWithRewriteAcrossIDs pins the two entry points to one
+// decision over a cross product of texts and ids, including ids the text only
+// contains inside a longer or dotted id: the preview (CitesID) must name
+// exactly the rows the deletion would rewrite, in either direction.
+func TestCitesIDAgreesWithRewriteAcrossIDs(t *testing.T) {
+	texts := []string{
+		"be-1", "be-1 be-1", "see be-1.", "step be-1.2 failed", "x.be-1", "be-1._x",
+		"be-1,be-1 be-1.2", "..be-1 ... be-1.2.3", "no citations here", "", "be-1.2.3",
+		"[deleted:be-1.2] cites be-1? no: be-1.2 is live",
+	}
+	ids := []string{"be-1", "be-1.2", "be-2", "be"}
+	for _, text := range texts {
+		for _, id := range ids {
+			_, changed := RewriteDeletedReferences(text, id)
+			if got := CitesID(text, id); got != changed {
+				t.Errorf("CitesID(%q, %q) = %v, but the rewrite changed the text: %v; the two must agree",
+					text, id, got, changed)
+			}
+		}
 	}
 }
 
