@@ -6273,13 +6273,20 @@ bd rename-prefix
     | The --repair flag will rename all issues with incorrect prefixes to the new prefix,
     | preserving issues that already have the correct prefix.
     |
+    | Changing the prefix for new issues only:
+    | --mint-only makes new issues use the new prefix and leaves every existing ID
+    | and text reference as it is. The old prefix is added to allowed_prefixes, so
+    | explicit --id values and children of existing issues keep working.
+    |
     | EXAMPLES:
     |   bd rename-prefix kw-                # Rename from 'knowledge-work-' to 'kw-'
     |   bd rename-prefix mtg- --repair      # Consolidate multiple prefixes into 'mtg-'
     |   bd rename-prefix team- --dry-run    # Preview changes without applying
+    |   bd rename-prefix kb- --mint-only    # New issues get 'kb-'; existing IDs stay
     |
     | NOTE: This is a rare operation. Most users never need this command.
   flag --dry-run type=bool default="false" usage="Preview changes without applying them"
+  flag --mint-only type=bool default="false" usage="Mint new issues under the new prefix; keep existing IDs and accept the old prefix"
   flag --repair type=bool default="false" usage="Repair database with multiple prefixes by consolidating them"
 
 bd reopen

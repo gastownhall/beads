@@ -45,10 +45,16 @@ If issues have multiple prefixes (corrupted database), use --repair to consolida
 The --repair flag will rename all issues with incorrect prefixes to the new prefix,
 preserving issues that already have the correct prefix.
 
+Changing the prefix for new issues only:
+--mint-only makes new issues use the new prefix and leaves every existing ID
+and text reference as it is. The old prefix is added to allowed_prefixes, so
+explicit --id values and children of existing issues keep working.
+
 EXAMPLES:
   bd rename-prefix kw-                # Rename from 'knowledge-work-' to 'kw-'
   bd rename-prefix mtg- --repair      # Consolidate multiple prefixes into 'mtg-'
   bd rename-prefix team- --dry-run    # Preview changes without applying
+  bd rename-prefix kb- --mint-only    # New issues get 'kb-'; existing IDs stay
 
 NOTE: This is a rare operation. Most users never need this command.`,
 	Args:          cobra.ExactArgs(1),
@@ -68,6 +74,7 @@ NOTE: This is a rare operation. Most users never need this command.`,
 		newPrefix := args[0]
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		repair, _ := cmd.Flags().GetBool("repair")
+		mintOnly, _ := cmd.Flags().GetBool("mint-only")
 
 		if !dryRun {
 			CheckReadonly("rename-prefix")
@@ -91,6 +98,10 @@ NOTE: This is a rare operation. Most users never need this command.`,
 		}
 
 		newPrefix = strings.TrimRight(newPrefix, "-")
+
+		if mintOnly {
+			return runMintOnlyPrefix(ctx, store, strings.TrimRight(oldPrefix, "-"), newPrefix)
+		}
 
 		issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 		if err != nil {
@@ -219,6 +230,74 @@ NOTE: This is a rare operation. Most users never need this command.`,
 
 		return nil
 	},
+}
+
+// mintOnlyResult is the single object bd rename-prefix --mint-only --json
+// writes.
+type mintOnlyResult struct {
+	OldPrefix            string   `json:"old_prefix"`
+	NewPrefix            string   `json:"new_prefix"`
+	MintOnly             bool     `json:"mint_only"`
+	DryRun               bool     `json:"dry_run"`
+	AllowedPrefixesAdded []string `json:"allowed_prefixes_added"`
+}
+
+// mintOnlyPrefix points new issues at newPrefix without touching any ID or
+// text. The old prefix stays valid through allowed_prefixes, so explicit
+// --id values and children of existing issues keep working.
+func mintOnlyPrefix(ctx context.Context, st storage.DoltStorage, oldPrefix, newPrefix string) (*mintOnlyResult, error) {
+	result := &mintOnlyResult{OldPrefix: oldPrefix, NewPrefix: newPrefix, MintOnly: true, AllowedPrefixesAdded: []string{}}
+	allowed, err := st.GetConfig(ctx, "allowed_prefixes")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read allowed_prefixes: %w", err)
+	}
+	present := false
+	for _, p := range strings.Split(allowed, ",") {
+		if strings.TrimRight(strings.TrimSpace(p), "-") == oldPrefix {
+			present = true
+		}
+	}
+	if !present {
+		result.AllowedPrefixesAdded = append(result.AllowedPrefixesAdded, oldPrefix)
+		updated := oldPrefix
+		if trimmed := strings.TrimSpace(allowed); trimmed != "" {
+			updated = trimmed + "," + oldPrefix
+		}
+		if err := st.SetConfig(ctx, "allowed_prefixes", updated); err != nil {
+			return nil, fmt.Errorf("failed to update allowed_prefixes: %w", err)
+		}
+	}
+	if err := st.SetConfig(ctx, "issue_prefix", newPrefix); err != nil {
+		return nil, fmt.Errorf("failed to update prefix: %w", err)
+	}
+	return result, nil
+}
+
+// runMintOnlyPrefix is bd rename-prefix --mint-only.
+func runMintOnlyPrefix(ctx context.Context, st storage.DoltStorage, oldPrefix, newPrefix string) error {
+	if oldPrefix == newPrefix {
+		return HandleErrorRespectJSON("new prefix is the same as current prefix: %s", oldPrefix)
+	}
+	result, err := mintOnlyPrefix(ctx, st, oldPrefix, newPrefix)
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+	commandDidWrite.Store(true)
+	// config.yaml's issue-prefix wins over the database for bd create.
+	if yamlPrefix := strings.TrimRight(overlayYAMLPrefix(""), "-"); yamlPrefix != "" && yamlPrefix != newPrefix {
+		fmt.Fprintf(os.Stderr, "%s config.yaml sets issue-prefix: %s, which bd create uses before the database; set it to %s so new issues mint %s-*\n",
+			ui.RenderWarn("⚠"), yamlPrefix, newPrefix, newPrefix)
+	}
+	if jsonOutput {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(result)
+	}
+	fmt.Printf("%s New issues now mint %s-*; existing IDs and text are unchanged\n", ui.RenderPass("✓"), ui.RenderAccent(newPrefix))
+	if len(result.AllowedPrefixesAdded) > 0 {
+		fmt.Printf("  Added %s to allowed_prefixes so existing %s-* IDs stay valid\n", ui.RenderAccent(oldPrefix), oldPrefix)
+	}
+	return nil
 }
 
 func validatePrefix(prefix string) error {
@@ -802,5 +881,6 @@ func repairHashRoot(prefix string, seed *types.Issue, actor string, nonce int) s
 func init() {
 	renamePrefixCmd.Flags().Bool("dry-run", false, "Preview changes without applying them")
 	renamePrefixCmd.Flags().Bool("repair", false, "Repair database with multiple prefixes by consolidating them")
+	renamePrefixCmd.Flags().Bool("mint-only", false, "Mint new issues under the new prefix; keep existing IDs and accept the old prefix")
 	rootCmd.AddCommand(renamePrefixCmd)
 }
