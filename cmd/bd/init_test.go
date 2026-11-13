@@ -1314,6 +1314,110 @@ func TestInitRedirect(t *testing.T) {
 			t.Error("Canonical database file should still exist after error")
 		}
 	})
+
+	// The redirect target can be a fully initialized server-mode workspace, not
+	// just a holder of the legacy beads.db file. The write path follows the
+	// redirect (beadsDirForInit), so the plain-init guard must guard the same
+	// workspace the identity names — the target — or `bd init` marches past a
+	// stub-level check and overwrites an initialized workspace's metadata
+	// (GH#6172). Before the guard read the identity, its redirect branch only
+	// statted the legacy beads.db and proceeded.
+	//
+	// The command runs through initCmd.RunE directly, on purpose: under
+	// rootCmd the PersistentPreRunE exports a redirect-followed BEADS_DIR for
+	// init, and that environment side channel is what made the old guard see
+	// the target — the one identity record is the chokepoint this test holds
+	// to, not an inherited export.
+	t.Run("RefusesPlainInitWhenTargetIsInitializedServerWorkspace", func(t *testing.T) {
+		resetRedirectState(t)
+
+		tmpDir := t.TempDir()
+
+		// The canonical target: an initialized server-mode workspace recording
+		// database redirect_a with local Dolt data for it and a current-era
+		// version witness, the shape bd itself leaves behind.
+		targetBeadsDir := filepath.Join(tmpDir, "canonical", ".beads")
+		if err := os.MkdirAll(targetBeadsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		// bd follows a redirect only to a target holding project files
+		// (gastownhall/beads#4692), like the RedirectCreatesDBInTarget fixture.
+		if err := os.WriteFile(filepath.Join(targetBeadsDir, "config.yaml"), []byte("# provisioned canonical workspace\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := (&configfile.Config{
+			Backend:        configfile.BackendDolt,
+			DoltMode:       configfile.DoltModeServer,
+			DoltServerHost: "127.0.0.1",
+			DoltDatabase:   "redirect_a",
+			ProjectID:      "redir-0000-1111-2222-333344445555",
+		}).Save(targetBeadsDir); err != nil {
+			t.Fatalf("save target metadata: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Join(targetBeadsDir, "dolt", "redirect_a", ".dolt"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeLocalVersion(filepath.Join(targetBeadsDir, localVersionFile), Version); err != nil {
+			t.Fatalf("write local version: %v", err)
+		}
+
+		// The project checkout whose .beads is only a redirect stub.
+		projectDir := filepath.Join(tmpDir, "project")
+		projectBeadsDir := filepath.Join(projectDir, ".beads")
+		if err := os.MkdirAll(projectBeadsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(projectBeadsDir, beads.RedirectFileName), []byte("../canonical/.beads\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		t.Chdir(projectDir)
+
+		// No server is started for this run: the refusal under test happens
+		// before any store is built, and the base (unguarded) run, which gets
+		// as far as store creation, must fail on a dead dial rather than sit
+		// in a managed-server start over the target's data directory.
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+		t.Setenv("BEADS_DOLT_PORT", "")
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+		origStore, origDBPath := store, dbPath
+		t.Cleanup(func() {
+			store, dbPath = origStore, origDBPath
+		})
+		store, dbPath = nil, ""
+
+		// --external keeps the run on the suite's live server: the mode
+		// resolution below preserves T's server mode from its metadata, and
+		// a managed start at this point would scan T's data dir forever.
+		// The refusal under test happens before any of this is reached; the
+		// flag only keeps the unguarded (base) run from hanging.
+		setInitFlag(t, "server", "true")
+		setInitFlag(t, "external", "true")
+		setInitFlag(t, "database", "redirect_b")
+		setInitFlag(t, "prefix", "redirect-test")
+		setInitFlag(t, "quiet", "true")
+		err := initCmd.RunE(initCmd, nil)
+		if err == nil {
+			t.Fatal("Expected bd init to refuse when the redirect target is an initialized server-mode workspace")
+		}
+		if !strings.Contains(err.Error(), "already initialized") {
+			t.Errorf("Expected the in-target already-initialized refusal, got: %s", err)
+		}
+
+		// The refused init must leave the target's identity alone.
+		after, loadErr := configfile.LoadForDiscovery(targetBeadsDir)
+		if loadErr != nil {
+			t.Fatalf("read target metadata: %v", loadErr)
+		}
+		got := "<nil>"
+		if after != nil {
+			got = after.DoltDatabase
+		}
+		if got != "redirect_a" {
+			t.Errorf("the refused init must leave the target recording redirect_a, got %q", got)
+		}
+	})
 }
 
 // =============================================================================
