@@ -11,9 +11,8 @@ import (
 // TestParseDarwinCwdOrphanDetection pins the darwin-only half of the
 // deleted-cwd signal. macOS lsof prints the bare path of a working directory
 // that has since been removed — no " (deleted)" suffix, unlike Linux's
-// /proc/<pid>/cwd — so the stat probe is the only thing that lets
-// selectOrphanTestServerPIDs recognize a leaked test server on this platform
-// (wy-j2zc8q).
+// /proc/<pid>/cwd — so the stat probe is the only thing that marks such a
+// candidate's cwd as deleted on this platform (wy-j2zc8q).
 func TestParseDarwinCwdOrphanDetection(t *testing.T) {
 	const livePath = "/private/var/folders/xx/T/some-suite/002"
 	const gonePath = "/private/var/folders/xx/T/TestUOWDependencyEditorContract1/002"
