@@ -109,6 +109,9 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 	if len(issues) == 0 {
 		return nil
 	}
+	// As in createIssue: a batch that rolls back empties the ID fields the
+	// caller left empty (GH#8457); one that committed keeps them.
+	resetMintedIDs := issueops.SnapshotUnsetCreateIDs(issues)
 
 	// All-wisps fast path: one SQL transaction, no Dolt versioning.
 	// Covers both ephemeral issues and no-history issues (both skip DOLT_COMMIT).
@@ -126,7 +129,7 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 			result, err = issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
 			return err
 		}); err != nil {
-			return err
+			return issueops.ResetCreateIDsIfRolledBack(err, resetMintedIDs)
 		}
 		s.commitWispDurable(ctx, wispDurable{issues: result.ChangedTables["issues"]},
 			fmt.Sprintf("bd: create %d issue(s)", len(issues)))
@@ -139,7 +142,7 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 		result, err = issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
 		return err
 	}); err != nil {
-		return err
+		return issueops.ResetCreateIDsIfRolledBack(err, resetMintedIDs)
 	}
 
 	// GH#2455: Stage only the tables we modified, then commit without -A.
