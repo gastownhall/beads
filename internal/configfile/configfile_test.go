@@ -1443,3 +1443,15 @@ func TestSaveProxiedServerClientInfo_SuccessfulSaveReturnsNil(t *testing.T) {
 		t.Fatalf("Load = %+v, want %+v", got, info)
 	}
 }
+
+// TestSyncSidecarDir pins the platform decision the saver makes after the
+// checked rename (GH#6858). Windows must not open or flush the directory at
+// all; every other platform keeps the directory open, Sync and Close errors.
+func TestSyncSidecarDir(t *testing.T) {
+	t.Run("windows skips the directory flush", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "no", "such", "dir")
+		if err := syncSidecarDir("windows", missing); err != nil {
+			t.Fatalf("syncSidecarDir(windows, %q) = %v; want nil without opening the directory", missing, err)
+		}
+	})
+}
