@@ -353,6 +353,46 @@ func TestDoltServerMode(t *testing.T) {
 		}
 	})
 
+	t.Run("GetDoltServerUser_config_yaml", func(t *testing.T) {
+		// GH#6598: dolt.user in config.yaml was read but never consulted by
+		// GetDoltServerUser, so a caller without BEADS_DOLT_SERVER_USER
+		// always authenticated as the "root" default. Mirrors the
+		// GetDoltServerHost_config_yaml case above.
+		// Precedence: env > metadata.json > config.yaml > default.
+
+		t.Setenv("BEADS_DOLT_SERVER_USER", "")
+
+		configDir := t.TempDir()
+		configYaml := filepath.Join(configDir, "config.yaml")
+		if err := os.WriteFile(configYaml,
+			[]byte("dolt.user: beads\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_DIR", configDir)
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("config.Initialize: %v", err)
+		}
+		t.Cleanup(config.ResetForTesting)
+
+		// config.yaml wins when metadata.json leaves user unset.
+		emptyCfg := &Config{}
+		if got := emptyCfg.GetDoltServerUser(); got != "beads" {
+			t.Errorf("empty cfg + config.yaml: GetDoltServerUser() = %q, want beads", got)
+		}
+
+		// metadata.json wins over config.yaml when both set.
+		metaCfg := &Config{DoltServerUser: "metauser"}
+		if got := metaCfg.GetDoltServerUser(); got != "metauser" {
+			t.Errorf("metadata over config.yaml: GetDoltServerUser() = %q, want metauser", got)
+		}
+
+		// env var wins over config.yaml.
+		t.Setenv("BEADS_DOLT_SERVER_USER", "envuser")
+		if got := emptyCfg.GetDoltServerUser(); got != "envuser" {
+			t.Errorf("env over config.yaml: GetDoltServerUser() = %q, want envuser", got)
+		}
+	})
+
 	t.Run("GetDoltServerPort", func(t *testing.T) {
 		// Clear port env vars so the table-driven configs are the source of truth.
 		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
