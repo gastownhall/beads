@@ -8,9 +8,10 @@ beads' own HTTP contract stays `/v0`, defined by
 `internal/httpapi/spec/openapi.v0.yaml` and
 [bd-serve-v0.md](bd-serve-v0.md).
 
-Main has no BDP yet: no `--protocol` flag, no `/bdp` mount and no BDP test.
-A default `bd serve` answers `/bdp` and the paths under it with v0's
-unrouted 404, which `TestDefaultSurfaceAnswersV0sUnrouted404`
+Main has no BDP protocol yet: no `--protocol` flag and no `/bdp` mount,
+only the vendored copy of the bdp files BDP's conformance tests will read
+and its pin (below). A default `bd serve` answers `/bdp` and the paths under
+it with v0's unrouted 404, which `TestDefaultSurfaceAnswersV0sUnrouted404`
 (`internal/httpapi/mount_census_test.go`) pins. The bring-up lands in small
 slices under [#8319](https://github.com/gastownhall/beads/issues/8319). Each
 slice that adds a BDP surface, file or test updates this page in the same
@@ -38,13 +39,16 @@ the failure prints, review the diff, and say in the PR what changed and why.
 A `/v0` change also follows [bd-serve-v0.md](bd-serve-v0.md): a non-additive
 change to an existing member bumps `wire_revision` and adds its history
 entry in `openapi.v0.yaml`; an additive one needs neither. A `--json` change
-follows CATALOG.md: `make corpus-regen` and a `JSONSchemaVersion` bump in
-`cmd/bd/output.go`. When BDP's Callables land, they will take their
-parameters from `openapi.v0.yaml`. A v0 change therefore never needs a
-Callables or spec edit, and a new v0 operation is simply not exposed over
-BDP until someone names it.
+follows CATALOG.md (`make corpus-regen`) and
+[json-schema.md](../../docs/reference/json-schema.md), which say when it also
+bumps `JSONSchemaVersion` in `cmd/bd/output.go`. When BDP's Callables land,
+they will take their parameters from `openapi.v0.yaml`. A v0 change
+therefore never needs a Callables or spec edit, and a new v0 operation is
+simply not exposed over BDP until someone names it.
 
-**A BDP test fails on your change.** There are none on main yet. While
+**A BDP test fails on your change.** No test of a BDP surface exists on
+main yet; `TestVendoredBDPMatchesPin` fails only when `third_party/bdp/` is
+edited by hand (see "The pin"). While
 `--protocol` is experimental, a beads change may break a BDP surface
 outright, but never silently: say so in the PR and file an issue on
 gastownhall/bdp. BDP's conformance tests (a later slice) will add the exact
@@ -54,10 +58,10 @@ waiver file.
 Two rules:
 
 - Never hand-edit the vendored BDP copy or the pin, even with a bdp PR open.
-  When they land, only `scripts/bdp-vendor.sh` will write them: at a new
-  checkpoint in a pin-bump PR (below), or at the same pin in the PR that
-  adds a consumer of another bdp file. So the vendored bytes will always
-  equal a checkpoint that bdp has merged and tagged.
+  Only `scripts/bdp-vendor.sh` writes them: at a new checkpoint in a
+  pin-bump PR (below), or at the same pin in the PR that adds a consumer of
+  another bdp file. So the vendored bytes always equal a checkpoint that
+  bdp has merged and tagged.
 - If the spec looks wrong, file an issue on gastownhall/bdp. Don't code
   around it silently.
 
@@ -78,9 +82,10 @@ release.
 
 The pin moves only in a pin-bump PR approved by Julian Knutsen.
 
-- **Target.** A tagged bdp checkpoint (`spec/<group>-<yyyymmdd>`) whose
-  commit is reachable from gastownhall/bdp `main`. Never a branch tip, a
-  fork or an untagged commit.
+- **Target.** An annotated bdp tag under `spec/` (for example
+  `spec/sprint1-20261109` or `spec/v0.1`) whose commit is reachable from
+  gastownhall/bdp `main`, as `scripts/bdp-vendor.sh` enforces. Never a
+  branch tip, a fork, a lightweight tag or an untagged commit.
 - **Forward only.** The new commit descends from the current one on bdp
   `main`. Reverting a bump PR, for example to clear a red main, restores the
   previous pin and is not a backward bump.
@@ -103,9 +108,55 @@ run here are beads' own.
 
 ## The pin
 
-The pin will land with the vendored copy, in the same directory
-(`third_party/bdp/`), not before. It will record the checkpoint the copy was
-taken from: its tag, commit and specRevision, plus each vendored file's
-hash, and a test will fail when a vendored file is changed, added or
-removed. The slice that adds `--protocol` will add a test that the
-specRevision `bd serve` advertises equals the pin's.
+The vendored copy lives in `third_party/bdp/spec/`, at bdp's own paths, and
+its pin and lock is `third_party/bdp/bdp.pin`. The pin records the
+checkpoint the copy was taken from (repository, tag, tag object, commit,
+specRevision and the rule that derives it) and, for each vendored file, its
+size, sha256 and git blob id. `scripts/bdp-vendor.sh` writes both. bdp's
+MIT notice is also listed in `THIRD_PARTY_LICENSES`.
+
+The pin's `lock` line is the sha256 of all its other non-comment lines.
+Two PRs that each change `bdp.pin`, such as a consumer slice and a pin
+bump, therefore always conflict on that line, even when they touch
+different files, and git can never merge them into a pin that mixes two
+checkpoints' bytes. The PR that merges second takes main's `bdp.pin`
+(`git checkout origin/main -- third_party/bdp/bdp.pin`) and reruns the
+script: at main's tag in a consumer slice, at its new tag in a pin bump.
+Never resolve a `bdp.pin` conflict by hand.
+
+`TestVendoredBDPMatchesPin` (`third_party/bdp/pin_test.go`) fails when a
+file under `spec/` is changed, added or removed, when `bdp.pin` is
+malformed, its non-comment lines are not in the script's exact format or
+its `lock` line does not match them, or when bdp's `LICENSE` is missing.
+It cannot check the checkpoint itself (tag, tag object, commit,
+specRevision) without bdp's history, so the reviewer of every PR that
+touches `bdp.pin` runs `scripts/bdp-vendor.sh <bdp checkout> <tag> --check`
+against a full, freshly fetched clone of gastownhall/bdp.
+
+The copy holds only files with a named consumer: bdp's `LICENSE`, and the
+core response schema and two current catalogs that BDP's conformance tests
+(a later slice) will read. Until they land, nothing in beads reads the
+schema or the catalogs. A slice that adds a consumer of another bdp file
+adds the path to the script's list, with the consumer beside it, and reruns
+the script at the same pin. bdp's TypeScript, its v0 cumulative matrices,
+catalogs, development data and fixtures, and spec prose are not vendored:
+nothing in beads runs or reads them, and bdp's own `specs/conformance.md`
+says v0.1 inherits no pass from that matrix. The conformance tests' failure
+messages will link to the spec at the pinned commit instead.
+
+**Re-pinning.** Run `scripts/bdp-vendor.sh <bdp checkout> <tag>` from a
+full (not shallow), freshly fetched clone of gastownhall/bdp, for a new
+annotated `spec/*` tag reachable from bdp `main`. It refuses a lightweight
+or non-`spec/*` tag, a commit not reachable from the checkout's
+`origin/main`, and a commit that does not descend from the current pin.
+`scripts/bdp-vendor.sh <bdp checkout> <tag> --check` verifies a tree
+without writing. It compares the tree with what `<tag>` generates and does
+not check the direction, so the reviewer of a pin bump also runs
+`git -C <bdp> merge-base --is-ancestor OLD NEW`, which exits 0 only for a
+forward move; OLD is the commit in main's `bdp.pin`. The pin-bump PR shows
+the `bdp.pin` diff (the vendored bytes are marked generated, so their diff
+collapses) and `git -C <bdp> log --oneline OLD..NEW -- <vendored paths>`.
+Julian Knutsen approves it.
+
+The slice that adds `--protocol` will add a test that the specRevision
+`bd serve` advertises equals the pin's.

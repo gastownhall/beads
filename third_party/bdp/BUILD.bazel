@@ -1,0 +1,92 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+# The vendored gastownhall/bdp files (spec/, byte copies at the pinned
+# checkpoint) and bdp.pin, their pin and lock. scripts/bdp-vendor.sh writes
+# both; engdocs/design/bdp.md has the rules. A consumer (BDP's conformance
+# tests, a later slice) declares :spec and bdp.pin as data.
+filegroup(
+    name = "spec",
+    srcs = glob(["spec/**"]),
+    visibility = ["//:__subpackages__"],
+)
+
+exports_files(
+    ["bdp.pin"],
+    visibility = ["//:__subpackages__"],
+)
+
+# Fails when a file under spec/ is changed, added or removed, when bdp.pin
+# is malformed, its non-comment lines are not in the script's exact format
+# or its lock line does not match them, or when LICENSE is missing. The
+# checkpoint itself (tag, commit, specRevision) needs bdp's history:
+# reviewers run scripts/bdp-vendor.sh --check. Stdlib only; reads its data
+# by relative path, as under go test.
+go_test(
+    name = "bdp_test",
+    srcs = ["pin_test.go"],
+    data = [
+        "bdp.pin",
+        ":spec",
+    ],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_doc_files",
+    srcs = glob(
+        [
+            "**/*.md",
+            "**/*.mdx",
+        ],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = [
+            "**/*_test.go",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_other_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.go",
+            "**/*.md",
+            "**/*.mdx",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end repo_files ---
