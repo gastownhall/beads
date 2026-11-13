@@ -5,7 +5,7 @@ description: Complete reference for bd configuration across config.yaml and data
 
 Complete configuration reference for beads.
 
-Last reviewed: 2026-10-26
+Last reviewed: 2026-11-12
 
 Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, `internal/config/`, `internal/configfile/`, and `internal/endpointtrust/`.
 
@@ -121,6 +121,8 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `dolt.local-only` | — | `BD_DOLT_LOCAL_ONLY` | `false` | Keep Dolt data off the network: skip remote wiring at `bd init`, suppress auto-push, have `bd dolt push`/`pull` and `bd sync` report remote sync as disabled without contacting a remote, and refuse `bd dolt remote add` |
 | `dolt.shared-server` | `--shared-server` | `BEADS_DOLT_SHARED_SERVER` | `false` | Share one Dolt server at `~/.beads/shared-server/` |
 | `dolt.max-conns` | — | `BEADS_DOLT_MAX_CONNS` | `10` | Connection pool size |
+| `dolt.pool-read-timeout` | — | `BEADS_DOLT_POOL_READ_TIMEOUT` | `10s` | How long bd waits for each read from the Dolt server: a per-I/O deadline, not a budget for the whole query. A read that runs past it fails and is not retried (see [Troubleshooting](/reference/troubleshooting#read-timeout-possible-pool-read-timeout)). Raise it for a slow or shared server |
+| `dolt.pool-write-timeout` | — | `BEADS_DOLT_POOL_WRITE_TIMEOUT` | `10s` | How long bd waits for each write to the Dolt server: a per-I/O deadline, not a budget for the whole query |
 | `git.author` | — | `BD_GIT_AUTHOR` | (none) | Override commit author for beads commits |
 | `git.no-gpg-sign` | — | `BD_GIT_NO_GPG_SIGN` | `false` | Disable GPG signing for beads commits |
 | `create.require-description` | — | `BD_CREATE_REQUIRE_DESCRIPTION` | `false` | Require description on `bd create` |
