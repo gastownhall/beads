@@ -199,3 +199,31 @@ func TestRepairRetiredLookupFindsTheDecoratedBackend(t *testing.T) {
 		t.Fatal("a store without the probe should skip it")
 	}
 }
+
+func TestPlanPrefixRepairKnownPrefixes(t *testing.T) {
+	t.Parallel()
+	// Known prefixes split longest-first; without one, the heuristic reads an
+	// all-letter suffix as part of the prefix. Target IDs, custom or not,
+	// stay, even when the target is a leading segment of a source prefix.
+	for _, tt := range []struct {
+		target string
+		known  []string
+		id     string
+		want   string
+	}{
+		{target: "kb", known: []string{"cre", "cre-db"}, id: "cre-db-wxyz", want: "kb-wxyz"},
+		{target: "kb", known: nil, id: "cre-db-wxyz", want: "kb-db-wxyz"},
+		{target: "kb", known: []string{"investment", "investment-advisor"}, id: "investment-advisor-q1x.4", want: "kb-q1x.4"},
+		{target: "kb", known: nil, id: "kb-adr-0001", want: ""},
+		{target: "beads", known: []string{"beads-vscode"}, id: "beads-vscode-1", want: ""},
+		{target: "kb", known: nil, id: "nohyphen", want: "kb-nohyphen"},
+	} {
+		plan, err := planPrefixRepair(context.Background(), tt.target, planIssues(tt.id), tt.known, "actor", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := planMapping(plan)[tt.id]; got != tt.want {
+			t.Errorf("%s with known %v -> %q, want %q", tt.id, tt.known, got, tt.want)
+		}
+	}
+}
