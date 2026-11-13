@@ -217,8 +217,8 @@ func hasBeadsHooks(settingsPath string) bool {
 				}
 				cmdStr, _ := cmdMap["command"].(string)
 				switch cmdStr {
-				case "bd prime", "bd prime --stealth",
-					"bd prime --hook-json", "bd prime --stealth --hook-json":
+				case "bd prime", "bd prime --stealth", "bd prime --no-memories",
+					"bd prime --hook-json", "bd prime --stealth --hook-json", "bd prime --no-memories --hook-json":
 					return true
 				}
 			}
@@ -747,8 +747,8 @@ func checkHookEvents(settingsPath string) (hasSessionStart, hasPreCompact bool) 
 				}
 				cmdStr, _ := cmdMap["command"].(string)
 				switch cmdStr {
-				case "bd prime", "bd prime --stealth",
-					"bd prime --hook-json", "bd prime --stealth --hook-json":
+				case "bd prime", "bd prime --stealth", "bd prime --no-memories",
+					"bd prime --hook-json", "bd prime --stealth --hook-json", "bd prime --no-memories --hook-json":
 					return true
 				}
 			}
