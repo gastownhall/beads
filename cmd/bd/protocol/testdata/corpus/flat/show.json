@@ -13,6 +13,7 @@
         "issue_type": "task",
         "owner": "test@protocol.test",
         "priority": 2,
+        "relation": "depends_on",
         "status": "open",
         "title": "Corpus dependency issue",
         "updated_at": "<TS>"
