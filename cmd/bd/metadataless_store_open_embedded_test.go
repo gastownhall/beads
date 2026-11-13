@@ -270,3 +270,74 @@ func TestEmbeddedMetadatalessStoreOpensKeepUnambiguousBehavior(t *testing.T) {
 		}
 	})
 }
+
+// TestEmbeddedMetadatalessStoreOpensRefuseSoleOtherDatabase is GH#4381 at the
+// store factories and the SDK: a metadata-less store whose only database is
+// not the effective target refuses with the shared metadata-less error
+// instead of creating the target beside it, for the default fallback, an
+// env-selected target, and the factories' sanitized names alike.
+func TestEmbeddedMetadatalessStoreOpensRefuseSoleOtherDatabase(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	for _, tc := range []struct{ name, env, target string }{
+		{name: "default target absent", target: "beads"},
+		{name: "env-selected target absent", env: "foo", target: "foo"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.env != "" {
+				t.Setenv("BEADS_DOLT_SERVER_DATABASE", tc.env)
+			}
+			beadsDir := t.TempDir()
+			seedEmbeddedDatabases(t, beadsDir, "myproj")
+			for _, opener := range metadatalessOpeners() {
+				t.Run(opener.name, func(t *testing.T) {
+					store, err := opener.open(t.Context(), beadsDir)
+					requireMetadatalessRefusal(t, store, err, tc.target, "myproj")
+					requireEmbeddedDatabases(t, beadsDir, "myproj")
+					if _, statErr := os.Stat(configfile.ConfigPath(beadsDir)); !os.IsNotExist(statErr) {
+						t.Fatalf("refused open wrote %s (stat err %v)", configfile.ConfigPath(beadsDir), statErr)
+					}
+				})
+			}
+		})
+	}
+
+	// renameDatabase renames a seeded database directory, giving the store a
+	// legacy unsanitized name that embeddeddolt.Open would not create.
+	renameDatabase := func(t *testing.T, beadsDir, from, to string) {
+		t.Helper()
+		root := filepath.Join(beadsDir, "embeddeddolt")
+		if err := os.Rename(filepath.Join(root, from), filepath.Join(root, to)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("writable factory sanitized collision", func(t *testing.T) {
+		// Both the legacy my-db and the sanitized my_db exist: neither is
+		// the sole target, so the factory refuses before its rename.
+		t.Setenv("BEADS_DOLT_SERVER_DATABASE", "my-db")
+		beadsDir := t.TempDir()
+		seedEmbeddedDatabases(t, beadsDir, "my_db", "legacy")
+		renameDatabase(t, beadsDir, "legacy", "my-db")
+		store, err := newDoltStoreFromConfig(t.Context(), beadsDir)
+		requireMetadatalessRefusal(t, store, err, "my_db", "my-db", "my_db")
+		requireEmbeddedDatabases(t, beadsDir, "my-db", "my_db")
+	})
+
+	t.Run("nonmutating factories legacy unsanitized only", func(t *testing.T) {
+		// Reads and previews open only the sanitized my_db; a store holding
+		// just the legacy my-db does not hold their target.
+		t.Setenv("BEADS_DOLT_SERVER_DATABASE", "my-db")
+		beadsDir := t.TempDir()
+		seedEmbeddedDatabases(t, beadsDir, "legacy")
+		renameDatabase(t, beadsDir, "legacy", "my-db")
+		for _, open := range []func(context.Context, string) (storage.DoltStorage, error){newReadOnlyStoreFromConfig, newPreviewStoreFromConfig} {
+			store, err := open(t.Context(), beadsDir)
+			var closer interface{ Close() error }
+			if store != nil {
+				closer = store
+			}
+			requireMetadatalessRefusal(t, closer, err, "my_db", "my-db")
+			requireEmbeddedDatabases(t, beadsDir, "my-db")
+		}
+	})
+}
