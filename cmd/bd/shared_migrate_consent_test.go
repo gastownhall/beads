@@ -81,10 +81,18 @@ func TestNoticeSharedMigrateRefusalPerDecision(t *testing.T) {
 		decision string
 		want     string
 		absent   string
+		// alsoWant and stale pin the adopt remedy (#6687): bare `bd bootstrap`
+		// no-ops on this existing database, the notice links the procedure
+		// rather than printing filesystem commands, and it makes no promise
+		// about reads, which can fail on the old schema.
+		alsoWant []string
+		stale    []string
 	}{
 		{decision: "shared-no-remote", want: "bd migrate schema"},
-		{decision: "adopt", want: "bd bootstrap", absent: "bd migrate schema"},
-		{decision: "adopt-ff", want: "bd bootstrap", absent: "bd migrate schema"},
+		{decision: "adopt", want: schema.AdoptionGuideURL, absent: "bd migrate schema", alsoWant: []string{`"Nothing to do."`, "no other bd process", "server section"},
+			stale: []string{"adopt it with 'bd bootstrap'", "reads keep working", "mv .beads"}},
+		{decision: "adopt-ff", want: schema.AdoptionGuideURL, absent: "bd migrate schema", alsoWant: []string{`"Nothing to do."`, "no other bd process", "server section"},
+			stale: []string{"adopt it with 'bd bootstrap'", "reads keep working", "mv .beads"}},
 		{decision: "fork-skew", want: "bd doctor", absent: "bd migrate schema"},
 		{decision: "", want: "bd migrate", absent: "bd migrate schema"},
 	} {
@@ -105,6 +113,16 @@ func TestNoticeSharedMigrateRefusalPerDecision(t *testing.T) {
 			if tt.absent != "" && strings.Contains(out, tt.absent) {
 				t.Errorf("notice for %q must not prescribe %q (the verb does not unlock this arm):\n%s",
 					tt.decision, tt.absent, out)
+			}
+			for _, want := range tt.alsoWant {
+				if !strings.Contains(out, want) {
+					t.Errorf("notice for %q missing %q:\n%s", tt.decision, want, out)
+				}
+			}
+			for _, stale := range tt.stale {
+				if strings.Contains(out, stale) {
+					t.Errorf("notice for %q still says %q:\n%s", tt.decision, stale, out)
+				}
 			}
 		})
 	}
