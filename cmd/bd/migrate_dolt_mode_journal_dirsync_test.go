@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -91,4 +92,27 @@ func TestMigrateJournalSaveAndRemoveSucceedOnPlainDirectory(t *testing.T) {
 	if _, err := os.Stat(migrateJournalPath(beadsDir)); !os.IsNotExist(err) {
 		t.Fatalf("journal still present after remove: %v", err)
 	}
+}
+
+// TestSyncMigrateJournalDir_SkipsOnlyWindows pins the helper's branch
+// selection directly: only Windows skips the directory flush; every other OS
+// still calls Sync and propagates its error. A closed handle stands in for a
+// real flush failure, so the propagated error is os.ErrClosed on every
+// platform.
+func TestSyncMigrateJournalDir_SkipsOnlyWindows(t *testing.T) {
+	d, err := os.Open(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, d.Close())
+
+	require.NoError(t, syncMigrateJournalDir("windows", d), "windows must skip the unsupported directory flush")
+	for _, goos := range []string{"linux", "darwin", "freebsd"} {
+		err := syncMigrateJournalDir(goos, d)
+		require.Error(t, err, "%s must still flush the directory", goos)
+		assert.ErrorIs(t, err, os.ErrClosed, "%s flush error must propagate", goos)
+	}
+
+	fresh, err := os.Open(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = fresh.Close() })
+	require.NoError(t, syncMigrateJournalDir(runtime.GOOS, fresh))
 }
