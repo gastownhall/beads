@@ -482,6 +482,7 @@ var versionExemptions = map[string]string{
 
 	// aux tables matched via templated %s, not work-bead state
 	"ReconcileChildCounters":        "child_counters are derived CLI acceleration state",
+	"ReserveChildSuffixesInTx":      "raises the child_counters high-water mark (GH#4750): counter state, not work-bead state",
 	"GetNextChildIDTx":              "child_counters allocation, not work-bead state",
 	"RecordEventInTable":            "writes the events audit table (templated %s), not work-bead state",
 	"RecordFullEventInTable":        "writes the events audit table (templated %s), not work-bead state",

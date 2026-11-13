@@ -177,6 +177,10 @@ func (t *embeddedTransaction) DeleteIssue(ctx context.Context, id string) error 
 	if result.IssueRowsChanged {
 		t.dirty.MarkDirty("issues")
 	}
+	// The suffix reservation's counter (GH#4750).
+	for changed := range result.ChangedTables {
+		t.dirty.MarkDirty(changed)
+	}
 	return nil
 }
 

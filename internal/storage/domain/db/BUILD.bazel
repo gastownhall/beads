@@ -45,6 +45,7 @@ go_test(
         "batching_dedupe_test.go",
         "batching_test.go",
         "child_counter_test.go",
+        "child_suffix_reserve_test.go",
         "close_checked_usecase_test.go",
         "close_test.go",
         "close_usecase_test.go",

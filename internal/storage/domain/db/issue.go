@@ -78,6 +78,9 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 		if err := issueops.InsertIssueStrictInTx(ctx, r.runner, table, issue); err != nil {
 			return err
 		}
+		if err := reserveCreatedChildSuffix(ctx, r.runner, issue.ID); err != nil {
+			return err
+		}
 		if err := r.events.Record(ctx, domain.Event{
 			IssueID: issue.ID,
 			Type:    types.EventCreated,
@@ -133,6 +136,9 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 	if err := insertIssueRow(ctx, r.runner, table, issue); err != nil {
 		return err
 	}
+	if err := reserveCreatedChildSuffix(ctx, r.runner, issue.ID); err != nil {
+		return err
+	}
 	if err := r.events.Record(ctx, domain.Event{
 		IssueID: issue.ID,
 		Type:    types.EventCreated,
@@ -147,6 +153,36 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 		return issueops.RecordVersionInTx(ctx, r.runner, issue.ID, actor)
 	}
 	return issueops.RecordVersionForCreateInTx(ctx, r.runner, issue.ID, actor)
+}
+
+// reserveCreatedChildSuffix raises the parent's child counter, in the
+// parent's own plane, to at least the suffix of a hierarchical id this Insert
+// just materialized (GH#4750), as issueops' singular and batch creates do. An
+// explicit child (P.8) that left the counter behind would otherwise be the
+// only record of its suffix, and its removal would let the next generated
+// child of P re-mint it. Both insert branches call it, before any version
+// return, so neither the strict create nor the upsert skips it.
+func reserveCreatedChildSuffix(ctx context.Context, runner Runner, id string) error {
+	if _, err := issueops.ReserveChildSuffixesInTx(ctx, runner, []string{id}, nil); err != nil {
+		return fmt.Errorf("db: Insert %s: reserve child suffix: %w", id, err)
+	}
+	return nil
+}
+
+// reserveRemovedChildSuffixes keeps each removed row's hierarchical suffix
+// used in its surviving parent's counter (GH#4750), so the next generated
+// child never re-mints it. A parent removed in the same call keeps no counter
+// to raise; one removed by a later call (the other plane's DeleteByIDs) takes
+// its counter row with it through the counter table's foreign key.
+func reserveRemovedChildSuffixes(ctx context.Context, runner Runner, ids []string) error {
+	departing := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		departing[id] = true
+	}
+	if _, err := issueops.ReserveChildSuffixesInTx(ctx, runner, ids, departing); err != nil {
+		return fmt.Errorf("reserve child suffixes: %w", err)
+	}
+	return nil
 }
 
 func (r *issueSQLRepositoryImpl) InsertBatch(ctx context.Context, issues []*types.Issue, actor string, opts domain.InsertIssueOpts) error {
@@ -1112,6 +1148,9 @@ func (r *issueSQLRepositoryImpl) Delete(ctx context.Context, id string, opts dom
 	if err := issueops.RecordDependencyRemovalsForIssuesInTx(ctx, r.runner, []string{id}, actor); err != nil {
 		return fmt.Errorf("db: IssueSQLRepository.Delete %s: journal dependency removals: %w", id, err)
 	}
+	if err := reserveRemovedChildSuffixes(ctx, r.runner, []string{id}); err != nil {
+		return fmt.Errorf("db: IssueSQLRepository.Delete %s: %w", id, err)
+	}
 	//nolint:gosec // G201: table is a hardcoded constant.
 	res, err := r.runner.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = ?", table), id)
 	if err != nil {
@@ -1152,6 +1191,9 @@ func (r *issueSQLRepositoryImpl) DeleteByIDs(ctx context.Context, ids []string, 
 	// still be read.
 	if err := issueops.RecordDependencyRemovalsForIssuesInTx(ctx, r.runner, actualIDs, actor); err != nil {
 		return 0, fmt.Errorf("db: IssueSQLRepository.DeleteByIDs journal dependency removals: %w", err)
+	}
+	if err := reserveRemovedChildSuffixes(ctx, r.runner, actualIDs); err != nil {
+		return 0, fmt.Errorf("db: IssueSQLRepository.DeleteByIDs: %w", err)
 	}
 	total := 0
 	for start := 0; start < len(ids); start += deleteBatchSize {

@@ -1292,6 +1292,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Consistency also skips `external:` parents; the checks count these edges as
   "not verifiable here". A missing target under a held prefix is still an
   orphan, and under `--deep` an edge whose source is missing is still broken.
+- **Generated child ids no longer re-mint a suffix a removed or renamed
+  child used** (part of
+  [#4750](https://github.com/gastownhall/beads/issues/4750); the issue stays
+  open for the JSONL leg). An explicit create of `P.N`, a rename into or
+  out of `P.N`, and every removal of `P.N`
+  (`bd delete`, plain `bd purge`/`bd prune`, wisp deletes, source-repo
+  deletes) raise the surviving parent's counter to at least `N`, in the
+  parent's own plane, so the next generated child continues past it. The
+  counter never decreases, no tombstone is written, an explicit
+  `bd create --id P.N` still succeeds, and a parent deleted with its
+  children keeps no counter. Limits: deleting and recreating the parent
+  drops its counter, raw SQL deletes bypass the reservation, a rebuild from
+  `issues.jsonl` loses the counter (the export format carries no counter
+  state), and suffix history already lost before the upgrade is not
+  recovered. On clones synced with `bd dolt pull`, a delete or rename that
+  raises a parent's missing or lagging counter can now conflict with a
+  child another clone created under the same parent: the pull fails on a
+  conflict in that parent's `child_counters` row, as parallel child creates
+  already do ([#4796](https://github.com/gastownhall/beads/issues/4796)).
 - **The aux row id re-key again skips tables with dolthub/dolt#11131
   encoding drift instead of aborting the migration on every open** (#8372).
   The Dolt 2.6 engine reports the drift as `malformed out-of-band adaptive

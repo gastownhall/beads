@@ -25,6 +25,11 @@ type DeleteIssueResult struct {
 	// row: the deleted row itself, or a dependent whose is_blocked the delete
 	// recomputed. A wisp delete changes one only through the recompute.
 	IssueRowsChanged bool
+	// ChangedTables names the counter tables the delete wrote to keep the
+	// removed row's child suffix reserved under its surviving parent
+	// (GH#4750). A wisp child of a durable parent writes child_counters, which
+	// a wisp delete's own staging set does not name.
+	ChangedTables map[string]bool
 }
 
 // DeleteIssueInTx removes one row and everything that hangs off it, journaling
@@ -61,6 +66,12 @@ func DeleteIssueInTxWithResult(ctx context.Context, tx *sql.Tx, id string, actor
 	if err := RecordDependencyRemovalsForIssuesInTx(ctx, tx, []string{id}, actor); err != nil {
 		return DeleteIssueResult{}, fmt.Errorf("journal dependency removals for %s: %w", id, err)
 	}
+	// GH#4750: the removed row's suffix stays used under its parent, so the
+	// next generated child never re-mints it.
+	changedTables, err := ReserveChildSuffixesInTx(ctx, tx, []string{id}, map[string]bool{id: true})
+	if err != nil {
+		return DeleteIssueResult{}, fmt.Errorf("delete %s: reserve child suffix: %w", id, err)
+	}
 	if err := deleteIssueRowInTx(ctx, tx, id, isWisp, actor); err != nil {
 		return DeleteIssueResult{}, err
 	}
@@ -71,7 +82,7 @@ func DeleteIssueInTxWithResult(ctx context.Context, tx *sql.Tx, id string, actor
 	}
 	NoteDeleteBlockedRecheck(tx, []string{id}, "", affectedIssues, affectedWisps)
 
-	return DeleteIssueResult{IssueRowsChanged: !isWisp || recompute.IssueRowsChanged}, nil
+	return DeleteIssueResult{IssueRowsChanged: !isWisp || recompute.IssueRowsChanged, ChangedTables: changedTables}, nil
 }
 
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
@@ -389,6 +400,13 @@ func DeleteResolvedSetInTx(ctx context.Context, tx *sql.Tx, set DeletionSet, dry
 	journaledDeletes, err := journalableDeletesInTx(ctx, tx, "issues", set.RegularIDs)
 	if err != nil {
 		return nil, err
+	}
+	// GH#4750: every removed row's suffix stays used under its surviving
+	// parent; a parent removed in the same set keeps no counter to raise.
+	// Callers stage child_counters with the delete (the server bulk delete's
+	// table list, the sweepers' swept tables).
+	if _, err := ReserveChildSuffixesInTx(ctx, tx, set.All, deletedSet); err != nil {
+		return nil, fmt.Errorf("batch delete: reserve child suffixes: %w", err)
 	}
 	// Edges are journaled before the rows go, while their source snapshots can
 	// still be read.

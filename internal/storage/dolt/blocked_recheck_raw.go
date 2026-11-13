@@ -44,6 +44,9 @@ type wispDurable struct {
 	// dependencies: deleting the wisp removed durable edges that pointed at it
 	// (issueops.DeleteWispFromDependenciesInTx).
 	dependencies bool
+	// childCounters: deleting the wisp kept its suffix reserved in a durable
+	// parent's counter (GH#4750).
+	childCounters bool
 }
 
 // commitWispDurable publishes the durable rows a wisp write changed. The
@@ -60,6 +63,9 @@ func (s *DoltStore) commitWispDurable(ctx context.Context, changed wispDurable, 
 	}
 	if changed.issues {
 		tables = append(tables, "issues")
+	}
+	if changed.childCounters {
+		tables = append(tables, "child_counters")
 	}
 	if len(tables) == 0 {
 		return
