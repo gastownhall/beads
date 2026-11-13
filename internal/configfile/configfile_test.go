@@ -875,6 +875,31 @@ func TestProxiedServerClientInfo_RoundTrip(t *testing.T) {
 	})
 }
 
+func TestSaveProxiedServerClientInfo_WriteFailures(t *testing.T) {
+	t.Run("missing parent", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "missing")
+		if err := SaveProxiedServerClientInfo(dir, &ProxiedServerClientInfo{}); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("Save: got %v, want missing-directory error", err)
+		}
+	})
+	t.Run("directory destination", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Mkdir(ProxiedServerClientInfoPath(dir), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := SaveProxiedServerClientInfo(dir, &ProxiedServerClientInfo{}); err == nil {
+			t.Fatal("Save with directory destination succeeded")
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 || entries[0].Name() != ProxiedServerClientInfoFileName || !entries[0].IsDir() {
+			t.Fatalf("failed save changed destination or leaked temp files: %v", entries)
+		}
+	})
+}
+
 // TestSyncSidecarDir pins the post-rename directory flush per platform
 // (bd-pw5t5e, GH#6858). The missing-directory rows are portable: no row
 // opens a real directory except the host-native writable sync.
