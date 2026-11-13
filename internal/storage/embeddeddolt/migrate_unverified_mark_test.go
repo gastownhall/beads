@@ -1,0 +1,154 @@
+//go:build cgo
+
+package embeddeddolt_test
+
+import (
+	"context"
+	"database/sql"
+	"strings"
+	"testing"
+
+	"github.com/steveyegge/beads/internal/storage/schema"
+)
+
+// gastownhall/beads#5269: the migration runner records a version mark once the
+// migration body returns no error, without checking that the body's DDL took
+// effect. A reporter's clone ended up with marks v50..v53 while 0050's guarded
+// (PREPARE/EXECUTE) `ALTER TABLE dependencies ALTER COLUMN id DROP DEFAULT`
+// never applied, and because the mark is present no later `bd migrate` heals it.
+//
+// silentPreparedALTERConn stands in for that environment: it delivers 0050's
+// body with the guarded ALTER replaced by a no-op, so the call still succeeds
+// (the shape of dolthub/dolt#11345, a PREPARE'd ALTER that reports success and
+// does nothing).
+type silentPreparedALTERConn struct {
+	schema.DBConn
+}
+
+func (c silentPreparedALTERConn) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	if strings.Contains(query, "Migration 0050:") {
+		query = strings.Replace(query, "'ALTER TABLE dependencies ALTER COLUMN id DROP DEFAULT'", "'SELECT 1'", 1)
+	}
+	return c.DBConn.ExecContext(ctx, query, args...)
+}
+
+func dependenciesIDDefault(t *testing.T, ctx context.Context, conn *sql.Conn) sql.NullString {
+	t.Helper()
+	var def sql.NullString
+	if err := conn.QueryRowContext(ctx, `SELECT COLUMN_DEFAULT FROM INFORMATION_SCHEMA.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'dependencies' AND COLUMN_NAME = 'id'`).Scan(&def); err != nil {
+		t.Fatalf("read dependencies.id default: %v", err)
+	}
+	return def
+}
+
+// TestEmbeddedMigrateDoesNotRecordVersionWhoseDDLDidNotApply_5269 asserts the
+// behaviour the report expects: when 0050's DDL does not take effect, the pass
+// either fails loudly or does not record version 50. It must never leave the
+// database claiming v50+ while dependencies.id still carries 0043's
+// DEFAULT (uuid()).
+func TestEmbeddedMigrateDoesNotRecordVersionWhoseDDLDidNotApply_5269(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	dataDir := seedMainSchemaAt(t, ctx, 49)
+
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+	restorePre4259DependenciesDefault(t, ctx, conn)
+
+	_, migrateErr := schema.MigrateUp(ctx, silentPreparedALTERConn{DBConn: conn})
+
+	var has50 int
+	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations WHERE version = 50").Scan(&has50); err != nil {
+		t.Fatalf("read schema_migrations: %v", err)
+	}
+	def := dependenciesIDDefault(t, ctx, conn)
+	maxVersion := currentMainVersion(t, ctx, conn)
+	if migrateErr == nil && has50 == 1 && def.Valid {
+		t.Fatalf("MigrateUp succeeded and recorded version 50 (cursor now v%d) while dependencies.id still has DEFAULT %q: "+
+			"the mark claims 0050 applied but its DDL never took effect, and re-running migrate cannot heal it", maxVersion, def.String)
+	}
+
+	// Re-running migrate is the user's only lever; it must not stay silent either.
+	_, rerunErr := schema.MigrateUp(ctx, conn)
+	if def := dependenciesIDDefault(t, ctx, conn); rerunErr == nil && def.Valid {
+		t.Fatalf("re-run MigrateUp succeeded but dependencies.id still has DEFAULT %q while schema_migrations claims v%d", def.String, currentMainVersion(t, ctx, conn))
+	}
+}
+
+// restorePre4259DependenciesDefault puts back 0043's DEFAULT (UUID()) on
+// dependencies.id and commits it. Today's 0043 drops the random default
+// itself; the reporter's clone ran the earlier 0043 that left it for 0050 to
+// drop.
+func restorePre4259DependenciesDefault(t *testing.T, ctx context.Context, conn *sql.Conn) {
+	t.Helper()
+	for _, q := range []string{
+		"ALTER TABLE dependencies ALTER COLUMN id SET DEFAULT (UUID())",
+		"CALL DOLT_COMMIT('-Am', 'test: pre-#4259 0043 shape')",
+	} {
+		if _, err := conn.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	if def := dependenciesIDDefault(t, ctx, conn); !def.Valid {
+		t.Fatalf("precondition: dependencies.id has no DEFAULT at v49; want 0043's DEFAULT (uuid())")
+	}
+}
+
+// AC-1 on the real engine: 0050's body succeeds without dropping the default.
+// The post-check drops it directly, verifies it gone, and the main step commit
+// for 0050 carries that dependencies schema change together with the v50 mark
+// — no uncommitted correction is left behind for a later pass to trip over.
+func TestEmbeddedMigrateCommitsTheDroppedDefaultCorrectionWithItsMark_5269(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	dataDir := seedMainSchemaAt(t, ctx, 49)
+
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+	restorePre4259DependenciesDefault(t, ctx, conn)
+
+	if _, err := schema.MigrateUp(ctx, silentPreparedALTERConn{DBConn: conn}); err != nil {
+		t.Fatalf("MigrateUp with 0050's guarded ALTER silenced: %v; want the post-check to correct it and the pass to succeed", err)
+	}
+	if def := dependenciesIDDefault(t, ctx, conn); def.Valid {
+		t.Fatalf("dependencies.id still has DEFAULT %q after MigrateUp", def.String)
+	}
+
+	const stepMessage = "schema: apply migration 0050_dependencies_deterministic_id.up.sql"
+	var stepCommit string
+	if err := conn.QueryRowContext(ctx, "SELECT commit_hash FROM dolt_log WHERE message = ?", stepMessage).Scan(&stepCommit); err != nil {
+		t.Fatalf("finding the 0050 step commit %q: %v", stepMessage, err)
+	}
+	changed := map[string]bool{}
+	rows, err := conn.QueryContext(ctx, "SELECT to_table_name, schema_change FROM dolt_diff_summary(?, ?)", stepCommit+"~", stepCommit)
+	if err != nil {
+		t.Fatalf("dolt_diff_summary of the 0050 step commit: %v", err)
+	}
+	for rows.Next() {
+		var table string
+		var schemaChange bool
+		if err := rows.Scan(&table, &schemaChange); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		changed[table] = changed[table] || schemaChange
+		if table == "schema_migrations" {
+			changed[table] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+	_ = rows.Close()
+	if !changed["dependencies"] || !changed["schema_migrations"] {
+		t.Fatalf("0050 step commit changed %v; want the dependencies schema correction and the schema_migrations mark in the same commit", changed)
+	}
+
+	var dirty int
+	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_status WHERE table_name = 'dependencies'").Scan(&dirty); err != nil {
+		t.Fatalf("dolt_status: %v", err)
+	}
+	if dirty != 0 {
+		t.Fatalf("dependencies is still dirty after MigrateUp; the correction was not committed")
+	}
+}
