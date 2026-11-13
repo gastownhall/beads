@@ -1172,3 +1172,102 @@ func TestRunRecipe_CopilotRemoveKeepsUserInstructions(t *testing.T) {
 		t.Fatalf("beads-owned manifest survived --remove (stat err %v)", err)
 	}
 }
+
+// captureStderrForCopilotSetup captures what fn writes to stderr, as the
+// backup-lock tests capture theirs.
+func captureStderrForCopilotSetup(t *testing.T, fn func()) string {
+	t.Helper()
+
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan string, 1)
+	go func() {
+		var buf []byte
+		chunk := make([]byte, 4096)
+		for {
+			n, err := r.Read(chunk)
+			buf = append(buf, chunk[:n]...)
+			if err != nil {
+				done <- string(buf)
+				return
+			}
+		}
+	}()
+	os.Stderr = w
+	fn()
+	w.Close()
+	os.Stderr = oldStderr
+	return <-done
+}
+
+// Markers bd cannot own stop an install or a --remove before either recipe
+// path is touched: the refusal names the file, and neither the instructions
+// file nor the manifest changes around it (GH#7431).
+func TestRunRecipe_CopilotMalformedRefusedBeforeMutating(t *testing.T) {
+	for _, mode := range []struct {
+		name   string
+		remove bool
+	}{
+		{name: "install", remove: false},
+		{name: "remove", remove: true},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+
+			t.Chdir(tmpDir)
+			t.Setenv("BEADS_DIR", "")
+			resetSetupResolutionCaches(t)
+			resetSetupGlobals(t)
+
+			instructions := filepath.Join(tmpDir, ".github", "copilot-instructions.md")
+			if err := os.MkdirAll(filepath.Dir(instructions), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			// A dangling BEGIN marker: whose span cannot be named.
+			const malformed = "intro\n<!-- BEGIN BEADS INTEGRATION -->\nbody\n"
+			if err := os.WriteFile(instructions, []byte(malformed), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			manifest := filepath.Join(tmpDir, ".copilot-plugin", "plugin.json")
+			if mode.remove {
+				if err := os.MkdirAll(filepath.Dir(manifest), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(manifest, []byte("{}\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			setupRemove = mode.remove
+			t.Cleanup(func() { setupRemove = false })
+
+			var runErr error
+			stderr := captureStderrForCopilotSetup(t, func() {
+				_ = captureStdout(t, func() error {
+					runErr = runRecipe("copilot")
+					return nil
+				})
+			})
+			if runErr == nil {
+				t.Fatalf("bd setup copilot (%s) accepted markers it cannot own", mode.name)
+			}
+			if !strings.Contains(stderr, ".github/copilot-instructions.md") {
+				t.Fatalf("refusal does not name the file:\n%s", stderr)
+			}
+			got, err := os.ReadFile(instructions)
+			if err != nil || string(got) != malformed {
+				t.Fatalf("instructions changed: %q, %v", got, err)
+			}
+			if mode.remove {
+				if _, err := os.Stat(manifest); err != nil {
+					t.Fatalf("manifest was removed before the refusal: %v", err)
+				}
+			} else if _, err := os.Stat(manifest); !os.IsNotExist(err) {
+				t.Fatalf("manifest was written before the refusal (stat err %v)", err)
+			}
+		})
+	}
+}

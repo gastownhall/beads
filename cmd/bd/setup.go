@@ -333,6 +333,22 @@ func runRecipe(name string) error {
 		}
 	}
 
+	// Install and --remove preflight each shared path before touching any
+	// recipe path: markers whose span bd cannot name would make either one
+	// corrupt or delete the user's text, so a known-bad file refuses the
+	// whole command with nothing changed (--check only reads, and reports
+	// the same file itself).
+	if !setupCheck {
+		for _, path := range paths {
+			if legacy, isShared := shared[path]; isShared {
+				if err := preflightSharedPath(path, legacy); err != nil {
+					return HandleErrorWithHint(err.Error(),
+						"Fix or remove the BEADS INTEGRATION markers in that file by hand, then run the command again.")
+				}
+			}
+		}
+	}
+
 	if setupCheck {
 		var problems []string
 		for _, path := range paths {
@@ -449,6 +465,25 @@ func translateSetupError(err error) error {
 		return nil
 	}
 	return SilentExit()
+}
+
+// preflightSharedPath reads a shared instruction file before install or
+// --remove mutates any recipe path, and refuses what neither can own
+// safely, naming the file: beads markers whose span cannot be named (a
+// dangling, reversed, nested or duplicated pair, an unclosed BEGIN
+// comment), or a read error. A missing file is fine — that is an install.
+func preflightSharedPath(path, legacy string) error {
+	data, err := os.ReadFile(path) // #nosec G304 -- a bd setup recipe's own path
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("cannot read %s: %v", remedy.PrintedValue(path), remedy.PrintedError(err))
+	}
+	if setup.ClassifySharedSection(string(data), legacy) == setup.SharedSectionMalformed {
+		return fmt.Errorf("%s holds BEADS INTEGRATION markers bd cannot own", remedy.PrintedValue(path))
+	}
+	return nil
 }
 
 // sharedSectionCheckProblem names what bd setup --check finds missing in a
