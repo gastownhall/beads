@@ -48,6 +48,10 @@ project/
 Key points:
 
 - `bd` discovers the repository's `.beads` directory from linked worktrees.
+- With no worktree-local database or discovery override, running `bd` from a
+  linked worktree uses the main checkout's `.beads` directory for runtime
+  files, including when shared-server data lives outside that checkout.
+  Unrelated ignored files still prevent normal worktree removal.
 - Issue changes are stored in Dolt, not committed to the current Git branch.
 - Cross-clone sync uses `bd dolt pull` and `bd dolt push`.
 - No `sync.branch` or beads-managed Git worktree is required.

@@ -871,3 +871,99 @@ func TestFindDatabasePath_WorktreeServerModeFromSubdir(t *testing.T) {
 		t.Errorf("FindDatabasePath() from subdir = %q, want main repo dolt dir %q", result, mainDoltDir)
 	}
 }
+
+// TestFindBeadsDir_WorktreeServerFallback covers server-backed main checkouts
+// without local data, as well as the overrides that must continue to win.
+// It only exercises discovery; it does not connect to or start a server.
+func TestFindBeadsDir_WorktreeServerFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name, mainMetadata, mainConfig, localDatabase string
+		redirect, wantLocal                           bool
+	}{
+		{"shared server", `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"shared_project"}`, "dolt.shared-server: true\n", "", false, false},
+		{"external server", `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_server_host":"db.example.invalid","dolt_database":"external_project"}`, "", "", false, false},
+		{"local server", `{"database":"dolt","backend":"dolt","dolt_mode":"server"}`, "", "dolt", false, true},
+		{"embedded database", `{"database":"dolt","backend":"dolt","dolt_mode":"server"}`, "", "embeddeddolt", false, true},
+		{"legacy database", `{"database":"dolt","backend":"dolt","dolt_mode":"server"}`, "", "beads.db", false, true},
+		{"redirect", `{"database":"dolt","backend":"dolt","dolt_mode":"server"}`, "", "", true, false},
+		{"nascent project", `{"database":"dolt"}`, "", "", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, key := range []string{"BEADS_DIR", "BEADS_DB", "BEADS_DOLT_SERVER_MODE", "BEADS_DOLT_SHARED_SERVER", "BEADS_DOLT_SERVER_HOST"} {
+				t.Setenv(key, "")
+			}
+			t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+			t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+			root := t.TempDir()
+			mainRepo := filepath.Join(root, "main")
+			mainBeads := filepath.Join(mainRepo, ".beads")
+			if err := os.MkdirAll(mainBeads, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			write := func(path, body string) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			runGit := func(dir string, args ...string) {
+				t.Helper()
+				cmd := exec.Command("git", args...)
+				cmd.Dir = dir
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("git %v: %v\n%s", args, err, out)
+				}
+			}
+			runGit(mainRepo, "init")
+			runGit(mainRepo, "config", "core.hooksPath", ".git/hooks")
+			runGit(mainRepo, "config", "user.name", "Discovery Test")
+			runGit(mainRepo, "config", "user.email", "discovery@example.invalid")
+			runGit(mainRepo, "config", "commit.gpgsign", "false")
+			write(filepath.Join(mainBeads, "metadata.json"), tc.mainMetadata)
+			write(filepath.Join(mainBeads, "config.yaml"), tc.mainConfig)
+			write(filepath.Join(mainBeads, ".gitignore"), "dolt/\nembeddeddolt/\n*.db\nredirect\n")
+			runGit(mainRepo, "add", ".beads")
+			runGit(mainRepo, "commit", "-m", "tracked metadata without local data")
+			worktree := filepath.Join(root, "worktree")
+			runGit(mainRepo, "worktree", "add", "-b", "worker", worktree)
+			localBeads := filepath.Join(worktree, ".beads")
+			want := mainBeads
+			if tc.localDatabase != "" {
+				path := filepath.Join(localBeads, tc.localDatabase)
+				if tc.localDatabase == "beads.db" {
+					write(path, "")
+				} else if err := os.MkdirAll(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.wantLocal {
+				want = localBeads
+			}
+			if tc.redirect {
+				want = filepath.Join(root, "redirect-target")
+				if err := os.MkdirAll(want, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				write(filepath.Join(want, "metadata.json"), `{"database":"dolt","dolt_mode":"server","dolt_database":"other_project"}`)
+				write(filepath.Join(localBeads, "redirect"), want+"\n")
+			}
+			want, err := filepath.EvalSymlinks(want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, cwd := range []string{worktree, filepath.Join(worktree, "subdir")} {
+				if err := os.MkdirAll(cwd, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				t.Chdir(cwd)
+				git.ResetCaches()
+				got := FindBeadsDir()
+				resolved, err := filepath.EvalSymlinks(got)
+				if err != nil || resolved != want {
+					t.Fatalf("FindBeadsDir from %s = %q (%v), want %q", cwd, got, err, want)
+				}
+			}
+			t.Cleanup(git.ResetCaches)
+		})
+	}
+}
