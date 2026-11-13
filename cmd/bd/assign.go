@@ -25,7 +25,7 @@ Refuses to overwrite another actor's live in_progress claim without --force
 
 Examples:
   bd assign bd-123 alice
-  bd assign bd-123 ""      # unassign`,
+  bd assign bd-123 ""      # unassign ("-" or whitespace-only text also unassigns)`,
 	Args:          cobra.ExactArgs(2),
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -54,7 +54,7 @@ Examples:
 		}
 
 		id := args[0]
-		assignee := args[1]
+		assignee := normalizeAssigneeInput(args[1])
 
 		ctx := rootCtx
 
