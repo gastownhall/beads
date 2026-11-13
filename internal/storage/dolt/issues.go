@@ -161,6 +161,12 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 		return nil
 	}
 
+	// Snapshot before the branch choice; both retry closures below reset first
+	// on every attempt so a rolled-back attempt's mint never replays as an
+	// explicit id (see snapshotCreateIDsForReplay and withRetryTx's closure
+	// contract).
+	resetMintedIDs := snapshotCreateIDsForReplay(issues)
+
 	// All-wisps fast path: one SQL transaction, no Dolt versioning.
 	// Covers both ephemeral issues and no-history issues (both skip DOLT_COMMIT).
 	// A create-time edge can still flip a durable row's is_blocked (a waiter
@@ -186,6 +192,7 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 
 	var result issueops.CreateIssuesResult
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		resetMintedIDs()
 		var err error
 		result, err = issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
 		return err

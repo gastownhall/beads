@@ -408,3 +408,151 @@ func TestCreateIssueReplayRemintsAutoMintedID(t *testing.T) {
 		})
 	}
 }
+
+// TestCreateIssuesReplayMovesBackfilledDependencyToRemint (AC-2): a durable
+// auto-id CreateIssues batch whose transaction rolls back after the row
+// write, the dependency backfill and the comment insert, with a competitor
+// taking the aborted issue id before the replay. The replay must re-mint the
+// issue id, re-backfill the dependency to the NEW id and re-derive the
+// comment id from its final owner/content/timestamp — and nothing of the
+// caller's may attach to the competitor's row.
+func TestCreateIssuesReplayMovesBackfilledDependencyToRemint(t *testing.T) {
+	fixedCommentAt, err := time.ParseInLocation("2006-01-02 15:04:05", "2024-05-01 12:00:00", time.UTC)
+	if err != nil {
+		t.Fatalf("parse fixed comment timestamp: %v", err)
+	}
+
+	// issueCount drives the batch shape: 1 takes the per-row path, 2 enables
+	// the create batch cache. armCount drives repeated rollbacks: each extra
+	// interception rolls one more replay back before the final one commits.
+	run := func(t *testing.T, issueCount, armCount int) {
+		store, cleanup := setupConcurrentTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+
+		target := &types.Issue{ID: "test-ac2-target", Title: "dep target", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+		if err := store.CreateIssue(ctx, target, "seeder"); err != nil {
+			t.Fatalf("seed dep target: %v", err)
+		}
+
+		head := &types.Issue{
+			Title:     "batch head loser",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Dependencies: []*types.Dependency{{
+				DependsOnID: "test-ac2-target",
+				Type:        types.DepBlocks,
+			}},
+			Comments: []*types.Comment{{
+				Author:    "author",
+				Text:      "head comment",
+				CreatedAt: fixedCommentAt,
+			}},
+		}
+		issues := []*types.Issue{head}
+		for i := 1; i < issueCount; i++ {
+			issues = append(issues, &types.Issue{
+				Title: fmt.Sprintf("batch sibling %d", i), Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+			})
+		}
+
+		var staleHeadID string
+		var competitorErr error
+		competitorDone := false
+		// Declared before the arming statement: the interceptor closure runs
+		// inside it.
+		var fault *createCommitFault
+		var origDB *sql.DB
+		fault, origDB, _ = armCreateCommitFault(t, store, armCount, func() error {
+			// Occupy the aborted id once, on the first interception: after the
+			// real rollback the id is free, so the competitor's explicit-id
+			// create commits. Later rollbacks replay against it.
+			if competitorDone {
+				return nil
+			}
+			competitorDone = true
+			staleHeadID = head.ID
+			competitorErr = createOnPool(ctx, origDB, &types.Issue{
+				ID: staleHeadID, Title: "concurrent winner", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask,
+			}, "winner")
+			return nil
+		})
+
+		if err := store.CreateIssues(ctx, issues, "loser"); err != nil {
+			t.Fatalf("CreateIssues: %v", err)
+		}
+		if competitorErr != nil {
+			t.Fatalf("concurrent winner create: %v", competitorErr)
+		}
+		if staleHeadID == "" {
+			t.Fatal("fault never observed the aborted mint: interleaving not forced")
+		}
+		if armed, commits := fault.counts(); armed != armCount || commits != 1 {
+			t.Fatalf("fault intercepted %d commits (want %d) and observed %d successful commits (want 1: the final replay)", armed, armCount, commits)
+		}
+
+		winner, err := issueOnPool(ctx, origDB, staleHeadID)
+		if err != nil {
+			t.Fatalf("read competitor %s: %v", staleHeadID, err)
+		}
+		if winner.Title != "concurrent winner" {
+			t.Errorf("competitor %s was overwritten by the replayed batch: title = %q, want %q", staleHeadID, winner.Title, "concurrent winner")
+		}
+		if head.ID == staleHeadID {
+			t.Fatalf("replay reused the aborted auto-minted id %s instead of re-minting", staleHeadID)
+		}
+		if got := head.Dependencies[0].IssueID; got != head.ID {
+			t.Errorf("backfilled dependency IssueID = %q, want re-backfilled to the reminted id %q", got, head.ID)
+		}
+
+		// No caller edge or comment may attach to the competitor's row.
+		if n, err := countOnPool(ctx, origDB, "SELECT COUNT(*) FROM dependencies WHERE issue_id = ?", staleHeadID); err != nil {
+			t.Fatalf("count competitor edges: %v", err)
+		} else if n != 0 {
+			t.Errorf("competitor %s carries %d caller edge(s), want none", staleHeadID, n)
+		}
+		if n, err := countOnPool(ctx, origDB, "SELECT COUNT(*) FROM comments WHERE issue_id = ?", staleHeadID); err != nil {
+			t.Fatalf("count competitor comments: %v", err)
+		} else if n != 0 {
+			t.Errorf("competitor %s carries %d caller comment(s), want none", staleHeadID, n)
+		}
+
+		// The edge persists under the reminted id.
+		if n, err := countOnPool(ctx, origDB, "SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ?", head.ID, "test-ac2-target"); err != nil {
+			t.Fatalf("count caller edges: %v", err)
+		} else if n != 1 {
+			t.Errorf("reminted id %s has %d edge(s) to the target, want 1", head.ID, n)
+		}
+
+		// The stored comment id derives from its final owner/content/timestamp
+		// (issueops.InsertDerivedComment's derivation).
+		wantCommentID := derivedCommentID(head.ID, "author", "head comment", fixedCommentAt)
+		if got := head.Comments[0].ID; got != wantCommentID {
+			t.Errorf("caller comment id = %q, want re-derived %q", got, wantCommentID)
+		}
+		storedID, err := commentIDOnPool(ctx, origDB, "comments", head.ID)
+		if err != nil {
+			t.Fatalf("read stored comment under %s: %v", head.ID, err)
+		}
+		if storedID != wantCommentID {
+			t.Errorf("stored comment id = %q, want %q", storedID, wantCommentID)
+		}
+
+		// Siblings name their own rows.
+		for i := 1; i < len(issues); i++ {
+			got, err := issueOnPool(ctx, origDB, issues[i].ID)
+			if err != nil {
+				t.Fatalf("read sibling %s: %v", issues[i].ID, err)
+			}
+			if got.Title != issues[i].Title {
+				t.Errorf("sibling %s title = %q, want %q", issues[i].ID, got.Title, issues[i].Title)
+			}
+		}
+	}
+
+	t.Run("one issue", func(t *testing.T) { run(t, 1, 1) })
+	t.Run("two issues (batch cache)", func(t *testing.T) { run(t, 2, 1) })
+	t.Run("repeated rollback", func(t *testing.T) { run(t, 1, 2) })
+}
