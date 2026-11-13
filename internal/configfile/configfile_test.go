@@ -873,6 +873,20 @@ func TestProxiedServerClientInfo_RoundTrip(t *testing.T) {
 	})
 }
 
+// TestSyncSidecarDir pins the post-rename directory flush per platform
+// (bd-pw5t5e, GH#6858). The missing-directory rows are portable: no row
+// opens a real directory except the host-native writable sync.
+func TestSyncSidecarDir(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+
+	t.Run("windows skips the directory flush", func(t *testing.T) {
+		// A missing path proves no directory is opened: any open fails.
+		if err := syncSidecarDir("windows", missing); err != nil {
+			t.Fatalf("syncSidecarDir(windows, missing) = %v, want nil", err)
+		}
+	})
+}
+
 func TestSaveProxiedServerClientInfo_WritesEffectiveIdleTimeout(t *testing.T) {
 	for _, tc := range []struct {
 		name string
