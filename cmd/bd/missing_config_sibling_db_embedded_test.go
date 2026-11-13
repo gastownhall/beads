@@ -190,3 +190,65 @@ func TestEmbeddedMetadatalessWorkspaceRefusesSiblingDatabase(t *testing.T) {
 		}
 	})
 }
+
+// TestEmbeddedMetadatalessWriteRefusesSiblingDatabase (GH#4381, AC-2): a
+// mutating command is the worse half of the bug — the write path hydrates the
+// sibling from issues.jsonl, so the workspace's data forks. It must refuse
+// with the same actionable error before creating or importing anything, with
+// the identity check disabled too, and restoring metadata.json must reveal
+// exactly the original issues.
+func TestEmbeddedMetadatalessWriteRefusesSiblingDatabase(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+
+	t.Run("create refuses with an actionable error", func(t *testing.T) {
+		f := newMetadatalessFixture(t)
+		f.removeMetadata(t)
+
+		out, err := runBDMetadataless(t, f.bd, f.dir, nil, "create", "--silent", "stray write")
+		f.requireRefusal(t, out, err, "beads", "myproj")
+		f.requireDatabases(t, "myproj")
+	})
+
+	t.Run("create refuses with the identity check disabled", func(t *testing.T) {
+		f := newMetadatalessFixture(t)
+		f.removeMetadata(t)
+
+		out, err := runBDMetadataless(t, f.bd, f.dir, []string{"BEADS_SKIP_IDENTITY_CHECK=1"}, "create", "--silent", "stray write")
+		f.requireRefusal(t, out, err, "beads", "myproj")
+		f.requireDatabases(t, "myproj")
+	})
+
+	t.Run("a read then a write both refuse", func(t *testing.T) {
+		f := newMetadatalessFixture(t)
+		f.removeMetadata(t)
+
+		// The read must not create the sibling the write would import into.
+		out, err := runBDMetadataless(t, f.bd, f.dir, nil, "list")
+		f.requireRefusal(t, out, err, "beads", "myproj")
+		out, err = runBDMetadataless(t, f.bd, f.dir, []string{"BEADS_SKIP_IDENTITY_CHECK=1"}, "create", "--silent", "stray write")
+		f.requireRefusal(t, out, err, "beads", "myproj")
+		f.requireDatabases(t, "myproj")
+	})
+
+	t.Run("restoring metadata reveals the original issues", func(t *testing.T) {
+		f := newMetadatalessFixture(t)
+		f.removeMetadata(t)
+
+		if out, err := runBDMetadataless(t, f.bd, f.dir, []string{"BEADS_SKIP_IDENTITY_CHECK=1"}, "create", "--silent", "stray write"); err == nil {
+			t.Fatalf("create succeeded against the metadata-less store:\n%s", out)
+		}
+		f.restoreMetadata(t)
+
+		issues := bdListJSON(t, f.bd, f.dir)
+		if len(issues) != 1 || !strings.Contains(issues[0].Title, "existing fixture issue") {
+			var titles []string
+			for _, issue := range issues {
+				titles = append(titles, issue.Title)
+			}
+			t.Fatalf("after restoring metadata, list = %v (%d issues), want exactly the original 1", titles, len(issues))
+		}
+		f.requireDatabases(t, "myproj")
+	})
+}
