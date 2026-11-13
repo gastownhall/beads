@@ -561,10 +561,11 @@ func graphConstraintViolations(ctx context.Context, ops syncOps) []storage.Const
 	return out
 }
 
-// bareNoRemotePattern matches Dolt's bare "no remote" wording. `bd dolt push`
-// and `bd dolt pull` classify only the "remote ... not found" phrasing, but a
+// bareNoRemotePattern matches Dolt's bare "no remote" wording: a
 // default-remote fetch on a rig that never configured one fails with
-// `Error 1105: no remote` instead, which that phrasing misses.
+// `Error 1105: no remote`, which the "remote ... not found" phrasing misses.
+// `bd dolt push` and `bd dolt pull` classify it too, through
+// isConfirmedNoRemote, since every pull fetches first (bd-e2q8zs).
 var bareNoRemotePattern = regexp.MustCompile(`(?i)\bno remote\b`)
 
 // isNoRemoteConfiguredErr reports whether a sync failure *sounds* like the

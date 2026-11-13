@@ -419,12 +419,11 @@ func TestEveryResponseCarriesTheResponseWideHeaders(t *testing.T) {
 	}
 
 	const probe = "header_probe"
-	for _, rt := range routeTable {
-		path := strings.NewReplacer(
-			"{id}", "bd-1",
-			"{key}", "k",
-			"{"+customMethodPathValue+"}", "bd-1"+rt.customMethod,
-		).Replace(rt.pattern) + "?" + probe + "=1"
+	for _, e := range mountEndpoints(t, ts.mounts()) {
+		if e.row == nil {
+			continue // the unrouted answers are held below
+		}
+		rt, path := *e.row, e.path+"?"+probe+"=1"
 		t.Run(rt.op, func(t *testing.T) {
 			resp := ts.do(t, rt.method, path, nil)
 			check(t, resp)
@@ -448,19 +447,25 @@ func TestEveryResponseCarriesTheResponseWideHeaders(t *testing.T) {
 	}
 
 	// The answers no row owns pass through withRequestContext and nothing else,
-	// so they are what fails if the header moves to a narrower layer. Each one
-	// asserts where it landed, mirroring the row loop's op guard: a case whose
-	// precondition drifted would otherwise quietly probe a row instead.
-	for _, tc := range []struct {
+	// so they are what fails if the header moves to a narrower layer: every
+	// mount's unrouted answer (the catch-all's, and the custom-method key's for
+	// a suffix no row registers), and the Host refusal. Each one asserts where
+	// it landed, mirroring the row loop's op guard: a case whose precondition
+	// drifted would otherwise quietly probe a row instead.
+	type unowned struct {
 		name, method, path, host string
 		status                   int
 		code                     Code
-	}{
-		// No API version can ever claim this path.
-		{"unrouted path", http.MethodGet, "/no-such-route", "", http.StatusNotFound, CodeNotFound},
-		{"unregistered custom method", http.MethodPost, "/v0/beads/issues/bd-1:nosuchverb", "", http.StatusNotFound, CodeNotFound},
+	}
+	unowneds := []unowned{
 		{"refused Host", http.MethodGet, "/healthz", "rebind.example", http.StatusBadRequest, CodeInvalidArgument},
-	} {
+	}
+	for _, e := range mountEndpoints(t, ts.mounts()) {
+		if e.row == nil {
+			unowneds = append(unowneds, unowned{e.name(), e.method, e.path, "", http.StatusNotFound, CodeNotFound})
+		}
+	}
+	for _, tc := range unowneds {
 		t.Run(tc.name, func(t *testing.T) {
 			var header http.Header
 			if tc.host != "" {
@@ -1795,19 +1800,20 @@ func bearer(token string) http.Header {
 	return http.Header{"Authorization": {"Bearer " + token}}
 }
 
-// authedOperations is every route the token guards — the whole table minus the
-// one exempt row. Derived rather than listed so a route added without a
-// decision about its exemption cannot slip past these tests.
-func authedOperations(t *testing.T) []route {
+// authedEndpoints is every operation the token guards on s — every operation
+// its mounts answer, minus the one exempt row — each with a request that
+// reaches it. Derived from the mount table rather than listed, so an operation
+// mounted without a decision about its exemption cannot slip past these tests.
+func authedEndpoints(t *testing.T, s *Server) []mountEndpoint {
 	t.Helper()
-	var out []route
-	for _, rt := range routeTable {
-		if !rt.authExempt {
-			out = append(out, rt)
+	var out []mountEndpoint
+	for _, e := range mountEndpoints(t, s.mounts()) {
+		if e.row != nil && !e.row.authExempt {
+			out = append(out, e)
 		}
 	}
 	if len(out) == 0 {
-		t.Fatal("no authenticated routes in the table")
+		t.Fatal("no authenticated operations among the mounts")
 	}
 	return out
 }
@@ -1824,15 +1830,11 @@ func TestBearerAuthGuardsEveryOperationButLiveness(t *testing.T) {
 		t.Errorf("GET /healthz with no credential = %d, want 200: a liveness probe carries none", resp.StatusCode)
 	}
 
-	for _, rt := range authedOperations(t) {
-		// The rows sharing the custom-method wildcard each answer on their own
-		// suffix, so the substitution has to be the ROW's, not the claim's:
-		// hard-coding ":claim" would drive every one of them down the claim's
-		// path and stop testing the others the moment a third row was added.
-		path := strings.NewReplacer(
-			"{id}", "bd-1",
-			"{"+customMethodPathValue+"}", "bd-1"+rt.customMethod,
-		).Replace(rt.pattern)
+	// The rows sharing the custom-method wildcard each answer on their own
+	// suffix, which mountEndpoints fills per row: hard-coding ":claim" would
+	// drive every one of them down the claim's path.
+	for _, e := range authedEndpoints(t, ts.Server) {
+		rt, path := *e.row, e.path
 		for _, tc := range []struct {
 			name   string
 			header http.Header
@@ -2007,13 +2009,12 @@ func TestUnroutedPathsStayUnauthenticated(t *testing.T) {
 	}
 
 	// A registered suffix names an operation, and an operation is guarded.
-	for _, rt := range authedOperations(t) {
-		if rt.customMethod == "" {
+	for _, e := range authedEndpoints(t, ts.Server) {
+		if e.row.customMethod == "" {
 			continue
 		}
-		path := "/v0/beads/issues/bd-1" + rt.customMethod
-		if resp := ts.do(t, rt.method, path, nil); resp.StatusCode != http.StatusUnauthorized {
-			t.Errorf("%s %s with no credential = %d, want 401", rt.method, path, resp.StatusCode)
+		if resp := ts.do(t, e.method, e.path, nil); resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s %s with no credential = %d, want 401", e.method, e.path, resp.StatusCode)
 		}
 	}
 }

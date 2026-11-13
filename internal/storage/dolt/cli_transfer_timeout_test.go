@@ -286,12 +286,11 @@ func TestCLITransferErrorRedactsRemoteCredentials(t *testing.T) {
 	out := []byte("To " + tokenRemote + "\n ! [rejected]        main -> main (non-fast-forward)\nerror: failed to push some refs to '" + tokenRemote + "'\n")
 
 	// The operation shapes of every caller: doltCLIPush, doltCLIPull and the
-	// federation peer push/pull/fetch, whose op names the peer argument.
+	// federation peer push and fetch, whose op names the peer argument.
 	for name, op := range map[string]string{
 		"push":       "dolt push",
-		"pull":       "dolt pull",
+		"fetch":      "dolt fetch",
 		"peer push":  "push to peer " + tokenRemote,
-		"peer pull":  "pull from peer " + tokenRemote,
 		"peer fetch": "fetch from peer " + tokenRemote,
 	} {
 		t.Run(name, func(t *testing.T) {

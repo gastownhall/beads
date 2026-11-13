@@ -300,7 +300,7 @@ Emitted for DOLT_PUSH operations. The span name is `dolt.push`, or `dolt.force_p
 
 ### `dolt.pull`
 
-Emitted for DOLT_PULL operations.
+Emitted for pull operations: a fetch of the remote branch, then a `DOLT_MERGE` of its tracking ref. bd never runs `DOLT_PULL`, whose merge message records the remote URL (bd-e2q8zs).
 
 | Attribute | Type | Description |
 |---|---|---|
