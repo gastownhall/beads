@@ -92,6 +92,14 @@ func (s *testSuite) TestIssueSQLRepository() {
 		s.Run("IgnoresChildIDsWhenSeeding", s.issueNextCounterIDSeedSkipsChildren)
 		s.Run("EmptyPrefixReturnsError", s.issueNextCounterIDEmptyPrefix)
 	})
+	s.Run("AdvanceCounterPastHeldIDs", func() {
+		s.Run("MaxFromEachHolderTable", s.issueAdvanceCounterMaxFromEachTable)
+		s.Run("NoNumericHolderLeavesCounterAlone", s.issueAdvanceCounterNoHolder)
+		s.Run("NeverLowersTheCounter", s.issueAdvanceCounterNeverLowers)
+		s.Run("IgnoresChildHashAndForeignIDs", s.issueAdvanceCounterIgnoresNonCandidates)
+		s.Run("MatchesLikeWildcardsInPrefixLiterally", s.issueAdvanceCounterLiteralPrefix)
+		s.Run("EmptyPrefixReturnsError", s.issueAdvanceCounterEmptyPrefix)
+	})
 }
 
 func (s *testSuite) issueRepo() domain.IssueSQLRepository {
@@ -986,4 +994,96 @@ func (s *testSuite) issueClaimRecordsEvent() {
 		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
 		"bd-claim-evt", "claimed").Scan(&count))
 	s.Equal(1, count, "successful claim must record exactly one 'claimed' event")
+}
+
+// counterRow reads prefix's issue_counter row, reporting whether one exists.
+func (s *testSuite) counterRow(prefix string) (int, bool) {
+	var last int
+	err := s.Runner().QueryRowContext(s.Ctx(), "SELECT last_id FROM issue_counter WHERE prefix = ?", prefix).Scan(&last)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false
+	}
+	s.Require().NoError(err)
+	return last, true
+}
+
+func (s *testSuite) issueAdvanceCounterMaxFromEachTable() {
+	for _, tc := range []struct {
+		name, prefix string
+		seed         func(id string)
+	}{
+		{"issues", "advI", s.seedIssueRow},
+		{"wisps", "advW", s.seedWispRow},
+		{"id_tombstones", "advT", func(id string) { s.seedTombstone("id_tombstones", id) }},
+		{"wisp_id_tombstones", "advWT", func(id string) { s.seedTombstone("wisp_id_tombstones", id) }},
+	} {
+		s.Run(tc.name, func() {
+			r := s.issueRepo()
+			_, err := r.NextCounterID(s.Ctx(), tc.prefix)
+			s.Require().NoError(err)
+			tc.seed(tc.prefix + "-7")
+			tc.seed(tc.prefix + "-41")
+			s.Require().NoError(r.AdvanceCounterPastHeldIDs(s.Ctx(), tc.prefix))
+			last, ok := s.counterRow(tc.prefix)
+			s.Require().True(ok)
+			s.Equal(41, last, "counter must reach the highest id %s holds", tc.name)
+		})
+	}
+}
+
+func (s *testSuite) issueAdvanceCounterNoHolder() {
+	r := s.issueRepo()
+	s.Require().NoError(r.AdvanceCounterPastHeldIDs(s.Ctx(), "advNone"))
+	_, ok := s.counterRow("advNone")
+	s.False(ok, "no held id must not create a counter row")
+
+	_, err := r.NextCounterID(s.Ctx(), "advNone")
+	s.Require().NoError(err)
+	s.Require().NoError(r.AdvanceCounterPastHeldIDs(s.Ctx(), "advNone"))
+	last, ok := s.counterRow("advNone")
+	s.Require().True(ok)
+	s.Equal(1, last)
+}
+
+func (s *testSuite) issueAdvanceCounterNeverLowers() {
+	r := s.issueRepo()
+	_, err := s.Runner().ExecContext(s.Ctx(), "INSERT INTO issue_counter (prefix, last_id) VALUES ('advHi', 90)")
+	s.Require().NoError(err)
+	s.seedIssueRow("advHi-12")
+	s.Require().NoError(r.AdvanceCounterPastHeldIDs(s.Ctx(), "advHi"))
+	last, _ := s.counterRow("advHi")
+	s.Equal(90, last, "advance must never lower the counter")
+}
+
+func (s *testSuite) issueAdvanceCounterIgnoresNonCandidates() {
+	r := s.issueRepo()
+	_, err := r.NextCounterID(s.Ctx(), "advSk")
+	s.Require().NoError(err)
+	s.seedIssueRow("advSk-3")
+	s.seedIssueRow("advSk-3.99")                    // child
+	s.seedWispRow("advSk-wisp-777")                 // hash/sub-prefix, nonnumeric
+	s.seedIssueRow("advSk-a9z")                     // hash id
+	s.seedIssueRow("advSkX-500")                    // a different prefix sharing the stem
+	s.seedIssueRow("advSk-99999999999999999999999") // overflows int
+	s.Require().NoError(r.AdvanceCounterPastHeldIDs(s.Ctx(), "advSk"))
+	last, _ := s.counterRow("advSk")
+	s.Equal(3, last, "only top-level numeric ids of this exact prefix count")
+}
+
+func (s *testSuite) issueAdvanceCounterLiteralPrefix() {
+	r := s.issueRepo()
+	_, err := r.NextCounterID(s.Ctx(), "ad_v%")
+	s.Require().NoError(err)
+	s.seedIssueRow("ad_v%-4")
+	s.seedIssueRow("adXvY-800") // matches the prefix only if '_' and '%' act as wildcards
+	s.seedIssueRow("ad_vZZ-900")
+	s.Require().NoError(r.AdvanceCounterPastHeldIDs(s.Ctx(), "ad_v%"))
+	last, _ := s.counterRow("ad_v%")
+	s.Equal(4, last, "LIKE wildcards in a prefix must match only themselves")
+}
+
+func (s *testSuite) issueAdvanceCounterEmptyPrefix() {
+	err := s.issueRepo().AdvanceCounterPastHeldIDs(s.Ctx(), "")
+	s.Require().Error(err)
+	s.Contains(err.Error(), "prefix must not be empty")
 }
