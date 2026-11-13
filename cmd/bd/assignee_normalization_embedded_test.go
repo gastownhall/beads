@@ -137,4 +137,52 @@ func TestEmbeddedAssigneeHiddenEmptyClears(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("AC5_non_clear_values_verbatim", func(t *testing.T) {
+		for _, name := range []string{"Bob", "Bob (Bot)", "a-b", "-x", "--", " - ", " alice "} {
+			issue := bdCreate(t, bd, dir, "Hold name", "--type", "task")
+			bdUpdate(t, bd, dir, issue.ID, "--assignee", name)
+			if got := bdShow(t, bd, dir, issue.ID); got.Assignee != name {
+				t.Errorf("update --assignee %q: assignee=%q, want verbatim", name, got.Assignee)
+			}
+		}
+
+		issue := bdCreate(t, bd, dir, "Assign name", "--type", "task")
+		bdRunOK(t, bd, dir, "assign", issue.ID, " - ")
+		if got := bdShow(t, bd, dir, issue.ID); got.Assignee != " - " {
+			t.Errorf("assign %q: assignee=%q, want verbatim", " - ", got.Assignee)
+		}
+
+		issue = bdCreate(t, bd, dir, "Batch name", "--type", "task")
+		bdBatchOK(t, bd, dir, "update "+issue.ID+` assignee=" - "`+"\n")
+		if got := bdShow(t, bd, dir, issue.ID); got.Assignee != " - " {
+			t.Errorf("batch assignee=%q: assignee=%q, want verbatim", " - ", got.Assignee)
+		}
+
+		// An update that omits the assignee leaves it alone.
+		issue = assigned(t, "Omitted assignee")
+		bdUpdate(t, bd, dir, issue.ID, "--title", "Retitled")
+		if got := bdShow(t, bd, dir, issue.ID); got.Assignee != "holder" {
+			t.Errorf("update without --assignee: assignee=%q, want holder", got.Assignee)
+		}
+	})
+
+	t.Run("AC5_if_assignee_guard_stays_literal", func(t *testing.T) {
+		// create keeps its raw value, so a legacy "-" row still exists.
+		issue := bdCreate(t, bd, dir, "Legacy dash", "--type", "task", "--assignee", "-")
+		if got := bdShow(t, bd, dir, issue.ID); got.Assignee != "-" {
+			t.Fatalf("create --assignee -: assignee=%q, want the raw dash", got.Assignee)
+		}
+		bdUpdate(t, bd, dir, issue.ID, "--if-assignee", "-", "--assignee", "")
+		if got := bdShow(t, bd, dir, issue.ID); got.Assignee != "" {
+			t.Fatalf("--if-assignee - on a legacy dash row: assignee=%q, want cleared", got.Assignee)
+		}
+		out, code := bdUpdateFailCode(t, bd, dir, issue.ID, "--if-assignee", "-", "--assignee", "bob")
+		if code != ExitGuardMismatch {
+			t.Errorf("--if-assignee - on an unassigned row: exit=%d, want %d\n%s", code, ExitGuardMismatch, out)
+		}
+		if got := bdShow(t, bd, dir, issue.ID); got.Assignee != "" {
+			t.Errorf("mismatched --if-assignee - wrote: assignee=%q, want unassigned", got.Assignee)
+		}
+	})
 }
