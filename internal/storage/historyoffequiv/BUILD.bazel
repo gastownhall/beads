@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "historyoffequiv",
@@ -19,6 +19,12 @@ go_library(
         "//internal/types",
         "//issueops",
     ],
+)
+
+go_test(
+    name = "historyoffequiv_test",
+    srcs = ["golden_test.go"],
+    embed = [":historyoffequiv"],
 )
 
 # --- begin go_srcs (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
