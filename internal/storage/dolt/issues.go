@@ -38,8 +38,10 @@ func (s *DoltStore) createIssue(ctx context.Context, issue *types.Issue, actor s
 		issue.Ephemeral = true // infra and wisp types get marked ephemeral (legacy behavior)
 	}
 
+	resetMintedIDs := snapshotUnsetCreateIDs([]*types.Issue{issue})
 	var result issueops.CreateIssueResult
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		resetMintedIDs()
 		// SkipPrefixValidation matches legacy behavior: single-issue path does
 		// not validate prefixes for explicit IDs.
 		bc, err := issueops.NewBatchContext(ctx, tx, storage.BatchCreateOptions{
@@ -62,6 +64,47 @@ func (s *DoltStore) createIssue(ctx context.Context, issue *types.Issue, actor s
 		}
 	}
 	return nil
+}
+
+// snapshotUnsetCreateIDs records which id fields of issues the caller left
+// empty — the issue id, each dependency's source and each comment's id — and
+// returns a reset that empties exactly those fields again.
+//
+// A create fills them in the caller's objects as it goes: it mints the issue
+// id, backfills dependency sources from it and derives fresh comment ids from
+// it. withRetryTx replays the closure after a rollback, and its contract is
+// that the closure re-derives such captured state on every attempt. Without
+// the reset a replay would read the aborted attempt's mint as an explicit id
+// and upsert over the row a concurrent writer committed under it, attach the
+// edges and comments to that id, and skip the counter advance the rollback
+// undid (GH#7289). Fields the caller supplied are never captured, so they
+// are never cleared. Call it first in each attempt; on the first it is a
+// no-op.
+func snapshotUnsetCreateIDs(issues []*types.Issue) func() {
+	var unset []*string
+	for _, issue := range issues {
+		if issue == nil {
+			continue
+		}
+		if issue.ID == "" {
+			unset = append(unset, &issue.ID)
+		}
+		for _, dep := range issue.Dependencies {
+			if dep != nil && dep.IssueID == "" {
+				unset = append(unset, &dep.IssueID)
+			}
+		}
+		for _, comment := range issue.Comments {
+			if comment != nil && comment.ID == "" {
+				unset = append(unset, &comment.ID)
+			}
+		}
+	}
+	return func() {
+		for _, field := range unset {
+			*field = ""
+		}
+	}
 }
 
 func createIssueCommitTables(ctx context.Context, issue *types.Issue, result issueops.CreateIssueResult) []string {
@@ -103,6 +146,7 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 	if len(issues) == 0 {
 		return nil
 	}
+	resetMintedIDs := snapshotUnsetCreateIDs(issues)
 
 	// All-wisps fast path: one SQL transaction, no Dolt versioning.
 	// Covers both ephemeral issues and no-history issues (both skip DOLT_COMMIT).
@@ -116,6 +160,7 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 		}
 		var result issueops.CreateIssuesResult
 		if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+			resetMintedIDs()
 			var err error
 			result, err = issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
 			return err
@@ -129,6 +174,7 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 
 	var result issueops.CreateIssuesResult
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		resetMintedIDs()
 		var err error
 		result, err = issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
 		return err
