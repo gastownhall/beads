@@ -379,6 +379,57 @@ func assignCreateIssueIDInTx(ctx context.Context, tx DBTX, bc *BatchContext, iss
 	return nil
 }
 
+// SnapshotUnsetCreateIDs records every ID field a create may fill in on the
+// caller's structs that the caller left empty: issue.ID (minted by
+// assignCreateIssueIDInTx), dep.IssueID (backfilled from the owning issue) and
+// comment.ID (content-derived for a fresh comment). The returned closure
+// empties exactly those fields again; caller-supplied values are never
+// recorded, so they are never cleared. Nil issues, dependencies and comments
+// are skipped.
+//
+// Store create entry points take the snapshot before their transaction and
+// hand the closure to ResetCreateIDsIfRolledBack on the transaction's error
+// return, so a create that rolled back leaves the caller's struct as it was
+// passed in and a retry of the same struct mints afresh (GH#8457).
+func SnapshotUnsetCreateIDs(issues []*types.Issue) (reset func()) {
+	var fields []*string
+	for _, issue := range issues {
+		if issue == nil {
+			continue
+		}
+		if issue.ID == "" {
+			fields = append(fields, &issue.ID)
+		}
+		for _, dep := range issue.Dependencies {
+			if dep != nil && dep.IssueID == "" {
+				fields = append(fields, &dep.IssueID)
+			}
+		}
+		for _, comment := range issue.Comments {
+			if comment != nil && comment.ID == "" {
+				fields = append(fields, &comment.ID)
+			}
+		}
+	}
+	return func() {
+		for _, field := range fields {
+			*field = ""
+		}
+	}
+}
+
+// ResetCreateIDsIfRolledBack runs reset when err means the create's
+// transaction rolled back, and returns err unchanged. A nil error keeps the
+// filled IDs (the rows exist), and so does an error wrapping
+// storage.ErrCommitIndeterminate (directly or inside errors.Join): the commit
+// may have landed, so the IDs may name real rows.
+func ResetCreateIDsIfRolledBack(err error, reset func()) error {
+	if err != nil && !errors.Is(err, storage.ErrCommitIndeterminate) && reset != nil {
+		reset()
+	}
+	return err
+}
+
 // CreateIssuesResult reports side effects that callers need for selective
 // Dolt staging after CreateIssuesInTxWithResult returns.
 type CreateIssuesResult struct {
