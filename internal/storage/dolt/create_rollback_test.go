@@ -423,3 +423,64 @@ func TestCreateIssueFailureRestoresAutoMintedID(t *testing.T) {
 		t.Fatalf("issues row count = %d after two rolled-back creates, want %d", n, before)
 	}
 }
+
+// TestCreateIssueRetryAfterFailedAutoMintKeepsPeerRow pins the damage the
+// leaked ID caused in counter mode (GH#8457): the failed create's counter
+// bump rolled back with its transaction, so a peer create receives the same
+// counter value. Retrying the caller's struct must mint a fresh ID and leave
+// the peer's row alone — before the fix the leaked ID routed the retry
+// through the explicit-ID upsert path and overwrote the peer's issue.
+func TestCreateIssueRetryAfterFailedAutoMintKeepsPeerRow(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("set issue_prefix: %v", err)
+	}
+	if err := store.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+		t.Fatalf("set issue_id_mode: %v", err)
+	}
+
+	seed := &types.Issue{Title: "seed", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, seed, "tester"); err != nil {
+		t.Fatalf("seed create: %v", err)
+	}
+
+	retry := &types.Issue{
+		Title:     "failed create the caller retries",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Labels:    []string{strings.Repeat("x", types.MaxFieldLen+1)},
+	}
+	if err := store.CreateIssue(ctx, retry, "tester"); !errors.Is(err, types.ErrFieldTooLong) {
+		t.Fatalf("first create err = %v, want types.ErrFieldTooLong", err)
+	}
+
+	// The failed transaction's counter bump rolled back, so the peer create
+	// receives the counter value the failed create minted and lost.
+	peer := &types.Issue{Title: "peer", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, peer, "tester"); err != nil {
+		t.Fatalf("peer create: %v", err)
+	}
+
+	// The caller retries the SAME struct with the invalid label fixed.
+	retry.Labels = []string{"ok"}
+	if err := store.CreateIssue(ctx, retry, "tester"); err != nil {
+		t.Fatalf("retry create: %v", err)
+	}
+	if retry.ID == peer.ID {
+		t.Fatalf("retry reused the rolled-back ID %q that the peer now holds", retry.ID)
+	}
+
+	got, err := store.GetIssue(ctx, peer.ID)
+	if err != nil {
+		t.Fatalf("get peer %s: %v", peer.ID, err)
+	}
+	if got.Title != "peer" {
+		t.Fatalf("peer %s title = %q, want %q (the retry must not overwrite the peer's row)", peer.ID, got.Title, "peer")
+	}
+}
