@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // These are pure: the claim path runs end to end over a real listener against a
@@ -281,6 +282,50 @@ func TestClaimConflictsCarryTheirState(t *testing.T) {
 			}
 			if body["request_id"] == nil {
 				t.Error("no request_id on the problem body")
+			}
+		})
+	}
+}
+
+// TestClaimRefusedForABlockerNamesItInDetail: the claim role has no force, so
+// a blocked issue is a 409 not_claimable whose `detail` names the blockers the
+// way the spec promises. The typed `blockers` member stays a not_closable
+// member and is absent here, and so is `assignee`.
+func TestClaimRefusedForABlockerNamesItInDetail(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		blockers   []string
+		wantDetail string
+	}{
+		{name: "direct blocker", blockers: []string{"bd-2"}, wantDetail: "bd-1 is blocked by [bd-2]"},
+		{name: "inherited block", blockers: nil, wantDetail: "bd-1 is blocked (inherited from an ancestor; see bd show)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			issues := &fakeIssues{
+				issue: seededIssue("bd-1", "", types.StatusOpen),
+				claim: func(string, string) (domain.ClaimResult, error) {
+					return domain.ClaimResult{}, fmt.Errorf("claim bd-1: %w", issueops.NewClaimBlockedError("bd-1", tc.blockers))
+				},
+			}
+			ts, _ := newClaimServer(t, issues)
+
+			resp := ts.claim(t, claimPath, `{"actor":"alice"}`)
+			if resp.StatusCode != http.StatusConflict {
+				t.Fatalf("status = %d, want 409: %s", resp.StatusCode, readAll(t, resp))
+			}
+			body := decodeBody(t, resp)
+			if body["code"] != string(CodeNotClaimable) {
+				t.Errorf("code = %v, want %s", body["code"], CodeNotClaimable)
+			}
+			detail, _ := body["detail"].(string)
+			if !strings.Contains(detail, tc.wantDetail) {
+				t.Errorf("detail = %q, want it to contain %q", detail, tc.wantDetail)
+			}
+			if _, present := body["blockers"]; present {
+				t.Errorf("blockers = %v, want the member absent on a claim refusal", body["blockers"])
+			}
+			if _, present := body["assignee"]; present {
+				t.Errorf("assignee = %v, want absent: nobody holds a blocked open issue", body["assignee"])
 			}
 		})
 	}

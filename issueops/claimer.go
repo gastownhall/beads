@@ -63,5 +63,10 @@ type Claimer interface {
 	//
 	// A wisp id is ErrNotFound: the wisp plane is not claimable through this
 	// role.
+	//
+	// A blocked issue is a *BlockedError wrapping ErrClaimBlocked, naming the
+	// live blockers, and writes nothing. The role has no force for it: the
+	// answer matches ReadyClaimer, which never offers a blocked issue.
+	// UpdateRequest.ForceClosePolicy is the one override, on Lifecycle.Update.
 	Claim(context.Context, ClaimRequest) (ClaimResult, error)
 }

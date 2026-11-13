@@ -466,6 +466,16 @@ func (r *issueSQLRepositoryImpl) Claim(ctx context.Context, id, actor string, op
 	if err != nil {
 		return domain.ClaimRowResult{}, fmt.Errorf("db: Claim %s: read old issue: %w", id, err)
 	}
+	idempotentReclaim := oldIssue.Status == types.StatusInProgress && issueops.ActorMatches(oldIssue.Assignee, actor)
+	if !opts.ForceClaimPolicy && !idempotentReclaim {
+		blocked, blockers, err := issueops.IsBlockedInTx(ctx, r.runner, id)
+		if err != nil {
+			return domain.ClaimRowResult{}, err
+		}
+		if blocked {
+			return domain.ClaimRowResult{}, publicops.NewClaimBlockedError(id, blockers)
+		}
+	}
 
 	table := pickIssueTable(opts.UseWispsTable)
 	now := time.Now().UTC()

@@ -43,7 +43,7 @@ func rawClaim(t *testing.T, s *DoltStore, id, actor string) error {
 	ctx, cancel := testContext(t)
 	defer cancel()
 	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
-		_, err := issueops.ClaimIssueInTx(ctx, tx, id, actor)
+		_, err := issueops.ClaimIssueInTx(ctx, tx, id, actor, false)
 		return err
 	})
 }

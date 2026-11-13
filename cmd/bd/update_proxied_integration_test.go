@@ -183,6 +183,36 @@ func TestProxiedServerUpdate(t *testing.T) {
 		}
 	})
 
+	t.Run("claim_blocked_delegated_guard", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ucbg")
+		blocker := bdProxiedCreate(t, bd, p.dir, "Claim blocker", "--type", "task")
+		blocked := bdProxiedCreate(t, bd, p.dir, "Blocked claim", "--type", "task")
+		bdProxiedDep(t, bd, p.dir, "add", blocked.ID, blocker.ID)
+
+		out := bdProxiedUpdateFail(t, bd, p.dir, blocked.ID, "--claim", "--actor", "blocked-worker")
+		if !strings.Contains(out, "cannot claim blocked issue") {
+			t.Errorf("expected claim guard message, got: %s", out)
+		}
+		if !strings.Contains(out, blocker.ID) {
+			t.Errorf("expected claim guard message to name blocker %s, got: %s", blocker.ID, out)
+		}
+		if !strings.Contains(out, "use --force to override") {
+			t.Errorf("expected claim guard message to mention --force, got: %s", out)
+		}
+
+		got := bdProxiedShow(t, bd, p.dir, blocked.ID)
+		if got.Status != types.StatusOpen || got.Assignee != "" {
+			t.Errorf("refused claim changed issue: status=%q assignee=%q", got.Status, got.Assignee)
+		}
+
+		bdProxiedUpdateOne(t, bd, p.dir, blocked.ID, "--claim", "--actor", "forced-worker", "--force")
+		got = bdProxiedShow(t, bd, p.dir, blocked.ID)
+		if got.Status != types.StatusInProgress || got.Assignee != "forced-worker" {
+			t.Errorf("forced claim did not land: status=%q assignee=%q", got.Status, got.Assignee)
+		}
+	})
+
 	// Parity with the non-proxied update_claim_batch_partial_loss_exits_nonzero:
 	// a batch where one claim is lost and another is won must exit non-zero so
 	// the lost claim is not hidden from exit-code automation (beads audit

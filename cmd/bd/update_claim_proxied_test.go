@@ -162,6 +162,27 @@ func TestProxiedClaimConflictStaysAPerIDFailure(t *testing.T) {
 	}
 }
 
+func TestProxiedClaimBlockedStaysAPerIDFailure(t *testing.T) {
+	before := &types.Issue{ID: "bd-blocked", Status: types.StatusOpen}
+	blockerID := "bd-blocker"
+	refusal := fmt.Errorf("%w: %s is blocked by [%s]", storage.ErrClaimBlocked, before.ID, blockerID)
+	claimRoleFixture(t, before, issueops.UpdateResult{}, refusal)
+
+	var fail *updateIDFailure
+	stderr := captureStderrDuring(t, func() {
+		_, fail, _ = applyUpdateProxiedOne(context.Background(), before.ID, &updateInput{claim: true, fields: map[string]any{}})
+	})
+	if fail == nil {
+		t.Fatal("blocked claim did not produce a per-id failure")
+	}
+	if !strings.Contains(stderr, blockerID) {
+		t.Errorf("stderr = %q, want blocker %q", stderr, blockerID)
+	}
+	if !strings.Contains(stderr, "use --force to override") {
+		t.Errorf("stderr = %q, want force override hint", stderr)
+	}
+}
+
 // SIGINT cancels bd's root context mid-batch. That is not a verdict on the
 // issue in flight: the loop aborts, rather than recording one "context
 // canceled" failure for this id and then the same failure for every id left.

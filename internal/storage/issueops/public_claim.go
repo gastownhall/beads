@@ -21,6 +21,8 @@ func ClaimCommitMessage(issueID, actor string) string {
 }
 
 // ExecuteClaim applies a guarded claim in tx and reports durable tables changed.
+// The role has no force: a blocked issue is refused with ErrClaimBlocked, the
+// same answer bd ready gives by omission.
 func ExecuteClaim(ctx context.Context, tx *sql.Tx, request publicops.ClaimRequest) (publicops.ClaimResult, ChangedTables, error) {
 	if request.Actor == "" || request.IssueID == "" {
 		return publicops.ClaimResult{}, nil, fmt.Errorf("%w: claim requires actor and issue ID", storage.ErrValidation)
@@ -32,7 +34,7 @@ func ExecuteClaim(ctx context.Context, tx *sql.Tx, request publicops.ClaimReques
 	if IsActiveWispInTx(ctx, tx, request.IssueID) {
 		return publicops.ClaimResult{}, nil, fmt.Errorf("%w: issue %s", storage.ErrNotFound, request.IssueID)
 	}
-	claimed, err := ClaimIssueInTx(ctx, tx, request.IssueID, request.Actor)
+	claimed, err := ClaimIssueInTx(ctx, tx, request.IssueID, request.Actor, false)
 	if err != nil {
 		return publicops.ClaimResult{}, nil, classifyClaimRefusalInTx(ctx, tx, request.IssueID, err)
 	}
