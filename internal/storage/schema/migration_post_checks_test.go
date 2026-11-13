@@ -263,3 +263,68 @@ func TestShowColumnDefaultNullVersusEmptyAndExactField(t *testing.T) {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}
 }
+
+// AC-2: 0051 drops four defaults and every one of them goes wrong in its own
+// way — the events probe fails, comments' correction fails, issue_snapshots'
+// default survives its correction, and compaction_snapshots is corrected. The
+// error names every condition that is not confirmed met with its observed
+// default and cause, and the step writes neither its cursor row nor its step
+// commit (sqlmock fails on any statement not expected here).
+func TestRunMigrationsReportsEveryUnmetDroppedDefaultAndWritesNoMark(t *testing.T) {
+	stubNoIssueRows(t)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	all := []string{"events", "comments", "issue_snapshots", "compaction_snapshots"}
+	// commitEachStep: the step snapshots the working set first.
+	mock.ExpectQuery(`(?s)SELECT s\.table_name, s\.staged\s+FROM dolt_status s`).
+		WillReturnRows(sqlmock.NewRows([]string{"table_name", "staged"}))
+	mock.ExpectExec(`ALTER TABLE events ALTER COLUMN id DROP DEFAULT`).WillReturnResult(sqlmock.NewResult(0, 0))
+
+	mock.ExpectQuery(`^SHOW TABLES$`).WillReturnRows(showTables(all...))
+	mock.ExpectQuery(showColumnsOf("events")).WillReturnError(fmt.Errorf("connection reset"))
+
+	mock.ExpectQuery(`^SHOW TABLES$`).WillReturnRows(showTables(all...))
+	mock.ExpectQuery(showColumnsOf("comments")).WillReturnRows(idDefault("(uuid())"))
+	mock.ExpectExec(directDropDefault("comments", "id")).WillReturnError(fmt.Errorf("lock wait timeout"))
+
+	mock.ExpectQuery(`^SHOW TABLES$`).WillReturnRows(showTables(all...))
+	mock.ExpectQuery(showColumnsOf("issue_snapshots")).WillReturnRows(idDefault("(uuid())"))
+	mock.ExpectExec(directDropDefault("issue_snapshots", "id")).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(showColumnsOf("issue_snapshots")).WillReturnRows(idDefault("(uuid())"))
+
+	mock.ExpectQuery(`^SHOW TABLES$`).WillReturnRows(showTables(all...))
+	mock.ExpectQuery(showColumnsOf("compaction_snapshots")).WillReturnRows(idDefault("(uuid())"))
+	mock.ExpectExec(directDropDefault("compaction_snapshots", "id")).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(showColumnsOf("compaction_snapshots")).WillReturnRows(idDefault(nil))
+
+	applied, err := runMigrations(context.Background(), db, mainSource, 50, 51, true)
+	if err == nil {
+		t.Fatalf("runMigrations(0051, three unmet conditions) = %d, nil; want a refusal", applied)
+	}
+	if applied != 0 {
+		t.Fatalf("applied = %d, want 0", applied)
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"0051_drop_aux_id_defaults.up.sql",
+		"events.id: probe failed",
+		"connection reset",
+		"comments.id (DEFAULT (uuid())): ALTER TABLE `comments` ALTER COLUMN `id` DROP DEFAULT failed",
+		"lock wait timeout",
+		"issue_snapshots.id (DEFAULT (uuid())): default still present",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q does not contain %q", msg, want)
+		}
+	}
+	if strings.Contains(msg, "compaction_snapshots") {
+		t.Errorf("error %q names compaction_snapshots, whose correction was verified", msg)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
