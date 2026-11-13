@@ -2624,13 +2624,20 @@ var rootCmd = &cobra.Command{
 					}
 				}
 
-				// Auto-backup: sync a Dolt-native backup if enabled and due
-				runPostRunAutoBackup(rootCtx)
+				// A preview must not run the backup, export or push below: each
+				// writes files or state the preview promised not to write, as
+				// the proxied arm above already holds for the backup.
+				preview := isPreviewCommand(cmd)
+
+				// Auto-backup: sync a Dolt-native backup if enabled and due.
+				if !preview {
+					runPostRunAutoBackup(rootCtx)
+				}
 
 				// Auto-export: write git-tracked JSONL for portability if enabled and due.
 				// Read-only commands must not perform post-run maintenance writes or emit
 				// sync guidance after machine-readable output.
-				if shouldRunPostCommandAutoExport(cmd) {
+				if !preview && shouldRunPostCommandAutoExport(cmd) {
 					if err := runPostRunAutoExport(rootCtx, commandAllowsEmptyAutoExport(cmd)); err != nil {
 						return HandleError("%v", err)
 					}
@@ -2639,7 +2646,7 @@ var rootCmd = &cobra.Command{
 				// Auto-push: push to Dolt remote if enabled and due.
 				// Skip for read-only commands to avoid unnecessary network operations
 				// and metadata writes on commands like bd list/show/ready (GH#2191).
-				if !isReadOnlyCommand(cmd.Name()) {
+				if !preview && !isReadOnlyCommand(cmd.Name()) {
 					runPostRunAutoPush(rootCtx)
 				}
 
