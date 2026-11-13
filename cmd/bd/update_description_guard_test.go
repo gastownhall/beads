@@ -392,3 +392,55 @@ func TestGatherUpdateInputClearFlagsGH8149(t *testing.T) {
 		})
 	}
 }
+
+// TestUpdateClearFlagsConflictWithContentFlagsGH8149 runs cobra's flag-group
+// validation over the live update registration: each clear flag is mutually
+// exclusive with every content input of its own field, while different
+// clears compose and content aliases keep their existing precedence rules.
+func TestUpdateClearFlagsConflictWithContentFlagsGH8149(t *testing.T) {
+	emptyFile := writeEmptyFile(t)
+	conflicts := [][]string{
+		{"--clear-description", "--description", "x"},
+		{"--clear-description", "--body", "x"},
+		{"--clear-description", "--message", "x"},
+		{"--clear-description", "--body-file", emptyFile},
+		{"--clear-description", "--description-file", emptyFile},
+		{"--clear-description", "--stdin"},
+		{"--clear-description=false", "--description", "x"},
+		{"--clear-design", "--design", "x"},
+		{"--clear-design", "--design-file", emptyFile},
+		{"--clear-acceptance", "--acceptance", "x"},
+		{"--clear-acceptance", "--acceptance-criteria", "x"},
+	}
+	for _, args := range conflicts {
+		t.Run(strings.ReplaceAll(strings.Join(args, " "), emptyFile, "FILE"), func(t *testing.T) {
+			cmd, err := newUpdateFlagsCommand(t, args...)
+			if err != nil {
+				t.Fatalf("parse %v: %v", args, err)
+			}
+			err = cmd.ValidateFlagGroups()
+			if err == nil || !strings.Contains(err.Error(), "none of the others can be") {
+				t.Fatalf("%v: expected mutual-exclusion error, got: %v", args, err)
+			}
+		})
+	}
+
+	compatible := [][]string{
+		{"--clear-description", "--clear-design", "--clear-acceptance", "--clear-notes"},
+		{"--clear-description", "--design", "x", "--acceptance", "y"},
+		{"--clear-design", "--description", "x", "--body", "x"},
+		{"--clear-acceptance", "--design-file", emptyFile, "--stdin"},
+		{"--acceptance", "x", "--acceptance-criteria", "y"},
+	}
+	for _, args := range compatible {
+		t.Run("ok "+strings.ReplaceAll(strings.Join(args, " "), emptyFile, "FILE"), func(t *testing.T) {
+			cmd, err := newUpdateFlagsCommand(t, args...)
+			if err != nil {
+				t.Fatalf("parse %v: %v", args, err)
+			}
+			if err := cmd.ValidateFlagGroups(); err != nil {
+				t.Fatalf("%v: unexpected flag-group error: %v", args, err)
+			}
+		})
+	}
+}
