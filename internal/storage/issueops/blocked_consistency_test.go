@@ -263,3 +263,30 @@ func TestBlockedParentEdgesGuardStatus(t *testing.T) {
 		t.Errorf("unmet sqlmock expectations: %v", err)
 	}
 }
+
+// RecomputeAllWispIsBlockedInTx runs inside the ignored/0032 schema repair,
+// where a wisps table that cannot be listed must fail the repair (so 32 stays
+// pending) rather than read as empty, as RecomputeAllIsBlockedInTx's
+// missing-table tolerance would. Its SQL runs against a real engine in the
+// dolt and embedded ignored-0032 suites.
+func TestRecomputeAllWispIsBlockedListErrorIsContextual(t *testing.T) {
+	mock, db := newFingerprintMock(t)
+	cause := errors.New("table not found: wisps")
+	mock.ExpectQuery(`^SELECT id FROM wisps$`).WillReturnError(cause)
+
+	_, err := RecomputeAllWispIsBlockedInTx(context.Background(), db)
+	if !errors.Is(err, cause) || !strings.Contains(err.Error(), "list wisps") {
+		t.Fatalf("RecomputeAllWispIsBlockedInTx error = %v, want the list failure wrapped with context", err)
+	}
+}
+
+func TestRecomputeAllWispIsBlockedEmptyWispsIsANoOp(t *testing.T) {
+	mock, db := newFingerprintMock(t)
+	mock.ExpectQuery(`^SELECT id FROM wisps$`).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+	// Any statement past the listing (an issues read or an UPDATE) fails the mock.
+	n, err := RecomputeAllWispIsBlockedInTx(context.Background(), db)
+	if err != nil || n != 0 {
+		t.Fatalf("RecomputeAllWispIsBlockedInTx on empty wisps = (%d, %v), want (0, nil)", n, err)
+	}
+}

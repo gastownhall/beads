@@ -441,6 +441,7 @@ var versionExemptions = map[string]string{
 	"RecomputeIsBlockedForWispIDsInTx": "is_blocked is derived state",
 	"RecomputeIsBlockedAfterMergeInTx": "is_blocked is derived state",
 	"RecomputeAllIsBlockedInTx":        "is_blocked is derived state",
+	"RecomputeAllWispIsBlockedInTx":    "is_blocked is derived state",
 	"MarkIsBlockedInTx":                "is_blocked is derived state",
 	"MarkIsBlockedInTxWithResult":      "is_blocked is derived state",
 
@@ -533,6 +534,7 @@ var versionNeverMints = map[string]string{
 	"RecomputeIsBlockedForWispIDsInTx": "is_blocked is derived state",
 	"RecomputeIsBlockedAfterMergeInTx": "is_blocked is derived state",
 	"RecomputeAllIsBlockedInTx":        "is_blocked is derived state",
+	"RecomputeAllWispIsBlockedInTx":    "is_blocked is derived state",
 	"MarkIsBlockedInTx":                "is_blocked is derived state",
 	"MarkIsBlockedInTxWithResult":      "is_blocked is derived state",
 	"DeleteIssueInTx":                  "delete family (Phase 3)",
