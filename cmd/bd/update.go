@@ -219,6 +219,9 @@ pointless).`,
 			return err
 		}
 		if designChanged {
+			if err := validateDesignUpdate(design); err != nil {
+				return HandleErrorRespectJSON("%v", err)
+			}
 			updates["design"] = design
 		}
 		if cmd.Flags().Changed("notes") && cmd.Flags().Changed("append-notes") {
@@ -244,6 +247,9 @@ pointless).`,
 				acceptanceCriteria, _ = cmd.Flags().GetString("acceptance")
 			} else {
 				acceptanceCriteria, _ = cmd.Flags().GetString("acceptance-criteria")
+			}
+			if err := validateAcceptanceUpdate(acceptanceCriteria); err != nil {
+				return HandleErrorRespectJSON("%v", err)
 			}
 			updates["acceptance_criteria"] = acceptanceCriteria
 		}
@@ -1078,6 +1084,12 @@ func init() {
 	updateCmd.Flags().Bool("clear-notes", false, "Clear the notes field (--notes \"\" is refused: an empty value is usually a dead command substitution)")
 	updateCmd.MarkFlagsMutuallyExclusive("clear-notes", "notes")
 	updateCmd.MarkFlagsMutuallyExclusive("clear-notes", "append-notes")
+	// GH#8149: an empty --description/--design/--acceptance is refused on
+	// update (a dead command substitution looks exactly like it), so each
+	// long-form text field gets its own deliberate clear verb.
+	updateCmd.Flags().Bool("clear-description", false, "Clear the description (an empty --description value is refused: it is usually a dead command substitution)")
+	updateCmd.Flags().Bool("clear-design", false, "Clear the design field (an empty --design value is refused: it is usually a dead command substitution)")
+	updateCmd.Flags().Bool("clear-acceptance", false, "Clear the acceptance criteria (an empty --acceptance value is refused: it is usually a dead command substitution)")
 	updateCmd.Flags().String("spec-id", "", "Link to specification document")
 	updateCmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")
 	_ = updateCmd.Flags().MarkHidden("acceptance-criteria") // Only fails if flag missing (caught in tests)
