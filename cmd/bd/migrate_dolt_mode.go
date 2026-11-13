@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -134,6 +135,19 @@ func loadMigrateJournal(beadsDir string) (*migrateJournal, error) {
 	return &j, nil
 }
 
+// syncMigrateJournalDir flushes the directory holding the migration journal
+// after a save or removal. Windows does not support flushing a directory
+// handle (the FlushFileBuffers behind (*os.File).Sync reports Access is
+// denied), so it skips the flush there; the journal's temporary file is
+// still synced before the rename. This is best-effort durability, not a
+// power-loss guarantee.
+func syncMigrateJournalDir(goos string, d *os.File) error {
+	if goos == "windows" {
+		return nil
+	}
+	return d.Sync()
+}
+
 func saveMigrateJournal(beadsDir string, j *migrateJournal) error {
 	b, err := json.MarshalIndent(j, "", "  ")
 	if err != nil {
@@ -164,7 +178,7 @@ func saveMigrateJournal(beadsDir string, j *migrateJournal) error {
 	if err != nil {
 		return fmt.Errorf("syncing %s directory: %w", migrateJournalFileName, err)
 	}
-	if err = d.Sync(); err != nil {
+	if err = syncMigrateJournalDir(runtime.GOOS, d); err != nil {
 		_ = d.Close()
 		return fmt.Errorf("syncing %s directory: %w", migrateJournalFileName, err)
 	}

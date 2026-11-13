@@ -1045,6 +1045,7 @@ go_test(
         "migrate_consent_test.go",
         "migrate_dolt_mode_frontdoor_integration_test.go",
         "migrate_dolt_mode_host_test.go",
+        "migrate_dolt_mode_journal_dirsync_test.go",
         "migrate_dolt_mode_test.go",
         "migrate_embedded_test.go",
         "migrate_force_test.go",
