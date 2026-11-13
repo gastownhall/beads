@@ -24,6 +24,10 @@ var deletedReferenceCases = []deletedReferenceCase{
 	{"child inside grandchild", "fx-k0008.1.2", "fx-k0008.1", "fx-k0008.1.2"},
 	{"grandchild itself", "step fx-k0008.1.2 failed", "fx-k0008.1.2", "step [deleted:fx-k0008.1.2] failed"},
 	{"earlier descendant marker", "was [deleted:fx-k0008.1.2]", "fx-k0008.1", "was [deleted:fx-k0008.1.2]"},
+	// Two rows carried from #7377's table: a descendant cited just before a
+	// sentence-ending dot, and one inside parentheses.
+	{"descendant cited at the end of a sentence", "blocked on fx-k0008.1.2.", "fx-k0008.1", "blocked on fx-k0008.1.2."},
+	{"descendant in parentheses", "(fx-k0008.3)", "fx-k0008", "(fx-k0008.3)"},
 
 	// Longer ids that merely contain the deleted one.
 	{"leading id byte", "xbe-1", "be-1", "xbe-1"},

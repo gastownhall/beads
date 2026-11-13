@@ -1634,10 +1634,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "step [deleted:fx-k0008.1].2 failed" while `fx-k0008.1.2` was still live; a
   `--cascade` gave `[deleted:fx-k0008].1.2`, and deleting a descendant first
   nested markers. A `.` followed by an id character is now part of the id,
-  while a sentence-ending `.` still ends a citation. Two citations separated
-  by one character ("be-1 be-1") are now both rewritten; before, only the
-  first was. Every route (direct, proxied server, `bd serve`) and the
-  unforced `bd delete` preview use the same rule. (#7377)
+  while a sentence-ending `.` still ends a citation. A `.` that follows an id
+  character joins too, so `x.be-1` and either id in `bd-1.bd-2` are left
+  alone, as is a file name such as `be-1.md`; the old rule rewrote them all.
+  Two citations separated by one character ("be-1 be-1") are now both
+  rewritten; before, only the first was. Every route (direct, proxied server,
+  `bd serve`) rewrites by the same rule, and the unforced single-issue
+  `bd delete` preview applies it too, so it no longer lists a neighbor that
+  cites only a descendant; on a proxied-server workspace that preview still
+  lists every connected issue as one whose text may be rewritten. (#8451,
+  from #7377 by @A3Ackerman)
 
 - `bd compact` no longer silently changes row data when commit dates are out
   of history order across the cutoff. When a recent-dated commit came before
