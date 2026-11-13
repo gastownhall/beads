@@ -955,9 +955,10 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 	// what closed_by_session was: the schema defaults it to '', so an issue
 	// written by this statement read back an empty closing session while the
 	// classic writer kept it. Only Insert without CreateOnly reaches this
-	// statement (CreateIssue callers that leave CreateOnly unset, such as the
-	// quick, todo, gate and batch proxied servers); CreateOnly creates, import
-	// and promotion go through the classic writer.
+	// statement: an explicit or child id whose CreateIssue caller leaves
+	// CreateOnly unset (such as the quick, todo, gate and batch proxied
+	// servers). A minted top-level id is always create-only, and CreateOnly
+	// creates, import and promotion go through the classic writer.
 	//
 	// Stamp a fresh non-zero row_lock at create, exactly like the classic
 	// insertIssueIntoTable (issueops/helpers.go). Without it a proxied-server
