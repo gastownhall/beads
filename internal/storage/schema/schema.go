@@ -779,6 +779,11 @@ func missingDoltIgnorePatterns(ctx context.Context, db DBConn, candidates []stri
 // no-work short-circuit, MigrateUp commits the seed itself in a scoped,
 // labeled commit (keyed off the changed return value) so the heal converges
 // in one pass instead of riding along inside an unrelated later commit.
+//
+// The first failed INSERT stops the seed and is returned wrapped with its
+// pattern, privilege refusals included: whether an open may continue past a
+// refused seed depends on the migration state, which is the caller's to read
+// (continueAfterRefusedDoltIgnoreSeed).
 func seedDoltIgnorePatterns(ctx context.Context, db DBConn) (bool, error) {
 	changed := false
 	for _, pattern := range missingDoltIgnorePatterns(ctx, db, doltIgnoreSeedCandidates(ctx, db)) {
@@ -794,6 +799,80 @@ func seedDoltIgnorePatterns(ctx context.Context, db DBConn) (bool, error) {
 		}
 	}
 	return changed, nil
+}
+
+// doltIgnoreSeedNoticeOut is where MigrateUp writes the warning for a seed
+// INSERT the opener was refused on an otherwise-current database (see
+// continueAfterRefusedDoltIgnoreSeed). Like lostTableNoticeOut it is not
+// terminal-gated: the remedy has to reach redirected and scripted opens too.
+// Overridable in tests.
+var doltIgnoreSeedNoticeOut io.Writer = os.Stderr
+
+// continueAfterRefusedDoltIgnoreSeed decides whether an open whose
+// dolt_ignore seed INSERT was refused for lack of privilege may continue
+// without the missing patterns, and returns nil only when it may. seedErr is
+// the refusal, and every error returned wraps it.
+//
+// Every new canonical pattern leaves every existing database under-seeded, so
+// without this the next open from a fenced wire client, which may not write
+// dolt_ignore by design (see seedDoltIgnorePatterns), fails until a
+// privileged bd heals the pattern (GH#6169). The open may skip the seed only
+// when nothing in it depends on the patterns:
+//
+//   - No migration work is pending. A pass creates and renames the tables the
+//     patterns keep off the versioned plane (rebuild intermediates, journal
+//     tables), so pending work keeps the original refusal.
+//   - dolt_status shows no new table. A later blanket commit (DOLT_COMMIT -Am)
+//     would version an unignored new table a missing pattern exists to cover.
+//     Any new table refuses, related or not: telling them apart would mean
+//     re-implementing Dolt's pattern matching here. This is a point-in-time
+//     read and does not guard against DDL that lands after it.
+//
+// When both hold, it prints one warning and the open continues on the current
+// schema: no cursor repair, no scoped seed commit, no pass. The patterns stay
+// missing, so doltIgnoreSeeded stays false and every such open takes the
+// locked MigrateUp path again until a privileged bd opens the database once
+// and the ordinary seed heals and commits them.
+func continueAfterRefusedDoltIgnoreSeed(ctx context.Context, db DBConn, seedErr error) error {
+	needed, err := migrationWorkNeeded(ctx, db)
+	if err != nil {
+		return fmt.Errorf("%w (and checking schema migration work to decide whether the open can continue without the seed failed: %w)", seedErr, err)
+	}
+	if needed {
+		return seedErr
+	}
+	tables, err := newDoltStatusTables(ctx, db)
+	if err != nil {
+		return fmt.Errorf("%w (and reading dolt_status for new tables to decide whether the open can continue without the seed failed: %w)", seedErr, err)
+	}
+	if len(tables) > 0 {
+		return fmt.Errorf("%w: cannot continue without the missing dolt_ignore patterns while dolt_status shows new table(s) %s; open this database once with a privileged bd that can write dolt_ignore", seedErr, strings.Join(tables, ", "))
+	}
+	fmt.Fprintf(doltIgnoreSeedNoticeOut, "Warning: %v; continuing without seeding dolt_ignore on the current schema; open this database once with a privileged bd that can write dolt_ignore to heal the missing patterns\n", seedErr)
+	return nil
+}
+
+// newDoltStatusTables lists the working set's new tables, sorted. Ignored
+// tables never appear in dolt_status, so every name is an unignored table a
+// blanket commit would version.
+func newDoltStatusTables(ctx context.Context, db DBConn) ([]string, error) {
+	rows, err := db.QueryContext(ctx, "SELECT table_name FROM dolt_status WHERE status = 'new table' ORDER BY table_name")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tables []string
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			return nil, err
+		}
+		tables = append(tables, table)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return tables, nil
 }
 
 // commitSeededDoltIgnore stages and commits freshly seeded dolt_ignore rows
@@ -979,9 +1058,18 @@ func migrateUpConsented(ctx context.Context, db DBConn) (int, error) {
 	// whose migration cursors arrived at-latest without executing the seeding
 	// migrations (out-of-band table copy) reports no work needed and
 	// would otherwise never be healed.
+	//
+	// A refused seed INSERT (the fenced wire client's SELECT/DML-on-data-only
+	// grant, GH#6169) is fatal only when the open needs the patterns: see
+	// continueAfterRefusedDoltIgnoreSeed. When it may continue, it returns
+	// here, before the cursor repair and the migration pass, so the degraded
+	// open issues no write past the refused INSERT.
 	seedChanged, err := seedDoltIgnorePatterns(ctx, db)
 	if err != nil {
-		return 0, err
+		if !dberrors.IsAccessDenied(err) {
+			return 0, err
+		}
+		return 0, continueAfterRefusedDoltIgnoreSeed(ctx, db, err)
 	}
 
 	// Asserting the pattern is not enough on a lineage old enough to have

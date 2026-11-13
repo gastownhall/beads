@@ -110,12 +110,27 @@ func openCappedOperatorStore(t *testing.T) (admin, op *DoltStore) {
 	admin, cleanup := setupConcurrentTestStore(t)
 	t.Cleanup(cleanup) // registered first so it runs after the DROP USER cleanup below
 
+	user, password := grantCappedOperator(t, admin)
+	op, err := openAsCappedOperator(t, admin.database, user, password)
+	if err != nil {
+		t.Fatalf("open store as capped operator: %v", err)
+	}
+	t.Cleanup(func() { _ = op.Close() })
+	return admin, op
+}
+
+// grantCappedOperator creates the least-privilege operator user described on
+// openCappedOperatorStore for admin's database and returns its credentials.
+// The user is dropped when the test ends. dolt_* system tables (dolt_ignore
+// among them) get no DML grant: only the database-wide SELECT covers them.
+func grantCappedOperator(t *testing.T, admin *DoltStore) (user, password string) {
+	t.Helper()
 	ctx, cancel := testContext(t)
 	defer cancel()
 
 	dbName := admin.database
-	user := "capped_op_" + strings.TrimPrefix(dbName, "testdb_")
-	const password = "capped-pw"
+	user = "capped_op_" + strings.TrimPrefix(dbName, "testdb_")
+	password = "capped-pw"
 
 	exec := func(stmt string) {
 		t.Helper()
@@ -157,8 +172,14 @@ func openCappedOperatorStore(t *testing.T) (admin, op *DoltStore) {
 	for _, proc := range []string{"dolt_add", "dolt_commit"} {
 		exec(fmt.Sprintf("GRANT EXECUTE ON PROCEDURE `%s`.`%s` TO '%s'@'%%'", dbName, proc, user))
 	}
+	return user, password
+}
 
-	op, err = openStoreWithOwnBudget(t, &Config{
+// openAsCappedOperator opens dbName with the credentials grantCappedOperator
+// returned, pool pinned to one connection. The caller owns closing the store.
+func openAsCappedOperator(t *testing.T, dbName, user, password string) (*DoltStore, error) {
+	t.Helper()
+	return openStoreWithOwnBudget(t, &Config{
 		Path:           t.TempDir(),
 		CommitterName:  "test",
 		CommitterEmail: "test@example.com",
@@ -167,11 +188,6 @@ func openCappedOperatorStore(t *testing.T) (admin, op *DoltStore) {
 		ServerPassword: password,
 		MaxOpenConns:   1,
 	})
-	if err != nil {
-		t.Fatalf("open store as capped operator: %v", err)
-	}
-	t.Cleanup(func() { _ = op.Close() })
-	return admin, op
 }
 
 // TestIgnoredTxFallbackUnderCappedOperatorUser reproduces the failure end to
@@ -224,5 +240,103 @@ func TestPinnedConnReadsUnderCappedOperatorUser(t *testing.T) {
 	}
 	if _, err := op.History(ctx, issue.ID); err != nil {
 		t.Fatalf("History as capped operator: %v", err)
+	}
+}
+
+// TestCappedOperatorOpensWithRefusedIgnoreSeed is the end-to-end form of
+// GH#6169 (bd-obnpv0): a new canonical dolt_ignore pattern leaves every
+// existing database under-seeded, and the least-privilege operator, which may
+// not write dolt_ignore, used to fail every open on the denied seed INSERT
+// until a privileged bd healed the pattern. On an otherwise-current schema
+// with no new table that a missing pattern could leave versioned, the open
+// must now succeed and leave the pattern for the privileged opener, whose
+// existing heal path inserts and commits it. A pending new table keeps the
+// refusal.
+func TestCappedOperatorOpensWithRefusedIgnoreSeed(t *testing.T) {
+	admin, cleanup := setupConcurrentTestStore(t)
+	t.Cleanup(cleanup) // registered first so it runs after the DROP USER cleanup
+
+	const pattern = "__temp__%"
+	const scratch = "bd_obnpv0_unignored_scratch"
+	adminExec := func(stmt string, args ...any) {
+		t.Helper()
+		ctx, cancel := testContext(t)
+		defer cancel()
+		if _, err := admin.db.ExecContext(ctx, stmt, args...); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	patternRows := func(asOf string) int {
+		t.Helper()
+		ctx, cancel := testContext(t)
+		defer cancel()
+		var n int
+		//nolint:gosec // G202: asOf is one of the test's own literals.
+		query := "SELECT COUNT(*) FROM dolt_ignore" + asOf + " WHERE pattern = ?"
+		if err := admin.db.QueryRowContext(ctx, query, pattern).Scan(&n); err != nil {
+			t.Fatalf("read dolt_ignore%s: %v", asOf, err)
+		}
+		return n
+	}
+
+	// A database that predates the pattern: remove it and commit the removal,
+	// so the working set is clean and only the pattern is missing.
+	adminExec("DELETE FROM dolt_ignore WHERE pattern = ?", pattern)
+	adminExec("CALL DOLT_ADD('dolt_ignore')")
+	adminExec("CALL DOLT_COMMIT('-m', 'test: drop a canonical dolt_ignore pattern', '--skip-empty')")
+	if got := patternRows(" AS OF 'HEAD'"); got != 0 {
+		t.Fatalf("fixture: %q still committed at HEAD (%d rows)", pattern, got)
+	}
+
+	user, password := grantCappedOperator(t, admin)
+
+	// A new, unignored table is what a missing pattern could leave versioned,
+	// so the operator must still be refused while one is pending.
+	adminExec("CREATE TABLE " + scratch + " (id INT PRIMARY KEY)")
+	if op, err := openAsCappedOperator(t, admin.database, user, password); err == nil {
+		_ = op.Close()
+		t.Fatalf("capped operator opened a database whose dolt_status shows new table %s; want a refusal naming it", scratch)
+	} else if !strings.Contains(err.Error(), scratch) || !strings.Contains(err.Error(), "dolt_ignore") {
+		t.Fatalf("capped operator open error = %v, want it to name the seed denial and new table %s", err, scratch)
+	}
+	adminExec("DROP TABLE " + scratch)
+
+	op, err := openAsCappedOperator(t, admin.database, user, password)
+	if err != nil {
+		t.Fatalf("capped operator open of an otherwise-current database missing %q: %v (a denied dolt_ignore seed must degrade to a warning)", pattern, err)
+	}
+	if err := op.Close(); err != nil {
+		t.Fatalf("close capped operator store: %v", err)
+	}
+	if got := patternRows(""); got != 0 {
+		t.Fatalf("capped operator open left %d %q rows in dolt_ignore, want 0 (it may not write dolt_ignore)", got, pattern)
+	}
+
+	healer, err := openStoreWithOwnBudget(t, &Config{
+		Path:           t.TempDir(),
+		CommitterName:  "test",
+		CommitterEmail: "test@example.com",
+		Database:       admin.database,
+	})
+	if err != nil {
+		t.Fatalf("privileged open after the degraded one: %v", err)
+	}
+	if err := healer.Close(); err != nil {
+		t.Fatalf("close privileged store: %v", err)
+	}
+	if got := patternRows(""); got != 1 {
+		t.Fatalf("privileged open left %d %q rows in the working set, want 1 (the heal)", got, pattern)
+	}
+	if got := patternRows(" AS OF 'HEAD'"); got != 1 {
+		t.Fatalf("privileged open left %d %q rows at HEAD, want 1 (the heal must be committed)", got, pattern)
+	}
+	ctx, cancel := testContext(t)
+	defer cancel()
+	var dirty int
+	if err := admin.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_status WHERE table_name = 'dolt_ignore'").Scan(&dirty); err != nil {
+		t.Fatalf("read dolt_status: %v", err)
+	}
+	if dirty != 0 {
+		t.Fatalf("dolt_ignore still has %d dolt_status rows after the privileged heal, want 0", dirty)
 	}
 }
