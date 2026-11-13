@@ -3,7 +3,6 @@ package domain
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"slices"
 	"sort"
 	"time"
@@ -458,28 +457,31 @@ func (u *issueUseCaseImpl) collectConnectedIssues(
 	return out, isWisp, nil
 }
 
+// rewriteTextReferences replaces every citation of a deleted id with
+// `[deleted:<id>]` in each connected survivor's four long text fields, and
+// reports how many ROWS it changed. The citation rule is the shared one in
+// internal/types (types.RewriteDeletedReferences) — the same rule the store
+// role's rewrite and the CLI preview apply — so the two delete bodies rewrite
+// the same citations for the same deletion.
 func (u *issueUseCaseImpl) rewriteTextReferences(
 	ctx context.Context, deletedIDs []string,
 	connected map[string]*types.Issue, isWisp map[string]bool, actor string,
 ) (int, error) {
 	touched := make(map[string]bool)
 	for _, id := range deletedIDs {
-		pattern := `(^|[^A-Za-z0-9_-])(` + regexp.QuoteMeta(id) + `)($|[^A-Za-z0-9_-])`
-		re := regexp.MustCompile(pattern)
-		replacement := `$1[deleted:` + id + `]$3`
 		for connID, conn := range connected {
 			updates := map[string]any{}
-			if re.MatchString(conn.Description) {
-				updates["description"] = re.ReplaceAllString(conn.Description, replacement)
+			if rewritten, changed := types.RewriteDeletedReferences(conn.Description, id); changed {
+				updates["description"] = rewritten
 			}
-			if conn.Notes != "" && re.MatchString(conn.Notes) {
-				updates["notes"] = re.ReplaceAllString(conn.Notes, replacement)
+			if rewritten, changed := types.RewriteDeletedReferences(conn.Notes, id); changed {
+				updates["notes"] = rewritten
 			}
-			if conn.Design != "" && re.MatchString(conn.Design) {
-				updates["design"] = re.ReplaceAllString(conn.Design, replacement)
+			if rewritten, changed := types.RewriteDeletedReferences(conn.Design, id); changed {
+				updates["design"] = rewritten
 			}
-			if conn.AcceptanceCriteria != "" && re.MatchString(conn.AcceptanceCriteria) {
-				updates["acceptance_criteria"] = re.ReplaceAllString(conn.AcceptanceCriteria, replacement)
+			if rewritten, changed := types.RewriteDeletedReferences(conn.AcceptanceCriteria, id); changed {
+				updates["acceptance_criteria"] = rewritten
 			}
 			if len(updates) == 0 {
 				continue

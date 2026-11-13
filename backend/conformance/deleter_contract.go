@@ -810,6 +810,67 @@ func RunDeleterRewritesReferencesInNeighbors(t *testing.T, ctx context.Context, 
 	}
 }
 
+// RunDeleterRewritesOnlyTheDeletedIDInAHierarchy pins the boundary the rewrite
+// matches at (issueops/deleter.go, Deleter.Delete: "WHICH ROWS GET
+// REWRITTEN"). A hierarchical child's id is its parent's id plus ".N"
+// (types.GenerateChildID), so a deleted parent's id occurs INSIDE every
+// descendant's id: a rule that treats '.' as a plain word boundary rewrites
+// "step R.1.2 failed" into "step [deleted:R.1].2 failed" while R.1.2 is still
+// live — the text then claims a live row is gone and has lost the id it
+// actually cited. The shared rule in internal/types rejects those matches
+// symmetrically, and the scenario below holds every wiring to it.
+//
+// Each scenario seeds an explicit root/child/grandchild chain with real
+// parent-child edges — a dotted id alone creates no dependency, so without
+// the edges the chain is neither a graph neighborhood nor a cascade — plus a
+// citing neighbor joined by an edge to a deleted row, because the rewrite
+// only ever touches rows the deletion is joined to. Non-cascade deletions use
+// Force: the edges give the deleted rows dependents, and the guard is not
+// what these scenarios are about.
+func RunDeleterRewritesOnlyTheDeletedIDInAHierarchy(t *testing.T, ctx context.Context, fixture DeleterFixture) {
+	t.Helper()
+
+	// seedChain seeds <prefix>-<tag>-root with its .1 child and its .1.2
+	// grandchild, parent first, joined by parent-child edges.
+	seedChain := func(tag string) (root, child, grandchild string) {
+		t.Helper()
+		root = deleterSeedIssue(t, ctx, fixture, tag, "root")
+		child, grandchild = root+".1", root+".1.2"
+		for _, row := range []struct{ id, name string }{{child, "child"}, {grandchild, "grandchild"}} {
+			issue := deleterIssue(fixture, tag, row.name, false)
+			issue.ID = row.id
+			deleterSeed(t, ctx, fixture, issue)
+		}
+		deleterAddParentChildEdge(t, ctx, fixture, child, root)
+		deleterAddParentChildEdge(t, ctx, fixture, grandchild, child)
+		return root, child, grandchild
+	}
+
+	// Deleting only the child: the neighbor cites the LIVE grandchild, and
+	// its text must come back byte-for-byte unchanged.
+	root, child, grandchild := seedChain("hier1")
+	neighbor := deleterIssue(fixture, "hier1", "neighbor", false)
+	neighbor.Description = "step " + grandchild + " failed"
+	deleterSeed(t, ctx, fixture, neighbor)
+	deleterAddEdge(t, ctx, fixture, neighbor.ID, child)
+
+	result := deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
+		IDs:   []string{child},
+		Force: true,
+		Actor: "deleter-contract",
+	})
+	if got := deleterText(t, ctx, fixture, neighbor.ID, "description"); got != neighbor.Description {
+		t.Errorf("hier1: after deleting %s the neighbor's description is %q, want it unchanged at %q — %s is still live and is the id the text cites",
+			child, got, neighbor.Description, grandchild)
+	}
+	deleterAssertIssueRows(t, ctx, fixture, 0, child)
+	deleterAssertIssueRows(t, ctx, fixture, 1, root)
+	deleterAssertIssueRows(t, ctx, fixture, 1, grandchild)
+	if result.ReferencesUpdated != 0 {
+		t.Errorf("hier1: ReferencesUpdated = %d, want 0 — no citation of %s existed, so no row changed", result.ReferencesUpdated, child)
+	}
+}
+
 // RunDeleterAttributesTheRewriteToTheActor pins the one place a deletion's
 // attribution SURVIVES it (issueops/deleter.go, DeleteRequest.Actor: "It DOES
 // reach the rewritten neighbors, which survive, so a workspace that cares who

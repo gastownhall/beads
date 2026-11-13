@@ -316,13 +316,19 @@ type Deleter interface {
 	//
 	// WHICH ROWS GET REWRITTEN is the deletion set's GRAPH NEIGHBORS — the
 	// surviving rows joined to a deleted row by a dependency edge in either
-	// direction — and not the workspace. Each occurrence of a deleted id in a
+	// direction — and not the workspace. Each citation of a deleted id in a
 	// neighbor's description, notes, design or acceptance criteria becomes
-	// `[deleted:<id>]`, matched at ASCII word boundaries the way
-	// SweepRequest.ProtectReferenced matches: `be-1` rewrites in "see (be-1)."
-	// and not inside `xbe-1` or `be-12`. A row that cites a deleted id in
-	// prose WITHOUT an edge to it is left alone, because a workspace-wide text
-	// scan on every delete is a cost this operation does not take.
+	// `[deleted:<id>]`, matched by the shared citation rule in
+	// internal/types: a literal occurrence of the id whose neighboring bytes
+	// do not continue a longer id. `be-1` rewrites in "see (be-1)." and not
+	// inside `xbe-1` or `be-12`; because a hierarchical child's id is its
+	// parent's plus ".N", it does not rewrite inside `be-1.2` either, while
+	// the sentence-ending "see be-1." still does, and two citations sharing
+	// their one separator byte ("be-1 be-1") both rewrite. (The retaining
+	// sweep's ProtectReferenced matcher is a different, hyphen-splitting
+	// rule; the two are not claimed to agree.) A row that cites a deleted id
+	// in prose WITHOUT an edge to it is left alone, because a workspace-wide
+	// text scan on every delete is a cost this operation does not take.
 	//
 	// THE ORDER THE REFUSALS HAPPEN IN IS PART OF THE ANSWER, because a
 	// request can fail several ways at once: request validation, then the
