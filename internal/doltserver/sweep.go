@@ -500,10 +500,12 @@ func canonicalRoots(roots []string) []string {
 }
 
 // isDoltServerCmdline reports whether cmdline looks like a dolt sql-server
-// invocation. Mirrors the substring check in listDoltProcessPIDs (both
-// "dolt" and "sql-server" must appear) rather than an exact match, since
-// debug mode inserts flags between the binary name and the subcommand
-// (e.g. `dolt --prof cpu --prof-path … sql-server …`).
+// invocation. It is a loose substring check (both "dolt" and "sql-server"
+// must appear) rather than an exact match, since debug mode inserts flags
+// between the binary name and the subcommand
+// (e.g. `dolt --prof cpu --prof-path … sql-server …`). It is independent of
+// the stricter executable-and-argument match that listDoltProcessPIDs
+// applies through isDoltSQLServerCommand on Unix.
 func isDoltServerCmdline(cmdline string) bool {
 	return strings.Contains(cmdline, "dolt") && strings.Contains(cmdline, "sql-server")
 }
