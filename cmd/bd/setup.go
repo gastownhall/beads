@@ -320,6 +320,19 @@ func runRecipe(name string) error {
 		}
 	}
 
+	// A built-in recipe can share a path with the user
+	// (recipes.Recipe.IsSharedPath): bd owns a marked section inside that
+	// file, not the file itself, so install, --check and --remove manage the
+	// section and leave the rest of the file alone. shared holds each shared
+	// path with the frozen legacy content that recognizes a whole-file
+	// install an earlier bd release wrote ("" when the recipe pins none).
+	shared := make(map[string]string, len(paths))
+	for _, path := range paths {
+		if recipe.IsSharedPath(path) {
+			shared[path] = recipe.LegacyContents[path]
+		}
+	}
+
 	if setupCheck {
 		var missing []string
 		for _, path := range paths {
@@ -380,6 +393,13 @@ func runRecipe(name string) error {
 		if err != nil {
 			return HandleError("%v", err)
 		}
+		if legacy, isShared := shared[path]; isShared {
+			if _, err := setup.UpsertSharedSection(path, content, legacy); err != nil {
+				return HandleError("manage beads section in %s: %v", remedy.PrintedValue(path), remedy.PrintedError(err))
+			}
+			continue
+		}
+
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil { // #nosec G306 -- config files need to be readable
 			return HandleError("write file: %v", remedy.PrintedError(err))
 		}

@@ -39,11 +39,35 @@ type Recipe struct {
 	ProjectPath string            `toml:"project_path"` // Project settings path (for hooks)
 	Paths       []string          `toml:"paths"`        // Multiple paths (for multifile)
 	Contents    map[string]string `toml:"-"`            // Optional static contents for TypeMultiFile
+	// SharedPaths names paths (each one of Paths) that hold content of the
+	// user's as well as bd's: install manages a marked beads section inside
+	// such a file instead of owning the whole file, and --check and --remove
+	// treat it accordingly. It is set by built-in recipes only.
+	SharedPaths []string `toml:"-"`
+	// LegacyContents holds, for a shared path, the exact file content an
+	// earlier bd release wrote to the whole file (before it was shared), so
+	// --check recognizes a legacy install and install can convert it to a
+	// marked section without duplicating its guidance. Each value is frozen;
+	// it does not follow later template edits.
+	LegacyContents map[string]string `toml:"-"`
 	// Workspace marks a recipe read from a workspace's .beads/recipes.toml
 	// (LoadUserRecipes), which a repository can commit, so bd setup confines
 	// the files it names to the directory it runs in (PathInside). A
 	// built-in recipe's paths are bd's own, and leave it false.
 	Workspace bool `toml:"-"`
+}
+
+// IsSharedPath reports whether path is one of the recipe's shared paths, ones
+// that hold content of the user's as well as bd's, by exact key: a shared
+// path is declared by its literal Paths entry, so no cleaned or otherwise
+// respelled variant of it matches.
+func (r Recipe) IsSharedPath(path string) bool {
+	for _, shared := range r.SharedPaths {
+		if shared == path {
+			return true
+		}
+	}
+	return false
 }
 
 // BuiltinRecipes contains the default recipe definitions.
@@ -105,6 +129,10 @@ var BuiltinRecipes = map[string]Recipe{
 			".copilot-plugin/plugin.json":     beadsplugin.CopilotPluginManifest(),
 			".github/copilot-instructions.md": CopilotInstructionsTemplate,
 		},
+		// The plugin manifest is bd's own file, but the instructions file is
+		// the standard place for a repository's own Copilot guidance, so bd
+		// manages a marked section inside it (GH#7431).
+		SharedPaths: []string{".github/copilot-instructions.md"},
 	},
 	"factory": {
 		Name:        "Factory.ai (Droid)",

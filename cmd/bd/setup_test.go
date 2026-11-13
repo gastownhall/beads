@@ -932,3 +932,51 @@ func TestAddRecipe_RefusesPathOutsideDir(t *testing.T) {
 		}
 	}
 }
+
+// bd setup copilot must not clobber a repository's own
+// .github/copilot-instructions.md: the user's content stays, with the beads
+// guidance added alongside it (GH#7431).
+func TestRunRecipe_CopilotKeepsExistingInstructions(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	t.Chdir(tmpDir)
+	t.Setenv("BEADS_DIR", "")
+	resetSetupResolutionCaches(t)
+	resetSetupGlobals(t)
+
+	instructions := filepath.Join(tmpDir, ".github", "copilot-instructions.md")
+	if err := os.MkdirAll(filepath.Dir(instructions), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const userContent = "# Team Copilot rules\n\nAlways write table-driven tests.\n"
+	if err := os.WriteFile(instructions, []byte(userContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = captureStdout(t, func() error {
+		return runRecipe("copilot")
+	})
+
+	got, err := os.ReadFile(instructions)
+	if err != nil {
+		t.Fatalf("read instructions: %v", err)
+	}
+	if !strings.Contains(string(got), "Always write table-driven tests.") {
+		t.Fatalf("bd setup copilot overwrote the user's copilot-instructions.md; got:\n%s", got)
+	}
+	// The user's bytes stay a prefix, and exactly one marked section with the
+	// current template follows them.
+	want := userContent + "\n" +
+		"<!-- BEGIN BEADS INTEGRATION -->\n" +
+		recipes.CopilotInstructionsTemplate +
+		"<!-- END BEADS INTEGRATION -->\n"
+	if string(got) != want {
+		t.Fatalf("instructions =\n%q\nwant\n%q", got, want)
+	}
+	if n := strings.Count(string(got), "<!-- BEGIN BEADS INTEGRATION"); n != 1 {
+		t.Fatalf("%d beads sections in instructions; want 1:\n%s", n, got)
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, ".copilot-plugin", "plugin.json")); err != nil {
+		t.Fatalf("expected the beads-owned plugin manifest: %v", err)
+	}
+}

@@ -1,12 +1,14 @@
 package recipes
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/BurntSushi/toml"
 	beadsplugin "github.com/steveyegge/beads/plugins/beads"
 )
 
@@ -361,5 +363,53 @@ func TestLoadUserRecipesMarksWorkspaceRecipes(t *testing.T) {
 		if recipe.Workspace {
 			t.Errorf("built-in recipe %s is marked Workspace", name)
 		}
+	}
+}
+
+// TestSharedPathModel pins how a recipe declares a shared path: an exact
+// Paths key the built-in recipe names, never a respelled variant, excluded
+// from TOML, and a workspace override of the recipe replaces the built-in's
+// declaration rather than inheriting it (GH#7431).
+func TestSharedPathModel(t *testing.T) {
+	copilot := BuiltinRecipes["copilot"]
+
+	// The instructions file is shared with the repository's own guidance;
+	// the plugin manifest stays bd's own file.
+	if !copilot.IsSharedPath(".github/copilot-instructions.md") {
+		t.Error("IsSharedPath(.github/copilot-instructions.md) = false, want true")
+	}
+	for _, path := range []string{
+		".copilot-plugin/plugin.json",
+		".github/copilot-instructions",      // no extension change
+		"github/copilot-instructions.md",    // no cleaning
+		".github/./copilot-instructions.md", // no respelling
+	} {
+		if copilot.IsSharedPath(path) {
+			t.Errorf("IsSharedPath(%q) = true, want false", path)
+		}
+	}
+
+	// Neither field is persisted: recipes.toml cannot spell them.
+	var buf bytes.Buffer
+	if err := toml.NewEncoder(&buf).Encode(UserRecipes{Recipes: map[string]Recipe{"copilot": copilot}}); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if strings.Contains(buf.String(), "shared_paths") || strings.Contains(buf.String(), "legacy_contents") {
+		t.Errorf("encoded recipes.toml spells a shared-path field:\n%s", buf.String())
+	}
+
+	// A workspace override replaces the built-in recipe, so the shared
+	// declaration does not carry over to paths it did not name.
+	tmpDir := t.TempDir()
+	override := "[recipes.copilot]\nname = \"Copilot\"\ntype = \"file\"\npath = \".my-copilot/rules.md\"\n"
+	if err := os.WriteFile(filepath.Join(tmpDir, "recipes.toml"), []byte(override), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	all, err := GetAllRecipes(tmpDir)
+	if err != nil {
+		t.Fatalf("GetAllRecipes: %v", err)
+	}
+	if r := all["copilot"]; r.Workspace && r.IsSharedPath(".github/copilot-instructions.md") {
+		t.Errorf("workspace override inherited SharedPaths: %+v", r)
 	}
 }
