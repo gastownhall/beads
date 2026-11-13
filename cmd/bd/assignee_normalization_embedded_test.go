@@ -4,11 +4,26 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// bdBatchOK runs `bd batch` with the given script on stdin, expecting success.
+func bdBatchOK(t *testing.T, bd, dir, script string) string {
+	t.Helper()
+	cmd := exec.Command(bd, "batch")
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	cmd.Stdin = strings.NewReader(script)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bd batch %q failed: %v\n%s", script, err, out)
+	}
+	return string(out)
+}
 
 // TestEmbeddedAssigneeHiddenEmptyClears pins bd-wkcfuz (PR #8203): the
 // hidden-empty spellings of an assignee — a bare "-" and whitespace-only text
@@ -68,6 +83,16 @@ func TestEmbeddedAssigneeHiddenEmptyClears(t *testing.T) {
 			}
 			if got := bdShow(t, bd, dir, issue.ID); got.Assignee != "" {
 				t.Errorf("assign %q: assignee=%q, want cleared", value, got.Assignee)
+			}
+		}
+	})
+
+	t.Run("AC3_batch_update_clears_like_assignee_eq", func(t *testing.T) {
+		for _, kv := range []string{"assignee=", "assignee=-", `assignee="-"`, `assignee=" "`} {
+			issue := assigned(t, "Batch clear")
+			bdBatchOK(t, bd, dir, "update "+issue.ID+" "+kv+"\n")
+			if got := bdShow(t, bd, dir, issue.ID); got.Assignee != "" {
+				t.Errorf("batch update %s: assignee=%q, want cleared", kv, got.Assignee)
 			}
 		}
 	})

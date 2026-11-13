@@ -224,6 +224,16 @@ func TestParseUpdateKVs(t *testing.T) {
 			want: map[string]interface{}{"assignee": ""},
 		},
 		{
+			name: "assignee bare dash clears (bd-wkcfuz)",
+			in:   []string{"assignee=-"},
+			want: map[string]interface{}{"assignee": ""},
+		},
+		{
+			name: "assignee whitespace-only clears (bd-wkcfuz)",
+			in:   []string{"assignee= \t "},
+			want: map[string]interface{}{"assignee": ""},
+		},
+		{
 			name:    "unsupported key",
 			in:      []string{"description=foo"},
 			wantErr: true,
