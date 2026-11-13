@@ -1281,6 +1281,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd create --graph` drops its per-edge cycle probe and closes several
+  plan-format pitfalls** (#3879). On embedded and server-mode workspaces each
+  plan edge no longer pays its own recursive SQL cycle probe: the plan-local
+  check and the batch's end gate still refuse every cycle, and the end gate
+  loads the dependency graph once per plan. On a proxied-server workspace
+  each edge still pays a whole-graph cycle check. Edges and node `deps` typed
+  `"blocked-by"` or `"depends-on"` are now stored as `blocks` (direction
+  unchanged) and gate `bd ready`, as with `bd dep add --type`; a respelling
+  of a known type such as `"blocked_by"` or `"Blocks"` is refused before any
+  write with the spelling bd recognizes, instead of being stored as an inert
+  custom type. Edges an earlier plan stored under these literal types (or a
+  respelling) are left as they are and do not gate; `bd dep remove` plus
+  `bd dep add` replaces one. Node `priority` accepts `"1"` and `"P1"` like
+  `--priority`. Node fields such as `blockedBy` or `depends_on` get a hint
+  saying where dependencies go, and `bd help --doc create` (named by
+  `--graph`'s help) now documents `deps`, the type rules, priority forms,
+  the 1000-item cap and what `--dry-run` does not check.
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc

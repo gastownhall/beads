@@ -7,6 +7,6 @@
     {"method":"GET","operation_id":"getSetting","path":"/v0/beads/config/allowed_prefixes","status":200},
     {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-wisp-g-root","status":404},
     {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-wisp-g-s1","status":404},
-    {"method":"POST","operation_id":"applyBatch","path":"/v0/beads/issues:batchApply","body":["actor","items","provenance"],"status":200}
+    {"method":"POST","operation_id":"applyBatch","path":"/v0/beads/issues:batchApply","body":["actor","items","provenance","skip_per_edge_cycle_check"],"status":200}
   ]
 }

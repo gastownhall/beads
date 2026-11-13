@@ -50,6 +50,34 @@ func TestDocsGraphPlanExampleValidates(t *testing.T) {
 	if _, err := validateGraphApplyStorageClasses(&plan, GraphApplyOptions{}, false); err != nil {
 		t.Errorf("documented example rejected by storage-class validation: %v", err)
 	}
+
+	// bd-esm0t5 (GH#3879): the example shows a node's inline deps, and the
+	// page states the rules a plan author otherwise finds by trial and error.
+	hasDeps := false
+	for _, node := range plan.Nodes {
+		hasDeps = hasDeps || len(node.Deps) > 0
+	}
+	if !hasDeps {
+		t.Error("documented example has no node with inline \"deps\"")
+	}
+	for what, want := range map[string]string{
+		"inline deps":                   `"deps"`,
+		"dependency-shaped node fields": "dropped with a warning",
+		"alias rule":                    `"blocked-by"`,
+		"respelling refusal":            `"blocked_by"`,
+		"custom types do not gate":      "do not gate `bd ready`",
+		"priority string forms":         `"P1"`,
+		"item cap":                      "1000",
+		"dry run":                       "--dry-run",
+		"dry run limits":                "not a full rehearsal",
+	} {
+		if !strings.Contains(createGraphPlanSupplement, want) {
+			t.Errorf("create_graph_plan.md does not document the %s (want %q)", what, want)
+		}
+	}
+	if flag := createCmd.Flags().Lookup("graph"); flag == nil || !strings.Contains(flag.Usage, "bd help --doc create") {
+		t.Errorf("--graph flag usage does not point at `bd help --doc create`: %+v", flag)
+	}
 }
 
 func TestValidateGraphApplyPlanAcceptsCustomTypes(t *testing.T) {
@@ -674,8 +702,8 @@ func TestValidateGraphApplyPlanNodeFieldRules(t *testing.T) {
 		{name: "custom status accepted", customStatuses: []string{"triage"}, mutate: func(n *GraphApplyNode) { n.Status = "triage" }},
 		{name: "custom status rejected without config", mutate: func(n *GraphApplyNode) { n.Status = "triage" }, wantErr: "invalid status"},
 		{name: "negative estimate", mutate: func(n *GraphApplyNode) { n.EstimatedMinutes = &neg }, wantErr: "estimated_minutes"},
-		{name: "priority out of range", mutate: func(n *GraphApplyNode) { p := 9; n.Priority = &p }, wantErr: "priority must be between 0 and 4"},
-		{name: "priority bounds accepted", mutate: func(n *GraphApplyNode) { p := 0; n.Priority = &p }},
+		{name: "priority out of range", mutate: func(n *GraphApplyNode) { p := GraphPlanPriority(9); n.Priority = &p }, wantErr: "priority must be between 0 and 4"},
+		{name: "priority bounds accepted", mutate: func(n *GraphApplyNode) { p := GraphPlanPriority(0); n.Priority = &p }},
 		{name: "invalid wisp_type", mutate: func(n *GraphApplyNode) { n.WispType = "bogus" }, wantErr: "invalid wisp_type"},
 		{name: "valid wisp_type", mutate: func(n *GraphApplyNode) { n.WispType = "heartbeat" }},
 		{name: "invalid mol_type", mutate: func(n *GraphApplyNode) { n.MolType = "bogus" }, wantErr: "invalid mol_type"},
@@ -1624,7 +1652,7 @@ func TestBuildGraphApplyBatchRequestFieldsSurvive(t *testing.T) {
 // (CreateItem.DefaultPriority) with a zero Issue.Priority, and a node naming 0
 // stays P0 with the flag off. `bd create --graph` no longer spells the default.
 func TestBuildGraphApplyBatchRequestLeavesAnAbsentPriorityToTheRole(t *testing.T) {
-	zero := 0
+	zero := GraphPlanPriority(0)
 	req, err := buildGraphApplyBatchRequest(&GraphApplyPlan{Nodes: []GraphApplyNode{
 		{Key: "a", Title: "absent"},
 		{Key: "z", Title: "zero", Priority: &zero},
@@ -1786,4 +1814,305 @@ func TestBuildGraphApplyBatchRequestCreationStampSurvivesCreatePreparation(t *te
 	if !next.Issue.CreatedAt.IsZero() {
 		t.Errorf("open item's created_at = %v, want zero in the built request", next.Issue.CreatedAt)
 	}
+}
+
+// TestBuildGraphApplyBatchRequestSkipsPerEdgeCycleProbe pins bd-esm0t5 (GH#3879
+// symptom 1): a graph plan pays one recursive SQL cycle probe per edge unless
+// the request sets SkipPerEdgeCycleCheck. Every plan that reaches the builder
+// has already passed validateGraphApplyLocalCycles, and the role's end gate
+// re-checks stored plus added edges once per batch, so the builder sets it
+// for every plan, on every leg that shares this request.
+func TestBuildGraphApplyBatchRequestSkipsPerEdgeCycleProbe(t *testing.T) {
+	plans := map[string]*GraphApplyPlan{
+		"nodes only": {Nodes: []GraphApplyNode{{Key: "a", Title: "A"}}},
+		"edges and inline deps": {
+			Nodes: []GraphApplyNode{
+				{Key: "a", Title: "A"},
+				{Key: "b", Title: "B", Deps: []GraphApplyNodeDep{{Target: "a"}}},
+				{Key: "c", Title: "C", ParentKey: "a"},
+			},
+			Edges: []GraphApplyEdge{{FromKey: "c", ToKey: "b", Type: "blocks"}},
+		},
+	}
+	for name, plan := range plans {
+		t.Run(name, func(t *testing.T) {
+			if err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{}); err != nil {
+				t.Fatalf("validateGraphApplyPlan: %v", err)
+			}
+			req, err := buildGraphApplyBatchRequest(plan, GraphApplyOptions{}, "actor", "owner")
+			if err != nil {
+				t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+			}
+			if !req.SkipPerEdgeCycleCheck {
+				t.Fatal("request SkipPerEdgeCycleCheck = false; want true (the end gate and the plan-local check cover cycles)")
+			}
+		})
+	}
+}
+
+// TestBuildGraphApplyBatchRequestCanonicalizesBlockingAliases pins bd-esm0t5
+// (GH#3879 pitfall c): the documented dash aliases "blocked-by" and
+// "depends-on" are stored as "blocks" — the type that gates `bd ready` — with
+// source and target unchanged, the same GH#5069 mapping `bd dep add --type`
+// and `bd create --deps` apply. It covers a top-level edge and an inline dep.
+func TestBuildGraphApplyBatchRequestCanonicalizesBlockingAliases(t *testing.T) {
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "a", Title: "A"},
+			{Key: "b", Title: "B"},
+			{Key: "c", Title: "C", Deps: []GraphApplyNodeDep{{Target: "a", Type: "depends-on"}}},
+		},
+		Edges: []GraphApplyEdge{{FromKey: "b", ToKey: "a", Type: "blocked-by"}},
+	}
+	if err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{}); err != nil {
+		t.Fatalf("validateGraphApplyPlan: %v", err)
+	}
+	req, err := buildGraphApplyBatchRequest(plan, GraphApplyOptions{}, "actor", "owner")
+	if err != nil {
+		t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+	}
+	var deps []*issueops.DepAddItem
+	for _, item := range req.Items {
+		if item.Kind == issueops.ItemDepAdd {
+			deps = append(deps, item.DepAdd)
+		}
+	}
+	if len(deps) != 2 {
+		t.Fatalf("dep_add items = %d, want 2", len(deps))
+	}
+	want := []struct{ source, target string }{{"b", "a"}, {"c", "a"}}
+	for i, dep := range deps {
+		if dep.Type != types.DepBlocks {
+			t.Errorf("dep_add %d type = %q, want %q", i, dep.Type, types.DepBlocks)
+		}
+		if dep.Source != (issueops.Ref{Key: want[i].source}) || dep.Target != (issueops.Ref{Key: want[i].target}) {
+			t.Errorf("dep_add %d = %s -> %s, want %s -> %s (direction unchanged)", i, dep.Source.Key, dep.Target.Key, want[i].source, want[i].target)
+		}
+	}
+}
+
+// TestGraphPlanRejectsUnknownEdgeDependencyType reproduces bd-esm0t5 (GH#3879
+// pitfall c): a --graph edge typed "blocked_by" was accepted as a custom type
+// that never gates `bd ready`. It respells the documented alias "blocked-by",
+// so the plan is refused with a pointer at the spelling bd recognizes.
+func TestGraphPlanRejectsUnknownEdgeDependencyType(t *testing.T) {
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "a", Title: "A", Type: "task"},
+			{Key: "b", Title: "B", Type: "task"},
+		},
+		Edges: []GraphApplyEdge{{FromKey: "b", ToKey: "a", Type: "blocked_by"}},
+	}
+	err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{})
+	if err == nil {
+		t.Fatalf("validateGraphApplyPlan accepted edge type %q; want a respelling refusal", "blocked_by")
+	}
+	for _, want := range []string{`"blocked_by"`, `did you mean "blocked-by"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to contain %s", err, want)
+		}
+	}
+}
+
+// TestValidateGraphApplyPlanRefusesRespelledDependencyTypes pins bd-esm0t5
+// AC-4: an edge or inline dep whose type respells a well-known type or alias
+// (case, '-', '_' or spaces differ) is refused before any write, on both legs
+// (requireUniform is the proxied leg's switch), naming the item, the raw type
+// and the canonical spelling. Custom types that respell nothing stay accepted
+// verbatim, as do the exact aliases and the empty default.
+func TestValidateGraphApplyPlanRefusesRespelledDependencyTypes(t *testing.T) {
+	accepted := []string{"related-to", "custom-edge-type", "implements", "blocked-by", "depends-on", "blocks", "waits-for", ""}
+	refused := map[string]string{
+		"blocked_by":   "blocked-by",
+		"BLOCKED-BY":   "blocked-by",
+		"Blocks":       "blocks",
+		"depends_on":   "depends-on",
+		"parent_child": "parent-child",
+		"waits_for":    "waits-for",
+	}
+
+	plans := map[string]func(depType string) *GraphApplyPlan{
+		"edge": func(depType string) *GraphApplyPlan {
+			return &GraphApplyPlan{
+				Nodes: []GraphApplyNode{{Key: "a", Title: "A"}, {Key: "b", Title: "B"}},
+				Edges: []GraphApplyEdge{{FromKey: "b", ToKey: "a", Type: depType}},
+			}
+		},
+		"inline dep": func(depType string) *GraphApplyPlan {
+			return &GraphApplyPlan{
+				Nodes: []GraphApplyNode{
+					{Key: "a", Title: "A"},
+					{Key: "b", Title: "B", Deps: []GraphApplyNodeDep{{Target: "a", Type: depType}}},
+				},
+			}
+		},
+	}
+	itemLabel := map[string]string{"edge": "edge 0", "inline dep": `node "b": dep 0`}
+
+	for shape, build := range plans {
+		for _, requireUniform := range []bool{false, true} {
+			leg := "embedded"
+			if requireUniform {
+				leg = "proxied"
+			}
+			for _, depType := range accepted {
+				t.Run(fmt.Sprintf("%s/%s/accepts %q", shape, leg, depType), func(t *testing.T) {
+					if _, err := validateFullGraphPlan(build(depType), graphPlanConfig{}, GraphApplyOptions{}, requireUniform); err != nil {
+						t.Fatalf("validateFullGraphPlan refused type %q: %v", depType, err)
+					}
+				})
+			}
+			for raw, canonical := range refused {
+				t.Run(fmt.Sprintf("%s/%s/refuses %q", shape, leg, raw), func(t *testing.T) {
+					_, err := validateFullGraphPlan(build(raw), graphPlanConfig{}, GraphApplyOptions{}, requireUniform)
+					if err == nil {
+						t.Fatalf("validateFullGraphPlan accepted respelled type %q", raw)
+					}
+					for _, want := range []string{itemLabel[shape], fmt.Sprintf("%q", raw), fmt.Sprintf("did you mean %q", canonical)} {
+						if !strings.Contains(err.Error(), want) {
+							t.Errorf("error = %q, want it to contain %s", err, want)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestGraphPlanPriorityAcceptsCLIForms pins bd-esm0t5 (GH#3879 pitfall a): a
+// plan node's priority takes the same forms as `bd create --priority` — an
+// integer, or a string "1", "P1" or "p1" — and the built request stores 1. An
+// absent or null priority stays unset so the role applies its default.
+func TestGraphPlanPriorityAcceptsCLIForms(t *testing.T) {
+	for _, raw := range []string{`1`, `"1"`, `"P1"`, `"p1"`} {
+		t.Run(raw, func(t *testing.T) {
+			planJSON := `{"nodes":[{"key":"a","title":"A","priority":` + raw + `}]}`
+			var plan GraphApplyPlan
+			if err := json.Unmarshal([]byte(planJSON), &plan); err != nil {
+				t.Fatalf("parsing plan with priority %s: %v", raw, err)
+			}
+			if plan.Nodes[0].Priority == nil || int(*plan.Nodes[0].Priority) != 1 {
+				t.Fatalf("decoded priority = %v, want 1", plan.Nodes[0].Priority)
+			}
+			if err := validateGraphApplyPlan(&plan, nil, nil, GraphApplyOptions{}); err != nil {
+				t.Fatalf("validateGraphApplyPlan: %v", err)
+			}
+			req, err := buildGraphApplyBatchRequest(&plan, GraphApplyOptions{}, "actor", "")
+			if err != nil {
+				t.Fatalf("buildGraphApplyBatchRequest: %v", err)
+			}
+			create := req.Items[0].Create
+			if create.DefaultPriority || create.Issue.Priority != 1 {
+				t.Fatalf("create item priority = %d (default %v), want 1", create.Issue.Priority, create.DefaultPriority)
+			}
+		})
+	}
+	for _, raw := range []string{`null`, ``} {
+		t.Run("unset "+raw, func(t *testing.T) {
+			field := ""
+			if raw != "" {
+				field = `,"priority":` + raw
+			}
+			var plan GraphApplyPlan
+			if err := json.Unmarshal([]byte(`{"nodes":[{"key":"a","title":"A"`+field+`}]}`), &plan); err != nil {
+				t.Fatalf("parsing plan: %v", err)
+			}
+			if plan.Nodes[0].Priority != nil {
+				t.Fatalf("decoded priority = %v, want nil (role default)", *plan.Nodes[0].Priority)
+			}
+		})
+	}
+}
+
+// TestGraphPlanPriorityRejectsBadForms pins the other half of bd-esm0t5 AC-5:
+// words, fractions and out-of-range P-forms are refused while the plan is
+// parsed, before any write, with an error naming the value; an in-range-typed
+// integer out of range still fails node validation with its existing message.
+func TestGraphPlanPriorityRejectsBadForms(t *testing.T) {
+	for raw, want := range map[string]string{`"high"`: `"high"`, `1.5`: `1.5`, `"P7"`: `"P7"`} {
+		t.Run(raw, func(t *testing.T) {
+			var plan GraphApplyPlan
+			err := json.Unmarshal([]byte(`{"nodes":[{"key":"a","title":"A","priority":`+raw+`}]}`), &plan)
+			if err == nil {
+				t.Fatalf("parsing plan accepted priority %s", raw)
+			}
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("error = %q, want it to name the value %s", err, want)
+			}
+		})
+	}
+
+	var plan GraphApplyPlan
+	if err := json.Unmarshal([]byte(`{"nodes":[{"key":"a","title":"A","priority":9}]}`), &plan); err != nil {
+		t.Fatalf("parsing plan with priority 9: %v", err)
+	}
+	err := validateGraphApplyPlan(&plan, nil, nil, GraphApplyOptions{})
+	if err == nil || !strings.Contains(err.Error(), "priority must be between 0 and 4") {
+		t.Fatalf("validateGraphApplyPlan(priority 9) = %v, want the range refusal", err)
+	}
+}
+
+// TestWarnUnknownGraphFields_HintsForDependencyFields pins bd-esm0t5 (GH#3879
+// pitfall b): dependency-shaped node fields ("blockedBy", "depends_on", ...)
+// are the natural shape for a plan written from memory, and were dropped
+// with no pointer at where dependencies go. The warning stays warn-only
+// (GH#3367) but points at `bd help --doc create`, and each such field gets a
+// hint naming the node's own deps and an edge whose from_key is the node. The
+// dry-run path of `bd create --graph` writes it to stderr.
+func TestWarnUnknownGraphFields_HintsForDependencyFields(t *testing.T) {
+	fields := []string{"blockedBy", "blocked_by", "depends_on", "dependencies", "needs"}
+	nodes := []string{`{"key": "a", "title": "A"}`}
+	for i, f := range fields {
+		nodes = append(nodes, fmt.Sprintf(`{"key": "n%d", "title": "N%d", %q: ["a"]}`, i, i, f))
+	}
+	planJSON := `{"nodes": [` + strings.Join(nodes, ",") + `]}`
+
+	checkStderr := func(t *testing.T, out string) {
+		t.Helper()
+		if !strings.Contains(out, "bd help --doc create") {
+			t.Errorf("unknown-field warning does not point at `bd help --doc create`:\n%s", out)
+		}
+		for _, f := range fields {
+			var hint string
+			for _, line := range strings.Split(out, "\n") {
+				if strings.Contains(line, fmt.Sprintf("hint: %q", f)) {
+					hint = line
+				}
+			}
+			if hint == "" {
+				t.Errorf("no hint for field %q:\n%s", f, out)
+				continue
+			}
+			for _, want := range []string{`"deps"`, "from_key"} {
+				if !strings.Contains(hint, want) {
+					t.Errorf("hint for %q = %q, want it to mention %s", f, hint, want)
+				}
+			}
+		}
+	}
+
+	t.Run("warn", func(t *testing.T) {
+		var buf bytes.Buffer
+		warnUnknownGraphFields(&buf, detectUnknownGraphFields([]byte(planJSON)))
+		checkStderr(t, buf.String())
+	})
+
+	t.Run("bd create --graph --dry-run", func(t *testing.T) {
+		oldStore := store
+		store = nil
+		defer func() { store = oldStore }()
+
+		planFile := t.TempDir() + "/plan.json"
+		if err := os.WriteFile(planFile, []byte(planJSON), 0o600); err != nil {
+			t.Fatalf("write plan file: %v", err)
+		}
+		var runErr error
+		out := captureStderr(t, func() {
+			runErr = createIssuesFromGraph(planFile, true, GraphApplyOptions{})
+		})
+		if runErr != nil {
+			t.Fatalf("createIssuesFromGraph dry run: %v", runErr)
+		}
+		checkStderr(t, out)
+	})
 }

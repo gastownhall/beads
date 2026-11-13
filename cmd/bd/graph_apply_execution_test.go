@@ -451,7 +451,7 @@ func TestExecuteGraphApplyAcceptsParentToChildPathThroughWaitsFor(t *testing.T) 
 // TestExecuteGraphApplyUnitFinalGateCatchesCycleHiddenFromPerEdgeChecks. That
 // test blinded the fake store's per-edge cycle probe; the real request has the
 // same switch, SkipPerEdgeCycleCheck, which drops the per-edge probe but never
-// the end gate. With it set, the plans TestExecuteGraphApplyRejectsCombinedSchedulingCycle
+// the end gate, and the builder now always sets it. With it set, the plans TestExecuteGraphApplyRejectsCombinedSchedulingCycle
 // and TestExecuteGraphApplyRejectsCycleHiddenInInlineDep send through
 // executeGraphApply must still be refused, by the end gate alone.
 func TestExecuteGraphApplyFinalGateCatchesCycleHiddenFromPerEdgeChecks(t *testing.T) {
@@ -497,7 +497,11 @@ func TestExecuteGraphApplyFinalGateCatchesCycleHiddenFromPerEdgeChecks(t *testin
 			if err != nil {
 				t.Fatalf("buildGraphApplyBatchRequest: %v", err)
 			}
-			req.SkipPerEdgeCycleCheck = true
+			// The builder itself sets the switch for every graph plan
+			// (bd-esm0t5), so this request is exactly what executeGraphApply sends.
+			if !req.SkipPerEdgeCycleCheck {
+				t.Fatal("buildGraphApplyBatchRequest left SkipPerEdgeCycleCheck unset")
+			}
 			applier, err := store.BatchApplier()
 			if err != nil {
 				t.Fatalf("BatchApplier: %v", err)
@@ -853,5 +857,145 @@ func TestExecuteGraphApplyRejectsBlockingThroughPlannedHierarchyRegardlessOfOrde
 				t.Fatalf("issue rows after rejected plan = %d, want 0", count)
 			}
 		})
+	}
+}
+
+// TestExecuteGraphApplyEndGateRefusesCycleThroughStoredEdgeViaNewNode pins
+// that, with the per-edge probe dropped (bd-esm0t5), the role's end gate still
+// refuses a cycle that runs through a stored edge and a plan-local node: X and
+// Y are stored with Y depending on X; the plan adds n, makes X depend on n and
+// n depend on Y, closing X -> n -> Y -> X. Nothing from the plan may persist.
+func TestExecuteGraphApplyEndGateRefusesCycleThroughStoredEdgeViaNewNode(t *testing.T) {
+	ctx, db := withGraphApplyTestStore(t)
+
+	for _, id := range []string{"ga-stored-x", "ga-stored-y"} {
+		if err := store.CreateIssue(ctx, &types.Issue{
+			ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+		}, actor); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", id, err)
+		}
+	}
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID: "ga-stored-y", DependsOnID: "ga-stored-x", Type: types.DepBlocks,
+	}, actor); err != nil {
+		t.Fatalf("AddDependency(y -> x): %v", err)
+	}
+
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{{Key: "n", Title: "New node", Type: "task"}},
+		Edges: []GraphApplyEdge{
+			{FromID: "ga-stored-x", ToKey: "n", Type: "blocks"},
+			{FromKey: "n", ToID: "ga-stored-y", Type: "blocks"},
+		},
+	}
+	if err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{}); err != nil {
+		t.Fatalf("validateGraphApplyPlan: %v", err)
+	}
+
+	_, err := executeGraphApply(ctx, plan, GraphApplyOptions{})
+	// The end gate's wording; the per-edge probe would have said "adding
+	// dependency would create a cycle" against a single item instead.
+	if err == nil || !strings.Contains(err.Error(), "dependency cycle would be created") {
+		t.Fatalf("executeGraphApply error = %v, want the end gate's whole-graph cycle rejection", err)
+	}
+
+	var issues int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues WHERE title = ?", "New node").Scan(&issues); err != nil {
+		t.Fatalf("query plan node rows: %v", err)
+	}
+	if issues != 0 {
+		t.Fatalf("rows for plan node n after rejected plan = %d, want 0", issues)
+	}
+	var deps int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dependencies").Scan(&deps); err != nil {
+		t.Fatalf("query dependency rows: %v", err)
+	}
+	if deps != 1 {
+		t.Fatalf("dependency rows after rejected plan = %d, want 1 (only the stored y -> x edge)", deps)
+	}
+}
+
+// TestExecuteGraphApplyLateItemFailureLeavesNoRows guards the all-or-nothing
+// promise GH#3879 questioned: when the LAST item of a plan fails (an inline
+// dep naming an issue id that does not exist), every create and edge applied
+// before it is rolled back with it.
+func TestExecuteGraphApplyLateItemFailureLeavesNoRows(t *testing.T) {
+	ctx, db := withGraphApplyTestStore(t)
+
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "a", Title: "A", Type: "task"},
+			{Key: "b", Title: "B", Type: "task"},
+			{Key: "c", Title: "C", Type: "task", Deps: []GraphApplyNodeDep{{Target: "ga-does-not-exist"}}},
+		},
+		Edges: []GraphApplyEdge{{FromKey: "b", ToKey: "a", Type: "blocks"}},
+	}
+	if err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{}); err != nil {
+		t.Fatalf("validateGraphApplyPlan: %v", err)
+	}
+	if _, err := executeGraphApply(ctx, plan, GraphApplyOptions{}); err == nil {
+		t.Fatal("executeGraphApply succeeded with an inline dep on a missing issue; want an error")
+	}
+
+	for _, table := range []string{"issues", "dependencies"} {
+		var count int
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table).Scan(&count); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		if count != 0 {
+			t.Fatalf("%s rows after failed plan = %d, want 0", table, count)
+		}
+	}
+}
+
+// TestExecuteGraphApplyBlockingAliasesGateReady pins bd-esm0t5 end to end: an
+// edge typed "blocked-by" and an inline dep typed "depends-on" are stored as
+// "blocks" rows (b and c depend on a), so `bd ready` holds b and c back while
+// a is open, instead of storing inert custom types that never gate.
+func TestExecuteGraphApplyBlockingAliasesGateReady(t *testing.T) {
+	ctx, _ := withGraphApplyTestStore(t)
+
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "a", Title: "A", Type: "task"},
+			{Key: "b", Title: "B", Type: "task"},
+			{Key: "c", Title: "C", Type: "task", Deps: []GraphApplyNodeDep{{Target: "a", Type: "depends-on"}}},
+		},
+		Edges: []GraphApplyEdge{{FromKey: "b", ToKey: "a", Type: "blocked-by"}},
+	}
+	if err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{}); err != nil {
+		t.Fatalf("validateGraphApplyPlan: %v", err)
+	}
+	result, err := executeGraphApply(ctx, plan, GraphApplyOptions{})
+	if err != nil {
+		t.Fatalf("executeGraphApply: %v", err)
+	}
+	a, b, c := result.IDs["a"], result.IDs["b"], result.IDs["c"]
+
+	for _, dependent := range []string{b, c} {
+		deps, err := store.GetDependenciesWithMetadata(ctx, dependent)
+		if err != nil {
+			t.Fatalf("GetDependenciesWithMetadata(%s): %v", dependent, err)
+		}
+		if len(deps) != 1 || deps[0].ID != a || deps[0].DependencyType != types.DepBlocks {
+			t.Fatalf("%s dependencies = %+v, want one blocks row on %s", dependent, deps, a)
+		}
+	}
+
+	ready, err := store.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	readyIDs := make(map[string]bool, len(ready))
+	for _, issue := range ready {
+		readyIDs[issue.ID] = true
+	}
+	if !readyIDs[a] {
+		t.Errorf("ready set %v lacks the unblocked node a (%s)", readyIDs, a)
+	}
+	for key, id := range map[string]string{"b": b, "c": c} {
+		if readyIDs[id] {
+			t.Errorf("node %s (%s) is ready while a is open; the alias edge must gate it", key, id)
+		}
 	}
 }
