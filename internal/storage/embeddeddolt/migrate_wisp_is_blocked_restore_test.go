@@ -97,6 +97,53 @@ func TestEmbeddedWispIsBlockedRestoreAtIgnored32(t *testing.T) {
 	}
 }
 
+// TestEmbeddedWispIsBlockedRestoreUnblocksClose is the embedded twin of
+// AC-3: closing a blocker recomputes its dependents through a mark statement
+// whose union leg joins wisps and reads p.is_blocked, so on the drifted clone
+// the close failed even for a durable dependent. After the heal the close
+// succeeds and unblocks the durable dependent X and the wisps B and C.
+func TestEmbeddedWispIsBlockedRestoreUnblocksClose(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	fx := newPristineEmbeddedDoltFixture(t, "wib")
+	store := fx.store
+	t.Cleanup(func() {
+		if store != nil {
+			closeEmbeddedDoltStore(t, store)
+		}
+	})
+
+	x := &types.Issue{ID: "wib-x", Title: "wib-x", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, x, "test"); err != nil {
+		t.Fatalf("CreateIssue(wib-x): %v", err)
+	}
+	seedWispIsBlockedGraph(t, ctx, fx, store)
+	if err := store.AddDependency(ctx, &types.Dependency{IssueID: "wib-x", DependsOnID: "wib-a", Type: types.DepBlocks}, "test"); err != nil {
+		t.Fatalf("AddDependency(wib-x -> wib-a): %v", err)
+	}
+	if err := store.Commit(ctx, "seed durable dependent"); err != nil {
+		t.Fatalf("commit seed: %v", err)
+	}
+	closeEmbeddedDoltStore(t, store)
+	store = nil
+	driftWispIsBlocked(t, ctx, fx)
+
+	reopened, err := embeddeddolt.Open(ctx, fx.beadsDir, fx.database, "main")
+	if err != nil {
+		t.Fatalf("Open (heal): %v", err)
+	}
+	store = reopened
+	if err := store.CloseIssue(ctx, "wib-a", "done", "test", ""); err != nil {
+		t.Fatalf("CloseIssue(wib-a) on the reopened clone: %v", err)
+	}
+	if got := wispScalar(t, ctx, fx, "SELECT is_blocked FROM issues WHERE id = ?", "wib-x"); got != 0 {
+		t.Errorf("durable dependent is_blocked after closing its blocker = %d, want 0", got)
+	}
+	if got := wispBlockedFlags(t, ctx, fx, "wib-b", "wib-c"); !slices.Equal(got, []int{0, 0}) {
+		t.Errorf("wisp dependents is_blocked (b, c) after closing their blocker = %v, want [0 0]", got)
+	}
+}
+
 // TestEmbeddedWispIsBlockedRepairFailureRetries is AC-7 on the embedded open
 // path: a fault at any stage of the ignored 0032 restore must fail Open with
 // the fault surfaced and record no ignored 0032 row, and the next Open with
