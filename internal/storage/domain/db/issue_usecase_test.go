@@ -954,6 +954,34 @@ func (s *testSuite) TestIssueUseCase_CallerNamedChildAdvancesParentCounter() {
 	})
 }
 
+// TestIssueUseCase_CallerNamedChildNeverLowersTheCounter: the advance is
+// monotonic. A caller-named child below the parent's counter leaves it where
+// it was; one above it raises it.
+func (s *testSuite) TestIssueUseCase_CallerNamedChildNeverLowersTheCounter() {
+	s.resetMintConfig("cn", "")
+	uc := s.issueUseCase()
+	s.seedIssueRow("cn-hi")
+	_, err := s.Runner().ExecContext(s.Ctx(),
+		"INSERT INTO child_counters (parent_id, last_child) VALUES (?, ?)", "cn-hi", 10)
+	s.Require().NoError(err)
+
+	_, err = uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "low child", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID: "cn-hi.8",
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal(10, s.childCounterValue("child_counters", "cn-hi"),
+		"a caller-named child below the counter must not lower it")
+
+	_, err = uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "high child", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID: "cn-hi.12",
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal(12, s.childCounterValue("child_counters", "cn-hi"),
+		"a caller-named child above the counter must raise it")
+}
+
 // childCounterValue reads parentID's last_child from table, failing the test
 // when there is no row.
 func (s *testSuite) childCounterValue(table, parentID string) int {
