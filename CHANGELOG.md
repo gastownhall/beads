@@ -1281,6 +1281,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A completed proxied-server client-info save no longer reports a failure
+  on Windows** (#6858, fix follows PR #6861 by @ecuthiell). After writing,
+  flushing and renaming `proxied_server_client_info.json`, the saver synced
+  the workspace directory through a read-only handle; Windows'
+  `FlushFileBuffers` needs write access, so every successful save returned
+  `syncing proxied_server_client_info.json directory: Access is denied`.
+  Windows now stops after the checked file flush, close and rename without
+  opening the directory; other platforms keep the directory sync and its
+  errors.
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 )
 
@@ -93,6 +94,19 @@ func SaveProxiedServerClientInfo(beadsDir string, info *ProxiedServerClientInfo)
 	}
 	if err = os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("writing %s: %w", ProxiedServerClientInfoFileName, err)
+	}
+	return syncSidecarDir(runtime.GOOS, beadsDir)
+}
+
+// syncSidecarDir flushes the workspace directory entry that names the
+// sidecar, so a completed rename is not lost after a crash. Windows cannot
+// sync a directory handle opened by os.Open (FlushFileBuffers needs
+// GENERIC_WRITE), so there the checked file flush, close and rename stand
+// alone: no directory is opened and a completed save stays successful.
+// Every other platform keeps the directory open, Sync and Close errors.
+func syncSidecarDir(goos, beadsDir string) error {
+	if goos == "windows" {
+		return nil
 	}
 	d, err := os.Open(beadsDir) // #nosec G304 -- beadsDir is the discovered workspace directory
 	if err != nil {
