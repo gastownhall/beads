@@ -653,3 +653,84 @@ func TestCreateIssueReplayKeepsCounterAheadOfReplayedID(t *testing.T) {
 		}
 	})
 }
+
+// TestCreateIssuesAllWispsReplayRemintsWispID (AC-4): an all-ephemeral
+// (wisp-plane) auto-id batch whose transaction rolls back before a competitor
+// occupies the aborted wisp id. The replay must re-mint in the wisps plane:
+// the competitor keeps its row and the caller's different final id names its
+// own wisp. The no-history variant rides the same fast path.
+func TestCreateIssuesAllWispsReplayRemintsWispID(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		noHistory bool
+	}{
+		{name: "ephemeral"},
+		{name: "no-history routing", noHistory: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, cleanup := setupConcurrentTestStore(t)
+			defer cleanup()
+			ctx, cancel := testContext(t)
+			defer cancel()
+
+			wisp := &types.Issue{
+				Title:     "wisp loser",
+				Status:    types.StatusOpen,
+				Priority:  2,
+				IssueType: types.TypeTask,
+				// Exactly one of the two flags: they are mutually exclusive,
+				// and both route the batch onto the all-wisps fast path (which
+				// marks no-history rows ephemeral itself).
+				Ephemeral: !tc.noHistory,
+				NoHistory: tc.noHistory,
+			}
+
+			var staleID string
+			var competitorErr error
+			// Declared before the arming statement: the interceptor closure
+			// runs inside it.
+			var fault *createCommitFault
+			var origDB *sql.DB
+			fault, origDB, _ = armCreateCommitFault(t, store, 1, func() error {
+				// After the real rollback the aborted wisp id is free; the
+				// competitor occupies it with different content.
+				staleID = wisp.ID
+				competitorErr = createOnPool(ctx, origDB, &types.Issue{
+					ID: staleID, Title: "wisp winner", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask, Ephemeral: true,
+				}, "winner")
+				return nil
+			})
+
+			if err := store.CreateIssues(ctx, []*types.Issue{wisp}, "loser"); err != nil {
+				t.Fatalf("CreateIssues: %v", err)
+			}
+			if competitorErr != nil {
+				t.Fatalf("concurrent winner create: %v", competitorErr)
+			}
+			if staleID == "" {
+				t.Fatal("fault never observed the aborted mint: interleaving not forced")
+			}
+			if armed, commits := fault.counts(); armed != 1 || commits != 1 {
+				t.Fatalf("fault intercepted %d commits (want 1) and observed %d successful commits (want 1: the replay)", armed, commits)
+			}
+
+			winner, err := issueOnPool(ctx, origDB, staleID)
+			if err != nil {
+				t.Fatalf("read competitor wisp %s: %v", staleID, err)
+			}
+			if winner.Title != "wisp winner" {
+				t.Errorf("competitor wisp %s was overwritten by the replayed batch: title = %q, want %q", staleID, winner.Title, "wisp winner")
+			}
+			if wisp.ID == staleID {
+				t.Fatalf("replay reused the aborted auto-minted wisp id %s instead of re-minting", staleID)
+			}
+			got, err := issueOnPool(ctx, origDB, wisp.ID)
+			if err != nil {
+				t.Fatalf("read caller wisp %s: %v", wisp.ID, err)
+			}
+			if got.Title != "wisp loser" {
+				t.Errorf("caller wisp %s title = %q, want %q", wisp.ID, got.Title, "wisp loser")
+			}
+		})
+	}
+}
