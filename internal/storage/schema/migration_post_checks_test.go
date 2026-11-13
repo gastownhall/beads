@@ -178,6 +178,83 @@ func TestRunMigrationsChecksEveryDefaultAMigrationDrops(t *testing.T) {
 	}
 }
 
+// GH#5269, AC-2: a migration with several unmet conditions reports every one
+// of them — the failed probe included — and writes neither the cursor row nor
+// the step commit. The step runs with commitEachStep so the absence of
+// DOLT_ADD/DOLT_COMMIT is observable.
+func TestRunMigrationsPostCheckReportsEveryUnmetConditionAndWritesNothing(t *testing.T) {
+	stubNoIssueRows(t)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	// dirtyBeforeStep snapshot for the per-step commit path.
+	mock.ExpectQuery(`FROM dolt_status`).WillReturnRows(
+		sqlmock.NewRows([]string{"table_name", "staged"}))
+	// 0051's body: the four guarded ALTERs in one Exec.
+	mock.ExpectExec(`ALTER TABLE events ALTER COLUMN id DROP DEFAULT`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	// Probes: events and comments carry their defaults, issue_snapshots'
+	// column cannot be read, compaction_snapshots is absent (skipped).
+	mock.ExpectQuery(`^SHOW TABLES$`).WillReturnRows(showTables("events", "comments", "issue_snapshots"))
+	mock.ExpectQuery(`^SHOW COLUMNS FROM events LIKE 'id'$`).WillReturnRows(idDefault("(uuid())"))
+	mock.ExpectQuery(`^SHOW TABLES$`).WillReturnRows(showTables("events", "comments", "issue_snapshots"))
+	mock.ExpectQuery(`^SHOW COLUMNS FROM comments LIKE 'id'$`).WillReturnRows(idDefault("(uuid())"))
+	mock.ExpectQuery(`^SHOW TABLES$`).WillReturnRows(showTables("events", "comments", "issue_snapshots"))
+	mock.ExpectQuery(`^SHOW COLUMNS FROM issue_snapshots LIKE 'id'$`).WillReturnError(errors.New("dolt: read boom"))
+	mock.ExpectQuery(`^SHOW TABLES$`).WillReturnRows(showTables("events", "comments", "issue_snapshots"))
+	// Corrections: events' ALTER fails outright; comments' ALTER "succeeds"
+	// but the re-probe still sees the default.
+	mock.ExpectExec("ALTER TABLE `events` ALTER COLUMN `id` DROP DEFAULT").
+		WillReturnError(errors.New("dolt: alter boom"))
+	mock.ExpectExec("ALTER TABLE `comments` ALTER COLUMN `id` DROP DEFAULT").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`^SHOW COLUMNS FROM comments LIKE 'id'$`).WillReturnRows(idDefault("(uuid())"))
+
+	applied, err := runMigrations(context.Background(), db, mainSource, 50, 51, true)
+	var perr *PostConditionError
+	if err == nil || !errors.As(err, &perr) {
+		t.Fatalf("runMigrations(0051, three unmet conditions) = %d, %v; want a *PostConditionError", applied, err)
+	}
+	if applied != 0 {
+		t.Fatalf("applied = %d, want 0", applied)
+	}
+	byColumn := map[string]PostConditionFailure{}
+	for _, f := range perr.Failures {
+		byColumn[f.Table+"."+f.Column] = f
+	}
+	if len(perr.Failures) != 3 {
+		t.Fatalf("failures = %+v, want three (events, comments, issue_snapshots)", perr.Failures)
+	}
+	if f := byColumn["events.id"]; !f.Observed.Valid || f.Observed.String != "(uuid())" || !strings.Contains(f.Cause, "failed") {
+		t.Fatalf("events.id failure = %+v, want the observed default and the failed ALTER", f)
+	}
+	if f := byColumn["comments.id"]; !f.Observed.Valid || !strings.Contains(f.Cause, "survived") {
+		t.Fatalf("comments.id failure = %+v, want the surviving default after the correction", f)
+	}
+	if f := byColumn["issue_snapshots.id"]; f.Observed.Valid || !strings.Contains(f.Cause, "probe failed") {
+		t.Fatalf("issue_snapshots.id failure = %+v, want a failed probe with no observed default", f)
+	}
+	for _, f := range perr.Failures {
+		if f.Source != mainSource.cursorTable || f.Version != 51 {
+			t.Fatalf("failure %+v lacks its source/version provenance", f)
+		}
+	}
+	msg := err.Error()
+	for _, want := range []string{"events.id", "comments.id", "issue_snapshots.id", "(uuid())", "GH#5269"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("err = %q, want it to identify %q", msg, want)
+		}
+	}
+	// No cursor row and no step commit: the mock has no INSERT, DOLT_ADD or
+	// DOLT_COMMIT expectation left, so any of them would surface here.
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
 // The check reads its columns from the frozen bodies, so it covers every
 // shipped migration that drops a default. This pins what it finds.
 func TestDroppedDefaultsOfTheShippedMigrations(t *testing.T) {
