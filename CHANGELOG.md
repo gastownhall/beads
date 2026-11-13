@@ -852,6 +852,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`BEADS_HTTP_POLICY_CACHE_TTL`, a duration, a number of seconds, or `off`),
   and a handshake the process already holds still wins. Claims and closes
   always ask the server.
+- **`bd dep add` no longer reads the whole dependency graph a second time
+  inside its write.** With per-edge cycle checks on (the default), a request
+  that adds a `blocks`, `conditional-blocks` or `parent-child` edge sent two
+  extra reads at the end, one of every row in `dependencies` and one of every
+  row in `wisp_dependencies`, to look for a cycle the per-edge checks had
+  already ruled out: each check runs in the same transaction after the
+  request's earlier edges are written. The write now sends 2 fewer
+  statements (measured on embedded Dolt for one `blocks` edge) and reads none
+  of those rows.
+  A bulk `bd dep add --file … --no-cycle-check` skips the per-edge probes and
+  so still runs the whole-graph check; for a single edge the flag only skips
+  the post-add cycle warning. That check and `bd dep cycles` now read only the
+  edge types they check rather than every edge.
+- **`bd dep tree` stops reading at its depth limit.** A node on the last
+  level `--max-depth` allows is still shown, but the walk no longer reads its
+  edges and loads its neighbors, which it then discarded. That saves 2
+  statements for each such node with no edges, 4 when its edges point only at
+  missing or external targets, and 5 or more when at least one neighbor loads
+  (server and embedded modes alike). The tree returned is
+  unchanged.
+- **`bd dep tree` reads level by level instead of node by node.** It read each
+  node's issue row, labels and edges with separate statements. It now reads a
+  level's edges, issues and labels in batches of 200 IDs. Against a server with
+  a 300-issue random graph, one `bd dep tree --direction=both` walk sent 1567
+  fewer statements and took 37 s less at a 20 ms round trip; a root with 30
+  children that each have one child sent 325 fewer. A node's dependencies are
+  now walked in order of the far end's ID. That order used to follow whichever
+  index the server's plan used, and it decides which parent of a diamond is
+  expanded and which shows `(shown above)`. So such a tree can draw differently
+  from before, and with a depth limit the changed order can also change which
+  descendants appear. The read can now fetch an issue the walk does not return,
+  when a depth limit cuts the only path the walk took to it, and a failure
+  reading such an issue fails the tree; before, that issue went unread.
 - `bd serve` normalizes every RFC 3339 time bound on the issue listing and
   count (`created_*`, `updated_*`, `closed_*`, and the new `defer_*` and
   `due_*`) to UTC before it reaches storage. A bound carrying an offset
