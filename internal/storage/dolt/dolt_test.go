@@ -1255,7 +1255,7 @@ func TestDoltStoreDeleteIssue(t *testing.T) {
 
 // TestDeleteIssuesBatchPerformance verifies that batch deletion works correctly
 // with a large number of issues and chain dependencies. This exercises the batched
-// IN-clause query paths that prevent N+1 hangs on embedded Dolt (steveyegge/beads#1692).
+// IN-clause query paths that prevent N+1 hangs on embedded Dolt (GH#1692).
 func TestDeleteIssuesBatchPerformance(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()

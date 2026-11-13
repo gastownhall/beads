@@ -121,7 +121,7 @@ func TestListBuildIssueTree_RelatesToDoesNotNestEpics(t *testing.T) {
 	})
 }
 
-// Regression test for https://github.com/steveyegge/beads/issues/1446
+// Regression test for https://github.com/gastownhall/beads/issues/1446
 // A task with multiple dependencies on the same epic should only appear once.
 func TestListBuildIssueTree_NoDuplicateChildrenFromMultipleDeps(t *testing.T) {
 	epic := &types.Issue{ID: "bd-epic", Title: "Epic", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeEpic}

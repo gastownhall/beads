@@ -23,8 +23,8 @@ import (
 const gitCmdTimeout = 30 * time.Second
 
 const (
-	hooksExamplesURL = "https://github.com/steveyegge/beads/tree/main/examples/git-hooks"
-	hooksUpgradeURL  = "https://github.com/steveyegge/beads/issues/615"
+	hooksDocsURL    = "https://beads.gascity.com/cli-reference/hooks"
+	hooksUpgradeURL = "https://github.com/gastownhall/beads/issues/615"
 )
 
 // bdShimMarker identifies bd shim hooks (GH#946)
@@ -171,7 +171,7 @@ func CheckGitHooks(cliVersion string) DoctorCheck {
 		}
 	}
 
-	hookInstallMsg := "Install hooks with 'bd hooks install'. See " + hooksExamplesURL
+	hookInstallMsg := "Install hooks with 'bd hooks install'. See " + hooksDocsURL
 
 	if len(installedHooks) > 0 {
 		return DoctorCheck{

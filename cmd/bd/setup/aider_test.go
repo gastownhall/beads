@@ -46,12 +46,18 @@ func TestAiderReadmeTemplate(t *testing.T) {
 		"bd create",
 		"bd close",
 		"bd dolt push",
+		"https://github.com/gastownhall/beads",
 	}
 
 	for _, req := range requiredContent {
 		if !strings.Contains(aiderReadmeTemplate, req) {
 			t.Errorf("aiderReadmeTemplate missing required content: %q", req)
 		}
+	}
+	// GH#3059: the repository moved; the link must not name the old org,
+	// split so scripts/check-legacy-repo-refs.sh does not flag this check.
+	if strings.Contains(aiderReadmeTemplate, "steve"+"yegge") {
+		t.Errorf("aiderReadmeTemplate still names the pre-move repository")
 	}
 }
 

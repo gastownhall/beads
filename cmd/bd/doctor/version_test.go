@@ -106,6 +106,10 @@ func TestIsBrewHeadVersion(t *testing.T) {
 	}
 }
 
+// wantInstallScriptCommand is spelled out, not installScriptCommand, so the
+// test pins the repository the upgrade hint names (GH#3059).
+const wantInstallScriptCommand = "curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash"
+
 func TestUpgradeCommandForPath(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -116,8 +120,8 @@ func TestUpgradeCommandForPath(t *testing.T) {
 		{"homebrew intel mac", "/usr/local/Cellar/beads/0.49.4/bin/bd", "brew upgrade beads"},
 		{"homebrew linux", "/home/linuxbrew/.linuxbrew/Cellar/beads/0.49.4/bin/bd", "brew upgrade beads"},
 		{"legacy tap formula", "/opt/homebrew/Cellar/bd/0.49.0/bin/bd", "brew upgrade beads"},
-		{"usr local bin symlink", "/usr/local/bin/bd", installScriptCommand},
-		{"go install", "/home/user/go/bin/bd", installScriptCommand},
+		{"usr local bin symlink", "/usr/local/bin/bd", wantInstallScriptCommand},
+		{"go install", "/home/user/go/bin/bd", wantInstallScriptCommand},
 	}
 
 	for _, tt := range tests {
@@ -127,6 +131,15 @@ func TestUpgradeCommandForPath(t *testing.T) {
 				t.Errorf("upgradeCommandForPath(%q)\n  got:  %q\n  want: %q", tt.execPath, result, tt.expected)
 			}
 		})
+	}
+}
+
+// TestLatestReleaseAPIURL pins the release lookup to the current repository
+// rather than relying on GitHub's transfer redirect from the pre-move repository.
+func TestLatestReleaseAPIURL(t *testing.T) {
+	const want = "https://api.github.com/repos/gastownhall/beads/releases/latest"
+	if latestReleaseAPIURL != want {
+		t.Errorf("latestReleaseAPIURL = %q, want %q", latestReleaseAPIURL, want)
 	}
 }
 
