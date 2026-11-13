@@ -70,3 +70,42 @@ func TestSharedSectionInstallFile(t *testing.T) {
 		t.Fatalf("InstallSharedFile into a missing directory = %v, want an I/O error", err)
 	}
 }
+
+func TestSharedSectionUpsertReplacesInPlace(t *testing.T) {
+	for _, tt := range []struct{ name, content, want string }{
+		{
+			name:    "bare markers with text around",
+			content: "# Mine\n\n" + agentsBeginMarker + "\nOld.\n" + agentsEndMarker + "\n\n## After\n",
+			want:    "# Mine\n\n" + sharedWrapped() + "\n## After\n",
+		},
+		{
+			name:    "metadata marker",
+			content: "<!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:00000000 -->\nOld.\n" + agentsEndMarker + "\n",
+			want:    sharedWrapped(),
+		},
+		{
+			name:    "END marker without a final line break",
+			content: "# Mine\n" + agentsBeginMarker + "\nOld.\n" + agentsEndMarker,
+			want:    "# Mine\n" + strings.TrimSuffix(sharedWrapped(), "\n"),
+		},
+		{
+			name:    "CRLF around the section",
+			content: "# Mine\r\n\r\n" + agentsBeginMarker + "\r\nOld.\r\n" + agentsEndMarker + "\r\n\r\nAfter\r\n",
+			want:    "# Mine\r\n\r\n" + strings.TrimSuffix(sharedWrapped(), "\n") + "\r\n\r\nAfter\r\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := UpsertSharedSection(tt.content, sharedBody)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Fatalf("UpsertSharedSection = %q, want %q", got, tt.want)
+			}
+			again, err := UpsertSharedSection(got, sharedBody)
+			if err != nil || again != got {
+				t.Fatalf("second UpsertSharedSection = %q, %v; want it unchanged", again, err)
+			}
+		})
+	}
+}

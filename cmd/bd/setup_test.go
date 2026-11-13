@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/git"
@@ -1080,6 +1081,54 @@ func TestSetupCopilot_AppendsSectionToUserInstructions(t *testing.T) {
 			}
 			if manifest, ok := readWorkspaceFile(t, copilotManifestFile); !ok || manifest != copilotManifest(t) {
 				t.Fatalf("manifest installed = %v, content matches = %v", ok, manifest == copilotManifest(t))
+			}
+		})
+	}
+}
+
+// AC-2: setup replaces an existing section in place, leaving the text
+// before and after it alone, and a second run does not rewrite the file.
+func TestSetupCopilot_UpdatesSectionInPlaceAndIsIdempotent(t *testing.T) {
+	for _, begin := range []string{
+		"<!-- BEGIN BEADS INTEGRATION -->",
+		"<!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:00000000 -->",
+	} {
+		t.Run(begin, func(t *testing.T) {
+			copilotTestWorkspace(t)
+			const before = "# Team rules\n\nBe kind.\n\n"
+			const after = "\n## More team rules\n\nKeep it short.\n"
+			writeWorkspaceFile(t, copilotInstructionsFile,
+				before+begin+"\nOlder beads guidance.\n<!-- END BEADS INTEGRATION -->\n"+after)
+
+			if out, err := runCopilotSetup(t, ""); err != nil {
+				t.Fatalf("bd setup copilot: %v\n%s", err, out)
+			}
+			got, _ := readWorkspaceFile(t, copilotInstructionsFile)
+			if want := before + copilotSection() + after; got != want {
+				t.Fatalf("instructions = %q, want %q", got, want)
+			}
+			if n := strings.Count(got, "# GitHub Copilot Instructions"); n != 1 {
+				t.Fatalf("template appears %d times, want 1", n)
+			}
+
+			path := filepath.FromSlash(copilotInstructionsFile)
+			stamp := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+			if err := os.Chtimes(path, stamp, stamp); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := runCopilotSetup(t, ""); err != nil {
+				t.Fatalf("second bd setup copilot: %v\n%s", err, out)
+			}
+			again, _ := readWorkspaceFile(t, copilotInstructionsFile)
+			if again != got {
+				t.Fatalf("second run changed the instructions:\n%q\nwant\n%q", again, got)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !info.ModTime().Equal(stamp) {
+				t.Fatalf("second run rewrote the unchanged instructions (mtime %v, want %v)", info.ModTime(), stamp)
 			}
 		})
 	}

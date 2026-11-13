@@ -75,18 +75,22 @@ func sharedSectionSpan(content string) (start, end int, state SharedSectionState
 	return start, endAt + len(agentsEndMarker), SharedSectionPresent, nil
 }
 
-// UpsertSharedSection returns content with body as its beads section. A
-// file with no beads markers gets the section appended, set off by a blank
-// line as AGENTS.md's is, its own bytes kept as they are; an empty one
-// gets just the section. Malformed markers are an error, content unchanged.
+// UpsertSharedSection returns content with body as its beads section. An
+// existing section is replaced in place, from its BEGIN marker to its END
+// marker, the bytes before and after it untouched, so running it again
+// changes nothing. A file with no beads markers gets the section appended,
+// set off by a blank line as AGENTS.md's is, its own bytes kept as they
+// are; an empty one gets just the section. Malformed markers are an error,
+// content unchanged.
 func UpsertSharedSection(content, body string) (string, error) {
 	wrapped := wrapSharedSection(body)
-	_, _, state, err := sharedSectionSpan(content)
+	start, end, state, err := sharedSectionSpan(content)
 	switch {
 	case err != nil:
 		return content, err
 	case state == SharedSectionPresent:
-		return content, nil
+		// The line break that ends the END marker's line stays in content.
+		return content[:start] + strings.TrimSuffix(wrapped, "\n") + content[end:], nil
 	case content == "":
 		return wrapped, nil
 	default:
