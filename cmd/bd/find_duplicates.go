@@ -537,7 +537,7 @@ func analyzeWithAI(ctx context.Context, client anthropic.Client, model anthropic
 		}
 	}
 	if !found {
-		fmt.Fprintf(os.Stderr, "Warning: unexpected AI response format\n")
+		fmt.Fprintf(os.Stderr, "Warning: unexpected AI response format: no text block in %d content blocks\n", len(message.Content))
 		return candidates
 	}
 

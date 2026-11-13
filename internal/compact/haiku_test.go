@@ -595,3 +595,33 @@ func TestSummarizeTier1_ReadsFirstTextBlock(t *testing.T) {
 		})
 	}
 }
+
+// TestSummarizeTier1_NoTextBlockFails pins that a reply with no text block is
+// a format error after one request, never a summary built from thinking.
+func TestSummarizeTier1_NoTextBlockFails(t *testing.T) {
+	tests := []struct {
+		name    string
+		content []map[string]any
+		wantErr string
+	}{
+		{"thinking only", []map[string]any{thinkingBlock()}, "no text block in 1 content blocks"},
+		{"no content", []map[string]any{}, "no text block in 0 content blocks"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, hits := stubMessagesServer(t, tt.content)
+			h := newStubHaikuClient(t, srv)
+
+			got, err := h.SummarizeTier1(context.Background(), &types.Issue{ID: "bd-1", Title: "t", Description: "d"})
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("SummarizeTier1 error = %v, want one containing %q", err, tt.wantErr)
+			}
+			if got != "" {
+				t.Fatalf("SummarizeTier1 = %q, want empty", got)
+			}
+			if n := hits.Load(); n != 1 {
+				t.Fatalf("requests = %d, want 1", n)
+			}
+		})
+	}
+}
