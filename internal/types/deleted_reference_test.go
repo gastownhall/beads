@@ -98,6 +98,18 @@ func TestRewriteDeletedReferencesIsOrderIndependent(t *testing.T) {
 		want string
 	}{
 		{
+			name: "root, child and grandchild all cited",
+			text: "root fx-k0008, child fx-k0008.1, grandchild fx-k0008.1.2.",
+			ids:  []string{"fx-k0008", "fx-k0008.1", "fx-k0008.1.2"},
+			want: "root [deleted:fx-k0008], child [deleted:fx-k0008.1], grandchild [deleted:fx-k0008.1.2].",
+		},
+		{
+			name: "only the grandchild cited",
+			text: "unblocks fx-k0008.1.2 when done",
+			ids:  []string{"fx-k0008", "fx-k0008.1", "fx-k0008.1.2"},
+			want: "unblocks [deleted:fx-k0008.1.2] when done",
+		},
+		{
 			name: "child and grandchild",
 			text: "step fx-k0008.1.2 failed; parent fx-k0008.1 is gone",
 			ids:  []string{"fx-k0008.1", "fx-k0008.1.2"},
