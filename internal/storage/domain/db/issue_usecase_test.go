@@ -1030,3 +1030,29 @@ func (s *testSuite) useCaseUpsertKeepsCallerNamedCounter() {
 	s.Equal(1, rows)
 	s.requireCounterRow("cn-p5", 8)
 }
+
+// TestIssueUseCase_CallerNamedChildNeverLowersTheCounter: the advance is
+// monotonic through the real create path (AC-3). A caller-named child below
+// the parent's counter leaves it where it was; one above it raises it.
+func (s *testSuite) TestIssueUseCase_CallerNamedChildNeverLowersTheCounter() {
+	s.resetMintConfig("cn", "")
+	uc := s.issueUseCase()
+	s.seedIssueRow("cn-hi")
+	_, err := s.Runner().ExecContext(s.Ctx(),
+		"INSERT INTO child_counters (parent_id, last_child) VALUES (?, ?)", "cn-hi", 10)
+	s.Require().NoError(err)
+
+	_, err = uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "low child", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID: "cn-hi.8",
+	}, "tester")
+	s.Require().NoError(err)
+	s.requireCounterRow("cn-hi", 10)
+
+	_, err = uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "high child", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID: "cn-hi.12",
+	}, "tester")
+	s.Require().NoError(err)
+	s.requireCounterRow("cn-hi", 12)
+}
