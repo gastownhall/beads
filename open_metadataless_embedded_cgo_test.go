@@ -90,4 +90,48 @@ func TestOpenBestAvailableRefusesMetadatalessEmbeddedFallback(t *testing.T) {
 		store, err := beads.OpenBestAvailable(context.Background(), beadsDir)
 		requireMetadatalessRefusal(t, beadsDir, store, err, "beads", "beads", "myproj")
 	})
+
+	t.Run("sole target is admitted past the guard", func(t *testing.T) {
+		if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+			t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+		}
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		plantEmbeddedMarker(t, beadsDir, "foo")
+		t.Setenv("BEADS_DOLT_SERVER_DATABASE", "foo")
+
+		// The planted marker is not a real repository, so the engine open may
+		// fail — but it must not be the metadata-less refusal, and it must not
+		// create a sibling beside the admitted target.
+		store, err := beads.OpenBestAvailable(context.Background(), beadsDir)
+		if store != nil {
+			_ = store.Close()
+		}
+		if err != nil && strings.Contains(err.Error(), "no workspace metadata at") {
+			t.Fatalf("the sole target was refused as metadata-less: %v", err)
+		}
+		if got := embeddedDirNames(t, beadsDir); strings.Join(got, ",") != "foo" {
+			t.Fatalf("embedded store holds %v, want exactly [foo]", got)
+		}
+	})
+
+	t.Run("empty store bootstraps the default database", func(t *testing.T) {
+		if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+			t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+		}
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+
+		store, err := beads.OpenBestAvailable(context.Background(), beadsDir)
+		if err != nil {
+			t.Fatalf("OpenBestAvailable on an empty store failed: %v", err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatalf("closing bootstrapped store: %v", err)
+		}
+		if got := embeddedDirNames(t, beadsDir); strings.Join(got, ",") != "beads" {
+			t.Fatalf("embedded store holds %v, want the bootstrapped [beads]", got)
+		}
+	})
 }

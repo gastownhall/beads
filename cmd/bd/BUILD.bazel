@@ -1040,6 +1040,7 @@ go_test(
         "metadata_filter_test.go",
         "metadata_flag_test.go",
         "metadata_ready_test.go",
+        "metadataless_allowed_fallbacks_embedded_test.go",
         "metadataless_multi_database_embedded_test.go",
         "metadataless_server_workspace_test.go",
         "metrics_test.go",

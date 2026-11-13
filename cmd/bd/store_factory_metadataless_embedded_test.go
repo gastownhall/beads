@@ -124,6 +124,127 @@ func TestEmbeddedMetadatalessStoreFactoryRefusesMultipleDatabases(t *testing.T) 
 	})
 }
 
+// TestEmbeddedMetadatalessStoreFactoryAllowedTargets (GH#4381, AC-4) pins the
+// factories' allowed metadata-less cases: an empty store, a sole database
+// matching the effective target (default or environment-selected), and the
+// two sanitation shapes the writable migration handles. These pass at the
+// base commit too; the guard must leave them green.
+func TestEmbeddedMetadatalessStoreFactoryAllowedTargets(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	metadatalessEnv(t)
+
+	t.Run("empty store still bootstraps the default database", func(t *testing.T) {
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		store, err := newDoltStoreFromConfig(t.Context(), beadsDir)
+		if err != nil {
+			t.Fatalf("writable factory on an empty store failed: %v", err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatalf("closing bootstrapped store: %v", err)
+		}
+		if _, statErr := os.Stat(filepath.Join(beadsDir, "embeddeddolt", "beads", ".dolt")); statErr != nil {
+			t.Fatalf("the default database was not created (stat error: %v)", statErr)
+		}
+	})
+
+	t.Run("strict open of an empty store still refuses", func(t *testing.T) {
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		_, err := newExistingDoltStoreFromConfig(t.Context(), beadsDir)
+		if err == nil || !strings.Contains(err.Error(), "no embedded database at") {
+			t.Fatalf("strict open of an empty store = %v, want the existing no-database refusal", err)
+		}
+	})
+
+	t.Run("sole default database stays allowed", func(t *testing.T) {
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		seedMetadatalessEmbeddedStore(t, beadsDir, "beads")
+
+		store, err := newDoltStoreFromConfig(t.Context(), beadsDir)
+		if err != nil {
+			t.Fatalf("writable factory on the sole default database failed: %v", err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatalf("closing store: %v", err)
+		}
+		readOnly, err := newReadOnlyStoreFromConfig(t.Context(), beadsDir)
+		if err != nil {
+			t.Fatalf("read-only factory on the sole default database failed: %v", err)
+		}
+		if err := readOnly.Close(); err != nil {
+			t.Fatalf("closing read-only store: %v", err)
+		}
+		if got := listDatabaseDirs(t, filepath.Join(beadsDir, "embeddeddolt")); strings.Join(got, ",") != "beads" {
+			t.Fatalf("embedded store holds %v, want exactly [beads]", got)
+		}
+	})
+
+	t.Run("environment-selected sole target stays allowed", func(t *testing.T) {
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		seedMetadatalessEmbeddedStore(t, beadsDir, "foo")
+		t.Setenv("BEADS_DOLT_SERVER_DATABASE", "foo")
+
+		store, err := newDoltStoreFromConfig(t.Context(), beadsDir)
+		if err != nil {
+			t.Fatalf("writable factory on the environment-selected sole database failed: %v", err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatalf("closing store: %v", err)
+		}
+		if _, statErr := os.Stat(filepath.Join(beadsDir, "metadata.json")); !os.IsNotExist(statErr) {
+			t.Fatalf("an allowed open of the sole target wrote metadata.json (stat error: %v)", statErr)
+		}
+	})
+
+	t.Run("sole legacy hyphenated directory migrates instead of refusing", func(t *testing.T) {
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		seedMetadatalessEmbeddedStore(t, beadsDir, "my_proj")
+		if err := os.Rename(filepath.Join(beadsDir, "embeddeddolt", "my_proj"), filepath.Join(beadsDir, "embeddeddolt", "my-proj")); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_DOLT_SERVER_DATABASE", "my-proj")
+
+		store, err := newDoltStoreFromConfig(t.Context(), beadsDir)
+		if err != nil {
+			t.Fatalf("writable factory on the sole legacy directory failed: %v", err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatalf("closing store: %v", err)
+		}
+		if got := listDatabaseDirs(t, filepath.Join(beadsDir, "embeddeddolt")); strings.Join(got, ",") != "my_proj" {
+			t.Fatalf("legacy directory was not migrated; store holds %v", got)
+		}
+		reloaded, loadErr := configfile.Load(beadsDir)
+		if loadErr != nil || reloaded == nil || reloaded.DoltDatabase != "my_proj" {
+			t.Fatalf("reloaded metadata = %+v, %v; want dolt_database my_proj", reloaded, loadErr)
+		}
+	})
+
+	t.Run("sole already-sanitized target opens without renaming", func(t *testing.T) {
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		seedMetadatalessEmbeddedStore(t, beadsDir, "my_proj")
+		t.Setenv("BEADS_DOLT_SERVER_DATABASE", "my-proj")
+
+		store, err := newDoltStoreFromConfig(t.Context(), beadsDir)
+		if err != nil {
+			t.Fatalf("writable factory on the sole sanitized database failed: %v", err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatalf("closing store: %v", err)
+		}
+		if got := listDatabaseDirs(t, filepath.Join(beadsDir, "embeddeddolt")); strings.Join(got, ",") != "my_proj" {
+			t.Fatalf("store holds %v, want exactly [my_proj]", got)
+		}
+	})
+}
+
 // removeWorkspaceMetadata deletes a workspace's configuration files without
 // capturing them, for tests that never restore metadata.
 func removeWorkspaceMetadata(t *testing.T, beadsDir string) {
