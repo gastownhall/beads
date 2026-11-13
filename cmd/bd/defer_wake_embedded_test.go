@@ -6,8 +6,13 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/migration"
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
 // showDeferState returns (status, defer_until) for an issue via bd show --json.
@@ -80,6 +85,42 @@ func wakeReadyIDsWithEnv(t *testing.T, bd, dir string, extraEnv []string, args .
 	return ids
 }
 
+// embeddedDoltHistory is a workspace's Dolt history at one moment: the HEAD
+// commit hash, the number of commits, and HEAD's message.
+type embeddedDoltHistory struct {
+	head    string
+	count   int
+	message string
+}
+
+// readEmbeddedDoltHistory opens the workspace's embedded database directly and
+// reads its history. The handle is closed before returning, so a bd
+// subprocess run afterwards never shares the data directory with it.
+func readEmbeddedDoltHistory(t *testing.T, beadsDir string) embeddedDoltHistory {
+	t.Helper()
+	database := ""
+	if cfg, _ := configfile.Load(beadsDir); cfg != nil {
+		database = cfg.GetDoltDatabase()
+	}
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer func() {
+		if err := cleanup(); err != nil {
+			t.Fatalf("closing OpenSQL: %v", err)
+		}
+	}()
+	var h embeddedDoltHistory
+	if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dolt_log").Scan(&h.count); err != nil {
+		t.Fatalf("counting dolt_log: %v", err)
+	}
+	if err := db.QueryRowContext(t.Context(), "SELECT commit_hash, message FROM dolt_log WHERE commit_hash = HASHOF('HEAD')").Scan(&h.head, &h.message); err != nil {
+		t.Fatalf("reading HEAD from dolt_log: %v", err)
+	}
+	return h
+}
+
 // TestEmbeddedDeferAutoWake documents the defer contract: a DATED defer is a
 // snooze — once defer_until passes, the next ready-front read returns the
 // issue to open (status open, defer_until cleared, same shape bd undefer
@@ -91,7 +132,11 @@ func TestEmbeddedDeferAutoWake(t *testing.T) {
 	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
-	dir, _, _ := bdInit(t, bd, "--prefix", "dw")
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "dw")
+	// GH#7634: the marker lives outside the workspace and reaches only the
+	// invocations given frozenEnv, so every other subtest here runs unfrozen.
+	marker := writeFreezeMarker(t, t.TempDir(), "migrator", "dolt v2 migration")
+	frozenEnv := []string{migration.EnvFreezeFile + "=" + marker}
 
 	t.Run("expired_dated_defer_wakes_on_ready", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Expired snooze", "--type", "task")
@@ -187,5 +232,40 @@ func TestEmbeddedDeferAutoWake(t *testing.T) {
 		if status != "in_progress" {
 			t.Errorf("expected status=in_progress after claim, got %q", status)
 		}
+	})
+
+	// GH#7634: a migration freeze lets bd ready through as a classified read,
+	// but the defer-wake sweep is a write, so a frozen ready must answer from
+	// current state and leave both the issue and the Dolt history untouched.
+	t.Run("frozen_ready_does_not_wake", func(t *testing.T) {
+		control := bdCreate(t, bd, dir, "Open control under a freeze", "--type", "task")
+		issue := bdCreate(t, bd, dir, "Expired snooze under a freeze", "--type", "task")
+		bdDefer(t, bd, dir, issue.ID, "--until", "2020-01-01")
+		wisp := bdCreate(t, bd, dir, "Expired wisp snooze under a freeze", "--type", "task", "--ephemeral", "--wisp-type", "heartbeat")
+		bdDefer(t, bd, dir, wisp.ID, "--until", "2020-01-01")
+		status, deferUntil := showDeferState(t, bd, dir, issue.ID)
+		if status != "deferred" || deferUntil == nil {
+			t.Fatalf("precondition: expected a dated deferred issue, got status=%q defer_until=%v", status, deferUntil)
+		}
+		_, wispDeferUntil := showDeferState(t, bd, dir, wisp.ID)
+
+		before := readEmbeddedDoltHistory(t, beadsDir)
+		ids := wakeReadyIDsWithEnv(t, bd, dir, frozenEnv)
+		after := readEmbeddedDoltHistory(t, beadsDir)
+
+		if !ids[control.ID] {
+			t.Errorf("open control %s missing from frozen bd ready: the read must still answer", control.ID)
+		}
+		if ids[issue.ID] {
+			t.Errorf("expired defer %s listed by frozen bd ready: the wake sweep wrote past the freeze", issue.ID)
+		}
+		if after.head != before.head || after.count != before.count {
+			t.Errorf("frozen bd ready moved Dolt history: HEAD %s -> %s, commits %d -> %d (HEAD message %q); a frozen read must not commit",
+				before.head, after.head, before.count, after.count, after.message)
+		}
+		assertDeferUnchanged(t, bd, dir, issue.ID, deferUntil)
+		// Wisp wakes mint no version commit, so only their state can show
+		// the sweep ran.
+		assertDeferUnchanged(t, bd, dir, wisp.ID, wispDeferUntil)
 	})
 }
