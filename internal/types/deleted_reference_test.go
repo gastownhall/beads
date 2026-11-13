@@ -23,6 +23,7 @@ var deletedReferenceCases = []deletedReferenceCase{
 	{"top-level inside grandchild", "step fx-k0008.1.2 failed", "fx-k0008", "step fx-k0008.1.2 failed"},
 	{"child inside grandchild", "fx-k0008.1.2", "fx-k0008.1", "fx-k0008.1.2"},
 	{"grandchild itself", "step fx-k0008.1.2 failed", "fx-k0008.1.2", "step [deleted:fx-k0008.1.2] failed"},
+	{"earlier descendant marker", "was [deleted:fx-k0008.1.2]", "fx-k0008.1", "was [deleted:fx-k0008.1.2]"},
 
 	// Longer ids that merely contain the deleted one.
 	{"leading id byte", "xbe-1", "be-1", "xbe-1"},
