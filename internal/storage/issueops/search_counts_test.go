@@ -59,6 +59,75 @@ func TestSearchIssuesWithCountsHonorsSkipWisps(t *testing.T) {
 	}
 }
 
+// The bd list page (no dependency counts, no wisp merge) is one statement. The
+// wisp_dependencies probe decides only whether the reverse-blocker count unions
+// wisp_dependencies and whether the wisp arms may run, and this page has
+// neither, so it is not sent.
+func TestSearchIssuesWithCountsListPageIsOneStatement(t *testing.T) {
+	t.Parallel()
+
+	_, mock, tx := beginMockTx(t)
+	mock.ExpectQuery(`(?s)FROM issues i.*ORDER BY i\.priority ASC, i\.created_at DESC, i\.id ASC`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+	filter := types.IssueFilter{SkipWisps: true, SkipCounts: true}
+	if _, err := SearchIssuesWithCountsInTx(context.Background(), tx, "", filter); err != nil {
+		t.Fatalf("SearchIssuesWithCountsInTx: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// The explicit ephemeral arm still probes: it reads wisps whatever SkipWisps
+// says, and it needs to know whether wisp_dependencies exists.
+func TestSearchIssuesWithCountsEphemeralArmKeepsTheProbe(t *testing.T) {
+	t.Parallel()
+
+	ephemeral := true
+	_, mock, tx := beginMockTx(t)
+	mock.ExpectQuery(`SELECT 1 FROM wisp_dependencies LIMIT 1`).
+		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+	mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).
+		WillReturnRows(sqlmock.NewRows([]string{"1"}))
+	mock.ExpectQuery(`(?s)FROM issues i.*ORDER BY`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+	filter := types.IssueFilter{SkipWisps: true, SkipCounts: true, Ephemeral: &ephemeral}
+	if _, err := SearchIssuesWithCountsInTx(context.Background(), tx, "", filter); err != nil {
+		t.Fatalf("SearchIssuesWithCountsInTx: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// The stores pick a transaction or a bare statement from these predicates, so
+// each must say one statement exactly when the shared body sends one.
+func TestOneStatementPredicates(t *testing.T) {
+	t.Parallel()
+
+	yes, no := true, false
+	for _, tc := range []struct {
+		filter      types.IssueFilter
+		search, cnt bool
+	}{
+		{filter: types.IssueFilter{SkipWisps: true, SkipCounts: true}, search: true, cnt: true},
+		{filter: types.IssueFilter{SkipWisps: true, SkipCounts: true, Ephemeral: &no}, search: true, cnt: true},
+		{filter: types.IssueFilter{SkipWisps: true, SkipCounts: true, Ephemeral: &yes}},
+		{filter: types.IssueFilter{SkipWisps: true}, cnt: true},
+		{filter: types.IssueFilter{SkipCounts: true}},
+		{filter: types.IssueFilter{}},
+	} {
+		if got := SearchIssuesWithCountsIsOneStatement(tc.filter); got != tc.search {
+			t.Errorf("SearchIssuesWithCountsIsOneStatement(%+v) = %v, want %v", tc.filter, got, tc.search)
+		}
+		if got := CountIssuesIsOneStatement(tc.filter); got != tc.cnt {
+			t.Errorf("CountIssuesIsOneStatement(%+v) = %v, want %v", tc.filter, got, tc.cnt)
+		}
+	}
+}
+
 // Regression for bd-6dnrw.43: SortBy/SortDesc must reach the per-table SQL
 // ORDER BY; otherwise LIMIT is applied under priority order and the wrong
 // row SET survives (not just the wrong order).

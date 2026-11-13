@@ -67,6 +67,14 @@ func CountIssuesInTx(ctx context.Context, tx DBTX, query string, filter types.Is
 	return count + wispCount, nil
 }
 
+// CountIssuesIsOneStatement reports whether CountIssuesInTx sends exactly one
+// statement for filter: the durable-only count (SkipWisps) outside the
+// ephemeral arm. The merge and the ephemeral fall-through send two statements
+// whose answers are added or chosen between, so they need one snapshot.
+func CountIssuesIsOneStatement(filter types.IssueFilter) bool {
+	return filter.SkipWisps && (filter.Ephemeral == nil || !*filter.Ephemeral)
+}
+
 // CountIssuesByGroupInTx counts issues grouped by a field within a transaction.
 // groupBy must be one of: status, priority, type, assignee, label.
 // Returns a map of group value → count, using the same display format as bd count.

@@ -26,16 +26,26 @@ const depTargetExpr = "COALESCE(depends_on_issue_id, depends_on_wisp_id, depends
 // Filter.Limit and Filter.Offset are ignored; all other fields apply.
 // Wisps-merge semantics follow SearchIssues: SkipWisps=true counts the
 // durable issues table only, otherwise the wisps tier is merged in (GH#4387).
+//
+// The durable-only count is one statement, which reads one snapshot by itself,
+// so it runs without a transaction where the server autocommits. The merge and
+// the ephemeral fall-through send two statements and keep one read transaction.
 func (s *DoltStore) CountIssues(ctx context.Context, query string, filter types.IssueFilter) (int64, error) {
 	var n int64
-	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
-		count, err := issueops.CountIssuesInTx(ctx, tx, query, filter)
+	count := func(q issueops.DBTX) error {
+		c, err := issueops.CountIssuesInTx(ctx, q, query, filter)
 		if err != nil {
 			return err
 		}
-		n = int64(count)
+		n = int64(c)
 		return nil
-	})
+	}
+	var err error
+	if issueops.CountIssuesIsOneStatement(filter) {
+		err = s.withSingleRead(ctx, count)
+	} else {
+		err = s.withReadTx(ctx, func(tx *sql.Tx) error { return count(tx) })
+	}
 	return n, err
 }
 

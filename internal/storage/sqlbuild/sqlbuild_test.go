@@ -624,6 +624,12 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	if !strings.Contains(skipCounts, "JSON_ARRAYAGG(label)") {
 		t.Error("SkipCounts must not drop the labels join")
 	}
+	// Under SkipCounts the wisp_dependencies flag changes nothing, which is why
+	// the bd list page skips the probe that sets it.
+	skipCountsNoWispDeps, _ := SearchCountsSQL(IssuesFilterTables, nil, "", "", "", false, CountsHydration{SkipCounts: true})
+	if skipCountsNoWispDeps != skipCounts {
+		t.Error("counts SQL under SkipCounts must not depend on includeWispReverseDeps")
+	}
 
 	// By-IDs: SkipCounts removes the dc, rc-deps, rc-wisp and cc injection
 	// points, leaving labels, pc, d and the driver.

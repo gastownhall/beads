@@ -13,9 +13,11 @@
 // value `bd forget` prints hopeful rather than true.
 //
 // There is no exported constructor and no exported body type, so there is
-// nothing for a depguard entry to deny: every function here takes a *sql.Tx,
-// which no front door holds. That is why the cmd-bd-role-constructors list in
-// .golangci.yml gains no entry for this role.
+// nothing for a depguard entry to deny: every function here takes a *sql.Tx, or
+// for the two one-statement reads (RecallInTx, ListInTx) an issueops.DBTX that a
+// server-mode store may fill with its *sql.DB, and no front door holds either.
+// That is why the cmd-bd-role-constructors list in .golangci.yml gains no entry
+// for this role.
 //
 // TWO THINGS THIS PACKAGE DELIBERATELY DOES NOT DO:
 //
@@ -97,11 +99,13 @@ func RememberInTx(ctx context.Context, tx *sql.Tx, key, content string) (replace
 	return replaced, nil
 }
 
-// RecallInTx reads one memory in the caller's transaction and reports whether
-// its row exists. A stored empty value is therefore distinct from no row.
-func RecallInTx(ctx context.Context, tx *sql.Tx, key string) (value string, found bool, err error) {
+// RecallInTx reads one memory and reports whether its row exists. A stored
+// empty value is therefore distinct from no row. It is one statement, so q may
+// be the caller's transaction or, for a read on its own, the store's database
+// handle.
+func RecallInTx(ctx context.Context, q issueops.DBTX, key string) (value string, found bool, err error) {
 	storageKey := StorageKey(key)
-	err = tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", storageKey).Scan(&value)
+	err = q.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", storageKey).Scan(&value)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
@@ -132,16 +136,16 @@ func ForgetInTx(ctx context.Context, tx *sql.Tx, key string) (previous string, f
 	return previous, true, nil
 }
 
-// ListInTx reads the whole memory plane in the caller's transaction, keyed by
-// user key.
+// ListInTx reads the whole memory plane, keyed by user key. Like RecallInTx it
+// is one statement, so q may be a transaction or the store's database handle.
 //
 // It reads the whole config table and narrows in Go rather than issuing a LIKE.
 // The plane is tens of rows inside a table of tens of rows, so the query would
 // buy nothing; what it would cost is a second definition of which rows are
 // memories, expressed in a pattern language where `_` is a wildcard and
 // "kv.memory." contains one.
-func ListInTx(ctx context.Context, tx *sql.Tx) (map[string]string, error) {
-	all, err := issueops.GetAllConfigInTx(ctx, tx)
+func ListInTx(ctx context.Context, q issueops.DBTX) (map[string]string, error) {
+	all, err := issueops.GetAllConfigInTx(ctx, q)
 	if err != nil {
 		return nil, err
 	}
