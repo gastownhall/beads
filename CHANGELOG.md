@@ -1281,6 +1281,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd update --assignee -`, `bd assign <id> -` and a batched
+  `update <id> assignee=-` now clear the assignee instead of storing the
+  literal** (#8203). Whitespace-only values clear too. Every emptiness
+  check — claim, unclaim, the live-claim reassign fence, ready's
+  unassigned filter — compares against the empty string, so a bead
+  released with the shell's empty-argument convention stayed assigned to
+  a literal `-` or blank: out of the pool's reach, silently, with no
+  error. The hidden-empty spellings now fold onto the same clear sentinel
+  `--assignee ''` already uses, at each route's input site (direct and
+  proxied update, both assign positionals, the shared batch KV parser).
+  Everything else is stored byte-for-byte — ` - `, `--`, `-x` and padded
+  names are names — and `--if-assignee` guards still compare literally,
+  so a legacy `-` row can still be matched and cleared explicitly.
+  `bd create`/`bd pour --assignee` keep storing what they are given.
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc

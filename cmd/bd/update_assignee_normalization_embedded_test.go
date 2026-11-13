@@ -183,4 +183,85 @@ func TestEmbeddedAssigneeHiddenEmptyClears(t *testing.T) {
 			}
 		})
 	})
+
+	// AC-5: everything outside the clear spellings is preserved verbatim,
+	// the --if-assignee guard keeps its literal comparison, create keeps
+	// storing raw values, and omitting the flag changes nothing.
+	t.Run("non_clear_values_verbatim", func(t *testing.T) {
+		t.Parallel()
+		for _, value := range []string{"alice", " alice ", " - ", "--", "-x", "a-b"} {
+			issue := bdCreate(t, bd, dir, "Verbatim update "+value)
+			bdUpdate(t, bd, dir, issue.ID, "--assignee", value)
+			if got := bdShow(t, bd, dir, issue.ID).Assignee; got != value {
+				t.Errorf("update stored assignee %q, want verbatim %q", got, value)
+			}
+		}
+		issue := bdCreate(t, bd, dir, "Verbatim assign")
+		bdRunOK(t, bd, dir, "assign", issue.ID, "a-b")
+		if got := bdShow(t, bd, dir, issue.ID).Assignee; got != "a-b" {
+			t.Errorf("assign stored %q, want verbatim a-b", got)
+		}
+		out, code := bdRunStdinEmbedded(t, bd, dir, fmt.Sprintf("update %s assignee=bob\n", issue.ID), "batch")
+		if code != 0 {
+			t.Fatalf("batch verbatim assignee exited %d:\n%s", code, out)
+		}
+		if got := bdShow(t, bd, dir, issue.ID).Assignee; got != "bob" {
+			t.Errorf("batch stored %q, want verbatim bob", got)
+		}
+	})
+
+	t.Run("if_assignee_guard_stays_literal", func(t *testing.T) {
+		t.Parallel()
+		// Seed a legacy literal "-" through the unchanged create path.
+		legacy := bdCreate(t, bd, dir, "Legacy literal dash", "--assignee", "-")
+		if got := bdShow(t, bd, dir, legacy.ID).Assignee; got != "-" {
+			t.Fatalf("create should keep storing the raw dash, got %q", got)
+		}
+		// The guard compares literally: - matches the legacy row and permits
+		// an explicit clear.
+		bdUpdate(t, bd, dir, legacy.ID, "--assignee", "", "--if-assignee", "-")
+		if got := bdShow(t, bd, dir, legacy.ID).Assignee; got != "" {
+			t.Errorf("guard-matched explicit clear left assignee %q", got)
+		}
+		// The same guard on an unassigned row is a mismatch: exit 13, no
+		// write.
+		fresh := bdCreate(t, bd, dir, "Guard mismatch target")
+		out, code := bdUpdateFailCode(t, bd, dir, fresh.ID, "--title", "Guarded", "--if-assignee", "-")
+		if code != ExitGuardMismatch {
+			t.Errorf("--if-assignee - on unassigned row exit code = %d, want %d:\n%s", code, ExitGuardMismatch, out)
+		}
+		if got := bdShow(t, bd, dir, fresh.ID).Title; got == "Guarded" {
+			t.Errorf("guard-mismatched update wrote the title anyway")
+		}
+	})
+
+	t.Run("omitted_and_claim_interactions", func(t *testing.T) {
+		t.Parallel()
+		// Omitting --assignee never clears.
+		kept := bdCreate(t, bd, dir, "No assignee flag", "--assignee", "holder")
+		bdUpdate(t, bd, dir, kept.ID, "--priority", "1")
+		if got := bdShow(t, bd, dir, kept.ID).Assignee; got != "holder" {
+			t.Errorf("update without --assignee changed assignee to %q", got)
+		}
+		// Repeated clearing is a successful no-op.
+		bdUpdate(t, bd, dir, kept.ID, "--assignee", "")
+		bdUpdate(t, bd, dir, kept.ID, "--assignee", "-")
+		if got := bdShow(t, bd, dir, kept.ID).Assignee; got != "" {
+			t.Errorf("repeated clear left assignee %q", got)
+		}
+		// --claim with a hidden-empty assignee behaves exactly like --claim
+		// with an explicit empty one (parity, not a policy claim: the claim
+		// postcondition permits a patch override, and the claim CAS itself
+		// refuses an issue assigned to someone else, so these start
+		// unassigned).
+		hidden := bdCreate(t, bd, dir, "Claim parity hidden")
+		baseline := bdCreate(t, bd, dir, "Claim parity explicit")
+		bdUpdate(t, bd, dir, hidden.ID, "--actor", "bob", "--claim", "--assignee", "-")
+		bdUpdate(t, bd, dir, baseline.ID, "--actor", "bob", "--claim", "--assignee", "")
+		gotHidden := bdShow(t, bd, dir, hidden.ID).Assignee
+		gotBaseline := bdShow(t, bd, dir, baseline.ID).Assignee
+		if gotHidden != gotBaseline {
+			t.Errorf("--claim --assignee -: assignee %q differs from explicit-empty baseline %q", gotHidden, gotBaseline)
+		}
+	})
 }

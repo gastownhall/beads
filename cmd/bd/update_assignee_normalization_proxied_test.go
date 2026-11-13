@@ -159,4 +159,37 @@ func TestProxiedServerAssigneeHiddenEmptyClears(t *testing.T) {
 			}
 		})
 	})
+
+	// AC-5: non-clear values stay verbatim on the proxied routes and the
+	// guard keeps comparing literally.
+	t.Run("non_clear_values_and_guard_verbatim", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "anv")
+		for _, value := range []string{"alice", " alice ", " - ", "--"} {
+			issue := bdProxiedCreate(t, bd, p.dir, "Proxied verbatim "+value)
+			bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--assignee", value)
+			if got := bdProxiedShow(t, bd, p.dir, issue.ID).Assignee; got != value {
+				t.Errorf("proxied update stored assignee %q, want verbatim %q", got, value)
+			}
+		}
+
+		// The create path still stores a raw dash, the guard still matches
+		// it literally, and a mismatched guard refuses with exit 13.
+		legacy := bdProxiedCreate(t, bd, p.dir, "Proxied legacy dash", "--assignee", "-")
+		if got := bdProxiedShow(t, bd, p.dir, legacy.ID).Assignee; got != "-" {
+			t.Fatalf("proxied create should keep storing the raw dash, got %q", got)
+		}
+		bdProxiedUpdateOne(t, bd, p.dir, legacy.ID, "--assignee", "", "--if-assignee", "-")
+		if got := bdProxiedShow(t, bd, p.dir, legacy.ID).Assignee; got != "" {
+			t.Errorf("guard-matched explicit clear left assignee %q", got)
+		}
+		fresh := bdProxiedCreate(t, bd, p.dir, "Proxied guard mismatch")
+		out, code := bdProxiedUpdateFailCode(t, bd, p.dir, fresh.ID, "--title", "Guarded", "--if-assignee", "-")
+		if code != ExitGuardMismatch {
+			t.Errorf("--if-assignee - on unassigned row exit code = %d, want %d:\n%s", code, ExitGuardMismatch, out)
+		}
+		if got := bdProxiedShow(t, bd, p.dir, fresh.ID).Title; got == "Guarded" {
+			t.Errorf("guard-mismatched update wrote the title anyway")
+		}
+	})
 }

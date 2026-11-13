@@ -239,6 +239,23 @@ func TestParseUpdateKVs(t *testing.T) {
 			in:   []string{"assignee=\t"},
 			want: map[string]interface{}{"assignee": ""},
 		},
+		// …and nothing else is rewritten: names, dashes-with-content and
+		// padded values stay byte-for-byte.
+		{
+			name: "assignee padded dash verbatim",
+			in:   []string{"assignee= - "},
+			want: map[string]interface{}{"assignee": " - "},
+		},
+		{
+			name: "assignee double dash verbatim",
+			in:   []string{"assignee=--"},
+			want: map[string]interface{}{"assignee": "--"},
+		},
+		{
+			name: "assignee padded name verbatim",
+			in:   []string{"assignee= alice "},
+			want: map[string]interface{}{"assignee": " alice "},
+		},
 		{
 			name:    "unsupported key",
 			in:      []string{"description=foo"},
