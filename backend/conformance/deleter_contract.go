@@ -818,7 +818,8 @@ func RunDeleterRewritesReferencesInNeighbors(t *testing.T, ctx context.Context, 
 // "step R.1.2 failed" into "step [deleted:R.1].2 failed" while R.1.2 is still
 // live — the text then claims a live row is gone and has lost the id it
 // actually cited. The shared rule in internal/types rejects those matches
-// symmetrically, and the scenario below holds every wiring to it.
+// symmetrically, and the scenarios below hold every wiring to it, including
+// the shapes a partial fix gets wrong: either request order.
 //
 // Each scenario seeds an explicit root/child/grandchild chain with real
 // parent-child edges — a dotted id alone creates no dependency, so without
@@ -868,6 +869,39 @@ func RunDeleterRewritesOnlyTheDeletedIDInAHierarchy(t *testing.T, ctx context.Co
 	deleterAssertIssueRows(t, ctx, fixture, 1, grandchild)
 	if result.ReferencesUpdated != 0 {
 		t.Errorf("hier1: ReferencesUpdated = %d, want 0 — no citation of %s existed, so no row changed", result.ReferencesUpdated, child)
+	}
+
+	// Deleting the child and the grandchild together, in either request
+	// order: both citations rewrite, each exactly once, and the changed row
+	// counts once.
+	for _, order := range []struct {
+		tag     string
+		request func(child, grandchild string) []string
+	}{
+		{"hier2d", func(child, grandchild string) []string { return []string{grandchild, child} }},
+		{"hier2a", func(child, grandchild string) []string { return []string{child, grandchild} }},
+	} {
+		root, child, grandchild := seedChain(order.tag)
+		neighbor := deleterIssue(fixture, order.tag, "neighbor", false)
+		neighbor.Description = "step " + grandchild + " failed; parent " + child + " is gone"
+		deleterSeed(t, ctx, fixture, neighbor)
+		deleterAddEdge(t, ctx, fixture, neighbor.ID, child)
+
+		result := deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
+			IDs:   order.request(child, grandchild),
+			Force: true,
+			Actor: "deleter-contract",
+		})
+		want := "step [deleted:" + grandchild + "] failed; parent [deleted:" + child + "] is gone"
+		if got := deleterText(t, ctx, fixture, neighbor.ID, "description"); got != want {
+			t.Errorf("%s: deleting %v left the description %q, want %q — each deleted id marks only its own citation, without nesting",
+				order.tag, order.request(child, grandchild), got, want)
+		}
+		deleterAssertIssueRows(t, ctx, fixture, 0, child, grandchild)
+		deleterAssertIssueRows(t, ctx, fixture, 1, root)
+		if result.ReferencesUpdated != 1 {
+			t.Errorf("%s: ReferencesUpdated = %d, want 1 — one row changed, however many ids it cited", order.tag, result.ReferencesUpdated)
+		}
 	}
 }
 
