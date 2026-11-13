@@ -121,6 +121,57 @@ func TestCodexHookPostCompactMarksAndUserPromptRefreshesOnce(t *testing.T) {
 	}
 }
 
+func TestCodexHookSessionStartClearsRefreshMarker(t *testing.T) {
+	dir := t.TempDir()
+	codexHookMarkerDirOverride = dir
+	t.Cleanup(func() { codexHookMarkerDirOverride = "" })
+
+	calls := 0
+	stubCodexHookPrime(t, func(memoriesOnly bool) (string, error) {
+		calls++
+		return "BEADS CONTEXT\n", nil
+	})
+
+	input := codexHookInput{SessionID: "s1", CWD: filepath.Join("repo", "sub"), HookEventName: codexHookPostCompact}
+	postJSON, _ := json.Marshal(input)
+	if err := runCodexHook(context.Background(), codexHookPostCompact, bytes.NewReader(postJSON), ioDiscard{}); err != nil {
+		t.Fatalf("PostCompact hook: %v", err)
+	}
+	marker := codexHookRefreshMarkerPath(input)
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("expected refresh marker: %v", err)
+	}
+
+	input.HookEventName = codexHookSessionStart
+	startJSON, _ := json.Marshal(input)
+	var out bytes.Buffer
+	if err := runCodexHook(context.Background(), codexHookSessionStart, bytes.NewReader(startJSON), &out); err != nil {
+		t.Fatalf("SessionStart hook: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("SessionStart prime calls = %d, want 1", calls)
+	}
+	if !strings.Contains(out.String(), "BEADS CONTEXT") {
+		t.Fatalf("expected SessionStart context, got %s", out.String())
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("expected SessionStart to remove refresh marker, stat err=%v", err)
+	}
+
+	input.HookEventName = codexHookUserPromptSubmit
+	promptJSON, _ := json.Marshal(input)
+	out.Reset()
+	if err := runCodexHook(context.Background(), codexHookUserPromptSubmit, bytes.NewReader(promptJSON), &out); err != nil {
+		t.Fatalf("UserPromptSubmit hook: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("prime should be injected once (by SessionStart), prime calls = %d", calls)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("expected no UserPromptSubmit refresh output, got %s", out.String())
+	}
+}
+
 type ioDiscard struct{}
 
 func (ioDiscard) Write(p []byte) (int, error) { return len(p), nil }
