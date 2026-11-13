@@ -162,4 +162,21 @@ func TestDoltNew_SharedStoreMigrateGate_NoRemote(t *testing.T) {
 		wantApplied(t, s, 1, "first call after a migrating open")
 		wantApplied(t, s, 0, "second call on the same store")
 	})
+
+	// A fresh open of the now-current database applies nothing, so it has
+	// nothing to report: the count above came from that open, not from a
+	// value every store carries.
+	t.Run("current open reports nothing", func(t *testing.T) {
+		s, err := New(ctx, &Config{
+			Path:           tmpDir,
+			CommitterName:  "test",
+			CommitterEmail: "test@example.com",
+			Database:       dbName,
+		})
+		if err != nil {
+			t.Fatalf("New (writable, current) = %v, want success", err)
+		}
+		defer s.Close()
+		wantApplied(t, s, 0, "fresh open of a current database")
+	})
 }
