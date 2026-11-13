@@ -136,3 +136,64 @@ func TestSharedSectionCheckFile(t *testing.T) {
 		t.Fatalf("CheckSharedFile(missing) err = %v, want not-exist", err)
 	}
 }
+
+func TestSharedSectionStrip(t *testing.T) {
+	for _, tt := range []struct {
+		name, content, want string
+		stripped, empty     bool
+	}{
+		{name: "no section", content: "# Mine\n", want: "# Mine\n"},
+		{name: "appended section round-trips", content: "# Mine\n\n" + sharedWrapped(), want: "# Mine\n", stripped: true},
+		{name: "text after", content: "# Mine\n\n" + sharedWrapped() + "\n## After\n", want: "# Mine\n\n## After\n", stripped: true},
+		{name: "section at the top", content: sharedWrapped() + "\n## After\n", want: "## After\n", stripped: true},
+		// removeBeadsSection's separator rule: extra blank lines around
+		// the section become one.
+		{name: "extra blank lines", content: "# Mine\n\n\n\n" + sharedWrapped() + "\n\n\n## After\n", want: "# Mine\n\n## After\n", stripped: true},
+		{name: "section only", content: sharedWrapped(), want: "", stripped: true, empty: true},
+		{name: "section and whitespace", content: "\n\n" + sharedWrapped() + "\n  \n", want: "  \n", stripped: true, empty: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, stripped, empty, err := StripSharedSection(tt.content)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want || stripped != tt.stripped || empty != tt.empty {
+				t.Fatalf("StripSharedSection = %q, %v, %v; want %q, %v, %v", got, stripped, empty, tt.want, tt.stripped, tt.empty)
+			}
+		})
+	}
+}
+
+func TestSharedSectionRemoveFile(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	mine := write("mine.md", "# Mine\n\n"+sharedWrapped())
+	if got, err := RemoveSharedFile(mine); err != nil || got != SharedRemovedSection {
+		t.Fatalf("RemoveSharedFile(user + section) = %v, %v", got, err)
+	}
+	if data, _ := os.ReadFile(mine); string(data) != "# Mine\n" {
+		t.Fatalf("file = %q, want the user's content", data)
+	}
+	if info, err := os.Stat(mine); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode after strip = %v, %v; want 0600 kept", info, err)
+	}
+	if got, err := RemoveSharedFile(mine); err != nil || got != SharedRemovedNothing {
+		t.Fatalf("RemoveSharedFile(no section) = %v, %v", got, err)
+	}
+	only := write("only.md", sharedWrapped())
+	if got, err := RemoveSharedFile(only); err != nil || got != SharedRemovedFile {
+		t.Fatalf("RemoveSharedFile(section only) = %v, %v", got, err)
+	}
+	if _, err := os.Stat(only); !os.IsNotExist(err) {
+		t.Fatalf("section-only file kept, err = %v", err)
+	}
+	if got, err := RemoveSharedFile(filepath.Join(dir, "missing.md")); err != nil || got != SharedRemovedNothing {
+		t.Fatalf("RemoveSharedFile(missing) = %v, %v", got, err)
+	}
+}

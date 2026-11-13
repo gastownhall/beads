@@ -1174,3 +1174,49 @@ func TestSetupCopilot_CheckPassesWithSection(t *testing.T) {
 		t.Fatalf("check output = %q", out)
 	}
 }
+
+// AC-4: --remove strips the section and the manifest but keeps the
+// instructions file and the user's text.
+func TestSetupCopilot_RemoveKeepsUserInstructions(t *testing.T) {
+	t.Run("text before and after the section", func(t *testing.T) {
+		copilotTestWorkspace(t)
+		const before = "# Team rules\n\nBe kind.\n"
+		const after = "\n## More team rules\n\nKeep it short.\n"
+		writeWorkspaceFile(t, copilotManifestFile, copilotManifest(t))
+		writeWorkspaceFile(t, copilotInstructionsFile, before+"\n"+copilotSection()+after)
+
+		out, err := runCopilotSetup(t, "remove")
+		if err != nil {
+			t.Fatalf("bd setup copilot --remove: %v\n%s", err, out)
+		}
+		if _, ok := readWorkspaceFile(t, copilotManifestFile); ok {
+			t.Errorf("remove kept the manifest")
+		}
+		got, ok := readWorkspaceFile(t, copilotInstructionsFile)
+		if !ok {
+			t.Fatalf("remove deleted the user's instructions file")
+		}
+		// removeBeadsSection rejoins the text around the section with the
+		// one blank line that set it off.
+		if want := before + after; got != want {
+			t.Fatalf("instructions = %q, want %q", got, want)
+		}
+	})
+	t.Run("install then remove gives the user's file back", func(t *testing.T) {
+		copilotTestWorkspace(t)
+		const user = "# Team Copilot rules\n\nAlways write table-driven tests.\n"
+		writeWorkspaceFile(t, copilotInstructionsFile, user)
+		if out, err := runCopilotSetup(t, ""); err != nil {
+			t.Fatalf("bd setup copilot: %v\n%s", err, out)
+		}
+		if out, err := runCopilotSetup(t, "remove"); err != nil {
+			t.Fatalf("bd setup copilot --remove: %v\n%s", err, out)
+		}
+		if got, ok := readWorkspaceFile(t, copilotInstructionsFile); !ok || got != user {
+			t.Fatalf("instructions after install+remove = %q (exists %v), want %q", got, ok, user)
+		}
+		if _, ok := readWorkspaceFile(t, copilotManifestFile); ok {
+			t.Errorf("remove kept the manifest")
+		}
+	})
+}
