@@ -1347,8 +1347,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filesystem, which a server in a container does not unless the backup is
   mounted at the same path in both; there a `--force` restore from a backup
   that only bd's machine holds can still drop the database.
-  rename such a backup before restoring it. In plain server mode the source
-  must also be visible to the bd client, since bd now checks it locally.
 - Loading config no longer touches the native user config file
   (`os.UserConfigDir()/bd/config.yaml`, on macOS
   `~/Library/Application Support/bd/config.yaml`) while
