@@ -32,7 +32,7 @@ Flags:
       --continue                     Auto-advance to next step in molecule
   -f, --force                        Force close pinned issues or unsatisfied gates
   -h, --help                         help for close
-      --if-revision bd show --json   Apply the write only if the issue's current revision equals this value (the decimal int64 from bd show --json's "revision" field). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures).
+      --if-revision bd show --json   Apply the write only if the issue's current revision equals this value (the decimal int64 from the "revision" field of bd show --json, or of the row a previous `bd update --json` printed). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures).
       --no-auto                      With --continue, show next step but don't claim it
   -r, --reason string                Reason for closing
       --reason-file string           Read close reason from file (use - for stdin)

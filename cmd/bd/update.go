@@ -692,7 +692,7 @@ pointless).`,
 		}
 
 		if jsonOutput && len(updatedIssues) > 0 {
-			if jerr := outputJSON(updatedIssues); jerr != nil {
+			if jerr := outputJSON(updateOutputRows(updatedIssues, claimFlag)); jerr != nil {
 				return jerr
 			}
 		}
@@ -706,6 +706,33 @@ pointless).`,
 		}
 		return nil
 	},
+}
+
+// updatedIssueJSON is one row of `bd update --json`: the operation's own
+// post-state snapshot plus the row's revision token after the write, so a
+// guarded client can send its next --if-revision without first re-reading the
+// row through `bd show --json`. The token is projected here, the way
+// types.NewIssueDetails projects it for show, because types.Issue.RowVersion
+// stays json:"-" (see its doc). It uses the same decimal-string encoding,
+// types.RevisionToken, with no omitempty: "0" is a legacy migration-0054 row.
+type updatedIssueJSON struct {
+	*types.Issue
+	Revision string `json:"revision"`
+}
+
+// updateOutputRows projects the post-state snapshots `bd update --json` prints.
+// A plain update row carries its revision. A --claim row stays the bare claim
+// shape, which the v0 claim response (ClaimResponse.issue) also publishes and
+// which has no revision member; TestProxiedServerServeClaim holds the two equal.
+func updateOutputRows(issues []*types.Issue, claim bool) any {
+	if claim {
+		return issues
+	}
+	rows := make([]updatedIssueJSON, 0, len(issues))
+	for _, issue := range issues {
+		rows = append(rows, updatedIssueJSON{Issue: issue, Revision: types.RevisionToken(issue.RowVersion)})
+	}
+	return rows
 }
 
 // setField marks a patch field as supplied, including when the value is a zero
