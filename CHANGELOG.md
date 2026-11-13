@@ -754,6 +754,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING: `bd update` refuses an empty `--description`, `--design` or
+  `--acceptance`; clear them with `--clear-description`, `--clear-design` or
+  `--clear-acceptance`** ([#8149](https://github.com/gastownhall/beads/issues/8149)).
+  An empty inline value (`--description ""` and its `--body`/`--message`
+  aliases, `--design ""`, `--acceptance ""`) used to wipe the field at exit 0,
+  and the empty string is exactly what a dead command substitution
+  (`--description "$(cat missing.md)"`) collapses to. The `--notes` rule from
+  [#6021](https://github.com/gastownhall/beads/issues/6021) now covers these
+  fields too: the empty value is refused (exit 1, nothing applied, naming the
+  field's clear flag) on the direct and proxied-server routes, and each clear
+  flag is mutually exclusive with its field's content flags. An empty
+  `--design-file` is refused the same way. An empty description read from
+  stdin or a file still needs `--allow-empty-description`, and its refusal
+  now names `--clear-description` as well. `bd create` is unchanged: a new
+  issue has nothing to wipe, so it accepts empty values and has no clear
+  flags.
 - **`bd dolt pull` on an embedded rig with no remote exits 0 (bd-e2q8zs).**
   It prints `No remote is configured — skipping.` and the setup guidance,
   as server mode already did; in embedded mode it used to exit 1. A pull
