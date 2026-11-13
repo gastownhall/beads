@@ -1955,6 +1955,19 @@ var rootCmd = &cobra.Command{
 		if backendErr := validateConfiguredBackend(cfg, beadsDir); backendErr != nil {
 			return HandleError("%v", backendErr)
 		}
+		// A metadata-less workspace cannot say which embedded database is its
+		// own. When its store already holds one, the default-name fallback
+		// below would open or create a sibling of it and later writes would
+		// diverge between the two (GH#4381). Refuse before any store
+		// construction; the empty-store and sole-matching-database cases stay
+		// allowed inside the shared check. Server/shared-server workspaces
+		// never take the embedded fallback, and this path's doltCfg names
+		// DefaultDoltDatabase, so that is the target checked.
+		if cfg == nil && !configfile.DefaultConfig().IsDoltServerMode() && !doltserver.IsSharedServerMode() {
+			if err := configfile.CheckMetadatalessEmbeddedDatabase(beadsDir, configfile.DefaultDoltDatabase); err != nil {
+				return HandleError("%v", err)
+			}
+		}
 		// Reject proxy capability combinations before any workspace side effect
 		// (version tracking, migration, auto-start, or provider construction).
 		// Two validators, one for each half of the policy: flag-keyed rules and

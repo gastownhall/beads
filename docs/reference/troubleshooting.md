@@ -349,6 +349,41 @@ tracking the same work twice.
   export BEADS_DB=/path/to/db
   ```
 
+### "no workspace metadata at" refusal (embedded mode)
+
+**Symptom (embedded mode):** Every `bd` command in a project fails with:
+
+```text
+Error: no workspace metadata at /path/to/.beads: refusing to open or create
+embedded database "beads" while /path/to/.beads/embeddeddolt already holds
+"myproj"; ... restore /path/to/.beads/metadata.json ... (GH#4381)
+```
+
+**Cause:** `.beads/metadata.json` is machine-local state, and this machine
+does not have it — a fresh clone of the project, a restored working tree, or
+a metadata file that was lost. The workspace's embedded Dolt store still
+holds the project's database, but without metadata bd cannot tell which
+database is this workspace's own. Silently falling back to the default
+database name `beads` would create a sibling of the real database and later
+writes would land in the wrong one, so bd refuses before opening or creating
+anything. A store holding several databases is refused even when one of them
+is named `beads`.
+
+**Fix:** restore `.beads/metadata.json` in that workspace — from the machine
+that created it or a backup — or recreate it so it names the intended
+database:
+
+```json
+{
+  "dolt_database": "myproj"
+}
+```
+
+If this working tree is simply the wrong one, a `.beads/redirect` can point
+at the workspace that owns the data. Do not delete the existing database
+directories under `.beads/embeddeddolt/`: they hold the only copy of the
+tracked issues.
+
 ### Circuit breaker: "server appears down, failing fast"
 
 **Symptom (server mode):** Every `bd` command fails with
