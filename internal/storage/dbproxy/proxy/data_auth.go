@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -191,13 +193,9 @@ func dialData(ctx context.Context, addr string) (net.Conn, error) {
 	if !ok {
 		return nil, fmt.Errorf("dbproxy: invalid data address registration for %q", addr)
 	}
-	_, portStr, err := net.SplitHostPort(addr)
+	port, err := dataAddressPort(addr)
 	if err != nil {
-		return nil, fmt.Errorf("dbproxy: invalid data address %q: %w", addr, err)
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil || port <= 0 {
-		return nil, fmt.Errorf("dbproxy: invalid data port in %q", addr)
+		return nil, err
 	}
 	// The address was registered only after readAndDial or spawn verified
 	// the proxy that owns it, so the pidfile is not re-read on every pool
@@ -207,6 +205,58 @@ func dialData(ctx context.Context, addr string) (net.Conn, error) {
 	// listens there now, so every connection makes it prove the secret
 	// (clientDataHandshake) before the driver sends it anything.
 	return dialAuthenticated(ctx, rootDir, addr, port)
+}
+
+func dataAddressPort(addr string) (int, error) {
+	_, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return 0, fmt.Errorf("dbproxy: invalid data address %q: %w", addr, err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port <= 0 {
+		return 0, fmt.Errorf("dbproxy: invalid data port in %q", addr)
+	}
+	return port, nil
+}
+
+var (
+	rootNetworksMu sync.Mutex
+	rootNetworks   = map[string]string{} // network name -> the root it dials under
+)
+
+// DataNetworkFor returns the name of a MySQL driver network bound to the
+// proxy root rootDir: its dialer completes the BDPROXY1 exchange under that
+// root's secret for whatever address the driver dials, so a DSN on it can
+// only ever reach the proxy that root names. Unlike DataNetwork, whose dialer
+// looks the root up by address in a process-wide table, nothing another open
+// does can change the root a connection on it authenticates under. That
+// matters in a process that opens several roots: when one root's proxy exits
+// and another's takes its port, the first root's pool must fail with
+// ErrDataAuth there, not authenticate under the second root's secret and
+// run its queries against that root's database. The name is derived from the
+// cleaned absolute path of rootDir and its dialer is registered with the
+// driver once per root, on first use; a process registers one per root it
+// opens and keeps it for its lifetime.
+func DataNetworkFor(rootDir string) string {
+	root, err := filepath.Abs(rootDir)
+	if err != nil {
+		root = filepath.Clean(rootDir)
+	}
+	sum := sha256.Sum256([]byte(root))
+	name := DataNetwork + "-" + hex.EncodeToString(sum[:16])
+	rootNetworksMu.Lock()
+	defer rootNetworksMu.Unlock()
+	if _, ok := rootNetworks[name]; !ok {
+		rootNetworks[name] = root
+		mysql.RegisterDialContext(name, func(ctx context.Context, addr string) (net.Conn, error) {
+			port, err := dataAddressPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			return dialAuthenticated(ctx, root, addr, port)
+		})
+	}
+	return name
 }
 
 // DialData dials the proxy data port at endpoint and completes the BDPROXY1
