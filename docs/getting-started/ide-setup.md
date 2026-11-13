@@ -231,7 +231,7 @@ Details: [Factory.ai Droid](/integrations/factory), [Mux](/integrations/mux), [O
 bd setup copilot
 ```
 
-This installs a native Copilot CLI plugin manifest (`.copilot-plugin/plugin.json`, which registers `bd prime` hooks) and repository instructions (`.github/copilot-instructions.md`). See [Copilot CLI](/integrations/copilot-cli).
+This installs a native Copilot CLI plugin manifest (`.copilot-plugin/plugin.json`, which registers `bd prime` hooks) and a marked Beads section inside the repository instructions file (`.github/copilot-instructions.md`); any guidance of your own in that file is kept. See [Copilot CLI](/integrations/copilot-cli).
 
 **For VS Code with GitHub Copilot**, use the MCP server:
 

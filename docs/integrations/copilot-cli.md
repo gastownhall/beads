@@ -36,7 +36,7 @@ For **VS Code + MCP**, see [GitHub Copilot](/integrations/github-copilot).
 3. **Lower maintenance burden**
    - No Copilot-specific install/check/remove implementation in core
    - No Copilot-specific doctor checks
-   - The recipe just writes the native plugin file and the instruction file
+   - The recipe just writes the native plugin file and manages a marked section in the instruction file
 
 ## Why Copilot CLI Over MCP for Terminal Work?
 
@@ -70,7 +70,32 @@ bd setup copilot --remove
   - `SessionStart` hook: Runs `bd prime` when Copilot CLI starts a session
   - `PreCompact` hook: Runs `bd prime` before context compaction
 - `.github/copilot-instructions.md`
-  - Repository workflow guidance for Copilot CLI
+  - A marked `<!-- BEGIN BEADS INTEGRATION -->` … `<!-- END BEADS INTEGRATION -->` section holding the repository workflow guidance for Copilot CLI
+
+## Who owns which file
+
+`bd setup copilot` owns `.copilot-plugin/plugin.json` outright, but
+`.github/copilot-instructions.md` is the standard place for a repository's
+own Copilot guidance, so bd manages only the marked section inside it:
+
+- **Install** keeps your existing content and appends (or replaces, in
+  place) exactly one marked section with the current guidance. A file an
+  older bd release wrote whole is converted to a marked section instead of
+  gaining a second copy.
+- **`--check`** requires the marked section: a file that exists but holds
+  only your own content is reported as not installed, non-zero, with the
+  path named.
+- **`--remove`** strips the section and deletes the manifest. The
+  instructions file itself is kept — with your content — unless nothing
+  but the section (or a recognized old whole-file install) was in it, in
+  which case the file and its now-empty directory are removed.
+
+If the file's BEADS INTEGRATION markers cannot be owned safely (a
+dangling, reversed, nested or duplicated pair, or an unclosed marker), or
+the file is a symbolic link, install and `--remove` refuse before touching
+either file; fix the markers (or the link) by hand and re-run. Guidance a
+pre-section release left in the file unmarked can be deleted manually once
+the marked section is in place.
 
 ## Related Files
 

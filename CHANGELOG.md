@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`bd setup copilot` no longer overwrites a repository's own
+  `.github/copilot-instructions.md`.** The instructions file is now managed
+  as a marked BEADS INTEGRATION section — existing content is kept, install
+  is idempotent, `--check` requires the section, and `--remove` keeps the
+  user's text. `.copilot-plugin/plugin.json` stays beads-owned; malformed
+  markers and symlinked instruction files are refused (#7431).
+
 ### Security
 
 - **Release binaries are built with Go 1.27.4.** Go 1.27.0-1.27.3 (and
