@@ -180,6 +180,7 @@ filegroup(
         "//internal/storage/memoryops:go_srcs",
         "//internal/storage/rowid:go_srcs",
         "//internal/storage/schema:go_srcs",
+        "//internal/storage/searchcountsequiv:go_srcs",
         "//internal/storage/sqlbuild:go_srcs",
         "//internal/storage/sqlclass:go_srcs",
         "//internal/storage/sqlcount:go_srcs",
