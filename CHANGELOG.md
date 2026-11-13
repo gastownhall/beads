@@ -1281,6 +1281,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `RunInTransaction` callback that writes both durable issues and wisps
+  now commits or rolls back as a whole on the Dolt server backend.** With the
+  events journal off (the default), the transaction ran wisp tables on a
+  second SQL session and committed it after the durable side and its Dolt
+  commit, so a conflict on a wisp row left the durable half committed and
+  returned `ErrCommitIndeterminate`; a wisp close that unblocked a durable
+  dependent published that `is_blocked` change in a second Dolt commit with
+  the same message; and the callback's own cross-tier reads
+  (`GetDependentRecords`, `CountDependentRecords`,
+  `GetDependentRecordsForIssues`, `CountIssuesByGroup`) did not see wisps it
+  had just written. Both planes now share the transaction's one pinned SQL
+  transaction, as they already did with the journal on and on the embedded
+  backend: a wisp conflict refuses the whole transaction determinately, the
+  durable side effects ride the callback's one Dolt commit, and every read is
+  read-your-writes. Wisps stay dolt-ignored and clone-local. `bd mol
+  squash`/`burn`/`bond`, `bd cook`, `bd batch` and SDK callers get this with
+  no change. (bd-z9b5y4, design from PR #6015 by jm2)
+
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc

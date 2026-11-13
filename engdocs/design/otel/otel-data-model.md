@@ -436,7 +436,6 @@ Emitted by the external-tracker sync engine (`internal/tracker/engine.go`, used 
 | `bd.write_retries_total` | Counter | `{retry}` | `type` (`serialization` \| `connection`) | ✅ Implemented |
 | `bd.db.post_tx_commit_dropped` | Counter | `{commit}` | — | ✅ Implemented |
 | `bd.db.blocked_recheck_dropped` | Counter | `{recheck}` | — | ✅ Implemented |
-| `bd.db.ignored_tx_fresh_pool` | Counter | `{tx}` | — | ✅ Implemented |
 | `bd.db.conn_acquire_ms` | Histogram | `ms` | — | ✅ Implemented |
 | `bd.db.pool_wait_count` | Counter | `{wait}` | — | ✅ Implemented |
 | `bd.db.pool_wait_ms` | Histogram | `ms` | — | ✅ Implemented |
@@ -500,7 +499,6 @@ Every metric name, span name, and attribute listed in this document is backed by
 | `bd.db.pool_wait_ms` | Histogram | `store.go:1028`; recorded at `transaction.go:224` |
 | `bd.claim_verify_lost_total` | Counter | `store.go:1032`; recorded at `claim_verify.go:208`, `issues.go:448` |
 | `bd.claim_verify_recovered_total` | Counter | `store.go:1036` — registered; `.Add()` not called anywhere |
-| `bd.db.ignored_tx_fresh_pool` | Counter | `store.go:1040`; recorded at `transaction.go:449` |
 | `bd.db.pool_open` / `pool_in_use` / `pool_idle` / `pool_max_open` | Observable gauge | `store.go:1053,1061,1069,1077` (`registerPoolGauges`, called at `store.go:2560`) |
 | `bd.db.blocked_recheck_dropped` | Counter | `internal/storage/issueops/blocked_recheck_report.go:17`; recorded at `:37` |
 | `bd.ai.input_tokens` | Counter | `haiku.go:145`; recorded at `haiku.go:195` |

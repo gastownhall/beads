@@ -74,15 +74,15 @@ func TestTxReadYourWritesWithComment(t *testing.T) {
 	}
 }
 
-// TestTxReadYourWritesWispTier pins the two-session wisp behavior of the new
-// reads on the classic Dolt store (wisp rows live on ignoredTx, durable on
-// regularTx). It proves:
-//   - Single-tier reads route to the owning session and ARE read-your-writes for
-//     an uncommitted wisp (GetIssueCommentsPage, IsBlocked, IsBlockedBatch).
-//   - Both-tiers-spanning reads run on regularTx and, per the documented
-//     two-session caveat, do NOT yet see a wisp edge written in the same open
-//     transaction (GetDependentRecords/CountDependentRecords) — and DO see it
-//     once the transaction commits.
+// TestTxReadYourWritesWispTier pins read-your-writes for wisp rows on the
+// classic Dolt store, where durable and wisp tables share the transaction's
+// one SQL session even with the events journal off (the default). It proves:
+//   - Single-tier reads are read-your-writes for an uncommitted wisp
+//     (GetIssueCommentsPage, IsBlocked, IsBlockedBatch).
+//   - Both-tiers-spanning reads see a wisp edge and a wisp row written earlier
+//     in the same open transaction (GetDependentRecords,
+//     CountDependentRecords, CountIssuesByGroup), and still see them once the
+//     transaction commits.
 func TestTxReadYourWritesWispTier(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -128,7 +128,7 @@ func TestTxReadYourWritesWispTier(t *testing.T) {
 		if err := tx.CreateIssue(ctx, wisp, "tester"); err != nil {
 			return err
 		}
-		// Wisp-sourced blocks edge → wisp_dependencies (ignoredTx); wisp blocked.
+		// Wisp-sourced blocks edge → wisp_dependencies; wisp blocked.
 		if err := tx.AddDependency(ctx, &types.Dependency{IssueID: "txw-wisp", DependsOnID: "txw-block", Type: types.DepBlocks}, "tester"); err != nil {
 			return err
 		}
@@ -159,22 +159,33 @@ func TestTxReadYourWritesWispTier(t *testing.T) {
 			t.Errorf("in-tx IsBlockedBatch = %v, want txw-wisp blocked, txw-block not", batch)
 		}
 
-		// Both-tiers-spanning reads do NOT yet see the uncommitted wisp edge
-		// (documented two-session caveat): txw-block's only inbound edge is the
-		// wisp edge, uncommitted on the ignored session.
+		// Both-tiers-spanning reads see the uncommitted wisp edge and row:
+		// txw-block's only inbound edge is the wisp edge written above, and the
+		// group count now includes txw-wisp.
 		dependents, err := tx.GetDependentRecords(ctx, "txw-block", "", 0, "")
 		if err != nil {
 			return err
 		}
-		if len(dependents) != 0 {
-			t.Errorf("in-tx GetDependentRecords(txw-block) = %v, want empty (uncommitted wisp edge not visible on regularTx)", dependents)
+		if len(dependents) != 1 || dependents[0].IssueID != "txw-wisp" {
+			t.Errorf("in-tx GetDependentRecords(txw-block) = %v, want one edge from txw-wisp (cross-plane read-your-writes)", dependents)
 		}
 		nDep, err := tx.CountDependentRecords(ctx, "txw-block", "")
 		if err != nil {
 			return err
 		}
-		if nDep != 0 {
-			t.Errorf("in-tx CountDependentRecords(txw-block) = %d, want 0 (documented caveat)", nDep)
+		if nDep != 1 {
+			t.Errorf("in-tx CountDependentRecords(txw-block) = %d, want 1 (uncommitted wisp edge)", nDep)
+		}
+		groupCounts, err = tx.CountIssuesByGroup(ctx, types.IssueFilter{}, "status")
+		if err != nil {
+			return err
+		}
+		total = 0
+		for _, n := range groupCounts {
+			total += n
+		}
+		if total != 3 {
+			t.Errorf("in-tx CountIssuesByGroup total = %d, want 3 (durable blocker + committed wisp + uncommitted txw-wisp)", total)
 		}
 		return nil
 	})

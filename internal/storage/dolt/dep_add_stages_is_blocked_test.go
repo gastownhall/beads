@@ -205,7 +205,7 @@ func TestBatchApplierDepAdd_StagesIsBlockedFlip(t *testing.T) {
 // a wisp batch create: a wisp created with a parent-child edge to a durable
 // spawner blocks the spawner's durable waits-for waiter, and that issues row
 // must be committed, on the store's all-wisps create path and on a
-// journal-off transaction, which creates wisps on its dolt-ignored session.
+// journal-off transaction, which creates wisps on its single session.
 func TestCreateWispChildOfDurableSpawner_StagesWaiterIsBlockedFlip(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
