@@ -168,7 +168,7 @@ func TestGraphWalkPlansHonorJoinHints(t *testing.T) {
 
 	t.Run("blocked-state recompute", func(t *testing.T) {
 		rec := &statementRecorder{DBTX: tx}
-		if err := issueops.RecomputeIsBlockedInTx(ctx, rec, []string{id(5), id(77), id(1500)}, nil); err != nil {
+		if err := issueops.RecomputeIsBlockedInTx(ctx, rec, []string{id(5), id(77), id(1500)}, nil, issueops.NoRequestActor); err != nil {
 			t.Fatal(err)
 		}
 		checked := 0

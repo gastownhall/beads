@@ -81,6 +81,9 @@ func TestJournalContract(t *testing.T) {
 	t.Run("EveryMutationKindRecordsItsActor", func(t *testing.T) {
 		conformance.RunJournalEveryMutationKindRecordsItsActor(t, ctx, fixture)
 	})
+	t.Run("DerivedRecordsCarryTheCausingActor", func(t *testing.T) {
+		conformance.RunJournalDerivedRecordsCarryTheCausingActor(t, ctx, fixture)
+	})
 	t.Run("EveryMutationKindLandsARow", func(t *testing.T) {
 		conformance.RunJournalEveryMutationKindLandsARow(t, ctx, fixture)
 	})
@@ -111,6 +114,78 @@ func newUOWJournalFixture(t *testing.T, ctx context.Context, prefix string) conf
 	if !ok {
 		t.Fatalf("provider %T does not offer the lifecycle, batch-create, import and reader accessors", provider)
 	}
+	// mutationsAs is the mutation kit acting as actor; the fixture's kit acts
+	// as "actor", and As hands the derived-actor case a second identity.
+	var mutationsAs func(actor string) conformance.JournalMutations
+	mutationsAs = func(actor string) conformance.JournalMutations {
+		return conformance.JournalMutations{
+			Create: func(ctx context.Context, id string) error {
+				return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
+					_, err := uw.IssueUseCase().CreateIssue(ctx, domain.CreateIssueParams{
+						Issue: &types.Issue{
+							ID: id, Title: "t-" + id, IssueType: types.TypeTask, Status: types.StatusOpen,
+						},
+						ExplicitID: id,
+						CreateOnly: true,
+					}, actor)
+					return "create " + id, err
+				})
+			},
+			Update: func(ctx context.Context, id string) error {
+				return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
+					return "update " + id, uw.IssueUseCase().UpdateIssue(ctx, id,
+						map[string]any{"title": "renamed " + id}, actor)
+				})
+			},
+			Close: func(ctx context.Context, id string) error {
+				return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
+					_, err := uw.IssueUseCase().CloseIssue(ctx, id, domain.CloseIssueParams{Reason: "done"}, actor)
+					return "close " + id, err
+				})
+			},
+			Delete: func(ctx context.Context, id string) error {
+				return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
+					_, err := uw.IssueUseCase().DeleteIssue(ctx, id, actor)
+					return "delete " + id, err
+				})
+			},
+			AddDependency: func(ctx context.Context, from, to string) error {
+				return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
+					return "dep add " + from, uw.DependencyUseCase().AddDependency(ctx, &types.Dependency{
+						IssueID: from, DependsOnID: to, Type: types.DepBlocks,
+					}, actor)
+				})
+			},
+			RemoveDependency: func(ctx context.Context, from, to string) error {
+				return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
+					return "dep remove " + from, uw.DependencyUseCase().RemoveDependency(ctx, from, to, actor)
+				})
+			},
+			Comment: func(ctx context.Context, id, text string) error {
+				return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
+					_, err := uw.CommentUseCase().AddCommentToIssue(ctx, id, actor, text)
+					return "comment " + id, err
+				})
+			},
+			AddParentChild: func(ctx context.Context, child, parent string) error {
+				return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
+					return "dep add " + child, uw.DependencyUseCase().AddDependency(ctx, &types.Dependency{
+						IssueID: child, DependsOnID: parent, Type: types.DepParentChild,
+					}, actor)
+				})
+			},
+			SetStatus: func(ctx context.Context, id string, status types.Status) error {
+				return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
+					return "update " + id, uw.IssueUseCase().UpdateIssue(ctx, id,
+						map[string]any{"status": string(status)}, actor)
+				})
+			},
+			// Every hook above acts as actor, Delete included: the unit of
+			// work's DeleteIssue takes the actor.
+			Actor: actor,
+			As:    mutationsAs,
+		}
+	}
 	return conformance.JournalFixture{
 		IssuePrefix: prefix,
 		Journal:     cursor,
@@ -128,58 +203,6 @@ func newUOWJournalFixture(t *testing.T, ctx context.Context, prefix string) conf
 				return uw.EventsJournalUseCase().Prune(ctx, before, retainDays, retainRows)
 			})
 		},
-		Mutations: conformance.JournalMutations{
-			Create: func(ctx context.Context, id string) error {
-				return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
-					_, err := uw.IssueUseCase().CreateIssue(ctx, domain.CreateIssueParams{
-						Issue: &types.Issue{
-							ID: id, Title: "t-" + id, IssueType: types.TypeTask, Status: types.StatusOpen,
-						},
-						ExplicitID: id,
-						CreateOnly: true,
-					}, "actor")
-					return "create " + id, err
-				})
-			},
-			Update: func(ctx context.Context, id string) error {
-				return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
-					return "update " + id, uw.IssueUseCase().UpdateIssue(ctx, id,
-						map[string]any{"title": "renamed " + id}, "actor")
-				})
-			},
-			Close: func(ctx context.Context, id string) error {
-				return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
-					_, err := uw.IssueUseCase().CloseIssue(ctx, id, domain.CloseIssueParams{Reason: "done"}, "actor")
-					return "close " + id, err
-				})
-			},
-			Delete: func(ctx context.Context, id string) error {
-				return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
-					_, err := uw.IssueUseCase().DeleteIssue(ctx, id, "actor")
-					return "delete " + id, err
-				})
-			},
-			AddDependency: func(ctx context.Context, from, to string) error {
-				return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
-					return "dep add " + from, uw.DependencyUseCase().AddDependency(ctx, &types.Dependency{
-						IssueID: from, DependsOnID: to, Type: types.DepBlocks,
-					}, "actor")
-				})
-			},
-			RemoveDependency: func(ctx context.Context, from, to string) error {
-				return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
-					return "dep remove " + from, uw.DependencyUseCase().RemoveDependency(ctx, from, to, "actor")
-				})
-			},
-			Comment: func(ctx context.Context, id, text string) error {
-				return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
-					_, err := uw.CommentUseCase().AddCommentToIssue(ctx, id, "actor", text)
-					return "comment " + id, err
-				})
-			},
-			// Every hook above acts as "actor", Delete included: the unit of
-			// work's DeleteIssue takes the actor.
-			Actor: "actor",
-		},
+		Mutations: mutationsAs("actor"),
 	}
 }

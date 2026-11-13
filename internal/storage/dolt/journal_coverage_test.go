@@ -702,6 +702,11 @@ func TestEventsJournal_DependencySnapshotsFollowBlockedState(t *testing.T) {
 // another bead's persisted readiness emit a post-recompute update for that
 // bead. Without these rows, cursor consumers retain stale is_blocked values
 // until a later full reconciliation.
+//
+// Each derived update carries the actor of the mutation that caused it — the
+// value that mutation's own record carries — and names no one only when no
+// request is behind it: storage.DeleteIssue's actorless surface and the full
+// repair `bd recompute-blocked` runs.
 func TestEventsJournal_DerivedBlockedStateChanges(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -737,10 +742,10 @@ func TestEventsJournal_DerivedBlockedStateChanges(t *testing.T) {
 			tb.Fatalf("%s is_blocked = %d, want %v", id, got, want)
 		}
 	}
-	assertJournalUpdate := func(tb testing.TB, id string, wantBlocked bool) {
+	assertJournalUpdate := func(tb testing.TB, id string, wantBlocked bool, wantActor string) {
 		tb.Helper()
 		rows, err := store.db.QueryContext(ctx,
-			`SELECT issue_json FROM bd_events_journal WHERE op = 'update' AND issue_id = ? ORDER BY seq`, id)
+			`SELECT issue_json, actor FROM bd_events_journal WHERE op = 'update' AND issue_id = ? ORDER BY seq`, id)
 		if err != nil {
 			tb.Fatal(err)
 		}
@@ -748,8 +753,12 @@ func TestEventsJournal_DerivedBlockedStateChanges(t *testing.T) {
 		var snapshots []types.Issue
 		for rows.Next() {
 			var raw []byte
-			if err := rows.Scan(&raw); err != nil {
+			var actor string
+			if err := rows.Scan(&raw, &actor); err != nil {
 				tb.Fatal(err)
+			}
+			if actor != wantActor {
+				tb.Errorf("derived update of %s names actor %q, want %q", id, actor, wantActor)
 			}
 			var issue types.Issue
 			if err := json.Unmarshal(raw, &issue); err != nil {
@@ -775,7 +784,7 @@ func TestEventsJournal_DerivedBlockedStateChanges(t *testing.T) {
 			t.Fatal(err)
 		}
 		assertBlocked(t, "bd-derived-close-source", false)
-		assertJournalUpdate(t, "bd-derived-close-source", false)
+		assertJournalUpdate(t, "bd-derived-close-source", false, "actor")
 	})
 
 	t.Run("deleting blocker updates depender", func(t *testing.T) {
@@ -788,7 +797,9 @@ func TestEventsJournal_DerivedBlockedStateChanges(t *testing.T) {
 			t.Fatal(err)
 		}
 		assertBlocked(t, "bd-derived-delete-source", false)
-		assertJournalUpdate(t, "bd-derived-delete-source", false)
+		// storage.DeleteIssue is an actorless system surface: no request is
+		// behind the delete, so its derived row names no one either.
+		assertJournalUpdate(t, "bd-derived-delete-source", false, "")
 	})
 
 	t.Run("removing parent blocker updates descendant", func(t *testing.T) {
@@ -804,7 +815,30 @@ func TestEventsJournal_DerivedBlockedStateChanges(t *testing.T) {
 		}
 		assertBlocked(t, "bd-derived-parent", false)
 		assertBlocked(t, "bd-derived-child", false)
-		assertJournalUpdate(t, "bd-derived-child", false)
+		assertJournalUpdate(t, "bd-derived-child", false, "actor")
+	})
+
+	t.Run("full repair names no one", func(t *testing.T) {
+		mustCreate(t, "bd-derived-repair-source", "bd-derived-repair-target")
+		mustAdd(t, "bd-derived-repair-source", "bd-derived-repair-target", types.DepBlocks)
+		assertBlocked(t, "bd-derived-repair-source", true)
+		// A stale flag only a repair settles.
+		if _, err := store.db.ExecContext(ctx, "UPDATE issues SET is_blocked = 0 WHERE id = ?", "bd-derived-repair-source"); err != nil {
+			t.Fatal(err)
+		}
+		clearJournal(t, store)
+
+		// The repair body, on the store's journal-scoped write transaction.
+		if err := store.withRetryTx(ctx, func(tx *sql.Tx) error {
+			_, err := issueops.RecomputeAllIsBlockedInTx(ctx, tx)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		assertBlocked(t, "bd-derived-repair-source", true)
+		// `bd recompute-blocked` / `bd doctor --fix`: no request is behind the
+		// repair, so it keeps the documented system behaviour.
+		assertJournalUpdate(t, "bd-derived-repair-source", true, "")
 	})
 }
 

@@ -63,7 +63,7 @@ func (t *doltServerTx) recheckBlockedOnce(ctx context.Context, pending issueops.
 	if _, err := t.conn.ExecContext(ctx, "START TRANSACTION;"); err != nil {
 		return fmt.Errorf("begin recheck: %w", err)
 	}
-	result, err := issueops.RecomputeIsBlockedInTxWithResult(ctx, t.conn, pending.IssueIDs, pending.WispIDs)
+	result, err := issueops.RecomputeIsBlockedInTxWithResult(ctx, t.conn, pending.IssueIDs, pending.WispIDs, pending.Actor)
 	if err != nil {
 		return err
 	}

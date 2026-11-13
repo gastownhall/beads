@@ -185,7 +185,7 @@ func moveIssuePersistenceInTx(ctx context.Context, tx DBTX, current *types.Issue
 	if err != nil {
 		return PersistenceMoveResult{}, err
 	}
-	recompute, err := RecomputeIsBlockedInTxWithResult(ctx, tx, issues, wisps)
+	recompute, err := RecomputeIsBlockedInTxWithResult(ctx, tx, issues, wisps, actor)
 	if err != nil {
 		return PersistenceMoveResult{}, fmt.Errorf("recompute blocked state: %w", err)
 	}

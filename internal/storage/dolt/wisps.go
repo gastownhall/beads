@@ -300,11 +300,11 @@ func (s *DoltStore) deleteWisp(ctx context.Context, id string) error {
 		return fmt.Errorf("delete wisp aux rows for %s: %w", id, err)
 	}
 
-	recompute, err := issueops.RecomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps)
+	recompute, err := issueops.RecomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps, issueops.NoRequestActor)
 	if err != nil {
 		return fmt.Errorf("recompute is_blocked after wisp delete for %s: %w", id, err)
 	}
-	issueops.NoteDeleteBlockedRecheck(tx, []string{id}, "", affectedIssues, affectedWisps)
+	issueops.NoteDeleteBlockedRecheck(tx, []string{id}, "", issueops.NoRequestActor, affectedIssues, affectedWisps)
 
 	return s.commitWispTxAndRecheck(ctx, "commit delete wisp", tx,
 		wispDurable{issues: recompute.IssueRowsChanged, dependencies: edgesDeleted}, fmt.Sprintf("bd: delete %s", id))
@@ -407,11 +407,11 @@ func (s *DoltStore) deleteWispBatchTx(ctx context.Context, ids []string) (int, e
 		return 0, fmt.Errorf("delete wisp aux rows: %w", err)
 	}
 
-	recompute, err := issueops.RecomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps)
+	recompute, err := issueops.RecomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps, issueops.NoRequestActor)
 	if err != nil {
 		return 0, fmt.Errorf("recompute is_blocked after batched wisp delete: %w", err)
 	}
-	issueops.NoteDeleteBlockedRecheck(tx, ids, "", affectedIssues, affectedWisps)
+	issueops.NoteDeleteBlockedRecheck(tx, ids, "", issueops.NoRequestActor, affectedIssues, affectedWisps)
 
 	if err := s.commitWispTxAndRecheck(ctx, "commit batch wisp delete", tx,
 		wispDurable{issues: recompute.IssueRowsChanged, dependencies: edgesDeleted},

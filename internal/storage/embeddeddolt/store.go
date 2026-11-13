@@ -482,7 +482,7 @@ func (s *EmbeddedDoltStore) recheckBlockedAfterCommit(ctx context.Context, pendi
 	ctx, cancel := issueops.BlockedRecheckContext(ctx)
 	defer cancel()
 	if _, err := s.commitConn(ctx, true, func(tx *sql.Tx) error {
-		return issueops.RecomputeIsBlockedInTx(ctx, tx, pending.IssueIDs, pending.WispIDs)
+		return issueops.RecomputeIsBlockedInTx(ctx, tx, pending.IssueIDs, pending.WispIDs, pending.Actor)
 	}); err != nil {
 		return issueops.BlockedRecheckFailed(err)
 	}
@@ -852,7 +852,7 @@ func (s *EmbeddedDoltStore) GetIssueByExternalRef(ctx context.Context, externalR
 func (s *EmbeddedDoltStore) DeleteIssue(ctx context.Context, id string) error {
 	return s.withConn(ctx, true, func(tx *sql.Tx) error {
 		// storage.DeleteIssue carries no actor, so the journal rows record none.
-		return issueops.DeleteIssueInTx(ctx, tx, id, "")
+		return issueops.DeleteIssueInTx(ctx, tx, id, issueops.NoRequestActor)
 	})
 }
 
@@ -1388,7 +1388,7 @@ func (s *EmbeddedDoltStore) DeleteIssues(ctx context.Context, ids []string, casc
 	err := s.withConn(ctx, !dryRun, func(tx *sql.Tx) error {
 		var err error
 		// storage.DeleteIssues carries no actor, so the journal rows record none.
-		result, err = issueops.DeleteIssuesInTx(ctx, tx, ids, cascade, force, dryRun, "")
+		result, err = issueops.DeleteIssuesInTx(ctx, tx, ids, cascade, force, dryRun, issueops.NoRequestActor)
 		return err
 	})
 	return result, err

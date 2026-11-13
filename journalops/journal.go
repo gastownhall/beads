@@ -17,9 +17,16 @@ import "context"
 //
 // Actor is the acting identity that performed the mutation, as resolved for
 // the audit-events table. A delete, and the dep_remove rows a cascading delete
-// produces, carry the identity that REQUESTED the delete. It is empty only
-// when the path genuinely has no actor: derived maintenance, system cleanup
-// with no request behind it, and rows written before the column existed.
+// produces, carry the identity that REQUESTED the delete; a derived is_blocked
+// update carries the actor of the request whose mutation caused it. It is
+// empty when no actor is behind the row: no request at all (system
+// maintenance: a pull's recompute, `bd recompute-blocked`, `bd doctor --fix`;
+// system cleanup), a request that named none (a served delete or sweep sent
+// without an actor), a delete made through a storage delete call that takes
+// no actor (a local `bd mol burn` or `bd mol squash`, or `bd cook`'s proto
+// delete) and the dep_remove and derived rows it causes, a post-commit
+// blocked recheck settling writes by different actors, and rows written
+// before the column existed.
 type Row struct {
 	Seq         int64
 	TS          string

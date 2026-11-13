@@ -261,11 +261,20 @@ func captureBlockedJournalSnapshot(
 // the captured state and journals only beads whose derived is_blocked value
 // actually changed. The emitted update carries the complete post-mutation
 // snapshot, allowing a cursor consumer to stay correct without graph queries.
+//
+// actor is the acting identity of the request whose mutation caused the
+// maintenance — the value that mutation's own record carries — and every
+// emitted update carries it: a dependent that a user's close unblocks, or the
+// subject a user's `bd dep remove` unblocks, changed because of that user.
+// NoRequestActor only from the system paths with
+// no request behind them (merge/pull recompute, `bd recompute-blocked`, `bd
+// doctor --fix`, the actorless delete surfaces).
 func recordBlockedJournalChanges(
 	ctx context.Context,
 	tx DBTX,
 	before blockedJournalSnapshot,
 	issueIDs, wispIDs []string,
+	actor string,
 ) error {
 	if before == nil {
 		return nil
@@ -288,11 +297,7 @@ func recordBlockedJournalChanges(
 		return changed[i].id < changed[j].id
 	})
 	for _, key := range changed {
-		// Derived maintenance runs from dozens of mutation paths (recompute /
-		// mark passes) that carry no actor of their own; attributing the
-		// triggering mutation here would mean threading an actor through the
-		// whole blocked-state layer, so these rows record no actor.
-		if err := RecordEventInTx(ctx, tx, EventUpdate, key.id, ""); err != nil {
+		if err := RecordEventInTx(ctx, tx, EventUpdate, key.id, actor); err != nil {
 			return fmt.Errorf("journal: record derived is_blocked update for %s: %w", key.id, err)
 		}
 	}
@@ -306,13 +311,17 @@ func recordBlockedJournalChanges(
 // journaling is disabled.
 //
 // actor is the acting identity that performed the mutation, as resolved for
-// the audit-events table; "" when the mutation path genuinely has none —
-// derived is_blocked maintenance, and the system surfaces with no request
-// behind them (storage.DeleteIssue, gc and molecule cleanup, `bd repo
-// remove`). A user-initiated delete is NOT one of those: its rows, cascade
-// included, carry the requesting actor. It is an explicit parameter, not
-// ambient context, so a new call site cannot compile without deciding
-// attribution.
+// the audit-events table; "" (NoRequestActor) when no actor reaches the
+// mutation path: the system recomputes (a pull's or merge's,
+// `bd recompute-blocked`, `bd doctor --fix`), `bd repo remove`, and the
+// storage delete surfaces that take no actor (storage.DeleteIssue, DeleteIssues
+// and Transaction.DeleteIssue), which `bd gc`'s Decay phase outside
+// proxied-server mode, a local `bd mol burn` or `bd mol squash`, and `bd cook`'s
+// proto delete reach. A delete made through a request that names an actor
+// carries it, cascade included, and derived is_blocked maintenance a request
+// caused carries that request's actor (recordBlockedJournalChanges).
+// It is an explicit parameter, not ambient context, so a new call site cannot
+// compile without deciding attribution.
 func RecordEventInTx(ctx context.Context, tx DBTX, op EventOp, issueID, actor string) error {
 	_, err := recordIssueEventInTx(ctx, tx, op, issueID, actor)
 	return err

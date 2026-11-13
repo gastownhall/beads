@@ -79,6 +79,9 @@ func TestJournalContract(t *testing.T) {
 	t.Run("EveryMutationKindRecordsItsActor", func(t *testing.T) {
 		conformance.RunJournalEveryMutationKindRecordsItsActor(t, ctx, fixture)
 	})
+	t.Run("DerivedRecordsCarryTheCausingActor", func(t *testing.T) {
+		conformance.RunJournalDerivedRecordsCarryTheCausingActor(t, ctx, fixture)
+	})
 	t.Run("EveryMutationKindLandsARow", func(t *testing.T) {
 		conformance.RunJournalEveryMutationKindLandsARow(t, ctx, fixture)
 	})
@@ -105,23 +108,21 @@ func newDoltJournalFixture(t *testing.T, prefix string) (conformance.JournalFixt
 	})
 	arrival.Import = conformance.ArrivalUpsertImportHook(store)
 	arrival.Rename = conformance.ArrivalRenameHook(store)
-	fixture := conformance.JournalFixture{
-		IssuePrefix:       prefix,
-		Journal:           cursor,
-		SetJournalEnabled: store.SetEventsJournalEnabled,
-		Prune:             store.PruneEventsJournal,
-		Arrival:           arrival,
-		Mutations: conformance.JournalMutations{
+	// mutationsAs is the mutation kit acting as actor; the fixture's kit acts
+	// as "actor", and As hands the derived-actor case a second identity.
+	var mutationsAs func(actor string) conformance.JournalMutations
+	mutationsAs = func(actor string) conformance.JournalMutations {
+		return conformance.JournalMutations{
 			Create: func(ctx context.Context, id string) error {
 				return store.CreateIssue(ctx, &types.Issue{
 					ID: id, Title: "t-" + id, IssueType: types.TypeTask, Status: types.StatusOpen,
-				}, "actor")
+				}, actor)
 			},
 			Update: func(ctx context.Context, id string) error {
-				return store.UpdateIssue(ctx, id, map[string]any{"title": "renamed " + id}, "actor")
+				return store.UpdateIssue(ctx, id, map[string]any{"title": "renamed " + id}, actor)
 			},
 			Close: func(ctx context.Context, id string) error {
-				return store.CloseIssue(ctx, id, "done", "actor", "")
+				return store.CloseIssue(ctx, id, "done", actor, "")
 			},
 			Delete: func(ctx context.Context, id string) error {
 				return store.DeleteIssue(ctx, id)
@@ -129,19 +130,36 @@ func newDoltJournalFixture(t *testing.T, prefix string) (conformance.JournalFixt
 			AddDependency: func(ctx context.Context, from, to string) error {
 				return store.AddDependency(ctx, &types.Dependency{
 					IssueID: from, DependsOnID: to, Type: types.DepBlocks,
-				}, "actor")
+				}, actor)
 			},
 			RemoveDependency: func(ctx context.Context, from, to string) error {
-				return store.RemoveDependency(ctx, from, to, "actor")
+				return store.RemoveDependency(ctx, from, to, actor)
 			},
 			Comment: func(ctx context.Context, id, text string) error {
-				return store.AddComment(ctx, id, "actor", text)
+				return store.AddComment(ctx, id, actor, text)
 			},
-			// Every hook above acts as "actor" except Delete: storage.DeleteIssue
+			AddParentChild: func(ctx context.Context, child, parent string) error {
+				return store.AddDependency(ctx, &types.Dependency{
+					IssueID: child, DependsOnID: parent, Type: types.DepParentChild,
+				}, actor)
+			},
+			SetStatus: func(ctx context.Context, id string, status types.Status) error {
+				return store.UpdateIssue(ctx, id, map[string]any{"status": string(status)}, actor)
+			},
+			// Every hook above acts as actor except Delete: storage.DeleteIssue
 			// takes no actor, so its record names none.
-			Actor:           "actor",
+			Actor:           actor,
+			As:              mutationsAs,
 			ActorlessDelete: true,
-		},
+		}
+	}
+	fixture := conformance.JournalFixture{
+		IssuePrefix:       prefix,
+		Journal:           cursor,
+		SetJournalEnabled: store.SetEventsJournalEnabled,
+		Prune:             store.PruneEventsJournal,
+		Arrival:           arrival,
+		Mutations:         mutationsAs("actor"),
 	}
 	return fixture, ctx, func() {
 		// Journaling is instance-scoped, and this store outlives the fixture in

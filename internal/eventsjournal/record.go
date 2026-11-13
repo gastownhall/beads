@@ -43,13 +43,24 @@ type Record struct {
 	// Actor is the acting identity that performed the mutation, as resolved
 	// for the audit-events table; on an op=comment row it is the comment's
 	// author (caller-asserted, the same value as comment.author — structured
-	// comments emit no audit event). Absent when the mutation path has no
-	// actor: derived maintenance (is_blocked recomputes), the delete plumbing
-	// (every delete except a rename's synthetic delete row — the storage
-	// surface drops the actor before the journal sees it), and rows written
-	// before the journal recorded actors. An absent actor is never user
-	// attribution; a consumer must read it as "system/unknown", not as a
-	// conflicting writer.
+	// comments emit no audit event). A delete, and the dep_remove rows a
+	// cascading delete produces, carry the identity that REQUESTED the
+	// delete. A derived update — the is_blocked recompute a mutation causes,
+	// on its own subject or on a dependent or descendant — carries the actor
+	// of the request whose mutation caused it, the same value that
+	// mutation's own record carries. Absent when no actor is behind the row:
+	// no request at all (system maintenance: a pull's or merge's recompute,
+	// `bd recompute-blocked`, `bd doctor --fix`; system cleanup: the
+	// Decay-phase deletes of `bd gc` outside proxied-server mode,
+	// `bd repo remove`); a request that named none (a served delete or sweep
+	// sent without an actor); a delete made through a storage delete call
+	// that takes no actor (storage.DeleteIssue, DeleteIssues or
+	// Transaction.DeleteIssue: a local `bd mol burn` or `bd mol squash`, or
+	// `bd cook`'s proto delete), and the dep_remove and derived update rows
+	// it causes; a post-commit blocked recheck settling writes by different
+	// actors in one transaction; and rows written before the journal
+	// recorded actors. An absent actor is never user attribution; a consumer
+	// must read it as "system/unknown", not as a conflicting writer.
 	Actor string `json:"actor,omitempty"`
 	// Issue is the full issue state AFTER the mutation, and the literal JSON
 	// `null` on a delete — never absent. A delete has no surviving row, and a

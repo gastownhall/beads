@@ -153,8 +153,9 @@ func renderGoldenLines(t *testing.T) []byte {
 
 	// actor pins both halves of the attribution contract: an attributed row
 	// emits the acting identity (the same one the audit-events table resolves),
-	// and an actorless row — derived maintenance, the system delete surfaces,
-	// records from before the column existed — omits the member entirely.
+	// derived maintenance included, and an actorless row — the system delete
+	// surfaces, system recomputes, records from before the column existed —
+	// omits the member entirely.
 	//
 	// A `delete` appears on BOTH sides on purpose. A user's `bd delete --actor A`
 	// is attributed to A, cascade rows included; the actorless surfaces (gc,
@@ -166,8 +167,9 @@ func renderGoldenLines(t *testing.T) []byte {
 		goldenRecord(2, ts, string(issueops.EventCreate), full.ID, "author", mustJSON(t, full), "", ""),
 		goldenRecord(3, ts, string(issueops.EventDepAdd), "bd-101", "author", mustJSON(t, full),
 			mustJSON(t, &issueops.EventDep{Kind: string(types.DepBlocks), Target: "bd-100"}), ""),
-		// A derived-maintenance update (is_blocked recompute) carries no actor.
-		goldenRecord(4, ts, string(issueops.EventUpdate), blocked.ID, "", mustJSON(t, blocked), "", ""),
+		// A derived-maintenance update (the is_blocked recompute the dep_remove
+		// below caused) carries that request's actor.
+		goldenRecord(4, ts, string(issueops.EventUpdate), blocked.ID, "author", mustJSON(t, blocked), "", ""),
 		goldenRecord(5, ts, string(issueops.EventDepRemove), "bd-101", "author", mustJSON(t, full),
 			mustJSON(t, &issueops.EventDep{Kind: string(types.DepBlocks), Target: "bd-100", Metadata: `{"note":"unblocked"}`}), ""),
 		goldenRecord(6, ts, string(issueops.EventUpdate), claimed.ID, "worker-1", mustJSON(t, claimed), "", ""),

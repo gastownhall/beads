@@ -2,7 +2,7 @@
   "tables": {
     "bd_events_journal": {
       "rows": 462,
-      "sha256": "f667bb697422cf57bca322f67ba1065bfad33508ae66cff68bcb0ce5f5ccda72"
+      "sha256": "09370124727115fa40f3ddb62d14a1937d454705b333eb1c4dee6cc6ec9ac89a"
     },
     "child_counters": {
       "rows": 0,

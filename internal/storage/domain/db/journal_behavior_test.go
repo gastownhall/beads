@@ -271,8 +271,10 @@ func (s *testSuite) TestEventsJournal_NoPhantomDeletes() {
 //
 // It asserts at the repository rather than through the use case because that is
 // where the actor was being dropped — deleteMany had it in hand the whole time.
-// The empty-actor half of the contract stays pinned by the derived-maintenance
-// rows in TestEventsJournal_UOWPlumbing.
+// Derived is_blocked rows a request causes carry its actor as well; the
+// empty-actor half of the contract (rows no request's actor reaches: the
+// actorless storage.DeleteIssue surface and the full repair) is pinned by
+// TestEventsJournal_DerivedBlockedStateChanges in internal/storage/dolt.
 func (s *testSuite) TestEventsJournal_DeleteActorAttribution() {
 	s.enableJournalForTest()
 	ctx := s.Ctx()

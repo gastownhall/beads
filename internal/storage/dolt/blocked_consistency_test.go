@@ -49,7 +49,7 @@ func recomputeScoped(ctx context.Context, t *testing.T, db *sql.DB, ids ...strin
 	if err != nil {
 		t.Fatalf("begin scoped recompute tx: %v", err)
 	}
-	if err := issueops.RecomputeIsBlockedInTx(ctx, tx, ids, nil); err != nil {
+	if err := issueops.RecomputeIsBlockedInTx(ctx, tx, ids, nil, issueops.NoRequestActor); err != nil {
 		_ = tx.Rollback()
 		t.Fatalf("RecomputeIsBlockedInTx(%v): %v", ids, err)
 	}

@@ -527,17 +527,23 @@ func (e *servedEnv) getIssue(ctx context.Context, id string) (*types.Issue, erro
 // unsupported allowlist), and the question both contracts ask is whether the
 // client can READ — page or stream — the journal a server wrote.
 func servedJournalMutations(reference servedReference) conformance.JournalMutations {
+	return servedJournalMutationsAs(reference, "actor")
+}
+
+// servedJournalMutationsAs is that kit acting as actor; As hands the
+// derived-actor case a second identity.
+func servedJournalMutationsAs(reference servedReference, actor string) conformance.JournalMutations {
 	return conformance.JournalMutations{
 		Create: func(ctx context.Context, id string) error {
 			return reference.CreateIssue(ctx, &types.Issue{
 				ID: id, Title: "t-" + id, IssueType: types.TypeTask, Status: types.StatusOpen,
-			}, "actor")
+			}, actor)
 		},
 		Update: func(ctx context.Context, id string) error {
-			return reference.UpdateIssue(ctx, id, map[string]any{"title": "renamed " + id}, "actor")
+			return reference.UpdateIssue(ctx, id, map[string]any{"title": "renamed " + id}, actor)
 		},
 		Close: func(ctx context.Context, id string) error {
-			return reference.CloseIssue(ctx, id, "done", "actor", "")
+			return reference.CloseIssue(ctx, id, "done", actor, "")
 		},
 		Delete: func(ctx context.Context, id string) error {
 			return reference.DeleteIssue(ctx, id)
@@ -545,17 +551,28 @@ func servedJournalMutations(reference servedReference) conformance.JournalMutati
 		AddDependency: func(ctx context.Context, from, to string) error {
 			return reference.AddDependency(ctx, &types.Dependency{
 				IssueID: from, DependsOnID: to, Type: types.DepBlocks,
-			}, "actor")
+			}, actor)
 		},
 		RemoveDependency: func(ctx context.Context, from, to string) error {
-			return reference.RemoveDependency(ctx, from, to, "actor")
+			return reference.RemoveDependency(ctx, from, to, actor)
 		},
 		Comment: func(ctx context.Context, id, text string) error {
-			return reference.AddComment(ctx, id, "actor", text)
+			return reference.AddComment(ctx, id, actor, text)
 		},
-		// Every hook above acts as "actor" except Delete: the reference store's
+		AddParentChild: func(ctx context.Context, child, parent string) error {
+			return reference.AddDependency(ctx, &types.Dependency{
+				IssueID: child, DependsOnID: parent, Type: types.DepParentChild,
+			}, actor)
+		},
+		SetStatus: func(ctx context.Context, id string, status types.Status) error {
+			return reference.UpdateIssue(ctx, id, map[string]any{"status": string(status)}, actor)
+		},
+		As: func(other string) conformance.JournalMutations {
+			return servedJournalMutationsAs(reference, other)
+		},
+		// Every hook above acts as actor except Delete: the reference store's
 		// DeleteIssue takes no actor, so its record names none.
-		Actor:           "actor",
+		Actor:           actor,
 		ActorlessDelete: true,
 	}
 }

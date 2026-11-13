@@ -1292,6 +1292,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Consistency also skips `external:` parents; the checks count these edges as
   "not verifiable here". A missing target under a held prefix is still an
   orphan, and under `--deep` an edge whose source is missing is still broken.
+- **A derived `is_blocked` journal record now names the user whose change
+  caused it.** When a mutation flips a bead's readiness — the subject of
+  `bd dep remove` itself, the dependents a close, reopen or status change
+  unblocks or blocks, the descendants of a re-parented or blocked parent —
+  the events journal records that flip as a separate `update`, and that
+  record carried no `actor`. A consumer that holds every record of a user's
+  change to that user read it as system/unknown. Every journaled change a
+  request causes, including derived `is_blocked` updates, now carries that
+  request's actor, the same value the request's own record carries, on every
+  engine and on the post-commit recheck. A derived record still names no one
+  when no request is behind it (a pull's or merge's recompute,
+  `bd recompute-blocked`, `bd doctor --fix`, the Decay-phase deletes of
+  `bd gc` outside proxied-server mode, `bd repo remove`), when the request
+  itself named no actor (for example a served delete or sweep sent without
+  one), when a delete goes through a storage delete call that takes no actor
+  (a local `bd mol burn` or `bd mol squash`, or `bd cook`'s proto delete,
+  whose own `delete` and `dep_remove` records name no one either), or when it
+  comes from a post-commit recheck covering writes by different actors. No
+  wire shape changes: `actor` was already an optional member of every record,
+  so `wire_revision` is unchanged. An out-of-tree backend that runs
+  `conformance.RunRoleContracts` with a journal fixture must now supply
+  `JournalMutations.As`, because the new derived-actor case seeds as one
+  identity and mutates as another (`AddParentChild` and `SetStatus` stay
+  optional), and must stamp the request's actor on its derived `is_blocked`
+  updates.
 - **The aux row id re-key again skips tables with dolthub/dolt#11131
   encoding drift instead of aborting the migration on every open** (#8372).
   The Dolt 2.6 engine reports the drift as `malformed out-of-band adaptive
