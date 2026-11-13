@@ -320,6 +320,86 @@ func TestEmbeddedRepairRefusesDirtyTrackedTargetBeforeAltering_5269(t *testing.T
 	})
 }
 
+// GH#5269, AC-6: a healthy, fully-current store pays nothing for the
+// post-condition machinery on the ordinary paths. A no-work MigrateUp
+// probes none of the dropped-default obligation targets, issues no
+// default-drop ALTER, no staging and no commit: those belong to the
+// explicit repair pass alone. countingConn records every statement so a
+// regression that leaks them into the no-work path fails this pin. (The
+// migration harness's own no-work probes — the cursor tables'
+// content_hash column and leases.granted_node — are expected and not
+// post-condition work.)
+type countingConn struct {
+	schema.DBConn
+	queries map[string]*[]string
+}
+
+func (c countingConn) record(query string) {
+	for pat, sink := range c.queries {
+		if strings.Contains(strings.ToLower(query), pat) {
+			*sink = append(*sink, query)
+		}
+	}
+}
+
+func (c countingConn) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	c.record(query)
+	return c.DBConn.ExecContext(ctx, query, args...)
+}
+
+func (c countingConn) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	c.record(query)
+	return c.DBConn.QueryContext(ctx, query, args...)
+}
+
+func (c countingConn) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	c.record(query)
+	return c.DBConn.QueryRowContext(ctx, query, args...)
+}
+
+func TestEmbeddedNoWorkMigrateUpAddsNoPostConditionProbes_5269(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	dataDir := seedFullyCurrentSchema(t, ctx)
+
+	withPinnedConn(t, dataDir, func(ctx context.Context, conn *sql.Conn) {
+		var probes, alters, stages, commits []string
+		// The pin targets the dropped-default obligation tables (the same
+		// set schema.droppedDefaultObligations pins, enforced there): a
+		// probe on any of them on the no-work path means the post-condition
+		// machinery leaked into ordinary opens.
+		queries := map[string]*[]string{
+			"drop default": &alters,
+			"dolt_add":     &stages,
+			"dolt_commit":  &commits,
+		}
+		for _, table := range []string{
+			"comments", "compaction_snapshots", "dependencies", "events",
+			"issue_snapshots", "wisp_comments", "wisp_dependencies", "wisp_events",
+		} {
+			queries["show columns from "+table+" like"] = &probes
+		}
+		counted := countingConn{DBConn: conn, queries: queries}
+		applied, err := schema.MigrateUp(ctx, counted)
+		if err != nil {
+			t.Fatalf("no-work MigrateUp on a current store: %v", err)
+		}
+		if applied != 0 {
+			t.Fatalf("applied = %d on a current store, want 0", applied)
+		}
+		for name, got := range map[string][]string{
+			"obligation-table probes": probes,
+			"DROP DEFAULT ALTERs":     alters,
+			"DOLT_ADD staging":        stages,
+			"DOLT_COMMIT commits":     commits,
+		} {
+			if len(got) != 0 {
+				t.Errorf("no-work MigrateUp issued %d %s (GH#5269 AC-6): %v", len(got), name, got)
+			}
+		}
+	})
+}
+
 // Compile-time pin: the store implements the capability interface the CLI's
 // `bd migrate schema` looks for.
 var _ storage.SchemaPostConditionRepairer = (*embeddeddolt.EmbeddedDoltStore)(nil)
