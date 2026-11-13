@@ -30,6 +30,7 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("HashIssueMintTakesTheStrictCreatePath", s.useCaseMintHashIssueStrictPath)
 	s.Run("HashWispMintTakesTheStrictCreatePath", s.useCaseMintHashWispStrictPath)
 	s.Run("MintedOverLengthAssigneeRejected", s.useCaseMintOverLengthAssignee)
+	s.Run("ExplicitRepeatCreateUpsertsWithoutCreateOnly", s.useCaseExplicitRepeatUpserts)
 	s.Run("MissingConfigPrefixErrors", s.useCaseMintMissingPrefix)
 	s.Run("ExplicitIDRequiresConfiguredPrefixUnlessForced", s.useCaseExplicitIDPrefixGuard)
 	s.Run("CreateOnlyRefusesOccupiedID", s.useCaseCreateOnlyRefusesOccupiedID)
@@ -513,6 +514,59 @@ func (s *testSuite) useCaseMintOverLengthAssignee() {
 	}, "tester")
 	s.Require().Error(err)
 	s.Require().ErrorIs(err, types.ErrFieldTooLong)
+}
+
+// useCaseExplicitRepeatUpserts pins what the strict-mint change must NOT
+// touch: a caller-NAMED id without CreateOnly still upserts, in both ways a
+// caller can name one (ExplicitID and a prepopulated Issue.ID) — import
+// relies on the repeat create rewriting the row — while a caller-selected
+// CreateOnly still refuses an occupied id.
+func (s *testSuite) useCaseExplicitRepeatUpserts() {
+	s.resetMintConfig("ucR", "")
+	uc := s.issueUseCase()
+
+	_, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		ExplicitID: "ucR-1",
+		Issue:      &types.Issue{Title: "explicit original", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+	_, err = uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		ExplicitID: "ucR-1",
+		Issue:      &types.Issue{Title: "explicit retitled", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err, "an explicit repeat create without CreateOnly must keep upserting")
+	issue, err := uc.GetIssue(s.Ctx(), "ucR-1")
+	s.Require().NoError(err)
+	s.Equal("explicit retitled", issue.Title, "the repeat create must rewrite the existing row")
+
+	_, err = uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{ID: "ucR-2", Title: "preset original", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+	_, err = uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{ID: "ucR-2", Title: "preset retitled", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err, "a prepopulated-ID repeat create without CreateOnly must keep upserting")
+	issue, err = uc.GetIssue(s.Ctx(), "ucR-2")
+	s.Require().NoError(err)
+	s.Equal("preset retitled", issue.Title, "the repeat create must rewrite the existing row")
+
+	_, err = uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		ExplicitID: "ucR-3",
+		Issue:      &types.Issue{Title: "strict original", IssueType: types.TypeTask, Priority: 2},
+		CreateOnly: true,
+	}, "tester")
+	s.Require().NoError(err)
+	_, err = uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		ExplicitID: "ucR-3",
+		Issue:      &types.Issue{Title: "strict replacement", IssueType: types.TypeTask, Priority: 2},
+		CreateOnly: true,
+	}, "tester")
+	s.Require().Error(err, "a caller-selected CreateOnly must still refuse an occupied id")
+	s.Require().ErrorIs(err, storage.ErrAlreadyExists)
+	issue, err = uc.GetIssue(s.Ctx(), "ucR-3")
+	s.Require().NoError(err)
+	s.Equal("strict original", issue.Title, "the refused strict create must leave the row alone")
 }
 
 func (s *testSuite) useCaseMintMissingPrefix() {
