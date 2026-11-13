@@ -593,6 +593,8 @@ class BdCliClient(BdClientBase):
             args.append(f"--external-ref={params.external_ref}")
         if params.defer_until is not None:  # "" is meaningful: it clears the defer
             args.append(f"--defer={params.defer_until}")
+        if params.labels is not None:
+            args.append(f"--set-labels={','.join(params.labels)}")
 
         data = await self._run_command(*args, positional=[params.issue_id])
         # bd update returns an array, extract first element

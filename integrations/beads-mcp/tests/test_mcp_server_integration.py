@@ -196,6 +196,7 @@ async def test_update_issue_tool(mcp_client):
             "status": "blocked",
             "priority": 0,
             "title": "Updated title",
+            "labels": ["mcp", "updated"],
             "brief": False,  # Get full Issue object
         },
     )
@@ -205,6 +206,19 @@ async def test_update_issue_tool(mcp_client):
     assert updated["status"] == "blocked"
     assert updated["priority"] == 0
     assert updated["title"] == "Updated title"
+    assert sorted(updated["labels"]) == ["mcp", "updated"]
+
+
+@pytest.mark.asyncio
+async def test_update_tool_info_lists_all_supported_fields(mcp_client):
+    """The lazy schema must not hide fields accepted by the update tool."""
+    import json
+
+    result = await mcp_client.call_tool("get_tool_info", {"tool_name": "update"})
+    info = json.loads(result.content[0].text)
+
+    for field in ("design", "acceptance_criteria", "notes", "external_ref", "labels"):
+        assert field in info["parameters"]
 
 
 @pytest.mark.asyncio
