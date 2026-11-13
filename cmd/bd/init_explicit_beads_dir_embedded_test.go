@@ -56,7 +56,7 @@ func testExplicitBeadsDirIsAuthoritative(t *testing.T, bd string, mode explicitB
 		t.Fatal(err)
 	}
 	if mode.proxied {
-		for _, root := range []string{filepath.Join(parentBeadsDir, "dolt"), filepath.Join(explicit, "dolt")} {
+		for _, root := range []string{filepath.Join(parentBeadsDir, "dolt"), filepath.Join(explicit, "dolt"), filepath.Join(parent, "dolt")} {
 			root := root
 			t.Cleanup(func() {
 				if _, err := os.Stat(root); err != nil {
@@ -125,6 +125,23 @@ func testExplicitBeadsDirIsAuthoritative(t *testing.T, bd string, mode explicitB
 	}
 	if strings.Contains(parentList, childID) || !strings.Contains(parentList, parentID) {
 		t.Fatalf("parent store should hold only %s, got:\n%s", parentID, parentList)
+	}
+
+	// BEADS_DIR names the workspace directory itself, not its parent. A common
+	// mistake is to pass the project root. When that root already contains an
+	// initialized .beads child, init must refuse instead of creating a second
+	// workspace's metadata and storage directly in the project root.
+	stdout, stderr, err = runExplicitBeadsDirBD(t, bd, mode, home, parent, parent, append(initArgs, "--prefix", "oops")...)
+	if err == nil {
+		t.Fatalf("bd init with BEADS_DIR set to project root unexpectedly succeeded\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	if !strings.Contains(stderr, "BEADS_DIR") || !strings.Contains(stderr, parentBeadsDir) {
+		t.Fatalf("project-root BEADS_DIR refusal should name the setting and intended workspace %s; stderr:\n%s", parentBeadsDir, stderr)
+	}
+	for _, artifact := range []string{"metadata.json", "config.yaml", "embeddeddolt", "dolt"} {
+		if _, statErr := os.Stat(filepath.Join(parent, artifact)); !os.IsNotExist(statErr) {
+			t.Errorf("project-root BEADS_DIR created %s before refusing (stat err=%v)", artifact, statErr)
+		}
 	}
 }
 
