@@ -796,3 +796,59 @@ func TestIssueOperationsCreateRetriesOnSerializationSQLStates(t *testing.T) {
 		})
 	}
 }
+
+// TestCallerNamedChildCounterRollsBack: the proxied create advances a
+// caller-named child's parent counter inside the create's own transaction
+// (bd-qp2au6, #4750), so a unit of work that fails after the create leaves
+// neither the child nor the counter row behind.
+func TestCallerNamedChildCounterRollsBack(t *testing.T) {
+	ctx := context.Background()
+	provider := newUOWRoleFixtureProvider(t, ctx, "rb")
+	if err := RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
+		_, err := uw.IssueUseCase().CreateIssue(ctx, domain.CreateIssueParams{
+			Issue:      &types.Issue{Title: "parent", IssueType: types.TypeEpic, Priority: 2},
+			ExplicitID: "rb-p",
+		}, "tester")
+		return "bd: create rb-p", err
+	}); err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+
+	counterRows := func(ctx context.Context, uw UnitOfWork) ([][]any, error) {
+		result, err := uw.RawSQLUseCase().Query(ctx,
+			"SELECT last_child FROM child_counters WHERE parent_id = ?", "rb-p")
+		if err != nil {
+			return nil, err
+		}
+		return result.Rows, nil
+	}
+	errAbort := errors.New("abort after the caller-named create")
+	err := RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
+		if _, err := uw.IssueUseCase().CreateIssue(ctx, domain.CreateIssueParams{
+			Issue:      &types.Issue{Title: "named child", IssueType: types.TypeTask, Priority: 2},
+			ExplicitID: "rb-p.8",
+		}, "tester"); err != nil {
+			return "", err
+		}
+		rows, err := counterRows(ctx, uw)
+		if err != nil {
+			return "", err
+		}
+		if len(rows) != 1 || fmt.Sprint(rows[0][0]) != "8" {
+			return "", fmt.Errorf("counter for rb-p inside the create's transaction = %#v, want last_child 8", rows)
+		}
+		return "", errAbort
+	})
+	if !errors.Is(err, errAbort) {
+		t.Fatalf("RunTx error = %v, want the abort sentinel", err)
+	}
+
+	assertNoDurableIssueRows(t, ctx, provider, "rb-p.8")
+	rows, err := RunTxRead(ctx, provider, counterRows)
+	if err != nil {
+		t.Fatalf("read counter after rollback: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("child_counters row for rb-p survived the rollback: %#v", rows)
+	}
+}
