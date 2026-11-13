@@ -63,11 +63,12 @@ func TestRunInTransactionWispLifecyclePersistsDurableDependent(t *testing.T) {
 }
 
 // TestRunInTransactionWispLifecycleOnIgnoredSessionPersistsDurableDependent
-// is the split-session form of the test above. With the events journal off,
-// RunInTransaction writes a wisp on its dolt-ignored session, which commits
-// after the transaction's Dolt commit, so the durable dependent the wisp's
-// close (or a status update into closed) recomputes must still reach HEAD
-// rather than land in the working set after the commit was cut (GH#6647).
+// is the journal-off form of the test above. Historically the wisp wrote on a
+// separate dolt-ignored session that committed after the transaction's Dolt
+// commit, so the durable dependent the wisp's close (or a status update into
+// closed) recomputes needed a second commit to reach HEAD (GH#6647). Both
+// planes share the transaction's one session now, so the recompute must ride
+// the mutation's own Dolt commit.
 func TestRunInTransactionWispLifecycleOnIgnoredSessionPersistsDurableDependent(t *testing.T) {
 	ctx, store := newTransactionWispLifecycleStore(t)
 
@@ -178,8 +179,7 @@ func TestWispStoreLifecyclePersistsDurableDependent(t *testing.T) {
 // delete also removes the durable edge that pointed at the wisp and unblocks
 // the durable dependent, and both must reach HEAD rather than sit in the
 // working set: on the store's single and batch delete arms, on a journal-off
-// transaction, which deletes on its dolt-ignored session after the
-// transaction's Dolt commit, and on a journal-on one.
+// transaction, and on a journal-on one.
 func TestWispDeletePersistsDurableDependent(t *testing.T) {
 	ctx, store := newTransactionWispLifecycleStore(t)
 
