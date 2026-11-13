@@ -108,10 +108,15 @@ func wantedRepairRoot(targetPrefix, prefix, oldRoot string) string {
 // in natural id order, natural destinations are reserved before any fallback
 // is allocated, and destinations are claimed in that order.
 //
+// knownPrefixes are the prefixes extraction should honor before falling back
+// to its heuristic (workspace config plus the prefixes detected on the rows),
+// so a hyphenated family like cre-db keeps its whole suffix. Pass nil for the
+// heuristic alone.
+//
 // retiredLookup, when non-nil, is probed in batches (natural destinations
 // first, then fallback candidates) and its errors fail planning before any
 // mutation, so a dry run previews exactly what execution would skip.
-func planPrefixRepair(targetPrefix, actor string, issues []*types.Issue, retiredLookup repairRetiredSet) (*prefixRepairPlan, error) {
+func planPrefixRepair(targetPrefix, actor string, issues []*types.Issue, knownPrefixes []string, retiredLookup repairRetiredSet) (*prefixRepairPlan, error) {
 	plan := &prefixRepairPlan{
 		TargetPrefix: targetPrefix,
 		RootMap:      make(map[string]string),
@@ -142,7 +147,7 @@ func planPrefixRepair(targetPrefix, actor string, issues []*types.Issue, retired
 		if fam == nil {
 			fam = &repairFamily{
 				oldRoot: root,
-				prefix:  utils.ExtractIssuePrefix(root),
+				prefix:  utils.ExtractIssuePrefixKnown(root, knownPrefixes),
 				wanted:  "", // set below; wantedRepairRoot needs the prefix first
 			}
 			fam.wanted = wantedRepairRoot(targetPrefix, fam.prefix, root)

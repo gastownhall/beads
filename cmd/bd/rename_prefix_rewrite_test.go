@@ -111,7 +111,7 @@ func TestPlanPrefixRepair(t *testing.T) {
 			planTestIssue("kb-adr-0001"),
 			planTestIssue("taxdb-5su1"),
 			planTestIssue("cre-db-c2a"),
-		}, nil)
+		}, nil, nil)
 		if err != nil {
 			t.Fatalf("plan: %v", err)
 		}
@@ -135,7 +135,7 @@ func TestPlanPrefixRepair(t *testing.T) {
 		plan, err := planPrefixRepair("kb", "actor", []*types.Issue{
 			planTestIssue("kb-5su1"),
 			planTestIssue("taxdb-5su1"),
-		}, nil)
+		}, nil, nil)
 		if err != nil {
 			t.Fatalf("plan: %v", err)
 		}
@@ -163,7 +163,7 @@ func TestPlanPrefixRepair(t *testing.T) {
 			planTestIssue("kb-5su1.13"),
 			planTestIssue("taxdb-5su1"),
 			planTestIssue("taxdb-5su1.13"),
-		}, nil)
+		}, nil, nil)
 		if err != nil {
 			t.Fatalf("plan: %v", err)
 		}
@@ -191,7 +191,7 @@ func TestPlanPrefixRepair(t *testing.T) {
 		plan, err := planPrefixRepair("kb", "actor", []*types.Issue{
 			planTestIssue("taxdb-u6ch"),
 			planTestIssue("cre-db-u6ch"),
-		}, nil)
+		}, nil, nil)
 		if err != nil {
 			t.Fatalf("plan: %v", err)
 		}
@@ -216,7 +216,7 @@ func TestPlanPrefixRepair(t *testing.T) {
 		lookup, probes := staticRetiredLookup("kb-5su1")
 		plan, err := planPrefixRepair("kb", "actor", []*types.Issue{
 			planTestIssue("taxdb-5su1"),
-		}, lookup)
+		}, nil, lookup)
 		if err != nil {
 			t.Fatalf("plan: %v", err)
 		}
@@ -243,7 +243,7 @@ func TestPlanPrefixRepair(t *testing.T) {
 		plan, err := planPrefixRepair("kb", "actor", []*types.Issue{
 			planTestIssue("taxdb-5su1"),
 			planTestIssue("taxdb-5su1.13"),
-		}, lookup)
+		}, nil, lookup)
 		if err != nil {
 			t.Fatalf("plan: %v", err)
 		}
@@ -310,7 +310,7 @@ func TestPlanPrefixRepair(t *testing.T) {
 			// A family whose natural destination IS the first candidate the
 			// blocked family would mint.
 			planTestIssue(bRoot),
-		}, lookup)
+		}, nil, lookup)
 		if err != nil {
 			t.Fatalf("plan: %v", err)
 		}
@@ -340,8 +340,54 @@ func TestPlanPrefixRepair(t *testing.T) {
 		lookup := func(ids []string) (map[string]bool, error) {
 			return nil, errors.New("boom")
 		}
-		if _, err := planPrefixRepair("kb", "actor", []*types.Issue{planTestIssue("taxdb-5su1")}, lookup); err == nil || !strings.Contains(err.Error(), "read retired ids") {
+		if _, err := planPrefixRepair("kb", "actor", []*types.Issue{planTestIssue("taxdb-5su1")}, nil, lookup); err == nil || !strings.Contains(err.Error(), "read retired ids") {
 			t.Fatalf("error = %v, want a read retired ids failure", err)
+		}
+	})
+
+	t.Run("known prefixes keep hyphenated suffixes whole", func(t *testing.T) {
+		t.Parallel()
+		// cre-db-wxyz's suffix is word-like, so the heuristic would split
+		// at the first hyphen and leave "db-" in the suffix; a known
+		// cre-db prefix keeps the whole suffix.
+		plan, err := planPrefixRepair("kb", "actor", []*types.Issue{
+			planTestIssue("cre-db-a1b"),
+			planTestIssue("cre-db-wxyz"),
+		}, []string{"cre-db"}, nil)
+		if err != nil {
+			t.Fatalf("plan: %v", err)
+		}
+		renames := repairRenamesByID(plan)
+		if renames["cre-db-a1b"] != "kb-a1b" || renames["cre-db-wxyz"] != "kb-wxyz" {
+			t.Errorf("renames = %v, want kb-a1b and kb-wxyz (whole suffixes)", renames)
+		}
+	})
+
+	t.Run("heuristic without known prefixes", func(t *testing.T) {
+		t.Parallel()
+		// Pins what the heuristic alone does with the same rows, so the
+		// known-prefix subtest above is visibly carrying the difference.
+		plan, err := planPrefixRepair("kb", "actor", []*types.Issue{
+			planTestIssue("cre-db-wxyz"),
+		}, nil, nil)
+		if err != nil {
+			t.Fatalf("plan: %v", err)
+		}
+		if renames := repairRenamesByID(plan); renames["cre-db-wxyz"] != "kb-db-wxyz" {
+			t.Errorf("renames = %v, want the heuristic kb-db-wxyz", renames)
+		}
+	})
+
+	t.Run("all-letter suffix under a known prefix", func(t *testing.T) {
+		t.Parallel()
+		plan, err := planPrefixRepair("kb", "actor", []*types.Issue{
+			planTestIssue("me-py-toolkit-abcd"),
+		}, []string{"me", "me-py-toolkit"}, nil)
+		if err != nil {
+			t.Fatalf("plan: %v", err)
+		}
+		if renames := repairRenamesByID(plan); renames["me-py-toolkit-abcd"] != "kb-abcd" {
+			t.Errorf("renames = %v, want kb-abcd (longest known prefix wins)", renames)
 		}
 	})
 
@@ -355,7 +401,7 @@ func TestPlanPrefixRepair(t *testing.T) {
 			planTestIssue("cre-db-u6ch"),
 			planTestIssue("taxdb-u6ch"),
 		}
-		forward, err := planPrefixRepair("kb", "actor", issues, nil)
+		forward, err := planPrefixRepair("kb", "actor", issues, nil, nil)
 		if err != nil {
 			t.Fatalf("plan: %v", err)
 		}
@@ -363,7 +409,7 @@ func TestPlanPrefixRepair(t *testing.T) {
 		for i, issue := range issues {
 			reversed[len(issues)-1-i] = issue
 		}
-		backward, err := planPrefixRepair("kb", "actor", reversed, nil)
+		backward, err := planPrefixRepair("kb", "actor", reversed, nil, nil)
 		if err != nil {
 			t.Fatalf("plan: %v", err)
 		}

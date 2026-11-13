@@ -257,7 +257,7 @@ func detectPrefixes(issues []*types.Issue) map[string]int {
 // earlier family claimed — move whole to a generated hash root, dotted paths
 // intact.
 func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName string, targetPrefix string, issues []*types.Issue, prefixes map[string]int, dryRun bool) error {
-	plan, err := planPrefixRepair(targetPrefix, actorName, issues, repairRetiredLookup(ctx, st))
+	plan, err := planPrefixRepair(targetPrefix, actorName, issues, knownIssuePrefixes(ctx, st, prefixes), repairRetiredLookup(ctx, st))
 	if err != nil {
 		return err
 	}
@@ -360,6 +360,29 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 	}
 
 	return nil
+}
+
+// knownIssuePrefixes collects the prefixes repair extraction should honor
+// before falling back to its heuristic: the configured issue_prefix, every
+// allowed_prefixes entry, and the prefixes detectPrefixes already found on
+// the rows. Config read errors count as unset — the detected list still
+// applies.
+func knownIssuePrefixes(ctx context.Context, st storage.DoltStorage, prefixes map[string]int) []string {
+	known := make([]string, 0, len(prefixes)+2)
+	if v, err := st.GetConfig(ctx, "issue_prefix"); err == nil && v != "" {
+		known = append(known, v)
+	}
+	if v, err := st.GetConfig(ctx, "allowed_prefixes"); err == nil && v != "" {
+		for _, p := range strings.Split(v, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				known = append(known, p)
+			}
+		}
+	}
+	for p := range prefixes {
+		known = append(known, p)
+	}
+	return known
 }
 
 // repairRetiredLookup adapts the store's optional retirement seam (the same

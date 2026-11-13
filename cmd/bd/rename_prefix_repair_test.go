@@ -489,6 +489,56 @@ func TestRepairPrefixesCollisionReRootsTree(t *testing.T) {
 	}
 }
 
+func TestRepairPrefixesUsesKnownPrefixes(t *testing.T) {
+	// GH#6591 AC-4: prefix extraction honors the workspace's known prefixes
+	// (issue_prefix, allowed_prefixes, and the prefixes detected on the
+	// rows) before falling back to the heuristic, so a hyphenated family
+	// like cre-db keeps its whole suffix: cre-db-wxyz -> kb-wxyz, not the
+	// heuristic's kb-db-wxyz.
+	ctx := context.Background()
+	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+
+	if err := testStore.SetConfig(ctx, "issue_prefix", "cre-db"); err != nil {
+		t.Fatalf("set issue_prefix: %v", err)
+	}
+	if err := testStore.SetConfig(ctx, "allowed_prefixes", "cre-db,vc"); err != nil {
+		t.Fatalf("set allowed_prefixes: %v", err)
+	}
+
+	for _, issue := range []*types.Issue{
+		{ID: "cre-db-a1b", Title: "Hash-like suffix", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "cre-db-wxyz", Title: "Word-like suffix", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "kb-adr-0001", Title: "Hand-named target id", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+	} {
+		if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("failed to create issue %s: %v", issue.ID, err)
+		}
+	}
+
+	allIssues, err := testStore.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if err := repairPrefixes(ctx, testStore, "test", "kb", allIssues, detectPrefixes(allIssues), false); err != nil {
+		t.Fatalf("repair failed: %v", err)
+	}
+
+	for _, id := range []string{"kb-a1b", "kb-wxyz", "kb-adr-0001"} {
+		if issue, err := testStore.GetIssue(ctx, id); err != nil || issue == nil {
+			t.Errorf("expected %s after repair: %v", id, err)
+		}
+	}
+	for _, id := range []string{"cre-db-a1b", "cre-db-wxyz"} {
+		if issue, err := testStore.GetIssue(ctx, id); err == nil && issue != nil {
+			t.Errorf("expected old id %s to be gone", id)
+		}
+	}
+	prefix, err := testStore.GetConfig(ctx, "issue_prefix")
+	if err != nil || prefix != "kb" {
+		t.Errorf("issue_prefix after repair = %q (%v), want kb", prefix, err)
+	}
+}
+
 func TestRenameFailureLeavesBeadGatesPending(t *testing.T) {
 	// When renaming the awaited bead fails, whether or not that rename
 	// landed, its gate is pointed back at the bead's old ID without a
