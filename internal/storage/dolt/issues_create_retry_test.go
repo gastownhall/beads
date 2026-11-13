@@ -476,3 +476,70 @@ func TestCreateIssuesReplayMovesBackfilledDependencyToRemint(t *testing.T) {
 		requireTitle(t, ctx, store, issue.ID, "override")
 	})
 }
+
+// AC-3: replaying an aborted counter mint without a competitor must advance
+// the seeded counter, so the next auto-ID create does not reuse the id. The
+// hash subtest pins the flip side: with no competitor a replay may
+// legitimately re-derive its own unoccupied id.
+func TestCreateIssueReplayKeepsCounterAheadOfReplayedID(t *testing.T) {
+	t.Run("counter mode", func(t *testing.T) {
+		store, cleanup := setupConcurrentTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+		enableSeededCounterMode(t, ctx, store)
+
+		fault, _, restore := installReplayFault(t, store, 1)
+		defer restore()
+
+		first := newRetryTestIssue("first")
+		if err := store.CreateIssue(ctx, first, "caller"); err != nil {
+			t.Fatalf("CreateIssue(first): %v", err)
+		}
+		restore()
+		assertReplayed(t, fault, 1)
+
+		second := newRetryTestIssue("second")
+		if err := store.CreateIssue(ctx, second, "caller"); err != nil {
+			t.Fatalf("CreateIssue(second): %v", err)
+		}
+		if first.ID == second.ID {
+			t.Errorf("subsequent create reused the replayed id %s", first.ID)
+		}
+		requireTitle(t, ctx, store, first.ID, "first")
+		requireTitle(t, ctx, store, second.ID, "second")
+	})
+
+	t.Run("hash mode reuses its own unoccupied id", func(t *testing.T) {
+		// No competitor and no counter: the replay legitimately re-derives the
+		// SAME hash id, because the aborted id is unoccupied. Guards against a
+		// fix that forces a different id per attempt.
+		store, cleanup := setupConcurrentTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+
+		fault, _, restore := installReplayFault(t, store, 1)
+		defer restore()
+
+		caller := newRetryTestIssue("hash replay")
+		var staleID string
+		fault.onFault = func(int) error {
+			staleID = caller.ID
+			return nil
+		}
+		if err := store.CreateIssue(ctx, caller, "caller"); err != nil {
+			t.Fatalf("CreateIssue: %v", err)
+		}
+		restore()
+		assertReplayed(t, fault, 1)
+
+		if staleID == "" {
+			t.Fatal("fault never observed the aborted mint: interleaving not forced")
+		}
+		if caller.ID != staleID {
+			t.Errorf("replay minted %s; the aborted id %s was unoccupied, so the deterministic hash mint legitimately reuses it", caller.ID, staleID)
+		}
+		requireTitle(t, ctx, store, caller.ID, "hash replay")
+	})
+}
