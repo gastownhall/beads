@@ -1281,6 +1281,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd find-duplicates --method ai` and `bd admin compact --auto` accept a
+  model reply that opens with a thinking block** (#7515). Both read the
+  reply's first text block instead of its first block; a reply with no text
+  block still falls back to mechanical scores (find-duplicates) or fails
+  (compact), now reporting `no text block in N content blocks`.
+
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
