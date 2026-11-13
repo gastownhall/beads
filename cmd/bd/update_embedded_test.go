@@ -671,6 +671,51 @@ func TestEmbeddedUpdateFieldsNotesClearAndDefer(t *testing.T) {
 		}
 	})
 
+	t.Run("update_clear_text_flags_succeed_gh8149", func(t *testing.T) {
+		// GH#8149: the deliberate clear verbs. One clear empties exactly
+		// its field, clears compose, an already-empty field clears fine,
+		// and a false clear flag is not an update at all. A
+		// conditional-update guard can ride on a clear, whose map entry is
+		// its field update.
+		issue := bdCreate(t, bd, dir, "Text field deliberate clear test", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--description", "desc", "--design", "design", "--acceptance", "acceptance", "--notes", "notes")
+
+		bdUpdate(t, bd, dir, issue.ID, "--clear-description")
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Description != "" {
+			t.Errorf("expected description cleared, got %q", got.Description)
+		}
+		if got.Design != "design" || got.AcceptanceCriteria != "acceptance" || got.Notes != "notes" {
+			t.Errorf("expected other fields preserved, got design=%q acceptance=%q notes=%q",
+				got.Design, got.AcceptanceCriteria, got.Notes)
+		}
+
+		bdUpdate(t, bd, dir, issue.ID, "--clear-design", "--clear-acceptance")
+		got = bdShow(t, bd, dir, issue.ID)
+		if got.Design != "" || got.AcceptanceCriteria != "" {
+			t.Errorf("expected design and acceptance cleared, got design=%q acceptance=%q", got.Design, got.AcceptanceCriteria)
+		}
+		if got.Notes != "notes" {
+			t.Errorf("expected notes preserved, got %q", got.Notes)
+		}
+
+		// Clearing an already-empty field is a successful no-op clear.
+		bdUpdate(t, bd, dir, issue.ID, "--clear-description")
+
+		// --clear-description=false is not an update.
+		out := bdUpdate(t, bd, dir, issue.ID, "--clear-description=false")
+		if !strings.Contains(out, "No updates specified") {
+			t.Errorf("expected 'No updates specified' for a false clear flag, got: %s", out)
+		}
+
+		other := bdCreate(t, bd, dir, "Conditional clear test", "--type", "task")
+		bdUpdate(t, bd, dir, other.ID, "--description", "conditional desc")
+		bdUpdate(t, bd, dir, other.ID, "--if-assignee", "", "--clear-description")
+		if got := bdShow(t, bd, dir, other.ID); got.Description != "" {
+			t.Errorf("expected conditional clear applied, got description=%q", got.Description)
+		}
+	})
+
 	t.Run("update_defer", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Defer test", "--type", "task")
 		bdUpdate(t, bd, dir, issue.ID, "--defer", "2099-01-15")

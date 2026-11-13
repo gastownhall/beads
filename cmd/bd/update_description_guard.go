@@ -115,3 +115,24 @@ func registerUpdateClearTextFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("clear-design", false, `Clear the design (--design "" and an empty --design-file are refused: an empty value is usually a dead command substitution)`)
 	cmd.Flags().Bool("clear-acceptance", false, `Clear the acceptance criteria (--acceptance "" is refused: an empty value is usually a dead command substitution)`)
 }
+
+// clearDescriptionRequested, clearDesignRequested and clearAcceptanceRequested
+// report whether the field's clear verb asked for the deliberate erase. The
+// Boolean value matters, matching clearNotesRequested: --clear-x=false is not
+// a clear (it updates nothing on its own). Combining a clear with the same
+// field's content input is contradictory and refused by cobra's
+// mutual-exclusion registration on the update command.
+func clearDescriptionRequested(cmd *cobra.Command) bool {
+	clear, _ := cmd.Flags().GetBool("clear-description")
+	return clear
+}
+
+func clearDesignRequested(cmd *cobra.Command) bool {
+	clear, _ := cmd.Flags().GetBool("clear-design")
+	return clear
+}
+
+func clearAcceptanceRequested(cmd *cobra.Command) bool {
+	clear, _ := cmd.Flags().GetBool("clear-acceptance")
+	return clear
+}

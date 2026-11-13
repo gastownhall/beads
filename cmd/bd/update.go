@@ -214,6 +214,9 @@ pointless).`,
 			}
 			updates["description"] = description
 		}
+		if clearDescriptionRequested(cmd) {
+			updates["description"] = ""
+		}
 		design, designChanged, err := getDesignFlag(cmd)
 		if err != nil {
 			return err
@@ -223,6 +226,9 @@ pointless).`,
 				return HandleErrorRespectJSON("%v", err)
 			}
 			updates["design"] = design
+		}
+		if clearDesignRequested(cmd) {
+			updates["design"] = ""
 		}
 		if cmd.Flags().Changed("notes") && cmd.Flags().Changed("append-notes") {
 			return HandleErrorRespectJSON("cannot specify both --notes and --append-notes")
@@ -252,6 +258,9 @@ pointless).`,
 				return HandleErrorRespectJSON("%v", err)
 			}
 			updates["acceptance_criteria"] = acceptanceCriteria
+		}
+		if clearAcceptanceRequested(cmd) {
+			updates["acceptance_criteria"] = ""
 		}
 		if cmd.Flags().Changed("external-ref") {
 			externalRef, _ := cmd.Flags().GetString("external-ref")

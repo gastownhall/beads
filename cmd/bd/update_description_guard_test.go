@@ -272,10 +272,103 @@ func newGH8149UpdateInputCmd(t *testing.T, args ...string) *cobra.Command {
 	cmd.Flags().Bool("clear-description", false, "Clear the description")
 	cmd.Flags().Bool("clear-design", false, "Clear the design")
 	cmd.Flags().Bool("clear-acceptance", false, "Clear the acceptance criteria")
+	cmd.Flags().String("if-assignee", "", "Apply the update only if the current assignee equals this value")
 	if err := cmd.ParseFlags(args); err != nil {
 		t.Fatalf("parse update flags %v: %v", args, err)
 	}
 	return cmd
+}
+
+// TestGatherUpdateInputClearTextFlagsGH8149 pins the clear verbs' effect at
+// input-gathering time: a true clear flag contributes exactly its field's
+// empty replacement, clears compose with one another and with content for
+// other fields, and a false clear flag contributes nothing (so
+// --clear-description=false alone is the same no-update as before). The
+// entries are ordinary field updates, so the conditional-update guards can
+// ride on them.
+func TestGatherUpdateInputClearTextFlagsGH8149(t *testing.T) {
+	gather := func(t *testing.T, args ...string) *updateInput {
+		t.Helper()
+		cmd := newGH8149UpdateInputCmd(t, args...)
+		var in *updateInput
+		var err error
+		captureStderr(t, func() {
+			in, err = gatherUpdateInput(t.Context(), cmd)
+		})
+		if err != nil {
+			t.Fatalf("gatherUpdateInput(%v): %v", args, err)
+		}
+		return in
+	}
+
+	t.Run("each_clear_flag_empties_exactly_its_field", func(t *testing.T) {
+		for _, tt := range []struct {
+			name  string
+			args  []string
+			field string
+		}{
+			{"clear_description", []string{"--clear-description"}, "description"},
+			{"clear_design", []string{"--clear-design"}, "design"},
+			{"clear_acceptance", []string{"--clear-acceptance"}, "acceptance_criteria"},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				in := gather(t, tt.args...)
+				if got, ok := in.fields[tt.field]; !ok || got != "" {
+					t.Fatalf("fields[%s] = %v (present=%t), want the empty string", tt.field, got, ok)
+				}
+				if len(in.fields) != 1 {
+					t.Fatalf("expected exactly the one cleared field, got %v", in.fields)
+				}
+			})
+		}
+	})
+
+	t.Run("clear_flags_compose", func(t *testing.T) {
+		in := gather(t, "--clear-description", "--clear-design", "--clear-acceptance")
+		for _, field := range []string{"description", "design", "acceptance_criteria"} {
+			if got, ok := in.fields[field]; !ok || got != "" {
+				t.Fatalf("fields[%s] = %v (present=%t), want the empty string", field, got, ok)
+			}
+		}
+		if len(in.fields) != 3 {
+			t.Fatalf("expected exactly the three cleared fields, got %v", in.fields)
+		}
+	})
+
+	t.Run("clear_composes_with_other_fields_content", func(t *testing.T) {
+		in := gather(t, "--clear-description", "--design=kept")
+		if got, ok := in.fields["description"]; !ok || got != "" {
+			t.Fatalf("fields[description] = %v (present=%t), want the empty string", got, ok)
+		}
+		if got := in.fields["design"]; got != "kept" {
+			t.Fatalf("fields[design] = %v, want %q", got, "kept")
+		}
+		if len(in.fields) != 2 {
+			t.Fatalf("expected exactly the two fields, got %v", in.fields)
+		}
+	})
+
+	t.Run("false_clear_flag_contributes_nothing", func(t *testing.T) {
+		in := gather(t, "--clear-description=false")
+		if len(in.fields) != 0 {
+			t.Fatalf("--clear-description=false must not update anything, got %v", in.fields)
+		}
+		if !isUpdateInputNoop(in) {
+			t.Fatal("a lone false clear flag must be a no-op update")
+		}
+	})
+
+	t.Run("conditional_guard_rides_on_a_clear", func(t *testing.T) {
+		// The --if-assignee guard needs a field update to ride on; the
+		// clear's map entry is one.
+		in := gather(t, "--if-assignee", "", "--clear-description")
+		if got, ok := in.fields["description"]; !ok || got != "" {
+			t.Fatalf("fields[description] = %v (present=%t), want the empty string", got, ok)
+		}
+		if in.ifAssignee == nil || *in.ifAssignee != "" {
+			t.Fatalf("ifAssignee = %v, want the explicit empty guard", in.ifAssignee)
+		}
+	})
 }
 
 // TestGatherUpdateInputRefusesEmptyTextFieldsGH8149 is the input-gathering

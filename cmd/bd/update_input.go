@@ -94,6 +94,9 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 		}
 		in.fields["description"] = description
 	}
+	if clearDescriptionRequested(cmd) {
+		in.fields["description"] = ""
+	}
 	design, designChanged, err := getDesignFlag(cmd)
 	if err != nil {
 		return nil, HandleErrorRespectJSON("%v", err)
@@ -103,6 +106,9 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 			return nil, HandleErrorRespectJSON("%v", err)
 		}
 		in.fields["design"] = design
+	}
+	if clearDesignRequested(cmd) {
+		in.fields["design"] = ""
 	}
 	if cmd.Flags().Changed("notes") && cmd.Flags().Changed("append-notes") {
 		return nil, HandleErrorRespectJSON("cannot specify both --notes and --append-notes")
@@ -132,6 +138,9 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 			return nil, HandleErrorRespectJSON("%v", err)
 		}
 		in.fields["acceptance_criteria"] = ac
+	}
+	if clearAcceptanceRequested(cmd) {
+		in.fields["acceptance_criteria"] = ""
 	}
 	if cmd.Flags().Changed("external-ref") {
 		externalRef, _ := cmd.Flags().GetString("external-ref")

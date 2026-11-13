@@ -197,6 +197,28 @@ func TestProxiedServerUpdate(t *testing.T) {
 		}
 	})
 
+	t.Run("clear_text_flags_gh8149", func(t *testing.T) {
+		// GH#8149 on the proxied route: the clear verbs ride through
+		// gatherUpdateInput like any other field update.
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "u89c")
+		issue := bdProxiedCreate(t, bd, p.dir, "Text clear verbs",
+			"--description", "desc", "--design", "design", "--acceptance", "acceptance")
+
+		updated := bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--clear-description")
+		if updated.Description != "" {
+			t.Errorf("expected description cleared, got %q", updated.Description)
+		}
+		if updated.Design != "design" || updated.AcceptanceCriteria != "acceptance" {
+			t.Errorf("expected other fields preserved, got design=%q acceptance=%q", updated.Design, updated.AcceptanceCriteria)
+		}
+
+		updated = bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--clear-design", "--clear-acceptance")
+		if updated.Design != "" || updated.AcceptanceCriteria != "" {
+			t.Errorf("expected design and acceptance cleared, got design=%q acceptance=%q", updated.Design, updated.AcceptanceCriteria)
+		}
+	})
+
 	t.Run("claim_sets_assignee_and_in_progress", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "uc")
