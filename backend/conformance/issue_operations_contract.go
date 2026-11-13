@@ -44,6 +44,12 @@ import (
 //     the raw funnel's accepted value shapes are reachable only through the
 //     untyped column map an external-sync or backfill caller uses. The typed
 //     patch carries no closed_at at all.
+//   - RunIssueOperationsUpdateRejectsATitleOverTheLengthLimit drives UpdateRaw
+//     too, and that IS its subject: the typed Update already refused an
+//     over-length title, so of the two update funnels only the raw one
+//     `bd edit`, `bd batch` and `bd rename` take could store one
+//     (beads#8150). UpdateIssueID, which stores the titles `bd rename-prefix`
+//     rewrites, checks none; that command checks them before its first write.
 //   - RunIssueOperationsUpdateMetadataReplaceClearsAndValidates ends on
 //     `SELECT metadata IS NULL`. A hydrated issue reads a NULL column and the
 //     empty document back as the same nil bytes (issueops/scan.go), so the
@@ -1706,6 +1712,61 @@ func RunIssueOperationsUpdateRefusesATypeOutsideTheWorkspaceVocabulary(t *testin
 	}
 	assertIssueOperationsScalarValue(t, ctx, fixture, "issue type after the configured update", "research",
 		"SELECT issue_type FROM issues WHERE id = ?", []any{id})
+}
+
+// RunIssueOperationsUpdateRejectsATitleOverTheLengthLimit pins beads#8150: the
+// typed Update path (publicops.UpdateRequest, driven through
+// ValidateUpdateRequest) already refused an over-length title before this
+// case was added, but the untyped raw-map funnel that `bd edit --title`, the
+// `title` key in `bd batch`, and the title rewrite in `bd rename` all go
+// through — issueops.UpdateIssueInTx by way of ValidateScalarUpdates — did
+// not: it checked issue_type, assignee and owner but never title, so those
+// three callers could store a title longer than what bd create and bd import
+// both refuse, and a later `bd import` of that same row would then be
+// refused what the earlier edit accepted.
+//
+// Driving this through fixture.UpdateRaw rather than fixture.Operations.Update
+// is the point: Update's typed request already lands on
+// ValidateUpdateRequest, so it would pass before and after this case existed,
+// proving nothing about the gap it is meant to pin.
+func RunIssueOperationsUpdateRejectsATitleOverTheLengthLimit(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
+	t.Helper()
+	if fixture.UpdateRaw == nil {
+		t.Skip("fixture has no UpdateRaw: this backend's untyped update funnel is unreachable, so the raw title-length guard is UNPINNED here")
+	}
+
+	id := fixture.IssuePrefix + "-titlelen"
+	seedIssueOperationsPlainIssue(t, ctx, fixture, id)
+
+	before := readIssueOperationsRowMarks(t, ctx, fixture, id)
+	events := newIssueOperationsEventCounter(t, ctx, fixture, id)
+
+	// 200 copies of a 3-byte rune: 200 RUNES, comfortably under the title
+	// column's 500-CHARACTER width, but 600 BYTES — over what
+	// types.ValidateIssueTitle (len(title), i.e. bytes) allows. A plain
+	// 501-ASCII-byte title would also get refused here, but by the storage
+	// column itself ("string ... is too large for column 'title'") rather
+	// than by this guard, which would mask the exact gap this case exists to
+	// pin: a title the COLUMN accepts but ValidateIssueTitle does not, which
+	// is precisely the shape bd create and bd import refuse and that only
+	// this raw funnel let through before the fix.
+	tooLong := strings.Repeat("字", 200)
+	if err := fixture.UpdateRaw(ctx, id, map[string]any{"title": tooLong}, "writer"); !errors.Is(err, publicops.ErrValidation) {
+		t.Fatalf("raw update of %s to a title with %d runes / %d bytes: err = %v, want ErrValidation", id, len([]rune(tooLong)), len(tooLong), err)
+	}
+	assertIssueOperationsScalarValue(t, ctx, fixture, "title after the refused update", id,
+		"SELECT title FROM issues WHERE id = ?", []any{id})
+	if after := readIssueOperationsRowMarks(t, ctx, fixture, id); after != before {
+		t.Errorf("the refused title update rewrote %s: %+v, want it unchanged at %+v", id, after, before)
+	}
+	events.assert(t, "refused title-length update", 0, nil)
+
+	okTitle := strings.Repeat("y", 500)
+	if err := fixture.UpdateRaw(ctx, id, map[string]any{"title": okTitle}, "writer"); err != nil {
+		t.Fatalf("raw update of %s to a 500-byte title: %v", id, err)
+	}
+	assertIssueOperationsScalarValue(t, ctx, fixture, "title after the accepted update", okTitle,
+		"SELECT title FROM issues WHERE id = ?", []any{id})
 }
 
 // issueOperationsTypeRequest builds the bare issue-type edit whose vocabulary
