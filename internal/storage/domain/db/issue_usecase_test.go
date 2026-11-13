@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("CounterModeMintsSequentialID", s.useCaseMintCounterMode)
 	s.Run("CounterModeUnavailableForWisps", s.useCaseMintWispIgnoresCounterMode)
 	s.Run("CounterModePassesOverLiveIDs", s.useCaseMintCounterModePassesOverLiveIDs)
+	s.Run("CounterModeSkipsAHeldRunLongerThanTheWalk", s.useCaseMintCounterModeSkipsALongHeldRun)
 	s.Run("IssuePrefixOverrideHonored", s.useCaseMintRespectsPrefixOverride)
 	s.Run("IDPrefixSubprefixHonored", s.useCaseMintRespectsIDPrefix)
 	s.Run("WispUsesWispPrefix", s.useCaseMintWispPrefix)
@@ -135,6 +137,60 @@ func (s *testSuite) useCaseMintCounterModePassesOverLiveIDs() {
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT title FROM wisps WHERE id = ?", "ucLive-5").Scan(&wispTitle))
 	s.Equal("explicit wisp", wispTitle, "the wisp ucLive-5 must keep its title")
+}
+
+// useCaseMintCounterModeSkipsALongHeldRun pins the long lag of GH#8456 at the
+// domain mint. An import left a held run ahead of the counter longer than two
+// walks probe (the walk, then the one after the skip): ucRun-2..ucRun-2102,
+// rows written without moving the counter, with a wisp and a tombstone
+// extending the run. Giving up at the bound failed every auto create for good.
+// The mint skips the rest of the run in one read (AdvanceCounterPastHeld) and
+// hands out the first free number on both create routes: not one past the
+// far-ahead ucRun-5000, and not past the child ucRun-2105.1, which holds no
+// counter value. Every held row keeps its content.
+func (s *testSuite) useCaseMintCounterModeSkipsALongHeldRun() {
+	s.resetMintConfig("ucRun", "counter")
+	uc := s.issueUseCase()
+	auto := func(title string, createOnly bool) string {
+		res, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+			Issue:      &types.Issue{Title: title, IssueType: types.TypeTask, Priority: 2},
+			CreateOnly: createOnly,
+		}, "tester")
+		s.Require().NoError(err, "auto create %q (CreateOnly=%v)", title, createOnly)
+		return res.Issue.ID
+	}
+	s.Require().Equal("ucRun-1", auto("first auto", false))
+
+	held := make([]string, 0, 2103)
+	for n := 2; n <= 2102; n++ {
+		held = append(held, fmt.Sprintf("ucRun-%d", n))
+	}
+	held = append(held, "ucRun-2105.1", "ucRun-5000")
+	values := make([]string, 0, len(held))
+	args := make([]any, 0, 2*len(held))
+	for _, id := range held {
+		values = append(values, "(?, ?, '', '', '', '')")
+		args = append(args, id, "imported "+id)
+	}
+	_, err := s.Runner().ExecContext(s.Ctx(),
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes) VALUES "+strings.Join(values, ", "), args...)
+	s.Require().NoError(err)
+	_, err = s.Runner().ExecContext(s.Ctx(), "INSERT INTO wisps (id, title) VALUES (?, ?)", "ucRun-2103", "imported ucRun-2103")
+	s.Require().NoError(err)
+	_, err = s.Runner().ExecContext(s.Ctx(), "INSERT INTO id_tombstones (id, closed_at) VALUES (?, ?)", "ucRun-2104", time.Now().UTC())
+	s.Require().NoError(err)
+
+	s.Equal("ucRun-2105", auto("upsert auto past the run", false), "CreateOnly unset must skip the held run")
+	s.Equal("ucRun-2106", auto("create-only auto", true), "CreateOnly set must take the next number")
+	for _, id := range []string{"ucRun-2", "ucRun-2102", "ucRun-5000"} {
+		stored, err := uc.GetIssue(s.Ctx(), id)
+		s.Require().NoError(err)
+		s.Equal("imported "+id, stored.Title, "%s was overwritten", id)
+	}
+	var wispTitle string
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT title FROM wisps WHERE id = ?", "ucRun-2103").Scan(&wispTitle))
+	s.Equal("imported ucRun-2103", wispTitle, "the wisp ucRun-2103 must keep its title")
 }
 
 func (s *testSuite) useCaseMintWispIgnoresCounterMode() {

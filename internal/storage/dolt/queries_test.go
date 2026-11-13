@@ -3234,6 +3234,83 @@ func TestCreateIssue_CounterModeWalksPastExplicitIDs(t *testing.T) {
 	}
 }
 
+// TestCreateIssue_CounterModeSkipsARunLongerThanTheWalk pins the long lag of
+// GH#8456 on the server store. An import left a held run ahead of the counter
+// longer than two walks probe (the walk, then the one after the skip):
+// test-2..test-2102, rows written without moving the counter, with a wisp and
+// a tombstone extending the run. Giving up at the bound failed every auto
+// create for good, because the rollback undoes the bumps. The mint skips the
+// rest of the run in one read and hands out the first free number: not one
+// past the far-ahead test-5000, and not past the child test-2105.1, which
+// holds no counter value. Every held row keeps its content.
+func TestCreateIssue_CounterModeSkipsARunLongerThanTheWalk(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if err := store.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+		t.Fatalf("failed to enable counter mode: %v", err)
+	}
+	auto := func(title string) string {
+		t.Helper()
+		issue := &types.Issue{Title: title, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("auto create %q: %v", title, err)
+		}
+		return issue.ID
+	}
+	if id := auto("first auto"); id != "test-1" {
+		t.Fatalf("first auto create = %q, want test-1", id)
+	}
+
+	held := make([]string, 0, 2103)
+	for n := 2; n <= 2102; n++ {
+		held = append(held, fmt.Sprintf("test-%d", n))
+	}
+	held = append(held, "test-2105.1", "test-5000")
+	values := make([]string, 0, len(held))
+	args := make([]any, 0, 2*len(held))
+	for _, id := range held {
+		values = append(values, "(?, ?, '', '', '', '')")
+		args = append(args, id, "imported "+id)
+	}
+	if _, err := store.db.ExecContext(ctx,
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes) VALUES "+strings.Join(values, ", "), args...); err != nil {
+		t.Fatalf("import the held run: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "INSERT INTO wisps (id, title) VALUES (?, ?)", "test-2103", "imported test-2103"); err != nil {
+		t.Fatalf("hold test-2103 with a wisp: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "INSERT INTO id_tombstones (id, closed_at) VALUES (?, ?)", "test-2104", time.Now().UTC()); err != nil {
+		t.Fatalf("hold test-2104 with a tombstone: %v", err)
+	}
+
+	if id := auto("past the run"); id != "test-2105" {
+		t.Errorf("auto create past a held run of 2103 = %q, want test-2105", id)
+	}
+	if id := auto("next"); id != "test-2106" {
+		t.Errorf("next auto create = %q, want test-2106", id)
+	}
+	for _, id := range []string{"test-2", "test-2102", "test-5000"} {
+		got, err := store.GetIssue(ctx, id)
+		if err != nil {
+			t.Fatalf("GetIssue(%s): %v", id, err)
+		}
+		if got.Title != "imported "+id {
+			t.Errorf("held row %s title = %q, want %q: an auto create overwrote it", id, got.Title, "imported "+id)
+		}
+	}
+	var lastID int
+	if err := store.db.QueryRowContext(ctx, "SELECT last_id FROM issue_counter WHERE prefix = ?", "test").Scan(&lastID); err != nil {
+		t.Fatalf("read issue_counter: %v", err)
+	}
+	if lastID != 2106 {
+		t.Errorf("issue_counter last_id = %d, want 2106", lastID)
+	}
+}
+
 // TestSearchIssues_NoDuplicatesWithMultipleBlockers verifies that
 // SearchIssues returns an issue exactly once even when it has multiple
 // blocks dependencies. GH#3567.
