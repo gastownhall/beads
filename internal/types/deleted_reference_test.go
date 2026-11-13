@@ -51,6 +51,13 @@ var deletedReferenceCases = []deletedReferenceCase{
 	{"non-ASCII punctuation", "«be-1»—be-1…", "be-1", "«[deleted:be-1]»—[deleted:be-1]…"},
 	{"non-ASCII letter next to it", "ébe-1", "be-1", "é[deleted:be-1]"},
 
+	// Adjacent citations share one separator; each still gets a marker.
+	{"space adjacent", "be-1 be-1", "be-1", "[deleted:be-1] [deleted:be-1]"},
+	{"comma adjacent", "be-1,be-1", "be-1", "[deleted:be-1],[deleted:be-1]"},
+	{"dot space adjacent", "see be-1. be-1", "be-1", "see [deleted:be-1]. [deleted:be-1]"},
+	{"dot newline adjacent", "be-1.\nbe-1", "be-1", "[deleted:be-1].\n[deleted:be-1]"},
+	{"rejected then accepted", "be-12 be-1", "be-1", "be-12 [deleted:be-1]"},
+
 	// Degenerate inputs.
 	{"empty text", "", "be-1", ""},
 	{"empty id", "be-1 text", "", "be-1 text"},
