@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -181,6 +182,58 @@ func TestEmbeddedRenamePrefixEdgeCases(t *testing.T) {
 			t.Errorf("regression: 'beads-vscode-' IDs were left unrewritten: %s", stdout.String())
 		}
 	})
+
+	// ===== Mint-only (GH#6591) =====
+	// --mint-only points new issues at the new prefix and leaves every
+	// existing ID and text reference alone; the old prefix stays valid.
+
+	t.Run("mint_only_keeps_existing_ids", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "taxdb")
+		bdCreate(t, bd, dir, "Tax parent", "--id", "taxdb-u6ch", "--type", "epic")
+		ref := bdCreate(t, bd, dir, "Tax ref", "--description", "see taxdb-u6ch")
+
+		result := decodeMintOnlyResult(t, bdRenamePrefix(t, bd, dir, "kb", "--mint-only", "--json"))
+		if result.OldPrefix != "taxdb" || result.NewPrefix != "kb" || !result.MintOnly || result.DryRun ||
+			fmt.Sprint(result.AllowedPrefixesAdded) != "[taxdb]" {
+			t.Errorf("result = %+v, want taxdb -> kb with taxdb added to allowed_prefixes", result)
+		}
+
+		if got := bdShow(t, bd, dir, "taxdb-u6ch"); got.Title != "Tax parent" {
+			t.Errorf("taxdb-u6ch = %+v, want it kept", got)
+		}
+		if got := bdShow(t, bd, dir, ref.ID); got.Description != "see taxdb-u6ch" {
+			t.Errorf("%s description = %q, want the text unchanged", ref.ID, got.Description)
+		}
+		if root := bdCreate(t, bd, dir, "New root", "--type", "task"); !strings.HasPrefix(root.ID, "kb-") {
+			t.Errorf("new root = %s, want a kb-* ID", root.ID)
+		}
+		if child := bdCreate(t, bd, dir, "Tax child", "--parent", "taxdb-u6ch"); !strings.HasPrefix(child.ID, "taxdb-u6ch.") {
+			t.Errorf("child = %s, want a taxdb-u6ch.N ID", child.ID)
+		}
+	})
+}
+
+// mintOnlyJSON is the single object bd rename-prefix --mint-only --json writes.
+type mintOnlyJSON struct {
+	OldPrefix            string   `json:"old_prefix"`
+	NewPrefix            string   `json:"new_prefix"`
+	MintOnly             bool     `json:"mint_only"`
+	DryRun               bool     `json:"dry_run"`
+	AllowedPrefixesAdded []string `json:"allowed_prefixes_added"`
+}
+
+func decodeMintOnlyResult(t *testing.T, out string) mintOnlyJSON {
+	t.Helper()
+	var result mintOnlyJSON
+	dec := json.NewDecoder(strings.NewReader(out))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&result); err != nil {
+		t.Fatalf("--mint-only --json stdout is not one result object: %v\n%s", err, out)
+	}
+	if dec.More() {
+		t.Fatalf("--mint-only --json stdout holds more than one JSON value:\n%s", out)
+	}
+	return result
 }
 
 // TestEmbeddedRenamePrefixConcurrent exercises rename-prefix --dry-run concurrently.
