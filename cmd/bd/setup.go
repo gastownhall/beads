@@ -380,6 +380,14 @@ func runRecipe(name string) error {
 		if err != nil {
 			return HandleError("%v", err)
 		}
+		// A shared file is the repository's too: keep bd's guidance as a
+		// marked section in it rather than replacing what it holds.
+		if recipe.IsSharedPath(path) {
+			if _, err := setup.InstallSharedFile(path, content); err != nil {
+				return HandleError("update %s: %v", remedy.PrintedValue(path), remedy.PrintedError(err))
+			}
+			continue
+		}
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil { // #nosec G306 -- config files need to be readable
 			return HandleError("write file: %v", remedy.PrintedError(err))
 		}
