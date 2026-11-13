@@ -918,6 +918,38 @@ func RunDeleterRewritesOnlyTheDeletedIDInAHierarchy(t *testing.T, ctx context.Co
 		}
 	})
 
+	// Two distinct top-level ids joined by a dot are ONE dotted run, not a
+	// citation of either; the standalone citations after it are. Both
+	// request orders must agree.
+	for _, order := range []struct {
+		tag         string
+		reverseThem bool
+	}{
+		{"hdotab", false},
+		{"hdotba", true},
+	} {
+		t.Run("ADottedRunOfTwoIDsCitesNeither/"+order.tag, func(t *testing.T) {
+			first := deleterSeedIssue(t, ctx, fixture, order.tag, "one")
+			second := deleterSeedIssue(t, ctx, fixture, order.tag, "two")
+			neighbor := deleterSeedCitingNeighbor(t, ctx, fixture, order.tag,
+				first+"."+second+" and "+second+", "+first, first)
+			ids := []string{first, second}
+			if order.reverseThem {
+				ids = []string{second, first}
+			}
+
+			deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
+				IDs:   ids,
+				Force: true,
+				Actor: "deleter-contract",
+			})
+			want := first + "." + second + " and [deleted:" + second + "], [deleted:" + first + "]"
+			if got := deleterText(t, ctx, fixture, neighbor, "description"); got != want {
+				t.Errorf("deleting %v: neighbor description = %q, want %q", ids, got, want)
+			}
+		})
+	}
+
 }
 
 // deleterHierarchy is one root, its child and its grandchild, with dotted ids.
