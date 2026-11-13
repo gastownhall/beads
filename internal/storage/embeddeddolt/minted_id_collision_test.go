@@ -183,4 +183,55 @@ func TestMintedIDsPassOverEveryHeldID(t *testing.T) {
 			t.Errorf("explicit item = %s, want cm-1", got)
 		}
 	})
+
+	// counterAheadOf runs one counter-mode case of GH#8456 on its own
+	// workspace: the counter mints cl-1, explicit rows (wisps when ephemeral)
+	// then take the next values without moving the counter, and two auto
+	// creates bound for issues must walk past every one of them rather than
+	// overwrite it (issues) or shadow it with a second row (wisps).
+	counterAheadOf := func(t *testing.T, explicit []string, ephemeral bool, want []string) {
+		t.Helper()
+		te := newTestEnv(t, "cl")
+		if err := te.store.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+			t.Fatalf("SetConfig(issue_id_mode=counter): %v", err)
+		}
+		auto := func(title string) string {
+			t.Helper()
+			item := &types.Issue{Title: title, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+			if err := te.store.CreateIssue(ctx, item, actor); err != nil {
+				t.Fatalf("auto CreateIssue(%q) = %v", title, err)
+			}
+			return item.ID
+		}
+		if id := auto("first auto"); id != "cl-1" {
+			t.Fatalf("first auto create = %s, want cl-1", id)
+		}
+		table, other := "issues", "wisps"
+		if ephemeral {
+			table, other = "wisps", "issues"
+		}
+		for _, id := range explicit {
+			held := &types.Issue{ID: id, Title: "explicit " + id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: ephemeral}
+			if err := te.store.CreateIssue(ctx, held, "seeder"); err != nil {
+				t.Fatalf("explicit create %s: %v", id, err)
+			}
+		}
+		for i, wantID := range want {
+			if id := auto("auto"); id != wantID {
+				t.Errorf("auto create %d = %s, want %s past the explicit %v", i+1, id, wantID, explicit)
+			}
+		}
+		for _, id := range explicit {
+			te.assertIssueTitle(t, ctx, table, id, "explicit "+id)
+			te.assertRowNotExists(t, ctx, other, id)
+		}
+	}
+
+	t.Run("a counter mint past explicit issues ahead of the counter", func(t *testing.T) {
+		counterAheadOf(t, []string{"cl-2", "cl-3", "cl-4"}, false, []string{"cl-5", "cl-6"})
+	})
+
+	t.Run("a counter mint past explicit wisps ahead of the counter", func(t *testing.T) {
+		counterAheadOf(t, []string{"cl-2", "cl-3"}, true, []string{"cl-4", "cl-5"})
+	})
 }
