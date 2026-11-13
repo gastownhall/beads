@@ -47,16 +47,16 @@ func TestRepairDroppedDefaultDriftRepairsRecordedDrift(t *testing.T) {
 	mock.ExpectQuery(`^SHOW TABLES$`).WillReturnRows(showTables("comments", "compaction_snapshots", "dependencies", "events", "issue_snapshots", "wisp_comments", "wisp_dependencies", "wisp_events"))
 	mock.ExpectQuery(`^SHOW COLUMNS FROM wisp_events LIKE 'id'$`).WillReturnRows(idDefault(nil))
 
-	// Session hygiene: transaction commit already off; working set clean.
-	mock.ExpectQuery(`SELECT @@SESSION\.dolt_transaction_commit`).
-		WillReturnRows(sqlmock.NewRows([]string{"v"}).AddRow(0))
+	// Working set clean; commit eligibility: the wisp tables are under
+	// dolt_ignore. Then session hygiene: transaction commit already off.
 	mock.ExpectQuery(`FROM dolt_status`).WillReturnRows(
 		sqlmock.NewRows([]string{"table_name", "staged"}))
-	// Commit eligibility: the wisp tables are under dolt_ignore.
 	mock.ExpectQuery(`FROM INFORMATION_SCHEMA\.TABLES`).
 		WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME"}).
 			AddRow("comments").AddRow("compaction_snapshots").AddRow("dependencies").
 			AddRow("events").AddRow("issue_snapshots"))
+	mock.ExpectQuery(`SELECT @@SESSION\.dolt_transaction_commit`).
+		WillReturnRows(sqlmock.NewRows([]string{"v"}).AddRow(0))
 
 	// Corrections, in probe order: comments, then dependencies.
 	mock.ExpectExec("ALTER TABLE `comments` ALTER COLUMN `id` DROP DEFAULT").
@@ -115,6 +115,61 @@ func TestRepairDroppedDefaultDriftHealthyStoreWritesNothing(t *testing.T) {
 	}
 	// No session write at all: not even the transaction-commit read is
 	// reached, and the mock would flag any ALTER/ADD/COMMIT.
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// GH#5269, AC-4: a tracked repair target that already holds uncommitted
+// changes is refused before anything is altered — no ALTER, no staging, no
+// commit — and the error names the table and the remedy. (The ignored-plane
+// counterpart is deliberately NOT refused: those repairs commit nothing, so
+// nothing can ride along; the embedded tier pins that.)
+func TestRepairDroppedDefaultDriftRefusesDirtyTrackedTarget_5269(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery(`SELECT MAX\(version\) FROM schema_migrations`).
+		WillReturnRows(sqlmock.NewRows([]string{"v"}).AddRow(74))
+	mock.ExpectQuery(`SELECT MAX\(version\) FROM ignored_schema_migrations`).
+		WillReturnRows(sqlmock.NewRows([]string{"v"}).AddRow(31))
+	allTables := showTables("comments", "compaction_snapshots", "dependencies", "events", "issue_snapshots", "wisp_comments", "wisp_dependencies", "wisp_events")
+	for _, col := range []string{"comments", "compaction_snapshots", "dependencies", "events", "issue_snapshots", "wisp_comments", "wisp_dependencies", "wisp_events"} {
+		mock.ExpectQuery(`^SHOW TABLES$`).WillReturnRows(allTables)
+		var def any
+		if col == "dependencies" {
+			def = "(uuid())" // the drift
+		}
+		mock.ExpectQuery(fmt.Sprintf(`^SHOW COLUMNS FROM %s LIKE 'id'$`, col)).WillReturnRows(idDefault(def))
+	}
+	// dependencies holds uncommitted changes and is a tracked (committable)
+	// table: the guard reads exactly these two and refuses.
+	mock.ExpectQuery(`FROM dolt_status`).WillReturnRows(
+		sqlmock.NewRows([]string{"table_name", "staged"}).AddRow("dependencies", false))
+	mock.ExpectQuery(`FROM INFORMATION_SCHEMA\.TABLES`).
+		WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME"}).
+			AddRow("comments").AddRow("compaction_snapshots").AddRow("dependencies").
+			AddRow("events").AddRow("issue_snapshots"))
+
+	repairs, err := RepairDroppedDefaultDrift(context.Background(), db)
+	var dirty *PostConditionDirtyWorkError
+	if !errors.As(err, &dirty) {
+		t.Fatalf("err = %T %v, want *PostConditionDirtyWorkError", err, err)
+	}
+	if strings.Join(dirty.Tables, ",") != "dependencies" {
+		t.Fatalf("dirty tables = %v, want [dependencies]", dirty.Tables)
+	}
+	if !strings.Contains(err.Error(), "bd migrate schema") || !strings.Contains(err.Error(), "dependencies") {
+		t.Fatalf("err = %v, want it to name dependencies and the re-run remedy", err)
+	}
+	if repairs != nil {
+		t.Fatalf("repairs = %v alongside a refusal, want none", repairs)
+	}
+	// Nothing beyond the guard's two reads ran: not even the session-hygiene
+	// SET, and the mock would flag any ALTER/ADD/COMMIT.
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}

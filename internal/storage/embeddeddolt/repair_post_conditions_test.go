@@ -5,6 +5,7 @@ package embeddeddolt_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -242,6 +243,64 @@ func TestEmbeddedRepairSchemaPostConditionsRepairsIgnoredTablesInPlace_5269(t *t
 		}
 		if repairCommits != 0 {
 			t.Fatalf("ignored-plane-only repair created %d commit(s)", repairCommits)
+		}
+	})
+}
+
+// GH#5269, AC-4: a tracked repair target holding uncommitted changes is
+// refused before anything is altered — durably: the default survives, no
+// repair commit exists, and the table's working-set change is still there.
+func TestEmbeddedRepairRefusesDirtyTrackedTargetBeforeAltering_5269(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	dataDir := seedFullyCurrentSchema(t, ctx)
+	beadsDir := filepath.Dir(dataDir)
+
+	// Uncommitted drift on a tracked table: dependencies carries a default
+	// AND an uncommitted schema change.
+	withPinnedConn(t, dataDir, func(ctx context.Context, conn *sql.Conn) {
+		if _, err := conn.ExecContext(ctx, "ALTER TABLE dependencies ALTER COLUMN id SET DEFAULT (UUID())"); err != nil {
+			t.Fatalf("seed uncommitted drift: %v", err)
+		}
+		if def := tableColumnDefault(t, ctx, conn, "dependencies", "id"); !def.Valid {
+			t.Fatalf("precondition: dependencies.id carries no DEFAULT after seeding")
+		}
+		if !contains(dirtyTableNames(t, ctx, conn), "dependencies") {
+			t.Fatalf("precondition: dependencies is not dirty in dolt_status")
+		}
+	})
+
+	store, err := embeddeddolt.Open(ctx, beadsDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	_, repairs, repairErr := store.RepairSchemaPostConditions(ctx)
+	var dirty *schema.PostConditionDirtyWorkError
+	if !errors.As(repairErr, &dirty) {
+		t.Fatalf("err = %T %v, want *schema.PostConditionDirtyWorkError", repairErr, repairErr)
+	}
+	if strings.Join(dirty.Tables, ",") != "dependencies" {
+		t.Fatalf("dirty tables = %v, want [dependencies]", dirty.Tables)
+	}
+	if repairs != nil {
+		t.Fatalf("repairs = %v alongside a refusal, want none", repairs)
+	}
+
+	withPinnedConn(t, dataDir, func(ctx context.Context, conn *sql.Conn) {
+		if def := tableColumnDefault(t, ctx, conn, "dependencies", "id"); !def.Valid {
+			t.Fatalf("dependencies.id was altered despite the refusal (DEFAULT %q gone)", def.String)
+		}
+		if !contains(dirtyTableNames(t, ctx, conn), "dependencies") {
+			t.Fatalf("dependencies lost its uncommitted change to the refused repair")
+		}
+		var repairCommits int
+		if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_log WHERE message = 'schema: repair dropped-default post-conditions'").Scan(&repairCommits); err != nil {
+			t.Fatalf("read dolt_log: %v", err)
+		}
+		if repairCommits != 0 {
+			t.Fatalf("refused repair created %d commit(s)", repairCommits)
 		}
 	})
 }

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -128,6 +129,66 @@ func TestEmbeddedMigrateSchemaRepairsDroppedDefaultDrift_5269(t *testing.T) {
 	if n := repairCommits(); n != 2 {
 		t.Errorf("repair commits = %d after the second seeded drift, want 2", n)
 	}
+}
+
+// gastownhall/beads#5269, AC-4: when a tracked repair target holds
+// uncommitted changes, `bd migrate schema` refuses before altering anything,
+// names the table, and names the remedy that ends the loop (commit or reset
+// the working set, then re-run).
+func TestEmbeddedMigrateSchemaRefusesDirtyTrackedTarget_5269(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "pt")
+	setMigrateJSONConfigFalse(t, beadsDir)
+
+	// Uncommitted drift on a tracked table: dependencies carries a default
+	// AND an uncommitted schema change.
+	withEmbeddedMigrateSQL(t, beadsDir, "pt", func(db *sql.DB) error {
+		if _, err := db.ExecContext(t.Context(), "ALTER TABLE dependencies ALTER COLUMN id SET DEFAULT (UUID())"); err != nil {
+			return fmt.Errorf("seed uncommitted drift: %w", err)
+		}
+		return nil
+	})
+
+	// The refusal exits non-zero; capture the text wire without failing on it.
+	cmd := exec.Command(bd, "migrate", "schema")
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, runErr := runCommandBuffers(t, cmd)
+	if runErr == nil {
+		t.Fatalf("bd migrate schema succeeded on a dirty tracked target:\n%s", stdout.String())
+	}
+	out := stdout.String() + stderr.String()
+	for _, want := range []string{"dropped-default repair refused", "dependencies", "bd dolt commit", "migrate schema"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("refusal output missing %q:\n%s", want, out)
+		}
+	}
+
+	// Durable: the default survives, no repair commit exists.
+	withEmbeddedMigrateSQL(t, beadsDir, "pt", func(db *sql.DB) error {
+		var def sql.NullString
+		if err := db.QueryRowContext(t.Context(), "SELECT COLUMN_DEFAULT FROM INFORMATION_SCHEMA.COLUMNS"+
+			" WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'dependencies' AND COLUMN_NAME = 'id'").Scan(&def); err != nil {
+			return err
+		}
+		if !def.Valid {
+			t.Errorf("dependencies.id was altered despite the refusal")
+		}
+		var repairCommits int
+		if err := db.QueryRowContext(t.Context(),
+			"SELECT COUNT(*) FROM dolt_log WHERE message = 'schema: repair dropped-default post-conditions'").Scan(&repairCommits); err != nil {
+			return err
+		}
+		if repairCommits != 0 {
+			t.Errorf("refused repair created %d commit(s)", repairCommits)
+		}
+		return nil
+	})
 }
 
 // The repair capability the CLI prefers is present on the embedded store this

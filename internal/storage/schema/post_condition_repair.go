@@ -143,9 +143,12 @@ func (e *PostConditionDirtyWorkError) Error() string {
 // migration already promised. Successfully repaired committable tables are
 // staged by name into one commit under a distinct schema-repair message;
 // pre-existing staged work is unstaged first, as the migration harness does,
-// so it neither rides the repair commit nor is lost. Tables under a
-// dolt_ignore pattern (the wisp tables; events since main 0062) are repaired
-// in place without staging: their shape is clone-local, never shared history.
+// so it neither rides the repair commit nor is lost. A tracked target that
+// already holds uncommitted changes is refused up front with a
+// *PostConditionDirtyWorkError, before anything is altered (AC-4). Tables
+// under a dolt_ignore pattern (the wisp tables; events since main 0062) are
+// repaired in place without staging: their shape is clone-local, never shared
+// history.
 //
 // A failed correction leaves the pass's own error reporting to the caller:
 // repairs already verified and committed are returned alongside the error
@@ -184,6 +187,39 @@ func RepairDroppedDefaultDrift(ctx context.Context, db DBConn) (repairs []string
 		return nil, nil
 	}
 
+	// Snapshot the working set and the tracking state before anything is
+	// altered: together they decide the dirty guard and the commit.
+	dirtyBefore, err := dirtyTables(ctx, db, false)
+	if err != nil {
+		return nil, fmt.Errorf("reading pre-repair status: %w", err)
+	}
+	// Current tracking state decides commit eligibility: a table matched by a
+	// dolt_ignore pattern is repaired in place, never staged or committed.
+	committable, err := existingCommittableTables(ctx, db)
+	if err != nil {
+		return nil, fmt.Errorf("reading committable tables: %w", err)
+	}
+
+	// The dirty guard, before the first ALTER: the repair stages exactly its
+	// repaired tracked tables by name and commits them, so pre-existing
+	// uncommitted changes on one of those tables would ride the repair commit
+	// inseparably (the entanglement MigrateUp's own dirty guard refuses,
+	// #4566). Ignored-plane targets are excluded: their repair is committed
+	// by no one, so their working-set changes cannot ride anything.
+	var dirtyTargets []string
+	for _, d := range drifts {
+		if _, isCommittable := committable[d.obligation.table]; !isCommittable {
+			continue
+		}
+		if _, dirty := dirtyBefore[d.obligation.table]; dirty {
+			dirtyTargets = append(dirtyTargets, d.obligation.table)
+		}
+	}
+	if len(dirtyTargets) > 0 {
+		sort.Strings(dirtyTargets)
+		return nil, &PostConditionDirtyWorkError{Tables: dirtyTargets}
+	}
+
 	// Same session hygiene as a migration pass: automatic transaction commits
 	// off for the whole repair, restored on every return.
 	restoreTransactionCommit, err := suspendTransactionCommit(ctx, db)
@@ -192,23 +228,12 @@ func RepairDroppedDefaultDrift(ctx context.Context, db DBConn) (repairs []string
 	}
 	defer func() { err = joinRestoreError(err, restoreTransactionCommit()) }()
 
-	// Snapshot the working set and unstage unrelated pre-existing staged work,
-	// as the migration harness does: the repair commit must contain exactly
-	// the repaired tables, and pre-existing staged data must survive in the
-	// working set rather than ride along.
-	dirtyBefore, err := dirtyTables(ctx, db, false)
-	if err != nil {
-		return nil, fmt.Errorf("reading pre-repair status: %w", err)
-	}
+	// Unstage unrelated pre-existing staged work, as the migration harness
+	// does: the repair commit must contain exactly the repaired tables, and
+	// pre-existing staged data must survive in the working set rather than
+	// ride along.
 	if err := unstagePreExistingTables(ctx, db, dirtyBefore); err != nil {
 		return nil, fmt.Errorf("unstaging pre-repair tables: %w", err)
-	}
-
-	// Current tracking state decides commit eligibility: a table matched by a
-	// dolt_ignore pattern is repaired in place, never staged or committed.
-	committable, err := existingCommittableTables(ctx, db)
-	if err != nil {
-		return nil, fmt.Errorf("reading committable tables: %w", err)
 	}
 
 	var repaired []postConditionObligation
