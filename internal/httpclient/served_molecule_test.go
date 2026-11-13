@@ -42,6 +42,7 @@ func moleculeContractCases() []struct {
 		{"StepperNeverTakesAStepAnotherActorHolds", conformance.RunMoleculeStepperNeverTakesAStepAnotherActorHolds},
 		{"StepperAnswersCompleteAndOutsideAMolecule", conformance.RunMoleculeStepperAnswersCompleteAndOutsideAMolecule},
 		{"StepperClaimsAWispStep", conformance.RunMoleculeStepperClaimsAWispStep},
+		{"StepperClaimsAStepBlockedFromOutsideTheMolecule", conformance.RunMoleculeStepperClaimsAStepBlockedFromOutsideTheMolecule},
 	}
 }
 

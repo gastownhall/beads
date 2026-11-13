@@ -287,7 +287,11 @@ func writeShapes() []writeShape {
 				// body.
 				"ForceAssigneeTransfer": member("force_assignee_transfer"),
 				"ForceClosePolicy":      member("force_close_policy"),
-				"Claim":                 member("claim"),
+				// The claim's own bypass, the local-blocker refusal's force
+				// member (GH#7049): claim-only, gated on
+				// issues.update.forceClaimBlocked before the dial.
+				"ForceClaimBlocked": member("force_claim_blocked"),
+				"Claim":             member("claim"),
 				// The template guard's stand-down (bd label, bd set-state).
 				"AllowTemplate": member("allow_template"),
 			},

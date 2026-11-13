@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"slices"
@@ -1386,6 +1387,168 @@ func TestUpdateAnswersARefusedClaimAsTheClaimDoes(t *testing.T) {
 				t.Errorf("detail = %q; a refused claim must neither steer to the fence's force nor quote the role", detail)
 			}
 		})
+	}
+}
+
+// TestUpdateForwardsTheForceClaimBlockedMember: the claim's own bypass reaches
+// the role as UpdateRequest.ForceClaimBlocked, beside the claim it requires,
+// and an explicit false is the absent member.
+func TestUpdateForwardsTheForceClaimBlockedMember(t *testing.T) {
+	lifecycle := &roleLifecycle{updateResult: issueops.UpdateResult{Issue: updatedIssue("bd-1"), Changed: true}}
+	ts := newUpdateServer(t, lifecycle)
+
+	resp := ts.updateIssue(t, updatePath, `{"actor":"alice","claim":true,"force_claim_blocked":true,"patch":{}}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+	}
+	got := lifecycle.updateRequests()
+	if len(got) != 1 {
+		t.Fatalf("the role was called %d times, want 1", len(got))
+	}
+	if !got[0].Claim || !got[0].ForceClaimBlocked {
+		t.Errorf("the role received claim %v force_claim_blocked %v, want both true", got[0].Claim, got[0].ForceClaimBlocked)
+	}
+
+	resp = ts.updateIssue(t, updatePath, `{"actor":"alice","claim":true,"force_claim_blocked":false,"patch":{}}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+	}
+	if got := lifecycle.updateRequests(); len(got) != 2 || got[1].ForceClaimBlocked {
+		t.Errorf("explicit false did not stay the absent member: %+v", got)
+	}
+}
+
+// TestUpdateRefusesForceClaimBlockedWithoutAClaim: the bypass is claim-only,
+// and a request setting it without the member it bypasses for is refused at
+// the edge naming `force_claim_blocked` — the force_notes_overwrite rule — so
+// a caller that meant `claim` never believes a bypass that did nothing. The
+// member's own type rules answer with the same param.
+func TestUpdateRefusesForceClaimBlockedWithoutAClaim(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"without a claim", `{"actor":"alice","force_claim_blocked":true,"patch":{"title":"t"}}`},
+		{"null", `{"actor":"alice","force_claim_blocked":null,"patch":{"title":"t"}}`},
+		{"a string", `{"actor":"alice","force_claim_blocked":"yes","patch":{"title":"t"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lifecycle := &roleLifecycle{updateResult: issueops.UpdateResult{Issue: updatedIssue("bd-1")}}
+			ts := newUpdateServer(t, lifecycle)
+
+			resp := ts.updateIssue(t, updatePath, tc.body)
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", resp.StatusCode, readAll(t, resp))
+			}
+			body := decodeBody(t, resp)
+			if body["code"] != string(CodeInvalidArgument) {
+				t.Errorf("code = %v, want %s", body["code"], CodeInvalidArgument)
+			}
+			if body["param"] != "force_claim_blocked" {
+				t.Errorf("param = %v, want force_claim_blocked", body["param"])
+			}
+			if got := lifecycle.updateRequests(); len(got) != 0 {
+				t.Errorf("a refused body reached the role: %+v", got)
+			}
+		})
+	}
+}
+
+// TestUpdateAnswersALocalBlockedClaimRefusalWithBlockers is the claim's
+// live-blocker refusal: `not_claimable` naming `claim` with the blockers in
+// the `blockers` member — the member that tells a client this is the refusal
+// `force_claim_blocked` bypasses, where the status's own not_claimable carries
+// `issue_status` — and the detail is the typed list's own sentence plus the
+// hint, never the close-policy refusal's members or hint.
+func TestUpdateAnswersALocalBlockedClaimRefusalWithBlockers(t *testing.T) {
+	blocked := &issueops.BlockedError{
+		IssueID:  "bd-1",
+		Blockers: []issueops.Blocker{issueops.ParseBlocker("bd-2"), issueops.ParseBlocker("bd-3 (waits-for)")},
+		Err:      issueops.ErrClaimBlocked,
+	}
+	lifecycle := &roleLifecycle{updateErr: fmt.Errorf("update bd-1: %w", blocked)}
+	ts := newUpdateServer(t, lifecycle)
+
+	resp := ts.updateIssue(t, updatePath, `{"actor":"alice","claim":true,"patch":{}}`)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", resp.StatusCode, readAll(t, resp))
+	}
+	body := decodeBody(t, resp)
+	if body["code"] != string(CodeNotClaimable) {
+		t.Errorf("code = %v, want %s", body["code"], CodeNotClaimable)
+	}
+	if body["param"] != "claim" {
+		t.Errorf("param = %v, want claim", body["param"])
+	}
+	// The same re-encoded comparison assertBlockersMember runs, against this
+	// refusal's own two-blocker list rather than the close fixture's three.
+	got, err := json.Marshal(body["blockers"])
+	if err != nil {
+		t.Fatalf("re-encode the blockers member: %v", err)
+	}
+	if want := `[{"id":"bd-2","kind":"local","type":"blocks"},{"id":"bd-3","kind":"local","type":"waits-for"}]`; string(got) != want {
+		t.Errorf("blockers = %s, want %s", got, want)
+	}
+	if _, present := body["issue_status"]; present {
+		t.Errorf("the local-blocker refusal reported issue_status, which is the status refusal's discriminator: %v", body)
+	}
+	if want := "cannot claim blocked issue: bd-1 is blocked by [bd-2 bd-3 (waits-for)]; clear the blocker, or send `force_claim_blocked`"; body["detail"] != want {
+		t.Errorf("detail = %q, want %q", body["detail"], want)
+	}
+}
+
+// TestUpdateALocalBlockedClaimWithoutTheTypedListNamesNobody is the other side
+// of the rule, closeBlocked's: an ErrClaimBlocked that carries no typed list
+// keeps the generic detail and no member, because the member is read from the
+// typed fields and never scraped from prose.
+func TestUpdateALocalBlockedClaimWithoutTheTypedListNamesNobody(t *testing.T) {
+	lifecycle := &roleLifecycle{updateErr: fmt.Errorf("update bd-1: %w: bd-1 is blocked by [bd-2]", issueops.ErrClaimBlocked)}
+	ts := newUpdateServer(t, lifecycle)
+
+	resp := ts.updateIssue(t, updatePath, `{"actor":"alice","claim":true,"patch":{}}`)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", resp.StatusCode, readAll(t, resp))
+	}
+	body := decodeBody(t, resp)
+	if body["code"] != string(CodeNotClaimable) {
+		t.Errorf("code = %v, want %s", body["code"], CodeNotClaimable)
+	}
+	if got, present := body["blockers"]; present {
+		t.Errorf("blockers = %v; it was scraped from the message rather than read from the typed list", got)
+	}
+	if want := "`claim` refuses a blocked issue; clear the blocker, or send `force_claim_blocked`"; body["detail"] != want {
+		t.Errorf("detail = %q, want the generic %q", body["detail"], want)
+	}
+}
+
+// TestClaimBlockedMapsThroughTheSharedClassification pins the claim's
+// live-local-blocker refusal at the shared mapping as well, so an operation
+// that reaches a lifecycle claim without an arm of its own answers 409
+// not_claimable with the typed blockers, never a 500. Its hint names no
+// bypass, and the close-policy refusal sharing the BlockedError type still
+// maps by its own sentinel.
+func TestClaimBlockedMapsThroughTheSharedClassification(t *testing.T) {
+	blocked := &issueops.BlockedError{
+		IssueID:  "bd-1",
+		Blockers: []issueops.Blocker{issueops.ParseBlocker("bd-2")},
+		Err:      issueops.ErrClaimBlocked,
+	}
+	res := ClassifyError(fmt.Errorf("claiming step bd-1: %w", blocked))
+	if res.Problem.Status != http.StatusConflict || res.Problem.Code != string(CodeNotClaimable) {
+		t.Fatalf("ClassifyError = %d/%s, want 409/%s", res.Problem.Status, res.Problem.Code, CodeNotClaimable)
+	}
+	if res.Problem.Blockers == nil || len(*res.Problem.Blockers) != 1 || (*res.Problem.Blockers)[0].Id != "bd-2" {
+		t.Errorf("blockers = %+v, want the typed [bd-2]", res.Problem.Blockers)
+	}
+	if want := "cannot claim blocked issue: bd-1 is blocked by [bd-2]; clear the blocker first"; res.Problem.Detail == nil || *res.Problem.Detail != want {
+		t.Errorf("detail = %v, want %q", res.Problem.Detail, want)
+	}
+
+	if res := ClassifyError(issueops.ErrClaimBlocked); res.Problem.Code != string(CodeNotClaimable) || res.Problem.Blockers != nil {
+		t.Errorf("the bare sentinel = %s with blockers %v, want %s and no member", res.Problem.Code, res.Problem.Blockers, CodeNotClaimable)
+	}
+	if res := ClassifyError(issueops.NewCloseBlockedError("bd-1", []string{"bd-2"})); res.Problem.Code != string(CodeNotClosable) {
+		t.Errorf("a close-policy BlockedError = %s, want %s", res.Problem.Code, CodeNotClosable)
 	}
 }
 

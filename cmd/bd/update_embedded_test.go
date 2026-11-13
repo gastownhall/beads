@@ -3,6 +3,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -748,6 +749,83 @@ func TestEmbeddedUpdateLifecycleClaimParentCommit(t *testing.T) {
 		}
 	})
 
+	// A claim of an issue or wisp with an open local blocker is refused the way
+	// `bd close` refuses it: exit 1, the refusal names both ids and the --force
+	// override, and nothing commits — not the claim, not a patch riding it.
+	t.Run("claim_blocked_delegated_guard", func(t *testing.T) {
+		blocker := bdCreate(t, bd, dir, "Claim blocker", "--type", "task")
+		blocked := bdCreate(t, bd, dir, "Blocked claim", "--type", "task")
+		blockedWisp := bdCreate(t, bd, dir, "Blocked wisp claim", "--type", "task", "--ephemeral")
+		bdDepAdd(t, bd, dir, blocked.ID, blocker.ID)
+		bdDepAdd(t, bd, dir, blockedWisp.ID, blocker.ID)
+
+		for _, tc := range []struct {
+			name string
+			id   string
+			args []string
+		}{
+			{name: "bare claim", id: blocked.ID},
+			{name: "claim with a patch", id: blocked.ID, args: []string{"--title", "Patched by a refused claim", "--notes", "refused notes"}},
+			{name: "wisp claim", id: blockedWisp.ID},
+		} {
+			before := bdShow(t, bd, dir, tc.id)
+			revision := bdShowRevision(t, bd, dir, tc.id)
+			books := embeddedClaimBookkeeping(t, beadsDir, "tu", tc.id)
+			args := append([]string{tc.id, "--claim", "--actor", "blocked-worker"}, tc.args...)
+			out, code := bdUpdateFailCode(t, bd, dir, args...)
+			if code != 1 {
+				t.Errorf("%s: exit code = %d, want 1\n%s", tc.name, code, out)
+			}
+			for _, want := range []string{"cannot claim blocked issue", tc.id, blocker.ID, "use --force to override"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("%s: refusal missing %q:\n%s", tc.name, want, out)
+				}
+			}
+			got := bdShow(t, bd, dir, tc.id)
+			if got.Status != types.StatusOpen || got.Assignee != "" || got.Title != before.Title || got.Notes != before.Notes {
+				t.Errorf("%s: refused claim changed %s: status=%q assignee=%q title=%q notes=%q",
+					tc.name, tc.id, got.Status, got.Assignee, got.Title, got.Notes)
+			}
+			if after := bdShowRevision(t, bd, dir, tc.id); after != revision {
+				t.Errorf("%s: refused claim moved %s's revision %d -> %d", tc.name, tc.id, revision, after)
+			}
+			if after := embeddedClaimBookkeeping(t, beadsDir, "tu", tc.id); after != books {
+				t.Errorf("%s: refused claim wrote claim bookkeeping for %s: %+v -> %+v", tc.name, tc.id, books, after)
+			}
+		}
+	})
+
+	// --force lets the claim through a live local blocker, and leaves the
+	// blocker and its edge where they were.
+	t.Run("claim_blocked_force_overrides", func(t *testing.T) {
+		blocker := bdCreate(t, bd, dir, "Forced claim blocker", "--type", "task")
+		blocked := bdCreate(t, bd, dir, "Forced blocked claim", "--type", "task")
+		bdDepAdd(t, bd, dir, blocked.ID, blocker.ID)
+
+		bdUpdate(t, bd, dir, blocked.ID, "--claim", "--actor", "forced-worker", "--force")
+		got := bdShow(t, bd, dir, blocked.ID)
+		if got.Status != types.StatusInProgress || got.Assignee != "forced-worker" {
+			t.Errorf("forced claim did not land: status=%q assignee=%q", got.Status, got.Assignee)
+		}
+		if gotBlocker := bdShow(t, bd, dir, blocker.ID); gotBlocker.Status != types.StatusOpen {
+			t.Errorf("forced claim moved blocker %s to %q, want open", blocker.ID, gotBlocker.Status)
+		}
+		kept := false
+		for _, d := range showDeps(t, bd, dir, blocked.ID) {
+			if d.ID == blocker.ID && d.Type == "blocks" {
+				kept = true
+			}
+		}
+		if !kept {
+			t.Errorf("forced claim dropped %s's blocks edge to %s", blocked.ID, blocker.ID)
+		}
+		// The override claims; it does not clear the block. is_blocked is not
+		// part of issue hydration, so read the column directly.
+		if !embeddedIsBlocked(t, beadsDir, "tu", blocked.ID) {
+			t.Errorf("forced claim cleared %s's is_blocked flag, want the block left standing", blocked.ID)
+		}
+	})
+
 	// A batch where one claim is lost and another is won must exit non-zero, so
 	// the lost claim is not hidden from exit-code automation (beads audit
 	// finding #10). The winner is still committed.
@@ -1030,4 +1108,125 @@ func TestEmbeddedUpdateConcurrent(t *testing.T) {
 
 	t.Logf("created and updated %d issues across %d/%d successful workers, %d in DB",
 		len(allIDs), successes, numWorkers, stats.TotalIssues)
+}
+
+// bd-ltvqa9: `bd update --claim` must refuse an issue with an open blocker,
+// the way `bd close` does, and leave it open and unassigned.
+func TestEmbeddedUpdateClaimRefusesBlockedIssue(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "cb")
+
+	blocker := bdCreate(t, bd, dir, "blocker", "--type", "task")
+	blocked := bdCreate(t, bd, dir, "blocked", "--type", "task")
+	bdRunOK(t, bd, dir, "dep", "add", blocked.ID, blocker.ID)
+
+	out, err := bdRunWithFlockRetry(t, bd, dir, "update", blocked.ID, "--claim", "--actor", "w1")
+	if err == nil {
+		t.Errorf("claim of blocked issue %s succeeded, want refusal naming blocker %s\n%s", blocked.ID, blocker.ID, out)
+	} else if !strings.Contains(string(out), blocker.ID) {
+		t.Errorf("refusal should name blocker %s, got: %s", blocker.ID, out)
+	}
+	got := bdShow(t, bd, dir, blocked.ID)
+	if got.Status != types.StatusOpen || got.Assignee != "" {
+		t.Errorf("blocked issue after refused claim: status=%s assignee=%q, want open and unassigned", got.Status, got.Assignee)
+	}
+}
+
+// claimBookkeeping counts what a claim writes beside the issue row for one id:
+// its lease, its event rows on either plane, its durable journal records and
+// its version rows, plus the length of the Dolt history. A refused claim must
+// leave every count where it was; the row itself is checked through bd show.
+type claimBookkeeping struct {
+	leases, events, journal, versions, commits int
+}
+
+func readClaimBookkeeping(t *testing.T, db *sql.DB, id string) claimBookkeeping {
+	t.Helper()
+	var got claimBookkeeping
+	for _, read := range []struct {
+		dst   *int
+		query string
+		args  []any
+	}{
+		{&got.leases, "SELECT COUNT(*) FROM leases WHERE issue_id = ?", []any{id}},
+		{&got.events, "SELECT (SELECT COUNT(*) FROM events WHERE issue_id = ?) + (SELECT COUNT(*) FROM wisp_events WHERE issue_id = ?)", []any{id, id}},
+		{&got.journal, "SELECT COUNT(*) FROM bd_events_journal WHERE issue_id = ?", []any{id}},
+		{&got.versions, "SELECT COUNT(*) FROM issue_versions WHERE issue_id = ?", []any{id}},
+		{&got.commits, "SELECT COUNT(*) FROM dolt_log", nil},
+	} {
+		if err := db.QueryRowContext(t.Context(), read.query, read.args...).Scan(read.dst); err != nil {
+			t.Fatalf("claim bookkeeping for %s: %s: %v", id, read.query, err)
+		}
+	}
+	return got
+}
+
+// embeddedClaimBookkeeping reads claimBookkeeping from an embedded workspace,
+// closing the database before the next bd invocation needs it.
+func embeddedClaimBookkeeping(t *testing.T, beadsDir, database, id string) claimBookkeeping {
+	t.Helper()
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), database, "main")
+	if err != nil {
+		t.Fatalf("open embedded SQL: %v", err)
+	}
+	defer func() { _ = cleanup() }()
+	return readClaimBookkeeping(t, db, id)
+}
+
+// embeddedIsBlocked reads id's stored is_blocked flag from an embedded
+// workspace, closing the database before the next bd invocation needs it.
+func embeddedIsBlocked(t *testing.T, beadsDir, database, id string) bool {
+	t.Helper()
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), database, "main")
+	if err != nil {
+		t.Fatalf("open embedded SQL: %v", err)
+	}
+	defer func() { _ = cleanup() }()
+	return readIsBlocked(t, db, id)
+}
+
+// bd-ltvqa9 AC-5: the guard refuses on a LIVE direct blocker, never on the
+// stored is_blocked flag alone — the close predicate's fail-open half. A flag
+// left set with no live edge (a purely transitive block, or direct blockers
+// that have since closed) claims cleanly without --force.
+func TestEmbeddedUpdateClaimPassesStaleBlockedFlag(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "cb")
+
+	issue := bdCreate(t, bd, dir, "stale", "--type", "task")
+
+	// Stale flag, written directly: every maintenance path would recompute
+	// the column away, and that is the point — only the raw row still says 1.
+	// The SQL connection is closed before the claim so it holds no lock.
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), "cb", "main")
+	if err != nil {
+		t.Fatalf("open embedded SQL: %v", err)
+	}
+	if _, err := db.ExecContext(t.Context(),
+		"UPDATE issues SET is_blocked = 1 WHERE id = ?", issue.ID); err != nil {
+		t.Fatalf("seed stale is_blocked flag for %s: %v", issue.ID, err)
+	}
+	if err := cleanup(); err != nil {
+		t.Fatalf("close embedded SQL: %v", err)
+	}
+
+	out, err := bdRunWithFlockRetry(t, bd, dir, "update", issue.ID, "--claim", "--actor", "w1")
+	if err != nil {
+		t.Fatalf("unforced claim of a stale-flagged issue refused: %v\n%s", err, out)
+	}
+	got := bdShow(t, bd, dir, issue.ID)
+	if got.Status != types.StatusInProgress || got.Assignee != "w1" {
+		t.Errorf("claim of a stale-flagged issue: status=%s assignee=%q, want in_progress/w1",
+			got.Status, got.Assignee)
+	}
 }

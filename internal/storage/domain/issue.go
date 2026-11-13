@@ -2,6 +2,7 @@ package domain
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -27,6 +28,11 @@ type InsertIssueOpts struct {
 
 type IssueTableOpts struct {
 	UseWispsTable bool
+	// RefuseBlocked asks Claim to refuse, after its compare-and-set wins and
+	// before any claim bookkeeping, an issue with a live local blocker
+	// (issueops.EnforceClaimPolicyInTx). Only the lifecycle update's claim
+	// sets it; other readers and writers ignore it.
+	RefuseBlocked bool
 }
 
 type ClaimRowResult struct {
@@ -354,6 +360,11 @@ type ClaimReadyResult struct {
 type UpdateSpec struct {
 	Fields map[string]any
 	Claim  bool
+	// ForceClaimBlocked lets Claim take an issue that still has a live local
+	// blocker; without it a claim of such an issue refuses with a
+	// publicops.BlockedError wrapping storage.ErrClaimBlocked and nothing is
+	// written. It has no meaning without Claim.
+	ForceClaimBlocked bool
 	// ExpectedVersion requires the current row version to match before any
 	// claim or field writes.
 	ExpectedVersion *int64
@@ -723,22 +734,31 @@ func canonicalIssueUpdateTypeError(field string, value any, want string) error {
 }
 
 func (u *issueUseCaseImpl) ClaimIssue(ctx context.Context, id, actor string) (ClaimResult, error) {
-	return u.claim(ctx, id, actor, false)
+	return u.claim(ctx, id, actor, false, false)
 }
 
 func (u *issueUseCaseImpl) ClaimWisp(ctx context.Context, id, actor string) (ClaimResult, error) {
-	return u.claim(ctx, id, actor, true)
+	return u.claim(ctx, id, actor, true, false)
 }
 
-func (u *issueUseCaseImpl) claim(ctx context.Context, id, actor string, useWisp bool) (ClaimResult, error) {
+// claim is the body of ClaimIssue and ClaimWisp. refuseBlocked is the
+// lifecycle update's opt-in to the blocked-claim refusal (see
+// IssueTableOpts.RefuseBlocked); the public claim methods never set it.
+func (u *issueUseCaseImpl) claim(ctx context.Context, id, actor string, useWisp, refuseBlocked bool) (ClaimResult, error) {
 	if id == "" {
 		return ClaimResult{}, fmt.Errorf("claim: id must not be empty")
 	}
 	if actor == "" {
 		return ClaimResult{}, fmt.Errorf("claim: actor must not be empty")
 	}
-	row, err := u.issueRepo.Claim(ctx, id, actor, IssueTableOpts{UseWispsTable: useWisp})
+	row, err := u.issueRepo.Claim(ctx, id, actor, IssueTableOpts{UseWispsTable: useWisp, RefuseBlocked: refuseBlocked})
 	if err != nil {
+		// The blocked-claim refusal already names the issue and its blockers,
+		// and must read the same on every route, so it is not prefixed.
+		var blocked *publicops.BlockedError
+		if errors.As(err, &blocked) {
+			return ClaimResult{}, err
+		}
 		return ClaimResult{}, fmt.Errorf("claim %s: %w", id, err)
 	}
 	if row.Updated {
@@ -846,14 +866,8 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 	}
 
 	if spec.Claim {
-		if useWisp {
-			if _, err := u.ClaimWisp(ctx, id, actor); err != nil {
-				return nil, err
-			}
-		} else {
-			if _, err := u.ClaimIssue(ctx, id, actor); err != nil {
-				return nil, err
-			}
+		if _, err := u.claim(ctx, id, actor, useWisp, !spec.ForceClaimBlocked); err != nil {
+			return nil, err
 		}
 	}
 
@@ -1899,11 +1913,11 @@ func (u *issueUseCaseImpl) reopen(ctx context.Context, id string, params ReopenI
 }
 
 func (u *issueUseCaseImpl) ClaimIssueIfOpen(ctx context.Context, id, actor string) (ClaimResult, error) {
-	return u.claim(ctx, id, actor, false)
+	return u.claim(ctx, id, actor, false, false)
 }
 
 func (u *issueUseCaseImpl) ClaimWispIfOpen(ctx context.Context, id, actor string) (ClaimResult, error) {
-	return u.claim(ctx, id, actor, true)
+	return u.claim(ctx, id, actor, true, false)
 }
 
 func (u *issueUseCaseImpl) CountOpenChildren(ctx context.Context, id string) (int, error) {

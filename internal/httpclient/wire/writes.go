@@ -228,21 +228,22 @@ type updateBody struct {
 	Actor string         `json:"actor"`
 	Patch map[string]any `json:"patch"`
 	UpdateGuards
-	// The five UpdateFlags, each sent only when true (setItemBool's
+	// The six UpdateFlags, each sent only when true (setItemBool's
 	// convention: an explicit false is the default said twice). Absent is
 	// what an older server that predates a member reads correctly, which is
 	// what lets a request that sets none of them reach a server that knows
 	// none of them.
 	Claim                 *bool `json:"claim,omitempty"`
 	ForceAssigneeTransfer *bool `json:"force_assignee_transfer,omitempty"`
+	ForceClaimBlocked     *bool `json:"force_claim_blocked,omitempty"`
 	ForceClosePolicy      *bool `json:"force_close_policy,omitempty"`
 	ForceNotesOverwrite   *bool `json:"force_notes_overwrite,omitempty"`
 	AllowTemplate         *bool `json:"allow_template,omitempty"`
 }
 
-// UpdateFlags are updateIssue's five top-level booleans: the claim, the three
+// UpdateFlags are updateIssue's six top-level booleans: the claim, the four
 // force overrides and the template stand-down. UpdateIssueRequest publishes all
-// five (internal/httpapi/apigen's generated type) and none is a GUARD — none
+// six (internal/httpapi/apigen's generated type) and none is a GUARD — none
 // carries a comparison value, unlike every member UpdateGuards holds — so they
 // travel as their own struct rather than joining that one.
 //
@@ -261,6 +262,11 @@ type UpdateFlags struct {
 	// transfer away from a live foreign in-progress owner. The server
 	// requires patch.assignee beside it.
 	ForceAssigneeTransfer bool
+	// ForceClaimBlocked bypasses ONLY the live local-blocker refusal on a
+	// claim. The server requires Claim beside it, and the client sends it
+	// only for a server advertising CapIssuesUpdateForceClaimBlocked, read
+	// from the handshake before the dial.
+	ForceClaimBlocked bool
 	// ForceClosePolicy bypasses ONLY close policy — the open-children and
 	// live-blocker refusals — on a patch.status crossing into the done
 	// category.
@@ -293,6 +299,7 @@ func (c *Client) UpdateIssue(ctx context.Context, id, actor string, patch map[st
 		Actor: actor, Patch: patch, UpdateGuards: guards,
 		Claim:                 trueOrAbsent(flags.Claim),
 		ForceAssigneeTransfer: trueOrAbsent(flags.ForceAssigneeTransfer),
+		ForceClaimBlocked:     trueOrAbsent(flags.ForceClaimBlocked),
 		ForceClosePolicy:      trueOrAbsent(flags.ForceClosePolicy),
 		ForceNotesOverwrite:   trueOrAbsent(flags.ForceNotesOverwrite),
 		AllowTemplate:         trueOrAbsent(flags.AllowTemplate),

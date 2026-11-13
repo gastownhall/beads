@@ -70,6 +70,19 @@ func TestValidateUpdateRequestRejectsInvalidNotesRequestShapes(t *testing.T) {
 	}
 }
 
+// bd-ltvqa9 AC-6: ForceClaimBlocked is a claim-only override. A request that
+// spells it without Claim is malformed and refused here — by both engines'
+// shared validation, before any mutation — rather than silently ignored.
+func TestValidateUpdateRequestRejectsForcedBlockedClaimWithoutClaim(t *testing.T) {
+	err := ValidateUpdateRequest(publicops.UpdateRequest{
+		Actor: "actor", IssueID: "bd-validate",
+		ForceClaimBlocked: true,
+	})
+	if !errors.Is(err, storage.ErrValidation) {
+		t.Fatalf("ValidateUpdateRequest() error = %v, want ErrValidation", err)
+	}
+}
+
 func TestApplyMetadataPatchRejectsUnsafeKeysAndNullMerge(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

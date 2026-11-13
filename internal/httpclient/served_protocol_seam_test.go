@@ -224,6 +224,10 @@ var servedDialsOutsideTheSwitch = map[servedDialSite]string{
 		"by reading v0 requests — it counts POST …/{id}:claim and answers a PATCH whose body carries `claim` with the skew 400 — " +
 		"and a client on another protocol sends neither shape (on BDP, TestClaimOnlyUpdateRefusesAWispByNameOnAServerThatPredatesUpdateClaim " +
 		"and TestClaimOnlyUpdateHydratesLabelsAndCreatedByForOutputParity fail)",
+	{"served_claim_lifecycle_test.go", "forceClaimBlockedSubject", "wire.New"}: "v0-only by design: the case varies the HANDSHAKE rather than the wire — " +
+		"forceClaimBlockedTransport is a pure pass-through that counts PATCHes, and what differs is the masked capabilities list " +
+		"the client reads before any dial, so a client on any protocol would take the same pre-dial refusal; the dial is v0 because " +
+		"the served harness's own subject is",
 	{"served_large_apply_timeout_test.go", "TestServedLargeApplyOutlivesTheDefaultClientTimeout", "DialWith"}: "the product dial path by design: " +
 		"the case proves the production transport and wire.DefaultTimeout carry a large apply, and a harness-built client would replace exactly that; " +
 		"a protocol reaches this dial through the Target the product path reads, not through wire.Options",

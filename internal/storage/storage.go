@@ -32,6 +32,7 @@ var (
 	ErrNotInitialized    = issueops.ErrNotInitialized
 	ErrPrefixMismatch    = issueops.ErrPrefixMismatch
 	ErrCloseBlocked      = issueops.ErrCloseBlocked
+	ErrClaimBlocked      = issueops.ErrClaimBlocked
 	ErrCloseOpenChildren = issueops.ErrCloseOpenChildren
 	ErrAlreadyExists     = issueops.ErrAlreadyExists
 	// ErrIdempotencyExpired matches a create refused because a retaining

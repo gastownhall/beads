@@ -151,6 +151,7 @@ go_test(
         "blocked_recheck_test.go",
         "blocked_state_result_test.go",
         "blocked_state_template_test.go",
+        "claim_policy_test.go",
         "close_guard_test.go",
         "close_test.go",
         "config_helpers_test.go",

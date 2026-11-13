@@ -73,6 +73,21 @@ func TestLifecycleUpdateContract(t *testing.T) {
 	t.Run("ClosePolicy", func(t *testing.T) {
 		conformance.RunLifecycleUpdateClosePolicy(t, ctx, fixture)
 	})
+	t.Run("ClaimRefusesALiveBlocker", func(t *testing.T) {
+		conformance.RunLifecycleUpdateClaimRefusesALiveBlocker(t, ctx, fixture)
+	})
+	t.Run("ForceClaimBlockedClaimsPastALiveBlocker", func(t *testing.T) {
+		conformance.RunLifecycleUpdateForceClaimBlockedClaimsPastALiveBlocker(t, ctx, fixture)
+	})
+	t.Run("ReclaimByTheHolderIgnoresANewBlocker", func(t *testing.T) {
+		conformance.RunLifecycleUpdateReclaimByTheHolderIgnoresANewBlocker(t, ctx, fixture)
+	})
+	t.Run("ClaimIgnoresAnInheritedBlockedFlag", func(t *testing.T) {
+		conformance.RunLifecycleUpdateClaimIgnoresAnInheritedBlockedFlag(t, ctx, fixture)
+	})
+	t.Run("ForceClaimBlockedRequiresAClaim", func(t *testing.T) {
+		conformance.RunLifecycleUpdateForceClaimBlockedRequiresAClaim(t, ctx, fixture)
+	})
 	t.Run("AssigneeTransferFence", func(t *testing.T) {
 		conformance.RunLifecycleUpdateAssigneeTransferFence(t, ctx, fixture)
 	})
@@ -129,6 +144,7 @@ func newEmbeddedLifecycleUpdateFixture(t *testing.T, te *testEnv, prefix string)
 		AddDependency:        kit.AddDependency,
 		SetConfig:            kit.SetConfig,
 		CountHistoryMatching: kit.CountHistoryMatching,
+		StoredIsBlocked:      conformance.StoredIsBlockedThrough(kit.QueryScalar),
 		// The frozen kit reads through QueryScalar. This block reads its
 		// post-state through the store's own reads instead, so no case in it
 		// depends on raw SQL.

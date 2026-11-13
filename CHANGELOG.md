@@ -1024,6 +1024,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `MoleculeStepper` role on every route: the assignee is set and a step
   another agent holds is skipped, never taken (the direct and http routes
   used to flip the status only).
+- **`bd update <id> --claim` refuses an issue with a live local blocker.** A
+  claim by id used to take an issue the dependency graph still blocked, so an
+  agent could start work it could not finish. The claim now applies the
+  blocker check `bd close` applies: a `blocks`, `waits-for` or
+  `conditional-blocks` dependency on an issue that is neither closed nor
+  pinned refuses it with `cannot claim blocked issue: <id> is blocked by
+  [<blockers>] (use --force to override)` and exit 1, and nothing is written
+  (no assignee, status, lease, event or history entry); the other ids of a
+  multi-id `bd update` are still claimed. `--force` claims it anyway. An
+  unresolved external dependency still refuses the claim, with or without
+  `--force`. Not refused: a block inherited only from a parent, an
+  `is_blocked` flag with no live blocker behind it, and a repeat claim by the
+  agent that already holds the issue. `bd ready --claim`, `bd close
+  --continue` and `POST /v0/beads/issues/{id}:claim` claim as before. Over
+  `bd serve`, `PATCH /v0/beads/issues/{id}` with `claim: true` answers the
+  refusal with `409 not_claimable` and a `blockers` member and accepts
+  `force_claim_blocked: true` as the override; the behavior token
+  `issues.update.forceClaimBlocked` advertises both. Against a `bd serve`
+  that does not advertise it (one older than this change, which never
+  refuses a blocked claim), `bd update --claim --force` fails before it
+  sends anything, also when `--force` was meant for `--notes`: claim without
+  `--force`, then overwrite the notes with a separate `bd update --force
+  --notes`. Library callers match the refusal with `ErrClaimBlocked`
+  (`beads`, `issueops`) and override it with
+  `issueops.UpdateRequest.ForceClaimBlocked`. (#7049, #8360, from @sjarmak)
 - **`bd mol current`, `bd mol progress`, `bd ready --mol` and `bd mol show`
   read through the library's molecule entries on every route**, so
   membership is the parent-child edge everywhere (`bd mol show` no longer

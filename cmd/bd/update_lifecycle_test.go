@@ -32,7 +32,7 @@ func TestRunDirectUpdateMutationBuildsLifecycleRequest(t *testing.T) {
 		want     issueops.UpdateRequest
 	}{
 		{
-			name: "force without assignee only overrides close policy",
+			name: "force with a claim and no assignee overrides close policy and the blocked claim",
 			mutation: commandUpdateMutation{
 				actor:            "writer",
 				issueID:          "bd-1",
@@ -43,13 +43,14 @@ func TestRunDirectUpdateMutationBuildsLifecycleRequest(t *testing.T) {
 				expectedStatus:   &expectedStatus,
 			},
 			want: issueops.UpdateRequest{
-				Actor:            "writer",
-				IssueID:          "bd-1",
-				Patch:            issueops.IssuePatch{Status: issueops.Field[issueops.Status]{Set: true, Value: issueops.StatusClosed}},
-				Claim:            true,
-				ForceClosePolicy: true,
-				ExpectedAssignee: &expectedAssignee,
-				ExpectedStatus:   &expectedStatus,
+				Actor:             "writer",
+				IssueID:           "bd-1",
+				Patch:             issueops.IssuePatch{Status: issueops.Field[issueops.Status]{Set: true, Value: issueops.StatusClosed}},
+				Claim:             true,
+				ForceClosePolicy:  true,
+				ForceClaimBlocked: true,
+				ExpectedAssignee:  &expectedAssignee,
+				ExpectedStatus:    &expectedStatus,
 			},
 		},
 		{

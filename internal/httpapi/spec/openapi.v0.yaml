@@ -3145,6 +3145,19 @@ paths:
         that dropped the claim.
 
 
+        A refused claim also covers the LOCAL-BLOCKED case: a claim that
+        would take an issue with a live local blocker is refused with `409
+        not_claimable` naming `claim`, with the blockers in the problem's
+        `blockers` member — `bd close`'s live-blocker refusal, on the claim.
+        The check runs only once the claim's compare-and-set has won, so the
+        holder's idempotent re-claim is never refused and a status that is
+        not claimable gets the status refusal instead.
+        `force_claim_blocked` bypasses it (and nothing else); the
+        external-dependency claim refusals are NOT local blockers and no force
+        member bypasses them. `POST /v0/beads/issues/{id}:claim` does not
+        apply this refusal.
+
+
         `labels` is COMPLETE REPLACEMENT. It is the only shape whose result the
         client already knows without a read-back; an additive
         `labels_add`/`labels_remove` pair can join the vocabulary later without
@@ -3294,8 +3307,12 @@ paths:
             answers them: `already_claimed` when another actor holds the issue
             (with the `assignee` extension member when the refusing transaction
             reported the holder), `not_claimable` when its status is not
-            claimable (with `issue_status`). Nothing was written, the patch
-            included.
+            claimable (with `issue_status`). A `not_claimable` whose
+            `blockers` member is present is the third refusal: the issue has a
+            LIVE local blocker, so the claim would put in-progress work behind
+            it; the member names those blockers, and `issue_status` is absent.
+            `force_claim_blocked` is the bypass. None of these write anything,
+            the patch included.
 
 
             `precondition_failed` is `expected_version`, `expected_status` or
@@ -3662,6 +3679,11 @@ paths:
         `assignee` extension member, read inside the same transaction; an issue
         in a non-claimable state is 409 `not_claimable` and carries
         `issue_status`. Neither needs the client to parse prose.
+
+
+        This claim does not refuse an issue for its blockers: the
+        live-local-blocker refusal is `PATCH /v0/beads/issues/{id}`'s, on its
+        `claim` member (see `force_claim_blocked`).
       parameters:
         - $ref: '#/components/parameters/IssueID'
       security:
@@ -9250,7 +9272,13 @@ components:
             parent-child descendants and orphans every other dependent (see
             `DeleteIssuesRequest.cascade`; a server without it deletes every
             transitive dependent, so a client refuses to send `cascade` to
-            one). One behavior token is
+            one), and `issues.update.forceClaimBlocked`, which announces
+            that `PATCH /v0/beads/issues/{id}` refuses a `claim` of an issue
+            with a live local blocker — `409 not_claimable` naming `claim`
+            with the blockers in the problem's `blockers` member — and
+            accepts `force_claim_blocked` as that refusal's bypass (see
+            `UpdateIssueRequest`) rather than a `400` naming the member
+            unknown. One behavior token is
             CONDITIONAL rather than build-level: `policy.external_dependencies`
             announces that this server's ready, blocked-listing, claim,
             claim-next, close, blocking and dependency-tree operations already
@@ -13130,11 +13158,14 @@ components:
             `bd update <id> --claim`, served by the same role. The claim sets
             `assignee` to `actor` and `status` to `in_progress`, then the patch
             applies, so a `patch.assignee` or `patch.status` overrides the
-            claim's value. Eligibility is `{id}:claim`'s: a claimable status,
-            and unassigned, already held by `actor`, or held by a configured
-            claim pool. Held by `actor` and `in_progress` already is an
-            idempotent success. A refusal is `409 already_claimed` or `409
-            not_claimable` naming `claim`, and writes nothing — the patch
+            claim's value. Eligibility is `{id}:claim`'s — a claimable
+            status, and unassigned, already held by `actor`, or held by a
+            configured claim pool — plus one refusal `{id}:claim` does not
+            make: an issue with a live local blocker (see
+            `force_claim_blocked`). Held by `actor` and `in_progress` already
+            is an idempotent success, blocker or not. A refusal is `409
+            already_claimed`, `409 not_claimable`, or `409 not_claimable` with
+            a `blockers` member, naming `claim`, and writes nothing — the patch
             included. With `claim: true` the `patch` may be empty. It must not
             be combined with `expected_assignee`, `expected_status` or
             `force_assignee_transfer`; a request that does is a `400` naming
@@ -13216,6 +13247,23 @@ components:
             `expected_assignee` exemption: there is no compare-and-set that
             authorizes a notes overwrite, so combining the two is legal and
             each answers its own question.
+        force_claim_blocked:
+          type: boolean
+          default: false
+          description: >-
+            Bypasses ONLY the live local-blocker refusal on `claim`: a
+            claim of an issue that has a live blocker (a
+            blocks/waits-for/conditional-blocks edge from a live issue or
+            wisp) is otherwise refused with `409 not_claimable` naming
+            `claim`, with the blockers in the problem's `blockers` member.
+            It requires `claim: true` — a request setting it without one is a
+            `400` — and it bypasses nothing else: not `already_claimed`, not
+            a non-claimable status, and not the EXTERNAL claim refusals
+            (`bd close`'s external-dependency policy, which
+            `force_close_policy` does not bypass either). An issue with a
+            stale `is_blocked` flag and no live blocker is never refused.
+            Advertised by the behavior token
+            `issues.update.forceClaimBlocked`.
         allow_template:
           type: boolean
           default: false
@@ -13954,7 +14002,8 @@ components:
           type: string
           description: >-
             With `already_claimed` or `not_claimable`: the issue's status at
-            the moment of refusal.
+            the moment of refusal. Absent on the `not_claimable` that carries
+            `blockers`, a claim refused for a live local blocker.
         open_children:
           type: integer
           description: >-
@@ -13972,15 +14021,18 @@ components:
           items:
             $ref: '#/components/schemas/Blocker'
           description: >-
-            With `not_closable`, and ONLY on the live-blocker refusal: the live
-            blockers that refused the close, in the order the refusing check
-            reported them, read from the refusal's typed list rather than
-            parsed out of any message. Never present together with
-            `open_children`.
+            With `not_closable`, ONLY on the live-blocker refusal, and with
+            `not_claimable`, ONLY on a claim refused for a live local blocker
+            (the refusal `force_claim_blocked` bypasses): the live blockers
+            that refused the close or the claim, in the order the refusing
+            check reported them, read from the refusal's typed list rather
+            than parsed out of any message. Never present together with
+            `open_children` or `issue_status`.
 
 
             A client renders the direct CLI's sentence from it: `cannot close
-            blocked issue: <id> is blocked by [<b1> <b2> …]`, each blocker
+            blocked issue: <id> is blocked by [<b1> <b2> …]` (`cannot claim
+            blocked issue: …` for the claim), each blocker
             spelled `id` when its `type` is absent or `blocks` and `id (type)`
             otherwise — the sentence `detail` already begins with when this
             member is present.

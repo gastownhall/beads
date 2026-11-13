@@ -168,6 +168,7 @@ func plainV0WriteCases() []plainV0WriteCase {
 					"expected_version": "41",
 					"force_close_policy": true,
 					"force_notes_overwrite": true,
+					"force_claim_blocked": true,
 					"allow_template": true,
 					"patch": {
 						"title": "t",
@@ -227,6 +228,7 @@ func plainV0WriteCases() []plainV0WriteCase {
 				ExpectedVersion:     &version,
 				ForceClosePolicy:    true,
 				ForceNotesOverwrite: true,
+				ForceClaimBlocked:   true,
 				AllowTemplate:       true,
 				Provenance:          updateProvenance,
 			},
