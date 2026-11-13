@@ -78,11 +78,31 @@ func TestCLI_ServerModeConfigWritesCommit_E2E(t *testing.T) {
 		{"config", "set-many", "types.custom=gh4078kind", "status.custom=gh4078review:active,gh4078parked:frozen"},
 		{"config", "unset", "types.custom"},
 		{"forget", "gh4078"},
+		{"kv", "set", "gh7523", "server-mode kv value"},
 	} {
 		mustBD(step...)
 		if got := dirtyConfigTables(); got != "" {
 			t.Fatalf("after bd %s: %s left uncommitted in the working set (GH#4078)", strings.Join(step, " "), got)
 		}
+	}
+
+	// The kv set versions through a commit that names it, and the pair reads
+	// back through the same route before it is cleared (GH#7523).
+	if out := mustBD("sql", "--csv", "SELECT message FROM dolt_log ORDER BY date DESC LIMIT 1"); !strings.Contains(out, "bd: kv set (auto-commit) by ") {
+		t.Fatalf("latest commit after bd kv set: %s, want a kv set auto-commit", out)
+	}
+	if out := mustBD("kv", "get", "gh7523"); !strings.Contains(out, "server-mode kv value") {
+		t.Fatalf("bd kv get gh7523 after set: %s", out)
+	}
+	mustBD("kv", "clear", "gh7523")
+	if got := dirtyConfigTables(); got != "" {
+		t.Fatalf("after bd kv clear gh7523: %s left uncommitted in the working set (GH#7523)", got)
+	}
+	if out := mustBD("sql", "--csv", "SELECT message FROM dolt_log ORDER BY date DESC LIMIT 1"); !strings.Contains(out, "bd: kv clear (auto-commit) by ") {
+		t.Fatalf("latest commit after bd kv clear: %s, want a kv clear auto-commit", out)
+	}
+	if out, err := bd("kv", "get", "gh7523"); err == nil {
+		t.Fatalf("bd kv get gh7523 succeeded after clear:\n%s", out)
 	}
 
 	// A bd that predates notion.token moving to config.yaml stored it in the

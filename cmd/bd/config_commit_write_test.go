@@ -92,6 +92,59 @@ func TestCommitMemoryWriteSurfacesScreenRefusal(t *testing.T) {
 	}
 }
 
+// commitKVWrite is the kv twin of commitMemoryWrite: the same kv.*-screened
+// commit (GH#7523), reached with the kv verbs' own command names so the
+// commit messages and warnings identify the verb that made them.
+func TestCommitKVWriteServerModeCommitsUserKVScreened(t *testing.T) {
+	for _, command := range []string{"kv set", "kv clear"} {
+		t.Run(command, func(t *testing.T) {
+			saveStorageMode(t)
+			serverMode = true
+
+			fake := &fakeConfigCommitStore{}
+			if err := commitKVWrite(context.Background(), fake, command); err != nil {
+				t.Fatalf("commitKVWrite(%q): %v", command, err)
+			}
+			if fake.userKVCalls != 1 {
+				t.Fatalf("CommitConfigUserKVOnly calls = %d, want 1 for %s", fake.userKVCalls, command)
+			}
+			if fake.configOnlyCalls != 0 {
+				t.Fatalf("CommitConfigOnly calls = %d, want 0 for %s", fake.configOnlyCalls, command)
+			}
+			want := "bd: " + command + " (auto-commit) by "
+			if !strings.HasPrefix(fake.messages[0], want) {
+				t.Fatalf("commit message = %q, want prefix %q", fake.messages[0], want)
+			}
+		})
+	}
+
+	t.Run("screen refusal keeps its type through the wrap", func(t *testing.T) {
+		saveStorageMode(t)
+		serverMode = true
+
+		fake := &fakeConfigCommitStore{err: &storage.ConfigCommitRefusedError{Keys: []string{"issue_prefix"}}}
+		err := commitKVWrite(context.Background(), fake, "kv set")
+		var refused *storage.ConfigCommitRefusedError
+		if !errors.As(err, &refused) || !slices.Equal(refused.Keys, []string{"issue_prefix"}) {
+			t.Fatalf("commitKVWrite error = %v, want the screen's refusal naming issue_prefix", err)
+		}
+		if !strings.HasPrefix(err.Error(), "committing kv write: ") {
+			t.Fatalf("error = %q, want the kv commit's own prefix", err.Error())
+		}
+	})
+
+	t.Run("an ordinary error keeps the kv prefix", func(t *testing.T) {
+		saveStorageMode(t)
+		serverMode = true
+
+		fake := &fakeConfigCommitStore{err: errors.New("connection refused")}
+		err := commitKVWrite(context.Background(), fake, "kv clear")
+		if err == nil || !strings.Contains(err.Error(), "committing kv write: connection refused") {
+			t.Fatalf("commitKVWrite error = %v, want the kv warning prefix wrapping the failure", err)
+		}
+	})
+}
+
 // memoryCommitFields is how --json learns that a memory write landed but was
 // not committed, which the exit code no longer says. A committed write adds
 // nothing, so its payload keeps the shipped shape. A commit that may have
