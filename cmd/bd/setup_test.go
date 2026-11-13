@@ -1409,3 +1409,96 @@ func TestRunRecipe_CopilotRefusesSymlinkedInstructions(t *testing.T) {
 		})
 	}
 }
+
+// A fresh repository: bd setup copilot creates the beads-owned manifest and
+// a section-only instructions file, and --remove takes both files and their
+// now-empty directories back out, while a directory holding anything else
+// stays (GH#7431).
+func TestSetupCopilotRemoveOwnedInstructions(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		seed        string // instructions file content before install; "missing" for none
+		siblingFile bool   // an unrelated file in .github keeps that directory
+	}{
+		{name: "fresh install", seed: "missing"},
+		{name: "whitespace outside the section", seed: "\n"},
+		{name: "legacy install", seed: "legacy"},
+		{name: "sibling file keeps .github", seed: "missing", siblingFile: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			t.Chdir(tmpDir)
+			t.Setenv("BEADS_DIR", "")
+			resetSetupResolutionCaches(t)
+			resetSetupGlobals(t)
+
+			instructions := filepath.Join(tmpDir, ".github", "copilot-instructions.md")
+			if err := os.MkdirAll(filepath.Dir(instructions), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			seed := tt.seed
+			if seed == "legacy" {
+				seed = recipes.CopilotInstructionsLegacy
+			}
+			if seed != "missing" {
+				if err := os.WriteFile(instructions, []byte(seed), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.siblingFile {
+				if err := os.WriteFile(filepath.Join(tmpDir, ".github", "other.yml"), []byte("on: push\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			_ = captureStdout(t, func() error {
+				return runRecipe("copilot")
+			})
+
+			manifest := filepath.Join(tmpDir, ".copilot-plugin", "plugin.json")
+			for _, path := range []string{manifest, instructions} {
+				if _, err := os.Stat(path); err != nil {
+					t.Fatalf("install did not create %s: %v", path, err)
+				}
+			}
+			got, err := os.ReadFile(instructions)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "<!-- BEGIN BEADS INTEGRATION -->\n" +
+				recipes.CopilotInstructionsTemplate +
+				"<!-- END BEADS INTEGRATION -->\n"
+			if tt.seed == "missing" && string(got) != want {
+				t.Fatalf("fresh install wrote a section-only instructions file:\n%s\nwant:\n%s", got, want)
+			}
+			if n := strings.Count(string(got), "<!-- BEGIN BEADS INTEGRATION"); n != 1 {
+				t.Fatalf("%d beads sections after install; want 1:\n%s", n, got)
+			}
+
+			_ = captureStdout(t, func() error {
+				return runRecipe("copilot")
+			})
+			setupRemove = true
+			t.Cleanup(func() { setupRemove = false })
+			_ = captureStdout(t, func() error {
+				return runRecipe("copilot")
+			})
+
+			for _, path := range []string{manifest, instructions} {
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Fatalf("%s still exists after --remove (stat err %v)", path, err)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(tmpDir, ".copilot-plugin")); !os.IsNotExist(err) {
+				t.Fatalf("empty .copilot-plugin directory still exists after --remove: %v", err)
+			}
+			if tt.siblingFile {
+				if _, err := os.Stat(filepath.Join(tmpDir, ".github", "other.yml")); err != nil {
+					t.Fatalf("unrelated .github file was taken: %v", err)
+				}
+			} else if _, err := os.Stat(filepath.Join(tmpDir, ".github")); !os.IsNotExist(err) {
+				t.Fatalf("empty .github directory still exists after --remove: %v", err)
+			}
+		})
+	}
+}
