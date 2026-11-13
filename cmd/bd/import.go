@@ -435,7 +435,7 @@ func runImportRecordsClassic(ctx context.Context, issues []*types.Issue, memorie
 			// An import can be a working-set no-op: re-importing an
 			// identical snapshot, or equal-timestamp rows whose guarded
 			// upsert kept every local column (bd-hj85c).
-			if !strings.Contains(err.Error(), "nothing to commit") {
+			if !isDoltNothingToCommit(err) {
 				return fmt.Errorf("commit: %w", err)
 			}
 		}

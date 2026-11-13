@@ -275,6 +275,7 @@
           "recovery/merge-conflicts",
           "recovery/circular-dependencies",
           "recovery/sync-failures",
+          "recovery/incomplete-commits",
           "recovery/history-squash",
           "recovery/unmigrate-schema-v65",
           "recovery/uninstalling"

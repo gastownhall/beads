@@ -3,7 +3,15 @@
 package embeddeddolt_test
 
 import (
+	"context"
+	"errors"
+	"slices"
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // TestCommitAllOutOfBandChangeAndHonestNoOp covers the embedded half of the
@@ -62,5 +70,217 @@ func TestCommitAllOutOfBandChangeAndHonestNoOp(t *testing.T) {
 	}
 	if headSwept == headAfter {
 		t.Fatalf("CommitAll reported committed=true but HEAD did not advance from %s", headAfter)
+	}
+}
+
+// seedIgnoredIssue creates one issue, commits it, then registers an operator
+// dolt_ignore pattern for the tracked issues table and commits the pattern,
+// so the next issues write lands in the working set but DOLT_COMMIT('-Am')
+// cannot stage it (GH#5433). It returns the issue id.
+func seedIgnoredIssue(t *testing.T, ctx context.Context, te *testEnv) string {
+	t.Helper()
+	issue := &types.Issue{Title: "before", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := te.store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if _, err := te.store.CommitAll(ctx, "test: commit issue"); err != nil {
+		t.Fatalf("CommitAll after CreateIssue: %v", err)
+	}
+	te.exec(t, ctx, "INSERT INTO dolt_ignore VALUES ('issues', true)")
+	if _, err := te.store.CommitAll(ctx, "test: commit ignore pattern"); err != nil {
+		t.Fatalf("CommitAll after dolt_ignore insert: %v", err)
+	}
+	te.exec(t, ctx, "UPDATE issues SET title = 'after' WHERE id = ?", issue.ID)
+	var dirty int
+	te.queryScalar(t, ctx, "SELECT COUNT(*) FROM dolt_status WHERE table_name = 'issues'", nil, &dirty)
+	if dirty == 0 {
+		t.Fatal("fixture: modified ignored issues table is not listed in dolt_status")
+	}
+	return issue.ID
+}
+
+// assertIssuesLeftInWorkingSet checks the residual issues change is still
+// saved in the working set and absent from HEAD.
+func assertIssuesLeftInWorkingSet(t *testing.T, ctx context.Context, te *testEnv, id string) {
+	t.Helper()
+	var working, head string
+	te.queryScalar(t, ctx, "SELECT title FROM issues WHERE id = ?", []any{id}, &working)
+	te.queryScalar(t, ctx, "SELECT title FROM issues AS OF 'HEAD' WHERE id = ?", []any{id}, &head)
+	if working != "after" || head != "before" {
+		t.Fatalf("issue title working=%q HEAD=%q, want working=after HEAD=before", working, head)
+	}
+}
+
+func requireUncommittedChanges(t *testing.T, err error, table string, committed bool) *storage.UncommittedChangesError {
+	t.Helper()
+	var residual *storage.UncommittedChangesError
+	if !errors.As(err, &residual) {
+		t.Fatalf("CommitAll error = %v, want *storage.UncommittedChangesError", err)
+	}
+	if !slices.Contains(residual.Tables, table) {
+		t.Fatalf("UncommittedChangesError.Tables = %v, want %q", residual.Tables, table)
+	}
+	if residual.Committed != committed {
+		t.Fatalf("UncommittedChangesError.Committed = %v, want %v", residual.Committed, committed)
+	}
+	if errors.Is(err, storage.ErrCommitIndeterminate) {
+		t.Fatalf("CommitAll error = %v, want a verification finding, not ErrCommitIndeterminate", err)
+	}
+	return residual
+}
+
+// TestCommitAllReportsTrackedTableSkippedByIgnorePattern pins GH#5433's
+// false-clean report: a tracked table covered by an ignore pattern stays dirty
+// after DOLT_COMMIT('-Am') answers "nothing to commit", and CommitAll must
+// say so instead of returning (false, nil).
+func TestCommitAllReportsTrackedTableSkippedByIgnorePattern(t *testing.T) {
+	ctx := t.Context()
+	te := newTestEnv(t, "ig")
+	id := seedIgnoredIssue(t, ctx, te)
+	headBefore, err := te.store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit: %v", err)
+	}
+
+	committed, err := te.store.CommitAll(ctx, "test: commit ignored issues change")
+	if committed {
+		t.Fatal("CommitAll committed = true, want false: nothing was committable")
+	}
+	residual := requireUncommittedChanges(t, err, "issues", false)
+	if !slices.Contains(residual.IgnorePatterns, "issues") {
+		t.Errorf("UncommittedChangesError.IgnorePatterns = %v, want the noncanonical pattern %q", residual.IgnorePatterns, "issues")
+	}
+	if !strings.Contains(err.Error(), "tracked changes remain in issues") {
+		t.Errorf("CommitAll error = %q, want it to name issues", err)
+	}
+
+	headAfter, err := te.store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit: %v", err)
+	}
+	if headAfter != headBefore {
+		t.Fatalf("HEAD moved %s -> %s on a refused commit", headBefore, headAfter)
+	}
+	assertIssuesLeftInWorkingSet(t, ctx, te, id)
+}
+
+// TestCommitAllReportsPartialCommit covers the partial case: Dolt commits the
+// stageable config change and skips the ignored issues change. CommitAll must
+// report both the commit and the residue, not either alone.
+func TestCommitAllReportsPartialCommit(t *testing.T) {
+	ctx := t.Context()
+	te := newTestEnv(t, "pc")
+	id := seedIgnoredIssue(t, ctx, te)
+	te.exec(t, ctx, "INSERT INTO config (`key`, value) VALUES ('test.partial-commit', 'v1')")
+	headBefore, err := te.store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit: %v", err)
+	}
+
+	committed, err := te.store.CommitAll(ctx, "test: partial commit")
+	if !committed {
+		t.Fatalf("CommitAll committed = false, want true: config was committable (err=%v)", err)
+	}
+	requireUncommittedChanges(t, err, "issues", true)
+	if !strings.Contains(err.Error(), "a commit was created") {
+		t.Errorf("CommitAll error = %q, want it to say a commit was created", err)
+	}
+
+	headAfter, err := te.store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit: %v", err)
+	}
+	if headAfter == headBefore {
+		t.Fatal("HEAD did not move although the config change was committable")
+	}
+	var headValue string
+	te.queryScalar(t, ctx, "SELECT value FROM config AS OF 'HEAD' WHERE `key` = 'test.partial-commit'", nil, &headValue)
+	if headValue != "v1" {
+		t.Fatalf("config at HEAD = %q, want v1", headValue)
+	}
+	var configDirty int
+	te.queryScalar(t, ctx, "SELECT COUNT(*) FROM dolt_status WHERE table_name = 'config'", nil, &configDirty)
+	if configDirty != 0 {
+		t.Fatalf("config still dirty after the partial commit (%d dolt_status rows)", configDirty)
+	}
+	assertIssuesLeftInWorkingSet(t, ctx, te, id)
+
+	// The residue is durable working-set state, not an in-memory leftover:
+	// after a reopen HEAD is still the partial commit, the stranded title is
+	// still there, and a full commit keeps refusing it.
+	if err := te.store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	beadsDir := strings.TrimSuffix(te.dataDir, "/embeddeddolt")
+	reopened, err := embeddeddolt.Open(ctx, beadsDir, te.database, "main")
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	headReopened, err := reopened.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit after reopen: %v", err)
+	}
+	if headReopened != headAfter {
+		t.Fatalf("HEAD changed across reopen: %s -> %s", headAfter, headReopened)
+	}
+	committed, err = reopened.CommitAll(ctx, "test: commit after reopen")
+	if committed {
+		t.Fatal("CommitAll after reopen committed = true, want false: only the ignored issues change is dirty")
+	}
+	requireUncommittedChanges(t, err, "issues", false)
+	assertIssuesLeftInWorkingSet(t, ctx, te, id)
+}
+
+// TestCommitAllToleratesOwnedCloneLocalChanges pins what the GH#5433 check
+// must not report: a change to a table bd's own dolt_ignore policy covers is
+// expected to stay in the working set. A formerly tracked __temp__ table
+// (the residue schema.go documents) stands in for that state; with only it
+// dirty CommitAll stays an honest no-op, and an ordinary tracked change
+// beside it still commits cleanly.
+func TestCommitAllToleratesOwnedCloneLocalChanges(t *testing.T) {
+	ctx := t.Context()
+	te := newTestEnv(t, "ow")
+	if _, err := te.store.CommitAll(ctx, "test: flush baseline"); err != nil {
+		t.Fatalf("baseline CommitAll: %v", err)
+	}
+	committed, err := te.store.CommitAll(ctx, "test: clean store")
+	if err != nil || committed {
+		t.Fatalf("CommitAll on a clean store = (%v, %v), want (false, nil)", committed, err)
+	}
+
+	te.exec(t, ctx, "UPDATE dolt_ignore SET ignored = false WHERE pattern = '__temp__%'")
+	te.exec(t, ctx, "CREATE TABLE __temp__probe (id INT PRIMARY KEY, v VARCHAR(16))")
+	if _, err := te.store.CommitAll(ctx, "test: track __temp__probe"); err != nil {
+		t.Fatalf("CommitAll tracking __temp__probe: %v", err)
+	}
+	te.exec(t, ctx, "UPDATE dolt_ignore SET ignored = true WHERE pattern = '__temp__%'")
+	if _, err := te.store.CommitAll(ctx, "test: re-ignore __temp__"); err != nil {
+		t.Fatalf("CommitAll re-ignoring __temp__: %v", err)
+	}
+	te.exec(t, ctx, "INSERT INTO __temp__probe VALUES (1, 'x')")
+	var dirty int
+	te.queryScalar(t, ctx, "SELECT COUNT(*) FROM dolt_status WHERE table_name = '__temp__probe'", nil, &dirty)
+	if dirty == 0 {
+		t.Fatal("fixture: modified formerly tracked __temp__probe is not listed in dolt_status")
+	}
+
+	committed, err = te.store.CommitAll(ctx, "test: only clone-local changes")
+	if err != nil || committed {
+		t.Fatalf("CommitAll with only owned clone-local changes = (%v, %v), want (false, nil)", committed, err)
+	}
+	if err := te.store.Commit(ctx, "test: tolerant Commit"); err != nil {
+		t.Fatalf("Commit with only owned clone-local changes: %v", err)
+	}
+
+	te.exec(t, ctx, "INSERT INTO config (`key`, value) VALUES ('test.owned-beside', 'v1')")
+	committed, err = te.store.CommitAll(ctx, "test: ordinary change beside clone-local")
+	if err != nil || !committed {
+		t.Fatalf("CommitAll with an ordinary tracked change = (%v, %v), want (true, nil)", committed, err)
+	}
+	var headValue string
+	te.queryScalar(t, ctx, "SELECT value FROM config AS OF 'HEAD' WHERE `key` = 'test.owned-beside'", nil, &headValue)
+	if headValue != "v1" {
+		t.Fatalf("config at HEAD = %q, want v1", headValue)
 	}
 }

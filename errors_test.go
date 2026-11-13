@@ -28,6 +28,46 @@ func TestReExportCommitIndeterminate(t *testing.T) {
 	}
 }
 
+// TestReExportCommitVerificationErrors proves the public aliases for the
+// incomplete-commit findings (GH#5433) are the storage types and sentinel
+// themselves, so a library caller recovers them from a wrapped Push or Pull
+// error with errors.As and errors.Is without importing internal/storage.
+func TestReExportCommitVerificationErrors(t *testing.T) {
+	t.Parallel()
+
+	if beads.ErrCommitVerificationFailed != storage.ErrCommitVerificationFailed {
+		t.Error("beads.ErrCommitVerificationFailed is not the internal sentinel value (identity broken)")
+	}
+
+	residual := fmt.Errorf("commit pending before push: %w", &storage.UncommittedChangesError{
+		Tables:    []string{"issues"},
+		Committed: true,
+	})
+	var changes *beads.UncommittedChangesError
+	if !errors.As(residual, &changes) || !changes.Committed || len(changes.Tables) != 1 || changes.Tables[0] != "issues" {
+		t.Errorf("errors.As(err, *beads.UncommittedChangesError) did not recover the payload; err = %v, got %+v", residual, changes)
+	}
+
+	for _, outcome := range []beads.CommitOutcome{beads.CommitOutcomeSucceeded, beads.CommitOutcomeNothingToCommit} {
+		cause := errors.New("read dolt_status failed")
+		unverified := fmt.Errorf("commit pending before pull: %w", &storage.CommitVerificationError{
+			Outcome:   outcome,
+			Operation: "read dolt_status",
+			Cause:     cause,
+		})
+		if !errors.Is(unverified, beads.ErrCommitVerificationFailed) {
+			t.Errorf("errors.Is(err, beads.ErrCommitVerificationFailed) = false; err = %v", unverified)
+		}
+		var verification *beads.CommitVerificationError
+		if !errors.As(unverified, &verification) || verification.Outcome != outcome {
+			t.Errorf("errors.As(err, *beads.CommitVerificationError) did not recover outcome %q; err = %v, got %+v", outcome, unverified, verification)
+		}
+		if !errors.Is(unverified, cause) {
+			t.Errorf("errors.Is(err, cause) = false: the failed read's error must stay reachable; err = %v", unverified)
+		}
+	}
+}
+
 // TestReExportCloseBlocked proves the public beads.ErrCloseBlocked alias is the
 // same value as the internal sentinel and composes through errors.Is when
 // wrapped — the property CloseIssueChecked callers rely on to detect a guard

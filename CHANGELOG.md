@@ -711,6 +711,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   multi-tenant embedder serving many workspaces needs, where a
   process-global credential cannot stand in for one tenant's own.
   EXPERIMENTAL, pin an exact beads version.
+- The public `beads` package re-exports the commit findings as aliases of
+  the storage types: `UncommittedChangesError`, `CommitVerificationError`,
+  `CommitOutcome` (with `CommitOutcomeSucceeded` and
+  `CommitOutcomeNothingToCommit`) and `ErrCommitVerificationFailed`. A
+  library caller matches what an embedded store's full commit, `Push` and
+  `Pull` return with `errors.As` and `errors.Is` instead of parsing the
+  message (GH#5433).
 - Unlimited ready and query reads over the HTTP backend (`bd ready --limit
   0`, `bd query --limit 0`, and every library read asking for no limit)
   return every row against any server, bounded on the client by the new
@@ -1815,6 +1822,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wisp), and creating a wisp under a durable parent that a `waits-for` edge
   watches. An edge that changes no `is_blocked` still commits only the
   dependency, so it cannot sweep someone else's pending issue edit (#6647).
+- Embedded-mode commits no longer report success while tracked changes stay
+  behind. A full commit can leave a tracked table's changes in the working
+  set, for example when an enabled `dolt_ignore` pattern covers the table:
+  Dolt answers "nothing to commit", or commits only the other tables, and
+  bd took that as clean, so a push sent nothing (GH#5433). After a full
+  commit (`bd dolt commit`, `bd vc commit`, the auto-commit after a write
+  command, or the commit `bd dolt push` and `bd dolt pull` make before they
+  contact the remote), bd now reads `dolt_status` and fails with
+  `commit incomplete:`, naming the tables still holding changes and saying
+  whether a partial commit was created, or with
+  `commit verification failed:` when that read could not run. Push, pull
+  and `bd federation sync` then stop before contacting the remote, a write
+  command such as `bd update` exits 1 after its write landed, `bd import`
+  and `bd backup restore` (also `bd bootstrap`'s restore) fail instead of
+  reporting success, and `bd init` warns. An embedded workspace already in
+  this state reports it at its next commit. The writes have landed in the
+  working set: do not replay them, and follow
+  [Incomplete Commits](docs/recovery/incomplete-commits.md) to commit them.
+  bd's own clone-local tables are exempt. The per-write commits some
+  commands make inside their own transaction are not checked yet, and
+  server-mode storage does not run the check.
 - `bd -C <dir>` (or `BEADS_DIR`) naming a beads project outside any git
   repository, run from inside one, no longer adopts the caller's repository
   root, role or git remote. The project is now rooted at its own directory
