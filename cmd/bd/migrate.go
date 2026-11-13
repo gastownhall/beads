@@ -667,6 +667,13 @@ func handleSchemaMigrate() error {
 					"(`CALL DOLT_COMMIT('-Am', 'pre-migration working set')` over the sql-server, or "+
 					schema.AllowRemoteMigrateEnv+"=1 bd dolt commit), then re-run this command")
 		}
+		var dirtyRepair *schema.PostConditionRepairDirtyError
+		if errors.As(err, &dirtyRepair) {
+			return HandleErrorWithHint(
+				fmt.Sprintf("dropped-default repair refused: %v", err),
+				"commit or reset the working set for the named table(s) first (`bd dolt commit`, or "+
+					"`CALL DOLT_COMMIT('-Am', 'pre-repair working set')` over the sql-server), then re-run this command")
+		}
 		return HandleError("schema migration failed: %v", err)
 	}
 

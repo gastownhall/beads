@@ -5,7 +5,9 @@ package embeddeddolt_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/schema"
@@ -168,5 +170,57 @@ func TestEmbeddedMigrateSchemaRepairsRecordedDefaultDriftOnTrackedTables_5269(t 
 	}
 	if hash, _ := headCommit(t, ctx, conn); hash != repairHash {
 		t.Fatalf("repeat moved HEAD from %s to %s, want no new commit", repairHash, hash)
+	}
+}
+
+// AC-4: a tracked repair target holding uncommitted user changes refuses the
+// whole repair before any ALTER, naming the table and the remedy; the user's
+// change stays uncommitted and no commit is made.
+func TestEmbeddedMigrateSchemaRepairRefusesDirtyTrackedTarget_5269(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	dataDir := seedCurrentSchema(t, ctx)
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+
+	execAll(t, ctx, conn,
+		repairIssueInsert,
+		"ALTER TABLE dependencies ALTER COLUMN id SET DEFAULT (UUID())",
+		"ALTER TABLE comments ALTER COLUMN id SET DEFAULT (UUID())",
+		"CALL DOLT_COMMIT('-Am', 'test: drifted defaults under recorded marks')",
+		"INSERT INTO comments (id, issue_id, author, text) VALUES ('user-comment', 'rp-1', 'u', 'not committed yet')",
+	)
+	headBefore, _ := headCommit(t, ctx, conn)
+
+	_, report, err := schema.MigrateUpAndRepairPostConditions(ctx, conn)
+	var dirtyErr *schema.PostConditionRepairDirtyError
+	if !errors.As(err, &dirtyErr) {
+		t.Fatalf("err = %v, want *schema.PostConditionRepairDirtyError", err)
+	}
+	if !reflect.DeepEqual(dirtyErr.Tables, []string{"comments"}) {
+		t.Fatalf("refusal names %v, want [comments]", dirtyErr.Tables)
+	}
+	for _, want := range []string{"comments", "bd dolt commit", "bd migrate schema"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal %q does not mention %q", err, want)
+		}
+	}
+	if len(report.Repaired) != 0 || report.Committed {
+		t.Fatalf("refused repair still reported %v (committed %v)", report.Names(), report.Committed)
+	}
+	for _, tc := range [][2]string{{"dependencies", "id"}, {"comments", "id"}} {
+		if def := columnDefault(t, ctx, conn, tc[0], tc[1]); !def.Valid {
+			t.Fatalf("%s.%s default was dropped although the repair refused", tc[0], tc[1])
+		}
+	}
+	if hash, _ := headCommit(t, ctx, conn); hash != headBefore {
+		t.Fatalf("refused repair moved HEAD")
+	}
+	if dirty := dirtyTableNames(t, ctx, conn); !reflect.DeepEqual(dirty, []string{"comments"}) {
+		t.Fatalf("working set = %v, want the user's comments change only", dirty)
+	}
+	var n int
+	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM comments WHERE id = 'user-comment'").Scan(&n); err != nil || n != 1 {
+		t.Fatalf("user's uncommitted comment lost: count %d, err %v", n, err)
 	}
 }
