@@ -7248,7 +7248,7 @@ bd update
   flag --add-label -l type=stringSlice default="[]" usage="Add labels (repeatable); -l matches bd create -l"
   flag --allow-empty-description type=bool default="false" usage="Allow empty description replacement when reading from stdin or file"
   flag --append-notes type=string default="" annotations={cobra_annotation_mutually_exclusive=["clear-notes append-notes"]} usage="Append to existing notes (with newline separator)"
-  flag --assignee -a type=string default="" usage="Assignee"
+  flag --assignee -a type=string default="" usage="Assignee ('', '-' or whitespace-only text unassigns)"
   flag --await-id type=string default="" usage="Set gate await_id (e.g., GitHub run ID for gh:run gates)"
   flag --body type=string default="" hidden annotations={cobra_annotation_mutually_exclusive=["stdin body"]} usage="Alias for --description (GitHub CLI convention)"
   flag --body-file type=string default="" annotations={cobra_annotation_mutually_exclusive=["stdin body-file"]} usage="Read description from file (use - for stdin)"

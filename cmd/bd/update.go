@@ -202,7 +202,7 @@ pointless).`,
 		}
 		if cmd.Flags().Changed("assignee") {
 			assignee, _ := cmd.Flags().GetString("assignee")
-			updates["assignee"] = assignee
+			updates["assignee"] = normalizeAssigneeInput(assignee)
 		}
 		description, descChanged, err := getDescriptionFlag(cmd)
 		if err != nil {
@@ -1073,6 +1073,7 @@ func init() {
 	updateCmd.Flags().String("title", "", "New title")
 	updateCmd.Flags().StringP("type", "t", "", "New type (bug|feature|task|epic|chore|decision|spike|story|milestone); custom types require types.custom config; aliases: enhancement/feat→feature, dec/adr→decision")
 	registerCommonIssueFlags(updateCmd)
+	updateCmd.Flags().Lookup("assignee").Usage = "Assignee ('', '-' or whitespace-only text unassigns)"
 	updateCmd.Flags().Lookup("notes").Usage = "Replace the notes field (requires --force over existing non-empty notes; --clear-notes clears; --append-notes appends instead)"
 	updateCmd.Flags().Bool("allow-empty-description", false, "Allow empty description replacement when reading from stdin or file")
 	updateCmd.Flags().Bool("clear-notes", false, "Clear the notes field (--notes \"\" is refused: an empty value is usually a dead command substitution)")
