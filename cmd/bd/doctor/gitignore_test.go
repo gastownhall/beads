@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -3434,4 +3435,178 @@ func TestEnsureGitignoreForBeadsDir_TightenFailureIsPermissionOnly(t *testing.T)
 			t.Errorf("template not written:\n%s", got)
 		}
 	})
+}
+
+// machineLocalStateFiles are the per-clone files bd writes at the top level of
+// .beads/ after init (GH#8318): the bd backup init/sync destination and
+// last-sync state, the bd dolt set audit log, the JSONL auto-import stamp and
+// the resume journal of the bd migrate from-<mode>-to-<mode> switches. Kept as
+// a literal list so a test never derives its expectation from the production
+// lists it checks.
+var machineLocalStateFiles = []string{
+	"dolt-backup.json",
+	"dolt-backup-state.json",
+	"dolt-config.log",
+	".auto-import-issues.jsonl",
+	"dolt-mode-migration.json",
+}
+
+// TestGitignoreTemplate_IgnoresMachineLocalStateFiles checks with real git
+// matching that the .beads/.gitignore bd init writes ignores every
+// machine-local state file, while the tracked issue data and config stay
+// visible (GH#8318). backup/ only matches that directory, not files beside it.
+func TestGitignoreTemplate_IgnoresMachineLocalStateFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping git-based test on Windows")
+	}
+
+	dir := setupGitRepo(t)
+	disableGlobalGitIgnore(t, dir)
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.WriteFile(filepath.Join(beadsDir, ".gitignore"), []byte(GitignoreTemplate), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tracked := []string{"issues.jsonl", "metadata.json", "config.yaml"}
+	for _, name := range append(append([]string{}, machineLocalStateFiles...), tracked...) {
+		if err := os.WriteFile(filepath.Join(beadsDir, name), []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	checkIgnore := func(name string) int {
+		t.Helper()
+		cmd := gitCommand("check-ignore", "-q", "--", ".beads/"+name)
+		cmd.Dir = dir
+		err := cmd.Run()
+		if err == nil {
+			return 0
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return exitErr.ExitCode()
+		}
+		t.Fatalf("git check-ignore .beads/%s: %v", name, err)
+		return -1
+	}
+
+	for _, name := range machineLocalStateFiles {
+		switch code := checkIgnore(name); code {
+		case 0:
+		case 1:
+			t.Errorf(".beads/%s is not ignored by GitignoreTemplate", name)
+		default:
+			t.Errorf("git check-ignore .beads/%s exited %d", name, code)
+		}
+	}
+	for _, name := range tracked {
+		switch code := checkIgnore(name); code {
+		case 1:
+		case 0:
+			t.Errorf(".beads/%s is ignored by GitignoreTemplate but must stay tracked", name)
+		default:
+			t.Errorf("git check-ignore .beads/%s exited %d", name, code)
+		}
+	}
+}
+
+// preMachineLocalStateTemplate returns GitignoreTemplate as it was before
+// GH#8318: every line naming a machine-local state file removed, with a
+// local custom rule on top as an existing workspace would have.
+func preMachineLocalStateTemplate(t *testing.T) string {
+	t.Helper()
+	drop := make(map[string]bool, len(machineLocalStateFiles))
+	for _, name := range machineLocalStateFiles {
+		drop[name] = true
+	}
+	var kept []string
+	for _, line := range strings.Split(GitignoreTemplate, "\n") {
+		if !drop[strings.TrimSpace(line)] {
+			kept = append(kept, line)
+		}
+	}
+	old := "# local rule kept by the user\nscratch-notes.md\n\n" + strings.Join(kept, "\n")
+	for _, name := range machineLocalStateFiles {
+		if containsGitignorePattern(old, name) {
+			t.Fatalf("test setup: stripped template still contains %q", name)
+		}
+	}
+	return old
+}
+
+// TestCheckGitignore_FlagsMissingMachineLocalStatePatterns checks that an
+// existing .beads/.gitignore written before GH#8318 is reported outdated, and
+// that the missing list is exactly the five machine-local state files.
+func TestCheckGitignore_FlagsMissingMachineLocalStatePatterns(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, ".gitignore"), []byte(preMachineLocalStateTemplate(t)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	check := CheckGitignore(tmpDir)
+	if check.Status != StatusWarning {
+		t.Fatalf("CheckGitignore status = %q, want %q (detail: %s)", check.Status, StatusWarning, check.Detail)
+	}
+	got := strings.Split(strings.TrimPrefix(check.Detail, "Missing: "), ", ")
+	if !strings.HasPrefix(check.Detail, "Missing: ") || strings.Join(got, "\n") != strings.Join(machineLocalStateFiles, "\n") {
+		t.Errorf("CheckGitignore Detail = %q, want Missing: %s", check.Detail, strings.Join(machineLocalStateFiles, ", "))
+	}
+}
+
+// TestFixGitignore_AppendsMissingMachineLocalStatePatterns checks that
+// bd doctor --fix heals a pre-GH#8318 .beads/.gitignore append-only: the
+// user's content survives as a prefix, each machine-local state name is
+// added once, the check then passes, and a second fix changes nothing.
+func TestFixGitignore_AppendsMissingMachineLocalStatePatterns(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	gitignorePath := filepath.Join(beadsDir, ".gitignore")
+	old := preMachineLocalStateTemplate(t)
+	if err := os.WriteFile(gitignorePath, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := FixGitignore(tmpDir); err != nil {
+		t.Fatalf("FixGitignore: %v", err)
+	}
+	fixed, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(fixed), old) {
+		t.Errorf("FixGitignore rewrote the existing content; want it kept as a prefix, got:\n%s", fixed)
+	}
+	lines := strings.Split(string(fixed), "\n")
+	for _, name := range machineLocalStateFiles {
+		n := 0
+		for _, line := range lines {
+			if strings.TrimSpace(line) == name {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("fixed .gitignore has %d lines for %q, want 1", n, name)
+		}
+	}
+	if check := CheckGitignore(tmpDir); check.Status != StatusOK {
+		t.Errorf("CheckGitignore after fix = %q, want %q (detail: %s)", check.Status, StatusOK, check.Detail)
+	}
+
+	if err := FixGitignore(tmpDir); err != nil {
+		t.Fatalf("second FixGitignore: %v", err)
+	}
+	again, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(again, fixed) {
+		t.Errorf("second FixGitignore changed the file:\nbefore:\n%s\nafter:\n%s", fixed, again)
+	}
 }
