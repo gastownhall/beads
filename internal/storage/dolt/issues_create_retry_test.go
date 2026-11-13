@@ -734,3 +734,156 @@ func TestCreateIssuesAllWispsReplayRemintsWispID(t *testing.T) {
 		})
 	}
 }
+
+// TestCreateIssueAndCreateIssuesReplayKeepCallerSuppliedIDs (AC-5): caller-
+// SUPPLIED ids survive a replay unchanged — explicit issue ids, a dependency
+// whose IssueID the caller set (an explicit dependency source on an auto-id
+// issue is covered by the backfill reset tests), and incoming comment ids
+// (import-style). Compatibility guard: this holds at the base commit too; the
+// fix must reset only ids the create itself minted or backfilled.
+func TestCreateIssueAndCreateIssuesReplayKeepCallerSuppliedIDs(t *testing.T) {
+	const fixedCommentAtText = "2024-05-01 12:00:00"
+	fixedCommentAt, err := time.ParseInLocation("2006-01-02 15:04:05", fixedCommentAtText, time.UTC)
+	if err != nil {
+		t.Fatalf("parse fixed comment timestamp: %v", err)
+	}
+
+	t.Run("singular explicit issue and comment ids", func(t *testing.T) {
+		store, cleanup := setupConcurrentTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+
+		issue := &types.Issue{
+			ID:        "test-ac5a",
+			Title:     "explicit singular",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Comments: []*types.Comment{{
+				ID:        "cmt-ac5a-incoming",
+				Author:    "importer",
+				Text:      "incoming id",
+				CreatedAt: fixedCommentAt,
+			}},
+		}
+		fault, origDB, restore := armCreateCommitFault(t, store, 1, nil)
+		if err := store.CreateIssue(ctx, issue, "loser"); err != nil {
+			t.Fatalf("CreateIssue: %v", err)
+		}
+		restore()
+		if armed, commits := fault.counts(); armed != 1 || commits != 1 {
+			t.Fatalf("fault intercepted %d commits (want 1) and observed %d successful commits (want 1: the replay)", armed, commits)
+		}
+
+		if issue.ID != "test-ac5a" {
+			t.Errorf("caller-supplied issue id changed by replay: %q, want %q", issue.ID, "test-ac5a")
+		}
+		if issue.Comments[0].ID != "cmt-ac5a-incoming" {
+			t.Errorf("caller-supplied comment id changed by replay: %q, want %q", issue.Comments[0].ID, "cmt-ac5a-incoming")
+		}
+		storedID, err := commentIDOnPool(ctx, origDB, "comments", "test-ac5a")
+		if err != nil {
+			t.Fatalf("read stored comment: %v", err)
+		}
+		if storedID != "cmt-ac5a-incoming" {
+			t.Errorf("stored comment id = %q, want the supplied %q", storedID, "cmt-ac5a-incoming")
+		}
+	})
+
+	t.Run("batch mixed explicit and auto ids with supplied dependency source", func(t *testing.T) {
+		store, cleanup := setupConcurrentTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+
+		target := &types.Issue{ID: "test-ac5b-target", Title: "dep target", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+		if err := store.CreateIssue(ctx, target, "seeder"); err != nil {
+			t.Fatalf("seed dep target: %v", err)
+		}
+
+		batch := []*types.Issue{
+			{
+				ID:        "test-ac5b0",
+				Title:     "explicit batch head",
+				Status:    types.StatusOpen,
+				Priority:  2,
+				IssueType: types.TypeTask,
+				Dependencies: []*types.Dependency{{
+					IssueID:     "test-ac5b0",
+					DependsOnID: "test-ac5b-target",
+					Type:        types.DepBlocks,
+				}},
+			},
+			{Title: "auto sibling", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		}
+		fault, origDB, restore := armCreateCommitFault(t, store, 1, nil)
+		if err := store.CreateIssues(ctx, batch, "loser"); err != nil {
+			t.Fatalf("CreateIssues: %v", err)
+		}
+		restore()
+		if armed, commits := fault.counts(); armed != 1 || commits != 1 {
+			t.Fatalf("fault intercepted %d commits (want 1) and observed %d successful commits (want 1: the replay)", armed, commits)
+		}
+
+		if batch[0].ID != "test-ac5b0" {
+			t.Errorf("caller-supplied issue id changed by replay: %q, want %q", batch[0].ID, "test-ac5b0")
+		}
+		if batch[0].Dependencies[0].IssueID != "test-ac5b0" {
+			t.Errorf("caller-supplied dependency IssueID changed by replay: %q, want %q", batch[0].Dependencies[0].IssueID, "test-ac5b0")
+		}
+		if batch[1].ID == "" {
+			t.Fatal("auto sibling was not minted an id")
+		}
+		n, err := countOnPool(ctx, origDB, "SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ?", "test-ac5b0", "test-ac5b-target")
+		if err != nil {
+			t.Fatalf("count persisted edges: %v", err)
+		}
+		if n != 1 {
+			t.Errorf("persisted dependency rows for the supplied source = %d, want 1", n)
+		}
+		got, err := issueOnPool(ctx, origDB, batch[1].ID)
+		if err != nil {
+			t.Fatalf("read auto sibling %s: %v", batch[1].ID, err)
+		}
+		if got.Title != "auto sibling" {
+			t.Errorf("auto sibling %s title = %q, want %q", batch[1].ID, got.Title, "auto sibling")
+		}
+	})
+
+	t.Run("fresh comment on explicit issue id", func(t *testing.T) {
+		store, cleanup := setupConcurrentTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+
+		issue := &types.Issue{
+			ID:        "test-ac5c",
+			Title:     "explicit with fresh comment",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Comments:  []*types.Comment{{Author: "author", Text: "fresh", CreatedAt: fixedCommentAt}},
+		}
+		fault, origDB, restore := armCreateCommitFault(t, store, 1, nil)
+		if err := store.CreateIssue(ctx, issue, "loser"); err != nil {
+			t.Fatalf("CreateIssue: %v", err)
+		}
+		restore()
+		if armed, commits := fault.counts(); armed != 1 || commits != 1 {
+			t.Fatalf("fault intercepted %d commits (want 1) and observed %d successful commits (want 1: the replay)", armed, commits)
+		}
+
+		want := derivedCommentID("test-ac5c", "author", "fresh", fixedCommentAt)
+		if issue.Comments[0].ID != want {
+			t.Errorf("fresh comment id after replay = %q, want content-derived %q", issue.Comments[0].ID, want)
+		}
+		storedID, err := commentIDOnPool(ctx, origDB, "comments", "test-ac5c")
+		if err != nil {
+			t.Fatalf("read stored comment: %v", err)
+		}
+		if storedID != want {
+			t.Errorf("stored comment id = %q, want %q", storedID, want)
+		}
+	})
+}
