@@ -18,7 +18,10 @@ go_test(
     name = "recipes_test",
     srcs = ["recipes_test.go"],
     embed = [":recipes"],
-    deps = ["//plugins/beads"],
+    deps = [
+        "//plugins/beads",
+        "@com_github_burntsushi_toml//:toml",
+    ],
 )
 
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
