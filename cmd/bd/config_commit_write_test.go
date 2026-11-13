@@ -306,6 +306,196 @@ func TestMemoryCommandsWarnAndSucceedWhenTheCommitIsRefused(t *testing.T) {
 	}
 }
 
+// refusingKVStore is a SQL-server store on which a kv write lands and its
+// kv.*-screened commit is attempted: commitErr is what the attempt returns —
+// the screen's refusal in the refused case. mutationErr, when set, fails the
+// write itself before any commit wiring runs.
+type refusingKVStore struct {
+	storage.DoltStorage
+	config      map[string]string
+	mutationErr error
+	commitErr   error
+	commits     int
+	messages    []string
+}
+
+func (s *refusingKVStore) SetConfig(_ context.Context, key, value string) error {
+	if s.mutationErr != nil {
+		return s.mutationErr
+	}
+	s.config[key] = value
+	return nil
+}
+
+func (s *refusingKVStore) DeleteConfig(_ context.Context, key string) error {
+	if s.mutationErr != nil {
+		return s.mutationErr
+	}
+	delete(s.config, key)
+	return nil
+}
+
+func (s *refusingKVStore) CommitConfigUserKVOnly(_ context.Context, message string) error {
+	s.commits++
+	s.messages = append(s.messages, message)
+	return s.commitErr
+}
+
+// A kv commit's outcome never turns a write that landed into exit 1: kv set
+// and kv clear warn on stderr, print their normal result, arm the embedded
+// epilogue, and — unlike remember and forget — keep their --json payload
+// exactly as shipped, with no commit fields: that shape predates commits and
+// scripts match it (GH#7523).
+func TestKVCommandsWarnAndSucceedWhenTheCommitIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		commitErr error
+		wantWarn  []string
+	}{
+		{
+			name:      "refused by the kv.* screen",
+			commitErr: &storage.ConfigCommitRefusedError{Keys: []string{"issue_prefix"}},
+			wantWarn:  []string{"Warning: committing kv write: refusing to commit", "issue_prefix"},
+		},
+		{name: "committed", commitErr: nil, wantWarn: nil},
+		{
+			name:      "failed for another reason",
+			commitErr: errors.New("connection refused"),
+			wantWarn:  []string{"Warning: committing kv write: connection refused"},
+		},
+	} {
+		for _, asJSON := range []bool{false, true} {
+			t.Run(tc.name+fmt.Sprintf("/json=%v", asJSON), func(t *testing.T) {
+				t.Setenv("BEADS_DIR", t.TempDir())
+				saveAndRestoreGlobals(t)
+				saveStorageMode(t)
+				serverMode = true
+				fake := &refusingKVStore{
+					config:    map[string]string{},
+					commitErr: tc.commitErr,
+				}
+				store = fake
+				setStoreActive(true)
+				savedJSON := jsonOutput
+				t.Cleanup(func() { jsonOutput = savedJSON })
+				jsonOutput = asJSON
+
+				for _, step := range []struct {
+					cmd  string
+					run  func() error
+					text string
+					json map[string]string
+				}{
+					{
+						cmd:  "set",
+						run:  func() error { return kvSetCmd.RunE(kvSetCmd, []string{"gh7523", "a value that lands"}) },
+						text: "Set gh7523 = a value that lands",
+						json: map[string]string{"key": "gh7523", "value": "a value that lands"},
+					},
+					{
+						cmd:  "clear",
+						run:  func() error { return kvClearCmd.RunE(kvClearCmd, []string{"gh7523"}) },
+						text: "Cleared gh7523",
+						json: map[string]string{"key": "gh7523", "deleted": "true"},
+					},
+				} {
+					commandDidWrite.Store(false)
+					attempts := fake.commits
+					var runErr error
+					stdout, stderr := captureStdio(t, func() { runErr = step.run() })
+					if runErr != nil {
+						t.Fatalf("bd kv %s returned %v after its write landed, want success", step.cmd, runErr)
+					}
+					if fake.commits-attempts != 1 {
+						t.Errorf("bd kv %s: CommitConfigUserKVOnly attempts = %d, want one", step.cmd, fake.commits-attempts)
+					}
+					if msg := fake.messages[len(fake.messages)-1]; !strings.HasPrefix(msg, "bd: kv "+step.cmd+" (auto-commit) by ") {
+						t.Errorf("bd kv %s commit message = %q, want it to name the verb", step.cmd, msg)
+					}
+					if !commandDidWrite.Load() {
+						t.Errorf("bd kv %s did not arm the auto-commit epilogue (noteDirectConfigWrite missing)", step.cmd)
+					}
+					for _, want := range tc.wantWarn {
+						if !strings.Contains(stderr, want) {
+							t.Errorf("bd kv %s stderr does not carry %q:\n%s", step.cmd, want, stderr)
+						}
+					}
+					if tc.wantWarn == nil && strings.Contains(stderr, "Warning:") {
+						t.Errorf("bd kv %s warned on a clean commit:\n%s", step.cmd, stderr)
+					}
+					if !asJSON {
+						if !strings.Contains(stdout, step.text) {
+							t.Errorf("bd kv %s stdout = %q, want the normal result %q", step.cmd, stdout, step.text)
+						}
+						continue
+					}
+					var got map[string]interface{}
+					if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+						t.Fatalf("bd kv %s --json stdout is not one JSON object: %v\n%s", step.cmd, err, stdout)
+					}
+					want := map[string]interface{}{"schema_version": float64(JSONSchemaVersion)}
+					for k, v := range step.json {
+						want[k] = v
+					}
+					if !reflect.DeepEqual(got, want) {
+						t.Errorf("bd kv %s --json = %#v, want %#v (the shipped shape: no commit fields)", step.cmd, got, want)
+					}
+				}
+				if fake.commits != 2 {
+					t.Errorf("CommitConfigUserKVOnly calls = %d, want one per command", fake.commits)
+				}
+				if len(fake.config) != 0 {
+					t.Errorf("stored config = %v, want the clear to have landed too", fake.config)
+				}
+			})
+		}
+	}
+}
+
+// A failed mutation never reaches the commit wiring: no armed flag, no commit
+// attempt, and the command's error is the mutation's own.
+func TestKVCommandFailedMutationDoesNotAttemptACommit(t *testing.T) {
+	for _, step := range []struct {
+		cmd string
+		run func() error
+	}{
+		{cmd: "set", run: func() error { return kvSetCmd.RunE(kvSetCmd, []string{"gh7523", "nowhere"}) }},
+		{cmd: "clear", run: func() error { return kvClearCmd.RunE(kvClearCmd, []string{"gh7523"}) }},
+	} {
+		t.Run(step.cmd, func(t *testing.T) {
+			t.Setenv("BEADS_DIR", t.TempDir())
+			saveAndRestoreGlobals(t)
+			saveStorageMode(t)
+			serverMode = true
+			fake := &refusingKVStore{
+				config:      map[string]string{"kv.gh7523": "earlier"},
+				mutationErr: errors.New("database is read only"),
+			}
+			store = fake
+			setStoreActive(true)
+			savedJSON := jsonOutput
+			t.Cleanup(func() { jsonOutput = savedJSON })
+			jsonOutput = false
+			commandDidWrite.Store(false)
+
+			var runErr error
+			_, stderr := captureStdio(t, func() { runErr = step.run() })
+			if runErr == nil {
+				t.Fatalf("bd kv %s succeeded against a failing store", step.cmd)
+			}
+			if !strings.Contains(stderr, "database is read only") {
+				t.Errorf("bd kv %s stderr = %q, want the mutation's own error", step.cmd, stderr)
+			}
+			if fake.commits != 0 {
+				t.Errorf("CommitConfigUserKVOnly calls = %d, want none", fake.commits)
+			}
+			if commandDidWrite.Load() {
+				t.Errorf("bd kv %s armed the write flag although its write failed", step.cmd)
+			}
+		})
+	}
+}
+
 // The proxied route's role commits each config write inside its own unit of
 // work, so committing again here would be a second commit for the same write.
 func TestCommitConfigWriteProxiedServerModeIsNoOp(t *testing.T) {

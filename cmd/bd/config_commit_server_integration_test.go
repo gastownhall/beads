@@ -151,6 +151,43 @@ func TestCLI_ServerModeConfigWritesCommit_E2E(t *testing.T) {
 	if got := dirtyConfigTables(); got != "config" {
 		t.Fatalf("after the refused memory commits: dirty = %q, want config left for bd dolt commit", got)
 	}
+
+	// The kv verbs share that screen: with the unwired issue_prefix still
+	// dirty, each lands its own row, its commit is refused with a warning
+	// naming the internal key, the command still succeeds, and HEAD keeps
+	// none of it (GH#7523).
+	stdout, stderr, err = runBDExecSeparated(t, testBD, tmpDir, env, "kv", "set", "gh7523-screened", "screened kv value")
+	if err != nil {
+		t.Fatalf("bd kv set failed after its write landed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Set gh7523-screened = screened kv value") {
+		t.Fatalf("bd kv set stdout:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, "Warning: committing kv write") || !strings.Contains(stderr, "issue_prefix") {
+		t.Fatalf("bd kv set stderr does not warn about the refused commit naming issue_prefix:\n%s", stderr)
+	}
+	if out := mustBD("kv", "get", "gh7523-screened"); !strings.Contains(out, "screened kv value") {
+		t.Fatalf("the screened kv pair was not stored:\n%s", out)
+	}
+	if out := mustBD("sql", "--csv", "SELECT COUNT(*) FROM config AS OF 'HEAD' WHERE `key` = 'kv.gh7523-screened'"); !strings.HasSuffix(strings.TrimSpace(out), "0") {
+		t.Fatalf("HEAD already carries the refused kv row (count not 0):\n%s", out)
+	}
+	stdout, stderr, err = runBDExecSeparated(t, testBD, tmpDir, env, "kv", "clear", "gh7523-screened")
+	if err != nil {
+		t.Fatalf("bd kv clear failed after its write landed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Cleared gh7523-screened") {
+		t.Fatalf("bd kv clear stdout:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, "Warning: committing kv write") || !strings.Contains(stderr, "issue_prefix") {
+		t.Fatalf("bd kv clear stderr does not warn about the refused commit naming issue_prefix:\n%s", stderr)
+	}
+	if out, getErr := bd("kv", "get", "gh7523-screened"); getErr == nil {
+		t.Fatalf("bd kv get gh7523-screened succeeded after clear:\n%s", out)
+	}
+	if got := dirtyConfigTables(); got != "config" {
+		t.Fatalf("after the refused kv commits: dirty = %q, want config left for bd dolt commit", got)
+	}
 	mustBD("dolt", "commit", "-m", "gh4078: commit the screened config")
 	if got := dirtyConfigTables(); got != "" {
 		t.Fatalf("after bd dolt commit: %s still dirty", got)
