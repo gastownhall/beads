@@ -394,7 +394,7 @@ func TestRepairPrefixesKeepsSuffixes(t *testing.T) {
 			t.Fatalf("dependencies of %s: %v", edge.from, err)
 		}
 		if len(deps) != 1 || deps[0].DependsOnID != edge.to {
-			t.Errorf("dependencies of %s = %+v, want one edge to %s", edge.from, deps, edge.to)
+			t.Errorf("dependencies of %s = %s, want one edge to %s", edge.from, fmtDeps(deps), edge.to)
 		}
 	}
 	if prefix, err := testStore.GetConfig(ctx, "issue_prefix"); err != nil || prefix != "kb" {
@@ -631,4 +631,12 @@ func TestRepairPrefixesCollisionReRootsTree(t *testing.T) {
 			t.Errorf("reported rename %s -> %s is not stored", r.OldID, r.NewID)
 		}
 	}
+}
+
+func fmtDeps(deps []*types.Dependency) string {
+	var parts []string
+	for _, d := range deps {
+		parts = append(parts, fmt.Sprintf("%s -%s-> %s", d.IssueID, d.Type, d.DependsOnID))
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
 }

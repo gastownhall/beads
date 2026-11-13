@@ -585,6 +585,10 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 		}
 	}
 
+	if err := repointRepairedDependencies(ctx, st, plan, issues, actorName); err != nil {
+		return err
+	}
+
 	// Set the new prefix in config
 	if err := st.SetConfig(ctx, "issue_prefix", targetPrefix); err != nil {
 		return fmt.Errorf("failed to update config: %w", err)
@@ -597,6 +601,48 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 	fmt.Printf("\n%s Successfully consolidated %d prefixes into %s\n",
 		ui.RenderPass("✓"), len(prefixes), ui.RenderAccent(targetPrefix))
 	fmt.Printf("  %d issues repaired, %d issues unchanged\n", len(plan.Renames), plan.Unchanged)
+	return nil
+}
+
+// repointRepairedDependencies points each edge that still names a renamed
+// issue's old ID at its new one. Storage keeps an edge between two different
+// prefixes as a reference into another repository (issueops.
+// IsExternalDepTarget), so renaming its target never re-points it; once the
+// families share the target prefix the edge is re-added as an ordinary one.
+// issues must hold the post-rename IDs.
+func repointRepairedDependencies(ctx context.Context, st storage.DoltStorage, plan *prefixRepairPlan, issues []*types.Issue, actorName string) error {
+	if len(plan.Renames) == 0 {
+		return nil
+	}
+	newID := make(map[string]string, len(plan.Renames))
+	for _, r := range plan.Renames {
+		newID[r.OldID] = r.NewID
+	}
+	ids := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		ids = append(ids, issue.ID)
+	}
+	slices.Sort(ids)
+	records, err := st.GetDependencyRecordsForIssues(ctx, ids)
+	if err != nil {
+		return fmt.Errorf("failed to read dependencies: %w", err)
+	}
+	for _, source := range ids {
+		for _, dep := range records[source] {
+			target, ok := newID[dep.DependsOnID]
+			if !ok {
+				continue
+			}
+			if err := st.RemoveDependency(ctx, source, dep.DependsOnID, actorName); err != nil {
+				return fmt.Errorf("failed to re-point dependency %s -> %s: %w", source, dep.DependsOnID, err)
+			}
+			moved := *dep
+			moved.IssueID, moved.DependsOnID = source, target
+			if err := st.AddDependency(ctx, &moved, actorName); err != nil {
+				return fmt.Errorf("failed to re-point dependency %s -> %s at %s: %w", source, dep.DependsOnID, target, err)
+			}
+		}
+	}
 	return nil
 }
 
