@@ -512,3 +512,53 @@ func TestGatherUpdateInputEmptyExternalDescriptionGH8149(t *testing.T) {
 		})
 	})
 }
+
+// TestCreateKeepsEmptyTextFieldsGH8149: GH#8149 changed update only. create
+// registers none of the clear flags, accepts omitted or explicitly empty
+// description/design/acceptance values, and keeps its stdin/file opt-in
+// refusal wording.
+func TestCreateKeepsEmptyTextFieldsGH8149(t *testing.T) {
+	for _, name := range []string{"clear-description", "clear-design", "clear-acceptance"} {
+		if createCmd.Flags().Lookup(name) != nil {
+			t.Errorf("create registers --%s, but GH#8149's clear flags are update-only", name)
+		}
+	}
+
+	for _, args := range [][]string{
+		nil,
+		{"--description="},
+		{"--body="},
+		{"--design="},
+		{"--acceptance="},
+		{"--description=", "--design=", "--acceptance="},
+	} {
+		t.Run("create "+strings.Join(args, " "), func(t *testing.T) {
+			var in createInput
+			var err error
+			stderr := captureStderr(t, func() {
+				in, err = gatherCreateInput(newCreateFlagsCommand(t, args...), []string{"Keep create semantics"})
+			})
+			if err != nil {
+				t.Fatalf("%v: create refused: %v %s", args, err, stderr)
+			}
+			if in.description != "" || in.design != "" || in.acceptanceCriteria != "" {
+				t.Fatalf("%v: description=%q design=%q acceptance=%q, want all empty", args, in.description, in.design, in.acceptanceCriteria)
+			}
+		})
+	}
+
+	t.Run("create empty stdin keeps opt-in wording", func(t *testing.T) {
+		withTestStdin(t, "", func() {
+			var err error
+			stderr := captureStderr(t, func() {
+				_, err = gatherCreateInput(newCreateFlagsCommand(t, "--stdin"), []string{"Keep create semantics"})
+			})
+			if err == nil {
+				t.Fatal("expected empty stdin description to be refused on create without the opt-in")
+			}
+			if !strings.Contains(stderr, "--allow-empty-description") || strings.Contains(stderr, "--clear-description") {
+				t.Fatalf("expected create's existing opt-in refusal, got: %q", stderr)
+			}
+		})
+	})
+}
