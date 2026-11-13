@@ -124,7 +124,10 @@ func TestNoticeSharedMigrateRefusalPerDecision(t *testing.T) {
 		}
 	})
 
-	t.Run("global flag names the global remedy", func(t *testing.T) {
+	// The refusal comes from the version-bump attempt, which opens the
+	// workspace's own database whatever --global says: the global verb would
+	// migrate beads_global and leave this refusal in place.
+	t.Run("global flag keeps the workspace remedy", func(t *testing.T) {
 		orig := globalFlag
 		globalFlag = true
 		defer func() { globalFlag = orig }()
@@ -134,8 +137,9 @@ func TestNoticeSharedMigrateRefusalPerDecision(t *testing.T) {
 				Decision: "shared-no-remote",
 			})
 		})
-		if !strings.Contains(out, schema.SharedConsentCommandGlobal) {
-			t.Errorf("notice under --global must name %q:\n%s", schema.SharedConsentCommandGlobal, out)
+		if !strings.Contains(out, "'"+schema.SharedConsentCommand+"'") || strings.Contains(out, schema.SharedConsentCommandGlobal) {
+			t.Errorf("notice under --global must name %q, not %q:\n%s",
+				schema.SharedConsentCommand, schema.SharedConsentCommandGlobal, out)
 		}
 	})
 

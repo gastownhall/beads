@@ -108,6 +108,7 @@
 34 10 TestProxiedServerServeRefusesAStreamOnADisabledJournal
 34 10 TestProxiedServerTypes
 34 10 TestProxiedServerUpdate2C
+34 10 TestServerModeReadRefusesAMissingLeaseOverlay
 
 34 11 TestProxiedServerBatchParity
 34 11 TestProxiedServerCompactHistory

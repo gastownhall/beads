@@ -115,7 +115,7 @@ var configfileLoadSites = map[string]string{
 	"uow_factory.go:resolveProxiedServerUOWTopology":                   "own: the command's or bd serve's workspace",
 	"uow_factory.go:resolveServerModeUOWTopologyWithTransportResolver": "own: the command's or bd serve's workspace",
 	"upgrade.go:var upgradeAckCmd":                                     "own",
-	"version_tracking.go:autoMigrateOnVersionBump":                     "own: the workspace admission (or doctor's) admitted",
+	"version_tracking.go:reconcileVersionBump":                         "own: the workspace admission (or doctor's) admitted",
 	"sdk/beads_cgo.go:OpenBestAvailableWith":                           "admitted: after checkDiscoveredBackend (library open)",
 	"sdk/beads_nocgo.go:OpenBestAvailableWith":                         "admitted: after checkDiscoveredBackend (library open)",
 }
