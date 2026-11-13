@@ -181,4 +181,53 @@ func TestDoltNew_SharedStoreMigrateGate_NoRemote(t *testing.T) {
 			t.Fatalf("fresh store on a current database = %d, want 0", applied)
 		}
 	})
+
+	// A failed explicit migration call must not consume the open's saved
+	// count (#7380): the CLI handler returns on error without observing the
+	// count, so a retry on the same store has to report the open's work
+	// exactly once. The failure is injected by pointing the store's
+	// migration DSN at a deterministically invalid string — the parse error
+	// from openMigrationDB, before any migration work. Nothing runs
+	// concurrently here; the mutation is restored before the retry.
+	t.Run("explicit migration failure preserves the open's count", func(t *testing.T) {
+		if _, err := store.db.ExecContext(ctx,
+			"DELETE FROM schema_migrations WHERE version = ?", schema.LatestVersion()); err != nil {
+			t.Fatalf("regress schema_migrations: %v", err)
+		}
+		schema.SetSharedMigrateConsent(true)
+		defer schema.SetSharedMigrateConsent(false)
+		s, err := New(ctx, &Config{
+			Path:           tmpDir,
+			CommitterName:  "test",
+			CommitterEmail: "test@example.com",
+			Database:       dbName,
+		})
+		if err != nil {
+			t.Fatalf("New (writable, consented) = %v, want success", err)
+		}
+		defer s.Close()
+		if got := cursor(); got != schema.LatestVersion() {
+			t.Fatalf("cursor = %d after a consented open, want %d", got, schema.LatestVersion())
+		}
+		saved := s.connStr
+		s.connStr = "invalid"
+		if _, err := s.ApplySchemaMigrations(ctx); err == nil {
+			t.Fatalf("ApplySchemaMigrations with an invalid DSN = nil error, want the DSN parse failure")
+		}
+		s.connStr = saved
+		applied, err := s.ApplySchemaMigrations(ctx)
+		if err != nil {
+			t.Fatalf("ApplySchemaMigrations (retry after failure): %v", err)
+		}
+		if applied != 1 {
+			t.Fatalf("retry after a failed explicit call = %d, want 1 (the open's migration, preserved and reported once)", applied)
+		}
+		applied, err = s.ApplySchemaMigrations(ctx)
+		if err != nil {
+			t.Fatalf("ApplySchemaMigrations (after the retry): %v", err)
+		}
+		if applied != 0 {
+			t.Fatalf("ApplySchemaMigrations after the retry = %d, want 0", applied)
+		}
+	})
 }
