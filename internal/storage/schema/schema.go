@@ -835,7 +835,10 @@ var doltIgnoreSeedNoticeOut io.Writer = os.Stderr
 // and the ordinary seed heals and commits them.
 func continueAfterRefusedDoltIgnoreSeed(ctx context.Context, db DBConn, seedErr error) error {
 	needed, err := migrationWorkNeeded(ctx, db)
-	if err != nil || needed {
+	if err != nil {
+		return fmt.Errorf("%w (and checking schema migration work to decide whether the open can continue without the seed failed: %w)", seedErr, err)
+	}
+	if needed {
 		return seedErr
 	}
 	tables, err := newDoltStatusTables(ctx, db)
