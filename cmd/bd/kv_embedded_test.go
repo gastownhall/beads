@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -74,6 +75,21 @@ func bdKVListJSON(t *testing.T, bd, dir string, extraArgs ...string) map[string]
 		}
 	}
 	return m
+}
+
+// newWarmKVWorkspace inits its own embedded workspace and makes one committed
+// write first: a fresh workspace's first command may commit bookkeeping of
+// its own, which is not what the kv commit checks measure. It fails unless
+// the working set is clean afterwards, so each check starts from nothing
+// outstanding.
+func newWarmKVWorkspace(t *testing.T, bd, prefix string) (dir, beadsDir string) {
+	t.Helper()
+	dir, beadsDir, _ = bdInit(t, bd, "--prefix", prefix)
+	bdRemember(t, bd, dir, "warm the workspace up", "--key", "kv-commit-warmup")
+	if _, dirty := embeddedLogCountAndDirtyTables(t, beadsDir); len(dirty) != 0 {
+		t.Fatalf("precondition: working set dirty after the warm-up write: %v", dirty)
+	}
+	return dir, beadsDir
 }
 
 func TestEmbeddedKV(t *testing.T) {
@@ -165,6 +181,87 @@ func TestEmbeddedKV(t *testing.T) {
 			t.Error("expected clearme to be absent from kv list after clear")
 		}
 	})
+
+	// ===== Version commits (GH#7523) =====
+
+	// A direct-route kv write is durable: with auto-commit on, `bd kv set`
+	// and `bd kv clear` each add exactly one Dolt commit and leave the working
+	// set clean, instead of leaving their config row for a later commit.
+	t.Run("kv_writes_commit", func(t *testing.T) {
+		wdir, beadsDir := newWarmKVWorkspace(t, bd, "kc")
+		before, _ := embeddedLogCountAndDirtyTables(t, beadsDir)
+
+		bdKV(t, bd, wdir, "set", "commitkey", "v1")
+		afterSet, dirty := embeddedLogCountAndDirtyTables(t, beadsDir)
+		if got := afterSet - before; got != 1 {
+			t.Errorf("bd kv set: dolt_log %d -> %d (delta %d), want exactly one commit", before, afterSet, got)
+		}
+		if len(dirty) != 0 {
+			t.Errorf("bd kv set left the working set dirty: %v", dirty)
+		}
+		if out := bdKV(t, bd, wdir, "get", "commitkey"); strings.TrimSpace(out) != "v1" {
+			t.Errorf("bd kv get commitkey = %q after set, want v1", out)
+		}
+
+		bdKV(t, bd, wdir, "clear", "commitkey")
+		afterClear, dirty := embeddedLogCountAndDirtyTables(t, beadsDir)
+		if got := afterClear - afterSet; got != 1 {
+			t.Errorf("bd kv clear: dolt_log %d -> %d (delta %d), want exactly one commit", afterSet, afterClear, got)
+		}
+		if len(dirty) != 0 {
+			t.Errorf("bd kv clear left the working set dirty: %v", dirty)
+		}
+		if _, ok := bdKVListJSON(t, bd, wdir)["commitkey"]; ok {
+			t.Error("commitkey still listed after bd kv clear")
+		}
+
+		// Clearing a key that is not there changes nothing, so on a clean
+		// working set it must succeed without an empty commit.
+		bdKV(t, bd, wdir, "clear", "never-set")
+		afterNoop, dirty := embeddedLogCountAndDirtyTables(t, beadsDir)
+		if afterNoop != afterClear || len(dirty) != 0 {
+			t.Errorf("bd kv clear of an absent key: dolt_log %d -> %d, dirty %v; want no commit and a clean working set",
+				afterClear, afterNoop, dirty)
+		}
+	})
+
+	// batch and off defer every per-command version commit to an explicit
+	// `bd dolt commit`, so a kv write under them lands in the working set and
+	// adds no commit, set and clear alike.
+	for _, mode := range []string{"batch", "off"} {
+		t.Run("kv_writes_defer_under_"+mode, func(t *testing.T) {
+			wdir, beadsDir := newWarmKVWorkspace(t, bd, "kd")
+			// Committed under the default (on), so the clear below has a
+			// HEAD row to change.
+			bdKV(t, bd, wdir, "set", "committed", "v0")
+			before, dirty := embeddedLogCountAndDirtyTables(t, beadsDir)
+			if len(dirty) != 0 {
+				t.Fatalf("precondition: working set dirty after an auto-committed kv set: %v", dirty)
+			}
+
+			bdKV(t, bd, wdir, "set", "deferred", "v1", "--dolt-auto-commit", mode)
+			afterSet, dirty := embeddedLogCountAndDirtyTables(t, beadsDir)
+			if afterSet != before {
+				t.Errorf("bd kv set under %s: dolt_log %d -> %d, want no commit", mode, before, afterSet)
+			}
+			if !slices.Contains(dirty, "config:modified") {
+				t.Errorf("bd kv set under %s: dirty = %v, want config left in the working set", mode, dirty)
+			}
+
+			bdKV(t, bd, wdir, "clear", "committed", "--dolt-auto-commit", mode)
+			afterClear, dirty := embeddedLogCountAndDirtyTables(t, beadsDir)
+			if afterClear != before {
+				t.Errorf("bd kv clear under %s: dolt_log %d -> %d, want no commit", mode, before, afterClear)
+			}
+			if !slices.Contains(dirty, "config:modified") {
+				t.Errorf("bd kv clear under %s: dirty = %v, want config left in the working set", mode, dirty)
+			}
+			got := bdKVListJSON(t, bd, wdir)
+			if _, ok := got["committed"]; ok || got["deferred"] != "v1" {
+				t.Errorf("kv list after the deferred writes = %v, want deferred=v1 and committed cleared", got)
+			}
+		})
+	}
 
 	// ===== Error Cases =====
 
