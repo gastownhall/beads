@@ -343,7 +343,7 @@ func namedPortConfigYaml(t *testing.T, beadsDir string, port int) {
 // starts no server and gives the same advice, naming the endpoint it dialed.
 // metadata.json's port declares the server external even when config.yaml's
 // dolt.port, which outranks it, chose the port: `bd dolt set port N
-// --update-config` writes both.
+// --update-config` writes both (dolt.port into the config.local.yaml sidecar).
 func TestNamedPortServerUnreachableAdvice(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -372,16 +372,26 @@ func TestNamedPortServerUnreachableAdvice(t *testing.T) {
 		}, "metadata.json declares the Dolt server at"},
 		{"bd dolt set port --update-config", func(t *testing.T, f *externalInitFixture, port int) {
 			beadsDir := namedPortWorkspace(t, f, 0)
-			// --update-config writes dolt.port only into a config.yaml that exists.
+			// --update-config writes dolt.port only beside a config.yaml that
+			// exists. dolt.port is machine-local, so it lands in the
+			// config.local.yaml sidecar and the tracked config.yaml keeps no
+			// port.
 			if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), nil, 0o600); err != nil {
 				t.Fatal(err)
 			}
 			if res := f.run("", "dolt", "set", "port", strconv.Itoa(port), "--update-config"); res.failed {
 				t.Fatalf("bd dolt set port failed:\n%s", res.output)
 			}
-			yaml, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
-			if err != nil || !strings.Contains(string(yaml), strconv.Itoa(port)) {
-				t.Fatalf("bd dolt set port --update-config left config.yaml without the port (%v):\n%s", err, yaml)
+			sidecar, err := os.ReadFile(filepath.Join(beadsDir, "config.local.yaml"))
+			if err != nil || !strings.Contains(string(sidecar), strconv.Itoa(port)) {
+				t.Fatalf("bd dolt set port --update-config left config.local.yaml without the port (%v):\n%s", err, sidecar)
+			}
+			tracked, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(tracked), "port") || strings.Contains(string(tracked), strconv.Itoa(port)) {
+				t.Fatalf("bd dolt set port --update-config wrote the port into the tracked config.yaml:\n%s", tracked)
 			}
 		}, "metadata.json declares the Dolt server at"},
 		{"config.yaml dolt.port other than dolt_server_port", func(t *testing.T, f *externalInitFixture, port int) {
