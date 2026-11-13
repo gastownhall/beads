@@ -81,6 +81,63 @@ func TestIssueOperationsCreateAggregatesEveryRelationItWasGiven(t *testing.T) {
 	}
 }
 
+// TestIssueOperationsCreateCounterModeWalksPastAnExplicitID pins the
+// ExecuteCreate route bd create takes, in counter mode (GH#8456): an
+// explicit row sitting ahead of the counter must not stop an auto create.
+// Before the fix the create-only guard refused the colliding minted id with
+// ErrAlreadyExists on every retry — the transaction rollback restored
+// last_id, so each retry minted the same held value — and the caller never
+// chose the id it was refused for.
+func TestIssueOperationsCreateCounterModeWalksPastAnExplicitID(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if _, err := store.db.ExecContext(ctx,
+		"INSERT INTO issue_counter (prefix, last_id) VALUES (?, ?)", "test", 0); err != nil {
+		t.Fatalf("failed to seed counter: %v", err)
+	}
+	if err := store.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+		t.Fatalf("failed to enable counter mode: %v", err)
+	}
+
+	first := &types.Issue{Title: "first auto", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, first, "tester"); err != nil {
+		t.Fatalf("first auto create: %v", err)
+	}
+	if first.ID != "test-1" {
+		t.Fatalf("first auto create = %q, want test-1", first.ID)
+	}
+	explicit := &types.Issue{ID: "test-2", Title: "explicit", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, explicit, "tester"); err != nil {
+		t.Fatalf("explicit create: %v", err)
+	}
+
+	operations, err := NewIssueOperations(store)
+	if err != nil {
+		t.Fatalf("NewIssueOperations: %v", err)
+	}
+	result, err := operations.Create(ctx, publicops.CreateRequest{
+		Actor: "writer",
+		Issue: &types.Issue{Title: "auto", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+	})
+	if err != nil {
+		t.Fatalf("Create(no id) = %v, want the mint to walk past test-2", err)
+	}
+	if result.Issue.ID != "test-3" {
+		t.Errorf("Create(no id) = %s, want test-3", result.Issue.ID)
+	}
+
+	got, err := store.GetIssue(ctx, "test-2")
+	if err != nil {
+		t.Fatalf("GetIssue(test-2): %v", err)
+	}
+	if got.Title != "explicit" {
+		t.Errorf("explicit row test-2 was overwritten: title=%q, want %q", got.Title, "explicit")
+	}
+}
+
 // TestIssueOperationsUpdateRefusesIncoherentClaimRequests is what is left of
 // TestIssueOperationsUpdateClaimCASAndTransferMatrix.
 //
