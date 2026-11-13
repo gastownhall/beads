@@ -31,8 +31,15 @@ type metadatalessWorkspace struct {
 // then removes metadata.json, config.yaml and any legacy config.json.
 func newMetadatalessWorkspace(t *testing.T, export bool) *metadatalessWorkspace {
 	t.Helper()
+	return newMetadatalessWorkspaceFor(t, "myproj", export)
+}
+
+// newMetadatalessWorkspaceFor is newMetadatalessWorkspace for a workspace
+// initialized with prefix, whose database is named after it.
+func newMetadatalessWorkspaceFor(t *testing.T, prefix string, export bool) *metadatalessWorkspace {
+	t.Helper()
 	bd := buildEmbeddedBD(t)
-	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "myproj")
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", prefix)
 	w := &metadatalessWorkspace{bd: bd, dir: dir, beadsDir: beadsDir}
 	w.issueID = strings.TrimSpace(bdCreateSilent(t, bd, dir, "retained issue"))
 	if export {
@@ -50,7 +57,7 @@ func newMetadatalessWorkspace(t *testing.T, export bool) *metadatalessWorkspace 
 			t.Fatal(err)
 		}
 	}
-	w.requireDatabases(t, "myproj")
+	w.requireDatabases(t, prefix)
 	return w
 }
 
@@ -200,6 +207,56 @@ func TestEmbeddedMetadatalessWorkspaceRefusesSiblingDatabase(t *testing.T) {
 			t.Fatalf("after restoring metadata.json the workspace lists %v, want only the original %s", ids, w.issueID)
 		}
 		w.requireDatabases(t, "beads", "myproj")
+	})
+
+	// AC-4: a metadata-less store whose only database is the default
+	// fallback keeps working as before, reads and writes alike, with the
+	// existing warning and no second database.
+	t.Run("sole fallback database", func(t *testing.T) {
+		w := newMetadatalessWorkspaceFor(t, "beads", true)
+		stdout, stderr, err := w.run(t, nil, "list")
+		if err != nil || !strings.Contains(stdout, w.issueID) {
+			t.Fatalf("bd list on the sole fallback database = %v, want the existing issue %s\nstdout:\n%s\nstderr:\n%s", err, w.issueID, stdout, stderr)
+		}
+		if !strings.Contains(stderr, "no beads configuration found") {
+			t.Errorf("the existing fallback warning is gone:\n%s", stderr)
+		}
+		stdout, stderr, err = w.run(t, nil, "create", "--silent", "second issue")
+		if err != nil || strings.TrimSpace(stdout) == "" {
+			t.Fatalf("bd create on the sole fallback database = %v, want a new issue\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		w.requireDatabases(t, "beads")
+	})
+
+	// AC-4: a metadata-less workspace with no embedded store at all, only
+	// issues.jsonl, has nothing to be ambiguous with: a write keeps its
+	// existing no-database answer naming bd init, never the metadata-less
+	// refusal, and creates no store.
+	t.Run("empty workspace keeps its existing guidance", func(t *testing.T) {
+		src := newMetadatalessWorkspace(t, true)
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+		beadsDir := filepath.Join(dir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), src.jsonl, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		w := &metadatalessWorkspace{bd: src.bd, dir: dir, beadsDir: beadsDir}
+		stdout, stderr, err := w.run(t, nil, "create", "--silent", "bootstrap probe")
+		if err == nil {
+			t.Fatalf("bd create against an empty metadata-less workspace succeeded\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		if strings.Contains(stderr, "cannot safely infer") {
+			t.Fatalf("an empty workspace must not hit the metadata-less refusal:\n%s", stderr)
+		}
+		if !strings.Contains(stdout+stderr, "bd init") {
+			t.Errorf("the empty-workspace guidance no longer names bd init\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		if _, statErr := os.Stat(filepath.Join(beadsDir, "embeddeddolt")); !os.IsNotExist(statErr) {
+			t.Fatalf("an embedded store appeared (stat error: %v)", statErr)
+		}
 	})
 }
 
