@@ -358,11 +358,10 @@ func (t *embeddedTransaction) CreateIssueImport(ctx context.Context, issue *type
 }
 
 // The composite-view reads below all run on the single embedded transaction
-// handle. Unlike the classic Dolt store, the embedded store has no durable/wisp
-// session split, so every read here — including the both-tiers-spanning ones —
-// is read-your-writes on both tiers; the InTx functions do their own wisp
-// routing on the one handle. The two-session wisp caveat in the
-// storage.Transaction doc applies only to the server (Dolt) backend.
+// handle, so every read here — including the both-tiers-spanning ones — is
+// read-your-writes on both tiers; the InTx functions do their own wisp
+// routing on the one handle. The classic Dolt store runs both planes on one
+// session too, so this is backend parity, not an embedded-only guarantee.
 
 // GetIssueCommentsPage returns one keyset page of an issue's comments within the
 // transaction. Mirrors EmbeddedDoltStore.GetIssueCommentsPage's issueops

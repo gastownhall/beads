@@ -233,21 +233,15 @@ func vhDoltTransaction(t *testing.T, store *DoltStore, fn func(storage.Transacti
 }
 
 // TestDeferredSwitchReadErrorFailsADoltTransaction: runDoltTransaction's
-// regular transaction answers the switch the same way. A failed read rolls it
-// back before the callback runs, and the next operation reads the row again.
-//
-// With the journal off, the default, the operation also holds the ignored
-// tables' transaction on a second connection. The failed read has to roll that
-// one back too: its cleanup closes the connection, and the close would wait on
-// the open transaction for good.
+// transaction answers the switch the same way. A failed read rolls it back
+// before the callback runs, and the next operation reads the row again. Both
+// journal scopes run the same single-transaction shape, so both arms arm the
+// same expectations.
 func TestDeferredSwitchReadErrorFailsADoltTransaction(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		journal bool
 	}{
-		// The journal pins both planes to the regular transaction, so the
-		// operation borrows no connection for the ignored tables; the switch is
-		// answered on the regular transaction either way.
 		{name: "journal on", journal: true},
 		{name: "journal off"},
 	} {
@@ -257,26 +251,11 @@ func TestDeferredSwitchReadErrorFailsADoltTransaction(t *testing.T) {
 			if _, err := versionedhistory.ActivateStore(context.Background(), store, nil); err != nil {
 				t.Fatal(err)
 			}
-			onMain := func() *sqlmock.Rows {
-				return sqlmock.NewRows([]string{"active_branch()"}).AddRow("main")
-			}
-			// Journal off, the operation also borrows a second connection,
-			// checks that it is on the regular transaction's branch, and begins
-			// the ignored tables' transaction there, which it rolls back after
-			// the regular one.
 			expectOperation := func() {
-				mock.ExpectQuery(regexp.QuoteMeta("SELECT active_branch()")).WillReturnRows(onMain())
 				mock.ExpectBegin()
-				if !tc.journal {
-					mock.ExpectQuery(regexp.QuoteMeta("SELECT active_branch()")).WillReturnRows(onMain())
-					mock.ExpectBegin()
-				}
 			}
 			expectRollback := func() {
 				mock.ExpectRollback()
-				if !tc.journal {
-					mock.ExpectRollback()
-				}
 			}
 
 			expectOperation()
@@ -298,7 +277,7 @@ func TestDeferredSwitchReadErrorFailsADoltTransaction(t *testing.T) {
 			errProbe := errors.New("probe done")
 			var scoped bool
 			err = vhDoltTransaction(t, store, func(tx storage.Transaction) error {
-				scoped = issueops.VersionedHistoryEnabledFor(tx.(*doltTransaction).regularTx)
+				scoped = issueops.VersionedHistoryEnabledFor(tx.(*doltTransaction).tx)
 				return errProbe
 			})
 			if !errors.Is(err, errProbe) {

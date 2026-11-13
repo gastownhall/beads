@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"sort"
 	"strings"
 	"time"
@@ -14,69 +13,20 @@ import (
 	"github.com/cenkalti/backoff/v4"
 
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// doltTransaction implements storage.Transaction for Dolt
+// doltTransaction implements storage.Transaction for Dolt. Durable tables and
+// the dolt-ignored wisp plane (wisps, wisp_*, local_metadata, repo_mtimes)
+// share its ONE server-side SQL transaction, so every read is read-your-writes
+// across the planes and a commit failure rolls both back together.
 type doltTransaction struct {
-	regularTx *sql.Tx
-	ignoredTx *sql.Tx
-	store     *DoltStore
-	dirty     versioncontrolops.DirtyTableTracker
-
-	// wroteRegularDep/wroteWispDep record whether a dependency row has been
-	// written to each tier during this logical transaction. Regular and wisp
-	// dependency tables live on separate SQL sessions, so a single-session
-	// cycle check cannot see the other session's uncommitted edges; these flags
-	// let AddDependencyWithOptions fall back to the merged two-session cycle
-	// check once both tiers are in play. The DirtyTableTracker cannot serve this
-	// role: it deliberately drops wisp_* tables because they are dolt-ignored.
-	wroteRegularDep bool
-	wroteWispDep    bool
-	// journalPinned records that ignoredTx IS regularTx because the events
-	// journal collapsed the two planes into one transaction, so the finish path
-	// must not commit or roll it back a second time.
-	journalPinned bool
-	// ignoredDirty records the durable tables a write on a separate ignoredTx
-	// changed: a durable dependent's or child's is_blocked that a wisp write
-	// recomputed (issues), and the durable edges that pointed at a deleted
-	// wisp (dependencies). That session commits after the Dolt commit, so the
-	// rows cannot ride it; finishDoltTransaction publishes them once the
-	// session has committed (GH#6647).
-	ignoredDirty versioncontrolops.DirtyTableTracker
-}
-
-func (t *doltTransaction) txFor(table string) *sql.Tx {
-	if table == "wisps" || strings.HasPrefix(table, "wisp_") ||
-		table == "local_metadata" || table == "repo_mtimes" {
-		return t.ignoredTx
-	}
-	return t.regularTx
-}
-
-// markChanged records that a write on writeTable's session changed table. On
-// the regular session it stages table for the transaction's Dolt commit. On a
-// separate ignored session it does not: that session commits after the Dolt
-// commit, so staging table there would commit it without this write's rows,
-// and only sweep up whatever else was pending. finishDoltTransaction
-// publishes it instead, once the session has committed. A dolt-ignored table
-// is dropped either way (DirtyTableTracker.MarkDirty).
-func (t *doltTransaction) markChanged(writeTable, table string) {
-	if t.txFor(writeTable) == t.regularTx {
-		t.dirty.MarkDirty(table)
-		return
-	}
-	t.ignoredDirty.MarkDirty(table)
-}
-
-// markIssuesChanged records that a write on writeTable's session changed a
-// durable issues row (an IssueRowsChanged result).
-func (t *doltTransaction) markIssuesChanged(writeTable string) {
-	t.markChanged(writeTable, "issues")
+	tx    *sql.Tx
+	store *DoltStore
+	dirty versioncontrolops.DirtyTableTracker
 }
 
 // isActiveWisp checks if an ID exists in the wisps table within the transaction.
@@ -84,7 +34,7 @@ func (t *doltTransaction) markIssuesChanged(writeTable string) {
 // sees uncommitted wisps. Handles both -wisp- pattern and explicit-ID ephemerals (GH#2053).
 func (t *doltTransaction) isActiveWisp(ctx context.Context, id string) bool {
 	var exists int
-	err := t.ignoredTx.QueryRowContext(ctx, "SELECT 1 FROM wisps WHERE id = ? LIMIT 1", id).Scan(&exists)
+	err := t.tx.QueryRowContext(ctx, "SELECT 1 FROM wisps WHERE id = ? LIMIT 1", id).Scan(&exists)
 	return err == nil
 }
 
@@ -153,7 +103,7 @@ func (s *DoltStore) runInIssueLifecycleTransaction(
 		var callbackErr error
 		err := run(ctx, func(sqlTx *sql.Tx) error {
 			invoked = true
-			tx := &doltTransaction{regularTx: sqlTx, ignoredTx: sqlTx, store: s}
+			tx := &doltTransaction{tx: sqlTx, store: s}
 			if callbackErr = fn(tx); callbackErr != nil {
 				return callbackErr
 			}
@@ -246,7 +196,6 @@ func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg s
 	// journal switch below now decides only whether journal rows are written,
 	// not how many sessions run.
 	journalEnabled := s.eventsJournalEnabled.Load()
-	ignoredTx := regularTx
 	clearJournalScope := issueops.ScopeEventsJournalTransaction(regularTx, journalEnabled)
 	defer clearJournalScope()
 	// Shape counterpart of the activation switch just above (PR A1):
@@ -283,7 +232,7 @@ func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg s
 	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(regularTx)
 	defer clearRecheckScope()
 
-	tx := &doltTransaction{regularTx: regularTx, ignoredTx: ignoredTx, store: s, journalPinned: true}
+	tx := &doltTransaction{tx: regularTx, store: s}
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -301,215 +250,42 @@ func (s *DoltStore) runDoltTransactionRecording(ctx context.Context, commitMsg s
 }
 
 // finishDoltTransactionRecording is finishDoltTransaction that also hands back
-// the dependents the transaction's unblocking writes recorded, on either of its
-// SQL transactions, for the post-commit blocked-state recheck.
+// the dependents the transaction's unblocking writes recorded, for the
+// post-commit blocked-state recheck.
 //
 // They are handed back with the error when the commit is indeterminate
-// (ErrCommitIndeterminate): the regular SQL commit may have landed, or did land
-// and only the Dolt commit or the ignored-table commit after it failed. The
-// rows are then committed without a caller being able to replay the write, so
-// the recheck is the only thing that can settle their dependents; being a full
-// recompute of committed state, it is harmless if the commit did not land.
-// Any other failure means the regular SQL commit was refused and rolled back,
-// and nothing is handed back.
+// (ErrCommitIndeterminate): the SQL commit may have landed, or did land and
+// only the Dolt commit after it failed. The rows are then committed without a
+// caller being able to replay the write, so the recheck is the only thing that
+// can settle their dependents; being a full recompute of committed state, it is
+// harmless if the commit did not land. Any other failure means the SQL commit
+// was refused and rolled back, and nothing is handed back.
 func (s *DoltStore) finishDoltTransactionRecording(ctx context.Context, conn *sql.Conn, tx *doltTransaction, commitMsg string) (issueops.BlockedRecheck, error) {
 	err := s.finishDoltTransaction(ctx, conn, tx, commitMsg)
 	if err != nil && !errors.Is(err, ErrCommitIndeterminate) {
 		return issueops.BlockedRecheck{}, err
 	}
-	pending := issueops.TakeBlockedRecheck(tx.regularTx)
-	if !tx.journalPinned {
-		pending = pending.Merge(issueops.TakeBlockedRecheck(tx.ignoredTx))
-	}
-	return pending, err
+	return issueops.TakeBlockedRecheck(tx.tx), err
 }
 
-// finishDoltTransaction commits the regular SQL transaction, its associated
-// Dolt revision, and then the ignored-table transaction. Once the regular SQL
-// transaction succeeds, later failures have an indeterminate durable outcome.
-// When the journal pinned both planes into the regular transaction, that single
-// commit already carried the ignored tables and there is no second transaction
-// to roll back or commit.
+// finishDoltTransaction commits the SQL transaction and its associated Dolt
+// revision. Once the SQL transaction succeeds, later failures have an
+// indeterminate durable outcome.
 func (s *DoltStore) finishDoltTransaction(ctx context.Context, conn *sql.Conn, tx *doltTransaction, commitMsg string) error {
-	rollbackIgnored := func() {
-		if !tx.journalPinned {
-			_ = tx.ignoredTx.Rollback()
-		}
-	}
-
-	if err := tx.regularTx.Commit(); err != nil {
-		rollbackIgnored()
-		return wrapSQLCommitError("sql commit (regular)", err)
+	if err := tx.tx.Commit(); err != nil {
+		return wrapSQLCommitError("sql commit", err)
 	}
 
 	// The mutations in this transaction ran with versioned history scoped on
-	// regularTx (see runDoltTransaction), so anything they minted has to be
-	// staged with them or the version rows never reach this operation's Dolt
-	// commit. Marked here, once, rather than at each MarkDirty call site.
+	// tx (see runDoltTransaction), so anything they minted has to be staged
+	// with them or the version rows never reach this operation's Dolt commit.
+	// Marked here, once, rather than at each MarkDirty call site.
 	tx.dirty.MarkVersionedHistoryDirty(s.versionedHistory.Enabled())
 
 	if err := versioncontrolops.StageAndCommit(ctx, conn, tx.dirty.DirtyTables(), commitMsg, s.commitAuthorString()); err != nil {
-		rollbackIgnored()
-		return fmt.Errorf("stage and commit after regular SQL commit: %w: %w", err, ErrCommitIndeterminate)
+		return fmt.Errorf("stage and commit after SQL commit: %w: %w", err, ErrCommitIndeterminate)
 	}
-
-	if tx.journalPinned {
-		return nil
-	}
-	if err := tx.ignoredTx.Commit(); err != nil {
-		return fmt.Errorf("sql commit (ignored, regular already committed): %w: %w", err, ErrCommitIndeterminate)
-	}
-	s.publishIgnoredDirty(ctx, conn, tx, commitMsg)
 	return nil
-}
-
-// publishIgnoredDirty commits the durable rows tx's ignored session changed
-// (markChanged), now that the session has committed them. It runs on conn,
-// the transaction's own pinned connection, because a MaxOpenConns=1 pool has
-// no other one to give while conn is held. Every row is already durable, so a
-// failure is counted and logged like the other post-commit history commits,
-// never returned: the rows ride the next Dolt commit on the branch.
-func (s *DoltStore) publishIgnoredDirty(ctx context.Context, conn *sql.Conn, tx *doltTransaction, commitMsg string) {
-	if err := versioncontrolops.StageAndCommit(ctx, conn, tx.ignoredDirty.DirtyTables(), commitMsg, s.commitAuthorString()); err != nil {
-		doltMetrics.postTxCommitDropped.Add(ctx, 1)
-		log.Printf("dolt: post-tx dolt commit failed for %q (data already committed; change rides the next dolt commit): %v", commitMsg, err)
-	}
-}
-
-// ignoredTxBorrowTimeout bounds how long a borrow of a second warm connection
-// from the main pool may wait before falling back to a dedicated fresh dial. It
-// keeps the second acquisition from ever waiting unboundedly while the caller
-// already holds the first (regular-tx) connection, which is what makes deadlock
-// impossible by construction on the borrow path.
-const ignoredTxBorrowTimeout = 250 * time.Millisecond
-
-// beginIgnoredTxOnBranch starts the ignored-tables transaction, checked out to
-// the regular transaction's branch. It borrows a second warm connection from the
-// main pool when one is safely available — the hosted-gateway churn fix: once the
-// pool is warm this costs zero new MySQL handshakes and zero Dolt session-setup
-// round-trips per write. It falls back to a dedicated single-connection pool when
-// borrowing could deadlock (MaxOpenConns==1, the documented case that every
-// branch-isolated test exercises) or when the pool is exhausted or a borrowed
-// connection turns out to be stale.
-//
-// The returned cleanup closure releases whichever acquisition path was taken, so
-// the caller does not need to know which one ran.
-func (s *DoltStore) beginIgnoredTxOnBranch(ctx context.Context, branch string) (cleanup func(), tx *sql.Tx, err error) {
-	// Borrow fast path: reuse an already-open pooled connection. Unlike the
-	// fallback below, this path never switches the session's branch — see
-	// beginBorrowedTx for the pool invariant it preserves.
-	if conn := s.borrowConnForIgnoredTx(ctx); conn != nil {
-		tx, err := beginBorrowedTx(ctx, conn, branch)
-		if err == nil {
-			return func() { _ = conn.Close() }, tx, nil
-		}
-		// A stale pooled connection or a session on another branch: a fresh
-		// dial always worked before, so discard this one (its session state is
-		// untouched) and fall through to the fallback.
-		_ = conn.Close()
-	}
-
-	// Fallback: a dedicated single-connection pool, paying the fresh dial the
-	// borrow path exists to avoid.
-	doltMetrics.ignoredTxFreshPool.Add(ctx, 1)
-	db, err := sql.Open("mysql", s.connStr)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to open ignored tx connection: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		_ = db.Close()
-		return nil, nil, fmt.Errorf("failed to acquire ignored tx connection: %w", err)
-	}
-
-	tx, err = beginTxOnConn(ctx, conn, branch)
-	if err != nil {
-		_ = conn.Close()
-		_ = db.Close()
-		return nil, nil, err
-	}
-
-	return func() { _ = conn.Close(); _ = db.Close() }, tx, nil
-}
-
-// borrowConnForIgnoredTx returns a second connection borrowed from the main pool
-// for the ignored-tables transaction, or nil if borrowing is unsafe or would
-// block. The caller falls back to a dedicated single-connection pool on nil.
-func (s *DoltStore) borrowConnForIgnoredTx(ctx context.Context) *sql.Conn {
-	st := s.db.Stats()
-	// MaxOpenConns==1: the caller already pinned the pool's only connection for
-	// the regular tx, so a borrow would deadlock. Preserve today's behavior.
-	if st.MaxOpenConnections == 1 {
-		return nil
-	}
-	// Exhausted pool: skip the wait and go straight to the fallback.
-	// MaxOpenConnections==0 means unlimited — always safe to grow.
-	if st.MaxOpenConnections > 0 && st.InUse >= st.MaxOpenConnections {
-		return nil
-	}
-
-	bctx, cancel := context.WithTimeout(ctx, ignoredTxBorrowTimeout)
-	defer cancel()
-	conn, err := s.db.Conn(bctx)
-	if err != nil {
-		// Lost a stats/Conn race, parent ctx canceled, or a slow dial exceeded
-		// the borrow timeout — fall back to a fresh dial.
-		return nil
-	}
-	return conn
-}
-
-// beginBorrowedTx begins the ignored-tables transaction on a connection
-// borrowed from the main pool, without ever changing that session's branch.
-//
-// Pool invariant: DOLT_CHECKOUT is session-level, and the borrow cleanup
-// returns the connection to the pool as-is — so switching its branch here
-// would leak a foreign branch into the pool for an unrelated later caller.
-// Every other production checkout site (federation staging, compact, flatten)
-// restores the branch before releasing the connection; the borrow path
-// preserves the same invariant by refusing instead of switching. Today no
-// shipped flow diverges a pool session's branch from the regular tx's branch
-// (DoltStore.Checkout has no non-test callers), so this is defense in depth
-// for future Checkout callers and for multi-connection tests.
-//
-// Instead of an unconditional checkout it verifies the session is already on
-// the requested branch — the overwhelmingly common case — and sends the
-// caller to the fresh-dial fallback otherwise. Same round-trip count as the
-// checkout it replaces (one statement), so the borrow fast path stays free.
-func beginBorrowedTx(ctx context.Context, conn *sql.Conn, branch string) (*sql.Tx, error) {
-	var active string
-	if err := conn.QueryRowContext(ctx, "SELECT active_branch()").Scan(&active); err != nil {
-		return nil, fmt.Errorf("failed to read borrowed conn's active branch: %w", err)
-	}
-	if active != branch {
-		return nil, fmt.Errorf("borrowed conn is on branch %q, want %q: refusing to switch a pooled session's branch", active, branch)
-	}
-	tx, err := conn.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to begin ignored tx: %w", err)
-	}
-	return tx, nil
-}
-
-// beginTxOnConn puts a connection on branch and begins a transaction on it.
-// Only the fallback path uses it: the fallback owns a dedicated
-// single-connection pool, so checking its session out is safe. Every Dolt SQL
-// session has its own active branch, and a fresh dial lands on the database's
-// default branch — usually already the requested one. DOLT_CHECKOUT is issued
-// only when the session is on a different branch: a capped operator user may
-// be granted EXECUTE on dolt_add/dolt_commit alone, and an unconditional no-op
-// checkout would be denied and fail every wisp write on the fallback path.
-func beginTxOnConn(ctx context.Context, conn *sql.Conn, branch string) (*sql.Tx, error) {
-	if err := checkoutBranchIfNeeded(ctx, conn, branch); err != nil {
-		return nil, fmt.Errorf("failed to put ignored tx conn on branch %s: %w", branch, err)
-	}
-	tx, err := conn.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to begin ignored tx: %w", err)
-	}
-	return tx, nil
 }
 
 // isDoltNothingToCommit returns true if the error indicates there were no
@@ -525,23 +301,21 @@ func (t *doltTransaction) CreateIssue(ctx context.Context, issue *types.Issue, a
 		return fmt.Errorf("issue must not be nil")
 	}
 
-	// Build the validation context on regularTx for both tiers: wisp rows
-	// live on the ignored session, but the validation context (config,
-	// custom_types) lives in regular dolt-tracked tables — reading it
-	// through regularTx keeps types registered earlier in this transaction
-	// (tx.SetConfig("types.custom", ...)) visible. Both sessions are
-	// pinned to the same branch (GH#5443).
-	bc, err := issueops.NewBatchContext(ctx, t.regularTx, storage.BatchCreateOptions{SkipPrefixValidation: true})
+	// The validation context (config, custom_types) lives in dolt-tracked
+	// tables; both tiers share this transaction's one session, so types
+	// registered earlier in this transaction (tx.SetConfig("types.custom",
+	// ...)) are visible to wisp creates too (GH#5443).
+	bc, err := issueops.NewBatchContext(ctx, t.tx, storage.BatchCreateOptions{SkipPrefixValidation: true})
 	if err != nil {
 		return err
 	}
 
 	if issueops.IsWisp(issue) {
-		_, err = issueops.CreateIssueInTxWithResult(ctx, t.ignoredTx, bc, issue, actor)
+		_, err = issueops.CreateIssueInTxWithResult(ctx, t.tx, bc, issue, actor)
 		return err
 	}
 
-	result, err := issueops.CreateIssueInTxWithResult(ctx, t.regularTx, bc, issue, actor)
+	result, err := issueops.CreateIssueInTxWithResult(ctx, t.tx, bc, issue, actor)
 	if err != nil {
 		return err
 	}
@@ -573,10 +347,10 @@ func (t *doltTransaction) CreateIssues(ctx context.Context, issues []*types.Issu
 		}
 	}
 
-	// See CreateIssue: one validation context on regularTx serves both
-	// tiers, so in-transaction custom-type registration is visible to the
-	// wisp tier too (GH#5443).
-	bc, err := issueops.NewBatchContext(ctx, t.regularTx, storage.BatchCreateOptions{
+	// See CreateIssue: the one validation context serves both tiers, so
+	// in-transaction custom-type registration is visible to the wisp tier
+	// too (GH#5443).
+	bc, err := issueops.NewBatchContext(ctx, t.tx, storage.BatchCreateOptions{
 		SkipPrefixValidation: true,
 	})
 	if err != nil {
@@ -584,7 +358,7 @@ func (t *doltTransaction) CreateIssues(ctx context.Context, issues []*types.Issu
 	}
 
 	if len(regularIssues) > 0 {
-		result, err := issueops.CreateIssuesInTxWithContext(ctx, t.regularTx, bc, regularIssues, actor)
+		result, err := issueops.CreateIssuesInTxWithContext(ctx, t.tx, bc, regularIssues, actor)
 		if err != nil {
 			return err
 		}
@@ -594,14 +368,14 @@ func (t *doltTransaction) CreateIssues(ctx context.Context, issues []*types.Issu
 	}
 
 	if len(wispIssues) > 0 {
-		result, err := issueops.CreateIssuesInTxWithContext(ctx, t.ignoredTx, bc, wispIssues, actor)
+		result, err := issueops.CreateIssuesInTxWithContext(ctx, t.tx, bc, wispIssues, actor)
 		if err != nil {
 			return err
 		}
 		// A wisp's create-time edge can flip a durable row's is_blocked: a
 		// waiter on the wisp's durable spawner.
 		if result.ChangedTables["issues"] {
-			t.markIssuesChanged("wisps")
+			t.dirty.MarkDirty("issues")
 		}
 	}
 	return nil
@@ -614,14 +388,14 @@ func (t *doltTransaction) GetIssue(ctx context.Context, id string) (*types.Issue
 	if t.isActiveWisp(ctx, id) {
 		table = "wisps"
 	}
-	return scanIssueTxFromTable(ctx, t.txFor(table), table, id)
+	return scanIssueTxFromTable(ctx, t.tx, table, id)
 }
 
 // SearchIssueIDs returns matching IDs only, projected in Go from SearchIssues.
 // It skips the issueops.SearchIssueIDsInTx fast path because that merges
-// issues+wisps over one *sql.Tx, while doltTransaction splits them across
-// regularTx/ignoredTx (see txFor). Not worth re-implementing: partial-ID
-// resolution calls the (fast) store path, never a transaction, so this is cold.
+// issues+wisps, while this transaction's SearchIssues reads one table (see its
+// NO WISP MERGE note). Not worth re-implementing: partial-ID resolution calls
+// the (fast) store path, never a transaction, so this is cold.
 func (t *doltTransaction) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
 	// The caller wants ids only, so opt out of the bulk label read SearchIssues
 	// would otherwise run and then project away. filter is a value copy, so this
@@ -661,12 +435,11 @@ func (t *doltTransaction) SearchIssueIDs(ctx context.Context, query string, filt
 // What still differs from the store-level search, deliberately and visibly:
 //
 //   - NO WISP MERGE. This runs ONE table — issues, or wisps when the filter
-//     routes there — because doltTransaction splits the two tiers across
-//     regularTx/ignoredTx (see txFor) and the shared searchInTx merges them over
-//     a single *sql.Tx. So a default (SkipWisps=false) search here answers what
-//     a SkipWisps=true search answers at the store level. That is a structural
-//     difference in the transaction, not a dropped filter field, and merging the
-//     tiers is its own change with its own blast radius.
+//     routes there — while the store-level searchInTx merges both tiers. So a
+//     default (SkipWisps=false) search here answers what a SkipWisps=true
+//     search answers at the store level. That is a structural difference in
+//     the transaction, not a dropped filter field, and merging the tiers is
+//     its own change with its own blast radius.
 //   - filter.Lite and filter.NoIDShrink are not read. Both describe HOW to
 //     fetch, not WHICH rows: ignoring Lite returns fully populated rows with
 //     IsLitePartial left false, which is exactly what that flag promises a
@@ -707,7 +480,7 @@ func (t *doltTransaction) SearchIssues(ctx context.Context, query string, filter
 	}
 
 	//nolint:gosec // G201: table name is a fixed constant, whereSQL is parameterized
-	rows, err := t.txFor(tables.Main).QueryContext(ctx, fmt.Sprintf(
+	rows, err := t.tx.QueryContext(ctx, fmt.Sprintf(
 		`SELECT id FROM %s %s %s %s`,
 		tables.Main, whereSQL, sqlbuild.OrderBy(filter.SortBy, filter.SortDesc, ""), limitSQL), args...)
 	if err != nil {
@@ -786,7 +559,7 @@ func (t *doltTransaction) hydrateSearchLabels(ctx context.Context, tables issueo
 	for i, issue := range issues {
 		ids[i] = issue.ID
 	}
-	labelsByID, err := issueops.GetLabelsForIssuesFromTableInTx(ctx, t.txFor(tables.Labels), tables.Labels, ids)
+	labelsByID, err := issueops.GetLabelsForIssuesFromTableInTx(ctx, t.tx, tables.Labels, ids)
 	if err != nil {
 		return fmt.Errorf("search issues in tx: hydrate labels: %w", err)
 	}
@@ -810,7 +583,7 @@ func (t *doltTransaction) hydrateSearchDependencies(ctx context.Context, depTabl
 	for i, issue := range issues {
 		ids[i] = issue.ID
 	}
-	depsByID, err := issueops.GetDependencyRecordsForIssuesFromTableInTx(ctx, t.txFor(depTable), depTable, ids)
+	depsByID, err := issueops.GetDependencyRecordsForIssuesFromTableInTx(ctx, t.tx, depTable, ids)
 	if err != nil {
 		return fmt.Errorf("search issues in tx: hydrate dependencies: %w", err)
 	}
@@ -847,7 +620,7 @@ func (t *doltTransaction) UpdateIssue(ctx context.Context, id string, updates ma
 		}
 	}
 
-	result, err := issueops.UpdateIssueInTx(ctx, t.txFor(table), id, updates, actor)
+	result, err := issueops.UpdateIssueInTx(ctx, t.tx, id, updates, actor)
 	if err != nil {
 		return wrapExecError("update issue in tx", err)
 	}
@@ -859,7 +632,7 @@ func (t *doltTransaction) UpdateIssue(ctx context.Context, id string, updates ma
 	t.dirty.MarkDirty(eventTable)
 	// A wisp's status change can recompute a durable dependent.
 	if result.IssueRowsChanged {
-		t.markIssuesChanged(table)
+		t.dirty.MarkDirty("issues")
 	}
 	return nil
 }
@@ -872,7 +645,7 @@ func (t *doltTransaction) CloseIssue(ctx context.Context, id string, reason stri
 		eventTable = "wisp_events"
 	}
 
-	result, err := issueops.CloseIssueInTx(ctx, t.txFor(table), id, reason, actor, session)
+	result, err := issueops.CloseIssueInTx(ctx, t.tx, id, reason, actor, session)
 	if err != nil {
 		return wrapExecError("close issue in tx", err)
 	}
@@ -882,7 +655,7 @@ func (t *doltTransaction) CloseIssue(ctx context.Context, id string, reason stri
 	t.dirty.MarkDirty(table)
 	t.dirty.MarkDirty(eventTable)
 	if result.IssueRowsChanged {
-		t.markIssuesChanged(table)
+		t.dirty.MarkDirty("issues")
 	}
 	return nil
 }
@@ -894,7 +667,7 @@ func (t *doltTransaction) ReopenIssueWithResult(ctx context.Context, id string, 
 	if t.isActiveWisp(ctx, id) {
 		table, eventTable = "wisps", "wisp_events"
 	}
-	result, err := issueops.ReopenIssueInTx(ctx, t.txFor(table), id, reason, actor)
+	result, err := issueops.ReopenIssueInTx(ctx, t.tx, id, reason, actor)
 	if err != nil {
 		return false, wrapExecError("reopen issue in tx", err)
 	}
@@ -902,7 +675,7 @@ func (t *doltTransaction) ReopenIssueWithResult(ctx context.Context, id string, 
 		t.dirty.MarkDirty(table)
 		t.dirty.MarkDirty(eventTable)
 		if result.IssueRowsChanged {
-			t.markIssuesChanged(table)
+			t.dirty.MarkDirty("issues")
 		}
 	}
 	return result.Changed, nil
@@ -910,27 +683,22 @@ func (t *doltTransaction) ReopenIssueWithResult(ctx context.Context, id string, 
 
 func (t *doltTransaction) DeleteIssue(ctx context.Context, id string) error {
 	isWisp := t.isActiveWisp(ctx, id)
-	table := "issues"
-	if isWisp {
-		table = "wisps"
-	}
 	// storage.Tx.DeleteIssue carries no actor (it is the actorless system
 	// surface), so the journal rows record none — 0066's "system/unknown".
-	result, err := issueops.DeleteIssueInTxWithResult(ctx, t.txFor(table), id, "")
+	result, err := issueops.DeleteIssueInTxWithResult(ctx, t.tx, id, "")
 	if err != nil {
 		return wrapExecError("delete issue in tx", err)
 	}
 	// Mark every table the ON DELETE CASCADE fans out to, not just the row's
 	// own table: the cascaded deletions are invisible to the SQL we issue, so
-	// staging only `issues` leaves them uncommitted in the working set. They
-	// are marked on the session that deleted them: a wisp's delete also
-	// removes the durable edges that pointed at it.
+	// staging only `issues` leaves them uncommitted in the working set. A
+	// wisp's delete also removes the durable edges that pointed at it.
 	for _, cascaded := range issueops.DeleteCascadeTables(isWisp) {
-		t.markChanged(table, cascaded)
+		t.dirty.MarkDirty(cascaded)
 	}
 	// Deleting a wisp can unblock a durable dependent.
 	if result.IssueRowsChanged {
-		t.markIssuesChanged(table)
+		t.dirty.MarkDirty("issues")
 	}
 	return nil
 }
@@ -974,43 +742,12 @@ func (t *doltTransaction) AddDependencyWithOptions(ctx context.Context, dep *typ
 		EmitEvent:      addOpts.EmitEvent,
 	}
 
-	// Regular and dolt-ignored tables run on separate SQL sessions, so when
-	// the edge's write table and its target issue live in different tiers,
-	// target reads on the write tx cannot see a target created earlier in
-	// this same logical transaction (e.g. `bd create --deps blocks:<id>`
-	// swapping the new issue into the target slot). Read the target on its
-	// own tx and hand the row to AddDependencyInTx.
-	crossTierTarget := kind != issueops.DepTargetExternal && t.txFor(targetTable) != t.txFor(table)
-	if crossTierTarget {
-		precheck, err := t.readDepTargetForPrecheck(ctx, dep.IssueID, targetTable, dep.DependsOnID)
-		if err != nil {
-			return err
-		}
-		opts.PrecheckedTarget = precheck
-	}
-
-	// The single-session in-tx cycle check only sees its own session's
-	// uncommitted rows. Fall back to the merged two-session check whenever a
-	// scheduling cycle could hide on the other session: either this edge itself
-	// crosses tiers, or a dependency row was already written to the other tier
-	// earlier in this logical transaction. The latter covers a create-time
-	// batch like `blocks:<wisp>,depends-on:<regular>`, where the cross-tier
-	// `blocks` edge is pending on the ignored session and the same-tier
-	// `depends-on` edge would otherwise close the cycle unseen.
-	if !opts.SkipCycleCheck && (crossTierTarget || t.otherDepTierPending(table)) {
-		if err := t.checkCrossTierSchedulingCycle(ctx, dep); err != nil {
-			return err
-		}
-		opts.SkipCycleCheck = true
-	}
-
-	var addErr error
-	var written issueops.DependencyWriteResult
-	if opts.PrecheckedTarget != nil && table == "wisp_dependencies" && kind == issueops.DepTargetIssue {
-		written, addErr = t.addWispDepSuspendingIssueTargetFK(ctx, dep, actor, opts)
-	} else {
-		written, addErr = issueops.AddDependencyInTxWithResult(ctx, t.txFor(table), dep, actor, opts)
-	}
+	// Both dependency tables share this transaction's one SQL session, so the
+	// in-tx target read and the in-tx cycle check (which scans BOTH tables in
+	// one recursive CTE) see targets and edges created earlier in this same
+	// transaction on either tier — no cross-tier precheck, no FK suspension
+	// for a target still uncommitted in this tx, and no merged fallback check.
+	written, addErr := issueops.AddDependencyInTxWithResult(ctx, t.tx, dep, actor, opts)
 	if addErr != nil {
 		return addErr
 	}
@@ -1027,107 +764,23 @@ func (t *doltTransaction) AddDependencyWithOptions(ctx context.Context, dep *typ
 	// durable row it flipped is committed with the edge (GH#6647), and an edge
 	// that flipped none stages no `issues` (GH#2455).
 	if written.Blocked.IssueRowsChanged {
-		t.markIssuesChanged(table)
-	}
-	t.recordDepTierWrite(table)
-	return nil
-}
-
-// otherDepTierPending reports whether a dependency row was written to the tier
-// opposite writeTable earlier in this logical transaction. Because the regular
-// and wisp dependency tables run on separate SQL sessions, an in-tx cycle check
-// on writeTable's session cannot see the other session's uncommitted scheduling
-// edges; when the other tier has pending writes the caller must use the merged
-// two-session cycle check instead.
-func (t *doltTransaction) otherDepTierPending(writeTable string) bool {
-	if writeTable == "wisp_dependencies" {
-		return t.wroteRegularDep
-	}
-	return t.wroteWispDep
-}
-
-// recordDepTierWrite notes that a dependency row was written to writeTable's
-// tier so a later same-tier edge on the opposite session can detect that the
-// merged cycle check is required. See otherDepTierPending.
-func (t *doltTransaction) recordDepTierWrite(writeTable string) {
-	if writeTable == "wisp_dependencies" {
-		t.wroteWispDep = true
-		return
-	}
-	t.wroteRegularDep = true
-}
-
-// addWispDepSuspendingIssueTargetFK inserts a wisp-source dependency whose
-// target is a regular issue created earlier in this logical transaction.
-// wisp_dependencies carries a real FK (depends_on_issue_id -> issues), and
-// the ignored session cannot see an issues row still uncommitted on the
-// regular session, so the insert would fail FK validation even though the
-// target's existence was just validated on the regular tx. The regular tx
-// commits before the ignored tx, so the committed end-state always satisfies
-// the FK; suspend the session's FK checks around this one statement scope.
-func (t *doltTransaction) addWispDepSuspendingIssueTargetFK(ctx context.Context, dep *types.Dependency, actor string, opts issueops.AddDependencyOpts) (issueops.DependencyWriteResult, error) {
-	if _, err := t.ignoredTx.ExecContext(ctx, "SET foreign_key_checks = 0"); err != nil {
-		return issueops.DependencyWriteResult{}, fmt.Errorf("suspend foreign key checks for cross-tier dependency: %w", err)
-	}
-	written, addErr := issueops.AddDependencyInTxWithResult(ctx, t.ignoredTx, dep, actor, opts)
-	if _, err := t.ignoredTx.ExecContext(ctx, "SET foreign_key_checks = 1"); err != nil && addErr == nil {
-		addErr = fmt.Errorf("restore foreign key checks after cross-tier dependency: %w", err)
-	}
-	return written, addErr
-}
-
-// readDepTargetForPrecheck validates a dependency target on the transaction
-// that owns its table and returns the row fields AddDependencyInTx needs when
-// it cannot read the target itself (cross-tier edges).
-func (t *doltTransaction) readDepTargetForPrecheck(ctx context.Context, sourceID, targetTable, id string) (*issueops.DepTargetPrecheck, error) {
-	var p issueops.DepTargetPrecheck
-	//nolint:gosec // G201: targetTable is "issues" or "wisps"
-	err := t.txFor(targetTable).QueryRowContext(ctx,
-		fmt.Sprintf(`SELECT issue_type, status FROM %s WHERE id = ?`, targetTable), id,
-	).Scan(&p.IssueType, &p.Status)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, issueops.MissingDependencyTarget(sourceID, id)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to check target issue existence: %w", err)
-	}
-	return &p, nil
-}
-
-// checkCrossTierSchedulingCycle rejects a scheduling edge that would close a
-// cycle, using the merged view of both sessions' dependency tables. The in-tx
-// cycle check scans both tables on the write tx and so misses edges added on
-// the other session earlier in this logical transaction.
-//
-// The set is types.IsSchedulingEdge's, by call and not by restatement: an
-// inline copy that missed a fifth scheduling type would fall through to
-// "not a scheduling edge" and skip this gate entirely, which is silence rather
-// than a failure — the whole reason that predicate was consolidated (ga-2ltro.10).
-func (t *doltTransaction) checkCrossTierSchedulingCycle(ctx context.Context, dep *types.Dependency) error {
-	if !types.IsSchedulingEdge(dep.Type) {
-		return nil
-	}
-	cycle, err := t.CycleThroughEdges(ctx, [][2]string{{dep.IssueID, dep.DependsOnID}})
-	if err != nil {
-		return err
-	}
-	if cycle != "" {
-		return domain.ErrDependencyCycle
+		t.dirty.MarkDirty("issues")
 	}
 	return nil
 }
 
-// CycleThroughEdges reports a scheduling cycle through one of the new edges.
-// The graph merges the regular tx's dependencies with the ignored tx's
-// wisp_dependencies, so uncommitted writes on both sides are gated — the
-// previous DetectCycles ran only on the regular tx and let bulk wisp edges
-// commit scheduling cycles (bd-578h9.9).
+// CycleThroughEdges reports a scheduling cycle through one of the new edges,
+// including the transaction's own uncommitted dependency writes
+// (bd-6dnrw.8, bd-578h9.9). Both dependency tables share this transaction's
+// one SQL session, so one in-tx graph walk covering both tiers sees every
+// edge written earlier in this same transaction, on either plane — the same
+// contract the embedded backend always had.
 func (t *doltTransaction) CycleThroughEdges(ctx context.Context, edges [][2]string) (string, error) {
 	graph := make(map[string][]string)
-	if err := issueops.AppendSchedulingGraphInTx(ctx, t.txFor("dependencies"), []string{"dependencies"}, graph); err != nil {
+	if err := issueops.AppendSchedulingGraphInTx(ctx, t.tx, []string{"dependencies"}, graph); err != nil {
 		return "", err
 	}
-	if err := issueops.AppendSchedulingGraphInTx(ctx, t.txFor("wisp_dependencies"), []string{"wisp_dependencies"}, graph); err != nil {
+	if err := issueops.AppendSchedulingGraphInTx(ctx, t.tx, []string{"wisp_dependencies"}, graph); err != nil {
 		return "", err
 	}
 	return issueops.CycleThroughEdgesInGraph(graph, edges), nil
@@ -1140,7 +793,7 @@ func (t *doltTransaction) GetDependencyRecords(ctx context.Context, issueID stri
 	}
 
 	//nolint:gosec // G201: table is hardcoded
-	rows, err := t.txFor(table).QueryContext(ctx, fmt.Sprintf(`
+	rows, err := t.tx.QueryContext(ctx, fmt.Sprintf(`
 		SELECT issue_id, %s AS depends_on_id, type, created_at, created_by, metadata, thread_id
 		FROM %s
 		WHERE issue_id = ?
@@ -1180,7 +833,7 @@ func (t *doltTransaction) RemoveDependencyWithOptions(ctx context.Context, issue
 		table = "wisp_dependencies"
 		eventTable = "wisp_events"
 	}
-	written, err := issueops.RemoveDependencyInTxWithResult(ctx, t.txFor(table), issueID, dependsOnID, actor, rmOpts.EmitEvent)
+	written, err := issueops.RemoveDependencyInTxWithResult(ctx, t.tx, issueID, dependsOnID, actor, rmOpts.EmitEvent)
 	if err != nil {
 		return wrapExecError("remove dependency in tx", err)
 	}
@@ -1195,7 +848,7 @@ func (t *doltTransaction) RemoveDependencyWithOptions(ctx context.Context, issue
 	// The removal's recompute can clear the source's or a descendant's
 	// is_blocked; that unblock is committed with the removal (GH#6647).
 	if written.Blocked.IssueRowsChanged {
-		t.markIssuesChanged(table)
+		t.dirty.MarkDirty("issues")
 	}
 	return nil
 }
@@ -1209,7 +862,7 @@ func (t *doltTransaction) AddLabel(ctx context.Context, issueID, label, actor st
 		eventTable = "wisp_events"
 	}
 
-	if err := issueops.AddLabelInTx(ctx, t.txFor(table), table, eventTable, issueID, label, actor); err != nil {
+	if err := issueops.AddLabelInTx(ctx, t.tx, table, eventTable, issueID, label, actor); err != nil {
 		return wrapExecError("add label in tx", err)
 	}
 	t.dirty.MarkDirty(table)
@@ -1224,7 +877,7 @@ func (t *doltTransaction) GetLabels(ctx context.Context, issueID string) ([]stri
 	}
 
 	//nolint:gosec // G201: table is hardcoded
-	rows, err := t.txFor(table).QueryContext(ctx, fmt.Sprintf(`SELECT label FROM %s WHERE issue_id = ? ORDER BY label`, table), issueID)
+	rows, err := t.tx.QueryContext(ctx, fmt.Sprintf(`SELECT label FROM %s WHERE issue_id = ? ORDER BY label`, table), issueID)
 	if err != nil {
 		return nil, wrapQueryError("get labels in tx", err)
 	}
@@ -1249,7 +902,7 @@ func (t *doltTransaction) RemoveLabel(ctx context.Context, issueID, label, actor
 		eventTable = "wisp_events"
 	}
 
-	if err := issueops.RemoveLabelInTx(ctx, t.txFor(table), table, eventTable, issueID, label, actor); err != nil {
+	if err := issueops.RemoveLabelInTx(ctx, t.tx, table, eventTable, issueID, label, actor); err != nil {
 		return wrapExecError("remove label in tx", err)
 	}
 	t.dirty.MarkDirty(table)
@@ -1259,7 +912,7 @@ func (t *doltTransaction) RemoveLabel(ctx context.Context, issueID, label, actor
 
 // SetConfig sets a config value within the transaction
 func (t *doltTransaction) SetConfig(ctx context.Context, key, value string) error {
-	_, err := t.regularTx.ExecContext(ctx, `
+	_, err := t.tx.ExecContext(ctx, `
 		INSERT INTO config (`+"`key`"+`, value) VALUES (?, ?)
 		ON DUPLICATE KEY UPDATE value = VALUES(value)
 	`, key, value)
@@ -1271,7 +924,7 @@ func (t *doltTransaction) SetConfig(ctx context.Context, key, value string) erro
 	// ResolveCustomTypesInTx reads the normalized tables first, so without
 	// this sync a type registered in-transaction stays invisible to
 	// validation whenever the table already has rows.
-	table, err := issueops.SyncConfigTables(ctx, t.regularTx, key, value)
+	table, err := issueops.SyncConfigTables(ctx, t.tx, key, value)
 	if err != nil {
 		return err
 	}
@@ -1290,7 +943,7 @@ func (t *doltTransaction) SetConfig(ctx context.Context, key, value string) erro
 // GetConfig gets a config value within the transaction
 func (t *doltTransaction) GetConfig(ctx context.Context, key string) (string, error) {
 	var value string
-	err := t.regularTx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", key).Scan(&value)
+	err := t.tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", key).Scan(&value)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -1299,7 +952,7 @@ func (t *doltTransaction) GetConfig(ctx context.Context, key string) (string, er
 
 // SetMetadata sets a metadata value within the transaction
 func (t *doltTransaction) SetMetadata(ctx context.Context, key, value string) error {
-	_, err := t.regularTx.ExecContext(ctx, `
+	_, err := t.tx.ExecContext(ctx, `
 		INSERT INTO metadata (`+"`key`"+`, value) VALUES (?, ?)
 		ON DUPLICATE KEY UPDATE value = VALUES(value)
 	`, key, value)
@@ -1312,7 +965,7 @@ func (t *doltTransaction) SetMetadata(ctx context.Context, key, value string) er
 // GetMetadata gets a metadata value within the transaction
 func (t *doltTransaction) GetMetadata(ctx context.Context, key string) (string, error) {
 	var value string
-	err := t.regularTx.QueryRowContext(ctx, "SELECT value FROM metadata WHERE `key` = ?", key).Scan(&value)
+	err := t.tx.QueryRowContext(ctx, "SELECT value FROM metadata WHERE `key` = ?", key).Scan(&value)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -1321,14 +974,14 @@ func (t *doltTransaction) GetMetadata(ctx context.Context, key string) (string, 
 
 // SetLocalMetadata sets a value in the dolt-ignored local_metadata table within the transaction.
 func (t *doltTransaction) SetLocalMetadata(ctx context.Context, key, value string) error {
-	_, err := t.ignoredTx.ExecContext(ctx, "REPLACE INTO local_metadata (`key`, value) VALUES (?, ?)", key, value)
+	_, err := t.tx.ExecContext(ctx, "REPLACE INTO local_metadata (`key`, value) VALUES (?, ?)", key, value)
 	return wrapExecError("set local metadata in tx", err)
 }
 
 // GetLocalMetadata gets a value from the dolt-ignored local_metadata table within the transaction.
 func (t *doltTransaction) GetLocalMetadata(ctx context.Context, key string) (string, error) {
 	var value string
-	err := t.ignoredTx.QueryRowContext(ctx, "SELECT value FROM local_metadata WHERE `key` = ?", key).Scan(&value)
+	err := t.tx.QueryRowContext(ctx, "SELECT value FROM local_metadata WHERE `key` = ?", key).Scan(&value)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -1347,7 +1000,7 @@ func (t *doltTransaction) ImportIssueComment(ctx context.Context, issueID, autho
 	}
 
 	createdAtText := issueops.FormatAuxTime(createdAt)
-	id, _, err := issueops.InsertDerivedComment(ctx, t.txFor(table), table, issueID, author, text, createdAtText)
+	id, _, err := issueops.InsertDerivedComment(ctx, t.tx, table, issueID, author, text, createdAtText)
 	if err != nil {
 		return nil, fmt.Errorf("failed to add comment: %w", err)
 	}
@@ -1360,7 +1013,7 @@ func (t *doltTransaction) ImportIssueComment(ctx context.Context, issueID, autho
 	// This path writes the comment row directly rather than through
 	// issueops.ImportIssueCommentInTx, so it must journal the comment op itself
 	// — the create/comment entry points cover their own writes, not this one.
-	if err := issueops.RecordCommentEventInTx(ctx, t.txFor(table), issueID, &issueops.EventComment{
+	if err := issueops.RecordCommentEventInTx(ctx, t.tx, issueID, &issueops.EventComment{
 		ID: id, Author: author, Text: text, CreatedAt: stored, Source: issueops.CommentSourceStructured,
 	}); err != nil {
 		return nil, wrapExecError("journal import comment in tx", err)
@@ -1375,7 +1028,7 @@ func (t *doltTransaction) GetIssueComments(ctx context.Context, issueID string) 
 	}
 
 	//nolint:gosec // G201: table is hardcoded
-	rows, err := t.txFor(table).QueryContext(ctx, fmt.Sprintf(`
+	rows, err := t.tx.QueryContext(ctx, fmt.Sprintf(`
 		SELECT id, issue_id, author, text, created_at
 		FROM %s
 		WHERE issue_id = ?
@@ -1404,7 +1057,7 @@ func (t *doltTransaction) AddComment(ctx context.Context, issueID, actor, commen
 	}
 
 	createdAt := issueops.NowAuxTime()
-	id, err := issueops.InsertDerivedEventReturningID(ctx, t.txFor(table), table, issueops.AuxEvent{
+	id, err := issueops.InsertDerivedEventReturningID(ctx, t.tx, table, issueops.AuxEvent{
 		IssueID:   issueID,
 		EventType: types.EventCommented,
 		Actor:     actor,
@@ -1423,7 +1076,7 @@ func (t *doltTransaction) AddComment(ctx context.Context, issueID, actor, commen
 	// issueops.AddCommentEventInTx, so it must journal the comment op itself.
 	// The text is replayable content, so it carries the same payload as a
 	// structured comment, distinguished by Source.
-	if err := issueops.RecordCommentEventInTx(ctx, t.txFor(table), issueID, &issueops.EventComment{
+	if err := issueops.RecordCommentEventInTx(ctx, t.tx, issueID, &issueops.EventComment{
 		ID: id, Author: actor, Text: comment, CreatedAt: stored, Source: issueops.CommentSourceAudit,
 	}); err != nil {
 		return wrapExecError("journal comment in tx", err)
@@ -1432,97 +1085,74 @@ func (t *doltTransaction) AddComment(ctx context.Context, issueID, actor, commen
 }
 
 // GetIssueCommentsPage returns one keyset page of an issue's comments within the
-// transaction. Like the OLD GetIssueComments/GetDependencyRecords tx methods, it
-// pre-resolves wispness on the ignored session and hands the InTx read the
-// handle that owns issueID's tier, so a comment written on either tier earlier in
-// THIS uncommitted transaction is visible (durable rows live on regularTx, wisp
-// rows on ignoredTx — see the struct comment on the two-session split).
+// transaction. The InTx read runs on the transaction's one session, so a comment
+// written on either tier earlier in THIS uncommitted transaction is visible.
 func (t *doltTransaction) GetIssueCommentsPage(ctx context.Context, issueID string, after storage.CommentPageCursor, limit int) ([]*types.Comment, error) {
-	tx := t.regularTx
-	if t.isActiveWisp(ctx, issueID) {
-		tx = t.ignoredTx
-	}
-	return issueops.GetIssueCommentsPageInTx(ctx, tx, issueID, after, limit)
+	return issueops.GetIssueCommentsPageInTx(ctx, t.tx, issueID, after, limit)
 }
 
 // CountIssuesByGroup returns per-group issue counts within the transaction.
 //
-// TWO-SESSION SCOPING: the count runs on regularTx, so it reflects this tx's own
-// uncommitted DURABLE issues plus all COMMITTED issues and wisps, but NOT wisps
-// created in this same uncommitted transaction (those live on the separate
-// ignored session). This matches doltTransaction.SearchIssues, which is likewise
-// durable-tier for the tx's own writes. Note the pre-existing count-vs-search
-// asymmetry: CountIssuesByGroupInTx merges committed wisps into the buckets while
-// SearchIssues reads the issues table only, so the two need not agree when
-// committed wisps exist. The embedded backend has no session split and sees
-// in-tx wisps here.
+// The count runs on the transaction's one session, so it reflects this tx's own
+// uncommitted issues AND wisps plus all committed ones — the same contract the
+// embedded backend always had. Note the pre-existing count-vs-search asymmetry:
+// CountIssuesByGroupInTx merges wisps into the buckets while SearchIssues reads
+// the issues table only, so the two need not agree when wisps exist.
 func (t *doltTransaction) CountIssuesByGroup(ctx context.Context, filter types.IssueFilter, groupBy string) (map[string]int, error) {
-	return issueops.CountIssuesByGroupInTx(ctx, t.regularTx, filter, groupBy)
+	return issueops.CountIssuesByGroupInTx(ctx, t.tx, filter, groupBy)
 }
 
 // GetDependentRecords returns the raw inbound dependency rows of targetID within
-// the transaction.
-//
-// TWO-SESSION SCOPING: a target's inbound edges genuinely span BOTH dependency
+// the transaction. A target's inbound edges genuinely span BOTH dependency
 // tables (a wisp source points at a durable target), and the InTx read unions
-// them with an in-query, cross-table de-dup that must run on a single handle.
-// Run on regularTx, it sees this tx's own uncommitted DURABLE edges plus all
-// COMMITTED edges, but NOT wisp edges written in this same uncommitted
-// transaction (those live on the ignored session and become visible after
-// commit). The embedded backend has no session split and sees in-tx wisp edges.
+// them with an in-query, cross-table de-dup that runs on the transaction's one
+// session — so edges written on either tier earlier in THIS uncommitted
+// transaction are visible.
 func (t *doltTransaction) GetDependentRecords(ctx context.Context, targetID string, depType string, limit int, afterID string) ([]*types.Dependency, error) {
-	return issueops.GetDependentRecordsInTx(ctx, t.regularTx, targetID, depType, limit, afterID)
+	return issueops.GetDependentRecordsInTx(ctx, t.tx, targetID, depType, limit, afterID)
 }
 
 // GetDependentRecordsForIssues returns the raw inbound dependency rows for a set
-// of target ids within the transaction, keyed by target id. Same TWO-SESSION
-// SCOPING as GetDependentRecords: uncommitted-durable plus committed edges on the
-// server backend; wisp edges written in this same transaction are visible after
-// commit. The embedded backend sees in-tx wisp edges.
+// of target ids within the transaction, keyed by target id. Same single-session
+// scoping as GetDependentRecords: edges written on either tier earlier in this
+// same transaction are visible.
 func (t *doltTransaction) GetDependentRecordsForIssues(ctx context.Context, targetIDs []string) (map[string][]*types.Dependency, error) {
-	return issueops.GetDependentRecordsForIssuesInTx(ctx, t.regularTx, targetIDs)
+	return issueops.GetDependentRecordsForIssuesInTx(ctx, t.tx, targetIDs)
 }
 
 // CountDependentRecords returns the total inbound-edge count of targetID within
-// the transaction. Same TWO-SESSION SCOPING as GetDependentRecords — the count
-// uses a cross-table NOT-IN subquery that must run on one handle, so on the
-// server backend it excludes wisp edges written in this same uncommitted
-// transaction (visible after commit). The embedded backend sees them.
+// the transaction. Same single-session scoping as GetDependentRecords — the
+// count's cross-table NOT-IN subquery runs on the one session, so wisp edges
+// written in this same transaction are visible.
 func (t *doltTransaction) CountDependentRecords(ctx context.Context, targetID string, depType string) (int, error) {
-	return issueops.CountDependentRecordsInTx(ctx, t.regularTx, targetID, depType)
+	return issueops.CountDependentRecordsInTx(ctx, t.tx, targetID, depType)
 }
 
 // IsBlocked reports the denormalized transitive is_blocked flag and direct
-// blockers of issueID within the transaction. Like GetIssueCommentsPage, it
-// pre-resolves wispness and reads on the session that owns issueID's tier, so the
-// is_blocked flag and blocker edges written for issueID earlier in THIS
-// uncommitted transaction are visible on either tier.
+// blockers of issueID within the transaction. The read runs on the
+// transaction's one session, so the is_blocked flag and blocker edges written
+// for issueID earlier in THIS uncommitted transaction are visible on either
+// tier.
 func (t *doltTransaction) IsBlocked(ctx context.Context, issueID string) (bool, []string, error) {
-	tx := t.regularTx
-	if t.isActiveWisp(ctx, issueID) {
-		tx = t.ignoredTx
-	}
-	return issueops.IsBlockedInTx(ctx, tx, issueID)
+	return issueops.IsBlockedInTx(ctx, t.tx, issueID)
 }
 
 // IsBlockedBatch reports the denormalized transitive is_blocked flag for a page
-// of ids within the transaction. A batch can mix durable and wisp ids whose
-// is_blocked columns live on different sessions, so — unlike a single-handle
-// delegation — it partitions the ids by wispness (resolved on the ignored
-// session so this tx's own uncommitted wisps count) and reads each tier's
-// is_blocked on its owning session, then merges. Every id therefore reflects the
-// flag written earlier in THIS uncommitted transaction, on either tier.
+// of ids within the transaction. It partitions the ids by wispness (resolved in
+// the transaction so this tx's own uncommitted wisps count) and reads each
+// tier's is_blocked on the one session, so every id reflects the flag written
+// earlier in THIS uncommitted transaction, on either tier.
 func (t *doltTransaction) IsBlockedBatch(ctx context.Context, ids []string) (map[string]bool, error) {
 	if len(ids) == 0 {
 		return map[string]bool{}, nil
 	}
-	wispIDs, permIDs, err := issueops.PartitionWispIDsInTx(ctx, t.ignoredTx, ids)
+	wispIDs, permIDs, err := issueops.PartitionWispIDsInTx(ctx, t.tx, ids)
 	if err != nil {
 		return nil, err
 	}
 	result := make(map[string]bool, len(ids))
 	if len(permIDs) > 0 {
-		durable, err := issueops.IsBlockedBatchInTx(ctx, t.regularTx, permIDs)
+		durable, err := issueops.IsBlockedBatchInTx(ctx, t.tx, permIDs)
 		if err != nil {
 			return nil, err
 		}
@@ -1531,7 +1161,7 @@ func (t *doltTransaction) IsBlockedBatch(ctx context.Context, ids []string) (map
 		}
 	}
 	if len(wispIDs) > 0 {
-		wisp, err := issueops.IsBlockedBatchInTx(ctx, t.ignoredTx, wispIDs)
+		wisp, err := issueops.IsBlockedBatchInTx(ctx, t.tx, wispIDs)
 		if err != nil {
 			return nil, err
 		}
@@ -1544,9 +1174,8 @@ func (t *doltTransaction) IsBlockedBatch(ctx context.Context, ids []string) (map
 
 // EventsSince returns durable events strictly after the keyset cursor within the
 // transaction. Mirrors DoltStore.EventsSince's issueops delegation. The feed is
-// durable-only by contract (wisp events are excluded), and durable event writes
-// land on regularTx, so an event recorded earlier in THIS uncommitted
-// transaction is visible.
+// durable-only by contract (wisp events are excluded), so an event recorded
+// earlier in THIS uncommitted transaction is visible.
 func (t *doltTransaction) EventsSince(ctx context.Context, cursor storage.EventCursor, issueID string, limit int) ([]*types.Event, error) {
-	return issueops.EventsSinceInTx(ctx, t.regularTx, cursor.CreatedAt, cursor.ID, issueID, limit)
+	return issueops.EventsSinceInTx(ctx, t.tx, cursor.CreatedAt, cursor.ID, issueID, limit)
 }

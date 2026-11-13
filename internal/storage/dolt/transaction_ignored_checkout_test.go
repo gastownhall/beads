@@ -10,88 +10,6 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// TestBeginTxOnConnSkipsCheckoutWhenAlreadyOnBranch pins that the fresh-dial
-// fallback does not issue DOLT_CHECKOUT when the session already sits on the
-// requested branch. A fresh session lands on the database's default branch, so
-// this is the normal case — and a capped operator user that may EXECUTE only
-// dolt_add/dolt_commit is denied DOLT_CHECKOUT outright.
-func TestBeginTxOnConnSkipsCheckoutWhenAlreadyOnBranch(t *testing.T) {
-	ctx := context.Background()
-	db, drv := openMockDB(t)
-	drv.failCheckout.Store(true) // any checkout attempt fails, like the capped user
-
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		t.Fatalf("acquire conn: %v", err)
-	}
-	defer conn.Close()
-
-	tx, err := beginTxOnConn(ctx, conn, "main")
-	if err != nil {
-		t.Fatalf("beginTxOnConn on the session's own branch: %v", err)
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	if got := drv.countQuery("DOLT_CHECKOUT"); got != 0 {
-		t.Fatalf("DOLT_CHECKOUT ran %d times, want 0 (session already on the requested branch)", got)
-	}
-	if got := drv.countQuery("active_branch"); got != 1 {
-		t.Fatalf("active_branch ran %d times, want 1", got)
-	}
-}
-
-// TestBeginTxOnConnChecksOutDifferentBranch pins that the fallback still
-// switches a fresh session that is NOT on the requested branch.
-func TestBeginTxOnConnChecksOutDifferentBranch(t *testing.T) {
-	ctx := context.Background()
-	db, drv := openMockDB(t)
-	drv.activeBranch.Store("main")
-
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		t.Fatalf("acquire conn: %v", err)
-	}
-	defer conn.Close()
-
-	tx, err := beginTxOnConn(ctx, conn, "feature-x")
-	if err != nil {
-		t.Fatalf("beginTxOnConn on a different branch: %v", err)
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	if got := drv.countQuery("DOLT_CHECKOUT"); got != 1 {
-		t.Fatalf("DOLT_CHECKOUT ran %d times, want 1 (session must be switched to the requested branch)", got)
-	}
-}
-
-// TestBeginTxOnConnSurfacesActiveBranchError pins that a failed branch read is
-// reported rather than papered over with a blind checkout.
-func TestBeginTxOnConnSurfacesActiveBranchError(t *testing.T) {
-	ctx := context.Background()
-	db, drv := openMockDB(t)
-	drv.failActiveBranch.Store(true)
-
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		t.Fatalf("acquire conn: %v", err)
-	}
-	defer conn.Close()
-
-	tx, err := beginTxOnConn(ctx, conn, "main")
-	if err == nil {
-		_ = tx.Rollback()
-		t.Fatal("expected an error when active_branch() fails")
-	}
-	if !strings.Contains(err.Error(), "active branch") {
-		t.Fatalf("error = %q, want it to name the active-branch read", err.Error())
-	}
-	if got := drv.countQuery("DOLT_CHECKOUT"); got != 0 {
-		t.Fatalf("DOLT_CHECKOUT ran %d times, want 0", got)
-	}
-}
-
 // readOnlyMigrationTables are the schema-version tables a least-privilege operator
 // only reads: covered
 // by the db-level SELECT, never granted DML.
@@ -103,7 +21,8 @@ var readOnlyMigrationTables = map[string]bool{
 // openCappedOperatorStore opens a store as a least-privilege operator user, as a
 // shared Dolt server may grant one: SELECT on the database, DML on the data tables,
 // and EXECUTE on only dolt_add/dolt_commit. The pool is pinned to one
-// connection, so the ignored tx must take the fresh-dial fallback. The caller
+// connection, so a transaction holds the store's only session and cannot lean
+// on any second connection. The caller
 // builds its own context after this returns (see openStoreWithOwnBudget).
 func openCappedOperatorStore(t *testing.T) (admin, op *DoltStore) {
 	t.Helper()
@@ -174,10 +93,12 @@ func openCappedOperatorStore(t *testing.T) (admin, op *DoltStore) {
 	return admin, op
 }
 
-// TestIgnoredTxFallbackUnderCappedOperatorUser reproduces the failure end to
-// end: writing a wisp in a transaction as a capped operator
+// TestIgnoredTxFallbackUnderCappedOperatorUser guards the historical failure
+// end to end: writing a wisp in a transaction as a capped operator
 // used to fail with "failed to checkout ignored tx branch main: ... command
-// denied" (bd create --graph, bd mol wisp).
+// denied" (bd create --graph, bd mol wisp). The transaction now runs both
+// planes on its one pinned session and issues no branch procedures at all,
+// so a least-privilege operator can write wisps like anyone else.
 func TestIgnoredTxFallbackUnderCappedOperatorUser(t *testing.T) {
 	admin, op := openCappedOperatorStore(t)
 	ctx, cancel := testContext(t)

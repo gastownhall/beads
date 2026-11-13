@@ -1768,7 +1768,10 @@ func RunDependencyEditorRefusesACycleThroughAParentChildHop(t *testing.T, ctx co
 //
 // Both orientations are asserted, because "the plane the endpoints share" and
 // "the plane the interior visits" swap between them and the two tables are not
-// symmetric — only one of them is versioned.
+// symmetric — only one of them is versioned. (The server backend now runs both
+// tables on one SQL session, so its gate merges the tables by construction;
+// the historical two-session defect this contract was written against is what
+// made an unconditional merge load-bearing.)
 func RunDependencyEditorRefusesASamePlaneEdgeClosingACrossPlaneCycle(t *testing.T, ctx context.Context, fixture DependencyEditorFixture) {
 	t.Helper()
 	// Durable endpoints, the interior hop through the ephemeral plane:

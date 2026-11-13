@@ -1281,6 +1281,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Transactions on a Dolt server database now keep durable rows and wisp rows
+  in one SQL transaction, so they cannot half-commit** (#6015). With the
+  events journal off (the default), `RunInTransaction` ran tracked tables on
+  one connection and dolt-ignored wisp tables (`bd batch`, `bd cook`,
+  `bd mol squash`/`burn`/`bond` and SDK transaction callers) on a second
+  session, committing the two one after the other. A mixed callback could
+  not read its own wisp writes through the cross-plane reads
+  (`GetDependentRecords`, `CountDependentRecords`, `CountIssuesByGroup`), and
+  when another client changed the same wisp row first, the durable half of the
+  transaction committed and only the wisp half was refused, surfacing as an
+  "indeterminate" commit error with the durable work already applied — and a
+  wisp close that unblocked a durable issue needed a second, best-effort Dolt
+  commit to publish the unblock. Both planes now share the transaction's one
+  session (the shape the journal, lifecycle transactions, store-level writes
+  and the embedded store already used): cross-plane reads are
+  read-your-writes, a commit-time conflict refuses the whole transaction
+  deterministically, and a wisp-driven `is_blocked` change rides the
+  mutation's own Dolt commit. Wisp tables remain dolt-ignored and
+  clone-local.
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
