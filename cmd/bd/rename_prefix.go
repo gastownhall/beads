@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -42,9 +43,16 @@ If issues have multiple prefixes (corrupted database), use --repair to consolida
 The --repair flag will rename all issues with incorrect prefixes to the new prefix,
 preserving issues that already have the correct prefix.
 
+Mint-only switch:
+Use --mint-only to start minting new ids under a different prefix without
+renaming any existing issue — for example mid-migration, while old work
+continues under its own ids. The old prefix is added to allowed_prefixes so
+children of existing issues keep validating.
+
 EXAMPLES:
   bd rename-prefix kw-                # Rename from 'knowledge-work-' to 'kw-'
   bd rename-prefix mtg- --repair      # Consolidate multiple prefixes into 'mtg-'
+  bd rename-prefix team- --mint-only  # New issues mint team-*; existing ids untouched
   bd rename-prefix team- --dry-run    # Preview changes without applying
 
 NOTE: This is a rare operation. Most users never need this command.`,
@@ -88,6 +96,16 @@ NOTE: This is a rare operation. Most users never need this command.`,
 		}
 
 		newPrefix = strings.TrimRight(newPrefix, "-")
+
+		// Mint-only switches what new ids use and never touches a row, so it
+		// works even on a corrupted multi-prefix database — no enumeration.
+		mintOnly, _ := cmd.Flags().GetBool("mint-only")
+		if mintOnly {
+			if repair {
+				return HandleError("--repair and --mint-only cannot be combined: --repair renames existing issues, --mint-only leaves every row untouched")
+			}
+			return mintOnlyPrefix(ctx, store, oldPrefix, newPrefix, dryRun)
+		}
 
 		issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 		if err != nil {
@@ -402,6 +420,86 @@ func printRepairJSON(plan *prefixRepairPlan, prefixes map[string]int, dryRun boo
 	return enc.Encode(&result)
 }
 
+// mintOnlyPrefix switches the prefix new ids mint under, without renaming
+// any existing row: the old prefix joins allowed_prefixes first (so a failed
+// issue_prefix write leaves only an extra allowed prefix, never a switch
+// without it), then issue_prefix moves. Children under old-prefix parents
+// keep validating against the allowed list.
+func mintOnlyPrefix(ctx context.Context, st storage.DoltStorage, oldPrefix, newPrefix string, dryRun bool) error {
+	oldPrefix = strings.TrimRight(oldPrefix, "-")
+	if oldPrefix == newPrefix {
+		return HandleError("new prefix is the same as current prefix: %s", oldPrefix)
+	}
+
+	allowed, _ := st.GetConfig(ctx, "allowed_prefixes") // read errors count as unset
+	var list []string
+	for _, p := range strings.Split(allowed, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			list = append(list, p)
+		}
+	}
+	added := !slices.Contains(list, oldPrefix)
+	if added {
+		list = append(list, oldPrefix)
+	}
+
+	if dryRun {
+		if jsonOutput {
+			return printMintOnlyJSON(oldPrefix, newPrefix, added, true)
+		}
+		fmt.Printf("DRY RUN: would mint new issues under %s without renaming existing issues (%s)\n",
+			ui.RenderAccent(newPrefix), describeAllowedAddition(oldPrefix, added))
+		return nil
+	}
+
+	if added {
+		if err := st.SetConfig(ctx, "allowed_prefixes", strings.Join(list, ",")); err != nil {
+			return HandleError("failed to update allowed_prefixes: %v", err)
+		}
+	}
+	if err := st.SetConfig(ctx, "issue_prefix", newPrefix); err != nil {
+		return HandleError("failed to update prefix: %v", err)
+	}
+	commandDidWrite.Store(true)
+
+	// The YAML overlay wins for new ids when set; flag a disagreement the
+	// switch itself cannot fix.
+	if y := overlayYAMLPrefix(""); y != "" && y != newPrefix {
+		fmt.Fprintf(os.Stderr, "%s workspace config sets issue-prefix '%s'; new issues keep minting under it until it is updated\n", ui.RenderWarn("⚠"), y)
+	}
+
+	if jsonOutput {
+		return printMintOnlyJSON(oldPrefix, newPrefix, added, false)
+	}
+	fmt.Printf("%s New issues will mint under %s; existing issues untouched (%s)\n",
+		ui.RenderPass("✓"), ui.RenderAccent(newPrefix), describeAllowedAddition(oldPrefix, added))
+	return nil
+}
+
+func describeAllowedAddition(oldPrefix string, added bool) string {
+	if !added {
+		return fmt.Sprintf("'%s' already in allowed_prefixes", oldPrefix)
+	}
+	return fmt.Sprintf("'%s' added to allowed_prefixes", oldPrefix)
+}
+
+func printMintOnlyJSON(oldPrefix, newPrefix string, added, dryRun bool) error {
+	addedList := []string{}
+	if added {
+		addedList = []string{oldPrefix}
+	}
+	result := struct {
+		OldPrefix            string   `json:"old_prefix"`
+		NewPrefix            string   `json:"new_prefix"`
+		MintOnly             bool     `json:"mint_only"`
+		DryRun               bool     `json:"dry_run"`
+		AllowedPrefixesAdded []string `json:"allowed_prefixes_added"`
+	}{oldPrefix, newPrefix, true, dryRun, addedList}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(&result)
+}
+
 // knownIssuePrefixes collects the prefixes repair extraction should honor
 // before falling back to its heuristic: the configured issue_prefix, every
 // allowed_prefixes entry, and the prefixes detectPrefixes already found on
@@ -581,5 +679,6 @@ func generateRepairHashID(prefix string, issue *types.Issue, actor string, usedI
 func init() {
 	renamePrefixCmd.Flags().Bool("dry-run", false, "Preview changes without applying them")
 	renamePrefixCmd.Flags().Bool("repair", false, "Repair database with multiple prefixes by consolidating them")
+	renamePrefixCmd.Flags().Bool("mint-only", false, "Switch the prefix new issues mint under without renaming existing issues (the old prefix joins allowed_prefixes)")
 	rootCmd.AddCommand(renamePrefixCmd)
 }

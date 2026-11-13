@@ -13,9 +13,11 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -676,6 +678,82 @@ func TestRepairPrefixesDryRunMatchesExecution(t *testing.T) {
 	}
 	if prefix, err := testStore.GetConfig(ctx, "issue_prefix"); err != nil || prefix != "kb" {
 		t.Errorf("issue_prefix after repair = %q (%v), want kb", prefix, err)
+	}
+}
+
+// runRenamePrefixMintOnly points the globals at st and runs
+// "rename-prefix <new> --mint-only" in-process.
+func runRenamePrefixMintOnly(t *testing.T, st storage.DoltStorage, newPrefix string) error {
+	t.Helper()
+	oldCtx := rootCtx
+	rootCtx = context.Background()
+	defer func() { rootCtx = oldCtx }()
+	return withRenameStore(st, func() error {
+		if err := renamePrefixCmd.Flags().Set("mint-only", "true"); err != nil {
+			return err
+		}
+		defer func() { _ = renamePrefixCmd.Flags().Set("mint-only", "false") }()
+		return renamePrefixCmd.RunE(renamePrefixCmd, []string{newPrefix})
+	})
+}
+
+func TestRenamePrefixMintOnly(t *testing.T) {
+	// GH#6591 AC-6: --mint-only switches the prefix new ids mint under
+	// without renaming any existing row: allowed_prefixes gains the old
+	// prefix (written first), then issue_prefix moves; children under
+	// old-prefix parents keep validating; ids and text stay untouched.
+	ctx := context.Background()
+	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+	if err := testStore.SetConfig(ctx, "issue_prefix", "taxdb"); err != nil {
+		t.Fatalf("set issue_prefix: %v", err)
+	}
+	for _, issue := range []*types.Issue{
+		{ID: "taxdb-5su1", Title: "Existing root", Description: "see taxdb-5su1.13", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "taxdb-5su1.13", Title: "Existing child", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+	} {
+		if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("create %s: %v", issue.ID, err)
+		}
+	}
+
+	if err := runRenamePrefixMintOnly(t, testStore, "kb"); err != nil {
+		t.Fatalf("rename-prefix kb --mint-only: %v", err)
+	}
+
+	// Every existing row is untouched, ids and text alike.
+	root, err := testStore.GetIssue(ctx, "taxdb-5su1")
+	if err != nil || root == nil {
+		t.Fatalf("mint-only renamed existing rows: taxdb-5su1 is gone (%v)", err)
+	}
+	if root.Description != "see taxdb-5su1.13" {
+		t.Errorf("mint-only rewrote text: description = %q", root.Description)
+	}
+	if issue, err := testStore.GetIssue(ctx, "kb-5su1"); err == nil && issue != nil {
+		t.Errorf("mint-only minted new ids for existing rows: kb-5su1 exists")
+	}
+
+	// Config moved: the new prefix mints, the old prefix is allowed.
+	prefix, err := testStore.GetConfig(ctx, "issue_prefix")
+	if err != nil || prefix != "kb" {
+		t.Errorf("issue_prefix = %q (%v), want kb", prefix, err)
+	}
+	allowed, err := testStore.GetConfig(ctx, "allowed_prefixes")
+	if err != nil || !strings.Contains(","+allowed+",", ",taxdb,") {
+		t.Errorf("allowed_prefixes = %q (%v), want it to contain taxdb", allowed, err)
+	}
+
+	// Ids the new prefix mints validate; children under old-prefix parents
+	// validate against the allowed list, the way bd create checks them.
+	if err := issueops.ValidateIssueIDPrefix("kb-a1b2c3", "kb", allowed); err != nil {
+		t.Errorf("new-prefix id no longer validates: %v", err)
+	}
+	if err := issueops.ValidateIssueIDPrefix("taxdb-5su1.7", "kb", allowed); err != nil {
+		t.Errorf("child under an old-prefix parent no longer validates: %v", err)
+	}
+
+	// Mint-only to the same prefix is refused, and it never becomes a repair.
+	if err := runRenamePrefixMintOnly(t, testStore, "kb"); err == nil {
+		t.Errorf("mint-only to the current prefix succeeded, want refusal")
 	}
 }
 
