@@ -321,18 +321,24 @@ func runRecipe(name string) error {
 	}
 
 	if setupCheck {
-		var missing []string
+		var problems []string
 		for _, path := range paths {
+			if recipe.IsSharedPath(path) {
+				if problem := checkSharedPath(path); problem != "" {
+					problems = append(problems, problem)
+				}
+				continue
+			}
 			if _, err := os.Stat(path); os.IsNotExist(err) {
-				missing = append(missing, path)
+				problems = append(problems, "Missing: "+remedy.PrintedValue(path))
 			}
 		}
-		if len(missing) > 0 {
+		if len(problems) > 0 {
 			fmt.Printf("✗ %s integration not installed\n", remedy.PrintedValue(recipe.Name))
 			key, note := remedy.CommandArg(runtime.GOOS, name, "<recipe>")
 			fmt.Printf("  Run: bd setup %s%s\n", key, note)
-			for _, path := range missing {
-				fmt.Printf("  Missing: %s\n", remedy.PrintedValue(path))
+			for _, problem := range problems {
+				fmt.Printf("  %s\n", problem)
 			}
 			return SilentExit()
 		}
@@ -398,6 +404,24 @@ func runRecipe(name string) error {
 		fmt.Printf("  File: %s\n", remedy.PrintedValue(path))
 	}
 	return nil
+}
+
+// checkSharedPath returns the line --check prints for a recipe's shared
+// file that does not hold bd's section, or "" when it does. Holding a file
+// is not enough: the repository's own instructions are not bd's.
+func checkSharedPath(path string) string {
+	state, err := setup.CheckSharedFile(path)
+	switch {
+	case os.IsNotExist(err):
+		return "Missing: " + remedy.PrintedValue(path)
+	case errors.Is(err, setup.ErrMalformedSection):
+		return fmt.Sprintf("Malformed Beads markers: %s (%v)", remedy.PrintedValue(path), remedy.PrintedError(err))
+	case err != nil:
+		return fmt.Sprintf("Unreadable: %s (%v)", remedy.PrintedValue(path), remedy.PrintedError(err))
+	case state == setup.SharedSectionNone:
+		return "Missing Beads section: " + remedy.PrintedValue(path)
+	}
+	return ""
 }
 
 func translateSetupError(err error) error {
