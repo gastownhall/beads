@@ -39,11 +39,12 @@ the failure prints, review the diff, and say in the PR what changed and why.
 A `/v0` change also follows [bd-serve-v0.md](bd-serve-v0.md): a non-additive
 change to an existing member bumps `wire_revision` and adds its history
 entry in `openapi.v0.yaml`; an additive one needs neither. A `--json` change
-follows CATALOG.md: `make corpus-regen` and a `JSONSchemaVersion` bump in
-`cmd/bd/output.go`. When BDP's Callables land, they will take their
-parameters from `openapi.v0.yaml`. A v0 change therefore never needs a
-Callables or spec edit, and a new v0 operation is simply not exposed over
-BDP until someone names it.
+follows CATALOG.md: `make corpus-regen`, plus a `JSONSchemaVersion` bump in
+`cmd/bd/output.go` when [json-schema.md](../../docs/reference/json-schema.md)
+calls for one (a new optional field does not). When BDP's Callables land, they
+will take their parameters from `openapi.v0.yaml`. A v0 change therefore never
+needs a Callables or spec edit, and a new v0 operation is simply not exposed
+over BDP until someone names it.
 
 **A BDP test fails on your change.** No test of a BDP surface exists on
 main yet; `TestVendoredBDPMatchesPin` fails only when `third_party/bdp/` is
@@ -81,9 +82,10 @@ release.
 
 The pin moves only in a pin-bump PR approved by Julian Knutsen.
 
-- **Target.** A tagged bdp checkpoint (`spec/<group>-<yyyymmdd>`) whose
-  commit is reachable from gastownhall/bdp `main`. Never a branch tip, a
-  fork or an untagged commit.
+- **Target.** An annotated bdp tag under `spec/` (for example
+  `spec/sprint1-20261109` or `spec/v0.1`) whose commit is reachable from
+  gastownhall/bdp `main`, as `scripts/bdp-vendor.sh` enforces. Never a
+  branch tip, a fork, a lightweight tag or an untagged commit.
 - **Forward only.** The new commit descends from the current one on bdp
   `main`. Reverting a bump PR, for example to clear a red main, restores the
   previous pin and is not a backward bump.
