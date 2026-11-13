@@ -1281,6 +1281,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd kv set` and `bd kv clear` now commit their write** (#7523). Both
+  wrote their `config` row without a Dolt commit, in embedded and direct
+  SQL-server mode alike, so the row sat in the working set until a later
+  command such as `bd dolt commit` staged config, and `bd dolt push` did not
+  publish it. With auto-commit on, each now adds one commit. On a SQL server
+  that commit takes only `kv.*` config rows, as `bd remember` and `bd forget`
+  do: when another write left an internal config key (such as `issue_prefix`)
+  uncommitted, the commit is refused, and the command still succeeds, since
+  its write has landed, with a stderr warning naming the key. Under
+  `dolt.auto-commit` `batch` or `off` the write waits for `bd dolt commit`,
+  as other writes do. (builds on PR #7717 by harry-miller-trimble)
+
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
