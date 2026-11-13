@@ -290,3 +290,57 @@ func TestCloseResolveReasons_RejectsMismatchedPerIDReasons(t *testing.T) {
 		t.Fatalf("execute: %v", err)
 	}
 }
+
+func TestCloseResolveReasons_TrailingPositionalReasonOnlyUnderDone(t *testing.T) {
+	cases := []struct {
+		name        string
+		args        []string
+		wantArgs    []string
+		wantReasons []string
+	}{
+		{"done", []string{"done", "issue-a", "fixed in abc123"}, []string{"issue-a"}, []string{"fixed in abc123"}},
+		{"done two IDs", []string{"done", "issue-a", "issue-b"}, []string{"issue-a"}, []string{"issue-b"}},
+		{"close", []string{"close", "issue-a", "fixed in abc123"}, []string{"issue-a", "fixed in abc123"}, []string{"Closed"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := &cobra.Command{Use: "bd"}
+			cmd := newCloseLikeCmd()
+			cmd.Aliases = []string{"done"}
+			root.AddCommand(cmd)
+			root.SetArgs(tc.args)
+
+			var gotReasons, gotArgs []string
+			cmd.Run = func(cmd *cobra.Command, args []string) {
+				var err error
+				gotReasons, gotArgs, err = resolveCloseReasons(cmd, args)
+				if err != nil {
+					t.Fatalf("resolveCloseReasons: %v", err)
+				}
+			}
+			if err := root.Execute(); err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+
+			if !slices.Equal(gotArgs, tc.wantArgs) {
+				t.Fatalf("args = %v, want %v", gotArgs, tc.wantArgs)
+			}
+			if !slices.Equal(gotReasons, tc.wantReasons) {
+				t.Fatalf("reasons = %v, want %v", gotReasons, tc.wantReasons)
+			}
+		})
+	}
+}
+
+func TestCloseHelpDocumentsDonePositionalReason(t *testing.T) {
+	help := strings.Join(strings.Fields(closeCmd.Long), " ")
+	for _, want := range []string{
+		`bd done <id> "fixed in abc123"`,
+		`"bd done <id1> <id2>" closes only <id1>`,
+		`"bd close" reads every argument as an issue ID`,
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("close long help missing %q:\n%s", want, closeCmd.Long)
+		}
+	}
+}

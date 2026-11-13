@@ -41,6 +41,11 @@ When closing multiple issues, provide one --reason for all IDs or repeat
 to the first ID, the second --reason to the second ID, regardless of where
 the flags appear in the command line.
 
+Invoked as "bd done" with at least two arguments and no reason flag, the
+last argument is the close reason: bd done <id> "fixed in abc123". That
+holds even when it is an issue ID, so "bd done <id1> <id2>" closes only
+<id1>. "bd close" reads every argument as an issue ID; use --reason there.
+
 Closing a molecule's last open step also closes the molecule's root, with
 the reason "all steps complete", when the root is a poured molecule, a wisp,
 or an epic labeled "template"; any other epic stays open as close-eligible
