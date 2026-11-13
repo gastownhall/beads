@@ -367,6 +367,12 @@ func renderProxiedServerConfigAtLevel(port int, level servercfg.LogLevel) ([]byt
 			PortNumber: &port,
 		},
 	}
+	// archive_level is written unconditionally: dolt releases older than
+	// doltserver.MinDoltVersionForArchiveLevelConfig reject the key under
+	// strict YAML parsing (#4986), but managed startup checks the detected
+	// dolt against doltversion.RequiredMin before writing this config, and
+	// that floor is above the cutoff
+	// (TestRequiredMinCoversProxiedArchiveLevelConfig).
 	archiveLevel := 0
 	yc.BehaviorConfig.AutoGCBehavior = &servercfg.AutoGCBehaviorYAMLConfig{
 		ArchiveLevel_: &archiveLevel,
