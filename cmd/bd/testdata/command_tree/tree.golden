@@ -471,6 +471,7 @@ bd batch
     |   #comment  (blank lines and '# ...' comments are ignored)
     |
     | Supported 'update' keys: status, priority, title, assignee, force
+    | 'assignee=', 'assignee=-' and a whitespace-only assignee clear the assignee.
     | Supported dependency types: see 'bd dep add --help' (default: blocks)
     |
     | 'force' is not a field. An update whose status moves the issue into closed
