@@ -249,9 +249,16 @@ func TestEmbeddedForkAutoContributorRoutedWrites(t *testing.T) {
 	bdCommand(t, bd, dir, "update", first.ID, "--claim")
 	assertEmbeddedHeadAdvanced(t, planningBeadsDir, planningDatabase, before, "update --claim")
 
+	// dep add routes through the same mutation resolver and commits the
+	// dependency edge in the planning repository.
+	before = embeddedCurrentCommit(t, planningBeadsDir, planningDatabase)
+	bdCommand(t, bd, dir, "dep", "add", first.ID, second.ID)
+	assertEmbeddedHeadAdvanced(t, planningBeadsDir, planningDatabase, before, "dep add")
+
 	// Final read-back from the planning store, after every subprocess
 	// mutation (openStore holds its handle until test cleanup): the claim
-	// persisted in_progress status and a non-empty assignee.
+	// persisted in_progress status with a non-empty assignee, and dep add
+	// persisted a blocks edge to the second issue.
 	planningStore := openStore(t, planningBeadsDir, planningDatabase)
 	claimed, err := planningStore.GetIssue(t.Context(), first.ID)
 	if err != nil {
@@ -263,6 +270,7 @@ func TestEmbeddedForkAutoContributorRoutedWrites(t *testing.T) {
 	if claimed.Assignee == "" {
 		t.Errorf("%s assignee in the planning store is empty; --claim did not persist", first.ID)
 	}
+	assertDepExistsWithType(t, planningBeadsDir, planningDatabase, first.ID, second.ID, "blocks")
 }
 
 // initContributor sets up a project with contributor mode enabled and returns
