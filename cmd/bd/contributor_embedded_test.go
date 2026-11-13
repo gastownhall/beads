@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -158,6 +159,63 @@ func TestEmbeddedContributorRoutedWritesCommitInPlanning(t *testing.T) {
 		t.Errorf("the comment did not land in the planning store: %+v", comments)
 	}
 	assertIssueNotInStore(t, filepath.Join(dir, ".beads"), "cw", issue.ID)
+}
+
+// TestEmbeddedForkAutoContributorRoutedWrites replays GH#8039 on a default
+// embedded init in a fork checkout (origin and upstream remotes, no role or
+// routing chosen): init's fork auto-configuration turns on contributor
+// auto-routing, so bd create lands in the planning repository, and the
+// commands that change those issues must then write there too.
+func TestEmbeddedForkAutoContributorRoutedWrites(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt contributor tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir := t.TempDir()
+	initGitRepoAt(t, dir)
+	for _, name := range []string{"origin", "upstream"} {
+		bare := filepath.Join(dir, name+".git")
+		if err := os.MkdirAll(bare, 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", bare, err)
+		}
+		initBare := gitCommand("init", "--bare")
+		initBare.Dir = bare
+		if out, err := initBare.CombinedOutput(); err != nil {
+			t.Fatalf("git init --bare %s failed: %v\n%s", bare, err, out)
+		}
+		addRemote := gitCommand("remote", "add", name, bare)
+		addRemote.Dir = dir
+		if out, err := addRemote.CombinedOutput(); err != nil {
+			t.Fatalf("git remote add %s failed: %v\n%s", name, err, out)
+		}
+	}
+
+	// Default init: no --contributor, no --role, no routing config set by hand.
+	runBDInit(t, bd, dir, "--prefix", "fk")
+	bdCommand(t, bd, dir, "setup", "opencode")
+
+	projectBeadsDir := filepath.Join(dir, ".beads")
+	planningBeadsDir := filepath.Join(dir, ".beads-planning", ".beads")
+
+	first := bdCreate(t, bd, dir, "test1")
+	second := bdCreate(t, bd, dir, "test2")
+
+	// The planning store's database is whatever its metadata names once the
+	// first create adopted it; do not assume it matches the project prefix.
+	planningCfg, err := configfile.Load(planningBeadsDir)
+	if err != nil {
+		t.Fatalf("load planning metadata: %v", err)
+	}
+	if planningCfg == nil {
+		t.Fatalf("planning repository %s has no metadata.json after create", planningBeadsDir)
+	}
+	planningDB := planningCfg.GetDoltDatabase()
+	for _, issue := range []*types.Issue{first, second} {
+		assertIssueInStore(t, planningBeadsDir, planningDB, issue.ID)
+		assertIssueNotInStore(t, projectBeadsDir, "fk", issue.ID)
+	}
 }
 
 // initContributor sets up a project with contributor mode enabled and returns
