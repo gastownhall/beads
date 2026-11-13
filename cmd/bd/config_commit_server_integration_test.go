@@ -85,6 +85,33 @@ func TestCLI_ServerModeConfigWritesCommit_E2E(t *testing.T) {
 		}
 	}
 
+	// GH#7523: bd kv set and clear write a config row too, and each commits it
+	// with a message naming its verb.
+	headMessage := func() string {
+		t.Helper()
+		return mustBD("sql", "--csv", "SELECT message FROM dolt_log LIMIT 1")
+	}
+	mustBD("kv", "set", "gh7523", "server-mode kv value")
+	if got := dirtyConfigTables(); got != "" {
+		t.Fatalf("after bd kv set: %s left uncommitted in the working set (GH#7523)", got)
+	}
+	if msg := headMessage(); !strings.Contains(msg, "bd: kv set (auto-commit)") {
+		t.Fatalf("after bd kv set: HEAD message = %q, want the kv set auto-commit", msg)
+	}
+	if out := mustBD("kv", "get", "gh7523"); !strings.Contains(out, "server-mode kv value") {
+		t.Fatalf("bd kv get gh7523 after set = %q, want the stored value", out)
+	}
+	mustBD("kv", "clear", "gh7523")
+	if got := dirtyConfigTables(); got != "" {
+		t.Fatalf("after bd kv clear: %s left uncommitted in the working set (GH#7523)", got)
+	}
+	if msg := headMessage(); !strings.Contains(msg, "bd: kv clear (auto-commit)") {
+		t.Fatalf("after bd kv clear: HEAD message = %q, want the kv clear auto-commit", msg)
+	}
+	if out, err := bd("kv", "get", "gh7523"); err == nil {
+		t.Fatalf("bd kv get gh7523 succeeded after clear, want the key gone:\n%s", out)
+	}
+
 	// A bd that predates notion.token moving to config.yaml stored it in the
 	// config table, and that row was committed and pushed.
 	mustBD("sql", "INSERT INTO config (`key`, value) VALUES ('notion.token', 'gh4078-leaked-credential')")
