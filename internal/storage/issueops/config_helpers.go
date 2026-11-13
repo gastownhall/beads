@@ -3,6 +3,7 @@ package issueops
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -48,7 +49,7 @@ func ResolveCustomConfigInTx(ctx context.Context, tx DBTX) (statuses []types.Cus
 		return statuses, ComposeCustomTypes(customTypes, "", config.GetCustomTypesFromYAML()), nil
 	}
 
-	cfg, err := getConfigKeysInTx(ctx, tx, "status.custom", "types.custom")
+	cfg, err := GetConfigKeysInTx(ctx, tx, "status.custom", "types.custom")
 	if err != nil {
 		if !statusesFromTable {
 			if yamlStatuses := config.GetCustomStatusesFromYAML(); len(yamlStatuses) > 0 {
@@ -114,7 +115,14 @@ func resolveCustomTypesFromTableInTx(ctx context.Context, tx DBTX) ([]string, bo
 	return result, len(result) > 0, nil
 }
 
-func getConfigKeysInTx(ctx context.Context, tx DBTX, keys ...string) (map[string]string, error) {
+// GetConfigKeysInTx reads the named config keys in one statement. Keys with no
+// row are absent from the result. The config table takes the database's default
+// collation, so on a case-insensitive one the IN list can return a row spelled
+// differently from the key asked for. Such a row is reported under the spelling
+// asked for, the answer a read of that key would give. The remap folds letter
+// case only (strings.EqualFold), not accents, and a row that matches two keys
+// asked for in different case is reported under one of them.
+func GetConfigKeysInTx(ctx context.Context, tx DBTX, keys ...string) (map[string]string, error) {
 	if len(keys) == 0 {
 		return map[string]string{}, nil
 	}
@@ -136,6 +144,11 @@ func getConfigKeysInTx(ctx context.Context, tx DBTX, keys ...string) (map[string
 		var k, v string
 		if err := rows.Scan(&k, &v); err != nil {
 			return nil, fmt.Errorf("get config keys: scan: %w", err)
+		}
+		if !slices.Contains(keys, k) {
+			if i := slices.IndexFunc(keys, func(key string) bool { return strings.EqualFold(key, k) }); i >= 0 {
+				k = keys[i]
+			}
 		}
 		result[k] = v
 	}

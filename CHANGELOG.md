@@ -845,6 +845,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   initialization triggers do not stop the world across every CPU of a large
   host. On a 192-CPU machine this takes about 17 ms off every bd process. An
   explicit `GOMAXPROCS` is restored as set.
+- **`bd create` reads its settings in one statement inside its write
+  transaction.** `bd create` read up to nine config keys one at a time while its
+  transaction was open, which at 100 ms round-trip time held it open up to 0.8 s
+  longer than needed. It now reads those keys together, for each item of a batch
+  apply as well. A failed read falls back to reading each key, and a config write
+  in the same scope is seen by the next read. `bd q`, the create form, and creates
+  on the proxied route read as before.
+- **Create, update, close, reopen and comment send fewer SQL statements.**
+  The result that create, update, close and reopen hydrate now takes its
+  labels from the issue read and its outgoing dependency records from the
+  dependency table of the plane that read answered on, which saves three
+  statements per result when the wisps table is empty. An update reuses the
+  row it read in its own transaction instead of reading it again (two
+  fewer) and skips `DELETE FROM leases` when that row has no lease (one
+  fewer). Separately, a comment checks its issue's plane and existence once
+  instead of twice (two fewer). On a Dolt server with no wisps, that is three
+  fewer for a create, a close, a reopen and an update that claims, five fewer
+  for an update that claims and patches, six fewer for a status update (five
+  when the issue holds a lease), and two fewer for a comment. A batch apply
+  saves three per create item and six per assign update: 402 fewer statements
+  for a 356-item plan. The standalone claim operation is unchanged. For an ID
+  with a row in both `issues` and `wisps`, the result's labels and outgoing
+  dependency records now come from `issues`, as its body already did; they
+  used to come from the wisp row. A label that an update adds to such an ID
+  is still written to the wisp row, so that update's result does not list it.
+- **A server-mode write's post-transaction commit stages its tables with one
+  `DOLT_ADD`.** The Dolt commit that most writes run after their SQL
+  transaction used to send one `CALL DOLT_ADD` per table it stages; it now
+  sends one call that names them all. The staged set is the same. A write that stages N tables sends
+  N-1 fewer statements: one fewer for a two-table write such as
+  `bd label add` (events and labels), and two fewer for a `bd dep add` that
+  records its event and changes a blocked flag (dependencies, events and
+  issues). With versioned history on, its tables join the same call
+  instead of adding one statement each.
 - Over an HTTP workspace, `bd ready` no longer fetches `GET /v0/beads/context`
   before its listing in every process only to learn whether the server
   enforces the external-dependency policy. The answer is kept for 5 minutes

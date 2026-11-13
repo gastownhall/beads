@@ -4525,10 +4525,24 @@ func (s *DoltStore) stageAndCommit(ctx context.Context, tables []string, commitM
 			afterStageCommitScreen()
 		}
 
-		for _, table := range tables {
-			if err := schema.DrainCall(ctx, conn, "CALL DOLT_ADD(?)", table); err != nil {
+		// One DOLT_ADD names every table, instead of one call per table. Dolt
+		// stages all of a call's arguments together (actions.StageTables), so
+		// the staged set is the one the per-table calls produced: a
+		// dolt_ignore'd table named among the others stages nothing, as its own
+		// call did, and a table that does not exist fails the call, as its own
+		// call did. A call the server rejects stages none of the tables, where
+		// the per-table calls left the ones before the failing table staged. A
+		// call whose response is lost may have staged every table, which is
+		// why the error stays ErrCommitIndeterminate. No read moves: this runs
+		// on the same pinned connection, after the same working-set screen, as
+		// the calls it replaces. tables is the list after
+		// withVersionedHistoryTables has added the history tables.
+		if len(tables) > 0 {
+			stmt, args := callNamingTables("CALL DOLT_ADD", tables)
+			if err := schema.DrainCall(ctx, conn, stmt, args...); err != nil {
 				return s.recordDoltPublicationFailure(ctx,
-					fmt.Errorf("dolt add %s after SQL mutation: %w: %w", table, err, ErrCommitIndeterminate))
+					fmt.Errorf("dolt add %s after SQL mutation: %w: %w",
+						strings.Join(tables, ", "), err, ErrCommitIndeterminate))
 			}
 		}
 
@@ -4574,6 +4588,18 @@ func (s *DoltStore) stageAndCommit(ctx context.Context, tables []string, commitM
 		}
 		return nil
 	})
+}
+
+// callNamingTables returns procedure called with one placeholder per table,
+// and the tables as its arguments: callNamingTables("CALL DOLT_ADD",
+// []string{"a", "b"}) is "CALL DOLT_ADD(?, ?)" bound to "a" and "b".
+func callNamingTables(procedure string, tables []string) (string, []any) {
+	args := make([]any, len(tables))
+	for i, table := range tables {
+		args[i] = table
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?, ", len(tables)), ", ")
+	return procedure + "(" + placeholders + ")", args
 }
 
 // unstageRefused undoes stageAndCommit's DOLT_ADD after its screen refused the

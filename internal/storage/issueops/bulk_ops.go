@@ -91,6 +91,7 @@ func GetIssuesByLabelInTx(ctx context.Context, tx *sql.Tx, label string) ([]stri
 
 // DeleteConfigInTx removes a configuration value.
 func DeleteConfigInTx(ctx context.Context, tx *sql.Tx, key string) error {
+	dropConfigSnapshot(ctx)
 	_, err := tx.ExecContext(ctx, "DELETE FROM config WHERE `key` = ?", key)
 	if err != nil {
 		return fmt.Errorf("delete config %s: %w", key, err)
