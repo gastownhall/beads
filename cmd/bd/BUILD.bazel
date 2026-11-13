@@ -1041,6 +1041,8 @@ go_test(
         "metadata_flag_test.go",
         "metadata_ready_test.go",
         "metadataless_server_workspace_test.go",
+        "metadataless_sibling_db_embedded_test.go",
+        "metadataless_store_open_embedded_test.go",
         "metrics_test.go",
         "migrate_consent_test.go",
         "migrate_dolt_mode_frontdoor_integration_test.go",

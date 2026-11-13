@@ -45,6 +45,7 @@
 100 10 TestEmbeddedCreateScalarAndRelationships
 
 100 11 TestEmbeddedKVConcurrent
+100 11 TestEmbeddedMetadatalessWorkspaceRefusesSiblingDatabase
 
 100 12 TestEmbeddedAutoImportFallback_ConflictSkip_SkipsRetiredRows
 100 12 TestEmbeddedConfigGetYamlKeyWithServerDown
@@ -74,6 +75,7 @@
 100 19 TestEmbeddedNewDoltStore_StrictReadOnlyRefusesWritesOnFreshDatabase
 
 100 20 TestEmbeddedInitRoleRoutingRetainedFork
+100 20 TestEmbeddedMetadatalessStoreOpensRefuseSeveralDatabases
 100 20 TestEmbeddedMigrateSchema_IdentityMismatchRefusesBeforeApplying
 
 100 21 TestEmbeddedArrivalSeqOnEveryJSONRead
@@ -102,6 +104,7 @@
 100 26 TestEmbeddedPersistentPreRunLogsAndSkipsIdentityCheckForFreshEmbeddedWorkspace
 
 100 27 TestEmbeddedDoltRemoteAdd_GitOriginCollision_RefusalMessageCopy
+100 27 TestEmbeddedMetadatalessStoreOpensKeepUnambiguousBehavior
 100 27 TestEmbeddedNewDoltStoreFromConfig_DottedDBName
 100 27 TestEmbeddedShipConcurrent
 
@@ -168,6 +171,7 @@
 100 39 TestEmbeddedNewDoltStoreFromConfig_NoMetadata
 
 100 40 TestEmbeddedIfRevisionOutranksReassignFenceCLI
+100 40 TestEmbeddedMetadatalessStoreOpensRefuseSoleOtherDatabase
 100 40 TestEmbeddedNewDoltStoreFromConfig_HyphenatedDBName
 100 40 TestEmbeddedUpdateLifecycleClaimParentCommit
 

@@ -1955,6 +1955,18 @@ var rootCmd = &cobra.Command{
 		if backendErr := validateConfiguredBackend(cfg, beadsDir); backendErr != nil {
 			return HandleError("%v", backendErr)
 		}
+		// Without metadata the embedded open below falls back to the literal
+		// default database name. When the embedded store already holds another
+		// database, or several, that open would create or select a sibling and
+		// every read and write after it would diverge from the workspace's real
+		// database (GH#4381). Refuse before version tracking, auto-import or
+		// any store construction, for reads, writes and previews alike, and
+		// whether or not the identity check is waived.
+		if cfg == nil && !configfile.DefaultConfig().IsDoltServerMode() && !doltserver.IsSharedServerMode() {
+			if err := configfile.CheckMetadatalessEmbeddedDatabase(beadsDir, configfile.DefaultDoltDatabase); err != nil {
+				return HandleError("%v", err)
+			}
+		}
 		// Reject proxy capability combinations before any workspace side effect
 		// (version tracking, migration, auto-start, or provider construction).
 		// Two validators, one for each half of the policy: flag-keyed rules and

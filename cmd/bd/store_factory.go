@@ -217,6 +217,9 @@ func openDoltStoreFromConfig(ctx context.Context, beadsDir string, requireExisti
 	if err := validateConfiguredBackend(cfg, beadsDir); err != nil {
 		return nil, err
 	}
+	// Normalizing replaces absent metadata with the default config; keep the
+	// provenance for the metadata-less database check below.
+	metadataMissing := cfg == nil
 	cfg = normalizeLoadedConfig(cfg)
 	if backend, ok := backends.Lookup(cfg.GetBackend()); ok {
 		return backend.Open(ctx, beadsDir)
@@ -236,6 +239,13 @@ func openDoltStoreFromConfig(ctx context.Context, beadsDir string, requireExisti
 	if cfg != nil {
 		database = cfg.GetDoltDatabase()
 	}
+	// Also before the sanitize migration: a metadata-less open must not
+	// create or select a sibling of the store's real database (GH#4381).
+	if metadataMissing {
+		if err := checkMetadatalessWritableTarget(beadsDir, database, sanitizeDBName(database)); err != nil {
+			return nil, err
+		}
+	}
 	if sanitized := sanitizeDBName(database); sanitized != database {
 		if err := migrateHyphenatedDB(beadsDir, cfg, database, sanitized); err != nil {
 			return nil, fmt.Errorf("auto-sanitize database name %q → %q: %w", database, sanitized, err)
@@ -243,6 +253,20 @@ func openDoltStoreFromConfig(ctx context.Context, beadsDir string, requireExisti
 		database = sanitized
 	}
 	return embeddeddolt.Open(ctx, beadsDir, database, "main")
+}
+
+// checkMetadatalessWritableTarget is configfile.CheckMetadatalessEmbeddedDatabase
+// for the writable factory, which opens sanitized but first renames a sole
+// legacy directory named database to it (migrateHyphenatedDB). The store may
+// therefore hold only sanitized, or only the unsanitized original; two
+// directories never collapse into one allowed match, and any other refusal
+// names sanitized, the database the open would use.
+func checkMetadatalessWritableTarget(beadsDir, database, sanitized string) error {
+	err := configfile.CheckMetadatalessEmbeddedDatabase(beadsDir, sanitized)
+	if err != nil && sanitized != database && configfile.CheckMetadatalessEmbeddedDatabase(beadsDir, database) == nil {
+		return nil
+	}
+	return err
 }
 
 // errNoRoutedEmbeddedDatabase refuses a routed write to beadsDir, an embedded
@@ -353,6 +377,7 @@ func openNonMutatingStoreFromConfig(ctx context.Context, beadsDir string, previe
 	if err := validateConfiguredBackend(cfg, beadsDir); err != nil {
 		return nil, err
 	}
+	metadataMissing := cfg == nil
 	cfg = normalizeLoadedConfig(cfg)
 	if backend, ok := backends.Lookup(cfg.GetBackend()); ok {
 		return backend.OpenReadOnly(ctx, beadsDir)
@@ -371,6 +396,14 @@ func openNonMutatingStoreFromConfig(ctx context.Context, beadsDir string, previe
 	}
 	if sanitized := sanitizeDBName(database); sanitized != database {
 		database = sanitized
+	}
+	// Without metadata the name is a fallback: refuse a store that holds
+	// another database, or several, rather than read a sibling (GH#4381).
+	// This open renames nothing, so only the sanitized name it opens counts.
+	if metadataMissing {
+		if err := configfile.CheckMetadatalessEmbeddedDatabase(beadsDir, database); err != nil {
+			return nil, err
+		}
 	}
 	if preview {
 		return embeddeddolt.OpenForPreviewCommand(ctx, beadsDir, database, "main")

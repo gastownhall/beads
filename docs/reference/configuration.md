@@ -29,6 +29,12 @@ Dolt is the only storage backend. Embedded mode (the default) stores data at `.b
 
 A `config.local.yaml` next to the project `config.yaml` is also merged in last for machine-specific overrides that should not be committed.
 
+### Missing `metadata.json`
+
+`.beads/metadata.json` names the workspace's database (`dolt_database`). Without it (and without a legacy `config.json`), bd falls back to the default database name `beads`. In embedded mode bd checks the store first: if `.beads/embeddeddolt/` is empty or holds only that database, the command runs as before. If the store holds a different database, or several, bd refuses the command, reads included, and names the databases it found. Opening `beads` there would create or select a second database next to the real one, so later reads and writes would diverge. Nothing is opened or created.
+
+To fix it, restore `.beads/metadata.json` (from a backup or another checkout) with `dolt_database` set to the database the workspace uses, then retry. In a git worktree that lacks the metadata, point `.beads/redirect` at the workspace that has it instead. If the refusal lists several databases, one of them may hold writes the others lack: check each before deleting anything.
+
 ## Precedence
 
 For Viper-managed (YAML) keys, highest to lowest:
