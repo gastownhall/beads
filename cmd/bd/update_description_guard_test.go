@@ -80,8 +80,8 @@ func TestValidateDescriptionUpdateRejectsEmptyStdinWithoutOptIn(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected empty stdin description to be rejected")
 		}
-		if !strings.Contains(err.Error(), "--allow-empty-description") {
-			t.Fatalf("expected opt-in guidance in error, got: %v", err)
+		if !strings.Contains(err.Error(), "--allow-empty-description") || !strings.Contains(err.Error(), "--clear-description") {
+			t.Fatalf("expected error to name both --allow-empty-description and --clear-description (GH#8149), got: %v", err)
 		}
 	})
 }
@@ -101,8 +101,8 @@ func TestValidateDescriptionUpdateRejectsEmptyDashShorthandWithoutOptIn(t *testi
 		if err == nil {
 			t.Fatal("expected empty dash shorthand description to be rejected")
 		}
-		if !strings.Contains(err.Error(), "--allow-empty-description") {
-			t.Fatalf("expected opt-in guidance in error, got: %v", err)
+		if !strings.Contains(err.Error(), "--allow-empty-description") || !strings.Contains(err.Error(), "--clear-description") {
+			t.Fatalf("expected error to name both --allow-empty-description and --clear-description (GH#8149), got: %v", err)
 		}
 	})
 }
@@ -127,8 +127,8 @@ func TestValidateDescriptionUpdateRejectsEmptyBodyFileWithoutOptIn(t *testing.T)
 	if err == nil {
 		t.Fatal("expected empty body file description to be rejected")
 	}
-	if !strings.Contains(err.Error(), "--allow-empty-description") {
-		t.Fatalf("expected opt-in guidance in error, got: %v", err)
+	if !strings.Contains(err.Error(), "--allow-empty-description") || !strings.Contains(err.Error(), "--clear-description") {
+		t.Fatalf("expected error to name both --allow-empty-description and --clear-description (GH#8149), got: %v", err)
 	}
 }
 
@@ -239,6 +239,78 @@ func TestValidateDescriptionUpdateAllowsExplicitInlineEmptyOnCreate(t *testing.T
 	}
 	if description != "" {
 		t.Fatalf("expected empty inline description, got %q", description)
+	}
+}
+
+// GH#8149 AC-4: on update, the stdin/file empty-description refusal names
+// both exits — the --allow-empty-description opt-in that authorizes empty
+// external input, and --clear-description, the deliberate clear verb. With
+// the opt-in the empty external value is the sanctioned clear; non-empty
+// external input never needed the opt-in.
+func TestGatherUpdateInputEmptyExternalDescriptionOptInGH8149(t *testing.T) {
+	tmpDir := t.TempDir()
+	emptyFile := filepath.Join(tmpDir, "empty.md")
+	if err := os.WriteFile(emptyFile, []byte{}, 0644); err != nil {
+		t.Fatalf("failed to write empty file: %v", err)
+	}
+	contentFile := filepath.Join(tmpDir, "content.md")
+	if err := os.WriteFile(contentFile, []byte("File content"), 0644); err != nil {
+		t.Fatalf("failed to write content file: %v", err)
+	}
+
+	refuse := func(t *testing.T, args []string) string {
+		t.Helper()
+		cmd := newGH8149UpdateInputCmd(t, args...)
+		var err error
+		stderr := captureStderr(t, func() {
+			_, err = gatherUpdateInput(t.Context(), cmd)
+		})
+		if err == nil {
+			t.Fatalf("expected %v to be refused", args)
+		}
+		return stderr
+	}
+	assertNamesBothPaths := func(t *testing.T, args []string, stderr string) {
+		t.Helper()
+		if !strings.Contains(stderr, "--allow-empty-description") || !strings.Contains(stderr, "--clear-description") {
+			t.Fatalf("expected %v refusal to name --allow-empty-description and --clear-description, got: %s", args, stderr)
+		}
+	}
+
+	for _, args := range [][]string{
+		{"--body-file", emptyFile},
+		{"--description-file", emptyFile},
+		{"--body-file", emptyFile, "--force"},
+	} {
+		assertNamesBothPaths(t, args, refuse(t, args))
+	}
+	withTestStdin(t, "", func() {
+		for _, args := range [][]string{{"--stdin"}, {"--description", "-"}} {
+			assertNamesBothPaths(t, args, refuse(t, args))
+		}
+	})
+
+	cases := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--body-file", emptyFile, "--allow-empty-description"}, ""},
+		{[]string{"--description-file", emptyFile, "--allow-empty-description"}, ""},
+		{[]string{"--body-file", contentFile}, "File content"},
+	}
+	for _, tc := range cases {
+		cmd := newGH8149UpdateInputCmd(t, tc.args...)
+		var in *updateInput
+		var err error
+		captureStderr(t, func() {
+			in, err = gatherUpdateInput(t.Context(), cmd)
+		})
+		if err != nil {
+			t.Fatalf("expected %v to succeed, got: %v", tc.args, err)
+		}
+		if got, ok := in.fields["description"].(string); !ok || got != tc.want {
+			t.Fatalf("expected %v to set description to %q, got %q (present=%v)", tc.args, tc.want, got, ok)
+		}
 	}
 }
 

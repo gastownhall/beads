@@ -59,7 +59,10 @@ func clearDescriptionRegistered(cmd *cobra.Command) bool {
 //
 // On create, inline empty stays the sanctioned explicit clear (a field may
 // be born empty), and only stdin/file input keeps the
-// --allow-empty-description gate.
+// --allow-empty-description gate. The stdin/file gate is unchanged in kind
+// on update — the opt-in still authorizes empty external input — but its
+// refusal names --clear-description as the deliberate alternative, where
+// the create refusal still suggests the inline empty.
 func validateDescriptionUpdate(cmd *cobra.Command, description string, descChanged bool) error {
 	if !descChanged || description != "" {
 		return nil
@@ -76,7 +79,10 @@ func validateDescriptionUpdate(cmd *cobra.Command, description string, descChang
 		return nil
 	}
 
-	return fmt.Errorf("empty description from stdin/file requires --allow-empty-description (or use an explicit inline empty value like --description \"\")")
+	if !clearDescriptionRegistered(cmd) {
+		return fmt.Errorf("empty description from stdin/file requires --allow-empty-description (or use an explicit inline empty value like --description \"\")")
+	}
+	return fmt.Errorf("empty description from stdin/file requires --allow-empty-description (or use --clear-description to clear it deliberately)")
 }
 
 // validateDesignUpdate is the GH#8149 design twin of the notes guard: on

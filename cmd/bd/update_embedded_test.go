@@ -671,6 +671,33 @@ func TestEmbeddedUpdateFieldsNotesClearAndDefer(t *testing.T) {
 		}
 	})
 
+	t.Run("update_empty_description_file_optin_gh8149", func(t *testing.T) {
+		// GH#8149 AC-4: empty stdin/file description input keeps its
+		// --allow-empty-description gate, and the refusal now names the
+		// update clear verb too; the opt-in stays the sanctioned way to
+		// clear via an empty file.
+		issue := bdCreate(t, bd, dir, "Empty description file guard test", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--description", "file guarded")
+
+		emptyFile := filepath.Join(t.TempDir(), "empty.md")
+		if err := os.WriteFile(emptyFile, []byte{}, 0644); err != nil {
+			t.Fatalf("failed to write empty file: %v", err)
+		}
+
+		out := bdUpdateFail(t, bd, dir, issue.ID, "--body-file", emptyFile)
+		if !strings.Contains(out, "--allow-empty-description") || !strings.Contains(out, "--clear-description") {
+			t.Errorf("expected empty body-file refusal to name --allow-empty-description and --clear-description, got:\n%s", out)
+		}
+		if got := bdShow(t, bd, dir, issue.ID); got.Description != "file guarded" {
+			t.Errorf("expected description preserved by the refusal, got %q", got.Description)
+		}
+
+		bdUpdate(t, bd, dir, issue.ID, "--body-file", emptyFile, "--allow-empty-description")
+		if got := bdShow(t, bd, dir, issue.ID); got.Description != "" {
+			t.Errorf("expected opt-in empty body-file to clear the description, got %q", got.Description)
+		}
+	})
+
 	t.Run("update_clear_text_flags_succeed_gh8149", func(t *testing.T) {
 		// GH#8149: the deliberate clear verbs. One clear empties exactly
 		// its field, clears compose, an already-empty field clears fine,
