@@ -609,6 +609,26 @@ func TestImporterUOWReplayReMintsUnsetIDs(t *testing.T) {
 			t.Errorf("stored comment id = %q, caller's comment.ID = %q; want equal", got, c.ID)
 		}
 	}
+	// AC-4: row B's caller-supplied ids survive the replay untouched and the
+	// row, edge and comment are stored under them.
+	assertRowBKept := func(t *testing.T, run replayRun) {
+		t.Helper()
+		b := run.rowB
+		want := "imr-b-" + strings.TrimPrefix(b.Title, "explicit row ")
+		if b.ID != want || b.Dependencies[0].IssueID != want || b.Comments[0].ID != want+"-c1" {
+			t.Errorf("caller ids changed: id=%q dep=%q comment=%q, want %q/%q/%q",
+				b.ID, b.Dependencies[0].IssueID, b.Comments[0].ID, want, want, want+"-c1")
+		}
+		if got := queryInt(t, "SELECT COUNT(*) FROM issues WHERE id = ? AND title = ?", want, b.Title); got != 1 {
+			t.Errorf("row B under %q = %d, want 1", want, got)
+		}
+		if got := queryInt(t, "SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ?", want, anchor); got != 1 {
+			t.Errorf("row B edges = %d, want 1", got)
+		}
+		if got := queryInt(t, "SELECT COUNT(*) FROM comments WHERE id = ? AND issue_id = ?", want+"-c1", want); got != 1 {
+			t.Errorf("row B comment under %q = %d, want 1", want+"-c1", got)
+		}
+	}
 	assertCleanResult := func(t *testing.T, run replayRun) {
 		t.Helper()
 		if run.result.Created != 2 || len(run.result.StaleRejectedIDs) != 0 || len(run.result.RetiredIDs) != 0 {
@@ -634,6 +654,7 @@ func TestImporterUOWReplayReMintsUnsetIDs(t *testing.T) {
 		assertCleanResult(t, run)
 		assertRowALanded(t, run)
 		assertRowAAuxFollowsReMint(t, run)
+		assertRowBKept(t, run)
 		x := run.attempt1ID
 		if run.rowA.ID != x {
 			t.Errorf("row A id = %q, want the replay to re-mint attempt 1's counter value %q", run.rowA.ID, x)
@@ -659,6 +680,7 @@ func TestImporterUOWReplayReMintsUnsetIDs(t *testing.T) {
 		assertCompetitorKept(t, run)
 		assertRowALanded(t, run)
 		assertRowAAuxFollowsReMint(t, run)
+		assertRowBKept(t, run)
 	})
 
 	// Edge: with --allow-stale the pre-fix replay overwrote the competitor's
@@ -669,6 +691,7 @@ func TestImporterUOWReplayReMintsUnsetIDs(t *testing.T) {
 		assertCompetitorKept(t, run)
 		assertRowALanded(t, run)
 		assertRowAAuxFollowsReMint(t, run)
+		assertRowBKept(t, run)
 	})
 
 	// Edge: hash mode. A row lands under attempt 1's hash id in between; the
@@ -690,5 +713,6 @@ func TestImporterUOWReplayReMintsUnsetIDs(t *testing.T) {
 		assertCompetitorKept(t, run)
 		assertRowALanded(t, run)
 		assertRowAAuxFollowsReMint(t, run)
+		assertRowBKept(t, run)
 	})
 }
