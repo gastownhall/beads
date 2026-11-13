@@ -92,8 +92,9 @@ func (s ignoredCursorState) reconcileNeeded() bool {
 }
 
 // readIgnoredCursorState answers both halves of the gate. On a healthy
-// database that is two SHOW TABLES listings, HEAD's and the working set's; a
-// dolt_ignore read joins them only when the cursor is tracked at HEAD. None of
+// database that is two SHOW TABLES listings, HEAD's and the working set's (which
+// alreadyConverged already holds, see withTableListing); a dolt_ignore read
+// joins them only when the cursor is tracked at HEAD. None of
 // them may fail, and that is not incidental: a Dolt session that issues a
 // FAILING statement stays pinned to its pre-statement catalog snapshot for the
 // rest of its pooled life (be-bv7x), and this runs on every writable open and

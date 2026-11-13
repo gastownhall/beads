@@ -767,6 +767,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (it keeps only `**Do:**` and `**Don't:**` lines), and a rule with no such
   lines is skipped by `--auto` and refused by `--group`.
   ([#5719](https://github.com/gastownhall/beads/issues/5719))
+- **Server mode: a write's schema convergence check lists the tables once.**
+  The check that lets a write skip the migration lock read `SHOW TABLES` ten times
+  and the `information_schema.schemata` probe twice, one per table it asks about.
+  It writes nothing, so its lookups now share one listing, which it reads once more
+  before the lock check to see that no table it asked about changed. Every write
+  command sends 9 fewer statements, about 0.9 s at 100 ms round-trip time.
+- **The schema checks a writable open runs before deciding whether to
+  migrate send fewer statements.** The remote-migrate gate read the
+  schema-migration cursor twice, once for the current version and again for
+  the pending versions; it now derives the pending versions from the one
+  read. That removes 3 statements (two existence probes and the version read)
+  wherever the gate reads an initialized database, which includes every
+  writable open of one directly against a Dolt server; a proxied open of an
+  already-current database skips the gate, and a fresh database stops before
+  the removed read. The check for a custom-type or
+  custom-status backfill counted each custom table and read each config key
+  separately; it now asks for both counts and both config values in one
+  statement, which removes 3 statements when both custom tables are empty and
+  1 when they hold rows. Empty or malformed config values still mean no
+  backfill, a failed read is still an error, and a database missing one of
+  those tables gets the same answer as before.
 - **`bd` requires Dolt 2.6.0 or newer outside embedded mode, and refuses
   anything older.** `doltversion.RecommendedMin` (2.5.0, a warning) is now
   `doltversion.RequiredMin` (2.6.0, an error). `bd dolt start` and

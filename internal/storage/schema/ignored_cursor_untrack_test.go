@@ -760,11 +760,10 @@ func TestAlreadyConvergedDeclinesOnALegacyTrackedCursor(t *testing.T) {
 	db, mock := newMockDB(t)
 
 	expectCurrentDatabase(mock, "testdb")
-	expectNoMigrationWorkNeeded(mock)
+	expectProbeFindsNoWork(mock)
 	expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(LatestVersion()))
 	expectHeadTableProbe(mock, "", ignoredSource.cursorTable, true)
 	expectIgnoreResolution(mock, "", ignoredSource.cursorTable, exactlyIgnored(true))
-	expectShowTable(mock, ignoredCursorUntrackTempTable, false)
 
 	converged, err := alreadyConverged(context.Background(), db, "testdb", nil)
 	if err != nil {
@@ -790,10 +789,9 @@ func TestAlreadyConvergedDeclinesOnASurvivingScratchTable(t *testing.T) {
 	db, mock := newMockDB(t)
 
 	expectCurrentDatabase(mock, "testdb")
-	expectNoMigrationWorkNeeded(mock)
+	expectProbeFindsNoWork(mock, ignoredCursorUntrackTempTable)
 	expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(LatestVersion()))
 	expectHeadTableProbe(mock, "", ignoredSource.cursorTable, false)
-	expectShowTable(mock, ignoredCursorUntrackTempTable, true)
 
 	converged, err := alreadyConverged(context.Background(), db, "testdb", nil)
 	if err != nil {
@@ -816,11 +814,10 @@ func TestAlreadyConvergedAcceptsATrackedCursorTheOperatorUnignored(t *testing.T)
 	db, mock := newMockDB(t)
 
 	expectCurrentDatabase(mock, "testdb")
-	expectNoMigrationWorkNeeded(mock)
+	expectProbeFindsNoWork(mock)
 	expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(LatestVersion()))
 	expectHeadTableProbe(mock, "", ignoredSource.cursorTable, true)
 	expectIgnoreResolution(mock, "", ignoredSource.cursorTable, exactlyIgnored(false))
-	expectShowTable(mock, ignoredCursorUntrackTempTable, false)
 	expectMigrationLockProbe(mock, "testdb", 1)
 
 	converged, err := alreadyConverged(context.Background(), db, "testdb", nil)
@@ -840,7 +837,7 @@ func TestAlreadyConvergedFailsClosedOnAnUnreadableHeadProbe(t *testing.T) {
 	db, mock := newMockDB(t)
 
 	expectCurrentDatabase(mock, "testdb")
-	expectNoMigrationWorkNeeded(mock)
+	expectProbeFindsNoWork(mock)
 	expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(LatestVersion()))
 	mock.ExpectQuery(regexp.QuoteMeta("SHOW TABLES AS OF 'HEAD'")).
 		WillReturnError(sql.ErrConnDone)
@@ -860,11 +857,10 @@ func TestAlreadyConvergedKeepsTheLockProbeLast(t *testing.T) {
 	db, mock := newMockDB(t)
 
 	expectCurrentDatabase(mock, "testdb")
-	expectNoMigrationWorkNeeded(mock)
+	expectProbeFindsNoWork(mock)
 	expectDoltIgnoreRead(mock, unqualifiedDoltIgnore, seededIgnorePatterns(LatestVersion()))
 	expectHeadTableProbe(mock, "", ignoredSource.cursorTable, true)
 	expectIgnoreResolution(mock, "", ignoredSource.cursorTable, exactlyIgnored(true))
-	expectShowTable(mock, ignoredCursorUntrackTempTable, false)
 
 	if _, err := alreadyConverged(context.Background(), db, "testdb", nil); err != nil {
 		t.Fatalf("alreadyConverged() error = %v", err)

@@ -1885,7 +1885,7 @@ var sentinelTableExists = showTableExists
 // push the TABLES predicate down any more than the COLUMNS one: the probe walks
 // the catalog of every database on the server. On a sql-server hosting 28
 // databases the INFORMATION_SCHEMA read costs 25-30 ms against 0.6 ms for the
-// listing (dolt 2.1.8), and the open path asks a dozen times per bd write.
+// listing (dolt 2.1.8), and the open path asks several times per bd write.
 //
 // It reads the unfiltered listing and compares names case-insensitively, which
 // is what the INFORMATION_SCHEMA count it replaced answers: Dolt resolves and
@@ -1900,15 +1900,32 @@ var sentinelTableExists = showTableExists
 // must succeed on any session (be-bv7x), gates it with tableInCurrentDatabase.
 // table is a migration-series constant, never user input.
 func showTableExists(ctx context.Context, db DBConn, table string) (bool, error) {
+	listing := tableListingFrom(ctx)
+	if listing == nil {
+		listing = &tableListing{}
+	}
+	if listing.names == nil {
+		names, err := listTables(ctx, db)
+		if err != nil {
+			return false, fmt.Errorf("checking table %s: %w", table, err)
+		}
+		listing.names = names
+	}
+	return listing.has(table), nil
+}
+
+// listTables reads the session database's SHOW TABLES listing, its names folded
+// to lower case for showTableExists's case-insensitive comparison.
+func listTables(ctx context.Context, db DBConn) (map[string]struct{}, error) {
 	rows, err := db.QueryContext(ctx, "SHOW TABLES")
 	if err != nil {
-		return false, fmt.Errorf("checking table %s: %w", table, err)
+		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 
 	cols, err := rows.Columns()
 	if err != nil {
-		return false, fmt.Errorf("checking table %s: %w", table, err)
+		return nil, err
 	}
 	// SHOW TABLES returns Tables_in_<db> (plus Table_type on SHOW FULL TABLES
 	// and on some servers); the first column is the table name.
@@ -1917,18 +1934,73 @@ func showTableExists(ctx context.Context, db DBConn, table string) (bool, error)
 	for i := range cells {
 		dest[i] = &cells[i]
 	}
+	names := make(map[string]struct{})
 	for rows.Next() {
 		if err := rows.Scan(dest...); err != nil {
-			return false, fmt.Errorf("checking table %s: %w", table, err)
+			return nil, err
 		}
-		if len(cells) > 0 && strings.EqualFold(string(cells[0]), table) {
-			return true, nil
+		if len(cells) > 0 {
+			names[strings.ToLower(string(cells[0]))] = struct{}{}
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return false, fmt.Errorf("checking table %s: %w", table, err)
+		return nil, err
 	}
-	return false, nil
+	return names, nil
+}
+
+// tableListing holds one SHOW TABLES answer for a pass that writes nothing, so
+// its probes share a single listing. A nil names means none has been read yet.
+type tableListing struct {
+	names map[string]struct{}
+	asked map[string]bool
+}
+
+// has answers from the listing and records the answer for tableListingUnchanged.
+func (l *tableListing) has(table string) bool {
+	name := strings.ToLower(table)
+	_, present := l.names[name]
+	if l.asked == nil {
+		l.asked = make(map[string]bool)
+	}
+	l.asked[name] = present
+	return present
+}
+
+type tableListingContextKey struct{}
+
+// withTableListing makes every table probe on the returned context answer from
+// one listing, read by whichever probe runs first. The caller must not write
+// through that context, and the session must already be on the database it is
+// asking about.
+func withTableListing(ctx context.Context) context.Context {
+	return context.WithValue(ctx, tableListingContextKey{}, &tableListing{})
+}
+
+func tableListingFrom(ctx context.Context) *tableListing {
+	listing, _ := ctx.Value(tableListingContextKey{}).(*tableListing)
+	return listing
+}
+
+// tableListingUnchanged reads the tables again and reports whether every table
+// the context's listing was asked about still has the answer it gave. A table
+// nobody asked about does not count, so unrelated tables coming and going on a
+// shared database leave the answer alone. No listing read yet is not a yes.
+func tableListingUnchanged(ctx context.Context, db DBConn) (bool, error) {
+	listing := tableListingFrom(ctx)
+	if listing == nil || listing.names == nil {
+		return false, nil
+	}
+	names, err := listTables(ctx, db)
+	if err != nil {
+		return false, fmt.Errorf("re-reading the table listing: %w", err)
+	}
+	for name, present := range listing.asked {
+		if _, now := names[name]; now != present {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // tableInCurrentDatabase is showTableExists for a session that may have no
@@ -1945,6 +2017,10 @@ func showTableExists(ctx context.Context, db DBConn, table string) (bool, error)
 // only when every connection in the pool is on the same database (a DSN that
 // names it).
 func tableInCurrentDatabase(ctx context.Context, db DBConn, table string) (bool, error) {
+	// A listing already read proves the session has a usable database.
+	if listing := tableListingFrom(ctx); listing != nil && listing.names != nil {
+		return listing.has(table), nil
+	}
 	var usable int
 	if err := db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = DATABASE()",
@@ -1988,14 +2064,27 @@ func (m migrationSource) pendingVersions(ctx context.Context, db DBConn) ([]int,
 	if err != nil {
 		return nil, err
 	}
-	files := m.list()
+	return m.pendingAbove(current), nil
+}
+
+// pendingAbove is pendingVersions for a cursor the caller has already read: the
+// versions in this series' embedded list above current. It sends no statement.
+func (m migrationSource) pendingAbove(current int) []int {
+	return versionsAbove(m.list(), current)
+}
+
+// versionsAbove returns the version of every file in files (sorted ascending,
+// as migrationSource.list returns them) that is strictly greater than current.
+// A cursor that no listed file carries, between two listed versions or past
+// the last one, still gets exactly the listed versions above it.
+func versionsAbove(files []migrationFile, current int) []int {
 	pending := make([]int, 0, len(files))
 	for _, mf := range files {
 		if mf.version > current {
 			pending = append(pending, mf.version)
 		}
 	}
-	return pending, nil
+	return pending
 }
 
 func (m migrationSource) pendingMigrationDirtyTables(ctx context.Context, db DBConn, dirtyBefore map[string]dirtyTableState) ([]string, error) {
