@@ -1347,8 +1347,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filesystem, which a server in a container does not unless the backup is
   mounted at the same path in both; there a `--force` restore from a backup
   that only bd's machine holds can still drop the database.
-  rename such a backup before restoring it. In plain server mode the source
-  must also be visible to the bd client, since bd now checks it locally.
 - `bd init --force`, `--reinit-local` or `--from-jsonl` without
   `--discard-remote` now says why it refuses when it cannot read the
   remote's `refs/dolt/data`. It still exits 10, now with reason
