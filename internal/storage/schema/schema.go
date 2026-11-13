@@ -2407,6 +2407,14 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 		if err := stamps.restore(ctx, db); err != nil {
 			return count, fmt.Errorf("restoring updated_at after migration %s: %w", mf.name, err)
 		}
+		// The cursor row below is what every later pass trusts, so a body that
+		// returned no error must also have dropped the defaults it drops. A
+		// default the body left behind is dropped directly and re-read; the
+		// corrected table lands in this step's commit with the mark
+		// (verifyDroppedDefaults, GH#5269).
+		if err := verifyDroppedDefaults(ctx, db, src, mf.version, string(data)); err != nil {
+			return count, fmt.Errorf("migration %s: %w", mf.name, err)
+		}
 		sum := sha256.Sum256(data)
 		contentHash := hex.EncodeToString(sum[:])
 		if _, err := db.ExecContext(ctx, "INSERT IGNORE INTO "+src.cursorTable+" (version, content_hash) VALUES (?, ?)", mf.version, contentHash); err != nil {

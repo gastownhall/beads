@@ -431,19 +431,23 @@ The mechanics matter, because they are not "a command that applies a migration":
   "status": "current",
   "latest_version": 66,
   "mode": "proxied-server",
-  "note": "schema reconciled during provider open"
+  "note": "schema reconciled during provider open; recorded migration post-conditions (GH#5269) are not checked or repaired in proxied-server mode"
 }
 ```
 
 (`latest_version` is `schema.LatestVersion()`, shown here illustratively — read
 the value, do not hard-code it.) The direct path emits `{"status", "applied",
-"latest_version"}`; the proxied arm drops `applied` and adds `mode` and `note`,
-so only `status` and `latest_version` are common to both. No applied count is
-reported because by the time `RunE` runs the work belongs to an open that has
-already returned — there is no number for it to have. An embedder decoding this
-payload into one struct across both topologies should treat `applied` as
-absent-not-zero on the proxied route, and should not infer "nothing was applied"
-from its absence.
+"repaired", "latest_version"}`; the proxied arm drops `applied` and `repaired`
+and adds `mode` and `note`, so only `status` and `latest_version` are common to
+both. No applied count is reported because by the time `RunE` runs the work
+belongs to an open that has already returned — there is no number for it to
+have. No `repaired` list is reported because the provider open runs the
+migrations only: the repair of recorded migration post-conditions (GH#5269),
+which the direct path runs and lists there, does not run on this route, and
+`note` says so. An embedder decoding this payload into one struct across both
+topologies should treat `applied` and `repaired` as absent-not-zero on the
+proxied route, and should not infer "nothing was applied" or "nothing needed
+repair" from their absence.
 
 **What an embedder can observe.** The DDL lands under co-resident clients that
 already hold connections and prepared state, with no coordination of any kind —

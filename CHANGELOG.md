@@ -1466,6 +1466,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the export is not left staged at its old content. It also decides whether
   the commit touches `.beads` from that index, and in a linked worktree no
   longer re-stages an export you removed with `git rm` (#4080).
+- A migration that drops a column default no longer records its version
+  while that default is still in place (GH#5269). Migrations 0043, 0050 and
+  0051, and ignored migration 0010, drop the `DEFAULT (UUID())` on an `id`
+  column through a guarded statement. If that statement returned no error
+  but left the default in place, the version was recorded anyway, every
+  later `bd migrate` skipped the migration, and an insert that omits `id`
+  still got a clone-random id instead of failing. Before recording the
+  version, the migration now drops a default it left in place directly,
+  checks it is gone, and commits that change with the version. If that
+  cannot be confirmed for any column, it fails with an error naming every
+  such column and what to do next, and records nothing. Any other change
+  the migration made stays uncommitted: the next pass refuses until it is
+  committed, then runs the migration and the check again. In embedded and
+  direct server mode, a store that already carries such a version is
+  repaired by an explicit `bd migrate schema`: it drops each such default,
+  commits the tracked tables on their own (ignored tables such as `events`
+  and the wisp tables are changed but not committed), reports the columns in
+  its text and JSON (`repaired`) output, and refuses before changing
+  anything if a table it would repair has uncommitted changes. If that
+  commit fails, the command fails too: it lists the columns whose defaults
+  it dropped but did not commit (JSON `uncommitted`, never `repaired`) and
+  names the commit that finishes them. Ordinary commands do not repair, and
+  neither does `bd migrate schema` through a gateway server, which owns its
+  schema, or on a proxied-server workspace yet. In direct server mode
+  `bd doctor` gains a read-only Migration Post-Conditions check that lists
+  every such column with the `bd migrate schema` hint (through a gateway,
+  the server administrator's fix), and says when it could not check
+  instead of reporting the schema healthy.
 - **bd again reads `GT_ROOT` from a rig's `.beads/.env`** (#8117; also
   shipped in 1.3.4). `gc rig add` writes the city root there, and the
   `.beads/.env` allowlist from #7879 (also in 1.3.3) dropped it, printing
