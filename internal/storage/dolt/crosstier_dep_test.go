@@ -12,14 +12,15 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// These tests pin the two-session transaction seam: DoltStore.RunInTransaction
-// runs versioned tables on one SQL session (regularTx) and dolt-ignored wisp
-// tables on another (ignoredTx). A dependency whose write table lives on one
-// session and whose target issue lives on the other must still resolve targets
-// created earlier in the same logical transaction — the shape `bd create
+// These tests pin cross-tier dependencies inside one DoltStore.RunInTransaction:
+// a dependency whose write table lives on one plane (versioned issues or
+// dolt-ignored wisps) and whose target issue lives on the other must resolve
+// targets created earlier in the same transaction — the shape `bd create
 // --deps blocks:<other-tier-id>` produces since create+deps became one
-// transaction. Regression coverage for the red-team finding where such creates
-// hard-failed with "issue not found" on the Dolt server backend.
+// transaction. Both planes share the transaction's one SQL session; these are
+// regression coverage for the red-team finding where such creates hard-failed
+// with "issue not found" on the Dolt server backend when the planes ran on two
+// sessions.
 
 func crossTierRegularIssue(id, title string) *types.Issue {
 	return &types.Issue{

@@ -161,3 +161,50 @@ func TestRunInTransactionWispCloseUnblockRidesOneDoltCommit(t *testing.T) {
 		requireCleanTables(ctx, t, store, "issues", "dependencies")
 	})
 }
+
+// TestRunInTransactionHoldsOneConnection: a callback that writes both planes
+// holds exactly one pool connection, even when the pool has a spare warm one
+// it could borrow.
+func TestRunInTransactionHoldsOneConnection(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Warm the pool: keep two idle connections around so a second session
+	// would be borrowed rather than dialed.
+	store.db.SetMaxIdleConns(2)
+	store.db.SetConnMaxIdleTime(0)
+	var warm []*sql.Conn
+	for i := 0; i < 2; i++ {
+		c, err := store.db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("warm conn %d: %v", i, err)
+		}
+		warm = append(warm, c)
+	}
+	for _, c := range warm {
+		_ = c.Close()
+	}
+	if idle := store.db.Stats().Idle; idle < 2 {
+		t.Fatalf("pool has %d idle connections after warming, want 2", idle)
+	}
+
+	before := store.db.Stats().InUse
+	var inside int
+	if err := store.RunInTransaction(ctx, "test: one connection", func(tx storage.Transaction) error {
+		if err := tx.CreateIssue(ctx, crossTierRegularIssue("test-onec-durable", "durable"), "tester"); err != nil {
+			return err
+		}
+		if err := tx.CreateIssue(ctx, crossTierWispIssue("test-onec-wisp", "wisp"), "tester"); err != nil {
+			return err
+		}
+		inside = store.db.Stats().InUse
+		return nil
+	}); err != nil {
+		t.Fatalf("RunInTransaction: %v", err)
+	}
+	if delta := inside - before; delta != 1 {
+		t.Errorf("connections in use inside the callback = %d more than before, want exactly 1 (no second session)", delta)
+	}
+}

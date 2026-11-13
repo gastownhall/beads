@@ -298,7 +298,7 @@ func TestDeferredSwitchReadErrorFailsADoltTransaction(t *testing.T) {
 			errProbe := errors.New("probe done")
 			var scoped bool
 			err = vhDoltTransaction(t, store, func(tx storage.Transaction) error {
-				scoped = issueops.VersionedHistoryEnabledFor(tx.(*doltTransaction).regularTx)
+				scoped = issueops.VersionedHistoryEnabledFor(tx.(*doltTransaction).tx)
 				return errProbe
 			})
 			if !errors.Is(err, errProbe) {

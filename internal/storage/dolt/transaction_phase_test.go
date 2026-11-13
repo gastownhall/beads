@@ -12,62 +12,44 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 )
 
-func newTransactionPhaseFixture(t *testing.T) (*DoltStore, *sql.Conn, *doltTransaction, sqlmock.Sqlmock, sqlmock.Sqlmock) {
+func newTransactionPhaseFixture(t *testing.T) (*DoltStore, *sql.Conn, *doltTransaction, sqlmock.Sqlmock) {
 	t.Helper()
 	ctx := context.Background()
 
-	regularDB, regularMock, err := sqlmock.New()
+	db, mock, err := sqlmock.New()
 	if err != nil {
-		t.Fatalf("new regular sqlmock: %v", err)
+		t.Fatalf("new sqlmock: %v", err)
 	}
-	t.Cleanup(func() { _ = regularDB.Close() })
-	regularConn, err := regularDB.Conn(ctx)
+	t.Cleanup(func() { _ = db.Close() })
+	conn, err := db.Conn(ctx)
 	if err != nil {
-		t.Fatalf("acquire regular sqlmock connection: %v", err)
+		t.Fatalf("acquire sqlmock connection: %v", err)
 	}
-	t.Cleanup(func() { _ = regularConn.Close() })
-	regularMock.ExpectBegin()
-	regularTx, err := regularConn.BeginTx(ctx, nil)
+	t.Cleanup(func() { _ = conn.Close() })
+	mock.ExpectBegin()
+	sqlTx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
-		t.Fatalf("begin regular sqlmock transaction: %v", err)
-	}
-
-	ignoredDB, ignoredMock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("new ignored sqlmock: %v", err)
-	}
-	t.Cleanup(func() { _ = ignoredDB.Close() })
-	ignoredMock.ExpectBegin()
-	ignoredTx, err := ignoredDB.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatalf("begin ignored sqlmock transaction: %v", err)
+		t.Fatalf("begin sqlmock transaction: %v", err)
 	}
 
-	return &DoltStore{}, regularConn, &doltTransaction{
-		regularTx: regularTx,
-		ignoredTx: ignoredTx,
-	}, regularMock, ignoredMock
+	return &DoltStore{}, conn, &doltTransaction{tx: sqlTx}, mock
 }
 
-func requireTransactionPhaseMocks(t *testing.T, regularMock, ignoredMock sqlmock.Sqlmock) {
+func requireTransactionPhaseMocks(t *testing.T, mock sqlmock.Sqlmock) {
 	t.Helper()
-	if err := regularMock.ExpectationsWereMet(); err != nil {
-		t.Errorf("regular SQL expectations: %v", err)
-	}
-	if err := ignoredMock.ExpectationsWereMet(); err != nil {
-		t.Errorf("ignored SQL expectations: %v", err)
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("SQL expectations: %v", err)
 	}
 }
 
 func TestRunInTransactionStageFailureAfterRegularCommitIsIndeterminateAndNotReplayed(t *testing.T) {
-	store, conn, tx, regularMock, ignoredMock := newTransactionPhaseFixture(t)
+	store, conn, tx, mock := newTransactionPhaseFixture(t)
 	tx.dirty.MarkDirty("issues")
-	regularMock.ExpectCommit()
-	regularMock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM dolt_status s").
+	mock.ExpectCommit()
+	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM dolt_status s").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
-	regularMock.ExpectQuery("CALL DOLT_ADD\\(\\?\\)").WithArgs("issues").
+	mock.ExpectQuery("CALL DOLT_ADD\\(\\?\\)").WithArgs("issues").
 		WillReturnError(errors.New("invalid connection"))
-	ignoredMock.ExpectRollback()
 
 	callbackCalls := 0
 	runnerCalls := 0
@@ -90,13 +72,12 @@ func TestRunInTransactionStageFailureAfterRegularCommitIsIndeterminateAndNotRepl
 	if runnerCalls != 1 {
 		t.Fatalf("transaction runner calls = %d, want 1", runnerCalls)
 	}
-	requireTransactionPhaseMocks(t, regularMock, ignoredMock)
+	requireTransactionPhaseMocks(t, mock)
 }
 
 func TestRunInTransactionRegularPacketSyncCommitIsIndeterminateAndNotReplayed(t *testing.T) {
-	store, conn, tx, regularMock, ignoredMock := newTransactionPhaseFixture(t)
-	regularMock.ExpectCommit().WillReturnError(mysql.ErrPktSync)
-	ignoredMock.ExpectRollback()
+	store, conn, tx, mock := newTransactionPhaseFixture(t)
+	mock.ExpectCommit().WillReturnError(mysql.ErrPktSync)
 
 	callbackCalls := 0
 	runnerCalls := 0
@@ -122,5 +103,5 @@ func TestRunInTransactionRegularPacketSyncCommitIsIndeterminateAndNotReplayed(t 
 	if runnerCalls != 1 {
 		t.Fatalf("transaction runner calls = %d, want 1", runnerCalls)
 	}
-	requireTransactionPhaseMocks(t, regularMock, ignoredMock)
+	requireTransactionPhaseMocks(t, mock)
 }

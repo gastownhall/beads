@@ -128,7 +128,7 @@ func TestTxReadYourWritesWispTier(t *testing.T) {
 		if err := tx.CreateIssue(ctx, wisp, "tester"); err != nil {
 			return err
 		}
-		// Wisp-sourced blocks edge → wisp_dependencies (ignoredTx); wisp blocked.
+		// Wisp-sourced blocks edge → wisp_dependencies; wisp blocked.
 		if err := tx.AddDependency(ctx, &types.Dependency{IssueID: "txw-wisp", DependsOnID: "txw-block", Type: types.DepBlocks}, "tester"); err != nil {
 			return err
 		}
