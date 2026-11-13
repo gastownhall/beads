@@ -183,11 +183,16 @@ type UnsetSettingResult struct {
 // absence is legible rather than surprising: the yaml-only keys (`export.*`,
 // `dolt.*`, `federation.*`, `storage-class.*`, the tracker credentials and the
 // rest of internal/config's list) live in config.yaml, and `beads.role` lives
-// in git config. A write of one of those through this role would land a row no
-// reader consults. This role does not police that routing — the front door
-// that knows where the client's files are does — with the ONE exception the
-// key constants above describe, which is policed here because the damage is
-// not a dead row but a workspace whose ids stop agreeing with each other.
+// in git config. The front door that knows where the client's files are
+// routes them there. This role REFUSES a yaml-only key outright (#7559): this
+// table is replicated by `bd dolt push`, `pull` and clone, so a tracker secret
+// stored here reaches every remote, and the settings HTTP surface is a second
+// door onto this plane with no config.yaml it could write instead. A
+// non-secret yaml-only key is refused too: stored here it is a row no reader
+// consults. `beads.role` is not refused — a dead row in git-config's name that
+// carries no secret. The protected key the constants above describe is refused
+// for its own reason: the damage is not a dead row but a workspace whose ids
+// stop agreeing with each other.
 //
 // THE THIRD FAMILY IS NOT ROUTED ELSEWHERE — IT RIDES IN THIS PLANE'S TABLE.
 // Everything under `kv.` is USER DATA: the generic keys `bd kv set` writes, and
@@ -258,6 +263,11 @@ type WorkspaceConfig interface {
 	// THE REFUSALS, in the order they are applied:
 	//
 	//   - a Key that is empty after trimming is ErrValidation;
+	//   - a Key that config.yaml owns (config.IsYamlOnlyKey: the startup
+	//     settings and the tracker secrets) is ErrValidation, whose message
+	//     names the key and config.yaml and never the value. This table is
+	//     replicated by `bd dolt push`, so such a key must never become a row
+	//     in it (#7559); `bd config set` writes it to config.yaml instead;
 	//   - a Key naming the issue prefix, in either spelling, is ErrValidation.
 	//     The prefix is owned by `bd init --prefix`, `bd bootstrap` and
 	//     `bd rename-prefix`, each of which does work this plane cannot:

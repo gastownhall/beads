@@ -88,7 +88,8 @@ no linter enforces it).
   call the Cobra methods in `cobraParallelUnsafeMethods`; drop `t.Parallel()`
   or serialize the call under `stdioMutex`.
 - `TestCorpusGolden` (`protocol/`) — no unreviewed change to the `--json`
-  wire shapes.
+  wire shapes, or to the audit events and Dolt commit counts
+  (`protocol/testdata/corpus_commits.golden`) of the native-fix captures.
 - `TestCommandTreeGolden` and `TestCommandHelpGolden` — no unreviewed change
   to the command tree (every command and flag, hidden ones included) or to
   the pinned `--help` output in `testdata/command_tree/`.

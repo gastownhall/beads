@@ -1,7 +1,7 @@
 # Historical release catalog
 
 `../release-catalog.json` pins the exact historical release universe (v0.9.1
-through v1.3.1; the v1.2 upgrade census plus the releases since): 127 stable
+through v1.3.4; the v1.2 upgrade census plus the releases since): 130 stable
 module versions authenticated through the Go
 proxy and SumDB, each with module / `go.mod` / source-zip / proxy-origin
 provenance, explicit proxy prerelease and repository-only tag exclusions, and
