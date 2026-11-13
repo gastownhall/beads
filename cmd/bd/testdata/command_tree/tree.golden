@@ -282,7 +282,7 @@ bd assign
     |
     | Examples:
     |   bd assign bd-123 alice
-    |   bd assign bd-123 ""      # unassign
+    |   bd assign bd-123 ""      # unassign ("-" or whitespace-only text also unassigns)
   flag --force type=bool default="false" usage="Allow overwriting another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim)"
   flag --if-revision type=string default="" usage="Apply the write only if the issue's current revision equals this value (the decimal int64 from `bd show --json`'s \"revision\" field). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures)."
 
@@ -471,6 +471,7 @@ bd batch
     |   #comment  (blank lines and '# ...' comments are ignored)
     |
     | Supported 'update' keys: status, priority, title, assignee, force
+    | 'assignee=', 'assignee=-' and a whitespace-only assignee clear the assignee.
     | Supported dependency types: see 'bd dep add --help' (default: blocks)
     |
     | 'force' is not a field. An update whose status moves the issue into closed
@@ -7248,7 +7249,7 @@ bd update
   flag --add-label -l type=stringSlice default="[]" usage="Add labels (repeatable); -l matches bd create -l"
   flag --allow-empty-description type=bool default="false" usage="Allow empty description replacement when reading from stdin or file"
   flag --append-notes type=string default="" annotations={cobra_annotation_mutually_exclusive=["clear-notes append-notes"]} usage="Append to existing notes (with newline separator)"
-  flag --assignee -a type=string default="" usage="Assignee"
+  flag --assignee -a type=string default="" usage="Assignee ('', '-' or whitespace-only text unassigns)"
   flag --await-id type=string default="" usage="Set gate await_id (e.g., GitHub run ID for gh:run gates)"
   flag --body type=string default="" hidden annotations={cobra_annotation_mutually_exclusive=["stdin body"]} usage="Alias for --description (GitHub CLI convention)"
   flag --body-file type=string default="" annotations={cobra_annotation_mutually_exclusive=["stdin body-file"]} usage="Read description from file (use - for stdin)"

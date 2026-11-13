@@ -1281,6 +1281,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd update --assignee -`, `bd assign <id> -`, `bd batch`'s
+  `update <id> assignee=-` and their whitespace-only forms now unassign the
+  issue** (#8203, reported and first fixed by @atbrace). They stored the
+  literal `-` or spaces, which every emptiness check (claim,
+  `bd ready --unassigned`, the reassign fence) reads as assigned, so an issue
+  meant to go back to the pool stayed held. A `-`, alone or with spaces
+  around it, and whitespace-only text now clear the assignee exactly as
+  `--assignee ''` does; any other value is stored verbatim, and
+  `--if-assignee` still matches literally. `bd create` keeps storing the
+  value as given. Issues that already hold a `-` or blank assignee keep it;
+  clear one with `bd update <id> --if-assignee '<stored value>' --assignee ''`.
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
