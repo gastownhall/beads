@@ -2,6 +2,7 @@ package versioncheck
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,7 +12,11 @@ import (
 
 func TestRepositoryReleaseVersionsMatch(t *testing.T) {
 	root := bazeltest.RepoRoot(t)
-	report, err := Check(root)
+	var includeHook hookPathFilter
+	if !bazeltest.IsBazel() {
+		includeHook = repositoryTrackedHookFilter(t, root)
+	}
+	report, err := check(root, includeHook)
 	if err != nil {
 		t.Fatalf("repository release metadata is inconsistent: %v", err)
 	}
@@ -28,6 +33,13 @@ func TestRepositoryReleaseVersionsMatch(t *testing.T) {
 			continue
 		}
 		path := filepath.Join(root, ".githooks", entry.Name())
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if includeHook != nil && !includeHook(filepath.ToSlash(relative)) {
+			continue
+		}
 		info, statErr := os.Stat(path)
 		if statErr != nil {
 			t.Fatal(statErr)
@@ -49,6 +61,29 @@ func TestRepositoryReleaseVersionsMatch(t *testing.T) {
 			len(report.Sources),
 			13+expectedHookMarkers,
 		)
+	}
+}
+
+func repositoryTrackedHookFilter(t *testing.T, root string) hookPathFilter {
+	t.Helper()
+	output, err := exec.Command(
+		"git", "-C", root, "ls-files", "-z", "--", ".githooks",
+	).Output()
+	if err != nil {
+		t.Fatalf("enumerate tracked hook inputs: %v", err)
+	}
+	tracked := make(map[string]bool)
+	for _, path := range strings.Split(string(output), "\x00") {
+		if path == "" {
+			continue
+		}
+		path = filepath.ToSlash(filepath.Clean(path))
+		if filepath.ToSlash(filepath.Dir(path)) == ".githooks" {
+			tracked[path] = true
+		}
+	}
+	return func(relativePath string) bool {
+		return tracked[filepath.ToSlash(relativePath)]
 	}
 }
 
@@ -207,6 +242,41 @@ func TestCheckDiscoversAdditionalTrackedHookFiles(t *testing.T) {
 		if !found {
 			t.Fatalf("additional tracked hook result %q not reported", description)
 		}
+	}
+}
+
+func TestCheckHookFilterIgnoresDebrisButChecksMaintainedHooks(t *testing.T) {
+	root := writeFixture(t, "1.1.0")
+	debris := filepath.Join(root, ".githooks", "pre-push.orig")
+	if err := os.WriteFile(debris, []byte("editor backup without markers\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	maintainedOnly := func(path string) bool {
+		return path == ".githooks/pre-push"
+	}
+	report, err := check(root, maintainedOnly)
+	if err != nil {
+		t.Fatalf("untracked hook debris failed filtered check: %v", err)
+	}
+	if report.CheckedHookMarkers != 2 {
+		t.Fatalf("checked hook markers = %d, want 2", report.CheckedHookMarkers)
+	}
+
+	maintained := filepath.Join(root, ".githooks", "pre-push")
+	if err := os.WriteFile(
+		maintained,
+		[]byte("# --- BEGIN BEADS INTEGRATION v9.9.9 ---\n"+
+			"body\n# --- END BEADS INTEGRATION v1.1.0 ---\n"),
+		0o755,
+	); err != nil {
+		t.Fatal(err)
+	}
+	_, err = check(root, maintainedOnly)
+	if err == nil {
+		t.Fatal("corrupt maintained hook marker unexpectedly passed")
+	}
+	if want := ".githooks/pre-push BEGIN marker: 9.9.9 (expected 1.1.0)"; !strings.Contains(err.Error(), want) {
+		t.Fatalf("error = %q, want %q", err, want)
 	}
 }
 
