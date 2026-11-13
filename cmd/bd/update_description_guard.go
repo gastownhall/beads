@@ -67,6 +67,9 @@ func validateDescriptionUpdate(cmd *cobra.Command, description string, descChang
 		return nil
 	}
 
+	if updateContract {
+		return fmt.Errorf("empty description from stdin/file requires --allow-empty-description (or use --clear-description to clear it deliberately)")
+	}
 	return fmt.Errorf("empty description from stdin/file requires --allow-empty-description (or use an explicit inline empty value like --description \"\")")
 }
 
