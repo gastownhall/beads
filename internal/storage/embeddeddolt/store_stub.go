@@ -31,8 +31,10 @@ func OpenForPreviewCommand(_ context.Context, _, _, _ string) (*EmbeddedDoltStor
 	return nil, errNoCGO
 }
 
-// OpenForReadOnlyCommand returns an error when CGO is not enabled.
-func OpenForReadOnlyCommand(_ context.Context, _, _, _ string) (*EmbeddedDoltStore, error) {
+// OpenForReadOnlyCommand returns an error when CGO is not enabled. The
+// frozen flag (the invocation's MIGRATION-FREEZE reading, #7634) is unused
+// on this stub path.
+func OpenForReadOnlyCommand(_ context.Context, _, _, _ string, _ bool) (*EmbeddedDoltStore, error) {
 	return nil, errNoCGO
 }
 

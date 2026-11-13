@@ -29,7 +29,7 @@ type cacheEntry struct {
 // This prevents redundant engine initializations when multiple code paths open
 // connectors against the same data directory in the same process.
 func Open(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
-	return openCached(ctx, beadsDir, database, branch, openStrict)
+	return openCached(ctx, beadsDir, database, branch, openStrict, false)
 }
 
 // OpenForReadOnlyCommand opens like Open, except that a #4259 remote-migrate
@@ -37,9 +37,13 @@ func Open(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDolt
 // failing the open (bd-578h9.5): the gate exists to stop in-place migration,
 // not reads, and server mode's read-only opens already skip migration. The
 // returned store is otherwise a normal writable store (read-only commands
-// can still write incidentally, e.g. the post-command autocommit net).
-func OpenForReadOnlyCommand(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
-	return openCached(ctx, beadsDir, database, branch, openReadOnlyCommand)
+// can still write incidentally, e.g. the post-command autocommit net) —
+// except that frozen, the invocation's MIGRATION-FREEZE reading, makes its
+// lazy defer-wake sweep stand down: that sweep is a write a freeze forbids,
+// so a classified read during a freeze answers from current state and the
+// first ready-front read after the thaw performs the wake (#7634).
+func OpenForReadOnlyCommand(ctx context.Context, beadsDir, database, branch string, frozen bool) (*EmbeddedDoltStore, error) {
+	return openCached(ctx, beadsDir, database, branch, openReadOnlyCommand, frozen)
 }
 
 // OpenForWorkingSetReconcile opens like Open, except that a schema.
@@ -53,7 +57,7 @@ func OpenForReadOnlyCommand(ctx context.Context, beadsDir, database, branch stri
 // (toleratesConsentRefusal). The returned store is otherwise a normal
 // writable store.
 func OpenForWorkingSetReconcile(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
-	return openCached(ctx, beadsDir, database, branch, openWorkingSetReconcile)
+	return openCached(ctx, beadsDir, database, branch, openWorkingSetReconcile, false)
 }
 
 // OpenForRemoteSync opens like Open, except that the #6575 data-behind
@@ -66,10 +70,10 @@ func OpenForWorkingSetReconcile(ctx context.Context, beadsDir, database, branch 
 // exactly as they fail a strict one. The returned store is otherwise a normal
 // writable store.
 func OpenForRemoteSync(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
-	return openCached(ctx, beadsDir, database, branch, openRemoteSync)
+	return openCached(ctx, beadsDir, database, branch, openRemoteSync, false)
 }
 
-func openCached(ctx context.Context, beadsDir, database, branch string, intent openIntent) (*EmbeddedDoltStore, error) {
+func openCached(ctx context.Context, beadsDir, database, branch string, intent openIntent, frozen bool) (*EmbeddedDoltStore, error) {
 	key, err := cacheKey(beadsDir)
 	if err != nil {
 		return nil, err
@@ -90,6 +94,19 @@ func openCached(ctx context.Context, beadsDir, database, branch string, intent o
 		// different intent on a cache hit would have to plumb intent through
 		// here instead of silently reusing the first store's; it is load-
 		// bearing that no current caller does.
+		//
+		// The frozen flag (the invocation's MIGRATION-FREEZE reading, #7634)
+		// rides the same invariant: the root CLI open resolves one
+		// classification and one freeze reading per invocation, the
+		// auto-migration store above is closed before the root open, and
+		// autoMigrateOnVersionBump is skipped entirely under a freeze — so a
+		// single process never holds two opens of one data directory with
+		// different freeze values either. This is NOT a general guarantee
+		// for simultaneous mixed-policy opens of one directory: the cache
+		// reuses the first store, frozen or not. Tests that need a different
+		// freeze value must close every reference before reopening; no cache
+		// key change or mutable setter is needed for the CLI defect this
+		// fixes.
 		entry.refCount++
 		cacheMu.Unlock()
 		return entry.store, nil
@@ -97,7 +114,7 @@ func openCached(ctx context.Context, beadsDir, database, branch string, intent o
 	cacheMu.Unlock()
 
 	// Slow path: create a new store outside the lock.
-	s, err := newStore(ctx, beadsDir, database, branch, intent)
+	s, err := newStore(ctx, beadsDir, database, branch, intent, frozen)
 	if err != nil {
 		return nil, err
 	}

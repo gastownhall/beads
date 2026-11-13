@@ -30,7 +30,18 @@ var _ storage.IssuesWithConfigSearcher = (*EmbeddedDoltStore)(nil)
 // mirroring the tip-metadata write's tolerance), anything else warns. It runs
 // OUTSIDE the read connections below because withConn(ctx, false, …) always
 // rolls back.
+//
+// A store opened frozen (a classified read on a MIGRATION-FREEZE workspace,
+// #7634) skips the sweep before any transaction: the sweep is a write, and
+// the freeze contract forbids writes after reads. Silently, like the
+// --readonly skip above — the read it precedes still answers from current
+// state, and the first ready-front read after the thaw performs the wake.
+// This one guard covers every entry point that sweeps (the ready reads
+// below, the counts, the advisory decorator, and the claim path's sweep).
 func (s *EmbeddedDoltStore) wakeExpiredDefers(ctx context.Context) {
+	if s.frozen {
+		return
+	}
 	err := s.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (issueops.ChangedTables, string, error) {
 		woke, err := issueops.WakeExpiredDefersInTx(ctx, tx)
 		if err != nil {

@@ -86,6 +86,13 @@ type EmbeddedDoltStore struct {
 	// (e.g. the post-command autocommit net, or the commit itself) - only the
 	// migration step is skipped.
 	intent openIntent
+	// frozen marks a store opened for a classified read on a workspace whose
+	// MIGRATION-FREEZE is active (#7634). Unlike readOnly the store is still
+	// writable underneath — but its lazy defer-wake sweep is a write, so the
+	// sweep stands down (see wakeExpiredDefers) and the first ready-front
+	// read after the thaw performs the wake. Fixed at construction; see
+	// openCached for why no per-open mutation is supported.
+	frozen bool
 }
 
 // lenientSharedGateGuidance is the blunt migrate-or-adopt block shared by the
@@ -319,7 +326,7 @@ func (s *EmbeddedDoltStore) IsClosed() bool {
 // The dolthub/driver/v2 handles its own concurrency internally. File-level locking
 // is only used during bd init (via util.TryLock in the init command) to protect
 // one-time initialization steps — the store itself does not hold any lock.
-func newStore(ctx context.Context, beadsDir, database, branch string, intent openIntent) (*EmbeddedDoltStore, error) {
+func newStore(ctx context.Context, beadsDir, database, branch string, intent openIntent, frozen bool) (*EmbeddedDoltStore, error) {
 	if database == "" {
 		return nil, fmt.Errorf("embeddeddolt: database name must not be empty (caller should default to %q)", "beads")
 	}
@@ -342,6 +349,7 @@ func newStore(ctx context.Context, beadsDir, database, branch string, intent ope
 		database: database,
 		branch:   branch,
 		intent:   intent,
+		frozen:   frozen,
 	}
 
 	if err := s.initSchema(ctx); err != nil {

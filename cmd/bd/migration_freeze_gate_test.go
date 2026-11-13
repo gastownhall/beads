@@ -1150,3 +1150,52 @@ func TestAutoMigrateStillRunsWithoutFreeze(t *testing.T) {
 		t.Errorf("expected autoMigrateOnVersionBump to run (an 'auto-migrate:' debug log line) when not frozen, got none:\nstderr:\n%s", stderr)
 	}
 }
+
+// TestReadyDoesNotWakeDefersDuringMigrationFreeze (GH#7634): bd ready is a
+// classified read and may run during a freeze, but its lazy defer-wake sweep
+// is a write. With the marker set, an expired dated defer must stay deferred.
+func TestReadyDoesNotWakeDefersDuringMigrationFreeze(t *testing.T) {
+	bd, dir := setupMigrationFreezeWorkspace(t)
+
+	stdout, stderr, code := runBDMigrationFreeze(t, bd, dir, "create", "expired snooze", "-p", "2", "--json")
+	if code != 0 {
+		t.Fatalf("setup bd create failed (exit %d):\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	var issue struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &issue); err != nil || issue.ID == "" {
+		t.Fatalf("parsing create --json output: %v\n%s", err, stdout)
+	}
+	// A past date leaves status=deferred with an already-expired defer_until.
+	if stdout, stderr, code = runBDMigrationFreeze(t, bd, dir, "defer", issue.ID, "--until", "2020-01-01"); code != 0 {
+		t.Fatalf("setup bd defer failed (exit %d):\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+
+	status := func() string {
+		t.Helper()
+		stdout, stderr, code := runBDFrozen(t, bd, dir, "show", issue.ID, "--json")
+		if code != 0 {
+			t.Fatalf("bd show failed (exit %d):\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+		var rows []struct {
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal([]byte(stdout), &rows); err != nil || len(rows) == 0 {
+			t.Fatalf("parsing show --json output: %v\n%s", err, stdout)
+		}
+		return rows[0].Status
+	}
+
+	writeFreezeMarker(t, dir, "migrator", "dolt v2 migration")
+	if got := status(); got != "deferred" {
+		t.Fatalf("precondition: status = %q, want deferred", got)
+	}
+
+	if stdout, stderr, code = runBDFrozen(t, bd, dir, "ready", "--json"); code != 0 {
+		t.Fatalf("bd ready during freeze: exit %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if got := status(); got != "deferred" {
+		t.Errorf("status = %q after bd ready during a migration freeze, want deferred: the defer-wake sweep wrote while frozen", got)
+	}
+}

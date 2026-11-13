@@ -2125,6 +2125,11 @@ var rootCmd = &cobra.Command{
 			// writable underneath, so the lazy defer-wake sweep may still run
 			// (be-vbhpf), but a freeze forbids that write (bd-6zf0q5).
 			ClassifiedRead: classifiedReadOpen(policy.readOnly, readonlyMode, previewMode, commandFreeze.Frozen()),
+			// The same single freeze reading, for the embedded classified-read
+			// open: the store it opens is writable underneath, so its
+			// defer-wake sweep stands down while the workspace is frozen
+			// (#7634). Server mode does not consume this yet (#7633).
+			MigrationFrozen: commandFreeze.Frozen(),
 			// A read-only or gateway open does not migrate, so a schema too
 			// old for this binary's issue reads is refused at open instead of
 			// failing each read on an unknown column. Not for a preview,

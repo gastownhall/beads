@@ -93,7 +93,11 @@ func TestEmbeddedMigrateConsent_BehindAndDirtyWorkingSetReconcileRecovers(t *tes
 	}
 	before := refusalSnapshot(t, dataDir, "testdb")
 	refuses("Open", embeddeddolt.Open)
-	refuses("OpenForReadOnlyCommand", embeddeddolt.OpenForReadOnlyCommand)
+	refuses("OpenForReadOnlyCommand", func(ctx context.Context, beadsDir, database, branch string) (*embeddeddolt.EmbeddedDoltStore, error) {
+		// frozen=false: this adapter only pins the refusal; the freeze
+		// reading is irrelevant to a behind-database consent refusal.
+		return embeddeddolt.OpenForReadOnlyCommand(ctx, beadsDir, database, branch, false)
+	})
 	if after := refusalSnapshot(t, dataDir, "testdb"); after != before {
 		t.Fatalf("a refused open wrote to the database:\nbefore:\n%s\nafter:\n%s", before, after)
 	}

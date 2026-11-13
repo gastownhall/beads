@@ -425,6 +425,17 @@ type Config struct {
 	// such an open would make it eligible to sweep.
 	ClassifiedRead bool
 
+	// MigrationFrozen carries this invocation's resolved MIGRATION-FREEZE
+	// state (migration.Find, read once per invocation in cmd/bd) to the
+	// embedded classified-read open: a frozen workspace still answers its
+	// classified reads, but the lazy defer-wake sweep those reads otherwise
+	// perform is a write, and must not run until the freeze lifts (#7634).
+	// Only the embedded open consumes it today; dolt.New deliberately does
+	// not — server mode's freeze wiring is a separate work item (#7633).
+	// The zero value (unfrozen) is correct for every open that builds its
+	// own Config.
+	MigrationFrozen bool
+
 	// RequireReadableSchema makes an open that will not migrate the database
 	// (ReadOnly, or Gateway, whose server owns the schema) refuse one whose
 	// schema is behind this binary's and lacks a column the shared issue
