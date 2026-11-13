@@ -251,126 +251,258 @@ func detectPrefixes(issues []*types.Issue) map[string]int {
 	return prefixes
 }
 
-// issueSort is used for sorting issues by prefix and number
-type issueSort struct {
-	issue  *types.Issue
-	prefix string
-	number int
+// prefixRepairRename is one planned ID change of a --repair run.
+type prefixRepairRename struct {
+	OldID string `json:"old_id"`
+	NewID string `json:"new_id"`
 }
 
-// repairPrefixes consolidates multiple prefixes into a single target prefix
-// Issues with the correct prefix are left unchanged.
-// Issues with incorrect prefixes get new hash-based IDs.
-func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName string, targetPrefix string, issues []*types.Issue, prefixes map[string]int, dryRun bool) error {
+// prefixRepairCollision records a source family whose suffix-preserving
+// destination was taken, and the hash root the whole family moved to instead.
+type prefixRepairCollision struct {
+	OldRoot      string   `json:"old_root"`
+	WantedRoot   string   `json:"wanted_root"`
+	AssignedRoot string   `json:"assigned_root"`
+	Reason       string   `json:"reason"`
+	ConflictID   string   `json:"conflict_id,omitempty"`
+	IDs          []string `json:"ids"`
+}
 
-	// Separate issues into correct and incorrect prefix groups
-	var correctIssues []*types.Issue
-	var incorrectIssues []issueSort
+// Collision reasons reported by a --repair plan.
+const (
+	repairCollisionExists  = "exists"  // a live target ID already holds the wanted root namespace
+	repairCollisionClaimed = "claimed" // an earlier source family claimed the wanted root
+)
 
+// prefixRepairPlan is the complete, deterministic outcome of a --repair run,
+// computed before anything is written so a dry run and the real run agree.
+type prefixRepairPlan struct {
+	Renames    []prefixRepairRename
+	Collisions []prefixRepairCollision
+	Unchanged  int
+	// rootMap maps every old root (the ID before its first dot, including
+	// virtual roots of orphan children) to the root it was assigned.
+	rootMap map[string]string
+}
+
+// repairFamily is one old root and every source row under it: the root row
+// itself (when present) and its dotted descendants.
+type repairFamily struct {
+	prefix     string
+	oldRoot    string
+	rootSuffix string
+	members    []*types.Issue
+}
+
+// issueIDRoot returns id up to its first dot: the root of a dotted family.
+func issueIDRoot(id string) string {
+	if i := strings.Index(id, "."); i >= 0 {
+		return id[:i]
+	}
+	return id
+}
+
+// planPrefixRepair plans the consolidation of every ID onto targetPrefix.
+//
+// IDs already under targetPrefix+"-" are left alone. Every other ID keeps its
+// suffix: its source prefix is the longest of knownPrefixes it starts with
+// (falling back to the heuristic), so cre-db-c2a becomes kb-c2a and
+// taxdb-5su1.13 becomes kb-5su1.13. Rows are grouped by old root, orphan
+// children included, and a whole family moves together: when its wanted root
+// is already held by a live target ID or claimed by an earlier source family,
+// the family is re-rooted to a hash root with its dotted paths intact, and
+// the collision is recorded.
+func planPrefixRepair(targetPrefix string, issues []*types.Issue, knownPrefixes []string, actorName string) (*prefixRepairPlan, error) {
+	plan := &prefixRepairPlan{rootMap: make(map[string]string)}
+
+	// occupied maps a live target root namespace (child-only ones included)
+	// to the smallest live ID holding it.
+	occupied := make(map[string]string)
+	families := make(map[string]*repairFamily)
 	for _, issue := range issues {
-		prefix := utils.ExtractIssuePrefix(issue.ID)
-		number := utils.ExtractIssueNumber(issue.ID)
-
-		if prefix == targetPrefix {
-			correctIssues = append(correctIssues, issue)
-		} else {
-			incorrectIssues = append(incorrectIssues, issueSort{
-				issue:  issue,
-				prefix: prefix,
-				number: number,
-			})
+		id := issue.ID
+		if strings.HasPrefix(id, targetPrefix+"-") {
+			plan.Unchanged++
+			root := issueIDRoot(id)
+			if cur, ok := occupied[root]; !ok || utils.NaturalCompareIDs(id, cur) < 0 {
+				occupied[root] = id
+			}
+			continue
 		}
+		oldRoot := issueIDRoot(id)
+		fam, ok := families[oldRoot]
+		if !ok {
+			prefix := utils.ExtractIssuePrefixKnown(oldRoot, knownPrefixes)
+			suffix := oldRoot
+			if prefix != "" && strings.HasPrefix(oldRoot, prefix+"-") && len(oldRoot) > len(prefix)+1 {
+				suffix = oldRoot[len(prefix)+1:]
+			}
+			fam = &repairFamily{prefix: prefix, oldRoot: oldRoot, rootSuffix: suffix}
+			families[oldRoot] = fam
+		}
+		fam.members = append(fam.members, issue)
 	}
 
-	// Sort incorrect issues: first by prefix lexicographically, then by number
-	slices.SortFunc(incorrectIssues, func(a, b issueSort) int {
+	ordered := make([]*repairFamily, 0, len(families))
+	for _, fam := range families {
+		slices.SortFunc(fam.members, func(a, b *types.Issue) int {
+			return cmp.Or(utils.NaturalCompareIDs(a.ID, b.ID), cmp.Compare(a.ID, b.ID))
+		})
+		ordered = append(ordered, fam)
+	}
+	// Families sort by source prefix, then by root number as the repair always
+	// has (so its rename order is unchanged), then naturally by root.
+	slices.SortFunc(ordered, func(a, b *repairFamily) int {
 		return cmp.Or(
 			cmp.Compare(a.prefix, b.prefix),
-			cmp.Compare(a.number, b.number),
+			cmp.Compare(utils.ExtractIssueNumber(a.oldRoot), utils.ExtractIssueNumber(b.oldRoot)),
+			utils.NaturalCompareIDs(a.oldRoot, b.oldRoot),
+			cmp.Compare(a.oldRoot, b.oldRoot),
 		)
 	})
 
-	// Build a map of all renames for text replacement using hash IDs
-	// Track used IDs to avoid collisions within the batch
-	renameMap := make(map[string]string)
-	usedIDs := make(map[string]bool)
-
-	// Mark existing correct IDs as used
-	for _, issue := range correctIssues {
-		usedIDs[issue.ID] = true
+	// Pass 1: every family that can keep its suffix claims its wanted root, so
+	// natural destinations are reserved before any fallback is allocated.
+	claimed := make(map[string]string) // root -> old root that claimed it
+	var conflicted []*prefixRepairCollision
+	conflictOf := make(map[string]*prefixRepairCollision)
+	for _, fam := range ordered {
+		wanted := targetPrefix + "-" + fam.rootSuffix
+		var c *prefixRepairCollision
+		if live, ok := occupied[wanted]; ok {
+			c = &prefixRepairCollision{Reason: repairCollisionExists, ConflictID: live}
+		} else if owner, ok := claimed[wanted]; ok {
+			c = &prefixRepairCollision{Reason: repairCollisionClaimed, ConflictID: owner}
+		}
+		if c == nil {
+			claimed[wanted] = fam.oldRoot
+			plan.rootMap[fam.oldRoot] = wanted
+			continue
+		}
+		c.OldRoot, c.WantedRoot = fam.oldRoot, wanted
+		conflicted = append(conflicted, c)
+		conflictOf[fam.oldRoot] = c
 	}
 
-	// Generate hash IDs for all incorrect issues
-	for _, is := range incorrectIssues {
-		newID, err := generateRepairHashID(targetPrefix, is.issue, actorName, usedIDs)
-		if err != nil {
-			return fmt.Errorf("failed to generate hash ID for %s: %w", is.issue.ID, err)
+	// Pass 2: each conflicting family moves, whole, to a fresh hash root.
+	rejected := make(map[string]bool)
+	for _, fam := range ordered {
+		c, ok := conflictOf[fam.oldRoot]
+		if !ok {
+			continue
 		}
-		renameMap[is.issue.ID] = newID
-		usedIDs[newID] = true
+		seed := fam.members[0] // the root row, or the first orphan member
+		assigned := ""
+		for nonce := 0; nonce < repairHashAttempts; nonce++ {
+			cand := repairHashRoot(targetPrefix, seed, actorName, nonce)
+			if _, live := occupied[cand]; live || rejected[cand] {
+				rejected[cand] = true
+				continue
+			}
+			if _, taken := claimed[cand]; taken {
+				rejected[cand] = true
+				continue
+			}
+			assigned = cand
+			break
+		}
+		if assigned == "" {
+			return nil, fmt.Errorf("failed to allocate a unique root for %s after %d attempts", fam.oldRoot, repairHashAttempts)
+		}
+		claimed[assigned] = fam.oldRoot
+		plan.rootMap[fam.oldRoot] = assigned
+		c.AssignedRoot = assigned
+	}
+
+	for _, fam := range ordered {
+		newRoot := plan.rootMap[fam.oldRoot]
+		var ids []string
+		for _, m := range fam.members {
+			plan.Renames = append(plan.Renames, prefixRepairRename{OldID: m.ID, NewID: newRoot + strings.TrimPrefix(m.ID, fam.oldRoot)})
+			ids = append(ids, m.ID)
+		}
+		if c, ok := conflictOf[fam.oldRoot]; ok {
+			c.IDs = ids
+		}
+	}
+	for _, c := range conflicted {
+		plan.Collisions = append(plan.Collisions, *c)
+	}
+	return plan, nil
+}
+
+// repairPrefixes consolidates multiple prefixes into a single target prefix.
+// Issues already under the target prefix are left unchanged. Every other
+// issue keeps its suffix (see planPrefixRepair); a family whose destination
+// is taken moves to a hash root and is reported.
+func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName string, targetPrefix string, issues []*types.Issue, prefixes map[string]int, dryRun bool) error {
+	known := make([]string, 0, len(prefixes))
+	for p := range prefixes {
+		known = append(known, p)
+	}
+	plan, err := planPrefixRepair(targetPrefix, issues, known, actorName)
+	if err != nil {
+		return err
+	}
+	byID := make(map[string]*types.Issue, len(issues))
+	for _, issue := range issues {
+		byID[issue.ID] = issue
 	}
 
 	if dryRun {
-		fmt.Printf("DRY RUN: Would repair %d issues with incorrect prefixes\n\n", len(incorrectIssues))
-		fmt.Printf("Issues with correct prefix (%s): %d\n", ui.RenderAccent(targetPrefix), len(correctIssues))
-		fmt.Printf("Issues to repair: %d\n\n", len(incorrectIssues))
+		fmt.Printf("DRY RUN: Would repair %d issues with incorrect prefixes\n\n", len(plan.Renames))
+		fmt.Printf("Issues with correct prefix (%s): %d\n", ui.RenderAccent(targetPrefix), plan.Unchanged)
+		fmt.Printf("Issues to repair: %d\n\n", len(plan.Renames))
 
 		fmt.Printf("Planned renames (showing first 10):\n")
-		for i, is := range incorrectIssues {
+		for i, r := range plan.Renames {
 			if i >= 10 {
-				fmt.Printf("... and %d more\n", len(incorrectIssues)-10)
+				fmt.Printf("... and %d more\n", len(plan.Renames)-10)
 				break
 			}
-			oldID := is.issue.ID
-			newID := renameMap[oldID]
-			fmt.Printf("  %s -> %s\n", ui.RenderWarn(oldID), ui.RenderAccent(newID))
+			fmt.Printf("  %s -> %s\n", ui.RenderWarn(r.OldID), ui.RenderAccent(r.NewID))
 		}
+		printRepairCollisions(plan.Collisions)
 		return nil
 	}
 
 	// Perform the repairs
 	fmt.Printf("Repairing database with multiple prefixes...\n")
-	fmt.Printf("  Issues with correct prefix (%s): %d\n", ui.RenderAccent(targetPrefix), len(correctIssues))
-	fmt.Printf("  Issues to repair: %d\n\n", len(incorrectIssues))
+	fmt.Printf("  Issues with correct prefix (%s): %d\n", ui.RenderAccent(targetPrefix), plan.Unchanged)
+	fmt.Printf("  Issues to repair: %d\n\n", len(plan.Renames))
 
-	// Pattern to match any issue ID reference in text (both hash and sequential IDs)
-	oldPrefixPattern := regexp.MustCompile(`\b[a-z][a-z0-9-]*-[a-z0-9]+\b`)
+	// Pattern to match any issue ID reference in text (both hash and
+	// sequential IDs). It stops at a dot, so a reference to a dotted child
+	// matches its root and keeps its path when the root is mapped.
+	idPattern := regexp.MustCompile(`\b[a-z][a-z0-9-]*-[a-z0-9]+\b`)
+	replaceFunc := func(match string) string {
+		if newRoot, ok := plan.rootMap[match]; ok {
+			return newRoot
+		}
+		return match
+	}
 	gates := beadGatesByTarget(issues)
 
-	// Rename each issue
-	for _, is := range incorrectIssues {
-		oldID := is.issue.ID
-		newID := renameMap[oldID]
+	for _, r := range plan.Renames {
+		issue := byID[r.OldID]
 
-		// Apply text replacements in all issue fields
-		issue := is.issue
-
-		// Replace all issue IDs in text fields using the rename map
-		replaceFunc := func(match string) string {
-			if newID, ok := renameMap[match]; ok {
-				return newID
-			}
-			return match
-		}
-
-		issue.Title = oldPrefixPattern.ReplaceAllStringFunc(issue.Title, replaceFunc)
-		issue.Description = oldPrefixPattern.ReplaceAllStringFunc(issue.Description, replaceFunc)
+		issue.Title = idPattern.ReplaceAllStringFunc(issue.Title, replaceFunc)
+		issue.Description = idPattern.ReplaceAllStringFunc(issue.Description, replaceFunc)
 		if issue.Design != "" {
-			issue.Design = oldPrefixPattern.ReplaceAllStringFunc(issue.Design, replaceFunc)
+			issue.Design = idPattern.ReplaceAllStringFunc(issue.Design, replaceFunc)
 		}
 		if issue.AcceptanceCriteria != "" {
-			issue.AcceptanceCriteria = oldPrefixPattern.ReplaceAllStringFunc(issue.AcceptanceCriteria, replaceFunc)
+			issue.AcceptanceCriteria = idPattern.ReplaceAllStringFunc(issue.AcceptanceCriteria, replaceFunc)
 		}
 		if issue.Notes != "" {
-			issue.Notes = oldPrefixPattern.ReplaceAllStringFunc(issue.Notes, replaceFunc)
+			issue.Notes = idPattern.ReplaceAllStringFunc(issue.Notes, replaceFunc)
 		}
 
-		// Update the issue in the database
-		if err := renameIssueKeepingBeadGates(ctx, st, issue, newID, gates[oldID], actorName); err != nil {
-			return fmt.Errorf("failed to update issue %s -> %s: %w", oldID, newID, err)
+		if err := renameIssueKeepingBeadGates(ctx, st, issue, r.NewID, gates[r.OldID], actorName); err != nil {
+			return fmt.Errorf("failed to update issue %s -> %s: %w", r.OldID, r.NewID, err)
 		}
 
-		fmt.Printf("  Renamed %s -> %s\n", ui.RenderWarn(oldID), ui.RenderAccent(newID))
+		fmt.Printf("  Renamed %s -> %s\n", ui.RenderWarn(r.OldID), ui.RenderAccent(r.NewID))
 	}
 
 	// Set the new prefix in config
@@ -378,16 +510,17 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 		return fmt.Errorf("failed to update config: %w", err)
 	}
 
+	printRepairCollisions(plan.Collisions)
 	fmt.Printf("\n%s Successfully consolidated %d prefixes into %s\n",
 		ui.RenderPass("✓"), len(prefixes), ui.RenderAccent(targetPrefix))
-	fmt.Printf("  %d issues repaired, %d issues unchanged\n", len(incorrectIssues), len(correctIssues))
+	fmt.Printf("  %d issues repaired, %d issues unchanged\n", len(plan.Renames), plan.Unchanged)
 
 	if jsonOutput {
 		result := map[string]interface{}{
 			"target_prefix":    targetPrefix,
 			"prefixes_found":   len(prefixes),
-			"issues_repaired":  len(incorrectIssues),
-			"issues_unchanged": len(correctIssues),
+			"issues_repaired":  len(plan.Renames),
+			"issues_unchanged": plan.Unchanged,
 		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -395,6 +528,22 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 	}
 
 	return nil
+}
+
+// printRepairCollisions lists every family that could not keep its suffix.
+func printRepairCollisions(collisions []prefixRepairCollision) {
+	if len(collisions) == 0 {
+		return
+	}
+	fmt.Printf("\n%s %d families could not keep their suffix and moved to a hash root:\n", ui.RenderWarn("⚠"), len(collisions))
+	for _, c := range collisions {
+		conflict := c.Reason
+		if c.ConflictID != "" {
+			conflict += ": " + c.ConflictID
+		}
+		fmt.Printf("  %s (wanted %s, %s) -> %s  [%d ids]\n",
+			ui.RenderWarn(c.OldRoot), c.WantedRoot, conflict, ui.RenderAccent(c.AssignedRoot), len(c.IDs))
+	}
 }
 
 // rewriteIssueID maps oldID from oldPrefix to newPrefix. oldPrefix must be
@@ -468,43 +617,21 @@ func renamePrefixInDB(ctx context.Context, oldPrefix, newPrefix string, issues [
 	return nil
 }
 
-// generateRepairHashID generates a hash-based ID for an issue during repair.
-// Uses content hashing and checks usedIDs for batch collision avoidance.
-func generateRepairHashID(prefix string, issue *types.Issue, actor string, usedIDs map[string]bool) (string, error) {
-	// Generate a hash ID from issue content (same approach as generateHashIDForIssue)
+// repairHashAttempts bounds the hash roots tried for one conflicting family.
+const repairHashAttempts = 100
+
+// repairHashRoot derives the nonce-th candidate hash root for a family from
+// its seed row's content (same approach as generateHashIDForIssue).
+func repairHashRoot(prefix string, seed *types.Issue, actor string, nonce int) string {
 	content := fmt.Sprintf("%s|%s|%s|%d|%d",
-		issue.Title,
-		issue.Description,
+		seed.Title,
+		seed.Description,
 		actor,
-		issue.CreatedAt.UnixNano(),
-		0, // nonce
+		seed.CreatedAt.UnixNano(),
+		nonce,
 	)
 	h := sha256.Sum256([]byte(content))
-	shortHash := hex.EncodeToString(h[:4]) // 4 bytes = 8 hex chars
-	newID := fmt.Sprintf("%s-%s", prefix, shortHash)
-
-	// Check if this ID was already used in this batch
-	// If so, we need to generate a new one with a different nonce
-	attempts := 0
-	for usedIDs[newID] && attempts < 100 {
-		attempts++
-		content = fmt.Sprintf("%s|%s|%s|%d|%d",
-			issue.Title,
-			issue.Description,
-			actor,
-			issue.CreatedAt.UnixNano(),
-			attempts,
-		)
-		h = sha256.Sum256([]byte(content))
-		shortHash = hex.EncodeToString(h[:4])
-		newID = fmt.Sprintf("%s-%s", prefix, shortHash)
-	}
-
-	if usedIDs[newID] {
-		return "", fmt.Errorf("failed to generate unique ID after %d attempts", attempts)
-	}
-
-	return newID, nil
+	return fmt.Sprintf("%s-%s", prefix, hex.EncodeToString(h[:4])) // 4 bytes = 8 hex chars
 }
 
 func init() {
