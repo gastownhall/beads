@@ -820,7 +820,8 @@ func RunDeleterRewritesReferencesInNeighbors(t *testing.T, ctx context.Context, 
 // actually cited. The shared rule in internal/types rejects those matches
 // symmetrically, and the scenarios below hold every wiring to it, including
 // the shapes a partial fix gets wrong: either request order, a cascade's
-// sorted ancestor-first expansion.
+// sorted ancestor-first expansion, citations sharing a separator byte across
+// all four rewritten fields.
 //
 // Each scenario seeds an explicit root/child/grandchild chain with real
 // parent-child edges — a dotted id alone creates no dependency, so without
@@ -928,6 +929,40 @@ func RunDeleterRewritesOnlyTheDeletedIDInAHierarchy(t *testing.T, ctx context.Co
 	if result.ReferencesUpdated != 1 {
 		t.Errorf("hier3: ReferencesUpdated = %d, want 1 — the blocker is the one surviving row with text to change", result.ReferencesUpdated)
 	}
+
+	// Every complete citation across all four rewritten fields: standalone,
+	// punctuated, and two citations sharing their one separator byte. The row
+	// counts once, however many fields changed.
+	target := deleterSeedIssue(t, ctx, fixture, "hier4", "target")
+	neighbor = deleterIssue(fixture, "hier4", "neighbor", false)
+	neighbor.Description = target + " " + target + " and " + target + "," + target
+	neighbor.Notes = "see (" + target + "); also " + target + "."
+	neighbor.Design = target + "\n" + target
+	neighbor.AcceptanceCriteria = "done: " + target
+	deleterSeed(t, ctx, fixture, neighbor)
+	deleterAddEdge(t, ctx, fixture, neighbor.ID, target)
+
+	result = deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
+		IDs:   []string{target},
+		Force: true,
+		Actor: "deleter-contract",
+	})
+	marker := "[deleted:" + target + "]"
+	for _, field := range []struct{ column, want string }{
+		{"description", marker + " " + marker + " and " + marker + "," + marker},
+		{"notes", "see (" + marker + "); also " + marker + "."},
+		{"design", marker + "\n" + marker},
+		{"acceptance_criteria", "done: " + marker},
+	} {
+		if got := deleterText(t, ctx, fixture, neighbor.ID, field.column); got != field.want {
+			t.Errorf("hier4: neighbor %s = %q, want %q — every complete citation marks and the separator bytes survive",
+				field.column, got, field.want)
+		}
+	}
+	if result.ReferencesUpdated != 1 {
+		t.Errorf("hier4: ReferencesUpdated = %d, want 1 — four changed fields are one changed row", result.ReferencesUpdated)
+	}
+	deleterAssertIssueRows(t, ctx, fixture, 1, neighbor.ID)
 }
 
 // RunDeleterAttributesTheRewriteToTheActor pins the one place a deletion's
