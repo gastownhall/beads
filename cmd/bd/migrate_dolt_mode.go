@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -164,7 +165,7 @@ func saveMigrateJournal(beadsDir string, j *migrateJournal) error {
 	if err != nil {
 		return fmt.Errorf("syncing %s directory: %w", migrateJournalFileName, err)
 	}
-	if err = d.Sync(); err != nil {
+	if err = syncMigrateJournalDir(runtime.GOOS, d); err != nil {
 		_ = d.Close()
 		return fmt.Errorf("syncing %s directory: %w", migrateJournalFileName, err)
 	}
@@ -172,6 +173,18 @@ func saveMigrateJournal(beadsDir string, j *migrateJournal) error {
 		return fmt.Errorf("closing %s directory: %w", migrateJournalFileName, err)
 	}
 	return nil
+}
+
+// syncMigrateJournalDir flushes the journal's containing directory so a rename
+// or removal reaches disk. Windows cannot Sync a directory handle opened by
+// os.Open (Access is denied), so it skips only that flush; the journal's
+// temporary file is still synced before its rename. This makes no
+// power-loss guarantee for the directory entry on Windows.
+func syncMigrateJournalDir(goos string, dir *os.File) error {
+	if goos == "windows" {
+		return nil
+	}
+	return dir.Sync()
 }
 
 func removeMigrateJournal(beadsDir string) error {
