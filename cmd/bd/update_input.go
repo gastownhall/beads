@@ -44,6 +44,20 @@ type updateInput struct {
 	force bool
 }
 
+// normalizeAssigneeInput folds the hidden-empty spellings of an assignee
+// value given to update, assign or batch (bd-wkcfuz) into the "" clear
+// sentinel that `--assignee ""` already uses: a bare "-" and whitespace-only
+// text. Stored verbatim, both read as ASSIGNED to every emptiness check
+// (claim, ready --unassigned, the transfer fence), so a bead meant to go back
+// to the pool stayed hooked. Every other value passes through byte-for-byte,
+// a spaced dash (" - ") and spaced names included.
+func normalizeAssigneeInput(v string) string {
+	if v == "-" || strings.TrimSpace(v) == "" {
+		return ""
+	}
+	return v
+}
+
 func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, error) {
 	in := &updateInput{fields: map[string]any{}}
 
@@ -81,7 +95,7 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 	}
 	if cmd.Flags().Changed("assignee") {
 		assignee, _ := cmd.Flags().GetString("assignee")
-		in.fields["assignee"] = assignee
+		in.fields["assignee"] = normalizeAssigneeInput(assignee)
 	}
 	in.force, _ = cmd.Flags().GetBool("force")
 	description, descChanged, err := getDescriptionFlag(cmd)
