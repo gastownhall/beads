@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -25,6 +26,8 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("ExplicitIDRequiresConfiguredPrefixUnlessForced", s.useCaseExplicitIDPrefixGuard)
 	s.Run("CreateOnlyRefusesOccupiedID", s.useCaseCreateOnlyRefusesOccupiedID)
 	s.Run("CreateAttachesNormalizedComments", s.useCaseCreateAttachesNormalizedComments)
+	s.Run("CounterModeJumpsPastHeldIDs", s.useCaseMintCounterJumpsPastHeldIDs)
+	s.Run("CounterModeFreeNextValueStaysSequential", s.useCaseMintCounterFreeNextValueStaysSequential)
 }
 
 func (s *testSuite) issueUseCase() domain.IssueUseCase {
@@ -887,4 +890,112 @@ func (s *testSuite) applyGraphWispRouting() {
 	s.Equal(res.IDs["p"], wispDeps[0].dependsOnID)
 	s.Equal("depends_on_wisp_id", wispDeps[0].targetColumn(),
 		"wisp-target dep must use depends_on_wisp_id, got %+v", wispDeps[0])
+}
+
+// counterLastID reads issue_counter's last_id for prefix.
+func (s *testSuite) counterLastID(prefix string) int {
+	var last int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT last_id FROM issue_counter WHERE prefix = ?", prefix).Scan(&last))
+	return last
+}
+
+// planeTitles returns the title of every row holding id, keyed by table.
+func (s *testSuite) planeTitles(id string) map[string]string {
+	out := map[string]string{}
+	for _, table := range []string{"issues", "wisps"} {
+		var title string
+		//nolint:gosec // G201: table is one of two hardcoded constants
+		err := s.Runner().QueryRowContext(s.Ctx(),
+			"SELECT title FROM "+table+" WHERE id = ?", id).Scan(&title)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		s.Require().NoError(err)
+		out[table] = title
+	}
+	return out
+}
+
+// mintCounterIssue creates a top-level issue with no id and CreateOnly unset,
+// the shape the quick, todo, gate and batch proxied servers send.
+func (s *testSuite) mintCounterIssue(uc domain.IssueUseCase, title string) string {
+	res, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: title, IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+	return res.Issue.ID
+}
+
+// holdExplicit creates id as an explicit, non-CreateOnly create (the import
+// shape) in the named plane. Explicit creates never move issue_counter.
+func (s *testSuite) holdExplicit(uc domain.IssueUseCase, id, title string, wisp bool) {
+	params := domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: title, IssueType: types.TypeTask, Priority: 2, Ephemeral: wisp},
+		ExplicitID: id,
+	}
+	var err error
+	if wisp {
+		_, err = uc.CreateWisp(s.Ctx(), params, "seeder")
+	} else {
+		_, err = uc.CreateIssue(s.Ctx(), params, "seeder")
+	}
+	s.Require().NoError(err, "hold %s", id)
+}
+
+// useCaseMintCounterJumpsPastHeldIDs pins bd-wnp679 AC-1: an explicit create
+// that sits ahead of a LAGGING counter (initialized before the explicit rows
+// existed, so seeding never saw them) is neither overwritten by the next
+// counter mint nor twinned in the other plane. The first held candidate makes
+// the mint advance the counter past every held numeric id once, so it lands
+// past the highest holder, not merely on the first gap.
+func (s *testSuite) useCaseMintCounterJumpsPastHeldIDs() {
+	for _, tc := range []struct {
+		name           string
+		prefix         string
+		twoWisp, fourW bool
+	}{
+		{name: "IssuesHoldBoth", prefix: "lagI"},
+		{name: "WispsHoldBoth", prefix: "lagW", twoWisp: true, fourW: true},
+		{name: "AcrossPlanes", prefix: "lagX", fourW: true},
+	} {
+		s.Run(tc.name, func() {
+			s.resetMintConfig(tc.prefix, "counter")
+			uc := s.issueUseCase()
+			p := func(n int) string { return fmt.Sprintf("%s-%d", tc.prefix, n) }
+
+			s.Require().Equal(p(1), s.mintCounterIssue(uc, "minted one"))
+			s.holdExplicit(uc, p(2), "holder two", tc.twoWisp)
+			s.holdExplicit(uc, p(4), "holder four", tc.fourW)
+			s.Require().Equal(1, s.counterLastID(tc.prefix), "explicit creates must leave the counter lagging at 1")
+
+			minted := s.mintCounterIssue(uc, "minted after holders")
+			s.Equal(p(5), minted, "counter mint must land past the highest held id")
+
+			plane := func(wisp bool) string {
+				if wisp {
+					return "wisps"
+				}
+				return "issues"
+			}
+			s.Equal(map[string]string{plane(tc.twoWisp): "holder two"}, s.planeTitles(p(2)),
+				"holder two must keep its one row, untouched")
+			s.Equal(map[string]string{plane(tc.fourW): "holder four"}, s.planeTitles(p(4)),
+				"holder four must keep its one row, untouched")
+			s.Equal(map[string]string{"issues": "minted after holders"}, s.planeTitles(minted),
+				"the minted id must exist in exactly one plane")
+		})
+	}
+}
+
+// useCaseMintCounterFreeNextValueStaysSequential pins the other half of
+// AC-1: a held id further ahead does not move the counter while the next
+// candidate is free, so ordinary minting stays sequential.
+func (s *testSuite) useCaseMintCounterFreeNextValueStaysSequential() {
+	s.resetMintConfig("seqF", "counter")
+	uc := s.issueUseCase()
+	s.Require().Equal("seqF-1", s.mintCounterIssue(uc, "one"))
+	s.holdExplicit(uc, "seqF-9", "held far ahead", false)
+	s.Equal("seqF-2", s.mintCounterIssue(uc, "two"))
+	s.Equal(2, s.counterLastID("seqF"))
 }
