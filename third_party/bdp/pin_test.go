@@ -22,7 +22,8 @@ import (
 )
 
 const hint = "regenerate with scripts/bdp-vendor.sh <bdp checkout> <tag>, or undo an accidental edit with " +
-	"`git checkout origin/main -- third_party/bdp`; never edit third_party/bdp by hand (engdocs/design/bdp.md)"
+	"`git restore --source=origin/main --staged --worktree -- third_party/bdp` and delete any untracked file " +
+	"under third_party/bdp/spec/; never edit third_party/bdp by hand (engdocs/design/bdp.md)"
 
 // pinRepository and pinSpecRevisionRule are the exact values
 // scripts/bdp-vendor.sh writes; keep them in step with REPOSITORY and
@@ -34,8 +35,8 @@ const (
 )
 
 // pinKeys are the key/value lines bdp.pin carries, each exactly once and in
-// this order.
-var pinKeys = []string{"repository", "tag", "tag-object", "commit", "spec-revision", "spec-revision-rule"}
+// this order. The last, lock, is lockOf the pin's other non-comment lines.
+var pinKeys = []string{"repository", "tag", "tag-object", "commit", "spec-revision", "spec-revision-rule", "lock"}
 
 var hex40 = regexp.MustCompile(`^[0-9a-f]{40}$`)
 var hex64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -56,7 +57,8 @@ type pin struct {
 // pinKeys order, then one "file <sha256> <size> <git-blob-sha1> <path>" line
 // per vendored file, sorted by path. Every non-comment line must be exactly
 // what scripts/bdp-vendor.sh writes, so a reordered, re-spaced or otherwise
-// re-formatted line fails even when it parses.
+// re-formatted line fails even when it parses, and the lock line must be
+// lockOf the others, so a pin merged from two script runs fails too.
 func parsePin(data []byte) (*pin, []error) {
 	p := &pin{values: map[string]string{}}
 	var errs []error
@@ -119,6 +121,9 @@ func parsePin(data []byte) (*pin, []error) {
 			errs = append(errs, fmt.Errorf("bdp.pin: %s %q is not a 40-hex object id", k, v))
 		}
 	}
+	if v, ok := p.values["lock"]; ok && !hex64.MatchString(v) {
+		errs = append(errs, fmt.Errorf("bdp.pin: lock %q is not a 64-hex sha256", v))
+	}
 	if v, ok := p.values["tag"]; ok && !strings.HasPrefix(v, "spec/") {
 		errs = append(errs, fmt.Errorf("bdp.pin: tag %q is not a bdp checkpoint tag (spec/*)", v))
 	}
@@ -159,7 +164,33 @@ func parsePin(data []byte) (*pin, []error) {
 			}
 		}
 	}
+	// Checked after the format check, which runs only on an error-free pin:
+	// nearly every edit of a non-comment line also leaves the lock stale, and
+	// that error must not hide the format error.
+	if v, ok := p.values["lock"]; ok && hex64.MatchString(v) {
+		if got := lockOf(lines); got != v {
+			errs = append(errs, fmt.Errorf("bdp.pin: lock %s does not match its other non-comment lines (sha256 %s): "+
+				"bdp.pin was edited by hand or merged from two script runs; take main's bdp.pin and rerun the script", v, got))
+		}
+	}
 	return p, errs
+}
+
+// lockOf is what bdp.pin's lock line holds: the sha256 of every other
+// non-comment line, in file order, each ending in a newline (as
+// `grep -v -e '^#' -e '^lock ' bdp.pin | sha256sum` computes it). Two script
+// runs that differ in any line write different lock lines, so two PRs that
+// each change bdp.pin conflict on that line instead of merging cleanly into
+// a pin that mixes their files. Keep it in step with scripts/bdp-vendor.sh.
+func lockOf(lines []string) string {
+	h := sha256.New()
+	for _, line := range lines {
+		if key, _, _ := strings.Cut(line, " "); key == "lock" {
+			continue
+		}
+		h.Write([]byte(line + "\n"))
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // gitBlobID is git's object id for a blob: sha1("blob <size>\x00" + bytes).
@@ -170,12 +201,12 @@ func gitBlobID(data []byte) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// checkVendored checks dir (a third_party/bdp tree): bdp.pin parses and its
-// non-comment lines are in the script's exact format, the files under spec/ are exactly its file
-// lines, each matches its size, sha256 and git blob id, and LICENSE is among
-// them. It cannot check that tag, tag-object, commit or spec-revision name
-// the real bdp checkpoint; that needs bdp's history (scripts/bdp-vendor.sh
-// --check).
+// checkVendored checks dir (a third_party/bdp tree): bdp.pin parses, its
+// non-comment lines are in the script's exact format and its lock line
+// matches them, the files under spec/ are exactly its file lines, each
+// matches its size, sha256 and git blob id, and LICENSE is among them. It
+// cannot check that tag, tag-object, commit or spec-revision name the real
+// bdp checkpoint; that needs bdp's history (scripts/bdp-vendor.sh --check).
 func checkVendored(dir string) []error {
 	data, err := os.ReadFile(filepath.Join(dir, "bdp.pin"))
 	if err != nil {
@@ -245,9 +276,10 @@ func checkVendored(dir string) []error {
 }
 
 // TestVendoredBDPMatchesPin fails when a file under spec/ is changed, added
-// or removed, when bdp.pin is malformed or its non-comment lines are not in
-// the script's exact format, or when bdp's LICENSE is missing. Whether the pin names the real bdp
-// checkpoint is checked by `scripts/bdp-vendor.sh <bdp> <tag> --check`.
+// or removed, when bdp.pin is malformed, its non-comment lines are not in the
+// script's exact format or its lock line does not match them, or when bdp's
+// LICENSE is missing. Whether the pin names the real bdp checkpoint is
+// checked by `scripts/bdp-vendor.sh <bdp> <tag> --check`.
 func TestVendoredBDPMatchesPin(t *testing.T) {
 	errs := checkVendored(".")
 	for _, err := range errs {
@@ -259,39 +291,70 @@ func TestVendoredBDPMatchesPin(t *testing.T) {
 }
 
 // writeTree writes a third_party/bdp tree into a temp dir: files under spec/
-// and a bdp.pin describing them in the script's format.
+// and a bdp.pin describing them in the script's format, lock line included.
 func writeTree(t *testing.T, files map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()
-	var b strings.Builder
-	b.WriteString("# test pin\n")
-	b.WriteString("repository " + pinRepository + "\n")
-	b.WriteString("tag spec/test-20260101\n")
-	b.WriteString("tag-object " + strings.Repeat("a", 40) + "\n")
-	b.WriteString("commit " + strings.Repeat("b", 40) + "\n")
-	b.WriteString("spec-revision " + strings.Repeat("c", 40) + "\n")
-	b.WriteString("spec-revision-rule " + pinSpecRevisionRule + "\n")
+	lines := []string{
+		"repository " + pinRepository,
+		"tag spec/test-20260101",
+		"tag-object " + strings.Repeat("a", 40),
+		"commit " + strings.Repeat("b", 40),
+		"spec-revision " + strings.Repeat("c", 40),
+		"spec-revision-rule " + pinSpecRevisionRule,
+	}
 	paths := make([]string, 0, len(files))
 	for p := range files {
 		paths = append(paths, p)
 	}
 	sort.Strings(paths)
+	var fileLines []string
 	for _, p := range paths {
 		raw := []byte(files[p])
-		full := filepath.Join(dir, "spec", filepath.FromSlash(p))
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(full, raw, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		sum := sha256.Sum256(raw)
-		fmt.Fprintf(&b, "file %s %d %s %s\n", hex.EncodeToString(sum[:]), len(raw), gitBlobID(raw), p)
+		writeSpecFile(t, dir, p, raw)
+		fileLines = append(fileLines, fileLine(p, raw))
 	}
-	if err := os.WriteFile(filepath.Join(dir, "bdp.pin"), []byte(b.String()), 0o644); err != nil {
+	lock := "lock " + lockOf(append(append([]string(nil), lines...), fileLines...))
+	lines = append(append(lines, lock), fileLines...)
+	pin := "# test pin\n" + strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "bdp.pin"), []byte(pin), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return dir
+}
+
+// writeSpecFile writes raw to spec/<path> in a third_party/bdp tree.
+func writeSpecFile(t *testing.T, dir, path string, raw []byte) {
+	t.Helper()
+	full := filepath.Join(dir, "spec", filepath.FromSlash(path))
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// fileLine is the bdp.pin line the script writes for a vendored file.
+func fileLine(path string, raw []byte) string {
+	sum := sha256.Sum256(raw)
+	return fmt.Sprintf("file %s %d %s %s", hex.EncodeToString(sum[:]), len(raw), gitBlobID(raw), path)
+}
+
+// pinLockLine returns the lock line of dir's bdp.pin.
+func pinLockLine(t *testing.T, dir string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, "bdp.pin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.HasPrefix(line, "lock ") {
+			return line
+		}
+	}
+	t.Fatal("bdp.pin fixture has no lock line")
+	return ""
 }
 
 func editFile(t *testing.T, path string, edit func(string) string) {
@@ -415,6 +478,35 @@ func TestCheckVendoredCatchesHandEdits(t *testing.T) {
 		{"wrong rule string", func(t *testing.T, dir string) {
 			editPin(t, dir, "; not --first-parent)", "; --first-parent)")
 		}, "spec-revision-rule"},
+		{"tag not under spec/", func(t *testing.T, dir string) {
+			editPin(t, dir, "tag spec/test-20260101\n", "tag v1\n")
+		}, "not a bdp checkpoint tag"},
+		{"git blob id swapped", func(t *testing.T, dir string) {
+			editPin(t, dir, " "+gitBlobID([]byte("MIT License\n"))+" LICENSE\n", " "+strings.Repeat("e", 40)+" LICENSE\n")
+		}, "spec/LICENSE git blob"},
+		{"file listed twice", func(t *testing.T, dir string) {
+			line := fileLine("LICENSE", []byte("MIT License\n"))
+			editPin(t, dir, line+"\n", line+"\n"+line+"\n")
+		}, "\"LICENSE\" is listed twice"},
+		{"lock missing", func(t *testing.T, dir string) {
+			editPin(t, dir, pinLockLine(t, dir)+"\n", "")
+		}, "missing key \"lock\""},
+		{"lock not a sha256", func(t *testing.T, dir string) {
+			editPin(t, dir, pinLockLine(t, dir)+"\n", "lock "+strings.Repeat("d", 40)+"\n")
+		}, "is not a 64-hex sha256"},
+		{"stale lock", func(t *testing.T, dir string) {
+			editPin(t, dir, pinLockLine(t, dir)+"\n", "lock "+strings.Repeat("d", 64)+"\n")
+		}, "does not match its other non-comment lines"},
+		// What a pin merged from two script runs looks like: a consumer slice's
+		// file and its line, self-consistent but taken at another checkpoint,
+		// next to the other run's lines and lock. Without the lock check every
+		// other check passes it.
+		{"file and line added without rerunning the script", func(t *testing.T, dir string) {
+			raw := []byte("{\"from\": \"another checkpoint\"}\n")
+			writeSpecFile(t, dir, "fixtures/x.json", raw)
+			license := fileLine("LICENSE", []byte("MIT License\n"))
+			editPin(t, dir, license+"\n", license+"\n"+fileLine("fixtures/x.json", raw)+"\n")
+		}, "does not match its other non-comment lines"},
 		{"pin missing", func(t *testing.T, dir string) {
 			if err := os.Remove(filepath.Join(dir, "bdp.pin")); err != nil {
 				t.Fatal(err)
@@ -438,6 +530,15 @@ func TestCheckVendoredCatchesHandEdits(t *testing.T) {
 			}
 			t.Errorf("want an error containing %q, got %v", tc.want, errs)
 		})
+	}
+}
+
+func TestLockOfMatchesSha256sum(t *testing.T) {
+	// `printf 'a\nlock x\nb\n' | grep -v -e '^#' -e '^lock ' | sha256sum`:
+	// the lock line is skipped and every other line ends in a newline.
+	const want = "911169ddaaf146aff539f58c26c489af3b892dff0fe283c1c264c65ae5aa59a2"
+	if got := lockOf([]string{"a", "lock x", "b"}); got != want {
+		t.Errorf("lockOf = %s, want %s", got, want)
 	}
 }
 

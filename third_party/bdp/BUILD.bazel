@@ -16,10 +16,11 @@ exports_files(
 )
 
 # Fails when a file under spec/ is changed, added or removed, when bdp.pin
-# is malformed or its non-comment lines are not in the script's exact
-# format, or when LICENSE is missing. The checkpoint itself (tag, commit, specRevision) needs bdp's
-# history: reviewers run scripts/bdp-vendor.sh --check. Stdlib only; reads
-# its data by relative path, as under go test.
+# is malformed, its non-comment lines are not in the script's exact format
+# or its lock line does not match them, or when LICENSE is missing. The
+# checkpoint itself (tag, commit, specRevision) needs bdp's history:
+# reviewers run scripts/bdp-vendor.sh --check. Stdlib only; reads its data
+# by relative path, as under go test.
 go_test(
     name = "bdp_test",
     srcs = ["pin_test.go"],

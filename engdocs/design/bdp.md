@@ -39,12 +39,12 @@ the failure prints, review the diff, and say in the PR what changed and why.
 A `/v0` change also follows [bd-serve-v0.md](bd-serve-v0.md): a non-additive
 change to an existing member bumps `wire_revision` and adds its history
 entry in `openapi.v0.yaml`; an additive one needs neither. A `--json` change
-follows CATALOG.md: `make corpus-regen`, plus a `JSONSchemaVersion` bump in
-`cmd/bd/output.go` when [json-schema.md](../../docs/reference/json-schema.md)
-calls for one (a new optional field does not). When BDP's Callables land, they
-will take their parameters from `openapi.v0.yaml`. A v0 change therefore never
-needs a Callables or spec edit, and a new v0 operation is simply not exposed
-over BDP until someone names it.
+follows CATALOG.md (`make corpus-regen`) and
+[json-schema.md](../../docs/reference/json-schema.md), which say when it also
+bumps `JSONSchemaVersion` in `cmd/bd/output.go`. When BDP's Callables land,
+they will take their parameters from `openapi.v0.yaml`. A v0 change
+therefore never needs a Callables or spec edit, and a new v0 operation is
+simply not exposed over BDP until someone names it.
 
 **A BDP test fails on your change.** No test of a BDP surface exists on
 main yet; `TestVendoredBDPMatchesPin` fails only when `third_party/bdp/` is
@@ -115,14 +115,23 @@ specRevision and the rule that derives it) and, for each vendored file, its
 size, sha256 and git blob id. `scripts/bdp-vendor.sh` writes both. bdp's
 MIT notice is also listed in `THIRD_PARTY_LICENSES`.
 
+The pin's `lock` line is the sha256 of all its other non-comment lines.
+Two PRs that each change `bdp.pin`, such as a consumer slice and a pin
+bump, therefore always conflict on that line, even when they touch
+different files, and git can never merge them into a pin that mixes two
+checkpoints' bytes. The PR that merges second takes main's `bdp.pin`
+(`git checkout origin/main -- third_party/bdp/bdp.pin`) and reruns the
+script: at main's tag in a consumer slice, at its new tag in a pin bump.
+Never resolve a `bdp.pin` conflict by hand.
+
 `TestVendoredBDPMatchesPin` (`third_party/bdp/pin_test.go`) fails when a
 file under `spec/` is changed, added or removed, when `bdp.pin` is
-malformed or its non-comment lines are not in the script's exact format, or
-when bdp's `LICENSE` is missing. It cannot check the checkpoint itself
-(tag, tag object, commit, specRevision) without bdp's history, so the
-reviewer of every PR that touches `bdp.pin` runs
-`scripts/bdp-vendor.sh <bdp checkout> <tag> --check` against a full,
-freshly fetched clone of gastownhall/bdp.
+malformed, its non-comment lines are not in the script's exact format or
+its `lock` line does not match them, or when bdp's `LICENSE` is missing.
+It cannot check the checkpoint itself (tag, tag object, commit,
+specRevision) without bdp's history, so the reviewer of every PR that
+touches `bdp.pin` runs `scripts/bdp-vendor.sh <bdp checkout> <tag> --check`
+against a full, freshly fetched clone of gastownhall/bdp.
 
 The copy holds only files with a named consumer: bdp's `LICENSE`, and the
 core response schema and two current catalogs that BDP's conformance tests
@@ -141,10 +150,13 @@ annotated `spec/*` tag reachable from bdp `main`. It refuses a lightweight
 or non-`spec/*` tag, a commit not reachable from the checkout's
 `origin/main`, and a commit that does not descend from the current pin.
 `scripts/bdp-vendor.sh <bdp checkout> <tag> --check` verifies a tree
-without writing. The pin-bump PR shows the `bdp.pin` diff (the vendored
-bytes are marked generated, so their diff collapses) and
-`git -C <bdp> log --oneline OLD..NEW -- <vendored paths>`. Julian Knutsen
-approves it.
+without writing. It compares the tree with what `<tag>` generates and does
+not check the direction, so the reviewer of a pin bump also runs
+`git -C <bdp> merge-base --is-ancestor OLD NEW`, which exits 0 only for a
+forward move; OLD is the commit in main's `bdp.pin`. The pin-bump PR shows
+the `bdp.pin` diff (the vendored bytes are marked generated, so their diff
+collapses) and `git -C <bdp> log --oneline OLD..NEW -- <vendored paths>`.
+Julian Knutsen approves it.
 
 The slice that adds `--protocol` will add a test that the specRevision
 `bd serve` advertises equals the pin's.
