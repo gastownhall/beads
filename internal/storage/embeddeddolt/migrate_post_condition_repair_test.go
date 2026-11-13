@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -270,5 +271,75 @@ func TestEmbeddedMigrateSchemaRepairsIgnoredTablesWithoutCommitting_5269(t *test
 	}
 	if got := stringColumn(t, ctx, conn, "SELECT id FROM wisp_comments ORDER BY id"); !reflect.DeepEqual(got, wispIDs) {
 		t.Fatalf("wisp_comments ids %v after repair, want %v", got, wispIDs)
+	}
+}
+
+// recordingConn records every statement MigrateUp issues.
+type recordingConn struct {
+	schema.DBConn
+	statements *[]string
+}
+
+func (c recordingConn) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	*c.statements = append(*c.statements, query)
+	return c.DBConn.ExecContext(ctx, query, args...)
+}
+
+func (c recordingConn) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	*c.statements = append(*c.statements, query)
+	return c.DBConn.QueryContext(ctx, query, args...)
+}
+
+func (c recordingConn) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	*c.statements = append(*c.statements, query)
+	return c.DBConn.QueryRowContext(ctx, query, args...)
+}
+
+// AC-6: a freshly migrated store meets every recorded post-condition, and an
+// ordinary no-work MigrateUp — even on a store with recorded drift — issues no
+// dropped-default probe, no repair DDL and no commit: the repair belongs to
+// the explicit `bd migrate schema` alone. (The server fast path is pinned by
+// schema's TestMigrateUpWithLockSkipsLockWhenAlreadyConverged, whose strict
+// mock fails on any extra statement.)
+func TestEmbeddedHealthyCurrentStoreHasNoPostConditionWork_5269(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	dataDir := seedCurrentSchema(t, ctx)
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+
+	check, err := schema.CheckRecordedPostConditions(ctx, conn)
+	if err != nil {
+		t.Fatalf("CheckRecordedPostConditions on a fresh current store: %v", err)
+	}
+	if check.Applicable == 0 || len(check.Violations) != 0 {
+		t.Fatalf("fresh current store: %d applicable, violations %v; want some applicable and none violated", check.Applicable, check.Violations)
+	}
+
+	execAll(t, ctx, conn,
+		"ALTER TABLE dependencies ALTER COLUMN id SET DEFAULT (UUID())",
+		"CALL DOLT_COMMIT('-Am', 'test: drifted default under recorded marks')",
+	)
+	headBefore, _ := headCommit(t, ctx, conn)
+
+	var statements []string
+	applied, err := schema.MigrateUp(ctx, recordingConn{DBConn: conn, statements: &statements})
+	if err != nil || applied != 0 {
+		t.Fatalf("no-work MigrateUp = %d, %v; want 0, nil", applied, err)
+	}
+	// The dropped-default probe reads one obligated id column at a time; the
+	// pass's own reality checks read other columns and stay allowed.
+	probe := regexp.MustCompile(`(?i)^SHOW COLUMNS FROM (dependencies|comments|events|issue_snapshots|compaction_snapshots|wisp_\w+) LIKE 'id'$`)
+	for _, q := range statements {
+		upper := strings.ToUpper(q)
+		if probe.MatchString(strings.TrimSpace(q)) || strings.Contains(upper, "DROP DEFAULT") || strings.Contains(upper, "DOLT_COMMIT") {
+			t.Fatalf("no-work MigrateUp issued %q; want no dropped-default probe, repair or commit", q)
+		}
+	}
+	if hash, _ := headCommit(t, ctx, conn); hash != headBefore {
+		t.Fatalf("no-work MigrateUp moved HEAD")
+	}
+	if def := columnDefault(t, ctx, conn, "dependencies", "id"); !def.Valid {
+		t.Fatalf("no-work MigrateUp repaired dependencies.id; only explicit `bd migrate schema` may")
 	}
 }
