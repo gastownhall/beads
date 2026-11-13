@@ -4,10 +4,12 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -166,6 +168,68 @@ func TestEmbeddedMetadatalessWorkspaceRefusesSiblingDatabase(t *testing.T) {
 		w.requireJSONLUnchanged(t)
 		w.requireOriginalIssuesAfterRestore(t)
 	})
+
+	// AC-3: the aftermath, a store already holding a real stray "beads"
+	// beside "myproj". The fallback database exists, but that must not
+	// license further divergent reads or writes: every command refuses,
+	// naming both, and opens neither.
+	t.Run("stray sibling already exists", func(t *testing.T) {
+		w := newMetadatalessWorkspace(t, true)
+		w.seedConfiguredDatabase(t, "beads")
+		for _, args := range [][]string{
+			{"list"},
+			{"show", w.issueID},
+			{"create", "--silent", "stray write"},
+		} {
+			stdout, stderr, err := w.run(t, []string{"BEADS_SKIP_IDENTITY_CHECK=1"}, args...)
+			w.requireRefused(t, stdout, stderr, err, "beads", "myproj")
+			if !strings.Contains(stderr, "do not delete any") {
+				t.Errorf("bd %s: refusal does not caution that a sibling may hold divergent writes:\n%s", args[0], stderr)
+			}
+		}
+		w.requireJSONLUnchanged(t)
+		// Restoring the metadata selects myproj again, beside the stray.
+		if err := os.WriteFile(filepath.Join(w.beadsDir, "metadata.json"), w.metadata, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var ids []string
+		for _, issue := range bdListJSON(t, w.bd, w.dir, "--all") {
+			ids = append(ids, issue.ID)
+		}
+		if !reflect.DeepEqual(ids, []string{w.issueID}) {
+			t.Fatalf("after restoring metadata.json the workspace lists %v, want only the original %s", ids, w.issueID)
+		}
+		w.requireDatabases(t, "beads", "myproj")
+	})
+}
+
+// seedConfiguredDatabase creates database in the workspace's store the way
+// a configured workspace does: through a bd read under metadata naming it.
+// The metadata is removed again afterwards.
+func (w *metadatalessWorkspace) seedConfiguredDatabase(t *testing.T, database string) {
+	t.Helper()
+	var metadata map[string]any
+	if err := json.Unmarshal(w.metadata, &metadata); err != nil {
+		t.Fatalf("setup: parse metadata.json: %v", err)
+	}
+	metadata["dolt_database"] = database
+	data, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(w.beadsDir, "metadata.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if stdout, stderr, err := w.run(t, nil, "list"); err != nil {
+		t.Fatalf("setup: configured bd list on %q failed: %v\nstdout:\n%s\nstderr:\n%s", database, err, stdout, stderr)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{database, "myproj"}
+	slices.Sort(want)
+	w.requireDatabases(t, want...)
 }
 
 // requireOriginalIssuesAfterRestore puts the metadata back and fails unless
