@@ -634,3 +634,117 @@ func TestKVCommandsCommitThroughTheUserKVScreen(t *testing.T) {
 		t.Errorf("config rows = %v, want the set row cleared again", fake.rows)
 	}
 }
+
+// The screen's refusal keeps its type through the kv wrap, and an ordinary
+// commit failure is attributed to the kv commit, not to the write.
+func TestCommitKVWriteSurfacesScreenRefusal(t *testing.T) {
+	saveStorageMode(t)
+	serverMode = true
+
+	fake := &fakeConfigCommitStore{err: &storage.ConfigCommitRefusedError{Keys: []string{"issue_prefix"}}}
+	err := commitKVWrite(context.Background(), fake, "kv set")
+	var refused *storage.ConfigCommitRefusedError
+	if !errors.As(err, &refused) || !slices.Equal(refused.Keys, []string{"issue_prefix"}) {
+		t.Fatalf("commitKVWrite error = %v, want the screen's refusal naming issue_prefix", err)
+	}
+	if !strings.HasPrefix(err.Error(), "committing kv write: ") {
+		t.Fatalf("commitKVWrite error = %q, want the kv commit prefix", err)
+	}
+
+	fake = &fakeConfigCommitStore{err: errors.New("connection refused")}
+	err = commitKVWrite(context.Background(), fake, "kv clear")
+	if err == nil || err.Error() != "committing kv write: connection refused" {
+		t.Fatalf("commitKVWrite error = %v, want %q", err, "committing kv write: connection refused")
+	}
+}
+
+// GH#7523: the kv write has landed by the time its commit runs, so a commit
+// the kv.* screen refuses (a dirty internal key such as `bd rename-prefix`
+// leaves) or that fails outright is a stderr warning, not exit 1, and the
+// text and --json results keep their shipped shape: no commit-status fields.
+func TestKVCommandsWarnAndSucceedWhenTheCommitIsRefused(t *testing.T) {
+	refusal := &storage.ConfigCommitRefusedError{Keys: []string{"issue_prefix"}}
+	for _, tc := range []struct {
+		name      string
+		commitErr error
+		warning   []string
+	}{
+		{name: "refused", commitErr: refusal,
+			warning: []string{"Warning: committing kv write: refusing to commit", "issue_prefix"}},
+		{name: "failed", commitErr: errors.New("connection refused"),
+			warning: []string{"Warning: committing kv write: connection refused"}},
+		{name: "indeterminate", commitErr: errIndeterminateCommit,
+			warning: []string{"Warning: committing kv write: ", "write commit result indeterminate"}},
+	} {
+		for _, asJSON := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/json=%v", tc.name, asJSON), func(t *testing.T) {
+				fake := &kvCommitStore{rows: map[string]string{}, commitErr: tc.commitErr}
+				useKVCommitStore(t, fake, asJSON)
+
+				for i, step := range kvWriteSteps() {
+					commandDidWrite.Store(false)
+					var runErr error
+					stdout, stderr := captureStdio(t, func() { runErr = step.run() })
+					if runErr != nil {
+						t.Fatalf("bd %s returned %v after its write landed, want success with a warning", step.verb, runErr)
+					}
+					for _, want := range tc.warning {
+						if !strings.Contains(stderr, want) {
+							t.Errorf("bd %s stderr does not carry %q:\n%s", step.verb, want, stderr)
+						}
+					}
+					if !commandDidWrite.Load() {
+						t.Errorf("bd %s did not mark the command as having written", step.verb)
+					}
+					if len(fake.userKVMessages) != i+1 {
+						t.Errorf("after bd %s: CommitConfigUserKVOnly calls = %d, want %d (one attempt per command, no retry)",
+							step.verb, len(fake.userKVMessages), i+1)
+					}
+					if !asJSON {
+						if strings.TrimSpace(stdout) != step.text {
+							t.Errorf("bd %s stdout = %q, want only the normal result %q", step.verb, stdout, step.text)
+						}
+						continue
+					}
+					var got map[string]interface{}
+					if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+						t.Fatalf("bd %s --json stdout is not one JSON object: %v\n%s", step.verb, err, stdout)
+					}
+					want := map[string]interface{}{"schema_version": float64(JSONSchemaVersion)}
+					for k, v := range step.json {
+						want[k] = v
+					}
+					if !reflect.DeepEqual(got, want) {
+						t.Errorf("bd %s --json = %#v, want the shipped shape %#v", step.verb, got, want)
+					}
+				}
+				if len(fake.rows) != 0 {
+					t.Errorf("config rows = %v, want the set and the clear both landed", fake.rows)
+				}
+			})
+		}
+	}
+}
+
+// A kv write that fails never landed: there is nothing to commit, so the
+// command neither arms the write flag nor attempts a commit.
+func TestKVCommandsDoNotCommitAFailedWrite(t *testing.T) {
+	fake := &kvCommitStore{rows: map[string]string{}, writeErr: errors.New("connection refused")}
+	useKVCommitStore(t, fake, false)
+
+	for _, step := range kvWriteSteps() {
+		commandDidWrite.Store(false)
+		var runErr error
+		captureStdio(t, func() { runErr = step.run() })
+		if runErr == nil {
+			t.Fatalf("bd %s succeeded on a failed write, want its error", step.verb)
+		}
+		if commandDidWrite.Load() {
+			t.Errorf("bd %s marked a failed write as having written", step.verb)
+		}
+	}
+	if len(fake.userKVMessages) != 0 || fake.configOnlyCalls != 0 {
+		t.Errorf("commits attempted after failed writes: user kv %d, config only %d, want none",
+			len(fake.userKVMessages), fake.configOnlyCalls)
+	}
+}
