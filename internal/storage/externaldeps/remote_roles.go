@@ -39,20 +39,25 @@ import (
 //     another implementation) does the policy run here, client-side — and
 //     only for the reference kinds that server leaves to its clients
 //     (clientKinds: a server that advertises policy.external_dependencies but
-//     not policy.cross_rig_dependencies leaves the bare cross-rig ids). Ready
-//     reads and the ready claim judge the rows the server returned by those
-//     rows' own edges, which a ready row carries (remoteRowBlockers), so a
-//     page with nothing externally blocked costs no request beyond the
-//     server's. Every per-issue question — may this issue be claimed or
-//     closed, what blocks these listed rows, which external leaves hang off
-//     this tree — reads only the edges of the issues it names, through the
-//     inner EdgeReader. The blocked listing, which must see every live
-//     source, pages the live listing (remoteLiveSourceEdges). The ready count
-//     does not (remoteReadyCounter): where only bare cross-rig ids are left to
-//     the client it is the server's own, which can count a source a cross-rig
-//     blocker holds, and otherwise a judged one-row ready read, whose total
-//     still counts a blocked row past the rows it read. Nothing here walks
-//     every edge in the workspace (GetAllDependencyRecords).
+//     not policy.cross_rig_dependencies leaves the bare cross-rig ids). The
+//     ready role and the ready claim judge the rows the server returned by
+//     those rows' own edges, which a ready row carries (remoteRowBlockers), so
+//     a page with nothing externally blocked costs no request beyond the
+//     server's. So do the decorator's ready reads (GetReadyWork and its
+//     counts, total and count forms, which bd ready and bd list --ready read
+//     through) where only bare cross-rig ids are left to the client
+//     (judgesReadyRows). Against a server that leaves the capability refs too
+//     they load the blocker set from the live listing (remoteLiveSourceEdges),
+//     so their totals, counts and --max-rows refusals stay exact. Every
+//     per-issue question — may this issue be claimed or closed, what blocks
+//     these listed rows, which external leaves hang off this tree — reads
+//     only the edges of the issues it names, through the inner EdgeReader.
+//     The blocked listing, which must see every live source, pages the live
+//     listing too. The ready count (remoteReadyCounter) is the server's own
+//     where only bare cross-rig ids are left to the client, which can count a
+//     source a cross-rig blocker holds, and otherwise the decorator's exact
+//     count. Nothing here walks every edge in the workspace
+//     (GetAllDependencyRecords).
 
 // maxRemoteEdgeAnchors is how many anchors one EdgeReader read names. It is
 // the server's own per-request anchor bound (internal/httpapi's
@@ -605,9 +610,8 @@ type remoteReadyCounter struct {
 // to judge every ready row's edges, a read the size of the ready set, for a
 // number that only decorates the page; so the count, unlike the page, can
 // include a source an open cross-rig blocker holds. Against a server that
-// applies none of the policy it is the decorator's judged count
-// (judgedReadyCount): a one-row ready read whose total drops the blocked rows
-// that read judged, so a blocked row past it still counts.
+// applies none of the policy it is the decorator's count (CountReadyWork),
+// exact over the blocker set loaded from the live listing (judgesReadyRows).
 func (c *remoteReadyCounter) CountReady(ctx context.Context, req issueops.ReadyRequest) (issueops.ReadyCountResult, error) {
 	kinds, err := c.policy.clientKinds(ctx)
 	if err != nil {

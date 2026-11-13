@@ -331,10 +331,14 @@ func (s *Store) blockingStateFromRecords(ctx context.Context, allDeps map[string
 
 // GetReadyWork excludes sources with unsatisfied external blocking edges.
 func (s *Store) GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*types.Issue, error) {
-	if s.judgesReadyRows() {
+	judged, err := s.judgesReadyRows(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if judged {
 		// The same one inner read as below (httpclient's GetReadyWork is its
 		// counts listing with the counts dropped), judged by its rows' edges.
-		rows, err := s.GetReadyWorkWithCounts(ctx, filter)
+		rows, err := s.judgedReadyWorkWithCounts(ctx, filter)
 		if err != nil {
 			return nil, err
 		}
@@ -364,7 +368,11 @@ func (s *Store) GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*t
 
 // GetReadyWorkWithCounts is the counts-bearing equivalent of GetReadyWork.
 func (s *Store) GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, error) {
-	if s.judgesReadyRows() {
+	judged, err := s.judgesReadyRows(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if judged {
 		return s.judgedReadyWorkWithCounts(ctx, filter)
 	}
 	state, err := s.loadBlockingState(ctx)
@@ -377,14 +385,28 @@ func (s *Store) GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFil
 // judgesReadyRows reports whether the ready reads judge the rows a read
 // returns by those rows' own edges instead of by a workspace-wide blocker
 // set: over a remote store with no narrow query (httpclient.Store), whose
-// ready rows carry every edge their source stores. A ready page with nothing
-// externally blocked then costs exactly the inner read, and no ready read
-// walks the workspace's issues.
-func (s *Store) judgesReadyRows() bool {
-	if _, ok := storage.UnwrapStore(s.inner).(storage.ExternalDependencyQueryStore); ok {
-		return false
+// ready rows carry every edge their source stores, when its server applies
+// the capability refs itself and leaves this client at most the bare
+// cross-rig ids (policy.external_dependencies, which every deployed bd serve
+// advertises). A ready page with nothing externally blocked then costs
+// exactly the inner read, and no ready read walks the workspace's issues.
+//
+// A server that applies none of the policy (an older bd serve, or another
+// implementation) leaves the capability refs to this client too. There the
+// reads keep the blocker set loadBlockingState loads from the live listing
+// (remoteLiveSourceEdges), which costs less than the workspace walk such a
+// server always cost, so their page, total, count and --max-rows refusal stay
+// exact, as internal/httpclient's served tests pin. A judged total or count
+// can still count a blocked row past the rows the reads judged.
+func (s *Store) judgesReadyRows(ctx context.Context) (bool, error) {
+	if _, ok := storage.UnwrapStore(s.inner).(storage.ExternalDependencyQueryStore); ok || !s.rolesAreRemote() {
+		return false, nil
 	}
-	return s.rolesAreRemote()
+	kinds, err := s.clientKinds(ctx)
+	if err != nil {
+		return false, err
+	}
+	return !kinds.capability, nil
 }
 
 // judgedReadyRead runs read, one inner ready read under a blocking state that
@@ -479,7 +501,11 @@ func (s *Store) readyWorkWithCounts(ctx context.Context, filter types.WorkFilter
 // externally blocked row past the window, which no read looked at. The page
 // itself is exact.
 func (s *Store) GetReadyWorkWithCountsAndTotal(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, int, error) {
-	if s.judgesReadyRows() {
+	judged, err := s.judgesReadyRows(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	if judged {
 		return s.judgedReadyWorkWithCountsAndTotal(ctx, filter)
 	}
 	state, err := s.loadBlockingState(ctx)
@@ -743,7 +769,11 @@ func (s *Store) refetchedReadyTotal(ctx context.Context, filter types.WorkFilter
 func (s *Store) CountReadyWork(ctx context.Context, filter types.WorkFilter) (int, error) {
 	filter.Limit = 0
 	filter.Offset = 0
-	if s.judgesReadyRows() {
+	judged, err := s.judgesReadyRows(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if judged {
 		return s.judgedReadyCount(ctx, filter)
 	}
 	state, err := s.loadBlockingState(ctx)

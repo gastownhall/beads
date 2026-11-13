@@ -478,47 +478,71 @@ func TestRemoteReaderPolicesReadyWorkOnly(t *testing.T) {
 // TestRemoteReaderAnswersAReadyListingWithoutTheWireFlag: `bd list --ready`
 // is a List with ReadyFlag, which the served listing refuses. Over a remote
 // store it is the ready question, answered by the policy store's own reader
-// with externally blocked work left out, and never sent to the served List.
+// with externally blocked work left out, and never sent to the served List as
+// a ready listing. How the blocker is found depends on what the server leaves
+// to the client (judgesReadyRows). A server that applies none of the policy
+// leaves the capability refs too, so the blocker set comes from one plain
+// listing of the live issues, whose rows carry their edges; that keeps the
+// ready totals and counts exact. A server that applies the capability refs
+// and leaves only the bare cross-rig ids gets a ready read judged by its own
+// rows' edges, which lists nothing. Neither walks every issue and edge in the
+// workspace.
 func TestRemoteReaderAnswersAReadyListingWithoutTheWireFlag(t *testing.T) {
 	a, b := issue("be-a"), issue("be-b")
-	for _, tc := range []struct {
-		name    string
-		blocked bool
-		want    []string
+	for _, server := range []struct {
+		name string
+		// oldToken models policy.external_dependencies without
+		// policy.cross_rig_dependencies.
+		oldToken bool
+		// blocker is a reference kind this server leaves to the client.
+		blocker string
+		served  []string
 	}{
-		{name: "no external refs", want: []string{a.ID, b.ID}},
-		{name: "an externally blocked issue", blocked: true, want: []string{b.ID}},
+		{name: "a server that applies none of the policy", blocker: paymentsRef, served: []string{"List"}},
+		{name: "an old-token server", oldToken: true, blocker: "bb-1"},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			raw := newRemoteStore(a, b)
-			if tc.blocked {
-				blockOnPayments(raw, a.ID)
-			}
-			reader, err := testStore(raw, &fakeStore{}, true).IssueReader()
-			if err != nil {
-				t.Fatalf("IssueReader: %v", err)
-			}
-			listed, err := reader.List(t.Context(), publicops.ListRequest{ReadyFlag: true})
-			if err != nil {
-				t.Fatalf("List(ReadyFlag): %v", err)
-			}
-			got := make([]string, 0, len(listed.Items))
-			for _, row := range listed.Items {
-				got = append(got, row.ID)
-			}
-			if !slices.Equal(got, tc.want) {
-				t.Fatalf("List(ReadyFlag) = %v, want %v", got, tc.want)
-			}
-			// The ready read is judged by its own rows' edges: neither the
-			// ready listing nor a walk of the plain one reaches the served
-			// List.
-			if slices.ContainsFunc(raw.served, func(call string) bool { return strings.HasPrefix(call, "List") }) {
-				t.Fatalf("served calls = %v: a ready listing reached the served List", raw.served)
-			}
-			if raw.scans != 0 {
-				t.Fatalf("workspace-wide dependency walks = %d, want none", raw.scans)
-			}
-		})
+		for _, tc := range []struct {
+			name    string
+			blocked bool
+			want    []string
+		}{
+			{name: "no external refs", want: []string{a.ID, b.ID}},
+			{name: "an externally blocked issue", blocked: true, want: []string{b.ID}},
+		} {
+			t.Run(server.name+"/"+tc.name, func(t *testing.T) {
+				raw := newRemoteStore(a, b)
+				raw.enforced, raw.capabilityOnly = server.oldToken, server.oldToken
+				if tc.blocked {
+					raw.deps[a.ID] = []*types.Dependency{externalDep(a.ID, server.blocker, types.DepBlocks)}
+				}
+				// crossRigRemote serves the BatchGetter a cross-rig check
+				// reads the source row through.
+				store := testStore(crossRigRemote{raw}, &fakeStore{}, true)
+				resolver := &fakeIssueResolver{issues: map[string]*types.Issue{"bb-1": foreignIssue("bb-1", types.StatusOpen)}}
+				WithIssueResolver(resolver.resolve)(store)
+				reader, err := store.IssueReader()
+				if err != nil {
+					t.Fatalf("IssueReader: %v", err)
+				}
+				listed, err := reader.List(t.Context(), publicops.ListRequest{ReadyFlag: true})
+				if err != nil {
+					t.Fatalf("List(ReadyFlag): %v", err)
+				}
+				got := make([]string, 0, len(listed.Items))
+				for _, row := range listed.Items {
+					got = append(got, row.ID)
+				}
+				if !slices.Equal(got, tc.want) {
+					t.Fatalf("List(ReadyFlag) = %v, want %v", got, tc.want)
+				}
+				if !slices.Equal(raw.served, server.served) {
+					t.Fatalf("served calls = %v, want %v: the ready listing never reaches the served List, and only a server that leaves the capability refs to the client gets one plain listing", raw.served, server.served)
+				}
+				if raw.scans != 0 {
+					t.Fatalf("workspace-wide dependency walks = %d, want none", raw.scans)
+				}
+			})
+		}
 	}
 }
 
