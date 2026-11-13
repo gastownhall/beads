@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -401,6 +402,41 @@ func TestRepairPrefixesKeepsSuffixes(t *testing.T) {
 	}
 	if prefix, err := testStore.GetConfig(ctx, "issue_prefix"); err != nil || prefix != "kb" {
 		t.Errorf("issue_prefix = %q (err %v), want kb", prefix, err)
+	}
+}
+
+func TestRepairPrefixesRepointsEdgesOntoUnrenamedTargetRows(t *testing.T) {
+	// GH#6591 AC-1: an edge stored across prefixes (taxdb-x -> kb-hand) sits
+	// in the external column. Renaming its SOURCE onto the target prefix must
+	// leave kb-x blocked by kb-hand, not holding a dangling external edge
+	// blocked state never reads.
+	ctx := context.Background()
+	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+	seedRepairIssues(t, ctx, testStore,
+		&types.Issue{ID: "taxdb-x", Title: "Blocked tax work"},
+		&types.Issue{ID: "kb-hand", Title: "Open blocker"},
+	)
+	if err := testStore.AddDependency(ctx, &types.Dependency{IssueID: "taxdb-x", DependsOnID: "kb-hand", Type: types.DepBlocks}, "test"); err != nil {
+		t.Fatalf("add dependency: %v", err)
+	}
+
+	if err := repairAll(t, ctx, testStore, "kb", false); err != nil {
+		t.Fatalf("repair failed: %v", err)
+	}
+
+	deps, err := testStore.GetDependencyRecords(ctx, "kb-x")
+	if err != nil {
+		t.Fatalf("dependencies of kb-x: %v", err)
+	}
+	if len(deps) != 1 || deps[0].DependsOnID != "kb-hand" || deps[0].Type != types.DepBlocks {
+		t.Fatalf("dependencies of kb-x = %s, want one blocks edge to kb-hand", fmtDeps(deps))
+	}
+	blocked, blockers, err := testStore.IsBlocked(ctx, "kb-x")
+	if err != nil {
+		t.Fatalf("IsBlocked(kb-x): %v", err)
+	}
+	if !blocked || !slices.Contains(blockers, "kb-hand") {
+		t.Errorf("IsBlocked(kb-x) = %v %v, want blocked by kb-hand", blocked, blockers)
 	}
 }
 

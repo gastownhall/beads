@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -734,18 +735,25 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 // prefixes as a reference into another repository (issueops.
 // IsExternalDepTarget), so renaming its target never re-points it; once the
 // families share the target prefix the edge is re-added as an ordinary one.
-// issues must hold the post-rename IDs.
+// The same holds for an edge whose SOURCE was renamed onto the target prefix
+// and whose target is an unrenamed target-prefix row (taxdb-x -> kb-hand
+// becomes kb-x -> kb-hand): it stays in the external column, which blocked
+// state never reads, until it is re-added. issues must hold the post-rename IDs.
 func repointRepairedDependencies(ctx context.Context, st storage.DoltStorage, plan *prefixRepairPlan, issues []*types.Issue, actorName string) error {
 	if len(plan.Renames) == 0 {
 		return nil
 	}
 	newID := make(map[string]string, len(plan.Renames))
+	oldID := make(map[string]string, len(plan.Renames))
 	for _, r := range plan.Renames {
 		newID[r.OldID] = r.NewID
+		oldID[r.NewID] = r.OldID
 	}
 	ids := make([]string, 0, len(issues))
+	stored := make(map[string]bool, len(issues))
 	for _, issue := range issues {
 		ids = append(ids, issue.ID)
+		stored[issue.ID] = true
 	}
 	slices.Sort(ids)
 	records, err := st.GetDependencyRecordsForIssues(ctx, ids)
@@ -756,7 +764,16 @@ func repointRepairedDependencies(ctx context.Context, st storage.DoltStorage, pl
 		for _, dep := range records[source] {
 			target, ok := newID[dep.DependsOnID]
 			if !ok {
-				continue
+				// The target kept its ID. Re-add only an edge the source's
+				// rename turned from cross-prefix into same-prefix, so it
+				// lands in the issue column instead of the external one.
+				was, renamed := oldID[source]
+				if !renamed || !stored[dep.DependsOnID] ||
+					!issueops.IsExternalDepTarget(was, dep.DependsOnID) ||
+					issueops.IsExternalDepTarget(source, dep.DependsOnID) {
+					continue
+				}
+				target = dep.DependsOnID
 			}
 			if err := st.RemoveDependency(ctx, source, dep.DependsOnID, actorName); err != nil {
 				return fmt.Errorf("failed to re-point dependency %s -> %s: %w", source, dep.DependsOnID, err)
