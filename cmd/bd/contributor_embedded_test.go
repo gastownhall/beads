@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -158,6 +159,88 @@ func TestEmbeddedContributorRoutedWritesCommitInPlanning(t *testing.T) {
 		t.Errorf("the comment did not land in the planning store: %+v", comments)
 	}
 	assertIssueNotInStore(t, filepath.Join(dir, ".beads"), "cw", issue.ID)
+}
+
+// TestEmbeddedForkAutoContributorRoutedWrites covers the fork auto-configured
+// contributor flow from GH#8039: default bd init in a git repository with
+// origin and upstream remotes configures contributor routing on its own (no
+// --contributor wizard, no hand-set routing config), every created issue
+// lands in the planning repository's database, and the routed mutations —
+// update --claim and dep add — commit there through the writable auto-route
+// open. v1.3.2 opened the auto-routed target read-only even for write-intent
+// callers, so those mutations failed with "embeddeddolt: store is read-only"
+// while bd create, which writes the planning store directly, kept working
+// (fixed for every auto-route rule by #7622). Unlike
+// TestEmbeddedContributorRoutedWritesCommitInPlanning, this test must not
+// configure routing itself: it exercises fork detection.
+func TestEmbeddedForkAutoContributorRoutedWrites(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt contributor tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	dir := t.TempDir()
+	initGitRepoAt(t, dir)
+
+	// Bare origin and upstream remotes — the fork shape fork detection keys
+	// on (detectForkSetup reads the upstream remote).
+	origin := filepath.Join(dir, "origin.git")
+	upstream := filepath.Join(dir, "upstream.git")
+	for _, bareRepo := range []string{origin, upstream} {
+		if err := os.MkdirAll(bareRepo, 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", bareRepo, err)
+		}
+		cmd := gitCommand("init", "--bare")
+		cmd.Dir = bareRepo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git init --bare %s failed: %v\n%s", bareRepo, err, out)
+		}
+	}
+	for name, url := range map[string]string{"origin": origin, "upstream": upstream} {
+		cmd := gitCommand("remote", "add", name, url)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git remote add %s failed: %v\n%s", name, err, out)
+		}
+	}
+
+	// Default init with no role flag, then setup, the reporter's sequence.
+	// bdEnv pins HOME inside dir, so the planning repository auto-configuration
+	// creates lands at dir/.beads-planning and nothing leaks to the host.
+	runBDInit(t, bd, dir, "--prefix", "fk")
+	bdSetup(t, bd, dir, "opencode")
+
+	first := bdCreate(t, bd, dir, "Fork planning issue")
+	second := bdCreate(t, bd, dir, "Fork second issue")
+	if !strings.HasPrefix(first.ID, "fk-") || !strings.HasPrefix(second.ID, "fk-") {
+		t.Fatalf("expected fk- prefixed issue IDs, got %q and %q", first.ID, second.ID)
+	}
+
+	// The first routed create adopts the planning store fork init seeded and
+	// writes the metadata.json naming its database. Read the name back rather
+	// than assuming it equals the project prefix (GH#2988).
+	planningBeadsDir := filepath.Join(dir, ".beads-planning", ".beads")
+	cfg, err := configfile.Load(planningBeadsDir)
+	if err != nil {
+		t.Fatalf("load %s: %v", planningBeadsDir, err)
+	}
+	planningDatabase := ""
+	if cfg != nil {
+		planningDatabase = cfg.GetDoltDatabase()
+	}
+	if planningDatabase == "" {
+		t.Fatal("planning metadata names no dolt_database")
+	}
+
+	// Both issues live in the planning database; neither in the project's
+	// own fk database.
+	assertIssueInStore(t, planningBeadsDir, planningDatabase, first.ID)
+	assertIssueInStore(t, planningBeadsDir, planningDatabase, second.ID)
+	projectBeadsDir := filepath.Join(dir, ".beads")
+	assertIssueNotInStore(t, projectBeadsDir, "fk", first.ID)
+	assertIssueNotInStore(t, projectBeadsDir, "fk", second.ID)
 }
 
 // initContributor sets up a project with contributor mode enabled and returns
