@@ -6,6 +6,8 @@ go_library(
         "beads.go",
         "context.go",
         "fingerprint.go",
+        "owner_other.go",
+        "owner_unix.go",
     ],
     importpath = "github.com/steveyegge/beads/internal/beads",
     visibility = ["//:__subpackages__"],
