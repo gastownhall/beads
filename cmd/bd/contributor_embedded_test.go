@@ -216,6 +216,25 @@ func TestEmbeddedForkAutoContributorRoutedWrites(t *testing.T) {
 		assertIssueInStore(t, planningBeadsDir, planningDB, issue.ID)
 		assertIssueNotInStore(t, projectBeadsDir, "fk", issue.ID)
 	}
+
+	// The reported failure: bd update --claim opened the auto-routed planning
+	// store read-only and the embedded store refused the write with
+	// "embeddeddolt: store is read-only".
+	before := embeddedCurrentCommit(t, planningBeadsDir, planningDB)
+	bdCommand(t, bd, dir, "update", first.ID, "--claim")
+	assertEmbeddedHeadAdvanced(t, planningBeadsDir, planningDB, before, "update --claim")
+
+	planningStore := openStore(t, planningBeadsDir, planningDB)
+	claimed, err := planningStore.GetIssue(t.Context(), first.ID)
+	if err != nil {
+		t.Fatalf("GetIssue(%s) in the planning store: %v", first.ID, err)
+	}
+	if claimed.Status != types.StatusInProgress {
+		t.Errorf("%s status in the planning store = %q, want %q", first.ID, claimed.Status, types.StatusInProgress)
+	}
+	if claimed.Assignee == "" {
+		t.Errorf("%s has no assignee in the planning store after --claim", first.ID)
+	}
 }
 
 // initContributor sets up a project with contributor mode enabled and returns
