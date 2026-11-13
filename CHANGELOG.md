@@ -1627,6 +1627,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transitive dependent, so this bd refuses `--cascade` (a `--dry-run` preview
   included) against it with an unsupported-capability error and sends nothing;
   deletions without `--cascade` are unaffected. Upgrade the server first.
+- **`bd delete` no longer marks a live descendant's id as deleted in its
+  neighbors' text.** The rewrite of citations to `[deleted:<id>]` took `.` for
+  a word boundary, and a hierarchical child's id is its parent's id plus
+  `.<n>`, so deleting `fx-k0008.1` turned "step fx-k0008.1.2 failed" into
+  "step [deleted:fx-k0008.1].2 failed" while `fx-k0008.1.2` was still live; a
+  `--cascade` gave `[deleted:fx-k0008].1.2`, and deleting a descendant first
+  nested markers. A `.` followed by an id character is now part of the id,
+  while a sentence-ending `.` still ends a citation. Two citations separated
+  by one character ("be-1 be-1") are now both rewritten; before, only the
+  first was. Every route (direct, proxied server, `bd serve`) and the
+  unforced `bd delete` preview use the same rule. (#7377)
 
 - `bd compact` no longer silently changes row data when commit dates are out
   of history order across the cutoff. When a recent-dated commit came before
