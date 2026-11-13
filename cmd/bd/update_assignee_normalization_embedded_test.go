@@ -109,4 +109,31 @@ func TestEmbeddedAssigneeHiddenEmptyClears(t *testing.T) {
 			}
 		}
 	})
+
+	// AC-3: `bd batch` update with assignee=- (and the quoted whitespace
+	// form) clears exactly like assignee= does. A bare trailing space or tab
+	// cannot reach parseUpdateKVs through the batch tokenizer — it is
+	// whitespace — so the quoted form is the CLI spelling of that half; the
+	// unit test covers the raw tokens.
+	t.Run("batch_hidden_empty_clears_like_empty_kv", func(t *testing.T) {
+		t.Parallel()
+		for i, token := range []string{`assignee=-`, `"assignee= "`} {
+			hidden := bdCreate(t, bd, dir, fmt.Sprintf("Batch clear %d", i), "--assignee", "holder")
+			baseline := bdCreate(t, bd, dir, fmt.Sprintf("Batch explicit %d", i), "--assignee", "holder")
+
+			cases := []struct{ name, id, token string }{
+				{"hidden", hidden.ID, token},
+				{"explicit", baseline.ID, `assignee=`},
+			}
+			for _, c := range cases {
+				out, code := bdRunStdinEmbedded(t, bd, dir, fmt.Sprintf("update %s %s\n", c.id, c.token), "batch")
+				if code != 0 {
+					t.Fatalf("%s %s: batch exited %d:\n%s", c.name, c.token, code, out)
+				}
+				if got := bdShow(t, bd, dir, c.id).Assignee; got != "" {
+					t.Errorf("%s %s: batch stored assignee %q, want cleared", c.name, c.token, got)
+				}
+			}
+		}
+	})
 }

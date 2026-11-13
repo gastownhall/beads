@@ -3,10 +3,35 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 	"testing"
 )
+
+// bdProxiedRunStdin runs bd in a proxied-server workspace with the given
+// stdin and returns stdout, stderr and the exit code (a non-zero exit is an
+// observation, not a harness failure).
+func bdProxiedRunStdin(t *testing.T, bd, dir, stdin string, args ...string) (string, string, int) {
+	t.Helper()
+	cmd := exec.Command(bd, args...)
+	cmd.Dir = dir
+	cmd.Env = bdProxiedEnv(dir)
+	cmd.Stdin = strings.NewReader(stdin)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	code := 0
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		code = ee.ExitCode()
+	} else if err != nil {
+		t.Fatalf("bd %s could not run: %v", strings.Join(args, " "), err)
+	}
+	return stdout.String(), stderr.String(), code
+}
 
 // TestProxiedServerAssigneeHiddenEmptyClears pins bd-wkcfuz on the
 // proxied-server route, whose update gather (gatherUpdateInput), assign
@@ -61,6 +86,25 @@ func TestProxiedServerAssigneeHiddenEmptyClears(t *testing.T) {
 			}
 			if got := bdProxiedShow(t, bd, p.dir, issue.ID).Assignee; got != "" {
 				t.Errorf("value %q: proxied assign stored assignee %q, want cleared", value, got)
+			}
+		}
+	})
+
+	// AC-3: the proxied batch route shares parseUpdateKVs, so its update
+	// lines clear on the hidden-empty spellings too.
+	t.Run("batch_hidden_empty_clears", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "anb")
+		for i, token := range []string{`assignee=-`, `"assignee= "`} {
+			issue := bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Proxied batch clear %d", i))
+			bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--actor", "holder", "--assignee", "holder")
+
+			stdout, stderr, code := bdProxiedRunStdin(t, bd, p.dir, fmt.Sprintf("update %s %s\n", issue.ID, token), "batch")
+			if code != 0 {
+				t.Fatalf("token %s: proxied batch exited %d\nstdout:\n%s\nstderr:\n%s", token, code, stdout, stderr)
+			}
+			if got := bdProxiedShow(t, bd, p.dir, issue.ID).Assignee; got != "" {
+				t.Errorf("token %s: proxied batch stored assignee %q, want cleared", token, got)
 			}
 		}
 	})

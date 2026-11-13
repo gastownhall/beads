@@ -55,6 +55,8 @@ Grammar (one command per line):
   #comment  (blank lines and '# ...' comments are ignored)
 
 Supported 'update' keys: status, priority, title, assignee, force
+An update's assignee= (empty) or assignee=- clears the assignee, like
+'bd update --assignee ""'; every other value is stored verbatim.
 Supported dependency types: see 'bd dep add --help' (default: blocks)
 
 'force' is not a field. An update whose status moves the issue into closed
@@ -509,7 +511,10 @@ func parseUpdateKVs(kvs []string) (map[string]interface{}, error) {
 			}
 			updates["title"] = value
 		case "assignee":
-			updates["assignee"] = value
+			// bd-wkcfuz: the hidden-empty spellings clear, like assignee=
+			// already does. Both batch routes (direct tx.UpdateIssue and the
+			// proxied unit-of-work dispatch) build their updates map here.
+			updates["assignee"] = normalizeAssigneeInput(value)
 		case "force":
 			// Not a field: the override for close policy on a status that
 			// crosses into done, spelled as a token because a batch script has

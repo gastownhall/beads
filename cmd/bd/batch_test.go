@@ -223,6 +223,22 @@ func TestParseUpdateKVs(t *testing.T) {
 			in:   []string{"assignee="},
 			want: map[string]interface{}{"assignee": ""},
 		},
+		// bd-wkcfuz: the hidden-empty spellings clear like assignee= does.
+		{
+			name: "assignee bare dash clears",
+			in:   []string{"assignee=-"},
+			want: map[string]interface{}{"assignee": ""},
+		},
+		{
+			name: "assignee whitespace clears",
+			in:   []string{"assignee= "},
+			want: map[string]interface{}{"assignee": ""},
+		},
+		{
+			name: "assignee tab clears",
+			in:   []string{"assignee=\t"},
+			want: map[string]interface{}{"assignee": ""},
+		},
 		{
 			name:    "unsupported key",
 			in:      []string{"description=foo"},
