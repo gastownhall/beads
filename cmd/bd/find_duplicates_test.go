@@ -1,8 +1,15 @@
 package main
 
 import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -259,5 +266,84 @@ func TestIssueText(t *testing.T) {
 	text2 := issueText(issue2)
 	if text2 != "Just title" {
 		t.Errorf("issueText() = %q, want %q", text2, "Just title")
+	}
+}
+
+// aiMessagesStub serves one fixed Messages API reply whose content blocks
+// come from the test, and counts the requests it received.
+func aiMessagesStub(t *testing.T, contentBlocks string) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/messages" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"msg_test","type":"message","role":"assistant","model":"claude-test","content":`+
+			contentBlocks+
+			`,"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":3,"output_tokens":5}}`)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
+// stubAIClient returns a client that talks only to the stub server.
+func stubAIClient(baseURL string) anthropic.Client {
+	return anthropic.NewClient(
+		option.WithoutEnvironmentDefaults(),
+		option.WithAPIKey("test-key"),
+		option.WithBaseURL(baseURL),
+		option.WithMaxRetries(0),
+	)
+}
+
+// aiTestCandidates returns one mechanical candidate pair for analyzeWithAI.
+func aiTestCandidates() []duplicatePair {
+	return []duplicatePair{{
+		IssueA:     &types.Issue{ID: "bd-aaa", Title: "Crash on save"},
+		IssueB:     &types.Issue{ID: "bd-bbb", Title: "Saving crashes"},
+		Similarity: 0.3,
+		Method:     "mechanical",
+	}}
+}
+
+// GH#7515: a reply that opens with a thinking block must still yield the
+// first text block's verdict, and the first text block is the answer even
+// when later text blocks exist.
+func TestAnalyzeWithAI_SkipsLeadingThinkingBlock(t *testing.T) {
+	const verdict = `[{"pair_index":0,"is_duplicate":true,"confidence":0.9,"reason":"same bug"}]`
+	const laterVerdict = `[{"pair_index":0,"is_duplicate":true,"confidence":0.1,"reason":"later block"}]`
+	cases := []struct {
+		name    string
+		content string
+		wantAI  bool
+	}{
+		{"thinking then text", `[{"type":"thinking","thinking":"pondering","signature":"sig"},{"type":"text","text":` + verdict + `}]`, true},
+		{"redacted thinking then text", `[{"type":"redacted_thinking","data":"opaque"},{"type":"text","text":` + verdict + `}]`, true},
+		{"text first", `[{"type":"text","text":` + verdict + `}]`, true},
+		{"first text block wins", `[{"type":"text","text":` + verdict + `},{"type":"text","text":` + laterVerdict + `}]`, true},
+		{"empty first text block keeps candidates", `[{"type":"text","text":""},{"type":"text","text":` + verdict + `}]`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, hits := aiMessagesStub(t, tc.content)
+			got := analyzeWithAI(context.Background(), stubAIClient(srv.URL), "claude-test", aiTestCandidates())
+			if len(got) != 1 {
+				t.Fatalf("got %d pairs, want 1", len(got))
+			}
+			if tc.wantAI {
+				if got[0].Method != "ai" || got[0].Similarity != 0.9 || got[0].Reason != "same bug" {
+					t.Errorf("pair = {Method:%s Similarity:%v Reason:%q}, want {ai, 0.9, \"same bug\"}", got[0].Method, got[0].Similarity, got[0].Reason)
+				}
+			} else if got[0].Method != "mechanical" || got[0].Similarity != 0.3 {
+				t.Errorf("pair = {Method:%s Similarity:%v}, want unchanged candidate {mechanical, 0.3}", got[0].Method, got[0].Similarity)
+			}
+			if n := hits.Load(); n != 1 {
+				t.Errorf("stub received %d requests, want 1", n)
+			}
+		})
 	}
 }
