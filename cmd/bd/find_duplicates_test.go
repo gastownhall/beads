@@ -1,8 +1,15 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -259,5 +266,101 @@ func TestIssueText(t *testing.T) {
 	text2 := issueText(issue2)
 	if text2 != "Just title" {
 		t.Errorf("issueText() = %q, want %q", text2, "Just title")
+	}
+}
+
+// stubAIClient returns an Anthropic client whose Messages replies carry the
+// given content blocks, plus a count of the requests the stub served.
+func stubAIClient(t *testing.T, content []map[string]any) (anthropic.Client, *atomic.Int64) {
+	t.Helper()
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/messages" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected request", http.StatusNotFound)
+			return
+		}
+		hits.Add(1)
+		body := map[string]any{
+			"id":            "msg_test",
+			"type":          "message",
+			"role":          "assistant",
+			"model":         "claude-haiku-4-5",
+			"content":       content,
+			"stop_reason":   "end_turn",
+			"stop_sequence": nil,
+			"usage":         map[string]any{"input_tokens": 1, "output_tokens": 1},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(body); err != nil {
+			t.Errorf("encode stub reply: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	client := anthropic.NewClient(
+		option.WithoutEnvironmentDefaults(),
+		option.WithAPIKey("test-key"),
+		option.WithBaseURL(srv.URL),
+		option.WithMaxRetries(0),
+	)
+	return client, &hits
+}
+
+func aiTestCandidates() []duplicatePair {
+	return []duplicatePair{{
+		IssueA:     &types.Issue{ID: "bd-1", Title: "Login fails on Safari"},
+		IssueB:     &types.Issue{ID: "bd-2", Title: "Safari login broken"},
+		Similarity: 0.3,
+		Method:     "mechanical",
+	}}
+}
+
+// TestAnalyzeWithAI_SkipsLeadingThinkingBlock pins GH#7515: a reply may open
+// with non-text blocks (thinking), and the verdict is in the first text block.
+func TestAnalyzeWithAI_SkipsLeadingThinkingBlock(t *testing.T) {
+	verdict := func(confidence float64, reason string) map[string]any {
+		return map[string]any{"type": "text", "text": `[{"pair_index":0,"is_duplicate":true,"confidence":` +
+			mustJSON(t, confidence) + `,"reason":` + mustJSON(t, reason) + `}]`}
+	}
+	thinking := map[string]any{"type": "thinking", "thinking": "pondering", "signature": "sig"}
+	redacted := map[string]any{"type": "redacted_thinking", "data": "opaque"}
+
+	tests := []struct {
+		name       string
+		content    []map[string]any
+		wantMethod string
+		wantSim    float64
+		wantReason string
+	}{
+		{"thinking then text", []map[string]any{thinking, verdict(0.9, "same bug")}, "ai", 0.9, "same bug"},
+		{"redacted thinking then text", []map[string]any{redacted, verdict(0.9, "same bug")}, "ai", 0.9, "same bug"},
+		{"text only", []map[string]any{verdict(0.9, "same bug")}, "ai", 0.9, "same bug"},
+		{"first of two text blocks", []map[string]any{thinking, verdict(0.8, "first"), verdict(0.7, "second")}, "ai", 0.8, "first"},
+		// An empty first text block is still the answer: it fails to parse and
+		// falls back to the mechanical scores rather than reading a later block.
+		{"empty first text block", []map[string]any{thinking, {"type": "text", "text": ""}, verdict(0.7, "second")}, "mechanical", 0.3, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, hits := stubAIClient(t, tt.content)
+			var got []duplicatePair
+			captureStderr(t, func() {
+				got = analyzeWithAI(context.Background(), client, "claude-haiku-4-5", aiTestCandidates())
+			})
+			if len(got) != 1 {
+				t.Fatalf("got %d pairs, want 1: %+v", len(got), got)
+			}
+			p := got[0]
+			if p.Method != tt.wantMethod || p.Similarity != tt.wantSim || p.Reason != tt.wantReason {
+				t.Fatalf("pair = {Method:%s Similarity:%v Reason:%q}, want {Method:%s Similarity:%v Reason:%q}",
+					p.Method, p.Similarity, p.Reason, tt.wantMethod, tt.wantSim, tt.wantReason)
+			}
+			if p.IssueA.ID != "bd-1" || p.IssueB.ID != "bd-2" {
+				t.Fatalf("pair issues = %s/%s, want bd-1/bd-2", p.IssueA.ID, p.IssueB.ID)
+			}
+			if n := hits.Load(); n != 1 {
+				t.Fatalf("requests = %d, want 1", n)
+			}
+		})
 	}
 }
