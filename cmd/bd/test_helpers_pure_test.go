@@ -127,10 +127,29 @@ func setupEndpointTrustWorkspaceForTest(t *testing.T) {
 // BEADS_TEST_IGNORE_REPO_CONFIG on the BEADS_DIR source too, so such a leaked value
 // can no longer re-import the repo's own config (ga-e6h6i); tests that want the repo
 // config must unset the flag before calling this helper.
+//
+// BD_ROUTING_MODE and BEADS_ROUTING_MODE are removed from the environment for the
+// test, and given back with their original value or absence when it ends. Agent
+// hosts export both (for example as "off"). Viper binds BD_ROUTING_MODE above any
+// config file, so a test that reads back the routing.mode it wrote itself, in the
+// database or in YAML, would otherwise see the host's value; config.GetValueSource and
+// config.EnvVarName report either spelling as an env override. Both are unset rather
+// than blanked with t.Setenv(name, ""): those two functions use os.LookupEnv, so a
+// variable that is set to the empty string still counts as an env override.
+// Tests that want a particular routing mode from the environment must set it after
+// calling this helper.
 func initConfigForTest(t *testing.T) {
 	t.Helper()
 	t.Setenv("BEADS_DIR", os.Getenv("BEADS_DIR"))
 	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	for _, name := range []string{"BD_ROUTING_MODE", "BEADS_ROUTING_MODE"} {
+		// t.Setenv registers the cleanup that restores the entry value and presence
+		// exactly; the Unsetenv that follows makes the variable absent for the test.
+		t.Setenv(name, "")
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatalf("unset %s: %v", name, err)
+		}
+	}
 	config.ResetForTesting()
 	if err := config.Initialize(); err != nil {
 		t.Fatalf("config.Initialize: %v", err)
