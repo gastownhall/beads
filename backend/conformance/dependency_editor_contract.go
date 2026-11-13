@@ -1762,9 +1762,10 @@ func RunDependencyEditorRefusesACycleThroughAParentChildHop(t *testing.T, ctx co
 // to merge the two tables from the edge in front of it still refuses. Here both
 // endpoints of the new edge live in ONE plane and only the INTERIOR of the loop
 // leaves it — so the gate has to merge the tables unconditionally, from the
-// graph rather than from the edge. That distinction was a real defect: the
-// merged two-session check ran only when the closing edge crossed tiers, and a
-// same-tier closing edge saw one session and let the cycle commit.
+// graph rather than from the edge. That distinction was a real defect: when the
+// Dolt server store still ran the planes on two SQL sessions, its merged cycle
+// check ran only when the closing edge crossed tiers, and a same-tier closing
+// edge saw one session and let the cycle commit.
 //
 // Both orientations are asserted, because "the plane the endpoints share" and
 // "the plane the interior visits" swap between them and the two tables are not
