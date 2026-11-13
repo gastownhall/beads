@@ -640,3 +640,47 @@ func fmtDeps(deps []*types.Dependency) string {
 	}
 	return "[" + strings.Join(parts, ", ") + "]"
 }
+
+func TestRepairPrefixesSplitsByKnownPrefix(t *testing.T) {
+	// GH#6591 AC-4: a source prefix with a hyphen is split off whole, even for
+	// an all-letter suffix the heuristic reads as part of the prefix, whether
+	// the family is observed on another row or declared in allowed_prefixes;
+	// a custom ID already under the target prefix is left alone.
+	for _, tt := range []struct {
+		name     string
+		ids      []string
+		declared string
+		want     []string
+	}{
+		{name: "observed", ids: []string{"cre-db-a1b", "cre-db-wxyz", "kb-adr-0001"}, want: []string{"kb-a1b", "kb-wxyz", "kb-adr-0001"}},
+		{name: "declared", ids: []string{"cre-db-a1b", "cre-db-wxyz", "kb-adr-0001"}, declared: "other, cre-db-", want: []string{"kb-a1b", "kb-wxyz", "kb-adr-0001"}},
+		{name: "declared only", ids: []string{"cre-db-wxyz", "taxdb-u6ch", "kb-adr-0001"}, declared: "cre-db", want: []string{"kb-wxyz", "kb-u6ch", "kb-adr-0001"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+			if tt.declared != "" {
+				if err := testStore.SetConfig(ctx, "allowed_prefixes", tt.declared); err != nil {
+					t.Fatalf("set allowed_prefixes: %v", err)
+				}
+			}
+			for i, id := range tt.ids {
+				seedRepairIssues(t, ctx, testStore, &types.Issue{ID: id, Title: fmt.Sprintf("row %d", i)})
+			}
+
+			if err := repairAll(t, ctx, testStore, "kb", false); err != nil {
+				t.Fatalf("repair failed: %v", err)
+			}
+
+			got := storedIDs(t, ctx, testStore)
+			if len(got) != len(tt.want) {
+				t.Fatalf("stored ids = %v, want %v", got, tt.want)
+			}
+			for i, id := range tt.want {
+				if got[id] == nil || got[id].Title != fmt.Sprintf("row %d", i) {
+					t.Errorf("expected %s to hold %s; ids now: %v", id, tt.ids[i], got)
+				}
+			}
+		})
+	}
+}

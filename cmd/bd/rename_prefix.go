@@ -503,14 +503,38 @@ func planPrefixRepair(ctx context.Context, targetPrefix string, issues []*types.
 	return plan, nil
 }
 
+// repairKnownPrefixes lists the prefixes a repair splits source IDs by: the
+// database's issue_prefix, every allowed_prefixes entry, and every prefix
+// detected on the rows. Declaring a family's prefix in allowed_prefixes is how
+// a user settles an ambiguous split (cre-db-wxyz is cre-db + wxyz).
+func repairKnownPrefixes(ctx context.Context, st storage.DoltStorage, detected map[string]int) ([]string, error) {
+	var known []string
+	for _, key := range []string{"issue_prefix", "allowed_prefixes"} {
+		value, err := st.GetConfig(ctx, key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read %s: %w", key, err)
+		}
+		for _, p := range strings.Split(value, ",") {
+			if p = strings.TrimRight(strings.TrimSpace(p), "-"); p != "" {
+				known = append(known, p)
+			}
+		}
+	}
+	for p := range detected {
+		known = append(known, p)
+	}
+	slices.Sort(known)
+	return slices.Compact(known), nil
+}
+
 // repairPrefixes consolidates multiple prefixes into a single target prefix.
 // Issues already under the target prefix are left unchanged. Every other
 // issue keeps its suffix (see planPrefixRepair); a family whose destination
 // is taken moves to a hash root and is reported.
 func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName string, targetPrefix string, issues []*types.Issue, prefixes map[string]int, dryRun bool) error {
-	known := make([]string, 0, len(prefixes))
-	for p := range prefixes {
-		known = append(known, p)
+	known, err := repairKnownPrefixes(ctx, st, prefixes)
+	if err != nil {
+		return err
 	}
 	plan, err := planPrefixRepair(ctx, targetPrefix, issues, known, actorName, repairRetiredLookup(st))
 	if err != nil {
