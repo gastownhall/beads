@@ -73,6 +73,40 @@ func TestGenerateIssueIDCounterModeWalksPastAClaimedValue(t *testing.T) {
 	}
 }
 
+// TestGenerateIssueIDCounterModeWalksPastALiveRow pins the counter walk's
+// probe (GH#8456): an unclaimed candidate is decided by the one both-planes
+// taken read, so a value a live row of either plane holds — not only one a
+// tombstone retired — is skipped and the counter advanced again.
+func TestGenerateIssueIDCounterModeWalksPastALiveRow(t *testing.T) {
+	db, mock := newIDRetentionMock(t)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT value FROM config WHERE `key` = ?")).
+		WithArgs("issue_id_mode").WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow("counter"))
+	bump := func(next int) {
+		mock.ExpectExec(regexp.QuoteMeta("UPDATE issue_counter SET last_id = last_id + 1 WHERE prefix = ?")).
+			WithArgs("bd").WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT last_id FROM issue_counter WHERE prefix = ?")).
+			WithArgs("bd").WillReturnRows(sqlmock.NewRows([]string{"last_id"}).AddRow(next))
+	}
+	probe := regexp.QuoteMeta(idTakenSQL)
+	bump(5)
+	mock.ExpectQuery(probe).WithArgs("bd-5", "bd-5", "bd-5", "bd-5").
+		WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(1))
+	bump(6)
+	mock.ExpectQuery(probe).WithArgs("bd-6", "bd-6", "bd-6", "bd-6").
+		WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(0))
+
+	id, err := GenerateIssueIDInTable(context.Background(), db, "issues", "bd", &types.Issue{}, "actor", nil)
+	if err != nil {
+		t.Fatalf("GenerateIssueIDInTable(counter) = %v", err)
+	}
+	if id != "bd-6" {
+		t.Fatalf("GenerateIssueIDInTable(counter) = %q, want bd-6, past the live bd-5", id)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestIDTakenReadsBothPlanesInOneStatement pins the probe both minters ask: a
 // live row of EITHER plane or a tombstone in either tombstone table takes the
 // id, in one statement, whichever plane the id is being minted for.

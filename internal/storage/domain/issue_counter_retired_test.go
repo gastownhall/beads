@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // counterRetiredIssueRepo hands out counter values in order and reports the
@@ -73,5 +75,70 @@ func TestCounterModeMintWalksPastClaimedValues(t *testing.T) {
 	}
 	if got := strings.Join(repo.probed, ","); got != "bd-6" {
 		t.Fatalf("probed %s, want only bd-6: a claimed value costs no probe", got)
+	}
+}
+
+// mintProbeIssueRepo is a self-contained probe recorder for the counter mint:
+// it answers Taken from its map and records every Taken and Retired call, so
+// a test can pin WHICH probe decides a candidate, not only the outcome.
+type mintProbeIssueRepo struct {
+	IssueSQLRepository
+	next          int
+	taken         map[string]bool
+	probedTaken   []string
+	probedRetired []string
+}
+
+func (r *mintProbeIssueRepo) NextCounterID(context.Context, string) (int, error) {
+	r.next++
+	return r.next, nil
+}
+
+func (r *mintProbeIssueRepo) Taken(_ context.Context, id string) (bool, error) {
+	r.probedTaken = append(r.probedTaken, id)
+	return r.taken[id], nil
+}
+
+func (r *mintProbeIssueRepo) Retired(_ context.Context, id string) (bool, error) {
+	r.probedRetired = append(r.probedRetired, id)
+	return false, nil
+}
+
+// mintProbeCfgRepo answers the two config reads mintTopLevelID makes.
+type mintProbeCfgRepo struct {
+	ConfigSQLRepository
+	prefix string
+}
+
+func (r mintProbeCfgRepo) GetConfig(_ context.Context, key string) (string, error) {
+	switch key {
+	case "issue_prefix":
+		return r.prefix, nil
+	case "issue_id_mode":
+		return "counter", nil
+	}
+	return "", nil
+}
+
+// TestCounterModeMintProbesTakenNotRetired pins the domain counter walk's
+// probe (GH#8456): every unclaimed candidate is decided by the one
+// both-planes Taken read, never by Retired — a tombstone-only read cannot see
+// the live row ahead of the counter — so a value a live row holds is passed
+// over.
+func TestCounterModeMintProbesTakenNotRetired(t *testing.T) {
+	repo := &mintProbeIssueRepo{next: 4, taken: map[string]bool{"bd-5": true}}
+	u := &issueUseCaseImpl{issueRepo: repo, cfgRepo: mintProbeCfgRepo{prefix: "bd"}}
+	id, err := u.mintTopLevelID(t.Context(), &types.Issue{Title: "live row ahead", IssueType: types.TypeTask, Priority: 2}, "tester", false, nil)
+	if err != nil {
+		t.Fatalf("mintTopLevelID() = %v", err)
+	}
+	if id != "bd-6" {
+		t.Fatalf("mintTopLevelID() = %q, want bd-6, past the live bd-5", id)
+	}
+	if got := strings.Join(repo.probedTaken, ","); got != "bd-5,bd-6" {
+		t.Fatalf("Taken probed %s, want bd-5,bd-6, one probe per unclaimed candidate", got)
+	}
+	if len(repo.probedRetired) != 0 {
+		t.Fatalf("Retired probed %v, want none: the counter walk decides through Taken", repo.probedRetired)
 	}
 }
