@@ -31,6 +31,9 @@ func TestShouldFlagTrackedFile_RuntimeArtifacts(t *testing.T) {
 		{"push-state.json", true},
 		{"sync-state.json", true},
 		{"daemon.pid", true},
+		{"dolt-server.log.1", true},
+		{"dolt-server.binary", true},
+		{".dolt-server.binary-1234567890", true},
 		{"bd.lock", true},
 		{"dolt-server-config.yaml", true}, // GH#6191: absolute cfg_dir + per-machine port
 		{"dolt-server.activity", true},    // GH#6191

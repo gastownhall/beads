@@ -1873,6 +1873,13 @@ func Start(beadsDir string) (*State, error) {
 }
 
 func startLocked(beadsDir string) (*State, error) {
+	return startLockedWith(beadsDir, nil)
+}
+
+// startLockedWith is startLocked that, given a launch identity, launches only
+// that dolt executable: the dolt on PATH must still be the file the caller
+// vetted, or nothing is launched.
+func startLockedWith(beadsDir string, launch *binaryIdentity) (*State, error) {
 	cfg := DefaultConfig(beadsDir)
 	doltDir := ResolveDoltDir(beadsDir)
 
@@ -1895,6 +1902,12 @@ func startLocked(beadsDir string) (*State, error) {
 	doltBin, err := exec.LookPath("dolt")
 	if err != nil {
 		return nil, fmt.Errorf("dolt is not installed (not found in PATH)\n\nInstall from: https://docs.dolthub.com/introduction/installation")
+	}
+	// Read what the launch record will name before launching: an installer
+	// can replace the executable at any moment (see writeLaunchRecord).
+	draft := draftLaunchRecord(doltBin)
+	if launch != nil && (draft == nil || !draft.same(*launch)) {
+		return nil, fmt.Errorf("the dolt executable on PATH (%s) changed after it was checked; not launching it", doltBin)
 	}
 
 	// Refuse a dolt older than the minimum bd requires before launching it:
@@ -1999,6 +2012,8 @@ func startLocked(beadsDir string) (*State, error) {
 			if adoptPID > 0 {
 				_ = logFile.Close()
 				_ = os.WriteFile(pidPath(beadsDir), []byte(strconv.Itoa(adoptPID)), 0o600)
+				// Adoption is no evidence of the executable the server runs.
+				_ = os.Remove(binaryRecordPath(beadsDir))
 				_ = writePortFile(beadsDir, actualPort)
 				return verifyRemotesAPIState(cfg, &State{
 					Running:        true,
@@ -2092,7 +2107,7 @@ func startLocked(beadsDir string) (*State, error) {
 			sanitizeInheritedFDs()
 
 			logOffset := logSize(logFile)
-			srv, startErr := launchServer(cmd)
+			srv, startErr := startServerProcess(cmd)
 			if startErr != nil {
 				lastErr = startErr
 				if movable {
@@ -2106,7 +2121,11 @@ func startLocked(beadsDir string) (*State, error) {
 			// stop / killall) must still find the dolt that holds the
 			// database lock. Both files, with the real port: IsRunning stops
 			// a tracked server whose port it cannot determine.
-			if werr := writeServerStateFiles(beadsDir, srv.pid, actualPort); werr != nil {
+			werr := writeServerStateFiles(beadsDir, srv.pid, actualPort)
+			if werr == nil {
+				werr = writeLaunchRecord(beadsDir, srv.pid, doltBin, draft)
+			}
+			if werr != nil {
 				srv.killAndWait()
 				removeServerStateFiles(beadsDir)
 				lastErr = werr
@@ -2352,12 +2371,18 @@ func Restart(beadsDir string) (*State, error) {
 		return nil, err
 	}
 	defer releaseLifecycleLock(lockF)
+	return restartLocked(beadsDir, nil)
+}
 
+// restartLocked is Restart under a lifecycle lock the caller holds. A non-nil
+// launch is the dolt executable the caller vetted: the start refuses to
+// launch anything else (see startLockedWith).
+func restartLocked(beadsDir string, launch *binaryIdentity) (*State, error) {
 	previousPort := 0
 	if state, stateErr := IsRunning(beadsDir); stateErr == nil && state != nil {
 		previousPort = state.Port
 	}
-	if err := IgnoreNotRunning(stopLocked(beadsDir)); err != nil {
+	if err := IgnoreNotRunning(stopLockedWith(beadsDir, launch != nil)); err != nil {
 		return nil, fmt.Errorf("stopping Dolt server for restart: %w", err)
 	}
 	if previousPort > 0 {
@@ -2365,7 +2390,7 @@ func Restart(beadsDir string) (*State, error) {
 			return nil, fmt.Errorf("restoring SQL port %d for restart: %w", previousPort, err)
 		}
 	}
-	state, err := startLocked(beadsDir)
+	state, err := startLockedWith(beadsDir, launch)
 	if err != nil {
 		var restoreErr error
 		if previousPort > 0 {
@@ -2396,7 +2421,33 @@ func StopWithForce(beadsDir string, force bool) error {
 	return stopLocked(beadsDir)
 }
 
-func stopLocked(beadsDir string) error {
+func stopLocked(beadsDir string) error { return stopLockedWith(beadsDir, false) }
+
+// stopServerProcess stops a verified server process. A var so tests can make
+// a stop fail.
+var stopServerProcess = gracefulStop
+
+// stopExitWait bounds how long a replacement waits for a stopped server's
+// process to be gone before it starts the new one.
+const stopExitWait = 2 * time.Second
+
+// awaitProcessExit reports whether pid is gone within timeout.
+func awaitProcessExit(pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for isProcessAlive(pid) {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return true
+}
+
+// stopLockedWith is stopLocked. With keepUntilExit, as a replacement stops
+// the server it is about to replace, a process still alive after the stop
+// keeps its pid, port and launch record files, so the next open still finds
+// it, and the stop fails.
+func stopLockedWith(beadsDir string, keepUntilExit bool) error {
 	state, err := IsRunning(beadsDir)
 	if err != nil {
 		return err
@@ -2450,8 +2501,15 @@ func stopLocked(beadsDir string) error {
 		fmt.Fprintf(os.Stderr, "Warning: could not flush working set before stop: %v\n", flushErr)
 	}
 
-	if err := gracefulStop(state.PID, 5*time.Second); err != nil {
-		return errors.Join(err, cleanupStateFiles(beadsDir))
+	stopErr := stopServerProcess(state.PID, 5*time.Second)
+	if keepUntilExit && (stopErr != nil || !awaitProcessExit(state.PID, stopExitWait)) && isProcessAlive(state.PID) {
+		if stopErr == nil {
+			stopErr = errors.New("it is still running")
+		}
+		return fmt.Errorf("PID %d did not stop, so its state files are kept: %w", state.PID, stopErr)
+	}
+	if stopErr != nil {
+		return errors.Join(stopErr, cleanupStateFiles(beadsDir))
 	}
 
 	// In debug mode, rotate cpu.pprof → cpu-<timestamp>.pprof so the next
@@ -2475,13 +2533,13 @@ func sanitizeInheritedFDs() {
 	}
 }
 
-// cleanupStateFiles removes all server state files (PID and port).
+// cleanupStateFiles removes all server state files (PID, port and binary record).
 // Returns a joined error for non-NotExist removal failures so callers
 // can surface filesystem problems while still treating "already clean"
 // as success. Logs non-NotExist errors at debug level (GH#2670).
 func cleanupStateFiles(beadsDir string) error {
 	var errs []error
-	for _, path := range []string{pidPath(beadsDir), portPath(beadsDir)} {
+	for _, path := range []string{pidPath(beadsDir), portPath(beadsDir), binaryRecordPath(beadsDir)} {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			debug.Logf("failed to remove server state file %s: %v", path, err)
 			errs = append(errs, err)
@@ -2494,6 +2552,7 @@ func StateFilePaths(beadsDir string) []string {
 	return []string{
 		pidPath(beadsDir),
 		portPath(beadsDir),
+		binaryRecordPath(beadsDir),
 		lockPath(beadsDir),
 		logPath(beadsDir),
 		logPath(beadsDir) + ".1",
