@@ -1,6 +1,10 @@
 package dolt
 
 import (
+	"fmt"
+	"math/rand"
+	"reflect"
+	"sort"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/depid"
@@ -422,6 +426,106 @@ func TestGetDependentRecordsForIssues(t *testing.T) {
 		t.Fatalf("GetDependentRecordsForIssues(nil): %v", err)
 	} else if len(got) != 0 {
 		t.Fatalf("GetDependentRecordsForIssues(nil) = %v, want empty", got)
+	}
+}
+
+// TestReadComponentMatchesAPerIssueWalk runs DoltStore.ReadComponent, the
+// server-mode read bd graph takes, against the per-issue walk it replaces, over
+// a random graph of durable issues and wisps with cycles. The walk order must
+// match, and each issue's edges must be what GetDependencyRecords returns. The
+// embedded store shares issueops.ReadComponentInTx and runs the larger version
+// of this test.
+func TestReadComponentMatchesAPerIssueWalk(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	const durable, wisps = 16, 5
+	ids := make([]string, 0, durable+wisps)
+	for i := 0; i < durable+wisps; i++ {
+		id := fmt.Sprintf("rcs-%02d", i)
+		issue := &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: i >= durable}
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+		ids = append(ids, id)
+	}
+	rnd := rand.New(rand.NewSource(8324))
+	depTypes := []types.DependencyType{types.DepRelated, types.DepRelatesTo, types.DepDiscoveredFrom}
+	seen := make(map[[2]string]bool)
+	for added := 0; added < 30; {
+		from, to := ids[rnd.Intn(len(ids))], ids[rnd.Intn(len(ids))]
+		if from == to || seen[[2]string{from, to}] {
+			continue
+		}
+		seen[[2]string{from, to}] = true
+		dep := &types.Dependency{IssueID: from, DependsOnID: to, Type: depTypes[rnd.Intn(len(depTypes))]}
+		if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+			t.Fatalf("add dep %s -> %s: %v", from, to, err)
+		}
+		added++
+	}
+
+	walk := func(root *types.Issue) []string {
+		order := []string{root.ID}
+		visited := map[string]bool{root.ID: true}
+		for queue := []string{root.ID}; len(queue) > 0; {
+			id := queue[0]
+			queue = queue[1:]
+			dependents, err := store.GetDependents(ctx, id)
+			if err != nil {
+				t.Fatalf("GetDependents(%s): %v", id, err)
+			}
+			dependencies, err := store.GetDependencies(ctx, id)
+			if err != nil {
+				t.Fatalf("GetDependencies(%s): %v", id, err)
+			}
+			for _, issue := range append(dependents, dependencies...) {
+				if !visited[issue.ID] {
+					visited[issue.ID] = true
+					order = append(order, issue.ID)
+					queue = append(queue, issue.ID)
+				}
+			}
+		}
+		return order
+	}
+	edgeKeys := func(deps []*types.Dependency) []string {
+		keys := make([]string, 0, len(deps))
+		for _, dep := range deps {
+			keys = append(keys, dep.IssueID+">"+dep.DependsOnID+":"+string(dep.Type))
+		}
+		sort.Strings(keys)
+		return keys
+	}
+
+	for _, rootID := range []string{"rcs-00", "rcs-09", "rcs-17"} {
+		root, err := store.GetIssue(ctx, rootID)
+		if err != nil {
+			t.Fatalf("GetIssue(%s): %v", rootID, err)
+		}
+		component, err := store.ReadComponent(ctx, root)
+		if err != nil {
+			t.Fatalf("ReadComponent(%s): %v", rootID, err)
+		}
+		got := make([]string, 0, len(component.Issues))
+		for _, issue := range component.Issues {
+			got = append(got, issue.ID)
+		}
+		if want := walk(root); !reflect.DeepEqual(got, want) {
+			t.Errorf("walk from %s:\n got %v\nwant %v", rootID, got, want)
+		}
+		for _, id := range got {
+			records, err := store.GetDependencyRecords(ctx, id)
+			if err != nil {
+				t.Fatalf("GetDependencyRecords(%s): %v", id, err)
+			}
+			if g, w := edgeKeys(component.Outgoing[id]), edgeKeys(records); !reflect.DeepEqual(g, w) {
+				t.Errorf("edges of %s:\n got %v\nwant %v", id, g, w)
+			}
+		}
 	}
 }
 

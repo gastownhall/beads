@@ -335,6 +335,7 @@
 40 16 TestExternalCapabilityBlocksEmbeddedReadyAndAppearsInTree
 40 16 TestGetReadyWorkIncludeEphemeralAppliesWispFilters
 40 16 TestMergeWithStrategy_OursKeepsLocal
+40 16 TestReadComponentFollowsBothPlanesOfADualIDEmbedded
 40 16 TestWithPeerAuth_DivergedRemoteURLFailsClosed
 
 40 17 TestAddDependency
@@ -347,6 +348,7 @@
 40 17 TestEmbeddedReaderListRejectsATypeOutsideTheWorkspaceVocabulary
 40 17 TestEmbeddedReadyClaimerLeasesADurableWinButNotAnEphemeralOne
 40 17 TestHeartbeatMatchesActorAcrossSpellingEmbedded
+40 17 TestReadComponentMatchesAPerIssueWalkEmbedded
 40 17 TestStatsReporterContract
 40 17 TestVersionReconcilerContract
 
@@ -539,6 +541,7 @@
 40 30 TestEmbeddedReaderReadySortPoliciesOrderTheSameRows
 40 30 TestEmbeddedTransactionStandaloneWispMutationDoesNotPublishUnrelatedDurableChanges
 40 30 TestLegacyTrackedIgnoredCursorUnwedgesPull
+40 30 TestReadComponentToleratesAMissingWispDependencyTableEmbedded
 40 30 TestUpdateMergeOps_DoltEngine_TwoIssues
 
 40 31 TestBumpEpochCarryingWritesOneCarryRowPerLiveIDNamingTheLineageRoot

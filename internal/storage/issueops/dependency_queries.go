@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
@@ -25,6 +26,118 @@ func GetAllDependencyRecordsInTx(ctx context.Context, tx DBTX) (map[string][]*ty
 		}
 	}
 	return result, nil
+}
+
+// ReadComponentInTx walks the connected component around root breadth-first, one
+// level at a time, following edges of every type in both directions and reading
+// each level with batched statements. See storage.Component for the order of the
+// result.
+//
+// The walk follows the rows of both dependency tables for every issue, because
+// an id can exist in both planes: a pull can bring another clone's promoted
+// issue and its edges next to a local wisp copy. The edges it reports for an
+// issue come only from that issue's own plane, the plane GetDependencyRecords
+// reads. An id that names no issue (a dangling edge or an external reference)
+// is not walked.
+func ReadComponentInTx(ctx context.Context, tx DBTX, root *types.Issue) (*storage.Component, error) {
+	component := &storage.Component{
+		Issues:   []*types.Issue{root},
+		Outgoing: make(map[string][]*types.Dependency),
+	}
+	visited := map[string]bool{root.ID: true}
+
+	for frontier := []string{root.ID}; len(frontier) > 0; {
+		inbound, err := GetDependentRecordsForIssuesInTx(ctx, tx, frontier)
+		if err != nil {
+			return nil, fmt.Errorf("read component: %w", err)
+		}
+		durable := make(map[string][]*types.Dependency)
+		if err := getDependencyRecordsIntoFromTable(ctx, tx, "dependencies", frontier, durable); err != nil {
+			return nil, fmt.Errorf("read component: %w", err)
+		}
+		wisp := make(map[string][]*types.Dependency)
+		if err := getDependencyRecordsIntoFromTable(ctx, tx, "wisp_dependencies", frontier, wisp); err != nil {
+			if !optionalBlockedTable("wisp_dependencies") || !isTableNotExistError(err) {
+				return nil, fmt.Errorf("read component: %w", err)
+			}
+		}
+
+		// One side per issue and direction: dependents, then dependencies.
+		sides := make([][]string, 0, 2*len(frontier))
+		for _, id := range frontier {
+			dependents := make([]string, 0, len(inbound[id]))
+			for _, dep := range inbound[id] {
+				dependents = append(dependents, dep.IssueID)
+			}
+			dependencies := make([]string, 0, len(durable[id])+len(wisp[id]))
+			for _, dep := range durable[id] {
+				dependencies = append(dependencies, dep.DependsOnID)
+			}
+			for _, dep := range wisp[id] {
+				dependencies = append(dependencies, dep.DependsOnID)
+			}
+			sides = append(sides, dependents, dependencies)
+		}
+
+		unvisited := make(map[string]struct{})
+		for _, side := range sides {
+			for _, id := range side {
+				if !visited[id] {
+					unvisited[id] = struct{}{}
+				}
+			}
+		}
+		ids := make([]string, 0, len(unvisited))
+		for id := range unvisited {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+
+		wispSet, err := WispIDSetInTx(ctx, tx, append(append([]string(nil), frontier...), ids...))
+		if err != nil {
+			return nil, fmt.Errorf("read component: %w", err)
+		}
+		for _, id := range frontier {
+			if _, isWisp := wispSet[id]; isWisp {
+				component.Outgoing[id] = wisp[id]
+			} else {
+				component.Outgoing[id] = durable[id]
+			}
+		}
+
+		hydrated, err := GetIssuesByIDsInTx(ctx, tx, ids, wispSet)
+		if err != nil {
+			return nil, fmt.Errorf("read component: %w", err)
+		}
+		sort.Slice(hydrated, func(i, j int) bool {
+			_, iWisp := wispSet[hydrated[i].ID]
+			_, jWisp := wispSet[hydrated[j].ID]
+			if iWisp != jWisp {
+				return jWisp
+			}
+			return hydrated[i].ID < hydrated[j].ID
+		})
+		position := make(map[string]int, len(hydrated))
+		for i, issue := range hydrated {
+			position[issue.ID] = i
+		}
+
+		var next []string
+		for _, side := range sides {
+			sort.SliceStable(side, func(i, j int) bool { return position[side[i]] < position[side[j]] })
+			for _, id := range side {
+				at, found := position[id]
+				if !found || visited[id] {
+					continue
+				}
+				visited[id] = true
+				component.Issues = append(component.Issues, hydrated[at])
+				next = append(next, id)
+			}
+		}
+		frontier = next
+	}
+	return component, nil
 }
 
 // GetExternalBlockingDependencyRecordsInTx returns explicit external: edges
