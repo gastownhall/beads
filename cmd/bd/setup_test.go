@@ -1331,3 +1331,81 @@ func TestRunRecipe_CopilotLegacyConverted(t *testing.T) {
 		t.Fatalf("guidance appears %d times after conversion; want 1:\n%s", n, got)
 	}
 }
+
+// A shared instructions file that is a symbolic link is refused — before
+// either recipe path is touched — by install and --remove alike: managing
+// a section in it would mutate whatever the link leads to, and removing it
+// would unlink the link. The link, its target and the manifest are
+// preserved (GH#7431).
+func TestRunRecipe_CopilotRefusesSymlinkedInstructions(t *testing.T) {
+	for _, mode := range []struct {
+		name   string
+		remove bool
+	}{
+		{name: "install", remove: false},
+		{name: "remove", remove: true},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+
+			t.Chdir(tmpDir)
+			t.Setenv("BEADS_DIR", "")
+			resetSetupResolutionCaches(t)
+			resetSetupGlobals(t)
+
+			const userContent = "# Team Copilot rules\n"
+			target := filepath.Join(tmpDir, "real-instructions.md")
+			if err := os.WriteFile(target, []byte(userContent), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			instructions := filepath.Join(tmpDir, ".github", "copilot-instructions.md")
+			if err := os.MkdirAll(filepath.Dir(instructions), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, instructions); err != nil {
+				t.Skipf("symlink: %v", err)
+			}
+			manifest := filepath.Join(tmpDir, ".copilot-plugin", "plugin.json")
+			if mode.remove {
+				if err := os.MkdirAll(filepath.Dir(manifest), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(manifest, []byte("{}\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			setupRemove = mode.remove
+			t.Cleanup(func() { setupRemove = false })
+
+			var runErr error
+			stderr := captureStderrForCopilotSetup(t, func() {
+				_ = captureStdout(t, func() error {
+					runErr = runRecipe("copilot")
+					return nil
+				})
+			})
+			if runErr == nil {
+				t.Fatalf("bd setup copilot (%s) accepted a symlinked instructions file", mode.name)
+			}
+			if !strings.Contains(stderr, ".github/copilot-instructions.md") {
+				t.Fatalf("refusal does not name the file:\n%s", stderr)
+			}
+			info, err := os.Lstat(instructions)
+			if err != nil || info.Mode()&os.ModeSymlink == 0 {
+				t.Fatalf("the link was removed or replaced (lstat: %+v, %v)", info, err)
+			}
+			got, err := os.ReadFile(target)
+			if err != nil || string(got) != userContent {
+				t.Fatalf("the link's target changed: %q, %v", got, err)
+			}
+			if mode.remove {
+				if _, err := os.Stat(manifest); err != nil {
+					t.Fatalf("manifest was removed before the refusal: %v", err)
+				}
+			} else if _, err := os.Stat(manifest); !os.IsNotExist(err) {
+				t.Fatalf("manifest was written before the refusal (stat err %v)", err)
+			}
+		})
+	}
+}

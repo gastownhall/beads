@@ -257,3 +257,41 @@ func TestSharedSectionRemoveFile(t *testing.T) {
 		})
 	}
 }
+
+func TestSharedSectionRefusesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real.md")
+	if err := os.WriteFile(target, []byte("# My rules\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name     string
+		dangling bool
+	}{
+		{name: "link to a real file"},
+		{name: "dangling link", dangling: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			link := filepath.Join(dir, tt.name[strings.IndexByte(tt.name, ' ')+1:]+"-link.md")
+			linkTarget := target
+			if tt.dangling {
+				linkTarget = filepath.Join(dir, "nowhere.md")
+			}
+			if err := os.Symlink(linkTarget, link); err != nil {
+				t.Skipf("symlink: %v", err)
+			}
+			if _, err := UpsertSharedSection(link, sharedBody, sharedLegacy); err == nil {
+				t.Error("UpsertSharedSection accepted a symbolic link")
+			}
+			if _, _, err := RemoveSharedSection(link, sharedLegacy); err == nil {
+				t.Error("RemoveSharedSection accepted a symbolic link")
+			}
+			if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+				t.Errorf("the link was removed or replaced: %+v, %v", info, err)
+			}
+			if got, err := os.ReadFile(target); err != nil || string(got) != "# My rules\n" {
+				t.Errorf("the link's target changed: %q, %v", got, err)
+			}
+		})
+	}
+}

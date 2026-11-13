@@ -469,10 +469,14 @@ func translateSetupError(err error) error {
 
 // preflightSharedPath reads a shared instruction file before install or
 // --remove mutates any recipe path, and refuses what neither can own
-// safely, naming the file: beads markers whose span cannot be named (a
+// safely, naming the file: a symbolic link (whose section would be managed
+// in whatever it leads to), beads markers whose span cannot be named (a
 // dangling, reversed, nested or duplicated pair, an unclosed BEGIN
 // comment), or a read error. A missing file is fine — that is an install.
 func preflightSharedPath(path, legacy string) error {
+	if err := setup.RefuseSharedSymlink(path); err != nil {
+		return fmt.Errorf("%s is a symbolic link, not a file bd will manage a section in", remedy.PrintedValue(path))
+	}
 	data, err := os.ReadFile(path) // #nosec G304 -- a bd setup recipe's own path
 	if os.IsNotExist(err) {
 		return nil

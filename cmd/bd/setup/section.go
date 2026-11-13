@@ -143,6 +143,9 @@ func upsertSharedSectionText(content, body, legacy string) (string, error) {
 // bytes and timestamps — so reinstall is byte-stable. It reports whether it
 // wrote the file.
 func UpsertSharedSection(path, body, legacy string) (bool, error) {
+	if err := RefuseSharedSymlink(path); err != nil {
+		return false, err
+	}
 	data, err := os.ReadFile(path) // #nosec G304 -- a bd setup recipe's own path
 	if err != nil && !os.IsNotExist(err) {
 		return false, fmt.Errorf("read file: %w", err)
@@ -161,6 +164,18 @@ func UpsertSharedSection(path, body, legacy string) (bool, error) {
 	return true, nil
 }
 
+// RefuseSharedSymlink refuses a symbolic link at a shared instruction
+// file's path, a dangling one included (Lstat tells those apart from a
+// missing file): upserting or removing a section there would act on
+// whatever the link leads to instead of a file in this repository. A
+// read-only --check may still follow the link.
+func RefuseSharedSymlink(path string) error {
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("shared instruction file is a symbolic link: %s", path)
+	}
+	return nil
+}
+
 // RemoveSharedSection takes bd's section out of the shared instruction file
 // at path. A file with no markers is left alone and reports nothing removed;
 // a legacy whole-file install, and a file holding nothing but the section,
@@ -170,6 +185,9 @@ func UpsertSharedSection(path, body, legacy string) (bool, error) {
 // are an error and change nothing. The caller drops the file's directory
 // only when the file itself was deleted.
 func RemoveSharedSection(path, legacy string) (removedSection, deleted bool, err error) {
+	if err := RefuseSharedSymlink(path); err != nil {
+		return false, false, err
+	}
 	data, err := os.ReadFile(path) // #nosec G304 -- a bd setup recipe's own path
 	if os.IsNotExist(err) {
 		return false, false, nil
