@@ -748,3 +748,99 @@ func TestKVCommandsDoNotCommitAFailedWrite(t *testing.T) {
 			len(fake.userKVMessages), fake.configOnlyCalls)
 	}
 }
+
+type closedConfigCommitStore struct{ fakeConfigCommitStore }
+
+func (*closedConfigCommitStore) IsClosed() bool { return true }
+
+// commitKVWrite commits nothing where something else owns that commit: the
+// embedded end-of-command auto-commit, the proxied role's unit of work, and
+// dolt.auto-commit batch/off, which defer it to `bd dolt commit`. A nil or
+// closed store has nothing to commit, and nothing-to-commit is no failure.
+func TestCommitKVWriteIsNoOpWhereSomethingElseOwnsTheCommit(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func()
+		store func() *fakeConfigCommitStore
+		calls int
+	}{
+		{name: "embedded", setup: func() { serverMode, proxiedServerMode = false, false }},
+		{name: "proxied", setup: func() { proxiedServerMode = true }},
+		{name: "batch", setup: func() { serverMode, doltAutoCommit = true, string(doltAutoCommitBatch) }},
+		{name: "off", setup: func() { serverMode, doltAutoCommit = true, string(doltAutoCommitOff) }},
+		{name: "nothing to commit", setup: func() { serverMode = true }, calls: 1,
+			store: func() *fakeConfigCommitStore {
+				return &fakeConfigCommitStore{err: errors.New("nothing to commit")}
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			saveStorageMode(t)
+			tc.setup()
+			fake := &fakeConfigCommitStore{}
+			if tc.store != nil {
+				fake = tc.store()
+			}
+			if err := commitKVWrite(context.Background(), fake, "kv set"); err != nil {
+				t.Fatalf("commitKVWrite: %v, want a no-op", err)
+			}
+			if fake.userKVCalls != tc.calls || fake.configOnlyCalls != 0 {
+				t.Fatalf("commit calls: user kv %d, config only %d; want %d and 0",
+					fake.userKVCalls, fake.configOnlyCalls, tc.calls)
+			}
+		})
+	}
+
+	t.Run("nil store", func(t *testing.T) {
+		saveStorageMode(t)
+		serverMode = true
+		if err := commitKVWrite(context.Background(), nil, "kv clear"); err != nil {
+			t.Fatalf("commitKVWrite with nil store: %v, want no-op", err)
+		}
+	})
+
+	t.Run("closed store", func(t *testing.T) {
+		saveStorageMode(t)
+		serverMode = true
+		closed := &closedConfigCommitStore{}
+		if err := commitKVWrite(context.Background(), closed, "kv clear"); err != nil {
+			t.Fatalf("commitKVWrite with a closed store: %v, want no-op", err)
+		}
+		if closed.userKVCalls != 0 {
+			t.Fatalf("CommitConfigUserKVOnly calls = %d on a closed store, want 0", closed.userKVCalls)
+		}
+	})
+}
+
+// Under dolt.auto-commit batch or off a server-mode kv write still lands but
+// makes no version commit and no warning: it stays in the working set for
+// `bd dolt commit`, like every other deferred server-mode write.
+func TestKVCommandsDeferTheCommitUnderBatchAndOff(t *testing.T) {
+	for _, mode := range []doltAutoCommitMode{doltAutoCommitBatch, doltAutoCommitOff} {
+		t.Run(string(mode), func(t *testing.T) {
+			fake := &kvCommitStore{rows: map[string]string{}}
+			useKVCommitStore(t, fake, false)
+			doltAutoCommit = string(mode)
+
+			for _, step := range kvWriteSteps() {
+				var runErr error
+				_, stderr := captureStdio(t, func() { runErr = step.run() })
+				if runErr != nil {
+					t.Fatalf("bd %s: %v", step.verb, runErr)
+				}
+				if strings.Contains(stderr, "Warning") {
+					t.Errorf("bd %s warned under %s:\n%s", step.verb, mode, stderr)
+				}
+				if step.verb == "kv set" && fake.rows["kv.gh7523"] != "landed" {
+					t.Errorf("bd kv set under %s did not land the row: %v", mode, fake.rows)
+				}
+			}
+			if len(fake.rows) != 0 {
+				t.Errorf("config rows = %v, want the clear landed", fake.rows)
+			}
+			if len(fake.userKVMessages) != 0 || fake.configOnlyCalls != 0 {
+				t.Errorf("version commits under %s: user kv %d, config only %d; want none",
+					mode, len(fake.userKVMessages), fake.configOnlyCalls)
+			}
+		})
+	}
+}
