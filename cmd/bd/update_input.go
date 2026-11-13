@@ -45,14 +45,15 @@ type updateInput struct {
 }
 
 // normalizeAssigneeInput folds the hidden-empty spellings of an assignee
-// value given to update, assign or batch (bd-wkcfuz) into the "" clear
-// sentinel that `--assignee ""` already uses: a bare "-" and whitespace-only
-// text. Stored verbatim, both read as ASSIGNED to every emptiness check
-// (claim, ready --unassigned, the transfer fence), so a bead meant to go back
-// to the pool stayed hooked. Every other value passes through byte-for-byte,
-// a spaced dash (" - ") and spaced names included.
+// value given to update, assign or batch (bd-wkcfuz, #8203) into the "" clear
+// sentinel that `--assignee ""` already uses: whitespace-only text and a "-"
+// with nothing but whitespace around it ("-", " - "). Stored verbatim, they
+// read as ASSIGNED to every emptiness check (claim, ready --unassigned, the
+// transfer fence), so a bead meant to go back to the pool stayed hooked. The
+// trim only decides whether a value is a clear: every other value passes
+// through byte-for-byte, spaced names (" alice ") included.
 func normalizeAssigneeInput(v string) string {
-	if v == "-" || strings.TrimSpace(v) == "" {
+	if t := strings.TrimSpace(v); t == "" || t == "-" {
 		return ""
 	}
 	return v

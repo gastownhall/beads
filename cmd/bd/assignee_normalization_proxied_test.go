@@ -28,9 +28,9 @@ func bdProxiedBatchOK(t *testing.T, bd, dir, script string) {
 // TestProxiedServerAssigneeHiddenEmptyClears is the proxied-server half of
 // bd-wkcfuz: the proxied update gather, the proxied assign handler, and the
 // proxied batch route each read the assignee themselves, so each must fold a
-// bare "-" and whitespace-only text into the `--assignee ""` clear, keep every
-// other value verbatim, and leave the live-claim fence and --if-assignee
-// literal.
+// "-" (bare or padded with whitespace) and whitespace-only text into the
+// `--assignee ""` clear, keep every other value verbatim, and leave the
+// live-claim fence and --if-assignee literal.
 func TestProxiedServerAssigneeHiddenEmptyClears(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
@@ -50,7 +50,7 @@ func TestProxiedServerAssigneeHiddenEmptyClears(t *testing.T) {
 	t.Run("AC1_update_clears_like_explicit_empty", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "hpa")
-		for _, value := range []string{"", "-", " ", "\t"} {
+		for _, value := range []string{"", "-", " ", "\t", "  - "} {
 			issue := assigned(t, p, "Update clear via proxy")
 			bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--actor", "dispatcher", "--assignee", value)
 			if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Assignee != "" {
@@ -74,7 +74,7 @@ func TestProxiedServerAssigneeHiddenEmptyClears(t *testing.T) {
 	t.Run("AC2_assign_positional_clears", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "hpb")
-		for _, value := range []string{"", "-", " "} {
+		for _, value := range []string{"", "-", " ", " - "} {
 			issue := assigned(t, p, "Assign clear via proxy")
 			out, err := bdProxiedRun(t, bd, p.dir, "assign", issue.ID, value, "--actor", "dispatcher")
 			if err != nil {
@@ -92,7 +92,7 @@ func TestProxiedServerAssigneeHiddenEmptyClears(t *testing.T) {
 	t.Run("AC3_batch_update_clears_like_assignee_eq", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "hpc")
-		for _, kv := range []string{"assignee=", "assignee=-", `assignee=" "`} {
+		for _, kv := range []string{"assignee=", "assignee=-", `assignee=" "`, `assignee=" - "`} {
 			issue := assigned(t, p, "Batch clear via proxy")
 			bdProxiedBatchOK(t, bd, p.dir, "update "+issue.ID+" "+kv+"\n")
 			if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Assignee != "" {
@@ -113,7 +113,7 @@ func TestProxiedServerAssigneeHiddenEmptyClears(t *testing.T) {
 
 		for _, value := range []string{"-", " "} {
 			issue := claimAs(t, p, "holder")
-			if out, code := bdProxiedUpdateFailCode(t, bd, p.dir, issue.ID, "--actor", "thief", "--assignee", value); code != 1 || !strings.Contains(out, "holder") {
+			if out, code := bdProxiedUpdateFailCode(t, bd, p.dir, issue.ID, "--actor", "thief", "--assignee", value); code != 1 || !strings.Contains(out, `held by "holder"`) {
 				t.Errorf("update --assignee %q over a live claim: exit=%d, want 1 naming the holder\n%s", value, code, out)
 			}
 			if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Assignee != "holder" || got.Status != types.StatusInProgress {
@@ -125,7 +125,7 @@ func TestProxiedServerAssigneeHiddenEmptyClears(t *testing.T) {
 			}
 
 			issue = claimAs(t, p, "holder")
-			if out, err := bdProxiedRun(t, bd, p.dir, "assign", issue.ID, value, "--actor", "thief"); err == nil || !strings.Contains(string(out), "holder") {
+			if out, err := bdProxiedRun(t, bd, p.dir, "assign", issue.ID, value, "--actor", "thief"); err == nil || !strings.Contains(string(out), `held by "holder"`) {
 				t.Errorf("assign %q over a live claim: err=%v, want a refusal naming the holder\n%s", value, err, out)
 			}
 			if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Assignee != "holder" {
@@ -143,7 +143,7 @@ func TestProxiedServerAssigneeHiddenEmptyClears(t *testing.T) {
 	t.Run("AC5_non_clear_values_verbatim_and_guard_literal", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "hpe")
-		for _, name := range []string{"a-b", "--", " - "} {
+		for _, name := range []string{"a-b", "--", " alice "} {
 			issue := bdProxiedCreate(t, bd, p.dir, "Hold name via proxy")
 			bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--assignee", name)
 			if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Assignee != name {
@@ -152,24 +152,27 @@ func TestProxiedServerAssigneeHiddenEmptyClears(t *testing.T) {
 		}
 
 		issue := bdProxiedCreate(t, bd, p.dir, "Assign name via proxy")
-		if out, err := bdProxiedRun(t, bd, p.dir, "assign", issue.ID, " - "); err != nil {
-			t.Fatalf("assign %q failed: %v\n%s", " - ", err, out)
+		if out, err := bdProxiedRun(t, bd, p.dir, "assign", issue.ID, " alice "); err != nil {
+			t.Fatalf("assign %q failed: %v\n%s", " alice ", err, out)
 		}
-		if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Assignee != " - " {
-			t.Errorf("assign %q: assignee=%q, want verbatim", " - ", got.Assignee)
+		if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Assignee != " alice " {
+			t.Errorf("assign %q: assignee=%q, want verbatim", " alice ", got.Assignee)
 		}
 
 		issue = bdProxiedCreate(t, bd, p.dir, "Batch name via proxy")
-		bdProxiedBatchOK(t, bd, p.dir, "update "+issue.ID+` assignee=" - "`+"\n")
-		if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Assignee != " - " {
-			t.Errorf("batch assignee=%q: assignee=%q, want verbatim", " - ", got.Assignee)
+		bdProxiedBatchOK(t, bd, p.dir, "update "+issue.ID+` assignee=" alice "`+"\n")
+		if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Assignee != " alice " {
+			t.Errorf("batch assignee=%q: assignee=%q, want verbatim", " alice ", got.Assignee)
 		}
 
+		// A legacy "-" row in progress: --if-assignee names the stored value,
+		// so another actor clears it without --force (the CHANGELOG recipe).
 		issue = bdProxiedCreate(t, bd, p.dir, "Legacy dash via proxy", "--assignee", "-")
 		if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Assignee != "-" {
 			t.Fatalf("create --assignee -: assignee=%q, want the raw dash", got.Assignee)
 		}
-		bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--if-assignee", "-", "--assignee", "")
+		bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--status", "in_progress")
+		bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--actor", "dispatcher", "--if-assignee", "-", "--assignee", "")
 		if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Assignee != "" {
 			t.Fatalf("--if-assignee - on a legacy dash row: assignee=%q, want cleared", got.Assignee)
 		}
