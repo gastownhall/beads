@@ -1056,3 +1056,39 @@ func (s *testSuite) TestIssueUseCase_CallerNamedChildNeverLowersTheCounter() {
 	s.Require().NoError(err)
 	s.requireCounterRow("cn-hi", 12)
 }
+
+// TestIssueUseCase_CallerNamedWispChildAdvancesWispCounter: through the real
+// CreateWisp path (AC-4), a caller-named child of a wisp parent advances the
+// parent's wisp_child_counters row and leaves child_counters unchanged.
+func (s *testSuite) TestIssueUseCase_CallerNamedWispChildAdvancesWispCounter() {
+	s.resetMintConfig("cn", "")
+	uc := s.issueUseCase()
+	_, err := uc.CreateWisp(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "wisp parent", IssueType: types.TypeTask, Priority: 2, Ephemeral: true},
+		ExplicitID: "cn-w",
+	}, "tester")
+	s.Require().NoError(err)
+	before := durableCounterRows(s.counterTablesFingerprint())
+
+	_, err = uc.CreateWisp(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "wisp child", IssueType: types.TypeTask, Priority: 2, Ephemeral: true},
+		ExplicitID: "cn-w.3",
+	}, "tester")
+	s.Require().NoError(err)
+
+	s.requireCounterTable("wisp_child_counters", "cn-w", 3)
+	s.Equal(before, durableCounterRows(s.counterTablesFingerprint()),
+		"a wisp parent's caller-named child must leave child_counters unchanged")
+}
+
+// durableCounterRows keeps only the child_counters lines of a
+// counterTablesFingerprint.
+func durableCounterRows(fingerprint string) string {
+	var b strings.Builder
+	for _, line := range strings.SplitAfter(fingerprint, "\n") {
+		if strings.HasPrefix(line, "child_counters:") {
+			b.WriteString(line)
+		}
+	}
+	return b.String()
+}
