@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -67,6 +68,66 @@ func TestGenerateIssueIDCounterModeWalksPastAClaimedValue(t *testing.T) {
 	}
 	if id != "bd-6" {
 		t.Fatalf("GenerateIssueIDInTable(counter) = %q, want bd-6 past the claimed bd-5", id)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// expectCounterCandidate expects one counter-mode candidate: the bump, the
+// read-back of next, and the one both-planes taken probe that decides it.
+func expectCounterCandidate(mock sqlmock.Sqlmock, next int, taken bool) {
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE issue_counter SET last_id = last_id + 1 WHERE prefix = ?")).
+		WithArgs("bd").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT last_id FROM issue_counter WHERE prefix = ?")).
+		WithArgs("bd").WillReturnRows(sqlmock.NewRows([]string{"last_id"}).AddRow(next))
+	id := fmt.Sprintf("bd-%d", next)
+	count := 0
+	if taken {
+		count = 1
+	}
+	mock.ExpectQuery(regexp.QuoteMeta(idTakenSQL)).WithArgs(id, id, id, id).
+		WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(count))
+}
+
+// TestGenerateIssueIDCounterModeWalksPastALiveRow pins GH#8456: a counter
+// value a live row already holds (an explicit, imported or wisp id, none of
+// which move the counter) is skipped like a retired one, decided by the same
+// one both-planes probe hash mode asks, instead of being handed out and then
+// overwritten by an upsert create or refused by a create-only one.
+func TestGenerateIssueIDCounterModeWalksPastALiveRow(t *testing.T) {
+	db, mock := newIDRetentionMock(t)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT value FROM config WHERE `key` = ?")).
+		WithArgs("issue_id_mode").WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow("counter"))
+	expectCounterCandidate(mock, 5, true)
+	expectCounterCandidate(mock, 6, false)
+
+	id, err := GenerateIssueIDInTable(context.Background(), db, "issues", "bd", &types.Issue{}, "actor", nil)
+	if err != nil {
+		t.Fatalf("GenerateIssueIDInTable(counter) = %v", err)
+	}
+	if id != "bd-6" {
+		t.Fatalf("GenerateIssueIDInTable(counter) = %q, want bd-6 past the live bd-5", id)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestGenerateIssueIDCounterModeGivesUpAfterTheSkipBound pins the bound: a
+// counter that keeps landing on held values fails loudly instead of walking
+// forever.
+func TestGenerateIssueIDCounterModeGivesUpAfterTheSkipBound(t *testing.T) {
+	db, mock := newIDRetentionMock(t)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT value FROM config WHERE `key` = ?")).
+		WithArgs("issue_id_mode").WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow("counter"))
+	for n := 1; n <= maxCounterSkips+1; n++ {
+		expectCounterCandidate(mock, n, true)
+	}
+
+	id, err := GenerateIssueIDInTable(context.Background(), db, "issues", "bd", &types.Issue{}, "actor", nil)
+	if err == nil || !strings.Contains(err.Error(), "taken or claimed") {
+		t.Fatalf("GenerateIssueIDInTable(counter) = %q, %v; want the skip-bound error", id, err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
