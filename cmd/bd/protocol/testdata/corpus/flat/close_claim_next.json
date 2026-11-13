@@ -1,0 +1,48 @@
+{
+  "claimed": {
+    "assignee": "protocol-test",
+    "created_at": "<TS>",
+    "created_by": "protocol-test",
+    "description": "updated corpus root",
+    "heartbeat_at": "<TS>",
+    "id": "corpus-root",
+    "issue_type": "feature",
+    "labels": [
+      "corpus-label"
+    ],
+    "lease_expires_at": "<TS>",
+    "metadata": {
+      "phase": 2
+    },
+    "owner": "test@protocol.test",
+    "priority": 0,
+    "started_at": "<TS>",
+    "status": "in_progress",
+    "title": "Corpus root issue",
+    "updated_at": "<TS>"
+  },
+  "closed": [
+    {
+      "close_reason": "Closed",
+      "closed_at": "<TS>",
+      "created_at": "<TS>",
+      "created_by": "protocol-test",
+      "description": "deterministic corpus-closer",
+      "id": "corpus-closer",
+      "issue_type": "task",
+      "labels": [
+        "corpus-native"
+      ],
+      "metadata": {
+        "corpus": "native"
+      },
+      "notes": "corpus-closer notes",
+      "owner": "test@protocol.test",
+      "priority": 3,
+      "status": "closed",
+      "title": "Corpus closer subject",
+      "updated_at": "<TS>"
+    }
+  ],
+  "schema_version": 1
+}

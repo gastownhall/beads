@@ -40,22 +40,31 @@ declare -ar EMBEDDED_DOLT_VERSIONS=(
     "v1.1.0"
     "v1.1.2"
     "v1.2.2"
+    "v1.3.3"
+    "v1.3.4"
 )
 
-# Embedded-Dolt sources whose wisp plane is close enough to the 1.3.0 input
-# regimes to be worth seeding: v1.0.1 is the legacy single-target
+# Embedded-Dolt sources whose wisp plane is close enough to the candidate's
+# input regimes to be worth seeding: v1.0.1 is the legacy single-target
 # wisp_dependencies shape with no ignored-migration cursor, while v1.1.0,
 # v1.1.2 and v1.2.2 are the post-split shape with the cursor parked at
 # ignored-0011. Both regimes are replayed over populated rows by the candidate's
-# main 0054-0066 + ignored 0012-0025 chain. v1.2.2 is the v1.1.2 tree re-tagged
-# by the recovery release, so it adds no new regime — it is here because it is
-# the tag people in the field actually upgrade from. Also selects the
-# external Dolt oracle (DOLT_BIN) in tests/migration's targets.
+# main 0054-onward + ignored 0012-onward chain. v1.2.2 is the v1.1.2 tree
+# re-tagged by the recovery release, so it adds no new regime — it is here
+# because it is the tag people in the field actually upgrade from. v1.3.3 and
+# v1.3.4 (the N-2 and N-1 releases for 1.4.0) are a third regime: their wisp
+# plane is already complete (main cursor at 0066, ignored cursor at 0026,
+# trusted via leases.granted_node, events already in the ignored plane), so the
+# candidate runs only the trailing main 0067-onward + ignored 0027-onward chain
+# over populated rows, including the ignored-0031 events restore. Also selects
+# the external Dolt oracle (DOLT_BIN) in tests/migration's targets.
 declare -ar WISP_PLANE_VERSIONS=(
     "v1.0.1"
     "v1.1.0"
     "v1.1.2"
     "v1.2.2"
+    "v1.3.3"
+    "v1.3.4"
 )
 
 # The test server is an external compatibility fixture, not the runner's
@@ -102,6 +111,8 @@ declare -Ar STRICT_RELEASE_ASSETS=(
     ["v1.1.0|linux|amd64"]="beads_1.1.0_linux_amd64.tar.gz"
     ["v1.1.2|linux|amd64"]="beads_1.1.2_linux_amd64.tar.gz"
     ["v1.2.2|linux|amd64"]="beads_1.2.2_linux_amd64.tar.gz"
+    ["v1.3.3|linux|amd64"]="beads_1.3.3_linux_amd64.tar.gz"
+    ["v1.3.4|linux|amd64"]="beads_1.3.4_linux_amd64.tar.gz"
     # darwin/arm64: reviewed 2026-08-29 (ga-9sghx) so the corpus can run
     # natively on Apple Silicon. Every asset below was confirmed to exist via
     # `gh release view <version> -R gastownhall/beads`, and every checksum was
@@ -134,6 +145,8 @@ declare -Ar STRICT_RELEASE_SHA256=(
     ["v1.1.0|linux|amd64"]="b0f3dd607c3fb989ee08d0a6854fba80d0402971eb108f9af6170bc14d491a34"
     ["v1.1.2|linux|amd64"]="a72d71ed374955dc9f83a0f90b54bd7b6a0016709dd1676ae2e368651ed401c2"
     ["v1.2.2|linux|amd64"]="8140098a51d3b81d5548d1c5e6db1a2d9930e5d141efe2a4bff7d079c4d321e8"
+    ["v1.3.3|linux|amd64"]="10a7aebfd50549c33c43d185e3870bbd82b4f900b2a5e3129369ee6e2b0fb2e5"
+    ["v1.3.4|linux|amd64"]="175c26904bde3ff9168d2282ff6b56f17b17f60c22fa5acb3dacc9fb3465303a"
     # darwin/arm64 — see provenance note on STRICT_RELEASE_ASSETS above.
     ["v0.17.0|darwin|arm64"]="41479fabf76ff76912096bf2e9c1988a9b0d0dd673c7e693342f711770f6d763"
     ["v0.49.6|darwin|arm64"]="007dacd919eeac48a3a0ecb6aad305ef04e903de02c43a8163d2fd6a63d9ab7d"

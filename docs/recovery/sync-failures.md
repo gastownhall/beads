@@ -22,6 +22,11 @@ This runbook helps you recover from Dolt sync failures.
   pull` fails on `events` (on embedded storage: `merge conflicts in events
   require operator resolution`) — see
   [Pull fails on a clone still on the old release](#pull-fails-on-a-clone-still-on-the-old-release)
+- A merge commit created by a pull names the tracking ref
+  (`Merge branch 'origin/main' into main`) instead of quoting the remote
+  URL, or a merge commit from an older release quotes a URL that carries a
+  token — see
+  [Credentials in a remote URL and merge commits](#credentials-in-a-remote-url-and-merge-commits)
 
 ## Diagnosis
 
@@ -387,6 +392,40 @@ This is the re-clone that a clone already running the new binary takes in
 which also covers server mode. The clone's own commit history and `events`
 rows stay in the moved-aside directory; keep it until you have checked the
 result.
+
+## Credentials in a remote URL and merge commits
+
+A remote URL can carry credentials, for example
+`git+https://x-access-token:<token>@github.com/org/repo` or
+`http://user:<token>@host/org/db`. In older bd versions, a server-mode
+`bd dolt pull` that had to merge diverged histories ran Dolt's own pull, and
+its merge commit message copied that stored URL, token included:
+
+```
+Merge branch 'main' of git+https://x-access-token:<token>@github.com/org/repo into main
+```
+
+`bd dolt push` then published the commit, so anyone who can read the remote's
+Dolt data could read the token in `dolt log`.
+
+Server-mode pulls now fetch and then merge the tracking ref, as embedded mode
+does, so the merge commit reads:
+
+```
+Merge branch 'origin/main' into main
+```
+
+Merge commits made by older bd versions stay in history that is already
+pushed, and changing the remote URL does not remove them. If a remote URL ever
+held a token, rotate the token. Check with:
+
+```bash
+bd sql "SELECT commit_hash, message FROM dolt_log WHERE message LIKE '%@%'"
+```
+
+Keep credentials out of remote URLs: set `DOLT_REMOTE_USER` /
+`DOLT_REMOTE_PASSWORD` in the environment (see `bd dolt pull --help`),
+or use a git credential helper for `git+https` remotes.
 
 ## Prevention
 
