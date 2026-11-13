@@ -863,6 +863,20 @@ type SchemaMigrator interface {
 	ApplySchemaMigrations(ctx context.Context) (applied int, err error)
 }
 
+// SchemaPostConditionRepairer is the explicit `bd migrate schema` capability:
+// apply pending migrations, then verify and repair the dropped-default
+// post-conditions of every recorded migration version (GH#5269 — marks
+// recorded while the DDL never applied). It is optional: a store that does
+// not implement it keeps the plain SchemaMigrator behavior and must never
+// report repairs it cannot perform.
+//
+// repairs names the verified repairs as "table.column", sorted; a non-nil err
+// may still carry completed repairs (partial success — the caller reports
+// both). Ordinary opens never invoke this.
+type SchemaPostConditionRepairer interface {
+	RepairSchemaPostConditions(ctx context.Context) (applied int, repairs []string, err error)
+}
+
 // Compactor squashes old Dolt commits while preserving recent ones.
 // Callers should type-assert to this interface for selective history compaction.
 // headHash is main's HEAD in the log the plan was read from; the replay is

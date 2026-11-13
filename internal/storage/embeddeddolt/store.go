@@ -665,6 +665,40 @@ func (s *EmbeddedDoltStore) ApplySchemaMigrations(ctx context.Context) (int, err
 	return schema.MigrateUp(ctx, conn)
 }
 
+// RepairSchemaPostConditions is the explicit `bd migrate schema` pass: the
+// migration run, then verification and repair of recorded dropped-default
+// post-conditions on the same pinned connection (GH#5269). Embedded Dolt uses
+// bare MigrateUp's own concurrency controls, like ApplySchemaMigrations.
+// Implements storage.SchemaPostConditionRepairer.
+func (s *EmbeddedDoltStore) RepairSchemaPostConditions(ctx context.Context) (int, []string, error) {
+	if s.closed.Load() {
+		return 0, nil, errClosed
+	}
+	if s.readOnly {
+		return 0, nil, ErrReadOnly
+	}
+	db, cleanup, err := OpenSQL(ctx, s.dataDir, s.database, s.branch)
+	if err != nil {
+		return 0, nil, fmt.Errorf("embeddeddolt: open db: %w", err)
+	}
+	defer func() { _ = cleanup() }()
+
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return 0, nil, fmt.Errorf("embeddeddolt: pin connection: %w", err)
+	}
+	defer conn.Close()
+
+	applied, err := schema.MigrateUp(ctx, conn)
+	if err != nil {
+		return applied, nil, err
+	}
+	// Only after a successful pass: both series have their final shape, and
+	// the repair probes exactly what the recorded marks claim.
+	repairs, err := schema.RepairDroppedDefaultDrift(ctx, conn)
+	return applied, repairs, err
+}
+
 func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 	db, cleanup, err := OpenSQL(ctx, s.dataDir, "", "")
 	if err != nil {

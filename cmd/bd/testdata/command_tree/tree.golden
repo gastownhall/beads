@@ -4794,8 +4794,17 @@ bd migrate schema
     | designated migrator. Migrating is one-way: bd releases built for an older
     | schema refuse the migrated database.
     |
-    | On an up-to-date database this is a no-op, so it is safe to run in CI,
-    | release gates, and recovery scenarios.
+    | After applying pending migrations, the command also verifies the
+    | dropped-default post-conditions of every recorded migration version and
+    | repairs, through direct DDL, any column default a recorded migration
+    | promised to drop but that is still in place (marks recorded ahead of the
+    | DDL, GH#5269). Repairs touch neither rows nor migration records, are
+    | committed separately under a distinct schema-repair message, and are
+    | reported as "repaired" in --json. On tables excluded from history
+    | (dolt_ignore) the repair is local to this clone and creates no commit.
+    |
+    | On an up-to-date, healthy database this is a no-op, so it is safe to run in
+    | CI, release gates, and recovery scenarios.
     |
     | Example:
     |   bd migrate schema

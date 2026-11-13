@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -625,13 +626,32 @@ func handleSchemaMigrate() error {
 		return HandleError("current storage backend does not support schema migration")
 	}
 
-	applied, err := migrator.ApplySchemaMigrations(rootCtx)
+	// Prefer the post-condition repair capability (GH#5269): the same
+	// migration pass followed by verification and repair of recorded
+	// dropped-default post-conditions. A backend without it keeps the plain
+	// migrator behavior and reports no repairs — an absent capability is
+	// never a successful repair.
+	var applied int
+	var repairs []string
+	var err error
+	if repairer, canRepair := storage.UnwrapStore(store).(storage.SchemaPostConditionRepairer); canRepair {
+		applied, repairs, err = repairer.RepairSchemaPostConditions(rootCtx)
+	} else {
+		applied, err = migrator.ApplySchemaMigrations(rootCtx)
+	}
 	if err != nil {
 		if jsonOutput {
-			if jerr := outputJSON(map[string]interface{}{
+			payload := map[string]interface{}{
 				"error":   "schema_migration_failed",
 				"message": err.Error(),
-			}); jerr != nil {
+			}
+			// Partial success stays observable on the failure wire: repairs
+			// that verified and committed before the error are reported, not
+			// swallowed.
+			if len(repairs) > 0 {
+				payload["repaired"] = repairs
+			}
+			if jerr := outputJSON(payload); jerr != nil {
 				return jerr
 			}
 			return SilentExit()
@@ -649,13 +669,30 @@ func handleSchemaMigrate() error {
 					"(`CALL DOLT_COMMIT('-Am', 'pre-migration working set')` over the sql-server, or "+
 					schema.AllowRemoteMigrateEnv+"=1 bd dolt commit), then re-run this command")
 		}
+		var dirtyRepair *schema.PostConditionDirtyWorkError
+		if errors.As(err, &dirtyRepair) {
+			return HandleErrorWithHint(
+				fmt.Sprintf("dropped-default repair refused: %v", err),
+				"commit or reset the working set for the named table(s) first (`bd dolt commit`, or "+
+					"`CALL DOLT_COMMIT('-Am', 'pre-repair working set')` over the sql-server), then re-run this command")
+		}
+		if len(repairs) > 0 {
+			fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Repaired %d dropped-default condition(s) before the failure: %s",
+				len(repairs), strings.Join(repairs, ", "))))
+		}
 		return HandleError("schema migration failed: %v", err)
 	}
 
 	latest := schema.LatestVersion()
+	sort.Strings(repairs)
 	status := "current"
 	if applied > 0 {
 		status = "applied"
+	}
+	if len(repairs) > 0 {
+		status = "repaired"
+	}
+	if applied > 0 || len(repairs) > 0 {
 		commandDidWrite.Store(true)
 		// Stamp the version markers the refused version-bump reconciliation
 		// could not (gastownhall/beads#5920 review). autoMigrateOnVersionBump
@@ -671,15 +708,21 @@ func handleSchemaMigrate() error {
 		return outputJSON(map[string]interface{}{
 			"status":         status,
 			"applied":        applied,
+			"repaired":       repairs,
 			"latest_version": latest,
 		})
 	}
 
-	if applied == 0 {
-		fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Schema already at v%d", latest)))
-		return nil
+	if applied > 0 {
+		fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Applied %d schema migration(s); schema now at v%d", applied, latest)))
 	}
-	fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Applied %d schema migration(s); schema now at v%d", applied, latest)))
+	if len(repairs) > 0 {
+		fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Repaired %d dropped-default condition(s) (GH#5269): %s",
+			len(repairs), strings.Join(repairs, ", "))))
+	}
+	if applied == 0 && len(repairs) == 0 {
+		fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Schema already at v%d", latest)))
+	}
 	return nil
 }
 
@@ -887,8 +930,17 @@ remote-migrate gate still applies: --force confirms you are the single
 designated migrator. Migrating is one-way: bd releases built for an older
 schema refuse the migrated database.
 
-On an up-to-date database this is a no-op, so it is safe to run in CI,
-release gates, and recovery scenarios.
+After applying pending migrations, the command also verifies the
+dropped-default post-conditions of every recorded migration version and
+repairs, through direct DDL, any column default a recorded migration
+promised to drop but that is still in place (marks recorded ahead of the
+DDL, GH#5269). Repairs touch neither rows nor migration records, are
+committed separately under a distinct schema-repair message, and are
+reported as "repaired" in --json. On tables excluded from history
+(dolt_ignore) the repair is local to this clone and creates no commit.
+
+On an up-to-date, healthy database this is a no-op, so it is safe to run in
+CI, release gates, and recovery scenarios.
 
 Example:
   bd migrate schema

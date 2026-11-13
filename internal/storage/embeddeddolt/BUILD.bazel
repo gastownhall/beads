@@ -249,6 +249,7 @@ go_test(
         "remote_peer_auth_test.go",
         "remote_sync_gate_test.go",
         "reopen_category_test.go",
+        "repair_post_conditions_test.go",
         "restore_database_test.go",
         "retention_epoch_contract_test.go",
         "role_fixture_kit_test.go",

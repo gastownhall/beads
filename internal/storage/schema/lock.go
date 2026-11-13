@@ -248,6 +248,27 @@ func WithDatabaseSelector(fn DatabaseSelector) MigrateLockOption {
 // relies on the embedded driver's file/concurrency controls instead of
 // sql-server session locks.
 func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string, opts ...MigrateLockOption) (applied int, err error) {
+	applied, _, err = migrateUpLocked(ctx, conn, databaseName, opts, false)
+	return applied, err
+}
+
+// MigrateUpWithRepair is the explicit `bd migrate schema` pass: the normal
+// locked MigrateUp, followed — on the same pinned connection, still under the
+// same lock — by the repair of recorded dropped-default post-conditions
+// (GH#5269). The steady-state convergence fast path is bypassed: a database
+// whose recorded marks outran its DDL reports no migration work, and this
+// repair is exactly the pass that must still run. Ordinary opens never take
+// this path, so a converged database pays nothing for it.
+//
+// The repair runs only after a successful migration pass, so both series have
+// their final shape before drift is probed. Its result is returned even when
+// it failed part-way (partial success: repairs that verified and committed are
+// reported alongside the error naming what remains unresolved).
+func MigrateUpWithRepair(ctx context.Context, conn *sql.Conn, databaseName string, opts ...MigrateLockOption) (applied int, repairs []string, err error) {
+	return migrateUpLocked(ctx, conn, databaseName, opts, true)
+}
+
+func migrateUpLocked(ctx context.Context, conn *sql.Conn, databaseName string, opts []MigrateLockOption, explicitRepair bool) (applied int, repairs []string, err error) {
 	var o migrateLockOptions
 	for _, opt := range opts {
 		opt(&o)
@@ -269,7 +290,7 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 	// session on it — preparation's CREATE DATABASE would then have failed
 	// with "database exists" and captured no authority, and its USE is the
 	// statement alreadyConverged itself issued.
-	if o.freshBootstrapHeal == nil {
+	if o.freshBootstrapHeal == nil && !explicitRepair {
 		converged, convergedErr := alreadyConverged(ctx, conn, databaseName, o.databaseSelector)
 		switch {
 		case convergedErr != nil:
@@ -281,13 +302,13 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 			debug.Logf("schema: convergence fast path unavailable for %q, taking the migration lock: %v\n",
 				databaseName, convergedErr)
 		case converged:
-			return 0, nil
+			return 0, nil, nil
 		}
 	}
 
 	lockName := MigrationLockName(databaseName)
 	if err := AcquireMigrationLock(ctx, conn, lockName); err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	defer func() {
 		if releaseErr := ReleaseMigrationLock(conn, lockName); releaseErr != nil {
@@ -303,7 +324,7 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 	if o.lockedPreparation != nil && o.lockedPreparation.fn != nil {
 		capability, preparationErr := o.lockedPreparation.fn(ctx, conn)
 		if preparationErr != nil {
-			return 0, preparationErr
+			return 0, nil, preparationErr
 		}
 		if capability != nil {
 			o.freshBootstrapHeal = &freshBootstrapHealRequest{
@@ -322,7 +343,7 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 	// the init refuse to finish migrating the database it just created.
 	if o.migrationGate != nil && o.freshBootstrapHeal == nil {
 		if gateErr := o.migrationGate(ctx, conn); gateErr != nil {
-			return 0, gateErr
+			return 0, nil, gateErr
 		}
 	}
 
@@ -343,7 +364,7 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 		if !o.freshBootstrapHeal.capability.consumeIfCurrentIncarnation(
 			ctx, conn, databaseName, o.freshBootstrapHeal.endpoint,
 		) {
-			return applied, err
+			return applied, repairs, err
 		}
 
 		// Consume occurs before the reset call. Thus a reset error or a
@@ -352,11 +373,23 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 		fmt.Fprintf(stderr, "Discarding interrupted-bootstrap working set (%s) and re-running migrations…\n",
 			strings.Join(dirtyErr.Tables, ", "))
 		if resetErr := drainFreshBootstrapReset(ctx, conn); resetErr != nil {
-			return applied, errors.Join(err, fmt.Errorf("schema: fresh-bootstrap reset: %w", resetErr))
+			return applied, repairs, errors.Join(err, fmt.Errorf("schema: fresh-bootstrap reset: %w", resetErr))
 		}
 		applied, err = migrate(ctx, conn)
 	}
-	return applied, err
+
+	// The explicit repair phase: after a successful pass, still under the
+	// lock, verify and correct the dropped-default post-conditions of every
+	// recorded version. A failed migration pass skips it — there is no final
+	// shape to verify yet — and its error travels unchanged.
+	if explicitRepair && err == nil {
+		var repairErr error
+		repairs, repairErr = RepairDroppedDefaultDrift(ctx, conn)
+		if repairErr != nil {
+			err = repairErr
+		}
+	}
+	return applied, repairs, err
 }
 
 // drainFreshBootstrapReset discards an interrupted bootstrap's working set,

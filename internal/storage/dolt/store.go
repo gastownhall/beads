@@ -3813,6 +3813,44 @@ func (s *DoltStore) ApplySchemaMigrations(ctx context.Context) (int, error) {
 	return initSchemaOnDBWithRetry(ctx, migDB)
 }
 
+// RepairSchemaPostConditions is the explicit `bd migrate schema` pass: the
+// locked migration run, then — still under the same lock — verification and
+// repair of recorded dropped-default post-conditions (GH#5269). The
+// convergence fast path is bypassed (schema.MigrateUpWithRepair), because a
+// database whose marks outran its DDL reports no migration work while the
+// repair is exactly what it needs. Implements storage.SchemaPostConditionRepairer.
+func (s *DoltStore) RepairSchemaPostConditions(ctx context.Context) (int, []string, error) {
+	migDB, err := s.openMigrationDB()
+	if err != nil {
+		return 0, nil, err
+	}
+	defer migDB.Close()
+
+	conn, err := migDB.Conn(ctx)
+	if err != nil {
+		return 0, nil, fmt.Errorf("schema: pin connection: %w", err)
+	}
+	defer conn.Close()
+
+	var dbName string
+	if err := conn.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&dbName); err != nil {
+		return 0, nil, fmt.Errorf("schema: read database name: %w", err)
+	}
+
+	applied, repairs, err := schema.MigrateUpWithRepair(ctx, conn, dbName)
+	// Anything this pass changed (migrations or repairs, including a partial
+	// success that returns an error) can leave pooled connections pinned to
+	// the pre-change session root (be-itm5), so the main pool is rebuilt even
+	// on error — and a rebuild failure joins the error without erasing the
+	// repairs that did land.
+	if applied > 0 || len(repairs) > 0 {
+		if rbErr := s.rebuildPoolAfterMigration(ctx, applied+len(repairs)); rbErr != nil {
+			return applied, repairs, errors.Join(err, fmt.Errorf("rebuild pool after schema repair: %w", rbErr))
+		}
+	}
+	return applied, repairs, err
+}
+
 // openMigrationDB opens a one-off connection pool for schema migrations with no
 // read/write timeout. Migrations may run far longer than the default 10s pool
 // timeout, and timing out part-way leaves the database in a dirty, half-migrated
