@@ -3,6 +3,7 @@ package schema
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"database/sql/driver"
 	"errors"
 	"fmt"
@@ -584,4 +585,91 @@ func TestMigrateUpRefusedSeedFailsWhenWorkPending(t *testing.T) {
 			t.Fatalf("unmet SQL expectations: %v", err)
 		}
 	})
+}
+
+// seedDenialObserver counts the statements issued after the seed's first
+// failed dolt_ignore INSERT, so a test can pin that a non-refusal seed error
+// is returned without a single fallback probe: the eligibility check in
+// degradeRefusedIgnoreSeed must run before migrationWorkNeeded reads
+// anything.
+type seedDenialObserver struct {
+	*sql.DB
+	sawFailedInsert bool
+	afterFailed     int
+}
+
+func (o *seedDenialObserver) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	res, err := o.DB.ExecContext(ctx, query, args...)
+	if err != nil && strings.Contains(query, "INSERT IGNORE INTO dolt_ignore") {
+		o.sawFailedInsert = true
+	}
+	return res, err
+}
+
+func (o *seedDenialObserver) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	if o.sawFailedInsert {
+		o.afterFailed++
+	}
+	return o.DB.QueryContext(ctx, query, args...)
+}
+
+func (o *seedDenialObserver) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	if o.sawFailedInsert {
+		o.afterFailed++
+	}
+	return o.DB.QueryRowContext(ctx, query, args...)
+}
+
+// TestMigrateUpSeedErrorsThatAreNotRefusalsStayFatal pins AC-3: only a
+// privilege refusal degrades. A connection fault or a server error in the
+// seed's INSERT is a real failure and comes back exactly as the seed wrapped
+// it — before any fallback probe or warning — preserving the underlying
+// error for errors.Is/errors.As. The 1105 case carries a denial-shaped
+// message on purpose: dberrors.IsAccessDenied classifies typed MySQL errors
+// by code, not message.
+func TestMigrateUpSeedErrorsThatAreNotRefusalsStayFatal(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		err  error
+	}{
+		{"connection reset", errors.New("connection reset during INSERT")},
+		{"typed 1105 with a denial phrase but a non-denial code", &mysql.MySQLError{Number: 1105, Message: "INSERT command denied to user 'bd_lego_pilot_op'@'%' for table 'dolt_ignore'"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			failOnSwallowedAdvisory(t)
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("create sql mock: %v", err)
+			}
+			defer db.Close()
+
+			const pattern = "__temp__%"
+			obs := &seedDenialObserver{DB: db}
+			expectRefusedIgnoreSeed(mock, LatestVersion(), tt.err, pattern)
+
+			notice := captureIgnoreSeedNotice(t)
+			applied, err := MigrateUp(context.Background(), obs)
+			if err == nil {
+				t.Fatal("MigrateUp() error = nil, want the seed failure: only a privilege refusal may degrade")
+			}
+			if want := wrappedIgnoreSeedErr(pattern, tt.err); err.Error() != want {
+				t.Fatalf("MigrateUp() error = %q, want the existing wrapped seed failure unchanged, before any fallback probe: %q", err.Error(), want)
+			}
+			if !errors.Is(err, tt.err) {
+				t.Fatalf("MigrateUp() error = %v, want errors.Is against the original seed cause", err)
+			}
+			if obs.afterFailed != 0 {
+				t.Fatalf("%d statements ran after the failed seed INSERT, want 0 (no fallback probe, status read or warning may run for a non-refusal)", obs.afterFailed)
+			}
+			if applied != 0 {
+				t.Fatalf("MigrateUp() applied = %d, want 0", applied)
+			}
+			if notice.Len() != 0 {
+				t.Fatalf("no continuation warning may print for a non-refusal seed failure, got %q", notice.String())
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+		})
+	}
 }

@@ -887,7 +887,16 @@ func doltStatusNewTables(ctx context.Context, db DBConn) ([]string, error) {
 // state change. The seed itself is unchanged: it still returns the refusal
 // (wrapped, pattern-specific) and never claims a scoped commit, so the
 // decision here cannot lose the denial or manufacture convergence.
+//
+// Only a privilege refusal is degradable: a connection fault or a server
+// error in the seed's INSERT means the seed's answer is unknown, not "no",
+// so it comes straight back (dberrors.IsAccessDenied, code-first, with the
+// plain-string fallback for drivers that lose the code) before any fallback
+// probe runs — a flapping connection must not buy a degraded open.
 func degradeRefusedIgnoreSeed(ctx context.Context, db DBConn, seedErr error) (int, error) {
+	if !dberrors.IsAccessDenied(seedErr) {
+		return 0, seedErr
+	}
 	needed, err := migrationWorkNeeded(ctx, db)
 	if err != nil {
 		return 0, fmt.Errorf("checking schema migration work after a refused dolt_ignore seed: %w (refused seed: %w)", err, seedErr)
