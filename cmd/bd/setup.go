@@ -351,7 +351,25 @@ func runRecipe(name string) error {
 
 	if setupRemove {
 		removed := false
+		var kept []string
 		for _, path := range paths {
+			// A shared file loses only bd's section, and is deleted only
+			// when nothing else is left in it.
+			if recipe.IsSharedPath(path) {
+				result, err := setup.RemoveSharedFile(path)
+				if err != nil {
+					return HandleError("remove the beads section from %s: %v", remedy.PrintedValue(path), remedy.PrintedError(err))
+				}
+				switch result {
+				case setup.SharedRemovedSection:
+					removed = true
+					kept = append(kept, path)
+				case setup.SharedRemovedFile:
+					removed = true
+					_ = setup.RemoveEmptyDir(filepath.Dir(path))
+				}
+				continue
+			}
 			if err := os.Remove(path); err != nil {
 				if os.IsNotExist(err) {
 					continue
@@ -369,6 +387,9 @@ func runRecipe(name string) error {
 			return nil
 		}
 		fmt.Printf("✓ Removed %s integration\n", remedy.PrintedValue(recipe.Name))
+		for _, path := range kept {
+			fmt.Printf("  Kept your content in %s\n", remedy.PrintedValue(path))
+		}
 		return nil
 	}
 
