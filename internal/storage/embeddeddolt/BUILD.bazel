@@ -144,6 +144,7 @@ go_test(
         "cross_record_invariant_contract_test.go",
         "cross_table_id_collision_test.go",
         "cycle_detector_contract_test.go",
+        "defer_wake_gate_test.go",
         "deleter_contract_test.go",
         "dependencies_test.go",
         "dependency_editor_contract_test.go",
