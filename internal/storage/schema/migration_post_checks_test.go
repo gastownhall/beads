@@ -3,6 +3,7 @@ package schema
 import (
 	"context"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -39,8 +40,9 @@ func stubNoIssueRows(t *testing.T) {
 
 // GH#5269: a store carried the v50 mark while dependencies.id still had the
 // DEFAULT (UUID()) that 0050 drops. Here 0050's body returns no error and
-// changes nothing, which is that state as runMigrations sees it. The mark must
-// not be recorded: once it is, every later pass skips 0050 for good.
+// changes nothing, which is that state as runMigrations sees it. The pass must
+// not record the mark while the default survives: the direct correction runs,
+// and when it fails the step fails and nothing claims the version.
 func TestRunMigrationsDoesNotRecordAMarkWhoseDroppedDefaultSurvives(t *testing.T) {
 	stubNoIssueRows(t)
 	db, mock, err := sqlmock.New()
@@ -53,13 +55,51 @@ func TestRunMigrationsDoesNotRecordAMarkWhoseDroppedDefaultSurvives(t *testing.T
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery(`^SHOW TABLES$`).WillReturnRows(showTables("issues", "dependencies"))
 	mock.ExpectQuery(`^SHOW COLUMNS FROM dependencies LIKE 'id'$`).WillReturnRows(idDefault("(uuid())"))
+	mock.ExpectExec("ALTER TABLE `dependencies` ALTER COLUMN `id` DROP DEFAULT").
+		WillReturnError(errors.New("dolt: boom"))
 
 	applied, err := runMigrations(context.Background(), db, mainSource, 49, 50, false)
-	if err == nil || !strings.Contains(err.Error(), "dependencies.id still has DEFAULT (uuid())") {
-		t.Fatalf("runMigrations(0050 with dependencies.id still DEFAULT (uuid())) = %d, %v; want a refusal naming dependencies.id and no schema_migrations row", applied, err)
+	var perr *PostConditionError
+	if err == nil || !errors.As(err, &perr) {
+		t.Fatalf("runMigrations(0050 with dependencies.id still DEFAULT (uuid())) = %d, %v; want a *PostConditionError", applied, err)
+	}
+	if len(perr.Failures) != 1 || perr.Failures[0].Table != "dependencies" || perr.Failures[0].Column != "id" {
+		t.Fatalf("failures = %+v, want one dependencies.id failure", perr.Failures)
+	}
+	if !strings.Contains(err.Error(), "dependencies.id") || !strings.Contains(err.Error(), "(uuid())") {
+		t.Fatalf("err = %v, want it to name dependencies.id and the surviving default", err)
 	}
 	if applied != 0 {
 		t.Fatalf("applied = %d, want 0", applied)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// A default the guarded body left behind is corrected directly and the mark is
+// recorded only once the re-probe sees it gone (GH#5269).
+func TestRunMigrationsCorrectsADefaultTheBodyLeftBehind(t *testing.T) {
+	stubNoIssueRows(t)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectExec(`ALTER TABLE dependencies ALTER COLUMN id DROP DEFAULT`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`^SHOW TABLES$`).WillReturnRows(showTables("issues", "dependencies"))
+	mock.ExpectQuery(`^SHOW COLUMNS FROM dependencies LIKE 'id'$`).WillReturnRows(idDefault("(uuid())"))
+	mock.ExpectExec("ALTER TABLE `dependencies` ALTER COLUMN `id` DROP DEFAULT").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`^SHOW COLUMNS FROM dependencies LIKE 'id'$`).WillReturnRows(idDefault(nil))
+	mock.ExpectExec(`INSERT IGNORE INTO schema_migrations`).WithArgs(50, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	applied, err := runMigrations(context.Background(), db, mainSource, 49, 50, false)
+	if err != nil || applied != 1 {
+		t.Fatalf("runMigrations(0050 with a correctable default) = %d, %v; want 1, nil", applied, err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
@@ -91,7 +131,8 @@ func TestRunMigrationsRecordsTheMarkWhenTheDroppedDefaultIsGone(t *testing.T) {
 }
 
 // 0051 drops four defaults. A table the store lacks is skipped, as the body's
-// guard skips it, and the first surviving default refuses the mark.
+// guard skips it, and a surviving default the correction cannot remove refuses
+// the mark.
 func TestRunMigrationsChecksEveryDefaultAMigrationDrops(t *testing.T) {
 	stubNoIssueRows(t)
 	db, mock, err := sqlmock.New()
@@ -105,9 +146,11 @@ func TestRunMigrationsChecksEveryDefaultAMigrationDrops(t *testing.T) {
 	mock.ExpectQuery(`^SHOW COLUMNS FROM events LIKE 'id'$`).WillReturnRows(idDefault(nil))
 	mock.ExpectQuery(`^SHOW TABLES$`).WillReturnRows(showTables("events", "comments"))
 	mock.ExpectQuery(`^SHOW COLUMNS FROM comments LIKE 'id'$`).WillReturnRows(idDefault("(uuid())"))
+	mock.ExpectExec("ALTER TABLE `comments` ALTER COLUMN `id` DROP DEFAULT").
+		WillReturnError(errors.New("dolt: boom"))
 
 	_, err = runMigrations(context.Background(), db, mainSource, 50, 51, false)
-	if err == nil || !strings.Contains(err.Error(), "comments.id still has DEFAULT (uuid())") {
+	if err == nil || !strings.Contains(err.Error(), "comments.id") {
 		t.Fatalf("runMigrations(0051 with comments.id still defaulted) err = %v, want a refusal naming comments.id", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {

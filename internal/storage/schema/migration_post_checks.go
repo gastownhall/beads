@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
@@ -37,7 +38,68 @@ func droppedDefaults(sqlText string) []droppedDefault {
 	return out
 }
 
-// verifyDroppedDefaults checks, after a migration body returned and before
+// dropDefaultSQL is the direct, identifier-quoted statement that removes a
+// lingering column default. The frozen bodies drop defaults through a guarded
+// statement (SET @sql = IF(...); PREPARE; EXECUTE) precisely so a re-run on an
+// already-correct store is a no-op — but that guard is also what let a store
+// end up with the mark recorded while the default survived: a PREPARE/EXECUTE
+// that reports success without applying (the shape of dolthub/dolt#11345)
+// leaves nothing to retry from, because the mark now skips the body. The
+// direct statement asserts beads' declared schema unconditionally; it is only
+// issued after a probe observed the default still present, so a healthy store
+// never sees it.
+func dropDefaultSQL(table, column string) string {
+	return "ALTER TABLE `" + table + "` ALTER COLUMN `" + column + "` DROP DEFAULT"
+}
+
+// PostConditionFailure names one dropped-default post-condition a pass could
+// not assert: the column, the default that survived (when one was observed),
+// and why the direct correction did not land.
+type PostConditionFailure struct {
+	// Source is the cursor table of the migration series that owns the
+	// obligation ("schema_migrations" / "ignored_schema_migrations").
+	Source string
+	// Version is the migration the obligation belongs to.
+	Version int
+	Table   string
+	Column  string
+	// Observed is the default the probe read, when it read one.
+	Observed sql.NullString
+	// Cause is why the condition could not be asserted: a failed probe, a
+	// failed correction, or a default that survived the correction.
+	Cause string
+}
+
+func (f PostConditionFailure) String() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s.%s (v%04d, %s)", f.Table, f.Column, f.Version, f.Source)
+	if f.Observed.Valid {
+		fmt.Fprintf(&b, " still has DEFAULT %s", f.Observed.String)
+	}
+	fmt.Fprintf(&b, ": %s", f.Cause)
+	return b.String()
+}
+
+// PostConditionError is returned when a migration's dropped-default
+// post-conditions could not all be asserted after direct correction. The
+// caller must not record the migration's cursor row: the mark is the only
+// record that a migration applied, and once written every later pass trusts it
+// and skips the body (GH#5269).
+type PostConditionError struct {
+	Failures []PostConditionFailure
+}
+
+func (e *PostConditionError) Error() string {
+	parts := make([]string, 0, len(e.Failures))
+	for _, f := range e.Failures {
+		parts = append(parts, f.String())
+	}
+	sort.Strings(parts)
+	return fmt.Sprintf("%d dropped-default post-condition(s) unmet and uncorrectable (GH#5269): %s",
+		len(e.Failures), strings.Join(parts, "; "))
+}
+
+// enforceDroppedDefaults verifies, after a migration body returned and before
 // runMigrations records the migration's cursor row, that every column default
 // the body drops is gone (GH#5269).
 //
@@ -46,34 +108,84 @@ func droppedDefaults(sqlText string) []droppedDefault {
 // returned no error but left a guarded DROP DEFAULT undone turns into a store
 // that claims the version while still minting ids from the dropped default, and
 // re-running `bd migrate` cannot repair it. A store was reported carrying
-// v50-v53 marks with the defaults 0050 and 0051 drop still in place. This
-// refuses to record the mark instead: the pass fails loudly, nothing claims the
-// version, and the next pass re-runs the body, whose guard makes it safe to
-// repeat.
+// v50-v53 marks with the defaults 0050 and 0051 drop still in place.
+//
+// A default the probe still observes is corrected directly — one
+// identifier-quoted ALTER TABLE ... ALTER COLUMN ... DROP DEFAULT, then a
+// re-probe — and only a correction that provably landed lets the mark through.
+// The correction dirties the table after the step's dirty-table snapshot, so
+// the step's commit records the corrected DDL together with the cursor row and
+// no later pass can resurrect the drift. The corrections that landed are
+// returned so the caller can report them. Any condition that cannot be probed
+// or corrected makes the whole step fail: the mark is withheld, nothing claims
+// the version, and the next pass runs the body again, whose guard makes it
+// safe to repeat.
 //
 // It runs only while a migration is being applied, never on the steady-state
 // open path. A table the store does not have is skipped, as the body's own
 // guard skips it.
-func verifyDroppedDefaults(ctx context.Context, db DBConn, sqlText string) error {
-	for _, d := range droppedDefaults(sqlText) {
+func enforceDroppedDefaults(ctx context.Context, db DBConn, src migrationSource, version int, sqlText string) ([]droppedDefault, error) {
+	targets := droppedDefaults(sqlText)
+	if len(targets) == 0 {
+		return nil, nil
+	}
+
+	// Probe every target first: one unreadable column must not hide the others.
+	type violation struct {
+		target   droppedDefault
+		observed sql.NullString
+	}
+	var violations []violation
+	var failures []PostConditionFailure
+	fail := func(d droppedDefault, observed sql.NullString, cause string) {
+		failures = append(failures, PostConditionFailure{
+			Source: src.cursorTable, Version: version,
+			Table: d.table, Column: d.column, Observed: observed, Cause: cause,
+		})
+	}
+	for _, d := range targets {
 		present, err := showTableExists(ctx, db, d.table)
 		if err != nil {
-			return err
+			fail(d, sql.NullString{}, fmt.Sprintf("probe failed: %v", err))
+			continue
 		}
 		if !present {
 			continue
 		}
 		def, err := showColumnDefault(ctx, db, d.table, d.column)
 		if err != nil {
-			return err
+			fail(d, sql.NullString{}, fmt.Sprintf("probe failed: %v", err))
+			continue
 		}
 		if def.Valid {
-			return fmt.Errorf("%s.%s still has DEFAULT %s, which this migration drops, although its SQL returned no error; "+
-				"not recording the migration (GH#5269). Run `ALTER TABLE %s ALTER COLUMN %s DROP DEFAULT` and retry",
-				d.table, d.column, def.String, d.table, d.column)
+			violations = append(violations, violation{target: d, observed: def})
 		}
 	}
-	return nil
+
+	var corrections []droppedDefault
+	for _, v := range violations {
+		stmt := dropDefaultSQL(v.target.table, v.target.column)
+		//nolint:gosec // G201: table and column come from the frozen, embedded migration body.
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			fail(v.target, v.observed, fmt.Sprintf("correction %s failed: %v", stmt, err))
+			continue
+		}
+		def, err := showColumnDefault(ctx, db, v.target.table, v.target.column)
+		if err != nil {
+			fail(v.target, v.observed, fmt.Sprintf("probe after correction failed: %v", err))
+			continue
+		}
+		if def.Valid {
+			fail(v.target, def, fmt.Sprintf("correction %s reported success but the default survived", stmt))
+			continue
+		}
+		corrections = append(corrections, v.target)
+	}
+
+	if len(failures) > 0 {
+		return corrections, &PostConditionError{Failures: failures}
+	}
+	return corrections, nil
 }
 
 // showColumnDefault reads a column's Default from SHOW COLUMNS. It is SQL NULL

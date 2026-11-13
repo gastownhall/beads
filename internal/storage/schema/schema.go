@@ -2408,10 +2408,16 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 			return count, fmt.Errorf("restoring updated_at after migration %s: %w", mf.name, err)
 		}
 		// The cursor row below is what every later pass trusts, so a body that
-		// returned no error must also have dropped the defaults it drops
-		// (verifyDroppedDefaults, GH#5269).
-		if err := verifyDroppedDefaults(ctx, db, string(data)); err != nil {
+		// returned no error must also have dropped the defaults it drops. A
+		// default the guarded body left behind is corrected directly and
+		// re-verified here, and the correction's table lands in this step's
+		// commit together with the mark (enforceDroppedDefaults, GH#5269).
+		corrections, err := enforceDroppedDefaults(ctx, db, src, mf.version, string(data))
+		if err != nil {
 			return count, fmt.Errorf("migration %s: %w", mf.name, err)
+		}
+		for _, c := range corrections {
+			fmt.Fprintf(stderr, "  corrected %s.%s: dropped a DEFAULT the migration body left in place (GH#5269)\n", c.table, c.column)
 		}
 		sum := sha256.Sum256(data)
 		contentHash := hex.EncodeToString(sum[:])
