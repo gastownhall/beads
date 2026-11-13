@@ -390,3 +390,55 @@ func TestCreateIssueFailureRestoresAutoMintedID(t *testing.T) {
 		t.Fatalf("issues rows = %d after two failed creates, want %d (unchanged)", after, before)
 	}
 }
+
+// TestCreateIssueRetryAfterFailedAutoMintKeepsPeerRow pins the consequence of
+// GH#8457 in counter mode: the failed create's counter increment rolls back,
+// so a peer's next create receives the same ID. A caller that then retries
+// its own struct must mint a new ID rather than upsert over the peer's row.
+func TestCreateIssueRetryAfterFailedAutoMintKeepsPeerRow(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if err := store.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+		t.Fatalf("set issue_id_mode: %v", err)
+	}
+	seed := &types.Issue{Title: "seed", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, seed, "tester"); err != nil {
+		t.Fatalf("seed create: %v", err)
+	}
+
+	issue := &types.Issue{
+		Title:     "caller",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Labels:    []string{overLengthLabel},
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); !errors.Is(err, types.ErrFieldTooLong) {
+		t.Fatalf("failing create error = %v, want types.ErrFieldTooLong", err)
+	}
+
+	peer := &types.Issue{Title: "peer", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, peer, "peer"); err != nil {
+		t.Fatalf("peer create: %v", err)
+	}
+
+	issue.Labels = []string{"ok"}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("retry create: %v", err)
+	}
+	if issue.ID == peer.ID {
+		t.Fatalf("retry reused the peer's ID %q: the rolled-back minted ID stayed on the caller's struct and the retry upserted over the peer's row", issue.ID)
+	}
+
+	got, err := store.GetIssue(ctx, peer.ID)
+	if err != nil {
+		t.Fatalf("GetIssue(%s): %v", peer.ID, err)
+	}
+	if got.Title != "peer" {
+		t.Fatalf("peer issue %s title = %q after the caller's retry, want %q", peer.ID, got.Title, "peer")
+	}
+}
