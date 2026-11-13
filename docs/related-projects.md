@@ -9,6 +9,12 @@ same neighborhood as Beads. These are not Beads integrations (see
 independent projects whose users may also find Beads useful, or vice
 versa.
 
+## Spec-driven development
+
+- **[Prism](https://github.com/baldaworks/prism)** — turns software-change
+  requests into a durable, Beads-backed lifecycle from specification and
+  design through human-approved implementation and verification.
+
 ## Recall / knowledge graph
 
 - **[scry](https://github.com/prmichaelsen/scry)** —
