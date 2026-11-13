@@ -506,3 +506,54 @@ func TestCreateIssueReplayKeepsCounterAheadOfReplayedID(t *testing.T) {
 	requireTitle(t, ctx, store, first.ID, "first")
 	requireTitle(t, ctx, store, second.ID, "second")
 }
+
+// AC-4: the all-wisps batch fast path re-mints a wisp id a competitor took
+// while the caller's attempt was rolled back.
+func TestCreateIssuesAllWispsReplayRemintsWispID(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		ephemeral bool
+		noHistory bool
+	}{
+		{name: "ephemeral", ephemeral: true},
+		{name: "no-history", noHistory: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, cleanup := setupConcurrentTestStore(t)
+			defer cleanup()
+			ctx, cancel := testContext(t)
+			defer cancel()
+
+			fault, orig, restore := installReplayFault(t, store, 1)
+			defer restore()
+
+			caller := newRetryTestIssue("caller wisp")
+			caller.Ephemeral = tc.ephemeral
+			caller.NoHistory = tc.noHistory
+			var stale string
+			fault.onFault = func(int) error {
+				stale = caller.ID
+				c := newRetryTestIssue("competitor wisp")
+				c.ID = stale
+				c.Ephemeral = tc.ephemeral
+				c.NoHistory = tc.noHistory
+				return competitorCreate(ctx, orig, c)
+			}
+
+			if err := store.CreateIssues(ctx, []*types.Issue{caller}, "caller"); err != nil {
+				t.Fatalf("CreateIssues: %v", err)
+			}
+			restore()
+			assertReplayed(t, fault, 1)
+
+			if stale == "" {
+				t.Fatal("fault saw no minted wisp id")
+			}
+			requireTitle(t, ctx, store, stale, "competitor wisp")
+			if caller.ID == stale {
+				t.Fatalf("replay kept the aborted wisp id %s the competitor owns", stale)
+			}
+			requireTitle(t, ctx, store, caller.ID, "caller wisp")
+		})
+	}
+}

@@ -160,6 +160,7 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 		}
 		var result issueops.CreateIssuesResult
 		if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+			resetMintedIDs()
 			var err error
 			result, err = issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
 			return err
