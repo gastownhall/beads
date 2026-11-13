@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -93,6 +94,14 @@ Claim Pools:
   that if a taker's lease expires, bd reclaim returns the issue to the
   unassigned pool, not to the pool alias it was dispatched to.
 
+Claim Leases (config.yaml):
+  A claim's lease expires 5m after the claim or the last bd heartbeat, and
+  bd reclaim may then revert the issue. claim.lease-ttl (or
+  BD_CLAIM_LEASE_TTL) sets a longer window for sessions or agents that work
+  a claim for long stretches without heartbeating:
+
+    bd config set claim.lease-ttl 2h
+
 Suppressing Doctor Warnings:
   Suppress specific bd doctor warnings by check name slug:
     bd config set doctor.suppress.pending-migrations true
@@ -110,6 +119,7 @@ Examples:
   bd config set jira.project "PROJ"
   bd config set status.custom "awaiting_review,awaiting_testing"
   bd config set claim.pools "fable-crew,night-crew"    # Pool aliases claimable by any actor
+  bd config set claim.lease-ttl 2h                     # Claim lease window (default 5m)
   bd config set doctor.suppress.pending-migrations true
   bd config set dolt.debug true                        # Enable Dolt sql-server debug mode (loglevel=debug, --prof cpu)
   bd config set dolt.local-only true                   # Skip wiring a Dolt sync remote during bd init
@@ -189,6 +199,12 @@ var configSetCmd = &cobra.Command{
 
 		if strings.HasPrefix(key, "storage-class.") {
 			if err := validateStorageClassConfig(key, value); err != nil {
+				return HandleError("%v", err)
+			}
+		}
+
+		if key == "claim.lease-ttl" {
+			if err := validateClaimLeaseTTL(value); err != nil {
 				return HandleError("%v", err)
 			}
 		}
@@ -1225,6 +1241,11 @@ Examples:
 					return HandleError("%v", err)
 				}
 			}
+			if p.key == "claim.lease-ttl" {
+				if err := validateClaimLeaseTTL(p.value); err != nil {
+					return HandleError("%v", err)
+				}
+			}
 			// The pre-enable check `bd config set` makes: turning versioned history
 			// on refuses while any issue that participates in history, or any
 			// template, holds a value a version could not record.
@@ -1404,6 +1425,15 @@ func validateStorageClassConfig(key, value string) error {
 	}
 	if _, err := types.ParseStorageClass(value); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateClaimLeaseTTL rejects a claim.lease-ttl that is not a positive
+// duration when it is set, instead of storing a value claims would ignore.
+func validateClaimLeaseTTL(value string) error {
+	if ttl, err := time.ParseDuration(value); err != nil || ttl <= 0 {
+		return fmt.Errorf("invalid claim.lease-ttl %q: expected a positive duration such as 30m or 48h", value)
 	}
 	return nil
 }

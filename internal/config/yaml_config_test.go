@@ -47,6 +47,9 @@ func TestIsYamlOnlyKey(t *testing.T) {
 		{"backup.git-repo", true},
 		{"backup.future-key", true}, // prefix match
 
+		{"claim.lease-ttl", true},
+		{"claim.pools", false},
+
 		// Import settings. import.* is exact-match, not a prefix namespace:
 		// an unlisted import.* key must not be treated as yaml-only.
 		{"import.auto", true},
