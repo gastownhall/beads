@@ -75,6 +75,9 @@ NOTE: This is a rare operation. Most users never need this command.`,
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		repair, _ := cmd.Flags().GetBool("repair")
 		mintOnly, _ := cmd.Flags().GetBool("mint-only")
+		if mintOnly && repair {
+			return HandleErrorRespectJSON("--mint-only and --repair cannot be used together: --mint-only renames no issues")
+		}
 
 		if !dryRun {
 			CheckReadonly("rename-prefix")
@@ -100,7 +103,7 @@ NOTE: This is a rare operation. Most users never need this command.`,
 		newPrefix = strings.TrimRight(newPrefix, "-")
 
 		if mintOnly {
-			return runMintOnlyPrefix(ctx, store, strings.TrimRight(oldPrefix, "-"), newPrefix)
+			return runMintOnlyPrefix(ctx, store, strings.TrimRight(oldPrefix, "-"), newPrefix, dryRun)
 		}
 
 		issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
@@ -244,9 +247,10 @@ type mintOnlyResult struct {
 
 // mintOnlyPrefix points new issues at newPrefix without touching any ID or
 // text. The old prefix stays valid through allowed_prefixes, so explicit
-// --id values and children of existing issues keep working.
-func mintOnlyPrefix(ctx context.Context, st storage.DoltStorage, oldPrefix, newPrefix string) (*mintOnlyResult, error) {
-	result := &mintOnlyResult{OldPrefix: oldPrefix, NewPrefix: newPrefix, MintOnly: true, AllowedPrefixesAdded: []string{}}
+// --id values and children of existing issues keep working. A dry run
+// reports the same changes and writes nothing.
+func mintOnlyPrefix(ctx context.Context, st storage.DoltStorage, oldPrefix, newPrefix string, dryRun bool) (*mintOnlyResult, error) {
+	result := &mintOnlyResult{OldPrefix: oldPrefix, NewPrefix: newPrefix, MintOnly: true, DryRun: dryRun, AllowedPrefixesAdded: []string{}}
 	allowed, err := st.GetConfig(ctx, "allowed_prefixes")
 	if err != nil {
 		return nil, fmt.Errorf("failed to read allowed_prefixes: %w", err)
@@ -259,6 +263,11 @@ func mintOnlyPrefix(ctx context.Context, st storage.DoltStorage, oldPrefix, newP
 	}
 	if !present {
 		result.AllowedPrefixesAdded = append(result.AllowedPrefixesAdded, oldPrefix)
+	}
+	if dryRun {
+		return result, nil
+	}
+	if !present {
 		updated := oldPrefix
 		if trimmed := strings.TrimSpace(allowed); trimmed != "" {
 			updated = trimmed + "," + oldPrefix
@@ -274,15 +283,17 @@ func mintOnlyPrefix(ctx context.Context, st storage.DoltStorage, oldPrefix, newP
 }
 
 // runMintOnlyPrefix is bd rename-prefix --mint-only.
-func runMintOnlyPrefix(ctx context.Context, st storage.DoltStorage, oldPrefix, newPrefix string) error {
+func runMintOnlyPrefix(ctx context.Context, st storage.DoltStorage, oldPrefix, newPrefix string, dryRun bool) error {
 	if oldPrefix == newPrefix {
 		return HandleErrorRespectJSON("new prefix is the same as current prefix: %s", oldPrefix)
 	}
-	result, err := mintOnlyPrefix(ctx, st, oldPrefix, newPrefix)
+	result, err := mintOnlyPrefix(ctx, st, oldPrefix, newPrefix, dryRun)
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
-	commandDidWrite.Store(true)
+	if !dryRun {
+		commandDidWrite.Store(true)
+	}
 	// config.yaml's issue-prefix wins over the database for bd create.
 	if yamlPrefix := strings.TrimRight(overlayYAMLPrefix(""), "-"); yamlPrefix != "" && yamlPrefix != newPrefix {
 		fmt.Fprintf(os.Stderr, "%s config.yaml sets issue-prefix: %s, which bd create uses before the database; set it to %s so new issues mint %s-*\n",
@@ -292,6 +303,13 @@ func runMintOnlyPrefix(ctx context.Context, st storage.DoltStorage, oldPrefix, n
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		return enc.Encode(result)
+	}
+	if dryRun {
+		fmt.Printf("DRY RUN: would set issue_prefix '%s' -> '%s'; no issue IDs or text would change\n", oldPrefix, newPrefix)
+		if len(result.AllowedPrefixesAdded) > 0 {
+			fmt.Printf("  Would add %s to allowed_prefixes\n", ui.RenderAccent(oldPrefix))
+		}
+		return nil
 	}
 	fmt.Printf("%s New issues now mint %s-*; existing IDs and text are unchanged\n", ui.RenderPass("✓"), ui.RenderAccent(newPrefix))
 	if len(result.AllowedPrefixesAdded) > 0 {
