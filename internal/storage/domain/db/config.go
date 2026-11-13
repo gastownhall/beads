@@ -142,6 +142,19 @@ func (r *configSQLRepositoryImpl) GetConfigByPrefix(ctx context.Context, prefix 
 	return out, nil
 }
 
+var _ domain.ConfigKeysReader = (*configSQLRepositoryImpl)(nil)
+
+// GetConfigKeys retrieves the named config rows in one statement
+// (domain.ConfigKeysReader), delegating to issueops as the dolt and embeddeddolt
+// stores do. Keys with no row are absent from the result.
+func (r *configSQLRepositoryImpl) GetConfigKeys(ctx context.Context, keys ...string) (map[string]string, error) {
+	out, err := issueops.GetConfigKeysInTx(ctx, r.runner, keys...)
+	if err != nil {
+		return nil, fmt.Errorf("db: GetConfigKeys: %w", err)
+	}
+	return out, nil
+}
+
 // GetCustomTypes resolves the workspace's custom issue types through
 // issueops.ComposeCustomTypes, the same rule the embedded and server-mode
 // stores use, so proxied `bd types` and proxied create/update validation

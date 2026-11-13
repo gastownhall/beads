@@ -19,6 +19,15 @@ type ConfigPrefixReader interface {
 	GetConfigByPrefix(ctx context.Context, prefix string) (map[string]string, error)
 }
 
+// ConfigKeysReader is the optional fast path for reading a known set of config
+// keys in one statement. The config table also holds kv.* rows, memories among
+// them, which can make a whole-table read megabytes. Like ConfigPrefixReader it
+// is discovered by type assertion, with GetAllConfig as the fallback. Keys with
+// no row are absent from the result.
+type ConfigKeysReader interface {
+	GetConfigKeys(ctx context.Context, keys ...string) (map[string]string, error)
+}
+
 type ConfigSQLRepository interface {
 	GetMetadata(ctx context.Context, key string) (string, error)
 	SetMetadata(ctx context.Context, key, value string) error
@@ -236,6 +245,36 @@ func (u *configUseCaseImpl) GetAllConfig(ctx context.Context) (map[string]string
 	out, err := u.cfgRepo.GetAllConfig(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("GetAllConfig: %w", err)
+	}
+	return out, nil
+}
+
+var _ ConfigKeysReader = (*configUseCaseImpl)(nil)
+
+// GetConfigKeys implements ConfigKeysReader on the use case, reading the keys in
+// one statement when the repository supports it and picking them out of the
+// GetAllConfig result when it does not. The fallback selects exact keys; a
+// repository's own read keeps its database collation and key remapping.
+func (u *configUseCaseImpl) GetConfigKeys(ctx context.Context, keys ...string) (map[string]string, error) {
+	if kr, ok := u.cfgRepo.(ConfigKeysReader); ok {
+		out, err := kr.GetConfigKeys(ctx, keys...)
+		if err != nil {
+			return nil, fmt.Errorf("GetConfigKeys: %w", err)
+		}
+		return out, nil
+	}
+	out := make(map[string]string, len(keys))
+	if len(keys) == 0 {
+		return out, nil
+	}
+	all, err := u.cfgRepo.GetAllConfig(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("GetConfigKeys: %w", err)
+	}
+	for _, k := range keys {
+		if v, ok := all[k]; ok {
+			out[k] = v
+		}
 	}
 	return out, nil
 }

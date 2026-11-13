@@ -370,6 +370,7 @@ go_test(
         "setup_shared_db_test.go",
         "shared_server_predicate_test.go",
         "shared_store_migrate_gate_test.go",
+        "single_read_cost_test.go",
         "slot_commit_boundary_test.go",
         "smart_gate_data_behind_test.go",
         "smart_remote_migrate_gate_test.go",

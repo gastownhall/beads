@@ -57,9 +57,9 @@ func (s *DoltStore) invalidateConfigCaches(key string) {
 // GetConfig retrieves a configuration value
 func (s *DoltStore) GetConfig(ctx context.Context, key string) (string, error) {
 	var value string
-	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+	err := s.withSingleRead(ctx, func(q issueops.DBTX) error {
 		var err error
-		value, err = issueops.GetConfigInTx(ctx, tx, key)
+		value, err = issueops.GetConfigInTx(ctx, q, key)
 		return err
 	})
 	return value, err
@@ -68,9 +68,9 @@ func (s *DoltStore) GetConfig(ctx context.Context, key string) (string, error) {
 // GetAllConfig retrieves all configuration values
 func (s *DoltStore) GetAllConfig(ctx context.Context) (map[string]string, error) {
 	var result map[string]string
-	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+	err := s.withSingleRead(ctx, func(q issueops.DBTX) error {
 		var err error
-		result, err = issueops.GetAllConfigInTx(ctx, tx)
+		result, err = issueops.GetAllConfigInTx(ctx, q)
 		return err
 	})
 	return result, err
@@ -85,9 +85,23 @@ var _ domain.ConfigPrefixReader = (*DoltStore)(nil)
 // prefix, filtered in SQL (the domain.ConfigPrefixReader optional fast path).
 func (s *DoltStore) GetConfigByPrefix(ctx context.Context, prefix string) (map[string]string, error) {
 	var result map[string]string
-	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+	err := s.withSingleRead(ctx, func(q issueops.DBTX) error {
 		var err error
-		result, err = issueops.GetConfigByPrefixInTx(ctx, tx, prefix)
+		result, err = issueops.GetConfigByPrefixInTx(ctx, q, prefix)
+		return err
+	})
+	return result, err
+}
+
+var _ domain.ConfigKeysReader = (*DoltStore)(nil)
+
+// GetConfigKeys retrieves the named configuration values in one statement (the
+// domain.ConfigKeysReader optional fast path).
+func (s *DoltStore) GetConfigKeys(ctx context.Context, keys ...string) (map[string]string, error) {
+	var result map[string]string
+	err := s.withSingleRead(ctx, func(q issueops.DBTX) error {
+		var err error
+		result, err = issueops.GetConfigKeysInTx(ctx, q, keys...)
 		return err
 	})
 	return result, err
@@ -110,9 +124,9 @@ func (s *DoltStore) SetMetadata(ctx context.Context, key, value string) error {
 // GetMetadata retrieves a metadata value
 func (s *DoltStore) GetMetadata(ctx context.Context, key string) (string, error) {
 	var value string
-	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+	err := s.withSingleRead(ctx, func(q issueops.DBTX) error {
 		var err error
-		value, err = issueops.GetMetadataInTx(ctx, tx, key)
+		value, err = issueops.GetMetadataInTx(ctx, q, key)
 		return err
 	})
 	return value, err
@@ -130,9 +144,9 @@ func (s *DoltStore) SetLocalMetadata(ctx context.Context, key, value string) err
 // Returns ("", nil) if the key does not exist.
 func (s *DoltStore) GetLocalMetadata(ctx context.Context, key string) (string, error) {
 	var value string
-	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+	err := s.withSingleRead(ctx, func(q issueops.DBTX) error {
 		var err error
-		value, err = issueops.GetLocalMetadataInTx(ctx, tx, key)
+		value, err = issueops.GetLocalMetadataInTx(ctx, q, key)
 		return err
 	})
 	return value, err
@@ -219,8 +233,15 @@ func (s *DoltStore) GetInfraTypes(ctx context.Context) map[string]bool {
 	s.cacheMu.Unlock()
 
 	var result map[string]bool
-	if err := s.withReadTx(ctx, func(tx *sql.Tx) error {
-		result = issueops.ResolveInfraTypesInTx(ctx, tx)
+	// The read error must reach withSingleRead's retry: ResolveInfraTypesInTx would
+	// swallow a lost connection, and the fallback below would be cached for the
+	// store's lifetime.
+	if err := s.withSingleRead(ctx, func(q issueops.DBTX) error {
+		value, err := issueops.GetConfigInTx(ctx, q, issueops.InfraTypesConfigKey)
+		if err != nil {
+			return err
+		}
+		result = issueops.ResolveInfraTypes(value)
 		return nil
 	}); err != nil || result == nil {
 		// DB unavailable — fall back to YAML then defaults.
