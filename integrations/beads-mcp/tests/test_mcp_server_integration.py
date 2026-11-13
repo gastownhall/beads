@@ -156,19 +156,29 @@ async def test_show_issue_tool(mcp_client):
 @pytest.mark.asyncio
 async def test_list_issues_tool(mcp_client):
     """Test list_issues tool."""
+    import json
+
     # Create some issues first
-    await mcp_client.call_tool("create", {"title": "Issue 1", "priority": 0, "issue_type": "bug", "brief": False})
+    first_result = await mcp_client.call_tool(
+        "create", {"title": "Issue 1", "priority": 0, "issue_type": "bug", "brief": False}
+    )
+    first_issue = json.loads(first_result.content[0].text)
     await mcp_client.call_tool(
         "create", {"title": "Issue 2", "priority": 1, "issue_type": "feature", "brief": False}
+    )
+    await mcp_client.call_tool(
+        "comment",
+        {"issue_id": first_issue["id"], "text": "List chronology"},
     )
 
     # List all issues
     result = await mcp_client.call_tool("list", {})
 
-    import json
-
     issues = json.loads(result.content[0].text)
     assert len(issues) >= 2
+    listed = next(issue for issue in issues if issue["id"] == first_issue["id"])
+    assert listed["comment_count"] == 1
+    assert listed["comments_omitted"] is True
 
     # List with status filter
     result = await mcp_client.call_tool("list", {"status": "open"})
@@ -534,6 +544,10 @@ async def test_ready_work_tool(mcp_client):
             "dep_type": "blocks",
         },
     )
+    await mcp_client.call_tool(
+        "comment",
+        {"issue_id": ready_issue["id"], "text": "Ready chronology"},
+    )
 
     # Get ready work
     result = await mcp_client.call_tool("ready", {"limit": 100})
@@ -542,6 +556,9 @@ async def test_ready_work_tool(mcp_client):
     ready_ids = [issue["id"] for issue in ready_issues]
     assert ready_issue["id"] in ready_ids
     assert blocked_issue["id"] not in ready_ids
+    our_ready = next(issue for issue in ready_issues if issue["id"] == ready_issue["id"])
+    assert our_ready["comment_count"] == 1
+    assert our_ready["comments_omitted"] is True
 
 
 @pytest.mark.asyncio
@@ -1272,3 +1289,74 @@ async def test_show_brief_deps(mcp_client):
     assert "status" in dep
     # BriefDep should NOT have full LinkedIssue fields
     assert "description" not in dep
+
+
+async def _issue_with_two_comments(mcp_client) -> str:
+    import json
+
+    create_result = await mcp_client.call_tool(
+        "create", {"title": "Discussed issue", "priority": 2, "issue_type": "task", "brief": False}
+    )
+    issue_id = json.loads(create_result.content[0].text)["id"]
+    await mcp_client.call_tool("comment", {"issue_id": issue_id, "text": "first comment"})
+    await mcp_client.call_tool("comment", {"issue_id": issue_id, "text": "second comment"})
+    return issue_id
+
+
+@pytest.mark.asyncio
+async def test_show_comment_completeness_real_cli(mcp_client):
+    """Default show reports omitted comments; opt-in returns the full chronology (bd-kwe4ze)."""
+    import json
+
+    issue_id = await _issue_with_two_comments(mcp_client)
+
+    default = json.loads((await mcp_client.call_tool("show", {"issue_id": issue_id})).content[0].text)
+    assert default["comment_count"] == 2
+    assert default["comments_omitted"] is True
+    assert default["comments"] is None
+
+    full = json.loads(
+        (await mcp_client.call_tool("show", {"issue_id": issue_id, "include_comments": True})).content[0].text
+    )
+    assert [c["text"] for c in full["comments"]] == ["first comment", "second comment"]
+    assert full["comment_count"] == 2
+    assert full["comments_omitted"] is False
+
+    selected = json.loads(
+        (await mcp_client.call_tool("show", {"issue_id": issue_id, "fields": ["comments"]})).content[0].text
+    )
+    assert [c["text"] for c in selected["comments"]] == ["first comment", "second comment"]
+    assert selected["comments_omitted"] is False
+
+
+@pytest.mark.asyncio
+async def test_show_include_comments_without_comments_real_cli(mcp_client):
+    """A body request on an issue with no comments answers [], not null (unknown) (bd-kwe4ze)."""
+    import json
+
+    create_result = await mcp_client.call_tool(
+        "create", {"title": "Quiet issue", "priority": 2, "issue_type": "task", "brief": False}
+    )
+    issue_id = json.loads(create_result.content[0].text)["id"]
+
+    full = json.loads(
+        (await mcp_client.call_tool("show", {"issue_id": issue_id, "include_comments": True})).content[0].text
+    )
+    assert full["comments"] == []
+    assert full["comment_count"] == 0
+    assert full["comments_omitted"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["list", "ready"])
+async def test_collection_comment_completeness_real_cli(mcp_client, tool):
+    """list/ready minimal rows say their comments were omitted (bd-kwe4ze)."""
+    import json
+
+    issue_id = await _issue_with_two_comments(mcp_client)
+
+    rows = json.loads((await mcp_client.call_tool(tool, {})).content[0].text)
+    row = next(r for r in rows if r["id"] == issue_id)
+    assert row["comment_count"] == 2
+    assert row["comments_omitted"] is True
+    assert "comments" not in row

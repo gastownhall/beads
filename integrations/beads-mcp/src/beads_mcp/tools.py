@@ -441,13 +441,15 @@ async def beads_list_issues(
 
 async def beads_show_issue(
     issue_id: Annotated[str, "Issue ID (e.g., bd-1)"],
+    include_comments: Annotated[bool, "Also return the comment bodies (bd show --include-comments)"] = False,
 ) -> Issue:
     """Show detailed information about a specific issue.
 
-    Includes full description, dependencies, and dependents.
+    Includes full description, dependencies, and dependents. Comments come back
+    as comment_count/comments_omitted only unless include_comments is True.
     """
     client = await _get_client()
-    params = ShowIssueParams(issue_id=issue_id)
+    params = ShowIssueParams(issue_id=issue_id, include_comments=include_comments)
     return await client.show(params)
 
 
@@ -654,7 +656,8 @@ async def beads_add_comment(
 
     Leave a durable, timestamped record of what you did, decided, or verified so
     humans don't have to read the agent transcript to know what happened. `show`
-    reports comment_count but not the bodies — use beads_list_comments to read them.
+    reports comment_count and comments_omitted but not the bodies unless asked with
+    include_comments — or use beads_list_comments to read them.
 
     Prefer a comment over overwriting `notes`: comments accumulate as a per-turn
     trail, whereas the notes field is a single value that gets replaced.
@@ -669,7 +672,8 @@ async def beads_list_comments(
 ) -> list[Comment]:
     """List all comments on an issue in chronological order.
 
-    `show` returns comment_count but not the comment bodies; use this to read them.
+    `show` returns comment_count and comments_omitted but not the comment bodies
+    unless called with include_comments=True; use this to read them on their own.
     """
     client = await _get_client()
     params = ListCommentsParams(issue_id=issue_id)

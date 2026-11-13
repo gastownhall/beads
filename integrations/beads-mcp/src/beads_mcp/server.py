@@ -447,12 +447,24 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
                 "issue_id": "str (required) - e.g., 'bd-a1b2'",
                 "brief": "bool (default false) - Return only {id, title, status, priority}",
                 "brief_deps": "bool (default false) - Full issue with compact dependencies",
-                "fields": "list[str] (optional) - Custom field projection",
+                "fields": (
+                    "list[str] (optional) - Custom field projection; fields=['comments'] also fetches "
+                    "the comment bodies (bd 1.0.5 or later) and adds comments_omitted"
+                ),
                 "max_description_length": "int (optional) - Truncate description",
                 "workspace_root": "str (optional)",
+                "include_comments": (
+                    "bool (default false) - Also return the comment bodies in CLI order (needs bd "
+                    "1.0.5 or later). By default show is count-only: comment_count plus "
+                    "comments_omitted, with comments null. Ignored with brief=True"
+                ),
             },
-            "returns": "Full Issue object (or BriefIssue/dict based on params)",
-            "example": "show(issue_id='bd-a1b2', brief_deps=True)",
+            "returns": (
+                "Full Issue object (or BriefIssue/dict based on params). Comments are count-only "
+                "(comment_count, comments_omitted) unless include_comments=True or fields=['comments']; "
+                "null means unknown"
+            ),
+            "example": "show(issue_id='bd-a1b2', include_comments=True)",
         },
         "create": {
             "name": "create",
@@ -547,7 +559,11 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
         },
         "comments": {
             "name": "comments",
-            "description": "List all comments on an issue (show reports comment_count but not the bodies)",
+            "description": (
+                "List all comments on an issue (show is count-only by default: it reports "
+                "comment_count/comments_omitted; pass show(include_comments=True) or use this "
+                "tool to read the bodies)"
+            ),
             "parameters": {
                 "issue_id": "str (required)",
                 "workspace_root": "str (optional)",
@@ -769,6 +785,26 @@ def _context_show() -> str:
 # =============================================================================
 
 
+def _minimal_comments_omitted(issue: Issue) -> bool | None:
+    """The comments_omitted a row without bodies must report about itself.
+
+    A minimal row, or a field projection without comments, never carries
+    bodies, so it must say whether it dropped any: an explicit true stays
+    true, positive evidence (a count above zero or bodies the projection is
+    removing) means true, a known zero without positive evidence means false,
+    and anything else keeps whatever the source said — including unknown.
+    This adjusts the projection only; the source Issue is never rewritten.
+    """
+    if issue.comments_omitted is True:
+        return True
+    bodies = issue.comments or []
+    if (issue.comment_count is not None and issue.comment_count > 0) or bodies:
+        return True
+    if issue.comment_count == 0 and not bodies:
+        return False
+    return issue.comments_omitted
+
+
 def _to_minimal(issue: Issue) -> IssueMinimal:
     """Convert full Issue to minimal format for context efficiency."""
     return IssueMinimal(
@@ -781,6 +817,8 @@ def _to_minimal(issue: Issue) -> IssueMinimal:
         labels=issue.labels,
         dependency_count=issue.dependency_count,
         dependent_count=issue.dependent_count,
+        comment_count=issue.comment_count,
+        comments_omitted=_minimal_comments_omitted(issue),
     )
 
 
@@ -826,6 +864,9 @@ VALID_ISSUE_FIELDS: set[str] = {
     "dependent_count",
     "dependencies",
     "dependents",
+    "comments",
+    "comment_count",
+    "comments_omitted",
 }
 
 
@@ -851,6 +892,14 @@ def _filter_fields(obj: Issue, fields: list[str]) -> dict[str, Any]:
             result[field] = [item.model_dump() for item in value]
         else:
             result[field] = value
+    # comments is None whenever bodies were not fetched, so a comments
+    # selection also says whether they were left out.
+    if "comments" in requested and "comments_omitted" not in requested:
+        result["comments_omitted"] = obj.comments_omitted
+    # Without comments the projection drops any fetched bodies, so its marker
+    # describes the projection, as a minimal row's does.
+    if "comments_omitted" in requested and "comments" not in requested:
+        result["comments_omitted"] = _minimal_comments_omitted(obj)
     return result
 
 
@@ -1033,7 +1082,13 @@ async def list_issues(
 
 @mcp.tool(
     name="show",
-    description="Show detailed information about a specific issue including dependencies and dependents.",
+    description=(
+        "Show detailed information about a specific issue including dependencies and dependents. "
+        "Comments are count-only by default: comment_count says how many exist and comments_omitted "
+        "is true when their bodies are not in the response. Pass include_comments=True (or "
+        "fields=['comments']) to also get the bodies (needs bd 1.0.5 or later); brief=True never "
+        "includes them."
+    ),
 )
 @with_workspace
 async def show_issue(
@@ -1043,6 +1098,7 @@ async def show_issue(
     brief_deps: bool = False,
     fields: list[str] | None = None,
     max_description_length: int | None = None,
+    include_comments: bool = False,
 ) -> Issue | BriefIssue | dict[str, Any]:
     """Show detailed information about a specific issue.
 
@@ -1053,8 +1109,11 @@ async def show_issue(
         brief_deps: If True, return full issue but with compact dependencies
         fields: Return only specified fields (custom projections)
         max_description_length: Truncate description to this length
+        include_comments: Also return the comment bodies (ignored with brief)
     """
-    issue = await beads_show_issue(issue_id=issue_id)
+    # Bodies are fetched only when asked for; brief output never carries them.
+    hydrate = not brief and (include_comments or bool(fields and "comments" in fields))
+    issue = await beads_show_issue(issue_id=issue_id, include_comments=hydrate)
 
     if max_description_length:
         issue = _truncate_description(issue, max_description_length)
@@ -1297,7 +1356,10 @@ async def comment(
 
 @mcp.tool(
     name="comments",
-    description="List all comments on an issue (show reports comment_count but not the comment bodies).",
+    description=(
+        "List all comments on an issue in chronological order. show reports comment_count and "
+        "comments_omitted by default; show(include_comments=True) returns the bodies inline."
+    ),
 )
 @with_workspace
 async def comments(
