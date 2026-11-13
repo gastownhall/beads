@@ -1325,3 +1325,88 @@ func TestSetupCopilot_ConvertsLegacyInstructions(t *testing.T) {
 		}
 	})
 }
+
+// AC-7: install and remove refuse a symlinked instructions file before
+// touching either recipe path, keeping the link and its target.
+func TestSetupCopilot_RefusesSymlinkedInstructions(t *testing.T) {
+	const user = "# Team rules\n\nBe kind.\n"
+	for _, tt := range []struct {
+		name     string
+		mode     string
+		target   string // the link target's content; "" leaves it dangling
+		manifest bool
+	}{
+		{name: "install through link", mode: "", target: user},
+		{name: "install through dangling link", mode: ""},
+		{name: "remove through link", mode: "remove", target: user + "\n" + copilotSection(), manifest: true},
+		{name: "remove through link to a section-only file", mode: "remove", target: copilotSection(), manifest: true},
+		{name: "remove through dangling link", mode: "remove", manifest: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ws := copilotTestWorkspace(t)
+			target := filepath.Join(ws, "shared", "instructions.md")
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tt.target != "" {
+				if err := os.WriteFile(target, []byte(tt.target), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.manifest {
+				writeWorkspaceFile(t, copilotManifestFile, copilotManifest(t))
+			}
+			link := filepath.FromSlash(copilotInstructionsFile)
+			if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, link); err != nil {
+				t.Skipf("symlink: %v", err)
+			}
+
+			out, err := runCopilotSetup(t, tt.mode)
+			if err == nil {
+				t.Fatalf("bd setup copilot %s went through a symlinked instructions file:\n%s", tt.mode, out)
+			}
+			if !strings.Contains(out, copilotInstructionsFile) {
+				t.Errorf("refusal does not name %s:\n%s", copilotInstructionsFile, out)
+			}
+			if dest, err := os.Readlink(link); err != nil || dest != target {
+				t.Errorf("link = %q, %v; want it kept pointing at %q", dest, err, target)
+			}
+			data, err := os.ReadFile(target)
+			switch {
+			case tt.target == "" && !os.IsNotExist(err):
+				t.Errorf("dangling link's target was created: %q, %v", data, err)
+			case tt.target != "" && string(data) != tt.target:
+				t.Errorf("link target changed to %q", data)
+			}
+			if _, ok := readWorkspaceFile(t, copilotManifestFile); ok != tt.manifest {
+				t.Errorf("manifest exists = %v, want %v", ok, tt.manifest)
+			}
+		})
+	}
+}
+
+// --check only reads, so it may follow a link to valid instructions.
+func TestSetupCopilot_CheckFollowsSymlinkedInstructions(t *testing.T) {
+	ws := copilotTestWorkspace(t)
+	target := filepath.Join(ws, "shared", "instructions.md")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("# Team rules\n\n"+copilotSection()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeWorkspaceFile(t, copilotManifestFile, copilotManifest(t))
+	link := filepath.FromSlash(copilotInstructionsFile)
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	if out, err := runCopilotSetup(t, "check"); err != nil {
+		t.Fatalf("bd setup copilot --check: %v\n%s", err, out)
+	}
+}

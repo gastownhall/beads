@@ -305,3 +305,44 @@ func TestSharedSectionLegacy(t *testing.T) {
 		t.Errorf("upsert with no legacy text = %q, %v", got, err)
 	}
 }
+
+// A shared file that is a symbolic link, dangling or not, is refused by
+// every writing operation, the link and its target left as they were.
+func TestSharedSectionRefusesSymlink(t *testing.T) {
+	for _, tt := range []struct{ name, target string }{
+		{"user content", "# Mine\n"},
+		{"section only", sharedWrapped()},
+		{"legacy only", sharedLegacy},
+		{"dangling", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			target := filepath.Join(dir, "target.md")
+			if tt.target != "" {
+				if err := os.WriteFile(target, []byte(tt.target), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			link := filepath.Join(dir, "instructions.md")
+			if err := os.Symlink(target, link); err != nil {
+				t.Skipf("symlink: %v", err)
+			}
+			if err := PreflightSharedFile(link); !errors.Is(err, ErrRefuseSymlinkWrite) {
+				t.Errorf("PreflightSharedFile = %v, want ErrRefuseSymlinkWrite", err)
+			}
+			if _, err := InstallSharedFile(link, sharedBody, sharedLegacy); !errors.Is(err, ErrRefuseSymlinkWrite) {
+				t.Errorf("InstallSharedFile = %v, want ErrRefuseSymlinkWrite", err)
+			}
+			if _, err := RemoveSharedFile(link, sharedLegacy); !errors.Is(err, ErrRefuseSymlinkWrite) {
+				t.Errorf("RemoveSharedFile = %v, want ErrRefuseSymlinkWrite", err)
+			}
+			if dest, err := os.Readlink(link); err != nil || dest != target {
+				t.Errorf("link = %q, %v; want it kept", dest, err)
+			}
+			data, err := os.ReadFile(target)
+			if tt.target == "" && !os.IsNotExist(err) || tt.target != "" && string(data) != tt.target {
+				t.Errorf("target = %q, %v; want %q", data, err, tt.target)
+			}
+		})
+	}
+}
