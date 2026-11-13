@@ -145,6 +145,20 @@ func TestNoticeSharedMigrateRefusalPerDecision(t *testing.T) {
 			t.Errorf("only a gate refusal should produce a notice, got:\n%s", out)
 		}
 	})
+
+	// From the contributor's #6949 regression: the dirty-table refusal has its
+	// own notice, naming the tables and the commit-then-migrate recovery.
+	t.Run("dirty tables name the commit and migration recovery", func(t *testing.T) {
+		pinJSONOutput(t, false)
+		out := captureNoticeStderr(t, func() {
+			noticeDirtyTablesRefusal(&schema.DirtyTablesError{Tables: []string{"issues"}}, "/ws/.beads")
+		})
+		for _, want := range []string{"issues", "bd dolt commit", "bd migrate schema"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("dirty-table notice missing %q:\n%s", want, out)
+			}
+		}
+	})
 }
 
 // TestSharedRefusalPrescribesAWorkingVerb closes the loop the review flagged:
