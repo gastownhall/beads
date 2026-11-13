@@ -7243,7 +7243,7 @@ bd update
     | --if-assignee/--if-status guard (the precondition no longer held, nothing was
     | written — another actor won the race, so retrying the same guard is
     | pointless).
-  flag --acceptance type=string default="" annotations={cobra_annotation_mutually_exclusive=["clear-acceptance acceptance"]} usage="Acceptance criteria"
+  flag --acceptance type=string default="" annotations={cobra_annotation_mutually_exclusive=["clear-acceptance acceptance"]} usage="Replace the acceptance criteria (--acceptance \"\" is refused: use --clear-acceptance to clear)"
   flag --acceptance-criteria type=string default="" hidden annotations={cobra_annotation_mutually_exclusive=["clear-acceptance acceptance-criteria"]} usage="DEPRECATED: use --acceptance"
   flag --add-label -l type=stringSlice default="[]" usage="Add labels (repeatable); -l matches bd create -l"
   flag --allow-empty-description type=bool default="false" usage="Allow empty description replacement when reading from stdin or file"
@@ -7258,9 +7258,9 @@ bd update
   flag --clear-design type=bool default="false" annotations={cobra_annotation_mutually_exclusive=["clear-design design" "clear-design design-file"]} usage="Clear the design field (an empty --design value is refused: it is usually a dead command substitution)"
   flag --clear-notes type=bool default="false" annotations={cobra_annotation_mutually_exclusive=["clear-notes notes" "clear-notes append-notes"]} usage="Clear the notes field (--notes \"\" is refused: an empty value is usually a dead command substitution)"
   flag --defer type=string default="" usage="Defer until date (empty to clear). Issue hidden from bd ready until then, then auto-wakes to open"
-  flag --description -d type=string default="" annotations={cobra_annotation_mutually_exclusive=["stdin description" "clear-description description"]} usage="Issue description"
+  flag --description -d type=string default="" annotations={cobra_annotation_mutually_exclusive=["stdin description" "clear-description description"]} usage="Replace the description (--description \"\" is refused: use --clear-description to clear)"
   flag --description-file type=string default="" hidden annotations={cobra_annotation_mutually_exclusive=["stdin description-file" "clear-description description-file"]} usage="Alias for --body-file"
-  flag --design type=string default="" annotations={cobra_annotation_mutually_exclusive=["design design-file" "clear-design design"]} usage="Design notes"
+  flag --design type=string default="" annotations={cobra_annotation_mutually_exclusive=["design design-file" "clear-design design"]} usage="Replace the design (--design \"\" and empty --design-file are refused: use --clear-design to clear)"
   flag --design-file type=string default="" annotations={cobra_annotation_mutually_exclusive=["design design-file" "clear-design design-file"]} usage="Read design from file (use - for stdin)"
   flag --due type=string default="" usage="Due date/time (empty to clear). Formats: +6h, +1d, +2w, tomorrow, next monday, 2025-01-15"
   flag --ephemeral type=bool default="false" usage="Mark issue as ephemeral (wisp) - not exported to JSONL"

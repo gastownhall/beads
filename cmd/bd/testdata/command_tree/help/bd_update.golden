@@ -20,7 +20,7 @@ Usage:
   bd update [id...] [flags]
 
 Flags:
-      --acceptance string            Acceptance criteria
+      --acceptance string            Replace the acceptance criteria (--acceptance "" is refused: use --clear-acceptance to clear)
   -l, --add-label strings            Add labels (repeatable); -l matches bd create -l
       --allow-empty-description      Allow empty description replacement when reading from stdin or file
       --append-notes string          Append to existing notes (with newline separator)
@@ -33,8 +33,8 @@ Flags:
       --clear-design                 Clear the design field (an empty --design value is refused: it is usually a dead command substitution)
       --clear-notes                  Clear the notes field (--notes "" is refused: an empty value is usually a dead command substitution)
       --defer string                 Defer until date (empty to clear). Issue hidden from bd ready until then, then auto-wakes to open
-  -d, --description string           Issue description
-      --design string                Design notes
+  -d, --description string           Replace the description (--description "" is refused: use --clear-description to clear)
+      --design string                Replace the design (--design "" and empty --design-file are refused: use --clear-design to clear)
       --design-file string           Read design from file (use - for stdin)
       --due string                   Due date/time (empty to clear). Formats: +6h, +1d, +2w, tomorrow, next monday, 2025-01-15
       --ephemeral                    Mark issue as ephemeral (wisp) - not exported to JSONL

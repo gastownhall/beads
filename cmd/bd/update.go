@@ -1091,6 +1091,11 @@ func init() {
 	updateCmd.Flags().Bool("clear-description", false, "Clear the description (an empty --description value is refused: it is usually a dead command substitution)")
 	updateCmd.Flags().Bool("clear-design", false, "Clear the design field (an empty --design value is refused: it is usually a dead command substitution)")
 	updateCmd.Flags().Bool("clear-acceptance", false, "Clear the acceptance criteria (an empty --acceptance value is refused: it is usually a dead command substitution)")
+	// Update replaces these fields, so their help names the refusal and the
+	// clear verb; create keeps the shared "Issue description" wording.
+	updateCmd.Flags().Lookup("description").Usage = "Replace the description (--description \"\" is refused: use --clear-description to clear)"
+	updateCmd.Flags().Lookup("design").Usage = "Replace the design (--design \"\" and empty --design-file are refused: use --clear-design to clear)"
+	updateCmd.Flags().Lookup("acceptance").Usage = "Replace the acceptance criteria (--acceptance \"\" is refused: use --clear-acceptance to clear)"
 	updateCmd.Flags().String("spec-id", "", "Link to specification document")
 	updateCmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")
 	_ = updateCmd.Flags().MarkHidden("acceptance-criteria") // Only fails if flag missing (caught in tests)
