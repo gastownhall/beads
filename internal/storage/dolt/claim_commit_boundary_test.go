@@ -85,6 +85,14 @@ func (c *claimCommitBoundaryConn) QueryContext(_ context.Context, query string, 
 	defer c.driver.mu.Unlock()
 
 	switch {
+	case strings.HasPrefix(query, "SELECT EXISTS (SELECT 1 FROM wisps)"):
+		// The ready probe always answers with one row. These are the six facts
+		// a zero-value WorkFilter asks for, all false: no wisps, no stale flags,
+		// no future-deferred parents.
+		return &claimCommitBoundaryRows{
+			columns: []string{"wisps", "wisp_deps", "issues_stale", "wisps_stale", "issues_deferred", "wisps_deferred"},
+			values:  [][]driver.Value{{false, false, false, false, false, false}},
+		}, nil
 	case strings.Contains(query, "SELECT 1 FROM wisps WHERE id = ? LIMIT 1"):
 		if c.driver.activeWisp {
 			return &claimCommitBoundaryRows{columns: []string{"exists"}, values: [][]driver.Value{{int64(1)}}}, nil
