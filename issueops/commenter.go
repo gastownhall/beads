@@ -45,14 +45,26 @@ type AddCommentResult struct {
 	Comment *Comment
 }
 
-// Commenter describes adding a comment to an issue: the write side of `bd
-// comment`, and — like Lifecycle, Reader, ReadyClaimer, BatchCloser and
-// DependencyEditor — a role with its own accessor. A new capability gets a new
-// role interface and its own accessor; never append a method here.
+// DeleteCommentRequest identifies one comment to remove.
+type DeleteCommentRequest struct {
+	Actor     string
+	IssueID   string
+	CommentID string
+}
+
+// DeleteCommentResult reports the comment that was removed.
+type DeleteCommentResult struct {
+	Comment *Comment
+}
+
+// Commenter describes comment-thread mutations: the write side of `bd
+// comment` and `bd comments`, and — like Lifecycle, Reader, ReadyClaimer,
+// BatchCloser and DependencyEditor — a role with its own accessor. Add and
+// delete are kept together because both mutate the same comment thread.
 //
 // It is its own role rather than a Lifecycle verb because a comment is not a
-// patch to an issue. It appends a row to a thread the issue owns and leaves
-// every field of the issue untouched, so an IssuePatch has nothing to carry
+// patch to an issue. It appends or removes a row in a thread the issue owns
+// and records activity on the anchor, so an IssuePatch has nothing to carry
 // and an UpdateResult has nowhere to put the comment.
 //
 // READING the thread is deliberately not here. Reader.Get already returns
@@ -81,4 +93,7 @@ type Commenter interface {
 	// caller reconstructing threads from durable history alone will not see
 	// it.
 	AddComment(ctx context.Context, req AddCommentRequest) (AddCommentResult, error)
+	// DeleteComment removes one exact comment id and records the actor in the
+	// audit trail. An unknown issue or comment is ErrNotFound.
+	DeleteComment(ctx context.Context, req DeleteCommentRequest) (DeleteCommentResult, error)
 }
