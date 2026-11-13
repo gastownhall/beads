@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/schema"
@@ -178,5 +179,29 @@ func TestDoltNew_SharedStoreMigrateGate_NoRemote(t *testing.T) {
 		}
 		defer s.Close()
 		wantApplied(t, s, 0, "fresh open of a current database")
+	})
+
+	// The verb returns on a migration error without looking at the count, so
+	// a failed explicit pass must not consume the open's migration: a retry
+	// on the same store still reports it, once.
+	t.Run("failed explicit pass keeps the open's count", func(t *testing.T) {
+		if _, err := store.db.ExecContext(ctx,
+			"DELETE FROM schema_migrations WHERE version = ?", schema.LatestVersion()); err != nil {
+			t.Fatalf("regress schema_migrations: %v", err)
+		}
+		s := openConsented(t)
+		if got := cursor(); got != schema.LatestVersion() {
+			t.Fatalf("cursor = %d after a consented open, want %d", got, schema.LatestVersion())
+		}
+		// An unparseable DSN makes openMigrationDB fail deterministically.
+		goodConnStr := s.connStr
+		s.connStr = "invalid"
+		applied, err := s.ApplySchemaMigrations(ctx)
+		s.connStr = goodConnStr
+		if err == nil || !strings.Contains(err.Error(), "failed to parse DSN for migration connection") {
+			t.Fatalf("ApplySchemaMigrations with a broken DSN = (%d, %v), want the DSN parse error", applied, err)
+		}
+		wantApplied(t, s, 1, "retry after a failed call")
+		wantApplied(t, s, 0, "call after the retry reported it")
 	})
 }
