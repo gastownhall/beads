@@ -289,7 +289,7 @@ jobs:
         id: msys2-shell
         if: ${{ !cancelled() && steps.toolchain-keys.outputs.msys2-sync-db != '' && steps.msys2-cache.outputs.cache-hit != 'true' }}
         timeout-minutes: 3
-        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         with:
           msystem: MSYS
           path-type: minimal
@@ -326,7 +326,7 @@ jobs:
         id: cygwin
         if: ${{ !cancelled() && steps.cygwin-cache.outputs.cache-hit != 'true' }}
         timeout-minutes: 10
-        uses: cygwin/cygwin-install-action@3f0a3f9f988f7e96b8c18098ae05eaec175f5b52 # v6
+        uses: cygwin/cygwin-install-action@5a1b0cd107181fa6bb6bf3f90d500f4fb3132f18 # v7.0.0
         with:
           packages: git make
           add-to-path: 'false'
