@@ -38,8 +38,10 @@ func (s *DoltStore) createIssue(ctx context.Context, issue *types.Issue, actor s
 		issue.Ephemeral = true // infra and wisp types get marked ephemeral (legacy behavior)
 	}
 
+	resetMintedIDs := snapshotUnsetCreateIDs([]*types.Issue{issue})
 	var result issueops.CreateIssueResult
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		resetMintedIDs()
 		// SkipPrefixValidation matches legacy behavior: single-issue path does
 		// not validate prefixes for explicit IDs.
 		bc, err := issueops.NewBatchContext(ctx, tx, storage.BatchCreateOptions{
@@ -62,6 +64,30 @@ func (s *DoltStore) createIssue(ctx context.Context, issue *types.Issue, actor s
 		}
 	}
 	return nil
+}
+
+// snapshotUnsetCreateIDs records which issues the caller left without an id
+// and returns a reset that empties exactly those ids again.
+//
+// A create mints the id into the caller's object. withRetryTx replays the
+// closure after a rollback, and its contract is that the closure re-derives
+// such captured state on every attempt. Without the reset a replay would read
+// the aborted attempt's mint as an explicit id and upsert over the row a
+// concurrent writer committed under it (GH#7289). Ids the caller supplied are
+// never captured, so they are never cleared. Call it first in each attempt;
+// on the first it is a no-op.
+func snapshotUnsetCreateIDs(issues []*types.Issue) func() {
+	var unset []*string
+	for _, issue := range issues {
+		if issue != nil && issue.ID == "" {
+			unset = append(unset, &issue.ID)
+		}
+	}
+	return func() {
+		for _, field := range unset {
+			*field = ""
+		}
+	}
 }
 
 func createIssueCommitTables(ctx context.Context, issue *types.Issue, result issueops.CreateIssueResult) []string {
