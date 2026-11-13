@@ -440,3 +440,41 @@ func TestScrubArgsForTelemetryPasswordlessDSNUnchanged(t *testing.T) {
 		}
 	}
 }
+
+// TestScrubArgsForTelemetryRedactsCertStoreSelector locks that bd init's
+// certificate store selector, which names the user and their certificate,
+// never reaches bd.args, in the space and equals spellings.
+func TestScrubArgsForTelemetryRedactsCertStoreSelector(t *testing.T) {
+	secretFlags := secretFlagTokens(initCmd)
+	argv := []string{"init", "--proxied-server", "--proxied-server-external-tls",
+		"--proxied-server-external-tls-cert-subject", "CN=Alice Smith, O=Example",
+		"--proxied-server-external-tls-cert-store=LocalMachine/My",
+		"--proxied-server-external-tls-cert-thumbprint", "AB12CD",
+		"--proxied-server-external-tls-cert-subject=CN=Bob",
+		// pflag takes the next token as the value even when it looks like
+		// a flag with an equals value; it must not reach the DSN scrub.
+		"--proxied-server-external-tls-cert-subject", "--CN=Carol:opaque@example.com",
+		"--proxied-server-external-tls-cert-path", "C:/Users/dave/certs/client.pem",
+		"--proxied-server-external-tls-key-path=C:/Users/dave/certs/client.key",
+		"--proxied-server-external-tls-ca-cert-path", "C:/ProgramData/beads/ca.pem"}
+	out := scrubArgsForTelemetry(argv, secretFlags)
+	for _, leaked := range []string{"Alice", "LocalMachine", "AB12CD", "Bob", "Carol", "example.com", "dave"} {
+		if strings.Contains(out, leaked) {
+			t.Errorf("selector value %q leaked into bd.args: %q", leaked, out)
+		}
+	}
+	for _, keep := range []string{
+		"--proxied-server-external-tls ",
+		"--proxied-server-external-tls-cert-subject xxxxx",
+		"--proxied-server-external-tls-cert-store=xxxxx",
+		"--proxied-server-external-tls-cert-thumbprint xxxxx",
+		"--proxied-server-external-tls-cert-subject=xxxxx",
+		"--proxied-server-external-tls-cert-path xxxxx",
+		"--proxied-server-external-tls-key-path=xxxxx",
+		"--proxied-server-external-tls-ca-cert-path C:/ProgramData/beads/ca.pem",
+	} {
+		if !strings.Contains(out, keep) {
+			t.Errorf("expected %q in %q", keep, out)
+		}
+	}
+}
