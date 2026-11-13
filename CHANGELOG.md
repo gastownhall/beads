@@ -151,6 +151,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Pi coding agent support.** Install the shared `plugins/beads` package to
+  discover the Beads skill and refresh `bd prime` context at session start and
+  after compaction. Pi skill opt-outs remain effective. (#4806)
+
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
   While a workspace journals, every `ephemeral` or `no_history` bead it creates
   is stamped with the `seq` of its own `create` journal record, in the same

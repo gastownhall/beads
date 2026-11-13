@@ -326,6 +326,7 @@ This updates:
 - `plugins/beads/.claude-plugin/plugin.json` — Claude plugin version
 - `plugins/beads/.codex-plugin/plugin.json` — Codex plugin version
 - `plugins/beads/.copilot-plugin/plugin.json` — Copilot plugin version
+- `plugins/beads/package.json` — Pi package version
 - `.claude-plugin/marketplace.json` — Claude marketplace version
 - `npm-package/package.json` — npm package version
 - `.githooks/*` — the `BEGIN`/`END BEADS INTEGRATION v<version>` markers on the

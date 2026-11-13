@@ -73,6 +73,11 @@ var releaseSources = []source{
 		read:        readTopLevelJSONVersion,
 	},
 	{
+		path:        "plugins/beads/package.json",
+		description: "Pi package.json",
+		read:        readTopLevelJSONVersion,
+	},
+	{
 		path:        ".claude-plugin/marketplace.json",
 		description: "Claude marketplace.json",
 		read:        readMarketplaceJSONVersion,
