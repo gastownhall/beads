@@ -14,6 +14,8 @@ func TestClassify(t *testing.T) {
 		{"parenthesized union", "(SELECT 1) UNION (SELECT 2)", Read},
 		{"intersect", "SELECT 1 INTERSECT SELECT 2", Read},
 		{"except", "SELECT 1 EXCEPT SELECT 2", Read},
+		{"union distinct", "SELECT 1 UNION DISTINCT SELECT 2", Read},
+		{"union order limit", "SELECT 1 UNION SELECT 2 ORDER BY 1 LIMIT 1", Read},
 		{"show", "SHOW TABLES", Read},
 		{"describe", "DESCRIBE issues", Read},
 		{"explain select", "EXPLAIN SELECT * FROM issues", Read},
@@ -32,6 +34,10 @@ func TestClassify(t *testing.T) {
 		{"cte escaped quote in literal", `WITH t AS (SELECT 'a\'(' AS s) SELECT s FROM t`, Read},
 		{"cte comment with keywords", "WITH t AS (SELECT 1 AS n /* ) DELETE */) SELECT n FROM t", Read},
 		{"cte union main", "WITH t(n) AS (SELECT 1) SELECT n FROM t UNION SELECT 2", Read},
+		// A set operation without INTO keeps returning rows (#7033).
+		{"union order by limit", "SELECT 1 UNION SELECT 2 UNION (SELECT 3) ORDER BY 1 LIMIT 1", Read},
+		{"parenthesized intersect", "(SELECT id FROM issues) INTERSECT (SELECT id FROM issues)", Read},
+		{"except order by", "SELECT id FROM issues EXCEPT SELECT id FROM issues ORDER BY 1", Read},
 
 		// CTE writes must stay writes: a read transaction is rolled back.
 		{"cte delete", "WITH t AS (SELECT id FROM issues) DELETE FROM issues WHERE id IN (SELECT id FROM t)", Write},
@@ -63,11 +69,19 @@ func TestClassify(t *testing.T) {
 		{"table-less cte union into outfile", "WITH t AS (SELECT 1 AS n) SELECT n FROM t UNION SELECT n FROM t INTO OUTFILE '/p'", Write},
 		{"intersect into outfile", "(SELECT 1) INTERSECT (SELECT 1) INTO OUTFILE '/p'", Write},
 		{"except into variable", "SELECT id FROM issues EXCEPT SELECT id FROM issues INTO @x", Write},
+		{"unparenthesized left into outfile", "SELECT 1 UNION (SELECT 2) INTO OUTFILE '/p'", Write},
+		{"union distinct into dumpfile", "SELECT 1 UNION DISTINCT SELECT id FROM issues INTO DUMPFILE '/p'", Write},
+		{"three-operand union order limit into outfile", "SELECT 1 UNION SELECT 2 UNION (SELECT 3) ORDER BY 1 LIMIT 1 INTO OUTFILE '/p'", Write},
+		// The INTO check answers before the Dolt-function upgrade, so an
+		// export whose operand calls a writing function stays Write.
+		{"dolt function union export", "SELECT 1 UNION SELECT DOLT_COMMIT('-Am','x') FROM dual INTO OUTFILE '/p'", Write},
 		// The grammar attaches INTO to a table-less last operand, or to an
 		// operand inside parentheses, and rejects it there: Mixed, which
 		// --readonly already refuses.
 		{"union into on table-less last operand", "SELECT 1 UNION SELECT 2 INTO @x", Mixed},
 		{"into inside union operand", "(SELECT 1 INTO @x) UNION (SELECT 2)", Mixed},
+		{"union outfile on table-less last operand", "SELECT 1 UNION SELECT 2 INTO OUTFILE '/p'", Mixed},
+		{"outfile inside union operand", "SELECT 1 UNION (SELECT 2 INTO OUTFILE '/p')", Mixed},
 
 		// Statements that may write AND return rows, or that the parser
 		// cannot classify, must run in a committing transaction that still
@@ -89,6 +103,7 @@ func TestClassify(t *testing.T) {
 		{"dolt function in subquery", "SELECT (SELECT DOLT_RESET('--hard'))", Mixed},
 		{"dolt function in cte", "WITH t AS (SELECT DOLT_COMMIT('-Am','x') AS h) SELECT h FROM t", Mixed},
 		{"dolt function in union", "SELECT 1 UNION SELECT DOLT_PUSH('origin','main')", Mixed},
+		{"dolt function in intersect", "(SELECT 1) INTERSECT (SELECT DOLT_RESET('--hard'))", Mixed},
 		// sqlparser.Walk skips these clauses; Classify walks them itself.
 		{"dolt function in cte before union", "WITH t AS (SELECT DOLT_COMMIT('-Am','x') AS h) SELECT h FROM t UNION SELECT 1", Mixed},
 		{"dolt function in union order by", "SELECT 1 UNION SELECT 2 ORDER BY DOLT_COMMIT('-Am','x')", Mixed},
@@ -129,5 +144,20 @@ func TestClassify(t *testing.T) {
 				t.Errorf("Classify(%q) = %v, want %v", tc.query, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestClassifySetOpExportIsWrite pins GH#7033: a set operation that exports
+// its rows with INTO OUTFILE/DUMPFILE writes a file and must not run as a
+// rolled-back read.
+func TestClassifySetOpExportIsWrite(t *testing.T) {
+	for _, query := range []string{
+		"(SELECT id FROM issues) UNION ALL (SELECT id FROM issues) INTO OUTFILE '/tmp/bd-7033.txt'",
+		"(SELECT 1) UNION (SELECT 2) INTO DUMPFILE '/tmp/bd-7033.bin'",
+		"WITH t AS (SELECT 1 AS n) (SELECT n FROM t) UNION (SELECT 2) INTO OUTFILE '/tmp/bd-7033.txt'",
+	} {
+		if got := Classify(query); got != Write {
+			t.Errorf("Classify(%q) = %v, want %v", query, got, Write)
+		}
 	}
 }
