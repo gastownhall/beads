@@ -3,12 +3,16 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // bdRenamePrefix runs "bd rename-prefix" with the given args and returns stdout.
@@ -179,6 +183,74 @@ func TestEmbeddedRenamePrefixEdgeCases(t *testing.T) {
 		}
 		if strings.Contains(stdout.String(), "beads-vscode-") {
 			t.Errorf("regression: 'beads-vscode-' IDs were left unrewritten: %s", stdout.String())
+		}
+	})
+
+	// ===== Repair (GH#6591): suffix-preserving consolidation =====
+
+	t.Run("repair_preview_and_apply", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "kb")
+
+		// Seed a corrupted multi-prefix workspace directly: two foreign
+		// families plus a hand-named target row. The store is closed before
+		// the CLI runs, so the workspace lock is free.
+		ctx := t.Context()
+		store, err := embeddeddolt.Open(ctx, beadsDir, dbNameFromPrefix("kb"), "main")
+		if err != nil {
+			t.Fatalf("open embedded store: %v", err)
+		}
+		for _, issue := range []*types.Issue{
+			{ID: "kb-hand", Title: "Hand-named target id", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+			{ID: "taxdb-5su1", Title: "Foreign family", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+			{ID: "cre-db-c2a", Title: "Other foreign family", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		} {
+			if err := store.CreateIssue(ctx, issue, "embedded-test"); err != nil {
+				t.Fatalf("create %s: %v", issue.ID, err)
+			}
+		}
+		if err := store.Close(); err != nil {
+			t.Fatalf("close embedded store: %v", err)
+		}
+
+		// Text dry run previews the suffix-preserving renames.
+		text := bdRenamePrefix(t, bd, dir, "kb", "--repair", "--dry-run")
+		if !strings.Contains(text, "DRY RUN") || !strings.Contains(text, "cre-db-c2a -> kb-c2a") {
+			t.Errorf("dry-run preview missing the suffix-preserving rename: %s", text)
+		}
+
+		// JSON dry run: exactly one object, the complete plan, no writes.
+		previewOut := bdRenamePrefix(t, bd, dir, "kb", "--repair", "--dry-run", "--json")
+		var preview repairJSONResult
+		if err := json.Unmarshal([]byte(previewOut), &preview); err != nil {
+			t.Fatalf("dry-run --json output is not exactly one object:\n%s\n%v", previewOut, err)
+		}
+		if !preview.DryRun || len(preview.Renames) != 2 || len(preview.Collisions) != 0 {
+			t.Errorf("preview = %+v, want a dry run with 2 renames and no collisions", preview)
+		}
+		previewByFrom := map[string]string{}
+		for _, r := range preview.Renames {
+			previewByFrom[r.From] = r.To
+		}
+		if previewByFrom["cre-db-c2a"] != "kb-c2a" || previewByFrom["taxdb-5su1"] != "kb-5su1" {
+			t.Errorf("preview renames = %v, want suffix-preserving kb-c2a and kb-5su1", previewByFrom)
+		}
+		if old := bdShow(t, bd, dir, "taxdb-5su1"); old == nil || old.ID != "taxdb-5su1" {
+			t.Errorf("dry run changed the database: taxdb-5su1 is gone")
+		}
+
+		// JSON apply: the same mappings, performed.
+		appliedOut := bdRenamePrefix(t, bd, dir, "kb", "--repair", "--json")
+		var applied repairJSONResult
+		if err := json.Unmarshal([]byte(appliedOut), &applied); err != nil {
+			t.Fatalf("apply --json output is not exactly one object:\n%s\n%v", appliedOut, err)
+		}
+		if applied.DryRun || len(applied.Renames) != 2 {
+			t.Errorf("applied = %+v, want dry_run false with 2 renames", applied)
+		}
+		for _, id := range []string{"kb-c2a", "kb-5su1", "kb-hand"} {
+			if shown := bdShow(t, bd, dir, id); shown == nil || shown.ID != id {
+				t.Errorf("expected %s after repair", id)
+			}
 		}
 	})
 }

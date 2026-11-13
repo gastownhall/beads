@@ -3,11 +3,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"testing"
 
@@ -535,6 +539,142 @@ func TestRepairPrefixesUsesKnownPrefixes(t *testing.T) {
 	}
 	prefix, err := testStore.GetConfig(ctx, "issue_prefix")
 	if err != nil || prefix != "kb" {
+		t.Errorf("issue_prefix after repair = %q (%v), want kb", prefix, err)
+	}
+}
+
+// captureRepairStdout captures everything fn writes to stdout. The caller
+// must not be parallel: the swap is process-global.
+func captureRepairStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stdout = w
+	var buf bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(&buf, r)
+		close(done)
+	}()
+	fn()
+	_ = w.Close()
+	os.Stdout = old
+	<-done
+	_ = r.Close()
+	return buf.String()
+}
+
+func TestRepairPrefixesDryRunMatchesExecution(t *testing.T) {
+	// GH#6591 AC-5: --json repair output is exactly one object — the same
+	// object for a dry run and the execution it previews — carrying the
+	// legacy summary fields plus dry_run, the complete rename list and every
+	// collision, with no text progress on the stream. The dry run writes
+	// nothing.
+	ctx := context.Background()
+	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+
+	for _, issue := range []*types.Issue{
+		{ID: "kb-5su1.13", Title: "Live child", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "kb-hand", Title: "Hand-named target id", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "taxdb-5su1", Title: "Blocked parent", Description: "see taxdb-5su1.13", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "taxdb-5su1.13", Title: "Blocked child", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "cre-db-c2a", Title: "Free family", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+	} {
+		if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("failed to create issue %s: %v", issue.ID, err)
+		}
+	}
+	allIssues, err := testStore.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	prefixes := detectPrefixes(allIssues)
+
+	oldJSON := jsonOutput
+	jsonOutput = true
+	defer func() { jsonOutput = oldJSON }()
+
+	runJSON := func(dryRun bool) repairJSONResult {
+		t.Helper()
+		var result repairJSONResult
+		out := captureRepairStdout(t, func() {
+			if err := repairPrefixes(ctx, testStore, "test", "kb", allIssues, prefixes, dryRun); err != nil {
+				t.Fatalf("repair (dry_run=%v): %v", dryRun, err)
+			}
+		})
+		if err := json.Unmarshal([]byte(out), &result); err != nil {
+			t.Fatalf("dry_run=%v stdout is not exactly one JSON object:\n%s\n%v", dryRun, out, err)
+		}
+		return result
+	}
+
+	preview := runJSON(true)
+	if !preview.DryRun {
+		t.Errorf("preview dry_run = false, want true")
+	}
+	if preview.TargetPrefix != "kb" || preview.IssuesUnchanged != 2 || preview.IssuesRepaired != 3 || preview.PrefixesFound != len(prefixes) {
+		t.Errorf("preview summary = %+v, want target kb, 2 unchanged, 3 repaired", preview)
+	}
+	if len(preview.Renames) != 3 {
+		t.Fatalf("preview renames = %+v, want the complete list of 3", preview.Renames)
+	}
+	previewByFrom := map[string]string{}
+	for _, r := range preview.Renames {
+		previewByFrom[r.From] = r.To
+	}
+	if previewByFrom["cre-db-c2a"] != "kb-c2a" {
+		t.Errorf("preview renames = %v, want cre-db-c2a -> kb-c2a", previewByFrom)
+	}
+	if len(preview.Collisions) != 1 {
+		t.Fatalf("preview collisions = %+v, want the taxdb family", preview.Collisions)
+	}
+	if c := preview.Collisions[0]; c.OldRoot != "taxdb-5su1" || c.Reason != repairReasonExists || c.Conflicting != "kb-5su1.13" || !regexp.MustCompile(`^kb-[0-9a-f]{8}$`).MatchString(c.AssignedRoot) {
+		t.Errorf("preview collision = %+v, want taxdb-5su1 blocked by kb-5su1.13 on a generated root", c)
+	}
+
+	// The dry run wrote nothing.
+	for _, id := range []string{"taxdb-5su1", "taxdb-5su1.13", "cre-db-c2a"} {
+		if issue, err := testStore.GetIssue(ctx, id); err != nil || issue == nil {
+			t.Errorf("dry run changed the database: %s is gone (%v)", id, err)
+		}
+	}
+	if prefix, err := testStore.GetConfig(ctx, "issue_prefix"); err == nil && prefix == "kb" {
+		t.Errorf("dry run set issue_prefix = kb")
+	}
+
+	applied := runJSON(false)
+	if applied.DryRun {
+		t.Errorf("applied dry_run = true, want false")
+	}
+	appliedByFrom := map[string]string{}
+	for _, r := range applied.Renames {
+		appliedByFrom[r.From] = r.To
+	}
+	if !reflect.DeepEqual(previewByFrom, appliedByFrom) {
+		t.Errorf("execution renames %v disagree with the dry run's %v", appliedByFrom, previewByFrom)
+	}
+
+	// What the database holds matches the reported mappings.
+	for from, to := range appliedByFrom {
+		if issue, err := testStore.GetIssue(ctx, to); err != nil || issue == nil {
+			t.Errorf("reported rename %s -> %s but %s is absent: %v", from, to, to, err)
+		}
+		if issue, err := testStore.GetIssue(ctx, from); err == nil && issue != nil {
+			t.Errorf("reported rename %s -> %s but %s remains", from, to, from)
+		}
+	}
+	// The re-rooted family's text reference followed the root map.
+	parent, err := testStore.GetIssue(ctx, preview.Collisions[0].AssignedRoot)
+	if err != nil || parent == nil {
+		t.Fatalf("get re-rooted parent: %v", err)
+	}
+	if want := "see " + preview.Collisions[0].AssignedRoot + ".13"; parent.Description != want {
+		t.Errorf("parent description = %q, want %q", parent.Description, want)
+	}
+	if prefix, err := testStore.GetConfig(ctx, "issue_prefix"); err != nil || prefix != "kb" {
 		t.Errorf("issue_prefix after repair = %q (%v), want kb", prefix, err)
 	}
 }

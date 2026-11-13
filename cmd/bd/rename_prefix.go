@@ -262,6 +262,13 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 		return err
 	}
 
+	// JSON mode: exactly one object — the same object a dry run previews —
+	// with no text progress on the stream. A dry run reports and stops; an
+	// execution reports what it did.
+	if dryRun && jsonOutput {
+		return printRepairJSON(plan, prefixes, true)
+	}
+
 	if dryRun {
 		fmt.Printf("DRY RUN: Would repair %d issues with incorrect prefixes\n\n", len(plan.Renames))
 		fmt.Printf("Issues with correct prefix (%s): %d\n", ui.RenderAccent(targetPrefix), plan.Unchanged)
@@ -280,9 +287,11 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 	}
 
 	// Perform the repairs
-	fmt.Printf("Repairing database with multiple prefixes...\n")
-	fmt.Printf("  Issues with correct prefix (%s): %d\n", ui.RenderAccent(targetPrefix), plan.Unchanged)
-	fmt.Printf("  Issues to repair: %d\n\n", len(plan.Renames))
+	if !jsonOutput {
+		fmt.Printf("Repairing database with multiple prefixes...\n")
+		fmt.Printf("  Issues with correct prefix (%s): %d\n", ui.RenderAccent(targetPrefix), plan.Unchanged)
+		fmt.Printf("  Issues to repair: %d\n\n", len(plan.Renames))
+	}
 
 	// Map of all renames for text replacement
 	issueByID := make(map[string]*types.Issue, len(issues))
@@ -332,7 +341,9 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 			return fmt.Errorf("failed to update issue %s -> %s: %w", oldID, newID, err)
 		}
 
-		fmt.Printf("  Renamed %s -> %s\n", ui.RenderWarn(oldID), ui.RenderAccent(newID))
+		if !jsonOutput {
+			fmt.Printf("  Renamed %s -> %s\n", ui.RenderWarn(oldID), ui.RenderAccent(newID))
+		}
 	}
 
 	// Set the new prefix in config — after the renames, and even when the
@@ -341,25 +352,54 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 		return fmt.Errorf("failed to update config: %w", err)
 	}
 
+	if jsonOutput {
+		return printRepairJSON(plan, prefixes, false)
+	}
+
 	printRepairCollisions(plan)
 
 	fmt.Printf("\n%s Successfully consolidated %d prefixes into %s\n",
 		ui.RenderPass("✓"), len(prefixes), ui.RenderAccent(targetPrefix))
 	fmt.Printf("  %d issues repaired, %d issues unchanged\n", len(plan.Renames), plan.Unchanged)
 
-	if jsonOutput {
-		result := map[string]interface{}{
-			"target_prefix":    targetPrefix,
-			"prefixes_found":   len(prefixes),
-			"issues_repaired":  len(plan.Renames),
-			"issues_unchanged": plan.Unchanged,
-		}
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		_ = enc.Encode(result)
-	}
-
 	return nil
+}
+
+// repairJSONResult is the single object --json repair output: the legacy
+// summary fields, plus dry_run, the complete rename list and every collision
+// fallback.
+type repairJSONResult struct {
+	TargetPrefix    string            `json:"target_prefix"`
+	PrefixesFound   int               `json:"prefixes_found"`
+	IssuesRepaired  int               `json:"issues_repaired"`
+	IssuesUnchanged int               `json:"issues_unchanged"`
+	DryRun          bool              `json:"dry_run"`
+	Renames         []repairRename    `json:"renames"`
+	Collisions      []repairCollision `json:"collisions"`
+}
+
+// printRepairJSON emits the repair result as exactly one JSON object, for a
+// dry run and an execution alike — a dry run previews the object an
+// execution would report. Empty lists are [] rather than null.
+func printRepairJSON(plan *prefixRepairPlan, prefixes map[string]int, dryRun bool) error {
+	result := repairJSONResult{
+		TargetPrefix:    plan.TargetPrefix,
+		PrefixesFound:   len(prefixes),
+		IssuesRepaired:  len(plan.Renames),
+		IssuesUnchanged: plan.Unchanged,
+		DryRun:          dryRun,
+		Renames:         plan.Renames,
+		Collisions:      plan.Collisions,
+	}
+	if result.Renames == nil {
+		result.Renames = []repairRename{}
+	}
+	if result.Collisions == nil {
+		result.Collisions = []repairCollision{}
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(&result)
 }
 
 // knownIssuePrefixes collects the prefixes repair extraction should honor
