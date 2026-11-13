@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -403,6 +404,88 @@ func TestRepairPrefixesRewritesDottedAndOrphanRefs(t *testing.T) {
 	}
 	if want := "see kb-5su1.13 and kb-nwb.3"; sibling.Description != want {
 		t.Errorf("description = %q, want %q", sibling.Description, want)
+	}
+}
+
+func TestRepairPrefixesCollisionReRootsTree(t *testing.T) {
+	// GH#6591 AC-3: a family whose natural destination is taken — here by a
+	// live child-only namespace and by an earlier family's claim — moves as
+	// a whole to one generated hash root, dotted paths intact, while
+	// target-prefixed rows stay untouched.
+	ctx := context.Background()
+	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+
+	for _, issue := range []*types.Issue{
+		{ID: "kb-5su1.13", Title: "Live child under the wanted root", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "kb-hand", Title: "Hand-named target id", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "taxdb-5su1", Title: "Blocked root", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "taxdb-5su1.13", Title: "Blocked child", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "taxdb-5su1.13.2", Title: "Blocked grandchild", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "cre-db-u6ch", Title: "First claimant", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "taxdb-u6ch", Title: "Second claimant", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+	} {
+		if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("failed to create issue %s: %v", issue.ID, err)
+		}
+	}
+
+	allIssues, err := testStore.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if err := repairPrefixes(ctx, testStore, "test", "kb", allIssues, detectPrefixes(allIssues), false); err != nil {
+		t.Fatalf("repair failed: %v", err)
+	}
+
+	allIssues, err = testStore.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("search after repair: %v", err)
+	}
+	idByTitle := make(map[string]string, len(allIssues))
+	for _, issue := range allIssues {
+		idByTitle[issue.Title] = issue.ID
+	}
+	generatedRoot := regexp.MustCompile(`^kb-[0-9a-f]{8}$`)
+
+	// The blocked tree moved whole: one generated root, nested paths intact.
+	blockedRoot := idByTitle["Blocked root"]
+	if !generatedRoot.MatchString(blockedRoot) {
+		t.Fatalf("blocked family re-rooted to %q, want a generated kb-<8hex> root", blockedRoot)
+	}
+	for _, tt := range []struct{ title, suffix string }{
+		{"Blocked child", ".13"},
+		{"Blocked grandchild", ".13.2"},
+	} {
+		if got := idByTitle[tt.title]; got != blockedRoot+tt.suffix {
+			t.Errorf("%s -> %q, want %q (path intact under the generated root)", tt.title, got, blockedRoot+tt.suffix)
+		}
+	}
+
+	// The first claimant took the natural destination; the second fell back
+	// to its own generated root.
+	if got := idByTitle["First claimant"]; got != "kb-u6ch" {
+		t.Errorf("First claimant -> %q, want the natural kb-u6ch", got)
+	}
+	secondRoot := idByTitle["Second claimant"]
+	if !generatedRoot.MatchString(secondRoot) || secondRoot == blockedRoot {
+		t.Errorf("Second claimant -> %q, want a distinct generated root", secondRoot)
+	}
+
+	// Target rows stayed put; every off-target id is gone.
+	for _, id := range []string{"kb-5su1.13", "kb-hand"} {
+		if issue, err := testStore.GetIssue(ctx, id); err != nil || issue == nil {
+			t.Errorf("expected target row %s unchanged: %v", id, err)
+		}
+	}
+	for _, id := range []string{"taxdb-5su1", "taxdb-5su1.13", "taxdb-5su1.13.2", "cre-db-u6ch", "taxdb-u6ch"} {
+		if issue, err := testStore.GetIssue(ctx, id); err == nil && issue != nil {
+			t.Errorf("expected old id %s to be gone", id)
+		}
+	}
+
+	prefix, err := testStore.GetConfig(ctx, "issue_prefix")
+	if err != nil || prefix != "kb" {
+		t.Errorf("issue_prefix after repair = %q (%v), want kb", prefix, err)
 	}
 }
 

@@ -18,7 +18,15 @@ import (
 const (
 	repairReasonExists  = "exists"
 	repairReasonClaimed = "claimed"
+	repairReasonRetired = "retired"
 )
+
+// repairRetiredSet is the batch retirement verdict the planner asks the store
+// seam for: which of a batch of candidate destination ids a retaining sweep
+// retired. A nil lookup means the store does not support the probe (test
+// fakes), and planning proceeds without retirement checks, the way import's
+// preview does.
+type repairRetiredSet func(ids []string) (map[string]bool, error)
 
 // repairCollision records one source family that could not take its wanted
 // root and was re-rooted, as a whole, on a generated hash id.
@@ -97,8 +105,13 @@ func wantedRepairRoot(targetPrefix, prefix, oldRoot string) string {
 // conflicting family moves as a whole to one generated hash root so dotted
 // ancestry stays intact. Identical store contents and actor always produce an
 // identical plan: families are ordered by old prefix, then root and members
-// in natural id order, and destinations are claimed in that order.
-func planPrefixRepair(targetPrefix, actor string, issues []*types.Issue) (*prefixRepairPlan, error) {
+// in natural id order, natural destinations are reserved before any fallback
+// is allocated, and destinations are claimed in that order.
+//
+// retiredLookup, when non-nil, is probed in batches (natural destinations
+// first, then fallback candidates) and its errors fail planning before any
+// mutation, so a dry run previews exactly what execution would skip.
+func planPrefixRepair(targetPrefix, actor string, issues []*types.Issue, retiredLookup repairRetiredSet) (*prefixRepairPlan, error) {
 	plan := &prefixRepairPlan{
 		TargetPrefix: targetPrefix,
 		RootMap:      make(map[string]string),
@@ -154,53 +167,49 @@ func planPrefixRepair(targetPrefix, actor string, issues []*types.Issue) (*prefi
 		)
 	})
 
-	// Destination allocation in family order. The natural root when free;
-	// otherwise one generated hash root for the whole family, bounded and
-	// conflict-checked like the natural root was. `taken` drives the hash
-	// walk: live ids, claims, and every rejected candidate, so allocation is
+	// Retirement probing, batch one: every wanted root and mapped member id,
+	// before any destination is handed out. Lookup errors fail planning.
+	var retired map[string]bool
+	if retiredLookup != nil && len(ordered) > 0 {
+		probe := make([]string, 0, 2*len(ordered))
+		for _, fam := range ordered {
+			probe = append(probe, fam.wanted)
+			for _, m := range fam.members {
+				probe = append(probe, fam.wanted+m.path)
+			}
+		}
+		var err error
+		retired, err = retiredLookup(dedupeIDs(probe))
+		if err != nil {
+			return nil, fmt.Errorf("read retired ids: %w", err)
+		}
+	}
+
+	// Destination allocation. `taken` drives the hash walk: live ids, retired
+	// ids, claims, and every rejected candidate, so allocation is
 	// deterministic and never revisits an id.
 	claims := make(map[string]bool) // destinations earlier families claimed
 	taken := make(map[string]bool, len(liveIDs)+len(families))
 	for id := range liveIDs {
 		taken[id] = true
 	}
+	for id := range retired {
+		taken[id] = true
+	}
 
-	for _, fam := range ordered {
-		reason, conflicting, free := repairDestinationStatus(fam.wanted, fam, liveIDs, liveChildRoot, claims)
-		if free {
-			fam.assigned = fam.wanted
-		} else {
-			// Seed the hash with the root row when it exists, else the first
-			// ordered orphan member.
-			seed := fam.members[0].issue
-			for attempts := 0; ; attempts++ {
-				if attempts >= 100 {
-					return nil, fmt.Errorf("failed to allocate a unique fallback root for the %s family after %d attempts", fam.oldRoot, attempts)
-				}
-				candidate, err := generateRepairHashID(targetPrefix, seed, actor, taken)
-				if err != nil {
-					return nil, fmt.Errorf("failed to generate a fallback root for %s: %w", fam.oldRoot, err)
-				}
-				taken[candidate] = true // a rejected candidate is never reconsidered
-				if _, _, candidateFree := repairDestinationStatus(candidate, fam, liveIDs, liveChildRoot, claims); candidateFree {
-					fam.assigned = candidate
-					break
-				}
-			}
-			collision := repairCollision{
-				OldRoot:      fam.oldRoot,
-				WantedRoot:   fam.wanted,
-				AssignedRoot: fam.assigned,
-				Reason:       reason,
-				Conflicting:  conflicting,
-				IDs:          make([]string, 0, len(fam.members)),
-			}
-			for _, m := range fam.members {
-				collision.IDs = append(collision.IDs, m.id)
-			}
-			plan.Collisions = append(plan.Collisions, collision)
-		}
-
+	// Phase one, in family order: reserve every natural (suffix-preserving)
+	// destination that is free. Families whose natural root conflicts on a
+	// live row, an earlier family's claim, or a retired id wait for phase
+	// two; their reason and the conflicting id are recorded as told by the
+	// first conflict found.
+	type pendingFallback struct {
+		fam         *repairFamily
+		reason      string
+		conflicting string
+		candidates  []string // in-memory-passing hash candidates, retirement verdict pending
+	}
+	var fallbacks []pendingFallback
+	claimFamily := func(fam *repairFamily) {
 		plan.RootMap[fam.oldRoot] = fam.assigned
 		for _, m := range fam.members {
 			newID := fam.assigned + m.path
@@ -209,13 +218,103 @@ func planPrefixRepair(targetPrefix, actor string, issues []*types.Issue) (*prefi
 			plan.Renames = append(plan.Renames, repairRename{From: m.id, To: newID})
 		}
 	}
+	for _, fam := range ordered {
+		reason, conflicting, free := repairDestinationStatus(fam.wanted, fam, liveIDs, liveChildRoot, claims, retired)
+		if free {
+			fam.assigned = fam.wanted
+			claimFamily(fam)
+		} else {
+			fallbacks = append(fallbacks, pendingFallback{fam: fam, reason: reason, conflicting: conflicting})
+		}
+	}
+
+	// Phase two: allocate one generated hash root per conflicting family.
+	// Candidates are generated against `taken` (so live, retired and rejected
+	// ids are never proposed), screened against the in-memory conflicts, then
+	// probed for retirement in one batch before any is committed.
+	const maxAttempts = 100
+	var probeBatch []string
+	for i := range fallbacks {
+		fb := &fallbacks[i]
+		// Seed the hash with the root row when it exists, else the first
+		// ordered orphan member.
+		seed := fb.fam.members[0].issue
+		for attempts := 0; attempts < maxAttempts; attempts++ {
+			candidate, err := generateRepairHashID(targetPrefix, seed, actor, taken)
+			if err != nil {
+				return nil, fmt.Errorf("failed to generate a fallback root for %s: %w", fb.fam.oldRoot, err)
+			}
+			taken[candidate] = true // a rejected candidate is never reconsidered
+			if _, _, free := repairDestinationStatus(candidate, fb.fam, liveIDs, liveChildRoot, claims, nil); free {
+				fb.candidates = append(fb.candidates, candidate)
+				probeBatch = append(probeBatch, candidate)
+			}
+		}
+	}
+	var retiredCandidates map[string]bool
+	if retiredLookup != nil && len(probeBatch) > 0 {
+		var err error
+		retiredCandidates, err = retiredLookup(dedupeIDs(probeBatch))
+		if err != nil {
+			return nil, fmt.Errorf("read retired ids: %w", err)
+		}
+	}
+	for i := range fallbacks {
+		fb := &fallbacks[i]
+		assigned := ""
+		for _, candidate := range fb.candidates {
+			if retiredCandidates[candidate] {
+				continue
+			}
+			// Re-check in memory: an earlier fallback family in this loop may
+			// have claimed a candidate this family also generated.
+			if _, _, free := repairDestinationStatus(candidate, fb.fam, liveIDs, liveChildRoot, claims, nil); !free {
+				continue
+			}
+			assigned = candidate
+			break
+		}
+		if assigned == "" {
+			return nil, fmt.Errorf("failed to allocate a unique non-retired fallback root for the %s family after %d attempts", fb.fam.oldRoot, maxAttempts)
+		}
+		fb.fam.assigned = assigned
+
+		collision := repairCollision{
+			OldRoot:      fb.fam.oldRoot,
+			WantedRoot:   fb.fam.wanted,
+			AssignedRoot: assigned,
+			Reason:       fb.reason,
+			Conflicting:  fb.conflicting,
+			IDs:          make([]string, 0, len(fb.fam.members)),
+		}
+		for _, m := range fb.fam.members {
+			collision.IDs = append(collision.IDs, m.id)
+		}
+		plan.Collisions = append(plan.Collisions, collision)
+		claimFamily(fb.fam)
+	}
 	return plan, nil
+}
+
+// dedupeIDs returns ids without duplicates, order preserved.
+func dedupeIDs(ids []string) []string {
+	seen := make(map[string]bool, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
 }
 
 // repairDestinationStatus reports whether destinationRoot is free for fam's
 // members, and when it is not, the fallback reason and the id that holds the
-// conflicting slot.
-func repairDestinationStatus(destinationRoot string, fam *repairFamily, liveIDs map[string]bool, liveChildRoot map[string]string, claims map[string]bool) (reason, conflicting string, free bool) {
+// conflicting slot. A nil retired set skips retirement checks (the in-memory
+// screen during candidate generation; the verdict arrives with the batch).
+func repairDestinationStatus(destinationRoot string, fam *repairFamily, liveIDs map[string]bool, liveChildRoot map[string]string, claims, retired map[string]bool) (reason, conflicting string, free bool) {
 	if liveIDs[destinationRoot] {
 		return repairReasonExists, destinationRoot, false
 	}
@@ -228,6 +327,9 @@ func repairDestinationStatus(destinationRoot string, fam *repairFamily, liveIDs 
 	if claims[destinationRoot] {
 		return repairReasonClaimed, destinationRoot, false
 	}
+	if retired[destinationRoot] {
+		return repairReasonRetired, destinationRoot, false
+	}
 	for _, m := range fam.members {
 		destination := destinationRoot + m.path
 		if liveIDs[destination] {
@@ -235,6 +337,9 @@ func repairDestinationStatus(destinationRoot string, fam *repairFamily, liveIDs 
 		}
 		if claims[destination] {
 			return repairReasonClaimed, destination, false
+		}
+		if retired[destination] {
+			return repairReasonRetired, destination, false
 		}
 	}
 	return "", "", true

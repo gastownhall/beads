@@ -253,10 +253,11 @@ func detectPrefixes(issues []*types.Issue) map[string]int {
 // Rows already on the target prefix are left unchanged; every other row keeps
 // its suffix under the target prefix when that destination is free (see
 // planPrefixRepair). Families whose natural destination conflicts — with a
-// live row, a live child-only namespace, or a destination an earlier family
-// claimed — move whole to a generated hash root, dotted paths intact.
+// live row, a live child-only namespace, a retired id, or a destination an
+// earlier family claimed — move whole to a generated hash root, dotted paths
+// intact.
 func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName string, targetPrefix string, issues []*types.Issue, prefixes map[string]int, dryRun bool) error {
-	plan, err := planPrefixRepair(targetPrefix, actorName, issues)
+	plan, err := planPrefixRepair(targetPrefix, actorName, issues, repairRetiredLookup(ctx, st))
 	if err != nil {
 		return err
 	}
@@ -359,6 +360,32 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 	}
 
 	return nil
+}
+
+// repairRetiredLookup adapts the store's optional retirement seam (the same
+// one import's preview reads; see importRetiredLookup) into the planner's
+// batched probe. The CLI's store is decorated (hooks, telemetry); the seam
+// lives on the backend underneath. A store without it — the test fakes —
+// plans without retirement checks, the way import's preview does.
+func repairRetiredLookup(ctx context.Context, st storage.DoltStorage) repairRetiredSet {
+	lookup, ok := st.(importRetiredLookup)
+	if !ok {
+		lookup, ok = storage.UnwrapStore(st).(importRetiredLookup)
+	}
+	if !ok {
+		return nil
+	}
+	return func(ids []string) (map[string]bool, error) {
+		retired, err := lookup.RetiredIssueIDs(ctx, ids)
+		if err != nil {
+			return nil, err
+		}
+		set := make(map[string]bool, len(retired))
+		for id := range retired {
+			set[id] = true
+		}
+		return set, nil
+	}
 }
 
 // printRepairCollisions reports every fallback family; only the rename sample
