@@ -343,6 +343,69 @@ func TestRepairPrefixesKeepsSuffixes(t *testing.T) {
 	}
 }
 
+func TestRepairPrefixesRewritesDottedAndOrphanRefs(t *testing.T) {
+	// GH#6591 AC-2: dotted children keep their path under the new root
+	// (taxdb-5su1.13 -> kb-5su1.13), orphan children whose parent row is
+	// missing still land under their wanted root (cre-db-nwb.3 -> kb-nwb.3),
+	// the parent-child dependency still resolves, and text references in
+	// renamed rows follow the mapping, dotted tails included.
+	ctx := context.Background()
+	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+
+	for _, issue := range []*types.Issue{
+		{ID: "taxdb-5su1", Title: "Parent", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "taxdb-5su1.13", Title: "Child", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "cre-db-nwb.3", Title: "Orphan child", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "cre-db-nwb.4", Title: "Orphan sibling", Description: "see taxdb-5su1.13 and cre-db-nwb.3", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+	} {
+		if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("create %s: %v", issue.ID, err)
+		}
+	}
+	// The child's parent-child edge follows the rename (same-prefix targets
+	// are issue-routed).
+	if err := testStore.AddDependency(ctx, &types.Dependency{IssueID: "taxdb-5su1.13", DependsOnID: "taxdb-5su1", Type: types.DepParentChild}, "test"); err != nil {
+		t.Fatalf("add dependency: %v", err)
+	}
+
+	allIssues, err := testStore.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if err := repairPrefixes(ctx, testStore, "test", "kb", allIssues, detectPrefixes(allIssues), false); err != nil {
+		t.Fatalf("repair failed: %v", err)
+	}
+
+	for _, id := range []string{"kb-5su1", "kb-5su1.13", "kb-nwb.3", "kb-nwb.4"} {
+		if issue, err := testStore.GetIssue(ctx, id); err != nil || issue == nil {
+			t.Errorf("expected %s after repair: %v", id, err)
+		}
+	}
+	for _, id := range []string{"taxdb-5su1", "taxdb-5su1.13", "cre-db-nwb.3", "cre-db-nwb.4"} {
+		if issue, err := testStore.GetIssue(ctx, id); err == nil && issue != nil {
+			t.Errorf("expected old id %s to be gone", id)
+		}
+	}
+
+	// The parent-child dependency resolves under the new ids.
+	deps, err := testStore.GetDependencies(ctx, "kb-5su1.13")
+	if err != nil {
+		t.Fatalf("dependencies after repair: %v", err)
+	}
+	if len(deps) != 1 || deps[0].ID != "kb-5su1" {
+		t.Errorf("parent-child dependency did not survive the repair: %+v", deps)
+	}
+
+	// Both text references were rewritten through the root map.
+	sibling, err := testStore.GetIssue(ctx, "kb-nwb.4")
+	if err != nil || sibling == nil {
+		t.Fatalf("get kb-nwb.4: %v", err)
+	}
+	if want := "see kb-5su1.13 and kb-nwb.3"; sibling.Description != want {
+		t.Errorf("description = %q, want %q", sibling.Description, want)
+	}
+}
+
 func TestRenameFailureLeavesBeadGatesPending(t *testing.T) {
 	// When renaming the awaited bead fails, whether or not that rename
 	// landed, its gate is pointed back at the bead's old ID without a

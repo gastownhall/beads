@@ -284,11 +284,7 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 	fmt.Printf("  Issues to repair: %d\n\n", len(plan.Renames))
 
 	// Map of all renames for text replacement
-	renameMap := make(map[string]string, len(plan.Renames))
 	issueByID := make(map[string]*types.Issue, len(issues))
-	for _, rename := range plan.Renames {
-		renameMap[rename.From] = rename.To
-	}
 	for _, issue := range issues {
 		issueByID[issue.ID] = issue
 	}
@@ -306,10 +302,14 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 		// Apply text replacements in all issue fields
 		issue := issueByID[oldID]
 
-		// Replace all issue IDs in text fields using the rename map
+		// Replace root tokens through the root map: the matched token is a
+		// root id, its replacement carries any dotted tail along. Roots here
+		// include the virtual roots of orphan children (families whose root
+		// row is absent), so references to orphan dotted ids rewrite too.
+		// Unknown tokens are left alone.
 		replaceFunc := func(match string) string {
-			if newID, ok := renameMap[match]; ok {
-				return newID
+			if newRoot, ok := plan.RootMap[match]; ok {
+				return newRoot
 			}
 			return match
 		}
