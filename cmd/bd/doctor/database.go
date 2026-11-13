@@ -14,6 +14,15 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// EngineWontOpenRecoveryURL is the preservation-first runbook for a database
+// the engine cannot open. test/docsync pins the heading it deep-links.
+const EngineWontOpenRecoveryURL = "https://github.com/gastownhall/beads/blob/main/docs/recovery/database-corruption.md#engine-wont-open"
+
+// unopenableDatabaseFix is the Fix for a local store that exists but did not
+// open. A failed open is often configuration, not corruption, and doctor
+// cannot rebuild a journal the engine refuses to open, so it names both.
+const unopenableDatabaseFix = "Check 'bd dolt status' for server configuration issues. If the store itself will not open, preserve it before any recovery: " + EngineWontOpenRecoveryURL
+
 // localConfig represents the config.yaml structure for no-db and prefer-dolt detection
 type localConfig struct {
 	SyncBranch string `yaml:"sync-branch"`
@@ -81,7 +90,7 @@ func CheckDatabaseVersion(path string, cliVersion string) DoctorCheck {
 			Status:  StatusError,
 			Message: "Unable to open database",
 			Detail:  fmt.Sprintf("Storage: Dolt\n\nError: %v", err),
-			Fix:     "Run 'bd doctor --fix' to attempt repair. Check 'bd dolt status' for server configuration issues",
+			Fix:     unopenableDatabaseFix,
 		}
 	}
 	defer func() { _ = store.Close() }()
@@ -119,7 +128,7 @@ func CheckDatabaseVersionWithStore(ss *SharedStore, cliVersion string) DoctorChe
 			Status:  StatusError,
 			Message: "Unable to open database",
 			Detail:  "Storage: Dolt",
-			Fix:     "Run 'bd doctor --fix' to attempt repair. Check 'bd dolt status' for server configuration issues",
+			Fix:     unopenableDatabaseFix,
 		}
 	}
 	return checkDatabaseVersionWithStore(store, cliVersion)
@@ -471,6 +480,12 @@ func FixDatabaseConfig(path string) error {
 // getDatabasePath returns the actual database directory path, respecting dolt_data_dir.
 // When dolt_data_dir is configured (e.g. ext4 redirect for WSL), the database lives
 // outside .beads/dolt/ — this function resolves the correct location.
+//
+// It reads the metadata with configfile.Load, which migrates a legacy
+// config.json into metadata.json, so pass only the workspace doctor runs in,
+// which command admission has checked. Read a .beads that admission never saw,
+// such as a nested one the Classic Artifacts walk reaches, with
+// configfile.LoadForDiscovery instead.
 func getDatabasePath(beadsDir string) string {
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil || cfg == nil {

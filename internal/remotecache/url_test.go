@@ -47,6 +47,39 @@ func TestIsRemoteURL(t *testing.T) {
 	}
 }
 
+// TestIsRemoteURLRejectsUserlessDottedHost pins this package's side of the one
+// intentional disagreement with doltremote.scpStyleGitURLPattern, whose first
+// alternative is byte-identical to gitSSHPattern but which additionally accepts
+// the user-less dotted-host form. doltremote.Normalize converts that form to
+// git+ssh://; IsRemoteURL treats it as a local path. Changing this behavior
+// means reconciling both files, not just this one.
+func TestIsRemoteURLRejectsUserlessDottedHost(t *testing.T) {
+	userless := []string{
+		"github.com:org/repo.git",
+		"myserver.com:beads/data",
+	}
+	for _, raw := range userless {
+		t.Run(raw, func(t *testing.T) {
+			if IsRemoteURL(raw) {
+				t.Errorf("IsRemoteURL(%q) = true, want false", raw)
+			}
+		})
+	}
+
+	// The shared alternative: identical charset, and both packages accept it.
+	withUser := []string{
+		"git@github.com:org/repo.git",
+		"deploy@myserver.com:beads/data",
+	}
+	for _, raw := range withUser {
+		t.Run(raw, func(t *testing.T) {
+			if !IsRemoteURL(raw) {
+				t.Errorf("IsRemoteURL(%q) = false, want true", raw)
+			}
+		})
+	}
+}
+
 func TestValidateRemoteURL(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -93,6 +126,12 @@ func TestValidateRemoteURL(t *testing.T) {
 		{"leading dash", "-origin", true, "must not start with a dash"},
 		{"double dash", "--force", true, "must not start with a dash"},
 		{"dash flag URL", "-https://evil.com", true, "must not start with a dash"},
+		// Dolt's ssh:// transport hands "[user@]host" to ssh as an argument.
+		{"ssh user option", "ssh://-oProxyCommand=touch%20%2Ftmp%2Fx@host/path", true, "user name in a remote URL must not start with a dash"},
+		{"ssh encoded user option", "ssh://%2DoProxyCommand=x@host/path", true, "user name in a remote URL must not start with a dash"},
+		{"ssh host option", "ssh://-oProxyCommand=x/path", true, "host in a remote URL must not start with a dash"},
+		{"git+ssh user option", "git+ssh://-oProxyCommand=x@host/path", true, "user name in a remote URL must not start with a dash"},
+		{"ssh inner dashes", "ssh://deploy-bot@my-host.example.com:2222/srv/beads", false, ""},
 
 		// === Invalid schemes ===
 		{"ftp scheme", "ftp://server/path", true, "not allowed"},
@@ -130,6 +169,64 @@ func TestValidateRemoteURL(t *testing.T) {
 				if err != nil {
 					t.Errorf("ValidateRemoteURL(%q) = %v, want nil", tt.url, err)
 				}
+			}
+		})
+	}
+}
+
+// TestOptionShapedPart pins which remote URLs a program bd or Dolt hands them
+// to would read as an option: git reads a leading "-" (also after git+), and
+// Dolt's ssh:// transport runs `ssh [user@]host <command>`, so an ssh user
+// name or host starting with "-" (percent-encoded too, as Dolt decodes it)
+// would reach ssh as -oProxyCommand=<command>.
+func TestOptionShapedPart(t *testing.T) {
+	tests := []struct {
+		remote string
+		want   string
+	}{
+		// The whole URL.
+		{"-origin", OptionShapedURL},
+		{"--upload-pack=touch /tmp/x;false", OptionShapedURL},
+		{"  -utouch /tmp/x", OptionShapedURL},
+		{"git+--upload-pack=x", OptionShapedURL},
+		{"GIT+ -ux", OptionShapedURL},
+		{"-oProxyCommand=x@host:path", OptionShapedURL},
+
+		// The user name of an ssh URL.
+		{"ssh://-oProxyCommand=touch%20%2Ftmp%2Fx@host/path", OptionShapedUser},
+		{"ssh://%2DoProxyCommand=x@host/path", OptionShapedUser},
+		{"ssh://%20-oProxyCommand=x@host/path", OptionShapedUser},
+		{"ssh://-oProxyCommand=x:secret@host/path", OptionShapedUser},
+		{"SSH://-oProxyCommand=x@host/path", OptionShapedUser},
+		{"git+ssh://-oProxyCommand=x@host/path.git", OptionShapedUser},
+		{"Git+SSH://-oProxyCommand=x@host/path", OptionShapedUser},
+
+		// The host of an ssh URL.
+		{"ssh://-oProxyCommand=touch$IFS.x/path", OptionShapedHost},
+		{"ssh://git@-oProxyCommand=x/path", OptionShapedHost},
+		{"ssh://-host:2222/path", OptionShapedHost},
+		{"ssh://[-oProxyCommand=x]/path", OptionShapedHost},
+		{"git+ssh://-oProxyCommand=x/path", OptionShapedHost},
+
+		// Nothing option-shaped.
+		{"", ""},
+		{"ssh://git@github.com/org/repo", ""},
+		{"ssh://deploy-bot@my-host.example.com:2222/srv/beads", ""},
+		{"ssh://user@host/-path", ""},
+		{"ssh://user@host/path?x=-y#-z", ""},
+		{"git+ssh://git@github.com/org/repo.git", ""},
+		{"git@github.com:org/repo.git", ""},
+		{"dolthub://org/repo", ""},
+		{"file:///-local/path", ""},
+		// An http(s) user name is a credential sent in a header, never an
+		// argument, and a token may well start with "-".
+		{"https://-token@github.com/org/repo", ""},
+		{"git+https://-token@github.com/org/repo.git", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.remote, func(t *testing.T) {
+			if got := OptionShapedPart(tt.remote); got != tt.want {
+				t.Errorf("OptionShapedPart(%q) = %q, want %q", tt.remote, got, tt.want)
 			}
 		})
 	}

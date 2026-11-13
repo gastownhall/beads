@@ -45,6 +45,14 @@ func bdUpdateFail(t *testing.T, bd, dir string, args ...string) string {
 	return string(out)
 }
 
+// wantNotesRefusal is the expected notes-overwrite refusal line, shared by the
+// embedded and proxied update tests. Spelled as a literal, not via the
+// production errNotesOverwriteRefusal: reusing the constructor would make the
+// wording self-verifying.
+func wantNotesRefusal(id string) string {
+	return id + ": --notes would replace existing notes; use --force to overwrite (or --append-notes to preserve history)"
+}
+
 // bdUpdateCapture runs "bd update" expecting success, returning stdout and
 // stderr separately (stdout may be JSON; warnings must not pollute it).
 func bdUpdateCapture(t *testing.T, bd, dir string, args ...string) (stdout, stderr string) {
@@ -235,14 +243,88 @@ func TestEmbeddedUpdateRoutedStoreCommitsTargetHead(t *testing.T) {
 	}
 }
 
-func TestEmbeddedUpdate(t *testing.T) {
+// TestEmbeddedRoutedWriteMissDoesNotCreateTargetDatabase pins that a routed
+// write whose id misses leaves an embedded target that has not been
+// bootstrapped yet without a database. The routed open runs before the lookup
+// it serves, so a database it created would outlive the miss, and `bd
+// bootstrap` there would then take it for the real one and skip the clone.
+// tgt-zzzz takes the prefix route and src-zzzz the maintainer auto-route; both
+// lead to the same fresh clone.
+func TestEmbeddedRoutedWriteMissDoesNotCreateTargetDatabase(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt update tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "src")
+
+	targetDir := filepath.Join(dir, "fresh-clone")
+	if err := os.MkdirAll(targetDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepoAt(t, targetDir)
+	targetBeadsDir := filepath.Join(targetDir, ".beads")
+	writeEmbeddedMetadata(t, targetBeadsDir, "tgt")
+
+	route := `{"prefix":"tgt-","path":"fresh-clone"}` + "\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(route), 0644); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+	roleCmd := gitCommand("config", "beads.role", "maintainer")
+	roleCmd.Dir = dir
+	if out, err := roleCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git config beads.role: %v\n%s", err, out)
+	}
+
+	env := bdEnv(dir)
+	runBD := func(args ...string) (string, error) {
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = dir
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	for _, args := range [][]string{
+		{"config", "set", "routing.mode", "auto"},
+		{"config", "set", "routing.maintainer", targetDir},
+	} {
+		if out, err := runBD(args...); err != nil {
+			t.Fatalf("bd %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	for _, args := range [][]string{
+		{"update", "tgt-zzzz", "--priority", "0"},
+		{"close", "tgt-zzzz"},
+		{"update", "src-zzzz", "--priority", "0"},
+		{"close", "src-zzzz"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			out, err := runBD(args...)
+			requireNoEmbeddedDatabase(t, targetBeadsDir)
+			if err == nil || !strings.Contains(out, "no embedded database") {
+				t.Fatalf("err = %v, want the routed open's refusal\n%s", err, out)
+			}
+		})
+	}
+}
+
+// The TestEmbeddedUpdateFields* and TestEmbeddedUpdateLifecycle* tests were
+// split from TestEmbeddedUpdate (originally ~267s, measured under
+// --config=embedded), first into TestEmbeddedUpdateFields and
+// TestEmbeddedUpdateLifecycle and then (~75s each on rbe-west) into these 5
+// top-level tests over disjoint subtest groups, each with its own workspace,
+// for CI shard balance (see scripts/ci/embedded_cmd_test_durations.json and
+// engdocs/TESTING.md). Every original subtest is preserved exactly once.
+func TestEmbeddedUpdateFieldsMappingAndRefs(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
 	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
-	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "tu")
+	dir, _, _ := bdInit(t, bd, "--prefix", "tu")
 
 	t.Run("update_direct_flag_mapping", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Multi update", "--type", "task", "--metadata", `{"remove":"me"}`)
@@ -393,13 +475,37 @@ func TestEmbeddedUpdate(t *testing.T) {
 			t.Errorf("expected external_ref field to be omitted from JSON after clear, got: %s", rawA)
 		}
 	})
+}
 
-	t.Run("update_notes_overwrite_warns", func(t *testing.T) {
+func TestEmbeddedUpdateFieldsNotesOverwrite(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "tu")
+
+	t.Run("update_notes_overwrite_requires_force", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Notes force test", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--notes", "original notes")
+
+		out := bdUpdateFail(t, bd, dir, issue.ID, "--notes", "replacement notes")
+		wantErr := wantNotesRefusal(issue.ID)
+		if !strings.Contains(out, wantErr) {
+			t.Errorf("expected output to contain %q, got: %s", wantErr, out)
+		}
+		if got := bdShow(t, bd, dir, issue.ID); got.Notes != "original notes" {
+			t.Errorf("expected notes to remain %q, got %q", "original notes", got.Notes)
+		}
+	})
+
+	t.Run("update_notes_overwrite_with_force_warns", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Notes warning test", "--type", "task")
 		bdUpdate(t, bd, dir, issue.ID, "--notes", "original notes")
 
-		stdout, stderr := bdUpdateCapture(t, bd, dir, issue.ID, "--notes", "replacement notes")
-		warning := fmt.Sprintf("warning: %s: --notes replaced existing notes (use --append-notes to preserve history)", issue.ID)
+		stdout, stderr := bdUpdateCapture(t, bd, dir, issue.ID, "--notes", "replacement notes", "--force")
+		warning := fmt.Sprintf("warning: %s: --force replaced existing notes (--append-notes preserves history)", issue.ID)
 		if !strings.Contains(stderr, warning) {
 			t.Errorf("expected stderr to contain %q, got: %s", warning, stderr)
 		}
@@ -408,6 +514,98 @@ func TestEmbeddedUpdate(t *testing.T) {
 		}
 		if got := bdShow(t, bd, dir, issue.ID); got.Notes != "replacement notes" {
 			t.Errorf("expected notes %q, got %q", "replacement notes", got.Notes)
+		}
+	})
+
+	t.Run("update_notes_overwrite_with_if_assignee_requires_force", func(t *testing.T) {
+		// --force and --if-assignee are no longer mutually exclusive at the
+		// flag level (that exclusion was the footgun: it made --force
+		// unpassable alongside --if-assignee, so a caller pairing --notes
+		// with --if-assignee could not opt into overwriting existing notes at
+		// all). Without --force the overwrite is still refused.
+		issue := bdCreate(t, bd, dir, "Notes plus if-assignee test", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--notes", "original notes")
+
+		out := bdUpdateFail(t, bd, dir, issue.ID, "--if-assignee", "", "--notes", "replacement notes")
+		wantErr := wantNotesRefusal(issue.ID)
+		if !strings.Contains(out, wantErr) {
+			t.Errorf("expected output to contain %q, got: %s", wantErr, out)
+		}
+		if got := bdShow(t, bd, dir, issue.ID); got.Notes != "original notes" {
+			t.Errorf("expected notes to remain %q, got %q", "original notes", got.Notes)
+		}
+	})
+
+	t.Run("update_notes_overwrite_with_if_assignee_and_force_succeeds", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Notes plus if-assignee force test", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--notes", "original notes")
+
+		bdUpdate(t, bd, dir, issue.ID, "--if-assignee", "", "--notes", "replacement notes", "--force")
+		if got := bdShow(t, bd, dir, issue.ID); got.Notes != "replacement notes" {
+			t.Errorf("expected notes %q, got %q", "replacement notes", got.Notes)
+		}
+	})
+}
+
+func TestEmbeddedUpdateFieldsNotesClearAndDefer(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "tu")
+
+	t.Run("update_empty_notes_refused", func(t *testing.T) {
+		// GH#6021: `--notes ""` is what a dead command substitution collapses
+		// to, so an unforced wipe must not look like success. The deliberate
+		// clear has its own verb, --clear-notes.
+		issue := bdCreate(t, bd, dir, "Notes clear guard test", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--notes", "original notes")
+
+		out := bdUpdateFail(t, bd, dir, issue.ID, "--notes", "")
+		if !strings.Contains(out, "--clear-notes") {
+			t.Errorf("expected refusal naming --clear-notes, got:\n%s", out)
+		}
+		// --force opens the overwrite fence, not this guard: the empty value
+		// stays refused because the bytes still cannot prove intent.
+		out = bdUpdateFail(t, bd, dir, issue.ID, "--notes", "", "--force")
+		if !strings.Contains(out, "--clear-notes") {
+			t.Errorf("expected forced empty-notes refusal naming --clear-notes, got:\n%s", out)
+		}
+		if got := bdShow(t, bd, dir, issue.ID); got.Notes != "original notes" {
+			t.Errorf("expected notes to remain %q, got %q", "original notes", got.Notes)
+		}
+	})
+
+	t.Run("update_clear_notes_succeeds", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Notes deliberate clear test", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--notes", "original notes")
+
+		// No --force: the fence exempts clears, so the verb alone authorizes
+		// the erase.
+		bdUpdate(t, bd, dir, issue.ID, "--clear-notes")
+		if got := bdShow(t, bd, dir, issue.ID); got.Notes != "" {
+			t.Errorf("expected notes cleared, got %q", got.Notes)
+		}
+	})
+
+	t.Run("update_clear_notes_conflicts_with_notes_flags", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Notes clear conflict test", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--notes", "original notes")
+
+		for _, extra := range [][]string{
+			{"--notes", "replacement"},
+			{"--append-notes", "more"},
+		} {
+			args := append([]string{issue.ID, "--clear-notes"}, extra...)
+			out := bdUpdateFail(t, bd, dir, args...)
+			if !strings.Contains(out, "none of the others can be") {
+				t.Errorf("expected mutual-exclusion error for %v, got:\n%s", extra, out)
+			}
+		}
+		if got := bdShow(t, bd, dir, issue.ID); got.Notes != "original notes" {
+			t.Errorf("expected notes to remain %q, got %q", "original notes", got.Notes)
 		}
 	})
 
@@ -423,6 +621,16 @@ func TestEmbeddedUpdate(t *testing.T) {
 			t.Errorf("expected status=deferred, got %q", got.Status)
 		}
 	})
+}
+
+func TestEmbeddedUpdateLifecycleDefer(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "tu")
 
 	t.Run("relative_defer_is_persisted_in_UTC", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "UTC defer test", "--type", "task")
@@ -505,6 +713,16 @@ func TestEmbeddedUpdate(t *testing.T) {
 			t.Errorf("expected status=in_progress to be preserved, got %q", got.Status)
 		}
 	})
+}
+
+func TestEmbeddedUpdateLifecycleClaimParentCommit(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "tu")
 
 	t.Run("update_claim_already_claimed", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Claim fail test", "--type", "task")
@@ -622,6 +840,18 @@ func TestEmbeddedUpdate(t *testing.T) {
 // TestEmbeddedUpdateConcurrent exercises create, update, and list operations
 // concurrently to verify EmbeddedDoltStore handles concurrent CLI invocations
 // without panics, data corruption, or deadlocks.
+//
+// issuesPerWorker was 5 (F1 review S1): under real CI-like load (several
+// Bazel shards running concurrently, -test.parallel=4), this test's 10
+// workers x 5 issues x 4 serialized `bd` subprocess invocations each (create,
+// 2 updates, list; writes serialize behind the embedded engine's single-
+// writer lock) measured ~452s -- the queueing-delay explanation once
+// proposed for this and three other outliers was wrong (see
+// scripts/ci/embedded_cmd_test_durations.json's header); this is genuine
+// CPU-bound work under contention. issuesPerWorker=2 keeps the same
+// invariants under test (duplicate-ID detection across all numWorkers
+// concurrent processes; each worker's own list-count-is-non-decreasing check
+// still exercises its loop body once) while cutting serialized work to 40%.
 func TestEmbeddedUpdateConcurrent(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
@@ -633,7 +863,7 @@ func TestEmbeddedUpdateConcurrent(t *testing.T) {
 
 	const (
 		numWorkers      = 10
-		issuesPerWorker = 5
+		issuesPerWorker = 2
 	)
 
 	type workerResult struct {

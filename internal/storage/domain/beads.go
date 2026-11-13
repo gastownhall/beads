@@ -39,7 +39,7 @@ type BeadsDirFSUseCase interface {
 	InstallGitHooks(ctx context.Context, params HooksInstallParams) error
 	InstallJJHooks(ctx context.Context) error
 	AddAgentsInstructions(ctx context.Context, params AgentsFileParams) error
-	InstallClaudeProject(ctx context.Context, stealth bool) error
+	InstallClaudeProject(ctx context.Context, stealth, quiet bool) error
 	SetYAMLConfig(ctx context.Context, key, value string) error
 }
 
@@ -62,6 +62,10 @@ type ResolveProxiedInitResult struct {
 	// DBNameDerived: DBName was guessed (prefix or default) rather than
 	// pinned by the --database flag or an existing metadata.json.
 	DBNameDerived bool
+	// Existing is the workspace's metadata.json as init found it, nil when
+	// there is none. Init writes that file back from it, so a re-init
+	// changes only the fields init owns.
+	Existing *configfile.Config
 }
 
 type BeadsDirTemplates struct {
@@ -110,7 +114,7 @@ type BeadsDirFSAdapters struct {
 	InstallGitHooks       func(params HooksInstallParams) error
 	InstallJJHooks        func() error
 	AddAgentsInstructions func(params AgentsFileParams)
-	InstallClaudeProject  func(stealth bool) error
+	InstallClaudeProject  func(stealth, quiet bool) error
 	SetYAMLConfig         func(key, value string) error
 }
 
@@ -144,6 +148,7 @@ func (u *beadsDirFSUseCaseImpl) ResolveProxiedInit(ctx context.Context, params R
 
 	result.DBName, result.DBNameDerived = resolveDoltDatabaseName(cfg, params.Prefix, params.DBFlag)
 	result.ProjectID = resolveProjectID(cfg)
+	result.Existing = cfg
 	return result, nil
 }
 
@@ -248,11 +253,11 @@ func (u *beadsDirFSUseCaseImpl) AddAgentsInstructions(ctx context.Context, param
 	return nil
 }
 
-func (u *beadsDirFSUseCaseImpl) InstallClaudeProject(ctx context.Context, stealth bool) error {
+func (u *beadsDirFSUseCaseImpl) InstallClaudeProject(ctx context.Context, stealth, quiet bool) error {
 	if u.adapters.InstallClaudeProject == nil {
 		return fmt.Errorf("InstallClaudeProject: adapter not configured")
 	}
-	return u.adapters.InstallClaudeProject(stealth)
+	return u.adapters.InstallClaudeProject(stealth, quiet)
 }
 
 func (u *beadsDirFSUseCaseImpl) SetYAMLConfig(ctx context.Context, key, value string) error {

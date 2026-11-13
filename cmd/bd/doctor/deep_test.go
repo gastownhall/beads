@@ -4,6 +4,7 @@ package doctor
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -247,6 +248,63 @@ func TestCheckEpicCompleteness_OpenWispChildPreventsCompletedEpic(t *testing.T) 
 	}
 }
 
+// TestCheckEpicCompleteness_DuplicateClosedChildIsNotReady pins GH#5026 on the
+// deep check. The child is closed, so the three cases above (which all close
+// their children with an empty reason) still pass unchanged — but a close that
+// redirects the work rather than finishing it leaves the epic's real scope
+// undone, so the epic must not be reported ready to close and the check must
+// not ship its `bd close <epic-id>` Fix line for it. Before this, `bd doctor
+// --deep` said "ready to close" while `bd doctor`'s Stale Molecules check,
+// reading the shared EpicStatus.EligibleForClose, said the same epic on the
+// same repository was not stale.
+func TestCheckEpicCompleteness_DuplicateClosedChildIsNotReady(t *testing.T) {
+	store := newTestDoltStore(t, "epic")
+	ctx := context.Background()
+
+	epic := &types.Issue{
+		ID:        "epic-dup",
+		Title:     "Epic",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeEpic,
+		CreatedAt: time.Now(),
+	}
+	if err := store.CreateIssue(ctx, epic, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	child := &types.Issue{
+		ID:          "epic-dup.1",
+		Title:       "Duplicate-closed child",
+		Status:      types.StatusClosed,
+		IssueType:   types.TypeTask,
+		ClosedAt:    ptrTime(time.Now()),
+		CloseReason: "duplicate of epic-1.1",
+		CreatedAt:   time.Now(),
+	}
+	if err := store.CreateIssue(ctx, child, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	dep := &types.Dependency{
+		IssueID:     child.ID,
+		DependsOnID: epic.ID,
+		Type:        types.DepParentChild,
+		CreatedAt:   time.Now(),
+		CreatedBy:   "test",
+	}
+	if err := store.AddDependency(ctx, dep, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	check := checkEpicCompleteness(store.UnderlyingDB())
+	if check.Status != StatusOK {
+		t.Errorf("Status = %q, want %q; message=%q detail=%q", check.Status, StatusOK, check.Message, check.Detail)
+	}
+	if strings.Contains(check.Fix, "bd close") {
+		t.Errorf("Fix = %q, want no 'bd close' instruction for a duplicate-closed epic", check.Fix)
+	}
+}
+
 // TestCheckMailThreadIntegrity_ValidThreads verifies valid thread references pass
 func TestCheckMailThreadIntegrity_ValidThreads(t *testing.T) {
 	store := newTestDoltStore(t, "thread")
@@ -322,5 +380,94 @@ func TestDeepValidationResultJSON(t *testing.T) {
 	}
 	if !strings.Contains(jsonStr, "overall_ok") {
 		t.Error("JSON should contain overall_ok")
+	}
+}
+
+// TestCheckDependencyIntegrity_CrossPrefixTargetIsValid: an edge bd dep add
+// stored to another repository's prefix is not a broken dependency under
+// --deep (bd-zcpo44, AC-6).
+func TestCheckDependencyIntegrity_CrossPrefixTargetIsValid(t *testing.T) {
+	store := newTestDoltStore(t, "bd")
+	db := store.DB()
+	createDepTestIssue(t, store, "bd-1", false)
+	createDepTestIssue(t, store, "bd-2", false)
+	addDepTestEdge(t, store, "bd-1", "gt-9", types.DepBlocks)
+	insertExternalTargetDep(t, db, "dependencies", "bd-2", "gt-8", "parent-child")
+
+	check := checkDependencyIntegrity(db)
+	if check.Status != StatusOK || check.Message != "All dependencies point to existing issues" {
+		t.Fatalf("check = %#v, want ok / All dependencies point to existing issues", check)
+	}
+}
+
+// TestCheckParentConsistency_CrossPrefixParentIsValid: a parent-child edge to
+// another repository's prefix, or to an external: ref, cannot be verified
+// here and is not reported as orphaned (bd-zcpo44, AC-6).
+func TestCheckParentConsistency_CrossPrefixParentIsValid(t *testing.T) {
+	store := newTestDoltStore(t, "bd")
+	db := store.DB()
+	createDepTestIssue(t, store, "bd-1", false)
+	createDepTestIssue(t, store, "bd-2", false)
+	addDepTestEdge(t, store, "bd-1", "gt-9", types.DepBlocks)
+	insertExternalTargetDep(t, db, "dependencies", "bd-2", "gt-8", "parent-child")
+	insertExternalTargetDep(t, db, "dependencies", "bd-2", "external:gt:epic", "parent-child")
+
+	check := checkParentConsistency(db)
+	if check.Status != StatusOK || check.Message != "All parent-child relationships valid" {
+		t.Fatalf("check = %#v, want ok / All parent-child relationships valid", check)
+	}
+}
+
+// TestCheckDependencyIntegrity_MissingSourceStillBroken: the exemption covers
+// only the target; an edge whose source issue is gone stays broken even when
+// its target is another repository's (bd-zcpo44, AC-7).
+func TestCheckDependencyIntegrity_MissingSourceStillBroken(t *testing.T) {
+	store := newTestDoltStore(t, "bd")
+	db := store.DB()
+	insertExternalTargetDep(t, db, "dependencies", "bd-gone", "gt-9", "blocks")
+
+	check := checkDependencyIntegrity(db)
+	if check.Status != StatusError {
+		t.Fatalf("check = %#v, want error", check)
+	}
+	if !strings.Contains(check.Detail, "bd-gone→gt-9") {
+		t.Fatalf("Detail = %q, want it to name bd-gone→gt-9", check.Detail)
+	}
+}
+
+// TestCheckDependencyIntegrity_GenuineBrokenEdgeBehindExemptRows: ten exempt
+// cross-repository edges ahead of a genuinely broken one in scan order must
+// not fill the ten-row cap and hide it (bd-zcpo44, AC-8).
+func TestCheckDependencyIntegrity_GenuineBrokenEdgeBehindExemptRows(t *testing.T) {
+	store := newTestDoltStore(t, "bd")
+	db := store.DB()
+	ctx := context.Background()
+	createDepTestIssue(t, store, "bd-1", false)
+	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 0"); err != nil {
+		t.Fatal(err)
+	}
+	insert := func(id, target string) {
+		t.Helper()
+		if _, err := db.ExecContext(ctx,
+			"INSERT INTO dependencies (id, issue_id, depends_on_external, type, created_at, created_by) VALUES (?, 'bd-1', ?, 'blocks', NOW(), 'test')",
+			id, target); err != nil {
+			t.Fatalf("insert bd-1→%s: %v", target, err)
+		}
+	}
+	// Primary-key order puts every exempt row ahead of the broken one.
+	for i := 0; i < 10; i++ {
+		insert(fmt.Sprintf("00000000-0000-0000-0000-%012d", i), fmt.Sprintf("gt-%d", i))
+	}
+	insert("ffffffff-ffff-ffff-ffff-ffffffffffff", "bd-gone")
+	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 1"); err != nil {
+		t.Fatal(err)
+	}
+
+	check := checkDependencyIntegrity(db)
+	if check.Status != StatusError || check.Message != "Found 1 broken dependencies" {
+		t.Fatalf("check = %#v, want error / Found 1 broken dependencies", check)
+	}
+	if !strings.Contains(check.Detail, "bd-1→bd-gone (blocks)") {
+		t.Fatalf("Detail = %q, want it to name bd-1→bd-gone (blocks)", check.Detail)
 	}
 }

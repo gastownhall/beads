@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -87,7 +88,7 @@ func TestExpandStep(t *testing.T) {
 		},
 	}
 
-	result, err := expandStep(target, template, 0, nil)
+	result, err := expandStep(target, template, nil)
 	if err != nil {
 		t.Fatalf("expandStep failed: %v", err)
 	}
@@ -138,7 +139,7 @@ func TestExpandStepDepthLimit(t *testing.T) {
 
 	// With depth 0 start, going to level 6 means 7 levels total (0-6)
 	// DefaultMaxExpansionDepth is 5, so this should fail
-	_, err := expandStep(target, template, 0, nil)
+	_, err := expandStep(target, template, nil)
 	if err == nil {
 		t.Fatal("expected depth limit error, got nil")
 	}
@@ -159,7 +160,7 @@ func TestExpandStepDepthLimit(t *testing.T) {
 	}
 
 	shallowTemplate := []*Step{shallowChild}
-	result, err := expandStep(target, shallowTemplate, 0, nil)
+	result, err := expandStep(target, shallowTemplate, nil)
 	if err != nil {
 		t.Fatalf("expected shallow template to succeed, got: %v", err)
 	}
@@ -421,6 +422,30 @@ func TestUpdateDependenciesForExpansion(t *testing.T) {
 	}
 	if result[2].DependsOn[1] != "test" {
 		t.Errorf("deploy step DependsOn[1] = %q, want %q", result[2].DependsOn[1], "test")
+	}
+}
+
+// TestUpdateDependenciesForExpansionKeepsGeneratedNeedsGenerated: an edge a
+// transform added onto the expanded step is still a generated edge once it
+// names the expansion's last step, so FilterStepsByCondition routes it rather
+// than reporting it as a reference the formula wrote.
+func TestUpdateDependenciesForExpansionKeepsGeneratedNeedsGenerated(t *testing.T) {
+	join := &Step{ID: "deploy", Title: "Deploy", Needs: []string{"design"}}
+	addGeneratedNeed(join, "implement")
+
+	result := UpdateDependenciesForExpansion([]*Step{join}, "implement", "implement.refine")
+
+	if got, want := result[0].Needs, []string{"design", "implement.refine"}; !slices.Equal(got, want) {
+		t.Fatalf("deploy Needs = %v, want %v", got, want)
+	}
+	if !isGeneratedNeed(result[0], "implement.refine") {
+		t.Errorf("deploy's need on implement.refine is no longer generated")
+	}
+	if isGeneratedNeed(result[0], "design") {
+		t.Errorf("deploy's written need on design became generated")
+	}
+	if !isGeneratedNeed(join, "implement") {
+		t.Errorf("input step modified: its generated need on implement was renamed")
 	}
 }
 
@@ -959,6 +984,38 @@ func TestApplyInlineExpansionsCrossExpansionDeps(t *testing.T) {
 			t.Errorf("work.second.Needs = %v, want [work.first]", workSecond.Needs)
 		}
 	})
+
+	// compose.branch makes work need prepare. The inline expansion moves that
+	// need to work.first, where it is still compose.branch's edge and not the
+	// formula's: when prepare's condition drops it, work.first is routed to
+	// what prepare needed, and the pour does not fail.
+	t.Run("a generated need moves to the root steps as generated", func(t *testing.T) {
+		steps, err := ApplyControlFlow([]*Step{
+			{ID: "setup", Title: "Setup"},
+			{ID: "prepare", Title: "Prepare", Needs: []string{"setup"}, Condition: "{{on}}"},
+			{ID: "work", Title: "Work", Expand: "inline-exp"},
+			{ID: "deploy", Title: "Deploy"},
+		}, &ComposeRules{Branch: []*BranchRule{{From: "prepare", Steps: []string{"work"}, Join: "deploy"}}})
+		if err != nil {
+			t.Fatalf("ApplyControlFlow failed: %v", err)
+		}
+		steps, err = ApplyInlineExpansions(steps, parser)
+		if err != nil {
+			t.Fatalf("ApplyInlineExpansions failed: %v", err)
+		}
+
+		result, err := FilterStepsByCondition(steps, map[string]string{"on": "false"})
+		if err != nil {
+			t.Fatalf("FilterStepsByCondition failed: %v", err)
+		}
+		workFirst := buildStepMap(result)["work.first"]
+		if workFirst == nil {
+			t.Fatalf("work.first missing after the filter")
+		}
+		if got, want := workFirst.Needs, []string{"setup"}; !slices.Equal(got, want) {
+			t.Errorf("work.first.Needs = %v, want %v", got, want)
+		}
+	})
 }
 
 func TestFindDuplicateStepIDs(t *testing.T) {
@@ -1194,6 +1251,80 @@ func TestMaterializeExpansion(t *testing.T) {
 		}
 		if f.Steps[0].Description != "Build {{feature}} with brief: {{brief}}" {
 			t.Errorf("Description = %q, want double-brace vars preserved", f.Steps[0].Description)
+		}
+	})
+}
+
+func TestExpansionVarRefs(t *testing.T) {
+	t.Run("reports every name the expansion substitutes", func(t *testing.T) {
+		f := &Formula{
+			Formula:     "deploy",
+			Description: "Ship {release}",
+			Type:        TypeExpansion,
+			Template: []*Step{
+				{
+					ID:          "{target}.build-{env}",
+					Title:       "Build {component} for {target.title}",
+					Description: "{target.description}",
+					Assignee:    "{owner}",
+					Labels:      []string{"team:{team}"},
+					DependsOn:   []string{"{target}.prep-{stage}"},
+					Needs:       []string{"{target.id}.gate-{gate}"},
+					// Neither field is carried into the expanded step, so
+					// nothing in them is ever substituted.
+					Notes:     "{notes_only}",
+					Condition: "{{condition_only}}",
+					Children: []*Step{
+						{ID: "{target}.child", Title: "Work on {{feature}}"},
+					},
+				},
+			},
+		}
+
+		// {target}, {target.id} and {target.title} are replaced before any
+		// variable is, so none of them is a name; {target.description} pulls
+		// in the formula's description, whose {release} IS substituted. The
+		// single-brace pattern also matches inside {{feature}}, so a
+		// --var feature=x is consumed there too.
+		got := strings.Join(ExpansionVarRefs(f, "main"), " ")
+		if want := "component env feature gate owner release stage team"; got != want {
+			t.Errorf("ExpansionVarRefs() = %q, want %q", got, want)
+		}
+		if f.Steps != nil {
+			t.Errorf("ExpansionVarRefs materialized the formula: Steps = %v", f.Steps)
+		}
+	})
+
+	t.Run("reported even when the formula already has steps", func(t *testing.T) {
+		// MaterializeExpansion skips this formula as it stands, but condition
+		// filtering can remove every step first, and then the template is
+		// materialized after all.
+		f := &Formula{
+			Formula:  "exp",
+			Type:     TypeExpansion,
+			Steps:    []*Step{{ID: "only", Title: "Only", Condition: "{{flag}}"}},
+			Template: []*Step{{ID: "{target}.build", Title: "Build {component}"}},
+		}
+
+		got := strings.Join(ExpansionVarRefs(f, "main"), " ")
+		if want := "component"; got != want {
+			t.Errorf("ExpansionVarRefs() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("nil unless the formula is an expansion with a template", func(t *testing.T) {
+		workflow := &Formula{
+			Formula:  "wf",
+			Type:     TypeWorkflow,
+			Template: []*Step{{ID: "{target}.build", Title: "Build {component}"}},
+		}
+		if got := ExpansionVarRefs(workflow, "main"); got != nil {
+			t.Errorf("workflow formula: ExpansionVarRefs() = %v, want nil", got)
+		}
+
+		noTemplate := &Formula{Formula: "exp", Type: TypeExpansion}
+		if got := ExpansionVarRefs(noTemplate, "main"); got != nil {
+			t.Errorf("expansion without a template: ExpansionVarRefs() = %v, want nil", got)
 		}
 	})
 }

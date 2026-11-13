@@ -14,6 +14,24 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// embeddedIsBlocked reads the STORED is_blocked flag for id.
+//
+// It exists because GetIssue cannot answer this question: is_blocked is not in
+// the hydrated column list (sqlbuild.IssueBaseColumns), so types.Issue.IsBlocked
+// is always false on a hydrated issue and an assertion on it holds no matter
+// what the flag says. The read runs with commit=false, so it takes nothing out
+// of the recheck scope and triggers no recheck of its own.
+func embeddedIsBlocked(t *testing.T, ctx context.Context, store *EmbeddedDoltStore, id string) bool {
+	t.Helper()
+	var blocked int
+	if err := store.withConn(ctx, false, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, "SELECT is_blocked FROM issues WHERE id = ?", id).Scan(&blocked)
+	}); err != nil {
+		t.Fatalf("read is_blocked for %s: %v", id, err)
+	}
+	return blocked != 0
+}
+
 // TestEmbeddedBlockedRecheckRecordsUnblockingWrites pins, on a real engine,
 // that an unblocking write running on the embedded store's own scoped
 // transaction records the dependents it recomputed for the post-commit
@@ -92,14 +110,74 @@ func TestEmbeddedBlockedRecheckRecordsUnblockingWrites(t *testing.T) {
 		return issueops.DeleteIssueInTx(ctx, tx, "rb-b", "")
 	}), "delete of rb-b", "rb-b")
 
-	// Through the public surface the recheck runs after commit and the graph
-	// ends settled: both blockers gone, rb-c unblocked.
-	got, err := store.GetIssue(ctx, "rb-c")
-	if err != nil {
-		t.Fatalf("get rb-c: %v", err)
-	}
-	if got.IsBlocked {
+	// The graph ends settled: both blockers gone, rb-c unblocked. Each write
+	// above took its pending set out of the transaction, so what settled the
+	// flag here is the in-transaction recompute, not the post-commit recheck —
+	// that one is pinned by TestEmbeddedBlockedRecheckSettlesWhatTheWriteRecorded.
+	if embeddedIsBlocked(t, ctx, store, "rb-c") {
 		t.Fatal("rb-c is still blocked after its last blocker was deleted")
+	}
+}
+
+// TestEmbeddedBlockedRecheckSettlesWhatTheWriteRecorded pins withConn's tail on
+// this tier: the recheck must run for whatever the committed transaction
+// recorded, with the test taking nothing out of that transaction first. The
+// test above takes the pending set inside the body — which is what it is for,
+// but it also means the store's tail always rechecks an empty set there, so
+// nothing was measuring the tail itself.
+//
+// Embedded transactions serialize (see recheckBlockedAfterCommit), so the
+// snapshot skew of gastownhall/beads#6716 cannot be staged here. The
+// transaction instead leaves the residue that skew leaves behind — a dependent
+// still flagged blocked once every blocker is closed — by closing the second
+// blocker with a raw status write, which no recompute observes. That stands in
+// for the concurrent writer this tier cannot host, and from there only a
+// post-commit recheck of the recorded dependent can settle the flag.
+func TestEmbeddedBlockedRecheckSettlesWhatTheWriteRecorded(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), ".beads"), "recheckafter", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.SetConfig(ctx, "issue_prefix", "rb"); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"rb-a", "rb-b", "rb-c"} {
+		iss := &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+	for _, blocker := range []string{"rb-a", "rb-b"} {
+		if err := store.AddDependency(ctx, &types.Dependency{IssueID: "rb-c", DependsOnID: blocker, Type: types.DepBlocks}, "tester"); err != nil {
+			t.Fatalf("add dependency rb-c -> %s: %v", blocker, err)
+		}
+	}
+
+	var blockedInTx int
+	if err := store.withConn(ctx, true, func(tx *sql.Tx) error {
+		// Records rb-c and recomputes it: rb-b is open here, so rb-c stays
+		// blocked.
+		if _, err := issueops.CloseIssueInTx(ctx, tx, "rb-a", "done", "tester", ""); err != nil {
+			return err
+		}
+		// The blocker whose close no recompute sees.
+		if _, err := tx.ExecContext(ctx, "UPDATE issues SET status = 'closed' WHERE id = ?", "rb-b"); err != nil {
+			return err
+		}
+		// The pending set is deliberately left in the transaction for the
+		// store's own tail to take.
+		return tx.QueryRowContext(ctx, "SELECT is_blocked FROM issues WHERE id = ?", "rb-c").Scan(&blockedInTx)
+	}); err != nil {
+		t.Fatalf("close rb-a: %v", err)
+	}
+	if blockedInTx == 0 {
+		t.Fatal("rb-c was already unblocked inside the transaction, so this test measures nothing about the post-commit recheck")
+	}
+
+	if embeddedIsBlocked(t, ctx, store, "rb-c") {
+		t.Fatal("rb-c is still blocked after a committed write recorded it: withConn's tail did not recheck what the transaction recorded")
 	}
 }
 

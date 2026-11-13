@@ -1,0 +1,10 @@
+{
+  "shape": "mc-close-text",
+  "requests": [
+    {"method":"GET","operation_id":"getContext","path":"/v0/beads/context","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-t-c4","status":200},
+    {"method":"POST","operation_id":"batchCloseIssues","path":"/v0/beads/issues:batchClose","body":["actor","items","session"],"status":200},
+    {"method":"GET","operation_id":"listDependencies","path":"/v0/beads/dependencies","query":["issue_id","type"],"status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-t-c4","status":200}
+  ]
+}

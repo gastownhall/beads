@@ -43,6 +43,23 @@ func (s *EmbeddedDoltStore) GetAllConfig(ctx context.Context) (map[string]string
 	return result, err
 }
 
+// Callers discover the capability below by type assertion, which degrades
+// silently to a full scan when the method set drifts. This pin turns that
+// drift into a compile error instead.
+var _ domain.ConfigPrefixReader = (*EmbeddedDoltStore)(nil)
+
+// GetConfigByPrefix retrieves the configuration values whose key starts with
+// prefix, filtered in SQL (the domain.ConfigPrefixReader optional fast path).
+func (s *EmbeddedDoltStore) GetConfigByPrefix(ctx context.Context, prefix string) (map[string]string, error) {
+	var result map[string]string
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetConfigByPrefixInTx(ctx, tx, prefix)
+		return err
+	})
+	return result, err
+}
+
 func (s *EmbeddedDoltStore) GetMetadata(ctx context.Context, key string) (string, error) {
 	var value string
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {

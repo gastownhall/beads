@@ -1,0 +1,274 @@
+// Contributed by gascity from bd-enterprise (internal/enterprise/httpstore/store.go@49d1df2f6)
+// to OSS beads under the MIT license.
+// Package httpstore is the enterprise client for the v0 `bd serve` wire: a
+// storage.DoltStorage registered under the name "http" whose issueops role
+// accessors speak HTTP to a remote server and whose every other method refuses
+// with a typed sentinel.
+//
+// This package is the store skeleton — the mechanically generated refusing
+// base, the sentinel, the benign local stubs and the registration glue. It
+// issues no wire calls: transport and encoding live in sibling packages, and
+// each role accessor here refuses until its role bead wires it.
+//
+// See the in-repo divergence ledger, engdocs/design/http-divergence-ledger.md,
+// for every place this client's behavior knowingly differs from local mode.
+package httpclient
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"slices"
+	"sync"
+
+	"github.com/steveyegge/beads/internal/httpapi/apigen"
+	"github.com/steveyegge/beads/internal/httpclient/wire"
+	"github.com/steveyegge/beads/internal/storage"
+)
+
+// Backend is the metadata.json backend identifier for this store.
+const Backend = "http"
+
+// ErrNoTransport reports a binary that registered this backend without linking a
+// wire client. It is a build-wiring fault, not a user's: the workspace and the
+// server may both be fine.
+var ErrNoTransport = errors.New("this build has no http transport linked")
+
+// Store is the http client backend.
+type Store struct {
+	// unsupportedDoltStorage (generated, unsupported_gen.go) provides the
+	// storage.DoltStorage surface this backend refuses — the D8 allowlist v1,
+	// each method returning the typed sentinel. It is generated as the exact
+	// complement of this package's hand-written method set, so there is no
+	// ambiguous-selector overlap.
+	unsupportedDoltStorage
+
+	target Target
+	wire   WireClient
+	local  *localMetadata
+	policy *policyCache
+
+	// mu guards the lazily fetched handshake snapshot. D6 makes the context
+	// fetch lazy (first post-baseline dispatch) and cached for the process, so
+	// a store opened before any dispatch carries none.
+	mu     sync.Mutex
+	ctxRes *apigen.ContextResponse
+
+	// vocabularyCache memoizes the workspace's status and type vocabulary, which
+	// the `--parent` walk's derived-default inversion recognizes with
+	// (vocabulary.go). It is embedded rather than a field so the zero Store the
+	// refusal contract constructs stays usable.
+	vocabularyCache
+}
+
+// Compile-time proof that the hand-written methods plus the generated shell
+// cover the full storage seam: a skipped method this package does not
+// actually implement is a missing method, and a method both implemented and
+// stubbed is an ambiguous selector.
+//
+// S3 reconciliation (2026-10): OSS's storage package
+// defines no storage.NonCommitGraphBackend or storage.RemoteWorkspaceBackend
+// marker interface — those are bd-enterprise additions this client's lift
+// carried over, with no OSS consumer anywhere (cmd/bd's PostRun and the
+// pre-write identity check both run unconditionally here). The marker
+// assertions and the CommitGraphUnsupported/WorkspaceMismatchRecovery methods
+// behind them are removed rather than stubbed, since inventing the OSS
+// interfaces here would assert a maintenance contract no OSS caller checks.
+var _ storage.DoltStorage = (*Store)(nil)
+
+// IsRemoteBackendStore satisfies storage.RemoteBackendStore. The
+// external-dependency policy decorator reads it to compose its role views over
+// this store's own roles (its legacy method seam is mostly stubs); it decides
+// whether to stand down through ServerEnforcesExternalDependencyPolicy below,
+// never through this marker.
+func (s *Store) IsRemoteBackendStore() bool { return true }
+
+var _ storage.RemoteBackendStore = (*Store)(nil)
+
+// ServerEnforcesExternalDependencyPolicy satisfies
+// storage.ExternalDependencyPolicyProber (design 3.6): it answers whether the
+// server this store dials already enforces bd's external-dependency policy
+// itself, by checking the handshake for wire.CapExternalDependencies.
+//
+// It propagates a handshake error rather than swallowing it to false, the
+// same asymmetry servesBatchClose documents: this probe gates whether the
+// external-deps DECORATOR runs its own enforcement at all, so an unresolved
+// "does the server already enforce this" has to fail the caller, not silently
+// resolve to "no, so enforce here" (which happens to be safe for THIS probe's
+// specific true/false meaning but would still hide a transport failure behind
+// a policy decision) or to "yes, so skip" (which would be the actual bug this
+// interface exists to prevent — the policy must never be silently skipped).
+//
+// A store opened from a workspace answers a read from the policy cache
+// (policy_cache.go) while it is fresh, so a short-lived command whose own
+// requests need no handshake does not dial one just for this. A claim or a
+// close (storage.WithLivePolicyProbe) always asks the server: it handshakes
+// anyway, and a stale answer must not stand down its client-side refusal. A
+// handshake this process already holds wins over the cache and refreshes it.
+func (s *Store) ServerEnforcesExternalDependencyPolicy(ctx context.Context) (bool, error) {
+	if s.cachedSnapshot() == nil && !storage.LivePolicyProbe(ctx) {
+		if enforced, ok := s.policy.load(); ok {
+			return enforced, nil
+		}
+	}
+	snap, err := s.snapshot(ctx)
+	if err != nil {
+		return false, err
+	}
+	if snap == nil {
+		return false, nil
+	}
+	enforced := slices.Contains(snap.Capabilities, wire.CapExternalDependencies)
+	s.policy.store(enforced)
+	return enforced, nil
+}
+
+var _ storage.ExternalDependencyPolicyProber = (*Store)(nil)
+
+// ExcludeIDsUnsupported satisfies storage.ExcludeIDsUnsupportedStore: the v0
+// wire's listReadyWork and countReadyWork operations publish no id-exclusion
+// parameter, so encode.ReadyBridgeParams / ReadyBridgeCountParams refuse any
+// types.WorkFilter carrying ExcludeIDs outright (D8/D9, L12) rather than
+// silently widening the result. Reporting true here — unconditionally, since
+// the gap is in the wire shape, not in any per-call state — lets the
+// external-deps decorator fall back to filtering its OWN additional
+// exclusions (unsatisfied external:<project>:<capability> blockers) client
+// side instead of folding them into the filter it hands this store, so design
+// 3.6's policy still runs against a server that does not advertise
+// wire.CapExternalDependencies rather than tripping this store's refusal.
+func (s *Store) ExcludeIDsUnsupported() bool { return true }
+
+var _ storage.ExcludeIDsUnsupportedStore = (*Store)(nil)
+
+// New builds the store around an already-resolved target and transport.
+//
+// snapshot pre-seeds the handshake context, or is nil to let D6 fetch it lazily
+// on the first post-baseline dispatch. The shipped core ALWAYS passes nil: open
+// is the one production constructor, and connect — which does run a handshake —
+// is a separate process that writes the sidecar and exits, so no in-process
+// snapshot survives to the first command. It is the tests that pass one, to pin
+// the server version or capability set a refusal renders without standing up a
+// live handshake (see store_test.go and the cmd/bd refusal tests). It stays a
+// constructor parameter rather than a private-field poke because those cmd/bd
+// tests are in another package and cannot reach ctxRes.
+//
+// wire may be nil in tests that only exercise the refusal surface.
+func New(target Target, wire WireClient, snapshot *apigen.ContextResponse) *Store {
+	return &Store{target: target, wire: wire, ctxRes: snapshot}
+}
+
+// NewFromConfig opens the workspace read-write. It is the backends.Backend
+// Open hook.
+func NewFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+	return open(ctx, beadsDir)
+}
+
+// NewReadOnlyFromConfig opens the workspace for a read-only command.
+//
+// It is the same store, WRITABLE, and that is the contract cmd/bd needs rather
+// than a gap. backends.Backend has one read-only hook and cmd/bd opens two
+// postures through it: the root pre-run opens every CLASSIFIED read command
+// here — `bd ready --claim` among them, which claims through the store it is
+// handed — and the non-mutating opens (previews, cross-repo hydration, doctor)
+// open here too. The embedded arm splits the two (OpenForReadOnlyCommand stays
+// writable, OpenReadOnly refuses), but a registered backend gets only this hook,
+// so refusing writes here would break `bd ready --claim` on this backend. What
+// keeps strict --readonly and a preview from writing here is cmd/bd's own
+// chokepoints (CheckReadonly, the preview RunEs), and
+// openNonMutatingStoreFromConfig names this arm as the exception to its
+// refuses-writes invariant. TestReadOnlyOpenServesTheClaimBdReadyMakes pins it.
+//
+// The two hooks stay distinct because backends.Register requires both and
+// because a later read-intent handshake belongs here rather than in a caller.
+// The follow-up that closes the exception is a third backends.Backend hook,
+// OpenNonMutating, for openNonMutatingStoreFromConfig to call: a preview or a
+// doctor read would then get a store that refuses writes, while the classified
+// reads keep this one.
+func NewReadOnlyFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+	return open(ctx, beadsDir)
+}
+
+func open(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+	target, err := LoadTarget(beadsDir)
+	if err != nil {
+		return nil, err
+	}
+	if dialer == nil {
+		return nil, fmt.Errorf("%w: cannot dial %s", ErrNoTransport, target)
+	}
+	wire, err := dialShared(ctx, dialer, beadsDir, target)
+	if err != nil {
+		return nil, err
+	}
+	s := New(target, wire, nil)
+	s.local = newLocalMetadata(beadsDir)
+	s.policy = newPolicyCache(target)
+	return s, nil
+}
+
+// snapshot returns the cached handshake, fetching it once if a transport is
+// present. It no longer swallows the handshake error (ga-b8ddd.11, Option C):
+// a wrong-server *wire.ProjectMismatchError has to reach GetMetadata so cmd/bd's
+// pre-write workspace-identity check can FIRE on it rather than skip on a
+// nil-turned-empty id. Per-request stamping (ga-b8ddd.12) now enforces identity
+// on EVERY read and write independently — a drifted server refuses each stamped
+// request before it answers — so this handshake path is the pre-write gate BESIDE
+// that per-request one, no longer the only thing between a drifted server and a
+// wrong-workspace answer. It dials nothing beyond the one lazy handshake
+// ServerContext already owns — a successful fetch is cached, a failed one is
+// reported and left uncached for the next attempt.
+func (s *Store) snapshot(ctx context.Context) (*apigen.ContextResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ctxRes != nil || s.wire == nil {
+		return s.ctxRes, nil
+	}
+	res, err := s.wire.ServerContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.ctxRes = res
+	return res, nil
+}
+
+// cachedSnapshot returns the handshake only if one has already been fetched.
+// Decorating an error must never dial: a refusal is the one path that has to
+// stay fast and side-effect free, and a taxonomy field is not worth a round trip
+// the caller did not ask for.
+func (s *Store) cachedSnapshot() *apigen.ContextResponse {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ctxRes
+}
+
+// Close releases the store. Nothing local is held open, so this is a no-op
+// (design D4, "Close").
+func (s *Store) Close() error { return nil }
+
+// The commit family is a NO-OP on this backend, not unsupported (design D3).
+// The server's writes are durable when it writes the response, so a client-side
+// "commit" of a remote store has nothing to flush. Refusing instead would break
+// working commands rather than unsupported ones: doltAutoCommit defaults on for
+// a registered workspace, so `bd ready --claim` calls Commit after a claim that
+// already landed, and PersistentPostRunE turns any Commit error into a failed
+// exit — exit 1 after a durable claim.
+func (s *Store) Commit(_ context.Context, _ string) error                { return nil }
+func (s *Store) CommitWithConfig(_ context.Context, _ string) error      { return nil }
+func (s *Store) CommitMergeResolution(_ context.Context, _ string) error { return nil }
+
+// CommitAll joins that family rather than the unsupported shell, for the same
+// D3 reason, and answers (false, nil): its bool reports whether a commit was
+// CREATED, so `bd vc commit` prints "Nothing to commit" instead of claiming
+// history this client does not own. A remote store has no working set to sweep.
+func (s *Store) CommitAll(_ context.Context, _ string) (bool, error) { return false, nil }
+
+// CommitPending reports nothing pending, for the same reason: write paths call
+// it opportunistically and must not error.
+func (s *Store) CommitPending(_ context.Context, _ string) (bool, error) { return false, nil }
+
+// CommitConfigOnly and CommitConfigUserKVOnly, the scoped commits after a
+// config or memory write (GH#4078), join the family for the same D3 reason:
+// the write is durable once the server answers, so there is nothing to flush,
+// and refusing would fail a command whose write already landed.
+func (s *Store) CommitConfigOnly(_ context.Context, _ string) error       { return nil }
+func (s *Store) CommitConfigUserKVOnly(_ context.Context, _ string) error { return nil }

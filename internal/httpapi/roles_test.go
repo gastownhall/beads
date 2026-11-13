@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi"
 	"github.com/steveyegge/beads/issueops"
 	"github.com/steveyegge/beads/memoryops"
 )
@@ -132,6 +133,116 @@ func (c *roleGraphCounter) countRequests() []issueops.EdgeCountRequest {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]issueops.EdgeCountRequest(nil), c.counts...)
+}
+
+// roleBatchGetter is the many-ids read role of the store-shaped source, its own
+// fake beside roleGraphCounter for its same reason: a separate role on a
+// separate accessor, so one fake answering both would let a test pass on a
+// server that had wired the batch-get handler to the wrong role.
+type roleBatchGetter struct {
+	result issueops.GetManyResult
+	err    error
+
+	mu    sync.Mutex
+	calls []issueops.GetManyRequest
+}
+
+func (g *roleBatchGetter) GetMany(_ context.Context, req issueops.GetManyRequest) (issueops.GetManyResult, error) {
+	g.mu.Lock()
+	g.calls = append(g.calls, req)
+	g.mu.Unlock()
+	if g.err != nil {
+		return issueops.GetManyResult{}, g.err
+	}
+	return g.result, nil
+}
+
+func (g *roleBatchGetter) getManyRequests() []issueops.GetManyRequest {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]issueops.GetManyRequest(nil), g.calls...)
+}
+
+// roleLeaseReclaimer is the stale-lease sweep of the store-shaped source, its
+// own fake beside roleReleaser for roleBatchGetter's reason: a separate role on
+// a separate accessor, so one fake answering both would let a test pass on a
+// server that had wired the reclaim handler to the wrong role.
+type roleLeaseReclaimer struct {
+	result issueops.ReclaimResult
+	err    error
+
+	mu    sync.Mutex
+	calls []issueops.ReclaimRequest
+}
+
+func (l *roleLeaseReclaimer) Reclaim(_ context.Context, req issueops.ReclaimRequest) (issueops.ReclaimResult, error) {
+	l.mu.Lock()
+	l.calls = append(l.calls, req)
+	l.mu.Unlock()
+	if l.err != nil {
+		return issueops.ReclaimResult{}, l.err
+	}
+	return l.result, nil
+}
+
+func (l *roleLeaseReclaimer) reclaimRequests() []issueops.ReclaimRequest {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]issueops.ReclaimRequest(nil), l.calls...)
+}
+
+// roleHeartbeater is the lease refresh of the store-shaped source, its own fake
+// beside roleClaimer for roleBatchGetter's reason: a separate role on a
+// separate accessor, so one fake answering both would let a test pass on a
+// server that had wired the heartbeat handler to the claim.
+type roleHeartbeater struct {
+	result issueops.HeartbeatResult
+	err    error
+
+	mu    sync.Mutex
+	calls []issueops.HeartbeatRequest
+}
+
+func (h *roleHeartbeater) Heartbeat(_ context.Context, req issueops.HeartbeatRequest) (issueops.HeartbeatResult, error) {
+	h.mu.Lock()
+	h.calls = append(h.calls, req)
+	h.mu.Unlock()
+	if h.err != nil {
+		return issueops.HeartbeatResult{}, h.err
+	}
+	return h.result, nil
+}
+
+func (h *roleHeartbeater) heartbeatRequests() []issueops.HeartbeatRequest {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]issueops.HeartbeatRequest(nil), h.calls...)
+}
+
+// roleBlockedLister is the blocked listing of the store-shaped source, its own
+// fake for roleHeartbeater's reason: a separate role on a separate accessor.
+type roleBlockedLister struct {
+	result issueops.BlockedResult
+	err    error
+
+	mu    sync.Mutex
+	calls []issueops.BlockedRequest
+}
+
+func (l *roleBlockedLister) ListBlocked(_ context.Context, req issueops.BlockedRequest) (issueops.BlockedResult, error) {
+	l.mu.Lock()
+	l.calls = append(l.calls, req)
+	l.mu.Unlock()
+	if l.err != nil {
+		return issueops.BlockedResult{}, l.err
+	}
+	return l.result, nil
+}
+
+func (l *roleBlockedLister) blockedRequests() []issueops.BlockedRequest {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]issueops.BlockedRequest(nil), l.calls...)
 }
 
 // roleRelations is the single-anchor NEIGHBOR role of the store-shaped source,
@@ -781,7 +892,8 @@ type roleSettings struct {
 	// sent", which is the role's own promise for every key this plane accepts;
 	// a case that wants to prove the response carries the STORED value rather
 	// than the request sets it.
-	stored string
+	stored        string
+	validateWrite bool
 
 	mu     sync.Mutex
 	gets   []issueops.GetSettingRequest
@@ -812,6 +924,13 @@ func (c *roleSettings) SetSetting(_ context.Context, req issueops.SetSettingRequ
 	c.mu.Unlock()
 	if c.writeErr != nil {
 		return issueops.SetSettingResult{}, c.writeErr
+	}
+	if c.validateWrite {
+		v, err := workapi.ValidateSettingWrite(req.Key, req.Value)
+		if err != nil {
+			return issueops.SetSettingResult{}, err
+		}
+		return issueops.SetSettingResult{Key: req.Key, Value: v}, nil
 	}
 	value := req.Value
 	if c.stored != "" {
@@ -928,6 +1047,18 @@ func rolesConfig(cfg Config) Config {
 	}
 	if cfg.GraphCounter == nil {
 		cfg.GraphCounter = &roleGraphCounter{}
+	}
+	if cfg.BatchGetter == nil {
+		cfg.BatchGetter = &roleBatchGetter{}
+	}
+	if cfg.LeaseReclaimer == nil {
+		cfg.LeaseReclaimer = &roleLeaseReclaimer{}
+	}
+	if cfg.Heartbeater == nil {
+		cfg.Heartbeater = &roleHeartbeater{}
+	}
+	if cfg.BlockedLister == nil {
+		cfg.BlockedLister = &roleBlockedLister{}
 	}
 	if cfg.Relations == nil {
 		cfg.Relations = &roleRelations{}

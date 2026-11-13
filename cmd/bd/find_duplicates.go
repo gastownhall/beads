@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"unicode"
@@ -15,8 +16,10 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/compact"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/telemetry"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -92,19 +95,27 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) error {
 	status, _ := cmd.Flags().GetString("status")
 	limit, _ := cmd.Flags().GetInt("limit")
 	model, _ := cmd.Flags().GetString("model")
-	if model == "" {
-		_, keySource := config.ResolveAIAPIKey("")
-		model = config.DefaultAIModelFor(keySource)
-	}
 
 	if method != "mechanical" && method != "ai" {
 		return HandleErrorRespectJSON("invalid method %q (use: mechanical, ai)", method)
 	}
 
+	var aiOptions []option.RequestOption
+	keySource := config.AIAPIKeySourceNone
 	if method == "ai" {
-		if apiKey, _ := config.ResolveAIAPIKey(""); apiKey == "" {
-			return HandleErrorRespectJSON("--method ai requires ANTHROPIC_API_KEY, MINIMAX_API_KEY, or ai.api_key in config")
+		options, source, _, err := compact.NewAIClientOptions("")
+		if err != nil {
+			if strings.Contains(err.Error(), "API key required") {
+				return HandleErrorRespectJSON("--method ai requires ANTHROPIC_API_KEY, MINIMAX_API_KEY, or ai.api_key in config")
+			}
+			return err
 		}
+		aiOptions, keySource = options, source
+	} else {
+		_, keySource = config.ResolveAIAPIKey("")
+	}
+	if model == "" {
+		model = config.DefaultAIModelFor(keySource)
 	}
 
 	// Fetch issues
@@ -141,7 +152,7 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) error {
 	}
 	issues = filterClosedIfNoStatus(issues, status)
 
-	return reportFindDuplicates(rootCtx, issues, method, threshold, limit, model)
+	return reportFindDuplicates(rootCtx, issues, method, threshold, limit, model, aiOptions)
 }
 
 func filterClosedIfNoStatus(issues []*types.Issue, status string) []*types.Issue {
@@ -157,7 +168,7 @@ func filterClosedIfNoStatus(issues []*types.Issue, status string) []*types.Issue
 	return filtered
 }
 
-func reportFindDuplicates(ctx context.Context, issues []*types.Issue, method string, threshold float64, limit int, model string) error {
+func reportFindDuplicates(ctx context.Context, issues []*types.Issue, method string, threshold float64, limit int, model string, aiOptions []option.RequestOption) error {
 	if len(issues) < 2 {
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
@@ -175,7 +186,14 @@ func reportFindDuplicates(ctx context.Context, issues []*types.Issue, method str
 	case "mechanical":
 		pairs = findMechanicalDuplicates(issues, threshold)
 	case "ai":
-		pairs = findAIDuplicates(ctx, issues, threshold, model)
+		if len(aiOptions) == 0 {
+			var err error
+			aiOptions, _, _, err = compact.NewAIClientOptions("")
+			if err != nil {
+				return err
+			}
+		}
+		pairs = findAIDuplicates(ctx, issues, threshold, model, aiOptions)
 	}
 
 	// Sort by similarity (highest first)
@@ -228,16 +246,35 @@ func reportFindDuplicates(ctx context.Context, issues []*types.Issue, method str
 		ui.RenderWarn("🔍"), len(pairs), threshold*100)
 
 	for i, p := range pairs {
-		pct := p.Similarity * 100
-		fmt.Printf("%s Pair %d (%.0f%% similar):\n", ui.RenderAccent("━━"), i+1, pct)
-		fmt.Printf("  %s %s\n", ui.RenderPass(p.IssueA.ID), p.IssueA.Title)
-		fmt.Printf("  %s %s\n", ui.RenderPass(p.IssueB.ID), p.IssueB.Title)
-		if p.Reason != "" {
-			fmt.Printf("  %s %s\n", ui.RenderAccent("Reason:"), p.Reason)
-		}
-		fmt.Printf("  %s bd show %s %s\n\n", ui.RenderAccent("Compare:"), p.IssueA.ID, p.IssueB.ID)
+		printDuplicatePair(i+1, p)
 	}
 	return nil
+}
+
+// printDuplicatePair prints the nth pair bd find-duplicates reports, ending
+// with the bd show command that compares the two issues. The IDs are read
+// from the store, which holds a collaborator's issues after bd dolt pull:
+// each goes into the bd show command as one shell word, or as a placeholder
+// named escaped after it (remedy.CommandArg), and is named on the lines above
+// the command by remedy.PrintedWord, so no part of one runs when the Compare
+// line is pasted and none can redraw it. The titles, and the reason the
+// model gives for an AI-found pair, which it writes from the issues' titles
+// and descriptions, are prose, which bd prints as it is in every listing:
+// they are spelled by remedy.PrintedValue, as printedIssueID's titles are, so
+// no line break or terminal control in them can split or redraw the Compare
+// line, and shell syntax in them is printed as it is. The Compare line is
+// the one to paste.
+func printDuplicatePair(n int, p duplicatePair) {
+	pct := p.Similarity * 100
+	fmt.Printf("%s Pair %d (%.0f%% similar):\n", ui.RenderAccent("━━"), n, pct)
+	fmt.Printf("  %s %s\n", ui.RenderPass(remedy.PrintedWord(p.IssueA.ID)), remedy.PrintedValue(p.IssueA.Title))
+	fmt.Printf("  %s %s\n", ui.RenderPass(remedy.PrintedWord(p.IssueB.ID)), remedy.PrintedValue(p.IssueB.Title))
+	if p.Reason != "" {
+		fmt.Printf("  %s %s\n", ui.RenderAccent("Reason:"), remedy.PrintedValue(p.Reason))
+	}
+	idA, noteA := remedy.CommandArg(runtime.GOOS, p.IssueA.ID, "<issue-a-id>")
+	idB, noteB := remedy.CommandArg(runtime.GOOS, p.IssueB.ID, "<issue-b-id>")
+	fmt.Printf("  %s bd show %s %s%s%s\n\n", ui.RenderAccent("Compare:"), idA, idB, noteA, noteB)
 }
 
 // tokenize splits text into lowercase word tokens, removing punctuation.
@@ -371,7 +408,7 @@ func findMechanicalDuplicates(issues []*types.Issue, threshold float64) []duplic
 
 // findAIDuplicates uses LLM-based semantic comparison to find duplicates.
 // It first pre-filters with mechanical similarity to reduce API calls.
-func findAIDuplicates(ctx context.Context, issues []*types.Issue, threshold float64, model string) []duplicatePair {
+func findAIDuplicates(ctx context.Context, issues []*types.Issue, threshold float64, model string, clientOptions []option.RequestOption) []duplicatePair {
 	// Pre-filter: use mechanical similarity with a lower threshold to find candidates
 	preFilterThreshold := threshold * 0.5 // Cast a wider net for pre-filtering
 	if preFilterThreshold < 0.15 {
@@ -395,11 +432,6 @@ func findAIDuplicates(ctx context.Context, issues []*types.Issue, threshold floa
 
 	fmt.Fprintf(os.Stderr, "Analyzing %d candidate pairs with AI...\n", len(candidates))
 
-	apiKey, keySource := config.ResolveAIAPIKey("")
-	clientOptions := []option.RequestOption{option.WithAPIKey(apiKey)}
-	if baseURL := config.DefaultAIBaseURL(keySource); baseURL != "" {
-		clientOptions = append(clientOptions, option.WithBaseURL(baseURL))
-	}
 	client := anthropic.NewClient(clientOptions...)
 
 	var pairs []duplicatePair
@@ -488,7 +520,7 @@ func analyzeWithAI(ctx context.Context, client anthropic.Client, model anthropic
 	aiSpan.SetAttributes(
 		attribute.Int64("bd.ai.input_tokens", message.Usage.InputTokens),
 		attribute.Int64("bd.ai.output_tokens", message.Usage.OutputTokens),
-		attribute.Float64("bd.ai.duration_ms", float64(time.Since(t0).Milliseconds())),
+		attribute.Float64("bd.ai.duration_ms", telemetry.Milliseconds(time.Since(t0))),
 	)
 	aiSpan.End()
 

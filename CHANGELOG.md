@@ -7,7 +7,4538 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Release binaries are built with Go 1.27.4.** Go 1.27.0-1.27.3 (and
+  releases before 1.26.11) can crash an HTTP/1 server that bounds request
+  bodies with `http.MaxBytesReader` when a handler reads past the limit while
+  response headers are written concurrently (GO-2026-6859, CVE-2026-97054).
+  `bd serve` bounds its JSON bodies with `MaxBytesReader` but reads them fully
+  before writing any header, so no bd handler is known to hit the race;
+  govulncheck still reports it reachable through `net/http`. 1.27.4 also fixes
+  eleven build-time advisories in the go command, cgo, the compiler and the
+  linker (GO-2026-6848 through GO-2026-6858). `go.mod` keeps `go 1.27.3`, the
+  minimum for programs that import beads, and adds `toolchain go1.27.4`, so
+  building from a checkout selects Go 1.27.4 (fetched automatically unless
+  `GOTOOLCHAIN=local`; offline builders need it installed). Builds through
+  `go install ...@version`, Nix and Homebrew use the installing Go: use Go
+  1.27.4 or newer there. (#8431)
+
+- **The `bd serve` settings surface no longer stores config.yaml-only keys.**
+  `PUT /v0/beads/config/{key}` (and the dashboard behind it) wrote any key,
+  so a tracker secret such as `github.token`, `linear.api_key`,
+  `jira.api_token`, `gitlab.token`, `ado.pat` or `notion.token` became a row
+  in the database's config table, which `bd dolt push` replicates to every
+  remote. The settings write role now refuses every config.yaml-only key with
+  a `400` that names the key and never echoes the value, and the HTTP client
+  refuses it before sending. `bd config set` is unchanged: it already writes
+  these keys to `config.yaml`. `DELETE /v0/beads/config/{key}` and
+  `bd config unset` still remove a row stored earlier; rotate any secret that
+  was pushed. (#7559, builds on PR #7567 by rjgeng)
+
+- **Telemetry no longer exports the raw command line.** With telemetry on
+  (`BD_OTEL_ENABLED=true`), the OTel resource attached to every exported
+  metric and span carried `process.command_args`, the unscrubbed `os.Args`,
+  so a `--password=...` flag, search text or an issue title reached the
+  metrics receiver even though the `bd.args` span attribute is scrubbed. The
+  resource also carried `process.executable.path` and `process.owner` (the OS
+  user name). bd now builds the resource from explicit detectors and keeps
+  only `host.name`, `process.pid`, `process.executable.name` and the Go
+  runtime attributes.
+
+- **Telemetry metrics no longer carry actor names, search text or commit
+  messages.** With telemetry on (`BD_OTEL_ENABLED=true`), the
+  `bd.storage.operations` counter was labelled with each storage call's
+  request attributes, so actor identities (`bd.actor`), `bd search` text
+  (`bd.query`), commit messages (`db.commit_msg`), issue ids and config keys
+  reached the OTLP metrics receiver. The storage metrics are now labelled by
+  `db.operation` only (see Fixed below for the dashboard impact).
+
+- **A committed `.beads/.env` can no longer copy your environment into bd's
+  settings, set a command or bearer token by a name the deny list missed, or
+  pick a file for bd to overwrite.**
+  bd read `.beads/.env` with `$VAR`/`${VAR}` expansion from the process
+  environment, so the file could set `DOLT_REMOTE_PASSWORD=${GITHUB_TOKEN}`, or
+  put any secret into `BEADS_ACTOR`, and bd would send it to the workspace's
+  own `sync.remote` (which the endpoint pins do not cover) or write it into
+  issues the workspace syncs. Values are now taken as written: a key whose
+  value expansion would change is ignored with `beads: ignoring <KEY> from
+  .beads/.env ($VAR references are not expanded in .beads/.env; ...)`. A
+  literal dollar sign (single-quoted, escaped, or not followed by a variable
+  name) is unaffected; a value that referred to another variable must be
+  written out or set in your shell. The key filter now also refuses, by name,
+  every `BEADS_*`/`BD_*` key ending in `_COMMAND`, `_BIN` or `_BINARY`, so a
+  command setting added later is covered without extending a list, and
+  `BEADS_HTTP_TOKEN`, the first rung of the http backend's bearer ladder,
+  which let the workspace that names the server (`http_target.json`) also
+  choose the bearer bd presents to it. The plaintext grant
+  `BEADS_HTTP_ALLOW_INSECURE` and `bd serve`'s accepted-token file
+  `BEADS_SERVE_TOKEN_FILE` are refused alongside the other credential target
+  settings. So are the files bd writes to, which a committed value could point
+  at any file you can write: the heap profile and MemStats summary bd creates
+  on exit (`BEADS_MEM_PROFILE`, `BEADS_MEM_STATS`, which truncated an existing
+  file) and the log the proxied Dolt server appends to
+  (`BEADS_PROXIED_SERVER_LOG`). Set these in your shell, user configuration or
+  the credentials file instead.
+
+- **A `GT_ROOT` from a committed `.beads/.env` can no longer make bd write or
+  delete formula files outside the repo.** `GT_ROOT` was admitted from
+  `.beads/.env` on the grounds that bd only reads from it, but
+  `bd formula convert --all` iterates every formula search path, including
+  `$GT_ROOT/.beads/formulas`, writing a `.formula.toml` beside each JSON
+  formula there and, with `--delete`, removing the JSON; `bd formula convert
+  <name>` and `bd mol distill` (when no earlier formula directory is writable)
+  could write there too. When `GT_ROOT` came from `.beads/.env` rather than your
+  shell, that directory is now read-only to these commands: `--all` skips it
+  with a note on stderr, converting a formula found only there by name is
+  refused (`--stdout` still prints it), and `mol distill` uses the next
+  writable directory or reports none. Formulas there are still found and used.
+  Export `GT_ROOT` in your shell to convert formulas in place; an explicit
+  path (`bd formula convert ./x.formula.json`, `bd mol distill --output`) is
+  unaffected.
+
+- **Shared workspace configuration can no longer redirect your private
+  credentials to an attacker's endpoint (GH#7886, #7560).** A committed
+  `.beads/config.yaml` / `.beads/config.local.yaml` / `.beads/.env`, a
+  committed `.beads/metadata.json`, or a row replicated through the synced Dolt
+  `config` table could point an AI endpoint (`ai.base_url`), a tracker endpoint
+  (`github.url`, `gitlab.url`, `ado.url`, `jira.url`, `linear.api_endpoint`) or
+  the remote Dolt server (`dolt_server_host`) at a server the attacker runs, and
+  `bd` would send your `ANTHROPIC_API_KEY`/`MINIMAX_API_KEY`, your tracker token,
+  or `BEADS_DOLT_PASSWORD` there. `bd` now pins each of these endpoints on first
+  use in a user-private file (`~/.config/beads/trusted-endpoints.json`) and
+  refuses to send the credential when a shared endpoint differs from the pin or
+  was never privately confirmed. Confirm an intended endpoint by setting its
+  environment variable in your shell (not in `.beads/.env`) or the key in
+  `~/.config/bd/config.yaml`. The pin store's own location is resolved from
+  private environment only, so a committed `.beads/.env` cannot relocate it with
+  `XDG_CONFIG_HOME`/`APPDATA`/`HOME` and pre-authorize its own endpoints. The
+  guard also covers the Dolt server password on the diagnostic and maintenance
+  paths — `bd dolt status`, `bd dolt clean-databases`, and the `bd doctor`
+  checks and `bd doctor --fix` repairs — which build their own connections
+  outside the store's open, so none of them can be used to harvest
+  `BEADS_DOLT_PASSWORD` by naming an attacker's host. A Dolt host or socket
+  that is not a plain host name, IP literal or socket path (for example
+  `localhost#@tcp(evil.example`, which the trust check read as bd's own server
+  while the MySQL driver dialed `evil.example`) is refused before the password
+  is sent. Dolt remote credentials
+  (`DOLT_REMOTE_USER`/`DOLT_REMOTE_PASSWORD` for `sync.remote` and federation
+  peers) are not covered by these pins.
+- **Failed Dolt pushes, pulls and fetches no longer print a remote's
+  credentials (#8089, from #7644 by @hexsprite).** When `sync.remote` or a
+  federation peer is a URL such as
+  `git+https://x-access-token:<token>@github.com/org/repo`, Dolt names that
+  stored URL, token included, in the error of a failed transfer, and `bd`
+  passed it on to the terminal, agent transcripts, the `dolt auto-push failed`
+  warning and trace spans. `bd` now redacts URL credentials from these errors
+  in embedded and server mode: HTTP(S) userinfo is dropped whole, an SSH remote
+  keeps its account but loses any password, and the host, path and rejection
+  detail are kept.
+
+- **Server-mode `bd dolt pull` no longer writes the remote URL, token
+  included, into its merge commits (bd-e2q8zs).** When local and remote
+  histories had diverged, a server-mode pull ran Dolt's own pull, whose merge
+  commit reads `Merge branch 'main' of <stored remote URL> into main`, so a
+  URL such as `git+https://x-access-token:<token>@github.com/org/repo` landed
+  in history and the next `bd dolt push` published it. Every server-mode pull
+  route (default remote, Hosted Dolt `--user`, git-protocol and credential CLI
+  routes, federation peers) now fetches and merges the tracking ref itself, as
+  embedded mode always has, so the message reads
+  `Merge branch 'origin/main' into main`. Merge commits made by older versions
+  stay in history that is already pushed: rotate any token that was in a
+  remote URL. See
+  [Sync failures](docs/recovery/sync-failures.md#credentials-in-a-remote-url-and-merge-commits).
+
+### Added
+
+- **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
+  While a workspace journals, every `ephemeral` or `no_history` bead it creates
+  is stamped with the `seq` of its own `create` journal record, in the same
+  transaction, so sorting rows by `arrival_seq` recovers the order their
+  creates committed in even after the journal is pruned (a row created with
+  the journal off, or moved onto the wisp plane, is stamped by the first
+  `create` record later journaled for it, a re-import or a rename, and sorts by
+  that commit). Unique, not reused unless the seq counter is lost after the
+  journal is pruned, never changed while the row stays on the wisp plane, never
+  settable by a caller, and never written by `bd export`. Durable beads carry
+  none. Schema migration 0073 adds the column to both planes and the
+  clone-local unique index to wisps (ignored migration 0029 carries both to
+  fresh clones, and raises the seq counter past every surviving stamp whenever
+  a lost counter is re-created); the seq-counter heal now also clears
+  `MAX(arrival_seq)`. `--json` output and every issue-shaped HTTP schema carry
+  the optional member, announced over HTTP by the new build-level capability
+  `issues.arrivalSeq`.
+  See [Arrival order on the row](docs/reference/events-journal.md#arrival-order-on-the-row).
+  **Upgrading:** every issue read now selects `arrival_seq`, so this bd reads
+  nothing from a database still at schema v72 until it is migrated
+  (`bd migrate schema`, once per database, after its clients are upgraded).
+  Until then a read that goes on without migrating (a read-only command on a
+  server-mode or proxied-server workspace, or on an embedded one whose
+  migration is refused, and a routed or foreign read) refuses the database at
+  open with the schema-behind error, instead of failing every query on the
+  unknown column; through a gateway server the refusal asks the server
+  administrator to upgrade the database. A database behind the binary that
+  still has every column the reads select keeps serving them as before.
+- **Retention sweeps can retire the ids they delete** (BDP
+  `idempotency-expired`). `issueops.SweepRequest.RetainIDs` — `bd prune
+  --retain-ids`, `bd purge --retain-ids`, `retain_ids` on
+  `POST /v0/beads/issues:sweep` behind the new `issues.sweep.retainIds`
+  capability — writes one permanent tombstone (the id and its `closed_at`,
+  nothing else) per deleted row, in the same transaction as the delete and in
+  the tombstone table of the row's own plane (`id_tombstones`, versioned;
+  `wisp_id_tombstones`, clone-local; migration 0074 and ignored 0030). From
+  then on no write path commits that id again: every create — `Lifecycle.Create`,
+  `BatchApplier`/`BatchCreator` items, the stores' upsert `CreateIssue` and a
+  transaction's `CreateIssue` — is refused with the typed
+  `*issueops.IdempotencyExpiredError` (`ErrIdempotencyExpired`; HTTP `410
+  idempotency_expired` with `param` and `closed_at`; `bd create --json`
+  prints `{"error","code":"idempotency_expired","id","closed_at"}` and exits
+  1), a rename onto it (`UpdateIssueID`: `bd rename`, `bd rename-prefix`) is
+  refused the same way, `bd import` and the `Importer` role skip the row and
+  report it in `retired_ids` (`bd import --dry-run` previews the same skip; the
+  JSONL auto-import skips it too and does not count it as imported), and id
+  generation, child ids under a parent included, never mints a retired id.
+  Opt-in: a sweep without it behaves exactly as before, and only a retaining
+  sweep retires — a plain prune or purge, `bd delete` and `bd gc` leave deleted
+  ids reusable. The main-series migration locks older bd binaries, which do not
+  check tombstones, out of a migrated Dolt database, but not a process that was
+  already running when the migration landed, so every writer must run this
+  release before any retaining sweep runs. A retaining sweep holds the
+  create-coordination cell of every id it retires (4096 shards shared by
+  unrelated ids) until it commits, so keep `limit` small, around 100, and loop
+  on `remaining`. The new `IDRetention` conformance contract runs on every leg.
+- **`types.retained`: the retention commands keep key-bearing types.** A
+  workspace setting (`issueops.SettingKeyTypesRetained`; a comma-separated
+  list or JSON array of issue types, unknown names allowed) honored by the
+  commands whose selection is a retention policy over closed beads:
+  `bd prune` and `bd purge` (including `--wisps-plane`) without
+  `--retain-ids`, their previews and `POST /v0/beads/issues:sweep`; the
+  decay phase of `bd gc`; `bd admin cleanup`, which refuses `--cascade` while
+  the setting names a type; and the stale-closed-issues `bd doctor --fix`,
+  whose check counts only what the fix deletes. They keep every closed bead
+  of a listed type and report it as `retention_required` (`--json`, and
+  `SweepSkips.RetentionRequired` on the wire behind the new behavior
+  capability `issues.sweep.retainedTypes`; against a server without that
+  token the client reads the setting and refuses a plain sweep when it names
+  a type). A retaining sweep keeps nothing back, so it is the one that
+  deletes those beads, and it retires their ids. A retained bead protects
+  itself only; in a sweep the hold-back runs before the protections and
+  `limit`. The setting is read from the workspace database, never from
+  `config.yaml` (a key there draws a warning): a sweep reads it in the
+  transaction that deletes, and `bd gc`, `bd admin cleanup` and
+  `bd doctor --fix` read it with their selection (from one snapshot, except
+  `bd gc` over HTTP) before they delete; a read error fails the command and
+  deletes nothing. Names are
+  matched through one canonicalizing read, so an alias (`feat`, `mol`) or a
+  case variant of a built-in type (`Chore`) protects the type beads carry,
+  and a malformed name stored past the write check (`[op]`, `op fact`) still
+  protects the names in it; a write refuses only malformed syntax (a
+  bracketed list that is not JSON, a name with a space, quote, bracket or
+  comma, a non-blank value that names no type), and `bd config set-many`
+  checks every pair before it writes. A bd that predates the setting ignores
+  it, so upgrade every bd that runs these commands on a workspace before
+  relying on it. Not in scope, by
+  design: `bd mol wisp gc` (it selects only ephemeral wisps), the
+  `bd doctor` pollution deletes, `bd migrate-personal`, and the deletes that
+  name what they delete (`bd delete`, `bd mol burn`/`squash`,
+  `bd cook --force`, `bd repo remove`, `bd sql`).
+- `bd versions <id>` lists the versions recorded for a bead, and
+  `versioned-history.enabled` turns recording on. While it is on, every
+  accepted change to a bead created while it is on, or that enters the issues
+  plane while it is on (a wisp promoted or made persistent), stores a
+  snapshot of it as a row of `issue_versions` in the same transaction. It is
+  off by default and nothing is backfilled: a bead already on the issues
+  plane when it is turned on is legacy, and editing it records nothing, nor
+  does making it a wisp and then persistent again while recording is on (a
+  bead that participates keeps its history across that round trip). A
+  recorded write leaves `updated_at` where an unrecorded one would, so
+  `bd import`'s stale check sees the same timestamps either way.
+  `bd versions --json` answers `{"versions": [...], "recording": bool}`; the
+  command still lists what was recorded after recording is turned off, and
+  proxied-server and HTTP workspaces refuse it. The setting is a row of each
+  store's `config` table (`bd config set versioned-history.enabled true`),
+  and every store reads its own in its first write (a store that only reads
+  never reads it, and a write whose read fails fails with it, changing
+  nothing): a write routed into another workspace (a prefix-routed
+  `bd update` or `bd close`, `bd create --repo`) follows the target store's
+  row, a proxied-server provider reads it in its first unit of work, and a
+  long-lived `bd serve` keeps the value it read until it restarts.
+  `BD_VERSIONED_HISTORY_ENABLED=1` (or a `config.yaml` value) turns
+  recording on for every store the process opens, and never turns it off.
+  The row replicates on `bd dolt push`/`pull`, and recording is single-writer
+  only: two clones recording at once can mint the same revision and fail the
+  pull, and a write from a writer that is not recording is folded into the
+  next recorded version under that version's actor, so keep recording on for
+  every writer of a store or off for all of them. Turning it on with
+  `bd config set` first checks every issue the store would version (one
+  created, or brought onto the issues plane, while recording was on) and every
+  template (`bd mol pour` and `bd mol bond` copy a proto's metadata and gate
+  timeouts into the beads they create, which are versioned, and `bd update`
+  cannot change a template), and refuses, writing nothing, while any holds a
+  number outside the I-JSON exact-integer range (magnitude above 2^53-1,
+  however it is spelled) in its metadata or in a gate's timeout (held as
+  nanoseconds, so about 104.25 days), and prints the count, the ids, the
+  field and the fix; a template is fixed by cooking its corrected formula
+  again with `bd cook --persist --force`, or removed with `bd delete`. A
+  write to a legacy bead is never refused, so no other legacy bead stops the
+  switch: a store that has never recorded and holds no such template is not
+  refused (a storage backend that cannot say which beads participate checks
+  every legacy bead too, and says so). A legacy bead that is not a template
+  but sits under a proto's root (a template or a `template`-labeled bead),
+  which a pour would still copy, is named in a warning with its proto's
+  root, and `bd update` (for a gate, `bd delete`) fixes it with recording on
+  or off. A molecule poured
+  from a stored proto carries the proto's `template` label, so a legacy
+  poured molecule is named there too, and `bd label remove <root> template`
+  stops it counting as a proto. There is no override, and the check runs
+  once; after that, a recorded write that would hold such a number fails
+  atomically. Turning recording on through `BD_VERSIONED_HISTORY_ENABLED` or
+  `config.yaml` checks nothing ahead of time, at open or anywhere else, and no
+  check reads a formula file: such a write, or a pour or cook straight from
+  such a formula, is refused when it is made. Migration 0071 adds a nullable
+  `removed_restriction` column to `issue_versions`. `bd version` now refuses
+  an argument and suggests `bd versions <arg>`, instead of printing bd's
+  build for a mistyped `bd version bd-123`.
+- `bd blocked --flags` prints the blocked flag for each id read from stdin
+  (one per line; blank lines and repeats ignored), with `--json` as
+  `[{"id","is_blocked"}]` in the order the ids were given, omitting an id that
+  names no row on either plane. A closed id is answered too, with its stored
+  flag (a `status <> 'closed'` SQL read of the column leaves it out). It is the flag `bd ready` filters on, not the
+  listing: a row whose stored flag is set with no nameable blocker reads true
+  here and is absent from `bd blocked`. It runs `issueops.BlockedFlags` on
+  every route; over HTTP that is `listBlockingAnnotations` with `is_blocked`,
+  behind `dependencies.blocking.isBlocked`, refused before the dial against a
+  server that does not advertise it. The listing's filter flags are refused
+  with `--flags`.
+- `bd blocked --flags --raw` answers the stored `is_blocked` column itself,
+  without the external-dependency policy: a row blocked only by an
+  unsatisfied `external:` ref reads `false` (the policy-aware `--flags`
+  reads `true`); a stale flag reads `true` either way. `--raw` is for the
+  local and proxied routes, where it reads the column directly and the two
+  answer the same. Over HTTP it is answered only by a server that does not
+  advertise `policy.external_dependencies` (whose flag is the column); a
+  server advertising it answers only the policy-aware flag, so `--raw`
+  against it is refused before the dial rather than answered with the
+  decorated flag. `--raw` without `--flags` is refused.
+- `bd blocked` works over a connected HTTP workspace. The blocked listing is
+  a role, `issueops.BlockedLister` (`ListBlocked(BlockedRequest{ParentID,
+  Labels, LabelsAny, ExcludeLabels}) -> BlockedResult{Items}`), on every
+  backend leg over the same body `GetBlockedIssues` runs, and `bd serve`
+  publishes it as `GET /v0/beads/blocked` (`parent`, and the repeatable
+  `label`, `label_any` and `exclude_label`), answering `{items, has_more}`
+  with `BlockedIssue` rows (the element `bd blocked --json` prints), behind
+  the new `blocked.list` capability token (additive; no wire_revision bump).
+  The listing names unsatisfied `external:` blockers wherever the
+  external-dependency policy applies: on the server when it advertises
+  `policy.external_dependencies`, else on the client, as every other policy
+  read does. The HTTP backend's `BlockedLister()` and legacy
+  `GetBlockedIssues` dial it; against a server that does not advertise the
+  token they refuse before dialing with a typed capability error naming
+  `blocked.list`, and never compose the listing from other reads. The
+  listing is unpaged: a server answer that reports `has_more` is refused
+  with the new `httpclient.TruncatedListingError` rather than returned
+  short, and an answer over the client's 32 MiB response limit is refused
+  as any oversized response is. The external-dependency decorator's legacy
+  `GetBlockedIssues` over an HTTP store now reads the extra sources through
+  the served roles (it failed on a raw multi-id read before), so callers of
+  that door no longer fail on it; commands that also make other raw reads
+  the HTTP backend does not serve (`bd ready --explain`) still refuse on
+  those. `bd
+  blocked` runs the role on every route (the proxied-server route through
+  the provider's accessor) with unchanged output: `--json` prints the same
+  rows in the same order (priority, then newest first, then id, which now
+  also breaks a tie the order used to leave to chance), and `[]`, never
+  `null`, when nothing is blocked.
+- `bd list`'s remaining filters work over a connected HTTP workspace.
+  `GET /v0/beads/issues` accepts `updated_after`/`updated_before`,
+  `closed_after`/`closed_before`, `defer_after`/`defer_before`,
+  `due_after`/`due_before`, `priority`, `priority_min`, `priority_max`,
+  `title_contains`, `desc_contains`, `notes_contains`, `external_contains`,
+  `external_ref`, `spec`, `label_pattern`, `label_regex`,
+  `empty_description`, `no_labels`, `no_parent`, a repeatable
+  `exclude_type`, `pinned`, `no_pinned`, `deferred`, `overdue`, `mol_type`
+  and `wisp_type`, behind one new capability token, `issues.list.filters`
+  (additive; no wire_revision bump; the names are `issues:count`'s where it
+  already spells the filter), and applies them through the same Reader role a
+  local `bd list` reads through. Bounds are strict and compared at
+  whole-second precision on both routes; relative and date-only values are
+  resolved on the client's clock and timezone as locally, while `--overdue`
+  compares against the server's clock. Against a server that does not
+  advertise the token the client refuses before dialing, naming
+  `issues.list.filters`, rather than sending a filter an older server rejects
+  or dropping one and answering a wider listing. The 29 corresponding
+  divergence-ledger refusal rows are removed. The default `bd list --parent`
+  tree view does not carry these filters yet: its descendant walk still
+  refuses one over HTTP rather than drop it, and `--flat` or `--json` skips
+  the walk and applies them to the parent's direct children (not its whole
+  subtree).
+- `issueops.ListRequest.ExcludeStatus`: statuses to leave out of a listing,
+  appended to the default exclusions (never re-admitting what they hide),
+  comma-separated or repeated, each validated against the workspace's
+  statuses like `CountRequest.ExcludeStatus` (an unknown name is
+  `ErrValidation`). `GET /v0/beads/issues` accepts it as a repeatable
+  `exclude_status` under the same `issues.list.filters` token (an unknown
+  name is a `400` on `exclude_status`), so an HTTP-backed caller can leave
+  closed history out of an `all` listing (`all` plus
+  `exclude_status=closed` keeps every status not named, the `pinned` and
+  `hooked` statuses and custom done/frozen statuses included) instead of
+  reading the whole history. It is refused together with `ReadyFlag`, like the other
+  members the ready query cannot carry. There is no `bd list` flag for it
+  yet.
+
+- `bd serve` publishes the gate members: `await_type`,
+  `await_id`, `timeout` (nanoseconds) and `waiters` on `POST
+  /v0/beads/issues` and on `issues:batchApply` create items, behind the new
+  `issues.create.gates` capability token, and `await_id` and `waiters` (a
+  whole-value replacement; `[]` clears) on the `patch` of `PATCH
+  /v0/beads/issues/{id}` and of `issues:batchApply` update items, behind
+  `issues.update.gates`. Additive; no wire_revision bump. The bounds are the
+  library role's, the same ones a local create or update now enforces (see
+  Changed), answered as `400 invalid_argument` with `param` naming the
+  member.
+- `issueops.IssuePatch.Waiters`: a whole-value replacement of a gate's waiter
+  list (nil or empty clears it, stored as `[]`), on `Lifecycle.Update` and on
+  `BatchApplier` update items, on every backend. `issueops.GateFieldError`
+  (`Field`, `Detail`; wraps `ErrValidation`) names the gate member a create or
+  update refused, as one of the new `issueops.GateFieldAwaitType`,
+  `GateFieldAwaitID`, `GateFieldTimeout` and `GateFieldWaiters` constants.
+- The HTTP client sends the gate members on create, update and
+  `issues:batchApply` (create and update items) to a server that advertises
+  `issues.create.gates` / `issues.update.gates`. Against an older server a
+  request naming any gate member is refused before the dial with a typed
+  capability error naming the missing token (never sent without the
+  member); a batchApply plan is checked whole, so no partial plan is sent.
+  A request naming no gate member is unaffected by either token.
+- `bd heartbeat` works over a connected HTTP workspace.
+  The lease refresh is a role, `issueops.Heartbeater`
+  (`Heartbeat(HeartbeatRequest{Actor, IssueID}) -> HeartbeatResult{IssueID,
+  Holder, HeartbeatAt, LeaseExpiresAt, Rearmed}`), on every backend leg, and
+  `bd serve` publishes it as `POST /v0/beads/issues/{id}:heartbeat` behind the
+  new `issues.heartbeat` capability token (additive; no wire_revision bump),
+  with the new `lease_not_held` (409) problem code (`reason: ephemeral` for a
+  wisp). A refresh writes ONLY the lease row: the issue's `revision` is not
+  reminted (a guarded write against the pre-heartbeat token still lands), no
+  version, event, journal entry or Dolt commit is recorded, and no hook
+  fires. `Rearmed` is true only when the heartbeat created the caller's lease
+  row (a hand-doled claim's first heartbeat). A re-arm is recorded as a
+  mutation; a refresh is not: the re-arm remints `revision`, stamps
+  `updated_at`, records a `lease_rearmed` event, a journal entry and a
+  version, makes a Dolt commit and fires `on_update` (see Fixed); the
+  reported times are whole seconds, exactly what the lease row stores. The
+  HTTP backend's `Heartbeater()` and legacy `HeartbeatIssue` dial it;
+  against a server that does not advertise the token they refuse before
+  dialing with a typed capability error naming `issues.heartbeat`, and never
+  fall back to a re-claim or a metadata stamp. A
+  busy (503) answer is replayed, because a repeat only moves the expiry later.
+  `bd heartbeat` now runs the role on every route (the proxied-server route
+  through the provider's accessor), with the same
+  `{"id","status":"heartbeat","owner"}` success output and the same exit
+  codes. Refusal TEXT on stderr changes per route: the direct routes (Dolt
+  server, embedded) gain a `lease not held: ` prefix
+  (`heartbeat X: lease not held: issue not claimable: X status closed`); the
+  proxied-server route loses its
+  `Heartbeat: db: IssueSQLRepository.HeartbeatIssue: ` prefix and reads as the
+  direct routes do; over HTTP the refusal is the problem's detail, which names
+  the state found (`it is closed`, `an ephemeral wisp`, `open and not
+  claimed`) or, for a foreign holder, the native `issue already claimed by
+  <holder>`. An id that names no row answers not-found from the role rather
+  than "not claimable" (the CLI resolves the id first, so its output is
+  unchanged), and every refusal for a caller that holds no live claim
+  (closed, released, reclaimed, moved off in_progress, or a wisp) is
+  `issueops.ErrLeaseNotHeld`, which still matches `ErrNotClaimable`.
+
+- `GET /v0/beads/dependencies/blocking` accepts `is_blocked`, behind the new
+  `dependencies.blocking.isBlocked` capability token (additive; no
+  wire_revision bump), and answers each item's stored, transitive
+  `is_blocked` flag, the column `bd ready` filters on; an item whose id names
+  no row carries none. `issueops.BlockingRequest` gains `IncludeIsBlocked` on
+  every BlockingAnnotator implementation, and `issueops.BlockedFlags` is the
+  batched read over it. The HTTP backend's `IsBlockedBatch` now serves
+  through it; against a server that does not advertise the token it still
+  refuses before dialing, now with a typed capability error naming the
+  token. An unsatisfied `external:` blocker sets the flag on every route,
+  just as it keeps the issue out of `bd ready`.
+- `bd promote` works over a connected HTTP workspace (S21b). Its one library
+  entry, `issueops.Promote(ctx, PromoteRoles{Reader, Lifecycle, Commenter},
+  PromoteRequest)`, reads the row, refuses one that is not a wisp
+  (`*issueops.NotAWispError`, the sentence `bd promote` always printed), moves
+  it with ONE `Lifecycle.Update` whose patch is `Persistence = persistent`
+  (labels, dependencies, events, comments and the child counter move with it
+  in the role's transaction), then records the promotion comment. The direct
+  and proxied-server routes run it over their own roles, so a local promote
+  now makes the same plane move `bd update --persistent` makes, honoring
+  `dolt.auto-commit`. That changes five things a script can see on those
+  routes: the workspace's `on_update` hook fires twice, once for the move and
+  once for the comment (the direct route never fired it, the proxied-server
+  route fired it once); the promotion comment is a row `bd comments` lists
+  (the direct route recorded only a `commented` event); a promoted parent
+  keeps its child counter, so its next `bd create --parent` mints the number
+  after its wisp children's instead of failing with
+  `issue already exists: <parent>.1`; a promotion records two Dolt
+  commits, `bd: promote <id>` for the move and `bd: comment <id>` for the
+  comment (an embedded workspace recorded one, `bd: promote (auto-commit)`,
+  and the proxied-server route one, `bd: promote <id>`); and a promote that
+  loses a race to a concurrent one fails with the not-a-wisp sentence instead
+  of `promoting <id>: wisp <id> not found`. A comment that cannot
+  be written leaves the promotion standing behind a warning on every route;
+  the proxied-server route used to roll the promotion back. `bd serve`
+  publishes the move as `patch.persistence` on `PATCH /v0/beads/issues/{id}`
+  behind the new `issues.update.persistence` capability (additive;
+  `wire_revision` is unchanged), which also carries `bd update --persistent`,
+  `--ephemeral` and `--no-history` over HTTP. Against a server without the
+  token the client refuses before the dial, naming it; nothing is written. A
+  move the workspace refuses (an `unversioned`-class row asked for
+  `--ephemeral` or `--no-history`, or a demotion of a row with retained
+  snapshots) matches `ErrValidation` on every route: `bd serve` answers it
+  `400 invalid_argument`, and the local refusal gains a `validation failed: `
+  prefix.
+- `bd serve` advertises the new `issues.update.claim` behavior token for what
+  `PATCH /v0/beads/issues/{id}` already served untokened: `claim` (upstream
+  #6890), resolved on both planes, so a wisp is claimable there (additive; no
+  wire_revision bump). The HTTP client now picks the claim route from the
+  handshake before dialing: with the token every claim is one updateIssue call;
+  without it a claim alone goes to `{id}:claim` (no doomed 400 first; a wisp
+  still refuses by name, W-ClaimRequest.Wisp, now naming the token), and a
+  claim beside a patch, a guard, a force override or `allow_template` is
+  refused before the dial with an unsupported error naming
+  `issues.update.claim`. Skew note: a server that serves `claim` untokened
+  (wire_revision 2 builds before this release) now gets those two refusals
+  from a new client where it used to serve them; upgrade bd serve. A template
+  claimed alone without the token is still refused, on the client's own
+  pre-read: `{id}:claim` has no template guard (bd-jkp9v3).
+- `issueops.LeaseReclaimer`, the stale-lease sweep behind `bd reclaim`, is a
+  role on every leg (dolt, embedded dolt, the unit-of-work provider and the
+  HTTP client), and `bd serve` publishes it as `POST /v0/beads/issues:reclaim`
+  behind the new `issues.reclaim` capability (additive; `wire_revision` is
+  unchanged). Every reverted row mints a new revision, reported per entry as
+  `revision`, so a holder that writes with its pre-reclaim token gets a version
+  mismatch. An id that is not a stale lease is left out of the answer, not
+  refused. `bd reclaim` now runs the role on both routes, which changes four
+  things a script can see: its `--json` entries gain `revision`; the
+  workspace's `on_update` hook fires once per reverted row (the raw path fired
+  none); `--id` now accepts at most 1000 ids per run (more is refused, never
+  truncated); and the role records its own version commit, honoring
+  `dolt.auto-commit` the way `bd prune` does, as
+  `bd: reclaim N expired lease(s)` on both routes. Over a connected HTTP
+  workspace `bd reclaim` now works instead of refusing.
+- **`bd show --comments-tail N`** renders only the last N comments in text
+  output (including under `--watch`)
+  ([#6618](https://github.com/gastownhall/beads/pull/6618)), preceded by one
+  elision line naming how many older ones were hidden. A render-only cap for
+  fat, append-only beads whose full comment history is hundreds of KB —
+  description and metadata are unchanged, and omitting the flag (or passing
+  `0`) is byte-identical to today's output. JSON output is untouched;
+  `--include-comments` still streams every comment there.
+- `GET /v0/beads/issues` accepts `no_assignee`, `title` and a repeatable `id`
+  (one id per value, at most 200), each behind its own new capability token
+  (`issues.list.noAssignee`, `issues.list.title`, `issues.list.ids`; additive,
+  no wire_revision bump; `id` and its token are bd-enterprise's contract,
+  adopted unchanged), and applies them through
+  the same Reader role a local `bd list` reads through. Over a connected HTTP
+  workspace `bd list --no-assignee`, `--title` and `--id` now work instead of
+  refusing. Against a server that does not advertise a flag's token the
+  client refuses before dialing, and the refusal names the token (every
+  capability refusal over HTTP now names its token).
+- `GET /v0/beads/issues` accepts `q`, `bd search`'s free text, behind the
+  new `issues.list.search` capability token (additive; no wire_revision
+  bump). `issueops.ListRequest` gains `Query`, with `SearchIssues`' meaning
+  (title or id contains the text, case-insensitively), on every Reader
+  implementation, and `issueops.SearchListRequest` is search's scope as a
+  request. Every `bd search` route (direct, `--proxied-server` and the HTTP
+  backend) now asks `Reader.List` with it through one flag mapping; against
+  a server that does not advertise the token the HTTP client refuses before
+  dialing with a typed capability error. Two things a script can see follow
+  from that mapping: `bd search --type` expands aliases (`feat`, `mol`,
+  `dec`, ...) and validates the type as `bd list` does, so an unknown type
+  now exits 1 where it used to answer an empty result, and `bd search
+  --json` rows carry `comments_omitted` (additive) as `bd list --json` rows
+  do.
+- `bd create --graph` now plans its batch through `issueops.BatchApplier`
+  instead of the old `buildDomainGraphPlan` path, so a graph create gets the
+  same atomic multi-row semantics as `bd batch apply`. A `waits-for` edge's
+  `metadata.spawner_id` is stamped only when that edge names a spawner
+  (never defaulted onto an edge that names none), and `thread_id` now survives
+  translation into the batch request alongside every other
+  `GraphApplyEdge`/`GraphApplyNodeDep` field — pinned by a reflection-based
+  field-coverage test (`TestBuildGraphApplyBatchRequestFieldsSurvive`) that
+  fails closed if a future field is added to either struct without an
+  explicit decision about where it goes. The hierarchy/cycle rejection
+  scenarios this path's local gates cover (blocking through existing or
+  planned hierarchy, transitive external-parent paths, reverse parent-to-child
+  edges, cycles hidden in an inline dep, combined scheduling cycles, the end
+  gate alone with the per-edge cycle probe skipped) are exercised against a
+  real Dolt store, not just skipped placeholders. A graph plan whose translated
+  BatchApplier items (nodes, edges and deferred assignments combined) exceed
+  `issueops.MaxApplyBatchItems` (1000) is now refused outright with
+  `GraphApplyTooLargeError` rather than silently chunked across several
+  transactions — `bd create --graph` promises one atomic request, so a plan
+  over the cap must be split by the caller into multiple `bd create --graph`
+  calls instead.
+- `--if-revision` (gastownhall/beads#4682) is extended to `bd reopen`, the
+  one lifecycle verb #7203 did not add it to, reusing the same
+  `issueops.ReopenRequest.ExpectedVersion` field the library already
+  exposed and the same `parseIfRevisionFlag` / `requireSingleIfRevisionID`
+  / `reportIfRevisionFailure` helpers #7203 introduced for the other four
+  verbs — no new CLI surface, no new JSON body shape. A guarded reopen of an
+  issue that is already open is still judged against the guard on both
+  routes: a stale revision exits 13, and a matching one is the usual
+  "already open" no-op. A faithful port of
+  gc's (gascity) `bdstore_conditional.go` decode logic is now run against a
+  real built `bd` for all five guarded verbs
+  (`TestEmbeddedGCConditionalMatcherDecode`), confirming gc's matcher decodes
+  #7203's numeric-only `expected_revision`/`current_revision` body exactly
+  — no decimal-string twin fields are needed, since `encoding/json` decodes
+  a JSON number straight into an `int64` struct field with no lossy
+  `float64` intermediate. The proxied-server route (`*_proxied_server.go`'s
+  uow-backed preflight/apply path), previously untested for `--if-revision`
+  on any verb, now has coverage for all five.
+- `backends.Backend` gains an optional `OpenWith(ctx, beadsDir, OpenOptions)`
+  and a `Remote bool` field for a registered extension backend (for example
+  an HTTP client registrant). `OpenOptions{Credential, HTTPClient,
+  UserAgent}` carries per-open injections — the motivating case is a single
+  embedder process serving many workspaces with distinct credentials against
+  a backend whose dialer would otherwise be process-global. `Open` keeps
+  working unmodified: a backend with no `OpenWith` falls back to it and
+  ignores `HTTPClient`/`UserAgent`, but refuses rather than silently drops a
+  non-nil `Credential`. The public SDK gains `beads.OpenBestAvailableWith`
+  (and the `backend` package's matching aliases); `beads.OpenBestAvailable`
+  is now that function called with a zero `OpenOptions`, with identical
+  behavior for every existing backend. `doltserver.ResolvePhysicalRoots` now
+  recognizes a registered remote backend (`backends.IsRemote`) before any
+  Dolt-mode check, so a remote-backend workspace is never misclassified as
+  having a local Dolt root to gate.
+- `bd serve`'s `GET /v0/beads/context` now reports `wire_revision` (the
+  non-additive wire-shape counter for this build) and
+  `min_client_wire_revision` (the oldest revision this build still answers
+  correctly). A client may declare the revision it was built for on any
+  request via the optional `Bd-Wire-Revision` header (a plain non-negative
+  decimal — no leading `+` or leading zero); a declared revision below
+  `min_client_wire_revision` is refused with `400 invalid_argument`/`reason:
+  "wire_revision_unsupported"` and `min_wire_revision`, `wire_revision`, and
+  `bd_version` fields naming this server's floor, current revision, and
+  release string. The header is absent by default and an absent header is
+  served exactly as before — this is additive, not a new precondition on
+  existing clients. A client with no `wire_revision` signal to read yet may
+  infer one from `bd_version` only as an ADVISORY hint (string-or-number,
+  never a refusal on an inferred `0`) — see the `wire_revision` property's
+  inference notes in `internal/httpapi/spec/openapi.v0.yaml` for the cutoff
+  and known-exception builds. See `internal/httpapi/wire_revision.go` and
+  that same property for the full revision history.
+- `GET /v0/beads/issues`'s `sort` parameter now advertises the
+  `issues.list.sort` capability token, the same way an operation itself
+  does, and a CI rule
+  (`TestNewParameterOnExistingOperationHasABehaviorToken`) requires every
+  new parameter on an existing operation, or new request body member on an
+  existing operation, to carry a token that `Capabilities()` actually
+  advertises (not just backticked `a.b` text shaped like one). Three frozen
+  baselines (`internal/httpapi/testdata/pretoken_*.json`) grandfather what
+  predates the rule and are pinned never to grow
+  (`TestPretokenBaselinesNeverGrow`); a brand-new operation is permanently
+  exempt — its own review decides its capability story.
+- A CI golden digest (`internal/httpapi/wireshape`) pins the JSON name,
+  type, format, enum, required-ness, and nullability of every EXISTING
+  response AND request-body member across the whole HTTP spec — including
+  array item shape and `additionalProperties` value shape — recursing
+  through `$ref` and through a schema's own `allOf` or `oneOf`, and fails if
+  any changes without `wire_revision` bumping to match;
+  `go run ./internal/httpapi/wireshape/cmd/gendigest` refuses to write a
+  changed or removed entry unless `wire_revision` has moved past what the
+  existing golden recorded, and refuses any write at a lower
+  `wire_revision` (purely additive entries otherwise always write). The
+  same digest also pins every operation PARAMETER (query, path and header),
+  keyed by operationId + location + name, and records its type, item shape,
+  enum, required-ness, effective style and explode (OpenAPI's defaults
+  filled in where unset), and default — a parameter retyped, re-enumerated,
+  narrowed, re-serialized, switched required, or removed is non-additive
+  exactly like a response or request-body member. A new member or
+  parameter always counts as additive, even a REQUIRED one an old client
+  will not send, and value constraints (`maxLength`, `pattern` and the
+  like) are outside the digest: such changes need their own review against
+  `wire_revision`.
+- `cmd/bd` registers the http client backend built on top of the v0 `bd
+  serve` wire (`internal/httpclient`), so a workspace whose
+  `.beads/metadata.json` selects `"backend": "http"` opens over HTTP through
+  the ordinary `OpenBestAvailable` path, exactly like a registered extension
+  backend does. A new `bd connect <url>` command performs the handshake
+  (`api_version`, wire revision, and — with `--expect-project-id` — workspace
+  identity) and writes nothing until it succeeds; it then records the
+  per-user activation sidecar (`.beads/http_target.json`, never
+  git-tracked — `cmd/bd/doctor/gitignore.go` now requires it and its local
+  metadata sidecar `http_local_metadata.json` be ignored) and sets
+  `metadata.json`'s backend to `"http"`. `bd connect` refuses a plain `http://`
+  URL to a non-loopback host (a bearer credential would cross the network in
+  the clear) unless `--allow-plaintext` is given, and refuses to switch a
+  workspace that already selects a different backend unless `--force`. A
+  credential is never accepted on the command line or written to disk; it
+  comes from the same ladder every http request already uses
+  (`BEADS_HTTP_TOKEN=host[:port]=<token>`, then
+  `BEADS_HTTP_TOKEN_COMMAND=host[:port]=<command>`, then the credentials
+  file, then none); both variables take only that host-scoped form, and a
+  bare value is refused, since it would be sent to whatever server the
+  workspace's `http_target.json` names.
+  `bd create` sends no `created_by` on any backend: the
+  create role defaults it to the request's actor (see *Changed*). The
+  external-dependency policy decorator (`internal/storage/externaldeps`)
+  still wraps an http store, and passes every ready, claim, claim-next,
+  close, blocking and tree request through untouched when the server's
+  handshake advertises `policy.external_dependencies`, which every `bd
+  serve` composed through the policy now does (see below). Only against a
+  server that does not advertise it (an older `bd serve`, or one handed raw
+  roles) does the client apply the policy itself, in role terms: ready reads
+  and the ready claim exclude the workspace-wide externally blocked set over
+  a widened window, and per-issue checks (claim, close, batch close, list
+  annotations, tree leaves) read only the named issues' edges.
+  `bd close --claim-next` refuses over http before anything closes, since
+  the wire's batch close cannot carry the claim; its error says to close
+  without it and then run `bd ready --claim`.
+- `bd serve` advertises the conditional behavior token
+  `policy.external_dependencies` exactly when the roles or provider it
+  serves were composed through the external-dependency policy
+  (`httpapi.Config.ExternalDependencyPolicy`, which `bd serve` derives with
+  `externaldeps.Applied` / `externaldeps.AppliedToProvider`); a server handed
+  raw roles withholds it. A client that sees it hands claim-next to the
+  server as one atomic call and takes the ready count from the server,
+  instead of judging external dependencies a second time against the CLIENT
+  machine's project config.
+- `bd ping` works on an http workspace (a new `storage.Pinger`, which the
+  http store answers with its authenticated context read).
+- The public `backend/http` package (`bdhttp`) is the out-of-tree door onto
+  this backend for an embedder that links beads as a library rather than
+  running `cmd/bd`: `Register(Options)` adds `"http"` to the registry and
+  installs its transport, `Open`/`Handshake` dial a server directly with no
+  workspace on disk, and the existing public `beads.OpenBestAvailableWith`
+  takes a per-call `OpenOptions.Credential` through it — the case a
+  multi-tenant embedder serving many workspaces needs, where a
+  process-global credential cannot stand in for one tenant's own.
+  EXPERIMENTAL, pin an exact beads version.
+- Unlimited ready and query reads over the HTTP backend (`bd ready --limit
+  0`, `bd query --limit 0`, and every library read asking for no limit)
+  return every row against any server, bounded on the client by the new
+  `BEADS_HTTP_UNLIMITED_READ_CAP` (a positive integer up to 1000000; default
+  10000). The client never puts `limit=0` on the wire, which a `bd serve
+  --allow-non-loopback` refuses and which an older server answered with its
+  default page, silently capping the result: an unlimited ready or query
+  read is one request bounded at the cap plus one (one consistent snapshot).
+  Past the cap, or when a server reports more rows below the requested
+  bound, the read is refused with a typed error
+  (`httpclient.ErrUnlimitedReadCap`) naming the cap, never truncated. An
+  unlimited `bd list` is unchanged: it walks its keyset cursor a page at a
+  time and is bounded only by `--max-rows` / `BEADS_MAX_ROWS`. Unlike a
+  malformed `BEADS_MAX_ROWS`, which is ignored with a warning, a malformed
+  cap value fails every unlimited ready or query read rather than falling
+  back to the default.
+- Two molecule capability tokens on `bd serve`. `issues.close.autoCloseMolecule`
+  announces that `POST /v0/beads/issues/{id}:close` and `POST
+  /v0/beads/issues:batchClose` accept `auto_close_molecule` and answer
+  `auto_closed_molecule` and `molecule_auto_close_refusal`;
+  `issues.advanceMolecule` is the new `POST
+  /v0/beads/issues/{id}:advanceMolecule`, `bd close --continue`'s advance.
+  Both run the one library entry (`issueops.CloseRequest.AutoCloseMolecule`,
+  `issueops.MoleculeStepper`) on the server. The public `issueops` package
+  gains the molecule rules as one implementation over the BatchGetter,
+  Relations and EdgeReader roles (`MoleculeRoots`, `LoadMolecule`,
+  `AnalyzeMolecule`, `ViewMolecule`, `ReadMoleculeProgress`,
+  `ActiveMoleculeIDs`, `CompletedMolecule`, `MoleculeRootClose`); a
+  molecule's membership is the parent-child edge. Against a server that
+  does not advertise a token the HTTP client refuses a library close that
+  sets `AutoCloseMolecule`, or an advance, before dialing, with a typed
+  capability error; it never runs a client-side copy of either rule.
+- `bd close --json` reports the molecule auto-close. The entry of a close
+  that completed a molecule carries the root it closed as
+  `auto_closed_molecule`, or why the root stayed open as
+  `molecule_auto_close_refusal`, on every route; before, that refusal
+  reached only stderr. Both members are absent from every other entry, so
+  each entry still decodes as the closed issue, and the output stays an
+  array (under `closed` with `--suggest-next`, `--continue` or
+  `--claim-next`).
+
+### Changed
+
+- **`bd dolt pull` on an embedded rig with no remote exits 0 (bd-e2q8zs).**
+  It prints `No remote is configured — skipping.` and the setup guidance,
+  as server mode already did; in embedded mode it used to exit 1. A pull
+  from a configured remote that fails still exits 1.
+- **`bd rules compact` previews by default and applies only with `--force`.**
+  It used to apply merges by default, writing the composite and deleting the
+  source rules. Scripts using `--auto` or `--group` to apply merges must add
+  `--force`. Applying now copies each source to `<name>.md.backup` before
+  deleting it; undo a merge by deleting the composite and renaming each
+  backup back. The preview lists, by source, every line the composite drops
+  (it keeps only `**Do:**` and `**Don't:**` lines), and a rule with no such
+  lines is skipped by `--auto` and refused by `--group`.
+  ([#5719](https://github.com/gastownhall/beads/issues/5719))
+- **`bd` requires Dolt 2.6.0 or newer outside embedded mode, and refuses
+  anything older.** `doltversion.RecommendedMin` (2.5.0, a warning) is now
+  `doltversion.RequiredMin` (2.6.0, an error). `bd dolt start` and
+  server-mode auto-start refuse to launch an older `dolt` binary; managed
+  proxied-server mode (`bd init --proxied-server` and every command after
+  it) refuses one before launching it; and every server-mode and
+  proxied-server store open asks the server it reached for
+  `SELECT dolt_version()` and refuses one older than 2.6.0 before it reads
+  or writes through that open, including external and shared servers `bd`
+  did not start. `bd bootstrap` and `bd init --remote` check the server, or
+  the `dolt` CLI, before they clone, and `bd bootstrap` exits non-zero when
+  the clone it made cannot be opened for that reason. `bd init` checks a
+  shared server before it creates `beads_global` on it.
+  `bd dolt clean-databases` refuses an older server before it drops anything.
+  The `dolt` binary on `PATH` is refused when it is older than 2.6.0, like
+  every other `dolt` `bd` runs, before: a `bd dolt push`, `pull` or fetch
+  routed through the CLI (git-protocol, credentialed, cloud-auth and local
+  remotes; federation sync included), checked as soon as the CLI route is
+  chosen; the remote-repo cache's `dolt clone`, `pull` and `push` (`bd create
+  --repo <url>`, `bd repo sync`); and the CLI clone of `bd bootstrap` and `bd
+  init --remote`. The error names the binary or server, the version it
+  reported, the 2.6.0 minimum, the install steps and the 2.6.0 release notes.
+  There is no override. `bd doctor`, `bd doctor --fix` included, is exempt so
+  you can still diagnose and repair a workspace: its own checks and repairs
+  connect without the floor. Its checks that open the workspace's store fail,
+  and the ✖ Database and Permissions errors only point at `bd dolt status`;
+  the refusal itself is printed by the ⚠ checks further down (Peer
+  Connectivity, Sync Staleness, Federation Conflicts, Dolt Mode). `bd doctor
+  --server` reports an older server as an error. Also exempt: `bd admin
+  compact --dolt`'s `dolt gc` (the store open has already checked the server,
+  and dolt hands the GC to that server), read-only probes (`bd dolt status`,
+  `bd init`'s existing-database check), and the working-set commit `bd dolt
+  stop` makes before it stops a server `bd` runs. Federation peers are not
+  checked: `bd` checks only its own server and its own `dolt` binary, so a
+  peer on an older engine can still merge the same criss-cross history
+  differently. A version `bd` cannot determine is still not refused: a binary
+  whose `dolt version` does not parse runs with the existing once-a-day
+  warning (proxied-server mode; `bd dolt start` launches it without one), and
+  a server that does not answer `dolt_version()` with a version is used
+  unchecked (logged under `BD_DEBUG`). Embedded mode links the 2.6.0 engine
+  and is unaffected.
+  Upgrade every `dolt sql-server` `bd` talks to (back it up first, and
+  treat the upgrade as one-way), then upgrade `bd`. What a server moving to
+  2.6.0 changes:
+  - When two histories have more than one merge base (criss-cross merges,
+    e.g. federation peers that pull from each other, or branches merged
+    into each other), Dolt 2.6.0 merges against a virtual base like git's
+    ORT strategy (new in 2.6.0, dolthub/dolt#12125). Some merges that 2.5.x
+    completed silently now conflict, and some spurious conflicts no longer
+    occur. Pull/push through a single remote is unaffected.
+  - Dolt reports MySQL 8.0's strict default `sql_mode`, which includes
+    `NO_ZERO_IN_DATE`, `NO_ZERO_DATE` and `ERROR_FOR_DIVISION_BY_ZERO`, so
+    anything that reads `@@sql_mode` sees it. Dolt has done so since 2.3.3,
+    not 2.6.0, so this is new only for a server moving from a release before
+    2.3.3, such as 2.1.8.
+- **Embedded mode now runs the Dolt 2.6.0 engine, and the module needs Go
+  1.27.3.** `bd` links `dolthub/dolt/go` at the v2.6.0 release (with
+  `go-mysql-server` to match). Dolt's own `go.mod` declares `go 1.27.3`, so
+  the `go` line of beads' `go.mod` is now 1.27.3: a program that imports
+  `github.com/steveyegge/beads` needs Go 1.27.3 or newer. CI, the test
+  container and the hermetic Bazel Dolt now pin the `dolt` CLI and
+  `dolt sql-server` at 2.6.0. When two histories have more than one merge
+  base (criss-cross merges, e.g. federation peers that pull from each other,
+  or branches merged into each other), Dolt 2.6.0 merges against a virtual
+  base like git's ORT strategy (dolthub/dolt#12125). Some merges that 2.5.x
+  completed silently now conflict, and some spurious conflicts no longer
+  occur. Pull/push through a single remote is unaffected.
+- Over an HTTP workspace, `bd ready --json` without `BD_JSON_ENVELOPE` no
+  longer sends `GET /v0/beads/ready:count` after a page the limit cut short:
+  the total only went into the stderr hint. It lists one row past the limit
+  instead, and the hint says more issues matched without saying how many
+  (the wording the proxied-server route already uses). A local store, and the
+  envelope's `pagination.total`, keep the total.
+- `bd` initializes its packages with `GOMAXPROCS` capped at 4 and hands it
+  back before `main` runs anything, so the garbage collections package
+  initialization triggers do not stop the world across every CPU of a large
+  host. On a 192-CPU machine this takes about 17 ms off every bd process. An
+  explicit `GOMAXPROCS` is restored as set.
+- Over an HTTP workspace, `bd ready` no longer fetches `GET /v0/beads/context`
+  before its listing in every process only to learn whether the server
+  enforces the external-dependency policy. The answer is kept for 5 minutes
+  per server URL and pinned project under the user cache directory
+  (`BEADS_HTTP_POLICY_CACHE_TTL`, a duration, a number of seconds, or `off`),
+  and a handshake the process already holds still wins. Claims and closes
+  always ask the server.
+- `bd serve` normalizes every RFC 3339 time bound on the issue listing and
+  count (`created_*`, `updated_*`, `closed_*`, and the new `defer_*` and
+  `due_*`) to UTC before it reaches storage. A bound carrying an offset
+  (`...+02:00`) now selects exactly what its `Z` twin does; previously a
+  backend whose timestamp column has no zone could read the offset bound's
+  wall clock and compare it hours off. `bd`'s own client always sent `Z`, so
+  its answers are unchanged.
+- `bd serve` answers a `label_regex` the database cannot compile with
+  `400 invalid_argument` (`invalid_value` on `label_regex`) on
+  `GET /v0/beads/issues`, `GET /v0/beads/ready`, `GET /v0/beads/ready:count`
+  and `POST /v0/beads/issues:claimNext`, instead of `500 internal`. The pattern is
+  still compiled by the database in its own dialect; only the attribution
+  of its refusal changed.
+- `issueops.Reader.List` refuses `PinnedFlag` together with `NoPinnedFlag`
+  with `ErrValidation` (`--pinned and --no-pinned are mutually exclusive`) on
+  every backend; it used to let `PinnedFlag` win silently. `bd list` already
+  refused the pair at flag parse, so its behavior is unchanged; over HTTP the
+  pair is a `400 invalid_argument` on `no_pinned`.
+- `issueops.Reader.List` refuses `ParentID` together with `NoParent` with
+  `ErrValidation` (`--parent and --no-parent are mutually exclusive`) on
+  every backend, as `CountRequest` already did; it used to answer with only
+  the edge-less rows under the parent's dotted id, which both clauses match.
+  `bd list` already refused the pair at flag parse, so its behavior is
+  unchanged; over HTTP the pair is a `400 invalid_argument` on `no_parent`.
+
+- **`bd gate discover` skips template gates, as `bd gate check` does.** A
+  template gh:run gate is a proto that work is poured from; on the direct,
+  proxied and embedded routes `bd gate discover` used to record a discovered
+  run ID on it, which every later pour copied. It is now left alone on every
+  route. `bd gate add-waiter` on a template gate is refused by the update
+  role's template guard, where the direct, proxied and embedded routes all
+  used to write the waiter.
+- **`bd gate create` refuses a negative `--timeout` on every route**
+  (`timeout cannot be negative`); the direct, proxied and embedded routes
+  used to store it. A `--type` longer than 32 characters fails with the same
+  typed validation error instead of a raw Dolt column error.
+- **`bd gate create` and `bd gate add-waiter` follow `dolt.auto-commit`
+  like every other role write.** Under `dolt.auto-commit=off` `bd gate
+  create` no longer makes its own Dolt commit on the direct and embedded
+  routes (the proxied route already did not). The Dolt commit messages are
+  the role's: `bd: create gate X blocking Y` becomes the create's default
+  message, and `bd gate add-waiter`'s becomes the update's (`bd: update X`
+  on the direct and embedded routes, `update issue` on the proxied route).
+  On the proxied route `bd gate create` no longer journals a
+  `dependency_added` event on the blocked issue, matching the direct route
+  and `bd create --deps`.
+- **Gate members are bounds-checked in the library, on every local backend.**
+  `issueops.Lifecycle.Create`, `Lifecycle.Update` and `BatchApplier` (create
+  and update items) now refuse, with a typed `*issueops.GateFieldError`
+  wrapping `ErrValidation`: a negative `Timeout` (previously accepted and
+  stored), an `await_type` over 32 characters, an `await_id` over 255
+  characters, and a waiter list whose JSON encoding exceeds its TEXT column
+  (65535 bytes). Creates check all four; an update can change only
+  `await_id` and `waiters`, so it checks those two. The over-width values
+  previously failed with a raw Dolt driver error. There is no `await_type` vocabulary, no gate-type-only rule
+  and no waiter deduplication.
+- **Over an http workspace, a bd command answers its repeated reads of a row
+  or setting from one response.** `bd show <id> --json` makes one request
+  instead of three, text `bd show` three instead of six, and `bd update`,
+  `bd close`, `bd label add`, `bd comments` and `bd dep add` one to seven
+  fewer (port of bd-enterprise e626072b8). A one-shot command's transport
+  answers an identical `getIssue`, `getSetting` or `listSettings` GET from the
+  answer it already received, for at most 5 s from that answer. Any write the
+  command makes clears it, and only a 2xx that decoded is kept. `bd serve`,
+  `--watch` and `--follow` never memoize, and neither do library embedders.
+  Within one command a re-read no longer sees another writer's change made in
+  the meantime (ledger row `L-read-memo`); `BD_HTTP_READ_MEMO=0` turns the
+  memo off. The identity-gate preview and the real open now share one
+  transport, so a write makes one handshake. `bd list` reads its vocabulary
+  with one `listSettings`, and the hook decorator skips its post-write re-reads
+  when no hook for the event is installed.
+- **Embedded mode now runs the Dolt 2.5.1 engine, and a database `bd init`
+  creates in embedded mode can no longer be opened by Dolt older than 2.3.3.
+  This change is one-way.** `bd` links `dolthub/driver` v2.4.1 with
+  `dolthub/dolt/go` at the v2.5.1 release.
+
+  Dolt 2.3.3 and later store a descending index column as descending
+  (dolthub/dolt#11746), where earlier releases silently stored it ascending.
+  Migration 0010 declares `compaction_snapshots`' `idx_comp_snap_issue` with
+  `created_at DESC`.
+
+  Dolt older than 2.3.3 cannot write to a database holding such a table. An
+  `UPDATE` or `DELETE` on `issues`, which `bd create` and `bd update` both
+  run, fails with `cannot add or update a child row: a foreign key constraint
+  fails` on `fk_comp_snap_issue`. Other writes and `information_schema`
+  queries fail with `table has unknown fields`. An earlier `bd` release
+  (every release through v1.3.x links Dolt 2.2.0 or older) therefore cannot
+  open the workspace (`schema skew check: probing schema_migrations
+  existence: … table has unknown fields`), and `BD_IGNORE_SCHEMA_SKEW=1` does
+  not get past it. A `bd` built from source against an older driver may open
+  and read the workspace, but every write fails.
+
+  This applies to every database this release creates in embedded mode, and
+  to any database whose schema a `dolt sql-server` 2.3.3 or newer created,
+  whatever the `bd` version. `bd` does not convert the index back. Any other
+  database keeps its ascending index and stays readable and writable by older
+  and newer Dolt alike, even after this release migrates and writes to it.
+  Every `bd` that touches a new database must be this release or later.
+
+  The `dolt` CLI and `dolt sql-server` must now be **2.6.0** or later (see
+  the required-minimum entry above); CI pins 2.6.0. Older releases have known
+  defects:
+  - Dolt 2.4.0 through 2.4.2 return no row, instead of one `NULL` row, for an
+    ungrouped `MAX` or `MIN` over an unmatched primary-key prefix
+    (dolthub/dolt#12093). The versioned-history revision read, `bd`'s one
+    query of that shape, no longer depends on it.
+  - Releases before 2.4.0 drop a join condition when an `ON` clause has an
+    `OR` over indexed columns (dolthub/dolt#11886, the cause of #7037).
+  - 2.3.0 and 2.3.1 regressed `CALL DOLT_RESET('--hard')`;
+    docs/architecture/dolt.md has the measurements.
+
+  Below 2.6.0 `bd` now refuses to run outside embedded mode (see the
+  required-minimum entry above). Dolt 2.3.3 and later also
+  report a stricter default `sql_mode` than 2.2.0, adding `NO_ZERO_IN_DATE`,
+  `NO_ZERO_DATE` and `ERROR_FOR_DIVISION_BY_ZERO`, in embedded mode and on
+  those servers.
+- **`created_by` defaults to the actor in the library, for every create
+  shape and every backend.** `PreparePublicCreateRequest`, which
+  `Lifecycle.Create`, `BatchCreator` items and batch-apply create items all
+  prepare through, now sets an empty `Issue.CreatedBy` to the request's
+  `Actor`; an explicit value is kept. The CLI (`bd create`, the state event
+  create) and the three `bd serve` create handlers no longer stamp it
+  themselves. A library caller that left `CreatedBy` empty used to store
+  `""` locally and the actor over http; both now store the actor. The raw
+  `CreateIssue` seam is unchanged: import keeps the creator its rows carry,
+  and `bd swarm`, `bd todo`, `bd gate` and the create form still stamp
+  `currentActor()` there.
+- **On an http workspace, `bd update -s closed` does not record
+  `closed_by_session`.** The update wire cannot carry it, so the CLI drops
+  it rather than refusing the close; the status change, its close-policy
+  guards and every other field in the same update still apply. A one-line
+  notice on stderr names the drop, both for an explicit `--session` and for
+  the ambient `CLAUDE_SESSION_ID` every agent under Claude Code exports, so
+  it is never silent. `bd close` (and `bd close --session`) still records
+  the session over http: its wire operation carries it. Local backends are
+  unchanged.
+- **On an http workspace, `bd reopen` sends no Provenance label.** The
+  CLI's label is the fixed `bd: reopen <id>`, which the wire cannot carry;
+  the server records its own reopen entry for the same issue and actor, so
+  the reopen no longer refuses. Local backends still record the label.
+- **Routing settings are local-only on a remote backend.** For an http
+  workspace, `routing.mode`, `routing.contributor`, `routing.default`,
+  `routing.maintainer`, `contributor.auto_route` and
+  `contributor.planning_repo` come from local config (`config.yaml` or the
+  environment) only; the server's shared settings document is not read for
+  them, because routing targets are local filesystem paths that one shared
+  document cannot name for every client. `bd create`'s routing decision, `bd
+  migrate-personal` and the missing-id lookup fallback all read the same
+  local-only answer, and none pays a settings round trip for it. Local
+  backends still fall back to the database values.
+- **The molecule auto-close runs inside the step's close, and an error in
+  it fails the close.** `bd close` of a molecule's last step closes the
+  root in the same transaction (opt-in `AutoCloseMolecule`, so an
+  orchestrator that runs its own molecule lifecycle is not doubled), and it
+  replays on an idempotent re-close. The root close is unforced, so a root
+  a direct close would refuse stays open and is reported while the step's
+  close stands: one its close policy refuses (such as a live blocker), and
+  now also one a close guard refuses (a template, a pinned root, a root
+  another actor holds). Any other failure of the root close (such as a
+  storage error) now fails the step's close with it, where the CLI used to
+  close the root afterwards and only warn.
+  Two closes that finish a molecule's last steps at the same time no
+  longer leave its root open: one of them retries and closes it. The cost
+  is that concurrent closes of steps under one open auto-closing root now
+  serialize, whether or not either finishes the molecule: each conflict is
+  retried, and a close still conflicting when its retry budget runs out
+  fails with the serialization error. A batch close reports each root once,
+  on the first item under it that closed.
+- **`bd close --continue` claims the next step for real.** The advance is
+  the `MoleculeStepper` role on every route: the assignee is set and a step
+  another agent holds is skipped, never taken (the direct and http routes
+  used to flip the status only).
+- **`bd mol current`, `bd mol progress`, `bd ready --mol` and `bd mol show`
+  read through the library's molecule entries on every route**, so
+  membership is the parent-child edge everywhere (`bd mol show` no longer
+  adds children found only by an id pattern).
+- **Against a server without the molecule tokens, `bd close` says what it
+  did not do.** If the server does not advertise
+  `issues.close.autoCloseMolecule` (an older `bd serve`, or one whose
+  orchestrator owns the molecule lifecycle), the close goes out without the
+  auto-close request. When that leaves a molecule with every step closed and
+  its root open, a notice on stderr names the root, once per root in a batch
+  and again on a re-close; a step under an ordinary epic or an unfinished
+  molecule prints nothing. If it does not advertise
+  `issues.advanceMolecule`, or the handshake that would say so fails, `bd
+  close --continue` refuses before closing anything, so the step is never
+  left closed with the next step unclaimed.
+- Every `bd` invocation used to start two git subprocesses before doing any
+  work: `git rev-parse` to locate the repository and `git config user.name`
+  to resolve the actor. On Linux the repository is now located in-process
+  (ordinary repositories, linked worktrees, submodules, no repository),
+  producing exactly what `git rev-parse` printed and still running git for
+  anything it does not model (`GIT_DIR` and related overrides,
+  `core.worktree`/`core.bare`, repository extensions, includes, foreign
+  ownership subject to `safe.directory`). The `git config user.name` actor
+  fallback is resolved only when a command actually needs an actor, so
+  read-only commands such as `bd list` and `bd show` start no git process
+  for it. The actor's value and priority order are unchanged. In an embedded
+  workspace with `backup.enabled` unset, the per-command auto-backup check
+  ("is there a git remote?") is likewise answered from the git config files
+  when they are plain (no includes, no command-line config), instead of
+  running `git -C .beads rev-parse --git-common-dir` and `git remote`.
+
+- `bd create --graph` now stores a plan whose path from a node's parent to
+  the node runs through a `waits-for` edge; the graph-only preflight that
+  walked every ready-work edge used to refuse it. The plan now goes through
+  the same end gate as `bd dep add` and `bd batch apply`, which walks only
+  the scheduling edges (`blocks`, `conditional-blocks`, `parent-child`) and
+  stores this shape too. Avoid it in plans: once the `waits-for` spawner has
+  an open child, every issue in the shape, that child included, stays
+  blocked and none is ever ready. The same path through scheduling edges
+  alone is still refused.
+- `bd preflight --fix --json` no longer returns a `Version sync` fix result:
+  version updates must keep all release surfaces aligned via `scripts/update-versions.sh`.
+- Release-tag pushes require Go and reject batches containing different release versions.
+- On version drift the release-tag pre-push hook points at the checker's
+  remedies instead of prescribing `scripts/update-versions.sh <version>`, and
+  `scripts/check-versions.sh` and `bd preflight` list the three that work: with
+  `cmd/bd/version.go` already at the release version, that re-run rewrites only
+  the `.githooks` markers and `uv.lock` and leaves any other drifted file as it was.
+- **BREAKING (fail-closed): bd no longer migrates an existing database without
+  explicit consent** (Beads 1.2 release remediation). The 1.2.0/1.2.1 releases
+  applied migrations 54–65 at store open on ANY command — including pure reads
+  like `bd list` — with no prompt, and older binaries then refuse the migrated
+  database (schema-skew guard). A command that would apply pending
+  main-sequence migrations to an existing database at store open (in embedded
+  mode that includes reads) now refuses with guidance instead, and the refused
+  open performs ZERO writes (dolt_ignore seeding and clone-local migrations
+  included). Server-mode read commands open without running migrations, so
+  they keep reading at the current schema. `bd dolt commit` and `bd vc commit`
+  warn and commit at the current schema without migrating, so the dirty-table
+  recovery (commit, then `bd migrate schema`) still works on a database that
+  is both behind and dirty. Consent is any of: `bd migrate schema`, the verb
+  that names the migration (a preview flag withholds it); `--force` on
+  `bd migrate` or `bd migrate schema`; or `BD_ALLOW_MIGRATE=1` for scripts/CI
+  (`BD_ALLOW_REMOTE_MIGRATE=1` is honored as an alias). Bare `bd migrate`,
+  including `--update-repo-id`, `--inspect` and `--dry-run`, does not consent.
+  Fresh databases (`bd init`) still migrate to latest — creating a database is
+  consent for its schema, kept across the retry of an interrupted server
+  bootstrap — and the same creation principle covers a workspace the
+  invocation just cloned into existence (`bd init --remote`, `bd bootstrap`
+  sync), so the #4259 behind-remote flows keep their exact behavior. A
+  database already at this binary's latest version never consults the gate;
+  one left at v65 by 1.2.x or at v66 by 1.3.x still has migrations pending
+  under this release, so it asks once. The remote-backed case keeps all of the
+  #4259 remote-migrate gate's additional protections (smart gate, adopt
+  fast-forward, fork-skew analysis) unchanged. JSON consumers: the refusal
+  renders as a structured error whose `error` states the refusal and whose
+  `hint` is a non-runnable operator directive (neither names a migration
+  command or a consent variable), plus a `migrate_consent` object
+  (`current_version`, `required_version`, `pending`, `severity: "blocking"`,
+  `human_decision_required: true`, and `options`: `migrate` runs
+  `bd migrate schema`, or `bd migrate schema --global` under `--global`;
+  `keep` has no command).
+- **Shipped migrations are frozen by CI** (same remediation): the content hash
+  of every released up-migration (main 0001–0066, ignored 0001–0026, through
+  the 1.3.x releases) is pinned by `TestShippedMigrationsAreFrozen`. Any
+  amendment to a released migration must land as a new migration (0070+, or
+  ignored 0028+, as of this change) so installed schemas and freshly-migrated
+  ones cannot fork.
+- **BREAKING: the close guards now hold for every close operation, not only
+  `bd close`.** The template read-only guard, the pin guard and the assignee
+  authority fence (be-035) used to be a pre-read in `cmd/bd`, so a close
+  through `bd serve` (`POST /v0/beads/issues/{id}:close`), `issues:batchClose`,
+  a `close` item of `issues:batchApply`, or a library caller of
+  `issueops.Lifecycle.Close`, `BatchCloser` or `BatchApplier` closed a
+  template, a pinned issue, or a bead another actor holds that `bd close`
+  refused. They now live in the role, inside the close's own transaction, on
+  every backend: a template refuses with `*issueops.TemplateReadOnlyError` (no
+  bypass), and unless `Force` is set a pinned issue refuses with
+  `*issueops.PinnedError` and another actor's bead with
+  `*issueops.CloseNotAssigneeError` (matching `ErrNotOwner`). Over HTTP they
+  are `409` `template_read_only`, `issue_pinned` and `not_assignee` (the
+  holder in `assignee`, also on a batch-close outcome), and the client
+  rebuilds the same typed errors. `bd close` prints the same lines and exits
+  as before, and `bd close --if-revision`, which skipped the guards, now
+  applies them too. Two paths stay outside the guards. The raw storage
+  `CloseIssue`, which a `close` line of `bd batch` and the other closes
+  `cmd/bd` makes outside `bd close` use, runs neither the guards nor close
+  policy on dolt, embedded or proxied; over HTTP it now sends
+  `force`, so there it also stops applying close policy, and only a template
+  refuses. A status update into the done category (`bd update -s closed`, a
+  `PATCH` whose `status` is done, an `update` item of `issues:batchApply`)
+  answers to close policy only, as before, so it still closes a pinned issue
+  or another actor's bead. Migration: HTTP and library callers that close
+  pinned issues or beads another actor holds must send `force` (`Force` on the
+  request), or reclaim the bead first; the close operations never close a
+  template, forced or not (pour it instead).
+- **BREAKING (out-of-tree storage backends): a create without a priority now
+  arrives as priority 0 with `DefaultPriority` set.** `bd create` without
+  `--priority`, a `bd create --graph` node without `priority` and a
+  `bd create --file` template without a valid `### Priority` used to reach a
+  backend's `IssueLifecycle().Create`, `BatchCreator().CreateBatch` and
+  `BatchApplier().ApplyBatch` as priority 2. They now arrive as priority 0
+  with `issueops.CreateRequest.DefaultPriority` (or `BatchCreateItem` /
+  `CreateItem.DefaultPriority`) set, as does an HTTP create without
+  `priority` when `bd serve` fronts the backend. The fields are additive, so
+  such a backend compiles unchanged, but the shared preparation that applies
+  the default lives under `internal/`, so a backend that ignores the flag now
+  stores P0 (critical) for those `bd create` paths, and still stores P0 for
+  that HTTP create. Migration: store `issueops.DefaultCreatePriority` when
+  `DefaultPriority` is set, and refuse `DefaultPriority` with a non-zero
+  priority as `ErrValidation`; `conformance.RunRoleContracts` checks both
+  through `RunLifecycleCreateAppliesTheDefaultPriority`,
+  `RunBatchCreatorAppliesTheDefaultPriority` and
+  `RunBatchApplyAppliesTheDefaultPriority`.
+- **BREAKING: commands run outside a project no longer use the user's global
+  `~/.beads` workspace** (#4402). Upward discovery used to walk past the
+  repository boundary all the way to the home directory, and a `~/.beads`
+  holding a legacy `config.yaml` or a database counted as a workspace, so a
+  command like `bd remember` issued from the wrong directory wrote to the
+  global database with no warning. Discovery now passes over the home
+  directory's own `.beads` — and a redirect inside it — unless the home
+  directory itself is the repository root (a dotfiles repository). It also
+  stops at the home directory instead of climbing above it, except within a
+  repository that encloses the home directory, so a `.beads` up there
+  (`/home/.beads`, `/.beads`) is not adopted in place of `~/.beads`. The
+  `github.com/steveyegge/beads` package's `FindBeadsDir`, `FindDatabasePath`
+  and `FindAllDatabases` follow the same rules. `bd import` no longer falls
+  back to `~/.beads` either. Run from the home directory, or from a directory
+  under it outside any repository while `~/.beads` holds a workspace, it
+  refuses like the other commands there; anywhere else, a linked worktree
+  included, the workspace it sets up when it finds none is the working
+  directory's own `.beads`, never one above it, and a `BEADS_DIR` naming a
+  directory not set up yet gets that directory. `bd bootstrap` in a project
+  with no `metadata.json` of its own no longer inherits the database name and
+  server of `~/.beads/metadata.json`. A refused command says
+  `no beads database found`; when `~/.beads` holds a workspace (a database,
+  `metadata.json` or a redirect), that refusal and `bd where` name it when run
+  from the home directory or outside a repository. The home directory is the
+  account's, the one `bd init`'s home guard protects, so a test harness or
+  sandbox that points `HOME` at its own scratch workspace keeps using that
+  workspace. Hooks that run `bd prime` outside a project stop priming from
+  `~/.beads` unless they name it.
+  **Migration:** to keep using `~/.beads`, name it for each command that
+  should use it: `BEADS_DIR=~/.beads bd remember "..."`, or an alias such as
+  `alias bdg='BEADS_DIR=~/.beads bd'`. Do not export `BEADS_DIR` for this: an
+  exported `BEADS_DIR` overrides every project's own `.beads`.
+  `--db`/`BEADS_DB` naming `~/.beads` or a path inside it still select it
+  (one naming a directory under the home directory that does not exist yet
+  gets that directory, not `~/.beads`), and a project's own `.beads/redirect`
+  pointing at it keeps working.
+- **For a Dolt server on another machine, the legacy `BEADS_DOLT_PORT` no
+  longer overrides a configured port.** It replaced the port that
+  `config.yaml` `dolt.port`, the data directory's `listener.port` or
+  `metadata.json` `dolt_server_port` named, although since #5835 it does not
+  for a server on this machine, so an ambient value could send bd to the
+  wrong server. A padded value counted too. It now fills in only a port that
+  no setting names, and is read untrimmed, as for a local server.
+  `BEADS_DOLT_SERVER_PORT` still overrides a configured port.
+
+  **Compatibility:** a remote setup that exported `BEADS_DOLT_PORT` to send
+  bd away from a pinned port now connects to the pinned port instead, as a
+  local one has since 1.3.0. That includes a tool that sets only
+  `BEADS_DOLT_PORT` for a remote server, and a `listener.port` left in the
+  local data directory's `config.yaml`, which now outranks the variable too.
+  Switch to `BEADS_DOLT_SERVER_PORT`, or change or remove the pinned value.
+
+- bd no longer prints a value a cloned repository can set raw in its
+  remedies, hints, and the error lines printed beside them. These values are
+  the Dolt server's host, socket, user and database in `metadata.json`,
+  `sync.remote`, `dolt.host` and the routing repos in `config.yaml`, a routed
+  planning or target path, an issue's assignee, and the `formula` field of
+  a committed `.beads/formulas` file, which `bd cook --persist` uses as the
+  proto's ID, with the bond point IDs it prints beside it. Before, a carriage
+  return or terminal escape in one of them could erase bd's line and show
+  other text in its place. Such a value is now named escaped (Go-quoted,
+  with each control character spelled as an escape). Every message printed
+  through bd's error printers (`HandleError` and its family, `WarnError`,
+  cobra's `Error:` line) and every `bd doctor` check printed as text is
+  spelled so that a control character in it prints as an escape while bd's
+  own line breaks are kept. Warnings bd writes straight to stderr outside
+  those printers are not all covered. Several remedies also pasted a value
+  unquoted into the command they suggest: `bd bootstrap`'s `git ls-remote`
+  reproduce line, the socket-mode `dolt sql-server --socket` hint,
+  `bd doctor`'s `bd repo add`, `rm -rf`, stale `.legacy` hook `rm` and
+  `git push -u origin` fixes, the unreachable-server `nc`/`curl` check, the
+  `chmod` hints for `.beads`, a credentials file and a directory `bd init`
+  cannot write, `bd mol distill`'s `mkdir -p` hint, the corrupt-journal
+  `mv` recovery hint, the git-tracked secret refusal's `git rm --cached` and
+  `.gitignore` lines, the in-progress refusal's `bd mail <holder>`, the
+  embedded store's `bd federation add-peer` refusal and stored-peer
+  password warning (peer name, username and tier), and the
+  `bd ship`, `bd label add`, `bd mol wisp`, `bd cook --persist`'s
+  `bd mol pour`, `bd vc merge`,
+  `bd dolt remote add` (`bd init` and hooks), `bd dolt push --remote`,
+  `bd backup init` and `bd remember --key` hints. Each now takes the value as
+  one shell word, or, when no quoting passes it on unchanged or it starts
+  with `-`, a placeholder with the value named beside it. On Windows, the
+  GH#2118 cold-start refusal for a ref remote on a Dolt server bd does not
+  own printed `bd sql '<statement>'` in POSIX single quotes, which bd.exe
+  received as eight arguments and refused. It now names the
+  `CALL DOLT_REMOTE(...)` statement to run as `bd sql`'s one argument or in
+  a Dolt SQL shell: as it is, so it runs as printed, when the remote, URL
+  and ref each pass the remedy printer's shell quoting on POSIX and on
+  Windows (no `$`, backtick, quote, backslash, `%`, `!`, `&`, `|`, `<`,
+  `>`, `^`, `;`, `,`, `=` or control character, and no leading `-`), such
+  as an ordinary `git+https` or `git+ssh` URL, and otherwise escaped
+  (`\x22` for each `"`, `\x2c` for each `,`), as it does on POSIX when
+  single quotes cannot carry the statement. That refusal names the remote's
+  URL and ref Go-quoted and escaped too. All of
+  these go through one printer, `internal/remedy`.
+  An ordinary value and an ordinary message print as before, except that a
+  command now quotes a value it used to paste bare when the value holds
+  anything but ASCII letters, digits and `_ . / : + -`; that `bd doctor`'s
+  `bd repo add` and `bd init --prefix` fixes, the embedded store's
+  `bd federation add-peer` refusal and stored-peer password warning, the
+  reset-data `bd dolt push --force --remote` hint, and the `bd ship` and proxied
+  `bd backup init` hints print the command bare rather than in single
+  quotes, each value in it one shell word or a placeholder (as do
+  `bd create --repo`'s server-mode refusals, which now read
+  `Run: <command> there`, `bd migrate-personal`'s repo-sync refusal and
+  `bd remember`'s hints, none of them in backticks);
+  that a value named with `EscapedValue` where bd used `%q`, such as
+  the repo in `bd doctor`'s `routing.contributor`/`routing.maintainer`
+  message, spells `'`, `"`, `$`, `` ` ``, `%`, `!`, `&`, `|`, `<`, `>`, `^`,
+  `;`, `,`, `=` and curly quotes as escapes (`\x27`), and the command beside
+  it takes a placeholder for a value no quoting passes on unchanged, such as
+  one holding `'` on POSIX; that on Windows a command takes a placeholder
+  for a value holding `"`, `$`, `` ` ``, `%`, `!`, `&`, `|`, `<`, `>`, `^`,
+  `;`, `,`, `=` or a curly double quote, such as each `--var key=value` in
+  the `bd mol wisp` hint, or one that ends in a backslash or holds `\\`,
+  such as a UNC path; and that the `⚠` that starts the
+  `bd init` and `bd bootstrap` missing-database refusals and `bd init`'s
+  already-initialized refusals, and the `bd list` example in the latter, are
+  no longer colored.
+
 ### Fixed
+
+- **`bd doctor` no longer flags cross-repository dependencies as orphans,
+  and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
+  a bare target under another repository's prefix (`bd dep add bd-abc
+  gt-123`) without verifying it, but the Orphaned Dependencies check, its
+  `--fix` repair and the `--deep` Dependency Integrity check exempted only
+  `external:` refs, and `--deep` Parent Consistency exempted nothing. They now
+  leave such a target alone when its prefix differs from its source's and is
+  neither this database's `issue_prefix` nor in `allowed_prefixes`, and Parent
+  Consistency also skips `external:` parents; the checks count these edges as
+  "not verifiable here". A missing target under a held prefix is still an
+  orphan, and under `--deep` an edge whose source is missing is still broken.
+- **The aux row id re-key again skips tables with dolthub/dolt#11131
+  encoding drift instead of aborting the migration on every open** (#8372).
+  The Dolt 2.6 engine reports the drift as `malformed out-of-band adaptive
+  value`, which the drift check did not recognize, so a drifted store that
+  1.3.4 upgraded past with a warning failed to open. The re-key now treats
+  that text as drift too: it warns, records the table, and retries it on later
+  passes, as for the older engine's `invalid hash length` (#4380).
+- **Upgrading a clone whose local `wisps` table lacks `started_at` or
+  `no_history` no longer stops at schema v52** (#6080, reported by @dmcp718;
+  fix from #8099 by @kyoto-bonsai). Migrations 0023 and 0027 add those
+  columns to `wisps` only if the table exists when they run, and `wisps` is
+  local to each clone, so a clone that created it later from an older shape
+  never got them. Migration 0053 copies both columns into `issues` and failed
+  with `Error 1105 ... column "started_at" could not be found`, even with no
+  rig wisps. bd now adds the missing columns right before 0053 runs, so
+  stores stuck at v52 finish the upgrade on their next run. The migration
+  files and their recorded content hashes are unchanged.
+- **Proxied-server workspaces and `bd serve` refuse a database whose schema is
+  ahead of the binary**, as embedded and server mode already did. An older
+  `bd` that a newer `bd` had migrated past now stops with a schema-skew error
+  instead of reading and writing the newer schema. Override with
+  `BD_IGNORE_SCHEMA_SKEW=1` or `--ignore-schema-skew`. A `bd serve` that is
+  already running when the database is migrated keeps serving until it is
+  restarted (#8121, reported and first fixed by @csauer02-personal-user).
+- `npm install @beads/bd` no longer intermittently fails with
+  `tar: ... No such file or directory` after a successful download. Following
+  the GitHub release redirect, the postinstall script scheduled a delete of
+  the archive path and then downloaded to that same path, so the delete could
+  remove the finished archive before extraction (#7791).
+- **Migration 0059 (and its wisp twin, ignored migration 0015) no longer runs
+  for hours on clones with many wisp dependencies** (#6520). Their
+  `is_blocked` recompute probed the wisp dependency graph with correlated
+  subqueries over an unindexed copy; a clone with ~14k wisp dependencies did
+  not finish 0059 in two hours. The runner now executes both through a
+  hash-gated, equivalent set-based plan (under a second on a 1/8-scale graph
+  in the server-lane tests).
+  The migration files and the content hashes recorded for them are
+  unchanged.
+
+- `bd backup restore` refuses a local source that holds no Dolt backup (no
+  regular `manifest` file at its top level) before it touches the database.
+  A `--force` restore from an empty or wrong directory, including the default
+  `.beads/backup` that bd creates when it is missing, dropped the live
+  database before Dolt found nothing to restore (GH#7098, GH#5972). It also
+  refuses a source whose absolute path holds `%`, or outside Windows `#`, `?`
+  or `\`: Dolt reads such a path as a different directory, so a `--force`
+  restore from a real backup there dropped the database the same way. Move or
+  rename such a backup before restoring it. bd checks the source on its own
+  machine, and in plain server mode the Dolt server reads the path on its own
+  filesystem: against a server at a host other than a loopback address, which
+  bd cannot check, the restore is refused with a pointer to run it on the
+  server's machine. A server at a loopback address is taken to share bd's
+  filesystem, which a server in a container does not unless the backup is
+  mounted at the same path in both; there a `--force` restore from a backup
+  that only bd's machine holds can still drop the database.
+- With several stores open in one process, the `bd.db.pool_open`,
+  `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
+  of the stores open now, summed. Each store registered the gauges with its
+  own callback, and the OTel SDK keeps only the first callback of an
+  instrument, so the gauges reported the first store's pool forever, even
+  after it closed. With no store open (a short command closes its store
+  before the final export) they report the pools as they were at close.
+- The console trace and metric exporters (`OTEL_TRACES_EXPORTER=console`,
+  `OTEL_METRICS_EXPORTER=console`, legacy `BD_OTEL_STDOUT=true`) write to
+  stderr, as documented. They wrote to stdout, where their JSON mixed into
+  the command's own output and broke `--json` consumers.
+- `bd.storage.operation.duration`, `bd.ai.request.duration` and the
+  `bd.ai.duration_ms` span attribute record fractional milliseconds. They
+  were truncated to whole milliseconds, so a sub-millisecond storage call
+  recorded 0.
+
+- The `bd.storage.operations`, `bd.storage.operation.duration` and
+  `bd.storage.errors` metrics are now keyed by `db.operation` alone. The
+  counter also carried every request attribute of the call (issue ids,
+  actors, `bd.query` search text, commit messages, config keys), so it grew
+  one series per value until the SDK's 2000-set limit folded the rest into
+  `otel.metric.overflow`, and it sent that content to the metrics receiver.
+  The duration and error metrics never carried `db.operation`: 77 of the 125
+  storage operations recorded into one unlabeled series and the rest were
+  keyed by request values. Request attributes stay on the spans.
+  **Breaking for dashboards:** the old series are replaced. Queries keyed on
+  `bd_actor`, `bd_issue_id`, `bd_issue_type`, `bd_query`, `db_commit_msg`,
+  `bd_dep_*`, `bd_config_*`, `slot_*`, `bd_since` and the other request
+  labels on these three metrics lose those labels;
+  `bd_storage_operation_duration_ms` and `bd_storage_errors_total` gain
+  `db_operation`.
+
+- Opening a database where any wisp table (`wisps`, `wisp_comments`,
+  `wisp_dependencies`, ...) is tracked in Dolt history and holds uncommitted
+  rows no longer fails with "pending ignored schema migrations alter
+  pre-existing dirty tables" when a wisp schema migration is pending (#5816).
+  The wisp tables are dolt-ignored, so their rows are local to the clone and
+  never part of a commit: the migration now updates them in place and leaves
+  them uncommitted, and no wisp data is lost. When a pending wisp migration
+  would change committable data that already has uncommitted changes (it can
+  delete `child_counters` rows), bd still refuses, but now before any
+  migration runs and with the same message as the main migrations, so
+  `bd dolt commit` commits the working set and the next open migrates.
+  Diagnosis by @marcodelpin.
+- **Concurrent guarded deletes through `bd serve` have one winner.** A
+  `POST /v0/beads/issues:delete` carrying `expected_version`, which is what
+  `bd delete --if-revision` sends from a `bd connect` workspace, never took the
+  per-issue delete fence #7244 added: the fence lookup could not see through
+  `bd serve`'s per-request wrapper. N concurrent deletes of one issue with the
+  same token all answered 200 `deleted: 1` (every `bd delete --if-revision`
+  exited 0), and each landed its own `bd: delete` commit. Now exactly one
+  succeeds and the rest answer 404 `not_found`, which `bd delete --if-revision`
+  reports as exit 13 `precondition failed: issue no longer exists`, as the
+  proxied-server and shared-server routes already did. A guarded delete that
+  cannot find the fence is now refused instead of running without it (#7243).
+- `bd config set`, `bd config unset`, `bd repo add` and `bd repo remove` now
+  replace an existing `config.yaml` in one step (temp file in the same
+  directory, fsync, rename) instead of truncating and rewriting it in place.
+  A bd process reading the file mid-write, such as a command starting up or
+  `bd serve` resolving events-journal activation at startup, could see an
+  empty or partial file, which parses as "key absent" and resolves to the
+  key's default. On Linux and macOS a reader now sees the whole old file or
+  the whole new one. Windows does not let a file that another process holds
+  open be replaced, so there the write waits up to about two seconds for the
+  reader to close it and otherwise fails with the old file intact. A
+  symlinked `config.yaml` is written through to its target, the file keeps
+  its own permissions, and a read-only `config.yaml` is still refused. The
+  user-global `config.yaml` gets the same treatment.
+- `bd config get` for a config.yaml, git-config or user-global key no longer
+  opens the database just because one exists, so it answers from those files
+  while the Dolt server is down instead of failing the open (GH#5108). In
+  server mode a database is "present" from metadata.json alone, so these
+  store-free reads ran the full store path: it wrote
+  `.beads/.local_version`, could auto-migrate and auto-start a server, and
+  refused outright once the configured server was unreachable. Keys that
+  live in the database (`storage.backend`, …) still open the store, and
+  every other `config` verb keeps its routing.
+- The android_arm64 release, which npm `@beads/bd` installs on Termux, is
+  now built with cgo, so embedded Dolt works there: `bd init` no longer fails
+  with "embedded Dolt requires a CGO build" (#3538). The binary is
+  cross-compiled with the Android NDK r30 clang at API level 21 and linked
+  against Bionic with 16 KB-aligned segments; release builds check both.
+  Building that release target (`goreleaser --id bd-android-arm64`) now needs
+  a Linux x86_64 host; see RELEASING.md.
+
+- With `export.git-add` on, the pre-commit export now lands in commits made
+  with `git commit -- <paths>`, `-a`, `-i` or `-p`. It used to stage into
+  `.git/index`, whose lock the commit holds, so it was skipped with
+  "git index is locked". The hook now stages into the index git hands it in
+  `GIT_INDEX_FILE` when that names an index of the same repository, and for
+  `git commit -- <paths>` also into the index git keeps after the commit, so
+  the export is not left staged at its old content. It also decides whether
+  the commit touches `.beads` from that index, and in a linked worktree no
+  longer re-stages an export you removed with `git rm` (#4080).
+- **bd again reads `GT_ROOT` from a rig's `.beads/.env`** (#8117; also
+  shipped in 1.3.4). `gc rig add` writes the city root there, and the
+  `.beads/.env` allowlist from #7879 (also in 1.3.3) dropped it, printing
+  `beads: ignoring GT_ROOT from .beads/.env` on every command in a rig. That
+  notice made released gc misreport failed bd commands there, and bd run in a
+  rig without `GT_ROOT` exported stopped reading `$GT_ROOT/.beads/formulas`
+  and `$GT_ROOT/.beads/molecules.jsonl`. `GT_ROOT` is now allowed: bd reads from it
+  (`$GT_ROOT/.beads/formulas` is the last formula search path, and
+  `$GT_ROOT/.beads/molecules.jsonl` is template data), so it names no command
+  and no credential target, and a `GT_ROOT` taken from `.beads/.env` is never
+  a formula write target (see Security). Shell environment still wins over
+  the file.
+
+- `bd query` now matches non-ASCII values. Its lexer read the query one
+  byte at a time, so a quoted value such as `title="größe test"` reached the
+  filter re-encoded and silently matched nothing, and a bare one either
+  failed to lex (`title=größe`: `unexpected character '¶'`) or was mangled
+  (`label=fête`). The lexer now decodes UTF-8 and keeps values exactly as
+  typed (#7539).
+- `bd create --file` and other batch creates no longer fail with "issue
+  already exists" on an id bd generated itself. The batch chose every id
+  before it wrote any row, so two of its items could be handed the same short
+  hash id, and a generated id (hash or counter) could be the one a later item
+  of the same batch names explicitly. Generated hash ids also skip ids held in
+  the other storage plane. A wisp or `--no-history` create could be refused
+  because an imported or promoted wisp's row in the durable table already
+  held its id. On a proxied-server workspace the same id was instead written
+  into both tables (#5106).
+- **`bd doctor --fix` no longer backs up or deletes a database outside the
+  workspace.** Automatic integrity recovery and the repo fingerprint fix's
+  "Reinitialize database" choice acted on whatever path `metadata.json`
+  selected, so a `dolt_data_dir` or `database` pointing outside `.beads`, at
+  `.beads` itself, or through a symlink moved or deleted unrelated data. Both
+  now refuse such a path before the backup or the DELETE prompt, unless
+  `BEADS_DOLT_DATA_DIR` selects it; a symlinked `.beads` is still supported.
+  When `bd init` fails during recovery, the restore checks the location again
+  and, if it changed meanwhile, leaves the backup in place and names it
+  (#7889, #8070, from @Wenjix).
+- **`bd hooks install` no longer writes hooks through a symlinked hooks
+  directory.** When the selected hooks directory (`.git/hooks`, a
+  `core.hooksPath` directory, `.beads-hooks/` or `.beads/hooks/`) was itself a
+  symlink, install copied preexisting hooks into, and wrote bd sections over
+  hooks in, the link's target, then pointed `core.hooksPath` at it. Install
+  now refuses such a directory, dangling links included, before any of those
+  steps; a symlinked `.beads` workspace above it is still supported. Hook
+  migration likewise refuses to create a hook whose parent directory is a
+  symlink. `bd hooks uninstall` refuses a symlinked hooks directory before
+  editing hooks or resetting `core.hooksPath`, leaves symlinked hooks alone,
+  and restores a legacy `.backup` only when it is a regular file, so a
+  symlink or directory never becomes the hook (#7889, #8070, from @Wenjix).
+
+- **`bd delete --cascade` and `bd admin cleanup --cascade` now delete only
+  parent-child descendants** (GH#6301). The cascade used to follow every
+  dependency type, so deleting an issue also deleted whatever was
+  `discovered-from` it, blocked by one of its children, or `related` to it.
+  Now it deletes the named issues and their children at every depth; every
+  other dependent survives, loses its edges to the deleted set (a bead blocked
+  only by a deleted issue becomes ready), and is reported as orphaned, as with
+  `--force`. The `--dry-run` preview lists every id the cascade would delete and
+  every id it would orphan, and `--json` adds `would_delete_ids` and
+  `would_orphan_ids` to the preview and `deleted_ids` to a multi-id or cascade
+  deletion; `deleted` still names only the requested ids and `deleted_count`
+  counts every deleted row. Over HTTP, `issues:delete` answers with an optional
+  `deleted_ids` member, and the server announces the new cascade with the
+  build-level capability `issues.delete.containmentCascade`.
+  **Compatibility:** a server without that capability still deletes every
+  transitive dependent, so this bd refuses `--cascade` (a `--dry-run` preview
+  included) against it with an unsupported-capability error and sends nothing;
+  deletions without `--cascade` are unaffected. Upgrade the server first.
+
+- `bd compact` no longer silently changes row data when commit dates are out
+  of history order across the cutoff. When a recent-dated commit came before
+  an old-dated one in history (a host clock that jumped back), the squashed
+  base already held the recent commit, and replaying it again could undo the
+  later old commit's edit while reporting "Compacted". Compact now refuses
+  such a history up front, names both commits and their dates, and changes
+  nothing; `--force` does not override the refusal. The squashed base now
+  also ends at the last old commit in history rather than the newest-dated
+  one, so an old window whose dates are shuffled no longer loses its final
+  edits. As a general net, compact now compares the replayed history's
+  committed data with main before swapping it in and aborts, leaving main
+  untouched, on any difference (#6645, reported by @bee-ghosttrack).
+- GitHub sync no longer matches a pulled issue to a bead linked to another
+  repository's issue with the same number. Pulling issue 1313 from a second
+  repository reported "0 created, 1 updated" and overwrote the bead linked to
+  the first repository's issue 1313; push, conflict detection and selective
+  pull likewise read another repository's link as the configured
+  repository's issue. Issue URLs now count only when they name the configured
+  host and repository, by its configured owner/repo or by another name GitHub
+  resolves to it (its current name, or a former name beads are still linked
+  under), so a renamed or transferred repository keeps syncing its beads
+  whether the config names its old name or its new one. `--dry-run` push
+  reports beads linked elsewhere as skipped, and `bd github pull <bead-id>`
+  says their link is not an issue the tracker can address (#7781, reported
+  and first fixed by @NahumLitvin in #7794).
+- GitHub sync no longer narrows its scope when GitHub does not answer a
+  lookup of the repository's names (follow-up to #8068). `bd github sync`,
+  `push` and `pull` read the configured repository, and each other name a
+  bead links under, to learn the names the repository goes by. When one of
+  those lookups failed with anything but a 404 (a 5xx, a dropped connection,
+  a rate limit, a refused token), the run went on without the answer, so
+  beads linked under the repository's other names could count as another
+  repository's: push and conflict detection skipped them without a warning
+  while `github.last_sync` moved past their local edits, and once the lookup
+  worked again a later run could pull a remote edit over an unpushed one, or
+  push a stale bead over a remote edit, with no conflict. v1.3.3, v1.3.4 and
+  v1.4.0-rc.1 work this way (the 1.3 releases carry #8068 through its
+  backport, #8083). Such a failure now stops the command with an error that
+  names the repository and says what to do, as does a failure to list the
+  local beads.
+- `bd compact` no longer discards writes that reach `main` while it runs. It
+  finished by hard-resetting `main` onto the rebuilt history, which dropped
+  changes in `main`'s working set that no Dolt commit held yet (a batch under
+  batched or disabled auto-commit, or a write between its SQL commit and its
+  Dolt commit) and any commit that landed on `main` during the rebuild, after
+  their writers had been told they succeeded. It now moves `main` with a soft
+  reset: working-set changes stay pending, and a commit that landed during the
+  rebuild is kept in one follow-up commit
+  (`compact: commit changes that reached main during compaction`), without its
+  own hash, message or author; changes already staged when `bd compact` started
+  join that commit. The check that the replay reproduces `main`'s data (#6645)
+  compares it with `main` as `bd compact` read it, so a write that lands
+  meanwhile is kept, not refused as a divergent replay. If the follow-up
+  commit fails, `bd compact` stops before garbage collection with the changes
+  staged on `main`, for `bd dolt commit`. The merge-settle path is unchanged.
+  See
+  [Writes that reach `main` while `bd compact` runs](docs/architecture/dolt.md#maintenance--bd-prune-and-bd-purge).
+- `bd flatten` no longer discards writes that reach `main` while it runs, or
+  drops the foreign keys of the clone-local (`dolt_ignored`) tables, `events`
+  and the `wisp_*` tables (reported and first fixed by @ckumar1 in #6772). It
+  finished by hard-resetting `main` onto the flattened branch. That replaced
+  `main`'s working set, the only place those foreign keys live, along with
+  any changes no Dolt commit held yet, and dropped any commit that landed on
+  `main` during the flatten. It now moves `main` with a soft reset: the
+  foreign keys stay, working-set changes stay pending, and a commit that
+  landed during the flatten, with any changes already staged, is kept in one
+  follow-up commit (`flatten: commit changes that reached main during flatten`),
+  without its own hash or message. If checking for or making that commit
+  fails, `bd flatten` stops before pruning and garbage collection, says that
+  `main` already moved, and leaves the changes staged, for `bd dolt commit`.
+  A failed or interrupted `bd flatten` now tries, within 30 seconds, to delete
+  its temporary `flatten-tmp` branch so the next run is not blocked; if that
+  cleanup fails, the error names the branch, and the next run's error says
+  how to delete it. A foreign key an older release already dropped stays
+  dropped; in server mode, `bd doctor --fix` re-adds it. See
+  [Writes that reach `main` while `bd flatten` runs](docs/architecture/dolt.md#maintenance--bd-prune-and-bd-purge).
+- A clone that adopts the 1.3.0 `events` flip (migration 0062) by
+  `bd dolt pull` or `bd bootstrap`, or clones after it, no longer starts with
+  an empty `events` audit table. Only the migrating clone kept its rows. The
+  first open now restores the missing events once from the clone's own
+  pre-upgrade history: it adds only the rows the live table lacks (a row
+  history holds twice is restored up to twice), keeps rows already present
+  and their ids, skips and counts events of deleted or renamed issues, and
+  resumes an interrupted restore without duplicates. History it cannot
+  read (a missing chunk, schema-encoding drift) never blocks an open: it
+  warns that the audit history is incomplete and carries on, and a shallow
+  clone that ends at the upgrade has nothing to restore. A cancelled,
+  transient or live-table failure leaves the restore to retry on the next
+  open. Every clone pays the check once, including the clone that ran 0062
+  itself, where nothing is restored. The restore reads the history before
+  each drop commit a page of rows at a time and writes in batches, so the
+  cost grows with the number of pre-upgrade events and drop commits, never
+  per issue. In embedded mode, 15,000 events over 3,000 issues take about
+  1.6 seconds to check on the migrating clone, and about 8 seconds to
+  restore on an adopting one, mostly writing. A shared server holds its
+  migration lock for that long. It makes no Dolt commit, and the restored
+  rows stay clone-local.
+  [Upgrading](docs/getting-started/upgrading.md) gives a manual recipe for
+  v1.3.4 and earlier, and how to retry a restore that skipped history
+  (#7039).
+- Upgrading an older database no longer rewrites issue and wisp `updated_at`
+  values with the time of the upgrade. Schema migrations 0035, 0046, 0047 and
+  0053 and ignored migration 0007 update rows without assigning `updated_at`,
+  so its `ON UPDATE CURRENT_TIMESTAMP` stamped every row they touched (every
+  blocked issue on a 1.0.x upgrade, for example). Migration 0041 and ignored
+  migrations 0003 and 0011 stamped rows they only join: the engine applies
+  `ON UPDATE` to every table a multi-table UPDATE joins, so 0041's dependency
+  split stamped every issue and wisp a dependency points at. Their SQL is
+  frozen, so bd now records the affected rows' `updated_at` before each of
+  these steps and writes it back on the rows the step rewrote before the step
+  is recorded and committed; the pre-0047/0053 repair that splits legacy wisp
+  dependencies no longer joins the tables it would stamp (#5981). An edit
+  another process makes during the step to an issue the step does not rewrite
+  keeps its own time. Values already stamped by an earlier upgrade are not
+  repaired. The check lists each table's columns with `SHOW TABLES` and
+  `SHOW COLUMNS` rather than `INFORMATION_SCHEMA`, which Dolt answers by
+  scanning every database on the server, so on a shared server it adds little
+  to the time other bd commands wait on the migration lock.
+- `bd init` against a Dolt sql-server whose sessions start with
+  automatic transaction commits on (`dolt_transaction_commit`) no longer
+  fails on a fresh database with `migration 0040_ignored_tables_also_nonlocal_tables.up.sql:
+  ... nothing to commit`. The migration pass now turns the setting off for
+  its own session and restores it on return. The same error at migration
+  0028, reported on bd 1.0.4, was fixed in v1.0.5 (#4470).
+- A long-lived proxied-server or external-server connection pool, such as
+  the one an embedder's unit-of-work provider keeps, now survives its local
+  proxy exiting on idle. Each new connection looks the proxy up again,
+  adopting a live one or starting a replacement, instead of dialing the
+  address chosen when the pool was opened, which a replacement proxy may no
+  longer use; until now every later query failed with `invalid connection`
+  until the process restarted. A connection whose lookup fails reports
+  `uow: rediscover proxy endpoint: <cause>` (#7295; builds on #7998 by
+  @vishnujayvel).
+- `bd dolt push <remote>` and `bd dolt pull <remote>` now push to and pull
+  from the named remote. bd ignored the name, so `bd dolt push 1st` pushed to
+  the default remote and reported "Push complete."; a name that differs from
+  `--remote`, an empty name, or a second argument is now an error (#3720,
+  reported by @bryanhirsch).
+- `bd dolt remote add` now registers a matching remote that exists only in
+  the served database's on-disk state (`.dolt/repo_state.json`) on the
+  server, instead of reporting success while SQL `dolt_remotes` stayed
+  empty. A sql-server resolves push, pull and fetch through its in-memory
+  remotes table and re-reads the state file only when it loads the
+  database, so a remote recorded only on disk was invisible to every SQL
+  operation while the add — the documented remedy — silently did nothing
+  (GH#2118). The add now writes the remote's recorded URL (the spelling a
+  server restart would load) and git ref, asks nothing when the URLs match,
+  and still asks before replacing a differing one. A remote recorded with
+  parameters an add over SQL cannot set (the dolt CLI's `aws-*` and `oss-*`
+  options) is refused instead, with the advice to restart the Dolt server,
+  because the add would erase them.
+- `bd epic close-eligible`, molecule progress and last-activity reads, and
+  `bd repo remove` now report a read that fails part-way through its result
+  set instead of acting on the rows read before the failure. A dropped
+  connection mid-read could mark an epic with open children eligible to
+  close, undercount molecule progress, or make `bd repo remove` report
+  success while deleting nothing.
+
+- `bd compact` no longer rewrites the preserved window's history with the
+  replay's timestamps. The cherry-pick replay stamped each preserved commit
+  with the time of the replay and the SQL session's identity, so after a
+  compaction every timestamp recorded before it (a tracker's last_sync, an
+  AS OF read) resolved to the wrong commit, and dolt_log showed the session
+  user as the committer of every preserved change. The replay now keeps
+  each preserved commit's original committer, author and dates, dates the
+  squashed base as the newest squashed commit, and checks the rebuilt
+  history before main moves onto it. A timestamp at or after the newest
+  squashed commit resolves as it did before the compaction; an earlier one
+  still resolves to the initial commit, as the history it named is gone
+  (#7294).
+- `bd migrate-personal` no longer leaves an issue in both databases when
+  someone else's bead in the project database depends on it. The move's
+  delete from the project database refuses such an issue, but it ran only
+  after the copy into the planning repo had committed, so the command
+  exited 1 with the issue in both places. The move now runs that delete as
+  a dry run before the prompt and refuses with nothing moved, naming the
+  issue, its dependents and the remedy (`bd dep remove`).
+- On a server-mode (Dolt sql-server) workspace, an unforced dry-run delete
+  (`DeleteIssues` with `dryRun`) now answers as the real delete does when
+  the request names a durable issue together with its ephemeral or
+  no-history children. The store deletes a request's wisps on their own
+  before it checks the rest for dependents, and a dry run, which deletes
+  nothing, counted those children as dependents left outside the request
+  and refused. The embedded store was already right.
+- A server-mode open from a `dolt.Config` that sets only `Path` (no
+  `BeadsDir`), such as the public `beads.Open`, now runs the project-identity
+  check against the `.beads` directory above `Path`, and refuses a database
+  whose `_project_id` differs from that workspace's `metadata.json` (#5559).
+  It used to skip the check and connect to a foreign project's database.
+- The GLOBAL PROJECT IDENTITY MISMATCH refusal of a `beads_global` open now
+  prints the `metadata.json` and database project IDs each on its own
+  labeled line. It used to print the database's ID as the `metadata.json`
+  one, `%!s(MISSING)` for the database, and the `metadata.json` ID unlabeled
+  at the end.
+- `bd github sync --push-only` and `bd github push` now create a locally
+  closed bead as a CLOSED GitHub issue (Fixes #5486). GitHub's create-issue
+  endpoint cannot set state, so a closed bead pushed for the first time landed
+  OPEN while bd cached the closed state's push hash, making every later run
+  skip the issue as already in sync with no fetch, no error, and no exit-code
+  signal — the drift was only visible from `gh issue list --state open`. bd now
+  follows the create with a close PATCH, so a failed close is reported as a
+  warning and retried on the next sync instead of being cached as in sync. The
+  push hash format is versioned, so the first sync after upgrading re-checks
+  each linked issue once (one GET per issue, the same one-time cost as a fresh
+  clone or Dolt server restart) and closes any issue an earlier build left
+  open.
+- A tracker push (`bd github push`, `bd github sync --push-only`) no longer
+  skips an issue that was changed back to the content of its last push after a
+  pull imported a remote edit of it, or found the issue already equal to the
+  remote. The pull left the stored push hash describing the last push, so the
+  push treated the revert as already sent and the remote kept the pulled edit.
+  A pull now records the pulled content's hash for each issue it updates,
+  creates or finds equal. After a GitHub pull (`bd github pull`,
+  `bd github sync`), the next push of an unchanged pulled issue makes no
+  GitHub call, so bd no longer re-sends normalized fields over remote content
+  it cannot represent: it no longer adds `type::task` or `priority::medium`
+  labels, and no longer replaces an unmapped `priority::urgent`.
+- A GitHub pull (`bd github pull`, `bd github sync`) now removes the plain
+  labels of a local issue when the GitHub issue has none left. It used to keep
+  them, so a later push of the issue put them back on GitHub. A label added or
+  removed locally since the last push or pull of the issue survives a pull
+  that finds GitHub's labels unchanged since then, even when GitHub changed
+  the title, body or state, and the next push sends it. A pull used to undo
+  such an edit when the GitHub issue had plain labels. When GitHub's labels
+  changed too, the pull takes GitHub's labels.
+- `bd dolt pull --strategy ours|theirs`, `bd vc merge --strategy`, and pulls
+  whose conflicts bd auto-resolves or whose foreign-key violations it repairs
+  now commit the tables that merged cleanly alongside them. Previously the
+  merge commit kept the local copy of those tables, so a push reverted the
+  other clone's change (for example its labels), and the merged copy was left
+  uncommitted (#7811).
+- `bd dep tree` no longer drops a diamond's second edge (#5282). An issue
+  reached by two paths is still expanded once, under the first path, but each
+  later path now lists it as `(shown above)` with its edge type, so a direct
+  blocker that is also reachable through another issue stays visible. In
+  `--json` and on `GET /v0/beads/dependencies/tree` those rows carry
+  `"deduped": true`; drop them to get each issue once. They count toward
+  `--max-rows` / `BEADS_MAX_ROWS`.
+- `bd list --watch` and `bd show --watch` now wait a full poll interval after
+  each refresh, and `bd list --watch --parent` reads its tree in one
+  transaction, so other bd commands on an embedded workspace no longer stall
+  behind a large watched tree (#3415).
+- `bd ready` no longer hides an open issue whose `is_blocked` flag is stale
+  while it has no open blocking dependency (#3268): the ready query now
+  trusts the flag only for an issue that is the source of a `blocks`,
+  `parent-child`, `conditional-blocks` or `waits-for` edge, so the direct and
+  domain stacks, wisps included, list it again. When nothing is ready,
+  `bd ready` says "all issues have blocking dependencies" only if `bd blocked`
+  lists an issue the listing would otherwise show, and says nothing is
+  blocked only when that holds for its filters; otherwise it points at
+  `bd blocked`, `bd list`, `bd doctor` and `bd recompute-blocked`. An empty
+  `--offset` page (`--proxied-server`) says only that the offset is past the
+  last ready issue.
+- The `### Dependencies` (or `### Deps`) section of a `bd create --file`
+  batch now reads its entries the way `bd create --deps` does (#7508).
+  `depends-on:<id>` and `blocked-by:<id>` now block: they used to be stored
+  as non-blocking literal types, so the new issue stayed in `bd ready`.
+  `blocks:<id>` now means `<id>` depends on the new issue, which used to be
+  the other way round; a file that meant "blocked by" should list the bare
+  id. A type `--deps` refuses (a misspelling or a custom type) now refuses
+  the whole file and lists the accepted types; `bd link` still writes custom
+  types. Repeating one edge writes it once. Edges an earlier batch stored
+  under the literal `depends-on` or `blocked-by` type are left as they are:
+  `bd dep remove` plus `bd dep add` replaces one.
+
+- `bd dep add` and `bd dep remove` now commit the `is_blocked` change a
+  blocking edge makes in the same Dolt commit as the edge, and so do `bd batch`
+  dep lines and the other dependency writes (the store's `AddDependency` /
+  `RemoveDependency`, explicit transactions, the batch applier's edges).
+  Before, with `dolt.auto-commit` on, the flag stayed in the working set: the
+  committed history (and so a push, a peer's pull or a backup) showed the bead
+  unblocked, and `bd recompute-blocked` refused with "needs a clean working
+  set" until some later write swept it up. A wisp-sourced edge that blocks or
+  unblocks a durable child now commits that child's flag too, and so does
+  closing, reopening or deleting a wisp that a durable issue depends on (a
+  delete also commits the removal of the durable edge that pointed at the
+  wisp), and creating a wisp under a durable parent that a `waits-for` edge
+  watches. An edge that changes no `is_blocked` still commits only the
+  dependency, so it cannot sweep someone else's pending issue edit (#6647).
+- `bd -C <dir>` (or `BEADS_DIR`) naming a beads project outside any git
+  repository, run from inside one, no longer adopts the caller's repository
+  root, role or git remote. The project is now rooted at its own directory
+  and treated as external, as it already was when run from outside any
+  repository; git-backed operations against it fail with git's own "not a
+  git repository" error instead of acting on the caller's repository
+  (GH#5700).
+- `bd gitlab pull` no longer overwrites a bead linked to another GitLab
+  project's issue with the same number, or puts that issue's dependency
+  links on it. Issue IIDs are only unique within a project, but when the
+  exact `external_ref` lookup missed, a pull matched local beads and link
+  endpoints by IID alone, so pulling project B's issue 7 into a database
+  holding project A's issue 7 updated (and relinked) project A's bead. A
+  bead a pull created is now matched by the project ID and IID it records
+  as its `source_system`, which a project rename or transfer leaves alone,
+  and so is a dependency link to it. Other beads are matched by the host,
+  project path and IID in their ref, so after a rename or transfer the next
+  pull imports a new bead for the issue of a bead that was created locally
+  and pushed, and likewise for a legacy `gitlab:N` bead when
+  `gitlab.project_id` is numeric and `gitlab.project_path` is unset. One
+  pull never writes two issues to one bead. A bead that the old IID match
+  relinked still records the project it was created for: a pull that
+  fetches anything from the project its ref now names leaves it to that
+  issue, while a pull that fetches only the original project gives the bead
+  back to the original issue. Group pulls now read each issue's links from
+  its own project. GitLab links are created in the configured project
+  (`gitlab.project_id`, or `gitlab.default_project_id` in group mode) by
+  IID, so `bd gitlab sync` and `bd gitlab push` now push a dependency as a
+  link only when both of its issues are in that project, and report the
+  rest in one warning instead of linking that project's unrelated issues
+  with the same IIDs (#7795, reported by @NahumLitvin).
+- Incremental tracker syncs (`bd github sync`, `bd gitlab sync`, `bd linear
+  sync`, `bd jira sync` and the other trackers) now fetch remote issues
+  updated up to five minutes before the stored `last_sync`, so an issue
+  written on the tracker just before a sync finished is imported on the next
+  sync instead of being missed until someone edits it again (#6806). A
+  remote copy only that wider window returns leaves the local issue alone
+  when it is older than the local issue, and on GitHub, GitLab and Linear
+  also when it only echoes what the previous sync pushed. A local issue
+  linked after the cursor is still hydrated from the overlapped fetch instead
+  of letting the next push overwrite the remote with a stub.
+- `bd linear sync` no longer updates a Linear issue again on every sync when
+  `linear.state_map` maps its status to a workflow state by name (for example
+  `linear.state_map.blocked` to a "Blocked" state of type started). The push
+  compared the issue's state the way a pull reads it back, by state type, so
+  such an issue never matched the state the push had just set.
+- `bd ado sync` no longer warns "Failed to resolve dependency" and counts
+  a skipped issue for each link to a work item the pull did not import,
+  such as one in another project. The dependency pass skips such a link
+  quietly when its endpoint is an ID, but an endpoint named by URL reached
+  the database's not-found error and was reported as a failure. A lookup
+  that fails for another reason is still reported.
+- **`bd dolt push`, `bd dolt pull`, `bd sync` and auto-push no longer move
+  a stale copy of the database for a server on `127.0.0.1` that does not
+  serve it.** For a plain TCP Dolt server on `127.0.0.1` whose port is
+  pinned by `dolt_server_port`, `dolt.port` or external mode (no port
+  variable set), bd ran the dolt CLI in `.beads/dolt/<database>` whenever
+  a Dolt database was there, such as the database from when bd ran the
+  workspace's server or a clone `bd init` left. When the server bd dials
+  serves another data directory (a container, another checkout), nothing
+  holds that copy, so the dolt CLI pushed it: "Push complete." was printed
+  without the server's commits, `--force` replaced the remote's branch with
+  the copy's, and a pull merged into the copy. The copy's remotes also
+  counted as the server's, so `bd dolt remote add` reported the remote as
+  added while the server still listed none. bd now takes that directory as
+  the server's data only by the dolt CLI's own test: a dolt process holds
+  the database's lock, and the first `sql-server.info` dolt keeps for it
+  (in the database's `.dolt`, else in its parent's) names the dialed port
+  and a live process. A copy of `.beads/dolt` taken while a server ran
+  carries that server's `sql-server.info` but not its lock, so it counts
+  as a copy. Otherwise the transfers run on the server (`CALL DOLT_PUSH`,
+  `CALL DOLT_PULL`, `CALL DOLT_FETCH`), the copy's remotes are reported as
+  the copy's, and `bd dolt remote add` adds the remote on the server. bd's
+  own server, and a server you run over `.beads/dolt` on `127.0.0.1`,
+  serve that directory and keep the dolt CLI route, including the recovery
+  when a freshly started server does not yet list a remote recorded on
+  disk (GH#2118). The test reads no process list, so it holds where `ps`
+  cannot run (GH#7214).
+- When the Dolt server lists no remote while a Dolt database in
+  `.beads/dolt/<database>` records one, `bd dolt push`, `bd dolt pull` and
+  `bd sync` no longer say that database "is not the server's data". The
+  server may serve it (a server you run over `.beads/dolt` on a unix
+  socket, `::1` or TLS); the error now says bd cannot confirm that it does.
+  The exit status and the `bd dolt remote add` remedy are unchanged.
+- **`bd dolt remote reset-data` no longer leaves a git-backed remote without
+  its Dolt data when the workspace pushes through a Dolt sql-server.** It
+  deleted the remote's Dolt data refs and then force-pushed through the
+  server, but a running sql-server keeps its view of every git remote it has
+  used. The push then hung until the 5-minute read timeout (or, with nothing
+  committed since the last push, reported success having written nothing),
+  and the `bd dolt push --force --remote <name>` re-run it named failed the
+  same way until the server restarted. This hit bd's own auto-started server
+  as well as servers bd does not run. Through a server, reset-data now
+  pushes the fresh store to a temporary ref of its own, moves the remote's
+  data ref to it in one update (only from the value it read first), and
+  removes the temporary ref and remote. Until that move the remote keeps its
+  data; a failure before it says the remote's Dolt data is unchanged and
+  names `bd dolt remote reset-data <name> --yes`, and, if the temporary ref
+  could not be deleted, the `git push <url> :<ref>` that deletes it, to run
+  in a clone of that remote. A remote an earlier reset left without its data
+  is rebuilt the same way. The server still holds its pre-reset view of the
+  remote after the move (a later push through it could write a manifest
+  naming table files the remote does not hold, or report a branch as up to
+  date that the remote lacks), so reset-data then restarts bd's own server
+  on the same port (in shared-server mode, the shared server); like
+  `bd dolt stop`, the restart commits any uncommitted changes in every
+  database that server serves and briefly interrupts them, which, for the
+  shared server, the report and the `--json` output's `warning` say. If
+  that restart fails, reset-data reports the reset and then exits non-zero
+  with the cause, saying to start the server with `bd dolt start` when bd
+  sees it stopped and to restart it otherwise, and the `--json` output adds
+  `server_restart_error`. For a server bd does not run, or bd's own where
+  the process list cannot be read (GH#7214), it reports the reset and then
+  exits non-zero, so that nothing pushes or pulls through that server
+  first, saying to restart it before the next push or pull of the remote
+  and not to run reset-data again, and the `--json` output sets
+  `server_restart_required`. It does the same for bd's own server while
+  auto-start is off (`dolt.auto-start: false`, `BEADS_DOLT_AUTO_START=0`)
+  or, outside shared-server mode, while `BEADS_DOLT_SERVER_MODE=1` or
+  `dolt_server_port` declares it externally managed, and names the
+  setting: bd also counts a server you run over `.beads/dolt` as its own
+  once it has adopted it (#6123), and these settings are how you tell bd
+  not to stop it. git can report a failed
+  move that the remote applied (Ctrl-C, a dropped connection), so after a
+  failed move reset-data reads the data ref back: a move that landed
+  completes the reset, with a warning, and one that did not says the
+  remote's Dolt data is unchanged, or that another client changed the ref
+  first. If the ref cannot be read back, reset-data says the outcome is
+  unknown, never that the data is unchanged, and exits non-zero after
+  restarting bd's own server, or saying to restart any other, as after a
+  reset. Embedded mode keeps deleting the refs and force-pushing. Cost: Dolt
+  keeps a cache repository per git remote and ref, so each reset through a
+  server leaves one more copy of the fresh store under the database's
+  `.dolt/git-remote-cache` (counted in the database size `bd gc` and backups
+  report). Until the next sync the server's `remotes/<name>/main` tracking
+  ref still names the pre-reset commit, and until the next push the remote's
+  `refs/heads/__dolt_remote_info__` names the temporary ref. Through a
+  server, the `--json` output's `deleted_refs` lists only the replaced data
+  ref. On every route, `--json` stdout is now the JSON report alone: the
+  progress lines printed before it are left out.
+- **`bd dolt remote reset-data` works for a git remote added in scp form**
+  (`bd dolt remote add origin git@github.com:org/repo.git`). Dolt stores
+  that remote as `git+ssh://git@github.com/./org/repo.git`, and reset-data
+  ran git with `ssh://git@github.com/./org/repo.git`, a path from the
+  server's root, which GitHub refuses ("./org/repo is not a valid repository
+  name"), so it failed before changing anything. It now gives git the scp
+  form, as Dolt does.
+- **`bd dolt remote reset-data` no longer deletes a git checkout used as a
+  `file://` remote.** Dolt makes a file URL a git remote only when it ends
+  in `.git`, and stores that one as `git+file://`, so any other `file://`
+  remote is a Dolt file store, even in a git repository, where Dolt writes
+  its files among the repository's. Once Dolt had pushed into a checkout,
+  reset-data took the directory for a file store and cleared it, `.git` and
+  every working file included, then reported the reset. A bare repository
+  it took for a git-backed remote: it deleted the Dolt data refs it found
+  there (none, unless a `git+file://` remote of another clone used the same
+  directory), force-pushed, and reported a reset that left every old table
+  file in place. reset-data now refuses a `file://` remote whose directory
+  is a git repository, bare or a checkout, saying to replace the remote with
+  a fresh URL, as for a cloud remote.
+- **`bd doctor --fix` no longer imports the tracked `issues.jsonl` over a
+  server database.** Its Database repair took a missing `.beads/dolt`
+  directory for a missing database. A server-mode workspace has no such
+  directory in a fresh clone or on another machine. So whenever `bd doctor`
+  reported a Database problem it repairs there, such as a database last
+  stamped by another bd version, the repair opened the server's existing
+  database and imported `.beads/issues.jsonl` into it. That rewrote the
+  database's rows to the tracked copy and recreated issues deleted since.
+  The repair now imports only into a database its own open created or one
+  with no issues. A database already on the server with issues gets the
+  local directory and its metadata update, and nothing is imported. The
+  Schema Compatibility repair runs the same code and is fixed too.
+
+- **Pasted hints no longer run a store-read issue ID.** `bd find-duplicates`'
+  `Compare:` line, `bd mol ready --gated`'s `bd assign` line, `bd show`'s
+  comments-tail pointer, the `bd show` and `bd dep list` raw-edge pointers,
+  `bd dep add`'s refusal of a `<type>:<id>` target, and `bd close`'s note on
+  a molecule a `bd serve` that does not advertise molecule auto-close left
+  complete pasted an issue ID read from the store raw into the command they
+  suggest, so a pulled ID holding shell syntax ran when the line was pasted.
+  Each ID now goes in as one shell word (an ID bd mints prints as before), or
+  as a placeholder named escaped after the command, and the lines beside
+  those commands name it escaped when it is not a plain word, as do the
+  partial-ID notice every command that resolves an ID prefix prints and
+  `bd close --force`'s open-children warning, so no such ID can redraw a
+  line above a hint. `bd find-duplicates --method ai` spells the model's
+  reason for a pair as it spells the titles beside it, so a carriage return
+  or terminal escape in the reason no longer reaches the terminal raw above
+  the `Compare:` line. `bd doctor --agent` shows a fix command that holds a
+  backtick in a code span fenced by a longer, even run of backticks, so the
+  command's own backtick no longer closes the span. bd's own advice while
+  the fix gate withholds `bd doctor --fix` now names that command in single
+  quotes, in `bd doctor`'s schema fix-gate line too: main quoted it in
+  backticks, which broke the advice's single-backtick span apart, and
+  pasting that span into sh or bash ran `bd doctor --fix`.
+- **`bd export` and auto-export no longer write JSONL with relations silently
+  dropped** (GH#6870). When a label, dependency, comment or count read fails,
+  `bd export` now exits non-zero and leaves the output file untouched, and
+  auto-export keeps the previous JSONL with a warning and retries on the next
+  write command. Previously both wrote records with those fields empty.
+- **`bd setup` keeps a `.beads/recipes.toml` recipe's files inside the
+  directory it runs in.** For a recipe from the workspace's
+  `.beads/recipes.toml` (a custom recipe, or one that overrides `windsurf`,
+  `cody`, `kilocode`, `kiro` or `copilot`), `bd setup <recipe>` checked, wrote
+  and, with `--remove`, deleted each `path` or `paths` entry as written,
+  wherever it led, creating its directory or dropping it once empty. It now
+  refuses such a recipe, touching none of its files or directories, when a
+  path is absolute, leaves that directory through `..`, leads out of it
+  through a symbolic link (the directory `bd setup` creates or removes
+  included), or runs through a dangling or looping link, and names the recipe
+  and the path; `bd setup --add` refuses to save such a path.
+  Built-in recipes, the dedicated installers and `bd setup -o <path>` are
+  unchanged, and a recipe whose paths stay inside runs as before.
+- **`bd init --server --remote` clones through a Dolt server you run on a
+  `dolt.port` your config.yaml names.** With the port named only by a
+  user-level or the workspace's own `config.yaml` `dolt.port`, init cloned the
+  remote with the dolt CLI into `.beads/dolt`, which that server does not
+  serve, then created an empty database on the server and exited 0, so
+  `bd list` showed none of the project's issues. When a server answers on
+  that port and bd's state files do not show it is bd's own, init now clones
+  through it (or uses the database it already holds), as it already did for
+  a socket or an externally managed port. With nothing answering, or bd's own
+  server answering, init still clones into `.beads/dolt`.
+- **`bd bootstrap` no longer imports into an embedded store in a server-mode
+  workspace.** When the workspace's server lacked its database, the
+  jsonl-import and init actions opened `.beads/embeddeddolt`, imported or
+  created the database there and exited 0, while the server still lacked it
+  and every later command failed with "database not found". They now create
+  the database on the workspace's server, at the endpoint later commands
+  resolve, and write there. When that server already holds the database,
+  bootstrap writes nothing into it and says so. In server mode the restore
+  action now refuses before creating anything: when the server lacks the
+  database it names the `bd backup restore --force` command to run once the
+  database exists there, and when the server already holds it, it says so
+  and does not restore over it. Only a workspace whose own `metadata.json`
+  selects server mode (`dolt_mode`, `BEADS_DOLT_SERVER_MODE`,
+  `BEADS_DOLT_SHARED_SERVER`, a remote host, or `dolt.mode: server`) is
+  affected. Embedded and proxied-server workspaces, workspaces without a
+  `metadata.json` of their own, and shared-server mode named only by
+  `dolt.shared-server` in a config.yaml are unchanged.
+
+- `bd doctor` no longer treats a `.beads/.gitignore` stricter than 0600
+  (e.g. 0400) as having loose permissions: only group/other access warns,
+  and the fix no longer adds owner-write to such a file. When the 0600
+  tightening itself fails (chmod-hostile mount, file owned by another
+  user), `bd bootstrap` and `bd connect` print a warning and continue
+  instead of failing — every required pattern is in place by then
+  (#6225).
+- **A nested `bd init --server` no longer creates its database on the
+  enclosing workspace's Dolt server.** In a directory nested in a workspace
+  whose `.beads/config.yaml` names `dolt.port`, `bd init --server` with no
+  port of its own took that port at 127.0.0.1. It created the new database
+  on the enclosing workspace's server and pinned that port in the new
+  workspace's port file, or, with nothing listening, started the new
+  workspace's server on it. Init now resolves the port from the new
+  workspace's own configuration, as it does for a workspace nested in
+  nothing: with no port there it starts a server of the new workspace's
+  own on a port of its own, and with one (such as a user-level `dolt.port`)
+  it uses a server already answering there or starts the new workspace's
+  server on it. The enclosing workspace's own `dolt.auto-start: false` no
+  longer applies to the new workspace. When bd would not start that server
+  (`--external`, `BEADS_DOLT_AUTO_START=0`, `BEADS_DOLT_SERVER_MODE=1`, a
+  credential command), init refuses the unresolved port with the store's
+  advice where it used to join the enclosing server (with a credential
+  command it failed before too, on a database the enclosing server did not
+  hold); with a unix socket it opens through the socket, and with a socket
+  nothing answers on it fails where it used to join the enclosing server
+  over TCP. Joining another workspace's server stays explicit with
+  `--server-port`, `BEADS_DOLT_SERVER_PORT`, `BEADS_DOLT_PORT`, or a
+  `dolt.port` in the new workspace's own config.
+- **`bd init --server` against a local Dolt server you run now clones the
+  remote through that server.** With a live unix socket (`--server-socket`),
+  or a port resolved in a way that declares the server externally managed
+  (`--server-port`, `BEADS_DOLT_SERVER_PORT`, `BEADS_DOLT_PORT`,
+  `BEADS_DOLT_SERVER_MODE=1` with a configured port, or `metadata.json`
+  `dolt_server_port`), and no `--external`, every remote bootstrap init
+  performs (`--remote`, a configured `sync.remote`, or a git origin carrying
+  `refs/dolt/data`) cloned with the dolt CLI into `.beads/dolt`, a directory
+  that server does not serve. It then created an empty database on the
+  server and reported success, so `bd list` showed none of the remote's
+  issues. Init now clones through the server its store opens. If that server
+  already holds the database, init uses it instead of cloning. The clone
+  runs inside that server, so the server must reach the remote (git on its
+  `PATH`, its credentials); when it cannot, init now fails with the server's
+  error where it used to exit 0 with an empty database. bd's own server, the
+  shared server, and a server at 127.0.0.1 that cannot be dialed keep the CLI
+  clone; in the last case init's store then reports, as before, that the
+  setting naming the port declares the server externally managed, so bd did
+  not start one. A server there that answers and refuses init's login is up,
+  so the clone goes through it and fails with that server's error, instead
+  of landing in `.beads/dolt`. A configured socket nothing answers on gives
+  way to TCP at the configured port when a server answers there, as init's
+  store does, and the clone follows the store to that server; with nothing
+  answering on either, the CLI clone stays.
+- **The `bd create --repo` and `bd migrate-personal` refusal of a server-mode
+  target whose metadata names no `dolt_mode` now names the target's own
+  Dolt host.** It said to set only `"dolt_mode": "server"`. An open from
+  another workspace does not read the target's `config.yaml` `dolt.host` or
+  `dolt.port`, so following that remedy dialed another server, or
+  auto-started a bd server inside the target. The remedy now ranks the
+  target's ports as the store does, both for that open and for bd run
+  inside the target: its `.beads/dolt-server.port` (at a host bd runs its
+  server at), the `listener.port` of its Dolt data directory's
+  `config.yaml`, a `dolt.port` (the launching workspace's own for the open
+  from there, the target's own for bd inside it, and a user-level one where
+  either names none), then its `metadata.json` `dolt_server_port`. When the
+  host the target dials (its `metadata.json` `dolt_server_host`, else its
+  own `dolt.host`) is a host bd does not run its server at, the remedy also
+  names `dolt_server_host`, and `dolt_server_port` set to the port bd
+  inside the target dials. It names no port where a `listener.port` decides
+  both opens, and asks for the port its server listens on where nothing
+  names one. `dolt_server_port` is the deprecated metadata field, so routed
+  opens print its deprecation warning, and the `dolt.port` the launching
+  workspace reads still outranks it. Once `dolt_mode` is set nothing
+  refuses the rerun, so neither remedy offers a rerun that dials another
+  port than bd inside the target dials. There `bd create`'s remedy is the
+  edit and then the write inside the target, and `bd migrate-personal`,
+  which cannot run inside its planning repo, says it cannot aim the write
+  at the target's server from there; a remedy that names the launching
+  workspace's `dolt.port` says whether its own configuration or the
+  user-level `config.yaml` sets it. Otherwise, at a host bd does not run
+  its server at, `bd create`'s remedy offers that write beside the rerun
+  when bd inside the target has a port to dial. At bd's own host the
+  remedy keeps "set `dolt_mode`, then rerun" where the rerun dials the port
+  bd inside the target dials, except that `bd create`'s remedy is the write
+  inside the target for a target whose own `config.yaml` or
+  `config.local.yaml` names `dolt.port` and that has no `listener.port`.
+- **`BEADS_HOOK_TIMEOUT` now stops a hung `bd hooks run` on the Perl backend**
+  ([#7753](https://github.com/gastownhall/beads/issues/7753)). On hosts without
+  a GNU or uutils coreutils `timeout` (stock macOS), the generated hook shims
+  bounded `bd` with `perl -e 'alarm shift; exec @ARGV'`. The pending alarm
+  survived the `exec`, so `SIGALRM` reached `bd`, which the Go runtime catches
+  and ignores: the deadline never fired and a hung hook blocked the git
+  operation until it was killed by hand. Perl now runs `bd` as its child, in a
+  process group of its own. At the deadline it sends the group `TERM`, which
+  reaches the chained hook and the `bd export` or `bd import` that `bd` waits
+  on (`bd` itself keeps waiting after its first `TERM`), and it sends `KILL`
+  two seconds later if `bd` is still running. The hook then reports the
+  timeout and exits 0, as it does with coreutils `timeout`. A Ctrl-C, hangup,
+  or `TERM` that reaches the hook is passed on to the group. As under coreutils
+  `timeout`, a chained hook that reads from the terminal is stopped until the
+  deadline. Run `bd hooks install` once to refresh already-installed hook
+  sections.
+- **`bd dolt status`, `bd dolt show`, `bd context` and `bd doctor --fix`
+  now resolve the Dolt port, and some of them the unix socket, the way the
+  store does.** With `dolt.auto-start` on and no server of bd's own
+  running, `bd dolt status` read bd's PID file and reported as not running
+  a server bd does not start: one on a unix socket, or one that
+  `BEADS_DOLT_SERVER_PORT`, `BEADS_DOLT_PORT`, `dolt_server_port` or
+  `BEADS_DOLT_SERVER_MODE=1` declares externally managed. It now probes
+  that server over SQL, as it already did with auto-start off (`--json`
+  then reports the external shape). A server behind
+  `BEADS_DOLT_CREDENTIAL_COMMAND` is probed the same way, but as the
+  configured user rather than with the command's token, so there status
+  can still disagree with `bd list`. With only the legacy
+  `BEADS_DOLT_PORT` naming the server, `bd dolt show` printed `Port: 0`
+  and a failed connection test, `bd context` named `127.0.0.1:0`, and
+  `bd doctor --fix` skipped every SQL fix as unreachable at `127.0.0.1:0`
+  while `bd doctor` diagnosed that server, and `bd doctor`'s Dolt Mode
+  check found the server unreachable and, with federation peers
+  configured, warned so; they now use the port the store dials (Dolt Mode
+  probes over the store's transport), the fixes present the credentials-file password for that port,
+  and `bd dolt show` lists the variable's rule among its port sources. A
+  server only a unix socket names was dialed over TCP at `127.0.0.1:0` by
+  `bd doctor`'s Fresh Clone check, `bd dolt status` and `bd dolt show`'s
+  connection test, and `bd doctor`'s read-only Clone-Local FKs check and
+  `bd doctor --check=validate`'s Cross-Table Duplicates check reported
+  "N/A" without reading it; they now dial the socket, as the store does.
+  `bd dolt status` names the socket it dialed, even beside a resolved port
+  (`bd dolt status --json` then reports `socket` in place of `host` and
+  `port`), Fresh Clone names the server it dialed, and `bd dolt show`
+  lists the configured socket. For a socket-only server, `bd bootstrap`
+  still stops at its metadata reconcile and writes nothing (it now says so
+  instead of dialing `127.0.0.1:0`), `bd dolt show` and `bd context` still
+  print port 0, and `bd doctor`'s own connection and `bd doctor --fix`
+  still do not use the socket, so the database fixes stay withheld there
+  as before. Beside a resolved port, `bd doctor --fix` runs its SQL fixes
+  over TCP at that port, as before, behind its project-identity check,
+  even where the store dials a live socket; its Project Identity and Dolt
+  Schema repairs and `bd bootstrap` likewise reconcile `metadata.json`
+  against that port's catalog over TCP. There Fresh Clone and the
+  Clone-Local FKs and Cross-Table Duplicates checks read the server their
+  `bd doctor --fix` repairs write, so a repair never writes a server its
+  check did not read: TCP at the port, as before, even where
+  `metadata.json` names a live socket the store dials, so they can report
+  on a server `bd list` does not read. Fresh Clone now reads a live
+  `BEADS_DOLT_SERVER_SOCKET` there, which its repair dials too, where it
+  read TCP at the port. It also logs in as its repair does, with the
+  `BEADS_DOLT_CREDENTIAL_COMMAND` token where one is configured (a failing
+  command fails the check), and `bd doctor --fix` imports `issues.jsonl`
+  only for a fresh clone the check found: when the check could not reach
+  the server, that repair is reported skipped, where it imported over the
+  live rows of a database the check never read. The Orphaned Dependencies,
+  Child-Parent Dependencies, Dependency Keys and Blocked State checks now
+  read TCP at the port too, which their repairs write, where they read a
+  live `BEADS_DOLT_SERVER_SOCKET` while their repairs deleted, re-keyed or
+  recomputed rows at the port; each warns when that server cannot be read
+  while the store opens the database, where Orphaned Dependencies and
+  Child-Parent Dependencies reported no database and
+  `bd doctor --check=validate` passed. Like their repairs, they log in as
+  the configured user, never with a `BEADS_DOLT_CREDENTIAL_COMMAND` token,
+  so a gateway that refuses that user now draws the warning, which fails
+  validate. The
+  federation checks of `bd doctor` (Dolt Mode, Dolt Remote Migration,
+  Federation remotesapi, Peer Connectivity, Sync Staleness and Federation
+  Conflicts) read the server `bd list` reads, a live `metadata.json`
+  socket included, where they read TCP at the port, and Dolt Mode lists
+  federation remotes on the server its probe reached. A SQL fix that does
+  not run, because its server
+  cannot be opened, only a unix socket names it, or its project identity
+  cannot be verified, is now reported as `⚠ Skipped` with the reason and
+  counted in a new `skipped` total of the fix summary, where it printed
+  `✓ Fixed` and counted as fixed; a skip does not count as an error.
+  `bd doctor`'s Clone-Local FKs and Cross-Table Duplicates checks, and the
+  `bd doctor --fix` repairs that open their connection the same way, now
+  give up after 5 seconds on a server that accepts the connection but
+  never sends the MySQL greeting, such as a stopped or paused
+  `sql-server`, where they waited forever.
+- **`bd doctor --fix` now untracks a committed `.beads/dolt-server-config.yaml`
+  or `.beads/dolt-server.activity`.** Both were already gitignored, but the
+  tracked-runtime-files check did not list them, so a copy committed before
+  the ignore rule stayed tracked (#6191).
+
+- `bd admin reset` now removes the `prepare-commit-msg` hook bd installs.
+  Reset scanned only four of the five hooks bd manages, so a bd-installed
+  `prepare-commit-msg` in the repository's git hooks directory survived
+  `bd admin reset --force`. A user-owned `prepare-commit-msg` is still left
+  alone, or reported and kept when bd only injected a section into it
+  (#5566).
+- The batched bulk readers no longer return an issue's rows twice when the
+  same id is requested twice. Since the 200-id batching (#6444), an id that
+  appeared in two batches had its comments, labels, dependency records,
+  blocking edges and issue rows read once per batch. Ids are now
+  de-duplicated before batching, matching the single `IN (...)` list the
+  readers used before.
+- **`bd doctor`'s Classic Artifacts cleanup no longer deletes a database it
+  can recognize, or anything in a `.beads` it cannot positively claim.** The cleanup
+  (`bd doctor --fix` and `bd doctor --check=artifacts --clean`) emptied every
+  `.beads` whose path looks like an orchestrator worktree (`crew/*`,
+  `polecats/*`, `refinery/rig`, `.git/beads-worktrees/*`, or a rig root
+  beside `mayor/rig/.beads`) of everything but its `redirect`, `.gitkeep`
+  and, beside a redirect, its `metadata.json` or `config.json`, whatever it
+  held: an embedded Dolt workspace initialized at such a path lost its
+  database, `metadata.json` and `config.yaml`, even when doctor ran inside
+  it; a server-mode workspace there with no `redirect` lost the
+  `metadata.json` and `config.yaml` that are its only local record of the
+  server database it opens; a Beads Classic or `--backend=sqlite`
+  workspace there lost its SQLite database whatever the file was named; a
+  Dolt backup or remote kept there in Dolt's own file format lost the whole
+  database; a workspace on another backend (`http`, `postgres`, or one this
+  build does not know) lost its
+  metadata; and a server-mode rig root that `mayor/rig/.beads` redirects to
+  lost the `metadata.json`, `config.yaml` and `routes.jsonl` every checkout
+  routes through. It also removed the WAL, SHM and backups of a nested
+  `.beads` whose metadata does not load or whose layout bd does not
+  recognize, reading either as Dolt. The check and the cleanup now share one
+  classification of each `.beads`, and the cleanup removes only what the
+  check reports as safe to delete: a `beads.db-wal` or `beads.db-shm` whose
+  `beads.db` is gone, in a `.beads` with positive Dolt evidence (metadata
+  that says `backend` `dolt` or sets any Dolt setting, even a lone
+  `dolt_server_host` or a `dolt_data_dir` that does not exist; an embedded
+  Dolt repository; or its Dolt store directory), and the leftover files of
+  a redirect-only `.beads` that holds no database and whose metadata names
+  no other backend and no existing `dolt_data_dir` and, unless a `redirect`
+  is beside it, does not configure Dolt. The cleanup never removes database
+  state:
+  a `*.db`, `*.db3`, `*.sqlite` or `*.sqlite3` file in any letter case,
+  including the `beads.backup-*.db` pre-migration backups it used to delete;
+  any file that starts with the SQLite header, whatever its name; the WAL
+  and SHM of a database still beside them, or a link in their place
+  wherever it points; a Dolt store, embedded Dolt or `backup` directory; a
+  Dolt chunk store in the layout a `file://` Dolt
+  backup or remote uses (a `manifest` starting `<n>:__DOLT__:`, `*.darc`,
+  `journal.idx` or NBS table files); a directory holding any of those; or a
+  symlink to any of those (the link is kept, and no removal follows a link).
+  Everything else is left as it is. A `beads.db`, its WAL or SHM, or a
+  `beads.backup-*.db` outside another backend's `.beads`, and a
+  redirect-only `.beads` that is not a stub but holds more than a clean
+  stub does (its `redirect`, `.gitkeep` and, beside a `redirect`, its
+  metadata), are reported for manual review. When nothing is safe to delete the check no longer offers
+  `bd doctor --fix`. A `.beads` at a
+  redirect-only path (`crew/*`, `polecats/*`, `refinery/rig`,
+  `.git/beads-worktrees/*`, or a rig root that `mayor/rig/.beads` does not
+  redirect to) that holds no database state, and whose metadata, if it has
+  any, loads, names no other backend and no existing `dolt_data_dir` and,
+  unless a `redirect` is beside it, does not configure Dolt (`backend`
+  `dolt` or any Dolt setting, such as `dolt_mode`, `dolt_database`,
+  `dolt_server_host` or `dolt_data_dir`), is still treated as a redirect
+  stub; the next entry says what the cleanup removes from one. A
+  `.beads` at such a path whose `metadata.json` does not load (for example
+  merge-conflict markers in a tracked file) was cleaned like any stub; it is
+  now left as it is, and reported for review when it holds more than its
+  `redirect`, `.gitkeep` and metadata. The cleanup also stops deleting files the check never listed:
+  `issues.jsonl.new` and an empty `interactions.jsonl` outside such a stub,
+  and anything in a `.beads` under `.git` outside `.git/beads-worktrees`.
+  The Legacy MQ Files repair removes only the `.beads/mq/*.json` files its
+  check counts, not the whole directory, and leaves a symlinked
+  `.beads/mq` alone: it no longer counts the files behind the link or
+  removes the link.
+- **`bd doctor`'s Classic Artifacts cleanup no longer deletes a worktree's
+  tracked `.beads` files (other than bd's own runtime leftovers), or
+  anything else bd did not leave in a redirect stub.** From a `.beads` it treats as a redirect stub, `bd doctor --fix`
+  and `bd doctor --check=artifacts --clean` removed every entry except
+  `redirect`, `.gitkeep` and, beside a `redirect`, the directory's
+  `metadata.json` or `config.json`. A crew, polecat or refinery worktree of
+  a repository that tracks `.beads` files lost its `formulas/`,
+  `config.yaml`, `README.md` and `.gitignore`, and any uncommitted edit to
+  them, so `git status` showed the clone's own files deleted and bd run
+  there lost the settings that `config.yaml` supplied. A stub also lost the
+  opt-in audit log `interactions.jsonl`, `routes.jsonl`, a `metadata.json`
+  or `config.yaml` with no `redirect` beside it, an `mq/` directory, and any
+  file bd cannot recognize as a database, such as an encrypted
+  `beads.db.enc`. The cleanup now removes from a stub only bd's own runtime
+  leftovers, each as bd writes it: the `daemon.lock`, `daemon.log`,
+  `daemon.pid` and `bd.sock` of bd's former daemon, and `.local_version`
+  and `last-touched` only beside a `redirect` bd follows, in a stub with no
+  `config.yaml`, `metadata.json` or `config.json` of its own. Anywhere else
+  bd opens the stub itself, and its `.local_version` is the witness that
+  makes bd refuse to open a Dolt server workspace from bd 0.55 to 0.62.
+  Everything else a stub holds, a SQLite WAL or SHM whose database is gone
+  included, stays and is reported for manual review. The check reports such
+  a stub for review and each runtime leftover in it as a finding of its own,
+  so `--json` no longer marks a `.beads` that holds files to keep
+  `safe_delete`, and a stub holding no runtime leftover no longer makes the
+  check offer `bd doctor --fix`.
+- `bd doctor --check=artifacts --clean --json` prints only its JSON document
+  on stdout. The cleanup's progress lines (each removal, each finding kept
+  for review, and the summary) were printed on stdout ahead of the document,
+  so stdout did not parse as JSON; they now go to stderr. Without `--json`,
+  `--clean` and `bd doctor --fix` still print them on stdout.
+- bd now decides whether it runs the Dolt server at a configured host in one
+  place, and treats the server as its own only at `127.0.0.1`, the one
+  address its own server binds, in any spelling (empty, `localhost` in any
+  case, `0.0.0.0`, `::ffff:127.0.0.1`, `[127.0.0.1]`). The IPv6 loopback in
+  any spelling (`::1`, `[::1]`, `0:0:0:0:0:0:0:1`, `::`), another loopback
+  address such as `127.0.0.2`, and another machine are always servers bd
+  does not run. Before, four separate host lists disagreed, and several
+  sites never checked the host:
+  - `bd migrate from-server-to-proxied-server` resumed from an interrupted
+    run's journal skipped its remote-host and IPv6-loopback refusals, and
+    re-rooted the workspace at `.beads/dolt`, hiding that server's data.
+    `from-shared-server-to-proxied-server` and the reverse
+    `from-proxied-server-to-server` / `-to-shared-server` migrations never
+    checked the host. All four now refuse such a host, fresh, dry run or
+    resumed, until the run switches `dolt_mode`; a resumed refusal names
+    the journal and says that clearing the host resumes the migration.
+  - In server mode with no port setting (owned mode), bd's port file
+    (`.beads/dolt-server.port`), which records the port of its own server
+    on `127.0.0.1`, no longer names the port of a server bd does not run.
+    It was ignored only for a host spelled `::1` or `[::1]`, so
+    `0:0:0:0:0:0:0:1`, `::`, `127.0.0.2` or another machine was dialed on
+    the stale port of bd's last server; an external server already ignored
+    it. Such a workspace now gets the "pin its port" advice until
+    `BEADS_DOLT_SERVER_PORT` or `dolt.port` names the port. `bd init
+    --server`, whose store and `--external` clone took the file's port for
+    every host, now ignores it for such a host (`--server-host` or
+    `BEADS_DOLT_SERVER_HOST`) too. It resolves that host's port from the new
+    workspace's own configuration, as later commands there do, rather than
+    from the `dolt.port` of a workspace it is nested in: an IPv6-loopback
+    host gets the same advice, and another loopback address or another
+    machine, which select the external server, the documented port 3307.
+  - `bd init`'s summary names the port of the new workspace's server as
+    later commands there resolve it, from that workspace's own
+    configuration rather than an enclosing workspace's `config.yaml`, which
+    made it print port 0 under an enclosing `dolt.host` of `::1` or
+    `[::1]`. When nothing names a port it says so rather than print port 0.
+    It also names the port the legacy `BEADS_DOLT_PORT` sets, which init's
+    store dials, and the host `BEADS_DOLT_SERVER_HOST` sets, rather than
+    `127.0.0.1`.
+  - `bd dolt show` no longer lists a leftover `.beads/dolt`'s remotes for
+    a workspace whose server is at the IPv6 loopback.
+  - A `localhost` host in another case, and `0.0.0.0`, now auto-start bd's
+    server, matching the `bd dolt start` advice they already got.
+  - The `bd init` remedy printed for a routed target whose `config.yaml`
+    names an IPv6-loopback `dolt.host` now passes `--server-host` and
+    `--server-port`, instead of initializing bd's own server.
+  - `bd dolt start`/`stop` name `0:0:0:0:0:0:0:1` as the IPv6 loopback and
+    `127.0.0.2` as a loopback address bd's server does not listen on,
+    rather than as a remote host; `bd doctor --perf` likewise. They now
+    accept `::ffff:127.0.0.1` and `[127.0.0.1]` as bd's own address,
+    which they refused as remote.
+  - Every spelling of a loopback host now gets the answer its canonical
+    form gets in mode inference and in the HTTP plaintext-credential
+    guards (`bd connect`, the HTTP backend). `::`, `[::]`,
+    `0:0:0:0:0:0:0:1`, `[127.0.0.1]` and `::ffff:127.0.0.1` in
+    `BEADS_DOLT_SERVER_HOST`, `dolt_server_host` or `dolt.host` no longer
+    select server mode by themselves, as `::1` already did not (#7803),
+    and those guards accept them as loopback. A workspace that relied on
+    one of them to select server mode, including one whose
+    `BEADS_DOLT_SERVER_HOST` overrode `dolt_mode: server`, names the
+    server's port in `BEADS_DOLT_SERVER_PORT` or `metadata.json`'s
+    `dolt_server_port`. For `::`, `[::]` or `0:0:0:0:0:0:0:1`,
+    `BEADS_DOLT_SERVER_MODE=1` works too and keeps the external server on
+    the documented port 3307. `[127.0.0.1]` and `::ffff:127.0.0.1` are now
+    bd's own address, where, as at `127.0.0.1`, an external server gets no
+    default port, so with `BEADS_DOLT_SERVER_MODE=1` they still need the
+    port pinned (`BEADS_DOLT_SERVER_PORT`, `dolt.port` or
+    `dolt_server_port`). `dolt_mode: server` alone does not restore it:
+    bd then refuses an IPv6-loopback host until a port is pinned, and
+    treats `[127.0.0.1]` and `::ffff:127.0.0.1` as its own server, which
+    it may start.
+- `bd dolt push` and `bd dolt pull`, and the transfers of `bd sync`,
+  auto-push, `bd dolt remote reset-data`, `bd federation sync` and
+  `bd federation status`, no longer run the dolt CLI in a Dolt database
+  left in `.beads/dolt/<database>` when the workspace's Dolt server cannot
+  be bd's own: a server at a host bd's own server never runs at (the IPv6
+  loopback, another loopback address such as `127.0.0.2`, or another
+  machine), a gateway (`BEADS_DOLT_CREDENTIAL_COMMAND`), a TLS endpoint
+  or a unix socket at any host, or a port `BEADS_DOLT_SERVER_PORT` or the
+  legacy `BEADS_DOLT_PORT` names, which may be any server, such as a
+  container or a tunnel on `127.0.0.1`, unless bd's state files for the
+  workspace show its own dolt sql-server running on that port (as when a
+  multi-agent rig names it), not merely a live process under its PID.
+  That database is at best a copy, such as a clone `bd init --server`
+  left there or the database from when bd ran the workspace's server. A
+  push reported success with the copy's commits instead of the server's
+  (with `--force` it replaced the remote's branch with them), and a pull
+  merged into the copy, which the server never saw. The transfers now run
+  on the server (`CALL DOLT_PUSH`, `CALL DOLT_PULL`, `CALL DOLT_FETCH`),
+  as they already did when that directory was absent, with the
+  credentials the server process holds: a push to the workspace's own
+  remote (not a federation peer's) that fails there names the ones bd
+  holds for it (`DOLT_REMOTE_PASSWORD`, cloud storage variables), which
+  the server reads from its own environment instead. A
+  server you run over `.beads/dolt` itself at such a host, or on a port
+  one of those variables names, now gets them directly; through the dolt
+  CLI they went to that server anyway, or failed where `localhost` does
+  not reach it (a server on `127.0.0.2`). Embedded mode is unchanged, and
+  so is a plain server on `127.0.0.1` whose port neither variable names
+  and that serves that directory, bd's own or one you run yourself: a dolt
+  process holds the database's lock, and the `sql-server.info` dolt keeps
+  for the served data names the dialed port and a live process. A copy no
+  such server serves takes the server route too.
+  Nor do the remotes recorded in such a copy count as the server's any
+  longer: `bd dolt remote add` and `bd config apply` add the remote on
+  the server instead of taking the copy's as already configured. Where
+  the server lists no remote while the copy records one, `bd dolt push`,
+  `bd dolt pull` and `bd sync` (also with `-q` or `--json`) exited 0
+  having moved only the copy; they now exit 1 before moving anything,
+  naming the copy's remote and the command that adds it on the server
+  (`bd dolt remote add origin <url>`). They neither report that no
+  remote is configured nor offer to adopt the git origin there, so an
+  unattended `bd sync` fails until that command has run once. A gateway
+  workspace set up with `bd init --server --remote <url>` is in this
+  state: init still clones the remote into `.beads/dolt/<database>` and
+  adds the remote only there.
+- `bd dolt push`, `bd sync` and dolt auto-push now explain Dolt's
+  "Found dangling references to HashSet {…}" push refusal instead of
+  stopping at its bare `unknown push error`. Dolt raises it when the remote
+  denies having a chunk the push points to, before it moves the remote
+  branch, so the attempt did not move the remote branch and says nothing
+  about the local database. The guidance prints this clone's HEAD commit
+  and root hashes (`dolt_hashof('HEAD')`, `dolt_hashof_db('HEAD')`), which
+  bd reads through the open store, so embedded mode, where `bd sql` does
+  not run, gets them too. A refused hash that equals either one is a
+  transient race. The guidance advises seeding a fresh remote only when the
+  same hash comes back and matches neither, gives the commands for the
+  remote that failed, and links a new section of the sync failures
+  playbook. bd's own pre-push check and Dolt's local `dangling ref:` error
+  keep their output (GH#3358).
+- With only the legacy `BEADS_DOLT_PORT` naming a workspace's Dolt server,
+  bd now presents the credentials-file password for that port
+  (`[127.0.0.1:<port>]`). The store looked the password up for the port it
+  had before `BEADS_DOLT_PORT` replaced it, so every command was refused
+  with "Access denied" while the same port named by `BEADS_DOLT_SERVER_PORT`
+  worked, and `bd serve` refused with "cannot determine the Dolt server
+  port". `bd dolt status` (where it probes the server over SQL, as with
+  `dolt.auto-start` off), plain `bd doctor` (its Dolt checks and the Fresh
+  Clone check) and `bd doctor --check-health` now check that port too,
+  where they reported port 0 or "no Dolt server port configured" for a
+  server `bd list` reached. So does the metadata reconcile `bd bootstrap`
+  and `bd doctor --fix` run, which read the server's databases at
+  `127.0.0.1:0`, or at a port file's server no other command dials.
+
+- `bd bootstrap` of a fresh clone of a `bd init --server` project that
+  names no port no longer fails at its metadata reconcile with
+  `dial tcp 127.0.0.1:0`, nor probes and clones into `127.0.0.1:3307`, a
+  port no later command dials. When the next bd command starts bd's own
+  server, bootstrap clones into the data directory that server serves.
+  Under `BEADS_DOLT_SERVER_MODE=1`, a host bd does not run is cloned
+  through at `3307`, the port later commands dial there, as before.
+  Otherwise (`dolt.auto-start` off, a host bd does not run, a
+  `BEADS_DOLT_CREDENTIAL_COMMAND` gateway) it refuses with the store's advice
+  for a server with no port. `bd doctor`'s Fresh Clone check on such a clone
+  says the same: it points at `bd bootstrap`, or gives that advice, where it
+  probed `127.0.0.1:0` and reported a connectivity problem, and `bd dolt
+  status` gives that advice rather than dial `127.0.0.1:0`. `bd init
+  --server --external --remote` with no port named for a server on this
+  machine refuses before cloning, with the advice to name the port, rather
+  than clone into `127.0.0.1:3307`.
+
+- `bd init --server --remote` without `--external`, for a Dolt server at a
+  host bd's own server never runs at (another machine, `::1` or `[::1]`),
+  now clones through that server. It cloned into `.beads/dolt`, which
+  nothing serves there, and its store then created an empty database on
+  the server, so `bd list` showed none of the remote's issues. When that
+  server already holds the database, init clones nothing and uses it. With
+  no port named for `::1` or `[::1]`, where the store resolves no port for
+  it, init refuses before cloning, with the advice to pin the port. A
+  `BEADS_DOLT_CREDENTIAL_COMMAND` gateway keeps the previous clone on any
+  host, unless `--server-user` names the user, which init's store then
+  presents instead of the gateway's token.
+
+- **bd no longer rewrites, or creates a database or server in, a legacy
+  repository it reaches from another one.** Command admission refuses a
+  historical SQLite workspace (a `.beads` whose `config.json` or
+  `metadata.json` names its SQLite database, or that holds only a SQLite
+  `.db` file) and a legacy Dolt workspace (a non-empty `.beads/dolt` with no
+  embedded database and no current version witness) in the repository bd
+  runs in, but the paths that open another repository skipped those checks.
+  An `external:` dependency (`bd ready`, `bd blocked`, `bd dep tree`,
+  `bd update --claim`, and `bd serve`'s equivalents) or an auto-routed read
+  migrated a pre-Dolt `config.json` into `metadata.json`, dropping keys bd
+  does not know and deleting `config.json`, before the open failed. That
+  included a fresh clone of a SQLite-era project, which keeps its tracked
+  `config.json` and `issues.jsonl` but not its ignored `*.db`, and which bd
+  run inside does not treat as a workspace at all. A routed read or write
+  (prefix or auto) or an `external:` dependency of a legacy Dolt server
+  workspace auto-started a Dolt server inside it, and a routed write ran
+  bd's schema migrations into its database; bd doctor's Multi-Repo Types
+  check did the same for such a `repos.additional` repository.
+  `bd create --repo` and an auto-routed create created an empty embedded
+  database beside a historical SQLite or legacy Dolt target, after which bd
+  run there no longer refused it and listed no issues, and `bd create
+  --dry-run` previewed a target the create refused. They, and `bd
+  migrate-personal` for its planning repo, also initialized such a fresh
+  SQLite-era clone, after which bd run there opened the empty database
+  instead of finding no workspace, its `issues.jsonl` hidden behind it.
+  `bd connect` from a linked worktree could attach the main checkout's
+  metadata-less SQLite `.beads`. The library opens (`Open`,
+  `OpenBestAvailable`, `OpenBestAvailableWith`, `OpenFromConfig`,
+  `OpenGated`) and `backend/http`'s `Attach`, `Connect` and `SaveTarget` did
+  the same to a historical SQLite workspace they were pointed at;
+  `beads.Open(ctx, dbPath)` did it through Dolt server port resolution, which
+  also migrated a legacy `config.json` for `EnsureRunning`'s error message and
+  for diagnostics of another workspace.
+
+  All of them now refuse such a workspace before writing anything, with the
+  error bd prints when run inside it (`historical SQLite workspace detected;
+  explicit migration is required ...`, `legacy Dolt workspace detected; ...`,
+  `legacy Dolt server workspace from bd 0.62.0 detected; ...`), prefixed with
+  their own context (`target repo X:`, `planning repo X:`, `failed to open
+  routed store at X:`, `prefix route "hr-" to X:`, `ancestor workspace X:`,
+  or the `.beads` path for `bd connect`). An `external:` dependency on such a
+  project still leaves its capabilities blocking, with the same warning, and
+  doctor says it did not read such a repository's database, and why. An
+  auto-routed read or write of a `.beads` bd run inside would not treat as a
+  workspace (such as that clone) now fails with `no beads database found at
+  X/.beads`, and `bd create --repo`, its dry-run, an auto-routed create and
+  `bd migrate-personal` refuse to initialize that clone with the same error,
+  followed by the reason. No read-only open of another repository (an
+  `external:` dependency, a routed or auto-routed read, doctor's
+  additional-repo read) migrates its legacy `config.json` any more (the
+  read-only store factories and the read-only `dolt.NewFromConfig*`
+  constructors read it in place); bd still migrates the legacy `config.json`
+  of the workspace it runs in, as before. Library callers can match the
+  refusal with `errors.As` on the new
+  `beads.LegacyWorkspaceError` (also `bdhttp.LegacyWorkspaceError`); the
+  library opens refuse historical SQLite workspaces but do not classify
+  legacy Dolt ones. A launcher that enables `dolt.shared-server` still
+  admits a legacy Dolt target whose own config sets neither
+  `dolt.shared-server` nor `dolt_mode`, and opens it on the shared server,
+  as before, which can record the shared server's port in the target's
+  `.beads/dolt-server.port` and, for a write or create, runs bd's schema
+  migrations in the shared server's database of that name. Likewise, server
+  intent set in a layer the foreign classification does not resolve for the
+  target (user-level config, the `BD_` environment, either workspace's
+  `.beads/.env`) can still admit a legacy Dolt workspace that bd run inside it
+  refuses, as before. When Dolt server mode comes only from the user-level
+  `config.yaml` or `BD_DOLT_MODE`/`BD_DOLT_HOST` and the target's metadata
+  names no `dolt_mode`, a legacy Dolt server workspace whose `.local_version`
+  names bd 0.55-0.62 with no `.beads/dolt` root, or that has an embedded
+  repository beside its legacy root or such a witness, is admitted and opened
+  on a Dolt server, which can auto-start one inside it or, for a write, run
+  bd's schema migrations in its database. When it comes only from the
+  target's own `.beads/.env`, the same layouts are admitted and opened in the
+  launcher's mode, so a write from an embedded launcher can create an
+  embedded database inside the target.
+
+  Also: `bd create --repo` now refuses a target whose own `config.yaml`
+  selects Dolt server mode while its `metadata.json` names no `dolt_mode`,
+  when bd would open it embedded and create a database beside its server
+  data; `bd migrate-personal` now refuses such a planning repo too. For a
+  historical SQLite or legacy Dolt workspace, `bd create --dry-run --repo`
+  and `bd migrate-personal` print admission's refusal instead of a preview,
+  "is not initialized", or a missing `dolt_database` or embedded database,
+  and `bd bootstrap` below such an ancestor
+  prints it instead of "fix or restore metadata.json"; `bd bootstrap` with
+  no discovered workspace refuses a historical SQLite
+  `.beads` it passed over (a lone `vc.db`) instead of reporting that no
+  workspace was found. A routed write to a repository with no embedded
+  database refuses before migrating its legacy `config.json`. `beads.Open`
+  now also refuses a workspace naming a removed or unknown backend, as the
+  other library opens do. The library
+  opens and Dolt constructors now report metadata naming the removed
+  `sqlite` backend beside a non-empty SQLite database as a historical SQLite
+  workspace (`LegacyWorkspaceError`, admission's text) rather than with the
+  removed-backend message.
+
+- **`bd create --repo`, an auto-routed `bd create` and `bd migrate-personal`
+  no longer hide the issues of a clone of a project from before bd wrote
+  `config.json`.** Such a clone's `.beads` holds only the `issues.jsonl` bd
+  before 0.17.7 committed (it ignored the `*.db` beside it), and bd run there
+  finds no workspace. The create, and `bd migrate-personal` for its planning
+  repo, gave it an embedded database and a `metadata.json` and wrote into
+  it. bd there then opened that database, and the upgrade auto-import, which
+  loads `issues.jsonl` only into an empty database, never loaded the clone's
+  issues; `bd create --dry-run` previewed that create. Run from another
+  workspace, they now refuse such a target, writing nothing, with `no beads
+  database found at <dir>/.beads: it has issues.jsonl but no database ...`
+  and the way forward: run `bd init --from-jsonl` in the clone, which
+  imports `issues.jsonl`, then rerun. An empty `issues.jsonl`, a `.beads`
+  that redirects elsewhere, and every other target are handled as before,
+  as is `bd create --repo` run from a directory with no workspace.
+
+- A Dolt server you run at an IPv6 address can now be configured bare
+  (`::1`) or bracketed (`[::1]`) in `metadata.json` `dolt_server_host`,
+  `BEADS_DOLT_SERVER_HOST`, `config.yaml` `dolt.host` or `bd init
+  --server-host`. Previously neither spelling could open the store: with a
+  bare host the MySQL connection dialed the wrong address (`[::1:3307]:3306`
+  for port 3307, which timed out, or `lookup ::1:13322: no such host` for a
+  five-digit port), and a bracketed one failed the reachability probe
+  (`[[::1]]:3307: missing port in address`). `bd init
+  --proxied-server-external-host` already worked with a bare host, and now
+  also accepts the bracketed one. The CLI, `bd serve` and a proxied-server
+  external backend now all dial `[::1]:port`. `bd doctor --perf`, `bd doctor
+  --server`, `bd dolt test` and `bd dolt show` dial the same address, so `bd
+  doctor --perf` no longer reports a running server at a bare IPv6 host as
+  not running. `bd dolt status` checks a server at the IPv6 loopback over
+  SQL, as it does an external one, rather than reading bd's PID file: a Dolt
+  server bd starts itself still listens on 127.0.0.1 only. For the same
+  reason, when nothing answers at the IPv6 loopback, bd no longer auto-starts
+  its own server, which it could not reach there and left running, and no
+  longer advises `bd dolt start`: the advice checks the server at `[::1]`
+  instead, and `bd dolt start` refuses that host. `bd dolt stop` refuses
+  it too, rather than stop bd's own 127.0.0.1 server and report success
+  while the one at `[::1]` keeps running, and `bd migrate
+  from-server-to-proxied-server` refuses it as it refuses a remote host,
+  rather than re-point the workspace at `.beads/dolt`, which does not hold
+  that server's data. Nor do the state files of such a
+  server make the one at `[::1]` bd's own: as for any server bd does not
+  own, its schema is migrated only with consent (#5920) and `bd admin
+  compact --dolt` does not run `dolt gc` on `.beads/dolt`. Its port file no
+  longer outranks the port `dolt_server_port`, `dolt.port` or
+  `listener.port` names for `[::1]`, and bd writes none for a server there.
+  With no port set for a server there, or on another machine, `bd doctor`,
+  `bd doctor --server`, `bd doctor --perf`, `bd dolt status`, `bd dolt
+  test`, `bd dolt show` and `bd dolt clean-databases` say to pin it, as the
+  store's error does, rather than advise an auto-start or check port 0, and
+  `bd doctor --server` exits 1 there rather than 0. `bd doctor` no longer
+  skips its Dolt checks for such a server as if the next bd command would
+  start it: they fail, with that advice or, when nothing answers at the port
+  set, with the reachability check. `bd doctor --perf` reports no
+  `.beads/dolt` size for a server at `[::1]`.
+  To stop a server bd started for such a workspace earlier, run
+  `BEADS_DOLT_SERVER_HOST=127.0.0.1 bd dolt stop`. Errors, advice and status
+  output that name the server read `[::1]:port` for either spelling, quoted
+  where the advice passes it to curl, and `[::1]` counts as a local host
+  wherever `::1` does. A credentials-file section for an IPv6 server,
+  including the one that holds a `bd serve` endpoint's bearer token, is
+  found whichever spelling it and the configured host use. `[[::1]:3307]`
+  is read before `[::1:3307]`, and an empty `password=` there is not
+  replaced by the other's. When a server bd does not run, on another
+  machine as well as at `[::1]`, refuses the connection bd opens to create
+  its database, the error suggests checking that the server is reachable
+  rather than `bd dolt start`. IPv4 addresses and hostnames are joined as
+  before, and a host is dialed without the surrounding whitespace bd
+  already ignored when it decided whether the host is local.
+
+- Pouring a formula (`bd mol pour`, `bd mol wisp`, `bd mol bond`,
+  `bd mol seed`) now fails with a formula validation error when a step that
+  stays in the pour names, in its `needs` or `depends_on` or as its
+  `waits_for` spawner, a step whose `condition` leaves it out. The step used
+  to be poured with that dependency silently dropped, so it was ready before
+  the work it waited on, and a `waits_for` gate waited for no one. The error
+  names both steps and the condition (#6437). A dependency that bd adds
+  itself is not an error: the link from one loop iteration to the next and
+  `compose.branch` wiring now go around a left-out step to the steps it
+  waited for, and advice steps are left out with their target. Before, these
+  links were dropped as well, so a loop iteration could start before the one
+  before it finished, and advice was poured for a step that was not. A
+  `waits_for` gate that takes its spawner from such a link fails the pour
+  when going around the left-out step leaves the gate nothing to wait for. A
+  loop iteration whose first step is left out is still not linked to the
+  iteration before it.
+- A formula step declared `type = "gate"` with a `[steps.gate]` block no
+  longer deadlocks its molecule (GH#3316). `bd mol pour` and `bd cook` used
+  to create it as a `gate` bead hidden from `bd ready` and wire its companion
+  gate to block it, so neither could proceed. The step is now a `task` that
+  blocks its companion gate. Steps that reference it in `depends_on` or
+  `needs` wait for both the task and the gate, and a `waits_for` on it waits
+  for the children bonded under the task and for the gate. A `[steps.gate]`
+  on any other step still blocks the step, as before. Molecules poured and
+  protos persisted with `bd cook --persist` before this change keep their
+  old wiring; re-cook a persisted proto with `--persist --force` to replace
+  it.
+
+- A formula loop step's own `needs`/`depends_on`, and another step's `needs`
+  on the loop step, are no longer dropped without an error when the loop
+  expands (#7636). The loop's dependencies now gate its first expanded steps,
+  and `needs = ["<loop>"]` waits for the whole loop (for an `until` loop, the
+  cooked iteration), so the first iteration and every step after the loop are
+  no longer ready as soon as the molecule is poured. A loop body step whose
+  `needs`/`depends_on` names its own loop, which was dropped the same way, is
+  now refused with an error that names the step. Molecules poured before the
+  fix keep their dependencies.
+- `bd show <epic>` lists and counts an epic's children the same way
+  whatever state the dolt-ignored `wisp_dependencies` table is in
+  (bd-cif6y4). With the table missing from a Dolt server's working set
+  (after a received `dolt push`, for example), the CHILDREN section, the
+  dependency listings and `dependent_count` failed with "table not found"
+  instead of reading the durable edges, and `bd show --json
+  --include-dependents` failed the same way with either `wisps` or
+  `wisp_dependencies` missing. With an edge stored in both
+  `dependencies` and `wisp_dependencies`, the child was listed and counted
+  twice, so `bd show` printed 2N children and warned about edges whose far
+  end has no row. Each far end is now listed and counted once, carrying the
+  `dependencies` row's type, and any other missing table or failed query is
+  still reported as an error.
+
+- In proxied-server mode, `.beads/dolt/proxy.log` no longer grows with
+  every `bd` command, and it and the default proxied `server.log` are
+  rotated when the proxy starts. The proxy wrote about six lines to
+  `proxy.log` for every connection it served; those lines are now written
+  only when `BD_DEBUG` is set in the proxy child's environment, while
+  lifecycle and error lines are still written. The rotation is the one
+  embedded mode applies to `dolt-server.log`: a file over 50 MB
+  (`BEADS_DOLT_LOG_MAX_BYTES` overrides the ceiling, `0` turns it off) is
+  renamed to `<file>.1`, and one generation is kept. A server log at a path
+  you chose (`BEADS_PROXIED_SERVER_LOG` or
+  `bd init --proxied-server-log-path`) is not rotated. Purging the proxy's
+  control files and a proxied→server migration remove the `.1` files with
+  the primaries (#7527).
+- In proxied-server mode, a long-running proxy now keeps `proxy.log` and
+  the default proxied `server.log` bounded while it runs, not only when it
+  starts. Once a minute the proxy checks both files, and one over the same
+  `BEADS_DOLT_LOG_MAX_BYTES` ceiling (default 50 MB, `0` turns it off) is
+  copied to `<file>.1` and emptied in place, so the processes writing it
+  keep their open files; lines written during the copy can be lost. A server
+  log at a path you chose is still never rotated. Where Beads can tell which
+  process holds a listening socket (Linux and macOS, normally), a newly
+  generated proxied `config.yaml` also sets `log_level: warning` instead of
+  `info`, so dolt no longer writes a `NewConnection` and a
+  `ConnectionClosed` line to `server.log` for each connection a `bd`
+  command opens. At `warning` dolt does not log its ready line, so the proxy
+  accepts the server once its listening socket is shown to belong to the
+  dolt it started, and moves a Beads-chosen port another process holds as
+  before, including a listener the host shows no process for (another
+  user's, or a Windows one under WSL2's mirrored networking). Elsewhere
+  (Windows, WSL1, some sandboxes) the generated config keeps
+  `log_level: info`, whose ready line proves the same. An existing
+  `config.yaml` keeps its `log_level`: delete it to have it regenerated, or
+  set `log_level` yourself (for example back to `info` or `debug` while
+  debugging); editing `log_level` does not pin the port.
+- **A routed `bd create` no longer hides what a repository without
+  `metadata.json` already holds.** The first `bd create` routed into such a
+  repository (by any routing rule, or by an absolute or `~/`-prefixed
+  `--repo`) gave it a new database named after the source project's prefix
+  and a `metadata.json` naming it, and that file decides what `bd` opens
+  there from then on. In the planning repo `bd init` sets up on a fork, that
+  put a second database beside the one setup created, and whatever that one
+  held no longer showed in `bd` run there. A repository whose own
+  `config.yaml` selects Dolt server mode with no `metadata.json` (by
+  `dolt.mode: server`, the shape gc provisions, or by a non-local `dolt.host`
+  with no `dolt.mode`) became an embedded one: `metadata.json` outranks
+  `config.yaml`, so `bd` there stopped reaching its server data. A SQLite-era repository,
+  which `bd` refuses to open, got a fresh Dolt database beside its data that
+  silenced the refusal. Now a repository that holds one embedded database
+  keeps it, with its issue prefix (or the source's, when it has none) and its
+  project identity, and the issue is created there. A repository whose own
+  config selects server mode, one `bd` refuses (such as a SQLite-era repo)
+  and one holding several databases are refused before anything is written;
+  for a server-mode repository, run `bd init --database <name>` there
+  (`bd init --server --database <name>` when only `dolt.host` selects server
+  mode), naming the server database it uses, then rerun. When that config
+  names a non-local `dolt.host`, the refusal adds `--server-host <host>
+  --server-port <port>` (its `dolt.port`, else 3307), since `bd init` does
+  not read `dolt.host` from `config.yaml` and would otherwise dial that host
+  on a local server's `.beads/dolt-server.port`. `bd create --dry-run`
+  refuses the same repositories. A database to keep that holds uncommitted
+  changes is refused as well, since the create's commit would publish them:
+  commit them there with `bd dolt commit`, then rerun. `bd migrate-personal`
+  initializes the planning repo by the same rule, so it now also refuses a
+  server-mode planning repo instead of moving issues into a new embedded
+  database there.
+- **A pasted `bd duplicates`, `bd mol current`, `bd mol stale` or
+  `bd close --continue` hint no longer runs part of an issue ID.** These
+  hints put issue IDs read from the database, which holds a collaborator's
+  issues after `bd dolt pull`, into the `bd close`, `bd dep add`,
+  `bd update --claim`, `bd show`, `bd mol current`, `bd mol progress` and
+  `bd mol squash` commands they suggest, and `bd duplicates --json` puts the
+  same command in `suggested_action` and (with `--dry-run` or
+  `--auto-merge`) `merge_commands`. An ID was pasted
+  bare, so one such as `bd-x$(curl ...|sh)` ran its command substitution
+  when the suggestion was pasted into a shell, and one holding a carriage
+  return or terminal escape could redraw the line. Each ID now goes into the
+  command as one shell word, quoted when it holds anything but ASCII
+  letters, digits and `_ . / : + -`, or, when no quoting passes it on
+  unchanged, as a placeholder (`<step-id>`, `<molecule-id>`,
+  `<duplicate-id>`, `<target-id>`) with the ID named escaped after the
+  command, through
+  `internal/remedy`. `bd mol current`'s step hint no longer puts its
+  `bd show` command between backticks, which bash and zsh run as a command
+  substitution when the line is pasted, so a backtick in a quoted step ID
+  could end it and run the rest of the ID; the hint now reads
+  `Run bd show <id> to see detailed instructions.` The lines printed around
+  those commands, which a user
+  can paste with one (a duplicate group's issues and `Note:` line,
+  `merge_commands`' `# Duplicate:` comment, a molecule's steps and
+  `Next ready:` line, `bd mol stale`'s molecules and `Blocking:` list, and
+  the `Closed`, `Auto-closed completed molecule` and, with `--suggest-next`,
+  `Newly unblocked` lines `bd close` prints above its `--continue` hint, on
+  either route), name an ID that is not such a plain word escaped too, so
+  pasting them runs no part of it and a line feed in it cannot end
+  `merge_commands`' comment; the titles, assignee and status these hints
+  print are spelled so that none can redraw a suggested command. So is the
+  warning `bd close` prints above its hint when the molecule's root refuses
+  the auto-close (another assignee, a pin, a blocker), though a `$(...)` in
+  the root's ID, or a blocker's, is still printed as it is there and runs if
+  the warning is pasted. Apart from that hint's backticks, an ID bd mints
+  prints as before.
+- **`bd setup` names a committed `.beads/recipes.toml` recipe's values
+  escaped.** `bd setup <recipe> --check` printed the recipe's name and each
+  missing path raw around its `Run: bd setup <recipe>` line, so a carriage
+  return, terminal escape or line feed in either, from a recipes.toml a
+  cloned repository commits, could redraw that line with another command.
+  `bd setup <recipe>` (with or without `--check` or `--remove`) and
+  `bd setup --list` now spell the recipe's key, name, description, type and
+  paths with `remedy.PrintedValue`, and the error install or `--remove`
+  prints when the filesystem refuses a recipe path (such as a directory the
+  repository committed at it) with `remedy.PrintedError`: a value that holds
+  such a character is printed Go-quoted with it escaped, and every other
+  value prints as before. The `Run:` line's command takes the key as one
+  shell word, quoted when it holds shell syntax, or as a `<recipe>`
+  placeholder with the key named escaped after it. The refusal of a recipe
+  whose type needs special handling names a key or type that is not a
+  plain word escaped, rather than between single quotes, which an
+  apostrophe in it would end. A `$(...)` in a recipe's name, description or
+  path is still printed as it is.
+- **A pasted `bd init` or `bd repo remove` remedy no longer runs part of a
+  crafted value.** When `bd create --repo` (or `bd migrate-personal`)
+  refuses a repository with no `metadata.json` whose own config names a
+  remote `dolt.host`, the `bd init --server-host ...` command it printed put
+  the host in plain double quotes on Windows, so a host such as
+  `x" & calc & "` ran `calc` from cmd.exe and `$(calc)` ran it from
+  PowerShell when the command was pasted; elsewhere its single quotes let a
+  host with a backslash before a quote do the same from fish, and one with a
+  single quote (`'`, or a curly one such as `’`) from PowerShell. The
+  `bd repo remove` and `bd repo add` commands `bd migrate-personal` prints
+  for a `bd repo sync` copy used the same quoting, and on Windows a
+  `source_repo` ending in a backslash reached `bd` with a stray quote, so
+  `bd repo remove` found no such repository. On every platform a value with
+  control characters, such as a carriage return or a terminal escape
+  sequence, went onto the remedy's line raw, in the command or beside it (the
+  repository path and the `source_repo` the refusal names), and could redraw
+  the command so the one a user copied was not the one printed. A remedy now
+  prints a value in its command only when every character of it prints as
+  itself and cmd.exe, PowerShell and Git Bash (on Windows) or sh, bash, zsh,
+  fish and PowerShell (elsewhere) all pass it on unchanged, and otherwise
+  prints `<host>` or `<path>` and names the value beside the command,
+  escaped as a Go string whose every quote and every character one of those
+  shells acts on is escaped too (`\x22` for `"`, `\x24` for `$`), so pasting
+  the name as printed runs nothing. A value named beside the command that
+  holds a control character, or a character such as U+202E or U+2028 that
+  reorders or splits the line, is printed escaped (`\r`, `\x1b`, `\u202e`).
+  On Windows a value with any of `& | < > ^`, such as
+  `C:\Users\Jane Doe\R&D planning`, or of `; , =`, which cmd.exe reads as
+  separating the arguments of a `.cmd` shim that takes them one by one, and a
+  UNC path such as `\\server\share\planning`, all printed in the command
+  before, now get a `<path>` placeholder, as does a path with a single quote,
+  such as `~/Jane's planning`, elsewhere.
+
+- **`bd doctor` no longer rewrites a `repos.additional` repository whose
+  metadata names a backend bd does not recognize.** Its multi-repo types
+  check opened such a repository's Dolt database whenever one was there, and
+  the open migrated a legacy `config.json` into `metadata.json`, dropping
+  keys bd does not know, before it refused the backend. The check now
+  refuses that metadata before opening anything, leaving the repository
+  byte-identical, and lists the custom types in its `config.yaml`.
+
+- **The Go library's opens no longer rewrite a legacy `config.json` they
+  refuse.** `beads.OpenBestAvailable`, `OpenBestAvailableWith`,
+  `OpenFromConfig` and `OpenGated` migrated a `.beads/config.json` naming a
+  removed or unrecognized backend into `metadata.json`, dropping keys bd does
+  not know and deleting `config.json`, before they refused the backend, and
+  `OpenGated` created its gate files in and beside `.beads` first. They now
+  refuse that metadata before writing anything, as the CLI's command
+  admission already does for the workspace bd runs in.
+  `OpenGated` also refuses any backend it cannot open before taking its gates,
+  whichever metadata file names it, so it no longer creates gate files for
+  such a workspace. For a workspace whose only metadata is a legacy
+  `config.json`, these refusals (and the CLI's) now name `config.json` as the
+  file to edit. The CLI's refusal named a `metadata.json` that did not exist,
+  and the library's named the `metadata.json` its own migration had just
+  written. `OpenFromConfig` now returns a nil `Storage` with every error, as
+  the other opens do; it returned a non-nil interface holding a nil store for
+  a backend refusal or a failed open, on which `Close` panics.
+
+- **bd no longer rewrites another repository's legacy `config.json` that it
+  refuses.** Command admission checks only the workspace bd runs in. When bd
+  opened another repository (an auto-routing target, or the project an
+  `external:` dependency names) whose only metadata was a
+  `.beads/config.json` naming a removed or unrecognized backend, it migrated
+  that file into `metadata.json`, dropping keys bd does not know and deleting
+  `config.json`, before it refused the backend. It now refuses that metadata
+  before writing anything, leaving the repository byte-identical, and a
+  refusal that names the file to edit names `config.json`, not the
+  `metadata.json` the migration wrote.
+
+- **`bd events tail --follow` can stop when its parent goes away.** A
+  follower noticed that its reader was gone only when it next wrote a
+  record, so in a quiet workspace a follower whose parent died without
+  stopping it kept polling the journal until the next write. With
+  `--exit-on-stdin-eof` (accepted only with `--follow`) it exits 0 as soon
+  as its stdin closes, whenever that happens: the parent passes a pipe as
+  stdin, and closing its end, or dying, stops the follower on every OS.
+  Without the flag stdin is ignored, as before. A follower stopped with
+  Ctrl-C while a poll is reading now exits 0 too, instead of failing with
+  `reading events journal: context canceled`. A stop never hides a
+  truncation: when the read it lands on has already found the checkpoint
+  pruned, the follower still reports `events_journal_truncated` and exits 1.
+
+- **`bd events tail --follow --json` reports a failure on one line.** A
+  follower whose read failed for any reason but a pruned checkpoint (a lost
+  server connection, a failed embedded or proxied read) ended its JSON Lines
+  stream with an indented, multi-line error object that a line reader cannot
+  parse, and so did a follower whose first read found its checkpoint pruned.
+  Both are now one compact line: a failed read is bd's usual `--json` error
+  object (`error` and `schema_version`, inside `data` under
+  `BD_JSON_ENVELOPE=1`), and a truncation is the `events_journal_truncated`
+  line a later poll already printed, without the envelope. Without
+  `--follow`, `bd events tail` and `bd events export` print failures as
+  before.
+
+- **A Dolt server whose port is named for it is no longer met with
+  `bd dolt start` advice when it is down.** A port named by
+  `BEADS_DOLT_SERVER_PORT` (or the legacy `BEADS_DOLT_PORT`), by
+  `dolt_server_port` in `metadata.json`, or by `bd init --server-port`
+  declares the server externally managed, so bd never starts one there. Yet
+  every command that could not reach it advised `bd dolt start`, and
+  `bd init` without `--external` printed that advice twice, after an
+  "auto-start failed" for a start it never attempted. `bd dolt start` starts a
+  bd-owned server over `.beads/dolt` on that very port: a different, usually
+  empty database that shadows the real one and holds the port the real server
+  needs. For a server on this machine, every command now gives the message
+  `bd init --external` gives: it
+  names the endpoint it dialed and the setting that declares the server
+  externally managed, and says bd did not start one. That includes
+  `bd dolt test`, `bd dolt clean-databases` and `bd doctor --perf`, and a
+  workspace whose `config.yaml` `dolt.port` chose the port beside a
+  `dolt_server_port` (what `bd dolt set port N --update-config` writes) or
+  beside a `BEADS_DOLT_PORT` that names the same port. It also holds after a
+  command has reached the server once: bd records that port in its port file,
+  which outranks `dolt_server_port`, but only a port file with bd's pid file
+  beside it marks a server bd started. When
+  only the legacy `BEADS_DOLT_PORT` names a port, those three commands and
+  `bd doctor --server` now dial its port, as commands that open the store
+  do, instead of `127.0.0.1:0` or a port left in bd's port file. A shared
+  server, a server bd started (its pid file beside the port file), a server
+  bd manages, and an external workspace whose port no setting names keep
+  their advice.
+- **`bd doctor --perf` checks a remote Dolt server on its host, and the
+  server diagnostics stop advising `bd dolt start` for one.**
+  `bd doctor --perf` probed `127.0.0.1` instead of the configured host, so it
+  reported a reachable remote server as not running; it now measures the
+  server that `bd ready`, `bd list` and `bd show`, the commands it times,
+  connect to, and no longer reports the local data directory's size for a
+  remote server. When nothing answers on a remote host, `bd doctor --perf`,
+  `bd dolt test` and `bd dolt clean-databases` say how to check the server
+  there (`nc -zv <host> <port>`) instead of advising `bd dolt start`, which
+  refuses a remote host.
+- `bd doctor`'s "Federation remotesapi" check no longer warns `Server not
+  running (N peers configured)`, counting `origin`, for a live Dolt server
+  bd did not start (launchd, systemd, a container) or bd's shared server,
+  which write no PID file in the workspace. When the PID file names no
+  running server, the check probes the endpoint the store opens, as the
+  "Dolt Mode" check does, and reports the remotesapi listener's real state.
+  A server only that probe found is named by the endpoint the probe
+  reached, its unix socket or host:port, instead of `PID 0`. Its listener
+  is dialed at the configured host when the probe reached it over TCP, and
+  at `127.0.0.1` over the socket. When the store cannot open there (wrong
+  credentials, a missing database, a listener that is not Dolt), the check
+  reports `Skipped (database unavailable)` with the error. (#7724)
+- **When bd's port file chose the port, the unreachable-server advice names
+  that file.** A command that reaches the server records its port in
+  `.beads/dolt-server.port`, which outranks `dolt_server_port`, and
+  `bd dolt set port N` leaves that file alone, so bd kept dialing the old
+  port. The advice blamed `dolt_server_port` and suggested removing it, which
+  would not change the port bd dials. It now says bd took the port from that
+  file, which outranks `dolt_server_port` (N), and to start that server or
+  remove the file, unless `config.yaml` `dolt.port` or the data directory's
+  `listener.port` names the file's port too, so that removing the file would
+  change nothing. Elsewhere the advice says removing `dolt_server_port` lets
+  bd manage the server only when nothing else, such as
+  `BEADS_DOLT_SERVER_MODE=1` or a port variable naming another port, declares
+  the server externally managed.
+- **`bd bootstrap` clones into the Dolt server that later commands connect
+  to.** For a workspace in Dolt server mode it picked the port to clone
+  through in its own order: the legacy `BEADS_DOLT_PORT` over `config.yaml`
+  `dolt.port` and the data directory's `listener.port`, and `metadata.json`
+  `dolt_server_port` over `BEADS_DOLT_SERVER_PORT`, `dolt.port`,
+  `listener.port` and bd's port file. Every other command
+  connects in the opposite order (#5835, and for a server on another machine
+  #7767), so when two of those settings named different ports the clone
+  landed on one server, `bd bootstrap` still exited 0, and the next command
+  reported the database missing on the other. It now clones through the port
+  those commands connect to when one resolves (when none does, it
+  clones into the data directory bd's own server will serve, or refuses
+  with the advice to pin the port; see the `bd bootstrap` entry above),
+  and looks for an existing database there too:
+  that check, which decides whether to clone at all, read neither
+  `listener.port` nor, in shared-server mode, `BEADS_DOLT_PORT`, so it could
+  find the database on a server those commands never use. That check now
+  also authenticates as the clone does, with the password for the port it
+  dials and through the configured socket: with a per-server entry in the
+  credentials file it could fail to authenticate and report the database
+  unverifiable. In shared-server mode bootstrap no longer takes the
+  workspace's `dolt_server_port`, which no other command reads there. For a
+  fresh rig with no `.beads` yet, the server bootstrap clones into (host, port
+  and password), whether it clones into a server at all, and the `dolt_mode`
+  it records now come from the settings later commands in the rig read, as
+  does the server of the store bootstrap opens after the clone: an enclosing
+  workspace's `config.yaml` `dolt.host`, `dolt.port`, `dolt.mode` and
+  `dolt.shared-server` no longer pick them, and `~/.beads/config.yaml` and the
+  other user config files still do. `bd init --server --external` now clones
+  through the port of the store it opens right after the clone; in
+  shared-server mode the clone took `config.yaml` `dolt.port`, which that
+  store does not read, and could land on a server init never opened.
+- **`bd migrate-personal` opens the planning repo the way that repo is
+  configured.** It opened the planning store as a Dolt SQL server under the
+  default database name, ignoring the planning repo's `metadata.json`. An
+  embedded planning repo failed with `Dolt server unreachable at
+  127.0.0.1:0`, and a server-mode one with `database "beads" not found`,
+  after printing `no database name configured; falling back to default
+  "beads"`. It now opens the planning repo the way a write auto-routed there
+  does: its own mode, server settings and database, pinned against the
+  launching workspace's `BEADS_DOLT_SERVER_DATABASE`. With the default
+  `dolt.auto-commit: on`, the move is a Dolt commit in each repository,
+  including an embedded planning repo that a server-mode project moves
+  issues into; with `batch` or `off`, the delete, and the copy in an
+  embedded planning repo, wait for `bd dolt commit` like any other write.
+  With `on`, an embedded planning repo whose working set already holds
+  uncommitted changes is refused before anything moves, since that commit
+  would publish them under the move's message. When no `metadata.json` names
+  the database holding them and it is not the default `beads` database, the
+  refusal says to give the planning repo one before `bd dolt commit`, which
+  would otherwise open the default database there. A planning repo the
+  command initializes gets that in a commit of its own. When the planning
+  commit fails without saying whether it landed, the copy is kept rather
+  than rolled back, and the error names the issues now in both
+  repositories. A planning repo that contributor setup left with no
+  `metadata.json` is first given one: the empty `.beads` from
+  `bd init --contributor` is initialized the way a routed `bd create`
+  initializes it, and the database fork setup creates is kept, along with
+  anything already in it, rather than hidden behind a new one. Any other
+  planning `.beads` with no `metadata.json` is handled the same way, except
+  that a workspace `bd` itself refuses, such as a SQLite-era repo, is refused
+  as `bd` refuses it there, and one holding several databases is refused,
+  both before anything is written. A planning repo that redirects elsewhere
+  is refused too, with or without a `metadata.json` of its own (point
+  `routing.contributor` at the redirect target, unless the planning repo
+  names a database of its own there, which `routing.contributor` cannot
+  select; a rig beside the project under a shared root is such a planning
+  repo). A planning repo whose `metadata.json`
+  has no `dolt_database`, or whose database has not been bootstrapped, is
+  refused before anything moves. So is a planning repo that is the project's
+  own workspace (for example `routing.contributor: .`), or a clone of it,
+  which carries the project's `project_id`. In server mode, when
+  the planning open resolved to the project's own database (`dolt_database`
+  "beads", or `BEADS_DOLT_SERVER_DATABASE` naming it), that used to delete
+  the issues while reporting them moved. Run from a rig under a shared
+  root, the shared root, or a redirect stub that uses its database, is
+  refused too; the refusal names the database `bd` uses there and the
+  project's, and points `routing.contributor` at a separate planning
+  repository. An issue ID already present in the
+  planning repo is also refused rather than overwritten; when the project
+  copy is a `bd repo sync` mirror of the planning repo, the error names
+  `bd repo remove`. Its errors no longer end in the usage block, and the
+  redirect, several-databases and uncommitted-changes refusals are no
+  longer prefixed `failed to open planning store`.
+- **`bd dolt start` no longer creates a phantom database when auto-start is
+  off.** With `dolt.auto-start: false` the server is managed outside bd. A
+  start over a data directory that is missing, empty, or holds no Dolt
+  database ran `dolt init`, launched a second, unsupervised server and
+  published its port, so later commands resolved to that empty database and
+  shadowed the real one. Such a start is now refused before anything is
+  written; `--force` overrides the refusal. A start over existing data, a
+  server bd already tracks, and auto-start workspaces are unchanged.
+  (bd-7pkvvd, [#7729](https://github.com/gastownhall/beads/pull/7729))
+- **An unresolved Dolt server port is reported as such.** When no socket and
+  no port source resolved a port (for example a lost `.beads/dolt-server.port`
+  in a workspace with `dolt.auto-start: false`), bd dialed `127.0.0.1:0` and
+  printed `Dolt server unreachable at 127.0.0.1:0` with `bd dolt start`
+  advice, although the managed server could be healthy. An open that will not
+  start a server now fails with `no Dolt server port resolved for <beadsDir>`,
+  listing every port source and the port file's path; it suggests
+  `bd dolt start` only when bd manages the server. A resolved port that does
+  not answer keeps today's error. (bd-7pkvvd,
+  [#7729](https://github.com/gastownhall/beads/pull/7729))
+- An HTTP workspace whose server cannot be reached now says which step
+  failed. A connect that is refused names the address and says nothing is
+  listening; one that times out (a filtered port, a down host) names the
+  address that never answered and how long it waited; a host name that does
+  not resolve is named as such. The error was the transport's
+  `Get "https://…/v0/beads/context": dial tcp …: i/o timeout`, which named the
+  request rather than the address.
+- **`bd link` works over a connected HTTP workspace.** It wrote through the
+  store's raw `AddDependencyWithOptions`, which the HTTP client refuses, so
+  every `bd link` failed there with `operation "AddDependencyWithOptions" not
+  supported by the http backend`, whatever the type. It now writes through
+  the `DependencyEditor` role, the route `bd dep add` takes, on the direct
+  and HTTP routes alike (the proxied-server route is unchanged). Over HTTP
+  that is one `dependencies:add` request, so `bd link` keeps accepting any
+  non-empty type of at most 32 characters (`owned-by`, `ships-in`, ...).
+  An empty or over-long type is still refused before anything is written,
+  and an edge that already exists with another type still reports the typed
+  conflict. On a Dolt store the history commit is now the role's, like
+  `bd dep add`'s: `bd: dep add <from> <to>` in place of
+  `dependency: add <type> <from> -> <to>`.
+
+- **`bd query` reports an uppercase duration unit as an unparseable time, not
+  a negated internal error.** `created>30M` failed with
+  `not a compact duration: "-30M"`, naming a value nobody typed; it now fails
+  with `cannot parse time expression: "30M"`. A signed spelling
+  (`created>+30M`) stops at the parser, as `created>+30x` already did, so
+  quote one to match it as a literal (`label="+30M"`). Units remain lowercase
+  (`30min`, `6h`, `7d`, `2w`, `3m`, `1y`); help and docs already say so.
+- **Strict `--readonly` no longer creates workspace gate files.** A
+  `bd --readonly` command took its shared workspace gates with
+  create-if-missing, so on a workspace no bd command had gated yet it left
+  `<project>/.beads.gate.lock` and the physical-root gate file
+  (`.beads/embeddeddolt.gate.lock` or `.beads/dolt.gate.lock`) behind, although
+  strict readonly promises not to mutate the workspace. It now opens an
+  existing gate file read-only and holds it shared as before, so a maintenance
+  operation still sees it and a running one still makes it wait; when no gate
+  file exists it holds nothing. Every other command still creates the files.
+- **Strict `--readonly` refuses `bd backup init`, `backup sync`,
+  `backup remove`, `backup restore` and `bd import`.** None of them checked
+  readonly mode. On a server-mode store they ran to completion under
+  `--readonly`: `backup init` and `backup remove` rewrote or emptied the
+  server's backup registry, `backup sync` wrote the backup destination,
+  `backup restore --force` replaced the store, and `import` wrote issues. On
+  an embedded store they failed with the storage layer's `store is read-only`
+  error instead, after `backup sync` had left `.beads/backup.lock` behind and
+  `backup restore` had left workspace-gate holder files. They now exit 1 with
+  the standard `Error: operation '<op>' is not allowed in read-only mode`,
+  and a restore is refused before it takes the exclusive workspace gate.
+  `bd import --dry-run` is refused too, as `bd create --dry-run` already is
+  and as a migration freeze already refuses it. `bd backup status` still runs
+  under `--readonly`.
+- **`bd sql --readonly` refuses a read that calls a Dolt function that may
+  write** ([#6230](https://github.com/gastownhall/beads/issues/6230)). A
+  `SELECT`, `UNION`, `SHOW` or `EXPLAIN` was routed as a read whatever
+  functions it called, so neither `--readonly` nor a migration freeze checked
+  it, and proxied-server mode ran it in a read transaction that is rolled
+  back. A read that calls a `dolt_` function in any clause, other than the
+  read-only ones Dolt registers (`dolt_hashof`, `dolt_hashof_table`,
+  `dolt_hashof_db`, `dolt_merge_base`, `dolt_version`, `dolt_storage_format`,
+  `dolt_join_cost`), is now handled like `CALL`: `--readonly` refuses it with
+  `Error: operation 'sql' is not allowed in read-only mode`, a migration
+  freeze refuses it, and proxied mode runs it in a committing transaction.
+  Supported Dolt servers expose their writers (`DOLT_COMMIT`, `DOLT_RESET`,
+  ...) only as procedures, so this guards against a server that exposes one
+  as a function; a read-only `dolt_` function that a newer Dolt adds is
+  refused the same way until bd lists it. Reads of Dolt system tables
+  (`dolt_log`) and table functions (`dolt_log()`, `dolt_diff(...)`) are
+  unchanged.
+- **`bd init --server --external` no longer starts a Dolt server of its own.**
+  Init builds its store config by hand and turned auto-start on for every
+  server init, so an `--external` init that named no port launched a
+  repo-local `dolt sql-server`, although `--external` says the server is
+  managed outside bd. `--external` now turns auto-start off. When the
+  external server cannot be reached, init gives one message on every route
+  (host and port, socket, shared server, auto-start pinned off): it names the
+  endpoint it dialed, says that bd did not start a server, and no longer
+  advises `bd dolt start`. With no port named at all, it asks for one
+  (`--server-port` or `BEADS_DOLT_SERVER_PORT`) instead of offering a default.
+- **A failed `bd init --server` can be retried.** A first attempt that could
+  not reach its server left an empty `.beads/dolt` and nothing on disk that
+  records the server choice, so the legacy-upgrade guard refused every retry
+  as a "legacy Dolt workspace" and no bd command could repair it. When init
+  itself selects server mode, the guard now admits exactly that root: empty,
+  with no `.local_version` witness. A pre-1.0 witness, or a `.beads/dolt` that
+  holds anything, is still refused, and commands other than `bd init` are
+  decided as before.
+- **`bd doctor` no longer rewrites the metadata of nested workspaces.**
+  Its Classic Artifacts check walks every `.beads` directory under the
+  repository, those of nested repositories and worktrees included, which
+  command admission never checks. Both the scan (plain `bd doctor` and
+  `bd doctor --check=artifacts`) and the cleanup (`bd doctor --fix` and
+  `bd doctor --check=artifacts --clean`) read each one's metadata with the
+  loader that migrates a legacy `config.json` into `metadata.json`, so a
+  nested workspace whose metadata was still a `config.json` lost that file,
+  and any key bd does not know, to a new `metadata.json`. The check now reads
+  that metadata without migrating it. In a redirect-only location, the
+  workspace's own metadata beside its `redirect` file now stays as it is: a
+  legacy `config.json` there is no longer migrated, and neither it nor a
+  `metadata.json` there is reported as cruft any more. The scan had listed
+  that file as safe to delete, though the cleanup kept it, so `bd doctor`
+  warned about it again after every `--fix`. A `config.json` kept beside a
+  `redirect` is inert: across a redirect, bd takes the source workspace's
+  `dolt_database` only from its `metadata.json`, and bd stopped writing
+  `config.json` before `dolt_database` existed. Rename a hand-written one to
+  `metadata.json` for its `dolt_database` to take effect.
+- **`bd doctor` no longer deletes the SQLite files of a nested workspace on
+  another backend.** The Classic Artifacts check reports `beads.db`,
+  `beads.db-wal`, `beads.db-shm` and `beads.backup-*.db` only in a `.beads`
+  whose metadata selects Dolt, but its cleanup (`bd doctor --fix` and
+  `bd doctor --check=artifacts --clean`) removed the WAL, the SHM and every
+  backup in each `.beads` under the repository whatever its backend, once the
+  check had found something (with `--clean`, something safe to delete), such
+  as a leftover WAL in the repository's own `.beads`. A nested workspace
+  whose metadata names `sqlite`, `postgres`, `mysql` or another registered
+  backend such as `http` lost files the check never listed. In a `sqlite`
+  one, a `beads.db-wal` left by an unclean close holds committed
+  transactions not yet checkpointed into `beads.db`, which exporting the
+  workspace with a bd release that still includes the sqlite backend, as bd
+  advises, would have recovered. The check and the cleanup now share one
+  backend predicate, so in each `.beads` both reach the cleanup removes
+  SQLite files only where the check reports them. Neither treats a
+  workspace whose metadata names a backend this build does not recognize as
+  Dolt any more, so its SQLite files are neither reported nor removed. Nor
+  do they treat a nested Beads Classic SQLite workspace as Dolt: its
+  metadata predates the `backend` key, or it has none, which bd reads as
+  Dolt, so the check listed its WAL, SHM and backups as safe to delete and
+  the cleanup removed them. Both now pass over every historical SQLite
+  layout that bd refuses to open.
+- **`bd setup claude --remove` no longer leaves a blank-line hole.** Removing
+  the beads section from `CLAUDE.md` (or, with the other setup recipes, from
+  `AGENTS.md` or `GEMINI.md`) left the blank lines around it behind, three in
+  the `CLAUDE.md` `bd init` writes, and setup then re-added the section after
+  two more, so every remove and re-add grew the file. `--remove` now takes
+  those blank lines with the section, and setup appends a section after one
+  blank line, so removing and re-adding it toggles between the same two files.
+  A re-added section goes at the end of the file.
+- **`bd config set` no longer truncates a `config.yaml` that has a line of
+  64 KiB or more.** Setting an undotted key (such as `actor` or `no-db`)
+  rewrites the file line by line, and a line of 65,536 bytes or more ended
+  that read early without an error, so the command reported success and wrote
+  back only the lines before the long one, plus the key it set. Dotted keys
+  and `bd config unset` were not affected. Setting an undotted key in such a
+  file now fails with `bufio.Scanner: token too long`. `bd config set` leaves
+  the file as it was. `set-many` stops at that key, but it has already written
+  any `config.yaml` keys listed before it, such as a dotted `sync.remote`.
+- **`bd show --as-of` exits 1 when it reads no issue.** A ref the Dolt AS OF
+  read does not take (an instant, a versioned-history address), a ref that
+  does not exist, or an issue that did not exist at the ref was reported on
+  stderr while the command exited 0 with nothing on stdout, even under
+  `--json`. It now ends the way plain `bd show` does: exit 1, with the JSON
+  error envelope on stdout under `--json`. A batch that reads at least one of
+  its ids still exits 0. Both the direct and the proxied-server routes
+  changed.
+- **`bd list --format dot` prints the same graph the same way every time.**
+  Nodes are declared in id order and edges in source, target and type order.
+  They used to follow the listing order, which breaks a priority tie by
+  creation time to the second, so two equal-priority issues swapped places
+  depending on whether they were created in the same second, and the
+  proxied-server route did not pin the order of one issue's edges. `--sort`
+  and `--limit` still choose which issues are listed.
+- **`bd init --quiet` no longer prints "Removed SessionStart hook" or "Removed
+  PreCompact hook"** when the project's `.claude/settings.json` (or the legacy
+  `.claude/settings.local.json`) still carries the bare `bd prime` hooks an
+  older bd registered. The hooks are still migrated to the SessionStart
+  `bd prime --hook-json` hook; the removal lines now go to the installer's own
+  output, which `--quiet` discards, instead of straight to stdout.
+- **A new `AGENTS.md` from `bd init` lists `bd dolt push` in its Quick
+  Reference only when the workspace has a Dolt remote.** The managed Beads
+  section already left out its push lines when no Dolt remote is configured or
+  the workspace is `no-push`, but the Quick Reference above it still showed
+  `bd dolt push  # Push beads data to remote`. It now follows the same rule.
+  `bd init` still leaves an existing `AGENTS.md` alone outside the managed
+  section, and writes an `--agents-template` as given.
+- **`bd setup claude` no longer rewrites a CLAUDE.md whose beads section is
+  already current.** A rerun (and `bd init`, which runs it) wrote the same
+  bytes back as a new file, resetting its mode to 0644 and its mtime, and
+  reported "Updated existing beads section"; it now leaves the file alone and
+  reports the section current (the report `bd init` already gives a current
+  AGENTS.md). `bd setup factory`, `opencode`, `mux` and `gemini` share the
+  fix. A section whose END marker is missing or comes before BEGIN, which was
+  also reported as updated while nothing changed, is now reported as an error:
+  `bd setup factory`, `opencode` and `mux` exit 1 (`mux` before installing its
+  `.mux` hooks), while `claude` and `gemini` warn and carry on. When CLAUDE.md
+  is an `@AGENTS.md` stub and it is AGENTS.md that cannot be updated, `claude`
+  now names AGENTS.md in the warning and keeps the beads block left in the
+  stub, which it used to delete although AGENTS.md was never updated.
+- **Time-bound filters and the keyset cursor compare the same instant on every
+  engine, whatever zone they are given in.** The storage filter builder binds
+  every time bound (`created_*`, `updated_*`, `closed_*`, `started_*`,
+  `defer_*`, `due_*`) as the UTC spelling of its instant. An engine whose
+  timestamp column carries no zone drops a literal's offset, so a `+02:00`
+  bound would have compared as that wall clock; Dolt already honored the
+  offset and `bd` resolves bounds to UTC, so no answer changes here. The
+  keyset cursor (`AfterCreatedAt`) is now bound in UTC too: embedded Dolt's
+  driver sends a `time.Time` as its wall clock with no zone, so a library
+  caller paging with a cursor in another zone was answered from the wrong
+  position there (server Dolt was unaffected).
+- **`bd setup mux --global` words its section in `~/.mux/AGENTS.md` for
+  repositories that use beads.** Mux loads that file in every workspace, but
+  the global install wrote it the way it writes a project's `AGENTS.md`: a new
+  file got the project scaffolding ("Project Instructions for AI Agents" and
+  placeholder sections), the section said that this project uses bd for all
+  issue tracking, and it followed the current directory's beads config, so
+  `--check --global` run from a project with a different Dolt remote or
+  `no-push` setting called it stale, and following its hint flipped it back.
+  The global section is now rendered the same from every project, a new file
+  holds just the section, and the section, task-tracking rules included,
+  applies only in repositories that use beads. The workspace layer run from
+  your home directory, and the root layer run from `~/.mux`, name that same
+  file and now manage it as the global layer too. Run from `~/.mux`, setup no
+  longer installs workspace hooks, or with `--project` a workspace
+  `AGENTS.md`, in `~/.mux/.mux`, which Mux does not load, and `--check` no
+  longer asks for them. `bd setup mux --remove` run there deletes the hooks an
+  earlier run installed, and with them the global section, since there the
+  root `AGENTS.md` is the global file: re-run `bd setup mux --global`
+  afterwards, or delete `~/.mux/.mux` by hand instead. `--check --global`
+  reports a section an earlier run wrote as stale; re-run
+  `bd setup mux --global` to reword it in place. Project scaffolding an earlier
+  run put around it stays; delete it by hand if you don't want it.
+- **`bd setup mux --remove` keeps a symlinked `.mux`.** After removing its
+  hooks it removed the `.mux` directory they were in, and when `.mux` was a
+  symlink that deleted the link, whatever its target held. Run from your home
+  directory, that is `~/.mux`, which Xum's migration replaces with a link to
+  `~/.xum`: `--remove` deleted the link even when bd had installed nothing,
+  and with `--global` it then found no `~/.mux/AGENTS.md` and left the global
+  section in `~/.xum/AGENTS.md`, still exiting 0. It now removes `.mux` only
+  when it is a real directory that the hooks it just removed left empty; a
+  link, or on Windows a junction, stays. Run from `~/.mux`, setup and
+  `--check` now also name the hooks an earlier bd installed in `~/.mux/.mux`,
+  which Mux does not load, and how to remove them.
+- **`bd setup <recipe> --remove` keeps a symlinked integration directory.**
+  After removing its files, `--remove` also removes the directories they were
+  in if that leaves them empty, but where such a directory was a symlink it
+  deleted the link: a linked `.aider`, `.junie` or `.junie/mcp`, even when bd
+  had installed nothing there, `.cursor/rules`, or a file recipe's directory
+  such as `.windsurf/rules` or `.github` (windsurf, cody, kilocode, kiro,
+  copilot and custom recipes), whatever the link's target held, and the agent
+  skill's linked `.agents`, `.agents/skills` or `.agents/skills/beads` (Codex
+  and Cursor; with `--global`, in your home directory) once its target was
+  empty. Every recipe now removes a directory as `bd setup mux --remove`
+  does: only a real one that the files it just removed left empty. A link, or
+  on Windows a junction, stays, and so does a directory it took nothing from,
+  such as an empty `.agents/skills` you made.
+- **`bd setup claude --global` keeps its beads section in `~/.claude/CLAUDE.md`.**
+  It wrote the section into the current directory's `CLAUDE.md`: run from your
+  home directory it created `~/CLAUDE.md`, which by default stops Claude Code
+  reading `AGENTS.md` in the projects below it, and `--remove --global`
+  stripped the section a project's own install had put in its `CLAUDE.md`
+  while leaving that project's hooks in place. A global install and removal now
+  use only the user-level files beside `~/.claude/settings.json`. A new
+  `~/.claude/CLAUDE.md` holds just the section, rendered the same whichever
+  project you run from. Claude Code loads that file in every project, so its
+  section, task-tracking rules included, applies only in repositories that use
+  beads. With global hooks, or a plugin enabled in `~/.claude/settings.json`,
+  `--check` accepts it when the project's instructions have none, or names
+  `--global` when it is missing and the project has no `CLAUDE.md` of its own.
+  Run from `~/.claude`,
+  or from your home directory unless `~/CLAUDE.md` still holds a section an
+  earlier run left there, `--check` judges the user-level files, and from your
+  home directory it names `--global` when no hooks are installed. From your
+  home directory, whose `.claude/settings.json` is the global one, `--remove`
+  removes the user-level section with the hooks. If you ran `--global` before,
+  re-run `bd setup claude --global` to add the section to `~/.claude/CLAUDE.md`.
+  A section an earlier `--global` run left in a directory's `CLAUDE.md` stays
+  there; delete it by hand if you don't want it.
+- **`bd setup claude` names the user-level files its global install uses.**
+  The `--global` flag help listed only `~/.claude/settings.json`; it now also
+  names `~/.claude/CLAUDE.md`, which holds the beads section. Run from
+  `~/.claude` with no hooks installed, `--check` suggested `bd setup claude`,
+  a project install that puts its hook in `~/.claude/.claude/settings.json`
+  and the project-worded section (inside project scaffolding when the file is
+  new) in `~/.claude/CLAUDE.md`, which Claude Code loads in every project; it
+  now suggests `bd setup claude --global`, as it already did from your home
+  directory. Run from your home directory, `--remove` removes the section
+  from `~/CLAUDE.md` and then from `~/.claude/CLAUDE.md`, and printed
+  "Removing Claude Code integration..." before each without naming either
+  file. That line now names the file it acts on, in `bd setup factory`,
+  `opencode`, `mux` and `gemini` `--remove` too.
+- **`bd setup claude --remove` run from `~/.claude` removes a global
+  install's hooks with its section.** There the directory's `CLAUDE.md` is
+  the user-level one, so `--remove` took the global install's beads section
+  out of `~/.claude/CLAUDE.md` but left its hook in `~/.claude/settings.json`,
+  and the next `--check` failed. It now removes that hook too, as `--remove`
+  from your home directory already removes both. If it then cannot remove
+  the section, for example because `~/.claude/CLAUDE.md` is a symlink, it
+  fails instead of warning and reporting success. That includes a
+  `~/.claude/CLAUDE.md` that is an `@AGENTS.md` stub with a
+  `~/.claude/AGENTS.md` beside it: `--remove` there now treats it as the
+  user-level file, as `--global` and `--check` do, not as a project stub
+  whose beads section lives in `AGENTS.md`.
+- **`bd setup claude --remove` leaves a settings file with no bd hook as it
+  is.** It rewrote any settings file that had hooks, `settings.local.json`
+  included: keys re-sorted, `&&` written as `\u0026\u0026`, mode reset to
+  0644. A symlinked `settings.json`, as dotfile managers leave it, failed
+  the removal with `refusing to write through symlink`. It now writes the
+  file only when it removes a bd hook from it. Its "No settings file
+  found", "No hooks found" and parse-error lines now name the settings file,
+  since a removal from `~/.claude` reads two, and a settings file it cannot
+  read now stops the removal instead of being reported as not found.
+- **`bd setup gemini` keeps its beads section in `~/.gemini/GEMINI.md`.** Its
+  default, global install (also what `--global` selects) put the hook in
+  `~/.gemini/settings.json` but wrote the section, with project scaffolding,
+  into the current directory's `GEMINI.md`, even in a directory that does not
+  use beads; run from your home directory it created `~/GEMINI.md`. `--remove`
+  stripped the section a project's own `--project` install had put in its
+  `GEMINI.md` while leaving that project's hooks in place, and `--check` failed
+  in every directory but the one the install ran from. A global install and
+  removal now use only the user-level files beside `~/.gemini/settings.json`. A
+  new `~/.gemini/GEMINI.md` holds just the section, rendered the same whichever
+  project you run from; Gemini CLI loads it in every project, so the section
+  applies only in repositories that use beads. In an existing file the section
+  goes ahead of the `## Gemini Added Memories` section that Gemini CLI
+  releases up to v0.43 keep there, so memories they save later stay outside
+  it. `--check` reports a section already below that heading as stale, an
+  install moves it ahead of the heading, and the move, like `--remove`,
+  keeps the memories saved inside it. With global hooks `--check` accepts
+  the user-level section when the project's `GEMINI.md` has none, and its
+  hints for a project's `GEMINI.md` name `bd setup gemini --project`. From
+  your home directory, whose `.gemini/settings.json` is the global one, and
+  from `~/.gemini`, `--project` is the global install: it adds and removes
+  the hook in `~/.gemini/settings.json` and the user-level section together,
+  and `--check` judges that section, not one in `~/GEMINI.md`. If you ran
+  `bd setup gemini` before, re-run it to add the section to
+  `~/.gemini/GEMINI.md`. A section an earlier run left in a directory's
+  `GEMINI.md` stays there; delete it by hand if you don't want it.
+- **`bd setup` keeps the permissions of a file it rewrites.** The claude,
+  gemini, codex, cursor, mux, factory, opencode, aider and junie recipes,
+  and the Claude, Codex and Cursor setup `bd init` runs, replaced each
+  existing file they changed with a new one at mode 0644, on install and on
+  `--remove`, so a file you had restricted to 0600 came back readable by
+  other local accounts: `~/.gemini/GEMINI.md`, where Gemini CLI keeps your
+  saved memories, or a settings file that can hold API keys, such as
+  `~/.claude/settings.json`, `~/.gemini/settings.json` or
+  `~/.codex/config.toml`. A rewritten file now keeps its permission bits. A
+  file setup creates is still 0644, and `bd setup mux` still makes its
+  hooks executable. A file an earlier run widened stays as it is; narrow it
+  again with `chmod 600`.
+- **`bd setup claude` and `bd setup gemini` no longer replace a settings file
+  they cannot read.** An install took any error reading
+  `.claude/settings.json`, `~/.claude/settings.json`, `.gemini/settings.json`
+  or `~/.gemini/settings.json` for a missing file, so a file it could not
+  read, such as one a `sudo` run left owned by root, was replaced by one
+  holding only the `bd prime` hook, and every other setting in it, API keys
+  included, was lost. The Claude setup `bd init` runs did the same without a
+  warning. Only a missing file now counts as no settings: any other read
+  error stops the install before it writes anything, with an error that
+  names the file (`bd init` warns and goes on). `bd setup gemini --remove`
+  reported such a file as "No settings file found", then removed the beads
+  section from `GEMINI.md` and reported success with the hook still in
+  place; like `bd setup claude --remove`, it now fails and keeps the
+  section.
+- **`bd setup claude --global` installs its hook when the beads plugin is
+  enabled only in the current project.** It skipped the hook whenever the
+  current directory's `.claude/settings.json` or `.claude/settings.local.json`
+  enabled the plugin, which left every other project without one. Claude Code
+  runs a plugin enabled in a project's settings in that project only, so a
+  global install now leaves the hooks to the plugin only when managed settings
+  or `~/.claude/settings.json` enable it. `--check` likewise treats the hooks
+  of a plugin enabled only in the project's settings as the project's: it
+  judges the project's own `CLAUDE.md`, as it does with project hooks, and
+  names `bd setup claude` rather than `--global` when that file is missing. In
+  a project that enables the plugin, a global install's hook and the plugin's
+  both run `bd prime`. If you ran `bd setup claude --global` from such a
+  project before, re-run it to add the hook your other projects are missing.
+- **`bd setup claude` reads the beads plugin's setting the way Claude Code
+  does.** It skipped its hook whenever `~/.claude/settings.json`, the
+  project's `.claude/settings.json` or `.claude/settings.local.json` enabled
+  the plugin, even when a more specific one turned it off, so a project that
+  opts out of a plugin your user settings enable got neither the plugin's hook
+  nor bd's, and `--check` reported the hooks as plugin-managed. It now takes
+  the plugin's setting from the first settings file that names it, in Claude
+  Code's order: managed settings (`managed-settings.json` and
+  `managed-settings.d/`), `.claude/settings.local.json` (at the repository
+  root, or the main checkout's root in a linked worktree, where Claude Code
+  v2.1.211 and later keeps it, then one left in the current directory), the
+  project's `.claude/settings.json`, then `~/.claude/settings.json`. An
+  install that leaves the hooks to the plugin names the file that enables it,
+  no longer adds an empty `"hooks": {}` to a settings file, and no longer
+  creates an empty `.claude/settings.json`, which `bd init` then committed.
+  `bd setup claude`, `--global` and `--check` now warn when `bd prime` runs
+  twice per session in the current directory, as it does in a project whose
+  own settings enable the plugin once a global hook is installed, and say how
+  to run it once. A `--global` install that leaves the hooks to the plugin,
+  run from a project whose own settings turn it off, now warns that no hook
+  runs `bd prime` there and names `bd setup claude`. When only your own
+  settings enable the plugin, a project install no longer deletes an older
+  bare `bd prime` hook from the shared `.claude/settings.json`, which
+  teammates without the plugin rely on; it replaces it with the current hook.
+  When the project's `.claude/settings.json` enables the plugin and only your
+  `.claude/settings.local.json` turns it off, a project install adds no hook
+  to the shared file, where every teammate with the plugin would run
+  `bd prime` twice, and keeps a `bd prime` hook in your
+  `.claude/settings.local.json` instead of migrating it there. It names the
+  hook that already runs `bd prime` for you; when none does, it, `--global`
+  and `--check` name how to run `bd prime` for yourself. Run in a
+  subdirectory or linked worktree, a project install adds no hook beside a
+  `bd prime` hook in the repository root's `.claude/settings.local.json`,
+  which Claude Code loads there, unless the project's `.claude/settings.json`
+  already has one, and keeps a hook in the current directory's own
+  `.claude/settings.local.json`. `--remove` removes the hook from the root's
+  file too, and `--check` warns about a removed `bd sync` hook in that file
+  as well. When an install or `--remove` cannot rewrite a
+  `.claude/settings.local.json` it takes a `bd prime` hook out of, such as a
+  symlinked one, it warns and names the file. `bd setup claude` and `--check`
+  also warn when two of the project's settings files run different `bd prime`
+  commands, which Claude Code runs both of. `--check` suggests migrating a
+  hook in `.claude/settings.local.json` only when `bd setup claude` would move
+  it to `.claude/settings.json`, and an install that leaves the hooks to the
+  plugin says it removed such a hook because the plugin runs `bd prime`,
+  rather than reporting a migration. bd assumes the managed settings files are
+  in force: it cannot see server-managed settings or an MDM profile, under
+  which Claude Code ignores those files by default.
+- **`bd doctor` and the `bd setup claude` tip read the beads plugin's setting
+  the way `bd setup claude --check` does.** `bd doctor`'s Claude Integration
+  check reported "Plugin installed" when `~/.claude/settings.json`, the
+  project's `.claude/settings.json` or `.claude/settings.local.json` enabled
+  any plugin whose name contains `beads`: also in a project whose own
+  settings turn off a plugin your user settings enable, where `--check`
+  reports no hooks, and for a plugin such as `design-to-beads`. It missed a
+  plugin enabled only in managed settings or in the repository root's
+  `.claude/settings.local.json`. The tip suggesting the plugin or
+  `bd setup claude` looked only at `~/.claude/settings.json` for the plugin
+  and in `~/.claude/` for a `bd prime` hook, and did not recognize the
+  `bd prime --hook-json` hook `bd setup claude` writes, so it kept appearing
+  after `bd setup claude --global` and in a project whose
+  `.claude/settings.json` enables the plugin or holds the hook, and never in
+  a project that turns off a plugin your user settings enable. `bd doctor`
+  now takes the plugin's setting from the first settings file that names it,
+  in Claude Code's order, and the tip appears where `--check` reports no
+  hooks installed. `bd doctor`'s hook checks (Claude Integration, Claude Hook
+  Completeness and Claude Settings Health) also read the repository root's
+  `.claude/settings.local.json` from a subdirectory or linked worktree, where
+  they missed a `bd prime` hook that `--check` finds; for `bd doctor <path>`
+  that is the root of `<path>`'s repository.
+- **`bd blocked --label`, `--label-any` and `--exclude-label` apply to a row
+  blocked only by an unsatisfied `external:` dependency.** The
+  external-dependency policy lists such a row itself, after the label query
+  has run, and it was listed whatever its labels; it is now narrowed by the
+  label filters like every other row, on every route. On the proxied-server
+  route such a row also printed with no labels; it now prints them.
+- **`bd gate add-waiter` survives contention the store gave up replaying.**
+  It retried only a version miss, so a convoy adder failed when its guarded
+  write ended in a serialization failure or deadlock the backend stopped
+  replaying (Dolt/MySQL 1213/1205, Postgres 40001/40P01), or, over HTTP, in a
+  503 busy. Those are now retried, but at most twice: each arrives only after
+  the store or `bd serve` has spent a whole replay budget on the write (up to
+  15s), so the 20-write bound a version miss gets could hold an adder for
+  minutes. Each retry waits the jittered backoff plus a busy answer's
+  Retry-After, as `bd serve` sent it. The retry is safe because every round
+  re-reads the gate, deduplicates and writes the whole list guarded by the
+  version it read: a 503 is not proof that nothing was written (a gateway can
+  answer one after the commit), and a write that did land is found on the
+  re-read, so the waiter is never added twice; when the last write allowed is
+  answered busy, one more read checks for it before the command fails. A
+  server fault (500) and an unreachable database are still returned at once,
+  and once the retries run out the error says no write was confirmed and
+  names the write contention, instead of saying the gate kept changing.
+- `bd list --title-contains X` works against an HTTP workspace. The client
+  folds it onto the listing's existing `title` parameter (the store compiles
+  both flags to the same case-insensitive substring predicate), so it needs
+  the `issues.list.title` capability, like `--title`. A `--title` and a
+  `--title-contains` that differ other than in letter case are two
+  predicates, so they ride `title` and `title_contains` together and also
+  need `issues.list.filters` (see Added), as does the `--closed-after` in
+  gascity's polecat pre-flight lookup of recently closed beads. Either flag
+  with `--parent` in the default tree view still refuses over HTTP.
+- **`bd gate create`, `bd gate add-waiter` and `bd gate discover` work over a
+  connected HTTP workspace.** They wrote through the legacy `CreateIssue`,
+  `AddDependency` and map-based `UpdateIssue`, which the HTTP store does not
+  implement, so each failed before any gate member reached the wire. They now
+  run through the library roles on every route:
+  - `bd gate create` is ONE `Lifecycle.Create` carrying the gate members and
+    a reverse `blocks` edge from the blocked issue to the new gate, so the
+    gate and its edge land atomically (one `createIssue` over HTTP, behind
+    `issues.create.gates`). The direct route used to make two writes and an
+    explicit commit; the proxied-server route now uses the same role.
+  - `bd gate add-waiter` reads the gate through `Reader.Get`, deduplicates,
+    and writes the whole waiter list through `Lifecycle.Update` guarded by
+    the row version it read. On a version mismatch it re-reads and retries
+    after a jittered, doubling backoff (10 ms up to 400 ms per wait, at most
+    20 writes), so a convoy of workers registering on one gate at once all
+    succeed. On the direct route concurrent adders used to lose
+    each other's waiters while every one exited 0; no waiter is lost now.
+    Over HTTP it needs `issues.update.gates`.
+  - `bd gate discover` lists through `issueops.ListGates` (as `bd gate check`
+    does) and records each discovered run ID through `Lifecycle.Update`, the
+    same `await_id` write `bd gate check` and `bd close` make. Over HTTP it
+    needs `issues.update.gates`. Its summary now counts only the gates whose
+    run ID was recorded, and it exits non-zero when any matched gate's write
+    failed (it used to report such a gate as updated and exit 0).
+
+  Against a server that does not advertise the token it needs, `bd gate
+  create` and `bd gate add-waiter` are refused before any write, naming the
+  token; `bd gate discover` writes nothing and reports the token as that
+  gate's error. The served corpus gains `mc-gate-create-timer`,
+  `mc-gate-check-timer-resolves`, `mc-gate-add-waiter` and
+  `mc-update-await-id` (pending until the reference server advertises the
+  gate tokens), pinned passing by `TestE2E_GatesOverHTTP`.
+- **`bd import` no longer reports a failed dependency check as a skipped
+  dependency.** Import skips an edge the dependency checks refuse (a
+  self-dependency, a cycle, or a blocker that is the issue's own ancestor or
+  descendant) and reports it on a `Skipped dependency:` line, or in
+  `skipped_dependencies` with `--json`. It did the same when the check's own
+  query failed, for example on a timeout, a dropped connection or a statement
+  the backend could not run: the SQL error became the skip reason, and on
+  Dolt, where the transaction survives a failed statement, the import
+  committed without the edge and exited 0. Such an error now fails the
+  import. Refused edges are still skipped as before.
+
+- **A bare hash that two prefixes share is reported as ambiguous instead of
+  resolving to one of them.** With `hacker-news-abc123` and `ops-abc123` in
+  one workspace (under `allowed_prefixes`, say), `abc123` matched both
+  exactly, and the resolver kept whichever the store listed last:
+  `bd update abc123 --status in_progress` updated `ops-abc123` and printed a
+  success line, `bd comment abc123` wrote to it, and `bd delete abc123`
+  previewed it and printed `bd delete ops-abc123 --force` as the next step.
+  An exact hash match is not an abbreviation, so the partial-id notice stayed
+  silent too. The shared resolver now refuses such a hash with `ambiguous
+  issue ID: "abc123" matches 2 issues: [hacker-news-abc123 ops-abc123]` and
+  asks for the full id, as
+  [Working with IDs](docs/core-concepts/hash-ids.md#working-with-ids)
+  documents for ambiguous cases. Wisps count too: a wisp
+  `hacker-news-wisp-abc123` beside the issue `ops-abc123` used to lose to the
+  issue without a word and now makes `abc123` ambiguous as well, and a wisp
+  whose hash is exactly the input now wins over an issue the input only
+  abbreviates, as an issue's exact hash already did. `bd update`, `bd close`,
+  `bd comment`, `bd delete`, `bd show` and the other commands that print the
+  resolver's error show that message. When a lookup falls through to a
+  routed rig or a contributor's planning store, an id that is ambiguous there
+  (a shared hash, or an abbreviation of several issues) is now reported as
+  ambiguous rather than as "no issue found". Under `--if-revision`,
+  `bd update`, `bd close`, `bd assign` and `bd reopen` report an ambiguous id
+  as the guard's lost race (`precondition_failed`, exit 13), as for any other
+  gone id, since no issue carries it: a parent deleted from the workspace's
+  own store while two of its children survive used to exit 1. A few lookups
+  report any resolver failure as not found (`bd mol show`, `bd graph` and
+  `bd mol pour` among them) and still say so, though they no longer pick one
+  of the issues. A hash that only one prefix uses, a full id, and the
+  workspace's own prefix (`bd-abc123` in a `bd` workspace, still looked up
+  first) resolve as before. A connected HTTP workspace resolves exact ids
+  only and was not affected.
+
+- **`bd mol bond <A> <B>` ignored prefix routing** — operand resolution now uses
+  the same routing fallback as `bd show`/`bd update`/`bd close`, so a bead that
+  lives in a routed store (a prefix-routed rig via `routes.jsonl`, or the
+  contributor planning store) resolves instead of failing with `'<id>' not found
+  as issue or formula`. Previously `bd mol bond` resolved operands
+  against the local store only, so `gt sling <bead> <rig>` — which cooks the
+  default formula and bonds it to a rig-routed bead — died at `bd mol bond` even
+  though `bd show <bead>` resolved the same ID. Resolution is write-intent: the
+  routed target opens writable and the bond commits where the bead lives. Two
+  operands that live in the same routed rig share one store handle and bond
+  normally; only a bond whose operands resolve to genuinely different databases
+  is rejected rather than written to the wrong one. As part of this change, an
+  auto-route — contributor, maintainer or default — now opens writable for the
+  commands that change an existing issue (`bd update`, `bd close`,
+  `bd comment`, `bd unclaim`, `bd dep` and the other routed mutation commands,
+  as well as `bd mol bond`), so the write commits where the issue lives: for a
+  contributor, in the planning repository, as the contributor workflow
+  documents. Every auto-route used to open read-only, so on an embedded
+  workspace these writes were refused. `bd unclaim` now opens a routed issue
+  writable, as `bd update --claim` does, and commits the release there; on an
+  embedded workspace `bd human respond` and `bd human dismiss` now record a
+  routed change as a Dolt commit in the routed repository instead of leaving it
+  uncommitted in that repository's working set. A routed
+  write, prefix or auto, never creates the target's database: an embedded
+  repository that has not been bootstrapped yet fails the write instead of
+  gaining an empty database that `bd bootstrap` would then take for the real
+  one. An auto-routed store, read or write, now opens the target's own
+  configured `dolt_database`, as a prefix route already did, even when
+  `BEADS_DOLT_SERVER_DATABASE` names the current workspace's database. An
+  auto-routed write refuses a target whose `metadata.json` is unreadable or
+  names no `dolt_database`, while a target with no `metadata.json` at all (a
+  planning repository nothing has been created in yet) opens the one embedded
+  database it holds, or its default database when it holds none or several; a
+  prefix route still requires the target's `dolt_database`. A
+  routing failure, such as an unreadable `routes.jsonl` or a
+  routed store that fails to open, is now reported as itself instead of as
+  `no issue found matching`. Same routing-parity fix as
+  [#3608](https://github.com/gastownhall/beads/issues/3608) for `bd close`.
+  Fixes [#4714](https://github.com/gastownhall/beads/issues/4714).
+
+- **`bd gate check` works over a connected HTTP workspace.** Its open-gate
+  listing built the same raw `SearchIssues` filter `bd gate list` did before
+  S20, so the HTTP backend refused the command before reading a gate and gc's
+  core `gate-sweep` order (`bd gate check --type=timer --escalate`) failed on
+  every remote scope. It now lists through `issueops.ListGates` over the
+  route's Querier (direct, proxied and remote alike). Closing a resolved gate
+  was already served. A bead gate's first sighting of its awaited bead
+  (`await_seen`, recorded when the check finds that bead, not yet closed, in
+  the gate's own store) was written through the legacy map-based
+  `UpdateIssue`, which the HTTP store does not implement, so every open bead
+  gate with an open target was an error on every sweep; it now goes through
+  the Lifecycle role's `Update` (a single-key metadata set, `issues.update` on
+  the wire), as does the gh:run discovery's `await_id` persist, which the
+  HTTP client sends to a server that advertises `issues.update.gates` (see
+  Added). Against an older server it refuses that patch before the dial, so a
+  gh:run gate with a workflow-name hint stays that gate's error, naming the
+  missing token and the server rather than a Go method.
+  The sweep also skips the gates of a persisted proto
+  (`bd cook --persist`): they are templates that every pour copies, so a
+  write to one was refused on every sweep and, in a local workspace, a
+  resolved one (an expired timer, say) was closed in the proto itself. The
+  listing's query leaves them out (`template=false`), so they take no row of
+  `--limit` and cannot crowd a live gate out of the sweep; `bd gate list`
+  still lists them. A negative `--limit` is now an error; the direct and
+  proxied routes used to read it as no limit. The served corpus gains
+  `mc-gate-check-timer`, `mc-gate-check-gh`, `gate-check-all` and a served
+  test over await-typed and template gates.
+
+- **`bd list`'s text renderings read only the listed issues' dependency
+  edges.** The tree (the default), `--deps`, `--parent`, `--format` and
+  `--watch` loaded every dependency record in the workspace
+  (`GetAllDependencyRecords`) to draw one page. Over a connected HTTP
+  workspace that is a walk of the whole workspace: every issue id, 200 per
+  request, then every id's edges, 100 per request. `bd list --limit 20`
+  against a ~3,800-issue workspace made 62 sequential requests (~5.7 s at
+  ~50 ms a round trip). Every rendering reads only edges a listed issue owns,
+  so the listing now reads exactly those through the `EdgeReader` role: one
+  request per 100 listed ids over HTTP. The same listing makes 6 requests
+  (~0.5 s), one more than `bd list --json`, and prints the same bytes. On a
+  local store a default page is as fast or faster. A listing that covers most
+  of a large store now pays batched reads (four queries per 200 listed ids)
+  instead of one scan of both edge tables, which costs more past roughly
+  1,000 listed rows: +0.07 s at 1,000 rows and +0.46 s at 4,000 on embedded
+  Dolt. A store with many wisps, whose edges the old read also scanned, is
+  faster at every page size.
+- A heartbeat can no longer resurrect a lease after a release or close. A
+  heartbeat re-arming a hand-doled claim (in_progress with no lease row) could
+  race a release or close on Dolt and leave an orphaned lease row on an open
+  or closed issue; every later heartbeat by the former holder then refreshed
+  it and answered success for a claim it no longer held. This affected every
+  Dolt route, including releases before this one. The re-arm is now recorded
+  as a mutation and remints the issue's row_lock, which every claim-ending
+  path rewrites, so it collides with a racing release or close and one side
+  is replayed against the other's result (the cost: a hand-doled claim's
+  first heartbeat changes its `revision` once). The refresh also requires, in
+  the same transaction, that the issue is still in_progress under the holder,
+  and a refusal deletes the caller's orphaned lease row, so a lease row
+  orphaned any other way never answers a heartbeat. A refresh and a refusal
+  still make no Dolt commit on any route; a re-arm commits only its own
+  tables (never `DOLT_COMMIT('-Am')`), so another writer's uncommitted
+  batch-mode edits to other tables stay uncommitted (a re-arm stages its
+  tables whole, as every other direct-route write does). On embedded Dolt, a heartbeat landing in
+  the same second as the previous one no longer re-grants the lease
+  (rewriting its `granted_at` / `granted_node`), and on every route a
+  heartbeat whose actor is a different spelling of the lease's holder
+  (`gastown.mayor` for `gastown__mayor`) refreshes the lease in place,
+  keeping its `granted_at` and granting replica, instead of re-granting it
+  under this node. For a Postgres port: the
+  refresh now reads the issue row, so under SERIALIZABLE expect more retried
+  serialization failures between a holder's own edits and its heartbeat.
+- **`bd gate list` works over a connected HTTP workspace** (S20). The
+  workspace-wide listing built a raw `SearchIssues` filter, which the HTTP
+  backend refuses, so gc's `renudge-stale-human-gates` order failed on every
+  remote scope. Every route now calls one library entry,
+  `issueops.ListGates`, which asks the Querier role (`queryIssues`, served by
+  every deployed server) for `type=gate` with closed rows hidden unless
+  `--all`: the same rows the raw filter selected, on both planes. `--limit 0`
+  is unlimited, as before. The bead-scoped form (`bd gate list <id>`) is
+  unchanged.
+- **`bd export` works over a connected HTTP workspace** (S21). It read
+  through the raw `SearchIssues` method and the bulk label, dependency and
+  comment reads, which the HTTP backend refuses, so gc's 15-minute JSONL
+  export order (`gc bd export --all`) failed on every remote scope. On a remote
+  backend the read set now comes from one library entry, `issueops.ReadExport`,
+  composed over role reads every deployed server publishes: an unlimited
+  `Reader.List` for the rows, their labels and counts, `EdgeReader.ReadEdges`
+  for the dependency records, and `Reader.Get` with comments for each row
+  that has any. The JSONL is written by the same code as on every other
+  route. Memories (`--all`, `--include-memories`) come from the served memory
+  plane (`listMemories`), not the settings listing, which withholds every
+  `kv.*` row and so exported none. A failed read fails the export, never
+  shortens it. A remote export does not yet stamp the `wisp_plane` marker,
+  because the server publishes no plane membership. So a current `bd import`
+  of a remote export puts genuine no-history wisps on the durable issues
+  plane instead of the wisps plane, and gc's JSONL archive keeps them.
+  Nothing is dropped.
+- **A silent HTTP connection no longer costs a read the full 60s.** The HTTP
+  backend client gives a read's first attempt 15s from when it is sent to get
+  its response headers (`BEADS_HTTP_RESPONSE_HEADER_TIMEOUT`: a duration, a
+  number of seconds, or `off`), then retries it once on another connection
+  with no header timer, on what is left of the same 60s request timeout. A
+  slow but healthy read still finishes if its retry's headers and body
+  together fit in that remainder (about 45s); one that needs longer now fails
+  at 60s. A read whose connection is reset is retried the same way (on Windows
+  only when the reset surfaces as an early EOF), and each retry is logged to
+  stderr with its count. The events:watch stream's connect gets neither the
+  timer nor the retry. A write is never retried; one that was sent and timed
+  out before its headers fails with a typed `wire.ResponseHeaderTimeoutError`
+  naming the server's host, because it may or may not have been applied,
+  while a dial or TLS timeout stays a plain connection error. The batch get,
+  a read on POST, is now also retried on a 503 the way a GET is.
+- **A large batch apply over HTTP no longer fails at 60s while the server
+  commits it.** `bd serve` runs an `issues:batchApply` of more than 100 items
+  (a large `bd create --graph` plan, say) under its `--large-apply-ceiling`
+  (5 minutes by default), on a context detached from the client, but the HTTP
+  backend client gave every request 60s. A large apply that took longer
+  failed client-side with a timeout while the server went on to commit it.
+  Such a request is now dialed with 6 minutes, which covers the server's
+  default ceiling plus what it may spend before (reading the request, waiting
+  for the one-wide large-apply slot) and after (writing the answer back).
+  Every other request keeps 60s. An `*http.Client` passed in through
+  `backend/http`'s `Options.HTTPClient` is raised the same way for that one
+  request when its `Timeout` is shorter than 6 minutes; one with no `Timeout`
+  stays unbounded. A server whose `--large-apply-ceiling` is raised past about
+  5m15s can still outlast the client: it does not advertise its ceiling, so
+  the client cannot learn it.
+- **An update of a template is now refused for every caller, not only
+  `bd update`.** The template guard used to be a pre-read in `cmd/bd`, so an
+  update through `bd serve` (`PATCH /v0/beads/issues/{id}`), an `update` item
+  of `issues:batchApply`, or a library caller of `issueops.Lifecycle.Update` or
+  `BatchApplier` edited a template that `bd update` refused. It now lives in
+  the role, in the update's own transaction, on every backend: any update
+  naming a template refuses with `*issueops.TemplateReadOnlyError` (matching
+  `ErrTemplateReadOnly`), whatever its patch and force flags, after the
+  compare-and-set guards. Over HTTP it is `409` `template_read_only`, and the
+  client rebuilds the same typed error. HTTP and library callers that edited
+  templates are now refused (pour the template instead) unless they set the
+  new `UpdateRequest.AllowTemplate` (`allow_template` on the PATCH body), which
+  stands the guard down for that one request. `bd update`, `bd assign` and the
+  proxied `bd tag` print the same line as before; `bd label` and
+  `bd set-state` set `AllowTemplate` and keep editing templates as they always
+  have. A batch create that makes a template and splices its metadata still
+  lands: the splice finishes the create. Version skew: a new `bd` against an
+  older `bd serve` (no `issues.update.allowTemplate` token in the handshake)
+  refuses a single template update itself before dialing, and never sends
+  `allow_template` to it. A batch `update` item gets no such check (its target
+  resolves on the server), so through an older `bd serve` it still edits a
+  template. An older `bd label` or `bd set-state` against a new `bd serve`
+  cannot send `allow_template`, so it now gets `409` `template_read_only` on a
+  template; upgrade the client. Not yet moved: `bd comment`, `bd note`,
+  `bd priority` and `bd tag` still refuse templates with their own pre-read in
+  `cmd/bd` (their direct-route writes do not go through `Lifecycle.Update`), so
+  for those four the guard lives only in the CLI. Claim, reopen, `:casMetadata`
+  and the served `addComment` have no template check at all yet (bd-jkp9v3):
+  `POST /v0/beads/issues/{id}:claim` (`issueops.Claimer`) still claims a
+  template that a `PATCH` with `claim: true` refuses. Close's guards move to
+  the role in their own change (#7425).
+- The dotted-id hierarchy refusal (a child such as `bd-abc.1` may not carry an
+  explicit edge to its own ancestor, other than the parent-child edge to its
+  immediate parent) moved from `cmd/bd` into the library as
+  `issueops.CheckDottedChildDependency` / `*issueops.DottedChildDependencyError`
+  (unwraps to `ErrValidation`). Every `DependencyEditor` (dolt, embedded,
+  unit of work, HTTP) and every `BatchApplier` dep_add item now enforces it, so
+  an HTTP `dependencies:add`, a `batch:apply` edge and `bd create --graph`'s own
+  edges are refused like `bd dep add` (HTTP: 400 `invalid_argument`). `bd dep
+  add`, `bd dep --blocks`, `bd link` and `bd dep add --file` print the same
+  messages as before, and a `bd batch` script's `dep add` line, which neither
+  backend checked, is now refused with that message and rolls the whole batch
+  back. The refusal is decided from the two ids, ahead of every check that
+  reads the stored graph, so for a child whose parent-child edge is already
+  stored (a `bd create --parent` child) an HTTP caller now gets that 400 where
+  it used to get 409 `dependency_cycle` (a blocking type) or
+  `dependency_exists` (any other type).
+- An HTTP create (`issues:create`, `issues:batchCreate`, a `batch:apply`
+  create item) that omits `priority` now stores the create default, P2, as the
+  spec documents, instead of P0 (critical). The default lives in one place:
+  `issueops.CreateRequest.DefaultPriority` (and `BatchCreateItem` /
+  `CreateItem.DefaultPriority`) asks the shared create preparation to store
+  `issueops.DefaultCreatePriority`; the handlers set it for an absent member,
+  the HTTP client omits `priority` for it only when the server advertises the
+  new additive `issues.create.defaultPriority` handshake token (an older
+  `bd serve` reads an absent `priority` as P0, so a new client sends `2`
+  explicitly to it), and `bd create` (no `--priority`),
+  `bd create --graph` (a node without `priority`) and `bd create --file` (a
+  template without `### Priority`) rely on it rather than spelling 2. An
+  explicit `0` is still P0, and `DefaultPriority` with a non-zero priority is
+  `ErrValidation`. CLI output is unchanged on the in-tree backends, except
+  that `bd create --file` now warns on stderr about a `### Priority` it cannot
+  parse, as it already did for `### Type`, rather than dropping it silently.
+  The client decides from the handshake its store cached (once per command
+  in `bd`), so a create that lands on an older build behind the same URL (a
+  `bd serve` rolled back under a live store, or mixed builds during a
+  rollout) still stores P0, with no error on either side.
+  Out-of-tree storage backends must now honor `DefaultPriority`; see the
+  BREAKING (out-of-tree storage backends) entry under `### Changed`.
+- Blocked-state repair no longer lets a stale `is_blocked` bit on a parent
+  with no reason row of its own hold itself up through a parent that blocks
+  on its own child, in a malformed parent-child cycle (gastownhall/beads#7386).
+  The explained-parent walk, on both the full repair and the per-write
+  recompute, now climbs through such a parent, whose bit is inherited,
+  instead of treating it as a final unexplained ancestor; `bd doctor`'s
+  Blocked State check counts the stale bit and `--fix` clears it.
+- A closed or pinned parent whose `is_blocked` bit a merge left stale no
+  longer darkens its open children (gastownhall/beads#7626). The next write
+  under such a parent used to mark its children blocked and hide them from
+  `bd ready`. The parent-child cascade, the close-gate walk, the full repair
+  and `bd doctor`'s Blocked State check now read a parent's bit only while
+  the parent is neither closed nor pinned. Children already darkened this
+  way stay out of `bd ready` until a write recomputes them: the Blocked State
+  check now counts them, and running `bd recompute-blocked` (or
+  `bd doctor --fix`) once clears them.
+
+- `bd show --current` over the HTTP backend no longer prints the wrong issue.
+  Its in-progress/hooked lookup used the raw `SearchIssues` method, which
+  the HTTP backend refuses; the refusal was swallowed and the command fell
+  back to the last-touched issue, exit 0. The lookup now reads through the
+  `issueops.Querier` role, and a failed read is an error on every route
+  (including `--proxied-server`), never a fallback. A miss (nothing in
+  progress or hooked, or no actor) is another matter: `--proxied-server` now
+  falls back to the last-touched issue as the direct route always has, where
+  it used to fail with `no current issue found`.
+- `bd list --type <infra type> --include-ephemeral` (and `GET
+  /v0/beads/issues` with the same parameters) now include that type's durable
+  rows — a promoted wisp, an issue retyped after it was created — beside its
+  wisps, as `--include-ephemeral` promises; the type used to narrow the read
+  to its wisps alone. `bd count --include-infra --include-ephemeral` and the
+  count endpoint count the same rows. An infra `--type` without
+  `--include-ephemeral` still reads only the wisps, and `bd search --type
+  <infra type>`, now served by the same listing, still finds that type's
+  wisps and durable rows alike.
+- `bd recompute-blocked` on a workspace connected to `bd serve` is a no-op
+  that exits 0 instead of refusing: the server maintains `is_blocked` on
+  every write and the column lives in its database. `--json` reports
+  `{"rows_corrected": 0, "maintained_by": "server"}`.
+- **The http store's `GetIssue` answers a miss with `storage.ErrNotFound`,
+  like the local stores.** It used to answer a missing (or empty) id with
+  `(nil, nil)`, which every caller written against the backend contract
+  read as a hit: `bd create --graph` refused every plan naming an explicit
+  id over http. The miss is now `not found: issue <id>`, wrapping
+  `storage.ErrNotFound` exactly as `issueops.GetIssueInTx` does; the empty
+  id never dials.
+- **`bd list`, `bd children`, `bd show --json` counts, the default `bd dep
+  tree`, `bd ready --claim` and `bd close` work on an http workspace.** The
+  external-dependency decorator rebuilt its views from storage seams the
+  http store only partly serves, so `bd list`/`bd children` refused, `bd
+  show --json` printed zero dependency and comment counts without an error,
+  and the default dep tree refused; each view now passes the server's own
+  role through (see *Added*). A missing id is a plain not-found after one
+  `getIssue`, instead of a partial-id search refusal, and `bd update
+  <absent> --claim` answers a not-found gc classifies.
+- **`bd mol wisp gc --age 0s` can miss a just-created wisp.** Dolt's
+  `DATETIME(0)` column rounds fractional seconds half-up on write rather
+  than truncating, so a wisp created in the second half of a wall-clock
+  second can read back with `updated_at` up to 0.5s in the future. The GC's
+  age check (`now.Sub(updatedAt) > ageThreshold`) then compares against a
+  negative duration and fails, even though `--age 0s`'s own contract is
+  that every wisp qualifies. `ageThreshold <= 0` now bypasses the clock
+  comparison entirely (#7236).
+- **`bd mol wisp gc` no longer deletes a fresh step because a wisp it
+  depends on is abandoned.** The GC applied `--age` only to the wisps it
+  selected directly, then deleted their dependents at any age as long as
+  they were not live work, so a step created seconds earlier went with an
+  old wisp it depended on, and raising `--age` did not help. A dependent
+  now has to meet `--age` itself, by the same rule as the wisp it depends
+  on (including the #7236 rounding fix). One that is too young is spared
+  and loses its edge to the deleted wisp: an open one is collected once it
+  ages out, a closed one is left for `--all`, `--closed` or `bd purge`,
+  since without `--all` the GC reaches a closed wisp only as the dependent
+  of an abandoned one (#5219).
+- `bd create --parent` works on the HTTP backend: the create role mints the
+  `<parent>.<n>` child id (and inherits the parent's labels) inside the
+  create on every route, instead of the CLI reserving it through a raw
+  `GetNextChildID` the HTTP backend does not serve. `bd mol current` (with
+  or without an id) and `bd mol progress` no longer answer empty or refuse
+  over http, and `bd ready --mol` step rows carry their assignee and
+  timestamps.
+- **Server-mode config writes are committed again.** On the direct SQL-server
+  route, `bd remember`, `bd forget` and `bd config set|unset|set-many` wrote
+  the `config` table but never created a Dolt commit: `maybeAutoCommit`
+  returns early off the embedded route, and plain `Commit()` excludes config
+  (GH#2455). The rows sat in the working set, where `bd dolt push` does not
+  carry them, and a dirty internal key such as `status.custom` made the next
+  `bd dolt pull` refuse until an explicit `bd dolt commit`. With
+  `dolt.auto-commit` on (the default) these writes now commit right away
+  through the scoped `CommitConfigOnly`, which stages only `config` and the
+  lookup tables projected from it, so a concurrent operation's other dirty
+  tables are never swept; `batch` and `off` defer them to `bd dolt commit`
+  like every other write. `bd remember` and `bd forget` commit only user
+  `kv.*` rows. When an internal config key is dirty (such as the
+  `issue_prefix` that `bd rename-prefix` writes), the memory is still
+  stored but not committed: the command warns on stderr with the keys named
+  and exits 0, `--json` adds `committed: false`, `commit_error` and
+  `dirty_config_keys`, and `bd dolt commit` publishes the memory with those
+  keys. v1.0.1 ([#3052](https://github.com/gastownhall/beads/pull/3052)),
+  whose commits this restores, also warned on a failed memory commit
+  instead of failing the write. `bd config unset` of a yaml-only secret key
+  also commits its delete of a credential row an older bd stored in the
+  database, so HEAD, which `bd dolt push` publishes, no longer keeps it
+  ([#4078](https://github.com/gastownhall/beads/issues/4078)).
+
+- **PRs based on `hotfix/**` branches now run full CI, not just
+  cross-version historical smokes and triage labeling.** `pr.yml`,
+  `pr-risk.yml`, `conformance.yml`, `cross-version-smoke.yml` and
+  `regression.yml` all trigger `pull_request` on `main` and `release/**`,
+  but not on `hotfix/**` — a backport PR based on a hotfix line (the same
+  position `release/**` was added for) got no unit shards, no lint, no
+  risk gate, and no required CI Gate at all: 15 passing cross-version
+  smokes and triage jobs, nothing else. Added `hotfix/**` alongside
+  `release/**` in all five (#7148).
+
+
+- **Ordinary bd commands now wait out a maintenance operation instead of
+  failing at once.** While `bd init`, `bd backup restore`, `bd migrate` or
+  `bd bootstrap` holds the workspace gate exclusively, every other bd command
+  on that workspace — and, in shared-server mode, on every project sharing
+  the server (another project's ~8s `bd init`) — failed immediately with "a
+  maintenance operation is running". They now wait up to 30s (one "waiting
+  for another bd process" notice after 2s; Ctrl-C aborts), then fail with the
+  same error naming the bound (and, in shared-server mode, saying the holder
+  may be another project). Override with `BEADS_GATE_WAIT_TIMEOUT` (`1m`,
+  `90`); scripts that relied on the old fail-fast behavior should set
+  `BEADS_GATE_WAIT_TIMEOUT=0`. Git hooks stay fail-fast so a commit or
+  checkout is never stalled. Waiting is writer-fair: once a maintenance
+  operation is waiting for the gate, newly started commands queue behind it,
+  so a steady stream of short commands can no longer starve `bd init`. The
+  queue only ever delays a command, never fails it, and a maintenance
+  operation that cannot get in (for example behind a `bd list --watch`)
+  stops queueing others after 10s. Queued maintenance operations run one
+  after another, and a waiting command waits for all of them. The queue
+  marker is an OS lock beside the gate (`*.gate.lock.intent`, covered by the
+  existing `*.gate.lock*` gitignore pattern), so a crashed waiter never
+  leaves a stale queue behind. `bd init`'s own wait (`BEADS_INIT_GATE_TIMEOUT`)
+  rises from 30s to 60s, since back-to-back inits under load take 10-15s
+  each.
+
+- **`bd rules compact` no longer overwrites an existing file.** A source named
+  like the composite was overwritten and then deleted with the other sources,
+  leaving nothing, and an unrelated rule with that name was silently replaced.
+  Compact now refuses a group whose output or backup path already exists
+  (a dangling symlink included), naming it, and leaves that group untouched
+  while other `--auto` groups apply. A failed backup deletes no source; a
+  failed delete is reported with exactly what was written, backed up and
+  deleted, and every backup is kept.
+  ([#5719](https://github.com/gastownhall/beads/issues/5719))
+
+- **Concurrent `bd init --shared-server` runs in different projects no
+  longer refuse each other.** Every shared-server project gates the one shared
+  dolt data dir, and `bd init` holds that gate exclusively for its ~8s run but
+  waited only 5s for it, so a second init (or an init during another
+  project's long command) failed with "bd init refuses to run over live bd
+  activity". `bd init` now waits (60s by default, see the gate-wait entry
+  above), printing one "waiting for another bd process on the shared server"
+  notice after 2s, then fails with the same refusal naming the bound.
+  Override it with `BEADS_INIT_GATE_TIMEOUT` (`2m`, `90`). Other exclusive
+  operations keep their 5s wait.
+
+- **A proxied-server command against an unreachable external Dolt upstream
+  now fails within about a second with a clear error instead of stalling
+  ~20-30s.** The local db proxy stayed up, so the client only saw a bare
+  close, which the bootstrap ping retried as a transient drop for its whole
+  30s budget before reporting `invalid connection`. The proxy now answers such
+  a connection with a MySQL error (2003, prefixed `beads db proxy:`) saying
+  what happened: the dial was refused / the socket is missing / the host is
+  unreachable, or the upstream closed the connection before the MySQL greeting
+  (down, restarting, or at its connection limit). The client retries that
+  error only for about a second, so an endpoint that is flapping or rebinding
+  is still ridden out within one command. A backend that drops a connection
+  after the greeting, a dial timeout, and every refusal from a managed (local
+  sidecar) backend keep the full transient retry.
+- **`bd ready --explain` no longer reports a pinned dependency as a resolved
+  blocker.** The ready query skips a pinned target exactly as it skips a closed
+  one, so a `blocks` edge onto a pinned bead never fences its dependent — but
+  the explanation listed every blocking edge of a ready issue under
+  `Resolved blockers`, status unread, and a bead wired behind a long-lived
+  pinned bring-up reported itself satisfied while its precondition was unmet.
+  Each blocking edge is now sorted by the target's status: closed under
+  `Resolved blockers` (and `resolved_blockers`), pinned under
+  `Pinned dependencies (never block)` (`pinned_dependencies`), and any other
+  status under `Open dependencies (not blocking)` (`open_dependencies`) — the
+  shape #6066 reports for a foreign-prefix blocker, now visible instead of
+  passing as resolved. `Reason` keeps its `N blocker(s) resolved` lead and
+  appends the pinned and open counts as clauses. Both routes fetch the ready
+  issues' dependency targets alongside the blockers they already fetched.
+  Pinned-never-blocks itself is unchanged.
+
+- **`bd list` no longer silently drops all but the last repeated filter flag.**
+  `--status`, `--state`, and `--id` were plain string flags, so
+  `bd list --status open --status closed --status pinned` kept only `pinned` —
+  a census over 477 issues quietly answered over 3, with nothing in the output
+  to distinguish the narrowed answer from a correct one. Repeats of those three
+  flags now accumulate (duplicates collapse) instead of overwriting, so
+  `--status open --status closed` selects the same set as
+  `--status open,closed`. The one repeat that does not simply accumulate is one
+  involving `--status all`: `all` cannot be combined with other statuses, so
+  `--status all --status open` is now refused rather than narrowed to `open`.
+  `--type` and `--assignee` are single-valued all the way down — unioning would
+  fail type validation or exact-match nobody — so a repeat of either now refuses
+  loudly instead of silently keeping the last value:
+  `invalid argument "epic" for "-t, --type" flag: --type given more than once
+  (already "bug"); pass a single value`.
+  Single-flag and comma-form spellings behave exactly as before.
+
+- **`bd restore`, `bd admin compact`, `bd repo <add|remove|list|sync>`,
+  `bd migrate [sync|hooks|schema]` and `bd preflight` no longer register a
+  local `--json` that shadows the root persistent flag.** pflag keeps a
+  command's own flag and drops the inherited one, so
+  `rootCmd.PersistentFlags().Changed("json")` stays false for that command;
+  [#6293](https://github.com/gastownhall/beads/pull/6293) compensated for that
+  per command by making the pre-run consult the subcommand's own `Changed` bit
+  before the root's. Deleting the eleven local registrations removes the
+  shadowing itself rather than working around it: `--json` moves to the Global
+  Flags section of those commands' `--help`, and a guard test now fails the
+  build if a command shadows the root flag again — closing the class before an
+  *unbound* local copy can reappear and invert the output mode it was meant to
+  select.
+
+- **`bd init --force` can no longer silently recreate a missing server-side
+  database as empty** (be-5up5). `--force` is an alias for `--reinit-local`,
+  which skips the existing-data guard entirely, and the reinit path's own typed
+  confirmation keys on the issue count — which is 0 in exactly the case where
+  the database is missing. So `bd init --force` against a lost database created
+  a fresh empty one at the same name, with no prompt and no destroy token: the
+  2026-08-11 fleet-wide data-loss reflex, reached through the flag an operator
+  in a panic is most likely to try. The missing-database refusal now applies on
+  the reinit path too. `--force`/`--reinit-local` authorize destroying a
+  database that exists; only the explicit, per-invocation `--recreate-missing`
+  authorizes creating one where the configured database has gone missing.
+
+- **`bd init --reinit-local` and `--force` no longer wave through a workspace
+  that predates `project_id`.** Their missing-database safety net returned
+  early whenever `.beads/metadata.json` carried no `project_id`, before it ever
+  probed for this project's local database directory — so a workspace
+  initialized before GH#2372 minted that field, whose local Dolt storage had
+  since been lost, was protected under plain `bd init` but not under the two
+  flags an operator reaches for in a panic. The probe now runs first and
+  unconditionally, and an absent `project_id` is allowed through only when
+  there is no local Dolt data directory either, matching the plain-`bd init`
+  guard. `--recreate-missing` still opens it. The signal decision behind both
+  guards is recorded in `engdocs/adr/0004-missing-database-guard-signal.md`.
+
+- **`bd init --recreate-missing` now reaches its own opt-in.** The existing-data
+  check derived "is this project's database here?" from the Dolt data
+  directory, which exists on every initialized workspace, so the
+  missing-database branch was unreachable and both `--recreate-missing` opt-ins
+  behind it were dead code. Four surfaces — the flag help, `bd help
+  init-safety`, `docs/recovery/init-safety.md`, and the guard's own refusal
+  text — told the operator to run `bd init --recreate-missing --prefix <p>`;
+  that command exited 1 with a false "already initialized" message and pointed
+  back at `bd init --reinit-local`, which is the destructive path, leaving the
+  documented recovery circling between two refusals. The check now probes
+  `<dolt-data-dir>/<database>/.dolt`, the same probe the reinit-path guard
+  uses.
+
+- **The missing-database guard probes this project's own database directory**
+  (`<dolt-data-dir>/<database>/.dolt`) rather than the Dolt data directory that
+  merely contains it. The data directory always exists on an initialized
+  workspace — shared-server mode creates the machine-global one on resolution,
+  and per-project mode creates it at init — so probing it made the guard a
+  no-op in shared-server mode, which is the topology of the 2026-08-11 loss.
+  User-visible wherever the data directory exists but the database is gone.
+
+- **The missing-database refusal no longer prints a ready-to-paste
+  `bd init --recreate-missing` command line.** It names the flag and points
+  to `bd help init-safety`, which keeps the full invocation behind the
+  diagnosis it requires (ADR 0002 Invariant 4). The refusal also fires when
+  the server merely could not be reached, and a stopped server, a wrong port
+  or a wrong data dir all look the same from there; recreating in any of them
+  strands the real data behind an empty namesake. Run without `--prefix`, the
+  old line also printed `--prefix` with no value. The `--force` and
+  `--reinit-local` help, `bd help init-safety` and the recovery playbook now
+  say that neither flag authorizes recreating a missing server-mode database.
+
+- **`BEADS_DOLT_POOL_READ_TIMEOUT` / `dolt.pool-read-timeout` (and the write
+  twins) now apply to every `bd` command in server mode.** The knobs shipped in
+  #5089, but their env/config ladder ran only for callers of `NewFromConfig*`;
+  the CLI's own store open hand-builds its config and goes straight to `New`,
+  so every `bd` command kept the built-in 10 s pool
+  deadline whatever the knob said — on a large shared server that is what made
+  `bd close` of a bead with dependents die in its recompute with `i/o timeout`
+  and no relief valve. The ladder now runs from the constructor every DoltStore
+  open shares — the CLI's store and library callers of
+  `New`/`NewFromConfig*`; `bd serve`'s HTTP data path builds its own
+  DSN without pool deadlines and is unchanged
+  ([#6144](https://github.com/gastownhall/beads/issues/6144)). Note for
+  operators of loaded servers: the documented precedence now reaches `bd
+  import` as well — it used to inherit the 5 m long-read fallback
+  unconditionally because the CLI's knob value was always 0, so a
+  `BEADS_DOLT_POOL_READ_TIMEOUT` set below that now bounds import too; size the
+  knob for your largest import, or leave it unset for the fallback.
+
+- **`BEADS_DOLT_MAX_CONNS` / `dolt.max-conns` now size the pool for ordinary
+  `bd` commands in server mode.** The pool-size knob (GH#3140) had the same
+  hole as the deadline knobs above: it was read only on the `NewFromConfig*`
+  path (routed stores, `bd doctor`, ...), so the CLI's own store open always
+  ran on the built-in 10-connection pool whatever the knob said. It now shares
+  the deadlines' ladder in the constructor every DoltStore open reaches
+  ([#7052](https://github.com/gastownhall/beads/pull/7052)).
+
+- **No-DB commands in a redirected workspace no longer lose the source
+  repo's `dolt_database`** (be-xil, be-fyt). `bd doctor`, `bootstrap`,
+  `context`, `dolt`, `init` and `version` skip store init, and the beads dir
+  they select is resolved through `beads.FindBeadsDir()`, which follows a
+  `.beads/redirect` internally. The source repo's configured database name was
+  therefore gone before anything could capture it, so `bd doctor` fell through
+  to the shared target directory's own default database and reported
+  `Dolt Schema: wrong database` — offering a `--fix` that would have repointed
+  the rig at an unrelated rig's store. The redirect source is now captured
+  before that resolution, matching the store-requiring path.
+- **An explicit `--db`, `BEADS_DB` or `BD_DB` target is no longer shadowed by
+  the ambient repo's redirect-source database** (be-fyt). `beads.GetRedirectInfo()`
+  deliberately resolves from the CWD repo's local `.beads` regardless of
+  `--db`/`BEADS_DIR` (bd-wayc3), so when the ambient repo itself had an active
+  redirect, the preservation above re-opened the same "wrong database" failure
+  through a narrower door. Preservation is now skipped whenever the caller
+  named an explicit target, asking the same question `selectedNoDBBeadsDir`
+  asks so the two cannot drift apart. Note that a `--db` value naming a
+  *database* rather than a path is not an explicit *directory* target: it is
+  consumed only on the store-requiring path, the ambient workspace is still
+  what gets selected, and its source database is still preserved.
+
+- **`bd --readonly sql` now refuses set operations that write through an
+  `INTO` clause** ([#7033](https://github.com/gastownhall/beads/issues/7033)).
+  `UNION`, `INTERSECT`, and `EXCEPT` statements ending in `INTO OUTFILE`,
+  `INTO DUMPFILE`, or `INTO @var` were classified as reads, bypassing the
+  read-only check and potentially writing a file. They are now classified as
+  writes, matching ordinary `SELECT ... INTO` statements.
+
+- **An ambient `BEADS_DOLT_SERVER_PORT` now marks a workspace externally
+  managed — suppressing auto-start — and no longer stops bd reaping its own
+  orphaned server**
+  ([#5934](https://github.com/gastownhall/beads/pull/5934)). Setting
+  `BEADS_DOLT_SERVER_PORT` (or the legacy `BEADS_DOLT_PORT`) now makes
+  `ResolveServerMode` classify a workspace as an externally-managed server, so
+  bd stops trying to own a lifecycle it does not own. The stale-server cleanup
+  path is deliberately carved out of that rule: it keeps resolving the mode
+  without the port var, so bd still reaps a same-repo orphan it started
+  (GH#2430) instead of declining because the environment named a port. A
+  `proxied-server` workspace is exempt from the new rule entirely — it reaches
+  its server through the proxy, so an ambient port does not describe its
+  lifecycle.
+
+- **`bd` caps how large the auto-backup destination can grow, instead of
+  growing it forever** ([#6071](https://github.com/gastownhall/beads/pull/6071)).
+  `CALL DOLT_BACKUP('sync', ...)` only ever adds new chunks to the
+  destination — it never prunes ones that became unreachable on the source
+  (history rewrites, superseded data) — and Dolt exposes no supported way to
+  GC a backup destination in place. Left uncapped, the destination could
+  only grow until disk filled; this is the root cause of the 2026-06-19
+  outage, where a 1.7GB store produced a 43GB backup directory. Auto-backup
+  now pauses (nothing is deleted) once the destination reaches
+  `backup.size-cap-mb` (default 2048MB); set it to `0` to disable the cap
+  entirely. The pause is no longer stderr-only: `bd backup status` and its
+  `--json` output now report a `size_cap` object (`enabled`, `cap_mb`,
+  `current_bytes`, `exceeded`), so an agent/CI caller relying on `--json` or
+  `--quiet` can see that auto-backup has stopped instead of reading a
+  reassuring "Last backup" line while nothing further syncs. The remediation
+  advice no longer suggests deleting the backup directory — nothing
+  guarantees a deleted destination is cleanly recreated by the next sync, and
+  the server-side backup remote stays registered against that path; it now
+  points at raising `backup.size-cap-mb` or pointing `backup.git-repo` at a
+  different git repository instead — not `bd backup init`, which configures
+  manual `bd backup sync`'s destination and leaves auto-backup paused. The
+  size-cap check itself runs after both the interval throttle and change
+  detection, so it costs nothing on any path that is not about to sync — an
+  idle workspace never reaches it at all, and a paused destination re-arms
+  the interval throttle on the skip, so it is measured at most once per
+  `backup.interval` rather than on every command. `backup.size-warn-interval`
+  (default 24h) controls how often the pause is re-announced. Manual `bd
+  backup` / `bd backup sync` are not capped.
+
+- **`bd context` resolves a workspace outside a git repository instead of
+  hard-failing** ([#4772](https://github.com/gastownhall/beads/issues/4772)).
+  The command's own help promises it "does not require the database to be open,
+  making it useful for diagnostics in degraded states", but it exited with
+  `cannot determine repository root` whenever the working directory was not
+  inside a git repo — even with a perfectly valid `.beads/` present — so
+  consumers using `bd context --json` as a health probe got a false
+  "unreachable" in healthy non-git scopes.
+
+  `GetRepoContext()` finds and boundary-validates `.beads/` *before* it asks
+  git for a root, so that one failure means only that git is missing. It now
+  returns a typed `*beads.NoRepoRootError`, and `GetRepoContextAllowingNoGit()`
+  selects it with `errors.As` and roots the context at the `.beads` parent.
+  Typed rather than by message text on purpose: the SEC-003 unsafe-location
+  rejection embeds the offending path verbatim, so a substring test would let a
+  workspace under a hostile path clear its own security refusal. Every other
+  failure, that one included, propagates untouched.
+
+  Scoped to the callers that only read config: `bd context` on both routes, and
+  the `domain/fs` context provider — which `bd serve` also resolves through, so
+  `bd serve` in a non-git directory with a valid `.beads/` now proceeds rather
+  than failing at context resolution. Anything that runs git commands still
+  uses `GetRepoContext()`. The synthesized context roots at the repository
+  containing the `.beads/` (falling back to its parent when git cannot be asked
+  there either) and decides `is_redirected` positionally — whether discovery
+  standing in the working directory would have found that `.beads/` — so
+  `--db`, `BEADS_DB`/`BD_DB` and `-C` are reported the same way `BEADS_DIR` is.
+  `bd context` also prints `cwd repo: git: unavailable` rather than silently
+  omitting the one degraded state it exists to report.
+
+- **Server-mode `bd federation sync` and `bd federation status` work with Dolt
+  remotes that have no stored peer credentials**
+  ([#5128](https://github.com/gastownhall/beads/pull/5128), fixes
+  [#4837](https://github.com/gastownhall/beads/issues/4837)). A remote added
+  by `bd federation add-peer` without `--user` or by `bd dolt remote add` has
+  no `federation_peers` row, and every server-mode `bd federation` push, pull
+  and fetch to it failed at the credential lookup with `failed to get peer
+  credentials: not found: federation peer <name>`. A missing row now means no
+  stored credentials, as it already did in embedded mode, so the operation
+  runs with Dolt's own credential discovery: `bd federation sync` without
+  `--peer` syncs those remotes too, and `status` fetches them. Errors reading
+  or decrypting a stored row still fail. A mistyped `--peer` now fails with
+  Dolt's own unknown-remote error instead.
+
+- **`bd comment`/`bd comments add` refuse an abbreviated id and a reserved
+  word instead of silently resolving one to the wrong issue**
+  ([#5393](https://github.com/gastownhall/beads/pull/5393)). `bd comment list
+  <id>`, a typo for `bd comments list`, used to parse as id="list" with no
+  guard on the id slot — and since no issue is ever literally named "list",
+  the default abbreviation-tolerant resolver would fuzzy-match it against
+  whatever existing bead or wisp id happened to start with "list" and write
+  the rest of the command line there as a comment. Confirmed in production:
+  15+ automated sessions made this exact typo over two days and all landed on
+  the same unrelated wisp. `bd comment`'s id positional now (a) refuses the
+  four words a `bd comments <verb>` typo is likely to produce — `list`, `add`,
+  `rm`, `delete` — before any id resolution is attempted, on both the
+  embedded and proxied-server paths, and (b) requires an EXACT id match
+  (`bd-a1b2c3d4`, not `a1b2`) rather than the abbreviation-tolerant matching
+  every other command keeps. The refusal message is truthful about which
+  case applies: a reserved word gets a hint toward `bd comments`; an
+  abbreviation of a REAL issue gets `id abbreviations are not accepted on
+  comment writes; use the full id from \`bd show <id>\`` rather than the
+  generic (and in that case false) "no issue found matching" text a genuine
+  not-found gets. See [Working with
+  IDs](docs/core-concepts/hash-ids.md#working-with-ids) for the full
+  read/write distinction. The proxied-server comment path was investigated
+  separately and found to already be exact-id-only by construction (its
+  resolution never performed abbreviation matching in the first place) — a
+  regression test now locks that in rather than leaving it undocumented.
+
+- **`bd delete` no longer resolves an id it cannot find to a different issue
+  whose id begins with it.**
+  ([#7375](https://github.com/gastownhall/beads/pull/7375)). The direct
+  (embedded and server) route resolved
+  each id with the abbreviation-tolerant resolver, so an id that was already
+  gone (a retried delete, a re-run `--from-file` list, a parent whose child
+  survives) resolved by leading-prefix match to whichever surviving issue's id
+  it begins: after `fx-t00003` was deleted, `bd delete fx-t00003` previewed
+  `fx-t000031` and printed `bd delete fx-t000031 --force` as the next step,
+  and with `--force` deleted it. `--quiet` silenced the partial-id notice, so
+  a `--force --quiet` re-run deleted issues it never named without a word.
+  `bd delete` now requires an exact id on the preview and with `--force`, as
+  `bd comment` does and as the team-server route already did; full ids, bare
+  full hashes, child ids and routed ids resolve as before. An abbreviation is
+  refused with `issue "t000" not found: bd delete needs the full issue id, and
+  "t000" is only the start of fx-t000031`, naming every id it matches; under
+  `--if-revision` it is the guard's lost race instead (`precondition_failed`,
+  exit 13), as for any other gone id. This is a user-visible change: a script
+  or habit that deletes by abbreviation now gets that error and must pass the
+  full id. Reads and other writes keep accepting abbreviations; see [Working
+  with IDs](docs/core-concepts/hash-ids.md#working-with-ids).
+
+- **A git hook beads never wrote is no longer reported as installed**
+  ([#6084](https://github.com/gastownhall/beads/issues/6084)). `getHookVersion`
+  returns no error for a readable hook file that carries no beads markers, so a
+  hand-written `pre-commit` — one beads does not own — was printed as
+  `✓ installed (version )` by `bd hooks list`, counted as installed by
+  `bd info`, and reported as no drift by `bd config drift`. Those surfaces now
+  report such a file as not installed. This is a user-visible change to a
+  scripted contract: in a repository whose hooks beads does not own,
+  `bd config drift` now exits 1 (drift detected) where it exited 0, so
+  automation keyed on that exit code should re-check those repositories before
+  upgrading. A hook that calls `bd hooks run <hook>` still counts as installed
+  even with no beads marker — that is the integration beads prescribes for
+  external hook managers such as lefthook and husky (GH#946) — and it is
+  version-agnostic, so it is never reported outdated and never prompts
+  `bd hooks install`, which would overwrite the manager's own hook.
+  `bd hooks list`, `bd info` and `bd config drift` now use the same predicate as
+  `bd doctor` for deciding whether a hook file is a beads hook; `bd doctor`'s own
+  installed/missing check still only tests for file existence and is tracked
+  separately.
+
+- **`bd close` verifies a bead gate in proxied-server mode.** The close
+  pre-check built its bead-gate lookup on the local store, which the
+  proxied-server route never opens, so closing a bead gate there refused with
+  `no local store available` even after the awaited bead had closed, while
+  `bd gate check` resolved the same gate. The close pre-check now reads the
+  awaited bead through the same fresh-read path `bd gate check` uses on that
+  route; the direct and embedded routes are unchanged
+  ([#5861](https://github.com/gastownhall/beads/issues/5861) item 1).
+
+- **`bd recall`, `bd forget`, `bd remember <bare-key>`,
+  `GET /v0/beads/memories/{key}` and `DELETE /v0/beads/memories/{key}` now
+  treat an empty-valued memory as present**
+  ([#5964](https://github.com/gastownhall/beads/pull/5964), fixes
+  [#5963](https://github.com/gastownhall/beads/issues/5963)). Presence used to
+  be derived from the stored value's truthiness, so a memory written out of
+  band with an empty string was invisible even though its row existed. `bd
+  recall` printed "No memory with key" and exited 1, `bd forget` refused to
+  delete it, `bd remember <bare-key>` refused to recall it, and both HTTP
+  doors answered 404 (the DELETE leaving the row in place), while
+  `GET /v0/beads/memories` already enumerated the same row. Presence now comes from row existence on direct Dolt, embedded Dolt and
+  the proxied backend. An empty-valued memory is found, recalls as an empty
+  string, and is deleted on the first forget. Only a key with no row is a
+  miss.
+
+- **`bd doctor` no longer flags a `.local_version` that starts with `v`.** The
+  canonical spelling of a Go module version — and the string a build stamped
+  from a Go pseudo-version reports and writes into `.local_version` itself —
+  was rejected by the Version Tracking check (`Invalid version format`), and
+  read as major 0 in version comparisons, because the helpers parsed digits
+  first. They now accept an optional leading `v`; versions without it are
+  unchanged ([#6152](https://github.com/gastownhall/beads/issues/6152)).
+
+- **`bd serve`'s blocked-close refusal names the blockers.** A `409
+  not_closable` for a live blocker — on `issues/{id}:close`, `issues:batchClose`
+  per-item outcomes, `PATCH issues/{id}` into a done status, and
+  `issues:batchApply` — said only "issue is blocked", so an HTTP client could
+  not tell the user what held the close, while `bd close` on the direct and
+  proxied routes prints `cannot close blocked issue: X is blocked by [Y]`. The
+  refusal now carries a `blockers` extension member (`[{id, kind, type}]`,
+  `kind` `local` or `external`, `type` the blocking edge type when known) and a
+  `detail` that opens with the direct route's sentence. The code, the status
+  and the `open_children` discriminator are unchanged. The list travels typed
+  end to end: close refusals are now an `issueops.BlockedError` (still matching
+  `ErrCloseBlocked`, with a byte-identical message), so the server never parses
+  prose to build the member and a client can rebuild the same typed error.
+
+- **The #6716 fan-in stall is fixed on the proxied-server route and the
+  remaining store routes.** Two blockers of one dependent taken away at the
+  same time (parallel workers closing both, or a close racing a
+  `bd dep remove` or a delete of the other) could leave the dependent
+  `is_blocked=1` and missing from `bd ready` until `bd recompute-blocked`
+  ([#6716](https://github.com/gastownhall/beads/issues/6716)). The post-commit
+  recheck the Dolt store write transactions gained for that issue now also
+  runs on every write the proxied-server (uow/domain-db) route serves, which
+  under `--proxied-server` — the default topology — is `bd close` (single
+  and batch), `bd update --status`, `bd dep remove`, `bd delete`, `bd batch`
+  and `bd serve`; on `RunInTransaction` (`bd batch` direct, `bd cook`,
+  `bd mol squash`/`burn`, and SDK callers that close or update inside a
+  transaction); and on the wisp close, update and delete writers and the
+  legacy dependency removal behind `bd duplicates --merge`. Demote-to-wisp
+  moves a row between planes without taking a blocker away and is unchanged.
+
+- **An explicit `BEADS_DIR` is authoritative during workspace discovery.**
+  When `BEADS_DIR` named a directory without project files yet (missing,
+  empty, or not initialized), discovery ignored it and walked up from the
+  current directory instead, then rebound `BEADS_DIR` to whatever ancestor
+  workspace it found. `bd init` refused with "already initialized" because of
+  the parent workspace, and data commands such as `bd create` and `bd list`
+  read and wrote the parent's store. Discovery now reports no workspace for
+  such a `BEADS_DIR`, so `bd init` initializes the named directory and other
+  commands fail with "no beads database found". `bd import`/`bd setup` and
+  `bd bootstrap` target the named directory when they create a workspace.
+  Behaviour with `BEADS_DIR` unset is unchanged. **Behaviour change:** a
+  `BEADS_DIR` that points at a project root rather than its `.beads`
+  directory (for example `BEADS_DIR=$repo` instead of `BEADS_DIR=$repo/.beads`),
+  or at a `.beads` that does not exist yet, used to work by accident because
+  discovery walked up to the nearest workspace; it now fails with "no beads
+  database found". Point `BEADS_DIR` at the `.beads` directory itself.
+  ([#6938](https://github.com/gastownhall/beads/pull/6938))
+
+- **A proxied workspace's proxy retires when its Dolt backend exits
+  cleanly.** The proxy noticed its `dolt sql-server` child exiting only when
+  the exit status was non-zero. A backend that shut down gracefully (for
+  example on SIGTERM) left the proxy up and adoptable in front of a dead store:
+  with `--proxied-server-idle-timeout 0` it never went away, `bd dolt status`
+  called it running, and every command failed until `bd dolt stop`. The proxy
+  now retires on any backend exit, as it already did on a crash, so the next bd
+  command (including `bd ping`) starts a fresh proxy and backend. `bd dolt
+  status` no longer reports a proxy whose managed backend is gone as running:
+  the text says "not serving" and the JSON reports `running: false` (with
+  `proxy_pid` still set), including for a stranded proxy started by an older
+  bd. ([#6937](https://github.com/gastownhall/beads/pull/6937))
+
+- **`bd sql` no longer drops the rows of CTE queries or CALL result sets**
+  ([#6932](https://github.com/gastownhall/beads/pull/6932)). In proxied-server
+  mode, `WITH name(cols) AS (...) SELECT ...` and `WITH RECURSIVE ...` queries
+  were misread as writes and printed `OK, 0 rows affected` with no error; they
+  now return their rows. Statements are now classified with the Dolt SQL
+  parser (shared by the proxied and direct paths): reads return rows, plain
+  writes (including CTE-prefixed `UPDATE`/`DELETE`) commit and report
+  `rows_affected`, and anything that may both write and return rows (`CALL`,
+  `EXPLAIN ANALYZE` of a write, `RETURNING`) or that the parser cannot
+  classify is committed and prints whatever rows it returns, so
+  `CALL DOLT_BRANCH(...)`-style result sets are rendered instead of discarded.
+  Visible changes for scripts: in direct server mode a multi-statement write,
+  or a single write statement the parser cannot classify, now prints `OK` /
+  `{"status":"ok"}` (as proxied mode already did) instead of
+  `OK, N rows affected` / `{"rows_affected":N}`; and `--readonly` now refuses
+  statements it cannot parse (for example `PRAGMA`) instead of treating them
+  as reads.
+
+- **`bd types` now lists exactly the types `bd create --type` accepts**
+  ([#6934](https://github.com/gastownhall/beads/pull/6934)). The two resolved
+  the type set through different code and could disagree: a server-mode
+  workspace's `bd types` dropped `.beads/config.yaml` `types.custom` entries
+  once the database had any custom type, although create accepts them; in
+  proxied mode `bd config set storage-class.<type>` checked `config.yaml` alone
+  and refused custom types registered in the database; and the built-in system
+  types `message`, `molecule`, `gate` and `event` were never listed. Every
+  mode now composes custom types by one rule (the `custom_types` table, else
+  the `types.custom` config row, always unioned with `config.yaml`). `bd types`
+  gains a "System types" section, and `bd types --json` an additive
+  `system_types` field; `core_types` and `custom_types` are unchanged. A
+  failure to read the custom types now fails `bd types`, `bd create --graph`
+  and `bd config set storage-class.*` instead of being silently treated as "no
+  custom types".
+
+- **`bd` refuses a bare tooling sentinel (`null`, `undefined`, an empty string)
+  as an issue ID** ([#6214](https://github.com/gastownhall/beads/issues/6214)).
+  `jq -r` prints the literal `null` when a selector misses and JS tooling prints
+  `undefined`, so `bd update "$(bd list --json | jq -r '.[0].id')" --status
+  closed` arrived at ID resolution as a plain four-character token. Those tokens
+  are a valid partial-ID shape, so they reached the leading-prefix abbreviation
+  branch and resolved to whichever issue's hash began with them — closing an
+  issue the caller never named and exiting 0 with a success line. `bd update
+  null`, `bd comment null` and every other command that resolves an ID now fail
+  before any lookup, because the guard sits in the shared resolver. An ID that
+  merely contains a token (`bd-null`, `null3t0`, `undefined-behavior`) still
+  resolves, and abbreviation matching is otherwise unchanged. The empty string
+  already failed; it now says why.
+
+- **Table-rebuild `__temp__` intermediates can no longer materialize as
+  tracked tables on `@@dolt_transaction_commit=1` servers.** The
+  ignored-series rebuilds stage every clone-local table through a
+  `__temp__<table>` rename, but the intermediate names carried no
+  `dolt_ignore` pattern: against a transaction-commit server each
+  `CREATE TABLE __temp__X` auto-committed a real table at HEAD, and the
+  rename onto the ignored final name left an unstageable `__temp__X -> X`
+  half in `dolt_status` that wedged every later open behind the dirty-table
+  guard (observed in the field as a three-city shared hub wedging twice in
+  one day, each time ending in fleet-wide write refusal and a manual SQL
+  repair). `__temp__%` now ships in the canonical seeded pattern set —
+  asserted, like the events-journal patterns, before the series that creates
+  the tables — so intermediates are born ignored. The scoped seed commit also
+  gains `--skip-empty`: under `@@dolt_transaction_commit=1` the server has
+  already committed the seeded rows at their own transaction boundaries, and
+  the previously unconditional `DOLT_COMMIT` died with "nothing to commit",
+  killing the pass on exactly the under-seeded stores the heal targets.
+  Fenced deployments: adding a canonical pattern un-converges `dolt_ignore` for
+  every existing database, so the next write-mode open issues one
+  `INSERT IGNORE INTO dolt_ignore`; a hosted or box-fenced wire client that is
+  denied that INSERT fails its open until one privileged `bd` opens the store
+  and heals the pattern — self-healing, one privileged open per upgrade
+  (degrading a denied seed to a skip is tracked separately).
+
+- **`bd ready --parent` and `bd blocked --parent` no longer re-scan the whole
+  parent-child edge relation for every descendant they find.** The transitive
+  descendant walk recursed against a materialized `parent_edges` CTE that Dolt
+  cannot index through, so its cost was (parent-child rows) × (descendants):
+  7.5 s for a 483-descendant parent on a 4.6k-edge database, and past the
+  shared-pool read deadline on a busy server. The walk now recurses directly
+  off `dependencies` / `wisp_dependencies` through their typed target indexes
+  and returns the same rows in a fraction of the time
+  ([#6128](https://github.com/gastownhall/beads/issues/6128)).
+
+- **`bd list --parent` on a proxied-server workspace no longer drops a child
+  whose prefix differs from its parent's**
+  ([#6130](https://github.com/gastownhall/beads/pull/6130)). The edge to such
+  a parent is stored in `depends_on_external` — `issueops.IsExternalDepTarget`
+  routes every cross-prefix target there — but the descendant walk behind the
+  proxied tree view resolved a parent only through the issue and wisp target
+  columns, so the child and its subtree were missing from the tree and from
+  `--watch`, while the direct route listed them. The walk now reads all three
+  target columns, as the direct route's `--parent` filter does. Nothing listed
+  before can drop out: the added column is read only when the other two are
+  both empty.
 
 - **`notion.token` is kept out of the Dolt database**
   ([#6676](https://github.com/gastownhall/beads/issues/6676)). It was missing
@@ -32,6 +4563,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A token that was already pushed should still be rotated: deleting the row
   locally does not unpublish it from remotes that already have a copy.
 
+- **A server-mode workspace with an empty `.beads/dolt` is no longer refused
+  as legacy**
+  ([#5682](https://github.com/gastownhall/beads/issues/5682),
+  [#6935](https://github.com/gastownhall/beads/pull/6935)). bd creates `.beads/dolt` on use even when the data lives on an
+  external Dolt server, and leaves it empty. When the gitignored
+  `.local_version` witness was missing — after a fresh checkout, or when a
+  provisioner created the empty root before `bd init --server --external` —
+  the legacy-upgrade guard refused every command, `bd init` included, as a
+  "legacy Dolt server workspace", and no bd command could repair it. An empty
+  root holds nothing a legacy release could have left, so the guard now admits
+  it: `bd init` writes the witness, and an existing workspace in that state
+  re-seeds it on the next command. A pre-1.0 witness, or a `.beads/dolt` that
+  holds anything, is still refused.
+
 - **`bd -C dir prime` now describes the target workspace instead of the launch
   directory** ([#5509](https://github.com/gastownhall/beads/issues/5509)). `-C`
   resolves `BEADS_DIR` but never changes directory, so prime's cwd-relative
@@ -48,6 +4593,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory's. That makes the probe agree with the store actually being backed
   up, but it can flip auto-backup on or off for `-C` invocations whose launch
   directory and target differ in remote configuration.
+
+- **`bd show --watch` works under `--proxied-server`.** It was refused with
+  `proxy.watch.unsupported` although the provider can answer the poll the way
+  `bd list --watch` already does, so every proxied workspace — the default
+  transport for managed-local setups — had no way to watch a bead. The proxied
+  route now shares the direct route's loop: render once, re-read every 2s,
+  redraw only when the issue's status or `updated_at` changes, stop cleanly on
+  Ctrl+C/SIGTERM, and require exactly one id. Each poll opens its own short
+  unit of work, so a long watch never pins a transaction, and a poll that
+  fails (the issue was deleted, the backend blipped) keeps the last render
+  without printing, as on the direct route. On both routes a watch whose id
+  cannot be found now exits non-zero instead of 0.
 
 - **Generated git hooks accept uutils coreutils `timeout` as a deadline helper**
   ([#5541](https://github.com/gastownhall/beads/issues/5541)). The managed hook
@@ -77,8 +4634,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   close runs, while the proxied route refuses that argument and closes the
   rest.) In `--json` mode the summary is instead a compact JSON line on stderr
   naming the failed ids, matching `bd update`'s partial-failure report, while
-  stdout keeps the usual closed-issues array. Each `failed[]` entry carries the
-  refusal as the engine worded it, identically on both routes; the `--force`
+  stdout keeps the usual closed-issues array. A single refused id gets that
+  JSON report too, as it does from `bd update`; only the text summary is left
+  off for it, since its refusal already names it. Each `failed[]` entry carries
+  the refusal as the engine worded it, identically on both routes; the `--force`
   hint and the route's own framing stay on the human-readable stderr line, which
   is unchanged. `--claim-next` still claims when
   part of the batch closed — the claim commits inside the batch's own
@@ -92,12 +4651,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   update to an inactive status, a dependency removal, a delete) and runs
   through a Dolt store write transaction now rechecks the dependents it
   recomputed once that transaction has committed
-  ([#6716](https://github.com/gastownhall/beads/issues/6716)). Writes that
-  reach the database another way still need the `bd doctor` /
-  `bd recompute-blocked` repair they needed before: `bd batch` (on both its
-  plain and its proxied transaction), `bd cook`, `bd mol squash`,
-  `bd mol burn`, `bd duplicates --merge`, and the wisp writes — closes,
-  updates, deletes and demote-to-wisp.
+  ([#6716](https://github.com/gastownhall/beads/issues/6716)). The
+  proxied-server route and the remaining store routes are covered by the
+  entry above.
 
 
 - **`bd list --watch --format` is refused instead of silently dropping the
@@ -106,6 +4662,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--format` template was ignored without a word, while `--proxied-server`
   already refused the combination. Both routes now fail with the same
   `--format cannot be combined with --watch` usage error.
+
+- Explicit `bd update --claim` and direct `bd close` now enforce unsatisfied
+  external capability dependencies. Mixed close batches still commit eligible
+  items together, and `--claim-next` skips externally blocked work even when
+  `--force` overrides the close guard.
 
 - **The smart migrate gate no longer auto-migrates a clone whose data is behind
   the remote, and `bd dolt pull` now works from that state**
@@ -174,6 +4735,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   section — plus the upgrade and init-safety ordering rules — now records the
   `bd dolt pull` exception instead of stating the pull is always refused.
 
+  **Proxied-server mode reaches the stop too, and is told where to run the
+  remedy.** The store-open gate on that path supplied no branch-position
+  callback, so a proxied clone that was level on schema and behind in data
+  could never be classified data-behind: it got the blunt shared-store refusal,
+  whose body is the designated-migrator recipe — `bd migrate --force` then
+  `bd dolt push` — which in this state is the wedge the stop exists to prevent.
+  It now routes to the same data-behind stop as every other topology. Because
+  `bd dolt pull` is refused at the proxied front door
+  (`proxy.dolt_pull.unsupported`), along with `bd dolt push`, the bare
+  `bd migrate` and `bd conflicts`, the guidance there names the machine the pull
+  has to run on rather than printing a command this binary rejects; the `--json`
+  option is `pull-first-on-server-host`, and `expected` carries the same
+  qualifier so a single-field reader is not handed a locally-refused command.
+  The shared-store consent step is the other way round: `bd migrate schema
+  --force` is *not* refused here — the capability registry permits the
+  two-word `migrate schema` path — so the guidance says it can be run from this
+  workspace but only after the pull lands on the server host, and the warning
+  against forcing past the stop names it alongside `BD_ALLOW_REMOTE_MIGRATE=1`
+  as the two consent surfaces this topology can still reach. Read-only proxied
+  opens print the same pull-first block instead of the shared-consent template.
+  The *Clone behind the remote* docs section the payload links to, and the
+  upgrade and init-safety ordering rules that point at it, now give the same
+  proxied-server answer.
+
   Both existing escape hatches are unchanged: `bd migrate --force` /
   `BD_ALLOW_REMOTE_MIGRATE=1` are still consulted before the smart gate, and
   `BD_SMART_GATE=0` still yields the blunt gate unconditionally (including for
@@ -188,7 +4773,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--format` now wins over the config default; an explicit `--json` still wins
   over `--format`.
 
+- **Strict readonly no longer records last-touched state**
+  ([#5785](https://github.com/gastownhall/beads/issues/5785)). Under strict
+  readonly (`--readonly`, or `readonly` in config), `bd show` wrote the issue
+  id to `.beads/last-touched` even though readonly promises not to mutate
+  workspace-local state — the database store was opened read-only while this
+  marker file was still written. `SetLastTouchedID` now returns early in that
+  mode, so a readonly workspace leaves the marker untouched. Ordinary
+  (non-readonly) `bd show` keeps recording last-touched exactly as before, so
+  only consumers driving `bd --readonly … --json` see the change.
+
+- **Markdown bodies now honor the terminal's actual background instead of
+  always rendering dark**
+  ([#5776](https://github.com/gastownhall/beads/pull/5776)).
+  `glamour.WithEnvironmentConfig()` defaults to `styles.DarkStyle` whenever
+  `GLAMOUR_STYLE` is unset, with no regard for the terminal's real
+  background — unlike `internal/ui`'s own adaptive colors, which probe it
+  via `lipgloss.HasDarkBackground`. That left every markdown body's colors
+  wrong on a light-background terminal even though the section header
+  wrapping it adapted correctly. The fix lands at the shared renderer, so it
+  covers every markdown body `bd` prints — DESCRIPTION, DESIGN, NOTES,
+  ACCEPTANCE CRITERIA, and comment bodies, direct and proxied alike — not
+  just `bd show`'s DESCRIPTION field. An explicit `GLAMOUR_STYLE` override
+  still takes priority over the detected background.
+
 ### Added
+
+- **`POST /v0/beads/issues:batchApply` accepts up to 1000 items, up from 100.**
+  `issueops.MaxApplyBatchItems` moves from 100 to 1000; the request body cap
+  rises from 4 MiB to 16 MiB (`maxApplyBatchBodyBytes`); and the whole plan
+  still applies in exactly ONE transaction — the cap raise never chunks a
+  request. A request over 100 items now runs under a separate, EXTENDED
+  whole-run budget instead of the ordinary 60s request deadline: a new
+  `bd serve --large-apply-ceiling` flag sets it (5 minutes by default), applied
+  flat regardless of item count, never scaled down. A request at or under 100
+  items is completely unaffected and keeps exactly the 60s deadline it has
+  always had. A request over 100 items also serializes against every other
+  such request through a dedicated one-wide semaphore, so at most one
+  oversized write transaction is in flight at a time; the wait for that
+  semaphore is itself bounded, so a burst of oversized requests is shed with
+  `503` rather than queuing indefinitely and starving ordinary traffic. An
+  ordinary (<=100-item) request is never made to wait on it. Graceful shutdown
+  waits out an in-flight large apply up to its own deadline, but refuses any
+  large apply still queued for the semaphore once shutdown begins, rather than
+  extending the drain further. `bd serve`'s orchestrator stop grace must be at
+  least `--large-apply-ceiling` plus 5 seconds, or an external `SIGKILL` can
+  still cut off an in-flight large apply the drain would otherwise have waited
+  out; see `engdocs/SERVE_RUNBOOK.md`. A new `issues.batchApplyLarge`
+  capability token on `GET /v0/beads/context` lets a client learn whether a
+  given server accepts the raised envelope before sending a plan over the old
+  100-item bound. Measured wall-clock for the whole-transaction apply
+  (embedded Dolt, build+commit only) backs the 5-minute default: a 356-item
+  plan (the design doc's primary measured shape) commits in ~12.6s (23.8x
+  headroom under the ceiling), and a 1000-item plan (the new cap) commits in
+  ~57.5s (5.2x headroom).
+
+- **A long-running schema migration now says so instead of going quiet**
+  ([#5997](https://github.com/gastownhall/beads/pull/5997)). Migrations are
+  allowed to take a long time by design — migration 0047's full-table
+  `is_blocked` recompute is a real example — but until now a slow one and a
+  wedged one looked identical from outside: `bd` simply stopped printing. A
+  watchdog now emits a WARN naming the migration's version, name, and elapsed
+  time once the migration's own SQL has been running past the interval, and
+  repeats every interval while it keeps running, so an operator reading logs
+  can tell "still working" from "stopped emitting anything". Coverage is the
+  migration body specifically — the per-step Dolt commit that follows it on
+  the production embedded path is outside the watchdog, so a stall there is
+  still quiet. Set `BEADS_MIGRATION_WATCHDOG_INTERVAL` to change the
+  5-minute default; it accepts durations like `10m` and bare seconds like `90`,
+  and falls back to the default when unset or unparsable. This is observability
+  only and never a circuit breaker: the migration receives the caller's exact
+  context, its error is passed through unchanged, and nothing is aborted or
+  rolled back. The warning is deliberately not terminal-gated, so it survives
+  `bd serve`, systemd, CI, and piped invocations.
 
 - **Auto-backup runs on a managed-local proxied-server workspace.** The
   proxied arm of the post-command hook now calls auto-backup, so an explicit
@@ -282,10 +4939,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server topology. Wiring an auto-backup hook through the new routes is left to
   a later slice.
 
+- **`bd` says when it resolved a partial ID instead of matching one exactly.**
+  ([#6302](https://github.com/gastownhall/beads/pull/6302)) ID resolution tries an exact match first and only then falls back to
+  leading-prefix abbreviation (`a3f8` -> `a3f8e9`). Ambiguity was already a hard
+  error naming every candidate, but a *sole* abbreviation match was returned
+  silently, so a caller could act on an issue it had not named without any
+  signal. bd now writes a one-line note to stderr identifying both the input and
+  what it resolved to. The case that motivates it: a hierarchical child is a
+  valid leading-prefix match for its own parent's ID, so after a parent is
+  renamed or deleted the vacated ID quietly resolves to the child. Note this
+  covers **every** leading-prefix abbreviation, not only that shape, so the
+  ordinary documented `a3f8` -> `bd-a3f8e9` path now emits a line too, once per
+  resolved argument. That breadth is deliberate: a `.`-boundary rule would fix
+  parent/child but leave `bd-x.1` -> `bd-x.11` just as silent. stdout and
+  `--json` are unchanged; silence it with `--quiet` or
+  `BD_NO_PARTIAL_ID_NOTICE=1`.
+
+- **`bd count` accepts `--has-metadata-key`**
+  ([#6160](https://github.com/gastownhall/beads/issues/6160)), closing the last
+  metadata-filter gap against `bd list`, `bd ready` and `bd search`. A caller
+  counting rows that merely carry a key no longer has to list them and measure
+  the page.
+
 - **`bd count` supports repeatable `--metadata-field key=value` filters**
   ([#6023](https://github.com/gastownhall/beads/issues/6023)), so callers can
   count the same metadata-scoped set `bd list` returns without fetching every
   row.
+- **`bd label rename <old> <new>` fixes a label everywhere it appears, in one
+  command instead of a per-issue add-then-remove loop**
+  ([#6009](https://github.com/gastownhall/beads/pull/6009)). An issue that
+  already carries the new label doesn't error — the rename drops its stale
+  old label and counts the issue as a merge instead, reported honestly:
+  `Renamed label 'Backend' to 'backend': 6 issues (2 already had 'backend')`.
+  A label nothing carries is a clean no-op (`No issues found with label
+  'Backend'`, exit 0). The sweep covers both planes, durable issues and
+  wisps, and the direct and proxied-server routes end at the same
+  `issueops.RenameLabelInTx` primitive — the proxied route journals through
+  `domain.LabelUseCase.RenameLabel` rather than a per-issue add+remove
+  fan-out, so merge semantics, the zero-carrier no-op, and the single
+  `label_renamed` event per touched row are identical on both.
+
+  `--dry-run` previews the blast radius (a count and the first 10 issues,
+  all of them under `--json`) without writing anything, through a read-only
+  path kept apart from the write path so a preview can never reach a
+  transaction. Its `merged` count is a plain snapshot intersection of two
+  independent reads, though, not the write path's measured one: the real
+  rename derives `merged` from what its `INSERT IGNORE` actually affected,
+  specifically so a concurrent label add between two reads can't skew the
+  count, and the preview has no insert to measure against. Treat the
+  dry-run number as an estimate — the flag's own help text says so now too.
+  A rename that fails partway through reports an UPPER BOUND - up to how many
+  issues may have been renamed, and up to how many of those were merges -
+  rather than only the error. It cannot be a landed count: both routes assign
+  those numbers inside the transaction, so a rollback or an exhausted retry
+  returns them still describing an attempt that landed nothing. Only a Dolt
+  publication failure after the SQL side already committed is a genuine
+  partial, and the count alone cannot tell the two apart.
+
+
+- **`bd label remove --prefix` removes every label matching a prefix in one
+  call**, instead of requiring an exact label name per removal. `bd list`/`bd
+  ready` already supported `--label-pattern`/`--label-regex` for *finding*
+  issues by label shape; `label remove` had no equivalent for *stripping* a
+  whole label family (e.g. every `pool:refused:*` reason label) — callers had
+  to fetch the labels themselves and issue one `label remove` per exact name.
+  `--prefix` resolves the matching labels per issue and removes that issue's
+  whole matching set in a single edit; `bd label remove <id> --prefix
+  pool:refused:` replaces that fetch-then-loop. Routed through the same `issueops.Lifecycle`/
+  `issueops.Reader` roles as a plain `label remove`, so it works identically
+  on the embedded and proxied-server (`bd serve`) storage modes.
+
+- **`PATCH /v0/beads/issues/{id}` accepts `claim: true`**, the wire spelling of
+  `bd update <id> --claim`. It passes through to the same lifecycle role the
+  direct route uses (`issueops.UpdateRequest.Claim`), so the claim and the
+  patch land in one transaction with the direct route's semantics: a
+  same-actor re-claim is idempotent (`changed: false`), a foreign holder is
+  409 `already_claimed` and an unclaimable status 409 `not_claimable` — both
+  naming `claim` and carrying `{id}:claim`'s `assignee` / `issue_status`
+  members — and a refused claim writes none of the patch. With `claim: true`
+  the `patch` may be empty. `claim` beside `expected_assignee`,
+  `expected_status` or `force_assignee_transfer` is a 400. A server that
+  predates the member refuses it as `unknown_parameter` before any database
+  work, so an HTTP client can forward `bd update --claim` instead of refusing
+  it, and can never mistake an older server for one that dropped the claim.
 
 ### Fixed
 
@@ -372,11 +5108,191 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd init` refuses to initialize directly in your home directory**
+  ([#4635](https://github.com/gastownhall/beads/issues/4635)). `bd init` sets
+  up the directory it runs in as a project: it runs `git init` there unless it
+  finds a repository, and installs agent files — `CLAUDE.md`, `AGENTS.md`,
+  `.gitignore`, `.claude/`, `.codex/`, `.cursor/`, `.agents/`. In your home
+  directory most of those are your agents' user-wide settings, so bd's hooks
+  ended up running in every project, and init did this silently under
+  `--non-interactive`, which engages automatically whenever stdin is not a TTY
+  (so: whenever an agent runs it). A project is virtually never the home
+  directory itself, so this now refuses with exit code `15`
+  (`ExitHomeDirRefused`; `13` and `14` already mean a lost conditional-write
+  race and a migration freeze), documented at
+  `docs/recovery/init-safety.md#init-home-refused`.
+
+  Deliberately narrow: it fires only when the working directory is *exactly*
+  your home directory, your home is not itself a git repository (tracked
+  dotfiles are unaffected, but a home that only sits inside an enclosing
+  repository, or a `GIT_DIR` inherited from the environment, does not count),
+  and you did not name a `BEADS_DIR` yourself. A subdirectory of home is an
+  ordinary project and is never refused. If you do name a `BEADS_DIR` from
+  an untracked home, init sets up only that workspace: no `git init`, no
+  agent files or `.gitignore` in your home directory, and nothing in a
+  repository your home sits inside (no hooks, `beads.role`, Dolt remote taken
+  from its origin, or bootstrap commit) unless a flag such as `--stealth` or
+  `--setup-exclude` asks for it. `--force` and
+  `--reinit-local` do not override the refusal — they bypass the local
+  data-safety guard, which is a different question from "is this the right
+  directory". The guard runs first in init's `RunE`, ahead of every path with
+  an effect, including the proxied dispatch and the store-opening
+  `--reinit-local` pre-checks.
+
+- **The managed shared Dolt server now opens its configured remotesapi
+  listener** ([#6020](https://github.com/gastownhall/beads/pull/6020)).
+  `dolt.remotesapi-port` (machine-global user config) and
+  `BEADS_DOLT_REMOTESAPI_PORT` now reach the launched `dolt sql-server`
+  (as `--remotesapi-port` in flag mode, `remotesapi.port` in generated-YAML
+  mode), and `doltserver.Restart` applies a listener change under one
+  lifecycle lock. Zero (the shared-mode default) still means no listener.
+
+  This changes the meaning of a pre-existing knob: `BEADS_DOLT_REMOTESAPI_PORT`
+  previously only informed federation doctor checks; a managed server launched
+  with it set now actually opens that listener. A server still running from
+  before the setting appeared refuses `bd dolt start` with a
+  `bd dolt stop && bd dolt start` remedy, while auto-start keeps serving SQL
+  and prints a warning until the server is restarted.
+
+  Security caveat: Dolt binds the remotesapi listener on all interfaces and
+  serves it unauthenticated, unlike the managed 127.0.0.1 SQL listener. Only
+  enable it where a firewall, private interface, or tunnel bounds who can
+  reach the port.
+
+- **`bd mol pour` and `bd mol wisp` now reject a `--var` name the proto cannot
+  consume, instead of dropping it silently.** An unusable name was accepted and
+  ignored, which turned a typo in an optional var into a conditional step that
+  quietly never appeared, or a defaulted var that quietly kept its default -
+  with a successful exit and no output to suggest otherwise. A name is accepted
+  if any proto being poured declares it, references it as a `{{handlebar}}` in
+  any field the pour substitutes - the prose fields, `assignee`, `labels`, a
+  gate's `await_id`, and every string value in its metadata - references it
+  from a step `condition` or from a step that `condition` removed, or uses it
+  as a `{name}` placeholder that a standalone `type = "expansion"` formula
+  substitutes as it builds its steps from `[[template]]`. The last
+  three matter because the condition filter and the `[[template]]` expansion
+  both run before the cook, and nothing in the cooked subgraph records
+  the names they consume or drop; collecting them ahead of the filter
+  also keeps a name's validity a property of the formula rather than of
+  another var's value. Anything left over cannot affect the pour, so it
+  is reported: `unknown variables: has_spke (available: has_spike, story)`. A
+  var belonging to an `--attach` proto still passes, as do a proto's
+  documentation handlebars. The refusal applies only where the declared-var set
+  is fully known, which means a proto cooked from a formula: a proto loaded from
+  the database (`bd cook --persist` output, and every `--attach` proto) no
+  longer has its `[vars]` declarations, so a declared-but-unreferenced name is
+  indistinguishable from a typo and nothing is refused for that pour rather than
+  risk breaking one that works. Out of scope for now: `bd mol bond --var` and
+  `bd mol seed --var` go through `formula.ValidateProvidedVars`, which only
+  iterates declared vars, so they still drop an unknown name silently. Also
+  fixed alongside: the missing-var hint printed `--var =<value>` when there was
+  no missing var to name.
+
+- **A formula with a `waits_for` gate and no spawner to wait for is now
+  rejected, and an invalid formula is no longer reported as not found.** A gate
+  step infers its spawner from `needs[0]`, so with nothing to infer from,
+  cooking stamped the `gate:<value>` label and emitted no dependency edge at
+  all - a gate bead that never blocks and never resolves. `bd create` already
+  refused `--waits-for-gate` without `--waits-for`; the formula path was the
+  outlier. `Formula.Validate` now enforces the same rule. Separately, a
+  validation failure is distinguishable from "this name is not a formula":
+  callers that fall back to a proto/issue lookup previously swallowed the real
+  error and reported `not found as issue or formula`, so an invalid formula
+  looked like a typo. `bd mol bond --dry-run` also resolves through
+  `parser.Resolve` now, so it resolves and validates the same way the real
+  bond does rather than previewing a bond that then errors on those checks.
+  Later cook transforms (inline expansions, expansions, aspects and
+  condition filtering) are still only exercised by the real bond.
+
+- **`bd prime` describes the memory split instead of prohibiting `MEMORY.md`**
+  ([#6111](https://github.com/gastownhall/beads/pull/6111), refs
+  [#5169](https://github.com/gastownhall/beads/issues/5169)). The guidance
+  line used to read `Do NOT use MEMORY.md files — they fragment across
+  accounts`. That warning predates harnesses that ship a first-party,
+  machine-local memory whose index file is also named `MEMORY.md`, so in a
+  workspace running both, prime told the agent every session not to use a file
+  the harness was actively maintaining. The line now says what each store is
+  for: durable **project** facts go in `bd remember`, because per-tool memory
+  files fragment across accounts; per-operator preferences stay in the
+  harness's own memory. Output text only, no behaviour change. The same
+  sentence is updated in its sibling renderings — the MCP/minimal context, the
+  generated AGENTS.md sections for the minimal and Codex harness templates,
+  and the README snippet — so `bd init` and copy-paste do not re-introduce the
+  prohibition.
+
+- **BREAKING: unforced `bd update --notes` over existing notes is now refused,
+  not warned** ([#5946](https://github.com/gastownhall/beads/pull/5946)).
+  Replacing existing non-empty notes with different non-empty content — the
+  blind clobber that destroys another agent's handoff notes — previously
+  printed a warning *after* succeeding; it now writes nothing and exits 1. The
+  same fence turns `PATCH /v0/beads/issues/{id}` and `batch:apply` from 200
+  into 409 `notes_overwrite_refused` when `patch.notes` would do the same, on
+  both backends and both batch legs. Migration: pass `--force` (CLI) or
+  `force_notes_overwrite` (API) to overwrite deliberately — the CLI then
+  prints the old warning as an audit trail — or preserve history with
+  `--append-notes` / `bd note`.
+
+  Two edges are deliberate. **An explicit clear is never fenced behind
+  `--force`**: `--notes ""` (or an API patch to the empty string) does not
+  trip this refusal, because every sibling text field clears the same way,
+  the pattern the fence exists to stop is an agent writing its own content
+  over someone else's, and the refusal's advice — force, or append — is
+  meaningless for a clear. (The CLI gives the clear its own verb,
+  `--clear-notes` — see the next entry — but never gates it behind
+  `--force`.) And
+  **`--force` is no longer mutually exclusive with `--if-assignee`**, since a
+  guarded notes overwrite has to be able to say both. This widens what
+  `--force` reaches under the guard: its assignee half stays suppressed (a
+  transfer under `--if-assignee` authorizes only through the matching CAS,
+  never the force bypass), but its close-policy half — closing despite open
+  children or a live blocker — now applies there too, a combination the CLI
+  previously rejected outright. `bd edit` is unaffected: it pre-fills the
+  editor with the current notes, a sighted edit rather than a blind clobber.
+
+- **`bd mol bond --ref` no longer deadlocks the molecule it bonds into, and no
+  longer accepts `--type conditional`.** A `--ref` arm is nested inside its
+  target and its hierarchical ID records that, so an ordering edge onto the
+  target was unsatisfiable in both directions: the arm waited for the molecule
+  to close, and the molecule could not close while it held an open arm. `bd
+  ready` went empty with nothing to point at. For a sequential bond (the
+  default) that edge is now dropped, so the arm carries **no ordering** and is
+  ready as soon as it is spawned - containment is a nested arm's only
+  satisfiable relationship to its container. A conditional edge has no such
+  degradation: it means "run only if the target fails", so dropping it would
+  run the arm unconditionally, turning a deadlock into a silent false dispatch.
+  `--ref` with `--type conditional` is therefore refused outright (including
+  under `--dry-run` and on the proxied route); omit `--ref` to bond a
+  conditional arm as a sibling, which is satisfiable and keeps its edge.
+
+- **`bd mol ready --gated` prints a dispatch command that exists.** The hint
+  named `bd sling`, which has never been a command in this binary, so the one
+  actionable line in the output could not be run. It now prints `bd assign
+  <ready-step-id> <agent>`, and says which listed molecule the example belongs
+  to when more than one is waiting.
+
 - **`bd purge` keeps closed beads a live bead depends on.** A closed bead
   that a not-done bead depends on through `parent-child`, `tracks` or
   `blocks` is no longer purged (reported as `live_dependent_skipped`), so a
   purge that used to delete a closed molecule root under a live step now
   leaves it. See the `--wisps-plane` entry under Added.
+
+- **`bd status` now discloses the counted rows a default `bd list` will not
+  show.** `Total Issues` counts the database; `bd list` shows a filtered view of
+  it, and the two disagreed silently — an operator reconciling a total against
+  a listing found rows they could not account for. A new line names the
+  breakdown and the flags that reveal each part: `Not shown by bd list: 2 gates
+  (--include-gates --all), 1 template (--include-templates --all)`, omitted
+  entirely when there is nothing to disclose. The counts describe the database,
+  every status included, which is why the remedy names `--all` beside the type
+  flag: the default listing hides closed rows independently of what a row is,
+  so a closed gate is counted here and the type flag alone would not show it.
+  `gate_issues` and `template_issues` join the `--json` payload and the OpenAPI
+  `Statistics` schema, additively; they are broken out of `TotalIssues` rather
+  than removed from it, so the buckets still do not sum to the total in either
+  direction. `bd status --assigned` gets the same breakdown, which it needs for
+  the same reason against `bd list --assignee`. Not yet covered: durable rows
+  carrying a configured infra type (GH#6439), which need the workspace's
+  `types.infra` set that the portable count has no seam to read.
 
 - **Proxied-server refusals now say *why* they refuse.** The JSON a refused
   command prints gains a `reason` field next to the existing `code`, `error`
@@ -444,12 +5360,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stdout is unlimited, agent mode on a terminal gets 20, and a terminal gets 50.
 
 - **`bd preflight` honors the `json` config default**
-  ([#6293](https://github.com/gastownhall/beads/pull/6293)). Its `--json` flag
-  is bound to the same global every sibling command binds, so `json: true` in
-  the config file now selects JSON output for `bd preflight` as it already did
-  elsewhere. Previously only the explicit flag was honored — and, because an
-  unbound flag reports as unset, `bd preflight --json` did not reach every
-  JSON-aware renderer.
+  ([#6293](https://github.com/gastownhall/beads/pull/6293)). `json: true` in the
+  config file selects JSON output for `bd preflight`, as it already did
+  elsewhere; previously only the explicit flag was honored.
+- **BREAKING: `bd update --notes ""` is now refused; clear with
+  `--clear-notes`** ([#6021](https://github.com/gastownhall/beads/issues/6021)).
+  An empty `--notes` previously wiped the whole notes field at exit 0 behind
+  the same `✓ Updated` receipt as a successful write — and the empty string
+  is exactly what a dead command substitution (`--notes "$(cat
+  missing.txt)"`) collapses to, the accident behind every recorded loss in
+  the report. At the flag layer the accident and the deliberate clear are the
+  same bytes, so the empty value is refused unconditionally (exit 1, naming
+  the alternative) and the deliberate clear gets its own verb: `bd update
+  <id> --clear-notes`, mutually exclusive with `--notes` and
+  `--append-notes`. A verb rather than an `--allow-empty-notes` opt-in
+  because what needs authorizing is an intent, not an input path — the
+  description guard's `--allow-empty-description` unblocks stdin/file
+  plumbing, which notes does not have — and because an opt-in passed
+  habitually would silently disarm the guard, while a habitual
+  `--clear-notes` fails loudly on the next real update. `--force` does not
+  bypass the refusal (the overwrite fence answers a different question),
+  `--append-notes ""` remains a safe no-op, and the HTTP API is unchanged:
+  `patch.notes: ""` still clears — a JSON payload is a deliberate
+  construction, not a shell substitution.
+
+- **`--notes` help no longer reads as additive**
+  ([#6272](https://github.com/gastownhall/beads/issues/6272)). `bd update
+  --help` described `--notes` as "Additional notes" and the `bd prime` text
+  said "Add supplementary notes" — both read as appending, so agents
+  following the injected guidance faithfully clobbered prior context. The
+  update help now names the operation ("Replace the notes field …") with the
+  `--append-notes` contrast at the point of use, and the base/create help is
+  field-named like `--description` and `--design`, implying no merge
+  behavior.
+
 - **`bd gate check` resolves bead gates whose target lives in a prefix-routed
   rig** ([#5859](https://github.com/gastownhall/beads/pull/5859)). After a local
   miss, the evaluator follows the target bead ID through `routes.jsonl` and
@@ -458,6 +5402,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `<rig>:<bead-id>` await value remains accepted for compatibility.
 
 ### Fixed
+
+- **`bd gate check` no longer reports an unreadable store as "pending".** The
+  bead arm of the check dropped the lookup error on the floor, so with dolt
+  down (or any backend or transport failure on the awaited bead's read) every
+  bead gate printed as still waiting and the command exited 0 — the same
+  output as a healthy, genuinely pending gate. A read of the workspace's own
+  store that fails for any reason other than not-found is now an error row
+  (`✗ <gate>: error checking - ...`), counted in the summary, and `bd close`
+  on such a gate keeps refusing (`could not check bead gate`, `--force` to
+  override) rather than letting a dead store read as satisfied. On the
+  classic and proxied routes alike, `bd gate check` now exits non-zero
+  whenever any gate it checks (gh, timer, or bead) could not be checked or
+  closed. A bead in a prefix-routed rig whose store cannot be read stays
+  pending, with the routing failure in its reason (`cannot confirm the
+  awaited bead is gone`); for a missing bead, see
+  [#6395](https://github.com/gastownhall/beads/pull/6395).
+
+- **`bd gate check` resolves a bead gate whose awaited bead was deleted**
+  ([#6395](https://github.com/gastownhall/beads/pull/6395)). A bead gate
+  waited for its target to close, so deleting the target left the gate
+  pending forever and its step blocked. The first `bd gate check` that finds
+  the target in this rig's own store now records the sighting in the gate's
+  metadata (`await_seen`), and a later check that no longer finds it there
+  resolves the gate (`awaited bead <id> no longer exists`). An await ID that
+  no check has seen, such as a typo or a bead deleted before the first check,
+  stays pending with a diagnostic instead of unblocking the step: correct the
+  await ID or close the gate with `bd gate resolve`. A miss outside this
+  rig's store (a target whose prefix routes to another rig, or a contributor
+  auto-routed store) does not prove the bead gone, so the gate stays pending
+  and the reason names the cause. `bd close` on a bead gate follows the same
+  rule: it no longer needs `--force` once an earlier check saw the awaited
+  bead and the bead is gone from the gate's rig, with no route pointing
+  elsewhere. `bd rename` and `bd rename-prefix` point a bead gate at its
+  bead's new ID, sighting included, so a renamed bead does not read as
+  deleted, even to a check or `bd close` that read the gate before the
+  rename; a rename that fails partway leaves the gate pending without a
+  sighting, never resolved. A rename by an older bd does not move the
+  gate: if a check had already seen the bead, a later check or `bd close`
+  treats that rename as a deletion and closes the gate while the bead is
+  still open, so upgrade every client that renames beads together with the
+  ones that check gates.
+
+- **An epic that blocks on its own children no longer hides them from `bd
+  ready`** ([#6506](https://github.com/gastownhall/beads/issues/6506)). A
+  parent-child edge now propagates only a parent's *exogenous* blockedness —
+  blockedness whose cause lies outside the parent's own subtree — so the
+  close-gate idiom, a parent carrying `blocks` edges onto its own children (or
+  grandchildren) so it cannot close before them, stops darkening the very work
+  it is waiting for. The parent itself stays blocked, and a close gate does not
+  unlock the work under an epic that is itself blocked from outside: a sub-epic
+  blocked BOTH by its own children AND by an exogenously blocked ancestor still
+  darkens its children
+  ([#6601](https://github.com/gastownhall/beads/issues/6601)).
+  "Inside my own subtree" is decided to a fixed depth of **four**
+  parent-child levels — epic → sub-epic → leg → task — so a parent that
+  blocks on something deeper than that still darkens its whole subtree, exactly
+  as it did before this fix; that depth is a measured trade (the
+  bounded walk is a fixed chain of index probes, where a recursive one cost
+  7.5x per evaluation) and raising it is a one-constant change. Existing stores
+  repair on the next write that touches the hierarchy, or with
+  `bd doctor --fix`.
+- `bd dep add` no longer explains its refusal of a blocking edge onto your own
+  descendant by claiming the block would cascade down and never clear — it
+  does not, as of the fix above. The refusal stands, and now names the
+  sanctioned way to say it: a waits-for gate over the children.
 
 - **`routes.jsonl` prefixes containing a hyphen now route**
   ([#5048](https://github.com/gastownhall/beads/issues/5048)). Prefix routing
@@ -547,6 +5556,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ready set should fail to compile rather than silently fall back to an
   unbounded query.
 
+- **`storage.Storage` gains a required `SearchIssueSummaries` method**
+  ([#3458](https://github.com/gastownhall/beads/pull/3458)). It is a
+  narrow-projection variant of `SearchIssues` for list-shaped rendering: it
+  returns `[]*types.IssueSummary` (exported as `backend.IssueSummary`), which
+  carries the list columns, labels, and the four wisp-plane markers but none of
+  the TEXT/JSON columns. Nothing in `bd` calls it yet, so no command's output
+  changes. Consumers that only *call* the interface are unaffected; any external
+  type that *implements* it (a custom store, mock, or proxy, or an
+  `internal/storage/backends` registrant) must add the method to compile:
+  `SearchIssueSummaries(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueSummary, error)`.
+  It honors `SortBy`/`SortDesc` and `SkipLabels` exactly as `SearchIssues`
+  does, `IncludeDependencies` is a silent no-op (a summary has nowhere to put
+  dependency records), and wisps are merged in unless `SkipWisps` is set, with
+  their markers set so a wisp row stays distinguishable from a durable issue.
+
 - **Push `--dry-run` now honors `--create-only`**
   ([#6337](https://github.com/gastownhall/beads/issues/6337)). The sequential
   tracker push previewed "Would update" for every already-linked issue, even
@@ -556,6 +5580,1563 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   applies the same `--create-only` gate as the real run. Linear's dry-run also
   no longer counts an issue its batch filter skipped (create-only, a `ShouldPush`
   hook, parent, type, or conflict) as skipped twice. Notion's batch dry-run was already correct.
+
+- **`bd config unset` no longer reports success while the key stays set, and
+  now names where the unset actually landed.** A key present in
+  `config.yaml` but not claimed by `IsYamlOnlyKey` was deleted from the
+  database only, so it stayed effective; it is now cleared from both, and the
+  reported location - `Unset <key> (in database, config.yaml)` - is derived
+  from what the writes actually changed rather than from a pre-check of viper's
+  merged value, which counted defaults and environment variables as present in
+  the file. A yaml-only key that was not in the file prints `<key> was not set
+  in config.yaml` instead of claiming a write. A workspace with no project
+  `config.yaml` at all is an answer rather than a failure, so a database-backed
+  unset there no longer deletes the row and then exits non-zero. Unsetting a
+  key whose value is the indented block beneath it (a mapping or a list), which
+  used to comment out the key line and orphan the block into a `config.yaml`
+  that no longer parsed, is now refused alongside the flow-style and
+  block-scalar shapes above. An unset also keeps the file's trailing newline,
+  and an unset that changes nothing now leaves the file byte-identical - on a
+  CRLF `config.yaml` it previously reported a write for a key that was never
+  there and rewrote every line ending to LF. The stderr side-effect hint is
+  gated on the write too, so a no-op no longer announces a removal it did not
+  make, and the `--json` payload for a yaml-only key carries a `changed` boolean
+  so the machine branch can tell an absent key from an unpopulated field.
+
+### Security
+
+- **Raised the `golang.org/x/net` floor to `v0.60.0` and `golang.org/x/crypto`
+  to `v0.57.0`, past the seven fixable advisories they carry into a locally
+  built `bd`.** `govulncheck` reports all seven as reachable from `bd`'s own
+  code on `main`:
+
+  | Advisory | Module on `main` | Fixed in |
+  |---|---|---|
+  | GO-2026-6603 | `golang.org/x/net v0.58.0` | `v0.60.0` |
+  | GO-2026-6610 | `golang.org/x/net v0.58.0` | `v0.60.0` |
+  | GO-2026-6611 | `golang.org/x/net v0.58.0` | `v0.60.0` |
+  | GO-2026-6612 | `golang.org/x/net v0.58.0` | `v0.60.0` |
+  | GO-2026-6617 | `golang.org/x/net v0.58.0` | `v0.60.0` |
+  | GO-2026-6355 | `golang.org/x/crypto v0.55.0` | `v0.56.0` |
+  | GO-2026-6354 | `golang.org/x/crypto v0.55.0` | `v0.56.0` |
+
+  `x/net v0.60.0` requires `x/crypto v0.57.0`, `x/text v0.42.0` and
+  `x/mod v0.41.0`, so those rise with it.
+
+  GO-2026-5932 (also `x/crypto`) has no fixed version at any release, so it
+  is carried forward and named rather than counted as resolved. Both example
+  modules are mirrored so they cannot pin a lower floor than the module they
+  demonstrate. All upgrades, no downgrades.
+
+  The `grpc` half of the original change is gone: `main` reached `v1.83.2`
+  on its own. These floors matter because the versions are baked into the
+  binary `make build` and `make install` produce, so a downstream image-build
+  override cannot reach them; only the module floor can. Re-derive rather
+  than trusting this table: `govulncheck -scan module`.
+
+- A `.beads/redirect` that leads into another user's git repository no
+  longer makes bd run git there as you. bd pins `GIT_DIR` for its own git
+  commands, and git skips its `safe.directory` ownership check for an
+  explicit `GIT_DIR`, so `bd dolt remote add` could run that repository's
+  `core.fsmonitor` or filters with your account. bd now refuses a repository
+  git itself will not open, also when `bd -C` or `BEADS_DIR` names one
+  (GH#5700): its git-backed operations skip or fail instead of running there,
+  and `bd context` still shows the workspace. Add the repository to
+  `safe.directory` if you trust it.
+
+- A cloned repository's committed config can no longer make bd run a command
+  through a remote URL that git or ssh reads as an option. A `sync.remote` or
+  `sync.git-remote` starting with `-`, also after `git+`, such as
+  `--upload-pack=<command>`, reached `git ls-remote` as an option in
+  `bd bootstrap` and `bd init`, and `bd dolt remote reset-data` passed its
+  remote's URL to `git ls-remote`, `git fetch` and `git push` the same way.
+  An `ssh://` URL whose user name or host starts with `-`, such as
+  `ssh://-oProxyCommand=<command>@host/path`, reached ssh as an option
+  through Dolt's `ssh://` transport, which runs `ssh [user@]host <command>`,
+  and an ssh without OpenSSH 9.6's host name check (CVE-2023-51385) ran the
+  command; such a URL came from `sync.remote` (`bd bootstrap`, `bd init`),
+  `routing.*` (`bd create`), `repos.additional` (`bd repo sync`) or
+  `federation.remote` (`bd config apply`). bd now refuses these URLs before
+  it probes, clones or adds a remote, and passes remote URLs to git after
+  `--`; `bd bootstrap` still restores a local backup or `issues.jsonl` when
+  one exists. beads-mcp no longer passes tool arguments where bd reads them
+  as flags (a comment of `--file=<path>` made bd read that file into the
+  comment): it passes each value as one `--flag=value` argument and ids and
+  text after `--` (#7880, reported and fixed by @Wenjix in #7881).
+
+- **On a host shared with other accounts, the proxied-server proxy and
+  bd-managed Dolt startup no longer trust whoever answers on loopback**
+  (#7884). The proxy's data port opens every connection with a `BDPROXY1`
+  exchange keyed by the owner-only `proxy.secret`, which rotates on every
+  proxy start: the client proves the secret before the proxy dials its
+  backend, and the proxy proves it back before bd sends any SQL, so a process
+  that takes over a dead proxy's port (as another user can, under a long-lived
+  `bd serve`) receives no session. Only bd can use that port now (`bd sql`
+  runs ad-hoc queries through it). The control probe sends a MAC of a fresh
+  nonce instead of the secret. The proxy child validates and launches Dolt
+  from an owner-only snapshot of its config, so the config cannot change
+  between the check and Dolt reading it. bd-managed Dolt startup no longer
+  takes a listener another account put on its port for its own server: on
+  Linux and macOS it checks which process holds the listener wherever the host
+  can show that (on macOS a listener `lsof` cannot see counts as another
+  user's), and on other platforms, Windows included, the server logs at `info`
+  and startup waits for Dolt's own ready line. A group-writable HTTP CA file
+  (`BEADS_HTTP_CA_FILE`, `bd connect --ca-file`) is accepted only when
+  `/etc/passwd` and `/etc/group` show no other account in its group.
+  **Upgrading:** the first bd of this version to open a proxied workspace
+  stops a proxy an older bd started (verified through its pidfile) and starts
+  its own; an older bd cannot use that proxy and fails with a timeout waiting
+  for it, so upgrade every bd that shares the workspace, or run `bd dolt stop`
+  before going back to an older one.
+
+## [1.3.4] - 2026-11-04
+
+First stable release of the 1.3.4 patch line. It ships the same code as
+[1.3.4-rc.1]; the only change since that candidate is the version stamp. The
+full notes are in the [1.3.4-rc.1] section below. 1.3.4 is 1.3.3 plus one
+fix: bd reads `GT_ROOT` from a rig's `.beads/.env` again.
+
+There is **no new migration file**, and the embedded Dolt engine is
+unchanged: upgrading from 1.3.x or 1.3.4-rc.1 is a binary swap.
+
+Before promotion, 1.3.4-rc.1 passed gascity's RC Gate with bd pinned to the
+candidate, on a throwaway branch off gascity's `hotfix/1.5.1`
+([run 41791836358](https://github.com/gastownhall/gascity/actions/runs/41791836358)):
+- It ran the same 155 jobs as the 1.3.3-rc.1 gate, and every job finished
+  with the same result: 151 passing and 3 skipped.
+- The one red job is an advisory probe that builds bd from `main`. That
+  branch, like 1.3.3's, made two upstream-drift checks non-blocking.
+- The gate does not demonstrate the fix: the 1.3.3-rc.1 gate ran bd without
+  it and got the same results, and no job log in either run mentions
+  `GT_ROOT`.
+
+### Upgrade notes
+
+- Coming from 1.3.2 or earlier, read the [1.3.3-rc.1] **Upgrade notes**
+  before upgrading. They still apply, except that `GT_ROOT` is no longer one
+  of the `.beads/.env` keys bd ignores.
+- The [1.3.3-rc.1] **Known issues** are not fixed in 1.3.4, whichever release
+  you upgrade from. 1.3.4 does not include the #7039 restore
+  ([#8047](https://github.com/gastownhall/beads/pull/8047)), so do not run
+  `bd compact` or `bd flatten` on a clone that adopted migration 0062 by
+  `bd dolt pull` or `bd bootstrap`, or was cloned after it
+  ([#7039](https://github.com/gastownhall/beads/issues/7039)).
+- The 1.3.2 upgrade note still applies: run `bd recompute-blocked` once per
+  workspace whose store crossed migration 0059 under bd 1.3.0 or later,
+  which includes any workspace first created by bd 1.2.x or earlier
+  ([#7037](https://github.com/gastownhall/beads/issues/7037)).
+- Coming from 1.3.4-rc.1, nothing changes in behaviour.
+
+## [1.3.4-rc.1] - 2026-11-04
+
+First release candidate for 1.3.4, a one-fix patch on top of 1.3.3
+([#8118](https://github.com/gastownhall/beads/pull/8118)). It adds **no new
+migration file**, and the embedded Dolt engine is unchanged, so upgrading from
+1.3.x is a binary swap. The 1.3.3 **Upgrade notes** and **Known issues** still
+apply, except the `GT_ROOT` issue fixed below.
+
+### Fixed
+
+- **bd reads `GT_ROOT` from a rig's `.beads/.env` again**
+  ([#8118](https://github.com/gastownhall/beads/pull/8118), backport of
+  [#8117](https://github.com/gastownhall/beads/pull/8117)).
+  - **The problem:** Gas City's `gc rig add` writes the city root as `GT_ROOT`
+    into each rig's `.beads/.env`. 1.3.3's `.beads/.env` allowlist
+    ([#7879](https://github.com/gastownhall/beads/pull/7879)) dropped it, so
+    every bd command in a rig printed
+    `beads: ignoring GT_ROOT from .beads/.env` on stderr. Two things followed:
+    - Released gc versions read bd's `--json` error from stdout only when
+      stderr is empty, so they could misreport a failed bd command in a rig
+      as that notice
+      ([gastownhall/gascity#8817](https://github.com/gastownhall/gascity/pull/8817)).
+    - bd run in a rig without `GT_ROOT` exported stopped searching
+      `$GT_ROOT/.beads/formulas` and stopped loading
+      `$GT_ROOT/.beads/molecules.jsonl`. gc also links the city's formulas
+      into each rig's own `.beads/formulas`, an earlier search path, so the
+      formulas gc manages still resolved; gc writes no `molecules.jsonl`.
+  - **The fix:** `GT_ROOT` is now admitted, as the exact key only.
+    `GT_TOWN_ROOT` and other `GT_*` keys stay refused.
+  - **Why this is safe:** it names no command and no credential target. bd
+    reads `$GT_ROOT/.beads/formulas` as its last formula search path and
+    `$GT_ROOT/.beads/molecules.jsonl` as template data. Commands that write
+    to formula search paths can also write there: `bd formula convert --all`
+    writes a `.formula.toml` beside each JSON formula it converts there and,
+    with `--delete`, removes the JSON.
+  - Shell environment still wins over the file.
+
+## [1.3.3] - 2026-11-03
+
+First stable release of the 1.3.3 patch line. It ships the same code as
+[1.3.3-rc.1]; the only change since that candidate is the version stamp. The
+full notes are in the [1.3.3-rc.1] section below, which covers everything
+since [1.3.2]: security fixes, data-loss fixes and dependency updates, the
+behaviour changes under **Upgrade notes**, and the **Known issues** that
+1.3.3 does not fix, with their workarounds.
+
+There is **no new migration file**, and the embedded Dolt engine is
+unchanged: upgrading from 1.3.x or 1.3.3-rc.1 is a binary swap.
+
+Before promotion, 1.3.3-rc.1 passed gascity's RC Gate with bd pinned to the
+candidate: the same 155 jobs as the 1.3.2 gate, 151 passing and 3 skipped,
+the remaining one being an advisory probe that builds bd from `main`. For
+that run, two checks that track moving upstream heads, that probe and a
+pack-pin check, were made non-blocking; both failed on upstream drift, not
+on the candidate.
+
+### Upgrade notes
+
+- Coming from 1.3.2 or earlier, read the [1.3.3-rc.1] **Upgrade notes**
+  before upgrading. Several commands change what they accept or print:
+  `.beads/.env` keys outside the allowlist are ignored with a warning,
+  `mail.delegate` is read only from the environment and user config,
+  option-shaped remote URLs are refused, `bd rules compact` needs `--force`
+  to apply, and `bd delete` needs full ids.
+- Read the [1.3.3-rc.1] **Known issues**, in particular the warning not to
+  run `bd compact` or `bd flatten` on a clone that adopted migration 0062 by
+  `bd dolt pull` or `bd bootstrap`, or was cloned after it
+  ([#7039](https://github.com/gastownhall/beads/issues/7039)).
+- The 1.3.2 upgrade note still applies: run `bd recompute-blocked` once per
+  workspace whose store crossed migration 0059 under bd 1.3.0 or later,
+  which includes any workspace first created by bd 1.2.x or earlier
+  ([#7037](https://github.com/gastownhall/beads/issues/7037)).
+- Coming from 1.3.3-rc.1, nothing changes in behaviour.
+
+## [1.3.3-rc.1] - 2026-11-03
+
+First release candidate for 1.3.3, a patch on top of 1.3.2 that backports
+security fixes, data-loss fixes and dependency updates from `main`
+([#8083](https://github.com/gastownhall/beads/pull/8083)). It adds **no new
+migration file**, and the embedded Dolt engine is unchanged, so upgrading from
+1.3.x is a binary swap. A store from an older release still runs its pending
+migrations on first open, now without restamping `updated_at`. Several fixes
+change what a command accepts or prints; read **Upgrade notes** before
+upgrading. The 1.3.2 upgrade note still applies: run `bd recompute-blocked`
+once per workspace whose store crossed migration 0059 under bd 1.3.0 or
+later, which includes any workspace first created by bd 1.2.x or earlier,
+whichever 1.3.x release it is on now
+([#7037](https://github.com/gastownhall/beads/issues/7037)). On an
+unaffected workspace it changes nothing.
+
+### Security
+
+- **A committed `.beads/.env` can no longer make bd run a command, and
+  workspace settings can no longer set the command `bd mail` runs**
+  ([#8083](https://github.com/gastownhall/beads/pull/8083), backport of
+  [#7879](https://github.com/gastownhall/beads/pull/7879), fixes
+  [#7878](https://github.com/gastownhall/beads/issues/7878), reported and
+  fixed by @Wenjix). bd loaded every key in `.beads/.env` into its
+  environment, so a contributor could commit
+  `BEADS_DOLT_CREDENTIAL_COMMAND=<command>` and bd ran it with `sh -c` on the
+  next user's machine. bd now imports only an allowlist from that file:
+  `BEADS_*` and `BD_*` keys other than the command keys and the four
+  credential-redirect keys listed under **Upgrade notes**, and, of the
+  `DOLT_*` namespace, only `DOLT_REMOTE_USER` and `DOLT_REMOTE_PASSWORD`.
+  Keys match case-insensitively and never override the shell environment.
+  Every other key is ignored with
+  `beads: ignoring <KEY> from .beads/.env (<reason>)` on stderr. The other
+  `BD_*` keys still set config values, so the file can still name an
+  endpoint that receives credentials, such as `BD_AI_BASE_URL` or
+  `BD_DOLT_HOST`; see the first item under **Known issues**. Separately,
+  `bd mail` ran `mail.delegate` from project `config.yaml` or the replicated
+  database config, where `PUT /v0/beads/config/mail.delegate` could store it.
+  `bd mail` now reads `mail.delegate` only from the environment and user
+  config (`~/.config/bd/config.yaml`), and the settings API refuses the key
+  with HTTP 400.
+- **A cloned repository's committed config can no longer make bd run a
+  command through a remote URL that git or ssh reads as an option**
+  ([#8083](https://github.com/gastownhall/beads/pull/8083), backport of
+  [#7881](https://github.com/gastownhall/beads/pull/7881), fixes
+  [#7880](https://github.com/gastownhall/beads/issues/7880), reported and
+  fixed by @Wenjix). A `sync.remote` or `sync.git-remote` starting with `-`,
+  also after `git+`, such as `--upload-pack=<command>`, reached
+  `git ls-remote` as an option in `bd bootstrap` and `bd init`, and
+  `bd dolt remote reset-data` passed its remote's URL to `git ls-remote` and
+  `git push` the same way. An `ssh://` URL whose user name (percent-decoded)
+  or host starts with `-`, such as `ssh://-oProxyCommand=<command>@host/path`,
+  reached ssh as an option through Dolt's `ssh://` transport, and an ssh
+  without OpenSSH 9.6's host name check (CVE-2023-51385) ran the command.
+  bd now refuses such a URL from `sync.remote` and `sync.git-remote` (naming
+  the key), `routing.*`, `repos.additional` and `federation.remote`
+  (`bd config apply` checks it before opening the store), and when it adds a
+  Dolt remote or clones; the `refs/dolt/data` probe and reset-data pass the
+  URL to git after `--`. beads-mcp no longer passes tool arguments where bd
+  reads them as flags (a comment of `--file=<path>` made bd read that file
+  into the comment): it passes each flag value as one `--flag=value` argument
+  and puts ids and text after `--`.
+- **Dependency updates for published advisories**
+  ([#8083](https://github.com/gastownhall/beads/pull/8083)). `govulncheck`
+  reported 2 reachable advisories on 1.3.2's module set and none on this one.
+  - Go: `github.com/go-jose/go-jose/v4` 4.1.6 and `golang.org/x/net` 0.62.0,
+    with `x/crypto` 0.58.0, `x/text` 0.43.0, `x/tools` 0.51.0, `x/sync`,
+    `x/sys`, `x/term` and `x/telemetry` raised with them (backport of
+    [#7925](https://github.com/gastownhall/beads/pull/7925)), and
+    `github.com/getkin/kin-openapi` 0.149.0, a tool-only dependency of the
+    API code generator that is not in the bd binary (backport of
+    [#7812](https://github.com/gastownhall/beads/pull/7812)).
+  - Release workflow: uv 0.13.6, which also rejects chains through the
+    compromised eMudhra intermediate CAs and ships patched CPython builds, and
+    Python 3.14.10 (backport of
+    [#7925](https://github.com/gastownhall/beads/pull/7925)).
+  - beads-mcp `uv.lock`: `opentelemetry-api` 1.45.1 (backport of
+    [#7813](https://github.com/gastownhall/beads/pull/7813)); `fastmcp` 3.4.11
+    and `certifi` 2026.10.23 (adapted from
+    [#7814](https://github.com/gastownhall/beads/pull/7814), which moves
+    `main` to fastmcp 4.x; this line stays on 3.x); `joserfc` 1.7.7 and `mcp`
+    1.30.0 (no source PR: `main` moved past them with fastmcp 4.x);
+    `pyjwt` 2.15.1 and `urllib3` 2.8.0 (backport of
+    [#7466](https://github.com/gastownhall/beads/pull/7466)); `authlib` 1.9.1,
+    and `dnspython` 2.9.0 on Python ≥3.11 only (backport of
+    [#7925](https://github.com/gastownhall/beads/pull/7925)). One osv-scanner
+    advisory remains: `dnspython` 2.8.0 on Python 3.10, which no fixed
+    `dnspython` release supports.
+
+### Fixed
+
+- **A managed-local proxied server no longer fails to start when another
+  process takes its Dolt port first**
+  ([#8083](https://github.com/gastownhall/beads/pull/8083), backport of
+  [#7184](https://github.com/gastownhall/beads/pull/7184)). bd picks the Dolt
+  port by binding and closing it when it writes the generated
+  `.beads/dolt/config.yaml`, and `dolt sql-server` binds it only later. If
+  another process took the port in between, Dolt logged
+  `Port N already in use.` and exited, but the proxy dialed the port, reached
+  the other process, and reported the server ready. `bd init --proxied-server`
+  and the first command after an idle restart then failed with
+  `unexpected EOF` followed by `uow: ping db: ... connection refused`.
+  Readiness now requires Dolt's own `Server ready. Accepting connections.`
+  line on the child's output (at `log_level` info or more verbose, which every
+  generated config uses; a quieter level keeps the dial-only check), and a
+  child that reports its port taken fails with
+  `dolt sql-server listener port is already in use`. When the port is one
+  Beads chose, the proxy relaunches Dolt on a fresh free port, trying at most
+  five ports in all (the configured one plus up to four others), from
+  `.beads/dolt/proxy-child.runtime-config.yaml`: `config.yaml`'s settings
+  re-rendered with only `listener.port` changed. That file is removed or
+  replaced at the next start (a `bd dolt stop` kills the child and can leave
+  it behind until then).
+  `config.yaml` itself is never rewritten.
+- **`bd delete` no longer resolves an id it cannot find to a different issue
+  whose id begins with it**
+  ([#8083](https://github.com/gastownhall/beads/pull/8083), backport of
+  [#7375](https://github.com/gastownhall/beads/pull/7375) by @A3Ackerman).
+  bd delete resolved each id with the abbreviation-tolerant resolver, so an
+  id that was already gone (a retried delete, a re-run `--from-file` list, a
+  parent whose child survives) resolved by leading-prefix match to whichever
+  surviving issue's id it begins: after `fx-t00003` was deleted,
+  `bd delete fx-t00003` previewed `fx-t000031` and printed
+  `bd delete fx-t000031 --force` as the next step, and with `--force`
+  deleted it. `--quiet` silenced the partial-id
+  notice, so a `--force --quiet` re-run deleted issues it never named without
+  a word. `bd delete` now requires an exact id on the preview and with
+  `--force`, as the team-server route already did; full ids, bare full
+  hashes, child ids and routed ids resolve as before. An abbreviation is
+  refused with `issue "t000" not found: bd delete needs the full issue id, and
+  "t000" is only the start of fx-t000031`, naming every id it matches. Reads
+  and other writes, `bd comment` included, keep accepting abbreviations.
+- **`bd doctor --fix` no longer imports the tracked `issues.jsonl` over a
+  server database**
+  ([#8083](https://github.com/gastownhall/beads/pull/8083), backport of
+  [#7899](https://github.com/gastownhall/beads/pull/7899)). Its Database
+  repair took a missing `.beads/dolt` directory for a missing database. A
+  server-mode workspace has no such directory in a fresh clone or on another
+  machine, so whenever `bd doctor` reported a Database problem it repairs
+  there, such as a database last stamped by another bd version, the repair
+  opened the server's existing database and imported `.beads/issues.jsonl`
+  into it. That rewrote the database's rows to the tracked copy and recreated
+  issues deleted since. The repair now imports only into a database its own
+  open created or one with no issues. A database already on the server with
+  issues gets the local directory and its metadata update, and nothing is
+  imported. The Schema Compatibility repair runs the same code and is fixed
+  too.
+- **`bd compact` no longer silently changes row data when commit dates are
+  out of history order**
+  ([#8083](https://github.com/gastownhall/beads/pull/8083), backport of
+  [#8050](https://github.com/gastownhall/beads/pull/8050) and
+  [#6644](https://github.com/gastownhall/beads/pull/6644) by @vishnujayvel,
+  fixes
+  [#6645](https://github.com/gastownhall/beads/issues/6645), reported by
+  @bee-ghosttrack, and [#6516](https://github.com/gastownhall/beads/issues/6516),
+  reported by @postoso). Dolt does not require commit dates to rise along the
+  parent chain (a host clock that jumped back). `bd compact --days N`
+  replayed the recent commits in date order, so a child dated before its
+  parent could conflict on a row both commits changed; it now replays them in
+  Dolt's
+  `commit_order`. When a recent-dated commit came before an old-dated one in
+  history, the squashed base already held the recent commit, and replaying it
+  again could undo the later old commit's edit while reporting "Compacted".
+  Compact now refuses such a history (a recent commit at or before an old
+  one in commit order) up front, names both commits and their
+  dates, and changes nothing; `--force` does not override the refusal, and
+  `--dry-run` reports it. The squashed base now ends at the last old commit
+  in history rather than the newest-dated one, so an old window whose dates
+  are shuffled no longer loses its final edits. As a general net, compact
+  compares the replayed history's committed data with `main` before swapping
+  it in and aborts, leaving `main` untouched, on any difference.
+- **`bd compact` no longer discards writes that reach `main` while it runs**
+  ([#8083](https://github.com/gastownhall/beads/pull/8083), backport of
+  [#8046](https://github.com/gastownhall/beads/pull/8046), carrying forward
+  [#7789](https://github.com/gastownhall/beads/pull/7789) by
+  @csauer02-personal-user). It finished by
+  hard-resetting `main` onto the rebuilt history, which dropped changes in
+  `main`'s working set that no Dolt commit held yet (a batch under batched or
+  disabled auto-commit, or a write between its SQL commit and its Dolt
+  commit) and any commit that landed on `main` during the rebuild, after
+  their writers had been told they succeeded. It now moves `main` with a soft
+  reset: working-set changes stay pending, and a commit that landed during
+  the rebuild is kept in one follow-up commit
+  (`compact: commit changes that reached main during compaction`), without
+  its own hash, message or author; changes already staged when `bd compact`
+  started join that commit. The replay check above compares with `main` as
+  `bd compact` read it, so a write that lands meanwhile is kept, not refused
+  as a divergent replay. If the follow-up commit fails, `bd compact` stops
+  with the changes staged on `main`, for `bd dolt commit` (which also commits
+  any other pending changes). This needs Dolt 2.x, as pinned: on an older
+  Dolt sql-server the soft reset unstages those changes, so no follow-up
+  commit is made and they stay pending in the working set, for
+  `bd dolt commit`.
+- **`bd rules compact` no longer deletes rules without confirmation or a
+  backup** ([#8083](https://github.com/gastownhall/beads/pull/8083), backport
+  of [#8051](https://github.com/gastownhall/beads/pull/8051), fixes
+  [#5719](https://github.com/gastownhall/beads/issues/5719), reported by
+  @postoso). It applied merges by default, writing the composite and deleting
+  the source rules, and a composite keeps only the `**Do:**` and `**Don't:**`
+  lines, so the rest of each source (rationale, exceptions, frontmatter) was
+  gone. Compact now
+  previews unless `--force` is given, and the preview lists, by source, every
+  line the composite drops. Applying copies each source to
+  `<name>.md.backup` before deleting it; undo a merge by deleting the
+  composite and renaming each backup back. A group whose composite or backup
+  path already exists is refused, in preview as well as apply, and a rule
+  with no Do/Don't lines is skipped by `--auto` and refused by `--group`.
+- **`bd dolt remote reset-data` no longer deletes a git checkout used as a
+  `file://` remote**
+  ([#8083](https://github.com/gastownhall/beads/pull/8083), partial backport
+  of [#7902](https://github.com/gastownhall/beads/pull/7902)). Dolt makes a
+  file URL a git remote only when it ends in `.git`, so any other `file://`
+  remote is a Dolt file store, even in a git repository, where Dolt writes
+  its files among the repository's. Once Dolt had pushed into a checkout,
+  reset-data took the directory for a file store and cleared it, `.git` and
+  every working file included, then reported the reset; a bare repository
+  kept every old table file while reset-data reported success. reset-data now
+  refuses a `file://` remote whose directory is a git repository, bare or a
+  checkout, saying to replace the remote with a fresh URL, as for a cloud
+  remote. The rest of #7902 is not in 1.3.3; see **Known issues**.
+- **`bd doctor`'s Classic Artifacts cleanup deletes only what one
+  positive-ownership plan marks safe, and never a database**
+  ([#8083](https://github.com/gastownhall/beads/pull/8083), backport of
+  [#7828](https://github.com/gastownhall/beads/pull/7828)). The cleanup
+  (`bd doctor --fix` and `bd doctor --check=artifacts --clean`) emptied every
+  `.beads` whose path looks like an orchestrator worktree (`crew/*`,
+  `polecats/*`, `refinery/rig`, `.git/beads-worktrees/*`, or a rig root
+  beside `mayor/rig/.beads`) of everything but its `redirect`, `.gitkeep`
+  and, beside a redirect, its metadata. An embedded Dolt workspace there lost
+  its database, a server-mode workspace lost the `metadata.json` and
+  `config.yaml` that record which server database it opens, a SQLite
+  workspace lost its database whatever the file was named, a Dolt backup or
+  remote kept there lost the whole store, and a rig root that
+  `mayor/rig/.beads` redirects to lost the files every checkout routes
+  through. It also removed the WAL, SHM and backups of a nested `.beads` it
+  could not classify. The check and the cleanup now share one classification,
+  and the cleanup removes only an orphaned `beads.db-wal`/`beads.db-shm` in a
+  `.beads` with positive Dolt evidence and the leftovers of a redirect-only
+  stub that holds no database. It never removes database state (`*.db`,
+  `*.db3`, `*.sqlite`, `*.sqlite3` in any case, including the
+  `beads.backup-*.db` backups it used to delete; any file with the SQLite
+  header; the WAL/SHM of a database still beside them; Dolt store, embedded
+  Dolt and backup directories; a raw Dolt chunk store; or a symlink to any of
+  these). Anything else it finds is reported for review and left as it was.
+- **`bd github` sync no longer matches a pulled issue to a bead linked to
+  another repository's issue with the same number**
+  ([#8083](https://github.com/gastownhall/beads/pull/8083), backport of
+  [#8068](https://github.com/gastownhall/beads/pull/8068), fixes
+  [#7781](https://github.com/gastownhall/beads/issues/7781), reported and
+  first fixed by @NahumLitvin in
+  [#7794](https://github.com/gastownhall/beads/pull/7794)). Pulling issue
+  1313 from a second repository reported "0 created, 1 updated" and
+  overwrote the bead linked to the first repository's issue 1313; push,
+  conflict detection and selective pull likewise read another repository's
+  link as the configured repository's issue. Issue URLs now count only when
+  they name the configured host and repository, by its configured owner/repo
+  or by another name GitHub resolves to it (its current name, or a former
+  name beads are still linked under), so a renamed or transferred repository
+  keeps syncing. `--dry-run` push reports beads linked elsewhere as skipped,
+  and `bd github pull <bead-id>` says when a bead's link is not an issue the
+  tracker can address.
+- **Upgrading an older database no longer rewrites issue and wisp
+  `updated_at` values with the time of the upgrade**
+  ([#8083](https://github.com/gastownhall/beads/pull/8083), backport of
+  [#8053](https://github.com/gastownhall/beads/pull/8053) and
+  [#8080](https://github.com/gastownhall/beads/pull/8080), refs
+  [#5981](https://github.com/gastownhall/beads/issues/5981)). Schema
+  migrations 0035, 0046, 0047 and 0053 and ignored migration 0007 update rows
+  without assigning `updated_at`, so its `ON UPDATE CURRENT_TIMESTAMP`
+  stamped every row they touched (every blocked issue on a 1.0.x upgrade, for
+  example). Migration 0041 and ignored migrations 0003 and 0011 stamped rows
+  they only join: the engine applies `ON UPDATE` to every table a
+  multi-table UPDATE joins. Their SQL is frozen, so bd now records the
+  affected rows' `updated_at` before each of these steps and writes it back
+  on the rows the step rewrote before the step is recorded and committed; the
+  pre-0047/0053 repair that splits legacy wisp dependencies no longer joins
+  the tables it would stamp. An edit another process makes during the step
+  to an issue the step does not rewrite keeps its own time. Values already
+  stamped by an earlier upgrade are not repaired. The check lists each
+  table's columns with `SHOW TABLES` and `SHOW COLUMNS` rather than
+  `INFORMATION_SCHEMA`, which Dolt answers by scanning every database on the
+  server, so on a shared server it adds little to the time other bd commands
+  wait on the migration lock.
+
+### Upgrade notes
+
+- **`.beads/.env` keys outside the allowlist are ignored, with a
+  `beads: ignoring <KEY> from .beads/.env` warning on every command**
+  ([#7879](https://github.com/gastownhall/beads/pull/7879)). Notable ones:
+  the credential commands `BEADS_DOLT_CREDENTIAL_COMMAND` and
+  `BEADS_HTTP_TOKEN_COMMAND`, `BEADS_MAIL_DELEGATE`/`BD_MAIL_DELEGATE`,
+  `EDITOR`, `VISUAL`, `PAGER`, `BD_PAGER`, `BEADS_DOLT_BIN`, the credential
+  redirects `BEADS_DOLT_SERVER_HOST`, `BEADS_CREDENTIALS_FILE`,
+  `BEADS_CENTRAL_CONFIG` and `BEADS_HTTP_CA_FILE`, tracker tokens such as
+  `GITHUB_TOKEN` and `LINEAR_API_KEY`, every `DOLT_*` key other than
+  `DOLT_REMOTE_USER` and `DOLT_REMOTE_PASSWORD` (such as `DOLT_SSH_COMMAND`
+  and `DOLT_ROOT_PATH`), and other process variables (`GIT_*`, `SSH_*`,
+  `LD_*`, `DYLD_*`). Move them to your shell environment or user config
+  (`~/.config/bd/config.yaml`), then delete them from `.beads/.env` to stop
+  the warning.
+- **`bd config set mail.delegate` writes user config
+  (`~/.config/bd/config.yaml`)**, and `bd mail` ignores `mail.delegate` in
+  project `config.yaml` and in the database; a leftover database row prints a
+  migration notice. Re-run `bd config set mail.delegate <command>` (or set
+  `BEADS_MAIL_DELEGATE`) on each machine that uses `bd mail`
+  ([#7879](https://github.com/gastownhall/beads/pull/7879)).
+- **Option-shaped remote URLs are refused**
+  ([#7881](https://github.com/gastownhall/beads/pull/7881)): a value
+  starting with `-` (also after `git+`), or an `ssh://` URL whose user or
+  host starts with `-`, in `sync.remote`, `sync.git-remote`, `routing.*`,
+  `repos.additional` or `federation.remote`. No valid remote has that shape.
+  `bd init` stops before writing anything, and `bd bootstrap` does not
+  contact the remote: it restores a local backup or `issues.jsonl` if one
+  exists and otherwise reports a blocked plan. Fix the config value.
+- **`bd rules compact` previews unless `--force` is given**
+  ([#8051](https://github.com/gastownhall/beads/pull/8051)). Scripts that
+  use `--auto` or `--group` to apply merges must add `--force`. Its JSON
+  changed shape: each group carries `sources` (each with `file`, `backup`,
+  `not_carried`, `backed_up` and `deleted`) and, when refused, `error`;
+  `applied` is true only under `--force`. A refused group makes the command
+  exit non-zero.
+- **`bd delete` refuses abbreviated ids**
+  ([#7375](https://github.com/gastownhall/beads/pull/7375)). A script or
+  habit that deletes by abbreviation now gets the
+  `bd delete needs the full issue id` error, which names the full ids the
+  input matches; pass one of them.
+- **`bd github` makes one more API request per command**
+  ([#8068](https://github.com/gastownhall/beads/pull/8068)): it reads the
+  configured repository (`GET /repos/{owner}/{repo}`, following redirects)
+  to learn its current name, plus one request for each other repository on
+  the same host that a local bead's link names, to learn whether that name
+  is a former name of the configured repository. The lookup is best-effort:
+  if it fails, that run accepts only the configured name. Beads linked under
+  a name the lookup does not tie to the repository (the request failed, or
+  the old name now belongs to another repository) count as another
+  repository's: relink them (`bd update <id> --external-ref <new-url>`), or
+  the next pull imports their issues again as new beads (README, "GitHub
+  Issues Sync").
+- **Newly generated `config.yaml` files carry a
+  `# beads-chosen-listener-port: N` line** after the managed marker. It is
+  how bd tells a port it chose from one an operator set. A port is moved only
+  when the file has the marker and either that record with an unchanged
+  `listener.port`, or is byte-identical to the file bd 1.2.0–1.2.1 or
+  1.3.0–1.3.2 generated, so existing unedited workspaces recover too (a
+  `config.yaml` written by 1.1.x or 1.2.2 has no managed marker and stays
+  pinned). A hand-set or hand-edited port is treated as pinned and is not
+  moved: the proxy child exits instead of reporting ready. The command itself
+  fails after about 15s, usually with
+  `uow: get proxy endpoint: timeout waiting for proxy to become ready on its
+  OS-assigned port` (sometimes `proxy child exited before publishing its
+  OS-assigned port`); bd retries the start meanwhile, so the log holds several
+  copies of the error. That error, `dolt sql-server listener port is already
+  in use`, naming the taken port and the remedy (free the port, set
+  `listener.port` in `config.yaml` to a free port, or delete a generated
+  `config.yaml` so Beads regenerates it), is in `.beads/dolt/server.log`. If
+  the configured port and the four free ports tried after it are all taken,
+  the command fails the same way, and the log says
+  `gave up after 5 ports, the last P; something on this host keeps taking
+  them`.
+- **After a move, the Dolt child runs with
+  `--config <root>/proxy-child.runtime-config.yaml`** (`<root>` is
+  `.beads/dolt` by default), and the backend pid record
+  `<root>/proxy-child.pid` (its `port` field) and the proxy's DSN carry the
+  effective port. Tools that identify bd's Dolt by its `--config` path ending
+  in `config.yaml`, or that read the Dolt port from `config.yaml`, should also
+  accept the runtime config and read the port from `proxy-child.pid` (not
+  `proxy.pid`, which holds the proxy's own port).
+
+### Known issues
+
+These are not fixed in 1.3.3.
+
+- **bd sends private credentials to endpoints named in shared configuration**
+  ([#7886](https://github.com/gastownhall/beads/issues/7886)). Tracker
+  tokens (GitHub, GitLab, Azure DevOps, Jira, Linear), the AI API key and
+  `BEADS_DOLT_PASSWORD` go to whatever endpoint the workspace configures,
+  including one set in a committed `.beads/config.yaml`,
+  `.beads/metadata.json` or `.beads/.env` (as a `BD_*` key), or replicated
+  through the Dolt `config` table. A repository contributor or Dolt peer can
+  therefore point them at a server they control. Workaround: in a clone you
+  do not fully trust, check the endpoints it configures before running bd
+  with those credentials set, or unset the credentials for that clone. Read
+  the Dolt server host from the files first, because in server mode any bd
+  command that opens the database, `bd config list` included, sends
+  `BEADS_DOLT_PASSWORD` to it: `dolt_server_host` in `.beads/metadata.json`,
+  `dolt.host` in `.beads/config.yaml` (or `config.local.yaml`), and
+  `BD_DOLT_HOST` in `.beads/.env`. Then check `ai.base_url` in those YAML
+  files and `BD_AI_BASE_URL` in `.beads/.env`, and the tracker
+  endpoints `github.url`, `gitlab.url`, `ado.url`, `jira.url` and
+  `linear.api_endpoint` in `bd config list`. Fixed on `main` by
+  [#7887](https://github.com/gastownhall/beads/pull/7887), which refuses an
+  endpoint from shared configuration until you confirm it once from your
+  environment or user config.
+- **A server-mode workspace can push, pull and reset from a stale local copy
+  of its database.** When the Dolt server bd connects to does not serve the
+  workspace's `.beads/dolt` directory (for example, a server in a container
+  or another checkout) but `.beads/dolt/<database>` still holds a database
+  (a leftover from embedded mode, or a copy), `bd dolt push` and
+  `bd dolt pull` use that copy instead of the server's data, and
+  `bd dolt push --force` or `bd dolt remote reset-data` can replace the
+  remote with it. Workaround: move the copy out of `.beads/dolt` (for
+  example `mv .beads/dolt/<database> ~/<database>.copy`) before pushing,
+  pulling or resetting. Fixed on `main` by
+  [#7902](https://github.com/gastownhall/beads/pull/7902).
+- **`bd dolt remote reset-data` through a Dolt sql-server can leave the
+  remote without its Dolt data.** A running sql-server keeps its view of
+  every git remote it has used, so after reset-data deletes the remote's data
+  refs, the force-push through the server can hang or write nothing.
+  Workaround: restart the Dolt server right before running reset-data
+  (`bd dolt stop`, then `bd dolt start`, for bd's own server). If a reset
+  already left the remote empty, restart the server and run
+  `bd dolt remote reset-data <name> --yes` again. Do not delete
+  `refs/dolt/data` on the remote by hand. Fixed on `main` by
+  [#7902](https://github.com/gastownhall/beads/pull/7902).
+- **A clone that adopted migration 0062 by `bd dolt pull` or
+  `bd bootstrap`, or was cloned after it, has an empty `events` table**
+  ([#7039](https://github.com/gastownhall/beads/issues/7039)); only the
+  clone that ran the migration kept its rows, and the others hold only
+  events written since. Fixed on `main` by
+  [#8047](https://github.com/gastownhall/beads/pull/8047), which restores the
+  missing events from the clone's own Dolt history on first open; it is
+  **not** in 1.3.3. Until you run a release whose notes include #8047, do not
+  run `bd compact` or `bd flatten` on such a clone: both rewrite Dolt history
+  and can delete the history that restore reads. #7039 has a manual backfill
+  recipe.
+
+## [1.3.2] - 2026-10-23
+
+First stable release of the 1.3.2 patch line. It ships the same code as
+[1.3.2-rc.3]; the only change since that candidate is the version stamp. The
+full notes are in the [1.3.2-rc.3], [1.3.2-rc.2] and [1.3.2-rc.1] sections
+below, which together cover everything since [1.3.1].
+
+There is **no schema migration**, and the embedded Dolt engine is unchanged:
+upgrading from 1.3.1 or any 1.3.2 release candidate is a binary swap.
+
+### Upgrade notes
+
+- **Run `bd recompute-blocked` once per workspace whose store crossed
+  migration 0059 under bd 1.3.0 or later**
+  ([#7037](https://github.com/gastownhall/beads/issues/7037)). That includes a
+  workspace now on 1.3.1 that was first created by 1.2.x or earlier. The
+  [1.3.2-rc.1] upgrade notes explain why and who is affected; on an
+  unaffected workspace the command changes nothing.
+- Coming from 1.3.1, read the **Fixed** entries in [1.3.2-rc.3],
+  [1.3.2-rc.2] and [1.3.2-rc.1]. Three can change what a script sees:
+  `bd purge` keeps more closed beads (the whole closed chain above a live
+  bead), the `bd purge --limit N` confirmation now suggests a `--force`
+  command that keeps `--limit`, and `bd export` fails with
+  `failed to classify wisp-plane rows` when the `wisps` table exists but
+  cannot be read, instead of exporting without wisp markers.
+- Coming from 1.3.2-rc.3, nothing changes in behaviour.
+
+## [1.3.2-rc.3] - 2026-10-23
+
+Third release candidate for 1.3.2. Like rc.1 and rc.2 it has **no schema
+migration**, and the embedded Dolt engine is unchanged, so upgrading from 1.3.1,
+1.3.2-rc.1 or 1.3.2-rc.2 is a binary swap. It adds three fixes and a set of
+security bumps on top of rc.2. The rc.1 upgrade note (run `bd recompute-blocked`
+once per workspace after upgrading from bd ≤1.3.0,
+[#7037](https://github.com/gastownhall/beads/issues/7037)) still applies.
+
+### Fixed
+
+- **A least-privilege Dolt user can write again**
+  ([#7786](https://github.com/gastownhall/beads/pull/7786), backport of
+  [#7322](https://github.com/gastownhall/beads/pull/7322)). Two
+  fresh-connection paths ran `CALL DOLT_CHECKOUT` even when the session was
+  already on the requested branch: the fallback for the ignored-tables
+  transaction, and the pinned connection used by long-timeout versioned reads
+  and the blocked recompute. A server user granted EXECUTE on only
+  `dolt_add`/`dolt_commit` is denied even that no-op checkout, so
+  `bd create --graph`, `bd mol wisp`, `bd history` and `bd recompute-blocked`
+  failed with `command denied`. The checkout now runs only when the session is
+  on a different branch.
+- **`bd export --all` no longer stalls on workspaces with many wisps**
+  ([#7603](https://github.com/gastownhall/beads/pull/7603), backport of
+  [#6444](https://github.com/gastownhall/beads/pull/6444)). The bulk label,
+  comment, dependency and issue readers sent every id in one `IN (...)` list,
+  and Dolt's cost grows faster than linearly in the list length. One reported
+  workspace stopped completing exports past about 21k wisps. The readers now
+  read at most 200 ids per statement, and export reads the wisp-plane
+  relations only for ids that are wisps. A repeated id is read once, so
+  batching never duplicates or drops a row
+  ([#7785](https://github.com/gastownhall/beads/pull/7785)). Export now fails
+  with `failed to classify wisp-plane rows` when the `wisps` table exists but
+  its membership cannot be read, instead of silently exporting without wisp
+  markers; only a missing `wisps` table is tolerated.
+- **`bd purge --limit N` confirmation suggests the same selection it
+  previewed** ([#7784](https://github.com/gastownhall/beads/pull/7784),
+  backport of [#7540](https://github.com/gastownhall/beads/pull/7540), fixes
+  [#7534](https://github.com/gastownhall/beads/issues/7534) and
+  [#7524](https://github.com/gastownhall/beads/issues/7524)). Without
+  `--force`, the suggested `--force` command dropped `--limit`, so running it
+  as printed deleted every eligible row instead of N. Separately,
+  `--older-than` with a large negative day count overflowed into a small
+  positive age and purged; it is now refused.
+
+### Security
+
+- **Release binaries build with Go 1.26.10**
+  ([#7787](https://github.com/gastownhall/beads/pull/7787), backport of
+  [#7732](https://github.com/gastownhall/beads/pull/7732)), which distrusts
+  the compromised eMudhra intermediate CAs in `crypto/x509`. `release.yml`
+  uses uv 0.13.4, which ships the same distrust.
+- **Dependency floors raised** ([#7787](https://github.com/gastownhall/beads/pull/7787)):
+  `golang.org/x/net` v0.60.0 and `golang.org/x/crypto` v0.57.0 (backport of
+  [#6355](https://github.com/gastownhall/beads/pull/6355)), and
+  `google.golang.org/grpc` v1.83.2 and `github.com/apache/thrift` v0.24.0
+  (backport of [#7495](https://github.com/gastownhall/beads/pull/7495)).
+  `govulncheck` reported 16 reachable advisories on rc.2's module set and
+  none on rc.3's.
+
+## [1.3.2-rc.2] - 2026-10-10
+
+Second release candidate for 1.3.2. Like rc.1 it has **no schema migration**:
+upgrading from 1.3.1 or 1.3.2-rc.1 is a binary swap. It adds one fix on top of
+rc.1, the backport of [#6876](https://github.com/gastownhall/beads/pull/6876),
+which keeps the post-commit blocked-state recheck from reverting concurrent
+writes. The rc.1 upgrade note (run `bd recompute-blocked` once per workspace
+after upgrading from bd ≤1.3.0, [#7037](https://github.com/gastownhall/beads/issues/7037))
+still applies.
+
+### Fixed
+
+- **The post-commit blocked-state recheck no longer reverts concurrent
+  writes** ([#7146](https://github.com/gastownhall/beads/pull/7146), backport
+  of [#6876](https://github.com/gastownhall/beads/pull/6876), fixes
+  [#7030](https://github.com/gastownhall/beads/issues/7030)). The 1.3.1 line
+  carried the #6716 fan-in fix
+  ([#6719](https://github.com/gastownhall/beads/pull/6719)/[#6936](https://github.com/gastownhall/beads/pull/6936),
+  [#6942](https://github.com/gastownhall/beads/pull/6942)/[#6947](https://github.com/gastownhall/beads/pull/6947))
+  in the form #6876 later corrected on `main`: on the Dolt server backend the
+  recheck minted its Dolt commit while its own SQL transaction was still open.
+  `DOLT_ADD` stages the table from the session's BEGIN-time root, so that
+  commit could write `issues` rows that other sessions had just committed back
+  to their BEGIN-time values. The recheck runs only when unblocking writes
+  (closes, dependency removals, deletes) race on `issues`, which is exactly
+  when this matters. The recompute now runs alone in its own retried
+  transaction and the Dolt commit is published after it commits. A failed
+  trailing commit is counted as `post_tx_commit_dropped` and logged, instead
+  of being reported as a recheck failure, because the flag repair itself is
+  already committed.
+
+## [1.3.2-rc.1] - 2026-10-05
+
+First release candidate for 1.3.2, a patch on top of 1.3.1 with **no schema
+migration**: upgrading from 1.3.1 is a binary swap. It fixes `bd purge`
+deleting the closed root of a chain that still has live work under it, and an
+auto-backup watermark that could claim a commit the snapshot does not contain.
+It also carries an upgrade note for stores migrated by 1.3.0 or 1.3.1
+([#7037](https://github.com/gastownhall/beads/issues/7037)).
+
+### Upgrade notes
+
+- **After upgrading from bd ≤1.3.0, run `bd recompute-blocked` once per
+  workspace** ([#7037](https://github.com/gastownhall/beads/issues/7037)).
+  Migration 0059, first shipped in 1.3.0, recomputes the denormalized
+  `is_blocked` flag with a recursive query. On Dolt servers older than 2.4.0,
+  and on the embedded engine, a query-planner bug
+  ([dolthub/dolt#11886](https://github.com/dolthub/dolt/issues/11886), fixed
+  in Dolt 2.4.0) drops the query's `parent-child` edge filter. Blockedness then
+  spreads across every dependency type, including `relates-to`,
+  `discovered-from` and `tracks`. Beads that are not actually blocked are
+  marked blocked and silently disappear from `bd ready` and `bd list --ready`.
+  The flag is stored, so the damage persists until it is recomputed: nothing in
+  1.3.2 repairs it automatically.
+
+  `bd recompute-blocked` rebuilds the flag from the dependency graph. It is
+  idempotent and reports `rows_corrected`. It applies to every workspace whose
+  store crossed migration 0059 under bd 1.3.0 or later, which includes a
+  workspace now on 1.3.1 that was originally created by 1.2.x or earlier.
+  Running it on a workspace that was not affected changes nothing.
+
+### Fixed
+
+- **`bd purge` keeps the whole closed chain above a live bead, not just its
+  direct parent** ([#7041](https://github.com/gastownhall/beads/pull/7041),
+  fixes [#7031](https://github.com/gastownhall/beads/issues/7031)). The
+  live-dependent protection added in 1.3.1 only protected a closed candidate
+  that a not-done bead pointed at directly. Take a closed root R, a closed child
+  S1 and an open grandchild S2. S1 was protected because S2 is live, but R was
+  not, because its only dependent S1 is closed. Purge deleted R, which orphaned
+  S1 and S2, and `--dry-run` reported the same deletion. Protection now
+  propagates through closed candidates until nothing changes, on every backend
+  (dolt server, embedded, proxied/uow). An orchestrator retention sweep
+  (`bd purge --wisps-plane --older-than ...`) is the common way to hit this.
+- **The backup watermark no longer runs ahead of the snapshot**
+  ([#7044](https://github.com/gastownhall/beads/pull/7044), fixes
+  [#7032](https://github.com/gastownhall/beads/issues/7032)). Auto-backup read
+  Dolt HEAD *after* the sync and recorded that as the newest commit backed up.
+  A commit that landed during the sync was therefore recorded as backed up even
+  though the snapshot did not contain it, and auto-backup reported "no changes
+  since last backup" until HEAD moved again. HEAD is now read before the sync,
+  so such a commit stays pending for the next backup. Only opted-in auto-backup
+  (`backup.enabled: true`) was affected; `bd backup sync` does not record a
+  commit watermark.
+
+### CI
+
+- PRs into `hotfix/**` branches now run full CI, including the required
+  `CI Gate / Required` check
+  ([#7198](https://github.com/gastownhall/beads/pull/7198), fixes
+  [#7148](https://github.com/gastownhall/beads/issues/7148); ported to this
+  branch in [#7217](https://github.com/gastownhall/beads/pull/7217)).
+
+## [1.3.1] - 2026-09-30
+
+First stable release of the 1.3.1 patch line. It ships the same code as
+[1.3.1-rc.2]; the only change since that candidate is the version stamp. The
+full notes are in the [1.3.1-rc.2] and [1.3.1-rc.1] sections below, which
+together cover everything since [1.3.0].
+
+There is **no schema migration**: upgrading from 1.3.0, 1.3.1-rc.1 or
+1.3.1-rc.2 is a binary swap.
+
+### Upgrade notes
+
+- Coming from 1.3.0, read the upgrade notes in [1.3.1-rc.2] and the
+  **Changed** entries in [1.3.1-rc.1]. The rc.1 change most likely to affect
+  scripts is the new `bd dolt status --json` shape on a proxied workspace
+  ([#6580](https://github.com/gastownhall/beads/pull/6580)).
+- Coming from 1.3.1-rc.2, nothing changes in behaviour.
+
+## [1.3.1-rc.2] - 2026-09-29
+
+Second release candidate for 1.3.1, still a patch line on top of 1.3.0 with
+**no schema migration**: upgrading from 1.3.0 or 1.3.1-rc.1 is a binary swap.
+It adds the proxied-server `bd backup` family and opt-in auto-backup on
+managed-local workspaces, a `bd purge` that can run an orchestrator's wisp
+retention sweep, and fixes for the #6716 fan-in stall, partial batch closes,
+`bd sql` result sets, `bd show --watch`, `bd types`, `BEADS_DIR` discovery and
+proxy liveness, plus eleven fixes from `main` ([#6653](https://github.com/gastownhall/beads/pull/6653)) and the smart-gate
+data-behind stop ([#6659](https://github.com/gastownhall/beads/pull/6659), [#6695](https://github.com/gastownhall/beads/pull/6695)). Engineering notes for embedders
+reading proxied-server surfaces are in `engdocs/` ([#6652](https://github.com/gastownhall/beads/pull/6652)).
+
+### Upgrade notes
+
+These behaviour changes can affect scripts; each is detailed below.
+
+- `bd show --watch <id>` exits 1 when the id cannot be found (it used to exit
+  0), on both the direct and proxied routes.
+- `bd sql` in direct server mode prints `OK` / `{"status":"ok"}` for a
+  multi-statement write or a write the parser cannot classify, instead of
+  `OK, N rows affected` / `{"rows_affected":N}`. `bd sql --readonly` refuses
+  statements it cannot parse (for example `PRAGMA`) instead of running them
+  as reads.
+- A failure to read the custom issue types now fails `bd types`,
+  `bd create --graph` and `bd config set storage-class.*` instead of being
+  treated as "no custom types".
+- `BEADS_DIR` must point at the `.beads` directory itself. A `BEADS_DIR` that
+  names a project root, or a `.beads` that does not exist yet, now fails with
+  "no beads database found" instead of silently resolving to the nearest
+  workspace above the current directory.
+- `bd purge` always keeps closed beads a live bead depends on
+  (`live_dependent_skipped`); there is no flag to turn this off.
+- `--older-than` on `bd purge` and `bd prune` is exact at hour precision:
+  `12h` no longer rounds up to a day, so `bd prune --older-than 12h` deletes
+  rows it used to keep.
+- `bd close` with several ids exits non-zero when any of them fails to close.
+- Unflagged piped `bd query` is no longer capped at 50 rows.
+- On a proxied workspace with `dolt.auto-commit` set to `batch` or `off`,
+  writes are no longer committed to Dolt history one by one; run
+  `bd dolt commit` to flush them.
+- `bd backup sync` fails after waiting 5 seconds if another backup of the same
+  workspace is running.
+- `bd ready` / `bd list --ready` include issues in custom `active`-category
+  statuses, and a store open against an unreachable Dolt server on a
+  proxied-server workspace or under `bd serve` retries for up to ~40s before
+  failing. Both come from [#6653](https://github.com/gastownhall/beads/pull/6653); see **Changed**.
+
+### Added
+
+- **`bd backup` works on a proxied-server workspace bd runs the Dolt server
+  for** ([#6584](https://github.com/gastownhall/beads/pull/6584)). `bd backup init`, `sync`, `remove`, `status` and `restore` are routed
+  over the proxied provider; before this, a proxied workspace — the default
+  topology since 1.3.0 — had no backup path at all. `bd backup restore` stops
+  the proxy and its Dolt child before replacing the database and leaves the
+  workspace quiescent, so the next command relaunches against the restored
+  data.
+
+  The family stays **refused by design** on a proxied workspace pointed at a
+  Dolt server bd does not own (an external host, socket, or a beads-team-server
+  database): `CALL DOLT_BACKUP('add', …)` registers the backup remote on the
+  *server*, where it is global to every client connected to it, so one
+  workspace's backup decision would silently become everyone's — the shape
+  `bd backup`'s own help text already warns about for auto-backup. A `file://`
+  destination has a second problem on top, since the server resolves that path
+  on its own filesystem. The refusal keeps the `proxy.backup.unsupported` code
+  and now carries `"reason": "design"`; a backup story for those deployments
+  belongs to whoever runs the server. Whether a *remote-scheme* destination
+  (DoltHub, `aws://`, `gs://`) should eventually be allowed there is recorded as
+  an open question rather than settled — the server pushes those over the
+  network from its own environment, which is the same credential question the
+  next slice has to answer for `dolt push`.
+
+  `bd backup status` and `bd backup` help no longer attribute auto-backup being
+  OFF on a server topology to a missing git remote, which was never the reason
+  there ([#6694](https://github.com/gastownhall/beads/pull/6694)). Auto-backup
+  itself is opt-in on this topology; see the next entry.
+
+- **Auto-backup runs on a managed-local proxied-server workspace**
+  ([#6879](https://github.com/gastownhall/beads/pull/6879)). The
+  proxied arm of the post-command hook now calls auto-backup, so an explicit
+  `backup.enabled=true` (or `BD_BACKUP_ENABLED=1`) takes the same throttled,
+  change-detected Dolt-native backup into `.beads/backup` it takes in direct
+  mode, through the proxied provider's non-transactional seam. Before this the
+  opt-in was inert on every proxied workspace and `bd backup status` said so.
+  The default stays OFF, as on every server-mode workspace: many bd clients
+  share one server. It is honored exactly where `bd backup sync` is — a
+  proxied server bd started itself — and stays inert on an external or
+  team-server topology, strict `--readonly`, `bd serve`, a preview
+  (`--dry-run`/`--inspect`) and a migration freeze. A command that opened no
+  provider (e.g. `bd dolt stop`) backs nothing up rather than relaunching the
+  server to do so. `bd backup status` now reports the proxied default as
+  `auto: off in proxied-server mode; set backup.enabled=true to opt in`.
+
+- **Auto-backup and `bd backup sync` no longer overlap.** A per-workspace
+  backup lock (`.beads/backup.lock`) serializes them in every mode:
+  auto-backup skips when another backup holds it, and `bd backup sync` waits
+  up to 5 seconds (the bound restore uses for the workspace gate) and then
+  fails with "another backup is running for this workspace".
+
+- **`bd purge` covers an orchestrator's wisp retention sweep**
+  ([#6883](https://github.com/gastownhall/beads/pull/6883)). Three changes
+  that together let `bd purge --wisps-plane --older-than 168h --force` replace
+  a raw `DELETE FROM wisps` retention step:
+  - **Live-dependent protection, always on.** `bd purge` no longer deletes a
+    closed bead that a live bead depends on through a `parent-child`,
+    `tracks` or `blocks` edge — a closed molecule root whose step is still
+    open, a closed wisp a live convoy tracks, a closed blocker of live work.
+    "Live" is any status that is not done, including custom statuses. The
+    held-back count is reported as `live_dependent_skipped` in `--json` (and
+    on its own line in text output). The protection is on the role
+    (`issueops.SweepRequest.ProtectLiveDependents`); `bd prune` does not ask
+    for it.
+  - **`--wisps-plane`** selects every closed row stored in the wisps table,
+    including `--no-history` beads, which the default ephemeral selection
+    leaves to `bd prune`. It works on embedded, server and proxied
+    workspaces, and because it reaches durable-tier rows it requires
+    `--older-than` or `--pattern`, like `bd prune`
+    (`issueops.SweepWispsPlane`).
+  - **`--older-than` accepts hour and finer durations** (`36h`, `168h`,
+    `90m`, down to `1s`) on both `bd purge` and `bd prune`. Day values (`7`,
+    `7d`, `2w`) are unchanged. An `Nh` value used to be converted to whole
+    days: floored above a day (`36h` swept rows only 24 hours old) and
+    rounded UP to one day below it (`12h` kept everything younger than 24
+    hours). Both are now taken exactly, so `bd prune --older-than 12h` now
+    deletes rows closed 12–24 hours ago that it used to keep. A value too
+    large to represent (e.g. `213504d`) is now refused instead of silently
+    wrapping to a tiny age.
+  - **`--limit N`** caps one `bd purge` run at N beads, oldest-closed first
+    (`issueops.SweepRequest.Limit`), so a large backlog drains in bounded
+    transactions; `--json` then adds `remaining` and `has_more`. Loop while
+    `has_more` is true.
+
+### Changed
+
+- **Proxied-server refusals now say *why* they refuse** ([#6582](https://github.com/gastownhall/beads/pull/6582)). The JSON a refused
+  command prints gains a `reason` field next to the existing `code`, `error`
+  and `mutates`: `design` for a refusal that is expected to stay (shared
+  history, multi-repo routing, destructive admin, strict `--readonly`) and
+  `unimplemented` for a capability gap with a named owner. Every existing code,
+  message and exit status is unchanged, and `reason` is absent on refusals that
+  report a runtime state rather than a policy, so existing consumers are
+  unaffected. The policy behind it moved into one registry
+  (`cmd/bd/capability_registry.go`) that every command must appear in.
+- **A command with no proxied-server route now fails with a typed error**
+  (`proxy.store.unrouted`) instead of the bare string `proxy server store
+  should be uow provider`.
+
+- **`bd backup restore --json` prints a result object on every topology**
+  (`{"restored": true, "source": "<dir>"}`). It previously printed nothing at
+  all, which left a caller unable to tell a completed restore from a silently
+  skipped one. This applies to direct/embedded workspaces too, not only proxied
+  ones.
+- **`bd backup init`, `sync`, `remove` and `restore` no longer print a usage
+  block after a failure.** They now silence cobra's own error and usage
+  rendering like the rest of the CLI, so a failure is one error line on stderr
+  instead of the message followed by `Error: exit code 1` and the full usage
+  text. Exit statuses are unchanged; this applies on every topology.
+
+- **`bd purge` keeps closed beads a live bead depends on, always**
+  ([#6883](https://github.com/gastownhall/beads/pull/6883)). A closed bead that a not-done bead depends on through
+  `parent-child`, `tracks` or `blocks` is no longer purged (reported as
+  `live_dependent_skipped`), so a purge that used to delete a closed molecule
+  root under a live step now leaves it. There is no flag to turn this off.
+  See the `--wisps-plane` entry under Added.
+
+- **`--older-than` on `bd purge` and `bd prune` is taken at hour precision**
+  ([#6883](https://github.com/gastownhall/beads/pull/6883)). An `Nh` value is no longer rounded to whole days: `12h` used to
+  round UP to one day and now means 12 hours, so `bd prune --older-than 12h`
+  deletes rows closed 12–24 hours ago that it used to keep; `36h` used to floor
+  to one day and now means 36 hours. Day values (`7`, `7d`, `2w`) are
+  unchanged. See the `bd purge` entry under Added.
+
+- **`dolt.auto-commit=batch` and `off` now take effect on a proxied-server
+  workspace, and `bd dolt commit` works there** ([#6499](https://github.com/gastownhall/beads/pull/6499),
+  [#4995](https://github.com/gastownhall/beads/issues/4995)). Every proxied write used to mint a Dolt history commit
+  whatever `dolt.auto-commit` said, and `bd dolt commit` was refused with
+  `proxy.dolt_commit.unsupported`. Under `batch`/`off` a proxied write now
+  lands in the server's working set without advancing Dolt history, and
+  `bd dolt commit` is the flush point, as on the direct route. Commands that
+  are explicit commit points (`bd batch`, `bd mol bond`/`pour`/`squash`,
+  `bd mol wisp create`, and the wisp half of `bd mol burn`) still commit, and
+  `bd serve` writes still commit per write. `on`, the default, is unchanged.
+  **Behaviour change:** a proxied workspace that set `batch` or `off` and was
+  getting per-write commits anyway now accumulates uncommitted changes until
+  `bd dolt commit`, and `dolt log`, `dolt push` and backups do not see them
+  before that. `bd vc commit`'s proxied refusal now points at `bd dolt commit`.
+
+- **`bd ready` and `bd list --ready` now return issues whose custom status is in
+  the `active` category** ([#5918](https://github.com/gastownhall/beads/pull/5918),
+  [#5831](https://github.com/gastownhall/beads/issues/5831)). The ready query
+  treated its `open` pin as an exact match, so a workspace that defined, say,
+  `triaged:active` never saw those issues in ready work — even though
+  `bd statuses`, the `ready_issues` view, and claim eligibility all already
+  counted that category as ready. **The ready set grows on upgrade** for any
+  workspace using custom active statuses: counts and dashboards will read higher,
+  and `bd ready` can hand out issues it used to withhold. Custom
+  `wip`/`done`/`frozen`/unspecified statuses stay out, and `in_progress` stays
+  out, both unchanged.
+
+- **`bd list --wisp-type <t>` with no plane admitted is now a refusal instead of
+  an empty listing** ([#6098](https://github.com/gastownhall/beads/pull/6098)).
+  `--wisp-type` narrows an admitted plane rather than admitting one, so alone it
+  could not match any row and exited 0 with an empty result for every input. It
+  now fails with a hint naming `--include-ephemeral`. A script that ran it and
+  read the empty output as "no such wisps" now sees an error — which is the
+  point: the old success answered a question it had not asked. The refusal is
+  CLI-only; the equivalent API request stays lawful and still composes to an
+  empty page.
+
+- **The `--ready` footer names the status pin that actually applied**
+  ([#5924](https://github.com/gastownhall/beads/pull/5924)). With no `--status`
+  (or `--status all`) the line is unchanged: `open only — --ready excludes
+  in_progress`. With an explicit `--status` it now reads `<selector> only`
+  instead of reusing the default-open sentence, which is no longer true once the
+  selector is honored (see **Fixed**). Anything scraping that parenthetical for
+  a `--status`-plus-`--ready` run sees new text — though that combination also
+  returned the wrong rows before this release. Note that the default sentence now
+  understates the set, since custom active statuses join it (above); the footer
+  and `--ready` help text are corrected upstream on main
+  ([#6187](https://github.com/gastownhall/beads/issues/6187),
+  [#6188](https://github.com/gastownhall/beads/issues/6188)).
+
+- **`bd doctor` reports a new missing gitignore pattern on every workspace
+  created before this release, until `bd doctor --fix` is run**
+  ([#5978](https://github.com/gastownhall/beads/pull/5978)).
+  `.beads/dolt-server-config.yaml` joined the required `.beads/.gitignore`
+  patterns (see **Fixed**), so a workspace that was clean a moment ago now
+  warns. `bd doctor --fix` appends the rule and silences it; workspaces
+  initialised after this release get it from the template and never warn.
+
+- **Opening a store against an unreachable Dolt server now takes up to ~40s to
+  fail instead of failing at once — on proxied-server workspaces, and under
+  `bd serve`** ([#6003](https://github.com/gastownhall/beads/pull/6003)). The
+  bootstrap ping is retried for up to 30 seconds, each attempt capped at 10s, so
+  a server still coming up is waited out rather than turned into a hard failure
+  (see **Fixed**). The cost is that a genuinely dead or misconfigured endpoint no
+  longer errors immediately: an interactive command against a stopped server, and
+  any script or CI step that counted on a fast failure, now waits out the retry
+  budget first. Durable rejections — bad credentials, unknown database, a
+  hostname that does not resolve — are still reported immediately without
+  retrying.
+
+  Only the paths that build a unit-of-work provider take that ping, so this is a
+  minority of topologies: every command in a proxied-server workspace, local or
+  external, and `bd serve` in a server, external-server or shared-server
+  workspace, which builds its own provider through the same funnel. **Embedded —
+  the default — is unaffected entirely**; `bd serve` refuses it outright, and no
+  embedded command can slow down here. An ordinary CLI command in a server or
+  shared-server workspace is also unaffected: it opens a Dolt store, which does
+  not take this ping. Only that mode's `bd serve` startup does.
+
+  The 30s figure is the retry budget, not the wall-clock bound. It stops
+  *scheduling* attempts at 30s but cannot cancel one already in flight, and each
+  attempt carries its own 10s cap, so ~40s is the honest worst case for a single
+  open. A provider open pings twice — once for the schema-init connection, once
+  for the database pool — each with a fresh budget, so a backend that satisfies
+  the first ping and the schema init and is then unreachable for the second can
+  push one command to ~80s. That ordering is narrow, but it is reachable.
+
+- **A backup sync that would leave the backup's manifest ahead of its chunk
+  files now fails at that point instead of corrupting the backup quietly**
+  ([#5931](https://github.com/gastownhall/beads/pull/5931),
+  [#4070](https://github.com/gastownhall/beads/issues/4070)). The Dolt bump
+  brings upstream's defense, which rejects a manifest update referencing a
+  missing table file. Previously that update was accepted and only some later
+  sync failed, confusingly, with `table file not found` — and stayed broken. A
+  sync that used to appear to succeed can now report a failure; that failure is
+  the corruption being caught at the moment it happens. This is a mitigation,
+  not a root-cause fix: backup file-and-manifest publish is still non-atomic,
+  and **backups already in the manifest-ahead state are not repaired** by
+  upgrading — they surface as a failing sync and have to be re-seeded.
+
+### Fixed
+
+- **An explicit `BEADS_DIR` is authoritative during workspace discovery.**
+  When `BEADS_DIR` named a directory without project files yet (missing,
+  empty, or not initialized), discovery ignored it and walked up from the
+  current directory instead, then rebound `BEADS_DIR` to whatever ancestor
+  workspace it found. `bd init` refused with "already initialized" because of
+  the parent workspace, and data commands such as `bd create` and `bd list`
+  read and wrote the parent's store. Discovery now reports no workspace for
+  such a `BEADS_DIR`, so `bd init` initializes the named directory and other
+  commands fail with "no beads database found". `bd import`/`bd setup` and
+  `bd bootstrap` target the named directory when they create a workspace.
+  Behaviour with `BEADS_DIR` unset is unchanged. **Behaviour change:** a
+  `BEADS_DIR` that points at a project root rather than its `.beads`
+  directory (for example `BEADS_DIR=$repo` instead of `BEADS_DIR=$repo/.beads`),
+  or at a `.beads` that does not exist yet, used to work by accident because
+  discovery walked up to the nearest workspace; it now fails with "no beads
+  database found". Point `BEADS_DIR` at the `.beads` directory itself.
+  ([#6938](https://github.com/gastownhall/beads/pull/6938))
+
+- **A proxied workspace's proxy retires when its Dolt backend exits
+  cleanly.** The proxy noticed its `dolt sql-server` child exiting only when
+  the exit status was non-zero. A backend that shut down gracefully (for
+  example on SIGTERM) left the proxy up and adoptable in front of a dead store:
+  with `--proxied-server-idle-timeout 0` it never went away, `bd dolt status`
+  called it running, and every command failed until `bd dolt stop`. The proxy
+  now retires on any backend exit, as it already did on a crash, so the next bd
+  command (including `bd ping`) starts a fresh proxy and backend. `bd dolt
+  status` no longer reports a proxy whose managed backend is gone as running:
+  the text says "not serving" and the JSON reports `running: false` (with
+  `proxy_pid` still set), including for a stranded proxy started by an older
+  bd. ([#6937](https://github.com/gastownhall/beads/pull/6937))
+
+- **`bd show --watch` works under `--proxied-server`.** It was refused with
+  `proxy.watch.unsupported` although the provider can answer the poll the way
+  `bd list --watch` already does, so every proxied workspace — the default
+  transport for managed-local setups — had no way to watch a bead. The proxied
+  route now shares the direct route's loop: render once, re-read every 2s,
+  redraw only when the issue's status or `updated_at` changes, stop cleanly on
+  Ctrl+C/SIGTERM, and require exactly one id. Each poll opens its own short
+  unit of work, so a long watch never pins a transaction, and a poll that
+  fails (the issue was deleted, the backend blipped) keeps the last render
+  without printing, as on the direct route. On both routes a watch whose id
+  cannot be found now exits 1 instead of 0 ([#6933](https://github.com/gastownhall/beads/pull/6933)).
+
+- **A server-mode workspace with an empty `.beads/dolt` is no longer refused
+  as legacy**
+  ([#5682](https://github.com/gastownhall/beads/issues/5682),
+  [#6935](https://github.com/gastownhall/beads/pull/6935)). bd creates `.beads/dolt` on use even when the data lives on an
+  external Dolt server, and leaves it empty. When the gitignored
+  `.local_version` witness was missing — after a fresh checkout, or when a
+  provisioner created the empty root before `bd init --server --external` —
+  the legacy-upgrade guard refused every command, `bd init` included, as a
+  "legacy Dolt server workspace", and no bd command could repair it. An empty
+  root holds nothing a legacy release could have left, so the guard now admits
+  it: `bd init` writes the witness, and an existing workspace in that state
+  re-seeds it on the next command. A pre-1.0 witness, or a `.beads/dolt` that
+  holds anything, is still refused.
+
+- **`bd types` now lists exactly the types `bd create --type` accepts**
+  ([#6934](https://github.com/gastownhall/beads/pull/6934)). The two resolved
+  the type set through different code and could disagree: a server-mode
+  workspace's `bd types` dropped `.beads/config.yaml` `types.custom` entries
+  once the database had any custom type, although create accepts them; in
+  proxied mode `bd config set storage-class.<type>` checked `config.yaml` alone
+  and refused custom types registered in the database; and the built-in system
+  types `message`, `molecule`, `gate` and `event` were never listed. Every
+  mode now composes custom types by one rule (the `custom_types` table, else
+  the `types.custom` config row, always unioned with `config.yaml`). `bd types`
+  gains a "System types" section, and `bd types --json` an additive
+  `system_types` field; `core_types` and `custom_types` are unchanged. A
+  failure to read the custom types now fails `bd types`, `bd create --graph`
+  and `bd config set storage-class.*` instead of being silently treated as "no
+  custom types".
+
+- **`bd sql` no longer drops the rows of CTE queries or CALL result sets**
+  ([#6932](https://github.com/gastownhall/beads/pull/6932)). In proxied-server
+  mode, `WITH name(cols) AS (...) SELECT ...` and `WITH RECURSIVE ...` queries
+  were misread as writes and printed `OK, 0 rows affected` with no error; they
+  now return their rows. Statements are now classified with the Dolt SQL
+  parser (shared by the proxied and direct paths): reads return rows, plain
+  writes (including CTE-prefixed `UPDATE`/`DELETE`) commit and report
+  `rows_affected`, and anything that may both write and return rows (`CALL`,
+  `EXPLAIN ANALYZE` of a write, `RETURNING`) or that the parser cannot
+  classify is committed and prints whatever rows it returns, so
+  `CALL DOLT_BRANCH(...)`-style result sets are rendered instead of discarded.
+  Visible changes for scripts: in direct server mode a multi-statement write,
+  or a single write statement the parser cannot classify, now prints `OK` /
+  `{"status":"ok"}` (as proxied mode already did) instead of
+  `OK, N rows affected` / `{"rows_affected":N}`; and `--readonly` now refuses
+  statements it cannot parse (for example `PRAGMA`) instead of treating them
+  as reads.
+
+- **Unblocking two blockers of one dependent at the same time no longer leaves
+  the dependent stuck as blocked** ([#6716](https://github.com/gastownhall/beads/issues/6716); [#6719](https://github.com/gastownhall/beads/pull/6719), [#6942](https://github.com/gastownhall/beads/pull/6942)).
+  Closing both blockers in parallel (formula fan-in with parallel workers), or
+  a close racing a `bd dep remove` or a delete of the other, could leave the
+  dependent `is_blocked=1` and missing from `bd ready` until
+  `bd recompute-blocked`. A write that takes a blocker away (a close, an update
+  to an inactive status, a dependency removal, a delete) now rechecks the
+  dependents it recomputed once its transaction has committed. This covers the
+  Dolt store write transactions, every write the proxied-server (uow/domain-db)
+  route serves — under `--proxied-server`, the default topology, that is
+  `bd close` (single and batch), `bd update --status`, `bd dep remove`,
+  `bd delete`, `bd batch` and `bd serve` — `RunInTransaction` (`bd batch`
+  direct, `bd cook`, `bd mol squash`/`burn`, and SDK callers that close or
+  update inside a transaction), the wisp close, update and delete writers, and
+  the legacy dependency removal behind `bd duplicates --merge`. Demote-to-wisp
+  moves a row between planes without taking a blocker away and is unchanged.
+
+- **`bd close` now exits non-zero when any issue in a batch fails to close**
+  ([#6648](https://github.com/gastownhall/beads/issues/6648); [#6740](https://github.com/gastownhall/beads/pull/6740), [#6771](https://github.com/gastownhall/beads/pull/6771)). A batch with one
+  refused id used to exit 0 as long as another id closed, so scripts could not
+  tell that part of the batch was left open. The closable ids still close, the
+  refusals are still printed, and a final `Error: N of M issues failed to close`
+  line is added; ids that were already closed still count as success. Both the
+  direct and proxied-server routes behave this way for ids the close policy or
+  the engine refuses. (An id that cannot be *resolved* at all is unchanged and
+  still differs by route: the direct route aborts the whole command before any
+  close runs, while the proxied route refuses that argument and closes the
+  rest.) In `--json` mode the summary is instead a compact JSON line on stderr
+  naming the failed ids, matching `bd update`'s partial-failure report, while
+  stdout keeps the usual closed-issues array. Each `failed[]` entry carries the
+  refusal as the engine worded it, identically on both routes; the `--force`
+  hint and the route's own framing stay on the human-readable stderr line, which
+  is unchanged. `--claim-next` still claims when
+  part of the batch closed — the claim commits inside the batch's own
+  transaction and a sibling's refusal does not roll it back — so the summary
+  names the claimed id rather than leaving it silently assigned.
+
+- **`bd query` no longer silently stops at 50 rows when its output is piped**
+  ([#6229](https://github.com/gastownhall/beads/issues/6229), [#6744](https://github.com/gastownhall/beads/pull/6744)). `bd list` has
+  treated piped stdout as unlimited since GH#4094, but `bd query` read its
+  `--limit` default of 50 straight through, so `bd query '...' | consumer`
+  dropped every row past 50 with no hint. An unflagged `bd query` now resolves
+  through the same policy as `bd list`: an explicit `--limit` wins, piped
+  stdout is unlimited, agent mode on a terminal gets 20, and a terminal gets 50.
+
+- **Deleting or purging a wisp no longer leaves orphan rows behind on stores
+  without the wisp foreign keys** ([#6563](https://github.com/gastownhall/beads/pull/6563), [#6627](https://github.com/gastownhall/beads/pull/6627), [#6487](https://github.com/gastownhall/beads/issues/6487)).
+  On a store whose `wisp_dependencies` and wisp auxiliary tables lack the
+  migration-0047 FK constraints, every wisp delete (including `bd purge`,
+  `bd mol burn` and wisp GC) left its `wisp_dependencies` edges on both sides
+  and its `wisp_labels`, `wisp_events`, `wisp_comments` and
+  `wisp_child_counters` rows in place, which showed up as dangling parent
+  references and store bloat. The delete paths now remove them. This is a
+  forward fix: orphans already in a store are not cleaned up.
+
+- **A clone missing its local `events`, `bd_events_journal` or `bd_events_seq`
+  table recreates it on open** ([#6547](https://github.com/gastownhall/beads/pull/6547)). Those tables are dolt-ignored, so
+  a fresh clone can arrive at the latest schema version without them, and bd
+  then treated the schema as complete and never created them. Their absence
+  now makes the migration runner replay the migrations that create them, from
+  each table's own floor rather than from zero.
+
+- **The smart migrate gate no longer auto-migrates a clone whose data is behind
+  the remote** ([#6575](https://github.com/gastownhall/beads/issues/6575)). The
+  gate's first-mover verdict was computed from schema facts alone — equal
+  migration content hashes against the cached remote ref, at the same version,
+  at or above the convergence floor — and none of those say where the clone's
+  branch sits relative to that ref. A clone level with the remote on *schema*
+  but behind it in unpulled *data* commits satisfied every precondition, was
+  classified a safe first-mover, and migrated in place, minting local-only
+  schema commits on a HEAD missing those commits. When the pending batch moves
+  a tracked table onto the `dolt_ignore` plane, every later `bd dolt pull` then
+  refuses with `local changes would be stomped by merge: events`
+  ([#6368](https://github.com/gastownhall/beads/issues/6368)) while `dolt
+  status` reads clean — and the clone can no longer fetch the very commits it
+  was behind on. Upgrading from a 1.1-era database is the ordinary way in, so
+  this release's upgrade audience is the exposed one. The gate now reads the
+  branch position its callers already supply and stops with guidance naming the
+  remedy: run `bd dolt pull`, then re-run what you were blocked on, and the
+  migrate proceeds as a true first-mover.
+
+  The stop applies whenever the clone has commits left to pull, whether or not
+  it also has commits of its own. bd auto-commits every write, so a clone that
+  is both behind and ahead is the ordinary multi-machine state, and it reaches
+  the same wedge; it is told its pull will *merge* rather than fast-forward, and
+  how to resolve conflicts if it reports them. A clone that is level with the
+  remote, or that only has unpushed local commits with nothing to pull, still
+  auto-migrates exactly as before.
+
+  **`bd dolt pull` works from the refused state.** It opens the store too, so
+  on a refused clone it would otherwise hit the very refusal that prescribes
+  it — and an embedded workspace has no external `dolt` binary to fall back to,
+  which would leave `BD_ALLOW_REMOTE_MIGRATE=1` (performing the migration the
+  stop exists to prevent) as the only way forward. `bd dolt pull` now opens
+  leniently for this one refusal, the way `bd dolt commit` does for the
+  dirty-working-set refusal
+  ([#4566](https://github.com/gastownhall/beads/issues/4566)); every other gate
+  refusal still fails that open. This supersedes the [1.3.0] upgrade note's
+  statement that the pending-migration gate refuses `bd dolt pull` as well as
+  `bd dolt push`: for the data-behind stop it does not, by design.
+
+  Commands that keep working through the stop say the same thing. `bd list`,
+  `bd ready` and `bd show` succeed against the old schema, and `bd dolt commit`
+  still commits the working set; on embedded storage all of them used to print
+  the blunt migrate-or-adopt coordination bullets while doing so — naming
+  `bd migrate --force && bd dolt push`, which on a data-behind clone applies
+  the migration this stop exists to prevent and then fails the push
+  non-fast-forward, and `bd bootstrap`, which no-ops against an existing
+  workspace. They now print the pull-first guidance, shape-branched the same
+  way the fatal refusal is, alongside the note that the command in hand
+  continued at the current schema. Refusals that are *not* the data-behind stop
+  keep the coordination bullets, which are right for them.
+
+  `--json` callers get the same remedy the terminal does: `observed`,
+  `expected` and `options` describe the pull (a single `pull-first` option)
+  rather than the migrate-or-adopt decision that does not apply here, plus a
+  `data_behind_shape` of `fast-forward` or `diverged`. `fallback_reason` stays
+  `data-behind`. For the fast-forward shape on a non-shared store — one
+  unconditional option, no local commits, nothing discarded —
+  `human_decision_required` is now `false`, so an agent can run the pull
+  instead of stalling for approval of a step the same payload calls riskless.
+  It stays `true` for the diverged shape (the pull merges and can need conflict
+  resolution) and on a shared store (the follow-up consent step needs an
+  operator who can confirm every co-resident client is upgraded). On a shared
+  Dolt sql-server the guidance carries #5920's consequence — migrating promotes
+  the schema for every co-resident client, and clients still on an older bd
+  refuse the database until upgraded — and names the consent step the retry
+  needs there: `bd migrate schema --force`. It is the forced form because this
+  stop always has a remote configured (behind-ness is read from the
+  remote-tracking ref), and the bare `bd migrate schema` consent is only read
+  for a shared database with *no* remote; the flag consents to migrating a
+  remote-backed shared store, and by then the pull has landed the commits the
+  clone was missing.
+
+  **Proxied-server mode reaches the stop too, and is told where to run the
+  remedy.** The store-open gate on that path supplied no branch-position
+  callback, so a proxied clone that was level on schema and behind in data
+  could never be classified data-behind: it got the blunt shared-store refusal,
+  whose body is the designated-migrator recipe — `bd migrate --force` then
+  `bd dolt push` — which in this state is the wedge the stop exists to prevent.
+  It now routes to the same data-behind stop as every other topology. Because
+  `bd dolt pull` is refused at the proxied front door
+  (`proxy.dolt_pull.unsupported`), along with `bd dolt push`, the bare
+  `bd migrate` and `bd conflicts`, the guidance there names the machine the pull
+  has to run on rather than printing a command this binary rejects; the `--json`
+  option is `pull-first-on-server-host`, and `expected` carries the same
+  qualifier so a single-field reader is not handed a locally-refused command.
+  The shared-store consent step is the other way round: `bd migrate schema
+  --force` is *not* refused here — the refusal table keys on the command path
+  and has no `migrate schema` row — so the guidance says it can be run from this
+  workspace but only after the pull lands on the server host, and the warning
+  against forcing past the stop names it alongside `BD_ALLOW_REMOTE_MIGRATE=1`
+  as the two consent surfaces this topology can still reach. Read-only proxied
+  opens print the same pull-first block instead of the shared-consent template.
+
+  Both existing workarounds keep working unchanged: `BD_SMART_GATE=0` opts out
+  of the smart gate entirely (which means the blunt gate applies to `bd dolt
+  pull` too — that is what opting out is), and running `bd dolt pull` before the
+  first open after upgrading avoids the state to begin with. `bd migrate
+  --force` / `BD_ALLOW_REMOTE_MIGRATE=1` are still consulted before the gate and
+  still override it.
+
+- **`bd list --status <s> --ready` honors `--status`**
+  ([#5924](https://github.com/gastownhall/beads/pull/5924),
+  [#5832](https://github.com/gastownhall/beads/issues/5832)). Combining the two
+  silently dropped `--status` and returned the unfiltered ready set, because the
+  ready path pinned `open` in two places regardless of what was asked for, so a
+  custom status or `in_progress` never reached the ready query. An explicit
+  `--status` is now the ready-work status selector, matching how the other list
+  filters already compose with `--ready`. `--ready` with no `--status` still
+  defaults to open, and `--status all` remains the no-filter spelling. The footer
+  wording moves with it — see **Changed**.
+
+- **`bd list --wisp-type` can reach rows at all**
+  ([#6098](https://github.com/gastownhall/beads/pull/6098)). `bd list` now
+  registers `--include-ephemeral`, the plane knob `--wisp-type` needs, off by
+  default so the default listing is byte-identical. `bd list
+  --include-ephemeral --wisp-type heartbeat` is the working spelling. Before
+  this, the only way to admit the wisp plane from `bd list` was `--type
+  <infra-type>`, which also lifts the infra-type exclusions and changes template
+  treatment — three decisions for a caller who wanted one classification. Bare
+  `--wisp-type` is now refused rather than empty; see **Changed**.
+
+- **`bd doctor` knows about the generated `.beads/dolt-server-config.yaml`**
+  ([#5978](https://github.com/gastownhall/beads/pull/5978)).
+  `doltserver.Start()` writes that file when the resolved dolt binary supports
+  `auto_gc_behavior.archive_level`, but the hyphenated name falls outside the
+  `dolt-server.` prefix its five sibling server-state entries share, so neither
+  the gitignore template nor the required-pattern list covered it. It holds an
+  absolute `cfg_dir` and a per-machine port, so committing it breaks every other
+  clone — the same reason the template already gives for `redirect`. It shows up
+  as untracked in every consumer repo whose dolt supports `archive_level`. It is
+  now in both lists: the template covers new workspaces, and the required
+  patterns are what `bd doctor --fix` appends to an existing
+  `.beads/.gitignore` — see **Changed** for the warning that implies.
+
+- **The missing-prefix error stops recommending a config key that does nothing**
+  ([#5936](https://github.com/gastownhall/beads/pull/5936),
+  [#5916](https://github.com/gastownhall/beads/issues/5916)). When the database's
+  `issue_prefix` config row was absent, the error advised using the
+  `issue-prefix` key in `config.yaml` — but that gate only reads the database's
+  config table, so following the advice produced a tracked config field that
+  changed nothing and misled the next reader. The message now points at
+  `bd init --prefix` or `bd bootstrap`, which is what writes the row, and says
+  plainly which store the check reads. Error text only; resolution behaviour is
+  unchanged.
+
+- **`bd create --file` says that it creates one issue per `##` heading**
+  ([#5921](https://github.com/gastownhall/beads/pull/5921)). The usage string was
+  "Create multiple issues from markdown file", which named neither the per-H2
+  semantics nor `--body-file`. Someone wanting "one issue, description loaded
+  from a file" reached for the shortest flag and got a silent bulk import — a
+  briefing file with `## Problem` / `## Context` / `## Acceptance Criteria`
+  became three issues. The usage now names the behaviour, and the existing
+  rejection of a positional title combined with `--file` carries a `--body-file`
+  hint. `--file` alone on a section-headed file is unchanged: bd cannot tell that
+  apart from a genuine batch file by content.
+
+- **The list truncation hint no longer leaves a padded blank line under the
+  shell prompt** ([#5927](https://github.com/gastownhall/beads/pull/5927),
+  [#5685](https://github.com/gastownhall/beads/issues/5685)). The hint passed its
+  surrounding newlines through the warning renderer, which treats them as a
+  block, pads the blank lines out to the widest line's width, and drops the
+  trailing newline — so the next prompt printed on top of a run of spaces. The
+  newlines are kept outside the renderer now, leaving one coloured line with a
+  real trailing newline.
+
+- **`bd setup claude` and `bd init` stop rewriting `.claude/settings.json` on
+  every run** ([#5944](https://github.com/gastownhall/beads/pull/5944),
+  [#5693](https://github.com/gastownhall/beads/issues/5693)). The settings map
+  was marshaled without a trailing newline and written unconditionally, so each
+  run stripped the newline Claude Code's own writes leave behind and rewrote the
+  file even when no hook had changed. Because `bd init` git-adds that file, it
+  surfaced as a staged diff with no semantic content. The write now keeps the
+  trailing newline and is skipped when the bytes match what is already on disk,
+  at all four call sites — the settings write and the `settings.local.json`
+  migration on install, and both again on remove.
+
+- **`bd gate check` resolves bead gates whose target lives in a prefix-routed
+  rig** ([#5859](https://github.com/gastownhall/beads/pull/5859)). After a local
+  miss, the evaluator follows the target bead ID through `routes.jsonl` and reads
+  the owning store without writing to it; previously such a gate stayed pending
+  until someone resolved it manually. This covers explicit gate checks in
+  embedded, server, and proxied-server command paths. The legacy
+  `<rig>:<bead-id>` await value remains accepted for compatibility, a malformed
+  cross-rig value is rejected, and when prefix routing is unavailable the original
+  local not-found error is preserved.
+
+- **A transient connection drop while opening a Dolt store is retried instead of
+  failing the command**
+  ([#6003](https://github.com/gastownhall/beads/pull/6003)). The bootstrap ping
+  in the unit-of-work provider was unretried, so a server still finishing startup
+  — or one that reset the connection mid-handshake — became a hard failure.
+  Connection-level shapes (`driver.ErrBadConn`, `mysql.ErrInvalidConn`, EOF, any
+  `*net.OpError`) are now retried for up to 30s, each attempt capped at 10s so a
+  server that accepts TCP and then stalls cannot block for the caller's whole
+  context. Durable rejections and an unresolvable hostname still fail without
+  retrying. See **Changed** for the latency this adds against a dead endpoint.
+
+## [1.3.1-rc.1] - 2026-09-16
+
+### Changed
+
+- **`bd dolt status --json` changes shape on a proxied workspace**
+  ([#6580](https://github.com/gastownhall/beads/pull/6580)). It now emits
+  `{"mode": "proxied-server", "root": ..., "running": <proxy up>, "proxy_pid":
+  ..., "proxy_port": ..., "backend_managed": ..., "backend_running": ...,
+  "backend_pid": ..., "backend_port": ..., "backend_endpoint": ...,
+  "idle_timeout": ...}` instead of the always-false `{"running": false, "pid":
+  0, "port": 0}` — `pid` and `port` are gone, replaced by the `proxy_*` and
+  `backend_*` pairs. `running` no longer reports a bd-managed dolt PID file; it
+  describes the proxy, the endpoint every bd command connects through, so it is
+  now usually true where it used to be always false. `backend_managed` is false
+  on external proxied topologies, where the dolt server is not bd's process to
+  report on and `backend_endpoint` names it instead. Anything parsing the old
+  payload changes behaviour on upgrade. Direct-server, shared, embedded and
+  externally-managed workspaces keep the output they had.
+
+- **`bd config set <dotted.key>` deletes a flat top-level key of the same
+  literal name** ([#6578](https://github.com/gastownhall/beads/pull/6578)).
+  Dotted keys are now written as a nested mapping (see **Fixed** below for why),
+  and where the file already carried the flat spelling — a top-level key whose
+  *name* contains the dot, such as `dolt.host: "10.0.0.1"` — that entry is
+  removed and the value re-emitted under `dolt:`. Only the key being written is
+  touched; other dotted keys, including ones bd did not write, are left exactly
+  as they are.
+
+  `.beads/config.yaml` is not exclusively bd's, so this can be visible outside
+  bd: an external tool that both writes *and* reads flat dotted keys there will
+  stop seeing any value bd migrates this way. Any dotted key bd stores in
+  `config.yaml` rather than the database can collide; in practice that means
+  `dolt.*`, `export.auto`, and `backup.enabled`. If the other writer then
+  re-adds its flat key, the file carries both spellings and bd's own readers
+  disagree — Viper-backed reads (`bd config get`, and the `dolt.auto-start`
+  lookup on the store-open path) return the **flat** value, while
+  `GetStringFromDir` returns the **nested** one, so a `bd config set` can be
+  shadowed by a stale flat entry. Tracked as
+  [#6594](https://github.com/gastownhall/beads/issues/6594). Until that lands,
+  in a workspace whose config another tool maintains, let that tool own its
+  keys, or check `.beads/config.yaml` for a duplicated key after running
+  `bd config set`.
+
+- **Two `bd config set` writes that used to exit 0 now exit 1**
+  ([#6578](https://github.com/gastownhall/beads/pull/6578)), because both wrote
+  a value no reader could see: setting a dotted key under a parent that already
+  holds a scalar (`sync: enabled`, then `bd config set sync.remote`), and
+  setting one in a file whose top level is not a mapping. A script that
+  tolerated the old exit 0 now has to handle the failure.
+
+### Fixed
+
+- **`bd dolt start` no longer puts a second sql-server over a proxied
+  workspace's data directory.** On a proxied-server workspace the default root
+  IS `.beads/dolt`, and `bd dolt start` knew nothing about proxied mode: with
+  the proxy quiesced it launched an unsupervised `dolt sql-server` directly
+  over that root, after which ordinary bd commands failed (`invalid
+  connection`) because the relaunched proxy found a foreign server on its
+  port; with the proxy live it instead adopted the proxy's own dolt child into
+  bd's classic PID/port records, leaving two managers for one process. It is
+  now a typed refusal with code `proxy.dolt_start.conflict`. The proxy owns
+  its backend's lifecycle — it starts on demand and `bd dolt stop` shuts it
+  down. Direct-server and embedded workspaces are unaffected.
+
+- **`bd dolt status` tells the truth on a proxied workspace.** It read the
+  classic PID file, which proxied mode never writes, and so reported `Dolt
+  server: not running` while the proxy was serving CRUD — the wrong answer
+  that sent operators to `bd dolt start` in the first place. It now reads the
+  proxy's own records and reports the proxy and its dolt backend separately,
+  without starting either. The `--json` payload changes shape to carry that —
+  see **Changed** above before parsing it.
+
+- **A dotted config key now round-trips: what `bd config set` writes,
+  `bd config get` and bd's own readers find**
+  ([#6578](https://github.com/gastownhall/beads/pull/6578), bd-zj95). Setting a
+  key like `sync.remote` or `dolt.host` into a `config.yaml` with no matching
+  section appended a key whose *name* contained the dot — a top-level
+  `sync.remote: "..."` — instead of nesting it under `sync:`. Viper finds a key
+  spelled that way; the direct reader `GetStringFromDir` splits on the dot and
+  walks nested mappings, so it does not. The value was set and invisible at the
+  same time depending on which reader asked, and `bd init --remote` in a fresh
+  workspace was the ordinary way in: the remote was recorded and then not found.
+  Dotted keys are written nested now, and `bd config unset` removes the nested
+  form — it only ever matched the flat spelling, so unsetting
+  `sync.remote` silently left the remote live. Keys the write does not own,
+  including dotted ones somebody else put there, are left exactly as they are.
+  Two consequences of the nested write — the flat-key migration and two new
+  failure exits — are under **Changed** above.
 
 ## [1.3.0] - 2026-09-15
 

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/routing"
 )
 
@@ -42,6 +44,10 @@ func TestDetermineAutoRoutedRepoPath_ContributorToPlanning(t *testing.T) {
 	if err := os.Chdir(repoDir); err != nil {
 		t.Fatalf("chdir repoDir: %v", err)
 	}
+	// Role detection reads the process-wide RepoContext cache, which an
+	// earlier test in this binary may have built for its own, now-deleted
+	// repo. Rebuild it from repoDir.
+	resetRepoContextCachesForTest(t)
 
 	got, rule := determineAutoRoutedRepoPath(ctx, sourceStore)
 	if got != planningDir {
@@ -49,6 +55,61 @@ func TestDetermineAutoRoutedRepoPath_ContributorToPlanning(t *testing.T) {
 	}
 	if rule != routing.RuleContributor {
 		t.Fatalf("determineAutoRoutedRepoPath() rule = %v, want %v", rule, routing.RuleContributor)
+	}
+}
+
+func TestDetermineAutoRoutedRepoPath_UsesSelectedBeadsDirRole(t *testing.T) {
+	initConfigForTest(t)
+	// Viper binds BEADS_ROUTING_MODE / BD_ROUTING_MODE onto the routing.mode
+	// key (internal/config), which outranks the routing.mode=auto this test
+	// writes into the store. Hosts that export either var (developer shells and
+	// agent runtimes do) would otherwise read routing.mode=off and get "." back.
+	t.Setenv("BEADS_ROUTING_MODE", "")
+	t.Setenv("BD_ROUTING_MODE", "")
+	beads.ResetCaches()
+	git.ResetCaches()
+	t.Cleanup(func() {
+		beads.ResetCaches()
+		git.ResetCaches()
+	})
+
+	tmpDir := t.TempDir()
+	callerDir := filepath.Join(tmpDir, "caller")
+	repoDir := filepath.Join(tmpDir, "repo")
+	planningDir := filepath.Join(tmpDir, "planning")
+
+	runCmd(t, tmpDir, "git", "init", callerDir)
+	runCmd(t, tmpDir, "git", "init", repoDir)
+	runCmd(t, repoDir, "git", "config", "beads.role", "contributor")
+
+	sourceStore := newTestStoreIsolatedDB(t, filepath.Join(repoDir, ".beads", "beads.db"), "src")
+	ctx := context.Background()
+
+	if err := sourceStore.SetConfig(ctx, "routing.mode", "auto"); err != nil {
+		t.Fatalf("failed to set routing.mode: %v", err)
+	}
+	if err := sourceStore.SetConfig(ctx, "routing.contributor", planningDir); err != nil {
+		t.Fatalf("failed to set routing.contributor: %v", err)
+	}
+
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd failed: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+	if err := os.Chdir(callerDir); err != nil {
+		t.Fatalf("chdir callerDir: %v", err)
+	}
+	t.Setenv("BEADS_DIR", filepath.Join(repoDir, ".beads"))
+	// This test simulates a caller who exported BEADS_DIR before bd started;
+	// selection provenance is captured at process start, so pin it explicitly.
+	setBeadsDirStartupProvenanceForTest(t, true)
+
+	got, _ := determineAutoRoutedRepoPath(ctx, sourceStore)
+	if got != planningDir {
+		t.Fatalf("determineAutoRoutedRepoPath() = %q, want %q", got, planningDir)
 	}
 }
 
@@ -82,6 +143,10 @@ func TestDetermineAutoRoutedRepoPath_MaintainerToPlanning(t *testing.T) {
 	if err := os.Chdir(repoDir); err != nil {
 		t.Fatalf("chdir repoDir: %v", err)
 	}
+	// Role detection reads the process-wide RepoContext cache, which an
+	// earlier test in this binary may have built for its own, now-deleted
+	// repo. Rebuild it from repoDir.
+	resetRepoContextCachesForTest(t)
 
 	got, rule := determineAutoRoutedRepoPath(ctx, sourceStore)
 	if got != planningDir {
@@ -165,6 +230,10 @@ func TestOpenRoutedReadStore_ContributorRouting(t *testing.T) {
 	if err := os.Chdir(repoDir); err != nil {
 		t.Fatalf("chdir repoDir: %v", err)
 	}
+	// Role detection reads the process-wide RepoContext cache, which an
+	// earlier test in this binary may have built for its own, now-deleted
+	// repo. Rebuild it from repoDir.
+	resetRepoContextCachesForTest(t)
 
 	routedStore, routed, rule, err := openRoutedReadStore(ctx, sourceStore)
 	if err != nil {

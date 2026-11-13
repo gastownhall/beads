@@ -157,16 +157,20 @@ func TestCorpusDoubleRunByteIdentical(t *testing.T) {
 	for _, envelope := range []bool{false, true} {
 		firstRaw, firstCalls, firstRunner := scriptedCorpusRunner(t, 1)
 		secondRaw, secondCalls, secondRunner := scriptedCorpusRunner(t, 2)
-		first, err := generateCorpus(envelope, firstRunner)
+		firstRun, err := generateCorpus(envelope, firstRunner)
 		if err != nil {
 			t.Fatalf("first corpus (envelope=%v): %v", envelope, err)
 		}
-		second, err := generateCorpus(envelope, secondRunner)
+		secondRun, err := generateCorpus(envelope, secondRunner)
 		if err != nil {
 			t.Fatalf("second corpus (envelope=%v): %v", envelope, err)
 		}
-		assertCaptureCalls(t, *firstCalls, envelope)
-		assertCaptureCalls(t, *secondCalls, envelope)
+		first, second := firstRun.blobs, secondRun.blobs
+		if a, b := renderCommitLedger(firstRun.commits), renderCommitLedger(secondRun.commits); !bytes.Equal(a, b) {
+			t.Fatalf("envelope=%v: commit ledger differs across runs:\n%s\nvs\n%s", envelope, a, b)
+		}
+		assertCaptureCalls(t, *firstCalls, envelope, 1)
+		assertCaptureCalls(t, *secondCalls, envelope, 2)
 		if len(first) != len(second) {
 			t.Fatalf("envelope=%v: blob count differs: %d vs %d", envelope, len(first), len(second))
 		}
@@ -238,6 +242,26 @@ func TestGenerateCorpusRejectsInvalidCaptures(t *testing.T) {
 			want:   "produced an error envelope",
 		},
 		{
+			name: "setup step exits non-zero",
+			result: func(c Capture) captureResult {
+				if c.Kind == CaptureSetup {
+					return captureResult{exitCode: 1}
+				}
+				return scriptedCaptureResult(c, false, 1)
+			},
+			want: `capture "seed_anchor"`,
+		},
+		{
+			name: "minting capture names no id",
+			result: func(c Capture) captureResult {
+				if c.Mints {
+					return captureResult{stdout: []byte(`{"title":"no id"}`)}
+				}
+				return scriptedCaptureResult(c, false, 1)
+			},
+			want: "names no id",
+		},
+		{
 			name:     "unexpected nested envelope error",
 			envelope: true,
 			result:   func(Capture) captureResult { return captureResult{stdout: []byte(`{"data":{"error":"unexpected"}}`)} },
@@ -267,19 +291,50 @@ func scriptedCorpusRunner(t *testing.T, variant int) (*map[string][]byte, *[]scr
 	raw := make(map[string][]byte)
 	var calls []scriptedCall
 	return &raw, &calls, func(envelope bool, capture Capture) captureResult {
-		stdout := scriptedCaptureJSON(capture.Name, envelope, variant)
-		raw[capture.Name] = stdout
-		result := captureResult{stdout: stdout}
-		if capture.Name == errorCaptureName {
-			result.exitCode = errorCaptureExitCode
-		}
+		result := scriptedCaptureResult(capture, envelope, variant)
+		raw[capture.Name] = result.stdout
 		calls = append(calls, scriptedCall{envelope: envelope, capture: capture, result: result})
 		return result
 	}
 }
 
-func scriptedCaptureJSON(name string, envelope bool, variant int) []byte {
+// scriptedCaptureResult is a well-formed result for c: the error capture exits
+// with errorCaptureExitCode and every write reports one commit.
+func scriptedCaptureResult(c Capture, envelope bool, variant int) captureResult {
+	result := captureResult{
+		stdout:   scriptedCaptureJSON(c, envelope, variant),
+		literals: map[string]string{scriptedPrefix(variant): "<PREFIX>"},
+	}
+	if c.Name == errorCaptureName {
+		result.exitCode = errorCaptureExitCode
+	}
+	if c.Write {
+		result.commitsAdded = 1
+	}
+	return result
+}
+
+func scriptedPrefix(variant int) string { return fmt.Sprintf("scripted%d", variant) }
+
+func scriptedMintedID(variant int) string { return scriptedPrefix(variant) + "-minted" }
+
+func scriptedCaptureJSON(c Capture, envelope bool, variant int) []byte {
+	name := c.Name
 	timestamp := fmt.Sprintf("2026-08-02T00:00:0%dZ", variant)
+	switch {
+	case c.Kind == CaptureSetup:
+		return []byte(`{"setup":true}`)
+	case c.Kind == CaptureText:
+		return []byte(scriptedPrefix(variant) + "-child\n")
+	case c.Kind == CaptureEvents:
+		payload := fmt.Sprintf(`[{"id":"evt-%d","event_type":"created","issue_id":%q,"old_value":"{\"created_at\":\"%s\"}","created_at":%q}]`, variant, c.Args[1], timestamp, timestamp)
+		if !envelope {
+			return []byte(payload)
+		}
+		return []byte(fmt.Sprintf(`{"data":%s,"schema_version":1}`, payload))
+	case c.Mints:
+		return []byte(fmt.Sprintf(`{"id":%q,"created_at":%q}`, scriptedMintedID(variant), timestamp))
+	}
 	var payload string
 	switch name {
 	case "list":
@@ -301,7 +356,7 @@ func scriptedCaptureJSON(name string, envelope bool, variant int) []byte {
 	return []byte(fmt.Sprintf(`{"data":%s,"schema_version":1}`, payload))
 }
 
-func assertCaptureCalls(t *testing.T, got []scriptedCall, envelope bool) {
+func assertCaptureCalls(t *testing.T, got []scriptedCall, envelope bool, variant int) {
 	t.Helper()
 	want := CorpusPlan()
 	if len(got) != len(want) {
@@ -310,6 +365,10 @@ func assertCaptureCalls(t *testing.T, got []scriptedCall, envelope bool) {
 	for i, call := range got {
 		if call.envelope != envelope {
 			t.Errorf("call %d envelope = %v, want %v", i, call.envelope, envelope)
+		}
+		want[i].Args = append([]string(nil), want[i].Args...)
+		for j, a := range want[i].Args {
+			want[i].Args[j] = mintedPlaceholderRE.ReplaceAllString(a, scriptedMintedID(variant))
 		}
 		if !reflect.DeepEqual(call.capture, want[i]) {
 			t.Errorf("call %d capture = %#v, want %#v", i, call.capture, want[i])
@@ -323,6 +382,78 @@ func assertCaptureCalls(t *testing.T, got []scriptedCall, envelope bool) {
 		}
 		if call.result.execErr != nil {
 			t.Errorf("call %d (%s) execution error = %v, want nil", i, call.capture.Name, call.result.execErr)
+		}
+	}
+}
+
+// TestCanonicalizeEventsProjection pins Projection.Events: two `bd history
+// --events --json` outputs that differ only in row ids, timestamps (including
+// those embedded in old_value's issue snapshot) and row order canonicalize to
+// the same bytes, and without the projection they do not.
+func TestCanonicalizeEventsProjection(t *testing.T) {
+	rows := func(id1, id2, ts string, swap bool) string {
+		a := fmt.Sprintf(`{"id":%q,"issue_id":"x","event_type":"created","actor":"a","old_value":"","new_value":"","created_at":%q}`, id1, ts)
+		b := fmt.Sprintf(`{"id":%q,"issue_id":"x","event_type":"updated","actor":"a","old_value":"{\"id\":\"x\",\"created_at\":\"%s\"}","new_value":"{\"priority\":1}","created_at":%q}`, id2, ts, ts)
+		if swap {
+			a, b = b, a
+		}
+		return "[" + a + "," + b + "]"
+	}
+	first := []byte(rows("0f6c-1", "9a1d-2", "2026-11-09T00:19:05Z", false))
+	second := []byte(rows("77aa-3", "1b2c-4", "2026-11-10T08:00:00.123Z", true))
+	for _, envelope := range []bool{false, true} {
+		wrap := func(b []byte) []byte {
+			if !envelope {
+				return b
+			}
+			return []byte(`{"data":` + string(b) + `,"schema_version":1}`)
+		}
+		got1, err := CanonicalizeJSONWith(wrap(first), Projection{Events: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got2, err := CanonicalizeJSONWith(wrap(second), Projection{Events: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got1, got2) {
+			t.Fatalf("envelope=%v: events projection left run-specific bytes:\n%s\nvs\n%s", envelope, got1, got2)
+		}
+		if bytes.Contains(got1, []byte(`"0f6c-1"`)) || bytes.Contains(got1, []byte("2026-")) {
+			t.Fatalf("envelope=%v: row id or embedded timestamp survived:\n%s", envelope, got1)
+		}
+		plain1, _ := CanonicalizeJSON(wrap(first))
+		plain2, _ := CanonicalizeJSON(wrap(second))
+		if bytes.Equal(plain1, plain2) {
+			t.Fatalf("envelope=%v: fixtures canonicalize equal without the projection, so this test proves nothing", envelope)
+		}
+	}
+}
+
+// TestCanonicalizeLiteralsProjection pins Projection.Literals: run-specific
+// literals are replaced in values and keys, a minted id wins over the prefix it
+// starts with, and arrays sort on the placeholder, not the random value.
+func TestCanonicalizeLiteralsProjection(t *testing.T) {
+	doc := func(prefix, minted string) []byte {
+		return []byte(fmt.Sprintf(`{"config":{"issue_prefix":%q},"database_path":"/tmp/ws-%s/.beads/embeddeddolt","%s":[{"id":%q},{"id":"corpus-a"}]}`, prefix, prefix, minted, minted))
+	}
+	p := func(prefix, minted string) Projection {
+		return Projection{Literals: map[string]string{prefix: "<PREFIX>", "/tmp/ws-" + prefix: "<WORKSPACE>", minted: MintedPlaceholder("todo_add")}}
+	}
+	got1, err := CanonicalizeJSONWith(doc("t1a2b3c4d", "t1a2b3c4d-x9z"), p("t1a2b3c4d", "t1a2b3c4d-x9z"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got2, err := CanonicalizeJSONWith(doc("tffffffff", "tffffffff-0aa"), p("tffffffff", "tffffffff-0aa"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got1, got2) {
+		t.Fatalf("literal projection left run-specific bytes:\n%s\nvs\n%s", got1, got2)
+	}
+	for _, want := range []string{`"<PREFIX>"`, `"<WORKSPACE>/.beads/embeddeddolt"`, `"<MINTED:todo_add>": [`, `"id": "<MINTED:todo_add>"`} {
+		if !strings.Contains(string(got1), want) {
+			t.Errorf("projected blob lacks %s:\n%s", want, got1)
 		}
 	}
 }

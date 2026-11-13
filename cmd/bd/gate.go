@@ -4,17 +4,25 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/httpclient"
+	"github.com/steveyegge/beads/internal/httpclient/wire"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
+	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // gateCmd is the parent command for gate operations
@@ -98,28 +106,28 @@ By default, shows only open gates. Use --all to include closed gates.`,
 			return nil
 		}
 
-		gateType := types.IssueType("gate")
-		filter := types.IssueFilter{
-			IssueType: &gateType,
-			Limit:     limit,
-		}
-
-		if !allFlag {
-			filter.ExcludeStatus = []types.Status{types.StatusClosed}
-		}
-
-		issues, err := store.SearchIssues(ctx, "", filter)
-		if err != nil {
-			return HandleErrorRespectJSON("%v", err)
-		}
-
-		if jsonOutput {
-			return outputJSON(issues)
-		}
-
-		displayGates(issues, allFlag)
-		return nil
+		return runGateList(ctx, allFlag, limit)
 	},
+}
+
+// runGateList lists the workspace's gates on every route through ONE library
+// entry, issueops.ListGates, over the route's Querier (openQuerier picks the
+// direct store, the proxied server's unit of work, or the remote http
+// backend). Only the presentation stays here.
+func runGateList(ctx context.Context, allFlag bool, limit int) error {
+	querier, err := openQuerier()
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+	gates, err := issueops.ListGates(ctx, querier, issueops.GateListRequest{All: allFlag, Limit: limit})
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+	if jsonOutput {
+		return outputJSON(gates)
+	}
+	displayGates(gates, allFlag)
+	return nil
 }
 
 // filterIssueGates selects the gate-type issues from an issue's dependency set,
@@ -233,9 +241,6 @@ This is used by 'bd done --phase-complete' to register for gate wake notificatio
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if usesProxiedServer() {
-			return runGateAddWaiterProxiedServer(cmd, rootCtx, args)
-		}
 		CheckReadonly("gate add-waiter")
 
 		evt := metrics.NewCommandEvent("gate-add-waiter")
@@ -247,34 +252,27 @@ This is used by 'bd done --phase-complete' to register for gate wake notificatio
 
 		gateID := args[0]
 		waiter := args[1]
-		ctx := rootCtx
 
-		var issue *types.Issue
-		var err error
-
-		issue, err = store.GetIssue(ctx, gateID)
+		reader, err := openIssueReader()
 		if err != nil {
-			return HandleError("gate not found: %s", gateID)
+			return HandleError("%v", err)
+		}
+		lifecycle, err := openIssueLifecycle()
+		if err != nil {
+			return HandleError("%v", err)
+		}
+		ctx, err := issueOpsContext(rootCtx)
+		if err != nil {
+			return HandleError("%v", err)
 		}
 
-		if issue.IssueType != "gate" {
-			return HandleError("%s is not a gate issue (type=%s)", gateID, issue.IssueType)
+		added, err := addGateWaiter(ctx, reader, lifecycle, gateID, waiter)
+		if err != nil {
+			return HandleError("%v", err)
 		}
-
-		for _, w := range issue.Waiters {
-			if w == waiter {
-				renderGateWaiterAlready(gateID)
-				return nil
-			}
-		}
-
-		newWaiters := append(issue.Waiters, waiter)
-
-		updates := map[string]interface{}{
-			"waiters": newWaiters,
-		}
-		if err := store.UpdateIssue(ctx, gateID, updates, actor); err != nil {
-			return HandleError("updating gate: %v", err)
+		if !added {
+			renderGateWaiterAlready(gateID)
+			return nil
 		}
 
 		commandDidWrite.Store(true)
@@ -282,6 +280,211 @@ This is used by 'bd done --phase-complete' to register for gate wake notificatio
 		renderGateWaiterAdded(gateID, waiter)
 		return nil
 	},
+}
+
+// addGateWaiter's compare-and-set budget. A version miss means another writer
+// changed the gate between this command's read and its write; under a convoy
+// (a phase finishing together, every worker registering on the same gate) each
+// round of simultaneous writes has exactly one winner, so retrying at once
+// would fail all but a handful of adders. Each retry therefore waits a
+// jittered, doubling backoff first: gateAddWaiterBackoffBase, doubled per miss
+// up to gateAddWaiterBackoffCap, each wait drawn uniformly from [d/2, d) so
+// the losers of one round do not collide again in the next.
+//
+// The loop is bounded by gateAddWaiterMaxAttempts writes, not by wall time:
+// one round's latency is the server's (a loaded remote server can take
+// seconds per read and write), and a wall-clock budget would fail a convoy on
+// a slow server after only two or three rounds. Each round has a winner, so
+// the bound carries at least that many simultaneous adders; the jitter
+// spreads them further. The backoffs themselves add up to at most about 6s,
+// and a gate rewritten without pause still fails after the last attempt.
+//
+// A write lost to contention the store gave up replaying (see
+// gateAddWaiterContended) is not one quick round, so it gets a much tighter
+// bound of its own, gateAddWaiterContentionRetries. It reaches this loop only
+// after the store or bd serve has spent a whole replay budget on it (up to
+// 15s, the server-mode Dolt store's and bd serve's), and the wait after a
+// busy answer includes the server's Retry-After (5s once bd serve's budget is
+// spent). Two retries, like the HTTP client's for a busy read, hold that tail
+// to three such writes (three 15s budgets and two 5s waits: about a minute),
+// where twenty would take over six minutes. They count against
+// gateAddWaiterMaxAttempts too.
+const (
+	gateAddWaiterMaxAttempts       = 20
+	gateAddWaiterContentionRetries = 2
+	gateAddWaiterBackoffBase       = 10 * time.Millisecond
+	gateAddWaiterBackoffCap        = 400 * time.Millisecond
+)
+
+// gateAddWaiterRetryWait is the wait before retry number retry after the
+// failed write err: the jittered backoff, plus the server's Retry-After when
+// err is a busy answer that carries one. bd serve sends Retry-After on its
+// busy answers: 1s when its admission limiter is saturated, and 5s when its
+// transaction retry budget is spent, because a convoy back sooner would hold
+// slots while it waited, starving reads. It is honored as sent: the wire
+// client already bounds the header (wire.Options.MaxRetryAfter). The jitter on
+// top keeps adders that were answered busy together from retrying together.
+func gateAddWaiterRetryWait(retry int, err error) time.Duration {
+	wait := gateAddWaiterBackoff(retry)
+	var problem *wire.ProblemError
+	if errors.Is(err, wire.ErrBusy) && errors.As(err, &problem) {
+		wait += problem.RetryAfter
+	}
+	return wait
+}
+
+// gateAddWaiterBackoff is the wait before retry number retry (1-based):
+// jittered in [d/2, d) around d = base * 2^(retry-1), capped.
+func gateAddWaiterBackoff(retry int) time.Duration {
+	d := gateAddWaiterBackoffBase
+	for i := 1; i < retry && d < gateAddWaiterBackoffCap; i++ {
+		d *= 2
+	}
+	if d > gateAddWaiterBackoffCap {
+		d = gateAddWaiterBackoffCap
+	}
+	half := d / 2
+	return half + time.Duration(rand.Int64N(int64(d-half))) // #nosec G404 -- retry jitter, not a secret
+}
+
+// gateAddWaiterSleep waits d or until ctx is done. It is a variable so tests
+// can record the backoff without sleeping.
+var gateAddWaiterSleep = func(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// addGateWaiter registers waiter on the gate gateID through the Reader and
+// Lifecycle roles, so every route (local, proxied server, and a connected HTTP
+// workspace, which sends getIssue then updateIssue behind issues.update.gates)
+// runs the same steps. It reports false, writing nothing, when the waiter is
+// already registered.
+//
+// The write is a whole-value waiter list guarded by the row version the read
+// returned, so two concurrent adders cannot lose each other's waiter: the
+// second write misses its version, re-reads the list with the first waiter in
+// it, and writes again. The deduplication is this command's, not the role's;
+// the role stores the list it is given.
+func addGateWaiter(ctx context.Context, reader issueops.Reader, lifecycle issueops.Lifecycle, gateID, waiter string) (bool, error) {
+	var lastErr error
+	attempts, contended := 0, 0
+	for attempts < gateAddWaiterMaxAttempts && contended <= gateAddWaiterContentionRetries {
+		if attempts > 0 {
+			if err := gateAddWaiterSleep(ctx, gateAddWaiterRetryWait(attempts, lastErr)); err != nil {
+				return false, fmt.Errorf("updating gate: %w", err)
+			}
+		}
+		attempts++
+		details, err := reader.Get(ctx, issueops.GetRequest{ID: gateID})
+		if errors.Is(err, storage.ErrNotFound) {
+			return false, fmt.Errorf("gate not found: %s", gateID)
+		}
+		if err != nil {
+			return false, fmt.Errorf("reading gate %s: %w", gateID, err)
+		}
+		gate := &details.Issue
+		if gate.IssueType != "gate" {
+			return false, fmt.Errorf("%s is not a gate issue (type=%s)", gateID, gate.IssueType)
+		}
+		if slices.Contains(gate.Waiters, waiter) {
+			return false, nil
+		}
+
+		waiters := append(slices.Clone(gate.Waiters), waiter)
+		version := gate.RowVersion
+		_, err = lifecycle.Update(ctx, issueops.UpdateRequest{
+			Actor:           currentActor(),
+			IssueID:         gate.ID,
+			Patch:           issueops.IssuePatch{Waiters: issueops.Field[[]string]{Set: true, Value: waiters}},
+			ExpectedVersion: &version,
+		})
+		if err == nil {
+			return true, nil
+		}
+		if !gateAddWaiterLostRound(err) {
+			return false, fmt.Errorf("updating gate: %w", err)
+		}
+		if gateAddWaiterContended(err) {
+			contended++
+		}
+		lastErr = err
+	}
+	if errors.Is(lastErr, wire.ErrBusy) && gateAddWaiterLanded(ctx, reader, gateID, waiter) {
+		return false, nil
+	}
+	return false, gateAddWaiterExhausted(gateID, attempts, contended, lastErr)
+}
+
+// gateAddWaiterLanded reports whether waiter is on the gate gateID, read once
+// after addGateWaiter's last write was answered busy. Such a write may have
+// landed (see gateAddWaiterLostRound), and every earlier round's re-read
+// would have found it, but the last write has no round left; so it gets this
+// one read, with no wait first. A failed read reports false.
+func gateAddWaiterLanded(ctx context.Context, reader issueops.Reader, gateID, waiter string) bool {
+	details, err := reader.Get(ctx, issueops.GetRequest{ID: gateID})
+	return err == nil && slices.Contains(details.Issue.Waiters, waiter)
+}
+
+// gateAddWaiterLostRound reports whether a failed guarded write is a lost
+// round the loop retries: a version miss, or a write lost to contention the
+// store gave up replaying (gateAddWaiterContended).
+//
+// Retrying is safe because of how a round is built, NOT because every busy
+// answer means nothing was written. bd serve's own busy answers are no-write,
+// but a gateway in front of the server can answer 503 after the write
+// committed, and the client maps that uncoded 503 to wire.ErrBusy too. Each
+// round re-reads the gate, deduplicates, and writes the whole list guarded by
+// the row version it read, so a write that did land is found on the re-read
+// (the waiter is already there: nothing more is written) and a stale list can
+// never overwrite a newer one. So a retry never adds a waiter twice and never
+// drops another adder's.
+//
+// Everything else is returned at once, including the classes a retry would
+// also survive but that are not contention: a refusal, a database bd serve
+// cannot reach (wire.ErrDBUnavailable), and a server fault such as an
+// indeterminate commit (wire.ErrServerFault, a 500). Those are for the caller
+// to see, not for a convoy loop to hammer.
+func gateAddWaiterLostRound(err error) bool {
+	return errors.Is(err, issueops.ErrVersionMismatch) || gateAddWaiterContended(err)
+}
+
+// gateAddWaiterContended reports whether a failed guarded write was lost to
+// contention the store gave up replaying. On the direct route that is a
+// serialization failure or deadlock, which guarantees a rollback (Dolt and
+// MySQL report 1213/1205, a SERIALIZABLE store such as Postgres SQLSTATE
+// 40001/40P01): the store's transaction envelope replays one until its budget
+// is spent and then returns it. Over HTTP it is wire.ErrBusy, which the client
+// maps from bd serve's busy answer (a refused admission, or a spent retry
+// budget) and from a 503 whose code it does not know or that has none, such as
+// a gateway's. A 503 coded db_unavailable or events_watch_saturated maps to its
+// own sentinel, not to this one.
+//
+// Dolt's 1105 "@autocommit transaction rolled back", which the direct route's
+// store also replays, is deliberately not admitted: Dolt raises it for
+// conflicts that a merge inside the transaction left behind, while a write
+// lost to a concurrent writer, the convoy's case, comes back as 1213.
+func gateAddWaiterContended(err error) bool {
+	return uow.IsSerializationError(err) || errors.Is(err, wire.ErrBusy)
+}
+
+// gateAddWaiterExhausted is addGateWaiter's error once it stops retrying:
+// after attempts writes, contended of them answered busy or lost to
+// contention, the last with lastErr. Only when none was contended did the gate
+// change under every write, so only then does the error say that; otherwise it
+// names the contention, so that the operator of a busy server is not sent
+// looking for a concurrent writer. It says no write was confirmed, not that
+// none landed, because a busy answer does not prove that nothing was written.
+func gateAddWaiterExhausted(gateID string, attempts, contended int, lastErr error) error {
+	if contended == 0 {
+		return fmt.Errorf("updating gate: %s changed on every one of %d attempts: %w", gateID, attempts, lastErr)
+	}
+	return fmt.Errorf("updating gate: no write to %s was confirmed in %d attempts (%d answered busy or lost to write contention): %w", gateID, attempts, contended, lastErr)
 }
 
 // renderGateWaiterAlready and renderGateWaiterAdded are shared by the direct
@@ -309,18 +512,19 @@ Gate types:
   gh:run  - Waits for GitHub Actions workflow
   gh:pr   - Waits for PR merge
 
+gh:run and gh:pr gates are checked in the current Git repository unless
+--repo names another, or the blocked issue carries a metadata.repo value.
+
 Examples:
   bd gate create --blocks bd-abc
   bd gate create --type=human --blocks bd-abc --reason="Need design review"
   bd gate create --type=timer --blocks bd-abc --timeout=2h
   bd gate create --type=gh:pr --blocks bd-abc --await-id=42
+  bd gate create --type=gh:pr --blocks bd-abc --await-id=42 --repo=owner/other-repo
   bd gate create --blocks bd-abc --title="Gate: awaiting owner sign-off"`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if usesProxiedServer() {
-			return runGateCreateProxiedServer(cmd, rootCtx)
-		}
 		CheckReadonly("gate create")
 
 		evt := metrics.NewCommandEvent("gate-create")
@@ -335,37 +539,25 @@ Examples:
 			return HandleErrorRespectJSON("%v", err)
 		}
 
-		ctx := rootCtx
-
-		targetIssue, err := store.GetIssue(ctx, in.blocksID)
+		reader, err := openIssueReader()
 		if err != nil {
-			return HandleErrorRespectJSON("issue not found: %s", in.blocksID)
+			return HandleErrorRespectJSON("%v", err)
+		}
+		lifecycle, err := openIssueLifecycle()
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		ctx, err := issueOpsContext(rootCtx)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
 		}
 
-		gate := buildGateIssue(in, targetIssue.ID)
-		metadata, metaErr := repoMetadataForGate(in.gateType, targetIssue)
-		if metaErr != nil {
-			return HandleErrorRespectJSON("invalid GitHub repository metadata on %s: %v", targetIssue.ID, metaErr)
-		}
-		gate.Metadata = metadata
-
-		if err := store.CreateIssue(ctx, gate, actor); err != nil {
-			return HandleErrorRespectJSON("creating gate: %v", err)
+		gate, targetIssue, err := createGateThroughRoles(ctx, reader, lifecycle, in)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
 		}
 
-		dep := &types.Dependency{
-			IssueID:     targetIssue.ID,
-			DependsOnID: gate.ID,
-			Type:        types.DepBlocks,
-		}
-		if err := store.AddDependency(ctx, dep, actor); err != nil {
-			return HandleErrorRespectJSON("adding blocking dependency: %v", err)
-		}
-
-		commitMsg := fmt.Sprintf("bd: create gate %s blocking %s", gate.ID, targetIssue.ID)
-		if err := store.Commit(ctx, commitMsg); err != nil && !isDoltNothingToCommit(err) {
-			return HandleErrorRespectJSON("failed to commit: %v", err)
-		}
+		commandDidWrite.Store(true)
 
 		if jsonOutput {
 			return outputJSON(gate)
@@ -376,6 +568,48 @@ Examples:
 	},
 }
 
+// createGateThroughRoles creates the gate and its blocking edge as ONE Lifecycle.Create:
+// the gate row plus a reverse blocks dependency from the blocked issue to the
+// new gate, in one transaction and one version commit on every route. A
+// connected HTTP workspace sends it as one createIssue carrying the gate
+// members, behind issues.create.gates; a server that does not advertise that
+// token is refused before any request is sent, and nothing is written.
+//
+// It returns the created gate (without its dependency records, which
+// `bd gate create` has never printed) and the blocked issue.
+func createGateThroughRoles(ctx context.Context, reader issueops.Reader, lifecycle issueops.Lifecycle, in gateCreateInput) (*types.Issue, *types.Issue, error) {
+	details, err := reader.Get(ctx, issueops.GetRequest{ID: in.blocksID})
+	if err != nil {
+		// Every target-lookup failure has always been reported as not-found.
+		return nil, nil, fmt.Errorf("issue not found: %s", in.blocksID)
+	}
+	target := &details.Issue
+
+	gate := buildGateIssue(in, target.ID)
+	metadata, err := gateMetadataForCreate(in, target)
+	if err != nil {
+		return nil, nil, err
+	}
+	gate.Metadata = metadata
+
+	result, err := lifecycle.Create(ctx, issueops.CreateRequest{
+		Actor: currentActor(),
+		Issue: gate,
+		Dependencies: []issueops.CreateDependency{{
+			TargetID: target.ID,
+			Type:     types.DepBlocks,
+			Reverse:  true,
+		}},
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating gate: %w", err)
+	}
+	created := result.Issue
+	created.Dependencies = nil
+	created.Comments = nil
+	return created, target, nil
+}
+
 // gateCreateInput carries `bd gate create`'s parsed flags. Both routes gather
 // it through gatherGateCreateInput so they cannot drift on flag semantics.
 type gateCreateInput struct {
@@ -383,6 +617,7 @@ type gateCreateInput struct {
 	gateType  string
 	reason    string
 	awaitID   string
+	repo      string
 	titleFlag string
 	timeout   time.Duration
 }
@@ -393,6 +628,7 @@ func gatherGateCreateInput(cmd *cobra.Command) (gateCreateInput, error) {
 	in.gateType, _ = cmd.Flags().GetString("type")
 	in.reason, _ = cmd.Flags().GetString("reason")
 	in.awaitID, _ = cmd.Flags().GetString("await-id")
+	in.repo, _ = cmd.Flags().GetString("repo")
 	in.titleFlag, _ = cmd.Flags().GetString("title")
 	timeoutStr, _ := cmd.Flags().GetString("timeout")
 	if timeoutStr != "" {
@@ -417,10 +653,10 @@ func buildGateIssue(in gateCreateInput, targetID string) *types.Issue {
 		title = in.titleFlag
 	}
 
-	desc := fmt.Sprintf("Ad-hoc gate blocking %s", targetID)
-	if in.reason != "" {
-		desc = fmt.Sprintf("%s\n\nReason: %s", desc, in.reason)
-	}
+	// types owns the description format because it also owns the read back
+	// out of it (types.GateReason), which is what puts the reason on
+	// `bd show`'s "Gated by:" line and in the detail view's gated_by.
+	desc := types.GateDescription(targetID, in.reason)
 
 	return &types.Issue{
 		Title:       title,
@@ -565,7 +801,7 @@ Use --reason to provide context for why the gate was resolved.`,
 			return HandleError("%s is not a gate issue (type=%s)", gateID, issue.IssueType)
 		}
 
-		if err := store.CloseIssue(ctx, gateID, reason, actor, ""); err != nil {
+		if err := store.CloseIssue(ctx, gateID, reason, currentActor(), ""); err != nil {
 			return HandleError("closing gate: %v", err)
 		}
 
@@ -598,7 +834,7 @@ Gate types:
   gh:run   - Check GitHub Actions workflow runs
   gh:pr    - Check pull request merge status
   timer    - Check timer gates (auto-expire based on timeout)
-  bead     - Check cross-rig bead gates
+  bead     - Check bead gates
   all      - Check all gate types
 
 GitHub gates use the 'gh' CLI to query status:
@@ -609,7 +845,8 @@ A gate is resolved when:
   - gh:run: status=completed AND conclusion=success
   - gh:pr: state=MERGED
   - timer: current time > created_at + timeout
-  - bead: target bead status=closed
+  - bead: target bead status=closed, or a bead an earlier check saw in
+    this rig no longer exists
 
 A gate is escalated when:
   - gh:run: status=completed AND conclusion in (failure, canceled)
@@ -620,7 +857,7 @@ Examples:
   bd gate check --type=gh    # Check only GitHub gates
   bd gate check --type=gh:run # Check only workflow run gates
   bd gate check --type=timer # Check only timer gates
-  bd gate check --type=bead  # Check only cross-rig bead gates
+  bd gate check --type=bead  # Check only bead gates
   bd gate check --dry-run    # Show what would happen without changes
   bd gate check --escalate   # Escalate expired/failed gates`,
 	SilenceUsage:  true,
@@ -643,16 +880,9 @@ Examples:
 		escalateFlag, _ := cmd.Flags().GetBool("escalate")
 		limit, _ := cmd.Flags().GetInt("limit")
 
-		gateType := types.IssueType("gate")
-		filter := types.IssueFilter{
-			IssueType:     &gateType,
-			ExcludeStatus: []types.Status{types.StatusClosed},
-			Limit:         limit,
-		}
-
 		ctx := rootCtx
 
-		gates, err := store.SearchIssues(ctx, "", filter)
+		gates, err := listOpenGatesForCheck(ctx, limit)
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
@@ -664,13 +894,17 @@ Examples:
 		}
 
 		var persistAwaitID func(gateID, runID string) error
+		var recordSeen func(gate *types.Issue) error
 		if !dryRun {
 			persistAwaitID = func(gateID, runID string) error {
-				return updateGateAwaitIDFunc(nil, gateID, runID)
+				return gateCheckPersistAwaitIDFunc(ctx, gateID, runID)
+			}
+			recordSeen = func(gate *types.Issue) error {
+				return updateGateThroughLifecycle(ctx, gate.ID, beadGateSeenPatch(gate.AwaitID))
 			}
 		}
 
-		results := evaluateGates(ctx, filteredGates, time.Now(), routedBeadGateGetter{localStore: store}, persistAwaitID)
+		results := evaluateGates(ctx, filteredGates, time.Now(), routedBeadGateGetter{localStore: store}, persistAwaitID, recordSeen)
 
 		resolvedCount, escalatedCount, errorCount := applyGateCheckResults(
 			results, dryRun, escalateFlag,
@@ -683,6 +917,32 @@ Examples:
 	},
 }
 
+// listOpenGatesForCheck lists the open gates `bd gate check` evaluates through
+// the same library entry `bd gate list` uses, issueops.ListGates over the
+// route's Querier (openQuerier: the direct store, the proxied server's unit
+// of work, or the remote http backend's queryIssues). It is the question the
+// raw SearchIssues filter used to ask — the gate type, both planes, closed
+// rows excluded, cut at limit — but a remote backend serves it, where the raw
+// filter was refused before any gate was read. Templates are left out of the
+// query (see listOpenGatesWith); the per-type selection stays with
+// filterCheckableGates.
+func listOpenGatesForCheck(ctx context.Context, limit int) ([]*types.Issue, error) {
+	querier, err := openQuerier()
+	if err != nil {
+		return nil, err
+	}
+	return listOpenGatesWith(ctx, querier, limit)
+}
+
+// listOpenGatesWith is listOpenGatesForCheck over a given Querier: the open
+// gates only (gate check never evaluates a closed one), minus templates, cut at
+// limit. The templates go in the query, not after it: a page of a persisted
+// proto's gates, newer than the live ones, would otherwise fill --limit and
+// leave the sweep nothing to check.
+func listOpenGatesWith(ctx context.Context, querier issueops.Querier, limit int) ([]*types.Issue, error) {
+	return issueops.ListGates(ctx, querier, issueops.GateListRequest{ExcludeTemplates: true, Limit: limit})
+}
+
 type gateCheckResult struct {
 	gate      *types.Issue
 	resolved  bool
@@ -691,9 +951,21 @@ type gateCheckResult struct {
 	err       error
 }
 
+// filterCheckableGates selects the listed gates a sweep evaluates: those that
+// match typeFilter, minus templates. A template's gate is a blueprint that every
+// pour copies, await_id included. Checking one fails every sweep where its
+// write is refused (the Lifecycle role's template guard, a served close) and
+// rewrites the proto where it is not (a local close, the proxied-server route's
+// writes): a closed timer gate, a recorded sighting, or a run ID every later
+// pour would await. listOpenGatesWith already leaves templates out of the
+// query; the skip here is the backstop for a listing that returns one anyway.
+// The direct and the proxied-server routes both select here.
 func filterCheckableGates(gates []*types.Issue, typeFilter string) []*types.Issue {
 	var out []*types.Issue
 	for _, gate := range gates {
+		if gate.IsTemplate {
+			continue
+		}
 		if shouldCheckGate(gate, typeFilter) {
 			out = append(out, gate)
 		}
@@ -709,7 +981,76 @@ func printNoOpenGates(typeFilter string) {
 	}
 }
 
-func evaluateGates(ctx context.Context, gates []*types.Issue, now time.Time, getter issueGetter, persistAwaitID func(gateID, runID string) error) []gateCheckResult {
+// updateGateThroughLifecycle is gate check's one write besides the close: a
+// patch to a gate through the Lifecycle role, so every route the direct path
+// serves (Dolt, embedded, Postgres, and a connected HTTP workspace, whose role
+// sends issues.update) applies it the same way. The legacy map-based
+// UpdateIssue is not on the HTTP store at all, so the sighting written through
+// it was refused before any request was sent.
+func updateGateThroughLifecycle(ctx context.Context, gateID string, patch issueops.IssuePatch) error {
+	lifecycle, err := openIssueLifecycle()
+	if err != nil {
+		return err
+	}
+	ctx, err = issueOpsContext(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := lifecycle.Update(ctx, issueops.UpdateRequest{Actor: currentActor(), IssueID: gateID, Patch: patch}); err != nil {
+		return err
+	}
+	commandDidWrite.Store(true)
+	return nil
+}
+
+// awaitIDPatchRefusal is the divergence-ledger row a connected HTTP
+// workspace's Lifecycle role refused an await_id edit by, before any request,
+// while the wire's issue patch had no await_id member. The row is retired: the
+// patch carries await_id behind issues.update.gates, and a server that does
+// not advertise that token earns the capability error, which
+// persistGateCheckAwaitID returns as the role raised it.
+const awaitIDPatchRefusal = "W-IssuePatch.AwaitID"
+
+// persistGateCheckAwaitID records a gh:run gate's discovered run ID through
+// the Lifecycle role. The one refusal it rewords is the HTTP wire's
+// (awaitIDPatchRefusal), whose own text names the role method and the wire
+// operation rather than what the user can do about it. That refusal stays
+// this gate's error, so the rest of the sweep runs. Every other error,
+// another unsupported capability included, is returned as the role raised it.
+func persistGateCheckAwaitID(ctx context.Context, gateID, runID string) error {
+	err := updateGateThroughLifecycle(ctx, gateID, issueops.IssuePatch{AwaitID: issueops.Field[string]{Set: true, Value: runID}})
+	var refused *httpclient.InexpressibleError
+	if errors.As(err, &refused) && refused.Refused != nil && refused.Refused.Row.ID == awaitIDPatchRefusal {
+		serverURL := ""
+		if refused.Unsup != nil {
+			serverURL = refused.Unsup.ServerURL
+		}
+		return &awaitIDRefusedError{runID: runID, serverURL: serverURL, err: err}
+	}
+	return err
+}
+
+// awaitIDRefusedError is the HTTP wire's await_id refusal, reworded for the
+// gate check row that prints it: it names the run, await_id and the server.
+// Unwrap keeps the refusal, so errors.As still reaches *storage.ErrUnsupported
+// and the ledger row.
+type awaitIDRefusedError struct {
+	runID     string
+	serverURL string
+	err       error
+}
+
+func (e *awaitIDRefusedError) Error() string {
+	server := "this backend"
+	if e.serverURL != "" {
+		server = "bd serve at " + e.serverURL
+	}
+	return fmt.Sprintf("run %s cannot be recorded as await_id: %s does not accept an await_id update; check the gate in a local workspace", e.runID, server)
+}
+
+func (e *awaitIDRefusedError) Unwrap() error { return e.err }
+
+func evaluateGates(ctx context.Context, gates []*types.Issue, now time.Time, getter issueGetter, persistAwaitID func(gateID, runID string) error, recordSeen func(gate *types.Issue) error) []gateCheckResult {
 	results := make([]gateCheckResult, 0, len(gates))
 	for _, gate := range gates {
 		r := gateCheckResult{gate: gate}
@@ -721,7 +1062,7 @@ func evaluateGates(ctx context.Context, gates []*types.Issue, now time.Time, get
 		case gate.AwaitType == "timer":
 			r.resolved, r.escalated, r.reason, r.err = checkTimer(gate, now)
 		case gate.AwaitType == "bead":
-			r.resolved, r.reason = checkBeadGate(ctx, getter, gate.AwaitID)
+			r.resolved, r.reason, r.err = evaluateBeadGate(ctx, gate, getter, recordSeen)
 		default:
 			continue
 		}
@@ -781,13 +1122,22 @@ func printGateCheckSummary(checked, resolvedCount, escalatedCount, errorCount in
 		checked, resolvedCount, escalatedCount, errorCount)
 
 	if jsonOutput {
-		return outputJSON(map[string]interface{}{
+		if err := outputJSON(map[string]interface{}{
 			"checked":   checked,
 			"resolved":  resolvedCount,
 			"escalated": escalatedCount,
 			"errors":    errorCount,
 			"dry_run":   dryRun,
-		})
+		}); err != nil {
+			return err
+		}
+	}
+	if errorCount > 0 {
+		// errorCount holds both row kinds applyGateCheckResults prints: a gate
+		// whose check failed ("error checking") and a resolved gate whose close
+		// failed ("error closing"). Neither is resolved or pending, so the
+		// caller must not mistake this run for a clean sweep.
+		return fmt.Errorf("%d gate(s) could not be checked or closed", errorCount)
 	}
 	return nil
 }
@@ -830,6 +1180,7 @@ func runGHCommand(args ...string) (stdout, stderr []byte, err error) {
 var (
 	discoverRunIDByWorkflowNameFunc = discoverRunIDByWorkflowName
 	updateGateAwaitIDFunc           = updateGateAwaitID
+	gateCheckPersistAwaitIDFunc     = persistGateCheckAwaitID
 	checkGHRunStatusFunc            = checkGHRunStatus
 )
 
@@ -882,6 +1233,14 @@ func githubRepoFromIssue(issue *types.Issue) (string, error) {
 		return "", nil
 	}
 
+	return validateGitHubRepo(repo)
+}
+
+// validateGitHubRepo accepts an OWNER/REPO or HOST/OWNER/REPO selector made of
+// the characters GitHub allows in those path components, and nothing else:
+// the value is passed to `gh --repo`, so a stray shell or URL character is
+// rejected here rather than reaching a subprocess argument.
+func validateGitHubRepo(repo string) (string, error) {
 	parts := strings.Split(repo, "/")
 	if len(parts) != 2 && len(parts) != 3 {
 		return "", fmt.Errorf("repo %q must use OWNER/REPO or HOST/OWNER/REPO", repo)
@@ -927,6 +1286,38 @@ func repoMetadataForGate(gateType string, targetIssue *types.Issue) (json.RawMes
 	}
 	if repo == "" {
 		return nil, nil
+	}
+	metadata, err := json.Marshal(map[string]string{"repo": repo})
+	if err != nil {
+		return nil, err
+	}
+	return metadata, nil
+}
+
+// gateMetadataForCreate computes the metadata for a new ad-hoc gate from the
+// parsed flags: an explicit --repo wins, otherwise the gate inherits the
+// blocked issue's validated metadata.repo (repoMetadataForGate). Both create
+// routes call this so the flag cannot drift between them.
+//
+// --repo is only meaningful on gh:* gates, whose check runs against a GitHub
+// repository; on any other type it is refused rather than stored, because a
+// repo selector nothing reads would look like a working cross-repo gate.
+// Errors are fully worded here (they name the flag or the blocked issue) so
+// the callers print them as-is.
+func gateMetadataForCreate(in gateCreateInput, targetIssue *types.Issue) (json.RawMessage, error) {
+	if in.repo == "" {
+		metadata, err := repoMetadataForGate(in.gateType, targetIssue)
+		if err != nil {
+			return nil, fmt.Errorf("invalid GitHub repository metadata on %s: %w", targetIssue.ID, err)
+		}
+		return metadata, nil
+	}
+	if !isGitHubGateType(in.gateType) {
+		return nil, fmt.Errorf("--repo applies only to gh:run and gh:pr gates, not %q", in.gateType)
+	}
+	repo, err := validateGitHubRepo(in.repo)
+	if err != nil {
+		return nil, fmt.Errorf("--repo: %w", err)
 	}
 	metadata, err := json.Marshal(map[string]string{"repo": repo})
 	if err != nil {
@@ -1076,7 +1467,16 @@ func checkGHRunStatusInRepoWithRunner(runID, repo string, runGH ghCommandRunner)
 		}
 		// Check if run not found
 		if strings.Contains(string(stderr), "not found") {
-			return false, true, "workflow run not found", nil
+			// Name the repository, as checkGHPRWithRunner does. Real gh
+			// reports a missing run as "HTTP 404: Not Found (<api url>)",
+			// which this case-sensitive match skips: that returns the error
+			// below, whose URL names the repository. Keep the match narrow; a
+			// token without access to the repository gets the same 404.
+			where := "the current repository"
+			if repo != "" {
+				where = repo
+			}
+			return false, true, fmt.Sprintf("workflow run not found: %s in %s", runID, where), nil
 		}
 		return false, false, "", fmt.Errorf("gh run view failed: %s", string(stderr))
 	}
@@ -1137,7 +1537,14 @@ func checkGHPRWithRunner(gate *types.Issue, runGH ghCommandRunner) (resolved, es
 		}
 		// Check if PR not found
 		if strings.Contains(string(stderr), "not found") || strings.Contains(string(stderr), "Could not resolve") {
-			return false, true, "pull request not found", nil
+			// Name the repository the number was resolved against: a gate
+			// armed for another repository without metadata.repo escalates
+			// here on every check, and the bare text never said why.
+			where := "the current repository"
+			if repo != "" {
+				where = repo
+			}
+			return false, true, fmt.Sprintf("pull request not found: #%s in %s", gate.AwaitID, where), nil
 		}
 		return false, false, "", fmt.Errorf("gh pr view failed: %s", string(stderr))
 	}
@@ -1177,69 +1584,331 @@ func checkTimer(gate *types.Issue, now time.Time) (resolved, escalated bool, rea
 	return false, false, fmt.Sprintf("expires in %s", remaining), nil
 }
 
-// issueGetter is the one storage method checkBeadGate needs, split out so
+// issueGetter is the one storage method inspectBeadGate needs, split out so
 // tests can fake the lookup without standing up a Dolt store.
 type issueGetter interface {
 	GetIssue(ctx context.Context, id string) (*types.Issue, error)
 }
 
+// beadGateTargetGetter is implemented by getters that also report where the
+// awaited bead was looked up. local is true when the answer came from this
+// rig's own store; a bead read through a prefix or contributor route is not
+// local. Only a local sighting is recorded on the gate (see
+// evaluateBeadGate), so a misdirected route can never let a later local miss
+// resolve the gate. A getter without this method is treated as local.
+type beadGateTargetGetter interface {
+	getBeadGateTarget(ctx context.Context, id string) (issue *types.Issue, local bool, err error)
+}
+
+// errBeadGateTargetUnconfirmed marks a miss that happened somewhere other
+// than this rig's own store: a route matched but its store could not be read,
+// or the routed store did not return the bead. Neither proves the bead is
+// gone, so the gate stays pending instead of resolving.
+var errBeadGateTargetUnconfirmed = errors.New("cannot confirm the awaited bead is gone")
+
+// beadGateNotFound reports whether a lookup failed because the bead does not
+// exist, as opposed to the read itself failing.
+func beadGateNotFound(err error) bool {
+	return gateProxiedNotFound(err) || isNotFoundErr(err)
+}
+
 // routedBeadGateGetter gives direct-mode gate checks the same local -> prefix
 // route -> contributor fallback used by other read commands. Routed stores are
-// opened read-only and closed before the result is returned.
+// opened read-only and closed before the result is returned. A route that
+// fails or misses is reported as errBeadGateTargetUnconfirmed instead of as
+// the local not-found.
 type routedBeadGateGetter struct {
 	localStore storage.DoltStorage
 }
 
 func (g routedBeadGateGetter) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
+	issue, _, err := g.getBeadGateTarget(ctx, id)
+	return issue, err
+}
+
+func (g routedBeadGateGetter) getBeadGateTarget(ctx context.Context, id string) (*types.Issue, bool, error) {
 	if g.localStore == nil {
-		return nil, fmt.Errorf("no local store available")
+		return nil, false, fmt.Errorf("no local store available")
 	}
-	result, err := getIssueWithRouting(ctx, g.localStore, id)
+	issue, err := g.localStore.GetIssue(ctx, id)
+	if err == nil && issue != nil {
+		return issue, true, nil
+	}
+	if err != nil && !beadGateNotFound(err) {
+		return nil, false, err
+	}
+
+	routed, routeErr := prefixRoutedBeadGateTarget(ctx, id)
+	if routed == nil {
+		var autoErr error
+		routed, autoErr = autoRoutedBeadGateTarget(ctx, g.localStore, id)
+		if routeErr == nil {
+			routeErr = autoErr
+		}
+	}
+	if routed != nil {
+		return routed, false, nil
+	}
+	if routeErr != nil {
+		return nil, false, routeErr
+	}
+	return issue, true, err
+}
+
+// prefixRoutedBeadGateTarget looks id up through routes.jsonl. It returns
+// (nil, nil) when no route sends id to another rig, so this rig's own answer
+// stands, and errBeadGateTargetUnconfirmed when routes.jsonl cannot be read or
+// a matched route's rig fails or does not return the bead.
+func prefixRoutedBeadGateTarget(ctx context.Context, id string) (*types.Issue, error) {
+	beadsDir := resolveCommandBeadsDir(dbPath)
+	if beadsDir == "" {
+		return nil, nil
+	}
+	routes, err := loadPrefixRoutes(beadsDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: reading routes.jsonl: %w", errBeadGateTargetUnconfirmed, err)
+	}
+	route := matchPrefixRoute(routes, id)
+	if route == nil || route.Path == "." {
+		return nil, nil
+	}
+
+	result, err := resolveViaPrefixRouting(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("%w: bead %s routes to %s: %w", errBeadGateTargetUnconfirmed, id, route.Path, err)
 	}
 	defer result.Close()
+	if result.Issue == nil {
+		return nil, fmt.Errorf("%w: bead %s routes to %s, which did not return it", errBeadGateTargetUnconfirmed, id, route.Path)
+	}
 	return result.Issue, nil
 }
 
-// checkBeadGate checks if a bead gate is satisfied.
-// Returns (satisfied, reason).
-//
-// A plain await_id names a bead in this rig. The historical
-// <rig>:<bead-id> form uses the bead ID as the routed lookup key; the rig
-// component is retained for compatibility while routes.jsonl remains keyed by
-// bead prefix. The supplied getter owns local-versus-routed lookup policy.
-func checkBeadGate(ctx context.Context, st issueGetter, awaitID string) (bool, string) {
-	if awaitID == "" {
-		return false, "bead gate has no await_id"
-	}
-	targetID := awaitID
-	if strings.Contains(awaitID, ":") {
-		parts := strings.SplitN(awaitID, ":", 2)
-		if parts[0] == "" || parts[1] == "" {
-			return false, fmt.Sprintf("invalid cross-rig bead gate %q: expected <rig>:<bead-id>", awaitID)
-		}
-		targetID = parts[1]
-	}
-	if st == nil {
-		return false, fmt.Sprintf("bead gate %q: no local store available", awaitID)
-	}
-	issue, err := st.GetIssue(ctx, targetID)
+// autoRoutedBeadGateTarget looks id up in the contributor auto-routed store.
+// It returns (nil, nil) when no auto-route is configured; like a prefix
+// route, a store that cannot be opened or does not return the bead leaves its
+// absence unconfirmed.
+func autoRoutedBeadGateTarget(ctx context.Context, localStore storage.DoltStorage, id string) (*types.Issue, error) {
+	routedStore, routed, _, err := openRoutedReadStore(ctx, localStore)
 	if err != nil {
-		return false, fmt.Sprintf("bead gate %q: %v", awaitID, err)
+		return nil, fmt.Errorf("%w: %w", errBeadGateTargetUnconfirmed, err)
 	}
-	if issue == nil {
-		return false, fmt.Sprintf("bead gate %q: bead not found", awaitID)
+	if !routed {
+		return nil, nil
 	}
-	if issue.Status == types.StatusClosed {
-		return true, fmt.Sprintf("bead %s closed", targetID)
+	defer func() { _ = routedStore.Close() }()
+
+	result, err := resolveAndGetFromStore(ctx, routedStore, id, true)
+	if err != nil {
+		return nil, fmt.Errorf("%w: looking up bead %s in the auto-routed store: %w", errBeadGateTargetUnconfirmed, id, err)
 	}
-	return false, fmt.Sprintf("bead %s is %s", targetID, issue.Status)
+	if result.Issue == nil {
+		return nil, fmt.Errorf("%w: the auto-routed store did not return bead %s", errBeadGateTargetUnconfirmed, id)
+	}
+	return result.Issue, nil
+}
+
+// lookupBeadGateTarget asks st for id and reports whether the answer came
+// from this rig's own store.
+func lookupBeadGateTarget(ctx context.Context, st issueGetter, id string) (*types.Issue, bool, error) {
+	if g, ok := st.(beadGateTargetGetter); ok {
+		return g.getBeadGateTarget(ctx, id)
+	}
+	issue, err := st.GetIssue(ctx, id)
+	return issue, true, err
+}
+
+// beadGateCheck is the outcome of one bead gate lookup. gone means this rig's
+// own store answered that the awaited bead does not exist; seenHere means it
+// returned the bead, not yet closed.
+type beadGateCheck struct {
+	resolved bool
+	reason   string
+	targetID string
+	gone     bool
+	seenHere bool
+}
+
+// beadGateTargetID returns the bead ID named by a bead gate's await_id. A
+// plain await_id names a bead in this rig. The historical <rig>:<bead-id>
+// form uses the bead ID as the routed lookup key; the rig component is
+// retained for compatibility while routes.jsonl remains keyed by bead prefix.
+// When there is nothing to look up, it returns the reason the gate stays
+// pending instead.
+func beadGateTargetID(awaitID string) (targetID, pendingReason string) {
+	if awaitID == "" {
+		return "", "bead gate has no await_id"
+	}
+	if !strings.Contains(awaitID, ":") {
+		return awaitID, ""
+	}
+	parts := strings.SplitN(awaitID, ":", 2)
+	if parts[0] == "" || parts[1] == "" {
+		return "", fmt.Sprintf("invalid cross-rig bead gate %q: expected <rig>:<bead-id>", awaitID)
+	}
+	return parts[1], ""
+}
+
+// inspectBeadGate looks up a bead gate's target. A non-nil err means the
+// awaited bead could not be read at all (backend or transport failure): the
+// gate is neither resolved nor pending, and the caller reports it as an error
+// rather than letting a dead store read as "still waiting". A bead that this
+// rig's own store reports missing is not an error either: it is reported gone,
+// and resolved with a "no longer exists" reason. A miss anywhere else (see
+// errBeadGateTargetUnconfirmed) keeps the gate pending.
+//
+// The supplied getter owns local-versus-routed lookup policy. The lookup alone
+// is not the bead-gate rule: a gone bead resolves the gate only after an
+// earlier sighting, so decide through evaluateBeadGate.
+func inspectBeadGate(ctx context.Context, st issueGetter, awaitID string) (beadGateCheck, error) {
+	targetID, pendingReason := beadGateTargetID(awaitID)
+	if pendingReason != "" {
+		return beadGateCheck{reason: pendingReason}, nil
+	}
+	c := beadGateCheck{targetID: targetID}
+	if st == nil {
+		c.reason = fmt.Sprintf("bead gate %q: no local store available", awaitID)
+		return c, nil
+	}
+
+	issue, local, err := lookupBeadGateTarget(ctx, st, targetID)
+	switch {
+	case errors.Is(err, errBeadGateTargetUnconfirmed):
+		// Checked before the not-found test below, because the routing error
+		// it wraps can itself be a not-found from the routed store.
+		c.reason = fmt.Sprintf("bead gate %q: %v", awaitID, err)
+	case err != nil && !beadGateNotFound(err):
+		return c, fmt.Errorf("bead gate %q: %w", awaitID, err)
+	case err != nil || issue == nil:
+		// A bead that no longer exists can never close, so a gate awaiting it
+		// would stay pending forever. Resolve it.
+		c.resolved, c.gone = true, true
+		c.reason = fmt.Sprintf("awaited bead %s no longer exists (treated as resolved)", targetID)
+	case issue.Status == types.StatusClosed:
+		c.resolved = true
+		c.reason = fmt.Sprintf("bead %s closed", targetID)
+	default:
+		c.seenHere = local
+		c.reason = fmt.Sprintf("bead %s is %s", targetID, issue.Status)
+	}
+	return c, nil
+}
+
+// beadGateSeenKey is the gate metadata key that records a bd gate check
+// seeing the awaited bead in this rig's own store. Its value is the await_id
+// that was seen, so retargeting the gate invalidates the record.
+const beadGateSeenKey = "await_seen"
+
+// evaluateBeadGate is the bd gate check rule for a bead gate. It adds one
+// condition to inspectBeadGate: an awaited bead that does not exist resolves
+// the gate only if an earlier check saw it here and the stored gate still
+// records that sighting (see rereadBeadGate). An await_id that never named a
+// real bead (a typo, a short ID, a rig without a route) keeps the gate pending
+// with a diagnostic instead of unblocking its step. getter reads the gate's own
+// store. recordSeen, when non-nil, records the first sighting of the bead on
+// the gate.
+func evaluateBeadGate(ctx context.Context, gate *types.Issue, getter issueGetter, recordSeen func(gate *types.Issue) error) (bool, string, error) {
+	c, err := inspectBeadGate(ctx, getter, gate.AwaitID)
+	if err != nil {
+		return false, "", err
+	}
+	seen := beadGateTargetSeen(gate)
+	if c.gone && !seen {
+		return false, fmt.Sprintf("awaited bead %s not found, and no earlier gate check saw it; check the await_id, or close the gate with bd gate resolve", c.targetID), nil
+	}
+	if c.gone {
+		if pendingReason, err := rereadBeadGate(ctx, getter, gate, c.targetID); err != nil || pendingReason != "" {
+			return false, pendingReason, err
+		}
+	}
+	if c.seenHere && !seen && recordSeen != nil {
+		if err := recordSeen(gate); err != nil {
+			return false, "", fmt.Errorf("recording that bead %s exists: %w", c.targetID, err)
+		}
+	}
+	return c.resolved, c.reason, nil
+}
+
+// rereadBeadGate reads gate back from getter once its awaited bead, targetID,
+// was found gone, and returns a pending reason unless the stored gate still
+// waits on the same await_id and records its sighting. The caller's copy can
+// predate a rename of the bead: bd rename points the gate at the new ID
+// before the bead takes it (see renameIssueKeepingBeadGates), so a check that
+// listed the gate before the rename and looks the bead up after it finds the
+// old ID gone on a copy that still records the sighting. This read comes after
+// that miss, so it sees the gate already moved. An error means the gate could
+// not be read at all.
+func rereadBeadGate(ctx context.Context, getter issueGetter, gate *types.Issue, targetID string) (string, error) {
+	stored, local, err := lookupBeadGateTarget(ctx, getter, gate.ID)
+	switch {
+	case err != nil && !errors.Is(err, errBeadGateTargetUnconfirmed) && !beadGateNotFound(err):
+		return "", fmt.Errorf("reading gate %s back: %w", gate.ID, err)
+	case err != nil || stored == nil || !local:
+		return fmt.Sprintf("awaited bead %s not found, and the gate could not be read back to confirm it still waits on it; check it again", targetID), nil
+	case stored.AwaitID != gate.AwaitID || !beadGateTargetSeen(stored):
+		return fmt.Sprintf("awaited bead %s not found, but the gate changed while it was being checked; check it again", targetID), nil
+	}
+	return "", nil
+}
+
+// beadGateTargetSeen reports whether gate metadata records a sighting of the
+// gate's current await_id. Unreadable metadata counts as no sighting.
+func beadGateTargetSeen(gate *types.Issue) bool {
+	return gate != nil && gate.AwaitID != "" && beadGateSeenID(gate) == gate.AwaitID
+}
+
+// beadGateSeenID returns the await_id that gate metadata records a sighting
+// of, or "" when it records none. Unreadable metadata counts as none.
+func beadGateSeenID(gate *types.Issue) string {
+	if len(gate.Metadata) == 0 {
+		return ""
+	}
+	var meta map[string]json.RawMessage
+	if err := json.Unmarshal(gate.Metadata, &meta); err != nil {
+		return ""
+	}
+	var seen string
+	if err := json.Unmarshal(meta[beadGateSeenKey], &seen); err != nil {
+		return ""
+	}
+	return seen
+}
+
+// beadGateSeenUpdate is the update that records a sighting of awaitID. It is
+// a metadata merge operation, resolved against the row inside the write
+// transaction, so other metadata keys on the gate are preserved.
+func beadGateSeenUpdate(awaitID string) map[string]interface{} {
+	value, _ := json.Marshal(awaitID)
+	return map[string]interface{}{
+		storageissueops.OpSetMetadata: map[string]json.RawMessage{beadGateSeenKey: value},
+	}
+}
+
+// beadGateSeenPatch is beadGateSeenUpdate as a Lifecycle patch: the same
+// single-key metadata set, which a connected HTTP workspace sends as
+// issues.update.
+func beadGateSeenPatch(awaitID string) issueops.IssuePatch {
+	value, _ := json.Marshal(awaitID)
+	return issueops.IssuePatch{Metadata: issueops.MetadataPatch{Set: map[string]json.RawMessage{beadGateSeenKey: value}}}
+}
+
+// beadGateRetargetUpdate is the update that points a bead gate at awaitID.
+// With dropSeen it also removes the gate's sighting in the same write, for a
+// rename step that cannot keep it (see renameIssueKeepingBeadGates).
+func beadGateRetargetUpdate(awaitID string, dropSeen bool) map[string]interface{} {
+	update := map[string]interface{}{"await_id": awaitID}
+	if dropSeen {
+		update[storageissueops.OpUnsetMetadata] = []string{beadGateSeenKey}
+	}
+	return update
 }
 
 // closeGate closes a gate issue with the given reason
 func closeGate(_ interface{}, gateID, reason string) error {
-	if err := store.CloseIssue(rootCtx, gateID, reason, actor, ""); err != nil {
+	if err := store.CloseIssue(rootCtx, gateID, reason, currentActor(), ""); err != nil {
 		return err
 	}
 	commandDidWrite.Store(true)
@@ -1283,6 +1952,7 @@ func init() {
 	gateCreateCmd.Flags().StringP("type", "t", "human", "Gate type (human, timer, gh:run, gh:pr)")
 	gateCreateCmd.Flags().StringP("reason", "r", "", "Reason for the gate")
 	gateCreateCmd.Flags().String("await-id", "", "Condition identifier (run ID, PR number, etc.)")
+	gateCreateCmd.Flags().String("repo", "", "GitHub repository the gh:run/gh:pr condition is checked in (OWNER/REPO or HOST/OWNER/REPO); default: the blocked issue's metadata.repo, else the current repository")
 	gateCreateCmd.Flags().String("timeout", "", "Timeout duration (e.g., 2h, 30m)")
 	gateCreateCmd.Flags().String("title", "", "Custom gate title (default: \"Gate: <type>\")")
 	_ = gateCreateCmd.MarkFlagRequired("blocks")

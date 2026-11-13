@@ -189,6 +189,50 @@ func TestBatchCloseReportsItemRefusalsInsideTheBody(t *testing.T) {
 	}
 }
 
+// TestBatchCloseNamesEachRefusedItemsBlockers is the per-item twin of
+// TestCloseBlockedNamesItsBlockers: `bd close a b c` over HTTP must be able to
+// say which issues hold EACH refused item, exactly as the single close does,
+// and only the item whose refusal carried the typed list gets the member.
+func TestBatchCloseNamesEachRefusedItemsBlockers(t *testing.T) {
+	closer := &roleBatchCloser{result: issueops.CloseBatchResult{Outcomes: []issueops.CloseOutcome{
+		{IssueID: "bd-0", Issue: closedIssue("bd-0"), Changed: true},
+		{IssueID: "bd-1", Err: fmt.Errorf("close bd-1: %w", blockedCloseFixture())},
+		{IssueID: "bd-untyped", Err: fmt.Errorf("%w: bd-untyped is blocked by [bd-2]", issueops.ErrCloseBlocked)},
+		{IssueID: "bd-parent", Err: &issueops.CloseOpenChildrenError{IssueID: "bd-parent", OpenChildren: 2}},
+	}}}
+	ts := newBatchCloseServer(t, closer)
+
+	resp := ts.batchClose(t, `{"actor":"alice","items":[{"id":"bd-0"},{"id":"bd-1"},{"id":"bd-untyped"},{"id":"bd-parent"}]}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+	}
+	outcomes := outcomesOf(t, resp)
+	if len(outcomes) != 4 {
+		t.Fatalf("outcomes = %v, want four", outcomes)
+	}
+
+	blocked := outcomes[1]
+	if blocked["code"] != string(CodeNotClosable) {
+		t.Errorf("outcomes[1].code = %v, want %s", blocked["code"], CodeNotClosable)
+	}
+	assertBlockersMember(t, "outcomes[1]", blocked["blockers"])
+	if want := blockedCloseSentence + "; clear the blocker, or send `force`"; blocked["detail"] != want {
+		t.Errorf("outcomes[1].detail = %q, want %q", blocked["detail"], want)
+	}
+	if _, present := blocked["open_children"]; present {
+		t.Errorf("outcomes[1] carries open_children on the blocker refusal: %v", blocked)
+	}
+
+	for _, index := range []int{0, 2, 3} {
+		if got, present := outcomes[index]["blockers"]; present {
+			t.Errorf("outcomes[%d] carries blockers=%v; only a typed live-blocker refusal names them", index, got)
+		}
+	}
+	if want := "this issue is blocked; clear the blocker, or send `force`"; outcomes[2]["detail"] != want {
+		t.Errorf("outcomes[2].detail = %q, want the generic %q", outcomes[2]["detail"], want)
+	}
+}
+
 // TestBatchCloseDoesNotReportAnUnknownItemErrorAsSuccess is the projection's
 // fail-closed arm. The role documents three item refusals; anything else must
 // still arrive as a REFUSAL, because the alternative shape — a success carrying

@@ -5,11 +5,68 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 )
+
+// TestNormalizeOptionalTimestampsToUTCCoversEveryPointerTimestamp is the drift
+// tripwire for NormalizeOptionalTimestampsToUTC's hand-written field list. The
+// helper enumerates its *time.Time fields explicitly to keep the insert hot path
+// free of reflection, so a *time.Time field added to Issue later would be skipped
+// silently and would reintroduce #5765 for that field. This walks Issue by
+// reflection, sets every pointer timestamp to a fixed non-UTC zone, and fails on
+// any field the helper leaves off UTC — keeping the explicit list honest without
+// driving the production path by reflection.
+func TestNormalizeOptionalTimestampsToUTCCoversEveryPointerTimestamp(t *testing.T) {
+	est := time.FixedZone("EST", -5*60*60)
+	// 2026-03-07T22:06:41-05:00 == 2026-03-08T03:06:41Z.
+	zoned := time.Date(2026, 3, 7, 22, 6, 41, 0, est)
+	const wantWall = "2026-03-08T03:06:41Z"
+
+	ptrTime := reflect.TypeOf((*time.Time)(nil))
+	issue := &Issue{}
+	v := reflect.ValueOf(issue).Elem()
+
+	var pinned []string
+	for i := 0; i < v.NumField(); i++ {
+		if v.Type().Field(i).Type != ptrTime {
+			continue
+		}
+		ts := zoned
+		v.Field(i).Set(reflect.ValueOf(&ts))
+		pinned = append(pinned, v.Type().Field(i).Name)
+	}
+	if len(pinned) == 0 {
+		t.Fatal("no *time.Time fields found on Issue: the reflection walk is vacuous")
+	}
+
+	issue.NormalizeOptionalTimestampsToUTC()
+
+	for i := 0; i < v.NumField(); i++ {
+		field := v.Type().Field(i)
+		if field.Type != ptrTime {
+			continue
+		}
+		got, _ := v.Field(i).Interface().(*time.Time)
+		if got == nil {
+			t.Errorf("%s: became nil", field.Name)
+			continue
+		}
+		if got.Location() != time.UTC {
+			t.Errorf("%s: location = %v, want UTC (field missing from NormalizeOptionalTimestampsToUTC's list?)",
+				field.Name, got.Location())
+		}
+		// Wall-clock digits, not just the label: a relabel without conversion
+		// would keep Location()==UTC but report the pre-shift digits.
+		if wall := got.Format("2006-01-02T15:04:05Z07:00"); wall != wantWall {
+			t.Errorf("%s: = %s, want %s", field.Name, wall, wantWall)
+		}
+	}
+	t.Logf("pinned %d pointer timestamps: %v", len(pinned), pinned)
+}
 
 func TestIssueValidation(t *testing.T) {
 	tests := []struct {
@@ -787,6 +844,30 @@ func TestDependencyTypeAffectsReadyWork(t *testing.T) {
 	}
 }
 
+// TestReadyAffectingDependencyTypes pins that the list SQL renders (the ready
+// read guard) is exactly the set AffectsReadyWork classifies as blocking, in
+// both directions, so the two cannot drift.
+func TestReadyAffectingDependencyTypes(t *testing.T) {
+	listed := make(map[DependencyType]bool)
+	for _, d := range ReadyAffectingDependencyTypes() {
+		if listed[d] {
+			t.Errorf("ReadyAffectingDependencyTypes() lists %q twice", d)
+		}
+		listed[d] = true
+		if !d.AffectsReadyWork() {
+			t.Errorf("ReadyAffectingDependencyTypes() lists %q, but AffectsReadyWork() is false", d)
+		}
+	}
+	for _, d := range append(WellKnownDependencyTypes(), DependencyType("custom-type")) {
+		if d.AffectsReadyWork() && !listed[d] {
+			t.Errorf("%q affects ready work but ReadyAffectingDependencyTypes() omits it", d)
+		}
+	}
+	if len(listed) == 0 {
+		t.Fatal("ReadyAffectingDependencyTypes() is empty")
+	}
+}
+
 func TestParseWaitsForGateMetadata(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1095,6 +1176,35 @@ func TestRevisionTokenSurvivesAJavaScriptRealisticParse(t *testing.T) {
 	}
 	if lossy := int64(float64(token)); lossy == token {
 		t.Fatalf("the control is broken: %d survives a float64 round trip, so this test proves nothing", token)
+	}
+}
+
+// TestParseRevisionTokenRejectsMalformedTokens pins that the string<->int64
+// boundary is strict in both directions: ParseRevisionToken accepts exactly
+// the decimal integer spelling RevisionToken emits (plain digits, an optional
+// leading "-", no fractional part, no exponent, no surrounding whitespace, no
+// value outside int64) and refuses everything else rather than guessing —
+// the same "a token it cannot read is a server this client cannot follow"
+// posture ParseRevisionToken's own doc comment describes, now pinned against
+// the inputs a float-typed or lenient parser would have let through.
+//
+// "007" and "-0" pin the exact-inverse-of-FormatInt rule specifically:
+// FormatInt never pads a digit string with a leading zero (so "007" is not a
+// token any revision ever produced, even though strconv.ParseInt alone would
+// accept it as 7), and FormatInt(0, 10) is always "0", never "-0".
+func TestParseRevisionTokenRejectsMalformedTokens(t *testing.T) {
+	for _, token := range []string{
+		"", "1.0", "1.5", "1e10", "1e0", "+1", " 1", "1 ", "0x1", "abc",
+		"9223372036854775808",  // math.MaxInt64 + 1, one past the boundary
+		"-9223372036854775809", // math.MinInt64 - 1, one past the boundary
+		"NaN", "Infinity", "１", // fullwidth digit, not ASCII
+		"007",  // leading zero FormatInt never pads in
+		"-007", // leading zero on the negative digit run
+		"-0",   // FormatInt(0, 10) is "0", never "-0"
+	} {
+		if got, err := ParseRevisionToken(token); err == nil {
+			t.Errorf("ParseRevisionToken(%q) = %d, nil, want an error", token, got)
+		}
 	}
 }
 
@@ -1957,5 +2067,38 @@ func TestCheckFieldLen(t *testing.T) {
 	err := CheckFieldLen("assignee", strings.Repeat("é", MaxFieldLen+1))
 	if !errors.Is(err, ErrFieldTooLong) {
 		t.Errorf("CheckFieldLen(256 runes) = %v, want errors.Is(ErrFieldTooLong)", err)
+	}
+}
+
+// TestArrivalSeqSerializesOnlyWhenStamped pins the wire shape of the stamp the
+// journal's create seam writes on a wisp row: absent when there is none (so
+// every unstamped row, and every reader that predates the member, sees exactly
+// what it saw before), the number when there is one, and no part of the
+// content identity — a stamp is assigned by storage, not authored.
+func TestArrivalSeqSerializesOnlyWhenStamped(t *testing.T) {
+	unstamped, err := json.Marshal(Issue{ID: "test-1", Title: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(unstamped), "arrival_seq") {
+		t.Errorf("an unstamped issue serializes arrival_seq: %s", unstamped)
+	}
+	stamped, err := json.Marshal(Issue{ID: "test-1", Title: "t", ArrivalSeq: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(stamped), `"arrival_seq":42`) {
+		t.Errorf("a stamped issue does not serialize arrival_seq 42: %s", stamped)
+	}
+	var back Issue
+	if err := json.Unmarshal(stamped, &back); err != nil || back.ArrivalSeq != 42 {
+		t.Errorf("round trip = %d, %v; want 42", back.ArrivalSeq, err)
+	}
+
+	a := Issue{ID: "test-1", Title: "t", Status: StatusOpen}
+	b := a
+	b.ArrivalSeq = 7
+	if a.ComputeContentHash() != b.ComputeContentHash() {
+		t.Error("arrival_seq changed the content hash; it is storage-assigned metadata, not content")
 	}
 }

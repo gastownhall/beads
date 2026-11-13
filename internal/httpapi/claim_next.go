@@ -72,6 +72,12 @@ func (s *Server) handleClaimNext(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := claimer.ClaimNext(r.Context(), req)
 	if err != nil {
+		// The claim's scan compiles label_regex in the database's own dialect,
+		// so a pattern it cannot compile is the caller's typo and wins nothing:
+		// the 400 on that parameter the ready listing gives for the same filter.
+		if s.refuseUncompilableRegex(w, r, err, req.Filter.LabelRegex) {
+			return
+		}
 		s.failClaimNext(w, r, err)
 		return
 	}
@@ -107,7 +113,9 @@ func (s *Server) claimNextActor(w http.ResponseWriter, r *http.Request) (string,
 // rather than an omission. There is no id to have missed, and a row another
 // agent took is simply not in the set this claim scanned — the role walks past
 // it. The whole refusal vocabulary beyond the edge is the role's ErrValidation,
-// which reaches the wire as the 400 the document promises.
+// which reaches the wire as the 400 the document promises, and the database's
+// refusal of an uncompilable label_regex, which handleClaimNext attributes to
+// that parameter before it gets here.
 //
 // The role's own validation is defensively unreachable: an empty actor is
 // refused at the edge, and the two fields it refuses beyond that — Limit and

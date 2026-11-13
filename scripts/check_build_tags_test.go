@@ -101,3 +101,38 @@ func TestCheckBuildTagsRequiresBazelrcTagForBazelUsers(t *testing.T) {
 		t.Fatalf(".bazelrc without gms_pure_go was accepted:\n%s", out)
 	}
 }
+
+// Workflows are not scanned for `go` commands here, but they still feed the
+// Bazel census: a workflow that invokes Bazel requires the .bazelrc tag and is
+// named as the reason.
+func TestCheckBuildTagsCountsWorkflowBazelUsers(t *testing.T) {
+	out, err := runCheckBuildTags(t, map[string]string{
+		".github/workflows/ci.yml": "jobs:\n" +
+			"  build:\n" +
+			"    runs-on: ubuntu-latest\n" +
+			"    steps:\n" +
+			"      - run: bazel build //...\n",
+		".bazelrc": "build --incompatible_strict_action_env\n",
+	})
+	if err == nil {
+		t.Fatalf(".bazelrc without gms_pure_go was accepted for a workflow Bazel user:\n%s", out)
+	}
+	if !strings.Contains(out, ".github/workflows/ci.yml") {
+		t.Errorf("expected .github/workflows/ci.yml to be reported as a Bazel user, got:\n%s", out)
+	}
+}
+
+// Workflow `run` steps are checked structurally by scripts/checkworkflowtags;
+// the line scan here must not police them as well.
+func TestCheckBuildTagsSkipsWorkflowGoCommands(t *testing.T) {
+	out, err := runCheckBuildTags(t, map[string]string{
+		".github/workflows/ci.yml": "jobs:\n" +
+			"  test:\n" +
+			"    runs-on: ubuntu-latest\n" +
+			"    steps:\n" +
+			"      - run: go test ./...\n",
+	})
+	if err != nil {
+		t.Fatalf("a workflow go command was scanned by check-build-tags.sh: %v\n%s", err, out)
+	}
+}

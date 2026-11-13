@@ -8,6 +8,7 @@ func TestAppendLineEnding(t *testing.T) {
 		{"delimiter-free", "local", "\n"},
 		{"LF", "a\n", "\n"},
 		{"CRLF", "a\r\n", "\r\n"},
+		{"CRLF with unterminated final line", "node_modules/\r\nbuild/", "\r\n"},
 		{"mixed", "a\r\nb\r\nc\n", "\n"},
 		{"BOM LF", "\xef\xbb\xbfa\n", "\n"},
 		{"BOM CRLF", "\xef\xbb\xbfa\r\n", "\r\n"},

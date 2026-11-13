@@ -10,7 +10,7 @@ MODULE.bazel declares one repository per platform (dolt_<os>_<arch>); only the
 one selected by //tools/bazel:dolt for the execution platform is fetched.
 """
 
-DOLT_VERSION = "2.2.0"
+DOLT_VERSION = "2.6.0"
 
 # sha256 of the upstream release tarballs dolt-<os>-<arch>.tar.gz, keyed by
 # version so that bumping DOLT_VERSION without adding its digests fails instead
@@ -18,6 +18,18 @@ DOLT_VERSION = "2.2.0"
 # sha256 alone). They match the asset digests GitHub reports for the release
 # (`gh api repos/dolthub/dolt/releases/tags/v<version>`).
 DOLT_SHA256 = {
+    "2.6.0": {
+        "darwin-amd64": "f20ed1ec96d06d627f601176e80cf630140a063ede0ebf125c28cf0ed4e789a2",
+        "darwin-arm64": "018d14904b5a644b3fa88ca2c6b5b940756cace592c69b05a8587a94587e17dd",
+        "linux-amd64": "a8d4c2e2e94b85fd3592cb80748044f846ccfd03d25a536ed1f754baf7da6401",
+        "linux-arm64": "6ca5cba6af38e6b52acd66fa23471e392f054f6bd15c0004498c491b9ba6ecde",
+    },
+    # The migration corpus's external Dolt runtime (DOLT_TEST_RUNTIME_VERSION
+    # and _SHA256 in scripts/migration-test/lib/versions.sh), linux/amd64
+    # only: @dolt_test_runtime_linux_amd64 in MODULE.bazel.
+    "2.1.8": {
+        "linux-amd64": "f66318f08ed66e409fc39363ae0fff8ce6fbf6dba9f5bac632b91527b9632a74",
+    },
     "2.2.0": {
         "darwin-amd64": "d40b57933e2a2c025a5a3c269eb87594b1aa71ead16c9902213d521529a19b02",
         "darwin-arm64": "c6737dc2c5806e2eeef4839ad76c28167c861f878af3071df1242a6589d81267",
@@ -34,13 +46,14 @@ exports_files(["dolt"])
 
 def _dolt_release_impl(rctx):
     platform = rctx.attr.platform
-    digests = DOLT_SHA256.get(DOLT_VERSION)
+    version = rctx.attr.version or DOLT_VERSION
+    digests = DOLT_SHA256.get(version)
     if digests == None:
-        fail("DOLT_SHA256 has no digests for DOLT_VERSION {}".format(DOLT_VERSION))
+        fail("DOLT_SHA256 has no digests for dolt {}".format(version))
     if platform not in digests:
-        fail("no pinned dolt {} release for platform {}".format(DOLT_VERSION, platform))
+        fail("no pinned dolt {} release for platform {}".format(version, platform))
     url = "https://github.com/dolthub/dolt/releases/download/v{v}/dolt-{p}.tar.gz".format(
-        v = DOLT_VERSION,
+        v = version,
         p = platform,
     )
     rctx.download_and_extract(
@@ -59,8 +72,11 @@ dolt_release = repository_rule(
             mandatory = True,
             doc = "Release platform suffix, for example linux-amd64.",
         ),
+        "version": attr.string(
+            doc = "Dolt release to fetch (a DOLT_SHA256 key); empty means DOLT_VERSION.",
+        ),
     },
-    doc = "Downloads the pinned Dolt CLI release for one platform and exports its `dolt` binary.",
+    doc = "Downloads a pinned Dolt CLI release for one platform and exports its `dolt` binary.",
 )
 
 def _hermetic_bin_impl(ctx):

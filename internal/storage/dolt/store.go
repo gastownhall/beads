@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -42,13 +43,17 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/doltremote"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/gittraceenv"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/kvkeys"
 	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -258,6 +263,11 @@ func autoStartRelease(serverDir string) error {
 // running — we didn't start it, so we don't stop it, but its port file
 // write must still be undone.
 //
+// Stop accepts a server this process launched even where the process list
+// cannot be read (GH#7214), so the restore below does not leave the new
+// server's pid file beside another port. Skipping the restore when a stop
+// fails would reopen the bypass described above.
+//
 // Best-effort throughout: cleanup failures are reported on stderr but never
 // returned, so they cannot mask the caller's fail-closed error, which is the
 // one that matters.
@@ -308,7 +318,9 @@ var _ storage.Compactor = (*DoltStore)(nil)
 var _ storage.SchemaMigrator = (*DoltStore)(nil)
 var _ storage.ExternalRefHistoryQuerier = (*DoltStore)(nil)
 var _ storage.EventsJournalConfigurer = (*DoltStore)(nil)
+var _ storage.EventsJournalShapeChecker = (*DoltStore)(nil)
 var _ storage.VersionedHistoryConfigurer = (*DoltStore)(nil)
+var _ storage.VersionedHistoryDeferrer = (*DoltStore)(nil)
 
 // DoltStore implements the Storage interface using Dolt
 type DoltStore struct {
@@ -317,19 +329,36 @@ type DoltStore struct {
 	beadsDir string      // Path to .beads directory (parent of dbPath)
 	database string      // Database name (subdirectory under dbPath)
 	closed   atomic.Bool // Tracks whether Close() has been called
+	// untrackPool removes db from the process pool gauges (processPools);
+	// set by registerPoolGauges, called by Close.
+	untrackPool func()
 	// eventsJournalEnabled activates the durable events journal for THIS store
 	// instance only (storage.EventsJournalConfigurer); never process-global.
 	eventsJournalEnabled atomic.Bool
-	// versionedHistoryEnabled activates dual-write issue-version history for
-	// THIS store instance only (storage.VersionedHistoryConfigurer); never
-	// process-global.
-	versionedHistoryEnabled atomic.Bool
-	connStr                 string       // Connection string for reconnection
-	cfg                     *Config      // Config this store was opened with (rebuildPoolAfterMigration)
-	serverEndpoint          string       // Exact endpoint bound to bootstrap reset authority
-	mu                      sync.RWMutex // Protects concurrent access
-	readOnly                bool         // True if opened in read-only mode
-	credentialKey           []byte       // Random encryption key for federation credentials
+	// journalShape caches the ONE INFORMATION_SCHEMA probe SetEventsJournalEnabled
+	// runs on activation (issueops.ProbeJournalShape, PR A1). Nil means the
+	// journal is disabled or the probe produced no shape; transactions then get
+	// the canonical column list — see journalActivationErr.
+	journalShape atomic.Pointer[issueops.JournalShape]
+	// journalActivationErr holds the probe's *issueops.JournalShapeError when
+	// SetEventsJournalEnabled(true) found a table shape the journal cannot run
+	// against (a missing required column, or a missing table). Nil otherwise,
+	// including when the probe could not run at all
+	// (issueops.JournalActivationError). See storage.EventsJournalShapeChecker.
+	journalActivationErr atomic.Pointer[error]
+	// versionedHistory activates dual-write issue-version history for THIS
+	// store instance only (storage.VersionedHistoryConfigurer); never
+	// process-global. Activation usually leaves it pending
+	// (storage.VersionedHistoryDeferrer): the row is read by the first write
+	// transaction, so a store that only reads never reads it.
+	versionedHistory issueops.VersionedHistorySwitch
+	connStr          string       // Connection string for reconnection
+	cfg              *Config      // Config this store was opened with (rebuildPoolAfterMigration)
+	serverEndpoint   string       // Exact endpoint bound to bootstrap reset authority
+	mu               sync.RWMutex // Protects concurrent access
+	readOnly         bool         // True if opened in read-only mode
+	classifiedRead   bool         // True if readOnly came from command classification (GH#804), not strict --readonly/preview/foreign-project; still eligible for the defer-wake sweep (be-vbhpf)
+	credentialKey    []byte       // Random encryption key for federation credentials
 
 	// localActiveDatabaseDir is the exact active database directory when this
 	// store instance has authoritative local filesystem access. It is resolved
@@ -365,6 +394,10 @@ type DoltStore struct {
 	// auto-start. Close() uses it to stop the server when the last store
 	// referencing it is closed (tracked via autoStartRefs).
 	autoStartedServerDir string
+
+	// createdDatabase reports whether this store's open created its database
+	// (serverConnFacts.created); see CreatedDatabase.
+	createdDatabase bool
 }
 
 // Config holds Dolt database configuration
@@ -378,14 +411,47 @@ type Config struct {
 	ReadOnly       bool   // Open in read-only mode (skip schema init)
 	Preview        bool   // Non-mutating preview: embedded opens skip schema init and refuse writes
 
-	// LenientOpen opens the store leniently: a migration gate refusal (#4259)
-	// or a dirty-working-set refusal (#4566) skips the migration instead of
-	// failing the open. Set for working-set-reconcile commands (bd dolt
-	// commit, bd vc commit; #4566), whose entire purpose is to clear the
-	// working set that the migration would otherwise refuse to touch.
-	// Honored in embedded and server mode alike. Migrations still RUN on a
-	// lenient open — only those two refusals are tolerated — so a lenient
-	// open of a clean database converges normally.
+	// ClassifiedRead marks a ReadOnly open whose read-only-ness comes purely
+	// from command classification (GH#804: bd ready/bd list are read-only for
+	// the CURRENT project) rather than strict --readonly, an explicit preview,
+	// or a foreign-project lookup. Only a classified-read open is eligible for
+	// the lazy defer-wake sweep (be-vbhpf) — the others must never mutate.
+	//
+	// Strict --readonly, preview, and an active migration freeze (bd-6zf0q5)
+	// are excluded by the policy expression that computes this field
+	// (classifiedReadOpen in cmd/bd); foreign-project and auxiliary opens are
+	// excluded because they construct their own Config and leave this at its
+	// false zero value. That default is the guarantee — setting it true on
+	// such an open would make it eligible to sweep.
+	ClassifiedRead bool
+
+	// RequireReadableSchema makes an open that will not migrate the database
+	// (ReadOnly, or Gateway, whose server owns the schema) refuse one whose
+	// schema is behind this binary's and lacks a column the shared issue
+	// projection selects, with *schema.SchemaBehindError
+	// (schema.CheckReadableDrift). Such a database cannot answer a single
+	// issue read; without the check the open succeeds and every list, show
+	// and ready fails afterwards on an unknown column. A behind database that
+	// has every projected column still opens, so reads keep working through
+	// the upgrade window (bd-578h9.5, gastownhall/beads#5920). A migrating
+	// open needs none of this: its consent and gate refusals name a behind
+	// schema before anything reads it.
+	//
+	// Opt-in, false by default, because diagnostic opens (bd doctor, the
+	// version-bump probe) must still reach a behind database to report on it,
+	// and a preview reports an incompatibility through its own query
+	// (embeddeddolt.OpenForPreviewCommand's policy).
+	RequireReadableSchema bool
+
+	// LenientOpen opens the store leniently: a migration gate refusal (#4259),
+	// a dirty-working-set refusal (#4566) or a migration-consent refusal
+	// skips the migration instead of failing the open. Set for
+	// working-set-reconcile commands (bd dolt commit, bd vc commit; #4566),
+	// whose entire purpose is to clear the working set that the migration
+	// would otherwise refuse to touch. Honored in embedded and server mode
+	// alike. Migrations still RUN on a lenient open — only those refusals are
+	// tolerated — so a lenient open of a clean database with consent to
+	// migrate converges normally.
 	LenientOpen bool
 
 	// RemoteSyncOpen is LenientOpen's narrow sibling for the #6575
@@ -425,6 +491,19 @@ type Config struct {
 	// ServerPortSource.IsAuthoritative() (GH#4052).
 	ServerPortSharedServer bool
 
+	// ServerPortResolved records that the caller already resolved ServerPort
+	// by the store's port chain (doltserver.DialConfig) under the
+	// configuration of the workspace being opened, which need not be the one
+	// the process loaded. A zero ServerPort then means that nothing there
+	// names a port: ResolveServerPort still applies the port environment
+	// variables, and New its test-mode guard (applyTestModePortGuard), but
+	// ResolveServerPort does not fill the port from
+	// doltserver.DefaultConfig, which reads the process's configuration. bd
+	// init sets it for a workspace it is creating, whose process
+	// configuration can be an enclosing workspace's config.yaml naming
+	// another project's server (GH#2336).
+	ServerPortResolved bool
+
 	// Remote auth for Hosted Dolt push/pull (optional)
 	// When set, Push/Pull use the --user flag and set DOLT_REMOTE_PASSWORD env var.
 	RemoteUser     string // Hosted Dolt remote user (set via DOLT_REMOTE_USER env var)
@@ -441,8 +520,10 @@ type Config struct {
 	// creation of shadow databases on the wrong server.
 	CreateIfMissing bool
 
-	// OpenedByInit marks the open `bd init` makes. It only shapes the advice in
-	// a project-identity mismatch error (GH#5558), never whether the check runs.
+	// OpenedByInit marks the open `bd init` makes. It only shapes advice, never
+	// whether a check runs: a project-identity mismatch error's (GH#5558), and
+	// the setting an externally managed endpoint's advice names (init's
+	// caller-explicit port is its --server-port flag).
 	// It is a field of its own because CreateIfMissing does not identify init:
 	// the library API (beads.OpenFromConfig, beads.OpenGated), `bd doctor --fix`
 	// and `bd bootstrap` open with CreateIfMissing too, and must not be told to
@@ -896,20 +977,19 @@ var doltTracer = otel.Tracer("github.com/steveyegge/beads/storage/dolt")
 // Instruments are registered against the global delegating provider at init time,
 // so they automatically forward to the real provider once telemetry.Init() runs.
 var doltMetrics struct {
-	retryCount            metric.Int64Counter
-	lockWaitMs            metric.Float64Histogram
-	circuitTrips          metric.Int64Counter
-	circuitRejected       metric.Int64Counter
-	serializationErrors   metric.Int64Counter
-	writeRetries          metric.Int64Counter
-	postTxCommitDropped   metric.Int64Counter
-	blockedRecheckDropped metric.Int64Counter
-	connAcquireMs         metric.Float64Histogram
-	poolWaitCount         metric.Int64Counter
-	poolWaitMs            metric.Float64Histogram
-	claimVerifyLost       metric.Int64Counter
-	claimVerifyRecovered  metric.Int64Counter
-	ignoredTxFreshPool    metric.Int64Counter
+	retryCount           metric.Int64Counter
+	lockWaitMs           metric.Float64Histogram
+	circuitTrips         metric.Int64Counter
+	circuitRejected      metric.Int64Counter
+	serializationErrors  metric.Int64Counter
+	writeRetries         metric.Int64Counter
+	postTxCommitDropped  metric.Int64Counter
+	connAcquireMs        metric.Float64Histogram
+	poolWaitCount        metric.Int64Counter
+	poolWaitMs           metric.Float64Histogram
+	claimVerifyLost      metric.Int64Counter
+	claimVerifyRecovered metric.Int64Counter
+	ignoredTxFreshPool   metric.Int64Counter
 }
 
 func init() {
@@ -942,10 +1022,6 @@ func init() {
 		metric.WithDescription("Post-tx dolt commits abandoned after retries; the data landed but no dolt commit was minted (change rides the next commit on the branch)"),
 		metric.WithUnit("{commit}"),
 	)
-	doltMetrics.blockedRecheckDropped, _ = m.Int64Counter("bd.db.blocked_recheck_dropped",
-		metric.WithDescription("Post-commit blocked-state rechecks abandoned; the write landed but dependents may carry a stale is_blocked flag until `bd recompute-blocked`"),
-		metric.WithUnit("{recheck}"),
-	)
 	doltMetrics.connAcquireMs, _ = m.Float64Histogram("bd.db.conn_acquire_ms",
 		metric.WithDescription("Time to acquire a pooled connection for a Dolt transaction"),
 		metric.WithUnit("ms"),
@@ -972,45 +1048,122 @@ func init() {
 	)
 }
 
-// registerPoolGauges registers observable gauges that report sql.DB pool stats
-// on each OTel collection cycle. These are essential for diagnosing shared-server
-// degradation under multi-worktree load (GH#3140).
-func (s *DoltStore) registerPoolGauges() {
-	m := otel.Meter("github.com/steveyegge/beads/storage/dolt")
-	db := s.db
+// poolSet is the set of sql.DB pools of the stores open in this process,
+// which the bd.db.pool_* gauges report on each collection.
+//
+// The gauges are registered once per process, and each store adds its pool
+// on open and removes it on Close. Registering them per store with an inline
+// callback does not work: the SDK keeps only the first callback of an
+// instrument, so a process that opened a second store reported the first
+// store's pool forever, closed or not, and kept its database handle
+// reachable.
+//
+// With several stores open the gauges report the sum over their pools: the
+// connections this process holds against its servers. With none open they
+// report the stats each pool had when its store closed, summed over the
+// stores closed since the last open. A short command closes its store before
+// telemetry.Shutdown exports the final collection, so without that the
+// command's only export would read zero.
+type poolSet struct {
+	mu  sync.Mutex
+	dbs map[*sql.DB]struct{}
+	// closed holds the stats of pools closed since the last track, read
+	// only while dbs is empty.
+	closed []sql.DBStats
+}
 
-	m.Int64ObservableGauge("bd.db.pool_open", //nolint:errcheck,gosec
-		metric.WithDescription("Current number of open connections (in-use + idle)"),
-		metric.WithUnit("{connection}"),
-		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			o.Observe(int64(db.Stats().OpenConnections))
-			return nil
-		}),
-	)
-	m.Int64ObservableGauge("bd.db.pool_in_use", //nolint:errcheck,gosec
-		metric.WithDescription("Connections currently in use"),
-		metric.WithUnit("{connection}"),
-		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			o.Observe(int64(db.Stats().InUse))
-			return nil
-		}),
-	)
-	m.Int64ObservableGauge("bd.db.pool_idle", //nolint:errcheck,gosec
-		metric.WithDescription("Idle connections in pool"),
-		metric.WithUnit("{connection}"),
-		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			o.Observe(int64(db.Stats().Idle))
-			return nil
-		}),
-	)
-	m.Int64ObservableGauge("bd.db.pool_max_open", //nolint:errcheck,gosec
-		metric.WithDescription("Maximum number of open connections (pool limit)"),
-		metric.WithUnit("{connection}"),
-		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
-			o.Observe(int64(db.Stats().MaxOpenConnections))
-			return nil
-		}),
-	)
+// track adds db to the set and returns a func that removes it, keeping the
+// pool's stats at that moment for the gauges (call it before db.Close). The
+// returned func is idempotent.
+func (p *poolSet) track(db *sql.DB) (untrack func()) {
+	p.mu.Lock()
+	if p.dbs == nil {
+		p.dbs = make(map[*sql.DB]struct{})
+	}
+	p.dbs[db] = struct{}{}
+	p.closed = nil
+	p.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			last := db.Stats()
+			p.mu.Lock()
+			delete(p.dbs, db)
+			p.closed = append(p.closed, last)
+			p.mu.Unlock()
+		})
+	}
+}
+
+// stats returns the summed pool stats of the open stores or, with none
+// open, of the stores closed since the last open.
+func (p *poolSet) stats() (open, inUse, idle, maxOpen int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	add := func(st sql.DBStats) {
+		open += int64(st.OpenConnections)
+		inUse += int64(st.InUse)
+		idle += int64(st.Idle)
+		maxOpen += int64(st.MaxOpenConnections)
+	}
+	if len(p.dbs) == 0 {
+		for _, st := range p.closed {
+			add(st)
+		}
+		return open, inUse, idle, maxOpen
+	}
+	for db := range p.dbs {
+		add(db.Stats())
+	}
+	return open, inUse, idle, maxOpen
+}
+
+// register creates the four pool gauges on m with one callback over the set.
+func (p *poolSet) register(m metric.Meter) error {
+	gauge := func(name, desc string) (metric.Int64ObservableGauge, error) {
+		return m.Int64ObservableGauge(name, metric.WithDescription(desc), metric.WithUnit("{connection}"))
+	}
+	openG, err := gauge("bd.db.pool_open", "Current number of open connections (in-use + idle)")
+	if err != nil {
+		return err
+	}
+	inUseG, err := gauge("bd.db.pool_in_use", "Connections currently in use")
+	if err != nil {
+		return err
+	}
+	idleG, err := gauge("bd.db.pool_idle", "Idle connections in pool")
+	if err != nil {
+		return err
+	}
+	maxG, err := gauge("bd.db.pool_max_open", "Maximum number of open connections (pool limit)")
+	if err != nil {
+		return err
+	}
+	_, err = m.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		open, inUse, idle, maxOpen := p.stats()
+		o.ObserveInt64(openG, open)
+		o.ObserveInt64(inUseG, inUse)
+		o.ObserveInt64(idleG, idle)
+		o.ObserveInt64(maxG, maxOpen)
+		return nil
+	}, openG, inUseG, idleG, maxG)
+	return err
+}
+
+var (
+	processPools          = &poolSet{}
+	processPoolGaugesOnce sync.Once
+)
+
+// registerPoolGauges adds the store's pool to the process pool gauges, which
+// report sql.DB pool stats on each OTel collection cycle. These are essential
+// for diagnosing shared-server degradation under multi-worktree load
+// (GH#3140). Close removes the pool again.
+func (s *DoltStore) registerPoolGauges() {
+	processPoolGaugesOnce.Do(func() {
+		_ = processPools.register(otel.Meter("github.com/steveyegge/beads/storage/dolt"))
+	})
+	s.untrackPool = processPools.track(s.db)
 }
 
 // doltSpanAttrs returns the fixed attributes shared by all SQL spans.
@@ -1074,6 +1227,13 @@ func (s *DoltStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) e
 			return fmt.Errorf("begin read tx: %w", err)
 		}
 		defer func() { _ = tx.Rollback() }()
+		// ReadEventsJournal/ReadEventsJournalPage read through this helper, and
+		// the column list they SELECT depends on the probed shape, not on
+		// whether the journal is enabled for writes — scope the shape only, so
+		// readEventsRowsInTx sees this store's actual table instead of
+		// defaulting to canonicalJournalShape (PR A1).
+		clearShape := issueops.ScopeEventsJournalShape(tx, s.journalShape.Load())
+		defer clearShape()
 		return fn(tx)
 	})
 }
@@ -1083,6 +1243,25 @@ func (s *DoltStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) e
 // and a single pinned *sql.Conn (see recomputeAllBlocked/recomputeBlockedTx).
 type execer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// checkoutBranchIfNeeded puts conn's session on branch, issuing DOLT_CHECKOUT
+// only when the session is on a different branch. A fresh session usually
+// already sits on the requested branch, and a least-privilege operator user
+// (EXECUTE on dolt_add/dolt_commit alone) is denied even a no-op checkout. conn
+// must be a single session: on a multi-connection *sql.DB the read and the
+// checkout could land on different connections.
+func checkoutBranchIfNeeded(ctx context.Context, conn execer, branch string) error {
+	var active string
+	if err := conn.QueryRowContext(ctx, "SELECT active_branch()").Scan(&active); err != nil {
+		return fmt.Errorf("read active branch: %w", err)
+	}
+	if active == branch {
+		return nil
+	}
+	_, err := conn.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", branch)
+	return err
 }
 
 // pinStoreBranch reproduces the store's real active branch on conn. Branch
@@ -1112,18 +1291,22 @@ type execer interface {
 // in practice rather than by construction. The s.branch fallback does not
 // close the gap either: it fires only when the query errors, not when it
 // succeeds with another connection's answer.
+//
+// conn must be a single session (a *sql.Conn, or a *sql.DB capped at one open
+// connection that keeps it idle-cached): the branch read and any checkout
+// must land on the same connection.
 func (s *DoltStore) pinStoreBranch(ctx context.Context, conn execer) error {
 	var branch string
 	if scanErr := s.db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&branch); scanErr == nil {
 		if branch != "" {
-			if _, err := conn.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", branch); err != nil {
+			if err := checkoutBranchIfNeeded(ctx, conn, branch); err != nil {
 				return fmt.Errorf("checkout active branch %q: %w", branch, err)
 			}
 		}
 	} else if s.branch != "" {
 		// Fall back to the store's recorded branch rather than failing the
 		// whole call outright.
-		if _, err := conn.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", s.branch); err != nil {
+		if err := checkoutBranchIfNeeded(ctx, conn, s.branch); err != nil {
 			return fmt.Errorf("checkout fallback branch %q: %w", s.branch, err)
 		}
 	}
@@ -1180,6 +1363,16 @@ func (s *DoltStore) withReadTxLongTimeout(ctx context.Context, fn func(tx *sql.T
 // logic (verify passes, hooks, return values). See ready_claimer.ClaimNext's
 // `claimed = nil` reset for the canonical example.
 func (s *DoltStore) withRetryTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
+	return s.withRetryTxOn(ctx, s.db, fn)
+}
+
+// withRetryTxOn is withRetryTx against a caller-chosen txBeginner instead of
+// the shared pool, so a caller that must hold a session-scoped resource (e.g.
+// a GET_LOCK) across the whole retried write can pin one *sql.Conn for it —
+// see withDeleteFence. Every retried attempt replays on that SAME connection,
+// which is required: txBeginner's one other implementer, *sql.Conn, is itself
+// the pinned session, there is no pool to hand back a different one.
+func (s *DoltStore) withRetryTxOn(ctx context.Context, beginner txBeginner, fn func(tx *sql.Tx) error) error {
 	// Keep circuit admission at the transaction retry boundary. Calling
 	// withRetry from here would multiply retries and could replay a write after
 	// an indeterminate commit.
@@ -1197,7 +1390,7 @@ func (s *DoltStore) withRetryTx(ctx context.Context, fn func(tx *sql.Tx) error) 
 	var pending issueops.BlockedRecheck
 	if err := backoff.Retry(func() error {
 		var err error
-		pending, err = s.commitWriteTx(ctx, fn)
+		pending, err = s.commitWriteTxOn(ctx, beginner, fn)
 		if err == nil {
 			if !circuitWriteManaged(ctx) && s.breaker != nil {
 				s.breaker.RecordSuccess()
@@ -1261,16 +1454,25 @@ func (s *DoltStore) withWriteTx(ctx context.Context, fn func(tx *sql.Tx) error) 
 // recheck. The caller runs that recheck outside any retry loop around fn: a
 // recheck failure must never replay a write that has already landed.
 func (s *DoltStore) commitWriteTx(ctx context.Context, fn func(tx *sql.Tx) error) (issueops.BlockedRecheck, error) {
+	return s.commitWriteTxOn(ctx, s.db, fn)
+}
+
+// commitWriteTxOn is commitWriteTx against a caller-chosen txBeginner — see
+// withRetryTxOn.
+func (s *DoltStore) commitWriteTxOn(ctx context.Context, beginner txBeginner, fn func(tx *sql.Tx) error) (issueops.BlockedRecheck, error) {
 	if s.closed.Load() {
 		return issueops.BlockedRecheck{}, ErrStoreClosed
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := beginner.BeginTx(ctx, nil)
 	if err != nil {
 		return issueops.BlockedRecheck{}, fmt.Errorf("begin write tx: %w", err)
 	}
 	clearJournalScope := s.scopeEventsJournalTransaction(tx)
 	defer clearJournalScope()
-	clearVersionScope := s.scopeVersionedHistoryTransaction(tx)
+	clearVersionScope, err := s.scopeVersionedHistoryTransaction(ctx, tx)
+	if err != nil {
+		return issueops.BlockedRecheck{}, errors.Join(err, tx.Rollback())
+	}
 	defer clearVersionScope()
 	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
 	defer clearRecheckScope()
@@ -1290,6 +1492,20 @@ func (s *DoltStore) commitWriteTx(ctx context.Context, fn func(tx *sql.Tx) error
 // the corrected flag reaches history the way the close's own rows did rather
 // than sitting dirty in the working set.
 //
+// Publication ordering (lost-update fix, LatentLabsSpace/NEXUS#92): the Dolt
+// commit runs AFTER the recompute transaction has committed, through
+// doltAddAndCommitPostTx, exactly as runIssueOperationTxWithMessage does and
+// for a sharper reason than that path had. DOLT_ADD stages the whole table
+// from the session's transaction root, so minting the commit inside the still
+// open transaction would write every row a concurrent writer committed inside
+// that window back to its BEGIN-time value — the hazard doltAddAndCommitInTx
+// documents. A recheck runs precisely and only when concurrent unblocking
+// writes are racing on issues, so that window is never idle here. Committing
+// the SQL transaction first lets Dolt's commit-time merge reconcile this
+// repair with those writers, and the post-commit staging then stages the
+// merged state. This also keeps the append-only versioned-history tables that
+// withVersionedHistoryTables adds to the staged set out of that hazard.
+//
 // It runs on issueops.BlockedRecheckContext: the write it follows is durable,
 // so the repair must outlive that write's cancellation, and a recheck must
 // never start another recheck. The returned failure is for the caller to log,
@@ -1300,15 +1516,38 @@ func (s *DoltStore) recheckBlockedAfterCommit(ctx context.Context, pending issue
 	}
 	ctx, cancel := issueops.BlockedRecheckContext(ctx)
 	defer cancel()
+	var rowsChanged bool
 	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		// Plain assignment, never |=: withRetryTx re-runs this body on a retry
+		// and the rolled-back attempt's verdict must not survive into the
+		// publication decision below (the closure contract on withRetryTx).
+		rowsChanged = false
 		result, err := issueops.RecomputeIsBlockedInTxWithResult(ctx, tx, pending.IssueIDs, pending.WispIDs)
-		if err != nil || !result.IssueRowsChanged {
+		if err != nil {
 			return err
 		}
-		return s.doltAddAndCommitInTx(ctx, tx, []string{"issues"}, pending.CommitMessage())
+		rowsChanged = result.IssueRowsChanged
+		return nil
 	})
 	if err != nil {
 		return issueops.BlockedRecheckFailed(err)
+	}
+	if !rowsChanged {
+		return nil
+	}
+	commitMsg := pending.CommitMessage()
+	if err := s.doltAddAndCommitPostTx(ctx, []string{"issues"}, commitMsg); err != nil {
+		// The repair itself is committed and durable: only its audit commit is
+		// missing, and the corrected flag rides the next Dolt commit on the
+		// branch. This is the post_tx_commit_dropped situation, not the recheck
+		// failure logBlockedRecheckFailure reports — that line tells an operator
+		// rows are possibly stale and prescribes `bd recompute-blocked`, which
+		// would be false here and would fire the counter a fleet alerts on for
+		// rows that are already correct. Accounted exactly like
+		// runIssueOperationTxWithMessage's trailing commit instead.
+		doltMetrics.postTxCommitDropped.Add(ctx, 1)
+		log.Printf("dolt: post-tx dolt commit failed for %q (blocked-state repair already committed; change rides the next dolt commit): %v",
+			commitMsg, err)
 	}
 	return nil
 }
@@ -1329,40 +1568,109 @@ func logBlockedRecheckFailure(ctx context.Context, pending issueops.BlockedReche
 	if err == nil {
 		return
 	}
-	doltMetrics.blockedRecheckDropped.Add(ctx, 1)
-	log.Printf("warning: %s", issueops.BlockedRecheckFailureMessage(pending, err))
+	issueops.ReportBlockedRecheckFailure(ctx, pending, err)
 }
 
 // SetEventsJournalEnabled activates the journal for this store instance only.
+//
+// Activating probes bd_events_journal's actual shape ONCE
+// (issueops.ProbeJournalShape, PR A1), bounded by
+// issueops.JournalShapeProbeTimeout, and caches the result for this
+// instance's lifetime; EventsJournalActivationError reports whether that
+// probe found a shape the journal cannot run against. A probe that could not
+// run degrades to the canonical shape (issueops.JournalActivationError).
+// Deactivating clears both and skips the probe entirely — a disabled store
+// accepts any shape.
 func (s *DoltStore) SetEventsJournalEnabled(enabled bool) {
 	s.eventsJournalEnabled.Store(enabled)
+	if !enabled {
+		s.journalShape.Store(nil)
+		s.journalActivationErr.Store(nil)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), issueops.JournalShapeProbeTimeout)
+	defer cancel()
+	shape, err := issueops.ProbeJournalShape(ctx, s.db)
+	s.journalShape.Store(shape)
+	if activationErr := issueops.JournalActivationError(err); activationErr != nil {
+		s.journalActivationErr.Store(&activationErr)
+		return
+	}
+	s.journalActivationErr.Store(nil)
 }
 
+// EventsJournalActivationError implements storage.EventsJournalShapeChecker:
+// nil unless the last SetEventsJournalEnabled(true) call found a table shape
+// the journal cannot run against.
+func (s *DoltStore) EventsJournalActivationError() error {
+	if p := s.journalActivationErr.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// scopeEventsJournalTransaction binds this store's cached activation state and
+// probed shape to tx. The activation switch deliberately does NOT depend on
+// the shape: an enabled store whose probe produced no shape writes with the
+// canonical column list, so a table the journal cannot run against fails the
+// write loudly instead of letting the mutation commit with no journal row
+// (storage.EventsJournalShapeChecker).
 func (s *DoltStore) scopeEventsJournalTransaction(tx *sql.Tx) func() {
-	return issueops.ScopeEventsJournalTransaction(tx, s.eventsJournalEnabled.Load())
+	clearActivation := issueops.ScopeEventsJournalTransaction(tx, s.eventsJournalEnabled.Load())
+	clearShape := issueops.ScopeEventsJournalShape(tx, s.journalShape.Load())
+	return func() {
+		clearShape()
+		clearActivation()
+	}
 }
 
 // SetVersionedHistoryEnabled activates dual-write issue-version history for
 // this store instance only.
 func (s *DoltStore) SetVersionedHistoryEnabled(enabled bool) {
-	s.versionedHistoryEnabled.Store(enabled)
+	s.versionedHistory.Set(enabled)
 }
 
-func (s *DoltStore) scopeVersionedHistoryTransaction(tx *sql.Tx) func() {
-	return issueops.ScopeVersionedHistoryTransaction(tx, s.versionedHistoryEnabled.Load())
+// DeferVersionedHistory leaves this store's switch to resolve, read by the
+// first write transaction (storage.VersionedHistoryDeferrer).
+func (s *DoltStore) DeferVersionedHistory(resolve storage.VersionedHistoryResolver) {
+	s.versionedHistory.Defer(resolve)
+}
+
+// scopeVersionedHistoryTransaction binds the switch to a WRITE transaction,
+// answering a pending switch through tx first. Every write transaction that can
+// mint is scoped here or in runDoltTransaction, so the row is read inside the
+// first of them and never by a read. When that read fails it binds nothing and
+// returns the error, and the caller rolls tx back before its body runs
+// (issueops.VersionedHistorySwitch.ResolveIn).
+func (s *DoltStore) scopeVersionedHistoryTransaction(ctx context.Context, tx *sql.Tx) (func(), error) {
+	enabled, err := s.versionedHistory.ResolveIn(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	return issueops.ScopeVersionedHistoryTransaction(tx, enabled), nil
 }
 
 // withVersionedHistoryTables appends the tables the versioned-history seam
 // writes to a fixed staging list when history is active on this store, so a
 // mutation's version rows land in that mutation's own Dolt commit rather than
 // sitting dirty in the working set. Every fixed-list DOLT_ADD path in this
-// package routes through here; the tracker-based path uses
+// package routes through here except the config-table commits, which mint no
+// version rows (CommitConfigOnly); the tracker-based path uses
 // DirtyTableTracker.MarkVersionedHistoryDirty instead.
 //
 // Staging a table that turns out to be clean is free: DOLT_ADD stages nothing
 // and both helpers already skip the commit on an empty staged set.
-func (s *DoltStore) withVersionedHistoryTables(tables []string) []string {
-	if !s.versionedHistoryEnabled.Load() {
+//
+// It answers a pending switch through q, the transaction or connection the
+// caller stages on: a write that ran in a transaction this store did not scope
+// (AddComment's) reaches a staging list before any scope site has asked. A
+// read that fails here leaves the list as it is and the switch pending,
+// instead of failing the write being staged. A switch still pending at staging
+// was not answered by that write: a scoped write that reaches its staging has
+// answered it, since a scope whose read fails fails its write. So the write
+// ran unscoped and minted nothing for the version tables to carry.
+func (s *DoltStore) withVersionedHistoryTables(ctx context.Context, q issueops.DBTX, tables []string) []string {
+	if enabled, err := s.versionedHistory.ResolveIn(ctx, q); err != nil || !enabled {
 		return tables
 	}
 	staged := slices.Clone(tables)
@@ -1462,17 +1770,17 @@ func (s *DoltStore) BackupDatabase(ctx context.Context, dir string) error {
 }
 
 // RestoreDatabase restores the database from a Dolt backup at dir.
-// When force is true, an existing database is overwritten.
+// The dir must exist on this process's filesystem and contain a Dolt backup
+// at a path Dolt reads literally; anything else is refused before the restore
+// connection opens (versioncontrolops.RestoreSourceURL). The SQL server then
+// opens dir on its own filesystem, so the check speaks for the directory
+// restored from only when the server shares this filesystem at that path. A
+// server in a container or on another host restores from whatever it holds
+// there, dropping the database under force before the transfer starts
+// (dolthub/dolt#11951). When force is true, an existing database is
+// overwritten.
 func (s *DoltStore) RestoreDatabase(ctx context.Context, dir string, force bool) error {
-	info, err := os.Stat(dir)
-	if err != nil {
-		return fmt.Errorf("backup source does not exist: %w", err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("backup source is not a directory: %s", dir)
-	}
-
-	backupURL, err := versioncontrolops.DirToFileURL(dir)
+	backupURL, err := versioncontrolops.RestoreSourceURL(dir)
 	if err != nil {
 		return err
 	}
@@ -1587,13 +1895,39 @@ func applyConfigDefaults(cfg *Config) {
 			cfg.ServerHost = "127.0.0.1"
 		}
 	}
+	ResolveServerPort(cfg)
+	applyTestModePortGuard(cfg)
+	if cfg.ServerUser == "" {
+		cfg.ServerUser = "root"
+	}
+	// Check environment variable for password (more secure than command-line)
+	if cfg.ServerPassword == "" {
+		cfg.ServerPassword = os.Getenv("BEADS_DOLT_PASSWORD")
+	}
+
+	// Remote credentials for Hosted Dolt push/pull (env vars take precedence)
+	if cfg.RemoteUser == "" {
+		cfg.RemoteUser = os.Getenv("DOLT_REMOTE_USER")
+	}
+	if cfg.RemotePassword == "" {
+		cfg.RemotePassword = os.Getenv("DOLT_REMOTE_PASSWORD")
+	}
+	// Pool knobs last: every DoltStore open (the CLI's store and library
+	// callers of New/NewFromConfig*) reaches New, so the knob ladders hold
+	// here regardless of how cfg was built.
+	applyPoolKnobs(cfg)
+}
+
+// ResolveServerPort applies the store's port rule to cfg, as New does before
+// it connects. Callers that dial the store's server without opening it
+// first, like bd init's clone into an external server, use it to dial the
+// port New will. It leaves a port nothing resolved at 0: such an endpoint has
+// no address to dial. The BEADS_TEST_MODE guard New applies after it
+// (applyTestModePortGuard) is not part of the rule, so a dial target computed
+// outside New never carries its port 1.
+func ResolveServerPort(cfg *Config) {
 	// Port resolution: caller-preset explicit ServerPort > BEADS_DOLT_SERVER_PORT
-	// env (or legacy BEADS_DOLT_PORT) > BEADS_TEST_MODE guard > metadata config > default.
-	// CRITICAL: BEADS_TEST_MODE=1 forces port 1 (immediate fail) if the resolved port
-	// is the production port (DefaultSQLPort). This prevents test databases from leaking
-	// onto production even when the port env var is set to 3307 by the orchestrator's beads module.
-	// Only an explicit non-production port (e.g., 43211 for a test server)
-	// overrides test mode — that's a deliberate test server assignment.
+	// env (or legacy BEADS_DOLT_PORT) > metadata config > default.
 	if cfg.ServerPort != 0 && cfg.ServerPortSource == doltserver.PortSourceUnset {
 		// The caller (e.g. `bd init --server-port`, or initGlobalDatabaseConfig's
 		// copy-forward of it) already set an explicit port before this function
@@ -1622,11 +1956,12 @@ func applyConfigDefaults(cfg *Config) {
 		}
 	}
 	// If env var didn't provide a port, consult the full resolution chain:
-	// port file > config.yaml > metadata.json (GH#2590).
+	// port file > config.yaml > metadata.json (GH#2590), unless the caller
+	// already did (ServerPortResolved).
 	// Resolve from the owning .beads dir when available; cfg.Path is the Dolt
 	// data path, not the config directory, and using it directly can miss the
 	// repo-local port file or metadata.
-	if cfg.ServerPort == 0 {
+	if cfg.ServerPort == 0 && !cfg.ServerPortResolved {
 		resolveDir := cfg.BeadsDir
 		if resolveDir == "" && cfg.Path != "" {
 			resolveDir = filepath.Dir(cfg.Path)
@@ -1642,32 +1977,42 @@ func applyConfigDefaults(cfg *Config) {
 	// Port 0 means "not yet resolved" — auto-start (EnsureRunning) will
 	// allocate an ephemeral port. Don't default to 3307 as that caused
 	// cross-project data leakage (GH#2098, GH#2372).
-	//
-	// Test mode guard: force port 1 (immediate fail) if we'd hit production
-	// or have no port, to prevent test databases leaking onto production.
-	// Production-port detection is generalized via isProductionPort so cities
-	// using non-3307 ports (BEADS_PRODUCTION_PORT or dolt-server.port) are
-	// covered too.
+}
+
+// applyTestModePortGuard is New's BEADS_TEST_MODE guard, applied after the
+// store's port rule (ResolveServerPort): it forces port 1 (immediate fail)
+// when the resolved port is a production port or there is none, so test
+// databases never leak onto production, even when the orchestrator's beads
+// module sets the port env var to 3307. Only an explicit non-production port
+// (e.g. 43211 for a test server) overrides it. Production-port detection is
+// generalized via isProductionPort so cities using non-3307 ports
+// (BEADS_PRODUCTION_PORT or dolt-server.port) are covered too.
+func applyTestModePortGuard(cfg *Config) {
 	if os.Getenv("BEADS_TEST_MODE") == "1" {
 		if cfg.ServerPort == 0 || isProductionPort(cfg) {
 			cfg.ServerPort = 1
 		}
 	}
-	if cfg.ServerUser == "" {
-		cfg.ServerUser = "root"
-	}
-	// Check environment variable for password (more secure than command-line)
-	if cfg.ServerPassword == "" {
-		cfg.ServerPassword = os.Getenv("BEADS_DOLT_PASSWORD")
-	}
+}
 
-	// Remote credentials for Hosted Dolt push/pull (env vars take precedence)
-	if cfg.RemoteUser == "" {
-		cfg.RemoteUser = os.Getenv("DOLT_REMOTE_USER")
+// ErrTestModeProductionPort is wrapped by TestModeRefusesPort's refusal.
+var ErrTestModeProductionPort = errors.New("BEADS_TEST_MODE=1 refuses to dial a production Dolt server port")
+
+// TestModeRefusesPort is New's BEADS_TEST_MODE guard (applyTestModePortGuard)
+// for a caller that dials beadsDir's server at port without New, such as
+// bd init's clone into its store's server: under
+// BEADS_TEST_MODE=1 it refuses a production port (isProductionPort), so a
+// test never writes to production through a dial New would have stopped.
+// It returns nil outside test mode and for a non-production port. A port of
+// 0 is the caller's to refuse: there is nothing to dial.
+func TestModeRefusesPort(beadsDir string, port int) error {
+	if os.Getenv("BEADS_TEST_MODE") != "1" || port <= 0 {
+		return nil
 	}
-	if cfg.RemotePassword == "" {
-		cfg.RemotePassword = os.Getenv("DOLT_REMOTE_PASSWORD")
+	if reasons := productionPortReasons(&Config{BeadsDir: beadsDir, ServerPort: port}); len(reasons) > 0 {
+		return fmt.Errorf("%w %d (%s)", ErrTestModeProductionPort, port, strings.Join(reasons, "; "))
 	}
+	return nil
 }
 
 // New creates a new Dolt storage backend.
@@ -1693,7 +2038,7 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// the second of two AD-01 defenses (the first is the production-port
 	// guard above). Returning an error (not panic) lets tests assert on it.
 	if isTestDatabaseName(cfg.Database) && os.Getenv("BEADS_TEST_SERVER") != "1" {
-		addr := net.JoinHostPort(cfg.ServerHost, strconv.Itoa(cfg.ServerPort))
+		addr := doltutil.ServerAddr(cfg.ServerHost, cfg.ServerPort)
 		if cfg.ServerSocket != "" {
 			addr = cfg.ServerSocket
 		}
@@ -1701,7 +2046,25 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			"refusing to connect test database %q to server %s: "+
 				"set BEADS_TEST_SERVER=1 on a dedicated test server, "+
 				"or use test helpers in internal/storage/dolt/testserver",
-			cfg.Database, addr)
+			cfg.Database, remedy.PrintedValue(addr))
+	}
+
+	// Pin the server endpoint before presenting cfg.ServerPassword to it. Every
+	// store open funnels through New (NewFromConfig* end with New), so this is the
+	// one place that covers direct dolt.New callers too — bd doctor's federation,
+	// validation, maintenance and migration checks open the store this way with
+	// a password resolved from the shared-config host (doltServerConfig), which
+	// the PR's applyResolvedConfig gate does not reach. A no-op for bd's own
+	// local server and the vendor default; it refuses a shared-config host
+	// (metadata.json dolt_server_host / config.yaml dolt.host) the workspace
+	// never pinned, so a committed endpoint cannot harvest BEADS_DOLT_PASSWORD
+	// (GH#7886). The credentials-file password is already keyed to [host:port],
+	// so a swapped host finds no entry and sends nothing; this adds the check for
+	// BEADS_DOLT_PASSWORD, which is sent to whatever host is configured.
+	if cfg.ServerPassword != "" {
+		if err := doltserver.CheckEndpointTrust(cfg.BeadsDir, nil, cfg.ServerHost, cfg.ServerPort, cfg.ServerSocket); err != nil {
+			return nil, err
+		}
 	}
 
 	return newServerMode(ctx, cfg)
@@ -1711,10 +2074,13 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 // server configurations whose storage ownership is known. It deliberately
 // does not infer locality from Path, CLIDir, or filesystem existence: external
 // servers may leave unrelated client-local directories at those locations.
+// Nor is a server at a host bd does not run its server at
+// (configfile.BdRunsServerAt) ever one whose data directory bd knows: bd's
+// own server, shared or not, listens on 127.0.0.1 only.
 func resolveLocalActiveDatabaseDir(cfg *Config) string {
 	if cfg == nil || cfg.BeadsDir == "" || cfg.Database == "" ||
 		cfg.Gateway || cfg.ProxiedServer || cfg.ServerSocket != "" ||
-		cfg.ServerTLS || !isLocalHost(cfg.ServerHost) {
+		cfg.ServerTLS || !configfile.BdRunsServerAt(cfg.ServerHost) {
 		return ""
 	}
 
@@ -1731,6 +2097,17 @@ func resolveLocalActiveDatabaseDir(cfg *Config) string {
 
 	// Owned mode plus effective auto-start authority is the affirmative proof
 	// that the configured data root belongs to this local beads instance.
+	//
+	// The AutoStart conjunct is deliberate and is deliberately stricter than
+	// ownership alone: ResolveServerMode already decides ownership, so this
+	// clause is a fail-closed backstop that rides resolveAutoStart's own
+	// exclusions (it is forced false for ServerModeExternal and under
+	// BEADS_TEST_MODE=1). The accepted cost is that an owned workspace which
+	// sets "dolt.auto-start: false" and starts its server by hand is refused
+	// local external GC; the CLI hint names that remedy explicitly. Relaxing
+	// this to ResolveServerMode alone would widen GC authority and is a
+	// behavior change, not a cleanup — do not drop it without re-reviewing the
+	// test-mode and external-server paths above.
 	if !cfg.AutoStart || doltserver.ResolveServerMode(cfg.BeadsDir) != doltserver.ServerModeOwned {
 		return ""
 	}
@@ -1743,7 +2120,7 @@ func resolveLocalActiveDatabaseDir(cfg *Config) string {
 // list of detection rules that matched, and a fix block naming each
 // supported escape hatch.
 func buildTestModeProductionPortPanic(cfg *Config) string {
-	addr := net.JoinHostPort(cfg.ServerHost, strconv.Itoa(cfg.ServerPort))
+	addr := doltutil.ServerAddr(cfg.ServerHost, cfg.ServerPort)
 	if cfg.ServerSocket != "" {
 		addr = cfg.ServerSocket
 	}
@@ -1780,7 +2157,7 @@ func buildTestModeProductionPortPanic(cfg *Config) string {
 			"%s",
 		cfg.Database,
 		cfg.Path,
-		addr,
+		remedy.PrintedValue(addr),
 		rules.String(),
 		fixLines.String(),
 	)
@@ -1819,18 +2196,12 @@ var dialProbe = func(network, addr string, timeout time.Duration) error {
 // a unit-of-work provider against the same server from the same connection
 // settings, and a transport policy that only one of them applies is a workspace
 // where CLI commands work and the HTTP server cannot connect.
+//
+// The policy is doltserver.SocketTransport's, which a dial through the
+// endpoint (doltserver.Endpoint.DialDSN) uses too, so it picks the
+// transport the store does.
 func ResolveSocketTransport(socket, host string, port int, timeout time.Duration) string {
-	if socket == "" {
-		return ""
-	}
-	if dialProbe("unix", socket, timeout) == nil {
-		return socket // socket is live — keep using it
-	}
-	if port > 0 && dialProbe("tcp", net.JoinHostPort(host, strconv.Itoa(port)), timeout) == nil {
-		debug.Logf("dolt: socket %s unreachable, falling back to TCP %s\n", socket, net.JoinHostPort(host, strconv.Itoa(port)))
-		return "" // socket down but TCP up — transparently fall back to TCP
-	}
-	return socket // both down (or no TCP port) — keep socket for the error path
+	return doltserver.SocketTransportWith(dialProbe, socket, host, port, timeout)
 }
 
 // ensureRunningDetailed starts (or reuses) the repo-local auto-started dolt
@@ -1846,9 +2217,44 @@ var ensureRunningDetailed = doltserver.EnsureRunningDetailed
 // dolt sql-server process.
 var stopRejectedAutoStartedServer = doltserver.Stop
 
+// dialServer makes newServerMode's fail-fast connection to the server.
+// Declared as a var (matching dialProbe above) so unit tests can stub a dial
+// failure, such as a sandbox refusing the connection, without a live server.
+var dialServer = net.DialTimeout
+
+// issueProjectionColumns are the columns every issue read selects from the
+// row (sqlbuild.IssueBaseColumns, shared by both planes). checkOpenSchemaDrift
+// requires them on issues, the replicated table whose shape the schema cursor
+// describes.
+var issueProjectionColumns = sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns)
+
+// checkOpenSchemaDrift is newServerMode's schema drift check. Every open
+// refuses a database ahead of this binary (schema.CheckForwardDrift). An open
+// that will not migrate and sets Config.RequireReadableSchema also refuses,
+// from the same version read, one behind it that lacks a projected column
+// (schema.CheckReadableDrift). Through a gateway that refusal names the
+// server administrator's remedy, since bd never migrates a gateway's schema.
+func checkOpenSchemaDrift(ctx context.Context, db *sql.DB, cfg *Config) error {
+	if !cfg.RequireReadableSchema || (!cfg.ReadOnly && !cfg.Gateway) {
+		return schema.CheckForwardDrift(ctx, db)
+	}
+	err := schema.CheckReadableDrift(ctx, db, "issues", issueProjectionColumns)
+	var behind *schema.SchemaBehindError
+	if cfg.Gateway && errors.As(err, &behind) {
+		behind.Gateway = true
+	}
+	return err
+}
+
 // newServerMode creates a DoltStore connected to a running dolt sql-server.
 // This path is pure Go and does not require CGO.
 func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
+	// An IPv6 host may be configured bracketed ("[::1]") as well as bare.
+	// Every address below, the fail-fast probe's and the DSN's alike, is
+	// joined by doltutil.ServerAddr, which accepts either, but the breaker
+	// key, hints and errors use the host as it is, so keep the bare form once
+	// here: both spellings then name and dial [::1]:port.
+	cfg.ServerHost = configfile.UnbracketHost(cfg.ServerHost)
 	breaker := initializeServerCircuitBreaker(cfg)
 
 	// Circuit breaker: fail-fast if the server is known to be down.
@@ -1872,6 +2278,17 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// the DSN built in openServerConnection agree on the transport.
 	cfg.ServerSocket = ResolveSocketTransport(cfg.ServerSocket, cfg.ServerHost, cfg.ServerPort, 500*time.Millisecond)
 
+	// Port 0 means "not yet resolved", and only auto-start resolves it. An
+	// open that will not start a server must not dial 127.0.0.1:0 and then
+	// report an outage: the server may be healthy and bd simply has no
+	// address for it (bd-7pkvvd). IsAutoStartDisabled is checked as well as
+	// serverOpenCanAutoStart because it also accepts spellings such as
+	// "false" that resolveAutoStart does not.
+	if cfg.ServerSocket == "" && cfg.ServerPort <= 0 &&
+		(!serverOpenCanAutoStart(cfg) || doltserver.IsAutoStartDisabled()) {
+		return nil, unresolvedServerPortError(cfg, resolvedBeadsDir, serverDir)
+	}
+
 	// Fail-fast connectivity check before MySQL protocol initialization.
 	// This gives an immediate, clear error if the Dolt server isn't running,
 	// rather than waiting for MySQL driver timeouts.
@@ -1880,12 +2297,17 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	var dialErr error
 	if cfg.ServerSocket != "" {
 		addr = cfg.ServerSocket
-		conn, dialErr = net.DialTimeout("unix", cfg.ServerSocket, 500*time.Millisecond)
+		conn, dialErr = dialServer("unix", cfg.ServerSocket, 500*time.Millisecond)
 	} else {
-		addr = net.JoinHostPort(cfg.ServerHost, fmt.Sprintf("%d", cfg.ServerPort))
-		conn, dialErr = net.DialTimeout("tcp", addr, 500*time.Millisecond)
+		addr = doltutil.ServerAddr(cfg.ServerHost, cfg.ServerPort)
+		conn, dialErr = dialServer("tcp", addr, 500*time.Millisecond)
 	}
 	if dialErr != nil {
+		// The endpoint comes from metadata.json (dolt_server_host,
+		// dolt_server_socket), which a cloned repository commits, and a
+		// dial error repeats it: each message below names both through
+		// the remedy printer, so neither can redraw the advice under it.
+		dialErr = remedy.PrintedError(dialErr)
 		// Auto-start: if enabled and connecting locally via TCP, start a server.
 		// Socket mode is excluded — auto-start creates a TCP listener, not a
 		// unix socket, so the DSN would still fail. Socket users are expected
@@ -1911,10 +2333,28 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			}
 			port, startedByUs, startErr := ensureRunningDetailed(resolvedBeadsDir)
 			if startErr != nil {
+				// EnsureRunning refused, rather than failed, to start a
+				// server bd does not manage. When a named port is what
+				// declares it so, report the failed dial the way an open
+				// that cannot auto-start does (below): "auto-start failed"
+				// and "bd dolt start" describe a start bd must not make.
+				if errors.Is(startErr, doltserver.ErrExternallyManaged) {
+					if hint := externallyManagedPortHint(cfg, resolvedBeadsDir, addr); hint != "" {
+						return nil, fmt.Errorf("Dolt server unreachable at %s: %w\n\n%s", remedy.PrintedValue(addr), dialErr, hint)
+					}
+				}
+				// Start refused a dolt older than bd's minimum. `bd dolt
+				// start` refuses the same binary, and turning auto-start
+				// off does not help, so the refusal's own upgrade advice is
+				// the whole remedy.
+				if errors.Is(startErr, doltversion.ErrBelowRequiredMin) {
+					return nil, fmt.Errorf("Dolt server unreachable at %s and auto-start refused to start it: %w",
+						remedy.PrintedValue(addr), remedy.PrintedTextError(startErr))
+				}
 				return nil, fmt.Errorf("Dolt server unreachable at %s and auto-start failed: %w\n\n"+
 					"To start manually: bd dolt start\n"+
 					"To disable auto-start: set dolt.auto-start: false in .beads/config.yaml",
-					addr, startErr)
+					remedy.PrintedValue(addr), remedy.PrintedTextError(startErr))
 			}
 			// Only tests should stop auto-started servers on Close(). In normal
 			// repo-local server mode, leaving the server up avoids endpoint churn
@@ -1948,9 +2388,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 					// unreachable").
 					if cfg.ServerPortSharedServer {
 						undoRejectedAutoStart(serverDir, startedByUs, autoStartedDir, portFileSnap, snapErr)
-						if breaker != nil {
-							breaker.RecordFailure()
-						}
+						recordDialFailure(breaker, dialErr)
 						return nil, fmt.Errorf(
 							"Shared Dolt server configured at port %d (source: %s) is unreachable; "+
 								"auto-start started a repo-local server on port %d instead, but bd will "+
@@ -1964,9 +2402,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 					}
 					if cfg.ServerPortSource.IsAuthoritative() {
 						undoRejectedAutoStart(serverDir, startedByUs, autoStartedDir, portFileSnap, snapErr)
-						if breaker != nil {
-							breaker.RecordFailure()
-						}
+						recordDialFailure(breaker, dialErr)
 						return nil, fmt.Errorf(
 							"Dolt server configured at port %d (source: %s) is unreachable; "+
 								"auto-start started a new server on port %d, but bd will not "+
@@ -1985,44 +2421,52 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 					fmt.Fprintf(os.Stderr, "  To pin a port: set dolt.port in .beads/config.yaml\n")
 				}
 				cfg.ServerPort = port
-				addr = net.JoinHostPort(cfg.ServerHost, fmt.Sprintf("%d", cfg.ServerPort))
+				addr = doltutil.ServerAddr(cfg.ServerHost, cfg.ServerPort)
 				breaker = maybeNewCircuitBreaker(cfg.ServerHost, cfg.ServerPort, cfg.Database)
 			}
 			// Retry connection with longer timeout (server just started)
-			conn, dialErr = net.DialTimeout("tcp", addr, 2*time.Second)
+			conn, dialErr = dialServer("tcp", addr, 2*time.Second)
 			if dialErr != nil {
 				// Release auto-start ref on connection failure
 				if autoStartedDir != "" {
 					_ = autoStartRelease(autoStartedDir)
 				}
-				if breaker != nil {
-					breaker.RecordFailure()
-				}
-				return nil, fmt.Errorf("Dolt server auto-started but still unreachable at %s: %w\n\n"+
-					"Check logs: %s", addr, dialErr, doltserver.LogPath(resolvedBeadsDir))
+				recordDialFailure(breaker, dialErr)
+				return nil, autoStartRedialError(addr, dialErr, startedByUs, doltserver.LogPath(resolvedBeadsDir))
 			}
 		} else {
-			if breaker != nil {
-				breaker.RecordFailure()
-			}
+			recordDialFailure(breaker, dialErr)
 			var hint string
 			if cfg.ServerSocket != "" {
+				// The socket path is metadata.json's dolt_server_socket,
+				// which a cloned repository commits: it goes into the
+				// command as one shell word, or as a <path> placeholder
+				// with the path named escaped beside it.
+				socket, note := remedy.CommandArg(runtime.GOOS, cfg.ServerSocket, "<path>")
 				hint = fmt.Sprintf("The Dolt server is not listening on socket %s.\n"+
 					"Ensure the server is started with --socket:\n"+
-					"  dolt sql-server --socket %s\n"+
+					"  dolt sql-server --socket %s%s\n"+
 					"Auto-start is not supported in socket mode.",
-					cfg.ServerSocket, cfg.ServerSocket)
+					remedy.PrintedValue(cfg.ServerSocket), socket, note)
 			} else if isExternalServerHost(cfg.ServerHost) {
-				// External (non-localhost) server: bd does not
-				// manage it; "bd dolt start" would be wrong advice
-				// (GH#3518). Suggest verifying the external server
-				// instead.
-				hint = fmt.Sprintf("Configured Dolt server at %s:%d is unreachable.\n"+
+				// A server bd does not run (configfile.BdRunsServerAt): bd
+				// does not manage it; "bd dolt start" would be wrong
+				// advice (GH#3518). Suggest verifying the external server
+				// instead. The endpoint is addr, which brackets an IPv6
+				// host; doltserver.ReachabilityCheck spells the host as
+				// nc and curl each take it.
+				hint = fmt.Sprintf("Configured Dolt server at %s is unreachable.\n"+
 					"Verify the external server is running and reachable from this host:\n"+
-					"  nc -zv %s %d  # or curl %s:%d for an HTTP-style check",
-					cfg.ServerHost, cfg.ServerPort,
-					cfg.ServerHost, cfg.ServerPort,
-					cfg.ServerHost, cfg.ServerPort)
+					"  %s",
+					remedy.PrintedValue(addr), doltserver.ReachabilityCheck(cfg.ServerHost, cfg.ServerPort))
+			} else if named := externallyManagedPortHint(cfg, resolvedBeadsDir, addr); named != "" {
+				// A named port declares the server externally managed
+				// (BEADS_DOLT_SERVER_PORT, dolt_server_port), which is
+				// why auto-start is off here: "bd dolt start" would start
+				// bd's own server on that port, not the one that belongs
+				// there. Checked before the auto-start-disabled hint,
+				// whose remedy is that same command.
+				hint = named
 			} else if !cfg.AutoStart && doltserver.IsAutoStartDisabled() {
 				hint = "Dolt server auto-start is disabled (dolt.auto-start: false).\n" +
 					"Start the server manually:\n  bd dolt start"
@@ -2030,7 +2474,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 				hint = "The Dolt server may not be running. Try:\n  bd dolt start"
 			}
 			return nil, fmt.Errorf("Dolt server unreachable at %s: %w\n\n%s",
-				addr, dialErr, hint)
+				remedy.PrintedValue(addr), dialErr, hint)
 		}
 	}
 	// Drain the MySQL handshake before closing so Close() sends FIN, not RST
@@ -2093,7 +2537,9 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		remotePassword:         cfg.RemotePassword,
 		serverMode:             true,
 		readOnly:               cfg.ReadOnly,
+		classifiedRead:         cfg.ClassifiedRead,
 		autoStartedServerDir:   autoStartedDir,
+		createdDatabase:        dbFacts.created,
 	}
 
 	// Forward-drift guard runs on read-only AND writable opens. A binary older
@@ -2101,8 +2547,10 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// when the DB is already past the binary's latest migration (atLatest uses
 	// >=), so without this guard a writable open would proceed and later queries
 	// would fail with cryptic unknown-column errors instead of a clear
-	// "upgrade bd" message (the stale-binary incident behind #4135/#4137).
-	if err := schema.CheckForwardDrift(ctx, db); err != nil {
+	// "upgrade bd" message (the stale-binary incident behind #4135/#4137). An
+	// open that will not migrate also refuses, when it asks to, a database
+	// behind the binary that its reads cannot query (checkOpenSchemaDrift).
+	if err := checkOpenSchemaDrift(ctx, db, cfg); err != nil {
 		return nil, err
 	}
 
@@ -2137,11 +2585,13 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// server-existence check; it does not reopen the separate "foreign
 	// server, no bd database at all" gap tracked as Part B (mybd-y18b).
 	if !cfg.CreateIfMissing || dbFacts.alreadyExisted {
+		// Verify against the resolved beadsDir that credentials and CLIDir
+		// use, so a Path-only open such as beads.Open is checked too (GH#5559).
 		var verifyErr error
 		if cfg.Database == doltserver.GlobalDatabaseName {
-			verifyErr = store.verifyGlobalProjectIdentity(ctx, cfg.BeadsDir)
+			verifyErr = store.verifyGlobalProjectIdentity(ctx, beadsDir)
 		} else {
-			verifyErr = store.verifyProjectIdentity(ctx, cfg.BeadsDir, cfg.OpenedByInit)
+			verifyErr = store.verifyProjectIdentity(ctx, beadsDir, cfg.OpenedByInit)
 		}
 		if verifyErr != nil {
 			return nil, verifyErr
@@ -2161,8 +2611,9 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 				return nil, fmt.Errorf("failed to initialize schema: %w", err)
 			}
 			// A tolerated refusal still reports what the aborted pass
-			// applied (0 for both guards today, since each refuses before
-			// migrating), so the rebuild below stays correct either way.
+			// applied (0 for every tolerated refusal today, since each
+			// refuses before migrating), so the rebuild below stays correct
+			// either way.
 		}
 		// initSchema runs migrations over a separate pool (openMigrationDB).
 		// The Ping above already pinned a connection in store.db to the
@@ -2175,13 +2626,12 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		}
 	}
 
-	if isLocalHost(cfg.ServerHost) {
-		beadsDir := cfg.BeadsDir
-		if beadsDir == "" && cfg.Path != "" {
-			beadsDir = filepath.Dir(cfg.Path)
-		}
-		_ = persistResolvedPortFile(cfg, beadsDir)
+	// persistResolvedPortFile records the port only for a server bd runs.
+	portFileDir := cfg.BeadsDir
+	if portFileDir == "" && cfg.Path != "" {
+		portFileDir = filepath.Dir(cfg.Path)
 	}
+	_ = persistResolvedPortFile(cfg, portFileDir)
 
 	// All writers operate on main — transaction isolation via RunInTransaction
 	// replaces the former branch-per-worker approach (BD_BRANCH).
@@ -2200,14 +2650,15 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 // warnLenientOpenRefusal reports whether a lenient open (Config.LenientOpen)
 // may continue past err instead of failing, warning on stderr when it may.
 //
-// Server mode reaches the same two pending-migration refusals embedded mode
+// Server mode reaches the same pending-migration refusals embedded mode
 // relaxes for this intent (embeddeddolt's openWorkingSetReconcile): the #4566
 // dirty-table guard, whose documented recovery IS the commit these opens exist
-// to run, and the #4259 remote-migrate gate, a coordination stop with no
-// business blocking a commit of the local working set. Against an external
-// server the operator cannot sidestep either by deleting a local database, so
-// leaving them fatal here left the refusals with no in-band recovery at all
-// (#5781).
+// to run; the migration-consent refusal, which fires before that guard and so
+// would rebuild the same deadlock on a database both behind and dirty; and
+// the #4259 remote-migrate gate, a coordination stop with no business blocking
+// a commit of the local working set. Against an external server the operator
+// cannot sidestep any of them by deleting a local database, so leaving them
+// fatal here left the refusals with no in-band recovery at all (#5781).
 //
 // Every other migration failure still fails the open, and the schema-skew and
 // identity guards run before this point either way: lenient relaxes migration,
@@ -2218,8 +2669,13 @@ func warnLenientOpenRefusal(err error) bool {
 		fmt.Fprintf(os.Stderr,
 			"Warning: %v\n"+
 				"  Committing the working set at the current schema; when it completes,\n"+
-				"  re-run 'bd migrate'.\n",
+				"  re-run 'bd migrate schema'.\n",
 			dirtyErr)
+		return true
+	}
+	var consentErr *schema.MigrateConsentError
+	if errors.As(err, &consentErr) {
+		fmt.Fprint(os.Stderr, consentErr.WorkingSetWarning())
 		return true
 	}
 	var gateErr *schema.RemoteMigrateGateError
@@ -2264,7 +2720,9 @@ func warnRemoteSyncOpenRefusal(err error) bool {
 }
 
 var (
-	cleanServerCircuitState = CleanStaleCircuitBreakerFiles
+	// Sweeps at most once per process: a test that needs the real sweep to run
+	// here must also start a fresh staleCircuitSweep.
+	cleanServerCircuitState = cleanStaleCircuitBreakerFilesOnce
 	newServerCircuitBreaker = maybeNewCircuitBreaker
 	ensureResolvedPortFile  = doltserver.EnsurePortFile
 )
@@ -2285,13 +2743,113 @@ func initializeServerCircuitBreaker(cfg *Config) *circuitBreaker {
 // not cfg.ReadOnly: ordinary classified-read commands (bd show, bd list, ...)
 // also set cfg.ReadOnly but must still be able to auto-start a stopped
 // managed server, per dolt_autostart_lifecycle_integration_test.go.
+//
+// The dial must be one the started server answers
+// (doltserver.AutoStartReaches, which doltserver.Endpoint.BDStartsServer asks
+// too): TCP, since that server never listens on a unix socket, to a host bd
+// runs its server at (configfile.BdRunsServerAt), since it listens on
+// 127.0.0.1 only, so at any other host, the IPv6 loopback included, the
+// retry would still find nothing at host:port and leave bd's server running.
 func serverOpenCanAutoStart(cfg *Config) bool {
 	return !cfg.DisableAutoStart && cfg.AutoStart && cfg.Path != "" &&
-		cfg.ServerSocket == "" && isLocalHost(cfg.ServerHost)
+		doltserver.AutoStartReaches(cfg.ServerHost, cfg.ServerSocket)
 }
 
+// ErrUnresolvedServerPort is wrapped by the error an open returns when it has
+// no server address and will not start a server (see
+// unresolvedServerPortError). A caller with its own advice for that case,
+// such as `bd init --external` asking for --server-port, tests for it with
+// errors.Is.
+var ErrUnresolvedServerPort = doltserver.ErrUnresolvedPort
+
+// unresolvedServerPortError explains an open that has no server address: no
+// socket, and no port source resolved a port. It returns nil when cfg has
+// either, and otherwise an error wrapping ErrUnresolvedServerPort. serverDir
+// is ResolveServerDir(beadsDir), so the port file it names is the
+// shared-server one in shared mode.
+//
+// The text never says "unreachable" or names 127.0.0.1:0 (nothing was
+// dialed), and it suggests `bd dolt start` only when bd manages the server:
+// for a server managed elsewhere that command inits an empty database and
+// publishes its port, shadowing the real one.
+func unresolvedServerPortError(cfg *Config, beadsDir, serverDir string) error {
+	if cfg.ServerSocket != "" || cfg.ServerPort > 0 {
+		return nil
+	}
+	portFile := filepath.Join(serverDir, doltserver.PortFileName)
+	portFileState := "no usable port"
+	if _, err := os.Stat(portFile); os.IsNotExist(err) {
+		portFileState = "missing"
+	}
+
+	var b strings.Builder
+	b.WriteString("None of these port sources has a value:\n")
+	for i, label := range doltserver.PortSourceLabels() {
+		fmt.Fprintf(&b, "  %d. %s", i+1, label)
+		if strings.Contains(label, doltserver.PortFileName) {
+			fmt.Fprintf(&b, ": %s (%s)", portFile, portFileState)
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
+
+	// The remedy paragraph is the one an endpoint with no port gives
+	// (doltserver.Endpoint.UnresolvedAdvice).
+	b.WriteString(doltserver.UnresolvedPortRemedy(cfg.ServerHost, portFile,
+		doltserver.IsAutoStartDisabled(), !cfg.AutoStart))
+	return fmt.Errorf("%w for %s\n\n%s", ErrUnresolvedServerPort, beadsDir, b.String())
+}
+
+// externallyManagedPortHint is the advice for an unreachable TCP endpoint on
+// this machine whose port is named by a setting that declares its server
+// externally managed (doltserver.ExternalPortSetting), or "" for any other
+// endpoint, which keeps its own advice. addr is the endpoint that was dialed.
+func externallyManagedPortHint(cfg *Config, beadsDir, addr string) string {
+	if cfg.ServerSocket != "" || isExternalServerHost(cfg.ServerHost) {
+		return ""
+	}
+	decl := doltserver.ExternalPortSetting(beadsDir, cfg.ServerPortSource, cfg.ServerPort)
+	if decl.NamesEndpoint && cfg.OpenedByInit && cfg.ServerPortSource == doltserver.PortSourceCallerExplicit {
+		// bd init's only caller-explicit port is its --server-port flag,
+		// which it promotes into BEADS_DOLT_SERVER_PORT: name what was typed.
+		decl.Setting = "--server-port"
+	}
+	return decl.Advice(addr)
+}
+
+// autoStartRedialError explains newServerMode's failed dial of the server
+// auto-start returned at addr: one it started (startedByUs), or a tracked one
+// it adopted, which it may not have been able to verify (GH#7214). A dial
+// refused by local policy says nothing about the server, so its log would not
+// explain it either.
+func autoStartRedialError(addr string, dialErr error, startedByUs bool, logPath string) error {
+	what := "Dolt server unreachable"
+	if startedByUs {
+		what = "Dolt server auto-started but still unreachable"
+	}
+	var advice string
+	switch {
+	case isLocalDialRefusal(dialErr):
+		advice = fmt.Sprintf("A local policy (a sandbox or firewall) refused the connection, so the server may be healthy.\n"+
+			"Allow bd to connect to %s, or run bd outside the sandbox", remedy.PrintedValue(addr))
+	case startedByUs:
+		advice = "Check logs: " + logPath
+	default:
+		advice = "Check logs: " + logPath + "\n" +
+			"If the recorded server is gone, clear its state: bd dolt stop"
+	}
+	return fmt.Errorf("%s at %s: %w\n\n%s", what, remedy.PrintedValue(addr), remedy.PrintedError(dialErr), advice)
+}
+
+// persistResolvedPortFile records the port a successful local open reached in
+// bd's port file. It writes no pid file, so the record does not make the
+// server bd's own: doltserver.ExternalPortSetting still names the setting
+// that declared the port when a later open finds the server down. Only a
+// server at a host bd runs its server at (configfile.BdRunsServerAt) gets a
+// record: the port file names a port on 127.0.0.1, where bd's own server
+// listens, and doltserver.DefaultConfig ignores it for any other host.
 func persistResolvedPortFile(cfg *Config, beadsDir string) error {
-	if cfg.DisableAutoStart || !shouldPersistResolvedPortFile() {
+	if cfg.DisableAutoStart || !shouldPersistResolvedPortFile() || !configfile.BdRunsServerAt(cfg.ServerHost) {
 		return nil
 	}
 	return ensureResolvedPortFile(beadsDir, cfg.ServerPort)
@@ -2311,8 +2869,9 @@ func (s *DoltStore) verifyProjectIdentity(ctx context.Context, beadsDir string, 
 		return nil // can't verify without knowing beadsDir
 	}
 
-	// Load local project ID from metadata.json
-	metaCfg, err := configfile.Load(beadsDir)
+	// Load local project ID from metadata.json. A read: LoadForDiscovery
+	// never migrates a legacy config.json, which a read-only open must not.
+	metaCfg, err := configfile.LoadForDiscovery(beadsDir)
 	if err != nil || metaCfg == nil {
 		return nil // no local config — skip verification
 	}
@@ -2385,7 +2944,8 @@ func (s *DoltStore) verifyGlobalProjectIdentity(ctx context.Context, beadsDir st
 		return nil
 	}
 
-	metaCfg, err := configfile.Load(beadsDir)
+	// A read, as in verifyProjectIdentity.
+	metaCfg, err := configfile.LoadForDiscovery(beadsDir)
 	if err != nil || metaCfg == nil {
 		return nil
 	}
@@ -2400,36 +2960,47 @@ func (s *DoltStore) verifyGlobalProjectIdentity(ctx context.Context, beadsDir st
 	}
 
 	if expectedID != dbID {
-		return fmt.Errorf(
-			"GLOBAL PROJECT IDENTITY MISMATCH — refusing to connect\n\n"+
-				"  Expected global project ID (metadata.json): %s\n"+
-				"  Database project ID:                        %s\n\n"+
-				expectedID, dbID)
+		return globalProjectIdentityMismatchError(expectedID, dbID)
 	}
 	return nil
 }
 
-// isLocalHost returns true if the host refers to the local machine.
-func isLocalHost(host string) bool {
-	switch host {
-	case "", "127.0.0.1", "localhost", "::1", "[::1]":
-		return true
-	}
-	return false
+// globalProjectIdentityMismatchError builds verifyGlobalProjectIdentity's
+// refusal when metadata.json's global_project_id and the beads_global
+// database's _project_id disagree. Both IDs are format arguments: neither is
+// part of the format string, so each prints on its own labeled line exactly
+// as stored, even when it holds a '%'.
+func globalProjectIdentityMismatchError(expectedID, dbID string) error {
+	return fmt.Errorf(
+		"GLOBAL PROJECT IDENTITY MISMATCH — refusing to connect\n\n"+
+			"  Expected global project ID (metadata.json): %s\n"+
+			"  Database project ID:                        %s",
+		expectedID, dbID)
 }
 
-// isExternalServerHost reports whether host names a remote server for the
-// purposes of connect-failure hints (GH#3518). Unlike isLocalHost it
-// normalizes case/whitespace and treats 0.0.0.0 as local, matching the
-// mode-inference classification in internal/configfile — the two must
-// agree or an unreachable local server gets external-server advice with
-// no "bd dolt start" recovery hint.
+// isExternalServerHost reports whether host names a server bd does not
+// manage, for the purposes of connect-failure hints (GH#3518): any host but
+// the one bd runs its own server at (doltserver.HostRunsBDServer, which is
+// configfile.BdRunsServerAt), so "bd dolt start" is advised exactly where bd
+// would auto-start.
 func isExternalServerHost(host string) bool {
-	switch strings.ToLower(strings.TrimSpace(host)) {
-	case "", "localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0":
-		return false
+	return !doltserver.HostRunsBDServer(host)
+}
+
+// createDatabaseRefusedError is the error for a CREATE DATABASE whose
+// connection the server refused after the open had already reached it. As
+// in the dial-failure hint, only a server bd can start gets `bd dolt start`;
+// an external one, or one at the IPv6 loopback, gets the reachability check.
+func createDatabaseRefusedError(cfg *Config, err error) error {
+	addr := doltutil.PrintedServerAddr(cfg.ServerHost, cfg.ServerPort)
+	err = remedy.PrintedError(err)
+	if isExternalServerHost(cfg.ServerHost) {
+		return fmt.Errorf("failed to connect to Dolt server at %s: %w\n\n"+
+			"Verify the external server is running and reachable from this host:\n  %s",
+			addr, err, doltserver.ReachabilityCheck(cfg.ServerHost, cfg.ServerPort))
 	}
-	return true
+	return fmt.Errorf("failed to connect to Dolt server at %s: %w\n\nThe Dolt server may not be running. Try:\n  bd dolt start    # Start a local server\n  gt dolt start    # If using an orchestrator",
+		addr, err)
 }
 
 // buildServerDSN constructs a MySQL DSN for connecting to a Dolt server.
@@ -2468,10 +3039,10 @@ func buildServerDSN(cfg *Config, database string) string {
 // and executes the given query. Push/pull operations can exceed the default
 // readTimeout when the server performs network I/O to git remotes.
 //
-// The query is wrapped in an explicit transaction (BEGIN/COMMIT) so that
-// DOLT_PULL merge operations succeed even when the server runs with
-// autocommit=1. Without this, Dolt rejects merges under autocommit because
-// it cannot expose conflict-resolution tables to the caller.
+// The query is wrapped in an explicit transaction (BEGIN/COMMIT). That was
+// added for DOLT_PULL merges, which Dolt rejects under autocommit=1 because it
+// cannot expose conflict-resolution tables to the caller; no pull runs here
+// now (bd-e2q8zs: pulls fetch and then merge the tracking ref).
 //
 // Audited for be-b0am's fresh-connection branch hazard: safe — but the two
 // callers are safe for different reasons, so the annotation names both.
@@ -2481,6 +3052,10 @@ func buildServerDSN(cfg *Config, database string) string {
 // GetRefSpecs), which are remote config rather than session state, and a
 // fetch writes only remote-tracking refs, never the working branch. Neither
 // depends on this fresh connection's default checkout.
+//
+// The statement's error is redacted (doltremote.RedactError): Dolt's transfer
+// procedures quote the stored remote URL, credentials included, in their
+// errors, which reach the terminal and agent transcripts.
 func (s *DoltStore) execWithLongTimeout(ctx context.Context, query string, args ...any) error {
 	cfg, err := mysql.ParseDSN(s.connStr)
 	if err != nil {
@@ -2499,7 +3074,7 @@ func (s *DoltStore) execWithLongTimeout(ctx context.Context, query string, args 
 	}
 	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 		_ = tx.Rollback()
-		return err
+		return doltremote.RedactError(err)
 	}
 	return tx.Commit()
 }
@@ -2512,6 +3087,8 @@ func (s *DoltStore) execWithLongTimeout(ctx context.Context, query string, args 
 // Audited for be-b0am's fresh-connection branch hazard: safe. Every caller
 // passes s.branch explicitly as a CALL DOLT_PUSH(...) arg, so this fresh
 // connection's default checkout never matters.
+//
+// The statement's error is redacted as in execWithLongTimeout.
 func (s *DoltStore) execWithLongTimeoutNoTx(ctx context.Context, query string, args ...any) error {
 	db, err := s.oneShotConn(5 * time.Minute)
 	if err != nil {
@@ -2519,7 +3096,7 @@ func (s *DoltStore) execWithLongTimeoutNoTx(ctx context.Context, query string, a
 	}
 	defer db.Close()
 	_, err = db.ExecContext(ctx, query, args...)
-	return err
+	return doltremote.RedactError(err)
 }
 
 // oneShotConn opens a one-shot connection with the given read deadline
@@ -2641,6 +3218,32 @@ func assertGatewaySessionDatabase(ctx context.Context, db *sql.DB, want string) 
 	}
 }
 
+// requireServerDoltVersion refuses a dolt sql-server older than
+// doltversion.RequiredMin, before bd reads or writes anything through q.
+// It is one SELECT dolt_version() on the connection the open already made.
+// Every server-mode open reaches it, whether bd started the server
+// (auto-start, bd dolt start, shared server) or something else did
+// (external host, BEADS_DOLT_SERVER_PORT, gateway).
+//
+// A version that cannot be determined is not refused (see
+// doltversion.CheckServer): the query failing, which a gateway that does
+// not pass dolt_version() through would do, or an answer that is not a
+// version. It is logged under BD_DEBUG and the open goes on, so a failed
+// connection still reports itself through the open's own errors.
+func requireServerDoltVersion(ctx context.Context, q doltversion.RowQuerier, cfg *Config) error {
+	addr := doltutil.ServerAddr(cfg.ServerHost, cfg.ServerPort)
+	if cfg.ServerSocket != "" {
+		addr = cfg.ServerSocket
+	}
+	// The address is configuration, so it is printed the way every other
+	// remedy value is (internal/remedy).
+	subject := "dolt sql-server at " + remedy.PrintedValue(addr)
+	return doltversion.CheckServer(ctx, q, subject, func(err error) {
+		debug.Logf("dolt: could not determine the version of %s; not checking it against the required minimum %s: %v\n",
+			subject, doltversion.RequiredMin, remedy.PrintedError(err))
+	})
+}
+
 // openServerConnection connects to (and if needed creates) the target database
 // on a dolt sql-server via MySQL protocol. See serverConnFacts for what the
 // returned facts mean and why they are not a single bool.
@@ -2675,8 +3278,11 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, se
 	// caller.
 	if cfg.Gateway {
 		if err := db.PingContext(ctx); err != nil {
-			return nil, "", serverConnFacts{}, fmt.Errorf("failed to connect to gateway server %s:%d (database %q): %w",
-				cfg.ServerHost, cfg.ServerPort, cfg.Database, err)
+			return nil, "", serverConnFacts{}, fmt.Errorf("failed to connect to gateway server %s (database %q): %w",
+				doltutil.PrintedServerAddr(cfg.ServerHost, cfg.ServerPort), cfg.Database, remedy.PrintedError(err))
+		}
+		if err := requireServerDoltVersion(ctx, db, cfg); err != nil {
+			return nil, "", serverConnFacts{}, err
 		}
 		// A connect proves the gateway accepted the credential, NOT that it
 		// honored the database name. A gateway scopes connections by
@@ -2738,6 +3344,9 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, se
 	// signal, databaseNotFoundError, and every error message callers match.
 	pingErr := db.PingContext(ctx)
 	if pingErr == nil {
+		if err := requireServerDoltVersion(ctx, db, cfg); err != nil {
+			return nil, "", serverConnFacts{}, err
+		}
 		connReady = true
 		return db, connStr, serverConnFacts{alreadyExisted: true}, nil
 	}
@@ -2748,8 +3357,8 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, se
 	// is back to burning the extra MySQL session this path exists to remove,
 	// with nothing to say so. Same reasoning as the convergence probe in
 	// internal/storage/schema/lock.go.
-	debug.Logf("dolt: direct-connect fast path unavailable for %q on %s:%d, using the no-database init connection: %v\n",
-		cfg.Database, cfg.ServerHost, cfg.ServerPort, pingErr)
+	debug.Logf("dolt: direct-connect fast path unavailable for %q on %s, using the no-database init connection: %v\n",
+		cfg.Database, doltutil.ServerAddr(cfg.ServerHost, cfg.ServerPort), pingErr)
 
 	// Ensure database exists (may need to create it)
 	// First connect without database to create it
@@ -2759,6 +3368,11 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, se
 		return nil, "", serverConnFacts{}, fmt.Errorf("failed to open init connection: %w", err)
 	}
 	defer func() { _ = initDB.Close() }()
+
+	// Refuse an old server before this connection can CREATE DATABASE on it.
+	if err := requireServerDoltVersion(ctx, initDB, cfg); err != nil {
+		return nil, "", serverConnFacts{}, err
+	}
 
 	// Check if the database already exists before deciding whether to create it.
 	// This prevents the shadow database bug: without CreateIfMissing, connecting
@@ -2774,8 +3388,8 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, se
 	// match unrelated databases with LIKE.
 	dbExists, checkErr := databaseExistsOnServer(ctx, initDB, cfg.Database)
 	if checkErr != nil {
-		return nil, "", serverConnFacts{}, fmt.Errorf("failed to check if database %q exists on server %s:%d: %w",
-			cfg.Database, cfg.ServerHost, cfg.ServerPort, checkErr)
+		return nil, "", serverConnFacts{}, fmt.Errorf("failed to check if database %q exists on server %s: %w",
+			cfg.Database, doltutil.PrintedServerAddr(cfg.ServerHost, cfg.ServerPort), remedy.PrintedError(checkErr))
 	}
 
 	// created reports whether THIS call's CREATE DATABASE won the race and
@@ -2807,8 +3421,7 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, se
 			if !strings.Contains(errLower, "database exists") && !strings.Contains(errLower, "1007") {
 				// Check for connection refused - server likely not running
 				if strings.Contains(errLower, "connection refused") || strings.Contains(errLower, "connect: connection refused") {
-					return nil, "", serverConnFacts{}, fmt.Errorf("failed to connect to Dolt server at %s:%d: %w\n\nThe Dolt server may not be running. Try:\n  bd dolt start    # Start a local server\n  gt dolt start    # If using an orchestrator",
-						cfg.ServerHost, cfg.ServerPort, err)
+					return nil, "", serverConnFacts{}, createDatabaseRefusedError(cfg, err)
 				}
 				return nil, "", serverConnFacts{}, fmt.Errorf("failed to create database: %w", err)
 			}
@@ -2874,12 +3487,20 @@ func serverEndpointIdentity(cfg *Config) string {
 	if cfg.ServerSocket != "" {
 		return "unix:" + cfg.ServerSocket
 	}
-	return "tcp:" + net.JoinHostPort(cfg.ServerHost, strconv.Itoa(cfg.ServerPort))
+	return "tcp:" + doltutil.ServerAddr(cfg.ServerHost, cfg.ServerPort)
 }
 
 // databaseExistsOnServer checks if a database with the exact given name exists
 // on the Dolt server. Uses SHOW DATABASES + iterate instead of SHOW DATABASES LIKE
 // to avoid LIKE wildcard issues with underscores in database names.
+//
+// COUPLED MIRROR: internal/testutil.databaseVisibleNow is a deliberate copy of
+// this predicate (testutil cannot import this package without a cycle), and
+// SetupSharedTestDB's visibility wait polls that copy so that once the fixture
+// observes the database, this check — the one dolt.New() depends on — observes
+// it too. Changing the predicate here (information_schema, name normalization,
+// …) without updating the mirror silently reintroduces the be-s9d race, and no
+// test pins the equivalence.
 func databaseExistsOnServer(ctx context.Context, db *sql.DB, name string) (bool, error) {
 	rows, err := db.QueryContext(ctx, "SHOW DATABASES")
 	if err != nil {
@@ -3066,10 +3687,13 @@ func sharedServerDatabase(cfg *Config) bool {
 	if cfg == nil || cfg.BeadsDir == "" {
 		return true
 	}
-	// Somebody else's server by construction: a host that is not this
-	// machine, a TLS endpoint (Hosted Dolt), or a unix socket — bd's own
-	// auto-start only ever creates a local TCP listener.
-	if !isLocalHost(cfg.ServerHost) || cfg.ServerTLS || cfg.ServerSocket != "" {
+	// Somebody else's server by construction: a host bd does not run its
+	// server at (configfile.BdRunsServerAt: another machine, the IPv6
+	// loopback, another loopback address), a TLS endpoint (Hosted Dolt), or
+	// a unix socket — bd's own auto-start only ever creates a TCP listener on
+	// 127.0.0.1. So state files a server bd started there left behind prove
+	// nothing about a server at [::1], even on the same port.
+	if !configfile.BdRunsServerAt(cfg.ServerHost) || cfg.ServerTLS || cfg.ServerSocket != "" {
 		return true
 	}
 	// The one shared topology that is otherwise indistinguishable from an
@@ -3088,12 +3712,22 @@ func sharedServerDatabase(cfg *Config) bool {
 	if !doltserver.ManagesLiveServerOnPort(cfg.BeadsDir, cfg.ServerPort) {
 		return true
 	}
-	// Proof of a bd-managed server does not override an explicit declaration
-	// that the lifecycle is external (metadata dolt_server_port, host
-	// inference, BEADS_DOLT_SERVER_MODE). Keeping this last means the change
-	// above can only ever ADD shared classifications to what #5920/#6048
-	// already gated, never remove one.
-	return doltserver.ResolveServerMode(cfg.BeadsDir) != doltserver.ServerModeOwned
+	// Proof of a bd-managed server does not override a genuine external
+	// declaration (metadata dolt_server_port, host inference,
+	// BEADS_DOLT_SERVER_MODE, IsSharedServerMode). Keeping this last means
+	// the change above can only ever ADD shared classifications to what
+	// #5920/#6048 already gated, never remove one.
+	//
+	// Uses ResolveServerModeIgnoringPortEnv, not the public ResolveServerMode
+	// (GH#6169): BEADS_DOLT_SERVER_PORT/BEADS_DOLT_PORT are also set
+	// ambiently on multi-agent rigs purely to route bd's own client
+	// connections to a shared coordination server, and say nothing about who
+	// owns cfg.BeadsDir's own server -- that question was just answered,
+	// above, by proof rather than inference. Honoring the ambient port env
+	// var here would let it override that proof and reclassify bd's own
+	// just-started server as shared, so a normal `bd init`/first-write on a
+	// multi-agent rig would refuse to migrate its own workspace database.
+	return doltserver.ResolveServerModeIgnoringPortEnv(cfg.BeadsDir) != doltserver.ServerModeOwned
 }
 
 func (s *DoltStore) initSchema(ctx context.Context, bootstrapHeal *schema.FreshBootstrapHealCapability) (int, error) {
@@ -3239,6 +3873,11 @@ func (s *DoltStore) Close() error {
 	s.closed.Store(true)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Untrack before db.Close: untrackPool keeps the pool's stats for the
+	// final export, and db.Close drops the idle connections.
+	if s.untrackPool != nil {
+		s.untrackPool()
+	}
 	var err error
 	if s.db != nil {
 		if cerr := doltutil.CloseWithTimeout("db", s.db.Close); cerr != nil {
@@ -3284,6 +3923,19 @@ func (s *DoltStore) IsReadOnly() bool {
 	return s.readOnly
 }
 
+// CreatedDatabase reports whether opening this store created its database
+// on the server: its bare CREATE DATABASE won the server's arbitration
+// (serverConnFacts.created), so the database holds nothing bd did not just
+// put there. It is false for every open that found the database on the
+// server, by connecting to it, by SHOW DATABASES, or by losing the CREATE
+// DATABASE race to another open, and for a gateway server, on which bd never
+// creates a database. bd doctor --fix's Database repair imports issues.jsonl
+// into a database its own open created, and into one a local directory's
+// absence merely suggested was missing only when that has no issues.
+func (s *DoltStore) CreatedDatabase() bool {
+	return s.createdDatabase
+}
+
 // CLIDir returns the directory for dolt CLI operations (push/pull/remote/fetch).
 // The actual database lives in a subdirectory of Path() named after the database.
 // Use this instead of Path() when running dolt CLI commands that target the
@@ -3313,6 +3965,18 @@ func (s *DoltStore) ActiveDatabaseSize(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("measure active database directory %q: %w", s.localActiveDatabaseDir, err)
 	}
 	return size, nil
+}
+
+// ExternalGCPath uses the local authority captured when this store was opened.
+// Later environment changes or stale client-local paths cannot grant it.
+func (s *DoltStore) ExternalGCPath(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if s.localActiveDatabaseDir == "" {
+		return "", &storage.ErrUnsupported{Op: "ExternalGCPath", Backend: "dolt-server"}
+	}
+	return s.localActiveDatabaseDir, nil
 }
 
 // DoltGC runs Dolt's default, generational garbage collection to reclaim disk
@@ -3374,13 +4038,13 @@ func (s *DoltStore) Flatten(ctx context.Context) error {
 
 // Compact squashes old Dolt commits while preserving recent ones.
 // Pins a single connection for session-scoped stored procedures.
-func (s *DoltStore) Compact(ctx context.Context, initialHash, boundaryHash string, oldCommits int, recentHashes []string) error {
+func (s *DoltStore) Compact(ctx context.Context, initialHash, boundaryHash, headHash string, oldCommits int, recentHashes []string) error {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire connection for compact: %w", err)
 	}
 	defer conn.Close()
-	return versioncontrolops.Compact(ctx, conn, initialHash, boundaryHash, oldCommits, recentHashes)
+	return versioncontrolops.Compact(ctx, conn, initialHash, boundaryHash, headHash, oldCommits, recentHashes)
 }
 
 // UnderlyingDB returns the underlying *sql.DB connection
@@ -3637,25 +4301,9 @@ func (s *DoltStore) concludeOpenMerge(ctx context.Context, conn *sql.Conn, messa
 // config's primary key is `key`, so dolt_diff exposes to_key/from_key; an add or
 // delete leaves one side NULL, so COALESCE picks whichever key the change carries.
 func (s *DoltStore) assertDirtyConfigUserKVOnly(ctx context.Context, conn *sql.Conn) error {
-	rows, err := conn.QueryContext(ctx,
-		"SELECT COALESCE(to_key, from_key) FROM dolt_diff('HEAD', 'WORKING', 'config')")
+	unsafe, err := dirtyInternalConfigKeys(ctx, conn, false)
 	if err != nil {
 		return fmt.Errorf("inspect dirty config before pull: %w", err)
-	}
-	defer rows.Close()
-
-	var unsafe []string
-	for rows.Next() {
-		var key sql.NullString
-		if err := rows.Scan(&key); err != nil {
-			return fmt.Errorf("scan dirty config key: %w", err)
-		}
-		if key.Valid && !strings.HasPrefix(key.String, kvkeys.Prefix) {
-			unsafe = append(unsafe, key.String)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate dirty config diff: %w", err)
 	}
 	if len(unsafe) > 0 {
 		return fmt.Errorf("refusing to auto-commit %d dirty internal config key(s) before pull: %s; "+
@@ -3663,6 +4311,38 @@ func (s *DoltStore) assertDirtyConfigUserKVOnly(ctx context.Context, conn *sql.C
 			"these explicitly with `bd dolt commit` first", len(unsafe), strings.Join(unsafe, ", "), kvkeys.Prefix)
 	}
 	return nil
+}
+
+// dirtyInternalConfigKeys lists the config keys that differ from HEAD and are
+// not user KV data (outside the kv.* namespace): in the working set, or with
+// staged set, in what DOLT_ADD has staged, which is what the next DOLT_COMMIT
+// publishes. It is the screen shared by assertDirtyConfigUserKVOnly and
+// CommitConfigUserKVOnly.
+func dirtyInternalConfigKeys(ctx context.Context, conn *sql.Conn, staged bool) ([]string, error) {
+	query := "SELECT COALESCE(to_key, from_key) FROM dolt_diff('HEAD', 'WORKING', 'config')"
+	if staged {
+		query = "SELECT COALESCE(to_key, from_key) FROM dolt_diff('HEAD', 'STAGED', 'config')"
+	}
+	rows, err := conn.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var unsafe []string
+	for rows.Next() {
+		var key sql.NullString
+		if err := rows.Scan(&key); err != nil {
+			return nil, fmt.Errorf("scan dirty config key: %w", err)
+		}
+		if key.Valid && !strings.HasPrefix(key.String, kvkeys.Prefix) {
+			unsafe = append(unsafe, key.String)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate dirty config diff: %w", err)
+	}
+	return unsafe, nil
 }
 
 // CommitWithConfig creates a Dolt commit that includes the config table.
@@ -3730,19 +4410,101 @@ func (s *DoltStore) CommitAll(ctx context.Context, message string) (bool, error)
 	return committed, err
 }
 
+// CommitConfigOnly commits the config table (GH#4078). Use after
+// intentional config writes (bd config set) in server mode,
+// where generic Commit() excludes config (GH#2455) and nothing else ever
+// commits it. Scoped staging means a concurrent operation's dirty tables
+// are never swept — the same guarantee that motivated GH#2455.
+//
+// The lookup tables SetConfig projects from config (custom_statuses,
+// custom_types) are staged with it: SetConfig writes them in the same
+// transaction as the row, and a commit holding one without the other is the
+// split that projection exists to prevent. They are written only from config,
+// so staging them sweeps no other kind of work.
+//
+// For the same reason the list is never widened with the versioned-history
+// tables: a config write mints no version rows, and that list's `issues` would
+// sweep a concurrent issue mutation into this commit.
+func (s *DoltStore) CommitConfigOnly(ctx context.Context, message string) error {
+	tables := append([]string{"config"}, issueops.ConfigProjectionTables()...)
+	return s.stageAndCommit(ctx, tables, message, stageOptions{configPlane: true})
+}
+
+// CommitConfigUserKVOnly is the scoped commit for a write of this clone's own
+// user KV data (bd remember, bd forget). It stages the config table alone, and
+// since DOLT_ADD stages that whole table it applies the pre-pull screen: when
+// any dirty config row is outside kv.*, it commits nothing and returns a
+// *storage.ConfigCommitRefusedError naming those keys, rather than sweep a
+// concurrent writer's internal key (issue_prefix above all) into a memory's
+// commit — the row-level form of the GH#2455 hazard.
+//
+// The screen runs twice on the connection that stages and commits. Sessions on
+// one branch share the working set, so a key another session writes after the
+// first screen is still staged by DOLT_ADD; the second screen reads what was
+// actually staged and, on a refusal, unstages config again (unstageRefused).
+// What it cannot see is another commit path's own DOLT_ADD of config landing
+// between the second screen and DOLT_COMMIT: that change is absorbed into this
+// commit, the same absorption doltAddAndCommit documents for every scoped
+// commit, and it is an intentional config commit, not a stale key.
+func (s *DoltStore) CommitConfigUserKVOnly(ctx context.Context, message string) error {
+	return s.stageAndCommit(ctx, []string{"config"}, message,
+		stageOptions{configPlane: true, screen: refuseInternalConfigKeys})
+}
+
+// refuseInternalConfigKeys is CommitConfigUserKVOnly's screen: it fails with a
+// *storage.ConfigCommitRefusedError when a config row outside kv.* differs from
+// HEAD in the working set (before staging) or in the staged set (after).
+func refuseInternalConfigKeys(ctx context.Context, conn *sql.Conn, staged bool) error {
+	unsafe, err := dirtyInternalConfigKeys(ctx, conn, staged)
+	if err != nil {
+		if staged {
+			return fmt.Errorf("inspect staged config: %w", err)
+		}
+		return fmt.Errorf("inspect dirty config: %w", err)
+	}
+	if len(unsafe) > 0 {
+		return &storage.ConfigCommitRefusedError{Keys: unsafe}
+	}
+	return nil
+}
+
+// stageOptions are what the scoped commits ask of stageAndCommit beyond
+// doltAddAndCommit's plain stage-and-commit. The zero value is
+// doltAddAndCommit.
+type stageOptions struct {
+	// configPlane stages the list exactly as given. Only the config-table
+	// commits set it (see CommitConfigOnly); every other list goes through
+	// withVersionedHistoryTables.
+	configPlane bool
+	// screen, when set, vets the commit on its own pinned connection: once
+	// against the working set before DOLT_ADD, and once against the staged
+	// set after it. A refusal before staging leaves nothing staged; a refusal
+	// after it unstages the tables again (unstageRefused).
+	screen func(ctx context.Context, conn *sql.Conn, staged bool) error
+}
+
+// afterStageCommitScreen runs between stageAndCommit's working-set screen and
+// its DOLT_ADD. It is a no-op outside tests, which use it to write in exactly
+// the window the staged-set screen exists for.
+var afterStageCommitScreen = func() {}
+
 // doltAddAndCommit stages the specified tables and commits on a pinned
 // connection. This prevents DOLT_COMMIT('-Am') from sweeping up stale
 // working set changes from concurrent operations (GH#2455). Every caller has
 // already committed its SQL mutation, so any publication failure here has an
 // indeterminate durable outcome and must not be replayed.
 func (s *DoltStore) doltAddAndCommit(ctx context.Context, tables []string, commitMsg string) error {
+	return s.stageAndCommit(ctx, tables, commitMsg, stageOptions{})
+}
+
+// stageAndCommit is doltAddAndCommit with the scoped commits' options.
+func (s *DoltStore) stageAndCommit(ctx context.Context, tables []string, commitMsg string, opts stageOptions) error {
 	// Batch/off auto-commit (bd-4wamg): leave the writes in the working set
 	// for a later explicit commit point (bd dolt commit / CommitPending),
 	// matching doltAddAndCommitInTx.
 	if issueops.VersionCommitDeferred(ctx) {
 		return nil
 	}
-	tables = s.withVersionedHistoryTables(tables)
 	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		conn, err := s.db.Conn(ctx)
 		if err != nil {
@@ -3751,10 +4513,28 @@ func (s *DoltStore) doltAddAndCommit(ctx context.Context, tables []string, commi
 		}
 		defer conn.Close()
 
+		tables := tables
+		if !opts.configPlane {
+			tables = s.withVersionedHistoryTables(ctx, conn, tables)
+		}
+
+		if opts.screen != nil {
+			if err := opts.screen(ctx, conn, false); err != nil {
+				return err
+			}
+			afterStageCommitScreen()
+		}
+
 		for _, table := range tables {
 			if err := schema.DrainCall(ctx, conn, "CALL DOLT_ADD(?)", table); err != nil {
 				return s.recordDoltPublicationFailure(ctx,
 					fmt.Errorf("dolt add %s after SQL mutation: %w: %w", table, err, ErrCommitIndeterminate))
+			}
+		}
+
+		if opts.screen != nil {
+			if err := opts.screen(ctx, conn, true); err != nil {
+				return unstageRefused(ctx, conn, tables, err)
 			}
 		}
 
@@ -3794,6 +4574,25 @@ func (s *DoltStore) doltAddAndCommit(ctx context.Context, tables []string, commi
 		}
 		return nil
 	})
+}
+
+// unstageRefused undoes stageAndCommit's DOLT_ADD after its screen refused the
+// staged set, so the refused rows are not left staged for whichever commit
+// runs next on the branch: every DOLT_COMMIT publishes the whole staged set.
+// DOLT_RESET of a table only unstages it; its working-set changes stay. When
+// the reset itself fails, both errors are returned. The reset is table-wide,
+// so a concurrent config commit that staged config in the same window loses
+// that staging too and publishes without those rows; they stay in the working
+// set for the next config commit, which is the lesser hazard next to leaving
+// a refused internal key staged for an unrelated commit to publish.
+func unstageRefused(ctx context.Context, conn *sql.Conn, tables []string, refusal error) error {
+	for _, table := range tables {
+		if err := schema.DrainCall(ctx, conn, "CALL DOLT_RESET(?)", table); err != nil {
+			return fmt.Errorf("%w; unstaging %s afterwards also failed, so it stays staged for the next commit: %w",
+				refusal, table, err)
+		}
+	}
+	return refusal
 }
 
 func (s *DoltStore) wrapDoltPublicationFailure(ctx context.Context, op string, err error) error {
@@ -3994,22 +4793,118 @@ func persistedCLIRemote(cliDir, remote string) (storage.RemoteInfo, bool) {
 	return storage.RemoteInfo{}, false
 }
 
-// hasCLIDatabase reports whether CLIDir points at an initialized Dolt database.
+// hasCLIDatabase reports whether CLIDir points at an initialized Dolt database
+// proven to be the one the store's server serves (cliDirServesServer).
 // SQL-capable routes use this as a CLI availability check and fall back to SQL
-// when an external-server client has only a placeholder local directory.
+// when an external-server client has only a placeholder local directory, or a
+// database there that is not its server's.
 func (s *DoltStore) hasCLIDatabase() bool {
 	cliDir := s.CLIDir()
-	if cliDir == "" {
+	if cliDir == "" || !s.cliDirServesServer() {
 		return false
 	}
 	info, err := os.Stat(filepath.Join(cliDir, ".dolt"))
 	return err == nil && info.IsDir()
 }
 
+// cliDirServesServer reports whether CLIDir is proven to be the database
+// this store's server serves, so that a dolt CLI subprocess run there (push,
+// pull, fetch, and the fsck before a push) moves that server's data, and the
+// remotes its .dolt/repo_state.json records are that server's
+// (PersistedRemoteInfos). Three things must hold.
+//
+// First, the server must be one bd may run for the workspace, as every
+// decision that counts the workspace's Dolt root as a server's data requires
+// (resolveLocalActiveDatabaseDir, sharedServerDatabase): a plain TCP server
+// at a host bd runs its server at (configfile.BdRunsServerAt), and not a
+// gateway, a TLS endpoint or a unix socket, none of which bd's own server
+// ever is. The dolt CLI hands a command in a served directory to its server
+// through localhost, so only such a server can take it.
+//
+// Second, a live server on the dialed port must serve CLIDir, by the dolt
+// CLI's own test: a dolt process holds the database's lock, and the first
+// sql-server.info the dolt CLI finds for it names that port and a live
+// process (doltserver.ServesDatabaseDirOnPort). Without that the dolt CLI
+// works on CLIDir's files directly, and a database there is at best a copy,
+// such as a clone bd init left in .beads/dolt (it still does for a gateway),
+// the database from when bd ran the workspace's server, or a copy of a
+// served directory that carries its server's info file, while the server bd
+// dials, a container or another data directory on 127.0.0.1, holds the real
+// data: pushing the copy would report success without the server's commits,
+// a pull into it would never reach the server, and its remotes are not the
+// server's. A store opened without a Config has no port, so no proof.
+//
+// Third, a port BEADS_DOLT_SERVER_PORT or the legacy BEADS_DOLT_PORT names
+// may be any server, such as a container or a tunnel on 127.0.0.1, so it
+// counts only with the proof sharedServerDatabase accepts (GH#6169): bd's
+// state files for the workspace's server name a live server on that very port
+// (doltserver.ManagesLiveServerOnPort), as when a multi-agent rig names the
+// server bd started in those variables. A wrong answer there only moves a SQL
+// connection; here it runs the dolt CLI in CLIDir, so the recorded process
+// must also be a dolt sql-server (doltserver.IsTrackedServerRunning): a live
+// PID the recorded server left behind, now another process's, is no proof.
+// That check runs ps, so it comes last. (resolveLocalActiveDatabaseDir, which
+// grants local garbage collection, refuses such a port even then.)
+func (s *DoltStore) cliDirServesServer() bool {
+	cfg := s.cfg
+	if cfg == nil {
+		cfg = &Config{}
+	}
+	if cfg.Gateway || cfg.ServerTLS || cfg.ServerSocket != "" || !configfile.BdRunsServerAt(cfg.ServerHost) {
+		return false
+	}
+	if !servesDatabaseDirOnPort(s.CLIDir(), cfg.ServerPort) {
+		return false
+	}
+	if os.Getenv("BEADS_DOLT_SERVER_PORT") == "" && os.Getenv("BEADS_DOLT_PORT") == "" {
+		return true
+	}
+	_, managed := s.ManagedServerDir()
+	return managed
+}
+
+// servesDatabaseDirOnPort is doltserver.ServesDatabaseDirOnPort. Declared as
+// a var (matching ensureRunningDetailed) so that a unit test of a route that
+// goes on to run the dolt CLI in the served directory can stand in for its
+// server: under a held lock a real dolt CLI hands every command to the
+// server, which the test does not run.
+var servesDatabaseDirOnPort = doltserver.ServesDatabaseDirOnPort
+
+// ManagedServerDir returns the directory of the server bd manages for this
+// store's workspace (doltserver.ResolveServerDir), and true, when the server
+// the store dials is that very server: a plain TCP server at a host bd runs
+// its server at (configfile.BdRunsServerAt), whose state files in that
+// directory name the dialed port and a live dolt sql-server
+// (doltserver.ManagesLiveServerOnPort, doltserver.IsTrackedServerRunning).
+// It is the proof cliDirServesServer requires of a port a port variable
+// names, and what a caller that would stop or restart the server through
+// doltserver needs, since a server that proof does not cover is one bd did
+// not start. The IsTrackedServerRunning check runs ps.
+func (s *DoltStore) ManagedServerDir() (string, bool) {
+	cfg := s.cfg
+	if cfg == nil || s.beadsDir == "" {
+		return "", false
+	}
+	if cfg.Gateway || cfg.ServerTLS || cfg.ServerSocket != "" || !configfile.BdRunsServerAt(cfg.ServerHost) {
+		return "", false
+	}
+	serverDir := doltserver.ResolveServerDir(s.beadsDir)
+	if !doltserver.ManagesLiveServerOnPort(serverDir, cfg.ServerPort) || !doltserver.IsTrackedServerRunning(serverDir) {
+		return "", false
+	}
+	return serverDir, true
+}
+
 // ensureMatchingCLIRemote materializes the local CLI remote needed before
 // subprocess push/pull/fetch routing. SQL remains the source of truth; the CLI
 // remote is only the local transport surface that dolt subprocesses read.
+//
+// It refuses a dolt on PATH older than doltversion.RequiredMin first
+// (requireCLIDoltBinary), since every caller has chosen the CLI route.
 func (s *DoltStore) ensureMatchingCLIRemote(remote, expectedURL, expectedRef string) error {
+	if err := requireCLIDoltBinary(); err != nil {
+		return err
+	}
 	if s.hasMatchingCLIRemote(remote, expectedURL, expectedRef) {
 		return nil
 	}
@@ -4029,11 +4924,47 @@ func (s *DoltStore) ensureMatchingCLIRemote(remote, expectedURL, expectedRef str
 	return nil
 }
 
-func (s *DoltStore) prepareDoltCLITransfer(ctx context.Context, remote string, creds *remoteCredentials, args ...string) (*exec.Cmd, context.Context, context.CancelFunc) {
+func (s *DoltStore) prepareDoltCLITransfer(ctx context.Context, remote string, creds *remoteCredentials, args ...string) (*exec.Cmd, context.Context, context.CancelFunc, error) {
 	return prepareDoltCLITransferCommand(ctx, s.CLIDir(), creds, s.isS3Remote(ctx, remote), args...)
 }
 
-func prepareDoltCLITransferCommand(ctx context.Context, cliDir string, creds *remoteCredentials, s3Remote bool, args ...string) (*exec.Cmd, context.Context, context.CancelFunc) {
+// requireCLIDoltBinary refuses the dolt binary on PATH that the CLI route
+// (git-protocol, credentialed, cloud-auth and local remotes) runs, when it
+// is older than doltversion.RequiredMin, like every other `dolt` bd runs.
+// When bd's own server holds the database, dolt hands the transfer to that
+// server; otherwise the binary's own engine runs it. The error is the one
+// Start gives (doltserver.RequireDoltBinaryVersion, memoized per binary, so
+// checking at several points of one route forks `dolt version` once). A
+// dolt that is not on PATH is left for the command itself to report, as
+// before.
+//
+// The route checks it as soon as it has chosen the CLI, before it runs
+// anything through the binary: ensureMatchingCLIRemote checks it before
+// `dolt remote` lists, adds or removes the CLI remote, the push routes
+// before prePushFSCK's `dolt fsck`, and prepareDoltCLITransferCommand before
+// the transfer itself. The local-remote route decides with a read-only
+// `dolt remote -v` (hasMatchingCLIRemote) before its first check.
+func requireCLIDoltBinary() error {
+	doltBin, err := exec.LookPath("dolt")
+	if err != nil {
+		return nil
+	}
+	return doltserver.RequireDoltBinaryVersion(doltBin)
+}
+
+// prepareDoltCLITransferCommand builds the `dolt push`/`pull`/`fetch` that
+// runs through the dolt binary on PATH: the route git-protocol,
+// credentialed, cloud-auth and local remotes take. It refuses that binary
+// when it is older than doltversion.RequiredMin, before the transfer runs
+// (see requireCLIDoltBinary).
+func prepareDoltCLITransferCommand(ctx context.Context, cliDir string, creds *remoteCredentials, s3Remote bool, args ...string) (*exec.Cmd, context.Context, context.CancelFunc, error) {
+	if err := requireCLIDoltBinary(); err != nil {
+		op := "dolt transfer"
+		if len(args) > 0 {
+			op = "dolt " + args[0]
+		}
+		return nil, nil, nil, fmt.Errorf("%s: %w", op, err)
+	}
 	ctx, cancel := withCLIExecTimeout(ctx)
 	if len(args) > 0 && creds != nil && creds.username != "" {
 		args = append([]string{args[0], "--user", creds.username}, args[1:]...)
@@ -4055,7 +4986,7 @@ func prepareDoltCLITransferCommand(ctx context.Context, cliDir string, creds *re
 		base = os.Environ()
 	}
 	cmd.Env = gittraceenv.ScrubEnv(base)
-	return cmd, ctx, cancel
+	return cmd, ctx, cancel, nil
 }
 
 // prepareCLIRouteForGitProtocol reports whether the SQL-visible remote uses
@@ -4094,7 +5025,7 @@ func (s *DoltStore) prepareCLIRouteForGitProtocol(ctx context.Context, remote st
 			continue
 		}
 		if !doltutil.IsGitProtocolURL(r.URL) {
-			return false, fmt.Errorf("remote %q (%s) is persisted on disk but not yet visible to this sql-server (GH#2118 cold start); retry shortly, or restart the dolt sql-server if it persists", remote, r.URL)
+			return false, fmt.Errorf("remote %q (%s) is persisted on disk but not yet visible to this sql-server (GH#2118 cold start); retry shortly, or restart the dolt sql-server if it persists", remote, remedy.PrintedValue(r.URL))
 		}
 		if r.Ref != "" {
 			// The proxied CLI refuses remote parameters, so a ref remote is
@@ -4102,13 +5033,16 @@ func (s *DoltStore) prepareCLIRouteForGitProtocol(ctx context.Context, remote st
 			// the served directory: a client-local state file proves nothing
 			// about an external server. The remedy names the procedure the
 			// server accepts (the proxied CLI in its directory would refuse
-			// the same --ref, and bd's own remote add finds the persisted
-			// remote and returns without a SQL add).
+			// the same --ref). The remote, URL and ref are named escaped
+			// (remedy.EscapedValue), as the statement that
+			// re-adds them is when one of them holds a character a shell
+			// acts on: a $( ) or a backtick in a persisted URL is not live on
+			// the line a user copies the remedy from.
 			if s.localActiveDatabaseDir == "" || s.localActiveDatabaseDir != s.CLIDir() {
-				return false, fmt.Errorf("remote %q (%s on %s) is persisted on disk but not visible to this sql-server (GH#2118 cold start), and this bd does not own the server's data directory; re-add it on that server with: %s", remote, r.URL, r.Ref, coldStartReaddRemedy(remote, r.URL, r.Ref))
+				return false, fmt.Errorf("remote %s (%s on %s) is persisted on disk but not visible to this sql-server (GH#2118 cold start), and this bd does not own the server's data directory; re-add it on that server %s", remedy.EscapedValue(remote), remedy.EscapedValue(r.URL), remedy.EscapedValue(r.Ref), coldStartReaddRemedy(runtime.GOOS, remote, r.URL, r.Ref))
 			}
 			if err := versioncontrolops.AddRemote(ctx, s.db, remote, r.URL, r.Ref); err != nil && !strings.Contains(strings.ToLower(err.Error()), "already exists") {
-				return false, fmt.Errorf("remote %q (%s on %s) is persisted on disk but not visible to this sql-server (GH#2118 cold start), and re-adding it over SQL failed: %w", remote, r.URL, r.Ref, err)
+				return false, fmt.Errorf("remote %q (%s on %s) is persisted on disk but not visible to this sql-server (GH#2118 cold start), and re-adding it over SQL failed: %w", remote, remedy.PrintedValue(r.URL), remedy.PrintedValue(r.Ref), err)
 			}
 		}
 		if err := s.ensureMatchingCLIRemote(remote, r.URL, r.Ref); err != nil {
@@ -4119,17 +5053,61 @@ func (s *DoltStore) prepareCLIRouteForGitProtocol(ctx context.Context, remote st
 	return false, nil
 }
 
-// coldStartReaddRemedy is the command an operator runs to register a ref
-// remote on a sql-server this bd does not own: bd sql with a DOLT_REMOTE call.
-// The values are user data that lands in a message meant to be pasted into a
-// shell, so the SQL literals are double-quoted with their escapes and the
-// whole statement is single-quoted for the shell, which keeps an apostrophe,
-// a dollar sign, or a backtick in a URL from changing the command.
-func coldStartReaddRemedy(remote, url, ref string) string {
+// coldStartReaddRemedy completes the refusal of a ref remote on a sql-server
+// this bd does not own ("re-add it on that server ..."): the DOLT_REMOTE call
+// that registers it there. The values are repository data (the persisted
+// remote's URL and ref), so the SQL literals are double-quoted with their
+// escapes, and the statement goes into a paste-ready bd sql command only as
+// the remedy printer quotes it for the shell on goos
+// (remedy.ShellQuotedFor): single-quoted on POSIX, which keeps a dollar sign
+// or a backtick in a URL from changing the command. On Windows the
+// statement's own double quotes and commas cannot be passed through cmd.exe or
+// PowerShell to bd.exe as one argument (Go's argument parsing split the
+// single-quoted form into eight). On POSIX the statement has no quoting
+// PowerShell and fish agree on when it holds an apostrophe or a backslash,
+// which a value's double quote becomes too (SQLDoubleQuoted spells it \"),
+// or one of ‘ ’ ‚ ‛ (U+2018 to U+201B), which end single quotes in
+// PowerShell, and none at all when a value does not print as itself. In
+// each of those cases the remedy names the statement on its own, to run as
+// bd sql's one argument or in a Dolt SQL shell, rather than a command that
+// would run something else. It names the statement as it is when the
+// remote, URL and ref are each a value the remedy printer quotes as a shell
+// argument on POSIX and on Windows alike (quotedOnEveryPlatform), such as an
+// ordinary git+https or git+ssh URL: then the statement prints as itself and
+// holds no shell syntax but its own double quotes, commas and parentheses, so
+// it runs as printed in a Dolt SQL shell, and nothing in it expands for a
+// user who pastes it into a shell. Otherwise it names the statement escaped
+// (remedy.EscapedValue), as a value no quoting passes on is named beside a
+// placeholder (remedy.CommandArg): printed as it is, a $( ) or a backtick in
+// the URL sits inside the statement's own double quotes, where PowerShell
+// and Git Bash run it for a user who pastes the line.
+func coldStartReaddRemedy(goos, remote, url, ref string) string {
 	stmt := fmt.Sprintf("CALL DOLT_REMOTE(%s, %s, %s, %s, %s)",
 		doltutil.SQLDoubleQuoted("add"), doltutil.SQLDoubleQuoted("--ref"),
 		doltutil.SQLDoubleQuoted(ref), doltutil.SQLDoubleQuoted(remote), doltutil.SQLDoubleQuoted(url))
-	return "bd sql " + doltutil.ShellQuote(stmt)
+	if quoted, ok := remedy.ShellQuotedFor(goos, stmt); ok {
+		return "with: bd sql " + quoted
+	}
+	named := remedy.EscapedValue(stmt)
+	if quotedOnEveryPlatform(remote, url, ref) {
+		named = stmt
+	}
+	return "by running this SQL statement there, as the one argument of bd sql (quoted for your shell) or in a Dolt SQL shell: " + named
+}
+
+// quotedOnEveryPlatform reports whether the remedy printer quotes each of
+// values as a shell argument on POSIX and on Windows (remedy.ShellQuotedFor):
+// each prints as itself and holds no character a shell on either expands,
+// splits an argument at or ends its quotes at.
+func quotedOnEveryPlatform(values ...string) bool {
+	for _, value := range values {
+		for _, goos := range []string{"linux", "windows"} {
+			if _, ok := remedy.ShellQuotedFor(goos, value); !ok {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // shouldUseCLIForGitProtocol is a compatibility wrapper for tests and older
@@ -4331,6 +5309,9 @@ func fsckOutputInterrupted(output string) bool {
 // If creds is non-nil, credentials are set on the subprocess environment only,
 // avoiding process-wide env var races with concurrent goroutines.
 func (s *DoltStore) doltCLIPush(ctx context.Context, remote string, force bool, creds *remoteCredentials) error {
+	if err := requireCLIDoltBinary(); err != nil {
+		return fmt.Errorf("dolt push: %w", err)
+	}
 	if err := s.prePushFSCK(ctx); err != nil {
 		return err
 	}
@@ -4339,7 +5320,10 @@ func (s *DoltStore) doltCLIPush(ctx context.Context, remote string, force bool, 
 		args = append(args, "--force")
 	}
 	args = append(args, remote, s.branch)
-	cmd, transferCtx, cancel := s.prepareDoltCLITransfer(ctx, remote, creds, args...)
+	cmd, transferCtx, cancel, err := s.prepareDoltCLITransfer(ctx, remote, creds, args...)
+	if err != nil {
+		return err
+	}
 	defer cancel()
 	applyNoGitHooksToCmd(cmd) // GH#3724
 	out, err := cmd.CombinedOutput()
@@ -4352,23 +5336,128 @@ func (s *DoltStore) doltCLIPush(ctx context.Context, remote string, force bool, 
 // cliTransferError wraps a failed CLI transfer, distinguishing a transfer that
 // hit the bounded timeout (actionable: raise BEADS_CLI_TRANSFER_TIMEOUT, or
 // check what holds the database directory busy) from an ordinary failure.
+//
+// URL credentials are redacted from the operation, the remote and dolt's
+// output before formatting: a rejection echoes the stored remote, token and
+// all, and this error reaches the terminal, agent transcripts and auto-push
+// warnings. The remote is redacted before %q so its escaped form need not be
+// recognized.
 func cliTransferError(op, remote string, transferCtx context.Context, out []byte, err error) error {
+	op = doltremote.RedactText(op)
+	remote = doltremote.Redact(remote)
+	detail := doltremote.RedactText(strings.TrimSpace(string(out)))
 	if errors.Is(transferCtx.Err(), context.DeadlineExceeded) {
 		return fmt.Errorf("%s to %q timed out after %s (override with %s=<duration>; large transfers to cloud remotes can run long, and a busy dolt sql-server serving the database directory can stall CLI transfers): %s: %w",
-			op, remote, cliExecTimeoutDuration(), cliExecTimeoutEnv, strings.TrimSpace(string(out)), err)
+			op, remote, cliExecTimeoutDuration(), cliExecTimeoutEnv, detail, err)
 	}
-	return fmt.Errorf("%s failed: %s: %w", op, strings.TrimSpace(string(out)), err)
+	return fmt.Errorf("%s failed: %s: %w", op, detail, err)
 }
 
-// doltCLIPull shells out to `dolt pull` from the database directory.
-// Used for git-protocol remotes where CALL DOLT_PULL times out through the SQL connection.
-// If creds is non-nil, credentials are set on the subprocess environment only.
-func (s *DoltStore) doltCLIPull(ctx context.Context, remote string, creds *remoteCredentials) error {
-	cmd, transferCtx, cancel := s.prepareDoltCLITransfer(ctx, remote, creds, "pull", remote, s.branch)
+// doltCLIFetchBranch shells out to `dolt fetch <remote> <s.branch>` from the
+// database directory: the transfer of a CLI-routed pull, whose tracking ref
+// mergeTrackingRefAfterCLIFetch then merges over SQL. Used for git-protocol
+// remotes, where a transfer through the SQL connection times out, and for the
+// credential and cloud-auth routes. If creds is non-nil, credentials are set
+// on the subprocess environment only. op names the transfer in its error.
+//
+// Never `dolt pull`: it forwards to the server's DOLT_PULL, whose merge
+// message copies the stored remote URL, credentials included (bd-e2q8zs).
+// `dolt fetch` forwards to DOLT_FETCH, which advances the server's tracking
+// ref, and the network transfer still runs under the CLI timeout.
+func (s *DoltStore) doltCLIFetchBranch(ctx context.Context, op, remote string, creds *remoteCredentials) error {
+	cmd, transferCtx, cancel, err := s.prepareDoltCLITransfer(ctx, remote, creds, "fetch", remote, s.branch)
+	if err != nil {
+		return err
+	}
 	defer cancel()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return cliTransferError("dolt pull", remote, transferCtx, out, err)
+		return cliTransferError(op, remote, transferCtx, out, err)
+	}
+	return nil
+}
+
+// doltCLIPull pulls remote's s.branch on the CLI route: doltCLIFetchBranch
+// runs the transfer, then mergeTrackingRefAfterCLIFetch merges the tracking
+// ref <remote>/<branch> it advanced.
+func (s *DoltStore) doltCLIPull(ctx context.Context, remote string, creds *remoteCredentials) error {
+	if err := s.doltCLIFetchBranch(ctx, "dolt fetch", remote, creds); err != nil {
+		return err
+	}
+	return s.mergeTrackingRefAfterCLIFetch(ctx, remote+"/"+s.branch)
+}
+
+// openCLIMergeDB opens the database mergeTrackingRefAfterCLIFetch merges on:
+// openLongTimeoutConn. Declared as a var so unit tests can hand the merge a
+// sqlmock database.
+var openCLIMergeDB = (*DoltStore).openLongTimeoutConn
+
+// mergeTrackingRefAfterCLIFetch merges ref, a tracking ref a CLI fetch just
+// advanced, into the store's branch with CALL DOLT_MERGE, whose default
+// message names only the ref (bd-e2q8zs).
+//
+// The merge runs on a dedicated long-timeout session (openLongTimeoutConn),
+// as the SQL route's merge does, not on a pool connection. `dolt pull` merged
+// under the CLI transfer timeout; a pool connection's per-I/O read deadline
+// (10s by default, see Config.PoolReadTimeout) is short enough that a
+// three-way merge of a large divergence, or one stalled behind a server
+// auto_gc pause, would fail on every retry. The session is pinned to the
+// store's branch (pinStoreBranch), the branch finishCLIPull's resolver
+// settles on its pool connection.
+//
+// @@dolt_force_transaction_commit is set, and the merge runs in an explicit
+// transaction that is committed, as `dolt pull` set the variable and sent
+// COMMIT, so a conflicted merge commits to the working set with its
+// conflicts, where finishCLIPull's resolver settles what it can. Without the
+// explicit COMMIT, a server started with --no-auto-commit would discard the
+// conflicted merge when the session closes, and the resolver would never see
+// it. A merge the resolver declines stays open there, as a declined `dolt
+// pull` left it: that is GH#7839, which #7849 fixes by merging and settling in
+// bd's own transaction. The session is discarded after the merge, so the
+// variable never reaches another caller.
+func (s *DoltStore) mergeTrackingRefAfterCLIFetch(ctx context.Context, ref string) error {
+	db, err := openCLIMergeDB(s)
+	if err != nil {
+		return fmt.Errorf("merge %s: %w", ref, err)
+	}
+	defer db.Close()
+	// See recomputeAllBlocked: pin a single physical connection and reproduce
+	// the store's real active branch on it before the merge runs (be-b0am).
+	// With no idle connection kept, closing it ends the session.
+	db.SetMaxIdleConns(0)
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("merge %s: acquire long-timeout connection: %w", ref, err)
+	}
+	defer conn.Close()
+	if err := s.pinStoreBranch(ctx, conn); err != nil {
+		return fmt.Errorf("merge %s: %w", ref, err)
+	}
+	if _, err := conn.ExecContext(ctx, "SET @@dolt_force_transaction_commit = 1"); err != nil {
+		return fmt.Errorf("merge %s: set dolt_force_transaction_commit: %w", ref, err)
+	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("merge %s: begin transaction: %w", ref, err)
+	}
+	mergeRow, mergeErr := schema.CallReturningRow(ctx, tx, "CALL DOLT_MERGE(?)", ref)
+	if mergeErr != nil {
+		_ = tx.Rollback()
+		// As in fetchAndMergeTrackingRefInTx: the ordinary no-op arrives as a
+		// message, and only the squash path's "Already up to date." as an error.
+		if strings.Contains(mergeErr.Error(), "up to date") {
+			return nil
+		}
+		return fmt.Errorf("merge %s: %w", ref, mergeErr)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("merge %s: commit: %w", ref, err)
+	}
+	// A conflicted merge committed its conflicts to the working set. Fail, as a
+	// conflicted `dolt pull` did, so finishCLIPull reports the pull as failed
+	// unless its resolver settles every conflict.
+	if parseMergeReport(mergeRow).Conflicted {
+		return fmt.Errorf("merge %s: conflicts found", ref)
 	}
 	return nil
 }
@@ -4396,6 +5485,29 @@ func (s *DoltStore) PushRemote(ctx context.Context, remote string, force bool) e
 	return s.pushToRemote(ctx, remote, force)
 }
 
+// logRouteDecision records which transport a push/pull operation used --
+// CLI subprocess or in-process SQL -- so the route taken is discoverable
+// without reading source (be-9i0yq.2 item 2). op is "push" or "pull".
+//
+// Scope: main-remote transports only. The federation peer plane in
+// federation.go (pushRefToPeer, pullFromPeer, Fetch) makes the same
+// CLI-vs-SQL decision and is not instrumented, so silence here does not mean
+// no peer transfer happened.
+//
+// This fires on every push and every pull on that plane, so it goes to the
+// gated debug sink rather than log.Printf: the latter is unconditional stderr
+// with a timestamp prefix and would put a line in front of every user on every
+// operation, including under --quiet. The remaining log.Printf calls in this
+// file are warnings on exceptional paths, which is a different contract. Under
+// BD_DEBUG or -v the line is exactly as discoverable as before.
+func logRouteDecision(op, remote string, cli bool) {
+	route := "SQL"
+	if cli {
+		route = "CLI"
+	}
+	debug.Logf("dolt %s route: %s (remote=%q)\n", op, route, remote)
+}
+
 // pushToRemote is the internal implementation for all push operations.
 // It routes through CLI or SQL based on the remote's protocol and credentials.
 func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool) (retErr error) {
@@ -4420,6 +5532,7 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 	if useCLI, err := s.prepareCLIRouteForGitProtocol(ctx, remote); err != nil {
 		return err
 	} else if useCLI {
+		logRouteDecision("push", remote, true)
 		return s.doltCLIPush(ctx, remote, force, creds)
 	}
 	// Credential CLI routing: when credentials are set and server is external,
@@ -4429,6 +5542,7 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 	if useCLI, err := s.prepareCLIRouteForCredentials(ctx, remote, creds); err != nil {
 		return err
 	} else if useCLI {
+		logRouteDecision("push", remote, true)
 		return s.doltCLIPush(ctx, remote, force, creds)
 	}
 	// Cloud auth CLI routing: when cloud storage env vars (AZURE_*, AWS_*,
@@ -4438,13 +5552,23 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 	if useCLI, err := s.prepareCLIRouteForCloudAuth(ctx, remote); err != nil {
 		return err
 	} else if useCLI {
+		logRouteDecision("push", remote, true)
 		return s.doltCLIPush(ctx, remote, force, creds)
 	}
 	if useCLI, err := s.shouldUseCLIForLocalRemoteWithError(ctx, remote); err != nil {
 		return err
 	} else if useCLI {
+		logRouteDecision("push", remote, true)
 		return s.doltCLIPush(ctx, remote, force, creds)
 	}
+	logRouteDecision("push", remote, false)
+	defer func() {
+		if retErr != nil {
+			if note := s.serverEnvCredentialsNote(ctx, remote, creds); note != "" {
+				retErr = fmt.Errorf("%w%s", retErr, note)
+			}
+		}
+	}()
 	if s.remoteUser != "" && remote == s.remote {
 		return withRemoteOperationEnv(creds, s.isS3Remote(ctx, remote), func() error {
 			if force {
@@ -4473,10 +5597,14 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 	})
 }
 
-// Pull pulls changes from the remote.
-// Passes branch explicitly to avoid "did not specify a branch" errors.
-// For git-protocol remotes (SSH, git+https://, git://), uses CLI `dolt pull` to avoid MySQL connection timeouts.
-// For non-SSH Hosted Dolt (remoteUser set), uses CALL DOLT_PULL with --user authentication.
+// Pull pulls changes from the remote: it fetches the store's branch and merges
+// the tracking ref <remote>/<branch> (pullTransportReporting).
+// For git-protocol remotes (SSH, git+https://, git://), the fetch runs as a CLI
+// `dolt fetch` to avoid MySQL connection timeouts.
+// For non-SSH Hosted Dolt (remoteUser set), the fetch is CALL DOLT_FETCH with
+// --user authentication.
+// No route runs `dolt pull` or CALL DOLT_PULL: Dolt's pull writes the stored
+// remote URL, credentials included, into its merge commit message (bd-e2q8zs).
 //
 // If the pull results in merge conflicts on the metadata table only (e.g., from
 // stale dolt_auto_push_* rows on multi-machine setups), the conflicts are
@@ -4593,12 +5721,13 @@ func (s *DoltStore) branchHash(ctx context.Context, branch string) (string, erro
 // merge (ga-ivaps).
 //
 // WHY A POST-CONDITION AND NOT A BETTER TRANSPORT CHECK. Pull() has several
-// routes (CLI subprocess, CALL DOLT_PULL, the fetch+merge fallback) and each
-// reports success its own way; `dolt pull` exits 0 both when it merged and when
-// it was already up to date, and CALL DOLT_PULL's (fast_forward, conflicts,
-// message) row is discarded by the shared DrainCall helper. Rather than teach
-// every route a new dialect, this asserts the one thing all of them promise:
-// after a successful pull, the branch you read contains what was fetched.
+// routes (a CLI `dolt fetch` then a merge on its own session, or a SQL fetch
+// and merge in one transaction) and each reports success its own way: the CLI
+// routes report nothing of what they merged, and when this check was written
+// the routes ran Dolt's own pull, and `dolt pull` exited 0 both when it merged
+// and when it was already up to date. Rather than teach every route a new
+// dialect, this asserts the one thing all of them promise: after a successful
+// pull, the branch you read contains what was fetched.
 //
 // THE THREE OUTCOMES, AND WHY THE NO-OP STAYS QUIET:
 //
@@ -4755,7 +5884,8 @@ func (s *DoltStore) refreshTrackingRef(ctx context.Context, remote string) error
 	}
 	defer db.Close()
 	return withRemoteOperationEnv(s.credentialsForRemote(remote), s.isS3Remote(ctx, remote), func() error {
-		return schema.DrainCall(ctx, db, "CALL DOLT_FETCH(?, ?)", remote, s.branch)
+		// Redacted as in execWithLongTimeout: verifyPullLanded logs this error.
+		return doltremote.RedactError(schema.DrainCall(ctx, db, "CALL DOLT_FETCH(?, ?)", remote, s.branch))
 	})
 }
 
@@ -4769,10 +5899,15 @@ func (s *DoltStore) pullTransport(ctx context.Context, remote string) error {
 }
 
 // pullTransportReporting is pullTransport plus the transport's own account of
-// what it did. The CLI routes have none to give — `dolt pull` exits 0 whether
-// it merged or was already up to date, and its stdout is discarded — so they
-// report nothing; the SQL routes return what CALL DOLT_PULL (or the fallback's
-// CALL DOLT_MERGE) said. See pullReport for what that does and does not prove.
+// what it did. The CLI routes report nothing; the SQL routes return what their
+// CALL DOLT_MERGE of the fetched tracking ref said. See pullReport for what
+// that does and does not prove.
+//
+// No route runs Dolt's own pull (CALL DOLT_PULL, or a `dolt pull` subprocess
+// that forwards to it): for a three-way merge it writes "Merge branch 'b' of
+// <stored remote URL> into b", credentials included, and `bd dolt push`
+// publishes that commit (bd-e2q8zs). Every route fetches and then merges
+// <remote>/<branch>, whose message names only the ref, as embedded mode does.
 func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (pullReport, error) {
 	creds := s.credentialsForRemote(remote)
 	// Git-protocol remotes: use CLI to avoid MySQL connection timeout during transfer.
@@ -4782,9 +5917,10 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 	if useCLI, err := s.prepareCLIRouteForGitProtocol(ctx, remote); err != nil {
 		return pullReport{}, err
 	} else if useCLI {
-		// CLI pull leaves any conflicts in the working set; run the auto-resolver so
-		// git-protocol remotes get the same audit-only dependency / metadata repair
-		// as the SQL DOLT_PULL path (#4259).
+		logRouteDecision("pull", remote, true)
+		// The CLI route's merge leaves any conflicts in the working set; run the
+		// auto-resolver so git-protocol remotes get the same audit-only
+		// dependency / metadata repair as the SQL route (#4259).
 		return pullReport{}, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
 	}
 	// Credential CLI routing: mirrors git-protocol path, including post-pull
@@ -4792,22 +5928,25 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 	if useCLI, err := s.prepareCLIRouteForCredentials(ctx, remote, creds); err != nil {
 		return pullReport{}, err
 	} else if useCLI {
+		logRouteDecision("pull", remote, true)
 		return pullReport{}, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
 	}
 	// Cloud auth CLI routing (GH#6), including post-pull auto-resolution.
 	if useCLI, err := s.prepareCLIRouteForCloudAuth(ctx, remote); err != nil {
 		return pullReport{}, err
 	} else if useCLI {
+		logRouteDecision("pull", remote, true)
 		return pullReport{}, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
 	}
 	// Local file:// pulls intentionally stay on the SQL path. The matching CLI
 	// guard is a push-only optimization; SQL pull keeps pullWithAutoResolve in
 	// charge of metadata-only conflict repair.
+	logRouteDecision("pull", remote, false)
 	var report pullReport
 	if s.remoteUser != "" && remote == s.remote {
 		err := withRemoteOperationEnv(creds, s.isS3Remote(ctx, remote), func() error {
 			var err error
-			report, err = s.pullWithAutoResolveReporting(ctx, remote, "CALL DOLT_PULL('--user', ?, ?, ?)", s.remoteUser, remote, s.branch)
+			report, err = s.pullWithAutoResolveReporting(ctx, remote, s.remoteUser)
 			if err != nil {
 				return fmt.Errorf("failed to pull from %s/%s: %w", remote, s.branch, err)
 			}
@@ -4817,7 +5956,7 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 	}
 	err := withRemoteOperationEnv(nil, s.isS3Remote(ctx, remote), func() error {
 		var err error
-		report, err = s.pullWithAutoResolveReporting(ctx, remote, "CALL DOLT_PULL(?, ?)", remote, s.branch)
+		report, err = s.pullWithAutoResolveReporting(ctx, remote, "")
 		if err != nil {
 			return fmt.Errorf("failed to pull from %s/%s: %w", remote, s.branch, err)
 		}
@@ -4826,17 +5965,6 @@ func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (
 	return report, err
 }
 
-// pullWithAutoResolve executes a DOLT_PULL query with long timeout and auto-resolves
-// metadata-only merge conflicts using "theirs" strategy. This handles the common case
-// where machine-local metadata rows (e.g., dolt_auto_push_*) diverge across clones
-// and cause recurring merge conflicts on pull (GH#2466).
-//
-// Dolt may report merge conflicts in two ways:
-//  1. DOLT_PULL itself returns an error (under autocommit)
-//  2. DOLT_PULL succeeds but tx.Commit() fails (conflicts in working set)
-//
-// This method handles both by checking for conflicts after the pull call
-// (whether it errored or not) and auto-resolving metadata-only conflicts.
 // openLongTimeoutConn opens a dedicated single-connection *sql.DB to this store's
 // database with a long read timeout, for merge/pull/conflict operations that can run
 // longer than the default connection timeout. The caller must Close the returned DB.
@@ -4854,42 +5982,96 @@ func (s *DoltStore) openLongTimeoutConn() (*sql.DB, error) {
 	return db, nil
 }
 
-// remote names the remote the query pulls from; the GH#3144 fetch+merge
-// fallback targets it directly, so pulls from non-default remotes (PullRemote,
-// federation peers) no longer fall back to s.remote.
-func (s *DoltStore) pullWithAutoResolve(ctx context.Context, remote string, query string, args ...any) error {
-	_, err := s.pullWithAutoResolveReporting(ctx, remote, query, args...)
+// pullWithAutoResolve pulls remote's s.branch on a long-timeout connection
+// and auto-resolves the merge conflicts that are safe without the operator.
+// This handles the common case where machine-local metadata rows (e.g.,
+// dolt_auto_push_*) diverge across clones and cause recurring merge conflicts
+// on pull (GH#2466).
+//
+// The pull is a fetch plus a merge of the tracking ref <remote>/<s.branch>,
+// never CALL DOLT_PULL: Dolt's pull writes the stored remote URL, credentials
+// included, into its merge commit message (bd-e2q8zs), and its merge needs
+// upstream tracking that a remote added with DOLT_REMOTE('add') lacks
+// (GH#3144). user, when non-empty, authenticates the fetch with --user (the
+// Hosted Dolt route); the merge is local and needs none.
+//
+// Dolt may report merge conflicts in two ways:
+//  1. DOLT_MERGE itself returns an error (under autocommit)
+//  2. DOLT_MERGE succeeds but tx.Commit() fails (conflicts in working set)
+//
+// This method handles both by checking for conflicts after the merge call
+// (whether it errored or not) and auto-resolving metadata-only conflicts.
+func (s *DoltStore) pullWithAutoResolve(ctx context.Context, remote, user string) error {
+	_, err := s.pullWithAutoResolveReporting(ctx, remote, user)
 	return err
 }
 
-// pullWithAutoResolveReporting is pullWithAutoResolve plus the row the pull (or
-// the fetch+merge fallback) returned — the engine's own account of whether
-// anything merged. See pullReport.
-func (s *DoltStore) pullWithAutoResolveReporting(ctx context.Context, remote string, query string, args ...any) (pullReport, error) {
+// pullWithAutoResolveReporting is pullWithAutoResolve plus the row the merge
+// returned — the engine's own account of whether anything merged. See
+// pullReport.
+//
+// Its error is redacted as in execWithLongTimeout: DOLT_FETCH's errors quote
+// the stored remote URL.
+func (s *DoltStore) pullWithAutoResolveReporting(ctx context.Context, remote, user string) (pullReport, error) {
 	var report pullReport
 	err := s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		var err error
-		report, err = s.pullWithAutoResolveUnchecked(ctx, remote, query, args...)
+		report, err = s.pullWithAutoResolveUnchecked(ctx, remote, user)
 		return err
 	})
-	return report, err
+	return report, doltremote.RedactError(err)
 }
 
-func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote string, query string, args ...any) (pullReport, error) {
+// sqlFetchCall builds the CALL DOLT_FETCH a server-mode SQL pull runs: the
+// statements embedded mode's versioncontrolops.PullWithStrategy runs, with
+// --user only when the route authenticates as a Hosted Dolt user.
+func sqlFetchCall(user, remote, branch string) (string, []any) {
+	if user != "" {
+		return "CALL DOLT_FETCH('--user', ?, ?, ?)", []any{user, remote, branch}
+	}
+	return "CALL DOLT_FETCH(?, ?)", []any{remote, branch}
+}
+
+// fetchAndMergeTrackingRefInTx fetches remote's s.branch and merges the
+// tracking ref <remote>/<s.branch> in tx. DOLT_MERGE's default message names
+// only that ref ("Merge branch 'origin/main' into main"). No -m: the merge
+// target is tx's current branch, which bd cannot reliably name here (be-5ybd),
+// and Dolt's own message names it accurately.
+//
+// fetchErr is a failed fetch: nothing was merged, and the caller must roll
+// back. mergeErr is the merge statement's own error, for settleMergeInTx;
+// "up to date" is not one.
+func (s *DoltStore) fetchAndMergeTrackingRefInTx(ctx context.Context, tx *sql.Tx, remote, user string) (report pullReport, mergeErr, fetchErr error) {
+	query, args := sqlFetchCall(user, remote, s.branch)
+	if err := schema.DrainCall(ctx, tx, query, args...); err != nil {
+		return pullReport{}, nil, fmt.Errorf("fetch from %s/%s: %w", remote, s.branch, err)
+	}
+	trackingRef := remote + "/" + s.branch
+	// DOLT_MERGE's row is the engine's only in-band account of what the pull
+	// did: it succeeds whether it merged or was already up to date. Capturing
+	// it is the difference between a caller that knows nothing arrived and one
+	// that only knows no error occurred (ga-bq9zd).
+	mergeRow, mergeErr := schema.CallReturningRow(ctx, tx, "CALL DOLT_MERGE(?)", trackingRef)
+	report = parseMergeReport(mergeRow)
+	// DOLT_MERGE reports the ordinary no-op as a MESSAGE with a nil error
+	// (measured: "Everything up-to-date" and "cannot fast forward from a to
+	// b. a is ahead of b already" both arrive that way). Dolt's squash path
+	// still returns "Already up to date." as a real error, and that is what
+	// this catches.
+	if mergeErr != nil && strings.Contains(mergeErr.Error(), "up to date") {
+		mergeErr = nil
+	}
+	return report, mergeErr, nil
+}
+
+func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote, user string) (pullReport, error) {
 	// Audited for be-b0am's fresh-connection branch hazard: NOT safe, and all
 	// three callers share it. Passing a branch argument does not avoid it.
 	//
-	// DOLT_PULL's second positional arg names the remote ref to merge FROM
-	// (dolt's doDoltPull binds it to remoteRefName); the merge TARGET is
-	// always the session's current working branch (CWBHeadRef), which on this
-	// fresh openLongTimeoutConn connection is the database's default branch,
-	// never s.branch. So store.go's two callers, which pass s.branch to
-	// CALL DOLT_PULL(...), pin only the source and still merge into the
-	// default branch; federation.go's peer-pull route (CALL DOLT_PULL(?),
-	// remote only) derives both source and target from that same default
-	// branch. The GH#3144 fallback below has the same shape — DOLT_FETCH
-	// names the remote ref, but CALL DOLT_MERGE(trackingRef) merges into the
-	// current branch too.
+	// DOLT_FETCH names the remote ref to fetch, but CALL DOLT_MERGE(ref)
+	// merges into the session's current working branch, which on this fresh
+	// openLongTimeoutConn connection is the database's default branch, never
+	// s.branch. So the merge target is the default branch for every caller.
 	//
 	// Left unfixed here deliberately: this is be-b0am's root cause on a
 	// pull/merge path, and a merge landing on the wrong branch has a much
@@ -4923,40 +6105,12 @@ func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote str
 		return pullReport{}, fmt.Errorf("failed to set dolt_force_transaction_commit: %w", err)
 	}
 
-	// DOLT_PULL's row is the engine's only in-band account of what the pull
-	// did: `dolt pull` on the CLI exits 0 whether it merged or was already up
-	// to date, and so does this CALL. Capturing it costs nothing — the drain
-	// is identical — and it is the difference between a caller that knows
-	// nothing arrived and one that only knows no error occurred (ga-bq9zd).
-	pullRow, pullErr := schema.CallReturningRow(ctx, tx, query, args...)
-	report := parseMergeReport(pullRow)
-
-	// GH#3144: When DOLT_PULL fails because upstream branch tracking is not
-	// configured in repo_state.json (common when remote was added via
-	// bd dolt remote add rather than bd bootstrap/dolt clone), fall back to
-	// DOLT_FETCH + DOLT_MERGE which does not require tracking config.
-	if pullErr != nil && isBranchTrackingError(pullErr) {
-		if err := schema.DrainCall(ctx, tx, "CALL DOLT_FETCH(?, ?)", remote, s.branch); err != nil {
-			_ = tx.Rollback()
-			return pullReport{}, fmt.Errorf("fetch from %s/%s: %w", remote, s.branch, err)
-		}
-		trackingRef := remote + "/" + s.branch
-		// The merge, not the pull, is now what happened — so its row replaces
-		// the failed pull's report rather than adding to it.
-		mergeRow, mergeErr := schema.CallReturningRow(ctx, tx, "CALL DOLT_MERGE(?)", trackingRef)
-		report = parseMergeReport(mergeRow)
-		// Retained deliberately even though DOLT_MERGE reports the ordinary
-		// no-op as a MESSAGE with a nil error (measured: "Everything
-		// up-to-date" and "cannot fast forward from a to b. a is ahead of b
-		// already" both arrive that way). Dolt's squash path still returns
-		// "Already up to date." as a real error, and that is what this catches.
-		if mergeErr != nil && strings.Contains(mergeErr.Error(), "up to date") {
-			mergeErr = nil
-		}
-		pullErr = mergeErr
+	report, mergeErr, fetchErr := s.fetchAndMergeTrackingRefInTx(ctx, tx, remote, user)
+	if fetchErr != nil {
+		_ = tx.Rollback()
+		return pullReport{}, fetchErr
 	}
-
-	return report, s.settleMergeInTx(ctx, tx, pullErr)
+	return report, s.settleMergeInTx(ctx, tx, mergeErr)
 }
 
 // settleMergeInTx finishes a pull/merge that ran in tx: it auto-resolves the
@@ -4968,7 +6122,7 @@ func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote str
 // why the violation gate here is mandatory: with the force flag on, committing
 // without it would persist a violated working set.
 func (s *DoltStore) settleMergeInTx(ctx context.Context, tx *sql.Tx, pullErr error) error {
-	// Check for merge conflicts regardless of whether DOLT_PULL errored.
+	// Check for merge conflicts regardless of whether the merge errored.
 	// Some Dolt versions error on conflicts, others leave them in the working set.
 	resolved, resolveErr := s.tryAutoResolveMergeConflicts(ctx, tx)
 	if resolveErr != nil {
@@ -5017,17 +6171,18 @@ func (s *DoltStore) settleMergeInTx(ctx context.Context, tx *sql.Tx, pullErr err
 		return pullErr
 	}
 
-	// Conclude the merge for resolved conflicts only now, after the FK repair:
-	// DOLT_COMMIT refuses a violated working set, so a merge carrying both
-	// classes could never settle when the resolver committed first (bd-578h9.14).
-	if resolved {
-		if err := versioncontrolops.CommitResolvedConflicts(ctx, tx); err != nil {
-			_ = tx.Rollback()
-			if pullErr != nil {
-				return pullErr
-			}
-			return err
+	// Conclude the merge only now, after the FK repair: DOLT_COMMIT refuses a
+	// violated working set, so a merge carrying both classes could never
+	// settle when the resolver committed first (bd-578h9.14). A merge the
+	// repair alone settled is concluded here too, with its full result
+	// (GH#7811): left open, it was concluded by the next commit, and a plain
+	// server-mode commit leaves config out (GH#2455).
+	if err := versioncontrolops.CommitSettledMerge(ctx, tx, resolved, repairedViol); err != nil {
+		_ = tx.Rollback()
+		if pullErr != nil {
+			return pullErr
 		}
+		return err
 	}
 
 	return s.commitSQLTx(ctx, "commit pull merge settlement", tx)
@@ -5115,7 +6270,11 @@ func (s *DoltStore) recomputeAllBlocked(ctx context.Context) (int, error) {
 
 // txBeginner is satisfied by both *sql.DB and *sql.Conn, letting
 // recomputeAllBlockedWithDB run either against a caller-owned pinned
-// *sql.Conn (recomputeAllBlocked) or directly against a *sql.DB (tests).
+// *sql.Conn (recomputeAllBlocked) or directly against a *sql.DB (tests). Also
+// used by withRetryTxOn/commitWriteTxOn to run the shared retry-and-commit
+// body against either the pool (the common case) or one pinned connection
+// (withDeleteFence, which must hold a GET_LOCK session across the whole
+// retried write).
 type txBeginner interface {
 	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
 }
@@ -5218,10 +6377,12 @@ func (s *DoltStore) markBlockedRecomputePending(ctx context.Context, fromCommit 
 }
 
 // finishCLIPull runs the merge-conflict auto-resolver after a CLI-based pull
-// (git-protocol, credentialed, or cloud-auth remotes). CLI `dolt pull` writes any
-// merge conflicts into the shared working set but, unlike the SQL DOLT_PULL path,
-// returns without a transaction we can inspect — so these remotes historically
-// skipped the resolver entirely. With deterministic dependency ids (#4259) a
+// (git-protocol, credentialed, or cloud-auth remotes). The CLI route's merge
+// (mergeTrackingRefAfterCLIFetch, which replaced a `dolt pull` subprocess,
+// bd-e2q8zs) commits any merge conflicts into the shared working set but,
+// unlike the SQL route, leaves no transaction we can inspect — so these
+// remotes historically skipped the resolver entirely. With deterministic
+// dependency ids (#4259) a
 // same-edge conflict that differs only in audit columns is safe to auto-resolve, and
 // the git remote topology in #4259 is exactly this CLI path; route it through the
 // same resolver as the SQL path. pullErr is what doltCLIPull returned: a pull that
@@ -5251,9 +6412,9 @@ func (s *DoltStore) finishCLIPull(ctx context.Context, pullErr error) error {
 // conflict classes that are safe without operator input (#4259 audit-only dependency
 // edges, GH#2466 metadata, GH#4698 issues-table LWW). It runs on a connection from
 // the store pool (s.db) on
-// purpose: those connections are on the same branch the CLI `dolt pull` merged into,
-// whereas a separately opened connection would default to the base branch and never
-// see the conflicts. The pull's
+// purpose: those connections are on the store's branch, which the CLI route's merge
+// session was pinned to (pinStoreBranch), whereas a separately opened connection would
+// default to the base branch and never see the conflicts. The pull's
 // network transfer already completed in the subprocess, so no long-timeout connection
 // is needed for the local resolve. Returns (true, nil) only if all conflicts were
 // resolved and committed; (false, nil) when there is nothing to resolve or a conflict
@@ -5307,14 +6468,13 @@ func (s *DoltStore) autoResolveConflictsAfterCLIPull(ctx context.Context) (bool,
 		_ = tx.Rollback()
 		return false, nil
 	}
-	// Conclude the merge for resolved conflicts only now, after the FK repair:
-	// DOLT_COMMIT refuses a violated working set, so a merge carrying both
-	// classes could never settle when the resolver committed first (bd-578h9.14).
-	if resolved {
-		if err := versioncontrolops.CommitResolvedConflicts(ctx, tx); err != nil {
-			_ = tx.Rollback()
-			return false, err
-		}
+	// Conclude the merge only now, after the FK repair: DOLT_COMMIT refuses a
+	// violated working set, so a merge carrying both classes could never
+	// settle when the resolver committed first (bd-578h9.14). A merge the
+	// repair alone settled is concluded too, as in settleMergeInTx (GH#7811).
+	if err := versioncontrolops.CommitSettledMerge(ctx, tx, resolved, repairedViol); err != nil {
+		_ = tx.Rollback()
+		return false, err
 	}
 	if err := s.commitSQLTx(ctx, "commit resolved CLI pull conflicts", tx); err != nil {
 		return false, err

@@ -64,16 +64,64 @@ func (d *deleter) Delete(ctx context.Context, req publicops.DeleteRequest) (publ
 			return deleteInUOW(ctx, uw, req)
 		})
 	}
-	return RunTxResult(ctx, d.provider, func(ctx context.Context, uw UnitOfWork) (publicops.DeleteResult, string, error) {
-		result, err := deleteInUOW(ctx, uw, req)
-		if err != nil || result.Deleted == 0 {
-			// A deletion that removed nothing labels nothing: the role
-			// promises at most one history entry per call and none for a
-			// no-op.
-			return result, "", err
+
+	write := func(ctx context.Context) (publicops.DeleteResult, error) {
+		return RunTxResult(ctx, d.provider, func(ctx context.Context, uw UnitOfWork) (publicops.DeleteResult, string, error) {
+			result, err := deleteInUOW(ctx, uw, req)
+			if err != nil || result.Deleted == 0 {
+				// A deletion that removed nothing labels nothing: the role
+				// promises at most one history entry per call and none for a
+				// no-op.
+				return result, "", err
+			}
+			return result, fmt.Sprintf("bd: delete %d issue(s)", result.Deleted), nil
+		})
+	}
+
+	// A guarded (ExpectedVersion-checked) delete additionally runs under the
+	// per-id delete fence (mc-zndi7.73): without it, two same-token deletes
+	// race to identical "row absent" diffs that Dolt's commit-time merge
+	// lands with no conflict, so every racer exits 0 — see withDeleteFence's
+	// doc for the full design. Every doltSQLProvider here IS a real Dolt
+	// sql-server session (proxied mode or bd serve; there is no embedded
+	// backend in this package), so unlike internal/storage/dolt's fence
+	// (scoped to serverMode only) this one applies whenever a guard is
+	// present, with no mode check.
+	//
+	// The fence is FOUND by walking d.provider with fenceTarget, because
+	// d.provider is a decorator in every real deployment, never the bare
+	// provider. The proxied chain (wireProxiedUOWProvider) wraps the bare
+	// *doltSQLProvider in a notifyingProvider and then an externaldeps
+	// uowProvider, both of which pass THEMSELVES to NewDeleter and peel with
+	// Unwrap. bd serve builds this role over a per-request timing wrapper
+	// above its externaldeps layer, and that wrapper answers FenceProvider
+	// instead (FenceProvider says why it is not an Unwrap). Only the lock comes
+	// from the provider found there: the write still runs through d.provider,
+	// so it is timed and policed exactly as an unguarded delete is.
+	//
+	// A GUARDED DELETE THAT FINDS NO FENCE IS REFUSED, not written unfenced.
+	// Every provider chain in this package ends in a *doltSQLProvider, so a
+	// miss means a decorator hides it, and writing anyway is the silent double
+	// delete the fence exists to stop: bd serve's v0 route did exactly that
+	// until its wrapper answered FenceProvider (GH#7243).
+	if req.ExpectedVersion != nil {
+		sp, ok := fenceTarget(d.provider)
+		if !ok {
+			return publicops.DeleteResult{}, fmt.Errorf("%w (%T)", errDeleteFenceUnreachable, d.provider)
 		}
-		return result, fmt.Sprintf("bd: delete %d issue(s)", result.Deleted), nil
-	})
+		var result publicops.DeleteResult
+		err := withDeleteFence(ctx, sp, req.IDs[0], func() error {
+			var ferr error
+			result, ferr = write(ctx)
+			return ferr
+		})
+		if err != nil {
+			return publicops.DeleteResult{}, err
+		}
+		return result, nil
+	}
+
+	return write(ctx)
 }
 
 // deleteInUOW is the whole deletion on one unit of work, shared by the preview
@@ -129,14 +177,13 @@ func deleteInUOW(ctx context.Context, uw UnitOfWork, req publicops.DeleteRequest
 	// duplicates before either ran.
 	if req.ExpectedVersion != nil {
 		if current := present[req.IDs[0]].RowVersion; current != *req.ExpectedVersion {
-			return publicops.DeleteResult{}, fmt.Errorf("%w: expected %d, got %d",
-				publicops.ErrVersionMismatch, *req.ExpectedVersion, current)
+			return publicops.DeleteResult{}, &publicops.VersionMismatchError{Expected: *req.ExpectedVersion, Current: current}
 		}
 	}
 
 	// The guard runs only when the request did not already say what to do
-	// about dependents. Under Cascade there is nothing outside the set by
-	// construction.
+	// about dependents. Under Cascade the use case reports the dependents the
+	// containment-only closure leaves behind, against the whole closure.
 	if !req.Cascade {
 		idSet := make(map[string]bool, len(req.IDs))
 		for _, id := range req.IDs {
@@ -183,6 +230,10 @@ func deleteInUOW(ctx context.Context, uw UnitOfWork, req publicops.DeleteRequest
 	result.Labels = deleted.LabelsCount
 	result.Events = deleted.EventsCount
 	result.ReferencesUpdated = deleted.ReferencesUpdated
+	result.DeletedIDs = deleted.DeletedIDs
+	if req.Cascade {
+		result.Orphaned = deleted.OrphanedIssues
+	}
 	return result, nil
 }
 

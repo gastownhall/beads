@@ -20,9 +20,12 @@ func setupConfigWorktree(t *testing.T) (mainRepoDir, worktreeDir, mainConfigPath
 		t.Fatalf("failed to create main repo dir: %v", err)
 	}
 
+	// maintenance.auto=false (gc.auto=0 on git before 2.29) keeps the commit from
+	// starting the detached "git maintenance run --auto" whose worktree-prune can
+	// remove the admin dir "git worktree add" is still writing (its locked file).
 	run := func(dir string, args ...string) {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := exec.Command("git", append([]string{"-c", "maintenance.auto=false", "-c", "gc.auto=0"}, args...)...)
 		cmd.Dir = dir
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v failed: %v\n%s", args, err, out)

@@ -684,7 +684,7 @@ async def _context_set(workspace_root: str) -> str:
             asyncio.to_thread(_resolve_workspace_root, workspace_root),
             timeout=5.0,  # Longer timeout to handle slow git operations
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.error(f"Git detection timed out after 5s for: {workspace_root}")
         return (
             f"Error: Git repository detection timed out.\n"
@@ -1230,7 +1230,8 @@ async def close_issue(
 
 @mcp.tool(
     name="reopen",
-    description="Reopen one or more closed issues. Sets status to 'open' and clears closed_at timestamp.",
+    description="Reopen one or more closed issues. Sets status to 'open' and clears closed_at timestamp. "
+    "Fails if none of the issues is closed.",
 )
 @with_workspace
 @require_context

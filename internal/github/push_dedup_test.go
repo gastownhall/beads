@@ -1,6 +1,10 @@
 package github
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -171,5 +175,46 @@ func TestPushContentHash(t *testing.T) {
 				t.Errorf("PushContentHash unchanged after %s mutation", name)
 			}
 		})
+	}
+}
+
+// TestPushContentHashInvalidatesPreFixHashes covers the repair half of
+// gastownhall/beads#5486: builds before the fix cached the desired closed
+// state's hash at create time even though the issue landed OPEN on GitHub, so
+// every later push short-circuited as "already in sync". The hash is versioned
+// so those stale stored hashes miss once; the sync that follows fetches the
+// issue, sees the state mismatch, and closes it.
+func TestPushContentHashInvalidatesPreFixHashes(t *testing.T) {
+	config := DefaultMappingConfig()
+
+	issue := &types.Issue{
+		Title:       "Done already",
+		Description: "Pushed closed, created OPEN pre-fix",
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		Status:      types.StatusClosed,
+		Labels:      []string{"backend"},
+	}
+
+	// The pre-fix formula: sha256 over title, body, desired state and
+	// NUL-joined sorted labels, each field followed by a 0 byte.
+	preFixHash := func(i *types.Issue) string {
+		desiredState := "open"
+		if i.Status == types.StatusClosed {
+			desiredState = "closed"
+		}
+		desiredLabels, _ := BeadsIssueToGitHubFields(i, config)["labels"].([]string)
+		sortedLabels := append([]string(nil), desiredLabels...)
+		slices.Sort(sortedLabels)
+		h := sha256.New()
+		for _, s := range []string{i.Title, i.Description, desiredState, strings.Join(sortedLabels, "\x00")} {
+			_, _ = h.Write([]byte(s))
+			_, _ = h.Write([]byte{0})
+		}
+		return hex.EncodeToString(h.Sum(nil))
+	}
+
+	if got, old := PushContentHash(issue, config), preFixHash(issue); got == old {
+		t.Errorf("PushContentHash = pre-fix hash (%s), want a versioned hash that differs so already-stuck issues are re-fetched and closed", got)
 	}
 }

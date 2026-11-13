@@ -82,10 +82,16 @@ func InstallCodex(global bool) error {
 // error instead of exiting. Used by bd init to integrate Codex setup
 // automatically.
 func InstallCodexProject() error {
+	return InstallCodexProjectTo(ProjectInstallOutput{})
+}
+
+// InstallCodexProjectTo is InstallCodexProject reporting to out.
+func InstallCodexProjectTo(out ProjectInstallOutput) error {
 	env, err := codexEnvProvider()
 	if err != nil {
 		return err
 	}
+	env.stdout, env.stderr = out.stdout(), out.stderr()
 	return installCodex(env, false)
 }
 

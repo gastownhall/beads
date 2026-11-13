@@ -11,27 +11,18 @@ import (
 )
 
 // validateIssueUpdatable checks if an issue can be updated.
+//
+// It is the CLI-only template guard that bd comment, bd note, bd priority and
+// bd tag (and the proxied comment and mutate routes) still run as a pre-read:
+// their writes do not go through issueops.Lifecycle.Update, whose role rule
+// (storage issueops.AuthorizeTemplateUpdate) guards bd update and bd assign on
+// every route. Until those commands move onto the role, this is their only
+// guard.
 // Uses the centralized validation package for consistency.
 func validateIssueUpdatable(id string, issue *types.Issue) error {
 	// Note: We use NotTemplate() directly instead of ForUpdate() to maintain
 	// backward compatibility - the original didn't check for nil issues.
 	return validation.NotTemplate()(id, issue)
-}
-
-// validateIssueClosable checks if an issue can be closed.
-// Uses the centralized validation package for consistency.
-//
-// actor is the current actor identity (may be empty in early-init contexts);
-// AssigneeMatches refuses the close when the bead is assigned to someone else
-// unless force is true. This is the authority guard for be-035.
-func validateIssueClosable(id string, issue *types.Issue, actor string, force bool) error {
-	// Note: We use individual validators instead of ForClose() to maintain
-	// backward compatibility - the original didn't check for nil issues.
-	return validation.Chain(
-		validation.NotTemplate(),
-		validation.NotPinned(force),
-		validation.AssigneeMatches(actor, force),
-	)(id, issue)
 }
 
 // validateIssueReassignable checks whether an assignee update may proceed:
@@ -43,10 +34,38 @@ func validateIssueClosable(id string, issue *types.Issue, actor string, force bo
 // newAssignee may be "" (unassign), which is fenced the same way. Do NOT call
 // it when the caller passed an explicit --if-assignee guard: that CAS names
 // the holder, so nothing about it is silent, and it is how sanctioned X→Y
-// transfers (park) work without --force (--force and --if-assignee are
-// mutually exclusive).
+// transfers (park) work without needing the fence bypass (under
+// --if-assignee, --force never arms the assignee half).
 func validateIssueReassignable(id string, issue *types.Issue, actor, newAssignee string, poolAliases func() []string, force bool) error {
 	return validation.AssigneeNotStolen(actor, newAssignee, poolAliases, force)(id, issue)
+}
+
+// ifRevisionAlreadyStale reports whether issue's own already-read RowVersion
+// no longer matches ifRevision — that is, whether this pre-write read already
+// knows the write is a foregone --if-revision precondition failure. Every
+// validateIssueReassignable call site that also honors --if-revision
+// (mc-zndi7.74) checks this FIRST and skips the fence when it is true.
+//
+// Why: --if-revision's correctness comes from the atomic compare-and-set
+// inside the guarded write itself, which already orders its own version check
+// ahead of the assignee-transfer fence (ExecuteUpdate checks ExpectedVersion
+// before calling AuthorizeAssigneeTransfer; the uow leg's
+// updatePreconditionsHold stands the fence down the same way before
+// ApplyUpdate's own version check runs). validateIssueReassignable's callers
+// above, though, read the issue in their OWN earlier, separately-timed
+// request — not inside that write's transaction — so a racing winner's commit
+// can land in the gap and leave this read already showing the winner's new
+// assignee. Without this check the loser's pre-read trips the live-claim
+// fence and reports the plain "already claimed" policy refusal (exit 1)
+// before ever reaching the guarded write that would have reported
+// precondition_failed (exit 13) — the wrong outcome for a caller whose whole
+// point in passing --if-revision was to get a crisp, retryable signal that it
+// lost a race rather than an ordinary policy refusal.
+//
+// ifRevision == nil (no active guard) always returns false, leaving every
+// unguarded caller's behavior exactly as before.
+func ifRevisionAlreadyStale(issue *types.Issue, ifRevision *int64) bool {
+	return ifRevision != nil && issue.RowVersion != *ifRevision
 }
 
 // storeClaimPoolAliases returns a lazy claim.pools reader against a direct

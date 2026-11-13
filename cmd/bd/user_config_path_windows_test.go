@@ -34,13 +34,13 @@ func TestMetricsOffRejectsUnsafeUserRootsInNativeProcess(t *testing.T) {
 		"BEADS_TEST_MODE=1",
 	)
 
-	gitInit := exec.Command("git", "init", "--quiet")
+	gitInit := gitCommand("init", "--quiet")
 	gitInit.Dir = sentinel
 	gitInit.Env = initEnv
 	if out, err := gitInit.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
-	gitHooks := exec.Command("git", "config", "core.hooksPath", ".git/hooks")
+	gitHooks := gitCommand("config", "core.hooksPath", ".git/hooks")
 	gitHooks.Dir = sentinel
 	gitHooks.Env = initEnv
 	if out, err := gitHooks.CombinedOutput(); err != nil {

@@ -151,6 +151,10 @@ type DependencySQLRepository interface {
 	GetBlockingInfo(ctx context.Context, issueIDs []string, opts DepListOpts) (BlockingInfo, error)
 	GetBlockingInfoAcrossIssuesAndWisps(ctx context.Context, issueIDs []string) (BlockingInfo, error)
 	IsBlocked(ctx context.Context, issueID string, opts DepListOpts) (bool, []string, error)
+	// IsBlockedBatch reads the stored transitive is_blocked flag for ids across
+	// both planes (issues win a cross-table collision); an id naming no row is
+	// absent from the map.
+	IsBlockedBatch(ctx context.Context, ids []string) (map[string]bool, error)
 
 	// DeleteAllForIDs takes actor for the same reason Delete above does: the
 	// edges it drops are journaled as dep_remove rows, and a cascade removal
@@ -161,8 +165,9 @@ type DependencySQLRepository interface {
 	// DetectCycleReport answers the same walk in the shape issueops.CycleDetector
 	// publishes: canonically ordered, and carrying every member of a cycle
 	// whether or not this database can describe it. DetectCycles above is the
-	// lossy legacy shape.
-	DetectCycleReport(ctx context.Context) (issueops.CycleReport, error)
+	// lossy legacy shape. req.IncludeTracks widens the walk; see
+	// issueops.DetectCyclesRequest.
+	DetectCycleReport(ctx context.Context, req issueops.DetectCyclesRequest) (issueops.CycleReport, error)
 
 	GetTree(ctx context.Context, rootID string, opts DepTreeOpts) ([]*types.TreeNode, error)
 	// WalkDependencyTree answers the tree walk in the shape issueops.TreeWalker
@@ -202,11 +207,14 @@ type DependencyUseCase interface {
 	CountsByIssueIDs(ctx context.Context, issueIDs []string) (map[string]*types.DependencyCounts, error)
 	GetBlockingInfo(ctx context.Context, issueIDs []string) (BlockingInfo, error)
 	IsBlocked(ctx context.Context, issueID string) (bool, []string, error)
+	// IsBlockedBatch is the repository read of the same name: the stored
+	// transitive is_blocked flag per id, both planes, absent = no row.
+	IsBlockedBatch(ctx context.Context, ids []string) (map[string]bool, error)
 	GetForIssueIDs(ctx context.Context, ids []string) (map[string][]*types.Dependency, error)
 	DetectCycles(ctx context.Context) ([][]*types.Issue, error)
 	// DetectCycleReport is the shape issueops.CycleDetector publishes; see the
 	// repository method of the same name.
-	DetectCycleReport(ctx context.Context) (issueops.CycleReport, error)
+	DetectCycleReport(ctx context.Context, req issueops.DetectCyclesRequest) (issueops.CycleReport, error)
 
 	GetDependencyTree(ctx context.Context, rootID string, opts DepTreeOpts) ([]*types.TreeNode, error)
 	// WalkDependencyTree is the shape issueops.TreeWalker publishes; see the
@@ -616,6 +624,17 @@ func (u *dependencyUseCaseImpl) GetBlockingInfo(ctx context.Context, issueIDs []
 	return out, nil
 }
 
+func (u *dependencyUseCaseImpl) IsBlockedBatch(ctx context.Context, ids []string) (map[string]bool, error) {
+	if len(ids) == 0 {
+		return map[string]bool{}, nil
+	}
+	out, err := u.depRepo.IsBlockedBatch(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("IsBlockedBatch: %w", err)
+	}
+	return out, nil
+}
+
 func (u *dependencyUseCaseImpl) IsBlocked(ctx context.Context, issueID string) (bool, []string, error) {
 	return u.isBlocked(ctx, issueID, false)
 }
@@ -643,8 +662,8 @@ func (u *dependencyUseCaseImpl) DetectCycles(ctx context.Context) ([][]*types.Is
 	return out, nil
 }
 
-func (u *dependencyUseCaseImpl) DetectCycleReport(ctx context.Context) (issueops.CycleReport, error) {
-	out, err := u.depRepo.DetectCycleReport(ctx)
+func (u *dependencyUseCaseImpl) DetectCycleReport(ctx context.Context, req issueops.DetectCyclesRequest) (issueops.CycleReport, error) {
+	out, err := u.depRepo.DetectCycleReport(ctx, req)
 	if err != nil {
 		return issueops.CycleReport{}, fmt.Errorf("DetectCycleReport: %w", err)
 	}

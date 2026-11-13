@@ -39,7 +39,12 @@ func bdRenamePrefixFail(t *testing.T, bd, dir string, args ...string) string {
 	return string(out)
 }
 
-func TestEmbeddedRenamePrefix(t *testing.T) {
+// TestEmbeddedRenamePrefixBasic was split from TestEmbeddedRenamePrefix
+// (originally ~197s, measured under --config=embedded) into 2 top-level
+// tests over disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedRenamePrefixBasic(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -114,6 +119,17 @@ func TestEmbeddedRenamePrefix(t *testing.T) {
 		dir, _, _ := bdInit(t, bd, "--prefix", "iv")
 		bdRenamePrefixFail(t, bd, dir, "UPPER")
 	})
+}
+
+func TestEmbeddedRenamePrefixEdgeCases(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	// ===== Invalid Prefix =====
 
 	t.Run("rename_invalid_chars", func(t *testing.T) {
 		dir, _, _ := bdInit(t, bd, "--prefix", "ic")

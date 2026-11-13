@@ -747,6 +747,49 @@ func RunSweeperProtectsLiveDependents(t *testing.T, ctx context.Context, fixture
 	sweeperAssertWispRows(t, ctx, fixture, 4, openChild, convoy, hooked, relater)
 }
 
+// RunSweeperProtectsTransitiveLiveDependents pins that protection propagates
+// through closed candidates: an open grandchild keeps both its closed parent
+// and closed grandparent. Otherwise sweeping the grandparent orphans a live
+// hierarchy even though the direct parent was correctly retained.
+func RunSweeperProtectsTransitiveLiveDependents(t *testing.T, ctx context.Context, fixture SweeperFixture) {
+	t.Helper()
+	if fixture.AddDependencies == nil {
+		t.Skip("fixture has no AddDependencies hook; cannot wire the hierarchy this case needs")
+	}
+	root := sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, "transitive", "root", true), nil)
+	middle := sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, "transitive", "middle", true), nil)
+	leafIssue := sweeperIssue(fixture, "transitive", "leaf", true)
+	leafIssue.Status = types.StatusOpen
+	leafIssue.ClosedAt = nil
+	leaf := sweeperSeed(t, ctx, fixture, leafIssue, nil)
+
+	if err := fixture.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "sweeper-seed",
+		Edges: []publicops.DependencyEdge{
+			{IssueID: middle, DependsOnID: root, Type: publicops.DepParentChild},
+			{IssueID: leaf, DependsOnID: middle, Type: publicops.DepParentChild},
+		},
+	}); err != nil {
+		t.Fatalf("wiring transitive hierarchy: %v", err)
+	}
+
+	request := publicops.SweepRequest{
+		Tier:                  publicops.SweepWispsPlane,
+		IDPattern:             sweeperPattern(fixture, "transitive"),
+		ClosedBefore:          &sweeperCutoff,
+		ProtectLiveDependents: true,
+	}
+	preview := sweeperSweep(t, ctx, fixture, sweeperAsDryRun(request))
+	if preview.Swept != 0 || preview.Skipped.LiveDependent != 2 {
+		t.Fatalf("dry run: Swept = %d, LiveDependent = %d; want 0 and 2", preview.Swept, preview.Skipped.LiveDependent)
+	}
+	result := sweeperSweep(t, ctx, fixture, request)
+	if result.Swept != 0 || result.Skipped.LiveDependent != 2 {
+		t.Fatalf("sweep: Swept = %d, LiveDependent = %d; want 0 and 2", result.Swept, result.Skipped.LiveDependent)
+	}
+	sweeperAssertWispRows(t, ctx, fixture, 3, root, middle, leaf)
+}
+
 // RunSweeperProtectsLiveDependentsAcrossPlanes pins that the live-dependent
 // protection reads BOTH dependency tables: a closed wisp that a live DURABLE
 // (issues-table) bead depends on through parent-child, tracks or blocks is

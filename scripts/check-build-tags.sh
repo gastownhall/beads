@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # check-build-tags.sh — source-time guard for ICU regression.
 #
-# Scans tracked scripts, CI workflows, and git hooks. Fails when a
+# Scans tracked shell scripts, git hooks, and the Makefile. Fails when a
 # `go build|test|run|generate|install` invocation neither:
 #   (a) carries -tags=...gms_pure_go itself, nor
 #   (b) appears in a file that sources .buildflags beforehand, nor
@@ -12,6 +12,9 @@
 # scanned file invokes Bazel, the script instead requires .bazelrc to set
 # `--@rules_go//go/config:tags=...gms_pure_go` for build (and so test/run).
 #
+# GitHub Actions `run` steps are no longer scanned here; they are checked
+# structurally by scripts/checkworkflowtags.
+#
 # This is the source-time companion to scripts/verify-cgo.sh (which is a
 # runtime check on release binaries). See engdocs/ICU-POLICY.md.
 
@@ -21,15 +24,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
-# Candidate files: shell scripts, workflows, git hooks, the Makefile.
+# Candidate files: shell scripts, git hooks, and the Makefile. Workflow `run`
+# steps are checked structurally by scripts/checkworkflowtags, so they are no
+# longer scanned for bare `go` commands here.
 mapfile -t candidates < <(
     git ls-files \
         '*.sh' \
-        '.github/workflows/*.yml' \
-        '.github/workflows/*.yaml' \
         '.github/scripts/*' \
         '.githooks/*' \
         'Makefile' 2>/dev/null || true
+)
+
+# ...but the Bazel census below is a separate question, and workflows are where
+# most `bazel` invocations live. Moving workflows to the Go checker dropped them
+# from `bazel_users` as a side effect, which would let .bazelrc lose its tag with
+# this gate still green — and scripts/checkworkflowtags does no Bazel handling at
+# all. So workflows keep feeding the census through their own list. Kept separate
+# from `candidates` on purpose: this list must NOT re-enter the `go`-verb scan.
+mapfile -t bazel_census_only < <(
+    git ls-files \
+        '.github/workflows/*.yml' \
+        '.github/workflows/*.yaml' 2>/dev/null || true
 )
 
 # Files that intentionally opt out of the policy.
@@ -163,6 +178,16 @@ for f in "${candidates[@]}"; do
         printf '       %s\n' "$line" >&2
         fail=1
     done < <(grep -n -E '\bgo[[:space:]]+(build|test|run|generate|install)\b' "$f" 2>/dev/null || true)
+done
+
+# Workflows contribute to the Bazel census only. Deliberately a separate loop
+# rather than another arm in the one above: nothing here may reach the `go`-verb
+# scan, which scripts/checkworkflowtags now owns for these files.
+for f in "${bazel_census_only[@]}"; do
+    [[ -f "$f" ]] || continue
+    if grep -Eq "$bazel_invocation_regex" "$f" 2>/dev/null; then
+        bazel_users+=("$f")
+    fi
 done
 
 # Bazel: every `bazel` invocation reads the committed .bazelrc, so the tag

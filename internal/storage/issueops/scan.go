@@ -57,6 +57,28 @@ var HeavyDropList = []string{
 	"payload",
 }
 
+// IssueSummaryColumns is the column list for types.IssueSummary hydration —
+// the narrowest projection, used by list-shaped rendering paths that never
+// dereference TEXT/JSON columns. Labels are hydrated separately (they live
+// in a join table, not a column); see hydrateSummaryLabels in search.go.
+// ScanIssueSummaryFrom below scans it positionally and must stay in agreement;
+// TestIssueSummaryColumnsMatchScanner pins that agreement by count.
+//
+// The trailing four are the wisp-plane markers. searchInTx merges the wisps
+// table into every non-SkipWisps result, so they are load-bearing rather than
+// optional: without them a wisp row and a durable one are indistinguishable in
+// `bd list --json`. All four are narrow scalars (TINYINT(1)/short VARCHAR)
+// present on both the issues and wisps tables, so they cost none of the
+// TEXT/JSON hydration this projection exists to skip.
+//
+// Unlike IssueSelectColumnsLite, this list is deliberately NOT a subsequence
+// of IssueSelectColumns in order (pinned sits beside the other scalars here,
+// not between wisp_type and is_template); the two are scanned by different
+// functions, so only each list's own agreement with its scanner matters.
+const IssueSummaryColumns = `id, title, status, priority, issue_type, assignee,
+	       pinned, created_at, updated_at, closed_at,
+	       ephemeral, no_history, wisp_type, storage_class`
+
 // IssueScanner is the common interface between *sql.Row and *sql.Rows,
 // allowing a single scan function to work with both single-row and
 // multi-row query results.
@@ -84,6 +106,7 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	var metadata sql.NullString
 	var rowLock sql.NullInt64       // row_lock column (NOT NULL DEFAULT 0); scanned defensively so NULL maps to 0
 	var storageClass sql.NullString // storage_class column (migration 0060); NULL = unset, resolves per EffectiveStorageClass
+	var arrivalSeq sql.NullInt64    // arrival_seq column (migration 0073); NULL = never stamped
 
 	dests := []any{
 		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
@@ -96,7 +119,7 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 		&molType,
 		&eventKind, &actor, &target, &payload,
 		&dueAt, &deferUntil,
-		&workType, &sourceSystem, &metadata, &rowLock, &storageClass,
+		&workType, &sourceSystem, &metadata, &rowLock, &storageClass, &arrivalSeq,
 		&leaseExpiresAt, &heartbeatAt, &leaseGrantedNode,
 	}
 	dests = append(dests, extra...)
@@ -228,6 +251,9 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	if storageClass.Valid {
 		issue.StorageClass = types.StorageClass(storageClass.String)
 	}
+	// arrival_seq (migration 0073); NULL = never stamped, read as 0. Only the
+	// journal's create seam writes it (stampArrivalSeqInTx).
+	issue.ArrivalSeq = arrivalSeq.Int64
 	// Lease columns (migration 0054); NULL when no active lease.
 	if leaseExpiresAt.Valid {
 		issue.LeaseExpiresAt = &leaseExpiresAt.Time
@@ -265,6 +291,7 @@ func ScanIssueLiteFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	var metadata sql.NullString
 	var rowLock sql.NullInt64       // row_lock column (NOT NULL DEFAULT 0); scanned defensively so NULL maps to 0
 	var storageClass sql.NullString // storage_class column (migration 0060); NULL = unset, resolves per EffectiveStorageClass
+	var arrivalSeq sql.NullInt64    // arrival_seq column (migration 0073); NULL = never stamped
 
 	dests := []any{
 		&issue.ID, &contentHash, &issue.Title,
@@ -277,7 +304,7 @@ func ScanIssueLiteFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 		&molType,
 		&eventKind, &actor, &target,
 		&dueAt, &deferUntil,
-		&workType, &sourceSystem, &metadata, &rowLock, &storageClass,
+		&workType, &sourceSystem, &metadata, &rowLock, &storageClass, &arrivalSeq,
 		&leaseExpiresAt, &heartbeatAt, &leaseGrantedNode,
 	}
 	dests = append(dests, extra...)
@@ -400,6 +427,9 @@ func ScanIssueLiteFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	if storageClass.Valid {
 		issue.StorageClass = types.StorageClass(storageClass.String)
 	}
+	// arrival_seq (migration 0073); NULL = never stamped, read as 0. Only the
+	// journal's create seam writes it (stampArrivalSeqInTx).
+	issue.ArrivalSeq = arrivalSeq.Int64
 	// Lease columns (migration 0054); NULL when no active lease.
 	if leaseExpiresAt.Valid {
 		issue.LeaseExpiresAt = &leaseExpiresAt.Time
@@ -413,6 +443,63 @@ func ScanIssueLiteFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 
 	issue.IsLitePartial = true
 	return &issue, nil
+}
+
+// ScanIssueSummaryFrom scans a narrow issue summary from any source
+// implementing IssueScanner. The caller must ensure the query selected
+// exactly IssueSummaryColumns in order. Labels are not populated here — the
+// caller must hydrate them separately (see hydrateSummaryLabels in search.go).
+func ScanIssueSummaryFrom(s IssueScanner) (*types.IssueSummary, error) {
+	var summary types.IssueSummary
+	var assignee sql.NullString
+	var pinned sql.NullInt64
+	var createdAtStr, updatedAtStr sql.NullString
+	var closedAt sql.NullTime
+	// Wisp-plane markers. Mapped exactly as ScanIssueFrom maps the same four
+	// columns, so a row read through either scanner carries identical values:
+	// the TINYINT(1) pair is truthy-on-nonzero, wisp_type takes any non-NULL
+	// string, and a NULL storage_class stays empty for EffectiveStorageClass to
+	// resolve per plane rather than being pinned to a literal here.
+	var ephemeral, noHistory sql.NullInt64
+	var wispType, storageClass sql.NullString
+
+	if err := s.Scan(
+		&summary.ID, &summary.Title, &summary.Status, &summary.Priority, &summary.IssueType,
+		&assignee, &pinned, &createdAtStr, &updatedAtStr, &closedAt,
+		&ephemeral, &noHistory, &wispType, &storageClass,
+	); err != nil {
+		return nil, err
+	}
+
+	if assignee.Valid {
+		summary.Assignee = assignee.String
+	}
+	if pinned.Valid && pinned.Int64 != 0 {
+		summary.Pinned = true
+	}
+	if createdAtStr.Valid {
+		summary.CreatedAt = ParseTimeString(createdAtStr.String)
+	}
+	if updatedAtStr.Valid {
+		summary.UpdatedAt = ParseTimeString(updatedAtStr.String)
+	}
+	if closedAt.Valid {
+		summary.ClosedAt = &closedAt.Time
+	}
+	if ephemeral.Valid && ephemeral.Int64 != 0 {
+		summary.Ephemeral = true
+	}
+	if noHistory.Valid && noHistory.Int64 != 0 {
+		summary.NoHistory = true
+	}
+	if wispType.Valid {
+		summary.WispType = types.WispType(wispType.String)
+	}
+	if storageClass.Valid {
+		summary.StorageClass = types.StorageClass(storageClass.String)
+	}
+
+	return &summary, nil
 }
 
 // ParseTimeString parses a time string from database TEXT columns (non-nullable).

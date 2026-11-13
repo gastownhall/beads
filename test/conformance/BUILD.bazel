@@ -1,4 +1,4 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "conformance",
@@ -6,3 +6,86 @@ go_library(
     importpath = "github.com/steveyegge/beads/test/conformance",
     visibility = ["//visibility:public"],
 )
+
+# The real-binary CLI tier of the storage conformance suite (formerly
+# conformance.yml's Tier 2, `go test -tags 'gms_pure_go e2e' ./test/conformance`):
+# bd init and the CLI corpus against the injected non-race bd_for_tests, as
+# that tier's freshly built gms_pure_go bd. Its files build under the e2e or
+# the integration tag, so --config=integration's lane runs it.
+#
+# Tags:
+#   integration-only: outside --config=integration rules_go drops both test
+#     files and the target would run zero tests.
+go_test(
+    name = "conformance_test",
+    srcs = [
+        "e2e_test.go",
+        "roundtrip_test.go",
+    ],
+    data = ["//cmd/bd:bd_for_tests"],
+    embed = [":conformance"],
+    env = {"BEADS_TEST_BD_BINARY": "$(rlocationpath //cmd/bd:bd_for_tests)"},
+    tags = ["integration-only"],
+    deps = ["//internal/testutil/bazeltest"],
+)
+
+# --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
+
+filegroup(
+    name = "repo_doc_files",
+    srcs = glob(
+        [
+            "**/*.md",
+            "**/*.mdx",
+        ],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = [
+            "**/*_test.go",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+        exclude = ["**/node_modules/**"],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+filegroup(
+    name = "repo_other_files",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "**/*.db",
+            "**/*.exe",
+            "**/*.go",
+            "**/*.md",
+            "**/*.mdx",
+            "**/*.out",
+            "**/*.prof",
+            "**/*.pyc",
+            "**/*.test",
+            "**/__pycache__/**",
+            "**/node_modules/**",
+        ],
+    ),
+    visibility = ["//:__subpackages__"],
+)
+
+# --- end repo_files ---

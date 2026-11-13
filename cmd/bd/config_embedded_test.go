@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -156,6 +157,189 @@ func TestEmbeddedConfig(t *testing.T) {
 		m := bdConfigListJSON(t, bd, dir)
 		if _, ok := m["test.removeme"]; ok {
 			t.Error("expected test.removeme to be absent from config list after unset")
+		}
+	})
+
+	// A key that config.yaml carries but IsYamlOnlyKey does not claim was
+	// unset from the database alone, so it stayed effective while bd reported
+	// success.
+	t.Run("config_unset_clears_yaml_layer", func(t *testing.T) {
+		configPath := filepath.Join(dir, ".beads", "config.yaml")
+		original, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("read config.yaml: %v", err)
+		}
+		if err := os.WriteFile(configPath, append(original, []byte("\ntest.fromyaml: yamlvalue\n")...), 0600); err != nil {
+			t.Fatalf("write config.yaml: %v", err)
+		}
+
+		out := bdConfig(t, bd, dir, "unset", "test.fromyaml")
+		if !strings.Contains(out, "config.yaml") {
+			t.Errorf("unset output should name config.yaml as a cleared location: %s", out)
+		}
+
+		after, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("read config.yaml after unset: %v", err)
+		}
+		if strings.Contains(string(after), "\ntest.fromyaml: yamlvalue") {
+			t.Errorf("test.fromyaml still set in config.yaml after unset:\n%s", after)
+		}
+		if !strings.Contains(string(after), "# test.fromyaml: yamlvalue") {
+			t.Errorf("expected the unset key to remain as a comment:\n%s", after)
+		}
+	})
+
+	// The location bd reports must be a record of the writes it made, not a
+	// guess made before them. GetYamlConfig reads viper's MERGED value -
+	// SetDefault values and AutomaticEnv included - so a database-backed key
+	// with a non-empty default looked present in config.yaml even in a
+	// workspace whose config.yaml never mentioned it, and bd claimed to have
+	// cleared a file it did not touch.
+	t.Run("config_unset_does_not_claim_a_yaml_write_it_did_not_make", func(t *testing.T) {
+		configPath := filepath.Join(dir, ".beads", "config.yaml")
+		before, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("read config.yaml: %v", err)
+		}
+		// no-hooks is not a yaml-only key and carries the default "false", so
+		// GetYamlConfig("no-hooks") is non-empty with or without a
+		// config.yaml entry. It is absent from this workspace's config.yaml.
+		if strings.Contains(string(before), "no-hooks") {
+			t.Skipf("this workspace's config.yaml already carries no-hooks; the probe needs a key it does not")
+		}
+
+		bdConfig(t, bd, dir, "set", "no-hooks", "true")
+		out := bdConfig(t, bd, dir, "unset", "no-hooks")
+
+		if strings.Contains(out, "config.yaml") {
+			t.Errorf("unset named config.yaml as a cleared location, but the key was never written there: %s", out)
+		}
+		if !strings.Contains(out, "in database") {
+			t.Errorf("unset should report the database as the cleared location: %s", out)
+		}
+
+		after, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("read config.yaml after unset: %v", err)
+		}
+		if string(after) != string(before) {
+			t.Errorf("config.yaml was rewritten by an unset that had nothing to clear:\nbefore:\n%s\nafter:\n%s", before, after)
+		}
+	})
+
+	// With no project config.yaml at all, a database-backed unset of a
+	// defaulted key used to delete the row and then fail on "no
+	// .beads/config.yaml found" - a non-zero exit over a half-applied unset,
+	// where before this PR bd printed "Unset <key>" and exited 0. "Not in
+	// config.yaml" is an answer, not a failure. The key has to be one with a
+	// non-empty default (no-hooks), since that is what made the old
+	// GetYamlConfig pre-check believe there was a config.yaml layer to clear.
+	t.Run("config_unset_succeeds_with_no_project_config_yaml", func(t *testing.T) {
+		configPath := filepath.Join(dir, ".beads", "config.yaml")
+		original, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("read config.yaml: %v", err)
+		}
+		t.Cleanup(func() {
+			if err := os.WriteFile(configPath, original, 0600); err != nil {
+				t.Fatalf("restore config.yaml: %v", err)
+			}
+		})
+
+		bdConfig(t, bd, dir, "set", "no-hooks", "true")
+		if err := os.Remove(configPath); err != nil {
+			t.Fatalf("remove config.yaml: %v", err)
+		}
+
+		out := bdConfig(t, bd, dir, "unset", "no-hooks")
+		if strings.Contains(out, "config.yaml") {
+			t.Errorf("unset named config.yaml with no config.yaml present: %s", out)
+		}
+		if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+			t.Errorf("unset recreated config.yaml: %v", err)
+		}
+	})
+
+	// Both --json routes changed shape in this PR and neither was pinned. The
+	// yaml-only payload carries `changed` because `location` is "" both when
+	// the key was never set and when a field is merely unpopulated — the human
+	// branch got an explicit "was not set" sentence for exactly that reason and
+	// the machine branch had no way to tell the two apart. The stderr
+	// side-effect hint is gated on the same bool: every hint is phrased in the
+	// completed past tense ("Backup config removed..."), so printing one on the
+	// no-op branch contradicts the line printed just above it.
+	t.Run("config_unset_json_payloads_and_no_op_hint", func(t *testing.T) {
+		configPath := filepath.Join(dir, ".beads", "config.yaml")
+		original, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("read config.yaml: %v", err)
+		}
+		t.Cleanup(func() {
+			if err := os.WriteFile(configPath, original, 0600); err != nil {
+				t.Fatalf("restore config.yaml: %v", err)
+			}
+		})
+		if strings.Contains(string(original), "backup.enabled") {
+			t.Skipf("this workspace's config.yaml already carries backup.enabled; the no-op probe needs a key it does not")
+		}
+
+		run := func(args ...string) (string, string) {
+			t.Helper()
+			cmd := exec.Command(bd, append([]string{"config"}, args...)...)
+			cmd.Dir = dir
+			cmd.Env = bdEnv(dir)
+			stdout, stderr, err := runCommandBuffers(t, cmd)
+			if err != nil {
+				t.Fatalf("bd config %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+			}
+			return stdout.String(), stderr.String()
+		}
+		decode := func(out string) map[string]interface{} {
+			t.Helper()
+			var payload map[string]interface{}
+			if err := json.Unmarshal([]byte(out), &payload); err != nil {
+				t.Fatalf("unset --json did not emit an object: %v\n%s", err, out)
+			}
+			return payload
+		}
+
+		// yaml-only route, key absent: no write, so no location, no hint.
+		stdout, stderr := run("unset", "--json", "backup.enabled")
+		payload := decode(stdout)
+		if changed, ok := payload["changed"].(bool); !ok || changed {
+			t.Errorf("yaml-only --json payload changed = %v (present=%v), want false: %s", payload["changed"], ok, stdout)
+		}
+		if payload["location"] != "" {
+			t.Errorf("yaml-only --json payload named a location for a key that was never set: %s", stdout)
+		}
+		if strings.Contains(stderr, "Hint:") {
+			t.Errorf("the no-op branch printed a side-effect hint asserting a removal that never happened:\n%s", stderr)
+		}
+
+		// yaml-only route, key present: the write is reported, and the hint
+		// that describes it is the one thing that should appear on stderr.
+		if err := os.WriteFile(configPath, append(original, []byte("\nbackup.enabled: true\n")...), 0600); err != nil {
+			t.Fatalf("write config.yaml: %v", err)
+		}
+		stdout, stderr = run("unset", "--json", "backup.enabled")
+		payload = decode(stdout)
+		if changed, ok := payload["changed"].(bool); !ok || !changed {
+			t.Errorf("yaml-only --json payload changed = %v, want true for a key the file carried: %s", payload["changed"], stdout)
+		}
+		if payload["location"] != "config.yaml" {
+			t.Errorf("yaml-only --json payload location = %v, want config.yaml: %s", payload["location"], stdout)
+		}
+		if !strings.Contains(stderr, "Backup config removed") {
+			t.Errorf("a real removal dropped its side-effect hint:\n%s", stderr)
+		}
+
+		// database-backed route: its payload names the layers it cleared.
+		run("set", "no-hooks", "true")
+		stdout, _ = run("unset", "--json", "no-hooks")
+		payload = decode(stdout)
+		if loc, _ := payload["location"].(string); !strings.Contains(loc, "database") {
+			t.Errorf("database-backed --json payload location = %v, want it to name the database: %s", payload["location"], stdout)
 		}
 	})
 

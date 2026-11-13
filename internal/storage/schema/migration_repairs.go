@@ -38,6 +38,7 @@ var preMigrationRepairs = map[repairKey]func(context.Context, DBConn) error{
 	{"schema_migrations", 58}:         repairWispDependenciesForwardShape,
 	{"ignored_schema_migrations", 7}:  ensureWispIsBlockedForRecompute,
 	{"ignored_schema_migrations", 15}: ensureWispIsBlockedForRecompute,
+	{"ignored_schema_migrations", 31}: seedEventsFromPreflipHistory,
 }
 
 // preMigrationRepair dispatches any repair registered for (source, version).
@@ -49,10 +50,14 @@ func (m migrationSource) preMigrationRepair(ctx context.Context, db DBConn, vers
 }
 
 // repairV53RigAndSplitTargets is the pre-0053 repair: it backfills the issues
-// rig/agent columns (#4502), the wisp_dependencies split-target columns
-// (#4555), and the dependencies id column that 0053 reads.
+// rig/agent columns (#4502), the wisps late columns 0053 copies into issues
+// (#6080), the wisp_dependencies split-target columns (#4555), and the
+// dependencies id column that 0053 reads.
 func repairV53RigAndSplitTargets(ctx context.Context, db DBConn) error {
 	if err := ensureIssuesRigColumns(ctx, db); err != nil {
+		return err
+	}
+	if err := ensureWispsLateColumns(ctx, db); err != nil {
 		return err
 	}
 	if err := ensureWispDependenciesSplitTargets(ctx, db); err != nil {
@@ -93,8 +98,39 @@ func commitNonlocalRepair(ctx context.Context, db DBConn, message string) error 
 //
 // It does NOT clear the staging area; a caller with anything possibly staged
 // must unstage first (see unstagePreExistingTables).
+//
+// The unforced DOLT_ADD is the right default — it keeps a clone-local table
+// out of a repair-labeled commit — but it is WRONG for a table whose own name
+// matches a seeded dolt_ignore pattern; such a caller must use
+// commitScopedIgnoredTableChange instead.
 func commitScopedTableChange(ctx context.Context, db DBConn, table, message string) error {
-	if err := DrainCall(ctx, db, "CALL DOLT_ADD(?)", table); err != nil {
+	return stageAndCommitScoped(ctx, db, "CALL DOLT_ADD(?)", table, message)
+}
+
+// commitScopedIgnoredTableChange is commitScopedTableChange for the one caller
+// whose table name matches a pattern in doltIgnorePatterns: the #4356 untrack
+// scratch, which "__temp__%" covers.
+//
+// Forcing is not optional there. Unforced staging filters ignore-matched names
+// out of the staging list SILENTLY (no error), and the filter classifies purely
+// by pattern without ever consulting HEAD — so a table that IS committed at HEAD
+// is dropped exactly like a fresh one. --skip-empty then turns the empty staged
+// diff into a successful no-op, and the caller's uncommitted delete delta
+// survives forever: dolt refuses a pull on any non-add unstaged delta whether or
+// not it is ignore-matched, so the store stays wedged while dolt_status hides
+// the cause.
+//
+// Scoping still holds: '-f' widens WHICH names may be staged, never HOW MANY,
+// so this stages exactly the one table named. Like its unforced twin it does not
+// clear the staging area.
+func commitScopedIgnoredTableChange(ctx context.Context, db DBConn, table, message string) error {
+	return stageAndCommitScoped(ctx, db, "CALL DOLT_ADD('-f', ?)", table, message)
+}
+
+// stageAndCommitScoped is the shared body of the two scoped-commit helpers.
+// They differ only in whether stageSQL forces past the dolt_ignore filter.
+func stageAndCommitScoped(ctx context.Context, db DBConn, stageSQL, table, message string) error {
+	if err := DrainCall(ctx, db, stageSQL, table); err != nil {
 		return fmt.Errorf("staging %s: %w", table, err)
 	}
 	return DrainCall(ctx, db, "CALL DOLT_COMMIT('-m', ?, '--skip-empty')", message)
@@ -611,6 +647,46 @@ func ensureIssuesRigColumns(ctx context.Context, db DBConn) error {
 	return nil
 }
 
+// ensureWispsLateColumns repairs #6080: migration 0053 copies
+// wisps.no_history and wisps.started_at into issues with a fixed
+// INSERT ... SELECT, guarded only on wisps existing, so PREPARE fails with
+// Error 1105 when either column is missing, even with no rig wisps. 0023 and
+// 0027 add those columns to wisps only IF wisps exists when they run, and
+// wisps is clone-local: a clone that created wisps after its main cursor
+// passed 23/27 keeps its creator's shape. From 2026-04-06 to 2026-04-14 that
+// creator was the WispsTableSchema constant, which lacked started_at, so such
+// clones stop at v52. These are exactly the wisps columns main migrations
+// <=52 add; the definitions match 0023/0027 and ignored/0001. Each column is
+// probed separately, so the repair is re-entrant after a partial run. An
+// absent wisps table needs nothing: 0053 skips every wisps statement then,
+// and ignored/0001 later creates the full shape.
+func ensureWispsLateColumns(ctx context.Context, db DBConn) error {
+	exists, err := schemaTableExists(ctx, db, "wisps")
+	if err != nil {
+		return fmt.Errorf("checking wisps table: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+	columns := []struct{ name, definition string }{
+		{"no_history", "TINYINT(1) DEFAULT 0"},
+		{"started_at", "DATETIME"},
+	}
+	for _, col := range columns {
+		present, err := schemaColumnExists(ctx, db, "wisps", col.name)
+		if err != nil {
+			return fmt.Errorf("checking wisps.%s: %w", col.name, err)
+		}
+		if present {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, "ALTER TABLE wisps ADD COLUMN "+col.name+" "+col.definition); err != nil {
+			return fmt.Errorf("adding wisps.%s for migration 0053: %w", col.name, err)
+		}
+	}
+	return nil
+}
+
 // ensureWispDependenciesSplitTargets repairs #4555: a mixed-vintage local
 // wisp_dependencies table can have the post-0005 id column while still lacking
 // one or more split target columns. Migration 0053 reads those columns when it
@@ -675,11 +751,17 @@ func wispDependenciesSplitTargetColumns() []struct{ name, definition string } {
 	}
 }
 
+// wispDependenciesSplitTargetBackfillSQL classifies each legacy
+// depends_on_id as an external, wisp or issue target. The wisp and issue
+// cases test the target with IN (SELECT id ...) rather than joining wisps or
+// issues: go-mysql-server applies the ON UPDATE CURRENT_TIMESTAMP of every
+// table a multi-table UPDATE joins, so a join here would stamp every wisp
+// and issue a wisp dependency points at (gastownhall/beads#5981).
 func wispDependenciesSplitTargetBackfillSQL() []string {
 	return []string{
 		"UPDATE wisp_dependencies SET depends_on_external = depends_on_id WHERE depends_on_external IS NULL AND depends_on_id LIKE 'external:%'",
-		"UPDATE wisp_dependencies wd JOIN wisps w ON w.id = wd.depends_on_id SET wd.depends_on_wisp_id = wd.depends_on_id WHERE wd.depends_on_wisp_id IS NULL AND wd.depends_on_external IS NULL",
-		"UPDATE wisp_dependencies wd JOIN issues i ON i.id = wd.depends_on_id SET wd.depends_on_issue_id = wd.depends_on_id WHERE wd.depends_on_issue_id IS NULL AND wd.depends_on_external IS NULL AND wd.depends_on_wisp_id IS NULL",
+		"UPDATE wisp_dependencies SET depends_on_wisp_id = depends_on_id WHERE depends_on_wisp_id IS NULL AND depends_on_external IS NULL AND depends_on_id IN (SELECT id FROM wisps)",
+		"UPDATE wisp_dependencies SET depends_on_issue_id = depends_on_id WHERE depends_on_issue_id IS NULL AND depends_on_external IS NULL AND depends_on_wisp_id IS NULL AND depends_on_id IN (SELECT id FROM issues)",
 		"UPDATE wisp_dependencies SET depends_on_external = depends_on_id WHERE depends_on_external IS NULL AND depends_on_wisp_id IS NULL AND depends_on_issue_id IS NULL",
 	}
 }

@@ -123,6 +123,18 @@ func TestRenderSectionMinimal(t *testing.T) {
 	if strings.Contains(section, "### Priorities") {
 		t.Error("minimal profile should not contain full priorities section")
 	}
+
+	// GH#6111: the memory bullet says which store each content class belongs
+	// in instead of prohibiting MEMORY.md, because harnesses ship a
+	// first-party memory whose index file has exactly that name. Assert the
+	// prohibition's absence rather than the replacement prose, so the pin
+	// survives any future rewording of the sentence.
+	if !strings.Contains(section, "bd remember") {
+		t.Error("minimal profile should still teach bd remember")
+	}
+	if strings.Contains(section, "MEMORY.md") {
+		t.Error("minimal profile should not name MEMORY.md")
+	}
 }
 
 func TestCodexSectionBody(t *testing.T) {
@@ -145,6 +157,16 @@ func TestCodexSectionBody(t *testing.T) {
 	}
 	if strings.Contains(body, "BEGIN BEADS") || strings.Contains(body, "END BEADS") {
 		t.Error("CodexSectionBody should not include managed markers")
+	}
+
+	// GH#6111, as above: the memory bullet describes the split instead of
+	// banning per-tool memory files. This body spelled its prohibition "ad hoc
+	// memory files" and never named MEMORY.md, so checking only the file name
+	// would assert nothing about what this surface used to emit.
+	for _, unwanted := range []string{"MEMORY.md", "ad hoc memory files"} {
+		if strings.Contains(body, unwanted) {
+			t.Errorf("CodexSectionBody should not prohibit %q", unwanted)
+		}
 	}
 }
 
@@ -517,5 +539,39 @@ func TestReplaceSectionWithOptsDetectsRemoteChange(t *testing.T) {
 	}
 	if strings.Contains(result, "bd dolt push") {
 		t.Error("replaced content should not contain 'bd dolt push' with HasRemote=false")
+	}
+}
+
+// A user-level section loads in every repository, so it must not say the
+// current one uses bd, and its task-tracking rules hold only in repositories
+// that do. The wording is matched against the templates' text, so a template
+// edit that the rewording no longer finds fails here.
+func TestRenderSectionUserLevelAppliesOnlyInBeadsRepositories(t *testing.T) {
+	for _, profile := range []Profile{ProfileMinimal, ProfileFull} {
+		section := RenderSectionWithOpts(profile, UserLevelRenderOpts())
+		if strings.Contains(section, "This project uses") {
+			t.Errorf("%s user-level section says the current project uses bd:\n%s", profile, section)
+		}
+		if n := strings.Count(section, userLevelScope); n != 1 {
+			t.Errorf("%s user-level section states its scope %d times, want 1", profile, n)
+		}
+	}
+	rules := map[Profile][]string{
+		ProfileMinimal: {
+			"- In a beads repository, use `bd` for ALL task tracking — do NOT use TodoWrite",
+			"- In a beads repository, use `bd remember` for durable project facts",
+		},
+		ProfileFull: {
+			"**IMPORTANT**: In a beads repository, use **bd (beads)** for ALL issue tracking.",
+			"- ✅ In a beads repository, use bd for ALL task tracking",
+		},
+	}
+	for profile, want := range rules {
+		section := RenderSectionWithOpts(profile, UserLevelRenderOpts())
+		for _, rule := range want {
+			if !strings.Contains(section, rule) {
+				t.Errorf("%s user-level section lacks the scoped rule %q", profile, rule)
+			}
+		}
 	}
 }

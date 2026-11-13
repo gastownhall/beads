@@ -1,6 +1,6 @@
 ---
 title: "bd merge-slot"
-description: "Merge-slot gates serialize conflict resolution in the merge queue."
+description: "Manage merge-slot gates for serialized conflict resolution"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -27,7 +27,7 @@ Examples:
   bd merge-slot release             # Release the slot
 
 ```
-bd merge-slot [flags]
+bd merge-slot [command]
 ```
 
 ## bd merge-slot acquire

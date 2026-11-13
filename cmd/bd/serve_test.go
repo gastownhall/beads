@@ -13,10 +13,11 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
-	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/httpapi"
 	"github.com/steveyegge/beads/internal/storage"
@@ -29,7 +30,10 @@ import (
 // deliberately, rather than arriving as one nobody designed.
 //
 // Every flag added here defaults to the behavior that existed without it, so
-// `bd serve` with no arguments is the same server it has always been.
+// a flag's default is never what changes `bd serve` with no arguments from
+// one release to the next. For --large-apply-ceiling that behavior is
+// httpapi.DefaultLargeApplyCeiling, the ceiling the server applies when none
+// is configured.
 func TestServeFlags(t *testing.T) {
 	var got []string
 	serveCmd.Flags().VisitAll(func(f *pflag.Flag) { got = append(got, f.Name) })
@@ -37,18 +41,20 @@ func TestServeFlags(t *testing.T) {
 
 	want := []string{
 		"addr", "allow-non-loopback", "allowed-host", "auth-token-file",
-		"insecure-no-auth",
+		"insecure-no-auth", "large-apply-ceiling",
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("bd serve flags = %v, want %v", got, want)
 	}
 
 	// The defaults ARE the compatibility promise: no token file, no extra
-	// hosts, and no waiver.
+	// hosts, no waiver, and the large-apply ceiling that SERVE_RUNBOOK.md
+	// sizes an orchestrator's stop grace against.
 	for _, tc := range []struct{ flag, want string }{
 		{"auth-token-file", ""},
 		{"insecure-no-auth", "false"},
 		{"allowed-host", "[]"},
+		{"large-apply-ceiling", "5m0s"},
 	} {
 		f := serveCmd.Flags().Lookup(tc.flag)
 		if f == nil {
@@ -129,6 +135,98 @@ func TestServeSkipsPostCommandMaintenance(t *testing.T) {
 	// And strict readonly still wins over everything, serve included.
 	if runsPostCommandMaintenance("update", true) {
 		t.Error("strict readonly no longer suppresses post-command maintenance")
+	}
+}
+
+// TestOnlyOneShotCommandsMemoizeRemoteReads (bts-xpw.3.14.6): an http
+// transport's read memo answers a repeated row read from a response already
+// received, which is only right for a command that exits within seconds. bd
+// serve answering other clients, and a --watch or --follow poll, would show a
+// snapshot instead of the changes they exist to show.
+func TestOnlyOneShotCommandsMemoizeRemoteReads(t *testing.T) {
+	command := func(name string, args ...string) *cobra.Command {
+		t.Helper()
+		cmd := &cobra.Command{Use: name}
+		cmd.Flags().BoolP("watch", "w", false, "")
+		cmd.Flags().Bool("follow", false, "")
+		if err := cmd.ParseFlags(args); err != nil {
+			t.Fatalf("%s %v: %v", name, args, err)
+		}
+		return cmd
+	}
+	for _, tc := range []struct {
+		cmd  *cobra.Command
+		args string
+		want bool
+	}{
+		{command("show"), "show", true},
+		{command("list"), "list", true},
+		{command("update"), "update", true},
+		{command("show", "--watch"), "show --watch", false},
+		{command("list", "-w"), "list -w", false},
+		{command("show", "--watch=false"), "show --watch=false", true},
+		{command("tail", "--follow"), "events tail --follow", false},
+		{command(serveCmdName), "serve", false},
+		{&cobra.Command{Use: "close"}, "close (no watch flag at all)", true},
+	} {
+		if got := commandMemoizesReads(tc.cmd); got != tc.want {
+			t.Errorf("bd %s: commandMemoizesReads = %v, want %v", tc.args, got, tc.want)
+		}
+	}
+}
+
+// TestReadMemoOptInReadsTheRealPollingFlags (mc-5dkzp): the synthetic commands
+// above pin the denylist's logic; this pins it against the commands that really
+// poll. Renaming a polling flag, or giving it another spelling, must not quietly
+// memoize a poll.
+func TestReadMemoOptInReadsTheRealPollingFlags(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cmd  *cobra.Command
+		args []string
+	}{
+		{"show --watch", showCmd, []string{"--watch"}},
+		{"show -w", showCmd, []string{"-w"}},
+		{"list --watch", listCmd, []string{"--watch"}},
+		{"list -w", listCmd, []string{"-w"}},
+		{"events tail --follow", eventsTailCmd, []string{"--follow"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetCommandFlags(tc.cmd)
+			t.Cleanup(func() { resetCommandFlags(tc.cmd) })
+			if !commandMemoizesReads(tc.cmd) {
+				t.Fatalf("bd %s without the flag: commandMemoizesReads = false, want true (a one-shot read)", tc.cmd.Name())
+			}
+			if err := tc.cmd.ParseFlags(tc.args); err != nil {
+				t.Fatalf("parse %v: %v", tc.args, err)
+			}
+			if commandMemoizesReads(tc.cmd) {
+				t.Errorf("bd %s: commandMemoizesReads = true, want false (a poll must see other writers)", tc.name)
+			}
+		})
+	}
+	if commandMemoizesReads(serveCmd) {
+		t.Errorf("bd serve: commandMemoizesReads = true, want false (a server answers other clients)")
+	}
+}
+
+// TestReadMemoKillSwitchTurnsTheMemoOff (mc-5dkzp): BD_HTTP_READ_MEMO=0 takes
+// the memo away from every command, so an operator who suspects a stale read
+// can rule it out without a rebuild. Any other value leaves the default.
+func TestReadMemoKillSwitchTurnsTheMemoOff(t *testing.T) {
+	oneShot := &cobra.Command{Use: "show"}
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{
+		{"", true},
+		{"1", true},
+		{"0", false},
+	} {
+		t.Setenv(readMemoEnvVar, tc.value)
+		if got := commandMemoizesReads(oneShot); got != tc.want {
+			t.Errorf("%s=%q: commandMemoizesReads(show) = %v, want %v", readMemoEnvVar, tc.value, got, tc.want)
+		}
 	}
 }
 
@@ -484,8 +582,7 @@ func runServeUnderReadonly(t *testing.T, dir string) (string, error) {
 	// without this a directory with no workspace would still resolve to
 	// whichever one an earlier test in this binary left behind — and "no
 	// workspace" is the whole premise of the ordering assertion above.
-	beads.ResetCaches()
-	t.Cleanup(beads.ResetCaches)
+	resetRepoCachesForTest(t)
 
 	var err error
 	stderr := captureBootstrapStderr(t, func() { err = runServe() })
@@ -513,14 +610,17 @@ func withServeFlags(t *testing.T) {
 	addr, nonLoopback := serveAddr, serveAllowNonLoopback
 	token, insecure := serveAuthTokenFile, serveInsecureNoAuth
 	hosts := serveAllowedHosts
+	largeApplyCeiling := serveLargeApplyCeiling
 	t.Cleanup(func() {
 		serveAddr, serveAllowNonLoopback = addr, nonLoopback
 		serveAuthTokenFile, serveInsecureNoAuth = token, insecure
 		serveAllowedHosts = hosts
+		serveLargeApplyCeiling = largeApplyCeiling
 	})
 	serveAddr, serveAllowNonLoopback = "127.0.0.1:0", false
 	serveAuthTokenFile, serveInsecureNoAuth = "", false
 	serveAllowedHosts = nil
+	serveLargeApplyCeiling = httpapi.DefaultLargeApplyCeiling
 }
 
 func serveTokenFile(t *testing.T) string {
@@ -586,6 +686,20 @@ func TestServeConfigRefusesAnUnservablePosture(t *testing.T) {
 			apply:   func(*testing.T) { serveAllowedHosts = []string{"bd.beads.svc:8080"} },
 			wantErr: "--allowed-host",
 		},
+		{
+			name:    "a zero large-apply ceiling",
+			apply:   func(*testing.T) { serveLargeApplyCeiling = 0 },
+			wantErr: "--large-apply-ceiling",
+		},
+		{
+			name:    "a negative large-apply ceiling",
+			apply:   func(*testing.T) { serveLargeApplyCeiling = -time.Second },
+			wantErr: "--large-apply-ceiling",
+		},
+		{
+			name:  "a non-default large-apply ceiling",
+			apply: func(*testing.T) { serveLargeApplyCeiling = 90 * time.Second },
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clearServeEnv(t)
@@ -649,6 +763,7 @@ func TestServeConfigCarriesTheOperatorsChoicesThrough(t *testing.T) {
 	withServeFlags(t)
 	serveAuthTokenFile = serveTokenFile(t)
 	serveAllowedHosts = []string{"bd-proj.beads.svc.cluster.local", "bd-proj.beads.svc"}
+	serveLargeApplyCeiling = 90 * time.Second
 
 	cfg, err := resolveServeConfig()
 	if err != nil {
@@ -662,6 +777,15 @@ func TestServeConfigCarriesTheOperatorsChoicesThrough(t *testing.T) {
 	}
 	if cfg.InsecureNoAuth {
 		t.Error("InsecureNoAuth is set without the flag")
+	}
+	if cfg.LargeApplyCeiling != serveLargeApplyCeiling {
+		t.Errorf("LargeApplyCeiling = %s, want %s (--large-apply-ceiling did not reach the server config)", cfg.LargeApplyCeiling, serveLargeApplyCeiling)
+	}
+
+	var httpCfg httpapi.Config
+	cfg.applyTo(&httpCfg)
+	if httpCfg.LargeApplyCeiling != serveLargeApplyCeiling {
+		t.Errorf("serveOptions.applyTo did not carry LargeApplyCeiling through: got %s, want %s", httpCfg.LargeApplyCeiling, serveLargeApplyCeiling)
 	}
 }
 

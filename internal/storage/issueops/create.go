@@ -12,6 +12,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/depid"
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -40,6 +41,12 @@ type BatchContext struct {
 	// Singular creates leave this false and mint in place — they never run
 	// the dependency pass.
 	DeferVersionMint bool
+	// cache, when set, answers the per-issue presence/label lookups from one
+	// up-front batch read and buffers the batch's audit events for one
+	// bulk write (see createBatchCache). CreateIssuesInTxWithContext sets it
+	// on its private copy for multi-issue batches; it is never set on a
+	// caller's context.
+	cache *createBatchCache
 }
 
 // NewBatchContext reads config from the database and returns a BatchContext.
@@ -79,7 +86,13 @@ type CreateIssueResult struct {
 	// StaleRejected reports that the RejectStaleUpserts guard kept the stored
 	// row: nothing was written, and the issue's aux data must not be
 	// persisted by later batch stages either (bd-578h9.8).
-	StaleRejected         bool
+	StaleRejected bool
+	// RetiredSkipped reports that the row's explicit id is retired (a
+	// retaining sweep deleted it and kept its tombstone) and the batch's
+	// options said to skip such rows rather than refuse them
+	// (BatchCreateOptions.OnRetiredID, ConflictSkip): nothing was written, and
+	// the issue's aux data must not be persisted by later batch stages either.
+	RetiredSkipped        bool
 	persistedDependencies []persistedDependency
 	// persistedComments are the comments this create actually inserted, carried
 	// up to the entry point so their journal rows land AFTER the create's. A
@@ -90,6 +103,17 @@ type CreateIssueResult struct {
 	// Set only on the path that would otherwise have minted, so the batch
 	// mints for exactly the issues a singular create would have.
 	versionDeferred bool
+	// isNew is whether this create actually inserted a new row, as opposed
+	// to resolving to an already-existing one. On the per-row path
+	// (CreateIssueInTxWithResult) it is InsertIssueIfNew's result; a row
+	// written by deferredCreates' multi-row INSERT reaches
+	// finishCreateIssueInTx directly and is always new, since only an id
+	// absent from both planes is deferrable. The participation_generation
+	// write-fence (design §16.2b) needs this to choose
+	// RecordVersionForCreateInTx over RecordVersionInTx; a batch that defers
+	// its mint (BatchContext.DeferVersionMint) carries it here since the
+	// per-issue isNew local is out of scope by the time the batch mints.
+	isNew bool
 }
 
 type persistedDependency struct {
@@ -121,28 +145,16 @@ func mergeChangedTables(dst map[string]bool, src map[string]bool) map[string]boo
 
 func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string) (CreateIssueResult, error) {
 	var result CreateIssueResult
-	if err := PrepareIssueForInsert(issue, bc.CustomStatuses, bc.CustomTypes); err != nil {
+	issueTable, eventTable, outcome, err := prepareCreateIssueInTx(ctx, tx, bc, issue, actor)
+	if err != nil || outcome == prepareSkip {
 		return result, err
 	}
-
-	issueTable, eventTable := TableRouting(issue)
-
-	if err := assignCreateIssueIDInTx(ctx, tx, bc, issue, actor); err != nil {
-		return result, err
-	}
-	if bc.Opts.CreateOnly {
-		if err := EnsureIssueIDAvailableInTx(ctx, tx, issue.ID); err != nil {
-			return result, err
-		}
-	}
-
-	if skip, err := checkCrossTableIDCollision(ctx, tx, issue.ID, issueTable, bc.Opts); err != nil {
-		return result, err
-	} else if skip {
+	if outcome == prepareRetiredSkip {
+		result.RetiredSkipped = true
 		return result, nil
 	}
 
-	isNew, staleRejected, err := InsertIssueIfNew(ctx, tx, issueTable, issue, bc.Opts)
+	isNew, staleRejected, err := insertIssueIfNewCached(ctx, tx, issueTable, issue, bc.Opts, bc.cache)
 	if err != nil {
 		return result, err
 	}
@@ -156,7 +168,108 @@ func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, i
 		}
 		return result, nil
 	}
+	return finishCreateIssueInTx(ctx, tx, bc, issue, actor, issueTable, eventTable, isNew)
+}
+
+// prepareOutcome is what prepareCreateIssueInTx decided for one issue.
+type prepareOutcome int
+
+const (
+	// prepareWrite: the row is to be written.
+	prepareWrite prepareOutcome = iota
+	// prepareSkip: a cross-plane collision the options tolerate
+	// (ConflictSkip). Nothing is written for the row itself, but the issue
+	// stays in the batch, so its labels, comments and edges still merge.
+	prepareSkip
+	// prepareRetiredSkip: the explicit id is retired and the options say to
+	// skip such rows. Nothing at all is written for the issue.
+	prepareRetiredSkip
+)
+
+// prepareCreateIssueInTx is the part of a create before its row write:
+// normalization and validation, table routing, id assignment, the create-only
+// guard, the retired-id guard and the cross-plane collision check.
+//
+// THE RETIRED-ID GUARD covers the upsert-shaped creates (CreateOnly false:
+// the stores' CreateIssue, transactions, import, tracker sync) for an
+// EXPLICIT id; a create-only create meets the same rule inside
+// EnsureIssueIDAvailableInTx, and a generated id is never retired (the
+// generators skip tombstones). Without it an upsert would resurrect a row a
+// retaining sweep retired. A retired id with no live row is refused with
+// *publicops.IdempotencyExpiredError, unless the options say to skip it:
+// ConflictSkip or OnRetiredID skips it, and OnRetiredID, when set, reports it
+// under ConflictSkip too.
+func prepareCreateIssueInTx(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string) (issueTable, eventTable string, outcome prepareOutcome, err error) {
+	if err := PrepareIssueForInsert(issue, bc.CustomStatuses, bc.CustomTypes); err != nil {
+		return "", "", prepareWrite, err
+	}
+
+	issueTable, eventTable = TableRouting(issue)
+
+	explicitID := issue.ID != ""
+	// No claimed set. Each issue is written before the next one mints, so a
+	// mint sees every EARLIER issue's row; an explicit id a LATER issue of the
+	// same slice names is not seen, and a mint can still draw it.
+	if err := assignCreateIssueIDInTx(ctx, tx, bc, issue, actor, nil); err != nil {
+		return "", "", prepareWrite, err
+	}
+	if bc.Opts.CreateOnly {
+		// A batch that coordinated this id up front already holds its cell.
+		ensure := EnsureIssueIDAvailableInTx
+		if bc.cache.coordinatedID(issue.ID) {
+			ensure = checkIssueIDAvailableInTx
+		}
+		if err := ensure(ctx, tx, issue.ID); err != nil {
+			return "", "", prepareWrite, err
+		}
+		// The guard has just read both planes in this transaction and found
+		// no row with this id, so the cross-plane collision check below would
+		// re-read the sibling plane only to find the same nothing.
+		return issueTable, eventTable, prepareWrite, nil
+	}
+	if explicitID {
+		// Coordinate before the probe (CoordinateIDCreatesInTx): on READ
+		// COMMITTED a retaining sweep could otherwise commit between the probe
+		// and the upsert below. A batch that coordinated up front already did.
+		if !bc.cache.coordinatedID(issue.ID) {
+			if err := CoordinateIDCreatesInTx(ctx, tx, []string{issue.ID}); err != nil {
+				return "", "", prepareWrite, err
+			}
+		}
+		retired, err := bc.cache.retiredNotLive(ctx, tx, issue.ID)
+		if err != nil {
+			return "", "", prepareWrite, err
+		}
+		if retired != nil {
+			// Report before skipping, ConflictSkip or not, so a caller that
+			// counts the rows it wrote never counts a retired one.
+			if bc.Opts.OnRetiredID != nil {
+				bc.Opts.OnRetiredID(issue.ID)
+			}
+			if bc.Opts.ConflictSkip || bc.Opts.OnRetiredID != nil {
+				return issueTable, eventTable, prepareRetiredSkip, nil
+			}
+			return "", "", prepareWrite, idempotencyExpired(retired)
+		}
+	}
+
+	skip, err := checkCrossTableIDCollisionCached(ctx, tx, issue.ID, issueTable, bc.Opts, bc.cache)
+	if err != nil {
+		return "", "", prepareWrite, err
+	}
+	if skip {
+		return issueTable, eventTable, prepareSkip, nil
+	}
+	return issueTable, eventTable, prepareWrite, nil
+}
+
+// finishCreateIssueInTx is the part of a create after its row is written:
+// lease reconciliation, the created event, labels, comments, the child
+// counter, the journal entry and the version seam.
+func finishCreateIssueInTx(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor, issueTable, eventTable string, isNew bool) (CreateIssueResult, error) {
+	var result CreateIssueResult
 	result.markChanged(issueTable)
+	result.isNew = isNew
 
 	// Reconcile the ephemeral lease row with the accepted issue state
 	// (restore an imported lease / drop an orphaned one — see
@@ -169,13 +282,15 @@ func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, i
 	}
 
 	if isNew {
-		if err := RecordEventInTable(ctx, tx, eventTable, issue.ID, types.EventCreated, actor, ""); err != nil {
+		if bc.cache != nil {
+			bc.cache.bufferEvent(eventTable, createdAuxEvent(issue.ID, actor))
+		} else if err := RecordEventInTable(ctx, tx, eventTable, issue.ID, types.EventCreated, actor, ""); err != nil {
 			return result, fmt.Errorf("failed to record event for %s: %w", issue.ID, err)
 		}
 		result.markChanged(eventTable)
 	}
 
-	labelResult, err := PersistLabels(ctx, tx, issue, actor, eventTable)
+	labelResult, err := persistLabelsCached(ctx, tx, issue, actor, eventTable, bc.cache)
 	if err != nil {
 		return result, err
 	}
@@ -203,8 +318,9 @@ func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, i
 	}
 	// Journal the create once, after labels and comments are in the row's
 	// transaction, so the snapshot is the complete bead. The early returns above
-	// (collision skip, stale reject) wrote nothing and journal nothing.
-	if err := RecordEventInTx(ctx, tx, EventCreate, issue.ID, actor); err != nil {
+	// (collision skip, stale reject) wrote nothing and journal nothing. The
+	// record hands the row's arrival_seq back onto issue, which callers keep.
+	if err := RecordCreateEventInTx(ctx, tx, issue, actor); err != nil {
 		return result, err
 	}
 	// The version row is the create's LAST durable-state write. A batch
@@ -213,6 +329,10 @@ func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, i
 	// create has nothing after this point and mints here.
 	if bc.DeferVersionMint {
 		result.versionDeferred = true
+	} else if isNew {
+		if err := RecordVersionForCreateInTx(ctx, tx, issue.ID, actor); err != nil {
+			return result, err
+		}
 	} else if err := RecordVersionInTx(ctx, tx, issue.ID, actor); err != nil {
 		return result, err
 	}
@@ -230,7 +350,10 @@ func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, i
 	return result, nil
 }
 
-func assignCreateIssueIDInTx(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string) error {
+// assignCreateIssueIDInTx mints issue an id when it names none, passing over
+// the ids claimed holds (GenerateIssueIDInTable), and otherwise validates the
+// prefix of the one it names.
+func assignCreateIssueIDInTx(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string, claimed map[string]bool) error {
 	if issue.ID == "" {
 		issueTable, _ := TableRouting(issue)
 		prefix := bc.ConfigPrefix
@@ -242,7 +365,7 @@ func assignCreateIssueIDInTx(ctx context.Context, tx DBTX, bc *BatchContext, iss
 			prefix = bc.ConfigPrefix + "-wisp"
 		}
 		var err error
-		issue.ID, err = GenerateIssueIDInTable(ctx, tx, issueTable, prefix, issue, actor)
+		issue.ID, err = GenerateIssueIDInTable(ctx, tx, issueTable, prefix, issue, actor, claimed)
 		if err != nil {
 			return fmt.Errorf("failed to generate issue ID: %w", err)
 		}
@@ -292,6 +415,17 @@ func CreateIssuesInTxWithResult(ctx context.Context, tx DBTX, issues []*types.Is
 	return CreateIssuesInTxWithContext(ctx, tx, bc, issues, actor)
 }
 
+// deferredVersion carries a create's issue id and whether it was a genuinely
+// new row (CreateIssueResult.isNew) from the per-issue loop in
+// CreateIssuesInTxWithContext to that function's own final mint pass. The
+// loop fills it from both of its write paths: a row CreateIssueInTxWithResult
+// wrote on its own, and a row deferredCreates wrote in a multi-row INSERT and
+// finished through finishCreateIssueInTx, which is always new.
+type deferredVersion struct {
+	id    string
+	isNew bool
+}
+
 // CreateIssuesInTxWithContext is CreateIssuesInTxWithResult with a
 // caller-supplied BatchContext. Callers that split config reads from row
 // writes across SQL sessions (doltTransaction's wisp tier) build the context
@@ -327,25 +461,79 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 	// version of each issue must carry them (one version per issue at
 	// creation, minted last).
 	batch.DeferVersionMint = true
+	if len(issues) >= createBatchCacheMinIssues && !createFastPathsDisabled.Load() {
+		cache, err := newCreateBatchCache(ctx, tx, issues, opts)
+		if err != nil {
+			return CreateIssuesResult{}, err
+		}
+		batch.cache = cache
+	}
 
 	result := CreateIssuesResult{}
 	accepted := issues[:0:0]
-	var toVersion []string
+	var toVersion []deferredVersion
+	record := func(issue *types.Issue, issueResult CreateIssueResult) {
+		result.merge(issueResult.ChangedTables)
+		if issueResult.versionDeferred {
+			toVersion = append(toVersion, deferredVersion{id: issue.ID, isNew: issueResult.isNew})
+		}
+		if issueResult.StaleRejected || issueResult.RetiredSkipped {
+			// A stale snapshot or a retired id: nothing of the issue was
+			// written, so keep its deps out of the batch too.
+			return
+		}
+		accepted = append(accepted, issue)
+	}
+	// Brand-new rows are written in multi-row INSERTs (see deferredCreates):
+	// a run of them is prepared in order, written together, then finished in
+	// order, before the next issue that is not one of them is touched.
+	var deferred deferredCreates
+	flush := func() error {
+		results, err := deferred.flush(ctx, tx, &batch, actor)
+		if err != nil {
+			return err
+		}
+		for i, issueResult := range results {
+			record(deferred.created[i].issue, issueResult)
+		}
+		deferred.created = deferred.created[:0]
+		return nil
+	}
 	for _, issue := range issues {
+		if batch.cache.deferrable(issue, opts) {
+			// deferrable requires the id absent from both planes, so the
+			// cross-plane collision check cannot ask for a skip here.
+			issueTable, eventTable, _, err := prepareCreateIssueInTx(ctx, tx, &batch, issue, actor)
+			if err != nil {
+				// The issues before this one are written (and can fail) first,
+				// as they would have been one at a time.
+				if flushErr := flush(); flushErr != nil {
+					return CreateIssuesResult{}, flushErr
+				}
+				return CreateIssuesResult{}, err
+			}
+			batch.cache.markInserted(issueTable, issue.ID)
+			deferred.created = append(deferred.created, deferredCreate{issue: issue, issueTable: issueTable, eventTable: eventTable})
+			continue
+		}
+		if err := flush(); err != nil {
+			return CreateIssuesResult{}, err
+		}
 		issueResult, err := CreateIssueInTxWithResult(ctx, tx, &batch, issue, actor)
 		if err != nil {
 			return CreateIssuesResult{}, err
 		}
-		result.merge(issueResult.ChangedTables)
-		if issueResult.versionDeferred {
-			toVersion = append(toVersion, issue.ID)
-		}
-		if issueResult.StaleRejected {
-			continue // stale snapshot: keep its deps out of the batch too
-		}
-		accepted = append(accepted, issue)
+		record(issue, issueResult)
+	}
+	if err := flush(); err != nil {
+		return CreateIssuesResult{}, err
 	}
 	issues = accepted
+	// The buffered created/label_added events land before anything else in
+	// the batch could read the events tables (nothing in it does).
+	if err := batch.cache.flushEvents(ctx, tx); err != nil {
+		return CreateIssuesResult{}, err
+	}
 
 	depResult, err := PersistDependenciesWithOptionsResult(ctx, tx, issues, actor, opts)
 	if err != nil {
@@ -365,7 +553,9 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 	if err != nil {
 		return CreateIssuesResult{}, err
 	}
-	recomputed, err := RecomputeIsBlockedInTxWithResult(ctx, tx, issueIDs, wispIDs)
+	// The ids are this batch's rows, most of them fresh and edgeless: let the
+	// recompute skip the union statements for those (planRecomputeInTx).
+	recomputed, err := recomputeIsBlockedInTxWithResult(ctx, tx, issueIDs, wispIDs, recomputeOptions{splitEdgeless: true})
 	if err != nil {
 		return CreateIssuesResult{}, err
 	}
@@ -380,8 +570,14 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 	// outgoing edge set. PersistDependenciesWithOptionsResult writes the edge
 	// rows directly and mints nothing itself, so this is the one version per
 	// issue at creation. Wisps are excluded by the seam.
-	for _, id := range toVersion {
-		if err := RecordVersionInTx(ctx, tx, id, actor); err != nil {
+	for _, dv := range toVersion {
+		if dv.isNew {
+			if err := RecordVersionForCreateInTx(ctx, tx, dv.id, actor); err != nil {
+				return CreateIssuesResult{}, err
+			}
+			continue
+		}
+		if err := RecordVersionInTx(ctx, tx, dv.id, actor); err != nil {
 			return CreateIssuesResult{}, err
 		}
 	}
@@ -522,16 +718,42 @@ func createBlockedRecomputeIDs(ctx context.Context, tx DBTX, issues []*types.Iss
 		isWisp := IsWisp(issue)
 		add(issue.ID, isWisp)
 	}
+	// The rows a created edge affects are AffectedByDepChange(ForWisp)InTx's:
+	// its source, plus the waiters on a parent-child edge's target, closed
+	// over parent-child descendants. That closure distributes over union, so
+	// the batch seeds every edge at once and expands once, rather than
+	// re-walking the descendants of each edge's source separately.
+	var depIssueSeed, depWispSeed, spawnerIDs []string
+	depIssueSeen, depWispSeen, spawnerSeen := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, dependency := range dependencies {
-		var affectedIssues, affectedWisps []string
-		var err error
-		if dependency.sourceWisp {
-			affectedIssues, affectedWisps, err = AffectedByDepChangeForWispInTx(ctx, tx, dependency.source, dependency.target, dependency.depType)
-		} else {
-			affectedIssues, affectedWisps, err = AffectedByDepChangeInTx(ctx, tx, dependency.source, dependency.target, dependency.depType)
+		switch dependency.depType {
+		case types.DepBlocks, types.DepConditionalBlocks, types.DepWaitsFor, types.DepParentChild:
+		default:
+			continue
 		}
+		if dependency.sourceWisp {
+			if !depWispSeen[dependency.source] {
+				depWispSeen[dependency.source] = true
+				depWispSeed = append(depWispSeed, dependency.source)
+			}
+		} else if !depIssueSeen[dependency.source] {
+			depIssueSeen[dependency.source] = true
+			depIssueSeed = append(depIssueSeed, dependency.source)
+		}
+		if dependency.depType == types.DepParentChild && dependency.target != "" && !spawnerSeen[dependency.target] {
+			spawnerSeen[dependency.target] = true
+			spawnerIDs = append(spawnerIDs, dependency.target)
+		}
+	}
+	if len(depIssueSeed) > 0 || len(depWispSeed) > 0 {
+		if len(spawnerIDs) > 0 {
+			if err := loadWaitersOnSpawnerIDsInTx(ctx, tx, spawnerIDs, &depIssueSeed, depIssueSeen, &depWispSeed, depWispSeen); err != nil {
+				return nil, nil, fmt.Errorf("affected by created dependencies: %w", err)
+			}
+		}
+		affectedIssues, affectedWisps, err := expandByParentChildDescendantsInTx(ctx, tx, depIssueSeed, depWispSeed, depIssueSeen, depWispSeen)
 		if err != nil {
-			return nil, nil, fmt.Errorf("affected by created dependency %s -> %s: %w", dependency.source, dependency.target, err)
+			return nil, nil, fmt.Errorf("affected by created dependencies: %w", err)
 		}
 		for _, id := range affectedIssues {
 			add(id, false)
@@ -561,6 +783,10 @@ func PrepareIssueForInsert(issue *types.Issue, customStatuses, customTypes []str
 	} else {
 		issue.UpdatedAt = issue.UpdatedAt.UTC()
 	}
+	// Optional timestamps (closed_at, started_at, due_at, …) may arrive from a
+	// JSONL import carrying a non-UTC offset; normalize them to UTC so the stored
+	// instant matches created_at/updated_at instead of keeping local wall-clock.
+	issue.NormalizeOptionalTimestampsToUTC()
 
 	// Ensure closed issues have a closed_at timestamp.
 	if issue.Status == types.StatusClosed && issue.ClosedAt == nil {
@@ -578,6 +804,12 @@ func PrepareIssueForInsert(issue *types.Issue, customStatuses, customTypes []str
 	if issue.ContentHash == "" {
 		issue.ContentHash = issue.ComputeContentHash()
 	}
+	// arrival_seq is assigned by storage alone, at the journal's create seam
+	// (stampArrivalSeqInTx). A value carried in from a caller, an import, or a
+	// row being moved between planes is never stored, and the struct must not
+	// claim one the row does not have; the create record hands the row's own
+	// stamp back (RecordCreateEventInTx).
+	issue.ArrivalSeq = 0
 	return nil
 }
 
@@ -643,6 +875,12 @@ func AllWisps(issues []*types.Issue) bool {
 //
 //nolint:gosec // G201: siblingTable is one of two hardcoded constants
 func checkCrossTableIDCollision(ctx context.Context, tx DBTX, id, issueTable string, opts storage.BatchCreateOptions) (skip bool, err error) {
+	return checkCrossTableIDCollisionCached(ctx, tx, id, issueTable, opts, nil)
+}
+
+// checkCrossTableIDCollisionCached is checkCrossTableIDCollision reading the
+// sibling plane's presence from cache when it covers id.
+func checkCrossTableIDCollisionCached(ctx context.Context, tx DBTX, id, issueTable string, opts storage.BatchCreateOptions, cache *createBatchCache) (skip bool, err error) {
 	if id == "" {
 		return false, nil
 	}
@@ -650,8 +888,8 @@ func checkCrossTableIDCollision(ctx context.Context, tx DBTX, id, issueTable str
 	if issueTable == "wisps" {
 		siblingTable = "issues"
 	}
-	var siblingCount int
-	if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id = ?`, siblingTable), id).Scan(&siblingCount); err != nil {
+	siblingCount, err := cache.rowCount(ctx, tx, siblingTable, id)
+	if err != nil {
 		return false, fmt.Errorf("failed to check cross-table ID collision for %s: %w", id, err)
 	}
 	if siblingCount == 0 {
@@ -687,9 +925,18 @@ func checkCrossTableIDCollision(ctx context.Context, tx DBTX, id, issueTable str
 //
 //nolint:gosec // G201: table is a hardcoded constant
 func InsertIssueIfNew(ctx context.Context, tx DBTX, issueTable string, issue *types.Issue, opts storage.BatchCreateOptions) (isNew bool, staleRejected bool, err error) {
+	return insertIssueIfNewCached(ctx, tx, issueTable, issue, opts, nil)
+}
+
+// insertIssueIfNewCached is InsertIssueIfNew reading the row's presence from
+// cache when it covers the id, and recording the write in cache.
+func insertIssueIfNewCached(ctx context.Context, tx DBTX, issueTable string, issue *types.Issue, opts storage.BatchCreateOptions, cache *createBatchCache) (isNew bool, staleRejected bool, err error) {
 	var existingCount int
-	if issue.ID != "" {
-		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id = ?`, issueTable), issue.ID).Scan(&existingCount); err != nil {
+	// A create-only insert that does not skip conflicts never reads the
+	// count: the strict INSERT itself refuses a duplicate.
+	if issue.ID != "" && (!opts.CreateOnly || opts.ConflictSkip) {
+		existingCount, err = cache.rowCount(ctx, tx, issueTable, issue.ID)
+		if err != nil {
 			return false, false, fmt.Errorf("failed to check issue existence for %s: %w", issue.ID, err)
 		}
 	}
@@ -703,6 +950,7 @@ func InsertIssueIfNew(ctx context.Context, tx DBTX, issueTable string, issue *ty
 			}
 			return false, false, err
 		}
+		cache.markInserted(issueTable, issue.ID)
 		return true, false, nil
 	}
 	if opts.RejectStaleUpserts && existingCount > 0 {
@@ -719,6 +967,7 @@ func InsertIssueIfNew(ctx context.Context, tx DBTX, issueTable string, issue *ty
 	if err := insertIssueIntoTable(ctx, tx, issueTable, issue, opts.RejectStaleUpserts); err != nil {
 		return false, false, fmt.Errorf("failed to insert issue %s: %w", issue.ID, err)
 	}
+	cache.markInserted(issueTable, issue.ID)
 	return existingCount == 0, false, nil
 }
 
@@ -744,6 +993,96 @@ func InsertIssueStrictInTx(ctx context.Context, tx DBTX, table string, issue *ty
 }
 
 func PersistLabels(ctx context.Context, tx DBTX, issue *types.Issue, actor, eventTable string) (CreateIssueResult, error) {
+	return persistLabelsCached(ctx, tx, issue, actor, eventTable, nil)
+}
+
+// createdAuxEvent is the created event RecordEventInTable mints for a new
+// issue, as an AuxEvent a batch can buffer.
+func createdAuxEvent(issueID, actor string) AuxEvent {
+	return AuxEvent{
+		IssueID:   issueID,
+		EventType: types.EventCreated,
+		Actor:     actor,
+		OldValue:  str(""),
+		NewValue:  str(""),
+	}
+}
+
+// labelAddedAuxEvent is the label_added event PersistLabels records for a
+// label its insert actually added.
+func labelAddedAuxEvent(issueID, actor, label string) AuxEvent {
+	return AuxEvent{
+		IssueID:   issueID,
+		EventType: types.EventLabelAdded,
+		Actor:     actor,
+		Comment:   str("Added label: " + label),
+	}
+}
+
+// persistLabelsCached is PersistLabels for a batch: with a cache it knows the
+// issue's stored labels before inserting, so the labels that are new land in
+// one multi-row INSERT and their label_added events are buffered, instead of
+// one INSERT IGNORE (plus a RowsAffected probe) and one event write per label.
+// The labels added, their order, and the events recorded are the same.
+func persistLabelsCached(ctx context.Context, tx DBTX, issue *types.Issue, actor, eventTable string, cache *createBatchCache) (CreateIssueResult, error) {
+	if cache == nil {
+		return persistLabelsPerRow(ctx, tx, issue, actor, eventTable)
+	}
+	var result CreateIssueResult
+	if len(issue.Labels) == 0 {
+		return result, nil
+	}
+	labelTable := "labels"
+	if IsWisp(issue) {
+		labelTable = "wisp_labels"
+	}
+	stored, err := cache.storedLabels(ctx, tx, labelTable, issue.ID)
+	if err != nil {
+		return result, err
+	}
+	seen := make(map[string]struct{}, len(issue.Labels))
+	var added []string
+	for _, label := range issue.Labels {
+		if _, ok := seen[label]; ok {
+			continue
+		}
+		seen[label] = struct{}{}
+		// Same over-length refusal, in the same label order, as the per-row
+		// path; the enclosing transaction rolls everything back.
+		if err := types.CheckFieldLen("label", label); err != nil {
+			return result, err
+		}
+		if stored[label] {
+			continue
+		}
+		added = append(added, label)
+	}
+	if len(added) == 0 {
+		return result, nil
+	}
+	values := make([]string, len(added))
+	args := make([]any, 0, 2*len(added))
+	for i, label := range added {
+		values[i] = "(?, ?)"
+		args = append(args, issue.ID, label)
+	}
+	//nolint:gosec // G201: table is determined by ephemeral flag; only placeholders are formatted in.
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
+		INSERT IGNORE INTO %s (issue_id, label)
+		VALUES %s
+	`, labelTable, strings.Join(values, ", ")), args...); err != nil {
+		return result, fmt.Errorf("failed to insert labels for %s: %w", issue.ID, err)
+	}
+	result.markChanged(labelTable)
+	result.markChanged(eventTable)
+	for _, label := range added {
+		cache.addLabel(labelTable, issue.ID, label)
+		cache.bufferEvent(eventTable, labelAddedAuxEvent(issue.ID, actor, label))
+	}
+	return result, nil
+}
+
+func persistLabelsPerRow(ctx context.Context, tx DBTX, issue *types.Issue, actor, eventTable string) (CreateIssueResult, error) {
 	var result CreateIssueResult
 	if len(issue.Labels) == 0 {
 		return result, nil
@@ -782,13 +1121,7 @@ func PersistLabels(ctx context.Context, tx DBTX, issue *types.Issue, actor, even
 			continue
 		}
 		result.markChanged(labelTable)
-		comment := "Added label: " + label
-		if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
-			IssueID:   issue.ID,
-			EventType: types.EventLabelAdded,
-			Actor:     actor,
-			Comment:   str(comment),
-		}); err != nil {
+		if err := InsertDerivedEvent(ctx, tx, eventTable, labelAddedAuxEvent(issue.ID, actor, label)); err != nil {
 			return result, fmt.Errorf("failed to record label event %q for %s: %w", label, issue.ID, err)
 		}
 		result.markChanged(eventTable)
@@ -881,22 +1214,32 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx DBTX, issues [
 		depTable string
 	}
 	var pending []pendingDependency
+	var deps []*types.Dependency
 	for _, issue := range issues {
-		if len(issue.Dependencies) == 0 {
-			continue
-		}
 		for _, dep := range issue.Dependencies {
 			// Default IssueID to the owning issue when not pre-set (e.g.,
 			// markdown bulk create where the ID is auto-generated).
 			if dep.IssueID == "" {
 				dep.IssueID = issue.ID
 			}
-			depTable := "dependencies"
-			if IsActiveWispInTx(ctx, tx, dep.IssueID) {
-				depTable = "wisp_dependencies"
-			}
-			pending = append(pending, pendingDependency{dep: dep, depTable: depTable})
+			deps = append(deps, dep)
 		}
+	}
+	// A multi-edge batch answers its per-edge routing, presence and graph
+	// reads from batch reads (depBatchLookups); nil keeps the per-edge reads.
+	var lookups *depBatchLookups
+	if len(deps) >= depBatchLookupsMinDeps && !createFastPathsDisabled.Load() {
+		var err error
+		if lookups, err = newDepBatchLookups(ctx, tx, deps); err != nil {
+			return result, err
+		}
+	}
+	for _, dep := range deps {
+		depTable := "dependencies"
+		if lookups.isWisp(ctx, tx, dep.IssueID) {
+			depTable = "wisp_dependencies"
+		}
+		pending = append(pending, pendingDependency{dep: dep, depTable: depTable})
 	}
 
 	// Persist hierarchy first so blocking edges in the same import see the full
@@ -910,29 +1253,22 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx DBTX, issues [
 				continue
 			}
 			isCrossPrefix := types.ExtractPrefix(dep.IssueID) != types.ExtractPrefix(dep.DependsOnID)
-			kind := ClassifyDepTarget(ctx, tx, dep, isCrossPrefix)
+			kind := lookups.classify(ctx, tx, dep, isCrossPrefix)
 
 			if kind != DepTargetExternal {
-				lookupTable := "issues"
-				if kind == DepTargetWisp {
-					lookupTable = "wisps"
-				}
-				var exists int
-				//nolint:gosec // G201: lookupTable is one of two hardcoded constants
-				if err := tx.QueryRowContext(ctx,
-					fmt.Sprintf("SELECT 1 FROM %s WHERE id = ?", lookupTable),
-					dep.DependsOnID).Scan(&exists); err != nil {
-					if err == sql.ErrNoRows {
-						recordSkippedDependency(opts, dep, "target not found")
-						continue
-					}
+				exists, err := lookups.targetExists(ctx, tx, kind, dep.DependsOnID)
+				if err != nil {
 					return result, fmt.Errorf("failed to check dependency target %s for %s: %w", dep.DependsOnID, dep.IssueID, err)
+				}
+				if !exists {
+					recordSkippedDependency(opts, dep, "target not found")
+					continue
 				}
 			}
 
 			if kind != DepTargetExternal && types.ExtractPrefix(dep.IssueID) == types.ExtractPrefix(dep.DependsOnID) {
-				if err := CheckBlockingHierarchyInTx(ctx, tx, dep, nil); err != nil {
-					if opts.SkipDependencyValidationErrors {
+				if err := lookups.checkHierarchy(ctx, tx, dep); err != nil {
+					if opts.SkipDependencyValidationErrors && isDependencyValidationRefusal(err) {
 						recordSkippedDependency(opts, dep, err.Error())
 						continue
 					}
@@ -940,8 +1276,8 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx DBTX, issues [
 				}
 			}
 
-			if err := CheckDependencyCycleInTx(ctx, tx, dep, nil); err != nil {
-				if opts.SkipDependencyValidationErrors {
+			if err := lookups.checkCycle(ctx, tx, dep); err != nil {
+				if opts.SkipDependencyValidationErrors && isDependencyValidationRefusal(err) {
 					recordSkippedDependency(opts, dep, err.Error())
 					continue
 				}
@@ -972,6 +1308,9 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx DBTX, issues [
 			rowsAffected, err := sqlResult.RowsAffected()
 			if err != nil {
 				return result, fmt.Errorf("failed to check dependency insert result for %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
+			}
+			if err := lookups.recordInsert(ctx, tx, item.depTable, dep, rowsAffected); err != nil {
+				return result, err
 			}
 			if rowsAffected > 0 {
 				result.markChanged(item.depTable)
@@ -1005,6 +1344,24 @@ func dependencyCreatedBy(dep *types.Dependency, actor string) string {
 		return dep.CreatedBy
 	}
 	return actor
+}
+
+// isDependencyValidationRefusal reports whether err, from checkHierarchy or
+// checkCycle, is a typed refusal of the edge itself (a self-dependency, a
+// cycle, or a blocker that is the issue's own ancestor or descendant) — the
+// only failures SkipDependencyValidationErrors tolerates. Every other error is
+// a failed walk query (an untranslated statement, a timeout, a dropped
+// connection): recording it as a skipped edge would commit the import without
+// the edge and report the SQL error only as a skip reason. On a backend whose
+// transaction aborts on a failed statement, the import would instead fail
+// later at an unrelated statement, with the real cause hidden in the skip
+// reason.
+func isDependencyValidationRefusal(err error) bool {
+	if errors.Is(err, domain.ErrSelfDependency) || errors.Is(err, domain.ErrDependencyCycle) {
+		return true
+	}
+	var hierarchy *domain.DependencyHierarchyConflictError
+	return errors.As(err, &hierarchy)
 }
 
 func recordSkippedDependency(opts storage.BatchCreateOptions, dep *types.Dependency, reason string) {

@@ -1,0 +1,9 @@
+=== request 1 of 1: getIssue
+GET /v0/beads/issues/bd-1
+  ?include_comments=true
+Accept: application/json, application/problem+json
+Accept-Encoding: gzip
+Authorization: Bearer <BEADS_HTTP_TOKEN>
+Bd-Project-Id: proj-v0-wire-golden
+Bd-Wire-Revision: 2
+User-Agent: bd-http-backend/v0

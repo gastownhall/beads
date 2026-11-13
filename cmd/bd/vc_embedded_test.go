@@ -40,7 +40,12 @@ func bdVCFail(t *testing.T, bd, dir string, args ...string) string {
 	return string(out)
 }
 
-func TestEmbeddedVC(t *testing.T) {
+// TestEmbeddedVCStatusAndCommit was split from TestEmbeddedVC (originally
+// ~241s, measured under --config=embedded) into 2 top-level tests over
+// disjoint subtest groups, for CI shard balance (see
+// scripts/ci/embedded_cmd_test_durations.json and engdocs/TESTING.md). Every original
+// subtest is preserved exactly once.
+func TestEmbeddedVCStatusAndCommit(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt vc tests")
 	}
@@ -135,6 +140,15 @@ func TestEmbeddedVC(t *testing.T) {
 			t.Error("expected 'committed' field in JSON output")
 		}
 	})
+}
+
+func TestEmbeddedVCCommitVariantsAndMerge(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt vc tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
 
 	t.Run("commit_stdin", func(t *testing.T) {
 		dir, _, _ := bdInit(t, bd, "--prefix", "vccs")

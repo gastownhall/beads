@@ -2,7 +2,6 @@ package main
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -119,7 +118,7 @@ func TestCommitBeadsConfigSkipsGitHooks(t *testing.T) {
 
 func runGitForCommitConfigTest(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := gitCommand(args...)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -202,6 +201,13 @@ func TestScrubURLCredentials(t *testing.T) {
 			// full tokenized URL. The token must go; host and path must stay.
 			name: "tokenized git stderr is scrubbed, host and path kept",
 			in:   "fatal: unable to access 'https://x-access-token:ghp_TESTTOKEN@github.com/org/repo.git/': The requested URL returned error: 403",
+			want: "fatal: unable to access 'https://github.com/org/repo.git/': The requested URL returned error: 403",
+		},
+		{
+			// A raw "'" in the password used to end the match, so the whole
+			// tokenized URL was echoed.
+			name: "apostrophe in a quoted URL's password is scrubbed",
+			in:   "fatal: unable to access 'https://user:canary'secret@github.com/org/repo.git/': The requested URL returned error: 403",
 			want: "fatal: unable to access 'https://github.com/org/repo.git/': The requested URL returned error: 403",
 		},
 		{

@@ -14,9 +14,11 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
@@ -32,7 +34,9 @@ var _ storage.Flattener = (*EmbeddedDoltStore)(nil)
 var _ storage.Compactor = (*EmbeddedDoltStore)(nil)
 var _ storage.SchemaMigrator = (*EmbeddedDoltStore)(nil)
 var _ storage.EventsJournalConfigurer = (*EmbeddedDoltStore)(nil)
+var _ storage.EventsJournalShapeChecker = (*EmbeddedDoltStore)(nil)
 var _ storage.VersionedHistoryConfigurer = (*EmbeddedDoltStore)(nil)
+var _ storage.VersionedHistoryDeferrer = (*EmbeddedDoltStore)(nil)
 var _ storage.ExternalRefHistoryQuerier = (*EmbeddedDoltStore)(nil)
 
 // EmbeddedDoltStore implements storage.DoltStorage backed by the embedded Dolt engine.
@@ -53,10 +57,24 @@ type EmbeddedDoltStore struct {
 	// eventsJournalEnabled activates the durable events journal for THIS store
 	// instance only (storage.EventsJournalConfigurer); never process-global.
 	eventsJournalEnabled atomic.Bool
-	// versionedHistoryEnabled activates dual-write issue-version history for
-	// THIS store instance only (storage.VersionedHistoryConfigurer); never
-	// process-global.
-	versionedHistoryEnabled atomic.Bool
+	// journalShape caches the ONE INFORMATION_SCHEMA probe SetEventsJournalEnabled
+	// runs on activation (issueops.ProbeJournalShape, PR A1), over a short-lived
+	// connection since this store has no persistent db handle. Nil means the
+	// journal is disabled or the probe produced no shape; transactions then get
+	// the canonical column list — see journalActivationErr.
+	journalShape atomic.Pointer[issueops.JournalShape]
+	// journalActivationErr holds the probe's *issueops.JournalShapeError when
+	// SetEventsJournalEnabled(true) found a table shape the journal cannot run
+	// against (a missing required column, or a missing table). Nil otherwise,
+	// including when the probe could not run at all
+	// (issueops.JournalActivationError). See storage.EventsJournalShapeChecker.
+	journalActivationErr atomic.Pointer[error]
+	// versionedHistory activates dual-write issue-version history for THIS
+	// store instance only (storage.VersionedHistoryConfigurer); never
+	// process-global. Activation usually leaves it pending
+	// (storage.VersionedHistoryDeferrer), for commitConn's first WRITE
+	// transaction to answer: a read never opens an engine to read the row.
+	versionedHistory issueops.VersionedHistorySwitch
 	// readOnly marks a store opened via OpenReadOnly or
 	// OpenForPreviewCommand: open-time mutations (CREATE DATABASE, schema
 	// migrations) were skipped and write transactions are refused
@@ -87,19 +105,25 @@ const lenientSharedGateGuidance = "  This is a coordination decision, not an aut
 // blunt gate refusals while allowing smart-gate decisions to explain their
 // narrower recovery. A non-empty Decision means UserMessage has a shaped body;
 // data-behind is the one shaped refusal deliberately represented as a fallback.
+// The blunt arm swaps only UserMessage's body for the shared guidance and keeps
+// the gate's Notes after it, where UserMessage (and so server mode) prints
+// them: the smart gate's fallback reason is what tells an unreadable remote
+// state apart from a below-floor database or a BD_SMART_GATE=0 opt-out, and
+// each calls for a different next step (bd-1z1pc).
 func lenientGateWarningBody(gateErr *schema.RemoteMigrateGateError) string {
 	if gateErr.Decision != "" || gateErr.IsDataBehind() {
 		return "Warning: " + gateErr.UserMessage()
 	}
-	return "Warning: " + gateErr.Error() + "\n" + lenientSharedGateGuidance
+	return "Warning: " + gateErr.Error() + "\n" + lenientSharedGateGuidance + gateErr.Notes()
 }
 
 // openIntent classifies why a store is being opened. openStrict fails the
 // open on any pending-migration refusal; openReadOnlyCommand and
 // openWorkingSetReconcile relax both the #4259 remote-migrate gate refusal and
 // the #4566 dirty-table refusal, each with its own warning text (see
-// initSchema); openRemoteSync relaxes exactly one gate refusal and nothing
-// else.
+// initSchema), and openWorkingSetReconcile alone also relaxes the
+// migration-consent refusal (toleratesConsentRefusal); openRemoteSync relaxes
+// exactly one gate refusal and nothing else.
 type openIntent int
 
 const (
@@ -115,7 +139,9 @@ const (
 	// commands (bd dolt commit, bd vc commit): their entire purpose is to
 	// clear the dirty working set that a migration would otherwise refuse to
 	// touch, so failing the open here would deadlock the documented recovery
-	// (#4566). Used by OpenForWorkingSetReconcile.
+	// (#4566). For the same reason it relaxes the migration-consent refusal,
+	// which fires before the dirty-table guard. Used by
+	// OpenForWorkingSetReconcile.
 	openWorkingSetReconcile
 	// openRemoteSync is the same shape of deadlock break as
 	// openWorkingSetReconcile, for the #6575 data-behind gate refusal: that
@@ -208,6 +234,21 @@ func lenientGateWarning(intent openIntent, gateErr *schema.RemoteMigrateGateErro
 	}
 }
 
+// requireReadableSchema bounds a read-only command's read-through. Having
+// tolerated a migration refusal, the open goes on at the current schema, which
+// this binary's issue reads can query only while it has every column the
+// shared projection selects (schema.CheckReadableDrift). One that lacks any is
+// refused here, as server mode's read-only open refuses it
+// (dolt.Config.RequireReadableSchema), instead of opening and then failing
+// every read on an unknown column. The other intents read no issues through
+// this open and are left alone.
+func (s *EmbeddedDoltStore) requireReadableSchema(ctx context.Context, conn *sql.Conn) error {
+	if s.intent != openReadOnlyCommand {
+		return nil
+	}
+	return schema.CheckReadableDrift(ctx, conn, "issues", sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns))
+}
+
 // toleratesGateRefusal reports whether this open's intent may warn and
 // continue past a remote-migrate gate refusal (#4259/#5920/#6575) instead of
 // failing the open.
@@ -238,6 +279,27 @@ func (s *EmbeddedDoltStore) toleratesGateRefusal(gateErr *schema.RemoteMigrateGa
 // re-key conflict is a different refusal with a different recovery.
 func (s *EmbeddedDoltStore) toleratesMigrationRefusal() bool {
 	return s.intent == openReadOnlyCommand || s.intent == openWorkingSetReconcile
+}
+
+// toleratesConsentRefusal reports whether this open's intent may warn and
+// continue on the current schema past the migration-consent refusal
+// (schema.MigrateConsentError) instead of failing the open.
+//
+// Only openWorkingSetReconcile may. MigrateUp checks consent before the #4566
+// dirty-table guard, so on a database that is both behind and dirty a strict
+// commit open rebuilds the #4566 deadlock one check earlier: `bd migrate
+// schema` is refused as dirty and names `bd dolt commit`, which is refused
+// for consent. The commit needs no migration, and MigrateUp refuses before
+// any write, so it runs on the current schema.
+//
+// openReadOnlyCommand stays strict on purpose. The remote-migrate gate lets
+// reads ride through because its migrate-or-adopt decision is cross-clone
+// coordination that takes a while to settle; this decision is one local
+// command either way (`bd migrate schema`, or keep the matching release), and
+// the refusal is where the operator learns it is needed. openRemoteSync stays
+// strict for the reason toleratesMigrationRefusal gives.
+func (s *EmbeddedDoltStore) toleratesConsentRefusal() bool {
+	return s.intent == openWorkingSetReconcile
 }
 
 // errClosed is returned when a method is called after Close.
@@ -332,7 +394,7 @@ func openReadOnly(ctx context.Context, beadsDir, database, branch string, checkB
 	}
 	dataDir := filepath.Join(absBeadsDir, "embeddeddolt")
 	if _, err := os.Stat(dataDir); err != nil {
-		return nil, fmt.Errorf("embeddeddolt: no embedded database at %s: %w", dataDir, err)
+		return nil, fmt.Errorf("%w at %s: %w", ErrNoEmbeddedDatabase, remedy.PrintedValue(dataDir), remedy.PrintedError(err))
 	}
 
 	s := &EmbeddedDoltStore{
@@ -457,9 +519,29 @@ func (s *EmbeddedDoltStore) commitConn(ctx context.Context, commit bool, fn func
 		err = fmt.Errorf("embeddeddolt: begin tx: %w", err)
 		return
 	}
+	// The activation switch deliberately does NOT depend on the cached shape:
+	// an enabled store whose probe produced no shape writes with the canonical
+	// column list, so a table the journal cannot run against fails the write
+	// loudly instead of letting the mutation commit with no journal row
+	// (storage.EventsJournalShapeChecker). Reads (commit=false callers) are
+	// never gated by this switch — only by the shape — since ReadEventsJournal
+	// has no enabled/disabled concept of its own.
 	clearJournalScope := issueops.ScopeEventsJournalTransaction(tx, s.eventsJournalEnabled.Load())
 	defer clearJournalScope()
-	clearVersionScope := issueops.ScopeVersionedHistoryTransaction(tx, s.versionedHistoryEnabled.Load())
+	clearJournalShapeScope := issueops.ScopeEventsJournalShape(tx, s.journalShape.Load())
+	defer clearJournalShapeScope()
+	// Only a transaction that commits answers a pending switch: a read rolls
+	// back whatever it does, so the row is read inside the first write and
+	// costs a read-only command nothing. A write whose read fails is rolled
+	// back before fn runs (issueops.VersionedHistorySwitch.ResolveIn).
+	versioned := s.versionedHistory.Enabled()
+	if commit {
+		if versioned, err = s.versionedHistory.ResolveIn(ctx, tx); err != nil {
+			err = errors.Join(err, tx.Rollback())
+			return
+		}
+	}
+	clearVersionScope := issueops.ScopeVersionedHistoryTransaction(tx, versioned)
 	defer clearVersionScope()
 	clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
 	defer clearRecheckScope()
@@ -484,14 +566,65 @@ func (s *EmbeddedDoltStore) commitConn(ctx context.Context, commit bool, fn func
 }
 
 // SetEventsJournalEnabled activates the journal for this store instance only.
+//
+// Activating probes bd_events_journal's actual shape ONCE
+// (issueops.ProbeJournalShape, PR A1), over a short-lived connection opened
+// and closed just for the probe since this store keeps no persistent db
+// handle, and caches the result for this instance's lifetime;
+// EventsJournalActivationError reports whether that probe found a shape the
+// journal cannot run against. The open and the probe share one
+// issueops.JournalShapeProbeTimeout, and either failing to run degrades to
+// the canonical shape (issueops.JournalActivationError). Deactivating clears
+// both and skips the probe entirely — a disabled store accepts any shape.
 func (s *EmbeddedDoltStore) SetEventsJournalEnabled(enabled bool) {
 	s.eventsJournalEnabled.Store(enabled)
+	if !enabled {
+		s.journalShape.Store(nil)
+		s.journalActivationErr.Store(nil)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), issueops.JournalShapeProbeTimeout)
+	defer cancel()
+	shape, err := s.probeJournalShape(ctx)
+	s.journalShape.Store(shape)
+	if activationErr := issueops.JournalActivationError(err); activationErr != nil {
+		s.journalActivationErr.Store(&activationErr)
+		return
+	}
+	s.journalActivationErr.Store(nil)
+}
+
+// probeJournalShape runs issueops.ProbeJournalShape over a connection opened
+// and closed just for it.
+func (s *EmbeddedDoltStore) probeJournalShape(ctx context.Context) (*issueops.JournalShape, error) {
+	db, cleanup, err := OpenSQL(ctx, s.dataDir, s.database, s.branch)
+	if err != nil {
+		return nil, fmt.Errorf("journal: open connection to probe shape: %w", err)
+	}
+	defer func() { _ = cleanup() }()
+	return issueops.ProbeJournalShape(ctx, db)
+}
+
+// EventsJournalActivationError implements storage.EventsJournalShapeChecker:
+// nil unless the last SetEventsJournalEnabled(true) call found a table shape
+// the journal cannot run against.
+func (s *EmbeddedDoltStore) EventsJournalActivationError() error {
+	if p := s.journalActivationErr.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 
 // SetVersionedHistoryEnabled activates dual-write issue-version history for
 // this store instance only.
 func (s *EmbeddedDoltStore) SetVersionedHistoryEnabled(enabled bool) {
-	s.versionedHistoryEnabled.Store(enabled)
+	s.versionedHistory.Set(enabled)
+}
+
+// DeferVersionedHistory leaves this store's switch to resolve, read by the
+// first write transaction (storage.VersionedHistoryDeferrer).
+func (s *EmbeddedDoltStore) DeferVersionedHistory(resolve storage.VersionedHistoryResolver) {
+	s.versionedHistory.Defer(resolve)
 }
 
 // commitEmbeddedTx classifies an unconfirmed SQL commit response as
@@ -628,6 +761,9 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 			// migrate-or-adopt guidance.
 			// lenientGateWarning owns the rendering (and the rationale for
 			// preferring gateErr's shaped body over the blunt bullets).
+			if err := s.requireReadableSchema(ctx, conn); err != nil {
+				return err
+			}
 			fmt.Fprint(os.Stderr, lenientGateWarning(s.intent, gateErr))
 			return nil
 		}
@@ -637,6 +773,11 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 	// Embedded mode relies on the dolthub/driver/v2's local file/concurrency
 	// controls; schema.MigrateUpWithLock requires a sql-server session lock.
 	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		var consentErr *schema.MigrateConsentError
+		if s.toleratesConsentRefusal() && errors.As(err, &consentErr) {
+			fmt.Fprint(os.Stderr, consentErr.WorkingSetWarning())
+			return nil
+		}
 		var dirtyErr *schema.DirtyTablesError
 		if s.toleratesMigrationRefusal() && errors.As(err, &dirtyErr) {
 			// The guard exists to keep dirty user data from being entangled
@@ -646,18 +787,21 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 			// read-only command must not be bricked by dirty tables either,
 			// so both non-strict intents warn and continue on the current
 			// schema instead of failing the open.
+			if err := s.requireReadableSchema(ctx, conn); err != nil {
+				return err
+			}
 			switch s.intent {
 			case openWorkingSetReconcile:
 				fmt.Fprintf(os.Stderr,
 					"Warning: %v\n"+
 						"  Committing the working set at the current schema; when it completes,\n"+
-						"  re-run 'bd migrate'.\n",
+						"  re-run 'bd migrate schema'.\n",
 					dirtyErr)
 			default: // openReadOnlyCommand
 				fmt.Fprintf(os.Stderr,
 					"Warning: %v\n"+
 						"  Continuing without migrating. Run 'bd dolt commit' to commit the\n"+
-						"  working set at the current schema, then re-run 'bd migrate'.\n",
+						"  working set at the current schema, then re-run 'bd migrate schema'.\n",
 					dirtyErr)
 			}
 			return nil
@@ -963,7 +1107,11 @@ func (s *EmbeddedDoltStore) ListTags(ctx context.Context) ([]string, error) {
 
 // ImportJSONLData atomically checks if the database is empty and, if so,
 // imports parsed issues and config key/value pairs in a single transaction.
-// Returns the count of issues imported, or 0 if the database was not empty.
+// Returns the count of issues imported and, deduplicated in file order, the
+// ids it skipped because a retaining retention sweep retired them (an import
+// never resurrects a swept row, and they are not counted as imported), or 0
+// and nil if the database was not empty. A database holding only tombstones
+// has no issue rows, so it counts as empty.
 // Does NOT issue DOLT_COMMIT — the caller is responsible for committing
 // (e.g. via the PersistentPostRun auto-commit hook).
 func (s *EmbeddedDoltStore) ImportJSONLData(
@@ -971,8 +1119,9 @@ func (s *EmbeddedDoltStore) ImportJSONLData(
 	issues []*types.Issue,
 	configEntries map[string]string,
 	actor string,
-) (int, error) {
+) (int, []string, error) {
 	var imported int
+	var retiredIDs []string
 	err := s.withConn(ctx, true, func(tx *sql.Tx) error {
 		// Atomically check: is the database empty?
 		stats := &types.Statistics{}
@@ -1005,6 +1154,7 @@ func (s *EmbeddedDoltStore) ImportJSONLData(
 		}
 
 		// Create all issues in the same transaction
+		retired := make(map[string]bool)
 		if err := issueops.CreateIssuesInTx(ctx, tx, issues, actor, storage.BatchCreateOptions{
 			SkipPrefixValidation: true,
 			// Defense-in-depth (GH#3955): the embedded fast-path is the primary
@@ -1013,14 +1163,26 @@ func (s *EmbeddedDoltStore) ImportJSONLData(
 			// that check cannot clobber live rows — matching the server-mode
 			// fallback's conflict-skip behavior.
 			ConflictSkip: true,
+			// A row whose id a retaining sweep retired is skipped, never
+			// written; the callback names it so the count below leaves it out.
+			OnRetiredID: func(issueID string) { retired[issueID] = true },
 		}); err != nil {
 			return err
 		}
 
-		imported = len(issues)
+		imported, retiredIDs = 0, nil
+		listed := make(map[string]bool, len(retired))
+		for _, issue := range issues {
+			if !retired[issue.ID] {
+				imported++
+			} else if !listed[issue.ID] {
+				listed[issue.ID] = true
+				retiredIDs = append(retiredIDs, issue.ID)
+			}
+		}
 		return nil
 	})
-	return imported, err
+	return imported, retiredIDs, err
 }
 
 // Flatten squashes all Dolt commit history into a single commit.
@@ -1041,7 +1203,7 @@ func (s *EmbeddedDoltStore) Flatten(ctx context.Context) error {
 
 // Compact squashes old Dolt commits while preserving recent ones.
 // Pins a single *sql.Conn for session-scoped stored procedures.
-func (s *EmbeddedDoltStore) Compact(ctx context.Context, initialHash, boundaryHash string, oldCommits int, recentHashes []string) error {
+func (s *EmbeddedDoltStore) Compact(ctx context.Context, initialHash, boundaryHash, headHash string, oldCommits int, recentHashes []string) error {
 	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		// withDBConn returns *sql.DB; pin a single connection for
 		// session-scoped operations (checkout, reset, cherry-pick).
@@ -1051,9 +1213,9 @@ func (s *EmbeddedDoltStore) Compact(ctx context.Context, initialHash, boundaryHa
 				return err
 			}
 			defer conn.Close()
-			return versioncontrolops.Compact(ctx, conn, initialHash, boundaryHash, oldCommits, recentHashes)
+			return versioncontrolops.Compact(ctx, conn, initialHash, boundaryHash, headHash, oldCommits, recentHashes)
 		}
-		return versioncontrolops.Compact(ctx, db, initialHash, boundaryHash, oldCommits, recentHashes)
+		return versioncontrolops.Compact(ctx, db, initialHash, boundaryHash, headHash, oldCommits, recentHashes)
 	})
 }
 
@@ -1135,6 +1297,31 @@ func (s *EmbeddedDoltStore) History(ctx context.Context, issueID string) ([]*sto
 	})
 	return result, err
 }
+
+// ListVersions implements storage.VersionLister over issue_versions.
+func (s *EmbeddedDoltStore) ListVersions(ctx context.Context, issueID string) ([]storage.IssueVersion, error) {
+	var result []storage.IssueVersion
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.ListVersionsInTx(ctx, tx, issueID)
+		return err
+	})
+	return result, err
+}
+
+// ParticipatingIssueIDs implements storage.HistoryParticipation: which of ids
+// name an issues-table row whose participation_generation is set.
+func (s *EmbeddedDoltStore) ParticipatingIssueIDs(ctx context.Context, ids []string) (map[string]struct{}, error) {
+	var participating map[string]struct{}
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		participating, err = issueops.ParticipatingIssueIDsInTx(ctx, tx, ids)
+		return err
+	})
+	return participating, err
+}
+
+var _ storage.HistoryParticipation = (*EmbeddedDoltStore)(nil)
 
 func (s *EmbeddedDoltStore) AsOf(ctx context.Context, issueID string, ref string) (*types.Issue, error) {
 	var result *types.Issue
@@ -1500,3 +1687,8 @@ func (s *EmbeddedDoltStore) GetStaleIssues(ctx context.Context, filter types.Sta
 	})
 	return result, err
 }
+
+// Compile-time proof that this leg serves versions -- see the matching
+// assertion in internal/storage/dolt/versioned.go for why it lives in the
+// leg's own package.
+var _ storage.VersionLister = (*EmbeddedDoltStore)(nil)

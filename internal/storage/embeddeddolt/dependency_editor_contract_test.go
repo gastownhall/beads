@@ -57,6 +57,12 @@ func TestEmbeddedDependencyEditorSameTypeReAddWithIdenticalMetadataIsANoOp(t *te
 	conformance.RunDependencyEditorSameTypeReAddWithIdenticalMetadataIsANoOp(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "idemmetasame"))
 }
 
+func TestEmbeddedDependencyEditorSameTypeReAddWithChangedThreadMintsOneVersion(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorSameTypeReAddWithChangedThreadMintsOneVersion(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "idemthread"))
+}
+
 func TestEmbeddedDependencyEditorRepeatsWithinOneRequestCollapse(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()
@@ -253,6 +259,12 @@ func TestEmbeddedDependencyEditorAcceptsBlockingAcrossIssueTypes(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()
 	conformance.RunDependencyEditorAcceptsBlockingAcrossIssueTypes(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "xtype"))
+}
+
+func TestEmbeddedDependencyEditorRefusesADottedChildGatedOnItsOwnParent(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorRefusesADottedChildGatedOnItsOwnParent(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "dotted"))
 }
 
 // newEmbeddedDependencyEditorFixture composes the backend's role fixture kit

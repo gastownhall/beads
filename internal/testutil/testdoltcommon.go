@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,7 +14,7 @@ import (
 )
 
 // DoltDockerImage is the Docker image used for Dolt test containers.
-const DoltDockerImage = "dolthub/dolt-sql-server:2.2.0"
+const DoltDockerImage = "dolthub/dolt-sql-server:2.6.0"
 
 // EnvRequireDoltContainer, set to "1", turns an unavailable Dolt test server
 // (either backend, see BEADS_TEST_DOLT_SERVER) into a failure instead of a
@@ -22,6 +23,22 @@ const DoltDockerImage = "dolthub/dolt-sql-server:2.2.0"
 // the Dolt server suites set it so they cannot pass green having run nothing
 // (and, under Bazel, have that vacuous pass cached and shared).
 const EnvRequireDoltContainer = "BEADS_TEST_REQUIRE_DOLT_CONTAINER"
+
+// EnvDoltServerBackend selects where the test Dolt SQL server comes from:
+//
+//	container  the dolthub/dolt-sql-server image through testcontainers
+//	           (needs a docker daemon and the pulled image)
+//	local      `dolt sql-server` from the pinned dolt CLI, started by the test
+//	           process itself (no docker; works under remote execution)
+//
+// Unset means container, under plain `go test` and `bazel test` alike. A
+// Bazel action has no docker daemon, so there an unset target keeps the
+// pre-existing "Dolt unavailable, skipping" behavior; only targets (or
+// invocations, via --test_env) that set local explicitly start servers from
+// the pinned CLI that tools/bazel/test_env.sh puts on PATH. Defaulting to
+// local under Bazel would light up every Dolt suite that no lane runs with a
+// server today in every non-ci `bazel test`.
+const EnvDoltServerBackend = "BEADS_TEST_DOLT_SERVER"
 
 // DoltUnavailableForTestMain handles an EnsureDoltContainerForTestMain error
 // in a TestMain and reports whether the TestMain must exit non-zero. By
@@ -99,6 +116,32 @@ func FindFreePort() (int, error) {
 	port := l.Addr().(*net.TCPAddr).Port
 	_ = l.Close()
 	return port, nil
+}
+
+// IPv6LoopbackListener listens on an ephemeral port of the IPv6 loopback
+// address, [::1], and accepts and closes every connection until the test
+// ends. It skips t when this host has no IPv6 loopback. It returns the port and
+// a count of the connections accepted so far, which tells an address that was
+// dialed from one that failed before the dial.
+func IPv6LoopbackListener(t testing.TB) (port int, accepted func() int64) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Skipf("IPv6 loopback not available: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	var n atomic.Int64
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			n.Add(1)
+			_ = conn.Close()
+		}
+	}()
+	return ln.Addr().(*net.TCPAddr).Port, n.Load
 }
 
 // WaitForServer polls until the server accepts TCP connections on the given port.

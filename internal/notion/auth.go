@@ -48,19 +48,16 @@ type ConfigReader interface {
 // clears the file and any row an older bd left behind. That matters because the
 // config table's contents are replicated by `bd dolt push`.
 //
-// ONE DOOR IS STILL OPEN, and this comment deliberately does not claim
-// otherwise: the routing lives in the CLI command, not at the write chokepoint,
-// so PUT /v0/beads/config/notion.token — `bd serve`, and the dashboard behind
-// it — still writes the row with no refusal. That hole is not Notion's; it is
-// identical for github.token, jira.api_token, linear.api_key and ado.pat, which
-// is why closing it belongs at the role (workapi.ValidateSettingWrite /
-// SetSetting), where every tracker credential gets the rule in one change,
-// rather than here. Tracked as follow-up to GH#6676.
+// THE OTHER DOOR IS CLOSED AT THE ROLE (#7559): PUT
+// /v0/beads/config/notion.token — `bd serve`, and the dashboard behind it —
+// reaches workapi.ValidateSettingWrite, which refuses every yaml-only key, so
+// github.token, jira.api_token, linear.api_key, ado.pat and this one share the
+// rule in one place rather than here. Follow-up to GH#6676.
 //
-// The database read below therefore remains, both as the upgrade path for a
-// workspace configured before the key moved and as the reader for anything that
-// door still writes. It reports AuthSourceDatabaseLegacy so `bd notion status`
-// can tell that workspace to rotate.
+// The database read below therefore remains only as the upgrade path for a
+// workspace configured before the key moved, or written by a server that
+// predates the refusal. It reports AuthSourceDatabaseLegacy so `bd notion
+// status` can tell that workspace to rotate.
 func ResolveAuth(ctx context.Context, reader ConfigReader) (*ResolvedAuth, error) {
 	if token := strings.TrimSpace(config.GetString(configKeyToken)); token != "" {
 		return &ResolvedAuth{Token: token, Source: AuthSourceConfigToken}, nil

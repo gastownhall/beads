@@ -367,7 +367,9 @@ intent (e.g. "mail_only"). Opaque to bd; consumed by downstream tools.`,
 		Name: "Gate",
 		Doc: `Gate defines an async wait condition for formula steps.
 When a step has a Gate, bd cook creates a gate issue that blocks the step.
-The gate must be closed (manually or via watchers) to unblock the step.`,
+The gate must be closed (manually or via watchers) to unblock the step.
+For a step declared type = "gate" the direction is reversed: the step's
+task blocks the gate, and steps referencing the step wait on both.`,
 		Fields: []FieldDoc{
 			{
 				Name:     "Type",
@@ -676,7 +678,7 @@ or poured.`,
 				Name:     "Labels",
 				Type:     "[]string",
 				JSONName: "labels",
-				Doc:      `Labels are applied to the created issue.`,
+				Doc:      `Labels are applied to the created issue (supports substitution).`,
 			},
 			{
 				Name:     "Metadata",
@@ -684,7 +686,8 @@ or poured.`,
 				JSONName: "metadata",
 				Doc: `Metadata is carried through to the created issue's Metadata field as
 JSON. Lets formulas pre-declare keys that downstream tooling can project
-without a post-pour compose step.`,
+without a post-pour compose step. String values support substitution at
+any nesting depth; keys are never rewritten.`,
 			},
 			{
 				Name:     "DependsOn",
@@ -705,7 +708,10 @@ Either Needs or DependsOn can be used; they are merged during cooking.`,
 				JSONName: "waits_for",
 				Doc: `WaitsFor specifies a fanout gate type for this step.
 Values: "all-children" (wait for all dynamic children) or "any-children" (wait for first).
-When set, the cooked issue gets a "gate:<value>" label.`,
+When set, the cooked issue gets a "gate:<value>" label.
+Requires needs: the gate waits on the children of the
+step it names, so with nothing to name there is nothing to wait for and
+the cooked gate would carry the label but no dependency edge at all.`,
 			},
 			{
 				Name:     "Assignee",
@@ -747,8 +753,11 @@ Evaluated at cook/pour time via FilterStepsByCondition.`,
 				Type:     "*Gate",
 				JSONName: "gate",
 				Doc: `Gate defines an async wait condition for this step.
-When set, bd cook creates a gate issue that blocks this step.
-Close the gate issue (bd close bd-xxx.gate-stepid) to unblock.`,
+When set, bd cook creates a companion gate issue that blocks this step
+(an entry-gate). Close the gate issue (bd close bd-xxx.gate-stepid) to
+unblock. If the step is declared type = "gate", the companion is an
+exit-gate instead: the step becomes a task that blocks the companion,
+and steps that reference the step id wait for both (GH#3316).`,
 			},
 			{
 				Name:     "Loop",

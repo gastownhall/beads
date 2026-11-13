@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
 func NewExternalDoltServerUOWProvider(
@@ -56,18 +57,34 @@ func NewExternalDoltServerUOWProvider(
 		return nil, fmt.Errorf("uow: external TLS: %w", err)
 	}
 
-	ep, err := proxy.GetCreateDatabaseProxyServerEndpoint(absServerRootDir, proxy.OpenOpts{
-		Backend:     proxy.BackendExternal,
-		LogFilePath: serverLogFilePath,
-		External:    external,
-		IdleTimeout: idleTimeout,
-		Port:        proxyPort,
+	resolved := applyProviderOptions(opts)
+	// The upstream is external, but the proxy in front of it is local and
+	// retires on idle exactly like a managed one, so new connections
+	// rediscover it too. Only its address is refreshed: the upstream, its TLS
+	// config and the credentials stay the ones this provider opened with.
+	discover := workspaceProxyDiscovery(absServerRootDir, proxy.OpenOpts{
+		Backend:       proxy.BackendExternal,
+		LogFilePath:   serverLogFilePath,
+		RotateLogFile: resolved.rotateServerLog,
+		External:      external,
+		IdleTimeout:   idleTimeout,
+		Port:          proxyPort,
 	})
+	ep, err := discover()
 	if err != nil {
 		return nil, fmt.Errorf("uow: get proxy endpoint: %w", err)
 	}
 
-	return openAndInitSchema(ctx, ep, database, rootUser, rootPassword, tlsConfigName, teamServer, expectedProjectID, applyProviderOptions(opts))
+	return openAndInitSchema(ctx, proxy.DataNetwork, ep, externalBackendAddress(external), database, rootUser, rootPassword, tlsConfigName, teamServer, expectedProjectID, resolved, newProxyEndpointResolver(discover))
+}
+
+// externalBackendAddress names the external server behind the proxy: its
+// socket, or its host and port.
+func externalBackendAddress(external configfile.ExternalDoltConfig) string {
+	if external.Socket != "" {
+		return external.Socket
+	}
+	return doltutil.ServerAddr(external.Host, external.Port)
 }
 
 func registerExternalTLSConfig(external configfile.ExternalDoltConfig) (string, error) {
