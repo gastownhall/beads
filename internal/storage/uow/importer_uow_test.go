@@ -2,6 +2,8 @@ package uow
 
 import (
 	"context"
+	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -388,4 +390,217 @@ func TestImporterUOW(t *testing.T) {
 			t.Fatal("ImportBatch with empty actor should be refused")
 		}
 	})
+}
+
+// replayFaultProvider models the hazard GH#8455 names: a proxied bd import
+// whose FIRST attempt writes everything — ids minted onto the caller's
+// structs, aux rows included — and then loses the commit to a serialization
+// error. The first unit of work it hands out fails at Commit AFTER a real
+// rollback of the attempt, so RunTxResult's replay runs against a database
+// that holds neither attempt 1's writes nor its locks. beforeReplay runs in
+// that window (after the rollback, before the replay) on the INNER provider —
+// exactly where another writer lands a row under the id attempt 1 minted.
+type replayFaultProvider struct {
+	UnitOfWorkProvider
+	// rowA is the caller's ID-less row. Attempt 1's mint lands on it, and
+	// the faulting Commit reads that mint off it for beforeReplay.
+	rowA *types.Issue
+	// beforeReplay, when set, runs after attempt 1's rollback and before the
+	// replay, with the id attempt 1 minted onto rowA.
+	beforeReplay func(ctx context.Context, mintedID string)
+	// uows counts the units of work handed out; faulted counts the commits
+	// failed on purpose. A subtest wants exactly one fault and at least two
+	// units of work.
+	uows, faulted int
+}
+
+func (p *replayFaultProvider) NewUOW(ctx context.Context) (UnitOfWork, error) {
+	uw, err := p.UnitOfWorkProvider.NewUOW(ctx)
+	if err != nil {
+		return nil, err
+	}
+	p.uows++
+	return &replayFaultUOW{UnitOfWork: uw, provider: p, fail: p.uows == 1}, nil
+}
+
+// replayFaultUOW decorates the unit of work RunTxResult commits through. It
+// implements unitOfWorkUnwrapper so importStatementRunner's
+// unwrapUOW(uw).(*baseUOW) still reaches the real transaction, the same way
+// beforeScopedCommitUOW does for the heartbeat contracts.
+type replayFaultUOW struct {
+	UnitOfWork
+	provider *replayFaultProvider
+	fail     bool
+}
+
+func (u *replayFaultUOW) Unwrap() UnitOfWork { return u.UnitOfWork }
+
+func (u *replayFaultUOW) Commit(ctx context.Context, message string) error {
+	if !u.fail {
+		return u.UnitOfWork.Commit(ctx, message)
+	}
+	u.provider.faulted++
+	minted := u.provider.rowA.ID
+	// A REAL rollback, not just a synthetic error: it discards attempt 1's
+	// writes and releases the issue_counter row lock the mint still holds,
+	// so a writer in beforeReplay can draw the same counter value, and the
+	// deferred closeAttempt in RunTxResultWithin finds nothing left to do
+	// (RollbackUnlessCommitted).
+	u.UnitOfWork.Close(ctx)
+	if u.provider.beforeReplay != nil {
+		u.provider.beforeReplay(ctx, minted)
+	}
+	return newMySQLError(1213)
+}
+
+// TestImporterUOWReplayReMintsUnsetIDs (GH#8455): a serialization failure at
+// COMMIT time replays ImportBatch's closure after the batch-upsert engine has
+// minted ids onto the caller's structs. The replay must see the structs as
+// the caller handed them over — re-minting exactly the fields the caller left
+// empty — instead of reading the aborted attempt's mints as caller-supplied
+// ids and upserting under them.
+//
+// ONE PROVIDER FOR THE WHOLE SUITE and NO t.Parallel, like TestImporterUOW:
+// dolt_log is database-global here, and the counter subtests advance
+// issue_counter in a shared sequence.
+func TestImporterUOWReplayReMintsUnsetIDs(t *testing.T) {
+	ctx := context.Background()
+	inner := newUOWRoleFixtureProvider(t, ctx, "imr")
+	kit := newUOWRoleFixtureKit(inner, "imr")
+	if err := kit.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+		t.Fatalf("set issue_id_mode=counter: %v", err)
+	}
+
+	// The anchor is the dependency target the subtests' rows hang their
+	// blocks edges on; it is AUTO-MINTED under the plain prefix.
+	anchor := &types.Issue{
+		Title: "replay anchor", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2,
+	}
+	if err := kit.CreateIssue(ctx, anchor, "replay-seed"); err != nil {
+		t.Fatalf("seed the anchor: %v", err)
+	}
+
+	queryInt := func(t *testing.T, query string, args ...any) int {
+		t.Helper()
+		var n int
+		if err := kit.QueryScalar(ctx, query, args, &n); err != nil {
+			t.Fatalf("QueryScalar %q: %v", query, err)
+		}
+		return n
+	}
+	// counterFor reads a subtest counter's committed last_id — 0 when the
+	// row does not exist, the state a replay that upserted under the
+	// aborted mint leaves behind (its seed rolled back with attempt 1).
+	counterFor := func(t *testing.T, sub string) int {
+		t.Helper()
+		return queryInt(t, "SELECT COALESCE((SELECT last_id FROM issue_counter WHERE prefix = ?), 0)", "imr-"+sub)
+	}
+	suffixFor := func(t *testing.T, sub, id string) int {
+		t.Helper()
+		n, err := strconv.Atoi(strings.TrimPrefix(id, "imr-"+sub+"-"))
+		if err != nil {
+			t.Fatalf("id %q does not carry a numeric %s counter suffix: %v", id, sub, err)
+		}
+		return n
+	}
+
+	// rowA builds the caller's ID-less row, minted under the subtest's own
+	// IDPrefix so every subtest draws from its OWN issue_counter row and
+	// they stay independent even when one of them leaves the broken state
+	// behind. CreatedAt/UpdatedAt are pinned to 2024-01-01 so a competitor
+	// created during the test is strictly newer and the broken replay
+	// deterministically takes the stale-reject branch rather than the ODKU's
+	// equal-timestamp tie.
+	rowA := func(title, sub string) *types.Issue {
+		when := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+		return &types.Issue{
+			Title: title, Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2, IDPrefix: sub,
+			Dependencies: []*types.Dependency{{DependsOnID: anchor.ID, Type: types.DepBlocks}},
+			Comments:     []*types.Comment{{Author: "importer-test", Text: "comment on " + title, CreatedAt: when}},
+			CreatedAt:    when, UpdatedAt: when,
+		}
+	}
+	// rowB carries every id the caller supplied, riding the same replayed
+	// batch as the ID-less row.
+	rowB := func(suffix string) *types.Issue {
+		when := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+		id := "imr-kept-" + suffix
+		return &types.Issue{
+			ID: id, Title: "Caller-supplied ids stay (" + suffix + ")", Status: types.StatusOpen,
+			IssueType: types.TypeTask, Priority: 2,
+			Dependencies: []*types.Dependency{{IssueID: id, DependsOnID: anchor.ID, Type: types.DepBlocks}},
+			Comments:     []*types.Comment{{ID: id + "-c1", Author: "importer-test", Text: "kept comment", CreatedAt: when}},
+			CreatedAt:    when, UpdatedAt: when,
+		}
+	}
+
+	// runReplayedBatch imports the two rows through a provider whose first
+	// commit fails with a serialization error after a real rollback, and
+	// returns the batch result and the id attempt 1 minted onto the ID-less
+	// row.
+	runReplayedBatch := func(t *testing.T, idless, kept *types.Issue, beforeReplay func(context.Context, string), allowStale bool) (publicops.ImportBatchResult, string) {
+		t.Helper()
+		var mintedAttempt1 string
+		provider := &replayFaultProvider{
+			UnitOfWorkProvider: inner,
+			rowA:               idless,
+			beforeReplay: func(ctx context.Context, minted string) {
+				mintedAttempt1 = minted
+				if beforeReplay != nil {
+					beforeReplay(ctx, minted)
+				}
+			},
+		}
+		imp, err := NewImporter(provider)
+		if err != nil {
+			t.Fatalf("NewImporter: %v", err)
+		}
+		result, err := imp.ImportBatch(ctx, publicops.ImportBatchRequest{
+			Actor: "importer-test", Issues: []*types.Issue{idless, kept},
+			AllowStale: allowStale, Source: "replay.jsonl",
+		})
+		if err != nil {
+			t.Fatalf("ImportBatch: %v", err)
+		}
+		if provider.faulted != 1 {
+			t.Fatalf("the commit fault fired %d times, want exactly 1", provider.faulted)
+		}
+		if provider.uows < 2 {
+			t.Fatalf("the import ran %d unit(s) of work; the replay did not happen", provider.uows)
+		}
+		if mintedAttempt1 == "" {
+			t.Fatalf("attempt 1 minted no id onto the caller's struct; the fixture cannot observe the hazard")
+		}
+		return result, mintedAttempt1
+	}
+
+	t.Run("no_competitor", func(t *testing.T) {
+		const sub = "nc"
+		idless, kept := rowA("re-minted with no other writer", sub), rowB(sub)
+		result, x := runReplayedBatch(t, idless, kept, nil, false)
+
+		// AC-1: the replay re-minted the same counter value (the rollback
+		// restored it), the row is stored under it, the committed counter
+		// names it, and the next auto-mint draws the following value.
+		if result.Created != 2 || len(result.StaleRejectedIDs) != 0 {
+			t.Errorf("result = %+v, want Created=2 with nothing rejected", result)
+		}
+		if idless.ID != x {
+			t.Errorf("the caller's struct id = %q, want the re-mint %q", idless.ID, x)
+		}
+		if got := queryInt(t, "SELECT COUNT(*) FROM issues WHERE id = ?", x); got != 1 {
+			t.Errorf("rows stored under %s = %d, want 1", x, got)
+		}
+		if got, want := counterFor(t, sub), suffixFor(t, sub, x); got != want {
+			t.Errorf("issue_counter.last_id for imr-%s = %d, want %d — the replay upserted under the aborted mint and never advanced the counter", sub, got, want)
+		}
+		next := &types.Issue{Title: "first create after the replay", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2, IDPrefix: sub}
+		if err := kit.CreateIssue(ctx, next, "replay-seed"); err != nil {
+			t.Fatalf("the next auto-minted create: %v (the counter re-drew the aborted attempt's value)", err)
+		}
+		if want := fmt.Sprintf("imr-%s-%d", sub, suffixFor(t, sub, x)+1); next.ID != want {
+			t.Errorf("the next auto-minted create got %q, want %q", next.ID, want)
+		}
+	})
+
 }

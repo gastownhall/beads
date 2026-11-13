@@ -46,11 +46,28 @@ var _ publicops.Importer = (*importer)(nil)
 // request: RunTxResult retries the whole attempt on a serialization failure,
 // and result state declared inside the attempt cannot leak between retries
 // the way a caller's callback accumulator would.
+//
+// The caller's request structs are replayed as the caller handed them over:
+// the engine mints Issue.ID, Dependency.IssueID and Comment.ID in place, so
+// the closure resets exactly the fields the caller left empty before each
+// attempt (issueops.SnapshotUnsetCreateIDs). Without the reset a replay
+// would read the aborted attempt's mints as caller-supplied ids and upsert
+// under them instead of re-minting (GH#8455). The committed attempt's ids
+// stay on the structs, because bd import builds ImportedIDs from them
+// (cmd/bd/import_shared.go).
 func (o *importer) ImportBatch(ctx context.Context, request publicops.ImportBatchRequest) (publicops.ImportBatchResult, error) {
 	if request.Actor == "" {
 		return publicops.ImportBatchResult{}, fmt.Errorf("import batch: actor must not be empty")
 	}
+	// Snapshot BEFORE the retry loop: the engine's attempt-1 mints land on
+	// these structs, and a snapshot taken inside the attempt would capture
+	// them as "set".
+	resetMintedIDs := storageissueops.SnapshotUnsetCreateIDs(request.Issues)
 	return RunTxResult(ctx, o.provider, func(ctx context.Context, uw UnitOfWork) (publicops.ImportBatchResult, string, error) {
+		// First statement of every attempt, ahead of the prefix seed: the
+		// structs must look exactly as the caller handed them over when the
+		// engine reads their (empty) id fields.
+		resetMintedIDs()
 		var result publicops.ImportBatchResult
 
 		// Seed issue_prefix before CreateIssuesInTxWithResult needs it (via
