@@ -363,3 +363,37 @@ func TestLoadUserRecipesMarksWorkspaceRecipes(t *testing.T) {
 		}
 	}
 }
+
+func TestCopilotSharedPath(t *testing.T) {
+	recipe := BuiltinRecipes["copilot"]
+	if !recipe.IsSharedPath(".github/copilot-instructions.md") {
+		t.Fatalf("copilot instructions should be a shared path")
+	}
+	for _, path := range []string{".copilot-plugin/plugin.json", "./.github/copilot-instructions.md", ".github/COPILOT-INSTRUCTIONS.md", ""} {
+		if recipe.IsSharedPath(path) {
+			t.Errorf("IsSharedPath(%q) = true, want an exact match only", path)
+		}
+	}
+	for name, r := range BuiltinRecipes {
+		if name != "copilot" && len(r.SharedPaths) != 0 {
+			t.Errorf("recipe %s declares shared paths %v", name, r.SharedPaths)
+		}
+	}
+}
+
+// A workspace recipes.toml cannot declare shared paths: the field is not
+// read from TOML, and an override of copilot replaces the built-in recipe.
+func TestUserRecipeSharedPathsNotFromTOML(t *testing.T) {
+	beadsDir := t.TempDir()
+	toml := "[recipes.copilot]\ntype = \"multifile\"\npaths = [\"a.md\"]\nshared_paths = [\"a.md\"]\nSharedPaths = [\"a.md\"]\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "recipes.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	recipe, err := GetRecipe("copilot", beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recipe.SharedPaths) != 0 || recipe.IsSharedPath("a.md") {
+		t.Fatalf("workspace recipe has shared paths %v", recipe.SharedPaths)
+	}
+}

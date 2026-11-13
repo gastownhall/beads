@@ -932,3 +932,155 @@ func TestAddRecipe_RefusesPathOutsideDir(t *testing.T) {
 		}
 	}
 }
+
+// bd setup copilot must not clobber a repository's own
+// .github/copilot-instructions.md: the user's content stays, with the beads
+// guidance added alongside it (GH#7431).
+func TestRunRecipe_CopilotKeepsExistingInstructions(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	t.Chdir(tmpDir)
+	t.Setenv("BEADS_DIR", "")
+	resetSetupResolutionCaches(t)
+	resetSetupGlobals(t)
+
+	instructions := filepath.Join(tmpDir, ".github", "copilot-instructions.md")
+	if err := os.MkdirAll(filepath.Dir(instructions), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const userContent = "# Team Copilot rules\n\nAlways write table-driven tests.\n"
+	if err := os.WriteFile(instructions, []byte(userContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = captureStdout(t, func() error {
+		return runRecipe("copilot")
+	})
+
+	got, err := os.ReadFile(instructions)
+	if err != nil {
+		t.Fatalf("read instructions: %v", err)
+	}
+	if !strings.Contains(string(got), "Always write table-driven tests.") {
+		t.Fatalf("bd setup copilot overwrote the user's copilot-instructions.md; got:\n%s", got)
+	}
+}
+
+// The paths of the built-in copilot recipe: the manifest is bd's own, the
+// instructions file is the repository's, which bd keeps a marked section in.
+const (
+	copilotManifestFile     = ".copilot-plugin/plugin.json"
+	copilotInstructionsFile = ".github/copilot-instructions.md"
+)
+
+// copilotTestWorkspace makes a fresh workspace the working directory, with
+// the setup flags reset, and returns it.
+func copilotTestWorkspace(t *testing.T) string {
+	t.Helper()
+	ws := t.TempDir()
+	t.Chdir(ws)
+	t.Setenv("BEADS_DIR", "")
+	resetSetupResolutionCaches(t)
+	resetSetupGlobals(t)
+	return ws
+}
+
+// runCopilotSetup runs bd setup copilot, with --check or --remove when mode
+// says so, and returns what it printed to stdout and stderr together.
+func runCopilotSetup(t *testing.T, mode string) (string, error) {
+	t.Helper()
+	resetSetupGlobals(t)
+	switch mode {
+	case "check":
+		setupCheck = true
+	case "remove":
+		setupRemove = true
+	}
+	f, err := os.CreateTemp(t.TempDir(), "setup-output")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	stdioMutex.Lock()
+	oldOut, oldErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = f, f
+	runErr := runRecipe("copilot")
+	os.Stdout, os.Stderr = oldOut, oldErr
+	stdioMutex.Unlock()
+	out, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out), runErr
+}
+
+// copilotSection is the marked section bd setup copilot keeps in the
+// instructions file: the current template between the beads markers.
+func copilotSection() string {
+	return "<!-- BEGIN BEADS INTEGRATION -->\n" + recipes.CopilotInstructionsTemplate + "<!-- END BEADS INTEGRATION -->\n"
+}
+
+func writeWorkspaceFile(t *testing.T, path, content string) {
+	t.Helper()
+	path = filepath.FromSlash(path)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// readWorkspaceFile returns the file's content and whether it exists.
+func readWorkspaceFile(t *testing.T, path string) (string, bool) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.FromSlash(path))
+	if os.IsNotExist(err) {
+		return "", false
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data), true
+}
+
+func copilotManifest(t *testing.T) string {
+	t.Helper()
+	manifest, err := recipes.ContentForPath(recipes.BuiltinRecipes["copilot"], copilotManifestFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return manifest
+}
+
+// AC-1: setup over user-authored instructions keeps their bytes as a prefix,
+// appends exactly one marked section, and installs the manifest.
+func TestSetupCopilot_AppendsSectionToUserInstructions(t *testing.T) {
+	for _, tt := range []struct {
+		name, user, sep string
+	}{
+		{name: "ends in a line break", user: "# Team Copilot rules\n\nAlways write table-driven tests.\n", sep: "\n"},
+		{name: "no final line break", user: "# Team Copilot rules\n\nAlways write table-driven tests.", sep: "\n\n"},
+		{name: "CRLF", user: "# Team Copilot rules\r\n\r\nAlways write table-driven tests.\r\n", sep: "\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			copilotTestWorkspace(t)
+			writeWorkspaceFile(t, copilotInstructionsFile, tt.user)
+
+			out, err := runCopilotSetup(t, "")
+			if err != nil {
+				t.Fatalf("bd setup copilot: %v\n%s", err, out)
+			}
+			got, _ := readWorkspaceFile(t, copilotInstructionsFile)
+			if want := tt.user + tt.sep + copilotSection(); got != want {
+				t.Fatalf("instructions = %q, want the user's bytes then one section %q", got, want)
+			}
+			if n := strings.Count(got, "<!-- BEGIN BEADS INTEGRATION"); n != 1 {
+				t.Fatalf("instructions hold %d beads sections, want 1:\n%s", n, got)
+			}
+			if manifest, ok := readWorkspaceFile(t, copilotManifestFile); !ok || manifest != copilotManifest(t) {
+				t.Fatalf("manifest installed = %v, content matches = %v", ok, manifest == copilotManifest(t))
+			}
+		})
+	}
+}
