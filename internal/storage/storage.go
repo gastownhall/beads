@@ -1323,16 +1323,10 @@ type ExcludeIDsUnsupportedStore interface {
 // everything it stitches together is read from a single snapshot and cannot
 // tear across separate engine reads.
 //
-// TWO-SESSION WISP CAVEAT (server/Dolt backend only): the classic Dolt store
-// runs durable tables and dolt-ignored wisp tables on two separate SQL sessions
-// within one logical transaction. Reads that span both tiers in a single query
-// (the ones flagged below) therefore see this transaction's own uncommitted
-// DURABLE writes and all COMMITTED wisps, but NOT wisps written in the same
-// still-open transaction — those become visible after commit. Single-tier reads
-// (GetIssue, GetIssueComments, GetIssueCommentsPage, GetDependencyRecords,
-// IsBlocked, IsBlockedBatch, GetLabels) route to the owning session and are
-// read-your-writes on both tiers. The embedded-Dolt store has no session split,
-// so every read there is read-your-writes on both tiers.
+// Both backends run durable tables and dolt-ignored wisp tables in the one SQL
+// transaction, so every read, including the ones that span both tiers in a
+// single query, is read-your-writes on both tiers, and a mixed durable+wisp
+// callback commits or rolls back as a whole.
 //
 // # Example Usage
 //
@@ -1418,29 +1412,26 @@ type Transaction interface {
 	// query shape, only the ability to run the existing read on the
 	// transaction's snapshot, so a bd show-style assembly can gather every count
 	// and relation it needs inside one transaction. All see this transaction's
-	// own uncommitted DURABLE writes; the wisp-tier visibility of the
-	// both-tiers-spanning reads is governed by the TWO-SESSION WISP CAVEAT above.
+	// own uncommitted writes on both tiers.
 
 	// CountIssuesByGroup returns per-group issue counts. groupBy is one of:
-	// status, priority, type, assignee, label. SPANS BOTH TIERS (merges wisps):
-	// subject to the two-session wisp caveat on the server backend. Note it merges
-	// committed wisps into the buckets while the transaction's SearchIssues reads
-	// the issues table only, so their totals need not agree when committed wisps
+	// status, priority, type, assignee, label. SPANS BOTH TIERS (merges wisps).
+	// Note it merges wisps into the buckets while the transaction's SearchIssues
+	// reads the issues table only, so their totals need not agree when wisps
 	// exist — a pre-existing count-vs-search wisp-scoping asymmetry, not a tear.
 	CountIssuesByGroup(ctx context.Context, filter types.IssueFilter, groupBy string) (map[string]int, error)
 
 	// GetDependentRecords returns the raw inbound dependency rows whose target is
 	// targetID (its dependents), spanning the durable and wisp dependency tables,
 	// filtered by depType ("" = all), bounded by limit and paged by afterID.
-	// SPANS BOTH TIERS: subject to the two-session wisp caveat on the server backend.
+	// SPANS BOTH TIERS.
 	GetDependentRecords(ctx context.Context, targetID string, depType string, limit int, afterID string) ([]*types.Dependency, error)
 	// GetDependentRecordsForIssues returns the raw inbound dependency rows for a
-	// SET of target ids in one batched read, keyed by target id. SPANS BOTH TIERS:
-	// subject to the two-session wisp caveat on the server backend.
+	// SET of target ids in one batched read, keyed by target id. SPANS BOTH TIERS.
 	GetDependentRecordsForIssues(ctx context.Context, targetIDs []string) (map[string][]*types.Dependency, error)
 	// CountDependentRecords returns the total inbound-edge count of targetID
 	// across both dependency tables (same predicate/scope as GetDependentRecords).
-	// SPANS BOTH TIERS: subject to the two-session wisp caveat on the server backend.
+	// SPANS BOTH TIERS.
 	CountDependentRecords(ctx context.Context, targetID string, depType string) (int, error)
 
 	// IsBlocked reports the denormalized transitive is_blocked flag for one issue
