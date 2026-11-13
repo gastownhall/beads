@@ -3174,6 +3174,66 @@ func TestCounterMode_AlreadySeeded(t *testing.T) {
 	}
 }
 
+// TestCreateIssue_CounterModeWalksPastExplicitIDs pins GH#8456: in counter
+// mode an explicit create ahead of the counter (here test-2..test-4, which
+// never move it) must not be handed out again by the next auto create. The
+// upsert create path would silently overwrite the explicit row and return nil;
+// the counter walks past every id a live row holds instead. Ported from
+// #6831's TestCreateIssue_CounterModeJumpsPastExplicitIDs.
+func TestCreateIssue_CounterModeWalksPastExplicitIDs(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if err := store.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+		t.Fatalf("failed to enable counter mode: %v", err)
+	}
+	auto := func(title string) string {
+		t.Helper()
+		issue := &types.Issue{Title: title, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("auto create %q: %v", title, err)
+		}
+		return issue.ID
+	}
+
+	if id := auto("first auto"); id != "test-1" {
+		t.Fatalf("first auto create = %q, want test-1", id)
+	}
+	explicitTitles := map[string]string{"test-2": "explicit two", "test-3": "explicit three", "test-4": "explicit four"}
+	for _, id := range []string{"test-2", "test-3", "test-4"} {
+		issue := &types.Issue{ID: id, Title: explicitTitles[id], Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("explicit create %s: %v", id, err)
+		}
+	}
+
+	if id := auto("second auto"); id != "test-5" {
+		t.Errorf("second auto create = %q, want test-5 past the explicit test-2..test-4", id)
+	}
+	if id := auto("third auto"); id != "test-6" {
+		t.Errorf("third auto create = %q, want test-6", id)
+	}
+	for id, title := range explicitTitles {
+		got, err := store.GetIssue(ctx, id)
+		if err != nil {
+			t.Fatalf("GetIssue(%s): %v", id, err)
+		}
+		if got.Title != title {
+			t.Errorf("explicit row %s title = %q, want %q: an auto create overwrote it", id, got.Title, title)
+		}
+	}
+	var lastID int
+	if err := store.db.QueryRowContext(ctx, "SELECT last_id FROM issue_counter WHERE prefix = ?", "test").Scan(&lastID); err != nil {
+		t.Fatalf("read issue_counter: %v", err)
+	}
+	if lastID != 6 {
+		t.Errorf("issue_counter last_id = %d, want 6", lastID)
+	}
+}
+
 // TestSearchIssues_NoDuplicatesWithMultipleBlockers verifies that
 // SearchIssues returns an issue exactly once even when it has multiple
 // blocks dependencies. GH#3567.
