@@ -842,8 +842,11 @@ func continueAfterRefusedDoltIgnoreSeed(ctx context.Context, db DBConn, seedErr 
 		return seedErr
 	}
 	tables, err := newDoltStatusTables(ctx, db)
-	if err != nil || len(tables) > 0 {
-		return seedErr
+	if err != nil {
+		return fmt.Errorf("%w (and reading dolt_status for new tables to decide whether the open can continue without the seed failed: %w)", seedErr, err)
+	}
+	if len(tables) > 0 {
+		return fmt.Errorf("%w: cannot continue without the missing dolt_ignore patterns while dolt_status shows new table(s) %s; open this database once with a privileged bd that can write dolt_ignore", seedErr, strings.Join(tables, ", "))
 	}
 	fmt.Fprintf(doltIgnoreSeedNoticeOut, "Warning: %v; continuing without seeding dolt_ignore on the current schema; open this database once with a privileged bd that can write dolt_ignore to heal the missing patterns\n", seedErr)
 	return nil
