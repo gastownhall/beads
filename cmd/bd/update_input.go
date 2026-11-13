@@ -44,6 +44,24 @@ type updateInput struct {
 	force bool
 }
 
+// normalizeAssigneeInput folds the hidden-empty assignee spellings — a bare
+// "-" (the shell convention for an empty argument) and whitespace-only text
+// — onto the empty-string clear sentinel every emptiness check reads
+// (issueops' claim/unclaim and the reassign fence compare against ""). A
+// value stored as "-" or " " read as ASSIGNED, so a bead believed back in
+// the pool stayed hooked to a dead lane. Everything else passes through
+// byte-for-byte, including " - ", "--" and "-x": only an exact bare dash or
+// nothing-but-whitespace means "unassigned". Guards (--if-assignee) and
+// read filters are not normalized — a literal "-" stored by bd create is
+// still matchable — and create/pour keep storing what they are given.
+// (bd-wkcfuz)
+func normalizeAssigneeInput(v string) string {
+	if v == "-" || strings.TrimSpace(v) == "" {
+		return ""
+	}
+	return v
+}
+
 func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, error) {
 	in := &updateInput{fields: map[string]any{}}
 
@@ -81,7 +99,7 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 	}
 	if cmd.Flags().Changed("assignee") {
 		assignee, _ := cmd.Flags().GetString("assignee")
-		in.fields["assignee"] = assignee
+		in.fields["assignee"] = normalizeAssigneeInput(assignee)
 	}
 	in.force, _ = cmd.Flags().GetBool("force")
 	description, descChanged, err := getDescriptionFlag(cmd)
