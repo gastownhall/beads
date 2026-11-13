@@ -33,7 +33,15 @@ The rename updates all issue IDs and all text references across all fields.
 Prefixes are lowercase letters, numbers, and hyphens,
 must start with a letter, and must end with a hyphen. If a corrupted database
 contains issues with multiple prefixes, `bd rename-prefix <prefix> --repair`
-consolidates them. See [bd rename-prefix](/cli-reference/rename-prefix).
+consolidates them: each off-prefix issue keeps its suffix under the new
+prefix (`cre-db-c2a` becomes `kb-c2a`) when that destination is free, and a
+family whose destination is taken — by a live issue, a retired id, or
+another family in the same repair — moves whole to a generated id, dotted
+child paths intact, with every such collision reported. Run it with
+`--dry-run --json` first to preview the complete rename list and every
+collision before anything is written. To change only the prefix new issues
+mint, leaving existing IDs alone, use `bd rename-prefix <prefix> --mint-only`.
+See [bd rename-prefix](/cli-reference/rename-prefix).
 
 ## Duplicate Detection and Merge
 
