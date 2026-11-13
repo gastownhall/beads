@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 func NewChildCounterSQLRepository(runner Runner) domain.ChildCounterSQLRepository {
@@ -73,6 +74,16 @@ func (r *childCounterSQLRepositoryImpl) NextChildID(ctx context.Context, parentI
 	}
 
 	return fmt.Sprintf("%s.%d", parentID, next), nil
+}
+
+// AdvanceForChild runs the issueops create's counter reconciliation
+// (issueops.ReconcileChildCounters, #5122) for one caller-named child, on the
+// same runner as the insert so the advance commits or rolls back with it.
+func (r *childCounterSQLRepositoryImpl) AdvanceForChild(ctx context.Context, childID string) error {
+	if _, err := issueops.ReconcileChildCounters(ctx, r.runner, []*types.Issue{{ID: childID}}); err != nil {
+		return fmt.Errorf("db: ChildCounterSQLRepository.AdvanceForChild: %s: %w", childID, err)
+	}
+	return nil
 }
 
 func (r *childCounterSQLRepositoryImpl) parentIsActiveWisp(ctx context.Context, parentID string) (bool, error) {

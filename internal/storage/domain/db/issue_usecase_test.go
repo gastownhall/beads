@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -887,4 +888,109 @@ func (s *testSuite) applyGraphWispRouting() {
 	s.Equal(res.IDs["p"], wispDeps[0].dependsOnID)
 	s.Equal("depends_on_wisp_id", wispDeps[0].targetColumn(),
 		"wisp-target dep must use depends_on_wisp_id, got %+v", wispDeps[0])
+}
+
+// TestIssueUseCase_CallerNamedChildAdvancesParentCounter pins the proxied
+// create (bd-qp2au6, #4750): a child the caller names (`bd create --id P.8`)
+// must raise the parent's child_counters row to its suffix, as the issueops
+// create does (#5122), so the slot is never minted again once P.8 is gone.
+func (s *testSuite) TestIssueUseCase_CallerNamedChildAdvancesParentCounter() {
+	s.resetMintConfig("cn", "")
+	uc := s.issueUseCase()
+
+	_, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "parent", IssueType: types.TypeEpic, Priority: 2},
+		ExplicitID: "cn-p",
+	}, "tester")
+	s.Require().NoError(err)
+
+	_, err = uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "named child", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID: "cn-p.8",
+	}, "tester")
+	s.Require().NoError(err)
+
+	var lastChild int
+	err = s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT last_child FROM child_counters WHERE parent_id = ?", "cn-p").Scan(&lastChild)
+	if errors.Is(err, sql.ErrNoRows) {
+		s.Fail("no child_counters row for cn-p after creating caller-named child cn-p.8; want last_child = 8")
+		return
+	}
+	s.Require().NoError(err)
+	s.Equal(8, lastChild, "caller-named child cn-p.8 must advance cn-p's child counter")
+
+	// The slot stays taken once the named child is hard-deleted without a
+	// tombstone: the next minted child follows it rather than reusing it.
+	s.hardDeleteIssueRow("cn-p.8")
+	res, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:    &types.Issue{Title: "minted child", IssueType: types.TypeTask, Priority: 2},
+		ParentID: "cn-p",
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal("cn-p.9", res.Issue.ID, "a parent-based create after deleting cn-p.8 must mint past it")
+
+	s.Run("PresetIssueIDWithoutExplicitID", func() {
+		_, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+			Issue: &types.Issue{Title: "parent", IssueType: types.TypeEpic, Priority: 2, ID: "cn-q"},
+		}, "tester")
+		s.Require().NoError(err)
+		_, err = uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+			Issue: &types.Issue{Title: "preset child", IssueType: types.TypeTask, Priority: 2, ID: "cn-q.5"},
+		}, "tester")
+		s.Require().NoError(err)
+		s.Equal(5, s.childCounterValue("child_counters", "cn-q"),
+			"a child id preset on the issue is caller-named too and must advance cn-q's counter")
+	})
+
+	s.Run("ParentFirstBatch", func() {
+		_, err := uc.CreateIssues(s.Ctx(), []domain.CreateIssueParams{
+			{Issue: &types.Issue{Title: "parent", IssueType: types.TypeEpic, Priority: 2}, ExplicitID: "cn-r"},
+			{Issue: &types.Issue{Title: "batch child", IssueType: types.TypeTask, Priority: 2}, ExplicitID: "cn-r.4"},
+		}, "tester")
+		s.Require().NoError(err)
+		s.Equal(4, s.childCounterValue("child_counters", "cn-r"),
+			"a caller-named child created after its parent in one batch must advance the counter")
+	})
+}
+
+// childCounterValue reads parentID's last_child from table, failing the test
+// when there is no row.
+func (s *testSuite) childCounterValue(table, parentID string) int {
+	var lastChild int
+	err := s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT last_child FROM "+table+" WHERE parent_id = ?", parentID).Scan(&lastChild)
+	if errors.Is(err, sql.ErrNoRows) {
+		s.Failf("missing counter row", "no %s row for %s", table, parentID)
+		return 0
+	}
+	s.Require().NoError(err)
+	return lastChild
+}
+
+// counterTableRows renders every row of a counter table, for before/after
+// comparisons.
+func (s *testSuite) counterTableRows(table string) []string {
+	rows, err := s.Runner().QueryContext(s.Ctx(),
+		"SELECT parent_id, last_child FROM "+table+" ORDER BY parent_id")
+	s.Require().NoError(err)
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var parentID string
+		var lastChild int
+		s.Require().NoError(rows.Scan(&parentID, &lastChild))
+		out = append(out, parentID+"="+strconv.Itoa(lastChild))
+	}
+	s.Require().NoError(rows.Err())
+	return out
+}
+
+// hardDeleteIssueRow removes an issue row and its events with no tombstone,
+// the way a deletion that retains nothing leaves it.
+func (s *testSuite) hardDeleteIssueRow(id string) {
+	_, err := s.Runner().ExecContext(s.Ctx(), "DELETE FROM events WHERE issue_id = ?", id)
+	s.Require().NoError(err)
+	_, err = s.Runner().ExecContext(s.Ctx(), "DELETE FROM issues WHERE id = ?", id)
+	s.Require().NoError(err)
 }

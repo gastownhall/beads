@@ -1281,6 +1281,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd create --id P.N` through a proxied server now advances `P`'s child
+  counter** (refs #4750; PR #8138 by kyoto-bonsai). The issueops create has
+  done this since #5122, but the proxied create moved the counter only when
+  it minted the child itself, so after a caller-named `P.8` was deleted
+  without a tombstone, `bd create --parent P` could mint `P.8` again. The
+  proxied create now raises the parent's counter (or a wisp parent's
+  `wisp_child_counters` row) to the named child's suffix in the create's own
+  transaction, never lowering it. JSONL counter durability and the other
+  #4750 drift paths stay open.
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
