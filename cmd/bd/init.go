@@ -32,6 +32,8 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/domain"
+	domaingit "github.com/steveyegge/beads/internal/storage/domain/git"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/templates/agents"
 	"github.com/steveyegge/beads/internal/ui"
@@ -4468,9 +4470,23 @@ func resolveInitDoltMode(proxiedFlag, sharedFlag, serverFlag bool) string {
 	return "embedded"
 }
 
+// initJujutsuBootstrapSkipNote is printed instead of the bootstrap commit in
+// a Jujutsu workspace: a native git commit there moves HEAD under jj, which
+// then rebases its working copy onto it and orphans the previous one (GH#5654).
+const initJujutsuBootstrapSkipNote = "Note: skipped bootstrap commit because this is a Jujutsu workspace; the beads files remain in the working copy for you to record with jj."
+
 // commitEmbeddedInitArtifacts stages the local init artifacts and preserves the
-// optional-add and nonfatal commit behavior of the embedded bootstrap.
+// optional-add and nonfatal commit behavior of the embedded bootstrap. The
+// commit is scoped to the artifact paths, so anything else the user had
+// staged stays staged (GH#5654).
 func commitEmbeddedInitArtifacts(workDir string, quiet bool) {
+	repo := domaingit.NewInitGitRepository(workDir)
+	if isJJ, _ := repo.IsJujutsuRepo(context.Background()); isJJ {
+		if !quiet {
+			fmt.Fprintln(os.Stderr, initJujutsuBootstrapSkipNote)
+		}
+		return
+	}
 	if initArtifactGitCommand(workDir, "rev-parse", "--git-dir").Run() != nil {
 		if !quiet {
 			fmt.Fprintln(os.Stderr, "Note: skipped bootstrap commit because Git could not resolve the selected repository.")
@@ -4479,48 +4495,33 @@ func commitEmbeddedInitArtifacts(workDir string, quiet bool) {
 	}
 	gitAddCmd := initArtifactGitCommand(workDir, "add", ".beads/")
 	if _, addErr := gitAddCmd.CombinedOutput(); addErr == nil {
-		// Also stage the agents file if it exists
-		agentsFileToStage := config.SafeAgentsFile()
-		if _, statErr := os.Stat(filepath.Join(workDir, agentsFileToStage)); statErr == nil {
-			agentsCmd := initArtifactGitCommand(workDir, "add", agentsFileToStage)
-			_ = agentsCmd.Run()
-		}
-		// Also stage Claude settings if created by init
-		claudeSettingsPath := filepath.Join(".claude", "settings.json")
-		if _, statErr := os.Stat(filepath.Join(workDir, claudeSettingsPath)); statErr == nil {
-			claudeCmd := initArtifactGitCommand(workDir, "add", claudeSettingsPath)
-			_ = claudeCmd.Run()
-		}
-		// Also stage CLAUDE.md if created by setup
-		if _, statErr := os.Stat(filepath.Join(workDir, "CLAUDE.md")); statErr == nil {
-			claudeMdCmd := initArtifactGitCommand(workDir, "add", "CLAUDE.md")
-			_ = claudeMdCmd.Run()
-		}
-		// Also stage Codex and Cursor project integration files if created
-		// by setup. Cursor project hooks/rules are meant to be committed
-		// (a no-op git add if .cursor/ is gitignored in this repo).
-		for _, path := range []string{".agents", ".codex", ".cursor"} {
+		paths := []string{".beads/"}
+		// Also stage the agents file, Claude settings and CLAUDE.md created by
+		// init or setup, the Codex and Cursor project integration files (Cursor
+		// project hooks/rules are meant to be committed; a no-op git add if
+		// .cursor/ is gitignored in this repo), and .gitignore if modified by
+		// EnsureProjectGitignore.
+		for _, path := range []string{config.SafeAgentsFile(), filepath.Join(".claude", "settings.json"), "CLAUDE.md", ".agents", ".codex", ".cursor", ".gitignore"} {
 			if _, statErr := os.Stat(filepath.Join(workDir, path)); statErr == nil {
-				codexCmd := initArtifactGitCommand(workDir, "add", path)
-				_ = codexCmd.Run()
+				_ = initArtifactGitCommand(workDir, "add", path).Run()
+				paths = append(paths, path)
 			}
-		}
-		// Also stage .gitignore if modified by EnsureProjectGitignore
-		if _, statErr := os.Stat(filepath.Join(workDir, ".gitignore")); statErr == nil {
-			giCmd := initArtifactGitCommand(workDir, "add", ".gitignore")
-			_ = giCmd.Run()
 		}
 		// Hooks installed by this init can call back into bd. Skip all
 		// of them for the bootstrap commit to avoid self-deadlocking
 		// while init still owns the embedded Dolt lock. --no-verify
 		// alone does not skip prepare-commit-msg.
-		commitArgs := []string{"-c", "core.hooksPath=", "commit", "--no-verify", "-m", "bd init: initialize beads issue tracking"}
-		commitCmd := initArtifactGitCommand(workDir, commitArgs...)
-		if commitOut, commitErr := commitCmd.CombinedOutput(); commitErr != nil {
-			if !quiet && !strings.Contains(string(commitOut), "nothing to commit") {
+		result, commitErr := repo.Commit(context.Background(), domain.GitCommitParams{
+			Message:   "bd init: initialize beads issue tracking",
+			NoVerify:  true,
+			SkipHooks: true,
+			Only:      paths,
+		})
+		if commitErr != nil {
+			if !quiet {
 				fmt.Fprintf(os.Stderr, "Warning: failed to commit beads files: %v\n", commitErr)
 			}
-		} else if !quiet {
+		} else if result.DidCommit && !quiet {
 			fmt.Printf("  %s Committed beads files to git\n", ui.RenderPass("✓"))
 		}
 		// WARNING: DO NOT remove, delete, or modify files inside Dolt's .dolt/

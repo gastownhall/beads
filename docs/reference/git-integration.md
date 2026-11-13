@@ -31,6 +31,26 @@ runtime files out of git — no manual gitignore rules are needed. Never track
 the database directory (`.beads/embeddeddolt/` or `.beads/dolt/`) in git or
 via Git LFS.
 
+### The Bootstrap Commit
+
+Unless you pass `--stealth` or work in a Jujutsu workspace (see
+[Jujutsu Setup](#jujutsu-setup)), `bd init` in a Git repository stages its
+artifacts and makes one commit, `bd init: initialize beads issue tracking`.
+That commit holds only the changes under the artifact paths: `.beads/`, the
+agents file, `.claude/settings.json`, `CLAUDE.md`, `.agents/`, `.codex/`,
+`.cursor/` and `.gitignore` (whichever exist). Anything else you had staged
+stays staged and out of the commit, and unstaged edits stay unstaged.
+
+The scope is by path, not by who wrote the change: if one of those files
+already had uncommitted edits of yours (a modified `CLAUDE.md` or
+`.gitignore`, say), the bootstrap commit includes them. The one exception is
+an ignored file you untracked but kept on disk, as `git rm --cached` (or
+`bd doctor --fix`) leaves it: its removal stays staged and out of the
+commit, so init does not track the file again. When nothing under
+the artifact paths differs from `HEAD`, init makes no commit. If Git refuses the
+commit (during a merge, for example), init prints a warning with Git's reason
+and continues.
+
 ## Git Hooks
 
 ### Installation
@@ -328,6 +348,12 @@ bd init --stealth        # Full invisible mode (also skips hooks + agents)
 **Colocated repos** (`jj git init --colocate`): Git hooks work normally.
 Beads installs simplified hooks (`pre-commit` and `post-merge` only, no
 staging logic).
+
+In a Jujutsu workspace `bd init` makes no bootstrap commit: a native
+`git commit` would move Git's `HEAD` under jj and leave the previous
+working-copy commit as a stray head. Init prints a note instead, and the
+beads files stay in the working copy for you to record with jj (for example
+with `jj commit` or `jj describe`).
 
 **Pure jj repos** (no git): Since jj doesn't have native hooks yet, set up
 push aliases:
