@@ -21,7 +21,10 @@ import (
 // TestCanonicalActor/TestActorMatches already pin in
 // internal/validation/issue_test.go through BOTH implementations; a future
 // edit to either separator set or matching rule that isn't mirrored in the
-// other fails here, not in production.
+// other fails here, not in production. The bd-740y4x rows below add the
+// slash-qualified report pair and its negative-control spellings to those
+// tables; TestAssigneeMatches/TestCheckClosable are the expected-value
+// oracle for them (parity alone is not).
 func TestIdentityCanonicalizationParityWithValidation(t *testing.T) {
 	canonicalCases := []struct {
 		name string
@@ -39,6 +42,18 @@ func TestIdentityCanonicalizationParityWithValidation(t *testing.T) {
 		{name: "exact double-hyphen separator decodes to the rig-qualified slash (ga-2vy9p2)", in: "gastown--mayor"},
 		{name: "raw slash passes through unchanged", in: "gastown/mayor"},
 		{name: "a hyphen run longer than two is not the exact slash spelling and falls back to generic collapse", in: "gastown---mayor"},
+		// bd-740y4x: the reported rig-qualified pair and its negative controls.
+		{name: "reported slash-qualified owner (bd-740y4x)", in: "gascity/bob"},
+		{name: "reported double-hyphen actor (bd-740y4x)", in: "gascity--bob"},
+		{name: "different agent in the same rig (bd-740y4x)", in: "gascity/alice"},
+		{name: "different agent in the same rig under double-hyphen (bd-740y4x)", in: "gascity--alice"},
+		{name: "same agent name in a different rig (bd-740y4x)", in: "python419--bob"},
+		{name: "double-underscore dotted-axis spelling (bd-740y4x)", in: "gascity__bob"},
+		{name: "dot dotted-axis spelling (bd-740y4x)", in: "gascity.bob"},
+		{name: "single-underscore dotted-axis spelling (bd-740y4x)", in: "gascity_bob"},
+		{name: "single-hyphen dotted-axis spelling (bd-740y4x)", in: "gascity-bob"},
+		{name: "rig-qualified role with a dotted name", in: "gascity/gastown.refinery"},
+		{name: "slash followed by a mixed separator run", in: "gascity/-_bob"},
 	}
 	for _, tc := range canonicalCases {
 		t.Run("CanonicalActor/"+tc.name, func(t *testing.T) {
@@ -63,6 +78,18 @@ func TestIdentityCanonicalizationParityWithValidation(t *testing.T) {
 		{name: "double-hyphen and double-underscore spellings no longer widen to the same identity (ga-2vy9p2)", assignee: "gastown--mayor", actor: "gastown__mayor"},
 		{name: "double-hyphen spelling matches its raw-slash identity (ga-2vy9p2)", assignee: "gastown--mayor", actor: "gastown/mayor"},
 		{name: "raw slash and raw dot stay genuinely distinct identities", assignee: "gastown/mayor", actor: "gastown.mayor"},
+		// bd-740y4x: the reported pair in both directions and its controls.
+		{name: "reported slash owner matches its double-hyphen actor (bd-740y4x)", assignee: "gascity/bob", actor: "gascity--bob"},
+		{name: "reported double-hyphen owner matches its slash actor (bd-740y4x)", assignee: "gascity--bob", actor: "gascity/bob"},
+		{name: "different agent in the same rig does not match (bd-740y4x)", assignee: "gascity/bob", actor: "gascity/alice"},
+		{name: "different agent in the same rig under double-hyphen does not match (bd-740y4x)", assignee: "gascity/bob", actor: "gascity--alice"},
+		{name: "same agent name in a different rig does not match (bd-740y4x)", assignee: "gascity/bob", actor: "python419--bob"},
+		{name: "double-underscore dotted-axis spelling does not match (bd-740y4x)", assignee: "gascity/bob", actor: "gascity__bob"},
+		{name: "dot dotted-axis spelling does not match (bd-740y4x)", assignee: "gascity/bob", actor: "gascity.bob"},
+		{name: "single-underscore dotted-axis spelling does not match (bd-740y4x)", assignee: "gascity/bob", actor: "gascity_bob"},
+		{name: "single-hyphen dotted-axis spelling does not match (bd-740y4x)", assignee: "gascity/bob", actor: "gascity-bob"},
+		{name: "rig-qualified role with a dotted name matches its double-hyphen spelling", assignee: "gascity/gastown.refinery", actor: "gascity--gastown.refinery"},
+		{name: "a separator-only actor never matches a real identity", assignee: "gascity/bob", actor: "/"},
 	}
 	for _, tc := range matchCases {
 		t.Run("ActorMatches/"+tc.name, func(t *testing.T) {
