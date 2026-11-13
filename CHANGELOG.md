@@ -151,6 +151,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd dolt pull --renumber-children` resolves offline child-id collisions.**
+  When two machines each create children under the same parent before
+  syncing, both mint the same child id for different work, and the next
+  `bd dolt pull` aborts on issues add/add conflicts plus a both-changed
+  `child_counters` row. The counter conflict now settles at the higher
+  high-water mark, a plain failing pull prints a best-effort renumber plan
+  plus the flag hint, and `bd dolt pull --renumber-children` renames the
+  colliding local children — with their descendants, dependency edges,
+  comments, events and counter rows — to fresh ids above both clones'
+  high-water marks in one commit, then merges the remote revision it
+  planned against: the remote keeps its ids, the local children survive
+  under the fresh ones, and the next local create starts above the
+  collision. It refuses to start over uncommitted changes or an unfinished
+  merge. Freetext mentions of a renamed id are reported in the result for
+  manual review, never rewritten (#4796, from @rjc123).
+
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
   While a workspace journals, every `ephemeral` or `no_history` bead it creates
   is stamped with the `seq` of its own `create` journal record, in the same

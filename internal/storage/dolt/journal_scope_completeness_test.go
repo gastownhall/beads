@@ -127,4 +127,27 @@ func TestEveryRawTxJournalScopeIsScopedOrExempt(t *testing.T) {
 			t.Errorf("exemption %q no longer matches a raw-transaction mutation path — remove it", key)
 		}
 	}
+
+	// versioncontrolops begins transactions too, on a session the store hands
+	// it (bd-28sb25's child renumbering), where the store's scoping cannot
+	// reach. Such a function takes that scoping as a scopeTx parameter
+	// (versioncontrolops.TxScope) and must call it on the transaction it began.
+	vcFns, err := journalscan.ParsePackage("../versioncontrolops")
+	if err != nil {
+		t.Fatalf("parse versioncontrolops package: %v", err)
+	}
+	var vcChecked int
+	for key, f := range vcFns {
+		if !f.CallsAnyOf(map[string]bool{"BeginTx": true}) || !f.CallsAnyOf(journalingMutators) {
+			continue
+		}
+		vcChecked++
+		if f.ParamIndex("scopeTx") < 0 || !f.CallsAnyOf(map[string]bool{"scopeTx": true}) {
+			t.Errorf("versioncontrolops %s begins its own transaction and reaches journaling issueops code, but never calls a scopeTx parameter on it — "+
+				"every mutation in that transaction journals NOTHING. Take the store's scoping as scopeTx versioncontrolops.TxScope and call it right after BeginTx.", key)
+		}
+	}
+	if vcChecked == 0 {
+		t.Fatal("guard found no versioncontrolops raw-transaction mutation path (ApplyChildRenumbers is one) — BeginTx detection or parsing changed; the guard is not actually running")
+	}
 }

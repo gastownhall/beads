@@ -875,7 +875,13 @@ Use --strategy ours|theirs to resolve conflicts the auto-resolver declines
 (e.g. both sides edited the same issue since the last sync) instead of
 aborting the pull for manual resolution. Embedded storage only (#4992); on
 server-mode/sql-server storage use 'bd conflicts resolve' after a pull that
-reports conflicts.`,
+reports conflicts.
+
+Use --renumber-children when the pull fails because both clones created
+different child issues under the same ids (P.71 here and P.71 there). The
+remote keeps its ids; this clone's colliding children, with their subtrees,
+move to fresh ids above both sides' counters in one commit before the merge.
+Text that mentions a moved id is reported, not rewritten.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if isDoltLocalOnly() {
 			if jsonOutput {
@@ -904,6 +910,19 @@ reports conflicts.`,
 				return HandleError("%v", err)
 			}
 		}
+		if renumber, _ := cmd.Flags().GetBool("renumber-children"); renumber {
+			if strategy != "" {
+				return HandleErrorRespectJSON("--renumber-children cannot be combined with --strategy")
+			}
+			if remote == "" {
+				// The default-remote gate below, before anything is renamed.
+				var leftover *remoteOnlyInLeftoverDatabaseError
+				if _, err := hasConfiguredRemote(ctx, st); errors.As(err, &leftover) {
+					return HandleErrorRespectJSON("%v", err)
+				}
+			}
+			return runPullRenumberChildren(ctx, st, remote)
+		}
 		var puller storage.StrategicPuller
 		if strategy != "" {
 			var ok bool
@@ -930,6 +949,8 @@ reports conflicts.`,
 					printAncestorPKMismatchGuidance(err)
 				} else if isDivergedHistoryErr(err) {
 					printDivergedHistoryGuidance("pull")
+				} else {
+					printChildRenumberHint(ctx, st, remote)
 				}
 				return SilentExit()
 			}
@@ -960,6 +981,8 @@ reports conflicts.`,
 				printAncestorPKMismatchGuidance(err)
 			} else if isDivergedHistoryErr(err) {
 				printDivergedHistoryGuidance("pull")
+			} else {
+				printChildRenumberHint(ctx, st, "")
 			}
 			return SilentExit()
 		}
@@ -2334,6 +2357,7 @@ func init() {
 	doltPushCmd.Flags().BoolP("yes", "y", false, "Consent to adopting a Dolt remote derived from git origin when none is configured")
 	doltPushCmd.Flags().Bool("no-adopt", false, "Never derive a Dolt remote from git origin (also BD_NO_REMOTE_ADOPT=1)")
 	doltPullCmd.Flags().String("remote", "", "Pull from a specific named remote instead of the default")
+	doltPullCmd.Flags().Bool("renumber-children", false, "Before merging, move this clone's child issues that collide with different remote children to fresh ids")
 	doltPullCmd.Flags().String("strategy", "", "Conflict resolution strategy for conflicts the auto-resolver declines: 'ours' or 'theirs' (embedded storage only, #4992)")
 	doltCommitCmd.Flags().StringP("message", "m", "", "Commit message (default: auto-generated)")
 	doltCleanDatabasesCmd.Flags().Bool("dry-run", false, "Show what would be dropped without dropping")

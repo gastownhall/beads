@@ -158,6 +158,72 @@ type StrategicPuller interface {
 	PullRemoteWithStrategy(ctx context.Context, remote, strategy string) error
 }
 
+// ChildRenumber is one local identity change `bd dolt pull
+// --renumber-children` makes (or, in a plan, proposes): a colliding
+// hierarchical child, or a descendant of one, moving From -> To.
+type ChildRenumber struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// ChildRenumberReport is what a child-renumbering pull planned and did.
+type ChildRenumberReport struct {
+	Remote     string `json:"remote"`
+	Branch     string `json:"branch"`
+	LocalHead  string `json:"local_head,omitempty"`
+	RemoteHead string `json:"remote_head,omitempty"`
+	MergeBase  string `json:"merge_base,omitempty"`
+	// Renames lists roots and descendants, roots first.
+	Renames []ChildRenumber `json:"renames"`
+	// RenameCommit is the Dolt commit holding Renames, once made.
+	RenameCommit string `json:"rename_commit,omitempty"`
+	// RenameParent is the commit RenameCommit was made on: the local head
+	// before the renames.
+	RenameParent string `json:"rename_parent,omitempty"`
+	// Retained reports that RenameCommit is an earlier renumbering pull's,
+	// against this same remote head, kept when its merge failed: this pull
+	// renamed nothing, and Renames are the ones that commit records.
+	Retained bool `json:"retained,omitempty"`
+	// Merged reports that the remote head was merged after the renames.
+	Merged bool `json:"merged"`
+	// Head is the branch head the pull ended on, once merged.
+	Head string `json:"head,omitempty"`
+	// Mentions lists local text that names a renamed id. The text is left
+	// as written: after the merge such an id names the remote's issue.
+	Mentions []ChildIDMention `json:"mentions,omitempty"`
+}
+
+// ChildIDMention is one field or comment of IssueID whose text names ID, an
+// id the pull renamed to RenamedTo. CommentID is set when Field is "comment".
+type ChildIDMention struct {
+	IssueID   string `json:"issue_id"`
+	Field     string `json:"field"`
+	CommentID string `json:"comment_id,omitempty"`
+	ID        string `json:"id"`
+	RenamedTo string `json:"renamed_to"`
+}
+
+// ChildRenumberPlanner is the optional read-only half of `bd dolt pull
+// --renumber-children` (bd-28sb25, GH#4796): two clones that each created
+// children under the same parent offline mint the same child ids for
+// different issues, an add/add collision the merge cannot settle.
+// PlanChildRenumbers proposes renaming the LOCAL colliding children (and
+// their subtrees) above both sides' high-water marks, against the
+// already-fetched remote-tracking ref, writing and fetching nothing. remote ""
+// means the default remote. Callers must type-assert.
+type ChildRenumberPlanner interface {
+	PlanChildRenumbers(ctx context.Context, remote string) (*ChildRenumberReport, error)
+}
+
+// ChildRenumberingPuller is the applying half of `bd dolt pull
+// --renumber-children`: fetch, rename the local colliding children in one
+// commit, then merge. The report comes back with any error once the rename
+// commit exists, since that commit is kept. Callers must type-assert.
+type ChildRenumberingPuller interface {
+	ChildRenumberPlanner
+	PullRenumberChildren(ctx context.Context, remote, actor string) (*ChildRenumberReport, error)
+}
+
 // VersionControl provides branch, commit, merge, and status operations.
 type VersionControl interface {
 	Branch(ctx context.Context, name string) error

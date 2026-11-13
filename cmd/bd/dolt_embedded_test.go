@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // bdDolt runs "bd dolt" with the given args and returns stdout.
@@ -258,6 +260,141 @@ func TestEmbeddedDoltRemoteAndPush(t *testing.T) {
 		bdDolt(t, bd, ppDir, "commit", "-m", "second commit")
 		bdDolt(t, bd, ppDir, "push")
 	})
+}
+
+// bdSkipIdentityCheck runs bd with BEADS_SKIP_IDENTITY_CHECK=1: the second
+// clone of the renumber fixture below pulls the first clone's metadata, and
+// the CLI write path would otherwise refuse on the workspace-identity check
+// (the field condition `bd doctor --fix`/`bd bootstrap` reconciles; the
+// override keeps the test on its subject).
+func bdSkipIdentityCheck(t *testing.T, bd, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command(bd, args...)
+	cmd.Dir = dir
+	cmd.Env = append(bdEnv(dir), "BEADS_SKIP_IDENTITY_CHECK=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bd %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return string(out)
+}
+
+// decodeOneChildRenumberJSON decodes a `bd dolt pull --renumber-children
+// --json` stdout, which must be exactly one JSON object.
+func decodeOneChildRenumberJSON(t *testing.T, out string) storage.ChildRenumberReport {
+	t.Helper()
+	dec := json.NewDecoder(strings.NewReader(out))
+	var report storage.ChildRenumberReport
+	if err := dec.Decode(&report); err != nil {
+		t.Fatalf("pull --renumber-children --json stdout is not the result JSON: %v\n%s", err, out)
+	}
+	if dec.More() {
+		t.Fatalf("pull --renumber-children --json wrote more than one JSON value:\n%s", out)
+	}
+	return report
+}
+
+// TestEmbeddedDoltPullRenumbersMentions (GH#4796, bd-28sb25 AC-5): the
+// repair reports, and never rewrites, the local prose that names a renamed
+// id. A whole-id mention is reported per field and per comment with the id
+// it maps to; a longer id that merely starts with the renamed one (pn-x.10
+// for a renamed pn-x.1) is not a mention. The text is left byte-for-byte as
+// it was, for the operator to review by hand, and --json stdout is one
+// object on the repair and on the pull after it.
+func TestEmbeddedDoltPullRenumbersMentions(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dirA, _, _ := bdInit(t, bd, "--prefix", "pn")
+	remoteDir := t.TempDir()
+	bdDolt(t, bd, dirA, "remote", "add", "origin", "file://"+remoteDir)
+
+	parent := bdCreate(t, bd, dirA, "Parent epic for mention scan", "--type", "epic")
+	bdDolt(t, bd, dirA, "commit", "-m", "seed parent")
+	bdDolt(t, bd, dirA, "push")
+
+	// The second clone pulls the parent, then both clones mint a child under
+	// it while "offline": same id, different beads.
+	dirB, _, _ := bdInit(t, bd, "--prefix", "pn")
+	bdDolt(t, bd, dirB, "remote", "add", "origin", "file://"+remoteDir)
+	bdDolt(t, bd, dirB, "pull")
+
+	localChild := bdCreate(t, bd, dirA, "Local child one", "--parent", parent.ID)
+	// Local prose names the child id three ways: the child's own
+	// description (which also carries the non-mention look-alike
+	// "<id>0"), a comment on the child, and the parent's notes.
+	bdSkipIdentityCheck(t, bd, dirA, "update", localChild.ID, "--description",
+		"Tracked under "+localChild.ID+", unlike "+localChild.ID+"0.")
+	bdSkipIdentityCheck(t, bd, dirA, "comment", localChild.ID, "Follow-up on "+localChild.ID)
+	bdSkipIdentityCheck(t, bd, dirA, "update", parent.ID, "--append-notes", "See "+localChild.ID)
+	bdDolt(t, bd, dirA, "commit", "-m", "local child with mentions")
+
+	remoteChild := parseIssueJSON(t, []byte(bdSkipIdentityCheck(t, bd, dirB,
+		"create", "Remote child one", "--parent", parent.ID, "--json")))
+	if remoteChild.ID != localChild.ID {
+		t.Fatalf("fixture: colliding children got distinct ids %s and %s", localChild.ID, remoteChild.ID)
+	}
+	bdSkipIdentityCheck(t, bd, dirB, "dolt", "commit", "-m", "remote child")
+	bdSkipIdentityCheck(t, bd, dirB, "dolt", "push")
+
+	result := decodeOneChildRenumberJSON(t, bdDolt(t, bd, dirA, "pull", "--renumber-children", "--json"))
+	if len(result.Renames) != 1 || result.Renames[0].From != localChild.ID {
+		t.Fatalf("renames = %+v, want the single rename of %s", result.Renames, localChild.ID)
+	}
+	newID := result.Renames[0].To
+	if newID != parent.ID+".2" {
+		t.Errorf("renamed id = %s, want %s.2 (above both clones' high-water marks)", newID, parent.ID)
+	}
+	if result.RenameCommit == "" || !result.Merged || result.Head == "" {
+		t.Errorf("result = rename commit %q, merged %v, head %q; want a committed, merged repair",
+			result.RenameCommit, result.Merged, result.Head)
+	}
+
+	// One report row per whole-id mention: the parent's notes, and the
+	// renamed child's comment and description. The look-alike id is not a
+	// mention, so the description is reported exactly once. Rows sort by
+	// issue then field: the parent before its child, "comment" before
+	// "description".
+	if len(result.Mentions) != 3 {
+		t.Fatalf("mentions = %+v, want 3 (parent notes, child comment, child description)", result.Mentions)
+	}
+	if m := result.Mentions[0]; m.IssueID != parent.ID || m.Field != "notes" ||
+		m.CommentID != "" || m.ID != localChild.ID || m.RenamedTo != newID {
+		t.Errorf("mention 0 = %+v, want the parent's notes naming %s -> %s", m, localChild.ID, newID)
+	}
+	if m := result.Mentions[1]; m.IssueID != newID || m.Field != "comment" ||
+		m.CommentID == "" || m.ID != localChild.ID || m.RenamedTo != newID {
+		// The comment id is derived from the re-keyed comment's content
+		// (timestamped), so it is checked for presence, not value.
+		t.Errorf("mention 1 = %+v, want the renamed child's comment naming %s -> %s", m, localChild.ID, newID)
+	}
+	if m := result.Mentions[2]; m.IssueID != newID || m.Field != "description" ||
+		m.CommentID != "" || m.ID != localChild.ID || m.RenamedTo != newID {
+		t.Errorf("mention 2 = %+v, want the renamed child's description naming %s -> %s", m, localChild.ID, newID)
+	}
+
+	// The text is unchanged: every mention still names the OLD id exactly
+	// where it did, for the operator to review.
+	shownChild := bdSkipIdentityCheck(t, bd, dirA, "show", newID, "--json")
+	if !strings.Contains(shownChild, "Tracked under "+localChild.ID+",") {
+		t.Errorf("renamed child's description was rewritten:\n%s", shownChild)
+	}
+	if !strings.Contains(shownChild, localChild.ID+"0.") {
+		t.Errorf("renamed child's description lost the look-alike id:\n%s", shownChild)
+	}
+	shownParent := bdSkipIdentityCheck(t, bd, dirA, "show", parent.ID, "--json")
+	if !strings.Contains(shownParent, "See "+localChild.ID) {
+		t.Errorf("parent notes were rewritten:\n%s", shownParent)
+	}
+
+	// Pulling again finds nothing to rename and still writes one object.
+	again := decodeOneChildRenumberJSON(t, bdDolt(t, bd, dirA, "pull", "--renumber-children", "--json"))
+	if len(again.Renames) != 0 || again.RenameCommit != "" || !again.Merged || again.Head != result.Head {
+		t.Errorf("second pull = %+v, want no renames, merged, head still %s", again, result.Head)
+	}
 }
 
 // TestEmbeddedDoltConcurrent exercises dolt operations concurrently.
