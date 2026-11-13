@@ -891,6 +891,33 @@ func TestMigrateResume_JournalFromBeforeEffectiveIdleTimeout(t *testing.T) {
 	}
 }
 
+// TestMigrateJournal_SaveRoundTrip pins that saving the migration journal on a
+// plain directory succeeds and loads back unchanged, including a rewrite over
+// an existing journal, and leaves no temporary file behind. On native Windows
+// an unconditional directory Sync failed this save after the rename (GH#6882).
+func TestMigrateJournal_SaveRoundTrip(t *testing.T) {
+	beadsDir := t.TempDir()
+	root := filepath.Join(beadsDir, "dolt")
+	j := &migrateJournal{
+		Version: 1, SourceMode: configfile.DoltModeServer, TargetMode: configfile.DoltModeProxiedServer,
+		RootPath: root, Sidecar: &configfile.ProxiedServerClientInfo{RootPath: root},
+		Ownership: "managed-local",
+	}
+	for i, phase := range []migratePhase{migratePrepared, migrateTargetConfigured} {
+		j.Phase = phase
+		j.Attempt = i + 1
+		require.NoError(t, saveMigrateJournal(beadsDir, j))
+		loaded, err := loadMigrateJournal(beadsDir)
+		require.NoError(t, err)
+		require.Equal(t, j, loaded)
+	}
+	entries, err := os.ReadDir(beadsDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "save must not leave temporary files")
+	require.Equal(t, migrateJournalFileName, entries[0].Name())
+	require.False(t, entries[0].IsDir())
+}
+
 func TestMigrateJournal_UnknownPhaseFailsClosed(t *testing.T) {
 	beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
 	path := migrateJournalPath(beadsDir)
