@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/git"
@@ -978,5 +979,77 @@ func TestRunRecipe_CopilotKeepsExistingInstructions(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(tmpDir, ".copilot-plugin", "plugin.json")); err != nil {
 		t.Fatalf("expected the beads-owned plugin manifest: %v", err)
+	}
+}
+
+// An existing beads section is replaced in place — the user's text before
+// and after it is untouched — and a second run leaves the file
+// byte-identical without rewriting it (GH#7431).
+func TestRunRecipe_CopilotReplacesSectionInPlace(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	t.Chdir(tmpDir)
+	t.Setenv("BEADS_DIR", "")
+	resetSetupResolutionCaches(t)
+	resetSetupGlobals(t)
+
+	instructions := filepath.Join(tmpDir, ".github", "copilot-instructions.md")
+	if err := os.MkdirAll(filepath.Dir(instructions), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const before = "# Team rules\n\nWrite table-driven tests.\n\n"
+	const after = "## Legacy notes\n\nKept from last year.\n"
+	stale := before +
+		"<!-- BEGIN BEADS INTEGRATION -->\n" +
+		"# Old beads guidance\n" +
+		"<!-- END BEADS INTEGRATION -->\n" +
+		after
+	if err := os.WriteFile(instructions, []byte(stale), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = captureStdout(t, func() error {
+		return runRecipe("copilot")
+	})
+
+	got, err := os.ReadFile(instructions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := before +
+		"<!-- BEGIN BEADS INTEGRATION -->\n" +
+		recipes.CopilotInstructionsTemplate +
+		"<!-- END BEADS INTEGRATION -->\n" +
+		after
+	if string(got) != want {
+		t.Fatalf("instructions =\n%q\nwant\n%q", got, want)
+	}
+	if n := strings.Count(string(got), "<!-- BEGIN BEADS INTEGRATION"); n != 1 {
+		t.Fatalf("%d beads sections after update; want 1:\n%s", n, got)
+	}
+	// The current template appears exactly once: the stale guidance is gone,
+	// not duplicated.
+	if n := strings.Count(string(got), "## Context Loading"); n != 1 {
+		t.Fatalf("current template appears %d times; want 1:\n%s", n, got)
+	}
+
+	// A second run changes nothing and does not rewrite the file.
+	age := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(instructions, age, age); err != nil {
+		t.Fatal(err)
+	}
+	_ = captureStdout(t, func() error {
+		return runRecipe("copilot")
+	})
+	info, err := os.Stat(instructions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().Equal(age) {
+		t.Fatal("second run rewrote the instructions file")
+	}
+	gotAgain, err := os.ReadFile(instructions)
+	if err != nil || string(gotAgain) != want {
+		t.Fatalf("second run changed the file:\n%q, %v\nwant\n%q", gotAgain, err, want)
 	}
 }

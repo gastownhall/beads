@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // sharedLegacy pins a frozen legacy template for classification: an exact
@@ -136,5 +137,30 @@ func TestSharedSectionUpsertFile(t *testing.T) {
 	}
 	if got, err := os.ReadFile(path); err != nil || string(got) != malformed {
 		t.Fatalf("malformed file was changed: %q, %v", got, err)
+	}
+
+	// A file already holding exactly the section install writes is not
+	// rewritten: bytes and timestamps stay.
+	current := agentsBeginMarker + "\n" + sharedBody + agentsEndMarker + "\n"
+	if err := os.WriteFile(path, []byte(current), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	age := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(path, age, age); err != nil {
+		t.Fatal(err)
+	}
+	wrote, err = UpsertSharedSection(path, sharedBody, sharedLegacy)
+	if err != nil || wrote {
+		t.Fatalf("UpsertSharedSection(current) = %v, %v; want false, nil", wrote, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().Equal(age) {
+		t.Fatal("unchanged file was rewritten")
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != current {
+		t.Fatalf("unchanged file's bytes moved: %q, %v", got, err)
 	}
 }

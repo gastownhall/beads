@@ -138,8 +138,10 @@ func upsertSharedSectionText(content, body, legacy string) (string, error) {
 
 // UpsertSharedSection reads the shared instruction file at path and writes
 // it back with body installed as its beads section, through the atomic
-// writer, which refuses a file symlink. A missing file is an empty one. It
-// reports whether it wrote the file.
+// writer, which refuses a file symlink. A missing file is an empty one. A
+// file already holding exactly the section install writes is left alone —
+// bytes and timestamps — so reinstall is byte-stable. It reports whether it
+// wrote the file.
 func UpsertSharedSection(path, body, legacy string) (bool, error) {
 	data, err := os.ReadFile(path) // #nosec G304 -- a bd setup recipe's own path
 	if err != nil && !os.IsNotExist(err) {
@@ -149,6 +151,9 @@ func UpsertSharedSection(path, body, legacy string) (bool, error) {
 	newContent, err := upsertSharedSectionText(content, body, legacy)
 	if err != nil {
 		return false, err
+	}
+	if newContent == content {
+		return false, nil
 	}
 	if err := atomicWriteFile(path, []byte(newContent)); err != nil {
 		return false, fmt.Errorf("write file: %w", err)
