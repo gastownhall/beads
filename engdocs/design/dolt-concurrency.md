@@ -374,13 +374,19 @@ Wisps are `dolt_ignore`-d and never pushed. This is correct:
 ## Implications for Standalone Beads
 
 The `bd` CLI supports both embedded Dolt and server mode. This design
-applies to **server mode only** (the orchestrator's deployment). Embedded mode
-is single-process and doesn't have the multi-connection concurrency
-concerns described here.
+applies to **server mode only** (the orchestrator's deployment). In embedded
+mode several `bd` processes can share one database, but their engine
+sessions are serialized: an open embedded engine holds the database's
+exclusive lock, and each store operation holds it only for its own short
+session. That narrows the multi-connection concurrency concerns described
+here rather than ruling them out: a write's SQL commit and the history
+commit that records it run in separate sessions, another process can run in
+between, and that history commit stages whole tables, so it can take in the
+other process's rows too.
 
 For standalone `bd` with embedded Dolt:
 - Single connection, auto-commit is fine
-- No branch-per-worker (single user)
+- No branch-per-worker (processes take turns on one branch)
 - Transaction wrapping is still good practice but not critical
 
 ## Performance Expectations
