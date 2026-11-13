@@ -1150,3 +1150,103 @@ func TestAutoMigrateStillRunsWithoutFreeze(t *testing.T) {
 		t.Errorf("expected autoMigrateOnVersionBump to run (an 'auto-migrate:' debug log line) when not frozen, got none:\nstderr:\n%s", stderr)
 	}
 }
+
+// freezeRunner runs one bd invocation (runBDFrozen or runBDMigrationFreeze),
+// so a check after a frozen command reads under the same marker it saw.
+type freezeRunner func(t *testing.T, bd, dir string, args ...string) (stdout, stderr string, exitCode int)
+
+func freezeShowDefer(t *testing.T, run freezeRunner, bd, dir, id string) (status string, deferUntil *string) {
+	t.Helper()
+	out, stderr, code := run(t, bd, dir, "show", id, "--json")
+	if code != 0 {
+		t.Fatalf("bd show %s failed (exit %d):\nstdout:\n%s\nstderr:\n%s", id, code, out, stderr)
+	}
+	var shown []struct {
+		Status     string  `json:"status"`
+		DeferUntil *string `json:"defer_until"`
+	}
+	if err := json.Unmarshal([]byte(out), &shown); err != nil || len(shown) != 1 {
+		t.Fatalf("parsing show --json output: %v\n%s", err, out)
+	}
+	return shown[0].Status, shown[0].DeferUntil
+}
+
+func freezeReadyIDs(t *testing.T, stdout string) map[string]bool {
+	t.Helper()
+	var rows []struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &rows); err != nil {
+		t.Fatalf("parsing ready --json output: %v\n%s", err, stdout)
+	}
+	ids := map[string]bool{}
+	for _, r := range rows {
+		ids[r.ID] = true
+	}
+	return ids
+}
+
+// TestDeferWakeSweepSkippedDuringMigrationFreeze (GH#7634) pins the
+// `MigrationFrozen: commandFreeze.Frozen()` wire-up in main.go's doltCfg
+// construction through to the embedded store: an expired defer must stay
+// deferred while the workspace is frozen, because the lazy defer-wake sweep
+// (be-vbhpf) is a real write against the store and must not run until the
+// freeze lifts — even though the command reading it ('bd ready') is itself
+// classified read-only and must still exit 0.
+//
+// Hardcoding MigrationFrozen to false (or dropping the guard in the embedded
+// store's wakeExpiredDefers) wakes the issue during the freeze; this test
+// fails against that regression.
+func TestDeferWakeSweepSkippedDuringMigrationFreeze(t *testing.T) {
+	bd, dir := setupMigrationFreezeWorkspace(t)
+	// The bug is in the embedded store's sweep; make sure that is the backend
+	// this workspace actually runs on.
+	if _, err := os.Stat(filepath.Join(dir, ".beads", "embeddeddolt")); err != nil {
+		t.Fatalf("precondition: workspace is not on the embedded backend: %v", err)
+	}
+
+	stdout, stderr, code := runBDMigrationFreeze(t, bd, dir, "create", "defer me", "-p", "2", "--json")
+	if code != 0 {
+		t.Fatalf("setup bd create failed (exit %d):\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	var issue struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &issue); err != nil || issue.ID == "" {
+		t.Fatalf("parsing create --json output: %v\n%s", err, stdout)
+	}
+
+	// An already-past --until makes the defer immediately eligible for the
+	// wake sweep the moment any ready-work read runs.
+	_, stderr, code = runBDMigrationFreeze(t, bd, dir, "defer", issue.ID, "--until", "2020-01-01T00:00:00Z")
+	if code != 0 {
+		t.Fatalf("setup bd defer failed (exit %d):\nstderr:\n%s", code, stderr)
+	}
+
+	writeFreezeMarker(t, dir, "migrator", "dolt v2 migration")
+
+	status, deferBefore := freezeShowDefer(t, runBDFrozen, bd, dir, issue.ID)
+	if status != "deferred" || deferBefore == nil {
+		t.Fatalf("precondition: status=%q defer_until=%v, want a dated deferred issue", status, deferBefore)
+	}
+
+	stdout, stderr, code = runBDFrozen(t, bd, dir, "ready", "--json")
+	if code != 0 {
+		t.Fatalf("bd ready was refused during a freeze, but it is classified read-only (exit %d):\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if strings.Contains(stderr, "defer-wake sweep") {
+		t.Errorf("frozen bd ready printed a sweep warning; the sweep must stand down silently:\n%s", stderr)
+	}
+	if freezeReadyIDs(t, stdout)[issue.ID] {
+		t.Errorf("expired defer %s listed by frozen bd ready: the wake sweep ran despite the freeze marker", issue.ID)
+	}
+
+	status, deferAfter := freezeShowDefer(t, runBDFrozen, bd, dir, issue.ID)
+	if status != "deferred" {
+		t.Errorf("status = %q after bd ready during a freeze, want %q — the defer-wake sweep ran despite the freeze marker",
+			status, "deferred")
+	}
+	if deferAfter == nil || *deferAfter != *deferBefore {
+		t.Errorf("defer_until changed under the freeze: was %q, now %v", *deferBefore, deferAfter)
+	}
+}
