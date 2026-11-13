@@ -646,6 +646,25 @@ func TestImporterUOWReplayReMintsUnsetIDs(t *testing.T) {
 		if got := queryInt(t, "SELECT COUNT(*) FROM issues WHERE id = ?", idless.ID); got != 1 {
 			t.Errorf("rows stored under the re-minted %s = %d, want 1", idless.ID, got)
 		}
+		// AC-3: the dependency and the comment re-landed under the re-minted
+		// id — none under the aborted one.
+		if dep := idless.Dependencies[0]; dep.IssueID != idless.ID {
+			t.Errorf("dep.IssueID on the struct = %q, want the re-minted %q", dep.IssueID, idless.ID)
+		}
+		if got := queryInt(t, "SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ?", idless.ID, anchor.ID); got != 1 {
+			t.Errorf("edges under the re-minted %s = %d, want 1", idless.ID, got)
+		}
+		if got := queryInt(t, "SELECT COUNT(*) FROM dependencies WHERE issue_id = ?", x); got != 0 {
+			t.Errorf("edges under the aborted %s = %d, want 0", x, got)
+		}
+		if c := idless.Comments[0]; c.ID == "" {
+			t.Error("the caller's comment struct carries no minted comment id")
+		} else if got := queryInt(t, "SELECT COUNT(*) FROM comments WHERE id = ? AND issue_id = ?", c.ID, idless.ID); got != 1 {
+			t.Errorf("comments under the minted %s = %d, want 1", c.ID, got)
+		}
+		if got := queryInt(t, "SELECT COUNT(*) FROM comments WHERE issue_id = ?", x); got != 0 {
+			t.Errorf("comments under the aborted %s = %d, want 0", x, got)
+		}
 	})
 
 	t.Run("competitor_allow_stale", func(t *testing.T) {
