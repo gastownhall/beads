@@ -7,23 +7,32 @@ import (
 	"testing"
 )
 
-// counterRetiredIssueRepo hands out counter values in order and reports the
-// listed ids retired. The embedded interface is nil on purpose: a call this
-// test did not intend panics rather than passing quietly.
-type counterRetiredIssueRepo struct {
+// counterHeldIssueRepo hands out counter values in order and models the two
+// id probes as the SQL repository answers them: Taken is a live row in either
+// plane or a tombstone, Retired a tombstone only. Each probe is recorded,
+// Retired ones as "retired:<id>", so a test can tell which one decided a
+// candidate. The embedded interface is nil on purpose: a call this test did
+// not intend panics rather than passing quietly.
+type counterHeldIssueRepo struct {
 	IssueSQLRepository
 	next    int
+	live    map[string]bool
 	retired map[string]bool
 	probed  []string
 }
 
-func (r *counterRetiredIssueRepo) NextCounterID(context.Context, string) (int, error) {
+func (r *counterHeldIssueRepo) NextCounterID(context.Context, string) (int, error) {
 	r.next++
 	return r.next, nil
 }
 
-func (r *counterRetiredIssueRepo) Retired(_ context.Context, id string) (bool, error) {
+func (r *counterHeldIssueRepo) Taken(_ context.Context, id string) (bool, error) {
 	r.probed = append(r.probed, id)
+	return r.live[id] || r.retired[id], nil
+}
+
+func (r *counterHeldIssueRepo) Retired(_ context.Context, id string) (bool, error) {
+	r.probed = append(r.probed, "retired:"+id)
 	return r.retired[id], nil
 }
 
@@ -31,47 +40,48 @@ func (r *counterRetiredIssueRepo) Retired(_ context.Context, id string) (bool, e
 // counter value a retaining sweep retired is skipped and the counter advanced
 // again, so a fresh create is never handed an id it would be refused.
 func TestCounterModeMintWalksPastRetiredValues(t *testing.T) {
-	repo := &counterRetiredIssueRepo{next: 4, retired: map[string]bool{"bd-5": true, "bd-6": true}}
+	repo := &counterHeldIssueRepo{next: 4, retired: map[string]bool{"bd-5": true, "bd-6": true}}
 	u := &issueUseCaseImpl{issueRepo: repo}
-	id, err := u.nextUnretiredCounterID(t.Context(), "bd", nil)
+	id, err := u.nextFreeCounterID(t.Context(), "bd", nil)
 	if err != nil {
-		t.Fatalf("nextUnretiredCounterID() = %v", err)
+		t.Fatalf("nextFreeCounterID() = %v", err)
 	}
 	if id != "bd-7" {
-		t.Fatalf("nextUnretiredCounterID() = %q, want bd-7 past the retired bd-5 and bd-6", id)
+		t.Fatalf("nextFreeCounterID() = %q, want bd-7 past the retired bd-5 and bd-6", id)
 	}
 	if got := strings.Join(repo.probed, ","); got != "bd-5,bd-6,bd-7" {
-		t.Fatalf("probed %s, want bd-5,bd-6,bd-7", got)
+		t.Fatalf("probed %s, want one Taken probe each for bd-5,bd-6,bd-7", got)
 	}
 }
 
 // TestCounterModeMintGivesUpAfterTheSkipBound pins the bound: a counter that
-// keeps landing on retired values fails loudly instead of walking forever.
+// keeps landing on held values fails loudly instead of walking forever.
 func TestCounterModeMintGivesUpAfterTheSkipBound(t *testing.T) {
-	repo := &counterRetiredIssueRepo{retired: map[string]bool{}}
-	for n := 1; n <= maxRetiredCounterSkips+1; n++ {
-		repo.retired[fmt.Sprintf("bd-%d", n)] = true
+	repo := &counterHeldIssueRepo{live: map[string]bool{}}
+	for n := 1; n <= maxCounterSkips+1; n++ {
+		repo.live[fmt.Sprintf("bd-%d", n)] = true
 	}
 	u := &issueUseCaseImpl{issueRepo: repo}
-	if id, err := u.nextUnretiredCounterID(t.Context(), "bd", nil); err == nil {
-		t.Fatalf("nextUnretiredCounterID() = %q, nil; want the skip-bound error", id)
+	id, err := u.nextFreeCounterID(t.Context(), "bd", nil)
+	if err == nil || !strings.Contains(err.Error(), "taken or claimed") {
+		t.Fatalf("nextFreeCounterID() = %q, %v; want the skip-bound error", id, err)
 	}
 }
 
 // TestCounterModeMintWalksPastClaimedValues pins the batch half of the
 // counter-mode mint: a value the caller's batch claimed (an explicit id a
-// later item names) is skipped like a retired one, without the tombstone read.
+// later item names) is skipped like a taken one, without the taken read.
 func TestCounterModeMintWalksPastClaimedValues(t *testing.T) {
-	repo := &counterRetiredIssueRepo{next: 4, retired: map[string]bool{}}
+	repo := &counterHeldIssueRepo{next: 4}
 	u := &issueUseCaseImpl{issueRepo: repo}
-	id, err := u.nextUnretiredCounterID(t.Context(), "bd", map[string]bool{"bd-5": true})
+	id, err := u.nextFreeCounterID(t.Context(), "bd", map[string]bool{"bd-5": true})
 	if err != nil {
-		t.Fatalf("nextUnretiredCounterID() = %v", err)
+		t.Fatalf("nextFreeCounterID() = %v", err)
 	}
 	if id != "bd-6" {
-		t.Fatalf("nextUnretiredCounterID() = %q, want bd-6 past the claimed bd-5", id)
+		t.Fatalf("nextFreeCounterID() = %q, want bd-6 past the claimed bd-5", id)
 	}
 	if got := strings.Join(repo.probed, ","); got != "bd-6" {
-		t.Fatalf("probed %s, want only bd-6: a claimed value costs no tombstone read", got)
+		t.Fatalf("probed %s, want only bd-6: a claimed value costs no taken read", got)
 	}
 }
