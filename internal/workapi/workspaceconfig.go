@@ -24,7 +24,9 @@ var CommandSettingKeys = config.CommandSettingKeys
 //
 // It is deliberately NOT the whole of `bd config set`. Which SOURCE a key
 // belongs to (config.yaml, git config, this plane) is resolved by the front
-// door; see issueops/workspaceconfig.go.
+// door; see issueops/workspaceconfig.go. The one routing fact the write rule
+// does state is the refusal: a config.yaml-only key is never stored here,
+// whichever door sent it (#7559).
 
 // ValidateSettingKey checks a key a caller wants to READ or REMOVE, and
 // returns it unchanged.
@@ -70,6 +72,27 @@ func ValidateSettingWrite(key, value string) (string, error) {
 	}
 	if config.IsCommandSettingKey(key) {
 		return "", fmt.Errorf("%w: %q must come from your shell environment or user config", issueops.ErrValidation, key)
+	}
+	// A CONFIG.YAML-ONLY KEY NEVER BECOMES A ROW (#7559). These are the
+	// startup settings and the tracker secrets (github.token, linear.api_key,
+	// jira.api_token, ...), and this table is replicated by bd dolt push, pull
+	// and clone, so a secret stored here reaches every remote. `bd config set`
+	// routes these keys to config.yaml before it reaches this role, but it is
+	// not the only door: the settings HTTP surface (PUT /v0/beads/config/{key})
+	// has no config.yaml it could write for the caller, so the refusal belongs
+	// HERE, where every leg passes — the issue_prefix precedent below. It is
+	// unconditional rather than limited to secrets: a non-secret yaml-only key
+	// stored here is a write that reports success and that no reader consults
+	// (the GH#536 class). The message never carries the value.
+	//
+	// After the command-setting check, so mail.delegate (on both lists) keeps
+	// that rule's more precise message, and after the length bounds, so an
+	// over-long key still carries types.ErrFieldTooLong. ValidateSettingKey is
+	// left alone, so a legacy row can still be read (redacted) and removed.
+	if config.IsYamlOnlyKey(key) {
+		return "", fmt.Errorf("%w: %q is a config.yaml-only key and is never stored in the workspace settings table, "+
+			"whose rows bd dolt push replicates to every remote; set it with \"bd config set %s <value>\" in the workspace instead",
+			issueops.ErrValidation, key, key)
 	}
 	// The prefix is owned by bd init --prefix, bd bootstrap and bd
 	// rename-prefix. Refused HERE rather than at the front door because `bd

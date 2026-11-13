@@ -60,7 +60,6 @@ internal/storage/dolt/initschema_multiprocess_test.go
 internal/storage/dolt/lenient_open_dirty_tables_integration_test.go
 internal/storage/dolt/multistore_multiprocess_test.go
 internal/storage/dolt/post_migration_pool_heal_integration_test.go
-internal/storage/dolt/pull_branch_tracking_integration_test.go
 internal/storage/dolt/route_logging_integration_test.go
 internal/storage/dolt/schema_cli_parity_integration_test.go
 internal/storage/dolt/wisp_delete_cascade_integration_test.go

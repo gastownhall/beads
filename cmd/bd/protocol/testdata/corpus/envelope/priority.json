@@ -1,0 +1,22 @@
+{
+  "data": {
+    "created_at": "<TS>",
+    "created_by": "protocol-test",
+    "description": "deterministic corpus-priority",
+    "id": "corpus-priority",
+    "issue_type": "task",
+    "labels": [
+      "corpus-native"
+    ],
+    "metadata": {
+      "corpus": "native"
+    },
+    "notes": "corpus-priority notes",
+    "owner": "test@protocol.test",
+    "priority": 1,
+    "status": "open",
+    "title": "Corpus priority subject",
+    "updated_at": "<TS>"
+  },
+  "schema_version": 1
+}
