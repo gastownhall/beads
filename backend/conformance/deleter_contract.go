@@ -810,8 +810,8 @@ func RunDeleterRewritesReferencesInNeighbors(t *testing.T, ctx context.Context, 
 	}
 }
 
-// RunDeleterRewritesOnlyTheDeletedIDInAHierarchy pins the boundary the rewrite
-// matches at (issueops/deleter.go, Deleter.Delete: "WHICH ROWS GET
+// RunDeleterRewritesOnlyTheDeletedIDInAHierarchy pins the boundary the
+// rewrite matches at (issueops/deleter.go, Deleter.Delete: "WHICH ROWS GET
 // REWRITTEN"). A hierarchical child's id is its parent's id plus ".N"
 // (types.GenerateChildID), so a deleted parent's id occurs INSIDE every
 // descendant's id: a rule that treats '.' as a plain word boundary rewrites
@@ -821,7 +821,7 @@ func RunDeleterRewritesReferencesInNeighbors(t *testing.T, ctx context.Context, 
 // symmetrically, and the scenarios below hold every wiring to it, including
 // the shapes a partial fix gets wrong: either request order, a cascade's
 // sorted ancestor-first expansion, citations sharing a separator byte across
-// all four rewritten fields.
+// all four rewritten fields, and a marker an earlier delete left behind.
 //
 // Each scenario seeds an explicit root/child/grandchild chain with real
 // parent-child edges — a dotted id alone creates no dependency, so without
@@ -963,6 +963,36 @@ func RunDeleterRewritesOnlyTheDeletedIDInAHierarchy(t *testing.T, ctx context.Co
 		t.Errorf("hier4: ReferencesUpdated = %d, want 1 — four changed fields are one changed row", result.ReferencesUpdated)
 	}
 	deleterAssertIssueRows(t, ctx, fixture, 1, neighbor.ID)
+
+	// A marker an earlier delete of the grandchild left behind. Deleting the
+	// ancestor afterwards must not nest a second marker inside it.
+	root, child, grandchild = seedChain("hier5")
+	neighbor = deleterIssue(fixture, "hier5", "neighbor", false)
+	neighbor.Description = "done via " + grandchild
+	deleterSeed(t, ctx, fixture, neighbor)
+	deleterAddEdge(t, ctx, fixture, neighbor.ID, child)
+	deleterAddEdge(t, ctx, fixture, neighbor.ID, grandchild)
+
+	deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
+		IDs:   []string{grandchild},
+		Force: true,
+		Actor: "deleter-contract",
+	})
+	if got, want := deleterText(t, ctx, fixture, neighbor.ID, "description"), "done via [deleted:"+grandchild+"]"; got != want {
+		t.Fatalf("hier5: setup: deleting %s left the description %q, want %q before the ancestor delete", grandchild, got, want)
+	}
+	result = deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
+		IDs:   []string{child},
+		Force: true,
+		Actor: "deleter-contract",
+	})
+	if got, want := deleterText(t, ctx, fixture, neighbor.ID, "description"), "done via [deleted:"+grandchild+"]"; got != want {
+		t.Errorf("hier5: deleting %s rewrote the prior marker to %q, want it unchanged at %q — the id inside the marker is %s, not %s",
+			child, got, want, grandchild, child)
+	}
+	if result.ReferencesUpdated != 0 {
+		t.Errorf("hier5: ReferencesUpdated = %d, want 0 — the marker was the only text and it did not change", result.ReferencesUpdated)
+	}
 }
 
 // RunDeleterAttributesTheRewriteToTheActor pins the one place a deletion's
