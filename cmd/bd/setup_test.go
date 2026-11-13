@@ -1260,3 +1260,68 @@ func TestSetupCopilot_RefusesMalformedMarkers(t *testing.T) {
 		}
 	}
 }
+
+// legacyCopilotInstructions is the instructions file bd setup copilot wrote,
+// unmarked, before it kept a marked section (v1.0.5 through v1.3.2).
+const legacyCopilotInstructions = `# GitHub Copilot Instructions
+
+This repository uses **Beads (bd)** for issue tracking.
+
+## Core Workflow
+
+- Use ` + "`bd ready`" + ` to find unblocked work
+- Use ` + "`bd create`" + ` to track new work
+- Use ` + "`bd update <id> --claim`" + ` before starting
+- Use ` + "`bd close <id>`" + ` when work is complete
+- Treat commit, push, and Dolt remote sync as policy-controlled handoff actions
+- Do not commit, push, or run Dolt remote sync unless explicitly authorized
+
+## Context Loading
+
+Run ` + "`bd prime`" + ` for the full workflow context.
+
+If the Beads Copilot plugin is installed, Copilot CLI will automatically run
+` + "`bd prime`" + ` on session start and before compaction.
+`
+
+// AC-6: an instructions file that is exactly the old unmarked template
+// passes --check, and setup turns it into one marked section.
+func TestSetupCopilot_ConvertsLegacyInstructions(t *testing.T) {
+	for _, tt := range []struct{ name, content string }{
+		{"as written", legacyCopilotInstructions},
+		{"CRLF and trailing blank lines", strings.ReplaceAll(legacyCopilotInstructions, "\n", "\r\n") + "\r\n  \n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			copilotTestWorkspace(t)
+			writeWorkspaceFile(t, copilotManifestFile, copilotManifest(t))
+			writeWorkspaceFile(t, copilotInstructionsFile, tt.content)
+
+			if out, err := runCopilotSetup(t, "check"); err != nil {
+				t.Fatalf("bd setup copilot --check over the legacy template: %v\n%s", err, out)
+			}
+			if out, err := runCopilotSetup(t, ""); err != nil {
+				t.Fatalf("bd setup copilot: %v\n%s", err, out)
+			}
+			got, _ := readWorkspaceFile(t, copilotInstructionsFile)
+			if got != copilotSection() {
+				t.Fatalf("legacy instructions became %q, want one section %q", got, copilotSection())
+			}
+		})
+	}
+	t.Run("legacy template with the user's additions is the user's", func(t *testing.T) {
+		copilotTestWorkspace(t)
+		content := legacyCopilotInstructions + "\n## Team rules\n\nBe kind.\n"
+		writeWorkspaceFile(t, copilotManifestFile, copilotManifest(t))
+		writeWorkspaceFile(t, copilotInstructionsFile, content)
+
+		if out, err := runCopilotSetup(t, "check"); err == nil {
+			t.Fatalf("check passed over an edited legacy file with no section:\n%s", out)
+		}
+		if out, err := runCopilotSetup(t, "remove"); err != nil {
+			t.Fatalf("bd setup copilot --remove: %v\n%s", err, out)
+		}
+		if got, _ := readWorkspaceFile(t, copilotInstructionsFile); got != content {
+			t.Fatalf("remove changed an edited legacy file to %q", got)
+		}
+	})
+}

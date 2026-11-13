@@ -32,7 +32,7 @@ func TestSharedSectionUpsertAppends(t *testing.T) {
 		{"whitespace only is kept", " \n", " \n\n" + sharedWrapped()},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := UpsertSharedSection(tt.content, sharedBody)
+			got, err := UpsertSharedSection(tt.content, sharedBody, "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -48,7 +48,7 @@ func TestSharedSectionInstallFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte("# Mine\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	wrote, err := InstallSharedFile(path, sharedBody)
+	wrote, err := InstallSharedFile(path, sharedBody, "")
 	if err != nil || !wrote {
 		t.Fatalf("InstallSharedFile = %v, %v; want a write", wrote, err)
 	}
@@ -66,7 +66,7 @@ func TestSharedSectionInstallFile(t *testing.T) {
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode = %v, want the file's 0600 kept", info.Mode().Perm())
 	}
-	if _, err := InstallSharedFile(filepath.Join(t.TempDir(), "missing", "x.md"), sharedBody); err == nil || errors.Is(err, ErrMalformedSection) {
+	if _, err := InstallSharedFile(filepath.Join(t.TempDir(), "missing", "x.md"), sharedBody, ""); err == nil || errors.Is(err, ErrMalformedSection) {
 		t.Fatalf("InstallSharedFile into a missing directory = %v, want an I/O error", err)
 	}
 }
@@ -95,14 +95,14 @@ func TestSharedSectionUpsertReplacesInPlace(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := UpsertSharedSection(tt.content, sharedBody)
+			got, err := UpsertSharedSection(tt.content, sharedBody, "")
 			if err != nil {
 				t.Fatal(err)
 			}
 			if got != tt.want {
 				t.Fatalf("UpsertSharedSection = %q, want %q", got, tt.want)
 			}
-			again, err := UpsertSharedSection(got, sharedBody)
+			again, err := UpsertSharedSection(got, sharedBody, "")
 			if err != nil || again != got {
 				t.Fatalf("second UpsertSharedSection = %q, %v; want it unchanged", again, err)
 			}
@@ -126,13 +126,13 @@ func TestSharedSectionCheckFile(t *testing.T) {
 			if err := os.WriteFile(path, []byte(tt.content), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			got, err := CheckSharedFile(path)
+			got, err := CheckSharedFile(path, "")
 			if got != tt.want || errors.Is(err, ErrMalformedSection) != tt.malformed {
 				t.Fatalf("CheckSharedFile = %v, %v; want %v, malformed %v", got, err, tt.want, tt.malformed)
 			}
 		})
 	}
-	if _, err := CheckSharedFile(filepath.Join(dir, "missing.md")); !os.IsNotExist(err) {
+	if _, err := CheckSharedFile(filepath.Join(dir, "missing.md"), ""); !os.IsNotExist(err) {
 		t.Fatalf("CheckSharedFile(missing) err = %v, want not-exist", err)
 	}
 }
@@ -153,7 +153,7 @@ func TestSharedSectionStrip(t *testing.T) {
 		{name: "section and whitespace", content: "\n\n" + sharedWrapped() + "\n  \n", want: "  \n", stripped: true, empty: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			got, stripped, empty, err := StripSharedSection(tt.content)
+			got, stripped, empty, err := StripSharedSection(tt.content, "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -174,7 +174,7 @@ func TestSharedSectionRemoveFile(t *testing.T) {
 		return path
 	}
 	mine := write("mine.md", "# Mine\n\n"+sharedWrapped())
-	if got, err := RemoveSharedFile(mine); err != nil || got != SharedRemovedSection {
+	if got, err := RemoveSharedFile(mine, ""); err != nil || got != SharedRemovedSection {
 		t.Fatalf("RemoveSharedFile(user + section) = %v, %v", got, err)
 	}
 	if data, _ := os.ReadFile(mine); string(data) != "# Mine\n" {
@@ -183,17 +183,17 @@ func TestSharedSectionRemoveFile(t *testing.T) {
 	if info, err := os.Stat(mine); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode after strip = %v, %v; want 0600 kept", info, err)
 	}
-	if got, err := RemoveSharedFile(mine); err != nil || got != SharedRemovedNothing {
+	if got, err := RemoveSharedFile(mine, ""); err != nil || got != SharedRemovedNothing {
 		t.Fatalf("RemoveSharedFile(no section) = %v, %v", got, err)
 	}
 	only := write("only.md", sharedWrapped())
-	if got, err := RemoveSharedFile(only); err != nil || got != SharedRemovedFile {
+	if got, err := RemoveSharedFile(only, ""); err != nil || got != SharedRemovedFile {
 		t.Fatalf("RemoveSharedFile(section only) = %v, %v", got, err)
 	}
 	if _, err := os.Stat(only); !os.IsNotExist(err) {
 		t.Fatalf("section-only file kept, err = %v", err)
 	}
-	if got, err := RemoveSharedFile(filepath.Join(dir, "missing.md")); err != nil || got != SharedRemovedNothing {
+	if got, err := RemoveSharedFile(filepath.Join(dir, "missing.md"), ""); err != nil || got != SharedRemovedNothing {
 		t.Fatalf("RemoveSharedFile(missing) = %v, %v", got, err)
 	}
 }
@@ -215,10 +215,10 @@ func TestSharedSectionMalformed(t *testing.T) {
 		{"END with extra text", begin + "\nA\n<!-- END BEADS INTEGRATION v:1 -->\n"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if got, err := UpsertSharedSection(tt.content, sharedBody); !errors.Is(err, ErrMalformedSection) || got != tt.content {
+			if got, err := UpsertSharedSection(tt.content, sharedBody, ""); !errors.Is(err, ErrMalformedSection) || got != tt.content {
 				t.Errorf("UpsertSharedSection = %q, %v; want the content back and ErrMalformedSection", got, err)
 			}
-			if got, stripped, _, err := StripSharedSection(tt.content); !errors.Is(err, ErrMalformedSection) || stripped || got != tt.content {
+			if got, stripped, _, err := StripSharedSection(tt.content, ""); !errors.Is(err, ErrMalformedSection) || stripped || got != tt.content {
 				t.Errorf("StripSharedSection = %q, %v, %v; want the content back and ErrMalformedSection", got, stripped, err)
 			}
 			path := filepath.Join(t.TempDir(), "instructions.md")
@@ -228,10 +228,10 @@ func TestSharedSectionMalformed(t *testing.T) {
 			if err := PreflightSharedFile(path); !errors.Is(err, ErrMalformedSection) {
 				t.Errorf("PreflightSharedFile = %v, want ErrMalformedSection", err)
 			}
-			if _, err := InstallSharedFile(path, sharedBody); !errors.Is(err, ErrMalformedSection) {
+			if _, err := InstallSharedFile(path, sharedBody, ""); !errors.Is(err, ErrMalformedSection) {
 				t.Errorf("InstallSharedFile = %v, want ErrMalformedSection", err)
 			}
-			if _, err := RemoveSharedFile(path); !errors.Is(err, ErrMalformedSection) {
+			if _, err := RemoveSharedFile(path, ""); !errors.Is(err, ErrMalformedSection) {
 				t.Errorf("RemoveSharedFile = %v, want ErrMalformedSection", err)
 			}
 			if data, _ := os.ReadFile(path); string(data) != tt.content {
@@ -256,5 +256,52 @@ func TestSharedSectionPreflight(t *testing.T) {
 	// A directory where the file should be cannot be read.
 	if err := PreflightSharedFile(dir); err == nil {
 		t.Errorf("PreflightSharedFile(directory) = nil, want a read error")
+	}
+}
+
+const sharedLegacy = "# Old beads guidance\n\nUse bd ready.\n"
+
+func TestSharedSectionLegacy(t *testing.T) {
+	for _, tt := range []struct {
+		name, content string
+		legacy        bool
+	}{
+		{"exact", sharedLegacy, true},
+		{"CRLF", strings.ReplaceAll(sharedLegacy, "\n", "\r\n"), true},
+		{"trailing whitespace", sharedLegacy + "\n \t\n", true},
+		{"no final line break", strings.TrimSuffix(sharedLegacy, "\n"), true},
+		{"user addition after", sharedLegacy + "\n## Mine\n", false},
+		{"user addition before", "# Mine\n\n" + sharedLegacy, false},
+		{"leading whitespace", "\n" + sharedLegacy, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			upserted, err := UpsertSharedSection(tt.content, sharedBody, sharedLegacy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			remainder, stripped, empty, err := StripSharedSection(tt.content, sharedLegacy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.legacy {
+				if upserted != sharedWrapped() {
+					t.Errorf("legacy upsert = %q, want only the section", upserted)
+				}
+				if !stripped || !empty || remainder != "" {
+					t.Errorf("legacy strip = %q, %v, %v; want the whole file bd's", remainder, stripped, empty)
+				}
+				return
+			}
+			if want := addBeadsSection(tt.content, sharedWrapped(), ""); upserted != want {
+				t.Errorf("upsert of the user's file = %q, want the section appended %q", upserted, want)
+			}
+			if stripped || remainder != tt.content {
+				t.Errorf("strip of the user's file = %q, %v; want it untouched", remainder, stripped)
+			}
+		})
+	}
+	// Without a legacy text, nothing is legacy.
+	if got, err := UpsertSharedSection(sharedLegacy, sharedBody, ""); err != nil || got != sharedLegacy+"\n"+sharedWrapped() {
+		t.Errorf("upsert with no legacy text = %q, %v", got, err)
 	}
 }

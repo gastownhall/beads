@@ -397,3 +397,31 @@ func TestUserRecipeSharedPathsNotFromTOML(t *testing.T) {
 		t.Fatalf("workspace recipe has shared paths %v", recipe.SharedPaths)
 	}
 }
+
+// The legacy instructions are frozen: bd recognizes the file older releases
+// wrote by this exact text, however the live template changes.
+func TestCopilotLegacyInstructionsFrozen(t *testing.T) {
+	const want = "# GitHub Copilot Instructions\n\n" +
+		"This repository uses **Beads (bd)** for issue tracking.\n\n" +
+		"## Core Workflow\n\n" +
+		"- Use `bd ready` to find unblocked work\n" +
+		"- Use `bd create` to track new work\n" +
+		"- Use `bd update <id> --claim` before starting\n" +
+		"- Use `bd close <id>` when work is complete\n" +
+		"- Treat commit, push, and Dolt remote sync as policy-controlled handoff actions\n" +
+		"- Do not commit, push, or run Dolt remote sync unless explicitly authorized\n\n" +
+		"## Context Loading\n\n" +
+		"Run `bd prime` for the full workflow context.\n\n" +
+		"If the Beads Copilot plugin is installed, Copilot CLI will automatically run\n" +
+		"`bd prime` on session start and before compaction.\n"
+	if LegacyCopilotInstructions != want {
+		t.Fatalf("LegacyCopilotInstructions changed:\n%s", LegacyCopilotInstructions)
+	}
+	recipe := BuiltinRecipes["copilot"]
+	if got := recipe.LegacyContents[".github/copilot-instructions.md"]; got != LegacyCopilotInstructions {
+		t.Fatalf("copilot legacy instructions = %q", got)
+	}
+	if _, ok := recipe.LegacyContents[".copilot-plugin/plugin.json"]; ok {
+		t.Fatalf("the beads-owned manifest needs no legacy text")
+	}
+}

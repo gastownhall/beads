@@ -50,6 +50,10 @@ type Recipe struct {
 	// deleting the whole file. A built-in recipe sets it; a recipe read
 	// from .beads/recipes.toml cannot.
 	SharedPaths []string `toml:"-"`
+	// LegacyContents maps a shared path to the whole file an older bd wrote
+	// there before it kept a marked section: a file that is exactly that
+	// text is bd's own, not the repository's.
+	LegacyContents map[string]string `toml:"-"`
 }
 
 // IsSharedPath reports whether path, spelled exactly as in Paths, is one
@@ -125,6 +129,9 @@ var BuiltinRecipes = map[string]Recipe{
 		// The manifest is bd's own; the instructions file is the
 		// repository's, which holds bd's guidance as a marked section.
 		SharedPaths: []string{".github/copilot-instructions.md"},
+		LegacyContents: map[string]string{
+			".github/copilot-instructions.md": LegacyCopilotInstructions,
+		},
 	},
 	"factory": {
 		Name:        "Factory.ai (Droid)",

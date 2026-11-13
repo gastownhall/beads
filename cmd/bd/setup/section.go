@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"unicode"
 )
 
 // A shared file is one a recipe writes into but the repository owns too,
@@ -31,7 +32,30 @@ const (
 	SharedSectionPresent
 	// SharedSectionMalformed: beads markers that do not make one section.
 	SharedSectionMalformed
+	// SharedSectionLegacy: no markers, and the whole file is the template an
+	// older bd wrote unmarked (recipes.Recipe.LegacyContents).
+	SharedSectionLegacy
 )
+
+// isLegacySharedFile reports whether content is exactly legacy, the whole
+// file an older bd wrote, but for CRLF line breaks and trailing whitespace.
+// A file holding legacy and anything else is the user's.
+func isLegacySharedFile(content, legacy string) bool {
+	normalize := func(s string) string {
+		return strings.TrimRightFunc(strings.ReplaceAll(s, "\r\n", "\n"), unicode.IsSpace)
+	}
+	return legacy != "" && normalize(content) == normalize(legacy)
+}
+
+// classifySharedSection is sharedSectionSpan, with a marker-free file that
+// is exactly legacy classified as SharedSectionLegacy.
+func classifySharedSection(content, legacy string) (start, end int, state SharedSectionState, err error) {
+	start, end, state, err = sharedSectionSpan(content)
+	if state == SharedSectionNone && isLegacySharedFile(content, legacy) {
+		state = SharedSectionLegacy
+	}
+	return start, end, state, err
+}
 
 // wrapSharedSection puts body between the beads markers, each on its own
 // line, ending in a line break.
@@ -80,14 +104,16 @@ func sharedSectionSpan(content string) (start, end int, state SharedSectionState
 // marker, the bytes before and after it untouched, so running it again
 // changes nothing. A file with no beads markers gets the section appended,
 // set off by a blank line as AGENTS.md's is, its own bytes kept as they
-// are; an empty one gets just the section. Malformed markers are an error,
-// content unchanged.
-func UpsertSharedSection(content, body string) (string, error) {
+// are; an empty one, or one that is exactly legacy, gets just the section.
+// Malformed markers are an error, content unchanged.
+func UpsertSharedSection(content, body, legacy string) (string, error) {
 	wrapped := wrapSharedSection(body)
-	start, end, state, err := sharedSectionSpan(content)
+	start, end, state, err := classifySharedSection(content, legacy)
 	switch {
 	case err != nil:
 		return content, err
+	case state == SharedSectionLegacy:
+		return wrapped, nil
 	case state == SharedSectionPresent:
 		// The line break that ends the END marker's line stays in content.
 		return content[:start] + strings.TrimSuffix(wrapped, "\n") + content[end:], nil
@@ -126,7 +152,7 @@ func readSharedFile(path string) (string, bool, error) {
 // InstallSharedFile puts body into path as its beads section
 // (UpsertSharedSection) and reports whether it wrote the file. It writes
 // only when the content changes, atomically, keeping the file's mode.
-func InstallSharedFile(path, body string) (bool, error) {
+func InstallSharedFile(path, body, legacy string) (bool, error) {
 	if err := refuseSharedSymlink(path); err != nil {
 		return false, err
 	}
@@ -134,7 +160,7 @@ func InstallSharedFile(path, body string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	updated, err := UpsertSharedSection(content, body)
+	updated, err := UpsertSharedSection(content, body, legacy)
 	if err != nil {
 		return false, err
 	}
@@ -150,13 +176,13 @@ func InstallSharedFile(path, body string) (bool, error) {
 // CheckSharedFile reads path, following a link since it only reads, and
 // returns what it holds of bd's. A missing file is the os.ReadFile error;
 // malformed markers return SharedSectionMalformed and an
-// ErrMalformedSection error.
-func CheckSharedFile(path string) (SharedSectionState, error) {
+// ErrMalformedSection error. A file that is exactly legacy is bd's.
+func CheckSharedFile(path, legacy string) (SharedSectionState, error) {
 	data, err := os.ReadFile(path) // #nosec G304 -- a built-in recipe's path
 	if err != nil {
 		return SharedSectionNone, err
 	}
-	_, _, state, err := sharedSectionSpan(string(data))
+	_, _, state, err := classifySharedSection(string(data), legacy)
 	return state, err
 }
 
@@ -164,10 +190,14 @@ func CheckSharedFile(path string) (SharedSectionState, error) {
 // removeBeadsSection, which drops the line breaks that set the section off
 // and rejoins the text around it. stripped reports a section was removed,
 // and empty that nothing but whitespace is left, so the file is bd's alone.
-// Malformed markers are an error, content unchanged.
-func StripSharedSection(content string) (remainder string, stripped, empty bool, err error) {
-	_, _, state, err := sharedSectionSpan(content)
-	if err != nil || state != SharedSectionPresent {
+// A file that is exactly legacy is bd's alone too. Malformed markers are an
+// error, content unchanged.
+func StripSharedSection(content, legacy string) (remainder string, stripped, empty bool, err error) {
+	_, _, state, err := classifySharedSection(content, legacy)
+	switch {
+	case state == SharedSectionLegacy:
+		return "", true, true, nil
+	case err != nil || state != SharedSectionPresent:
 		return content, false, false, err
 	}
 	remainder = removeBeadsSection(content)
@@ -187,8 +217,9 @@ const (
 )
 
 // RemoveSharedFile takes bd's section out of path (StripSharedSection),
-// deleting the file only when nothing but whitespace is left.
-func RemoveSharedFile(path string) (SharedRemoval, error) {
+// deleting the file only when nothing but whitespace is left, or when it is
+// exactly legacy.
+func RemoveSharedFile(path, legacy string) (SharedRemoval, error) {
 	if err := refuseSharedSymlink(path); err != nil {
 		return SharedRemovedNothing, err
 	}
@@ -196,7 +227,7 @@ func RemoveSharedFile(path string) (SharedRemoval, error) {
 	if err != nil || !exists {
 		return SharedRemovedNothing, err
 	}
-	remainder, stripped, empty, err := StripSharedSection(content)
+	remainder, stripped, empty, err := StripSharedSection(content, legacy)
 	switch {
 	case err != nil:
 		return SharedRemovedNothing, err
