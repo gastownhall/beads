@@ -229,3 +229,32 @@ func TestEmbeddedSyncCommitsConfigBeforeMerge(t *testing.T) {
 		t.Fatal("embedded Sync left config dirty before merge; bd federation sync would wedge DOLT_MERGE (GH#2474)")
 	}
 }
+
+// TestEmbeddedGetConfigKeysReadsOnlyTheNamedKeys pins the embedded store's
+// keyed config read (domain.ConfigKeysReader), which cmd/bd's routing lookup
+// uses instead of reading the whole config table, kv.* rows included: it
+// returns only the named rows, leaves a key with no row out, and answers an
+// empty map when no keys are asked for.
+func TestEmbeddedGetConfigKeysReadsOnlyTheNamedKeys(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "cfgkeys")
+	ctx := t.Context()
+	for _, kv := range [][2]string{{"routing.mode", "auto"}, {"routing.default", "."}, {"kv.memory.notes", "large"}} {
+		if err := te.store.SetConfig(ctx, kv[0], kv[1]); err != nil {
+			t.Fatalf("SetConfig(%s): %v", kv[0], err)
+		}
+	}
+
+	got, err := te.store.GetConfigKeys(ctx, "routing.mode", "routing.default", "routing.absent")
+	if err != nil {
+		t.Fatalf("GetConfigKeys: %v", err)
+	}
+	if len(got) != 2 || got["routing.mode"] != "auto" || got["routing.default"] != "." {
+		t.Fatalf("GetConfigKeys = %v, want routing.mode and routing.default only", got)
+	}
+
+	got, err = te.store.GetConfigKeys(ctx)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("GetConfigKeys() = %v, %v, want an empty map", got, err)
+	}
+}

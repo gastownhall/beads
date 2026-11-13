@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"slices"
 	"sync/atomic"
@@ -87,6 +88,136 @@ func wakeAgainstScript(t *testing.T, history bool) error {
 		return fmt.Errorf("woken = issues %v, wisps %v, want [bd-1] and none", got.Issues, got.Wisps)
 	}
 	return nil
+}
+
+// TestExpiredDefersDue pins the preflight's answers and statements: one
+// statement over both tables, the issues-only form on a table-not-found error
+// that does not name issues, and any other error returned rather than read as
+// "nothing due".
+func TestExpiredDefersDue(t *testing.T) {
+	const both = `SELECT EXISTS \(SELECT 1 FROM issues WHERE status = 'deferred' AND defer_until IS NOT NULL AND defer_until <= UTC_TIMESTAMP\(\)\), ` +
+		`EXISTS \(SELECT 1 FROM wisps WHERE status = 'deferred' AND defer_until IS NOT NULL AND defer_until <= UTC_TIMESTAMP\(\)\)`
+	const issuesOnly = `^SELECT EXISTS \(SELECT 1 FROM issues WHERE status = 'deferred' AND defer_until IS NOT NULL AND defer_until <= UTC_TIMESTAMP\(\)\)$`
+	missingWisps := errors.New("Error 1146 (42S02): table not found: wisps")
+	missingIssues := errors.New("Error 1146 (42S02): table not found: issues")
+	unnamedMissing := errors.New("Error 1146 (42S02): no such table")
+
+	for _, tc := range []struct {
+		name       string
+		script     func(sqlmock.Sqlmock)
+		want       bool
+		wantErr    bool
+		wantErrIs  error
+		statements int64
+	}{
+		{
+			name: "nothing due",
+			script: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(both).WillReturnRows(sqlmock.NewRows([]string{"i", "w"}).AddRow(0, 0))
+			},
+			statements: 1,
+		},
+		{
+			name: "an issue due",
+			script: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(both).WillReturnRows(sqlmock.NewRows([]string{"i", "w"}).AddRow(1, 0))
+			},
+			want:       true,
+			statements: 1,
+		},
+		{
+			name: "a wisp due",
+			script: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(both).WillReturnRows(sqlmock.NewRows([]string{"i", "w"}).AddRow(0, 1))
+			},
+			want:       true,
+			statements: 1,
+		},
+		{
+			name: "no wisps table, an issue due",
+			script: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(both).WillReturnError(missingWisps)
+				m.ExpectQuery(issuesOnly).WillReturnRows(sqlmock.NewRows([]string{"i"}).AddRow(1))
+			},
+			want:       true,
+			statements: 2,
+		},
+		{
+			name: "no wisps table, nothing due",
+			script: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(both).WillReturnError(missingWisps)
+				m.ExpectQuery(issuesOnly).WillReturnRows(sqlmock.NewRows([]string{"i"}).AddRow(0))
+			},
+			statements: 2,
+		},
+		{
+			name: "no wisps table, issues-only form fails",
+			script: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(both).WillReturnError(missingWisps)
+				m.ExpectQuery(issuesOnly).WillReturnError(errors.New("Error 1146 (42S02): table not found: issues"))
+			},
+			wantErr:    true,
+			statements: 2,
+		},
+		{
+			name: "a missing issues table is returned, not retried in the issues-only form",
+			script: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(both).WillReturnError(missingIssues)
+			},
+			wantErrIs:  missingIssues,
+			statements: 1,
+		},
+		{
+			// The sweep tolerates any table-not-found error from its wisps half,
+			// so the preflight asks the issues-only form rather than skip a sweep
+			// that would have woken issues.
+			name: "a 1146 that names no table falls back to the issues-only form",
+			script: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(both).WillReturnError(unnamedMissing)
+				m.ExpectQuery(issuesOnly).WillReturnRows(sqlmock.NewRows([]string{"i"}).AddRow(1))
+			},
+			want:       true,
+			statements: 2,
+		},
+		{
+			name: "a 1146 that names no table, then a failing issues-only form, is returned",
+			script: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(both).WillReturnError(unnamedMissing)
+				m.ExpectQuery(issuesOnly).WillReturnError(missingIssues)
+			},
+			wantErrIs:  missingIssues,
+			statements: 2,
+		},
+		{
+			name: "an unrelated error is returned, not retried in the issues-only form",
+			script: func(m sqlmock.Sqlmock) {
+				m.ExpectQuery(both).WillReturnError(errors.New("Error 1064 (42000): syntax error"))
+			},
+			wantErr:    true,
+			statements: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mock, tx, counts := countedMockTx(t)
+			tc.script(mock)
+			got, err := ExpiredDefersDue(t.Context(), tx)
+			if (err != nil) != (tc.wantErr || tc.wantErrIs != nil) {
+				t.Fatalf("ExpiredDefersDue error = %v, want error %v", err, tc.wantErr || tc.wantErrIs != nil)
+			}
+			if tc.wantErrIs != nil && !errors.Is(err, tc.wantErrIs) {
+				t.Fatalf("ExpiredDefersDue error = %v, want it to wrap %v", err, tc.wantErrIs)
+			}
+			if got != tc.want {
+				t.Errorf("ExpiredDefersDue = %v, want %v", got, tc.want)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+			if n := counts.Total(); n != tc.statements {
+				t.Errorf("sent %d statements, want %d", n, tc.statements)
+			}
+		})
+	}
 }
 
 var sqlmockSeq atomic.Int64

@@ -822,6 +822,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     anything that reads `@@sql_mode` sees it. Dolt has done so since 2.3.3,
     not 2.6.0, so this is new only for a server moving from a release before
     2.3.3, such as 2.1.8.
+- **Server mode: one-statement settings reads no longer open a transaction.**
+  `GetConfig`, `GetAllConfig`, `GetConfigByPrefix`, `GetMetadata`,
+  `GetLocalMetadata` and `GetInfraTypes` sent `START TRANSACTION` and `ROLLBACK`
+  around a single `SELECT`, two more round trips for a consistency one statement
+  already has. A store now asks `SELECT @@autocommit` once and skips them when it
+  is on, so `bd list` sends 5 fewer statements and `bd create` 16 fewer, about
+  0.5 s and 1.6 s at 100 ms round-trip time. A server started with
+  `--no-auto-commit` keeps the transactions, because a bare `SELECT` there stays on
+  an old snapshot.
 - **Embedded mode now runs the Dolt 2.6.0 engine, and the module needs Go
   1.27.3.** `bd` links `dolthub/dolt/go` at the v2.6.0 release (with
   `go-mysql-server` to match). Dolt's own `go.mod` declares `go 1.27.3`, so
@@ -840,6 +849,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead, and the hint says more issues matched without saying how many
   (the wording the proxied-server route already uses). A local store, and the
   envelope's `pagination.total`, keep the total.
+- **The defer-wake sweep opens its write transaction only when a defer is due.**
+  `bd ready`, `bd ready --json`, `bd list --ready` and claims run the sweep
+  first, and it sent `START TRANSACTION`, a `SELECT` per table and `COMMIT` even
+  when nothing was due, which is almost always. It now asks one
+  `SELECT EXISTS(...), EXISTS(...)` first, without a transaction where the
+  server autocommits, and opens the write only on a true answer. Against a dolt
+  sql-server a sweep with nothing due sends 1 statement instead of 4. When it is
+  the store's first read it sends 2, because it also asks the server's
+  autocommit mode once; it used to send 5, because the store's first write also
+  read the versioned-history switch. A SQL user without write privileges now
+  gets bd's "lacks write privileges" warning only when a defer is due, instead
+  of from every ready read. A sweep
+  that wakes something sends 1 more than before with autocommit on and both
+  tables present, 2 more on a database without the wisps table, 3 more on a
+  server started with `--no-auto-commit`, and 4 more on such a server without
+  the wisps table. A defer whose date passes just
+  after the check wakes on the next ready read. Embedded mode gets the same
+  check.
 - `bd` initializes its packages with `GOMAXPROCS` capped at 4 and hands it
   back before `main` runs anything, so the garbage collections package
   initialization triggers do not stop the world across every CPU of a large
