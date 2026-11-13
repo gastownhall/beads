@@ -269,7 +269,7 @@ func TestEmbeddedOpenForReadOnlyCommand_LenientGate(t *testing.T) {
 	}
 
 	// The read-only-command open must succeed without migrating.
-	roStore, roErr := embeddeddolt.OpenForReadOnlyCommand(ctx, beadsDir, "testdb", "main")
+	roStore, roErr := embeddeddolt.OpenForReadOnlyCommand(ctx, beadsDir, "testdb", "main", false)
 	if roErr != nil {
 		t.Fatalf("OpenForReadOnlyCommand: %v", roErr)
 	}
@@ -304,7 +304,7 @@ func TestEmbeddedOpenForReadOnlyCommand_LenientGate(t *testing.T) {
 		}
 	}
 	_ = cleanup2()
-	if unreadable, err := embeddeddolt.OpenForReadOnlyCommand(ctx, beadsDir, "testdb", "main"); err == nil {
+	if unreadable, err := embeddeddolt.OpenForReadOnlyCommand(ctx, beadsDir, "testdb", "main", false); err == nil {
 		unreadable.Close()
 		t.Fatal("OpenForReadOnlyCommand of a schema without arrival_seq = nil error, want *schema.SchemaBehindError")
 	} else if !schema.IsSchemaBehindError(err) {
@@ -325,7 +325,7 @@ func TestEmbeddedOpenForReadOnlyCommand_LenientGate(t *testing.T) {
 	}
 	_ = cleanup3()
 	t.Setenv(schema.AllowMigrateEnv, "1")
-	if unreadable, err := embeddeddolt.OpenForReadOnlyCommand(ctx, beadsDir, "testdb", "main"); err == nil {
+	if unreadable, err := embeddeddolt.OpenForReadOnlyCommand(ctx, beadsDir, "testdb", "main", false); err == nil {
 		unreadable.Close()
 		t.Fatal("OpenForReadOnlyCommand past a dirty-table refusal of a schema without arrival_seq = nil error, want *schema.SchemaBehindError")
 	} else if !schema.IsSchemaBehindError(err) {
