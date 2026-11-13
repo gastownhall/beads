@@ -1199,3 +1199,99 @@ func TestReadyDoesNotWakeDefersDuringMigrationFreeze(t *testing.T) {
 		t.Errorf("status = %q after bd ready during a migration freeze, want deferred: the defer-wake sweep wrote while frozen", got)
 	}
 }
+
+// TestDeferWakeSweepSkippedDuringMigrationFreeze, preserved from PR #7653 by
+// @rjgeng (assertions strengthened on review): bd ready during a freeze is a
+// classified read and must exit 0, but the lazy defer-wake sweep it normally
+// runs is a write the freeze forbids (#7634). The frozen ready must print no
+// sweep warning, leave the expired defer out of its JSON, and change neither
+// the issue's status nor its defer_until timestamp. Removing the marker wakes
+// the defer on the next ready read — a guard that simply never woke anything
+// would pass the frozen leg for the wrong reason.
+func TestDeferWakeSweepSkippedDuringMigrationFreeze(t *testing.T) {
+	bd, dir := setupMigrationFreezeWorkspace(t)
+
+	stdout, stderr, code := runBDMigrationFreeze(t, bd, dir, "create", "defer me", "-p", "2", "--json")
+	if code != 0 {
+		t.Fatalf("setup bd create failed (exit %d):\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	var issue struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &issue); err != nil || issue.ID == "" {
+		t.Fatalf("parsing create --json output: %v\n%s", err, stdout)
+	}
+
+	// An already-past --until makes the defer immediately eligible for the
+	// wake sweep the moment any ready-work read runs.
+	_, stderr, code = runBDMigrationFreeze(t, bd, dir, "defer", issue.ID, "--until", "2020-01-01T00:00:00Z")
+	if code != 0 {
+		t.Fatalf("setup bd defer failed (exit %d):\nstderr:\n%s", code, stderr)
+	}
+
+	writeFreezeMarker(t, dir, "migrator", "dolt v2 migration")
+
+	// All verification reads run under the same ancestor walk the ready read
+	// sees — never the setup helper's env, which pins the freeze override to
+	// a path that cannot exist and so bypasses the marker.
+	showFrozen := func() (status string, deferUntil interface{}) {
+		t.Helper()
+		out, errOut, c := runBDFrozen(t, bd, dir, "show", issue.ID, "--json")
+		if c != 0 {
+			t.Fatalf("bd show failed during freeze (exit %d):\nstdout:\n%s\nstderr:\n%s", c, out, errOut)
+		}
+		s := strings.TrimSpace(out)
+		start := strings.Index(s, "[")
+		if start < 0 {
+			t.Fatalf("no JSON array in show output: %s", s)
+		}
+		var shown []struct {
+			Status     string      `json:"status"`
+			DeferUntil interface{} `json:"defer_until"`
+		}
+		if err := json.Unmarshal([]byte(s[start:]), &shown); err != nil || len(shown) != 1 {
+			t.Fatalf("parsing show --json output: %v\n%s", err, s)
+		}
+		return shown[0].Status, shown[0].DeferUntil
+	}
+
+	beforeStatus, beforeDeferUntil := showFrozen()
+	if beforeStatus != "deferred" {
+		t.Fatalf("precondition: status = %q, want deferred", beforeStatus)
+	}
+	if beforeDeferUntil == nil {
+		t.Fatal("precondition: defer_until is set on a dated defer")
+	}
+
+	readyOut, readyErr, code := runBDFrozen(t, bd, dir, "ready", "--json")
+	if code != 0 {
+		t.Fatalf("bd ready was refused during a freeze, but it is classified read-only (exit %d):\nstdout:\n%s\nstderr:\n%s", code, readyOut, readyErr)
+	}
+	if strings.Contains(readyErr, "defer-wake sweep") {
+		t.Errorf("frozen bd ready printed a sweep warning:\n%s", readyErr)
+	}
+	if strings.Contains(readyOut, issue.ID) {
+		t.Errorf("frozen bd ready listed %s:\n%s", issue.ID, readyOut)
+	}
+	afterStatus, afterDeferUntil := showFrozen()
+	if afterStatus != "deferred" || afterDeferUntil != beforeDeferUntil {
+		t.Errorf("frozen bd ready changed the defer: status %q -> %q, defer_until %v -> %v; want both unchanged",
+			beforeStatus, afterStatus, beforeDeferUntil, afterDeferUntil)
+	}
+
+	// Thaw and confirm the sweep resumes normally.
+	if err := os.Remove(filepath.Join(dir, migration.FileName)); err != nil {
+		t.Fatalf("removing freeze marker: %v", err)
+	}
+	stdout, stderr, code = runBDMigrationFreeze(t, bd, dir, "ready", "--json")
+	if code != 0 {
+		t.Fatalf("bd ready failed after thaw (exit %d):\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, issue.ID) {
+		t.Errorf("expected %s in bd ready after thaw:\n%s", issue.ID, stdout)
+	}
+	thawStatus, thawDeferUntil := showFrozen()
+	if thawStatus != "open" || thawDeferUntil != nil {
+		t.Errorf("status = %q, defer_until = %v after thaw + bd ready; want open with the date cleared", thawStatus, thawDeferUntil)
+	}
+}

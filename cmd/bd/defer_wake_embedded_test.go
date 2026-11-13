@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/migration"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
 // showDeferState returns (status, defer_until) for an issue via bd show --json.
@@ -229,6 +230,33 @@ func TestEmbeddedDeferAutoWake(t *testing.T) {
 		status, deferUntil := showDeferState(t, bd, dir, issue.ID)
 		if status != "deferred" || deferUntil == nil {
 			t.Errorf("frozen bd list --ready changed %s to status=%q defer_until=%v, want deferred with its date retained", issue.ID, status, deferUntil)
+		}
+	})
+
+	// The freeze only postpones the sweep (#7634): the first ready read
+	// after the marker goes away wakes what the frozen reads left asleep,
+	// in one bd: wake N expired defer(s) commit.
+	t.Run("thawed_ready_wakes_with_one_commit", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Snooze across a thaw", "--type", "task")
+		bdDefer(t, bd, dir, issue.ID, "--until", "2020-01-01")
+		_ = bdReadIDsWithEnv(t, bd, dir, deferWakeFreezeEnv(t, markerDir, true), "ready", "--json")
+		beforeHead, _, _ := embeddedDeferWakeHistory(t, beadsDir, "")
+
+		ids := bdReadIDsWithEnv(t, bd, dir, deferWakeFreezeEnv(t, markerDir, false), "ready", "--json")
+		if !ids[issue.ID] {
+			t.Errorf("expected %s in bd ready after the thaw", issue.ID)
+		}
+		status, deferUntil := showDeferState(t, bd, dir, issue.ID)
+		if status != "open" || deferUntil != nil {
+			t.Errorf("thawed bd ready left %s at status=%q defer_until=%v, want open with no date", issue.ID, status, deferUntil)
+		}
+		// Earlier frozen subtests leave their own expired defers asleep for
+		// this sweep, so match the message family rather than the count it
+		// names.
+		wakePrefix := strings.TrimSuffix(issueops.WakeDefersCommitMessage(1), "1 expired defer(s)")
+		_, _, commits := embeddedDeferWakeHistory(t, beadsDir, beforeHead)
+		if len(commits) != 1 || !strings.HasPrefix(commits[0], wakePrefix) {
+			t.Errorf("thawed bd ready made commits %q, want exactly one %q... defer-wake commit", commits, wakePrefix)
 		}
 	})
 
