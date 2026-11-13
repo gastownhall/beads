@@ -155,4 +155,30 @@ func TestDoltNew_SharedStoreMigrateGate_NoRemote(t *testing.T) {
 			t.Fatalf("second ApplySchemaMigrations = %d, want 0 (the open's work is reported exactly once)", applied)
 		}
 	})
+
+	// AC-2's guard: the previous subtest's store applied and reported a
+	// migration; a FRESH store opening the now-current database must report
+	// (0, nil), not inherit that work. This pins the count to per-instance
+	// state — the alternative a process-global counter would implement —
+	// and holds even though base already returns 0 here (base returns 0
+	// everywhere, which is the defect).
+	t.Run("fresh store on the current database reports zero", func(t *testing.T) {
+		s, err := New(ctx, &Config{
+			Path:           tmpDir,
+			CommitterName:  "test",
+			CommitterEmail: "test@example.com",
+			Database:       dbName,
+		})
+		if err != nil {
+			t.Fatalf("New (writable, current): %v", err)
+		}
+		defer s.Close()
+		applied, err := s.ApplySchemaMigrations(ctx)
+		if err != nil {
+			t.Fatalf("ApplySchemaMigrations (fresh store): %v", err)
+		}
+		if applied != 0 {
+			t.Fatalf("fresh store on a current database = %d, want 0", applied)
+		}
+	})
 }
