@@ -277,14 +277,24 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 			}
 			return HandleError("%v", err)
 		}
+		// A --limit-cut page reports its truncation in-band under the
+		// envelope, the same contract bd ready --json emits: the stderr hint
+		// is terminal-gated and never reaches a pipe (GH#5444). Total stays
+		// omitted — no list-plane count exists, and the Counter role's
+		// cardinality diverges from a listing's on templates, so a mapped
+		// count would misreport.
+		var pag *PaginationMeta
+		if page.HasMore {
+			pag = &PaginationMeta{Returned: len(page.Items), Truncated: true}
+		}
 		if in.SkipLabels {
-			if err := outputJSON(newSkipLabelsListJSONResponse(page.Items)); err != nil {
+			if err := outputJSONWithPagination(newSkipLabelsListJSONResponse(page.Items), pag); err != nil {
 				return err
 			}
 			printTruncationHint(page.HasMore, in.effectiveLimit)
 			return nil
 		}
-		if err := outputJSON(page.Items); err != nil {
+		if err := outputJSONWithPagination(page.Items, pag); err != nil {
 			return err
 		}
 		printTruncationHint(page.HasMore, in.effectiveLimit)
