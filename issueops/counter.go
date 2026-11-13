@@ -30,6 +30,10 @@ const (
 // none of them and answers for every durable row that matches. Sharing
 // ListRequest would have made the two questions look interchangeable at the
 // call site while their answers differed by every one of those exclusions.
+// What they share is the PLANE (GH#6258): a type the workspace calls infra
+// answers from the wisps tier, narrowed to its ephemeral rows, as a listing
+// of that type does — still without the listing's default exclusions (see
+// IssueType).
 //
 // THERE IS NO Limit AND NO Offset, deliberately. A count is a cardinality:
 // bounding the scan would answer "how many of the first N" and there is no
@@ -69,8 +73,24 @@ type CountRequest struct {
 	// IssueType restricts the type, with the same match-nothing-rather-than-fail
 	// treatment Status gets and no alias expansion at all.
 	//
-	// It has a SECOND effect under IncludeInfra: an infra type routes the count
-	// to the ephemeral tier. See that field.
+	// It has a SECOND effect: a type the workspace calls infra reads the
+	// wisps tier, narrowed to that type's EPHEMERAL rows — the plane and the
+	// narrowing `bd list --type <infra>` applies, though not its rows, since a
+	// count keeps the closed and pinned rows that listing hides — unless
+	// IncludeEphemeral is set, which lifts the narrowing and counts the type's
+	// durable rows too. That is the plane decision count and list share
+	// (GH#6258); before it, the routing applied only under IncludeInfra, so a
+	// plain typed count of an infra type answered 0 where the listing returned
+	// rows.
+	//
+	// The narrowing belongs to a count that NAMES the type, so it never
+	// reaches a bucket. A CountByGroup by CountGroupType with this field empty
+	// is an untyped count: by default it reads the durable plane, so an infra
+	// type's bucket counts that type's durable rows while a count naming the
+	// type counts its ephemeral ones. Those are different rows. Only
+	// IncludeEphemeral makes the two agree, both then counting both planes in
+	// full; IncludeInfra admits the wisps tier to the bucket but keeps this
+	// field's narrowing.
 	IssueType string
 	// Assignee restricts to one actor's rows; NoAssignee restricts to rows with
 	// none. Setting both is not refused — they are handed to the filter as
@@ -167,6 +187,8 @@ type CountRequest struct {
 	//   - an IssueType the workspace calls infra routes the count to the
 	//     ephemeral tier instead of the durable one — unless IncludeEphemeral
 	//     is also set, which lifts that routing, as it does for a listing.
+	//     That routing is the plane decision count and list share (GH#6258):
+	//     it applies to a named infra type with or without this flag.
 	//
 	// The infra vocabulary is the WORKSPACE's, read from configuration inside
 	// the implementation. A caller does not supply it and cannot: that is the
@@ -174,12 +196,19 @@ type CountRequest struct {
 	//
 	// Unset — and with IncludeEphemeral also unset — the count is durable-plane
 	// only and applies none of those four: the historical `bd count` answer,
-	// kept exactly so a scripted caller reads the same number it read yesterday.
+	// kept exactly so a scripted caller reads the same number it read
+	// yesterday. The one exception is a named infra IssueType, which reads
+	// the wisps tier narrowed to its ephemeral rows, as a listing of that
+	// type does (see IssueType).
 	IncludeInfra bool
 
-	// IncludeEphemeral admits the EPHEMERAL PLANE — the wisps TABLE — and
-	// admits nothing else. It is the plane knob on its own: exactly the first
-	// of IncludeInfra's four changes, with none of the other three.
+	// IncludeEphemeral is the plane knob on its own: it counts BOTH PLANES in
+	// full — the wisps TABLE as well as the durable one — and takes no type
+	// exclusion off. For an untyped count, or one of a type the workspace does
+	// not call infra, that admits the wisps table: exactly the first of
+	// IncludeInfra's four changes, with none of the other three. For an infra
+	// IssueType, which already reads the wisps tier narrowed to its ephemeral
+	// rows, it lifts that narrowing instead (below).
 	//
 	// It exists because there was no way to ask for that one thing. The write
 	// path routes on STORAGE CLASS, not type (dolt's useWispsTable is
@@ -197,13 +226,17 @@ type CountRequest struct {
 	// it; only IncludeInfra sets out to reconcile cardinality, and it pays for
 	// that with three changes beyond the plane.
 	//
-	// Beside IncludeInfra it does one thing more, the same thing it does to a
-	// listing: it lifts the fourth change's routing of an infra IssueType, so
-	// the durable rows of that type (a promoted wisp, a retyped issue) are
-	// counted along with its wisps rather than instead of them.
+	// Lifting an infra IssueType's narrowing is the same thing it does to a
+	// listing, and it holds with or without IncludeInfra (GH#6258): the type
+	// reads only its ephemeral rows either way, so the durable rows of that
+	// type (a promoted wisp, a retyped issue) are counted along with its wisps
+	// only under this field. It is the one way to count them; IncludeInfra
+	// beside it also drops the type's template rows.
 	//
 	// Unset — and with IncludeInfra also unset — the count is durable-plane
-	// only: the historical answer, unchanged.
+	// only: the historical answer, unchanged — except that a named infra
+	// IssueType reads the wisps tier, narrowed to its ephemeral rows
+	// (see IssueType).
 	IncludeEphemeral bool
 }
 
@@ -222,6 +255,13 @@ type CountByGroupRequest struct {
 	// anonymously: a grouped count is a scalar count plus a dimension, and
 	// spelling the dimension beside the whole filter says that, where promoted
 	// fields would have made GroupBy look like one more predicate.
+	//
+	// A bucket is therefore a share of Filter's set, NOT the scalar count of a
+	// request naming the bucket's key. Grouping by CountGroupType with no
+	// Filter.IssueType is the case where the two differ: an infra type's
+	// bucket counts the rows an untyped count reads (by default the durable
+	// plane), while a Count naming that type reads its ephemeral rows (see
+	// CountRequest.IssueType). They agree only under IncludeEphemeral.
 	Filter CountRequest
 	// GroupBy is the bucketing dimension and must be one of the five
 	// CountGroup constants. An empty or unknown value is ErrValidation, not a

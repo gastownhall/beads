@@ -2895,7 +2895,7 @@ type CountIssuesParams struct {
 
 	// Type One issue type, with `status`'s match-nothing-rather-than-fail treatment and NO shorthand alias expansion at all — unlike `GET /v0/beads/ready`'s `type`, which expands aliases.
 	//
-	// It has a SECOND effect under `include_infra`: a type this workspace calls infra routes the count to the ephemeral tier, unless `include_ephemeral` is also set. See that parameter.
+	// It has a SECOND effect: a type this workspace calls infra reads the wisps tier narrowed to that type's ephemeral rows — the plane and the narrowing `GET /v0/beads/issues?type=<infra>` applies, though not its rows, since a count keeps the closed and pinned rows that listing hides — unless `include_ephemeral` is also set, which lifts the narrowing and counts the type's durable rows too. That is the plane decision count and list share; it applies with or without `include_infra`.
 	Type *string `form:"type,omitempty" json:"type,omitempty"`
 
 	// Assignee Only issues assigned to this actor. Sending it beside `no_assignee` is not refused: the two are handed to the filter as written and answer with the empty intersection, which is `0`.
@@ -2961,11 +2961,11 @@ type CountIssuesParams struct {
 	// MetadataField Top-level metadata equality filter as `key=value`, split on the first `=`. Repeatable. An invalid key is a 400.
 	MetadataField *[]string `form:"metadata_field,omitempty" json:"metadata_field,omitempty"`
 
-	// IncludeEphemeral Admit the EPHEMERAL PLANE — the wisps table — and nothing else. Exactly the first of `include_infra`'s four changes, with none of the other three: no type exclusion is taken off, so a row whose TYPE a default count already excludes stays excluded.
+	// IncludeEphemeral Count BOTH PLANES in full — the wisps table as well as the durable one — and take no type exclusion off, so a row whose TYPE a default count already excludes stays excluded. For a count with no `type`, or of a type this workspace does not call infra, that admits the wisps table: exactly the first of `include_infra`'s four changes, with none of the other three.
 	//
 	// It exists because there was no way to ask for that one thing. The write path routes on STORAGE CLASS, not type, so a `no_history` bead lives in the wisps table while remaining ordinary durable work. Reaching it needed `include_infra`, which also drops template rows of the named type — one silent undercount traded for another.
 	//
-	// Beside `include_infra` it also lifts the fourth change's routing of an infra `type`, so that type's durable rows are counted along with its ephemeral ones rather than instead of them.
+	// For a `type` this workspace calls infra, which reads the wisps tier narrowed to its ephemeral rows (see `type`), the flag lifts that narrowing instead, with or without `include_infra`: the type's durable rows (a promoted wisp, a retyped issue) are counted along with its ephemeral ones rather than left out. It is the only flag that lifts it — `include_infra` keeps the narrowing — so it is the way to count those durable rows; sending `include_infra` beside it also drops the type's template rows.
 	IncludeEphemeral *bool `form:"include_ephemeral,omitempty" json:"include_ephemeral,omitempty"`
 
 	// HasMetadataKey Only issues carrying this top-level metadata key.
@@ -2973,11 +2973,11 @@ type CountIssuesParams struct {
 
 	// IncludeInfra Count the cardinality of `bd list --include-infra --all` instead of the durable plane. IT CHANGES FOUR THINGS AT ONCE, and they are listed rather than summarized because a caller reading "include infra" would expect one:
 	//
-	// the ephemeral wisps tier is MERGED IN, picking up both wisps and the `no_history` beads that are durable work stored in that tier; template molecules are EXCLUDED, which a default count includes; gate beads are EXCLUDED unless `type=gate` asks for them by name; and a `type` this workspace calls infra ROUTES the count to the ephemeral tier instead of the durable one — unless `include_ephemeral` is also set, which keeps the durable tier as well, as `GET /v0/beads/issues` does.
+	// the ephemeral wisps tier is MERGED IN, picking up both wisps and the `no_history` beads that are durable work stored in that tier; template molecules are EXCLUDED, which a default count includes; gate beads are EXCLUDED unless `type=gate` asks for them by name; and a `type` this workspace calls infra ROUTES the count to the ephemeral tier instead of the durable one — unless `include_ephemeral` is also set, which keeps the durable tier as well, as `GET /v0/beads/issues` does. That routing is the plane decision count and list share: it applies to a named infra type with or without this flag, so it is listed here only because a caller reading "include infra" expects the fourth change to be this flag's.
 	//
 	// The infra vocabulary is the WORKSPACE's, read from its configuration inside the role. A caller does not supply it and cannot — that config load is what this role exists to keep off both front doors.
 	//
-	// Unset — and with `include_ephemeral` also unset — the count is durable-plane only and applies none of the four: the historical `bd count` answer, kept exactly so a scripted caller reads the same number it read yesterday.
+	// Unset — and with `include_ephemeral` also unset — the count is durable-plane only and applies none of the four: the historical `bd count` answer, kept exactly so a scripted caller reads the same number it read yesterday. The one exception is a `type` this workspace calls infra, which reads the wisps tier narrowed to its ephemeral rows, as a listing of that type does.
 	IncludeInfra *bool `form:"include_infra,omitempty" json:"include_infra,omitempty"`
 
 	// Parent Restrict to one issue's children through one predicate with two arms: a parent-child dependency edge onto `parent`, OR — for an issue carrying no parent-child edge at all — a dotted-id prefix match (`parent.anything`). NEITHER ARM WALKS. The edge arm stops at one level, so a grandchild with an edge of its own is not counted, while the prefix arm reaches every edge-less dotted id at any depth (`X.1.1` as well as `X.1`). It is the same predicate `GET /v0/beads/issues`'s own `parent` applies, so `bd count --parent X` agrees in cardinality with `bd list --parent X --flat --all` (or `--json`) for the shared part of the predicate — NOT with a bare `bd list --parent X --all`, whose default tree mode walks every descendant reachable through either arm (grandchildren and below) by re-querying this same predicate once per level client-side (cmd/bd/list_show_filter_modes.go). `--flat` and `--json` both skip that walk and return this field's answer directly.
@@ -3009,6 +3009,8 @@ type CountIssuesParams struct {
 	// The set is CLOSED, and a value outside it is a `400` rather than an empty answer: a caller that misspelled a dimension and got zero buckets back has no way to tell that from a workspace with nothing in it. That is the role's own rule, applied at the edge here so the refusal names the parameter.
 	//
 	// Bucket KEYS are normalized and printed unmodified by every front door, so the normalization is part of this contract: a priority bucket is `P` followed by the number (`P1`); the assignee bucket for unassigned rows is `(unassigned)`, never the empty string, which would be indistinguishable from a stored empty assignee; the label bucket for rows carrying no label at all is `(no labels)`, and it is ABSENT rather than zero when every matching row has one; `status` and `type` buckets are the stored value verbatim.
+	//
+	// A `type` bucket is a share of THIS request's set, NOT the count a request naming that `type` returns. A request with no `type` reads the durable plane by default, so the bucket of a type this workspace calls infra counts that type's durable rows, while `type=<infra>` counts its ephemeral rows (see `type`). `include_ephemeral` is the one flag that makes the two agree, both then counting both planes in full; `include_infra` admits the wisps tier to the bucket and keeps the typed count's narrowing.
 	GroupBy *CountIssuesParamsGroupBy `form:"group_by,omitempty" json:"group_by,omitempty"`
 }
 

@@ -4,6 +4,7 @@ package embeddeddolt_test
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
@@ -183,6 +184,186 @@ func TestCounterExcludeStatusAcceptsAWorkspaceCustomStatusWithoutIncludeInfra(t 
 	}
 	if result.Total != 1 {
 		t.Fatalf("Count(exclude-status=review).Total = %d, want 1", result.Total)
+	}
+}
+
+// TestCounterInfraTypeCountMatchesList pins GH#6258 end to end on the embedded
+// store: `bd count --type <infra>` must count the same rows `bd list --type
+// <infra>` shows — the type's ephemeral wisps-tier rows — for every
+// combination of --include-ephemeral and --include-infra. Recognizing the type
+// as infra requires the workspace's types.infra, so this is also the test that
+// pins the counter's config load: with types.infra=robot, a plain typed count
+// must load the config (workapi.CountNeedsConfig) or "robot" would never be
+// treated as infra and the count would read the durable plane alone.
+//
+// The seed is the bug report's shape: two robot wisps (the plane a listing of
+// an infra type reads), one durable task retyped to robot (create-time routing
+// does not run on UpdateIssue, so the row stays durable), and one durable
+// agent (agent is NOT infra in this workspace, so it is durable work counted
+// on every arm). A leg-level test, not a conformance case, for the same
+// reason the ExcludeStatus test above is: CounterFixture cannot drive a
+// workspace-configured types.infra.
+func TestCounterInfraTypeCountMatchesList(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "cntinf")
+	ctx := t.Context()
+
+	if err := te.store.SetConfig(ctx, "types.custom", "robot,agent"); err != nil {
+		t.Fatalf("SetConfig(types.custom): %v", err)
+	}
+	if err := te.store.SetConfig(ctx, "types.infra", "robot"); err != nil {
+		t.Fatalf("SetConfig(types.infra): %v", err)
+	}
+
+	// Two robot wisps: the ephemeral rows a listing of the infra type reads.
+	for _, id := range []string{"cntinf-r1", "cntinf-r2"} {
+		if err := te.store.CreateIssue(ctx, &types.Issue{
+			ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: "robot", Ephemeral: true,
+		}, "tester"); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", id, err)
+		}
+	}
+	// One durable task, retyped to robot after creation: update does not run
+	// create-time routing, so the row stays in the durable plane.
+	if err := te.store.CreateIssue(ctx, &types.Issue{
+		ID: "cntinf-r3", Title: "cntinf-r3", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+	}, "tester"); err != nil {
+		t.Fatalf("CreateIssue(cntinf-r3): %v", err)
+	}
+	if err := te.store.UpdateIssue(ctx, "cntinf-r3", map[string]interface{}{
+		"issue_type": "robot",
+	}, "tester"); err != nil {
+		t.Fatalf("UpdateIssue(cntinf-r3) to robot: %v", err)
+	}
+	// One durable agent: not infra in this workspace.
+	if err := te.store.CreateIssue(ctx, &types.Issue{
+		ID: "cntinf-a1", Title: "cntinf-a1", Status: types.StatusOpen, Priority: 2, IssueType: "agent",
+	}, "tester"); err != nil {
+		t.Fatalf("CreateIssue(cntinf-a1): %v", err)
+	}
+
+	counter, err := te.store.Counter()
+	if err != nil {
+		t.Fatalf("Counter(): %v", err)
+	}
+	reader, err := te.store.IssueReader()
+	if err != nil {
+		t.Fatalf("IssueReader(): %v", err)
+	}
+
+	const scope = "cntinf-r1,cntinf-r2,cntinf-r3,cntinf-a1"
+	for _, tt := range []struct {
+		issueType string
+		ephemeral bool
+		infra     bool
+		want      int64
+	}{
+		{"robot", false, false, 2}, // the bug: main counted 1 here
+		{"robot", true, false, 3},
+		{"robot", false, true, 2},
+		{"robot", true, true, 3},
+		{"agent", false, false, 1},
+		{"agent", true, false, 1},
+		{"agent", false, true, 1},
+		{"agent", true, true, 1},
+	} {
+		name := fmt.Sprintf("%s/ephemeral=%v/infra=%v", tt.issueType, tt.ephemeral, tt.infra)
+		t.Run(name, func(t *testing.T) {
+			countReq := publicops.CountRequest{
+				IssueType: tt.issueType, IncludeEphemeral: tt.ephemeral, IncludeInfra: tt.infra, IDFilter: scope,
+			}
+			result, err := counter.Count(ctx, countReq)
+			if err != nil {
+				t.Fatalf("Count(%s): %v", name, err)
+			}
+			// The listing twin: AllFlag and IncludeTemplates lift the
+			// deliberate count-versus-list differences (closed/pinned rows,
+			// templates) that are not this bug; the plane is what must agree.
+			page, err := reader.List(ctx, publicops.ListRequest{
+				IssueType: tt.issueType, IncludeEphemeral: tt.ephemeral, IncludeInfra: tt.infra,
+				AllFlag: true, IncludeTemplates: true, IDFilter: scope,
+			})
+			if err != nil {
+				t.Fatalf("List(%s): %v", name, err)
+			}
+			if result.Total != int64(len(page.Items)) {
+				t.Errorf("Count(%s) = %d, len(List(%s)) = %d, want equal",
+					name, result.Total, name, len(page.Items))
+			}
+			if result.Total != tt.want {
+				t.Errorf("Count(%s) = %d, want %d", name, result.Total, tt.want)
+			}
+
+			grouped, err := counter.CountByGroup(ctx, publicops.CountByGroupRequest{
+				Filter: countReq, GroupBy: publicops.CountGroupStatus,
+			})
+			if err != nil {
+				t.Fatalf("CountByGroup(%s): %v", name, err)
+			}
+			if grouped.Total != result.Total {
+				t.Errorf("CountByGroup(%s).Total = %d, want the scalar %d", name, grouped.Total, result.Total)
+			}
+			// Total re-runs the scalar count, so only the buckets read the
+			// grouped query. Status buckets are disjoint: their sum is exact.
+			var bucketSum int64
+			for _, n := range grouped.Groups {
+				bucketSum += int64(n)
+			}
+			if bucketSum != tt.want {
+				t.Errorf("CountByGroup(%s) buckets %v sum to %d, want %d", name, grouped.Groups, bucketSum, tt.want)
+			}
+		})
+	}
+
+	// The untyped count keeps its historical durable-plane answer: the two
+	// durable rows in scope (the retyped robot and the agent), not the wisps.
+	// It deliberately does NOT equal the default listing, which suppresses
+	// infra types (the PR's "noticed, not changed" list).
+	untyped, err := counter.Count(ctx, publicops.CountRequest{IDFilter: scope})
+	if err != nil {
+		t.Fatalf("Count(untyped): %v", err)
+	}
+	if untyped.Total != 2 {
+		t.Errorf("Count(untyped) = %d, want 2 (the durable rows only)", untyped.Total)
+	}
+
+	// So an infra type's --by-type bucket is NOT its typed count, and this
+	// pins that split rather than leaving it implicit: the grouping is an
+	// untyped count, so by default robot's bucket is the retyped durable robot
+	// alone, while the typed count reads the two robot wisps. Only
+	// IncludeEphemeral makes the two agree, both then counting both planes;
+	// IncludeInfra admits the wisps tier to the bucket and keeps the typed
+	// count's narrowing.
+	for _, tt := range []struct {
+		ephemeral  bool
+		infra      bool
+		wantBucket int
+		wantTyped  int64
+	}{
+		{false, false, 1, 2},
+		{true, false, 3, 3},
+		{false, true, 3, 2},
+	} {
+		name := fmt.Sprintf("by-type/ephemeral=%v/infra=%v", tt.ephemeral, tt.infra)
+		t.Run(name, func(t *testing.T) {
+			byType, err := counter.CountByGroup(ctx, publicops.CountByGroupRequest{
+				Filter:  publicops.CountRequest{IncludeEphemeral: tt.ephemeral, IncludeInfra: tt.infra, IDFilter: scope},
+				GroupBy: publicops.CountGroupType,
+			})
+			if err != nil {
+				t.Fatalf("CountByGroup(%s): %v", name, err)
+			}
+			typed, err := counter.Count(ctx, publicops.CountRequest{
+				IssueType: "robot", IncludeEphemeral: tt.ephemeral, IncludeInfra: tt.infra, IDFilter: scope,
+			})
+			if err != nil {
+				t.Fatalf("Count(robot, %s): %v", name, err)
+			}
+			if got := byType.Groups["robot"]; got != tt.wantBucket || typed.Total != tt.wantTyped {
+				t.Errorf("%s: robot bucket = %d (groups %v), --type robot = %d; want %d and %d",
+					name, got, byType.Groups, typed.Total, tt.wantBucket, tt.wantTyped)
+			}
+		})
 	}
 }
 

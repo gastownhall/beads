@@ -1,6 +1,7 @@
 package workapi
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/steveyegge/beads/issueops"
@@ -70,15 +71,17 @@ func TestBuildCountFilter_IncludeEphemeral(t *testing.T) {
 // field admits the wisps PLANE and changes nothing else.
 //
 // That half is why the field exists. IncludeInfra already admitted the plane,
-// but it also drops template rows of the named type, drops gates and routes an
-// infra type to the ephemeral tier. A builder that sent IncludeEphemeral
-// through IncludeInfra's branch would pass every SkipWisps assertion and bring
-// back exactly the undercount the flag was added to avoid, so this asserts the
-// other three fields against IncludeInfra — the field that does set them.
+// but it also drops template rows of the named type and drops gates, and it
+// keeps an infra type's narrowing to its ephemeral rows, which since GH#6258
+// a typed count applies with or without IncludeInfra and only IncludeEphemeral
+// lifts. A builder that sent IncludeEphemeral through IncludeInfra's branch
+// would pass every SkipWisps assertion and bring back exactly the undercount
+// the flag was added to avoid, so this asserts the other three fields against
+// IncludeInfra — the field that does set them.
 func TestCountIncludeEphemeralIsThePlaneBitAndNothingElse(t *testing.T) {
 	// The zero ListConfig falls back to the default InfraSet, under which
-	// "agent" is an infra type: the one IncludeInfra would route to the
-	// ephemeral tier.
+	// "agent" is an infra type: the one whose count narrows to its ephemeral
+	// rows unless IncludeEphemeral lifts that.
 	cfg := ListConfig{}
 
 	for _, tt := range []struct {
@@ -109,7 +112,8 @@ func TestCountIncludeEphemeralIsThePlaneBitAndNothingElse(t *testing.T) {
 		})
 	}
 
-	// And IncludeInfra still makes all four changes, so the contrast above is
+	// And IncludeInfra still sets all three — its template and gate exclusions,
+	// and an infra type's narrowing, which it keeps — so the contrast above is
 	// drawn against the field it has to differ from.
 	for _, tt := range []struct {
 		name          string
@@ -144,73 +148,121 @@ func TestCountIncludeEphemeralIsThePlaneBitAndNothingElse(t *testing.T) {
 	}
 }
 
-// TestCountAndListPlaneAgreement pins how count and list decide the PLANE for
-// the same request — including the ONE case where they disagree.
+// TestCountAndListPlaneAgreement pins that count and list decide the PLANE
+// identically for the same request: whether the wisps TABLE is read at all
+// (SkipWisps), and whether a named infra type narrows the read to its
+// ephemeral rows (Ephemeral). Both decisions live in applyPlane, which both
+// builders call, so a change to either builder alone cannot land here — which
+// is the drift this test exists to catch: two count-local copies of the rule
+// had already disagreed with list's on exactly the named-infra-type cell
+// (GH#6258, the row this test used to pin as "infra type diverges").
 //
-// The name is not "AgreeOnThePlane" because they do not always agree, and a
-// test that claimed they did would be asserting a property the code lacks. For
-// an INFRA type they diverge: list reads the plane (applyTypeSuppressions
-// exempts infra types) while count does not, so `bd count --type agent` answers
-// 0 where `bd list --type agent` returns rows.
-//
-// That divergence predates the flag — the count arm is a bare `else {
-// SkipWisps = true }`, so it answers 0 for an infra type with or without this
-// change. It is pinned here, not fixed: the fix is a separate decision about
-// what naming an infra type should admit, and this change deliberately alters
-// nothing about the default arm.
+// The table runs under the zero config's default infra set (agent, role,
+// message) and again under a workspace infra set of {robot}, where "agent" is
+// NOT infra and "robot" is: the two configs disagree about both named types,
+// so the table proves the plane follows the workspace's vocabulary rather
+// than the built-in one.
 //
 // It asserts the ABSOLUTE expected value as well as the agreement. Agreement
-// alone is satisfied by a regression that turns the flag into a no-op on BOTH
+// alone is satisfied by a regression that turns a flag into a no-op on BOTH
 // builders, which is exactly the drift this exists to catch.
 //
 // It deliberately says nothing about the two answers being equal in ROWS: a
-// count includes templates and a listing does not, with or without this flag.
+// count includes templates and a listing does not, whatever the flags.
 // See issueops.CountRequest.IncludeEphemeral.
 func TestCountAndListPlaneAgreement(t *testing.T) {
-	// CustomTypes admits "agent" into the workspace vocabulary (BuildListFilter
-	// rejects a type it does not know), and the default InfraSet already treats
-	// it as infra. Without the vocabulary the builders return an error and the
-	// infra cases below prove nothing.
-	cfg := ListConfig{CustomTypes: []string{"agent", "role", "message"}}
+	// CustomTypes admits every named type into the workspace vocabulary
+	// (BuildListFilter rejects a type it does not know); without the
+	// vocabulary the list arm returns an error and the infra cells prove
+	// nothing.
+	defaultSet := ListConfig{CustomTypes: []string{"agent", "role", "message", "robot"}}
+	workspaceSet := ListConfig{
+		CustomTypes: []string{"agent", "role", "message", "robot"},
+		InfraSet:    map[string]bool{"robot": true},
+	}
 
-	for _, tt := range []struct {
-		name             string
-		issueType        string
-		includeEphemeral bool
-		wantCountSkip    bool
-		wantAgree        bool
+	for _, cfgCase := range []struct {
+		name string
+		cfg  ListConfig
 	}{
-		{"default", "", false, true, true},
-		{"named type", "task", false, true, true},
-		{"include-ephemeral", "", true, false, true},
-		{"named type + include-ephemeral", "task", true, false, true},
-		// The known divergence. list reads the plane for an infra type, count
-		// does not; --include-ephemeral recovers count.
-		{"infra type diverges", "agent", false, true, false},
-		{"infra type + include-ephemeral", "agent", true, false, true},
+		{"default_infra_set", defaultSet},
+		{"workspace_infra_set", workspaceSet},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			listFilter, err := BuildListFilter(issueops.ListRequest{
-				IssueType: tt.issueType, IncludeEphemeral: tt.includeEphemeral,
-			}, cfg)
-			if err != nil {
-				t.Fatalf("BuildListFilter: %v", err)
+		for _, issueType := range []string{"", "task", "agent", "robot"} {
+			for _, includeEphemeral := range []bool{false, true} {
+				for _, includeInfra := range []bool{false, true} {
+					name := fmt.Sprintf("%s/type=%s/ephemeral=%v/infra=%v",
+						cfgCase.name, issueType, includeEphemeral, includeInfra)
+					t.Run(name, func(t *testing.T) {
+						listFilter, err := BuildListFilter(issueops.ListRequest{
+							IssueType: issueType, IncludeEphemeral: includeEphemeral, IncludeInfra: includeInfra,
+						}, cfgCase.cfg)
+						if err != nil {
+							t.Fatalf("BuildListFilter: %v", err)
+						}
+						countFilter, err := BuildCountFilter(issueops.CountRequest{
+							IssueType: issueType, IncludeEphemeral: includeEphemeral, IncludeInfra: includeInfra,
+						}, cfgCase.cfg)
+						if err != nil {
+							t.Fatalf("BuildCountFilter: %v", err)
+						}
+
+						// The absolute expectation, spelled from the request and the
+						// config rather than from either builder.
+						wantSkip := !includeEphemeral && !includeInfra && (issueType == "" || !cfgCase.cfg.IsInfra(issueType))
+						if countFilter.SkipWisps != wantSkip {
+							t.Errorf("count SkipWisps = %v, want %v", countFilter.SkipWisps, wantSkip)
+						}
+						if listFilter.SkipWisps != wantSkip {
+							t.Errorf("list SkipWisps = %v, want %v", listFilter.SkipWisps, wantSkip)
+						}
+						wantEphemeral := cfgCase.cfg.IsInfra(issueType) && !includeEphemeral
+						countEph := countFilter.Ephemeral != nil && *countFilter.Ephemeral
+						listEph := listFilter.Ephemeral != nil && *listFilter.Ephemeral
+						if countEph != wantEphemeral {
+							t.Errorf("count Ephemeral = %v, want %v", countEph, wantEphemeral)
+						}
+						if listEph != wantEphemeral {
+							t.Errorf("list Ephemeral = %v, want %v", listEph, wantEphemeral)
+						}
+
+						// The agreement itself, cell by cell.
+						if countFilter.SkipWisps != listFilter.SkipWisps {
+							t.Errorf("count SkipWisps = %v, list SkipWisps = %v, want equal — "+
+								"a change to either builder alone lands here",
+								countFilter.SkipWisps, listFilter.SkipWisps)
+						}
+						if countEph != listEph {
+							t.Errorf("count Ephemeral = %v, list Ephemeral = %v, want equal", countEph, listEph)
+						}
+					})
+				}
 			}
-			countFilter, err := BuildCountFilter(issueops.CountRequest{
-				IssueType: tt.issueType, IncludeEphemeral: tt.includeEphemeral,
-			}, cfg)
-			if err != nil {
-				t.Fatalf("BuildCountFilter: %v", err)
-			}
-			if countFilter.SkipWisps != tt.wantCountSkip {
-				t.Errorf("count SkipWisps = %v, want %v", countFilter.SkipWisps, tt.wantCountSkip)
-			}
-			agree := listFilter.SkipWisps == countFilter.SkipWisps
-			if agree != tt.wantAgree {
-				t.Errorf("list SkipWisps=%v count SkipWisps=%v (agree=%v), want agree=%v — "+
-					"a change to either builder alone lands here",
-					listFilter.SkipWisps, countFilter.SkipWisps, agree, tt.wantAgree)
-			}
-		})
+		}
+	}
+
+	// The AC's anchor cells, asserted literally so the table above cannot pass
+	// merely by agreeing with itself: under the default infra set, naming
+	// "agent" with no flags reads the wisps tier narrowed to ephemeral rows —
+	// the cell that used to diverge — while a request naming no infra type
+	// stays durable-only.
+	anchor, err := BuildCountFilter(issueops.CountRequest{IssueType: "agent"}, defaultSet)
+	if err != nil {
+		t.Fatalf("BuildCountFilter(agent, default set): %v", err)
+	}
+	if anchor.SkipWisps {
+		t.Error("count --type agent (default set) SkipWisps = true, want false: an infra type reads the wisps tier")
+	}
+	if anchor.Ephemeral == nil || !*anchor.Ephemeral {
+		t.Error("count --type agent (default set) Ephemeral not &true: an infra type narrows to its ephemeral rows")
+	}
+	for _, issueType := range []string{"", "task"} {
+		durable, err := BuildCountFilter(issueops.CountRequest{IssueType: issueType}, defaultSet)
+		if err != nil {
+			t.Fatalf("BuildCountFilter(%q, default set): %v", issueType, err)
+		}
+		if !durable.SkipWisps {
+			t.Errorf("count --type %q with no flags SkipWisps = false, want true: only an infra type admits the plane", issueType)
+		}
 	}
 }
