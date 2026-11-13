@@ -314,6 +314,34 @@ func TestGatherUpdateInputEmptyExternalDescriptionOptInGH8149(t *testing.T) {
 	}
 }
 
+// GH#8149 AC-5: create shares the description validator but keeps its own
+// contract — the stdin/file gate still suggests the inline empty (create's
+// sanctioned clear) and never names the update-only --clear-description,
+// which create does not register.
+func TestValidateDescriptionUpdateCreateExternalRefusalKeepsInlineHintGH8149(t *testing.T) {
+	withTestStdin(t, "", func() {
+		cmd := newCreateDescriptionGuardCmd()
+		if err := cmd.ParseFlags([]string{"--stdin"}); err != nil {
+			t.Fatalf("failed to parse flags: %v", err)
+		}
+
+		description, changed, flagErr := getDescriptionFlag(cmd)
+		if flagErr != nil {
+			t.Fatalf("unexpected error: %v", flagErr)
+		}
+		err := validateDescriptionUpdate(cmd, description, changed)
+		if err == nil {
+			t.Fatal("expected empty stdin description to be rejected on create without the opt-in")
+		}
+		if !strings.Contains(err.Error(), "--allow-empty-description") || !strings.Contains(err.Error(), `--description ""`) {
+			t.Fatalf("expected create refusal to name --allow-empty-description and the inline-empty hint, got: %v", err)
+		}
+		if strings.Contains(err.Error(), "--clear-description") {
+			t.Fatalf("create refusal must not name the update-only --clear-description, got: %v", err)
+		}
+	})
+}
+
 // TestClearTextFlagsRegisteredOnUpdateOnly pins the real command surface:
 // updateCmd must register all three GH#8149 clear verbs (their registration
 // is the update-contract marker validateDescriptionUpdate reads — a missing

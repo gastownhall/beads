@@ -754,6 +754,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING: `bd update` refuses an exactly empty `--description`, `--design`
+  or `--acceptance` replacement; clear with `--clear-description`,
+  `--clear-design` or `--clear-acceptance`**
+  ([#8149](https://github.com/gastownhall/beads/issues/8149)). An empty
+  inline value previously wiped the field at exit 0 behind the same
+  `✓ Updated` receipt as a successful write — and the empty string is
+  exactly what a dead command substitution (`--description "$(cat
+  missing.txt)"`) collapses to. At the flag layer the accident and the
+  deliberate clear are the same bytes, so the empty replacement is refused
+  unconditionally (exit 1, naming the field's clear verb; neither `--force`
+  nor `--allow-empty-description` unblocks it — the opt-in covers stdin/file
+  input plumbing only, and that refusal now names the clear verb too) and
+  the deliberate clear gets its own verb per field, each mutually exclusive
+  with its field's content inputs: `--clear-description` with
+  `--description`/`--body`/`--message`/`--body-file`/`--description-file`/
+  `--stdin`, `--clear-design` with `--design`/`--design-file`, and
+  `--clear-acceptance` with `--acceptance`/`--acceptance-criteria`. A clear
+  is an ordinary field update, so the conditional-update guards
+  (`--if-assignee`, `--if-status`, `--if-revision`) ride on it,
+  `--clear-x=false` is not an update at all, and whitespace values are
+  content, not empty. Creation is unchanged: `bd create` keeps omitted and
+  explicitly empty values as a field born empty and exposes none of the
+  clear verbs, and empty stdin/file description input stays behind
+  `--allow-empty-description` on both commands.
 - **`bd dolt pull` on an embedded rig with no remote exits 0 (bd-e2q8zs).**
   It prints `No remote is configured — skipping.` and the setup guidance,
   as server mode already did; in embedded mode it used to exit 1. A pull

@@ -251,6 +251,31 @@ func TestEmbeddedCreateScalarAndRelationships(t *testing.T) {
 		}
 	})
 
+	// GH#8149: creation keeps today's behavior — omitted and explicitly
+	// empty text values stay a field born empty — and createCmd exposes none
+	// of the update-only clear verbs (also pinned by
+	// TestClearTextFlagsRegisteredOnUpdateOnly).
+	t.Run("create_empty_text_fields_allowed_gh8149", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "ce")
+
+		explicit := bdCreate(t, bd, dir, "Explicitly empty text fields",
+			"--description=", "--design=", "--acceptance=")
+		if explicit.Description != "" || explicit.Design != "" || explicit.AcceptanceCriteria != "" {
+			t.Fatalf("explicitly empty create fields = description=%q design=%q acceptance=%q",
+				explicit.Description, explicit.Design, explicit.AcceptanceCriteria)
+		}
+
+		omitted := bdCreate(t, bd, dir, "Omitted text fields")
+		if omitted.Description != "" || omitted.Design != "" || omitted.AcceptanceCriteria != "" {
+			t.Fatalf("omitted create fields = description=%q design=%q acceptance=%q",
+				omitted.Description, omitted.Design, omitted.AcceptanceCriteria)
+		}
+
+		if out := bdCreateFail(t, bd, dir, "Clear verbs are update-only", "--clear-description"); !strings.Contains(out, "unknown flag") {
+			t.Fatalf("expected unknown-flag refusal for --clear-description on create, got: %s", out)
+		}
+	})
+
 	// GH#6035: create stored a bare JSON string/array/number as metadata,
 	// and update rejected the same value only late, in the storage merge.
 	t.Run("metadata_must_be_object_GH6035", func(t *testing.T) {
