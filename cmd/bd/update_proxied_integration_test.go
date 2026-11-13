@@ -158,6 +158,45 @@ func TestProxiedServerUpdate(t *testing.T) {
 		}
 	})
 
+	t.Run("empty_text_fields_refused_gh8149", func(t *testing.T) {
+		// GH#8149 on the proxied route: the empty-replacement refusal fires
+		// in gatherUpdateInput, before any request leaves the CLI, and each
+		// field's clear verb is the deliberate path.
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "u89r")
+		issue := bdProxiedCreate(t, bd, p.dir, "Empty text guard",
+			"--description", "precious", "--design", "design text", "--acceptance", "acceptance text")
+		for _, tt := range []struct {
+			flag  string
+			clear string
+		}{
+			{"--description", "--clear-description"},
+			{"--design", "--clear-design"},
+			{"--acceptance", "--clear-acceptance"},
+		} {
+			stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "update", issue.ID, tt.flag, "")
+			if err == nil {
+				t.Fatalf("expected %s \"\" to fail\nstdout:\n%s\nstderr:\n%s", tt.flag, stdout, stderr)
+			}
+			if !strings.Contains(stderr+stdout, tt.clear) {
+				t.Errorf("expected output naming %s for %s, got stdout:\n%s\nstderr:\n%s", tt.clear, tt.flag, stdout, stderr)
+			}
+		}
+		if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Description != "precious" || got.Design != "design text" || got.AcceptanceCriteria != "acceptance text" {
+			t.Errorf("expected text fields preserved, got description=%q design=%q acceptance=%q",
+				got.Description, got.Design, got.AcceptanceCriteria)
+		}
+		// A second requested mutation rides along and still nothing applies.
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "update", issue.ID, "--title", "should not land", "--design", "")
+		if err == nil {
+			t.Fatalf("expected empty --design with --title to fail\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		got := bdProxiedShow(t, bd, p.dir, issue.ID)
+		if got.Title != "Empty text guard" || got.Design != "design text" {
+			t.Errorf("expected title and design preserved, got title=%q design=%q", got.Title, got.Design)
+		}
+	})
+
 	t.Run("claim_sets_assignee_and_in_progress", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "uc")

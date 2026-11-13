@@ -219,6 +219,9 @@ pointless).`,
 			return err
 		}
 		if designChanged {
+			if err := validateDesignUpdate(design, designChanged); err != nil {
+				return HandleErrorRespectJSON("%v", err)
+			}
 			updates["design"] = design
 		}
 		if cmd.Flags().Changed("notes") && cmd.Flags().Changed("append-notes") {
@@ -244,6 +247,9 @@ pointless).`,
 				acceptanceCriteria, _ = cmd.Flags().GetString("acceptance")
 			} else {
 				acceptanceCriteria, _ = cmd.Flags().GetString("acceptance-criteria")
+			}
+			if err := validateAcceptanceUpdate(acceptanceCriteria, true); err != nil {
+				return HandleErrorRespectJSON("%v", err)
 			}
 			updates["acceptance_criteria"] = acceptanceCriteria
 		}
@@ -1078,6 +1084,16 @@ func init() {
 	updateCmd.Flags().Bool("clear-notes", false, "Clear the notes field (--notes \"\" is refused: an empty value is usually a dead command substitution)")
 	updateCmd.MarkFlagsMutuallyExclusive("clear-notes", "notes")
 	updateCmd.MarkFlagsMutuallyExclusive("clear-notes", "append-notes")
+	// GH#8149: the same deliberate-clear contract for the other three
+	// long-form text fields. An exactly empty replacement value is refused
+	// (see validateDescriptionUpdate/validateDesignUpdate/
+	// validateAcceptanceUpdate); clearing is an explicit verb.
+	registerUpdateClearTextFlags(updateCmd)
+	// Update replaces these fields, so their help names the refusal and the
+	// clear verb; create keeps the shared "Issue description" wording.
+	updateCmd.Flags().Lookup("description").Usage = "Replace the description (--description \"\" is refused: use --clear-description to clear)"
+	updateCmd.Flags().Lookup("design").Usage = "Replace the design (--design \"\" and empty --design-file are refused: use --clear-design to clear)"
+	updateCmd.Flags().Lookup("acceptance").Usage = "Replace the acceptance criteria (--acceptance \"\" is refused: use --clear-acceptance to clear)"
 	updateCmd.Flags().String("spec-id", "", "Link to specification document")
 	updateCmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")
 	_ = updateCmd.Flags().MarkHidden("acceptance-criteria") // Only fails if flag missing (caught in tests)

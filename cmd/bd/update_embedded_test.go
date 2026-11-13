@@ -609,6 +609,68 @@ func TestEmbeddedUpdateFieldsNotesClearAndDefer(t *testing.T) {
 		}
 	})
 
+	t.Run("update_empty_text_fields_refused_gh8149", func(t *testing.T) {
+		// GH#8149: an exactly empty description/design/acceptance value is
+		// what a dead command substitution collapses to; it must not wipe
+		// the field behind a success receipt. The deliberate clear is the
+		// field's clear verb, and neither --force nor
+		// --allow-empty-description unblocks the inline empty.
+		issue := bdCreate(t, bd, dir, "Empty text field guard test", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--description", "precious", "--design", "design text", "--acceptance", "acceptance text")
+
+		for _, tt := range []struct {
+			flag  string
+			clear string
+		}{
+			{"--description", "--clear-description"},
+			{"--design", "--clear-design"},
+			{"--acceptance", "--clear-acceptance"},
+		} {
+			out := bdUpdateFail(t, bd, dir, issue.ID, tt.flag, "")
+			if !strings.Contains(out, tt.clear) {
+				t.Errorf("expected refusal naming %s, got:\n%s", tt.clear, out)
+			}
+			// --force opens overwrite fences, not this guard: the bytes
+			// still cannot prove intent.
+			out = bdUpdateFail(t, bd, dir, issue.ID, tt.flag, "", "--force")
+			if !strings.Contains(out, tt.clear) {
+				t.Errorf("expected forced refusal naming %s, got:\n%s", tt.clear, out)
+			}
+		}
+
+		// --json keeps the refusal on the error surface, named after the
+		// clear verb.
+		out := bdUpdateFail(t, bd, dir, "--json", issue.ID, "--description", "")
+		if !strings.Contains(out, "--clear-description") {
+			t.Errorf("expected --json refusal naming --clear-description, got:\n%s", out)
+		}
+
+		// A refused update applies none of its requested changes: the title
+		// riding along must not land either.
+		out = bdUpdateFail(t, bd, dir, issue.ID, "--title", "should not land", "--description", "")
+		if !strings.Contains(out, "--clear-description") {
+			t.Errorf("expected refusal naming --clear-description, got:\n%s", out)
+		}
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Title != "Empty text field guard test" {
+			t.Errorf("expected title preserved, got %q", got.Title)
+		}
+		if got.Description != "precious" || got.Design != "design text" || got.AcceptanceCriteria != "acceptance text" {
+			t.Errorf("expected text fields preserved, got description=%q design=%q acceptance=%q",
+				got.Description, got.Design, got.AcceptanceCriteria)
+		}
+
+		// Multi-ID: the refusal protects every id in the batch.
+		other := bdCreate(t, bd, dir, "Empty text field guard second", "--type", "task")
+		bdUpdate(t, bd, dir, other.ID, "--description", "also precious")
+		bdUpdateFail(t, bd, dir, issue.ID, other.ID, "--description", "")
+		for _, id := range []string{issue.ID, other.ID} {
+			if g := bdShow(t, bd, dir, id); g.Description == "" {
+				t.Errorf("expected description preserved on %s, got empty", id)
+			}
+		}
+	})
+
 	t.Run("update_defer", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Defer test", "--type", "task")
 		bdUpdate(t, bd, dir, issue.ID, "--defer", "2099-01-15")
