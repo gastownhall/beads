@@ -146,6 +146,43 @@ func TestEmbeddedDeletePreviewAndGuards(t *testing.T) {
 		}
 	})
 
+	// The preview's affected-text section must name the neighbors the
+	// deletion would really rewrite. "X.7" is a hierarchical child's id, not a
+	// citation of X; "X." at the end of a sentence is.
+	t.Run("delete_preview_lists_only_complete_citations", func(t *testing.T) {
+		target := bdCreate(t, bd, dir, "Preview hierarchy target", "--type", "task")
+		childCiter := bdCreate(t, bd, dir, "Preview cites a child id", "--type", "task",
+			"--description", "follow-up in "+target.ID+".7")
+		citer := bdCreate(t, bd, dir, "Preview cites the target", "--type", "task",
+			"--description", "see "+target.ID+".")
+		bdDepAdd(t, bd, dir, target.ID, childCiter.ID)
+		bdDepAdd(t, bd, dir, target.ID, citer.ID)
+
+		out := bdDelete(t, bd, dir, target.ID)
+		const header = "Connected issues where text references will be updated:"
+		_, section, found := strings.Cut(out, header)
+		if !found {
+			t.Fatalf("preview has no affected-text section:\n%s", out)
+		}
+		section, _, _ = strings.Cut(section, "\n\n")
+		if !strings.Contains(section, citer.ID+":") {
+			t.Errorf("affected-text section omits %s, whose text cites %s:\n%s", citer.ID, target.ID, section)
+		}
+		if strings.Contains(section, childCiter.ID+":") {
+			t.Errorf("affected-text section lists %s, whose text cites only %s.7:\n%s", childCiter.ID, target.ID, section)
+		}
+		// A preview changes nothing.
+		if got := bdShow(t, bd, dir, target.ID); got.ID != target.ID {
+			t.Errorf("expected the target to survive the preview")
+		}
+		if got := bdShow(t, bd, dir, childCiter.ID); got.Description != "follow-up in "+target.ID+".7" {
+			t.Errorf("preview changed %s description to %q", childCiter.ID, got.Description)
+		}
+		if got := bdShow(t, bd, dir, citer.ID); got.Description != "see "+target.ID+"." {
+			t.Errorf("preview changed %s description to %q", citer.ID, got.Description)
+		}
+	})
+
 	t.Run("delete_single_quiet_forced_dry_run_is_payload_blind", func(t *testing.T) {
 		titleMarker := "EMBEDDED_QUIET_TITLE_MARKER"
 		descriptionMarker := "EMBEDDED_QUIET_DESCRIPTION_MARKER"
