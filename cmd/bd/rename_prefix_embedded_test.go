@@ -211,6 +211,38 @@ func TestEmbeddedRenamePrefixEdgeCases(t *testing.T) {
 			t.Errorf("child = %s, want a taxdb-u6ch.N ID", child.ID)
 		}
 	})
+
+	t.Run("mint_only_dry_run_writes_nothing", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "taxdb")
+		bdCreate(t, bd, dir, "Tax parent", "--id", "taxdb-u6ch")
+
+		result := decodeMintOnlyResult(t, bdRenamePrefix(t, bd, dir, "kb", "--mint-only", "--dry-run", "--json"))
+		if result.OldPrefix != "taxdb" || result.NewPrefix != "kb" || !result.MintOnly || !result.DryRun ||
+			fmt.Sprint(result.AllowedPrefixesAdded) != "[taxdb]" {
+			t.Errorf("result = %+v, want a dry run planning taxdb -> kb and adding taxdb", result)
+		}
+		if out := bdRenamePrefix(t, bd, dir, "kb", "--mint-only", "--dry-run"); !strings.Contains(out, "DRY RUN") {
+			t.Errorf("text dry run did not say so: %s", out)
+		}
+		if root := bdCreate(t, bd, dir, "Still taxdb", "--type", "task"); !strings.HasPrefix(root.ID, "taxdb-") {
+			t.Errorf("dry run changed the prefix: new root = %s", root.ID)
+		}
+	})
+
+	t.Run("mint_only_with_repair_fails", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "taxdb")
+		bdCreate(t, bd, dir, "Tax parent", "--id", "taxdb-u6ch")
+
+		if out := bdRenamePrefixFail(t, bd, dir, "kb", "--mint-only", "--repair"); !strings.Contains(out, "--mint-only") {
+			t.Errorf("refusal does not name --mint-only: %s", out)
+		}
+		if root := bdCreate(t, bd, dir, "Still taxdb", "--type", "task"); !strings.HasPrefix(root.ID, "taxdb-") {
+			t.Errorf("refused run changed the prefix: new root = %s", root.ID)
+		}
+		if got := bdShow(t, bd, dir, "taxdb-u6ch"); got.Title != "Tax parent" {
+			t.Errorf("refused run moved taxdb-u6ch: %+v", got)
+		}
+	})
 }
 
 // mintOnlyJSON is the single object bd rename-prefix --mint-only --json writes.
