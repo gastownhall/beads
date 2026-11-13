@@ -438,3 +438,45 @@ func TestRepairPrefixesKeepsSuffixesWithoutCollision(t *testing.T) {
 		}
 	}
 }
+
+func TestRepairPrefixesKeepsDottedChildren(t *testing.T) {
+	// GH#6591 AC-2: a dotted child keeps its path under the renamed root, an
+	// orphan child (no root row) is mapped through its virtual root, the
+	// parent-child edge still resolves, and text references to both children
+	// point at the new IDs.
+	ctx := context.Background()
+	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+	seedRepairIssues(t, ctx, testStore,
+		&types.Issue{ID: "taxdb-5su1", Title: "Parent", IssueType: types.TypeEpic},
+		&types.Issue{ID: "taxdb-5su1.13", Title: "Child"},
+		&types.Issue{ID: "cre-db-nwb.3", Title: "Orphan child"},
+		&types.Issue{ID: "cre-db-c2a", Title: "Referrer", Description: "see taxdb-5su1.13 and cre-db-nwb.3."},
+	)
+	if err := testStore.AddDependency(ctx, &types.Dependency{IssueID: "taxdb-5su1.13", DependsOnID: "taxdb-5su1", Type: types.DepParentChild}, "test"); err != nil {
+		t.Fatalf("add parent-child: %v", err)
+	}
+
+	if err := repairAll(t, ctx, testStore, "kb", false); err != nil {
+		t.Fatalf("repair failed: %v", err)
+	}
+
+	got := storedIDs(t, ctx, testStore)
+	for _, want := range []string{"kb-5su1", "kb-5su1.13", "kb-nwb.3", "kb-c2a"} {
+		if got[want] == nil {
+			t.Fatalf("expected %s after repair; ids now: %v", want, got)
+		}
+	}
+	if desc := got["kb-c2a"].Description; desc != "see kb-5su1.13 and kb-nwb.3." {
+		t.Errorf("referrer description = %q, want both child references rewritten", desc)
+	}
+	deps, err := testStore.GetDependencyRecords(ctx, "kb-5su1.13")
+	if err != nil {
+		t.Fatalf("dependencies of kb-5su1.13: %v", err)
+	}
+	if len(deps) != 1 || deps[0].DependsOnID != "kb-5su1" || deps[0].Type != types.DepParentChild {
+		t.Fatalf("dependencies of kb-5su1.13 = %+v, want parent-child on kb-5su1", deps)
+	}
+	if parent, err := testStore.GetIssue(ctx, deps[0].DependsOnID); err != nil || parent == nil || parent.Title != "Parent" {
+		t.Errorf("parent of kb-5su1.13 does not resolve: %+v (err %v)", parent, err)
+	}
+}
