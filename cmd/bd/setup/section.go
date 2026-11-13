@@ -213,3 +213,16 @@ func RemoveSharedFile(path string) (SharedRemoval, error) {
 	}
 	return SharedRemovedSection, nil
 }
+
+// PreflightSharedFile reports, by a nil error, that install and remove can
+// work on path: it is missing or readable, and its beads markers are not
+// malformed. A recipe runs it on every shared file before changing any of
+// its files, so a refusal leaves them all as they were.
+func PreflightSharedFile(path string) error {
+	content, _, err := readSharedFile(path)
+	if err != nil {
+		return err
+	}
+	_, _, _, err = sharedSectionSpan(content)
+	return err
+}

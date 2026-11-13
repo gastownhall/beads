@@ -1220,3 +1220,43 @@ func TestSetupCopilot_RemoveKeepsUserInstructions(t *testing.T) {
 		}
 	})
 }
+
+// AC-5: install and remove refuse instructions whose beads markers are
+// malformed, naming the file, and leave both recipe files as they were.
+func TestSetupCopilot_RefusesMalformedMarkers(t *testing.T) {
+	const begin = "<!-- BEGIN BEADS INTEGRATION -->"
+	const end = "<!-- END BEADS INTEGRATION -->"
+	for _, mode := range []string{"", "remove"} {
+		for _, tt := range []struct{ name, content string }{
+			{"dangling BEGIN", "# Team rules\n\n" + begin + "\nOld guidance.\n"},
+			{"dangling END", "# Team rules\n\nOld guidance.\n" + end + "\n"},
+			{"END before BEGIN", "# Team rules\n" + end + "\nMine.\n" + begin + "\nOld.\n"},
+			{"two sections", begin + "\nA\n" + end + "\n\n" + begin + "\nB\n" + end + "\n"},
+			{"nested", begin + "\n" + begin + "\nA\n" + end + "\n" + end + "\n"},
+			{"unterminated BEGIN comment", "<!-- BEGIN BEADS INTEGRATION\nA\n" + end + "\n"},
+		} {
+			t.Run(mode+"/"+tt.name, func(t *testing.T) {
+				copilotTestWorkspace(t)
+				hadManifest := mode == "remove"
+				if hadManifest {
+					writeWorkspaceFile(t, copilotManifestFile, copilotManifest(t))
+				}
+				writeWorkspaceFile(t, copilotInstructionsFile, tt.content)
+
+				out, err := runCopilotSetup(t, mode)
+				if err == nil {
+					t.Fatalf("bd setup copilot %s accepted malformed markers:\n%s", mode, out)
+				}
+				if !strings.Contains(out, copilotInstructionsFile) {
+					t.Errorf("refusal does not name %s:\n%s", copilotInstructionsFile, out)
+				}
+				if got, _ := readWorkspaceFile(t, copilotInstructionsFile); got != tt.content {
+					t.Errorf("instructions changed to %q", got)
+				}
+				if _, ok := readWorkspaceFile(t, copilotManifestFile); ok != hadManifest {
+					t.Errorf("manifest exists = %v, want %v", ok, hadManifest)
+				}
+			})
+		}
+	}
+}
