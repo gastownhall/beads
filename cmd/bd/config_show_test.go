@@ -515,3 +515,120 @@ func TestCollectGitConfigEntriesIgnoresInheritedRouting(t *testing.T) {
 		})
 	}
 }
+
+// captureStdoutAndStderr runs fn with both streams redirected to files, so a
+// test can assert what a failing command printed on each.
+func captureStdoutAndStderr(t *testing.T, fn func() error) (stdout, stderr string, err error) {
+	t.Helper()
+	outFile, createErr := os.CreateTemp(t.TempDir(), "stdout-*")
+	if createErr != nil {
+		t.Fatal(createErr)
+	}
+	errFile, createErr := os.CreateTemp(t.TempDir(), "stderr-*")
+	if createErr != nil {
+		t.Fatal(createErr)
+	}
+	stdioMutex.Lock()
+	oldOut, oldErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = outFile, errFile
+	err = fn()
+	os.Stdout, os.Stderr = oldOut, oldErr
+	stdioMutex.Unlock()
+	_ = outFile.Close()
+	_ = errFile.Close()
+	outData, readErr := os.ReadFile(outFile.Name())
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	errData, readErr := os.ReadFile(errFile.Name())
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	return string(outData), string(errData), err
+}
+
+// malformedRoleRepoForConfigTest returns a repository (the new working
+// directory) whose local config git cannot parse, with the global config moved
+// to an empty home so nothing else can answer the beads.role read.
+func malformedRoleRepoForConfigTest(t *testing.T) string {
+	t.Helper()
+	for _, entry := range os.Environ() {
+		key := gitenv.EntryKey(entry)
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
+			t.Setenv(key, "")
+			if err := os.Unsetenv(key); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	home := t.TempDir()
+	for _, key := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME"} {
+		t.Setenv(key, home)
+	}
+	repo := filepath.Join(t.TempDir(), "repo")
+	initGitRepoForContextTest(t, repo)
+	malformGitConfigForTest(t, repo)
+	t.Chdir(repo)
+	return repo
+}
+
+// TestConfigShowOmitsUnreadableBeadsRole pins bd-a2qnf4 (GH#6765): when git
+// cannot read beads.role, `bd config show` warns on stderr with git's
+// diagnostic, leaves the role out, and still prints the rest of the view in
+// its usual shape.
+func TestConfigShowOmitsUnreadableBeadsRole(t *testing.T) {
+	malformedRoleRepoForConfigTest(t)
+	t.Setenv("BEADS_MAX_ROWS", "500") // one other entry the view must keep
+	want := configEntry{Key: "BEADS_MAX_ROWS", Value: "500", Source: "env: BEADS_MAX_ROWS"}
+	for _, mode := range []struct {
+		name string
+		json bool
+	}{{"text", false}, {"json", true}} {
+		t.Run(mode.name, func(t *testing.T) {
+			pinJSONOutput(t, mode.json)
+			stdout, stderr, err := captureStdoutAndStderr(t, func() error {
+				return configShowCmd.RunE(configShowCmd, nil)
+			})
+			if err != nil {
+				t.Fatalf("config show = %v, want success", err)
+			}
+			if !strings.Contains(stderr, "beads.role") || !strings.Contains(stderr, "bad config") {
+				t.Errorf("stderr %q does not warn about the unreadable role", stderr)
+			}
+			if strings.Contains(stdout, "beads.role") {
+				t.Errorf("unreadable role printed as an entry: %q", stdout)
+			}
+			if mode.json {
+				var entries []configEntry
+				if err := json.Unmarshal([]byte(stdout), &entries); err != nil || len(entries) != 1 || entries[0] != want {
+					t.Errorf("JSON output = %q (%v), want only %+v", stdout, err, want)
+				}
+			} else if strings.TrimSpace(stdout) != "BEADS_MAX_ROWS = 500  (env: BEADS_MAX_ROWS)" {
+				t.Errorf("text output = %q, want the remaining entry", stdout)
+			}
+		})
+	}
+}
+
+// TestConfigShowWithoutGitOmitsBeadsRoleQuietly pins git-free usage for
+// `bd config show`: with no git executable there is no git config to show,
+// so the role is left out without a warning on every run, and the rest of the
+// view still prints.
+func TestConfigShowWithoutGitOmitsBeadsRoleQuietly(t *testing.T) {
+	roleReadFailureRepoForTest(t)
+	t.Setenv("BEADS_MAX_ROWS", "500")
+	t.Setenv("PATH", t.TempDir())
+	pinJSONOutput(t, false)
+	stdout, stderr, err := captureStdoutAndStderr(t, func() error {
+		return configShowCmd.RunE(configShowCmd, nil)
+	})
+	if err != nil {
+		t.Fatalf("config show = %v, want success", err)
+	}
+	if strings.Contains(stderr, "beads.role") {
+		t.Errorf("stderr %q warns about a role there is no git to read", stderr)
+	}
+	if strings.TrimSpace(stdout) != "BEADS_MAX_ROWS = 500  (env: BEADS_MAX_ROWS)" {
+		t.Errorf("text output = %q, want the remaining entry", stdout)
+	}
+}

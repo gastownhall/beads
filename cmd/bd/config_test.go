@@ -1185,3 +1185,31 @@ func TestBeadsRoleWriteErrorsRetainGitDiagnostics(t *testing.T) {
 		}
 	}
 }
+
+// TestConfigGetBeadsRoleReportsReadFailure pins bd-a2qnf4 (GH#6765): when git
+// cannot read beads.role, `bd config get beads.role` fails with git's
+// diagnostic in both output modes rather than answering "not set". Absence
+// keeps its existing answer (TestBeadsRoleCommandsIgnoreInheritedGitRouting).
+func TestConfigGetBeadsRoleReportsReadFailure(t *testing.T) {
+	malformedRoleRepoForConfigTest(t)
+	for _, mode := range []struct {
+		name string
+		json bool
+	}{{"text", false}, {"json", true}} {
+		t.Run(mode.name, func(t *testing.T) {
+			pinJSONOutput(t, mode.json)
+			stdout, stderr, err := captureStdoutAndStderr(t, func() error {
+				return configGetCmd.RunE(configGetCmd, []string{"beads.role"})
+			})
+			if code, ok := exitCodeFromError(err); !ok || code != 1 {
+				t.Errorf("config get beads.role = %v, want exit 1", err)
+			}
+			if !strings.Contains(stderr, "bad config") {
+				t.Errorf("stderr %q does not carry git's diagnostic", stderr)
+			}
+			if strings.Contains(stdout, "not set") || strings.Contains(stdout, `"value"`) {
+				t.Errorf("failed read answered as a value on stdout: %q", stdout)
+			}
+		})
+	}
+}

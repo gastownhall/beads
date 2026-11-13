@@ -120,6 +120,29 @@ func TestScrubRoutingAndSuppressionDropsSuppression(t *testing.T) {
 	}
 }
 
+// TestScrubRoleReadDropsStderrTracing pins the role-read boundary (GH#6763):
+// the authority scrub plus every git tracing form that writes to stderr, while
+// a trace that goes to a file is kept.
+func TestScrubRoleReadDropsStderrTracing(t *testing.T) {
+	traceFile := filepath.Join(t.TempDir(), "git.trace")
+	input := []string{
+		"GIT_DIR=decoy",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_TRACE=1",
+		"GIT_TRACE_SETUP=true",
+		"GIT_TRACE2_EVENT=2",
+		"GIT_TRACE_PERFORMANCE=relative.trace",
+		"GIT_CURL_VERBOSE=1",
+		"GIT_TRACE_PACKET=" + traceFile,
+		"GIT_OPTIONAL_LOCKS=1",
+		"KEEP=value",
+	}
+	want := []string{"GIT_TRACE_PACKET=" + traceFile, "GIT_OPTIONAL_LOCKS=1", "KEEP=value"}
+	if got := ScrubRoleRead(input); !reflect.DeepEqual(got, want) {
+		t.Fatalf("ScrubRoleRead() = %q, want %q", got, want)
+	}
+}
+
 func TestScrubRoutingGitConfigSuppressionEffects(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("real Git config isolation test requires Git")
