@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 func NewChildCounterSQLRepository(runner Runner) domain.ChildCounterSQLRepository {
@@ -73,6 +74,23 @@ func (r *childCounterSQLRepositoryImpl) NextChildID(ctx context.Context, parentI
 	}
 
 	return fmt.Sprintf("%s.%d", parentID, next), nil
+}
+
+// AdvanceForChild reconciles one caller-named child into its parent's child
+// counter by reusing issueops' ReconcileChildCounters (the #5122 fix for the
+// issueops create path, GH#4750), so both stacks advance counters with one
+// body: the reconcile reads the parent's plane for its counter table, never
+// lowers a counter, skips a parent that does not exist (the counter's foreign
+// key), and issues no SQL at all for a flat id. Runs on the runner the caller
+// shares with the insert, so the advance commits or rolls back with the row.
+func (r *childCounterSQLRepositoryImpl) AdvanceForChild(ctx context.Context, childID string) error {
+	if childID == "" {
+		return errors.New("db: ChildCounterSQLRepository.AdvanceForChild: childID must not be empty")
+	}
+	if _, err := issueops.ReconcileChildCounters(ctx, r.runner, []*types.Issue{{ID: childID}}); err != nil {
+		return fmt.Errorf("db: ChildCounterSQLRepository.AdvanceForChild: advance counter for %s: %w", childID, err)
+	}
+	return nil
 }
 
 func (r *childCounterSQLRepositoryImpl) parentIsActiveWisp(ctx context.Context, parentID string) (bool, error) {

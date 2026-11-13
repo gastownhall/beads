@@ -1087,6 +1087,17 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 	if err := u.issueRepo.Insert(ctx, issue, actor, insertOpts); err != nil {
 		return CreateIssueResult{}, fmt.Errorf("create: insert: %w", err)
 	}
+	// A child the caller named (bd create --id P.8, or a preset Issue.ID)
+	// bypassed the mint, so the parent's child counter never learned the
+	// suffix: once such a child is hard-deleted with no tombstone, the mint
+	// hands its slot to a new child (GH#4750). Advance the counter on the
+	// insert's own transaction, the way the issueops create has since #5122;
+	// a minted child already moved it through NextChildID above.
+	if explicitID {
+		if err := u.counterRepo.AdvanceForChild(ctx, issue.ID); err != nil {
+			return CreateIssueResult{}, fmt.Errorf("create: advance child counter for %s: %w", issue.ID, err)
+		}
+	}
 
 	if len(params.Comments) > 0 {
 		issue.Comments = make([]*types.Comment, 0, len(params.Comments))
