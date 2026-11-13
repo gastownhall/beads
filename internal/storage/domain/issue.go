@@ -1729,7 +1729,8 @@ func (u *issueUseCaseImpl) resolveTopLevelPrefix(ctx context.Context, issue *typ
 // issue_id_mode=counter); otherwise uses adaptive hash-mode IDs that mirror
 // issueops.GenerateIssueIDInTable. Reads issue.CreatedAt (caller must have
 // stabilized it before this call so retries hash the same value). Both modes
-// pass over the ids claimed names (CreateIssueParams.ClaimedIDs).
+// pass over every held ID — one a live row of either plane holds, a tombstone
+// retired, or claimed names (CreateIssueParams.ClaimedIDs).
 func (u *issueUseCaseImpl) mintTopLevelID(ctx context.Context, issue *types.Issue, actor string, useWisp bool, claimed map[string]bool) (string, error) {
 	prefix, err := u.resolveTopLevelPrefix(ctx, issue, useWisp)
 	if err != nil {
@@ -1745,7 +1746,7 @@ func (u *issueUseCaseImpl) mintTopLevelID(ctx context.Context, issue *types.Issu
 			return "", fmt.Errorf("read issue_id_mode: %w", err)
 		}
 		if mode == "counter" {
-			return u.nextUnretiredCounterID(ctx, prefix, claimed)
+			return u.nextFreeCounterID(ctx, prefix, claimed)
 		}
 	}
 
@@ -1782,15 +1783,16 @@ func (u *issueUseCaseImpl) mintTopLevelID(ctx context.Context, issue *types.Issu
 	return "", fmt.Errorf("failed to generate unique ID for prefix %q after lengths %d..%d with 10 nonces each", prefix, baseLength, cfg.MaxLength)
 }
 
-// maxRetiredCounterSkips bounds how many retired counter values one
+// maxCounterSkips bounds how many taken or claimed counter values one
 // counter-mode mint walks past (issueops.GenerateIssueIDInTable's bound).
-const maxRetiredCounterSkips = 1000
+const maxCounterSkips = 1000
 
-// nextUnretiredCounterID is the counter-mode mint skipping values a retaining
-// sweep retired or the caller's batch claimed, so a fresh create is never
-// handed an id it would be refused. The counter only advances, so a skipped
-// value is never offered again.
-func (u *issueUseCaseImpl) nextUnretiredCounterID(ctx context.Context, prefix string, claimed map[string]bool) (string, error) {
+// nextFreeCounterID is the counter-mode mint skipping values anything holds —
+// a live row of either plane, a tombstone, or the caller's batch claimed — so
+// a fresh create is never handed an id it would be refused, and never one it
+// would silently overwrite. The counter only advances, so a skipped value is
+// never offered again.
+func (u *issueUseCaseImpl) nextFreeCounterID(ctx context.Context, prefix string, claimed map[string]bool) (string, error) {
 	for skips := 0; ; skips++ {
 		n, err := u.issueRepo.NextCounterID(ctx, prefix)
 		if err != nil {
@@ -1798,16 +1800,16 @@ func (u *issueUseCaseImpl) nextUnretiredCounterID(ctx context.Context, prefix st
 		}
 		candidate := fmt.Sprintf("%s-%d", prefix, n)
 		if !claimed[candidate] {
-			retired, err := u.issueRepo.Retired(ctx, candidate)
+			taken, err := u.issueRepo.Taken(ctx, candidate)
 			if err != nil {
 				return "", err
 			}
-			if !retired {
+			if !taken {
 				return candidate, nil
 			}
 		}
-		if skips >= maxRetiredCounterSkips {
-			return "", fmt.Errorf("issue counter for prefix %q walked past %d retired or claimed ids without finding a free one", prefix, maxRetiredCounterSkips)
+		if skips >= maxCounterSkips {
+			return "", fmt.Errorf("issue counter for prefix %q walked past %d taken or claimed ids without finding a free one", prefix, maxCounterSkips)
 		}
 	}
 }

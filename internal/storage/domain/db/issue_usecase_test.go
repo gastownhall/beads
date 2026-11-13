@@ -15,6 +15,7 @@ import (
 func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("HashModeMintsBdPrefixedID", s.useCaseMintHashMode)
 	s.Run("CounterModeMintsSequentialID", s.useCaseMintCounterMode)
+	s.Run("CounterModePassesOverLiveIDs", s.useCaseMintCounterPassesOverLiveIDs)
 	s.Run("CounterModeUnavailableForWisps", s.useCaseMintWispIgnoresCounterMode)
 	s.Run("IssuePrefixOverrideHonored", s.useCaseMintRespectsPrefixOverride)
 	s.Run("IDPrefixSubprefixHonored", s.useCaseMintRespectsIDPrefix)
@@ -85,6 +86,61 @@ func (s *testSuite) useCaseMintCounterMode() {
 	}, "tester")
 	s.Require().NoError(err)
 	s.Equal("ucCnt-2", second.Issue.ID)
+}
+
+// useCaseMintCounterPassesOverLiveIDs pins GH#8456 at the domain use case:
+// explicit ids do not move the counter, so it can sit behind live rows in
+// either plane. The counter mint walks past them — an upsert create would
+// otherwise silently overwrite the row, and a create-only create would fail
+// ErrAlreadyExists for an id the caller never chose, on every retry.
+func (s *testSuite) useCaseMintCounterPassesOverLiveIDs() {
+	s.resetMintConfig("pclr", "counter")
+	uc := s.issueUseCase()
+	create := func(params domain.CreateIssueParams) domain.CreateIssueResult {
+		created, err := uc.CreateIssue(s.Ctx(), params, "tester")
+		s.Require().NoError(err, "CreateIssue(%q)", params.Issue.Title)
+		return created
+	}
+	auto := func(title string) string {
+		return create(domain.CreateIssueParams{
+			Issue: &types.Issue{Title: title, IssueType: types.TypeTask, Priority: 2},
+		}).Issue.ID
+	}
+
+	first := auto("first auto")
+	s.Require().Equal("pclr-1", first, "first auto create")
+	create(domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "explicit", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID: "pclr-2",
+	})
+	second := auto("second auto")
+	s.Equal("pclr-3", second, "second auto create, past the live pclr-2")
+	createOnly := create(domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "create-only auto", IssueType: types.TypeTask, Priority: 2},
+		CreateOnly: true,
+	})
+	s.Equal("pclr-4", createOnly.Issue.ID, "create-only auto create")
+
+	// An id only the wisps table holds steers the issues mint the same way.
+	_, err := uc.CreateWisp(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "wisp ahead", IssueType: types.TypeTask, Priority: 2, Ephemeral: true},
+		ExplicitID: "pclr-5",
+		CreateOnly: true,
+	}, "seeder")
+	s.Require().NoError(err)
+	third := auto("third auto")
+	s.Equal("pclr-6", third, "third auto create, past the wisp pclr-5")
+
+	stored, err := uc.GetIssue(s.Ctx(), "pclr-2")
+	s.Require().NoError(err)
+	s.Equal("explicit", stored.Title, "the explicit pclr-2 row was overwritten")
+
+	var wispTitle string
+	s.Require().NoError(s.db.QueryRowContext(s.Ctx(), "SELECT title FROM wisps WHERE id = ?", "pclr-5").Scan(&wispTitle))
+	s.Equal("wisp ahead", wispTitle)
+	var wispInIssues int
+	s.Require().NoError(s.db.QueryRowContext(s.Ctx(), "SELECT COUNT(*) FROM issues WHERE id = ?", "pclr-5").Scan(&wispInIssues))
+	s.Zero(wispInIssues, "pclr-5 must stay in wisps only")
 }
 
 func (s *testSuite) useCaseMintWispIgnoresCounterMode() {
