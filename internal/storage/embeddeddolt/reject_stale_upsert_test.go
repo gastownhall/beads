@@ -127,7 +127,7 @@ func TestCreateIssuesRejectStaleUpserts(t *testing.T) {
 		// bd-hj85c incident shape: local `bd update --notes` lands in the
 		// same second as the snapshot being imported. The incoming row has
 		// no notes; the populated local notes must survive, while the tie
-		// row's aux data (which never bumps updated_at) still merges.
+		// row's aux data still merges.
 		te := newTestEnv(t, "rsf")
 		ctx := t.Context()
 		err := te.store.CreateIssuesWithFullOptions(ctx, []*types.Issue{{
@@ -220,6 +220,47 @@ func TestCreateIssuesRejectStaleUpserts(t *testing.T) {
 		if labelCount != 0 || commentCount != 0 || depCount != 0 {
 			t.Fatalf("aux rows persisted for rejected issue: labels=%d comments=%d deps=%d, want 0/0/0",
 				labelCount, commentCount, depCount)
+		}
+	})
+
+	t.Run("local_label_removal_makes_older_snapshot_stale", func(t *testing.T) {
+		// GH#5442: a label edit is a local edit, so it advances updated_at.
+		// Re-importing the snapshot exported before the removal must then be
+		// stale-rejected instead of merging the removed label back in.
+		te := newTestEnv(t, "rsh")
+		ctx := t.Context()
+		snapshot := func() []*types.Issue {
+			return []*types.Issue{{
+				ID: "rsh-1", Title: "local title", Status: types.StatusOpen,
+				Priority: 2, IssueType: types.TypeTask,
+				CreatedAt: base, UpdatedAt: base,
+				Labels: []string{"keep"},
+			}}
+		}
+		if err := te.store.CreateIssuesWithFullOptions(ctx, snapshot(), "tester",
+			storage.BatchCreateOptions{SkipPrefixValidation: true}); err != nil {
+			t.Fatalf("seed issue: %v", err)
+		}
+		if err := te.store.RemoveLabel(ctx, "rsh-1", "keep", "tester"); err != nil {
+			t.Fatalf("remove label: %v", err)
+		}
+
+		var rejected []string
+		if err := te.store.CreateIssuesWithFullOptions(ctx, snapshot(), "tester", storage.BatchCreateOptions{
+			SkipPrefixValidation: true,
+			RejectStaleUpserts:   true,
+			OnStaleRejected:      func(id string) { rejected = append(rejected, id) },
+		}); err != nil {
+			t.Fatalf("re-import snapshot: %v", err)
+		}
+
+		if len(rejected) != 1 || rejected[0] != "rsh-1" {
+			t.Fatalf("OnStaleRejected = %v, want [rsh-1]: the label removal left updated_at at the snapshot's time", rejected)
+		}
+		var labelCount int
+		te.queryScalar(t, ctx, "SELECT COUNT(*) FROM labels WHERE issue_id = ?", []any{"rsh-1"}, &labelCount)
+		if labelCount != 0 {
+			t.Fatalf("labelCount = %d, want the locally removed label to stay absent", labelCount)
 		}
 	})
 

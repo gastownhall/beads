@@ -1654,6 +1654,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SHOW COLUMNS` rather than `INFORMATION_SCHEMA`, which Dolt answers by
   scanning every database on the server, so on a shared server it adds little
   to the time other bd commands wait on the migration lock.
+- Adding, removing or renaming a label now advances the issue's or wisp's
+  `updated_at`, as a field edit does, so everything that reads it sees label
+  edits: `--updated-after` and `--updated-before` on `bd list`, `bd search`
+  and `bd count`, `--sort updated`, `bd stale`, `bd mol last-activity`,
+  tracker sync's check for local changes, and `bd import`'s stale guard. A
+  snapshot exported before a local label removal used to put the label back
+  on import; it is now skipped as stale, as for any newer local edit. Only a
+  real change counts: re-adding a label the issue already has, or removing
+  one it lacks, keeps the timestamp, and a create or an import that writes
+  labels keeps the `updated_at` it supplies. The revision that
+  `--if-revision` compares does not change on a label edit, and comments and
+  dependencies still leave `updated_at` alone (#5442).
 - `bd init` against a Dolt sql-server whose sessions start with
   automatic transaction commits on (`dolt_transaction_commit`) no longer
   fails on a fresh database with `migration 0040_ignored_tables_also_nonlocal_tables.up.sql:

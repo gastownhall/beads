@@ -149,6 +149,11 @@ bd federation status --peer town-beta
 Without `--strategy`, a sync that hits merge conflicts pauses and reports the
 conflicting tables for manual resolution instead of auto-resolving.
 
+A label add, remove or rename advances the issue's `updated_at`, like a field
+edit. So last-writer-wins and stale-import checks see label changes, and two
+peers that edit the same issue (labels included) between syncs both move that
+row. Comments and dependencies do not advance `updated_at`.
+
 ### Topologies
 
 | Pattern | Description | Use Case |

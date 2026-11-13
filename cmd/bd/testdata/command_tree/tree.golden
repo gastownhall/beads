@@ -1353,8 +1353,8 @@ bd count
   flag --title type=string default="" usage="Filter by title text (case-insensitive substring match)"
   flag --title-contains type=string default="" usage="Filter by title substring"
   flag --type -t type=string default="" usage="Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate)"
-  flag --updated-after type=string default="" usage="Filter issues updated after date (YYYY-MM-DD or RFC3339)"
-  flag --updated-before type=string default="" usage="Filter issues updated before date (YYYY-MM-DD or RFC3339)"
+  flag --updated-after type=string default="" usage="Filter issues updated after date (YYYY-MM-DD or RFC3339); field and label edits count, comments, dependencies and derived blocked state do not"
+  flag --updated-before type=string default="" usage="Filter issues updated before date (YYYY-MM-DD or RFC3339); field and label edits count, comments, dependencies and derived blocked state do not"
 
 bd create
   use: "create [title]"
@@ -3619,7 +3619,10 @@ bd import
     | column — updated_at has second granularity, so a timestamp tie can be
     | two distinct same-second updates, and the local row wins the tie
     | (reported as tie_kept_local_ids; the row's labels/comments/dependencies
-    | still merge). The guard is also enforced inside the upsert itself, so a
+    | still merge). A local label add, remove or rename advances updated_at,
+    | so a snapshot exported before it is skipped as stale, labels, comments
+    | and dependencies included; local comment and dependency edits do not
+    | advance it. The guard is also enforced inside the upsert itself, so a
     | local update that lands while the import is running is preserved rather
     | than overwritten. Existing issues that the import did rewrite are listed
     | with a field-level summary (updated_issues), so local state changed by
@@ -4450,8 +4453,8 @@ bd list
   flag --title-contains type=string default="" usage="Filter by title substring (case-insensitive)"
   flag --tree type=bool default="true" usage="Hierarchical tree format (default: true; use --flat to disable)"
   flag --type -t type=string default="" usage="Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate, convoy). Aliases: mr→merge-request, feat→feature, mol→molecule, dec/adr→decision"
-  flag --updated-after type=string default="" usage="Filter issues updated after date (YYYY-MM-DD or RFC3339)"
-  flag --updated-before type=string default="" usage="Filter issues updated before date (YYYY-MM-DD or RFC3339)"
+  flag --updated-after type=string default="" usage="Filter issues updated after date (YYYY-MM-DD or RFC3339); field and label edits count, comments, dependencies and derived blocked state do not"
+  flag --updated-before type=string default="" usage="Filter issues updated before date (YYYY-MM-DD or RFC3339); field and label edits count, comments, dependencies and derived blocked state do not"
   flag --watch -w type=bool default="false" usage="Watch for changes and auto-update display (implies --pretty)"
   flag --wisp-type type=string default="" usage="Filter by wisp type: heartbeat, ping, patrol, gc_report, recovery, error, escalation"
 
@@ -6523,8 +6526,8 @@ bd search
   flag --sort type=string default="" usage="Sort by field: priority, created, updated, closed, status, id, title, type, assignee"
   flag --status -s type=string default="" usage="Filter by stored status (comma-separated for OR; open, in_progress, blocked, deferred, closed, all). Default searches all statuses including closed. Note: dependency-blocked issues use 'bd blocked'"
   flag --type -t type=string default="" usage="Filter by type (bug, feature, task, epic, chore, decision, message, molecule, gate, spike, story, milestone); custom types require types.custom config, and an unknown type is an error. Aliases: feat/enhancement→feature, mol→molecule, dec/adr→decision, mr→merge-request"
-  flag --updated-after type=string default="" usage="Filter issues updated after date (YYYY-MM-DD or RFC3339)"
-  flag --updated-before type=string default="" usage="Filter issues updated before date (YYYY-MM-DD or RFC3339)"
+  flag --updated-after type=string default="" usage="Filter issues updated after date (YYYY-MM-DD or RFC3339); field and label edits count, comments, dependencies and derived blocked state do not"
+  flag --updated-before type=string default="" usage="Filter issues updated before date (YYYY-MM-DD or RFC3339); field and label edits count, comments, dependencies and derived blocked state do not"
 
 bd send-metrics
   use: "send-metrics"

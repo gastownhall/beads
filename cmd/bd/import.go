@@ -68,7 +68,10 @@ stale_skipped_ids) and rows with the same updated_at keep every local
 column — updated_at has second granularity, so a timestamp tie can be
 two distinct same-second updates, and the local row wins the tie
 (reported as tie_kept_local_ids; the row's labels/comments/dependencies
-still merge). The guard is also enforced inside the upsert itself, so a
+still merge). A local label add, remove or rename advances updated_at,
+so a snapshot exported before it is skipped as stale, labels, comments
+and dependencies included; local comment and dependency edits do not
+advance it. The guard is also enforced inside the upsert itself, so a
 local update that lands while the import is running is preserved rather
 than overwritten. Existing issues that the import did rewrite are listed
 with a field-level summary (updated_issues), so local state changed by

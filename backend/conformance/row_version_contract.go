@@ -200,7 +200,7 @@ var rowVersionKinds = []rowVersionKind{
 	{
 		name:  "UpdateLabelAdd",
 		roles: []string{"Lifecycle"},
-		why:   "a label-only patch writes the label rows and their events, never the issue row (issueops applyLabelPatch; domain ApplyUpdate's label branch)",
+		why:   "a label-only patch writes the label rows and their events and stamps only the issue row's updated_at, never row_lock (issueops applyLabelPatch; domain ApplyUpdate's label branch)",
 		arrange: func(t *testing.T, ctx context.Context, f RowVersionFixture, base string) []rowVersionWatch {
 			rowVersionSeed(t, ctx, f, &types.Issue{ID: base, Labels: []string{"rv-keep"}})
 			return []rowVersionWatch{{"subject", base, rowVersionHolds}}
@@ -215,7 +215,7 @@ var rowVersionKinds = []rowVersionKind{
 	{
 		name:  "UpdateLabelRemove",
 		roles: []string{"Lifecycle"},
-		why:   "a label-only patch writes the label rows and their events, never the issue row",
+		why:   "a label-only patch writes the label rows and their events and stamps only the issue row's updated_at, never row_lock",
 		arrange: func(t *testing.T, ctx context.Context, f RowVersionFixture, base string) []rowVersionWatch {
 			rowVersionSeed(t, ctx, f, &types.Issue{ID: base, Labels: []string{"rv-keep", "rv-drop"}})
 			return []rowVersionWatch{{"subject", base, rowVersionHolds}}
@@ -230,7 +230,7 @@ var rowVersionKinds = []rowVersionKind{
 	{
 		name:  "UpdateLabelReplace",
 		roles: []string{"Lifecycle"},
-		why:   "a label-only patch writes the label rows and their events, never the issue row",
+		why:   "a label-only patch writes the label rows and their events and stamps only the issue row's updated_at, never row_lock",
 		arrange: func(t *testing.T, ctx context.Context, f RowVersionFixture, base string) []rowVersionWatch {
 			rowVersionSeed(t, ctx, f, &types.Issue{ID: base, Labels: []string{"rv-old"}})
 			return []rowVersionWatch{{"subject", base, rowVersionHolds}}
@@ -251,7 +251,7 @@ var rowVersionKinds = []rowVersionKind{
 		// v0 wire accept it, and this is what they do.
 		name:  "UpdateLabelOnlyGuardedByExpectedVersion",
 		roles: []string{"Lifecycle"},
-		why:   "the version check reads row_lock (CheckVersionInTx; domain ApplyUpdate's guard read) and the label branch still never writes the issue row",
+		why:   "the version check reads row_lock (CheckVersionInTx; domain ApplyUpdate's guard read) and the label branch still stamps only updated_at, never row_lock",
 		arrange: func(t *testing.T, ctx context.Context, f RowVersionFixture, base string) []rowVersionWatch {
 			rowVersionSeed(t, ctx, f, &types.Issue{ID: base, Labels: []string{"rv-keep"}})
 			return []rowVersionWatch{{"subject", base, rowVersionHolds}}

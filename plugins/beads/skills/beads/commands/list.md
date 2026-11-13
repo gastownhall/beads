@@ -26,7 +26,7 @@ List beads issues with optional filtering.
 ### Date Ranges
 - **--created-after**: Issues created after date (YYYY-MM-DD or ISO 8601)
 - **--created-before**: Issues created before date
-- **--updated-after**: Issues updated after date
+- **--updated-after**: Issues updated after date (field and label edits count; comments, dependencies and derived blocked state do not)
 - **--updated-before**: Issues updated before date
 - **--closed-after**: Issues closed after date
 - **--closed-before**: Issues closed before date

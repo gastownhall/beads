@@ -7,6 +7,11 @@ import (
 
 type LabelOpts struct {
 	UseWispsTable bool
+	// PreserveUpdatedAt keeps Insert from advancing the owner's updated_at.
+	// A create sets it for the labels it persists with the new issue (supplied
+	// or inherited): they are part of the snapshot the create's own
+	// updated_at describes, not a later edit of it (GH#5442).
+	PreserveUpdatedAt bool
 }
 
 type LabelSQLRepository interface {

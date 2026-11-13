@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -168,6 +169,11 @@ func addLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID,
 	if err != nil {
 		return fmt.Errorf("add label: rows affected: %w", err)
 	}
+	if inserted > 0 {
+		if err := touchLabelOwnerInTx(ctx, tx, labelTable, issueID); err != nil {
+			return fmt.Errorf("add label: %w", err)
+		}
+	}
 	comment := "Added label: " + label
 	if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
 		IssueID:   issueID,
@@ -189,6 +195,37 @@ func addLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID,
 		return nil
 	}
 	return RecordVersionInTx(ctx, tx, issueID, actor)
+}
+
+// TouchLabelOwnerInTx stamps updated_at on the issue (labelTable "labels")
+// or wisp (labelTable "wisp_labels") owning a label row the caller just
+// inserted or deleted. It is the exported entry point for the uow label
+// repository, which writes its own label rows; see touchLabelOwnerInTx.
+func TouchLabelOwnerInTx(ctx context.Context, tx DBTX, labelTable, issueID string) error {
+	return touchLabelOwnerInTx(ctx, tx, labelTable, issueID)
+}
+
+// touchLabelOwnerInTx advances updated_at on the row owning a label the
+// caller really changed (GH#5442). Labels are part of the issue snapshot, so
+// --updated-after, the import stale guard (RejectStaleUpserts) and the
+// last-writer-wins merge all have to see a label edit as an edit of the
+// issue. Callers touch only after a row landed or went away, so an
+// idempotent re-add or a removal of an absent label keeps the timestamp.
+//
+// Only updated_at is written. row_lock stays as it is: it guards ownership
+// (status, assignee, started_at), and reminting it would fail the CAS of a
+// caller holding the row for an orthogonal edit.
+func touchLabelOwnerInTx(ctx context.Context, tx DBTX, labelTable, issueID string) error {
+	issueTable := "issues"
+	if labelTable == "wisp_labels" {
+		issueTable = "wisps"
+	}
+	//nolint:gosec // G201: issueTable is "issues" or "wisps" (hardcoded above)
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET updated_at = ? WHERE id = ?`, issueTable),
+		time.Now().UTC(), issueID); err != nil {
+		return fmt.Errorf("touch %s updated_at: %w", issueTable, err)
+	}
+	return nil
 }
 
 // RemoveLabelInTx removes a label from an issue and records an event within
@@ -221,6 +258,11 @@ func removeLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issue
 	deleted, err := res.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("remove label: rows affected: %w", err)
+	}
+	if deleted > 0 {
+		if err := touchLabelOwnerInTx(ctx, tx, labelTable, issueID); err != nil {
+			return fmt.Errorf("remove label: %w", err)
+		}
 	}
 	comment := "Removed label: " + label
 	if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
@@ -268,8 +310,9 @@ var ErrRenameLabelSameName = errors.New("rename label: old and new label are the
 // counts the subset of renamed where that happened. oldLabel carried by
 // nothing is an honest no-op (renamed, merged both 0, err nil). ids lists
 // every touched issue and wisp id, both planes concatenated. Each touched
-// durable issue mints one version row (its label set changed); a no-op
-// rename mints nothing. oldLabel and
+// issue and wisp advances its updated_at, and each touched durable issue
+// mints one version row (its label set changed); a no-op rename does
+// neither. oldLabel and
 // newLabel equal after trimming is refused with ErrRenameLabelSameName
 // rather than treated as a no-op -- see that error's doc for why silently
 // proceeding would wipe the label instead of leaving it alone.
@@ -393,6 +436,11 @@ func renameLabelInPlane(ctx context.Context, tx DBTX, labelTable, eventTable, ol
 	// per-call cost for their one issue today, and this loop is exactly that
 	// cost repeated once per touched issue. Left as a disclosed limitation.
 	for _, id := range oldIDs {
+		// Every id here changed its label set, so it advances updated_at
+		// like a single add or remove does (GH#5442).
+		if err := touchLabelOwnerInTx(ctx, tx, labelTable, id); err != nil {
+			return 0, 0, nil, fmt.Errorf("rename label: %s: %w", id, err)
+		}
 		if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
 			IssueID:   id,
 			EventType: types.EventLabelRenamed,
