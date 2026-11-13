@@ -92,6 +92,15 @@ func (s *testSuite) TestIssueSQLRepository() {
 		s.Run("IgnoresChildIDsWhenSeeding", s.issueNextCounterIDSeedSkipsChildren)
 		s.Run("EmptyPrefixReturnsError", s.issueNextCounterIDEmptyPrefix)
 	})
+	s.Run("AdvanceCounterPastHeldIDs", func() {
+		s.Run("JumpsToMaxHeldAcrossAllFourTables", s.issueAdvanceCounterJumpsToMax)
+		s.Run("AdvancesFromAnySingleTable", s.issueAdvanceCounterSingleTable)
+		s.Run("NoHeldNumericIDsLeavesCounterAlone", s.issueAdvanceCounterNoNumericIDs)
+		s.Run("NeverDecreasesAnExistingCounter", s.issueAdvanceCounterNeverDecreases)
+		s.Run("IgnoresChildHashOverflowAndZeroSuffixes", s.issueAdvanceCounterIgnoresNonCounterIDs)
+		s.Run("LiteralPrefixBeatsLikeWildcards", s.issueAdvanceCounterLiteralPrefix)
+		s.Run("EmptyPrefixReturnsError", s.issueAdvanceCounterEmptyPrefix)
+	})
 }
 
 func (s *testSuite) issueRepo() domain.IssueSQLRepository {
@@ -701,6 +710,124 @@ func (s *testSuite) issueNextCounterIDEmptyPrefix() {
 	_, err := r.NextCounterID(s.Ctx(), "")
 	s.Require().Error(err)
 	s.Contains(err.Error(), "prefix must not be empty")
+}
+
+// seedBareRow inserts a bare issues or wisps row with the minimal columns the
+// schema requires, for counter fixtures that must not go through the
+// repository's own create bookkeeping.
+func (s *testSuite) seedBareRow(table, id string) {
+	//nolint:gosec // G201: table is one of two hardcoded constants for tests
+	_, err := s.Runner().ExecContext(s.Ctx(),
+		"INSERT INTO "+table+" (id, title, description, design, acceptance_criteria, notes) VALUES (?, 'held', 'held', 'held', 'held', 'held')", id)
+	s.Require().NoError(err, "seed %s row %s", table, id)
+}
+
+func (s *testSuite) counterLastID(prefix string) (int, bool) {
+	var last int
+	err := s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT last_id FROM issue_counter WHERE prefix = ?", prefix).Scan(&last)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false
+	}
+	s.Require().NoError(err, "read counter %s", prefix)
+	return last, true
+}
+
+// issueAdvanceCounterJumpsToMax: the advance reads every place an id can be
+// held — both row tables and both tombstone tables — and lands the counter on
+// the highest numeric top-level suffix any of them holds.
+func (s *testSuite) issueAdvanceCounterJumpsToMax() {
+	s.seedBareRow("issues", "adv-3")
+	s.seedBareRow("wisps", "adv-7")
+	s.seedTombstone("id_tombstones", "adv-5")
+	s.seedTombstone("wisp_id_tombstones", "adv-9")
+
+	s.Require().NoError(s.issueRepo().AdvanceCounterPastHeldIDs(s.Ctx(), "adv"))
+	last, ok := s.counterLastID("adv")
+	s.Require().True(ok, "the advance must create the counter row")
+	s.Equal(9, last)
+}
+
+// issueAdvanceCounterSingleTable: each holding table alone drives the advance.
+func (s *testSuite) issueAdvanceCounterSingleTable() {
+	for _, tc := range []struct {
+		table  string
+		prefix string
+	}{
+		{"issues", "advi"},
+		{"wisps", "advw"},
+		{"id_tombstones", "advt"},
+		{"wisp_id_tombstones", "advwt"},
+	} {
+		s.Run(tc.table, func() {
+			id := tc.prefix + "-4"
+			switch tc.table {
+			case "issues", "wisps":
+				s.seedBareRow(tc.table, id)
+			default:
+				s.seedTombstone(tc.table, id)
+			}
+			s.Require().NoError(s.issueRepo().AdvanceCounterPastHeldIDs(s.Ctx(), tc.prefix))
+			last, ok := s.counterLastID(tc.prefix)
+			s.Require().True(ok)
+			s.Equal(4, last)
+		})
+	}
+}
+
+// issueAdvanceCounterNoNumericIDs: nothing holds a numeric id under the
+// prefix — the advance writes no counter row at all.
+func (s *testSuite) issueAdvanceCounterNoNumericIDs() {
+	s.seedBareRow("issues", "advn-abc12") // a hash id is not a counter value
+	s.Require().NoError(s.issueRepo().AdvanceCounterPastHeldIDs(s.Ctx(), "advn"))
+	_, ok := s.counterLastID("advn")
+	s.False(ok, "no numeric holder means no counter row")
+}
+
+// issueAdvanceCounterNeverDecreases: GREATEST semantics — holders BELOW the
+// counter never pull it back.
+func (s *testSuite) issueAdvanceCounterNeverDecreases() {
+	_, err := s.Runner().ExecContext(s.Ctx(),
+		"INSERT INTO issue_counter (prefix, last_id) VALUES ('advd', 10)")
+	s.Require().NoError(err)
+	s.seedBareRow("issues", "advd-3")
+	s.seedBareRow("wisps", "advd-4")
+	s.Require().NoError(s.issueRepo().AdvanceCounterPastHeldIDs(s.Ctx(), "advd"))
+	last, ok := s.counterLastID("advd")
+	s.Require().True(ok)
+	s.Equal(10, last)
+}
+
+// issueAdvanceCounterIgnoresNonCounterIDs: dotted child ids, nonnumeric
+// suffixes, numeric overflow, a zero suffix and ids of another prefix never
+// move the maximum.
+func (s *testSuite) issueAdvanceCounterIgnoresNonCounterIDs() {
+	s.seedBareRow("issues", "advg-2")                       // the only top-level counter id
+	s.seedBareRow("issues", "advg-7.3")                     // dotted child
+	s.seedBareRow("issues", "advg-abc99")                   // hash-like
+	s.seedBareRow("issues", "advg-99999999999999999999")    // strconv.Atoi overflow
+	s.seedTombstone("id_tombstones", "advg-0")              // not a positive suffix
+	s.seedBareRow("issues", "other-15")                     // another prefix entirely
+	s.Require().NoError(s.issueRepo().AdvanceCounterPastHeldIDs(s.Ctx(), "advg"))
+	last, ok := s.counterLastID("advg")
+	s.Require().True(ok)
+	s.Equal(2, last)
+}
+
+// issueAdvanceCounterLiteralPrefix: a prefix containing a LIKE wildcard (the
+// _ of "w_d") must match literally — "wXd-9" answers the LIKE scan but is not
+// a w_d- id.
+func (s *testSuite) issueAdvanceCounterLiteralPrefix() {
+	s.seedBareRow("issues", "wXd-9")
+	s.seedBareRow("issues", "w_d-4")
+	s.Require().NoError(s.issueRepo().AdvanceCounterPastHeldIDs(s.Ctx(), "w_d"))
+	last, ok := s.counterLastID("w_d")
+	s.Require().True(ok)
+	s.Equal(4, last, "the literal prefix must win over the LIKE wildcard match")
+}
+
+func (s *testSuite) issueAdvanceCounterEmptyPrefix() {
+	s.Require().Error(s.issueRepo().AdvanceCounterPastHeldIDs(s.Ctx(), ""))
 }
 
 func (s *testSuite) issueUpdateMissingIDWithStatus() {

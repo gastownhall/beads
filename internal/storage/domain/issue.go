@@ -103,6 +103,14 @@ type IssueSQLRepository interface {
 	CoordinateCreates(ctx context.Context, ids []string) error
 	CountForPrefix(ctx context.Context, prefix string, opts IssueTableOpts) (int, error)
 	NextCounterID(ctx context.Context, prefix string) (int, error)
+	// AdvanceCounterPastHeldIDs moves prefix's counter to the highest numeric
+	// top-level id anything holds under prefix — a live row in either plane or
+	// a tombstone in either tombstone table — never decreasing it, and does
+	// nothing when no such id exists. The counter mint calls it once after a
+	// collision: an explicit create never advances the counter, so rows can
+	// sit ahead of it, and handing one of them out again would overwrite its
+	// holder (GH#5106). Runs in the caller's transaction.
+	AdvanceCounterPastHeldIDs(ctx context.Context, prefix string) error
 	SearchAcrossIssuesAndWisps(ctx context.Context, query string, filter types.IssueFilter) (SearchPage, error)
 	SearchAcrossIssuesAndWispsWithCounts(ctx context.Context, query string, filter types.IssueFilter) (SearchCountsPage, error)
 	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)
@@ -1782,15 +1790,25 @@ func (u *issueUseCaseImpl) mintTopLevelID(ctx context.Context, issue *types.Issu
 	return "", fmt.Errorf("failed to generate unique ID for prefix %q after lengths %d..%d with 10 nonces each", prefix, baseLength, cfg.MaxLength)
 }
 
-// maxRetiredCounterSkips bounds how many retired counter values one
-// counter-mode mint walks past (issueops.GenerateIssueIDInTable's bound).
+// maxRetiredCounterSkips bounds how many counter values one counter-mode
+// mint walks past (issueops.GenerateIssueIDInTable's bound). A held value no
+// longer costs skips against it — the first one advances the counter past
+// every held id — so the bound now guards claimed runs and a held value that
+// appears after that one advance.
 const maxRetiredCounterSkips = 1000
 
-// nextUnretiredCounterID is the counter-mode mint skipping values a retaining
-// sweep retired or the caller's batch claimed, so a fresh create is never
-// handed an id it would be refused. The counter only advances, so a skipped
-// value is never offered again.
+// nextUnretiredCounterID is the counter-mode mint skipping values the
+// caller's batch claimed and values anything holds — a live row in either
+// plane or a retaining tombstone, the one Taken predicate — so a fresh create
+// is never handed an id it would overwrite or be refused. On the FIRST held
+// value it advances the counter past the highest held numeric id once
+// (AdvanceCounterPastHeldIDs): an explicit create never advances the counter,
+// so an id ahead of it can be held, and a bounded walk alone would exhaust
+// its bound on an imported range longer than it. A claimed value cannot
+// trigger the advance (no table holds it yet), so claimed runs still walk
+// against the bound.
 func (u *issueUseCaseImpl) nextUnretiredCounterID(ctx context.Context, prefix string, claimed map[string]bool) (string, error) {
+	advanced := false
 	for skips := 0; ; skips++ {
 		n, err := u.issueRepo.NextCounterID(ctx, prefix)
 		if err != nil {
@@ -1798,16 +1816,25 @@ func (u *issueUseCaseImpl) nextUnretiredCounterID(ctx context.Context, prefix st
 		}
 		candidate := fmt.Sprintf("%s-%d", prefix, n)
 		if !claimed[candidate] {
-			retired, err := u.issueRepo.Retired(ctx, candidate)
+			taken, err := u.issueRepo.Taken(ctx, candidate)
 			if err != nil {
 				return "", err
 			}
-			if !retired {
+			if !taken {
 				return candidate, nil
+			}
+			if !advanced {
+				// One advance per mint: the first held value is counter lag,
+				// and the scan it triggers jumps past every later holder too.
+				// A held value found after it costs a skip, not another scan.
+				if err := u.issueRepo.AdvanceCounterPastHeldIDs(ctx, prefix); err != nil {
+					return "", err
+				}
+				advanced = true
 			}
 		}
 		if skips >= maxRetiredCounterSkips {
-			return "", fmt.Errorf("issue counter for prefix %q walked past %d retired or claimed ids without finding a free one", prefix, maxRetiredCounterSkips)
+			return "", fmt.Errorf("issue counter for prefix %q walked past %d held or claimed ids without finding a free one", prefix, maxRetiredCounterSkips)
 		}
 	}
 }

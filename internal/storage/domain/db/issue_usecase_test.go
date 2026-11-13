@@ -21,6 +21,8 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("WispUsesWispPrefix", s.useCaseMintWispPrefix)
 	s.Run("HashModePassesOverTheOtherPlanesIDs", s.useCaseMintPassesOverTheOtherPlane)
 	s.Run("MintPassesOverClaimedIDs", s.useCaseMintPassesOverClaimedIDs)
+	s.Run("CounterModeJumpsPastHeldIDs", s.useCaseMintCounterModeJumpsPastHeldIDs)
+	s.Run("CounterModeStaysSequentialWhenNextValueIsFree", s.useCaseMintCounterModeStaysSequential)
 	s.Run("MissingConfigPrefixErrors", s.useCaseMintMissingPrefix)
 	s.Run("ExplicitIDRequiresConfiguredPrefixUnlessForced", s.useCaseExplicitIDPrefixGuard)
 	s.Run("CreateOnlyRefusesOccupiedID", s.useCaseCreateOnlyRefusesOccupiedID)
@@ -228,6 +230,120 @@ func (s *testSuite) useCaseMintPassesOverClaimedIDs() {
 	}, "tester")
 	s.Require().NoError(err)
 	s.Equal("clc-2", counted.Issue.ID, "counter mode must pass over the claimed clc-1")
+}
+
+// titleIn reads one row's title straight from its table, so a holder's
+// survival is asserted in the plane it lives in, whatever the use case's own
+// routing would do with it.
+func (s *testSuite) titleIn(table, id string) string {
+	//nolint:gosec // G201: table is one of two hardcoded constants for tests
+	var title string
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT title FROM "+table+" WHERE id = ?", id).Scan(&title))
+	return title
+}
+
+func (s *testSuite) countIn(table, id string) int {
+	//nolint:gosec // G201: table is one of two hardcoded constants for tests
+	var n int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM "+table+" WHERE id = ?", id).Scan(&n))
+	return n
+}
+
+// useCaseMintCounterModeJumpsPastHeldIDs pins bd-wnp679 (GH#5106): an
+// explicit id created ahead of the counter must never be handed to a later
+// counter-minted create. The counter is initialized by a real mint FIRST (a
+// counter that does not exist yet would reseed from the rows and mask the
+// bug), then holders land at <prefix>-2 and <prefix>-4 — both in the issues
+// plane, and again with the second holder in the wisps plane — and the next
+// mint must hand out <prefix>-5, leaving every holder's row and title intact
+// and the minted id in the issues plane alone.
+func (s *testSuite) useCaseMintCounterModeJumpsPastHeldIDs() {
+	for _, tc := range []struct {
+		name               string
+		prefix             string
+		secondHolderInWisp bool
+	}{
+		{name: "HoldersInIssuesPlane", prefix: "lagA"},
+		{name: "HoldersAcrossPlanes", prefix: "lagX", secondHolderInWisp: true},
+	} {
+		s.Run(tc.name, func() {
+			s.resetMintConfig(tc.prefix, "counter")
+			uc := s.issueUseCase()
+
+			first, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+				Issue: &types.Issue{Title: "initializes the counter", IssueType: types.TypeTask, Priority: 2},
+			}, "tester")
+			s.Require().NoError(err)
+			s.Require().Equal(tc.prefix+"-1", first.Issue.ID)
+
+			_, err = uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+				ExplicitID: tc.prefix + "-2",
+				Issue:      &types.Issue{Title: "explicit holder at two", IssueType: types.TypeTask, Priority: 2},
+			}, "tester")
+			s.Require().NoError(err)
+
+			holderFour := domain.CreateIssueParams{
+				ExplicitID: tc.prefix + "-4",
+				Issue:      &types.Issue{Title: "explicit holder at four", IssueType: types.TypeTask, Priority: 2},
+			}
+			if tc.secondHolderInWisp {
+				holderFour.Issue.Ephemeral = true
+				_, err = uc.CreateWisp(s.Ctx(), holderFour, "tester")
+			} else {
+				_, err = uc.CreateIssue(s.Ctx(), holderFour, "tester")
+			}
+			s.Require().NoError(err)
+
+			minted, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+				Issue: &types.Issue{Title: "minted after holders", IssueType: types.TypeTask, Priority: 2},
+			}, "tester")
+			s.Require().NoError(err)
+			s.Equal(tc.prefix+"-5", minted.Issue.ID,
+				"the mint must jump past the held %s-2 and %s-4", tc.prefix, tc.prefix)
+
+			s.Equal("explicit holder at two", s.titleIn("issues", tc.prefix+"-2"),
+				"the counter-minted create overwrote the explicit holder")
+			if tc.secondHolderInWisp {
+				s.Equal("explicit holder at four", s.titleIn("wisps", tc.prefix+"-4"),
+					"the counter-minted create overwrote the cross-plane wisp holder")
+				s.Equal(0, s.countIn("issues", tc.prefix+"-4"), "the wisp holder must not be duplicated into issues")
+			} else {
+				s.Equal("explicit holder at four", s.titleIn("issues", tc.prefix+"-4"))
+			}
+			s.Equal(1, s.countIn("issues", minted.Issue.ID))
+			s.Equal(0, s.countIn("wisps", minted.Issue.ID), "the minted issue id must not exist in both planes")
+		})
+	}
+}
+
+// useCaseMintCounterModeStaysSequential pins that the jump is lazy: a holder
+// far ahead of the counter changes nothing while the next value is free —
+// the mint hands out <prefix>-2 as before, and only a collision triggers the
+// advance.
+func (s *testSuite) useCaseMintCounterModeStaysSequential() {
+	s.resetMintConfig("lagSeq", "counter")
+	uc := s.issueUseCase()
+
+	first, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "initializes the counter", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+	s.Require().Equal("lagSeq-1", first.Issue.ID)
+
+	_, err = uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		ExplicitID: "lagSeq-7",
+		Issue:      &types.Issue{Title: "far ahead of the counter", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+
+	second, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "next free value", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal("lagSeq-2", second.Issue.ID, "a free next value must stay sequential; the advance is lazy")
+	s.Equal("far ahead of the counter", s.titleIn("issues", "lagSeq-7"))
 }
 
 func (s *testSuite) useCaseMintMissingPrefix() {
@@ -887,4 +1003,34 @@ func (s *testSuite) applyGraphWispRouting() {
 	s.Equal(res.IDs["p"], wispDeps[0].dependsOnID)
 	s.Equal("depends_on_wisp_id", wispDeps[0].targetColumn(),
 		"wisp-target dep must use depends_on_wisp_id, got %+v", wispDeps[0])
+}
+
+// TestIssueUseCase_MintCounterLag reproduces bd-wnp679: an explicitly created
+// issue sitting ahead of the issue counter must not be overwritten by the next
+// counter-minted create.
+func (s *testSuite) TestIssueUseCase_MintCounterLag() {
+	s.resetMintConfig("ucLag", "counter")
+	uc := s.issueUseCase()
+
+	first, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "minted one", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+	s.Require().Equal("ucLag-1", first.Issue.ID)
+
+	_, err = uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		ExplicitID: "ucLag-2",
+		Issue:      &types.Issue{Title: "explicit two", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+
+	minted, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "minted after explicit", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+	s.NotEqual("ucLag-2", minted.Issue.ID, "counter mint handed out an ID an explicit create already holds")
+
+	explicit, err := uc.GetIssue(s.Ctx(), "ucLag-2")
+	s.Require().NoError(err)
+	s.Equal("explicit two", explicit.Title, "explicit issue was overwritten by the counter-minted create")
 }

@@ -850,6 +850,76 @@ func (r *issueSQLRepositoryImpl) seedCounterFromExisting(ctx context.Context, pr
 	return nil
 }
 
+// AdvanceCounterPastHeldIDs moves prefix's counter to the highest numeric
+// top-level id anything holds under prefix, never decreasing it. It scans,
+// in one parameterized UNION ALL statement, every place an id can be held —
+// both row tables and both tombstone tables — and keeps the maximum positive
+// suffix after the literal prefix + "-". With no numeric holder it writes
+// nothing; otherwise one upsert advances last_id to GREATEST(last_id, max),
+// so the next NextCounterID hands out an id no row holds.
+func (r *issueSQLRepositoryImpl) AdvanceCounterPastHeldIDs(ctx context.Context, prefix string) error {
+	if prefix == "" {
+		return errors.New("db: AdvanceCounterPastHeldIDs: prefix must not be empty")
+	}
+	maxNum, err := r.maxHeldNumericSuffix(ctx, prefix)
+	if err != nil {
+		return err
+	}
+	if maxNum <= 0 {
+		return nil
+	}
+	if _, err := r.runner.ExecContext(ctx, `
+		INSERT INTO issue_counter (prefix, last_id) VALUES (?, ?)
+		ON DUPLICATE KEY UPDATE last_id = GREATEST(last_id, VALUES(last_id))
+	`, prefix, maxNum); err != nil {
+		return fmt.Errorf("db: AdvanceCounterPastHeldIDs %q: advance to %d: %w", prefix, maxNum, err)
+	}
+	return nil
+}
+
+// maxHeldNumericSuffix scans every holder of an id — issues, wisps and both
+// tombstone tables — for prefix's highest positive top-level numeric suffix.
+// LIKE CONCAT(?, '-%') does the server-side narrowing only; the literal
+// CutPrefix below is the real filter, because a prefix containing a LIKE
+// wildcard (_ or %) would otherwise admit other ids. Child ids (a "." in the
+// suffix), nonnumeric suffixes (hash ids) and values strconv.Atoi cannot
+// parse (numeric overflow) are not counter ids and are ignored, the same
+// convention seedCounterFromExisting parses with.
+func (r *issueSQLRepositoryImpl) maxHeldNumericSuffix(ctx context.Context, prefix string) (int, error) {
+	rows, err := r.runner.QueryContext(ctx, `
+		SELECT id FROM issues WHERE id LIKE CONCAT(?, '-%')
+		UNION ALL SELECT id FROM wisps WHERE id LIKE CONCAT(?, '-%')
+		UNION ALL SELECT id FROM id_tombstones WHERE id LIKE CONCAT(?, '-%')
+		UNION ALL SELECT id FROM wisp_id_tombstones WHERE id LIKE CONCAT(?, '-%')
+	`, prefix, prefix, prefix, prefix)
+	if err != nil {
+		return 0, fmt.Errorf("db: AdvanceCounterPastHeldIDs %q: scan held ids: %w", prefix, err)
+	}
+	defer rows.Close()
+	pfxDash := prefix + "-"
+	maxNum := 0
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return 0, fmt.Errorf("db: AdvanceCounterPastHeldIDs %q: read held id: %w", prefix, err)
+		}
+		suffix, ok := strings.CutPrefix(id, pfxDash)
+		if !ok {
+			continue
+		}
+		if strings.Contains(suffix, ".") {
+			continue
+		}
+		if n, err := strconv.Atoi(suffix); err == nil && n > 0 && n > maxNum {
+			maxNum = n
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("db: AdvanceCounterPastHeldIDs %q: iterate held ids: %w", prefix, err)
+	}
+	return maxNum, nil
+}
+
 func normalizeIssueTimestamps(issue *types.Issue) {
 	now := time.Now().UTC()
 	if issue.CreatedAt.IsZero() {
