@@ -1,0 +1,25 @@
+[
+  {
+    "actor": "protocol-test",
+    "comment": "Added label: corpus-native",
+    "created_at": "<TS>",
+    "event_type": "label_added",
+    "issue_id": "corpus-note"
+  },
+  {
+    "actor": "protocol-test",
+    "created_at": "<TS>",
+    "event_type": "created",
+    "issue_id": "corpus-note",
+    "new_value": "",
+    "old_value": ""
+  },
+  {
+    "actor": "protocol-test",
+    "created_at": "<TS>",
+    "event_type": "updated",
+    "issue_id": "corpus-note",
+    "new_value": "{\"notes\":\"corpus-note notes\\ncorpus note text\"}",
+    "old_value": "{\"id\":\"corpus-note\",\"title\":\"Corpus note subject\",\"description\":\"deterministic corpus-note\",\"notes\":\"corpus-note notes\",\"status\":\"open\",\"priority\":3,\"issue_type\":\"task\",\"owner\":\"test@protocol.test\",\"created_at\":\"<TS>\",\"created_by\":\"protocol-test\",\"updated_at\":\"<TS>\",\"metadata\":{\"corpus\":\"native\"},\"labels\":[\"corpus-native\"]}"
+  }
+]

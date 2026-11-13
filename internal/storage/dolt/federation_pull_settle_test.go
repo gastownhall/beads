@@ -15,10 +15,10 @@ import (
 // back with nothing in dolt_conflicts and could never converge on retry.
 // PullFrom's SQL route now goes through pullWithAutoResolve, whose forced
 // transaction + tryRepairFKCascadeViolations applies the cascade semantics by
-// hand. The pull also exercises the remote-parameterized GH#3144 fallback: the
-// peer remote is added without branch tracking, so DOLT_PULL('peer') fails
-// with the tracking error and the fallback must fetch from the PEER, not from
-// the store's (empty) default remote.
+// hand. The pull also exercises the remote-parameterized fetch: the peer
+// remote is added without branch tracking (GH#3144), and the fetch+merge path
+// (bd-e2q8zs) must fetch from the PEER, not from the store's (empty) default
+// remote.
 //
 // The peer lives entirely inside the test Dolt server (a container in CI, so
 // host-side file remotes are invisible to it): the local store pushes its

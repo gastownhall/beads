@@ -1,6 +1,6 @@
 # `bd serve` operator runbook
 
-Last reviewed: 2026-08-10
+Last reviewed: 2026-11-09
 
 Freshness source: `internal/httpapi/server.go`,
 `internal/httpapi/events_watch.go`, `cmd/bd/serve.go` and
@@ -153,15 +153,17 @@ authenticating reverse proxy in front is still a reasonable shape; the token
 file is what stops the origin being open if it is bypassed.
 
 **The Host allowlist is what a service deployment trips over first.** The
-DNS-rebinding check answers only to loopback spellings and the bind address, so
-a client dialing a service DNS name gets a `400` on every request. Enumerate
-the names it dials with `--allowed-host` (repeatable, matched exactly, no
-wildcards). The `event=startup` line prints the effective allowlist.
+DNS-rebinding check answers only to loopback spellings and the bind address (on
+a wildcard bind, any numeric IP literal), so a client dialing a service DNS name
+gets a `400` on every request. Enumerate the names it dials with
+`--allowed-host` (repeatable, matched exactly, no wildcards). The
+`event=startup` line prints the effective allowlist.
 
 One behavioral difference follows `--allow-non-loopback`: `limit=0` (unlimited)
-is refused on both list operations with 400 `invalid_argument` /
-`reason: "invalid_value"`, whether or not a token is configured. Clients must
-page.
+is refused on the ready, list and query operations with 400
+`invalid_argument` / `reason: "invalid_value"`, whether or not a token is
+configured. Clients must pass an explicit `limit`; only the list operation
+(`GET /v0/beads/issues`) pages, with `cursor`.
 
 The blocked listing (`GET /v0/beads/blocked`, behind `blocked.list`) is the
 exception, on every bind: like `bd blocked`, it takes no `limit` and no cursor,
@@ -251,9 +253,9 @@ The shape behind those numbers:
 
 So `max_connections` on a shared server must cover roughly `22 × (number of bd
 serve processes)` plus every other `bd` process pointed at the same server,
-each of which claims its own. Idle connections are reclaimed after 5 minutes and
-recycled after an hour, so a bursty deployment settles below the worst case —
-but size for the worst case.
+each of which claims its own. Idle connections are reclaimed after 20 seconds
+and recycled after an hour, so a bursty deployment settles below the worst
+case — but size for the worst case.
 
 Those pool limits are applied only if the unit-of-work provider exposes the
 knob. If it does not, `bd serve` says so at startup with
@@ -396,7 +398,7 @@ One structured line per request on **stderr**, prefixed `bd serve: ` and a UTC
 timestamp from the standard logger:
 
 ```
-bd serve: 2026/08/01 05:17:42 event=request request_id=8f3a1c07-000042 op=listReadyWork method=GET path=/v0/beads/ready status=200 code="" duration_ms=12.480 sem_wait_ms=0.031 uow_ms=11.902 conns=1 remote_addr=127.0.0.1:54321
+bd serve: 2026/08/01 05:17:42 event=request request_id=8f3a1c07-000042 op=listReadyWork method=GET path=/v0/beads/ready status=200 code="" duration_ms=12.480 sem_wait_ms=0.031 uow_ms=0.418 conns=1 remote_addr=127.0.0.1:54321
 ```
 
 Fields, in order:
@@ -409,7 +411,7 @@ Fields, in order:
 | `code` | The problem `code`, or `""` on success. |
 | `duration_ms` | Whole request, milliseconds with three decimals. |
 | `sem_wait_ms` | Time spent waiting for a database slot. |
-| `uow_ms` | Time spent holding the unit of work. |
+| `uow_ms` | Time spent *obtaining* units of work: getting a connection from the pool (dialing one, or waiting for one, when none is idle) and starting its transaction, summed over every unit of work the request opened (each retry attempt of a write opens its own). It does not include running the queries, so a slow query shows in `duration_ms`, not here. Always `0.000` on a `db=roles` server, which opens none. |
 | `conns` | Live accepted connections at that moment — watch this climb toward 64. |
 | `remote_addr` | Which client; on loopback the port identifies the local process. |
 | `refused` | Present only when the request was refused for a specific value: the offending value. |
@@ -427,11 +429,12 @@ Other events on the same stream:
 
 | Event | When |
 |---|---|
-| `startup` | Bound address, mode, workspace, database, host allowlist, capabilities, and `auth` — `none`, or `bearer (<token file path>)`. Check `auth` after a deploy rather than inferring it from a process listing. |
+| `startup` | Bound address, mode, database source (`db=provider` or `db=roles`), workspace, beads directory, database, host allowlist, capabilities, and `auth` — `none`, or `bearer (<token file path>)`. Check `auth` after a deploy rather than inferring it from a process listing. |
 | `auth_refused` | A `401`. Carries `request_id`, `op`, `remote_addr` and `reason` (`missing`, `malformed`, `unknown_token`). A burst of `unknown_token` from one peer is a client left on a rotated-out token; `missing` is a client that was never configured with one. |
 | `auth_reload_error` | The token file could not be re-read. **Not** a refusal — the last-good set stays in force — but the file an operator is rotating is unreadable and nothing else says so. |
 | `limits` | The operating envelope this build compiled in. Log it, then compare against this page. |
 | `request_error` | Accompanies a ≥500, carrying the real error the body withholds. Join on `request_id`. Not emitted when the client hung up (see above). |
+| `request_refused` | Accompanies a write's 4xx whose body gives the server's own words instead of the underlying reason, such as a 400 `invalid_argument` "refused by this workspace's own validation". Carries `request_id` and the real `error`. Join on `request_id`. |
 | `pool_limits_unavailable` | The unit-of-work provider does not expose the pool knob, so the limits below are *not* applied and the pool is unbounded. Worth alerting on; it changes the connection budget. |
 | `panic` | A panicking handler: the value, the stack, and the same `request_id`. |
 | `semaphore_saturated`, `semaphore_timeout`, `conn_cap_saturated` | See [Detecting a wedge](#detecting-a-wedge). |
@@ -441,10 +444,13 @@ Other events on the same stream:
 | `events_watch_failed` | An open journal stream ended on a failure it could not report to the client, because the `200` was already sent: a read that failed (carrying the checkpoint it reached), or a stored payload that would not encode (carrying its `seq`). The client reconnects on its own; a repeated read failure names a database problem, and a repeated `seq` names one unencodable row that will end every stream that reaches it. |
 | `events_watch_unflushable` | A journal stream was refused because the response writer cannot flush. Not reachable through `bd serve`'s own server; it means something is wrapping this handler. |
 
-A 5xx body carries a fixed static detail by design, so `request_id` is the
-client's only handle on the one line that has the real error. When a user
-reports a 500, ask for the `request_id` and grep for it — the `request` line
-gives the shape, the `request_error` line gives the cause.
+A 5xx body carries a fixed static detail by design, and a refusal that
+`request_refused` accompanies gives only the server's own words, so
+`request_id` is the client's only handle on the one line that has the real
+error. When a user reports a 500, or a 4xx such as "refused by this
+workspace's own validation", ask for the `request_id` and grep for it — the
+`request` line gives the shape, the `request_error` or `request_refused` line
+gives the cause.
 
 ## Refusals to expect at startup
 
@@ -460,7 +466,7 @@ gives the shape, the `request_error` line gives the cause.
 | `--auth-token-file: token file <path>: open <path>: no such file or directory` | The token file is unreadable. Also `is a directory`, `contains no tokens`, and `is larger than 1048576 bytes; that is a mis-pointed path, not a token file`. All four are refusals at startup, never a server that binds anyway. |
 | `address already in use` | The fixed-port mutual exclusion working as intended: a second server is already on that port. |
 
-The five auth and bind refusals above are raised by `resolveServeConfig` before
+The six auth and bind refusals above are raised by `resolveServeConfig` before
 serve opens its database source or listener, independent of the workspace, so
 they read the same in every workspace mode. (The root command's
 `PersistentPreRunE` still resolves the workspace first, so a directory with no

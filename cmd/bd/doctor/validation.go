@@ -68,10 +68,23 @@ func CheckOrphanedDependencies(path string, ss *SharedStore) DoctorCheck {
 
 // checkOrphanedDependenciesDB is the core logic for CheckOrphanedDependencies.
 func checkOrphanedDependenciesDB(db *sql.DB) DoctorCheck {
+	// Read the held prefixes before the candidate query opens its rows: the
+	// pool can be a single connection.
+	issuePrefix, allowedPrefixes, err := fix.LoadDepTargetPrefixes(context.Background(), db)
+	if err != nil {
+		return DoctorCheck{
+			Name:    "Orphaned Dependencies",
+			Status:  StatusWarning,
+			Message: "N/A (query failed)",
+		}
+	}
+
 	// Query for orphaned dependencies.
 	// Exclude external: refs — these are synthetic cross-rig tracking deps
 	// injected by the JSONL exporter and intentionally reference issues not
-	// present in the local database (#1593).
+	// present in the local database (#1593). The scan loop also skips bare
+	// targets bd dep add stored unverified under another repository's prefix
+	// (fix.IsUnverifiableDepTarget) and counts them in the message.
 	//nolint:gosec // G202: doctorDependencyUnionSQL returns a fixed internal SELECT fragment.
 	query := `
 		SELECT d.issue_id, d.depends_on_id, d.type
@@ -91,9 +104,14 @@ func checkOrphanedDependenciesDB(db *sql.DB) DoctorCheck {
 	defer rows.Close()
 
 	var orphans []string
+	unverifiable := 0
 	for rows.Next() {
 		var issueID, dependsOnID, depType string
 		if err := rows.Scan(&issueID, &dependsOnID, &depType); err == nil {
+			if fix.IsUnverifiableDepTarget(issueID, dependsOnID, issuePrefix, allowedPrefixes) {
+				unverifiable++
+				continue
+			}
 			orphans = append(orphans, fmt.Sprintf("%s→%s", issueID, dependsOnID))
 		}
 	}
@@ -106,11 +124,18 @@ func checkOrphanedDependenciesDB(db *sql.DB) DoctorCheck {
 		}
 	}
 
+	// external: refs stay silent as before; only the bare cross-repository
+	// edges get the note, so a database without them reads as it always did.
+	note := ""
+	if unverifiable > 0 {
+		note = fmt.Sprintf(" (%d cross-repository edge(s) not verifiable here)", unverifiable)
+	}
+
 	if len(orphans) == 0 {
 		return DoctorCheck{
 			Name:    "Orphaned Dependencies",
 			Status:  "ok",
-			Message: "No orphaned dependencies",
+			Message: "No orphaned dependencies" + note,
 		}
 	}
 
@@ -122,7 +147,7 @@ func checkOrphanedDependenciesDB(db *sql.DB) DoctorCheck {
 	return DoctorCheck{
 		Name:    "Orphaned Dependencies",
 		Status:  "warning",
-		Message: fmt.Sprintf("%d orphaned dependency reference(s)", len(orphans)),
+		Message: fmt.Sprintf("%d orphaned dependency reference(s)", len(orphans)) + note,
 		Detail:  detail,
 		Fix:     "Run 'bd doctor --fix' to remove orphaned dependencies",
 	}

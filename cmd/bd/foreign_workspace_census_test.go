@@ -89,7 +89,7 @@ func TestForeignOpensGoThroughOpenForeignStore(t *testing.T) {
 // it at all: it reads with configfile.LoadForDiscovery.
 var configfileLoadSites = map[string]string{
 	"backend_support.go:loadDoltBackendConfig":                         "own: bd dolt/backup commands on the selected workspace, after checkDiscoveredForOpen",
-	"backup_auto.go:clientServerShareFilesystem":                       "own",
+	"backup_auto.go:backupServerHost":                                  "own",
 	"backup_proxied_server.go:syncProjectIDFromProxiedDB":              "own",
 	"backup_restore.go:syncProjectIDFromDB":                            "own",
 	"bootstrap.go:var bootstrapCmd":                                    "own: the workspace admission admitted",

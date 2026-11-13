@@ -110,7 +110,11 @@ type PushHooks struct {
 	// its fingerprint to the pulled content, which is what the remote then
 	// holds. A pull by an engine without ContentHash (or one that returns "" for
 	// the pulled content) clears a stored fingerprint instead, so a later push
-	// never trusts the last push.
+	// never trusts the last push. While the stored fingerprint shows that the
+	// remote's labels have not changed since the last push or pull, a pull keeps
+	// the labels changed locally since then and still writes the remote's other
+	// fields. The fingerprint it refreshes holds the remote's labels, so the
+	// next push sends the kept ones.
 	ContentHash func(local *types.Issue) string
 
 	// TargetScope returns the canonical remote namespace in which external issue
@@ -533,11 +537,22 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			dryRunIssues = append(dryRunIssues, &dryRunIssue)
 		}
 
+		// A label edit moves no updated_at, so the conflict guard above lets
+		// the issue through. While the remote's labels are still those of the
+		// last push or pull, the pull keeps the labels changed locally since
+		// then, so the push sends them. The push hash keeps fingerprinting the
+		// remote, which holds the pulled labels.
+		pulledLabels := conv.Issue.Labels
+		keepLocalLabels := e.pullKeepsLocalLabels(ctx, existing, conv.Issue, ref)
+		if keepLocalLabels {
+			conv.Issue.Labels = existing.Labels
+		}
+
 		if existing != nil && pullIssueEqual(existing, conv.Issue, ref) {
 			if !opts.DryRun {
 				// Both sides can reach this content without a push, which
 				// leaves the hash of the last push stale.
-				e.refreshPushHashAfterPull(ctx, existing, conv.Issue, ref)
+				e.refreshPushHashAfterPull(ctx, existing, withLabels(conv.Issue, pulledLabels), ref)
 			}
 			stats.Skipped++
 			continue
@@ -569,7 +584,11 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				stats.Errors++
 				continue
 			}
-			if err := updater.ApplyIssueUpdate(ctx, existing.ID, updates, conv.Issue.Labels, e.Actor); err != nil {
+			labels := conv.Issue.Labels
+			if keepLocalLabels {
+				labels = nil // ApplyIssueUpdate leaves the labels alone
+			}
+			if err := updater.ApplyIssueUpdate(ctx, existing.ID, updates, labels, e.Actor); err != nil {
 				e.warn("Failed to update %s: %v", existing.ID, err)
 				stats.Errors++
 				if pulledIDs != nil {
@@ -578,10 +597,14 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				continue
 			}
 			stats.Updated++
+			e.refreshPushHashAfterPull(ctx, existing, withLabels(conv.Issue, pulledLabels), ref)
+			if keepLocalLabels {
+				// The push must send the kept labels.
+				continue
+			}
 			if pulledIDs != nil {
 				pulledIDs[existing.ID] = true
 			}
-			e.refreshPushHashAfterPull(ctx, existing, conv.Issue, ref)
 		} else {
 			// Create new issue
 			conv.Issue.ExternalRef = strPtr(ref)
@@ -1195,13 +1218,14 @@ func (e *Engine) recordPushHash(ctx context.Context, issue *types.Issue, externa
 
 // refreshPushHashAfterPull keeps the stored push hash of a pulled issue in
 // step with the remote. After a pull the remote holds the pulled content, not
-// the content of the last push. The hash fingerprints row, the local issue the
-// pull wrote or found equal, as the pull leaves it: the pulled content under
-// row's ID (a GenerateID hook may have given pulled a fresh ID), with row's own
-// labels when pulled.Labels is nil, because ApplyIssueUpdate leaves the labels
-// alone for a nil set. Without a fingerprint, a stored hash is cleared so the
-// next push fetches and compares instead of trusting the last push. The entry
-// is written only when it changes, so a pull of unchanged issues writes none.
+// the content of the last push. The hash fingerprints that content under the
+// ID of row, the local issue the pull wrote or found equal (a GenerateID hook
+// may have given pulled a fresh ID), with row's own labels when pulled.Labels
+// is nil, because ApplyIssueUpdate leaves the labels alone for a nil set. A
+// pull that keeps local labels passes the pulled ones, so the next push sends
+// the kept labels. Without a fingerprint, a stored hash is cleared so the next
+// push fetches and compares instead of trusting the last push. The entry is
+// written only when it changes, so a pull of unchanged issues writes none.
 func (e *Engine) refreshPushHashAfterPull(ctx context.Context, row, pulled *types.Issue, ref string) {
 	if row == nil || row.ID == "" || pulled == nil {
 		return
@@ -1220,6 +1244,53 @@ func (e *Engine) refreshPushHashAfterPull(ctx context.Context, row, pulled *type
 	if err := e.Store.SetLocalMetadata(ctx, key, value); err != nil {
 		e.warn("Failed to refresh push hash for %s: %v", row.ID, err)
 	}
+}
+
+// pullKeepsLocalLabels reports whether a pull must leave the labels of
+// existing alone instead of writing pulled's. bd label add and remove move no
+// updated_at, so the conflict guard cannot see such an edit. The stored push
+// hash fingerprints the issue as the remote held it after the last push or
+// pull. The labels that differ were changed locally since then, and the
+// remote's labels were not, when the stored hash matches either the pulled
+// content (the remote is unchanged) or the local issue with the pulled labels
+// (the remote changed fields other than its labels, and the local issue
+// changed only its labels). The labels are kept only when the hash tells them
+// apart from the pulled ones, so that the next push sends them. With no stored
+// hash, or when the remote's labels changed too, the pull writes the remote's
+// labels.
+func (e *Engine) pullKeepsLocalLabels(ctx context.Context, existing, pulled *types.Issue, ref string) bool {
+	if existing == nil || pulled == nil || pulled.Labels == nil || equalNormalizedStrings(existing.Labels, pulled.Labels) {
+		return false
+	}
+	hashed := *pulled
+	hashed.ID = existing.ID
+	hashed.ExternalRef = strPtr(ref)
+	remote := e.pushCacheValue(&hashed, ref)
+	if remote == "" {
+		return false
+	}
+	hashed.Labels = existing.Labels
+	if e.pushCacheValue(&hashed, ref) == remote {
+		return false
+	}
+	stored, err := e.Store.GetLocalMetadata(ctx, e.pushHashKey(existing.ID))
+	if err != nil || stored == "" {
+		return false
+	}
+	if stored == remote {
+		return true
+	}
+	local := *existing
+	local.ExternalRef = strPtr(ref)
+	local.Labels = pulled.Labels
+	return e.pushCacheValue(&local, ref) == stored
+}
+
+// withLabels returns a copy of issue that carries labels.
+func withLabels(issue *types.Issue, labels []string) *types.Issue {
+	copied := *issue
+	copied.Labels = labels
+	return &copied
 }
 
 func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs map[string]bool) (*PushStats, error) {

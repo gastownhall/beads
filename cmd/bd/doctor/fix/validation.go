@@ -46,7 +46,16 @@ func OrphanedDependencies(path string, verbose bool) error {
 		return err
 	}
 
-	// Find orphaned dependencies (exclude external: cross-rig tracking refs, #1593)
+	// Read the held prefixes before anything is deleted, and before the
+	// candidate query opens its rows.
+	issuePrefix, allowedPrefixes, err := LoadDepTargetPrefixes(context.Background(), db)
+	if err != nil {
+		return fmt.Errorf("failed to read issue prefixes: %w", err)
+	}
+
+	// Find orphaned dependencies (exclude external: cross-rig tracking refs,
+	// #1593, and, in the scan loop, bare targets bd dep add stored unverified
+	// under another repository's prefix: IsUnverifiableDepTarget)
 	//nolint:gosec // G202: fixDependencyUnionSQL returns a fixed internal SELECT fragment.
 	query := `
 		SELECT d.dep_table, d.issue_id, d.depends_on_id
@@ -71,6 +80,9 @@ func OrphanedDependencies(path string, verbose bool) error {
 	for rows.Next() {
 		var o orphan
 		if err := rows.Scan(&o.depTable, &o.issueID, &o.dependsOnID); err == nil {
+			if IsUnverifiableDepTarget(o.issueID, o.dependsOnID, issuePrefix, allowedPrefixes) {
+				continue
+			}
 			orphans = append(orphans, o)
 		}
 	}

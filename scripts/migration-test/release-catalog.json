@@ -2492,6 +2492,72 @@
           "digest": "sha256:3219443a9734b89b93fb16ee8d65844759fa1b3cd3cf139c606b7353cfb0715c"
         }
       }
+    },
+    {
+      "version": "v1.3.2",
+      "sum": "h1:j5Nl22LxLOs/iBrSCavuEUtoO4G7EKRkRxHaE2iEGHg=",
+      "go_mod_sum": "h1:CIUA8czOIImoDG+a9cLM50W/qtM/zuLt3bFQJ/XOh4E=",
+      "origin": {
+        "hash": "9b65b9e198acbcc98e7fd3a87a5d55baa065a572",
+        "ref": "refs/tags/v1.3.2"
+      },
+      "source_zip": {
+        "sha256": "ba2c396052c51e0105922d1fc7cbcaf2f1c01b257142f57bb91b7022b805ae65",
+        "size": 12475604
+      },
+      "github_release": {
+        "html_url": "https://github.com/gastownhall/beads/releases/tag/v1.3.2",
+        "source_relation": "matches_proxy_origin",
+        "linux_amd64_asset": {
+          "size": 53348580,
+          "name": "beads_1.3.2_linux_amd64.tar.gz",
+          "digest": "sha256:c6ea3281f6ff82628351b2d0967c9eb85862c8a0ec0ebc24e63e645c8b02462e"
+        }
+      }
+    },
+    {
+      "version": "v1.3.3",
+      "sum": "h1:LbCljGwUHlBOaNR/IkclB3SCJmlQaFyp98eaxsoX23I=",
+      "go_mod_sum": "h1:lLQ09yp7BCR1rr6+j5kKs+/JAfEXnmyUUl7DJC8+YmU=",
+      "origin": {
+        "hash": "e86e46fd462cc56d72cad21b32867daf06212749",
+        "ref": "refs/tags/v1.3.3"
+      },
+      "source_zip": {
+        "sha256": "d6d526f0fab7c77057e72a51fc2aaa0bbf1cd6c03145bc6c33015aa252ff7118",
+        "size": 12658548
+      },
+      "github_release": {
+        "html_url": "https://github.com/gastownhall/beads/releases/tag/v1.3.3",
+        "source_relation": "matches_proxy_origin",
+        "linux_amd64_asset": {
+          "size": 53448640,
+          "name": "beads_1.3.3_linux_amd64.tar.gz",
+          "digest": "sha256:10a7aebfd50549c33c43d185e3870bbd82b4f900b2a5e3129369ee6e2b0fb2e5"
+        }
+      }
+    },
+    {
+      "version": "v1.3.4",
+      "sum": "h1:aCtzVr3yVcLwuClGrmPxwwGl99eSu19C6k9gnGDQ3ww=",
+      "go_mod_sum": "h1:lLQ09yp7BCR1rr6+j5kKs+/JAfEXnmyUUl7DJC8+YmU=",
+      "origin": {
+        "hash": "7ef2fd05eb0cd3bdbde051f93cfc14ccf270cdde",
+        "ref": "refs/tags/v1.3.4"
+      },
+      "source_zip": {
+        "sha256": "eb3bfe98e395677f116cd019b9a5a42a72a3e2eb48504fd6993c8e679a147b2c",
+        "size": 12660831
+      },
+      "github_release": {
+        "html_url": "https://github.com/gastownhall/beads/releases/tag/v1.3.4",
+        "source_relation": "matches_proxy_origin",
+        "linux_amd64_asset": {
+          "size": 53448333,
+          "name": "beads_1.3.4_linux_amd64.tar.gz",
+          "digest": "sha256:175c26904bde3ff9168d2282ff6b56f17b17f60c22fa5acb3dacc9fb3465303a"
+        }
+      }
     }
   ],
   "repository_tag_drift": [
@@ -2556,7 +2622,12 @@
       "v1.3.0-rc.1",
       "v1.3.0-rc.2",
       "v1.3.1-rc.1",
-      "v1.3.1-rc.2"
+      "v1.3.1-rc.2",
+      "v1.3.2-rc.1",
+      "v1.3.2-rc.2",
+      "v1.3.2-rc.3",
+      "v1.3.3-rc.1",
+      "v1.3.4-rc.1"
     ],
     "repository_only_stable_tags": [
       "v0.57.12",

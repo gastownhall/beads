@@ -54,7 +54,22 @@ func TestSettingWriteValidationMatchesTheSharedValidator(t *testing.T) {
 		key   string
 		value string
 	}{
-		{"an ordinary key", "routing.default", "core"},
+		{"an ordinary key", "jira.url", "https://example.atlassian.net"},
+		// config.yaml-only keys (#7559): both sides refuse them, secrets and
+		// startup settings alike, mail.delegate (also a command setting)
+		// included.
+		{"a yaml-only tracker secret", "github.token", "ghp-x"},
+		{"another yaml-only tracker secret", "notion.token", "secret_x"},
+		{"a yaml-only routing key", "routing.default", "core"},
+		{"a yaml-only bootstrap flag", "no-db", "true"},
+		{"a key under a yaml-only prefix", "dolt.max-conns", "4"},
+		{"a command setting that is also yaml-only", "mail.delegate", "gt mail"},
+		// Beside the yaml-only set, accepted on both sides: keys are
+		// case-sensitive, and a credential-named key outside the set is this
+		// plane's.
+		{"a case variant of a yaml-only key", "GITHUB.TOKEN", "x"},
+		{"a separator variant of a yaml-only key", "github_token", "x"},
+		{"a credential-named key that is not yaml-only", "notes.api_token", "x"},
 		{"an empty key", "", "x"},
 		{"a blank key", "   ", "x"},
 		{"the protected key", issueops.SettingKeyIssuePrefix, "bd"},
@@ -139,6 +154,10 @@ func TestConfigWritesRefuseBeforeTheDial(t *testing.T) {
 		}},
 		{"set of the protected key", func(c issueops.WorkspaceConfig) error {
 			_, err := c.SetSetting(context.Background(), issueops.SetSettingRequest{Key: issueops.SettingKeyIssuePrefix, Value: "bd"})
+			return err
+		}},
+		{"set of a yaml-only key", func(c issueops.WorkspaceConfig) error {
+			_, err := c.SetSetting(context.Background(), issueops.SetSettingRequest{Key: "github.token", Value: "ghp-x"})
 			return err
 		}},
 		{"set of an unparseable custom status", func(c issueops.WorkspaceConfig) error {
@@ -248,9 +267,9 @@ func TestSetSettingTranscribesTheAnswerRatherThanEchoingTheRequest(t *testing.T)
 	const sent = "what the caller sent"
 
 	stored := "what the server stored"
-	plain := &settingAnswerWire{answer: apigen.Setting{Key: "routing.default", Value: &stored}}
+	plain := &settingAnswerWire{answer: apigen.Setting{Key: "custom.transcribed", Value: &stored}}
 	res, err := settingsOver(t, plain).SetSetting(context.Background(),
-		issueops.SetSettingRequest{Key: "routing.default", Value: sent})
+		issueops.SetSettingRequest{Key: "custom.transcribed", Value: sent})
 	if err != nil {
 		t.Fatalf("SetSetting: %v", err)
 	}
@@ -258,13 +277,15 @@ func TestSetSettingTranscribesTheAnswerRatherThanEchoingTheRequest(t *testing.T)
 		t.Errorf("SetSetting reported %q, want the answer's %q: the result is what the workspace holds, "+
 			"and echoing the request would report a value it does not", res.Value, stored)
 	}
-	if res.Key != "routing.default" {
+	if res.Key != "custom.transcribed" {
 		t.Errorf("SetSetting reported key %q, want the answer's", res.Key)
 	}
 
-	withheld := &settingAnswerWire{answer: apigen.Setting{Key: "notion.token", Redacted: true}}
+	// A credential-named key outside the config.yaml-only set: the tracker
+	// secrets such as notion.token are refused before the dial (#7559).
+	withheld := &settingAnswerWire{answer: apigen.Setting{Key: "notes.api_token", Redacted: true}}
 	res, err = settingsOver(t, withheld).SetSetting(context.Background(),
-		issueops.SetSettingRequest{Key: "notion.token", Value: sent})
+		issueops.SetSettingRequest{Key: "notes.api_token", Value: sent})
 	if err != nil {
 		t.Fatalf("SetSetting on a credential-bearing key: %v", err)
 	}
