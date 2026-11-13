@@ -324,7 +324,7 @@ func runRecipe(name string) error {
 		var problems []string
 		for _, path := range paths {
 			if recipe.IsSharedPath(path) {
-				if problem := checkSharedPath(path); problem != "" {
+				if problem := checkSharedPath(path, recipe.LegacyContents[path]); problem != "" {
 					problems = append(problems, problem)
 				}
 				continue
@@ -362,7 +362,7 @@ func runRecipe(name string) error {
 			// A shared file loses only bd's section, and is deleted only
 			// when nothing else is left in it.
 			if recipe.IsSharedPath(path) {
-				result, err := setup.RemoveSharedFile(path)
+				result, err := setup.RemoveSharedFile(path, recipe.LegacyContents[path])
 				if err != nil {
 					return HandleError("remove the beads section from %s: %v", remedy.PrintedValue(path), remedy.PrintedError(err))
 				}
@@ -416,7 +416,7 @@ func runRecipe(name string) error {
 		// A shared file is the repository's too: keep bd's guidance as a
 		// marked section in it rather than replacing what it holds.
 		if recipe.IsSharedPath(path) {
-			if _, err := setup.InstallSharedFile(path, content); err != nil {
+			if _, err := setup.InstallSharedFile(path, content, recipe.LegacyContents[path]); err != nil {
 				return HandleError("update %s: %v", remedy.PrintedValue(path), remedy.PrintedError(err))
 			}
 			continue
@@ -457,8 +457,8 @@ func preflightSharedPaths(recipe *recipes.Recipe, paths []string) error {
 // checkSharedPath returns the line --check prints for a recipe's shared
 // file that does not hold bd's section, or "" when it does. Holding a file
 // is not enough: the repository's own instructions are not bd's.
-func checkSharedPath(path string) string {
-	state, err := setup.CheckSharedFile(path)
+func checkSharedPath(path, legacy string) string {
+	state, err := setup.CheckSharedFile(path, legacy)
 	switch {
 	case os.IsNotExist(err):
 		return "Missing: " + remedy.PrintedValue(path)
