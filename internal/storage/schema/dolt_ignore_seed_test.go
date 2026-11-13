@@ -673,3 +673,135 @@ func TestMigrateUpSeedErrorsThatAreNotRefusalsStayFatal(t *testing.T) {
 		})
 	}
 }
+
+// TestMigrateUpRefusedSeedFailsOnUnignoredNewTable pins AC-4: with no
+// migration work pending, the capture guard still refuses the degraded open
+// when dolt_status reports a new table — the one shape this pass can predict
+// a later blanket commit would capture into HEAD. Every new table blocks,
+// including an unrelated user-created one; a status read that cannot
+// complete fails closed the same way, preserving both causes.
+func TestMigrateUpRefusedSeedFailsOnUnignoredNewTable(t *testing.T) {
+	const pattern = "__temp__%"
+
+	for _, tt := range []struct {
+		name   string
+		tables []string
+	}{
+		{"a rebuild intermediate", []string{"__temp__ignored_schema_migrations"}},
+		{"an unrelated user-created table", []string{"user_scratch"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			failOnSwallowedAdvisory(t)
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("create sql mock: %v", err)
+			}
+			defer db.Close()
+
+			expectRefusedIgnoreSeed(mock, LatestVersion(), refusedIgnoreSeedInsert(), pattern)
+			expectNoMigrationWork(mock)
+			rows := sqlmock.NewRows([]string{"table_name"})
+			for _, table := range tt.tables {
+				rows.AddRow(table)
+			}
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT table_name FROM dolt_status WHERE status = 'new table' ORDER BY table_name")).
+				WillReturnRows(rows)
+
+			notice := captureIgnoreSeedNotice(t)
+			applied, err := MigrateUp(context.Background(), db)
+			if err == nil {
+				t.Fatal("MigrateUp() error = nil, want the refusal: a new table in the working set blocks the degraded open")
+			}
+			for _, table := range tt.tables {
+				if !strings.Contains(err.Error(), table) {
+					t.Fatalf("MigrateUp() error = %q, want it to identify the blocking table %q", err.Error(), table)
+				}
+			}
+			if !strings.Contains(err.Error(), "open this database once with a privileged bd that can write dolt_ignore") {
+				t.Fatalf("MigrateUp() error = %q, want the privileged-heal remedy", err.Error())
+			}
+			var mysqlErr *mysql.MySQLError
+			if !errors.As(err, &mysqlErr) || mysqlErr.Number != 1142 {
+				t.Fatalf("MigrateUp() error = %v, want the preserved seed refusal as the cause", err)
+			}
+			if applied != 0 {
+				t.Fatalf("MigrateUp() applied = %d, want 0", applied)
+			}
+			if notice.Len() != 0 {
+				t.Fatalf("no continuation warning may print on the refusal, got %q", notice.String())
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations (no write may follow the refusal): %v", err)
+			}
+		})
+	}
+
+	readFailures := []struct {
+		name       string
+		wantSubstr string
+		prime      func(sqlmock.Sqlmock, error)
+	}{
+		{
+			name:       "the status query fails",
+			wantSubstr: "dolt_status read failed",
+			prime: func(mock sqlmock.Sqlmock, cause error) {
+				mock.ExpectQuery(regexp.QuoteMeta("SELECT table_name FROM dolt_status WHERE status = 'new table' ORDER BY table_name")).
+					WillReturnError(cause)
+			},
+		},
+		{
+			name:       "a row fails to scan",
+			wantSubstr: "Scan error",
+			prime: func(mock sqlmock.Sqlmock, cause error) {
+				mock.ExpectQuery(regexp.QuoteMeta("SELECT table_name FROM dolt_status WHERE status = 'new table' ORDER BY table_name")).
+					WillReturnRows(sqlmock.NewRows([]string{"table_name"}).AddRow(nil))
+			},
+		},
+		{
+			name:       "the row stream fails mid-iteration",
+			wantSubstr: "connection reset mid-read",
+			prime: func(mock sqlmock.Sqlmock, cause error) {
+				rows := sqlmock.NewRows([]string{"table_name"}).AddRow("__temp__x").AddRow("__temp__y")
+				rows.RowError(1, cause)
+				mock.ExpectQuery(regexp.QuoteMeta("SELECT table_name FROM dolt_status WHERE status = 'new table' ORDER BY table_name")).
+					WillReturnRows(rows)
+			},
+		},
+	}
+	for _, tt := range readFailures {
+		t.Run(tt.name, func(t *testing.T) {
+			failOnSwallowedAdvisory(t)
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("create sql mock: %v", err)
+			}
+			defer db.Close()
+
+			expectRefusedIgnoreSeed(mock, LatestVersion(), refusedIgnoreSeedInsert(), pattern)
+			expectNoMigrationWork(mock)
+			tt.prime(mock, errors.New(tt.wantSubstr))
+
+			notice := captureIgnoreSeedNotice(t)
+			applied, err := MigrateUp(context.Background(), db)
+			if err == nil {
+				t.Fatal("MigrateUp() error = nil, want the read failure to stay fatal")
+			}
+			if !strings.Contains(err.Error(), tt.wantSubstr) {
+				t.Fatalf("MigrateUp() error = %q, want the status-read failure preserved as a cause", err.Error())
+			}
+			var mysqlErr *mysql.MySQLError
+			if !errors.As(err, &mysqlErr) || mysqlErr.Number != 1142 {
+				t.Fatalf("MigrateUp() error = %v, want the seed refusal preserved as a cause too", err)
+			}
+			if applied != 0 {
+				t.Fatalf("MigrateUp() applied = %d, want 0", applied)
+			}
+			if notice.Len() != 0 {
+				t.Fatalf("no continuation warning may print on a failed status read, got %q", notice.String())
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+		})
+	}
+}
