@@ -148,8 +148,8 @@ func idBatchClauses(format string, ids []string) ([]string, []any) {
 // clause folds in. Computing them takes queries, which is execution-context
 // work each stack does its own way.
 type ReadyWorkWhereInputs struct {
-	// DeferredChildIDs are children of future-deferred parents; consulted
-	// only when !filter.IncludeDeferred.
+	// DeferredChildIDs are the direct children of deferred parents
+	// (DeferredParentPredicate); consulted only when !filter.IncludeDeferred.
 	DeferredChildIDs []string
 	// ParentDescendantIDs are the transitive descendants of *filter.ParentID;
 	// consulted only when filter.ParentID != nil.
@@ -282,4 +282,66 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 	}
 
 	return "WHERE " + strings.Join(whereClauses, " AND "), args, nil
+}
+
+// deferredParentConds renders the two ways a row is a deferred parent, whose
+// direct children ready work hides, with each column prefixed by qualifier:
+// dated, a defer_until still in the future (whatever the status: the snooze
+// lasts until the date), and undated, status 'deferred' with no defer_until
+// (the indefinite icebox, held until `bd undefer`, GH#7300). An expired date is
+// neither, even while the status still says deferred: the wake sweep owns that
+// transition (issueops.WakeExpiredDefersInTx).
+func deferredParentConds(qualifier string) (dated, undated string) {
+	dated = qualifier + "defer_until IS NOT NULL AND " + qualifier + "defer_until > UTC_TIMESTAMP()"
+	undated = qualifier + "status = 'deferred' AND " + qualifier + "defer_until IS NULL"
+	return dated, undated
+}
+
+// DeferredParentPredicate renders the parenthesized condition that a row of
+// the issue table aliased as alias is a deferred parent (deferredParentConds).
+// Pass "" for unqualified columns. alias must be an internal constant.
+func DeferredParentPredicate(alias string) string {
+	qualifier := ""
+	if alias != "" {
+		qualifier = alias + "."
+	}
+	dated, undated := deferredParentConds(qualifier)
+	return "((" + dated + ") OR (" + undated + "))"
+}
+
+// DeferredParentExistsSQL renders a scalar boolean expression that is true
+// when table holds a deferred parent (deferredParentConds) whose children ready
+// work has to look up: any dated one, or an undated one that some parent-child
+// edge in depTables names as its parent. Each leg is its own EXISTS, so the
+// dated leg can use the defer_until index and each undated leg the status
+// index, probing the edge table's (type, target) index per deferred row; one
+// WHERE ORing columns indexed separately may not get index access for either.
+//
+// Only the undated legs ask for a child. `bd defer <id>` with no date ices any
+// issue, leaf or parent, until `bd undefer`; gated on the status alone, one
+// iced leaf would send every ready read through the whole child scan, for
+// nothing, for as long as it stays iced. A dated snooze ends by itself and
+// keeps the gate it always had.
+//
+// depTables must exist in the database. table and depTables must be internal
+// constants.
+func DeferredParentExistsSQL(table string, depTables []string) string {
+	dated, _ := deferredParentConds("")
+	_, undated := deferredParentConds("p.")
+	legs := []string{"EXISTS (SELECT 1 FROM " + table + " WHERE " + dated + ")"}
+	for _, depTable := range depTables {
+		legs = append(legs, "EXISTS (SELECT 1 FROM "+table+" p WHERE "+undated+
+			" AND EXISTS (SELECT 1 FROM "+depTable+" d WHERE d.type = 'parent-child' AND d."+
+			deferredParentTargetCol(table)+" = p.id))")
+	}
+	return "(" + strings.Join(legs, " OR ") + ")"
+}
+
+// deferredParentTargetCol is the dependency column that names a parent row of
+// table.
+func deferredParentTargetCol(table string) string {
+	if table == WispsFilterTables.Main {
+		return "depends_on_wisp_id"
+	}
+	return "depends_on_issue_id"
 }
