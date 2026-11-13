@@ -122,9 +122,9 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 		}
 	}
 	// The upsert below would resurrect a row a retaining sweep retired; an
-	// explicit retired id with no live row is refused instead. A generated id
-	// is never retired (the generators skip tombstones), so it is not guarded,
-	// as issueops' create body does not guard one.
+	// explicit retired id with no live row is refused instead. A minted id
+	// never reaches this branch (it takes the strict one above), and the
+	// generators skip tombstoned ids anyway.
 	if opts.ExplicitID {
 		if err := issueops.RefuseRetiredIDInTx(ctx, r.runner, issue.ID); err != nil {
 			return err
@@ -964,10 +964,10 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 	// a harmless omission but a silent, writer-dependent data loss. That is
 	// what closed_by_session was: the schema defaults it to '', so an issue
 	// written by this statement read back an empty closing session while the
-	// classic writer kept it. Only Insert without CreateOnly reaches this
-	// statement (CreateIssue callers that leave CreateOnly unset, such as the
-	// quick, todo, gate and batch proxied servers); CreateOnly creates, import
-	// and promotion go through the classic writer.
+	// classic writer kept it. Only a caller-NAMED id without CreateOnly
+	// reaches this statement (an explicit create or import upsert); every
+	// minted id and every CreateOnly create takes the strict branch above and
+	// the classic writer.
 	//
 	// Stamp a fresh non-zero row_lock at create, exactly like the classic
 	// insertIssueIntoTable (issueops/helpers.go). Without it a proxied-server

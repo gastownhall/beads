@@ -1056,6 +1056,7 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 	}
 
 	explicitID := createIDNamedByCaller(params)
+	mintedTopLevel := false
 	switch {
 	case params.ExplicitID != "":
 		issue.ID = params.ExplicitID
@@ -1071,6 +1072,7 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 			return CreateIssueResult{}, fmt.Errorf("create: mint top-level ID: %w", err)
 		}
 		issue.ID = minted
+		mintedTopLevel = true
 	}
 
 	if params.CreateOnly && params.ExplicitID != "" && !params.ForcePrefix {
@@ -1093,7 +1095,14 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 		}
 	}
 
-	insertOpts := InsertIssueOpts{UseWispsTable: useWisp, CreateOnly: params.CreateOnly, ExplicitID: explicitID}
+	// A minted top-level id always takes the strict create path. The mint
+	// chose it free in BOTH planes, so a duplicate key at insert means someone
+	// took it between the probe and the write — refusing (ErrAlreadyExists)
+	// is correct; upserting would silently overwrite that row or, on the
+	// wisp side, mint a twin id into the other plane (GH#5106). A caller-named
+	// explicit id keeps the caller's choice: without CreateOnly it upserts,
+	// which import relies on, and with CreateOnly it was already strict.
+	insertOpts := InsertIssueOpts{UseWispsTable: useWisp, CreateOnly: params.CreateOnly || mintedTopLevel, ExplicitID: explicitID}
 	if err := u.issueRepo.Insert(ctx, issue, actor, insertOpts); err != nil {
 		return CreateIssueResult{}, fmt.Errorf("create: insert: %w", err)
 	}

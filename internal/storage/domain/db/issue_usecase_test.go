@@ -1,6 +1,7 @@
 package db
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -25,6 +26,9 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("CounterModeJumpsPastHeldIDs", s.useCaseMintCounterModeJumpsPastHeldIDs)
 	s.Run("CounterModeStaysSequentialWhenNextValueIsFree", s.useCaseMintCounterModeStaysSequential)
 	s.Run("CounterModeSurvivesAnOverlongHeldRun", s.useCaseMintCounterModeSurvivesOverlongHeldRun)
+	s.Run("CounterIssueMintTakesTheStrictCreatePath", s.useCaseMintCounterIssueStrictPath)
+	s.Run("HashIssueMintTakesTheStrictCreatePath", s.useCaseMintHashIssueStrictPath)
+	s.Run("HashWispMintTakesTheStrictCreatePath", s.useCaseMintHashWispStrictPath)
 	s.Run("MissingConfigPrefixErrors", s.useCaseMintMissingPrefix)
 	s.Run("ExplicitIDRequiresConfiguredPrefixUnlessForced", s.useCaseExplicitIDPrefixGuard)
 	s.Run("CreateOnlyRefusesOccupiedID", s.useCaseCreateOnlyRefusesOccupiedID)
@@ -390,6 +394,90 @@ func (s *testSuite) useCaseMintCounterModeSurvivesOverlongHeldRun() {
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT COUNT(*) FROM issues WHERE id LIKE ? AND title = 'held'", prefix+"-%").Scan(&heldCount))
 	s.Equal(heldLast-heldFirst+1, heldCount, "every held row must survive unchanged")
+}
+
+// issueCreateCoordinationKey is the shard key issueops.CoordinateIDCreatesInTx
+// writes for id (internal/storage/issueops/create_only_guard.go): the first
+// 12 bits of the id's SHA-256, as issue-create/v1/%03x. Replicated here
+// because the mapping is unexported; if production ever changes it, this
+// test fails loudly instead of passing vacuously.
+func issueCreateCoordinationKey(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	shard := uint16(sum[0])<<4 | uint16(sum[1])>>4
+	return fmt.Sprintf("issue-create/v1/%03x", shard)
+}
+
+// snapshotCreateCoordination reads every create-coordination cell. The cells
+// live in dolt-ignored local_metadata, which the suite's DOLT_RESET baseline
+// does not clear, so evidence is a VALUE CHANGE against this snapshot, never
+// mere existence.
+func (s *testSuite) snapshotCreateCoordination() map[string]string {
+	rows, err := s.Runner().QueryContext(s.Ctx(),
+		"SELECT `key`, value FROM local_metadata WHERE `key` LIKE 'issue-create/v1/%'")
+	s.Require().NoError(err)
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var k, v string
+		s.Require().NoError(rows.Scan(&k, &v))
+		out[k] = v
+	}
+	s.Require().NoError(rows.Err())
+	return out
+}
+
+// assertMintTookStrictCreatePath proves the minted create of res.Issue.ID ran
+// the strict-create guard: the guard rewrites the id's create-coordination
+// cell with a fresh stamp (crypto/rand, so a rewrite always changes the
+// value), while the upsert the minted create used to take writes no cell at
+// all.
+func (s *testSuite) assertMintTookStrictCreatePath(res domain.CreateIssueResult, before map[string]string) {
+	key := issueCreateCoordinationKey(res.Issue.ID)
+	var after string
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT value FROM local_metadata WHERE `key` = ?", key).Scan(&after))
+	if prev, ok := before[key]; ok {
+		s.NotEqual(prev, after, "the minted create of %s must rewrite its create-coordination cell (strict path), not upsert silently", res.Issue.ID)
+	} else {
+		s.NotEmpty(after, "the minted create of %s must write its create-coordination cell (strict path)", res.Issue.ID)
+	}
+}
+
+func (s *testSuite) useCaseMintCounterIssueStrictPath() {
+	s.resetMintConfig("ucSt", "counter")
+	uc := s.issueUseCase()
+	before := s.snapshotCreateCoordination()
+
+	res, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "counter mint", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+	s.Require().Equal("ucSt-1", res.Issue.ID)
+	s.assertMintTookStrictCreatePath(res, before)
+}
+
+func (s *testSuite) useCaseMintHashIssueStrictPath() {
+	s.resetMintConfig("ucSh", "")
+	uc := s.issueUseCase()
+	before := s.snapshotCreateCoordination()
+
+	res, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "hash mint", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+	s.assertMintTookStrictCreatePath(res, before)
+}
+
+func (s *testSuite) useCaseMintHashWispStrictPath() {
+	s.resetMintConfig("ucSw", "")
+	uc := s.issueUseCase()
+	before := s.snapshotCreateCoordination()
+
+	res, err := uc.CreateWisp(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "wisp hash mint", IssueType: types.TypeTask, Priority: 2, Ephemeral: true},
+	}, "tester")
+	s.Require().NoError(err)
+	s.assertMintTookStrictCreatePath(res, before)
 }
 
 func (s *testSuite) useCaseMintMissingPrefix() {
