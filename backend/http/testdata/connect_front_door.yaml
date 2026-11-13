@@ -761,6 +761,14 @@ commands:
         args: [events, export]
         exit: 1
         words: storage backend does not support the events journal
+  - command: bd events head
+    cases:
+      - id: events-head
+        class: refuses
+        native_fix: [B14]
+        args: [events, head, '--json']
+        exit: 1
+        words: storage backend does not support the events journal
   - command: bd events prune
     cases:
       - id: events-prune

@@ -41,6 +41,16 @@ func (s *DoltStore) ReadEventsJournalPage(ctx context.Context, since int64, limi
 	return page, err
 }
 
+// JournalHead returns the journal's head and floor without reading any rows.
+func (s *DoltStore) JournalHead(ctx context.Context) (head, floor int64, err error) {
+	err = s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var readErr error
+		head, floor, readErr = issueops.ReadEventsHeadAndFloorInTx(ctx, tx)
+		return readErr
+	})
+	return head, floor, err
+}
+
 // PruneEventsJournal deletes journal rows below before, honoring the retain
 // floors, and returns the number of rows deleted.
 func (s *DoltStore) PruneEventsJournal(ctx context.Context, before int64, retainDays, retainRows int) (int64, error) {
