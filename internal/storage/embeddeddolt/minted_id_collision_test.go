@@ -3,6 +3,7 @@
 package embeddeddolt_test
 
 import (
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -181,6 +182,97 @@ func TestMintedIDsPassOverEveryHeldID(t *testing.T) {
 		}
 		if got := result.Issues[1].ID; got != "cm-1" {
 			t.Errorf("explicit item = %s, want cm-1", got)
+		}
+	})
+
+	t.Run("a counter mint over explicit issues ahead of the counter", func(t *testing.T) {
+		// GH#8456: explicit ids do not move the counter, so it can sit behind
+		// live rows. The mint must walk past them, not mint one and silently
+		// overwrite the row through the upsert.
+		te := newTestEnv(t, "cl")
+		if err := te.store.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+			t.Fatalf("SetConfig(issue_id_mode=counter): %v", err)
+		}
+		creator, err := te.store.BatchCreator()
+		if err != nil {
+			t.Fatalf("BatchCreator(): %v", err)
+		}
+		auto := func(title string) string {
+			result, err := creator.CreateBatch(ctx, publicops.CreateBatchRequest{
+				Actor: actor,
+				Items: []publicops.BatchCreateItem{{Issue: issue(title)}},
+			})
+			if err != nil {
+				t.Fatalf("CreateBatch(%q) = %v, want the mint to walk past the ids issues holds", title, err)
+			}
+			return result.Issues[0].ID
+		}
+		if got := auto("first auto"); got != "cl-1" {
+			t.Fatalf("first auto create = %s, want cl-1", got)
+		}
+		for n := 2; n <= 4; n++ {
+			explicit := issue(fmt.Sprintf("explicit-%d", n))
+			explicit.ID = fmt.Sprintf("cl-%d", n)
+			explicit.Status = types.StatusOpen
+			if err := te.store.CreateIssue(ctx, explicit, "seeder"); err != nil {
+				t.Fatalf("explicit create cl-%d: %v", n, err)
+			}
+		}
+		if got := auto("second auto"); got != "cl-5" {
+			t.Errorf("second auto create = %s, want cl-5, past the explicit cl-2..cl-4", got)
+		}
+		if got := auto("third auto"); got != "cl-6" {
+			t.Errorf("third auto create = %s, want cl-6", got)
+		}
+		for n := 2; n <= 4; n++ {
+			te.assertIssueTitle(t, ctx, "issues", fmt.Sprintf("cl-%d", n), fmt.Sprintf("explicit-%d", n))
+		}
+	})
+
+	t.Run("a counter mint over explicit wisps ahead of the counter", func(t *testing.T) {
+		// The same walk across planes: issues and wisps share one id space
+		// (GH#5106), so the counter must pass over ids only the wisps table
+		// holds, and leave the wisps where they are.
+		te := newTestEnv(t, "cl")
+		if err := te.store.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+			t.Fatalf("SetConfig(issue_id_mode=counter): %v", err)
+		}
+		creator, err := te.store.BatchCreator()
+		if err != nil {
+			t.Fatalf("BatchCreator(): %v", err)
+		}
+		auto := func(title string) string {
+			result, err := creator.CreateBatch(ctx, publicops.CreateBatchRequest{
+				Actor: actor,
+				Items: []publicops.BatchCreateItem{{Issue: issue(title)}},
+			})
+			if err != nil {
+				t.Fatalf("CreateBatch(%q) = %v, want the mint to walk past the ids wisps holds", title, err)
+			}
+			return result.Issues[0].ID
+		}
+		if got := auto("first auto"); got != "cl-1" {
+			t.Fatalf("first auto create = %s, want cl-1", got)
+		}
+		for n := 2; n <= 3; n++ {
+			wisp := issue(fmt.Sprintf("wisp-%d", n))
+			wisp.ID = fmt.Sprintf("cl-%d", n)
+			wisp.Status = types.StatusOpen
+			wisp.Ephemeral = true
+			if err := te.store.CreateIssue(ctx, wisp, "seeder"); err != nil {
+				t.Fatalf("explicit wisp create cl-%d: %v", n, err)
+			}
+		}
+		if got := auto("second auto"); got != "cl-4" {
+			t.Errorf("second auto create = %s, want cl-4, past the wisps cl-2 and cl-3", got)
+		}
+		if got := auto("third auto"); got != "cl-5" {
+			t.Errorf("third auto create = %s, want cl-5", got)
+		}
+		for n := 2; n <= 3; n++ {
+			id := fmt.Sprintf("cl-%d", n)
+			te.assertIssueTitle(t, ctx, "wisps", id, fmt.Sprintf("wisp-%d", n))
+			te.assertRowNotExists(t, ctx, "issues", id)
 		}
 	})
 }
