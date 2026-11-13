@@ -130,6 +130,17 @@ func TestDatabaseNotFoundHint(t *testing.T) {
 		ServerPort: 3309,
 	}
 
+	t.Run("wraps ErrDatabaseNotFound and still reads as the hint", func(t *testing.T) {
+		cfg := baseCfg
+		err := fmt.Errorf("open: %w", databaseNotFoundError(&cfg))
+		if !errors.Is(err, ErrDatabaseNotFound) {
+			t.Fatalf("want ErrDatabaseNotFound in the chain, got %v", err)
+		}
+		if want := "open: database \"beads_test\" not found on Dolt server at 127.0.0.1:3309\n\n"; !strings.HasPrefix(err.Error(), want) {
+			t.Errorf("want the message to begin %q, got:\n%s", want, err)
+		}
+	})
+
 	t.Run("an IPv6 host is named bracketed with its port", func(t *testing.T) {
 		for _, host := range []string{"::1", "[::1]"} {
 			cfg := baseCfg
