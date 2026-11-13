@@ -266,6 +266,10 @@ Examples:
 		if err := store.SetConfig(ctx, storageKey, value); err != nil {
 			return HandleErrorRespectJSON("setting key: %v", err)
 		}
+		// Arms the embedded end-of-command auto-commit, which stages config
+		// with everything else; without it the row stays in the working set
+		// (GH#7523).
+		noteDirectConfigWrite()
 
 		return printKVSetResult(key, value)
 	},
@@ -354,6 +358,7 @@ Examples:
 		if err := store.DeleteConfig(ctx, storageKey); err != nil {
 			return HandleErrorRespectJSON("deleting key: %v", err)
 		}
+		noteDirectConfigWrite()
 
 		return printKVClearResult(key)
 	},
