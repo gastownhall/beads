@@ -386,6 +386,46 @@ func TestImporterUOW(t *testing.T) {
 		}
 	})
 
+	// bd-8qq0ho AC-5: the per-attempt reset must not run after the committed
+	// attempt. The proxied `bd import` builds ImportedIDs from the request
+	// structs (cmd/bd/import_shared.go assembleImportResult), so an ID-less
+	// row's minted id — and its edge's and comment's — stays on them.
+	t.Run("SingleAttemptLeavesMintedIDsOnTheCallerStructs", func(t *testing.T) {
+		when := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+		issue := &types.Issue{
+			Title: "Imported without an id", Status: types.StatusOpen,
+			IssueType: types.TypeTask, Priority: 2,
+			Dependencies: []*types.Dependency{{DependsOnID: "imp-one", Type: types.DepBlocks}},
+			Comments:     []*types.Comment{{Author: "importer-test", Text: "fresh comment", CreatedAt: when}},
+			CreatedAt:    when, UpdatedAt: when,
+		}
+		result, err := imp.ImportBatch(ctx, publicops.ImportBatchRequest{
+			Actor:  "importer-test",
+			Issues: []*types.Issue{issue},
+			Source: "minted.jsonl",
+		})
+		if err != nil {
+			t.Fatalf("ImportBatch: %v", err)
+		}
+		if result.Created != 1 || len(result.StaleRejectedIDs) != 0 || len(result.RetiredIDs) != 0 {
+			t.Errorf("result = %+v, want Created=1 and nothing rejected or retired", result)
+		}
+		if issue.ID == "" {
+			t.Fatal("issue.ID is empty after a committed import; want the minted id left on the caller's struct")
+		}
+		if got := queryString(t, "SELECT title FROM issues WHERE id = ?", issue.ID); got != issue.Title {
+			t.Errorf("row %q title = %q, want %q", issue.ID, got, issue.Title)
+		}
+		if dep := issue.Dependencies[0]; dep.IssueID != issue.ID {
+			t.Errorf("dep.IssueID = %q, want the minted id %q", dep.IssueID, issue.ID)
+		}
+		if c := issue.Comments[0]; c.ID == "" {
+			t.Error("comment.ID is empty after a committed import; want the stored id")
+		} else if got := queryString(t, "SELECT issue_id FROM comments WHERE id = ?", c.ID); got != issue.ID {
+			t.Errorf("comment %q issue_id = %q, want %q", c.ID, got, issue.ID)
+		}
+	})
+
 	t.Run("EmptyActorIsRefused", func(t *testing.T) {
 		if _, err := imp.ImportBatch(ctx, publicops.ImportBatchRequest{Source: "noactor.jsonl"}); err == nil {
 			t.Fatal("ImportBatch with empty actor should be refused")
