@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"regexp"
 
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi"
@@ -337,10 +336,10 @@ func deleteNeighborsInTx(ctx context.Context, tx DBTX, ids []string) ([]*types.I
 // `[deleted:<id>]` in each neighbor's description, notes, design and
 // acceptance criteria, and reports how many ROWS it changed.
 //
-// What counts as a citation is types.RewriteDeletedReferences, the one rule
-// the unit-of-work body in internal/storage/domain also calls: a route that
-// spelled the rule differently would rewrite a different set of citations for
-// the same deletion.
+// The citation rule itself lives in internal/types (CitesID,
+// RewriteDeletedReferences), which this body, the unit-of-work body and the
+// CLI preview all call: a route that spelled the rule differently would
+// rewrite a different set of citations for the same deletion.
 func RewriteDeletedReferencesInTx(ctx context.Context, tx DBTX, deletedIDs []string, neighbors []*types.Issue, actor string) (int, error) {
 	if len(neighbors) == 0 {
 		return 0, nil
@@ -384,18 +383,6 @@ func RewriteDeletedReferencesInTx(ctx context.Context, tx DBTX, deletedIDs []str
 		}
 	}
 	return len(touched), nil
-}
-
-// DeletedReferencePattern spells types.CitesID's citation rule as a regular
-// expression, for a caller that needs a *regexp.Regexp: group 2 is the id, and
-// groups 1 and 3 are the boundaries on either side, which may be two bytes
-// when a `.` is one of them. MatchString agrees with types.CitesID. It is a
-// matcher, not a rewriter: ReplaceAllString consumes the boundaries, so two
-// citations sharing one separator would lose the second. Rewrite with
-// types.RewriteDeletedReferences.
-func DeletedReferencePattern(id string) *regexp.Regexp {
-	quoted := regexp.QuoteMeta(id)
-	return regexp.MustCompile(`(^|[^A-Za-z0-9_.-]|^\.|[^A-Za-z0-9_-]\.)(` + quoted + `)($|[^A-Za-z0-9_.-]|\.$|\.[^A-Za-z0-9_-])`)
 }
 
 // sortedUniqueIDs returns ids in ascending order without duplicates, the
