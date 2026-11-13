@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -294,5 +296,87 @@ func TestRenameFailureLeavesBeadGatesPending(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// lookupOnlyRenameStore records each GetIssue and reports the issue missing,
+// so runRename stops at its old-issue lookup without touching a database.
+type lookupOnlyRenameStore struct {
+	storage.DoltStorage
+	lookups []string
+}
+
+func (s *lookupOnlyRenameStore) GetIssue(_ context.Context, id string) (*types.Issue, error) {
+	s.lookups = append(s.lookups, id)
+	return nil, storage.ErrNotFound
+}
+
+// TestRenameNewIDCheck drives runRename's target-ID check (GH#6068): a target
+// whose prefix bd init would produce must reach the old-issue lookup, and a
+// malformed target must be refused before the store is touched.
+// Not parallel: it mutates the store, actor and proxied-mode globals.
+func TestRenameNewIDCheck(t *testing.T) {
+	oldUseGlobals, oldProxied := testModeUseGlobals, proxiedServerMode
+	testModeUseGlobals, proxiedServerMode = true, false
+	t.Cleanup(func() { testModeUseGlobals, proxiedServerMode = oldUseGlobals, oldProxied })
+
+	accepted := func(t *testing.T, oldID, newID string) {
+		t.Helper()
+		st := &lookupOnlyRenameStore{}
+		var err error
+		stderr := captureStderr(t, func() {
+			err = withRenameStore(st, func() error { return runRename(renameCmd, []string{oldID, newID}) })
+		})
+		if strings.Contains(stderr, "invalid new ID format") {
+			t.Fatalf("rename %s -> %s refused the target: %s", oldID, newID, stderr)
+		}
+		if len(st.lookups) != 1 || st.lookups[0] != oldID {
+			t.Fatalf("rename %s -> %s looked up %q, want exactly [%q]", oldID, newID, st.lookups, oldID)
+		}
+		if want := fmt.Sprintf("issue %s not found", oldID); !strings.Contains(stderr, want) {
+			t.Fatalf("rename %s -> %s: stderr %q, want it to contain %q (err %v)", oldID, newID, stderr, want, err)
+		}
+	}
+
+	// Prefixes as bd init normalizes them: digits, uppercase letters,
+	// underscores (from dots or a leading digit) and hyphens.
+	for _, raw := range []string{"probe", "probe8", "MyApp2", "001", "my.app", "_scratch", "web3-app"} {
+		prefix := normalizeIssuePrefix(raw)
+		t.Run("init/"+raw, func(t *testing.T) {
+			if err := dolt.ValidateDatabaseName(dbNameFromPrefix(prefix)); err != nil {
+				t.Fatalf("bd init would refuse prefix %q: %v", prefix, err)
+			}
+			accepted(t, prefix+"-4b0", prefix+"-abc")
+		})
+	}
+
+	// Targets the previous ^[a-z]+- pattern accepted stay accepted:
+	// letters-only, hyphenated and hierarchical IDs.
+	for _, newID := range []string{"bd-dolt", "gt-auth", "bd-a3f8e9.1", "web-app-abc123", "bd-a_b.c-d"} {
+		t.Run("compat/"+newID, func(t *testing.T) {
+			accepted(t, "bd-4b0", newID)
+		})
+	}
+
+	// Malformed targets fail the format check before the store is read:
+	// bare, empty or empty-component, leading digit, space, dollar sign.
+	for _, newID := range []string{"abc", "", "-abc", "abc-", "8ball-abc", "a b-c", "bd-$1"} {
+		t.Run(fmt.Sprintf("reject/%q", newID), func(t *testing.T) {
+			st := &lookupOnlyRenameStore{}
+			var err error
+			stderr := captureStderr(t, func() {
+				err = withRenameStore(st, func() error { return runRename(renameCmd, []string{"bd-old1", newID}) })
+			})
+			var exitErr *exitError
+			if !errors.As(err, &exitErr) || exitErr.Code != 1 {
+				t.Fatalf("rename bd-old1 -> %q returned %v, want exit code 1", newID, err)
+			}
+			if want := fmt.Sprintf("invalid new ID format %q", newID); !strings.Contains(stderr, want) {
+				t.Fatalf("rename bd-old1 -> %q: stderr %q, want it to contain %q", newID, stderr, want)
+			}
+			if len(st.lookups) != 0 {
+				t.Fatalf("rename bd-old1 -> %q read the store %q before refusing the target", newID, st.lookups)
+			}
+		})
 	}
 }
