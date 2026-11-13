@@ -481,6 +481,11 @@ linters:
         text: 'do not write a filter here'
         linters:
           - forbidigo
+      # wisp_gc.go retains the GC filters moved unchanged from wisp.go.
+      - path: '^cmd/bd/wisp_gc\.go$'
+        text: 'do not write a filter here'
+        linters:
+          - forbidigo
       # Molecule reporting: each selects the members of one molecule.
       #
       # `mol current` and `mol progress` LEFT this list when their in_progress
