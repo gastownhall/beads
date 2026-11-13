@@ -1281,6 +1281,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A fenced wire client no longer loses its store open to a denied
+  `dolt_ignore` seed** (#6169). Adding a canonical pattern un-converges
+  `dolt_ignore` for every existing database, so the next write-mode open owes
+  one `INSERT IGNORE INTO dolt_ignore` — and a hosted or box-fenced wire
+  client, whose grant deliberately excludes writes on `dolt_ignore` (a write
+  there could silently stop its own issues from committing), failed the whole
+  open on the command-denied error. That denial now degrades to a one-line
+  warning — `continuing without seeding dolt_ignore on the current schema` —
+  when nothing rides on the unasserted patterns: with migration work pending,
+  or with any new table in the working set (which a later blanket commit
+  could capture into HEAD), the open still refuses, preserving the original
+  denial, and the refusal names the table and the remedy. Every fenced open
+  repeats the warning until one privileged `bd` write-mode open heals the
+  patterns; the heal itself is unchanged.
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
@@ -4514,9 +4528,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Fenced deployments: adding a canonical pattern un-converges `dolt_ignore` for
   every existing database, so the next write-mode open issues one
   `INSERT IGNORE INTO dolt_ignore`; a hosted or box-fenced wire client that is
-  denied that INSERT fails its open until one privileged `bd` opens the store
-  and heals the pattern — self-healing, one privileged open per upgrade
-  (degrading a denied seed to a skip is tracked separately).
+  denied that INSERT now continues past the denial with a warning when
+  nothing rides on the unasserted patterns, until one privileged `bd` opens
+  the store and heals the pattern — self-healing, one privileged open per
+  upgrade (the degradation itself is #6169, listed under Fixed above).
 
 - **`bd ready --parent` and `bd blocked --parent` no longer re-scan the whole
   parent-child edge relation for every descendant they find.** The transitive

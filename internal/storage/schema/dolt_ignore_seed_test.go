@@ -1,14 +1,18 @@
 package schema
 
 import (
+	"bytes"
 	"context"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"regexp"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	mysql "github.com/go-sql-driver/mysql"
 )
 
 // A fenced wire client holds SELECT on dolt_ignore and nothing else, so the
@@ -238,4 +242,244 @@ func upperASCII(s string) string {
 		}
 	}
 	return string(b)
+}
+
+// --- bd-obnpv0 / gastownhall/beads#6169: a refused dolt_ignore seed must not
+// take a fenced wire client's open down. The tests below pin the approved
+// design: the seed itself still returns the refusal (the eligibility
+// decision must not lose it), and migrateUpConsented degrades only on a
+// database that has no migration work pending and no new table in its
+// working set.
+
+// refusedIgnoreSeedInsert is the wire-shaped privilege refusal the mocks
+// return from the seed's INSERT: exactly what a box-fenced operator grant
+// (SELECT/DML-on-data-only) produces against dolt_ignore.
+func refusedIgnoreSeedInsert() *mysql.MySQLError {
+	return &mysql.MySQLError{
+		Number:  1142,
+		Message: "INSERT command denied to user 'bd_lego_pilot_op'@'%' for table 'dolt_ignore'",
+	}
+}
+
+// wrappedIgnoreSeedErr is the failure text seedDoltIgnorePatterns returns for
+// a denied INSERT of pattern: the wrapped, pattern-specific error callers
+// must keep seeing unchanged on every fatal arm.
+func wrappedIgnoreSeedErr(pattern string, cause error) string {
+	return fmt.Sprintf("seeding dolt_ignore pattern %q: %v", pattern, cause)
+}
+
+// captureIgnoreSeedNotice redirects the degraded-seed warning to a buffer
+// for the duration of one test and returns it, so the tests can assert the
+// open's one visible warning without a public capture hook.
+func captureIgnoreSeedNotice(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	saved := doltIgnoreSeedNoticeOut
+	doltIgnoreSeedNoticeOut = &buf
+	t.Cleanup(func() { doltIgnoreSeedNoticeOut = saved })
+	return &buf
+}
+
+// expectRefusedIgnoreSeed mocks the seed on an under-seeded database: the
+// presence probe reports every candidate except the missing ones, and the
+// FIRST INSERT for a missing pattern fails with seedErr — the exact wire
+// shape a fence produces. The seed stops at its first error, so exactly one
+// INSERT is expected however many patterns are missing.
+func expectRefusedIgnoreSeed(mock sqlmock.Sqlmock, mainVersion int, seedErr error, missing ...string) {
+	candidates := expectedIgnoreSeedCandidates(mainVersion)
+	missingSet := make(map[string]bool, len(missing))
+	for _, pattern := range missing {
+		missingSet[pattern] = true
+	}
+	present := make([]string, 0, len(candidates))
+	first := ""
+	for _, pattern := range candidates {
+		if missingSet[pattern] {
+			if first == "" {
+				first = pattern
+			}
+			continue
+		}
+		present = append(present, pattern)
+	}
+	if first == "" {
+		panic("expectRefusedIgnoreSeed: none of the missing patterns is a seed candidate")
+	}
+	expectIgnoreSeedProbe(mock, mainVersion, present)
+	mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
+		WithArgs(first).
+		WillReturnError(seedErr)
+}
+
+// expectNoMigrationWork mocks migrationWorkNeeded's no-work answer, the
+// shape TestMigrateUpSkipsSeedCommitWhenNothingChanged pins: both cursors
+// at-latest (the ignored lane's sentinel probes included), both content_hash
+// columns present, no custom-types/statuses backfill pending.
+func expectNoMigrationWork(mock sqlmock.Sqlmock) {
+	expectCursorProbe(mock, "schema_migrations", true)
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+	expectCursorProbe(mock, "ignored_schema_migrations", true)
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
+	expectIgnoredSentinelProbes(mock, true)
+	expectContentHashColumnExists(mock)
+	expectContentHashColumnExists(mock)
+	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
+	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+}
+
+// expectNoNewTables mocks the capture guard's clean answer: dolt_status
+// reports no table in "new table" state.
+func expectNoNewTables(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT table_name FROM dolt_status WHERE status = 'new table' ORDER BY table_name")).
+		WillReturnRows(sqlmock.NewRows([]string{"table_name"}))
+}
+
+// TestMigrateUpDegradesRefusedSeedWhenConverged pins AC-1 of bd-obnpv0: a
+// fenced wire client whose dolt_ignore INSERT is command-denied still opens a
+// database that has no migration work pending and no new table in its
+// working set. MigrateUp returns (0, nil), prints exactly one warning naming
+// the refused pattern and the privileged-heal remedy, and issues no further
+// statement — ordered sqlmock fails any unprimed call, so the
+// expectations-were-met check proves the "no subsequent write or commit"
+// half. Every code dberrors.IsAccessDenied classifies must degrade, not just
+// the canonical 1142 wire shape.
+func TestMigrateUpDegradesRefusedSeedWhenConverged(t *testing.T) {
+	denials := []struct {
+		name string
+		err  error
+	}{
+		{"1142 table access", refusedIgnoreSeedInsert()},
+		{"1044 database access", &mysql.MySQLError{Number: 1044, Message: "access denied to database 'beads' for user 'bd_lego_pilot_op'"}},
+		{"1045 access", &mysql.MySQLError{Number: 1045, Message: "access denied for user 'bd_lego_pilot_op'@'%' (using password: YES)"}},
+		{"1143 column access", &mysql.MySQLError{Number: 1143, Message: "INSERT command denied to user 'bd_lego_pilot_op'@'%' for column 'pattern' in table 'beads'.'dolt_ignore'"}},
+		{"1227 specific access", &mysql.MySQLError{Number: 1227, Message: "Access denied; you need (at least one of) the INSERT privilege(s) for this operation"}},
+		{"plain-string denial", errors.New("Error 1142: INSERT command denied to user 'bd_lego_pilot_op'@'%' for table 'dolt_ignore'")},
+	}
+	for _, tt := range denials {
+		t.Run(tt.name, func(t *testing.T) {
+			failOnSwallowedAdvisory(t)
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("create sql mock: %v", err)
+			}
+			defer db.Close()
+
+			const pattern = "__temp__%"
+			expectRefusedIgnoreSeed(mock, LatestVersion(), tt.err, pattern)
+			expectNoMigrationWork(mock)
+			expectNoNewTables(mock)
+
+			notice := captureIgnoreSeedNotice(t)
+			applied, err := MigrateUp(context.Background(), db)
+			if err != nil {
+				t.Fatalf("MigrateUp() error = %v, want nil: a permission-denied seed must degrade to a warning on an otherwise-converged database", err)
+			}
+			if applied != 0 {
+				t.Fatalf("MigrateUp() applied = %d, want 0", applied)
+			}
+			warn := notice.String()
+			if warn == "" {
+				t.Fatal("no degraded-seed warning was printed")
+			}
+			if strings.Count(warn, "\n") != 1 || !strings.HasSuffix(warn, "\n") {
+				t.Fatalf("degraded-seed warning = %q, want exactly one line", warn)
+			}
+			for _, want := range []string{
+				`"` + pattern + `"`,
+				tt.err.Error(),
+				"continuing without seeding dolt_ignore on the current schema",
+				"open this database once with a privileged bd that can write dolt_ignore to heal the missing patterns",
+			} {
+				if !strings.Contains(warn, want) {
+					t.Fatalf("degraded-seed warning %q missing %q", warn, want)
+				}
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations (the degraded open must issue no subsequent write or commit): %v", err)
+			}
+		})
+	}
+}
+
+// TestSeedDoltIgnorePatternsToleratesPermissionDeniedInsert is the triage
+// repro for bd-obnpv0, adapted to the approved design: the design rejected a
+// seed-local swallow (it loses the denial before the eligibility decision),
+// so the tolerance is asserted at MigrateUp, the layer that owns the
+// decision. The original repro's shape is kept: the probe reports every
+// candidate present except the last two, and every INSERT the seed attempts
+// would be denied.
+func TestSeedDoltIgnorePatternsToleratesPermissionDeniedInsert(t *testing.T) {
+	t.Run("multiple missing patterns, one refused INSERT, one warning", func(t *testing.T) {
+		failOnSwallowedAdvisory(t)
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("create sql mock: %v", err)
+		}
+		defer db.Close()
+
+		// The seed stops at its first error, so only the first missing
+		// candidate's INSERT is ever attempted.
+		expectRefusedIgnoreSeed(mock, LatestVersion(), refusedIgnoreSeedInsert(), "wisps", "events")
+		expectNoMigrationWork(mock)
+		expectNoNewTables(mock)
+
+		notice := captureIgnoreSeedNotice(t)
+		applied, err := MigrateUp(context.Background(), db)
+		if err != nil {
+			t.Fatalf("MigrateUp() error = %v, want nil (a fenced wire client must still open a converged database when its dolt_ignore INSERT is denied)", err)
+		}
+		if applied != 0 {
+			t.Fatalf("MigrateUp() applied = %d, want 0", applied)
+		}
+		if !strings.Contains(notice.String(), `"wisps"`) {
+			t.Fatalf("degraded-seed warning %q must name the refused pattern", notice.String())
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations (the second denied INSERT must never be attempted): %v", err)
+		}
+	})
+
+	// A first INSERT can succeed before a later one is refused (grants can
+	// change under the seed). The degraded open must not turn that partial
+	// success into a scoped commit or a convergence claim: no DOLT_ADD or
+	// DOLT_COMMIT is primed, so ordered sqlmock fails the test if one runs.
+	t.Run("an earlier successful INSERT is never claimed as a scoped commit", func(t *testing.T) {
+		failOnSwallowedAdvisory(t)
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("create sql mock: %v", err)
+		}
+		defer db.Close()
+
+		candidates := expectedIgnoreSeedCandidates(LatestVersion())
+		if len(candidates) < 3 {
+			t.Fatalf("expected at least 3 seed candidates, got %d", len(candidates))
+		}
+		present := candidates[:len(candidates)-2]
+		missing := candidates[len(candidates)-2:]
+		expectIgnoreSeedProbe(mock, LatestVersion(), present)
+		mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
+			WithArgs(missing[0]).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
+			WithArgs(missing[1]).
+			WillReturnError(refusedIgnoreSeedInsert())
+		expectNoMigrationWork(mock)
+		expectNoNewTables(mock)
+
+		notice := captureIgnoreSeedNotice(t)
+		applied, err := MigrateUp(context.Background(), db)
+		if err != nil {
+			t.Fatalf("MigrateUp() error = %v, want nil", err)
+		}
+		if applied != 0 {
+			t.Fatalf("MigrateUp() applied = %d, want 0", applied)
+		}
+		if !strings.Contains(notice.String(), fmt.Sprintf("%q", missing[1])) {
+			t.Fatalf("degraded-seed warning %q must name the refused pattern", notice.String())
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations (a partially seeded database must not be scoped-committed by the degraded open): %v", err)
+		}
+	})
 }

@@ -499,6 +499,35 @@ Run the command from the owning rig's own workspace instead, where the ID
 resolves locally rather than through a route. Tracked in
 [#5861](https://github.com/gastownhall/beads/issues/5861).
 
+### "continuing without seeding dolt_ignore on the current schema"
+
+A store open prints this one-line warning when the server refused the
+`dolt_ignore` seed write and bd judged it safe to continue without it:
+
+```
+schema: seeding dolt_ignore pattern "__temp__%": ... command denied ...;
+continuing without seeding dolt_ignore on the current schema; open this
+database once with a privileged bd that can write dolt_ignore to heal the
+missing patterns
+```
+
+This happens on fenced deployments (hosted or box fence) whose operator grant
+deliberately excludes writes on `dolt_ignore`, after an upgrade added a
+canonical ignore pattern or one was deleted out of band. The warning means
+exactly what it says: the pattern set was not asserted, and every fenced open
+will print it again until it is healed.
+
+To heal it, open the store once with a write-mode `bd` that is allowed to
+write `dolt_ignore` (a privileged operator, not the fenced wire user); the
+open seeds the missing patterns and commits them, and the warning stops.
+
+bd still refuses the open — preserving the original denial — instead of
+printing the warning when something rides on the unasserted patterns: schema
+migration work is pending, or the working set holds a new table (which a
+later blanket commit could capture into HEAD). Those refusals name the
+blocking table and the same privileged-open remedy. See
+[#6169](https://github.com/gastownhall/beads/issues/6169).
+
 ## Sync Issues
 
 ### Changes not syncing
