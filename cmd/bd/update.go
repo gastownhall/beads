@@ -219,6 +219,9 @@ pointless).`,
 			return err
 		}
 		if designChanged {
+			if err := validateDesignUpdate(design); err != nil {
+				return HandleErrorRespectJSON("%v", err)
+			}
 			updates["design"] = design
 		}
 		if cmd.Flags().Changed("notes") && cmd.Flags().Changed("append-notes") {
@@ -245,8 +248,12 @@ pointless).`,
 			} else {
 				acceptanceCriteria, _ = cmd.Flags().GetString("acceptance-criteria")
 			}
+			if err := validateAcceptanceUpdate(acceptanceCriteria); err != nil {
+				return HandleErrorRespectJSON("%v", err)
+			}
 			updates["acceptance_criteria"] = acceptanceCriteria
 		}
+		applyTextFieldClears(cmd, updates)
 		if cmd.Flags().Changed("external-ref") {
 			externalRef, _ := cmd.Flags().GetString("external-ref")
 			// Empty string clears the ref to SQL NULL, mirroring buildCreateIssue's
@@ -1078,9 +1085,31 @@ func init() {
 	updateCmd.Flags().Bool("clear-notes", false, "Clear the notes field (--notes \"\" is refused: an empty value is usually a dead command substitution)")
 	updateCmd.MarkFlagsMutuallyExclusive("clear-notes", "notes")
 	updateCmd.MarkFlagsMutuallyExclusive("clear-notes", "append-notes")
+	// GH#8149: an empty --description/--design/--acceptance is refused on
+	// update (a dead command substitution looks exactly like it), so each
+	// long-form text field gets its own deliberate clear verb.
+	updateCmd.Flags().Bool("clear-description", false, "Clear the description (an empty --description value is refused: it is usually a dead command substitution)")
+	updateCmd.Flags().Bool("clear-design", false, "Clear the design field (an empty --design value is refused: it is usually a dead command substitution)")
+	updateCmd.Flags().Bool("clear-acceptance", false, "Clear the acceptance criteria (an empty --acceptance value is refused: it is usually a dead command substitution)")
+	// Update replaces these fields, so their help names the refusal and the
+	// clear verb; create keeps the shared "Issue description" wording.
+	updateCmd.Flags().Lookup("description").Usage = "Replace the description (--description \"\" is refused: use --clear-description to clear)"
+	updateCmd.Flags().Lookup("design").Usage = "Replace the design (--design \"\" and empty --design-file are refused: use --clear-design to clear)"
+	updateCmd.Flags().Lookup("acceptance").Usage = "Replace the acceptance criteria (--acceptance \"\" is refused: use --clear-acceptance to clear)"
 	updateCmd.Flags().String("spec-id", "", "Link to specification document")
 	updateCmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")
 	_ = updateCmd.Flags().MarkHidden("acceptance-criteria") // Only fails if flag missing (caught in tests)
+	// GH#8149: a clear and a content input for the same field contradict each
+	// other. One call per pair so the content aliases stay compatible with
+	// each other (their precedence lives in getDescriptionFlag) and different
+	// clears compose. Registered after --acceptance-criteria exists.
+	for _, content := range []string{"description", "body", "message", "body-file", "description-file", "stdin"} {
+		updateCmd.MarkFlagsMutuallyExclusive("clear-description", content)
+	}
+	updateCmd.MarkFlagsMutuallyExclusive("clear-design", "design")
+	updateCmd.MarkFlagsMutuallyExclusive("clear-design", "design-file")
+	updateCmd.MarkFlagsMutuallyExclusive("clear-acceptance", "acceptance")
+	updateCmd.MarkFlagsMutuallyExclusive("clear-acceptance", "acceptance-criteria")
 	updateCmd.Flags().IntP("estimate", "e", 0, "Time estimate in minutes (e.g., 60 for 1 hour)")
 	// -l is the shorthand for --add-label, matching `bd create -l`.
 	//

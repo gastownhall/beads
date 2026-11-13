@@ -99,6 +99,9 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 		return nil, HandleErrorRespectJSON("%v", err)
 	}
 	if designChanged {
+		if err := validateDesignUpdate(design); err != nil {
+			return nil, HandleErrorRespectJSON("%v", err)
+		}
 		in.fields["design"] = design
 	}
 	if cmd.Flags().Changed("notes") && cmd.Flags().Changed("append-notes") {
@@ -125,8 +128,12 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 		} else {
 			ac, _ = cmd.Flags().GetString("acceptance-criteria")
 		}
+		if err := validateAcceptanceUpdate(ac); err != nil {
+			return nil, HandleErrorRespectJSON("%v", err)
+		}
 		in.fields["acceptance_criteria"] = ac
 	}
+	applyTextFieldClears(cmd, in.fields)
 	if cmd.Flags().Changed("external-ref") {
 		externalRef, _ := cmd.Flags().GetString("external-ref")
 		if externalRef == "" {
