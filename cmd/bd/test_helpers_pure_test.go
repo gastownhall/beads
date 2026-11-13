@@ -241,6 +241,32 @@ func saveAndRestoreGlobals(t *testing.T) *savedGlobals {
 	return saved
 }
 
+// saveStorageMode snapshots the storage-mode globals (server and
+// proxied-server mode, the command context, the store, dolt auto-commit) and
+// restores them at cleanup. It also makes commands read the globals (no
+// command context) and turns the shared server off and auto-commit on.
+func saveStorageMode(t *testing.T) {
+	t.Helper()
+	oldServerMode := serverMode
+	oldProxiedServerMode := proxiedServerMode
+	oldCmdCtx := cmdCtx
+	oldStore := store
+	oldUseGlobals := testModeUseGlobals
+	oldDoltAutoCommit := doltAutoCommit
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "0")
+	testModeUseGlobals = true
+	cmdCtx = nil
+	doltAutoCommit = string(doltAutoCommitOn)
+	t.Cleanup(func() {
+		serverMode = oldServerMode
+		proxiedServerMode = oldProxiedServerMode
+		cmdCtx = oldCmdCtx
+		store = oldStore
+		testModeUseGlobals = oldUseGlobals
+		doltAutoCommit = oldDoltAutoCommit
+	})
+}
+
 // runCommandInDir runs a command in the specified directory.
 func runCommandInDir(dir string, name string, args ...string) error {
 	cmd := exec.Command(name, args...)

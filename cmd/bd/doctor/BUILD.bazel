@@ -67,6 +67,7 @@ go_library(
         "//internal/gitenv",
         "//internal/gitignore",
         "//internal/remedy",
+        "//internal/remotecache",
         "//internal/storage",
         "//internal/storage/dberrors",
         "//internal/storage/dolt",

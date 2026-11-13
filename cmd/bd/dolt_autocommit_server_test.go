@@ -31,28 +31,6 @@ func (f *fakeCommitPendingStore) CommitPending(_ context.Context, actor string) 
 	return true, f.err
 }
 
-func saveStorageMode(t *testing.T) {
-	t.Helper()
-	oldServerMode := serverMode
-	oldProxiedServerMode := proxiedServerMode
-	oldCmdCtx := cmdCtx
-	oldStore := store
-	oldUseGlobals := testModeUseGlobals
-	oldDoltAutoCommit := doltAutoCommit
-	t.Setenv("BEADS_DOLT_SHARED_SERVER", "0")
-	testModeUseGlobals = true
-	cmdCtx = nil
-	doltAutoCommit = string(doltAutoCommitOn)
-	t.Cleanup(func() {
-		serverMode = oldServerMode
-		proxiedServerMode = oldProxiedServerMode
-		cmdCtx = oldCmdCtx
-		store = oldStore
-		testModeUseGlobals = oldUseGlobals
-		doltAutoCommit = oldDoltAutoCommit
-	})
-}
-
 func TestCommitPendingIfEmbeddedSkipsServerMode(t *testing.T) {
 	saveStorageMode(t)
 	serverMode = true
