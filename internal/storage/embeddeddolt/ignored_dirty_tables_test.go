@@ -493,3 +493,225 @@ func TestEmbeddedIgnoredCommittableDirtyReconcileRecovers(t *testing.T) {
 		t.Fatalf("unrelated wisp: working = %d, at HEAD = %d; want 1 and 0 (it must stay local)", working, atHead)
 	}
 }
+
+// TestEmbeddedIgnoredCommittableDirtyReadOnlyCommandTolerates is the
+// read-only pin for the same refusal (#5168/#5816 test plan): the read-only
+// command open must not be bricked by the ignored-series dirty-table
+// refusal either. It warns, opens at the current (unmigrated) schema, and
+// runs no migration — every cursor row, HEAD and the dirty user rows stay
+// exactly as they were, so the read serves the old schema until the
+// operator commits the working set.
+func TestEmbeddedIgnoredCommittableDirtyReadOnlyCommandTolerates(t *testing.T) {
+	ctx := t.Context()
+	beadsDir, dataDir := committableIgnoredDirtyFixture(t, false)
+
+	db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	before := committableIgnoredDirtySnapshot(t, ctx, db)
+	_ = cleanup()
+
+	var (
+		readOnly *embeddeddolt.EmbeddedDoltStore
+		openErr  error
+	)
+	warning := captureStderr(t, func() {
+		readOnly, openErr = embeddeddolt.OpenForReadOnlyCommand(ctx, beadsDir, "testdb", "main")
+	})
+	if openErr != nil {
+		t.Fatalf("OpenForReadOnlyCommand = %v, want the DirtyTablesError refusal tolerated (a read-only command must not be bricked by dirty tables)", openErr)
+	}
+	if !strings.Contains(warning, "Warning:") || !strings.Contains(warning, "child_counters") {
+		readOnly.Close()
+		t.Fatalf("read-only open stderr = %q, want a warning naming child_counters", warning)
+	}
+	readOnly.Close()
+
+	db, cleanup, err = embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL (after tolerated open): %v", err)
+	}
+	defer func() { _ = cleanup() }()
+	if after := committableIgnoredDirtySnapshot(t, ctx, db); after != before {
+		t.Fatalf("state after tolerated read-only open =\n%s\nwant unchanged\n%s", after, before)
+	}
+	// Refused holds: the ignored series never ran, so its cursor is still 1
+	// and both reads and (blocked) writes stay on the pre-migration schema
+	// until a commit clears the working set (the reconcile-open recovery
+	// AC-3 pins).
+	if got := ignoredCursorVersion(t, ctx, db); got != 1 {
+		t.Fatalf("ignored cursor = %d, want 1 (no ignored migration may run past the tolerated refusal)", got)
+	}
+}
+
+// TestEmbeddedIgnoredMidPassBackstopRefusesUntyped covers gastownhall/beads#5168
+// AC-4: the ignored-series dirty-table check before any migration runs reads
+// the ignored cursor before the main series. If a main step leaves ignored
+// migrations newly pending (here a step hook drops the wisps sentinel table, so
+// the ignored cursor clamps and ignored 0002, which deletes child_counters rows,
+// is pending again), a mid-pass backstop must still refuse before the ignored
+// series applies. That refusal comes after main steps committed, so it must
+// not be the *schema.DirtyTablesError the working-set-reconcile opens
+// tolerate: a reconcile commit must never checkpoint a half-applied pass.
+func TestEmbeddedIgnoredMidPassBackstopRefusesUntyped(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	dataDir := filepath.Join(beadsDir, "embeddeddolt")
+
+	store, err := embeddeddolt.Open(ctx, beadsDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := store.SetConfig(ctx, "issue_prefix", "testdb"); err != nil {
+		store.Close()
+		t.Fatalf("SetConfig(issue_prefix): %v", err)
+	}
+	parent := &types.Issue{
+		ID:        committableParentID,
+		Title:     "durable parent",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeEpic,
+	}
+	if err := store.CreateIssue(ctx, parent, "tester"); err != nil {
+		store.Close()
+		t.Fatalf("CreateIssue(parent): %v", err)
+	}
+	if _, err := store.CommitAll(ctx, "test: durable parent"); err != nil {
+		store.Close()
+		t.Fatalf("CommitAll: %v", err)
+	}
+	store.Close()
+
+	// Only the latest main migration is pending, the ignored series is at
+	// latest, and committable child_counters is dirty. Neither series'
+	// pending SQL touches child_counters yet, so the check before the
+	// migrations run passes.
+	mainFrom := schema.LatestVersion() - 1
+	db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	for _, q := range []string{
+		"INSERT INTO child_counters (parent_id, last_child) VALUES ('" + committableParentID + "', 7) " +
+			"ON DUPLICATE KEY UPDATE last_child = 7",
+		fmt.Sprintf("DELETE FROM schema_migrations WHERE version > %d", mainFrom),
+	} {
+		if _, err := db.ExecContext(ctx, q); err != nil {
+			_ = cleanup()
+			t.Fatalf("fixture %q: %v", q, err)
+		}
+	}
+	if got, want := ignoredCursorVersion(t, ctx, db), schema.LatestIgnoredVersion(); got != want {
+		_ = cleanup()
+		t.Fatalf("fixture ignored cursor = %d, want %d", got, want)
+	}
+	ignoredRowsBefore := ignoredCursorRows(t, ctx, db)
+	_ = cleanup()
+
+	restore := schema.SetMigrateStepFaultHookForTest(func(ctx context.Context, db schema.DBConn, version int) error {
+		if version != schema.LatestVersion() {
+			return nil
+		}
+		for _, q := range []string{
+			"SET FOREIGN_KEY_CHECKS = 0",
+			"DROP TABLE wisps",
+			"SET FOREIGN_KEY_CHECKS = 1",
+		} {
+			if _, err := db.ExecContext(ctx, q); err != nil {
+				return fmt.Errorf("test hook %q: %w", q, err)
+			}
+		}
+		return nil
+	})
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	applied, err := schema.MigrateUp(ctx, conn)
+	closeConn()
+	restore()
+
+	if err == nil {
+		t.Fatal("MigrateUp = nil, want the mid-pass refusal for dirty child_counters")
+	}
+	var dirtyErr *schema.DirtyTablesError
+	if errors.As(err, &dirtyErr) {
+		t.Fatalf("MigrateUp error = %v, want an error that is NOT *schema.DirtyTablesError (main steps already applied)", err)
+	}
+	if !strings.Contains(err.Error(), "child_counters") {
+		t.Fatalf("MigrateUp error = %v, want it to name child_counters", err)
+	}
+	if applied != 1 {
+		t.Fatalf("MigrateUp applied = %d, want 1 (the latest main step applied and committed before the backstop refused)", applied)
+	}
+
+	db, cleanup, err = embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL (post-refusal): %v", err)
+	}
+	defer func() {
+		if cleanup != nil {
+			_ = cleanup()
+		}
+	}()
+	var wispsTables int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisps'",
+	).Scan(&wispsTables); err != nil {
+		t.Fatalf("probe wisps table: %v", err)
+	}
+	if wispsTables != 0 {
+		t.Fatal("wisps table was recreated: the newly pending ignored migrations applied despite the dirty child_counters")
+	}
+	if after := ignoredCursorRows(t, ctx, db); after != ignoredRowsBefore {
+		t.Fatalf("ignored cursor rows after refusal =\n%s\nwant unchanged\n%s", after, ignoredRowsBefore)
+	}
+	var lastChild int
+	if err := db.QueryRowContext(ctx,
+		"SELECT last_child FROM child_counters WHERE parent_id = '"+committableParentID+"'",
+	).Scan(&lastChild); err != nil {
+		t.Fatalf("read child_counters: %v", err)
+	}
+	if lastChild != 7 {
+		t.Fatalf("child_counters.last_child = %d, want the dirty 7 preserved", lastChild)
+	}
+	_ = cleanup()
+	cleanup = nil
+
+	// Recovery is the next open: its check before any migration runs
+	// refuses with the typed error the working-set-reconcile opens tolerate.
+	reopened, openErr := embeddeddolt.Open(ctx, beadsDir, "testdb", "main")
+	if openErr == nil {
+		reopened.Close()
+		t.Fatal("Open = nil, want the next open's typed refusal naming child_counters")
+	}
+	var typed *schema.DirtyTablesError
+	if !errors.As(openErr, &typed) {
+		t.Fatalf("Open error = %T (%v), want an error wrapping *schema.DirtyTablesError", openErr, openErr)
+	}
+	if !slices.Equal(typed.Tables, []string{"child_counters"}) {
+		t.Fatalf("DirtyTablesError.Tables = %v, want [child_counters]", typed.Tables)
+	}
+}
+
+func ignoredCursorRows(t *testing.T, ctx context.Context, db *sql.DB) string {
+	t.Helper()
+	rows, err := db.QueryContext(ctx,
+		"SELECT CONCAT_WS(':', version, COALESCE(content_hash, '')) FROM ignored_schema_migrations ORDER BY version")
+	if err != nil {
+		t.Fatalf("read ignored cursor rows: %v", err)
+	}
+	defer rows.Close()
+	var b strings.Builder
+	for rows.Next() {
+		var row string
+		if err := rows.Scan(&row); err != nil {
+			t.Fatalf("scan ignored cursor row: %v", err)
+		}
+		b.WriteString(row + "\n")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate ignored cursor rows: %v", err)
+	}
+	return b.String()
+}

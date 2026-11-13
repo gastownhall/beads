@@ -173,6 +173,87 @@ func TestIgnoredPendingMigrationDirtyTablesDetectsWispDependencies(t *testing.T)
 	}
 }
 
+// TestMigrateUpRefusesIgnoredPendingDirtyTableBeforeMainMigrations pins the
+// #5816/#5168 refusal ordering: the ignored series' pending intersection
+// reads after the main series' preflight and refuses, typed, BEFORE any
+// numbered migration runs. The dirty `child_counters` table is untouched by
+// every pending main migration (the mocked cursor sits at 0061, and nothing
+// from 0062 on alters it) but touched by the ignored series' 0002, whose
+// DELETE runs inside a PREPARE string the raw-text scan must still attribute
+// to the table. With the ignored cursor table absent, every ignored
+// migration is pending, so the ignored intersection alone refuses — naming
+// only `child_counters` — and the pass issues no statement beyond its reads:
+// sqlmock's ordered expectations fail the next statement that is not the
+// deferred dolt_transaction_commit restoration, so met expectations prove
+// no migration write (DDL or cursor INSERT) happened before the refusal. The
+// suspend/restore pair additionally pins that the refusal unwinds through
+// the #4470 restoration.
+func TestMigrateUpRefusesIgnoredPendingDirtyTableBeforeMainMigrations(t *testing.T) {
+	failOnSwallowedAdvisory(t)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin mock connection: %v", err)
+	}
+	defer conn.Close()
+
+	cursor := eventsFlipVersion - 1
+
+	expectIgnorePatternSeedNoop(mock, cursor)
+	expectIgnoredCursorHealNoop(mock)
+	// migrationWorkNeeded: main cursor behind -> work needed (short-circuits
+	// before the ignored series is consulted).
+	expectCursorProbe(mock, "schema_migrations", true)
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", cursor)
+	expectTransactionCommitSuspend(mock, 1)
+	// dirtyBeforeAll, then committableDirtyTables: `child_counters` dirty in
+	// the working set, never staged, and never one of the ignored names.
+	expectDirtyDoltStatusRow(mock, "child_counters", false)
+	expectDirtyDoltStatusRow(mock, "child_counters", false)
+	// The pre-pass main cursor (drives the aux-rekey dirtyBefore exemption).
+	expectCursorProbe(mock, "schema_migrations", true)
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", cursor)
+	// auxRekeyExemptTables: no ignored cursor table, no local_metadata, so
+	// nothing is exempted and the dirty table stays in dirtyBefore.
+	expectCursorProbe(mock, "ignored_schema_migrations", false)
+	for range auxRekeyPasses {
+		mock.ExpectQuery(`SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES`).
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	}
+	// Main intersection: cursor read (the flow's last read before the ignored
+	// series' own intersection below), nothing touching `child_counters`.
+	expectCursorProbe(mock, "schema_migrations", true)
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", cursor)
+	// Ignored intersection: no ignored cursor table, so its read stops at the
+	// existence probe; the pending ignored 0002 (DELETE FROM child_counters,
+	// inside a PREPARE string) refuses.
+	expectCursorProbe(mock, "ignored_schema_migrations", false)
+	// The deferred dolt_transaction_commit restoration is the refused flow's
+	// last statement — nothing between it and the refusal wrote.
+	expectTransactionCommitRestore(mock, 1, nil)
+
+	applied, err := MigrateUp(ctx, conn)
+	if applied != 0 {
+		t.Fatalf("MigrateUp() applied = %d, want 0 (no numbered migration runs)", applied)
+	}
+	var dirtyErr *DirtyTablesError
+	if !errors.As(err, &dirtyErr) {
+		t.Fatalf("MigrateUp() error = %v (%T), want *DirtyTablesError", err, err)
+	}
+	if len(dirtyErr.Tables) != 1 || dirtyErr.Tables[0] != "child_counters" {
+		t.Fatalf("DirtyTablesError.Tables = %v, want [child_counters]", dirtyErr.Tables)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
 func TestMigrationSQLTouchesTableStatementForms(t *testing.T) {
 	tests := []struct {
 		name string
