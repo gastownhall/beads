@@ -116,3 +116,50 @@ func TestSyncMigrateJournalDir_SkipsOnlyWindows(t *testing.T) {
 	t.Cleanup(func() { _ = fresh.Close() })
 	require.NoError(t, syncMigrateJournalDir(runtime.GOOS, fresh))
 }
+
+// TestMigrateJournal_FilesystemErrorsStillReported pins that the Windows fix
+// narrows only the directory flush: every other filesystem failure in journal
+// persistence keeps its existing error and cleanup behavior, before and after
+// the fix.
+func TestMigrateJournal_FilesystemErrorsStillReported(t *testing.T) {
+	t.Run("save into missing directory", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "missing")
+		j := plainDirMigrationJournal(t, missing, migratePrepared, 1)
+		err := saveMigrateJournal(missing, j)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, os.ErrNotExist)
+	})
+
+	t.Run("remove in missing directory", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "missing")
+		err := removeMigrateJournal(missing)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, os.ErrNotExist)
+		assert.Contains(t, err.Error(), "opening migration directory: ")
+	})
+
+	t.Run("journal path occupied by a directory", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		occupied := migrateJournalPath(beadsDir)
+		require.NoError(t, os.Mkdir(occupied, 0o755))
+		sentinel := []byte("journal-path-sentinel")
+		require.NoError(t, os.WriteFile(filepath.Join(occupied, "keep"), sentinel, 0o600))
+
+		j := plainDirMigrationJournal(t, beadsDir, migratePrepared, 1)
+		err := saveMigrateJournal(beadsDir, j)
+		require.Error(t, err, "renaming onto a directory must fail")
+		got, readErr := os.ReadFile(filepath.Join(occupied, "keep"))
+		require.NoError(t, readErr)
+		assert.Equal(t, sentinel, got, "failed save must not touch the occupied journal path")
+
+		residue, globErr := filepath.Glob(filepath.Join(beadsDir, ".dolt-mode-migration-*.tmp"))
+		require.NoError(t, globErr)
+		assert.Empty(t, residue, "failed save must clean its temporary file")
+
+		err = removeMigrateJournal(beadsDir)
+		require.Error(t, err, "removing a non-empty directory must fail")
+		got, readErr = os.ReadFile(filepath.Join(occupied, "keep"))
+		require.NoError(t, readErr)
+		assert.Equal(t, sentinel, got, "failed removal must not touch the occupied journal path")
+	})
+}
