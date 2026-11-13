@@ -133,4 +133,54 @@ func TestEmbeddedMetadatalessWorkspaceRefusesSiblingDatabase(t *testing.T) {
 			w.requireJSONLUnchanged(t)
 		})
 	}
+
+	// AC-2: a mutating command refuses before it can create the sibling or
+	// import issues.jsonl into it, whether or not the identity check is
+	// waived, and restoring the metadata shows exactly the original issues.
+	for _, tc := range []struct {
+		name string
+		env  []string
+	}{
+		{name: "write first"},
+		{name: "write first identity check disabled", env: []string{"BEADS_SKIP_IDENTITY_CHECK=1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newMetadatalessWorkspace(t, true)
+			stdout, stderr, err := w.run(t, tc.env, "create", "--silent", "stray write")
+			w.requireRefused(t, stdout, stderr, err, "myproj")
+			w.requireJSONLUnchanged(t)
+			w.requireOriginalIssuesAfterRestore(t)
+		})
+	}
+
+	// AC-2: the base sequence that diverged writes: a read created the
+	// sibling, and the next write imported issues.jsonl into it and wrote
+	// there. Both now refuse. This fixture does not export over
+	// issues.jsonl, so an import would have had something to hydrate.
+	t.Run("read then write", func(t *testing.T) {
+		w := newMetadatalessWorkspace(t, false)
+		stdout, stderr, err := w.run(t, nil, "list")
+		w.requireRefused(t, stdout, stderr, err, "myproj")
+		stdout, stderr, err = w.run(t, []string{"BEADS_SKIP_IDENTITY_CHECK=1"}, "create", "--silent", "stray write")
+		w.requireRefused(t, stdout, stderr, err, "myproj")
+		w.requireJSONLUnchanged(t)
+		w.requireOriginalIssuesAfterRestore(t)
+	})
+}
+
+// requireOriginalIssuesAfterRestore puts the metadata back and fails unless
+// the workspace lists exactly the one issue it held before the removal.
+func (w *metadatalessWorkspace) requireOriginalIssuesAfterRestore(t *testing.T) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(w.beadsDir, "metadata.json"), w.metadata, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, issue := range bdListJSON(t, w.bd, w.dir, "--all") {
+		ids = append(ids, issue.ID)
+	}
+	if !reflect.DeepEqual(ids, []string{w.issueID}) {
+		t.Fatalf("after restoring metadata.json the workspace lists %v, want only the original %s", ids, w.issueID)
+	}
+	w.requireDatabases(t, "myproj")
 }
