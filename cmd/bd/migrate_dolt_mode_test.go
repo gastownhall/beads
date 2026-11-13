@@ -958,6 +958,50 @@ func TestSyncMigrateJournalDir_SkipsOnlyWindows(t *testing.T) {
 	require.NoError(t, syncMigrateJournalDir(runtime.GOOS, dir))
 }
 
+// TestMigrateJournal_FilesystemErrorsStillReported pins that skipping the
+// Windows directory flush leaves every other journal persistence failure
+// reported, with its existing wrapping and cleanup.
+func TestMigrateJournal_FilesystemErrorsStillReported(t *testing.T) {
+	t.Run("missing parent", func(t *testing.T) {
+		beadsDir := filepath.Join(t.TempDir(), "missing")
+		require.ErrorIs(t, saveMigrateJournal(beadsDir, &migrateJournal{}), os.ErrNotExist)
+		err := removeMigrateJournal(beadsDir)
+		require.ErrorIs(t, err, os.ErrNotExist)
+		require.True(t, strings.HasPrefix(err.Error(), "opening migration directory: "), "got %q", err)
+	})
+	t.Run("rename destination is directory", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		path := migrateJournalPath(beadsDir)
+		require.NoError(t, os.Mkdir(path, 0o700))
+		marker := filepath.Join(path, "keep")
+		require.NoError(t, os.WriteFile(marker, []byte("unchanged"), 0o600))
+		var renameErr *os.LinkError
+		require.ErrorAs(t, saveMigrateJournal(beadsDir, &migrateJournal{}), &renameErr)
+		require.Equal(t, path, renameErr.New)
+		contents, err := os.ReadFile(marker)
+		require.NoError(t, err)
+		require.Equal(t, "unchanged", string(contents))
+		entries, err := os.ReadDir(beadsDir)
+		require.NoError(t, err)
+		require.Len(t, entries, 1, "failed save must not leave temporary files")
+		require.Equal(t, migrateJournalFileName, entries[0].Name())
+		require.True(t, entries[0].IsDir())
+	})
+	t.Run("remove nonempty directory", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		path := migrateJournalPath(beadsDir)
+		require.NoError(t, os.Mkdir(path, 0o700))
+		marker := filepath.Join(path, "keep")
+		require.NoError(t, os.WriteFile(marker, []byte("unchanged"), 0o600))
+		var removeErr *os.PathError
+		require.ErrorAs(t, removeMigrateJournal(beadsDir), &removeErr)
+		require.Equal(t, path, removeErr.Path)
+		contents, err := os.ReadFile(marker)
+		require.NoError(t, err)
+		require.Equal(t, "unchanged", string(contents))
+	})
+}
+
 func TestMigrateJournal_UnknownPhaseFailsClosed(t *testing.T) {
 	beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
 	path := migrateJournalPath(beadsDir)
