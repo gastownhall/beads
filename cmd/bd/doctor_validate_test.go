@@ -297,3 +297,60 @@ func TestValidateOverallOK(t *testing.T) {
 		t.Error("Expected false when a check has error")
 	}
 }
+
+// TestValidateCheck_PollutionGateMatchesSharedClassifier pins GH#5025's
+// gate/report agreement: the full doctor's Test Pollution gate must use the
+// same classifier as the detailed pollution report. The old SQL gate was
+// case-sensitive (missing "Test-quality leftover"), had no status filter
+// (counting a closed "test-lowercase leftover") and matched ID shapes the
+// classifier rightly ignores (an ordinary-titled issue whose ID starts with
+// "test-").
+func TestValidateCheck_PollutionGateMatchesSharedClassifier(t *testing.T) {
+	tmpDir, store := setupValidateTestDB(t, "val")
+	ctx := context.Background()
+
+	// Eligible for the classifier: mixed-case test-style title, no
+	// description, open, no authored fields, no edges or comments. The old
+	// SQL gate missed this one (case-sensitive LIKE).
+	if err := store.CreateIssue(ctx, &types.Issue{
+		Title: "Test-quality leftover", Description: "", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+	}, "test"); err != nil {
+		t.Fatalf("CreateIssue(mixed-case leftover): %v", err)
+	}
+	// Ineligible for the classifier (closed) but counted by the old SQL
+	// gate, which had no status filter.
+	if err := store.CreateIssue(ctx, &types.Issue{
+		Title: "test-lowercase leftover", Description: "", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+	}, "test"); err != nil {
+		t.Fatalf("CreateIssue(lowercase leftover): %v", err)
+	}
+	if _, err := store.DB().ExecContext(ctx,
+		`UPDATE issues SET status = 'closed' WHERE title = 'test-lowercase leftover'`); err != nil {
+		t.Fatalf("close lowercase leftover: %v", err)
+	}
+	// Ineligible for the classifier (ordinary title) but counted by the old
+	// SQL gate, whose `id LIKE 'test-%'` arm matched the ID shape.
+	if _, err := store.DB().ExecContext(ctx,
+		`INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"test-ordinary", "Ordinary titled work", "", "", "", "", "open", 2, "task",
+	); err != nil {
+		t.Fatalf("insert ordinary-titled test-ID row: %v", err)
+	}
+	store.Close()
+
+	checks := collectValidateChecks(tmpDir)
+
+	for _, cr := range checks {
+		if cr.check.Name != "Test Pollution" {
+			continue
+		}
+		if cr.check.Status != statusWarning {
+			t.Errorf("Test Pollution status = %q, want %q", cr.check.Status, statusWarning)
+		}
+		if cr.check.Message != "1 potential test issue(s) detected" {
+			t.Errorf("Test Pollution message = %q, want %q (the gate and the shared classifier must agree on the flagged set)", cr.check.Message, "1 potential test issue(s) detected")
+		}
+		return
+	}
+	t.Error("Test Pollution check not found")
+}

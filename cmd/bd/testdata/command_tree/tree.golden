@@ -1771,9 +1771,23 @@ bd doctor
     |     (stale JSONL, SQLite files, cruft .beads dirs). Use with --clean.
     |   - conventions: Check for convention drift (lint warnings, stale
     |     issues, orphaned issues). Advisory only - warns, never blocks.
-    |   - pollution: Detect and optionally clean test issues from database
+    |   - pollution: List possible test leftovers for review (heuristic);
+    |     --clean deletes them after confirmation
     |   - validate: Run focused data-integrity checks (duplicates, orphaned
     |     deps, test pollution, git conflicts). Use with --fix to auto-repair.
+    |
+    | Pollution Check (--check=pollution):
+    |   Lists issues that look like leftovers of test runs: a test-style title
+    |   (test-, tmp_, debug-, ...) with no description, or a generic phrase such
+    |   as "test issue" with a description under 20 bytes once trimmed, and in
+    |   both cases no design, acceptance criteria or notes. Closed issues, epics,
+    |   pinned issues, templates, issues from another tracker or system, and
+    |   issues with any dependency or comment are never listed. Real work with
+    |   little or no content can still match, and scores rank heuristic strength,
+    |   not probability: review each match with 'bd show <id>' first. --clean is
+    |   an explicit bulk delete: after confirmation it re-checks the reported
+    |   issues, backs up the ones that still match and deletes them. Edits made
+    |   after that re-check are not seen.
     |
     | Deep Validation Mode (--deep):
     |   Validate full graph integrity. May be slow on large databases.
@@ -1838,8 +1852,8 @@ bd doctor
     |   bd doctor --check=artifacts           # Show classic artifacts (JSONL, SQLite, cruft dirs)
     |   bd doctor --check=artifacts --clean  # Delete safe-to-delete artifacts (with confirmation)
     |   bd doctor --check=conventions        # Convention drift check (lint, stale, orphans)
-    |   bd doctor --check=pollution          # Show potential test issues
-    |   bd doctor --check=pollution --clean  # Delete test issues (with confirmation)
+    |   bd doctor --check=pollution          # List possible test leftovers to review
+    |   bd doctor --check=pollution --clean  # Delete reported matches (confirmation, backup)
     |   bd doctor --check=validate         # Data-integrity checks only
     |   bd doctor --check=validate --fix   # Auto-fix data-integrity issues
     |   bd doctor --deep             # Full graph integrity validation
@@ -1850,7 +1864,7 @@ bd doctor
   flag --agent type=bool default="false" usage="Agent-facing diagnostic mode: rich context for AI agents (ZFC-compliant)"
   flag --check type=string default="" usage="Run specific check in detail (e.g., 'pollution')"
   flag --check-health type=bool default="false" usage="Quick health check for git hooks (silent on success)"
-  flag --clean type=bool default="false" usage="For pollution check: delete detected test issues"
+  flag --clean type=bool default="false" usage="For pollution check: delete the reported matches (with confirmation and backup)"
   flag --deep type=bool default="false" usage="Validate full graph integrity"
   flag --dry-run type=bool default="false" usage="Preview fixes without making changes"
   flag --fix type=bool default="false" usage="Automatically fix issues where possible"
