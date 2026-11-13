@@ -296,3 +296,145 @@ func TestRenameFailureLeavesBeadGatesPending(t *testing.T) {
 		}
 	}
 }
+
+// seedRepairIssues creates issues with explicit IDs, as a store absorbed from
+// several trackers holds them.
+func seedRepairIssues(t *testing.T, ctx context.Context, st storage.DoltStorage, issues ...*types.Issue) {
+	t.Helper()
+	for _, issue := range issues {
+		if issue.Status == "" {
+			issue.Status = types.StatusOpen
+		}
+		if issue.IssueType == "" {
+			issue.IssueType = types.TypeTask
+		}
+		if issue.Priority == 0 {
+			issue.Priority = 2
+		}
+		if err := st.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("create %s: %v", issue.ID, err)
+		}
+	}
+}
+
+// repairAll runs the repair over every stored issue, as bd rename-prefix
+// --repair does.
+func repairAll(t *testing.T, ctx context.Context, st storage.DoltStorage, target string, dryRun bool) error {
+	t.Helper()
+	all, err := st.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	return repairPrefixes(ctx, st, "test", target, all, detectPrefixes(all), dryRun)
+}
+
+// storedIDs returns the set of IDs now stored.
+func storedIDs(t *testing.T, ctx context.Context, st storage.DoltStorage) map[string]*types.Issue {
+	t.Helper()
+	all, err := st.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	got := make(map[string]*types.Issue, len(all))
+	for _, issue := range all {
+		got[issue.ID] = issue
+	}
+	return got
+}
+
+func TestRepairPrefixesKeepsSuffixes(t *testing.T) {
+	// GH#6591 AC-1: --repair keeps each off-prefix issue's suffix when its
+	// destination is free, keeps target IDs, and carries data and edges.
+	ctx := context.Background()
+	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+	seedRepairIssues(t, ctx, testStore,
+		&types.Issue{ID: "taxdb-u6ch", Title: "Tax work", Description: "payload body", Priority: 1},
+		&types.Issue{ID: "cre-db-c2a", Title: "CRE work", Notes: "depends on taxdb-u6ch"},
+		&types.Issue{ID: "kb-hand", Title: "Hand named"},
+	)
+	if err := testStore.AddLabel(ctx, "taxdb-u6ch", "finance", "test"); err != nil {
+		t.Fatalf("add label: %v", err)
+	}
+	if err := testStore.AddDependency(ctx, &types.Dependency{IssueID: "cre-db-c2a", DependsOnID: "taxdb-u6ch", Type: types.DepBlocks}, "test"); err != nil {
+		t.Fatalf("add dependency: %v", err)
+	}
+	if err := testStore.AddDependency(ctx, &types.Dependency{IssueID: "kb-hand", DependsOnID: "cre-db-c2a", Type: types.DepBlocks}, "test"); err != nil {
+		t.Fatalf("add dependency: %v", err)
+	}
+
+	if err := repairAll(t, ctx, testStore, "kb", false); err != nil {
+		t.Fatalf("repair failed: %v", err)
+	}
+
+	got := storedIDs(t, ctx, testStore)
+	if len(got) != 3 {
+		t.Fatalf("stored ids after repair = %v, want exactly kb-u6ch, kb-c2a, kb-hand", got)
+	}
+	for _, want := range []string{"kb-u6ch", "kb-c2a", "kb-hand"} {
+		if got[want] == nil {
+			t.Fatalf("expected %s after repair; ids now: %v", want, got)
+		}
+	}
+	if tax := got["kb-u6ch"]; tax.Title != "Tax work" || tax.Description != "payload body" || tax.Priority != 1 {
+		t.Errorf("kb-u6ch lost its data: %+v", tax)
+	}
+	if notes := got["kb-c2a"].Notes; notes != "depends on kb-u6ch" {
+		t.Errorf("kb-c2a notes = %q, want the reference rewritten to kb-u6ch", notes)
+	}
+	labels, err := testStore.GetLabels(ctx, "kb-u6ch")
+	if err != nil || len(labels) != 1 || labels[0] != "finance" {
+		t.Errorf("kb-u6ch labels = %v (err %v), want [finance]", labels, err)
+	}
+	for _, edge := range []struct{ from, to string }{{"kb-c2a", "kb-u6ch"}, {"kb-hand", "kb-c2a"}} {
+		deps, err := testStore.GetDependencyRecords(ctx, edge.from)
+		if err != nil {
+			t.Fatalf("dependencies of %s: %v", edge.from, err)
+		}
+		if len(deps) != 1 || deps[0].DependsOnID != edge.to {
+			t.Errorf("dependencies of %s = %+v, want one edge to %s", edge.from, deps, edge.to)
+		}
+	}
+	if prefix, err := testStore.GetConfig(ctx, "issue_prefix"); err != nil || prefix != "kb" {
+		t.Errorf("issue_prefix = %q (err %v), want kb", prefix, err)
+	}
+}
+
+func TestRepairPrefixesKeepsSuffixesWithoutCollision(t *testing.T) {
+	// GH#6591: consolidating prefixes with --repair should keep each issue's
+	// suffix (cre-db-c2a -> kb-c2a) when the target id is free, instead of
+	// minting a fresh hash id for every off-prefix issue.
+	ctx := context.Background()
+	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+
+	for _, issue := range []*types.Issue{
+		{ID: "kb-u6ch", Title: "Kept", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "cre-db-c2a", Title: "Other family", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "taxdb-5su1", Title: "Third family", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+	} {
+		if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("create %s: %v", issue.ID, err)
+		}
+	}
+
+	allIssues, err := testStore.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if err := repairPrefixes(ctx, testStore, "test", "kb", allIssues, detectPrefixes(allIssues), false); err != nil {
+		t.Fatalf("repair failed: %v", err)
+	}
+
+	allIssues, err = testStore.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("search after repair: %v", err)
+	}
+	got := map[string]bool{}
+	for _, issue := range allIssues {
+		got[issue.ID] = true
+	}
+	for _, want := range []string{"kb-u6ch", "kb-c2a", "kb-5su1"} {
+		if !got[want] {
+			t.Errorf("expected suffix-preserving id %s after repair; ids now: %v", want, got)
+		}
+	}
+}
