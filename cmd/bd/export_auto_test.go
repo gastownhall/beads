@@ -2441,3 +2441,94 @@ func jsonlRecordsByID(t *testing.T, path string) map[string]map[string]interface
 	}
 	return out
 }
+
+// TestAutoExportReadCommandsAndChainedClosesGH4135 reproduces the two
+// concrete embedded-mode claims of GH#4135: (2a) read commands against an
+// empty database with export.auto on must not truncate or delete the
+// populated issues.jsonl, and (6) several `bd close` calls run back to back
+// in one shell invocation must all persist.
+func TestAutoExportReadCommandsAndChainedClosesGH4135(t *testing.T) {
+	bd := buildBDForInitTests(t)
+	dir := t.TempDir()
+	env := autoExportDataLossTestEnv(dir)
+
+	run := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = dir
+		cmd.Env = env
+		out, _ := cmd.CombinedOutput()
+		return string(out)
+	}
+	mustRun := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = dir
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd %v failed: %v\n%s", args, err, out)
+		}
+		return string(out)
+	}
+
+	mustRun("init", "--prefix", "gh", "--non-interactive")
+	jsonlPath := filepath.Join(dir, ".beads", "issues.jsonl")
+	original := []byte(`{"_type":"issue","id":"gh-1","title":"Tracked in git","priority":1,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}` + "\n")
+	if err := os.WriteFile(jsonlPath, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun("config", "set", "export.auto", "true")
+
+	for _, args := range [][]string{{"count"}, {"list"}, {"show", "gh-1"}, {"count"}} {
+		// show misses gh-1 in the empty database and exits non-zero;
+		// count and list must succeed.
+		if args[0] == "show" {
+			run(args...)
+		} else {
+			mustRun(args...)
+		}
+		got, err := os.ReadFile(jsonlPath)
+		if err != nil {
+			t.Fatalf("2a: bd %v against an empty DB removed issues.jsonl: %v", args, err)
+		}
+		if string(got) != string(original) {
+			t.Fatalf("2a: bd %v against an empty DB rewrote issues.jsonl:\n%s", args, got)
+		}
+	}
+
+	// Failure mode 6: chained closes in one shell invocation.
+	if err := os.Remove(jsonlPath); err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, title := range []string{"A", "B", "C"} {
+		out := mustRun("create", title, "--json")
+		var created struct {
+			ID string `json:"id"`
+		}
+		if i := strings.Index(out, "{"); i < 0 || json.NewDecoder(strings.NewReader(out[i:])).Decode(&created) != nil || created.ID == "" {
+			t.Fatalf("6: parse bd create %s:\n%s", title, out)
+		}
+		id := created.ID
+		ids = append(ids, id)
+	}
+	sh := exec.Command("sh", "-c", fmt.Sprintf(`"$BD" close %s -r one && "$BD" close %s -r two && "$BD" close %s -r three`, ids[0], ids[1], ids[2]))
+	sh.Dir = dir
+	sh.Env = append(append([]string{}, env...), "BD="+bd)
+	if out, err := sh.CombinedOutput(); err != nil {
+		t.Fatalf("6: chained close failed: %v\n%s", err, out)
+	}
+	for _, id := range ids {
+		var shown []struct {
+			Status string `json:"status"`
+		}
+		out := mustRun("show", id, "--json")
+		if err := json.Unmarshal([]byte(out[strings.Index(out, "["):]), &shown); err != nil || len(shown) != 1 {
+			t.Fatalf("6: parse bd show %s: %v\n%s", id, err, out)
+		}
+		if shown[0].Status != "closed" {
+			t.Fatalf("6: %s status = %q after chained close, want closed", id, shown[0].Status)
+		}
+	}
+}

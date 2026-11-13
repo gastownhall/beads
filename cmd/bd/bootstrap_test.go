@@ -2956,7 +2956,7 @@ func TestServerClonePortIgnoresAnAncestorDoltPort(t *testing.T) {
 			if err := cfg.Save(beadsDir); err != nil {
 				t.Fatal(err)
 			}
-			if err := createConfigYaml(beadsDir, false, ""); err != nil {
+			if err := createConfigYaml(beadsDir); err != nil {
 				t.Fatal(err)
 			}
 			config.ResetForTesting()
@@ -3059,7 +3059,7 @@ func TestServerClonePortReadsTheUserLayers(t *testing.T) {
 			if err := cfg.Save(beadsDir); err != nil {
 				t.Fatal(err)
 			}
-			if err := createConfigYaml(beadsDir, false, ""); err != nil {
+			if err := createConfigYaml(beadsDir); err != nil {
 				t.Fatal(err)
 			}
 			loadClonePortConfig(t, beadsDir)
@@ -3273,7 +3273,7 @@ func TestWarmUpSyncedStoreOpensWhereTheCloneLanded(t *testing.T) {
 	if err := cfg.Save(beadsDir); err != nil {
 		t.Fatal(err)
 	}
-	if err := createConfigYaml(beadsDir, false, ""); err != nil {
+	if err := createConfigYaml(beadsDir); err != nil {
 		t.Fatal(err)
 	}
 	warmupHost, warmupPort := "", 0
