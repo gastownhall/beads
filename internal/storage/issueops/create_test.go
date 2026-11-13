@@ -954,3 +954,92 @@ func expectDepBatchReads(mock sqlmock.Sqlmock, issueTargets, ids []driver.Value,
 		}
 	}
 }
+
+// TestResetCreateIDsIfRolledBack pins the reset contract the stores rely on
+// when a create fails after minting into the caller's structs (GH#8457).
+// SnapshotUnsetCreateIDs records only the ID fields the caller left empty —
+// issue IDs, dependency IssueIDs, comment IDs; nil issues, dependencies and
+// comments are skipped — and ResetCreateIDsIfRolledBack empties exactly those
+// when the error means the transaction rolled back: every error except one
+// carrying storage.ErrCommitIndeterminate (directly, wrapped, or inside
+// errors.Join), where the row may have committed and the minted IDs must
+// stay. The input error is returned unchanged in every case, and
+// caller-supplied IDs are never cleared in any case.
+func TestResetCreateIDsIfRolledBack(t *testing.T) {
+	newFixture := func() (auto, explicit *types.Issue) {
+		auto = &types.Issue{
+			Title:     "auto-minted",
+			IssueType: types.TypeTask,
+			Dependencies: []*types.Dependency{
+				{DependsOnID: "test-parent", Type: types.DepParentChild}, // IssueID left empty
+				nil,
+			},
+			Comments: []*types.Comment{
+				{Author: "tester", Text: "fresh"}, // ID left empty
+				nil,
+			},
+		}
+		explicit = &types.Issue{
+			ID:        "test-explicit",
+			IssueType: types.TypeTask,
+			Dependencies: []*types.Dependency{{
+				IssueID:     "test-explicit",
+				DependsOnID: "test-other",
+				Type:        types.DepBlocks,
+			}},
+			Comments: []*types.Comment{{ID: "test-comment-1", Author: "tester", Text: "supplied"}},
+		}
+		return auto, explicit
+	}
+	// mintInto simulates what a create does inside the transaction: it fills
+	// the caller's empty ID fields from the minted issue ID.
+	mintInto := func(auto *types.Issue) {
+		auto.ID = "test-minted"
+		auto.Dependencies[0].IssueID = "test-minted"
+		auto.Comments[0].ID = "test-minted-comment"
+	}
+
+	for _, tc := range []struct {
+		name      string
+		err       error
+		wantReset bool
+	}{
+		{name: "plain error resets", err: types.ErrFieldTooLong, wantReset: true},
+		{name: "wrapped plain error resets", err: fmt.Errorf("create: %w", types.ErrFieldTooLong), wantReset: true},
+		{name: "wrapped indeterminate keeps", err: fmt.Errorf("commit: %w", storage.ErrCommitIndeterminate)},
+		{name: "joined indeterminate keeps", err: errors.Join(context.Canceled, storage.ErrCommitIndeterminate)},
+		{name: "nil keeps", err: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			auto, explicit := newFixture()
+			reset := SnapshotUnsetCreateIDs([]*types.Issue{auto, explicit, nil})
+			mintInto(auto)
+			got := ResetCreateIDsIfRolledBack(tc.err, reset)
+
+			if tc.err == nil {
+				if got != nil {
+					t.Fatalf("ResetCreateIDsIfRolledBack(nil) = %v, want nil", got)
+				}
+			} else if !errors.Is(got, tc.err) {
+				t.Fatalf("ResetCreateIDsIfRolledBack returned %v, want the input error %v unchanged", got, tc.err)
+			}
+
+			if tc.wantReset {
+				if auto.ID != "" || auto.Dependencies[0].IssueID != "" || auto.Comments[0].ID != "" {
+					t.Fatalf("rolled-back create left minted IDs on the struct: issue=%q dep=%q comment=%q, want all empty",
+						auto.ID, auto.Dependencies[0].IssueID, auto.Comments[0].ID)
+				}
+			} else {
+				if auto.ID != "test-minted" || auto.Dependencies[0].IssueID != "test-minted" || auto.Comments[0].ID != "test-minted-comment" {
+					t.Fatalf("kept-outcome error cleared minted IDs: issue=%q dep=%q comment=%q, want them kept",
+						auto.ID, auto.Dependencies[0].IssueID, auto.Comments[0].ID)
+				}
+			}
+			// Caller-supplied values are never recorded, so never cleared.
+			if explicit.ID != "test-explicit" || explicit.Dependencies[0].IssueID != "test-explicit" || explicit.Comments[0].ID != "test-comment-1" {
+				t.Fatalf("caller-supplied IDs changed: issue=%q dep=%q comment=%q",
+					explicit.ID, explicit.Dependencies[0].IssueID, explicit.Comments[0].ID)
+			}
+		})
+	}
+}
