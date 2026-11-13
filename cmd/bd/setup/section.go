@@ -146,3 +146,16 @@ func InstallSharedFile(path, body string) (bool, error) {
 	}
 	return true, nil
 }
+
+// CheckSharedFile reads path, following a link since it only reads, and
+// returns what it holds of bd's. A missing file is the os.ReadFile error;
+// malformed markers return SharedSectionMalformed and an
+// ErrMalformedSection error.
+func CheckSharedFile(path string) (SharedSectionState, error) {
+	data, err := os.ReadFile(path) // #nosec G304 -- a built-in recipe's path
+	if err != nil {
+		return SharedSectionNone, err
+	}
+	_, _, state, err := sharedSectionSpan(string(data))
+	return state, err
+}

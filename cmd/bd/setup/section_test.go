@@ -109,3 +109,30 @@ func TestSharedSectionUpsertReplacesInPlace(t *testing.T) {
 		})
 	}
 }
+
+func TestSharedSectionCheckFile(t *testing.T) {
+	dir := t.TempDir()
+	for _, tt := range []struct {
+		name, content string
+		want          SharedSectionState
+		malformed     bool
+	}{
+		{name: "user content only", content: "# Mine\n", want: SharedSectionNone},
+		{name: "section", content: "# Mine\n\n" + sharedWrapped(), want: SharedSectionPresent},
+		{name: "dangling BEGIN", content: agentsBeginMarker + "\n", want: SharedSectionMalformed, malformed: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(dir, strings.ReplaceAll(tt.name, " ", "-")+".md")
+			if err := os.WriteFile(path, []byte(tt.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			got, err := CheckSharedFile(path)
+			if got != tt.want || errors.Is(err, ErrMalformedSection) != tt.malformed {
+				t.Fatalf("CheckSharedFile = %v, %v; want %v, malformed %v", got, err, tt.want, tt.malformed)
+			}
+		})
+	}
+	if _, err := CheckSharedFile(filepath.Join(dir, "missing.md")); !os.IsNotExist(err) {
+		t.Fatalf("CheckSharedFile(missing) err = %v, want not-exist", err)
+	}
+}
