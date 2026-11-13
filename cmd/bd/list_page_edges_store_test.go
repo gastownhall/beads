@@ -207,6 +207,77 @@ func checkListDependencyRecordsParity(t *testing.T, f listEdgeStoreFixture) {
 	}
 }
 
+// TestPageDependencyRecordsMatchTheEdgeRead runs
+// checkPageDependencyRecordsParity on the Dolt server; TestEmbeddedListPageEdges
+// runs it on embedded Dolt.
+func TestPageDependencyRecordsMatchTheEdgeRead(t *testing.T) {
+	checkPageDependencyRecordsParity(t, seedListEdgeStore(t, newListEdgeServerStore(t)))
+}
+
+// checkPageDependencyRecordsParity is the parity proof for the page-derived
+// edge map on a real store. For each page, the rows the counts search returns
+// (the seam a `bd list` page is read through) carry the same edges that
+// listDependencyRecords reads for them: the same rows in the same order, on
+// both planes, with the same fields apart from created_at, which no `bd list`
+// text rendering that takes the page's edges prints. Every `bd list` text
+// rendering prints the same bytes from either map.
+func checkPageDependencyRecordsParity(t *testing.T, f listEdgeStoreFixture) {
+	t.Helper()
+	ctx := t.Context()
+	pages := map[string][]string{
+		"default listing": {"epic", "alpha", "bravo", "delta", "other"},
+		"truncated page":  {"epic", "alpha"},
+		"with closed":     {"epic", "alpha", "bravo", "delta", "other", "hidden", "gate", "gate done"},
+		"with wisps":      {"epic", "alpha", "wisp", "wisp child"},
+		"wisps only":      {"wisp", "wisp child"},
+	}
+	for name, names := range pages {
+		t.Run(name, func(t *testing.T) {
+			ids := f.idSet(names...)
+			rows, err := f.store.SearchIssuesWithCounts(ctx, "", types.IssueFilter{IDs: ids})
+			if err != nil {
+				t.Fatalf("SearchIssuesWithCounts: %v", err)
+			}
+			page := make([]*types.Issue, 0, len(rows))
+			for _, row := range rows {
+				page = append(page, row.Issue)
+			}
+			if len(page) != len(ids) {
+				t.Fatalf("the page holds %d rows, want %d", len(page), len(ids))
+			}
+			read, err := listDependencyRecords(ctx, f.store, page)
+			if err != nil {
+				t.Fatalf("listDependencyRecords: %v", err)
+			}
+			fromPage := pageDependencyRecords(page)
+			for _, is := range page {
+				if got, want := describeDepRecords(fromPage[is.ID]), describeDepRecords(read[is.ID]); got != want {
+					t.Errorf("edges of %s: from the page %s, from the edge read %s", is.ID, got, want)
+				}
+			}
+			if len(fromPage) != len(read) {
+				t.Errorf("the page map has %d keys, the edge read %d", len(fromPage), len(read))
+			}
+			hydrate := func(ctx context.Context, ids []string) ([]*types.Issue, error) {
+				return f.store.GetIssuesByIDs(ctx, ids)
+			}
+			assertSameListTextOutputs(t,
+				renderListTextOutputs(t, hydrate, page, read),
+				renderListTextOutputs(t, hydrate, page, fromPage))
+		})
+	}
+}
+
+// describeDepRecords is describeDeps with every field but created_at.
+func describeDepRecords(deps []*types.Dependency) string {
+	parts := make([]string, len(deps))
+	for i, d := range deps {
+		parts[i] = d.IssueID + " -[" + string(d.Type) + "]-> " + d.DependsOnID +
+			" by=" + d.CreatedBy + " metadata=" + d.Metadata + " thread=" + d.ThreadID + " id=" + d.ID
+	}
+	return "[" + strings.Join(parts, "; ") + "]"
+}
+
 func describeDeps(deps []*types.Dependency) string {
 	parts := make([]string, len(deps))
 	for i, d := range deps {
@@ -253,9 +324,10 @@ func TestListTextRenderingsReadTheListedIssuesEdgesOnly(t *testing.T) {
 }
 
 // checkListTextRenderingsReadListedEdges drives runListCore on the direct route
-// over a real store and pins each text rendering that consumes edges to one
-// edge read naming exactly the listed issues, never the store-wide
-// GetAllDependencyRecords. backend/http's
+// over a real store and pins each text rendering that consumes edges: the flat
+// page's tree takes the edges its page read returned and makes no edge read,
+// and the --parent tree and --format make one edge read naming exactly the
+// listed issues. None reads the store-wide GetAllDependencyRecords. backend/http's
 // TestE2E_ListTextRenderingsReadOnlyTheListedIssuesEdges pins the same reads on
 // the wire.
 func checkListTextRenderingsReadListedEdges(t *testing.T, f listEdgeStoreFixture) {
@@ -269,14 +341,14 @@ func checkListTextRenderingsReadListedEdges(t *testing.T, f listEdgeStoreFixture
 	for _, tc := range []struct {
 		name    string
 		args    []string
-		anchors []string
+		anchors []string // nil: the rendering takes the page's own edges and reads none
 		want    []string
 	}{
-		{"tree", nil, f.idSet("epic", "alpha", "bravo", "delta", "other"),
+		{"tree", nil, nil,
 			[]string{"├── ○ " + f.ids["alpha"], gatedRow}},
-		{"deps all", []string{"--deps=all"}, f.idSet("epic", "alpha", "bravo", "delta", "other"),
+		{"deps all", []string{"--deps=all"}, nil,
 			[]string{"[depends-on]", "[related]", "[waits-for]", "[duplicates]", "↗ 1 outside this view: external:other:cap"}},
-		{"truncated page", []string{"--limit", "2"}, f.idSet("epic", "alpha"),
+		{"truncated page", []string{"--limit", "2"}, nil,
 			[]string{"└── ○ " + f.ids["alpha"]}},
 		{"parent tree", []string{"--parent", f.ids["epic"]}, f.idSet("epic", "alpha", "bravo"),
 			[]string{"├── ○ " + f.ids["alpha"], gatedRow}},
@@ -290,11 +362,17 @@ func checkListTextRenderingsReadListedEdges(t *testing.T, f listEdgeStoreFixture
 			if spy.wholeStoreReads != 0 {
 				t.Errorf("bd list %v read every edge in the store %d times", tc.args, spy.wholeStoreReads)
 			}
-			if len(spy.anchors) != 1 {
-				t.Fatalf("bd list %v made %d edge reads, want 1: %v", tc.args, len(spy.anchors), spy.anchors)
-			}
-			if got := slices.Sorted(slices.Values(spy.anchors[0])); !slices.Equal(got, tc.anchors) {
-				t.Errorf("bd list %v read the edges of %v, want exactly the listed issues %v", tc.args, got, tc.anchors)
+			if tc.anchors == nil {
+				if len(spy.anchors) != 0 {
+					t.Errorf("bd list %v made %d edge reads, want none: %v", tc.args, len(spy.anchors), spy.anchors)
+				}
+			} else {
+				if len(spy.anchors) != 1 {
+					t.Fatalf("bd list %v made %d edge reads, want 1: %v", tc.args, len(spy.anchors), spy.anchors)
+				}
+				if got := slices.Sorted(slices.Values(spy.anchors[0])); !slices.Equal(got, tc.anchors) {
+					t.Errorf("bd list %v read the edges of %v, want exactly the listed issues %v", tc.args, got, tc.anchors)
+				}
 			}
 			for _, w := range tc.want {
 				if !strings.Contains(out, w) {
