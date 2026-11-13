@@ -196,10 +196,12 @@ func TestEngineExternalRefChangedAfter_FastPathDifferentRef(t *testing.T) {
 
 // TestEngineExternalRefChangedAfter_FastPathNotFound pins the missing-row
 // decision (#7294): no history entry at or before lastSync reports changed
-// only for an issue created after lastSync (a new pre-linked stub to
-// hydrate). An older issue, one created exactly at lastSync, or one with no
-// creation time reports historyUnknown instead, whatever its UpdatedAt says:
-// the row may be missing because history was compacted or rewritten, and a
+// only for an issue created at or after lastSync (a new pre-linked stub to
+// hydrate). created_at is stored rounded to a whole second and last_sync is
+// one, so a stub created within half a second after the stamp reads as
+// created exactly at lastSync. An older issue, or one with no creation
+// time, reports historyUnknown instead, whatever its UpdatedAt says: the
+// row may be missing because history was compacted or rewritten, and a
 // local edit after lastSync is what the pull's guards must keep.
 func TestEngineExternalRefChangedAfter_FastPathNotFound(t *testing.T) {
 	lastSync := time.Date(2026, time.March, 4, 5, 6, 7, 0, time.UTC)
@@ -212,10 +214,11 @@ func TestEngineExternalRefChangedAfter_FastPathNotFound(t *testing.T) {
 	}{
 		{name: "old unchanged", created: lastSync.Add(-24 * time.Hour), updated: lastSync.Add(-time.Hour), wantHistoryUnknown: true},
 		{name: "old locally edited", created: lastSync.Add(-24 * time.Hour), updated: lastSync.Add(time.Hour), wantHistoryUnknown: true},
+		{name: "created a second before lastSync", created: lastSync.Add(-time.Second), updated: lastSync.Add(time.Hour), wantHistoryUnknown: true},
 		{name: "newly created", created: lastSync.Add(time.Hour), updated: lastSync.Add(time.Hour), wantChanged: true},
-		{name: "created at lastSync", created: lastSync, updated: lastSync.Add(time.Hour), wantHistoryUnknown: true},
+		{name: "created at lastSync (rounded to the stamp)", created: lastSync, updated: lastSync, wantChanged: true},
 		{name: "zero creation time", updated: lastSync.Add(time.Hour), wantHistoryUnknown: true},
-		{name: "created at lastSync in another zone", created: lastSync.In(plus5), updated: lastSync.Add(time.Hour).In(plus5), wantHistoryUnknown: true},
+		{name: "created at lastSync in another zone", created: lastSync.In(plus5), updated: lastSync.Add(time.Hour).In(plus5), wantChanged: true},
 		{name: "created after lastSync in another zone", created: lastSync.Add(time.Second).In(plus5), updated: lastSync.Add(time.Second).In(plus5), wantChanged: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -274,6 +277,59 @@ func TestEngineExternalRefChangedAfter_KnownAnswersReportHistoryKnown(t *testing
 			}
 			if changed != test.wantChanged || historyUnknown {
 				t.Errorf("externalRefChangedAfter = (changed %v, historyUnknown %v), want (%v, false)", changed, historyUnknown, test.wantChanged)
+			}
+		})
+	}
+}
+
+// TestPrelinkDecision pins the pure pre-link decision that every path
+// reading external_ref history must share (#7294): a history row decides by
+// comparing refs, and a missing row hydrates only an issue created at or
+// after lastSync. An older issue without a row reports historyUnknown,
+// unless it is on the wisps plane, which never has history.
+func TestPrelinkDecision(t *testing.T) {
+	lastSync := time.Date(2026, time.March, 4, 5, 6, 7, 0, time.UTC)
+	old := newTestIssue("bd-old", lastSync.Add(-24*time.Hour), lastSync.Add(time.Hour))
+	atStamp := newTestIssue("bd-stamp", lastSync, lastSync)
+	ephemeral := func(issue *types.Issue) *types.Issue {
+		wisp := *issue
+		wisp.Ephemeral = true
+		return &wisp
+	}
+	noHistory := func(issue *types.Issue) *types.Issue {
+		bead := *issue
+		bead.NoHistory = true
+		return &bead
+	}
+	const ref = "https://tracker.test/EXT-1"
+	for _, test := range []struct {
+		name               string
+		local              *types.Issue
+		previousRef        string
+		found              bool
+		wantChanged        bool
+		wantHistoryUnknown bool
+	}{
+		{name: "same ref at lastSync", local: old, previousRef: ref, found: true},
+		{name: "same ref modulo spaces", local: old, previousRef: " " + ref + " ", found: true},
+		{name: "other ref at lastSync", local: old, previousRef: "https://tracker.test/EXT-OLD", found: true, wantChanged: true},
+		{name: "NULL ref at lastSync", local: old, found: true, wantChanged: true},
+		{name: "no row, created at lastSync", local: atStamp, wantChanged: true},
+		{name: "no row, created before lastSync", local: old, wantHistoryUnknown: true},
+		{name: "no row, no creation time", local: newTestIssue("bd-zero", time.Time{}, lastSync.Add(time.Hour)), wantHistoryUnknown: true},
+		{name: "no row, ephemeral, created before lastSync", local: ephemeral(old)},
+		{name: "no row, no-history, created before lastSync", local: noHistory(old)},
+		{name: "no row, ephemeral, created at lastSync", local: ephemeral(atStamp), wantChanged: true},
+		{name: "no row, no-history, created at lastSync", local: noHistory(atStamp), wantChanged: true},
+		// A bead moved to the wisps plane after lastSync keeps its history.
+		{name: "no-history, other ref at lastSync", local: noHistory(old), previousRef: "https://tracker.test/EXT-OLD", found: true, wantChanged: true},
+		{name: "nil local", previousRef: ref},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed, historyUnknown := prelinkDecision(test.local, ref, test.previousRef, test.found, lastSync)
+			if changed != test.wantChanged || historyUnknown != test.wantHistoryUnknown {
+				t.Errorf("prelinkDecision = (changed %v, historyUnknown %v), want (%v, %v)",
+					changed, historyUnknown, test.wantChanged, test.wantHistoryUnknown)
 			}
 		})
 	}
