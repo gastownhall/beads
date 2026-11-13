@@ -1,6 +1,7 @@
 package db
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -29,6 +30,7 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("CounterModeJumpsPastHeldIDs", s.useCaseMintCounterJumpsPastHeldIDs)
 	s.Run("CounterModeFreeNextValueStaysSequential", s.useCaseMintCounterFreeNextValueStaysSequential)
 	s.Run("CounterModeCrossesAHeldRunLongerThanTheSkipBound", s.useCaseMintCounterCrossesLongHeldRun)
+	s.Run("MintedIDTakesTheCreateOnlyGuard", s.useCaseMintedIDTakesTheCreateOnlyGuard)
 }
 
 func (s *testSuite) issueUseCase() domain.IssueUseCase {
@@ -1043,4 +1045,81 @@ func (s *testSuite) useCaseMintCounterCrossesLongHeldRun() {
 		     + (SELECT COUNT(*) FROM wisps WHERE id LIKE 'lagRun-%' AND title <> 'held')`, minted).Scan(&changed))
 	s.Zero(changed, "no held row may be rewritten")
 	s.Equal(map[string]string{"issues": "minted past the run"}, s.planeTitles(minted))
+}
+
+// createCoordinationKey mirrors issueops.issueCreateCoordinationKey: the
+// local_metadata cell the create-only guard (EnsureIssueIDAvailableInTx)
+// rewrites for id's shard before it probes the id.
+func createCoordinationKey(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	shard := uint16(sum[0])<<4 | uint16(sum[1])>>4
+	return fmt.Sprintf("issue-create/v1/%03x", shard)
+}
+
+// coordinationCell reads id's create coordination cell ("" when unset).
+func (s *testSuite) coordinationCell(id string) string {
+	var value string
+	err := s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT value FROM local_metadata WHERE `key` = ?", createCoordinationKey(id)).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ""
+	}
+	s.Require().NoError(err)
+	return value
+}
+
+// coordinationCells snapshots every create coordination cell.
+func (s *testSuite) coordinationCells() map[string]string {
+	rows, err := s.Runner().QueryContext(s.Ctx(),
+		"SELECT `key`, value FROM local_metadata WHERE `key` LIKE 'issue-create/v1/%'")
+	s.Require().NoError(err)
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var k, v string
+		s.Require().NoError(rows.Scan(&k, &v))
+		out[k] = v
+	}
+	s.Require().NoError(rows.Err())
+	return out
+}
+
+// useCaseMintedIDTakesTheCreateOnlyGuard pins bd-wnp679 AC-3: a top-level
+// create that names no id and leaves CreateOnly unset (the quick, todo, gate
+// and batch proxied servers) still inserts through the strict create-only
+// guard and writer, in every mint mode and plane. The guard's mark is the
+// rewritten coordination cell of the minted id's shard; the upsert writer
+// never touches it for a generated id.
+func (s *testSuite) useCaseMintedIDTakesTheCreateOnlyGuard() {
+	for _, tc := range []struct {
+		name, prefix, mode string
+		wisp               bool
+	}{
+		{name: "CounterIssue", prefix: "guardC", mode: "counter"},
+		{name: "HashIssue", prefix: "guardH"},
+		{name: "HashWisp", prefix: "guardW", wisp: true},
+	} {
+		s.Run(tc.name, func() {
+			s.resetMintConfig(tc.prefix, tc.mode)
+			uc := s.issueUseCase()
+			before := s.coordinationCells()
+			params := domain.CreateIssueParams{
+				Issue: &types.Issue{Title: "minted " + tc.name, IssueType: types.TypeTask, Priority: 2, Ephemeral: tc.wisp},
+			}
+			var res domain.CreateIssueResult
+			var err error
+			if tc.wisp {
+				res, err = uc.CreateWisp(s.Ctx(), params, "tester")
+			} else {
+				res, err = uc.CreateIssue(s.Ctx(), params, "tester")
+			}
+			s.Require().NoError(err)
+			s.Require().True(strings.HasPrefix(res.Issue.ID, tc.prefix+"-"), "minted %q", res.Issue.ID)
+
+			after := s.coordinationCell(res.Issue.ID)
+			s.NotEmpty(after, "minted %s must take the create-only guard's coordination cell", res.Issue.ID)
+			s.NotEqual(before[createCoordinationKey(res.Issue.ID)], after,
+				"minted %s must rewrite its shard's coordination cell (strict create), not upsert unguarded", res.Issue.ID)
+		})
+	}
 }

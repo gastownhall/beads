@@ -1055,6 +1055,11 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 	}
 
 	explicitID := createIDNamedByCaller(params)
+	// A minted top-level id always inserts create-only: between the mint's
+	// occupancy probe and the insert another writer can take the id, and the
+	// upsert writer would then overwrite that row or twin it in the other
+	// plane. Explicit ids keep the caller's choice (import relies on upsert).
+	mintedTopLevel := false
 	switch {
 	case params.ExplicitID != "":
 		issue.ID = params.ExplicitID
@@ -1070,6 +1075,7 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 			return CreateIssueResult{}, fmt.Errorf("create: mint top-level ID: %w", err)
 		}
 		issue.ID = minted
+		mintedTopLevel = true
 	}
 
 	if params.CreateOnly && params.ExplicitID != "" && !params.ForcePrefix {
@@ -1092,7 +1098,7 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 		}
 	}
 
-	insertOpts := InsertIssueOpts{UseWispsTable: useWisp, CreateOnly: params.CreateOnly, ExplicitID: explicitID}
+	insertOpts := InsertIssueOpts{UseWispsTable: useWisp, CreateOnly: params.CreateOnly || mintedTopLevel, ExplicitID: explicitID}
 	if err := u.issueRepo.Insert(ctx, issue, actor, insertOpts); err != nil {
 		return CreateIssueResult{}, fmt.Errorf("create: insert: %w", err)
 	}
