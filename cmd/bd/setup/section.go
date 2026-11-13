@@ -159,3 +159,57 @@ func CheckSharedFile(path string) (SharedSectionState, error) {
 	_, _, state, err := sharedSectionSpan(string(data))
 	return state, err
 }
+
+// StripSharedSection returns content without its beads section, removed by
+// removeBeadsSection, which drops the line breaks that set the section off
+// and rejoins the text around it. stripped reports a section was removed,
+// and empty that nothing but whitespace is left, so the file is bd's alone.
+// Malformed markers are an error, content unchanged.
+func StripSharedSection(content string) (remainder string, stripped, empty bool, err error) {
+	_, _, state, err := sharedSectionSpan(content)
+	if err != nil || state != SharedSectionPresent {
+		return content, false, false, err
+	}
+	remainder = removeBeadsSection(content)
+	return remainder, true, strings.TrimSpace(remainder) == "", nil
+}
+
+// SharedRemoval is what RemoveSharedFile did.
+type SharedRemoval int
+
+const (
+	// SharedRemovedNothing: the file was missing or held no section.
+	SharedRemovedNothing SharedRemoval = iota
+	// SharedRemovedSection: the section went; the rest of the file stays.
+	SharedRemovedSection
+	// SharedRemovedFile: the file held nothing else, and was deleted.
+	SharedRemovedFile
+)
+
+// RemoveSharedFile takes bd's section out of path (StripSharedSection),
+// deleting the file only when nothing but whitespace is left.
+func RemoveSharedFile(path string) (SharedRemoval, error) {
+	if err := refuseSharedSymlink(path); err != nil {
+		return SharedRemovedNothing, err
+	}
+	content, exists, err := readSharedFile(path)
+	if err != nil || !exists {
+		return SharedRemovedNothing, err
+	}
+	remainder, stripped, empty, err := StripSharedSection(content)
+	switch {
+	case err != nil:
+		return SharedRemovedNothing, err
+	case !stripped:
+		return SharedRemovedNothing, nil
+	case empty:
+		if err := os.Remove(path); err != nil {
+			return SharedRemovedNothing, err
+		}
+		return SharedRemovedFile, nil
+	}
+	if err := atomicWriteFile(path, []byte(remainder)); err != nil {
+		return SharedRemovedNothing, err
+	}
+	return SharedRemovedSection, nil
+}
