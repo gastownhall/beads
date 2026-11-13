@@ -299,10 +299,12 @@ derived ones included, from the same source, and never a caller-supplied
 value. A record carries no `actor` only when no actor is behind it: no request
 at all (a pull's or merge's recompute, `bd recompute-blocked`,
 `bd doctor --fix`, the Decay-phase deletes of `bd gc` outside proxied-server
-mode, `bd repo remove`); a request that
-named none (a `delete` or `sweep` sent without `actor`, which both accept); or
-a post-commit recheck that settles writes by different actors in one
-transaction, which names no one rather than one of them. This is not a
+mode, `bd repo remove`); a request that named none (a `delete` or `sweep` sent
+without `actor`, which both accept); a delete made through a storage delete
+call that takes no actor (a local `bd mol burn` or `bd mol squash`, or
+`bd cook`'s proto delete), with the `dep_remove` and derived `update` records
+it causes; or a post-commit recheck that settles writes by different actors in
+one transaction, which names no one rather than one of them. This is not a
 wire-shape change: `actor` was already an optional member of every record, so
 `wire_revision` does not move.
 

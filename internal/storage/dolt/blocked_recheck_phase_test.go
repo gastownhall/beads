@@ -44,8 +44,11 @@ func TestFinishDoltTransactionRecordingKeepsRecheckWhenDoltCommitFails(t *testin
 	if !errors.Is(err, ErrCommitIndeterminate) {
 		t.Fatalf("error = %v, want ErrCommitIndeterminate", err)
 	}
-	if !slices.Equal(pending.IssueIDs, []string{"rp-c"}) || !slices.Equal(pending.WispIDs, []string{"rp-wc"}) {
-		t.Fatalf("pending = %+v, want the dependents recorded on both transactions", pending)
+	// Both transactions recorded "actor", so the merged recheck journals its
+	// derived records as that writer's, not as no one's.
+	if !slices.Equal(pending.IssueIDs, []string{"rp-c"}) || !slices.Equal(pending.WispIDs, []string{"rp-wc"}) ||
+		pending.Actor != "actor" {
+		t.Fatalf("pending = %+v, want the dependents and the actor recorded on both transactions", pending)
 	}
 	requireTransactionPhaseMocks(t, regularMock, ignoredMock)
 }

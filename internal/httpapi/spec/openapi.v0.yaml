@@ -10448,8 +10448,11 @@ components:
             all (system maintenance such as a pull's or merge's recompute,
             `bd recompute-blocked` or `bd doctor --fix`; system cleanup such as
             the Decay-phase deletes of `bd gc` outside proxied-server mode,
-            or `bd repo remove`); a request that named no
-            actor (a `delete` or `sweep` sent without `actor`); a derived
+            or `bd repo remove`); a request that named no actor (a `delete` or
+            `sweep` sent without `actor`); a delete made through a storage
+            delete call that takes no actor (a local `bd mol burn` or
+            `bd mol squash`, or `bd cook`'s proto delete), and the
+            `dep_remove` and derived `update` records it causes; a derived
             `update` from the post-commit blocked recheck when the writes it
             settles in one transaction were made by different actors; and
             records written before the journal recorded actors. An absent

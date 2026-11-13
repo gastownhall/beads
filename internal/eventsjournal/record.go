@@ -53,11 +53,14 @@ type Record struct {
 	// `bd recompute-blocked`, `bd doctor --fix`; system cleanup: the
 	// Decay-phase deletes of `bd gc` outside proxied-server mode,
 	// `bd repo remove`); a request that named none (a served delete or sweep
-	// sent without an actor, storage.DeleteIssue, which takes none); a
-	// post-commit blocked recheck settling writes by different actors in one
-	// transaction; and rows written before the journal recorded actors. An absent actor is never
-	// user attribution; a consumer must read it as "system/unknown", not as a
-	// conflicting writer.
+	// sent without an actor); a delete made through a storage delete call
+	// that takes no actor (storage.DeleteIssue, DeleteIssues or
+	// Transaction.DeleteIssue: a local `bd mol burn` or `bd mol squash`, or
+	// `bd cook`'s proto delete), and the dep_remove and derived update rows
+	// it causes; a post-commit blocked recheck settling writes by different
+	// actors in one transaction; and rows written before the journal
+	// recorded actors. An absent actor is never user attribution; a consumer
+	// must read it as "system/unknown", not as a conflicting writer.
 	Actor string `json:"actor,omitempty"`
 	// Issue is the full issue state AFTER the mutation, and the literal JSON
 	// `null` on a delete — never absent. A delete has no surviving row, and a

@@ -112,9 +112,11 @@ Record contract (stable for external consumers):
                     behind the row: no request at all (system maintenance:
                     pull, recompute-blocked, doctor --fix; system cleanup), a
                     request that named none (a served delete or sweep sent
-                    without one), a post-commit blocked recheck settling
-                    writes by different actors, and rows older than the
-                    column. Never user attribution when empty.
+                    without one), a delete through a storage call that takes
+                    no actor (a local mol burn or mol squash, cook's proto
+                    delete) and the rows it causes, a post-commit blocked
+                    recheck settling writes by different actors, and rows
+                    older than the column. Never user attribution when empty.
   issue     object  full issue state AFTER the mutation; null on delete
   dep       object  {"kind","target","metadata"} for dep_add / dep_remove; omitted otherwise
   comment   object  {"id","author","text","created_at","source"} for comment; omitted otherwise

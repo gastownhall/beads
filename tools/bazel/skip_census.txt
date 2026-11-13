@@ -170,6 +170,7 @@
 //internal/httpclient:httpclient_served_test TestServedJournalContract/ArrivalOrdersABatchByItem nil-hook JournalArrivalHooks.CreateWispBatch
 //internal/httpclient:httpclient_served_test TestServedJournalContract/ArrivalReimportKeepsTheStamp nil-hook JournalArrivalHooks.Import
 //internal/httpclient:httpclient_served_test TestServedJournalContract/ArrivalRenameKeepsTheStamp nil-hook JournalArrivalHooks.Rename
+//internal/httpclient:httpclient_served_test TestServedJournalContract/DerivedRecordsCarryTheCausingActor WAITING ON donnabox fixes-b B14
 //internal/httpclient:httpclient_served_test TestServedJournalContract/EveryMutationKindRecordsItsActor WAITING ON donnabox fixes-b B14
 //internal/httpclient:httpclient_served_test TestServedLifecycleCreateEchoesSubSecondTimestamps KNOWN DIVERGENCE W-CreateRequest.Issue
 //internal/httpclient:httpclient_served_test TestServedLifecycleCreateRefusesAForeignIDPrefix KNOWN DIVERGENCE L-create-prefix

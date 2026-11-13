@@ -1271,11 +1271,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   engine and on the post-commit recheck. A derived record still names no one
   when no request is behind it (a pull's or merge's recompute,
   `bd recompute-blocked`, `bd doctor --fix`, the Decay-phase deletes of
-  `bd gc` outside proxied-server mode, `bd repo remove`), when the request itself named no actor (for example a
-  served delete or sweep sent without one), or when it comes from a
-  post-commit recheck covering writes by different actors. No wire shape
-  changes: `actor` was already an optional member of every record, so
-  `wire_revision` is unchanged.
+  `bd gc` outside proxied-server mode, `bd repo remove`), when the request
+  itself named no actor (for example a served delete or sweep sent without
+  one), when a delete goes through a storage delete call that takes no actor
+  (a local `bd mol burn` or `bd mol squash`, or `bd cook`'s proto delete,
+  whose own `delete` and `dep_remove` records name no one either), or when it
+  comes from a post-commit recheck covering writes by different actors. No
+  wire shape changes: `actor` was already an optional member of every record,
+  so `wire_revision` is unchanged. An out-of-tree backend that runs
+  `conformance.RunRoleContracts` with a journal fixture must now supply
+  `JournalMutations.As`, because the new derived-actor case seeds as one
+  identity and mutates as another (`AddParentChild` and `SetStatus` stay
+  optional), and must stamp the request's actor on its derived `is_blocked`
+  updates.
 - **The aux row id re-key again skips tables with dolthub/dolt#11131
   encoding drift instead of aborting the migration on every open** (#8372).
   The Dolt 2.6 engine reports the drift as `malformed out-of-band adaptive

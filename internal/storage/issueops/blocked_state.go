@@ -156,14 +156,19 @@ type RecomputeIsBlockedResult struct {
 }
 
 // NoRequestActor is the actor a blocked-state recompute or mark passes when no
-// request is behind it: the derived is_blocked records it journals then name no
-// one, which a journal consumer reads as system/unknown
-// (eventsjournal.Record.Actor). Only the genuinely system-originated paths pass
-// it — a pull's or merge's recompute, `bd recompute-blocked`, `bd doctor --fix`,
-// federation, and the delete surfaces that carry no actor of their own (the
-// Decay-phase deletes of `bd gc` outside proxied-server mode, `bd repo remove`). A path a user request drives passes that request's actor,
-// the same value its own record carries: a derived
-// record a user's change caused is that user's change.
+// request's actor reaches it: the derived is_blocked records it journals then
+// name no one, which a journal consumer reads as system/unknown
+// (eventsjournal.Record.Actor). The system paths pass it — a pull's or merge's
+// recompute, `bd recompute-blocked`, `bd doctor --fix`, federation and
+// `bd repo remove` — and so do the storage delete surfaces, which take no
+// actor (storage.DeleteIssue, DeleteIssues and Transaction.DeleteIssue). Their
+// callers are mostly system cleanup (the Decay-phase deletes of `bd gc`
+// outside proxied-server mode), but not only: a local `bd mol burn` or
+// `bd mol squash` and `bd cook`'s proto delete reach them holding an actor the
+// surfaces cannot carry, so those records name no one until the surfaces take
+// one. Every other path a user request drives passes that request's actor, the
+// same value its own record carries: a derived record a user's change caused
+// is that user's change.
 const NoRequestActor = ""
 
 // RecomputeIsBlockedInTx recomputes blocked state and discards the per-table
