@@ -476,3 +476,33 @@ func TestCreateIssuesReplayMovesBackfilledDependencyToRemint(t *testing.T) {
 		requireTitle(t, ctx, store, issue.ID, "override")
 	})
 }
+
+// AC-3: replaying an aborted counter mint without a competitor must advance
+// the seeded counter, so the next auto-ID create does not reuse the id.
+func TestCreateIssueReplayKeepsCounterAheadOfReplayedID(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	enableSeededCounterMode(t, ctx, store)
+
+	fault, _, restore := installReplayFault(t, store, 1)
+	defer restore()
+
+	first := newRetryTestIssue("first")
+	if err := store.CreateIssue(ctx, first, "caller"); err != nil {
+		t.Fatalf("CreateIssue(first): %v", err)
+	}
+	restore()
+	assertReplayed(t, fault, 1)
+
+	second := newRetryTestIssue("second")
+	if err := store.CreateIssue(ctx, second, "caller"); err != nil {
+		t.Fatalf("CreateIssue(second): %v", err)
+	}
+	if first.ID == second.ID {
+		t.Errorf("subsequent create reused the replayed id %s", first.ID)
+	}
+	requireTitle(t, ctx, store, first.ID, "first")
+	requireTitle(t, ctx, store, second.ID, "second")
+}
