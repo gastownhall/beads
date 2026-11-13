@@ -469,6 +469,14 @@ func TestImporterUOWReplayReMintsUnsetIDs(t *testing.T) {
 		}
 		return n
 	}
+	queryString := func(t *testing.T, query string, args ...any) string {
+		t.Helper()
+		var s string
+		if err := kit.QueryScalar(ctx, query, args, &s); err != nil {
+			t.Fatalf("QueryScalar %q: %v", query, err)
+		}
+		return s
+	}
 	// autoMint creates one issue with no explicit id on the unfaulted
 	// provider and returns the id the workspace minted for it.
 	autoMint := func(t *testing.T, title string) string {
@@ -548,6 +556,18 @@ func TestImporterUOWReplayReMintsUnsetIDs(t *testing.T) {
 		}
 		return run
 	}
+	// counterCompetitor auto-mints through the counter and proves it drew the
+	// very id attempt 1 had minted: the race the bug needs.
+	counterCompetitor := func(name string) func(t *testing.T, x string) string {
+		return func(t *testing.T, x string) string {
+			title := "competitor " + name
+			if got := autoMint(t, title); got != x {
+				t.Fatalf("competitor minted %q, want attempt 1's %q (race not reproduced)", got, x)
+			}
+			return title
+		}
+	}
+
 	// AC-1/AC-3/AC-2's "stored under issue.ID" half: row A landed exactly
 	// once, under the id on the caller's struct, with its edge and comment.
 	assertRowALanded := func(t *testing.T, run replayRun) {
@@ -569,6 +589,18 @@ func TestImporterUOWReplayReMintsUnsetIDs(t *testing.T) {
 			t.Errorf("result = %+v, want Created=2 with nothing stale-rejected or retired", run.result)
 		}
 	}
+	// The competitor's row is untouched by the import.
+	assertCompetitorKept := func(t *testing.T, run replayRun) {
+		t.Helper()
+		x := run.attempt1ID
+		if got := queryString(t, "SELECT title FROM issues WHERE id = ?", x); got != run.competitorRow {
+			t.Errorf("row %q title = %q, want the competitor's %q", x, got, run.competitorRow)
+		}
+		if run.rowA.ID == x {
+			t.Errorf("row A kept attempt 1's id %q; want a fresh mint", x)
+		}
+	}
+
 	// AC-1: no other writer. The replay re-draws the same counter value, the
 	// counter ends at it, and the next auto-mint draws the one after.
 	t.Run("no_competitor", func(t *testing.T) {
@@ -589,5 +621,44 @@ func TestImporterUOWReplayReMintsUnsetIDs(t *testing.T) {
 		if next := autoMint(t, "after no_competitor"); next != fmt.Sprintf("%s-%d", prefix, n+1) {
 			t.Errorf("next auto-mint = %q, want %s-%d", next, prefix, n+1)
 		}
+	})
+
+	// AC-2/AC-3: another writer took attempt 1's id between the rollback and
+	// the replay. With the stale guard on, row A must land under a fresh id
+	// rather than be stale-rejected against the competitor's row.
+	t.Run("competitor_stale_guard", func(t *testing.T) {
+		run := importWithReplay(t, "competitor_stale_guard", false, counterCompetitor("competitor_stale_guard"))
+		assertCleanResult(t, run)
+		assertCompetitorKept(t, run)
+		assertRowALanded(t, run)
+	})
+
+	// Edge: with --allow-stale the pre-fix replay overwrote the competitor's
+	// row with row A; after the fix the competitor keeps its columns.
+	t.Run("competitor_allow_stale", func(t *testing.T) {
+		run := importWithReplay(t, "competitor_allow_stale", true, counterCompetitor("competitor_allow_stale"))
+		assertCleanResult(t, run)
+		assertCompetitorKept(t, run)
+		assertRowALanded(t, run)
+	})
+
+	// Edge: hash mode. A row lands under attempt 1's hash id in between; the
+	// replay's mint must step past it (IDTakenInTx) instead of upserting.
+	t.Run("hash_mode_competitor", func(t *testing.T) {
+		if err := kit.SetConfig(ctx, "issue_id_mode", "hash"); err != nil {
+			t.Fatalf("set hash mode: %v", err)
+		}
+		const title = "competitor hash_mode_competitor"
+		run := importWithReplay(t, "hash_mode_competitor", false, func(t *testing.T, x string) string {
+			if err := kit.CreateIssue(ctx, &types.Issue{
+				ID: x, Title: title, Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2,
+			}, "other-writer"); err != nil {
+				t.Fatalf("seed competitor under %q: %v", x, err)
+			}
+			return title
+		})
+		assertCleanResult(t, run)
+		assertCompetitorKept(t, run)
+		assertRowALanded(t, run)
 	})
 }
