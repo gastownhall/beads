@@ -46,11 +46,21 @@ var _ publicops.Importer = (*importer)(nil)
 // request: RunTxResult retries the whole attempt on a serialization failure,
 // and result state declared inside the attempt cannot leak between retries
 // the way a caller's callback accumulator would.
+//
+// The request's issue structs are NOT attempt-local: the engine mints
+// Issue.ID, Dependency.IssueID and Comment.ID onto them in place. The fields
+// the caller left empty are snapshotted once, before the retry loop, and
+// cleared at the top of every attempt, so a replay mints again instead of
+// reading the rolled-back attempt's ids as caller-supplied and upserting under
+// them (bd-8qq0ho, GH#8455). The committed attempt's ids stay on the structs:
+// the proxied `bd import` builds ImportedIDs from them.
 func (o *importer) ImportBatch(ctx context.Context, request publicops.ImportBatchRequest) (publicops.ImportBatchResult, error) {
 	if request.Actor == "" {
 		return publicops.ImportBatchResult{}, fmt.Errorf("import batch: actor must not be empty")
 	}
+	resetMintedIDs := storageissueops.SnapshotUnsetCreateIDs(request.Issues)
 	return RunTxResult(ctx, o.provider, func(ctx context.Context, uw UnitOfWork) (publicops.ImportBatchResult, string, error) {
+		resetMintedIDs()
 		var result publicops.ImportBatchResult
 
 		// Seed issue_prefix before CreateIssuesInTxWithResult needs it (via
