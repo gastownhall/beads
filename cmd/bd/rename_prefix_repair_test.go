@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -682,5 +684,89 @@ func TestRepairPrefixesSplitsByKnownPrefix(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// repairSnapshot is everything a repair may change: each issue's text and
+// edges, and the stored issue_prefix.
+func repairSnapshot(t *testing.T, ctx context.Context, st storage.DoltStorage) string {
+	t.Helper()
+	got := storedIDs(t, ctx, st)
+	ids := make([]string, 0, len(got))
+	for id := range got {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	var b strings.Builder
+	for _, id := range ids {
+		deps, err := st.GetDependencyRecords(ctx, id)
+		if err != nil {
+			t.Fatalf("deps of %s: %v", id, err)
+		}
+		fmt.Fprintf(&b, "%s %q %q %s\n", id, got[id].Title, got[id].Description, fmtDeps(deps))
+	}
+	prefix, err := st.GetConfig(ctx, "issue_prefix")
+	if err != nil {
+		t.Fatalf("issue_prefix: %v", err)
+	}
+	fmt.Fprintf(&b, "issue_prefix=%s\n", prefix)
+	return b.String()
+}
+
+func TestRepairPrefixesDryRunMatchesRealRun(t *testing.T) {
+	// GH#6591 AC-5: against unchanged inputs, --dry-run writes nothing and
+	// reports the same renames and collisions the real run then performs, and
+	// the real run's JSON mapping is what the store holds.
+	ctx := context.Background()
+	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+	seedRepairIssues(t, ctx, testStore,
+		&types.Issue{ID: "kb-c2a", Title: "Live target"},
+		&types.Issue{ID: "kb-5su1.2", Title: "Target child holding kb-5su1"},
+		&types.Issue{ID: "taxdb-c2a", Title: "Tax c2a", Description: "see taxdb-u6ch"},
+		&types.Issue{ID: "cre-db-c2a", Title: "CRE c2a"},
+		&types.Issue{ID: "taxdb-u6ch", Title: "Tax u6ch"},
+		&types.Issue{ID: "taxdb-5su1", Title: "Tax parent"},
+		&types.Issue{ID: "taxdb-5su1.13", Title: "Tax child"},
+		&types.Issue{ID: "cre-db-nwb.3", Title: "Orphan on a retired root"},
+	)
+	if err := testStore.AddDependency(ctx, &types.Dependency{IssueID: "taxdb-5su1.13", DependsOnID: "taxdb-5su1", Type: types.DepParentChild}, "test"); err != nil {
+		t.Fatalf("add parent-child: %v", err)
+	}
+	// Each run gets a fresh probe store, so both see the same retirements.
+	probeStore := func() storage.DoltStorage {
+		return &retiringRepairStore{DoltStorage: testStore, retiredIDs: map[string]bool{"kb-nwb.3": true}}
+	}
+
+	before := repairSnapshot(t, ctx, testStore)
+	dry := repairAllJSON(t, ctx, probeStore(), "kb", true)
+	if after := repairSnapshot(t, ctx, testStore); after != before {
+		t.Fatalf("dry run wrote:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	live := repairAllJSON(t, ctx, probeStore(), "kb", false)
+
+	if !dry.DryRun || live.DryRun {
+		t.Errorf("dry_run flags = %v, %v; want true, false", dry.DryRun, live.DryRun)
+	}
+	if len(live.Collisions) != 4 {
+		t.Errorf("collisions = %+v, want taxdb-c2a, cre-db-c2a, taxdb-5su1 and cre-db-nwb", live.Collisions)
+	}
+	if !reflect.DeepEqual(dry.Renames, live.Renames) || !reflect.DeepEqual(dry.Collisions, live.Collisions) {
+		t.Fatalf("dry run and real run disagree:\ndry:  %+v\nreal: %+v", dry, live)
+	}
+	if dry.IssuesRepaired != live.IssuesRepaired || dry.IssuesUnchanged != live.IssuesUnchanged || live.IssuesRepaired != len(live.Renames) {
+		t.Errorf("counts differ: dry %+v, real %+v", dry, live)
+	}
+
+	got := storedIDs(t, ctx, testStore)
+	if len(got) != live.IssuesRepaired+live.IssuesUnchanged {
+		t.Errorf("stored %d issues, want %d repaired + %d unchanged", len(got), live.IssuesRepaired, live.IssuesUnchanged)
+	}
+	for _, r := range live.Renames {
+		if got[r.NewID] == nil || got[r.OldID] != nil {
+			t.Errorf("rename %s -> %s is not what the store holds: %v", r.OldID, r.NewID, got)
+		}
+	}
+	if got["kb-u6ch"] == nil || got["kb-c2a"].Title != "Live target" || got["kb-5su1.2"] == nil {
+		t.Errorf("free roots or live targets moved: %v", got)
 	}
 }
