@@ -9,10 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -496,5 +498,86 @@ func TestBytesWriterAppends(t *testing.T) {
 	}
 	if got := string(w.buf); got != "hello world" {
 		t.Fatalf("unexpected buffer content: %q", got)
+	}
+}
+
+// summarizeViaStub runs SummarizeTier1 against a stub Messages API serving
+// the given content blocks, and fails the test unless exactly one request
+// reached the stub. The request client is injected so no ai.base_url global
+// is touched; the application retry count keeps its default so an
+// accidental retry shows up in the hit count.
+func summarizeViaStub(t *testing.T, contentBlocks string) (string, error) {
+	t.Helper()
+	isolateEndpointPins(t)
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("MINIMAX_API_KEY", "")
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config initialize: %v", err)
+	}
+	config.Set("ai.base_url", "")
+	t.Cleanup(func() { config.Set("ai.base_url", "") })
+
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/messages" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"id":"msg_test","type":"message","role":"assistant","model":"claude-haiku-4-5","content":%s,"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}`, contentBlocks)
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := newHaikuClient("test-key")
+	if err != nil {
+		t.Fatalf("newHaikuClient: %v", err)
+	}
+	client.client = anthropic.NewClient(
+		option.WithoutEnvironmentDefaults(),
+		option.WithAPIKey("test-key"),
+		option.WithBaseURL(srv.URL),
+		option.WithMaxRetries(0),
+	)
+	client.initialBackoff = time.Millisecond
+
+	issue := &types.Issue{ID: "bd-1", Title: "Test", Description: "Test desc"}
+	got, callErr := client.SummarizeTier1(context.Background(), issue)
+	if n := hits.Load(); n != 1 {
+		t.Errorf("stub received %d requests, want 1", n)
+	}
+	return got, callErr
+}
+
+// GH#7515: a reply that opens with a non-text block must yield the first
+// text block's content verbatim.
+func TestSummarizeTier1_ReadsFirstTextBlock(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    string
+		wantErr string // empty means no error expected
+	}{
+		{"thinking then text", `[{"type":"thinking","thinking":"pondering","signature":"sig"},{"type":"text","text":"the summary"}]`, "the summary", ""},
+		{"redacted thinking then text", `[{"type":"redacted_thinking","data":"opaque"},{"type":"text","text":"the summary"}]`, "the summary", ""},
+		{"thinking then two text blocks", `[{"type":"thinking","thinking":"pondering","signature":"sig"},{"type":"text","text":"A"},{"type":"text","text":"B"}]`, "A", ""},
+		{"text first", `[{"type":"text","text":"the summary"}]`, "the summary", ""},
+		{"empty first text block", `[{"type":"thinking","thinking":"pondering","signature":"sig"},{"type":"text","text":""},{"type":"text","text":"B"}]`, "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := summarizeViaStub(t, tc.content)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("SummarizeTier1: %v", err)
+				}
+				if got != tc.want {
+					t.Errorf("SummarizeTier1 = %q, want %q", got, tc.want)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("SummarizeTier1 error = %v, want it to contain %q", err, tc.wantErr)
+			}
+		})
 	}
 }
