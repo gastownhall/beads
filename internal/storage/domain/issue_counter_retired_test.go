@@ -7,17 +7,20 @@ import (
 	"testing"
 )
 
-// counterHeldIssueRepo hands out counter values in order and models the two
-// id probes as the SQL repository answers them: Taken is a live row in either
-// plane or a tombstone, Retired a tombstone only. Each probe is recorded,
-// Retired ones as "retired:<id>", so a test can tell which one decided a
-// candidate. The embedded interface is nil on purpose: a call this test did
-// not intend panics rather than passing quietly.
+// counterHeldIssueRepo hands out counter values in order and models the held
+// id reads as the SQL repository answers them: Taken is a live row in either
+// plane or a tombstone, and AdvanceCounterPastHeld moves the counter over the
+// run of values above it that a live row, a tombstone or claimed holds. hidden
+// ids are held where only Taken sees them: a probe the one-read skip disagrees
+// with. Each Taken probe is recorded, and each skip as "advance", so a test
+// can tell what decided a candidate. The embedded interface is nil on purpose:
+// a call this test did not intend panics rather than passing quietly.
 type counterHeldIssueRepo struct {
 	IssueSQLRepository
 	next    int
 	live    map[string]bool
 	retired map[string]bool
+	hidden  map[string]bool
 	probed  []string
 }
 
@@ -28,12 +31,18 @@ func (r *counterHeldIssueRepo) NextCounterID(context.Context, string) (int, erro
 
 func (r *counterHeldIssueRepo) Taken(_ context.Context, id string) (bool, error) {
 	r.probed = append(r.probed, id)
-	return r.live[id] || r.retired[id], nil
+	return r.live[id] || r.retired[id] || r.hidden[id], nil
 }
 
-func (r *counterHeldIssueRepo) Retired(_ context.Context, id string) (bool, error) {
-	r.probed = append(r.probed, "retired:"+id)
-	return r.retired[id], nil
+func (r *counterHeldIssueRepo) AdvanceCounterPastHeld(_ context.Context, prefix string, claimed map[string]bool) error {
+	r.probed = append(r.probed, "advance")
+	for {
+		id := fmt.Sprintf("%s-%d", prefix, r.next+1)
+		if !r.live[id] && !r.retired[id] && !claimed[id] {
+			return nil
+		}
+		r.next++
+	}
 }
 
 // TestCounterModeMintWalksPastRetiredValues pins the uow counter-mode mint: a
@@ -78,17 +87,58 @@ func TestCounterModeMintWalksPastLiveRows(t *testing.T) {
 	}
 }
 
-// TestCounterModeMintGivesUpAfterTheSkipBound pins the bound: a counter that
-// keeps landing on held values fails loudly instead of walking forever.
-func TestCounterModeMintGivesUpAfterTheSkipBound(t *testing.T) {
+// TestCounterModeMintSkipsAHeldRunLongerThanTheWalk pins the long lag of
+// GH#8456 at the uow mint: more held values in a row than one walk probes, as
+// a bulk import ahead of an existing counter leaves. Giving up at the bound
+// failed every auto create for good, because the rollback undoes the bumps.
+// The mint skips the rest of the run in one AdvanceCounterPastHeld read
+// instead and goes on from the first free value. It passes the claimed set to
+// that read: the claimed bd-1201..bd-2300 alone outlast a second walk.
+func TestCounterModeMintSkipsAHeldRunLongerThanTheWalk(t *testing.T) {
 	repo := &counterHeldIssueRepo{live: map[string]bool{}}
+	claimed := map[string]bool{}
+	for n := 1; n <= 2300; n++ {
+		id := fmt.Sprintf("bd-%d", n)
+		if n <= 1200 {
+			repo.live[id] = true
+		} else {
+			claimed[id] = true
+		}
+	}
+	u := &issueUseCaseImpl{issueRepo: repo}
+	id, err := u.nextFreeCounterID(t.Context(), "bd", claimed)
+	if err != nil {
+		t.Fatalf("nextFreeCounterID() = %v", err)
+	}
+	if id != "bd-2301" {
+		t.Fatalf("nextFreeCounterID() = %q, want bd-2301 past the live bd-1..bd-1200 and the claimed bd-1201..bd-2300", id)
+	}
+	want := make([]string, 0, maxCounterSkips+3)
+	for n := 1; n <= maxCounterSkips+1; n++ {
+		want = append(want, fmt.Sprintf("bd-%d", n))
+	}
+	want = append(want, "advance", "bd-2301")
+	if got := strings.Join(repo.probed, ","); got != strings.Join(want, ",") {
+		t.Fatalf("probed %s, want one walk of %d probes, one advance, then bd-2301", got, maxCounterSkips+1)
+	}
+}
+
+// TestCounterModeMintGivesUpAfterTheSkipBound pins the bound that still ends
+// the walk: a counter that keeps landing on held values the one-read skip does
+// not see walks one more bound and fails loudly instead of walking forever.
+func TestCounterModeMintGivesUpAfterTheSkipBound(t *testing.T) {
+	repo := &counterHeldIssueRepo{live: map[string]bool{}, hidden: map[string]bool{}}
 	for n := 1; n <= maxCounterSkips+1; n++ {
 		repo.live[fmt.Sprintf("bd-%d", n)] = true
+		repo.hidden[fmt.Sprintf("bd-%d", maxCounterSkips+1+n)] = true
 	}
 	u := &issueUseCaseImpl{issueRepo: repo}
 	id, err := u.nextFreeCounterID(t.Context(), "bd", nil)
 	if err == nil || !strings.Contains(err.Error(), "taken or claimed") {
 		t.Fatalf("nextFreeCounterID() = %q, %v; want the skip-bound error", id, err)
+	}
+	if got, want := len(repo.probed), 2*(maxCounterSkips+1)+1; got != want {
+		t.Fatalf("%d probes and skips, want %d: two walks of %d and one advance", got, want, maxCounterSkips+1)
 	}
 }
 

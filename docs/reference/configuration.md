@@ -373,7 +373,7 @@ Counter mode behavior:
 - The counter is stored atomically in the database; concurrent creates within a single Dolt session are safe.
 - On first use (including switching an existing repository to counter mode), the counter seeds itself from the highest existing numeric ID for that prefix, so new IDs don't collide with old ones.
 - An explicit `--id` flag on `bd create` bypasses ID generation entirely; the counter is not incremented. Imports and wisps don't move the counter either.
-- When the counter's next number is already held, by an explicit `--id`, an imported issue, a wisp or a deleted ID that is still reserved, counter mode skips to the next free number. It never overwrites that issue or refuses the create.
+- When the counter's next number is already held, by an explicit `--id`, an imported issue, a wisp or a deleted ID that is still reserved, counter mode skips to the next free number. It never overwrites that issue or refuses the create. This holds however far the counter lags, for example after a large import: the next ID is the lowest free number above the counter, and a far-ahead ID such as `bd-5000` doesn't make it jump.
 - Counter mode applies only to regular issues, not wisps.
 
 Tradeoff — hash vs. counter:
