@@ -882,6 +882,31 @@ func RunDeleterRewritesOnlyTheDeletedIDInAHierarchy(t *testing.T, ctx context.Co
 		})
 	}
 
+	// A cascade hands the rewrite every id in the closure, the ancestor
+	// before its descendants; the ancestor's pass must not claim the
+	// grandchild's citation before the grandchild's own pass reaches it.
+	t.Run("CascadeMarksTheGrandchildCitationWhole", func(t *testing.T) {
+		h := deleterSeedHierarchy(t, ctx, fixture, "hcasc")
+		deleterAddParentChildEdge(t, ctx, fixture, h.child, h.root)
+		deleterAddParentChildEdge(t, ctx, fixture, h.grandchild, h.child)
+		blocker := deleterIssue(fixture, "hcasc", "blocker", false)
+		blocker.Description = "unblocks " + h.grandchild + " when done"
+		deleterSeed(t, ctx, fixture, blocker)
+		deleterAddEdge(t, ctx, fixture, h.grandchild, blocker.ID)
+
+		deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
+			IDs:     []string{h.root},
+			Cascade: true,
+			Actor:   "deleter-contract",
+		})
+		deleterAssertIssueRows(t, ctx, fixture, 0, h.root, h.child, h.grandchild)
+		deleterAssertIssueRows(t, ctx, fixture, 1, blocker.ID)
+		want := "unblocks [deleted:" + h.grandchild + "] when done"
+		if got := deleterText(t, ctx, fixture, blocker.ID, "description"); got != want {
+			t.Errorf("blocker description = %q, want %q", got, want)
+		}
+	})
+
 }
 
 // deleterHierarchy is one root, its child and its grandchild, with dotted ids.
