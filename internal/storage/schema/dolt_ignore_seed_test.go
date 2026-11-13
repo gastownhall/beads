@@ -483,3 +483,105 @@ func TestSeedDoltIgnorePatternsToleratesPermissionDeniedInsert(t *testing.T) {
 		}
 	})
 }
+
+// TestMigrateUpRefusedSeedFailsWhenWorkPending pins AC-2: the degradation is
+// only for a database with nothing else to do. With migration work pending
+// the original wrapped seed refusal comes back unchanged — before any
+// reconciliation, migration statement or status read — because a pass that
+// migrates through a seed it could not assert would blanket-commit
+// (DOLT_COMMIT('-Am')) whatever the unasserted patterns were protecting.
+func TestMigrateUpRefusedSeedFailsWhenWorkPending(t *testing.T) {
+	assertOriginalRefusal := func(t *testing.T, applied int, err error, pattern string, notice *bytes.Buffer) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("MigrateUp() error = nil, want the original wrapped seed refusal")
+		}
+		if want := wrappedIgnoreSeedErr(pattern, refusedIgnoreSeedInsert()); err.Error() != want {
+			t.Fatalf("MigrateUp() error = %q, want the original wrapped seed refusal unchanged: %q", err.Error(), want)
+		}
+		var mysqlErr *mysql.MySQLError
+		if !errors.As(err, &mysqlErr) || mysqlErr.Number != 1142 {
+			t.Fatalf("MigrateUp() error = %v, want the preserved MySQL refusal as the cause", err)
+		}
+		if applied != 0 {
+			t.Fatalf("MigrateUp() applied = %d, want 0", applied)
+		}
+		if notice.Len() != 0 {
+			t.Fatalf("a continuation warning must not print when migration work is pending, got %q", notice.String())
+		}
+	}
+
+	const pattern = "__temp__%"
+
+	t.Run("main-lane migration pending", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("create sql mock: %v", err)
+		}
+		defer db.Close()
+
+		// A pre-0062-flip database: the version-gated events pattern is not
+		// a seed candidate yet, and the main cursor is one below the flip.
+		const cursor = eventsFlipVersion - 1
+		expectRefusedIgnoreSeed(mock, cursor, refusedIgnoreSeedInsert(), pattern)
+		// migrationWorkNeeded reads the main cursor once and reports work;
+		// nothing else may run.
+		expectCursorProbe(mock, "schema_migrations", true)
+		expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", cursor)
+
+		notice := captureIgnoreSeedNotice(t)
+		applied, err := MigrateUp(context.Background(), db)
+		assertOriginalRefusal(t, applied, err, pattern, notice)
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations (no reconciliation, migration statement or status read may follow a refused seed with work pending): %v", err)
+		}
+	})
+
+	t.Run("ignored-lane migration pending with main current", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("create sql mock: %v", err)
+		}
+		defer db.Close()
+
+		expectRefusedIgnoreSeed(mock, LatestVersion(), refusedIgnoreSeedInsert(), pattern)
+		expectCursorProbe(mock, "schema_migrations", true)
+		expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+		expectCursorProbe(mock, "ignored_schema_migrations", true)
+		expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion()-1)
+		expectIgnoredSentinelProbes(mock, true)
+
+		notice := captureIgnoreSeedNotice(t)
+		applied, err := MigrateUp(context.Background(), db)
+		assertOriginalRefusal(t, applied, err, pattern, notice)
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+
+	t.Run("content-hash backfill pending with main current", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("create sql mock: %v", err)
+		}
+		defer db.Close()
+
+		expectRefusedIgnoreSeed(mock, LatestVersion(), refusedIgnoreSeedInsert(), pattern)
+		expectCursorProbe(mock, "schema_migrations", true)
+		expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+		expectCursorProbe(mock, "ignored_schema_migrations", true)
+		expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
+		expectIgnoredSentinelProbes(mock, true)
+		// Both cursors are current but the main cursor table predates
+		// content_hash (#4259): migrationWorkNeeded reports work.
+		mock.ExpectQuery(`SHOW COLUMNS FROM schema_migrations LIKE 'content_hash'`).
+			WillReturnRows(showColumnsRows())
+
+		notice := captureIgnoreSeedNotice(t)
+		applied, err := MigrateUp(context.Background(), db)
+		assertOriginalRefusal(t, applied, err, pattern, notice)
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+	})
+}
