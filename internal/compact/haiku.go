@@ -209,10 +209,7 @@ func (h *haikuClient) callWithRetry(ctx context.Context, prompt string) (string,
 					return block.Text, nil
 				}
 			}
-			if len(message.Content) > 0 {
-				return "", fmt.Errorf("unexpected response format: not a text block (type=%s)", message.Content[0].Type)
-			}
-			return "", fmt.Errorf("unexpected response format: no content blocks")
+			return "", fmt.Errorf("unexpected response format: no text block in %d content blocks", len(message.Content))
 		}
 
 		lastErr = err

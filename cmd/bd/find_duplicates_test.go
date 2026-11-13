@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -357,6 +359,39 @@ func TestAnalyzeWithAI_SkipsLeadingThinkingBlock(t *testing.T) {
 			}
 			if p.IssueA.ID != "bd-1" || p.IssueB.ID != "bd-2" {
 				t.Fatalf("pair issues = %s/%s, want bd-1/bd-2", p.IssueA.ID, p.IssueB.ID)
+			}
+			if n := hits.Load(); n != 1 {
+				t.Fatalf("requests = %d, want 1", n)
+			}
+		})
+	}
+}
+
+// TestAnalyzeWithAI_NoTextBlockKeepsCandidates pins that a reply with no text
+// block warns and keeps the mechanical candidates after one request.
+func TestAnalyzeWithAI_NoTextBlockKeepsCandidates(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  []map[string]any
+		wantWarn string
+	}{
+		{"thinking only", []map[string]any{{"type": "thinking", "thinking": "pondering", "signature": "sig"}},
+			"Warning: unexpected AI response format: no text block in 1 content blocks"},
+		{"no content", []map[string]any{}, "Warning: unexpected AI response format: no text block in 0 content blocks"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, hits := stubAIClient(t, tt.content)
+			candidates := aiTestCandidates()
+			var got []duplicatePair
+			stderr := captureStderr(t, func() {
+				got = analyzeWithAI(context.Background(), client, "claude-haiku-4-5", candidates)
+			})
+			if !reflect.DeepEqual(got, aiTestCandidates()) {
+				t.Fatalf("pairs = %+v, want the input candidates unchanged", got)
+			}
+			if !strings.Contains(stderr, tt.wantWarn) {
+				t.Fatalf("stderr = %q, want it to contain %q", stderr, tt.wantWarn)
 			}
 			if n := hits.Load(); n != 1 {
 				t.Fatalf("requests = %d, want 1", n)
