@@ -92,6 +92,11 @@ func TestIssueOperationsUpdateRefusesATypeOutsideTheWorkspaceVocabulary(t *testi
 	conformance.RunIssueOperationsUpdateRefusesATypeOutsideTheWorkspaceVocabulary(t, ctx, newUOWIssueOperationsFixture(t, ctx))
 }
 
+func TestIssueOperationsUpdateRejectsATitleOverTheLengthLimit(t *testing.T) {
+	ctx := context.Background()
+	conformance.RunIssueOperationsUpdateRejectsATitleOverTheLengthLimit(t, ctx, newUOWIssueOperationsFixture(t, ctx))
+}
+
 func TestIssueOperationsUpdateStatusCrossingSettlesDependers(t *testing.T) {
 	ctx := context.Background()
 	conformance.RunIssueOperationsUpdateStatusCrossingSettlesDependers(t, ctx, newUOWIssueOperationsFixture(t, ctx))

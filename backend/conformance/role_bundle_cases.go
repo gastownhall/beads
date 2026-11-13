@@ -428,6 +428,7 @@ var roleContractCases = []roleContract{
 		RunIssueOperationsUpdateStampsStartedAtOnceOnTheFirstInProgress,
 		RunIssueOperationsUpdateRawMetadataTakesTheFunnelsValueShapes,
 		RunIssueOperationsUpdateRefusesATypeOutsideTheWorkspaceVocabulary,
+		RunIssueOperationsUpdateRejectsATitleOverTheLengthLimit,
 		RunIssueOperationsUpdateStatusCrossingSettlesDependers,
 		RunIssueOperationsUpdateStatusCrossingSettlesAConditionalBlocksDepender,
 		RunIssueOperationsCreateWithDependenciesSettlesInTheCreatingTransaction,
