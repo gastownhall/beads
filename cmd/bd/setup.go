@@ -334,18 +334,27 @@ func runRecipe(name string) error {
 	}
 
 	if setupCheck {
-		var missing []string
+		var problems []string
 		for _, path := range paths {
+			if legacy, isShared := shared[path]; isShared {
+				// Check only reads a shared file — through a link, too —
+				// and holds it to owning a beads section, not to existing:
+				// a file the user owns outright is not an install.
+				if problem := sharedSectionCheckProblem(path, legacy); problem != "" {
+					problems = append(problems, problem)
+				}
+				continue
+			}
 			if _, err := os.Stat(path); os.IsNotExist(err) {
-				missing = append(missing, path)
+				problems = append(problems, "Missing: "+remedy.PrintedValue(path))
 			}
 		}
-		if len(missing) > 0 {
+		if len(problems) > 0 {
 			fmt.Printf("✗ %s integration not installed\n", remedy.PrintedValue(recipe.Name))
 			key, note := remedy.CommandArg(runtime.GOOS, name, "<recipe>")
 			fmt.Printf("  Run: bd setup %s%s\n", key, note)
-			for _, path := range missing {
-				fmt.Printf("  Missing: %s\n", remedy.PrintedValue(path))
+			for _, problem := range problems {
+				fmt.Printf("  %s\n", problem)
 			}
 			return SilentExit()
 		}
@@ -417,6 +426,28 @@ func translateSetupError(err error) error {
 		return nil
 	}
 	return SilentExit()
+}
+
+// sharedSectionCheckProblem names what bd setup --check finds missing in a
+// shared instruction file — "" when the file holds a beads section bd owns
+// (a marked one, or the whole frozen legacy file an earlier release wrote).
+// The file is only read, a link followed as checkAgents follows one.
+func sharedSectionCheckProblem(path, legacy string) string {
+	data, err := os.ReadFile(path) // #nosec G304 -- a bd setup recipe's own path
+	if os.IsNotExist(err) {
+		return "Missing: " + remedy.PrintedValue(path)
+	}
+	if err != nil {
+		return fmt.Sprintf("Cannot read %s: %v", remedy.PrintedValue(path), remedy.PrintedError(err))
+	}
+	switch setup.ClassifySharedSection(string(data), legacy) {
+	case setup.SharedSectionPresent, setup.SharedSectionLegacy:
+		return ""
+	case setup.SharedSectionMalformed:
+		return "Malformed beads section: " + remedy.PrintedValue(path)
+	default:
+		return "Missing beads section: " + remedy.PrintedValue(path)
+	}
 }
 
 func runCursorRecipe() error {

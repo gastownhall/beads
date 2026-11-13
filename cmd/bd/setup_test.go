@@ -1053,3 +1053,62 @@ func TestRunRecipe_CopilotReplacesSectionInPlace(t *testing.T) {
 		t.Fatalf("second run changed the file:\n%q, %v\nwant\n%q", gotAgain, err, want)
 	}
 }
+
+// --check cannot call an integration installed off a file bd owns no part
+// of: an instructions file holding only the user's content is a missing
+// beads section, reported non-zero with the path named and a setup remedy,
+// and neither file is modified (GH#7431).
+func TestRunRecipe_CopilotCheckRequiresSection(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	t.Chdir(tmpDir)
+	t.Setenv("BEADS_DIR", "")
+	resetSetupResolutionCaches(t)
+	resetSetupGlobals(t)
+
+	// The beads-owned manifest is installed; the shared instructions file
+	// holds only user content.
+	manifest := filepath.Join(tmpDir, ".copilot-plugin", "plugin.json")
+	if err := os.MkdirAll(filepath.Dir(manifest), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifest, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	instructions := filepath.Join(tmpDir, ".github", "copilot-instructions.md")
+	if err := os.MkdirAll(filepath.Dir(instructions), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const userContent = "# Team Copilot rules\n"
+	if err := os.WriteFile(instructions, []byte(userContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	setupCheck = true
+	t.Cleanup(func() { setupCheck = false })
+
+	var checkErr error
+	out := captureStdout(t, func() error {
+		checkErr = runRecipe("copilot")
+		return nil
+	})
+	if checkErr == nil {
+		t.Fatal("bd setup copilot --check accepted an instructions file with no beads section")
+	}
+	if !strings.Contains(out, "Missing beads section: .github/copilot-instructions.md") {
+		t.Fatalf("missing-section diagnostic not found in:\n%s", out)
+	}
+	if !strings.Contains(out, "Run: bd setup copilot") {
+		t.Fatalf("setup remedy not found in:\n%s", out)
+	}
+
+	// Neither file moved.
+	gotManifest, err := os.ReadFile(manifest)
+	if err != nil || string(gotManifest) != "{}\n" {
+		t.Fatalf("check touched the manifest: %q, %v", gotManifest, err)
+	}
+	gotInstructions, err := os.ReadFile(instructions)
+	if err != nil || string(gotInstructions) != userContent {
+		t.Fatalf("check touched the instructions file: %q, %v", gotInstructions, err)
+	}
+}
