@@ -537,3 +537,48 @@ func TestMigrateUpRefusedSeedFailsWhenWorkPending(t *testing.T) {
 		}
 	})
 }
+
+// AC-3: only a privilege refusal earns the fallback. A connection fault or
+// any other SQL error from the seed INSERT fails the open exactly as before,
+// with no work probe, no new-table read and no warning.
+func TestMigrateUpSeedErrorsThatAreNotRefusalsStayFatal(t *testing.T) {
+	causes := map[string]error{
+		"connection reset": errors.New("connection reset by peer"),
+		"mysql 1105":       &mysql.MySQLError{Number: 1105, Message: "unknown error: disk full"},
+		// The code, not the text, classifies a typed MySQL error: a denial
+		// phrase under a non-denial code is still not a refusal.
+		"mysql 1105 with denial wording": &mysql.MySQLError{Number: 1105, Message: "INSERT command denied upstream: access denied"},
+	}
+	for name, cause := range causes {
+		t.Run(name, func(t *testing.T) {
+			failOnSwallowedAdvisory(t)
+			notices := captureDoltIgnoreSeedNotices(t)
+			db, mock := newSeedMock(t)
+
+			expectSeedInsertFailure(mock, LatestVersion(), 0, cause)
+
+			_, err := MigrateUp(context.Background(), db)
+			if err == nil {
+				t.Fatal("MigrateUp() error = nil, want the seed failure")
+			}
+			if got, want := err.Error(), wantSeedError(refusedSeedMissing[0], cause); got != want {
+				t.Fatalf("MigrateUp() error = %q, want %q", got, want)
+			}
+			if !errors.Is(err, cause) {
+				t.Fatalf("MigrateUp() error = %v, want errors.Is to find the cause", err)
+			}
+			if mysqlCause, ok := cause.(*mysql.MySQLError); ok {
+				var got *mysql.MySQLError
+				if !errors.As(err, &got) || got != mysqlCause {
+					t.Fatalf("MigrateUp() error = %v, want errors.As to find the MySQL cause", err)
+				}
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+			if notices.Len() != 0 {
+				t.Fatalf("failed open printed %q, want no warning", notices.String())
+			}
+		})
+	}
+}
