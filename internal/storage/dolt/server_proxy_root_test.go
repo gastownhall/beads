@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	mysql "github.com/go-sql-driver/mysql"
+
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/identity"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
@@ -22,27 +24,45 @@ import (
 func startProxyInFrontOfTestServer(t *testing.T) (root string, port int) {
 	t.Helper()
 	root = t.TempDir()
+	port, _, _ = runProxyInFrontOfTestServer(t, root, 0)
+	return root, port
+}
+
+// runProxyInFrontOfTestServer runs a real bd db-proxy rooted at root on port
+// (0 picks one) in front of the shared test Dolt server. It returns the data
+// port, a stop that shuts the proxy down and waits for it (as the test's
+// cleanup also does), and the proxy's counters.
+func runProxyInFrontOfTestServer(t *testing.T, root string, port int) (dataPort int, stop func(), stats *proxy.Stats) {
+	t.Helper()
 	backend, err := server.NewExternalDoltServer(configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: testServerPort})
 	if err != nil {
 		t.Fatal(err)
 	}
+	stats = &proxy.Stats{}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	p := proxy.NewProxyServer(proxy.ProxyOpts{RootDir: root, Server: backend})
+	p := proxy.NewProxyServer(proxy.ProxyOpts{RootDir: root, Port: port, Server: backend, Stats: stats})
 	go func() { done <- p.ListenAndServe(ctx) }()
-	t.Cleanup(func() {
+	var stopped bool
+	stop = func() {
+		t.Helper()
+		if stopped {
+			return
+		}
+		stopped = true
 		cancel()
 		select {
 		case <-done:
 		case <-time.After(10 * time.Second):
 			t.Error("proxy did not exit within 10s of cancel")
 		}
-	})
+	}
+	t.Cleanup(stop)
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		pf, err := pidfile.Read(root, proxy.PIDFileName)
 		if err == nil && pf != nil {
-			return root, pf.Port
+			return pf.Port, stop, stats
 		}
 		select {
 		case err := <-done:
@@ -51,7 +71,7 @@ func startProxyInFrontOfTestServer(t *testing.T) (root string, port int) {
 		}
 	}
 	t.Fatal("proxy pidfile not present within 10s")
-	return "", 0
+	return 0, nil, nil
 }
 
 // TestServerProxyRoot pins the server-mode open through a bd db-proxy's data
@@ -107,6 +127,61 @@ func TestServerProxyRoot(t *testing.T) {
 			t.Fatalf("open through the proxy with BEADS_DOLT_SERVER_PROXY_ROOT: %v", err)
 		}
 		_ = store.Close()
+	})
+
+	// Two roots taking turns on one port, in one process: root A's proxy
+	// exits, root B's proxy takes its port, and the process opens a store
+	// under B. A's pool must not follow the port to B: its next connection
+	// authenticates under A's secret, so B's proxy hangs up on it before
+	// dialing B's backend, and A gets proxy.ErrDataAuth. A dialer that found
+	// the root by address would now find B's and run A's queries there.
+	t.Run("two roots taking turns on one port", func(t *testing.T) {
+		rootA, rootB := t.TempDir(), t.TempDir()
+		port, stopA, _ := runProxyInFrontOfTestServer(t, rootA, 0)
+		storeA, err := open(t, port, rootA)
+		if err != nil {
+			t.Fatalf("open under root A: %v", err)
+		}
+		defer storeA.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		var one int
+		if err := storeA.db.QueryRowContext(ctx, "SELECT 1").Scan(&one); err != nil {
+			t.Fatalf("SELECT 1 under root A: %v", err)
+		}
+
+		stopA()
+		_, _, statsB := runProxyInFrontOfTestServer(t, rootB, port)
+		storeB, err := open(t, port, rootB)
+		if err != nil {
+			t.Fatalf("open under root B on root A's old port %d: %v", port, err)
+		}
+		defer storeB.Close()
+
+		before := statsB.Snapshot()
+		// The connection A's pool held died with A's proxy, and the driver
+		// may first report that one ("invalid connection"); the query after
+		// it is made on a new connection, which must be refused.
+		for attempt := 1; ; attempt++ {
+			var name string
+			err = storeA.db.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&name)
+			if err == nil {
+				t.Fatalf("root A's store queried root B's proxy (database %q)", name)
+			}
+			if errors.Is(err, proxy.ErrDataAuth) {
+				break
+			}
+			if attempt == 3 || !errors.Is(err, mysql.ErrInvalidConn) {
+				t.Fatalf("root A's query %d after root B took its port = %v; want proxy.ErrDataAuth", attempt, err)
+			}
+			t.Logf("root A's query %d after root B took its port, on the connection A's proxy closed: %v", attempt, err)
+		}
+		after := statsB.Snapshot()
+		if after.BackendDialAttempts != before.BackendDialAttempts {
+			t.Errorf("root B's proxy dialed its backend %d times for root A's connections; want 0",
+				after.BackendDialAttempts-before.BackendDialAttempts)
+		}
+		t.Logf("root A after root B took port %d: %v", port, err)
 	})
 
 	t.Run("no proxy root", func(t *testing.T) {

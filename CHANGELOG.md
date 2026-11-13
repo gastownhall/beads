@@ -134,8 +134,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (another workspace's root, a rotated secret, or another process on the
   port). A server-mode open dials its server as a proxy data port when
   `BEADS_DOLT_SERVER_PROXY_ROOT` names the proxy root (the Dolt store's
-  `Config.ServerProxyRoot`); such an open never auto-starts a server and
-  refuses a Unix socket beside the proxy root. Like the other settings that
+  `Config.ServerProxyRoot`). Every connection of such a store authenticates
+  under that root's secret, so in a process that opens several roots, a
+  store whose proxy exits fails with `ErrProxyDataAuth` rather than follow
+  its port to another root's proxy. Such an open never auto-starts a server
+  and refuses a Unix socket beside the proxy root. Like the other settings that
   choose which credential bd presents, `.beads/.env` cannot set it.
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
   While a workspace journals, every `ephemeral` or `no_history` bead it creates

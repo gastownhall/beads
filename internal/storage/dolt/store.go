@@ -2303,12 +2303,6 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		(!serverOpenCanAutoStart(cfg) || doltserver.IsAutoStartDisabled()) {
 		return nil, unresolvedServerPortError(cfg, resolvedBeadsDir, serverDir)
 	}
-	if cfg.ServerProxyRoot != "" {
-		// The bdproxy dialer (buildServerDSN's network) finds the proxy root
-		// by the address the driver dials. A proxy root disables auto-start,
-		// so the port no longer changes below.
-		proxy.RegisterDataAddress(cfg.ServerProxyRoot, proxy.Endpoint{Host: cfg.ServerHost, Port: cfg.ServerPort})
-	}
 
 	// Fail-fast connectivity check before MySQL protocol initialization.
 	// This gives an immediate, clear error if the Dolt server isn't running,
@@ -3038,9 +3032,11 @@ func buildServerDSN(cfg *Config, database string) string {
 		TLS:      cfg.ServerTLS,
 	}
 	if cfg.ServerProxyRoot != "" {
-		// The bdproxy network runs the BDPROXY1 exchange on every
-		// connection, for the root newServerMode registered this address to.
-		base.Net = proxy.DataNetwork
+		// A network bound to this store's proxy root, not the address-keyed
+		// proxy.DataNetwork: every connection makes the BDPROXY1 exchange
+		// under this root's secret, whatever another open in the process has
+		// since registered for the address.
+		base.Net = proxy.DataNetworkFor(cfg.ServerProxyRoot)
 	}
 	// Parse the base DSN and add pool-specific timeouts.
 	parsed, err := mysql.ParseDSN(base.String())
