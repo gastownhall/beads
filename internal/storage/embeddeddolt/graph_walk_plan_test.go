@@ -44,6 +44,17 @@ func (r *statementRecorder) QueryContext(ctx context.Context, q string, a ...any
 
 func explainPlan(t *testing.T, tx *sql.Tx, st recordedStatement) string {
 	t.Helper()
+	plan := explainPlanText(t, tx, st)
+	if !strings.Contains(plan, "IndexedTableAccess(") {
+		t.Skipf("EXPLAIN output not in a recognized Dolt plan format, skipping plan assertions; plan=\n%s", plan)
+	}
+	return plan
+}
+
+// explainPlanText is explainPlan without the format check, for a caller that
+// recognizes the plan itself.
+func explainPlanText(t *testing.T, tx *sql.Tx, st recordedStatement) string {
+	t.Helper()
 	rows, err := tx.QueryContext(context.Background(), "EXPLAIN PLAN "+st.query, st.args...)
 	if err != nil {
 		t.Fatalf("EXPLAIN PLAN: %v\n%s", err, st.query)
@@ -60,11 +71,7 @@ func explainPlan(t *testing.T, tx *sql.Tx, st recordedStatement) string {
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	plan := strings.Join(out, "\n")
-	if !strings.Contains(plan, "IndexedTableAccess(") {
-		t.Skipf("EXPLAIN output not in a recognized Dolt plan format, skipping plan assertions; plan=\n%s", plan)
-	}
-	return plan
+	return strings.Join(out, "\n")
 }
 
 // assertRecursiveMembersAreLookups checks a walk built on reachabilityMembers:

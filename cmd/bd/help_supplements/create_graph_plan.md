@@ -70,6 +70,12 @@ Node notes:
 
 Edge notes:
 
+- Direction follows `bd dep add [issue-id] [depends-on-id]`: the `from`
+  endpoint (`from_key`/`from_id`) is the dependent — the issue that waits —
+  and the `to` endpoint (`to_key`/`to_id`) is what it depends on. The
+  example's `{ "from_key": "gate", "to_key": "api" }` edge is
+  `bd dep add gate api`: the gate depends on api, and with the default
+  `blocks` type api blocks the gate until it closes.
 - `type` defaults to `blocks`. `parent_key`/`parent_id` on nodes already
   create `parent-child` edges; don't repeat them in `edges`.
 - `gate` (`all-children` | `any-children`) and `spawner_key`/`spawner_id`

@@ -3,7 +3,7 @@ title: Recovery Playbooks
 description: Step-by-step recovery for bd init and bd dolt push/pull refusals, including the primary-key fork playbook
 ---
 
-Last reviewed: 2026-10-01
+Last reviewed: 2026-11-07
 
 Freshness source: `cmd/bd/init.go`, `cmd/bd/init_safety.go`,
 `cmd/bd/init_safety_test.go`, `cmd/bd/init_safety_help.go`, and
@@ -23,6 +23,7 @@ See also: `bd help init-safety`, and
 ## Table of contents
 
 - [init-force-refused — `bd init --force`/`--reinit-local` refused because origin has Dolt history](#init-force-refused)
+- [init-remote-unverified — `bd init --force`/`--reinit-local`/`--from-jsonl` refused because the remote's Dolt history could not be verified](#init-remote-unverified)
 - [init-token-missing — a destructive re-init refused because `--destroy-token` is missing or wrong](#init-token-missing)
 - [init-local-exists — `bd init --reinit-local` refused because local data already exists](#init-local-exists)
 - [init-home-refused — `bd init` refused because the working directory is your home directory](#init-home-refused)
@@ -93,6 +94,72 @@ See `bd help init-safety` for the token format.
 After `bd init --reinit-local --discard-remote`, your next
 `bd dolt push` must be a history-replacing push. Coordinate with your
 team before doing this.
+
+---
+
+## init-remote-unverified
+
+**Exit code:** `10` (`ExitRemoteDivergenceRefused`)
+
+**Symptom**
+
+```
+! could not verify refs/dolt/data on <remote> (<error>); treating remote as having Dolt history
+
+bd init refuses: could not verify whether the remote has Dolt history (refs/dolt/data).
+  Why: the probe could not read the remote, and a failed probe cannot
+       establish that the remote is empty. ...
+```
+
+Releases before this message existed printed the
+[init-force-refused](#init-force-refused) text ("remote 'origin' already has
+Dolt history") in this situation too, even though nothing had confirmed any
+history. If you see that text and `git ls-remote` against the remote fails,
+this section is the one that applies.
+
+**Why this happens**
+
+You selected local history (`--force`, `--reinit-local`, or `--from-jsonl`)
+without `--discard-remote`, and `bd` could not read the remote's
+`refs/dolt/data`: the remote does not exist, needs credentials this shell
+does not have, or the network failed. The probe is `git ls-remote`, so it
+also always fails on a Dolt-native remote (DoltHub, `aws://`, `gs://`,
+`file://`), which is not a git repository. An unreadable remote might still
+hold your team's history, so `bd` refuses exactly as it would for confirmed
+history ([ADR 0002](https://github.com/gastownhall/beads/blob/main/engdocs/adr/0002-init-safety-invariants.md)
+treats an unknown remote as having history). A plain `bd init` without
+those flags is not refused here. When the remote is the git origin, it
+falls back to a fresh local database. When it is a configured
+`sync.remote`, it tries to clone that remote instead, and exits with code 1
+(`failed to clone remote`) if the clone cannot read it.
+
+**Recovery paths**
+
+### 1. Fix access to the remote, then retry
+
+```
+git ls-remote <remote-url> refs/dolt/data
+```
+
+Once that command succeeds, re-run your `bd init`. If it prints a
+`refs/dolt/data` line, the remote does have history: adopt it with
+`bd bootstrap`, or follow [init-force-refused](#init-force-refused).
+
+This path is for git remotes only. `git ls-remote` can never read a
+Dolt-native remote, so `bd init` cannot verify one: adopt its history with
+`bd bootstrap`, which reads it through Dolt, or take path 2 or 3.
+
+### 2. Initialize without connecting that remote
+
+Add `--remote ""` to the same `bd init` command. An explicitly empty remote
+tells `bd` not to probe or wire the git origin or a configured `sync.remote`,
+so the new database is local only. Connect a remote later with
+`bd dolt remote add origin <url>` once you know its state.
+
+### 3. You intentionally want to overwrite the remote (destructive)
+
+`--discard-remote` still runs the destroy-token flow described in
+[init-token-missing](#init-token-missing); see `bd help init-safety`.
 
 ---
 

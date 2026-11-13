@@ -1347,6 +1347,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filesystem, which a server in a container does not unless the backup is
   mounted at the same path in both; there a `--force` restore from a backup
   that only bd's machine holds can still drop the database.
+- `bd init --force`, `--reinit-local` or `--from-jsonl` without
+  `--discard-remote` now says why it refuses when it cannot read the
+  remote's `refs/dolt/data`. It still exits 10, now with reason
+  `remote-unverified-without-discard-remote`: the message says the remote's
+  history could not be verified, and that the `git ls-remote` probe reads
+  only git remotes, so a Dolt-native remote (DoltHub, `aws://`, `gs://`,
+  `file://`) always fails it. `--remote ""` initializes without connecting
+  that remote. An unreadable remote is not treated as having no Dolt data
+  (#7665, #7682).
+- The target-filtered dependency counts (dependent counts and the ready
+  counts by id) read through one guarded branch per target column
+  (`sqlbuild.DepTargetUnion`) instead of the COALESCE'd filters, so each
+  branch can seek its index. `bd show`'s dependents listing and the other
+  COALESCE-filtered readers are unchanged (#7666, #7682).
+- docs/core-concepts/dependencies.md creates gates with `bd gate create
+  --blocks`; it documented a `bd create --await-type` flag that does not
+  exist. `bd create --graph` help now says which end of an edge is the
+  dependent (`from_key`) and which the blocker (`to_key`) (#7664, #7682).
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
