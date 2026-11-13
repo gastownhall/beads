@@ -349,6 +349,12 @@ func runRecipe(name string) error {
 		return nil
 	}
 
+	// Install and remove refuse a shared file they cannot work on before
+	// changing any of the recipe's files, so a refusal changes nothing.
+	if err := preflightSharedPaths(recipe, paths); err != nil {
+		return err
+	}
+
 	if setupRemove {
 		removed := false
 		var kept []string
@@ -423,6 +429,27 @@ func runRecipe(name string) error {
 	fmt.Printf("\n✓ %s integration installed\n", remedy.PrintedValue(recipe.Name))
 	for _, path := range paths {
 		fmt.Printf("  File: %s\n", remedy.PrintedValue(path))
+	}
+	return nil
+}
+
+// preflightSharedPaths refuses, naming the file and what to do, a recipe
+// whose shared file install or remove cannot work on (setup.PreflightSharedFile).
+func preflightSharedPaths(recipe *recipes.Recipe, paths []string) error {
+	for _, path := range paths {
+		if !recipe.IsSharedPath(path) {
+			continue
+		}
+		err := setup.PreflightSharedFile(path)
+		switch {
+		case err == nil:
+		case errors.Is(err, setup.ErrMalformedSection):
+			return HandleErrorWithHint(
+				fmt.Sprintf("%s: %v; no files were changed", remedy.PrintedValue(path), remedy.PrintedError(err)),
+				"edit the file so it holds at most one <!-- BEGIN BEADS INTEGRATION --> ... <!-- END BEADS INTEGRATION --> pair, then run bd setup again")
+		default:
+			return HandleError("%s: %v; no files were changed", remedy.PrintedValue(path), remedy.PrintedError(err))
+		}
 	}
 	return nil
 }
