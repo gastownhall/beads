@@ -556,3 +556,100 @@ func TestCreateIssuesReplayMovesBackfilledDependencyToRemint(t *testing.T) {
 	t.Run("two issues (batch cache)", func(t *testing.T) { run(t, 2, 1) })
 	t.Run("repeated rollback", func(t *testing.T) { run(t, 1, 2) })
 }
+
+// TestCreateIssueReplayKeepsCounterAheadOfReplayedID (AC-3): with the counter
+// pre-seeded, a rolled-back singular auto-id create with NO competitor
+// re-mints on replay (deterministically obtaining its own unoccupied id), and
+// the counter must be left AHEAD of the replayed row: the next auto-id create
+// gets a distinct id instead of reusing — and overwriting — the replayed one.
+func TestCreateIssueReplayKeepsCounterAheadOfReplayedID(t *testing.T) {
+	t.Run("counter mode", func(t *testing.T) {
+		store, cleanup := setupConcurrentTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+
+		if err := store.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+			t.Fatalf("set issue_id_mode=counter: %v", err)
+		}
+		// Seed the counter with a committed row so replay-time allocation is
+		// UPDATE-driven. Without a seeded row the next mint re-seeds from the
+		// live rows and hides the leak.
+		seed := &types.Issue{Title: "counter seed", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+		if err := store.CreateIssue(ctx, seed, "seeder"); err != nil {
+			t.Fatalf("seed counter: %v", err)
+		}
+
+		issue := &types.Issue{Title: "replayed create", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+		fault, origDB, restore := armCreateCommitFault(t, store, 1, func() error {
+			return nil // no competitor: the aborted id stays unoccupied
+		})
+		if err := store.CreateIssue(ctx, issue, "loser"); err != nil {
+			t.Fatalf("CreateIssue: %v", err)
+		}
+		restore()
+		if armed, commits := fault.counts(); armed != 1 || commits != 1 {
+			t.Fatalf("fault intercepted %d commits (want 1) and observed %d successful commits (want 1: the replay)", armed, commits)
+		}
+		if issue.ID == "" {
+			t.Fatal("replayed create holds no id")
+		}
+
+		later := &types.Issue{Title: "later distinct create", Status: types.StatusOpen, Priority: 3, IssueType: types.TypeTask}
+		if err := store.CreateIssue(ctx, later, "later"); err != nil {
+			t.Fatalf("subsequent CreateIssue: %v", err)
+		}
+		if later.ID == issue.ID {
+			t.Errorf("subsequent auto-id create reused the replayed id %s: the counter was left behind the replayed row", issue.ID)
+		}
+		for _, want := range []struct{ id, title string }{
+			{issue.ID, "replayed create"},
+			{later.ID, "later distinct create"},
+		} {
+			got, err := issueOnPool(ctx, origDB, want.id)
+			if err != nil {
+				t.Fatalf("read %s: %v", want.id, err)
+			}
+			if got.Title != want.title {
+				t.Errorf("issue %s title = %q, want %q", want.id, got.Title, want.title)
+			}
+		}
+	})
+
+	t.Run("hash mode reuses its own unoccupied id", func(t *testing.T) {
+		// No competitor and no counter: the replay legitimately re-derives the
+		// SAME hash id, because the aborted id is unoccupied. Guards against a
+		// fix that forces a different id per attempt.
+		store, cleanup := setupConcurrentTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+
+		issue := &types.Issue{Title: "hash replay", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+		var staleID string
+		fault, origDB, restore := armCreateCommitFault(t, store, 1, func() error {
+			staleID = issue.ID
+			return nil
+		})
+		if err := store.CreateIssue(ctx, issue, "loser"); err != nil {
+			t.Fatalf("CreateIssue: %v", err)
+		}
+		restore()
+		if armed, commits := fault.counts(); armed != 1 || commits != 1 {
+			t.Fatalf("fault intercepted %d commits (want 1) and observed %d successful commits (want 1: the replay)", armed, commits)
+		}
+		if staleID == "" {
+			t.Fatal("fault never observed the aborted mint: interleaving not forced")
+		}
+		if issue.ID != staleID {
+			t.Errorf("replay minted %s; the aborted id %s was unoccupied, so the deterministic hash mint legitimately reuses it", issue.ID, staleID)
+		}
+		got, err := issueOnPool(ctx, origDB, issue.ID)
+		if err != nil {
+			t.Fatalf("read %s: %v", issue.ID, err)
+		}
+		if got.Title != "hash replay" {
+			t.Errorf("issue %s title = %q, want %q", issue.ID, got.Title, "hash replay")
+		}
+	})
+}
