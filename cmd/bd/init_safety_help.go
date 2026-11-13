@@ -29,9 +29,10 @@ FLAG SURFACE
 
   bd init --reinit-local        Re-initialize local .beads/ over existing
                                 local data. Does NOT authorize discarding
-                                remote history. If origin has Dolt data
-                                this will refuse — pair with
-                                --discard-remote to override. Nor does it
+                                remote history. If origin has Dolt data,
+                                or bd cannot read origin to check, this
+                                will refuse — pair with --discard-remote
+                                to override. Nor does it
                                 authorize recreating a missing server-mode
                                 database; that takes --recreate-missing.
 
@@ -61,9 +62,18 @@ FLAG SURFACE
                                   bd init --recreate-missing --prefix <prefix>
 
   bd init --from-jsonl          Import from configured import.path. If
-                                origin has Dolt data, this refuses unless
+                                origin has Dolt data, or bd cannot read
+                                origin to check, this refuses unless
                                 --discard-remote authorizes replacing that
                                 remote history.
+
+  bd init --remote=""           Initialize without configuring a remote
+                                for this run: no sync.remote and no
+                                origin discovery, so nothing is probed.
+                                It does not remove a sync.remote already
+                                in config or a Dolt remote the database
+                                already has, and it bypasses no local
+                                data-safety guard.
 
 ADOPTING A REMOTE
 
@@ -72,6 +82,28 @@ ADOPTING A REMOTE
       bd bootstrap
 
   bd init will automatically suggest this when a remote is detected.
+
+UNREADABLE REMOTE
+
+  bd init checks the remote for refs/dolt/data with git ls-remote. When
+  that check fails (no credentials for a private repository, a wrong
+  URL, no network), bd cannot rule out existing history and treats the
+  remote as if it had some. The check always fails for a Dolt remote
+  that is not a git repository (file://, gs://, s3://, az://, DoltHub,
+  remotesapi), because git cannot read one.
+
+  When the remote is the git origin (no sync.remote, no --remote), a
+  plain bd init then warns and initializes a fresh local database. A
+  configured sync.remote or an explicit --remote is cloned instead, and
+  bd init fails with exit 1 if the clone cannot read it.
+
+  --reinit-local, --force and --from-jsonl refuse with exit 10 and
+  "could not verify whether remote 'origin' has Dolt history"; releases
+  before this message said "already has Dolt history" for the same
+  case. Restore access and re-run; adopt a Dolt remote that is not a
+  git repository with bd bootstrap; or add --remote="" to initialize
+  without a remote, and check the remote's history before you add one
+  later.
 
 DESTROY-TOKEN (non-interactive only)
 
@@ -93,8 +125,8 @@ DESTROY-TOKEN (non-interactive only)
 
 EXIT CODES
 
-  10    refused: remote has Dolt history and you selected local history
-        without --discard-remote
+  10    refused: remote has Dolt history, or could not be checked for it,
+        and you selected local history without --discard-remote
   11    refused: existing local data and you declined the destroy confirm
         (interactive mode only)
   12    refused: destructive re-init (--discard-remote, or --reinit-local
