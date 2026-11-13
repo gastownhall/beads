@@ -31,8 +31,15 @@ type metadatalessWorkspace struct {
 // then removes metadata.json, config.yaml and any legacy config.json.
 func newMetadatalessWorkspace(t *testing.T, export bool) *metadatalessWorkspace {
 	t.Helper()
+	return newMetadatalessWorkspaceFor(t, "myproj", export)
+}
+
+// newMetadatalessWorkspaceFor is newMetadatalessWorkspace for a workspace
+// initialized with prefix, whose database is named after it.
+func newMetadatalessWorkspaceFor(t *testing.T, prefix string, export bool) *metadatalessWorkspace {
+	t.Helper()
 	bd := buildEmbeddedBD(t)
-	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "myproj")
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", prefix)
 	w := &metadatalessWorkspace{bd: bd, dir: dir, beadsDir: beadsDir}
 	w.issueID = strings.TrimSpace(bdCreateSilent(t, bd, dir, "retained issue"))
 	if export {
@@ -50,7 +57,7 @@ func newMetadatalessWorkspace(t *testing.T, export bool) *metadatalessWorkspace 
 			t.Fatal(err)
 		}
 	}
-	w.requireDatabases(t, "myproj")
+	w.requireDatabases(t, prefix)
 	return w
 }
 
@@ -200,6 +207,25 @@ func TestEmbeddedMetadatalessWorkspaceRefusesSiblingDatabase(t *testing.T) {
 			t.Fatalf("after restoring metadata.json the workspace lists %v, want only the original %s", ids, w.issueID)
 		}
 		w.requireDatabases(t, "beads", "myproj")
+	})
+
+	// AC-4: a metadata-less store whose only database is the default
+	// fallback keeps working as before, reads and writes alike, with the
+	// existing warning and no second database.
+	t.Run("sole fallback database", func(t *testing.T) {
+		w := newMetadatalessWorkspaceFor(t, "beads", true)
+		stdout, stderr, err := w.run(t, nil, "list")
+		if err != nil || !strings.Contains(stdout, w.issueID) {
+			t.Fatalf("bd list on the sole fallback database = %v, want the existing issue %s\nstdout:\n%s\nstderr:\n%s", err, w.issueID, stdout, stderr)
+		}
+		if !strings.Contains(stderr, "no beads configuration found") {
+			t.Errorf("the existing fallback warning is gone:\n%s", stderr)
+		}
+		stdout, stderr, err = w.run(t, nil, "create", "--silent", "second issue")
+		if err != nil || strings.TrimSpace(stdout) == "" {
+			t.Fatalf("bd create on the sole fallback database = %v, want a new issue\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		w.requireDatabases(t, "beads")
 	})
 }
 

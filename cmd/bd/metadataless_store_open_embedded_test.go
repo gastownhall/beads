@@ -6,12 +6,14 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"testing"
 
 	"github.com/steveyegge/beads"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
@@ -157,4 +159,114 @@ func TestEmbeddedMetadatalessStoreOpensRefuseSeveralDatabases(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestEmbeddedMetadatalessStoreOpensKeepUnambiguousBehavior pins that the
+// GH#4381 check changes nothing for a metadata-less store that is empty or
+// holds only the effective target: the factories and the SDK open it as
+// before, the strict paths keep their own rules (a routed write still needs
+// an existing database, reads and previews still create none), the
+// environment still selects the target where it did, and the writable
+// factory still migrates a legacy unsanitized directory.
+func TestEmbeddedMetadatalessStoreOpensKeepUnambiguousBehavior(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	for _, tc := range []struct{ name, env, target string }{
+		{name: "sole default database", target: "beads"},
+		{name: "sole env-selected database", env: "foo", target: "foo"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.env != "" {
+				t.Setenv("BEADS_DOLT_SERVER_DATABASE", tc.env)
+			}
+			beadsDir := t.TempDir()
+			seedEmbeddedDatabases(t, beadsDir, tc.target)
+			for _, opener := range metadatalessOpeners() {
+				t.Run(opener.name, func(t *testing.T) {
+					store, err := opener.open(t.Context(), beadsDir)
+					if err != nil {
+						t.Fatalf("open of the sole target %q failed: %v", tc.target, err)
+					}
+					if err := store.Close(); err != nil {
+						t.Fatal(err)
+					}
+					requireEmbeddedDatabases(t, beadsDir, tc.target)
+				})
+			}
+		})
+	}
+
+	t.Run("empty store", func(t *testing.T) {
+		for _, opener := range metadatalessOpeners() {
+			t.Run(opener.name, func(t *testing.T) {
+				beadsDir := t.TempDir()
+				store, err := opener.open(t.Context(), beadsDir)
+				var refusal *configfile.MetadatalessDatabaseError
+				if errors.As(err, &refusal) {
+					t.Fatalf("an empty store got the metadata-less refusal: %v", err)
+				}
+				switch opener.name {
+				case "newDoltStoreFromConfig", "beads.OpenBestAvailable", "beads.OpenBestAvailableWith":
+					// A fresh workspace still gets the default database.
+					if err != nil {
+						t.Fatalf("open of an empty store failed: %v", err)
+					}
+					_ = store.Close()
+					requireEmbeddedDatabases(t, beadsDir, "beads")
+				case "newExistingDoltStoreFromConfig":
+					// A routed write still does not create a database.
+					if err == nil {
+						_ = store.Close()
+						t.Fatal("routed write opened an empty store; want its existing no-database refusal")
+					}
+					requireEmbeddedDatabases(t, beadsDir)
+				default:
+					// Reads and previews still create nothing.
+					if err == nil {
+						_ = store.Close()
+					}
+					requireEmbeddedDatabases(t, beadsDir)
+				}
+			})
+		}
+	})
+
+	t.Run("writable factory sanitation", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_DATABASE", "my-db")
+		for _, legacy := range []bool{false, true} {
+			beadsDir := t.TempDir()
+			seedEmbeddedDatabases(t, beadsDir, "my_db")
+			if legacy {
+				// The sole directory is the unsanitized legacy name, which
+				// the factory's existing migration renames to my_db.
+				root := filepath.Join(beadsDir, "embeddeddolt")
+				if err := os.Rename(filepath.Join(root, "my_db"), filepath.Join(root, "my-db")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			store, err := newDoltStoreFromConfig(t.Context(), beadsDir)
+			if err != nil {
+				t.Fatalf("writable open (legacy dir %v) failed: %v", legacy, err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			requireEmbeddedDatabases(t, beadsDir, "my_db")
+		}
+	})
+
+	t.Run("nonmutating sanitation", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_DATABASE", "my-db")
+		beadsDir := t.TempDir()
+		seedEmbeddedDatabases(t, beadsDir, "my_db")
+		for _, open := range []func(context.Context, string) (storage.DoltStorage, error){newReadOnlyStoreFromConfig, newPreviewStoreFromConfig} {
+			store, err := open(t.Context(), beadsDir)
+			if err != nil {
+				t.Fatalf("nonmutating open of the sanitized my_db failed: %v", err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			requireEmbeddedDatabases(t, beadsDir, "my_db")
+		}
+	})
 }
