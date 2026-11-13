@@ -757,6 +757,11 @@ func runDiagnostics(path string) doctorResult {
 	skewCheck := convertWithCategory(doctor.CheckMigrationContentSkew(sharedStore), doctor.CategoryData)
 	result.Checks = append(result.Checks, skewCheck)
 
+	// Check 7f2: recorded migrations whose dropped column default survives
+	// (GH#5269). Read-only; `bd migrate schema` repairs.
+	postConditionsCheck := convertWithCategory(doctor.CheckMigrationPostConditions(sharedStore), doctor.CategoryData)
+	result.Checks = append(result.Checks, postConditionsCheck)
+
 	// Dolt health checks (connection, schema, issue count, status).
 	for _, dc := range doctor.RunDoltHealthChecks(path) {
 		result.Checks = append(result.Checks, convertDoctorCheck(dc))
