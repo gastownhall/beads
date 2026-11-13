@@ -1373,8 +1373,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their precedence. Discovery never opens, changes or deletes the skipped
   database: back it up before removing it; `docs/reference/worktrees.md`
   shows how to inspect a copy.
-- **`bd update --assignee -` and a whitespace-only `--assignee` now unassign
-  the issue** (#8203). They stored the literal `-` or spaces, which every
+- **`bd update --assignee -`, `bd assign <id> -` and their whitespace-only
+  forms now unassign the issue** (#8203). They stored the literal `-` or spaces, which every
   emptiness check (claim, `bd ready --unassigned`, the reassign fence) reads
   as assigned, so an issue meant to go back to the pool stayed held. Both
   spellings now clear the assignee exactly as `--assignee ''` does; any other

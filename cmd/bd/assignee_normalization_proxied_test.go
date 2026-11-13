@@ -3,6 +3,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -44,6 +45,24 @@ func TestProxiedServerAssigneeHiddenEmptyClears(t *testing.T) {
 			bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--claim", "--actor", "newcomer")
 			if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Assignee != "newcomer" || got.Status != types.StatusInProgress {
 				t.Errorf("update --assignee %q then --claim by another actor: assignee=%q status=%s, want newcomer/in_progress", value, got.Assignee, got.Status)
+			}
+		}
+	})
+
+	t.Run("AC2_assign_positional_clears", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "hpb")
+		for _, value := range []string{"", "-", " "} {
+			issue := assigned(t, p, "Assign clear via proxy")
+			out, err := bdProxiedRun(t, bd, p.dir, "assign", issue.ID, value, "--actor", "dispatcher")
+			if err != nil {
+				t.Fatalf("assign %q failed: %v\n%s", value, err, out)
+			}
+			if !strings.Contains(string(out), "Unassigned") {
+				t.Errorf("assign %q: want the Unassigned confirmation, got:\n%s", value, out)
+			}
+			if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Assignee != "" {
+				t.Errorf("assign %q: assignee=%q, want cleared", value, got.Assignee)
 			}
 		}
 	})

@@ -4,6 +4,7 @@ package main
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -54,6 +55,19 @@ func TestEmbeddedAssigneeHiddenEmptyClears(t *testing.T) {
 			bdUpdate(t, bd, dir, issue.ID, "--claim", "--actor", "newcomer")
 			if got := bdShow(t, bd, dir, issue.ID); got.Assignee != "newcomer" || got.Status != types.StatusInProgress {
 				t.Errorf("update %q then --claim by another actor: assignee=%q status=%s, want newcomer/in_progress", form, got.Assignee, got.Status)
+			}
+		}
+	})
+
+	t.Run("AC2_assign_positional_clears", func(t *testing.T) {
+		for _, value := range []string{"", "-", " ", "\t"} {
+			issue := assigned(t, "Assign clear")
+			out := bdRunOK(t, bd, dir, "assign", issue.ID, value, "--actor", "dispatcher")
+			if !strings.Contains(out, "Unassigned") {
+				t.Errorf("assign %q: want the Unassigned confirmation, got:\n%s", value, out)
+			}
+			if got := bdShow(t, bd, dir, issue.ID); got.Assignee != "" {
+				t.Errorf("assign %q: assignee=%q, want cleared", value, got.Assignee)
 			}
 		}
 	})
