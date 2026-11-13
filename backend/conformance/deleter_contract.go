@@ -756,7 +756,8 @@ func RunDeleterCollapsesDuplicateIDs(t *testing.T, ctx context.Context, fixture 
 // RunDeleterRewritesReferencesInNeighbors pins the rewrite
 // (issueops/deleter.go, Deleter.Delete: "WHICH ROWS GET REWRITTEN"): every
 // occurrence of a deleted id in a graph neighbor's four long text fields
-// becomes `[deleted:<id>]`, matched at word boundaries.
+// becomes `[deleted:<id>]`, matched at word boundaries, including citations
+// that sit next to each other with one separator between them.
 //
 // The NEGATIVE half is the half worth having. A neighbor also cites an id that
 // merely has the deleted one as a PREFIX, and that citation must survive: a
@@ -770,9 +771,11 @@ func RunDeleterRewritesReferencesInNeighbors(t *testing.T, ctx context.Context, 
 	lookalike := deleterSeedIssue(t, ctx, fixture, "refs", "targetx")
 
 	neighbor := deleterIssue(fixture, "refs", "neighbor", false)
-	neighbor.Description = "blocked by " + target + "."
-	neighbor.Notes = "see " + target + " and " + lookalike
-	neighbor.Design = "(" + target + ")"
+	// Adjacent citations share one separator: a rewrite that consumed it as
+	// the first citation's trailing boundary had none left for the second.
+	neighbor.Description = "blocked by " + target + ". " + target + " first"
+	neighbor.Notes = "see " + target + " and " + lookalike + "; " + target + " " + target
+	neighbor.Design = "(" + target + ")," + target + "...\n" + target
 	neighbor.AcceptanceCriteria = target + " closes"
 	deleterSeed(t, ctx, fixture, neighbor)
 	deleterAddEdge(t, ctx, fixture, neighbor.ID, target)
@@ -793,10 +796,18 @@ func RunDeleterRewritesReferencesInNeighbors(t *testing.T, ctx context.Context, 
 	}
 
 	marker := "[deleted:" + target + "]"
+	// Exact bytes: every complete citation is marked and every separator
+	// around it survives.
+	wantText := map[string]string{
+		"description":         "blocked by " + marker + ". " + marker + " first",
+		"notes":               "see " + marker + " and " + lookalike + "; " + marker + " " + marker,
+		"design":              "(" + marker + ")," + marker + "...\n" + marker,
+		"acceptance_criteria": marker + " closes",
+	}
 	for _, field := range []string{"description", "notes", "design", "acceptance_criteria"} {
 		got := deleterText(t, ctx, fixture, neighbor.ID, field)
-		if !strings.Contains(got, marker) {
-			t.Errorf("neighbor %s = %q, want it to contain %q", field, got, marker)
+		if got != wantText[field] {
+			t.Errorf("neighbor %s = %q, want %q", field, got, wantText[field])
 		}
 		if strings.Contains(got, "[deleted:"+lookalike+"]") {
 			t.Errorf("neighbor %s = %q: the lookalike id was rewritten too", field, got)
