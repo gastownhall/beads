@@ -819,7 +819,8 @@ func RunDeleterRewritesReferencesInNeighbors(t *testing.T, ctx context.Context, 
 // live — the text then claims a live row is gone and has lost the id it
 // actually cited. The shared rule in internal/types rejects those matches
 // symmetrically, and the scenarios below hold every wiring to it, including
-// the shapes a partial fix gets wrong: either request order.
+// the shapes a partial fix gets wrong: either request order, a cascade's
+// sorted ancestor-first expansion.
 //
 // Each scenario seeds an explicit root/child/grandchild chain with real
 // parent-child edges — a dotted id alone creates no dependency, so without
@@ -902,6 +903,30 @@ func RunDeleterRewritesOnlyTheDeletedIDInAHierarchy(t *testing.T, ctx context.Co
 		if result.ReferencesUpdated != 1 {
 			t.Errorf("%s: ReferencesUpdated = %d, want 1 — one row changed, however many ids it cited", order.tag, result.ReferencesUpdated)
 		}
+	}
+
+	// A cascade hands the rewrite the whole closure in sorted order, ancestor
+	// first. The blocker's citation must still name the row the text actually
+	// cited — the deleted grandchild — and not a truncated ancestor id.
+	root, child, grandchild = seedChain("hier3")
+	blocker := deleterIssue(fixture, "hier3", "blocker", false)
+	blocker.Description = "unblocks " + grandchild + " when done"
+	deleterSeed(t, ctx, fixture, blocker)
+	deleterAddEdge(t, ctx, fixture, grandchild, blocker.ID)
+
+	result = deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
+		IDs:     []string{root},
+		Cascade: true,
+		Force:   true,
+		Actor:   "deleter-contract",
+	})
+	if want := "unblocks [deleted:" + grandchild + "] when done"; deleterText(t, ctx, fixture, blocker.ID, "description") != want {
+		t.Errorf("hier3: cascade from %s left the blocker's description %q, want %q — the citation names the deleted grandchild, not a truncated ancestor id",
+			root, deleterText(t, ctx, fixture, blocker.ID, "description"), want)
+	}
+	deleterAssertIssueRows(t, ctx, fixture, 0, root, child, grandchild)
+	if result.ReferencesUpdated != 1 {
+		t.Errorf("hier3: ReferencesUpdated = %d, want 1 — the blocker is the one surviving row with text to change", result.ReferencesUpdated)
 	}
 }
 
