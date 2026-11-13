@@ -241,6 +241,28 @@ func TestEmbeddedForkAutoContributorRoutedWrites(t *testing.T) {
 	projectBeadsDir := filepath.Join(dir, ".beads")
 	assertIssueNotInStore(t, projectBeadsDir, "fk", first.ID)
 	assertIssueNotInStore(t, projectBeadsDir, "fk", second.ID)
+
+	// update --claim resolves the issue through the mutation auto-route and
+	// commits in the planning repository (assertEmbeddedHeadAdvanced opens
+	// and closes its own handle before and after the subprocess).
+	before := embeddedCurrentCommit(t, planningBeadsDir, planningDatabase)
+	bdCommand(t, bd, dir, "update", first.ID, "--claim")
+	assertEmbeddedHeadAdvanced(t, planningBeadsDir, planningDatabase, before, "update --claim")
+
+	// Final read-back from the planning store, after every subprocess
+	// mutation (openStore holds its handle until test cleanup): the claim
+	// persisted in_progress status and a non-empty assignee.
+	planningStore := openStore(t, planningBeadsDir, planningDatabase)
+	claimed, err := planningStore.GetIssue(t.Context(), first.ID)
+	if err != nil {
+		t.Fatalf("GetIssue(%s) in the planning store: %v", first.ID, err)
+	}
+	if claimed.Status != types.StatusInProgress {
+		t.Errorf("%s status in the planning store = %q, want %q", first.ID, claimed.Status, types.StatusInProgress)
+	}
+	if claimed.Assignee == "" {
+		t.Errorf("%s assignee in the planning store is empty; --claim did not persist", first.ID)
+	}
 }
 
 // initContributor sets up a project with contributor mode enabled and returns
