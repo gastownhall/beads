@@ -338,6 +338,7 @@
 40 16 TestWithPeerAuth_DivergedRemoteURLFailsClosed
 
 40 17 TestAddDependency
+40 17 TestAddFederationPeerSovereignty
 40 17 TestEmbeddedBatchCloserWispItemClosesAndEarnsTheClaim
 40 17 TestEmbeddedDependencyEditorSameTypeReAddWithChangedThreadMintsOneVersion
 40 17 TestEmbeddedIgnoredMigration0031OpensAShallowClone

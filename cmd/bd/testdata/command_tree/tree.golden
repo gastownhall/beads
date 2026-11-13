@@ -2587,7 +2587,7 @@ bd federation add-peer
     |   bd federation add-peer town-gamma 192.168.1.100:3306/beads --user sync-bot
     |   bd federation add-peer partner https://partner.example.com/beads --user admin --password secret
   flag --password -p type=string default="" usage="SQL password (prompted if --user set without --password)"
-  flag --sovereignty type=string default="" usage="Sovereignty tier (T1, T2, T3, T4)"
+  flag --sovereignty type=string default="" usage="Sovereignty tier (T1, T2, T3, T4); omit to keep a stored tier, pass \"\" to clear it"
   flag --user -u type=string default="" usage="SQL username for authentication"
 
 bd federation list-peers

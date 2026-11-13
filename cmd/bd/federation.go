@@ -136,7 +136,7 @@ func init() {
 	// Flags for add-peer (SQL user authentication)
 	federationAddPeerCmd.Flags().StringVarP(&federationUser, "user", "u", "", "SQL username for authentication")
 	federationAddPeerCmd.Flags().StringVarP(&federationPassword, "password", "p", "", "SQL password (prompted if --user set without --password)")
-	federationAddPeerCmd.Flags().StringVar(&federationSov, "sovereignty", "", "Sovereignty tier (T1, T2, T3, T4)")
+	federationAddPeerCmd.Flags().StringVar(&federationSov, "sovereignty", "", "Sovereignty tier (T1, T2, T3, T4); omit to keep a stored tier, pass \"\" to clear it")
 
 	rootCmd.AddCommand(federationCmd)
 }
@@ -404,6 +404,9 @@ func runFederationAddPeer(cmd *cobra.Command, args []string) error {
 		password = string(pwBytes)
 	}
 
+	// An omitted --sovereignty keeps a peer's stored tier; an explicit empty
+	// value (--sovereignty "") is the way to clear it (GH#5213).
+	clearSov := cmd.Flags().Changed("sovereignty") && federationSov == ""
 	sov := federationSov
 	if sov != "" {
 		sov = strings.ToUpper(sov)
@@ -414,15 +417,19 @@ func runFederationAddPeer(cmd *cobra.Command, args []string) error {
 
 	if federationUser != "" {
 		peer := &storage.FederationPeer{
-			Name:        name,
-			RemoteURL:   url,
-			Username:    federationUser,
-			Password:    password,
-			Sovereignty: sov,
+			Name:             name,
+			RemoteURL:        url,
+			Username:         federationUser,
+			Password:         password,
+			Sovereignty:      sov,
+			ClearSovereignty: clearSov,
 		}
 		if err := store.AddFederationPeer(ctx, peer); err != nil {
 			return HandleErrorRespectJSON("failed to add peer: %v", err)
 		}
+		// Report the peer's effective tier: an omitted --sovereignty keeps
+		// the stored one (GH#5213), which the store hands back here.
+		sov = peer.Sovereignty
 	} else {
 		if err := store.AddRemote(ctx, name, url); err != nil {
 			return HandleErrorRespectJSON("failed to add peer: %v", err)
@@ -444,6 +451,9 @@ func runFederationAddPeer(cmd *cobra.Command, args []string) error {
 	}
 	if sov != "" {
 		fmt.Printf("  Sovereignty: %s\n", sov)
+	} else if clearSov && federationUser != "" {
+		// Only the credential branch writes a peer row, so only it clears.
+		fmt.Println("  Sovereignty: cleared")
 	}
 	return nil
 }

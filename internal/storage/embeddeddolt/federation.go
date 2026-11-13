@@ -122,14 +122,21 @@ func (s *EmbeddedDoltStore) decryptPassword(encrypted []byte) (string, error) {
 // FederationStore implementation
 // ---------------------------------------------------------------------------
 
+// AddFederationPeer upserts a federation peer with credentials and adds the
+// matching Dolt remote. See FederationStore.AddFederationPeer for the
+// sovereignty tier contract (GH#5213): a successful call copies the
+// effective stored tier into peer.Sovereignty.
 func (s *EmbeddedDoltStore) AddFederationPeer(ctx context.Context, peer *storage.FederationPeer) error {
 	encryptedPwd, err := s.encryptPassword(peer.Password)
 	if err != nil {
 		return fmt.Errorf("encrypt password: %w", err)
 	}
 
+	var tier string
 	if err := s.withConn(ctx, true, func(tx *sql.Tx) error {
-		if err := issueops.AddFederationPeerInTx(ctx, tx, peer, encryptedPwd); err != nil {
+		var err error
+		tier, err = issueops.AddFederationPeerInTx(ctx, tx, peer, encryptedPwd)
+		if err != nil {
 			return err
 		}
 		// Also add the Dolt remote.
@@ -137,6 +144,7 @@ func (s *EmbeddedDoltStore) AddFederationPeer(ctx context.Context, peer *storage
 	}); err != nil {
 		return err
 	}
+	peer.Sovereignty = tier
 	return nil
 }
 
@@ -233,10 +241,12 @@ func warnStoredPeerSuppressesAmbientPassword(peer string, p *storage.FederationP
 	if os.Getenv("DOLT_REMOTE_PASSWORD") == "" {
 		return
 	}
-	// add-peer upserts the whole row, so a re-run without --sovereignty
-	// clears a stored tier (GH#5213): carry the stored tier into the
-	// suggested command. The password is left to add-peer's no-echo prompt
-	// rather than suggested as an argument that lands in shell history.
+	// add-peer preserves a stored tier when --sovereignty is omitted
+	// (GH#5213), but keep the stored tier in the suggested command anyway:
+	// it names the tier the peer runs under, and the command stays correct
+	// even for an older bd that clears on omission. The password is left
+	// to add-peer's no-echo prompt rather than suggested as an argument
+	// that lands in shell history.
 	//
 	// The peer name, username and tier are fields of a federation_peers row,
 	// which travels with a pull, and this line is written straight to stderr,
