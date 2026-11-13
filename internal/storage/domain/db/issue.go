@@ -69,6 +69,18 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 	if issue.ID == "" {
 		return errors.New("db: Insert: explicit ID required (ID generation belongs to CreateIssueUseCase)")
 	}
+	// Bound the VARCHAR(255) assignment columns ahead of both insert
+	// branches, so every proxied-server (uow) create (single, batch, import,
+	// and the create-only branch every minted id takes) rejects an over-length
+	// assignee/owner with a typed ErrFieldTooLong before it writes anything,
+	// instead of a raw backend "data too long" error. Mirrors
+	// ValidateWithCustom on the embedded create path.
+	if err := types.CheckFieldLen("assignee", issue.Assignee); err != nil {
+		return err
+	}
+	if err := types.CheckFieldLen("owner", issue.Owner); err != nil {
+		return err
+	}
 
 	table := pickIssueTable(opts.UseWispsTable)
 	if opts.CreateOnly {
@@ -937,17 +949,6 @@ func pickIssueTable(useWisps bool) string {
 
 //nolint:gosec // G201: table is a hardcoded constant ("issues" or "wisps")
 func insertIssueRow(ctx context.Context, runner Runner, table string, issue *types.Issue) error {
-	// Bound the VARCHAR(255) assignment columns at the raw-SQL chokepoint, so
-	// every proxied-server (uow) create — single, batch, and import — rejects an
-	// over-length assignee/owner with a typed ErrFieldTooLong instead of a raw
-	// backend "data too long" error. Mirrors ValidateWithCustom on the embedded
-	// create path.
-	if err := types.CheckFieldLen("assignee", issue.Assignee); err != nil {
-		return err
-	}
-	if err := types.CheckFieldLen("owner", issue.Owner); err != nil {
-		return err
-	}
 	// The column list must stay in step with the classic writer
 	// (issueops.insertIssueIntoTable) — the shared scanner hydrates whatever
 	// either writer stored, so a column present there and missing here is not
