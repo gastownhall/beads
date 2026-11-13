@@ -154,7 +154,7 @@ func TestExternalRefHistoryQuerier_UnwrapsDecorator(t *testing.T) {
 
 func TestEngineExternalRefChangedAfter_NilLocalIssue(t *testing.T) {
 	e := &Engine{Store: newPureTestStore()}
-	changed, err := e.externalRefChangedAfter(context.Background(), nil, "ref", time.Now())
+	changed, _, err := e.externalRefChangedAfter(context.Background(), nil, "ref", time.Now())
 	if err != nil || changed {
 		t.Fatalf("externalRefChangedAfter(nil local) = (%v, %v), want (false, nil)", changed, err)
 	}
@@ -165,7 +165,7 @@ func TestEngineExternalRefChangedAfter_FastPathSameRef(t *testing.T) {
 	e := &Engine{Store: querier}
 	local := newTestIssue("bd-1", time.Now(), time.Now())
 
-	changed, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", time.Now())
+	changed, _, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestEngineExternalRefChangedAfter_FastPathDifferentRef(t *testing.T) {
 	e := &Engine{Store: querier}
 	local := newTestIssue("bd-1", time.Now(), time.Now())
 
-	changed, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-NEW", time.Now())
+	changed, _, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-NEW", time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -194,19 +194,144 @@ func TestEngineExternalRefChangedAfter_FastPathDifferentRef(t *testing.T) {
 	}
 }
 
+// TestEngineExternalRefChangedAfter_FastPathNotFound pins the missing-row
+// decision (#7294): no history entry at or before lastSync reports changed
+// only for an issue created at or after lastSync (a new pre-linked stub to
+// hydrate). created_at is stored rounded to a whole second and last_sync is
+// one, so a stub created within half a second after the stamp reads as
+// created exactly at lastSync. An older issue, or one with no creation
+// time, reports historyUnknown instead, whatever its UpdatedAt says: the
+// row may be missing because history was compacted or rewritten, and a
+// local edit after lastSync is what the pull's guards must keep.
 func TestEngineExternalRefChangedAfter_FastPathNotFound(t *testing.T) {
-	// No history entry at or before lastSync: treat as changed, per the
-	// documented contract on storage.ExternalRefHistoryQuerier.PreviousExternalRef.
-	querier := &historyQuerierStore{prevFound: false}
-	e := &Engine{Store: querier}
-	local := newTestIssue("bd-1", time.Now(), time.Now())
+	lastSync := time.Date(2026, time.March, 4, 5, 6, 7, 0, time.UTC)
+	plus5 := time.FixedZone("UTC+5", 5*60*60)
+	for _, test := range []struct {
+		name               string
+		created, updated   time.Time
+		wantChanged        bool
+		wantHistoryUnknown bool
+	}{
+		{name: "old unchanged", created: lastSync.Add(-24 * time.Hour), updated: lastSync.Add(-time.Hour), wantHistoryUnknown: true},
+		{name: "old locally edited", created: lastSync.Add(-24 * time.Hour), updated: lastSync.Add(time.Hour), wantHistoryUnknown: true},
+		{name: "created a second before lastSync", created: lastSync.Add(-time.Second), updated: lastSync.Add(time.Hour), wantHistoryUnknown: true},
+		{name: "newly created", created: lastSync.Add(time.Hour), updated: lastSync.Add(time.Hour), wantChanged: true},
+		{name: "created at lastSync (rounded to the stamp)", created: lastSync, updated: lastSync, wantChanged: true},
+		{name: "zero creation time", updated: lastSync.Add(time.Hour), wantHistoryUnknown: true},
+		{name: "created at lastSync in another zone", created: lastSync.In(plus5), updated: lastSync.Add(time.Hour).In(plus5), wantChanged: true},
+		{name: "created after lastSync in another zone", created: lastSync.Add(time.Second).In(plus5), updated: lastSync.Add(time.Second).In(plus5), wantChanged: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			querier := &historyQuerierStore{prevFound: false}
+			e := &Engine{Store: querier}
+			local := newTestIssue("bd-1", test.created, test.updated)
 
-	changed, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", time.Now())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+			changed, historyUnknown, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", lastSync)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if changed != test.wantChanged || historyUnknown != test.wantHistoryUnknown {
+				t.Errorf("externalRefChangedAfter = (changed %v, historyUnknown %v), want (%v, %v)",
+					changed, historyUnknown, test.wantChanged, test.wantHistoryUnknown)
+			}
+			if querier.calls != 1 {
+				t.Errorf("PreviousExternalRef calls = %d, want 1", querier.calls)
+			}
+		})
 	}
-	if !changed {
-		t.Error("expected changed=true when no prior history entry is found")
+}
+
+// TestEngineExternalRefChangedAfter_KnownAnswersReportHistoryKnown pins that
+// every case other than a missing history row keeps its prior answer and
+// never reports historyUnknown: exact history (same, different and NULL
+// refs), a propagated error, a decorated store and the no-capability
+// heuristic.
+func TestEngineExternalRefChangedAfter_KnownAnswersReportHistoryKnown(t *testing.T) {
+	lastSync := time.Date(2026, time.March, 4, 5, 6, 7, 0, time.UTC)
+	old := newTestIssue("bd-1", lastSync.Add(-24*time.Hour), lastSync.Add(time.Hour))
+	boom := errors.New("boom")
+	inner := &doltLikeStore{prevRef: "https://tracker.test/EXT-1", prevFound: true}
+	decorated := &fakeStoreDecorator{DoltStorage: inner, inner: inner}
+	for _, test := range []struct {
+		name        string
+		store       Store
+		local       *types.Issue
+		currentRef  string
+		wantChanged bool
+		wantErr     error
+	}{
+		{name: "nil local", store: &historyQuerierStore{}, currentRef: "ref"},
+		{name: "same historical ref", store: &historyQuerierStore{prevRef: "https://tracker.test/EXT-1", prevFound: true}, local: old, currentRef: "https://tracker.test/EXT-1"},
+		{name: "different historical ref", store: &historyQuerierStore{prevRef: "https://tracker.test/EXT-OLD", prevFound: true}, local: old, currentRef: "https://tracker.test/EXT-1", wantChanged: true},
+		{name: "NULL historical ref", store: &historyQuerierStore{prevRef: "", prevFound: true}, local: old, currentRef: "https://tracker.test/EXT-1", wantChanged: true},
+		{name: "history error", store: &historyQuerierStore{prevErr: boom}, local: old, currentRef: "ref", wantErr: boom},
+		{name: "decorated store", store: decorated, local: old, currentRef: "https://tracker.test/EXT-1"},
+		{name: "no capability, touched after lastSync", store: newPureTestStore(), local: old, currentRef: "ref", wantChanged: true},
+		{name: "no capability, untouched", store: newPureTestStore(), local: newTestIssue("bd-2", lastSync.Add(-2*time.Hour), lastSync.Add(-time.Hour)), currentRef: "ref"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			e := &Engine{Store: test.store}
+			changed, historyUnknown, err := e.externalRefChangedAfter(context.Background(), test.local, test.currentRef, lastSync)
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("error = %v, want %v", err, test.wantErr)
+			}
+			if changed != test.wantChanged || historyUnknown {
+				t.Errorf("externalRefChangedAfter = (changed %v, historyUnknown %v), want (%v, false)", changed, historyUnknown, test.wantChanged)
+			}
+		})
+	}
+}
+
+// TestPrelinkDecision pins the pure pre-link decision that every path
+// reading external_ref history must share (#7294): a history row decides by
+// comparing refs, and a missing row hydrates only an issue created at or
+// after lastSync. An older issue without a row reports historyUnknown,
+// unless it is on the wisps plane, which never has history.
+func TestPrelinkDecision(t *testing.T) {
+	lastSync := time.Date(2026, time.March, 4, 5, 6, 7, 0, time.UTC)
+	old := newTestIssue("bd-old", lastSync.Add(-24*time.Hour), lastSync.Add(time.Hour))
+	atStamp := newTestIssue("bd-stamp", lastSync, lastSync)
+	ephemeral := func(issue *types.Issue) *types.Issue {
+		wisp := *issue
+		wisp.Ephemeral = true
+		return &wisp
+	}
+	noHistory := func(issue *types.Issue) *types.Issue {
+		bead := *issue
+		bead.NoHistory = true
+		return &bead
+	}
+	const ref = "https://tracker.test/EXT-1"
+	for _, test := range []struct {
+		name               string
+		local              *types.Issue
+		previousRef        string
+		found              bool
+		wantChanged        bool
+		wantHistoryUnknown bool
+	}{
+		{name: "same ref at lastSync", local: old, previousRef: ref, found: true},
+		{name: "same ref modulo spaces", local: old, previousRef: " " + ref + " ", found: true},
+		{name: "other ref at lastSync", local: old, previousRef: "https://tracker.test/EXT-OLD", found: true, wantChanged: true},
+		{name: "NULL ref at lastSync", local: old, found: true, wantChanged: true},
+		{name: "no row, created at lastSync", local: atStamp, wantChanged: true},
+		{name: "no row, created before lastSync", local: old, wantHistoryUnknown: true},
+		{name: "no row, no creation time", local: newTestIssue("bd-zero", time.Time{}, lastSync.Add(time.Hour)), wantHistoryUnknown: true},
+		{name: "no row, ephemeral, created before lastSync", local: ephemeral(old)},
+		{name: "no row, no-history, created before lastSync", local: noHistory(old)},
+		{name: "no row, ephemeral, created at lastSync", local: ephemeral(atStamp), wantChanged: true},
+		{name: "no row, no-history, created at lastSync", local: noHistory(atStamp), wantChanged: true},
+		// A bead moved to the wisps plane after lastSync keeps its history.
+		{name: "no-history, other ref at lastSync", local: noHistory(old), previousRef: "https://tracker.test/EXT-OLD", found: true, wantChanged: true},
+		{name: "nil local", previousRef: ref},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed, historyUnknown := prelinkDecision(test.local, ref, test.previousRef, test.found, lastSync)
+			if changed != test.wantChanged || historyUnknown != test.wantHistoryUnknown {
+				t.Errorf("prelinkDecision = (changed %v, historyUnknown %v), want (%v, %v)",
+					changed, historyUnknown, test.wantChanged, test.wantHistoryUnknown)
+			}
+		})
 	}
 }
 
@@ -221,7 +346,7 @@ func TestEngineExternalRefChangedAfter_FastPathNullHistoricalRef(t *testing.T) {
 	e := &Engine{Store: querier}
 	local := newTestIssue("bd-1", time.Now(), time.Now())
 
-	changed, err := e.externalRefChangedAfter(context.Background(), local, "", time.Now())
+	changed, _, err := e.externalRefChangedAfter(context.Background(), local, "", time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -236,7 +361,7 @@ func TestEngineExternalRefChangedAfter_FastPathPropagatesError(t *testing.T) {
 	e := &Engine{Store: querier}
 	local := newTestIssue("bd-1", time.Now(), time.Now())
 
-	_, err := e.externalRefChangedAfter(context.Background(), local, "ref", time.Now())
+	_, _, err := e.externalRefChangedAfter(context.Background(), local, "ref", time.Now())
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("externalRefChangedAfter error = %v, want %v", err, wantErr)
 	}
@@ -255,7 +380,7 @@ func TestEngineExternalRefChangedAfter_EmbeddedDoltTakesFastPath(t *testing.T) {
 	lastSync := time.Now()
 	local := newTestIssue("bd-1", lastSync.Add(-time.Hour), lastSync.Add(time.Hour))
 
-	changed, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", lastSync)
+	changed, _, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", lastSync)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -276,7 +401,7 @@ func TestEngineExternalRefChangedAfter_NoHistoryCapabilityFallsBack(t *testing.T
 
 	t.Run("touched after lastSync reports changed", func(t *testing.T) {
 		local := newTestIssue("bd-1", lastSync.Add(-time.Hour), lastSync.Add(time.Hour))
-		changed, err := e.externalRefChangedAfter(context.Background(), local, "ref", lastSync)
+		changed, _, err := e.externalRefChangedAfter(context.Background(), local, "ref", lastSync)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -287,7 +412,7 @@ func TestEngineExternalRefChangedAfter_NoHistoryCapabilityFallsBack(t *testing.T
 
 	t.Run("untouched since lastSync reports unchanged", func(t *testing.T) {
 		local := newTestIssue("bd-2", lastSync.Add(-2*time.Hour), lastSync.Add(-time.Hour))
-		changed, err := e.externalRefChangedAfter(context.Background(), local, "ref", lastSync)
+		changed, _, err := e.externalRefChangedAfter(context.Background(), local, "ref", lastSync)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -306,7 +431,7 @@ func TestEngineExternalRefChangedAfter_DecoratedDoltServerStoreUnchanged(t *test
 	e := &Engine{Store: dec}
 	local := newTestIssue("bd-1", time.Now(), time.Now())
 
-	changed, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", time.Now())
+	changed, _, err := e.externalRefChangedAfter(context.Background(), local, "https://tracker.test/EXT-1", time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
