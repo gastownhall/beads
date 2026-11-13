@@ -371,3 +371,55 @@ func TestDoltNew_WispIsBlockedRestoreDefaultReady_RealDolt(t *testing.T) {
 		t.Fatalf("restored wisp is_blocked (b, c) = %v, want [1 1]", got)
 	}
 }
+
+// TestDoltNew_WispIsBlockedRestoreUnblocksClose_RealDolt is AC-3: closing a
+// blocker recomputes its dependents, and the recompute's mark statement has a
+// union leg that joins wisps and reads p.is_blocked even when every dependent
+// is durable. On the drifted clone that close failed with "table "p" does not
+// have column "is_blocked""; after the heal it succeeds and unblocks durable
+// and wisp dependents alike.
+func TestDoltNew_WispIsBlockedRestoreUnblocksClose_RealDolt(t *testing.T) {
+	durable := func(id string) *types.Issue {
+		return &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	}
+
+	t.Run("durable_dependent", func(t *testing.T) {
+		c := newWispIsBlockedClone(t)
+		const a, x = "wib-a", "wib-x"
+		c.create(durable(a))
+		c.create(durable(x))
+		c.depend(x, a, types.DepBlocks)
+		if got := c.blockedFlags("issues", x); !slices.Equal(got, []int{1}) {
+			t.Fatalf("seeded durable dependent is_blocked = %v, want [1]", got)
+		}
+		c.breakShape()
+		c.reopen()
+
+		if err := c.store.CloseIssue(c.ctx, a, "done", "test", ""); err != nil {
+			t.Fatalf("CloseIssue(%s) on the reopened clone: %v", a, err)
+		}
+		if got := c.blockedFlags("issues", x); !slices.Equal(got, []int{0}) {
+			t.Fatalf("durable dependent is_blocked after closing its blocker = %v, want [0]", got)
+		}
+	})
+
+	t.Run("mixed_dependents", func(t *testing.T) {
+		c := newWispIsBlockedClone(t)
+		g := c.seedGraph()
+		const x = "wib-x"
+		c.create(durable(x))
+		c.depend(x, g.a, types.DepBlocks)
+		c.breakShape()
+		c.reopen()
+
+		if err := c.store.CloseIssue(c.ctx, g.a, "done", "test", ""); err != nil {
+			t.Fatalf("CloseIssue(%s) on the reopened clone: %v", g.a, err)
+		}
+		if got := c.blockedFlags("issues", x); !slices.Equal(got, []int{0}) {
+			t.Errorf("durable dependent is_blocked after closing its blocker = %v, want [0]", got)
+		}
+		if got := c.blockedFlags("wisps", g.b, g.c); !slices.Equal(got, []int{0, 0}) {
+			t.Errorf("wisp dependents is_blocked (b, c) after closing their blocker = %v, want [0 0]", got)
+		}
+	})
+}

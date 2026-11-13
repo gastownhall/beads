@@ -346,6 +346,7 @@
 40 17 TestEmbeddedOnlyAWriteAnswersTheSwitch
 40 17 TestEmbeddedReaderListRejectsATypeOutsideTheWorkspaceVocabulary
 40 17 TestEmbeddedReadyClaimerLeasesADurableWinButNotAnEphemeralOne
+40 17 TestEmbeddedWispIsBlockedRestoreUnblocksClose
 40 17 TestHeartbeatMatchesActorAcrossSpellingEmbedded
 40 17 TestStatsReporterContract
 40 17 TestVersionReconcilerContract
