@@ -847,6 +847,41 @@ func RunDeleterRewritesOnlyTheDeletedIDInAHierarchy(t *testing.T, ctx context.Co
 		}
 	})
 
+	// Either request order, because neither body may depend on rewrite order
+	// to keep a hierarchical id whole: rewriting the descendant first used to
+	// nest the ancestor's marker inside the descendant's.
+	for _, order := range []struct {
+		tag             string
+		descendantFirst bool
+	}{
+		{"hpairup", false},
+		{"hpairdown", true},
+	} {
+		t.Run("DeletingAChildAndGrandchildMarksEachOnce/"+order.tag, func(t *testing.T) {
+			h := deleterSeedHierarchy(t, ctx, fixture, order.tag)
+			neighbor := deleterSeedCitingNeighbor(t, ctx, fixture, order.tag,
+				"step "+h.grandchild+" failed; parent "+h.child+" is gone", h.child)
+			ids := []string{h.child, h.grandchild}
+			if order.descendantFirst {
+				ids = []string{h.grandchild, h.child}
+			}
+
+			result := deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
+				IDs:   ids,
+				Force: true,
+				Actor: "deleter-contract",
+			})
+			deleterAssertIssueRows(t, ctx, fixture, 0, h.child, h.grandchild)
+			want := "step [deleted:" + h.grandchild + "] failed; parent [deleted:" + h.child + "] is gone"
+			if got := deleterText(t, ctx, fixture, neighbor, "description"); got != want {
+				t.Errorf("deleting %v: neighbor description = %q, want %q", ids, got, want)
+			}
+			if result.ReferencesUpdated != 1 {
+				t.Errorf("ReferencesUpdated = %d, want 1 — one neighbor row changed", result.ReferencesUpdated)
+			}
+		})
+	}
+
 }
 
 // deleterHierarchy is one root, its child and its grandchild, with dotted ids.
