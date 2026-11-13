@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -722,6 +724,9 @@ func UnsetUserYamlConfig(key string) (bool, error) {
 	if newContent == normalized {
 		return false, nil
 	}
+	if err := collateralUnsetRefusal(normalized, newContent, key); err != nil {
+		return false, err
+	}
 
 	// replaceConfigYaml keeps the file's own mode, so the owner-private 0600
 	// posture every user-global writer creates it with (SetUserYamlConfig, the
@@ -864,6 +869,9 @@ func UnsetYamlConfig(key string) (bool, error) {
 	}
 	if newContent == normalized {
 		return false, nil
+	}
+	if err := collateralUnsetRefusal(normalized, newContent, key); err != nil {
+		return false, err
 	}
 
 	if err := replaceConfigYaml(configPath, []byte(newContent)); err != nil {
@@ -1291,6 +1299,16 @@ func commentOutYamlKey(content, key string) (string, error) {
 	// long-standing behavior.
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 
+	// A key no document holds is not in the file, whatever its lines look
+	// like. The matcher below reads lines, so a line inside a quoted value or
+	// a list item can match the key. Commenting that line out edits a value
+	// nobody named, and refusing it fails the unset of a key that is not
+	// there, which has always been a successful no-op. So the file is left as
+	// it is, and both unset callers report that nothing changed.
+	if !yamlHoldsKey(content, key) {
+		return content, nil
+	}
+
 	if err := unsupportedUnsetShape(content, key); err != nil {
 		return "", err
 	}
@@ -1551,22 +1569,26 @@ func (w *nestedKeyWalk) stepOver(line string) {
 	w.opaque = lineIndent(line)
 }
 
-// unsupportedUnsetShape reports the two shapes named in the changelog — a key
-// under a flow-style mapping, and a key whose value is a block scalar — in
-// whichever spelling the file uses. Both used to be silent: the flow-style one
-// reported success while the value stayed live, and the block scalar had its key
-// line commented out while the body stayed behind as a value of its own. The set
-// direction already refuses what it cannot write correctly, so unset says so too.
+// unsupportedUnsetShape reports the shapes named in the changelog — a key under
+// a flow-style mapping, a key whose value is a block scalar, and a key whose
+// value wraps past its own line — in whichever spelling the file uses. All
+// three used to be silent: the flow-style one reported success while the value
+// stayed live, and the other two had their key line commented out while the
+// rest of the value stayed behind, to be re-read as something else or to stop
+// the file from parsing. The set direction already refuses what it cannot write
+// correctly, so unset says so too.
 //
-// This is a list of known shapes, not a decision procedure for the whole class:
-// a value that spans lines in flow or quoted style lands its body in the same
-// place and is still silent. A mapping-valued key is refused by the line
-// matcher itself (mappingValueUnsetRefusal), which also covers single-segment
-// keys this function never walks.
+// The first two are named shapes with diagnoses of their own. The third is
+// decided by where the entry ends rather than by the value's style
+// (spansLinesUnsetRefusal), so the same value written on one line still
+// comments out cleanly. A mapping-valued key is refused by the line matcher
+// itself (mappingValueUnsetRefusal), which also covers single-segment keys this
+// function never walks. An edit none of these names is still judged by its
+// effect once the line matcher has made it (collateralUnsetRefusal).
 //
-// Only a key that is actually present can be refused: unsetting a key that was
-// never there has always been a successful no-op, and staying silent about a
-// shape nobody asked to touch is the point.
+// This function refuses only a key that is actually present: unsetting a key
+// that was never there has always succeeded, and staying silent about a shape
+// nobody asked to touch is the point.
 func unsupportedUnsetShape(content, key string) error {
 	// Single-segment keys are checked too. The database-backed unset clears
 	// the config.yaml layer for every key, so `notes: |` with an indented body
@@ -1583,16 +1605,15 @@ func unsupportedUnsetShape(content, key string) error {
 	// The flat spelling first, and by the same order the line matcher uses: it
 	// comments a literal `sync.remote:` line out without ever walking the nested
 	// path, so the body left behind orphans at the TOP level, where it stops the
-	// whole document from parsing rather than just its own section.
-	if top := root.Content[0]; top.Kind == yaml.MappingNode {
-		if idx := findMappingChild(top, key); idx != -1 {
-			if err := blockScalarUnsetRefusal(top.Content[idx+1], key); err != nil {
-				return err
-			}
-		}
+	// whole document from parsing rather than just its own section. A
+	// single-segment key is its own flat spelling, and the walk below would only
+	// find the same entry again.
+	if err := flatKeyUnsetRefusal(content, root.Content[0], key); err != nil || len(segments) == 1 {
+		return err
 	}
 
 	node := root.Content[0]
+	var keyNode *yaml.Node
 	parents := make([]*yaml.Node, 0, len(segments))
 	for _, segment := range segments {
 		if node.Kind != yaml.MappingNode {
@@ -1603,20 +1624,58 @@ func unsupportedUnsetShape(content, key string) error {
 			return nil
 		}
 		parents = append(parents, node)
-		node = node.Content[idx+1]
+		keyNode, node = node.Content[idx], node.Content[idx+1]
 	}
 
 	for i, parent := range parents {
-		if parent.Style&yaml.FlowStyle == 0 {
-			continue
+		if parent.Style&yaml.FlowStyle != 0 {
+			return flowStyleUnsetRefusal(key, segments[:i])
 		}
-		where := "the top level of this config file"
-		if i > 0 {
-			where = fmt.Sprintf("%q", strings.Join(segments[:i], "."))
-		}
-		return fmt.Errorf("cannot unset %q: %s is written in flow style ({...}), which bd cannot edit; remove the key by hand", key, where)
 	}
-	return blockScalarUnsetRefusal(node, key)
+	if err := blockScalarUnsetRefusal(node, key); err != nil {
+		return err
+	}
+	return spansLinesUnsetRefusal(content, keyNode, node, key)
+}
+
+// flatKeyUnsetRefusal runs unsupportedUnsetShape's checks on the flat spelling
+// of key: a top-level entry whose name is the whole key, dots included.
+//
+// Under a flow-style top level that entry is a key inside a flow-style mapping
+// like any other, and the line matcher cannot edit it either. On the opening
+// line (`{sync.remote: a, node_id: b}`) it is never matched at all, so the
+// value stays live while the unset reports success. On a line of its own it
+// can be matched, but that line may close the braces as well, or hold only the
+// start of a value that wraps. So it gets the flow-style refusal, as a
+// single-segment key there always has. The span probe would not hold here
+// anyway: cut inside the mapping's own braces, the document fails to parse
+// whatever the value is.
+func flatKeyUnsetRefusal(content string, top *yaml.Node, key string) error {
+	if top.Kind != yaml.MappingNode {
+		return nil
+	}
+	idx := findMappingChild(top, key)
+	if idx == -1 {
+		return nil
+	}
+	if top.Style&yaml.FlowStyle != 0 {
+		return flowStyleUnsetRefusal(key, nil)
+	}
+	if err := blockScalarUnsetRefusal(top.Content[idx+1], key); err != nil {
+		return err
+	}
+	return spansLinesUnsetRefusal(content, top.Content[idx], top.Content[idx+1], key)
+}
+
+// flowStyleUnsetRefusal refuses a key inside a flow-style mapping, which the
+// line matcher cannot edit. parent is the path of that mapping, empty for the
+// top level.
+func flowStyleUnsetRefusal(key string, parent []string) error {
+	where := "the top level of this config file"
+	if len(parent) > 0 {
+		where = fmt.Sprintf("%q", strings.Join(parent, "."))
+	}
+	return fmt.Errorf("cannot unset %q: %s is written in flow style ({...}), which bd cannot edit; remove the key by hand", key, where)
 }
 
 // blockScalarUnsetRefusal refuses a key whose value is written as a block
@@ -1628,6 +1687,298 @@ func blockScalarUnsetRefusal(valueNode *yaml.Node, key string) error {
 		return nil
 	}
 	return fmt.Errorf("cannot unset %q: its value is a block scalar (| or >), and commenting the key out would leave the body behind as a value of its own; remove the key by hand", key)
+}
+
+// spansLinesUnsetRefusal refuses a key of a block mapping whose value starts on
+// the key's own line and does not end there: a flow collection, a quoted string
+// or a plain scalar wrapped onto the next line (`remote: {url: a,` then
+// `branch: b}`). The line matcher comments out only the key's line, so the rest
+// of the value would stay behind with its opening bracket or quote gone: as a
+// line that re-reads as a key nobody set (`branch: b}`) or as the value of the
+// enclosing key (`sync: b`), or one that stops the file from parsing.
+//
+// It is decided by where the entry ends, not by the value's style: the same
+// collection written on one line comments out cleanly. Everything above an
+// entry of a block mapping is either a finished entry or an enclosing block
+// mapping, and those end with the document, so the document cut off after the
+// key's line parses whenever the entry ends on that line, and fails while a
+// flow collection or quoted string opened on it is still open. The cut counts
+// lines the way yaml.v3 numbers them (yamlLineEnd), not by "\n" alone: a
+// carriage return or a Unicode line separator above the key would otherwise
+// move the cut to another line, refusing a value that ends on its own line
+// and missing one that wraps. Cutting the document rather than parsing the one
+// line on its own, as replaceFlatKeyLine does, keeps anchors in scope:
+// `remote: *r` is a whole entry, but its alias resolves only against an anchor
+// defined above it.
+//
+// A plain scalar continued onto a deeper line (`remote: file:///a`, then `b`)
+// needs one more look, because it parses when cut after any of its lines, as a
+// shorter value. The cut holds the key's line and nothing after it, so the
+// key's value is the last node in it, and a value that started on the key's
+// line and goes on reads shorter there than in the whole file. An alias or a
+// collection is not compared: a cut that parses has already closed it.
+func spansLinesUnsetRefusal(content string, keyNode, valueNode *yaml.Node, key string) error {
+	end, ok := yamlLineEnd(content, keyNode.Line)
+	if !ok {
+		// Nothing follows the key's line for its value to wrap onto.
+		return nil
+	}
+	var cut yaml.Node
+	if yaml.Unmarshal([]byte(content[:end]), &cut) == nil && !plainScalarGoesOn(&cut, keyNode, valueNode) {
+		return nil
+	}
+	return fmt.Errorf("cannot unset %q: its value spans more than one line, and commenting the key out would leave the rest of it behind; remove the key by hand", key)
+}
+
+// plainScalarGoesOn reports whether a scalar value that starts on the key's
+// line reads differently in cut, the document cut off after that line, than
+// in the whole file: a plain scalar continued onto the lines below.
+func plainScalarGoesOn(cut, keyNode, valueNode *yaml.Node) bool {
+	if valueNode.Kind != yaml.ScalarNode || valueNode.Line != keyNode.Line {
+		return false
+	}
+	last := cut
+	for len(last.Content) > 0 {
+		last = last.Content[len(last.Content)-1]
+	}
+	return last.Value != valueNode.Value
+}
+
+// yamlLineEnd reports the offset of the line break that ends the given 1-based
+// line of content, counting breaks as yaml.v3 does when it numbers node lines:
+// LF, CR, CRLF as one break, NEL (U+0085) and the Unicode line and paragraph
+// separators (U+2028, U+2029). ok is false when no break ends that line,
+// because it is the last line or out of range.
+func yamlLineEnd(content string, line int) (end int, ok bool) {
+	breaks := 0
+	for i, r := range content {
+		switch {
+		case r == '\n' && i > 0 && content[i-1] == '\r':
+			continue // the LF of a CRLF, already counted at its CR
+		case r == '\n', r == '\r', r == '\u0085', r == '\u2028', r == '\u2029':
+			breaks++
+			if breaks == line {
+				return i, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// collateralUnsetRefusal refuses an unset whose edit changed more of the file
+// than the key. Both unset callers run it on commentOutYamlKey's result before
+// they write. The refusals before the edit name the shapes they know, judged
+// from the first document's parse; this one judges the edit by its effect, so
+// it also catches the shapes they cannot see: a later duplicate of the key
+// whose value wraps, the key in a later document, an anchor on the key's line
+// that an alias further down still uses, or a line inside another value that
+// only looks like the key, beside the key itself. A file that does not hold
+// the key at all never gets here: commentOutYamlKey leaves it as it is.
+//
+// Read back, after must hold what before held, document by document, less
+// some of the key's own entries in either spelling: nothing added, and nothing
+// else removed or changed. Documents are compared by position because bd reads
+// only the first one: commenting out all of a first document that no `---`
+// opens would move the second one into its place.
+//
+// A later document that does not parse leaves the ones before it readable, the
+// first of them being what bd reads, so those are compared all the same, and
+// the edit must leave every one of them parsing. The document that does not
+// parse, and any after it, has no reading to compare, before the edit or after
+// it. A file whose first document does not parse is left to the line matcher's
+// best effort, as it always has been. A file that nests deeper than
+// maxYamlLeafDepth is refused: it costs too much to compare.
+func collateralUnsetRefusal(before, after, key string) error {
+	was, wasErr := yamlDocuments(before)
+	if wasErr != nil && len(was) == 0 {
+		return nil
+	}
+	is, isErr := yamlDocuments(after)
+	if wasErr != nil && len(is) >= len(was) {
+		is, isErr = is[:len(was)], nil
+	}
+	wasLeaves, ok := yamlLeaves(was)
+	if !ok {
+		return fmt.Errorf("cannot unset %q: this file nests more than %d levels deep, too deep for bd to check what else commenting out the key would change; remove the key by hand", key, maxYamlLeafDepth)
+	}
+	isLeaves, ok := yamlLeaves(is)
+	if ok && isErr == nil && onlyKeyLeavesRemoved(wasLeaves, isLeaves, key) {
+		return nil
+	}
+	return fmt.Errorf("cannot unset %q: commenting out the lines that match it would change more of this file than the key itself; remove the key by hand", key)
+}
+
+// yamlLeaf is one scalar of a YAML stream: the document it is in, the keys and
+// list indexes that lead to it, and its value. An alias is a leaf of its own,
+// naming the anchor it resolves to rather than expanding it, so the list never
+// grows past the size of the file, however the aliases nest.
+type yamlLeaf struct {
+	doc   int
+	path  []string
+	value string
+}
+
+func (l yamlLeaf) id() string {
+	return fmt.Sprintf("%d %q %q", l.doc, l.path, l.value)
+}
+
+// maxYamlLeafDepth is how many keys and list items deep yamlLeaves reads. A
+// leaf carries the whole path to it, so listing a document's leaves costs
+// their number times their depth, and yaml.v3 lets a document nest 10000
+// deep: one unset of a 45 KB config.yaml nested 9000 deep allocated 1.7 GB.
+// No config bd reads comes near this depth.
+const maxYamlLeafDepth = 64
+
+// yamlLeaves lists the leaves of docs. A null scalar or an empty collection
+// holds no leaf, so a section left holding nothing reads the same as one that
+// is gone. ok is false, and no leaves come back, when a document nests more
+// than maxYamlLeafDepth keys and list items deep.
+func yamlLeaves(docs []*yaml.Node) (leaves []yamlLeaf, ok bool) {
+	for doc, root := range docs {
+		if yamlNestsDeeper(root, maxYamlLeafDepth) {
+			return nil, false
+		}
+		leaves = appendYamlLeaves(leaves, doc, nil, root)
+	}
+	return leaves, true
+}
+
+// yamlNestsDeeper reports whether some node under n has more than depth
+// mappings and sequences above it, counting n. Under a document, those are the
+// keys and list items on the node's path. It looks no deeper than that.
+func yamlNestsDeeper(n *yaml.Node, depth int) bool {
+	if n.Kind == yaml.MappingNode || n.Kind == yaml.SequenceNode {
+		depth--
+	}
+	for _, child := range n.Content {
+		if depth < 0 || yamlNestsDeeper(child, depth) {
+			return true
+		}
+	}
+	return false
+}
+
+// yamlDocuments decodes the documents of content, in order. When one does not
+// parse, the documents decoded before it come back with the error.
+func yamlDocuments(content string) ([]*yaml.Node, error) {
+	dec := yaml.NewDecoder(strings.NewReader(content))
+	var docs []*yaml.Node
+	for {
+		var root yaml.Node
+		err := dec.Decode(&root)
+		if errors.Is(err, io.EOF) {
+			return docs, nil
+		}
+		if err != nil {
+			return docs, err
+		}
+		docs = append(docs, &root)
+	}
+}
+
+// appendYamlLeaves appends the leaves of n, which path leads to, to leaves.
+func appendYamlLeaves(leaves []yamlLeaf, doc int, path []string, n *yaml.Node) []yamlLeaf {
+	switch n.Kind {
+	case yaml.DocumentNode:
+		for _, child := range n.Content {
+			leaves = appendYamlLeaves(leaves, doc, path, child)
+		}
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			leaves = appendYamlLeaves(leaves, doc, append(path[:len(path):len(path)], n.Content[i].Value), n.Content[i+1])
+		}
+	case yaml.SequenceNode:
+		for i, item := range n.Content {
+			leaves = appendYamlLeaves(leaves, doc, append(path[:len(path):len(path)], strconv.Itoa(i)), item)
+		}
+	case yaml.AliasNode:
+		// By where its anchor is, not by name alone: YAML lets a later anchor
+		// reuse a name, and with the later one's line commented out the alias
+		// would resolve to the earlier one, reading the same while its value
+		// changed. Commenting a line out moves no other node, so an alias
+		// whose anchor is untouched reads the same.
+		leaves = append(leaves, yamlLeaf{doc: doc, path: path, value: fmt.Sprintf("*%s@%d:%d", n.Value, n.Alias.Line, n.Alias.Column)})
+	case yaml.ScalarNode:
+		if n.ShortTag() != "!!null" {
+			leaves = append(leaves, yamlLeaf{doc: doc, path: path, value: n.Value})
+		}
+	}
+	return leaves
+}
+
+// onlyKeyLeavesRemoved reports whether is holds exactly was's leaves less some
+// that belong to key: under the top-level entry named key, dots and all, or
+// under its nested path, the two spellings the line matcher comments out.
+func onlyKeyLeavesRemoved(was, is []yamlLeaf, key string) bool {
+	left := make(map[string]int, len(was))
+	for _, leaf := range was {
+		left[leaf.id()]++
+	}
+	for _, leaf := range is {
+		id := leaf.id()
+		if left[id] == 0 {
+			return false
+		}
+		left[id]--
+	}
+	segments := strings.Split(key, ".")
+	for _, leaf := range was {
+		p := leaf.path
+		ofKey := (len(p) > 0 && p[0] == key) || (len(p) >= len(segments) && slices.Equal(p[:len(segments)], segments))
+		if left[leaf.id()] > 0 && !ofKey {
+			return false
+		}
+	}
+	return true
+}
+
+// yamlHoldsKey reports whether some document of content has an entry for key
+// in either spelling the line matcher comments out: a top-level entry named
+// key, dots and all, or its nested path. An entry whose value is null holds
+// the key too, and so does one under either copy of a section the file writes
+// twice, since the matcher comments out both.
+//
+// When a later document does not parse, the documents before it answer: bd
+// reads the first of them, and an edit to them is checked like any other
+// (collateralUnsetRefusal). The document that does not parse, and any after
+// it, is read by nobody, so a key there is not set. A file whose first
+// document does not parse gives no answer, so it is taken to hold the key,
+// and the line matcher keeps its best effort there, as it always has.
+func yamlHoldsKey(content, key string) bool {
+	docs, err := yamlDocuments(content)
+	if err != nil && len(docs) == 0 {
+		return true
+	}
+	segments := strings.Split(key, ".")
+	for _, doc := range docs {
+		for _, top := range doc.Content {
+			if mappingHoldsPath(top, []string{key}) || mappingHoldsPath(top, segments) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// mappingHoldsPath reports whether n leads down path through mappings, one key
+// per step. Every entry of a name that repeats is followed.
+func mappingHoldsPath(n *yaml.Node, path []string) bool {
+	level := []*yaml.Node{n}
+	for _, name := range path {
+		var next []*yaml.Node
+		for _, m := range level {
+			if m.Kind != yaml.MappingNode {
+				continue
+			}
+			for i := 0; i+1 < len(m.Content); i += 2 {
+				if k := m.Content[i]; k.Kind == yaml.ScalarNode && k.Value == name {
+					next = append(next, m.Content[i+1])
+				}
+			}
+		}
+		level = next
+	}
+	return len(level) > 0
 }
 
 // blockScalarIndent reports the indentation of a key whose value is a literal
