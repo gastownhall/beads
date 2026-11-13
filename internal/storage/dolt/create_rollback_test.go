@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -441,4 +442,120 @@ func TestCreateIssueRetryAfterFailedAutoMintKeepsPeerRow(t *testing.T) {
 	if got.Title != "peer" {
 		t.Fatalf("peer issue %s title = %q after the caller's retry, want %q", peer.ID, got.Title, "peer")
 	}
+}
+
+// TestCreateIssuesFailureRestoresFilledIDs pins GH#8457 for the batch arms of
+// DoltStore.CreateIssues: when the batch transaction rolls back after the
+// create filled caller-left-empty ID fields (a minted issue ID, a fresh
+// comment's ID, a dependency's source IssueID), every one of them is empty
+// again and every caller-supplied ID is unchanged.
+func TestCreateIssuesFailureRestoresFilledIDs(t *testing.T) {
+	newTask := func(title string) *types.Issue {
+		return &types.Issue{Title: title, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	}
+
+	t.Run("durable/label", func(t *testing.T) {
+		store, cleanup := setupTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+
+		explicit := newTask("explicit")
+		explicit.ID = "test-explicit-e"
+		// An auto-minted issue is never deferred, so A, comment included, is
+		// fully written before B's over-length label fails the batch.
+		a := newTask("auto A")
+		a.Comments = []*types.Comment{{Author: "tester", Text: "fresh comment"}}
+		b := newTask("auto B")
+		b.Labels = []string{overLengthLabel}
+
+		before := countIssueRows(t, ctx, store, "issues")
+		err := store.CreateIssues(ctx, []*types.Issue{explicit, a, b}, "tester")
+		if !errors.Is(err, types.ErrFieldTooLong) {
+			t.Fatalf("CreateIssues error = %v, want types.ErrFieldTooLong", err)
+		}
+		if a.ID != "" || b.ID != "" {
+			t.Errorf("auto IDs = %q, %q after a rolled-back batch, want both empty", a.ID, b.ID)
+		}
+		if got := a.Comments[0].ID; got != "" {
+			t.Errorf("fresh comment ID = %q after a rolled-back batch, want empty", got)
+		}
+		if explicit.ID != "test-explicit-e" {
+			t.Errorf("explicit ID = %q, want the caller-supplied %q", explicit.ID, "test-explicit-e")
+		}
+		if after := countIssueRows(t, ctx, store, "issues"); after != before {
+			t.Errorf("issues rows = %d after a rolled-back batch, want %d", after, before)
+		}
+	})
+
+	t.Run("durable/dependency", func(t *testing.T) {
+		store, cleanup := setupTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+
+		grandparent := newTask("grandparent")
+		if err := store.CreateIssue(ctx, grandparent, "tester"); err != nil {
+			t.Fatalf("create grandparent: %v", err)
+		}
+		parent := newTask("parent")
+		parent.Dependencies = []*types.Dependency{{DependsOnID: grandparent.ID, Type: types.DepParentChild}}
+		if err := store.CreateIssues(ctx, []*types.Issue{parent}, "tester"); err != nil {
+			t.Fatalf("create parent: %v", err)
+		}
+
+		// X becomes P's child and blocks on its own grandparent G: the
+		// hierarchy check refuses that only after the dependency pass
+		// backfilled each edge's empty IssueID from X's minted ID.
+		x := newTask("child blocking on its grandparent")
+		x.Dependencies = []*types.Dependency{
+			{DependsOnID: parent.ID, Type: types.DepParentChild},
+			{DependsOnID: grandparent.ID, Type: types.DepBlocks},
+		}
+		err := store.CreateIssues(ctx, []*types.Issue{x}, "tester")
+		var conflict *domain.DependencyHierarchyConflictError
+		if !errors.As(err, &conflict) {
+			t.Fatalf("CreateIssues error = %v, want *domain.DependencyHierarchyConflictError", err)
+		}
+		if x.ID != "" {
+			t.Errorf("auto ID = %q after a rolled-back batch, want empty", x.ID)
+		}
+		for i, dep := range x.Dependencies {
+			if dep.IssueID != "" {
+				t.Errorf("dependency %d IssueID = %q after a rolled-back batch, want empty", i, dep.IssueID)
+			}
+		}
+		if parent.Dependencies[0].IssueID != parent.ID {
+			t.Errorf("seed dependency IssueID = %q, want %q (a committed create keeps its fills)", parent.Dependencies[0].IssueID, parent.ID)
+		}
+	})
+
+	t.Run("all-wisps", func(t *testing.T) {
+		store, cleanup := setupTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+
+		first := newTask("wisp one")
+		first.Ephemeral = true
+		first.Comments = []*types.Comment{{Author: "tester", Text: "fresh wisp comment"}}
+		second := newTask("wisp two")
+		second.Ephemeral = true
+		second.Labels = []string{overLengthLabel}
+
+		before := countIssueRows(t, ctx, store, "wisps")
+		err := store.CreateIssues(ctx, []*types.Issue{first, second}, "tester")
+		if !errors.Is(err, types.ErrFieldTooLong) {
+			t.Fatalf("CreateIssues error = %v, want types.ErrFieldTooLong", err)
+		}
+		if first.ID != "" || second.ID != "" {
+			t.Errorf("auto wisp IDs = %q, %q after a rolled-back batch, want both empty", first.ID, second.ID)
+		}
+		if got := first.Comments[0].ID; got != "" {
+			t.Errorf("fresh wisp comment ID = %q after a rolled-back batch, want empty", got)
+		}
+		if after := countIssueRows(t, ctx, store, "wisps"); after != before {
+			t.Errorf("wisps rows = %d after a rolled-back batch, want %d", after, before)
+		}
+	})
 }
