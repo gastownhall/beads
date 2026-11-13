@@ -7,13 +7,16 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	mysql "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/rowid"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -342,4 +345,134 @@ func TestCreateIssueReplayRemintsAutoMintedID(t *testing.T) {
 			requireTitle(t, ctx, store, caller.ID, "caller")
 		})
 	}
+}
+
+func expectedDerivedCommentID(table, issueID string, c *types.Comment) string {
+	ns := func(s string) sql.NullString { return sql.NullString{String: s, Valid: true} }
+	return rowid.New(table, 0, rowid.Digest([]sql.NullString{
+		ns(issueID), ns(c.Author), ns(c.Text), ns(issueops.FormatAuxTime(c.CreatedAt)),
+	}))
+}
+
+// AC-2: a durable auto-ID batch whose dependency source and fresh comment ID
+// were filled from the aborted mint must move both onto the re-minted ID.
+func TestCreateIssuesReplayMovesBackfilledDependencyToRemint(t *testing.T) {
+	for _, n := range []int{1, 3} {
+		t.Run(fmt.Sprintf("issues=%d", n), func(t *testing.T) {
+			store, cleanup := setupConcurrentTestStore(t)
+			defer cleanup()
+			ctx, cancel := testContext(t)
+			defer cancel()
+
+			target := newRetryTestIssue("dependency target")
+			if err := store.CreateIssue(ctx, target, "seed"); err != nil {
+				t.Fatalf("create target: %v", err)
+			}
+
+			fault, orig, restore := installReplayFault(t, store, 1)
+			defer restore()
+
+			commentAt := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+			issues := make([]*types.Issue, n)
+			for i := range issues {
+				issues[i] = newRetryTestIssue(fmt.Sprintf("caller %d", i))
+				issues[i].Dependencies = []*types.Dependency{{DependsOnID: target.ID, Type: types.DepBlocks}}
+				issues[i].Comments = []*types.Comment{{Author: "alice", Text: fmt.Sprintf("note %d", i), CreatedAt: commentAt}}
+			}
+
+			type staleIDs struct{ issue, dep, comment string }
+			stale := make([]staleIDs, n)
+			fault.onFault = func(int) error {
+				for i, is := range issues {
+					stale[i] = staleIDs{issue: is.ID, dep: is.Dependencies[0].IssueID, comment: is.Comments[0].ID}
+					if err := competitorCreate(ctx, orig, &types.Issue{
+						ID: is.ID, Title: fmt.Sprintf("competitor %d", i), Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask,
+					}); err != nil {
+						return err
+					}
+				}
+				return nil
+			}
+
+			if err := store.CreateIssuesWithFullOptions(ctx, issues, "caller", storage.BatchCreateOptions{}); err != nil {
+				t.Fatalf("CreateIssuesWithFullOptions: %v", err)
+			}
+			restore()
+			assertReplayed(t, fault, 1)
+
+			for i, is := range issues {
+				s := stale[i]
+				if s.issue == "" || s.dep != s.issue || s.comment == "" {
+					t.Fatalf("issue %d: fault saw ids %+v: the aborted attempt did not fill them", i, s)
+				}
+				requireTitle(t, ctx, store, s.issue, fmt.Sprintf("competitor %d", i))
+				if is.ID == s.issue {
+					t.Fatalf("issue %d: replay kept the aborted id %s the competitor owns", i, s.issue)
+				}
+				requireTitle(t, ctx, store, is.ID, fmt.Sprintf("caller %d", i))
+
+				dep := is.Dependencies[0]
+				if dep.IssueID != is.ID {
+					t.Errorf("issue %d: dependency source = %q, want the re-minted %q", i, dep.IssueID, is.ID)
+				}
+				deps, err := store.GetDependencyRecords(ctx, is.ID)
+				if err != nil {
+					t.Fatalf("GetDependencyRecords(%s): %v", is.ID, err)
+				}
+				if len(deps) != 1 || deps[0].DependsOnID != target.ID {
+					t.Errorf("issue %d: stored edges from %s = %+v, want one edge to %s", i, is.ID, deps, target.ID)
+				}
+				staleDeps, err := store.GetDependencyRecords(ctx, s.issue)
+				if err != nil {
+					t.Fatalf("GetDependencyRecords(%s): %v", s.issue, err)
+				}
+				if len(staleDeps) != 0 {
+					t.Errorf("issue %d: competitor %s gained the caller's edges %+v", i, s.issue, staleDeps)
+				}
+
+				wantComment := expectedDerivedCommentID("comments", is.ID, is.Comments[0])
+				if is.Comments[0].ID != wantComment {
+					t.Errorf("issue %d: comment id = %q, want %q derived from the final owner", i, is.Comments[0].ID, wantComment)
+				}
+				comments, err := store.GetIssueComments(ctx, is.ID)
+				if err != nil {
+					t.Fatalf("GetIssueComments(%s): %v", is.ID, err)
+				}
+				if len(comments) != 1 || comments[0].ID != wantComment {
+					t.Errorf("issue %d: stored comments on %s = %+v, want one with id %s", i, is.ID, comments, wantComment)
+				}
+				staleComments, err := store.GetIssueComments(ctx, s.issue)
+				if err != nil {
+					t.Fatalf("GetIssueComments(%s): %v", s.issue, err)
+				}
+				if len(staleComments) != 0 {
+					t.Errorf("issue %d: competitor %s gained the caller's comments %+v", i, s.issue, staleComments)
+				}
+			}
+		})
+	}
+
+	// An auto-minted id under a PrefixOverride outside allowed_prefixes is
+	// valid as a mint; replayed as if explicit it fails prefix validation.
+	t.Run("prefix override outside allowed prefixes", func(t *testing.T) {
+		store, cleanup := setupConcurrentTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+
+		fault, _, restore := installReplayFault(t, store, 1)
+		defer restore()
+
+		issue := newRetryTestIssue("override")
+		issue.PrefixOverride = "elsewhere"
+		if err := store.CreateIssues(ctx, []*types.Issue{issue}, "caller"); err != nil {
+			t.Fatalf("CreateIssues: %v", err)
+		}
+		restore()
+		assertReplayed(t, fault, 1)
+		if !strings.HasPrefix(issue.ID, "elsewhere-") {
+			t.Errorf("issue id = %q, want a mint under the override prefix", issue.ID)
+		}
+		requireTitle(t, ctx, store, issue.ID, "override")
+	})
 }
