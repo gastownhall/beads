@@ -34,9 +34,32 @@ func descriptionUsesExternalInput(cmd *cobra.Command) bool {
 	return false
 }
 
+// commandOffersClearDescription reports whether cmd follows the update
+// contract (GH#8149): registering --clear-description is what makes an inline
+// empty description a refused replacement rather than a value. It checks the
+// registration, not the flag's value. create shares validateDescriptionUpdate
+// and registers no clear flag, so it keeps accepting an inline empty value.
+func commandOffersClearDescription(cmd *cobra.Command) bool {
+	return cmd.Flags().Lookup("clear-description") != nil
+}
+
+// validateDescriptionUpdate guards the resolved description of create and
+// update. Empty stdin/file input needs --allow-empty-description on both. On
+// update (a command offering --clear-description) an inline empty value is
+// refused outright, like --notes "" (GH#6021): the empty string is exactly
+// what a failed command substitution collapses to, so it cannot prove intent
+// (GH#8149). --force and --allow-empty-description do not open that refusal.
 func validateDescriptionUpdate(cmd *cobra.Command, description string, descChanged bool) error {
-	if !descChanged || description != "" || !descriptionUsesExternalInput(cmd) {
+	if !descChanged || description != "" {
 		return nil
+	}
+	updateContract := commandOffersClearDescription(cmd)
+
+	if !descriptionUsesExternalInput(cmd) {
+		if !updateContract {
+			return nil
+		}
+		return fmt.Errorf(`an empty --description/--body/--message value would clear the description (an empty command substitution is the usual accident); use --clear-description to clear it deliberately`)
 	}
 
 	allowEmptyDescription, _ := cmd.Flags().GetBool("allow-empty-description")
@@ -45,4 +68,24 @@ func validateDescriptionUpdate(cmd *cobra.Command, description string, descChang
 	}
 
 	return fmt.Errorf("empty description from stdin/file requires --allow-empty-description (or use an explicit inline empty value like --description \"\")")
+}
+
+// validateDesignUpdate refuses an exactly empty design replacement on update,
+// inline or from --design-file (GH#8149); --clear-design clears deliberately.
+// Whitespace is content. Called only when a design flag was passed.
+func validateDesignUpdate(design string) error {
+	if design != "" {
+		return nil
+	}
+	return fmt.Errorf(`an empty --design/--design-file value would clear the design field (an empty command substitution is the usual accident); use --clear-design to clear it deliberately`)
+}
+
+// validateAcceptanceUpdate refuses an exactly empty acceptance-criteria
+// replacement on update (GH#8149); --clear-acceptance clears deliberately.
+// Called only when --acceptance or --acceptance-criteria was passed.
+func validateAcceptanceUpdate(acceptance string) error {
+	if acceptance != "" {
+		return nil
+	}
+	return fmt.Errorf(`an empty --acceptance value would clear the acceptance criteria (an empty command substitution is the usual accident); use --clear-acceptance to clear them deliberately`)
 }

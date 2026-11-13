@@ -11,12 +11,13 @@ import (
 // substitution (`--notes "$(cat missing.txt)"`) collapses to — at the flag
 // layer the accident and the deliberate clear are the same bytes, so the
 // empty value is refused outright and the deliberate clear gets its own verb,
-// --clear-notes. That differs from the description guard twice over:
-// validateDescriptionUpdate guards only stdin/file input (where emptiness is
-// an input-plumbing property and --allow-empty-description unblocks the same
-// content flag), while notes has no file/stdin variant — inline is the only
-// path, clearing already-empty notes is a no-op, and what needs authorizing
-// is an intent, not a pipe. The notes-overwrite fence
+// --clear-notes. GH#8149 extended the same contract to the description,
+// design and acceptance fields on update (validateDescriptionUpdate,
+// validateDesignUpdate, validateAcceptanceUpdate and their --clear-* verbs);
+// only the description's stdin/file input keeps --allow-empty-description as
+// an opt-in, because there emptiness is an input-plumbing property. Clearing
+// already-empty notes is a no-op, and what needs authorizing is an intent,
+// not a pipe. The notes-overwrite fence
 // (issueops.NotesReplacement) exempts clears by design and --force does not
 // reach here. Called only when --notes was explicitly passed.
 func validateNotesUpdate(notes string) error {
