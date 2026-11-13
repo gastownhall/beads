@@ -143,7 +143,6 @@ func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) 
 		return nil
 	}
 
-	parentEpicMap := buildParentEpicMapProxied(ctx, uw, issues)
 	usePlain := in.plainFormat || !in.prettyFormat
 	if usePlain {
 		fmt.Printf("\n%s Ready work (%d issues with no active blockers):\n\n", ui.RenderAccent("📋"), len(issues))
@@ -161,7 +160,9 @@ func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) 
 		}
 		fmt.Println()
 	} else {
-		displayReadyList(issues, parentEpicMap)
+		// Only this view prints the parent epic, so only it reads the parent
+		// edges and the parents.
+		displayReadyList(issues, buildParentEpicMapProxied(ctx, uw, issues))
 	}
 
 	if truncated {

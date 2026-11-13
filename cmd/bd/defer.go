@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -104,20 +105,10 @@ Examples:
 				updates["defer_until"] = *deferUntil
 			}
 			if reason != "" {
-				issue, err := store.GetIssue(ctx, fullID)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error loading %s: %v\n", fullID, err)
-					continue
-				}
-				if issue == nil {
-					fmt.Fprintf(os.Stderr, "Issue %s not found\n", fullID)
-					continue
-				}
-				notes := issue.Notes
-				if notes != "" {
-					notes += "\n"
-				}
-				updates["notes"] = notes + reason
+				// An append operation, resolved against the row the update
+				// transaction reads, so a note another process commits after
+				// resolution is kept rather than overwritten.
+				updates[issueops.OpAppendNotes] = reason
 			}
 
 			if err := store.UpdateIssue(ctx, fullID, updates, currentActor()); err != nil {

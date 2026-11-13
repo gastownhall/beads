@@ -332,7 +332,10 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 			return nil
 		}
 
-		allDeps, depErr := listDependencyRecords(ctx, activeStore, issues)
+		// The edges are the ones the page read returned with its rows
+		// (pageDependencyRecords says which snapshot and which plane), so this
+		// rendering reads none of its own, except on a remote backend.
+		allDeps, depErr := listPageDependencies(ctx, activeStore, issues)
 		if depErr != nil && in.depsMode != "" {
 			return HandleError("loading dependencies for --deps: %v", depErr)
 		}
@@ -371,15 +374,27 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	// still swallowed: this route has always rendered the page undecorated
 	// rather than failing on it, while the proxied route fails — a difference
 	// between the two CALLERS, recorded for the owner in AMBIGUITIES.md
-	// (A-blk-1) rather than converged here.
-	blocking := annotateListBlocking(ctx, activeStore, issueIDs)
-	// Batched by id set, never per row — see gatesByIssueID. --long and
-	// --format render no gate (GatedBy lives on types.IssueDetails, which a
-	// --format template cannot reach), so neither pays for the reads; agent
-	// and compact mode both spend them and both render them.
+	// (A-blk-1) rather than converged here. --long renders no blocking
+	// decoration, so it skips the read; agent and compact mode render it.
+	//
+	// Gates are batched by id set, never per row — see gatesByIssueID. --long
+	// and --format render no gate (GatedBy lives on types.IssueDetails, which
+	// a --format template cannot reach), so neither pays for the reads; agent
+	// and compact mode both spend them and both render them. The gate rule
+	// runs over the edges the page read returned (pageDependencyRecords), so
+	// the only gate read left is the hydration of the gates those edges name.
+	// A remote backend's page is not trusted to carry them
+	// (pageCarriesDependencies), so there the decoration reads them itself, as
+	// it always has.
+	var blocking listBlocking
 	var gated map[string][]string
 	if ui.IsAgentMode() || !in.longFormat {
-		gated = gatedIssueIDs(ctx, activeStore, issues, nil)
+		blocking = annotateListBlocking(ctx, activeStore, issueIDs)
+		var gateDeps map[string][]*types.Dependency
+		if pageCarriesDependencies(activeStore) {
+			gateDeps = pageDependencyRecords(issues)
+		}
+		gated = gatedIssueIDs(ctx, activeStore, issues, gateDeps)
 	}
 
 	var buf strings.Builder
