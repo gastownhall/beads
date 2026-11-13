@@ -36,7 +36,8 @@ For **VS Code + MCP**, see [GitHub Copilot](/integrations/github-copilot).
 3. **Lower maintenance burden**
    - No Copilot-specific install/check/remove implementation in core
    - No Copilot-specific doctor checks
-   - The recipe just writes the native plugin file and the instruction file
+   - The recipe writes the native plugin file and keeps a marked section in
+     the instruction file
 
 ## Why Copilot CLI Over MCP for Terminal Work?
 
@@ -70,7 +71,35 @@ bd setup copilot --remove
   - `SessionStart` hook: Runs `bd prime` when Copilot CLI starts a session
   - `PreCompact` hook: Runs `bd prime` before context compaction
 - `.github/copilot-instructions.md`
-  - Repository workflow guidance for Copilot CLI
+  - Repository workflow guidance for Copilot CLI, kept as a marked section
+
+## Sharing `.github/copilot-instructions.md`
+
+`.github/copilot-instructions.md` is where a repository keeps its own Copilot
+instructions, so `bd setup copilot` does not own the whole file. It keeps
+the beads guidance between `<!-- BEGIN BEADS INTEGRATION -->` and
+`<!-- END BEADS INTEGRATION -->` markers and leaves everything else alone:
+
+- **Setup** creates the file holding just the section when it is missing or
+  empty, appends the section after your content when the file has none, and
+  replaces an existing section in place. Running it again changes nothing.
+- **`--check`** fails, naming the file, when it is missing, holds no beads
+  section, or has malformed markers. It also needs the plugin manifest.
+- **`--remove`** takes out only the section, rejoining the text around it
+  with the blank line that set it off, and deletes the file only when nothing
+  but whitespace is left.
+- **Earlier releases** wrote the template as the whole file, unmarked. A
+  file that is exactly that template passes `--check`, and setup converts it
+  to one marked section. If you edited that file, setup appends a new
+  section; delete the old unmarked guidance by hand.
+- **Refusals:** setup and remove change nothing, and exit non-zero, when the
+  file's markers are malformed (a dangling, reversed, nested or repeated
+  marker) or when `.github/copilot-instructions.md` is itself a symbolic
+  link. Fix the markers, or replace the link with a regular file, and run
+  the command again. A symlinked `.github` directory works as before.
+
+`.copilot-plugin/plugin.json` is bd's own: setup writes it whole, and
+`--remove` deletes it.
 
 ## Related Files
 

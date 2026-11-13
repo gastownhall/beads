@@ -1410,3 +1410,63 @@ func TestSetupCopilot_CheckFollowsSymlinkedInstructions(t *testing.T) {
 		t.Fatalf("bd setup copilot --check: %v\n%s", err, out)
 	}
 }
+
+// AC-8: in a fresh repository setup creates both files, the instructions
+// holding only the section, and remove deletes both and the directories it
+// emptied.
+func TestSetupCopilotRemoveOwnedInstructions(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		seed     string // instructions seeded with the manifest; "" runs setup first
+		sibling  bool   // .github holds a file of the user's too
+		wantFile string // instructions after setup, when setup runs
+	}{
+		{name: "fresh install then remove"},
+		{name: "fresh install then remove, .github holds workflows", sibling: true},
+		{name: "legacy-only instructions", seed: legacyCopilotInstructions},
+		{name: "section with only whitespace around it", seed: "\n\n" + copilotSection() + "\n  \n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ws := copilotTestWorkspace(t)
+			sibling := filepath.Join(ws, ".github", "workflows", "ci.yml")
+			if tt.sibling {
+				writeWorkspaceFile(t, ".github/workflows/ci.yml", "on: push\n")
+			}
+			if tt.seed == "" {
+				if out, err := runCopilotSetup(t, ""); err != nil {
+					t.Fatalf("bd setup copilot: %v\n%s", err, out)
+				}
+				if got, ok := readWorkspaceFile(t, copilotManifestFile); !ok || got != copilotManifest(t) {
+					t.Fatalf("setup did not install the manifest (exists %v)", ok)
+				}
+				if got, _ := readWorkspaceFile(t, copilotInstructionsFile); got != copilotSection() {
+					t.Fatalf("fresh instructions = %q, want only the section %q", got, copilotSection())
+				}
+			} else {
+				writeWorkspaceFile(t, copilotManifestFile, copilotManifest(t))
+				writeWorkspaceFile(t, copilotInstructionsFile, tt.seed)
+			}
+
+			if out, err := runCopilotSetup(t, "remove"); err != nil {
+				t.Fatalf("bd setup copilot --remove: %v\n%s", err, out)
+			}
+			for _, f := range []string{copilotManifestFile, copilotInstructionsFile} {
+				if _, ok := readWorkspaceFile(t, f); ok {
+					t.Errorf("remove kept %s", f)
+				}
+			}
+			if _, err := os.Lstat(filepath.Join(ws, ".copilot-plugin")); !os.IsNotExist(err) {
+				t.Errorf("remove kept the emptied .copilot-plugin, lstat err = %v", err)
+			}
+			_, err := os.Lstat(filepath.Join(ws, ".github"))
+			switch {
+			case tt.sibling:
+				if _, err := os.Stat(sibling); err != nil {
+					t.Errorf("remove lost the user's %s: %v", sibling, err)
+				}
+			case !os.IsNotExist(err):
+				t.Errorf("remove kept the emptied .github, lstat err = %v", err)
+			}
+		})
+	}
+}
