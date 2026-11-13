@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -191,6 +192,15 @@ func TestSharedServerVersionBumpDoesNotPromoteCursor(t *testing.T) {
 		t.Fatalf("the refused write promoted the schema cursor from %d to %d", behind, got)
 	}
 
+	// Seed the clone-local version marker to a stale 1.x value so the remedy's
+	// stamp is observable (#7380): the success path records this binary's
+	// version through the reconciler, and a distinguishable stale value is
+	// what proves the stamp branch ran on the run that migrated.
+	if _, err := admin.ExecContext(ctx,
+		"REPLACE INTO local_metadata (`key`, value) VALUES ('bd_version', '1.0.0')"); err != nil {
+		t.Fatalf("seed bd_version marker: %v", err)
+	}
+
 	// Consent completes the upgrade.
 	stdout, stderr, code = run("migrate", "schema")
 	if code != 0 {
@@ -198,6 +208,30 @@ func TestSharedServerVersionBumpDoesNotPromoteCursor(t *testing.T) {
 	}
 	if got := cursor(); got != schema.LatestVersion() {
 		t.Fatalf("cursor = %d after bd migrate schema, want %d", got, schema.LatestVersion())
+	}
+	// The command's own open applied the migration under the verb's consent;
+	// the handler must still report it (#7380), not claim already-current.
+	if !strings.Contains(stdout, fmt.Sprintf("Applied 1 schema migration(s); schema now at v%d", schema.LatestVersion())) {
+		t.Errorf("bd migrate schema did not report the migration its open applied:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "Schema already at") {
+		t.Errorf("bd migrate schema reported already-current on the run that migrated:\n%s", stdout)
+	}
+	var stamped string
+	if err := admin.QueryRowContext(ctx,
+		"SELECT value FROM local_metadata WHERE `key` = 'bd_version'").Scan(&stamped); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("read back bd_version marker: %v", err)
+	}
+	if stamped == "" || stamped == "1.0.0" {
+		t.Errorf("bd_version marker = %q after the remedy, want this binary's version (%s) stamped", stamped, Version)
+	}
+	// A second invocation now genuinely has nothing left to do.
+	stdout, stderr, code = run("migrate", "schema")
+	if code != 0 {
+		t.Fatalf("second bd migrate schema exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, fmt.Sprintf("Schema already at v%d", schema.LatestVersion())) {
+		t.Errorf("second bd migrate schema should report the schema current:\n%s", stdout)
 	}
 }
 
@@ -335,6 +369,13 @@ func TestServerModeReadRefusesASchemaItsReadsCannotQuery(t *testing.T) {
 	stdout, stderr, code := run("migrate", "schema")
 	if code != 0 {
 		t.Fatalf("bd migrate schema exit = %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	// Both pending migrations (0073 arrival_seq, 0074 id tombstones) are
+	// applied by the command's consented open and must be reported as a
+	// count of two (#7380) — a check that the folded open count is the
+	// open's real total, not a constant one.
+	if !strings.Contains(stdout, fmt.Sprintf("Applied 2 schema migration(s); schema now at v%d", schema.LatestVersion())) {
+		t.Errorf("bd migrate schema did not report both pending migrations it applied:\n%s", stdout)
 	}
 	stdout, stderr, code = run("list")
 	if code != 0 || !strings.Contains(stdout, "rdb-1") {
