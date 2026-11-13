@@ -207,7 +207,7 @@ var readOnlyCommands = map[string]bool{
 	"list":       true,
 	"ready":      true,
 	"show":       true,
-	"stats":      true,
+	"stats":      true, // matches only `bd human stats`: `bd stats` is an alias of `bd status`, whose leaf name is "status"
 	"blocked":    true,
 	"count":      true,
 	"search":     true,
@@ -227,6 +227,55 @@ var readOnlyCommands = map[string]bool{
 // that would trigger file watchers. See GH#804.
 func isReadOnlyCommand(cmdName string) bool {
 	return readOnlyCommands[cmdName]
+}
+
+// readOnlyCommandPaths lists more commands that only read, keyed by command
+// path (commandRegistryPath) rather than leaf name, so that a nested command
+// sharing a leaf name does not match: `federation status` and `mol stale` are
+// not `status` and `stale`.
+var readOnlyCommandPaths = map[string]bool{
+	"status":      true, // also `bd stats`, an alias that dispatches to it
+	"stale":       true,
+	"children":    true,
+	"dep tree":    true,
+	"statuses":    true,
+	"types":       true,
+	"info":        true,
+	"kv get":      true,
+	"memories":    true,
+	"history":     true,
+	"epic status": true,
+	"prime":       true, // opens its own store lazily, read-only (ensureReadOnlyStoreActiveWithContext)
+}
+
+// commandReadsOnly reports whether cmd only reads from the database: its path
+// is in readOnlyCommandPaths, or its leaf name is in readOnlyCommands.
+func commandReadsOnly(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	return readOnlyCommandPaths[commandRegistryPath(cmd)] || isReadOnlyCommand(cmd.Name())
+}
+
+// localOnlyFlags names, by command path, the boolean flags whose RunE prints
+// text built into the binary and returns before any store use.
+var localOnlyFlags = map[string][]string{
+	"info":  {"thanks", "whats-new"},
+	"types": {"sections"},
+}
+
+// commandRunsLocalOnly reports whether cmd was invoked with one of its
+// localOnlyFlags set, so the root pre-run need not open a store for it.
+func commandRunsLocalOnly(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	for _, name := range localOnlyFlags[commandRegistryPath(cmd)] {
+		if on, err := cmd.Flags().GetBool(name); err == nil && on {
+			return true
+		}
+	}
+	return false
 }
 
 // isPreviewCommand reports whether cmd was explicitly invoked in a
@@ -254,9 +303,9 @@ type rootStorePolicy struct {
 // effectiveRootStorePolicy separates strict --readonly/config policy from
 // command classification. Classified reads retain their compatibility
 // maintenance and auto-start behavior; strict readonly is mutation-free.
-func effectiveRootStorePolicy(cmdName string, strictReadonly bool) rootStorePolicy {
+func effectiveRootStorePolicy(cmd *cobra.Command, strictReadonly bool) rootStorePolicy {
 	return rootStorePolicy{
-		readOnly:         strictReadonly || isReadOnlyCommand(cmdName),
+		readOnly:         strictReadonly || commandReadsOnly(cmd),
 		disableAutoStart: strictReadonly,
 		runMaintenance:   !strictReadonly,
 	}
@@ -279,7 +328,9 @@ func runsPostCommandMaintenance(cmdName string, strictReadonly bool) bool {
 	if cmdName == serveCmdName {
 		return false
 	}
-	return effectiveRootStorePolicy(cmdName, strictReadonly).runMaintenance
+	// runMaintenance depends on strict readonly alone, not on the command's
+	// read classification, so no command is passed.
+	return effectiveRootStorePolicy(nil, strictReadonly).runMaintenance
 }
 
 // readMemoEnvVar turns the per-command http read memo off when set to "0": an
@@ -1649,6 +1700,12 @@ var rootCmd = &cobra.Command{
 			skipsStoreInit = true
 		}
 
+		// `info --thanks`, `info --whats-new` and `types --sections` print
+		// text built into the binary and return before any store use.
+		if commandRunsLocalOnly(cmd) {
+			skipsStoreInit = true
+		}
+
 		// One-time friendly heads-up about anonymous usage metrics. Placed after
 		// the config-derived json/quiet rebind and command classification above so
 		// it can read the real output mode and command identity — that is how it
@@ -1992,7 +2049,7 @@ var rootCmd = &cobra.Command{
 		// ahead of version tracking, because that is the first step a preview
 		// has to change.
 		previewMode := isPreviewCommand(cmd)
-		policy := effectiveRootStorePolicy(cmd.Name(), readonlyMode)
+		policy := effectiveRootStorePolicy(cmd, readonlyMode)
 		useReadOnly := policy.readOnly || previewMode
 
 		// dc-6jaq: consult the migration freeze marker here, before any of
@@ -2639,7 +2696,7 @@ var rootCmd = &cobra.Command{
 				// Auto-push: push to Dolt remote if enabled and due.
 				// Skip for read-only commands to avoid unnecessary network operations
 				// and metadata writes on commands like bd list/show/ready (GH#2191).
-				if !isReadOnlyCommand(cmd.Name()) {
+				if !commandReadsOnly(cmd) {
 					runPostRunAutoPush(rootCtx)
 				}
 
@@ -2779,7 +2836,7 @@ func shouldRunPostCommandAutoExport(cmd *cobra.Command) bool {
 	if cmd == nil {
 		return true
 	}
-	return !isReadOnlyCommand(cmd.Name())
+	return !commandReadsOnly(cmd)
 }
 
 func shouldRunAutoImportJSONL(cmd *cobra.Command, s storage.DoltStorage, useReadOnly, globalFlag, serverMode bool) bool {

@@ -55,7 +55,7 @@ func TestEffectiveRootStorePolicy(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			policy := effectiveRootStorePolicy(tc.command, tc.strictReadonly)
+			policy := effectiveRootStorePolicy(&cobra.Command{Use: tc.command}, tc.strictReadonly)
 			if policy.readOnly != tc.wantReadOnly {
 				t.Fatalf("readOnly = %v, want %v", policy.readOnly, tc.wantReadOnly)
 			}

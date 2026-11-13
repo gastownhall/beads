@@ -25,8 +25,10 @@ const sharedServerPrimePort = "19999"
 // TestPrimeHonorsSharedServerConfigYaml is a regression test for GH#6551.
 //
 // bd prime resolves its store through ensureStoreActiveForPrime ->
-// ensureStoreActiveWithContext -> newDoltStoreFromConfig, a different path
-// from every other command's resolution in cmd/bd/main.go. That path did not
+// ensureReadOnlyStoreActiveWithContext -> newReadOnlyStoreFromConfig (at the
+// time of GH#6551, ensureStoreActiveWithContext -> newDoltStoreFromConfig), a
+// different path from every other command's resolution in cmd/bd/main.go.
+// Both factories gate on effectiveServerMode. That path did not
 // compensate for the gap configfile.IsDoltServerMode() leaves on purpose: it
 // does not read dolt.shared-server from config.yaml, to avoid a circular
 // import with the doltserver package. A linked git worktree commonly has
