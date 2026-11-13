@@ -982,6 +982,31 @@ func (s *testSuite) TestIssueUseCase_CallerNamedChildNeverLowersTheCounter() {
 		"a caller-named child above the counter must raise it")
 }
 
+// TestIssueUseCase_CallerNamedWispChildAdvancesWispCounter: a caller-named
+// child of a wisp parent advances the parent's wisp_child_counters row and
+// leaves child_counters alone.
+func (s *testSuite) TestIssueUseCase_CallerNamedWispChildAdvancesWispCounter() {
+	s.resetMintConfig("cn", "")
+	uc := s.issueUseCase()
+	_, err := uc.CreateWisp(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "wisp parent", IssueType: types.TypeTask, Priority: 2, Ephemeral: true},
+		ExplicitID: "cn-w",
+	}, "tester")
+	s.Require().NoError(err)
+	before := s.counterTableRows("child_counters")
+
+	_, err = uc.CreateWisp(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "wisp child", IssueType: types.TypeTask, Priority: 2, Ephemeral: true},
+		ExplicitID: "cn-w.3",
+	}, "tester")
+	s.Require().NoError(err)
+
+	s.Equal(3, s.childCounterValue("wisp_child_counters", "cn-w"),
+		"a caller-named child of a wisp parent must advance wisp_child_counters")
+	s.Equal(before, s.counterTableRows("child_counters"),
+		"a wisp parent's caller-named child must leave child_counters unchanged")
+}
+
 // childCounterValue reads parentID's last_child from table, failing the test
 // when there is no row.
 func (s *testSuite) childCounterValue(table, parentID string) int {
