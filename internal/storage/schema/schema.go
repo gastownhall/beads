@@ -368,6 +368,12 @@ func missingColumns(ctx context.Context, db DBConn, table string, columns []stri
 	if err != nil {
 		return nil, fmt.Errorf("checking table %s: %w", table, err)
 	}
+	return missingColumnsIn(ctx, db, table, exists, columns)
+}
+
+// missingColumnsIn is missingColumns once tableInCurrentDatabase has answered
+// whether table exists, for a caller that needed that answer itself.
+func missingColumnsIn(ctx context.Context, db DBConn, table string, exists bool, columns []string) ([]string, error) {
 	present := map[string]bool{}
 	if exists {
 		//nolint:gosec // G201: table is a hardcoded identifier, never user input.
@@ -958,6 +964,12 @@ func MigrateIgnoredUpTo(ctx context.Context, db DBConn, maxVersion int) (int, er
 // pass suspends and restores @@SESSION.dolt_transaction_commit on it
 // (suspendTransactionCommit), and a pooled *sql.DB would let the SET land on
 // one connection while the migrations run on another.
+//
+// It returns the pass's work: the numbered migrations it applied from both
+// sources, main and clone-local, plus the open-time reconciles that changed
+// the database (see migrateUpConsented). 0 means the pass changed nothing,
+// which callers rely on to skip a pool rebuild or a write; a partial count
+// comes back with an error.
 func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 	// Consent gate first, before ANY write — dolt_ignore seeding included: an
 	// existing database with pending main-sequence migrations must stay
@@ -1211,6 +1223,14 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 	backfilled = backfilled || auxRekeyed
 
 	appliedIgnored, ignoredColumnAdded, err := ignoredSource.migrate(ctx, db, 0)
+	// The clone-local series changes the schema as much as the main one does,
+	// so its work counts toward the total every return below reports: a pass
+	// whose only work was clone-local (a clone that pulled the migrated main
+	// series and then upgraded, gastownhall/beads#7038) otherwise reported 0,
+	// and the callers that act only on a changed database skipped it — `bd
+	// migrate schema` reported "current" and left the version markers
+	// unstamped, and the migrating open skipped its pool rebuild.
+	applied += appliedIgnored
 	if err != nil {
 		return applied, fmt.Errorf("ignored migrations: %w", err)
 	}
@@ -1218,7 +1238,7 @@ func migrateUpAfterReconcile(ctx context.Context, db DBConn, seedChanged bool) (
 		return applied, fmt.Errorf("unstaging ignored migration tables: %w", err)
 	}
 
-	if applied == 0 && !backfilled && appliedIgnored == 0 && !mainColumnAdded && !ignoredColumnAdded {
+	if applied == 0 && !backfilled && !mainColumnAdded && !ignoredColumnAdded {
 		return applied, nil
 	}
 	changedDirtyTables, err := changedDirtyTableSignatures(ctx, db, dirtyBeforeSignatures)

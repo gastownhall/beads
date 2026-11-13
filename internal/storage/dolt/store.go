@@ -2228,20 +2228,66 @@ var dialServer = net.DialTimeout
 // describes.
 var issueProjectionColumns = sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns)
 
+// leaseProjectionColumns are the lease-overlay columns every hydrated issue
+// read selects (sqlbuild.LeaseSelectColumns), with their leases. qualifier
+// stripped for the probe. Derived from the same constant the queries render
+// from rather than re-listed, so a projection change moves the probe with it.
+var leaseProjectionColumns = stripColumnQualifiers(sqlbuild.ColumnNames(sqlbuild.LeaseSelectColumns))
+
+// cloneLocalProjections are the clone-local tables issue reads select from,
+// for schema.CheckCloneLocalReadable: the lease overlay every hydrated read
+// joins, and the wisps plane, which GetIssue falls back to for an id not in
+// issues and ready work and search merge in, through the same issue
+// projection as issues. A database without a wisps table has no wisps to
+// read (sqlbuild.OptionalWispTable), so that table's absence refuses nothing.
+var cloneLocalProjections = []schema.CloneLocalProjection{
+	{Table: "leases", Columns: leaseProjectionColumns},
+	{Table: "wisps", Columns: issueProjectionColumns, Optional: sqlbuild.OptionalWispTable("wisps")},
+}
+
+// stripColumnQualifiers drops each column's table qualifier ("leases." ->
+// ""), the bare names SHOW COLUMNS compares against.
+func stripColumnQualifiers(columns []string) []string {
+	out := make([]string, len(columns))
+	for i, column := range columns {
+		if idx := strings.LastIndex(column, "."); idx >= 0 {
+			column = column[idx+1:]
+		}
+		out[i] = column
+	}
+	return out
+}
+
 // checkOpenSchemaDrift is newServerMode's schema drift check. Every open
 // refuses a database ahead of this binary (schema.CheckForwardDrift). An open
 // that will not migrate and sets Config.RequireReadableSchema also refuses,
 // from the same version read, one behind it that lacks a projected column
-// (schema.CheckReadableDrift). Through a gateway that refusal names the
-// server administrator's remedy, since bd never migrates a gateway's schema.
+// (schema.CheckReadableDrift) — and, once the replicated schema is readable,
+// a clone-local series behind it that lacks a projected lease or wisps column
+// (schema.CheckCloneLocalReadable, gastownhall/beads#7038): the clone-local
+// lane never arrives with `bd dolt pull`, so the pull-then-upgrade recipe
+// leaves a consumer clone with exactly that shape, and without the check its
+// issue reads fail on a raw unknown-column error. Through a gateway both
+// refusals name the server administrator's remedy, since bd never migrates a
+// gateway's schema.
 func checkOpenSchemaDrift(ctx context.Context, db *sql.DB, cfg *Config) error {
 	if !cfg.RequireReadableSchema || (!cfg.ReadOnly && !cfg.Gateway) {
 		return schema.CheckForwardDrift(ctx, db)
 	}
+	// Main-series refusals keep precedence: a database whose replicated
+	// schema its reads cannot query is refused for that first, whatever its
+	// clone-local lane looks like.
 	err := schema.CheckReadableDrift(ctx, db, "issues", issueProjectionColumns)
+	if err == nil {
+		err = schema.CheckCloneLocalReadable(ctx, db, cloneLocalProjections)
+	}
 	var behind *schema.SchemaBehindError
 	if cfg.Gateway && errors.As(err, &behind) {
 		behind.Gateway = true
+	}
+	var cloneLocal *schema.CloneLocalBehindError
+	if cfg.Gateway && errors.As(err, &cloneLocal) {
+		cloneLocal.Gateway = true
 	}
 	return err
 }
@@ -3522,7 +3568,8 @@ func databaseExistsOnServer(ctx context.Context, db *sql.DB, name string) (bool,
 
 // initSchemaOnDB applies pending schema migrations. schema.MigrateUp tracks
 // applied versions in schema_migrations and backfills legacy config-driven
-// tables. Returns the number of migrations applied.
+// tables. Returns the pass's work count (schema.MigrateUp): main and
+// clone-local migrations applied plus reconciles, 0 when nothing changed.
 func initSchemaOnDB(ctx context.Context, db *sql.DB) (int, error) {
 	return initSchemaOnDBWithBootstrapHeal(ctx, db, nil, "")
 }

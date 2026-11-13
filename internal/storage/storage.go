@@ -859,6 +859,10 @@ type RemoteRefPruner interface {
 	ListTags(ctx context.Context) ([]string, error)
 }
 
+// SchemaMigrator applies the binary's pending schema migrations. applied
+// counts the pass's work: numbered migrations of both series (main and
+// clone-local), plus any open-time reconcile that changed the database, so 0
+// means the pass changed nothing (schema.MigrateUp).
 type SchemaMigrator interface {
 	ApplySchemaMigrations(ctx context.Context) (applied int, err error)
 }

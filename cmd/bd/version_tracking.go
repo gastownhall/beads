@@ -232,15 +232,36 @@ func autoMigrateOnVersionBump(beadsDir string) {
 		return
 	}
 
-	// Check if database exists at the backend-appropriate path
+	// Local-directory prerequisite: the workspace's on-disk Dolt data dir.
+	// For a local/embedded backend the directory IS the database — absent
+	// means there is nothing to migrate. A SERVER-mode workspace is
+	// different: its configured database lives on the dolt sql-server, and
+	// the workspace routinely has no local data dir at all (gastownhall/
+	// beads#7038: that shape is exactly the shared-server consumer clone).
+	// Returning here skipped an already-authorized maintenance open for
+	// every server-mode workspace without a local dir, so the version-bump
+	// reconciliation silently never ran and the database kept its
+	// pre-upgrade clone-local schema. In server mode the factory open below
+	// decides whether the configured database exists; CreateIfMissing stays
+	// false, so no database is ever created here. Server mode is resolved as
+	// that open resolves it: shared-server mode (dolt.shared-server) counts
+	// even where metadata.json still says embedded (GH#2946).
 	dbPath := cfg.DatabasePath(beadsDir)
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+	serverMode := cfg.IsDoltServerMode() || doltserver.IsSharedServerMode()
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) && !serverMode {
 		// No database - nothing to migrate
 		debug.Logf("auto-migrate: skipping migration, database does not exist: %s", dbPath)
 		return
 	}
 
-	recoverPreV56IfNeeded(previousVersion, dbPath)
+	// The pre-v0.56 recovery rebuilds a database directory by deleting .dolt:
+	// filesystem surgery on a genuinely local backend's directory. A
+	// server-mode workspace's local path may be an incidental directory — or
+	// the served data dir of a live server — and must never be operated on
+	// from here (#7038).
+	if !serverMode {
+		recoverPreV56IfNeeded(previousVersion, dbPath)
+	}
 
 	// Open database using factory (respects backend config from metadata.json)
 	// Use rootCtx if available and not canceled, otherwise use Background

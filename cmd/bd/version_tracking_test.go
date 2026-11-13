@@ -3,10 +3,17 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/git"
 )
 
@@ -636,6 +643,211 @@ func TestAutoMigrateOnVersionBump_NoDatabase(t *testing.T) {
 	autoMigrateOnVersionBump(tmpDir)
 
 	// Test passes if no panic occurs
+}
+
+// newLocalModeBumpWorkspace builds an embedded-mode .beads whose local
+// database path is beadsDir/dolt, and arms the one-shot upgrade witness with
+// the given predecessor. The package's bump globals are saved and restored.
+func newLocalModeBumpWorkspace(t *testing.T, previous string) (beadsDir, doltDir string) {
+	t.Helper()
+	ensureCleanGlobalState(t)
+
+	tmpDir := t.TempDir()
+	beadsDir = filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatalf("create .beads: %v", err)
+	}
+	if err := (&configfile.Config{
+		Backend:  configfile.BackendDolt,
+		DoltMode: configfile.DoltModeEmbedded,
+	}).Save(beadsDir); err != nil {
+		t.Fatalf("save metadata: %v", err)
+	}
+	if err := writeLocalVersion(filepath.Join(beadsDir, localVersionFile), previous); err != nil {
+		t.Fatalf("write stale %s: %v", localVersionFile, err)
+	}
+
+	origDetected, origPrevious := versionUpgradeDetected, previousVersion
+	t.Cleanup(func() {
+		versionUpgradeDetected, previousVersion = origDetected, origPrevious
+	})
+	versionUpgradeDetected = true
+	previousVersion = previous
+
+	return beadsDir, filepath.Join(beadsDir, "dolt")
+}
+
+// TestAutoMigrateOnVersionBump_ServerModeSkipsPreV56Recovery is #7038's
+// destructive edge: the pre-0.56 recovery deletes .dolt, so it must never run
+// against a server-mode workspace's local path, where any directory there is
+// incidental — never the served database.
+//
+// The witness this needs is pre-1.0 by definition, and the cross-era legacy
+// guard refuses such a workspace at CLI admission, so this edge cannot be
+// driven through a bd subprocess; the hook is exercised in-process here.
+// The configured database is never created, so the hook's own opens fail on
+// it harmlessly after the recovery decision under test.
+func TestAutoMigrateOnVersionBump_ServerModeSkipsPreV56Recovery(t *testing.T) {
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available, skipping")
+	}
+	ensureCleanGlobalState(t)
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatalf("create .beads: %v", err)
+	}
+	database := uniqueTestDBName(t)
+	if err := (&configfile.Config{
+		Backend:        configfile.BackendDolt,
+		DoltMode:       configfile.DoltModeServer,
+		DoltServerHost: "127.0.0.1",
+		DoltServerPort: testDoltServerPort,
+		DoltDatabase:   database,
+	}).Save(beadsDir); err != nil {
+		t.Fatalf("save metadata: %v", err)
+	}
+	t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+
+	// An incidental pre-0.56-shaped directory at the workspace's local
+	// database path: .dolt present, no .bd-dolt-ok marker.
+	dotDolt := filepath.Join(beadsDir, "dolt", ".dolt")
+	if err := os.MkdirAll(dotDolt, 0o750); err != nil {
+		t.Fatalf("create incidental .dolt: %v", err)
+	}
+	sentinel := filepath.Join(dotDolt, "sentinel.txt")
+	if err := os.WriteFile(sentinel, []byte("live workspace data"), 0o600); err != nil {
+		t.Fatalf("write sentinel: %v", err)
+	}
+
+	origDetected, origPrevious := versionUpgradeDetected, previousVersion
+	t.Cleanup(func() {
+		versionUpgradeDetected, previousVersion = origDetected, origPrevious
+	})
+	versionUpgradeDetected = true
+	previousVersion = "0.55.4"
+
+	autoMigrateOnVersionBump(beadsDir)
+
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Errorf("the server-mode reconciliation ran the pre-v0.56 recovery and destroyed %s: %v; the local path of a server-mode workspace is never the served database", sentinel, err)
+	}
+}
+
+// TestAutoMigrateOnVersionBump_LocalModeStillRunsPreV56Recovery is the other
+// side of the #7038 server-mode gate: for a genuinely local backend the
+// pre-0.56 recovery is still filesystem surgery the reconciliation performs
+// on the workspace's own database directory. A pre-0.56 .dolt at the local
+// database path must be rebuilt; only a server-mode workspace (see
+// TestServerVersionBumpWithoutLocalDoltDir) is exempt.
+func TestAutoMigrateOnVersionBump_LocalModeStillRunsPreV56Recovery(t *testing.T) {
+	beadsDir, doltDir := newLocalModeBumpWorkspace(t, "0.55.4")
+
+	// The pre-0.56 shape: .dolt present, no .bd-dolt-ok marker. The sentinel
+	// inside it does not survive the rebuild; the reinitializing `dolt init`
+	// may fail in a bare environment, but the removal that precedes it is the
+	// assertion.
+	sentinel := filepath.Join(doltDir, ".dolt", "sentinel.txt")
+	if err := os.MkdirAll(filepath.Dir(sentinel), 0o750); err != nil {
+		t.Fatalf("create pre-v56 .dolt: %v", err)
+	}
+	if err := os.WriteFile(sentinel, []byte("live workspace data"), 0o600); err != nil {
+		t.Fatalf("write sentinel: %v", err)
+	}
+
+	autoMigrateOnVersionBump(beadsDir)
+
+	if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+		t.Fatalf("local-mode reconciliation left a pre-0.56 .dolt intact (%v); the recovery must still run for genuinely local backends", err)
+	}
+}
+
+// TestAutoMigrateOnVersionBump_LocalModeStillRequiresTheLocalDatabaseDir pins
+// the prerequisite #7038's fix retains: a local/embedded workspace whose
+// on-disk database directory is absent has nothing to migrate, and the
+// reconciliation must still say so and return before opening anything.
+func TestAutoMigrateOnVersionBump_LocalModeStillRequiresTheLocalDatabaseDir(t *testing.T) {
+	beadsDir, doltDir := newLocalModeBumpWorkspace(t, "1.0.0")
+
+	// Capture the debug stream the skip path logs to. SetVerbose (not BD_DEBUG,
+	// which is read once at package init) turns debug.Logf on for this test.
+	debug.SetVerbose(true)
+	t.Cleanup(func() { debug.SetVerbose(false) })
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stderr pipe: %v", err)
+	}
+	origStderr := os.Stderr
+	os.Stderr = writer
+	autoMigrateOnVersionBump(beadsDir)
+	os.Stderr = origStderr
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close stderr pipe: %v", err)
+	}
+	logs, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read captured stderr: %v", err)
+	}
+
+	if !strings.Contains(string(logs), "auto-migrate: skipping migration, database does not exist") {
+		t.Errorf("local-mode reconciliation did not take the no-database skip:\n%s", logs)
+	}
+	if _, err := os.Stat(doltDir); !os.IsNotExist(err) {
+		t.Errorf("local-mode reconciliation created %s from nothing", doltDir)
+	}
+}
+
+// TestAutoMigrateOnVersionBump_SharedServerModeSkipsTheLocalDirPrerequisite is
+// the shared-server shape of #7038's server-mode gate: config.yaml's
+// dolt.shared-server makes a workspace whose metadata.json still says
+// embedded a server-mode one (GH#2946), as the command's own open resolves
+// it, so the reconciliation must not stop at its absent local database
+// directory either: the database is the shared server's. The config.yaml key
+// is the case that needs doltserver.IsSharedServerMode; IsDoltServerMode
+// already honors its BEADS_DOLT_SHARED_SERVER environment twin.
+//
+// The configured database is never created, so the hook's opens fail on it
+// harmlessly after the decision under test; the debug log shows the hook got
+// as far as the server open.
+func TestAutoMigrateOnVersionBump_SharedServerModeSkipsTheLocalDirPrerequisite(t *testing.T) {
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available, skipping")
+	}
+	beadsDir, doltDir := newLocalModeBumpWorkspace(t, "1.0.0")
+	database := uniqueTestDBName(t)
+	cfg := &configfile.Config{
+		Backend:      configfile.BackendDolt,
+		DoltMode:     configfile.DoltModeEmbedded,
+		DoltDatabase: database,
+	}
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("save metadata: %v", err)
+	}
+	t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(testDoltServerPort))
+	initConfigForTest(t)
+	config.Set("dolt.shared-server", true)
+	if !doltserver.IsSharedServerMode() || cfg.IsDoltServerMode() {
+		t.Fatalf("precondition: want dolt.shared-server as the only server-mode signal (shared %v, metadata server mode %v)",
+			doltserver.IsSharedServerMode(), cfg.IsDoltServerMode())
+	}
+
+	debug.SetVerbose(true)
+	t.Cleanup(func() { debug.SetVerbose(false) })
+	logs := captureNoticeStderr(t, func() { autoMigrateOnVersionBump(beadsDir) })
+
+	if strings.Contains(logs, "auto-migrate: skipping migration, database does not exist") {
+		t.Errorf("shared-server reconciliation stopped at the absent local database directory; the database is the shared server's:\n%s", logs)
+	}
+	if !strings.Contains(logs, "auto-migrate: failed to open database") {
+		t.Errorf("shared-server reconciliation did not reach the server open:\n%s", logs)
+	}
+	if _, err := os.Stat(doltDir); !os.IsNotExist(err) {
+		t.Errorf("shared-server reconciliation created a local database directory at %s", doltDir)
+	}
 }
 
 // NOTE: TestAutoMigrateOnVersionBump_MigratesVersion, TestAutoMigrateOnVersionBump_AlreadyMigrated,

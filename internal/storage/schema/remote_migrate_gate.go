@@ -527,8 +527,14 @@ func (e *RemoteMigrateGateError) userBody() string {
 			"\n" +
 			"  Several machines on one remote? Only ONE migrates. Get every other clone\n" +
 			"  fully in sync on its current binary, then after the migrator pushes run\n" +
-			"  `bd dolt pull` on each before upgrading it — its upgrade then has nothing\n" +
-			"  to migrate and needs no re-clone.\n"
+			"  `bd dolt pull` on each before upgrading it — the pull brings the shared\n" +
+			"  (main-series) schema, which replicates, and the upgrade needs no re-clone.\n" +
+			"  The clone-local migration series (leases and the other per-clone tables)\n" +
+			"  never replicates, so `bd dolt pull` cannot bring it (#7038): after the\n" +
+			"  upgrade, run `bd migrate schema` once on each consumer clone for its own\n" +
+			"  database. The upgraded binary's one-shot version-bump maintenance may\n" +
+			"  already have applied it, but that is not guaranteed — run the command and\n" +
+			"  read what it applied.\n"
 	}
 }
 
