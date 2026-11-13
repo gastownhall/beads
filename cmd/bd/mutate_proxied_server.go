@@ -131,7 +131,9 @@ func proxiedAssign(ctx context.Context, id, assignee string, force bool, ifRevis
 
 func runAssignProxiedServer(ctx context.Context, args []string, force bool, ifRevision *int64) error {
 	id := args[0]
-	assignee := args[1]
+	// bd-wkcfuz: same hidden-empty clear spellings as the direct route's
+	// positional — this read is a separate input site from assign.go's.
+	assignee := normalizeAssigneeInput(args[1])
 	updated, err := proxiedAssign(ctx, id, assignee, force, ifRevision)
 	if err != nil {
 		if ifRevision != nil {

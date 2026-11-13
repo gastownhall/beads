@@ -92,4 +92,21 @@ func TestEmbeddedAssigneeHiddenEmptyClears(t *testing.T) {
 			}
 		}
 	})
+
+	// AC-2: `bd assign <id> -` (and whitespace-only) clears and prints the
+	// existing Unassigned confirmation.
+	t.Run("assign_hidden_empty_clears", func(t *testing.T) {
+		t.Parallel()
+		for i, value := range hiddenEmptyAssignees {
+			issue := bdCreate(t, bd, dir, fmt.Sprintf("Assign clear %d", i), "--assignee", "holder")
+
+			out := bdRunOK(t, bd, dir, "assign", issue.ID, value)
+			if !strings.Contains(out, "Unassigned") {
+				t.Errorf("value %q: assign output should confirm Unassigned, got:\n%s", value, out)
+			}
+			if got := bdShow(t, bd, dir, issue.ID).Assignee; got != "" {
+				t.Errorf("value %q: assign stored assignee %q, want cleared", value, got)
+			}
+		}
+	})
 }

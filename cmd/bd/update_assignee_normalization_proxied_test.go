@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -38,6 +39,28 @@ func TestProxiedServerAssigneeHiddenEmptyClears(t *testing.T) {
 			bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--actor", "taker", "--claim")
 			if got := bdProxiedShow(t, bd, p.dir, issue.ID).Assignee; got != "taker" {
 				t.Errorf("value %q: claim by another actor set assignee %q, want taker", value, got)
+			}
+		}
+	})
+
+	// AC-2: the proxied assign positional normalizes hidden-empty names and
+	// keeps the Unassigned confirmation.
+	t.Run("assign_hidden_empty_clears", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ana")
+		for i, value := range []string{"-", " "} {
+			issue := bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Proxied assign clear %d", i))
+			bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--actor", "holder", "--assignee", "holder")
+
+			out, err := bdProxiedRun(t, bd, p.dir, "assign", issue.ID, value)
+			if err != nil {
+				t.Fatalf("value %q: proxied assign failed: %v\n%s", value, err, out)
+			}
+			if !strings.Contains(string(out), "Unassigned") {
+				t.Errorf("value %q: proxied assign output should confirm Unassigned, got:\n%s", value, out)
+			}
+			if got := bdProxiedShow(t, bd, p.dir, issue.ID).Assignee; got != "" {
+				t.Errorf("value %q: proxied assign stored assignee %q, want cleared", value, got)
 			}
 		}
 	})

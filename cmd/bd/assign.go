@@ -18,6 +18,9 @@ var assignCmd = &cobra.Command{
 
 Shorthand for 'bd update <id> --assignee <name>'.
 
+A bare '-' or a whitespace-only name clears the assignee, same as the
+empty string.
+
 Refuses to overwrite another actor's live in_progress claim without --force
 (bd-98s5c); issues assigned to a claim.pools alias are exempt, matching
 --claim. For a holder-aware transfer prefer
@@ -25,7 +28,8 @@ Refuses to overwrite another actor's live in_progress claim without --force
 
 Examples:
   bd assign bd-123 alice
-  bd assign bd-123 ""      # unassign`,
+  bd assign bd-123 ""      # unassign
+  bd assign bd-123 -       # unassign (same as "")`,
 	Args:          cobra.ExactArgs(2),
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -54,7 +58,9 @@ Examples:
 		}
 
 		id := args[0]
-		assignee := args[1]
+		// bd-wkcfuz: a bare "-" or whitespace-only name means "unassign"
+		// here, exactly as the empty positional already does.
+		assignee := normalizeAssigneeInput(args[1])
 
 		ctx := rootCtx
 
