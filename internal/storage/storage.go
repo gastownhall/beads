@@ -420,8 +420,9 @@ type Storage interface {
 	// Issue CRUD
 
 	// CreateIssue and CreateIssues write back to the caller's structs the IDs
-	// they fill: a minted issue.ID for an empty one, a dependency's empty
-	// IssueID from its owning issue, and a fresh comment's ID. On success the
+	// they fill: a minted issue.ID for an empty one and a fresh comment's ID.
+	// CreateIssues also backfills each dependency's empty IssueID from its
+	// owning issue; CreateIssue does not persist Dependencies. On success the
 	// fields hold the created rows' IDs. When the create fails and its
 	// transaction rolled back, every one of those fields the caller left
 	// empty is empty again, so retrying the same struct mints afresh; an
