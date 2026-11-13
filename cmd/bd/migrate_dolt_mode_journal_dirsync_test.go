@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -50,4 +52,43 @@ func TestMigrateJournal_SaveAndLoadOnPlainDirectory(t *testing.T) {
 	residue, err := filepath.Glob(filepath.Join(beadsDir, ".dolt-mode-migration-*.tmp"))
 	require.NoError(t, err)
 	assert.Empty(t, residue, "temporary journal files must not survive a successful save")
+}
+
+// TestMigrateJournal_RemoveOnPlainDirectory writes the journal file directly,
+// so a failing save cannot mask the removal regression (GH#6882): removing
+// the journal must succeed even though Windows cannot flush a directory
+// handle, and removing an absent journal stays a no-op.
+func TestMigrateJournal_RemoveOnPlainDirectory(t *testing.T) {
+	beadsDir := t.TempDir()
+	j := plainDirMigrationJournal(t, beadsDir, migrateVerified, 1)
+	b, err := json.MarshalIndent(j, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(migrateJournalPath(beadsDir), b, 0o600))
+
+	require.NoError(t, removeMigrateJournal(beadsDir))
+	_, err = os.Stat(migrateJournalPath(beadsDir))
+	require.True(t, os.IsNotExist(err), "journal still present after removal: %v", err)
+
+	require.NoError(t, removeMigrateJournal(beadsDir), "removing an absent journal must stay a no-op")
+}
+
+// TestMigrateJournalSaveAndRemoveSucceedOnPlainDirectory pins that persisting
+// and removing the migration journal works on every platform. On Windows an
+// os.Open'd directory cannot be Sync'd (FlushFileBuffers: Access is denied),
+// so an unconditional directory Sync fails both operations (GH#6882).
+func TestMigrateJournalSaveAndRemoveSucceedOnPlainDirectory(t *testing.T) {
+	beadsDir := t.TempDir()
+	j := &migrateJournal{SourceMode: "embedded", TargetMode: "server"}
+	if err := saveMigrateJournal(beadsDir, j); err != nil {
+		t.Fatalf("saveMigrateJournal: %v", err)
+	}
+	if _, err := os.Stat(migrateJournalPath(beadsDir)); err != nil {
+		t.Fatalf("journal not written: %v", err)
+	}
+	if err := removeMigrateJournal(beadsDir); err != nil {
+		t.Fatalf("removeMigrateJournal: %v", err)
+	}
+	if _, err := os.Stat(migrateJournalPath(beadsDir)); !os.IsNotExist(err) {
+		t.Fatalf("journal still present after remove: %v", err)
+	}
 }

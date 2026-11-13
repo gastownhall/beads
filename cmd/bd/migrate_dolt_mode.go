@@ -196,7 +196,7 @@ func removeMigrateJournal(beadsDir string) error {
 	if err != nil {
 		return fmt.Errorf("opening migration directory: %w", err)
 	}
-	if err = d.Sync(); err != nil {
+	if err = syncMigrateJournalDir(runtime.GOOS, d); err != nil {
 		_ = d.Close()
 		return fmt.Errorf("syncing migration directory: %w", err)
 	}

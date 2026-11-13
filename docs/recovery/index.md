@@ -19,6 +19,16 @@ This section provides step-by-step recovery procedures for common Beads issues. 
 | History Bloat | Store grows unbounded; `dolt gc` reclaims nothing | [History Bloat](/recovery/history-squash) |
 | Removing beads | Uninstall bd or strip beads from a repo | [Uninstalling](/recovery/uninstalling) |
 
+## Platform Notes
+
+**Windows and the dolt-mode migration journal.** When `bd` migrates between
+dolt modes it persists a migration journal (`dolt-mode-migration.json`),
+syncing the file before renaming it into place. Windows cannot flush a
+directory handle, so `bd` skips that one directory flush there; the journal
+file itself is still synced before the rename. Two other Windows migration
+failures are tracked separately and are not resolved by this: sidecar sync
+(#6858) and held-lock cleanup (#6884).
+
 ## Quick Diagnostic
 
 Before diving into specific runbooks, try these quick checks:
