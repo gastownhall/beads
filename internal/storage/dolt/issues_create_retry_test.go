@@ -557,3 +557,135 @@ func TestCreateIssuesAllWispsReplayRemintsWispID(t *testing.T) {
 		})
 	}
 }
+
+// AC-5: caller-supplied issue, dependency-source and comment ids survive a
+// replay unchanged, in the caller's objects and in what each API persists.
+func TestCreateIssueAndCreateIssuesReplayKeepCallerSuppliedIDs(t *testing.T) {
+	const suppliedCommentA = "00000000-0000-4000-8000-00000000000a"
+	const suppliedCommentB = "00000000-0000-4000-8000-00000000000b"
+	commentAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+
+	t.Run("CreateIssue", func(t *testing.T) {
+		store, cleanup := setupConcurrentTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+
+		fault, _, restore := installReplayFault(t, store, 1)
+		defer restore()
+
+		issue := newRetryTestIssue("explicit single")
+		issue.ID = "test-explicit1"
+		issue.Comments = []*types.Comment{
+			{ID: suppliedCommentA, Author: "alice", Text: "supplied", CreatedAt: commentAt},
+			{Author: "bob", Text: "fresh", CreatedAt: commentAt},
+		}
+		if err := store.CreateIssue(ctx, issue, "caller"); err != nil {
+			t.Fatalf("CreateIssue: %v", err)
+		}
+		restore()
+		assertReplayed(t, fault, 1)
+
+		if issue.ID != "test-explicit1" {
+			t.Errorf("issue id = %q, want the supplied test-explicit1", issue.ID)
+		}
+		if issue.Comments[0].ID != suppliedCommentA {
+			t.Errorf("supplied comment id = %q, want %q", issue.Comments[0].ID, suppliedCommentA)
+		}
+		wantFresh := expectedDerivedCommentID("comments", issue.ID, issue.Comments[1])
+		if issue.Comments[1].ID != wantFresh {
+			t.Errorf("fresh comment id = %q, want %q", issue.Comments[1].ID, wantFresh)
+		}
+		requireTitle(t, ctx, store, issue.ID, "explicit single")
+		requireCommentIDs(t, ctx, store, issue.ID, suppliedCommentA, wantFresh)
+	})
+
+	t.Run("CreateIssues", func(t *testing.T) {
+		store, cleanup := setupConcurrentTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+
+		target := newRetryTestIssue("dependency target")
+		if err := store.CreateIssue(ctx, target, "seed"); err != nil {
+			t.Fatalf("create target: %v", err)
+		}
+		// Edges key on (source, target), so the second edge needs its own target.
+		target2 := newRetryTestIssue("second dependency target")
+		if err := store.CreateIssue(ctx, target2, "seed"); err != nil {
+			t.Fatalf("create target2: %v", err)
+		}
+
+		fault, _, restore := installReplayFault(t, store, 1)
+		defer restore()
+
+		explicit := newRetryTestIssue("explicit batch")
+		explicit.ID = "test-explicit2"
+		explicit.Dependencies = []*types.Dependency{{DependsOnID: target.ID, Type: types.DepBlocks}}
+		explicit.Comments = []*types.Comment{{ID: suppliedCommentB, Author: "alice", Text: "supplied", CreatedAt: commentAt}}
+		auto := newRetryTestIssue("auto batch")
+		// An explicit source on an auto-ID issue's edge names another issue.
+		auto.Dependencies = []*types.Dependency{{IssueID: "test-explicit2", DependsOnID: target2.ID, Type: types.DepBlocks}}
+
+		if err := store.CreateIssues(ctx, []*types.Issue{explicit, auto}, "caller"); err != nil {
+			t.Fatalf("CreateIssues: %v", err)
+		}
+		restore()
+		assertReplayed(t, fault, 1)
+
+		if explicit.ID != "test-explicit2" {
+			t.Errorf("explicit id = %q, want test-explicit2", explicit.ID)
+		}
+		if got := explicit.Dependencies[0].IssueID; got != "test-explicit2" {
+			t.Errorf("explicit issue's backfilled edge source = %q, want test-explicit2", got)
+		}
+		if got := auto.Dependencies[0].IssueID; got != "test-explicit2" {
+			t.Errorf("supplied edge source on the auto-ID issue = %q, want test-explicit2", got)
+		}
+		if explicit.Comments[0].ID != suppliedCommentB {
+			t.Errorf("supplied comment id = %q, want %q", explicit.Comments[0].ID, suppliedCommentB)
+		}
+		requireTitle(t, ctx, store, explicit.ID, "explicit batch")
+		requireTitle(t, ctx, store, auto.ID, "auto batch")
+		requireCommentIDs(t, ctx, store, explicit.ID, suppliedCommentB)
+
+		deps, err := store.GetDependencyRecords(ctx, "test-explicit2")
+		if err != nil {
+			t.Fatalf("GetDependencyRecords: %v", err)
+		}
+		gotTargets := map[string]bool{}
+		for _, d := range deps {
+			gotTargets[d.DependsOnID] = true
+		}
+		if len(deps) != 2 || !gotTargets[target.ID] || !gotTargets[target2.ID] {
+			t.Errorf("stored edges from test-explicit2 = %+v, want edges to %s and %s", deps, target.ID, target2.ID)
+		}
+		autoDeps, err := store.GetDependencyRecords(ctx, auto.ID)
+		if err != nil {
+			t.Fatalf("GetDependencyRecords(%s): %v", auto.ID, err)
+		}
+		if len(autoDeps) != 0 {
+			t.Errorf("auto-ID issue %s gained edges %+v; its edge names test-explicit2 as source", auto.ID, autoDeps)
+		}
+	})
+}
+
+func requireCommentIDs(t *testing.T, ctx context.Context, store *DoltStore, issueID string, want ...string) {
+	t.Helper()
+	comments, err := store.GetIssueComments(ctx, issueID)
+	if err != nil {
+		t.Fatalf("GetIssueComments(%s): %v", issueID, err)
+	}
+	got := map[string]bool{}
+	for _, c := range comments {
+		got[c.ID] = true
+	}
+	if len(comments) != len(want) {
+		t.Errorf("stored comments on %s = %d, want %d", issueID, len(comments), len(want))
+	}
+	for _, id := range want {
+		if !got[id] {
+			t.Errorf("stored comments on %s lack id %s (have %v)", issueID, id, got)
+		}
+	}
+}
