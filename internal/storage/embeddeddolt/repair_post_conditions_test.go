@@ -196,7 +196,15 @@ func TestEmbeddedRepairSchemaPostConditionsRepairsIgnoredTablesInPlace_5269(t *t
 	var logCountBefore int
 	withPinnedConn(t, dataDir, func(ctx context.Context, conn *sql.Conn) {
 		for _, q := range []string{
+			// A marker row on the ignored plane: it must survive the repair.
+			// wisp_events.issue_id carries a foreign key into wisps, so the
+			// parent wisp is seeded first (title is its only defaultless
+			// column).
+			"INSERT INTO wisps (id, title) VALUES ('repair-marker-wisp', 'repair marker')",
+			"INSERT INTO wisp_events (id, issue_id, event_type, actor) VALUES ('repair-wisp-marker-1', 'repair-marker-wisp', 'noted', 'marker')",
 			"ALTER TABLE wisp_events ALTER COLUMN id SET DEFAULT (UUID())",
+			"ALTER TABLE wisp_comments ALTER COLUMN id SET DEFAULT (UUID())",
+			"ALTER TABLE wisp_dependencies ALTER COLUMN id SET DEFAULT (UUID())",
 			"ALTER TABLE events ALTER COLUMN id SET DEFAULT (UUID())",
 		} {
 			if _, err := conn.ExecContext(ctx, q); err != nil {
@@ -218,17 +226,24 @@ func TestEmbeddedRepairSchemaPostConditionsRepairsIgnoredTablesInPlace_5269(t *t
 	if err != nil {
 		t.Fatalf("RepairSchemaPostConditions: %v", err)
 	}
-	if strings.Join(repairs, ",") != "events.id,wisp_events.id" {
-		t.Fatalf("repairs = %v, want [events.id wisp_events.id]", repairs)
+	if strings.Join(repairs, ",") != "events.id,wisp_comments.id,wisp_dependencies.id,wisp_events.id" {
+		t.Fatalf("repairs = %v, want [events.id wisp_comments.id wisp_dependencies.id wisp_events.id]", repairs)
 	}
 
 	withPinnedConn(t, dataDir, func(ctx context.Context, conn *sql.Conn) {
-		// Defaults dropped in place; history untouched — no commit at all, not
-		// even a repair-shaped one.
-		for _, tc := range [][2]string{{"events", "id"}, {"wisp_events", "id"}} {
+		// Defaults dropped in place; rows untouched; history untouched — no
+		// commit at all, not even a repair-shaped one.
+		for _, tc := range [][2]string{{"events", "id"}, {"wisp_events", "id"}, {"wisp_comments", "id"}, {"wisp_dependencies", "id"}} {
 			if def := tableColumnDefault(t, ctx, conn, tc[0], tc[1]); def.Valid {
 				t.Fatalf("%s.%s still carries DEFAULT %q after the repair", tc[0], tc[1], def.String)
 			}
+		}
+		var wispMarkers int
+		if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM wisp_events WHERE id = 'repair-wisp-marker-1'").Scan(&wispMarkers); err != nil {
+			t.Fatalf("read wisp_events markers: %v", err)
+		}
+		if wispMarkers != 1 {
+			t.Fatalf("wisp_events marker rows = %d after the repair, want 1", wispMarkers)
 		}
 		var logCountAfter int
 		if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_log").Scan(&logCountAfter); err != nil {
