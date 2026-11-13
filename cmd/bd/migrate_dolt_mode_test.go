@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -935,6 +936,26 @@ func TestMigrateJournal_Remove(t *testing.T) {
 	info, err := os.Stat(beadsDir)
 	require.NoError(t, err)
 	require.True(t, info.IsDir())
+}
+
+// TestSyncMigrateJournalDir_SkipsOnlyWindows pins the platform decision for the
+// journal's directory flush: only Windows skips it, every other platform still
+// calls Sync and propagates its error. A closed handle makes Sync fail, so a
+// nil result proves the call was skipped and os.ErrClosed proves it ran.
+func TestSyncMigrateJournalDir_SkipsOnlyWindows(t *testing.T) {
+	closed, err := os.Open(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, closed.Close())
+
+	require.NoError(t, syncMigrateJournalDir("windows", closed), "windows must skip the directory flush")
+	for _, goos := range []string{"linux", "darwin", "freebsd"} {
+		require.ErrorIs(t, syncMigrateJournalDir(goos, closed), os.ErrClosed, "%s must still sync the directory", goos)
+	}
+
+	dir, err := os.Open(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = dir.Close() })
+	require.NoError(t, syncMigrateJournalDir(runtime.GOOS, dir))
 }
 
 func TestMigrateJournal_UnknownPhaseFailsClosed(t *testing.T) {
