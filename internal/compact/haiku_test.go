@@ -2,6 +2,7 @@ package compact
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -9,10 +10,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -496,5 +499,99 @@ func TestBytesWriterAppends(t *testing.T) {
 	}
 	if got := string(w.buf); got != "hello world" {
 		t.Fatalf("unexpected buffer content: %q", got)
+	}
+}
+
+// stubMessagesServer serves a fixed Messages API reply whose content is the
+// given blocks, and counts the requests it receives.
+func stubMessagesServer(t *testing.T, content []map[string]any) (*httptest.Server, *atomic.Int64) {
+	t.Helper()
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/messages" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected request", http.StatusNotFound)
+			return
+		}
+		hits.Add(1)
+		body := map[string]any{
+			"id":            "msg_test",
+			"type":          "message",
+			"role":          "assistant",
+			"model":         "claude-haiku-4-5",
+			"content":       content,
+			"stop_reason":   "end_turn",
+			"stop_sequence": nil,
+			"usage":         map[string]any{"input_tokens": 1, "output_tokens": 1},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(body); err != nil {
+			t.Errorf("encode stub reply: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
+// newStubHaikuClient returns a haikuClient whose requests go to srv only.
+func newStubHaikuClient(t *testing.T, srv *httptest.Server) *haikuClient {
+	t.Helper()
+	isolateEndpointPins(t)
+	h, err := newHaikuClient("test-key")
+	if err != nil {
+		t.Fatalf("newHaikuClient: %v", err)
+	}
+	h.client = anthropic.NewClient(
+		option.WithoutEnvironmentDefaults(),
+		option.WithAPIKey("test-key"),
+		option.WithBaseURL(srv.URL),
+		option.WithMaxRetries(0),
+	)
+	h.initialBackoff = time.Millisecond
+	return h
+}
+
+func thinkingBlock() map[string]any {
+	return map[string]any{"type": "thinking", "thinking": "pondering", "signature": "sig"}
+}
+
+func redactedThinkingBlock() map[string]any {
+	return map[string]any{"type": "redacted_thinking", "data": "opaque"}
+}
+
+func textBlock(text string) map[string]any {
+	return map[string]any{"type": "text", "text": text}
+}
+
+// TestSummarizeTier1_ReadsFirstTextBlock pins GH#7515: a reply may open with
+// non-text blocks (thinking), and the summary is the first text block.
+func TestSummarizeTier1_ReadsFirstTextBlock(t *testing.T) {
+	tests := []struct {
+		name    string
+		content []map[string]any
+		want    string
+	}{
+		{"thinking then text", []map[string]any{thinkingBlock(), textBlock("S")}, "S"},
+		{"redacted thinking then text", []map[string]any{redactedThinkingBlock(), textBlock("S")}, "S"},
+		{"first of two text blocks", []map[string]any{thinkingBlock(), textBlock("A"), textBlock("B")}, "A"},
+		{"text only", []map[string]any{textBlock("S")}, "S"},
+		{"empty first text block is still the answer", []map[string]any{thinkingBlock(), textBlock(""), textBlock("B")}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, hits := stubMessagesServer(t, tt.content)
+			h := newStubHaikuClient(t, srv)
+
+			got, err := h.SummarizeTier1(context.Background(), &types.Issue{ID: "bd-1", Title: "t", Description: "d"})
+			if err != nil {
+				t.Fatalf("SummarizeTier1: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("SummarizeTier1 = %q, want %q", got, tt.want)
+			}
+			if n := hits.Load(); n != 1 {
+				t.Fatalf("requests = %d, want 1", n)
+			}
+		})
 	}
 }
