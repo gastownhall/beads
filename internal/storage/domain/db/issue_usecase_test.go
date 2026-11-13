@@ -28,6 +28,7 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("CreateAttachesNormalizedComments", s.useCaseCreateAttachesNormalizedComments)
 	s.Run("CounterModeJumpsPastHeldIDs", s.useCaseMintCounterJumpsPastHeldIDs)
 	s.Run("CounterModeFreeNextValueStaysSequential", s.useCaseMintCounterFreeNextValueStaysSequential)
+	s.Run("CounterModeCrossesAHeldRunLongerThanTheSkipBound", s.useCaseMintCounterCrossesLongHeldRun)
 }
 
 func (s *testSuite) issueUseCase() domain.IssueUseCase {
@@ -998,4 +999,48 @@ func (s *testSuite) useCaseMintCounterFreeNextValueStaysSequential() {
 	s.holdExplicit(uc, "seqF-9", "held far ahead", false)
 	s.Equal("seqF-2", s.mintCounterIssue(uc, "two"))
 	s.Equal(2, s.counterLastID("seqF"))
+}
+
+// useCaseMintCounterCrossesLongHeldRun pins bd-wnp679 AC-2: an initialized
+// counter behind more consecutive held ids than the mint's skip bound (an
+// import ahead of the counter, split across both planes) still mints past the
+// highest holder in one request, and leaves every holder untouched. A
+// value-by-value walk would exhaust the bound, and its progress would roll
+// back with the failed transaction, so every retry would fail the same way.
+func (s *testSuite) useCaseMintCounterCrossesLongHeldRun() {
+	const prefix = "lagRun"
+	s.resetMintConfig(prefix, "counter")
+	uc := s.issueUseCase()
+	s.Require().Equal(prefix+"-1", s.mintCounterIssue(uc, "minted one"))
+
+	last := 2 + 1100
+	var issueVals, wispVals []string
+	var issueArgs, wispArgs []any
+	for n := 2; n <= last; n++ {
+		id := fmt.Sprintf("%s-%d", prefix, n)
+		if n%2 == 0 {
+			issueVals = append(issueVals, "(?, 'held', '', '', '', '')")
+			issueArgs = append(issueArgs, id)
+		} else {
+			wispVals = append(wispVals, "(?, 'held')")
+			wispArgs = append(wispArgs, id)
+		}
+	}
+	_, err := s.Runner().ExecContext(s.Ctx(),
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes) VALUES "+strings.Join(issueVals, ", "), issueArgs...)
+	s.Require().NoError(err)
+	_, err = s.Runner().ExecContext(s.Ctx(),
+		"INSERT INTO wisps (id, title) VALUES "+strings.Join(wispVals, ", "), wispArgs...)
+	s.Require().NoError(err)
+	s.Require().Equal(1, s.counterLastID(prefix), "bulk holders must leave the counter lagging at 1")
+
+	minted := s.mintCounterIssue(uc, "minted past the run")
+	s.Equal(fmt.Sprintf("%s-%d", prefix, last+1), minted)
+
+	var changed int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(), `
+		SELECT (SELECT COUNT(*) FROM issues WHERE id LIKE 'lagRun-%' AND id <> ? AND id <> 'lagRun-1' AND title <> 'held')
+		     + (SELECT COUNT(*) FROM wisps WHERE id LIKE 'lagRun-%' AND title <> 'held')`, minted).Scan(&changed))
+	s.Zero(changed, "no held row may be rewritten")
+	s.Equal(map[string]string{"issues": "minted past the run"}, s.planeTitles(minted))
 }

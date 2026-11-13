@@ -159,6 +159,52 @@ func TestCounterModeMintWalksPastClaimedValues(t *testing.T) {
 	}
 }
 
+// TestCounterModeMintAdvancesPastAHeldRunLongerThanTheBound pins bd-wnp679
+// AC-2: a held run longer than the skip bound (an import ahead of the counter)
+// is crossed by one advance, not walked value by value into the bound.
+func TestCounterModeMintAdvancesPastAHeldRunLongerThanTheBound(t *testing.T) {
+	repo := &counterHeldIssueRepo{next: 1, live: heldRun(2, maxRetiredCounterSkips+500)}
+	u := &issueUseCaseImpl{issueRepo: repo}
+	id, err := u.nextUnretiredCounterID(t.Context(), "bd", nil)
+	if err != nil {
+		t.Fatalf("nextUnretiredCounterID() = %v", err)
+	}
+	if want := fmt.Sprintf("bd-%d", maxRetiredCounterSkips+501); id != want {
+		t.Fatalf("nextUnretiredCounterID() = %q, want %s past the held run", id, want)
+	}
+	if repo.advances != 1 || len(repo.probed) != 2 {
+		t.Fatalf("advanced %d times over %d probes, want 1 advance over 2 probes", repo.advances, len(repo.probed))
+	}
+}
+
+// TestCounterModeMintAdvancesOnlyOnce pins that the held-id scan runs at most
+// once per mint: a value still held after the advance is walked past.
+func TestCounterModeMintAdvancesOnlyOnce(t *testing.T) {
+	repo := &counterHeldIssueRepo{next: 4, live: map[string]bool{"bd-5": true, "bd-6": true, "bd-8": true}, advanceTo: 5}
+	u := &issueUseCaseImpl{issueRepo: repo}
+	id, err := u.nextUnretiredCounterID(t.Context(), "bd", nil)
+	if err != nil {
+		t.Fatalf("nextUnretiredCounterID() = %v", err)
+	}
+	if id != "bd-7" || repo.advances != 1 {
+		t.Fatalf("nextUnretiredCounterID() = %q after %d advances, want bd-7 after 1", id, repo.advances)
+	}
+}
+
+// TestCounterModeMintHeldAfterClaimedRunAdvances pins that claimed skips do
+// not spend the one advance: the first HELD value still triggers it.
+func TestCounterModeMintHeldAfterClaimedRunAdvances(t *testing.T) {
+	repo := &counterHeldIssueRepo{next: 4, live: map[string]bool{"bd-6": true, "bd-9": true}}
+	u := &issueUseCaseImpl{issueRepo: repo}
+	id, err := u.nextUnretiredCounterID(t.Context(), "bd", map[string]bool{"bd-5": true})
+	if err != nil {
+		t.Fatalf("nextUnretiredCounterID() = %v", err)
+	}
+	if id != "bd-10" || repo.advances != 1 {
+		t.Fatalf("nextUnretiredCounterID() = %q after %d advances, want bd-10 after 1", id, repo.advances)
+	}
+}
+
 // TestCounterModeMintPropagatesProbeAndAdvanceErrors pins that a failed
 // occupancy probe or advance fails the mint rather than handing out an id.
 func TestCounterModeMintPropagatesProbeAndAdvanceErrors(t *testing.T) {
