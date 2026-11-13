@@ -182,6 +182,47 @@ func TestEmbeddedDeletePreviewAndGuards(t *testing.T) {
 			t.Fatalf("forced dry-run removed dependent: got %v, want %q", got["id"], child.ID)
 		}
 	})
+
+	// The preview names the neighbors whose text the deletion would rewrite,
+	// through the same citation rule the rewrite applies. A dotted
+	// continuation is not a citation: N1's "follow-up in X.7" names a longer
+	// id, so it must be excluded, while N2's sentence-final "see X." is a
+	// citation and must be listed. Only the affected-text section is
+	// asserted; the dependency listing legitimately names both neighbors.
+	t.Run("delete_preview_citation_boundary_dots", func(t *testing.T) {
+		x := bdCreate(t, bd, dir, "Preview dotted citations", "--type", "task")
+		n1 := bdCreate(t, bd, dir, "Dotted continuation", "--type", "task",
+			"--description", "follow-up in "+x.ID+".7")
+		n2 := bdCreate(t, bd, dir, "Sentence-final citation", "--type", "task",
+			"--description", "see "+x.ID+".")
+		// X depends on both, and nothing depends on X, so the unforced
+		// preview renders rather than refusing.
+		bdDepAdd(t, bd, dir, x.ID, n1.ID)
+		bdDepAdd(t, bd, dir, x.ID, n2.ID)
+
+		out := bdDelete(t, bd, dir, x.ID)
+
+		const section = "Connected issues where text references will be updated:"
+		idx := strings.Index(out, section)
+		if idx < 0 {
+			t.Fatalf("preview had no affected-text section:\n%s", out)
+		}
+		affected := out[idx+len(section):]
+		if !strings.Contains(affected, n2.ID) {
+			t.Errorf("affected-text section omitted %s, whose description cites %s at a sentence boundary:\n%s",
+				n2.ID, x.ID, affected)
+		}
+		if strings.Contains(affected, n1.ID) {
+			t.Errorf("affected-text section listed %s, whose description names %s.7 — a longer id, not a citation:\n%s",
+				n1.ID, x.ID, affected)
+		}
+		// The preview deletes nothing.
+		for _, id := range []string{x.ID, n1.ID, n2.ID} {
+			if got := bdShow(t, bd, dir, id); got.ID != id {
+				t.Errorf("preview removed %s", id)
+			}
+		}
+	})
 }
 
 func TestEmbeddedDeleteForceAndBatch(t *testing.T) {

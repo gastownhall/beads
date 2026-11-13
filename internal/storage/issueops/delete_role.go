@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"regexp"
 
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi"
@@ -384,13 +383,6 @@ func RewriteDeletedReferencesInTx(ctx context.Context, tx DBTX, deletedIDs []str
 		}
 	}
 	return len(touched), nil
-}
-
-// DeletedReferencePattern is the OLD citation rule, dot-blind: it sees the
-// id inside a descendant's dotted id (`be-1` in `be-1.2`). It stays only for
-// the CLI preview, which moves to types.CitesID with the rest of the rule.
-func DeletedReferencePattern(id string) *regexp.Regexp {
-	return regexp.MustCompile(`(^|[^A-Za-z0-9_-])(` + regexp.QuoteMeta(id) + `)($|[^A-Za-z0-9_-])`)
 }
 
 // sortedUniqueIDs returns ids in ascending order without duplicates, the

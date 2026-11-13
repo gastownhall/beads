@@ -11,7 +11,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
-	storeissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -268,7 +267,6 @@ func renderSingleDeletePreview(
 	}
 	// The role's own citation rule, not a second copy: a preview naming a
 	// different set of neighbors than the deletion rewrites is worse than none.
-	re := storeissueops.DeletedReferencePattern(issueID)
 
 	fmt.Printf("\n%s\n", ui.RenderFail("⚠️  DELETE PREVIEW"))
 	fmt.Printf("\nIssue to delete:\n")
@@ -287,10 +285,10 @@ func renderSingleDeletePreview(
 		fmt.Printf("\nConnected issues where text references will be updated:\n")
 		issuesWithRefs := 0
 		for id, connIssue := range connectedIssues {
-			hasRefs := re.MatchString(connIssue.Description) ||
-				(connIssue.Notes != "" && re.MatchString(connIssue.Notes)) ||
-				(connIssue.Design != "" && re.MatchString(connIssue.Design)) ||
-				(connIssue.AcceptanceCriteria != "" && re.MatchString(connIssue.AcceptanceCriteria))
+			hasRefs := types.CitesID(connIssue.Description, issueID) ||
+				(connIssue.Notes != "" && types.CitesID(connIssue.Notes, issueID)) ||
+				(connIssue.Design != "" && types.CitesID(connIssue.Design, issueID)) ||
+				(connIssue.AcceptanceCriteria != "" && types.CitesID(connIssue.AcceptanceCriteria, issueID))
 			if hasRefs {
 				fmt.Printf("  %s: %s\n", id, connIssue.Title)
 				issuesWithRefs++

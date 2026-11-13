@@ -1281,6 +1281,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd delete` no longer rewrites a deleted issue's id inside its
+  descendants' ids** (#7377). The text-reference rewrite treated `.` as a
+  word boundary, and a hierarchical child's id is its parent's id plus
+  `.N`, so deleting `fx-1` turned a neighbor's "step fx-1.2 failed" into
+  "step [deleted:fx-1].2 failed" while `fx-1.2` was still live, and could
+  nest markers ("[deleted:[deleted:fx-1].2]") when ancestor and descendant
+  were deleted together or a cascade rewrote ancestor-first. A `.` that an
+  id character follows now continues the id on either side, so a citation
+  only marks the id the text actually named; a sentence-ending "see fx-1."
+  still rewrites. The same fix makes the rewrite complete adjacent
+  citations that share their separator byte ("fx-1 fx-1" now rewrites
+  both, previously only the first), and `bd delete`'s unforced preview
+  lists the same neighbors the deletion rewrites. The rule lives in one
+  place (`internal/types`) shared by both delete routes and the preview.
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
