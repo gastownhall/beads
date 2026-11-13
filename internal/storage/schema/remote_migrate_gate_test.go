@@ -368,3 +368,29 @@ func TestRemoteMigrateGateAdoptFastForward(t *testing.T) {
 		t.Errorf("UserMessage should explain the fast-forward is loss-free:\n%s", msg)
 	}
 }
+
+// TestSharedGateReadsPromiseKeyedToLeasesTable pins #7302: reads only survive
+// a refused migration once the leases table (v55) exists, so the
+// "reads keep working" promise must not be made below it.
+func TestSharedGateReadsPromiseKeyedToLeasesTable(t *testing.T) {
+	for _, tt := range []struct {
+		current     int
+		body, agent string
+	}{
+		{53, "Read commands may fail too until then: schema v53 predates the leases", "Reads may fail too until the migration runs: schema v53"},
+		{56, "Read commands keep working against the current schema", "Reads keep working on the current schema meanwhile."},
+	} {
+		e := &RemoteMigrateGateError{CurrentVersion: tt.current, LatestVersion: 66, Pending: 66 - tt.current,
+			Decision: gateDecisionSharedNoRemote, Shared: true}
+		msg, dir := e.UserMessage(), e.AgentDirective()
+		if !strings.Contains(msg, tt.body) {
+			t.Errorf("v%d UserMessage missing %q:\n%s", tt.current, tt.body, msg)
+		}
+		if !strings.Contains(dir, tt.agent) {
+			t.Errorf("v%d AgentDirective missing %q:\n%s", tt.current, tt.agent, dir)
+		}
+		if promised := strings.Contains(strings.ToLower(msg+dir), "keep working"); promised != (tt.current >= FirstLeasesTableVersion) {
+			t.Errorf("v%d: reads-keep-working promise present = %v:\n%s\n%s", tt.current, promised, msg, dir)
+		}
+	}
+}
