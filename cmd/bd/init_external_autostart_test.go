@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -309,6 +310,155 @@ func TestInitServerNamedPortDeadEndpointStartsNoServer(t *testing.T) {
 	}
 }
 
+// TestInitServerDialsCentralServerConfig pins GH#3895 for bd init: with no
+// --server-* flag and no BEADS_DOLT_SERVER_* variable, a server-mode init
+// dials the endpoint ~/.config/beads/server.json names, not 127.0.0.1, and,
+// as for --external, starts no local dolt server for it.
+func TestInitServerDialsCentralServerConfig(t *testing.T) {
+	f := newExternalInitFixture(t)
+	port := freeLoopbackPort(t)
+	central := filepath.Join(f.home, "server.json")
+	body := fmt.Sprintf(`{"dolt_server_host":"db.invalid","dolt_server_port":%d,"dolt_server_user":"central_user","dolt_server_tls":true}`, port)
+	if err := os.WriteFile(central, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.env = append(f.env, "BEADS_CENTRAL_CONFIG="+central)
+
+	res := f.run("", "init", "--quiet", "--server", "--prefix", "x", "--skip-hooks", "--skip-agents")
+
+	if !res.failed {
+		t.Errorf("bd init --server succeeded with no server at db.invalid:\n%s", res.output)
+	}
+	requireNoLaunch(t, res)
+	if want := net.JoinHostPort("db.invalid", strconv.Itoa(port)); !strings.Contains(res.output, want) {
+		t.Errorf("bd init output does not name the central server config's endpoint %q:\n%s", want, res.output)
+	}
+	local := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	if strings.Contains(res.output, local) {
+		t.Errorf("bd init dialed %s, not the central server config's host:\n%s", local, res.output)
+	}
+	requireNothingListening(t, "tcp", local)
+	requireDoltRootEmpty(t, f.repoDir)
+}
+
+// TestInitServerRecordsNoCentralServerConfigEndpoint pins that a server-mode
+// init that reaches the server ~/.config/beads/server.json names records
+// dolt_mode server in metadata.json but none of server.json's endpoint
+// (GH#3895): a recorded copy would outrank server.json for every later
+// command, so editing server.json would no longer move the workspace.
+func TestInitServerRecordsNoCentralServerConfigEndpoint(t *testing.T) {
+	skipIfNoDolt(t)
+	f := newExternalInitFixture(t)
+	database := uniqueTestDBName(t)
+	t.Cleanup(func() { dropTestDatabase(database, testDoltServerPort) })
+	central := filepath.Join(f.home, "server.json")
+	body := fmt.Sprintf(`{"dolt_server_host":"127.0.0.1","dolt_server_port":%d,"dolt_server_user":"root"}`, testDoltServerPort)
+	if err := os.WriteFile(central, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.env = append(f.env, "BEADS_CENTRAL_CONFIG="+central)
+
+	res := f.run("", "init", "--quiet", "--server", "--database", database, "--prefix", "x", "--skip-hooks", "--skip-agents")
+
+	if res.failed {
+		t.Fatalf("bd init --server failed against the server the central server config names:\n%s", res.output)
+	}
+	requireNoLaunch(t, res)
+	data, err := os.ReadFile(filepath.Join(f.repoDir, ".beads", "metadata.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("metadata.json: %v\n%s", err, data)
+	}
+	if meta["dolt_mode"] != configfile.DoltModeServer {
+		t.Errorf("metadata.json dolt_mode = %v, want %s:\n%s", meta["dolt_mode"], configfile.DoltModeServer, data)
+	}
+	for _, key := range []string{"dolt_server_host", "dolt_server_port", "dolt_server_user", "dolt_server_tls"} {
+		if v, ok := meta[key]; ok {
+			t.Errorf("metadata.json records %s = %v from the central server config:\n%s", key, v, data)
+		}
+	}
+}
+
+// TestInitStoreTakesCentralServerConfig pins the rest of what init's store
+// takes from the central server config (GH#3895): its user and TLS, which
+// no dial error names, and its precedence below the flags and the
+// environment.
+func TestInitStoreTakesCentralServerConfig(t *testing.T) {
+	setup := func(t *testing.T) string {
+		t.Helper()
+		for _, name := range []string{"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT",
+			"BEADS_DOLT_SERVER_USER", "BEADS_DOLT_SERVER_TLS", "BEADS_DOLT_SHARED_SERVER", "BEADS_DOLT_SERVER_MODE"} {
+			t.Setenv(name, "")
+		}
+		central := filepath.Join(t.TempDir(), "server.json")
+		body := `{"dolt_server_host":"db.invalid","dolt_server_port":15124,"dolt_server_user":"central_user","dolt_server_tls":true}`
+		if err := os.WriteFile(central, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_CENTRAL_CONFIG", central)
+		return filepath.Join(t.TempDir(), ".beads")
+	}
+
+	t.Run("no flag or environment", func(t *testing.T) {
+		beadsDir := setup(t)
+		host := initStoreServerHost("")
+		port, source, _, _ := initStoreServerPort(beadsDir, host)
+		if host != "db.invalid" || port != 15124 || source != doltserver.PortSourceCentralConfig {
+			t.Errorf("init's store dials %s:%d (%s), want db.invalid:15124 (%s)", host, port, source, doltserver.PortSourceCentralConfig)
+		}
+		if got := initStoreServerUser(""); got != "central_user" {
+			t.Errorf("initStoreServerUser() = %q, want central_user", got)
+		}
+		if !initDoltServerTLS() {
+			t.Error("initDoltServerTLS() = false, want the central server config's true")
+		}
+		if !initCentralConfigNamesServer("", host, source) {
+			t.Error("init would auto-start a local server for the central server config's endpoint")
+		}
+	})
+
+	t.Run("central port at a host bd runs its server at", func(t *testing.T) {
+		beadsDir := setup(t)
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+		port, source, _, _ := initStoreServerPort(beadsDir, "127.0.0.1")
+		if port != 15124 || source != doltserver.PortSourceCentralConfig {
+			t.Errorf("initStoreServerPort = %d (%s), want 15124 (%s)", port, source, doltserver.PortSourceCentralConfig)
+		}
+		if !initCentralConfigNamesServer("", "127.0.0.1", source) {
+			t.Error("init would auto-start a local server on the central server config's port")
+		}
+	})
+
+	t.Run("flags and environment win", func(t *testing.T) {
+		beadsDir := setup(t)
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "15200")
+		t.Setenv("BEADS_DOLT_SERVER_USER", "env_user")
+		t.Setenv("BEADS_DOLT_SERVER_TLS", "0")
+		if got := initStoreServerHost("flag.invalid"); got != "flag.invalid" {
+			t.Errorf("initStoreServerHost(--server-host) = %q, want flag.invalid", got)
+		}
+		port, source, _, _ := initStoreServerPort(beadsDir, "127.0.0.1")
+		if port != 15200 || source != doltserver.PortSourceEnv {
+			t.Errorf("initStoreServerPort = %d (%s), want 15200 (%s)", port, source, doltserver.PortSourceEnv)
+		}
+		if got := initStoreServerUser(""); got != "env_user" {
+			t.Errorf("initStoreServerUser() = %q, want env_user", got)
+		}
+		if got := initStoreServerUser("flag_user"); got != "flag_user" {
+			t.Errorf("initStoreServerUser(--server-user) = %q, want flag_user", got)
+		}
+		if initDoltServerTLS() {
+			t.Error("initDoltServerTLS() = true, want BEADS_DOLT_SERVER_TLS=0 to disable it")
+		}
+		if initCentralConfigNamesServer("", "127.0.0.1", source) {
+			t.Error("init treats an environment-named local endpoint as the central server config's")
+		}
+	})
+}
+
 // namedPortWorkspace writes a server-mode metadata.json into the fixture's
 // project, naming metadataPort as dolt_server_port when it is nonzero.
 func namedPortWorkspace(t *testing.T, f *externalInitFixture, metadataPort int) string {
@@ -469,8 +619,8 @@ func TestNamedPortServerUnreachableAdvice(t *testing.T) {
 // than 127.0.0.1:0 when it is alone, or a port-file port left over beside it.
 // A config.yaml dolt.port outranks it for the dial, as in the store, and the
 // advice still names it when both name the same port. A remote host gets the
-// remote-host advice. A host set only in the central server config is not
-// dialed: they dial what bd list dials.
+// remote-host advice. A host set only in the central server config is
+// dialed, as bd list dials it (GH#3895).
 func TestNamedPortServerDiagnosticsAdvice(t *testing.T) {
 	diagnostics := [][]string{
 		{"dolt", "test"},
@@ -552,20 +702,23 @@ func runIPv6HostDiagnostic(t *testing.T, host string, args []string) {
 // runCentralConfigHostDiagnostic runs bd list and one diagnostic against a
 // workspace whose metadata.json names a dead port and whose host only the
 // central server config (~/.config/beads/server.json) names. bd list's store
-// open never applies that file, so it dials 127.0.0.1, and the diagnostic must
-// dial the same endpoint: --perf times bd list, and the others check the
+// open takes that host (GH#3895), so it dials db.invalid, and the diagnostic
+// must dial the same endpoint: --perf times bd list, and the others check the
 // server it uses.
 func runCentralConfigHostDiagnostic(t *testing.T, args []string) {
 	t.Helper()
 	f := newExternalInitFixture(t)
 	port := freeLoopbackPort(t)
-	ep := tcpEndpoint(port)
 	namedPortWorkspace(t, f, port)
 	central := filepath.Join(f.home, "server.json")
 	if err := os.WriteFile(central, []byte(`{"dolt_server_host":"db.invalid"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	f.env = append(f.env, "BEADS_CENTRAL_CONFIG="+central)
+	want := net.JoinHostPort("db.invalid", strconv.Itoa(port))
+	// The loopback endpoint, not "127.0.0.1" alone: a resolver on 127.0.0.1
+	// can appear in the failed lookup of db.invalid.
+	banned := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 
 	for _, cmdArgs := range [][]string{{"list"}, args} {
 		res := f.run("", cmdArgs...)
@@ -574,12 +727,74 @@ func runCentralConfigHostDiagnostic(t *testing.T, args []string) {
 		if !res.failed {
 			t.Errorf("bd %s succeeded with no server:\n%s", strings.Join(cmdArgs, " "), res.output)
 		}
-		if !strings.Contains(res.output, ep.addr) {
-			t.Errorf("bd %s output does not contain %q:\n%s", strings.Join(cmdArgs, " "), ep.addr, res.output)
+		if !strings.Contains(res.output, want) {
+			t.Errorf("bd %s output does not contain %q:\n%s", strings.Join(cmdArgs, " "), want, res.output)
 		}
-		if strings.Contains(res.output, "db.invalid") {
-			t.Errorf("bd %s output names the central server config's host:\n%s", strings.Join(cmdArgs, " "), res.output)
+		if strings.Contains(res.output, banned) {
+			t.Errorf("bd %s dialed %s, not the central server config's host:\n%s", strings.Join(cmdArgs, " "), banned, res.output)
 		}
+	}
+}
+
+// TestRuntimeCommandDialsCentralServerConfig is GH#3895 for an ordinary
+// command: a server-mode workspace whose metadata.json names no host, port or
+// user takes all three from the central server config (server.json, here the
+// file BEADS_CENTRAL_CONFIG names), so bd list dials db.invalid:N, not
+// 127.0.0.1, and, the endpoint being one the whole machine shares, starts no
+// dolt server of its own.
+func TestRuntimeCommandDialsCentralServerConfig(t *testing.T) {
+	f := newExternalInitFixture(t)
+	port := freeLoopbackPort(t)
+	namedPortWorkspace(t, f, 0)
+	central := filepath.Join(f.home, "server.json")
+	body := fmt.Sprintf(`{"dolt_server_host":"db.invalid","dolt_server_port":%d,"dolt_server_user":"central_user"}`, port)
+	if err := os.WriteFile(central, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.env = append(f.env, "BEADS_CENTRAL_CONFIG="+central)
+
+	res := f.run("", "list")
+
+	requireNoLaunch(t, res)
+	if !res.failed {
+		t.Errorf("bd list succeeded with no server:\n%s", res.output)
+	}
+	if want := net.JoinHostPort("db.invalid", strconv.Itoa(port)); !strings.Contains(res.output, want) {
+		t.Errorf("bd list output does not name the central server config's endpoint %q:\n%s", want, res.output)
+	}
+	if banned := net.JoinHostPort("127.0.0.1", strconv.Itoa(port)); strings.Contains(res.output, banned) {
+		t.Errorf("bd list dialed %s, not the central server config's host:\n%s", banned, res.output)
+	}
+}
+
+// TestRuntimeCommandPrefersConfigYAMLHostOverCentralServerConfig pins the
+// other half of GH#3895's precedence: server.json is the lowest source, so a
+// config.yaml dolt.host outranks its host while its port still applies.
+func TestRuntimeCommandPrefersConfigYAMLHostOverCentralServerConfig(t *testing.T) {
+	f := newExternalInitFixture(t)
+	port := freeLoopbackPort(t)
+	beadsDir := namedPortWorkspace(t, f, 0)
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt.host: yaml.invalid\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	central := filepath.Join(f.home, "server.json")
+	body := fmt.Sprintf(`{"dolt_server_host":"db.invalid","dolt_server_port":%d}`, port)
+	if err := os.WriteFile(central, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.env = append(f.env, "BEADS_CENTRAL_CONFIG="+central)
+
+	res := f.run("", "list")
+
+	requireNoLaunch(t, res)
+	if !res.failed {
+		t.Errorf("bd list succeeded with no server:\n%s", res.output)
+	}
+	if want := net.JoinHostPort("yaml.invalid", strconv.Itoa(port)); !strings.Contains(res.output, want) {
+		t.Errorf("bd list output does not name config.yaml's host with the central port %q:\n%s", want, res.output)
+	}
+	if strings.Contains(res.output, "db.invalid") {
+		t.Errorf("bd list dialed the central server config's host over config.yaml dolt.host:\n%s", res.output)
 	}
 }
 

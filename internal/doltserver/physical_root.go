@@ -134,14 +134,19 @@ func ResolveProxiedServerRootPath(beadsDir string) (string, error) {
 // applyCentralModeDefaults mirrors the central-config merge the LIBRARY open
 // path performs (internal/storage/dolt/open.go applyCentralConfigDefaults):
 // load ~/.config/beads/server.json (or BEADS_CENTRAL_CONFIG) and apply its
-// server fields — DoltMode, host, port, user, TLS, never data dirs — as
-// defaults for fields the project config leaves empty.
+// DoltMode when the project config names none. It also fills the empty
+// connection fields, which the open path leaves to the getters; only the
+// mode reaches DatabasePath, so the root is the same.
 //
 // This is deliberately NOT part of ResolvePhysicalRoots: the CLI's
-// hand-built store selection in cmd/bd/main.go never consults the central
-// config, so CLI gate planning must not either (it would gate a server root
-// the CLI would not open). It exists for LibraryOpenRootPath, which mirrors
-// the library path where the merge DOES apply.
+// hand-built store selection in cmd/bd/main.go takes the connection fields
+// (host, port, user, TLS) from the central config through the configfile
+// getters and doltserver's port chain (GH#3895), but never its dolt_mode, so
+// CLI gate planning must not merge it either (a central dolt_mode would gate
+// a server root the CLI would not open). The server branch below still
+// follows a central host through GetDoltServerHost, as the store does. This
+// function exists for LibraryOpenRootPath, which mirrors the library path
+// where the dolt_mode merge DOES apply.
 //
 // A missing central config is a silent no-op, and a BROKEN central config is
 // also skipped (the open path warns and proceeds without it; this pure

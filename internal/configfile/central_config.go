@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 )
 
 // CentralConfigFileName is the filename for the central/global server config.
@@ -28,6 +29,61 @@ func DefaultCentralConfigPath() string {
 		return ""
 	}
 	return filepath.Join(home, ".config", "beads", CentralConfigFileName)
+}
+
+// CentralConfigPath is the central server config this process reads:
+// BEADS_CENTRAL_CONFIG when set, else DefaultCentralConfigPath. Empty when
+// neither names a file.
+func CentralConfigPath() string {
+	if p := os.Getenv("BEADS_CENTRAL_CONFIG"); p != "" {
+		return p
+	}
+	return DefaultCentralConfigPath()
+}
+
+// centralConfigWarned records the central config paths whose load failure
+// CentralConfig has already reported, so a broken file is named once per
+// process, not once per getter call.
+var centralConfigWarned sync.Map
+
+// CentralConfig is the central server config (CentralConfigPath), read now
+// so an edit or a t.Setenv takes effect, or nil when there is none. A file
+// that cannot be read or parsed is reported once per process and treated as
+// absent: a broken central config never blocks an open.
+//
+// It is the lowest-precedence source of the server host, port, user and TLS
+// (GH#3895): the connection getters, doltserver's port chain and bd init read
+// those four fields from it. It never selects the storage mode, socket,
+// database or data directory; the workspace's own settings do.
+func CentralConfig() *Config {
+	path := CentralConfigPath()
+	if path == "" {
+		return nil
+	}
+	cfg, err := LoadCentralConfig(path)
+	if err != nil {
+		if _, warned := centralConfigWarned.LoadOrStore(path, true); !warned {
+			fmt.Fprintf(os.Stderr, "Warning: failed to load central config %s: %v\n", path, err)
+		}
+		return nil
+	}
+	return cfg
+}
+
+// CentralServerHost is the central config's dolt_server_host, or "".
+func CentralServerHost() string {
+	if c := CentralConfig(); c != nil {
+		return c.DoltServerHost
+	}
+	return ""
+}
+
+// CentralServerPort is the central config's dolt_server_port, or 0.
+func CentralServerPort() int {
+	if c := CentralConfig(); c != nil && c.DoltServerPort > 0 {
+		return c.DoltServerPort
+	}
+	return 0
 }
 
 // LoadCentralConfig reads the central server config from the given path.
