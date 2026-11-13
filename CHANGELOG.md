@@ -1457,6 +1457,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Building that release target (`goreleaser --id bd-android-arm64`) now needs
   a Linux x86_64 host; see RELEASING.md.
 
+- **`bd init` no longer sweeps changes you had already staged into its
+  bootstrap commit (#5654).** The commit took the whole index, so a file
+  staged before `bd init` landed in "bd init: initialize beads issue
+  tracking". It now commits only the artifacts init staged, on both the
+  embedded and the proxied route, and anything else stays staged. During a
+  merge (including `git merge --no-commit`), cherry-pick, revert, rebase or
+  `git am`, or while any path is unmerged, init now refuses to commit: it
+  warns, leaves its artifacts staged and prints the `git commit -- <paths>`
+  to run once that operation is finished.
+
 - With `export.git-add` on, the pre-commit export now lands in commits made
   with `git commit -- <paths>`, `-a`, `-i` or `-p`. It used to stage into
   `.git/index`, whose lock the commit holds, so it was skipped with
