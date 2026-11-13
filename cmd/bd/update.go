@@ -1094,6 +1094,17 @@ func init() {
 	updateCmd.Flags().String("spec-id", "", "Link to specification document")
 	updateCmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")
 	_ = updateCmd.Flags().MarkHidden("acceptance-criteria") // Only fails if flag missing (caught in tests)
+	// GH#8149: a clear and a content input for the same field contradict each
+	// other. One call per pair so the content aliases stay compatible with
+	// each other (their precedence lives in getDescriptionFlag) and different
+	// clears compose. Registered after --acceptance-criteria exists.
+	for _, content := range []string{"description", "body", "message", "body-file", "description-file", "stdin"} {
+		updateCmd.MarkFlagsMutuallyExclusive("clear-description", content)
+	}
+	updateCmd.MarkFlagsMutuallyExclusive("clear-design", "design")
+	updateCmd.MarkFlagsMutuallyExclusive("clear-design", "design-file")
+	updateCmd.MarkFlagsMutuallyExclusive("clear-acceptance", "acceptance")
+	updateCmd.MarkFlagsMutuallyExclusive("clear-acceptance", "acceptance-criteria")
 	updateCmd.Flags().IntP("estimate", "e", 0, "Time estimate in minutes (e.g., 60 for 1 hour)")
 	// -l is the shorthand for --add-label, matching `bd create -l`.
 	//
