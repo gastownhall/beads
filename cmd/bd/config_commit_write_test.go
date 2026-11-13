@@ -496,6 +496,126 @@ func TestKVCommandFailedMutationDoesNotAttemptACommit(t *testing.T) {
 	}
 }
 
+// commitKVWrite defers wherever something else owns the commit — the kv twin
+// of TestCommitConfigWrite*'s guards (GH#7523).
+func TestCommitKVWriteIsNoOpWhereSomethingElseOwnsTheCommit(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		setMode func()
+	}{
+		{"embedded mode", func() { serverMode = false; proxiedServerMode = false }},
+		{"proxied server mode", func() { proxiedServerMode = true }},
+		{"batch", func() { serverMode = true; doltAutoCommit = string(doltAutoCommitBatch) }},
+		{"off", func() { serverMode = true; doltAutoCommit = string(doltAutoCommitOff) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			saveStorageMode(t)
+			tc.setMode()
+
+			fake := &fakeConfigCommitStore{}
+			if err := commitKVWrite(context.Background(), fake, "kv set"); err != nil {
+				t.Fatalf("commitKVWrite: %v, want no-op", err)
+			}
+			if fake.userKVCalls != 0 || fake.configOnlyCalls != 0 {
+				t.Fatalf("commit calls = kv:%d config:%d, want none", fake.userKVCalls, fake.configOnlyCalls)
+			}
+		})
+	}
+
+	t.Run("nil store", func(t *testing.T) {
+		saveStorageMode(t)
+		serverMode = true
+
+		if err := commitKVWrite(context.Background(), nil, "kv set"); err != nil {
+			t.Fatalf("commitKVWrite with nil store: %v, want no-op", err)
+		}
+	})
+
+	t.Run("closed store", func(t *testing.T) {
+		saveStorageMode(t)
+		serverMode = true
+
+		fake := &closedConfigCommitStore{}
+		if err := commitKVWrite(context.Background(), fake, "kv set"); err != nil {
+			t.Fatalf("commitKVWrite with a closed store: %v, want no-op", err)
+		}
+		if fake.userKVCalls != 0 {
+			t.Fatalf("CommitConfigUserKVOnly calls = %d, want none on a closed store", fake.userKVCalls)
+		}
+	})
+
+	t.Run("nothing to commit is swallowed", func(t *testing.T) {
+		saveStorageMode(t)
+		serverMode = true
+
+		fake := &fakeConfigCommitStore{err: errors.New("nothing to commit")}
+		if err := commitKVWrite(context.Background(), fake, "kv clear"); err != nil {
+			t.Fatalf("commitKVWrite: %v, want nothing-to-commit swallowed", err)
+		}
+		if fake.userKVCalls != 1 {
+			t.Fatalf("CommitConfigUserKVOnly calls = %d, want the one attempt", fake.userKVCalls)
+		}
+	})
+}
+
+// closedConfigCommitStore is a store past Close: the shared guards must leave
+// it alone instead of committing on a teardown racing the command.
+type closedConfigCommitStore struct {
+	fakeConfigCommitStore
+}
+
+func (f *closedConfigCommitStore) IsClosed() bool { return true }
+
+// Under batch/off the kv verbs still write — the row lands and the epilogue
+// flag is armed — but no version commit is attempted: `bd dolt commit` owns
+// it, exactly as for every other server-mode write (GH#7523). The armed flag
+// is the regression assertion: unwired code also commits nothing, but only
+// because it arms nothing, which is the bug this change fixes.
+func TestKVCommandsDeferTheirCommitUnderBatchAndOff(t *testing.T) {
+	for _, mode := range []doltAutoCommitMode{doltAutoCommitBatch, doltAutoCommitOff} {
+		t.Run(string(mode), func(t *testing.T) {
+			t.Setenv("BEADS_DIR", t.TempDir())
+			saveAndRestoreGlobals(t)
+			saveStorageMode(t)
+			serverMode = true
+			doltAutoCommit = string(mode)
+			fake := &refusingKVStore{
+				config:    map[string]string{},
+				commitErr: errors.New("a deferred commit must not be attempted"),
+			}
+			store = fake
+			setStoreActive(true)
+			savedJSON := jsonOutput
+			t.Cleanup(func() { jsonOutput = savedJSON })
+			jsonOutput = false
+
+			commandDidWrite.Store(false)
+			if err := kvSetCmd.RunE(kvSetCmd, []string{"gh7523", "deferred"}); err != nil {
+				t.Fatalf("bd kv set under %s: %v", mode, err)
+			}
+			if fake.config["kv.gh7523"] != "deferred" {
+				t.Fatalf("stored config = %v, want the set to have landed", fake.config)
+			}
+			if fake.commits != 0 {
+				t.Fatalf("CommitConfigUserKVOnly calls = %d under %s, want none", fake.commits, mode)
+			}
+			if !commandDidWrite.Load() {
+				t.Errorf("bd kv set under %s did not arm the write flag; the deferral must come from the policy, not from missing wiring", mode)
+			}
+
+			if err := kvClearCmd.RunE(kvClearCmd, []string{"gh7523"}); err != nil {
+				t.Fatalf("bd kv clear under %s: %v", mode, err)
+			}
+			if _, ok := fake.config["kv.gh7523"]; ok {
+				t.Fatalf("stored config = %v, want the clear to have landed", fake.config)
+			}
+			if fake.commits != 0 {
+				t.Fatalf("CommitConfigUserKVOnly calls = %d under %s after clear, want none", fake.commits, mode)
+			}
+		})
+	}
+}
+
 // The proxied route's role commits each config write inside its own unit of
 // work, so committing again here would be a second commit for the same write.
 func TestCommitConfigWriteProxiedServerModeIsNoOp(t *testing.T) {
