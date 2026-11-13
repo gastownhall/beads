@@ -139,4 +139,45 @@ func TestProxiedServerAssigneeHiddenEmptyClears(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("AC5_non_clear_values_verbatim_and_guard_literal", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "hpe")
+		for _, name := range []string{"a-b", "--", " - "} {
+			issue := bdProxiedCreate(t, bd, p.dir, "Hold name via proxy")
+			bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--assignee", name)
+			if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Assignee != name {
+				t.Errorf("update --assignee %q: assignee=%q, want verbatim", name, got.Assignee)
+			}
+		}
+
+		issue := bdProxiedCreate(t, bd, p.dir, "Assign name via proxy")
+		if out, err := bdProxiedRun(t, bd, p.dir, "assign", issue.ID, " - "); err != nil {
+			t.Fatalf("assign %q failed: %v\n%s", " - ", err, out)
+		}
+		if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Assignee != " - " {
+			t.Errorf("assign %q: assignee=%q, want verbatim", " - ", got.Assignee)
+		}
+
+		issue = bdProxiedCreate(t, bd, p.dir, "Batch name via proxy")
+		bdProxiedBatchOK(t, bd, p.dir, "update "+issue.ID+` assignee=" - "`+"\n")
+		if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Assignee != " - " {
+			t.Errorf("batch assignee=%q: assignee=%q, want verbatim", " - ", got.Assignee)
+		}
+
+		issue = bdProxiedCreate(t, bd, p.dir, "Legacy dash via proxy", "--assignee", "-")
+		if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Assignee != "-" {
+			t.Fatalf("create --assignee -: assignee=%q, want the raw dash", got.Assignee)
+		}
+		bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--if-assignee", "-", "--assignee", "")
+		if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Assignee != "" {
+			t.Fatalf("--if-assignee - on a legacy dash row: assignee=%q, want cleared", got.Assignee)
+		}
+		if out, code := bdProxiedUpdateFailCode(t, bd, p.dir, issue.ID, "--if-assignee", "-", "--assignee", "bob"); code != ExitGuardMismatch {
+			t.Errorf("--if-assignee - on an unassigned row: exit=%d, want %d\n%s", code, ExitGuardMismatch, out)
+		}
+		if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Assignee != "" {
+			t.Errorf("mismatched --if-assignee - wrote: assignee=%q, want unassigned", got.Assignee)
+		}
+	})
 }
