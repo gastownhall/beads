@@ -528,8 +528,8 @@ func TestImporterUOWReplayReMintsUnsetIDs(t *testing.T) {
 			CreatedAt:    when, UpdatedAt: when,
 		}
 	}
-	// rowB carries every id the caller supplied, riding the same replayed
-	// batch as the ID-less row.
+	// rowB carries every id the caller supplied; the subtests pin that the
+	// replay reset never clears those.
 	rowB := func(suffix string) *types.Issue {
 		when := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
 		id := "imr-kept-" + suffix
@@ -539,6 +539,23 @@ func TestImporterUOWReplayReMintsUnsetIDs(t *testing.T) {
 			Dependencies: []*types.Dependency{{IssueID: id, DependsOnID: anchor.ID, Type: types.DepBlocks}},
 			Comments:     []*types.Comment{{ID: id + "-c1", Author: "importer-test", Text: "kept comment", CreatedAt: when}},
 			CreatedAt:    when, UpdatedAt: when,
+		}
+	}
+	assertRowBKept := func(t *testing.T, row *types.Issue, suffix string) {
+		t.Helper()
+		id, commentID := "imr-kept-"+suffix, "imr-kept-"+suffix+"-c1"
+		if row.ID != id || row.Dependencies[0].IssueID != id || row.Comments[0].ID != commentID {
+			t.Errorf("caller-supplied ids on the struct = (%q, %q, %q), want (%q, %q, %q)",
+				row.ID, row.Dependencies[0].IssueID, row.Comments[0].ID, id, id, commentID)
+		}
+		if got := queryInt(t, "SELECT COUNT(*) FROM issues WHERE id = ?", id); got != 1 {
+			t.Errorf("rows stored under the caller's id %s = %d, want 1", id, got)
+		}
+		if got := queryInt(t, "SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ?", id, anchor.ID); got != 1 {
+			t.Errorf("edges stored under the caller's id %s = %d, want 1", id, got)
+		}
+		if got := queryInt(t, "SELECT COUNT(*) FROM comments WHERE id = ? AND issue_id = ?", commentID, id); got != 1 {
+			t.Errorf("comments stored under the caller's id %s = %d, want 1", commentID, got)
 		}
 	}
 
@@ -614,6 +631,7 @@ func TestImporterUOWReplayReMintsUnsetIDs(t *testing.T) {
 		if got, want := counterFor(t, sub), suffixFor(t, sub, x); got != want {
 			t.Errorf("issue_counter.last_id for imr-%s = %d, want %d — the replay upserted under the aborted mint and never advanced the counter", sub, got, want)
 		}
+		assertRowBKept(t, kept, sub)
 		next := &types.Issue{Title: "first create after the replay", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2, IDPrefix: sub}
 		if err := kit.CreateIssue(ctx, next, "replay-seed"); err != nil {
 			t.Fatalf("the next auto-minted create: %v (the counter re-drew the aborted attempt's value)", err)
@@ -665,6 +683,7 @@ func TestImporterUOWReplayReMintsUnsetIDs(t *testing.T) {
 		if got := queryInt(t, "SELECT COUNT(*) FROM comments WHERE issue_id = ?", x); got != 0 {
 			t.Errorf("comments under the aborted %s = %d, want 0", x, got)
 		}
+		assertRowBKept(t, kept, "cg")
 	})
 
 	t.Run("competitor_allow_stale", func(t *testing.T) {
@@ -689,6 +708,7 @@ func TestImporterUOWReplayReMintsUnsetIDs(t *testing.T) {
 		if got := queryInt(t, "SELECT COUNT(*) FROM issues WHERE id = ?", idless.ID); got != 1 {
 			t.Errorf("rows stored under the re-minted %s = %d, want 1", idless.ID, got)
 		}
+		assertRowBKept(t, kept, "as")
 	})
 
 	t.Run("hash_mode_competitor", func(t *testing.T) {
@@ -726,5 +746,6 @@ func TestImporterUOWReplayReMintsUnsetIDs(t *testing.T) {
 		if got := queryInt(t, "SELECT COUNT(*) FROM issues WHERE id = ?", idless.ID); got != 1 {
 			t.Errorf("rows stored under the re-minted %s = %d, want 1", idless.ID, got)
 		}
+		assertRowBKept(t, kept, "hm")
 	})
 }
