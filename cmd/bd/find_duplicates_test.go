@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -340,6 +343,50 @@ func TestAnalyzeWithAI_SkipsLeadingThinkingBlock(t *testing.T) {
 				}
 			} else if got[0].Method != "mechanical" || got[0].Similarity != 0.3 {
 				t.Errorf("pair = {Method:%s Similarity:%v}, want unchanged candidate {mechanical, 0.3}", got[0].Method, got[0].Similarity)
+			}
+			if n := hits.Load(); n != 1 {
+				t.Errorf("stub received %d requests, want 1", n)
+			}
+		})
+	}
+}
+
+// GH#7515: a reply with no text block at all keeps the mechanical candidates
+// and warns with the content-block count, after exactly one request.
+func TestAnalyzeWithAI_NoTextBlockKeepsCandidates(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		blocks  int
+	}{
+		{"thinking only", `[{"type":"thinking","thinking":"pondering","signature":"sig"}]`, 1},
+		{"no blocks", `[]`, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, hits := aiMessagesStub(t, tc.content)
+
+			old := os.Stderr
+			r, w, err := os.Pipe()
+			if err != nil {
+				t.Fatalf("pipe: %v", err)
+			}
+			os.Stderr = w
+
+			got := analyzeWithAI(context.Background(), stubAIClient(srv.URL), "claude-test", aiTestCandidates())
+
+			w.Close()
+			os.Stderr = old
+			var buf strings.Builder
+			_, _ = io.Copy(&buf, r)
+			warned := buf.String()
+
+			want := fmt.Sprintf("no text block in %d content blocks", tc.blocks)
+			if !strings.Contains(warned, want) {
+				t.Errorf("stderr = %q, want it to contain %q", warned, want)
+			}
+			if len(got) != 1 || got[0].Method != "mechanical" || got[0].Similarity != 0.3 {
+				t.Errorf("pairs = %+v, want the unchanged mechanical candidate", got)
 			}
 			if n := hits.Load(); n != 1 {
 				t.Errorf("stub received %d requests, want 1", n)

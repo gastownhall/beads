@@ -1281,6 +1281,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd find-duplicates --method ai` and `bd admin compact --auto` now read
+  the first text block of a model reply instead of requiring it to be the
+  first block** (#7515). A reply that opens with a thinking block was
+  discarded: duplicate analysis fell back to mechanical scores with
+  "unexpected AI response format", and compaction failed with "not a text
+  block (type=thinking)". A reply with no text block at all still fails,
+  now naming the content-block count.
+
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc

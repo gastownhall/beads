@@ -564,6 +564,8 @@ func TestSummarizeTier1_ReadsFirstTextBlock(t *testing.T) {
 		{"thinking then two text blocks", `[{"type":"thinking","thinking":"pondering","signature":"sig"},{"type":"text","text":"A"},{"type":"text","text":"B"}]`, "A", ""},
 		{"text first", `[{"type":"text","text":"the summary"}]`, "the summary", ""},
 		{"empty first text block", `[{"type":"thinking","thinking":"pondering","signature":"sig"},{"type":"text","text":""},{"type":"text","text":"B"}]`, "", ""},
+		{"thinking only", `[{"type":"thinking","thinking":"pondering","signature":"sig"}]`, "", "no text block in 1 content blocks"},
+		{"no blocks", `[]`, "", "no text block in 0 content blocks"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
