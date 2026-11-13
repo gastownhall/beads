@@ -37,6 +37,8 @@ func (s *testSuite) TestChildCounterSQLRepository() {
 		s.Run("AMintedChildAdvancesOnceOnly", s.advanceForChildAfterMint)
 		s.Run("GrandchildRaisesItsImmediateParentOnly", s.advanceForChildGrandchild)
 		s.Run("LeadingZeroSuffixParses", s.advanceForChildLeadingZero)
+		s.Run("WispParentRoutesToWispCounters", s.advanceForChildWispParent)
+		s.Run("WispChildUnderADurableParentUsesChildCounters", s.advanceForChildWispChild)
 		s.Run("EmptyChildIDIsRejected", s.advanceForChildEmptyID)
 	})
 }
@@ -329,6 +331,25 @@ func (s *testSuite) advanceForChildLeadingZero() {
 	s.seedIssueRow("bd-cc-lz")
 	s.Require().NoError(s.childCounterRepo().AdvanceForChild(s.Ctx(), "bd-cc-lz.08"))
 	s.requireCounterTable("child_counters", "bd-cc-lz", 8)
+}
+
+// AC-4: the counter follows the PARENT's plane, so a caller-named child of a
+// wisp parent advances wisp_child_counters and leaves child_counters alone.
+func (s *testSuite) advanceForChildWispParent() {
+	s.seedWispRow("bd-cc-wadv")
+	s.Require().NoError(s.childCounterRepo().AdvanceForChild(s.Ctx(), "bd-cc-wadv.3"))
+	s.requireCounterTable("wisp_child_counters", "bd-cc-wadv", 3)
+	s.requireNoCounterRow("child_counters", "bd-cc-wadv")
+}
+
+// Routing reads the parent, not the child: a wisp child under a durable
+// parent is a durable parent's counter row.
+func (s *testSuite) advanceForChildWispChild() {
+	s.seedIssueRow("bd-cc-pw")
+	s.seedWispRow("bd-cc-pw.2")
+	s.Require().NoError(s.childCounterRepo().AdvanceForChild(s.Ctx(), "bd-cc-pw.2"))
+	s.requireCounterTable("child_counters", "bd-cc-pw", 2)
+	s.requireNoCounterRow("wisp_child_counters", "bd-cc-pw")
 }
 
 func (s *testSuite) advanceForChildEmptyID() {
