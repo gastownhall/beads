@@ -1440,6 +1440,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   symlinked `config.yaml` is written through to its target, the file keeps
   its own permissions, and a read-only `config.yaml` is still refused. The
   user-global `config.yaml` gets the same treatment.
+- `bd update --assignee -`, `--assignee ' '`, `bd assign <id> -` and
+  `bd batch update … assignee=-` now clear the assignee instead of storing
+  the literal, folding both hidden-empty spellings into the unchanged
+  `--assignee ''` clear sentinel.
 - `bd config get` for a config.yaml, git-config or user-global key no longer
   opens the database just because one exists, so it answers from those files
   while the Dolt server is down instead of failing the open (GH#5108). In

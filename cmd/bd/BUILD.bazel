@@ -563,6 +563,7 @@ go_test(
         "arrival_seq_json_e2e_test.go",
         "assign_fence_embedded_test.go",
         "assign_fence_proxied_test.go",
+        "assignee_normalization_embedded_test.go",
         "auto_import_upgrade_embedded_test.go",
         "auto_import_upgrade_unit_test.go",
         "autocommit_embedded_test.go",
