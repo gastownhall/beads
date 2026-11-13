@@ -39,7 +39,12 @@ func (s *DoltStore) createIssue(ctx context.Context, issue *types.Issue, actor s
 	}
 
 	var result issueops.CreateIssueResult
+	// Snapshot before the retry loop; reset first in every attempt so a
+	// rolled-back attempt's mint never replays as an explicit id (see
+	// snapshotCreateIDsForReplay and withRetryTx's closure contract).
+	resetMintedIDs := snapshotCreateIDsForReplay([]*types.Issue{issue})
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		resetMintedIDs()
 		// SkipPrefixValidation matches legacy behavior: single-issue path does
 		// not validate prefixes for explicit IDs.
 		bc, err := issueops.NewBatchContext(ctx, tx, storage.BatchCreateOptions{
@@ -66,6 +71,58 @@ func (s *DoltStore) createIssue(ctx context.Context, issue *types.Issue, actor s
 
 func createIssueCommitTables(ctx context.Context, issue *types.Issue, result issueops.CreateIssueResult) []string {
 	return sortedDirtyTables(issueops.CreateIssueDirtyTables(ctx, issue, result))
+}
+
+// snapshotCreateIDsForReplay snapshots the ids a create mints into CALLER-
+// OWNED objects and returns a reset closure for them: an auto-minted
+// issue.ID, the dependency IssueIDs the create backfills to that mint, and
+// the content-derived ids of fresh comments (whose derivation folds in the
+// owning issue's id). Call it once BEFORE the retrying transaction and call
+// the returned closure first in EVERY attempt, the first included (there it
+// is a no-op).
+//
+// withRetryTx's closure contract says captured state must be re-derived on
+// every attempt. These ids violate that contract by construction: the create
+// writes them into the caller's objects, and an aborted attempt's values
+// survive the rollback. Unreset, a replay treats the aborted mint as an
+// explicit id — no re-mint — and the default upsert row write overwrites a
+// concurrent winner that took the id in between, stranding the attempt's
+// backfilled dependency edges and comments on it too (GH#7289).
+//
+// Only INITIALLY EMPTY fields are captured: a caller-supplied id (explicit
+// issue id, dependency IssueID, incoming comment id) is input, not mint
+// output, and must survive every replay unchanged. A rolled-back attempt
+// never clears the last mint after the fact either — an indeterminate commit
+// may have landed under it — and this helper never runs outside an attempt.
+// Nil issues, dependencies and comments are skipped; duplicate pointers are
+// harmless (resetting twice is idempotent).
+func snapshotCreateIDsForReplay(issues []*types.Issue) func() {
+	var minted []*string
+	for _, issue := range issues {
+		if issue == nil {
+			continue
+		}
+		if issue.ID == "" {
+			minted = append(minted, &issue.ID)
+		}
+		for _, dep := range issue.Dependencies {
+			if dep == nil || dep.IssueID != "" {
+				continue
+			}
+			minted = append(minted, &dep.IssueID)
+		}
+		for _, comment := range issue.Comments {
+			if comment == nil || comment.ID != "" {
+				continue
+			}
+			minted = append(minted, &comment.ID)
+		}
+	}
+	return func() {
+		for _, id := range minted {
+			*id = ""
+		}
+	}
 }
 
 func createIssuesCommitTables(ctx context.Context, issues []*types.Issue, result issueops.CreateIssuesResult) []string {
