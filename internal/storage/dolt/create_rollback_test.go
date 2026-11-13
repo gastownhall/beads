@@ -326,3 +326,67 @@ func TestCreateIssueRollsBackFullyOnContextCancelMidTransaction(t *testing.T) {
 		t.Fatalf("event rows for %s persisted despite context-cancel rollback: found %d rows", issueID, eventCount)
 	}
 }
+
+// overLengthLabel is one rune past types.MaxFieldLen, so the label persist
+// step rejects it with types.ErrFieldTooLong after the create minted its ID.
+var overLengthLabel = strings.Repeat("x", types.MaxFieldLen+1)
+
+func countIssueRows(t *testing.T, ctx context.Context, store *DoltStore, table string) int {
+	t.Helper()
+	var n int
+	//nolint:gosec // G201: table is a test-chosen constant
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table).Scan(&n); err != nil {
+		t.Fatalf("count %s rows: %v", table, err)
+	}
+	return n
+}
+
+// TestCreateIssueFailureRestoresAutoMintedID reproduces bd-wm5ahf (GH#8457):
+// a singular CreateIssue with an empty ID that fails permanently after the ID
+// was minted (ErrFieldTooLong on an over-length label) must hand the caller's
+// struct back with the empty ID it passed in, while an explicit ID survives
+// the same failure, and no row is written.
+func TestCreateIssueFailureRestoresAutoMintedID(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	before := countIssueRows(t, ctx, store, "issues")
+
+	auto := &types.Issue{
+		Title:     "auto-minted create that fails permanently",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Labels:    []string{overLengthLabel},
+	}
+	err := store.CreateIssue(ctx, auto, "tester")
+	if !errors.Is(err, types.ErrFieldTooLong) {
+		t.Fatalf("auto-minted CreateIssue error = %v, want types.ErrFieldTooLong", err)
+	}
+	if auto.ID != "" {
+		t.Fatalf("auto.ID = %q after a failed auto-minted create, want \"\" (minted ID leaked onto the caller's struct)", auto.ID)
+	}
+
+	explicit := &types.Issue{
+		ID:        "test-explicit",
+		Title:     "explicit-ID create that fails permanently",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Labels:    []string{overLengthLabel},
+	}
+	err = store.CreateIssue(ctx, explicit, "tester")
+	if !errors.Is(err, types.ErrFieldTooLong) {
+		t.Fatalf("explicit-ID CreateIssue error = %v, want types.ErrFieldTooLong", err)
+	}
+	if explicit.ID != "test-explicit" {
+		t.Fatalf("explicit.ID = %q after a failed create, want the caller-supplied %q", explicit.ID, "test-explicit")
+	}
+
+	if after := countIssueRows(t, ctx, store, "issues"); after != before {
+		t.Fatalf("issues rows = %d after two failed creates, want %d (unchanged)", after, before)
+	}
+}
