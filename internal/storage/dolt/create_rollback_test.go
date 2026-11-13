@@ -326,3 +326,100 @@ func TestCreateIssueRollsBackFullyOnContextCancelMidTransaction(t *testing.T) {
 		t.Fatalf("event rows for %s persisted despite context-cancel rollback: found %d rows", issueID, eventCount)
 	}
 }
+
+// TestFailedAutoMintedCreateRestoresEmptyID reproduces bd-wm5ahf (GH#8457):
+// a singular CreateIssue with an empty ID that fails permanently (a
+// non-retryable ErrFieldTooLong on a 256-character label, raised after the ID
+// was minted) must leave the caller's struct with the empty ID it passed in.
+// Otherwise a caller retrying the same struct takes the explicit-ID path
+// instead of minting a fresh ID.
+func TestFailedAutoMintedCreateRestoresEmptyID(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("set issue_prefix: %v", err)
+	}
+
+	issue := &types.Issue{
+		Title:     "auto-minted create that fails permanently",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Labels:    []string{strings.Repeat("x", 256)},
+	}
+
+	err := store.CreateIssue(ctx, issue, "tester")
+	if err == nil {
+		t.Fatal("expected CreateIssue to fail on a 256-character label, got nil error")
+	}
+	if !errors.Is(err, types.ErrFieldTooLong) {
+		t.Fatalf("error = %v, want types.ErrFieldTooLong", err)
+	}
+	if issue.ID != "" {
+		t.Fatalf("issue.ID = %q after a permanently failed auto-minted create, want \"\" (minted ID leaked onto the caller's struct)", issue.ID)
+	}
+}
+
+// TestCreateIssueFailureRestoresAutoMintedID pins the singular-create half of
+// the GH#8457 fix. A permanently failed auto-minted create leaves the
+// caller's ID empty and no row behind; an explicit-ID create failing the same
+// way keeps the caller's ID, which was never the store's to clear.
+func TestCreateIssueFailureRestoresAutoMintedID(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("set issue_prefix: %v", err)
+	}
+
+	countIssues := func() int {
+		var n int
+		if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues").Scan(&n); err != nil {
+			t.Fatalf("count issues: %v", err)
+		}
+		return n
+	}
+	before := countIssues()
+
+	auto := &types.Issue{
+		Title:     "auto-minted create that fails permanently",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Labels:    []string{strings.Repeat("x", types.MaxFieldLen+1)},
+	}
+	if err := store.CreateIssue(ctx, auto, "tester"); !errors.Is(err, types.ErrFieldTooLong) {
+		t.Fatalf("auto-minted CreateIssue err = %v, want types.ErrFieldTooLong", err)
+	}
+	if auto.ID != "" {
+		t.Fatalf("auto issue ID = %q after a rolled-back create, want empty", auto.ID)
+	}
+	if n := countIssues(); n != before {
+		t.Fatalf("issues row count = %d after a rolled-back create, want %d", n, before)
+	}
+
+	explicit := &types.Issue{
+		ID:        "test-explicit",
+		Title:     "explicit-ID create failing the same way",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Labels:    []string{strings.Repeat("x", types.MaxFieldLen+1)},
+	}
+	if err := store.CreateIssue(ctx, explicit, "tester"); !errors.Is(err, types.ErrFieldTooLong) {
+		t.Fatalf("explicit-ID CreateIssue err = %v, want types.ErrFieldTooLong", err)
+	}
+	if explicit.ID != "test-explicit" {
+		t.Fatalf("explicit issue ID = %q, want test-explicit (a caller-supplied ID is never cleared)", explicit.ID)
+	}
+	if n := countIssues(); n != before {
+		t.Fatalf("issues row count = %d after two rolled-back creates, want %d", n, before)
+	}
+}

@@ -418,6 +418,16 @@ type Storage interface {
 	MoleculeStepper() (issueops.MoleculeStepper, error)
 
 	// Issue CRUD
+	//
+	// CreateIssue and CreateIssues write the minted IDs back into the
+	// caller's structs on success: issue.ID for an auto-minted issue, plus
+	// the dependency IssueIDs and comment IDs the create backfilled from it.
+	// When the create fails and its transaction rolled back, every one of
+	// those fields the caller left empty is empty again, so retrying the
+	// same structs mints fresh IDs instead of taking the explicit-ID upsert
+	// path. An error wrapping ErrCommitIndeterminate keeps the minted IDs:
+	// the row may have committed and they must stay usable. A caller-supplied
+	// ID is never cleared in any outcome.
 	CreateIssue(ctx context.Context, issue *types.Issue, actor string) error
 	CreateIssues(ctx context.Context, issues []*types.Issue, actor string) error
 	GetIssue(ctx context.Context, id string) (*types.Issue, error)

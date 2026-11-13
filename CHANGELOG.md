@@ -1281,6 +1281,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A failed auto-minted create no longer leaves the minted ID on the
+  caller's struct** (#8457). When a storage `CreateIssue` or `CreateIssues`
+  failed permanently after minting — an over-length label, for example — the
+  minted issue ID (and the dependency and comment IDs the create backfilled
+  from it) stayed on the caller's structs even though the transaction rolled
+  back. Retrying the same structs then took the explicit-ID upsert path
+  instead of minting, and in counter mode could overwrite a peer's issue that
+  received the counter value the failed transaction rolled back. The ID
+  fields the caller left empty are now empty again after such a failure; an
+  `ErrCommitIndeterminate` error keeps them, since the row may have
+  committed. `bd create` was not affected (it mints on a copy).
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc

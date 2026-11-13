@@ -38,6 +38,13 @@ func (s *DoltStore) createIssue(ctx context.Context, issue *types.Issue, actor s
 		issue.Ephemeral = true // infra and wisp types get marked ephemeral (legacy behavior)
 	}
 
+	// A create that fails permanently after minting must hand the struct back
+	// with the ID fields the caller left empty, so a retry mints again instead
+	// of upserting the rolled-back ID (GH#8457). Every withRetryTx error except
+	// one wrapping storage.ErrCommitIndeterminate means the transaction rolled
+	// back; there the row may have committed and the ID must stay.
+	resetMintedIDs := issueops.SnapshotUnsetCreateIDs([]*types.Issue{issue})
+
 	var result issueops.CreateIssueResult
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		// SkipPrefixValidation matches legacy behavior: single-issue path does
@@ -51,7 +58,7 @@ func (s *DoltStore) createIssue(ctx context.Context, issue *types.Issue, actor s
 		result, err = issueops.CreateIssueInTxWithResult(ctx, tx, bc, issue, actor)
 		return err
 	}); err != nil {
-		return err
+		return issueops.ResetCreateIDsIfRolledBack(err, resetMintedIDs)
 	}
 
 	// Dolt versioning — wisps and no-history issues skip DOLT_COMMIT.
