@@ -1244,6 +1244,10 @@ type DependencyCounts struct {
 type IssueWithDependencyMetadata struct {
 	Issue
 	DependencyType DependencyType `json:"dependency_type"`
+	// External is true on a view-only row for a foreign issue: a bare
+	// cross-prefix target this workspace does not hold, read through its
+	// prefix routes (GH#5784). The row is never written back.
+	External bool `json:"external,omitempty"`
 }
 
 // IssueWithCounts extends Issue with dependency relationship counts
@@ -2141,6 +2145,15 @@ type TreeNode struct {
 	// into an issue already expanded earlier in the same list, and it has no
 	// descendants. Drop these rows to get each issue once.
 	Deduped bool `json:"deduped,omitempty"`
+	// External is true on a view-only leaf for a bare cross-prefix target
+	// this workspace does not hold (GH#5784): its issue fields are the
+	// foreign row read through the prefix routes, unless Unresolved is set.
+	// The walk never descends into a foreign graph.
+	External bool `json:"external,omitempty"`
+	// Unresolved, on an External leaf, is why the target could not be read.
+	// Such a leaf carries only the stored id (as id and title) and no status:
+	// nothing was observed.
+	Unresolved string `json:"unresolved,omitempty"`
 }
 
 // MoleculeProgressStats provides efficient progress info for large molecules.

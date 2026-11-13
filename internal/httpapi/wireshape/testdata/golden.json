@@ -4031,6 +4031,12 @@
     },
     {
       "schema": "IssueWithDependencyMetadata",
+      "member": "external",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "IssueWithDependencyMetadata",
       "member": "external_ref",
       "type": "string",
       "required": false
@@ -5236,6 +5242,12 @@
     },
     {
       "schema": "TreeNode",
+      "member": "external",
+      "type": "boolean",
+      "required": false
+    },
+    {
+      "schema": "TreeNode",
       "member": "external_ref",
       "type": "string",
       "required": false
@@ -5424,6 +5436,12 @@
       "member": "truncated",
       "type": "boolean",
       "required": true
+    },
+    {
+      "schema": "TreeNode",
+      "member": "unresolved",
+      "type": "string",
+      "required": false
     },
     {
       "schema": "TreeNode",

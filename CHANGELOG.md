@@ -758,6 +758,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It prints `No remote is configured — skipping.` and the setup guidance,
   as server mode already did; in embedded mode it used to exit 1. A pull
   from a configured remote that fails still exits 1.
+- **Existing cross-rig dependencies start gating after the upgrade, and
+  `bd serve` advertises `policy.cross_rig_dependencies`**
+  ([#5784](https://github.com/gastownhall/beads/issues/5784)). A
+  `blocks` or `conditional-blocks` edge to another rig's issue that an older
+  bd stored and ignored blocks on the first check: an open or unreadable
+  target removes its dependent from `bd ready` (see Fixed below for the
+  remedies). A `bd serve` that applies the cross-rig policy says so with the
+  new handshake token. Against an older server, which advertises only
+  `policy.external_dependencies`, the client applies the cross-rig check
+  itself: `bd update --claim`, `bd close` and `bd dep tree` each make one more
+  request there, an edge read of the issue or tree they name, and `bd ready`
+  judges each page by the edges its rows already carry.
 - **`bd rules compact` previews by default and applies only with `--force`.**
   It used to apply merges by default, writing the composite and deleting the
   source rules. Scripts using `--auto` or `--group` to apply merges must add
@@ -1281,6 +1293,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A cross-rig `blocks` or `conditional-blocks` dependency now gates its
+  dependent** ([#5784](https://github.com/gastownhall/beads/issues/5784)).
+  `bd dep add aa-1 bb-1` stored a bare target under another rig's prefix, but
+  `bd ready`, `bd blocked`, `bd update --claim` and `bd close` ignored it, so
+  the dependent was handed out while its foreign blocker was still open. bd
+  now reads the target at query time through the workspace's prefix routes
+  (`.beads/routes.jsonl`, else `$GT_ROOT/.beads/routes.jsonl` with paths from
+  the town root): an open target keeps the dependent out of `bd ready`, lists
+  it in `bd blocked`, and refuses its claim and its close. A target bd cannot
+  read (no route, a missing database, an id the routed rig does not hold, a
+  failed read) stays blocking, with one stderr warning per target; remove the
+  edge with `bd dep remove`, and `bd close --force` still overrides the close
+  guard. `tracks`, `related`, `parent-child` and `waits-for` edges to another
+  rig never gate. `bd dep add` marks a cross-rig edge `"external": true` in
+  its JSON output, `bd show` and `bd dep list` list a readable foreign target
+  as an `(external)` row, and `bd dep tree` hangs each foreign edge as a
+  marked leaf without walking the other rig.
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc

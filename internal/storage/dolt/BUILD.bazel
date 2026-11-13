@@ -444,6 +444,7 @@ go_test(
         "//internal/storage/depid",
         "//internal/storage/doltutil",
         "//internal/storage/domain",
+        "//internal/storage/externaldeps",
         "//internal/storage/historyoffequiv",
         "//internal/storage/issueops",
         "//internal/storage/journalscan",

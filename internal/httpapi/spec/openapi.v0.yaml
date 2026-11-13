@@ -8567,6 +8567,12 @@ components:
           description: >-
             The edge type, e.g. `blocks`, `parent-child`, `related`,
             `discovered-from`. Not a closed vocabulary.
+        external:
+          type: boolean
+          description: >-
+            True when the issue is a foreign one: a bare cross-prefix target
+            this workspace does not hold, read through its prefix routes at
+            query time. Omitted for a local issue.
 
     TreeNode:
       type: object
@@ -8686,6 +8692,18 @@ components:
             into an issue already expanded earlier in the same answer, with no
             descendants of its own. Absent, never false, on every other row.
             Drop the rows carrying it to get each issue once.
+        external:
+          type: boolean
+          description: >-
+            True on a leaf for a bare cross-prefix target this workspace does
+            not hold: its issue members are the foreign row read through the
+            prefix routes at query time, unless `unresolved` is set. The walk
+            never descends below it. Absent on every other row.
+        unresolved:
+          type: string
+          description: >-
+            On an `external` leaf, why the target could not be read. That leaf
+            carries only the stored id (as `id` and `title`) and no `status`.
 
     Dependency:
       type: object
@@ -9250,7 +9268,7 @@ components:
             parent-child descendants and orphans every other dependent (see
             `DeleteIssuesRequest.cascade`; a server without it deletes every
             transitive dependent, so a client refuses to send `cascade` to
-            one). One behavior token is
+            one). Two behavior tokens are
             CONDITIONAL rather than build-level: `policy.external_dependencies`
             announces that this server's ready, blocked-listing, claim,
             claim-next, close, blocking and dependency-tree operations already
@@ -9261,14 +9279,22 @@ components:
             `blocked_by`). A server advertises it
             only when it enforces that policy; a client that sees it must not
             apply the policy again, and a client that does not see it applies
-            the policy itself. The
+            the policy itself. `policy.cross_rig_dependencies`, advertised
+            only beside it, announces that the same policy also enforces a
+            bare cross-rig issue id stored as a `blocks` or
+            `conditional-blocks` target (a cross-prefix dependency): its
+            source stays blocked until that issue, read through this
+            server's prefix routes, is closed or pinned. A client that sees
+            `policy.external_dependencies` without it applies the cross-rig
+            part itself. The
             list grows additively, and an operation never appears here unless
             it is fully implemented. This is how a client checks for an
             operation or a behavior — never the version string.
 
 
             THIS LIST IS BUILD-LEVEL, NOT WORKSPACE-LEVEL, apart from the
-            conditional `policy.external_dependencies` above, which depends on
+            conditional `policy.external_dependencies` and
+            `policy.cross_rig_dependencies` above, which depend on
             how this server composed its roles rather than on the build. It
             says which operations this binary serves, and for every entry but
             two that is the whole answer. `events.list` and `events.watch` are

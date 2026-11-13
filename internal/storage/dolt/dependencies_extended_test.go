@@ -1,11 +1,15 @@
 package dolt
 
 import (
+	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage/externaldeps"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -230,6 +234,70 @@ func TestGetAllDependencyRecords(t *testing.T) {
 	}
 	if _, ok := allRecords[issueB.ID]; !ok {
 		t.Errorf("expected records for %q", issueB.ID)
+	}
+}
+
+// TestGetExternalBlockingDependencyRecordsKeepsLiveSourcesOnly: the narrow
+// candidate read behind every ready, blocked and count evaluation drops the
+// edges of a closed or pinned source, issue or wisp. Such a source is never
+// ready, claimable or listed as blocked, so resolving its targets could only
+// open foreign rigs and warn about the unreachable ones (GH#5784). A guard
+// about one named issue still reads that issue's own edges, whatever its
+// status.
+func TestGetExternalBlockingDependencyRecordsKeepsLiveSourcesOnly(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	for _, issue := range []*types.Issue{
+		{ID: "test-live", Title: "live", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+		{ID: "test-closed", Title: "closed", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+		{ID: "test-pinned", Title: "pinned", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+		{ID: "test-wisp", Title: "live wisp", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask, Ephemeral: true},
+		{ID: "test-wisp-closed", Title: "closed wisp", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask, Ephemeral: true},
+	} {
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("CreateIssue %s: %v", issue.ID, err)
+		}
+		// A bare cross-rig id and a capability ref: both live in
+		// depends_on_external.
+		for _, target := range []string{"other-1", "external:remote:payments"} {
+			dep := &types.Dependency{IssueID: issue.ID, DependsOnID: target, Type: types.DepBlocks}
+			if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+				t.Fatalf("AddDependency %s -> %s: %v", issue.ID, target, err)
+			}
+		}
+	}
+	for _, id := range []string{"test-closed", "test-wisp-closed"} {
+		if err := store.CloseIssue(ctx, id, "done", "tester", ""); err != nil {
+			t.Fatalf("CloseIssue %s: %v", id, err)
+		}
+	}
+	if err := store.UpdateIssue(ctx, "test-pinned", map[string]interface{}{"status": string(types.StatusPinned)}, "tester"); err != nil {
+		t.Fatalf("pin test-pinned: %v", err)
+	}
+
+	got, err := store.GetExternalBlockingDependencyRecords(ctx)
+	if err != nil {
+		t.Fatalf("GetExternalBlockingDependencyRecords: %v", err)
+	}
+	if sources, want := slices.Sorted(maps.Keys(got)), []string{"test-live", "test-wisp"}; !slices.Equal(sources, want) {
+		t.Fatalf("candidate sources = %v, want %v", sources, want)
+	}
+	for id, deps := range got {
+		if len(deps) != 2 {
+			t.Fatalf("%s candidates = %+v, want both of its edges", id, deps)
+		}
+	}
+
+	records, err := store.GetDependencyRecordsForIssues(ctx, []string{"test-closed", "test-pinned"})
+	if err != nil {
+		t.Fatalf("GetDependencyRecordsForIssues: %v", err)
+	}
+	if len(records["test-closed"]) != 2 || len(records["test-pinned"]) != 2 {
+		t.Fatalf("named reads = %+v, want both edges of each closed or pinned source", records)
 	}
 }
 
@@ -1785,3 +1853,74 @@ func TestGetBlockedIssues_WithBlockerDetails(t *testing.T) {
 }
 
 // Note: testContext is already defined in dolt_test.go for this package
+
+// TestAddDependency_CrossPrefix_BlocksReadyWork reproduces bd-ncw9bo
+// (GH#5784): a cross-prefix blocks edge is stored in depends_on_external, but
+// readiness only counted "external:" targets as blockers, so the source was
+// offered as ready although its cross-rig blocker was never seen closed. Raw
+// is_blocked stays local derived state; the externaldeps decorator is the
+// supported foreign-policy surface, so the repro reads ready work through it
+// with a route lookup that reports the target open, and then unreadable
+// (an unreadable blocking target keeps holding the source).
+func TestAddDependency_CrossPrefix_BlocksReadyWork(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	source := &types.Issue{
+		ID:        "test-xrig",
+		Title:     "Depends on a bead in another rig",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, source, "tester"); err != nil {
+		t.Fatalf("failed to create source issue: %v", err)
+	}
+	dep := &types.Dependency{IssueID: "test-xrig", DependsOnID: "other-200", Type: types.DepBlocks}
+	if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+		t.Fatalf("AddDependency cross-prefix: %v", err)
+	}
+
+	noProjects := func(externaldeps.ProjectName) (string, bool) { return "", false }
+	for _, tc := range []struct {
+		name    string
+		resolve externaldeps.IssueResolver
+	}{
+		{
+			name: "foreign target open",
+			resolve: func(_ context.Context, ids []string) (map[string]*types.Issue, map[string]string, error) {
+				found := make(map[string]*types.Issue, len(ids))
+				for _, id := range ids {
+					found[id] = &types.Issue{ID: id, Title: "foreign " + id, Status: types.StatusOpen, IssueType: types.TypeTask}
+				}
+				return found, nil, nil
+			},
+		},
+		{
+			name: "foreign target unreadable",
+			resolve: func(_ context.Context, ids []string) (map[string]*types.Issue, map[string]string, error) {
+				unavailable := make(map[string]string, len(ids))
+				for _, id := range ids {
+					unavailable[id] = "no route for prefix other-"
+				}
+				return nil, unavailable, nil
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			decorated := externaldeps.New(store, noProjects, nil, externaldeps.WithIssueResolver(tc.resolve))
+			ready, err := decorated.GetReadyWork(ctx, types.WorkFilter{Status: types.StatusOpen})
+			if err != nil {
+				t.Fatalf("GetReadyWork: %v", err)
+			}
+			for _, issue := range ready {
+				if issue.ID == "test-xrig" {
+					t.Fatalf("test-xrig is offered as ready although it has a stored cross-prefix blocks edge on other-200 (an open or unreadable blocker in another rig)")
+				}
+			}
+		})
+	}
+}

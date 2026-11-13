@@ -118,6 +118,13 @@ identity and carries no scopes, so it never makes `actor` an authenticated
 principal — `actor` stays caller-asserted provenance for the audit trail, and
 any client the token admits can claim as any name.
 
+The surface reaches past the served database when the workspace has prefix
+routes (`.beads/routes.jsonl`, or the town root's under `$GT_ROOT`): the
+cross-rig dependency policy reads routed rigs' issues to decide readiness,
+and a dependency tree answers any client the token admits with the display
+fields (id, title, status, priority, type, closed time) of each routed rig's
+issue an edge names. Any such client can add that edge.
+
 Confirm the posture from the startup line rather than from the absence of a
 flag: `event=startup` carries `auth=none` or `auth=bearer (<path>)`.
 

@@ -1583,6 +1583,12 @@ bd dep add
     | the external_projects config. They block the issue until the capability
     | is "shipped" in the target project.
     |
+    | A target whose ID prefix belongs to another rig (a bare cross-prefix ID)
+    | is stored in this database and gates readiness like a local edge: bd
+    | ready checks its target live through the routes in .beads/routes.jsonl,
+    | holding the source while the target is open or unreadable. Informational
+    | types (tracks, related, and the rest) never gate readiness.
+    |
     | With no -t/--type the edge is created as type=blocks, which excludes the
     | dependent from bd ready. When stderr is an interactive terminal, an advisory
     | note says so once per command; it is silent for scripted and agent callers

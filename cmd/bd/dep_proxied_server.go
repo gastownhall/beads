@@ -277,15 +277,18 @@ func runDepBlocksProxiedServer(cmd *cobra.Command, ctx context.Context, blockerI
 	warnProxiedUnresolvedDepTarget(ctx, blockedID, blockerID)
 
 	if jsonOutput {
-		_ = outputJSON(map[string]interface{}{
+		out := map[string]interface{}{
 			"status":     "added",
 			"blocker_id": blockerID,
 			"blocked_id": blockedID,
 			"type":       string(types.DepBlocks),
-		})
+		}
+		markExternalJSON(out, blockedID, blockerID)
+		_ = outputJSON(out)
 		return nil
 	}
 
+	printCrossRigBlockingSemantics(blockedID, blockerID, types.DepBlocks)
 	fmt.Printf("%s Added dependency: %s blocks %s\n",
 		ui.RenderPass("✓"),
 		formatFeedbackIDParen(blockerID, res.toTitle),
@@ -352,15 +355,18 @@ func runDepAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	warnProxiedUnresolvedDepTarget(ctx, fromID, toID)
 
 	if jsonOutput {
-		_ = outputJSON(map[string]interface{}{
+		out := map[string]interface{}{
 			"status":        "added",
 			"issue_id":      fromID,
 			"depends_on_id": toID,
 			"type":          string(dt),
-		})
+		}
+		markExternalJSON(out, fromID, toID)
+		_ = outputJSON(out)
 		return nil
 	}
 
+	printCrossRigBlockingSemantics(fromID, toID, dt)
 	fmt.Printf("%s Added dependency: %s %s %s (%s)\n",
 		ui.RenderPass("✓"),
 		formatFeedbackIDParen(fromID, res.fromTitle),
@@ -421,11 +427,13 @@ func runDepAddBulkProxied(cmd *cobra.Command, ctx context.Context, file, default
 	if jsonOutput {
 		out := make([]map[string]interface{}, 0, len(depEdges))
 		for _, edge := range depEdges {
-			out = append(out, map[string]interface{}{
+			row := map[string]interface{}{
 				"issue_id":      edge.IssueID,
 				"depends_on_id": edge.DependsOnID,
 				"type":          string(edge.Type),
-			})
+			}
+			markExternalJSON(row, edge.IssueID, edge.DependsOnID)
+			out = append(out, row)
 		}
 		_ = outputJSON(map[string]interface{}{
 			"status":       "added",
@@ -436,6 +444,9 @@ func runDepAddBulkProxied(cmd *cobra.Command, ctx context.Context, file, default
 	}
 
 	fmt.Printf("%s Added %d dependencies\n", ui.RenderPass("✓"), len(depEdges))
+	for _, edge := range depEdges {
+		printCrossRigBlockingSemantics(edge.IssueID, edge.DependsOnID, edge.Type)
+	}
 	return nil
 }
 
@@ -489,6 +500,29 @@ func runDepRemoveProxiedServer(_ *cobra.Command, ctx context.Context, args []str
 	return nil
 }
 
+// withProxiedDroppedDownEdges covers the same gap as the embedded RunE for
+// this command (cmd/bd/dep.go): Relations drops "down" edges whose target has
+// no row in this database, and the `len(args) > 1 && direction == "down"`
+// branch of runDepListProxiedServer already uses the (non-dropping)
+// EdgeReader role for batch mode — so this runs only for "down" with exactly
+// one arg. It adds the readable cross-rig targets as external rows and warns
+// on stderr about the edges still missing, so a cross-database `bd link`
+// isn't indistinguishable from no link at all (bd-mtla); the warning never
+// touches stdout/--json. Without an EdgeReader the rows are returned as they
+// came.
+func withProxiedDroppedDownEdges(ctx context.Context, direction string, args []string, depTypes []types.DependencyType, typeFilter string, rows []*issueops.RelatedIssue) []*issueops.RelatedIssue {
+	if direction != "down" || len(args) != 1 {
+		return rows
+	}
+	reader, err := proxiedEdgeReader()
+	if err != nil {
+		return rows
+	}
+	rows = append(rows, foreignDependencyRows(ctx, reader, args[0], depTypes, rows, crossRigPresentationResolver(""))...)
+	warnDroppedDepEdges(ctx, reader, args[0], typeFilter, rows)
+	return rows
+}
+
 func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
 	direction, _ := cmd.Flags().GetString("direction")
 	typeFilter, _ := cmd.Flags().GetString("type")
@@ -528,18 +562,7 @@ func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 		allIssues = append(allIssues, issues...)
 	}
 
-	// Same gap as the embedded RunE for this command (cmd/bd/dep.go): Relations
-	// drops "down" edges whose target has no row in this database, and the
-	// `len(args) > 1 && direction == "down"` branch above already uses the
-	// (non-dropping) EdgeReader role for batch mode — so this loop only runs
-	// for "down" with exactly one arg. Warn on stderr so a cross-database
-	// `bd link` isn't indistinguishable from no link at all (bd-mtla); never
-	// touches stdout/--json.
-	if direction == "down" && len(args) == 1 {
-		if reader, err := proxiedEdgeReader(); err == nil {
-			warnDroppedDepEdges(ctx, reader, args[0], typeFilter, allIssues)
-		}
-	}
+	allIssues = withProxiedDroppedDownEdges(ctx, direction, args, request.Types, typeFilter, allIssues)
 
 	if jsonOutput {
 		if allIssues == nil {
@@ -576,8 +599,8 @@ func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 		default:
 			idStr = iss.ID
 		}
-		fmt.Printf("  %s: %s [P%d] (%s) via %s\n",
-			idStr, iss.Title, iss.Priority, iss.Status, iss.DependencyType)
+		fmt.Printf("  %s: %s [P%d] (%s) via %s%s\n",
+			idStr, iss.Title, iss.Priority, iss.Status, iss.DependencyType, externalRowMarker(iss))
 	}
 	fmt.Println()
 	return nil

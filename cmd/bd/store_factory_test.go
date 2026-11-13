@@ -266,7 +266,7 @@ func TestOpenNonMutatingStoreHonorsSharedServerConfig(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
-	store, err := openNonMutatingStoreFromConfig(ctx, beadsDir, false)
+	store, err := openNonMutatingStoreFromConfig(ctx, beadsDir, false, "")
 	if err == nil {
 		if store != nil {
 			_ = store.Close()

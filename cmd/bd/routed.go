@@ -51,7 +51,13 @@ type RoutedResult struct {
 	Store      storage.DoltStorage // The store that contains this issue (may be routed)
 	Routed     bool                // true if the issue was found via routing
 	ResolvedID string              // The resolved (full) issue ID
-	closeFn    func()              // Function to close routed storage (if any)
+	// BeadsDir is the workspace the store belongs to: the prefix-routed
+	// target's .beads directory when the lookup followed a route, empty for
+	// the launching command's own store. A consumer that must resolve that
+	// workspace's cross-rig policy (the externaldeps wiring, GH#5784 §210)
+	// falls back to the command's own beads directory when it is empty.
+	BeadsDir string
+	closeFn  func() // Function to close routed storage (if any)
 }
 
 // Close closes any routed storage. Safe to call if Routed is false.
@@ -376,6 +382,7 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 		return nil, err
 	}
 	result.closeFn = func() { _ = targetStore.Close() }
+	result.BeadsDir = targetBeadsDir
 
 	if os.Getenv("BD_DEBUG_ROUTING") != "" {
 		fmt.Fprintf(os.Stderr, "[routing] Resolved %s via prefix route to %s (database: %s)\n", id, remedy.PrintedValue(matchedRoute.Path), remedy.PrintedValue(targetDB))
@@ -385,23 +392,33 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 }
 
 // lookupPrefixRoute finds the routes.jsonl route for id and returns it with
-// the target rig's .beads directory. Having no route to follow (no prefix in
-// the ID, no beads directory, no routes, no matching route, or a route back to
-// the current database) wraps errRoutingUnavailable; an unreadable routes.jsonl
-// does not, so callers report it instead of falling through.
+// the target rig's .beads directory, resolving from the LAUNCHING command's
+// beads directory; lookupPrefixRouteFrom holds the body. The cross-rig
+// dependency resolver does not share it: it reads its routes through
+// crossRigRoutes (cross_rig_resolver.go), which also falls back to the town
+// root's routes ($GT_ROOT) when the workspace has none.
 func lookupPrefixRoute(id string) (*prefixRoute, string, error) {
+	return lookupPrefixRouteFrom(id, resolveCommandBeadsDir(dbPath))
+}
+
+// lookupPrefixRouteFrom is lookupPrefixRoute resolving routes from the given
+// beads directory.
+//
+// Having no route to follow (no prefix in the ID, no beads directory, no
+// routes, no matching route, or a route back to the current database) wraps
+// errRoutingUnavailable; an unreadable routes.jsonl does not, so callers
+// report it instead of falling through.
+func lookupPrefixRouteFrom(id, beadsDir string) (*prefixRoute, string, error) {
 	if strings.Index(id, "-") <= 0 {
 		return nil, "", fmt.Errorf("%w: no prefix in ID %q", errRoutingUnavailable, id)
 	}
 
-	// Find the resolved beads directory (where routes.jsonl lives)
-	currentBeadsDir := resolveCommandBeadsDir(dbPath)
-	if currentBeadsDir == "" {
+	if beadsDir == "" {
 		return nil, "", fmt.Errorf("%w: no beads directory available", errRoutingUnavailable)
 	}
 
 	// Load routes from routes.jsonl
-	routes, err := loadPrefixRoutes(currentBeadsDir)
+	routes, err := loadPrefixRoutes(beadsDir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, "", fmt.Errorf("%w: no routes available", errRoutingUnavailable)
@@ -423,25 +440,39 @@ func lookupPrefixRoute(id string) (*prefixRoute, string, error) {
 		return nil, "", fmt.Errorf("%w: route points to current database", errRoutingUnavailable)
 	}
 
-	// Derive the town root from the current beads dir.
-	// currentBeadsDir is typically <town_root>/.beads
-	townRoot := filepath.Dir(currentBeadsDir)
+	targetBeadsDir := prefixRouteTargetBeadsDir(beadsDir, matchedRoute)
+	return matchedRoute, targetBeadsDir, nil
+}
 
-	// Resolve the target rig's .beads directory
-	rigDir := filepath.Join(townRoot, matchedRoute.Path)
-	return matchedRoute, beads.FollowRedirect(filepath.Join(rigDir, ".beads")), nil
+// prefixRouteTargetBeadsDir resolves a matched route to the target rig's
+// .beads directory from the source workspace's beads directory: the route
+// path is relative to the town root, the source beads directory's parent, and
+// the target's own redirect is followed.
+func prefixRouteTargetBeadsDir(sourceBeadsDir string, route *prefixRoute) string {
+	// Derive the town root from the source beads dir.
+	// sourceBeadsDir is typically <town_root>/.beads
+	townRoot := filepath.Dir(sourceBeadsDir)
+	rigDir := filepath.Join(townRoot, route.Path)
+	return beads.FollowRedirect(filepath.Join(rigDir, ".beads"))
 }
 
 // openRoutedTargetStore opens the store of a routed target, prefix or auto,
-// writable or read-only. BEADS_DOLT_SERVER_DATABASE outranks the target's
-// metadata.json when a store resolves its database name, and it names the
-// launching workspace's database (set by the user, or by
-// preserveRedirectSourceDatabase after a redirect), so while the target opens
-// it is pointed at database, the target's own dolt_database. Otherwise a
-// server-mode open would connect to the launcher's database on the shared
-// server, and an embedded writable open would create or migrate a wrongly
-// named database under the target. An empty database leaves the environment
-// as it is: the target names no database of its own to prefer.
+// writable or read-only. The target must be pointed at database, its own
+// dolt_database, while it opens: otherwise a server-mode open would connect
+// to the launcher's database on the shared server, and an embedded writable
+// open would create or migrate a wrongly named database under the target.
+// BEADS_DOLT_SERVER_DATABASE names the launching workspace's database (set by
+// the user, or by preserveRedirectSourceDatabase after a redirect), so it must
+// be outranked, never obeyed.
+//
+// A READ carries database through per-open configuration
+// (openForeignStoreReadOnlyDatabase, GH#5784 §212): the environment swap this
+// factory used to make is process-global, and a concurrent read — the
+// cross-rig resolver answering a ready query among them — cannot swap it
+// around other threads' opens. A WRITE keeps the swap: a routed write is a
+// single command flow, and the writable factories have no per-open seam yet.
+// An empty database leaves the environment as it is either way: the target
+// names no database of its own to prefer.
 //
 // It opens through openForeignStore, so a target admitForeignWorkspace
 // refuses (a legacy Dolt workspace among them) is refused before the open can
@@ -457,6 +488,9 @@ func lookupPrefixRoute(id string) (*prefixRoute, string, error) {
 // repository would; they bring it to the schema this bd writes, not to
 // anything the missed id asked for.
 func openRoutedTargetStore(ctx context.Context, beadsDir, database string, writable bool) (storage.DoltStorage, error) {
+	if !writable {
+		return openForeignStoreReadOnlyDatabase(ctx, beadsDir, database)
+	}
 	if database != "" {
 		origDB := os.Getenv("BEADS_DOLT_SERVER_DATABASE")
 		_ = os.Setenv("BEADS_DOLT_SERVER_DATABASE", database)
@@ -469,10 +503,7 @@ func openRoutedTargetStore(ctx context.Context, beadsDir, database string, writa
 			}
 		}()
 	}
-	if writable {
-		return openForeignStore(ctx, beadsDir, foreignWrite)
-	}
-	return openForeignStore(ctx, beadsDir, foreignRead)
+	return openForeignStore(ctx, beadsDir, foreignWrite)
 }
 
 // matchPrefixRoute returns the route whose prefix is the longest leading match

@@ -612,30 +612,34 @@ shapes:
   # gc parses update --claim --json, so the claimed row is compared as json
   # (timestamps and revision tokens are dropped as for every json shape; no
   # other member differs). requests pins the reference profile's claim path:
-  # the handshake, the template pre-read, claimIssue, and the read-back that
+  # the handshake, the template pre-read, the cross-rig guard's read of the
+  # claimed issue's own edges (the reference server predates
+  # policy.cross_rig_dependencies, so the client refuses a claim an open
+  # cross-rig blocker holds, GH#5784), claimIssue, and the read-back that
   # hydrates labels (httpclient lifecycle.go claimOnlyUpdate); the
   # current-capability transcripts pin the updateIssue path.
   - id: gc-update-claim
     source: gc bdstore.go BdStore.Claim and gc hook --claim (update <id> --claim --json)
     args: [update, e2e-t-claim, --claim, --json]
     verify: [[show, --json, e2e-t-claim]]
-    requests: 4
+    requests: 5
   - id: gc-update-claim-actor
     source: gc cmd_agent_script.go bd_claim (update <id> --claim --actor X)
     args: [update, e2e-t-claim2, --claim, --actor, alice]
     compare: text
     verify: [[show, --json, e2e-t-claim2]]
-    requests: 4
+    requests: 5
   - id: gc-update-claim-wisp
     source: gc ready queues include ephemeral work; claiming a wisp
     args: [update, e2e-wisp-c, --claim, --json]
     verify: [[show, --json, e2e-wisp-c]]
-    requests: 4
+    requests: 5
     pending: {slice: "SRV-1", reason: "the reference server lacks UpdateIssueRequest.claim, and the claimIssue fallback excludes wisps (B3 #6); remove the mark when reference_server.json is upgraded"}
   # A claim the store refuses: another actor holds the bead, or it is closed.
   # Both sides refuse with the same class (expect_stderr matches the embedded
   # "already claimed by alice" and the served "already_claimed" problem alike;
-  # the served text does not name the holder) and leave the row alone.
+  # the served text does not name the holder) and leave the row alone. The
+  # cross-rig guard's edge read comes first, as for gc-update-claim.
   - id: gc-update-claim-conflict
     source: gc bdstore.go BdStore.Claim on a bead another worker holds (update <id> --claim --json)
     setup: [[create, "claim conflict target", -t, task, --id, e2e-t-claimx, --json], [update, e2e-t-claimx, --claim, --actor, alice]]
@@ -644,7 +648,7 @@ shapes:
     expect_stderr: "already.claimed"
     compare: exit
     verify: [[show, --json, e2e-t-claimx]]
-    requests: 3
+    requests: 4
   - id: gc-update-claim-closed
     source: gc bdstore.go BdStore.Claim on a bead closed under it (update <id> --claim --json)
     setup: [[create, "closed claim target", -t, task, --id, e2e-t-claimc, --json], [close, e2e-t-claimc]]
@@ -653,7 +657,7 @@ shapes:
     expect_stderr: "not.claimable"
     compare: exit
     verify: [[show, --json, e2e-t-claimc]]
-    requests: 3
+    requests: 4
   - id: gc-update-if-revision
     source: gc bdstore_conditional.go UpdateIfMatch / CompareAndSetMetadataKey
     args: [update, e2e-t-rev, --set-metadata, k=v, --if-revision, "{rev:e2e-t-rev}"]

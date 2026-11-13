@@ -119,11 +119,38 @@ func (s *Store) ServerEnforcesExternalDependencyPolicy(ctx context.Context) (boo
 		return false, nil
 	}
 	enforced := slices.Contains(snap.Capabilities, wire.CapExternalDependencies)
-	s.policy.store(enforced)
+	s.policy.storeAnswers(enforced, slices.Contains(snap.Capabilities, wire.CapCrossRigDependencies))
 	return enforced, nil
 }
 
 var _ storage.ExternalDependencyPolicyProber = (*Store)(nil)
+
+// ServerEnforcesCrossRigDependencyPolicy satisfies
+// storage.CrossRigDependencyPolicyProber: whether the server also enforces
+// bare cross-rig issue ids (wire.CapCrossRigDependencies). A server that
+// predates the token answers false, so the client's decorator composes that
+// enforcement itself even when the server enforces capability refs. It reads
+// the cache and propagates handshake errors exactly as
+// ServerEnforcesExternalDependencyPolicy does.
+func (s *Store) ServerEnforcesCrossRigDependencyPolicy(ctx context.Context) (bool, error) {
+	if s.cachedSnapshot() == nil && !storage.LivePolicyProbe(ctx) {
+		if enforced, ok := s.policy.loadCrossRig(); ok {
+			return enforced, nil
+		}
+	}
+	snap, err := s.snapshot(ctx)
+	if err != nil {
+		return false, err
+	}
+	if snap == nil {
+		return false, nil
+	}
+	enforced := slices.Contains(snap.Capabilities, wire.CapCrossRigDependencies)
+	s.policy.storeAnswers(slices.Contains(snap.Capabilities, wire.CapExternalDependencies), enforced)
+	return enforced, nil
+}
+
+var _ storage.CrossRigDependencyPolicyProber = (*Store)(nil)
 
 // ExcludeIDsUnsupported satisfies storage.ExcludeIDsUnsupportedStore: the v0
 // wire's listReadyWork and countReadyWork operations publish no id-exclusion
