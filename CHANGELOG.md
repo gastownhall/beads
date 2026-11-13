@@ -1712,6 +1712,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the export is not left staged at its old content. It also decides whether
   the commit touches `.beads` from that index, and in a linked worktree no
   longer re-stages an export you removed with `git rm` (#4080).
+- **A store create that fails and rolls back no longer leaves the IDs it
+  filled on the caller's structs** (#8457). `CreateIssue` and `CreateIssues`
+  (server and embedded mode) mint an empty `issue.ID` and backfill empty
+  dependency sources and comment IDs before later checks can fail, such as an
+  over-length label. On a failed create those fields stayed set, so an SDK
+  caller retrying the same struct took the explicit-ID upsert path and, in
+  counter mode, could overwrite the issue a peer had since created with the
+  rolled-back ID. When the transaction rolled back they are now empty again;
+  an error wrapping `storage.ErrCommitIndeterminate` keeps them. `bd create`
+  was not affected.
+
 - **bd again reads `GT_ROOT` from a rig's `.beads/.env`** (#8117; also
   shipped in 1.3.4). `gc rig add` writes the city root there, and the
   `.beads/.env` allowlist from #7879 (also in 1.3.3) dropped it, printing
