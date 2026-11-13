@@ -416,3 +416,124 @@ func assertOneRefusedSeedWarning(t *testing.T, notices, seedErr string) {
 		}
 	}
 }
+
+// AC-2: pending migration work cannot run without the patterns, so the
+// refusal stays the original seed error. Nothing past migrationWorkNeeded
+// runs: no cursor repair, no new-table read, no migration, no warning.
+func TestMigrateUpRefusedSeedFailsWhenWorkPending(t *testing.T) {
+	const latestMinusOne = 1
+	cases := map[string]struct {
+		mainVersion int
+		work        func(sqlmock.Sqlmock)
+	}{
+		"main migrations pending": {
+			mainVersion: LatestVersion() - latestMinusOne,
+			work: func(mock sqlmock.Sqlmock) {
+				expectCursorProbe(mock, "schema_migrations", true)
+				expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion()-latestMinusOne)
+			},
+		},
+		"ignored migrations pending": {
+			mainVersion: LatestVersion(),
+			work: func(mock sqlmock.Sqlmock) {
+				expectCursorProbe(mock, "schema_migrations", true)
+				expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+				expectCursorProbe(mock, "ignored_schema_migrations", false)
+			},
+		},
+		"content_hash column missing": {
+			mainVersion: LatestVersion(),
+			work: func(mock sqlmock.Sqlmock) {
+				expectCursorProbe(mock, "schema_migrations", true)
+				expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+				expectCursorProbe(mock, "ignored_schema_migrations", true)
+				expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
+				expectIgnoredSentinelProbes(mock, true)
+				mock.ExpectQuery(`SHOW COLUMNS FROM \w+ LIKE 'content_hash'`).WillReturnRows(showColumnsRows())
+			},
+		},
+		"custom types backfill pending": {
+			mainVersion: LatestVersion(),
+			work: func(mock sqlmock.Sqlmock) {
+				expectCursorProbe(mock, "schema_migrations", true)
+				expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+				expectCursorProbe(mock, "ignored_schema_migrations", true)
+				expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
+				expectIgnoredSentinelProbes(mock, true)
+				expectContentHashColumnExists(mock)
+				expectContentHashColumnExists(mock)
+				expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 0)
+				expectScalar(mock, "SELECT `value` FROM config WHERE `key` = 'types.custom'", "value", "spike")
+				expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+			},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			failOnSwallowedAdvisory(t)
+			notices := captureDoltIgnoreSeedNotices(t)
+			db, mock := newSeedMock(t)
+			denial := seedDenial()
+
+			expectSeedInsertFailure(mock, tc.mainVersion, 0, denial)
+			tc.work(mock)
+
+			_, err := MigrateUp(context.Background(), db)
+			if err == nil {
+				t.Fatal("MigrateUp() error = nil, want the refused seed while migration work is pending")
+			}
+			if got, want := err.Error(), wantSeedError(refusedSeedMissing[0], denial); got != want {
+				t.Fatalf("MigrateUp() error = %q, want the original seed error %q", got, want)
+			}
+			var mysqlErr *mysql.MySQLError
+			if !errors.As(err, &mysqlErr) || mysqlErr != denial {
+				t.Fatalf("MigrateUp() error = %v, want it to wrap the seed denial", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations (the work probe must run before refusing): %v", err)
+			}
+			if notices.Len() != 0 {
+				t.Fatalf("refused open printed %q, want no continuation warning", notices.String())
+			}
+		})
+	}
+
+	// A work probe that cannot answer is no licence to continue: the open
+	// fails with both causes preserved.
+	t.Run("work probe fails", func(t *testing.T) {
+		failOnSwallowedAdvisory(t)
+		notices := captureDoltIgnoreSeedNotices(t)
+		db, mock := newSeedMock(t)
+		denial := seedDenial()
+		probeErr := errors.New("connection reset by peer")
+
+		expectSeedInsertFailure(mock, LatestVersion(), 0, denial)
+		expectCursorProbe(mock, "schema_migrations", true)
+		expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+		expectCursorProbe(mock, "ignored_schema_migrations", true)
+		expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
+		expectIgnoredSentinelProbes(mock, true)
+		mock.ExpectQuery(`SHOW COLUMNS FROM \w+ LIKE 'content_hash'`).WillReturnError(probeErr)
+
+		_, err := MigrateUp(context.Background(), db)
+		if err == nil {
+			t.Fatal("MigrateUp() error = nil, want a failure when the work probe fails")
+		}
+		var mysqlErr *mysql.MySQLError
+		if !errors.As(err, &mysqlErr) || mysqlErr != denial {
+			t.Fatalf("MigrateUp() error = %v, want it to wrap the seed denial", err)
+		}
+		if !errors.Is(err, probeErr) {
+			t.Fatalf("MigrateUp() error = %v, want it to wrap the work-probe failure", err)
+		}
+		if !strings.Contains(err.Error(), "checking schema migration work") {
+			t.Fatalf("MigrateUp() error = %q, want it to say the migration-work check failed", err.Error())
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet SQL expectations: %v", err)
+		}
+		if notices.Len() != 0 {
+			t.Fatalf("refused open printed %q, want no continuation warning", notices.String())
+		}
+	})
+}
