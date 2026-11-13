@@ -4693,6 +4693,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   items together, and `--claim-next` skips externally blocked work even when
   `--force` overrides the close guard.
 
+- **`bd ready --claim` and `bd duplicates --auto-merge` now get the checks
+  other writes get** ([#8264](https://github.com/gastownhall/beads/issues/8264)).
+  bd classified both commands as reads by their names, whatever their flags.
+  With a schema migration pending on a shared Dolt server,
+  `bd update --claim` was refused until `bd migrate schema` ran, but
+  `bd ready --claim` claimed an issue and `bd duplicates --auto-merge` closed
+  duplicates, both exiting 0. In proxied-server mode, `bd ready --claim` read
+  through the refused migration and claimed. Both forms now open the store as
+  writers, so a pending migration refuses them as it refuses
+  `bd update --claim`. They also get the workspace identity check, and the
+  import from `.beads/issues.jsonl` into an empty embedded database, that
+  other writes get. Auto-export, auto-push and events-journal retention, when
+  enabled, now run after them as after any write. Plain `bd ready`, plain
+  `bd duplicates` and `bd duplicates --auto-merge --dry-run` are still reads.
+
 - **The smart migrate gate no longer auto-migrates a clone whose data is behind
   the remote, and `bd dolt pull` now works from that state**
   ([#6575](https://github.com/gastownhall/beads/issues/6575)). The gate's

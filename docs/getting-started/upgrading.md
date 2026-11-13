@@ -613,8 +613,12 @@ bd doctor
 ```
 
 Between steps 1 and 2, an upgraded client reads normally and its writes are
-refused with the gate's guidance. Nothing is silently promoted, so there is no
-deadline — but the window is a degraded one, so keep it short.
+refused with the gate's guidance. That includes the write forms of listing
+commands: `bd ready --claim` and `bd duplicates --auto-merge` are refused like
+`bd update --claim`, while plain `bd ready`, `bd duplicates` and
+`bd duplicates --auto-merge --dry-run` keep working. Nothing is silently
+promoted, so there is no deadline — but the window is a degraded one, so keep
+it short.
 
 If the server's schema is v53 or older (1.1.x, or 1.2.2, the re-release of
 the 1.1 line), reads can fail too until step 2: `bd list` stops with
