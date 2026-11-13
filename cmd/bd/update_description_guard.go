@@ -89,3 +89,21 @@ func validateAcceptanceUpdate(acceptance string) error {
 	}
 	return fmt.Errorf(`an empty --acceptance value would clear the acceptance criteria (an empty command substitution is the usual accident); use --clear-acceptance to clear them deliberately`)
 }
+
+// updateTextClearFlags maps each GH#8149 deliberate clear flag to the update
+// field it empties. Each is mutually exclusive with its field's content flags.
+var updateTextClearFlags = []struct{ flag, field string }{
+	{"clear-description", "description"},
+	{"clear-design", "design"},
+	{"clear-acceptance", "acceptance_criteria"},
+}
+
+// applyTextFieldClears adds an empty value for every clear flag set to true,
+// like --clear-notes: --clear-description=false alone erases nothing.
+func applyTextFieldClears(cmd *cobra.Command, fields map[string]any) {
+	for _, c := range updateTextClearFlags {
+		if clear, _ := cmd.Flags().GetBool(c.flag); clear {
+			fields[c.field] = ""
+		}
+	}
+}

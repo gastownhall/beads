@@ -133,6 +133,7 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 		}
 		in.fields["acceptance_criteria"] = ac
 	}
+	applyTextFieldClears(cmd, in.fields)
 	if cmd.Flags().Changed("external-ref") {
 		externalRef, _ := cmd.Flags().GetString("external-ref")
 		if externalRef == "" {

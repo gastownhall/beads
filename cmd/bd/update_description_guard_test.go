@@ -351,3 +351,44 @@ func TestUpdateRegistersTextClearFlagsGH8149(t *testing.T) {
 		}
 	}
 }
+
+// TestGatherUpdateInputClearFlagsGH8149: each deliberate clear flag empties
+// exactly its own field, clears compose, a false clear value erases nothing,
+// and a clear counts as the field update the conditional guards ride on.
+func TestGatherUpdateInputClearFlagsGH8149(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want map[string]any
+	}{
+		{"clear_description", []string{"--clear-description"}, map[string]any{"description": ""}},
+		{"clear_design", []string{"--clear-design"}, map[string]any{"design": ""}},
+		{"clear_acceptance", []string{"--clear-acceptance"}, map[string]any{"acceptance_criteria": ""}},
+		{"all_clears", []string{"--clear-description", "--clear-design", "--clear-acceptance"},
+			map[string]any{"description": "", "design": "", "acceptance_criteria": ""}},
+		{"clear_with_other_field_replacement", []string{"--clear-design", "--description", "kept", "--title", "Renamed"},
+			map[string]any{"design": "", "description": "kept", "title": "Renamed"}},
+		{"clear_with_clear_notes", []string{"--clear-acceptance", "--clear-notes"},
+			map[string]any{"acceptance_criteria": "", "notes": ""}},
+		{"false_clears_erase_nothing", []string{"--clear-description=false", "--clear-design=false", "--clear-acceptance=false"},
+			map[string]any{}},
+		{"clear_with_if_assignee", []string{"--clear-description", "--if-assignee", ""},
+			map[string]any{"description": ""}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in, err, stderr := gatherUpdateInputFor(t, tc.args...)
+			if err != nil {
+				t.Fatalf("%v: unexpected refusal: %v %s", tc.args, err, stderr)
+			}
+			if len(in.fields) != len(tc.want) {
+				t.Fatalf("%v: fields = %#v, want exactly %#v", tc.args, in.fields, tc.want)
+			}
+			for k, v := range tc.want {
+				if got, ok := in.fields[k]; !ok || got != v {
+					t.Fatalf("%v: fields[%q] = %#v (present=%v), want %#v", tc.args, k, got, ok, v)
+				}
+			}
+		})
+	}
+}

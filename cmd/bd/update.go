@@ -253,6 +253,7 @@ pointless).`,
 			}
 			updates["acceptance_criteria"] = acceptanceCriteria
 		}
+		applyTextFieldClears(cmd, updates)
 		if cmd.Flags().Changed("external-ref") {
 			externalRef, _ := cmd.Flags().GetString("external-ref")
 			// Empty string clears the ref to SQL NULL, mirroring buildCreateIssue's
