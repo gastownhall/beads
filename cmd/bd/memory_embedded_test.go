@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/memoryapi"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	storagememoryops "github.com/steveyegge/beads/internal/storage/memoryops"
 )
@@ -227,6 +228,60 @@ func TestEmbeddedMemory(t *testing.T) {
 		}
 	})
 
+	// GH#7275: read-shaped arguments are reads even when the key does not
+	// round-trip through the key derivation (nine-plus segments, over 60
+	// bytes, or a dot). The whole corpus is compared before and after every
+	// call, so a junk row minted by a stray write -- or a derived-key
+	// collision overwritten by one -- fails the test. Adapted from PR #7278.
+	t.Run("remember_noncanonical_keys_are_read_only", func(t *testing.T) {
+		for _, key := range []string{
+			"bd-list-silent-partial-rows-take-decision-counts-with-json",
+			strings.Repeat("x", 61),
+			"memory.v2",
+		} {
+			t.Run(key, func(t *testing.T) {
+				derived := memoryapi.DeriveKey(key)
+				bdRemember(t, bd, dir, "exact memory content", "--key", key)
+				bdRemember(t, bd, dir, "derived memory content", "--key", derived)
+				before := bdMemories(t, bd, dir, "--json")
+				if out := bdRemember(t, bd, dir, key); out != "exact memory content\n" {
+					t.Errorf("bare recall of the exact key = %q, want the exact memory content", out)
+				}
+				if after := bdMemories(t, bd, dir, "--json"); after != before {
+					t.Fatalf("read changed memories:\nbefore: %s\nafter:  %s", before, after)
+				}
+
+				// The exact key gone, its derived collision still there: the
+				// refusal names the derived key, whose content never
+				// substitutes for the missing memory's.
+				bdForget(t, bd, dir, key)
+				before = bdMemories(t, bd, dir, "--json")
+				out := bdRememberFail(t, bd, dir, key)
+				if !strings.Contains(out, "no memory named") || !strings.Contains(out, "did you mean "+derived) {
+					t.Errorf("missing exact key must refuse with a derived-key hint: %s", out)
+				}
+				if strings.Contains(out, "derived memory content") {
+					t.Errorf("the hint must not substitute the derived memory's content: %s", out)
+				}
+				if after := bdMemories(t, bd, dir, "--json"); after != before {
+					t.Fatalf("miss changed memories:\nbefore: %s\nafter:  %s", before, after)
+				}
+
+				// Both gone: the same refusal, with no hint, and no write
+				// under either key.
+				bdForget(t, bd, dir, derived)
+				before = bdMemories(t, bd, dir, "--json")
+				out = bdRememberFail(t, bd, dir, key, "--json")
+				if !strings.Contains(out, "no memory named") || strings.Contains(out, "did you mean") {
+					t.Errorf("both keys missing must refuse without a hint: %s", out)
+				}
+				if after := bdMemories(t, bd, dir, "--json"); after != before {
+					t.Fatalf("miss changed memories:\nbefore: %s\nafter:  %s", before, after)
+				}
+			})
+		}
+	})
+
 	t.Run("remember_bare_slug_without_memory_refuses", func(t *testing.T) {
 		// A bare slug naming NO existing memory is a mistyped read (or junk content) --
 		// refuse rather than silently creating a memory whose content is its own key.
@@ -238,19 +293,17 @@ func TestEmbeddedMemory(t *testing.T) {
 		bdRecallFail(t, bd, dir, "brand-new-slug-memory")
 	})
 
-	// The two refusals that sit either side of the desire path, and the reason
-	// the bare-slug test is `derived != "" && derived == insight` rather than
-	// the shipped `slugify(insight) == insight`: DeriveKey("") is "", so empty
-	// and underivable content satisfies derived == insight and would be routed
-	// into a "recall" of the empty key instead of being refused. The shipped
-	// code was saved from that by an empty-content check that ran BEFORE the
-	// branch; that check belongs to the role now, so the branch has to exclude
-	// the empty key itself.
+	// The two refusals that sit either side of the desire path. Empty,
+	// whitespace and separator-only arguments are not bare keys
+	// (isBareMemoryKey), so they reach the role and get its refusal instead of
+	// being routed into a "recall" of a key nothing could ever store. A lone
+	// dot is the case a dotted-key grammar could get wrong (GH#7275).
 	t.Run("remember_refuses_content_no_key_derives_from", func(t *testing.T) {
 		for _, tc := range []struct{ insight, want string }{
 			{"", "memory content cannot be empty"},
 			{"   ", "memory content cannot be empty"},
 			{"!!!", "could not generate key from content"},
+			{".", "could not generate key from content"},
 		} {
 			out := bdRememberFail(t, bd, dir, tc.insight)
 			if !strings.Contains(out, tc.want) {
@@ -393,6 +446,96 @@ func TestEmbeddedMemory(t *testing.T) {
 	t.Run("forget_no_args", func(t *testing.T) {
 		bdForgetFail(t, bd, dir)
 	})
+}
+
+// TestEmbeddedMemoryBareKeyRecallsKeysDeriveKeyChanges pins GH#7275: a bare
+// `bd remember <exact-key>` recalls an existing memory even when the key does
+// not round-trip through DeriveKey (more than eight segments, over 60 bytes,
+// or a dot), and never writes a memory. A different memory under the derived
+// key is the one the old gate overwrote; it must neither answer nor change.
+func TestEmbeddedMemoryBareKeyRecallsKeysDeriveKeyChanges(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "tk")
+
+	for _, key := range []string{
+		"one-two-three-four-five-six-seven-eight-nine",
+		strings.Repeat("k", 61), // one segment, so the 60-byte cap is what changes it
+		"config.v2",
+	} {
+		t.Run(key, func(t *testing.T) {
+			content := "keep this content for " + key
+			derivedContent := "the derived-key memory beside " + key
+			bdRemember(t, bd, dir, content, "--key", key)
+			bdRemember(t, bd, dir, derivedContent, "--key", memoryapi.DeriveKey(key))
+			before := bdMemories(t, bd, dir, "--json")
+
+			out := bdRemember(t, bd, dir, key)
+			if !strings.Contains(out, content) {
+				t.Errorf("bare `bd remember %s` should recall %q, got: %s", key, content, out)
+			}
+			if strings.Contains(out, derivedContent) {
+				t.Errorf("bare `bd remember %s` answered with the derived key's memory: %s", key, out)
+			}
+			if after := bdMemories(t, bd, dir, "--json"); after != before {
+				t.Errorf("bare `bd remember %s` changed the memories:\nbefore: %s\nafter:  %s", key, before, after)
+			}
+		})
+	}
+}
+
+// TestEmbeddedMemoryBareKeyMissesNeverWrite pins GH#7275's misses: a bare
+// key the derivation changes that names no memory is refused, and when its
+// derived key names one the refusal hints at that key without printing its
+// content. Neither miss may create or change a memory.
+func TestEmbeddedMemoryBareKeyMissesNeverWrite(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "tk")
+	bdRemember(t, bd, dir, "an unrelated memory", "--key", "unrelated")
+
+	for _, key := range []string{
+		"one-two-three-four-five-six-seven-eight-nine",
+		strings.Repeat("k", 61), // one segment, so the 60-byte cap is what changes it
+		"config.v2",
+	} {
+		derived := memoryapi.DeriveKey(key)
+		t.Run(key+"/neither exists", func(t *testing.T) {
+			before := bdMemories(t, bd, dir, "--json")
+			out := bdRememberFail(t, bd, dir, key)
+			if !strings.Contains(out, "no memory named") || strings.Contains(out, "Hint:") {
+				t.Errorf("bare `bd remember %s` = %s, want the refusal with no hint", key, out)
+			}
+			if after := bdMemories(t, bd, dir, "--json"); after != before {
+				t.Errorf("bare `bd remember %s` changed the memories:\nbefore: %s\nafter:  %s", key, before, after)
+			}
+		})
+		t.Run(key+"/derived exists", func(t *testing.T) {
+			derivedContent := "the derived-key memory beside " + key
+			bdRemember(t, bd, dir, derivedContent, "--key", derived)
+			t.Cleanup(func() { bdForget(t, bd, dir, derived) })
+			before := bdMemories(t, bd, dir, "--json")
+			out := bdRememberFail(t, bd, dir, key)
+			if !strings.Contains(out, "no memory named") || !strings.Contains(out, "Hint: did you mean "+derived+"?") ||
+				!strings.Contains(out, "bd recall "+derived) {
+				t.Errorf("bare `bd remember %s` = %s, want the refusal with a hint naming %s", key, out, derived)
+			}
+			if strings.Contains(out, derivedContent) {
+				t.Errorf("bare `bd remember %s` printed the derived key's memory: %s", key, out)
+			}
+			if after := bdMemories(t, bd, dir, "--json"); after != before {
+				t.Errorf("bare `bd remember %s` changed the memories:\nbefore: %s\nafter:  %s", key, before, after)
+			}
+		})
+	}
 }
 
 // TestEmbeddedMemoryConcurrent exercises memory operations concurrently.
