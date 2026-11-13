@@ -283,6 +283,46 @@ func TestDoltNew_WispIsBlockedRestoreDefaultReady_RealDolt(t *testing.T) {
 	}
 }
 
+// TestDoltNew_WispIsBlockedRestoreUnblocksClose_RealDolt is AC-3: every
+// is_blocked mark statement carries the wisps union leg, so closing a blocker
+// on the drifted shape failed with 'recompute is_blocked (mark): table "p"
+// does not have column "is_blocked"'. The durable-only case shows that leg is
+// read even when only a durable dependent needs recomputation; the mixed case
+// closes the AC-2 graph's blocker and expects its wisp chain to unblock. No
+// column assertion runs before the close, so base reaches the failing SQL.
+func TestDoltNew_WispIsBlockedRestoreUnblocksClose_RealDolt(t *testing.T) {
+	t.Run("durable dependent", func(t *testing.T) {
+		c := newWispIsBlockedClone(t)
+		g := c.seedGraph()
+		x := "wib-x"
+		c.create(&types.Issue{ID: x, Title: x, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask})
+		c.depend(x, g.a, types.DepBlocks)
+		if got := c.blockedFlags("issues", x); !slices.Equal(got, []int{1}) {
+			t.Fatalf("durable dependent is_blocked before the drift = %v, want [1]", got)
+		}
+		c.breakShape()
+		c.reopen()
+		if err := c.store.CloseIssue(c.ctx, g.a, "done", "tester", ""); err != nil {
+			t.Fatalf("CloseIssue(%s) after the heal: %v", g.a, err)
+		}
+		if got := c.blockedFlags("issues", x); !slices.Equal(got, []int{0}) {
+			t.Fatalf("durable dependent is_blocked after closing its blocker = %v, want [0]", got)
+		}
+	})
+	t.Run("mixed wisp dependents", func(t *testing.T) {
+		c := newWispIsBlockedClone(t)
+		g := c.seedGraph()
+		c.breakShape()
+		c.reopen()
+		if err := c.store.CloseIssue(c.ctx, g.a, "done", "tester", ""); err != nil {
+			t.Fatalf("CloseIssue(%s) after the heal: %v", g.a, err)
+		}
+		if got := c.blockedFlags("wisps", g.b, g.c, g.d); !slices.Equal(got, []int{0, 0, 0}) {
+			t.Fatalf("wisp is_blocked (b, c, d) after closing the blocker = %v, want [0 0 0]", got)
+		}
+	})
+}
+
 // TestDoltNew_WispIsBlockedRestoreAllowsEphemeralCreate_RealDolt is AC-4:
 // creating a wisp recomputes is_blocked, which failed on the missing column.
 func TestDoltNew_WispIsBlockedRestoreAllowsEphemeralCreate_RealDolt(t *testing.T) {

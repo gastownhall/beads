@@ -124,6 +124,68 @@ func TestEmbeddedWispIsBlockedRestoreDefaultReady(t *testing.T) {
 	}
 }
 
+// TestEmbeddedWispIsBlockedRestoreUnblocksClose is the embedded twin of AC-3:
+// every is_blocked mark statement carries the wisps union leg, so closing a
+// blocker on the drifted shape failed on the missing column even when only a
+// durable dependent needed recomputation. No column assertion runs before the
+// close, so base reaches the failing close SQL.
+func TestEmbeddedWispIsBlockedRestoreUnblocksClose(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	for _, tc := range []struct {
+		name string
+		x    bool
+	}{{name: "durable dependent", x: true}, {name: "mixed wisp dependents", x: false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			fx := newPristineEmbeddedDoltFixture(t, "wib")
+			store := fx.store
+			t.Cleanup(func() {
+				if store != nil {
+					closeEmbeddedDoltStore(t, store)
+				}
+			})
+
+			seedWispIsBlockedGraph(t, ctx, fx, store)
+			if tc.x {
+				issue := &types.Issue{ID: "wib-x", Title: "wib-x", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+				if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+					t.Fatalf("CreateIssue(wib-x): %v", err)
+				}
+				dep := &types.Dependency{IssueID: "wib-x", DependsOnID: "wib-a", Type: types.DepBlocks}
+				if err := store.AddDependency(ctx, dep, "test"); err != nil {
+					t.Fatalf("AddDependency(wib-x -> wib-a): %v", err)
+				}
+				if err := store.Commit(ctx, "seed durable dependent"); err != nil {
+					t.Fatalf("commit durable dependent: %v", err)
+				}
+				if got := wispScalar(t, ctx, fx, "SELECT is_blocked FROM issues WHERE id = 'wib-x'"); got != 1 {
+					t.Fatalf("durable dependent is_blocked before the drift = %d, want 1", got)
+				}
+			}
+			closeEmbeddedDoltStore(t, store)
+			store = nil
+			driftWispIsBlocked(t, ctx, fx)
+
+			reopened, err := embeddeddolt.Open(ctx, fx.beadsDir, fx.database, "main")
+			if err != nil {
+				t.Fatalf("Open (heal): %v", err)
+			}
+			store = reopened
+			if err := store.CloseIssue(ctx, "wib-a", "done", "tester", ""); err != nil {
+				t.Fatalf("CloseIssue(wib-a) after the heal: %v", err)
+			}
+			if tc.x {
+				if got := wispScalar(t, ctx, fx, "SELECT is_blocked FROM issues WHERE id = 'wib-x'"); got != 0 {
+					t.Fatalf("durable dependent is_blocked after closing its blocker = %d, want 0", got)
+				}
+			}
+			if got := wispBlockedFlags(t, ctx, fx, "wib-b", "wib-c", "wib-d"); !slices.Equal(got, []int{0, 0, 0}) {
+				t.Fatalf("wisp is_blocked (b, c, d) after closing the blocker = %v, want [0 0 0]", got)
+			}
+		})
+	}
+}
+
 // TestEmbeddedWispIsBlockedRepairFailureRetries is AC-7 on the embedded open
 // path: a fault at any stage of the ignored 0032 restore must fail Open with
 // the fault surfaced and record no ignored 0032 row, and the next Open with
