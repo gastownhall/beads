@@ -1133,3 +1133,44 @@ func TestSetupCopilot_UpdatesSectionInPlaceAndIsIdempotent(t *testing.T) {
 		})
 	}
 }
+
+// AC-3: --check fails, naming the file and the remedy, when the instructions
+// hold only the user's content, and changes nothing.
+func TestSetupCopilot_CheckReportsMissingSection(t *testing.T) {
+	copilotTestWorkspace(t)
+	const user = "# Team Copilot rules\n\nAlways write table-driven tests.\n"
+	writeWorkspaceFile(t, copilotManifestFile, copilotManifest(t))
+	writeWorkspaceFile(t, copilotInstructionsFile, user)
+
+	out, err := runCopilotSetup(t, "check")
+	if err == nil {
+		t.Fatalf("bd setup copilot --check passed over instructions with no beads section:\n%s", out)
+	}
+	for _, want := range []string{"Missing Beads section: " + copilotInstructionsFile, "Run: bd setup copilot"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("check output lacks %q:\n%s", want, out)
+		}
+	}
+	if got, _ := readWorkspaceFile(t, copilotInstructionsFile); got != user {
+		t.Errorf("check changed the instructions to %q", got)
+	}
+	if got, _ := readWorkspaceFile(t, copilotManifestFile); got != copilotManifest(t) {
+		t.Errorf("check changed the manifest")
+	}
+}
+
+// --check passes once setup has added the section to the user's file.
+func TestSetupCopilot_CheckPassesWithSection(t *testing.T) {
+	copilotTestWorkspace(t)
+	writeWorkspaceFile(t, copilotInstructionsFile, "# Team rules\n")
+	if out, err := runCopilotSetup(t, ""); err != nil {
+		t.Fatalf("bd setup copilot: %v\n%s", err, out)
+	}
+	out, err := runCopilotSetup(t, "check")
+	if err != nil {
+		t.Fatalf("bd setup copilot --check: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "integration installed") {
+		t.Fatalf("check output = %q", out)
+	}
+}
