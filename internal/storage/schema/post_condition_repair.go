@@ -76,34 +76,25 @@ func recordedCursorVersion(ctx context.Context, db DBConn, cursorTable string) (
 	return int(maxed.Int64), true, nil
 }
 
-// recordedDroppedDefaultObligations returns the pinned obligations whose
-// versions both cursors already record, deduplicated by table/column (the
-// first, lowest-version entry retains the provenance). Reading each cursor
-// independently means a store that is current on one series and behind on the
-// other only owes what the recorded marks claim.
-func recordedDroppedDefaultObligations(ctx context.Context, db DBConn) []postConditionObligation {
-	sources := []migrationSource{mainSource, ignoredSource}
+// coveredDroppedDefaultObligations returns the pinned obligations the
+// recorded cursor versions cover, deduplicated by table/column (the first,
+// lowest-version entry retains the provenance). recorded maps a cursor table
+// to the highest version it records; a cursor absent from the map records
+// nothing. Reading each cursor independently means a store that is current on
+// one series and behind on the other only owes what the recorded marks claim.
+func coveredDroppedDefaultObligations(recorded map[string]int) []postConditionObligation {
 	var out []postConditionObligation
 	seen := make(map[string]bool)
-	for _, src := range sources {
-		recorded, exists, err := recordedCursorVersion(ctx, db, src.cursorTable)
-		if err != nil || !exists {
-			// A cursor that cannot be read is the caller's error to surface
-			// (RepairDroppedDefaultDrift re-reads and fails loudly); here an
-			// absent table simply records nothing.
+	for _, o := range droppedDefaultObligations {
+		if recordedVersion, covered := recorded[o.cursorTable]; !covered || o.version > recordedVersion {
 			continue
 		}
-		for _, o := range droppedDefaultObligations {
-			if o.cursorTable != src.cursorTable || o.version > recorded {
-				continue
-			}
-			key := o.table + "." + o.column
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			out = append(out, o)
+		key := o.table + "." + o.column
+		if seen[key] {
+			continue
 		}
+		seen[key] = true
+		out = append(out, o)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].table != out[j].table {
@@ -112,6 +103,57 @@ func recordedDroppedDefaultObligations(ctx context.Context, db DBConn) []postCon
 		return out[i].column < out[j].column
 	})
 	return out
+}
+
+// recordedDroppedDefaultObligations reads what both cursors RECORD and
+// returns the obligations those marks cover. A cursor table that does not
+// exist records nothing; a cursor that cannot be read also records nothing
+// here — the explicit repair's failure modes surface through its own later
+// reads, while the read-only diagnosis (DiagnoseDroppedDefaultDrift) fails
+// loudly on the same error instead.
+func recordedDroppedDefaultObligations(ctx context.Context, db DBConn) []postConditionObligation {
+	recorded := make(map[string]int)
+	for _, src := range []migrationSource{mainSource, ignoredSource} {
+		version, exists, err := recordedCursorVersion(ctx, db, src.cursorTable)
+		if err != nil || !exists {
+			continue
+		}
+		recorded[src.cursorTable] = version
+	}
+	return coveredDroppedDefaultObligations(recorded)
+}
+
+// droppedDefaultDrift is one obligation whose column default survived the
+// migration that promised to drop it, with the default the probe read.
+type droppedDefaultDrift struct {
+	obligation postConditionObligation
+	observed   sql.NullString
+}
+
+// probeDroppedDefaultDrifts reads, without altering anything, which of the
+// obligations' column defaults are still in place. A table the store does
+// not have is skipped, as the migration body's own guard skipped it. One
+// unreadable column fails the whole probe: a partial drift picture must not
+// decide a repair, or pose as a clean bill of health.
+func probeDroppedDefaultDrifts(ctx context.Context, db DBConn, obligations []postConditionObligation) ([]droppedDefaultDrift, error) {
+	var drifts []droppedDefaultDrift
+	for _, o := range obligations {
+		present, err := showTableExists(ctx, db, o.table)
+		if err != nil {
+			return nil, fmt.Errorf("checking table %s: %w", o.table, err)
+		}
+		if !present {
+			continue // never created on this store; the body's guard skipped it too
+		}
+		def, err := showColumnDefault(ctx, db, o.table, o.column)
+		if err != nil {
+			return nil, fmt.Errorf("reading %s.%s default: %w", o.table, o.column, err)
+		}
+		if def.Valid {
+			drifts = append(drifts, droppedDefaultDrift{obligation: o, observed: def})
+		}
+	}
+	return drifts, nil
 }
 
 // PostConditionDirtyWorkError is returned by the explicit repair when a
@@ -162,26 +204,9 @@ func RepairDroppedDefaultDrift(ctx context.Context, db DBConn) (repairs []string
 	// Probe every obligation before touching anything: the full drift picture
 	// decides the guard and the commit, and one unreadable column must not
 	// hide the rest.
-	type drift struct {
-		obligation postConditionObligation
-		observed   sql.NullString
-	}
-	var drifts []drift
-	for _, o := range obligations {
-		present, err := showTableExists(ctx, db, o.table)
-		if err != nil {
-			return nil, fmt.Errorf("checking table %s: %w", o.table, err)
-		}
-		if !present {
-			continue // never created on this store; the body's guard skipped it too
-		}
-		def, err := showColumnDefault(ctx, db, o.table, o.column)
-		if err != nil {
-			return nil, fmt.Errorf("reading %s.%s default: %w", o.table, o.column, err)
-		}
-		if def.Valid {
-			drifts = append(drifts, drift{obligation: o, observed: def})
-		}
+	drifts, err := probeDroppedDefaultDrifts(ctx, db, obligations)
+	if err != nil {
+		return nil, err
 	}
 	if len(drifts) == 0 {
 		return nil, nil

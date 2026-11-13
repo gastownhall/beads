@@ -1460,6 +1460,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   commit. `--json` reports `status: "repaired"` with the `repaired` list, a
   repeat run is a no-op, and a tracked table holding uncommitted changes is
   refused before anything is altered, naming the table and the remedy.
+  `bd doctor` also gained a read-only "Migration Post-Conditions" check
+  (server and embedded mode) that reports every recorded obligation whose
+  default survived — the marks-say-current / DDL-says-older signature — with
+  the `bd migrate schema` remedy; a database it cannot inspect warns
+  could-not-check instead of reading as healthy.
 - **bd again reads `GT_ROOT` from a rig's `.beads/.env`** (#8117; also
   shipped in 1.3.4). `gc rig add` writes the city root there, and the
   `.beads/.env` allowlist from #7879 (also in 1.3.3) dropped it, printing
