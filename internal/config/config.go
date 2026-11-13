@@ -132,8 +132,8 @@ func initialize(beadsDirSetting string) error {
 	//
 	// Precedence (highest to lowest):
 	//   BEADS_DIR/config.yaml > project .beads/config.yaml > documented
-	//   <home>/.config/bd/config.yaml > native os.UserConfigDir()/bd/config.yaml
-	//   > legacy <home>/.beads/config.yaml
+	//   <home>/.config/bd/config.yaml, or native os.UserConfigDir()/bd/config.yaml
+	//   only when the documented file is absent > legacy <home>/.beads/config.yaml
 	//
 	// Previously, only ONE config file was loaded (the highest-priority match),
 	// which meant user-level config was silently ignored when project-level
@@ -159,9 +159,15 @@ func initialize(beadsDirSetting string) error {
 		configPaths = append(configPaths, path)
 	}
 
-	// Lowest to highest user-level precedence: legacy, native, documented.
+	// Lowest to highest user-level precedence: legacy, then documented or,
+	// only when the documented file is absent, native. Native is never even
+	// probed while documented exists: on macOS touching os.UserConfigDir()
+	// raises a privacy prompt on every launch (GH#8113).
 	appendExistingUserConfig(userConfigPaths.legacy)
-	appendExistingUserConfig(userConfigPaths.native)
+	if userConfigPaths.native != userConfigPaths.documented &&
+		!userConfigPathExists(userConfigPaths.documented) {
+		appendExistingUserConfig(userConfigPaths.native)
+	}
 	appendExistingUserConfig(userConfigPaths.documented)
 	userConfigPathCount := len(configPaths)
 

@@ -58,9 +58,13 @@ type MismatchError struct {
 	Hint   string
 }
 
+// Error names the user config file bd reads, not always
+// ~/.config/bd/config.yaml: while that file is missing bd reads the native
+// one instead, and creating ~/.config/bd/config.yaml to confirm the endpoint
+// would hide every setting in the native file (GH#8113).
 func (e *MismatchError) Error() string {
-	return fmt.Sprintf("%s for this workspace changed from %s to %s. Your %s credential was not sent. If this change is intended, set %s in your environment or %s in ~/.config/bd/config.yaml.",
-		e.Key, e.Pinned, e.Got, e.Kind, e.Hint, e.Key)
+	return fmt.Sprintf("%s for this workspace changed from %s to %s. Your %s credential was not sent. If this change is intended, set %s in your environment or %s in %s.",
+		e.Key, e.Pinned, e.Got, e.Kind, e.Hint, e.Key, config.UserConfigYamlDisplayPath())
 }
 
 // FirstUseError reports a shared credential endpoint that has no pin for
@@ -73,9 +77,10 @@ type FirstUseError struct {
 	Hint string
 }
 
+// Error names the user config file bd reads, as MismatchError's does.
 func (e *FirstUseError) Error() string {
-	return fmt.Sprintf("%s for this workspace is %s, which no private source has confirmed. Your %s credential was not sent. If this endpoint is intended, set %s in your environment or %s in ~/.config/bd/config.yaml.",
-		e.Key, e.Got, e.Kind, e.Hint, e.Key)
+	return fmt.Sprintf("%s for this workspace is %s, which no private source has confirmed. Your %s credential was not sent. If this endpoint is intended, set %s in your environment or %s in %s.",
+		e.Key, e.Got, e.Kind, e.Hint, e.Key, config.UserConfigYamlDisplayPath())
 }
 
 // Origin normalizes an endpoint to a scheme/host/port[/path] origin or an absolute Unix socket origin.

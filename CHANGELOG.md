@@ -1347,6 +1347,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filesystem, which a server in a container does not unless the backup is
   mounted at the same path in both; there a `--force` restore from a backup
   that only bd's machine holds can still drop the database.
+- Loading config no longer touches the native user config file
+  (`os.UserConfigDir()/bd/config.yaml`, on macOS
+  `~/Library/Application Support/bd/config.yaml`) while
+  `~/.config/bd/config.yaml` exists. Every launch stat'd it, which on macOS 26
+  was reported to raise a privacy prompt each time (GH#8113). The native file
+  is now a fallback, read only when the existence check for
+  `~/.config/bd/config.yaml` fails, instead of a layer merged beneath it; the
+  legacy `~/.beads/config.yaml` still merges beneath the selected file.
+  **Breaking for native-file users:** once `~/.config/bd/config.yaml` exists,
+  no setting in the native file applies, and nothing warns about it. If your
+  settings live in the native file, move it to `~/.config/bd/config.yaml` now.
+  Otherwise a `~/.config/bd/config.yaml` created later hides it, whether you
+  create one by hand or bd does: on Linux, a bd run without your
+  `XDG_CONFIG_HOME` (a cron job, a systemd unit or `ssh host bd` that does not
+  set it) writes one holding only the metrics settings, unless metrics are
+  disabled there. If you already have both files, settings defined only in the
+  native file stop applying. That includes `node_id`: unless it is supplied
+  elsewhere, it reads as unset and replica-aware behavior is disabled. Copy the
+  settings you want into `~/.config/bd/config.yaml` by editing it (keeping its
+  own value where both set a key). `bd config set` writes that file only for
+  the per-machine keys (`node_id`, `mail.delegate`, `dolt.remotesapi-port`,
+  `metrics.*`), so `bd config set node_id <name>` restores `node_id`. The
+  native file can stay in place. Endpoint-trust refusals and `bd doctor`'s hint
+  for an untrusted Dolt server now name the user config file bd reads, the
+  native one while `~/.config/bd/config.yaml` is missing, instead of always
+  `~/.config/bd/config.yaml`. Other commands may still touch the native
+  directory (`bd prime` looks for `os.UserConfigDir()/beads/PRIME.md`); this
+  removes only the config-load probe.
+
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
