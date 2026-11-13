@@ -26,7 +26,7 @@ var lintCmd = &cobra.Command{
 	Use:     "lint [issue-id...]",
 	GroupID: "views",
 	Short:   "Check issues for missing template sections",
-	Long: `Check issues for missing recommended sections based on issue type.
+	Long: `Check issues for missing recommended sections and configured field-length limits.
 
 By default, lints all open issues. Specify issue IDs to lint specific issues.
 
