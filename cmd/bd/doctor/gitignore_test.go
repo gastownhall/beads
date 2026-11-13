@@ -3440,8 +3440,9 @@ func TestEnsureGitignoreForBeadsDir_TightenFailureIsPermissionOnly(t *testing.T)
 // machineLocalStateFiles are the per-clone files bd writes at the top level of
 // .beads/ after init (GH#8318): the bd backup init/sync destination and
 // last-sync state, the bd dolt set audit log, the JSONL auto-import stamp and
-// the bd dolt migrate resume journal. Kept as a literal list so a test never
-// derives its expectation from the production lists it checks.
+// the resume journal of the bd migrate from-<mode>-to-<mode> switches. Kept as
+// a literal list so a test never derives its expectation from the production
+// lists it checks.
 var machineLocalStateFiles = []string{
 	"dolt-backup.json",
 	"dolt-backup-state.json",

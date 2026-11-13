@@ -99,8 +99,8 @@ dolt-config.log
 # JSONL auto-import stamp (size and mtime of the issues.jsonl last attempted)
 .auto-import-issues.jsonl
 
-# bd dolt migrate resume journal (absolute paths; kept only while a
-# migration is unfinished)
+# Resume journal of the bd migrate from-<mode>-to-<mode> switches (absolute
+# paths; kept only while a migration is unfinished)
 dolt-mode-migration.json
 
 # Per-project environment file (Dolt connection config, GH#2520)

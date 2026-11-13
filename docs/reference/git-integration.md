@@ -27,9 +27,16 @@ between machines.
 ```
 
 `bd init` writes `.beads/.gitignore` to keep the database directory and
-runtime files out of git — no manual gitignore rules are needed. Never track
-the database directory (`.beads/embeddeddolt/` or `.beads/dolt/`) in git or
-via Git LFS.
+runtime files out of git. Never track the database directory
+(`.beads/embeddeddolt/` or `.beads/dolt/`) in git or via Git LFS.
+
+A `.beads/.gitignore` that an older bd wrote can lack patterns a newer bd
+adds. In server mode, `bd doctor` reports the file as outdated, and
+`bd doctor --fix` appends the missing patterns, keeping your own rules, and
+untracks runtime files that were already committed. Embedded mode (the
+default) and proxied-server mode do not run these checks: there, add the
+missing patterns to `.beads/.gitignore` by hand and run `git rm --cached`
+on any runtime file already committed.
 
 ## Git Hooks
 
