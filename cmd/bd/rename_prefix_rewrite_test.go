@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -62,6 +63,9 @@ func TestRewriteIssueID_PrefixShortening(t *testing.T) {
 		t.Fatalf("got %q, want kw-42 (shortening regression)", got)
 	}
 }
+
+// repairHashRootPattern matches a fallback root the planner mints under kb.
+var repairHashRootPattern = regexp.MustCompile(`^kb-[0-9a-f]{8}$`)
 
 func planIssues(ids ...string) []*types.Issue {
 	issues := make([]*types.Issue, 0, len(ids))
@@ -143,6 +147,208 @@ func TestPlanPrefixRepair(t *testing.T) {
 		}
 		if probes != 1+repairHashAttempts {
 			t.Fatalf("probes = %d, want one batch plus %d candidates", probes, repairHashAttempts)
+		}
+	})
+
+	t.Run("free suffixes and retained target ids", func(t *testing.T) {
+		t.Parallel()
+		plan, err := planPrefixRepair(ctx, "kb", planIssues("kb-adr-0001", "taxdb-5su1", "cre-db-c2a"), nil, "actor", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if plan.Unchanged != 1 || len(plan.Collisions) != 0 {
+			t.Fatalf("plan = %+v, want kb-adr-0001 unchanged and no collisions", plan)
+		}
+		if got := planMapping(plan); got["taxdb-5su1"] != "kb-5su1" || got["cre-db-c2a"] != "kb-c2a" {
+			t.Fatalf("mapping = %v, want suffix-preserving kb-5su1 and kb-c2a", got)
+		}
+		if plan.rootMap["taxdb-5su1"] != "kb-5su1" {
+			t.Fatalf("rootMap[taxdb-5su1] = %q, want kb-5su1", plan.rootMap["taxdb-5su1"])
+		}
+	})
+
+	t.Run("live root collision re-roots the family", func(t *testing.T) {
+		t.Parallel()
+		plan, err := planPrefixRepair(ctx, "kb", planIssues("kb-5su1", "taxdb-5su1"), nil, "actor", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(plan.Collisions) != 1 {
+			t.Fatalf("collisions = %+v, want one", plan.Collisions)
+		}
+		c := plan.Collisions[0]
+		if c.OldRoot != "taxdb-5su1" || c.WantedRoot != "kb-5su1" || c.Reason != repairCollisionExists || c.ConflictID != "kb-5su1" {
+			t.Fatalf("collision = %+v, want taxdb-5su1 -> kb-5su1 [exists] held by kb-5su1", c)
+		}
+		if !repairHashRootPattern.MatchString(c.AssignedRoot) {
+			t.Fatalf("assigned root = %q, want kb-<8 hex>", c.AssignedRoot)
+		}
+		if got := planMapping(plan); got["taxdb-5su1"] != c.AssignedRoot {
+			t.Fatalf("mapping = %v, want the family on %s", got, c.AssignedRoot)
+		}
+	})
+
+	t.Run("child-only namespace collision", func(t *testing.T) {
+		t.Parallel()
+		// No live kb-5su1 row, but kb-5su1.13 holds the namespace: taking the
+		// root would graft the taxdb family onto that child's ancestry.
+		plan, err := planPrefixRepair(ctx, "kb", planIssues("kb-5su1.13", "taxdb-5su1", "taxdb-5su1.13"), nil, "actor", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(plan.Collisions) != 1 {
+			t.Fatalf("collisions = %+v, want one", plan.Collisions)
+		}
+		c := plan.Collisions[0]
+		if c.Reason != repairCollisionExists || c.ConflictID != "kb-5su1.13" || !repairHashRootPattern.MatchString(c.AssignedRoot) {
+			t.Fatalf("collision = %+v, want exists held by the live child kb-5su1.13, on a hash root", c)
+		}
+		if got := planMapping(plan); got["taxdb-5su1"] != c.AssignedRoot || got["taxdb-5su1.13"] != c.AssignedRoot+".13" {
+			t.Fatalf("mapping = %v, want the family nested under %s", got, c.AssignedRoot)
+		}
+	})
+
+	t.Run("earlier family's claim", func(t *testing.T) {
+		t.Parallel()
+		// Both families want kb-u6ch; prefix order gives cre-db the natural
+		// destination and taxdb the fallback.
+		plan, err := planPrefixRepair(ctx, "kb", planIssues("taxdb-u6ch", "cre-db-u6ch"), []string{"cre-db", "taxdb"}, "actor", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := planMapping(plan)
+		if got["cre-db-u6ch"] != "kb-u6ch" {
+			t.Fatalf("cre-db-u6ch -> %q, want the natural kb-u6ch", got["cre-db-u6ch"])
+		}
+		if len(plan.Collisions) != 1 {
+			t.Fatalf("collisions = %+v, want one", plan.Collisions)
+		}
+		c := plan.Collisions[0]
+		if c.OldRoot != "taxdb-u6ch" || c.WantedRoot != "kb-u6ch" || c.Reason != repairCollisionClaimed || c.ConflictID != "cre-db-u6ch" {
+			t.Fatalf("collision = %+v, want taxdb-u6ch -> kb-u6ch [claimed] by cre-db-u6ch", c)
+		}
+		if got["taxdb-u6ch"] != c.AssignedRoot || !repairHashRootPattern.MatchString(c.AssignedRoot) {
+			t.Fatalf("taxdb-u6ch -> %q (assigned %q), want a hash root", got["taxdb-u6ch"], c.AssignedRoot)
+		}
+	})
+
+	t.Run("orphan family's root claim makes a later root family fall back", func(t *testing.T) {
+		t.Parallel()
+		// cre-db-x.3 has no cre-db-x row, but its virtual root still claims
+		// the kb-x namespace; taxdb-x must not become kb-x, a false parent of
+		// kb-x.3.
+		plan, err := planPrefixRepair(ctx, "kb", planIssues("taxdb-x", "cre-db-x.3"), []string{"cre-db", "taxdb"}, "actor", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := planMapping(plan)
+		if got["cre-db-x.3"] != "kb-x.3" {
+			t.Fatalf("cre-db-x.3 -> %q, want kb-x.3", got["cre-db-x.3"])
+		}
+		if len(plan.Collisions) != 1 {
+			t.Fatalf("collisions = %+v, want one", plan.Collisions)
+		}
+		c := plan.Collisions[0]
+		if c.OldRoot != "taxdb-x" || c.WantedRoot != "kb-x" || c.Reason != repairCollisionClaimed || c.ConflictID != "cre-db-x" {
+			t.Fatalf("collision = %+v, want taxdb-x -> kb-x [claimed] by the orphan root cre-db-x", c)
+		}
+		if got["taxdb-x"] != c.AssignedRoot || got["taxdb-x"] == "kb-x" || !repairHashRootPattern.MatchString(c.AssignedRoot) {
+			t.Fatalf("taxdb-x -> %q (assigned %q), want a hash root, not kb-x", got["taxdb-x"], c.AssignedRoot)
+		}
+	})
+
+	t.Run("retired member id re-roots the family", func(t *testing.T) {
+		t.Parallel()
+		// The wanted root is free but a member's destination is retired: the
+		// family moves whole rather than splitting.
+		plan, err := planPrefixRepair(ctx, "kb", planIssues("taxdb-5su1", "taxdb-5su1.13"), nil, "actor",
+			func(_ context.Context, ids []string) (map[string]time.Time, error) {
+				if slices.Contains(ids, "kb-5su1.13") {
+					return map[string]time.Time{"kb-5su1.13": time.Unix(1, 0)}, nil
+				}
+				return nil, nil
+			})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(plan.Collisions) != 1 {
+			t.Fatalf("collisions = %+v, want one", plan.Collisions)
+		}
+		c := plan.Collisions[0]
+		if c.Reason != repairCollisionRetired || c.ConflictID != "kb-5su1.13" {
+			t.Fatalf("collision = %+v, want retired held by kb-5su1.13", c)
+		}
+		if got := planMapping(plan); got["taxdb-5su1"] != c.AssignedRoot || got["taxdb-5su1.13"] != c.AssignedRoot+".13" {
+			t.Fatalf("mapping = %v, want the family nested under %s", got, c.AssignedRoot)
+		}
+	})
+
+	t.Run("retired candidate is skipped", func(t *testing.T) {
+		t.Parallel()
+		// aaa-q7 collides with live kb-q7 and walks hash candidates. Family b
+		// naturally wants the first candidate and reserves it before any
+		// fallback is allocated; the probe retires the second, so aaa-q7
+		// lands on the third.
+		const actor = "deterministic-actor"
+		issues := planIssues("kb-q7", "aaa-q7")
+		seed := issues[1]
+		first := repairHashRoot("kb", seed, actor, 0)
+		second := repairHashRoot("kb", seed, actor, 1)
+		third := repairHashRoot("kb", seed, actor, 2)
+		if first == second || second == third || first == third {
+			t.Fatal("precomputed candidates collided; the fixture does not exercise the walk")
+		}
+		bRoot := "b-" + strings.TrimPrefix(first, "kb-")
+		issues = append(issues, planIssues(bRoot)...)
+		plan, err := planPrefixRepair(ctx, "kb", issues, []string{"aaa", "b"}, actor,
+			func(_ context.Context, ids []string) (map[string]time.Time, error) {
+				if slices.Contains(ids, second) {
+					return map[string]time.Time{second: time.Unix(1, 0)}, nil
+				}
+				return nil, nil
+			})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := planMapping(plan)
+		if got[bRoot] != first {
+			t.Fatalf("family b -> %q, want its natural root %s", got[bRoot], first)
+		}
+		if len(plan.Collisions) != 1 || plan.Collisions[0].AssignedRoot != third || got["aaa-q7"] != third {
+			t.Fatalf("collisions = %+v, mapping = %v; want aaa-q7 on the third candidate %s", plan.Collisions, got, third)
+		}
+	})
+
+	t.Run("known prefixes keep hyphenated suffixes whole", func(t *testing.T) {
+		t.Parallel()
+		plan, err := planPrefixRepair(ctx, "kb", planIssues("cre-db-a1b", "cre-db-wxyz"), []string{"cre-db"}, "actor", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := planMapping(plan); got["cre-db-a1b"] != "kb-a1b" || got["cre-db-wxyz"] != "kb-wxyz" {
+			t.Fatalf("mapping = %v, want kb-a1b and kb-wxyz", got)
+		}
+	})
+
+	t.Run("heuristic without known prefixes", func(t *testing.T) {
+		t.Parallel()
+		plan, err := planPrefixRepair(ctx, "kb", planIssues("cre-db-wxyz"), nil, "actor", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := planMapping(plan); got["cre-db-wxyz"] != "kb-db-wxyz" {
+			t.Fatalf("mapping = %v, want the heuristic kb-db-wxyz", got)
+		}
+	})
+
+	t.Run("all-letter suffix under a known prefix", func(t *testing.T) {
+		t.Parallel()
+		plan, err := planPrefixRepair(ctx, "kb", planIssues("me-py-toolkit-abcd"), []string{"me", "me-py-toolkit"}, "actor", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := planMapping(plan); got["me-py-toolkit-abcd"] != "kb-abcd" {
+			t.Fatalf("mapping = %v, want kb-abcd (longest known prefix wins)", got)
 		}
 	})
 
