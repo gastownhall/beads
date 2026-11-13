@@ -67,6 +67,10 @@ type migrateLockOptions struct {
 	lockedPreparation  *lockedPreparationRequest
 	databaseSelector   DatabaseSelector
 	migrationGate      MigrationGate
+	// postConditionRepair, when set, runs RepairRecordedPostConditions after
+	// MigrateUp under the lock and skips the convergence fast path
+	// (WithPostConditionRepair; explicit `bd migrate schema` only).
+	postConditionRepair *PostConditionRepairReport
 }
 
 type freshBootstrapHealRequest struct {
@@ -269,7 +273,7 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 	// session on it — preparation's CREATE DATABASE would then have failed
 	// with "database exists" and captured no authority, and its USE is the
 	// statement alreadyConverged itself issued.
-	if o.freshBootstrapHeal == nil {
+	if o.freshBootstrapHeal == nil && o.postConditionRepair == nil {
 		converged, convergedErr := alreadyConverged(ctx, conn, databaseName, o.databaseSelector)
 		switch {
 		case convergedErr != nil:
@@ -355,6 +359,13 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 			return applied, errors.Join(err, fmt.Errorf("schema: fresh-bootstrap reset: %w", resetErr))
 		}
 		applied, err = migrate(ctx, conn)
+	}
+	if err == nil && o.postConditionRepair != nil {
+		// Explicit repair (GH#5269): after MigrateUp so both sources have
+		// their final shape, on the same session, still under the lock.
+		report, repairErr := RepairRecordedPostConditions(ctx, conn)
+		o.postConditionRepair.merge(report)
+		err = repairErr
 	}
 	return applied, err
 }

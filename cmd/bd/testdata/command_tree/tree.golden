@@ -4794,8 +4794,14 @@ bd migrate schema
     | designated migrator. Migrating is one-way: bd releases built for an older
     | schema refuse the migrated database.
     |
-    | On an up-to-date database this is a no-op, so it is safe to run in CI,
-    | release gates, and recovery scenarios.
+    | It also repairs recorded migration post-conditions: a column default that a
+    | recorded migration drops but that is still in place (GH#5269) is dropped and
+    | the change committed on its own. It refuses, before changing anything, if a
+    | table it would repair holds uncommitted changes. Ordinary commands never do
+    | this repair; `bd doctor` reports when it is needed.
+    |
+    | On an up-to-date, healthy database this is a no-op, so it is safe to run in
+    | CI, release gates, and recovery scenarios.
     |
     | Example:
     |   bd migrate schema

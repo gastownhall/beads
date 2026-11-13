@@ -316,6 +316,7 @@ var _ storage.FullGarbageCollector = (*DoltStore)(nil)
 var _ storage.Flattener = (*DoltStore)(nil)
 var _ storage.Compactor = (*DoltStore)(nil)
 var _ storage.SchemaMigrator = (*DoltStore)(nil)
+var _ storage.SchemaPostConditionRepairer = (*DoltStore)(nil)
 var _ storage.ExternalRefHistoryQuerier = (*DoltStore)(nil)
 var _ storage.EventsJournalConfigurer = (*DoltStore)(nil)
 var _ storage.EventsJournalShapeChecker = (*DoltStore)(nil)
@@ -3534,6 +3535,7 @@ func initSchemaOnDBWithBootstrapHeal(
 	db *sql.DB,
 	bootstrapHeal *schema.FreshBootstrapHealCapability,
 	endpoint string,
+	extra ...schema.MigrateLockOption,
 ) (int, error) {
 	conn, err := db.Conn(ctx)
 	if err != nil {
@@ -3550,6 +3552,7 @@ func initSchemaOnDBWithBootstrapHeal(
 	if bootstrapHeal != nil {
 		opts = append(opts, schema.WithFreshBootstrapHeal(bootstrapHeal, endpoint))
 	}
+	opts = append(opts, extra...)
 	applied, err := schema.MigrateUpWithLock(ctx, conn, dbName, opts...)
 	if err != nil {
 		return applied, fmt.Errorf("schema migration: %w", err)
@@ -3579,6 +3582,7 @@ func initSchemaOnDBWithRetryAndGateBootstrapHeal(
 	gate func(context.Context, *sql.DB) error,
 	bootstrapHeal *schema.FreshBootstrapHealCapability,
 	endpoint string,
+	extra ...schema.MigrateLockOption,
 ) (int, error) {
 	// Schema initialization for server mode is idempotent. Retry transient
 	// Dolt startup/catalog races and contended migration-lock attempts so
@@ -3620,7 +3624,7 @@ func initSchemaOnDBWithRetryAndGateBootstrapHeal(
 			gateSatisfied = true
 		}
 		var schemaErr error
-		applied, schemaErr = initSchemaOnDBWithBootstrapHeal(ctx, db, bootstrapHeal, endpoint)
+		applied, schemaErr = initSchemaOnDBWithBootstrapHeal(ctx, db, bootstrapHeal, endpoint, extra...)
 		if schemaErr != nil && isRetryableError(schemaErr) {
 			return schemaErr
 		}
@@ -3811,6 +3815,29 @@ func (s *DoltStore) ApplySchemaMigrations(ctx context.Context) (int, error) {
 	}
 	defer migDB.Close()
 	return initSchemaOnDBWithRetry(ctx, migDB)
+}
+
+// ApplySchemaMigrationsAndRepair is ApplySchemaMigrations for an explicit
+// `bd migrate schema`: under the same lock and retry, it also repairs recorded
+// migration post-conditions (schema.WithPostConditionRepair, GH#5269), then
+// rebuilds the main pool so no pooled session keeps reading the pre-repair
+// root — after a partial success too.
+// Implements storage.SchemaPostConditionRepairer.
+func (s *DoltStore) ApplySchemaMigrationsAndRepair(ctx context.Context) (int, []string, error) {
+	migDB, err := s.openMigrationDB()
+	if err != nil {
+		return 0, nil, err
+	}
+	defer migDB.Close()
+	var report schema.PostConditionRepairReport
+	applied, err := initSchemaOnDBWithRetryAndGateBootstrapHeal(ctx, migDB, nil, nil, "", schema.WithPostConditionRepair(&report))
+	repaired := report.Names()
+	if changed := applied + len(repaired); changed > 0 {
+		if rebuildErr := s.rebuildPoolAfterMigration(ctx, changed); rebuildErr != nil {
+			err = errors.Join(err, rebuildErr)
+		}
+	}
+	return applied, repaired, err
 }
 
 // openMigrationDB opens a one-off connection pool for schema migrations with no

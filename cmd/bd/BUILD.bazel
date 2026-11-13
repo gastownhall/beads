@@ -1055,6 +1055,7 @@ go_test(
         "migrate_personal_test.go",
         "migrate_repo_id_notice_test.go",
         "migrate_schema_identity_order_test.go",
+        "migrate_schema_post_condition_repair_test.go",
         "migrate_test.go",
         "migration_freeze_gate_test.go",
         "mol_bond_compound_label_test.go",
