@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -191,13 +192,53 @@ func TestSharedServerVersionBumpDoesNotPromoteCursor(t *testing.T) {
 		t.Fatalf("the refused write promoted the schema cursor from %d to %d", behind, got)
 	}
 
-	// Consent completes the upgrade.
+	// The refused reconciliation could not record the new version, and its
+	// .local_version signal is consumed: pin the workspace marker to the old
+	// version so the stamp below is observable.
+	readVersionMarker := func() string {
+		var v string
+		err := admin.QueryRowContext(ctx,
+			"SELECT value FROM local_metadata WHERE `key` = 'bd_version'").Scan(&v)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("read bd_version: %v", err)
+		}
+		return v
+	}
+	if _, err := admin.ExecContext(ctx,
+		"REPLACE INTO local_metadata (`key`, value) VALUES ('bd_version', '1.0.0')"); err != nil {
+		t.Fatalf("seed bd_version: %v", err)
+	}
+
+	// Consent completes the upgrade. The command's own pre-run open applies
+	// the pending migration, and the verb must still report it and stamp the
+	// workspace version (bd-pgsagt, gastownhall/beads#7380), not print
+	// "already at" and skip the stamp.
 	stdout, stderr, code = run("migrate", "schema")
 	if code != 0 {
 		t.Fatalf("bd migrate schema exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
 	}
 	if got := cursor(); got != schema.LatestVersion() {
 		t.Fatalf("cursor = %d after bd migrate schema, want %d", got, schema.LatestVersion())
+	}
+	wantApplied := fmt.Sprintf("Applied 1 schema migration(s); schema now at v%d", schema.LatestVersion())
+	if !strings.Contains(stdout, wantApplied) || strings.Contains(stdout, "Schema already at") {
+		t.Errorf("bd migrate schema on the run that migrated: want %q, got:\n%s", wantApplied, stdout)
+	}
+	stamped := readVersionMarker()
+	if stamped == "" || stamped == "1.0.0" {
+		t.Errorf("bd_version = %q after bd migrate schema applied a migration, want the binary's version", stamped)
+	}
+	if vOut, vErr, vCode := run("version"); vCode != 0 || !strings.Contains(vOut, stamped) {
+		t.Errorf("bd_version = %q, not the running binary's version (bd version exit %d):\n%s%s", stamped, vCode, vOut, vErr)
+	}
+
+	// Nothing is left the second time, and the command says so.
+	stdout, stderr, code = run("migrate", "schema")
+	if code != 0 {
+		t.Fatalf("second bd migrate schema exit = %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if want := fmt.Sprintf("Schema already at v%d", schema.LatestVersion()); !strings.Contains(stdout, want) {
+		t.Errorf("second bd migrate schema: want %q, got:\n%s", want, stdout)
 	}
 }
 
@@ -335,6 +376,9 @@ func TestServerModeReadRefusesASchemaItsReadsCannotQuery(t *testing.T) {
 	stdout, stderr, code := run("migrate", "schema")
 	if code != 0 {
 		t.Fatalf("bd migrate schema exit = %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if want := "Applied 2 schema migration(s); schema now at v74"; !strings.Contains(stdout, want) {
+		t.Errorf("bd migrate schema from v72: want %q, got:\n%s", want, stdout)
 	}
 	stdout, stderr, code = run("list")
 	if code != 0 || !strings.Contains(stdout, "rdb-1") {
