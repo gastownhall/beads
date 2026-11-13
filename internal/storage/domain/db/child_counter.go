@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 func NewChildCounterSQLRepository(runner Runner) domain.ChildCounterSQLRepository {
@@ -73,6 +74,22 @@ func (r *childCounterSQLRepositoryImpl) NextChildID(ctx context.Context, parentI
 	}
 
 	return fmt.Sprintf("%s.%d", parentID, next), nil
+}
+
+// AdvanceForChild runs issueops.ReconcileChildCounters for one caller-named
+// ID, the same advance the classic store's create path makes (GH#4750). It
+// routes a wisp parent to wisp_child_counters and skips an absent parent.
+func (r *childCounterSQLRepositoryImpl) AdvanceForChild(ctx context.Context, issue *types.Issue) error {
+	if issue == nil {
+		return nil
+	}
+	if _, childNum, ok := issueops.ParseHierarchicalID(issue.ID); !ok || childNum <= 0 {
+		return nil
+	}
+	if _, err := issueops.ReconcileChildCounters(ctx, r.runner, []*types.Issue{issue}); err != nil {
+		return fmt.Errorf("db: ChildCounterSQLRepository.AdvanceForChild: %s: %w", issue.ID, err)
+	}
+	return nil
 }
 
 func (r *childCounterSQLRepositoryImpl) parentIsActiveWisp(ctx context.Context, parentID string) (bool, error) {

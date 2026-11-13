@@ -4822,6 +4822,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   just `bd show`'s DESCRIPTION field. An explicit `GLAMOUR_STYLE` override
   still takes priority over the detected background.
 
+- **`bd create --id P.N` on a proxied-server workspace now advances the
+  parent's child counter**, as it already did in server and embedded mode
+  (GH#4750). The counter stayed behind, so once such a child was deleted, a
+  later `bd create --parent P` minted its ID again.
+
 ### Added
 
 - **`POST /v0/beads/issues:batchApply` accepts up to 1000 items, up from 100.**
