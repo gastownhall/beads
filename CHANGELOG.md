@@ -1347,6 +1347,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filesystem, which a server in a container does not unless the backup is
   mounted at the same path in both; there a `--force` restore from a backup
   that only bd's machine holds can still drop the database.
+- The `AGENTS.md` that `bd init` writes no longer teaches `rm -rf directory`
+  and `cp -rf source dest` as the default recursive forms. Its
+  "Non-Interactive Shell Commands" section keeps the `-f` examples for `cp`,
+  `mv` and `rm`, which is what prevents a hang on an interactive prompt, and
+  now says that `-r` is a separate decision: use it only on a directory the
+  user or the task named explicitly, and never widen a path to make a
+  command succeed. Existing projects keep their current file until it is
+  regenerated (#8367).
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its
