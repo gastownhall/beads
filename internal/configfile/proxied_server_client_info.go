@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 )
 
@@ -93,6 +94,22 @@ func SaveProxiedServerClientInfo(beadsDir string, info *ProxiedServerClientInfo)
 	}
 	if err = os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("writing %s: %w", ProxiedServerClientInfoFileName, err)
+	}
+	return syncSidecarDir(runtime.GOOS, beadsDir)
+}
+
+// syncSidecarDir flushes beadsDir after the rename that published the
+// sidecar. goos is the platform whose rules apply (runtime.GOOS in
+// production); tests pass other values to exercise each platform's branch.
+//
+// Windows omits the directory flush: FlushFileBuffers needs a handle with
+// GENERIC_WRITE access, and os.Open returns a read-only one, so the flush
+// fails with "Access is denied" after the save has already completed. The
+// checked file Sync, Close and Rename still run there; no equal power-loss
+// guarantee is claimed for Windows.
+func syncSidecarDir(goos, beadsDir string) error {
+	if goos == "windows" {
+		return nil
 	}
 	d, err := os.Open(beadsDir) // #nosec G304 -- beadsDir is the discovered workspace directory
 	if err != nil {
