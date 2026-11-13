@@ -3124,6 +3124,139 @@ func TestCounterMode_NoExistingIssues(t *testing.T) {
 	}
 }
 
+// TestCreateIssue_CounterModeWalksPastExplicitIDs pins GH#8456: explicit
+// --id creates do not advance the counter, so it can sit behind live rows. A
+// counter-mode auto create must walk past those ids — minting one would
+// silently overwrite the explicit row through the upsert create — and a
+// skipped value must never be handed out again.
+func TestCreateIssue_CounterModeWalksPastExplicitIDs(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Seed the counter so the first auto ID is test-1.
+	if _, err := store.db.ExecContext(ctx,
+		"INSERT INTO issue_counter (prefix, last_id) VALUES (?, ?)", "test", 0); err != nil {
+		t.Fatalf("failed to seed counter: %v", err)
+	}
+	if err := store.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+		t.Fatalf("failed to enable counter mode: %v", err)
+	}
+
+	first := &types.Issue{Title: "first auto", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, first, "tester"); err != nil {
+		t.Fatalf("first auto create: %v", err)
+	}
+	if first.ID != "test-1" {
+		t.Fatalf("first auto create = %q, want test-1", first.ID)
+	}
+
+	// Explicit creates do not move the counter: it stays at 1, behind
+	// test-2..test-4.
+	for n := 2; n <= 4; n++ {
+		explicit := &types.Issue{
+			ID:        fmt.Sprintf("test-%d", n),
+			Title:     fmt.Sprintf("explicit-%d", n),
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}
+		if err := store.CreateIssue(ctx, explicit, "tester"); err != nil {
+			t.Fatalf("explicit create test-%d: %v", n, err)
+		}
+	}
+
+	for i, want := range []string{"test-5", "test-6"} {
+		auto := &types.Issue{Title: "auto", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+		if err := store.CreateIssue(ctx, auto, "tester"); err != nil {
+			t.Fatalf("auto create %d: %v", i, err)
+		}
+		if auto.ID != want {
+			t.Errorf("auto create %d = %q, want %q, past the explicit test-2..test-4", i, auto.ID, want)
+		}
+	}
+
+	for n := 2; n <= 4; n++ {
+		got, err := store.GetIssue(ctx, fmt.Sprintf("test-%d", n))
+		if err != nil {
+			t.Fatalf("GetIssue(test-%d): %v", n, err)
+		}
+		if want := fmt.Sprintf("explicit-%d", n); got.Title != want {
+			t.Errorf("explicit row test-%d was overwritten: title=%q, want %q", n, got.Title, want)
+		}
+	}
+
+	var lastID int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT last_id FROM issue_counter WHERE prefix = ?", "test").Scan(&lastID); err != nil {
+		t.Fatalf("read issue counter: %v", err)
+	}
+	if lastID != 6 {
+		t.Errorf("issue_counter last_id = %d, want 6", lastID)
+	}
+}
+
+// TestCounterMode_AutoIDDoesNotOverwriteExplicitRowAheadOfCounter pins
+// GH#8456: in counter mode an auto-minted ID that collides with an explicit
+// row already ahead of the counter must not silently overwrite that row.
+func TestCounterMode_AutoIDDoesNotOverwriteExplicitRowAheadOfCounter(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Seed the counter so the next auto ID is test-1.
+	if _, err := store.db.ExecContext(ctx,
+		"INSERT INTO issue_counter (prefix, last_id) VALUES (?, ?)", "test", 0); err != nil {
+		t.Fatalf("failed to seed counter: %v", err)
+	}
+	if err := store.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+		t.Fatalf("failed to enable counter mode: %v", err)
+	}
+
+	explicit := &types.Issue{
+		ID:        "test-2",
+		Title:     "explicit",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, explicit, "tester"); err != nil {
+		t.Fatalf("failed to create explicit issue: %v", err)
+	}
+
+	autos := make([]string, 0, 2)
+	for i := 0; i < 2; i++ {
+		auto := &types.Issue{
+			Title:     "auto",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}
+		err := store.CreateIssue(ctx, auto, "tester")
+		if err != nil {
+			// A surfaced collision error is acceptable; a silent overwrite is not.
+			t.Logf("auto create %d returned error: %v", i, err)
+			continue
+		}
+		autos = append(autos, auto.ID)
+		if auto.ID == "test-2" {
+			t.Errorf("auto create %d was minted id test-2, which the explicit row already holds", i)
+		}
+	}
+
+	got, err := store.GetIssue(ctx, "test-2")
+	if err != nil {
+		t.Fatalf("GetIssue(test-2): %v", err)
+	}
+	if got.Title != "explicit" {
+		t.Errorf("explicit row test-2 was overwritten: title=%q, want %q (auto ids minted: %v)", got.Title, "explicit", autos)
+	}
+}
+
 // TestCounterMode_AlreadySeeded verifies that if a counter row already exists
 // (e.g., the counter is at 20), seeding is skipped even if higher manually-
 // created IDs like test-99 exist. The counter must NOT regress.

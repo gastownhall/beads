@@ -273,22 +273,24 @@ func RecordEventInTable(ctx context.Context, tx DBTX, table, issueID string, eve
 	})
 }
 
-// maxRetiredCounterSkips bounds how many retired counter values one
+// maxCounterSkips bounds how many taken or claimed counter values one
 // counter-mode create walks past before giving up with an error rather than
-// looping on a counter that a sweep retired a long run of.
-const maxRetiredCounterSkips = 1000
+// looping on a counter a long run of held values sits ahead of.
+const maxCounterSkips = 1000
 
 // GenerateIssueIDInTable generates an ID for an issue bound for table that
-// claimed does not name and no tombstone retired. Supports counter mode for
-// non-ephemeral issues. Only hash mode also probes for live rows, in both
-// planes (IDTakenInTx); counter mode takes the counter's next value on trust.
+// nothing holds: no live row in either plane, no tombstone, and not claimed.
+// Supports counter mode for non-ephemeral issues. Both modes pass over every
+// held ID the same way, through the one both-planes probe (IDTakenInTx);
+// hash mode tries hashes until one is free, counter mode walks the counter's
+// values until one is.
 //
 // A RETIRED ID IS TAKEN: a candidate a retaining sweep retired (either
 // tombstone table) is skipped exactly like one a live row holds, so a fresh
 // create is never refused with *IdempotencyExpiredError for an id it did not
-// choose. Hash mode folds the tombstone check into the one collision read it
-// already made; counter mode walks past retired values, at most
-// maxRetiredCounterSkips of them.
+// choose. Both modes fold the tombstone check into the one both-planes read
+// they already make; counter mode walks past held values, at most
+// maxCounterSkips of them.
 //
 // CLAIMED IS THE CALLER'S OWN BATCH: the ids it will write but has not yet,
 // explicit and minted. The probe reads rows, so a caller that assigns every
@@ -304,7 +306,7 @@ func GenerateIssueIDInTable(ctx context.Context, tx DBTX, table, prefix string, 
 			return "", err
 		}
 		if counterMode {
-			return nextUnretiredCounterIDTx(ctx, tx, prefix, claimed)
+			return nextFreeCounterIDTx(ctx, tx, prefix, claimed)
 		}
 	}
 
@@ -338,26 +340,27 @@ func GenerateIssueIDInTable(ctx context.Context, tx DBTX, table, prefix string, 
 	return "", fmt.Errorf("failed to generate unique ID after trying lengths %d-%d with 10 nonces each", baseLength, maxLength)
 }
 
-// nextUnretiredCounterIDTx is NextCounterIDTx skipping counter values a
-// retaining sweep retired or the caller's batch claimed. The counter only ever
-// advances, so a skipped value is never offered again.
-func nextUnretiredCounterIDTx(ctx context.Context, tx DBTX, prefix string, claimed map[string]bool) (string, error) {
+// nextFreeCounterIDTx is NextCounterIDTx skipping counter values anything
+// holds: a live row of either plane, a tombstone, or the caller's batch
+// claimed. The counter only ever advances, so a skipped value is never
+// offered again.
+func nextFreeCounterIDTx(ctx context.Context, tx DBTX, prefix string, claimed map[string]bool) (string, error) {
 	for skips := 0; ; skips++ {
 		candidate, err := NextCounterIDTx(ctx, tx, prefix)
 		if err != nil {
 			return "", err
 		}
 		if !claimed[candidate] {
-			retired, err := IDRetiredInTx(ctx, tx, candidate)
+			taken, err := IDTakenInTx(ctx, tx, candidate)
 			if err != nil {
 				return "", err
 			}
-			if !retired {
+			if !taken {
 				return candidate, nil
 			}
 		}
-		if skips >= maxRetiredCounterSkips {
-			return "", fmt.Errorf("issue counter for prefix %q walked past %d retired or claimed ids without finding a free one", prefix, maxRetiredCounterSkips)
+		if skips >= maxCounterSkips {
+			return "", fmt.Errorf("issue counter for prefix %q walked past %d taken or claimed ids without finding a free one", prefix, maxCounterSkips)
 		}
 	}
 }

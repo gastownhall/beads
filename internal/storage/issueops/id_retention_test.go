@@ -211,7 +211,8 @@ func TestGenerateIssueIDSkipsARetiredCandidate(t *testing.T) {
 
 // TestGenerateIssueIDCounterModeWalksPastARetiredValue pins counter mode: a
 // counter value a sweep retired is skipped and the counter advanced again, and
-// each candidate costs one tombstone read, not one per tombstone table.
+// each candidate costs one taken read, which covers both row tables and both
+// tombstone tables.
 func TestGenerateIssueIDCounterModeWalksPastARetiredValue(t *testing.T) {
 	db, mock := newIDRetentionMock(t)
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT value FROM config WHERE `key` = ?")).
@@ -226,8 +227,9 @@ func TestGenerateIssueIDCounterModeWalksPastARetiredValue(t *testing.T) {
 		if retired {
 			count = 1
 		}
-		// One statement per candidate reads both tombstone tables.
-		mock.ExpectQuery(regexp.QuoteMeta(idRetiredSQL)).WithArgs(id, id).
+		// One statement per candidate reads both row tables and both
+		// tombstone tables.
+		mock.ExpectQuery(regexp.QuoteMeta(idTakenSQL)).WithArgs(id, id, id, id).
 			WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(count))
 	}
 	expectCounter(5, true)

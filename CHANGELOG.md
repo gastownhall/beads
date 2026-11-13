@@ -1281,6 +1281,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Counter-mode ID minting no longer overwrites an existing issue.** In
+  `issue_id_mode=counter`, an auto-generated ID that collided with an issue
+  sitting ahead of the counter — created with an explicit `--id`, imported, or
+  a wisp, none of which move the counter — silently replaced that row and
+  returned success. Both counter walks (the store's `CreateIssue` and the
+  domain use case) now check each candidate against live rows in both planes
+  and the tombstones, the same one-statement probe hash mode already made,
+  and skip to the next free number. `bd create` with no ID likewise succeeds
+  instead of failing with "issue already exists" on every retry. (#8456,
+  carries forward the counter half of #6831)
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
