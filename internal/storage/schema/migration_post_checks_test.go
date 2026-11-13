@@ -5,6 +5,7 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -37,10 +38,21 @@ func stubNoIssueRows(t *testing.T) {
 	t.Cleanup(func() { issueRowCounter = orig })
 }
 
+// directDropDefault is the regexp for the post-check's own, unguarded
+// correction of table.column.
+func directDropDefault(table, column string) string {
+	return "^" + regexp.QuoteMeta("ALTER TABLE `"+table+"` ALTER COLUMN `"+column+"` DROP DEFAULT") + "$"
+}
+
+func showColumnsOf(table string) string {
+	return "^" + regexp.QuoteMeta("SHOW COLUMNS FROM "+table+" LIKE 'id'") + "$"
+}
+
 // GH#5269: a store carried the v50 mark while dependencies.id still had the
 // DEFAULT (UUID()) that 0050 drops. Here 0050's body returns no error and
-// changes nothing, which is that state as runMigrations sees it. The mark must
-// not be recorded: once it is, every later pass skips 0050 for good.
+// changes nothing, and the post-check's direct DROP DEFAULT returns no error
+// and changes nothing either. The mark must not be recorded: once it is, every
+// later pass skips 0050 for good.
 func TestRunMigrationsDoesNotRecordAMarkWhoseDroppedDefaultSurvives(t *testing.T) {
 	stubNoIssueRows(t)
 	db, mock, err := sqlmock.New()
@@ -52,10 +64,12 @@ func TestRunMigrationsDoesNotRecordAMarkWhoseDroppedDefaultSurvives(t *testing.T
 	mock.ExpectExec(`ALTER TABLE dependencies ALTER COLUMN id DROP DEFAULT`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery(`^SHOW TABLES$`).WillReturnRows(showTables("issues", "dependencies"))
-	mock.ExpectQuery(`^SHOW COLUMNS FROM dependencies LIKE 'id'$`).WillReturnRows(idDefault("(uuid())"))
+	mock.ExpectQuery(showColumnsOf("dependencies")).WillReturnRows(idDefault("(uuid())"))
+	mock.ExpectExec(directDropDefault("dependencies", "id")).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(showColumnsOf("dependencies")).WillReturnRows(idDefault("(uuid())"))
 
 	applied, err := runMigrations(context.Background(), db, mainSource, 49, 50, false)
-	if err == nil || !strings.Contains(err.Error(), "dependencies.id still has DEFAULT (uuid())") {
+	if err == nil || !strings.Contains(err.Error(), "dependencies.id (DEFAULT (uuid())): default still present") {
 		t.Fatalf("runMigrations(0050 with dependencies.id still DEFAULT (uuid())) = %d, %v; want a refusal naming dependencies.id and no schema_migrations row", applied, err)
 	}
 	if applied != 0 {
@@ -77,7 +91,7 @@ func TestRunMigrationsRecordsTheMarkWhenTheDroppedDefaultIsGone(t *testing.T) {
 	mock.ExpectExec(`ALTER TABLE dependencies ALTER COLUMN id DROP DEFAULT`).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery(`^SHOW TABLES$`).WillReturnRows(showTables("dependencies"))
-	mock.ExpectQuery(`^SHOW COLUMNS FROM dependencies LIKE 'id'$`).WillReturnRows(idDefault(nil))
+	mock.ExpectQuery(showColumnsOf("dependencies")).WillReturnRows(idDefault(nil))
 	mock.ExpectExec(`INSERT IGNORE INTO schema_migrations`).WithArgs(50, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -90,8 +104,37 @@ func TestRunMigrationsRecordsTheMarkWhenTheDroppedDefaultIsGone(t *testing.T) {
 	}
 }
 
+// AC-1: the body returned no error but left the default in place. The
+// post-check drops it directly, reads it back as gone, and only then writes
+// the cursor row.
+func TestRunMigrationsCorrectsALeftoverDroppedDefaultBeforeTheMark(t *testing.T) {
+	stubNoIssueRows(t)
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectExec(`ALTER TABLE dependencies ALTER COLUMN id DROP DEFAULT`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`^SHOW TABLES$`).WillReturnRows(showTables("issues", "dependencies"))
+	mock.ExpectQuery(showColumnsOf("dependencies")).WillReturnRows(idDefault("(uuid())"))
+	mock.ExpectExec(directDropDefault("dependencies", "id")).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(showColumnsOf("dependencies")).WillReturnRows(idDefault(nil))
+	mock.ExpectExec(`INSERT IGNORE INTO schema_migrations`).WithArgs(50, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	applied, err := runMigrations(context.Background(), db, mainSource, 49, 50, false)
+	if err != nil || applied != 1 {
+		t.Fatalf("runMigrations(0050 leaving dependencies.id defaulted, correction works) = %d, %v; want 1, nil", applied, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations (want body -> probe -> ALTER -> re-probe -> INSERT): %v", err)
+	}
+}
+
 // 0051 drops four defaults. A table the store lacks is skipped, as the body's
-// guard skips it, and the first surviving default refuses the mark.
+// guard skips it, and a default that survives its correction refuses the mark.
 func TestRunMigrationsChecksEveryDefaultAMigrationDrops(t *testing.T) {
 	stubNoIssueRows(t)
 	db, mock, err := sqlmock.New()
@@ -102,12 +145,17 @@ func TestRunMigrationsChecksEveryDefaultAMigrationDrops(t *testing.T) {
 
 	mock.ExpectExec(`ALTER TABLE events ALTER COLUMN id DROP DEFAULT`).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery(`^SHOW TABLES$`).WillReturnRows(showTables("events", "comments"))
-	mock.ExpectQuery(`^SHOW COLUMNS FROM events LIKE 'id'$`).WillReturnRows(idDefault(nil))
+	mock.ExpectQuery(showColumnsOf("events")).WillReturnRows(idDefault(nil))
 	mock.ExpectQuery(`^SHOW TABLES$`).WillReturnRows(showTables("events", "comments"))
-	mock.ExpectQuery(`^SHOW COLUMNS FROM comments LIKE 'id'$`).WillReturnRows(idDefault("(uuid())"))
+	mock.ExpectQuery(showColumnsOf("comments")).WillReturnRows(idDefault("(uuid())"))
+	mock.ExpectExec(directDropDefault("comments", "id")).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(showColumnsOf("comments")).WillReturnRows(idDefault("(uuid())"))
+	for i := 0; i < 2; i++ { // issue_snapshots, compaction_snapshots: absent
+		mock.ExpectQuery(`^SHOW TABLES$`).WillReturnRows(showTables("events", "comments"))
+	}
 
 	_, err = runMigrations(context.Background(), db, mainSource, 50, 51, false)
-	if err == nil || !strings.Contains(err.Error(), "comments.id still has DEFAULT (uuid())") {
+	if err == nil || !strings.Contains(err.Error(), "comments.id (DEFAULT (uuid()))") {
 		t.Fatalf("runMigrations(0051 with comments.id still defaulted) err = %v, want a refusal naming comments.id", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -121,7 +169,7 @@ func TestRunMigrationsChecksEveryDefaultAMigrationDrops(t *testing.T) {
 	defer db2.Close()
 	mock2.ExpectExec(`ALTER TABLE events ALTER COLUMN id DROP DEFAULT`).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock2.ExpectQuery(`^SHOW TABLES$`).WillReturnRows(showTables("events"))
-	mock2.ExpectQuery(`^SHOW COLUMNS FROM events LIKE 'id'$`).WillReturnRows(idDefault(nil))
+	mock2.ExpectQuery(showColumnsOf("events")).WillReturnRows(idDefault(nil))
 	for i := 0; i < 3; i++ { // comments, issue_snapshots, compaction_snapshots: absent
 		mock2.ExpectQuery(`^SHOW TABLES$`).WillReturnRows(showTables("events"))
 	}
@@ -163,5 +211,55 @@ func TestDroppedDefaultsOfTheShippedMigrations(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("droppedDefaults over the shipped migrations = %v, want %v", fmt.Sprint(got), fmt.Sprint(want))
+	}
+}
+
+// A statement quoted in a comment is prose, not an obligation; the guarded
+// form carries the real statement inside a string literal, which must survive
+// even when the literal itself contains comment markers.
+func TestDroppedDefaultsIgnoresCommentsAndKeepsLiterals(t *testing.T) {
+	cases := []struct {
+		name string
+		sql  string
+		want []droppedDefault
+	}{
+		{"line comment", "-- ALTER TABLE a ALTER COLUMN id DROP DEFAULT\nSELECT 1;", nil},
+		{"hash comment", "# ALTER TABLE a ALTER COLUMN id DROP DEFAULT\nSELECT 1;", nil},
+		{"block comment", "/* ALTER TABLE a ALTER COLUMN id\n DROP DEFAULT */ SELECT 1;", nil},
+		{"guarded literal", "SET @sql = IF(@d, 'ALTER TABLE b ALTER COLUMN id DROP DEFAULT', 'SELECT 1');", []droppedDefault{{"b", "id"}}},
+		{"literal holding comment markers", "SET @x = '-- not a comment /* nor this */'; SET @sql = 'ALTER TABLE `c` ALTER COLUMN `id` DROP DEFAULT';", []droppedDefault{{"c", "id"}}},
+		{"escaped quote in literal", `SET @x = 'it''s -- still a literal'; ALTER TABLE d ALTER COLUMN id DROP DEFAULT;`, []droppedDefault{{"d", "id"}}},
+		{"dedup by table and column", "ALTER TABLE E ALTER COLUMN ID DROP DEFAULT; ALTER TABLE e ALTER COLUMN id DROP DEFAULT;", []droppedDefault{{"e", "id"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := droppedDefaults(tc.sql); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("droppedDefaults(%q) = %v, want %v", tc.sql, got, tc.want)
+			}
+		})
+	}
+}
+
+// An empty-string default is a default; only SQL NULL means none. A LIKE
+// lookalike (an underscore matches any character) is not the column.
+func TestShowColumnDefaultNullVersusEmptyAndExactField(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery(showColumnsOf("t")).WillReturnRows(sqlmock.NewRows(showColumnsCols).AddRow("id", "char(36)", "NO", "PRI", "", ""))
+	got, err := showColumnDefault(context.Background(), db, "t", "id")
+	if err != nil || !got.violated() || got.def.String != "" {
+		t.Fatalf("empty-string default = %+v, %v; want present with a valid empty default", got, err)
+	}
+	mock.ExpectQuery(`^SHOW COLUMNS FROM t LIKE 'a_b'$`).WillReturnRows(sqlmock.NewRows(showColumnsCols).AddRow("axb", "char(36)", "NO", "", "x", ""))
+	got, err = showColumnDefault(context.Background(), db, "t", "a_b")
+	if err != nil || got.present {
+		t.Fatalf("LIKE lookalike only = %+v, %v; want the column absent", got, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
 	}
 }
