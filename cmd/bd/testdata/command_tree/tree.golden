@@ -1528,11 +1528,39 @@ bd delete
     |
     | Force: Delete and orphan dependents
     |   bd delete bd-1 --force
+    |
+    | GUARDED DELETION OF ARCHIVED THREADS (--if-threads):
+    |   bd delete --force --from-file ids.txt --if-threads guard.json
+    |
+    | The guard file is JSON:
+    |   {"cutoff": "<RFC3339>", "member_label": "...", "exclude_label": "...",
+    |    "edge": "replies-to",
+    |    "threads": [{"root": "<id>",
+    |                 "members": [{"id": "...", "revision": "<sha256>"}]}]}
+    |
+    | Each revision is the "revision" field 'bd image' printed when the thread was
+    | archived. Inside the deleting transaction, before any row changes, every
+    | listed thread must still be exactly what was archived:
+    |   membership   the beads joined to root by edge dependencies (either
+    |                direction, skipping beads labelled exclude_label) are exactly
+    |                the listed members
+    |   revision     every member's current image revision is the listed one
+    |   eligibility  every member carries member_label, is a wisp, is closed, and
+    |                closed before cutoff
+    |   coverage     every requested id carrying member_label is a listed member
+    | If any check fails nothing is deleted and bd exits 13 (the guard-mismatch
+    | exit code 'bd update --if-assignee' uses), naming each failed thread and
+    | check on stderr. With --json the last stderr line is
+    |   {"error": "...", "failed_threads": [{"root": "...", "check": "...",
+    |    "ids": ["..."]}], "guard_mismatch": true}
+    | --if-threads requires --force and refuses --cascade (exit 1). With --dry-run
+    | the same guard runs in the preview's read and exits 13 the same way.
   flag --cascade type=bool default="false" usage="Also delete parent-child descendants; other dependents survive"
   flag --dry-run type=bool default="false" usage="Preview what would be deleted without making changes"
   flag --force -f type=bool default="false" usage="Actually delete (without this flag, shows preview)"
   flag --from-file type=string default="" usage="Read issue IDs from file (one per line)"
   flag --if-revision type=string default="" usage="Apply the write only if the issue's current revision equals this value (the decimal int64 from `bd show --json`'s \"revision\" field). One id only: refused before any write when combined with more than one issue id. A mismatch writes nothing and exits 13 (vs 1 for other failures)."
+  flag --if-threads type=string default="" usage="Delete only if the archived threads in this JSON guard file are unchanged (exit 13 otherwise; requires --force)"
 
 bd dep
   use: "dep [issue-id]"
@@ -3565,6 +3593,40 @@ bd human stats
     |
     | Example:
     |   bd human stats
+
+bd image
+  use: "image <issue-id> [issue-id...]"
+  short: "Print raw, hashable images of issues as JSON lines"
+  group: "issues"
+  hidden: false
+  runnable: true
+  annotations: {bd.mutation-free="true"}
+  long:
+    | Print the raw image of each issue: one line of compact JSON per id, in
+    | the order given (duplicates collapse).
+    |
+    | An image is every stored row that belongs to the issue, read in one
+    | transaction for all ids: its own row, its labels, its comments, its
+    | events, and its dependencies in both directions. Rows are raw: every
+    | column by its column name, SQL NULL as null, JSON columns as the stored
+    | text, timestamps as UTC RFC 3339 at the column's stored precision.
+    | Keys are sorted and rows are sorted by primary key.
+    |
+    | Generated columns are excluded from the image and from the revision.
+    |
+    | The "revision" field is the sha256 (hex) of the canonical image without
+    | the revision field. It changes on any write to the issue - its body, a
+    | label, a comment, an event, a dependency in either direction, a status
+    | change - so an archive can later check that an issue is unchanged.
+    |
+    | If any id names no issue, nothing is printed and the command exits 1
+    | naming every missing id.
+    |
+    | Examples:
+    |   bd image bd-1
+    |   bd image bd-1 bd-2
+    |   bd image --from-file ids.txt
+  flag --from-file type=string default="" usage="Read issue IDs from file (one per line)"
 
 bd import
   use: "import [file|-]"

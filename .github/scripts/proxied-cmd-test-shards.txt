@@ -143,6 +143,7 @@
 34 14 TestProxiedServerMolReadyGated
 
 34 15 TestProxiedServerDepConcurrent
+34 15 TestProxiedServerImageRoutesAgreeOnOneDataset
 34 15 TestProxiedServerImport
 34 15 TestProxiedServerMoleculeFrontDoorWriteParity
 34 15 TestProxiedServerReopenConcurrent
@@ -179,6 +180,7 @@
 34 19 TestServerModeTypesAgreeWithCreate
 
 34 20 TestProxiedServerDelete
+34 20 TestProxiedServerImageStartupWritesNothing
 34 20 TestProxiedServerLint
 34 20 TestProxiedServerPriority
 34 20 TestProxiedServerShow2B
@@ -276,6 +278,7 @@
 34 32 TestProxiedServerCleanDatabasesPurgeDropped
 34 32 TestProxiedServerConfigConcurrent
 34 32 TestProxiedServerDepB
+34 32 TestProxiedServerImageAutoBackupWritesNothing
 34 32 TestProxiedServerServeStreamsTheJournalItIsWriting
 34 32 TestProxiedServerServeUpdateClaim
 34 32 TestProxiedServerStorageClass

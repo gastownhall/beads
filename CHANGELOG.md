@@ -151,6 +151,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd image <id>... [--from-file]` prints a raw, hashable image of each
+  bead.** One line of compact JSON per id, keys sorted, in the order given
+  (duplicates collapse): the bead's own row, its label, comment and event
+  rows, and its dependency rows in either direction from both edge tables,
+  read in one transaction for all ids. Rows are raw (column names, SQL NULL as null, JSON
+  columns as stored text, timestamps as UTC RFC 3339 at the column's
+  precision) and generated columns are left out. `revision` is the sha256 of
+  the canonical image without it, so it moves on any write to the bead and an
+  archive can later check that a bead is unchanged. The lines are byte for
+  byte the same on the embedded, server-mode and proxied-server routes. A
+  missing id prints nothing and exits 1 naming every missing id. `bd image`
+  writes nothing, startup and post-command maintenance included: a new
+  mutation-free command annotation gives every invocation the `--dry-run`
+  preview policy, and auto-backup is now skipped after a preview. Library:
+  `issueops.Image` and the `Imager` role on the direct, embedded and UOW
+  stores; `ImageInTx`, `CanonicalImageJSON` and `ComputeImageRevision` in
+  `internal/storage/issueops`.
+- **`bd delete --force --from-file <ids> --if-threads <guard.json>`** deletes
+  only if every archived mail thread in the guard file is unchanged: its
+  membership over the guard's edge type, each member's `bd image` revision,
+  each member's eligibility (member label, wisp, closed before the cutoff), and
+  coverage of every member-labelled id in the request. The guard runs inside
+  the deleting transaction on the direct, embedded and proxied-server routes.
+  Otherwise nothing changes and it exits 13; under `--json` the last stderr
+  line is a JSON report with `"guard_mismatch": true` and `failed_threads`. It
+  needs `--force` and refuses `--cascade` and an empty path (exit 1). With
+  `--dry-run` the same guard runs and fails the same way. The check walks all
+  thread roots at once, one level at a time, so its statement count does not
+  grow with the number of threads. Library: `issueops.ThreadGuard` on
+  `DeleteRequest` and `ErrThreadGuardMismatch`; `CheckThreadGuardInTx` in
+  `internal/storage/issueops`.
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
   While a workspace journals, every `ephemeral` or `no_history` bead it creates
   is stamped with the `seq` of its own `create` journal record, in the same
