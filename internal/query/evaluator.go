@@ -620,9 +620,16 @@ func (e *Evaluator) parseTimeValue(comp *ComparisonNode) (time.Time, error) {
 }
 
 // parseDurationAgo parses a duration and returns now - duration.
+// The lexer keeps an explicit sign in the token ("+7d", "-7d"); either sign
+// still means N ago, so it is dropped before negating rather than doubled
+// into "--7d", which the compact-duration grammar rejects.
 func (e *Evaluator) parseDurationAgo(s string) (time.Time, error) {
 	// Negate the duration to get time in the past
-	negated := "-" + strings.TrimPrefix(s, "+")
+	unsigned := s
+	if strings.HasPrefix(s, "+") || strings.HasPrefix(s, "-") {
+		unsigned = s[1:]
+	}
+	negated := "-" + unsigned
 	return timeparsing.ParseCompactDuration(negated, e.now)
 }
 
