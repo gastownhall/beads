@@ -29,6 +29,8 @@ bd show bd-42 --json
 
 ## Issue Types
 
+Beads provides twelve built-in issue types:
+
 | Type | Use Case |
 |------|----------|
 | `bug` | Something broken that needs fixing |
@@ -36,6 +38,19 @@ bd show bd-42 --json
 | `task` | Work item (tests, docs, refactoring) |
 | `epic` | Large feature with subtasks |
 | `chore` | Maintenance (dependencies, tooling) |
+| `decision` | Decision, rationale, and alternatives considered |
+| `message` | Inter-agent communication |
+| `molecule` | Swarm coordination (internal use) |
+| `gate` | Asynchronous coordination, including formula gates |
+| `spike` | Timeboxed investigation to reduce uncertainty |
+| `story` | Feature described from the user's perspective |
+| `milestone` | Completion marker for related issues (no work itself) |
+
+Configure additional issue types with `types.custom`, for example:
+`bd config set types.custom "convoy,agent"`.
+
+The internal `event` type records audit trails for `set-state` and is separate
+from the issue types listed above.
 
 ## Priorities
 
