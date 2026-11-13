@@ -45,10 +45,9 @@ func ReadMigrationContentHashes(ctx context.Context, db DBConn, ref string) (map
 	)
 	if ref == "" {
 		// Probe the cursor's shape before selecting, as the AS OF arm below
-		// does: a failing SELECT pins the pooled Dolt session to its
-		// pre-statement catalog (be-bv7x), and `bd doctor` reaches this read
-		// on a database it never migrates. tableInCurrentDatabase is
-		// currentVersion's probe, which succeeds on any session.
+		// does: `bd doctor` reaches this read on a database it never migrates,
+		// and a failing SELECT would leave a server warning on each run.
+		// tableInCurrentDatabase succeeds on any session.
 		hasTable, queryErr := tableInCurrentDatabase(ctx, db, "schema_migrations")
 		if queryErr != nil {
 			return nil, queryErr
@@ -71,8 +70,7 @@ func ReadMigrationContentHashes(ctx context.Context, db DBConn, ref string) (map
 		// A cached ref may legitimately predate schema_migrations or its
 		// content_hash column. Probe the historical shape before selecting from
 		// it: letting the SELECT fail emits a Dolt server warning for every
-		// read-only doctor run and, as at HEAD, pins the pooled session to its
-		// pre-statement catalog (be-bv7x).
+		// read-only doctor run.
 		//nolint:gosec // G201: ref is validated above — AS OF requires a literal, not a bind param
 		hasTable, queryErr := queryHasRows(ctx, db,
 			fmt.Sprintf("SHOW TABLES AS OF '%s' LIKE 'schema_migrations'", ref))

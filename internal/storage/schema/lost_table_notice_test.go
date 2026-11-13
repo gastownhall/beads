@@ -34,7 +34,6 @@ func migrateLostTombstonesUpToFirstApply(t *testing.T, raw int) string {
 	mock.ExpectQuery(regexp.QuoteMeta("SHOW COLUMNS FROM ignored_schema_migrations LIKE 'content_hash'")).
 		WillReturnRows(sqlmock.NewRows([]string{"Field", "Type", "Null", "Key", "Default", "Extra"}).
 			AddRow("content_hash", "char(64)", "YES", "", nil, ""))
-	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", raw)
 	boom := errors.New("stop here: the replay started")
 	mock.ExpectExec(".*").WillReturnError(boom)

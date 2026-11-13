@@ -14,7 +14,6 @@ import (
 // expectMainMigrationWorkNeeded mocks migrationWorkNeeded finding the main
 // cursor behind latest, which short-circuits the remaining probes.
 func expectMainMigrationWorkNeeded(mock sqlmock.Sqlmock) {
-	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", 42)
 }
 
@@ -221,7 +220,6 @@ func TestMigrateUpTransactionCommitSetErrorFailsPass(t *testing.T) {
 	cursor := LatestVersion() - 1
 	expectIgnorePatternSeedNoop(mock, cursor)
 	expectIgnoredCursorHealNoop(mock)
-	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", cursor)
 	expectTransactionCommitRead(mock, 1)
 	setErr := errors.New("Error 1234: variable is read only")

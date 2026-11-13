@@ -375,8 +375,8 @@ func restorePreflipEventsFrom(ctx context.Context, db DBConn, ref string, orphan
 // preflipEventsSourceUsable reports whether ref carries an events table, and
 // fails with errPreflipSourceIncompatible when it lacks a column the restore
 // reads. The shape is probed before anything selects
-// from it, as ReadMigrationContentHashes does: a failing statement would pin
-// a pooled Dolt session to its pre-statement catalog (be-bv7x).
+// from it, as ReadMigrationContentHashes does, so a ref without the table reads
+// as unusable instead of failing.
 func preflipEventsSourceUsable(ctx context.Context, db DBConn, ref string) (bool, error) {
 	//nolint:gosec // G201: ref is validated by preflipEventsSources; AS OF requires a literal.
 	hasTable, err := queryHasRows(ctx, db, "SHOW TABLES AS OF '"+ref+"' LIKE 'events'")

@@ -360,9 +360,8 @@ func CheckReadableDrift(ctx context.Context, db DBConn, table string, columns []
 // compares column names. It lists the one table with SHOW COLUMNS for
 // showColumnExists's reason (Dolt answers INFORMATION_SCHEMA.COLUMNS by
 // scanning every database on the server), and only after
-// tableInCurrentDatabase has found the table, because a SHOW COLUMNS that
-// fails pins the pooled session to its catalog snapshot (be-bv7x). table is
-// a hardcoded identifier, never user input.
+// tableInCurrentDatabase has found the table, because SHOW COLUMNS fails on a
+// missing table. table is a hardcoded identifier, never user input.
 func missingColumns(ctx context.Context, db DBConn, table string, columns []string) ([]string, error) {
 	exists, err := tableInCurrentDatabase(ctx, db, table)
 	if err != nil {
@@ -1745,28 +1744,21 @@ func (m migrationSource) currentVersion(ctx context.Context, db DBConn) (int, er
 // replayFloor) and that are absent: the tables the replay that follows will
 // re-create empty after a loss.
 func (m migrationSource) readCursor(ctx context.Context, db DBConn) (int, []schemaSentinelTable, error) {
-	// Probe existence with a query that always SUCCEEDS before ever issuing one
-	// that can fail. A Dolt session that issues a failing statement stays
-	// pinned to its pre-statement catalog snapshot, so a bare SELECT against a
-	// not-yet-created cursor table poisons the pooled connection: tables
-	// created afterwards on other connections stay invisible to this one for
-	// the rest of its life in the pool (be-bv7x).
-	cursorExists, err := tableInCurrentDatabase(ctx, db, m.cursorTable)
-	if err != nil {
-		return 0, nil, fmt.Errorf("probing %s existence: %w", m.cursorTable, err)
-	}
-	if !cursorExists {
-		return 0, nil, nil
-	}
-
+	// One read answers whether there is a cursor and what it says. It fails
+	// when the table does not exist yet and when the session has no usable
+	// database, and both failures mean "no cursor". Failing here is safe on
+	// every server bd accepts: be-bv7x (a failing statement pinning a pooled
+	// session to its old catalog) was fixed in Dolt between 2.2.0 and 2.4.1,
+	// and the required minimum is 2.6.0.
 	var current int
-	err = db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM "+m.cursorTable).Scan(&current)
+	err := db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM "+m.cursorTable).Scan(&current)
 	if err != nil && err != sql.ErrNoRows {
-		if dberrors.IsTableNotExist(err) {
+		if dberrors.IsTableNotExist(err) || dberrors.IsNoUsableDatabase(err) {
 			return 0, nil, nil
 		}
 		return 0, nil, fmt.Errorf("reading %s version: %w", m.cursorTable, err)
 	}
+	noteTablePresent(ctx, m.cursorTable)
 	if current == 0 {
 		return 0, nil, nil
 	}
@@ -1875,9 +1867,8 @@ func (m migrationSource) cursorReality(ctx context.Context, db DBConn) (int, boo
 // sentinelTableExists is a function variable for the same reason
 // issueRowCounter is: it lets the cursor-reality tests exercise the real
 // decision without a live database. It runs on EVERY store open
-// (cursorRealityFloor: the sentinel and floored-sentinel tables, and the
-// column sentinel's carrier), so it takes the SHOW TABLES prober for the
-// reason sentinelColumnExists takes SHOW COLUMNS.
+// (cursorRealityFloor: the sentinel and floored-sentinel tables), so it takes
+// the SHOW TABLES prober for the reason sentinelColumnExists takes SHOW COLUMNS.
 var sentinelTableExists = showTableExists
 
 // showTableExists reports whether the session's current database holds table,
@@ -1885,7 +1876,7 @@ var sentinelTableExists = showTableExists
 // push the TABLES predicate down any more than the COLUMNS one: the probe walks
 // the catalog of every database on the server. On a sql-server hosting 28
 // databases the INFORMATION_SCHEMA read costs 25-30 ms against 0.6 ms for the
-// listing (dolt 2.1.8), and the open path asks a dozen times per bd write.
+// listing (dolt 2.1.8), and the open path asks several times per bd write.
 //
 // It reads the unfiltered listing and compares names case-insensitively, which
 // is what the INFORMATION_SCHEMA count it replaced answers: Dolt resolves and
@@ -1896,19 +1887,35 @@ var sentinelTableExists = showTableExists
 //
 // Unlike the INFORMATION_SCHEMA count, SHOW TABLES errors when no database is
 // selected or the selected one was dropped, so it is only for callers already
-// on the target database: the cursor-existence probe in currentVersion, which
-// must succeed on any session (be-bv7x), gates it with tableInCurrentDatabase.
-// table is a migration-series constant, never user input.
+// on the target database; tableInCurrentDatabase serves the others. table is a
+// migration-series constant, never user input.
 func showTableExists(ctx context.Context, db DBConn, table string) (bool, error) {
+	listing := tableListingFrom(ctx)
+	if listing == nil {
+		listing = &tableListing{}
+	}
+	if listing.names == nil {
+		names, err := listTables(ctx, db)
+		if err != nil {
+			return false, fmt.Errorf("checking table %s: %w", table, err)
+		}
+		listing.names = names
+	}
+	return listing.has(table), nil
+}
+
+// listTables reads the session database's SHOW TABLES listing, its names folded
+// to lower case for showTableExists's case-insensitive comparison.
+func listTables(ctx context.Context, db DBConn) (map[string]struct{}, error) {
 	rows, err := db.QueryContext(ctx, "SHOW TABLES")
 	if err != nil {
-		return false, fmt.Errorf("checking table %s: %w", table, err)
+		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 
 	cols, err := rows.Columns()
 	if err != nil {
-		return false, fmt.Errorf("checking table %s: %w", table, err)
+		return nil, err
 	}
 	// SHOW TABLES returns Tables_in_<db> (plus Table_type on SHOW FULL TABLES
 	// and on some servers); the first column is the table name.
@@ -1917,30 +1924,101 @@ func showTableExists(ctx context.Context, db DBConn, table string) (bool, error)
 	for i := range cells {
 		dest[i] = &cells[i]
 	}
+	names := make(map[string]struct{})
 	for rows.Next() {
 		if err := rows.Scan(dest...); err != nil {
-			return false, fmt.Errorf("checking table %s: %w", table, err)
+			return nil, err
 		}
-		if len(cells) > 0 && strings.EqualFold(string(cells[0]), table) {
-			return true, nil
+		if len(cells) > 0 {
+			names[strings.ToLower(string(cells[0]))] = struct{}{}
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return false, fmt.Errorf("checking table %s: %w", table, err)
+		return nil, err
 	}
-	return false, nil
+	return names, nil
+}
+
+// tableListing holds one SHOW TABLES answer for a pass that writes nothing, so
+// its probes share a single listing. A nil names means none has been read yet.
+type tableListing struct {
+	names map[string]struct{}
+	asked map[string]bool
+}
+
+// has answers from the listing and records the answer for tableListingUnchanged.
+func (l *tableListing) has(table string) bool {
+	name := strings.ToLower(table)
+	_, present := l.names[name]
+	if l.asked == nil {
+		l.asked = make(map[string]bool)
+	}
+	l.asked[name] = present
+	return present
+}
+
+type tableListingContextKey struct{}
+
+// noteTablePresent records, on the context's listing if it has one, that a read
+// in this pass just found table. A read of the table itself needs no lookup, but
+// its answer depends on the table as much as a lookup's would, so
+// tableListingUnchanged must see the table again.
+func noteTablePresent(ctx context.Context, table string) {
+	listing := tableListingFrom(ctx)
+	if listing == nil {
+		return
+	}
+	if listing.asked == nil {
+		listing.asked = make(map[string]bool)
+	}
+	listing.asked[strings.ToLower(table)] = true
+}
+
+// withTableListing makes every table probe on the returned context answer from
+// one listing, read by whichever probe runs first. The caller must not write
+// through that context, and the session must already be on the database it is
+// asking about.
+func withTableListing(ctx context.Context) context.Context {
+	return context.WithValue(ctx, tableListingContextKey{}, &tableListing{})
+}
+
+func tableListingFrom(ctx context.Context) *tableListing {
+	listing, _ := ctx.Value(tableListingContextKey{}).(*tableListing)
+	return listing
+}
+
+// tableListingUnchanged reads the tables again and reports whether every table
+// the context's listing was asked about still has the answer it gave. A table
+// nobody asked about does not count, so unrelated tables coming and going on a
+// shared database leave the answer alone. No listing read yet is not a yes.
+func tableListingUnchanged(ctx context.Context, db DBConn) (bool, error) {
+	listing := tableListingFrom(ctx)
+	if listing == nil || listing.names == nil {
+		return false, nil
+	}
+	names, err := listTables(ctx, db)
+	if err != nil {
+		return false, fmt.Errorf("re-reading the table listing: %w", err)
+	}
+	for name, present := range listing.asked {
+		if _, now := names[name]; now != present {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // tableInCurrentDatabase is showTableExists for a session that may have no
-// usable database: the cursor-existence probe runs on any session, so it must
-// never issue a statement that can fail (be-bv7x). SHOW TABLES fails with no
-// database selected (1105) and on a session whose database was dropped under
-// it (1049); the schemata read answers 0 in both cases instead, which reads
-// the table as absent, exactly as the INFORMATION_SCHEMA.TABLES count with
-// TABLE_SCHEMA = DATABASE() did. Both reads are one round trip each.
+// usable database, for the checks that answer without sending a failing
+// statement.
+// SHOW TABLES fails with no database selected (1105) and on a session whose
+// database was dropped under it (1049); the schemata read answers 0 in both
+// cases instead, which reads the table as absent, exactly as the
+// INFORMATION_SCHEMA.TABLES count with TABLE_SCHEMA = DATABASE() did. Both
+// reads are one round trip each.
 //
 // The guard is check-then-act, not atomic: a DROP DATABASE landing between the
-// two reads still fails the SHOW TABLES and pins the session. On a *sql.DB the
+// two reads can still make SHOW TABLES fail. On a *sql.DB the
 // two reads may also land on different pooled connections, so the guard holds
 // only when every connection in the pool is on the same database (a DSN that
 // names it).
@@ -1964,23 +2042,20 @@ func tableInCurrentDatabase(ctx context.Context, db DBConn, table string) (bool,
 // schemaColumnExists as is — they run once per migration, not per open.
 //
 // SHOW COLUMNS fails on a missing table, and the carrier table is exactly what
-// a release-lineage store lacks (no leases before ignored/0012). A failing
-// statement is not free here: on the store's multiStatements DSN it pins the
-// pooled Dolt session to its pre-statement catalog, so a table another
-// connection creates afterwards stays "not found" on it (be-bv7x; reproduced
-// on dolt 2.1.8 and 2.2.0). So the carrier's existence is read first through
-// sentinelTableExists, whose read succeeds whether or not the table is there,
-// and SHOW COLUMNS is only sent to a table that is. A missing table reads as a
-// missing column, as the INFORMATION_SCHEMA count did.
+// a release-lineage store lacks (no leases before ignored/0012). showColumnExists
+// reads that failure as a missing column, as the INFORMATION_SCHEMA count did.
+// Failing here is safe on every server bd accepts: be-bv7x (a failing statement
+// pinning a pooled session to its old catalog) was fixed in Dolt between 2.2.0
+// and 2.4.1, and the required minimum is 2.6.0.
 var sentinelColumnExists = func(ctx context.Context, db DBConn, table, column string) (bool, error) {
-	present, err := sentinelTableExists(ctx, db, table)
+	present, err := showColumnExists(ctx, db, table, column)
 	if err != nil {
-		return false, fmt.Errorf("probing %s: %w", table, err)
+		return false, err
 	}
-	if !present {
-		return false, nil
+	if present {
+		noteTablePresent(ctx, table)
 	}
-	return showColumnExists(ctx, db, table, column)
+	return present, nil
 }
 
 func (m migrationSource) pendingVersions(ctx context.Context, db DBConn) ([]int, error) {
@@ -1988,14 +2063,27 @@ func (m migrationSource) pendingVersions(ctx context.Context, db DBConn) ([]int,
 	if err != nil {
 		return nil, err
 	}
-	files := m.list()
+	return m.pendingAbove(current), nil
+}
+
+// pendingAbove is pendingVersions for a cursor the caller has already read: the
+// versions in this series' embedded list above current. It sends no statement.
+func (m migrationSource) pendingAbove(current int) []int {
+	return versionsAbove(m.list(), current)
+}
+
+// versionsAbove returns the version of every file in files (sorted ascending,
+// as migrationSource.list returns them) that is strictly greater than current.
+// A cursor that no listed file carries, between two listed versions or past
+// the last one, still gets exactly the listed versions above it.
+func versionsAbove(files []migrationFile, current int) []int {
 	pending := make([]int, 0, len(files))
 	for _, mf := range files {
 		if mf.version > current {
 			pending = append(pending, mf.version)
 		}
 	}
-	return pending, nil
+	return pending
 }
 
 func (m migrationSource) pendingMigrationDirtyTables(ctx context.Context, db DBConn, dirtyBefore map[string]dirtyTableState) ([]string, error) {

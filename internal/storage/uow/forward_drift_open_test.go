@@ -53,8 +53,8 @@ func countMigrateUpWithLock(t *testing.T) *int {
 // open against a pre-existing database at version ahead: the convergence probe
 // declines (its main cursor is ahead but the ignored-lane cursor table is
 // missing, so there is migration work), GET_LOCK, the locked preparation (a
-// losing bare CREATE, then USE), the shared-store gate's two version reads,
-// which find nothing pending and pass, and finally the forward-drift read.
+// losing bare CREATE, then USE), the shared-store gate's one cursor read, which
+// finds nothing pending and passes, and finally the forward-drift read.
 // No migration write is scripted: any statement MigrateUp issues after it is
 // unexpected. Returns the lock name so callers can script its release.
 func expectAheadDatabaseThroughDriftCheck(mock sqlmock.Sqlmock, database string, ahead int) string {
@@ -63,7 +63,7 @@ func expectAheadDatabaseThroughDriftCheck(mock sqlmock.Sqlmock, database string,
 	mock.ExpectExec(regexp.QuoteMeta("USE `" + database + "`")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	expectVersionQuery(mock, ahead)
-	expectCursorProbe(mock, "ignored_schema_migrations", false)
+	expectCursorTableMissing(mock, "ignored_schema_migrations")
 
 	lockName := schema.MigrationLockName(database)
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
@@ -73,8 +73,8 @@ func expectAheadDatabaseThroughDriftCheck(mock sqlmock.Sqlmock, database string,
 		WillReturnError(&mysql.MySQLError{Number: 1007, Message: "database exists"})
 	mock.ExpectExec(regexp.QuoteMeta("USE `" + database + "`")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
-	// Shared-store gate: CurrentVersion and PendingVersions; nothing pending.
-	expectVersionQuery(mock, ahead)
+	// Shared-store gate: one cursor read, from which the pending versions are
+	// derived; nothing pending.
 	expectVersionQuery(mock, ahead)
 	// Forward-drift check, inside the gate and before MigrateUp.
 	expectVersionQuery(mock, ahead)
@@ -279,8 +279,8 @@ func TestInitSchemaRefusesForwardDrift(t *testing.T) {
 
 	// AC-4: the steady-state open — a database at this binary's latest schema
 	// on the converged fast path — still opens, and pays exactly one added
-	// CurrentVersion read (the cursor existence probe, SHOW TABLES, and the
-	// MAX(version) read) on the pinned session: no lock, no write.
+	// CurrentVersion read (the MAX(version) read) on the pinned session: no
+	// lock, no write.
 	t.Run("converged path at latest opens with exactly one added version read", func(t *testing.T) {
 		t.Setenv("BD_IGNORE_SCHEMA_SKEW", "")
 		calls := stubConvergedMigrateUp(t)
@@ -374,7 +374,7 @@ func TestInitSchemaRefusesForwardDrift(t *testing.T) {
 		}
 		defer db.Close()
 
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = DATABASE()")).
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")).
 			WillReturnError(&mysql.MySQLError{Number: 1213, Message: "serialization failure"})
 		expectVersionQuery(mock, schema.LatestVersion())
 

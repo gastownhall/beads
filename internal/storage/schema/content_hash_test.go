@@ -109,9 +109,7 @@ func TestMigrationWorkNeededAddsContentHashColumnOnUpToDateDB(t *testing.T) {
 	defer db.Close()
 
 	// Both sources are already at their latest version...
-	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
-	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
 	expectIgnoredSentinelProbes(mock, true)
 	// ...but schema_migrations predates the content_hash column.
@@ -141,9 +139,7 @@ func TestMigrationWorkNotNeededWhenContentHashColumnsPresent(t *testing.T) {
 	}
 	defer db.Close()
 
-	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
-	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
 	expectIgnoredSentinelProbes(mock, true)
 	mock.ExpectQuery(`SHOW COLUMNS FROM schema_migrations LIKE 'content_hash'`).
@@ -151,8 +147,7 @@ func TestMigrationWorkNotNeededWhenContentHashColumnsPresent(t *testing.T) {
 	mock.ExpectQuery(`SHOW COLUMNS FROM ignored_schema_migrations LIKE 'content_hash'`).
 		WillReturnRows(showColumnsRows("content_hash"))
 	// No backfill pending (custom tables already populated).
-	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
-	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+	expectCustomTablesPopulated(mock)
 
 	needed, err := migrationWorkNeeded(context.Background(), db)
 	if err != nil {

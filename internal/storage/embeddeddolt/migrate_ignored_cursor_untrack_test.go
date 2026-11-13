@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 // These tests cover gastownhall/beads#4356 against the real engine: a database
@@ -117,6 +118,40 @@ func (f *legacyTrackedFixture) reopen(t *testing.T) *embeddeddolt.EmbeddedDoltSt
 func (f *legacyTrackedFixture) reopenAndClose(t *testing.T) {
 	t.Helper()
 	closeEmbeddedDoltStore(t, f.reopen(t))
+}
+
+// TestEmbeddedSchemaReadsTakeAMissingTableAsAbsent sends the cursor read and the
+// column sentinel's SHOW COLUMNS to tables the real embedded engine does not
+// have. Both go to the table directly, so they fail, and the engine's error has
+// to read as "absent" here as it does on a sql-server: the cursor as version 0,
+// the column's table as a contradicted ignored cursor.
+func TestEmbeddedSchemaReadsTakeAMissingTableAsAbsent(t *testing.T) {
+	requireEmbedded(t)
+
+	ctx := t.Context()
+	const database = "schemareadsabsent"
+	pristine := newPristineEmbeddedDoltFixture(t, database)
+	closeEmbeddedDoltStore(t, pristine.store)
+
+	withRawConn(t, pristine.dataDir, database, func(conn *sql.Conn) {
+		mustExecOn(t, ctx, conn, "DROP TABLE leases")
+		ignored, err := schema.CurrentIgnoredVersion(ctx, conn)
+		if err != nil {
+			t.Fatalf("CurrentIgnoredVersion with leases missing: %v", err)
+		}
+		if ignored >= schema.LatestIgnoredVersion() {
+			t.Fatalf("CurrentIgnoredVersion with leases missing = %d, want it below latest %d", ignored, schema.LatestIgnoredVersion())
+		}
+
+		mustExecOn(t, ctx, conn, "DROP TABLE schema_migrations")
+		main, err := schema.CurrentVersion(ctx, conn)
+		if err != nil {
+			t.Fatalf("CurrentVersion with schema_migrations missing: %v", err)
+		}
+		if main != 0 {
+			t.Fatalf("CurrentVersion with schema_migrations missing = %d, want 0", main)
+		}
+	})
 }
 
 func mustExecOn(t *testing.T, ctx context.Context, conn *sql.Conn, stmt string, args ...any) {

@@ -767,6 +767,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (it keeps only `**Do:**` and `**Don't:**` lines), and a rule with no such
   lines is skipped by `--auto` and refused by `--group`.
   ([#5719](https://github.com/gastownhall/beads/issues/5719))
+- **Server mode: a write's schema convergence check lists the tables once.**
+  The check that lets a write skip the migration lock read `SHOW TABLES` ten times
+  and the `information_schema.schemata` probe twice, one per table it asks about.
+  It writes nothing, so its lookups now share one listing, which it reads once more
+  before the lock check to see that no table it asked about changed. Every write
+  command sends 9 fewer statements, about 0.9 s at 100 ms round-trip time.
+- **The schema checks a writable open runs before deciding whether to
+  migrate send fewer statements.** The remote-migrate gate read the
+  schema-migration cursor twice, once for the current version and again for
+  the pending versions; it now derives the pending versions from the one
+  read. That removes 3 statements (two existence probes and the version read)
+  wherever the gate reads an initialized database, which includes every
+  writable open of one directly against a Dolt server; a proxied open of an
+  already-current database skips the gate, and a fresh database stops before
+  the removed read. The check for a custom-type or
+  custom-status backfill counted each custom table and read each config key
+  separately; it now asks for both counts and both config values in one
+  statement, which removes 3 statements when both custom tables are empty and
+  1 when they hold rows. Empty or malformed config values still mean no
+  backfill, a failed read is still an error, and a database missing one of
+  those tables gets the same answer as before.
 - **`bd` requires Dolt 2.6.0 or newer outside embedded mode, and refuses
   anything older.** `doltversion.RecommendedMin` (2.5.0, a warning) is now
   `doltversion.RequiredMin` (2.6.0, an error). `bd dolt start` and
@@ -877,6 +898,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bd list` already refused the pair at flag parse, so its behavior is
   unchanged; over HTTP the pair is a `400 invalid_argument` on `no_parent`.
 
+- **The migration consent check reads the schema cursor once.** `MigrateUp`
+  read the cursor for the current version and again for the pending list, when
+  the check reached the pending list. Both answers now come from one read. A
+  converged server-mode open does not reach this check. A direct server open
+  also asks its session for the database name once instead of twice. The cursor read and
+  the sentinel column read also go to their tables directly now, without a
+  probe first: both read a missing table as absent, and the cursor read also
+  treats a session with no usable database as having no cursor. The probes guarded against a failing statement
+  pinning a pooled session to its old catalog, which Dolt fixed between 2.2.0
+  and 2.4.1, and the required minimum is 2.6.0. In a trace against a Dolt 2.6.0
+  server, `bd create` and `bd update` each send 8 fewer statements and `bd show`
+  2 fewer. A SQL user granted `SELECT` on some tables but not on
+  `schema_migrations` used to see the cursor table as absent, so the database
+  looked fresh and the consent check was skipped; the open now reports the
+  access-denied error.
 - **`bd gate discover` skips template gates, as `bd gate check` does.** A
   template gh:run gate is a proto that work is poured from; on the direct,
   proxied and embedded routes `bd gate discover` used to record a discovered

@@ -30,7 +30,6 @@ func TestPendingMigrationDirtyTablesDetectsMigration0043Dependencies(t *testing.
 	}
 	defer db.Close()
 
-	expectCursorProbe(mock, "schema_migrations", true)
 	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(42))
 
@@ -75,7 +74,6 @@ func TestMigrateUpReturnsDirtyTablesErrorForPreExistingDirtyTable(t *testing.T) 
 	// migrationWorkNeeded: mainSource.atLatest reads the current cursor; v42
 	// is behind LatestVersion(), so the || short-circuits before checking
 	// ignoredSource.atLatest or the content-hash/backfill probes.
-	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", 42)
 
 	// The pass reads @@dolt_transaction_commit before its first write (#4470).
@@ -94,14 +92,13 @@ func TestMigrateUpReturnsDirtyTablesErrorForPreExistingDirtyTable(t *testing.T) 
 
 	// MigrateUp now captures the pre-pass main cursor up front (it drives the
 	// aux-rekey dirtyBefore exemption); v42 (behind latest) is read here.
-	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", 42)
 	// auxRekeyExemptTables reads the ignored cursor to see which passes' markers
 	// are pending, then each pass's clone-local re-key state. This mocked world
 	// has no ignored cursor table and no local_metadata, so every read stops at
-	// its existence probe and nothing aux is exempted — and `dependencies` is
+	// a table-missing answer and nothing aux is exempted — and `dependencies` is
 	// not an aux table anyway, so it stays in dirtyBefore.
-	expectCursorProbe(mock, "ignored_schema_migrations", false)
+	expectCursorTableMissing(mock, "ignored_schema_migrations")
 	for range auxRekeyPasses {
 		mock.ExpectQuery(`SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES`).
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
@@ -109,11 +106,10 @@ func TestMigrateUpReturnsDirtyTablesErrorForPreExistingDirtyTable(t *testing.T) 
 
 	// pendingMigrationDirtyTables re-reads the current version and finds
 	// migration 0043 touches the dirty `dependencies` table.
-	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", 42)
 	// The ignored series is intersected before either series migrates
-	// (#5816); with no ignored cursor table its read stops at the probe.
-	expectCursorProbe(mock, "ignored_schema_migrations", false)
+	// (#5816); with no ignored cursor table its one read fails with 1146.
+	expectCursorTableMissing(mock, "ignored_schema_migrations")
 
 	_, err = MigrateUp(context.Background(), db)
 	if err == nil {
@@ -154,7 +150,6 @@ func TestIgnoredPendingMigrationDirtyTablesDetectsWispDependencies(t *testing.T)
 	}
 	defer db.Close()
 
-	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM ignored_schema_migrations`).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(2))
 	expectIgnoredSentinelProbes(mock, true)

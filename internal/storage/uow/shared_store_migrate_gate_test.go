@@ -15,13 +15,11 @@ import (
 )
 
 // expectSharedGateProbe mocks the shared-store gate's read sequence on an
-// existing database: CurrentVersion, PendingVersions, and the remote count.
+// existing database: one migration-cursor read (the pending versions are
+// derived from it) and the remote count.
 func expectSharedGateProbe(mock sqlmock.Sqlmock, current, remotes int) {
-	for i := 0; i < 2; i++ { // CurrentVersion, then PendingVersions
-		expectCursorProbe(mock, "schema_migrations", true)
-		mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")).
-			WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(current))
-	}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")).
+		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(current))
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM dolt_remotes`).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(remotes))
 }
@@ -38,7 +36,6 @@ func expectBehindDatabaseThroughPreparation(mock sqlmock.Sqlmock, database strin
 	expectDatabaseExistsProbe(mock, database, true)
 	mock.ExpectExec(regexp.QuoteMeta("USE `" + database + "`")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
-	expectCursorProbe(mock, "schema_migrations", true)
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(current))
 
@@ -68,7 +65,7 @@ func expectLockRelease(mock sqlmock.Sqlmock, lockName string) {
 // omit (none when omit is empty).
 func expectIssuesProjection(mock sqlmock.Sqlmock, version int, omit string) {
 	expectVersionQuery(mock, version)
-	expectCursorProbe(mock, "issues", true)
+	expectTableProbe(mock, "issues", true)
 	rows := sqlmock.NewRows([]string{"Field", "Type", "Null", "Key", "Default", "Extra"})
 	for _, column := range sqlbuild.ColumnNames(sqlbuild.IssueBaseColumns) {
 		if column != omit {
@@ -186,7 +183,7 @@ func TestInitSchemaSharedStoreGate(t *testing.T) {
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 		// The gate on a database this init just created: no cursor table, so
 		// version 0, so allow — and MigrateUp proceeds to its first statement.
-		expectCursorProbe(mock, "schema_migrations", false)
+		expectCursorTableMissing(mock, "schema_migrations")
 		mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
 			WithArgs(sqlmock.AnyArg()).
 			WillReturnError(errors.New("reached the first migration statement"))

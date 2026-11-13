@@ -66,6 +66,7 @@ type migrateLockOptions struct {
 	freshBootstrapHeal *freshBootstrapHealRequest
 	lockedPreparation  *lockedPreparationRequest
 	databaseSelector   DatabaseSelector
+	sessionOnDatabase  bool
 	migrationGate      MigrationGate
 }
 
@@ -241,6 +242,16 @@ func WithDatabaseSelector(fn DatabaseSelector) MigrateLockOption {
 	}
 }
 
+// WithSessionOnDatabase tells the convergence probe that databaseName is the
+// answer this pinned session just gave to SELECT DATABASE(), so it need not ask
+// the same session the same question again. Only a caller that took the name
+// from conn itself may pass it.
+func WithSessionOnDatabase() MigrateLockOption {
+	return func(o *migrateLockOptions) {
+		o.sessionOnDatabase = true
+	}
+}
+
 // MigrateUpWithLock serializes schema migrations for a single Dolt sql-server
 // database. conn must be a pinned *sql.Conn because MySQL/Dolt named locks are
 // session-scoped; GET_LOCK, migrations, and RELEASE_LOCK must run on the same
@@ -270,7 +281,13 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 	// with "database exists" and captured no authority, and its USE is the
 	// statement alreadyConverged itself issued.
 	if o.freshBootstrapHeal == nil {
-		converged, convergedErr := alreadyConverged(ctx, conn, databaseName, o.databaseSelector)
+		var converged bool
+		var convergedErr error
+		if o.sessionOnDatabase && databaseName != "" {
+			converged, convergedErr = convergedOnTarget(ctx, conn, databaseName, "")
+		} else {
+			converged, convergedErr = alreadyConverged(ctx, conn, databaseName, o.databaseSelector)
+		}
 		switch {
 		case convergedErr != nil:
 			// Advisory only: the probe fails closed onto the locked path
