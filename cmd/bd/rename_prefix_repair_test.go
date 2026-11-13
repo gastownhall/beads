@@ -231,12 +231,127 @@ func withRenameStore(st storage.DoltStorage, run func() error) error {
 	return run()
 }
 
+func TestRepairPrefixesKeepsSuffixesWithoutCollision(t *testing.T) {
+	// GH#6591: consolidating prefixes with --repair should keep each issue's
+	// suffix (cre-db-c2a -> kb-c2a) when the target id is free, instead of
+	// minting a fresh hash id for every off-prefix issue.
+	ctx := context.Background()
+	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+
+	for _, issue := range []*types.Issue{
+		{ID: "kb-u6ch", Title: "Kept", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "cre-db-c2a", Title: "Other family", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "taxdb-5su1", Title: "Third family", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+	} {
+		if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("create %s: %v", issue.ID, err)
+		}
+	}
+
+	allIssues, err := testStore.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if err := repairPrefixes(ctx, testStore, "test", "kb", allIssues, detectPrefixes(allIssues), false); err != nil {
+		t.Fatalf("repair failed: %v", err)
+	}
+
+	allIssues, err = testStore.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("search after repair: %v", err)
+	}
+	got := map[string]bool{}
+	for _, issue := range allIssues {
+		got[issue.ID] = true
+	}
+	for _, want := range []string{"kb-u6ch", "kb-c2a", "kb-5su1"} {
+		if !got[want] {
+			t.Errorf("expected suffix-preserving id %s after repair; ids now: %v", want, got)
+		}
+	}
+}
+
+func TestRepairPrefixesKeepsSuffixes(t *testing.T) {
+	// GH#6591 AC-1: a suffix-preserving repair keeps each off-prefix row's
+	// mnemonic suffix when the destination is free, leaves hand-named target
+	// ids alone, carries payload and relationships, and sets issue_prefix.
+	ctx := context.Background()
+	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+
+	for _, issue := range []*types.Issue{
+		{ID: "taxdb-u6ch", Title: "Renamed with payload", Description: "body", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Labels: []string{"area/storage"}},
+		{ID: "cre-db-c2a", Title: "Other family", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "cre-db-a1b", Title: "Other family sibling", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "kb-hand", Title: "Hand-named target id", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+	} {
+		if err := testStore.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("create %s: %v", issue.ID, err)
+		}
+	}
+	// A relationship inside one family: dep targets only follow a rename when
+	// they are issue-routed, which they are for same-prefix pairs
+	// (isCrossPrefixDep).
+	if err := testStore.AddDependency(ctx, &types.Dependency{IssueID: "cre-db-a1b", DependsOnID: "cre-db-c2a", Type: types.DepBlocks}, "test"); err != nil {
+		t.Fatalf("add dependency: %v", err)
+	}
+
+	allIssues, err := testStore.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if err := repairPrefixes(ctx, testStore, "test", "kb", allIssues, detectPrefixes(allIssues), false); err != nil {
+		t.Fatalf("repair failed: %v", err)
+	}
+
+	allIssues, err = testStore.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("search after repair: %v", err)
+	}
+	if len(allIssues) != 4 {
+		t.Fatalf("expected 4 issues after repair, got %d", len(allIssues))
+	}
+
+	renamed, err := testStore.GetIssue(ctx, "kb-u6ch")
+	if err != nil || renamed == nil {
+		t.Fatalf("expected suffix-preserving id kb-u6ch after repair: %v", err)
+	}
+	if renamed.Title != "Renamed with payload" || renamed.Description != "body" || len(renamed.Labels) != 1 || renamed.Labels[0] != "area/storage" {
+		t.Errorf("payload did not survive the rename: %+v", renamed)
+	}
+
+	for _, id := range []string{"kb-c2a", "kb-a1b"} {
+		if other, err := testStore.GetIssue(ctx, id); err != nil || other == nil {
+			t.Errorf("expected suffix-preserving id %s after repair: %v", id, err)
+		}
+	}
+	if hand, err := testStore.GetIssue(ctx, "kb-hand"); err != nil || hand == nil {
+		t.Errorf("hand-named target id kb-hand must be unchanged: %v", err)
+	}
+
+	// The dependency edge followed both renames.
+	deps, err := testStore.GetDependencies(ctx, "kb-a1b")
+	if err != nil {
+		t.Fatalf("dependencies after repair: %v", err)
+	}
+	if len(deps) != 1 || deps[0].ID != "kb-c2a" {
+		t.Errorf("dependency edge did not follow the rename: %+v", deps)
+	}
+
+	prefix, err := testStore.GetConfig(ctx, "issue_prefix")
+	if err != nil || prefix != "kb" {
+		t.Errorf("issue_prefix after repair = %q (%v), want kb", prefix, err)
+	}
+}
+
 func TestRenameFailureLeavesBeadGatesPending(t *testing.T) {
 	// When renaming the awaited bead fails, whether or not that rename
 	// landed, its gate is pointed back at the bead's old ID without a
 	// sighting: bd gate check must find it pending, never resolve it as
-	// though the bead had been deleted. The prefix renames rename the gate
-	// first, so they move it back under its new ID.
+	// though the bead had been deleted. The plain prefix rename renames the
+	// gate before its bead (row order), so it moves the gate back under its
+	// new ID; the suffix-preserving repair plans families in NaturalCompareIDs
+	// order, which renames the bead old-1 before the gate old-gate, so there
+	// the gate is still waiting under its old ID when the failure lands.
 	for _, tt := range []struct {
 		name        string
 		gateRenamed bool
@@ -245,7 +360,7 @@ func TestRenameFailureLeavesBeadGatesPending(t *testing.T) {
 		{name: "rename", run: func(_ context.Context, st storage.DoltStorage, _ []*types.Issue) error {
 			return withRenameStore(st, func() error { return runRename(renameCmd, []string{"old-1", "old-renamed"}) })
 		}},
-		{name: "repair", gateRenamed: true, run: func(ctx context.Context, st storage.DoltStorage, issues []*types.Issue) error {
+		{name: "repair", gateRenamed: false, run: func(ctx context.Context, st storage.DoltStorage, issues []*types.Issue) error {
 			return repairPrefixes(ctx, st, "test", "test", issues, detectPrefixes(issues), false)
 		}},
 		{name: "rename-prefix", gateRenamed: true, run: func(ctx context.Context, st storage.DoltStorage, issues []*types.Issue) error {
