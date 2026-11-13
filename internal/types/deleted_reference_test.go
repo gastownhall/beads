@@ -34,6 +34,7 @@ var deletedReferenceCases = []deletedReferenceCase{
 	{"dot then underscore", "be-1._x", "be-1", "be-1._x"},
 	{"dot then hyphen", "be-1.-x", "be-1", "be-1.-x"},
 	{"id byte then dot before", "x.be-1", "be-1", "x.be-1"},
+	{"dotted run of two ids", "bd-1.bd-2", "bd-2", "bd-1.bd-2"},
 
 	// Punctuation around a complete citation is a boundary and survives.
 	{"whole text", "be-1", "be-1", "[deleted:be-1]"},
@@ -121,6 +122,12 @@ func TestRewriteDeletedReferencesIsOrderIndependent(t *testing.T) {
 			text: "step fx-k0008.1.2 failed; parent fx-k0008.1 is gone",
 			ids:  []string{"fx-k0008.1", "fx-k0008.1.2"},
 			want: "step [deleted:fx-k0008.1.2] failed; parent [deleted:fx-k0008.1] is gone",
+		},
+		{
+			name: "dotted run of two top-level ids",
+			text: "bd-1.bd-2 and bd-2, bd-1",
+			ids:  []string{"bd-1", "bd-2"},
+			want: "bd-1.bd-2 and [deleted:bd-2], [deleted:bd-1]",
 		},
 	}
 	for _, tc := range cases {
