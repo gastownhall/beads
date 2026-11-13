@@ -4,9 +4,12 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 func TestProxiedServerWispCreate(t *testing.T) {
@@ -387,6 +390,183 @@ func TestProxiedServerWispGC(t *testing.T) {
 		}
 		if count != 0 {
 			t.Errorf("expected closed wisp %s purged", closedWisp.ID)
+		}
+	})
+
+	t.Run("closed_purge_spares_protected_labels", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "wgpl")
+		if out, err := bdProxiedRun(t, bd, p.dir, "config", "set", "wisp.protected_labels", "keep:mail"); err != nil {
+			t.Fatalf("bd config set wisp.protected_labels: %v\n%s", err, out)
+		}
+		readMail := bdProxiedCreate(t, bd, p.dir, "Read mail", "--ephemeral", "--label", "keep:mail")
+		spent := bdProxiedCreate(t, bd, p.dir, "Spent wisp", "--ephemeral")
+		if out, err := bdProxiedRun(t, bd, p.dir, "close", readMail.ID, spent.ID); err != nil {
+			t.Fatalf("bd close: %v\n%s", err, out)
+		}
+
+		preview, err := bdProxiedRun(t, bd, p.dir, "mol", "wisp", "gc", "--closed")
+		if err != nil {
+			t.Fatalf("bd mol wisp gc --closed: %v\n%s", err, preview)
+		}
+		if !strings.Contains(string(preview), "Found 1 closed wisp(s) to delete") ||
+			!strings.Contains(string(preview), "Skipping 1 wisp(s) carrying a protected label") {
+			t.Errorf("closed purge preview should find only the unlabeled wisp and report the label skip; got:\n%s", preview)
+		}
+
+		out, err := bdProxiedRun(t, bd, p.dir, "mol", "wisp", "gc", "--closed", "--force", "--json")
+		if err != nil {
+			t.Fatalf("bd mol wisp gc --closed --force --json: %v\n%s", err, out)
+		}
+		var got struct {
+			Deleted []string `json:"deleted"`
+		}
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatalf("unmarshal: %v\n%s", err, out)
+		}
+		if len(got.Deleted) != 1 || got.Deleted[0] != spent.ID {
+			t.Errorf("deleted = %v, want only the unlabeled closed wisp %s", got.Deleted, spent.ID)
+		}
+
+		db := openProxiedDB(t, p)
+		var count int
+		if err := db.QueryRow("SELECT COUNT(*) FROM wisps WHERE id = ?", readMail.ID).Scan(&count); err != nil {
+			t.Fatalf("query wisps: %v", err)
+		}
+		if count != 1 {
+			t.Errorf("closed wisp %s carries protected label keep:mail and must survive wisp gc --closed --force", readMail.ID)
+		}
+	})
+
+	// A wisp.protected_labels value that cannot be parsed is not "no labels
+	// configured": GC aborts in age and closed mode with nothing deleted. The
+	// value is planted as direct database drift (the validated write path
+	// refuses it), so the abort is the read's own fail-closed contract, not a
+	// write gate. [null,"keep:mail"] pins that a null element is refused, not
+	// read as an empty name beside a valid one.
+	t.Run("invalid_setting_aborts_both_modes", func(t *testing.T) {
+		t.Parallel()
+		for i, value := range []string{`["keep:mail"`, `[null,"keep:mail"]`} {
+			p := newSharedProxiedProject(t, bd, fmt.Sprintf("wgi%d", i))
+			open := bdProxiedCreate(t, bd, p.dir, "open wisp", "--ephemeral")
+			closed := bdProxiedCreate(t, bd, p.dir, "closed wisp", "--ephemeral")
+			if out, err := bdProxiedRun(t, bd, p.dir, "close", closed.ID); err != nil {
+				t.Fatalf("bd close %s: %v\n%s", closed.ID, err, out)
+			}
+
+			db := openProxiedDB(t, p)
+			if _, err := db.Exec("INSERT INTO config (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)",
+				workapi.SettingKeyWispProtectedLabels, value); err != nil {
+				t.Fatalf("plant malformed setting %q: %v", value, err)
+			}
+
+			for _, mode := range []struct {
+				name string
+				args []string
+			}{
+				{name: "age", args: []string{"mol", "wisp", "gc", "--age", "0s", "--all"}},
+				{name: "closed", args: []string{"mol", "wisp", "gc", "--closed", "--force"}},
+			} {
+				out, err := bdProxiedRun(t, bd, p.dir, mode.args...)
+				if err == nil {
+					t.Errorf("%s-mode gc over malformed setting %q succeeded; want an abort:\n%s", mode.name, value, out)
+				}
+				for _, id := range []string{open.ID, closed.ID} {
+					var count int
+					if err := db.QueryRow("SELECT COUNT(*) FROM wisps WHERE id = ?", id).Scan(&count); err != nil {
+						t.Fatalf("query %s: %v", id, err)
+					}
+					if count != 1 {
+						t.Errorf("%s-mode gc over malformed setting %q deleted wisp %s; want no deletions", mode.name, value, id)
+					}
+				}
+			}
+		}
+	})
+
+	// The proxied route reads through uowMolReader, so the age and cascade
+	// fixtures the direct route pins (TestWispGCProtectedLabel*) must give the
+	// same answer here: a labeled wisp survives age GC, --all, and its
+	// abandoned parent's cascade, while unlabeled peers go.
+	t.Run("age_and_cascade_spare_protected_labels", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "wgal")
+		if out, err := bdProxiedRun(t, bd, p.dir, "config", "set", "wisp.protected_labels", "keep:mail"); err != nil {
+			t.Fatalf("bd config set wisp.protected_labels: %v\n%s", err, out)
+		}
+		openMail := bdProxiedCreate(t, bd, p.dir, "Unread mail", "--ephemeral", "--label", "keep:mail")
+		openPlain := bdProxiedCreate(t, bd, p.dir, "Idle wisp", "--ephemeral")
+		parent := bdProxiedCreate(t, bd, p.dir, "Abandoned parent", "--ephemeral")
+		keptStep := bdProxiedCreate(t, bd, p.dir, "Kept step", "--ephemeral", "--label", "keep:mail")
+		plainStep := bdProxiedCreate(t, bd, p.dir, "Plain step", "--ephemeral")
+		closedMail := bdProxiedCreate(t, bd, p.dir, "Read mail", "--ephemeral", "--label", "thread,keep:mail")
+		closedPlain := bdProxiedCreate(t, bd, p.dir, "Spent wisp", "--ephemeral")
+		if out, err := bdProxiedRun(t, bd, p.dir, "close", keptStep.ID, plainStep.ID, closedMail.ID, closedPlain.ID); err != nil {
+			t.Fatalf("bd close: %v\n%s", err, out)
+		}
+
+		db := openProxiedDB(t, p)
+		for _, stepID := range []string{keptStep.ID, plainStep.ID} {
+			if _, err := db.Exec(
+				"INSERT INTO wisp_dependencies (id, issue_id, depends_on_wisp_id, type, created_at, created_by) VALUES (UUID(), ?, ?, ?, NOW(), 'test')",
+				stepID, parent.ID, "blocks"); err != nil {
+				t.Fatalf("plant step->parent wisp edge: %v", err)
+			}
+		}
+		if _, err := db.Exec("UPDATE wisps SET updated_at = ?", time.Now().UTC().Add(-2*time.Hour)); err != nil {
+			t.Fatalf("backdate wisps: %v", err)
+		}
+
+		gc := func(args ...string) map[string]bool {
+			t.Helper()
+			args = append([]string{"mol", "wisp", "gc", "--age", "1h", "--json"}, args...)
+			out, err := bdProxiedRun(t, bd, p.dir, args...)
+			if err != nil {
+				t.Fatalf("bd %v: %v\n%s", args, err, out)
+			}
+			var got struct {
+				Deleted []string `json:"deleted"`
+			}
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatalf("unmarshal: %v\n%s", err, out)
+			}
+			deleted := map[string]bool{}
+			for _, id := range got.Deleted {
+				deleted[id] = true
+			}
+			return deleted
+		}
+
+		// Age GC without --all: open wisps by age, closed steps only by cascade.
+		deleted := gc()
+		for _, id := range []string{openMail.ID, keptStep.ID} {
+			if deleted[id] {
+				t.Errorf("wisp %s carries protected label keep:mail but age GC deleted it; deleted=%v", id, deleted)
+			}
+		}
+		for _, id := range []string{openPlain.ID, parent.ID, plainStep.ID} {
+			if !deleted[id] {
+				t.Errorf("unprotected wisp %s must be reclaimed (old, or its abandoned parent's step); deleted=%v", id, deleted)
+			}
+		}
+
+		// --all reaches closed wisps directly.
+		deleted = gc("--all")
+		if deleted[closedMail.ID] || deleted[openMail.ID] || deleted[keptStep.ID] {
+			t.Errorf("age GC --all deleted a wisp carrying protected label keep:mail; deleted=%v", deleted)
+		}
+		if !deleted[closedPlain.ID] {
+			t.Errorf("unlabeled closed wisp %s must be reclaimed by --all; deleted=%v", closedPlain.ID, deleted)
+		}
+
+		for _, id := range []string{openMail.ID, keptStep.ID, closedMail.ID} {
+			var count int
+			if err := db.QueryRow("SELECT COUNT(*) FROM wisps WHERE id = ?", id).Scan(&count); err != nil {
+				t.Fatalf("query wisps: %v", err)
+			}
+			if count != 1 {
+				t.Errorf("wisp %s carries protected label keep:mail and must remain in the wisps table", id)
+			}
 		}
 	})
 }

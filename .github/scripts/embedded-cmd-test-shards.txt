@@ -45,6 +45,7 @@
 100 10 TestEmbeddedCreateScalarAndRelationships
 
 100 11 TestEmbeddedKVConcurrent
+100 11 TestEmbeddedWispGCProtectedLabelCascade
 
 100 12 TestEmbeddedAutoImportFallback_ConflictSkip_SkipsRetiredRows
 100 12 TestEmbeddedConfigGetYamlKeyWithServerDown
@@ -75,6 +76,7 @@
 
 100 20 TestEmbeddedInitRoleRoutingRetainedFork
 100 20 TestEmbeddedMigrateSchema_IdentityMismatchRefusesBeforeApplying
+100 20 TestEmbeddedWispGCProtectedLabelReporting
 
 100 21 TestEmbeddedArrivalSeqOnEveryJSONRead
 100 21 TestEmbeddedConfigGetIsReadOnly
@@ -104,6 +106,7 @@
 100 27 TestEmbeddedDoltRemoteAdd_GitOriginCollision_RefusalMessageCopy
 100 27 TestEmbeddedNewDoltStoreFromConfig_DottedDBName
 100 27 TestEmbeddedShipConcurrent
+100 27 TestEmbeddedWispGCProtectedLabelWriteRefused
 
 100 28 TestEmbeddedDoltLocalOnly_RemoteAdd_RefusesExitOne
 100 28 TestEmbeddedForeignPreDoltCloneLeftUnchanged
@@ -174,6 +177,7 @@
 100 41 TestEmbeddedCompactAbortsDivergentReplay
 100 41 TestEmbeddedDuplicateConcurrent
 100 41 TestEmbeddedVersionedHistoryFollowsTheStoreItWritesInto
+100 41 TestEmbeddedWispGCClosedPurgeProtectedLabel
 
 100 42 TestEmbeddedCompactMisdatedOldWindow
 100 42 TestEmbeddedInitAForkAutoContributor
@@ -486,6 +490,7 @@
 100 84 TestEmbeddedInitGitBootstrapRoutingDecoyInvalid
 100 84 TestEmbeddedInitSelectedExcludeRoutingStealthInvalid
 100 84 TestEmbeddedMigratePersonal_preservesComments
+100 84 TestEmbeddedWispGCProtectedLabel
 
 100 85 TestEmbeddedBootstrapExistingDryRunInit
 100 85 TestEmbeddedChildrenBasicAndEmpty
@@ -499,6 +504,7 @@
 100 86 TestEmbeddedExplicitHierarchicalParentEdges
 100 86 TestEmbeddedInitHooksRouting
 100 86 TestEmbeddedMigratePersonal_noopWhenEmpty
+100 86 TestEmbeddedWispGCExcludeLabel
 
 100 87 TestEmbeddedCreateRepoProxiedTargetError
 100 87 TestEmbeddedGateInheritsDownParentChain
