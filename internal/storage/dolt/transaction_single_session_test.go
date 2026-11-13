@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // These tests pin that DoltStore.RunInTransaction runs the durable plane and
@@ -57,6 +59,10 @@ func commitsWithMessage(t *testing.T, ctx context.Context, store *DoltStore, msg
 		t.Fatalf("iterate dolt_log: %v", err)
 	}
 	return hashes
+}
+
+func isWispPlaneTable(table string) bool {
+	return table == "wisps" || strings.HasPrefix(table, "wisp_")
 }
 
 // TestRunInTransactionWispCommitConflictIsDeterminateAndAtomic: when another
@@ -206,5 +212,92 @@ func TestRunInTransactionHoldsOneConnection(t *testing.T) {
 	}
 	if delta := inside - before; delta != 1 {
 		t.Errorf("connections in use inside the callback = %d more than before, want exactly 1 (no second session)", delta)
+	}
+}
+
+// TestRunInTransactionKeepsWispsUnstaged: running both planes in one SQL
+// transaction does not version wisps. The callback's Dolt commit carries its
+// durable write and no wisp-plane table, and the wisp tables stay out of the
+// staged set afterwards (they remain clone-local).
+func TestRunInTransactionKeepsWispsUnstaged(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	const msg = "test: wisp lifecycle beside a durable write"
+	if err := store.RunInTransaction(ctx, msg, func(tx storage.Transaction) error {
+		if err := tx.CreateIssue(ctx, crossTierRegularIssue("test-unstaged-durable", "durable"), "tester"); err != nil {
+			return err
+		}
+		if err := tx.CreateIssue(ctx, crossTierWispIssue("test-unstaged-wisp", "wisp"), "tester"); err != nil {
+			return err
+		}
+		if err := tx.UpdateIssue(ctx, "test-unstaged-wisp", map[string]interface{}{"title": "wisp renamed"}, "tester"); err != nil {
+			return err
+		}
+		if err := tx.AddLabel(ctx, "test-unstaged-wisp", "scratch", "tester"); err != nil {
+			return err
+		}
+		return tx.CloseIssue(ctx, "test-unstaged-wisp", "done", "tester", "session")
+	}); err != nil {
+		t.Fatalf("RunInTransaction: %v", err)
+	}
+
+	hashes := commitsWithMessage(t, ctx, store, msg)
+	if len(hashes) != 1 {
+		t.Fatalf("Dolt commits with message %q = %d (%v), want exactly 1", msg, len(hashes), hashes)
+	}
+	rows, err := store.db.QueryContext(ctx, "SELECT table_name FROM dolt_diff WHERE commit_hash = ?", hashes[0])
+	if err != nil {
+		t.Fatalf("query dolt_diff: %v", err)
+	}
+	var committed []string
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			t.Fatalf("scan dolt_diff: %v", err)
+		}
+		committed = append(committed, table)
+	}
+	_ = rows.Close()
+	sawIssues := false
+	for _, table := range committed {
+		if isWispPlaneTable(table) {
+			t.Errorf("Dolt commit %s carries wisp-plane table %s; wisps must stay unversioned", hashes[0], table)
+		}
+		if table == "issues" {
+			sawIssues = true
+		}
+	}
+	if !sawIssues {
+		t.Errorf("Dolt commit %s tables = %v, want the durable issues write", hashes[0], committed)
+	}
+
+	statusRows, err := store.db.QueryContext(ctx, "SELECT table_name, staged FROM dolt_status")
+	if err != nil {
+		t.Fatalf("query dolt_status: %v", err)
+	}
+	defer statusRows.Close()
+	for statusRows.Next() {
+		var table string
+		var staged bool
+		if err := statusRows.Scan(&table, &staged); err != nil {
+			t.Fatalf("scan dolt_status: %v", err)
+		}
+		if isWispPlaneTable(table) && staged {
+			t.Errorf("wisp-plane table %s is staged after the commit; wisps must stay clone-local", table)
+		}
+		if !isWispPlaneTable(table) && (table == "issues" || table == "dependencies") {
+			t.Errorf("durable table %s is still dirty after the commit", table)
+		}
+	}
+
+	w, err := store.GetIssue(ctx, "test-unstaged-wisp")
+	if err != nil {
+		t.Fatalf("GetIssue(test-unstaged-wisp): %v", err)
+	}
+	if w.Status != types.StatusClosed || w.Title != "wisp renamed" {
+		t.Errorf("wisp after commit = status %s title %q, want closed %q", w.Status, w.Title, "wisp renamed")
 	}
 }
