@@ -129,6 +129,17 @@ func checkDiscoveredBackend(beadsDir string) error {
 // here because internal/configfile is unimportable outside this module.
 type LegacyWorkspaceError = configfile.LegacyWorkspaceError
 
+// MetadatalessDatabaseError is returned by OpenBestAvailable and
+// OpenBestAvailableWith for an embedded workspace with no metadata.json (or
+// legacy config.json) whose store already holds a database other than the
+// one the open falls back to, or several: opening the fallback would create
+// or select a sibling database whose reads and writes diverge from the
+// workspace's real one. Nothing was opened, created or modified; restore the
+// metadata naming the intended dolt_database. Match it with errors.As.
+// Aliased here because internal/configfile is unimportable outside this
+// module.
+type MetadatalessDatabaseError = configfile.MetadatalessDatabaseError
+
 // Transaction provides atomic multi-operation support within a database transaction.
 // Use Storage.RunInTransaction() to obtain a Transaction instance.
 type Transaction = beads.Transaction
