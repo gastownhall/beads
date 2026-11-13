@@ -390,6 +390,39 @@ func TestImporterUOW(t *testing.T) {
 			t.Fatal("ImportBatch with empty actor should be refused")
 		}
 	})
+
+	t.Run("SingleAttemptKeepsMintedIDsOnTheCallerStructs", func(t *testing.T) {
+		// GH#8455's fix resets the caller's structs at the top of EVERY
+		// attempt, including the only attempt of an uncontended import. This
+		// pins that the reset changes nothing on that path: the minted id is
+		// still on the caller's struct — the proxied bd import builds
+		// ImportedIDs from it (cmd/bd/import_shared.go) — and the counts and
+		// the one-commit contract are exactly today's.
+		before := countHistory(t)
+		when := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+		row := &types.Issue{
+			Title: "Minted onto the caller's struct", Status: types.StatusOpen,
+			IssueType: types.TypeTask, Priority: 2, CreatedAt: when, UpdatedAt: when,
+		}
+		result, err := imp.ImportBatch(ctx, publicops.ImportBatchRequest{
+			Actor: "importer-test", Issues: []*types.Issue{row}, Source: "minted.jsonl",
+		})
+		if err != nil {
+			t.Fatalf("ImportBatch: %v", err)
+		}
+		if result.Created != 1 || len(result.StaleRejectedIDs) != 0 || result.MemoriesImported != 0 {
+			t.Errorf("result = %+v, want Created=1 with nothing rejected", result)
+		}
+		if row.ID == "" {
+			t.Fatal("the caller's struct carries no minted id — the proxied bd import would report ImportedIDs empty")
+		}
+		if got := queryInt(t, "SELECT COUNT(*) FROM issues WHERE id = ?", row.ID); got != 1 {
+			t.Errorf("rows stored under the minted id %s = %d, want 1", row.ID, got)
+		}
+		if after := countHistory(t); after != before+1 {
+			t.Errorf("history entries = %d, want %d", after, before+1)
+		}
+	})
 }
 
 // replayFaultProvider models the hazard GH#8455 names: a proxied bd import
@@ -558,7 +591,6 @@ func TestImporterUOWReplayReMintsUnsetIDs(t *testing.T) {
 			t.Errorf("comments stored under the caller's id %s = %d, want 1", commentID, got)
 		}
 	}
-
 	seedCompetitor := func(t *testing.T, ctx context.Context, sub string) *types.Issue {
 		t.Helper()
 		competitor := &types.Issue{
