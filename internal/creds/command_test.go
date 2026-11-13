@@ -204,6 +204,7 @@ func TestAllowedProjectEnvKeyRefusesExecutableAndBearerSettings(t *testing.T) {
 		{key: "beads_http_token", reason: credentialReason},
 		{key: "BEADS_HTTP_ALLOW_INSECURE", reason: targetReason},
 		{key: "BEADS_SERVE_TOKEN_FILE", reason: targetReason},
+		{key: "BEADS_DOLT_SERVER_PROXY_ROOT", reason: targetReason},
 		{key: "BEADS_DOLT_PASSWORD", ok: true},
 		{key: "DOLT_REMOTE_PASSWORD", ok: true},
 		{key: "GT_ROOT", ok: true},

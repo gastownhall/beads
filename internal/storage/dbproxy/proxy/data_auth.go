@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -60,9 +62,14 @@ const (
 	dataAuthTimeout = 5 * time.Second
 )
 
-// errDataAuth reports that the listener at a registered data address did not
-// prove it holds the workspace's proxy secret.
-var errDataAuth = errors.New("dbproxy: data port authentication failed")
+// ErrDataAuth reports that the listener at a proxy data address did not
+// complete the BDPROXY1 exchange under the proxy root's secret: it hung up on
+// the hello, as a proxy does on a token minted from another secret, or it
+// answered with a proof that does not verify. Either way it has not shown it
+// is the proxy that root names: the root may be another workspace's, the
+// proxy may have restarted and rotated its secret since (a new dial re-reads
+// it), or another process may now hold the port. Test for it with errors.Is.
+var ErrDataAuth = errors.New("dbproxy: data port authentication failed")
 
 // dataAuth is the proxy's side of the BDPROXY1 exchange.
 type dataAuth struct {
@@ -146,12 +153,16 @@ func exchangeDataHandshake(conn net.Conn, secret string, port int, nonce []byte)
 		// A proxy that rejected the hello (a secret rotated by a restart
 		// since this read it, say) closes without answering; a retry
 		// re-reads the secret.
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return fmt.Errorf("%w: the listener at %s closed the connection without answering the hello, as a proxy does to a token from another proxy secret: %w",
+				ErrDataAuth, conn.RemoteAddr(), err)
+		}
 		return fmt.Errorf("dbproxy: read data handshake answer from %s: %w", conn.RemoteAddr(), err)
 	}
 	want := []byte(dataAuthPrefix + identity.DataServerProof(secret, port, nonce) + "\n")
 	if !hmac.Equal(got, want) {
 		return fmt.Errorf("%w: the listener at %s did not prove it holds this workspace's proxy secret, so it is not this workspace's proxy (it may have exited and another process taken its port); refusing to send it any data",
-			errDataAuth, conn.RemoteAddr())
+			ErrDataAuth, conn.RemoteAddr())
 	}
 	return nil
 }
@@ -182,13 +193,9 @@ func dialData(ctx context.Context, addr string) (net.Conn, error) {
 	if !ok {
 		return nil, fmt.Errorf("dbproxy: invalid data address registration for %q", addr)
 	}
-	_, portStr, err := net.SplitHostPort(addr)
+	port, err := dataAddressPort(addr)
 	if err != nil {
-		return nil, fmt.Errorf("dbproxy: invalid data address %q: %w", addr, err)
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil || port <= 0 {
-		return nil, fmt.Errorf("dbproxy: invalid data port in %q", addr)
+		return nil, err
 	}
 	// The address was registered only after readAndDial or spawn verified
 	// the proxy that owns it, so the pidfile is not re-read on every pool
@@ -197,6 +204,76 @@ func dialData(ctx context.Context, addr string) (net.Conn, error) {
 	// refusal. What the registration cannot vouch for is the process that
 	// listens there now, so every connection makes it prove the secret
 	// (clientDataHandshake) before the driver sends it anything.
+	return dialAuthenticated(ctx, rootDir, addr, port)
+}
+
+func dataAddressPort(addr string) (int, error) {
+	_, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return 0, fmt.Errorf("dbproxy: invalid data address %q: %w", addr, err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port <= 0 {
+		return 0, fmt.Errorf("dbproxy: invalid data port in %q", addr)
+	}
+	return port, nil
+}
+
+var (
+	rootNetworksMu sync.Mutex
+	rootNetworks   = map[string]string{} // network name -> the root it dials under
+)
+
+// DataNetworkFor returns the name of a MySQL driver network bound to the
+// proxy root rootDir: its dialer completes the BDPROXY1 exchange under that
+// root's secret for whatever address the driver dials, so a DSN on it can
+// only ever reach the proxy that root names. Unlike DataNetwork, whose dialer
+// looks the root up by address in a process-wide table, nothing another open
+// does can change the root a connection on it authenticates under. That
+// matters in a process that opens several roots: when one root's proxy exits
+// and another's takes its port, the first root's pool must fail with
+// ErrDataAuth there, not authenticate under the second root's secret and
+// run its queries against that root's database. The name is derived from the
+// cleaned absolute path of rootDir and its dialer is registered with the
+// driver once per root, on first use; a process registers one per root it
+// opens and keeps it for its lifetime.
+func DataNetworkFor(rootDir string) string {
+	root, err := filepath.Abs(rootDir)
+	if err != nil {
+		root = filepath.Clean(rootDir)
+	}
+	sum := sha256.Sum256([]byte(root))
+	name := DataNetwork + "-" + hex.EncodeToString(sum[:16])
+	rootNetworksMu.Lock()
+	defer rootNetworksMu.Unlock()
+	if _, ok := rootNetworks[name]; !ok {
+		rootNetworks[name] = root
+		mysql.RegisterDialContext(name, func(ctx context.Context, addr string) (net.Conn, error) {
+			port, err := dataAddressPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			return dialAuthenticated(ctx, root, addr, port)
+		})
+	}
+	return name
+}
+
+// DialData dials the proxy data port at endpoint and completes the BDPROXY1
+// exchange under the secret in rootDir, the proxy's root directory (the one
+// holding proxy.secret). It returns the connection only once the listener has
+// proven it holds that secret, ready for the MySQL session; a listener that
+// does not fails with ErrDataAuth. The secret is read on every call, so a
+// dial after a proxy restart uses the rotated one. ctx bounds the dial and
+// the exchange, which also gives up after dataAuthTimeout.
+func DialData(ctx context.Context, rootDir string, endpoint Endpoint) (net.Conn, error) {
+	if endpoint.Port <= 0 {
+		return nil, fmt.Errorf("dbproxy: invalid data port %d", endpoint.Port)
+	}
+	return dialAuthenticated(ctx, rootDir, endpoint.Address(), endpoint.Port)
+}
+
+func dialAuthenticated(ctx context.Context, rootDir, addr string, port int) (net.Conn, error) {
 	secret, err := identity.ReadSecret(rootDir)
 	if err != nil {
 		return nil, fmt.Errorf("dbproxy: read data authentication secret: %w", err)

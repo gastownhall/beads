@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	mysql "github.com/go-sql-driver/mysql"
+
 	"github.com/steveyegge/beads/internal/storage/dbproxy/identity"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
 	"github.com/stretchr/testify/assert"
@@ -184,7 +186,8 @@ func TestDataPortDoesNotCountUnauthenticatedConnectionsAsActive(t *testing.T) {
 // can exit, and another local user can bind the freed port): such a
 // listener gets the hello and nothing more, whether it stays silent, hangs
 // up, answers garbage or a MySQL greeting, or replays an answer from an
-// earlier connection. proxy.pid is never consulted (the test writes none):
+// earlier connection, and every refusal but a silent listener's is
+// ErrDataAuth, which an embedder classifies. proxy.pid is never consulted (the test writes none):
 // the proxy removes it first at shutdown, and a pooled dial must not race
 // that into a refusal.
 func TestDialDataRequiresTheProxysProof(t *testing.T) {
@@ -284,7 +287,7 @@ func TestDialDataRequiresTheProxysProof(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			received := serveOne(tc.answer)
 			conn, err := dialData(context.Background(), addr)
-			require.Error(t, err)
+			require.ErrorIs(t, err, ErrDataAuth)
 			assert.Nil(t, conn)
 			got := <-received
 			assert.Len(t, got, dataHelloLen, "the listener received more than the hello: %q", got)
@@ -309,6 +312,68 @@ func TestDialDataRequiresTheProxysProof(t *testing.T) {
 
 	_, err = dialData(context.Background(), "127.0.0.1:65535")
 	require.ErrorContains(t, err, "unknown data address")
+}
+
+// TestDataNetworkForIsBoundToItsRoot pins DataNetworkFor: one network per
+// root, whatever spelling of the root names it, and a connection on it
+// authenticates under that root's secret even when the address it dials is
+// registered to another root, as it is once another root's proxy takes the
+// port. The listener here is a proxy under root B's secret; root A's network
+// must be refused by it (ErrDataAuth), and root B's must pass.
+func TestDataNetworkForIsBoundToItsRoot(t *testing.T) {
+	rootA, rootB := t.TempDir(), t.TempDir()
+	_, err := identity.WriteSecret(rootA)
+	require.NoError(t, err)
+	secretB, err := identity.WriteSecret(rootB)
+	require.NoError(t, err)
+
+	netA := DataNetworkFor(rootA)
+	assert.Equal(t, netA, DataNetworkFor(rootA+"/."), "a root spelled differently gets the same network")
+	assert.NotEqual(t, netA, DataNetworkFor(rootB))
+	assert.NotEqual(t, DataNetwork, netA)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer listener.Close()
+	port := listener.Addr().(*net.TCPAddr).Port
+	endpoint := Endpoint{Host: "127.0.0.1", Port: port}
+	registerDataAddress(rootB, endpoint) // the address now belongs to root B
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				_, _ = newDataAuth(secretB, port).accept(conn)
+			}()
+		}
+	}()
+
+	dial := func(network string) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		dsn := (&mysql.Config{User: "root", Net: network, Addr: endpoint.Address(), AllowNativePasswords: true}).FormatDSN()
+		connector, err := mysql.NewConnector(mustParseDSN(t, dsn))
+		require.NoError(t, err)
+		conn, err := connector.Connect(ctx)
+		if conn != nil {
+			_ = conn.Close()
+		}
+		return err
+	}
+	require.ErrorIs(t, dial(netA), ErrDataAuth, "root A's network authenticated under root B's secret")
+	// Root B's network passes the handshake; the listener then hangs up, so
+	// the driver fails reading the MySQL greeting, not on the proof.
+	require.NotErrorIs(t, dial(DataNetworkFor(rootB)), ErrDataAuth)
+}
+
+func mustParseDSN(t *testing.T, dsn string) *mysql.Config {
+	t.Helper()
+	cfg, err := mysql.ParseDSN(dsn)
+	require.NoError(t, err)
+	return cfg
 }
 
 // recordingConn records what is read through it.

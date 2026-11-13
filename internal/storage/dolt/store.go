@@ -49,6 +49,7 @@ import (
 	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/kvkeys"
@@ -470,6 +471,17 @@ type Config struct {
 	ServerUser     string // MySQL user (default: root)
 	ServerPassword string // MySQL password (default: empty, can be set via BEADS_DOLT_PASSWORD)
 	ServerTLS      bool   // Enable TLS for server connections (required for Hosted Dolt)
+
+	// ServerProxyRoot names the root directory of the bd db-proxy (the
+	// directory holding its proxy.secret) whose data port ServerHost and
+	// ServerPort are. A proxy data port refuses a plain MySQL connection:
+	// every connection must first complete the proxy's BDPROXY1 exchange
+	// under that secret, as bd's own proxied-server connections do, and
+	// with this set every connection of the store does. Empty dials a Dolt
+	// server directly. BEADS_DOLT_SERVER_PROXY_ROOT sets it when empty. A
+	// proxy listens on TCP only, so it cannot be combined with ServerSocket,
+	// and a store with it never auto-starts a server.
+	ServerProxyRoot string
 
 	// ServerPortSource records which step of doltserver's port-resolution
 	// chain (or the caller-explicit/env-var reads in applyConfigDefaults)
@@ -1887,6 +1899,9 @@ func applyConfigDefaults(cfg *Config) {
 	if cfg.ServerSocket == "" {
 		cfg.ServerSocket = os.Getenv("BEADS_DOLT_SERVER_SOCKET")
 	}
+	if cfg.ServerProxyRoot == "" {
+		cfg.ServerProxyRoot = os.Getenv("BEADS_DOLT_SERVER_PROXY_ROOT")
+	}
 	if cfg.ServerHost == "" {
 		// Host resolution: BEADS_DOLT_SERVER_HOST env > default 127.0.0.1.
 		if h := os.Getenv("BEADS_DOLT_SERVER_HOST"); h != "" {
@@ -2271,6 +2286,11 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		resolvedBeadsDir = filepath.Dir(cfg.Path) // fallback: cfg.Path is .beads/dolt → parent is .beads/
 	}
 	serverDir := doltserver.ResolveServerDir(resolvedBeadsDir)
+
+	if cfg.ServerProxyRoot != "" && cfg.ServerSocket != "" {
+		return nil, fmt.Errorf("the Dolt server is configured both as a beads db-proxy data port (proxy root %s) and as the Unix socket %s; a proxy listens on TCP only, so clear one of them",
+			remedy.PrintedValue(cfg.ServerProxyRoot), remedy.PrintedValue(cfg.ServerSocket))
+	}
 
 	// Socket-first / TCP-fallback (gt-28itz): a configured unix socket that
 	// isn't currently connectable must not block operations when the server is
@@ -2751,7 +2771,7 @@ func initializeServerCircuitBreaker(cfg *Config) *circuitBreaker {
 // 127.0.0.1 only, so at any other host, the IPv6 loopback included, the
 // retry would still find nothing at host:port and leave bd's server running.
 func serverOpenCanAutoStart(cfg *Config) bool {
-	return !cfg.DisableAutoStart && cfg.AutoStart && cfg.Path != "" &&
+	return !cfg.DisableAutoStart && cfg.AutoStart && cfg.Path != "" && cfg.ServerProxyRoot == "" &&
 		doltserver.AutoStartReaches(cfg.ServerHost, cfg.ServerSocket)
 }
 
@@ -3015,6 +3035,13 @@ func buildServerDSN(cfg *Config, database string) string {
 		Password: cfg.ServerPassword,
 		Database: database,
 		TLS:      cfg.ServerTLS,
+	}
+	if cfg.ServerProxyRoot != "" {
+		// A network bound to this store's proxy root, not the address-keyed
+		// proxy.DataNetwork: every connection makes the BDPROXY1 exchange
+		// under this root's secret, whatever another open in the process has
+		// since registered for the address.
+		base.Net = proxy.DataNetworkFor(cfg.ServerProxyRoot)
 	}
 	// Parse the base DSN and add pool-specific timeouts.
 	parsed, err := mysql.ParseDSN(base.String())
