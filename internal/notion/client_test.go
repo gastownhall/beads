@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -86,7 +87,7 @@ func TestClientQueryDataSourcePaginates(t *testing.T) {
 	})
 
 	client := NewClient("secret-token").WithBaseURL(server.URL)
-	pages, err := client.QueryDataSource(context.Background(), "ds_123")
+	pages, err := client.QueryDataSource(context.Background(), "ds_123", nil)
 	if err != nil {
 		t.Fatalf("QueryDataSource returned error: %v", err)
 	}
@@ -268,7 +269,7 @@ func TestClientQueryDataSourceRespectsConfiguredPageBound(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient("secret-token").WithBaseURL(server.URL).WithMaxQueryPages(3)
-	_, err := client.QueryDataSource(context.Background(), "ds_123")
+	_, err := client.QueryDataSource(context.Background(), "ds_123", nil)
 	if err == nil {
 		t.Fatal("QueryDataSource succeeded, want pagination-bound error")
 	}
@@ -300,7 +301,7 @@ func TestClientQueryDataSourceDefaultBoundUnchanged(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient("secret-token").WithBaseURL(server.URL)
-	if _, err := client.QueryDataSource(context.Background(), "ds_123"); err == nil {
+	if _, err := client.QueryDataSource(context.Background(), "ds_123", nil); err == nil {
 		t.Fatal("QueryDataSource succeeded, want pagination-bound error")
 	}
 	// Hardcoded rather than compared against maxQueryPages: pinned to the
@@ -309,6 +310,297 @@ func TestClientQueryDataSourceDefaultBoundUnchanged(t *testing.T) {
 	if calls.Load() != 50 {
 		t.Fatalf("requests = %d, want the unchanged default 50", calls.Load())
 	}
+}
+
+func TestClientQueryDataSourceFilters(t *testing.T) {
+	t.Parallel()
+
+	filter := map[string]interface{}{
+		"timestamp":        "last_edited_time",
+		"last_edited_time": map[string]interface{}{"on_or_after": "2026-11-01T12:04:00Z"},
+	}
+	const wantFilter = `"filter":{"last_edited_time":{"on_or_after":"2026-11-01T12:04:00Z"},"timestamp":"last_edited_time"}`
+
+	t.Run("filter rides every page, including cursor requests", func(t *testing.T) {
+		t.Parallel()
+		var mu sync.Mutex
+		var bodies []string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			bodies = append(bodies, string(body))
+			first := len(bodies) == 1
+			mu.Unlock()
+			if first {
+				_, _ = io.WriteString(w, `{"results":[{"id":"page-1"}],"has_more":true,"next_cursor":"cursor-2"}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"results":[{"id":"page-2"}],"has_more":false}`)
+		}))
+		defer server.Close()
+
+		pages, err := NewClient("secret-token").WithBaseURL(server.URL).QueryDataSource(context.Background(), "ds_123", filter)
+		if err != nil {
+			t.Fatalf("QueryDataSource returned error: %v", err)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if len(pages) != 2 || len(bodies) != 2 {
+			t.Fatalf("pages = %d over %d requests, want 2 over 2", len(pages), len(bodies))
+		}
+		for i, body := range bodies {
+			if !strings.Contains(body, wantFilter) {
+				t.Fatalf("request %d body = %s, want %s", i, body, wantFilter)
+			}
+		}
+		if !strings.Contains(bodies[1], `"start_cursor":"cursor-2"`) {
+			t.Fatalf("cursor request body = %s", bodies[1])
+		}
+	})
+
+	t.Run("nil filter omits the key", func(t *testing.T) {
+		t.Parallel()
+		var mu sync.Mutex
+		var body string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			raw, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			body = string(raw)
+			mu.Unlock()
+			_, _ = io.WriteString(w, `{"results":[],"has_more":false}`)
+		}))
+		defer server.Close()
+
+		if _, err := NewClient("secret-token").WithBaseURL(server.URL).QueryDataSource(context.Background(), "ds_123", nil); err != nil {
+			t.Fatalf("QueryDataSource returned error: %v", err)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if strings.Contains(body, `"filter"`) {
+			t.Fatalf("unfiltered request body = %s, want no filter key", body)
+		}
+	})
+
+	t.Run("finishing on the last allowed page succeeds", func(t *testing.T) {
+		t.Parallel()
+		var calls atomic.Int64
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.ReadAll(r.Body)
+			if calls.Add(1) < 2 {
+				_, _ = io.WriteString(w, `{"results":[{"id":"p"}],"has_more":true,"next_cursor":"c"}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"results":[{"id":"q"}],"has_more":false}`)
+		}))
+		defer server.Close()
+
+		pages, err := NewClient("secret-token").WithBaseURL(server.URL).WithMaxQueryPages(2).QueryDataSource(context.Background(), "ds_123", filter)
+		if err != nil {
+			t.Fatalf("QueryDataSource finishing at the bound returned error: %v", err)
+		}
+		if len(pages) != 2 {
+			t.Fatalf("pages = %d, want 2", len(pages))
+		}
+	})
+
+	t.Run("a filtered query past the bound fails without partial rows", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.ReadAll(r.Body)
+			_, _ = io.WriteString(w, `{"results":[{"id":"p"}],"has_more":true,"next_cursor":"c"}`)
+		}))
+		defer server.Close()
+
+		pages, err := NewClient("secret-token").WithBaseURL(server.URL).WithMaxQueryPages(2).QueryDataSource(context.Background(), "ds_123", filter)
+		if err == nil {
+			t.Fatal("QueryDataSource succeeded, want pagination-bound error")
+		}
+		if pages != nil {
+			t.Fatalf("pages = %d with the error, want none", len(pages))
+		}
+		if !strings.Contains(err.Error(), "notion.max_query_pages") || !strings.Contains(err.Error(), "NOTION_MAX_QUERY_PAGES") {
+			t.Fatalf("error should name the config key and env var, got: %v", err)
+		}
+		if strings.Contains(err.Error(), "no sync can complete") {
+			t.Fatalf("error should describe this query, not every sync, got: %v", err)
+		}
+	})
+}
+
+func TestClientRetrievePage(t *testing.T) {
+	t.Parallel()
+
+	t.Run("decodes the page and its data source parent", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet || r.URL.EscapedPath() != "/pages/odd%2Fid" {
+				t.Errorf("request = %s %s, want GET /pages/odd%%2Fid", r.Method, r.URL.EscapedPath())
+			}
+			_, _ = io.WriteString(w, `{"object":"page","id":"page-1","archived":true,"parent":{"type":"data_source_id","data_source_id":"ds-1","database_id":"db-1"}}`)
+		}))
+		defer server.Close()
+
+		page, err := NewClient("secret-token").WithBaseURL(server.URL).RetrievePage(context.Background(), "odd/id")
+		if err != nil {
+			t.Fatalf("RetrievePage returned error: %v", err)
+		}
+		if page.ID != "page-1" || !page.Archived {
+			t.Fatalf("page = %+v", page)
+		}
+		if page.Parent == nil || *page.Parent != (PageParent{Type: "data_source_id", DataSourceID: "ds-1", DatabaseID: "db-1"}) {
+			t.Fatalf("parent = %+v", page.Parent)
+		}
+	})
+
+	for _, tc := range []struct {
+		name, body, wantText string
+	}{
+		{"json body", `{"object":"error","status":404,"code":"object_not_found","message":"Could not find page"}`, "Notion API error object_not_found (404): Could not find page"},
+		{"non-json body", "  no such page \n", "Notion API error (404): no such page"},
+	} {
+		t.Run("404 with "+tc.name+" is a typed not-found", func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer server.Close()
+
+			client := NewClient("secret-token").WithBaseURL(server.URL)
+			client.after = mustNotWait(t, "a 404 must not be retried")
+			_, err := client.RetrievePage(context.Background(), "page-1")
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusNotFound || !isNotFound(err) {
+				t.Fatalf("error = %#v, want an *APIError with status 404", err)
+			}
+			if err.Error() != tc.wantText {
+				t.Fatalf("error text = %q, want the unchanged %q", err.Error(), tc.wantText)
+			}
+		})
+	}
+
+	t.Run("403 is an error, not a missing page", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `{"code":"restricted_resource","message":"no access"}`)
+		}))
+		defer server.Close()
+
+		_, err := NewClient("secret-token").WithBaseURL(server.URL).RetrievePage(context.Background(), "page-1")
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden || isNotFound(err) {
+			t.Fatalf("error = %#v, want a 403 *APIError that is not a not-found", err)
+		}
+	})
+
+	t.Run("429 is retried under Retry-After", func(t *testing.T) {
+		t.Parallel()
+		var calls atomic.Int64
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if calls.Add(1) == 1 {
+				w.Header().Set("Retry-After", "1")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = io.WriteString(w, `{"code":"rate_limited","message":"Rate limited."}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"object":"page","id":"page-1"}`)
+		}))
+		defer server.Close()
+
+		var slept []time.Duration
+		client := NewClient("secret-token").WithBaseURL(server.URL)
+		client.after = firesImmediately(&slept)
+		page, err := client.RetrievePage(context.Background(), "page-1")
+		if err != nil || page.ID != "page-1" {
+			t.Fatalf("RetrievePage = (%+v, %v), want page-1", page, err)
+		}
+		if len(slept) != 1 || slept[0] != time.Second {
+			t.Fatalf("slept = %v, want the 1s Retry-After", slept)
+		}
+	})
+
+	t.Run("529 is retried for a GET", func(t *testing.T) {
+		t.Parallel()
+		var calls atomic.Int64
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if calls.Add(1) == 1 {
+				w.WriteHeader(statusNotionOverloaded)
+				return
+			}
+			_, _ = io.WriteString(w, `{"object":"page","id":"page-1"}`)
+		}))
+		defer server.Close()
+
+		var slept []time.Duration
+		client := NewClient("secret-token").WithBaseURL(server.URL)
+		client.after = firesImmediately(&slept)
+		page, err := client.RetrievePage(context.Background(), "page-1")
+		if err != nil || page.ID != "page-1" {
+			t.Fatalf("RetrievePage after 529 = (%+v, %v), want page-1", page, err)
+		}
+		if calls.Load() != 2 {
+			t.Fatalf("requests = %d, want 2 (a GET retries on 529)", calls.Load())
+		}
+	})
+
+	t.Run("exhausted retries stay an error", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"code":"service_unavailable","message":"try later"}`)
+		}))
+		defer server.Close()
+
+		var slept []time.Duration
+		client := NewClient("secret-token").WithBaseURL(server.URL)
+		client.after = firesImmediately(&slept)
+		_, err := client.RetrievePage(context.Background(), "page-1")
+		if err == nil || isNotFound(err) || len(slept) != maxRequestAttempts-1 {
+			t.Fatalf("error = %v after %d waits, want a non-not-found error after %d", err, len(slept), maxRequestAttempts-1)
+		}
+	})
+
+	t.Run("transport failure stays an error", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		baseURL := server.URL
+		server.Close()
+
+		_, err := NewClient("secret-token").WithBaseURL(baseURL).RetrievePage(context.Background(), "page-1")
+		var apiErr *APIError
+		if err == nil || errors.As(err, &apiErr) {
+			t.Fatalf("error = %#v, want a transport error that is not an *APIError", err)
+		}
+	})
+
+	t.Run("canceled context stays an error", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, `{"object":"page","id":"page-1"}`)
+		}))
+		defer server.Close()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := NewClient("secret-token").WithBaseURL(server.URL).RetrievePage(ctx, "page-1")
+		if !errors.Is(err, context.Canceled) || isNotFound(err) {
+			t.Fatalf("error = %v, want context.Canceled", err)
+		}
+	})
+
+	t.Run("malformed success stays an error", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, `{not json`)
+		}))
+		defer server.Close()
+
+		_, err := NewClient("secret-token").WithBaseURL(server.URL).RetrievePage(context.Background(), "page-1")
+		if err == nil || !strings.Contains(err.Error(), "parse page response") {
+			t.Fatalf("error = %v, want a parse error", err)
+		}
+	})
 }
 
 func TestClientRetriesRateLimitedRequestHonoringRetryAfter(t *testing.T) {
@@ -338,7 +630,7 @@ func TestClientRetriesRateLimitedRequestHonoringRetryAfter(t *testing.T) {
 	client := NewClient("secret-token").WithBaseURL(server.URL)
 	client.after = firesImmediately(&slept)
 
-	pages, err := client.QueryDataSource(context.Background(), "ds_123")
+	pages, err := client.QueryDataSource(context.Background(), "ds_123", nil)
 	if err != nil {
 		t.Fatalf("QueryDataSource returned error: %v", err)
 	}
@@ -415,7 +707,7 @@ func TestClientRetriesServerErrorOnQueryPost(t *testing.T) {
 			client := NewClient("secret-token").WithBaseURL(server.URL)
 			client.after = firesImmediately(&slept)
 
-			pages, err := client.QueryDataSource(context.Background(), "ds_123")
+			pages, err := client.QueryDataSource(context.Background(), "ds_123", nil)
 			if err != nil {
 				t.Fatalf("QueryDataSource returned error: %v", err)
 			}
@@ -576,7 +868,7 @@ func TestClientRetryWaitObservesContextCancellation(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := client.QueryDataSource(ctx, "ds_123")
+		_, err := client.QueryDataSource(ctx, "ds_123", nil)
 		done <- err
 	}()
 
@@ -618,7 +910,7 @@ func TestClientRefusesRetryAfterLongerThanItWillWait(t *testing.T) {
 	client := NewClient("secret-token").WithBaseURL(server.URL)
 	client.after = mustNotWait(t, "a Retry-After beyond maxRetryDelay must not be clamped and retried")
 
-	_, err := client.QueryDataSource(context.Background(), "ds_123")
+	_, err := client.QueryDataSource(context.Background(), "ds_123", nil)
 	if err == nil {
 		t.Fatal("QueryDataSource succeeded, want a refusal")
 	}
@@ -655,7 +947,7 @@ func TestClientRefusesLongRetryAfterInHTTPDateForm(t *testing.T) {
 	client := NewClient("secret-token").WithBaseURL(server.URL)
 	client.after = mustNotWait(t, "a date-form Retry-After beyond maxRetryDelay must not be clamped and retried")
 
-	_, err := client.QueryDataSource(context.Background(), "ds_123")
+	_, err := client.QueryDataSource(context.Background(), "ds_123", nil)
 	if err == nil {
 		t.Fatal("QueryDataSource succeeded, want a refusal")
 	}
