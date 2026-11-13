@@ -151,6 +151,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd rename-prefix --mint-only` switches the prefix new ids mint under.**
+  No existing issue is renamed: the old prefix is appended to
+  `allowed_prefixes` (written first, so a failed `issue_prefix` write leaves
+  only an extra allowed prefix) and then `issue_prefix` moves, so children of
+  old-prefix parents keep validating. Works on corrupted multi-prefix
+  databases too, refuses the current prefix, warns when an active workspace
+  YAML `issue-prefix` disagrees, and reports `{old_prefix, new_prefix,
+  mint_only, dry_run, allowed_prefixes_added}` as one JSON object.
+- **`bd rename-prefix --repair` keeps suffixes and re-roots conflicting
+  families whole.** Off-prefix issues keep their mnemonic suffix under the
+  target prefix (`cre-db-c2a` becomes `kb-c2a`, hyphenated prefixes honored
+  through `issue_prefix`/`allowed_prefixes`) when the destination is free;
+  a family blocked by a live issue (child-only namespaces included), a
+  retired id, or another family in the same repair moves as a whole to one
+  generated `kb-<8hex>` root with dotted paths intact, and every collision
+  is reported. `--json` now emits exactly one object — dry run and execution
+  alike — carrying `target_prefix`, `prefixes_found`, `issues_repaired`,
+  `issues_unchanged`, `dry_run`, the complete `renames` list and every
+  `collisions` fallback.
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
   While a workspace journals, every `ephemeral` or `no_history` bead it creates
   is stamped with the `seq` of its own `create` journal record, in the same

@@ -757,6 +757,104 @@ func TestRenamePrefixMintOnly(t *testing.T) {
 	}
 }
 
+// runRenamePrefixFlags points the globals at st and runs rename-prefix with
+// the named boolean flags set (restored afterwards), capturing stdout and
+// stderr.
+func runRenamePrefixFlags(t *testing.T, st storage.DoltStorage, args []string, flags ...string) (stdout, stderrOut string, err error) {
+	t.Helper()
+	oldCtx := rootCtx
+	rootCtx = context.Background()
+	defer func() { rootCtx = oldCtx }()
+	var runErr error
+	err = withRenameStore(st, func() error {
+		for _, f := range flags {
+			if ferr := renamePrefixCmd.Flags().Set(f, "true"); ferr != nil {
+				return ferr
+			}
+		}
+		defer func() {
+			for _, f := range flags {
+				_ = renamePrefixCmd.Flags().Set(f, "false")
+			}
+		}()
+		stderrOut = captureStderr(t, func() {
+			stdout = captureRepairStdout(t, func() {
+				runErr = renamePrefixCmd.RunE(renamePrefixCmd, args)
+			})
+		})
+		return runErr
+	})
+	return stdout, stderrOut, err
+}
+
+func TestRenamePrefixMintOnlyDryRunAndRefusal(t *testing.T) {
+	// GH#6591 AC-7: mint-only --dry-run reports both changes — the prefix
+	// switch and the allowed-prefix addition — and writes nothing; JSON is
+	// one object with allowed_prefixes_added as an array; --repair and
+	// --mint-only together are refused without any write.
+	ctx := context.Background()
+	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+	if err := testStore.SetConfig(ctx, "issue_prefix", "taxdb"); err != nil {
+		t.Fatalf("set issue_prefix: %v", err)
+	}
+	if err := testStore.CreateIssue(ctx, &types.Issue{ID: "taxdb-5su1", Title: "Existing", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "test"); err != nil {
+		t.Fatalf("create taxdb-5su1: %v", err)
+	}
+
+	// Text dry run names both changes.
+	out, _, err := runRenamePrefixFlags(t, testStore, []string{"kb"}, "mint-only", "dry-run")
+	if err != nil {
+		t.Fatalf("mint-only --dry-run: %v", err)
+	}
+	if !strings.Contains(out, "DRY RUN") || !strings.Contains(out, "kb") || !strings.Contains(out, "'taxdb' added to allowed_prefixes") {
+		t.Errorf("dry-run output does not report both changes: %s", out)
+	}
+
+	// JSON dry run: one object, nothing written.
+	oldJSON := jsonOutput
+	jsonOutput = true
+	out, _, err = runRenamePrefixFlags(t, testStore, []string{"kb"}, "mint-only", "dry-run")
+	jsonOutput = oldJSON
+	if err != nil {
+		t.Fatalf("mint-only --dry-run --json: %v", err)
+	}
+	var preview struct {
+		OldPrefix            string   `json:"old_prefix"`
+		NewPrefix            string   `json:"new_prefix"`
+		MintOnly             bool     `json:"mint_only"`
+		DryRun               bool     `json:"dry_run"`
+		AllowedPrefixesAdded []string `json:"allowed_prefixes_added"`
+	}
+	if err := json.Unmarshal([]byte(out), &preview); err != nil {
+		t.Fatalf("dry-run stdout is not exactly one JSON object:\n%s\n%v", out, err)
+	}
+	if preview.OldPrefix != "taxdb" || preview.NewPrefix != "kb" || !preview.MintOnly || !preview.DryRun {
+		t.Errorf("preview = %+v, want taxdb -> kb, mint-only dry run", preview)
+	}
+	if !reflect.DeepEqual(preview.AllowedPrefixesAdded, []string{"taxdb"}) {
+		t.Errorf("allowed_prefixes_added = %v, want [taxdb]", preview.AllowedPrefixesAdded)
+	}
+	prefix, _ := testStore.GetConfig(ctx, "issue_prefix")
+	allowed, _ := testStore.GetConfig(ctx, "allowed_prefixes")
+	if prefix != "taxdb" || allowed != "" {
+		t.Errorf("dry run wrote config: issue_prefix=%q allowed_prefixes=%q", prefix, allowed)
+	}
+
+	// --repair and --mint-only together: refused, nothing written.
+	_, stderrOut, err := runRenamePrefixFlags(t, testStore, []string{"kb"}, "mint-only", "repair")
+	if err == nil || !strings.Contains(stderrOut, "cannot be combined") {
+		t.Fatalf("--repair --mint-only error = %v (stderr %q), want the mutual-exclusion refusal", err, stderrOut)
+	}
+	prefix, _ = testStore.GetConfig(ctx, "issue_prefix")
+	allowed, _ = testStore.GetConfig(ctx, "allowed_prefixes")
+	if prefix != "taxdb" || allowed != "" {
+		t.Errorf("refusal wrote config: issue_prefix=%q allowed_prefixes=%q", prefix, allowed)
+	}
+	if issue, gerr := testStore.GetIssue(ctx, "taxdb-5su1"); gerr != nil || issue == nil {
+		t.Errorf("refusal disturbed existing rows: %v", gerr)
+	}
+}
+
 func TestRenameFailureLeavesBeadGatesPending(t *testing.T) {
 	// When renaming the awaited bead fails, whether or not that rename
 	// landed, its gate is pointed back at the bead's old ID without a

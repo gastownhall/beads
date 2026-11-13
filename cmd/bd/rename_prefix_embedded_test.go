@@ -253,6 +253,36 @@ func TestEmbeddedRenamePrefixEdgeCases(t *testing.T) {
 			}
 		}
 	})
+
+	// ===== Mint-only (GH#6591): switch what new ids use =====
+
+	t.Run("mint_only_switches_new_ids_only", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "taxdb")
+		existing := bdCreate(t, bd, dir, "Existing issue", "--type", "task")
+
+		out := bdRenamePrefix(t, bd, dir, "kb", "--mint-only")
+		if !strings.Contains(out, "kb") || !strings.Contains(out, "untouched") {
+			t.Errorf("mint-only output does not report the switch: %s", out)
+		}
+
+		// The existing row kept its id; the next create mints kb-*.
+		if shown := bdShow(t, bd, dir, existing.ID); shown == nil || shown.ID != existing.ID {
+			t.Errorf("mint-only renamed the existing row: %v", shown)
+		}
+		fresh := bdCreate(t, bd, dir, "Fresh under the new prefix", "--type", "task")
+		if !strings.HasPrefix(fresh.ID, "kb-") {
+			t.Errorf("fresh issue minted %q, want a kb- id", fresh.ID)
+		}
+
+		// A child of the old-prefix parent still validates.
+		child := bdCreate(t, bd, dir, "Child under the old prefix", "--type", "task", "--parent", existing.ID)
+		if !strings.HasPrefix(child.ID, existing.ID+".") {
+			t.Errorf("child of %s minted %q, want a %s.N id", existing.ID, child.ID, existing.ID)
+		}
+
+		// --repair and --mint-only together are refused.
+		bdRenamePrefixFail(t, bd, dir, "xx", "--mint-only", "--repair")
+	})
 }
 
 // TestEmbeddedRenamePrefixConcurrent exercises rename-prefix --dry-run concurrently.

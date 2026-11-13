@@ -85,8 +85,9 @@ func TestRejectProtectedConfigKey(t *testing.T) {
 			t.Errorf("rejectProtectedConfigKey(%q) = (_, false), want rejected", key)
 			continue
 		}
-		// Error message must surface the three lifecycle alternatives.
-		wantSubstrings := []string{"bd init --prefix", "bd bootstrap", "bd rename-prefix"}
+		// Error message must surface the lifecycle alternatives, the
+		// mint-only switch included.
+		wantSubstrings := []string{"bd init --prefix", "bd bootstrap", "bd rename-prefix", "--mint-only"}
 		for _, want := range wantSubstrings {
 			if !strings.Contains(msg, want) {
 				t.Errorf("rejectProtectedConfigKey(%q) message missing %q; got:\n%s", key, want, msg)
