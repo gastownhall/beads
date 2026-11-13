@@ -850,6 +850,17 @@ bd --dolt-auto-commit off create "Issue 2"
 bd vc commit -m "Batch: created issues"
 ```
 
+Config-table writes — `bd config set`, `bd remember` / `bd forget`, and
+`bd kv set` / `bd kv clear` — never wait for a later commit on a direct
+connection: each one stages its own scoped config commit as part of the
+command (`bd kv` and memory writes take only user `kv.*` rows with them). A
+screened commit that another writer's dirty internal config key refuses
+prints a warning on stderr and exits 0: the write itself has landed and
+stays in the working set for `bd dolt commit`. Under `dolt.auto-commit`
+`batch` or `off` these writes defer to `bd dolt commit`, like every other
+write; embedded mode commits them with the end-of-command auto-commit
+instead.
+
 ## Server Management (Orchestrator)
 
 The orchestrator provides integrated Dolt server management:

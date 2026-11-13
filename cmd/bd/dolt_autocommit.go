@@ -182,9 +182,9 @@ func commitPendingIfEmbedded(ctx context.Context, st storage.DoltStorage, actor 
 // rename-prefix and migrate also write config (issue_prefix, sync.branch) and
 // are deliberately not wired here: they are multi-step operations, and when
 // their config row should become a commit is the GH#2455 question itself.
-// `bd kv set`/`clear` and the kv.memory rows `bd import` writes are not wired
-// here yet either, so on this route they stay in the working set until a later
-// commit stages config, such as `bd dolt commit`.
+// `bd kv set`/`clear` are wired through commitKVWrite below; the kv.memory
+// rows `bd import` writes are not, so on this route they stay in the working
+// set until a later commit stages config, such as `bd dolt commit`.
 func commitConfigWrite(ctx context.Context, st storage.DoltStorage, command string) error {
 	if err := commitConfigTable(ctx, st, command, storage.DoltStorage.CommitConfigOnly); err != nil {
 		return fmt.Errorf("committing config write: %w", err)
@@ -200,6 +200,20 @@ func commitConfigWrite(ctx context.Context, st storage.DoltStorage, command stri
 func commitMemoryWrite(ctx context.Context, st storage.DoltStorage, command string) error {
 	if err := commitConfigTable(ctx, st, command, storage.DoltStorage.CommitConfigUserKVOnly); err != nil {
 		return fmt.Errorf("committing memory write: %w", err)
+	}
+	return nil
+}
+
+// commitKVWrite is commitConfigWrite for bd kv set/clear. A kv pair is user
+// kv.* data, exactly like a memory, so its commit is the same screened one
+// (CommitConfigUserKVOnly): a dirty internal key is refused, not swept in,
+// and the callers report the refusal as a warning because the kv write has
+// already landed. It is a helper of its own only so the warning says
+// "committing kv write" — commitMemoryWrite's text is pinned in remember's
+// stderr and --json output (GH#7523).
+func commitKVWrite(ctx context.Context, st storage.DoltStorage, command string) error {
+	if err := commitConfigTable(ctx, st, command, storage.DoltStorage.CommitConfigUserKVOnly); err != nil {
+		return fmt.Errorf("committing kv write: %w", err)
 	}
 	return nil
 }

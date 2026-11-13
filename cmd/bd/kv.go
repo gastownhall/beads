@@ -267,6 +267,17 @@ Examples:
 			return HandleErrorRespectJSON("setting key: %v", err)
 		}
 
+		// The row is written by now, so a commit the kv.* screen refuses (a
+		// dirty internal key such as `bd rename-prefix` leaves) or that fails
+		// is a warning, not the command's failure — as for remember and
+		// forget. noteDirectConfigWrite arms the embedded end-of-run
+		// auto-commit; commitKVWrite versions the write on the direct
+		// SQL-server route, where nothing else commits it (GH#7523).
+		noteDirectConfigWrite()
+		if err := commitKVWrite(ctx, store, "kv set"); err != nil {
+			WarnError("%v", err)
+		}
+
 		return printKVSetResult(key, value)
 	},
 }
@@ -353,6 +364,13 @@ Examples:
 		ctx := rootCtx
 		if err := store.DeleteConfig(ctx, storageKey); err != nil {
 			return HandleErrorRespectJSON("deleting key: %v", err)
+		}
+
+		// As for kv set: the delete has landed, so a refused or failed commit
+		// warns and the command still succeeds (GH#7523).
+		noteDirectConfigWrite()
+		if err := commitKVWrite(ctx, store, "kv clear"); err != nil {
+			WarnError("%v", err)
 		}
 
 		return printKVClearResult(key)
