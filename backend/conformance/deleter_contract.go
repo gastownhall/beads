@@ -810,6 +810,76 @@ func RunDeleterRewritesReferencesInNeighbors(t *testing.T, ctx context.Context, 
 	}
 }
 
+// RunDeleterRewritesOnlyTheDeletedIDInAHierarchy pins what a "complete
+// citation" means once ids nest (issueops/deleter.go, Deleter.Delete: "WHICH
+// ROWS GET REWRITTEN"). A hierarchical child's id is its parent's id plus
+// `.<n>` (types.GenerateChildID), so a rule that took `.` for a word boundary
+// found a deleted parent's id INSIDE every descendant's id: deleting R.1 turned
+// "step R.1.2 failed" into "step [deleted:R.1].2 failed" while R.1.2 was still
+// live, and a descendant deleted first came back as a nested marker.
+//
+// Every scenario seeds its own root, child and grandchild under its own tag,
+// parent first, and gives the citing row an explicit edge to a deleted row:
+// the rewrite is scoped to graph neighbors, and a dotted id alone makes no
+// edge. Expectations are exact bytes, not "contains a marker".
+func RunDeleterRewritesOnlyTheDeletedIDInAHierarchy(t *testing.T, ctx context.Context, fixture DeleterFixture) {
+	t.Helper()
+
+	t.Run("DeletingAChildLeavesTheGrandchildCitationAlone", func(t *testing.T) {
+		h := deleterSeedHierarchy(t, ctx, fixture, "hchild")
+		neighbor := deleterSeedCitingNeighbor(t, ctx, fixture, "hchild",
+			"step "+h.grandchild+" failed", h.child)
+
+		result := deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
+			IDs:   []string{h.child},
+			Force: true,
+			Actor: "deleter-contract",
+		})
+		deleterAssertIssueRows(t, ctx, fixture, 0, h.child)
+		deleterAssertIssueRows(t, ctx, fixture, 1, h.grandchild)
+		deleterAssertIssueRows(t, ctx, fixture, 1, neighbor)
+		if got, want := deleterText(t, ctx, fixture, neighbor, "description"), "step "+h.grandchild+" failed"; got != want {
+			t.Errorf("neighbor description = %q, want %q unchanged: %s is live and only its PARENT was deleted",
+				got, want, h.grandchild)
+		}
+		if result.ReferencesUpdated != 0 {
+			t.Errorf("ReferencesUpdated = %d, want 0 — no neighbor cites the deleted id", result.ReferencesUpdated)
+		}
+	})
+
+}
+
+// deleterHierarchy is one root, its child and its grandchild, with dotted ids.
+type deleterHierarchy struct {
+	root, child, grandchild string
+}
+
+// deleterSeedHierarchy seeds R, R.1 and R.1.2 parent first, with no edges: the
+// cases that need containment add it themselves.
+func deleterSeedHierarchy(t *testing.T, ctx context.Context, fixture DeleterFixture, tag string) deleterHierarchy {
+	t.Helper()
+	root := deleterIssue(fixture, tag, "root", false)
+	deleterSeed(t, ctx, fixture, root)
+	child := deleterIssue(fixture, tag, "child", false)
+	child.ID = root.ID + ".1"
+	deleterSeed(t, ctx, fixture, child)
+	grandchild := deleterIssue(fixture, tag, "grandchild", false)
+	grandchild.ID = child.ID + ".2"
+	deleterSeed(t, ctx, fixture, grandchild)
+	return deleterHierarchy{root: root.ID, child: child.ID, grandchild: grandchild.ID}
+}
+
+// deleterSeedCitingNeighbor seeds a surviving row whose description is text
+// and makes it depend on blocker, so the deletion reaches it.
+func deleterSeedCitingNeighbor(t *testing.T, ctx context.Context, fixture DeleterFixture, tag, text, blocker string) string {
+	t.Helper()
+	neighbor := deleterIssue(fixture, tag, "neighbor", false)
+	neighbor.Description = text
+	deleterSeed(t, ctx, fixture, neighbor)
+	deleterAddEdge(t, ctx, fixture, neighbor.ID, blocker)
+	return neighbor.ID
+}
+
 // RunDeleterAttributesTheRewriteToTheActor pins the one place a deletion's
 // attribution SURVIVES it (issueops/deleter.go, DeleteRequest.Actor: "It DOES
 // reach the rewritten neighbors, which survive, so a workspace that cares who

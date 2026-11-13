@@ -333,21 +333,20 @@ func deleteNeighborsInTx(ctx context.Context, tx DBTX, ids []string) ([]*types.I
 	return issues, nil
 }
 
-// RewriteDeletedReferencesInTx replaces every word-boundary occurrence of a
-// deleted id with `[deleted:<id>]` in each neighbor's description, notes,
-// design and acceptance criteria, and reports how many ROWS it changed.
+// RewriteDeletedReferencesInTx replaces every citation of a deleted id with
+// `[deleted:<id>]` in each neighbor's description, notes, design and
+// acceptance criteria, and reports how many ROWS it changed.
 //
-// Exported because the unit-of-work body needs the same rule and neither
-// implementation may own it: a route that spelled the pattern differently
-// would rewrite a different set of citations for the same deletion.
+// What counts as a citation is types.RewriteDeletedReferences, the one rule
+// the unit-of-work body in internal/storage/domain also calls: a route that
+// spelled the rule differently would rewrite a different set of citations for
+// the same deletion.
 func RewriteDeletedReferencesInTx(ctx context.Context, tx DBTX, deletedIDs []string, neighbors []*types.Issue, actor string) (int, error) {
 	if len(neighbors) == 0 {
 		return 0, nil
 	}
 	touched := make(map[string]bool)
 	for _, id := range deletedIDs {
-		re := DeletedReferencePattern(id)
-		replacement := `$1[deleted:` + id + `]$3`
 		for _, neighbor := range neighbors {
 			if neighbor == nil {
 				continue
@@ -362,10 +361,13 @@ func RewriteDeletedReferencesInTx(ctx context.Context, tx DBTX, deletedIDs []str
 				{"design", &neighbor.Design},
 				{"acceptance_criteria", &neighbor.AcceptanceCriteria},
 			} {
-				if *field.value == "" || !re.MatchString(*field.value) {
+				if *field.value == "" {
 					continue
 				}
-				rewritten := re.ReplaceAllString(*field.value, replacement)
+				rewritten, changed := types.RewriteDeletedReferences(*field.value, id)
+				if !changed {
+					continue
+				}
 				updates[field.column] = rewritten
 				// Write the rewrite back onto the in-memory row so a second
 				// deleted id in the same field sees the first one's result
@@ -384,12 +386,16 @@ func RewriteDeletedReferencesInTx(ctx context.Context, tx DBTX, deletedIDs []str
 	return len(touched), nil
 }
 
-// DeletedReferencePattern is the citation rule, in one place: a literal id at
-// ASCII word boundaries, where a word character includes the hyphen an id is
-// full of. It matches `be-1` in "see (be-1)." and not inside `xbe-1` or
-// `be-12`.
+// DeletedReferencePattern spells types.CitesID's citation rule as a regular
+// expression, for a caller that needs a *regexp.Regexp: group 2 is the id, and
+// groups 1 and 3 are the boundaries on either side, which may be two bytes
+// when a `.` is one of them. MatchString agrees with types.CitesID. It is a
+// matcher, not a rewriter: ReplaceAllString consumes the boundaries, so two
+// citations sharing one separator would lose the second. Rewrite with
+// types.RewriteDeletedReferences.
 func DeletedReferencePattern(id string) *regexp.Regexp {
-	return regexp.MustCompile(`(^|[^A-Za-z0-9_-])(` + regexp.QuoteMeta(id) + `)($|[^A-Za-z0-9_-])`)
+	quoted := regexp.QuoteMeta(id)
+	return regexp.MustCompile(`(^|[^A-Za-z0-9_.-]|^\.|[^A-Za-z0-9_-]\.)(` + quoted + `)($|[^A-Za-z0-9_.-]|\.$|\.[^A-Za-z0-9_-])`)
 }
 
 // sortedUniqueIDs returns ids in ascending order without duplicates, the
