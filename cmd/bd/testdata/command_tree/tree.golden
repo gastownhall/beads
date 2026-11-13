@@ -3768,6 +3768,7 @@ bd init
   flag --setup-exclude type=bool default="false" usage="Configure .git/info/exclude to keep beads files local (for forks)"
   flag --shared-server type=bool default="false" usage="Enable shared Dolt server mode (all projects share one server at ~/.beads/shared-server/)"
   flag --skip-agents type=bool default="false" usage="Skip AGENTS.md and Claude/Codex/Cursor setup generation"
+  flag --skip-git-commit type=bool default="false" usage="Skip staging and committing init artifacts in the project's Git repository"
   flag --skip-hooks type=bool default="false" usage="Skip git hooks installation"
   flag --sqlite-path type=string default="" hidden usage="Legacy SQLite database file (removed backend compatibility only)"
   flag --stealth type=bool default="false" usage="Enable stealth mode: keep beads files out of git via .git/info/exclude (sets no-git-ops)"
@@ -3840,9 +3841,9 @@ bd init-safety
     | DESTROY-TOKEN (non-interactive only)
     |
     |   When running with no TTY (CI, agents, piped input), a destructive
-    |   re-init requires an explicit --destroy-token value. That covers both
-    |   --discard-remote and --reinit-local over existing issues. The token
-    |   format is:
+    |   re-init requires an explicit --destroy-token value. That covers
+    |   --discard-remote, --reinit-local over existing issues, and a
+    |   --reinit-local store switch (see STORE SWITCH). The token format is:
     |
     |       DESTROY-<issue-prefix>
     |
@@ -3855,14 +3856,47 @@ bd init-safety
     |   deliberate guard against pattern-matched one-liners (see
     |   engdocs/adr/0002-init-safety-invariants.md).
     |
+    | STORE SWITCH
+    |
+    |   bd init --reinit-local re-initializes the store this workspace records
+    |   in .beads/metadata.json. When the invocation would select another one,
+    |   either another engine family (embedded versus server, proxied-server or
+    |   shared-server) or a --database other than the recorded one, bd init
+    |   names both stores and asks for confirmation first, under --quiet too and
+    |   whether or not the recorded store holds issues:
+    |
+    |     - interactively, type the phrase it shows: leave <database> behind
+    |     - non-interactively, pass the destroy token described above
+    |
+    |   The recorded store is left in place, not deleted, but the workspace
+    |   stops reading its issues, Dolt history and database-stored configuration
+    |   (types.custom, status.custom); none of it is copied to the new store.
+    |   To keep the recorded store, drop the mode setting or --database that
+    |   differs. Back it up first with bd backup. Only the engine family and the
+    |   database name are compared: host, port, socket and shared-server
+    |   location changes are not.
+    |
+    | GIT OPT-OUT (--skip-git-commit)
+    |
+    |   bd init's last step stages its artifacts (.beads/, the agent
+    |   instructions) and makes a "bd init: initialize beads issue tracking"
+    |   commit in the project's Git repository. --skip-git-commit skips that
+    |   staging and commit only: the files are still created, nothing is
+    |   staged, HEAD does not move, and whatever the index already held is
+    |   left untouched. It does not touch the store's own Dolt history, and it
+    |   does not authorize any store switch or remote-history discard; those
+    |   keep their own confirmations above.
+    |
     | EXIT CODES
     |
     |   10    refused: remote has Dolt history and you selected local history
     |         without --discard-remote
-    |   11    refused: existing local data and you declined the destroy confirm
-    |         (interactive mode only)
-    |   12    refused: destructive re-init (--discard-remote, or --reinit-local
-    |         over existing issues) without a valid --destroy-token
+    |   11    refused: existing local data and you declined the destroy confirm,
+    |         or a store switch's typed phrase did not match (interactive mode
+    |         only)
+    |   12    refused: destructive re-init (--discard-remote, --reinit-local
+    |         over existing issues, or a store switch) without a valid
+    |         --destroy-token
     |         (non-interactive mode); also returned when the interactive
     |         --discard-remote typed-token confirmation is declined
     |   15    refused: run directly in your home directory, which is not itself
