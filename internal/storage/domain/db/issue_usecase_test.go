@@ -29,6 +29,7 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("CounterIssueMintTakesTheStrictCreatePath", s.useCaseMintCounterIssueStrictPath)
 	s.Run("HashIssueMintTakesTheStrictCreatePath", s.useCaseMintHashIssueStrictPath)
 	s.Run("HashWispMintTakesTheStrictCreatePath", s.useCaseMintHashWispStrictPath)
+	s.Run("MintedOverLengthAssigneeRejected", s.useCaseMintOverLengthAssignee)
 	s.Run("MissingConfigPrefixErrors", s.useCaseMintMissingPrefix)
 	s.Run("ExplicitIDRequiresConfiguredPrefixUnlessForced", s.useCaseExplicitIDPrefixGuard)
 	s.Run("CreateOnlyRefusesOccupiedID", s.useCaseCreateOnlyRefusesOccupiedID)
@@ -426,6 +427,20 @@ func (s *testSuite) snapshotCreateCoordination() map[string]string {
 	return out
 }
 
+// readCreateCoordinationCell reads one create-coordination cell's value, ""
+// when the cell does not exist yet (local_metadata is dolt-ignored and never
+// reset between tests, so absence is a legitimate before-state).
+func (s *testSuite) readCreateCoordinationCell(key string) string {
+	var val string
+	err := s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT value FROM local_metadata WHERE `key` = ?", key).Scan(&val)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ""
+	}
+	s.Require().NoError(err)
+	return val
+}
+
 // assertMintTookStrictCreatePath proves the minted create of res.Issue.ID ran
 // the strict-create guard: the guard rewrites the id's create-coordination
 // cell with a fresh stamp (crypto/rand, so a rewrite always changes the
@@ -478,6 +493,26 @@ func (s *testSuite) useCaseMintHashWispStrictPath() {
 	}, "tester")
 	s.Require().NoError(err)
 	s.assertMintTookStrictCreatePath(res, before)
+}
+
+// useCaseMintOverLengthAssignee pins the mint end to end: a minted create
+// (which AC-3 forced onto the strict path) with a 300-character assignee
+// fails with the typed ErrFieldTooLong, not the backend's raw column-width
+// error.
+func (s *testSuite) useCaseMintOverLengthAssignee() {
+	s.resetMintConfig("ucFl", "")
+	uc := s.issueUseCase()
+
+	_, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{
+			Title:     "minted over-length assignee",
+			IssueType: types.TypeTask,
+			Priority:  2,
+			Assignee:  strings.Repeat("x", 300),
+		},
+	}, "tester")
+	s.Require().Error(err)
+	s.Require().ErrorIs(err, types.ErrFieldTooLong)
 }
 
 func (s *testSuite) useCaseMintMissingPrefix() {

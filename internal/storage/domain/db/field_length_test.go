@@ -55,6 +55,50 @@ func (s *testSuite) TestFieldLengthGuards() {
 		s.Require().ErrorIs(err, types.ErrFieldTooLong)
 	})
 
+	// The strict (CreateOnly) branch has no guards of its own: the hoisted
+	// checks must fire ahead of it too, before any write — including the
+	// create-coordination cell the strict guard writes first.
+	s.Run("CreateOnlyOverLengthAssigneeRejectedBeforeAnyWrite", func() {
+		r := s.issueRepo()
+		cellKey := issueCreateCoordinationKey("bd-fl-co-assignee")
+		before := s.readCreateCoordinationCell(cellKey)
+
+		in := newTestIssue("bd-fl-co-assignee", "strict over-length assignee")
+		in.Assignee = over
+		err := r.Insert(s.Ctx(), in, "tester", domain.InsertIssueOpts{CreateOnly: true})
+		s.Require().ErrorIs(err, types.ErrFieldTooLong)
+
+		exists, err := r.Exists(s.Ctx(), "bd-fl-co-assignee", domain.IssueTableOpts{})
+		s.Require().NoError(err)
+		s.False(exists, "issue must not be persisted when the strict create rejects the assignee")
+
+		s.Require().Equal(before, s.readCreateCoordinationCell(cellKey),
+			"the length guard must fire before the strict-create coordination cell is written")
+	})
+
+	s.Run("CreateOnlyOverLengthOwnerRejected", func() {
+		r := s.issueRepo()
+		in := newTestIssue("bd-fl-co-owner", "strict over-length owner")
+		in.Owner = over
+		err := r.Insert(s.Ctx(), in, "tester", domain.InsertIssueOpts{CreateOnly: true})
+		s.Require().ErrorIs(err, types.ErrFieldTooLong)
+
+		exists, err := r.Exists(s.Ctx(), "bd-fl-co-owner", domain.IssueTableOpts{})
+		s.Require().NoError(err)
+		s.False(exists, "issue must not be persisted when the strict create rejects the owner")
+	})
+
+	s.Run("CreateOnlyAtLimitAssigneeRoundTrips", func() {
+		r := s.issueRepo()
+		in := newTestIssue("bd-fl-co-ok", "at limit, strict")
+		in.Assignee = atLimit
+		s.Require().NoError(r.Insert(s.Ctx(), in, "tester", domain.InsertIssueOpts{CreateOnly: true}))
+
+		out, err := r.Get(s.Ctx(), "bd-fl-co-ok", domain.IssueTableOpts{})
+		s.Require().NoError(err)
+		s.Equal(atLimit, out.Assignee, "255-char assignee must round-trip on the strict path unchanged")
+	})
+
 	s.Run("ClaimOverLengthActorRejected", func() {
 		r := s.issueRepo()
 		s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-fl-claim", "x"), "tester", domain.InsertIssueOpts{}))
