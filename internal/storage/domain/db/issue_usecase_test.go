@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -23,6 +24,7 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("MintPassesOverClaimedIDs", s.useCaseMintPassesOverClaimedIDs)
 	s.Run("CounterModeJumpsPastHeldIDs", s.useCaseMintCounterModeJumpsPastHeldIDs)
 	s.Run("CounterModeStaysSequentialWhenNextValueIsFree", s.useCaseMintCounterModeStaysSequential)
+	s.Run("CounterModeSurvivesAnOverlongHeldRun", s.useCaseMintCounterModeSurvivesOverlongHeldRun)
 	s.Run("MissingConfigPrefixErrors", s.useCaseMintMissingPrefix)
 	s.Run("ExplicitIDRequiresConfiguredPrefixUnlessForced", s.useCaseExplicitIDPrefixGuard)
 	s.Run("CreateOnlyRefusesOccupiedID", s.useCaseCreateOnlyRefusesOccupiedID)
@@ -344,6 +346,50 @@ func (s *testSuite) useCaseMintCounterModeStaysSequential() {
 	s.Require().NoError(err)
 	s.Equal("lagSeq-2", second.Issue.ID, "a free next value must stay sequential; the advance is lazy")
 	s.Equal("far ahead of the counter", s.titleIn("issues", "lagSeq-7"))
+}
+
+// useCaseMintCounterModeSurvivesOverlongHeldRun pins why the walk advances
+// the counter instead of skipping held values one at a time: an imported
+// range longer than the walk's bound (1000 skips) would exhaust it and fail
+// every later create. The counter is initialized first, then 1001
+// consecutive ids are bulk-seeded straight into issues (seeding them through
+// the use case would time the suite out for no extra signal), and the mint
+// must land beyond the whole run without touching any held row.
+func (s *testSuite) useCaseMintCounterModeSurvivesOverlongHeldRun() {
+	const prefix = "lagRun"
+	const heldFirst, heldLast = 2, 1002 // 1001 consecutive ids: one past the 1000-skip bound
+	s.resetMintConfig(prefix, "counter")
+	uc := s.issueUseCase()
+
+	first, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "initializes the counter", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+	s.Require().Equal(prefix+"-1", first.Issue.ID)
+
+	values := make([]string, 0, heldLast-heldFirst+1)
+	args := make([]any, 0, 2*(heldLast-heldFirst+1))
+	for n := heldFirst; n <= heldLast; n++ {
+		values = append(values, "(?, ?, 'held', 'held', 'held', 'held')")
+		args = append(args, fmt.Sprintf("%s-%d", prefix, n), "held")
+	}
+	_, err = s.Runner().ExecContext(s.Ctx(),
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes) VALUES "+
+			strings.Join(values, ", "), args...)
+	s.Require().NoError(err, "bulk-seed the held range")
+
+	minted, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "minted beyond the run", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err, "a held run longer than the walk bound must not fail the mint: the counter advances past it")
+	s.Equal(prefix+"-1003", minted.Issue.ID)
+
+	s.Equal("held", s.titleIn("issues", prefix+"-2"), "no held row may change")
+	s.Equal("held", s.titleIn("issues", prefix+"-1002"), "no held row may change")
+	var heldCount int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM issues WHERE id LIKE ? AND title = 'held'", prefix+"-%").Scan(&heldCount))
+	s.Equal(heldLast-heldFirst+1, heldCount, "every held row must survive unchanged")
 }
 
 func (s *testSuite) useCaseMintMissingPrefix() {

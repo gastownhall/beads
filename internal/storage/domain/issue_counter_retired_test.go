@@ -135,6 +135,48 @@ func TestCounterModeMintGivesUpAfterTheSkipBound(t *testing.T) {
 	}
 }
 
+// TestCounterModeMintSurvivesAnOverlongHeldRun pins why the walk advances
+// instead of merely skipping: a held run longer than the skip bound (an
+// imported range the counter never tracked) must still mint beyond it, in
+// one advance, without walking the run value by value.
+func TestCounterModeMintSurvivesAnOverlongHeldRun(t *testing.T) {
+	const run = maxRetiredCounterSkips + 1
+	repo := &counterWalkIssueRepo{next: 1, taken: map[string]bool{}}
+	for n := 2; n <= run+1; n++ {
+		repo.taken[fmt.Sprintf("bd-%d", n)] = true
+	}
+	u := &issueUseCaseImpl{issueRepo: repo}
+	id, err := u.nextUnretiredCounterID(t.Context(), "bd", nil)
+	if err != nil {
+		t.Fatalf("nextUnretiredCounterID() = %v", err)
+	}
+	want := fmt.Sprintf("bd-%d", run+2)
+	if id != want {
+		t.Fatalf("nextUnretiredCounterID() = %q, want %s past the %d held ids", id, want, run)
+	}
+	if repo.advances != 1 {
+		t.Fatalf("advances = %d, want exactly 1", repo.advances)
+	}
+}
+
+// TestCounterModeMintAdvancesAfterAClaimedRun pins the interplay: a claimed
+// run cannot trigger the advance (nothing holds those ids), so the first
+// HELD value after it still gets the one permitted advance.
+func TestCounterModeMintAdvancesAfterAClaimedRun(t *testing.T) {
+	repo := &counterWalkIssueRepo{next: 1, taken: map[string]bool{"bd-3": true, "bd-4": true}}
+	u := &issueUseCaseImpl{issueRepo: repo}
+	id, err := u.nextUnretiredCounterID(t.Context(), "bd", map[string]bool{"bd-2": true})
+	if err != nil {
+		t.Fatalf("nextUnretiredCounterID() = %v", err)
+	}
+	if id != "bd-5" {
+		t.Fatalf("nextUnretiredCounterID() = %q, want bd-5", id)
+	}
+	if repo.advances != 1 {
+		t.Fatalf("advances = %d, want 1: the held bd-3 after the claimed bd-2 still advances once", repo.advances)
+	}
+}
+
 var (
 	errCounterWalkProbe   = errors.New("counter walk probe failed")
 	errCounterWalkAdvance = errors.New("counter walk advance failed")
