@@ -1695,6 +1695,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before it checks the rest for dependents, and a dry run, which deletes
   nothing, counted those children as dependents left outside the request
   and refused. The embedded store was already right.
+- **`bd dep list <id>` no longer says "has no dependencies" when the issue's
+  only dependencies are external or cross-repo.** Those edges are warned
+  about on stderr but not listed, so stdout contradicted the warning above
+  it. It now says the issue has no local dependencies and how many edges were
+  listed on stderr; output for an issue with no edges at all is unchanged
+  (#6557).
 - A server-mode open from a `dolt.Config` that sets only `Path` (no
   `BeadsDir`), such as the public `beads.Open`, now runs the project-identity
   check against the `.beads` directory above `Path`, and refuses a database
