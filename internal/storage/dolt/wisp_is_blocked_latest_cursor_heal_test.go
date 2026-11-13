@@ -251,7 +251,39 @@ func TestDoltNew_WispIsBlockedRestoreRecomputesFlags_RealDolt(t *testing.T) {
 	}
 }
 
-// TestDoltNew_WispIsBlockedRestoreAllowsEphemeralCreate_RealDolt is AC-3:
+// TestDoltNew_WispIsBlockedRestoreDefaultReady_RealDolt is AC-2's default
+// filter half: getReadyWispsInTx runs the stale-flag read and the blocked-wisp
+// filter on every ready read with a nonempty wisp family, before the default
+// filter's ephemeral exclusion drops the wisps from the result, so even
+// `bd ready` with no wisps in scope failed on the drifted shape with
+// 'column "is_blocked" could not be found in any table in scope'.
+func TestDoltNew_WispIsBlockedRestoreDefaultReady_RealDolt(t *testing.T) {
+	c := newWispIsBlockedClone(t)
+	g := c.seedGraph()
+	c.breakShape()
+	c.reopen()
+
+	ready, err := c.store.GetReadyWork(c.ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork(default filter) after the heal: %v", err)
+	}
+	ids := make(map[string]bool, len(ready))
+	for _, issue := range ready {
+		ids[issue.ID] = true
+	}
+	for _, id := range []string{g.a, g.e} {
+		if !ids[id] {
+			t.Errorf("default ready work misses durable %s after the heal", id)
+		}
+	}
+	for _, id := range []string{g.b, g.c, g.d} {
+		if ids[id] {
+			t.Errorf("default ready work includes wisp %s: the default filter returns no wisps", id)
+		}
+	}
+}
+
+// TestDoltNew_WispIsBlockedRestoreAllowsEphemeralCreate_RealDolt is AC-4:
 // creating a wisp recomputes is_blocked, which failed on the missing column.
 func TestDoltNew_WispIsBlockedRestoreAllowsEphemeralCreate_RealDolt(t *testing.T) {
 	c := newWispIsBlockedClone(t)
@@ -266,7 +298,7 @@ func TestDoltNew_WispIsBlockedRestoreAllowsEphemeralCreate_RealDolt(t *testing.T
 	}
 }
 
-// TestDoltNew_WispIsBlockedRestoreHealthyCloneConverges_RealDolt is AC-4's
+// TestDoltNew_WispIsBlockedRestoreHealthyCloneConverges_RealDolt is AC-6's
 // store half: a healthy clone with 0032 pending records it, keeps its flags,
 // and a converged reopen leaves it recorded. The probe count is pinned in the
 // schema package (TestIgnored32HealthyCloneOnlyProbes).

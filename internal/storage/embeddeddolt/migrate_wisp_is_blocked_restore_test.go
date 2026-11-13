@@ -82,7 +82,49 @@ func TestEmbeddedWispIsBlockedRestoreAtIgnored32(t *testing.T) {
 	}
 }
 
-// TestEmbeddedWispIsBlockedRepairFailureRetries is AC-6 on the embedded open
+// TestEmbeddedWispIsBlockedRestoreDefaultReady is the embedded twin of AC-2's
+// default-filter half: the default ready read probes the wisp family's
+// is_blocked before the filter excludes wisps, so on the drifted shape it
+// failed with 'column "is_blocked" could not be found' even with no wisps in
+// scope.
+func TestEmbeddedWispIsBlockedRestoreDefaultReady(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	fx := newPristineEmbeddedDoltFixture(t, "wib")
+	store := fx.store
+	t.Cleanup(func() {
+		if store != nil {
+			closeEmbeddedDoltStore(t, store)
+		}
+	})
+
+	seedWispIsBlockedGraph(t, ctx, fx, store)
+	closeEmbeddedDoltStore(t, store)
+	store = nil
+	driftWispIsBlocked(t, ctx, fx)
+
+	reopened, err := embeddeddolt.Open(ctx, fx.beadsDir, fx.database, "main")
+	if err != nil {
+		t.Fatalf("Open (heal): %v", err)
+	}
+	store = reopened
+
+	ready, err := store.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork(default filter) after the heal: %v", err)
+	}
+	readyIDs := map[string]bool{}
+	for _, issue := range ready {
+		readyIDs[issue.ID] = true
+	}
+	for id, want := range map[string]bool{"wib-a": true, "wib-b": false, "wib-c": false, "wib-d": false} {
+		if readyIDs[id] != want {
+			t.Errorf("default ready work has %s = %v after the heal, want %v", id, readyIDs[id], want)
+		}
+	}
+}
+
+// TestEmbeddedWispIsBlockedRepairFailureRetries is AC-7 on the embedded open
 // path: a fault at any stage of the ignored 0032 restore must fail Open with
 // the fault surfaced and record no ignored 0032 row, and the next Open with
 // the fault cleared must resume the repair to completion. The stage strings
