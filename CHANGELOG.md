@@ -1281,6 +1281,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A child the caller names on a proxied server now advances its parent's
+  child counter** (#4750, builds on PR #8138 by kyoto-bonsai). `bd create
+  --id P.8` against a served (proxied) database left the parent's
+  `child_counters.last_child` behind, so after `P.8` was deleted without a
+  tombstone, `bd create --parent P` could mint `P.8` again. The proxied
+  create's shared body now reconciles the counter right after the insert, on
+  the same transaction (it never lowers a counter and never writes for a
+  flat id); the embedded path already did this (#5122).
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
