@@ -950,6 +950,25 @@ func RunDeleterRewritesOnlyTheDeletedIDInAHierarchy(t *testing.T, ctx context.Co
 		})
 	}
 
+	// A marker an earlier delete left is text like any other: deleting the
+	// ancestor later must not find its id inside the descendant's marker.
+	t.Run("AnEarlierDescendantMarkerSurvivesTheAncestorsDelete", func(t *testing.T) {
+		h := deleterSeedHierarchy(t, ctx, fixture, "hmark")
+		text := "was [deleted:" + h.grandchild + "]"
+		neighbor := deleterSeedCitingNeighbor(t, ctx, fixture, "hmark", text, h.child)
+
+		result := deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
+			IDs:   []string{h.child},
+			Force: true,
+			Actor: "deleter-contract",
+		})
+		if got := deleterText(t, ctx, fixture, neighbor, "description"); got != text {
+			t.Errorf("neighbor description = %q, want the earlier marker %q unchanged", got, text)
+		}
+		if result.ReferencesUpdated != 0 {
+			t.Errorf("ReferencesUpdated = %d, want 0", result.ReferencesUpdated)
+		}
+	})
 }
 
 // deleterHierarchy is one root, its child and its grandchild, with dotted ids.
