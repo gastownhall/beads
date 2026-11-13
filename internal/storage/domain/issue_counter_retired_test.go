@@ -54,6 +54,30 @@ func TestCounterModeMintWalksPastRetiredValues(t *testing.T) {
 	}
 }
 
+// TestCounterModeMintWalksPastLiveRows pins GH#8456 at the uow mint: a
+// counter value a live row holds (an explicit, imported or wisp id, none of
+// which move the counter) is skipped like a retired one, decided by the one
+// both-planes Taken probe, so the create is neither handed an id it would
+// overwrite nor one it would be refused.
+func TestCounterModeMintWalksPastLiveRows(t *testing.T) {
+	repo := &counterHeldIssueRepo{
+		next:    4,
+		live:    map[string]bool{"bd-5": true, "bd-7": true},
+		retired: map[string]bool{"bd-6": true},
+	}
+	u := &issueUseCaseImpl{issueRepo: repo}
+	id, err := u.nextFreeCounterID(t.Context(), "bd", map[string]bool{"bd-8": true})
+	if err != nil {
+		t.Fatalf("nextFreeCounterID() = %v", err)
+	}
+	if id != "bd-9" {
+		t.Fatalf("nextFreeCounterID() = %q, want bd-9 past the live bd-5 and bd-7, the retired bd-6 and the claimed bd-8", id)
+	}
+	if got := strings.Join(repo.probed, ","); got != "bd-5,bd-6,bd-7,bd-9" {
+		t.Fatalf("probed %s, want one Taken probe each for bd-5,bd-6,bd-7,bd-9 and none for the claimed bd-8", got)
+	}
+}
+
 // TestCounterModeMintGivesUpAfterTheSkipBound pins the bound: a counter that
 // keeps landing on held values fails loudly instead of walking forever.
 func TestCounterModeMintGivesUpAfterTheSkipBound(t *testing.T) {
