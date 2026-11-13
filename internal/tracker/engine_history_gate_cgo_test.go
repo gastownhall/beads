@@ -183,10 +183,16 @@ func TestDoltStoreExternalRefChangedAfterUsesHistoryFastPath(t *testing.T) {
 // squashes the commits that held their state at last_sync into a base dated
 // after it, so PreviousExternalRef finds no row for them. The next pull with
 // the original last_sync must not hydrate them from stale remotes: the edit
-// and the unchanged issue keep their local content. The control compacts at
-// a boundary before last_sync, so history keeps each issue's row there: the
-// edited issue is unchanged, and the issue linked after last_sync (a
-// historical NULL ref) is hydrated.
+// and the unchanged issue keep their local content, and one warning names
+// the issues changed since last_sync but not the untouched one. A pre-linked
+// stub created after last_sync is still hydrated, which needs the real
+// store's created_at. The control compacts at a boundary before last_sync,
+// so history keeps each issue's row there: the edited issue is unchanged,
+// and the issue linked after last_sync (a historical NULL ref) and the new
+// stub are hydrated. In both cases a linked ephemeral and a linked
+// no-history bead, created before last_sync and edited after it, have no
+// history row (the wisps table is not versioned): they keep their edits,
+// and no warning names them.
 //
 // Commit dates are set through @@dolt_committer_date, which DOLT_COMMIT
 // stamps on the store's single pooled session, so last_sync falls between
@@ -197,9 +203,9 @@ func TestDoltStoreCompactPullPreservesLocalEdits(t *testing.T) {
 		t.Skip("shared test Dolt server not initialized, skipping test")
 	}
 
-	// T1 holds every issue's state at last_sync; T3 the edit and the link
-	// made after it; T4 a later, unrelated commit. All lie in the past, so
-	// the local edit's wall-clock updated_at is after last_sync.
+	// T1 holds every issue's state at last_sync; T3 the edit, the link and
+	// the new stub made after it; T4 a later, unrelated commit. All lie in
+	// the past, so the local edit's wall-clock updated_at is after last_sync.
 	t1 := time.Now().UTC().Add(-10 * 24 * time.Hour).Truncate(time.Second)
 	lastSync := t1.Add(time.Hour)
 	t3 := t1.Add(2 * time.Hour)
@@ -214,8 +220,8 @@ func TestDoltStoreCompactPullPreservesLocalEdits(t *testing.T) {
 		wantLinkedTitle  string
 		wantMissingWarns int
 	}{
-		{name: "baseline compacted away", boundaryDate: t3, baselineRemoved: true, wantFetches: 0, wantLinkedTitle: "linked after sync", wantMissingWarns: 1},
-		{name: "baseline retained", boundaryDate: t1, wantFetches: 1, wantLinkedTitle: "stale remote title EXT-2"},
+		{name: "baseline compacted away", boundaryDate: t3, baselineRemoved: true, wantFetches: 1, wantLinkedTitle: "linked after sync", wantMissingWarns: 1},
+		{name: "baseline retained", boundaryDate: t1, wantFetches: 2, wantLinkedTitle: "stale remote title EXT-2"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -237,9 +243,14 @@ func TestDoltStoreCompactPullPreservesLocalEdits(t *testing.T) {
 			unchanged := linkedIssue("bd-unchanged", "EXT-3", "synced unchanged", created, created)
 			relinked := &types.Issue{ID: "bd-relinked", Title: "linked after sync", Status: types.StatusOpen,
 				Priority: 2, IssueType: types.TypeTask, CreatedAt: created, UpdatedAt: created}
+			wisp := linkedIssue("bd-wisp", "EXT-5", "synced wisp", created, created)
+			wisp.Ephemeral = true
+			noHistory := linkedIssue("bd-nh", "EXT-6", "synced no-history bead", created, created)
+			noHistory.NoHistory = true
+			wispsPlane := []*types.Issue{wisp, noHistory}
 
 			setDate(t1)
-			for _, issue := range []*types.Issue{edited, unchanged, relinked} {
+			for _, issue := range []*types.Issue{edited, unchanged, relinked, wisp, noHistory} {
 				if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
 					t.Fatalf("CreateIssue(%s): %v", issue.ID, err)
 				}
@@ -248,8 +259,17 @@ func TestDoltStoreCompactPullPreservesLocalEdits(t *testing.T) {
 			if err := store.UpdateIssue(ctx, edited.ID, map[string]interface{}{"title": "local edit not yet pushed"}, "tester"); err != nil {
 				t.Fatalf("UpdateIssue(edit): %v", err)
 			}
+			for _, issue := range wispsPlane {
+				if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{"title": "local edit of " + issue.ID}, "tester"); err != nil {
+					t.Fatalf("UpdateIssue(%s): %v", issue.ID, err)
+				}
+			}
 			if err := store.UpdateIssue(ctx, relinked.ID, map[string]interface{}{"external_ref": "https://test.test/EXT-2"}, "tester"); err != nil {
 				t.Fatalf("UpdateIssue(link): %v", err)
+			}
+			stub := linkedIssue("bd-stub", "EXT-4", "new stub", t3, t3)
+			if err := store.CreateIssue(ctx, stub, "tester"); err != nil {
+				t.Fatalf("CreateIssue(stub): %v", err)
 			}
 			setDate(t4)
 			later := &types.Issue{ID: "bd-later", Title: "later work", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
@@ -281,6 +301,14 @@ func TestDoltStoreCompactPullPreservesLocalEdits(t *testing.T) {
 					t.Fatalf("after compaction PreviousExternalRef(%s) = (%q, %v), want (%q, found)", probe.id, ref, found, probe.wantRef)
 				}
 			}
+			if ref, found, err := store.PreviousExternalRef(ctx, stub.ID, lastSync); err != nil || found {
+				t.Fatalf("after compaction PreviousExternalRef(%s) = (%q, %v, %v), want no row: it was created after last_sync", stub.ID, ref, found, err)
+			}
+			for _, issue := range wispsPlane {
+				if ref, found, err := store.PreviousExternalRef(ctx, issue.ID, lastSync); err != nil || found {
+					t.Fatalf("PreviousExternalRef(%s) = (%q, %v, %v), want no row: the wisps table has no history", issue.ID, ref, found, err)
+				}
+			}
 
 			if err := store.SetLocalMetadata(ctx, "test.last_sync", lastSync.Format(time.RFC3339)); err != nil {
 				t.Fatalf("SetLocalMetadata(last_sync): %v", err)
@@ -289,6 +317,9 @@ func TestDoltStoreCompactPullPreservesLocalEdits(t *testing.T) {
 				staleRemote("EXT-1", t1.Add(-2*time.Hour)),
 				staleRemote("EXT-2", t1.Add(-2*time.Hour)),
 				staleRemote("EXT-3", t1.Add(-2*time.Hour)),
+				staleRemote("EXT-4", t1.Add(-2*time.Hour)),
+				staleRemote("EXT-5", t1.Add(-2*time.Hour)),
+				staleRemote("EXT-6", t1.Add(-2*time.Hour)),
 			)
 			result, err := NewEngine(mock, store, "sync").Sync(ctx, SyncOptions{Pull: true})
 			if err != nil {
@@ -297,19 +328,34 @@ func TestDoltStoreCompactPullPreservesLocalEdits(t *testing.T) {
 			if mock.fetchCalls != test.wantFetches {
 				t.Errorf("FetchIssue calls = %d, want %d", mock.fetchCalls, test.wantFetches)
 			}
-			missingWarns := 0
-			for _, w := range result.Warnings {
-				if strings.Contains(w, "history of older linked issues") {
-					missingWarns++
-				}
+			missingWarns := missingHistoryWarnings(result.Warnings)
+			if len(missingWarns) != test.wantMissingWarns {
+				t.Errorf("missing-history warnings = %d (warnings %q), want %d", len(missingWarns), result.Warnings, test.wantMissingWarns)
 			}
-			if missingWarns != test.wantMissingWarns {
-				t.Errorf("missing-history warnings = %d (warnings %q), want %d", missingWarns, result.Warnings, test.wantMissingWarns)
+			for _, w := range missingWarns {
+				// The edit and the link changed updated_at after last_sync;
+				// the unchanged issue's row still carries its creation time.
+				for _, want := range []string{"2 issue(s)", edited.ID, relinked.ID} {
+					if !strings.Contains(w, want) {
+						t.Errorf("warning %q does not mention %q", w, want)
+					}
+				}
+				if strings.Contains(w, unchanged.ID) {
+					t.Errorf("warning %q names %s, which is untouched since last_sync", w, unchanged.ID)
+				}
+				for _, issue := range wispsPlane {
+					if strings.Contains(w, issue.ID) {
+						t.Errorf("warning %q names %s, which never has history", w, issue.ID)
+					}
+				}
 			}
 			for id, want := range map[string]string{
 				edited.ID:    "local edit not yet pushed",
 				unchanged.ID: "synced unchanged",
 				relinked.ID:  test.wantLinkedTitle,
+				stub.ID:      "stale remote title EXT-4",
+				wisp.ID:      "local edit of " + wisp.ID,
+				noHistory.ID: "local edit of " + noHistory.ID,
 			} {
 				got, err := store.GetIssue(ctx, id)
 				if err != nil {
