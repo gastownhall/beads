@@ -1314,6 +1314,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filesystem, which a server in a container does not unless the backup is
   mounted at the same path in both; there a `--force` restore from a backup
   that only bd's machine holds can still drop the database.
+- `bd backup restore` explains a post-restore commit that Dolt refuses with
+  `table has unknown fields` (GH#7569). The restore step has already run by
+  then, but bd printed only the engine error. It now says the workspace's
+  database may already hold the backup contents, that whether the commit was
+  recorded and whether the data can be read is unknown, and that the backup
+  may be in a newer storage format than the restoring engine reads. It names
+  the engine to upgrade (the Dolt engine built into `bd` in embedded mode;
+  the Dolt server in server mode, which for a server bd starts is the `dolt`
+  on `PATH`, picked up after `bd dolt stop` and `bd dolt start`) and says to
+  verify the recovery in a separate, freshly initialized workspace, as the
+  native-backup route of the database-corruption runbook now describes.
+  `bd bootstrap` prints the same guidance when its restore fails this way.
+  The version pair reported there, an embedded Dolt 2.2.3 reading a backup
+  written by Dolt 2.4.2, no longer applies: embedded mode now runs the Dolt
+  2.6.0 engine.
 - With several stores open in one process, the `bd.db.pool_open`,
   `pool_in_use`, `pool_idle` and `pool_max_open` gauges now report the pools
   of the stores open now, summed. Each store registered the gauges with its

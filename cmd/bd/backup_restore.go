@@ -166,7 +166,8 @@ const restoreUnknownFieldsHint = "The restore step completed before this commit,
 	"Dolt reported table fields the restoring engine does not know, which can mean the backup was written in a newer\n" +
 	"storage format than that engine reads.\n" +
 	"Embedded mode: upgrade bd to a build whose embedded Dolt engine can read this backup.\n" +
-	"Server mode: restore through a Dolt server whose version can read this backup.\n" +
+	"Server mode: restore through a Dolt server whose version can read this backup. A server bd starts runs the dolt\n" +
+	"that was on PATH when it started: upgrade dolt, then restart the server ('bd dolt stop', then 'bd dolt start').\n" +
 	"Keep the backup unchanged and verify the recovery by restoring it into a separate, freshly initialized workspace\n" +
 	"(see docs/recovery/database-corruption.md)"
 

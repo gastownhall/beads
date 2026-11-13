@@ -222,9 +222,11 @@ func headingLevel(line string) int {
 
 // TestNativeBackupRestoreUnknownFieldsGuidance pins the native-backup route's
 // answer to a restore whose post-restore commit Dolt refuses with "table has
-// unknown fields" (GH#7569): which engine must read the backup, that a newer
-// writer is not guaranteed, that the outcome is unknown, and how to verify
-// recovery from a preserved backup in a separate workspace.
+// unknown fields" (GH#7569): which engine must read the backup (the installed
+// Dolt CLI is ruled out only in embedded mode, because a server bd starts runs
+// it and needs a restart after an upgrade), that a newer writer is not
+// guaranteed, that the outcome is unknown, and how to verify recovery from a
+// preserved backup in a separate workspace.
 func TestNativeBackupRestoreUnknownFieldsGuidance(t *testing.T) {
 	runbook := readRepoDoc(t, "docs", "recovery", "database-corruption.md")
 	const heading = "### From a Dolt-native backup"
@@ -236,9 +238,10 @@ func TestNativeBackupRestoreUnknownFieldsGuidance(t *testing.T) {
 	requirePhrases(t, where, section,
 		"table has unknown fields",
 		"failed to commit restore",
-		"not the dolt cli you may have installed",
-		"the dolt engine built into `bd`",
+		"in embedded mode it is the dolt engine built into `bd`, not the dolt cli you may have installed",
 		"the dolt sql server the workspace connects to",
+		"a server that bd starts runs the `dolt` that was on your path when it started",
+		"restart the server with `bd dolt stop` and then `bd dolt start`",
 		"a backup written by a newer dolt is not guaranteed to restore",
 		"may already hold the backup contents",
 		"whether the commit was recorded or the data can be read is unknown",
@@ -249,6 +252,7 @@ func TestNativeBackupRestoreUnknownFieldsGuidance(t *testing.T) {
 	)
 	forbidPhrases(t, where, section,
 		"every newer backup is rejected",
+		"the one doing the restore, not the dolt cli you may have installed",
 		"nothing was committed",
 		"the restored data is readable",
 	)

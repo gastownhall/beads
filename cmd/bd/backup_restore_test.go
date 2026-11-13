@@ -743,9 +743,10 @@ func isolateRestoreWorkspace(t *testing.T) string {
 // post-restore commit the engine refuses with "table has unknown fields"
 // (GH#7569): the restore step already ran, so the error must say the
 // workspace may have been replaced, name the possible engine/backup format
-// mismatch with embedded and server guidance, and keep the commit outcome and
-// readability unknown. The injected error tests the reporting contract; it is
-// not a real storage incompatibility.
+// mismatch with embedded and server guidance (a server bd starts keeps the
+// dolt it started with, so an upgrade needs a server restart), and keep the
+// commit outcome and readability unknown. The injected error tests the
+// reporting contract; it is not a real storage incompatibility.
 func TestRunBackupRestoreUnknownFieldsCommitGuidance(t *testing.T) {
 	mysqlCause := errors.New("Error 1105: table has unknown fields")
 	bareCause := errors.New("table has unknown fields")
@@ -793,6 +794,8 @@ func TestRunBackupRestoreUnknownFieldsCommitGuidance(t *testing.T) {
 				"upgrade bd",
 				"Server mode",
 				"Dolt server",
+				"that was on PATH when it started",
+				"'bd dolt stop', then 'bd dolt start'",
 				"separate",
 			} {
 				if !strings.Contains(msg, want) {
