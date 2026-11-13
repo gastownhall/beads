@@ -1112,3 +1112,63 @@ func TestRunRecipe_CopilotCheckRequiresSection(t *testing.T) {
 		t.Fatalf("check touched the instructions file: %q, %v", gotInstructions, err)
 	}
 }
+
+// --remove takes bd's section out of a shared instructions file, not the
+// file: the user's text stays — whitespace around the section following the
+// section-removal rules — while the beads-owned manifest goes (GH#7431).
+func TestRunRecipe_CopilotRemoveKeepsUserInstructions(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	t.Chdir(tmpDir)
+	t.Setenv("BEADS_DIR", "")
+	resetSetupResolutionCaches(t)
+	resetSetupGlobals(t)
+
+	instructions := filepath.Join(tmpDir, ".github", "copilot-instructions.md")
+	if err := os.MkdirAll(filepath.Dir(instructions), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const userBefore = "# Team rules\n\nWrite table-driven tests.\n"
+	const userAfter = "## Legacy notes\n\nKept from last year.\n"
+	installed := userBefore + "\n" +
+		"<!-- BEGIN BEADS INTEGRATION -->\n" +
+		recipes.CopilotInstructionsTemplate +
+		"<!-- END BEADS INTEGRATION -->\n" +
+		userAfter
+	if err := os.WriteFile(instructions, []byte(installed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = captureStdout(t, func() error {
+		return runRecipe("copilot")
+	})
+	manifest := filepath.Join(tmpDir, ".copilot-plugin", "plugin.json")
+	if _, err := os.Stat(manifest); err != nil {
+		t.Fatalf("expected the beads-owned manifest: %v", err)
+	}
+
+	setupRemove = true
+	t.Cleanup(func() { setupRemove = false })
+	out := captureStdout(t, func() error {
+		return runRecipe("copilot")
+	})
+
+	got, err := os.ReadFile(instructions)
+	if err != nil {
+		t.Fatalf("bd setup copilot --remove deleted the user's instructions file: %v", err)
+	}
+	// The section and the blank lines that set it off are gone; the user's
+	// text is rejoined with one blank line, per the section-removal rules.
+	want := "# Team rules\n\nWrite table-driven tests.\n\n## Legacy notes\n\nKept from last year.\n"
+	if string(got) != want {
+		t.Fatalf("instructions =\n%q\nwant\n%q", got, want)
+	}
+	if strings.Contains(string(got), "BEADS INTEGRATION") {
+		t.Fatalf("markers survived --remove:\n%s", got)
+	}
+	if !strings.Contains(out, "Kept user content: .github/copilot-instructions.md") {
+		t.Fatalf("retained user content not reported in:\n%s", out)
+	}
+	if _, err := os.Stat(manifest); !os.IsNotExist(err) {
+		t.Fatalf("beads-owned manifest survived --remove (stat err %v)", err)
+	}
+}

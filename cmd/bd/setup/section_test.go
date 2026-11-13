@@ -164,3 +164,96 @@ func TestSharedSectionUpsertFile(t *testing.T) {
 		t.Fatalf("unchanged file's bytes moved: %q, %v", got, err)
 	}
 }
+
+func TestSharedSectionRemoveFile(t *testing.T) {
+	dir := t.TempDir()
+	wrapped := agentsBeginMarker + "\n" + sharedBody + agentsEndMarker + "\n"
+
+	for _, tt := range []struct {
+		name    string
+		content string
+		legacy  string
+		wantRem bool
+		wantDel bool
+		wantErr error
+		want    string // remaining content; "" when the file is gone
+	}{
+		{name: "missing file is a no-op", content: "\x00missing", wantRem: false},
+		{
+			name:    "no section is a no-op",
+			content: "# My rules\n",
+			want:    "# My rules\n",
+		},
+		{
+			name:    "user text around the section is kept",
+			content: "# Before\n\n" + wrapped + "# After\n",
+			want:    "# Before\n\n# After\n",
+			wantRem: true,
+		},
+		{
+			name:    "section-only file is deleted",
+			content: wrapped,
+			wantRem: true,
+			wantDel: true,
+		},
+		{
+			name:    "whitespace outside the section is deleted with it",
+			content: "\n" + wrapped + "\n\n",
+			wantRem: true,
+			wantDel: true,
+		},
+		{
+			name:    "legacy-only file is deleted",
+			content: sharedLegacy,
+			legacy:  sharedLegacy,
+			wantRem: true,
+			wantDel: true,
+		},
+		{
+			name:    "legacy file without a pin is the user's",
+			content: sharedLegacy,
+			want:    sharedLegacy,
+		},
+		{
+			name:    "malformed markers are an error",
+			content: agentsBeginMarker + "\nbody\n",
+			wantErr: ErrSharedSectionMalformed,
+			want:    agentsBeginMarker + "\nbody\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(dir, strings.ReplaceAll(tt.name, " ", "_")+".md")
+			if tt.content != "\x00missing" {
+				if err := os.WriteFile(path, []byte(tt.content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			removed, deleted, err := RemoveSharedSection(path, tt.legacy)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("RemoveSharedSection error = %v, want %v", err, tt.wantErr)
+			}
+			if err != nil {
+				return
+			}
+			if removed != tt.wantRem || deleted != tt.wantDel {
+				t.Fatalf("RemoveSharedSection = removed %v, deleted %v; want %v, %v", removed, deleted, tt.wantRem, tt.wantDel)
+			}
+			if tt.wantDel {
+				if _, err := os.Lstat(path); !os.IsNotExist(err) {
+					t.Fatalf("file survived (lstat err %v)", err)
+				}
+				return
+			}
+			if tt.content == "\x00missing" {
+				return
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != tt.want {
+				t.Fatalf("file =\n%q\nwant\n%q", got, tt.want)
+			}
+		})
+	}
+}

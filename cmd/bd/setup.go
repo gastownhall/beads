@@ -367,7 +367,27 @@ func runRecipe(name string) error {
 
 	if setupRemove {
 		removed := false
+		var kept []string
 		for _, path := range paths {
+			if legacy, isShared := shared[path]; isShared {
+				// A shared file is only taken when nothing of the user's is
+				// left in it; a stripped section counts as a removal, and
+				// the retained file is said so the user knows it stayed.
+				sectionRemoved, deleted, err := setup.RemoveSharedSection(path, legacy)
+				if err != nil {
+					return HandleError("manage beads section in %s: %v", remedy.PrintedValue(path), remedy.PrintedError(err))
+				}
+				if !sectionRemoved {
+					continue
+				}
+				removed = true
+				if deleted {
+					_ = setup.RemoveEmptyDir(filepath.Dir(path))
+				} else {
+					kept = append(kept, path)
+				}
+				continue
+			}
 			if err := os.Remove(path); err != nil {
 				if os.IsNotExist(err) {
 					continue
@@ -385,6 +405,9 @@ func runRecipe(name string) error {
 			return nil
 		}
 		fmt.Printf("✓ Removed %s integration\n", remedy.PrintedValue(recipe.Name))
+		for _, path := range kept {
+			fmt.Printf("  Kept user content: %s\n", remedy.PrintedValue(path))
+		}
 		return nil
 	}
 

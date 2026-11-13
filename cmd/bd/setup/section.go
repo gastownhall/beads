@@ -160,3 +160,45 @@ func UpsertSharedSection(path, body, legacy string) (bool, error) {
 	}
 	return true, nil
 }
+
+// RemoveSharedSection takes bd's section out of the shared instruction file
+// at path. A file with no markers is left alone and reports nothing removed;
+// a legacy whole-file install, and a file holding nothing but the section,
+// are deleted (deleted true); otherwise the remainder — the user's text — is
+// written back through the atomic writer, with the blank lines that set the
+// section off taken with it, as removeBeadsSection does. Malformed markers
+// are an error and change nothing. The caller drops the file's directory
+// only when the file itself was deleted.
+func RemoveSharedSection(path, legacy string) (removedSection, deleted bool, err error) {
+	data, err := os.ReadFile(path) // #nosec G304 -- a bd setup recipe's own path
+	if os.IsNotExist(err) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, fmt.Errorf("read file: %w", err)
+	}
+	content := string(data)
+	switch ClassifySharedSection(content, legacy) {
+	case SharedSectionMalformed:
+		return false, false, ErrSharedSectionMalformed
+	case SharedSectionNone:
+		return false, false, nil
+	case SharedSectionLegacy:
+		if err := os.Remove(path); err != nil {
+			return false, false, fmt.Errorf("remove file: %w", err)
+		}
+		return true, true, nil
+	default:
+		remainder := removeBeadsSection(content)
+		if strings.TrimSpace(remainder) == "" {
+			if err := os.Remove(path); err != nil {
+				return false, false, fmt.Errorf("remove file: %w", err)
+			}
+			return true, true, nil
+		}
+		if err := atomicWriteFile(path, []byte(remainder)); err != nil {
+			return false, false, fmt.Errorf("write file: %w", err)
+		}
+		return true, false, nil
+	}
+}
