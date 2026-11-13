@@ -318,11 +318,17 @@ type Deleter interface {
 	// surviving rows joined to a deleted row by a dependency edge in either
 	// direction — and not the workspace. Each occurrence of a deleted id in a
 	// neighbor's description, notes, design or acceptance criteria becomes
-	// `[deleted:<id>]`, matched at ASCII word boundaries the way
-	// SweepRequest.ProtectReferenced matches: `be-1` rewrites in "see (be-1)."
-	// and not inside `xbe-1` or `be-12`. A row that cites a deleted id in
-	// prose WITHOUT an edge to it is left alone, because a workspace-wide text
-	// scan on every delete is a cost this operation does not take.
+	// `[deleted:<id>]` when it is a complete citation: not inside a longer
+	// id, where an id byte is an ASCII letter, digit, `_` or `-`, and a `.`
+	// with an id byte on its far side joins the two into one id. So `be-1`
+	// rewrites in "see (be-1)." and "be-1...", and not inside `xbe-1`,
+	// `be-12`, a hierarchical child's `be-1.2`, or `x.be-1`; two citations
+	// that share one separator ("be-1 be-1") are both rewritten. The rule is
+	// types.RewriteDeletedReferences; it is not the one
+	// SweepRequest.ProtectReferenced matches by. A row that cites a deleted
+	// id in prose WITHOUT an edge to it is left alone, because a
+	// workspace-wide text scan on every delete is a cost this operation does
+	// not take.
 	//
 	// THE ORDER THE REFUSALS HAPPEN IN IS PART OF THE ANSWER, because a
 	// request can fail several ways at once: request validation, then the
