@@ -197,3 +197,64 @@ func TestSharedSectionRemoveFile(t *testing.T) {
 		t.Fatalf("RemoveSharedFile(missing) = %v, %v", got, err)
 	}
 }
+
+// Markers that do not make exactly one section are refused by every
+// operation, which leaves the content as it was.
+func TestSharedSectionMalformed(t *testing.T) {
+	const begin, end = agentsBeginMarker, agentsEndMarker
+	for _, tt := range []struct{ name, content string }{
+		{"dangling BEGIN", "# Mine\n" + begin + "\nOld.\n"},
+		{"dangling metadata BEGIN", "<!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:00000000 -->\nOld.\n"},
+		{"dangling END", "# Mine\n" + end + "\n"},
+		{"reversed", end + "\nMine.\n" + begin + "\n"},
+		{"two sections", begin + "\nA\n" + end + "\n" + begin + "\nB\n" + end + "\n"},
+		{"nested", begin + "\n" + begin + "\nA\n" + end + "\n" + end + "\n"},
+		{"unterminated BEGIN comment", "<!-- BEGIN BEADS INTEGRATION\nA\n" + end + "\n"},
+		{"BEGIN closed after END", "<!-- BEGIN BEADS INTEGRATION " + end + " -->\n"},
+		{"BEGIN prefix of another word", "<!-- BEGIN BEADS INTEGRATIONS -->\nA\n" + end + "\n"},
+		{"END with extra text", begin + "\nA\n<!-- END BEADS INTEGRATION v:1 -->\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got, err := UpsertSharedSection(tt.content, sharedBody); !errors.Is(err, ErrMalformedSection) || got != tt.content {
+				t.Errorf("UpsertSharedSection = %q, %v; want the content back and ErrMalformedSection", got, err)
+			}
+			if got, stripped, _, err := StripSharedSection(tt.content); !errors.Is(err, ErrMalformedSection) || stripped || got != tt.content {
+				t.Errorf("StripSharedSection = %q, %v, %v; want the content back and ErrMalformedSection", got, stripped, err)
+			}
+			path := filepath.Join(t.TempDir(), "instructions.md")
+			if err := os.WriteFile(path, []byte(tt.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := PreflightSharedFile(path); !errors.Is(err, ErrMalformedSection) {
+				t.Errorf("PreflightSharedFile = %v, want ErrMalformedSection", err)
+			}
+			if _, err := InstallSharedFile(path, sharedBody); !errors.Is(err, ErrMalformedSection) {
+				t.Errorf("InstallSharedFile = %v, want ErrMalformedSection", err)
+			}
+			if _, err := RemoveSharedFile(path); !errors.Is(err, ErrMalformedSection) {
+				t.Errorf("RemoveSharedFile = %v, want ErrMalformedSection", err)
+			}
+			if data, _ := os.ReadFile(path); string(data) != tt.content {
+				t.Errorf("file changed to %q", data)
+			}
+		})
+	}
+}
+
+func TestSharedSectionPreflight(t *testing.T) {
+	dir := t.TempDir()
+	if err := PreflightSharedFile(filepath.Join(dir, "missing.md")); err != nil {
+		t.Errorf("PreflightSharedFile(missing) = %v, want nil", err)
+	}
+	ok := filepath.Join(dir, "ok.md")
+	if err := os.WriteFile(ok, []byte("# Mine\n\n"+sharedWrapped()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := PreflightSharedFile(ok); err != nil {
+		t.Errorf("PreflightSharedFile(section) = %v, want nil", err)
+	}
+	// A directory where the file should be cannot be read.
+	if err := PreflightSharedFile(dir); err == nil {
+		t.Errorf("PreflightSharedFile(directory) = nil, want a read error")
+	}
+}
