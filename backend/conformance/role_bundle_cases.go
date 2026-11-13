@@ -407,6 +407,7 @@ var roleContractCases = []roleContract{
 		RunImporterReportsTheAbsentTargetItDroppedOnce,
 		RunImporterWiresTheCrossPlaneEdgeBetweenItsRows,
 		RunImporterReportsTheCycleEdgeItDropped,
+		RunImporterRecordsOneHistoryEntry,
 	),
 
 	// Per case, not per role: see RoleContractBundle.IssueOperations.

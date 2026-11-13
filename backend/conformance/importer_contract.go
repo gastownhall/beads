@@ -75,6 +75,10 @@ type ImporterFixture struct {
 	// QueryScalar runs a single-row query and scans it, RETURNING the error
 	// rather than failing the test.
 	QueryScalar func(context.Context, string, []any, ...any) error
+	// CountHistory reports how many history entries the fixture's branch has. A
+	// nil hook means "this backend cannot observe history", and the cases that
+	// need it SKIP rather than passing quietly.
+	CountHistory func(context.Context) (int, error)
 }
 
 // RunImporterRejectsAStaleRowAndNamesIt pins the in-transaction half of the
@@ -343,6 +347,52 @@ func RunImporterReportsTheCycleEdgeItDropped(t *testing.T, ctx context.Context, 
 	assertImporterSkipped(t, result, []publicops.SkippedDependency{dropped})
 }
 
+// RunImporterRecordsOneHistoryEntry pins the role's headline promise as a
+// count rather than a slogan: "one whole import batch in one transaction with
+// one history entry" (issueops/importer.go:81-84, and the request's own
+// wording at issueops/importer.go:5-9).
+//
+// THE BATCH HAS THREE ROWS because that is what separates the two halves of
+// the promise from their lookalikes. A single-row import cannot tell "one
+// entry per batch" from "one entry per row" — both answer 1. And a count of
+// zero is the failure this role is most capable of, not a hypothetical: the
+// unit-of-work body commits only when its message is non-empty
+// (uow/importer.go's importBatchCommitMessage), so an implementation that
+// landed the rows without producing a message would record nothing at all.
+// The rows are asserted landed alongside the delta for the same reason: "one
+// entry" is the promise only when something was written, and a batch that
+// wrote nothing and recorded nothing satisfies a different, emptier sentence.
+//
+// BEFORE/AFTER, not a read of the log's top entry, for the reason the kit's
+// CountHistory doc states: two commits inside one second tie on date and
+// their relative order is not something to rely on. The entry's text is not
+// asserted for the same reason the batch creator's twin gives it.
+func RunImporterRecordsOneHistoryEntry(t *testing.T, ctx context.Context, fixture ImporterFixture) {
+	t.Helper()
+	if fixture.CountHistory == nil {
+		t.Skip("this backend cannot observe history entries")
+	}
+	first := fixture.IssuePrefix + "-imphist-first"
+	second := fixture.IssuePrefix + "-imphist-second"
+	third := fixture.IssuePrefix + "-imphist-third"
+
+	before := importerHistoryCount(t, ctx, fixture)
+	result := runImporterBatch(t, ctx, fixture, "history",
+		importerIssue(first, "one"),
+		importerIssue(second, "two"),
+		importerIssue(third, "three"))
+
+	if result.Created != 3 {
+		t.Errorf("Created = %d, want 3", result.Created)
+	}
+	assertImporterRowCount(t, ctx, fixture, "issues", first, 1)
+	assertImporterRowCount(t, ctx, fixture, "issues", second, 1)
+	assertImporterRowCount(t, ctx, fixture, "issues", third, 1)
+	if delta := importerHistoryCount(t, ctx, fixture) - before; delta != 1 {
+		t.Errorf("history entries += %d for a 3-row import, want 1: the request is the transaction, so it records one entry", delta)
+	}
+}
+
 // runImporterBatch imports issues under the option set `bd import` actually
 // sends (cmd/bd/import_proxied_server.go): stale rows rejected in the
 // transaction, and an explicit import admitting ids outside the workspace's
@@ -494,4 +544,14 @@ func readImporterUpdatedAt(t *testing.T, ctx context.Context, fixture ImporterFi
 		t.Fatalf("read updated_at of %s: %v", id, err)
 	}
 	return stamp.UTC()
+}
+
+// importerHistoryCount reads the fixture's history counter.
+func importerHistoryCount(t *testing.T, ctx context.Context, fixture ImporterFixture) int {
+	t.Helper()
+	entries, err := fixture.CountHistory(ctx)
+	if err != nil {
+		t.Fatalf("count history entries: %v", err)
+	}
+	return entries
 }

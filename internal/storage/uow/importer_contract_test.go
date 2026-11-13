@@ -40,6 +40,9 @@ func TestImporterContract(t *testing.T) {
 	t.Run("ReportsTheCycleEdgeItDropped", func(t *testing.T) {
 		conformance.RunImporterReportsTheCycleEdgeItDropped(t, ctx, fixture)
 	})
+	t.Run("RecordsOneHistoryEntry", func(t *testing.T) {
+		conformance.RunImporterRecordsOneHistoryEntry(t, ctx, fixture)
+	})
 }
 
 func newUOWImporterFixture(t *testing.T, ctx context.Context, prefix string) conformance.ImporterFixture {
@@ -57,8 +60,9 @@ func newUOWImporterFixture(t *testing.T, ctx context.Context, prefix string) con
 	}
 	kit := newUOWRoleFixtureKit(provider, prefix)
 	return conformance.ImporterFixture{
-		IssuePrefix: kit.IssuePrefix,
-		Importer:    importer,
-		QueryScalar: kit.QueryScalar,
+		IssuePrefix:  kit.IssuePrefix,
+		Importer:     importer,
+		QueryScalar:  kit.QueryScalar,
+		CountHistory: kit.CountHistory,
 	}
 }
