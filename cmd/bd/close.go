@@ -686,6 +686,8 @@ func isMachineCheckableGate(issue *types.Issue) bool {
 		return false
 	}
 	switch {
+	case isGitLabGateType(issue.AwaitType):
+		return true
 	case strings.HasPrefix(issue.AwaitType, "gh:pr"):
 		return true
 	case strings.HasPrefix(issue.AwaitType, "gh:run"):
@@ -714,6 +716,10 @@ func checkGateSatisfaction(issue *types.Issue, gateStore storage.DoltStorage) er
 	var err error
 
 	switch {
+	case issue.AwaitType == "gl:pipeline":
+		resolved, escalated, reason, err = checkGLPipeline(issue)
+	case issue.AwaitType == "gl:mr":
+		resolved, escalated, reason, err = checkGLMR(issue)
 	case strings.HasPrefix(issue.AwaitType, "gh:run"):
 		resolved, escalated, reason, err = checkGHRun(issue, func(gateID, runID string) error { return updateGateAwaitIDFunc(nil, gateID, runID) })
 	case strings.HasPrefix(issue.AwaitType, "gh:pr"):
