@@ -5,6 +5,7 @@ package embeddeddolt_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1390,4 +1391,66 @@ func readHookPayloads(t *testing.T, logPath string) []types.Issue {
 		payloads = append(payloads, issue)
 	}
 	return payloads
+}
+
+// TestFailedAutoMintedCreateRestoresEmptyID pins that a failed create hands an
+// auto-minted struct back with an empty ID. A label over MaxFieldLen fails the
+// create after the ID is minted and the row inserted. The transaction rolls
+// back, so the minted ID names nothing, and a caller retrying the struct must
+// mint again rather than take the explicit-ID upsert path. A caller-supplied
+// ID is the caller's and survives the same failure. (GH#8457; ported from
+// PR #6831.)
+func TestFailedAutoMintedCreateRestoresEmptyID(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "fr")
+	ctx := t.Context()
+	tooLong := strings.Repeat("x", types.MaxFieldLen+1)
+
+	auto := &types.Issue{Title: "auto", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Labels: []string{tooLong}}
+	if err := te.store.CreateIssue(ctx, auto, "tester"); !errors.Is(err, types.ErrFieldTooLong) {
+		t.Fatalf("auto-minted CreateIssue with an over-length label: err = %v, want ErrFieldTooLong", err)
+	}
+	if auto.ID != "" {
+		t.Fatalf("failed auto-minted create left ID %q, want it restored to empty", auto.ID)
+	}
+
+	explicit := &types.Issue{ID: "fr-explicit", Title: "explicit", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Labels: []string{tooLong}}
+	if err := te.store.CreateIssue(ctx, explicit, "tester"); !errors.Is(err, types.ErrFieldTooLong) {
+		t.Fatalf("explicit-ID CreateIssue with an over-length label: err = %v, want ErrFieldTooLong", err)
+	}
+	if explicit.ID != "fr-explicit" {
+		t.Fatalf("failed explicit-ID create changed ID to %q, want fr-explicit", explicit.ID)
+	}
+
+	var rows int
+	te.queryScalar(t, ctx, "SELECT COUNT(*) FROM issues", nil, &rows)
+	if rows != 0 {
+		t.Fatalf("issues holds %d rows after two failed creates, want 0", rows)
+	}
+}
+
+// TestFailedAutoMintedCreateIssuesRestoresEmptyIDs pins the batch half of the
+// same contract on the embedded store (GH#8457): a two-issue auto-minted
+// batch whose second issue fails on an over-length label restores both minted
+// IDs and writes no row.
+func TestFailedAutoMintedCreateIssuesRestoresEmptyIDs(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "fb")
+	ctx := t.Context()
+	tooLong := strings.Repeat("x", types.MaxFieldLen+1)
+
+	first := &types.Issue{Title: "auto one", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	second := &types.Issue{Title: "auto two", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Labels: []string{tooLong}}
+	if err := te.store.CreateIssues(ctx, []*types.Issue{first, second}, "tester"); !errors.Is(err, types.ErrFieldTooLong) {
+		t.Fatalf("auto-minted CreateIssues with an over-length label: err = %v, want ErrFieldTooLong", err)
+	}
+	if first.ID != "" || second.ID != "" {
+		t.Fatalf("failed auto-minted batch left IDs %q/%q, want both restored to empty", first.ID, second.ID)
+	}
+
+	var rows int
+	te.queryScalar(t, ctx, "SELECT COUNT(*) FROM issues", nil, &rows)
+	if rows != 0 {
+		t.Fatalf("issues holds %d rows after a failed batch, want 0", rows)
+	}
 }

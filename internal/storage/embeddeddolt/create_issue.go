@@ -27,7 +27,12 @@ func (s *EmbeddedDoltStore) CreateIssue(ctx context.Context, issue *types.Issue,
 		issue.Ephemeral = true
 	}
 
-	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+	// Same contract as DoltStore.CreateIssue (GH#8457): a create whose
+	// transaction rolled back hands the struct back with the ID fields the
+	// caller left empty; withConn's indeterminate-commit errors keep them.
+	resetMintedIDs := issueops.SnapshotUnsetCreateIDs([]*types.Issue{issue})
+
+	return issueops.ResetCreateIDsIfRolledBack(s.withConn(ctx, true, func(tx *sql.Tx) error {
 		// SkipPrefixValidation matches DoltStore.CreateIssue, which does not
 		// validate prefixes for explicit IDs on the single-issue path.
 		bc, err := issueops.NewBatchContext(ctx, tx, storage.BatchCreateOptions{
@@ -37,7 +42,7 @@ func (s *EmbeddedDoltStore) CreateIssue(ctx context.Context, issue *types.Issue,
 			return err
 		}
 		return issueops.CreateIssueInTx(ctx, tx, bc, issue, actor)
-	})
+	}), resetMintedIDs)
 }
 
 func (s *EmbeddedDoltStore) CreateIssues(ctx context.Context, issues []*types.Issue, actor string) error {
@@ -70,7 +75,11 @@ func (s *EmbeddedDoltStore) CreateIssuesWithFullOptions(ctx context.Context, iss
 		}
 	}
 
-	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+	// Same contract as DoltStore's batch create (GH#8457): a rolled-back
+	// batch leaves the ID fields the caller left empty.
+	resetMintedIDs := issueops.SnapshotUnsetCreateIDs(issues)
+
+	return issueops.ResetCreateIDsIfRolledBack(s.withConn(ctx, true, func(tx *sql.Tx) error {
 		return issueops.CreateIssuesInTx(ctx, tx, issues, actor, opts)
-	})
+	}), resetMintedIDs)
 }
