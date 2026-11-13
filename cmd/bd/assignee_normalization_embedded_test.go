@@ -48,6 +48,12 @@ func TestEmbeddedAssigneeHiddenEmptyClears(t *testing.T) {
 		t.Helper()
 		return bdCreate(t, bd, dir, title, "--type", "task", "--assignee", "holder")
 	}
+	claimAs := func(t *testing.T, holder string) *types.Issue {
+		t.Helper()
+		issue := bdCreate(t, bd, dir, "Held work", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--actor", holder, "--assignee", holder, "--status", "in_progress")
+		return issue
+	}
 
 	t.Run("AC1_update_clears_like_explicit_empty", func(t *testing.T) {
 		for _, form := range [][]string{
@@ -93,6 +99,41 @@ func TestEmbeddedAssigneeHiddenEmptyClears(t *testing.T) {
 			bdBatchOK(t, bd, dir, "update "+issue.ID+" "+kv+"\n")
 			if got := bdShow(t, bd, dir, issue.ID); got.Assignee != "" {
 				t.Errorf("batch update %s: assignee=%q, want cleared", kv, got.Assignee)
+			}
+		}
+	})
+
+	t.Run("AC4_live_claim_fence_holds_then_force_clears", func(t *testing.T) {
+		baseline := claimAs(t, "holder")
+		bdUpdate(t, bd, dir, baseline.ID, "--actor", "thief", "--assignee", "", "--force")
+		want := bdShow(t, bd, dir, baseline.ID)
+		if want.Assignee != "" {
+			t.Fatalf("explicit-empty --force baseline: assignee=%q, want cleared", want.Assignee)
+		}
+
+		for _, value := range []string{"-", " "} {
+			issue := claimAs(t, "holder")
+			if out, code := bdUpdateFailCode(t, bd, dir, issue.ID, "--actor", "thief", "--assignee", value); code != 1 || !strings.Contains(out, "holder") {
+				t.Errorf("update --assignee %q over a live claim: exit=%d, want 1 naming the holder\n%s", value, code, out)
+			}
+			if got := bdShow(t, bd, dir, issue.ID); got.Assignee != "holder" || got.Status != types.StatusInProgress {
+				t.Errorf("refused update --assignee %q clobbered the claim: assignee=%q status=%s", value, got.Assignee, got.Status)
+			}
+			bdUpdate(t, bd, dir, issue.ID, "--actor", "thief", "--assignee", value, "--force")
+			if got := bdShow(t, bd, dir, issue.ID); got.Assignee != want.Assignee || got.Status != want.Status {
+				t.Errorf("update --assignee %q --force: assignee=%q status=%s, want %q/%s like --assignee ''", value, got.Assignee, got.Status, want.Assignee, want.Status)
+			}
+
+			issue = claimAs(t, "holder")
+			if out, code := bdRunFailCode(t, bd, dir, "assign", issue.ID, value, "--actor", "thief"); code != 1 || !strings.Contains(out, "holder") {
+				t.Errorf("assign %q over a live claim: exit=%d, want 1 naming the holder\n%s", value, code, out)
+			}
+			if got := bdShow(t, bd, dir, issue.ID); got.Assignee != "holder" {
+				t.Errorf("refused assign %q clobbered the claim: assignee=%q", value, got.Assignee)
+			}
+			bdRunOK(t, bd, dir, "assign", issue.ID, value, "--actor", "thief", "--force")
+			if got := bdShow(t, bd, dir, issue.ID); got.Assignee != want.Assignee || got.Status != want.Status {
+				t.Errorf("assign %q --force: assignee=%q status=%s, want %q/%s like --assignee ''", value, got.Assignee, got.Status, want.Assignee, want.Status)
 			}
 		}
 	})
