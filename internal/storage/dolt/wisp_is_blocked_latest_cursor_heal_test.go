@@ -328,3 +328,46 @@ func TestDoltNew_WispIsBlockedRestoreKeepsHistoryAndTimestamps_RealDolt(t *testi
 		t.Errorf("dirty tables after the heal = %q, want %q", got, dirtyBefore)
 	}
 }
+
+// TestDoltNew_WispIsBlockedRestoreDefaultReady_RealDolt is AC-2 on the
+// default ready filter: a nonempty wisp family sends even the default read
+// through the wisp stale-flag probe and the blocked-wisp filter, both of which
+// read wisps.is_blocked. After the heal both reads succeed and keep the
+// blocked wisps B and C out.
+func TestDoltNew_WispIsBlockedRestoreDefaultReady_RealDolt(t *testing.T) {
+	c := newWispIsBlockedClone(t)
+	g := c.seedGraph()
+	c.breakShape()
+	c.reopen()
+
+	for _, tc := range []struct {
+		name   string
+		filter types.WorkFilter
+		want   []string
+	}{
+		{"default", types.WorkFilter{}, []string{g.a}},
+		{"IncludeEphemeral", types.WorkFilter{IncludeEphemeral: true}, []string{g.a, g.d}},
+	} {
+		ready, err := c.store.GetReadyWork(c.ctx, tc.filter)
+		if err != nil {
+			t.Fatalf("GetReadyWork(%s) after the heal: %v", tc.name, err)
+		}
+		ids := make(map[string]bool, len(ready))
+		for _, issue := range ready {
+			ids[issue.ID] = true
+		}
+		for _, id := range tc.want {
+			if !ids[id] {
+				t.Errorf("GetReadyWork(%s) misses %s after the heal", tc.name, id)
+			}
+		}
+		for _, id := range []string{g.b, g.c} {
+			if ids[id] {
+				t.Errorf("GetReadyWork(%s) includes blocked wisp %s after the heal", tc.name, id)
+			}
+		}
+	}
+	if got := c.blockedFlags("wisps", g.b, g.c); !slices.Equal(got, []int{1, 1}) {
+		t.Fatalf("restored wisp is_blocked (b, c) = %v, want [1 1]", got)
+	}
+}

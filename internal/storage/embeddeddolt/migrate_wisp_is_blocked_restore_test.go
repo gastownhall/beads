@@ -80,6 +80,21 @@ func TestEmbeddedWispIsBlockedRestoreAtIgnored32(t *testing.T) {
 			t.Errorf("ready work has %s = %v after the heal, want %v", id, readyIDs[id], want)
 		}
 	}
+	// The default filter goes through the same wisp stale-flag probe and
+	// blocked-wisp filter, which read wisps.is_blocked.
+	defaultReady, err := store.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork(default): %v", err)
+	}
+	defaultIDs := map[string]bool{}
+	for _, issue := range defaultReady {
+		defaultIDs[issue.ID] = true
+	}
+	for id, want := range map[string]bool{"wib-a": true, "wib-b": false, "wib-c": false} {
+		if defaultIDs[id] != want {
+			t.Errorf("default ready work has %s = %v after the heal, want %v", id, defaultIDs[id], want)
+		}
+	}
 }
 
 // TestEmbeddedWispIsBlockedRepairFailureRetries is AC-7 on the embedded open
