@@ -813,8 +813,16 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			if !backends.CanCreate(backendFlag) {
 				return fmt.Errorf("backend %q cannot be created by bd init; it can only open an existing workspace (bd init provisions \"dolt\", the default)", backendFlag)
 			}
-			initIfMissing, _ := cmd.Flags().GetBool("init-if-missing")
-			return runInitRegisteredBackend(cmd.Context(), backendFlag, prefix, quiet, initIfMissing)
+			if err := refuseFlagsRegisteredInitCannotHonor(cmd, backendFlag); err != nil {
+				return err
+			}
+			return runInitRegisteredBackend(cmd.Context(), registeredInitOptions{
+				name:          backendFlag,
+				prefix:        prefix,
+				quiet:         quiet,
+				initIfMissing: initIfMissing,
+				keepHomeClean: keepHomeClean,
+			})
 		}
 		for _, legacyFlag := range removedBackendInitFlags {
 			if cmd.Flags().Changed(legacyFlag.name) {

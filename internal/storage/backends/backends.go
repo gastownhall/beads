@@ -183,10 +183,17 @@ type Backend struct {
 
 	// Create provisions an empty workspace store under beadsDir for bd init.
 	// A backend that leaves it nil can only open workspaces something else
-	// created, and bd init refuses it by name. bd init writes the standard
-	// .beads/.gitignore before calling it, and that file names only the
-	// built-in engines' directories: a Create that puts data under beadsDir
-	// keeps it out of version control itself.
+	// created, and bd init refuses it by name.
+	//
+	// bd init calls it under its exclusive workspace gate, after writing the
+	// standard .beads/.gitignore and before the workspace has a metadata.json.
+	// That file names only the built-in engines' directories: a Create that
+	// puts data under beadsDir keeps it out of version control itself.
+	//
+	// Create must accept a directory it has already been run on. When an init
+	// fails after Create returned, bd init removes a .beads directory it
+	// created itself, but leaves one that was already there, and the retry
+	// calls Create again on whatever the first call left in it.
 	Create func(ctx context.Context, beadsDir string) error
 }
 
