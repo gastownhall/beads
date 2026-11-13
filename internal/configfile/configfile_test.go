@@ -1424,3 +1424,22 @@ func TestPortImpliesServerMode(t *testing.T) {
 		})
 	}
 }
+
+// TestSaveProxiedServerClientInfo_SuccessfulSaveReturnsNil pins bd-pw5t5e
+// (GH#6858): a save that wrote, flushed and renamed the sidecar must report
+// success. On Windows, syncing the read-only directory handle fails with
+// "Access is denied", so a completed save surfaced as an error.
+func TestSaveProxiedServerClientInfo_SuccessfulSaveReturnsNil(t *testing.T) {
+	dir := t.TempDir()
+	info := &ProxiedServerClientInfo{RootPath: "/var/lib/beads/proxieddb", Port: 3307}
+	if err := SaveProxiedServerClientInfo(dir, info); err != nil {
+		t.Fatalf("Save returned an error for a completed save: %v", err)
+	}
+	got, err := LoadProxiedServerClientInfo(dir)
+	if err != nil || got == nil {
+		t.Fatalf("Load = %+v, %v; want the saved sidecar", got, err)
+	}
+	if got.RootPath != info.RootPath || got.Port != info.Port {
+		t.Fatalf("Load = %+v, want %+v", got, info)
+	}
+}
