@@ -235,6 +235,7 @@ go_test(
         "issue_lifecycle_external_test.go",
         "issue_roles_external_test.go",
         "open_backend_selection_test.go",
+        "open_metadataless_embedded_cgo_test.go",
         "open_nocgo_test.go",
         "query_interfaces_cgo_test.go",
         "query_interfaces_test.go",

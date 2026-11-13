@@ -214,6 +214,9 @@ func openDoltStoreFromConfig(ctx context.Context, beadsDir string, requireExisti
 		// metadata.json (cfg == nil, err == nil) keeps the embedded default.
 		return nil, fmt.Errorf("load %s: %w (refusing to fall back to the embedded store)", remedy.PrintedValue(configfile.ConfigPath(beadsDir)), remedy.PrintedError(err))
 	}
+	// Captured before normalizeLoadedConfig below substitutes DefaultConfig
+	// for the absent metadata: the guard needs the true metadata absence.
+	metadataMissing := cfg == nil
 	if err := validateConfiguredBackend(cfg, beadsDir); err != nil {
 		return nil, err
 	}
@@ -232,6 +235,17 @@ func openDoltStoreFromConfig(ctx context.Context, beadsDir string, requireExisti
 	if requireExisting && !embeddeddolt.HasRepository(beadsDir) {
 		return nil, errNoRoutedEmbeddedDatabase(beadsDir)
 	}
+	// A metadata-less workspace cannot say which database is its own; the
+	// default-name fallback below would open or create a sibling of the one
+	// it holds (GH#4381). The target honors BEADS_DOLT_SERVER_DATABASE
+	// exactly as the open below does, and a hyphenated target is admitted
+	// when either spelling names the sole database, matching the migration's
+	// two rename shapes.
+	if metadataMissing {
+		if err := checkMetadatalessWritableEmbeddedTarget(beadsDir, cfg.GetDoltDatabase()); err != nil {
+			return nil, err
+		}
+	}
 	database := configfile.DefaultDoltDatabase
 	if cfg != nil {
 		database = cfg.GetDoltDatabase()
@@ -243,6 +257,22 @@ func openDoltStoreFromConfig(ctx context.Context, beadsDir string, requireExisti
 		database = sanitized
 	}
 	return embeddeddolt.Open(ctx, beadsDir, database, "main")
+}
+
+// checkMetadatalessWritableEmbeddedTarget applies the metadata-less embedded
+// guard (GH#4381) for the writable factory, whose sanitize migration
+// (migrateHyphenatedDB) may rename the sole legacy directory to the sanitized
+// name before the open: the sanitized spelling is admitted too, and when both
+// are refused its error is returned, naming the directory the open would use.
+func checkMetadatalessWritableEmbeddedTarget(beadsDir, database string) error {
+	err := configfile.CheckMetadatalessEmbeddedDatabase(beadsDir, database)
+	if err == nil {
+		return nil
+	}
+	if sanitized := sanitizeDBName(database); sanitized != database {
+		return configfile.CheckMetadatalessEmbeddedDatabase(beadsDir, sanitized)
+	}
+	return err
 }
 
 // errNoRoutedEmbeddedDatabase refuses a routed write to beadsDir, an embedded
@@ -350,6 +380,9 @@ func openNonMutatingStoreFromConfig(ctx context.Context, beadsDir string, previe
 		// "database not found" the embedded open would produce.
 		return nil, fmt.Errorf("load %s: %w (refusing to fall back to the embedded store)", remedy.PrintedValue(configfile.MetadataFilePath(beadsDir)), remedy.PrintedError(err))
 	}
+	// Captured before normalizeLoadedConfig below substitutes DefaultConfig
+	// for the absent metadata, as in openDoltStoreFromConfig.
+	metadataMissing := cfg == nil
 	if err := validateConfiguredBackend(cfg, beadsDir); err != nil {
 		return nil, err
 	}
@@ -371,6 +404,14 @@ func openNonMutatingStoreFromConfig(ctx context.Context, beadsDir string, previe
 	}
 	if sanitized := sanitizeDBName(database); sanitized != database {
 		database = sanitized
+	}
+	// The same metadata-less refusal as the writable factory (GH#4381),
+	// against the in-memory sanitized name — this path renames nothing, so
+	// the directory it would open is the sanitized one.
+	if metadataMissing {
+		if err := configfile.CheckMetadatalessEmbeddedDatabase(beadsDir, database); err != nil {
+			return nil, err
+		}
 	}
 	if preview {
 		return embeddeddolt.OpenForPreviewCommand(ctx, beadsDir, database, "main")

@@ -55,6 +55,9 @@ func OpenBestAvailableWith(ctx context.Context, beadsDir string, opts OpenOption
 	if err != nil {
 		return nil, fmt.Errorf("loading storage metadata: %w", err)
 	}
+	// Captured before the DefaultConfig substitution below erases the
+	// provenance: the metadata-less guard needs the true metadata absence.
+	metadataMissing := cfg == nil
 	if cfg == nil {
 		cfg = configfile.DefaultConfig()
 	}
@@ -99,6 +102,15 @@ func OpenBestAvailableWith(ctx context.Context, beadsDir string, opts OpenOption
 	database := configfile.DefaultDoltDatabase
 	if cfg != nil {
 		database = cfg.GetDoltDatabase()
+	}
+	// A metadata-less workspace whose store already holds a database cannot
+	// say which database is its own; the default-name fallback would create
+	// a sibling of it (GH#4381). Refuse before the engine opens or creates
+	// anything; the empty store and the sole matching database stay allowed.
+	if metadataMissing {
+		if err := configfile.CheckMetadatalessEmbeddedDatabase(beadsDir, database); err != nil {
+			return nil, err
+		}
 	}
 	store, err := embeddeddolt.Open(ctx, beadsDir, database, "main")
 	if err != nil {
