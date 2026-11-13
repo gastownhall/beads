@@ -2,8 +2,10 @@ package configfile
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -877,12 +879,37 @@ func TestProxiedServerClientInfo_RoundTrip(t *testing.T) {
 // (bd-pw5t5e, GH#6858). The missing-directory rows are portable: no row
 // opens a real directory except the host-native writable sync.
 func TestSyncSidecarDir(t *testing.T) {
+	const syncPrefix = "syncing " + ProxiedServerClientInfoFileName + " directory:"
 	missing := filepath.Join(t.TempDir(), "missing")
 
 	t.Run("windows skips the directory flush", func(t *testing.T) {
 		// A missing path proves no directory is opened: any open fails.
 		if err := syncSidecarDir("windows", missing); err != nil {
 			t.Fatalf("syncSidecarDir(windows, missing) = %v, want nil", err)
+		}
+	})
+
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos+" missing directory reports the open error", func(t *testing.T) {
+			err := syncSidecarDir(goos, missing)
+			if err == nil {
+				t.Fatal("syncSidecarDir on a missing directory returned nil")
+			}
+			if !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("err = %v, want it to wrap os.ErrNotExist", err)
+			}
+			if !strings.HasPrefix(err.Error(), syncPrefix) {
+				t.Errorf("err = %q, want prefix %q", err, syncPrefix)
+			}
+		})
+	}
+
+	t.Run("non-windows host syncs a writable directory", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("a real non-Windows directory flush needs a non-Windows host")
+		}
+		if err := syncSidecarDir(runtime.GOOS, t.TempDir()); err != nil {
+			t.Fatalf("syncSidecarDir(%q, tempdir) = %v, want nil", runtime.GOOS, err)
 		}
 	})
 }
