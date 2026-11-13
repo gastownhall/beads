@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -161,19 +162,78 @@ func isRoutedResolutionRefusal(err error) bool {
 // decorators (hooks, the external-dependency policy, telemetry) decide
 // nothing about it. Every other store is resolved through s unchanged.
 func idResolverFor(s storage.DoltStorage) utils.PartialIDResolverStore {
+	if raw := exactIDLookupBackend(s); raw != nil {
+		return raw
+	}
+	return s
+}
+
+// exactIDLookupBackend returns the backend under s's decorator chain when it
+// can look ids up only exactly (utils.ExactIDLookupStore, the http backend),
+// and nil for every other store, a nil s included.
+func exactIDLookupBackend(s storage.DoltStorage) storage.DoltStorage {
 	if s == nil {
-		return s
+		return nil
 	}
 	if raw := storage.UnwrapStore(s); raw != nil {
 		if exact, ok := raw.(utils.ExactIDLookupStore); ok && exact.ExactIDLookupOnly() {
 			return raw
 		}
 	}
-	return s
+	return nil
+}
+
+// looksLikeFullIssueID is the gate for reading an id directly before resolving
+// it: the id contains a hyphen with at least one character on each side, and
+// no whitespace. It is purely syntactic and reads no configuration, so a direct
+// read that finds the issue never depends on the workspace prefix or on
+// routes.jsonl, which resolution reads only after a local miss. It is a cheap
+// gate, not a validator: a prefixed abbreviation or another repository's id
+// passes it and pays one failed read before the resolver runs.
+func looksLikeFullIssueID(id string) bool {
+	if strings.IndexFunc(id, unicode.IsSpace) >= 0 {
+		return false
+	}
+	for i := 1; i < len(id)-1; i++ {
+		if id[i] == '-' {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveAndGetFromStore resolves a partial ID and gets the issue from a specific store.
+//
+// An id that passes looksLikeFullIssueID is first read with the GetIssue the
+// command needs anyway. Today's sequence ends in that same GetIssue, so a hit
+// returns exactly the issue it returned before (the durable row first, then a
+// wisp) and the resolver's exact search, which only confirms that the id
+// exists, is not sent. Only a not-found falls back to the resolver followed by
+// GetIssue; any other error is returned as the final GetIssue's error is.
+// Nothing read earlier is reused: the direct read is the command's own read.
+//
+// A store that looks ids up only exactly (exactIDLookupBackend, the http
+// backend) keeps the resolver sequence. Its resolver's exact search already
+// is a getIssue request, and a miss is not memoized, so a direct read first
+// would add a request to every miss. On a hit the sequence costs one request
+// when the CLI read memo answers the second lookup, and two without it, so
+// the bypass keeps the existing cost in both cases.
 func resolveAndGetFromStore(ctx context.Context, s storage.DoltStorage, id string, routed bool) (*RoutedResult, error) {
+	if s != nil && looksLikeFullIssueID(id) && exactIDLookupBackend(s) == nil {
+		issue, err := s.GetIssue(ctx, id)
+		if err == nil && issue != nil {
+			return &RoutedResult{
+				Issue:      issue,
+				Store:      s,
+				Routed:     routed,
+				ResolvedID: issue.ID,
+			}, nil
+		}
+		if err != nil && !errors.Is(err, storage.ErrNotFound) {
+			return nil, err
+		}
+	}
+
 	// First, resolve the partial ID
 	resolvedID, err := utils.ResolvePartialID(ctx, idResolverFor(s), id)
 	if err != nil {

@@ -117,9 +117,8 @@ func TestActivateStoreSendsNoStatementsToAHistoryOffServerStore(t *testing.T) {
 			}
 
 			// A read is not a write: it never reads the row.
-			mock.ExpectBegin()
+			expectAutocommit(mock, 1)
 			mock.ExpectQuery(vhConfigRead).WithArgs("issue_prefix").WillReturnRows(vhRow("vh", true))
-			mock.ExpectRollback()
 			if _, err := store.GetConfig(context.Background(), "issue_prefix"); err != nil {
 				t.Fatal(err)
 			}
@@ -133,8 +132,8 @@ func TestActivateStoreSendsNoStatementsToAHistoryOffServerStore(t *testing.T) {
 			if err := mock.ExpectationsWereMet(); err != nil {
 				t.Fatal(err)
 			}
-			if got := counts.Snapshot().Total(); got != 1+3 {
-				t.Errorf("read + two writes sent %d statements, want 4: one read, one switch read, two updates", got)
+			if got := counts.Snapshot().Total(); got != 2+3 {
+				t.Errorf("read + two writes sent %d statements, want 5: the autocommit mode, one read, one switch read, two updates", got)
 			}
 		})
 	}

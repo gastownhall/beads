@@ -634,6 +634,38 @@ func (s *InstrumentedStorage) GetAllConfig(ctx context.Context) (map[string]stri
 	return v, err
 }
 
+// GetConfigKeys forwards the domain.ConfigKeysReader optional fast path when
+// the wrapped store provides it, and otherwise picks the keys out of
+// instrumented GetAllConfig, so wrapping a store never costs it the capability.
+// The fallback selects exact keys; a store's own read keeps its database
+// collation and key remapping. As with GetConfigByPrefix, cmd/bd unwraps to the
+// raw store, so this span fires only for a caller that holds the instrumented
+// store. The span records how many keys were asked for, not their names.
+func (s *InstrumentedStorage) GetConfigKeys(ctx context.Context, keys ...string) (map[string]string, error) {
+	if kr, ok := s.inner.(interface {
+		GetConfigKeys(ctx context.Context, keys ...string) (map[string]string, error)
+	}); ok {
+		ctx, span, t := s.op(ctx, "GetConfigKeys", attribute.Int("bd.config.key_count", len(keys)))
+		v, err := kr.GetConfigKeys(ctx, keys...)
+		s.done(ctx, span, t, err)
+		return v, err
+	}
+	out := make(map[string]string, len(keys))
+	if len(keys) == 0 {
+		return out, nil
+	}
+	all, err := s.GetAllConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, k := range keys {
+		if v, ok := all[k]; ok {
+			out[k] = v
+		}
+	}
+	return out, nil
+}
+
 // GetConfigByPrefix forwards the domain.ConfigPrefixReader optional fast
 // path when the wrapped store provides it, and otherwise falls back to
 // instrumented GetAllConfig filtered in-process — so wrapping a store never
