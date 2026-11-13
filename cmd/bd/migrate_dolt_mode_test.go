@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -889,6 +890,116 @@ func TestMigrateResume_JournalFromBeforeEffectiveIdleTimeout(t *testing.T) {
 			assert.Nil(t, j, "successful migration removes its journal")
 		})
 	}
+}
+
+// TestMigrateJournal_SaveRoundTrip pins that saving the migration journal on a
+// plain directory succeeds and loads back unchanged, including a rewrite over
+// an existing journal, and leaves no temporary file behind. On native Windows
+// an unconditional directory Sync failed this save after the rename (GH#6882).
+func TestMigrateJournal_SaveRoundTrip(t *testing.T) {
+	beadsDir := t.TempDir()
+	root := filepath.Join(beadsDir, "dolt")
+	j := &migrateJournal{
+		Version: 1, SourceMode: configfile.DoltModeServer, TargetMode: configfile.DoltModeProxiedServer,
+		RootPath: root, Sidecar: &configfile.ProxiedServerClientInfo{RootPath: root},
+		Ownership: "managed-local",
+	}
+	for i, phase := range []migratePhase{migratePrepared, migrateTargetConfigured} {
+		j.Phase = phase
+		j.Attempt = i + 1
+		require.NoError(t, saveMigrateJournal(beadsDir, j))
+		loaded, err := loadMigrateJournal(beadsDir)
+		require.NoError(t, err)
+		require.Equal(t, j, loaded)
+	}
+	entries, err := os.ReadDir(beadsDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "save must not leave temporary files")
+	require.Equal(t, migrateJournalFileName, entries[0].Name())
+	require.False(t, entries[0].IsDir())
+}
+
+// TestMigrateJournal_Remove pins that removing the migration journal succeeds,
+// leaves the journal path absent and its directory in place, and that removing
+// an already-absent journal is a no-op. On native Windows an unconditional
+// directory Sync failed this removal after the journal was gone (GH#6882).
+func TestMigrateJournal_Remove(t *testing.T) {
+	beadsDir := t.TempDir()
+	path := migrateJournalPath(beadsDir)
+	// Seed directly so removal exercises its own directory flush independently
+	// of saveMigrateJournal.
+	require.NoError(t, os.WriteFile(path, []byte("{}"), 0o600))
+	require.NoError(t, removeMigrateJournal(beadsDir))
+	_, err := os.Stat(path)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	require.NoError(t, removeMigrateJournal(beadsDir), "missing journal is a no-op")
+	info, err := os.Stat(beadsDir)
+	require.NoError(t, err)
+	require.True(t, info.IsDir())
+}
+
+// TestSyncMigrateJournalDir_SkipsOnlyWindows pins the platform decision for the
+// journal's directory flush: only Windows skips it, every other platform still
+// calls Sync and propagates its error. A closed handle makes Sync fail, so a
+// nil result proves the call was skipped and os.ErrClosed proves it ran.
+func TestSyncMigrateJournalDir_SkipsOnlyWindows(t *testing.T) {
+	closed, err := os.Open(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, closed.Close())
+
+	require.NoError(t, syncMigrateJournalDir("windows", closed), "windows must skip the directory flush")
+	for _, goos := range []string{"linux", "darwin", "freebsd"} {
+		require.ErrorIs(t, syncMigrateJournalDir(goos, closed), os.ErrClosed, "%s must still sync the directory", goos)
+	}
+
+	dir, err := os.Open(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = dir.Close() })
+	require.NoError(t, syncMigrateJournalDir(runtime.GOOS, dir))
+}
+
+// TestMigrateJournal_FilesystemErrorsStillReported pins that skipping the
+// Windows directory flush leaves every other journal persistence failure
+// reported, with its existing wrapping and cleanup.
+func TestMigrateJournal_FilesystemErrorsStillReported(t *testing.T) {
+	t.Run("missing parent", func(t *testing.T) {
+		beadsDir := filepath.Join(t.TempDir(), "missing")
+		require.ErrorIs(t, saveMigrateJournal(beadsDir, &migrateJournal{}), os.ErrNotExist)
+		err := removeMigrateJournal(beadsDir)
+		require.ErrorIs(t, err, os.ErrNotExist)
+		require.True(t, strings.HasPrefix(err.Error(), "opening migration directory: "), "got %q", err)
+	})
+	t.Run("rename destination is directory", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		path := migrateJournalPath(beadsDir)
+		require.NoError(t, os.Mkdir(path, 0o700))
+		marker := filepath.Join(path, "keep")
+		require.NoError(t, os.WriteFile(marker, []byte("unchanged"), 0o600))
+		var renameErr *os.LinkError
+		require.ErrorAs(t, saveMigrateJournal(beadsDir, &migrateJournal{}), &renameErr)
+		require.Equal(t, path, renameErr.New)
+		contents, err := os.ReadFile(marker)
+		require.NoError(t, err)
+		require.Equal(t, "unchanged", string(contents))
+		entries, err := os.ReadDir(beadsDir)
+		require.NoError(t, err)
+		require.Len(t, entries, 1, "failed save must not leave temporary files")
+		require.Equal(t, migrateJournalFileName, entries[0].Name())
+		require.True(t, entries[0].IsDir())
+	})
+	t.Run("remove nonempty directory", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		path := migrateJournalPath(beadsDir)
+		require.NoError(t, os.Mkdir(path, 0o700))
+		marker := filepath.Join(path, "keep")
+		require.NoError(t, os.WriteFile(marker, []byte("unchanged"), 0o600))
+		var removeErr *os.PathError
+		require.ErrorAs(t, removeMigrateJournal(beadsDir), &removeErr)
+		require.Equal(t, path, removeErr.Path)
+		contents, err := os.ReadFile(marker)
+		require.NoError(t, err)
+		require.Equal(t, "unchanged", string(contents))
+	})
 }
 
 func TestMigrateJournal_UnknownPhaseFailsClosed(t *testing.T) {
