@@ -17,6 +17,7 @@ const (
 	testScriptDriverEnv         = "BEADS_TEST_SCRIPT_DRIVER"
 	testScriptNativeSuffixEnv   = "BEADS_TEST_SCRIPT_NATIVE_SUFFIX"
 	testScriptLaunchProbeEnv    = "BEADS_TEST_SCRIPT_LAUNCH_PROBE"
+	testEnvNativeProfileProbe   = "BEADS_TEST_ENV_NATIVE_PROFILE_PROBE"
 )
 
 const testScriptFakeGo = `#!/usr/bin/env bash
@@ -112,6 +113,152 @@ func TestTestScriptPrebuiltBinaryLaunchProbe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("launch exported prebuilt binary through os/exec: %v\n%s", err, output)
 	}
+}
+
+func TestTestEnvIsolatesNativeProfileDirs(t *testing.T) {
+	root := t.TempDir()
+	tempRoot := filepath.Join(root, "temporary files")
+	outsideAppData := filepath.Join(root, "outside appdata")
+	outsideLocalAppData := filepath.Join(root, "outside localappdata")
+	for _, path := range []string{tempRoot, outsideAppData, outsideLocalAppData} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("create fixture directory %s: %v", path, err)
+		}
+	}
+	appSentinel := filepath.Join(outsideAppData, "keep")
+	localSentinel := filepath.Join(outsideLocalAppData, "keep")
+	for _, path := range []string{appSentinel, localSentinel} {
+		if err := os.WriteFile(path, []byte("outside"), 0o600); err != nil {
+			t.Fatalf("write outside sentinel %s: %v", path, err)
+		}
+	}
+
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatalf("bash is required to exercise the shared test environment: %v", err)
+	}
+	repoRoot := sourceRepoRoot(t)
+	env := []string{
+		"PATH=/usr/bin:/bin",
+		"TMPDIR=" + portableTestScriptPath(tempRoot),
+		"TEMP=" + portableTestScriptPath(tempRoot),
+		"TMP=" + portableTestScriptPath(tempRoot),
+		"APPDATA=" + portableTestScriptPath(outsideAppData),
+		"LOCALAPPDATA=" + portableTestScriptPath(outsideLocalAppData),
+		"GOCACHE=" + portableTestScriptPath(filepath.Join(root, "go-cache")),
+		"GOMODCACHE=" + portableTestScriptPath(filepath.Join(root, "go-mod-cache")),
+		"LC_ALL=C",
+		"LANG=C",
+		"BASH_ENV=",
+		"ENV=",
+		testEnvNativeProfileProbe + "=1",
+	}
+	for _, key := range []string{"SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT"} {
+		if value, ok := os.LookupEnv(key); ok {
+			env = append(env, key+"="+value)
+		}
+	}
+	helpScript := shellPathUnderEnv(t, bash, filepath.Join(repoRoot, "scripts", "ci", "lib", "test-env.sh"), env)
+	driver := shellPathUnderEnv(t, bash, currentTestExecutable(t), env)
+	appSentinelShell := shellPathUnderEnv(t, bash, appSentinel, env)
+	localSentinelShell := shellPathUnderEnv(t, bash, localSentinel, env)
+
+	cmd := exec.Command(
+		bash,
+		"--noprofile",
+		"--norc",
+		"-c",
+		`set -euo pipefail
+source "$1"
+beads_test_env_enter
+owned_root="$BEADS_TEST_ENV_ROOT"
+"$2" -test.run '^TestTestEnvNativeProfileProbe$' -test.count=1
+beads_test_env_cleanup
+test ! -e "$owned_root"
+test -f "$3"
+test -f "$4"`,
+		"test-env",
+		helpScript,
+		driver,
+		appSentinelShell,
+		localSentinelShell,
+	)
+	cmd.Dir = repoRoot
+	cmd.Env = env
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("shared test environment probe failed: %v\n%s", err, output)
+	}
+}
+
+// TestTestEnvNativeProfileProbe runs as a native child of the real Bash helper
+// above. On Windows this is the boundary that proves the exported paths drive
+// os.UserConfigDir and os.UserCacheDir rather than merely looking correct to
+// the POSIX shell.
+func TestTestEnvNativeProfileProbe(t *testing.T) {
+	if os.Getenv(testEnvNativeProfileProbe) != "1" {
+		t.Skip("native profile probe runs only under the shared test environment driver")
+	}
+
+	root := os.Getenv("BEADS_TEST_ENV_ROOT")
+	if root == "" {
+		t.Fatal("BEADS_TEST_ENV_ROOT is empty")
+	}
+	appData := os.Getenv("APPDATA")
+	localAppData := os.Getenv("LOCALAPPDATA")
+	assertPathInside(t, root, appData, "APPDATA")
+	assertPathInside(t, root, localAppData, "LOCALAPPDATA")
+
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatalf("os.UserConfigDir: %v", err)
+	}
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatalf("os.UserCacheDir: %v", err)
+	}
+	assertUsablePathInside(t, root, configDir, "os.UserConfigDir")
+	assertUsablePathInside(t, root, cacheDir, "os.UserCacheDir")
+	if runtime.GOOS == "windows" {
+		if !sameCleanPath(configDir, appData) {
+			t.Fatalf("os.UserConfigDir() = %q, want APPDATA %q", configDir, appData)
+		}
+		if !sameCleanPath(cacheDir, localAppData) {
+			t.Fatalf("os.UserCacheDir() = %q, want LOCALAPPDATA %q", cacheDir, localAppData)
+		}
+	}
+}
+
+func assertUsablePathInside(t *testing.T, root, path, name string) {
+	t.Helper()
+	assertPathInside(t, root, path, name)
+	if !filepath.IsAbs(path) {
+		t.Fatalf("%s = %q, want an absolute native path", name, path)
+	}
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatalf("create %s path %q: %v", name, path, err)
+	}
+	probe := filepath.Join(path, "beads-test-env-probe")
+	if err := os.WriteFile(probe, []byte("ok"), 0o600); err != nil {
+		t.Fatalf("write through %s path %q: %v", name, path, err)
+	}
+}
+
+func assertPathInside(t *testing.T, root, path, name string) {
+	t.Helper()
+	if path == "" {
+		t.Fatalf("%s is empty", name)
+	}
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+	if err != nil {
+		t.Fatalf("compare %s %q with owned root %q: %v", name, path, root, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		t.Fatalf("%s = %q escapes owned root %q", name, path, root)
+	}
+}
+
+func sameCleanPath(first, second string) bool {
+	return strings.EqualFold(filepath.Clean(first), filepath.Clean(second))
 }
 
 func runTestScriptWithFakeGo(t *testing.T, callerBinary string) []string {
