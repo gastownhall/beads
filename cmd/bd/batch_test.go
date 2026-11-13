@@ -234,9 +234,9 @@ func TestParseUpdateKVs(t *testing.T) {
 			want: map[string]interface{}{"assignee": ""},
 		},
 		{
-			name: "assignee spaced dash kept verbatim",
+			name: "assignee spaced dash clears (#8203)",
 			in:   []string{"assignee= - "},
-			want: map[string]interface{}{"assignee": " - "},
+			want: map[string]interface{}{"assignee": ""},
 		},
 		{
 			name: "assignee names kept verbatim",
