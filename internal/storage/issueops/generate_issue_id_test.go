@@ -44,8 +44,8 @@ func TestGenerateIssueIDPassesOverAClaimedCandidate(t *testing.T) {
 
 // TestGenerateIssueIDCounterModeWalksPastAClaimedValue pins the same rule in
 // counter mode: a value the batch already claimed (an explicit id one of its
-// items names) is skipped like a retired one, without the tombstone read, and
-// the counter advanced again.
+// items names) is skipped like a taken one, without the taken read, and the
+// counter advanced again.
 func TestGenerateIssueIDCounterModeWalksPastAClaimedValue(t *testing.T) {
 	db, mock := newIDRetentionMock(t)
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT value FROM config WHERE `key` = ?")).
@@ -58,7 +58,7 @@ func TestGenerateIssueIDCounterModeWalksPastAClaimedValue(t *testing.T) {
 	}
 	bump(5)
 	bump(6)
-	mock.ExpectQuery(regexp.QuoteMeta(idRetiredSQL)).WithArgs("bd-6", "bd-6").
+	mock.ExpectQuery(regexp.QuoteMeta(idTakenSQL)).WithArgs("bd-6", "bd-6", "bd-6", "bd-6").
 		WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(0))
 
 	id, err := GenerateIssueIDInTable(context.Background(), db, "issues", "bd", &types.Issue{}, "actor", map[string]bool{"bd-5": true})
