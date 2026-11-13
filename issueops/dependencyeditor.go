@@ -67,10 +67,14 @@ type AddDependenciesRequest struct {
 	// validated against it.
 	Edges []DependencyEdge
 	// SkipPerEdgeCycleCheck drops the per-edge cycle probe for a caller wiring
-	// a large graph, trading validation cost for speed. It NEVER drops the
-	// whole-graph gate that runs once at the end, and it never drops the
-	// self-dependency refusal: an edge that points an issue at itself is
-	// refused with or without it.
+	// a large graph, trading validation cost for speed. A request that sets it
+	// always runs the whole-graph cycle gate once at the end, after every edge
+	// is written. A request that leaves it unset needs no such gate: each
+	// edge's probe runs in the same transaction after the request's earlier
+	// edges are written, so the probe of the last edge on any new cycle refuses
+	// the request. Either way a cycle is refused and nothing is written. It
+	// never drops the self-dependency refusal: an edge that points an issue at
+	// itself is refused with or without it.
 	SkipPerEdgeCycleCheck bool
 }
 

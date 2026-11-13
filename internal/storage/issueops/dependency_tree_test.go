@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -291,10 +292,11 @@ func TestGetDependencyTreeInTxEmitsDedupedDirectBlocker(t *testing.T) {
 	}
 }
 
-// TestGetDependencyTreeInTxDepthCutoffBeatsStub pins that the depth bound is
-// checked before the revisit: root expands x at depth 1, and the longer path
-// root→a→b→x reaches x again at depth 3 == maxDepth, where it is absent rather
-// than a stub.
+// TestGetDependencyTreeInTxDepthCutoffBeatsStub pins that the depth bound wins
+// over the revisit: root expands x at depth 1, and the longer path root→a→b→x
+// would reach x again at depth 3 == maxDepth, where it is absent rather than a
+// stub. b sits on the last level the bound allows, so its edges, including the
+// one into x, are not read at all.
 func TestGetDependencyTreeInTxDepthCutoffBeatsStub(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -315,8 +317,6 @@ func TestGetDependencyTreeInTxDepthCutoffBeatsStub(t *testing.T) {
 	expectDependencies(mock, "a", []dependencyRow{{id: "b", depType: string(types.DepBlocks)}})
 	expectIssueBatchOne(mock, "b")
 	expectIssue(mock, "b", "B")
-	expectDependencies(mock, "b", []dependencyRow{{id: "x", depType: string(types.DepBlocks)}})
-	expectIssueBatchOne(mock, "x")
 
 	tx, err := db.BeginTx(context.Background(), nil)
 	if err != nil {
@@ -342,6 +342,139 @@ func TestGetDependencyTreeInTxDepthCutoffBeatsStub(t *testing.T) {
 			t.Fatalf("node %s is Deduped, want no stub at or beyond the cutoff", node.ID)
 		}
 	}
+}
+
+// TestGetDependencyTreeInTxRecordsALastLevelNodeAsExpanded pins that a node
+// on the last level maxDepth allows still counts as expanded, although the
+// walk returns it without reading its edges. root depends on a then b, and a
+// depends on b, with maxDepth 3: b is first reached through a at depth 2, the
+// last level, and the root's own edge into b must then be a Deduped stub at
+// depth 1 that reuses the issue already read. If the early return came before
+// b was recorded, the walk would expand b a second time at depth 1, sending
+// reads this mock does not script.
+func TestGetDependencyTreeInTxRecordsALastLevelNodeAsExpanded(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	expectIssue(mock, "root", "Root")
+	expectDependencies(mock, "root", []dependencyRow{
+		{id: "a", depType: string(types.DepBlocks)},
+		{id: "b", depType: string(types.DepBlocks)},
+	})
+	expectIssueBatch(mock, []string{"a", "b"})
+	expectIssue(mock, "a", "A")
+	expectDependencies(mock, "a", []dependencyRow{{id: "b", depType: string(types.DepBlocks)}})
+	expectIssueBatchOne(mock, "b")
+	expectIssue(mock, "b", "B")
+	// No expectation for b's edges (b is on the last level) or for the stub.
+
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	tree, err := GetDependencyTreeInTx(context.Background(), tx, "root", 3, false, false)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("GetDependencyTreeInTx: %v", err)
+	}
+	mock.ExpectRollback()
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+
+	if got := treeIDs(tree); strings.Join(got, ",") != "root,a,b,b" {
+		t.Fatalf("tree = %v, want [root a b b]", got)
+	}
+	for i, node := range tree {
+		if node.Deduped != (i == 3) {
+			t.Fatalf("row %d (%s) Deduped = %v, want only the last row to be a stub", i, node.ID, node.Deduped)
+		}
+	}
+	if full := tree[2]; full.Depth != 2 || full.ParentID != "a" {
+		t.Fatalf("expanded b = depth %d parent %q, want 2/a", full.Depth, full.ParentID)
+	}
+	stub := tree[3]
+	if stub.Depth != 1 || stub.ParentID != "root" || stub.EdgeFromParent != types.DepBlocks {
+		t.Fatalf("stub of b = depth %d parent %q edge %q, want 1/root/blocks", stub.Depth, stub.ParentID, stub.EdgeFromParent)
+	}
+	if stub.Title != "B" {
+		t.Fatalf("stub title = %q, want the expanded issue's %q", stub.Title, "B")
+	}
+}
+
+// TestGetDependencyTreeInTxReadsNothingPastTheDepthLimit walks from root, in
+// each direction, with a depth limit of one level and of two. A node on the
+// last level the limit allows is read and returned, but its edges lead only to
+// nodes the walk will not return, so the walk must not read its adjacency or
+// hydrate its neighbors. The mock scripts exactly the reads the walk needs and
+// is reached through sqlcount, so a read beyond them is counted even if the
+// walk dropped the error sqlmock answers it with.
+func TestGetDependencyTreeInTxReadsNothingPastTheDepthLimit(t *testing.T) {
+	for _, reverse := range []bool{false, true} {
+		for _, tt := range []struct {
+			maxDepth       int
+			wantIDs        string
+			wantStatements int64
+		}{
+			// The root's issue row and labels.
+			{maxDepth: 1, wantIDs: "root", wantStatements: 2},
+			// Plus the root's adjacency in both planes (2), the hydration of
+			// a (wisps probe, issue rows, labels: 3) and a's own issue row
+			// and labels (2).
+			{maxDepth: 2, wantIDs: "root,a", wantStatements: 9},
+		} {
+			t.Run(fmt.Sprintf("reverse=%v/maxDepth=%d", reverse, tt.maxDepth), func(t *testing.T) {
+				mock, tx, counts := countedMockTx(t)
+				expectIssue(mock, "root", "Root")
+				if tt.maxDepth > 1 {
+					expectAdjacency(mock, "root", reverse, "a")
+					expectIssueBatchOne(mock, "a")
+					expectIssue(mock, "a", "A")
+				}
+
+				tree, err := GetDependencyTreeInTx(t.Context(), tx, "root", tt.maxDepth, false, reverse)
+				if err != nil {
+					t.Fatalf("GetDependencyTreeInTx: %v (statements sent: %d)", err, counts.Total())
+				}
+				if n := counts.Total(); n != tt.wantStatements {
+					t.Fatalf("the walk sent %d statements, want exactly the %d scripted", n, tt.wantStatements)
+				}
+				if err := mock.ExpectationsWereMet(); err != nil {
+					t.Fatalf("unmet sql expectations: %v", err)
+				}
+				if got := strings.Join(treeIDs(tree), ","); got != tt.wantIDs {
+					t.Fatalf("tree = %s, want %s", got, tt.wantIDs)
+				}
+			})
+		}
+	}
+}
+
+// expectAdjacency scripts the two adjacency reads of anchor, durable plane
+// then wisp plane, in the direction the walk reads them, with one blocks edge
+// to each far id in the durable plane.
+func expectAdjacency(mock sqlmock.Sqlmock, anchor string, reverse bool, farIDs ...string) {
+	cols, where := DepTargetExpr+" AS depends_on_id, type", "issue_id = ?"
+	if reverse {
+		cols, where = "issue_id, type", DepTargetExpr+" = ?"
+	}
+	rows := sqlmock.NewRows([]string{"far_id", "type"})
+	for _, id := range farIDs {
+		rows.AddRow(id, string(types.DepBlocks))
+	}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT " + cols + " FROM dependencies WHERE " + where)).
+		WithArgs(anchor).
+		WillReturnRows(rows)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT " + cols + " FROM wisp_dependencies WHERE " + where)).
+		WithArgs(anchor).
+		WillReturnRows(sqlmock.NewRows([]string{"far_id", "type"}))
 }
 
 func expectIssueBatchOne(mock sqlmock.Sqlmock, id string) {

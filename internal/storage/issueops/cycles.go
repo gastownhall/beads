@@ -92,12 +92,37 @@ func AppendSchedulingGraphInTx(ctx context.Context, tx DBTX, depTables []string,
 	return appendDependencyGraphInTx(ctx, tx, depTables, graph, true)
 }
 
+// The type sets the two graph readers send as a WHERE, so rows of other
+// types (related, tracks, waits-for and the rest) are not read at all. They
+// must match the Go check in appendDependencyGraphInTx, which stays as the
+// exact test: a collation that compared types without regard to case would
+// otherwise widen the set.
+//
+// The read also sends ORDER BY id, the primary key of both dependency tables.
+// A read without ORDER BY has no guaranteed order: the unfiltered scan was
+// observed in primary-key order, and with the filter the engine may read through
+// a type-leading index and return the rows grouped by type. The rows are the same
+// either way, but each adjacency list is built in row order, and
+// CycleThroughEdgesInGraph follows the first path it finds, so the order decides
+// which of two equally short cycle paths a refusal names. ORDER BY id makes that
+// order explicit, so type-index ordering cannot change those messages.
+const (
+	blockingGraphTypes   = "'blocks', 'conditional-blocks'"
+	schedulingGraphTypes = "'blocks', 'conditional-blocks', 'parent-child'"
+)
+
 func appendDependencyGraphInTx(ctx context.Context, tx DBTX, depTables []string, graph map[string][]string, includeParentChild bool) error {
+	graphTypes := blockingGraphTypes
+	if includeParentChild {
+		graphTypes = schedulingGraphTypes
+	}
 	for _, depTable := range depTables {
 		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 			SELECT issue_id, %s AS depends_on_id, type
 			FROM %s
-		`, DepTargetExpr, depTable))
+			WHERE type IN (%s)
+			ORDER BY id
+		`, DepTargetExpr, depTable, graphTypes))
 		if err != nil {
 			return fmt.Errorf("dependency graph: query %s: %w", depTable, err)
 		}
