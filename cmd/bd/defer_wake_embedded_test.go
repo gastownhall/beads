@@ -6,8 +6,13 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/migration"
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
 // showDeferState returns (status, defer_until) for an issue via bd show --json.
@@ -54,13 +59,20 @@ func wakeReadyIDs(t *testing.T, bd, dir string, args ...string) map[string]bool 
 // this one invocation.
 func wakeReadyIDsWithEnv(t *testing.T, bd, dir string, extraEnv []string, args ...string) map[string]bool {
 	t.Helper()
-	fullArgs := append([]string{"ready", "--json"}, args...)
-	cmd := exec.Command(bd, fullArgs...)
+	return bdReadIDsWithEnv(t, bd, dir, extraEnv, append([]string{"ready", "--json"}, args...)...)
+}
+
+// bdReadIDsWithEnv runs a bd read that prints a JSON array of issues (bd
+// ready --json, bd list --json) with extraEnv layered over bdEnv, and returns
+// the listed ids.
+func bdReadIDsWithEnv(t *testing.T, bd, dir string, extraEnv []string, args ...string) map[string]bool {
+	t.Helper()
+	cmd := exec.Command(bd, args...)
 	cmd.Dir = dir
 	cmd.Env = append(bdEnv(dir), extraEnv...)
 	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd ready --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		t.Fatalf("bd %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
 	s := strings.TrimSpace(stdout.String())
 	start := strings.Index(s, "[")
@@ -69,7 +81,7 @@ func wakeReadyIDsWithEnv(t *testing.T, bd, dir string, extraEnv []string, args .
 	}
 	var arr []map[string]interface{}
 	if err := json.Unmarshal([]byte(s[start:]), &arr); err != nil {
-		t.Fatalf("parse ready JSON: %v\n%s", err, s)
+		t.Fatalf("parse %s JSON: %v\n%s", args[0], err, s)
 	}
 	ids := map[string]bool{}
 	for _, row := range arr {
@@ -78,6 +90,66 @@ func wakeReadyIDsWithEnv(t *testing.T, bd, dir string, extraEnv []string, args .
 		}
 	}
 	return ids
+}
+
+// deferWakeFreezeEnv returns the environment entries that freeze (frozen) or
+// thaw a bd invocation through the authoritative BD_MIGRATION_FREEZE_FILE
+// override, so a freeze never leaks into another invocation in the same
+// workspace (#7634). The marker lives outside the workspace and is created
+// once; bdEnv already strips any inherited BD_* override.
+func deferWakeFreezeEnv(t *testing.T, markerDir string, frozen bool) []string {
+	t.Helper()
+	marker := filepath.Join(markerDir, migration.FileName)
+	if !frozen {
+		return []string{migration.EnvFreezeFile + "=" + filepath.Join(markerDir, "no-such-freeze-marker")}
+	}
+	if _, err := os.Stat(marker); os.IsNotExist(err) {
+		if err := os.WriteFile(marker, []byte("operator: defer-wake-test\n"), 0o644); err != nil {
+			t.Fatalf("write freeze marker: %v", err)
+		}
+	}
+	return []string{migration.EnvFreezeFile + "=" + marker}
+}
+
+// embeddedDeferWakeHistory reads the workspace's Dolt history without
+// writing: the HEAD hash, the total dolt_log row count, and the messages of
+// the commits HEAD has that since does not (none when since is empty).
+func embeddedDeferWakeHistory(t *testing.T, beadsDir, since string) (head string, logCount int, messages []string) {
+	t.Helper()
+	database := ""
+	if cfg, _ := configfile.Load(beadsDir); cfg != nil {
+		database = cfg.GetDoltDatabase()
+	}
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer func() { _ = cleanup() }()
+	if err := db.QueryRowContext(t.Context(), "SELECT HASHOF('HEAD')").Scan(&head); err != nil {
+		t.Fatalf("read HEAD: %v", err)
+	}
+	if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dolt_log").Scan(&logCount); err != nil {
+		t.Fatalf("count dolt_log: %v", err)
+	}
+	if since == "" {
+		return head, logCount, nil
+	}
+	rows, err := db.QueryContext(t.Context(), "SELECT message FROM DOLT_LOG('HEAD', '--not', ?)", since)
+	if err != nil {
+		t.Fatalf("read commits since %s: %v", since, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var msg string
+		if err := rows.Scan(&msg); err != nil {
+			t.Fatalf("scan commit message: %v", err)
+		}
+		messages = append(messages, msg)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read commits since %s: %v", since, err)
+	}
+	return head, logCount, messages
 }
 
 // TestEmbeddedDeferAutoWake documents the defer contract: a DATED defer is a
@@ -91,7 +163,8 @@ func TestEmbeddedDeferAutoWake(t *testing.T) {
 	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
-	dir, _, _ := bdInit(t, bd, "--prefix", "dw")
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "dw")
+	markerDir := t.TempDir()
 
 	t.Run("expired_dated_defer_wakes_on_ready", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Expired snooze", "--type", "task")
@@ -114,6 +187,48 @@ func TestEmbeddedDeferAutoWake(t *testing.T) {
 		}
 		if deferUntil != nil {
 			t.Errorf("expected defer_until cleared after wake (undefer's shape), got %v", deferUntil)
+		}
+	})
+
+	// A MIGRATION-FREEZE makes the workspace read-only for the duration of a
+	// migration (#7634): a ready read still answers, but the sweep must not
+	// wake anything or mint a commit — the HEAD hash and the dolt_log row
+	// count the freeze started with are the direct observable of "no write".
+	t.Run("frozen_ready_does_not_wake", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Frozen snooze (ready)", "--type", "task")
+		bdDefer(t, bd, dir, issue.ID, "--until", "2020-01-01")
+		beforeHead, beforeCount, _ := embeddedDeferWakeHistory(t, beadsDir, "")
+
+		ids := bdReadIDsWithEnv(t, bd, dir, deferWakeFreezeEnv(t, markerDir, true), "ready", "--json")
+		if ids[issue.ID] {
+			t.Errorf("frozen bd ready listed %s: the sweep woke it during a freeze", issue.ID)
+		}
+		afterHead, afterCount, _ := embeddedDeferWakeHistory(t, beadsDir, "")
+		if afterHead != beforeHead || afterCount != beforeCount {
+			t.Errorf("frozen bd ready wrote: HEAD %s -> %s, dolt_log %d -> %d", beforeHead, afterHead, beforeCount, afterCount)
+		}
+		status, deferUntil := showDeferState(t, bd, dir, issue.ID)
+		if status != "deferred" || deferUntil == nil {
+			t.Errorf("frozen bd ready changed %s to status=%q defer_until=%v, want deferred with its date retained", issue.ID, status, deferUntil)
+		}
+	})
+
+	t.Run("frozen_list_ready_does_not_wake", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Frozen snooze (list --ready)", "--type", "task")
+		bdDefer(t, bd, dir, issue.ID, "--until", "2020-01-01")
+		beforeHead, beforeCount, _ := embeddedDeferWakeHistory(t, beadsDir, "")
+
+		ids := bdReadIDsWithEnv(t, bd, dir, deferWakeFreezeEnv(t, markerDir, true), "list", "--ready", "--json")
+		if ids[issue.ID] {
+			t.Errorf("frozen bd list --ready listed %s: the sweep woke it during a freeze", issue.ID)
+		}
+		afterHead, afterCount, _ := embeddedDeferWakeHistory(t, beadsDir, "")
+		if afterHead != beforeHead || afterCount != beforeCount {
+			t.Errorf("frozen bd list --ready wrote: HEAD %s -> %s, dolt_log %d -> %d", beforeHead, afterHead, beforeCount, afterCount)
+		}
+		status, deferUntil := showDeferState(t, bd, dir, issue.ID)
+		if status != "deferred" || deferUntil == nil {
+			t.Errorf("frozen bd list --ready changed %s to status=%q defer_until=%v, want deferred with its date retained", issue.ID, status, deferUntil)
 		}
 	})
 
