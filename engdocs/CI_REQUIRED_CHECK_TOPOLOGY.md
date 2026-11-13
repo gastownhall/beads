@@ -1124,8 +1124,9 @@ Do not require these existing check names directly:
 - `Check doc flags freshness`
 - `Windows Make shell (native, msys2, cygwin)` (F7a fold of the former
   `host: [native, msys2, cygwin]` three-job matrix)
-- `Test (Windows) small packages (doltversion, dbproxy server)` (F7a fold of
-  the former `test-windows-doltversion` and `test-windows-dbproxy-server`)
+- `Test (Windows) small packages (doltversion, dbproxy server, util, proxy purge)`
+  (F7a fold of the former `test-windows-doltversion` and
+  `test-windows-dbproxy-server`, plus the dbproxy lock-retirement tests)
 - `Test (ubuntu-latest)`
 - `Test (macos-latest)`
 - `Go checks (vet)`

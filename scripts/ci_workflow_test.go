@@ -2735,6 +2735,27 @@ func TestPRWindowsSmallDbproxyServerIsCGODisabled(t *testing.T) {
 	}
 }
 
+// test-windows-small is the only native Windows run of the retirable
+// lifecycle leases (#6884): Linux lets a process remove a file it holds open
+// and compiles flock_retire_windows_test.go out. Both legs build CGO-disabled
+// like the dbproxy-server leg, and -v names every result.
+func TestPRWindowsSmallRunsLeaseRetirementTests(t *testing.T) {
+	pr := readCIWorkflow(t, "pr.yml")
+	job := pr.job(t, "test-windows-small")
+	for name, command := range map[string]string{
+		"Run dbproxy util package tests on Windows":       "go test -tags gms_pure_go -count=1 -v ./internal/storage/dbproxy/util/",
+		"Run dbproxy control-file purge tests on Windows": "go test -tags gms_pure_go -count=1 -v -run '^TestPurgeControlFiles' ./internal/storage/dbproxy/proxy/",
+	} {
+		step := job.step(t, name)
+		if got := strings.TrimSpace(step.Run); got != command {
+			t.Errorf("test-windows-small step %q command = %q, want %q", name, got, command)
+		}
+		if step.Env["CGO_ENABLED"] != "0" {
+			t.Errorf("test-windows-small step %q env CGO_ENABLED = %q, want \"0\"", name, step.Env["CGO_ENABLED"])
+		}
+	}
+}
+
 // stepContinueOnError reports whether a step's continue-on-error is truthy
 // (the field unmarshals as `any` because the YAML schema also allows an
 // expression string, which GitHub itself treats as whatever it evaluates to
@@ -2776,6 +2797,7 @@ func TestPRWindowsMakeShellLegsFailTheJob(t *testing.T) {
 		},
 		"test-windows-small": {
 			"Run doltversion package tests on Windows", "Run dbproxy server package tests on Windows",
+			"Run dbproxy util package tests on Windows", "Run dbproxy control-file purge tests on Windows",
 		},
 	}
 	for jobName, names := range legSteps {

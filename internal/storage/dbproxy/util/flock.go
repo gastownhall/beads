@@ -2,6 +2,7 @@
 package util
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,7 +17,9 @@ type Unlocker interface {
 
 // Lock holds an exclusive flock on a file.
 type Lock struct {
-	f *os.File
+	f         *os.File
+	retirable bool
+	retired   bool
 }
 
 // TryLock attempts to acquire a non-blocking exclusive flock on lockPath.
@@ -25,10 +28,28 @@ type Lock struct {
 // can detect "another holder is alive" and produce their own contextual
 // error message.
 func TryLock(lockPath string) (*Lock, error) {
+	return tryLock(lockPath, openLockFile)
+}
+
+// TryRetirableLock is TryLock for a lease whose holder must remove the lock
+// file while still holding it (see Retire). On Windows the file is opened
+// with delete sharing, which ordinary TryLock leases deliberately lack;
+// elsewhere it behaves exactly like TryLock. Contention still satisfies
+// lockfile.IsLocked.
+func TryRetirableLock(lockPath string) (*Lock, error) {
+	l, err := tryLock(lockPath, openRetirableLockFile)
+	if err != nil {
+		return nil, err
+	}
+	l.retirable = true
+	return l, nil
+}
+
+func tryLock(lockPath string, open func(string) (*os.File, error)) (*Lock, error) {
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0700); err != nil {
 		return nil, fmt.Errorf("util: creating lock directory: %w", err)
 	}
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600) //nolint:gosec // lockPath comes from caller-derived dirs, not user input
+	f, err := open(lockPath)
 	if err != nil {
 		return nil, fmt.Errorf("util: opening lock file: %w", err)
 	}
@@ -37,6 +58,36 @@ func TryLock(lockPath string) (*Lock, error) {
 		return nil, err
 	}
 	return &Lock{f: f}, nil
+}
+
+func openLockFile(lockPath string) (*os.File, error) {
+	return os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600) //nolint:gosec // lockPath comes from caller-derived dirs, not user input
+}
+
+// Retire removes the lock file of a lease acquired with TryRetirableLock
+// while the lease stays held. On Windows the pathname stays unavailable to
+// new opens until Unlock closes the lease, so no other holder can slip in
+// between retirement and release, and Retire fails, leaving the file alone,
+// once the pathname names another file. Elsewhere the pathname is unlinked
+// at once, whatever file it names by then, and a new holder can create and
+// lock a fresh file there before Unlock. A pathname that is already gone
+// counts as retired. Retire is idempotent and refuses ordinary or released
+// leases.
+func (l *Lock) Retire() error {
+	if l == nil || l.f == nil || l.f.Fd() == ^uintptr(0) {
+		return errors.New("util: retire: lease is not held")
+	}
+	if !l.retirable {
+		return fmt.Errorf("util: retire %s: lease was not acquired with TryRetirableLock", l.f.Name())
+	}
+	if l.retired {
+		return nil
+	}
+	if err := retireLockFile(l.f); err != nil {
+		return fmt.Errorf("util: retiring lock file: %w", err)
+	}
+	l.retired = true
+	return nil
 }
 
 // File returns the underlying *os.File. Useful for fork+exec lock-fd

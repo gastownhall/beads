@@ -288,6 +288,15 @@ jobs:
   # loudly (dolt is not installed on the Windows runners), and the
   # unix-socket cases skip on Windows by design.
   #
+  # internal/storage/dbproxy/util's retirable lifecycle leases (#6884) and
+  # the proxy's purge of the control files they hold are Windows behavior:
+  # Linux lets a process remove a file it holds open and compiles
+  # flock_retire_windows_test.go out. Run the whole util package and the
+  # proxy's TestPurgeControlFiles* tests here, the only place their
+  # delete-pending, replaced-pathname and reparse-point checks run. -v names
+  # every result, so a symlink case that skips for want of the privilege
+  # says so in the log.
+  #
   # F7a: fold of two small, independent windows-latest jobs
   # (test-windows-doltversion, test-windows-dbproxy-server) into one. Neither
   # was in ci-gate's needs/CI_GATE_REQUIRED before the fold (promoting either
@@ -296,16 +305,16 @@ jobs:
   # Windows jobs F4 touches (test-windows-liveness, worktree-remove-windows,
   # the preflight/doc-freshness matrices, the twins).
   #
-  # Review SF-1 (2026-10-03): neither step carries continue-on-error, so a
+  # Review SF-1 (2026-10-03): no step carries continue-on-error, so a
   # failing test already fails the job on its own; `if: ${{ !cancelled() }}`
-  # on the second step only ensures it still runs after the first fails,
-  # giving both packages' results in one log instead of stopping at the
+  # on each step only ensures it still runs after an earlier one fails,
+  # giving every package's results in one log instead of stopping at the
   # first failure. No aggregator step is needed.
-  # Blacksmith Windows (blacksmith-2vcpu-windows-2025) for every PR; both steps
-  # build with CGO_ENABLED=0 (or no cgo at all for doltversion), so this job
+  # Blacksmith Windows (blacksmith-2vcpu-windows-2025) for every PR; every step
+  # builds with CGO_ENABLED=0 (or no cgo at all for doltversion), so this job
   # carries none of test-windows-liveness's cgo-toolchain risk.
   test-windows-small:
-    name: Test (Windows) small packages (doltversion, dbproxy server)
+    name: Test (Windows) small packages (doltversion, dbproxy server, util, proxy purge)
     needs: scope
     if: ${{ needs.scope.outputs.platforms == 'true' }}
     runs-on: ${{ 'blacksmith-2vcpu-windows-2025' }}
@@ -321,7 +330,7 @@ jobs:
           cache: false
 
       # F7b review fix (S9): see test-windows-liveness's identical step for
-      # the full rationale. Both packages here build with CGO_ENABLED=0 (or
+      # the full rationale. Every package here builds with CGO_ENABLED=0 (or
       # no cgo at all), so this is lower-risk than test-windows-liveness, but
       # printing the toolchain state costs nothing and keeps the diagnostic
       # convention uniform across every moved Windows job.
@@ -340,6 +349,20 @@ jobs:
         env:
           CGO_ENABLED: "0"
         run: go test -tags gms_pure_go -count=1 -v ./internal/storage/dbproxy/server/
+
+      - name: Run dbproxy util package tests on Windows
+        id: dbproxy-util
+        if: ${{ !cancelled() }}
+        env:
+          CGO_ENABLED: "0"
+        run: go test -tags gms_pure_go -count=1 -v ./internal/storage/dbproxy/util/
+
+      - name: Run dbproxy control-file purge tests on Windows
+        id: dbproxy-purge
+        if: ${{ !cancelled() }}
+        env:
+          CGO_ENABLED: "0"
+        run: go test -tags gms_pure_go -count=1 -v -run '^TestPurgeControlFiles' ./internal/storage/dbproxy/proxy/
 
   # Destructive worktree removal depends on native Windows path identity.
   # This focused process suite requires NTFS per-directory case sensitivity

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/steveyegge/beads/internal/lockfile"
@@ -158,9 +159,35 @@ func ControlFilePaths(rootDir string) []string {
 	return paths
 }
 
-func PurgeControlFiles(rootDir string) []error {
+// PurgeControlFiles removes every control file under rootDir. Controls whose
+// lease the caller still holds (acquired with util.TryRetirableLock) go in
+// held: each is retired through its lease instead of by pathname, because
+// Windows refuses to remove a file its own holder has open. Nil, duplicate
+// or non-control leases are refused before anything is removed.
+func PurgeControlFiles(rootDir string, held ...*util.Lock) []error {
+	paths := ControlFilePaths(rootDir)
+	leases := make(map[string]*util.Lock, len(held))
+	for _, lease := range held {
+		if lease == nil || lease.File() == nil {
+			return []error{errors.New("purge control files: nil held lease")}
+		}
+		path := filepath.Clean(lease.File().Name())
+		if _, dup := leases[path]; dup {
+			return []error{fmt.Errorf("purge control files: lease for %s supplied twice", path)}
+		}
+		if !slices.Contains(paths, path) {
+			return []error{fmt.Errorf("purge control files: held lease %s is not a control file of %s", path, rootDir)}
+		}
+		leases[path] = lease
+	}
 	var errs []error
-	for _, path := range ControlFilePaths(rootDir) {
+	for _, path := range paths {
+		if lease, ok := leases[path]; ok {
+			if err := lease.Retire(); err != nil {
+				errs = append(errs, err)
+			}
+			continue
+		}
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			errs = append(errs, err)
 		}
