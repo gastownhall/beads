@@ -224,6 +224,13 @@ func TestEmbeddedForkAutoContributorRoutedWrites(t *testing.T) {
 	bdCommand(t, bd, dir, "update", first.ID, "--claim")
 	assertEmbeddedHeadAdvanced(t, planningBeadsDir, planningDB, before, "update --claim")
 
+	// bd dep add failed the same way in the report.
+	before = embeddedCurrentCommit(t, planningBeadsDir, planningDB)
+	bdCommand(t, bd, dir, "dep", "add", first.ID, second.ID)
+	assertEmbeddedHeadAdvanced(t, planningBeadsDir, planningDB, before, "dep add")
+
+	// Read back only after every bd subprocess has run: the inspection handle
+	// holds the planning store open until the test ends.
 	planningStore := openStore(t, planningBeadsDir, planningDB)
 	claimed, err := planningStore.GetIssue(t.Context(), first.ID)
 	if err != nil {
@@ -234,6 +241,19 @@ func TestEmbeddedForkAutoContributorRoutedWrites(t *testing.T) {
 	}
 	if claimed.Assignee == "" {
 		t.Errorf("%s has no assignee in the planning store after --claim", first.ID)
+	}
+	deps, err := planningStore.GetDependencyRecords(t.Context(), first.ID)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords(%s) in the planning store: %v", first.ID, err)
+	}
+	blocked := false
+	for _, dep := range deps {
+		if dep.DependsOnID == second.ID && dep.Type == types.DepBlocks {
+			blocked = true
+		}
+	}
+	if !blocked {
+		t.Errorf("planning store has no blocks dependency %s -> %s: %+v", first.ID, second.ID, deps)
 	}
 }
 
