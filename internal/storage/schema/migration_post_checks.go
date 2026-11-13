@@ -4,11 +4,21 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
+	"os"
 	"regexp"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 )
+
+// postConditionNoticeOut is where a dropped-default correction or repair says
+// what it changed. Like lostTableNoticeOut it is deliberately NOT
+// terminal-gated: a correction firing is the only field evidence of the
+// GH#5269 trigger, and bd serve, systemd, CI and agent shells are all non-tty,
+// so the gated stderr would discard it exactly where it happens. Overridable
+// in tests.
+var postConditionNoticeOut io.Writer = os.Stderr
 
 // droppedDefaultRe finds the column defaults a migration body drops. The
 // bodies that drop one (main 0043, 0050 and 0051, ignored 0010) do it inside a
@@ -212,7 +222,10 @@ func dropDefaultAndVerify(ctx context.Context, db DBConn, d droppedDefault, obse
 // with the cursor row. If any condition cannot be confirmed met — a probe
 // fails, the ALTER fails, or the default survives it — the error names every
 // such column, and runMigrations returns before the cursor row and the step
-// commit, so nothing claims the version and the next pass runs it again.
+// commit, so nothing claims the version. Anything else the body changed stays
+// uncommitted in the working set, as after any failed step, and the next
+// pass's dirty-table guard refuses until it is committed. Then (at once, when
+// the body changed nothing else) the migration and this check run again.
 //
 // It runs only while a migration is being applied, never on the steady-state
 // open path. A table the store does not have is skipped, as the body's own
@@ -220,7 +233,8 @@ func dropDefaultAndVerify(ctx context.Context, db DBConn, d droppedDefault, obse
 func verifyDroppedDefaults(ctx context.Context, db DBConn, src migrationSource, version int, sqlText string) error {
 	corrected, failures := correctDroppedDefaults(ctx, db, droppedDefaults(sqlText))
 	for _, c := range corrected {
-		fmt.Fprintf(stderr, "  corrected %s: the migration left DEFAULT %s in place; dropped it directly (GH#5269)\n", c.d, c.removed)
+		fmt.Fprintf(postConditionNoticeOut, "migration %s v%04d: corrected %s: the migration left DEFAULT %s in place; dropped it directly (GH#5269)\n",
+			src.cursorTable, version, c.d, c.removed)
 	}
 	if len(failures) == 0 {
 		return nil
@@ -261,20 +275,35 @@ func (f PostConditionFailure) String() string {
 // post-conditions could not all be confirmed met after direct correction. The
 // migration's cursor row and step commit are not written: the mark is the
 // only record that a migration applied, and once written every later pass
-// trusts it and skips the body (GH#5269).
+// trusts it and skips the body (GH#5269). Any other change the step made
+// stays uncommitted in the working set, so the next pass first meets the
+// dirty-table guard (*DirtyTablesError) for it.
 type PostConditionError struct {
 	Source   string
 	Version  int
 	Failures []PostConditionFailure
 }
 
+// postConditionErrorRemedy is what PostConditionError tells the operator to
+// do, in order, naming only steps that work in each mode. A re-run comes
+// first, because a transient cause (a lock wait, a dropped connection) clears
+// by itself. A manual drop is offered for server mode only: there any SQL
+// client reaches the database, but it dirties the table, so it must be
+// committed before the re-run, or the dirty-table guard refuses the pass. In
+// embedded mode bd's only SQL surface, `bd sql`, opens through the same
+// failing migration, so the last step is the report.
+const postConditionErrorRemedy = "Re-run `bd migrate schema` first: a transient cause clears by itself. " +
+	"If it persists in server mode, drop each default over SQL (ALTER TABLE <table> ALTER COLUMN <column> DROP DEFAULT), " +
+	"commit it (CALL DOLT_COMMIT('-Am', 'drop leftover default')), then re-run `bd migrate schema`. " +
+	"Otherwise (embedded mode, or the drop does not take), report this error with your Dolt version"
+
 func (e *PostConditionError) Error() string {
 	parts := make([]string, len(e.Failures))
 	for i, f := range e.Failures {
 		parts[i] = f.String()
 	}
-	return fmt.Sprintf("dropped-default post-conditions of %s v%04d unmet, not recording the migration (GH#5269): %s",
-		e.Source, e.Version, strings.Join(parts, "; "))
+	return fmt.Sprintf("dropped-default post-conditions of %s v%04d unmet, not recording the migration (GH#5269): %s. %s",
+		e.Source, e.Version, strings.Join(parts, "; "), postConditionErrorRemedy)
 }
 
 // showColumnDefault reads a column's Default from SHOW COLUMNS. It is SQL NULL

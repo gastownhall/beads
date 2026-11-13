@@ -181,35 +181,96 @@ func CheckRecordedPostConditions(ctx context.Context, db DBConn) (PostConditionC
 
 // PostConditionRepairReport is what RepairRecordedPostConditions changed.
 type PostConditionRepairReport struct {
-	// Repaired lists every default dropped and verified gone, by name.
+	// Repaired lists every default dropped, verified gone and finished: its
+	// tracked table committed, or its dolt-ignored table changed in place.
 	Repaired []PostConditionViolation
+	// Uncommitted lists every default dropped and verified gone on a tracked
+	// table that then could not be staged or committed. The change is real
+	// but sits uncommitted in the working set, and it is only ever reported
+	// alongside a *PostConditionRepairUncommittedError.
+	Uncommitted []PostConditionViolation
 	// Committed is set when the repair created a commit (tracked tables only).
 	Committed bool
 }
 
 // Names lists the repaired columns as sorted "table.column" strings.
 func (r PostConditionRepairReport) Names() []string {
-	names := make([]string, len(r.Repaired))
-	for i, v := range r.Repaired {
+	return violationNames(r.Repaired)
+}
+
+// UncommittedNames lists the dropped-but-uncommitted columns as sorted
+// "table.column" strings.
+func (r PostConditionRepairReport) UncommittedNames() []string {
+	return violationNames(r.Uncommitted)
+}
+
+func violationNames(vs []PostConditionViolation) []string {
+	names := make([]string, len(vs))
+	for i, v := range vs {
 		names[i] = v.Name()
 	}
 	sort.Strings(names)
 	return names
 }
 
+// merge folds a later attempt's report into r. A column a later attempt
+// finished is no longer uncommitted.
 func (r *PostConditionRepairReport) merge(other PostConditionRepairReport) {
-	have := map[string]bool{}
+	r.Repaired = unionViolations(r.Repaired, other.Repaired)
+	finished := map[string]bool{}
 	for _, v := range r.Repaired {
-		have[v.Name()] = true
+		finished[v.Name()] = true
 	}
-	for _, v := range other.Repaired {
-		if !have[v.Name()] {
-			r.Repaired = append(r.Repaired, v)
+	var uncommitted []PostConditionViolation
+	for _, v := range unionViolations(r.Uncommitted, other.Uncommitted) {
+		if !finished[v.Name()] {
+			uncommitted = append(uncommitted, v)
 		}
 	}
-	sort.Slice(r.Repaired, func(i, j int) bool { return r.Repaired[i].Name() < r.Repaired[j].Name() })
+	r.Uncommitted = uncommitted
 	r.Committed = r.Committed || other.Committed
 }
+
+// unionViolations is a and b deduplicated by name, sorted by name.
+func unionViolations(a, b []PostConditionViolation) []PostConditionViolation {
+	have := map[string]bool{}
+	var out []PostConditionViolation
+	for _, v := range append(append([]PostConditionViolation(nil), a...), b...) {
+		if !have[v.Name()] {
+			have[v.Name()] = true
+			out = append(out, v)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name() < out[j].Name() })
+	return out
+}
+
+// PostConditionRepairUncommittedError is returned when the repair dropped
+// defaults on tracked tables and verified them gone, but then could not stage
+// or commit those tables. The change stays in the working set, uncommitted.
+// The repair finds its work by reading the working set's columns, so a re-run
+// of `bd migrate schema` finds nothing left to do: the error itself has to
+// say what to commit. Retrying the pass is wrong for the same reason; the
+// retry would repair nothing and report success.
+type PostConditionRepairUncommittedError struct {
+	// Columns are the dropped defaults left uncommitted, as sorted
+	// "table.column" names.
+	Columns []string
+	// Tables are their tables, sorted.
+	Tables []string
+	// Err is the staging or commit failure.
+	Err error
+}
+
+func (e *PostConditionRepairUncommittedError) Error() string {
+	return fmt.Sprintf("dropped the default(s) on %s but did not commit the change (%v): it is only in the working set, "+
+		"and re-running `bd migrate schema` will not find it again. Unless `bd vc status` no longer lists %s "+
+		"(the commit landed despite the error), commit it yourself (`bd dolt commit`, or "+
+		"`CALL DOLT_COMMIT('-Am', 'schema: repair recorded migration post-conditions')` over the sql-server) (GH#5269)",
+		strings.Join(e.Columns, ", "), e.Err, strings.Join(e.Tables, ", "))
+}
+
+func (e *PostConditionRepairUncommittedError) Unwrap() error { return e.Err }
 
 // PostConditionRepairDirtyError refuses a repair whose tracked target tables
 // hold uncommitted changes. It is returned before any target is altered.
@@ -243,7 +304,10 @@ const postConditionRepairCommitMessage = "schema: repair recorded migration post
 //
 // A partial failure returns the report of what was repaired together with an
 // error naming what was not; a failed ALTER may leave working-set changes,
-// which the existing dirty-table guidance covers.
+// which the existing dirty-table guidance covers. When staging or committing
+// the tracked tables fails, their columns move to report.Uncommitted and the
+// error is a *PostConditionRepairUncommittedError, which names the commit
+// that finishes the repair.
 func RepairRecordedPostConditions(ctx context.Context, db DBConn) (report PostConditionRepairReport, err error) {
 	check, checkErr := CheckRecordedPostConditions(ctx, db)
 	if len(check.Violations) == 0 {
@@ -283,35 +347,68 @@ func RepairRecordedPostConditions(ctx context.Context, db DBConn) (report PostCo
 	}
 
 	var failures []string
-	var toStage []string
+	var tracked []PostConditionViolation
 	for _, v := range check.Violations {
 		d := droppedDefault{table: v.Table, column: v.Column}
 		if _, f := dropDefaultAndVerify(ctx, db, d, sql.NullString{String: v.Default, Valid: true}); f != nil {
 			failures = append(failures, f.String())
 			continue
 		}
-		report.Repaired = append(report.Repaired, v)
-		fmt.Fprintf(stderr, "Repaired %s: dropped DEFAULT %s (GH#5269)\n", v.Name(), v.Default)
-		if _, tracked := committable[v.Table]; tracked {
-			toStage = append(toStage, v.Table)
+		if _, isTracked := committable[v.Table]; isTracked {
+			tracked = append(tracked, v)
+			continue
 		}
+		report.Repaired = append(report.Repaired, v)
+		noteRepaired(v)
 	}
 
-	if len(toStage) > 0 {
-		for _, table := range dedupStrings(toStage) {
-			if err := DrainCall(ctx, db, "CALL DOLT_ADD(?)", table); err != nil {
-				return report, errors.Join(fmt.Errorf("staging repaired table %s: %w", table, err), joinFailures(failures), checkErr)
-			}
-		}
-		if err := DrainCall(ctx, db, "CALL DOLT_COMMIT('-m', ?)", postConditionRepairCommitMessage); err != nil {
-			if !strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
-				return report, errors.Join(fmt.Errorf("committing repair: %w", err), joinFailures(failures), checkErr)
-			}
-		} else {
-			report.Committed = true
+	committed, commitErr := commitRepairedTables(ctx, db, tracked)
+	if commitErr != nil {
+		report.Uncommitted = tracked
+		return report, errors.Join(commitErr, joinFailures(failures), checkErr)
+	}
+	for _, v := range tracked {
+		noteRepaired(v)
+	}
+	report.Repaired = unionViolations(report.Repaired, tracked)
+	report.Committed = committed
+	return report, errors.Join(joinFailures(failures), checkErr)
+}
+
+// noteRepaired says on the un-gated notice writer that v's repair is finished.
+func noteRepaired(v PostConditionViolation) {
+	fmt.Fprintf(postConditionNoticeOut, "Repaired %s: dropped DEFAULT %s (GH#5269)\n", v.Name(), v.Default)
+}
+
+// commitRepairedTables stages each tracked table whose default the repair
+// dropped, by name, and commits them in the repair's own commit. It reports
+// whether that commit was made. When staging or committing fails, the
+// dropped defaults stay in the working set and the error is a
+// *PostConditionRepairUncommittedError naming them.
+func commitRepairedTables(ctx context.Context, db DBConn, repaired []PostConditionViolation) (bool, error) {
+	if len(repaired) == 0 {
+		return false, nil
+	}
+	tables := make([]string, len(repaired))
+	for i, v := range repaired {
+		tables[i] = v.Table
+	}
+	tables = dedupStrings(tables)
+	uncommitted := func(cause error) error {
+		return &PostConditionRepairUncommittedError{Columns: violationNames(repaired), Tables: tables, Err: cause}
+	}
+	for _, table := range tables {
+		if err := DrainCall(ctx, db, "CALL DOLT_ADD(?)", table); err != nil {
+			return false, uncommitted(fmt.Errorf("staging repaired table %s: %w", table, err))
 		}
 	}
-	return report, errors.Join(joinFailures(failures), checkErr)
+	if err := DrainCall(ctx, db, "CALL DOLT_COMMIT('-m', ?)", postConditionRepairCommitMessage); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
+			return false, nil
+		}
+		return false, uncommitted(fmt.Errorf("committing repair: %w", err))
+	}
+	return true, nil
 }
 
 func joinFailures(failures []string) error {

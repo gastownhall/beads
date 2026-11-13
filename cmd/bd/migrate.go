@@ -625,65 +625,18 @@ func handleSchemaMigrate() error {
 		return HandleError("current storage backend does not support schema migration")
 	}
 
-	// Explicit `bd migrate schema` also repairs recorded migration
-	// post-conditions when the backend can (GH#5269); ordinary opens never do.
-	var applied int
-	var repaired []string
-	var err error
-	if repairer, canRepair := storage.UnwrapStore(store).(storage.SchemaPostConditionRepairer); canRepair {
-		applied, repaired, err = repairer.ApplySchemaMigrationsAndRepair(rootCtx)
-	} else {
-		applied, err = migrator.ApplySchemaMigrations(rootCtx)
-	}
-	if repaired == nil {
-		repaired = []string{}
-	}
+	res, err := applySchemaMigrate(store, migrator)
 	if err != nil {
-		if applied > 0 || len(repaired) > 0 {
-			// Part of the work landed before the failure; the command wrote.
-			commandDidWrite.Store(true)
-		}
-		if jsonOutput {
-			if jerr := outputJSON(map[string]interface{}{
-				"error":    "schema_migration_failed",
-				"message":  err.Error(),
-				"applied":  applied,
-				"repaired": repaired,
-			}); jerr != nil {
-				return jerr
-			}
-			return SilentExit()
-		}
-		var dirtyErr *schema.DirtyTablesError
-		if errors.As(err, &dirtyErr) {
-			// The dirty guard's own remedy is `bd dolt commit`, which on a
-			// shared server opens writably, hits the migrate gate, and is told
-			// to run this command — the two messages point at each other and
-			// the operator loops (gastownhall/beads#5920 review). Name the
-			// sequence that actually terminates.
-			return HandleErrorWithHint(
-				fmt.Sprintf("schema migration failed: %v", err),
-				"in server mode `bd dolt commit` is itself gated, so commit the working set on the server first "+
-					"(`CALL DOLT_COMMIT('-Am', 'pre-migration working set')` over the sql-server, or "+
-					schema.AllowRemoteMigrateEnv+"=1 bd dolt commit), then re-run this command")
-		}
-		var dirtyRepair *schema.PostConditionRepairDirtyError
-		if errors.As(err, &dirtyRepair) {
-			return HandleErrorWithHint(
-				fmt.Sprintf("dropped-default repair refused: %v", err),
-				"commit or reset the working set for the named table(s) first (`bd dolt commit`, or "+
-					"`CALL DOLT_COMMIT('-Am', 'pre-repair working set')` over the sql-server), then re-run this command")
-		}
-		return HandleError("schema migration failed: %v", err)
+		return reportSchemaMigrateFailure(res, err)
 	}
 
 	latest := schema.LatestVersion()
 	status := "current"
-	if len(repaired) > 0 {
+	if len(res.Repaired) > 0 {
 		status = "repaired"
 		commandDidWrite.Store(true)
 	}
-	if applied > 0 {
+	if res.Applied > 0 {
 		status = "applied"
 		commandDidWrite.Store(true)
 		// Stamp the version markers the refused version-bump reconciliation
@@ -699,22 +652,94 @@ func handleSchemaMigrate() error {
 	if jsonOutput {
 		return outputJSON(map[string]interface{}{
 			"status":         status,
-			"applied":        applied,
-			"repaired":       repaired,
+			"applied":        res.Applied,
+			"repaired":       res.Repaired,
 			"latest_version": latest,
 		})
 	}
 
 	switch {
-	case applied > 0:
-		fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Applied %d schema migration(s); schema now at v%d", applied, latest)))
-	case len(repaired) == 0:
+	case res.Applied > 0:
+		fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Applied %d schema migration(s); schema now at v%d", res.Applied, latest)))
+	case len(res.Repaired) == 0:
 		fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Schema already at v%d", latest)))
 	}
-	if len(repaired) > 0 {
-		fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Repaired %d recorded migration post-condition(s): %s", len(repaired), strings.Join(repaired, ", "))))
+	if len(res.Repaired) > 0 {
+		fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Repaired %d recorded migration post-condition(s): %s", len(res.Repaired), strings.Join(res.Repaired, ", "))))
 	}
 	return nil
+}
+
+// applySchemaMigrate is the work of an explicit `bd migrate schema`: pending
+// migrations and, when the backend can, the repair of recorded migration
+// post-conditions (GH#5269), which ordinary opens never run. The lists in the
+// result are never nil, so --json always carries them as arrays.
+func applySchemaMigrate(s storage.DoltStorage, migrator storage.SchemaMigrator) (storage.SchemaRepairResult, error) {
+	var res storage.SchemaRepairResult
+	var err error
+	if repairer, canRepair := storage.UnwrapStore(s).(storage.SchemaPostConditionRepairer); canRepair {
+		res, err = repairer.ApplySchemaMigrationsAndRepair(rootCtx)
+	} else {
+		res.Applied, err = migrator.ApplySchemaMigrations(rootCtx)
+	}
+	if res.Repaired == nil {
+		res.Repaired = []string{}
+	}
+	if res.Uncommitted == nil {
+		res.Uncommitted = []string{}
+	}
+	return res, err
+}
+
+// reportSchemaMigrateFailure is `bd migrate schema`'s failure output. Work can
+// land before the failure: --json reports it as `applied` and `repaired`, and
+// lists as `uncommitted` the defaults the repair dropped but could not commit.
+// The text error names the finished repairs; the error itself
+// (*schema.PostConditionRepairUncommittedError) names the uncommitted ones
+// and the commit that finishes them.
+func reportSchemaMigrateFailure(res storage.SchemaRepairResult, err error) error {
+	if res.Applied > 0 || len(res.Repaired) > 0 || len(res.Uncommitted) > 0 {
+		// Part of the work landed before the failure; the command wrote.
+		commandDidWrite.Store(true)
+	}
+	if jsonOutput {
+		if jerr := outputJSON(map[string]interface{}{
+			"error":       "schema_migration_failed",
+			"message":     err.Error(),
+			"applied":     res.Applied,
+			"repaired":    res.Repaired,
+			"uncommitted": res.Uncommitted,
+		}); jerr != nil {
+			return jerr
+		}
+		return SilentExit()
+	}
+	var dirtyErr *schema.DirtyTablesError
+	if errors.As(err, &dirtyErr) {
+		// The dirty guard's own remedy is `bd dolt commit`, which on a
+		// shared server opens writably, hits the migrate gate, and is told
+		// to run this command — the two messages point at each other and
+		// the operator loops (gastownhall/beads#5920 review). Name the
+		// sequence that actually terminates.
+		return HandleErrorWithHint(
+			fmt.Sprintf("schema migration failed: %v", err),
+			"in server mode `bd dolt commit` is itself gated, so commit the working set on the server first "+
+				"(`CALL DOLT_COMMIT('-Am', 'pre-migration working set')` over the sql-server, or "+
+				schema.AllowRemoteMigrateEnv+"=1 bd dolt commit), then re-run this command")
+	}
+	var dirtyRepair *schema.PostConditionRepairDirtyError
+	if errors.As(err, &dirtyRepair) {
+		return HandleErrorWithHint(
+			fmt.Sprintf("dropped-default repair refused: %v", err),
+			"commit or reset the working set for the named table(s) first (`bd dolt commit`, or "+
+				"`CALL DOLT_COMMIT('-Am', 'pre-repair working set')` over the sql-server), then re-run this command")
+	}
+	if len(res.Repaired) > 0 {
+		// Part of the repair finished before the failure. --json reports it
+		// as `repaired`; the text error is the only place to name it.
+		return HandleError("schema migration failed after repairing %s: %v", strings.Join(res.Repaired, ", "), err)
+	}
+	return HandleError("schema migration failed: %v", err)
 }
 
 // stampWorkspaceVersionAfterMigrate records this binary's version through the
@@ -737,15 +762,18 @@ func stampWorkspaceVersionAfterMigrate(store storage.DoltStorage) {
 
 // reportProxiedSchemaMigrate is `bd migrate schema`'s proxied-server arm. The
 // provider open already reconciled the schema under this verb's consent, so
-// there is nothing left to do but say so — and say it in the same shape the
-// direct path uses, since a caller parsing --json should not have to branch on
-// the workspace's storage mode.
+// there is nothing left to do but say so, with the direct path's `status` and
+// `latest_version` keys (engdocs/EMBEDDING_OVER_PROXIED_SERVER.md lists how
+// the two shapes differ).
 //
 // The open reports its own failures: a gate refusal or a failed migration
 // aborts the command in root pre-run and never reaches RunE, so arriving here
 // means the schema is reconciled. The applied count is not observable from
 // here (it belongs to an open that has already returned), hence the "current"
-// status rather than a count.
+// status rather than a count. There is no `repaired` list either: the open
+// runs the migrations only, so the GH#5269 post-condition repair the direct
+// path runs does not happen on this route. The output says so, since an
+// operator may run this verb precisely to clear that drift.
 //
 // No version stamping here, unlike the direct path: reconcileVersionProxiedServer
 // already runs in the root pre-run after a successful provider open, so the
@@ -757,13 +785,18 @@ func reportProxiedSchemaMigrate() error {
 			"status":         "current",
 			"latest_version": latest,
 			"mode":           "proxied-server",
-			"note":           "schema reconciled during provider open",
+			"note":           "schema reconciled during provider open; " + proxiedPostConditionRepairGap,
 		})
 	}
 	fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf(
 		"✓ Schema reconciled during provider open (proxied-server mode); schema now at v%d", latest)))
+	fmt.Printf("  Note: %s\n", proxiedPostConditionRepairGap)
 	return nil
 }
+
+// proxiedPostConditionRepairGap is what reportProxiedSchemaMigrate says about
+// the repair this route does not run.
+const proxiedPostConditionRepairGap = "recorded migration post-conditions (GH#5269) are not checked or repaired in proxied-server mode"
 
 func handleToSeparateBranch(branch string, dryRun bool) error {
 	b := strings.TrimSpace(branch)
@@ -921,11 +954,14 @@ remote-migrate gate still applies: --force confirms you are the single
 designated migrator. Migrating is one-way: bd releases built for an older
 schema refuse the migrated database.
 
-It also repairs recorded migration post-conditions: a column default that a
-recorded migration drops but that is still in place (GH#5269) is dropped and
-the change committed on its own. It refuses, before changing anything, if a
-table it would repair holds uncommitted changes. Ordinary commands never do
-this repair; ` + "`bd doctor`" + ` reports when it is needed.
+In embedded and direct server mode it also repairs recorded migration
+post-conditions: a column default that a recorded migration drops but that is
+still in place (GH#5269) is dropped and the change committed on its own. It
+refuses, before changing anything, if a table it would repair holds
+uncommitted changes. Ordinary commands never do this repair, and neither does
+this command through a gateway server, which owns its schema. In direct server
+mode ` + "`bd doctor`" + ` reports when it is needed; a proxied-server workspace
+gets neither the repair nor that check yet.
 
 On an up-to-date, healthy database this is a no-op, so it is safe to run in
 CI, release gates, and recovery scenarios.

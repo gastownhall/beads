@@ -217,52 +217,103 @@ func (c refusingCorrectionConn) ExecContext(ctx context.Context, query string, a
 
 // TestEmbeddedMigrateUncorrectableDefaultFailsLoudlyWithoutTheMark_5269: when
 // neither the guarded body nor the direct correction can drop the default, the
-// pass fails loudly, records no mark, and stays failed on retry — the database
-// never silently claims the version (GH#5269).
+// pass fails loudly, names the manual fix, records no mark, and stays failed on
+// retry — the database never silently claims the version (GH#5269). Which
+// refusal the retry meets depends on what else the failed step changed:
+//
+//   - nothing: the retry runs 0050 and its post-check again, and refuses
+//     again with the *schema.PostConditionError;
+//   - other DDL (here 0050 re-creates a uk_dep_* key the store lacked): that
+//     DDL stays uncommitted, so the retry meets the dirty-table guard first
+//     (*schema.DirtyTablesError naming dependencies); once it is committed,
+//     the migration and its post-check run again and refuse again.
 func TestEmbeddedMigrateUncorrectableDefaultFailsLoudlyWithoutTheMark_5269(t *testing.T) {
 	requireEmbedded(t)
-	ctx := t.Context()
-	dataDir := seedMainSchemaAt(t, ctx, 49)
 
-	conn, closeConn := openPinnedConn(t, ctx, dataDir)
-	defer closeConn()
-	restorePre4259DependenciesDefault(t, ctx, conn)
+	for _, tc := range []struct {
+		name string
+		// lostKey, when set, is a uk_dep_* key dropped (and committed) before
+		// the pass, so 0050's body re-creates it and the failed step leaves
+		// that DDL in the working set.
+		lostKey string
+	}{
+		{name: "nothing else changed"},
+		{name: "other DDL left uncommitted", lostKey: "uk_dep_external_target"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			dataDir := seedMainSchemaAt(t, ctx, 49)
 
-	engine := silentPreparedALTERConn{DBConn: conn}
-	_, migrateErr := schema.MigrateUp(ctx, refusingCorrectionConn{DBConn: engine})
-	if migrateErr == nil {
-		t.Fatalf("MigrateUp succeeded although dependencies.id's default could be dropped neither by the body nor by the correction")
-	}
-	var perr *schema.PostConditionError
-	if !errors.As(migrateErr, &perr) {
-		t.Fatalf("MigrateUp err = %T %v, want a *schema.PostConditionError", migrateErr, migrateErr)
-	}
-	if !strings.Contains(migrateErr.Error(), "dependencies.id") || !strings.Contains(migrateErr.Error(), "(uuid())") {
-		t.Fatalf("err = %v, want it to name dependencies.id and the surviving default", migrateErr)
-	}
+			conn, closeConn := openPinnedConn(t, ctx, dataDir)
+			defer closeConn()
+			restorePre4259DependenciesDefault(t, ctx, conn)
+			if tc.lostKey != "" {
+				for _, q := range []string{
+					"ALTER TABLE dependencies DROP INDEX " + tc.lostKey,
+					"CALL DOLT_COMMIT('-Am', 'test: a clone whose 0043 left a natural key missing')",
+				} {
+					if _, err := conn.ExecContext(ctx, q); err != nil {
+						t.Fatalf("%s: %v", q, err)
+					}
+				}
+			}
 
-	markCount := func() int {
-		var has50 int
-		if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations WHERE version = 50").Scan(&has50); err != nil {
-			t.Fatalf("read schema_migrations: %v", err)
-		}
-		return has50
-	}
-	if has50 := markCount(); has50 != 0 {
-		t.Fatalf("version 50 recorded (%d rows) although its post-condition failed; every later pass would skip the body", has50)
-	}
-	if v := currentMainVersion(t, ctx, conn); v != 49 {
-		t.Fatalf("version after the failed pass = %d, want 49", v)
-	}
-	if def := dependenciesIDDefault(t, ctx, conn); !def.Valid {
-		t.Fatalf("dependencies.id lost its default although the correction was refused")
-	}
+			engine := silentPreparedALTERConn{DBConn: conn}
+			_, migrateErr := schema.MigrateUp(ctx, refusingCorrectionConn{DBConn: engine})
+			if migrateErr == nil {
+				t.Fatalf("MigrateUp succeeded although dependencies.id's default could be dropped neither by the body nor by the correction")
+			}
+			var perr *schema.PostConditionError
+			if !errors.As(migrateErr, &perr) {
+				t.Fatalf("MigrateUp err = %T %v, want a *schema.PostConditionError", migrateErr, migrateErr)
+			}
+			for _, want := range []string{"dependencies.id", "(uuid())", "DROP DEFAULT", "bd migrate schema", "embedded mode"} {
+				if !strings.Contains(migrateErr.Error(), want) {
+					t.Fatalf("err = %v, want it to name %q (the column, the surviving default, the re-run and the step for embedded mode)", migrateErr, want)
+				}
+			}
 
-	// Re-running is the user's only lever; it must not go silent either.
-	if _, err := schema.MigrateUp(ctx, refusingCorrectionConn{DBConn: engine}); err == nil {
-		t.Fatalf("re-run MigrateUp succeeded while dependencies.id still carries its default")
-	}
-	if has50 := markCount(); has50 != 0 {
-		t.Fatalf("re-run recorded version 50 (%d rows) while the default survived", has50)
+			markCount := func() int {
+				var has50 int
+				if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations WHERE version = 50").Scan(&has50); err != nil {
+					t.Fatalf("read schema_migrations: %v", err)
+				}
+				return has50
+			}
+			if has50 := markCount(); has50 != 0 {
+				t.Fatalf("version 50 recorded (%d rows) although its post-condition failed; every later pass would skip the body", has50)
+			}
+			if v := currentMainVersion(t, ctx, conn); v != 49 {
+				t.Fatalf("version after the failed pass = %d, want 49", v)
+			}
+			if def := dependenciesIDDefault(t, ctx, conn); !def.Valid {
+				t.Fatalf("dependencies.id lost its default although the correction was refused")
+			}
+
+			// Re-running is the user's only lever; it must not go silent either.
+			_, rerunErr := schema.MigrateUp(ctx, refusingCorrectionConn{DBConn: engine})
+			if tc.lostKey != "" {
+				var dirtyErr *schema.DirtyTablesError
+				if !errors.As(rerunErr, &dirtyErr) || !contains(dirtyErr.Tables, "dependencies") {
+					t.Fatalf("re-run err = %T %v, want a *schema.DirtyTablesError naming the failed step's uncommitted dependencies DDL", rerunErr, rerunErr)
+				}
+				if has50 := markCount(); has50 != 0 {
+					t.Fatalf("re-run recorded version 50 (%d rows) while the default survived", has50)
+				}
+				if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'test: commit the failed step leftovers')"); err != nil {
+					t.Fatalf("commit the failed step leftovers: %v", err)
+				}
+				_, rerunErr = schema.MigrateUp(ctx, refusingCorrectionConn{DBConn: engine})
+			}
+			if !errors.As(rerunErr, &perr) {
+				t.Fatalf("re-run err = %T %v, want the *schema.PostConditionError again: the migration and its post-check run again", rerunErr, rerunErr)
+			}
+			if has50 := markCount(); has50 != 0 {
+				t.Fatalf("re-run recorded version 50 (%d rows) while the default survived", has50)
+			}
+			if def := dependenciesIDDefault(t, ctx, conn); !def.Valid {
+				t.Fatalf("dependencies.id lost its default although every correction was refused")
+			}
+		})
 	}
 }

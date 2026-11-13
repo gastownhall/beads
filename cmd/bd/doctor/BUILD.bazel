@@ -179,6 +179,7 @@ go_test(
         "//internal/storage/doltutil",
         "//internal/storage/embeddeddolt",
         "//internal/storage/issueops",
+        "//internal/storage/schema",
         "//internal/testutil",
         "//internal/testutil/bazeltest",
         "//internal/testutil/legacyworkspace",

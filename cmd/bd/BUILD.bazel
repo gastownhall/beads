@@ -1054,6 +1054,7 @@ go_test(
         "migrate_personal_server_test.go",
         "migrate_personal_test.go",
         "migrate_repo_id_notice_test.go",
+        "migrate_schema_failure_output_test.go",
         "migrate_schema_identity_order_test.go",
         "migrate_schema_post_condition_repair_test.go",
         "migrate_test.go",

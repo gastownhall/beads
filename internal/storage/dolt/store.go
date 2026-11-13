@@ -723,6 +723,14 @@ func isRetryableError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// A GH#5269 repair whose commit failed has already dropped the defaults
+	// in the working set. A retry would find nothing left to repair and
+	// report success with the change never committed, so it is never
+	// retried, whatever the connection-like wording of its cause.
+	var uncommittedRepair *schema.PostConditionRepairUncommittedError
+	if errors.As(err, &uncommittedRepair) {
+		return false
+	}
 	if schema.IsMigrationLockError(err) {
 		return true
 	}
@@ -3822,22 +3830,39 @@ func (s *DoltStore) ApplySchemaMigrations(ctx context.Context) (int, error) {
 // migration post-conditions (schema.WithPostConditionRepair, GH#5269), then
 // rebuilds the main pool so no pooled session keeps reading the pre-repair
 // root — after a partial success too.
+//
+// Through a gateway it does not repair. The gateway server owns the schema
+// (ApplyGatewayCredential), and bd issues it no schema DDL, so the call is
+// exactly ApplySchemaMigrations and bd doctor names the server
+// administrator's fix instead.
 // Implements storage.SchemaPostConditionRepairer.
-func (s *DoltStore) ApplySchemaMigrationsAndRepair(ctx context.Context) (int, []string, error) {
+func (s *DoltStore) ApplySchemaMigrationsAndRepair(ctx context.Context) (storage.SchemaRepairResult, error) {
+	if s.IsGateway() {
+		applied, err := s.ApplySchemaMigrations(ctx)
+		return storage.SchemaRepairResult{Applied: applied, Repaired: []string{}, Uncommitted: []string{}}, err
+	}
 	migDB, err := s.openMigrationDB()
 	if err != nil {
-		return 0, nil, err
+		return storage.SchemaRepairResult{}, err
 	}
 	defer migDB.Close()
 	var report schema.PostConditionRepairReport
 	applied, err := initSchemaOnDBWithRetryAndGateBootstrapHeal(ctx, migDB, nil, nil, "", schema.WithPostConditionRepair(&report))
-	repaired := report.Names()
-	if changed := applied + len(repaired); changed > 0 {
+	result := storage.SchemaRepairResult{Applied: applied, Repaired: report.Names(), Uncommitted: report.UncommittedNames()}
+	if changed := applied + len(result.Repaired) + len(result.Uncommitted); changed > 0 {
 		if rebuildErr := s.rebuildPoolAfterMigration(ctx, changed); rebuildErr != nil {
 			err = errors.Join(err, rebuildErr)
 		}
 	}
-	return applied, repaired, err
+	return result, err
+}
+
+// IsGateway reports whether the store reaches its database through an
+// authenticating gateway server (Config.Gateway). The gateway owns the
+// database's schema: bd issues it no schema DDL, and a schema problem there
+// is the server administrator's to fix.
+func (s *DoltStore) IsGateway() bool {
+	return s.cfg != nil && s.cfg.Gateway
 }
 
 // openMigrationDB opens a one-off connection pool for schema migrations with no

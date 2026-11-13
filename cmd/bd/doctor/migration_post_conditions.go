@@ -19,15 +19,17 @@ const migrationPostConditionsCheckName = "Migration Post-Conditions"
 // column default is still in place (GH#5269): the cursor claims e.g. 0050
 // applied while dependencies.id still mints random ids. It only reads — it
 // creates no cursor table and changes no schema, cursor or history — and
-// points at the explicit `bd migrate schema`, which repairs it. A check that
-// cannot run says so instead of reading as healthy.
+// points at the explicit `bd migrate schema`, which repairs it. Through a
+// gateway, which owns the schema and which bd never changes, it points at the
+// server administrator instead. A check that cannot run says so instead of
+// reading as healthy.
 //
 // Database access mirrors CheckMigrationContentSkew: the server-mode store
 // when there is one, else the workspace's embedded database opened directly.
 func CheckMigrationPostConditions(ss *SharedStore) DoctorCheck {
 	ctx := context.Background()
 	if store := ss.Store(); store != nil {
-		return checkMigrationPostConditions(ctx, store.DB())
+		return checkMigrationPostConditions(ctx, store.DB(), store.IsGateway())
 	}
 	if check, ok := checkMigrationPostConditionsEmbedded(ctx, sharedStoreBeadsDir(ss)); ok {
 		return check
@@ -57,7 +59,7 @@ func checkMigrationPostConditionsEmbedded(ctx context.Context, beadsDir string) 
 		return migrationPostConditionsCannotCheck(fmt.Errorf("open embedded database: %w", err)), true
 	}
 	defer func() { _ = cleanup() }()
-	return checkMigrationPostConditions(ctx, db), true
+	return checkMigrationPostConditions(ctx, db, false), true
 }
 
 func migrationPostConditionsCannotCheck(err error) DoctorCheck {
@@ -70,7 +72,7 @@ func migrationPostConditionsCannotCheck(err error) DoctorCheck {
 	}
 }
 
-func checkMigrationPostConditions(ctx context.Context, db *sql.DB) DoctorCheck {
+func checkMigrationPostConditions(ctx context.Context, db *sql.DB, gateway bool) DoctorCheck {
 	// One session for every probe, so a failed statement cannot leave a later
 	// read on a different pooled session's catalog.
 	conn, err := db.Conn(ctx)
@@ -80,6 +82,23 @@ func checkMigrationPostConditions(ctx context.Context, db *sql.DB) DoctorCheck {
 	defer func() { _ = conn.Close() }()
 
 	check, err := schema.CheckRecordedPostConditions(ctx, conn)
+	return migrationPostConditionsResult(check, err, gateway)
+}
+
+// Fixes for an unmet post-condition: the explicit repair, or, through a
+// gateway, the server administrator (bd migrate schema does not repair there).
+const (
+	migrationPostConditionsFix = "Run `bd migrate schema` to drop the leftover default(s); " +
+		"commit any uncommitted changes to those tables first."
+	migrationPostConditionsGatewayFix = "This database is served by a gateway server, which owns its schema, " +
+		"so bd does not repair it: ask the server administrator to drop the leftover default(s) " +
+		"(ALTER TABLE <table> ALTER COLUMN <column> DROP DEFAULT) and commit."
+)
+
+// migrationPostConditionsResult is the check for what
+// schema.CheckRecordedPostConditions saw (check, err) on a database that a
+// gateway serves or not.
+func migrationPostConditionsResult(check schema.PostConditionCheck, err error, gateway bool) DoctorCheck {
 	if len(check.Violations) == 0 {
 		if err != nil {
 			return migrationPostConditionsCannotCheck(err)
@@ -103,12 +122,16 @@ func checkMigrationPostConditions(ctx context.Context, db *sql.DB) DoctorCheck {
 	if err != nil {
 		detail += fmt.Sprintf("\nSome conditions could not be checked: %v", err)
 	}
+	fix := migrationPostConditionsFix
+	if gateway {
+		fix = migrationPostConditionsGatewayFix
+	}
 	return DoctorCheck{
 		Name:     migrationPostConditionsCheckName,
 		Status:   StatusWarning,
 		Message:  fmt.Sprintf("%d recorded migration post-condition(s) unmet: %s", len(names), strings.Join(names, ", ")),
 		Detail:   detail,
-		Fix:      "Run `bd migrate schema` to drop the leftover default(s); commit any uncommitted changes to those tables first.",
+		Fix:      fix,
 		Category: CategoryData,
 	}
 }

@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"bytes"
 	"context"
 	"database/sql/driver"
 	"errors"
@@ -107,9 +108,14 @@ func TestRunMigrationsRecordsTheMarkWhenTheDroppedDefaultIsGone(t *testing.T) {
 
 // AC-1: the body returned no error but left the default in place. The
 // post-check drops it directly, reads it back as gone, and only then writes
-// the cursor row.
+// the cursor row. It says so on the un-gated notice writer, naming the
+// migration: a correction firing is the field evidence of the GH#5269 trigger.
 func TestRunMigrationsCorrectsALeftoverDroppedDefaultBeforeTheMark(t *testing.T) {
 	stubNoIssueRows(t)
+	var notices bytes.Buffer
+	saved := postConditionNoticeOut
+	postConditionNoticeOut = &notices
+	t.Cleanup(func() { postConditionNoticeOut = saved })
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
@@ -131,6 +137,10 @@ func TestRunMigrationsCorrectsALeftoverDroppedDefaultBeforeTheMark(t *testing.T)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations (want body -> probe -> ALTER -> re-probe -> INSERT): %v", err)
+	}
+	want := "migration schema_migrations v0050: corrected dependencies.id: the migration left DEFAULT (uuid()) in place"
+	if got := notices.String(); !strings.Contains(got, want) {
+		t.Fatalf("correction notice = %q, want it to contain %q", got, want)
 	}
 }
 
@@ -212,6 +222,32 @@ func TestDroppedDefaultsOfTheShippedMigrations(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("droppedDefaults over the shipped migrations = %v, want %v", fmt.Sprint(got), fmt.Sprint(want))
+	}
+}
+
+// droppedDefaultRe recognizes only `ALTER TABLE t ALTER COLUMN c DROP
+// DEFAULT`. MySQL also accepts `ALTER c DROP DEFAULT` (COLUMN is optional) and
+// a DROP DEFAULT inside a multi-clause ALTER, and a shipped body written either
+// way would get no post-check, no doctor check and no repair while the test
+// above stayed green. So every DROP DEFAULT in every shipped body, comments
+// aside, must be one the regex matches.
+func TestEveryShippedDropDefaultIsARecognizedObligation(t *testing.T) {
+	anyDropDefault := regexp.MustCompile(`(?i)\bDROP\s+DEFAULT\b`)
+	for _, src := range []migrationSource{mainSource, ignoredSource} {
+		for _, mf := range src.list() {
+			path := src.dir + "/" + mf.name
+			data, err := src.files.ReadFile(path)
+			if err != nil {
+				t.Fatalf("reading %s: %v", path, err)
+			}
+			body := stripSQLComments(string(data))
+			drops := len(anyDropDefault.FindAllStringIndex(body, -1))
+			recognized := len(droppedDefaultRe.FindAllStringIndex(body, -1))
+			if drops != recognized {
+				t.Errorf("%s: %d DROP DEFAULT statement(s), %d in the form droppedDefaultRe recognizes; "+
+					"write each as ALTER TABLE t ALTER COLUMN c DROP DEFAULT, or teach droppedDefaults the new form", path, drops, recognized)
+			}
+		}
 	}
 }
 
@@ -317,6 +353,15 @@ func TestRunMigrationsReportsEveryUnmetDroppedDefaultAndWritesNoMark(t *testing.
 		"comments.id (DEFAULT (uuid())): ALTER TABLE `comments` ALTER COLUMN `id` DROP DEFAULT failed",
 		"lock wait timeout",
 		"issue_snapshots.id (DEFAULT (uuid())): default still present",
+		// The remedy, in order, naming only steps that work: a plain re-run,
+		// then in server mode a manual drop that is committed before the
+		// re-run, else (embedded mode) the report.
+		"Re-run `bd migrate schema` first",
+		"in server mode, drop each default over SQL (ALTER TABLE <table> ALTER COLUMN <column> DROP DEFAULT)",
+		"CALL DOLT_COMMIT('-Am'",
+		"then re-run `bd migrate schema`",
+		"embedded mode",
+		"report this error with your Dolt version",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("error %q does not contain %q", msg, want)

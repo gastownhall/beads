@@ -19,6 +19,22 @@ import (
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
+// The two tests in this file need a real Dolt engine: a Dolt server for
+// TestCheckMigrationPostConditions_RealDolt, the embedded engine for
+// TestCheckMigrationPostConditions_Embedded. No CI lane runs them today.
+// //cmd/bd/doctor:doctor_test has no dolt-server or embedded variant, and the
+// ci, prcore and integration configs set BEADS_TEST_SKIP=dolt, so both skip
+// there, like every other Dolt-backed test in this package. Until the target
+// gains such a lane, run them by hand:
+//
+//	bazel test //cmd/bd/doctor:doctor_test --config=ci \
+//	  --test_filter='^TestCheckMigrationPostConditions_(RealDolt|Embedded)$' \
+//	  --test_env=BEADS_TEST_SKIP= --test_env=BEADS_TEST_DOLT_SERVER=local \
+//	  --test_env=BEADS_TEST_REQUIRE_DOLT_CONTAINER=1 --test_env=BEADS_TEST_EMBEDDED_DOLT=1
+//
+// The gateway Fix and the could-not-check path are unit-tested in
+// migration_post_conditions_test.go, which the ci lane does run.
+
 // postConditionDriftColumns are one tracked and one ignored column whose
 // default a recorded migration drops (0050 and ignored 0010).
 var postConditionDriftColumns = []string{"dependencies.id", "wisp_events.id"}

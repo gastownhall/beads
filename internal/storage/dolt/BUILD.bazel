@@ -361,6 +361,7 @@ go_test(
         "schema_migration_dirty_test.go",
         "schema_migrations_conflict_test.go",
         "schema_parity_test.go",
+        "schema_post_condition_repair_test.go",
         "schema_skew_test.go",
         "schema_version_test.go",
         "search_counts_parity_test.go",
