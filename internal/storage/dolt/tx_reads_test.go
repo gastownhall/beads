@@ -74,15 +74,17 @@ func TestTxReadYourWritesWithComment(t *testing.T) {
 	}
 }
 
-// TestTxReadYourWritesWispTier pins the two-session wisp behavior of the new
-// reads on the classic Dolt store (wisp rows live on ignoredTx, durable on
-// regularTx). It proves:
-//   - Single-tier reads route to the owning session and ARE read-your-writes for
+// TestTxReadYourWritesWispTier pins the single-session wisp behavior of the
+// reads on the classic Dolt store: durable tables and dolt-ignored wisp
+// tables share ONE SQL transaction, so every read — single-tier and
+// both-tiers-spanning — is read-your-writes. It proves:
+//   - Single-tier reads route to the owning table and ARE read-your-writes for
 //     an uncommitted wisp (GetIssueCommentsPage, IsBlocked, IsBlockedBatch).
-//   - Both-tiers-spanning reads run on regularTx and, per the documented
-//     two-session caveat, do NOT yet see a wisp edge written in the same open
-//     transaction (GetDependentRecords/CountDependentRecords) — and DO see it
-//     once the transaction commits.
+//   - Both-tiers-spanning reads (GetDependentRecords/CountDependentRecords,
+//     CountIssuesByGroup) see a wisp edge and a wisp row written in this same
+//     open transaction, the same contract the embedded backend always had.
+//   - SearchIssues stays single-table (durable tier for a default filter) — a
+//     parity gap with its own change, not a session limit.
 func TestTxReadYourWritesWispTier(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -159,22 +161,33 @@ func TestTxReadYourWritesWispTier(t *testing.T) {
 			t.Errorf("in-tx IsBlockedBatch = %v, want txw-wisp blocked, txw-block not", batch)
 		}
 
-		// Both-tiers-spanning reads do NOT yet see the uncommitted wisp edge
-		// (documented two-session caveat): txw-block's only inbound edge is the
-		// wisp edge, uncommitted on the ignored session.
+		// Both-tiers-spanning reads are read-your-writes across the planes:
+		// txw-block's only inbound edge is the wisp edge written earlier in
+		// this same transaction, and the group count merges the in-tx wisp.
 		dependents, err := tx.GetDependentRecords(ctx, "txw-block", "", 0, "")
 		if err != nil {
 			return err
 		}
-		if len(dependents) != 0 {
-			t.Errorf("in-tx GetDependentRecords(txw-block) = %v, want empty (uncommitted wisp edge not visible on regularTx)", dependents)
+		if len(dependents) != 1 || dependents[0].IssueID != "txw-wisp" {
+			t.Errorf("in-tx GetDependentRecords(txw-block) = %v, want one edge from txw-wisp (cross-plane read-your-writes)", dependents)
 		}
 		nDep, err := tx.CountDependentRecords(ctx, "txw-block", "")
 		if err != nil {
 			return err
 		}
-		if nDep != 0 {
-			t.Errorf("in-tx CountDependentRecords(txw-block) = %d, want 0 (documented caveat)", nDep)
+		if nDep != 1 {
+			t.Errorf("in-tx CountDependentRecords(txw-block) = %d, want 1", nDep)
+		}
+		groupCounts, err = tx.CountIssuesByGroup(ctx, types.IssueFilter{}, "status")
+		if err != nil {
+			return err
+		}
+		total = 0
+		for _, n := range groupCounts {
+			total += n
+		}
+		if total != 3 {
+			t.Errorf("in-tx CountIssuesByGroup total = %d, want 3 (durable blocker + committed wisp + in-tx wisp)", total)
 		}
 		return nil
 	})
@@ -203,5 +216,46 @@ func TestTxReadYourWritesWispTier(t *testing.T) {
 	}
 	if len(page) != 1 || page[0].Text != "wisp note" {
 		t.Errorf("post-commit GetIssueCommentsPage(txw-wisp) = %v, want one comment 'wisp note'", page)
+	}
+}
+
+// TestTxCrossPlaneReadYourWritesSeesWispEdge asserts the plane-consistent
+// contract PR #6015 claims: a durable target's inbound-edge reads inside one
+// RunInTransaction must see a wisp edge written earlier in the SAME
+// transaction (the embedded backend already does).
+func TestTxCrossPlaneReadYourWritesSeesWispEdge(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	err := store.RunInTransaction(ctx, "bd: cross-plane read-your-writes", func(tx storage.Transaction) error {
+		if err := tx.CreateIssue(ctx, crossTierRegularIssue("cpr-block", "durable blocker"), "tester"); err != nil {
+			return err
+		}
+		if err := tx.CreateIssue(ctx, crossTierWispIssue("cpr-wisp", "wisp"), "tester"); err != nil {
+			return err
+		}
+		if err := tx.AddDependency(ctx, &types.Dependency{IssueID: "cpr-wisp", DependsOnID: "cpr-block", Type: types.DepBlocks}, "tester"); err != nil {
+			return err
+		}
+		dependents, err := tx.GetDependentRecords(ctx, "cpr-block", "", 0, "")
+		if err != nil {
+			return err
+		}
+		if len(dependents) != 1 || dependents[0].IssueID != "cpr-wisp" {
+			t.Errorf("in-tx GetDependentRecords(cpr-block) = %v, want one edge from cpr-wisp (cross-plane read-your-writes)", dependents)
+		}
+		nDep, err := tx.CountDependentRecords(ctx, "cpr-block", "")
+		if err != nil {
+			return err
+		}
+		if nDep != 1 {
+			t.Errorf("in-tx CountDependentRecords(cpr-block) = %d, want 1", nDep)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("RunInTransaction: %v", err)
 	}
 }
