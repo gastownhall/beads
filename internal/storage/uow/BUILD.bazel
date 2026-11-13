@@ -109,6 +109,7 @@ go_test(
         "blocked_recheck_race_test.go",
         "blocking_annotator_contract_test.go",
         "bootstrapper_contract_test.go",
+        "child_counter_rollback_test.go",
         "claimer_contract_test.go",
         "commenter_contract_test.go",
         "counter_contract_test.go",
