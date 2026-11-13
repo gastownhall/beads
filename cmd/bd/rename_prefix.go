@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
@@ -272,7 +273,36 @@ type prefixRepairCollision struct {
 const (
 	repairCollisionExists  = "exists"  // a live target ID already holds the wanted root namespace
 	repairCollisionClaimed = "claimed" // an earlier source family claimed the wanted root
+	repairCollisionRetired = "retired" // a retaining sweep retired the wanted root or a member destination
 )
+
+// repairRetiredIDs reports which of ids a retaining sweep retired; storage
+// refuses to rename a live row onto such an ID.
+type repairRetiredIDs func(ctx context.Context, ids []string) (map[string]time.Time, error)
+
+// repairRetiredLookup returns st's retired-ID probe, looking under the CLI's
+// decorators the way the import dry run does (excludeRetiredFromImportPlan),
+// or nil when the store has none (test fakes).
+func repairRetiredLookup(st storage.DoltStorage) repairRetiredIDs {
+	lookup, ok := st.(importRetiredLookup)
+	if !ok {
+		lookup, ok = storage.UnwrapStore(st).(importRetiredLookup)
+	}
+	if !ok {
+		return nil
+	}
+	return lookup.RetiredIssueIDs
+}
+
+// firstRetired returns the first of ids (in order) that retired holds.
+func firstRetired(ids []string, retired map[string]time.Time) string {
+	for _, id := range ids {
+		if _, ok := retired[id]; ok {
+			return id
+		}
+	}
+	return ""
+}
 
 // prefixRepairPlan is the complete, deterministic outcome of a --repair run,
 // computed before anything is written so a dry run and the real run agree.
@@ -311,8 +341,10 @@ func issueIDRoot(id string) string {
 // children included, and a whole family moves together: when its wanted root
 // is already held by a live target ID or claimed by an earlier source family,
 // the family is re-rooted to a hash root with its dotted paths intact, and
-// the collision is recorded.
-func planPrefixRepair(targetPrefix string, issues []*types.Issue, knownPrefixes []string, actorName string) (*prefixRepairPlan, error) {
+// the collision is recorded. The same happens when retired (nil skips the
+// probe) reports the wanted root or a member destination as retired; hash
+// roots are checked the same way. A lookup error fails the plan.
+func planPrefixRepair(ctx context.Context, targetPrefix string, issues []*types.Issue, knownPrefixes []string, actorName string, retired repairRetiredIDs) (*prefixRepairPlan, error) {
 	plan := &prefixRepairPlan{rootMap: make(map[string]string)}
 
 	// occupied maps a live target root namespace (child-only ones included)
@@ -361,6 +393,36 @@ func planPrefixRepair(targetPrefix string, issues []*types.Issue, knownPrefixes 
 		)
 	})
 
+	// destinations lists the IDs fam would hold under root: the root itself
+	// and every member's path.
+	destinations := func(fam *repairFamily, root string) []string {
+		ids := []string{root}
+		for _, m := range fam.members {
+			if id := root + strings.TrimPrefix(m.ID, fam.oldRoot); id != root {
+				ids = append(ids, id)
+			}
+		}
+		return ids
+	}
+	probeRetired := func(ids []string) (map[string]time.Time, error) {
+		if retired == nil || len(ids) == 0 {
+			return nil, nil
+		}
+		got, err := retired(ctx, ids)
+		if err != nil {
+			return nil, fmt.Errorf("read retired ids: %w", err)
+		}
+		return got, nil
+	}
+	var wantedIDs []string
+	for _, fam := range ordered {
+		wantedIDs = append(wantedIDs, destinations(fam, targetPrefix+"-"+fam.rootSuffix)...)
+	}
+	retiredWanted, err := probeRetired(wantedIDs)
+	if err != nil {
+		return nil, err
+	}
+
 	// Pass 1: every family that can keep its suffix claims its wanted root, so
 	// natural destinations are reserved before any fallback is allocated.
 	claimed := make(map[string]string) // root -> old root that claimed it
@@ -373,6 +435,8 @@ func planPrefixRepair(targetPrefix string, issues []*types.Issue, knownPrefixes 
 			c = &prefixRepairCollision{Reason: repairCollisionExists, ConflictID: live}
 		} else if owner, ok := claimed[wanted]; ok {
 			c = &prefixRepairCollision{Reason: repairCollisionClaimed, ConflictID: owner}
+		} else if id := firstRetired(destinations(fam, wanted), retiredWanted); id != "" {
+			c = &prefixRepairCollision{Reason: repairCollisionRetired, ConflictID: id}
 		}
 		if c == nil {
 			claimed[wanted] = fam.oldRoot
@@ -400,6 +464,14 @@ func planPrefixRepair(targetPrefix string, issues []*types.Issue, knownPrefixes 
 				continue
 			}
 			if _, taken := claimed[cand]; taken {
+				rejected[cand] = true
+				continue
+			}
+			got, err := probeRetired(destinations(fam, cand))
+			if err != nil {
+				return nil, err
+			}
+			if len(got) > 0 {
 				rejected[cand] = true
 				continue
 			}
@@ -440,7 +512,7 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 	for p := range prefixes {
 		known = append(known, p)
 	}
-	plan, err := planPrefixRepair(targetPrefix, issues, known, actorName)
+	plan, err := planPrefixRepair(ctx, targetPrefix, issues, known, actorName, repairRetiredLookup(st))
 	if err != nil {
 		return err
 	}
@@ -450,6 +522,9 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 	}
 
 	if dryRun {
+		if jsonOutput {
+			return writeRepairJSON(targetPrefix, len(prefixes), plan, true)
+		}
 		fmt.Printf("DRY RUN: Would repair %d issues with incorrect prefixes\n\n", len(plan.Renames))
 		fmt.Printf("Issues with correct prefix (%s): %d\n", ui.RenderAccent(targetPrefix), plan.Unchanged)
 		fmt.Printf("Issues to repair: %d\n\n", len(plan.Renames))
@@ -466,10 +541,13 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 		return nil
 	}
 
-	// Perform the repairs
-	fmt.Printf("Repairing database with multiple prefixes...\n")
-	fmt.Printf("  Issues with correct prefix (%s): %d\n", ui.RenderAccent(targetPrefix), plan.Unchanged)
-	fmt.Printf("  Issues to repair: %d\n\n", len(plan.Renames))
+	// Perform the repairs. JSON output is the single result object at the
+	// end, so text progress is suppressed under --json.
+	if !jsonOutput {
+		fmt.Printf("Repairing database with multiple prefixes...\n")
+		fmt.Printf("  Issues with correct prefix (%s): %d\n", ui.RenderAccent(targetPrefix), plan.Unchanged)
+		fmt.Printf("  Issues to repair: %d\n\n", len(plan.Renames))
+	}
 
 	// Pattern to match any issue ID reference in text (both hash and
 	// sequential IDs). It stops at a dot, so a reference to a dotted child
@@ -502,7 +580,9 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 			return fmt.Errorf("failed to update issue %s -> %s: %w", r.OldID, r.NewID, err)
 		}
 
-		fmt.Printf("  Renamed %s -> %s\n", ui.RenderWarn(r.OldID), ui.RenderAccent(r.NewID))
+		if !jsonOutput {
+			fmt.Printf("  Renamed %s -> %s\n", ui.RenderWarn(r.OldID), ui.RenderAccent(r.NewID))
+		}
 	}
 
 	// Set the new prefix in config
@@ -510,24 +590,39 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 		return fmt.Errorf("failed to update config: %w", err)
 	}
 
+	if jsonOutput {
+		return writeRepairJSON(targetPrefix, len(prefixes), plan, false)
+	}
 	printRepairCollisions(plan.Collisions)
 	fmt.Printf("\n%s Successfully consolidated %d prefixes into %s\n",
 		ui.RenderPass("✓"), len(prefixes), ui.RenderAccent(targetPrefix))
 	fmt.Printf("  %d issues repaired, %d issues unchanged\n", len(plan.Renames), plan.Unchanged)
-
-	if jsonOutput {
-		result := map[string]interface{}{
-			"target_prefix":    targetPrefix,
-			"prefixes_found":   len(prefixes),
-			"issues_repaired":  len(plan.Renames),
-			"issues_unchanged": plan.Unchanged,
-		}
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		_ = enc.Encode(result)
-	}
-
 	return nil
+}
+
+// writeRepairJSON writes a --repair result as one JSON object: the complete
+// rename mapping and every collision, for a dry run and a real run alike.
+func writeRepairJSON(targetPrefix string, prefixesFound int, plan *prefixRepairPlan, dryRun bool) error {
+	renames := plan.Renames
+	if renames == nil {
+		renames = []prefixRepairRename{}
+	}
+	collisions := plan.Collisions
+	if collisions == nil {
+		collisions = []prefixRepairCollision{}
+	}
+	result := map[string]interface{}{
+		"target_prefix":    targetPrefix,
+		"prefixes_found":   prefixesFound,
+		"issues_repaired":  len(plan.Renames),
+		"issues_unchanged": plan.Unchanged,
+		"dry_run":          dryRun,
+		"renames":          renames,
+		"collisions":       collisions,
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(result)
 }
 
 // printRepairCollisions lists every family that could not keep its suffix.

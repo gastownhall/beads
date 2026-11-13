@@ -8,7 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -478,5 +481,154 @@ func TestRepairPrefixesKeepsDottedChildren(t *testing.T) {
 	}
 	if parent, err := testStore.GetIssue(ctx, deps[0].DependsOnID); err != nil || parent == nil || parent.Title != "Parent" {
 		t.Errorf("parent of kb-5su1.13 does not resolve: %+v (err %v)", parent, err)
+	}
+}
+
+// repairJSONResult is the single object bd rename-prefix --repair --json
+// writes.
+type repairJSONResult struct {
+	TargetPrefix    string `json:"target_prefix"`
+	PrefixesFound   int    `json:"prefixes_found"`
+	IssuesRepaired  int    `json:"issues_repaired"`
+	IssuesUnchanged int    `json:"issues_unchanged"`
+	DryRun          bool   `json:"dry_run"`
+	Renames         []struct {
+		OldID string `json:"old_id"`
+		NewID string `json:"new_id"`
+	} `json:"renames"`
+	Collisions []struct {
+		OldRoot      string   `json:"old_root"`
+		WantedRoot   string   `json:"wanted_root"`
+		AssignedRoot string   `json:"assigned_root"`
+		Reason       string   `json:"reason"`
+		ConflictID   string   `json:"conflict_id"`
+		IDs          []string `json:"ids"`
+	} `json:"collisions"`
+}
+
+// repairAllJSON runs the repair under --json and decodes stdout, which must
+// hold exactly one JSON object.
+func repairAllJSON(t *testing.T, ctx context.Context, st storage.DoltStorage, target string, dryRun bool) repairJSONResult {
+	t.Helper()
+	oldJSON := jsonOutput
+	jsonOutput = true
+	defer func() { jsonOutput = oldJSON }()
+	out := captureStdout(t, func() error { return repairAll(t, ctx, st, target, dryRun) })
+	var result repairJSONResult
+	dec := json.NewDecoder(strings.NewReader(out))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&result); err != nil {
+		t.Fatalf("repair --json stdout is not one result object: %v\n%s", err, out)
+	}
+	if dec.More() {
+		t.Fatalf("repair --json stdout holds more than one JSON value:\n%s", out)
+	}
+	return result
+}
+
+// retiringRepairStore reports retiredIDs as retired, and on its second probe
+// (the first hash root tried for the first conflicting family) reports every
+// probed ID retired, recording them in rejectedProbe.
+type retiringRepairStore struct {
+	storage.DoltStorage
+	retiredIDs    map[string]bool
+	probes        int
+	rejectedProbe []string
+}
+
+func (s *retiringRepairStore) RetiredIssueIDs(_ context.Context, ids []string) (map[string]time.Time, error) {
+	s.probes++
+	out := make(map[string]time.Time)
+	for _, id := range ids {
+		if s.retiredIDs[id] || s.probes == 2 {
+			out[id] = time.Unix(1, 0)
+		}
+	}
+	if s.probes == 2 {
+		s.rejectedProbe = append(s.rejectedProbe, ids...)
+	}
+	return out, nil
+}
+
+func TestRepairPrefixesCollisionReRootsTree(t *testing.T) {
+	// GH#6591 AC-3: a family whose wanted root namespace is live (here only a
+	// target child holds it), claimed by an earlier source family, or retired
+	// moves whole to one unique, non-retired hash root with its dotted paths
+	// intact, and every fallback is reported.
+	ctx := context.Background()
+	testStore := newTestStore(t, filepath.Join(t.TempDir(), "test.db"))
+	seedRepairIssues(t, ctx, testStore,
+		&types.Issue{ID: "kb-5su1.2", Title: "Target child holding kb-5su1"},
+		&types.Issue{ID: "taxdb-5su1", Title: "Tax parent", IssueType: types.TypeEpic},
+		&types.Issue{ID: "taxdb-5su1.13", Title: "Tax child"},
+		&types.Issue{ID: "taxdb-5su1.13.2", Title: "Tax grandchild"},
+		&types.Issue{ID: "cre-db-c2a", Title: "CRE c2a"},
+		&types.Issue{ID: "taxdb-c2a", Title: "Tax c2a", Description: "twin of cre-db-c2a, under taxdb-5su1.13"},
+		&types.Issue{ID: "cre-db-nwb.3", Title: "Orphan whose destination was retired"},
+	)
+	if err := testStore.AddDependency(ctx, &types.Dependency{IssueID: "taxdb-5su1.13.2", DependsOnID: "taxdb-5su1.13", Type: types.DepParentChild}, "test"); err != nil {
+		t.Fatalf("add parent-child: %v", err)
+	}
+	st := &retiringRepairStore{DoltStorage: testStore, retiredIDs: map[string]bool{"kb-nwb.3": true}}
+
+	result := repairAllJSON(t, ctx, st, "kb", false)
+
+	hashRoot := regexp.MustCompile(`^kb-[0-9a-f]{8}$`)
+	type want struct{ wanted, reason, conflict string }
+	wants := map[string]want{
+		"cre-db-nwb": {"kb-nwb", "retired", "kb-nwb.3"},
+		"taxdb-5su1": {"kb-5su1", "exists", "kb-5su1.2"},
+		"taxdb-c2a":  {"kb-c2a", "claimed", "cre-db-c2a"},
+	}
+	if len(result.Collisions) != len(wants) {
+		t.Fatalf("collisions = %+v, want one per conflicting family %v", result.Collisions, wants)
+	}
+	assigned := map[string]string{}
+	seen := map[string]bool{}
+	for _, c := range result.Collisions {
+		w, ok := wants[c.OldRoot]
+		if !ok || c.WantedRoot != w.wanted || c.Reason != w.reason || c.ConflictID != w.conflict {
+			t.Errorf("collision %+v, want %+v for %s", c, w, c.OldRoot)
+		}
+		if !hashRoot.MatchString(c.AssignedRoot) || seen[c.AssignedRoot] {
+			t.Errorf("collision %s assigned %q, want a unique kb-<8hex> root", c.OldRoot, c.AssignedRoot)
+		}
+		seen[c.AssignedRoot] = true
+		assigned[c.OldRoot] = c.AssignedRoot
+	}
+	if len(st.rejectedProbe) == 0 || st.rejectedProbe[0] == assigned["cre-db-nwb"] {
+		t.Errorf("the retired hash root %v was not rejected for cre-db-nwb (assigned %s)", st.rejectedProbe, assigned["cre-db-nwb"])
+	}
+	for _, c := range result.Collisions {
+		if c.OldRoot == "taxdb-5su1" && fmt.Sprint(c.IDs) != "[taxdb-5su1 taxdb-5su1.13 taxdb-5su1.13.2]" {
+			t.Errorf("taxdb-5su1 collision ids = %v, want the whole family", c.IDs)
+		}
+	}
+
+	tax := assigned["taxdb-5su1"]
+	wantIDs := []string{"kb-5su1.2", "kb-c2a", assigned["cre-db-nwb"] + ".3", tax, tax + ".13", tax + ".13.2", assigned["taxdb-c2a"]}
+	got := storedIDs(t, ctx, testStore)
+	if len(got) != len(wantIDs) {
+		t.Fatalf("stored ids = %v, want %v", got, wantIDs)
+	}
+	for _, id := range wantIDs {
+		if got[id] == nil {
+			t.Fatalf("expected %s after repair; ids now: %v", id, got)
+		}
+	}
+	if got[tax+".13.2"].Title != "Tax grandchild" || got["kb-c2a"].Title != "CRE c2a" {
+		t.Errorf("families landed on the wrong roots: %v", got)
+	}
+	if desc, wantDesc := got[assigned["taxdb-c2a"]].Description, "twin of kb-c2a, under "+tax+".13"; desc != wantDesc {
+		t.Errorf("re-rooted text = %q, want %q", desc, wantDesc)
+	}
+	deps, err := testStore.GetDependencyRecords(ctx, tax+".13.2")
+	if err != nil || len(deps) != 1 || deps[0].DependsOnID != tax+".13" {
+		t.Errorf("dependencies of %s.13.2 = %+v (err %v), want parent %s.13", tax, deps, err, tax)
+	}
+	for _, r := range result.Renames {
+		if got[r.NewID] == nil {
+			t.Errorf("reported rename %s -> %s is not stored", r.OldID, r.NewID)
+		}
 	}
 }
