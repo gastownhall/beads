@@ -82,6 +82,14 @@ func TestOpenBestAvailableRefusesMetadatalessEmbeddedFallback(t *testing.T) {
 		t.Setenv(name, "")
 	}
 
+	t.Run("sole different database refuses", func(t *testing.T) {
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		plantEmbeddedMarker(t, beadsDir, "myproj")
+
+		store, err := beads.OpenBestAvailable(context.Background(), beadsDir)
+		requireMetadatalessRefusal(t, beadsDir, store, err, "beads", "myproj")
+	})
+
 	t.Run("several databases refuse even with the attempted name among them", func(t *testing.T) {
 		beadsDir := filepath.Join(t.TempDir(), ".beads")
 		plantEmbeddedMarker(t, beadsDir, "myproj")
@@ -89,6 +97,15 @@ func TestOpenBestAvailableRefusesMetadatalessEmbeddedFallback(t *testing.T) {
 
 		store, err := beads.OpenBestAvailable(context.Background(), beadsDir)
 		requireMetadatalessRefusal(t, beadsDir, store, err, "beads", "beads", "myproj")
+	})
+
+	t.Run("environment-selected target against a different sole database refuses", func(t *testing.T) {
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		plantEmbeddedMarker(t, beadsDir, "myproj")
+		t.Setenv("BEADS_DOLT_SERVER_DATABASE", "foo")
+
+		store, err := beads.OpenBestAvailable(context.Background(), beadsDir)
+		requireMetadatalessRefusal(t, beadsDir, store, err, "foo", "myproj")
 	})
 
 	t.Run("sole target is admitted past the guard", func(t *testing.T) {

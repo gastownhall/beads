@@ -124,6 +124,55 @@ func TestEmbeddedMetadatalessStoreFactoryRefusesMultipleDatabases(t *testing.T) 
 	})
 }
 
+// TestEmbeddedMetadatalessStoreFactoryRefusesSoleDifferentDatabase (GH#4381,
+// AC-5): a sole database that is not the effective target is the sibling
+// hazard in its purest form — the fallback would create a second database
+// beside the workspace's only one. All three factories refuse with the shared
+// error and create no sibling, whatever name the environment selects.
+func TestEmbeddedMetadatalessStoreFactoryRefusesSoleDifferentDatabase(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	metadatalessEnv(t)
+
+	t.Run("writable factory refuses and creates no sibling", func(t *testing.T) {
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		seedMetadatalessEmbeddedStore(t, beadsDir, "myproj")
+
+		_, err := newDoltStoreFromConfig(t.Context(), beadsDir)
+		requireFactoryRefusal(t, err, beadsDir, "beads", "myproj")
+		requireStoreIntact(t, beadsDir, "myproj")
+	})
+
+	t.Run("read-only factory refuses and creates no sibling", func(t *testing.T) {
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		seedMetadatalessEmbeddedStore(t, beadsDir, "myproj")
+
+		_, err := newReadOnlyStoreFromConfig(t.Context(), beadsDir)
+		requireFactoryRefusal(t, err, beadsDir, "beads", "myproj")
+		requireStoreIntact(t, beadsDir, "myproj")
+	})
+
+	t.Run("preview factory refuses and creates no sibling", func(t *testing.T) {
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		seedMetadatalessEmbeddedStore(t, beadsDir, "myproj")
+
+		_, err := newPreviewStoreFromConfig(t.Context(), beadsDir)
+		requireFactoryRefusal(t, err, beadsDir, "beads", "myproj")
+		requireStoreIntact(t, beadsDir, "myproj")
+	})
+
+	t.Run("environment-selected target against a different sole database", func(t *testing.T) {
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		seedMetadatalessEmbeddedStore(t, beadsDir, "myproj")
+		t.Setenv("BEADS_DOLT_SERVER_DATABASE", "foo")
+
+		_, err := newDoltStoreFromConfig(t.Context(), beadsDir)
+		requireFactoryRefusal(t, err, beadsDir, "foo", "myproj")
+		requireStoreIntact(t, beadsDir, "myproj")
+	})
+}
+
 // TestEmbeddedMetadatalessStoreFactoryAllowedTargets (GH#4381, AC-4) pins the
 // factories' allowed metadata-less cases: an empty store, a sole database
 // matching the effective target (default or environment-selected), and the
