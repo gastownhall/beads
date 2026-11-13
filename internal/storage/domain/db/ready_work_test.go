@@ -37,6 +37,17 @@ func (s *testSuite) TestIssueGetReadyWork() {
 	s.Run("OffsetWalksAllPages", s.readyOffsetWalksAllPages)
 }
 
+// TestIssueGetReadyWorkUndatedDeferredParent is a suite method of its own
+// because SetupTest resets the database per method, not per subtest:
+// TestIssueGetReadyWork's ExcludesDeferred and IncludeDeferred leave
+// future-dated rows behind, and those would answer the deferred-parent probe
+// for these subtests (GH#7300). Here only a deferred status can.
+func (s *testSuite) TestIssueGetReadyWorkUndatedDeferredParent() {
+	s.Run("ExcludesChildrenOfUndatedDeferredParent", s.readyExcludesChildrenOfUndatedDeferredParent)
+	s.Run("ExcludesChildrenOfParentInsertedDeferred", s.readyExcludesChildrenOfParentInsertedDeferred)
+	s.Run("IncludeDeferredShowsChildrenOfUndatedDeferredParent", s.readyIncludeDeferredShowsChildrenOfUndatedDeferredParent)
+}
+
 func (s *testSuite) readyOpenAndInProgress() {
 	r := s.issueRepo()
 
@@ -296,6 +307,72 @@ func (s *testSuite) readyIncludeDeferred() {
 	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{IncludeDeferred: true})
 	s.Require().NoError(err)
 	s.Contains(issueIDsFrom(out), "bd-rdy-idf-1")
+}
+
+// insertUndatedDeferredFamily inserts parent, its parent-child child, and an
+// unrelated control, then defers the parent the way plain `bd defer` does:
+// status deferred with no defer_until (GH#7300).
+func (s *testSuite) insertUndatedDeferredFamily(parentID, childID, controlID string) {
+	r := s.issueRepo()
+	for _, id := range []string{parentID, childID, controlID} {
+		s.Require().NoError(r.Insert(s.Ctx(), newTestIssue(id, id), "tester", domain.InsertIssueOpts{}))
+	}
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep(childID, parentID, types.DepParentChild), "tester", domain.DepInsertOpts{}))
+	_, err := s.Runner().ExecContext(s.Ctx(),
+		"UPDATE issues SET status = ?, defer_until = NULL WHERE id = ?", types.StatusDeferred, parentID)
+	s.Require().NoError(err)
+}
+
+func (s *testSuite) readyExcludesChildrenOfUndatedDeferredParent() {
+	s.insertUndatedDeferredFamily("bd-rdy-udf-p", "bd-rdy-udf-c", "bd-rdy-udf-free")
+
+	out, err := s.issueRepo().GetReadyWork(s.Ctx(), types.WorkFilter{})
+	s.Require().NoError(err)
+	got := issueIDsFrom(out)
+	s.NotContains(got, "bd-rdy-udf-c", "child of an undated deferred parent is not ready")
+	s.NotContains(got, "bd-rdy-udf-p")
+	s.Contains(got, "bd-rdy-udf-free")
+}
+
+// readyExcludesChildrenOfParentInsertedDeferred pins GH#7300 for a parent
+// inserted with status 'deferred' and no defer_until: it hides its children.
+// No row in the database has a future defer_until, so only the status can
+// trip the deferred-parent probe.
+func (s *testSuite) readyExcludesChildrenOfParentInsertedDeferred() {
+	r := s.issueRepo()
+	parent := newTestIssue("bd-rdy-udp-parent", "undated deferred parent")
+	parent.IssueType = types.TypeEpic
+	parent.Status = types.StatusDeferred
+	s.Require().NoError(r.Insert(s.Ctx(), parent, "tester", domain.InsertIssueOpts{}))
+	child := newTestIssue("bd-rdy-udp-child", "child of undated deferred parent")
+	s.Require().NoError(r.Insert(s.Ctx(), child, "tester", domain.InsertIssueOpts{}))
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep(child.ID, parent.ID, types.DepParentChild), "tester", domain.DepInsertOpts{}))
+
+	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{})
+	s.Require().NoError(err)
+	s.NotContains(issueIDsFrom(out), child.ID)
+
+	out, err = r.GetReadyWork(s.Ctx(), types.WorkFilter{IncludeDeferred: true})
+	s.Require().NoError(err)
+	s.Contains(issueIDsFrom(out), child.ID)
+}
+
+func (s *testSuite) readyIncludeDeferredShowsChildrenOfUndatedDeferredParent() {
+	s.insertUndatedDeferredFamily("bd-rdy-uidf-p", "bd-rdy-uidf-c", "bd-rdy-uidf-free")
+	r := s.issueRepo()
+
+	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{})
+	s.Require().NoError(err)
+	s.NotContains(issueIDsFrom(out), "bd-rdy-uidf-c")
+
+	out, err = r.GetReadyWork(s.Ctx(), types.WorkFilter{IncludeDeferred: true})
+	s.Require().NoError(err)
+	got := issueIDsFrom(out)
+	s.Contains(got, "bd-rdy-uidf-c", "IncludeDeferred lifts the deferred-parent child exclusion")
+	s.NotContains(got, "bd-rdy-uidf-p", "the deferred status still fails the ready status filter")
+	s.Contains(got, "bd-rdy-uidf-free")
 }
 
 func (s *testSuite) readyLabelFilter() {

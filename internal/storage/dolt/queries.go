@@ -291,51 +291,6 @@ func (s *DoltStore) GetStatisticsNoBlocked(ctx context.Context) (*types.Statisti
 	return stats, nil
 }
 
-// getChildrenOfDeferredParents returns IDs of issues whose parent has a future
-// defer_until date. Uses separate single-table queries to avoid correlated
-// cross-table JOIN subqueries that trigger Dolt joinIter hangs (GH#1190).
-// Caller must hold s.mu (at least RLock).
-func (s *DoltStore) getChildrenOfDeferredParents(ctx context.Context) ([]string, error) {
-	// Step 1: Get IDs of issues with future defer_until
-	deferredRows, err := s.queryContext(ctx, `
-		SELECT id FROM issues
-		WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP()
-	`)
-	if err != nil {
-		return nil, wrapQueryError("deferred parents: get deferred issues", err)
-	}
-	var deferredIDs []string
-	for deferredRows.Next() {
-		var id string
-		if err := deferredRows.Scan(&id); err != nil {
-			_ = deferredRows.Close()
-			return nil, wrapScanError("deferred parents: scan deferred issue", err)
-		}
-		deferredIDs = append(deferredIDs, id)
-	}
-	_ = deferredRows.Close()
-	if err := deferredRows.Err(); err != nil {
-		return nil, wrapQueryError("deferred parents: deferred rows", err)
-	}
-	if len(deferredIDs) == 0 {
-		return nil, nil
-	}
-
-	// Step 2: Get children of those deferred parents
-	return s.getChildrenOfIssues(ctx, deferredIDs)
-}
-
-// getChildrenOfIssues returns IDs of direct children (parent-child deps) of the given issue IDs.
-func (s *DoltStore) getChildrenOfIssues(ctx context.Context, parentIDs []string) ([]string, error) {
-	var result []string
-	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
-		var err error
-		result, err = issueops.GetChildrenOfIssuesInTx(ctx, tx, parentIDs)
-		return err
-	})
-	return result, err
-}
-
 // getChildrenWithParents returns a map of childID -> parentID for direct children
 // (parent-child deps) of the given parent IDs.
 func (s *DoltStore) getChildrenWithParents(ctx context.Context, parentIDs []string) (map[string]string, error) {

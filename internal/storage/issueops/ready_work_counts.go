@@ -297,9 +297,11 @@ func queryReadyIDPageWithTotal(ctx context.Context, tx DBTX, query string, args 
 // the mega-query, so a single wisp no longer disables the fast path.
 //
 // Statement budget: the shared probe (one statement; plus one for the
-// deferred-parent children when a future-deferred parent exists), then both
-// family counts in ONE statement of scalar subqueries, then the overlap only
-// when the probe saw an ID present in both tables. `bd ready` itself sizes a
+// deferred-parent children whenever some row matches the deferred-parent
+// rule, which the probe answers without looking for children, so a childless
+// deferred leaf pays for that scan too), then both family counts in ONE
+// statement of scalar subqueries, then the overlap only when the probe saw an
+// ID present in both tables. `bd ready` itself sizes a
 // capped --json page in-band (GetReadyWorkWithCountsAndTotalInTx); this backs
 // the ReadyCounter role and the human-readable "Showing X of N".
 func CountReadyWorkInTx(ctx context.Context, tx DBTX, filter types.WorkFilter) (int, error) {
