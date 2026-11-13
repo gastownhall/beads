@@ -122,11 +122,37 @@ func TestDoltNew_SharedStoreMigrateGate_NoRemote(t *testing.T) {
 	t.Run("verb consent migrates", func(t *testing.T) {
 		schema.SetSharedMigrateConsent(true)
 		defer schema.SetSharedMigrateConsent(false)
-		if err := openWith(&Config{}); err != nil {
+		// Keep the consented store open: `bd migrate schema` holds exactly
+		// this shape — the root pre-run's writable open (with the verb's
+		// consent) is the store the handler later calls
+		// ApplySchemaMigrations on. openWith closes immediately, which is
+		// why the discarded count was never caught here (#7380).
+		s, err := New(ctx, &Config{
+			Path:           tmpDir,
+			CommitterName:  "test",
+			CommitterEmail: "test@example.com",
+			Database:       dbName,
+		})
+		if err != nil {
 			t.Fatalf("New (writable, consented) = %v, want success", err)
 		}
+		defer s.Close()
 		if got := cursor(); got != schema.LatestVersion() {
 			t.Fatalf("cursor = %d after a consented open, want %d", got, schema.LatestVersion())
+		}
+		applied, err := s.ApplySchemaMigrations(ctx)
+		if err != nil {
+			t.Fatalf("ApplySchemaMigrations (first): %v", err)
+		}
+		if applied != 1 {
+			t.Fatalf("ApplySchemaMigrations after a migrating consented open = %d, want 1 (the migration the open applied, reported to the verb)", applied)
+		}
+		applied, err = s.ApplySchemaMigrations(ctx)
+		if err != nil {
+			t.Fatalf("ApplySchemaMigrations (second): %v", err)
+		}
+		if applied != 0 {
+			t.Fatalf("second ApplySchemaMigrations = %d, want 0 (the open's work is reported exactly once)", applied)
 		}
 	})
 }

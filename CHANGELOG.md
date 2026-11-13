@@ -1281,6 +1281,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd migrate schema` again reports the migrations it applied on a shared
+  server and stamps the workspace version** (#7380). With the verb's consent
+  the writable store open in the root pre-run applies the pending schema
+  migrations itself; its count was used only to rebuild the connection pool
+  and then discarded, so the command's own migration pass found nothing left,
+  printed `✓ Schema already at vN` on the very run that migrated, and never
+  recorded the workspace version the earlier refused reconciliation had held
+  back (`bd doctor` kept reporting a version mismatch afterwards). The store
+  now keeps the count its open applied and reports it through the next
+  successful `ApplySchemaMigrations` on that same instance, exactly once.
+  This covers migrations performed by the command's own store open;
+  migrations performed by a separate auxiliary open (such as the version-bump
+  reconciliation on another store instance) are still not counted, and
+  embedded mode is unchanged.
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc

@@ -329,6 +329,16 @@ type DoltStore struct {
 	beadsDir string      // Path to .beads directory (parent of dbPath)
 	database string      // Database name (subdirectory under dbPath)
 	closed   atomic.Bool // Tracks whether Close() has been called
+	// openApplied holds the migration count this instance's own writable
+	// open performed (newServerMode -> initSchema), not yet reported by a
+	// successful ApplySchemaMigrations. It exists so `bd migrate schema` —
+	// whose root pre-run open applies the pending migrations under the
+	// verb's consent — still sees that work when the handler calls
+	// ApplySchemaMigrations on the same store (#7380). Consumed exactly
+	// once, by the first successful explicit call; an atomic so a racing
+	// caller cannot double-report it (the database-level migration
+	// advisory lock, not this word, serializes the migrations themselves).
+	openApplied atomic.Int64
 	// untrackPool removes db from the process pool gauges (processPools);
 	// set by registerPoolGauges, called by Close.
 	untrackPool func()
@@ -2621,6 +2631,14 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		// through that stale connection returns 0 rows / table-not-found
 		// and does not self-heal on retry (be-itm5). Only a migrating open
 		// (applied > 0) needs this — rebuildPoolAfterMigration no-ops otherwise.
+		//
+		// The count itself must survive the rebuild too: `bd migrate schema`
+		// consents to exactly this open, and its handler later asks the same
+		// store how many migrations ran. Losing the count here made the verb
+		// report "already at vN" on the very run that migrated (#7380).
+		// Tolerated refusals contribute 0 (each refuses before migrating), so
+		// recording unconditionally after the handling above is safe.
+		store.openApplied.Store(int64(applied))
 		if err := store.rebuildPoolAfterMigration(ctx, applied); err != nil {
 			return nil, fmt.Errorf("failed to rebuild pool after migration: %w", err)
 		}
@@ -3804,13 +3822,28 @@ func (s *DoltStore) initSchema(ctx context.Context, bootstrapHeal *schema.FreshB
 // ApplySchemaMigrations runs idempotent schema migrations under the
 // per-database advisory lock, with retry for transient lock contention.
 // Implements storage.SchemaMigrator.
+//
+// The result folds in migrations this store's own writable open already
+// applied (see openApplied) and consumes them exactly once: the first
+// successful call on a store whose open migrated reports both its own pass
+// and the open's work; every later call on the same store reports only its
+// own pass. A failed call — including a failure to even open the migration
+// connection — preserves the open's count for a later successful retry on
+// this store, since callers return on error without observing the count.
+// This one-shot guarantee is specific to the server store: a count held by
+// another store instance (e.g. a separate auxiliary open) is never reported
+// here, and embedded stores do not implement it.
 func (s *DoltStore) ApplySchemaMigrations(ctx context.Context) (int, error) {
 	migDB, err := s.openMigrationDB()
 	if err != nil {
 		return 0, err
 	}
 	defer migDB.Close()
-	return initSchemaOnDBWithRetry(ctx, migDB)
+	applied, err := initSchemaOnDBWithRetry(ctx, migDB)
+	if err != nil {
+		return applied, err
+	}
+	return applied + int(s.openApplied.Swap(0)), nil
 }
 
 // openMigrationDB opens a one-off connection pool for schema migrations with no
