@@ -535,9 +535,10 @@ func ApplyInlineExpansions(steps []*Step, parser *Parser) ([]*Step, error) {
 }
 
 // refuseOnCompleteIn refuses an expansion formula whose steps or template
-// steps set on_complete. Expansion formulas are loaded by name without
-// Validate, and expandStep does not carry OnComplete into the expanded steps,
-// so without this check the field would be dropped silently (GH#3782).
+// steps set on_complete. compose.expand, compose.map and an inline expand load
+// the expansion formula by name without Validate, so this check is what
+// refuses its on_complete there. bd never runs on_complete, so an expansion
+// that set it would cook into steps whose completion spawns nothing (GH#3782).
 func refuseOnCompleteIn(f *Formula) error {
 	var errs []string
 	refuseOnComplete(f.Steps, "steps", &errs)

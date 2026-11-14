@@ -1331,9 +1331,9 @@ func TestExpansionVarRefs(t *testing.T) {
 }
 
 // TestApplyExpansions_TemplateOnCompleteRefused: an expansion formula is loaded
-// by name without Resolve or Validate, and expandStep rebuilds template steps
-// without OnComplete, so a template on_complete was silently dropped. Every
-// expansion route must refuse it instead (GH#3782).
+// by name without Resolve or Validate, so nothing else refuses a template
+// on_complete on these routes, and bd never runs it (it used to be dropped
+// silently). Every expansion route must refuse it instead (GH#3782).
 func TestApplyExpansions_TemplateOnCompleteRefused(t *testing.T) {
 	tmpDir := t.TempDir()
 	const expansion = `formula = "fan-out"

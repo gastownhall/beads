@@ -1640,14 +1640,32 @@ bond = "mol-worker"
 worker_name = "{item.name}"
 `
 
+// fanOutOnCompleteExpansion is an expansion formula whose template step sets
+// on_complete.
+const fanOutOnCompleteExpansion = `formula = "fan-out"
+type = "expansion"
+version = 1
+
+[[template]]
+id = "{target}.survey"
+title = "Survey {target.title}"
+
+[template.on_complete]
+for_each = "output.workers"
+bond = "mol-worker"
+`
+
 // TestCookFormulaOnCompleteRefused: a formula that sets on_complete must fail
 // the cook on both the pour/wisp/bond/seed path and the bd cook path, instead
-// of cooking into steps whose completion spawns nothing (GH#3782).
+// of cooking into steps whose completion spawns nothing (GH#3782). The same
+// holds when the on_complete comes from an expansion formula, and the cook's
+// expansion wraps must keep formula.ErrValidation: pour and wisp report any
+// other cook error as "not found as formula or proto".
 func TestCookFormulaOnCompleteRefused(t *testing.T) {
-	check := func(t *testing.T, gotResult bool, err error) {
+	check := func(t *testing.T, gotResult bool, err error, wants ...string) {
 		t.Helper()
 		if err == nil {
-			t.Fatal("cook succeeded although step survey-workers sets on_complete, which bd never runs")
+			t.Fatal("cook succeeded although a step sets on_complete, which bd never runs")
 		}
 		if gotResult {
 			t.Errorf("cook returned a result alongside the error")
@@ -1655,7 +1673,7 @@ func TestCookFormulaOnCompleteRefused(t *testing.T) {
 		if !errors.Is(err, formula.ErrValidation) {
 			t.Errorf("errors.Is(err, formula.ErrValidation) = false for %v", err)
 		}
-		for _, want := range []string{"survey-workers", "on_complete is not supported"} {
+		for _, want := range append([]string{"on_complete is not supported"}, wants...) {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("error %q does not mention %q", err, want)
 			}
@@ -1664,14 +1682,74 @@ func TestCookFormulaOnCompleteRefused(t *testing.T) {
 
 	t.Run("resolveAndCookFormulaWithVars", func(t *testing.T) {
 		sg, err := cookFormulaTOMLWithVars(t, "survey", surveyOnCompleteFormula, nil)
-		check(t, sg != nil, err)
+		check(t, sg != nil, err, "survey-workers")
 	})
 
 	t.Run("loadAndResolveFormula", func(t *testing.T) {
 		dir := writePipelineFormula(t, "survey", surveyOnCompleteFormula)
 		f, err := loadAndResolveFormula("survey", []string{dir})
-		check(t, f != nil, err)
+		check(t, f != nil, err, "survey-workers")
 	})
+
+	// Each workflow sets no on_complete itself; it applies fan-out, whose
+	// template does, through one expansion route.
+	for _, route := range []struct{ route, name, src string }{
+		{"compose.expand", "survey-expand", `formula = "survey-expand"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "work"
+title = "Work"
+
+[[compose.expand]]
+target = "work"
+with = "fan-out"
+`},
+		{"compose.map", "survey-map", `formula = "survey-map"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "impl.a"
+title = "A"
+
+[[steps]]
+id = "impl.b"
+title = "B"
+
+[[compose.map]]
+select = "impl.*"
+with = "fan-out"
+`},
+		{"inline expand", "survey-inline", `formula = "survey-inline"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "work"
+title = "Work"
+expand = "fan-out"
+`},
+	} {
+		t.Run(route.route, func(t *testing.T) {
+			dir := writePipelineFormula(t, route.name, route.src)
+			if err := os.WriteFile(filepath.Join(dir, "fan-out.formula.toml"), []byte(fanOutOnCompleteExpansion), 0o644); err != nil {
+				t.Fatalf("write expansion formula: %v", err)
+			}
+			wants := []string{`"fan-out"`, "template[0] ({target}.survey)"}
+
+			t.Run("resolveAndCookFormulaWithVars", func(t *testing.T) {
+				sg, err := resolveAndCookFormulaWithVars(route.name, []string{dir}, map[string]string{})
+				check(t, sg != nil, err, wants...)
+			})
+
+			t.Run("loadAndResolveFormula", func(t *testing.T) {
+				f, err := loadAndResolveFormula(route.name, []string{dir})
+				check(t, f != nil, err, wants...)
+			})
+		})
+	}
 }
 
 // TestCookFormulaWithoutStepOnCompleteSucceeds: refusing step-level

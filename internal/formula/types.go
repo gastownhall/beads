@@ -834,8 +834,11 @@ func refuseOnComplete(steps []*Step, prefix string, errs *[]string) {
 
 // onCompleteRefusal is the reason given for every step that sets on_complete.
 // "on_complete is not supported" is the stable substring callers may match.
-const onCompleteRefusal = "on_complete is not supported: bd never runs it, so completing this step would spawn nothing; " +
-	"remove it and bond one molecule per item with 'bd mol bond' instead"
+// It does not tell the author to delete the field: a formula written for an
+// engine that runs on_complete itself can sit on bd's search path, and that
+// file is not bd's to edit.
+const onCompleteRefusal = "on_complete is not supported: bd does not run it, so a molecule bd cooks from this formula would never fan out; " +
+	"to fan out with bd, bond one molecule per item with 'bd mol bond'"
 
 // GetRequiredVars returns the names of all required variables.
 func (f *Formula) GetRequiredVars() []string {

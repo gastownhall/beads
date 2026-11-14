@@ -291,11 +291,14 @@ before_step = "design"
 
 ### Hooks
 
-bd has no step-completion hooks. A step's `on_complete` table was
-declared but never run, so bd refuses formulas that set it: `bd cook` and
-`bd mol pour`, `wisp`, `bond` and `seed` fail with a validation error that
-names the step. To fan out one molecule per item, bond them yourself (see
-[Dynamic Bonding](#dynamic-bonding)).
+Formulas cannot attach an action to a step's completion. A step's
+`on_complete` table was declared but never run, so bd refuses formulas that
+set it: `bd cook` and `bd mol pour`, `wisp`, `bond` and `seed` fail with a
+validation error that names the step. `bd formula show` still displays such
+a formula. To fan out one molecule per item with bd, bond them yourself (see
+[Dynamic Bonding](#dynamic-bonding)). To run a command whenever an issue
+closes, molecule steps included, use an `on_close` script hook in
+`.beads/hooks/` (see [Events Journal](/reference/events-journal)).
 
 ### Assigning Molecules
 
