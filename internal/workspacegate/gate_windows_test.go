@@ -4,11 +4,13 @@ package workspacegate
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -201,4 +203,50 @@ func assertOneGateOneLock(t *testing.T, want string, guarded []string) {
 	if len(m.handles) != 1 {
 		t.Fatalf("alias spellings held %d locks, want 1 (dedupe by canonical path)", len(m.handles))
 	}
+}
+
+// TestCrossProcessExclusionAcrossJunctionWindows: a child process holding
+// the exclusive gate through one spelling excludes a shared acquisition
+// through another, in both directions, and a shared acquire succeeds once
+// the holder exits. Locking the file (not the path) already guaranteed
+// this for the physical lock; canonical keys must not undo it by letting
+// two spellings acquire "different" gates.
+func TestCrossProcessExclusionAcrossJunctionWindows(t *testing.T) {
+	f := newJunctionFixture(t)
+	viaJunction := filepath.Join(f.junction, "proj")
+	direct := filepath.Join(f.real, "proj")
+
+	// Holder through the junction, this process via the direct spelling.
+	hp := spawnHolder(t, viaJunction, "exclusive")
+	gDirect, err := ForWorkspace(filepath.Join(direct, ".beads"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gDirect.Acquire(context.Background(), Shared, Options{}); !errors.Is(err, ErrBusy) {
+		t.Fatalf("shared via direct spelling under junction-held exclusive: %v, want ErrBusy", err)
+	}
+	hp.stop()
+	h, err := gDirect.Acquire(context.Background(), Shared,
+		Options{Wait: 10 * time.Second, PollInterval: 25 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("shared via direct spelling after release: %v", err)
+	}
+	_ = h.Release()
+
+	// Holder via the direct spelling, this process through the junction.
+	hp2 := spawnHolder(t, direct, "exclusive")
+	gJunction, err := ForWorkspace(filepath.Join(viaJunction, ".beads"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gJunction.Acquire(context.Background(), Shared, Options{}); !errors.Is(err, ErrBusy) {
+		t.Fatalf("shared via junction spelling under direct-held exclusive: %v, want ErrBusy", err)
+	}
+	hp2.stop()
+	h2, err := gJunction.Acquire(context.Background(), Shared,
+		Options{Wait: 10 * time.Second, PollInterval: 25 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("shared via junction spelling after release: %v", err)
+	}
+	_ = h2.Release()
 }
