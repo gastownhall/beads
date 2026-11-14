@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "agent_profile.go",
         "config.go",
+        "gascity.go",
         "permissions.go",
         "permissions_open_linux.go",
         "permissions_open_nonlinux.go",
@@ -20,6 +21,7 @@ go_library(
         "//internal/atomicfile",
         "//internal/ceiling",
         "//internal/debug",
+        "//internal/git",
         "//internal/gitenv",
         "//internal/remedy",
         "@com_github_spf13_viper//:viper",
@@ -40,6 +42,7 @@ go_test(
     srcs = [
         "agents_file_test.go",
         "config_test.go",
+        "gascity_test.go",
         "git_routing_test.go",
         "permissions_linux_test.go",
         "permissions_test.go",
