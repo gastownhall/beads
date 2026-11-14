@@ -41,6 +41,10 @@ When closing multiple issues, provide one --reason for all IDs or repeat
 to the first ID, the second --reason to the second ID, regardless of where
 the flags appear in the command line.
 
+Closing an issue that is already closed succeeds and changes nothing: the
+first close's reason stays. The issue is reported as "Already closed" with
+the reason it kept, and under --json its entry carries already_closed: true.
+
 Closing a molecule's last open step also closes the molecule's root, with
 the reason "all steps complete", when the root is a poured molecule, a wisp,
 or an epic labeled "template"; any other epic stays open as close-eligible

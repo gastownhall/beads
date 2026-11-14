@@ -274,6 +274,13 @@ only when that close completed a molecule (see
 When one command closes several steps of the same molecule, only the first
 of their entries carries these members.
 
+An issue that was already closed is reported with one more member:
+- `already_closed` (boolean, optional): `true` when this issue was already
+  closed, so the command changed nothing on it and its `close_reason` is the
+  one the first close stored, not the reason this command passed. Absent for
+  a real close. It speaks for the issue only: re-closing a molecule's final
+  step can still auto-close its root
+
 With `--suggest-next`, `--continue`, or `--claim-next`, the output is an
 object instead: the array moves under `closed`, beside `unblocked` (issue
 array), `continue` (`closed_step`, `next_step`, `auto_advanced`,
