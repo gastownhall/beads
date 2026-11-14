@@ -1429,12 +1429,16 @@ func FindBeadsDir() string {
 		if worktreeRoot := git.GetRepoRoot(); worktreeRoot != "" {
 			worktreeBeadsDir := filepath.Join(worktreeRoot, ".beads")
 			if info, err := os.Stat(worktreeBeadsDir); err == nil && info.IsDir() {
-				if hasBeadsDatabase(worktreeBeadsDir) &&
-					!yieldLocalStore(worktreeBeadsDir, resolvedWorktreeFallbackBeadsDir()) {
-					return worktreeBeadsDir
+				yielded := false
+				if hasBeadsDatabase(worktreeBeadsDir) {
+					if !yieldLocalStore(worktreeBeadsDir, resolvedWorktreeFallbackBeadsDir()) {
+						return worktreeBeadsDir
+					}
+					yielded = true
 				}
 				// Lenient acceptance only when there is no shared .beads with
-				// a real database to fall back to.
+				// a real database to fall back to, and never for a store that
+				// just yielded: 3c returns the shared workspace it yielded to.
 				fallback := GetWorktreeFallbackBeadsDir()
 				fallbackHasDB := false
 				if fallback != "" {
@@ -1443,7 +1447,7 @@ func FindBeadsDir() string {
 						fallbackHasDB = hasBeadsDatabase(resolved)
 					}
 				}
-				if !fallbackHasDB && hasBeadsProjectFiles(worktreeBeadsDir) {
+				if !yielded && !fallbackHasDB && hasBeadsProjectFiles(worktreeBeadsDir) {
 					return worktreeBeadsDir
 				}
 			}
@@ -1476,11 +1480,16 @@ func FindBeadsDir() string {
 		if jjSecondaryRoot != "" {
 			secondaryBeadsDir := filepath.Join(jjSecondaryRoot, ".beads")
 			if info, err := os.Stat(secondaryBeadsDir); err == nil && info.IsDir() {
-				if hasBeadsDatabase(secondaryBeadsDir) &&
-					!yieldLocalStore(secondaryBeadsDir, resolvedJJPrimaryBeadsDir(jjPrimaryRoot, jjPrimaryErr)) {
-					return secondaryBeadsDir
+				yielded := false
+				if hasBeadsDatabase(secondaryBeadsDir) {
+					if !yieldLocalStore(secondaryBeadsDir, resolvedJJPrimaryBeadsDir(jjPrimaryRoot, jjPrimaryErr)) {
+						return secondaryBeadsDir
+					}
+					yielded = true
 				}
-				// Lenient acceptance only when the primary has no DB to fall back to.
+				// Lenient acceptance only when the primary has no DB to fall
+				// back to, and never for a store that just yielded: 3'c
+				// returns the primary workspace it yielded to.
 				primaryFallbackHasDB := false
 				if jjPrimaryErr == nil && jjPrimaryRoot != "" {
 					primaryBeadsDir := filepath.Join(jjPrimaryRoot, ".beads")
@@ -1488,7 +1497,7 @@ func FindBeadsDir() string {
 						primaryFallbackHasDB = hasBeadsDatabase(FollowRedirect(primaryBeadsDir))
 					}
 				}
-				if !primaryFallbackHasDB && hasBeadsProjectFiles(secondaryBeadsDir) {
+				if !yielded && !primaryFallbackHasDB && hasBeadsProjectFiles(secondaryBeadsDir) {
 					return secondaryBeadsDir
 				}
 			}
@@ -1753,6 +1762,11 @@ func findDatabaseInTree() string {
 
 	// Check if we're in a git worktree or jj secondary workspace.
 	var mainRepoRoot string
+	// yieldedBeadsDir is the canonical local .beads whose metadata-less store
+	// yielded to the shared workspace (GH#6552). The trailing ancestor walk
+	// must not select it again when the shared workspace has no local data
+	// (e.g. embedded metadata without an embeddeddolt/ directory).
+	yieldedBeadsDir := ""
 	if isWt {
 		// Per-worktree redirect override
 		if target := worktreeRedirectTarget(); target != "" {
@@ -1772,9 +1786,10 @@ func findDatabaseInTree() string {
 		if worktreeRoot := git.GetRepoRoot(); worktreeRoot != "" {
 			worktreeBeadsDir := filepath.Join(worktreeRoot, ".beads")
 			if info, err := os.Stat(worktreeBeadsDir); err == nil && info.IsDir() {
-				if hasBeadsDatabase(worktreeBeadsDir) &&
-					!yieldLocalStore(worktreeBeadsDir, resolvedWorktreeFallbackBeadsDir()) {
-					if dbPath := findDatabaseInBeadsDir(worktreeBeadsDir, true); dbPath != "" {
+				if hasBeadsDatabase(worktreeBeadsDir) {
+					if yieldLocalStore(worktreeBeadsDir, resolvedWorktreeFallbackBeadsDir()) {
+						yieldedBeadsDir = utils.CanonicalizePath(worktreeBeadsDir)
+					} else if dbPath := findDatabaseInBeadsDir(worktreeBeadsDir, true); dbPath != "" {
 						return dbPath
 					}
 				}
@@ -1806,9 +1821,10 @@ func findDatabaseInTree() string {
 		if jjSecondaryRoot != "" {
 			secondaryBeadsDir := filepath.Join(jjSecondaryRoot, ".beads")
 			if info, err := os.Stat(secondaryBeadsDir); err == nil && info.IsDir() {
-				if hasBeadsDatabase(secondaryBeadsDir) &&
-					!yieldLocalStore(secondaryBeadsDir, resolvedJJPrimaryBeadsDir(jjPrimaryRoot, jjPrimaryErr)) {
-					if dbPath := findDatabaseInBeadsDir(secondaryBeadsDir, true); dbPath != "" {
+				if hasBeadsDatabase(secondaryBeadsDir) {
+					if yieldLocalStore(secondaryBeadsDir, resolvedJJPrimaryBeadsDir(jjPrimaryRoot, jjPrimaryErr)) {
+						yieldedBeadsDir = utils.CanonicalizePath(secondaryBeadsDir)
+					} else if dbPath := findDatabaseInBeadsDir(secondaryBeadsDir, true); dbPath != "" {
 						return dbPath
 					}
 				}
@@ -1844,7 +1860,8 @@ func findDatabaseInTree() string {
 	walk := NewAncestorDirWalk(dir, dir).passOverUserGlobalBeads(gitRootCanonical, true)
 	for dir, ok := walk.Next(); ok; dir, ok = walk.Next() {
 		beadsDir := filepath.Join(dir, ".beads")
-		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
+		yielded := yieldedBeadsDir != "" && utils.PathsEqual(beadsDir, yieldedBeadsDir)
+		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() && !yielded {
 			// Follow redirect if present
 			beadsDir = FollowRedirect(beadsDir)
 

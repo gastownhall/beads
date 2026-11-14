@@ -2,6 +2,7 @@ package beads
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1223,4 +1224,79 @@ func TestFindBeadsDir_JJSecondaryMetadatalessStoreYieldsToPrimary(t *testing.T) 
 		assertSamePath(t, "FindDatabasePath() from "+start, FindDatabasePath(), filepath.Join(primaryBeads, "embeddeddolt"))
 		assertSamePath(t, "FindBeadsDirFrom("+start+")", FindBeadsDirFrom(start), primaryBeads)
 	}
+}
+
+// TestFindDatabasePath_WorktreeYieldedStoreNotRediscovered covers a main
+// checkout whose metadata declares embedded mode but holds no embedded data:
+// the yielded worktree store must not come back through lenient acceptance
+// or the trailing ancestor walk, and discovery must not touch either side.
+func TestFindDatabasePath_WorktreeYieldedStoreNotRediscovered(t *testing.T) {
+	f := newMetadatalessStoreFixture(t, mainEmbeddedMetadata, "")
+	before := snapshotTree(t, filepath.Dir(f.mainRepo))
+	for _, start := range []string{f.worktree, f.subdir} {
+		chdirForDiscovery(t, start)
+		assertSamePath(t, "FindBeadsDir() from "+start, FindBeadsDir(), f.mainBeads)
+		if dbPath := FindDatabasePath(); dbPath != "" && pathWithin(dbPath, f.worktree) {
+			t.Errorf("FindDatabasePath() from %s = %q, reselected the yielded worktree store", start, dbPath)
+		}
+		assertSamePath(t, "FindBeadsDirFrom("+start+")", FindBeadsDirFrom(start), f.mainBeads)
+	}
+	if after := snapshotTree(t, filepath.Dir(f.mainRepo)); after != before {
+		t.Errorf("discovery changed the fixture tree:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+// TestFindDatabasePath_JJSecondaryYieldedStoreNotRediscovered is the jj
+// variant of the AC-8 layout: the primary declares embedded mode without
+// embedded data.
+func TestFindDatabasePath_JJSecondaryYieldedStoreNotRediscovered(t *testing.T) {
+	clearDiscoveryEnv(t)
+	tmpDir := utils.CanonicalizePath(t.TempDir())
+	primaryDir := filepath.Join(tmpDir, "primary")
+	if err := os.MkdirAll(filepath.Join(primaryDir, ".jj", "repo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	secondaryDir := filepath.Join(primaryDir, "workspaces", "secondary")
+	writeFixtureFile(t, filepath.Join(secondaryDir, ".jj", "repo"), filepath.Join(primaryDir, ".jj", "repo")+"\n")
+	cmd := gitCommand("init")
+	cmd.Dir = primaryDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+
+	primaryBeads := filepath.Join(primaryDir, ".beads")
+	writeFixtureFile(t, filepath.Join(primaryBeads, "config.yaml"), "issue-prefix: \"MyProject\"\n")
+	writeFixtureFile(t, filepath.Join(primaryBeads, "metadata.json"), mainEmbeddedMetadata)
+	secondaryBeads := filepath.Join(secondaryDir, ".beads")
+	writeFixtureFile(t, filepath.Join(secondaryBeads, "config.yaml"), "issue-prefix: \"MyProject\"\n")
+	writeEmbeddedStore(t, secondaryBeads, "beads")
+
+	chdirForDiscovery(t, secondaryDir)
+	assertSamePath(t, "FindBeadsDir()", FindBeadsDir(), primaryBeads)
+	if dbPath := FindDatabasePath(); dbPath != "" && pathWithin(dbPath, secondaryDir) {
+		t.Errorf("FindDatabasePath() = %q, reselected the yielded secondary store", dbPath)
+	}
+	assertSamePath(t, "FindBeadsDirFrom()", FindBeadsDirFrom(secondaryDir), primaryBeads)
+}
+
+// snapshotTree lists every non-.git path under root with its size, so a test
+// can assert discovery created, removed or rewrote nothing.
+func snapshotTree(t *testing.T, root string) string {
+	t.Helper()
+	var b strings.Builder
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() && info.Name() == ".git" {
+			return filepath.SkipDir
+		}
+		rel, _ := filepath.Rel(root, path)
+		fmt.Fprintf(&b, "%s %d %v\n", rel, info.Size(), info.IsDir())
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b.String()
 }

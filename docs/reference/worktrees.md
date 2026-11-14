@@ -52,6 +52,40 @@ Key points:
 - Cross-clone sync uses `bd dolt pull` and `bd dolt push`.
 - No `sync.branch` or beads-managed Git worktree is required.
 
+### Which `.beads` a worktree uses
+
+From a linked Git worktree (or a jj secondary workspace), automatic discovery
+checks these in order:
+
+1. `BEADS_DIR`, when set, always wins.
+2. A valid `.beads/redirect` file in the worktree.
+3. The worktree's own `.beads`, when it holds a database (`embeddeddolt/`,
+   `dolt/`, or a `*.db` file). This is separate-database mode.
+4. The main repository's shared `.beads`.
+
+Step 3 has one exception. A worktree database with no `metadata.json` (or
+legacy `config.json`) beside it yields to the shared `.beads` when that
+directory has readable `metadata.json`. `bd init` writes metadata, so an
+initialized separate database keeps working; a store with none is usually left
+behind by a command that fell back to embedded mode inside the worktree. The
+first time this happens in a process, `bd` prints a warning to stderr naming
+both directories:
+
+```text
+Warning: ignoring the beads database in /path/to/worktree/.beads because it has no metadata.json or config.json; using the shared workspace /path/to/main/.beads instead
+  (embedded databases observed: beads; shared metadata declares dolt_database "myproject")
+  To inspect the skipped database: BEADS_DIR='/path/to/worktree/.beads' bd list
+  Preserve any data you need from it before removing it.
+```
+
+The names in the warning are what is on disk and what the shared metadata
+declares; they do not prove the skipped database is empty. Discovery never
+opens, changes, or deletes either database. The exception does not apply when
+the worktree `.beads` has its own metadata (even metadata copied from the main
+repository), when the shared `.beads` has no readable metadata, or when the
+worktree is not linked to a shared workspace: those keep the worktree's
+database, as before.
+
 ## Basic Usage
 
 Initialize beads once in the repository:
@@ -144,6 +178,17 @@ repository.
 If a worktree has its own accidental `.beads` directory, remove or archive the
 extra copy after confirming it does not contain unique issue data. By default,
 worktrees should share the repository workspace.
+
+A worktree database without `metadata.json` is skipped in favor of the shared
+workspace, with a warning (see
+[Which `.beads` a worktree uses](#which-beads-a-worktree-uses)). Inspect it
+with the command in the warning, for example
+`BEADS_DIR='/path/to/worktree/.beads' bd list`, before removing it. Do not run
+`bd init` in the worktree to repair it: in a linked worktree, `bd init` targets
+the main repository's workspace.
+
+If the worktree's own database was intentional, use `BEADS_DIR` to select it
+explicitly.
 
 ### Concurrent Writers
 
