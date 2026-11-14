@@ -14,7 +14,6 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -349,85 +348,6 @@ func (s *DoltStore) demoteToWispInTx(ctx context.Context, tx *sql.Tx, id string,
 	}
 
 	return changedTables(permanentIssueAuxTables...), fmt.Sprintf("bd: demote %s to wisp", id), nil
-}
-
-// doltAddAndCommitInTx stages and Dolt-commits INSIDE a still-open SQL
-// transaction.
-//
-// HAZARD (LatentLabsSpace/NEXUS#92): DOLT_ADD stages the whole table from
-// this session's BEGIN-time root, and DOLT_COMMIT here runs before the
-// transaction's commit-time merge — so under concurrent writers the produced
-// Dolt commit writes every concurrently-changed row in the staged tables
-// back to its BEGIN-time value (lost update). The main issue-mutation path
-// (runIssueOperationTxWithMessage) no longer uses this; it commits the SQL
-// transaction first and then calls doltAddAndCommitPostTx.
-//
-// The hazard remains LIVE everywhere the in-tx ordering survives — a larger
-// surface than this helper's callers: wisp promote/demote (this file),
-// legacy reopen (issues.go), RunInIssueLifecycleTransaction
-// (transaction.go), the role deleter and sweeper (deleter.go, sweeper.go),
-// AND the same DOLT_ADD/DOLT_COMMIT-inside-tx pattern
-// inlined directly in the legacy DoltStore write methods in issues.go and
-// slots.go (UpdateIssue, UpdateIssueChecked, ClaimIssue, ClaimReadyIssue,
-// UnclaimIssue, UnclaimIssueIfAssignee, ReclaimExpiredLeases, CloseIssue*,
-// DeleteIssue*, MergeMetadata, SlotClear) — several reachable from live CLI
-// paths (bd edit/note/priority/defer/unclaim, linear sync) and from the
-// uow/domain claim surfaces. Every one of these should migrate to the
-// post-tx ordering; until then any of them racing a concurrent writer can
-// still silently revert that writer's committed rows.
-//
-// The STAGED SET is the hazard's other axis, and it widened. When versioned
-// history is active, withVersionedHistoryTables adds issue_versions and
-// store_epoch to whatever fixed list a caller passed (every caller here
-// already stages issues), and the role deleter and sweeper call it on their
-// own fixed list for the same durability reason, so those two tables are now
-// exposed to the lost update above on every in-tx plane named in the paragraph
-// above. The exposure is not equivalent to the one issues already had: a
-// reverted issues row is rewritten by the next mutation of that bead, while
-// issue_versions and store_epoch are append-only, so a row reverted to its
-// BEGIN-time value is never rewritten -- it is gone, leaving a hole in the
-// history no later write fills. Migrating these planes to the post-tx
-// ordering closes this along with the rest of the hazard; it is written down
-// here so the activation phase inherits a known hazard rather than
-// discovering it.
-func (s *DoltStore) doltAddAndCommitInTx(ctx context.Context, tx *sql.Tx, tables []string, commitMsg string) error {
-	// Batch/off auto-commit (bd-4wamg): leave the writes in the working set
-	// for a later explicit commit point (bd dolt commit / CommitPending)
-	// instead of minting one Dolt version commit per write.
-	if issueops.VersionCommitDeferred(ctx) {
-		return nil
-	}
-	for _, table := range s.withVersionedHistoryTables(ctx, tx, tables) {
-		if err := schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table); err != nil {
-			return fmt.Errorf("dolt add %s: %w", table, err)
-		}
-	}
-
-	// Skip the commit when nothing was actually staged. A caller can reach here
-	// after an idempotent no-op write (e.g. re-adding an existing dependency via
-	// INSERT IGNORE, or removing a non-existent one), in which case the DOLT_ADDs
-	// above stage nothing and DOLT_COMMIT('-m') fails with a server-side "nothing
-	// to commit" warning that floods the Dolt log at reconcile cadence.
-	//
-	// Unlike StageAndCommit's fast-path (a global HasPendingChanges check), this
-	// helper stages only a FIXED table list. Other tables may be dirty
-	// concurrently, so the guard must test the STAGED set, not the whole working
-	// set — otherwise we would still fire an empty `-m` commit whenever an
-	// unrelated table is dirty. issueops.HasStagedChanges checks exactly what
-	// '-m' will commit; *sql.Tx satisfies issueops.SQLQuerier.
-	staged, err := issueops.HasStagedChanges(ctx, tx)
-	if err != nil {
-		return fmt.Errorf("check staged changes before commit: %w", err)
-	}
-	if !staged {
-		return nil
-	}
-
-	if err := schema.DrainCall(ctx, tx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-		commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-		return wrapSQLCommitError("dolt commit", err)
-	}
-	return nil
 }
 
 const (

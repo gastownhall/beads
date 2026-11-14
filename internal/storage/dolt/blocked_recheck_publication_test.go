@@ -7,8 +7,10 @@ import (
 )
 
 // TestPostCommitRecheckPublishesOutsideItsTransaction is the structural guard
-// for the recheck's publication ordering (the lost-update hazard
-// doltAddAndCommitInTx documents, LatentLabsSpace/NEXUS#92).
+// for the recheck's publication ordering (the lost-update hazard of
+// LatentLabsSpace/NEXUS#92, GH#5752). TestNoDoltAddOrCommitInsideOpenTransaction
+// keeps every in-transaction publisher out of the package; this test keeps
+// the recheck on the post-transaction one.
 //
 // The hazard needs a writer that commits inside the recheck's OWN transaction
 // window, and nothing in the store exposes that window to a test: the recheck
@@ -32,7 +34,6 @@ func TestPostCommitRecheckPublishesOutsideItsTransaction(t *testing.T) {
 	}
 
 	const (
-		inTx    = "doltAddAndCommitInTx"
 		postTx  = "doltAddAndCommitPostTx"
 		recheck = "DoltStore.recheckBlockedAfterCommit"
 		// Anchor: a function known to publish post-commit. No in-transaction
@@ -52,9 +53,6 @@ func TestPostCommitRecheckPublishesOutsideItsTransaction(t *testing.T) {
 		t.Fatalf("%s no longer reads as a post-transaction publisher: the %s analysis is broken, so its verdict on %s means nothing", knownPostTxPublisher, postTx, recheck)
 	}
 
-	if publishes(recheck, inTx) {
-		t.Fatalf("%s publishes with %s: DOLT_ADD stages the whole table from the transaction's BEGIN-time root, so a Dolt commit minted inside the recheck's own transaction writes every concurrently committed row back to its BEGIN-time value — and a recheck runs only when concurrent unblocking writes are racing. Publish with %s after the transaction commits instead.", recheck, inTx, postTx)
-	}
 	if !publishes(recheck, postTx) {
 		t.Fatalf("%s no longer publishes with %s: a corrected is_blocked flag that reaches no Dolt commit sits dirty in the working set until an unrelated write sweeps it in", recheck, postTx)
 	}

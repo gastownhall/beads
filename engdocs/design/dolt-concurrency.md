@@ -216,6 +216,23 @@ func (s *DoltStore) runDoltTransaction(ctx, fn, commitMsg) error {
 }
 ```
 
+> **Superseded (GH#5752, LatentLabsSpace/NEXUS#92):** do not publish inside
+> the SQL transaction. `DOLT_ADD` stages a whole table from the session's
+> BEGIN-time root, so a Dolt commit minted before `COMMIT` writes every row a
+> concurrent writer committed in the meantime back to its BEGIN-time value.
+> Every store write now commits its SQL transaction first and then stages and
+> Dolt-commits on its own connection (`publishCommittedOperation` →
+> `stageAndCommit`), honoring deferred version commits and skipping an empty
+> staged set. A failure there cannot unwind the committed write: the write
+> reports success, and the dropped publication is logged and counted on
+> `bd.db.post_tx_commit_dropped`; the next explicit or automatic commit picks
+> the change up. `TestNoDoltAddOrCommitInsideOpenTransaction`
+> (`internal/storage/dolt/publication_guard_test.go`) keeps
+> `DOLT_ADD`/`DOLT_COMMIT` literals to an approved list of publishers that run
+> outside any transaction. The unit-of-work transaction
+> (`internal/storage/uow/doltserver_tx.go`) still commits inside its
+> transaction and documents that hazard.
+
 #### `dolt_autocommit.go`: Retire or Simplify
 
 With `DOLT_COMMIT` moving inside transactions, the external auto-commit
@@ -316,6 +333,8 @@ also updates it). Mitigation: use optimistic concurrency checks where needed
 
 Modify `RunInTransaction` to include `DOLT_COMMIT` inside the SQL transaction.
 This works regardless of branch-per-worker — it's strictly additive safety.
+(Superseded by GH#5752: the Dolt commit now runs after the SQL commit; see
+the note under `transaction.go` above.)
 
 - Modify `transaction.go`: Add commit message parameter, call `DOLT_COMMIT`
   before `tx.Commit()`
