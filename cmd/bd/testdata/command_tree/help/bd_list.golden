@@ -4,7 +4,7 @@ Usage:
   bd list [flags]
 
 Flags:
-      --all                          Show all issues including closed (overrides default filter)
+      --all                          Lift default status and pinned exclusions and the default limit (type and plane suppressions still apply; see --include-all-types)
   -a, --assignee string              Filter by assignee
       --brief                        Omit the free-form text (description, design, acceptance criteria, notes, payload, waiters) from each row. Filters that read those fields, such as --desc-contains, still select on them. An omitted field is indistinguishable from an empty one in --json; fetch a whole issue with bd show.
       --closed-after string          Filter issues closed after date (YYYY-MM-DD or RFC3339)
