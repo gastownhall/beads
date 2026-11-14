@@ -359,3 +359,47 @@ func TestGatherListInput_ExistingFlagsKeepTheirRequestIdentity(t *testing.T) {
 		t.Errorf("an explicit --limit wins over --all, got %d", limited.effectiveLimit)
 	}
 }
+
+// TestGatherListInput_WispTypeWithIncludeAllTypesIsAccepted: the flag admits
+// the wisp plane, so --wisp-type can match rows and the reachability guard
+// must let it through. Without it the guard still refuses, naming
+// --include-ephemeral.
+func TestGatherListInput_WispTypeWithIncludeAllTypesIsAccepted(t *testing.T) {
+	defer func(prev bool) { jsonOutput = prev }(jsonOutput)
+	jsonOutput = false
+
+	cmd := newIncludeAllTypesInputCmd()
+	if err := cmd.Flags().Set("wisp-type", "heartbeat"); err != nil {
+		t.Fatalf("set wisp-type: %v", err)
+	}
+	if err := cmd.Flags().Set("include-all-types", "true"); err != nil {
+		t.Fatalf("set include-all-types: %v", err)
+	}
+	var in listInput
+	var err error
+	_ = captureStderr(t, func() { in, err = gatherListInput(cmd) })
+	if err != nil {
+		t.Fatalf("--wisp-type with --include-all-types must be accepted, got: %v", err)
+	}
+	if in.WispType == nil || string(*in.WispType) != "heartbeat" {
+		t.Errorf("WispType must survive onto the request, got %v", in.WispType)
+	}
+	if !in.IncludeAllTypes {
+		t.Error("IncludeAllTypes must survive onto the request alongside --wisp-type")
+	}
+
+	t.Run("without it the guard still refuses", func(t *testing.T) {
+		cmd := newIncludeAllTypesInputCmd()
+		if err := cmd.Flags().Set("wisp-type", "heartbeat"); err != nil {
+			t.Fatalf("set wisp-type: %v", err)
+		}
+		var err error
+		stderr := captureStderr(t, func() { _, err = gatherListInput(cmd) })
+		if err == nil {
+			t.Fatal("--wisp-type with no plane knob must still be refused")
+		}
+		if !strings.Contains(stderr, "--include-ephemeral") {
+			t.Errorf("the refusal must keep naming --include-ephemeral; got:\n%s", stderr)
+		}
+	})
+}
