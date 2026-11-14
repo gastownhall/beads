@@ -6618,8 +6618,12 @@ func (s *DoltStore) MergeWithStrategy(ctx context.Context, branch, strategy stri
 	// configured with a single connection (setupTestStore's MaxOpenConns: 1
 	// mirrors constrained production configs), and recomputeBlockedAfterPull
 	// acquires its own connection — held past this point, conn would starve
-	// it of the only one available.
-	closeErr := conn.Close()
+	// it of the only one available. The conflict-tolerance flags the merge
+	// set are session state: clear them first so the pool never hands a
+	// later, unrelated write a session that silently commits conflicts
+	// (bd-sesknw), and discard the session if the reset fails — the
+	// discipline ResolveConflictRows follows.
+	closeErr := releaseConflictTolerantConn(ctx, conn)
 	if len(conflicts) > 0 {
 		span.SetAttributes(attribute.Int("dolt.conflicts", len(conflicts)))
 	}
@@ -6635,6 +6639,20 @@ func (s *DoltStore) MergeWithStrategy(ctx context.Context, branch, strategy stri
 		}
 	}
 	return conflicts, nil
+}
+
+// releaseConflictTolerantConn returns a pinned connection whose session may
+// carry @@dolt_allow_commit_conflicts / @@dolt_force_transaction_commit to the
+// pool with both flags cleared — on success, on failure, and after a partial
+// flag setup alike. When the reset itself fails (a canceled context, a dead
+// session) the physical connection is discarded instead of being returned
+// with the flags possibly still set.
+func releaseConflictTolerantConn(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx,
+		"SET @@dolt_allow_commit_conflicts = 0, @@dolt_force_transaction_commit = 0"); err != nil {
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+	}
+	return conn.Close()
 }
 
 // RecomputeBlockedAfterMerge recomputes the denormalized is_blocked column
