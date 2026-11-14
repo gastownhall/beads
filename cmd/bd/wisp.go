@@ -1051,7 +1051,7 @@ func init() {
 	wispCreateCmd.Flags().Bool("root-only", false, "Create only the root issue (no child step issues)")
 
 	wispListCmd.Flags().Bool("all", false, "Include closed wisps")
-	wispListCmd.Flags().String("type", "", "Filter by issue type (e.g., agent, task, patrol)")
+	addOnceFilterFlag(wispListCmd.Flags(), "type", "", "", "Filter by issue type (e.g., agent, task, patrol)")
 
 	wispGCCmd.Flags().Bool("dry-run", false, "Preview what would be cleaned")
 	wispGCCmd.Flags().String("age", "1h", "Age threshold for abandoned wisp detection")

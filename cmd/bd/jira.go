@@ -86,7 +86,9 @@ func init() {
 	jiraSyncCmd.Flags().Bool("prefer-local", false, "Prefer local version on conflicts")
 	jiraSyncCmd.Flags().Bool("prefer-jira", false, "Prefer Jira version on conflicts")
 	jiraSyncCmd.Flags().Bool("create-only", false, "Only create new issues, don't update existing")
-	jiraSyncCmd.Flags().String("state", "all", "Issue state to sync: open, closed, all")
+	// Single-valued all the way down (tracker.SyncOptions.State): a repeat
+	// is refused rather than narrowing; the default "all" survives resets.
+	addOnceFilterFlag(jiraSyncCmd.Flags(), "state", "", "all", "Issue state to sync: open, closed, all")
 	jiraSyncCmd.Flags().StringSlice("project", nil, "Project key(s) to sync (overrides configured project/projects)")
 	registerSelectiveSyncFlags(jiraSyncCmd)
 

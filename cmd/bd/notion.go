@@ -79,7 +79,6 @@ var (
 	notionPreferLocal  bool
 	notionPreferNotion bool
 	notionCreateOnly   bool
-	notionSyncState    string
 )
 
 var newNotionStatusClient = notion.NewClient
@@ -139,7 +138,9 @@ func init() {
 	notionSyncCmd.Flags().BoolVar(&notionPreferLocal, "prefer-local", false, "On conflict, keep the local beads version")
 	notionSyncCmd.Flags().BoolVar(&notionPreferNotion, "prefer-notion", false, "On conflict, use the Notion version")
 	notionSyncCmd.Flags().BoolVar(&notionCreateOnly, "create-only", false, "Only create missing remote pages, do not update existing ones")
-	notionSyncCmd.Flags().StringVar(&notionSyncState, "state", "all", "Issue state to sync: open, closed, or all")
+	// --state becomes a custom value (GH#6548), so the global binding goes;
+	// runNotionSync reads it back with GetString when building SyncOptions.
+	addOnceFilterFlag(notionSyncCmd.Flags(), "state", "", "all", "Issue state to sync: open, closed, or all")
 	registerSelectiveSyncFlags(notionSyncCmd)
 
 	notionCmd.AddCommand(
@@ -495,12 +496,13 @@ func runNotionSync(cmd *cobra.Command, _ []string) error {
 		conflictResolution = tracker.ConflictExternal
 	}
 
+	state, _ := cmd.Flags().GetString("state")
 	syncOpts := tracker.SyncOptions{
 		Pull:               pull,
 		Push:               push,
 		DryRun:             notionSyncDryRun,
 		CreateOnly:         notionCreateOnly,
-		State:              notionSyncState,
+		State:              state,
 		ExcludeEphemeral:   true,
 		ConflictResolution: conflictResolution,
 	}

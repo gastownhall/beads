@@ -99,7 +99,7 @@ func displayStaleIssues(issues []*types.Issue, days int) {
 }
 func init() {
 	staleCmd.Flags().IntP("days", "d", 30, "Issues not updated in this many days")
-	staleCmd.Flags().StringP("status", "s", "", "Filter by status (open|in_progress|blocked|deferred)")
+	addOnceFilterFlag(staleCmd.Flags(), "status", "s", "", "Filter by status (open|in_progress|blocked|deferred)")
 	staleCmd.Flags().IntP("limit", "n", 50, "Maximum issues to show")
 	staleCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
 	staleCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")

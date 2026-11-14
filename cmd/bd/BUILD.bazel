@@ -1184,6 +1184,7 @@ go_test(
         "reopen_test.go",
         "repair_deps_test.go",
         "reparent_test.go",
+        "repeated_filter_flag_repro_test.go",
         "reset_global_guard_test.go",
         "reset_hook_ownership_test.go",
         "reset_worktree_test.go",

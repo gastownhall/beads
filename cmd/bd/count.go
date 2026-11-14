@@ -273,10 +273,13 @@ func init() {
 // real command and into the next test.
 func registerCountFlags(cmd *cobra.Command) {
 	// Filter flags (same as list command)
-	cmd.Flags().StringP("status", "s", "", "Filter by stored status (open, in_progress, blocked, deferred, closed). Note: dependency-blocked issues use 'bd blocked'")
+	// CountRequest.Status is ONE stored status, not a comma-OR set (unlike bd
+	// search's --status under the same flag name): unioning here would turn a
+	// silent truncation into a silent zero, so a repeat is refused instead.
+	addOnceFilterFlag(cmd.Flags(), "status", "s", "", "Filter by stored status (open, in_progress, blocked, deferred, closed). Note: dependency-blocked issues use 'bd blocked'")
 	cmd.Flags().IntP("priority", "p", 0, "Filter by priority (0-4: 0=critical, 1=high, 2=medium, 3=low, 4=backlog)")
-	cmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
-	cmd.Flags().StringP("type", "t", "", "Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate)")
+	addOnceFilterFlag(cmd.Flags(), "assignee", "a", "", "Filter by assignee")
+	addOnceFilterFlag(cmd.Flags(), "type", "t", "", "Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate)")
 	cmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL)")
 	cmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE)")
 	cmd.Flags().String("title", "", "Filter by title text (case-insensitive substring match)")

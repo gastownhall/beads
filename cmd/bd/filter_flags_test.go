@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -243,6 +244,100 @@ func TestSearchRepeatedStatusUnionsIntoListRequest(t *testing.T) {
 	if got := filterFlagValue(t, "bd count", "id"); got != "bd-1,bd-2" {
 		t.Errorf("count repeated --id = %q, want %q", got, "bd-1,bd-2")
 	}
+}
+
+// TestRepeatedOnceFilterFlagsRefuse derives every once filter from the
+// registrations: a repeat must fail during parsing with an error naming the
+// flag, never silently narrow.
+func TestRepeatedOnceFilterFlagsRefuse(t *testing.T) {
+	cases := deriveSweptFilterFlags(t, "once")
+	if len(cases) < 26 {
+		t.Fatalf("derived %d once filter flags, want at least 26 (bd list's two, the swept single-valued filters incl. gitlab assignee, and the three --state defaults); the sweep or the derivation is incomplete", len(cases))
+	}
+	for _, tc := range cases {
+		t.Run(tc.path+" --"+tc.f.Name, func(t *testing.T) {
+			err := parseFilterFlags(t, tc.path, []string{"--" + tc.f.Name, "alpha", "--" + tc.f.Name, "beta"})
+			if err == nil {
+				t.Fatalf("repeated --%s accepted (value %q); want a parse refusal", tc.f.Name, filterFlagValue(t, tc.path, tc.f.Name))
+			}
+			if !strings.Contains(err.Error(), tc.f.Name) || !strings.Contains(err.Error(), "more than once") {
+				t.Errorf("repeated --%s error = %q, want it to name the flag and say it was given more than once", tc.f.Name, err)
+			}
+			// Identical non-empty repeats still refuse: a silent "same value,
+			// no harm" exception would hide the narrowing on every flag whose
+			// downstream canonicalizes (aliases, case).
+			if err := parseFilterFlags(t, tc.path, []string{"--" + tc.f.Name, "alpha", "--" + tc.f.Name, "alpha"}); err == nil {
+				t.Errorf("identical repeated --%s accepted; want a refusal", tc.f.Name)
+			}
+			// A shorthand repeat is the same repeat where a shorthand exists.
+			if sh := tc.f.Shorthand; sh != "" {
+				if err := parseFilterFlags(t, tc.path, []string{"-" + sh, "alpha", "--" + tc.f.Name, "beta"}); err == nil {
+					t.Errorf("shorthand+long repeated --%s accepted; want a refusal", tc.f.Name)
+				}
+			}
+		})
+	}
+}
+
+// TestCountRepeatedFilterRefusedBeforeRun builds a fresh command carrying
+// bd count's flag set (registerCountFlags exists so a test can do exactly
+// this) with sentinel hooks: a repeated once filter must fail during flag
+// parsing, before any hook or RunE runs.
+func TestCountRepeatedFilterRefusedBeforeRun(t *testing.T) {
+	for _, tc := range []struct {
+		flag   string
+		values []string
+	}{
+		{"status", []string{"open", "closed"}},
+		{"type", []string{"bug", "task"}},
+		{"assignee", []string{"alice", "bob"}},
+	} {
+		t.Run("count --"+tc.flag, func(t *testing.T) {
+			reachedHook, reachedRun := false, false
+			cmd := &cobra.Command{
+				Use:           "count-fresh",
+				SilenceUsage:  true,
+				SilenceErrors: true,
+				PersistentPreRunE: func(*cobra.Command, []string) error {
+					reachedHook = true
+					return nil
+				},
+				RunE: func(*cobra.Command, []string) error {
+					reachedRun = true
+					return nil
+				},
+			}
+			registerCountFlags(cmd)
+			cmd.SetArgs([]string{"--" + tc.flag, tc.values[0], "--" + tc.flag, tc.values[1]})
+
+			err := cmd.Execute()
+			if err == nil {
+				t.Fatalf("repeated --%s accepted; want a refusal", tc.flag)
+			}
+			if !strings.Contains(err.Error(), tc.flag) || !strings.Contains(err.Error(), "more than once") {
+				t.Errorf("repeated --%s error = %q, want it to name the flag and say it was given more than once", tc.flag, err)
+			}
+			if reachedHook {
+				t.Errorf("repeated --%s reached PersistentPreRunE; want the refusal before any hook", tc.flag)
+			}
+			if reachedRun {
+				t.Errorf("repeated --%s reached RunE; want the refusal before execution", tc.flag)
+			}
+		})
+	}
+
+	// bd gate check --type selects a result set (never exempt, unlike gate
+	// create --type): the registered flag must refuse a repeat at parse time,
+	// with no gate evaluation involved.
+	t.Run("gate check --type", func(t *testing.T) {
+		err := parseFilterFlags(t, "bd gate check", []string{"--type", "gh", "--type", "timer"})
+		if err == nil {
+			t.Fatal("repeated gate check --type accepted; want a refusal")
+		}
+		if !strings.Contains(err.Error(), "type") || !strings.Contains(err.Error(), "more than once") {
+			t.Errorf("repeated gate check --type error = %q, want it to name the flag and say it was given more than once", err)
+		}
+	})
 }
 
 // TestGitLabRepeatedFiltersReachCLIFilter checks the gitlab sync consumers:
