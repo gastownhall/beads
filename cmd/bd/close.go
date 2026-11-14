@@ -235,9 +235,10 @@ in the molecule for you; add --no-auto to only show it.`,
 			if !res.Changed {
 				// Already closed: an idempotent no-op on the step's stored state. The
 				// old CloseIssue path also returned nil here and still reported the
-				// (already-closed) issue, so keep OUTPUT parity via the shared display
-				// block below — the issue stays in --json output and the text report
-				// exactly as before. Suppress the step's own real-state-change side
+				// (already-closed) issue, so the shared display block below still
+				// reports it, but as the no-op it was (bd-th8229, GH#4816): the text
+				// line says it was already closed and names the reason it kept, never
+				// the requested one the store did not apply. Suppress the step's own real-state-change side
 				// effects (the audit entry, so no spurious closed→closed; the
 				// closedCount bump; step-level pending-commit tracking, since the step
 				// write itself is a no-op), but still count the command as a successful
@@ -292,8 +293,10 @@ in the molecule for you; add --no-auto to only show it.`,
 				if closedIssue != nil {
 					closedIssues = append(closedIssues, newClosedIssueJSON(closedIssue, res.AutoClosedMolecule, res.MoleculeAutoCloseRefusal))
 				}
-			} else {
+			} else if res.Changed {
 				debug.PrintNormal("%s Closed %s: %s\n", ui.RenderPass("✓"), printedFeedbackID(id, issueTitleOrEmpty(issue)), reason)
+			} else {
+				debug.PrintNormal("%s\n", alreadyClosedNotice(id, closedIssue))
 			}
 		}
 
@@ -804,6 +807,22 @@ func printNewlyUnblocked(unblocked []*types.Issue) {
 	for _, issue := range unblocked {
 		fmt.Printf("  • %s (P%d)\n", printedFeedbackID(issue.ID, issue.Title), issue.Priority)
 	}
+}
+
+// alreadyClosedNotice is the text line bd close prints, on every route, for
+// an ID whose close was an already-closed no-op (bd-th8229, GH#4816). The
+// store keeps the first close's reason (#4025), so the line names the ID as
+// already closed with the reason it still holds, read from the operation's
+// post-state snapshot post, and never the reason this command asked for. A
+// nil snapshot or an empty stored reason prints no reason rather than
+// inventing one. The check is muted: it is the closed-status symbol, not the
+// success marker of a close this command made.
+func alreadyClosedNotice(id string, post *types.Issue) string {
+	line := fmt.Sprintf("%s Already closed %s", ui.RenderMuted("✓"), printedFeedbackID(id, issueTitleOrEmpty(post)))
+	if post == nil || post.CloseReason == "" {
+		return line + " (close reason unchanged)"
+	}
+	return line + " (close reason unchanged: " + remedy.PrintedValue(post.CloseReason) + ")"
 }
 
 // closedIssueJSON is one entry of `bd close --json`'s list of closed issues:

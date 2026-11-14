@@ -175,7 +175,12 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 			audit.LogFieldChange(o.id, "status", o.auditOld, "closed", currentActor(), o.auditReason)
 		}
 		if !in.jsonOut {
-			fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), printedFeedbackID(o.after.ID, o.after.Title), closeReasons[i])
+			if o.closed {
+				fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), printedFeedbackID(o.after.ID, o.after.Title), closeReasons[i])
+			} else {
+				// An already-closed no-op kept its first reason (bd-th8229).
+				fmt.Println(alreadyClosedNotice(o.after.ID, o.after))
+			}
 		}
 	}
 
