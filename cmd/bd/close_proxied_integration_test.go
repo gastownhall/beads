@@ -358,6 +358,26 @@ func TestProxiedServerCloseB(t *testing.T) {
 		}
 	})
 
+	// bd-th8229: the proxied twin of the embedded mixed-batch JSON case. Both
+	// entries stay, in argument order; only the no-op is marked
+	// already_closed, and it reports the reason it kept.
+	t.Run("close_json_mixed_batch_marks_already_closed", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cjm")
+		already := bdProxiedCreate(t, bd, p.dir, "Mixed already")
+		fresh := bdProxiedCreate(t, bd, p.dir, "Mixed fresh")
+		bdProxiedClose(t, bd, p.dir, already.ID, "--reason", "FIRST")
+		out := bdProxiedClose(t, bd, p.dir, already.ID, fresh.ID, "--reason", "SECOND", "--json")
+		entries := decodeCloseJSON(t, out, []string{already.ID, fresh.ID})
+		requireCloseJSONMarksAlreadyClosed(t, entries, map[string]bool{already.ID: true})
+		if got := entries[0].CloseReason; got != "FIRST" {
+			t.Errorf("already-closed entry close_reason = %q, want %q (first close wins)", got, "FIRST")
+		}
+		if got := entries[1].CloseReason; got != "SECOND" {
+			t.Errorf("real-close entry close_reason = %q, want %q", got, "SECOND")
+		}
+	})
+
 	t.Run("close_nonexistent_id", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "cni")
