@@ -192,8 +192,8 @@ func runLint(issues []*types.Issue) error {
 }
 
 func init() {
-	lintCmd.Flags().StringP("type", "t", "", "Filter by issue type (bug, task, feature, epic, decision, spike, story, chore, milestone)")
-	lintCmd.Flags().StringP("status", "s", "", "Filter by status (default: open, use 'all' for all)")
+	addOnceFilterFlag(lintCmd.Flags(), "type", "t", "", "Filter by issue type (bug, task, feature, epic, decision, spike, story, chore, milestone)")
+	addOnceFilterFlag(lintCmd.Flags(), "status", "s", "", "Filter by status (default: open, use 'all' for all)")
 
 	rootCmd.AddCommand(lintCmd)
 }

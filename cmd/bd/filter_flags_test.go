@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"slices"
 	"strings"
 	"testing"
@@ -54,6 +55,39 @@ var reviewedFilterFlags = []reviewedFilterFlag{
 	// GitLab labels are a comma list (AND), types go through parseTypeList.
 	{path: "bd gitlab sync", flag: "label", class: unionFilter},
 	{path: "bd gitlab sync", flag: "type", class: unionFilter},
+
+	// Single-valued all the way down: a repeat is refused.
+	{path: "bd list", flag: "type", class: onceFilter},
+	{path: "bd list", flag: "assignee", class: onceFilter},
+	// CountRequest.Status is ONE stored status, not a comma OR set; unioning
+	// would turn a silent truncation into a silent zero.
+	{path: "bd count", flag: "status", class: onceFilter},
+	{path: "bd count", flag: "assignee", class: onceFilter},
+	{path: "bd count", flag: "type", class: onceFilter},
+	{path: "bd search", flag: "assignee", class: onceFilter},
+	{path: "bd search", flag: "type", class: onceFilter},
+	{path: "bd gitlab sync", flag: "assignee", class: onceFilter},
+	{path: "bd ready", flag: "assignee", class: onceFilter},
+	{path: "bd ready", flag: "type", class: onceFilter},
+	{path: "bd stale", flag: "status", class: onceFilter},
+	{path: "bd find-duplicates", flag: "status", class: onceFilter},
+	{path: "bd dep tree", flag: "status", class: onceFilter},
+	{path: "bd dep list", flag: "type", class: onceFilter},
+	{path: "bd lint", flag: "status", class: onceFilter},
+	{path: "bd lint", flag: "type", class: onceFilter},
+	// The hidden migrate-issues alias is a copy sharing the same flag set.
+	{path: "bd migrate issues", flag: "status", class: onceFilter},
+	{path: "bd migrate issues", flag: "type", class: onceFilter},
+	{path: "bd migrate-issues", flag: "status", class: onceFilter},
+	{path: "bd migrate-issues", flag: "type", class: onceFilter},
+	{path: "bd formula list", flag: "type", class: onceFilter},
+	{path: "bd mol wisp list", flag: "type", class: onceFilter},
+	// gate check selects gates by one type (gate create --type is a setter).
+	{path: "bd gate check", flag: "type", class: onceFilter},
+	// tracker.SyncOptions.State is one of open/closed/all, default all.
+	{path: "bd jira sync", flag: "state", class: onceFilter, def: "all"},
+	{path: "bd linear sync", flag: "state", class: onceFilter, def: "all"},
+	{path: "bd notion sync", flag: "state", class: onceFilter, def: "all"},
 }
 
 // filterFlagCases returns the reviewed rows of one class, failing the test
@@ -191,4 +225,70 @@ func TestSearchRepeatedStatusUnionsIntoListRequest(t *testing.T) {
 			t.Errorf("CountRequest.IDFilter = %q, want %q", req.IDFilter, "bd-1,bd-2")
 		}
 	})
+}
+
+// TestRepeatedOnceFilterFlagsRefuse: a second non-empty occurrence of a once
+// filter fails flag parsing with an error naming the flag, in every spelling
+// (long, shorthand, equals form) and even when the value is identical.
+func TestRepeatedOnceFilterFlagsRefuse(t *testing.T) {
+	for _, r := range filterFlagCases(t, onceFilter) {
+		t.Run(strings.ReplaceAll(r.path, " ", "_")+"/--"+r.flag, func(t *testing.T) {
+			_, fl := lookupFilterFlag(t, r.path, r.flag)
+			long := "--" + r.flag
+			second := long
+			if fl.Shorthand != "" {
+				second = "-" + fl.Shorthand
+			}
+			want := "--" + r.flag + " given more than once"
+			for _, args := range [][]string{
+				{long, "one", second, "two"},
+				{long + "=one", long + "=two"},
+				{long, "same", long, "same"},
+			} {
+				fl, err := parseFilterArgs(t, r.path, r.flag, args...)
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Errorf("%s %s: err = %v (value %q), want a refusal containing %q",
+						r.path, strings.Join(args, " "), err, fl.Value.String(), want)
+				}
+			}
+		})
+	}
+}
+
+// TestCountRepeatedFilterRefusedBeforeRun: the refusal happens while flags are
+// parsed, so neither a pre-run hook nor RunE ever sees the narrowed value.
+func TestCountRepeatedFilterRefusedBeforeRun(t *testing.T) {
+	for _, tc := range []struct{ flag, v1, v2 string }{
+		{"status", "open", "closed"},
+		{"type", "bug", "task"},
+		{"assignee", "alice", "bob"},
+	} {
+		t.Run(tc.flag, func(t *testing.T) {
+			ran := ""
+			sentinel := func(stage string) func(*cobra.Command, []string) error {
+				return func(*cobra.Command, []string) error { ran += stage + " "; return nil }
+			}
+			cmd := &cobra.Command{
+				Use:               "count",
+				PersistentPreRunE: sentinel("PersistentPreRunE"),
+				PreRunE:           sentinel("PreRunE"),
+				RunE:              sentinel("RunE"),
+				SilenceUsage:      true,
+				SilenceErrors:     true,
+			}
+			registerCountFlags(cmd)
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			cmd.SetArgs([]string{"--" + tc.flag, tc.v1, "--" + tc.flag, tc.v2})
+			err := cmd.Execute()
+			if err == nil || !strings.Contains(err.Error(), "--"+tc.flag+" given more than once") {
+				got, _ := cmd.Flags().GetString(tc.flag)
+				t.Errorf("count --%s %s --%s %s: err = %v, value %q; want a refusal naming --%s",
+					tc.flag, tc.v1, tc.flag, tc.v2, err, got, tc.flag)
+			}
+			if ran != "" {
+				t.Errorf("count --%s repeated reached %s; the refusal must come before any hook or RunE", tc.flag, ran)
+			}
+		})
+	}
 }
