@@ -364,3 +364,60 @@ func TestSweptFilterFlagsKeepSingleAndCommaForms(t *testing.T) {
 		}
 	})
 }
+
+// TestFilterFlagDefaultsSurviveReset: a once filter with a non-empty default
+// (the tracker sync --state flags, default "all") reports that default when
+// fresh and again after the test harness restores a parsed flag, with Changed
+// lowered, and the restored flag accepts one new value instead of counting
+// the earlier parse as a first occurrence.
+func TestFilterFlagDefaultsSurviveReset(t *testing.T) {
+	var withDefault int
+	for _, r := range reviewedFilterFlags {
+		if r.def == "" {
+			continue
+		}
+		withDefault++
+		t.Run(strings.ReplaceAll(r.path, " ", "_")+"/--"+r.flag, func(t *testing.T) {
+			check := func(stage string, fl *pflag.Flag) {
+				t.Helper()
+				fs, _ := lookupFilterFlag(t, r.path, r.flag)
+				if got, err := fs.GetString(r.flag); err != nil || got != r.def {
+					t.Errorf("%s: GetString(%q) = %q, %v; want %q", stage, r.flag, got, err, r.def)
+				}
+				if fl.DefValue != r.def {
+					t.Errorf("%s: DefValue = %q, want %q", stage, fl.DefValue, r.def)
+				}
+				if fl.Changed {
+					t.Errorf("%s: Changed = true, want false", stage)
+				}
+			}
+
+			fl, err := parseFilterArgs(t, r.path, r.flag)
+			if err != nil {
+				t.Fatalf("parse with no args: %v", err)
+			}
+			check("fresh", fl)
+
+			if fl, err = parseFilterArgs(t, r.path, r.flag, "--"+r.flag, "open"); err != nil {
+				t.Fatalf("--%s open: %v", r.flag, err)
+			}
+			if got := fl.Value.String(); got != "open" || !fl.Changed {
+				t.Fatalf("--%s open: value %q changed=%v, want open/true", r.flag, got, fl.Changed)
+			}
+
+			resetCommandFlags(rootCmd)
+			check("after reset", fl)
+
+			cmd := commandsByPath(rootCmd)[r.path]
+			if err := cmd.Flags().Parse([]string{"--" + r.flag, "closed"}); err != nil {
+				t.Fatalf("--%s closed after reset: %v; the reset must clear the occurrence", r.flag, err)
+			}
+			if got := fl.Value.String(); got != "closed" {
+				t.Errorf("--%s closed after reset: value %q, want closed", r.flag, got)
+			}
+		})
+	}
+	if withDefault == 0 {
+		t.Fatal("no reviewed filter flag has a non-empty default; nothing was checked")
+	}
+}
