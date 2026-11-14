@@ -1281,6 +1281,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A worktree database without metadata no longer hides the shared
+  workspace** (#6552). In a linked Git worktree or a jj secondary workspace, a
+  `.beads` database with no `metadata.json` or `config.json`, usually left
+  behind by a command that fell back to embedded mode there, outranked the
+  main repository's workspace for good, so `bd` read and wrote the wrong
+  store. Discovery (`bd` in the worktree, `bd -C`, and the `FindBeadsDir` and
+  `FindDatabasePath` library calls) now uses the shared `.beads` instead when
+  its metadata is readable, and warns once per process on stderr, naming both
+  directories and the databases found in the skipped one. A worktree database
+  with its own metadata, a `.beads/redirect`, `BEADS_DIR` and `BEADS_DB` keep
+  their precedence. Discovery never opens, changes or deletes the skipped
+  database: back it up before removing it; `docs/reference/worktrees.md`
+  shows how to inspect a copy.
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
