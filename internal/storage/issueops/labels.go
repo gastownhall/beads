@@ -168,6 +168,15 @@ func addLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID,
 	if err != nil {
 		return fmt.Errorf("add label: rows affected: %w", err)
 	}
+	// A row that actually landed makes this transaction conflict with any
+	// other one changing this issue's labels (GH#5657); a no-op leaves the
+	// cell alone. This runs before the mintVersion gate so a label patch,
+	// which mints once for the whole patch, still coordinates every row.
+	if inserted > 0 {
+		if err := TouchLabelCoordinationInTx(ctx, tx, issueID, labelTable); err != nil {
+			return fmt.Errorf("add label: %w", err)
+		}
+	}
 	comment := "Added label: " + label
 	if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
 		IssueID:   issueID,
@@ -221,6 +230,11 @@ func removeLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issue
 	deleted, err := res.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("remove label: rows affected: %w", err)
+	}
+	if deleted > 0 {
+		if err := TouchLabelCoordinationInTx(ctx, tx, issueID, labelTable); err != nil {
+			return fmt.Errorf("remove label: %w", err)
+		}
 	}
 	comment := "Removed label: " + label
 	if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
