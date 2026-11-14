@@ -6,9 +6,12 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
@@ -490,5 +493,80 @@ func TestMergeWithStrategy_LeavesPreMergePendingChanges(t *testing.T) {
 				t.Errorf("HEAD labels = %v, want [ready-for-agent]", labels)
 			}
 		})
+	}
+}
+
+// TestSyncWithStrategy_TheirsResolvesPeerConflict (bd-sesknw, GH#5564): embedded
+// Sync with an explicit strategy must resolve a real peer conflict, conclude
+// the merge and push. Before the fix it ran a bare Merge under autocommit, so
+// Dolt rejected the conflicted merge (Error 1105) before --strategy applied.
+func TestSyncWithStrategy_TheirsResolvesPeerConflict(t *testing.T) {
+	te := newTestEnv(t, "syncstrat")
+	ctx := t.Context()
+
+	remoteDir := filepath.Join(t.TempDir(), "remote")
+	if err := os.MkdirAll(remoteDir, 0o755); err != nil {
+		t.Fatalf("mkdir remote: %v", err)
+	}
+	peer := &storage.FederationPeer{Name: "peer", RemoteURL: "file://" + remoteDir, Sovereignty: "T2"}
+	if err := te.store.AddFederationPeer(ctx, peer); err != nil {
+		t.Fatalf("add federation peer: %v", err)
+	}
+	if err := te.store.Commit(ctx, "register sync peer"); err != nil {
+		t.Fatalf("commit peer registration: %v", err)
+	}
+
+	// Build the conflict on a raw session, then release its exclusive lock
+	// before the store syncs: the peer remote's main carries "theirs" and
+	// local main carries "ours", with the SAME updated_at so LWW declines it.
+	withRawConn(t, te.dataDir, te.database, func(conn *sql.Conn) {
+		syncExec(t, ctx, conn,
+			"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES ('ss-1', 'base', '', '', '', '', 'open', 2, 'task')")
+		syncExec(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'seed issue')")
+		syncExec(t, ctx, conn, "CALL DOLT_PUSH('peer', 'main')")
+		syncExec(t, ctx, conn, "CALL DOLT_CHECKOUT('-b', 'peerwork')")
+		syncExec(t, ctx, conn, "UPDATE issues SET title = 'theirs', updated_at = '2026-01-01 00:00:00' WHERE id = 'ss-1'")
+		syncExec(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'retitle theirs')")
+		syncExec(t, ctx, conn, "CALL DOLT_PUSH('peer', 'peerwork:main')")
+		syncExec(t, ctx, conn, "CALL DOLT_CHECKOUT('main')")
+		syncExec(t, ctx, conn, "CALL DOLT_BRANCH('-D', 'peerwork')")
+		syncExec(t, ctx, conn, "UPDATE issues SET title = 'ours', updated_at = '2026-01-01 00:00:00' WHERE id = 'ss-1'")
+		syncExec(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'retitle ours')")
+	})
+
+	result, err := te.store.Sync(ctx, peer.Name, "theirs")
+	if err != nil {
+		t.Fatalf("Sync(theirs): %v", err)
+	}
+	if !result.Merged || !result.ConflictsResolved || !result.Pushed {
+		t.Errorf("Sync result Merged=%v ConflictsResolved=%v Pushed=%v (PushError=%v), want all true",
+			result.Merged, result.ConflictsResolved, result.Pushed, result.PushError)
+	}
+
+	withRawConn(t, te.dataDir, te.database, func(conn *sql.Conn) {
+		var title string
+		if err := conn.QueryRowContext(ctx, "SELECT title FROM issues AS OF 'HEAD' WHERE id = 'ss-1'").Scan(&title); err != nil {
+			t.Fatalf("read committed title: %v", err)
+		}
+		if title != "theirs" {
+			t.Errorf("committed title = %q after Sync(theirs), want %q", title, "theirs")
+		}
+		var liveConflicts int
+		if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_conflicts").Scan(&liveConflicts); err != nil {
+			t.Fatalf("count live conflicts: %v", err)
+		}
+		if liveConflicts != 0 {
+			t.Errorf("%d conflicted table(s) remain after Sync(theirs)", liveConflicts)
+		}
+		if mergeOpen(t, ctx, conn) {
+			t.Error("Sync(theirs) left a merge open (dolt_merge_status.is_merging = 1)")
+		}
+	})
+}
+
+func syncExec(t *testing.T, ctx context.Context, conn *sql.Conn, query string) {
+	t.Helper()
+	if _, err := conn.ExecContext(ctx, query); err != nil {
+		t.Fatalf("%s: %v", query, err)
 	}
 }
