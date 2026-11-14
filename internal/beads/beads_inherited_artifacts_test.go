@@ -1173,3 +1173,54 @@ func TestFindBeadsDir_WorktreeMetadatalessStoreWarnsOnce(t *testing.T) {
 		}
 	}
 }
+
+// TestFindBeadsDir_JJSecondaryMetadatalessStoreYieldsToPrimary mirrors the
+// worktree case for a jj secondary workspace: its metadata-less embedded
+// store yields to the primary's metadata-backed workspace in all three
+// discovery entry points.
+func TestFindBeadsDir_JJSecondaryMetadatalessStoreYieldsToPrimary(t *testing.T) {
+	clearDiscoveryEnv(t)
+	tmpDir := utils.CanonicalizePath(t.TempDir())
+	primaryDir := filepath.Join(tmpDir, "primary")
+	if err := os.MkdirAll(filepath.Join(primaryDir, ".jj", "repo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	secondaryDir := filepath.Join(primaryDir, "workspaces", "secondary")
+	writeFixtureFile(t, filepath.Join(secondaryDir, ".jj", "repo"), filepath.Join(primaryDir, ".jj", "repo")+"\n")
+
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := gitCommand(args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+		}
+	}
+	runGit(primaryDir, "init")
+	runGit(primaryDir, "config", "user.email", "test@example.com")
+	runGit(primaryDir, "config", "user.name", "Test User")
+	runGit(primaryDir, "config", "core.hooksPath", ".git/hooks")
+
+	primaryBeads := filepath.Join(primaryDir, ".beads")
+	writeFixtureFile(t, filepath.Join(primaryBeads, "config.yaml"), "issue-prefix: \"MyProject\"\n")
+	writeFixtureFile(t, filepath.Join(primaryBeads, "metadata.json"), mainEmbeddedMetadata)
+	writeEmbeddedStore(t, primaryBeads, "myproject")
+	writeFixtureFile(t, filepath.Join(primaryDir, "README.md"), "# Test\n")
+	runGit(primaryDir, "add", "README.md")
+	runGit(primaryDir, "commit", "-m", "initial")
+
+	secondaryBeads := filepath.Join(secondaryDir, ".beads")
+	writeFixtureFile(t, filepath.Join(secondaryBeads, "config.yaml"), "issue-prefix: \"MyProject\"\n")
+	writeEmbeddedStore(t, secondaryBeads, "beads")
+	subdir := filepath.Join(secondaryDir, "src")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, start := range []string{secondaryDir, subdir} {
+		chdirForDiscovery(t, start)
+		assertSamePath(t, "FindBeadsDir() from "+start, FindBeadsDir(), primaryBeads)
+		assertSamePath(t, "FindDatabasePath() from "+start, FindDatabasePath(), filepath.Join(primaryBeads, "embeddeddolt"))
+		assertSamePath(t, "FindBeadsDirFrom("+start+")", FindBeadsDirFrom(start), primaryBeads)
+	}
+}

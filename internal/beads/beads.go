@@ -728,6 +728,9 @@ func FindBeadsDirFrom(startDir string) string {
 				// A jj secondary workspace can likewise contain inherited
 				// .beads metadata without the ignored database directory.
 				// Match FindBeadsDir by preferring the primary workspace DB.
+			} else if isJJSecondaryRoot && resolved == beadsDir && yieldLocalStore(beadsDir, jjPrimaryBeadsDir) {
+				// A metadata-less secondary store yields to the metadata-backed
+				// primary workspace, as in FindBeadsDir (GH#6552).
 			} else if hasBeadsProjectFiles(resolved) {
 				return resolved
 			}
@@ -1468,10 +1471,13 @@ func FindBeadsDir() string {
 
 		// 3'b. Only accept the secondary's own .beads/ if it owns a real database.
 		// Otherwise it's git-tracked config inherited from the primary; fall through.
+		// A metadata-less database yields to a metadata-backed primary
+		// workspace (localStoreYieldsToShared, GH#6552).
 		if jjSecondaryRoot != "" {
 			secondaryBeadsDir := filepath.Join(jjSecondaryRoot, ".beads")
 			if info, err := os.Stat(secondaryBeadsDir); err == nil && info.IsDir() {
-				if hasBeadsDatabase(secondaryBeadsDir) {
+				if hasBeadsDatabase(secondaryBeadsDir) &&
+					!yieldLocalStore(secondaryBeadsDir, resolvedJJPrimaryBeadsDir(jjPrimaryRoot, jjPrimaryErr)) {
 					return secondaryBeadsDir
 				}
 				// Lenient acceptance only when the primary has no DB to fall back to.
@@ -1590,6 +1596,19 @@ func resolvedWorktreeFallbackBeadsDir() string {
 		return ""
 	}
 	return FollowRedirect(fallback)
+}
+
+// resolvedJJPrimaryBeadsDir returns the redirect-resolved .beads directory of
+// the jj primary workspace, or "" when the primary is unknown or has none.
+func resolvedJJPrimaryBeadsDir(primaryRoot string, primaryErr error) string {
+	if primaryErr != nil || primaryRoot == "" {
+		return ""
+	}
+	primaryBeadsDir := filepath.Join(primaryRoot, ".beads")
+	if info, err := os.Stat(primaryBeadsDir); err != nil || !info.IsDir() {
+		return ""
+	}
+	return FollowRedirect(primaryBeadsDir)
 }
 
 // ResolveBeadsDirForRepo returns the effective .beads directory for a repo path.
@@ -1782,10 +1801,13 @@ func findDatabaseInTree() string {
 
 		// Separate-DB mode: only honor secondary's .beads/ if it owns a real DB;
 		// otherwise it's inherited git-tracked config and we want the primary.
+		// A metadata-less database yields to a metadata-backed primary
+		// workspace (localStoreYieldsToShared, GH#6552).
 		if jjSecondaryRoot != "" {
 			secondaryBeadsDir := filepath.Join(jjSecondaryRoot, ".beads")
 			if info, err := os.Stat(secondaryBeadsDir); err == nil && info.IsDir() {
-				if hasBeadsDatabase(secondaryBeadsDir) {
+				if hasBeadsDatabase(secondaryBeadsDir) &&
+					!yieldLocalStore(secondaryBeadsDir, resolvedJJPrimaryBeadsDir(jjPrimaryRoot, jjPrimaryErr)) {
 					if dbPath := findDatabaseInBeadsDir(secondaryBeadsDir, true); dbPath != "" {
 						return dbPath
 					}
