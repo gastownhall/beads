@@ -3,6 +3,8 @@ package workspacegate
 import (
 	"errors"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -173,5 +175,31 @@ func TestResolveParent(t *testing.T) {
 				t.Fatalf("resolveParent = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestForDirMissingParent pins the missing-parent error contract on
+// every platform: the wrap starts with "workspacegate: gate parent", the
+// error chain carries fs.ErrNotExist, and nothing is ever created at the
+// parent's path (the Windows resolver opens with OPEN_EXISTING, never
+// creating, and returns the open failure unchanged). On Unix this is
+// today's EvalSymlinks behavior, unchanged by design; the test exists so
+// the Windows handle route cannot break it.
+func TestForDirMissingParent(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "no", "such", "dir")
+
+	_, err := ForWorkspace(filepath.Join(missing, ".beads"))
+	if err == nil {
+		t.Fatal("ForWorkspace beneath a missing parent must fail")
+	}
+	if !strings.HasPrefix(err.Error(), "workspacegate: gate parent") {
+		t.Fatalf("err = %q, want prefix %q", err, "workspacegate: gate parent")
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("errors.Is(%v, fs.ErrNotExist) = false, want true", err)
+	}
+	if _, serr := os.Lstat(missing); !errors.Is(serr, fs.ErrNotExist) {
+		t.Fatalf("resolution must not create the parent: Lstat(%s) = %v, want not-exist", missing, serr)
 	}
 }
