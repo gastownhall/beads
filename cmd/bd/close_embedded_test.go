@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/types"
@@ -1008,5 +1009,87 @@ func TestEmbeddedCloseAlreadyClosedNewReasonNotReportedAsApplied(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(out), "already closed") {
 		t.Errorf("re-close of already-closed %s should say it was already closed and the reason is unchanged, got:\n%s", issue.ID, out)
+	}
+}
+
+// TestEmbeddedCloseAlreadyClosedAddsNoAuditEntry pins the side-effect half of
+// bd-th8229 / #4816: an already-closed re-close — batch or guarded — writes no
+// issue-status audit entry, keeps the stored first reason and its closed-event
+// count (the event half is pinned in-process by
+// TestParityCloseAlreadyClosedIsIdempotentSuccess), and reports the no-op.
+// The audit sidecar runs with BD_AUDIT_ENABLED=1 in an isolated store, so the
+// .beads/interactions.jsonl line count is an exact sink.
+func TestEmbeddedCloseAlreadyClosedAddsNoAuditEntry(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "raa")
+
+	issue := bdCreate(t, bd, dir, "Audit sink reclose", "--type", "task")
+
+	closeWithAudit := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command(bd, append([]string{"close"}, args...)...)
+		cmd.Dir = dir
+		cmd.Env = append(bdEnv(dir), "BD_AUDIT_ENABLED=1")
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd close %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+		}
+		return stdout.String()
+	}
+	auditLines := func() []string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(beadsDir, audit.FileName))
+		if err != nil {
+			t.Fatalf("read %s: %v", audit.FileName, err)
+		}
+		var lines []string
+		for _, l := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+			if l != "" {
+				lines = append(lines, l)
+			}
+		}
+		return lines
+	}
+
+	closeWithAudit(issue.ID, "--reason", "FIRST")
+	afterFirst := auditLines()
+	found := false
+	for _, l := range afterFirst {
+		if strings.Contains(l, issue.ID) && strings.Contains(l, "field_change") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("precondition: the first close wrote a status field_change audit entry; lines:\n%s", strings.Join(afterFirst, "\n"))
+	}
+
+	// The batch-route no-op: no audit line, stored reason kept, no-op report.
+	out := closeWithAudit(issue.ID, "--reason", "SECOND")
+	if !strings.Contains(out, "Already closed ") {
+		t.Errorf("re-close must report the no-op, got:\n%s", out)
+	}
+	if got := auditLines(); len(got) != len(afterFirst) {
+		t.Errorf("audit sidecar gained %d line(s) across an already-closed re-close (had %d, now %d); a no-op writes no entry:\n%s",
+			len(got)-len(afterFirst), len(afterFirst), len(got), strings.Join(got[len(afterFirst):], "\n"))
+	}
+	if got := bdShow(t, bd, dir, issue.ID).CloseReason; got != "FIRST" {
+		t.Errorf("close_reason = %q after re-close, want %q", got, "FIRST")
+	}
+
+	// The guarded-route no-op against the same sink and the same row: the row
+	// did not move, so its current revision still guards it.
+	rev := bdShowRevision(t, bd, dir, issue.ID)
+	out = closeWithAudit(issue.ID, "--if-revision", revStr(rev), "--reason", "THIRD")
+	if !strings.Contains(out, "Already closed ") {
+		t.Errorf("guarded re-close must report the no-op, got:\n%s", out)
+	}
+	if got := auditLines(); len(got) != len(afterFirst) {
+		t.Errorf("audit sidecar gained line(s) across a guarded already-closed re-close; a no-op writes no entry:\n%s",
+			strings.Join(got[len(afterFirst):], "\n"))
 	}
 }

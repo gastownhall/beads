@@ -1281,6 +1281,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd close` on an already-closed issue no longer reports the close it
+  dropped** (#4816). Closing is idempotent — first close wins — so a re-close
+  with a new `--reason` kept the stored reason but every route (batch,
+  proxied-server and `--if-revision`) printed `✓ Closed <id> …: <new reason>`
+  as if it had been applied. The re-close is still a no-op that exits 0 and
+  still names the issue, but now reports `✓ Already closed <id> — <title>
+  (close reason unchanged: <stored reason>)`, and `--json` entries for it
+  carry `already_closed: true` beside the stored reason (matching the served
+  HTTP per-item member). Exit codes, retry contracts (`--continue`,
+  `--claim-next`) and the molecule auto-close replay are unchanged; reopen
+  the issue first to change the close reason.
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
