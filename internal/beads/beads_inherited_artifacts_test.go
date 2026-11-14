@@ -1304,3 +1304,97 @@ func TestFindBeadsDir_YieldRequiresRecognizedSharedWorkspace(t *testing.T) {
 		}
 	})
 }
+
+// TestFindBeadsDir_ExplicitOverridesBypassYield is the AC-5 guard for
+// GH#6552: explicit choices — BEADS_DIR, BEADS_DB and a valid per-worktree
+// redirect — keep selecting the worktree's own store; the implicit yield
+// never applies to them and no missing-metadata warning is emitted. Passes
+// before and after the fix.
+func TestFindBeadsDir_ExplicitOverridesBypassYield(t *testing.T) {
+	unsetDiscoveryEnvForTest(t)
+
+	newFixture := func(t *testing.T) *gh6552Fixture {
+		t.Helper()
+		return newGH6552Fixture(t,
+			`{"backend":"dolt","dolt_mode":"embedded","dolt_database":"myproject"}`,
+			filepath.Join("embeddeddolt", "myproject"),
+			"beads")
+	}
+	worktreePaths := func(t *testing.T, fx *gh6552Fixture) (string, string) {
+		t.Helper()
+		return resolveForTest(t, fx.worktreeBeadsDir),
+			resolveForTest(t, filepath.Join(fx.worktreeBeadsDir, "embeddeddolt"))
+	}
+
+	t.Run("BEADS_DIR names the local store", func(t *testing.T) {
+		fx := newFixture(t)
+		t.Setenv("BEADS_DIR", fx.worktreeBeadsDir)
+		t.Chdir(fx.worktreeDir)
+		git.ResetCaches()
+
+		wantBeads, wantEmbedded := worktreePaths(t, fx)
+		stderr := strings.TrimSpace(captureStderrForTest(t, func() {
+			if got := resolveForTest(t, FindBeadsDir()); got != wantBeads {
+				t.Errorf("FindBeadsDir() = %q, want the BEADS_DIR-named %q", FindBeadsDir(), fx.worktreeBeadsDir)
+			}
+			if got := resolveForTest(t, FindDatabasePath()); got != wantEmbedded {
+				t.Errorf("FindDatabasePath() = %q, want the BEADS_DIR-named store %q", FindDatabasePath(), filepath.Join(fx.worktreeBeadsDir, "embeddeddolt"))
+			}
+		}))
+		if strings.Contains(stderr, "GH#6552") {
+			t.Errorf("no missing-metadata warning expected for an explicit BEADS_DIR, got stderr:\n%s", stderr)
+		}
+	})
+
+	t.Run("BEADS_DB names the local store", func(t *testing.T) {
+		fx := newFixture(t)
+		t.Setenv("BEADS_DB", fx.worktreeBeadsDir)
+		t.Chdir(fx.worktreeDir)
+		git.ResetCaches()
+
+		_, wantEmbedded := worktreePaths(t, fx)
+		stderr := strings.TrimSpace(captureStderrForTest(t, func() {
+			if got := resolveForTest(t, FindDatabasePath()); got != wantEmbedded {
+				t.Errorf("FindDatabasePath() = %q, want the BEADS_DB-named store %q", FindDatabasePath(), filepath.Join(fx.worktreeBeadsDir, "embeddeddolt"))
+			}
+		}))
+		if strings.Contains(stderr, "GH#6552") {
+			t.Errorf("no missing-metadata warning expected for an explicit BEADS_DB, got stderr:\n%s", stderr)
+		}
+	})
+
+	t.Run("valid worktree redirect wins before the yield", func(t *testing.T) {
+		fx := newFixture(t)
+
+		// A third workspace the redirect selects explicitly.
+		externalBeads := filepath.Join(fx.tmpDir, "external", ".beads")
+		if err := os.MkdirAll(filepath.Join(externalBeads, "embeddeddolt", "ext"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(externalBeads, "metadata.json"),
+			[]byte(`{"backend":"dolt","dolt_mode":"embedded","dolt_database":"ext"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(fx.worktreeBeadsDir, "redirect"),
+			[]byte(externalBeads+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		t.Chdir(fx.worktreeDir)
+		git.ResetCaches()
+
+		wantBeads := resolveForTest(t, externalBeads)
+		wantEmbedded := resolveForTest(t, filepath.Join(externalBeads, "embeddeddolt"))
+		stderr := strings.TrimSpace(captureStderrForTest(t, func() {
+			if got := resolveForTest(t, FindBeadsDir()); got != wantBeads {
+				t.Errorf("FindBeadsDir() = %q, want the redirect target %q", FindBeadsDir(), externalBeads)
+			}
+			if got := resolveForTest(t, FindDatabasePath()); got != wantEmbedded {
+				t.Errorf("FindDatabasePath() = %q, want the redirect target's store %q", FindDatabasePath(), filepath.Join(externalBeads, "embeddeddolt"))
+			}
+		}))
+		if strings.Contains(stderr, "GH#6552") {
+			t.Errorf("no missing-metadata warning expected for an explicit redirect, got stderr:\n%s", stderr)
+		}
+	})
+}
