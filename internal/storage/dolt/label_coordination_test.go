@@ -10,6 +10,7 @@ import (
 	publicops "github.com/steveyegge/beads/issueops"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // TestLabelPatchConcurrentReplaceConflictsAtCommit pins GH#5657 on the durable
@@ -30,6 +31,104 @@ func TestLabelPatchConcurrentReplaceConflictsAtCommit(t *testing.T) {
 // exist until the racing transactions write it.
 func TestWispLabelPatchConcurrentReplaceConflictsAtCommit(t *testing.T) {
 	runLabelReplaceRace(t, "wisp_label_patch_race", true, false)
+}
+
+// TestLabelOnlyPatchLeavesTheRowAndRepeatsAsANoOp pins what the coordination
+// cell must not cost (GH#5657): a label-only patch is a label-table write plus
+// a clone-local cell rewrite, so the issue row keeps its RowVersion and its
+// updated_at, and a second identical patch nets to the current set, reports
+// Changed=false, leaves the cell as the first patch wrote it and records no
+// label events.
+func TestLabelOnlyPatchLeavesTheRowAndRepeatsAsANoOp(t *testing.T) {
+	skipIfNoServer(t)
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	store := newMultiConnectionEpochStore(t, ctx, "label_patch_noop")
+	if err := store.SetConfig(ctx, "issue_prefix", "lr"); err != nil {
+		t.Fatalf("set issue_prefix: %v", err)
+	}
+	const id = "lr-noop"
+	createPerm(t, ctx, store, id)
+	for _, label := range []string{"state:a", "keep"} {
+		if err := store.AddLabel(ctx, id, label, "seeder"); err != nil {
+			t.Fatalf("seed label %s: %v", label, err)
+		}
+	}
+	if _, err := store.db.ExecContext(ctx, "DELETE FROM local_metadata WHERE `key` LIKE ?", "label-coordination/%"); err != nil {
+		t.Fatalf("drop the seed's coordination cells: %v", err)
+	}
+	lifecycle, err := store.IssueLifecycle()
+	if err != nil {
+		t.Fatalf("IssueLifecycle(): %v", err)
+	}
+	row := func() *types.Issue {
+		t.Helper()
+		issue, err := store.GetIssue(ctx, id)
+		if err != nil {
+			t.Fatalf("GetIssue: %v", err)
+		}
+		return issue
+	}
+	cell := func() string {
+		t.Helper()
+		var value sql.NullString
+		if err := store.db.QueryRowContext(ctx,
+			"SELECT MAX(value) FROM local_metadata WHERE `key` LIKE ?", "label-coordination/v1/labels/%").Scan(&value); err != nil {
+			t.Fatalf("read the coordination cell: %v", err)
+		}
+		return value.String
+	}
+	events := func() int {
+		t.Helper()
+		got, err := store.GetEvents(ctx, id, 0)
+		if err != nil {
+			t.Fatalf("GetEvents: %v", err)
+		}
+		return len(got)
+	}
+	patch := publicops.UpdateRequest{Actor: "writer", IssueID: id, Patch: publicops.IssuePatch{
+		Labels: publicops.LabelPatch{RemovePrefixes: []string{"state:"}, Add: []string{"state:b"}},
+	}}
+
+	before := row()
+	first, err := lifecycle.Update(ctx, patch)
+	if err != nil || !first.Changed {
+		t.Fatalf("first label patch = (changed %v, %v), want a committed edit", first.Changed, err)
+	}
+	afterFirst := row()
+	labels := append([]string(nil), afterFirst.Labels...)
+	sort.Strings(labels)
+	if !reflect.DeepEqual(labels, []string{"keep", "state:b"}) {
+		t.Fatalf("labels after the first patch = %v, want [keep state:b]", labels)
+	}
+	if afterFirst.RowVersion != before.RowVersion || !afterFirst.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Fatalf("label-only patch moved the issue row: RowVersion %d -> %d, updated_at %v -> %v; want both unchanged",
+			before.RowVersion, afterFirst.RowVersion, before.UpdatedAt, afterFirst.UpdatedAt)
+	}
+	written := cell()
+	if written == "" {
+		t.Fatalf("the first label patch wrote no coordination cell")
+	}
+	eventsAfterFirst := events()
+
+	second, err := lifecycle.Update(ctx, patch)
+	if err != nil {
+		t.Fatalf("identical label patch: %v", err)
+	}
+	if second.Changed {
+		t.Errorf("identical label patch reported Changed = true, want a no-op")
+	}
+	if got := cell(); got != written {
+		t.Errorf("identical label patch rewrote the coordination cell %q -> %q, want it untouched", written, got)
+	}
+	if got := events(); got != eventsAfterFirst {
+		t.Errorf("identical label patch recorded %d new events, want none", got-eventsAfterFirst)
+	}
+	if afterSecond := row(); afterSecond.RowVersion != before.RowVersion || !afterSecond.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Errorf("identical label patch moved the issue row: RowVersion %d -> %d, updated_at %v -> %v",
+			before.RowVersion, afterSecond.RowVersion, before.UpdatedAt, afterSecond.UpdatedAt)
+	}
 }
 
 func runLabelReplaceRace(t *testing.T, dbName string, wisp, preseeded bool) {
