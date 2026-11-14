@@ -388,8 +388,15 @@ func (s *DoltStore) setLastSyncTime(ctx context.Context, peer string) error {
 
 // Sync performs a full bidirectional sync with a peer:
 // 1. Fetch from peer
-// 2. Merge peer's changes (handling conflicts per strategy)
+// 2. Merge peer's changes (resolving conflicts with strategy when one is set)
 // 3. Push local changes to peer
+//
+// An explicit strategy runs the merge through MergeWithStrategy — the
+// pinned-session, conflict-tolerant path `bd vc merge --strategy` uses
+// (#4992) — which resolves, repairs and concludes the merge before returning.
+// The bare-autocommit Merge a strategy-less sync uses cannot resolve a real
+// conflict: Dolt rejects the merge transaction (Error 1105) before the
+// conflicts are inspectable (GH#5564).
 //
 // Returns the sync result including any conflicts encountered.
 func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*SyncResult, error) {
@@ -422,50 +429,40 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 	// Step 2: Get status before merge
 	beforeCommit, _ := s.GetCurrentCommit(ctx) // Best effort: empty commit hash means diff won't be logged
 
-	// Step 3: Merge peer's branch
+	// Step 3: Merge peer's branch. An explicit strategy runs the whole
+	// merge/resolve/repair/commit sequence on MergeWithStrategy's pinned
+	// connection — it concludes the merge and runs the post-resolution
+	// is_blocked recompute (bd-578h9.11) itself. The resolve/commit tail Sync
+	// used to run here never executed on a real conflict through the bare
+	// Merge: Dolt rejects the conflicted merge before Sync could resolve it
+	// (GH#5564), the same dead-strategy shape #4992 fixed for vc merge.
 	remoteBranch := fmt.Sprintf("%s/%s", peer, s.branch)
-	conflicts, err := s.Merge(ctx, remoteBranch)
+	var conflicts []storage.Conflict
+	var err error
+	if strategy != "" {
+		conflicts, err = s.MergeWithStrategy(ctx, remoteBranch, strategy)
+	} else {
+		conflicts, err = s.Merge(ctx, remoteBranch)
+	}
 	if err != nil {
 		result.Error = fmt.Errorf("merge failed: %w", err)
 		return result, result.Error
 	}
 
-	// Step 4: Handle conflicts if any
+	// Step 4: Report what the merge produced. With a strategy the conflicts
+	// are already resolved and committed by MergeWithStrategy, so they are
+	// data for the caller, not work left open. Without one, a returned
+	// conflict set is defensive — plain Merge errors on real conflicts — and
+	// surfaces the operator guidance instead of resolving blind.
 	if len(conflicts) > 0 {
 		result.Conflicts = conflicts
 
 		if strategy == "" {
-			// No strategy specified, leave conflicts for manual resolution
 			result.Error = fmt.Errorf("merge conflicts require resolution (use --strategy ours|theirs)")
 			return result, result.Error
 		}
 
-		// Auto-resolve using strategy
-		for _, c := range conflicts {
-			if err := s.ResolveConflicts(ctx, c.Field, strategy); err != nil {
-				result.Error = fmt.Errorf("conflict resolution failed for %s: %w", c.Field, err)
-				return result, result.Error
-			}
-		}
 		result.ConflictsResolved = true
-
-		// Commit the resolution INCLUDING config: the operator chose this
-		// strategy, and plain Commit excludes config (GH#2455). A config-only
-		// conflict — routine now that kv.memory.* memories sync through config —
-		// would otherwise resolve but never commit, leaving the merge
-		// unconcluded and re-wedging the next sync.
-		if err := s.CommitMergeResolution(ctx, fmt.Sprintf("Resolve conflicts from %s using %s strategy", peer, strategy)); err != nil {
-			result.Error = fmt.Errorf("failed to commit conflict resolution: %w", err)
-			return result, result.Error
-		}
-
-		// bd-578h9.11: the conflicted merge skipped the automatic is_blocked
-		// recompute (unresolved rows would have fed it garbage); now that the
-		// resolution is committed, cover the whole merge+resolution window.
-		if err := s.RecomputeBlockedAfterMerge(ctx, beforeCommit); err != nil {
-			result.Error = fmt.Errorf("conflicts resolved but is_blocked recompute failed: %w", err)
-			return result, result.Error
-		}
 	}
 	result.Merged = true
 
