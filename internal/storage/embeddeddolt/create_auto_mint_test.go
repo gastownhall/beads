@@ -4,9 +4,11 @@ package embeddeddolt_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
@@ -206,5 +208,91 @@ func TestCreateFailureResetsAssignedIDs(t *testing.T) {
 			t.Fatalf("retry assigned id %q, edge owner %q; want a fresh id owning the edge", minted.ID, minted.Dependencies[0].IssueID)
 		}
 		te.assertRowExists(t, ctx, "issues", minted.ID)
+	})
+}
+
+// TestExplicitIDCreateBehaviorUnchanged pins the explicit-id side of
+// bd-t4h0n7 (PR #6754): the auto-mint fix makes only creates that name no id
+// create-only, so a create that names one keeps every caller-option behavior:
+// the legacy single create upserts an existing row, a ConflictSkip batch skips
+// it, the guarded create refuses it, a row in the sibling plane is refused,
+// and a retired id is refused as expired.
+func TestExplicitIDCreateBehaviorUnchanged(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "cl")
+	ctx := t.Context()
+	explicit := func(id, title string, ephemeral bool) *types.Issue {
+		return &types.Issue{ID: id, Title: title, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: ephemeral}
+	}
+	if err := te.store.CreateIssue(ctx, explicit("cl-held", "original", false), "tester"); err != nil {
+		t.Fatalf("CreateIssue(cl-held): %v", err)
+	}
+
+	t.Run("legacy single create upserts", func(t *testing.T) {
+		if err := te.store.CreateIssue(ctx, explicit("cl-upsert", "first", false), "tester"); err != nil {
+			t.Fatalf("CreateIssue(cl-upsert): %v", err)
+		}
+		if err := te.store.CreateIssue(ctx, explicit("cl-upsert", "second", false), "tester"); err != nil {
+			t.Fatalf("CreateIssue(cl-upsert) again = %v, want the upsert", err)
+		}
+		assertTitle(t, ctx, te, "cl-upsert", "second")
+	})
+
+	t.Run("ConflictSkip batch skips", func(t *testing.T) {
+		err := te.store.CreateIssuesWithFullOptions(ctx, []*types.Issue{explicit("cl-held", "skipped", false)}, "tester",
+			storage.BatchCreateOptions{ConflictSkip: true})
+		if err != nil {
+			t.Fatalf("ConflictSkip CreateIssuesWithFullOptions(cl-held) = %v, want a skip", err)
+		}
+		assertTitle(t, ctx, te, "cl-held", "original")
+	})
+
+	t.Run("guarded create refuses an existing id", func(t *testing.T) {
+		lifecycle, err := te.store.IssueLifecycle()
+		if err != nil {
+			t.Fatalf("IssueLifecycle(): %v", err)
+		}
+		_, err = lifecycle.Create(ctx, publicops.CreateRequest{Actor: "tester", Issue: explicit("cl-held", "refused", false)})
+		if !errors.Is(err, storage.ErrAlreadyExists) {
+			t.Fatalf("guarded Create(cl-held) = %v, want ErrAlreadyExists", err)
+		}
+		assertTitle(t, ctx, te, "cl-held", "original")
+	})
+
+	t.Run("sibling plane is refused", func(t *testing.T) {
+		if err := te.store.CreateIssue(ctx, explicit("cl-wisp", "wisp", true), "tester"); err != nil {
+			t.Fatalf("CreateIssue(wisp cl-wisp): %v", err)
+		}
+		if err := te.store.CreateIssue(ctx, explicit("cl-wisp", "durable", false), "tester"); err == nil {
+			t.Fatal("durable CreateIssue(cl-wisp) over a wisp succeeded, want a refusal")
+		}
+		assertTitle(t, ctx, te, "cl-wisp", "wisp")
+		te.assertRowNotExists(t, ctx, "issues", "cl-wisp")
+	})
+
+	t.Run("retired id is refused as expired", func(t *testing.T) {
+		if err := te.store.CreateIssue(ctx, explicit("cl-retired", "retired", false), "tester"); err != nil {
+			t.Fatalf("CreateIssue(cl-retired): %v", err)
+		}
+		lifecycle, err := te.store.IssueLifecycle()
+		if err != nil {
+			t.Fatalf("IssueLifecycle(): %v", err)
+		}
+		if _, err := lifecycle.Close(ctx, publicops.CloseRequest{Actor: "tester", IssueID: "cl-retired", Reason: "done"}); err != nil {
+			t.Fatalf("Close(cl-retired): %v", err)
+		}
+		sweeper, err := te.store.Sweeper()
+		if err != nil {
+			t.Fatalf("Sweeper(): %v", err)
+		}
+		if result, err := sweeper.Sweep(ctx, publicops.SweepRequest{Tier: publicops.SweepDurable, IDPattern: "cl-retired", RetainIDs: true}); err != nil || result.Swept != 1 {
+			t.Fatalf("retaining sweep of cl-retired = %+v, %v; want Swept 1", result, err)
+		}
+		err = te.store.CreateIssue(ctx, explicit("cl-retired", "reborn", false), "tester")
+		var expired *publicops.IdempotencyExpiredError
+		if !errors.As(err, &expired) {
+			t.Fatalf("CreateIssue(retired cl-retired) = %v, want *IdempotencyExpiredError", err)
+		}
+		te.assertRowNotExists(t, ctx, "issues", "cl-retired")
 	})
 }
