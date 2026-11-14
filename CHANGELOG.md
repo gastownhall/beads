@@ -1281,6 +1281,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The workspace gate, and so `bd init`, no longer fails beneath a Windows
+  junction or directory-mounted volume (such as a Dev Drive)** (#8170,
+  builds on #8173 by @bgrainger). The gate resolved its parent directory
+  with `filepath.EvalSymlinks`, which since Go 1.23 refuses to walk through
+  a mount-point reparse point, so `bd init` failed there with `gate parent
+  ... must exist: The system cannot find the path specified.` and other
+  commands ran ungated. The parent is now resolved through a directory
+  handle, so other commands are gated there again, and a junction, folder
+  mount, drive letter or differently cased spelling of one directory
+  selects one gate file. A gate path takes the directory's DOS path as
+  Windows reports it: a plain local directory keeps the drive-letter path
+  it had, a mapped network drive resolves to its UNC path and a `subst`
+  drive to its backing directory, and a volume with no DOS path uses its
+  `\\?\Volume{...}` path. Resolution outside Windows is unchanged.
+  Installing Git hooks beneath such a mount is a separate open issue
+  (#8171).
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
