@@ -742,3 +742,36 @@ func TestMolBondProxiedKeepsRouteErrors(t *testing.T) {
 		f.assertServedUnwritten("formula over route refusal")
 	})
 }
+
+// TestMolBondProxiedRefusesAChangedRoutedHome: a writable reopen that hands
+// back another store than the one discovery planned on is refused before any
+// write.
+func TestMolBondProxiedRefusesAChangedRoutedHome(t *testing.T) {
+	f := newMolBondProxiedFixture(t)
+	f.reopenWrapper = func(rr *RoutedResult) *RoutedResult {
+		rr.Close()
+		other, err := resolveViaPrefixRoutingWithAccess(f.ctx, "zz-other", true, true)
+		if err != nil {
+			t.Fatalf("open the other rig: %v", err)
+		}
+		return other
+	}
+
+	runErr, _, stderr := f.bond(molBondInput{argA: "gt-mol1", argB: "gt-mol2"})
+	if runErr == nil {
+		t.Fatalf("bond onto a changed home succeeded")
+	}
+	if !strings.Contains(stderr, "changed between discovery and writable reopen") {
+		t.Errorf("stderr lacks the changed-home refusal:\n%s", stderr)
+	}
+	if f.reopens != 1 {
+		t.Errorf("got %d writable reopen(s), want 1", f.reopens)
+	}
+	if deps := f.rigDependencies("gt-mol2"); len(deps) != 0 {
+		t.Errorf("refused bond wrote dependencies in the planned rig: %+v", deps)
+	}
+	if deps := f.rigDependencies("zz-other"); len(deps) != 0 {
+		t.Errorf("refused bond wrote dependencies in the other rig: %+v", deps)
+	}
+	f.assertServedUnwritten("changed home")
+}
