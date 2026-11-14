@@ -87,13 +87,26 @@ a bottleneck in practice.
 
 ### The Two Patterns
 
-**Pattern 1: Transaction-Wrapped Dolt Commits** (recommended for us)
+**Pattern 1: SQL-Committed Writes, Dolt-Committed After** (recommended for us)
+
+> **Post-implementation correction (GH#5752).** This design originally put
+> `CALL DOLT_COMMIT` *inside* the SQL transaction. `DOLT_ADD` stages the whole
+> table from the session's transaction root, so a history commit minted inside
+> the still-open transaction writes every row a concurrent writer committed in
+> the meantime back to its BEGIN-time value (the lost-update hazard,
+> dolthub/dolt#5205) — and if the SQL commit's response is lost, it mints a
+> Dolt revision for a transaction the server may have rolled back. Publication
+> (`DOLT_ADD`, then `DOLT_COMMIT`) therefore runs strictly **after** the SQL
+> transaction commits, on its own connection; a failure there is dropped and
+> the change rides the next Dolt commit.
+
 ```sql
 BEGIN;
 INSERT INTO issues (id, title, status) VALUES ('gt-abc', 'Fix bug', 'open');
 INSERT INTO dependencies (issue_id, depends_on_id, type) VALUES ('gt-abc', 'gt-def', 'blocks');
-CALL DOLT_COMMIT('-Am', 'bd: create gt-abc');
--- Transaction ends, changes are atomically visible
+COMMIT;  -- SQL first: the rows are durable and atomically visible
+CALL DOLT_ADD('issues', 'dependencies');
+CALL DOLT_COMMIT('-m', 'bd: create gt-abc');
 ```
 
 **Pattern 2: Branch-Per-Client** (our current approach — retiring)
@@ -108,15 +121,17 @@ CALL DOLT_CHECKOUT('worker-ace-1708642800');
 
 ### Principle
 
-All beads live on `main`. Concurrent access is managed through SQL transactions
-with explicit `DOLT_COMMIT` at transaction boundaries. No per-worker branches.
+All beads live on `main`. Concurrent access is managed through SQL
+transactions, with the Dolt history commit minted after the transaction
+commits (see the correction note under Pattern 1). No per-worker branches.
 
 ### Transaction Semantics
 
 #### Rule 1: Every Write Group Gets a Transaction
 
 Every logical write operation (create bead, update status, close bead, add
-dependency, etc.) must be wrapped in `BEGIN` ... `CALL DOLT_COMMIT()`.
+dependency, etc.) must be wrapped in `BEGIN` ... `COMMIT`, and its Dolt
+history commit minted only after that `COMMIT` succeeded.
 
 ```go
 // BEFORE (current): auto-commit per statement, no transaction boundary
@@ -125,22 +140,24 @@ func (s *DoltStore) CreateIssue(ctx, issue, actor) {
     // DOLT_COMMIT happens later via maybeAutoCommit()
 }
 
-// AFTER: explicit transaction with DOLT_COMMIT inside
+// AFTER: explicit transaction, then post-tx publication
 func (s *DoltStore) CreateIssue(ctx, issue, actor) {
     tx, _ := s.db.BeginTx(ctx, nil)
     tx.Exec("INSERT INTO issues ...")
     tx.Exec("INSERT INTO labels ...")        // if applicable
     tx.Exec("INSERT INTO dependencies ...")  // if applicable
-    tx.Exec("CALL DOLT_COMMIT('-Am', ?)", msg)
-    tx.Commit()
+    tx.Commit()                              // SQL first
+    s.publishCommittedTables(ctx, []string{"issues", "labels", "dependencies"}, msg)
 }
 ```
 
 This ensures:
 - All writes within a logical operation are **atomic**
 - No other connection can commit our uncommitted writes
-- The `DOLT_COMMIT` is part of the transaction, so it only includes our changes
-- If the transaction rolls back, no Dolt commit is created
+- The Dolt commit stages the post-commit merged state, so a concurrent
+  writer's rows committed inside the transaction's window survive
+- If the transaction rolls back — or its commit response is lost — no Dolt
+  commit is minted off it
 
 #### Rule 2: Read Operations Don't Need Transactions
 
@@ -155,13 +172,13 @@ The current batch mode (accumulate changes, commit at a logical boundary)
 maps naturally to a long-lived transaction:
 
 ```go
-// Batch: open transaction, do multiple writes, single DOLT_COMMIT at end
+// Batch: one transaction for the logical group, one publication after it
 tx.Begin()
 for _, issue := range issues {
     tx.Exec("INSERT INTO issues ...")
 }
-tx.Exec("CALL DOLT_COMMIT('-Am', ?)", batchMsg)
 tx.Commit()
+s.publishCommittedTables(ctx, dirtyTables(tx), batchMsg)
 ```
 
 ### What Changes in Beads
@@ -181,12 +198,16 @@ if bdBranch := os.Getenv("BD_BRANCH"); bdBranch != "" {
 }
 ```
 
-#### `transaction.go`: Add DOLT_COMMIT to Transactions
+#### `transaction.go`: Publish the Committed Transaction to Version History
 
 The current `RunInTransaction` does `sql.BeginTx` / `Commit` but never calls
 `DOLT_COMMIT`. This means SQL changes are committed to the working set but
 not to Dolt's version history. Another connection could then inadvertently
 include those changes in its own `DOLT_COMMIT`.
+
+The original fix minted the `DOLT_COMMIT` inside the SQL transaction; GH#5752
+moved it out (the correction note under Pattern 1): the transaction commits
+first, then the store publishes the tables the body dirtied, after the commit.
 
 ```go
 // BEFORE:
@@ -197,7 +218,7 @@ func (s *DoltStore) runDoltTransaction(ctx, fn) error {
     return sqlTx.Commit()  // SQL commit only — no Dolt commit!
 }
 
-// AFTER: DOLT_COMMIT inside the transaction
+// AFTER: commit SQL first, then publish to version history
 func (s *DoltStore) runDoltTransaction(ctx, fn, commitMsg) error {
     sqlTx, _ := s.db.BeginTx(ctx, nil)
     tx := &doltTransaction{tx: sqlTx, store: s}
@@ -205,24 +226,24 @@ func (s *DoltStore) runDoltTransaction(ctx, fn, commitMsg) error {
         sqlTx.Rollback()
         return err
     }
-    // Dolt commit INSIDE the SQL transaction — atomic with the writes
-    _, err := sqlTx.Exec("CALL DOLT_COMMIT('-Am', ?, '--author', ?)",
-        commitMsg, s.commitAuthorString())
-    if err != nil && !isNothingToCommit(err) {
-        sqlTx.Rollback()
-        return err
+    if err := sqlTx.Commit(); err != nil {
+        return err // an ambiguous commit surfaces ErrCommitIndeterminate; never replayed
     }
-    return sqlTx.Commit()
+    // Dolt commit AFTER the SQL commit — staging inside the open transaction
+    // would stage from the BEGIN-time root and revert concurrent writers'
+    // rows. A failure here is dropped: the data is durable and rides the
+    // next Dolt commit.
+    return s.publishCommittedTables(ctx, tx.dirtyTables(), commitMsg)
 }
 ```
 
 #### `dolt_autocommit.go`: Retire or Simplify
 
-With `DOLT_COMMIT` moving inside transactions, the external auto-commit
-wrapper (`maybeAutoCommit`) becomes unnecessary for most operations. It may
-still be useful as a safety net for bare writes that escape the transaction
-pattern (migration scripts, one-off fixes), but the primary write path
-should use transaction-scoped commits.
+With per-mutation publication moved after the SQL commit (through the
+post-tx publisher), the external auto-commit wrapper (`maybeAutoCommit`)
+becomes unnecessary for most operations. It may still be useful as a safety
+net for bare writes that escape the transaction pattern (migration scripts,
+one-off fixes), but the primary write path publishes after its transaction.
 
 #### `versioned.go`: Merge/Branch Operations
 
@@ -314,11 +335,13 @@ also updates it). Mitigation: use optimistic concurrency checks where needed
 
 ### Phase 1: Add Transaction Discipline (Non-Breaking)
 
-Modify `RunInTransaction` to include `DOLT_COMMIT` inside the SQL transaction.
-This works regardless of branch-per-worker — it's strictly additive safety.
+Give `RunInTransaction` a commit message and mint the Dolt commit after the
+SQL transaction commits. This works regardless of branch-per-worker — it's
+strictly additive safety.
 
-- Modify `transaction.go`: Add commit message parameter, call `DOLT_COMMIT`
-  before `tx.Commit()`
+- Modify `transaction.go`: add a commit message parameter, publish the
+  transaction's dirty tables through the post-tx publisher after
+  `tx.Commit()`
 - Update all `RunInTransaction` callers to provide commit messages
 - Keep `maybeAutoCommit` as fallback for bare writes
 - **Test**: Existing concurrent_test.go should still pass
@@ -357,8 +380,9 @@ The move to all-on-main **simplifies** federation:
 - **Cross-rig bead visibility is immediate.** When rig A pushes to DoltHub,
   rig B pulls and sees all beads. No branch reconciliation needed.
 
-- **Federation transactions.** The same `BEGIN` ... `DOLT_COMMIT` pattern
-  applies to federation sync: pull remote changes, resolve conflicts, commit.
+- **Federation transactions.** The same discipline applies to federation
+  sync — commit the SQL transaction first, then mint the Dolt commit: pull
+  remote changes, resolve conflicts, commit.
   This is the same flow as Dolt's native replication.
 
 ### Wisps and Federation

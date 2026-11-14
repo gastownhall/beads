@@ -1498,8 +1498,9 @@ func (s *DoltStore) commitWriteTxOn(ctx context.Context, beginner txBeginner, fn
 // for a sharper reason than that path had. DOLT_ADD stages the whole table
 // from the session's transaction root, so minting the commit inside the still
 // open transaction would write every row a concurrent writer committed inside
-// that window back to its BEGIN-time value — the hazard doltAddAndCommitInTx
-// documents. A recheck runs precisely and only when concurrent unblocking
+// that window back to its BEGIN-time value — the lost-update hazard the
+// deleted in-tx staging helper used to carry and GH#5752's post-tx
+// publication eliminates. A recheck runs precisely and only when concurrent unblocking
 // writes are racing on issues, so that window is never idle here. Committing
 // the SQL transaction first lets Dolt's commit-time merge reconcile this
 // repair with those writers, and the post-commit staging then stages the
@@ -4500,8 +4501,9 @@ func (s *DoltStore) doltAddAndCommit(ctx context.Context, tables []string, commi
 // stageAndCommit is doltAddAndCommit with the scoped commits' options.
 func (s *DoltStore) stageAndCommit(ctx context.Context, tables []string, commitMsg string, opts stageOptions) error {
 	// Batch/off auto-commit (bd-4wamg): leave the writes in the working set
-	// for a later explicit commit point (bd dolt commit / CommitPending),
-	// matching doltAddAndCommitInTx.
+	// for a later explicit commit point (bd dolt commit / CommitPending).
+	// This is the one staging funnel every post-tx publication routes
+	// through (GH#5752), so the deferral holds uniformly.
 	if issueops.VersionCommitDeferred(ctx) {
 		return nil
 	}

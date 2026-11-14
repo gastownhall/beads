@@ -15,7 +15,8 @@ import (
 // TestDoltAddAndCommitSkipsEmptyCommitWithUnrelatedDirtyTable is a regression
 // test for the high-frequency "nothing to commit" Dolt warning spam.
 //
-// Root cause: doltAddAndCommit / doltAddAndCommitInTx stage only a FIXED table
+// Root cause: the selective-staging commit helpers (doltAddAndCommit, and
+// before GH#5752 removed it doltAddAndCommitInTx) stage only a FIXED table
 // list (e.g. ["dependencies"]) and then issue DOLT_COMMIT('-m', ...). An
 // idempotent no-op write (re-adding an existing dependency via INSERT IGNORE, or
 // removing a non-existent one) leaves that table clean, so the DOLT_ADD stages
@@ -97,8 +98,9 @@ func TestDoltAddAndCommitSkipsEmptyCommitWithUnrelatedDirtyTable(t *testing.T) {
 }
 
 // TestClaimAndCloseNoRegressionWithUnrelatedDirtyTable guards the issues.go
-// commit sites that were consolidated onto the guarded doltAddAndCommitInTx
-// helper (UpdateIssue/ClaimIssue/ClaimReadyIssue/CloseIssue/Delete*).
+// commit sites that were consolidated onto the guarded staging funnel the
+// post-tx publisher routes through (stageAndCommit)
+// (UpdateIssue/ClaimIssue/ClaimReadyIssue/CloseIssue/Delete*).
 //
 // IMPORTANT — what this test does and does NOT prove. The empty-commit BUG is a
 // server-side "nothing to commit" WARNING, not a HEAD movement: an empty

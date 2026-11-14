@@ -531,7 +531,7 @@ func (s *deleteRecordingStore) DeleteIssues(ctx context.Context, ids []string, _
 // TestDeleteMovedIssuesFollowsAutoCommitPolicy verifies that phase 2 deletes
 // under the command's dolt.auto-commit policy, as bd delete does. A
 // server-mode project's delete honors the deferral
-// (DoltStore.doltAddAndCommitInTx), so with batch or off it stays in the
+// (DoltStore.stageAndCommit, the post-tx publication funnel), so with batch or off it stays in the
 // working set as the copy stays in an embedded planning store, instead of
 // being committed while the only copy is not.
 func TestDeleteMovedIssuesFollowsAutoCommitPolicy(t *testing.T) {

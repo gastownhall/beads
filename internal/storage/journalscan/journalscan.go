@@ -4,7 +4,8 @@
 // their guard tests detect such mutators STRUCTURALLY — by the DML a function
 // executes — rather than by matching on method-name prefixes, which could let a
 // mutator named off-pattern ship un-journaled. This package holds the parsing,
-// bead-table DML detection, and call-graph fixpoint those guards run.
+// bead-table DML detection, Dolt version-statement detection, and call-graph
+// fixpoint those guards run.
 package journalscan
 
 import (
@@ -28,6 +29,13 @@ type FuncInfo struct {
 	SelCalls   []string // selector calls, by selector name (x.Foo -> "Foo")
 	Calls      []Call   // every call, bare or selector, with its arguments
 	OwnBeadDML bool     // body issues INSERT/UPDATE/DELETE against a bead table
+
+	// OwnDoltVersionCall reports that the body passes a DOLT_ADD or
+	// DOLT_COMMIT statement — a write to Dolt's version history — to any
+	// call (ExecContext, DrainCall, fmt.Sprintf, ...): a Dolt version
+	// publisher. The dolt package's staging-completeness guard allows only
+	// its approved publisher set to hold one (GH#5752).
+	OwnDoltVersionCall bool
 }
 
 // Call is one call expression in a function body: the called name (a bare
@@ -138,6 +146,9 @@ func ParsePackage(dir string) (map[string]*FuncInfo, error) {
 					case *ast.BasicLit:
 						if node.Kind == token.STRING && SQLWritesBeadTable(node.Value) {
 							f.OwnBeadDML = true
+						}
+						if node.Kind == token.STRING && DoltVersionCall(node.Value) {
+							f.OwnDoltVersionCall = true
 						}
 					}
 					return true
@@ -309,6 +320,20 @@ func Fixpoint(fns map[string]*FuncInfo, seed func(*FuncInfo) bool, edges func(*F
 		}
 	}
 	return got
+}
+
+// doltVersionCall matches a Dolt version statement — DOLT_ADD( or DOLT_COMMIT(
+// — case-insensitively, tolerant of whitespace before the parenthesis and of
+// backquoted table arguments. Those are the two statements that stage tables
+// into, and advance, Dolt's version history; the parenthesis keeps prose
+// about Dolt commits (log lines, error messages) from reading as one.
+var doltVersionCall = regexp.MustCompile("(?i)\\bDOLT_(?:ADD|COMMIT)\\s*\\(")
+
+// DoltVersionCall reports whether a SQL string literal issues a Dolt version
+// statement (CALL DOLT_ADD(...) / CALL DOLT_COMMIT(...)) — a write to Dolt's
+// version history, as opposed to a row write SQLWritesBeadTable detects.
+func DoltVersionCall(lit string) bool {
+	return doltVersionCall.MatchString(strings.ReplaceAll(lit, "`", ""))
 }
 
 // BeadTables are the work-bead tables a mutation must be journaled for.

@@ -754,6 +754,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Dolt version commits are minted strictly after the SQL transaction they
+  describe (GH#5752).** The last in-transaction `DOLT_ADD`/`DOLT_COMMIT`
+  sites (delete, purge/prune sweeper, lifecycle transactions, unclaim,
+  metadata merge, reopen, epoch minting) now publish through the shared
+  post-tx publisher, and the in-tx staging helper (`doltAddAndCommitInTx`)
+  is gone. Staging from the BEGIN-time root inside an open transaction let
+  a minted commit revert rows a concurrent writer had committed in the
+  meantime; publishing after the commit stages the merged state instead.
+  Failure contracts that follow: a trailing `DOLT_ADD`/`DOLT_COMMIT`
+  failure after the SQL commit no longer fails the operation — the change
+  is durable and rides the next Dolt commit, counted and logged once; an
+  ambiguous SQL commit (lost response) surfaces
+  `ErrCommitIndeterminate` and never replays the body or mints history;
+  a serialization conflict replays once and stages only the committed
+  attempt's tables. Sweeps now honor a deferred version-commit context
+  (`--dolt-auto-commit batch`/`off`) like every other write. A structural
+  guard (`version_staging_completeness_test.go`) keeps new DOLT_ADD/
+  DOLT_COMMIT literals confined to the approved publisher set.
 - **`bd dolt pull` on an embedded rig with no remote exits 0 (bd-e2q8zs).**
   It prints `No remote is configured — skipping.` and the setup guidance,
   as server mode already did; in embedded mode it used to exit 1. A pull

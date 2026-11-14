@@ -34,7 +34,7 @@ func HasPendingChanges(ctx context.Context, db SQLQuerier) (bool, error) {
 // i.e. rows that a subsequent DOLT_COMMIT('-m', …) would actually commit.
 //
 // This is the correct pre-commit check for selective-staging commit helpers
-// (StageAndCommit, doltAddAndCommit, doltAddAndCommitInTx) that DOLT_ADD only a
+// (StageAndCommit, doltAddAndCommit) that DOLT_ADD only a
 // fixed/dirty-tracked set of tables. A global HasPendingChanges check is NOT
 // sufficient for them: a table can be marked dirty by a write statement yet have
 // no real row change (idempotent INSERT IGNORE / ON DUPLICATE KEY no-op, or an
