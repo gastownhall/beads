@@ -272,6 +272,7 @@ go_test(
         "versioned_read_contract_test.go",
         "wisp_plane_states_test.go",
         "workspace_config_contract_test.go",
+        "write_access_open_test.go",
     ],
     embed = [":embeddeddolt"],
     shard_count = 9,
