@@ -24,6 +24,15 @@ func TestLabelPatchConcurrentReplaceConflictsAtCommit(t *testing.T) {
 	runLabelReplaceRace(t, "label_patch_race", false, true)
 }
 
+// TestWispLabelPatchConcurrentReplaceConflictsAtCommit is the same race on an
+// ephemeral wisp, whose labels live in wisp_labels: the coordination write has
+// to use that tier, on the transaction that wrote the label rows. The seed's
+// cell is removed first, so this variant also covers a cell that does not
+// exist until the racing transactions write it.
+func TestWispLabelPatchConcurrentReplaceConflictsAtCommit(t *testing.T) {
+	runLabelReplaceRace(t, "wisp_label_patch_race", true, false)
+}
+
 func runLabelReplaceRace(t *testing.T, dbName string, wisp, preseeded bool) {
 	t.Helper()
 	skipIfNoServer(t)
