@@ -754,6 +754,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Formulas that set a step's `on_complete` are now refused (GH#3782,
+  reported by jjgarzella).** `bd cook` and `bd mol pour|wisp|bond|seed`
+  fail with a validation error naming the offending step — at every step
+  depth, and on expansion-formula loads — instead of accepting a spec
+  that could never run. 0.37.0 declared the field but bd never executed
+  it: the spec was dropped at pour time and no close hook or
+  `{item}`/`{index}` substitution existed, so every accepted shape
+  (including the docs' `on_complete.run` example, whose `run` field never
+  existed) silently spawned nothing. The field stays declared so the key
+  is seen and refused rather than silently dropped; `bd formula
+  show --json` and `bd formula convert` still round-trip it, and
+  `bd formula schema on_complete` states the refusal. Fan out work per
+  item with `bd mol bond` instead.
+
 - **`bd dolt pull` on an embedded rig with no remote exits 0 (bd-e2q8zs).**
   It prints `No remote is configured — skipping.` and the setup guidance,
   as server mode already did; in embedded mode it used to exit 1. A pull
