@@ -675,3 +675,38 @@ func writeProxiedMetadata(t *testing.T, beadsDir string, fields map[string]strin
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(configfile.ConfigPath(beadsDir), data, 0o644))
 }
+
+// TestResolveProxiedServerUOWTopology_ExplicitBypassClearsIdentity pins the
+// escape hatch's scope: BEADS_SKIP_IDENTITY_CHECK=1 clears a plain
+// workspace's excursion expectation but leaves the strict team-server
+// posture untouched — the team-server branch honors no bypass.
+func TestResolveProxiedServerUOWTopology_ExplicitBypassClearsIdentity(t *testing.T) {
+	t.Setenv("BEADS_SKIP_IDENTITY_CHECK", "1")
+
+	t.Run("plain excursion with the bypass clears the expectation", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		writeTopologyConfig(t, beadsDir, map[string]any{
+			"dolt_database": "beads_ws",
+			"project_id":    "project-AAAA",
+		})
+
+		topology, err := resolveProxiedServerUOWTopology(beadsDir, "beads_other", assertWorkspaceIdentity)
+		require.NoError(t, err)
+		assert.Equal(t, "beads_other", topology.database)
+		assert.Empty(t, topology.expectedProjectID, "the explicit bypass disables the excursion comparison")
+	})
+
+	t.Run("team-server keeps the identity with the bypass set", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		writeTopologyConfig(t, beadsDir, map[string]any{
+			"dolt_database":    "beads_ws",
+			"project_id":       "project-AAAA",
+			"dolt_team_server": true,
+		})
+
+		topology, err := resolveProxiedServerUOWTopology(beadsDir, "beads_other", assertWorkspaceIdentity)
+		require.NoError(t, err)
+		assert.Equal(t, "project-AAAA", topology.expectedProjectID,
+			"BEADS_SKIP_IDENTITY_CHECK must not weaken the team-server posture")
+	})
+}

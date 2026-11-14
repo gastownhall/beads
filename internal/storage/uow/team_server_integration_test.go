@@ -444,3 +444,46 @@ func TestPlainProxiedExcursionIdentity_ConfiguredDatabaseNoCompare_Integration(t
 	require.NoError(t, err, "a configured-database open (no assertion) must not compare identities")
 	require.NoError(t, p.Close(ctx))
 }
+
+// TestPlainProxiedExcursionIdentity_ExplicitBypass_Integration pins the
+// escape hatch's scope: with BEADS_SKIP_IDENTITY_CHECK=1 the topology
+// resolver hands the provider no expectation, so the plain excursion opens a
+// foreign-identified database deliberately, while the strict team-server
+// identity check never honors the escape hatch.
+func TestPlainProxiedExcursionIdentity_ExplicitBypass_Integration(t *testing.T) {
+	h := newTeamServerHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	t.Setenv("BEADS_SKIP_IDENTITY_CHECK", "1")
+
+	const database = "excursion_bypass"
+	provisioner, err := h.openProvider(ctx, database, false, "")
+	require.NoError(t, err)
+	require.NoError(t, provisioner.Close(ctx))
+
+	direct := h.directDB(t, database)
+	_, err = direct.ExecContext(ctx,
+		"REPLACE INTO metadata (`key`, value) VALUES (?, ?)", "_project_id", "project-owning-this-db")
+	require.NoError(t, err)
+	cleanupCtx, cleanupDone := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(func() {
+		defer cleanupDone()
+		_, err := direct.ExecContext(cleanupCtx, "DELETE FROM metadata WHERE `key` = ?", "_project_id")
+		assert.NoError(t, err)
+	})
+
+	// Plain excursion: no expectation is what the topology resolver passes
+	// when the escape hatch is set, so no identity is compared.
+	p, err := h.openProvider(ctx, database, false, "")
+	require.NoError(t, err, "BEADS_SKIP_IDENTITY_CHECK=1 must permit the plain excursion")
+	require.NoError(t, p.Close(ctx))
+
+	// Team-server: the strict check runs regardless of the escape hatch.
+	p, err = h.openProvider(ctx, database, true, "project-somewhere-else")
+	if p != nil {
+		_ = p.Close(ctx)
+	}
+	require.Error(t, err, "the team-server identity check must not honor BEADS_SKIP_IDENTITY_CHECK")
+	assert.Contains(t, err.Error(), "PROJECT IDENTITY MISMATCH")
+}
