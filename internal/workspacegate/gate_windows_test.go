@@ -4,11 +4,13 @@ package workspacegate
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -173,6 +175,37 @@ func TestJunctionAliasesShareOneGateWindows(t *testing.T) {
 			if len(m.handles) != 1 {
 				t.Fatalf("AcquireAll held %d locks for one physical gate, want 1", len(m.handles))
 			}
+		})
+	}
+}
+
+// A holder in another process that reached the workspace through one
+// spelling excludes this process reaching it through the other.
+func TestCrossProcessExclusionAcrossJunctionWindows(t *testing.T) {
+	f := newJunctionFixture(t)
+	for _, tc := range []struct {
+		name          string
+		holder, local string
+	}{
+		{"holder via junction", f.jProj, f.realProj},
+		{"holder via target", f.realProj, f.jProj},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g, err := ForWorkspace(filepath.Join(tc.local, ".beads"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			hp := spawnHolder(t, tc.holder, "exclusive")
+			if _, err := g.Acquire(context.Background(), Shared, Options{}); !errors.Is(err, ErrBusy) {
+				t.Fatalf("shared via %s while another process holds exclusive via %s: %v, want ErrBusy", tc.local, tc.holder, err)
+			}
+			hp.stop()
+			h, err := g.Acquire(context.Background(), Shared,
+				Options{Wait: 10 * time.Second, PollInterval: 25 * time.Millisecond})
+			if err != nil {
+				t.Fatalf("shared after the holder exited: %v", err)
+			}
+			_ = h.Release()
 		})
 	}
 }
