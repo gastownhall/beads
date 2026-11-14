@@ -166,13 +166,21 @@ func TestRetargetGitContextPropagatesGitErrors(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			want: "not a git repository:",
+			// git's wording for a dangling gitfile changed across releases
+			// ("not a git repository:" before 2.5x, "gitfile does not point to
+			// a valid repo" after); the contract is that git's own failure
+			// reaches the caller, so assert its fatal stderr marker.
+			want: "fatal:",
 		},
 		{
 			name: "dubious ownership",
 			fixture: func(t *testing.T, dir string) {
 				initChangeDirTestRepo(t, dir)
-				// git's own knob for the safe.directory ownership check.
+				// git's own knob for the safe.directory ownership check. A
+				// runner-wide safe.directory (CI sets "*") would bypass the
+				// check, so the global and system config are kept out.
+				t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+				t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 				t.Setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
 			},
 			want: "dubious ownership",
