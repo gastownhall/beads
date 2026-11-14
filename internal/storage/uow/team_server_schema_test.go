@@ -383,3 +383,17 @@ func TestInitSchemaAttempt_ExcursionMismatchStopsBeforeOpen(t *testing.T) {
 		})
 	}
 }
+
+// BEADS_SKIP_IDENTITY_CHECK=1 is a plain-excursion hatch applied by the CLI
+// topology; the team-server guard never reads it.
+func TestCheckTeamServerIdentity_SkipIdentityEnvDoesNotBypass(t *testing.T) {
+	t.Setenv("BEADS_SKIP_IDENTITY_CHECK", "1")
+	mock, db, closeDB := newVersionMockDB(t)
+	defer closeDB()
+	expectProjectIDQuery(mock, "project-BBBB")
+
+	err := checkTeamServerIdentity(context.Background(), db, "beads_team", "project-AAAA")
+	if err == nil || !strings.Contains(err.Error(), "PROJECT IDENTITY MISMATCH") {
+		t.Fatalf("checkTeamServerIdentity = %v, want the team-server mismatch refusal", err)
+	}
+}
