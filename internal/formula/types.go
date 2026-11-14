@@ -285,8 +285,9 @@ type Step struct {
 	// When set, the step becomes a container that expands its body.
 	Loop *LoopSpec `json:"loop,omitempty"`
 
-	// OnComplete defines actions triggered when this step completes.
-	// Used for runtime expansion over step output (the for-each construct).
+	// OnComplete is declared only: bd refuses formulas that set it because
+	// no executor has ever run it (GH#3782). See OnCompleteSpec; to fan
+	// out work per item, bond one molecule per item with 'bd mol bond'.
 	OnComplete *OnCompleteSpec `json:"on_complete,omitempty" toml:"on_complete,omitempty"`
 
 	// Source tracing fields: track where this step came from.
@@ -360,43 +361,31 @@ type LoopSpec struct {
 	Body []*Step `json:"body"`
 }
 
-// OnCompleteSpec defines actions triggered when a step completes.
-// Used for runtime expansion over step output (the for-each construct).
-//
-// Example YAML:
-//
-//	step: survey-workers
-//	on_complete:
-//	  for_each: output.workers
-//	  bond: mol-worker-arm
-//	  vars:
-//	    worker_name: "{item.name}"
-//	    rig: "{item.rig}"
-//	  parallel: true
+// OnCompleteSpec is declared only: bd refuses formulas that set
+// on_complete because no executor has ever run it (GH#3782), so
+// Formula.Validate fails with an error naming the step. The struct stays
+// declared so the key is seen and refused rather than silently dropped, and
+// bd formula show --json and bd formula convert still round-trip what the
+// author wrote. To fan out work per item, bond one molecule per item with
+// 'bd mol bond'.
 type OnCompleteSpec struct {
-	// ForEach is the path to the iterable collection in step output.
-	// Format: "output.<field>" or "output.<field>.<nested>"
-	// The collection must be an array at runtime.
+	// ForEach is the path to the iterable collection in step output the
+	// author intended to iterate ("output.<field>"). Never read: bd
+	// refuses the field.
 	ForEach string `json:"for_each,omitempty" toml:"for_each,omitempty"`
 
-	// Bond is the formula to instantiate for each item.
-	// A new molecule is created for each element in the ForEach collection.
+	// Bond is the formula that would have been instantiated for each item.
+	// Never read: bd refuses the field.
 	Bond string `json:"bond,omitempty"`
 
-	// Vars are variable bindings for each iteration.
-	// Supports placeholders:
-	//   - {item} - the current item value (for primitives)
-	//   - {item.field} - a field from the current item (for objects)
-	//   - {index} - the zero-based iteration index
+	// Vars are per-item variable bindings ({item}, {item.field} and
+	// {index} placeholders were documented but never substituted).
 	Vars map[string]string `json:"vars,omitempty"`
 
-	// Parallel runs all bonded molecules concurrently (default behavior).
-	// Set to true to make this explicit.
+	// Parallel would have run bonded molecules concurrently.
 	Parallel bool `json:"parallel,omitempty"`
 
-	// Sequential runs bonded molecules one at a time.
-	// Each molecule starts only after the previous one completes.
-	// Mutually exclusive with Parallel.
+	// Sequential would have run bonded molecules one at a time.
 	Sequential bool `json:"sequential,omitempty"`
 }
 
@@ -656,13 +645,15 @@ func (f *Formula) Validate() error {
 				errs = append(errs, fmt.Sprintf("steps[%d] (%s): %s", i, step.ID, err.Error()))
 			}
 		}
-		// Validate on_complete field - runtime expansion
-		if step.OnComplete != nil {
-			validateOnComplete(step.OnComplete, &errs, fmt.Sprintf("steps[%d] (%s)", i, step.ID))
-		}
 		// Validate children's depends_on and needs recursively
 		validateChildDependsOn(step.Children, stepIDLocations, &errs, fmt.Sprintf("steps[%d]", i))
 	}
+
+	// on_complete is declared-only: bd parses it but no executor runs it,
+	// so refuse it wherever it appears instead of accepting a spec that
+	// would silently spawn nothing (GH#3782).
+	refuseOnComplete(f.Steps, "steps", &errs)
+	refuseOnComplete(f.Template, "template", &errs)
 
 	// Validate compose rules
 	if f.Compose != nil {
@@ -819,34 +810,27 @@ func validateChildDependsOn(children []*Step, idLocations map[string]string, err
 				*errs = append(*errs, fmt.Sprintf("%s (%s): %s", childPrefix, child.ID, err.Error()))
 			}
 		}
-		// Validate on_complete field
-		if child.OnComplete != nil {
-			validateOnComplete(child.OnComplete, errs, fmt.Sprintf("%s (%s)", childPrefix, child.ID))
-		}
 		validateChildDependsOn(child.Children, idLocations, errs, childPrefix)
 	}
 }
 
-// validateOnComplete validates an OnCompleteSpec.
-func validateOnComplete(oc *OnCompleteSpec, errs *[]string, prefix string) {
-	// Check that for_each and bond are both present or both absent
-	if oc.ForEach != "" && oc.Bond == "" {
-		*errs = append(*errs, fmt.Sprintf("%s.on_complete: bond is required when for_each is set", prefix))
-	}
-	if oc.ForEach == "" && oc.Bond != "" {
-		*errs = append(*errs, fmt.Sprintf("%s.on_complete: for_each is required when bond is set", prefix))
-	}
-
-	// Validate for_each path format
-	if oc.ForEach != "" {
-		if !strings.HasPrefix(oc.ForEach, "output.") {
-			*errs = append(*errs, fmt.Sprintf("%s.on_complete: for_each must start with 'output.' (got %q)", prefix, oc.ForEach))
+// refuseOnComplete rejects every step that declares on_complete, wherever
+// it appears. bd parses the field but has no executor for it (GH#3782), so
+// a formula that sets it would cook, pour and close with zero side effects;
+// one refusal line per offending step turns that silent no-op into an error
+// naming the step. Children and loop bodies are walked with the same path
+// shape setSourceInfoRecursive uses; prefix is "steps" or "template".
+func refuseOnComplete(steps []*Step, prefix string, errs *[]string) {
+	for i, step := range steps {
+		if step.OnComplete != nil {
+			*errs = append(*errs, fmt.Sprintf(
+				"%s[%d] (%s): on_complete is not supported: bd never runs it, so completing this step would spawn nothing; remove it and bond one molecule per item with 'bd mol bond' instead",
+				prefix, i, step.ID))
 		}
-	}
-
-	// Check parallel and sequential are mutually exclusive
-	if oc.Parallel && oc.Sequential {
-		*errs = append(*errs, fmt.Sprintf("%s.on_complete: cannot set both parallel and sequential", prefix))
+		refuseOnComplete(step.Children, fmt.Sprintf("%s[%d].children", prefix, i), errs)
+		if step.Loop != nil {
+			refuseOnComplete(step.Loop.Body, fmt.Sprintf("%s[%d].loop.body", prefix, i), errs)
+		}
 	}
 }
 

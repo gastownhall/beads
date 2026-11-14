@@ -544,59 +544,47 @@ Examples: "*.implement", "shiny.*"`,
 	},
 	{
 		Name: "OnCompleteSpec",
-		Doc: `OnCompleteSpec defines actions triggered when a step completes.
-Used for runtime expansion over step output (the for-each construct).
-
-Example YAML:
-
-	step: survey-workers
-	on_complete:
-	  for_each: output.workers
-	  bond: mol-worker-arm
-	  vars:
-	    worker_name: "{item.name}"
-	    rig: "{item.rig}"
-	  parallel: true`,
+		Doc: `OnCompleteSpec is declared only: bd refuses formulas that set
+on_complete because no executor has ever run it (GH#3782), so
+Formula.Validate fails with an error naming the step. The struct stays
+declared so the key is seen and refused rather than silently dropped, and
+bd formula show --json and bd formula convert still round-trip what the
+author wrote. To fan out work per item, bond one molecule per item with
+'bd mol bond'.`,
 		Fields: []FieldDoc{
 			{
 				Name:     "ForEach",
 				Type:     "string",
 				JSONName: "for_each",
-				Doc: `ForEach is the path to the iterable collection in step output.
-Format: "output.<field>" or "output.<field>.<nested>"
-The collection must be an array at runtime.`,
+				Doc: `ForEach is the path to the iterable collection in step output the
+author intended to iterate ("output.<field>"). Never read: bd
+refuses the field.`,
 			},
 			{
 				Name:     "Bond",
 				Type:     "string",
 				JSONName: "bond",
-				Doc: `Bond is the formula to instantiate for each item.
-A new molecule is created for each element in the ForEach collection.`,
+				Doc: `Bond is the formula that would have been instantiated for each item.
+Never read: bd refuses the field.`,
 			},
 			{
 				Name:     "Vars",
 				Type:     "map[string]string",
 				JSONName: "vars",
-				Doc: `Vars are variable bindings for each iteration.
-Supports placeholders:
-  - {item} - the current item value (for primitives)
-  - {item.field} - a field from the current item (for objects)
-  - {index} - the zero-based iteration index`,
+				Doc: `Vars are per-item variable bindings ({item}, {item.field} and
+{index} placeholders were documented but never substituted).`,
 			},
 			{
 				Name:     "Parallel",
 				Type:     "bool",
 				JSONName: "parallel",
-				Doc: `Parallel runs all bonded molecules concurrently (default behavior).
-Set to true to make this explicit.`,
+				Doc:      `Parallel would have run bonded molecules concurrently.`,
 			},
 			{
 				Name:     "Sequential",
 				Type:     "bool",
 				JSONName: "sequential",
-				Doc: `Sequential runs bonded molecules one at a time.
-Each molecule starts only after the previous one completes.
-Mutually exclusive with Parallel.`,
+				Doc:      `Sequential would have run bonded molecules one at a time.`,
 			},
 		},
 	},
@@ -770,8 +758,9 @@ When set, the step becomes a container that expands its body.`,
 				Name:     "OnComplete",
 				Type:     "*OnCompleteSpec",
 				JSONName: "on_complete",
-				Doc: `OnComplete defines actions triggered when this step completes.
-Used for runtime expansion over step output (the for-each construct).`,
+				Doc: `OnComplete is declared only: bd refuses formulas that set it because
+no executor has ever run it (GH#3782). See OnCompleteSpec; to fan
+out work per item, bond one molecule per item with 'bd mol bond'.`,
 			},
 		},
 	},
