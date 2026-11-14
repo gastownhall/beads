@@ -1300,3 +1300,54 @@ func snapshotTree(t *testing.T, root string) string {
 	}
 	return b.String()
 }
+
+// TestFindBeadsDir_YieldRequiresRecognizedSharedWorkspace guards the other
+// side of the yield decision: it fires only beside a shared workspace that
+// discovery recognizes by readable metadata. A shared candidate without
+// workspace metadata does not displace the metadata-less local store, and a
+// standalone repository is never subject to the yield.
+func TestFindBeadsDir_YieldRequiresRecognizedSharedWorkspace(t *testing.T) {
+	t.Run("shared workspace without metadata does not displace the local store", func(t *testing.T) {
+		f := newMetadatalessStoreFixture(t, "", "myproject")
+		chdirForDiscovery(t, f.worktree)
+		var dir, dbPath string
+		stderr := captureStderr(t, func() {
+			dir = FindBeadsDir()
+			dbPath = FindDatabasePath()
+		})
+		assertSamePath(t, "FindBeadsDir()", dir, f.worktreeBeads)
+		assertSamePath(t, "FindDatabasePath()", dbPath, filepath.Join(f.worktreeBeads, "embeddeddolt"))
+		if strings.Contains(stderr, "no metadata.json or config.json") {
+			t.Errorf("unexpected missing-metadata warning beside an unrecognized shared candidate:\n%s", stderr)
+		}
+	})
+
+	t.Run("standalone repository keeps its metadata-less store", func(t *testing.T) {
+		clearDiscoveryEnv(t)
+		repo := filepath.Join(utils.CanonicalizePath(t.TempDir()), "repo")
+		if err := os.MkdirAll(repo, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, args := range [][]string{{"init"}, {"config", "core.hooksPath", ".git/hooks"}} {
+			cmd := gitCommand(args...)
+			cmd.Dir = repo
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git %v: %v\n%s", args, err, out)
+			}
+		}
+		beadsDir := filepath.Join(repo, ".beads")
+		writeFixtureFile(t, filepath.Join(beadsDir, "config.yaml"), "issue-prefix: \"R\"\n")
+		writeEmbeddedStore(t, beadsDir, "beads")
+		chdirForDiscovery(t, repo)
+		var dir, dbPath string
+		stderr := captureStderr(t, func() {
+			dir = FindBeadsDir()
+			dbPath = FindDatabasePath()
+		})
+		assertSamePath(t, "FindBeadsDir()", dir, beadsDir)
+		assertSamePath(t, "FindDatabasePath()", dbPath, filepath.Join(beadsDir, "embeddeddolt"))
+		if strings.Contains(stderr, "no metadata.json or config.json") {
+			t.Errorf("unexpected missing-metadata warning in a standalone repository:\n%s", stderr)
+		}
+	})
+}
