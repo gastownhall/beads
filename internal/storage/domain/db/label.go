@@ -74,6 +74,15 @@ func (r *labelSQLRepositoryImpl) Insert(ctx context.Context, issueID, label, act
 		}
 		return nil
 	}
+	// The uow-route twin of issueops.AddLabelInTx's coordination touch: a
+	// landed label row rewrites the issue's label coordination cell on this
+	// same transaction (r.runner IS the unit of work's transaction), so two
+	// whole-set label edits of one issue conflict at commit time instead of
+	// cell-merging into a silent union (GH#5657). The rows gate above keeps
+	// the idempotent no-op path out.
+	if err := issueops.TouchLabelCoordinationInTx(ctx, r.runner, issueID, table); err != nil {
+		return err
+	}
 	if err := r.events.Record(ctx, domain.Event{
 		IssueID:  issueID,
 		Type:     types.EventLabelAdded,
@@ -125,6 +134,12 @@ func (r *labelSQLRepositoryImpl) Delete(ctx context.Context, issueID, label, act
 	}
 	if rows == 0 {
 		return nil
+	}
+	// Insert's coordination touch, on the remove side: a deleted row
+	// participates in the per-issue serialization, a DELETE that matched
+	// nothing does not (GH#5657).
+	if err := issueops.TouchLabelCoordinationInTx(ctx, r.runner, issueID, table); err != nil {
+		return err
 	}
 	if err := r.events.Record(ctx, domain.Event{
 		IssueID:  issueID,
