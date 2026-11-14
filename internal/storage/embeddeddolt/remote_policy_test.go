@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -241,7 +242,14 @@ func TestRemotePolicyRefusesEmbeddedRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	sortRemotes(before)
+	sortRemotes(after)
 	if fmt.Sprint(after) != fmt.Sprint(before) {
 		t.Fatalf("remotes = %+v after refused registrations, want the prior %+v", after, before)
 	}
+}
+
+// sortRemotes orders remotes by name: ListRemotes does not promise an order.
+func sortRemotes(rs []storage.RemoteInfo) {
+	sort.Slice(rs, func(i, j int) bool { return rs[i].Name < rs[j].Name })
 }
