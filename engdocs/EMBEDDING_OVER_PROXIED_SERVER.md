@@ -1,6 +1,6 @@
 # Embedding over a proxied-server workspace: observed behaviour at 1.3.1
 
-Last reviewed: 2026-09-23
+Last reviewed: 2026-11-14
 
 Read at: `e1e1158dd` (`v1.3.1-rc.1-2-ge1e1158dd`). Because this document
 describes observed behaviour rather than a contract, a stale marker makes it
@@ -606,41 +606,38 @@ and returns an error for embedded Dolt.
 copy has a proxied-server arm. Both dispatch on `cfg.IsDoltServerMode()`, and
 `configfile.IsDoltServerMode` and `IsDoltProxiedServerMode` are mutually
 exclusive — proxied workspaces are explicitly exempt from the host-based
-server-mode inference. So on a proxied-server workspace `OpenBestAvailable` falls
-through to `embeddeddolt.Open`, and it does not connect through the proxy.
+server-mode inference. So since GH#8323 both copies refuse a proxied-server
+workspace up front, before `configfile.Load` and before every Dolt arm, with
+`beads.ErrProxiedServerUnsupported`: proxied-server mode is served only by the
+bd CLI, through the workspace's proxy, and the refusal leaves the workspace
+untouched — no `.beads/embeddeddolt` is minted, a legacy `config.json` is not
+migrated, and ambient `BEADS_DOLT_SERVER_MODE` or `BEADS_DOLT_SHARED_SERVER`
+cannot dial a server behind the proxy's back. The refusal's message points at
+the bd CLI, not at `OpenFromConfig`, which has no proxied arm either.
 
-The consequence is not contention over the directory the proxy is serving. It is
-that the two paths look at **different directories entirely**. `embeddeddolt`
-joins its data directory as `<beadsDir>/embeddeddolt` and does so in four
-non-test places — `newStore`, `openReadOnly`, the open cache's `cacheKey`, and
-`HasRepository` — with no way for a caller to redirect it. The proxy's
-`dolt sql-server`, meanwhile, serves the proxied root, which defaults to
-`<beadsDir>/dolt`
+The refusal exists because of the directories, not just the routing. Before
+it, the open silently fell through to `embeddeddolt`, and the two paths looked
+at **different directories entirely**: `embeddeddolt` joins its data directory
+as `<beadsDir>/embeddeddolt` and does so in four non-test places — `newStore`,
+`openReadOnly`, the open cache's `cacheKey`, and `HasRepository` — with no way
+for a caller to redirect it, while the proxy's `dolt sql-server` serves the
+proxied root, which defaults to `<beadsDir>/dolt`
 (`internal/doltserver/physical_root.go`; `Config.DatabasePath`'s fallback joins
-the literal `dolt`, with a comment saying always to).
-
-So an embedder that calls `OpenBestAvailable` on a proxied workspace does not
-fight the running server for its files — it silently opens **a separate database**
+the literal `dolt`, with a comment saying always to). An embedder did not fight
+the running server for its files — it silently opened **a separate database**
 beside it. On the read-write path — the one `OpenBestAvailable` takes —
 `newStore` `MkdirAll`s `.beads/embeddeddolt`, and `initSchema` issues
-`CREATE DATABASE IF NOT EXISTS` and migrates, so the open creates and writes a
-second database rather than failing. What it contains depends on the workspace's
-history: empty on one initialised straight into proxied mode, and whatever
-`.beads/embeddeddolt` still holds on one that was ever embedded, since none of
-the mode-migration verbs removes that directory. The second case is the nastier
-one — stale issues that look real.
+`CREATE DATABASE IF NOT EXISTS` and migrates, so the open created and wrote a
+second database rather than failing: empty on a workspace initialised straight
+into proxied mode, and whatever `.beads/embeddeddolt` still held on one that
+was ever embedded, since none of the mode-migration verbs removes that
+directory — the nastier case, stale issues that look real. The read-only join
+site behaved the other way, worth knowing before generalising: `openReadOnly`
+does **not** create; it `os.Stat`s the same directory and returns
+`embeddeddolt: no embedded database at …` when it is absent.
 
-The read-only join site behaves the other way, which is worth knowing before
-generalising the paragraph above: `openReadOnly` does **not** create. It
-`os.Stat`s the same directory and returns
-`embeddeddolt: no embedded database at …` when it is absent, so a caller
-arriving through the read-only open on a workspace that was never embedded gets
-an error instead of an empty database.
-
-Nothing in the open path refuses on that ground and no error comes back. The
-store is genuine; it is just not the one the workspace's issues are in. An
-embedder that wants the proxied endpoint should connect to the data port (§3)
-rather than expect this function to find it.
+An embedder that wants the proxied endpoint should connect to the data port
+(§3) rather than expect this function to find it.
 
 `SetEventsJournalEnabled(enabled bool)` is **not a method on the `Storage`
 interface.** `beads.Storage` aliases `internal/beads.Storage`, which aliases
@@ -870,13 +867,14 @@ live proxy to confirm end to end, and are therefore inferred from the code:
   succeeds against the data port on a managed-local workspace (§3). The
   credentials, the loopback bind and the absence of protocol handling in the
   proxy are all read directly from the source; the end-to-end connection is not.
-- That `OpenBestAvailable`'s embedded fall-through (§8) completes and hands back
-  a usable but separate store, rather than failing somewhere in the create and
-  migrate steps. The *routing* (it takes the embedded arm, because proxied mode
-  is exempt from `IsDoltServerMode`) and the *directory* (`embeddeddolt` joins
-  `<beadsDir>/embeddeddolt`, the proxy serves `<beadsDir>/dolt`) are read off the
-  source and are not in doubt; the open itself was not run against a live
-  proxied workspace.
+- That `OpenBestAvailable`'s embedded fall-through (§8) completed and handed
+  back a usable but separate store, rather than failing somewhere in the create
+  and migrate steps — the behaviour GH#8323 replaced with the
+  `ErrProxiedServerUnsupported` refusal. The *routing* (it took the embedded
+  arm, because proxied mode is exempt from `IsDoltServerMode`) and the
+  *directory* (`embeddeddolt` joins `<beadsDir>/embeddeddolt`, the proxy serves
+  `<beadsDir>/dolt`) were read off the source and were not in doubt; the open
+  itself was never run against a live proxied workspace.
 
 Everything else — field names, JSON keys and their types, argv and flag
 spellings, exported Go symbols, default values, and which code path decides

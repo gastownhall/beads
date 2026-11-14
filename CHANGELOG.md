@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`beads.OpenBestAvailable`/`OpenBestAvailableWith` refuse a proxied-server
+  workspace** with the new `beads.ErrProxiedServerUnsupported` instead of
+  silently minting an empty `.beads/embeddeddolt` store beside the workspace's
+  real (proxied) database — the GH#5104 symptom class for library callers.
+  Proxied-server mode is served only by the bd CLI, through the workspace's
+  proxy; the refusal names the metadata file that declares the mode, leaves the
+  workspace untouched (no embedded store is created and a legacy `config.json`
+  is not migrated), and wins over `BEADS_DOLT_SERVER_MODE` and
+  `BEADS_DOLT_SHARED_SERVER`, which would otherwise dial a server behind the
+  proxy's back. (#8323)
+
 ### Security
 
 - **Release binaries are built with Go 1.27.4.** Go 1.27.0-1.27.3 (and

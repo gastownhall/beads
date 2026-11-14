@@ -85,6 +85,28 @@ var ErrUserAgentWithoutOpenWith = backends.ErrUserAgentWithoutOpenWith
 // outside this module cannot import internal/storage/backends directly.
 var ErrUnsupportedCredential = backends.ErrUnsupportedCredential
 
+// ErrProxiedServerUnsupported is returned by OpenBestAvailable and
+// OpenBestAvailableWith for a Dolt workspace in proxied-server mode, which
+// only the bd CLI serves (through the workspace's proxy). Nothing is opened
+// or created.
+var ErrProxiedServerUnsupported = errors.New("beads: the Go SDK cannot open a proxied-server workspace")
+
+// checkProxiedServerWorkspace refuses a Dolt workspace in proxied-server mode.
+// It runs before configfile.Load (which would migrate a legacy config.json)
+// and before every Dolt arm, as the CLI store factories refuse it before
+// effectiveServerMode. It reads metadata as checkDiscoveredBackend does.
+func checkProxiedServerWorkspace(beadsDir string) error {
+	cfg, err := configfile.LoadDiscoveredForOpen(beadsDir)
+	if err != nil {
+		return err
+	}
+	if cfg == nil || !cfg.IsDoltProxiedServerMode() {
+		return nil
+	}
+	return fmt.Errorf("%w: %s sets dolt_mode %q, which only the bd CLI can serve; %s. Run bd in that workspace instead",
+		ErrProxiedServerUnsupported, configfile.MetadataFilePath(beadsDir), cfg.DoltMode, configfile.BackendNotOpenedGuarantee)
+}
+
 // configuredBackendUnavailable is the public open path's fail-closed refusal for
 // metadata naming a removed or unrecognized backend. beadsDir and cfg let the
 // refusal detect an already-present Dolt database and name the exact

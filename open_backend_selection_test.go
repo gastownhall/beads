@@ -721,3 +721,121 @@ func TestPublicOpensRefuseHistoricalSQLiteWorkspace(t *testing.T) {
 		}
 	}
 }
+
+// TestOpenBestAvailableRefusesProxiedServerModeBeforeWriting pins GH#8323: a
+// workspace whose metadata.json says dolt_mode "proxied-server" must not fall
+// through to the embedded path and mint an empty .beads/embeddeddolt store.
+// Whether the SDK routes to the proxied provider or refuses, nothing is
+// serving this temp workspace, so the open must fail and leave no embedded
+// store behind.
+func TestOpenBestAvailableRefusesProxiedServerModeBeforeWriting(t *testing.T) {
+	opens := map[string]func(context.Context, string) (beads.Storage, error){
+		"OpenBestAvailable": beads.OpenBestAvailable,
+		"OpenBestAvailableWith": func(ctx context.Context, dir string) (beads.Storage, error) {
+			return beads.OpenBestAvailableWith(ctx, dir, beads.OpenOptions{})
+		},
+	}
+	for name, open := range opens {
+		t.Run(name, func(t *testing.T) {
+			beadsDir := filepath.Join(t.TempDir(), ".beads")
+			if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+				t.Fatalf("create .beads: %v", err)
+			}
+			metadata := `{"backend":"dolt","dolt_mode":"proxied-server"}`
+			if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o600); err != nil {
+				t.Fatalf("write metadata: %v", err)
+			}
+			store, err := open(context.Background(), beadsDir)
+			if store != nil {
+				_ = store.Close()
+			}
+			_, statErr := os.Stat(filepath.Join(beadsDir, "embeddeddolt"))
+			if !os.IsNotExist(statErr) {
+				t.Errorf("%s on a proxied-server workspace created .beads/embeddeddolt (err=%v, store=%v, stat=%v)", name, err, store != nil, statErr)
+			}
+			if err == nil {
+				t.Errorf("%s on a proxied-server workspace returned err=nil and a store, want a refusal or proxied-provider error", name)
+			}
+		})
+	}
+}
+
+// TestOpenBestAvailableRefusesProxiedServerWorkspace pins GH#8323's refusal
+// contract across the metadata shapes a proxied-server workspace can present:
+// whichever file declares the mode, whether the backend key is present, and
+// whatever env would otherwise flip the workspace onto the server arm, both
+// public opens return ErrProxiedServerUnsupported — only the bd CLI serves a
+// proxied-server workspace — and leave the workspace untouched.
+func TestOpenBestAvailableRefusesProxiedServerWorkspace(t *testing.T) {
+	// If the refusal were missing, the open must fail fast rather than reach
+	// a real server: pin the dial target to a port nobody listens on, keep
+	// ambient mode env from flipping the workspace, and isolate config.yaml.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	type row struct {
+		name     string
+		file     string            // metadata file declaring dolt_mode
+		backend  string            // "" omits the key (Dolt by default)
+		spelling string            // dolt_mode value exactly as written
+		env      map[string]string // applied after the shared pinning above
+		opts     beads.OpenOptions // only read by the OpenWith variant
+		openWith bool
+	}
+	rows := []row{
+		{name: "metadata.json/dolt/no-env/OpenBestAvailable", file: "metadata.json", backend: "dolt", spelling: "proxied-server"},
+		{name: "metadata.json/dolt/no-env/OpenBestAvailableWith", file: "metadata.json", backend: "dolt", spelling: "proxied-server", openWith: true},
+		{name: "metadata.json/backend-omitted/no-env/OpenBestAvailable", file: "metadata.json", spelling: "proxied-server"},
+		{name: "metadata.json/dolt/spelling-case/OpenBestAvailable", file: "metadata.json", backend: "dolt", spelling: "Proxied-Server"},
+		{
+			// The workspace cannot be opened whatever the options are, so
+			// the proxied refusal must win over ErrUserAgentWithoutOpenWith.
+			name:     "metadata.json/dolt/no-env/OpenBestAvailableWith/UserAgent",
+			file:     "metadata.json",
+			backend:  "dolt",
+			spelling: "proxied-server",
+			opts:     beads.OpenOptions{UserAgent: "test-agent/1.0"},
+			openWith: true,
+		},
+	}
+	for _, tt := range rows {
+		t.Run(tt.name, func(t *testing.T) {
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
+			root := t.TempDir()
+			beadsDir := filepath.Join(root, ".beads")
+			// A dolt root the proxy would be serving, standing in for the
+			// workspace's proxied database.
+			if err := os.MkdirAll(filepath.Join(beadsDir, "dolt", ".dolt"), 0o750); err != nil {
+				t.Fatalf("plant proxied dolt root: %v", err)
+			}
+			metadata := `{"dolt_mode":"` + tt.spelling + `","dolt_database":"beads_legacy","future_binding":"keep-me"}`
+			if tt.backend != "" {
+				metadata = `{"backend":"` + tt.backend + `","dolt_mode":"` + tt.spelling + `","dolt_database":"beads_legacy","future_binding":"keep-me"}`
+			}
+			if err := os.WriteFile(filepath.Join(beadsDir, tt.file), []byte(metadata), 0o600); err != nil {
+				t.Fatalf("write %s: %v", tt.file, err)
+			}
+
+			var store beads.Storage
+			var err error
+			if tt.openWith {
+				store, err = beads.OpenBestAvailableWith(t.Context(), beadsDir, tt.opts)
+			} else {
+				store, err = beads.OpenBestAvailable(t.Context(), beadsDir)
+			}
+			if store != nil {
+				_ = store.Close()
+				t.Fatalf("returned a non-nil %T alongside the proxied refusal", store)
+			}
+			if !errors.Is(err, beads.ErrProxiedServerUnsupported) {
+				t.Fatalf("error = %v, want ErrProxiedServerUnsupported", err)
+			}
+		})
+	}
+}
