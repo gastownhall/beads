@@ -902,3 +902,60 @@ func assertIssueIDs(t *testing.T, issues []*types.Issue, want []string) {
 		}
 	}
 }
+
+// TestGitLabRepeatedFiltersReachCLIFilter drives `bd gitlab sync`'s real flag
+// set through loadGitLabFilterFlags into what the sync consumes: the
+// IssueFilter from buildCLIFilter and the SyncOptions TypeFilter. Repeated
+// --label/--type join their comma sets (labels keep their AND meaning), a
+// repeated --assignee is refused while parsing, and a second invocation from
+// freshly reset flags carries none of the first one's filters: the globals
+// are no longer bound to the flags, so only the loader clears them.
+func TestGitLabRepeatedFiltersReachCLIFilter(t *testing.T) {
+	// Not parallel: it parses the shared command tree's flags.
+	savedLabel, savedProject, savedMilestone, savedAssignee := gitlabFilterLabel, gitlabFilterProject, gitlabFilterMilestone, gitlabFilterAssignee
+	savedType := gitlabTypeFilter
+	t.Cleanup(func() {
+		resetCommandFlags(rootCmd)
+		gitlabFilterLabel, gitlabFilterProject, gitlabFilterMilestone, gitlabFilterAssignee = savedLabel, savedProject, savedMilestone, savedAssignee
+		gitlabTypeFilter = savedType
+	})
+	fs := gitlabSyncCmd.Flags()
+
+	resetCommandFlags(rootCmd)
+	if err := fs.Parse([]string{"--label", "bug", "--label=backend,bug", "--assignee", "kyriakos", "--type", "epic", "--type", "task"}); err != nil {
+		t.Fatalf("parse repeated --label/--type: %v", err)
+	}
+	loadGitLabFilterFlags(fs)
+	filter := buildCLIFilter()
+	if filter == nil {
+		t.Fatal("buildCLIFilter() = nil after --label/--assignee were given")
+	}
+	if filter.Labels != "bug,backend" {
+		t.Errorf("IssueFilter.Labels = %q, want %q (repeats join the comma set, deduplicated)", filter.Labels, "bug,backend")
+	}
+	if filter.Assignee != "kyriakos" {
+		t.Errorf("IssueFilter.Assignee = %q, want %q", filter.Assignee, "kyriakos")
+	}
+	if got := parseTypeList(gitlabTypeFilter); len(got) != 2 || got[0] != types.IssueType("epic") || got[1] != types.IssueType("task") {
+		t.Errorf("SyncOptions TypeFilter = %v, want [epic task]", got)
+	}
+
+	resetCommandFlags(rootCmd)
+	err := fs.Parse([]string{"--assignee", "alice", "--assignee", "bob"})
+	if err == nil || !strings.Contains(err.Error(), "--assignee given more than once") {
+		t.Errorf("repeated --assignee: err = %v, want a refusal naming --assignee", err)
+	}
+
+	// A second invocation from freshly reset flags passes no filter at all.
+	resetCommandFlags(rootCmd)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatalf("parse with no flags: %v", err)
+	}
+	loadGitLabFilterFlags(fs)
+	if filter := buildCLIFilter(); filter != nil {
+		t.Errorf("buildCLIFilter() = %+v after a run without filters, want nil (earlier labels/assignee leaked)", filter)
+	}
+	if got := parseTypeList(gitlabTypeFilter); len(got) != 0 {
+		t.Errorf("SyncOptions TypeFilter = %v after a run without --type, want none (earlier types leaked)", got)
+	}
+}
