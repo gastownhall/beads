@@ -145,6 +145,13 @@ func mergeChangedTables(dst map[string]bool, src map[string]bool) map[string]boo
 
 func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string) (CreateIssueResult, error) {
 	var result CreateIssueResult
+	// An auto-minted id is never the caller's. Capture the emptiness before
+	// preparation assigns one: the row below then inserts strict (CreateOnly,
+	// no conflict skip) on its own options copy, so an id that was taken
+	// between the mint's probe and the insert fails ErrAlreadyExists instead
+	// of silently upserting over its occupant (bd-t4h0n7, PR #6754). A caller
+	// that named its id keeps the caller's options untouched.
+	autoMinted := issue.ID == ""
 	issueTable, eventTable, outcome, err := prepareCreateIssueInTx(ctx, tx, bc, issue, actor)
 	if err != nil || outcome == prepareSkip {
 		return result, err
@@ -154,7 +161,12 @@ func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, i
 		return result, nil
 	}
 
-	isNew, staleRejected, err := insertIssueIfNewCached(ctx, tx, issueTable, issue, bc.Opts, bc.cache)
+	insertOpts := bc.Opts
+	if autoMinted {
+		insertOpts.CreateOnly = true
+		insertOpts.ConflictSkip = false
+	}
+	isNew, staleRejected, err := insertIssueIfNewCached(ctx, tx, issueTable, issue, insertOpts, bc.cache)
 	if err != nil {
 		return result, err
 	}
@@ -213,7 +225,12 @@ func prepareCreateIssueInTx(ctx context.Context, tx DBTX, bc *BatchContext, issu
 	if err := assignCreateIssueIDInTx(ctx, tx, bc, issue, actor, nil); err != nil {
 		return "", "", prepareWrite, err
 	}
-	if bc.Opts.CreateOnly {
+	// A create-only create, or an auto-minted one (the minted id is never the
+	// caller's, so it meets the same strict guard the caller-requested
+	// CreateOnly does): coordinate the shard, then prove the id free in BOTH
+	// planes and neither tombstone table. An auto-mint that draws a held id
+	// fails here with ErrAlreadyExists rather than overwriting or skipping.
+	if bc.Opts.CreateOnly || !explicitID {
 		// A batch that coordinated this id up front already holds its cell.
 		ensure := EnsureIssueIDAvailableInTx
 		if bc.cache.coordinatedID(issue.ID) {

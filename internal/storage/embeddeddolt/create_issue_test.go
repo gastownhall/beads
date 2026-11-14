@@ -1391,3 +1391,43 @@ func readHookPayloads(t *testing.T, logPath string) []types.Issue {
 	}
 	return payloads
 }
+
+// TestAutoMintedCounterIDDoesNotOverwriteExplicitID (bd-t4h0n7, PR #6754):
+// an explicit id created ahead of the counter holds the counter's next value;
+// the next auto-minted create must not upsert over that row.
+func TestAutoMintedCounterIDDoesNotOverwriteExplicitID(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "cl")
+	ctx := t.Context()
+	if err := te.store.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+		t.Fatalf("SetConfig(issue_id_mode): %v", err)
+	}
+	if err := te.store.Commit(ctx, "enable counter mode"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	first := &types.Issue{Title: "auto one", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := te.store.CreateIssue(ctx, first, "tester"); err != nil {
+		t.Fatalf("CreateIssue(auto one): %v", err)
+	}
+	if first.ID != "cl-1" {
+		t.Fatalf("first auto id = %q, want cl-1", first.ID)
+	}
+	explicit := &types.Issue{ID: "cl-2", Title: "explicit two", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := te.store.CreateIssue(ctx, explicit, "tester"); err != nil {
+		t.Fatalf("CreateIssue(explicit cl-2): %v", err)
+	}
+
+	minted := &types.Issue{Title: "auto two", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	err := te.store.CreateIssue(ctx, minted, "tester")
+	if err == nil && minted.ID == "cl-2" {
+		t.Errorf("auto-minted create was handed cl-2, which the explicit issue holds, and reported success")
+	}
+	got, getErr := te.store.GetIssue(ctx, "cl-2")
+	if getErr != nil {
+		t.Fatalf("GetIssue(cl-2): %v", getErr)
+	}
+	if got.Title != "explicit two" {
+		t.Fatalf("explicit cl-2 was overwritten by the auto-minted create: title = %q, want %q", got.Title, "explicit two")
+	}
+}
