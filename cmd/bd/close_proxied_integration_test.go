@@ -1213,3 +1213,49 @@ func TestProxiedServerCloseRealCloseOutputUnchanged(t *testing.T) {
 	out = bdProxiedClose(t, bd, p.dir, guardedJSON.ID, "--if-revision", proxiedRevStr(bdProxiedShowRevision(t, bd, p.dir, guardedJSON.ID)), "--reason", "done", "--json")
 	requireRealCloseJSON(t, out, guardedJSON.ID, "done")
 }
+
+// TestProxiedServerCloseAlreadyClosedLeavesStateAndAuditUnchanged is
+// TestEmbeddedCloseAlreadyClosedLeavesStateAndAuditUnchanged's proxied-server
+// twin (bd-th8229, AC-5).
+func TestProxiedServerCloseAlreadyClosedLeavesStateAndAuditUnchanged(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+	p := newSharedProxiedProject(t, bd, "pcs")
+	if out, err := bdProxiedRun(t, bd, p.dir, "config", "set", "audit.enabled", "true"); err != nil {
+		t.Fatalf("bd config set audit.enabled: %v\n%s", err, out)
+	}
+
+	issue := bdProxiedCreate(t, bd, p.dir, "Reclose state")
+	bdProxiedClose(t, bd, p.dir, issue.ID, "--reason", "FIRST")
+	db := openProxiedDB(t, p)
+	closedEvents := func() int {
+		t.Helper()
+		var n int
+		if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?", issue.ID, types.EventClosed).Scan(&n); err != nil {
+			t.Fatalf("count closed events: %v", err)
+		}
+		return n
+	}
+	audits := auditStatusEntries(t, p.dir, issue.ID)
+	if audits != 1 {
+		t.Fatalf("control: the real close wrote %d issue-status audit entries, want 1", audits)
+	}
+	events := closedEvents()
+	if events == 0 {
+		t.Fatalf("control: the real close recorded no closed event")
+	}
+
+	bdProxiedClose(t, bd, p.dir, issue.ID, "--reason", "SECOND")
+	bdProxiedClose(t, bd, p.dir, issue.ID, "--if-revision", proxiedRevStr(bdProxiedShowRevision(t, bd, p.dir, issue.ID)), "--reason", "THIRD")
+
+	if got := readCloseReason(t, db, issue.ID); got != "FIRST" {
+		t.Errorf("close_reason = %q after re-closes, want %q (first close wins)", got, "FIRST")
+	}
+	if got := closedEvents(); got != events {
+		t.Errorf("closed events = %d after re-closes, want %d", got, events)
+	}
+	if got := auditStatusEntries(t, p.dir, issue.ID); got != audits {
+		t.Errorf("issue-status audit entries = %d after re-closes, want %d", got, audits)
+	}
+}

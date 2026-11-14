@@ -1043,3 +1043,86 @@ func TestEmbeddedCloseRealCloseOutputUnchanged(t *testing.T) {
 	out = bdClose(t, bd, dir, guardedJSON.ID, "--if-revision", revStr(bdShowRevision(t, bd, dir, guardedJSON.ID)), "--reason", "done", "--json")
 	requireRealCloseJSON(t, out, guardedJSON.ID, "done")
 }
+
+// auditStatusEntries counts the issue-status field_change entries the audit
+// sidecar (.beads/interactions.jsonl under dir) holds for id.
+func auditStatusEntries(t *testing.T, dir, id string) int {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, ".beads", "interactions.jsonl"))
+	if os.IsNotExist(err) {
+		return 0
+	}
+	if err != nil {
+		t.Fatalf("read audit sidecar: %v", err)
+	}
+	n := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var e struct {
+			Kind    string         `json:"kind"`
+			IssueID string         `json:"issue_id"`
+			Extra   map[string]any `json:"extra"`
+		}
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("parse audit line %q: %v", line, err)
+		}
+		if e.Kind == "field_change" && e.IssueID == id && e.Extra["field"] == "status" {
+			n++
+		}
+	}
+	return n
+}
+
+// closedEventCount counts id's closed events in bd history --events.
+func closedEventCount(t *testing.T, bd, dir, id string) int {
+	t.Helper()
+	n := 0
+	for _, event := range bdHistoryJSON(t, bd, dir, id, "--events") {
+		if event["event_type"] == string(types.EventClosed) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestEmbeddedCloseAlreadyClosedLeavesStateAndAuditUnchanged pins bd-th8229's
+// AC-5 on the direct routes: a successful re-close, batch or --if-revision,
+// keeps the first reason, adds no closed event and writes no issue-status
+// audit entry. The first close's own entry is the control that proves the
+// sidecar is on.
+func TestEmbeddedCloseAlreadyClosedLeavesStateAndAuditUnchanged(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "rcs")
+	bdRunOK(t, bd, dir, "config", "set", "audit.enabled", "true")
+
+	issue := bdCreate(t, bd, dir, "Reclose state", "--type", "task")
+	bdClose(t, bd, dir, issue.ID, "--reason", "FIRST")
+	audits := auditStatusEntries(t, dir, issue.ID)
+	if audits != 1 {
+		t.Fatalf("control: the real close wrote %d issue-status audit entries, want 1", audits)
+	}
+	events := closedEventCount(t, bd, dir, issue.ID)
+	if events == 0 {
+		t.Fatalf("control: the real close recorded no closed event")
+	}
+
+	bdClose(t, bd, dir, issue.ID, "--reason", "SECOND")
+	bdClose(t, bd, dir, issue.ID, "--if-revision", revStr(bdShowRevision(t, bd, dir, issue.ID)), "--reason", "THIRD")
+
+	if got := bdShow(t, bd, dir, issue.ID).CloseReason; got != "FIRST" {
+		t.Errorf("close_reason = %q after re-closes, want %q (first close wins)", got, "FIRST")
+	}
+	if got := closedEventCount(t, bd, dir, issue.ID); got != events {
+		t.Errorf("closed events = %d after re-closes, want %d", got, events)
+	}
+	if got := auditStatusEntries(t, dir, issue.ID); got != audits {
+		t.Errorf("issue-status audit entries = %d after re-closes, want %d", got, audits)
+	}
+}
