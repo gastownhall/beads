@@ -4,7 +4,7 @@
 #   scripts/fork/fork.sh sync                   merge upstream's default branch into
 #                                               the integration branch and open the PR
 #   scripts/fork/fork.sh release                tag the merged integration head as the
-#                                               next fork prerelease (<base>-<label>.<N>)
+#                                               next stable fork release (<upstream-version>-dc.N)
 #   scripts/fork/fork.sh pair [<bd-fork-tag>]   link the bd fork release this build
 #                                               pairs with (repos that link beads only)
 #
@@ -33,7 +33,6 @@ integration=$(jq -r '.defaultBranchRef.name' <<<"$repo_json")
 upstream_url="https://github.com/${upstream}.git"
 
 release_re='^v[0-9]+\.[0-9]+\.[0-9]+$'
-fork_re='^v[0-9]+\.[0-9]+\.[0-9]+-(f[a-z])\.?([0-9]+)$'
 
 fetch_integration() {
 	git fetch --no-tags origin "refs/heads/${integration}:refs/remotes/origin/${integration}"
@@ -57,18 +56,6 @@ current_base() {
 	die "no upstream release of $upstream is an ancestor of origin/${integration}"
 }
 
-# The fork label (fd, fc, ...) used by this fork's existing release tags.
-fork_label() {
-	local tag
-	while read -r tag; do
-		if [[ "$tag" =~ $fork_re ]]; then
-			echo "${BASH_REMATCH[1]}"
-			return 0
-		fi
-	done < <(gh release list -R "$self" --limit 100 --json tagName --jq '.[].tagName')
-	die "no fork release tag of $self matches vX.Y.Z-f<letter>[.]N"
-}
-
 cmd_sync() {
 	fetch_integration
 	local upstream_branch target base short
@@ -83,19 +70,13 @@ cmd_sync() {
 	fi
 	short=$(git rev-parse --short=9 "$target")
 
-	local main_root lane worktree patch
+	local main_root lane worktree
 	main_root=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")
 	lane="lane/${integration}-${upstream_branch}-${short}"
 	worktree="$(dirname "$main_root")/worktrees/$(basename "$main_root")/lane-${integration}-${upstream_branch}-${short}"
-	patch=$(mktemp)
-	git diff --binary "$base" "origin/${integration}" >"$patch"
 
 	git worktree add -b "$lane" "$worktree" "$target"
-	git -C "$worktree" merge --no-ff -s ours "origin/${integration}" \
-		-m "merge ${integration} history into upstream ${upstream_branch} ${short} (tree stays upstream)"
-	git -C "$worktree" apply --3way --index "$patch"
-	rm -f "$patch"
-	git -C "$worktree" commit -m "re-apply the fork delta onto upstream ${upstream_branch} ${short}"
+	git -C "$worktree" merge --no-ff "origin/${integration}"
 	if grep -q '^BD_FORK_VERSION=' "$worktree/deps.env" 2>/dev/null; then
 		(cd "$worktree" && "$worktree/scripts/fork/fork.sh" pair)
 		git -C "$worktree" add go.mod go.sum deps.env
@@ -104,14 +85,14 @@ cmd_sync() {
 	git -C "$worktree" push -u origin "$lane"
 	gh pr create -R "$self" --base "$integration" --head "$lane" --draft \
 		--title "Sync ${integration} with upstream ${upstream_branch} ${short}" \
-		--body "Upstream ${upstream_branch} ${target} with the fork delta re-applied (\`git diff ${base} origin/${integration}\`). Created by scripts/fork/fork.sh sync; see FORK.md."
+		--body "Upstream ${upstream_branch} ${target} merged with the fork integration lane (\`git diff ${base} origin/${integration}\`). Created by scripts/fork/fork.sh sync; see FORK.md."
 }
 
 cmd_release() {
 	fetch_integration
 	local base label head n tag
 	base=$(current_base)
-	label=$(fork_label)
+	label=dc
 	head=$(git rev-parse "origin/${integration}")
 	n=0
 	while read -r tag; do
@@ -124,7 +105,8 @@ cmd_release() {
 	local upstream_branch synced
 	upstream_branch=$(gh repo view "$upstream" --json defaultBranchRef --jq .defaultBranchRef.name)
 	git fetch --no-tags "$upstream_url" "refs/heads/${upstream_branch}:refs/remotes/upstream-sync/${upstream_branch}"
-	synced=$(git merge-base "refs/remotes/upstream-sync/${upstream_branch}" "$head")
+	synced=$(git rev-parse "refs/remotes/upstream-sync/${upstream_branch}")
+	git merge-base --is-ancestor "$synced" "$head" || die "integration does not contain upstream ${upstream_branch} $synced"
 	echo "fork.sh: ${self} ${integration} ${head} = upstream ${upstream_branch} ${synced} + fork delta:"
 	git diff --stat "$synced" "$head"
 	git tag -a "$tag" -m "Fork release ${tag}: upstream ${upstream_branch} ${synced} (${base} line) + fork delta" "$head"
@@ -144,9 +126,9 @@ cmd_pair() {
 	[[ -n "$fork_repo" ]] || die "$owner has no fork of $module_repo"
 	tag="${1:-}"
 	if [[ -z "$tag" ]]; then
-		tag=$(gh release list -R "$fork_repo" --limit 100 --json tagName --jq '.[].tagName' | grep -E "^${required}-f[a-z]\.[0-9]+$" | sort -rV | head -n 1)
+		tag=$(gh release list -R "$fork_repo" --limit 100 --json tagName --jq '.[].tagName' | grep -E "^${required}-dc\.[0-9]+$" | sort -rV | head -n 1)
 	fi
-	[[ "$tag" =~ ^${required}-f[a-z]\.[0-9]+$ ]] || die "bd fork tag must be ${required}-f<letter>.N (the linked version), got: ${tag:-none}"
+	[[ "$tag" =~ ^${required}-dc\.[0-9]+$ ]] || die "bd fork tag must be ${required}-dc.N (the linked version), got: ${tag:-none}"
 	go mod edit -replace "${module}=github.com/${fork_repo}@${tag}"
 	go mod tidy
 	local key
