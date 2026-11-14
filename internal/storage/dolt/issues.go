@@ -38,8 +38,12 @@ func (s *DoltStore) createIssue(ctx context.Context, issue *types.Issue, actor s
 		issue.Ephemeral = true // infra and wisp types get marked ephemeral (legacy behavior)
 	}
 
+	// A replayed attempt mints afresh: the id an attempt that did not land
+	// assigned may be a concurrent writer's row by now (bd-t4h0n7).
+	assigned := issueops.RecordAssignedIDs(issue)
 	var result issueops.CreateIssueResult
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		assigned.Reset()
 		// SkipPrefixValidation matches legacy behavior: single-issue path does
 		// not validate prefixes for explicit IDs.
 		bc, err := issueops.NewBatchContext(ctx, tx, storage.BatchCreateOptions{
@@ -48,8 +52,10 @@ func (s *DoltStore) createIssue(ctx context.Context, issue *types.Issue, actor s
 		if err != nil {
 			return err
 		}
-		result, err = issueops.CreateIssueInTxWithResult(ctx, tx, bc, issue, actor)
-		return err
+		if result, err = issueops.CreateIssueInTxWithResult(ctx, tx, bc, issue, actor); err != nil {
+			return err
+		}
+		return s.runCreateAttemptHook(ctx, []*types.Issue{issue})
 	}); err != nil {
 		return err
 	}
@@ -62,6 +68,14 @@ func (s *DoltStore) createIssue(ctx context.Context, issue *types.Issue, actor s
 		}
 	}
 	return nil
+}
+
+// runCreateAttemptHook runs the test-only createAttemptHook, if any.
+func (s *DoltStore) runCreateAttemptHook(ctx context.Context, issues []*types.Issue) error {
+	if s.createAttemptHook == nil {
+		return nil
+	}
+	return s.createAttemptHook(ctx, issues)
 }
 
 func createIssueCommitTables(ctx context.Context, issue *types.Issue, result issueops.CreateIssueResult) []string {

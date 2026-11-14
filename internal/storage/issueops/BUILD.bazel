@@ -6,6 +6,7 @@ go_library(
         "aggregate.go",
         "as_of.go",
         "asof_read.go",
+        "assigned_ids.go",
         "batch_apply.go",
         "batchget.go",
         "batching.go",
