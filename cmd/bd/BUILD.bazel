@@ -838,6 +838,7 @@ go_test(
         "federation_embedded_test.go",
         "feedback_test.go",
         "field_mutation_proxied_integration_test.go",
+        "filter_flags_test.go",
         "find_duplicates_embedded_test.go",
         "find_duplicates_test.go",
         "flags_test.go",
