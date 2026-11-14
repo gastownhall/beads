@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/endpointtrust"
 	"github.com/steveyegge/beads/internal/gitlab"
@@ -197,15 +198,19 @@ func init() {
 	gitlabSyncCmd.Flags().BoolVar(&gitlabPreferGitLab, "prefer-gitlab", false, "On conflict, use GitLab version")
 	gitlabSyncCmd.Flags().BoolVar(&gitlabPreferNewer, "prefer-newer", false, "On conflict, use most recent version (default)")
 
-	// Filter flags (override config defaults)
-	gitlabSyncCmd.Flags().StringVar(&gitlabFilterLabel, "label", "", "Filter by labels (comma-separated, AND logic)")
+	// Filter flags (override config defaults). --label and --type are
+	// documented comma lists, so a repeat joins the same list (GH#6548);
+	// runGitLabSync loads their values into the gitlabFilter*/gitlabType*
+	// globals through loadGitLabFilterFlags, since a custom flag value has
+	// no variable to bind.
+	addUnionFilterFlag(gitlabSyncCmd.Flags(), "label", "", "Filter by labels (comma-separated, AND logic)")
 	gitlabSyncCmd.Flags().StringVar(&gitlabFilterProject, "project", "", "Filter to issues from this project ID (group mode)")
 	gitlabSyncCmd.Flags().StringVar(&gitlabFilterMilestone, "milestone", "", "Filter by milestone title")
 	gitlabSyncCmd.Flags().StringVar(&gitlabFilterAssignee, "assignee", "", "Filter by assignee username")
 	registerSelectiveSyncFlags(gitlabSyncCmd)
 
 	// Type filtering flags
-	gitlabSyncCmd.Flags().StringVar(&gitlabTypeFilter, "type", "", "Only sync these issue types (comma-separated, e.g. 'epic,feature,task')")
+	addUnionFilterFlag(gitlabSyncCmd.Flags(), "type", "", "Only sync these issue types (comma-separated, e.g. 'epic,feature,task')")
 	gitlabSyncCmd.Flags().StringVar(&gitlabExcludeTypes, "exclude-type", "", "Exclude these issue types from sync (comma-separated)")
 	gitlabSyncCmd.Flags().BoolVar(&gitlabNoEphemeral, "no-ephemeral", true, "Exclude ephemeral/wisp issues from push (default: true)")
 
@@ -470,12 +475,28 @@ type gitlabSyncResult struct {
 	Warnings            []string `json:"warnings,omitempty"`
 }
 
+// loadGitLabFilterFlags copies the sync command's parsed filter flags into
+// the package globals buildCLIFilter and the sync options read. It loads
+// every value unconditionally — including empty ones — so each invocation
+// reflects only its own flags: label and type (and assignee, once it joins
+// them) are custom union/once values rather than pflag-bound variables
+// (GH#6548), so nothing else writes those globals, and a value left there by
+// a previous in-process invocation must not survive one that leaves the flag
+// unset. Called at the top of runGitLabSync, before any config, store, or
+// network work and before buildCLIFilter or the type reads below.
+func loadGitLabFilterFlags(fs *pflag.FlagSet) {
+	gitlabFilterLabel, _ = fs.GetString("label")
+	gitlabFilterAssignee, _ = fs.GetString("assignee")
+	gitlabTypeFilter, _ = fs.GetString("type")
+}
+
 // runGitLabSync implements the gitlab sync command.
 // Uses the tracker.Engine for all sync operations.
 func runGitLabSync(cmd *cobra.Command, args []string) error {
 	if usesProxiedServer() {
 		return HandleErrorRespectJSON("gitlab sync is not supported in proxied-server mode")
 	}
+	loadGitLabFilterFlags(cmd.Flags())
 	evt := metrics.NewCommandEvent("gitlab-sync")
 	defer func() {
 		if c := metrics.Global(); c != nil {

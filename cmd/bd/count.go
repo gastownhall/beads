@@ -280,7 +280,9 @@ func registerCountFlags(cmd *cobra.Command) {
 	cmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL)")
 	cmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE)")
 	cmd.Flags().String("title", "", "Filter by title text (case-insensitive substring match)")
-	cmd.Flags().String("id", "", "Filter by specific issue IDs (comma-separated)")
+	// A comma-separated id set all the way down (issueops.CountRequest's
+	// IDFilter): a repeat joins the set instead of silently dropping ids.
+	addUnionFilterFlag(cmd.Flags(), "id", "", "Filter by specific issue IDs (comma-separated)")
 
 	// Hierarchy and exclusions (same spelling as `bd list`'s flags of the same
 	// name, GH#4387's count/list parity): --parent and --no-parent restrict to
