@@ -1552,6 +1552,39 @@ func TestValidate_OnCompleteRefused(t *testing.T) {
 	})
 }
 
+// TestValidate_NoStepOnCompleteAccepted: formulas with no step-level
+// on_complete validate exactly as before — plain steps, children, loop
+// bodies — and a top-level [squash] table whose trigger string says
+// "on_complete" is not a step field, so the refusal must not catch it
+// (GH#3782 regression guard).
+func TestValidate_NoStepOnCompleteAccepted(t *testing.T) {
+	f := workflowWithSteps(
+		&Step{ID: "build", Title: "Build"},
+		&Step{ID: "phase", Title: "Phase", Children: []*Step{
+			{ID: "impl", Title: "Implement"},
+		}},
+		&Step{ID: "matrix", Title: "Matrix", Loop: &LoopSpec{
+			Count: 3,
+			Var:   "i",
+			Body:  []*Step{{ID: "cell", Title: "Cell {{i}}"}},
+		}},
+	)
+	if err := f.Validate(); err != nil {
+		t.Errorf("Validate failed for an on_complete-free formula: %v", err)
+	}
+
+	src := "formula = \"mol-squash\"\nversion = 1\ntype = \"workflow\"\n\n" +
+		"[[steps]]\nid = \"build\"\ntitle = \"Build\"\n\n" +
+		"[squash]\ntrigger = \"on_complete\"\n"
+	parsed, err := NewParser().ParseTOML([]byte(src))
+	if err != nil {
+		t.Fatalf("ParseTOML: %v", err)
+	}
+	if err := parsed.Validate(); err != nil {
+		t.Errorf("Validate refused a formula whose only on_complete text is the unrelated [squash] trigger: %v", err)
+	}
+}
+
 // bd-4bt1: Tests for gate field parsing
 
 func TestParse_GateField(t *testing.T) {

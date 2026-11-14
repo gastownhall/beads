@@ -1684,6 +1684,55 @@ func TestCookFormulaOnCompleteRefused(t *testing.T) {
 	})
 }
 
+// TestCookFormulaOnCompleteFreeFormulaStillCooks: the GH#3782 refusal must
+// not disturb formulas with no step-level on_complete, including one that
+// carries the unrelated top-level [squash] table.
+func TestCookFormulaOnCompleteFreeFormulaStillCooks(t *testing.T) {
+	const name = "no-on-complete"
+	sg, err := cookFormulaTOMLWithVars(t, name, `formula = "`+name+`"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "build"
+title = "Build"
+
+[[steps]]
+id = "phase"
+title = "Phase"
+
+[[steps.children]]
+id = "impl"
+title = "Implement"
+
+[[steps]]
+id = "matrix"
+title = "Matrix"
+
+[steps.loop]
+count = 3
+var = "i"
+
+[[steps.loop.body]]
+id = "cell"
+title = "Cell {{i}}"
+
+[squash]
+trigger = "on_complete"
+`, nil)
+	if err != nil {
+		t.Fatalf("cook %q: %v", name, err)
+	}
+	for _, id := range []string{
+		name + ".build", name + ".phase.impl", name + ".matrix.iter1.cell",
+		name + ".matrix.iter2.cell", name + ".matrix.iter3.cell",
+	} {
+		if sg.IssueMap[id] == nil {
+			t.Errorf("issue %s missing from subgraph; issues %v", id, allIssueIDs(sg))
+		}
+	}
+}
+
 // TestCookFormulaConditionDroppedWaitsForSpawnerErrors: a gate whose
 // waits_for spawner is dropped by its condition must fail the cook, not pour
 // a gate:<value> step that waits for no one (GH#6437, PR #6642).
