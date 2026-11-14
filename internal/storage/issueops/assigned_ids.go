@@ -1,6 +1,11 @@
 package issueops
 
-import "github.com/steveyegge/beads/internal/types"
+import (
+	"errors"
+
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/types"
+)
 
 // AssignedIDs records the identity fields a create left for the store to
 // assign: an Issue.ID, a Dependency.IssueID (defaulted to its owning issue)
@@ -11,7 +16,7 @@ import "github.com/steveyegge/beads/internal/types"
 // there, and a caller that retries gets the same.
 //
 // Record before the first attempt, Reset at the start of every attempt so each
-// one mints from scratch, and Reset again when the create fails definitely.
+// one mints from scratch, and ResetAfterFailure once the create has failed.
 // Fields the caller supplied are never touched.
 type AssignedIDs struct {
 	issues   []*types.Issue
@@ -54,4 +59,16 @@ func (a AssignedIDs) Reset() {
 	for _, comment := range a.comments {
 		comment.ID = ""
 	}
+}
+
+// ResetAfterFailure is Reset for a create that returned err, unless err wraps
+// storage.ErrCommitIndeterminate: a commit that may have landed keeps the ids
+// it assigned, since they may name the caller's rows. A failure after the SQL
+// commit (the Dolt commit or publication) never reaches here: the rows landed
+// and their ids stay.
+func (a AssignedIDs) ResetAfterFailure(err error) {
+	if err == nil || errors.Is(err, storage.ErrCommitIndeterminate) {
+		return
+	}
+	a.Reset()
 }

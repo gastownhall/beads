@@ -57,6 +57,7 @@ func (s *DoltStore) createIssue(ctx context.Context, issue *types.Issue, actor s
 		}
 		return s.runCreateAttemptHook(ctx, []*types.Issue{issue})
 	}); err != nil {
+		assigned.ResetAfterFailure(err)
 		return err
 	}
 
@@ -138,6 +139,7 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 			}
 			return s.runCreateAttemptHook(ctx, issues)
 		}); err != nil {
+			assigned.ResetAfterFailure(err)
 			return err
 		}
 		s.commitWispDurable(ctx, wispDurable{issues: result.ChangedTables["issues"]},
@@ -157,6 +159,7 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 		}
 		return s.runCreateAttemptHook(ctx, issues)
 	}); err != nil {
+		assigned.ResetAfterFailure(err)
 		return err
 	}
 
