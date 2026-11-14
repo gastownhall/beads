@@ -1,9 +1,11 @@
 package beads
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/git"
@@ -1155,4 +1157,150 @@ func TestFindBeadsDirFrom_WorktreeMetadatalessStoreYieldsToSharedWorkspace(t *te
 			}
 		})
 	}
+}
+
+// captureStderrForTest swaps os.Stderr for the duration of fn and returns
+// what was written to it. Discovery writes diagnostics to os.Stderr only.
+func captureStderrForTest(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = saved }()
+	fn()
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
+}
+
+// TestFindBeadsDir_WorktreeStoreWithMetadataNotYielded is the AC-4 guard for
+// the GH#6552 fix: a worktree store that carries readable workspace metadata
+// of its own — however it got there, and whether or not it names a database
+// — keeps existing separate-database precedence beside a metadata-backed
+// shared workspace, in directory and database-path discovery, with no
+// missing-metadata warning. Passes before and after the fix.
+func TestFindBeadsDir_WorktreeStoreWithMetadataNotYielded(t *testing.T) {
+	unsetDiscoveryEnvForTest(t)
+
+	cases := []struct {
+		name string
+		// localMetadata is written into the worktree's .beads; legacy
+		// selects the legacy config.json filename for it.
+		localMetadata string
+		legacy        bool
+	}{
+		{
+			name:          "own metadata with database name",
+			localMetadata: `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"workdb"}`,
+		},
+		{
+			name:          "metadata without a database name",
+			localMetadata: `{"backend":"dolt","dolt_mode":"embedded"}`,
+		},
+		{
+			name:          "legacy config.json metadata",
+			localMetadata: `{"backend":"dolt","dolt_database":"workdb"}`,
+			legacy:        true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newGH6552Fixture(t,
+				`{"backend":"dolt","dolt_mode":"embedded","dolt_database":"myproject"}`,
+				filepath.Join("embeddeddolt", "myproject"),
+				"beads")
+
+			metadataName := "metadata.json"
+			if tc.legacy {
+				metadataName = "config.json"
+			}
+			if err := os.WriteFile(filepath.Join(fx.worktreeBeadsDir, metadataName), []byte(tc.localMetadata), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			t.Chdir(fx.worktreeDir)
+			git.ResetCaches()
+
+			worktreeBeads := resolveForTest(t, fx.worktreeBeadsDir)
+			worktreeEmbedded := resolveForTest(t, filepath.Join(fx.worktreeBeadsDir, "embeddeddolt"))
+
+			stderr := strings.TrimSpace(captureStderrForTest(t, func() {
+				if got := resolveForTest(t, FindBeadsDir()); got != worktreeBeads {
+					t.Errorf("FindBeadsDir() = %q, want worktree .beads %q (a store with its own metadata is separate-DB mode, not a phantom)", FindBeadsDir(), fx.worktreeBeadsDir)
+				}
+				if got := resolveForTest(t, FindDatabasePath()); got != worktreeEmbedded {
+					t.Errorf("FindDatabasePath() = %q, want worktree embedded store %q", FindDatabasePath(), filepath.Join(fx.worktreeBeadsDir, "embeddeddolt"))
+				}
+				if got := resolveForTest(t, FindBeadsDirFrom(fx.worktreeDir)); got != worktreeBeads {
+					t.Errorf("FindBeadsDirFrom(%q) = %q, want worktree .beads %q", fx.worktreeDir, FindBeadsDirFrom(fx.worktreeDir), fx.worktreeBeadsDir)
+				}
+			}))
+
+			if strings.Contains(stderr, "GH#6552") {
+				t.Errorf("no missing-metadata warning expected for a store with its own metadata, got stderr:\n%s", stderr)
+			}
+		})
+	}
+}
+
+// TestFindBeadsDir_YieldRequiresRecognizedSharedWorkspace guards the other
+// direction of the GH#6552 decision: the yield fires only beside a shared
+// workspace that existing directory discovery recognizes by readable
+// metadata. A shared candidate without workspace metadata does not displace
+// the local store, and a standalone (non-worktree) repository is never
+// subject to the yield at all. Passes before and after the fix.
+func TestFindBeadsDir_YieldRequiresRecognizedSharedWorkspace(t *testing.T) {
+	unsetDiscoveryEnvForTest(t)
+
+	t.Run("shared workspace without metadata does not displace the local store", func(t *testing.T) {
+		// Same layout as the GH#6552 fixture, minus the main metadata.json:
+		// the shared candidate has project files and a store, but nothing
+		// that declares it a workspace.
+		fx := newGH6552Fixture(t,
+			`{"backend":"dolt","dolt_mode":"embedded","dolt_database":"myproject"}`,
+			filepath.Join("embeddeddolt", "myproject"),
+			"beads")
+		if err := os.Remove(filepath.Join(fx.mainBeadsDir, "metadata.json")); err != nil {
+			t.Fatal(err)
+		}
+
+		t.Chdir(fx.worktreeDir)
+		git.ResetCaches()
+
+		worktreeBeads := resolveForTest(t, fx.worktreeBeadsDir)
+		worktreeEmbedded := resolveForTest(t, filepath.Join(fx.worktreeBeadsDir, "embeddeddolt"))
+		if got := resolveForTest(t, FindBeadsDir()); got != worktreeBeads {
+			t.Errorf("FindBeadsDir() = %q, want worktree .beads %q (an unrecognized shared candidate must not displace the local store)", FindBeadsDir(), fx.worktreeBeadsDir)
+		}
+		if got := resolveForTest(t, FindDatabasePath()); got != worktreeEmbedded {
+			t.Errorf("FindDatabasePath() = %q, want worktree embedded store %q", FindDatabasePath(), filepath.Join(fx.worktreeBeadsDir, "embeddeddolt"))
+		}
+	})
+
+	t.Run("standalone repository keeps its metadata-less store", func(t *testing.T) {
+		repoDir := filepath.Join(t.TempDir(), "repo")
+		if err := os.MkdirAll(filepath.Join(repoDir, ".beads", "embeddeddolt", "beads"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repoDir, ".beads", "config.yaml"), []byte("issue-prefix: \"R\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		t.Chdir(repoDir)
+		git.ResetCaches()
+
+		repoBeads := resolveForTest(t, filepath.Join(repoDir, ".beads"))
+		if got := resolveForTest(t, FindBeadsDir()); got != repoBeads {
+			t.Errorf("FindBeadsDir() = %q, want %q (standalone stores are never subject to the yield)", FindBeadsDir(), filepath.Join(repoDir, ".beads"))
+		}
+	})
 }
