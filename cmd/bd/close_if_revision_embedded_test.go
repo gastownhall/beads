@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -85,5 +86,42 @@ func TestEmbeddedIfRevisionCloseWarnsOnForcedOpenChildren(t *testing.T) {
 
 	if got := bdShow(t, bd, dir, parent.ID); got.Status != types.StatusClosed {
 		t.Errorf("guarded forced close did not apply: status = %s, want closed", got.Status)
+	}
+}
+
+// TestEmbeddedIfRevisionCloseAlreadyClosedReportsNoOp pins bd-th8229 (GH#4816)
+// on the guarded direct route: a re-close at the issue's current revision with
+// a new reason exits 0, keeps the first reason, and reports the no-op as the
+// batch routes do, in text and in --json.
+func TestEmbeddedIfRevisionCloseAlreadyClosedReportsNoOp(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "rgn")
+
+	issue := bdCreate(t, bd, dir, "Guarded reclose", "--type", "task")
+	bdClose(t, bd, dir, issue.ID, "--reason", "FIRST")
+
+	out := bdClose(t, bd, dir, issue.ID, "--if-revision", revStr(bdShowRevision(t, bd, dir, issue.ID)), "--reason", "SECOND")
+	want := fmt.Sprintf("Already closed %s — Guarded reclose (close reason unchanged: FIRST)", issue.ID)
+	if !strings.Contains(out, want) {
+		t.Errorf("guarded re-close should report %q, got:\n%s", want, out)
+	}
+	if strings.Contains(out, "✓ Closed") || strings.Contains(out, "SECOND") {
+		t.Errorf("guarded re-close reports a close with the dropped reason:\n%s", out)
+	}
+
+	out = bdClose(t, bd, dir, issue.ID, "--if-revision", revStr(bdShowRevision(t, bd, dir, issue.ID)), "--reason", "THIRD", "--json")
+	entries := decodeCloseJSON(t, out, []string{issue.ID})
+	requireCloseJSONMarksAlreadyClosed(t, entries, map[string]bool{issue.ID: true})
+	if got := entries[0].CloseReason; got != "FIRST" {
+		t.Errorf("guarded re-close --json close_reason = %q, want %q", got, "FIRST")
+	}
+
+	if got := bdShow(t, bd, dir, issue.ID).CloseReason; got != "FIRST" {
+		t.Errorf("close_reason = %q after guarded re-closes, want %q (first close wins)", got, "FIRST")
 	}
 }
