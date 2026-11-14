@@ -1619,7 +1619,7 @@ Atomically set operational state on an issue.
 
 This command:
 1. Creates an event bead recording the state change (source of truth)
-2. Removes any existing label for the dimension
+2. Removes every label of the dimension (each label starting with <dimension>:)
 3. Adds the new dimension:value label (fast lookup cache)
 
 State labels follow the convention &lt;dimension&gt;:&lt;value&gt;, for example:
