@@ -1074,3 +1074,124 @@ func TestSetupChangeDir_InstallWritesTarget(t *testing.T) {
 		assertDirEmpty(t, launch, "launch directory")
 	})
 }
+
+// TestSetupChangeDir_RemoveTouchesOnlyTarget pins #8283's removal half: with
+// an integration's files present in both the launch directory and the -C
+// target, `bd -C <target> setup <recipe> --remove` takes them only from the
+// target. The launch directory's copies keep their bytes, unrelated target
+// content survives, and the target directory itself is never dropped.
+func TestSetupChangeDir_RemoveTouchesOnlyTarget(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		files []string // the recipe's managed files (slash-relative), seeded in both T and L
+		keep  []string // target content (slash-relative) that must survive
+		seed  string   // rel path whose seed must be this bd-owned content, not filler
+		owns  string   // that seed content, valid for the tool's remover
+	}{
+		{name: "windsurf", files: []string{".windsurf/rules/beads.md"}, keep: []string{"README.md"}},
+		{name: "copilot", files: []string{".copilot-plugin/plugin.json", ".github/copilot-instructions.md"}},
+		{name: "cursor", files: []string{".cursor/rules/beads.mdc", ".cursor/hooks.json", ".agents/skills/beads/SKILL.md"},
+			seed: ".cursor/hooks.json", owns: `{"version": 1, "hooks": {}}`},
+		{name: "aider", files: []string{".aider.conf.yml", ".aider/BEADS.md", ".aider/README.md"}, keep: []string{".aider/notes.md"}},
+		{name: "junie", files: []string{".junie/guidelines.md", ".junie/mcp/mcp.json"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			launch, target := setupChangeDirWorkspace(t)
+			setupChangeDir(t, target)
+			setupRemove = true
+
+			for _, dir := range []string{launch, target} {
+				for _, rel := range tt.files {
+					path := filepath.Join(dir, filepath.FromSlash(rel))
+					if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+						t.Fatalf("MkdirAll: %v", err)
+					}
+					// Distinct bytes per side, so a missing-file assertion on
+					// the wrong side cannot pass by reading the other's copy.
+					content := "stale target copy\n"
+					if dir == launch {
+						content = "launch copy\n"
+					}
+					if rel == tt.seed {
+						// The remover only takes a file it recognizes as bd's
+						// own; filler it cannot parse stops it before the
+						// removal under test.
+						content = tt.owns
+					}
+					if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+						t.Fatalf("WriteFile: %v", err)
+					}
+				}
+			}
+			for _, rel := range tt.keep {
+				path := filepath.Join(target, filepath.FromSlash(rel))
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatalf("MkdirAll: %v", err)
+				}
+				if err := os.WriteFile(path, []byte("unrelated\n"), 0o644); err != nil {
+					t.Fatalf("WriteFile: %v", err)
+				}
+			}
+
+			_ = captureStdout(t, func() error {
+				return runRecipe(strings.Split(tt.name, " ")[0])
+			})
+
+			for _, rel := range tt.files {
+				if _, err := os.Stat(filepath.Join(target, filepath.FromSlash(rel))); !os.IsNotExist(err) {
+					t.Errorf("bd -C %s setup %s --remove left %s in the target (stat err=%v)", target, tt.name, rel, err)
+				}
+				launchCopy, err := os.ReadFile(filepath.Join(launch, filepath.FromSlash(rel)))
+				want := "launch copy\n"
+				if rel == tt.seed {
+					want = tt.owns
+				}
+				if err != nil {
+					t.Errorf("bd -C %s setup %s --remove took %s out of the launch directory %s: %v", target, tt.name, rel, launch, err)
+				} else if string(launchCopy) != want {
+					t.Errorf("bd -C %s setup %s --remove rewrote the launch copy of %s; now %q", target, tt.name, rel, launchCopy)
+				}
+			}
+			for _, rel := range tt.keep {
+				if _, err := os.Stat(filepath.Join(target, filepath.FromSlash(rel))); err != nil {
+					t.Errorf("bd -C %s setup %s --remove took unrelated %s from the target: %v", target, tt.name, rel, err)
+				}
+			}
+			if _, err := os.Stat(target); err != nil {
+				t.Errorf("bd -C %s setup %s --remove dropped the target directory itself: %v", target, tt.name, err)
+			}
+		})
+	}
+
+	// A workspace recipe naming a bare file pins the generic branch's
+	// directory cleanup under -C: the file comes out of the target, and the
+	// empty-directory sweep that follows a removal never reaches the target
+	// directory itself, which a bare filename's parent "." would name.
+	t.Run("workspace bare file", func(t *testing.T) {
+		launch, target := setupChangeDirWorkspace(t)
+		if err := os.WriteFile(filepath.Join(target, ".beads", "recipes.toml"), []byte("[recipes.plan]\nname = \"Plan\"\npath = \"plan.md\"\n"), 0o600); err != nil {
+			t.Fatalf("WriteFile recipes.toml: %v", err)
+		}
+		setupChangeDir(t, target)
+		setupRemove = true
+		if err := os.WriteFile(filepath.Join(target, "plan.md"), []byte("stale target copy\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile target plan.md: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(launch, "plan.md"), []byte("launch copy\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile launch plan.md: %v", err)
+		}
+
+		_ = captureStdout(t, func() error { return runRecipe("plan") })
+
+		if _, err := os.Stat(filepath.Join(target, "plan.md")); !os.IsNotExist(err) {
+			t.Errorf("bd -C %s setup plan --remove left plan.md in the target (stat err=%v)", target, err)
+		}
+		launchCopy, err := os.ReadFile(filepath.Join(launch, "plan.md"))
+		if err != nil || string(launchCopy) != "launch copy\n" {
+			t.Errorf("bd -C %s setup plan --remove took or rewrote the launch copy (err=%v, now %q)", target, err, launchCopy)
+		}
+		if _, err := os.Stat(target); err != nil {
+			t.Errorf("bd -C %s setup plan --remove dropped the target directory itself: %v", target, err)
+		}
+	})
+}

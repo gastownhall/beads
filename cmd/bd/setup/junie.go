@@ -183,10 +183,12 @@ func CheckJunie() error {
 }
 
 func RemoveJunie() error {
-	guidelinesPath := ".junie/guidelines.md"
-	mcpPath := ".junie/mcp/mcp.json"
-	mcpDir := ".junie/mcp"
-	junieDir := ".junie"
+	// The files belong to the selected project (the -C target while one is
+	// bound, GH#8283), as InstallJunie writes them.
+	guidelinesPath := ProjectPath(".junie/guidelines.md")
+	mcpPath := ProjectPath(".junie/mcp/mcp.json")
+	mcpDir := ProjectPath(".junie/mcp")
+	junieDir := ProjectPath(".junie")
 
 	fmt.Println("Removing Junie integration...")
 

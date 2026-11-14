@@ -196,10 +196,12 @@ func CheckAider() error {
 }
 
 func RemoveAider() error {
-	configPath := ".aider.conf.yml"
-	instructionsPath := ".aider/BEADS.md"
-	readmePath := ".aider/README.md"
-	aiderDir := ".aider"
+	// The files belong to the selected project (the -C target while one is
+	// bound, GH#8283), as InstallAider writes them.
+	configPath := ProjectPath(".aider.conf.yml")
+	instructionsPath := ProjectPath(".aider/BEADS.md")
+	readmePath := ProjectPath(".aider/README.md")
+	aiderDir := ProjectPath(".aider")
 
 	fmt.Println("Removing Aider integration...")
 
