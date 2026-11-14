@@ -511,8 +511,18 @@ type schemaSentinelColumn struct {
 	//        but column-less. A floor above the table's creator would strand
 	//        the table-absent shape in a permanent re-migration loop.
 	//
-	// TestSentinelColumnsAreCreatedByTheSeries pins the floor to those two
-	// files, so a future renumbering breaks CI rather than users.
+	//        A column whose SQL creator sits at or below the floor may instead
+	//        delegate the column's heal to a pre-migration repair
+	//        (preMigrationRepairs) registered strictly ABOVE the floor that
+	//        re-adds the column in code — the wisps.is_blocked shape (gh 5257),
+	//        whose adder ignored/0006 sits below any floor that can exclude
+	//        0007. That delegation requires the carrier to also be a floor-0
+	//        sentinelTables entry, so the table-absent shape still floors to
+	//        zero and replays the carrier's own creator.
+	//
+	// TestSentinelColumnsAreCreatedByTheSeries pins each floor to those two
+	// files or to its registered healer, so a future renumbering breaks CI
+	// rather than users.
 	replayFloor int
 }
 
@@ -584,7 +594,33 @@ var (
 		// 0001–0025 series replays, dragging in ignored/0007 and restamping
 		// wisps.updated_at across the plane. Believing the cursor up to 11
 		// applies exactly the pending tail 0012–0025 instead.
-		sentinelColumns: []schemaSentinelColumn{{table: "leases", column: "granted_node", replayFloor: 11}},
+		//
+		// gh 5257: the same trust, one column deeper. wisps is dolt-ignored —
+		// no committed history — so an out-of-band copy or restore can land
+		// with the ignored cursor at-latest and is_blocked (and its index)
+		// gone, with no log to reconstruct the loss from. The trusted cursor
+		// then says the series is fully applied, the column is never re-added,
+		// and every blocked-state read and write on the store fails with a
+		// generic "column could not be found" — including bd doctor's
+		// blocked-state check, the thing that should have caught it.
+		//
+		// The floor of 14 is the highest one that heals without harming: it
+		// keeps guarded 0015 — and the repair registered immediately before
+		// it (ensureWispIsBlockedForRecompute, which re-adds the column and
+		// idx_wisps_is_blocked in code, mirroring 0006's own statements) — in
+		// the replay, and frozen 0007's unguarded restamp out of it, exactly
+		// the leases-11 reasoning one version later. The column's own SQL
+		// adder is 0006, below any such floor, so the column's heal is
+		// delegated to that {ignored_schema_migrations, 15} repair (the
+		// replayFloor contract's second arm); the table-absent shape floors to
+		// 0 through the "wisps" sentinelTables entry above and replays the
+		// carrier's creator. Cursors at or below 14 are believed as read, and
+		// the same repair's {ignored_schema_migrations, 7} registration still
+		// reaches them.
+		sentinelColumns: []schemaSentinelColumn{
+			{table: "leases", column: "granted_node", replayFloor: 11},
+			{table: "wisps", column: "is_blocked", replayFloor: 14},
+		},
 	}
 )
 

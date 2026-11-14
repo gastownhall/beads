@@ -22,7 +22,10 @@ func migrateLostTombstonesUpToFirstApply(t *testing.T, raw int) string {
 	lostTableNoticeOut = &notices
 	t.Cleanup(func() { lostTableNoticeOut = orig })
 	stubSentinelTables(t, allSentinelTablesExcept("wisp_id_tombstones"), nil)
-	stubSentinelColumns(t, map[string]bool{"leases.granted_node": true}, nil)
+	// Every column sentinel present: a "missing" wisps.is_blocked would clamp
+	// the raw cursor down to its floor and reclassify the lost tombstone table
+	// as never-created, suppressing the notice this file pins.
+	stubSentinelColumns(t, allSentinelColumns(), nil)
 
 	db, mock, err := sqlmock.New()
 	if err != nil {
