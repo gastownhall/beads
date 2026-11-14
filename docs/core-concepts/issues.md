@@ -178,3 +178,22 @@ bd list --label-all backend,security
 # Combined filters
 bd list --status open --priority 1 --type bug --json
 ```
+
+### Repeating a filter flag
+
+Set-valued filters treat a repeated flag like their comma form: `bd list
+--status open --status closed` and `bd list --status open,closed` mean the
+same thing. This holds for every filter that already accepts a comma list —
+`bd list` / `bd search` / `bd human list --status`, `bd list` / `bd count
+--id`, and `bd gitlab sync --label` / `--type` (labels keep their documented
+AND meaning).
+
+Single-valued filters (`--type`, `--assignee`, single-status `--status`
+filters such as `bd count --status`, the sync commands' `--state`, …)
+refuse a second occurrence with an error instead of silently keeping only
+the last value. An explicit empty value (`--assignee=`) resets the filter
+first, so `--assignee= --assignee bob` overrides cleanly. This protection
+covers the filter flags spelled `--status`, `--state`, `--id`, `--type`,
+`--assignee`, and `--label`; other flags keep their documented behavior,
+and value setters like `bd create --type` deliberately keep the shell's
+last-one-wins override idiom.
