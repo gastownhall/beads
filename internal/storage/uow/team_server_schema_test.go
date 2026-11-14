@@ -472,6 +472,45 @@ func TestCheckExcursionIdentity_SerializationError_StaysBare(t *testing.T) {
 	}
 }
 
+// The non-beads escape hatch (the compatibility promise of bd-rgvivq): a
+// target whose metadata table is absent is not a beads database — the check
+// skips so the open path below can install the schema, exactly as it did
+// before the guard existed.
+func TestCheckExcursionIdentity_MissingMetadataTable_Skips(t *testing.T) {
+	mock, db, closeDB := newVersionMockDB(t)
+	defer closeDB()
+	expectExcursionSelection(mock, "widgets_db")
+	mock.ExpectQuery("SELECT value FROM metadata WHERE .key. = \\?").
+		WithArgs("_project_id").
+		WillReturnError(&mysql.MySQLError{Number: 1146, Message: "table 'widgets_db.metadata' doesn't exist"})
+
+	if err := checkExcursionIdentity(context.Background(), db, "widgets_db", "project-AAAA"); err != nil {
+		t.Fatalf("checkExcursionIdentity = %v, want nil on a non-beads database (no metadata table)", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// A beads schema installed by a plain excursion open carries no _project_id
+// row (only init adopts an identity into a database). Revisiting such a
+// target asserts nothing and passes.
+func TestCheckExcursionIdentity_MissingIdentityRow_Skips(t *testing.T) {
+	mock, db, closeDB := newVersionMockDB(t)
+	defer closeDB()
+	expectExcursionSelection(mock, "beads_other")
+	mock.ExpectQuery("SELECT value FROM metadata WHERE .key. = \\?").
+		WithArgs("_project_id").
+		WillReturnRows(sqlmock.NewRows([]string{"value"}))
+
+	if err := checkExcursionIdentity(context.Background(), db, "beads_other", "project-AAAA"); err != nil {
+		t.Fatalf("checkExcursionIdentity = %v, want nil when the target carries no identity row", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
 // TestInitSchemaAttempt_ExcursionMismatchStopsBeforeOpen pins where the
 // excursion identity refusal lands in the plain proxied open: on the pinned
 // connection, after the team-server branch, before the preview split and

@@ -281,3 +281,67 @@ func TestPlainProxiedServerMode_ForeignProjectIdentityRefused_Integration(t *tes
 	require.Error(t, err, "plain proxied open attached to a foreign project's beads database with no identity assertion")
 	assert.Contains(t, err.Error(), "PROJECT IDENTITY MISMATCH")
 }
+
+// TestPlainProxiedExcursionIdentity_NonBeadsTarget_Integration pins the
+// compatibility promise of the bd-rgvivq guard: a --database excursion into
+// a database that is not a beads database stays fully usable — across
+// repeated excursions, including after an earlier excursion open installed
+// the beads schema in it without a project identity — and no open ever mints
+// an identity there.
+func TestPlainProxiedExcursionIdentity_NonBeadsTarget_Integration(t *testing.T) {
+	h := newTeamServerHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	admin := h.directDB(t, "")
+	_, err := admin.ExecContext(ctx, "CREATE DATABASE excursion_widgets")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		// The parent's ctx is canceled by its deferred cancel() before
+		// cleanup functions run; use a fresh one.
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cleanupCancel()
+		_, err := admin.ExecContext(cleanupCtx, "DROP DATABASE IF EXISTS excursion_widgets")
+		assert.NoError(t, err)
+	})
+	_, err = admin.ExecContext(ctx, "CREATE TABLE excursion_widgets.widgets (id INT PRIMARY KEY, name VARCHAR(32))")
+	require.NoError(t, err)
+	_, err = admin.ExecContext(ctx, "INSERT INTO excursion_widgets.widgets VALUES (1, 'gear')")
+	require.NoError(t, err)
+	// Commit the seed data dolt-side, the way any real pre-existing database
+	// holds it (and the CLI lane's proxy does for its sessions): the
+	// migrating open refuses uncommitted working-set changes to tables it
+	// does not own, so the compatibility envelope under test is the
+	// committed shape.
+	seeded := h.directDB(t, "excursion_widgets")
+	_, err = seeded.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'seed widgets')")
+	require.NoError(t, err)
+
+	// First excursion from a workspace that carries a project identity: the
+	// target has no beads schema at all, so the check finds no metadata
+	// table and the migrating open installs the schema.
+	p, err := h.openProvider(ctx, "excursion_widgets", false, "project-workspace")
+	require.NoError(t, err, "a --database excursion into a non-beads database must stay permitted")
+	require.NoError(t, p.Close(ctx))
+
+	// The user's own data survived the migrating open.
+	var n int
+	require.NoError(t, admin.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM excursion_widgets.widgets").Scan(&n))
+	assert.Equal(t, 1, n, "excursion open must not disturb the target's own tables")
+
+	// The open must not have minted an identity for the workspace.
+	var minted int
+	require.NoError(t, admin.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM excursion_widgets.metadata WHERE `key` = '_project_id'").Scan(&minted))
+	assert.Zero(t, minted, "a plain excursion must not mint a project identity in the target database")
+
+	// Second excursion: the beads schema now exists but carries no identity
+	// row, so the open passes again — and still mints nothing.
+	p, err = h.openProvider(ctx, "excursion_widgets", false, "project-workspace")
+	require.NoError(t, err, "repeated excursion into the now-schema'd database must stay permitted")
+	require.NoError(t, p.Close(ctx))
+	require.NoError(t, admin.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM excursion_widgets.metadata WHERE `key` = '_project_id'").Scan(&minted))
+	assert.Zero(t, minted, "repeated excursion must not adopt or mint an identity either")
+}

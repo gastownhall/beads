@@ -133,6 +133,32 @@ func TestProxiedServerSQLDatabaseFlag(t *testing.T) {
 		t.Fatalf("--database read output missing 'gear':\n%s", s)
 	}
 
+	// The first excursion's open installed the beads schema in the other
+	// database without a project identity (bd-rgvivq AC-2): a second
+	// excursion write must keep working against it, and the workspace's
+	// identity must not be minted there.
+	out, err = bdProxiedRun(t, bd, p.dir, "sql", "--database", other,
+		"INSERT INTO widgets VALUES (2, 'cog')")
+	if err != nil {
+		t.Fatalf("second bd sql --database write failed: %v\n%s", err, out)
+	}
+	var total int
+	if err := db.QueryRowContext(context.Background(),
+		"SELECT COUNT(*) FROM "+other+".widgets").Scan(&total); err != nil {
+		t.Fatalf("count %s.widgets: %v", other, err)
+	}
+	if total != 2 {
+		t.Fatalf("%s.widgets rows = %d, want 2 (repeated --database excursions must keep working)", other, total)
+	}
+	var minted int
+	if err := db.QueryRowContext(context.Background(),
+		"SELECT COUNT(*) FROM "+other+".metadata WHERE `key` = '_project_id'").Scan(&minted); err != nil {
+		t.Fatalf("count %s.metadata._project_id: %v", other, err)
+	}
+	if minted != 0 {
+		t.Fatalf("%s.metadata._project_id rows = %d, want 0 (an excursion must not mint an identity)", other, minted)
+	}
+
 	// An invalid database identifier is rejected, not interpolated.
 	out, err = bdProxiedRun(t, bd, p.dir, "sql", "--database", "bad;name",
 		"SELECT 1")
