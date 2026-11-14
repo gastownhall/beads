@@ -1295,9 +1295,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   such an ID, as it did before. Edges written before the fix keep their
   external target; re-adding the same edge does not change it, so remove and
   re-add one, with its dependency type and metadata, to make it block.
-- **`bd doctor` no longer flags cross-repository dependencies as orphans,
-  and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
-  a bare target under another repository's prefix (`bd dep add bd-abc
+- **Separately from GH#8299, `bd doctor` no longer flags cross-repository
+  dependencies as orphans or deletes them under `--fix`** (#4647, #8400).
+  `bd dep add` stores a bare target under another repository's prefix (`bd dep add bd-abc
   gt-123`) without verifying it, but the Orphaned Dependencies check, its
   `--fix` repair and the `--deep` Dependency Integrity check exempted only
   `external:` refs, and `--deep` Parent Consistency exempted nothing. They now
