@@ -45,6 +45,7 @@
 100 10 TestEmbeddedCreateScalarAndRelationships
 
 100 11 TestEmbeddedKVConcurrent
+100 11 TestEmbeddedSetStateHealsADuplicatedDimension
 
 100 12 TestEmbeddedAutoImportFallback_ConflictSkip_SkipsRetiredRows
 100 12 TestEmbeddedConfigGetYamlKeyWithServerDown
