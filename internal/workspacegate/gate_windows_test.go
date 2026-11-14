@@ -3,6 +3,7 @@
 package workspacegate
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -138,4 +139,40 @@ func volumeQuery(t *testing.T, name, arg string, query func(in, out *uint16, n u
 		t.Fatalf("%s(%s): %v", name, arg, err)
 	}
 	return windows.UTF16ToString(out)
+}
+
+// Every spelling of one physical parent selects one gate file, so
+// AcquireAll's dedupe and sort agree with the OS lock. A parent that is
+// itself the junction is the case EvalSymlinks returned unevaluated.
+func TestJunctionAliasesShareOneGateWindows(t *testing.T) {
+	f := newJunctionFixture(t)
+	for _, tc := range []struct {
+		name    string
+		parents []string
+	}{
+		{"parent beneath junction", []string{f.jProj, f.realProj, strings.ToUpper(f.realProj), strings.ToUpper(f.jProj)}},
+		{"parent is the junction", []string{f.j, f.real, strings.ToUpper(f.j)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gates := make([]Gate, 0, len(tc.parents))
+			for _, p := range tc.parents {
+				g, err := ForWorkspace(filepath.Join(p, ".beads"))
+				if err != nil {
+					t.Fatalf("ForWorkspace(%s): %v", p, err)
+				}
+				if len(gates) > 0 && g.Path() != gates[0].Path() {
+					t.Fatalf("spelling %s selected gate %s, %s selected %s", p, g.Path(), tc.parents[0], gates[0].Path())
+				}
+				gates = append(gates, g)
+			}
+			m, err := AcquireAll(context.Background(), Exclusive, Options{}, gates...)
+			if err != nil {
+				t.Fatalf("AcquireAll over aliases of one gate: %v", err)
+			}
+			defer func() { _ = m.Release() }()
+			if len(m.handles) != 1 {
+				t.Fatalf("AcquireAll held %d locks for one physical gate, want 1", len(m.handles))
+			}
+		})
+	}
 }
