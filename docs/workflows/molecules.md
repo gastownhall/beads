@@ -291,10 +291,11 @@ before_step = "design"
 
 ### Hooks
 
-Step-completion hooks are not currently exposed as runnable formula
-actions. The historical `on_complete.run` example was invalid: `run` is
-not a formula field, and `on_complete` runtime expansion is tracked
-separately until it is wired end to end.
+bd has no step-completion hooks. A step's `on_complete` table was
+declared but never run, so bd refuses formulas that set it: `bd cook` and
+`bd mol pour`, `wisp`, `bond` and `seed` fail with a validation error that
+names the step. To fan out one molecule per item, bond them yourself (see
+[Dynamic Bonding](#dynamic-bonding)).
 
 ### Assigning Molecules
 
