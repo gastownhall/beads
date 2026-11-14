@@ -324,6 +324,7 @@ go_test(
         "pr4107_corruption_test.go",
         "prune_remote_refs_test.go",
         "public_write_circuit_test.go",
+        "publication_failure_test.go",
         "publication_ordering_support_test.go",
         "pull_branch_tracking_test.go",
         "pull_config_wedge_test.go",
@@ -468,6 +469,7 @@ go_test(
         "@com_github_go_sql_driver_mysql//:mysql",
         "@com_github_google_uuid//:uuid",
         "@com_github_stretchr_testify//require",
+        "@io_opentelemetry_go_otel_metric//:metric",
         "@io_opentelemetry_go_otel_sdk_metric//:metric",
         "@io_opentelemetry_go_otel_sdk_metric//metricdata",
     ] + select({
