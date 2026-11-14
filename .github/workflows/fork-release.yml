@@ -68,7 +68,7 @@ jobs:
           tar -czf "$archive" -C cmd/bd/protocol/testdata corpus
           (cd dist && sha256sum "$(basename "$archive")") >> dist/checksums.txt
 
-      - name: Publish the fork release
+      - name: Create the draft fork release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -78,6 +78,7 @@ jobs:
           gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
+            --draft \
             --title "$GITHUB_REF_NAME" \
             --notes "Fork build of upstream's default branch (${GITHUB_REF_NAME%-dc.*} line); the tag annotation names the synced upstream commit. See FORK.md for the fork delta."
 
@@ -197,3 +198,16 @@ jobs:
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: beads_*_darwin_*.tar.gz
+
+
+  publish:
+    if: ${{ github.event.repository.fork }}
+    needs: [release, release-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish after both artifact and attestation jobs pass
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --repo "$GITHUB_REPOSITORY"
