@@ -238,7 +238,6 @@ go_test(
         "external_gc_path_test.go",
         "external_port_advice_test.go",
         "federation_pull_settle_test.go",
-        "federation_sync_strategy_test.go",
         "federation_test.go",
         "field_length_test.go",
         "filters_test.go",

@@ -347,8 +347,8 @@
 40 17 TestEmbeddedReaderListRejectsATypeOutsideTheWorkspaceVocabulary
 40 17 TestEmbeddedReadyClaimerLeasesADurableWinButNotAnEphemeralOne
 40 17 TestHeartbeatMatchesActorAcrossSpellingEmbedded
+40 17 TestMergeWithStrategy_ConcludesViolationOnlyMerge
 40 17 TestStatsReporterContract
-40 17 TestSyncWithStrategy_TheirsResolvesPeerConflict
 40 17 TestVersionReconcilerContract
 
 40 18 TestCreateBatchParticipationGeneration
@@ -540,6 +540,7 @@
 40 30 TestEmbeddedReaderReadySortPoliciesOrderTheSameRows
 40 30 TestEmbeddedTransactionStandaloneWispMutationDoesNotPublishUnrelatedDurableChanges
 40 30 TestLegacyTrackedIgnoredCursorUnwedgesPull
+40 30 TestMergeWithStrategy_RefusesOpenMerge
 40 30 TestUpdateMergeOps_DoltEngine_TwoIssues
 
 40 31 TestBumpEpochCarryingWritesOneCarryRowPerLiveIDNamingTheLineageRoot

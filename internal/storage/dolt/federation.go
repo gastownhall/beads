@@ -387,11 +387,9 @@ func (s *DoltStore) setLastSyncTime(ctx context.Context, peer string) error {
 }
 
 // Sync performs a full bidirectional sync with a peer:
-//  1. Fetch from peer
-//  2. Merge peer's changes: with a strategy ("ours"/"theirs") conflicts are
-//     resolved and the merge concluded before anything is pushed; without
-//     one a real conflict fails the sync with nothing merged
-//  3. Push local changes to peer
+// 1. Fetch from peer
+// 2. Merge peer's changes (handling conflicts per strategy)
+// 3. Push local changes to peer
 //
 // Returns the sync result including any conflicts encountered.
 func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*SyncResult, error) {
@@ -421,52 +419,53 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 	}
 	result.Fetched = true
 
-	// A successful Fetch stamps federation_peers.last_sync (withPeerCredentials)
-	// AFTER the pre-sync commit above, and Dolt refuses to merge over a dirty
-	// table ("local changes would be stomped by merge") whenever that stamp
-	// lands in a new second. Commit it the same way before merging (bd-sesknw).
-	if !s.readOnly {
-		if err := s.commitBeforePull(ctx, "auto-commit before sync merge"); err != nil {
-			if !isDoltNothingToCommit(err) {
-				result.Error = fmt.Errorf("failed to commit pending changes before sync merge: %w", err)
-				return result, result.Error
-			}
-		}
-	}
-
 	// Step 2: Get status before merge
 	beforeCommit, _ := s.GetCurrentCommit(ctx) // Best effort: empty commit hash means diff won't be logged
 
-	// Step 3: Merge peer's branch. An explicit strategy goes through
-	// MergeWithStrategy (bd-sesknw, GH#5564), the pinned-session path `bd vc
-	// merge --strategy` uses (#4992): plain Merge runs a bare DOLT_MERGE under
-	// autocommit, so Dolt rejects a real conflict (Error 1105) before any
-	// strategy can apply. MergeWithStrategy resolves, repairs and concludes
-	// the merge as one two-parent commit (config included) and recomputes
-	// is_blocked from the pre-merge HEAD, so the push below sends a settled
-	// result. Without a strategy, a real conflict fails here with the
-	// --strategy hint and nothing is left half-merged.
+	// Step 3: Merge peer's branch
 	remoteBranch := fmt.Sprintf("%s/%s", peer, s.branch)
-	var conflicts []storage.Conflict
-	var err error
-	if strategy != "" {
-		conflicts, err = s.MergeWithStrategy(ctx, remoteBranch, strategy)
-	} else {
-		conflicts, err = s.Merge(ctx, remoteBranch)
-	}
-	result.Conflicts = conflicts
+	conflicts, err := s.Merge(ctx, remoteBranch)
 	if err != nil {
 		result.Error = fmt.Errorf("merge failed: %w", err)
 		return result, result.Error
 	}
+
+	// Step 4: Handle conflicts if any
 	if len(conflicts) > 0 {
+		result.Conflicts = conflicts
+
 		if strategy == "" {
-			// Defensive: plain Merge reports conflicts as an error today, but
-			// never push or claim success over an unresolved merge.
+			// No strategy specified, leave conflicts for manual resolution
 			result.Error = fmt.Errorf("merge conflicts require resolution (use --strategy ours|theirs)")
 			return result, result.Error
 		}
+
+		// Auto-resolve using strategy
+		for _, c := range conflicts {
+			if err := s.ResolveConflicts(ctx, c.Field, strategy); err != nil {
+				result.Error = fmt.Errorf("conflict resolution failed for %s: %w", c.Field, err)
+				return result, result.Error
+			}
+		}
 		result.ConflictsResolved = true
+
+		// Commit the resolution INCLUDING config: the operator chose this
+		// strategy, and plain Commit excludes config (GH#2455). A config-only
+		// conflict — routine now that kv.memory.* memories sync through config —
+		// would otherwise resolve but never commit, leaving the merge
+		// unconcluded and re-wedging the next sync.
+		if err := s.CommitMergeResolution(ctx, fmt.Sprintf("Resolve conflicts from %s using %s strategy", peer, strategy)); err != nil {
+			result.Error = fmt.Errorf("failed to commit conflict resolution: %w", err)
+			return result, result.Error
+		}
+
+		// bd-578h9.11: the conflicted merge skipped the automatic is_blocked
+		// recompute (unresolved rows would have fed it garbage); now that the
+		// resolution is committed, cover the whole merge+resolution window.
+		if err := s.RecomputeBlockedAfterMerge(ctx, beforeCommit); err != nil {
+			result.Error = fmt.Errorf("conflicts resolved but is_blocked recompute failed: %w", err)
+			return result, result.Error
+		}
 	}
 	result.Merged = true
 
@@ -476,7 +475,7 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 		result.PulledCommits = 1 // Simplified - could count actual commits
 	}
 
-	// Step 4: Push our changes to peer, filtering excluded types.
+	// Step 5: Push our changes to peer, filtering excluded types.
 	excludeTypes := config.GetFederationConfig().ExcludeTypes
 	if err := s.filteredPushToPeer(ctx, peer, excludeTypes); err != nil {
 		// Push failure is not fatal - peer may not accept pushes

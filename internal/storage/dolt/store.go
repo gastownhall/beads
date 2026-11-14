@@ -6622,16 +6622,18 @@ func (s *DoltStore) MergeWithStrategy(ctx context.Context, branch, strategy stri
 	// set are session state: clear them first so the pool never hands a
 	// later, unrelated write a session that silently commits conflicts
 	// (bd-sesknw), and discard the session if the reset fails — the
-	// discipline ResolveConflictRows follows.
-	closeErr := releaseConflictTolerantConn(ctx, conn)
+	// discipline ResolveConflictRows follows. A failed reset is recorded,
+	// never returned: the discarded session cannot leak the flags, and by
+	// now the merge has concluded or failed on its own, so failing a
+	// concluded merge would only skip the is_blocked recompute below.
+	if resetErr := releaseMergeConn(ctx, conn); resetErr != nil {
+		span.RecordError(resetErr)
+	}
 	if len(conflicts) > 0 {
 		span.SetAttributes(attribute.Int("dolt.conflicts", len(conflicts)))
 	}
 	if err != nil {
 		return conflicts, err
-	}
-	if closeErr != nil {
-		return conflicts, fmt.Errorf("release merge connection: %w", closeErr)
 	}
 	if !s.readOnly {
 		if rerr := s.recomputeBlockedAfterPull(ctx, preHead); rerr != nil {
@@ -6641,16 +6643,33 @@ func (s *DoltStore) MergeWithStrategy(ctx context.Context, branch, strategy stri
 	return conflicts, nil
 }
 
+// mergeSessionResetTimeout bounds the flag reset releaseConflictTolerantConn
+// runs on a context detached from its caller's cancellation.
+const mergeSessionResetTimeout = 5 * time.Second
+
+// releaseMergeConn is how MergeWithStrategy releases its pinned connection:
+// releaseConflictTolerantConn outside tests, which swap it to fail the reset
+// after a merge has concluded.
+var releaseMergeConn = releaseConflictTolerantConn
+
 // releaseConflictTolerantConn returns a pinned connection whose session may
 // carry @@dolt_allow_commit_conflicts / @@dolt_force_transaction_commit to the
 // pool with both flags cleared — on success, on failure, and after a partial
-// flag setup alike. When the reset itself fails (a canceled context, a dead
-// session) the physical connection is discarded instead of being returned
-// with the flags possibly still set.
+// flag setup alike. The reset runs on a short context detached from ctx's
+// cancellation, so a caller canceled after its merge still hands back a
+// cleared session. When the reset fails anyway (a dead session, the timeout)
+// the physical connection is discarded instead of being returned with the
+// flags possibly still set, and the reset's own error is returned. conn is
+// closed either way.
 func releaseConflictTolerantConn(ctx context.Context, conn *sql.Conn) error {
-	if _, err := conn.ExecContext(ctx,
+	resetCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mergeSessionResetTimeout)
+	defer cancel()
+	if _, err := conn.ExecContext(resetCtx,
 		"SET @@dolt_allow_commit_conflicts = 0, @@dolt_force_transaction_commit = 0"); err != nil {
+		// ErrBadConn makes database/sql drop the physical connection and
+		// close conn; a Close after it would only report sql.ErrConnDone.
 		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		return fmt.Errorf("reset merge session flags (session discarded): %w", err)
 	}
 	return conn.Close()
 }

@@ -1281,14 +1281,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`bd federation sync --strategy ours|theirs` resolves real conflicts
-  again** (#5564). Sync merged the peer's branch under autocommit, so Dolt
-  rejected any genuine conflict before the strategy applied and the sync
-  failed. It now resolves the conflicted tables, commits the merge
-  (including FK repairs for rows that reference issues deleted on the other
-  side) and only then pushes, on both server and embedded stores. Without
-  `--strategy`, a conflict fails the sync with that peer and leaves nothing
-  merged; the help no longer promises an interactive pause.
+- **`bd vc merge --strategy ours|theirs` concludes a merge whose only
+  problem is a foreign-key violation** (#4992 follow-up). A merge with no row
+  conflict can still stop on a foreign-key cascade violation, for example
+  when one side deleted an issue the other side labeled. The command left
+  that merge open with the violation in the working set; in server mode it
+  then failed with "merge succeeded but is_blocked recompute failed". It now
+  deletes the rows that reference the deleted issue and commits the merge,
+  or aborts it when bd cannot repair the violation, the way `bd dolt pull`
+  settles such a merge. It also refuses to start while another merge is
+  open, such as one an older bd left that way, instead of aborting that
+  merge or concluding it as this one; `bd conflicts list` shows what the
+  open merge needs. In server mode the merge also stops leaving its
+  conflict-tolerance session settings on a pooled connection, where a later
+  transaction on that connection could keep merge conflicts or constraint
+  violations in the working set instead of rolling back.
 
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores

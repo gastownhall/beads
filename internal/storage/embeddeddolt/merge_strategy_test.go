@@ -6,12 +6,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
@@ -496,77 +493,132 @@ func TestMergeWithStrategy_LeavesPreMergePendingChanges(t *testing.T) {
 	}
 }
 
-// TestSyncWithStrategy_TheirsResolvesPeerConflict (bd-sesknw, GH#5564): embedded
-// Sync with an explicit strategy must resolve a real peer conflict, conclude
-// the merge and push. Before the fix it ran a bare Merge under autocommit, so
-// Dolt rejected the conflicted merge (Error 1105) before --strategy applied.
-func TestSyncWithStrategy_TheirsResolvesPeerConflict(t *testing.T) {
-	te := newTestEnv(t, "syncstrat")
-	ctx := t.Context()
-
-	remoteDir := filepath.Join(t.TempDir(), "remote")
-	if err := os.MkdirAll(remoteDir, 0o755); err != nil {
-		t.Fatalf("mkdir remote: %v", err)
-	}
-	peer := &storage.FederationPeer{Name: "peer", RemoteURL: "file://" + remoteDir, Sovereignty: "T2"}
-	if err := te.store.AddFederationPeer(ctx, peer); err != nil {
-		t.Fatalf("add federation peer: %v", err)
-	}
-	if err := te.store.Commit(ctx, "register sync peer"); err != nil {
-		t.Fatalf("commit peer registration: %v", err)
-	}
-
-	// Build the conflict on a raw session, then release its exclusive lock
-	// before the store syncs: the peer remote's main carries "theirs" and
-	// local main carries "ours", with the SAME updated_at so LWW declines it.
-	withRawConn(t, te.dataDir, te.database, func(conn *sql.Conn) {
-		syncExec(t, ctx, conn,
-			"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES ('ss-1', 'base', '', '', '', '', 'open', 2, 'task')")
-		syncExec(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'seed issue')")
-		syncExec(t, ctx, conn, "CALL DOLT_PUSH('peer', 'main')")
-		syncExec(t, ctx, conn, "CALL DOLT_CHECKOUT('-b', 'peerwork')")
-		syncExec(t, ctx, conn, "UPDATE issues SET title = 'theirs', updated_at = '2026-01-01 00:00:00' WHERE id = 'ss-1'")
-		syncExec(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'retitle theirs')")
-		syncExec(t, ctx, conn, "CALL DOLT_PUSH('peer', 'peerwork:main')")
-		syncExec(t, ctx, conn, "CALL DOLT_CHECKOUT('main')")
-		syncExec(t, ctx, conn, "CALL DOLT_BRANCH('-D', 'peerwork')")
-		syncExec(t, ctx, conn, "UPDATE issues SET title = 'ours', updated_at = '2026-01-01 00:00:00' WHERE id = 'ss-1'")
-		syncExec(t, ctx, conn, "CALL DOLT_COMMIT('-Am', 'retitle ours')")
-	})
-
-	result, err := te.store.Sync(ctx, peer.Name, "theirs")
-	if err != nil {
-		t.Fatalf("Sync(theirs): %v", err)
-	}
-	if !result.Merged || !result.ConflictsResolved || !result.Pushed {
-		t.Errorf("Sync result Merged=%v ConflictsResolved=%v Pushed=%v (PushError=%v), want all true",
-			result.Merged, result.ConflictsResolved, result.Pushed, result.PushError)
-	}
-
-	withRawConn(t, te.dataDir, te.database, func(conn *sql.Conn) {
-		var title string
-		if err := conn.QueryRowContext(ctx, "SELECT title FROM issues AS OF 'HEAD' WHERE id = 'ss-1'").Scan(&title); err != nil {
-			t.Fatalf("read committed title: %v", err)
+// seedViolationOnlyMerge seeds issue issueID on main, branches peerBranch off
+// it, labels the issue there, and deletes it on main, so merging peerBranch
+// into main has no row conflict, only an FK cascade violation: the label
+// references an issue main no longer has. Leaves main checked out on conn.
+func seedViolationOnlyMerge(t *testing.T, ctx context.Context, conn *sql.Conn, issueID, peerBranch string) {
+	t.Helper()
+	for _, stmt := range []struct {
+		query string
+		args  []any
+	}{
+		{"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES (?, 'seed', '', '', '', '', 'open', 2, 'task')", []any{issueID}},
+		{"CALL DOLT_COMMIT('-Am', 'seed issue')", nil},
+		{"CALL DOLT_BRANCH(?, 'HEAD')", []any{peerBranch}},
+		{"CALL DOLT_CHECKOUT(?)", []any{peerBranch}},
+		{"INSERT INTO labels (issue_id, label) VALUES (?, 'late-label')", []any{issueID}},
+		{"CALL DOLT_COMMIT('-Am', 'peer labels the issue')", nil},
+		{"CALL DOLT_CHECKOUT('main')", nil},
+		{"DELETE FROM issues WHERE id = ?", []any{issueID}},
+		{"CALL DOLT_COMMIT('-Am', 'delete the issue')", nil},
+	} {
+		if _, err := conn.ExecContext(ctx, stmt.query, stmt.args...); err != nil {
+			t.Fatalf("%s: %v", stmt.query, err)
 		}
-		if title != "theirs" {
-			t.Errorf("committed title = %q after Sync(theirs), want %q", title, "theirs")
-		}
-		var liveConflicts int
-		if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_conflicts").Scan(&liveConflicts); err != nil {
-			t.Fatalf("count live conflicts: %v", err)
-		}
-		if liveConflicts != 0 {
-			t.Errorf("%d conflicted table(s) remain after Sync(theirs)", liveConflicts)
-		}
-		if mergeOpen(t, ctx, conn) {
-			t.Error("Sync(theirs) left a merge open (dolt_merge_status.is_merging = 1)")
-		}
-	})
+	}
 }
 
-func syncExec(t *testing.T, ctx context.Context, conn *sql.Conn, query string) {
+// constraintViolationCount sums dolt_constraint_violations over every table.
+func constraintViolationCount(t *testing.T, ctx context.Context, conn *sql.Conn) int {
 	t.Helper()
-	if _, err := conn.ExecContext(ctx, query); err != nil {
-		t.Fatalf("%s: %v", query, err)
+	var n int
+	if err := conn.QueryRowContext(ctx,
+		"SELECT COALESCE(SUM(num_violations), 0) FROM dolt_constraint_violations").Scan(&n); err != nil {
+		t.Fatalf("count constraint violations: %v", err)
+	}
+	return n
+}
+
+// TestMergeWithStrategy_ConcludesViolationOnlyMerge is the embedded
+// counterpart of the server test of the same name (bd-sesknw): a strategy
+// merge whose only problem is an FK cascade violation used to stay open
+// while MergeWithStrategy reported success. The dangling label must be
+// repaired and the merge concluded as one two-parent commit.
+func TestMergeWithStrategy_ConcludesViolationOnlyMerge(t *testing.T) {
+	te := newTestEnv(t, "mgsfkonly")
+	ctx := t.Context()
+	conn := openSettleConn(t, ctx, te)
+
+	seedViolationOnlyMerge(t, ctx, conn, "mgs-fk", "mgs-fk-peer")
+
+	conflicts, err := versioncontrolops.MergeWithStrategy(ctx, conn, "mgs-fk-peer", "test <test@example.com>", "theirs")
+	if err != nil {
+		t.Fatalf("MergeWithStrategy over a violation-only merge: %v", err)
+	}
+	if len(conflicts) != 0 {
+		t.Errorf("conflicts = %+v, want none: the merge had no row conflict", conflicts)
+	}
+	if labels := headLabels(t, ctx, conn, "mgs-fk"); len(labels) != 0 {
+		t.Errorf("HEAD keeps label(s) %v for the deleted issue", labels)
+	}
+	if n := constraintViolationCount(t, ctx, conn); n != 0 {
+		t.Errorf("%d constraint violation(s) remain", n)
+	}
+	assertMergeConcluded(t, ctx, conn)
+}
+
+// TestMergeWithStrategy_RefusesOpenMerge is the embedded counterpart of the
+// server test of the same name (bd-sesknw): over a merge already open in the
+// working set, MergeWithStrategy must refuse, name that merge, and leave it
+// as it was, instead of repairing and concluding it as the branch it was
+// asked to merge.
+func TestMergeWithStrategy_RefusesOpenMerge(t *testing.T) {
+	te := newTestEnv(t, "mgsopen")
+	ctx := t.Context()
+	conn := openSettleConn(t, ctx, te)
+
+	seedViolationOnlyMerge(t, ctx, conn, "mgs-open", "mgs-open-peer")
+	for _, stmt := range []string{
+		"CALL DOLT_BRANCH('mgs-next-peer', 'HEAD')",
+		"CALL DOLT_CHECKOUT('mgs-next-peer')",
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES ('mgs-next', 'next', '', '', '', '', 'open', 2, 'task')",
+		"CALL DOLT_COMMIT('-Am', 'next branch adds an issue')",
+		"CALL DOLT_CHECKOUT('main')",
+		// Park the violation-only merge the way bd left it before this fix:
+		// both conflict-tolerance flags on, and never concluded.
+		"SET @@dolt_allow_commit_conflicts = 1, @@dolt_force_transaction_commit = 1",
+		"CALL DOLT_MERGE('mgs-open-peer')",
+		"SET @@dolt_allow_commit_conflicts = 0, @@dolt_force_transaction_commit = 0",
+	} {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	if !mergeOpen(t, ctx, conn) || constraintViolationCount(t, ctx, conn) == 0 {
+		t.Fatal("fixture: the violation-only merge of mgs-open-peer is not open")
+	}
+	var headBefore string
+	if err := conn.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&headBefore); err != nil {
+		t.Fatalf("read HEAD: %v", err)
+	}
+
+	_, err := versioncontrolops.MergeWithStrategy(ctx, conn, "mgs-next-peer", "test <test@example.com>", "theirs")
+	if err == nil || !strings.Contains(err.Error(), "a merge of mgs-open-peer is already open") {
+		t.Fatalf("MergeWithStrategy over an open merge = %v, want the refusal naming mgs-open-peer", err)
+	}
+
+	var source string
+	if err := conn.QueryRowContext(ctx,
+		"SELECT source FROM dolt_merge_status WHERE is_merging").Scan(&source); err != nil || source != "mgs-open-peer" {
+		t.Errorf("open merge after the refusal = (%q, %v), want the merge of mgs-open-peer still open", source, err)
+	}
+	if constraintViolationCount(t, ctx, conn) == 0 {
+		t.Error("the open merge's violations are gone: the refusal repaired them")
+	}
+	var headAfter string
+	if err := conn.QueryRowContext(ctx, "SELECT HASHOF('HEAD')").Scan(&headAfter); err != nil {
+		t.Fatalf("read HEAD: %v", err)
+	}
+	if headAfter != headBefore {
+		t.Errorf("HEAD moved %s -> %s: the open merge was concluded", headBefore, headAfter)
+	}
+	var next int
+	if err := conn.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM issues AS OF 'HEAD' WHERE id = 'mgs-next'").Scan(&next); err != nil {
+		t.Fatalf("read HEAD issues: %v", err)
+	}
+	if next != 0 {
+		t.Error("HEAD has mgs-next-peer's issue, but that branch was never merged")
 	}
 }
