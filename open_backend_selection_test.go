@@ -811,3 +811,26 @@ func TestOpenBestAvailableRefusesProxiedServerWorkspace(t *testing.T) {
 		}
 	}
 }
+
+// TestOpenBestAvailableProxiedServerRefusalLeavesWorkspaceUnchanged pins
+// AC-2: the refusal comes before anything writes, whichever file declares the
+// mode. Before the fix the cgo build created .beads/embeddeddolt, and for a
+// legacy config.json configfile.Load migrated it into metadata.json.
+func TestOpenBestAvailableProxiedServerRefusalLeavesWorkspaceUnchanged(t *testing.T) {
+	isolateProxiedServerEnv(t, "", "")
+	for _, file := range []string{"metadata.json", "config.json"} {
+		for name, open := range bestAvailableOpens {
+			t.Run(file+"/"+name, func(t *testing.T) {
+				root, beadsDir := writeProxiedServerWorkspace(t, file, "dolt", "proxied-server")
+				before := workspaceTreeDigest(t, root)
+				_, err := openClosing(t, open, beadsDir)
+				if after := workspaceTreeDigest(t, root); !maps.Equal(after, before) {
+					t.Fatalf("%s changed the workspace (err=%v): before %v, after %v", name, err, before, after)
+				}
+				if !errors.Is(err, beads.ErrProxiedServerUnsupported) {
+					t.Fatalf("%s error = %v, want errors.Is ErrProxiedServerUnsupported", name, err)
+				}
+			})
+		}
+	}
+}
