@@ -2,8 +2,11 @@ package uow
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
+	"github.com/steveyegge/beads/internal/storage/dberrors"
+	db "github.com/steveyegge/beads/internal/storage/domain/db"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
 )
@@ -94,4 +97,107 @@ func checkTeamServerIdentity(ctx context.Context, conn schema.DBConn, database, 
 			expectedProjectID, database, dbProjectID)
 	}
 	return nil
+}
+
+// plainExcursionUseDatabaseRemedy is the advice for a plain proxied excursion
+// whose USE failed for a reason the server did not classify. An absent
+// database is not reported through it: checkExcursionIdentity leaves that case
+// to the open path that follows (the ordinary open creates the database, the
+// preview open refuses it with its own remedy).
+var plainExcursionUseDatabaseRemedy = useDatabaseRemedy{
+	missing:      "check the --database/--db override for this invocation",
+	unclassified: "check the --database/--db override for this invocation and that the server is reachable",
+}
+
+// checkExcursionIdentity is the plain (non-team-server) proxied counterpart of
+// checkTeamServerIdentity, run before the preview or migrating open touches
+// the database (gastownhall/beads#5572). The CLI passes a non-empty
+// expectedProjectID to a plain provider only when the invocation's
+// --database/--db override names a database other than the configured one,
+// so this guards the explicit excursion: an override that selects ANOTHER
+// beads project's database is refused before anything is created, migrated or
+// read on it.
+//
+// It is deliberately lenient where checkTeamServerIdentity is strict. A plain
+// excursion to a database that carries no identity — a non-beads database
+// (`bd sql --database other`), one with a metadata table but no _project_id
+// row, or one that does not exist yet — is the documented escape hatch, so
+// "no identity available" passes. Only a positive, different identity is a
+// refusal. Nothing is written: no identity is minted, changed or adopted.
+func checkExcursionIdentity(ctx context.Context, conn *sql.Conn, database, expectedProjectID string) error {
+	if expectedProjectID == "" {
+		return nil
+	}
+	// Probe existence with a statement that always succeeds before any USE: a
+	// Dolt session that issues a FAILING statement stays pinned to its
+	// pre-statement catalog snapshot (be-bv7x), and this pooled connection is
+	// the one the open path below goes on to CREATE and migrate on.
+	var exists int
+	if err := conn.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = ?", database,
+	).Scan(&exists); err != nil {
+		if isSerializationError(err) {
+			return err
+		}
+		return fmt.Errorf("uow: identity check: probing database %q existence: %w", database, err)
+	}
+	if exists == 0 {
+		// Nothing there to carry an identity. The open path that follows
+		// decides what an absent database means (the ordinary open creates
+		// it, the preview open refuses it).
+		return nil
+	}
+	if err := db.NewDDLSQLRepository(conn).UseDatabase(ctx, database); err != nil {
+		if isSerializationError(err) {
+			return fmt.Errorf("uow: switching to database: %w", err)
+		}
+		// Denial is classified first: a server hides existence from a
+		// credential it has not granted, so a denial must never read as
+		// "absent".
+		return classifyUseDatabaseError(err, database, plainExcursionUseDatabaseRemedy)
+	}
+	// A USE that returns no error is not proof the session moved, and the
+	// metadata read below is unqualified: see assertSessionDatabase.
+	if err := assertSessionDatabase(ctx, conn, database); err != nil {
+		return err
+	}
+	// No metadata table means a non-beads database (or one never
+	// initialized): no identity to compare. Probed rather than read-and-
+	// failed, for the same be-bv7x reason as the existence probe above.
+	var hasMetadata int
+	if err := conn.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ? AND table_name = 'metadata'", database,
+	).Scan(&hasMetadata); err != nil {
+		if isSerializationError(err) {
+			return err
+		}
+		return fmt.Errorf("uow: identity check: probing database %q for a metadata table: %w", database, err)
+	}
+	if hasMetadata == 0 {
+		return nil
+	}
+	dbProjectID, err := issueops.GetMetadataInTx(ctx, conn, "_project_id")
+	if err != nil {
+		if isSerializationError(err) {
+			return err
+		}
+		if dberrors.IsTableNotExist(err) {
+			// Dropped between the probe and the read.
+			return nil
+		}
+		return fmt.Errorf("uow: identity check on database %q: %w", database, err)
+	}
+	if dbProjectID == "" || dbProjectID == expectedProjectID {
+		return nil
+	}
+	return fmt.Errorf(
+		"PROJECT IDENTITY MISMATCH — refusing to connect\n\n"+
+			"  Local project ID (metadata.json):  %s\n"+
+			"  Database %q project ID:            %s\n\n"+
+			"The --database (or --db name) override for this invocation selected\n"+
+			"a DIFFERENT beads project's database. Remove the override to use this\n"+
+			"workspace's configured database, or run the command from that\n"+
+			"project's workspace. To access it from here deliberately, set\n"+
+			"BEADS_SKIP_IDENTITY_CHECK=1.",
+		expectedProjectID, database, dbProjectID)
 }
