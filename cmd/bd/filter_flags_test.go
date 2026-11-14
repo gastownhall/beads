@@ -279,6 +279,58 @@ func TestRepeatedOnceFilterFlagsRefuse(t *testing.T) {
 	}
 }
 
+// TestSweptFilterFlagsKeepSingleAndCommaForms is the negative control: the
+// sweep must not quietly become "ignore the filter". A single value, a comma
+// value, and the empty reset keep their exact base meaning, byte for byte,
+// and an explicit empty between two occurrences is still a full reset.
+func TestSweptFilterFlagsKeepSingleAndCommaForms(t *testing.T) {
+	cases := deriveSweptFilterFlags(t, "union", "once")
+	if len(cases) != 34 {
+		t.Fatalf("derived %d swept filter flags, want exactly 34 (29 swept pairs incl. the migration alias + bd list's five); the sweep or the derivation is incomplete", len(cases))
+	}
+	for _, tc := range cases {
+		t.Run(tc.path+" --"+tc.f.Name, func(t *testing.T) {
+			kind := stringFilterFlagKind(tc.f)
+
+			if err := parseFilterFlags(t, tc.path, []string{"--" + tc.f.Name, "alpha"}); err != nil {
+				t.Fatalf("single --%s: ParseFlags: %v", tc.f.Name, err)
+			}
+			if got := filterFlagValue(t, tc.path, tc.f.Name); got != "alpha" {
+				t.Errorf("single --%s = %q, want %q unchanged", tc.f.Name, got, "alpha")
+			}
+
+			if err := parseFilterFlags(t, tc.path, []string{"--" + tc.f.Name + "=alpha,beta"}); err != nil {
+				t.Fatalf("comma --%s: ParseFlags: %v", tc.f.Name, err)
+			}
+			if got := filterFlagValue(t, tc.path, tc.f.Name); got != "alpha,beta" {
+				t.Errorf("comma --%s = %q, want %q byte-preserved", tc.f.Name, got, "alpha,beta")
+			}
+
+			// The empty value resets: a subsequent occurrence is the first
+			// one again (bd children already relies on this for --status).
+			reset := []string{"--" + tc.f.Name, "alpha", "--" + tc.f.Name + "=", "--" + tc.f.Name, "beta"}
+			if err := parseFilterFlags(t, tc.path, reset); err != nil {
+				t.Fatalf("empty-reset --%s chain: ParseFlags: %v", tc.f.Name, err)
+			}
+			if got := filterFlagValue(t, tc.path, tc.f.Name); got != "beta" {
+				t.Errorf("empty-reset --%s chain = %q, want %q", tc.f.Name, got, "beta")
+			}
+
+			if kind == "once" {
+				// A comma value stays one occurrence for a once flag: no new
+				// validation is added, the downstream keeps its base reading
+				// (including bd count's documented match-nothing status).
+				if err := parseFilterFlags(t, tc.path, []string{"--" + tc.f.Name + "=a,b"}); err != nil {
+					t.Fatalf("comma once --%s: ParseFlags: %v", tc.f.Name, err)
+				}
+				if got := filterFlagValue(t, tc.path, tc.f.Name); got != "a,b" {
+					t.Errorf("comma once --%s = %q, want %q", tc.f.Name, got, "a,b")
+				}
+			}
+		})
+	}
+}
+
 // TestCountRepeatedFilterRefusedBeforeRun builds a fresh command carrying
 // bd count's flag set (registerCountFlags exists so a test can do exactly
 // this) with sentinel hooks: a repeated once filter must fail during flag
