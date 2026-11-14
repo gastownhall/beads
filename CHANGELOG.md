@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **`federation.allowed-remote-patterns` is enforced.** The key was only
+  checked by `bd config validate`, so a non-empty allowlist did not stop bd
+  from pushing to, pulling or fetching from, registering, or cloning a remote
+  outside it. A non-empty list now refuses such a remote before any transfer
+  or write, in server and embedded mode: `bd dolt push`/`pull`, `bd sync`,
+  auto-push (the local write is kept), federation peers, `bd dolt remote add`,
+  git-origin adoption, `bd config apply`, bootstrap clones, and the remote
+  cache. Patterns match the URL in the form Dolt stores it, so a typed
+  `https://github.com/org/repo` needs a `git+https://github.com/org/*`
+  pattern; `bd config validate` now uses the same rule, the effective
+  (user, environment and project) list, and checks `sync.remote` too.
+  Refusals name the remote or key, never the URL. An empty list (the
+  default) keeps the old behavior. (#6233)
+
 - **Release binaries are built with Go 1.27.4.** Go 1.27.0-1.27.3 (and
   releases before 1.26.11) can crash an HTTP/1 server that bounds request
   bodies with `http.MaxBytesReader` when a handler reads past the limit while

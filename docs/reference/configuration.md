@@ -151,7 +151,7 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `external_projects` | — | — | `{}` | Map project names → paths for cross-project deps |
 | `federation.remote` | — | `BD_FEDERATION_REMOTE` | (none) | Dolt remote URL (`dolthub://`, `gs://`, `s3://`, `az://`, `file://`) |
 | `federation.sovereignty` | — | `BD_FEDERATION_SOVEREIGNTY` | (none) | Sovereignty tier: `T1`, `T2`, `T3`, `T4` (see [below](#sync-and-federation)) |
-| `federation.allowed-remote-patterns` | — | — | `[]` | Glob patterns restricting allowed remote URLs |
+| `federation.allowed-remote-patterns` | — | `BD_FEDERATION_ALLOWED_REMOTE_PATTERNS` | `[]` (no restriction) | Glob patterns for the remote URLs bd pushes to, pulls and fetches from, registers and clones (see [below](#sync-and-federation)) |
 | `federation.exclude_types` | — | — | `[wisp]` | Issue types excluded from federation push |
 | `sync.require_confirmation_on_mass_delete` | — | — | `false` | Prompt before pushing when a merge deletes most issues |
 | `output.title-length` | — | — | `255` | Title display in feedback (`0` hides); see routing note below |
@@ -449,7 +449,16 @@ federation:
   - `T3`: Provider sovereignty — data with trusted cloud provider
   - `T4`: No restrictions — data can be anywhere
 
-`bd config validate` checks the remote URL format, the sovereignty tier, `federation.allowed-remote-patterns`, and `routing.mode`.
+`federation.allowed-remote-patterns` is an allowlist for remote destinations. Empty (the default) means no restriction. When the list is non-empty, bd refuses, before any transfer or write, to push to, pull or fetch from, register, adopt, apply, or clone from a remote whose URL matches no pattern; this covers `bd dolt push`/`pull`, `bd sync`, auto-push, federation peers, `bd dolt remote add`, git-origin adoption, `bd config apply`, `bd bootstrap`, and the remote cache. Each pattern is matched literally with Go `path.Match` (`*` stops at `/`) against the URL in the form Dolt stores it: a typed `https://github.com/org/repo` is checked as `git+https://github.com/org/repo`, so a forge needs a `git+https://github.com/org/*` pattern. Blank or malformed entries match nothing, so a list of only blank entries refuses every remote. A refusal names the remote or config key, never the URL. A refused auto-push keeps the local write and prints its usual warning.
+
+```yaml
+federation:
+  allowed-remote-patterns:
+    - "dolthub://myorg/*"
+    - "git+https://github.com/myorg/*"
+```
+
+`bd config validate` checks the remote URL format, the sovereignty tier, `routing.mode`, and whether `federation.remote` and `sync.remote` pass the effective `federation.allowed-remote-patterns` (user config, environment, and project config) under the same matching rule.
 
 ## Integration Configuration
 
