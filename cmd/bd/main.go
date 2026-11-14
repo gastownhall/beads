@@ -1374,6 +1374,13 @@ var rootCmd = &cobra.Command{
 		_ = cmd.Help() // Help() always returns nil for cobra commands
 	},
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) (retErr error) {
+		// Refuse bd -C <dir> init before anything else runs: -C selects
+		// an existing beads project and never changes the process
+		// directory (GH#3442), so init would create the project in the
+		// launch directory instead (GH#8283). --force does not lift it.
+		if err := refuseInitWithChangeDir(cmd); err != nil {
+			return err
+		}
 		if err := clearWorktreeGitRoutingEnv(cmd); err != nil {
 			return err
 		}
@@ -3160,4 +3167,24 @@ func envTruthyValue(v string) bool {
 		return false
 	}
 	return true
+}
+
+// refuseInitWithChangeDir refuses bd init under -C (--directory). The flag
+// selects the beads project in a directory without changing the process
+// directory, so init has no supported way to create a project there; the
+// hint names the directory the user gave, rendered so pasting it runs no
+// part of it.
+func refuseInitWithChangeDir(cmd *cobra.Command) error {
+	if cmd != initCmd || strings.TrimSpace(changeDir) == "" {
+		return nil
+	}
+	dir, err := filepath.Abs(changeDir)
+	if err != nil {
+		dir = changeDir
+	}
+	arg, note := remedy.CommandArg(runtime.GOOS, dir, "<dir>")
+	return HandleErrorWithHint(
+		"bd init does not support -C (--directory)",
+		"run bd init from the directory instead: cd "+arg+" && bd init"+note,
+	)
 }
