@@ -1344,6 +1344,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   itself a proxied-server workspace) keeps its own error unless a formula has
   the operand's name, and a dry run previews without a writable open. A bond
   that stays in the served database still commits once.
+- **`beads.OpenBestAvailable` no longer opens an empty embedded store on a
+  proxied-server workspace** (#8323). On a workspace whose metadata sets
+  `dolt_mode: proxied-server`, the public open (and `OpenBestAvailableWith`)
+  fell through to the embedded engine: cgo builds created
+  `.beads/embeddeddolt/` beside the workspace's real database and returned a
+  new, empty store with no error, pure-Go builds returned the misleading
+  "embedded Dolt requires CGO" error, and with `BEADS_DOLT_SERVER_MODE` or
+  `BEADS_DOLT_SHARED_SERVER` set they dialed a server behind the proxy's back.
+  Both now refuse with the new `beads.ErrProxiedServerUnsupported`, naming the
+  mode and the metadata file that sets it, before anything is opened,
+  created or migrated. Only the bd CLI serves proxied-server workspaces.
+
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc

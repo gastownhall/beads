@@ -14,6 +14,9 @@ import (
 // OpenBestAvailable opens a beads database using the best available backend
 // for the given .beads directory. In non-CGO builds, only Dolt server mode is
 // supported; embedded Dolt returns an error directing the user to server mode.
+// A Dolt workspace in proxied-server mode is refused with
+// ErrProxiedServerUnsupported in every build, before anything is opened or
+// created; only the bd CLI serves that mode.
 //
 // beadsDir is the path to the .beads directory.
 //
@@ -35,6 +38,12 @@ func OpenBestAvailableWith(ctx context.Context, beadsDir string, opts OpenOption
 	// Before Load, which can migrate a legacy config.json, and before any
 	// backend is chosen; IsSupportedBackend below re-checks the loaded config.
 	if err := checkDiscoveredBackend(beadsDir); err != nil {
+		return nil, err
+	}
+	// A proxied-server workspace is served only through its proxy, which the
+	// SDK cannot reach: refuse it before Load, the option refusals and every
+	// Dolt arm (GH#8323).
+	if err := checkProxiedServerWorkspace(beadsDir); err != nil {
 		return nil, err
 	}
 	cfg, err := configfile.Load(beadsDir)
