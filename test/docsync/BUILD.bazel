@@ -8,6 +8,7 @@ go_test(
         "docsync_test.go",
         "doltpin_test.go",
         "init_safety_recovery_test.go",
+        "readonly_sandbox_write_access_test.go",
     ],
     # Every Markdown file (the docs trees, the root docs, every AGENTS.md),
     # every Go test file (the guard-test names the agent instructions cite),
