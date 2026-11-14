@@ -1074,3 +1074,103 @@ func TestSetupChangeDir_InstallWritesTarget(t *testing.T) {
 		assertDirEmpty(t, launch, "launch directory")
 	})
 }
+
+// runSetupIn runs bd setup args with -C set to changeDirArg ("" for none)
+// and returns what it printed. It leaves the -C flag as it found it.
+func runSetupIn(t *testing.T, changeDirArg string, args ...string) string {
+	t.Helper()
+	orig := changeDir
+	changeDir = changeDirArg
+	defer func() { changeDir = orig }()
+	return captureStdout(t, func() error { return runSetup(setupCmd, args) })
+}
+
+// TestSetupChangeDir_RemoveTouchesOnlyTarget pins #8283 for --remove: with
+// the integration installed in both T and L, bd -C T setup <recipe> --remove
+// run from L takes it out of T, leaving T as cd T && bd setup <recipe>
+// --remove leaves a workspace (R here), unrelated content in T and T itself
+// in place, and L byte for byte as it was.
+func TestSetupChangeDir_RemoveTouchesOnlyTarget(t *testing.T) {
+	for _, tc := range changeDirProjectRecipes {
+		t.Run(tc.recipe, func(t *testing.T) {
+			launch, target, _ := changeDirSetupFixture(t)
+			setupProject = tc.project
+			targetBeads := os.Getenv("BEADS_DIR")
+
+			// R: the oracle, installed and removed with R as the working
+			// directory, as cd R && bd setup does.
+			ref := changeDirTempDir(t)
+			if err := os.MkdirAll(filepath.Join(ref, ".beads"), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(ref, ".beads", "metadata.json"), []byte(`{"backend":"dolt"}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for _, dir := range []string{ref, target, launch} {
+				if err := os.WriteFile(filepath.Join(dir, "unrelated.txt"), []byte("keep\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Chdir(ref)
+			t.Setenv("BEADS_DIR", filepath.Join(ref, ".beads"))
+			resetSetupResolutionCaches(t)
+			runSetupIn(t, "", tc.recipe)
+			setupRemove = true
+			runSetupIn(t, "", tc.recipe)
+			setupRemove = false
+			wantTarget := treeSnapshot(t, ref)
+
+			// L: installed with L as the working directory.
+			t.Chdir(launch)
+			resetSetupResolutionCaches(t)
+			runSetupIn(t, "", tc.recipe)
+			launchBefore := treeSnapshot(t, launch)
+
+			// T: installed and removed through -C from L.
+			t.Setenv("BEADS_DIR", targetBeads)
+			resetSetupResolutionCaches(t)
+			runSetupIn(t, target, tc.recipe)
+			installed := treeSnapshot(t, target)
+			setupRemove = true
+			out := runSetupIn(t, target, tc.recipe)
+
+			after := treeSnapshot(t, target)
+			for _, file := range tc.files {
+				if now, ok := after[file]; ok && now == installed[file] {
+					t.Errorf("bd -C T setup %s --remove left T/%s as installed:\n%s", tc.recipe, file, out)
+				}
+			}
+			if after["unrelated.txt"] != "keep\n" {
+				t.Errorf("bd -C T setup %s --remove touched T/unrelated.txt", tc.recipe)
+			}
+			assertSameTree(t, "T after bd -C T setup "+tc.recipe+" --remove (vs cd R && bd setup --remove)", target, wantTarget)
+			assertSameTree(t, "L after bd -C T setup "+tc.recipe+" --remove", launch, launchBefore)
+		})
+	}
+
+	// A recipe file named by a bare name sits in the -C directory itself:
+	// removing it must not take that directory with it when it is left
+	// empty. Here T is a subdirectory of the workspace, holding nothing else.
+	t.Run("bare name keeps the -C directory", func(t *testing.T) {
+		_, workspace, _ := changeDirSetupFixture(t)
+		if err := os.WriteFile(filepath.Join(workspace, ".beads", "recipes.toml"), []byte("[recipes.bare]\npath = \"bare.md\"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(workspace, "sub")
+		if err := os.Mkdir(target, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		runSetupIn(t, target, "bare")
+		if _, err := os.Stat(filepath.Join(target, "bare.md")); err != nil {
+			t.Fatalf("bd -C T setup bare did not write T/bare.md: %v", err)
+		}
+		setupRemove = true
+		out := runSetupIn(t, target, "bare")
+		if _, err := os.Stat(filepath.Join(target, "bare.md")); !os.IsNotExist(err) {
+			t.Errorf("bd -C T setup bare --remove left T/bare.md: %v\n%s", err, out)
+		}
+		if info, err := os.Stat(target); err != nil || !info.IsDir() {
+			t.Errorf("bd -C T setup bare --remove removed T itself: %v\n%s", err, out)
+		}
+	})
+}
