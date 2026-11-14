@@ -37,7 +37,7 @@ func runListProxiedServer(cmd *cobra.Command, ctx context.Context, out io.Writer
 	case in.watchMode:
 		return runListProxiedWatch(cmd, ctx, in)
 	case !in.ReadyFlag && in.prettyFormat && in.ParentID != "":
-		return runListProxiedTree(ctx, in)
+		return runListProxiedTree(out, ctx, in)
 	default:
 		// The --ready arm is not a case of its own any more: it is
 		// ListRequest.ReadyFlag, and choosing the ready query from it is the
@@ -61,7 +61,7 @@ func openProxiedListUOW(ctx context.Context) (uow.UnitOfWork, error) {
 // hierarchical --parent walk under pretty output. It consumes the FILTER as a
 // value, re-parenting a copy of it at every level, and it reaches no page
 // epilogue on either route.
-func runListProxiedTree(ctx context.Context, in listInput) error {
+func runListProxiedTree(out io.Writer, ctx context.Context, in listInput) error {
 	uw, filter, err := openAndPrepare(ctx, in)
 	if err != nil {
 		return err
@@ -71,7 +71,7 @@ func runListProxiedTree(ctx context.Context, in listInput) error {
 	if in.Offset > 0 {
 		return fmt.Errorf("--offset is not supported with hierarchical --parent + pretty/tree")
 	}
-	return runListProxiedHierarchicalParent(ctx, uw, in, filter)
+	return runListProxiedHierarchicalParent(out, ctx, uw, in, filter)
 }
 
 // runListProxiedPage is the proxied twin of the direct route's two flips, and
@@ -111,7 +111,8 @@ func runListProxiedPage(ctx context.Context, out io.Writer, in listInput) error 
 	return renderProxiedListText(ctx, out, issues, in, hasMore)
 }
 
-func runListProxiedWatch(_ *cobra.Command, ctx context.Context, in listInput) error {
+func runListProxiedWatch(cmd *cobra.Command, ctx context.Context, in listInput) error {
+	out := cmd.OutOrStdout()
 	// --format with --watch is refused in gatherListInput, on both routes.
 	uw, filter, err := openAndPrepare(ctx, in)
 	if err != nil {
@@ -166,7 +167,7 @@ func runListProxiedWatch(_ *cobra.Command, ctx context.Context, in listInput) er
 	// reads. Deliberate, not a forgotten argument — decorating watch means
 	// computing the map on every refresh.
 	draw := func(issues []*types.Issue, hasMore bool, deps map[string][]*types.Dependency) {
-		displayPrettyListWithDepsMode(issues, true, deps, "", hasMore, in.ReadyFlag, in.Status, in.SortBy, in.Reverse, nil)
+		displayPrettyListWithDepsMode(out, issues, true, deps, "", hasMore, in.ReadyFlag, in.Status, in.SortBy, in.Reverse, nil)
 		printTruncationHint(hasMore, in.effectiveLimit)
 	}
 
@@ -258,7 +259,7 @@ func renderProxiedListText(ctx context.Context, out io.Writer, issues []*types.I
 		}
 		// The gate decoration rides the edge map this route just read, so the
 		// proxied pretty listing says what the direct one says (wy-j2upyy).
-		displayPrettyListWithDepsMode(issues, false, depsByIssueID, in.depsMode, truncated, in.ReadyFlag, in.Status, in.SortBy, in.Reverse,
+		displayPrettyListWithDepsMode(out, issues, false, depsByIssueID, in.depsMode, truncated, in.ReadyFlag, in.Status, in.SortBy, in.Reverse,
 			proxiedGatedIssueIDs(ctx, uw, issues, depsByIssueID))
 		printTruncationHint(truncated, in.effectiveLimit)
 		printSkipLabelsFooter(in.SkipLabels)

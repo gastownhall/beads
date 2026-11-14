@@ -33,8 +33,14 @@ if [ "$pushing_version_tag" -eq 1 ]; then
                 refs/tags/v[0-9]*)
                     tag_version="${local_ref#refs/tags/v}"
                     echo "Release tag v$tag_version push detected — verifying version consistency..."
+                    expected_version="$tag_version"
+                    # Fork builds stamp the full tag via GoReleaser; tracked
+                    # version surfaces continue to describe the upstream base.
+                    if [[ "$tag_version" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-dc\.[1-9][0-9]*$ ]]; then
+                        expected_version="${BASH_REMATCH[1]}"
+                    fi
                     checker_status=0
-                    (cd "$repo_root" && ./scripts/check-versions.sh --expect "$tag_version") || checker_status=$?
+                    (cd "$repo_root" && ./scripts/check-versions.sh --expect "$expected_version") || checker_status=$?
                     if [ "$checker_status" -ne 0 ]; then
                         echo ""
                         if [ "$checker_status" -eq 1 ]; then

@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -284,7 +285,7 @@ func TestListDisplayPrettyListHonorsSort(t *testing.T) {
 		}
 
 		out := captureStdout(t, func() error {
-			displayPrettyListWithDepsMode(issues, false, nil, "", false, false, "closed", "closed", false, nil)
+			displayPrettyListWithDepsMode(os.Stdout, issues, false, nil, "", false, false, "closed", "closed", false, nil)
 			return nil
 		})
 		newAt, oldAt := strings.Index(out, "bd-new"), strings.Index(out, "bd-old")
@@ -300,7 +301,7 @@ func TestListDisplayPrettyListHonorsSort(t *testing.T) {
 		}
 
 		out := captureStdout(t, func() error {
-			displayPrettyListWithDepsMode(issues, false, nil, "", false, false, "", "", true, nil)
+			displayPrettyListWithDepsMode(os.Stdout, issues, false, nil, "", false, false, "", "", true, nil)
 			return nil
 		})
 		p3At, p0At := strings.Index(out, "bd-p3"), strings.Index(out, "bd-p0")
@@ -319,7 +320,7 @@ func TestListDisplayPrettyListHonorsSort(t *testing.T) {
 		}
 
 		out := captureStdout(t, func() error {
-			displayPrettyListWithDepsMode([]*types.Issue{parent, oldChild, newChild}, false, deps, "", false, false, "closed", "closed", false, nil)
+			displayPrettyListWithDepsMode(os.Stdout, []*types.Issue{parent, oldChild, newChild}, false, deps, "", false, false, "closed", "closed", false, nil)
 			return nil
 		})
 		newAt, oldAt := strings.Index(out, newChild.ID), strings.Index(out, oldChild.ID)
@@ -354,7 +355,7 @@ func TestListDisplayPrettyListHonorsSort(t *testing.T) {
 		issues := []*types.Issue{parent, rootDep, rootLate, rootFree, childDep, childLate, childFree}
 
 		out := captureStdout(t, func() error {
-			displayPrettyListWithDepsMode(issues, false, deps, "scheduling", false, false, "closed", "closed", false, nil)
+			displayPrettyListWithDepsMode(os.Stdout, issues, false, deps, "scheduling", false, false, "closed", "closed", false, nil)
 			return nil
 		})
 		// A dependency's id also appears on its dependent's annotation row; the
@@ -375,7 +376,7 @@ func TestListDisplayPrettyListHonorsSort(t *testing.T) {
 
 func TestListDisplayPrettyList(t *testing.T) {
 	out := captureStdout(t, func() error {
-		displayPrettyList(nil, false)
+		displayPrettyList(os.Stdout, nil, false)
 		return nil
 	})
 	if !strings.Contains(out, "No issues found") {
@@ -389,7 +390,7 @@ func TestListDisplayPrettyList(t *testing.T) {
 	}
 
 	out = captureStdout(t, func() error {
-		displayPrettyList(issues, false)
+		displayPrettyList(os.Stdout, issues, false)
 		return nil
 	})
 	if !strings.Contains(out, "bd-1") || !strings.Contains(out, "bd-1.1") || !strings.Contains(out, "Total:") {
@@ -408,7 +409,7 @@ func TestListDisplayPrettyList_TruncatedSummary(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() error {
-		displayPrettyListWithDepsMode(issues, false, nil, "", true, false, "", "", false, nil)
+		displayPrettyListWithDepsMode(os.Stdout, issues, false, nil, "", true, false, "", "", false, nil)
 		return nil
 	})
 	if !strings.Contains(out, "Showing 2 issues") {
@@ -434,7 +435,7 @@ func TestDisplayWatchedIssueList_UsesDependencyHierarchy(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() error {
-		displayWatchedIssueList(context.Background(), store, []*types.Issue{child, parent}, false, false, "", "", false)
+		displayWatchedIssueList(os.Stdout, context.Background(), store, []*types.Issue{child, parent}, false, false, "", "", false)
 		return nil
 	})
 
