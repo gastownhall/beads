@@ -1328,3 +1328,147 @@ func TestSetupChangeDir_WorkspaceRecipeConfinedToTarget(t *testing.T) {
 		}
 	})
 }
+
+// TestSetupChangeDir_GlobalScopeUnchanged pins that -C selects only the
+// project layer: a global install's files keep their user-level
+// destinations under the home directory, whatever -C selected (GH#8283's
+// design leaves global scope untouched).
+func TestSetupChangeDir_GlobalScopeUnchanged(t *testing.T) {
+	restoreManaged := setup.SetClaudeManagedSettingsDirForTest("")
+	t.Cleanup(restoreManaged)
+
+	for _, tt := range []struct {
+		name  string
+		flags func(t *testing.T)
+		files []string // user-level files (slash-relative to HOME) the install must write
+	}{
+		{name: "cursor --global", flags: func(t *testing.T) { setupGlobal = true }, files: []string{".cursor/hooks.json"}},
+		{name: "gemini", files: []string{".gemini/settings.json", ".gemini/GEMINI.md"}},
+		{name: "claude --global", flags: func(t *testing.T) { setupGlobal = true }, files: []string{".claude/settings.json"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			launch, target := setupChangeDirWorkspace(t)
+			setupChangeDir(t, target)
+			home, err := os.UserHomeDir()
+			if err != nil {
+				t.Fatalf("UserHomeDir: %v", err)
+			}
+			if tt.flags != nil {
+				tt.flags(t)
+			}
+			if err := runRecipe(strings.Split(tt.name, " ")[0]); err != nil {
+				t.Fatalf("bd -C %s setup %s: %v", target, tt.name, err)
+			}
+			for _, rel := range tt.files {
+				if _, err := os.Stat(filepath.Join(home, filepath.FromSlash(rel))); err != nil {
+					t.Errorf("bd -C %s setup %s did not write the user-level %s: %v", target, tt.name, rel, err)
+				}
+				for _, dir := range []string{launch, target} {
+					if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(rel))); !os.IsNotExist(err) {
+						t.Errorf("bd -C %s setup %s wrote %s into %s (stat err=%v)", target, tt.name, rel, dir, err)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestSetupChangeDir_NoFlagStaysCwd pins the other side of GH#8283's design:
+// without -C, a setup run installs into the process working directory and
+// keeps its old relative spelling in the output.
+func TestSetupChangeDir_NoFlagStaysCwd(t *testing.T) {
+	launch, _ := setupChangeDirWorkspace(t)
+	orig := changeDir
+	changeDir = ""
+	t.Cleanup(func() { changeDir = orig })
+
+	out := captureStdout(t, func() error { return runRecipe("windsurf") })
+	if _, err := os.Stat(filepath.Join(launch, ".windsurf", "rules", "beads.md")); err != nil {
+		t.Errorf("bd setup windsurf (no -C) did not write the working directory's file: %v", err)
+	}
+	if !strings.Contains(out, "File: .windsurf/rules/beads.md") {
+		t.Errorf("bd setup windsurf (no -C) lost the relative path in its output; output:\n%s", out)
+	}
+	if strings.Contains(out, launch) {
+		t.Errorf("bd setup windsurf (no -C) printed an absolute path; output:\n%s", out)
+	}
+}
+
+// TestSetupChangeDir_RestoresBinding pins that the -C binding lasts one run:
+// after a run, refused or not, a setup run without -C installs into the
+// working directory with its old relative output. A relative -C also names
+// its directory against the working directory, as git -C does.
+func TestSetupChangeDir_RestoresBinding(t *testing.T) {
+	t.Run("after success", func(t *testing.T) {
+		launch, target := setupChangeDirWorkspace(t)
+		setupChangeDir(t, target)
+		if err := runRecipe("windsurf"); err != nil {
+			t.Fatalf("bd -C %s setup windsurf: %v", target, err)
+		}
+		if _, err := os.Stat(filepath.Join(target, ".windsurf", "rules", "beads.md")); err != nil {
+			t.Fatalf("bd -C %s setup windsurf did not write the target's file: %v", target, err)
+		}
+		changeDir = ""
+		out := captureStdout(t, func() error { return runRecipe("cody") })
+		if _, err := os.Stat(filepath.Join(launch, ".cody", "rules", "beads.md")); err != nil {
+			t.Errorf("the -C binding outlived its run: bd setup cody afterwards did not write the working directory: %v", err)
+		}
+		if strings.Contains(out, launch) {
+			t.Errorf("bd setup cody after a -C run printed an absolute path; output:\n%s", out)
+		}
+	})
+
+	t.Run("after refusal", func(t *testing.T) {
+		launch, target := setupChangeDirWorkspace(t)
+		outside := t.TempDir()
+		if err := os.Symlink(outside, filepath.Join(target, "out")); err != nil {
+			t.Fatalf("Symlink: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(target, ".beads", "recipes.toml"), []byte("[recipes.lint]\nname = \"Lint\"\npath = \"out/lint.md\"\n"), 0o600); err != nil {
+			t.Fatalf("WriteFile recipes.toml: %v", err)
+		}
+		setupChangeDir(t, target)
+		if _, err := captureStdoutWithError(t, func() error { return runRecipe("lint") }); err == nil {
+			t.Fatalf("bd -C %s setup lint (escaping path) was not refused", target)
+		}
+		changeDir = ""
+		out := captureStdout(t, func() error { return runRecipe("cody") })
+		if _, err := os.Stat(filepath.Join(launch, ".cody", "rules", "beads.md")); err != nil {
+			t.Errorf("a refused -C run left its binding: bd setup cody afterwards did not write the working directory: %v", err)
+		}
+		if strings.Contains(out, launch) {
+			t.Errorf("bd setup cody after a refused -C run printed an absolute path; output:\n%s", out)
+		}
+	})
+
+	t.Run("relative -C names against the working directory", func(t *testing.T) {
+		launch := t.TempDir()
+		target := filepath.Join(launch, "rel")
+		beadsDir := filepath.Join(target, ".beads")
+		if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt"}`), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("BEADS_DIR", beadsDir)
+		t.Setenv("CODEX_HOME", "")
+		t.Chdir(launch)
+		resetSetupResolutionCaches(t)
+		resetSetupGlobals(t)
+		orig := changeDir
+		changeDir = "rel"
+		t.Cleanup(func() { changeDir = orig })
+
+		if err := runRecipe("windsurf"); err != nil {
+			t.Fatalf("bd -C rel setup windsurf: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(target, ".windsurf", "rules", "beads.md")); err != nil {
+			t.Errorf("bd -C rel setup windsurf did not write rel/'s file: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(launch, ".windsurf")); !os.IsNotExist(err) {
+			t.Errorf("bd -C rel setup windsurf wrote into the launch directory %s (stat err=%v)", launch, err)
+		}
+	})
+}
