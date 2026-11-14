@@ -223,6 +223,7 @@ go_test(
         "dolt_commit_ordering_metadata_test.go",
         "dolt_commit_ordering_test.go",
         "dolt_indeterminate_publication_test.go",
+        "dolt_noop_publication_test.go",
         "dolt_sql_large_script_test.go",
         "dolt_test.go",
         "dolt_trailing_publication_failure_test.go",
