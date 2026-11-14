@@ -82,9 +82,29 @@ func (s *DoltStore) runIssueOperationTxWithMessage(ctx context.Context, fn func(
 		// resolves the true outcome.
 		return err
 	}
-	staged := sortedDirtyTables(tables)
-	if len(staged) == 0 {
-		return nil
+	s.publishCommittedOperation(ctx, sortedDirtyTables(tables), commitMsg)
+	return nil
+}
+
+// publishCommittedOperation mints the Dolt history commit for a mutation whose
+// SQL transaction has ALREADY committed: DOLT_ADD of tables (plus the version
+// history tables when active) and DOLT_COMMIT with commitMsg, on a fresh
+// pinned connection with no SQL transaction open. It is the only publication
+// step a SQL mutation may take (GH#5752, LatentLabsSpace/NEXUS#92): staging
+// inside the still-open transaction builds the Dolt commit from the BEGIN-time
+// root and silently reverts rows concurrent writers committed in the window.
+//
+// Callers reach it only after their runner returned nil, so a failed or
+// indeterminate SQL commit never publishes (see runIssueOperationTxWithMessage
+// on why an ambiguous commit is not published either). Publication is
+// best-effort by contract: the mutation is applied and durable, so a
+// failure is counted and logged once and never returned — the change rides
+// the next Dolt commit on the branch. Version-commit deferral, the staged-set
+// guard (no empty commits) and the nothing-to-commit tolerance live in
+// doltAddAndCommit.
+func (s *DoltStore) publishCommittedOperation(ctx context.Context, tables []string, commitMsg string) {
+	if len(tables) == 0 {
+		return
 	}
 	if commitMsg == "" {
 		// A body can dirty tables without composing a message (e.g. a ready
@@ -92,12 +112,19 @@ func (s *DoltStore) runIssueOperationTxWithMessage(ctx context.Context, fn func(
 		// mint a Dolt commit with an empty message.
 		commitMsg = "bd: issue operation"
 	}
-	if err := s.doltAddAndCommitPostTx(ctx, staged, commitMsg); err != nil {
-		// See the failure-mode note above: the mutation is applied and
-		// durable; only the trailing history commit is missing, and the
-		// change rides the next dolt commit on the branch.
+	if err := s.doltAddAndCommitPostTx(ctx, tables, commitMsg); err != nil {
+		// The mutation is applied and durable; only the trailing history
+		// commit is missing, and the change rides the next dolt commit on
+		// the branch.
 		doltMetrics.postTxCommitDropped.Add(ctx, 1)
 		log.Printf("dolt: post-tx dolt commit failed for %q (data already committed; change rides the next dolt commit): %v", commitMsg, err)
 	}
-	return nil
+}
+
+// changedTables builds the publication intent for a legacy write whose table
+// set is fixed at the call site.
+func changedTables(names ...string) storageissueops.ChangedTables {
+	tables := storageissueops.ChangedTables{}
+	tables.Add(names...)
+	return tables
 }
