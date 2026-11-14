@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
@@ -219,6 +220,10 @@ func (s *EmbeddedDoltStore) AddRemote(ctx context.Context, name, url string) err
 // AddRemoteWithRef adds a remote whose Dolt data lives on the git ref ref;
 // see storage.RemoteStore.
 func (s *EmbeddedDoltStore) AddRemoteWithRef(ctx context.Context, name, url, ref string) error {
+	// GH#6233: a URL the allowlist refuses is never registered.
+	if err := remotecache.CheckProposedRemote(name, url); err != nil {
+		return err
+	}
 	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		return versioncontrolops.AddRemote(ctx, db, name, url, ref)
 	})

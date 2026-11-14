@@ -212,3 +212,36 @@ func TestRemotePolicyAcceptsMatchingEmbeddedRemote(t *testing.T) {
 		}
 	}
 }
+
+// GH#6233: AddRemote and AddFederationPeer refuse a URL the allowlist rejects
+// before they write, so no remote, peer row or credential is recorded and the
+// remotes already there are unchanged.
+func TestRemotePolicyRefusesEmbeddedRegistration(t *testing.T) {
+	ctx := t.Context()
+	setAllowedRemotePatterns(t)
+	store, remoteURL := newFileRemoteStore(t)
+	before, err := store.ListRemotes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.Set(remotecache.AllowedRemotePatternsKey, []string{remoteURL})
+
+	if err := store.AddRemote(ctx, "other", "file://"+t.TempDir()); !errors.Is(err, remotecache.ErrRemoteNotAllowed) {
+		t.Fatalf("AddRemote error = %v, want a policy refusal", err)
+	}
+	if err := store.AddFederationPeer(ctx, &storage.FederationPeer{
+		Name: "peer", RemoteURL: "https://peer.example/team", Username: "u", Password: "p",
+	}); !errors.Is(err, remotecache.ErrRemoteNotAllowed) {
+		t.Fatalf("AddFederationPeer error = %v, want a policy refusal", err)
+	}
+	if _, err := store.GetFederationPeer(ctx, "peer"); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("GetFederationPeer(peer) error = %v, want not found: a refused peer was recorded", err)
+	}
+	after, err := store.ListRemotes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(after) != fmt.Sprint(before) {
+		t.Fatalf("remotes = %+v after refused registrations, want the prior %+v", after, before)
+	}
+}

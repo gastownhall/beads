@@ -20,6 +20,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/execenv"
 	"github.com/steveyegge/beads/internal/githooksenv"
+	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -284,6 +285,10 @@ func (s *DoltStore) decryptPassword(encrypted []byte) (string, error) {
 // AddFederationPeer adds or updates a federation peer with credentials.
 // This stores credentials in the database and also adds the Dolt remote.
 func (s *DoltStore) AddFederationPeer(ctx context.Context, peer *storage.FederationPeer) error {
+	// GH#6233: refuse before the peer row or its credentials are written.
+	if err := remotecache.CheckProposedRemote(peer.Name, peer.RemoteURL); err != nil {
+		return err
+	}
 	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		return s.addFederationPeer(ctx, peer)
 	})

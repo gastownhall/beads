@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
@@ -669,6 +670,12 @@ func adoptGitOriginRemoteForPush(ctx context.Context, st storage.DoltStorage, po
 		return false, nil
 	}
 	remoteURL := normalizeRemoteURL(originURL)
+
+	// GH#6233: an origin federation.allowed-remote-patterns refuses is never
+	// offered for consent, let alone adopted.
+	if err := remotecache.CheckProposedRemote("origin", remoteURL); err != nil {
+		return false, err
+	}
 
 	if proceed, err := applyAdoptionConsent(remoteURL, policy, optIn); err != nil || !proceed {
 		return false, err
@@ -2062,6 +2069,12 @@ func registerPersistedDoltRemote(ctx context.Context, st doltRemoteAddStore, per
 }
 
 func ensureDoltRemote(ctx context.Context, st doltRemoteAddStore, name, url string, confirm doltRemoteOverwriteConfirmer) (doltRemoteAddResult, error) {
+	// GH#6233: a URL federation.allowed-remote-patterns refuses is refused
+	// before the overwrite prompt and the remove, so the remote already
+	// registered under name stays as it was.
+	if err := remotecache.CheckProposedRemote(name, url); err != nil {
+		return doltRemoteAddResult{}, err
+	}
 	remotes, err := st.ListRemotes(ctx)
 	if err != nil {
 		return doltRemoteAddResult{}, fmt.Errorf("list existing remotes: %w", err)
