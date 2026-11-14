@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/git"
@@ -930,5 +931,580 @@ func TestAddRecipe_RefusesPathOutsideDir(t *testing.T) {
 		if err != nil || saved["myeditor"].Path != path {
 			t.Errorf("bd setup --add myeditor %q saved %+v, %v", path, saved["myeditor"], err)
 		}
+	}
+}
+
+// bd setup copilot must not clobber a repository's own
+// .github/copilot-instructions.md: the user's content stays, with the beads
+// guidance added alongside it (GH#7431).
+func TestRunRecipe_CopilotKeepsExistingInstructions(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	t.Chdir(tmpDir)
+	t.Setenv("BEADS_DIR", "")
+	resetSetupResolutionCaches(t)
+	resetSetupGlobals(t)
+
+	instructions := filepath.Join(tmpDir, ".github", "copilot-instructions.md")
+	if err := os.MkdirAll(filepath.Dir(instructions), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const userContent = "# Team Copilot rules\n\nAlways write table-driven tests.\n"
+	if err := os.WriteFile(instructions, []byte(userContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = captureStdout(t, func() error {
+		return runRecipe("copilot")
+	})
+
+	got, err := os.ReadFile(instructions)
+	if err != nil {
+		t.Fatalf("read instructions: %v", err)
+	}
+	if !strings.Contains(string(got), "Always write table-driven tests.") {
+		t.Fatalf("bd setup copilot overwrote the user's copilot-instructions.md; got:\n%s", got)
+	}
+}
+
+// The paths of the built-in copilot recipe: the manifest is bd's own, the
+// instructions file is the repository's, which bd keeps a marked section in.
+const (
+	copilotManifestFile     = ".copilot-plugin/plugin.json"
+	copilotInstructionsFile = ".github/copilot-instructions.md"
+)
+
+// copilotTestWorkspace makes a fresh workspace the working directory, with
+// the setup flags reset, and returns it.
+func copilotTestWorkspace(t *testing.T) string {
+	t.Helper()
+	ws := t.TempDir()
+	t.Chdir(ws)
+	t.Setenv("BEADS_DIR", "")
+	resetSetupResolutionCaches(t)
+	resetSetupGlobals(t)
+	return ws
+}
+
+// runCopilotSetup runs bd setup copilot, with --check or --remove when mode
+// says so, and returns what it printed to stdout and stderr together.
+func runCopilotSetup(t *testing.T, mode string) (string, error) {
+	t.Helper()
+	resetSetupGlobals(t)
+	switch mode {
+	case "check":
+		setupCheck = true
+	case "remove":
+		setupRemove = true
+	}
+	f, err := os.CreateTemp(t.TempDir(), "setup-output")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	stdioMutex.Lock()
+	oldOut, oldErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = f, f
+	runErr := runRecipe("copilot")
+	os.Stdout, os.Stderr = oldOut, oldErr
+	stdioMutex.Unlock()
+	out, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out), runErr
+}
+
+// copilotSection is the marked section bd setup copilot keeps in the
+// instructions file: the current template between the beads markers.
+func copilotSection() string {
+	return "<!-- BEGIN BEADS INTEGRATION -->\n" + recipes.CopilotInstructionsTemplate + "<!-- END BEADS INTEGRATION -->\n"
+}
+
+func writeWorkspaceFile(t *testing.T, path, content string) {
+	t.Helper()
+	path = filepath.FromSlash(path)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// readWorkspaceFile returns the file's content and whether it exists.
+func readWorkspaceFile(t *testing.T, path string) (string, bool) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.FromSlash(path))
+	if os.IsNotExist(err) {
+		return "", false
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data), true
+}
+
+func copilotManifest(t *testing.T) string {
+	t.Helper()
+	manifest, err := recipes.ContentForPath(recipes.BuiltinRecipes["copilot"], copilotManifestFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return manifest
+}
+
+// AC-1: setup over user-authored instructions keeps their bytes as a prefix,
+// appends exactly one marked section, and installs the manifest.
+func TestSetupCopilot_AppendsSectionToUserInstructions(t *testing.T) {
+	for _, tt := range []struct {
+		name, user, sep string
+	}{
+		{name: "ends in a line break", user: "# Team Copilot rules\n\nAlways write table-driven tests.\n", sep: "\n"},
+		{name: "no final line break", user: "# Team Copilot rules\n\nAlways write table-driven tests.", sep: "\n\n"},
+		{name: "CRLF", user: "# Team Copilot rules\r\n\r\nAlways write table-driven tests.\r\n", sep: "\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			copilotTestWorkspace(t)
+			writeWorkspaceFile(t, copilotInstructionsFile, tt.user)
+
+			out, err := runCopilotSetup(t, "")
+			if err != nil {
+				t.Fatalf("bd setup copilot: %v\n%s", err, out)
+			}
+			got, _ := readWorkspaceFile(t, copilotInstructionsFile)
+			if want := tt.user + tt.sep + copilotSection(); got != want {
+				t.Fatalf("instructions = %q, want the user's bytes then one section %q", got, want)
+			}
+			if n := strings.Count(got, "<!-- BEGIN BEADS INTEGRATION"); n != 1 {
+				t.Fatalf("instructions hold %d beads sections, want 1:\n%s", n, got)
+			}
+			if manifest, ok := readWorkspaceFile(t, copilotManifestFile); !ok || manifest != copilotManifest(t) {
+				t.Fatalf("manifest installed = %v, content matches = %v", ok, manifest == copilotManifest(t))
+			}
+		})
+	}
+}
+
+// AC-2: setup replaces an existing section in place, leaving the text
+// before and after it alone, and a second run does not rewrite the file.
+func TestSetupCopilot_UpdatesSectionInPlaceAndIsIdempotent(t *testing.T) {
+	for _, begin := range []string{
+		"<!-- BEGIN BEADS INTEGRATION -->",
+		"<!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:00000000 -->",
+	} {
+		t.Run(begin, func(t *testing.T) {
+			copilotTestWorkspace(t)
+			const before = "# Team rules\n\nBe kind.\n\n"
+			const after = "\n## More team rules\n\nKeep it short.\n"
+			writeWorkspaceFile(t, copilotInstructionsFile,
+				before+begin+"\nOlder beads guidance.\n<!-- END BEADS INTEGRATION -->\n"+after)
+
+			if out, err := runCopilotSetup(t, ""); err != nil {
+				t.Fatalf("bd setup copilot: %v\n%s", err, out)
+			}
+			got, _ := readWorkspaceFile(t, copilotInstructionsFile)
+			if want := before + copilotSection() + after; got != want {
+				t.Fatalf("instructions = %q, want %q", got, want)
+			}
+			if n := strings.Count(got, "# GitHub Copilot Instructions"); n != 1 {
+				t.Fatalf("template appears %d times, want 1", n)
+			}
+
+			path := filepath.FromSlash(copilotInstructionsFile)
+			stamp := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+			if err := os.Chtimes(path, stamp, stamp); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := runCopilotSetup(t, ""); err != nil {
+				t.Fatalf("second bd setup copilot: %v\n%s", err, out)
+			}
+			again, _ := readWorkspaceFile(t, copilotInstructionsFile)
+			if again != got {
+				t.Fatalf("second run changed the instructions:\n%q\nwant\n%q", again, got)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !info.ModTime().Equal(stamp) {
+				t.Fatalf("second run rewrote the unchanged instructions (mtime %v, want %v)", info.ModTime(), stamp)
+			}
+		})
+	}
+}
+
+// AC-3: --check fails, naming the file and the remedy, when the instructions
+// hold only the user's content, and changes nothing.
+func TestSetupCopilot_CheckReportsMissingSection(t *testing.T) {
+	copilotTestWorkspace(t)
+	const user = "# Team Copilot rules\n\nAlways write table-driven tests.\n"
+	writeWorkspaceFile(t, copilotManifestFile, copilotManifest(t))
+	writeWorkspaceFile(t, copilotInstructionsFile, user)
+
+	out, err := runCopilotSetup(t, "check")
+	if err == nil {
+		t.Fatalf("bd setup copilot --check passed over instructions with no beads section:\n%s", out)
+	}
+	for _, want := range []string{"Missing Beads section: " + copilotInstructionsFile, "Run: bd setup copilot"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("check output lacks %q:\n%s", want, out)
+		}
+	}
+	if got, _ := readWorkspaceFile(t, copilotInstructionsFile); got != user {
+		t.Errorf("check changed the instructions to %q", got)
+	}
+	if got, _ := readWorkspaceFile(t, copilotManifestFile); got != copilotManifest(t) {
+		t.Errorf("check changed the manifest")
+	}
+}
+
+// --check passes once setup has added the section to the user's file.
+func TestSetupCopilot_CheckPassesWithSection(t *testing.T) {
+	copilotTestWorkspace(t)
+	writeWorkspaceFile(t, copilotInstructionsFile, "# Team rules\n")
+	if out, err := runCopilotSetup(t, ""); err != nil {
+		t.Fatalf("bd setup copilot: %v\n%s", err, out)
+	}
+	out, err := runCopilotSetup(t, "check")
+	if err != nil {
+		t.Fatalf("bd setup copilot --check: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "integration installed") {
+		t.Fatalf("check output = %q", out)
+	}
+}
+
+// AC-4: --remove strips the section and the manifest but keeps the
+// instructions file and the user's text.
+func TestSetupCopilot_RemoveKeepsUserInstructions(t *testing.T) {
+	t.Run("text before and after the section", func(t *testing.T) {
+		copilotTestWorkspace(t)
+		const before = "# Team rules\n\nBe kind.\n"
+		const after = "\n## More team rules\n\nKeep it short.\n"
+		writeWorkspaceFile(t, copilotManifestFile, copilotManifest(t))
+		writeWorkspaceFile(t, copilotInstructionsFile, before+"\n"+copilotSection()+after)
+
+		out, err := runCopilotSetup(t, "remove")
+		if err != nil {
+			t.Fatalf("bd setup copilot --remove: %v\n%s", err, out)
+		}
+		if _, ok := readWorkspaceFile(t, copilotManifestFile); ok {
+			t.Errorf("remove kept the manifest")
+		}
+		got, ok := readWorkspaceFile(t, copilotInstructionsFile)
+		if !ok {
+			t.Fatalf("remove deleted the user's instructions file")
+		}
+		// removeBeadsSection rejoins the text around the section with the
+		// one blank line that set it off.
+		if want := before + after; got != want {
+			t.Fatalf("instructions = %q, want %q", got, want)
+		}
+	})
+	t.Run("install then remove gives the user's file back", func(t *testing.T) {
+		copilotTestWorkspace(t)
+		const user = "# Team Copilot rules\n\nAlways write table-driven tests.\n"
+		writeWorkspaceFile(t, copilotInstructionsFile, user)
+		if out, err := runCopilotSetup(t, ""); err != nil {
+			t.Fatalf("bd setup copilot: %v\n%s", err, out)
+		}
+		if out, err := runCopilotSetup(t, "remove"); err != nil {
+			t.Fatalf("bd setup copilot --remove: %v\n%s", err, out)
+		}
+		if got, ok := readWorkspaceFile(t, copilotInstructionsFile); !ok || got != user {
+			t.Fatalf("instructions after install+remove = %q (exists %v), want %q", got, ok, user)
+		}
+		if _, ok := readWorkspaceFile(t, copilotManifestFile); ok {
+			t.Errorf("remove kept the manifest")
+		}
+	})
+}
+
+// AC-5: install and remove refuse instructions whose beads markers are
+// malformed, naming the file, and leave both recipe files as they were;
+// --check fails on them. A mention of the markers in the user's own text is
+// malformed too, never bd's section.
+func TestSetupCopilot_RefusesMalformedMarkers(t *testing.T) {
+	const begin = "<!-- BEGIN BEADS INTEGRATION -->"
+	const end = "<!-- END BEADS INTEGRATION -->"
+	for _, mode := range []string{"", "check", "remove"} {
+		for _, tt := range []struct{ name, content string }{
+			{"dangling BEGIN", "# Team rules\n\n" + begin + "\nOld guidance.\n"},
+			{"dangling END", "# Team rules\n\nOld guidance.\n" + end + "\n"},
+			{"END before BEGIN", "# Team rules\n" + end + "\nMine.\n" + begin + "\nOld.\n"},
+			{"two sections", begin + "\nA\n" + end + "\n\n" + begin + "\nB\n" + end + "\n"},
+			{"nested", begin + "\n" + begin + "\nA\n" + end + "\n" + end + "\n"},
+			{"unterminated BEGIN comment", "<!-- BEGIN BEADS INTEGRATION\nA\n" + end + "\n"},
+			{"markers mentioned inline", "# Team rules\n\nbd keeps its guidance between `" + begin + "` and `" + end + "`; never edit inside them.\n"},
+			{"markers in an indented code block", "# Team rules\n\nExample:\n\n    " + begin + "\n    Old guidance.\n    " + end + "\n"},
+		} {
+			t.Run(mode+"/"+tt.name, func(t *testing.T) {
+				copilotTestWorkspace(t)
+				hadManifest := mode != ""
+				if hadManifest {
+					writeWorkspaceFile(t, copilotManifestFile, copilotManifest(t))
+				}
+				writeWorkspaceFile(t, copilotInstructionsFile, tt.content)
+
+				out, err := runCopilotSetup(t, mode)
+				if err == nil {
+					t.Fatalf("bd setup copilot %s accepted malformed markers:\n%s", mode, out)
+				}
+				if !strings.Contains(out, copilotInstructionsFile) || !strings.Contains(out, "malformed beads integration markers") {
+					t.Errorf("refusal does not name %s and its malformed markers:\n%s", copilotInstructionsFile, out)
+				}
+				if got, _ := readWorkspaceFile(t, copilotInstructionsFile); got != tt.content {
+					t.Errorf("instructions changed to %q", got)
+				}
+				if _, ok := readWorkspaceFile(t, copilotManifestFile); ok != hadManifest {
+					t.Errorf("manifest exists = %v, want %v", ok, hadManifest)
+				}
+			})
+		}
+	}
+}
+
+// A byte order mark that an editor saved at the start of the instructions
+// file is not text before the BEGIN marker: setup leaves the section behind
+// it as it is, --check passes, and --remove takes out only the section,
+// keeping the mark and the user's text.
+func TestSetupCopilot_SectionBehindByteOrderMark(t *testing.T) {
+	const bom = "\ufeff"
+	const user = "## Team rules\n\n- Prefer small PRs.\n"
+	copilotTestWorkspace(t)
+	writeWorkspaceFile(t, copilotManifestFile, copilotManifest(t))
+	content := bom + copilotSection() + "\n" + user
+	writeWorkspaceFile(t, copilotInstructionsFile, content)
+
+	if out, err := runCopilotSetup(t, ""); err != nil {
+		t.Fatalf("bd setup copilot: %v\n%s", err, out)
+	}
+	if got, _ := readWorkspaceFile(t, copilotInstructionsFile); got != content {
+		t.Fatalf("setup changed the instructions to %q, want %q", got, content)
+	}
+	if out, err := runCopilotSetup(t, "check"); err != nil || !strings.Contains(out, "integration installed") {
+		t.Fatalf("bd setup copilot --check: %v\n%s", err, out)
+	}
+	if out, err := runCopilotSetup(t, "remove"); err != nil {
+		t.Fatalf("bd setup copilot --remove: %v\n%s", err, out)
+	}
+	if got, ok := readWorkspaceFile(t, copilotInstructionsFile); !ok || got != bom+user {
+		t.Fatalf("instructions after remove = %q (exists %v), want %q", got, ok, bom+user)
+	}
+	if _, ok := readWorkspaceFile(t, copilotManifestFile); ok {
+		t.Errorf("remove kept the manifest")
+	}
+}
+
+// legacyCopilotInstructions is the instructions file bd setup copilot wrote,
+// unmarked, in every release from v1.0.5 until it kept a marked section.
+const legacyCopilotInstructions = `# GitHub Copilot Instructions
+
+This repository uses **Beads (bd)** for issue tracking.
+
+## Core Workflow
+
+- Use ` + "`bd ready`" + ` to find unblocked work
+- Use ` + "`bd create`" + ` to track new work
+- Use ` + "`bd update <id> --claim`" + ` before starting
+- Use ` + "`bd close <id>`" + ` when work is complete
+- Treat commit, push, and Dolt remote sync as policy-controlled handoff actions
+- Do not commit, push, or run Dolt remote sync unless explicitly authorized
+
+## Context Loading
+
+Run ` + "`bd prime`" + ` for the full workflow context.
+
+If the Beads Copilot plugin is installed, Copilot CLI will automatically run
+` + "`bd prime`" + ` on session start and before compaction.
+`
+
+// AC-6: an instructions file that is exactly the old unmarked template
+// passes --check, and setup turns it into one marked section, keeping a byte
+// order mark the file starts with.
+func TestSetupCopilot_ConvertsLegacyInstructions(t *testing.T) {
+	for _, tt := range []struct{ name, bom, content string }{
+		{"as written", "", legacyCopilotInstructions},
+		{"CRLF and trailing blank lines", "", strings.ReplaceAll(legacyCopilotInstructions, "\n", "\r\n") + "\r\n  \n"},
+		{"behind a byte order mark", "\ufeff", legacyCopilotInstructions},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			copilotTestWorkspace(t)
+			writeWorkspaceFile(t, copilotManifestFile, copilotManifest(t))
+			writeWorkspaceFile(t, copilotInstructionsFile, tt.bom+tt.content)
+
+			if out, err := runCopilotSetup(t, "check"); err != nil {
+				t.Fatalf("bd setup copilot --check over the legacy template: %v\n%s", err, out)
+			}
+			if out, err := runCopilotSetup(t, ""); err != nil {
+				t.Fatalf("bd setup copilot: %v\n%s", err, out)
+			}
+			got, _ := readWorkspaceFile(t, copilotInstructionsFile)
+			if want := tt.bom + copilotSection(); got != want {
+				t.Fatalf("legacy instructions became %q, want one section %q", got, want)
+			}
+		})
+	}
+	t.Run("legacy template with the user's additions is the user's", func(t *testing.T) {
+		copilotTestWorkspace(t)
+		content := legacyCopilotInstructions + "\n## Team rules\n\nBe kind.\n"
+		writeWorkspaceFile(t, copilotManifestFile, copilotManifest(t))
+		writeWorkspaceFile(t, copilotInstructionsFile, content)
+
+		if out, err := runCopilotSetup(t, "check"); err == nil {
+			t.Fatalf("check passed over an edited legacy file with no section:\n%s", out)
+		}
+		if out, err := runCopilotSetup(t, "remove"); err != nil {
+			t.Fatalf("bd setup copilot --remove: %v\n%s", err, out)
+		}
+		if got, _ := readWorkspaceFile(t, copilotInstructionsFile); got != content {
+			t.Fatalf("remove changed an edited legacy file to %q", got)
+		}
+	})
+}
+
+// AC-7: install and remove refuse a symlinked instructions file before
+// touching either recipe path, keeping the link and its target.
+func TestSetupCopilot_RefusesSymlinkedInstructions(t *testing.T) {
+	const user = "# Team rules\n\nBe kind.\n"
+	for _, tt := range []struct {
+		name     string
+		mode     string
+		target   string // the link target's content; "" leaves it dangling
+		manifest bool
+	}{
+		{name: "install through link", mode: "", target: user},
+		{name: "install through dangling link", mode: ""},
+		{name: "remove through link", mode: "remove", target: user + "\n" + copilotSection(), manifest: true},
+		{name: "remove through link to a section-only file", mode: "remove", target: copilotSection(), manifest: true},
+		{name: "remove through dangling link", mode: "remove", manifest: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ws := copilotTestWorkspace(t)
+			target := filepath.Join(ws, "shared", "instructions.md")
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tt.target != "" {
+				if err := os.WriteFile(target, []byte(tt.target), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.manifest {
+				writeWorkspaceFile(t, copilotManifestFile, copilotManifest(t))
+			}
+			link := filepath.FromSlash(copilotInstructionsFile)
+			if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, link); err != nil {
+				t.Skipf("symlink: %v", err)
+			}
+
+			out, err := runCopilotSetup(t, tt.mode)
+			if err == nil {
+				t.Fatalf("bd setup copilot %s went through a symlinked instructions file:\n%s", tt.mode, out)
+			}
+			if !strings.Contains(out, copilotInstructionsFile) {
+				t.Errorf("refusal does not name %s:\n%s", copilotInstructionsFile, out)
+			}
+			if dest, err := os.Readlink(link); err != nil || dest != target {
+				t.Errorf("link = %q, %v; want it kept pointing at %q", dest, err, target)
+			}
+			data, err := os.ReadFile(target)
+			switch {
+			case tt.target == "" && !os.IsNotExist(err):
+				t.Errorf("dangling link's target was created: %q, %v", data, err)
+			case tt.target != "" && string(data) != tt.target:
+				t.Errorf("link target changed to %q", data)
+			}
+			if _, ok := readWorkspaceFile(t, copilotManifestFile); ok != tt.manifest {
+				t.Errorf("manifest exists = %v, want %v", ok, tt.manifest)
+			}
+		})
+	}
+}
+
+// --check only reads, so it may follow a link to valid instructions.
+func TestSetupCopilot_CheckFollowsSymlinkedInstructions(t *testing.T) {
+	ws := copilotTestWorkspace(t)
+	target := filepath.Join(ws, "shared", "instructions.md")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("# Team rules\n\n"+copilotSection()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeWorkspaceFile(t, copilotManifestFile, copilotManifest(t))
+	link := filepath.FromSlash(copilotInstructionsFile)
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	if out, err := runCopilotSetup(t, "check"); err != nil {
+		t.Fatalf("bd setup copilot --check: %v\n%s", err, out)
+	}
+}
+
+// AC-8: in a fresh repository setup creates both files, the instructions
+// holding only the section, and remove deletes both and the directories it
+// emptied.
+func TestSetupCopilotRemoveOwnedInstructions(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		seed     string // instructions seeded with the manifest; "" runs setup first
+		sibling  bool   // .github holds a file of the user's too
+		wantFile string // instructions after setup, when setup runs
+	}{
+		{name: "fresh install then remove"},
+		{name: "fresh install then remove, .github holds workflows", sibling: true},
+		{name: "legacy-only instructions", seed: legacyCopilotInstructions},
+		{name: "section with only whitespace around it", seed: "\n\n" + copilotSection() + "\n  \n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ws := copilotTestWorkspace(t)
+			sibling := filepath.Join(ws, ".github", "workflows", "ci.yml")
+			if tt.sibling {
+				writeWorkspaceFile(t, ".github/workflows/ci.yml", "on: push\n")
+			}
+			if tt.seed == "" {
+				if out, err := runCopilotSetup(t, ""); err != nil {
+					t.Fatalf("bd setup copilot: %v\n%s", err, out)
+				}
+				if got, ok := readWorkspaceFile(t, copilotManifestFile); !ok || got != copilotManifest(t) {
+					t.Fatalf("setup did not install the manifest (exists %v)", ok)
+				}
+				if got, _ := readWorkspaceFile(t, copilotInstructionsFile); got != copilotSection() {
+					t.Fatalf("fresh instructions = %q, want only the section %q", got, copilotSection())
+				}
+			} else {
+				writeWorkspaceFile(t, copilotManifestFile, copilotManifest(t))
+				writeWorkspaceFile(t, copilotInstructionsFile, tt.seed)
+			}
+
+			if out, err := runCopilotSetup(t, "remove"); err != nil {
+				t.Fatalf("bd setup copilot --remove: %v\n%s", err, out)
+			}
+			for _, f := range []string{copilotManifestFile, copilotInstructionsFile} {
+				if _, ok := readWorkspaceFile(t, f); ok {
+					t.Errorf("remove kept %s", f)
+				}
+			}
+			if _, err := os.Lstat(filepath.Join(ws, ".copilot-plugin")); !os.IsNotExist(err) {
+				t.Errorf("remove kept the emptied .copilot-plugin, lstat err = %v", err)
+			}
+			_, err := os.Lstat(filepath.Join(ws, ".github"))
+			switch {
+			case tt.sibling:
+				if _, err := os.Stat(sibling); err != nil {
+					t.Errorf("remove lost the user's %s: %v", sibling, err)
+				}
+			case !os.IsNotExist(err):
+				t.Errorf("remove kept the emptied .github, lstat err = %v", err)
+			}
+		})
 	}
 }

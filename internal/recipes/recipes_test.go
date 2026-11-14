@@ -363,3 +363,65 @@ func TestLoadUserRecipesMarksWorkspaceRecipes(t *testing.T) {
 		}
 	}
 }
+
+func TestCopilotSharedPath(t *testing.T) {
+	recipe := BuiltinRecipes["copilot"]
+	if !recipe.IsSharedPath(".github/copilot-instructions.md") {
+		t.Fatalf("copilot instructions should be a shared path")
+	}
+	for _, path := range []string{".copilot-plugin/plugin.json", "./.github/copilot-instructions.md", ".github/COPILOT-INSTRUCTIONS.md", ""} {
+		if recipe.IsSharedPath(path) {
+			t.Errorf("IsSharedPath(%q) = true, want an exact match only", path)
+		}
+	}
+	for name, r := range BuiltinRecipes {
+		if name != "copilot" && len(r.SharedPaths) != 0 {
+			t.Errorf("recipe %s declares shared paths %v", name, r.SharedPaths)
+		}
+	}
+}
+
+// A workspace recipes.toml cannot declare shared paths: the field is not
+// read from TOML, and an override of copilot replaces the built-in recipe.
+func TestUserRecipeSharedPathsNotFromTOML(t *testing.T) {
+	beadsDir := t.TempDir()
+	toml := "[recipes.copilot]\ntype = \"multifile\"\npaths = [\"a.md\"]\nshared_paths = [\"a.md\"]\nSharedPaths = [\"a.md\"]\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "recipes.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	recipe, err := GetRecipe("copilot", beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recipe.SharedPaths) != 0 || recipe.IsSharedPath("a.md") {
+		t.Fatalf("workspace recipe has shared paths %v", recipe.SharedPaths)
+	}
+}
+
+// The legacy instructions are frozen: bd recognizes the file older releases
+// wrote by this exact text, however the live template changes.
+func TestCopilotLegacyInstructionsFrozen(t *testing.T) {
+	const want = "# GitHub Copilot Instructions\n\n" +
+		"This repository uses **Beads (bd)** for issue tracking.\n\n" +
+		"## Core Workflow\n\n" +
+		"- Use `bd ready` to find unblocked work\n" +
+		"- Use `bd create` to track new work\n" +
+		"- Use `bd update <id> --claim` before starting\n" +
+		"- Use `bd close <id>` when work is complete\n" +
+		"- Treat commit, push, and Dolt remote sync as policy-controlled handoff actions\n" +
+		"- Do not commit, push, or run Dolt remote sync unless explicitly authorized\n\n" +
+		"## Context Loading\n\n" +
+		"Run `bd prime` for the full workflow context.\n\n" +
+		"If the Beads Copilot plugin is installed, Copilot CLI will automatically run\n" +
+		"`bd prime` on session start and before compaction.\n"
+	if LegacyCopilotInstructions != want {
+		t.Fatalf("LegacyCopilotInstructions changed:\n%s", LegacyCopilotInstructions)
+	}
+	recipe := BuiltinRecipes["copilot"]
+	if got := recipe.LegacyContents[".github/copilot-instructions.md"]; got != LegacyCopilotInstructions {
+		t.Fatalf("copilot legacy instructions = %q", got)
+	}
+	if _, ok := recipe.LegacyContents[".copilot-plugin/plugin.json"]; ok {
+		t.Fatalf("the beads-owned manifest needs no legacy text")
+	}
+}

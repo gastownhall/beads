@@ -231,7 +231,7 @@ Details: [Factory.ai Droid](/integrations/factory), [Mux](/integrations/mux), [O
 bd setup copilot
 ```
 
-This installs a native Copilot CLI plugin manifest (`.copilot-plugin/plugin.json`, which registers `bd prime` hooks) and repository instructions (`.github/copilot-instructions.md`). See [Copilot CLI](/integrations/copilot-cli).
+This installs a native Copilot CLI plugin manifest (`.copilot-plugin/plugin.json`, which registers `bd prime` hooks) and repository instructions (`.github/copilot-instructions.md`). bd releases before v1.5.0, v1.4.x included, write that file whole, replacing any instructions already in it, and `--remove` deletes it; bd v1.5.0 and later keep the beads guidance as a marked section and leave the rest of the file yours (`--remove` takes out only that section). See [Copilot CLI](/integrations/copilot-cli).
 
 **For VS Code with GitHub Copilot**, use the MCP server:
 

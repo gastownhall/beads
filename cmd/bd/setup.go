@@ -321,18 +321,24 @@ func runRecipe(name string) error {
 	}
 
 	if setupCheck {
-		var missing []string
+		var problems []string
 		for _, path := range paths {
+			if recipe.IsSharedPath(path) {
+				if problem := checkSharedPath(path, recipe.LegacyContents[path]); problem != "" {
+					problems = append(problems, problem)
+				}
+				continue
+			}
 			if _, err := os.Stat(path); os.IsNotExist(err) {
-				missing = append(missing, path)
+				problems = append(problems, "Missing: "+remedy.PrintedValue(path))
 			}
 		}
-		if len(missing) > 0 {
+		if len(problems) > 0 {
 			fmt.Printf("✗ %s integration not installed\n", remedy.PrintedValue(recipe.Name))
 			key, note := remedy.CommandArg(runtime.GOOS, name, "<recipe>")
 			fmt.Printf("  Run: bd setup %s%s\n", key, note)
-			for _, path := range missing {
-				fmt.Printf("  Missing: %s\n", remedy.PrintedValue(path))
+			for _, problem := range problems {
+				fmt.Printf("  %s\n", problem)
 			}
 			return SilentExit()
 		}
@@ -343,9 +349,33 @@ func runRecipe(name string) error {
 		return nil
 	}
 
+	// Install and remove refuse a shared file they cannot work on before
+	// changing any of the recipe's files, so a refusal changes nothing.
+	if err := preflightSharedPaths(recipe, paths); err != nil {
+		return err
+	}
+
 	if setupRemove {
 		removed := false
+		var kept []string
 		for _, path := range paths {
+			// A shared file loses only bd's section, and is deleted only
+			// when nothing else is left in it.
+			if recipe.IsSharedPath(path) {
+				result, err := setup.RemoveSharedFile(path, recipe.LegacyContents[path])
+				if err != nil {
+					return HandleError("remove the beads section from %s: %v", remedy.PrintedValue(path), remedy.PrintedError(err))
+				}
+				switch result {
+				case setup.SharedRemovedSection:
+					removed = true
+					kept = append(kept, path)
+				case setup.SharedRemovedFile:
+					removed = true
+					_ = setup.RemoveEmptyDir(filepath.Dir(path))
+				}
+				continue
+			}
 			if err := os.Remove(path); err != nil {
 				if os.IsNotExist(err) {
 					continue
@@ -363,6 +393,9 @@ func runRecipe(name string) error {
 			return nil
 		}
 		fmt.Printf("✓ Removed %s integration\n", remedy.PrintedValue(recipe.Name))
+		for _, path := range kept {
+			fmt.Printf("  Kept your content in %s\n", remedy.PrintedValue(path))
+		}
 		return nil
 	}
 
@@ -380,6 +413,14 @@ func runRecipe(name string) error {
 		if err != nil {
 			return HandleError("%v", err)
 		}
+		// A shared file is the repository's too: keep bd's guidance as a
+		// marked section in it rather than replacing what it holds.
+		if recipe.IsSharedPath(path) {
+			if _, err := setup.InstallSharedFile(path, content, recipe.LegacyContents[path]); err != nil {
+				return HandleError("update %s: %v", remedy.PrintedValue(path), remedy.PrintedError(err))
+			}
+			continue
+		}
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil { // #nosec G306 -- config files need to be readable
 			return HandleError("write file: %v", remedy.PrintedError(err))
 		}
@@ -390,6 +431,49 @@ func runRecipe(name string) error {
 		fmt.Printf("  File: %s\n", remedy.PrintedValue(path))
 	}
 	return nil
+}
+
+// preflightSharedPaths refuses, naming the file and what to do, a recipe
+// whose shared file install or remove cannot work on (setup.PreflightSharedFile).
+func preflightSharedPaths(recipe *recipes.Recipe, paths []string) error {
+	for _, path := range paths {
+		if !recipe.IsSharedPath(path) {
+			continue
+		}
+		err := setup.PreflightSharedFile(path)
+		switch {
+		case err == nil:
+		case errors.Is(err, setup.ErrMalformedSection):
+			return HandleErrorWithHint(
+				fmt.Sprintf("%s: %v; no files were changed", remedy.PrintedValue(path), remedy.PrintedError(err)),
+				"edit the file so it holds at most one <!-- BEGIN BEADS INTEGRATION --> ... <!-- END BEADS INTEGRATION --> pair, each marker alone on its line, and no other mention of the markers, then run bd setup again")
+		case errors.Is(err, setup.ErrRefuseSymlinkWrite):
+			return HandleErrorWithHint(
+				fmt.Sprintf("%s is a symbolic link; bd setup will not write or delete through it, and no files were changed", remedy.PrintedValue(path)),
+				"replace the link with a regular file, or add or remove the beads section in the file it points to by hand")
+		default:
+			return HandleError("%s: %v; no files were changed", remedy.PrintedValue(path), remedy.PrintedError(err))
+		}
+	}
+	return nil
+}
+
+// checkSharedPath returns the line --check prints for a recipe's shared
+// file that does not hold bd's section, or "" when it does. Holding a file
+// is not enough: the repository's own instructions are not bd's.
+func checkSharedPath(path, legacy string) string {
+	state, err := setup.CheckSharedFile(path, legacy)
+	switch {
+	case os.IsNotExist(err):
+		return "Missing: " + remedy.PrintedValue(path)
+	case errors.Is(err, setup.ErrMalformedSection):
+		return fmt.Sprintf("Malformed Beads markers: %s (%v)", remedy.PrintedValue(path), remedy.PrintedError(err))
+	case err != nil:
+		return fmt.Sprintf("Unreadable: %s (%v)", remedy.PrintedValue(path), remedy.PrintedError(err))
+	case state == setup.SharedSectionNone:
+		return "Missing Beads section: " + remedy.PrintedValue(path)
+	}
+	return ""
 }
 
 func translateSetupError(err error) error {

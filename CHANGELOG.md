@@ -1281,6 +1281,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd setup copilot` no longer overwrites your
+  `.github/copilot-instructions.md`** (#7431, reported by @raykao; first
+  fixed by @Yi-111-a in #7433). Setup wrote the beads template over the whole
+  file, `--check` passed for any file at that path, and `--remove` deleted
+  it. bd now keeps its guidance there as one section between
+  `<!-- BEGIN/END BEADS INTEGRATION -->` markers: setup appends it to your
+  instructions or updates it in place, `--check` fails when the section is
+  missing, and `--remove` takes out only the section, deleting the file only
+  when nothing else is left. A file that is exactly the template earlier
+  releases wrote is converted to a section. Setup and remove refuse a file
+  with malformed markers or a symlinked instructions file before changing
+  anything. `.copilot-plugin/plugin.json` stays bd's own.
+
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
