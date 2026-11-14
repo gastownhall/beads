@@ -118,7 +118,7 @@ var setStateCmd = &cobra.Command{
 
 This command:
 1. Creates an event bead recording the state change (source of truth)
-2. Removes any existing label for the dimension
+2. Removes every label of the dimension (each label starting with <dimension>:)
 3. Adds the new dimension:value label (fast lookup cache)
 
 State labels follow the convention <dimension>:<value>, for example:
@@ -168,15 +168,21 @@ func runSetState(ctx context.Context, issueID, dimension, newValue, reason strin
 	}
 	fullID := details.ID
 
-	oldValue, found := findStateLabel(details.Labels, dimension)
-	oldLabel := ""
-	if found {
-		oldLabel = dimension + ":" + oldValue
+	newLabel := dimension + ":" + newValue
+	// The dimension's labels as read, which can be more than one: a stale
+	// read-modify-write elsewhere can leave two values behind (GH#5657). Only
+	// a dimension holding exactly the requested label is already set; any
+	// other shape is healed by the prefix patch below.
+	held := stateLabelValues(details.Labels, dimension)
+	oldValue := ""
+	for _, value := range held {
+		if value != newValue {
+			oldValue = value
+			break
+		}
 	}
 
-	newLabel := dimension + ":" + newValue
-
-	if oldLabel == newLabel {
+	if len(held) == 1 && held[0] == newValue {
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
 				"issue_id":  fullID,
@@ -248,16 +254,19 @@ func runSetState(ctx context.Context, issueID, dimension, newValue, reason strin
 	// label and added the new one as two writes, and both treated a failed
 	// removal as a warning — which leaves an issue carrying two values for
 	// one dimension, a state findStateLabel resolves by whichever the label
-	// read happens to return first. A LabelPatch applies Add and Remove in
-	// one guarded update, so the dimension has one value or the command
-	// failed. The plane needs no branch: IssuePlaneOnly stays false and the
-	// role resolves it inside its own transaction.
+	// read happens to return first. The patch names the dimension by its
+	// literal "<dimension>:" prefix rather than the label this command read,
+	// so it drops every value the transaction sees, including one a
+	// concurrent writer added after the read (GH#5657), and the dimension has
+	// one value or the command failed. The plane needs no branch:
+	// IssuePlaneOnly stays false and the role resolves it inside its own
+	// transaction.
 	if _, err := lifecycle.Update(ctx, issueops.UpdateRequest{
 		Actor:   currentActor(),
 		IssueID: fullID,
 		Patch: issueops.IssuePatch{Labels: issueops.LabelPatch{
-			Add:    []string{newLabel},
-			Remove: removeStateLabel(oldLabel),
+			RemovePrefixes: []string{dimension + ":"},
+			Add:            []string{newLabel},
 		}},
 		// bd set-state has always edited templates; the role's template guard
 		// stands down for it (issueops.UpdateRequest.AllowTemplate).
@@ -371,16 +380,18 @@ func findStateLabel(labels []string, dimension string) (string, bool) {
 	return "", false
 }
 
-// removeStateLabel is the Remove member of the dimension swap: the old label
-// when there was one, and nothing when the dimension is being set for the
-// first time. A nil slice rather than a one-entry slice holding "" matters —
-// LabelPatch drops an empty entry, so both spell "remove nothing", but only
-// one of them says so.
-func removeStateLabel(oldLabel string) []string {
-	if oldLabel == "" {
-		return nil
+// stateLabelValues lists every value labels holds for dimension, in label
+// order: the literal "<dimension>:" prefix, the same match the set-state
+// patch's RemovePrefixes uses.
+func stateLabelValues(labels []string, dimension string) []string {
+	prefix := dimension + ":"
+	var values []string
+	for _, label := range labels {
+		if strings.HasPrefix(label, prefix) {
+			values = append(values, strings.TrimPrefix(label, prefix))
+		}
 	}
-	return []string{oldLabel}
+	return values
 }
 
 func collectStateLabels(labels []string) map[string]string {
