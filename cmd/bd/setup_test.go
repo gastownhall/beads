@@ -1241,3 +1241,90 @@ func TestSetupChangeDir_CheckReadsTarget(t *testing.T) {
 		})
 	}
 }
+
+// TestSetupChangeDir_WorkspaceRecipeConfinedToTarget pins #8283's
+// confinement half: under -C <target> a .beads/recipes.toml recipe's files
+// land in the target, so its paths are held inside the target — a symbolic
+// link in the target leading out is followed by neither install, --check,
+// --remove nor --add, and the refusal names the selected project. A recipe
+// whose path stays inside the target still installs.
+func TestSetupChangeDir_WorkspaceRecipeConfinedToTarget(t *testing.T) {
+	// seedEscape gives the target a .beads/recipes.toml recipe whose path
+	// runs through "out", a symbolic link in the target leading to outside,
+	// where lint.md already sits.
+	seedEscape := func(t *testing.T) (target, outside string) {
+		t.Helper()
+		_, target = setupChangeDirWorkspace(t)
+		outside = t.TempDir()
+		if err := os.Symlink(outside, filepath.Join(target, "out")); err != nil {
+			t.Fatalf("Symlink: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(outside, "lint.md"), []byte("outside\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(target, ".beads", "recipes.toml"), []byte("[recipes.lint]\nname = \"Lint\"\npath = \"out/lint.md\"\n"), 0o600); err != nil {
+			t.Fatalf("WriteFile recipes.toml: %v", err)
+		}
+		setupChangeDir(t, target)
+		return target, outside
+	}
+
+	t.Run("install refuses", func(t *testing.T) {
+		target, outside := seedEscape(t)
+		var runErr error
+		stderr := captureStderr(t, func() { runErr = runRecipe("lint") })
+		if runErr == nil {
+			t.Errorf("bd -C %s setup lint installed a recipe whose path leaves the target through a link", target)
+		}
+		if !strings.Contains(stderr, "selected project directory") {
+			t.Errorf("bd -C %s setup lint refusal does not name the selected project; stderr:\n%s", target, stderr)
+		}
+		if got, err := os.ReadFile(filepath.Join(outside, "lint.md")); err != nil || string(got) != "outside\n" {
+			t.Errorf("bd -C %s setup lint wrote through the target's link (err=%v, now %q)", target, err, got)
+		}
+	})
+
+	t.Run("check refuses", func(t *testing.T) {
+		target, _ := seedEscape(t)
+		setupCheck = true
+		var runErr error
+		_ = captureStderr(t, func() { runErr = runRecipe("lint") })
+		if runErr == nil {
+			t.Errorf("bd -C %s setup lint --check judged a recipe whose path leaves the target through a link", target)
+		}
+	})
+
+	t.Run("remove refuses", func(t *testing.T) {
+		target, outside := seedEscape(t)
+		setupRemove = true
+		var runErr error
+		_ = captureStderr(t, func() { runErr = runRecipe("lint") })
+		if runErr == nil {
+			t.Errorf("bd -C %s setup lint --remove removed through a recipe whose path leaves the target", target)
+		}
+		if _, err := os.Stat(filepath.Join(outside, "lint.md")); err != nil {
+			t.Errorf("bd -C %s setup lint --remove took the file outside the target: %v", target, err)
+		}
+	})
+
+	t.Run("add refuses", func(t *testing.T) {
+		target, _ := seedEscape(t)
+		if err := addRecipe("sneaky", "out/notes.md"); err == nil {
+			t.Errorf("bd -C %s setup --add saved a recipe whose path leaves the target through a link", target)
+		}
+	})
+
+	t.Run("path inside target installs", func(t *testing.T) {
+		_, target := setupChangeDirWorkspace(t)
+		if err := os.WriteFile(filepath.Join(target, ".beads", "recipes.toml"), []byte("[recipes.lint]\nname = \"Lint\"\npath = \"docs/lint.md\"\n"), 0o600); err != nil {
+			t.Fatalf("WriteFile recipes.toml: %v", err)
+		}
+		setupChangeDir(t, target)
+		if err := runRecipe("lint"); err != nil {
+			t.Fatalf("bd -C %s setup lint (path inside the target): %v", target, err)
+		}
+		if _, err := os.Stat(filepath.Join(target, "docs", "lint.md")); err != nil {
+			t.Errorf("bd -C %s setup lint did not write the target's file: %v", target, err)
+		}
+	})
+}

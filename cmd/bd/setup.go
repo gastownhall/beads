@@ -202,10 +202,16 @@ func addRecipe(name, path string) error {
 		return setupWorkspaceError()
 	}
 	// bd setup refuses a recipe of .beads/recipes.toml whose path leaves the
-	// directory it runs in (recipes.PathInside), so --add does not save one.
+	// directory its files land in (recipes.PathInside) — the -C-selected
+	// project under -C, the directory it runs in otherwise — so --add does
+	// not save one.
 	if path != "" {
-		if err := recipes.PathInside(".", path); err != nil {
-			return fmt.Errorf("recipe path %s %s; %s", recipeRefusalWord(path), recipePathRefusal(err), recipePathRule)
+		root, err := setupPathRoot()
+		if err != nil {
+			return err
+		}
+		if err := recipes.PathInside(root, path); err != nil {
+			return fmt.Errorf("recipe path %s %s; %s", recipeRefusalWord(path), recipePathRefusal(err, root), recipePathRuleFor(root))
 		}
 	}
 
@@ -237,16 +243,47 @@ func recipeRefusalWord(value string) string {
 // paths to (recipes.PathInside), as its refusals state it.
 const recipePathRule = "a .beads/recipes.toml recipe can only name a relative path with no '..' or symbolic link leading out of the directory bd setup runs in, and no dangling or looping link along it"
 
+// setupPathRoot is the directory a .beads/recipes.toml recipe's paths are
+// held inside (recipes.PathInside): the -C-selected project when one is
+// selected, so under -C the paths cannot leave the project the files land
+// in (GH#8283), and the directory bd setup runs in otherwise ("."). An
+// error means -C was given and its directory cannot be made absolute.
+func setupPathRoot() (string, error) {
+	root, err := selectSetupProjectDir()
+	if err != nil {
+		return "", fmt.Errorf("%v", err)
+	}
+	if root == "" {
+		return ".", nil
+	}
+	return root, nil
+}
+
+// recipePathRuleFor states the confinement rule recipePathRule words for
+// the directory bd setup runs in; under -C it names the selected project,
+// which is where the recipe's files land.
+func recipePathRuleFor(root string) string {
+	if root != "." {
+		return "a .beads/recipes.toml recipe can only name a relative path with no '..' or symbolic link leading out of the selected project directory (-C), and no dangling or looping link along it"
+	}
+	return recipePathRule
+}
+
 // recipePathRefusal says why recipes.PathInside refused a path: it is not
-// inside the directory bd setup runs in, or it runs through a link bd setup
-// cannot follow (a dangling or looping one), whose target may be inside, or
-// that directory itself could not be resolved (a deleted working directory),
-// whose OS error is spelled by remedy.PrintedError.
-func recipePathRefusal(err error) string {
+// inside the directory the paths are held in, or it runs through a link bd
+// setup cannot follow (a dangling or looping one), whose target may be
+// inside, or that directory itself could not be resolved (a deleted working
+// directory), whose OS error is spelled by remedy.PrintedError. Under -C
+// (root != ".") it names the selected project; otherwise its wording is
+// recipePathRule's, byte for byte.
+func recipePathRefusal(err error, root string) string {
 	switch {
 	case errors.Is(err, recipes.ErrPathUnfollowable):
 		return "runs through a symbolic link bd setup cannot follow"
 	case errors.Is(err, recipes.ErrPathOutside):
+		if root != "." {
+			return "is not inside the selected project directory (-C)"
+		}
 		return "is not inside the directory bd setup runs in"
 	}
 	return fmt.Sprintf("cannot be checked: %v", remedy.PrintedError(err))
@@ -343,21 +380,26 @@ func runRecipe(name string) error {
 	// can commit, names the files --check reads, install writes and --remove
 	// deletes, and the directories install creates and --remove drops when
 	// empty: bd setup refuses it, touching none of them, unless each stays
-	// inside the directory it runs in (recipes.PathInside). The refusal
-	// names the key and the path by recipeRefusalWord, and says whether the
-	// path leads out or runs through a link bd setup cannot follow
-	// (recipePathRefusal). An empty path names
+	// inside the directory its files land in (recipes.PathInside against
+	// setupPathRoot: the -C-selected project under -C, the directory it runs
+	// in otherwise, GH#8283). The refusal names the key and the path by
+	// recipeRefusalWord, and says whether the path leads out or runs through
+	// a link bd setup cannot follow (recipePathRefusal). An empty path names
 	// no file, and fails or is skipped as before. A built-in recipe's paths
 	// are bd's own and are not checked.
 	if recipe.Workspace {
+		root, err := setupPathRoot()
+		if err != nil {
+			return HandleError("%v", err)
+		}
 		for _, path := range paths {
 			if path == "" {
 				continue
 			}
-			if err := recipes.PathInside(".", path); err != nil {
+			if err := recipes.PathInside(root, path); err != nil {
 				return HandleErrorWithHint(
-					fmt.Sprintf("recipe %s names %s, which %s", recipeRefusalWord(name), recipeRefusalWord(path), recipePathRefusal(err)),
-					recipePathRule)
+					fmt.Sprintf("recipe %s names %s, which %s", recipeRefusalWord(name), recipeRefusalWord(path), recipePathRefusal(err, root)),
+					recipePathRuleFor(root))
 			}
 		}
 	}
