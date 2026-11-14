@@ -258,3 +258,28 @@ func TestEmbeddedRepairedWispIsBlockedServesBlockedStateRecompute(t *testing.T) 
 	}
 	requireConsistent("after the full recompute")
 }
+
+// TestEmbeddedWispIsBlockedHealIsIdempotentAndReArms is gh 5257's AC-4: a
+// healthy current store and a freshly repaired one both migrate with zero
+// steps, and dropping the column and index again is healed again by the next
+// pass, with the same ignored/0015-onward replay.
+func TestEmbeddedWispIsBlockedHealIsIdempotentAndReArms(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	conn := seedLostIsBlockedStore(t, ctx)
+
+	if applied := migrateUpRecordingSteps(t, ctx, conn); len(applied) != 0 {
+		t.Fatalf("healthy control: MigrateUp applied %v, want nothing", applied)
+	}
+
+	for round := 1; round <= 2; round++ {
+		dropWispIsBlocked(t, ctx, conn)
+		if applied := migrateUpRecordingSteps(t, ctx, conn); !slices.Equal(applied, wantHealReplay()) {
+			t.Fatalf("heal round %d: MigrateUp applied %v, want %v", round, applied, wantHealReplay())
+		}
+		requireWispIsBlockedHealed(t, ctx, conn)
+		if applied := migrateUpRecordingSteps(t, ctx, conn); len(applied) != 0 {
+			t.Fatalf("after heal round %d: MigrateUp applied %v, want nothing", round, applied)
+		}
+	}
+}
