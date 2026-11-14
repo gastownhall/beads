@@ -55,9 +55,9 @@ func defaultGeminiEnv() (geminiEnv, error) {
 	if err != nil {
 		return geminiEnv{}, fmt.Errorf("home directory: %w", err)
 	}
-	workDir, err := os.Getwd()
+	workDir, err := workingProjectDir()
 	if err != nil {
-		return geminiEnv{}, fmt.Errorf("working directory: %w", err)
+		return geminiEnv{}, err
 	}
 	return geminiEnv{
 		stdout:     os.Stdout,

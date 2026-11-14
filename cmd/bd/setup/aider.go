@@ -150,13 +150,13 @@ The AI will suggest the appropriate ` + "`bd`" + ` command, which you run via ` 
 `
 
 func InstallAider() error {
-	configPath := ".aider.conf.yml"
-	instructionsPath := ".aider/BEADS.md"
-	readmePath := ".aider/README.md"
+	configPath := ProjectPath(".aider.conf.yml")
+	instructionsPath := ProjectPath(".aider/BEADS.md")
+	readmePath := ProjectPath(".aider/README.md")
 
 	fmt.Println("Installing Aider integration...")
 
-	if err := EnsureDir(".aider", 0755); err != nil {
+	if err := EnsureDir(ProjectPath(".aider"), 0755); err != nil {
 		return HandleError("%v", err)
 	}
 

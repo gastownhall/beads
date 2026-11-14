@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/cmd/bd/setup"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/recipes"
@@ -931,4 +932,145 @@ func TestAddRecipe_RefusesPathOutsideDir(t *testing.T) {
 			t.Errorf("bd setup --add myeditor %q saved %+v, %v", path, saved["myeditor"], err)
 		}
 	}
+}
+
+// setupChangeDirWorkspace builds the #8283 fixture: a launch directory L
+// the test runs in, and an initialized target workspace T that -C selects.
+// It returns T's path with symlinks resolved, so comparisons match what
+// -C resolution yields, and beads dir T/.beads is exported as BEADS_DIR the
+// way applyChangeDirSelection does.
+func setupChangeDirWorkspace(t *testing.T) (launch, target string) {
+	t.Helper()
+	launch = t.TempDir()
+	target = t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(target); err == nil {
+		target = resolved
+	}
+	beadsDir := filepath.Join(target, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("CODEX_HOME", "")
+	t.Chdir(launch)
+	resetSetupResolutionCaches(t)
+	resetSetupGlobals(t)
+	return launch, target
+}
+
+// setupChangeDir selects target the way the -C flag does, for the run under
+// test, and stops selecting it when the test ends.
+func setupChangeDir(t *testing.T, target string) {
+	t.Helper()
+	origChangeDir := changeDir
+	changeDir = target
+	t.Cleanup(func() { changeDir = origChangeDir })
+}
+
+// assertOnlyEntry reports whether dir holds no entry besides itself.
+func assertDirEmpty(t *testing.T, dir, what string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("%s: ReadDir: %v", what, err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("%s: %s holds %d entries (%v); want it untouched", what, dir, len(entries), entries)
+	}
+}
+
+// TestSetupClaude_ChangeDirWritesToSelectedProject pins #8283: `bd -C <project>
+// setup claude` must write the project's Claude integration under <project>,
+// not under the process working directory, as `cd <project> && bd setup
+// claude` does.
+func TestSetupClaude_ChangeDirWritesToSelectedProject(t *testing.T) {
+	startDir, projectDir := setupChangeDirWorkspace(t)
+	restoreManaged := setup.SetClaudeManagedSettingsDirForTest("")
+	t.Cleanup(restoreManaged)
+	setupChangeDir(t, projectDir)
+
+	_ = captureStdout(t, func() error {
+		return runRecipe("claude")
+	})
+
+	if _, err := os.Stat(filepath.Join(startDir, ".claude")); !os.IsNotExist(err) {
+		t.Errorf("bd -C %s setup claude wrote .claude into the process cwd %s (stat err=%v)", projectDir, startDir, err)
+	}
+	if _, err := os.Stat(filepath.Join(projectDir, ".claude", "settings.json")); err != nil {
+		t.Errorf("bd -C %s setup claude did not write the selected project's .claude/settings.json: %v", projectDir, err)
+	}
+}
+
+// TestSetupChangeDir_InstallWritesTarget pins #8283's install half for every
+// project-scope recipe: run from launch directory L with -C T, each recipe's
+// managed project files land under T, and L's tree stays untouched. The
+// environment providers are the real defaults, not mocks pre-loaded with T,
+// so the rows cover the provider wiring itself.
+func TestSetupChangeDir_InstallWritesTarget(t *testing.T) {
+	restoreManaged := setup.SetClaudeManagedSettingsDirForTest("")
+	t.Cleanup(restoreManaged)
+
+	for _, tt := range []struct {
+		name  string
+		flags func(t *testing.T)
+		files []string // files the recipe must create under T (slash-relative)
+	}{
+		{name: "claude", files: []string{".claude/settings.json", "CLAUDE.md"}},
+		{name: "codex", files: []string{"AGENTS.md", ".codex/config.toml", ".codex/hooks.json", ".agents/skills/beads/SKILL.md"}},
+		{name: "cursor", files: []string{".cursor/rules/beads.mdc", ".cursor/hooks.json", ".agents/skills/beads/SKILL.md"}},
+		{name: "factory", files: []string{"AGENTS.md"}},
+		{name: "opencode", files: []string{"AGENTS.md"}},
+		{name: "aider", files: []string{".aider.conf.yml", ".aider/BEADS.md", ".aider/README.md"}},
+		{name: "junie", files: []string{".junie/guidelines.md", ".junie/mcp/mcp.json"}},
+		{name: "windsurf", files: []string{".windsurf/rules/beads.md"}},
+		{name: "cody", files: []string{".cody/rules/beads.md"}},
+		{name: "kilocode", files: []string{".kilocode/rules/beads.md"}},
+		{name: "kiro", files: []string{".kiro/steering/beads.md"}},
+		{name: "copilot", files: []string{".copilot-plugin/plugin.json", ".github/copilot-instructions.md"}},
+		{name: "gemini --project", flags: func(t *testing.T) { setupProject = true }, files: []string{"GEMINI.md", ".gemini/settings.json"}},
+		{name: "mux --project", flags: func(t *testing.T) { setupProject = true }, files: []string{".mux/AGENTS.md", ".mux/init"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			launch, target := setupChangeDirWorkspace(t)
+			setupChangeDir(t, target)
+			if tt.flags != nil {
+				tt.flags(t)
+			}
+
+			if err := runRecipe(strings.Split(tt.name, " ")[0]); err != nil {
+				t.Fatalf("bd -C %s setup %s: %v", target, tt.name, err)
+			}
+			for _, rel := range tt.files {
+				if _, err := os.Stat(filepath.Join(target, filepath.FromSlash(rel))); err != nil {
+					t.Errorf("bd -C %s setup %s did not write %s: %v", target, tt.name, rel, err)
+				}
+			}
+			assertDirEmpty(t, launch, "launch directory")
+			if wd, err := os.Getwd(); err != nil || wd != launch {
+				t.Errorf("setup moved the process working directory to %q (err=%v); want %q", wd, err, launch)
+			}
+		})
+	}
+
+	t.Run("workspace recipe", func(t *testing.T) {
+		launch, target := setupChangeDirWorkspace(t)
+		beadsDir := filepath.Join(target, ".beads")
+		if err := os.WriteFile(filepath.Join(beadsDir, "recipes.toml"), []byte("[recipes.lint]\nname = \"Lint\"\npath = \"docs/lint.md\"\n"), 0o600); err != nil {
+			t.Fatalf("WriteFile recipes.toml: %v", err)
+		}
+		setupChangeDir(t, target)
+
+		out := captureStdout(t, func() error { return runRecipe("lint") })
+		if _, err := os.Stat(filepath.Join(target, "docs", "lint.md")); err != nil {
+			t.Errorf("bd -C %s setup lint did not write the workspace recipe's file: %v", target, err)
+		}
+		if !strings.Contains(out, filepath.Join(target, "docs", "lint.md")) {
+			t.Errorf("bd -C %s setup lint did not report the absolute target path; output:\n%s", target, out)
+		}
+		assertDirEmpty(t, launch, "launch directory")
+	})
 }
