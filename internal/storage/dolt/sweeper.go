@@ -7,7 +7,6 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	storeops "github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/workapi"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -41,19 +40,20 @@ var _ issueops.Sweeper = (*sweeper)(nil)
 // giving it a write transaction and an empty commit would make the preview
 // look like a mutation to everything watching the store.
 //
-// THE VERSION-CONTROL ENTRY IS ONE PER SWEEP, recorded here rather than in the
-// shared body because the two backends mint it differently: this one INSIDE
-// the write transaction, where the embedded store can only publish after its
-// SQL commit, on a second connection. That is why the role promises exactly
-// one entry in the STEADY STATE and only this leg makes it atomic with the
-// sweep. An ephemeral sweep touches only the wisp tables, which this plane
-// ignores, so DOLT_COMMIT finds nothing to commit and records none.
+// THE VERSION-CONTROL ENTRY IS ONE PER SWEEP, minted by the shared post-tx
+// publisher (GH#5752) once the write transaction has returned. The role
+// promises exactly one entry in the STEADY STATE; a publication failure is
+// dropped by the publisher (the sweep is durable and rides the next Dolt
+// commit), so a caller retry cannot mint a second entry for one sweep. An
+// ephemeral sweep touches only the wisp tables, which this plane ignores, so
+// DOLT_COMMIT finds nothing to commit and records none.
 func (s *sweeper) Sweep(ctx context.Context, req issueops.SweepRequest) (issueops.SweepResult, error) {
 	if err := workapi.ValidateSweepRequest(req); err != nil {
 		return issueops.SweepResult{}, err
 	}
 
 	var result issueops.SweepResult
+	var publish bool
 	run := func(tx *sql.Tx) error {
 		var err error
 		result, err = storeops.SweepInTx(ctx, tx, req)
@@ -74,30 +74,24 @@ func (s *sweeper) Sweep(ctx context.Context, req issueops.SweepRequest) (issueop
 	// create committing in any of those shards first conflicts it.
 	if err := s.store.withRetryTx(ctx, func(tx *sql.Tx) error {
 		result = issueops.SweepResult{}
+		publish = false
 		if err := run(tx); err != nil {
 			return err
 		}
-		if result.Swept == 0 {
-			return nil
-		}
-		// Through the same funnel the deleter uses. A sweep mints nothing today
-		// — SweepInTx deletes through DeleteIssuesInTx, which rewrites no
-		// neighbor, so there is no surviving row to version — but it shares
-		// this table list and the minting-scoped write transaction with the deleter,
-		// and a staging list that carries the version tables on one and not the
-		// other is the asymmetry the wisp-arm scope comment refused: inert
-		// today, and silently wrong the day a sweep gains a surviving-row write.
-		for _, table := range s.store.withVersionedHistoryTables(ctx, tx, sweptTables) {
-			_ = schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table)
-		}
-		msg := fmt.Sprintf("bd: sweep %d %s bead(s)", result.Swept, req.Tier)
-		if err := schema.DrainCall(ctx, tx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-			msg, s.store.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-			return fmt.Errorf("dolt commit: %w", err)
-		}
+		publish = result.Swept > 0
 		return nil
 	}); err != nil {
 		return issueops.SweepResult{}, err
+	}
+	// Post-tx publication (GH#5752): the sweep's Dolt history commit runs only
+	// after the SQL transaction committed, through the same funnel the deleter
+	// uses — sweptTables plus the versioned-history tables the publisher itself
+	// appends, and the deferred-commit check (bd-4wamg) the in-tx staging this
+	// replaced never had: a deferred context now leaves the sweep in the working
+	// set like every other write.
+	if publish {
+		s.store.publishCommittedTables(ctx, sweptTables,
+			fmt.Sprintf("bd: sweep %d %s bead(s)", result.Swept, req.Tier))
 	}
 	return result, nil
 }

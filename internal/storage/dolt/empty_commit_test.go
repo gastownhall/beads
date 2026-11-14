@@ -200,8 +200,8 @@ func dirtyConfigUncommitted(t *testing.T, store *DoltStore) {
 }
 
 // TestHasStagedChanges is a fast, server-free unit test of the guard predicate
-// (issueops.HasStagedChanges) used by StageAndCommit, doltAddAndCommit and
-// doltAddAndCommitInTx. It asserts the helper returns false on an empty staged
+// (issueops.HasStagedChanges) used by StageAndCommit and doltAddAndCommit.
+// It asserts the helper returns false on an empty staged
 // set (so the caller skips the empty '-m' commit) and true when something is
 // staged (so a real change still commits). Mirrors the sqlmock style of
 // versioncontrolops.TestStageAndCommit*.

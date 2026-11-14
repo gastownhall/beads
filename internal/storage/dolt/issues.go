@@ -767,6 +767,17 @@ func (s *DoltStore) DeleteIssue(ctx context.Context, id string) error {
 	})
 }
 
+// deleteIssueStagedTables is the fixed staging list a durable delete publishes
+// after its SQL commit: the row's own table plus every table its ON DELETE
+// CASCADE fans out to. The cascaded deletions are invisible to the SQL issued
+// here, so staging only `issues` would leave them uncommitted in the working
+// set. It is DeleteCascadeTables' durable set minus the dolt-ignored
+// wisp_dependencies (staging an ignored table is a no-op).
+var deleteIssueStagedTables = []string{
+	"issues", "dependencies", "labels", "comments", "events", "provenance_events",
+	"child_counters", "issue_snapshots", "compaction_snapshots",
+}
+
 func (s *DoltStore) deleteIssue(ctx context.Context, id string) error {
 	// Route ephemeral IDs to wisps table (falls through for promoted wisps)
 	if s.isActiveWisp(ctx, id) {
@@ -775,17 +786,13 @@ func (s *DoltStore) deleteIssue(ctx context.Context, id string) error {
 
 	if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
 		// storage.DeleteIssue carries no actor, so the journal rows record none.
-		if err := issueops.DeleteIssueInTx(ctx, tx, id, issueops.NoRequestActor); err != nil {
-			return err
-		}
-
-		commitMsg := fmt.Sprintf("bd: delete %s", id)
-		return s.doltAddAndCommitInTx(ctx, tx,
-			[]string{"issues", "dependencies", "labels", "comments", "events", "provenance_events", "child_counters", "issue_snapshots", "compaction_snapshots"},
-			commitMsg)
+		return issueops.DeleteIssueInTx(ctx, tx, id, issueops.NoRequestActor)
 	}); err != nil {
 		return s.recordDoltPublicationFailure(ctx, err)
 	}
+	// Post-tx publication (GH#5752): the Dolt history commit runs only after
+	// the SQL transaction committed.
+	s.publishCommittedTables(ctx, deleteIssueStagedTables, fmt.Sprintf("bd: delete %s", id))
 	return nil
 }
 
@@ -851,6 +858,7 @@ func (s *DoltStore) deleteIssues(ctx context.Context, ids []string, cascade bool
 	}
 
 	var result *types.DeleteIssuesResult
+	var publish bool
 	if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
 		// storage.DeleteIssues carries no actor, so the journal rows record none.
 		// The wisps peeled off above stay part of the request for the
@@ -861,20 +869,24 @@ func (s *DoltStore) deleteIssues(ctx context.Context, ids []string, cascade bool
 			return err
 		}
 		result = r
-		if dryRun {
-			return nil
-		}
-
-		commitMsg := fmt.Sprintf("bd: delete %d issue(s)", result.DeletedCount)
-		return s.doltAddAndCommitInTx(ctx, tx,
-			[]string{"issues", "dependencies", "labels", "comments", "events", "provenance_events", "child_counters", "issue_snapshots", "compaction_snapshots"},
-			commitMsg)
+		// Plain assignment: a replayed attempt re-derives the publication
+		// intent, and a dry run publishes nothing.
+		publish = !dryRun
+		return nil
 	}); err != nil {
 		// Preserve partial result (e.g., OrphanedIssues) on error.
 		if result != nil {
 			result.DeletedCount += wispDeleteCount
 		}
 		return result, s.recordDoltPublicationFailure(ctx, err)
+	}
+	// Post-tx publication (GH#5752). The message counts only the DURABLE rows
+	// this transaction deleted; the wisp deletions peeled off above are folded
+	// into the returned DeletedCount only after the commit (they are dolt-ignored
+	// tables and stage nothing).
+	if publish {
+		s.publishCommittedTables(ctx, deleteIssueStagedTables,
+			fmt.Sprintf("bd: delete %d issue(s)", result.DeletedCount))
 	}
 	result.DeletedCount += wispDeleteCount
 

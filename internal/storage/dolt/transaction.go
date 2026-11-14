@@ -142,6 +142,14 @@ func (s *DoltStore) RunInIssueLifecycleTransaction(ctx context.Context, commitMs
 // runInIssueLifecycleTransaction retries only failures that occur before the
 // public callback starts. Once fn has run, its caller-owned work must never be
 // replayed, even when Dolt proves that the SQL transaction rolled back.
+//
+// The Dolt history commit is minted by the shared post-tx publisher AFTER the
+// SQL transaction commits (GH#5752); the body only records which tables the
+// callback dirtied. Staging inside the still-open transaction staged those
+// tables from the BEGIN-time root, so a racing writer's committed rows were
+// written back to their BEGIN-time values by the minted commit — the
+// lost-update hazard — and a Dolt revision could land even when the SQL
+// transaction then failed to commit (phantom audit evidence).
 func (s *DoltStore) runInIssueLifecycleTransaction(
 	ctx context.Context,
 	commitMsg string,
@@ -151,27 +159,32 @@ func (s *DoltStore) runInIssueLifecycleTransaction(
 	return s.withTransactionSetupRetry(ctx, func() error {
 		invoked := false
 		var callbackErr error
+		var tables []string
 		err := run(ctx, func(sqlTx *sql.Tx) error {
 			invoked = true
 			tx := &doltTransaction{regularTx: sqlTx, ignoredTx: sqlTx, store: s}
 			if callbackErr = fn(tx); callbackErr != nil {
 				return callbackErr
 			}
-			tables := tx.dirtyTableNames()
-			if len(tables) == 0 {
-				return nil
-			}
-			return s.doltAddAndCommitInTx(ctx, sqlTx, tables, commitMsg)
+			// Plain assignment: a replayed attempt re-runs the body and
+			// re-derives the publication intent.
+			tables = tx.dirtyTableNames()
+			return nil
 		})
 		if invoked && err != nil {
 			// An ambiguous commit reaches withRetry so connection failures still
-			// count toward the circuit breaker, but it is never replayed.
+			// count toward the circuit breaker, but it is never replayed — and
+			// nothing publishes off it (publishCommittedOperation's contract).
 			if callbackErr == nil && errors.Is(err, ErrCommitIndeterminate) {
 				return err
 			}
 			return backoff.Permanent(err)
 		}
-		return err
+		if err != nil {
+			return err
+		}
+		s.publishCommittedTables(ctx, tables, commitMsg)
+		return nil
 	})
 }
 

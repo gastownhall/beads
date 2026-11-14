@@ -312,9 +312,9 @@ func assertPostTxPublication(t *testing.T, events []string, wantTables []string,
 }
 
 // TestReopenIssueDoltCommitRunsAfterTxCommit extends the post-tx ordering
-// contract (TestIssueOperationDoltCommitRunsAfterTxCommit) to a legacy write
-// path that still stages via doltAddAndCommitInTx (GH#5752): ReopenIssue must
-// run DOLT_ADD/DOLT_COMMIT strictly after the driver-level tx COMMIT.
+// contract (TestIssueOperationDoltCommitRunsAfterTxCommit) to the reopen
+// write path (GH#5752): ReopenIssue must run DOLT_ADD/DOLT_COMMIT strictly
+// after the driver-level tx COMMIT, through the shared post-tx publisher.
 func TestReopenIssueDoltCommitRunsAfterTxCommit(t *testing.T) {
 	rec := &seqRecorder{}
 	connector := &seqConnector{rec: rec}

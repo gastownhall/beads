@@ -114,3 +114,19 @@ func (s *DoltStore) publishCommittedOperation(ctx context.Context, tables storag
 		log.Printf("dolt: post-tx dolt commit failed for %q (data already committed; change rides the next dolt commit): %v", commitMsg, err)
 	}
 }
+
+// publishCommittedTables is publishCommittedOperation for a site whose table
+// set is a derived list rather than a ChangedTables map — the lifecycle
+// runner's dirtyTableNames and the deletes' fixed cascade lists. Same
+// contract: only after the SQL transaction committed, never inside one, never
+// after an ambiguous commit.
+func (s *DoltStore) publishCommittedTables(ctx context.Context, tables []string, commitMsg string) {
+	if len(tables) == 0 {
+		return
+	}
+	changed := make(storageissueops.ChangedTables, len(tables))
+	for _, table := range tables {
+		changed[table] = true
+	}
+	s.publishCommittedOperation(ctx, changed, commitMsg)
+}
