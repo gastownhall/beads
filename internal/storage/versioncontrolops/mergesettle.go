@@ -277,6 +277,15 @@ func MergeWithStrategy(ctx context.Context, db DBConn, ref, author, strategy str
 		return nil, err
 	}
 
+	// Settle only a merge this call starts (bd-sesknw). Over an open merge
+	// DOLT_MERGE fails with Dolt's "you have not committed an active merge",
+	// and every step after it — the strategy resolve, the FK repair, the
+	// conclusion — would act on that other merge and report ref merged. This
+	// refusal returns before anything runs, so it has nothing to abort.
+	if err := refuseOpenMerge(ctx, db, ref); err != nil {
+		return nil, err
+	}
+
 	// Capture pre-merge cleanliness before anything runs: abortMerge's
 	// hard-reset fallback is only safe when nothing uncommitted predates the
 	// merge (bd-578h9.2), same as MergeAndSettle.
@@ -308,38 +317,9 @@ func MergeWithStrategy(ctx context.Context, db DBConn, ref, author, strategy str
 	}
 
 	if len(conflicts) == 0 {
-		// bd-sesknw: a merge with no row conflict can still stop on FK
-		// cascade violations (a local issue deletion against a peer's new
-		// child row, bd-6dnrw.4): the force flag above parks it in the
-		// working set, unconcluded. Repair or refuse it exactly as SettleMerge
-		// does, before any unrelated merge error is surfaced as-is.
-		repaired, had, violErr := TryRepairFKCascadeViolations(ctx, db)
-		switch {
-		case violErr != nil:
-			abortMerge(ctx, db, preMergeClean)
-			if mergeErr != nil {
-				return nil, fmt.Errorf("merge branch %s: %w", ref, mergeErr)
-			}
-			return nil, violErr
-		case had && !repaired:
-			abortMerge(ctx, db, preMergeClean)
-			if mergeErr != nil {
-				return nil, fmt.Errorf("merge branch %s: %w", ref, mergeErr)
-			}
-			return nil, fmt.Errorf("merge of %s left constraint violations bd cannot auto-repair; inspect dolt_constraint_violations and resolve before retrying", ref)
-		case repaired:
-			if err := concludeMerge(ctx, db,
-				"auto-repair merge FK cascade violations: deleted rows referencing issues deleted on the other side", author); err != nil {
-				abortMerge(ctx, db, preMergeClean)
-				return nil, fmt.Errorf("FK cascade violations repaired but commit failed: %w", err)
-			}
-		case mergeErr != nil:
-			// Not a conflict: some other merge failure (unknown branch, dirty
-			// working set, ...). Nothing to resolve — surface it as-is.
-			abortMerge(ctx, db, preMergeClean)
-			return nil, fmt.Errorf("merge branch %s: %w", ref, mergeErr)
-		}
-		return nil, nil
+		// No row conflict, but the merge can still have stopped on FK
+		// cascade violations: settle those before reporting anything.
+		return nil, settleConflictFreeStrategyMerge(ctx, db, ref, author, mergeErr, preMergeClean)
 	}
 
 	dirtyTables := make(map[string]bool, len(conflicts))
@@ -391,6 +371,31 @@ func MergeWithStrategy(ctx context.Context, db DBConn, ref, author, strategy str
 	}
 
 	return conflicts, nil
+}
+
+// refuseOpenMerge returns an error naming the merge already open in db's
+// working set, and nil when none is (or the Dolt version has no
+// dolt_merge_status to say). It never touches that merge: it may be another
+// session's merge in progress, or one an older bd left open, and concluding
+// or aborting it is the operator's call. A failed status read is returned as
+// well, since a merge that cannot rule out an open one must not start.
+func refuseOpenMerge(ctx context.Context, db DBConn, ref string) error {
+	var merging bool
+	var source sql.NullString
+	err := db.QueryRowContext(ctx, "SELECT is_merging, source FROM dolt_merge_status").Scan(&merging, &source)
+	switch {
+	case errors.Is(err, sql.ErrNoRows) || isMissingSystemTable(err):
+		return nil
+	case err != nil:
+		return fmt.Errorf("merge branch %s: check for an open merge: %w", ref, err)
+	case !merging:
+		return nil
+	}
+	open := "another merge"
+	if source.String != "" {
+		open = "a merge of " + source.String
+	}
+	return fmt.Errorf("merge branch %s: %s is already open; conclude or abort it first (bd conflicts list shows what blocks it)", ref, open)
 }
 
 // abortMerge restores the pre-merge state after a settle pass refused the
@@ -1095,6 +1100,49 @@ func TryRepairFKCascadeViolations(ctx context.Context, db DBConn) (repaired, had
 		return false, true, nil
 	}
 	return true, true, nil
+}
+
+// settleConflictFreeStrategyMerge settles a MergeWithStrategy merge that
+// produced no row conflict (bd-sesknw). Such a merge can still stop on FK
+// cascade violations, for example a local issue deletion against the other
+// side's new child row (bd-6dnrw.4). The force flag MergeWithStrategy sets
+// parks that merge in the working set, unconcluded, while `bd vc merge
+// --strategy` reported success. It is repaired and concluded with the
+// caller's author, or refused and aborted, the way SettleMerge and
+// CommitSettledMerge settle it.
+//
+// mergeErr is the DOLT_MERGE statement's error, with "up to date" already
+// cleared. It is checked first, and no repair supersedes it: under the force
+// flag this call's own violation-only merge does not error, so violations
+// behind a failed merge statement belong to a merge this call did not start —
+// one another session opened after refuseOpenMerge looked — and repairing
+// and concluding that merge would report ref merged.
+func settleConflictFreeStrategyMerge(ctx context.Context, db DBConn, ref, author string, mergeErr error, preMergeClean bool) error {
+	if mergeErr != nil {
+		// Not a conflict: some other merge failure (unknown branch, dirty
+		// working set, ...). Nothing to resolve — surface it as-is.
+		abortMerge(ctx, db, preMergeClean)
+		return fmt.Errorf("merge branch %s: %w", ref, mergeErr)
+	}
+	repaired, had, violErr := TryRepairFKCascadeViolations(ctx, db)
+	switch {
+	case violErr != nil:
+		abortMerge(ctx, db, preMergeClean)
+		return violErr
+	case had && !repaired:
+		abortMerge(ctx, db, preMergeClean)
+		return fmt.Errorf("merge of %s left constraint violations bd cannot auto-repair; inspect dolt_constraint_violations and resolve before retrying", ref)
+	case repaired:
+		// Name the merged ref, as the conflicted path's "Resolve merge
+		// conflicts from <ref> ..." does: nothing else in the log says what
+		// this merge commit merged.
+		msg := fmt.Sprintf("Merge %s: auto-repair FK cascade violations (deleted rows referencing issues deleted on the other side)", ref)
+		if err := concludeMerge(ctx, db, msg, author); err != nil {
+			abortMerge(ctx, db, preMergeClean)
+			return fmt.Errorf("FK cascade violations repaired but commit failed: %w", err)
+		}
+	}
+	return nil
 }
 
 // constraintViolationTables lists the tables with outstanding constraint
