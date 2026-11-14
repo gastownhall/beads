@@ -27,6 +27,20 @@ import (
 // generation. The limit applies to template children, not to expansion rules.
 const DefaultMaxExpansionDepth = 5
 
+// refuseOnCompleteIn reports whether f declares on_complete anywhere bd
+// would silently drop it (GH#3782). Expansion formulas load through
+// LoadByName without Validate, so the composition sites call this check
+// directly instead of running the full validation.
+func refuseOnCompleteIn(f *Formula) error {
+	var errs []string
+	refuseOnComplete(f.Steps, "steps", &errs)
+	refuseOnComplete(f.Template, "template", &errs)
+	if len(errs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%w:\n  - %s", ErrValidation, strings.Join(errs, "\n  - "))
+}
+
 // ApplyExpansions applies all expand and map rules to a formula's steps.
 // Returns a new steps slice with expansions applied.
 // The original steps slice is not modified.
@@ -64,6 +78,9 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 		expFormula, err := parser.LoadByName(rule.With)
 		if err != nil {
 			return nil, fmt.Errorf("expand: loading %q: %w", rule.With, err)
+		}
+		if err := refuseOnCompleteIn(expFormula); err != nil {
+			return nil, fmt.Errorf("expand: formula %q: %w", rule.With, err)
 		}
 
 		if expFormula.Type != TypeExpansion {
@@ -109,6 +126,9 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 		expFormula, err := parser.LoadByName(rule.With)
 		if err != nil {
 			return nil, fmt.Errorf("map: loading %q: %w", rule.With, err)
+		}
+		if err := refuseOnCompleteIn(expFormula); err != nil {
+			return nil, fmt.Errorf("map: formula %q: %w", rule.With, err)
 		}
 
 		if expFormula.Type != TypeExpansion {
@@ -544,6 +564,9 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int) ([
 			expFormula, err := parser.LoadByName(step.Expand)
 			if err != nil {
 				return nil, fmt.Errorf("inline expand on step %q: loading %q: %w", step.ID, step.Expand, err)
+			}
+			if err := refuseOnCompleteIn(expFormula); err != nil {
+				return nil, fmt.Errorf("inline expand on step %q: formula %q: %w", step.ID, step.Expand, err)
 			}
 
 			if expFormula.Type != TypeExpansion {

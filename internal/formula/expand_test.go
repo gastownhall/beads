@@ -1,6 +1,7 @@
 package formula
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -369,6 +370,79 @@ func TestApplyExpansions(t *testing.T) {
 		if err == nil {
 			t.Error("expected error for missing target step")
 		}
+	})
+}
+
+// TestApplyExpansions_TemplateOnCompleteRefused: expansion formulas load
+// through LoadByName without Validate, so a template step's on_complete
+// used to pass silently and be dropped by expandStepWith. All three
+// expansion sites must refuse it with an error naming the formula
+// (GH#3782).
+func TestApplyExpansions_TemplateOnCompleteRefused(t *testing.T) {
+	tmpDir := t.TempDir()
+	expander := `{
+  "formula": "on-complete-expander",
+  "type": "expansion",
+  "version": 1,
+  "template": [
+    {
+      "id": "{target}.unit",
+      "title": "Unit: {target.title}",
+      "on_complete": {"for_each": "output.items", "bond": "mol-item"}
+    }
+  ]
+}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "on-complete-expander.formula.json"), []byte(expander), 0644); err != nil {
+		t.Fatal(err)
+	}
+	parser := NewParser(tmpDir)
+
+	assertRefused := func(t *testing.T, result []*Step, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("expansion succeeded and returned %d steps although the template sets on_complete", len(result))
+		}
+		if !errors.Is(err, ErrValidation) {
+			t.Errorf("errors.Is(err, ErrValidation) = false for %v", err)
+		}
+		for _, want := range []string{"on-complete-expander", "on_complete is not supported"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not mention %q", err, want)
+			}
+		}
+	}
+
+	t.Run("compose expand", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "design", Title: "Design"},
+			{ID: "implement", Title: "Implement"},
+			{ID: "test", Title: "Test"},
+		}
+		compose := &ComposeRules{
+			Expand: []*ExpandRule{{Target: "implement", With: "on-complete-expander"}},
+		}
+		result, err := ApplyExpansions(steps, compose, parser)
+		assertRefused(t, result, err)
+	})
+
+	t.Run("compose map", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "design", Title: "Design"},
+			{ID: "impl.auth", Title: "Implement auth"},
+		}
+		compose := &ComposeRules{
+			Map: []*MapRule{{Select: "impl.*", With: "on-complete-expander"}},
+		}
+		result, err := ApplyExpansions(steps, compose, parser)
+		assertRefused(t, result, err)
+	})
+
+	t.Run("inline expand", func(t *testing.T) {
+		steps := []*Step{
+			{ID: "design", Title: "Design", Expand: "on-complete-expander"},
+		}
+		result, err := ApplyInlineExpansions(steps, parser)
+		assertRefused(t, result, err)
 	})
 }
 
