@@ -110,3 +110,48 @@ func TestMerge_NoStrategyStillErrorsWithEscapeHatchHint(t *testing.T) {
 		t.Errorf("error = %v, want it to mention the --strategy escape hatch", err)
 	}
 }
+
+// TestMergeWithStrategy_ResetsSessionFlags pins the release contract of
+// DoltStore.MergeWithStrategy's pinned connection (bd-sesknw / GH#5564): the
+// conflict-tolerance flags versioncontrolops.MergeWithStrategy sets
+// (@@dolt_allow_commit_conflicts, @@dolt_force_transaction_commit) are session
+// state, so the conn must reset them before it returns to the pool — on
+// success and on failure alike. The test store's pool holds exactly one
+// connection (MaxOpenConns 1, and the default idle count keeps it), so the
+// next borrow through store.db sees whatever the merge session left behind.
+func TestMergeWithStrategy_ResetsSessionFlags(t *testing.T) {
+	const issueID = "mgs-svr-flags"
+	store, peerBranch := setupIssueMergeConflict(t, issueID,
+		"seed", "2026-07-10 10:00:00",
+		"ours", "2026-07-10 11:00:00", "theirs", "2026-07-10 11:00:00", true)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	readFlags := func() (allow, force bool) {
+		t.Helper()
+		var a, f int
+		if err := store.db.QueryRowContext(ctx,
+			"SELECT @@dolt_allow_commit_conflicts, @@dolt_force_transaction_commit").Scan(&a, &f); err != nil {
+			t.Fatalf("read session flags: %v", err)
+		}
+		return a == 1, f == 1
+	}
+
+	// A successful strategy merge must not leave the flags armed.
+	if _, err := store.MergeWithStrategy(ctx, peerBranch, "theirs"); err != nil {
+		t.Fatalf("MergeWithStrategy(theirs): %v", err)
+	}
+	if allow, force := readFlags(); allow || force {
+		t.Errorf("after a successful merge, flags = (allow_commit_conflicts=%v, force_transaction_commit=%v); the pinned conn leaked them into the pool", allow, force)
+	}
+
+	// Neither may a failed one: the flags were set before the merge statement
+	// ran, so the release path must run on error returns too.
+	if _, err := store.MergeWithStrategy(ctx, "no-such-peer-branch", "theirs"); err == nil {
+		t.Fatal("merging a nonexistent branch should error")
+	}
+	if allow, force := readFlags(); allow || force {
+		t.Errorf("after a failed merge, flags = (allow_commit_conflicts=%v, force_transaction_commit=%v); the pinned conn leaked them into the pool", allow, force)
+	}
+}

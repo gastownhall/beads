@@ -6578,6 +6578,25 @@ func (s *DoltStore) Merge(ctx context.Context, branch string) (conflicts []stora
 	return conflicts, err
 }
 
+// releaseStrategyMergeConn resets the conflict-tolerance session flags
+// versioncontrolops.MergeWithStrategy sets on its pinned connection
+// (@@dolt_allow_commit_conflicts, @@dolt_force_transaction_commit) and
+// returns the conn to the pool. The flags are session state, so without the
+// reset the next unrelated borrower of the recycled conn could commit
+// conflicted or constraint-violating writes Dolt should have refused
+// (bd-sesknw, GH#5564). The reset runs whether the merge succeeded or
+// failed — the flags are armed before the merge statement executes — and a
+// failed reset poisons the conn (driver.ErrBadConn) so the pool discards it
+// instead of recycling a still-armed session. Same release discipline as
+// ResolveConflictRows.
+func releaseStrategyMergeConn(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx,
+		"SET @@dolt_allow_commit_conflicts = 0, @@dolt_force_transaction_commit = 0"); err != nil {
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+	}
+	return conn.Close()
+}
+
 // MergeWithStrategy implements storage.StrategicMerger for `bd vc merge
 // --strategy` (#4992). Merge (above) runs the bare CALL DOLT_MERGE on the
 // shared pool: that is enough to detect a conflict-shaped autocommit
@@ -6618,16 +6637,17 @@ func (s *DoltStore) MergeWithStrategy(ctx context.Context, branch, strategy stri
 	// configured with a single connection (setupTestStore's MaxOpenConns: 1
 	// mirrors constrained production configs), and recomputeBlockedAfterPull
 	// acquires its own connection — held past this point, conn would starve
-	// it of the only one available.
-	closeErr := conn.Close()
+	// it of the only one available. releaseStrategyMergeConn also RESETS the
+	// session flags the merge set, on the success and the error path alike.
+	releaseErr := releaseStrategyMergeConn(ctx, conn)
 	if len(conflicts) > 0 {
 		span.SetAttributes(attribute.Int("dolt.conflicts", len(conflicts)))
 	}
 	if err != nil {
 		return conflicts, err
 	}
-	if closeErr != nil {
-		return conflicts, fmt.Errorf("release merge connection: %w", closeErr)
+	if releaseErr != nil {
+		return conflicts, fmt.Errorf("release merge connection: %w", releaseErr)
 	}
 	if !s.readOnly {
 		if rerr := s.recomputeBlockedAfterPull(ctx, preHead); rerr != nil {
