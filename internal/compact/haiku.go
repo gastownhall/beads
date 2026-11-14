@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"strings"
 	"sync"
 	"text/template"
 	"time"
@@ -202,14 +203,8 @@ func (h *haikuClient) callWithRetry(ctx context.Context, prompt string) (string,
 				attribute.Int("bd.ai.attempts", attempt+1),
 			)
 
-			// Non-text blocks (e.g. thinking) can precede the answer, so the
-			// summary is the first text block, not the first block.
-			for _, block := range message.Content {
-				if block.Type == "text" {
-					return block.Text, nil
-				}
-			}
-			return "", fmt.Errorf("unexpected response format: no text block in %d content blocks", len(message.Content))
+			// A reply that cannot be the summary is not retried.
+			return summaryFromReply(message)
 		}
 
 		lastErr = err
@@ -230,6 +225,34 @@ func (h *haikuClient) callWithRetry(ctx context.Context, prompt string) (string,
 		span.SetStatus(codes.Error, lastErr.Error())
 	}
 	return "", fmt.Errorf("failed after %d retries: %w", h.maxRetries+1, lastErr)
+}
+
+// summaryFromReply returns the summary in a successful reply: its first text
+// block, since non-text blocks (e.g. thinking) can precede the answer.
+// Compaction writes the summary over the issue, so a reply the model did not
+// finish (cut off at max_tokens or the context window, or a refusal) and an
+// empty first text block are errors rather than a partial or empty summary.
+// Other stop reasons are accepted, so compatible providers keep working.
+func summaryFromReply(message *anthropic.Message) (string, error) {
+	blockTypes := make([]string, 0, len(message.Content))
+	text, found := "", false
+	for _, block := range message.Content {
+		blockTypes = append(blockTypes, block.Type)
+		if block.Type == "text" && !found {
+			text, found = block.Text, true
+		}
+	}
+	switch {
+	case message.StopReason == anthropic.StopReasonMaxTokens,
+		message.StopReason == anthropic.StopReasonModelContextWindowExceeded,
+		message.StopReason == anthropic.StopReasonRefusal:
+		return "", fmt.Errorf("incomplete response: stop_reason %s (types: %v)", message.StopReason, blockTypes)
+	case !found:
+		return "", fmt.Errorf("unexpected response format: no text block in %d content blocks (types: %v; stop_reason: %s)", len(message.Content), blockTypes, message.StopReason)
+	case strings.TrimSpace(text) == "":
+		return "", fmt.Errorf("unexpected response format: empty text block (types: %v; stop_reason: %s)", blockTypes, message.StopReason)
+	}
+	return text, nil
 }
 
 func isRetryable(err error) bool {
