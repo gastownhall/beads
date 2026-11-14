@@ -1092,3 +1092,22 @@ func TestFindBeadsDir_WorktreeStoreWithMetadataPreservesLocal(t *testing.T) {
 		})
 	}
 }
+
+// TestFindBeadsDir_ExplicitBeadsDirKeepsMetadatalessWorktreeStore guards
+// explicit selection: BEADS_DIR naming the metadata-less local .beads keeps
+// it, without the yield warning.
+func TestFindBeadsDir_ExplicitBeadsDirKeepsMetadatalessWorktreeStore(t *testing.T) {
+	f := newMetadatalessStoreFixture(t, mainEmbeddedMetadata, "myproject")
+	chdirForDiscovery(t, f.worktree)
+	t.Setenv("BEADS_DIR", f.worktreeBeads)
+	var dir, dbPath string
+	stderr := captureStderr(t, func() {
+		dir = FindBeadsDir()
+		dbPath = FindDatabasePath()
+	})
+	assertSamePath(t, "FindBeadsDir()", dir, f.worktreeBeads)
+	assertSamePath(t, "FindDatabasePath()", dbPath, filepath.Join(f.worktreeBeads, "embeddeddolt"))
+	if strings.Contains(stderr, "no metadata.json or config.json") {
+		t.Errorf("unexpected missing-metadata warning under explicit BEADS_DIR:\n%s", stderr)
+	}
+}
