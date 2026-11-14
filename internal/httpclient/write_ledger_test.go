@@ -313,12 +313,13 @@ func writeShapes() []writeShape {
 				"ExternalRef":        member("external_ref"),
 				"DueAt":              member("due_at"),
 				"DeferUntil":         member("defer_until"),
-				// THE ORDERED EDIT, whole: one field driving three members, which
-				// is what `spread` is for. `labels` replaces, `add_labels` adds
-				// and `remove_labels` removes, applied in that order so removal
-				// wins — the role's own algebra, and the same three the batchApply
-				// shape has carried since client wave ga-mijra.
-				"Labels": spread("labels", "add_labels", "remove_labels"),
+				// THE ORDERED EDIT, whole: one field driving four members, which
+				// is what `spread` is for. `labels` replaces, `add_labels` adds,
+				// `remove_labels` removes and `remove_label_prefixes` drops every
+				// label matching a prefix, applied in that order so removal wins
+				// — the role's own algebra, and the same four the batchApply
+				// shape carries (prefixes landed with GH#5657's dimension swap).
+				"Labels": spread("labels", "add_labels", "remove_labels", "remove_label_prefixes"),
 				// The patch half of upstream #5484, carried by client wave
 				// ga-7i6by. They left the pending set below with their W- rows.
 				"Status":   member("status"),
@@ -618,16 +619,20 @@ func writeShapes() []writeShape {
 		},
 		{
 			// The label edit, a shape of its own for the reason the metadata
-			// patch is one: `labels` is ONE member up there, and the three arms
-			// under it are three fields of a role type that can grow. It is
-			// total in both directions.
+			// patch is one: `labels` is ONE member up there, and the four arms
+			// under it are four fields of a role type that can grow. It is
+			// total in both directions. The prefix arm is the GH#5657
+			// dimension swap — `remove_prefixes` drops every label matching a
+			// literal prefix, spelled nested here where updateIssue spells it
+			// as the flat `remove_label_prefixes` sibling.
 			name:   "applyBatch/update/patch/labels",
 			source: reflect.TypeOf(issueops.LabelPatch{}),
 			body:   reflect.TypeOf(apigen.ApplyLabelPatch{}),
 			carried: map[string]carriage{
-				"Replace": member("replace"),
-				"Add":     member("add"),
-				"Remove":  member("remove"),
+				"Replace":        member("replace"),
+				"Add":            member("add"),
+				"Remove":         member("remove"),
+				"RemovePrefixes": member("remove_prefixes"),
 			},
 		},
 		{
@@ -1025,7 +1030,7 @@ func setPatchField(t *testing.T, v reflect.Value) {
 	}
 	switch v.Type() {
 	case reflect.TypeOf(issueops.LabelPatch{}):
-		// ALL THREE ARMS, because all three are carried now: the document gate
+		// ALL FOUR ARMS, because all four are carried now: the document gate
 		// compares the encoded members against the table's spread, so driving
 		// only the replace would let a dropped add_labels pass.
 		replace := v.FieldByName("Replace")
@@ -1033,6 +1038,7 @@ func setPatchField(t *testing.T, v reflect.Value) {
 		replace.FieldByName("Value").Set(reflect.ValueOf([]string{"gate-sentinel"}))
 		v.FieldByName("Add").Set(reflect.ValueOf([]string{"gate-added"}))
 		v.FieldByName("Remove").Set(reflect.ValueOf([]string{"gate-removed"}))
+		v.FieldByName("RemovePrefixes").Set(reflect.ValueOf([]string{"gate-prefix:"}))
 		return
 	case reflect.TypeOf(issueops.MetadataPatch{}):
 		// The CLEAR, for the reason the comment below gives about a zero

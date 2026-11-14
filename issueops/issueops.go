@@ -59,8 +59,8 @@ type Field[T any] struct {
 }
 
 // LabelPatch describes ordered label replacement and incremental edits.
-// Operations apply Replace, then Add, then Remove, so removal wins when the
-// same label appears in more than one edit.
+// Operations apply Replace, then RemovePrefixes, then Add, then Remove, so
+// removal wins when the same label appears in more than one edit.
 //
 // The VALUES an edit carries answer to the same field rules a create's labels
 // do: a label longer than the column is refused with ErrFieldTooLong and the
@@ -83,6 +83,19 @@ type LabelPatch struct {
 	Remove []string
 	// Replace supplies the starting complete label set when Set is true.
 	Replace Field[[]string]
+	// RemovePrefixes drops every label starting with any one of these
+	// prefixes, between replacement and addition: Replace, then
+	// RemovePrefixes, then Add, then Remove, so an explicit Remove still wins
+	// and an Add still lands. This is the dimension-swap edit — "whatever
+	// state: holds now, make it state:c" — which otherwise forces the caller
+	// to READ the set first and compose a replacement against a snapshot a
+	// concurrent writer can invalidate (GH#5657). A prefix follows the same
+	// field rule a label does: an over-length prefix is refused with
+	// ErrFieldTooLong and the whole update writes nothing, while an
+	// empty-string prefix is dropped — it matches nothing and refuses
+	// nothing. Prefix matching is literal: a prefix containing % or _
+	// matches those characters, never a wildcard.
+	RemovePrefixes []string
 }
 
 // MetadataPatch describes metadata replacement or ordered incremental edits.

@@ -45,7 +45,7 @@ var (
 	issuePatchMembers = []string{
 		"title", "description", "design", "acceptance_criteria",
 		"notes", "append_notes", "priority", "issue_type", "status",
-		"assignee", "parent_id", "labels", "add_labels", "remove_labels", "metadata",
+		"assignee", "parent_id", "labels", "add_labels", "remove_labels", "remove_label_prefixes", "metadata",
 		"estimated_minutes", "external_ref", "due_at", "defer_until", "persistence",
 		"await_id", "waiters",
 	}
@@ -452,8 +452,9 @@ func (s *Server) issuePatch(w http.ResponseWriter, r *http.Request, id string, m
 		patch.Metadata = metadata
 	}
 	// THE THREE LABEL MEMBERS ARE ONE PATCH, assembled together because the role
-	// models them as one: LabelPatch applies Replace, then Add, then Remove, so
-	// removal wins where a label appears in more than one of them. They are NOT
+	// models them as one: LabelPatch applies Replace, then RemovePrefixes,
+	// then Add, then Remove, so removal wins where a label appears in more
+	// than one of them. They are NOT
 	// mutually exclusive, which is the difference from `notes`/`append_notes`
 	// above — that pair is a contradiction the role refuses, and this trio has a
 	// defined order.
@@ -474,6 +475,10 @@ func (s *Server) issuePatch(w http.ResponseWriter, r *http.Request, id string, m
 		}},
 		{"add_labels", wire.AddLabels, func(v []string) { labelEdit.Add = v }},
 		{"remove_labels", wire.RemoveLabels, func(v []string) { labelEdit.Remove = v }},
+		// The fourth edit, spelled flat like its siblings: drop every label
+		// matching a prefix, between replacement and addition. The role applies
+		// it in that slot of the same one-patch order above.
+		{"remove_label_prefixes", wire.RemoveLabelPrefixes, func(v []string) { labelEdit.RemovePrefixes = v }},
 	} {
 		if !set(member.name) {
 			continue

@@ -592,6 +592,49 @@ func RunLifecycleUpdateReplacesTheLabelSet(t *testing.T, ctx context.Context, fi
 	assertLifecycleUpdateLabels(t, "stored row after the clear", lifecycleUpdateRow(t, ctx, fixture, id))
 }
 
+// RunLifecycleUpdateRemovesLabelsByPrefix is GH#5657's label algebra at the
+// role seam: RemovePrefixes=[state:] beside Add=[state:c] must collapse every
+// state the row carries onto exactly the one requested, preserving every
+// label the prefix does not match — the dimension swap that previously forced
+// the CALLER to read the set first and compose a replacement against a
+// snapshot a concurrent writer could invalidate.
+//
+// The stored row is asserted alongside the result because the result's labels
+// are what a front door renders, and the row is what the next writer reads:
+// both must show the swap, never the union of the old dimension and the new.
+func RunLifecycleUpdateRemovesLabelsByPrefix(t *testing.T, ctx context.Context, fixture LifecycleUpdateFixture) {
+	t.Helper()
+
+	id := fixture.IssuePrefix + "-lup-label-prefix"
+	seedLifecycleUpdateIssue(t, ctx, fixture, lifecycleUpdateIssue(id, "state:a", "state:b", "stateful", "area:x"))
+
+	patched, err := fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: id, Patch: publicops.IssuePatch{
+		Labels: publicops.LabelPatch{RemovePrefixes: []string{"state:"}, Add: []string{"state:c"}},
+	}})
+	if err != nil {
+		t.Fatalf("prefix-edit the labels of %s: %v", id, err)
+	}
+	if !patched.Changed {
+		t.Errorf("prefix-editing the labels of %s reported Changed = false, want a committed edit", id)
+	}
+	assertLifecycleUpdateLabels(t, "prefix edit result", patched.Issue, "area:x", "state:c", "stateful")
+	assertLifecycleUpdateLabels(t, "stored row after the prefix edit", lifecycleUpdateRow(t, ctx, fixture, id), "area:x", "state:c", "stateful")
+
+	// The identical replay is a no-op: the resolved set already equals the
+	// target, so nothing is written and no label event lands.
+	row := lifecycleUpdateRow(t, ctx, fixture, id)
+	replayed, err := fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: id, Patch: publicops.IssuePatch{
+		Labels: publicops.LabelPatch{RemovePrefixes: []string{"state:"}, Add: []string{"state:c"}},
+	}})
+	if err != nil {
+		t.Fatalf("replay the prefix edit of %s: %v", id, err)
+	}
+	if replayed.Changed {
+		t.Errorf("replaying %s's resolved prefix edit reported Changed = true, want a no-op", id)
+	}
+	assertLifecycleUpdateRowUnchanged(t, ctx, fixture, id, "after the replayed prefix edit", row)
+}
+
 // RunLifecycleUpdateResolvesBothPlanesUnlessRestricted pins what an id resolves
 // against: "The zero value keeps the both-plane auto-resolve every caller gets
 // today", while a set IssuePlaneOnly makes "an ID that names a wisp ErrNotFound

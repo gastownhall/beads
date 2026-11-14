@@ -1036,6 +1036,13 @@ func encodeIssuePatch(patch issueops.IssuePatch) (map[string]any, error) {
 	if len(patch.Labels.Remove) > 0 {
 		out["remove_labels"] = append([]string(nil), patch.Labels.Remove...)
 	}
+	// The fourth edit, emitted only when non-empty for the same reason as its
+	// two incremental siblings: the role drops an empty prefix list the same
+	// way, and an empty member on the wire would say nothing while turning a
+	// no-op patch into one the server has to decode.
+	if len(patch.Labels.RemovePrefixes) > 0 {
+		out["remove_label_prefixes"] = append([]string(nil), patch.Labels.RemovePrefixes...)
+	}
 	return out, nil
 }
 

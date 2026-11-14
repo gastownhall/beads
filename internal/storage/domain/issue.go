@@ -361,7 +361,16 @@ type UpdateSpec struct {
 	AddLabels       []string
 	RemoveLabels    []string
 	SetLabels       *[]string
-	Reparent        *string
+	// RemoveLabelPrefixes drops every label starting with any prefix, between
+	// SetLabels and AddLabels — the role's LabelPatch.RemovePrefixes algebra,
+	// resolved IN this unit of work's transaction against the live set so the
+	// swap is one serialized write rather than a read-modify-write a
+	// concurrent writer can race (GH#5657). Over-length prefixes are refused
+	// before any write, the same ErrFieldTooLong an over-length Add gets;
+	// empty prefixes are dropped. A prefix-bearing spec resolves to ONE
+	// SetLabels call carrying the computed target.
+	RemoveLabelPrefixes []string
+	Reparent            *string
 
 	// ExpectedAssignee and ExpectedStatus are the bd-wsqvw compare-and-set
 	// guards (`bd update --if-assignee/--if-status`): when non-nil, the whole
@@ -869,36 +878,105 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 		}
 	}
 
-	if spec.SetLabels != nil {
-		if useWisp {
-			if err := u.labelUC.SetWispLabels(ctx, id, *spec.SetLabels, actor); err != nil {
-				return nil, err
+	if len(spec.RemoveLabelPrefixes) > 0 {
+		// A prefix-bearing edit resolves the role's whole algebra — Replace,
+		// RemovePrefixes, Add, Remove — against the live set IN this unit of
+		// work's transaction and lands as ONE SetLabels, so the dimension
+		// swap is a single serialized write (the label rows it writes take
+		// the per-issue coordination cell) rather than a read-modify-write
+		// against a snapshot a concurrent writer can race (GH#5657).
+		for _, prefix := range spec.RemoveLabelPrefixes {
+			if prefix == "" {
+				continue
 			}
-		} else {
-			if err := u.labelUC.SetLabels(ctx, id, *spec.SetLabels, actor); err != nil {
-				return nil, err
-			}
-		}
-	}
-	if len(spec.AddLabels) > 0 {
-		if useWisp {
-			if err := u.labelUC.AddWispLabels(ctx, id, spec.AddLabels, actor); err != nil {
-				return nil, err
-			}
-		} else {
-			if err := u.labelUC.AddLabels(ctx, id, spec.AddLabels, actor); err != nil {
+			if err := types.CheckFieldLen("label", prefix); err != nil {
 				return nil, err
 			}
 		}
-	}
-	if len(spec.RemoveLabels) > 0 {
+		var base []string
+		if spec.SetLabels != nil {
+			base = *spec.SetLabels
+		} else {
+			var err error
+			if useWisp {
+				base, err = u.labelUC.GetWispLabels(ctx, id)
+			} else {
+				base, err = u.labelUC.GetLabels(ctx, id)
+			}
+			if err != nil {
+				return nil, fmt.Errorf("resolve label prefixes: list current: %w", err)
+			}
+		}
+		removed := make(map[string]bool, len(spec.RemoveLabels))
+		for _, label := range spec.RemoveLabels {
+			removed[label] = true
+		}
+		added := make(map[string]bool, len(spec.AddLabels))
+		for _, label := range spec.AddLabels {
+			if label != "" {
+				added[label] = true
+			}
+		}
+		target := make([]string, 0, len(base)+len(added))
+		for _, label := range base {
+			if added[label] || removed[label] {
+				continue
+			}
+			dropped := false
+			for _, prefix := range spec.RemoveLabelPrefixes {
+				if prefix != "" && strings.HasPrefix(label, prefix) {
+					dropped = true
+					break
+				}
+			}
+			if !dropped {
+				target = append(target, label)
+			}
+		}
+		for label := range added {
+			target = append(target, label)
+		}
 		if useWisp {
-			if err := u.labelUC.RemoveWispLabels(ctx, id, spec.RemoveLabels, actor); err != nil {
+			if err := u.labelUC.SetWispLabels(ctx, id, target, actor); err != nil {
 				return nil, err
 			}
 		} else {
-			if err := u.labelUC.RemoveLabels(ctx, id, spec.RemoveLabels, actor); err != nil {
+			if err := u.labelUC.SetLabels(ctx, id, target, actor); err != nil {
 				return nil, err
+			}
+		}
+	} else {
+		if spec.SetLabels != nil {
+			if useWisp {
+				if err := u.labelUC.SetWispLabels(ctx, id, *spec.SetLabels, actor); err != nil {
+					return nil, err
+				}
+			} else {
+				if err := u.labelUC.SetLabels(ctx, id, *spec.SetLabels, actor); err != nil {
+					return nil, err
+				}
+			}
+		}
+		if len(spec.AddLabels) > 0 {
+			if useWisp {
+				if err := u.labelUC.AddWispLabels(ctx, id, spec.AddLabels, actor); err != nil {
+					return nil, err
+				}
+			} else {
+				if err := u.labelUC.AddLabels(ctx, id, spec.AddLabels, actor); err != nil {
+					return nil, err
+				}
+			}
+		}
+		if len(spec.RemoveLabels) > 0 {
+			if useWisp {
+				if err := u.labelUC.RemoveWispLabels(ctx, id, spec.RemoveLabels, actor); err != nil {
+					return nil, err
+				}
+			} else {
+				if err := u.labelUC.RemoveLabels(ctx, id, spec.RemoveLabels, actor); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}

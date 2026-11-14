@@ -934,7 +934,8 @@ func TestTheEncodedApplyPatchDocumentUsesOnlyPublishedMembers(t *testing.T) {
 
 // TestTheApplyLabelPatchIsTheWholeEdit pins the one place this document is
 // WIDER than PATCH /v0/beads/issues/{id}'s: a plan edits a label set it did not
-// compose, so a REMOVAL has to be expressible without reading the set back.
+// compose, so a REMOVAL — by name or by prefix, the GH#5657 dimension swap —
+// has to be expressible without reading the set back.
 func TestTheApplyLabelPatchIsTheWholeEdit(t *testing.T) {
 	w := &stubWire{}
 	_, err := applyRole(t, w).ApplyBatch(t.Context(), issueops.ApplyBatchRequest{
@@ -944,9 +945,10 @@ func TestTheApplyLabelPatchIsTheWholeEdit(t *testing.T) {
 			Update: &issueops.UpdateItem{
 				Target: issueops.Ref{ID: "bd-1"},
 				Patch: issueops.IssuePatch{Labels: issueops.LabelPatch{
-					Replace: issueops.Field[[]string]{Set: true, Value: []string{"base"}},
-					Add:     []string{"added"},
-					Remove:  []string{"gone"},
+					Replace:        issueops.Field[[]string]{Set: true, Value: []string{"base"}},
+					Add:            []string{"added"},
+					Remove:         []string{"gone"},
+					RemovePrefixes: []string{"state:"},
 				}},
 			},
 		}},
@@ -960,6 +962,7 @@ func TestTheApplyLabelPatchIsTheWholeEdit(t *testing.T) {
 	}
 	for member, want := range map[string][]string{
 		"replace": {"base"}, "add": {"added"}, "remove": {"gone"},
+		"remove_prefixes": {"state:"},
 	} {
 		got, ok := labels[member].([]string)
 		if !ok || !slices.Equal(got, want) {

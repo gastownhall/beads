@@ -11783,8 +11783,9 @@ components:
       type: object
       additionalProperties: false
       description: >-
-        An ordered label edit: `replace` first, then `add`, then `remove`, so
-        REMOVAL WINS when the same label appears in more than one member.
+        An ordered label edit: `replace` first, then `remove_prefixes`, then
+        `add`, then `remove`, so REMOVAL WINS when the same label appears in
+        more than one member.
 
 
         It is the full patch rather than `IssuePatchBody.labels`' complete
@@ -11807,12 +11808,24 @@ components:
           description: >-
             The complete starting label set. An empty array CLEARS every label;
             omitting the member leaves the current set as the starting point.
+        remove_prefixes:
+          type: array
+          items:
+            type: string
+            maxLength: 255
+          description: >-
+            Label PREFIXES whose matches are all removed, between `replace`
+            and `add` — the dimension swap a plan writes when it retargets a
+            state, without reading the set back. Matching is literal: `%` and
+            `_` are characters, never wildcards. An empty-string prefix is
+            dropped, and a prefix longer than a whole label is refused with
+            the same length rule `add` carries.
         add:
           type: array
           items:
             type: string
             maxLength: 255
-          description: Labels to add after any replacement.
+          description: Labels to add after any replacement and prefix removal.
         remove:
           type: array
           items:
@@ -13361,10 +13374,10 @@ components:
 
             It is the REPLACE half of the same ordered edit `ApplyPatchBody`
             spells as `labels.replace`, and `add_labels`/`remove_labels` are the
-            other two. All three may travel together and are applied in that
-            order — replace, then add, then remove — so REMOVAL WINS when one
-            label appears in more than one of them. That is the role's own
-            algebra, not this operation's arrangement of it.
+            other two. All of them may travel together and are applied in that
+            order — replace, then prefix removal, then add, then remove — so
+            REMOVAL WINS when one label appears in more than one of them. That
+            is the role's own algebra, not this operation's arrangement of it.
 
 
             THE SHAPE DIFFERS FROM `ApplyPatchBody`'s, which nests the three
@@ -13422,6 +13435,27 @@ components:
             longer than the column is refused here as it is there — the length
             rule is about what a label may BE, not about whether this particular
             row happens to carry one.
+        remove_label_prefixes:
+          type: array
+          items:
+            type: string
+            maxLength: 255
+          description: >-
+            Label PREFIXES whose matches are all removed, applied AFTER
+            `labels` and BEFORE `add_labels` — the dimension swap: "whatever
+            `state:` holds now, make it `state:c`" is `["state:`]` here plus
+            the new value in `add_labels`, with no read of the current set
+            and no race against a concurrent writer (GH#5657).
+
+
+            The full order is replace, then prefixes, then add, then remove,
+            so an explicit `remove_labels` entry still wins and an added
+            label can re-land a name a prefix just dropped. Matching is
+            LITERAL: `%` and `_` are characters here, never wildcards. An
+            empty-string prefix is dropped — it matches nothing — and a
+            prefix longer than a whole label is refused with the same
+            `add_labels` length rule, for the same reason: it is about what
+            a label may BE.
         estimated_minutes:
           type: integer
           nullable: true

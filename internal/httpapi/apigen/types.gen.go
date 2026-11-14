@@ -696,17 +696,20 @@ type ApplyItemResult struct {
 // ApplyItemResultKind Echoes the item's kind, so a caller walking the results does not have to walk the request alongside them.
 type ApplyItemResultKind string
 
-// ApplyLabelPatch An ordered label edit: `replace` first, then `add`, then `remove`, so REMOVAL WINS when the same label appears in more than one member.
+// ApplyLabelPatch An ordered label edit: `replace` first, then `remove_prefixes`, then `add`, then `remove`, so REMOVAL WINS when the same label appears in more than one member.
 //
 // It is the full patch rather than `IssuePatchBody.labels`' complete replacement because a plan edits a set it did not compose: replacing would mean reading the labels back first, and the read this operation exists to avoid is exactly that one.
 //
 // Repetition is free in both directions — a label named twice in one member is applied once, and removing a label the issue does not carry is a no-op. An EMPTY-STRING entry is dropped rather than refused: a label row holding "" renders as nothing and matches nothing, so refusing the whole request for one stray entry would fail an otherwise-good edit.
 type ApplyLabelPatch struct {
-	// Add Labels to add after any replacement.
+	// Add Labels to add after any replacement and prefix removal.
 	Add *[]string `json:"add,omitempty"`
 
 	// Remove Labels to remove after replacement and addition.
 	Remove *[]string `json:"remove,omitempty"`
+
+	// RemovePrefixes Label PREFIXES whose matches are all removed, between `replace` and `add` — the dimension swap a plan writes when it retargets a state, without reading the set back. Matching is literal: `%` and `_` are characters, never wildcards. An empty-string prefix is dropped, and a prefix longer than a whole label is refused with the same length rule `add` carries.
+	RemovePrefixes *[]string `json:"remove_prefixes,omitempty"`
 
 	// Replace The complete starting label set. An empty array CLEARS every label; omitting the member leaves the current set as the starting point.
 	Replace *[]string `json:"replace,omitempty"`
@@ -771,7 +774,7 @@ type ApplyPatchBody struct {
 	// IssueType The issue type, from this workspace's own configured vocabulary. A type outside it is refused by the ROLE and reaches the client as a `400`.
 	IssueType *string `json:"issue_type,omitempty"`
 
-	// Labels An ordered label edit: `replace` first, then `add`, then `remove`, so REMOVAL WINS when the same label appears in more than one member.
+	// Labels An ordered label edit: `replace` first, then `remove_prefixes`, then `add`, then `remove`, so REMOVAL WINS when the same label appears in more than one member.
 	//
 	// It is the full patch rather than `IssuePatchBody.labels`' complete replacement because a plan edits a set it did not compose: replacing would mean reading the labels back first, and the read this operation exists to avoid is exactly that one.
 	//
@@ -1667,7 +1670,7 @@ type IssuePatchBody struct {
 
 	// Labels COMPLETE REPLACEMENT of the label set. An empty array clears every label.
 	//
-	// It is the REPLACE half of the same ordered edit `ApplyPatchBody` spells as `labels.replace`, and `add_labels`/`remove_labels` are the other two. All three may travel together and are applied in that order — replace, then add, then remove — so REMOVAL WINS when one label appears in more than one of them. That is the role's own algebra, not this operation's arrangement of it.
+	// It is the REPLACE half of the same ordered edit `ApplyPatchBody` spells as `labels.replace`, and `add_labels`/`remove_labels` are the other two. All of them may travel together and are applied in that order — replace, then prefix removal, then add, then remove — so REMOVAL WINS when one label appears in more than one of them. That is the role's own algebra, not this operation's arrangement of it.
 	//
 	// THE SHAPE DIFFERS FROM `ApplyPatchBody`'s, which nests the three under one `labels` object, and the difference is historical rather than meaningful. This member shipped as a bare array; nesting it now would RE-TYPE a published member, which is the one kind of change this document has no additive route for. Two flat siblings is the shape that could be added — and it is the shape `notes` and `append_notes` already use for the same replace/increment pair.
 	Labels *[]string `json:"labels,omitempty"`
@@ -1690,6 +1693,11 @@ type IssuePatchBody struct {
 	// A PLANE MOVE IS AN AGGREGATE MIGRATION, not a field write, and it is applied LAST, after every other member of the patch, so the edit and the move commit together or not at all. Advertised by the `issues.update.persistence` capability token; a server that predates the member refuses it as an unknown parameter, and a client that does not see the token refuses the move before the dial rather than sending it.
 	Persistence *string `json:"persistence,omitempty"`
 	Priority    *int    `json:"priority,omitempty"`
+
+	// RemoveLabelPrefixes Label PREFIXES whose matches are all removed, applied AFTER `labels` and BEFORE `add_labels` — the dimension swap: "whatever `state:` holds now, make it `state:c`" is `["state:`]` here plus the new value in `add_labels`, with no read of the current set and no race against a concurrent writer (GH#5657).
+	//
+	// The full order is replace, then prefixes, then add, then remove, so an explicit `remove_labels` entry still wins and an added label can re-land a name a prefix just dropped. Matching is LITERAL: `%` and `_` are characters here, never wildcards. An empty-string prefix is dropped — it matches nothing — and a prefix longer than a whole label is refused with the same `add_labels` length rule, for the same reason: it is about what a label may BE.
+	RemoveLabelPrefixes *[]string `json:"remove_label_prefixes,omitempty"`
 
 	// RemoveLabels Labels to remove, applied AFTER `labels` and `add_labels`, so REMOVAL WINS over both.
 	//

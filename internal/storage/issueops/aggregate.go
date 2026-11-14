@@ -394,8 +394,22 @@ func ApplyLabelPatch(ctx context.Context, tx DBTX, current *types.Issue, patch p
 // the patch mints its own version row; ExecuteUpdate passes false and mints
 // once for the whole guarded update after its last patch.
 func applyLabelPatch(ctx context.Context, tx DBTX, current *types.Issue, patch publicops.LabelPatch, actor string, mintVersion bool) (bool, error) {
-	if !patch.Replace.Set && len(patch.Add) == 0 && len(patch.Remove) == 0 {
+	if !patch.Replace.Set && len(patch.Add) == 0 && len(patch.Remove) == 0 && len(patch.RemovePrefixes) == 0 {
 		return false, nil
+	}
+	// A prefix is bounded by the same field rule a label is — refused BEFORE
+	// any write so the whole update rolls back, the rule the per-label
+	// helpers draw on Add. An over-length prefix could never match a stored
+	// label, but refusing it here is about what a label may BE, not about
+	// whether this row carries one. An empty-string prefix is dropped below:
+	// it matches nothing and refuses nothing.
+	for _, prefix := range patch.RemovePrefixes {
+		if prefix == "" {
+			continue
+		}
+		if err := types.CheckFieldLen("label", prefix); err != nil {
+			return false, err
+		}
 	}
 	existing := stringSet(current.Labels)
 	target := make(map[string]struct{}, len(existing)+len(patch.Add))
@@ -423,6 +437,21 @@ func applyLabelPatch(ctx context.Context, tx DBTX, current *types.Issue, patch p
 			continue
 		}
 		target[label] = struct{}{}
+	}
+	// RemovePrefixes, between replacement and addition: the dimension swap,
+	// "whatever state: holds now, make it state:c". Literal prefix matching —
+	// % and _ are characters here, not wildcards — and deletion-during-range
+	// is safe in Go. An Add below can re-land a label a prefix just dropped,
+	// which is exactly the ordering the role documents.
+	for _, prefix := range patch.RemovePrefixes {
+		if prefix == "" {
+			continue
+		}
+		for label := range target {
+			if strings.HasPrefix(label, prefix) {
+				delete(target, label)
+			}
+		}
 	}
 	for _, label := range patch.Add {
 		if label == "" {
