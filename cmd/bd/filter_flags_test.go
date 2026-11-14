@@ -331,6 +331,72 @@ func TestSweptFilterFlagsKeepSingleAndCommaForms(t *testing.T) {
 	}
 }
 
+// TestFilterFlagDefaultsSurviveReset covers the state filters that default
+// to "all": fresh and restored through the in-process test harness, GetString
+// and DefValue report the default, Changed is false, a single value is
+// accepted, and a repeat is refused rather than narrowed. A reset that
+// emptied the value instead of restoring "all" would turn the next
+// invocation's default from "all statuses" into "none".
+func TestFilterFlagDefaultsSurviveReset(t *testing.T) {
+	statePaths := []string{"bd jira sync", "bd linear sync", "bd notion sync"}
+	for _, path := range statePaths {
+		t.Run(path+" --state", func(t *testing.T) {
+			resetCommandFlags(rootCmd)
+			t.Cleanup(func() { resetCommandFlags(rootCmd) })
+
+			cmd, fl := lookupFilterFlag(t, path, "state")
+			if got := filterFlagValue(t, path, "state"); got != "all" {
+				t.Fatalf("fresh --state = %q, want default %q", got, "all")
+			}
+			if fl.DefValue != "all" {
+				t.Errorf("--state DefValue = %q, want %q", fl.DefValue, "all")
+			}
+			if cmd.Flags().Changed("state") {
+				t.Error("fresh --state reads as Changed")
+			}
+
+			if err := cmd.ParseFlags([]string{"--state", "open"}); err != nil {
+				t.Fatalf("ParseFlags(single --state): %v", err)
+			}
+			if got := filterFlagValue(t, path, "state"); got != "open" {
+				t.Fatalf("single --state = %q, want %q", got, "open")
+			}
+
+			// The harness restore puts the flag back to its registered
+			// default "all", not the empty string.
+			resetCommandFlags(rootCmd)
+			if got := filterFlagValue(t, path, "state"); got != "all" {
+				t.Fatalf("--state after harness reset = %q, want %q", got, "all")
+			}
+			if cmd.Flags().Changed("state") {
+				t.Error("--state still reads as Changed after harness reset")
+			}
+			if err := cmd.ParseFlags([]string{"--state", "closed"}); err != nil {
+				t.Fatalf("ParseFlags(--state closed) after reset: %v", err)
+			}
+			if got := filterFlagValue(t, path, "state"); got != "closed" {
+				t.Fatalf("--state after reset+parse = %q, want %q", got, "closed")
+			}
+
+			// A repeat is refused, naming the flag, and the explicit empty
+			// between two occurrences is a reset, not a refusal.
+			err := parseFilterFlags(t, path, []string{"--state", "open", "--state", "closed"})
+			if err == nil {
+				t.Fatal("repeated --state accepted; want a refusal")
+			}
+			if !strings.Contains(err.Error(), "state") || !strings.Contains(err.Error(), "more than once") {
+				t.Errorf("repeated --state error = %q, want it to name the flag and say it was given more than once", err)
+			}
+			if err := parseFilterFlags(t, path, []string{"--state", "open", "--state=", "--state", "closed"}); err != nil {
+				t.Fatalf("empty-reset --state chain: ParseFlags: %v", err)
+			}
+			if got := filterFlagValue(t, path, "state"); got != "closed" {
+				t.Errorf("empty-reset --state chain = %q, want %q", got, "closed")
+			}
+		})
+	}
+}
+
 // TestCountRepeatedFilterRefusedBeforeRun builds a fresh command carrying
 // bd count's flag set (registerCountFlags exists so a test can do exactly
 // this) with sentinel hooks: a repeated once filter must fail during flag
