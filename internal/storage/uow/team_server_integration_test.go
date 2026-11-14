@@ -48,11 +48,11 @@ func newTeamServerHarness(t *testing.T) *teamServerHarness {
 	}
 }
 
-func (h *teamServerHarness) openProvider(ctx context.Context, database string, teamServer bool, expectedProjectID string) (UnitOfWorkProvider, error) {
-	return h.openProviderAs(ctx, database, "root", "", teamServer, expectedProjectID)
+func (h *teamServerHarness) openProvider(ctx context.Context, database string, teamServer bool, expectedProjectID string, opts ...ProviderOption) (UnitOfWorkProvider, error) {
+	return h.openProviderAs(ctx, database, "root", "", teamServer, expectedProjectID, opts...)
 }
 
-func (h *teamServerHarness) openProviderAs(ctx context.Context, database, user, password string, teamServer bool, expectedProjectID string) (UnitOfWorkProvider, error) {
+func (h *teamServerHarness) openProviderAs(ctx context.Context, database, user, password string, teamServer bool, expectedProjectID string, opts ...ProviderOption) (UnitOfWorkProvider, error) {
 	return NewExternalDoltServerUOWProvider(
 		ctx,
 		h.storeRootDir,
@@ -65,6 +65,7 @@ func (h *teamServerHarness) openProviderAs(ctx context.Context, database, user, 
 		0,
 		teamServer,
 		expectedProjectID,
+		opts...,
 	)
 }
 
@@ -246,5 +247,135 @@ func TestTeamServerMode_Integration(t *testing.T) {
 
 		assert.Equal(t, rolledBack, snapshotMigrations(t, ctx, direct),
 			"refused team-server open must not migrate the database")
+	})
+}
+
+func readProjectID(t *testing.T, ctx context.Context, db *sql.DB) string {
+	t.Helper()
+	var id sql.NullString
+	err := db.QueryRowContext(ctx, "SELECT value FROM metadata WHERE `key` = '_project_id'").Scan(&id)
+	if err == sql.ErrNoRows {
+		return ""
+	}
+	require.NoError(t, err)
+	return id.String
+}
+
+// TestPlainProxiedServerMode_ForeignProjectIdentityRefused_Integration is the bd-rgvivq
+// (gastownhall/beads#5572) repro: a plain (non-team-server) proxied open that
+// carries the workspace's project identity — the CLI passes it only for a
+// --database/--db excursion — must not attach to a beads database that
+// belongs to a DIFFERENT project, and must refuse before migrating it.
+func TestPlainProxiedServerMode_ForeignProjectIdentityRefused_Integration(t *testing.T) {
+	h := newTeamServerHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	const database = "beads_other_project"
+	const owner = "project-owning-this-db"
+
+	// Another project's beads database on the same server.
+	provisioner, err := h.openProvider(ctx, database, false, "")
+	require.NoError(t, err)
+	require.NoError(t, provisioner.Close(ctx))
+
+	direct := h.directDB(t, database)
+	_, err = direct.ExecContext(ctx,
+		"REPLACE INTO metadata (`key`, value) VALUES (?, ?)", "_project_id", owner)
+	require.NoError(t, err)
+
+	provisioned := snapshotMigrations(t, ctx, direct)
+	require.Positive(t, provisioned.maxVersion)
+
+	for _, tc := range []struct {
+		name string
+		opts []ProviderOption
+	}{
+		{name: "ordinary"},
+		{name: "preview", opts: []ProviderOption{WithPreview()}},
+		{name: "read-only", opts: []ProviderOption{WithReadOnly()}},
+		{name: "working-set reconcile", opts: []ProviderOption{WithWorkingSetReconcile()}},
+	} {
+		t.Run(tc.name+" excursion refused before mutation", func(t *testing.T) {
+			p, err := h.openProvider(ctx, database, false, "project-somewhere-else", tc.opts...)
+			if p != nil {
+				_ = p.Close(ctx)
+			}
+			require.Error(t, err, "plain proxied open attached to a foreign project's beads database with no identity assertion")
+			assert.Nil(t, p)
+			for _, want := range []string{"PROJECT IDENTITY MISMATCH", "project-somewhere-else", owner, database} {
+				assert.Contains(t, err.Error(), want)
+			}
+			assert.Equal(t, provisioned, snapshotMigrations(t, ctx, direct),
+				"refused excursion must not migrate the foreign database")
+			assert.Equal(t, owner, readProjectID(t, ctx, direct),
+				"refused excursion must not touch the foreign identity")
+		})
+	}
+}
+
+// TestPlainProxiedExcursionIdentity_Integration pins the lenient half of the
+// plain excursion guard (gastownhall/beads#5572) against a real server: a
+// target with no identity, or the workspace's own, opens as it did before the
+// guard, and the guard mints, changes, and adopts nothing.
+func TestPlainProxiedExcursionIdentity_Integration(t *testing.T) {
+	h := newTeamServerHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	const mine = "project-mine"
+
+	t.Run("matching identity opens unchanged", func(t *testing.T) {
+		const database = "beads_mine_too"
+		provisioner, err := h.openProvider(ctx, database, false, "")
+		require.NoError(t, err)
+		require.NoError(t, provisioner.Close(ctx))
+		direct := h.directDB(t, database)
+		_, err = direct.ExecContext(ctx, "REPLACE INTO metadata (`key`, value) VALUES (?, ?)", "_project_id", mine)
+		require.NoError(t, err)
+
+		p, err := h.openProvider(ctx, database, false, mine)
+		require.NoError(t, err)
+		require.NoError(t, p.Close(ctx))
+		assert.Equal(t, mine, readProjectID(t, ctx, direct))
+	})
+
+	t.Run("absent database keeps the existing open paths", func(t *testing.T) {
+		p, err := h.openProvider(ctx, "beads_absent_preview", false, mine, WithPreview())
+		require.Error(t, err, "preview still refuses to create a database")
+		assert.Nil(t, p)
+		assert.Contains(t, err.Error(), "--dry-run")
+		assert.NotContains(t, err.Error(), "PROJECT IDENTITY MISMATCH")
+
+		const database = "beads_absent_created"
+		p, err = h.openProvider(ctx, database, false, mine)
+		require.NoError(t, err, "the ordinary open still creates the database")
+		require.NoError(t, p.Close(ctx))
+		assert.Empty(t, readProjectID(t, ctx, h.directDB(t, database)),
+			"the guard must not mint or adopt an identity")
+	})
+
+	t.Run("non-beads database opens repeatedly", func(t *testing.T) {
+		const database = "df_widgets"
+		root := h.directDB(t, "")
+		_, err := root.ExecContext(ctx, "CREATE DATABASE "+database)
+		require.NoError(t, err)
+		direct := h.directDB(t, database)
+		_, err = direct.ExecContext(ctx, "CREATE TABLE widgets (id INT PRIMARY KEY, name VARCHAR(64))")
+		require.NoError(t, err)
+
+		// The first open installs beads schema with no identity; the second
+		// then finds a metadata table with no _project_id row.
+		for i := 1; i <= 2; i++ {
+			p, err := h.openProvider(ctx, database, false, mine)
+			require.NoError(t, err, "open %d of a non-beads database", i)
+			require.NoError(t, p.Close(ctx))
+			_, err = direct.ExecContext(ctx, "INSERT INTO widgets VALUES (?, ?)", i, fmt.Sprintf("w%d", i))
+			require.NoError(t, err)
+		}
+		var n int
+		require.NoError(t, direct.QueryRowContext(ctx, "SELECT COUNT(*) FROM widgets").Scan(&n))
+		assert.Equal(t, 2, n)
+		assert.Empty(t, readProjectID(t, ctx, direct), "the guard must not mint or adopt an identity")
 	})
 }
