@@ -592,6 +592,46 @@ func RunLifecycleUpdateReplacesTheLabelSet(t *testing.T, ctx context.Context, fi
 	assertLifecycleUpdateLabels(t, "stored row after the clear", lifecycleUpdateRow(t, ctx, fixture, id))
 }
 
+// RunLifecycleUpdateRemovesLabelsByPrefix pins LabelPatch.RemovePrefixes
+// (GH#5657): one patch drops every label that starts with a literal prefix and
+// adds the replacement, so a state-dimension switch is a single label write
+// instead of a read of the dimension followed by exact removes.
+//
+// The seed carries two labels of the dimension (a set a stale read-modify-write
+// leaves behind), a label that shares the dimension's spelling but not its
+// prefix (`stateful` — the colon is what makes it a prefix), and a label of
+// another dimension. Only the two `state:` labels may go. The wisp leg pins the
+// same algebra on the wisp_labels tier; a nil CreateWisp skips it loudly.
+func RunLifecycleUpdateRemovesLabelsByPrefix(t *testing.T, ctx context.Context, fixture LifecycleUpdateFixture) {
+	t.Helper()
+
+	run := func(t *testing.T, id string, seed func(*types.Issue)) {
+		t.Helper()
+		seed(lifecycleUpdateIssue(id, "state:a", "state:b", "stateful", "area:x"))
+		switched, err := fixture.Lifecycle.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: id, Patch: publicops.IssuePatch{
+			Labels: publicops.LabelPatch{RemovePrefixes: []string{"state:"}, Add: []string{"state:c"}},
+		}})
+		if err != nil {
+			t.Fatalf("switch the state labels of %s: %v", id, err)
+		}
+		if !switched.Changed {
+			t.Errorf("switching the state labels of %s reported Changed = false, want a committed edit", id)
+		}
+		assertLifecycleUpdateLabels(t, "prefix-switch result", switched.Issue, "state:c", "stateful", "area:x")
+		assertLifecycleUpdateLabels(t, "stored row after the prefix switch", lifecycleUpdateRow(t, ctx, fixture, id), "state:c", "stateful", "area:x")
+	}
+
+	t.Run("durable", func(t *testing.T) {
+		run(t, fixture.IssuePrefix+"-lup-prefix", func(issue *types.Issue) { seedLifecycleUpdateIssue(t, ctx, fixture, issue) })
+	})
+	t.Run("wisp", func(t *testing.T) {
+		if fixture.CreateWisp == nil {
+			t.Skip("fixture cannot seed a wisp: CreateWisp is nil, so the wisp_labels leg has no row to edit")
+		}
+		run(t, fixture.IssuePrefix+"-lup-prefix-wisp", func(issue *types.Issue) { seedLifecycleUpdateWisp(t, ctx, fixture, issue) })
+	})
+}
+
 // RunLifecycleUpdateResolvesBothPlanesUnlessRestricted pins what an id resolves
 // against: "The zero value keeps the both-plane auto-resolve every caller gets
 // today", while a set IssuePlaneOnly makes "an ID that names a wisp ErrNotFound

@@ -99,7 +99,7 @@ var (
 		"issue_type", "labels", "metadata", "notes", "owner", "priority",
 		"status", "title", "waiters",
 	}
-	applyLabelPatchMembers    = []string{"add", "remove", "replace"}
+	applyLabelPatchMembers    = []string{"add", "remove", "remove_prefixes", "replace"}
 	applyMetadataPatchMembers = []string{"merge", "replace", "set", "unset"}
 	applyCloseItemMembers     = []string{"expected_version", "force", "reason", "session", "target"}
 	applyDepAddItemMembers    = []string{"has_spawner", "metadata", "source", "target", "thread_id", "type"}
@@ -685,6 +685,7 @@ func applyLabelPatch(prefix string, encoded json.RawMessage) (issueops.LabelPatc
 		}},
 		{"add", wire.Add, func(v []string) { patch.Add = v }},
 		{"remove", wire.Remove, func(v []string) { patch.Remove = v }},
+		{"remove_prefixes", wire.RemovePrefixes, func(v []string) { patch.RemovePrefixes = v }},
 	} {
 		if _, present := raw[edit.member]; !present {
 			continue

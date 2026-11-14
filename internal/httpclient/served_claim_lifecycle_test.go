@@ -484,6 +484,12 @@ func TestServedLifecycleUpdateReplacesTheLabelSet(t *testing.T) {
 	conformance.RunLifecycleUpdateReplacesTheLabelSet(t, t.Context(), newServedUpdateFixture(t, "hlul"))
 }
 
+// TestServedLifecycleUpdateRemovesLabelsByPrefix carries the prefix drop over
+// updateIssue's remove_label_prefixes member (GH#5657).
+func TestServedLifecycleUpdateRemovesLabelsByPrefix(t *testing.T) {
+	conformance.RunLifecycleUpdateRemovesLabelsByPrefix(t, t.Context(), newServedUpdateFixture(t, "hlup"))
+}
+
 // TestServedLifecycleUpdateResolvesBothPlanesUnlessRestricted is PARKED: half
 // the case sets IssuePlaneOnly, which updateIssue publishes no member for. The
 // client refuses it because dropping it would EDIT the wisp the caller asked to
