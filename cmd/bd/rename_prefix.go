@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -20,6 +21,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 var renamePrefixCmd = &cobra.Command{
@@ -49,11 +51,18 @@ its suffix (taxdb-u6ch -> mtg-u6ch, cre-db-c2a.3 -> mtg-c2a.3); source IDs are
 split by issue_prefix, allowed_prefixes and the prefixes found on the rows. When
 a family's root is already live, claimed by another family or retired, the whole
 family moves to one new hash root (mtg-<8 hex>) and the move is reported.
+Text references are rewritten only inside the renamed issues. Dependencies
+follow the renames. An edge between two prefixes is re-pointed by removing
+and re-adding it, so it records the repair's actor and time; one that storage
+refuses to re-add is left as it was and reported.
 
 Changing the prefix for new issues only:
 --mint-only makes new issues use the new prefix and leaves every existing ID
 and text reference as it is. The old prefix is added to allowed_prefixes, so
-explicit --id values and children of existing issues keep working.
+explicit --id values and children of existing issues keep working. A
+dependency between an old-prefix and a new-prefix issue does not block: it is
+stored as a reference to another repository, which bd ready ignores. A later
+--repair consolidates the prefixes and re-points those dependencies.
 
 EXAMPLES:
   bd rename-prefix kw-                # Rename from 'knowledge-work-' to 'kw-'
@@ -141,10 +150,6 @@ NOTE: This is a rare operation. Most users never need this command.`,
 			return nil
 		}
 
-		if len(prefixes) == 1 && oldPrefix == newPrefix {
-			return HandleError("new prefix is the same as current prefix: %s", oldPrefix)
-		}
-
 		if len(issues) == 0 {
 			fmt.Printf("No issues to rename. Updating prefix to %s\n", newPrefix)
 			if !dryRun {
@@ -165,6 +170,13 @@ NOTE: This is a rare operation. Most users never need this command.`,
 			for p := range prefixes {
 				detected = p
 			}
+		}
+
+		// Only rows already on newPrefix make this a no-op. After --mint-only
+		// the config names newPrefix while every row may still carry the old
+		// prefix, and renaming those rows is what the switch has left to do.
+		if len(prefixes) == 1 && oldPrefix == newPrefix && detected == newPrefix {
+			return HandleError("new prefix is the same as current prefix: %s", oldPrefix)
 		}
 
 		// detected == newPrefix means every row is already correctly prefixed
@@ -303,6 +315,13 @@ func runMintOnlyPrefix(ctx context.Context, st storage.DoltStorage, oldPrefix, n
 	if yamlPrefix := strings.TrimRight(overlayYAMLPrefix(""), "-"); yamlPrefix != "" && yamlPrefix != newPrefix {
 		fmt.Fprintf(os.Stderr, "%s config.yaml sets issue-prefix: %s, which bd create uses before the database; set it to %s so new issues mint %s-*\n",
 			ui.RenderWarn("⚠"), yamlPrefix, newPrefix, newPrefix)
+	}
+	// Storage classifies an edge by the part of each ID before its first
+	// hyphen and ignores allowed_prefixes, so an edge between the two
+	// prefixes lands in the external column, which blocked state never reads.
+	if issueops.IsExternalDepTarget(oldPrefix+"-1", newPrefix+"-1") {
+		fmt.Fprintf(os.Stderr, "%s A dependency between a %s-* and a %s-* issue does not block: it is stored as a reference to another repository, which bd ready ignores. bd rename-prefix %s --repair consolidates the prefixes and re-points such dependencies.\n",
+			ui.RenderWarn("⚠"), oldPrefix, newPrefix, newPrefix)
 	}
 	if jsonOutput {
 		enc := json.NewEncoder(os.Stdout)
@@ -448,36 +467,79 @@ func issueIDRoot(id string) string {
 // roots are checked the same way. A lookup error fails the plan.
 func planPrefixRepair(ctx context.Context, targetPrefix string, issues []*types.Issue, knownPrefixes []string, actorName string, retired repairRetiredIDs) (*prefixRepairPlan, error) {
 	plan := &prefixRepairPlan{rootMap: make(map[string]string)}
+	occupied, ordered, unchanged := groupRepairFamilies(targetPrefix, issues, knownPrefixes)
+	plan.Unchanged = unchanged
+	alloc := &repairRootAllocator{
+		targetPrefix: targetPrefix,
+		actorName:    actorName,
+		retired:      retired,
+		occupied:     occupied,
+		claimed:      make(map[string]string),
+		rejected:     make(map[string]bool),
+	}
 
-	// occupied maps a live target root namespace (child-only ones included)
-	// to the smallest live ID holding it.
-	occupied := make(map[string]string)
+	// Pass 1: every family that can keep its suffix claims its wanted root, so
+	// natural destinations are reserved before any fallback is allocated.
+	conflicted, conflictOf, err := alloc.claimWantedRoots(ctx, plan, ordered)
+	if err != nil {
+		return nil, err
+	}
+
+	// Pass 2: each conflicting family moves, whole, to a fresh hash root.
+	for _, fam := range ordered {
+		c, ok := conflictOf[fam.oldRoot]
+		if !ok {
+			continue
+		}
+		assigned, err := alloc.hashRoot(ctx, fam)
+		if err != nil {
+			return nil, err
+		}
+		alloc.claimed[assigned] = fam.oldRoot
+		plan.rootMap[fam.oldRoot] = assigned
+		c.AssignedRoot = assigned
+	}
+
+	for _, fam := range ordered {
+		ids := appendFamilyRenames(plan, fam)
+		if c, ok := conflictOf[fam.oldRoot]; ok {
+			c.IDs = ids
+		}
+	}
+	for _, c := range conflicted {
+		plan.Collisions = append(plan.Collisions, *c)
+	}
+	return plan, nil
+}
+
+// groupRepairFamilies splits issues into the live target namespace and the
+// source families. occupied maps each live target root namespace (child-only
+// ones included) to the smallest live ID holding it, and unchanged counts the
+// IDs already under targetPrefix. ordered holds every source family, grouped
+// by old root with orphan children included, its members sorted by ID, in the
+// order the repair renames them.
+func groupRepairFamilies(targetPrefix string, issues []*types.Issue, knownPrefixes []string) (occupied map[string]string, ordered []*repairFamily, unchanged int) {
+	occupied = make(map[string]string)
 	families := make(map[string]*repairFamily)
 	for _, issue := range issues {
 		id := issue.ID
+		root := issueIDRoot(id)
 		if strings.HasPrefix(id, targetPrefix+"-") {
-			plan.Unchanged++
-			root := issueIDRoot(id)
+			unchanged++
 			if cur, ok := occupied[root]; !ok || utils.NaturalCompareIDs(id, cur) < 0 {
 				occupied[root] = id
 			}
 			continue
 		}
-		oldRoot := issueIDRoot(id)
-		fam, ok := families[oldRoot]
+		fam, ok := families[root]
 		if !ok {
-			prefix := utils.ExtractIssuePrefixKnown(oldRoot, knownPrefixes)
-			suffix := oldRoot
-			if prefix != "" && strings.HasPrefix(oldRoot, prefix+"-") && len(oldRoot) > len(prefix)+1 {
-				suffix = oldRoot[len(prefix)+1:]
-			}
-			fam = &repairFamily{prefix: prefix, oldRoot: oldRoot, rootSuffix: suffix}
-			families[oldRoot] = fam
+			fam = newRepairFamily(root, knownPrefixes)
+			families[root] = fam
 		}
 		fam.members = append(fam.members, issue)
 	}
 
-	ordered := make([]*repairFamily, 0, len(families))
+	ordered = make([]*repairFamily, 0, len(families))
 	for _, fam := range families {
 		slices.SortFunc(fam.members, func(a, b *types.Issue) int {
 			return cmp.Or(utils.NaturalCompareIDs(a.ID, b.ID), cmp.Compare(a.ID, b.ID))
@@ -494,54 +556,87 @@ func planPrefixRepair(ctx context.Context, targetPrefix string, issues []*types.
 			cmp.Compare(a.oldRoot, b.oldRoot),
 		)
 	})
+	return occupied, ordered, unchanged
+}
 
-	// destinations lists the IDs fam would hold under root: the root itself
-	// and every member's path.
-	destinations := func(fam *repairFamily, root string) []string {
-		ids := []string{root}
-		for _, m := range fam.members {
-			if id := root + strings.TrimPrefix(m.ID, fam.oldRoot); id != root {
-				ids = append(ids, id)
-			}
-		}
-		return ids
+// newRepairFamily starts the family of oldRoot. Its source prefix is the
+// longest of knownPrefixes the root starts with (falling back to the
+// heuristic), and the rest of the root is the suffix the family keeps.
+func newRepairFamily(oldRoot string, knownPrefixes []string) *repairFamily {
+	prefix := utils.ExtractIssuePrefixKnown(oldRoot, knownPrefixes)
+	suffix := oldRoot
+	if prefix != "" && strings.HasPrefix(oldRoot, prefix+"-") && len(oldRoot) > len(prefix)+1 {
+		suffix = oldRoot[len(prefix)+1:]
 	}
-	probeRetired := func(ids []string) (map[string]time.Time, error) {
-		if retired == nil || len(ids) == 0 {
-			return nil, nil
+	return &repairFamily{prefix: prefix, oldRoot: oldRoot, rootSuffix: suffix}
+}
+
+// destinations lists the IDs fam would hold under root: the root itself and
+// every member's path.
+func (fam *repairFamily) destinations(root string) []string {
+	ids := []string{root}
+	for _, m := range fam.members {
+		if id := root + strings.TrimPrefix(m.ID, fam.oldRoot); id != root {
+			ids = append(ids, id)
 		}
-		got, err := retired(ctx, ids)
-		if err != nil {
-			return nil, fmt.Errorf("read retired ids: %w", err)
-		}
-		return got, nil
 	}
+	return ids
+}
+
+// appendFamilyRenames records the rename of every member of fam onto the
+// root plan assigned it, and returns the members' old IDs.
+func appendFamilyRenames(plan *prefixRepairPlan, fam *repairFamily) []string {
+	newRoot := plan.rootMap[fam.oldRoot]
+	var ids []string
+	for _, m := range fam.members {
+		plan.Renames = append(plan.Renames, prefixRepairRename{OldID: m.ID, NewID: newRoot + strings.TrimPrefix(m.ID, fam.oldRoot)})
+		ids = append(ids, m.ID)
+	}
+	return ids
+}
+
+// repairRootAllocator assigns the source families their new roots.
+type repairRootAllocator struct {
+	targetPrefix string
+	actorName    string
+	retired      repairRetiredIDs  // nil skips the retired probe
+	occupied     map[string]string // live target root namespace -> smallest live ID
+	claimed      map[string]string // root -> old root that claimed it
+	rejected     map[string]bool   // hash roots found live, claimed or retired
+}
+
+// probeRetired reports which of ids a retaining sweep retired.
+func (a *repairRootAllocator) probeRetired(ctx context.Context, ids []string) (map[string]time.Time, error) {
+	if a.retired == nil || len(ids) == 0 {
+		return nil, nil
+	}
+	got, err := a.retired(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("read retired ids: %w", err)
+	}
+	return got, nil
+}
+
+// claimWantedRoots gives every family whose wanted root is free that root,
+// in family order. It returns the collision of each family that cannot keep
+// its suffix, in family order and by old root.
+func (a *repairRootAllocator) claimWantedRoots(ctx context.Context, plan *prefixRepairPlan, ordered []*repairFamily) ([]*prefixRepairCollision, map[string]*prefixRepairCollision, error) {
 	var wantedIDs []string
 	for _, fam := range ordered {
-		wantedIDs = append(wantedIDs, destinations(fam, targetPrefix+"-"+fam.rootSuffix)...)
+		wantedIDs = append(wantedIDs, fam.destinations(a.targetPrefix+"-"+fam.rootSuffix)...)
 	}
-	retiredWanted, err := probeRetired(wantedIDs)
+	retiredWanted, err := a.probeRetired(ctx, wantedIDs)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	// Pass 1: every family that can keep its suffix claims its wanted root, so
-	// natural destinations are reserved before any fallback is allocated.
-	claimed := make(map[string]string) // root -> old root that claimed it
 	var conflicted []*prefixRepairCollision
 	conflictOf := make(map[string]*prefixRepairCollision)
 	for _, fam := range ordered {
-		wanted := targetPrefix + "-" + fam.rootSuffix
-		var c *prefixRepairCollision
-		if live, ok := occupied[wanted]; ok {
-			c = &prefixRepairCollision{Reason: repairCollisionExists, ConflictID: live}
-		} else if owner, ok := claimed[wanted]; ok {
-			c = &prefixRepairCollision{Reason: repairCollisionClaimed, ConflictID: owner}
-		} else if id := firstRetired(destinations(fam, wanted), retiredWanted); id != "" {
-			c = &prefixRepairCollision{Reason: repairCollisionRetired, ConflictID: id}
-		}
+		wanted := a.targetPrefix + "-" + fam.rootSuffix
+		c := a.wantedRootConflict(fam, wanted, retiredWanted)
 		if c == nil {
-			claimed[wanted] = fam.oldRoot
+			a.claimed[wanted] = fam.oldRoot
 			plan.rootMap[fam.oldRoot] = wanted
 			continue
 		}
@@ -549,60 +644,48 @@ func planPrefixRepair(ctx context.Context, targetPrefix string, issues []*types.
 		conflicted = append(conflicted, c)
 		conflictOf[fam.oldRoot] = c
 	}
+	return conflicted, conflictOf, nil
+}
 
-	// Pass 2: each conflicting family moves, whole, to a fresh hash root.
-	rejected := make(map[string]bool)
-	for _, fam := range ordered {
-		c, ok := conflictOf[fam.oldRoot]
-		if !ok {
+// wantedRootConflict reports why fam cannot take wanted: a live target ID
+// holds it, an earlier family claimed it, or it or a member destination
+// under it is retired. It returns nil when wanted is free.
+func (a *repairRootAllocator) wantedRootConflict(fam *repairFamily, wanted string, retired map[string]time.Time) *prefixRepairCollision {
+	if live, ok := a.occupied[wanted]; ok {
+		return &prefixRepairCollision{Reason: repairCollisionExists, ConflictID: live}
+	}
+	if owner, ok := a.claimed[wanted]; ok {
+		return &prefixRepairCollision{Reason: repairCollisionClaimed, ConflictID: owner}
+	}
+	if id := firstRetired(fam.destinations(wanted), retired); id != "" {
+		return &prefixRepairCollision{Reason: repairCollisionRetired, ConflictID: id}
+	}
+	return nil
+}
+
+// hashRoot finds fam a fresh hash root: the first candidate that no live ID
+// holds, no family claimed and under which no member destination is retired.
+func (a *repairRootAllocator) hashRoot(ctx context.Context, fam *repairFamily) (string, error) {
+	seed := fam.members[0] // the root row, or the first orphan member
+	for nonce := 0; nonce < repairHashAttempts; nonce++ {
+		cand := repairHashRoot(a.targetPrefix, seed, a.actorName, nonce)
+		_, live := a.occupied[cand]
+		_, taken := a.claimed[cand]
+		if live || taken || a.rejected[cand] {
+			a.rejected[cand] = true
 			continue
 		}
-		seed := fam.members[0] // the root row, or the first orphan member
-		assigned := ""
-		for nonce := 0; nonce < repairHashAttempts; nonce++ {
-			cand := repairHashRoot(targetPrefix, seed, actorName, nonce)
-			if _, live := occupied[cand]; live || rejected[cand] {
-				rejected[cand] = true
-				continue
-			}
-			if _, taken := claimed[cand]; taken {
-				rejected[cand] = true
-				continue
-			}
-			got, err := probeRetired(destinations(fam, cand))
-			if err != nil {
-				return nil, err
-			}
-			if len(got) > 0 {
-				rejected[cand] = true
-				continue
-			}
-			assigned = cand
-			break
+		got, err := a.probeRetired(ctx, fam.destinations(cand))
+		if err != nil {
+			return "", err
 		}
-		if assigned == "" {
-			return nil, fmt.Errorf("failed to allocate a unique root for %s after %d attempts", fam.oldRoot, repairHashAttempts)
+		if len(got) > 0 {
+			a.rejected[cand] = true
+			continue
 		}
-		claimed[assigned] = fam.oldRoot
-		plan.rootMap[fam.oldRoot] = assigned
-		c.AssignedRoot = assigned
+		return cand, nil
 	}
-
-	for _, fam := range ordered {
-		newRoot := plan.rootMap[fam.oldRoot]
-		var ids []string
-		for _, m := range fam.members {
-			plan.Renames = append(plan.Renames, prefixRepairRename{OldID: m.ID, NewID: newRoot + strings.TrimPrefix(m.ID, fam.oldRoot)})
-			ids = append(ids, m.ID)
-		}
-		if c, ok := conflictOf[fam.oldRoot]; ok {
-			c.IDs = ids
-		}
-	}
-	for _, c := range conflicted {
-		plan.Collisions = append(plan.Collisions, *c)
-	}
-	return plan, nil
+	return "", fmt.Errorf("failed to allocate a unique root for %s after %d attempts", fam.oldRoot, repairHashAttempts)
 }
 
 // repairKnownPrefixes lists the prefixes a repair splits source IDs by: the
@@ -648,23 +731,7 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 	}
 
 	if dryRun {
-		if jsonOutput {
-			return writeRepairJSON(targetPrefix, len(prefixes), plan, true)
-		}
-		fmt.Printf("DRY RUN: Would repair %d issues with incorrect prefixes\n\n", len(plan.Renames))
-		fmt.Printf("Issues with correct prefix (%s): %d\n", ui.RenderAccent(targetPrefix), plan.Unchanged)
-		fmt.Printf("Issues to repair: %d\n\n", len(plan.Renames))
-
-		fmt.Printf("Planned renames (showing first 10):\n")
-		for i, r := range plan.Renames {
-			if i >= 10 {
-				fmt.Printf("... and %d more\n", len(plan.Renames)-10)
-				break
-			}
-			fmt.Printf("  %s -> %s\n", ui.RenderWarn(r.OldID), ui.RenderAccent(r.NewID))
-		}
-		printRepairCollisions(plan.Collisions)
-		return nil
+		return reportRepairDryRun(targetPrefix, len(prefixes), plan)
 	}
 
 	// Perform the repairs. JSON output is the single result object at the
@@ -685,22 +752,12 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 		}
 		return match
 	}
+	rewrite := func(text string) string { return idPattern.ReplaceAllStringFunc(text, replaceFunc) }
 	gates := beadGatesByTarget(issues)
 
 	for _, r := range plan.Renames {
 		issue := byID[r.OldID]
-
-		issue.Title = idPattern.ReplaceAllStringFunc(issue.Title, replaceFunc)
-		issue.Description = idPattern.ReplaceAllStringFunc(issue.Description, replaceFunc)
-		if issue.Design != "" {
-			issue.Design = idPattern.ReplaceAllStringFunc(issue.Design, replaceFunc)
-		}
-		if issue.AcceptanceCriteria != "" {
-			issue.AcceptanceCriteria = idPattern.ReplaceAllStringFunc(issue.AcceptanceCriteria, replaceFunc)
-		}
-		if issue.Notes != "" {
-			issue.Notes = idPattern.ReplaceAllStringFunc(issue.Notes, replaceFunc)
-		}
+		rewriteRepairText(issue, rewrite)
 
 		if err := renameIssueKeepingBeadGates(ctx, st, issue, r.NewID, gates[r.OldID], actorName); err != nil {
 			return fmt.Errorf("failed to update issue %s -> %s: %w", r.OldID, r.NewID, err)
@@ -711,7 +768,8 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 		}
 	}
 
-	if err := repointRepairedDependencies(ctx, st, plan, issues, actorName); err != nil {
+	refused, err := repointRepairedDependencies(ctx, st, plan, issues, actorName)
+	if err != nil {
 		return err
 	}
 
@@ -721,13 +779,69 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 	}
 
 	if jsonOutput {
-		return writeRepairJSON(targetPrefix, len(prefixes), plan, false)
+		return writeRepairJSON(targetPrefix, len(prefixes), plan, refused, false)
 	}
 	printRepairCollisions(plan.Collisions)
+	printUnrepointedEdges(refused)
 	fmt.Printf("\n%s Successfully consolidated %d prefixes into %s\n",
 		ui.RenderPass("✓"), len(prefixes), ui.RenderAccent(targetPrefix))
 	fmt.Printf("  %d issues repaired, %d issues unchanged\n", len(plan.Renames), plan.Unchanged)
 	return nil
+}
+
+// reportRepairDryRun reports what a --repair run would do; it writes nothing.
+func reportRepairDryRun(targetPrefix string, prefixesFound int, plan *prefixRepairPlan) error {
+	if jsonOutput {
+		return writeRepairJSON(targetPrefix, prefixesFound, plan, nil, true)
+	}
+	fmt.Printf("DRY RUN: Would repair %d issues with incorrect prefixes\n\n", len(plan.Renames))
+	fmt.Printf("Issues with correct prefix (%s): %d\n", ui.RenderAccent(targetPrefix), plan.Unchanged)
+	fmt.Printf("Issues to repair: %d\n\n", len(plan.Renames))
+
+	fmt.Printf("Planned renames (showing first 10):\n")
+	for i, r := range plan.Renames {
+		if i >= 10 {
+			fmt.Printf("... and %d more\n", len(plan.Renames)-10)
+			break
+		}
+		fmt.Printf("  %s -> %s\n", ui.RenderWarn(r.OldID), ui.RenderAccent(r.NewID))
+	}
+	printRepairCollisions(plan.Collisions)
+	return nil
+}
+
+// rewriteRepairText applies rewrite to every text field of issue a repair
+// rewrites references in.
+func rewriteRepairText(issue *types.Issue, rewrite func(string) string) {
+	issue.Title = rewrite(issue.Title)
+	issue.Description = rewrite(issue.Description)
+	if issue.Design != "" {
+		issue.Design = rewrite(issue.Design)
+	}
+	if issue.AcceptanceCriteria != "" {
+		issue.AcceptanceCriteria = rewrite(issue.AcceptanceCriteria)
+	}
+	if issue.Notes != "" {
+		issue.Notes = rewrite(issue.Notes)
+	}
+}
+
+// unrepointedEdge is a dependency edge a --repair run left as it was because
+// storage refused to re-point it, or because it closes the cycle storage
+// refused a parent-child re-point for (refuseIfItClosesARefusedCycle).
+// Re-pointing re-adds the edge, and storage validates the re-add as it does a
+// new edge, with hierarchy and cycle checks that an edge stored across
+// prefixes, or one older than the check, never went through. The refused
+// edge keeps its stored ID and column. That is not always the external
+// column: a database older than the dependency-target split, or a bd rename,
+// keeps edges between two prefixes in the issue column, where a refused
+// blocks edge still blocks.
+type unrepointedEdge struct {
+	IssueID     string `json:"issue_id"`
+	DependsOnID string `json:"depends_on_id"`
+	WantedID    string `json:"wanted_depends_on_id"`
+	Type        string `json:"type"`
+	Error       string `json:"error"`
 }
 
 // repointRepairedDependencies points each edge that still names a renamed
@@ -738,10 +852,121 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 // The same holds for an edge whose SOURCE was renamed onto the target prefix
 // and whose target is an unrenamed target-prefix row (taxdb-x -> kb-hand
 // becomes kb-x -> kb-hand): it stays in the external column, which blocked
-// state never reads, until it is re-added. issues must hold the post-rename IDs.
-func repointRepairedDependencies(ctx context.Context, st storage.DoltStorage, plan *prefixRepairPlan, issues []*types.Issue, actorName string) error {
-	if len(plan.Renames) == 0 {
+// state never reads, until it is re-added. An edge that storage already
+// re-pointed (both ends under one prefix before the repair, as in a renamed
+// family) is left alone. issues must hold the post-rename IDs.
+//
+// The column an edge is stored in is not visible here, so an edge between
+// two prefixes that already sits in the issue column (a database older than
+// the dependency-target split, or a bd rename) is re-added too and takes the
+// repair's actor and time.
+//
+// Parent-child edges move first, then every other edge, so storage checks
+// each blocking re-add against the re-pointed hierarchy. Moved in source-ID
+// order alone, a re-add was checked against a partly re-pointed graph whose
+// ancestry and cycle walks stop at old IDs that no longer exist, and whether
+// an edge was refused depended on how its IDs sorted. A parent-child edge can
+// itself be refused for a cycle through a blocking edge that blocked state
+// never reads, such as an epic's close gate on a child already on the target
+// prefix, stored across prefixes. Such a blocking edge is left as it was
+// (refuseIfItClosesARefusedCycle): re-pointed, it would start to block while
+// the child stays detached.
+//
+// Each edge moves in its own transaction, so a re-add storage refuses rolls
+// its removal back. The refused edge is returned instead of ending the run,
+// and the caller still sets issue_prefix. Any other failure ends the run and
+// names the edges refused before it.
+func repointRepairedDependencies(ctx context.Context, st storage.DoltStorage, plan *prefixRepairPlan, issues []*types.Issue, actorName string) ([]unrepointedEdge, error) {
+	moves, err := repairEdgeMoves(ctx, st, plan, issues)
+	if err != nil {
+		return nil, err
+	}
+	var refused []unrepointedEdge
+	// The parent-child moves storage refused for a cycle.
+	var cycleRefused []repairEdgeMove
+	for _, m := range moves {
+		err := refuseIfItClosesARefusedCycle(ctx, st, m, cycleRefused, actorName)
+		if err == nil {
+			err = repointDependency(ctx, st, m.source, m.dep, m.target, actorName)
+		}
+		if err == nil {
+			continue
+		}
+		edge := unrepointedEdge{
+			IssueID: m.source, DependsOnID: m.dep.DependsOnID, WantedID: m.target, Type: string(m.dep.Type), Error: err.Error(),
+		}
+		var closes *closesRefusedCycleError
+		if !errors.As(err, &closes) && !isDependencyRefusal(err) {
+			return nil, repointFailure(edge, err, refused)
+		}
+		refused = append(refused, edge)
+		if m.dep.Type == types.DepParentChild && errors.Is(err, publicops.ErrDependencyCycle) {
+			cycleRefused = append(cycleRefused, m)
+		}
+	}
+	return refused, nil
+}
+
+// errRepairProbe ends every probe transaction refuseIfItClosesARefusedCycle
+// runs, so the transaction rolls back.
+var errRepairProbe = errors.New("rename-prefix --repair probe")
+
+// closesRefusedCycleError is why a repair left a blocking edge as it was:
+// without it, storage accepts the parent-child move it refused for a cycle.
+type closesRefusedCycleError struct{ hierarchy repairEdgeMove }
+
+func (e *closesRefusedCycleError) Error() string {
+	h := e.hierarchy
+	return fmt.Sprintf("it closes the cycle that kept %s -> %s (%s) from being re-pointed", h.source, h.target, h.dep.Type)
+}
+
+// refuseIfItClosesARefusedCycle returns a *closesRefusedCycleError when
+// storage accepts one of the parent-child moves it refused for a cycle
+// (cycleRefused) once m's edge is gone; the store is left as it was either
+// way. Storage's cycle walk follows an edge in any column, while blocked
+// state never reads one stored across prefixes, so such an edge can keep a
+// parent-child edge out while blocking nothing; re-pointed, it would start to
+// block while the child stays detached. Each probe removes m's edge and
+// retries one refused move in a transaction that always rolls back. Only a
+// blocking edge is probed: the cycle walk follows no other type, and
+// parent-child edges move first.
+func refuseIfItClosesARefusedCycle(ctx context.Context, st storage.DoltStorage, m repairEdgeMove, cycleRefused []repairEdgeMove, actorName string) error {
+	if m.dep.Type == types.DepParentChild || !types.IsSchedulingEdge(m.dep.Type) {
 		return nil
+	}
+	for _, h := range cycleRefused {
+		err := transactHonoringAutoCommit(ctx, st, "", func(tx storage.Transaction) error {
+			if err := tx.RemoveDependency(ctx, m.source, m.dep.DependsOnID, actorName); err != nil {
+				return err
+			}
+			if err := moveDependencyInTx(ctx, tx, h.source, h.dep, h.target, actorName); err != nil {
+				return err
+			}
+			return errRepairProbe
+		})
+		if errors.Is(err, errRepairProbe) {
+			return &closesRefusedCycleError{hierarchy: h}
+		}
+		if !isDependencyRefusal(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+// repairEdgeMove is one stored edge a repair re-points: the edge on source
+// and the target it must name.
+type repairEdgeMove struct {
+	source string
+	dep    *types.Dependency
+	target string
+}
+
+// repairEdgeMoves lists the edges a repair re-points: parent-child edges
+// first, then every other edge, each group in source-ID order.
+func repairEdgeMoves(ctx context.Context, st storage.DoltStorage, plan *prefixRepairPlan, issues []*types.Issue) ([]repairEdgeMove, error) {
+	if len(plan.Renames) == 0 {
+		return nil, nil
 	}
 	newID := make(map[string]string, len(plan.Renames))
 	oldID := make(map[string]string, len(plan.Renames))
@@ -758,39 +983,111 @@ func repointRepairedDependencies(ctx context.Context, st storage.DoltStorage, pl
 	slices.Sort(ids)
 	records, err := st.GetDependencyRecordsForIssues(ctx, ids)
 	if err != nil {
-		return fmt.Errorf("failed to read dependencies: %w", err)
+		return nil, fmt.Errorf("failed to read dependencies: %w", err)
 	}
+	var hierarchy, rest []repairEdgeMove
 	for _, source := range ids {
 		for _, dep := range records[source] {
-			target, ok := newID[dep.DependsOnID]
-			if !ok {
-				// The target kept its ID. Re-add only an edge the source's
-				// rename turned from cross-prefix into same-prefix, so it
-				// lands in the issue column instead of the external one.
-				was, renamed := oldID[source]
-				if !renamed || !stored[dep.DependsOnID] ||
-					!issueops.IsExternalDepTarget(was, dep.DependsOnID) ||
-					issueops.IsExternalDepTarget(source, dep.DependsOnID) {
-					continue
-				}
-				target = dep.DependsOnID
-			}
-			if err := st.RemoveDependency(ctx, source, dep.DependsOnID, actorName); err != nil {
-				return fmt.Errorf("failed to re-point dependency %s -> %s: %w", source, dep.DependsOnID, err)
-			}
-			moved := *dep
-			moved.IssueID, moved.DependsOnID = source, target
-			if err := st.AddDependency(ctx, &moved, actorName); err != nil {
-				return fmt.Errorf("failed to re-point dependency %s -> %s at %s: %w", source, dep.DependsOnID, target, err)
+			target, ok := repairedDependencyTarget(source, dep.DependsOnID, newID, oldID, stored)
+			switch {
+			case !ok:
+			case dep.Type == types.DepParentChild:
+				hierarchy = append(hierarchy, repairEdgeMove{source: source, dep: dep, target: target})
+			default:
+				rest = append(rest, repairEdgeMove{source: source, dep: dep, target: target})
 			}
 		}
 	}
-	return nil
+	return append(hierarchy, rest...), nil
+}
+
+// isDependencyRefusal reports whether err is storage refusing the edge
+// itself, as it refuses a new edge: a cycle, a block on the issue's own
+// ancestor or descendant, an edge onto itself, a second type for one pair or
+// a missing endpoint. Anything else (a lost connection, a commit whose result
+// is unknown, a canceled run) is a failure of the write.
+func isDependencyRefusal(err error) bool {
+	var hierarchy *publicops.DependencyHierarchyConflictError
+	var conflict *publicops.DependencyTypeConflictError
+	var missing *publicops.DependencyEndpointNotFoundError
+	return errors.Is(err, publicops.ErrDependencyCycle) || errors.Is(err, publicops.ErrSelfDependency) ||
+		errors.As(err, &hierarchy) || errors.As(err, &conflict) || errors.As(err, &missing)
+}
+
+// repointFailure is the error a failed re-point ends the repair with. The
+// run never reaches its report, so the error names the edges storage
+// refused before it, which were left as they were.
+func repointFailure(failed unrepointedEdge, err error, refused []unrepointedEdge) error {
+	err = fmt.Errorf("failed to re-point dependency %s -> %s at %s: %w", failed.IssueID, failed.DependsOnID, failed.WantedID, err)
+	if len(refused) == 0 {
+		return err
+	}
+	edges := make([]string, len(refused))
+	for i, e := range refused {
+		edges[i] = fmt.Sprintf("%s -> %s (%s, wanted %s): %s", e.IssueID, e.DependsOnID, e.Type, e.WantedID, e.Error)
+	}
+	return fmt.Errorf("%w; before it, storage refused to re-point %d dependencies, which were left as they were: %s",
+		err, len(refused), strings.Join(edges, "; "))
+}
+
+// repairedDependencyTarget reports the target an edge stored on source must
+// name after the repair, and false when storage already holds it right.
+func repairedDependencyTarget(source, dependsOn string, newID, oldID map[string]string, stored map[string]bool) (string, bool) {
+	if target, ok := newID[dependsOn]; ok {
+		// The edge still names its target's old ID.
+		return target, true
+	}
+	// The target kept its ID, or storage already re-pointed the edge at its
+	// new one. Re-add only an edge the source's rename turned from
+	// cross-prefix into same-prefix, judged on both ends' IDs before the
+	// repair, so it lands in the issue column instead of the external one.
+	was, renamed := oldID[source]
+	if !renamed || !stored[dependsOn] {
+		return "", false
+	}
+	wasTarget := dependsOn
+	if o, ok := oldID[dependsOn]; ok {
+		wasTarget = o
+	}
+	if !issueops.IsExternalDepTarget(was, wasTarget) || issueops.IsExternalDepTarget(source, dependsOn) {
+		return "", false
+	}
+	return dependsOn, true
+}
+
+// repointDependency moves one edge stored on source onto target: the removal
+// and the re-add share a transaction, so a re-add storage refuses leaves the
+// edge exactly as it was.
+func repointDependency(ctx context.Context, st storage.DoltStorage, source string, dep *types.Dependency, target, actorName string) error {
+	// Commit as the store-level edge writes would: a Dolt commit per edge on
+	// a SQL server (dropped under dolt.auto-commit batch or off), none on an
+	// embedded store, whose post-run auto-commit takes the whole repair,
+	// issue_prefix included. A transaction commit there would mark the
+	// command committed and skip that auto-commit.
+	msg := ""
+	if !isEmbeddedStore(st) {
+		msg = fmt.Sprintf("bd: rename-prefix --repair re-points %s -> %s at %s", source, dep.DependsOnID, target)
+	}
+	return transactHonoringAutoCommit(ctx, st, msg, func(tx storage.Transaction) error {
+		return moveDependencyInTx(ctx, tx, source, dep, target, actorName)
+	})
+}
+
+// moveDependencyInTx removes the edge dep stored on source and re-adds it
+// naming target.
+func moveDependencyInTx(ctx context.Context, tx storage.Transaction, source string, dep *types.Dependency, target, actorName string) error {
+	if err := tx.RemoveDependency(ctx, source, dep.DependsOnID, actorName); err != nil {
+		return err
+	}
+	moved := *dep
+	moved.IssueID, moved.DependsOnID = source, target
+	return tx.AddDependency(ctx, &moved, actorName)
 }
 
 // writeRepairJSON writes a --repair result as one JSON object: the complete
-// rename mapping and every collision, for a dry run and a real run alike.
-func writeRepairJSON(targetPrefix string, prefixesFound int, plan *prefixRepairPlan, dryRun bool) error {
+// rename mapping and every collision, for a dry run and a real run alike,
+// plus the edges a real run could not re-point (a dry run re-points none).
+func writeRepairJSON(targetPrefix string, prefixesFound int, plan *prefixRepairPlan, refused []unrepointedEdge, dryRun bool) error {
 	renames := plan.Renames
 	if renames == nil {
 		renames = []prefixRepairRename{}
@@ -799,18 +1096,34 @@ func writeRepairJSON(targetPrefix string, prefixesFound int, plan *prefixRepairP
 	if collisions == nil {
 		collisions = []prefixRepairCollision{}
 	}
+	if refused == nil {
+		refused = []unrepointedEdge{}
+	}
 	result := map[string]interface{}{
-		"target_prefix":    targetPrefix,
-		"prefixes_found":   prefixesFound,
-		"issues_repaired":  len(plan.Renames),
-		"issues_unchanged": plan.Unchanged,
-		"dry_run":          dryRun,
-		"renames":          renames,
-		"collisions":       collisions,
+		"target_prefix":     targetPrefix,
+		"prefixes_found":    prefixesFound,
+		"issues_repaired":   len(plan.Renames),
+		"issues_unchanged":  plan.Unchanged,
+		"dry_run":           dryRun,
+		"renames":           renames,
+		"collisions":        collisions,
+		"unrepointed_edges": refused,
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(result)
+}
+
+// printUnrepointedEdges lists every edge the repair left as it was.
+func printUnrepointedEdges(edges []unrepointedEdge) {
+	if len(edges) == 0 {
+		return
+	}
+	fmt.Printf("\n%s %d dependencies could not be re-pointed and were left exactly as they were:\n",
+		ui.RenderWarn("⚠"), len(edges))
+	for _, e := range edges {
+		fmt.Printf("  %s -> %s (%s, wanted %s): %s\n", ui.RenderWarn(e.IssueID), e.DependsOnID, e.Type, ui.RenderAccent(e.WantedID), e.Error)
+	}
 }
 
 // printRepairCollisions lists every family that could not keep its suffix.

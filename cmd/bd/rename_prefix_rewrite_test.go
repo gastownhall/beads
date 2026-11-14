@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"regexp"
 	"slices"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 func TestRewriteIssueID_NoDoublePrefix(t *testing.T) {
@@ -430,6 +432,38 @@ func TestPlanPrefixRepairKnownPrefixes(t *testing.T) {
 		}
 		if got := planMapping(plan)[tt.id]; got != tt.want {
 			t.Errorf("%s with known %v -> %q, want %q", tt.id, tt.known, got, tt.want)
+		}
+	}
+}
+
+func TestIsDependencyRefusal(t *testing.T) {
+	t.Parallel()
+	// A repair steps over an edge storage refuses, as it refuses a new one,
+	// and stops on any other failure after its renames landed. Each refusal
+	// must match bare, wrapped and joined with a rollback error, the forms
+	// the two backends return it in.
+	refusals := []error{
+		publicops.ErrDependencyCycle,
+		fmt.Errorf("%w: kb-a cannot depend on itself", publicops.ErrSelfDependency),
+		&publicops.DependencyHierarchyConflictError{IssueID: "kb-a", BlockerID: "kb-p", BlockerIsAncestor: true},
+		&publicops.DependencyTypeConflictError{IssueID: "kb-a", DependsOnID: "kb-b", ExistingType: "blocks", RequestedType: "parent-child"},
+		&publicops.DependencyEndpointNotFoundError{IssueID: "kb-a", DependsOnID: "kb-b", MissingID: "kb-b", Err: publicops.ErrDependencyTargetNotFound},
+	}
+	for _, refusal := range refusals {
+		for _, err := range []error{refusal, fmt.Errorf("add dependency: %w", refusal), errors.Join(refusal, errors.New("rollback failed"))} {
+			if !isDependencyRefusal(err) {
+				t.Errorf("isDependencyRefusal(%v) = false, want true", err)
+			}
+		}
+	}
+	for _, err := range []error{
+		errors.New(publicops.ErrDependencyCycle.Error()),
+		fmt.Errorf("failed to check blocker ancestry: %w", errors.New("connection reset")),
+		fmt.Errorf("stage and commit after regular SQL commit: %w", storage.ErrCommitIndeterminate),
+		context.Canceled,
+	} {
+		if isDependencyRefusal(err) {
+			t.Errorf("isDependencyRefusal(%v) = true, want false", err)
 		}
 	}
 }

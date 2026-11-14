@@ -192,10 +192,16 @@ func TestEmbeddedRenamePrefixEdgeCases(t *testing.T) {
 		bdCreate(t, bd, dir, "Tax parent", "--id", "taxdb-u6ch", "--type", "epic")
 		ref := bdCreate(t, bd, dir, "Tax ref", "--description", "see taxdb-u6ch")
 
-		result := decodeMintOnlyResult(t, bdRenamePrefix(t, bd, dir, "kb", "--mint-only", "--json"))
+		stdout, stderr := bdRunSplit(t, bd, dir, "rename-prefix", "kb", "--mint-only", "--json")
+		result := decodeMintOnlyResult(t, stdout)
 		if result.OldPrefix != "taxdb" || result.NewPrefix != "kb" || !result.MintOnly || result.DryRun ||
 			fmt.Sprint(result.AllowedPrefixesAdded) != "[taxdb]" {
 			t.Errorf("result = %+v, want taxdb -> kb with taxdb added to allowed_prefixes", result)
+		}
+		// An edge between taxdb-* and kb-* is stored across prefixes and
+		// never blocks; the command must say so.
+		if !strings.Contains(stderr, "A dependency between a taxdb-* and a kb-* issue does not block") {
+			t.Errorf("stderr does not warn that taxdb-*/kb-* dependencies do not block:\n%s", stderr)
 		}
 
 		if got := bdShow(t, bd, dir, "taxdb-u6ch"); got.Title != "Tax parent" {
@@ -241,6 +247,60 @@ func TestEmbeddedRenamePrefixEdgeCases(t *testing.T) {
 		}
 		if got := bdShow(t, bd, dir, "taxdb-u6ch"); got.Title != "Tax parent" {
 			t.Errorf("refused run moved taxdb-u6ch: %+v", got)
+		}
+	})
+
+	t.Run("mint_only_then_repair_renames", func(t *testing.T) {
+		// After --mint-only the config already names kb while every row is
+		// still taxdb-*. The --repair its warning advises must rename those
+		// rows instead of refusing kb as the current prefix.
+		dir, _, _ := bdInit(t, bd, "--prefix", "taxdb")
+		bdCreate(t, bd, dir, "Tax parent", "--id", "taxdb-u6ch")
+		bdRenamePrefix(t, bd, dir, "kb", "--mint-only")
+
+		if out := bdRenamePrefix(t, bd, dir, "kb", "--repair"); !strings.Contains(out, "Successfully renamed") {
+			t.Errorf("expected 'Successfully renamed' in output: %s", out)
+		}
+		if got := bdShow(t, bd, dir, "kb-u6ch"); got.Title != "Tax parent" {
+			t.Errorf("kb-u6ch = %+v, want taxdb-u6ch renamed onto kb", got)
+		}
+	})
+
+	t.Run("repair_repoints_cross_prefix_edges", func(t *testing.T) {
+		// taxdb-x blocking on a kb-* issue is stored across prefixes, where
+		// it never blocks. --repair moves the edge in a transaction of its
+		// own once taxdb-x is kb-x, and the command's post-run commit still
+		// records every write, issue_prefix (taxdb -> kb) included: a Dolt
+		// commit of the edge's own would mark the command committed and
+		// leave the config row out.
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "taxdb")
+		blocker := bdCreate(t, bd, dir, "Open blocker", "--id", "kb-hand", "--type", "task", "--force")
+		bdCreate(t, bd, dir, "Tax work", "--id", "taxdb-x", "--type", "task")
+		bdDep(t, bd, dir, "add", "taxdb-x", blocker.ID)
+		if _, dirty := embeddedLogCountAndDirtyTables(t, beadsDir); len(dirty) != 0 {
+			t.Fatalf("fixture left the working set dirty: %v", dirty)
+		}
+
+		var result struct {
+			Renames []struct {
+				OldID string `json:"old_id"`
+				NewID string `json:"new_id"`
+			} `json:"renames"`
+			UnrepointedEdges []json.RawMessage `json:"unrepointed_edges"`
+		}
+		out := bdRenamePrefix(t, bd, dir, "kb", "--repair", "--json")
+		if err := json.Unmarshal([]byte(out), &result); err != nil {
+			t.Fatalf("--repair --json stdout is not one result object: %v\n%s", err, out)
+		}
+		if len(result.Renames) != 1 || result.Renames[0].OldID != "taxdb-x" || result.Renames[0].NewID != "kb-x" ||
+			result.UnrepointedEdges == nil || len(result.UnrepointedEdges) != 0 {
+			t.Errorf("result = %+v, want taxdb-x -> kb-x and an empty unrepointed_edges", result)
+		}
+		if _, dirty := embeddedLogCountAndDirtyTables(t, beadsDir); len(dirty) != 0 {
+			t.Errorf("--repair left the working set dirty: %v, want every write in the command's commit", dirty)
+		}
+		if ready := wakeReadyIDs(t, bd, dir); ready["kb-x"] || !ready[blocker.ID] {
+			t.Errorf("ready = %v, want %s ready and kb-x blocked by it", ready, blocker.ID)
 		}
 	})
 }
