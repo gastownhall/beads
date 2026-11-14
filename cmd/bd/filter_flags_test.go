@@ -122,17 +122,21 @@ func commandsByPath(root *cobra.Command) map[string]*cobra.Command {
 }
 
 // lookupFilterFlag resolves a reviewed row to the flag set that declares it
-// and the flag itself.
+// and the flag itself. It never calls LocalNonPersistentFlags, LocalFlags or
+// InheritedFlags: those run cobra's mergePersistentFlags, which copies the
+// root's persistent flags into the command's Flags() for the rest of the
+// process and breaks TestServeFlags (see goldenLocalFlags).
 func lookupFilterFlag(t *testing.T, path, name string) (*pflag.FlagSet, *pflag.Flag) {
 	t.Helper()
 	cmd, ok := commandsByPath(rootCmd)[path]
 	if !ok {
 		t.Fatalf("command %q not found in the bd command tree", path)
 	}
-	for _, fs := range []*pflag.FlagSet{cmd.LocalNonPersistentFlags(), cmd.PersistentFlags(), cmd.Flags()} {
-		if fl := fs.Lookup(name); fl != nil {
-			return fs, fl
-		}
+	if fl := goldenLocalFlags(cmd).Lookup(name); fl != nil {
+		return cmd.Flags(), fl
+	}
+	if fl := cmd.PersistentFlags().Lookup(name); fl != nil {
+		return cmd.PersistentFlags(), fl
 	}
 	t.Fatalf("%s has no --%s flag", path, name)
 	return nil, nil
@@ -484,7 +488,10 @@ func stringFilterFlagRegistrations(root *cobra.Command) []filterFlagRegistration
 			out = append(out, filterFlagRegistration{path, fl.Name, filterFlagKind(fl)})
 		}
 		cmd.PersistentFlags().VisitAll(visit)
-		cmd.LocalNonPersistentFlags().VisitAll(visit)
+		// goldenLocalFlags, not LocalNonPersistentFlags: the latter merges
+		// the root's persistent flags into every command's Flags() for the
+		// rest of the process, which breaks TestServeFlags.
+		goldenLocalFlags(cmd).VisitAll(visit)
 	}
 	slices.SortFunc(out, func(a, b filterFlagRegistration) int {
 		return strings.Compare(a.path+" --"+a.flag, b.path+" --"+b.flag)
