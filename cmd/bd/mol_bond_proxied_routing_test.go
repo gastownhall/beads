@@ -838,3 +838,32 @@ func TestMolBondProxiedServedIssueGoneFailsWithoutFormulaFallback(t *testing.T) 
 	}
 	f.assertServedUnwritten("deleted planned issue")
 }
+
+// TestMolBondProxiedRoutedLateWriteRollsBack: a routed bond whose transaction
+// fails after the spawn created rows leaves the rig as it was and the served
+// database unwritten.
+func TestMolBondProxiedRoutedLateWriteRollsBack(t *testing.T) {
+	f := newMolBondProxiedFixture(t)
+	var failing *lateWriteFailingStore
+	f.reopenWrapper = func(rr *RoutedResult) *RoutedResult {
+		failing = &lateWriteFailingStore{DoltStorage: rr.Store}
+		rr.Store = failing
+		return rr
+	}
+
+	before := f.rigIssueIDs("gt-mol1")
+	runErr, _, stderr := f.bond(molBondInput{argA: molBondProxiedFormula, argB: "gt-mol1"})
+	if runErr == nil {
+		t.Fatalf("bond with a failing late write succeeded")
+	}
+	if !strings.Contains(stderr, errLateBondWrite.Error()) {
+		t.Errorf("stderr lacks the injected failure:\n%s", stderr)
+	}
+	if failing == nil || failing.created == 0 {
+		t.Fatalf("the injected failure did not come after a spawned row (created=%v)", failing)
+	}
+	if after := f.rigIssueIDs("gt-mol1"); len(after) != len(before) {
+		t.Errorf("failed bond left rows in the rig: %v -> %v", before, after)
+	}
+	f.assertServedUnwritten("late write failure")
+}
