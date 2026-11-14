@@ -272,8 +272,9 @@ func TestIssueText(t *testing.T) {
 }
 
 // stubAIClient returns an Anthropic client whose Messages replies carry the
-// given content blocks, plus a count of the requests the stub served.
-func stubAIClient(t *testing.T, content []map[string]any) (anthropic.Client, *atomic.Int64) {
+// given stop reason and content blocks, plus a count of the requests the stub
+// served.
+func stubAIClient(t *testing.T, stopReason string, content []map[string]any) (anthropic.Client, *atomic.Int64) {
 	t.Helper()
 	var hits atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -289,7 +290,7 @@ func stubAIClient(t *testing.T, content []map[string]any) (anthropic.Client, *at
 			"role":          "assistant",
 			"model":         "claude-haiku-4-5",
 			"content":       content,
-			"stop_reason":   "end_turn",
+			"stop_reason":   stopReason,
 			"stop_sequence": nil,
 			"usage":         map[string]any{"input_tokens": 1, "output_tokens": 1},
 		}
@@ -344,7 +345,7 @@ func TestAnalyzeWithAI_SkipsLeadingThinkingBlock(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client, hits := stubAIClient(t, tt.content)
+			client, hits := stubAIClient(t, "end_turn", tt.content)
 			var got []duplicatePair
 			captureStderr(t, func() {
 				got = analyzeWithAI(context.Background(), client, "claude-haiku-4-5", aiTestCandidates())
@@ -368,20 +369,28 @@ func TestAnalyzeWithAI_SkipsLeadingThinkingBlock(t *testing.T) {
 }
 
 // TestAnalyzeWithAI_NoTextBlockKeepsCandidates pins that a reply with no text
-// block warns and keeps the mechanical candidates after one request.
+// block warns and keeps the mechanical candidates after one request. The
+// warning names the reply's block types and stop reason, so thinking that
+// used up max_tokens shows in a bug report.
 func TestAnalyzeWithAI_NoTextBlockKeepsCandidates(t *testing.T) {
+	thinking := map[string]any{"type": "thinking", "thinking": "pondering", "signature": "sig"}
+	redacted := map[string]any{"type": "redacted_thinking", "data": "opaque"}
 	tests := []struct {
-		name     string
-		content  []map[string]any
-		wantWarn string
+		name       string
+		stopReason string
+		content    []map[string]any
+		wantWarn   string
 	}{
-		{"thinking only", []map[string]any{{"type": "thinking", "thinking": "pondering", "signature": "sig"}},
-			"Warning: unexpected AI response format: no text block in 1 content blocks"},
-		{"no content", []map[string]any{}, "Warning: unexpected AI response format: no text block in 0 content blocks"},
+		{"thinking only", "end_turn", []map[string]any{thinking},
+			"Warning: unexpected AI response format: no text block in 1 content blocks (types: [thinking]; stop_reason: end_turn)\n"},
+		{"thinking used up max_tokens", "max_tokens", []map[string]any{thinking, redacted},
+			"Warning: unexpected AI response format: no text block in 2 content blocks (types: [thinking redacted_thinking]; stop_reason: max_tokens)\n"},
+		{"no content", "end_turn", []map[string]any{},
+			"Warning: unexpected AI response format: no text block in 0 content blocks (types: []; stop_reason: end_turn)\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client, hits := stubAIClient(t, tt.content)
+			client, hits := stubAIClient(t, tt.stopReason, tt.content)
 			candidates := aiTestCandidates()
 			var got []duplicatePair
 			stderr := captureStderr(t, func() {
