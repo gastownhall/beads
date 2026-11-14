@@ -168,6 +168,16 @@ func addLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID,
 	if err != nil {
 		return fmt.Errorf("add label: rows affected: %w", err)
 	}
+	// A landed label row rewrites the issue's coordination cell for this
+	// table, on this same transaction (GH#5657): whole-set edits that would
+	// otherwise cell-merge into a silent union now conflict at commit time and
+	// replay on a fresh snapshot. The rows-affected gate keeps an idempotent
+	// re-add (INSERT IGNORE that landed nothing) from participating.
+	if inserted > 0 {
+		if err := TouchLabelCoordinationInTx(ctx, tx, issueID, labelTable); err != nil {
+			return err
+		}
+	}
 	comment := "Added label: " + label
 	if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
 		IssueID:   issueID,
@@ -221,6 +231,13 @@ func removeLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issue
 	deleted, err := res.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("remove label: rows affected: %w", err)
+	}
+	// addLabelInTx's coordination gate, on the remove side: a deleted row
+	// participates, a DELETE that matched nothing does not.
+	if deleted > 0 {
+		if err := TouchLabelCoordinationInTx(ctx, tx, issueID, labelTable); err != nil {
+			return err
+		}
 	}
 	comment := "Removed label: " + label
 	if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
