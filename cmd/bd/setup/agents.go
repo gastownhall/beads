@@ -69,9 +69,6 @@ type agentsIntegration struct {
 
 func defaultAgentsEnv() agentsEnv {
 	return agentsEnv{
-		// The agents file belongs to the selected project (the -C target
-		// while bd setup binds one, GH#8283); unbound, this is the bare
-		// filename in the process working directory, as before.
 		agentsPath: ProjectPath(config.SafeAgentsFile()),
 		stdout:     os.Stdout,
 		stderr:     os.Stderr,

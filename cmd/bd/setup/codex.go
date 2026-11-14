@@ -53,7 +53,7 @@ func defaultCodexEnv() (codexEnv, error) {
 	}
 	workDir, err := workingProjectDir()
 	if err != nil {
-		return codexEnv{}, err
+		return codexEnv{}, fmt.Errorf("working directory: %w", err)
 	}
 	return codexEnv{
 		stdout:     os.Stdout,

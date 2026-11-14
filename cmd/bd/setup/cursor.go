@@ -137,7 +137,7 @@ func InstallCursor(global bool) error {
 
 	fmt.Printf("\n✓ Cursor integration installed\n")
 	if !global {
-		fmt.Printf("  Rules: %s\n", cursorRulesTargetPath())
+		fmt.Printf("  Rules: %s\n", ProjectPath(cursorRulesPath))
 	}
 	fmt.Printf("  Skill: %s\n", agentSkillPath(skillEnv.projectDir))
 	fmt.Printf("  Hooks: %s (sessionStart, preCompact, postToolUse)\n", hooksPath)
@@ -183,10 +183,7 @@ func InstallCursorProjectTo(out ProjectInstallOutput) error {
 // (global). This is the same skill Codex installs; Cursor loads .agents/skills/
 // natively, so Cursor-only users get it too. See installAgentSkill.
 func cursorAgentSkillEnv(global bool) (agentSkillEnv, error) {
-	base, err := workingProjectDir()
-	if err != nil {
-		return agentSkillEnv{}, err
-	}
+	base := ProjectPath(".")
 	if global {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -207,15 +204,8 @@ func cursorAgentSkillEnv(global bool) (agentSkillEnv, error) {
 	}, nil
 }
 
-// cursorRulesTargetPath is where the project rules file lives: under the
-// selected project (the -C target while bd setup binds one, GH#8283), else
-// the process working directory, spelled relatively as before.
-func cursorRulesTargetPath() string {
-	return ProjectPath(cursorRulesPath)
-}
-
 func installCursorRules() error {
-	rulesPath := cursorRulesTargetPath()
+	rulesPath := ProjectPath(cursorRulesPath)
 	if err := EnsureDir(filepath.Dir(rulesPath), 0o755); err != nil {
 		return err
 	}
