@@ -257,6 +257,10 @@ func SettleMerge(ctx context.Context, db DBConn, mergeErr error, preMergeClean b
 // resolved with it. FK cascade violations a resolution can leave behind
 // (bd-6dnrw.4) are still repaired — or refused — exactly like SettleMerge, so
 // a strategy-resolved merge can never silently commit a violated working set.
+// That includes a conflict-free merge whose only artifact is the violation
+// itself (bd-sesknw): applying the peer's clean changes can insert a child
+// row whose parent issue this side deleted, and a merge reported successful
+// with the violation — or the open merge — left behind wedges the next one.
 //
 // db must be a single session (a pinned *sql.Conn, or a *sql.DB used
 // sequentially whose pool holds one connection) — see MergeAndSettle for why:
@@ -308,6 +312,39 @@ func MergeWithStrategy(ctx context.Context, db DBConn, ref, author, strategy str
 	}
 
 	if len(conflicts) == 0 {
+		// bd-sesknw (GH#5564): a conflict-free merge is not necessarily a
+		// settled one. Applying the other side cleanly can leave FK cascade
+		// violations behind — a child row whose parent issue was deleted on
+		// this side (bd-6dnrw.4) — which DOLT_MERGE reports as its own error
+		// or, under the flags above, leaves in the working set. Repair them
+		// exactly like SettleMerge before deciding the merge failed, so a
+		// strategy merge can never commit (or refuse to commit) a violated
+		// working set; a repaired merge concludes with its full result.
+		repaired, had, violErr := TryRepairFKCascadeViolations(ctx, db)
+		if violErr != nil {
+			abortMerge(ctx, db, preMergeClean)
+			if mergeErr != nil {
+				return nil, fmt.Errorf("merge branch %s: %w", ref, mergeErr)
+			}
+			return nil, violErr
+		}
+		if had && !repaired {
+			abortMerge(ctx, db, preMergeClean)
+			if mergeErr != nil {
+				return nil, fmt.Errorf("merge branch %s: %w", ref, mergeErr)
+			}
+			return nil, fmt.Errorf("merge branch %s left constraint violations bd cannot auto-repair; inspect dolt_constraint_violations and resolve before retrying", ref)
+		}
+		if repaired {
+			if err := CommitSettledMerge(ctx, db, false, true); err != nil {
+				abortMerge(ctx, db, preMergeClean)
+				if mergeErr != nil {
+					return nil, fmt.Errorf("merge branch %s: %w", ref, mergeErr)
+				}
+				return nil, err
+			}
+			return nil, nil
+		}
 		if mergeErr != nil {
 			// Not a conflict: some other merge failure (unknown branch, dirty
 			// working set, ...). Nothing to resolve — surface it as-is.

@@ -370,3 +370,64 @@ func TestFederationSyncNoStrategyStillErrorsWithGuidance(t *testing.T) {
 	}
 	assertSyncConcluded(t, f.db, ctx)
 }
+
+// TestFederationSyncStrategyRepairsFKCascade covers GH#5564 AC-6: local
+// commits an issue delete, the peer commits a label referencing it — the
+// delete-vs-insert divergence with no row conflicts (bd-6dnrw.4). The
+// strategy merge must apply the FK's cascade delete, conclude the merge, and
+// push a committed result; a reported success that left an open merge or a
+// violated working set would wedge the next sync.
+func TestFederationSyncStrategyRepairsFKCascade(t *testing.T) {
+	const issueID = "fsspeer-fk"
+	f := setupSyncPeerClone(t, issueID)
+
+	f.peerExec(t, "peer label insert",
+		fmt.Sprintf("INSERT INTO labels (issue_id, label) VALUES ('%s', 'late-label')", issueID))
+	f.peerExec(t, "peer commit", "CALL DOLT_COMMIT('-Am', 'peer adds label')")
+	f.peerExec(t, "peer push", "CALL DOLT_PUSH('origin', 'main')")
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+	if _, err := f.db.ExecContext(ctx, "DELETE FROM issues WHERE id = ?", issueID); err != nil {
+		t.Fatalf("delete issue: %v", err)
+	}
+	if _, err := f.db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'delete issue')"); err != nil {
+		t.Fatalf("commit delete: %v", err)
+	}
+
+	result, err := f.store.Sync(ctx, "peer", "theirs")
+	if err != nil {
+		t.Fatalf("Sync(--strategy theirs) should settle the FK cascade divergence, got: %v", err)
+	}
+	if !result.Merged || !result.Pushed {
+		t.Errorf("Sync result = merged:%v pushed:%v; want both true", result.Merged, result.Pushed)
+	}
+
+	var dangling int
+	if err := f.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM labels WHERE issue_id = ?", issueID).Scan(&dangling); err != nil {
+		t.Fatalf("count dangling labels: %v", err)
+	}
+	if dangling != 0 {
+		t.Errorf("%d dangling label row(s) survive the sync", dangling)
+	}
+	var violations int
+	if err := f.db.QueryRowContext(ctx,
+		"SELECT COALESCE(SUM(num_violations),0) FROM dolt_constraint_violations").Scan(&violations); err != nil {
+		t.Fatalf("read dolt_constraint_violations: %v", err)
+	}
+	if violations != 0 {
+		t.Errorf("%d constraint violation(s) survive the sync", violations)
+	}
+	assertSyncConcluded(t, f.db, ctx)
+
+	// The pushed result must carry the repair, not the dangling row.
+	f.peerExec(t, "peer fetch", "CALL DOLT_FETCH('origin')")
+	var remoteLabels int
+	peerScalar(t, f,
+		fmt.Sprintf("SELECT COUNT(*) FROM labels AS OF 'remotes/origin/main' WHERE issue_id = '%s'", issueID),
+		&remoteLabels)
+	if remoteLabels != 0 {
+		t.Errorf("peer remote carries %d dangling label(s); the push did not carry the repair", remoteLabels)
+	}
+}

@@ -53,6 +53,7 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 		expectConflictFlags(mock)
 		expectDrainedCall(mock, "CALL DOLT_MERGE('--author', ?, ?)", testAuthor, "feature")
 		expectConflicts(mock)
+		expectNoViolations(mock)
 
 		conflicts, err := MergeWithStrategy(context.Background(), rec, "feature", testAuthor, "theirs")
 		if err != nil || conflicts != nil {
@@ -73,6 +74,49 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 			t.Fatalf("MergeWithStrategy = (%v, %v), want (one conflict, nil)", conflicts, err)
 		}
 		rec.assertDrained(t, mock)
+	})
+
+	// A conflict-free strategy merge whose only artifact is an FK cascade
+	// violation (bd-sesknw / GH#5564, mirroring settle_merge_fk_repair_only):
+	// the repair supersedes even the merge statement's own constraint-violation
+	// error, and the merge is concluded with its full result.
+	t.Run("merge_with_strategy_fk_repair_only", func(t *testing.T) {
+		for name, mergeErr := range map[string]error{
+			"merge statement succeeds": nil,
+			"merge statement reports the violation": errors.New(
+				"Error 1105: Committing this transaction resulted in a working set with constraint violations, transaction rolled back"),
+		} {
+			t.Run(name, func(t *testing.T) {
+				rec, mock := newDrainMock(t)
+				expectWorkingSetClean(mock)
+				expectConflictFlags(mock)
+				if mergeErr != nil {
+					mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_MERGE('--author', ?, ?)")).
+						WithArgs(testAuthor, "feature").WillReturnError(mergeErr)
+				} else {
+					expectDrainedCall(mock, "CALL DOLT_MERGE('--author', ?, ?)", testAuthor, "feature")
+				}
+				expectConflicts(mock)
+				expectViolations(mock, "labels")
+				mock.ExpectQuery(regexp.QuoteMeta("SELECT violation_type, violation_info FROM dolt_constraint_violations_labels")).
+					WillReturnRows(sqlmock.NewRows([]string{"violation_type", "violation_info"}).
+						AddRow("foreign key", `{"ReferencedTable":"issues"}`))
+				mock.ExpectExec(regexp.QuoteMeta(fkCascadeRepairDeletes["labels"])).
+					WillReturnResult(sqlmock.NewResult(0, 2))
+				mock.ExpectExec(regexp.QuoteMeta("DELETE FROM dolt_constraint_violations_labels")).
+					WillReturnResult(sqlmock.NewResult(0, 1))
+				expectDrainedCall(mock, "CALL DOLT_ADD('labels')")
+				expectNoViolations(mock)
+				expectMergeResult(mock, "config")
+				expectDrainedCall(mock, "CALL DOLT_COMMIT('-m', ?)", fkRepairCommitMsg)
+
+				conflicts, err := MergeWithStrategy(context.Background(), rec, "feature", testAuthor, "theirs")
+				if err != nil || conflicts != nil {
+					t.Fatalf("MergeWithStrategy = (%v, %v), want (nil, nil) — the repair must supersede the violation", conflicts, err)
+				}
+				rec.assertDrained(t, mock)
+			})
+		}
 	})
 
 	// The unauthored commit form (the proxied-server plane's) drains too.
@@ -260,6 +304,7 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 					mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_MERGE('--author', ?, ?)")).
 						WithArgs(testAuthor, "feature").WillReturnError(cause)
 					expectConflicts(mock)
+					expectNoViolations(mock)
 					expectDrainedCall(mock, "CALL DOLT_MERGE('--abort')")
 				},
 				run: func(db DBConn) error {
@@ -276,11 +321,55 @@ func TestMergeSettleDrainsCallResultSets(t *testing.T) {
 					mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_MERGE('--author', ?, ?)")).
 						WithArgs(testAuthor, "feature").WillReturnError(upToDate)
 					expectConflicts(mock)
+					expectNoViolations(mock)
 				},
 				run: func(db DBConn) error {
 					_, err := MergeWithStrategy(ctx, db, "feature", testAuthor, "theirs")
 					return err
 				},
+			},
+			{
+				// bd-sesknw: a conflict-free merge whose violations the repair
+				// refuses (unknown table) aborts with the merge error, which
+				// takes precedence over the generic refusal text.
+				name: "MergeWithStrategy unrepaired violations refuse",
+				setup: func(mock sqlmock.Sqlmock, cause error) {
+					expectWorkingSetClean(mock)
+					expectConflictFlags(mock)
+					mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_MERGE('--author', ?, ?)")).
+						WithArgs(testAuthor, "feature").WillReturnError(cause)
+					expectConflicts(mock)
+					expectViolations(mock, "wisps") // not in the repair allowlist
+					expectDrainedCall(mock, "CALL DOLT_MERGE('--abort')")
+				},
+				run: func(db DBConn) error {
+					_, err := MergeWithStrategy(ctx, db, "feature", testAuthor, "theirs")
+					return err
+				},
+				want: "merge branch feature: injected",
+			},
+			{
+				// bd-sesknw: a repair-deleted-table error on the clean path
+				// aborts and surfaces the repair error verbatim (the merge
+				// statement itself succeeded, so nothing masks it).
+				name: "MergeWithStrategy FK repair delete",
+				setup: func(mock sqlmock.Sqlmock, cause error) {
+					expectWorkingSetClean(mock)
+					expectConflictFlags(mock)
+					expectDrainedCall(mock, "CALL DOLT_MERGE('--author', ?, ?)", testAuthor, "feature")
+					expectConflicts(mock)
+					expectViolations(mock, "labels")
+					mock.ExpectQuery(regexp.QuoteMeta("SELECT violation_type, violation_info FROM dolt_constraint_violations_labels")).
+						WillReturnRows(sqlmock.NewRows([]string{"violation_type", "violation_info"}).
+							AddRow("foreign key", `{"ReferencedTable":"issues"}`))
+					mock.ExpectExec(regexp.QuoteMeta(fkCascadeRepairDeletes["labels"])).WillReturnError(cause)
+					expectDrainedCall(mock, "CALL DOLT_MERGE('--abort')")
+				},
+				run: func(db DBConn) error {
+					_, err := MergeWithStrategy(ctx, db, "feature", testAuthor, "theirs")
+					return err
+				},
+				want: "cascade-repair labels: injected",
 			},
 			{
 				name: "MergeWithStrategy DOLT_ADD",
