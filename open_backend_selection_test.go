@@ -892,4 +892,37 @@ func TestOpenBestAvailableRefusesProxiedServerWorkspace(t *testing.T) {
 			}
 		})
 	}
+
+	// A registered extension backend whose metadata also carries dolt_mode
+	// "proxied-server" must keep dispatching to the registry, unchanged from
+	// main: IsDoltProxiedServerMode is Dolt-only, so the new refusal must not
+	// hijack the workspace before the registry claims it.
+	t.Run("registered-backend-dispatch-unchanged", func(t *testing.T) {
+		const backendName = "registry-proxied-mode"
+		registerWorkspaceBackend(t, backendName)
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+			t.Fatalf("create .beads: %v", err)
+		}
+		metadata := `{"backend":"` + backendName + `","dolt_mode":"proxied-server"}`
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o600); err != nil {
+			t.Fatalf("write metadata.json: %v", err)
+		}
+		opens := map[string]func(context.Context, string) (beads.Storage, error){
+			"OpenBestAvailable": beads.OpenBestAvailable,
+			"OpenBestAvailableWith": func(ctx context.Context, dir string) (beads.Storage, error) {
+				return beads.OpenBestAvailableWith(ctx, dir, beads.OpenOptions{})
+			},
+		}
+		for openName, open := range opens {
+			store, err := open(t.Context(), beadsDir)
+			if store != nil {
+				_ = store.Close()
+				t.Fatalf("%s returned a store instead of the backend's own result", openName)
+			}
+			if !errors.Is(err, errRegistryBackendOpen) {
+				t.Fatalf("%s error = %v, want the registered backend's Open sentinel (dispatch unchanged from main)", openName, err)
+			}
+		}
+	})
 }
