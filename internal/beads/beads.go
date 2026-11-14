@@ -730,6 +730,10 @@ func FindBeadsDirFrom(startDir string) string {
 				// FindBeadsDir step 3b by passing over the metadata-less
 				// store; the shared fallback after this walk (or a nested
 				// workspace found further up) answers for it.
+			} else if isJJSecondaryRoot && localStoreYieldsToShared(resolved, jjPrimaryBeadsDir) {
+				// GH#6552: jj secondary mirror of the worktree-root branch
+				// above; the primary workspace fallback after this walk
+				// answers for the metadata-less secondary store.
 			} else if hasBeadsProjectFiles(resolved) {
 				return resolved
 			}
@@ -1519,24 +1523,33 @@ func FindBeadsDir() string {
 		// 3'. JJ secondary fallback: mirror of step 3 for git worktrees
 		// (no 3'a — jj has no per-workspace redirect equivalent).
 		jjPrimaryRoot, jjPrimaryErr := git.GetJJPrimaryWorkspaceRoot()
+		jjSharedBeadsDir := ""
+		if jjPrimaryErr == nil && jjPrimaryRoot != "" {
+			jjSharedBeadsDir = filepath.Join(jjPrimaryRoot, ".beads")
+		}
 
 		// 3'b. Only accept the secondary's own .beads/ if it owns a real database.
 		// Otherwise it's git-tracked config inherited from the primary; fall through.
+		// A database-owning .beads with no workspace metadata of its own
+		// yields to the recognized primary workspace instead (GH#6552;
+		// step 3b owns the full explanation).
 		if jjSecondaryRoot != "" {
 			secondaryBeadsDir := filepath.Join(jjSecondaryRoot, ".beads")
 			if info, err := os.Stat(secondaryBeadsDir); err == nil && info.IsDir() {
-				if hasBeadsDatabase(secondaryBeadsDir) {
+				if localStoreYieldsToShared(secondaryBeadsDir, jjSharedBeadsDir) {
+					yieldedBeadsDir = secondaryBeadsDir
+				} else if hasBeadsDatabase(secondaryBeadsDir) {
 					return secondaryBeadsDir
 				}
-				// Lenient acceptance only when the primary has no DB to fall back to.
+				// Lenient acceptance only when the primary has no DB to fall back to,
+				// and never for a store this resolver just yielded to one.
 				primaryFallbackHasDB := false
-				if jjPrimaryErr == nil && jjPrimaryRoot != "" {
-					primaryBeadsDir := filepath.Join(jjPrimaryRoot, ".beads")
-					if pInfo, pErr := os.Stat(primaryBeadsDir); pErr == nil && pInfo.IsDir() {
-						primaryFallbackHasDB = hasBeadsDatabase(FollowRedirect(primaryBeadsDir))
+				if jjSharedBeadsDir != "" {
+					if pInfo, pErr := os.Stat(jjSharedBeadsDir); pErr == nil && pInfo.IsDir() {
+						primaryFallbackHasDB = hasBeadsDatabase(FollowRedirect(jjSharedBeadsDir))
 					}
 				}
-				if !primaryFallbackHasDB && hasBeadsProjectFiles(secondaryBeadsDir) {
+				if !primaryFallbackHasDB && yieldedBeadsDir == "" && hasBeadsProjectFiles(secondaryBeadsDir) {
 					return secondaryBeadsDir
 				}
 			}
@@ -1832,11 +1845,20 @@ func findDatabaseInTree() string {
 
 		// Separate-DB mode: only honor secondary's .beads/ if it owns a real DB;
 		// otherwise it's inherited git-tracked config and we want the primary.
+		// A database-owning .beads with no workspace metadata of its own
+		// yields to the recognized primary workspace instead (GH#6552;
+		// FindBeadsDir step 3'b owns the full explanation).
+		jjSharedBeadsDir := ""
+		if jjPrimaryErr == nil && jjPrimaryRoot != "" {
+			jjSharedBeadsDir = filepath.Join(jjPrimaryRoot, ".beads")
+		}
 		if jjSecondaryRoot != "" {
 			secondaryBeadsDir := filepath.Join(jjSecondaryRoot, ".beads")
 			if info, err := os.Stat(secondaryBeadsDir); err == nil && info.IsDir() {
 				if hasBeadsDatabase(secondaryBeadsDir) {
-					if dbPath := findDatabaseInBeadsDir(secondaryBeadsDir, true); dbPath != "" {
+					if localStoreYieldsToShared(secondaryBeadsDir, jjSharedBeadsDir) {
+						yieldedBeadsDir = secondaryBeadsDir
+					} else if dbPath := findDatabaseInBeadsDir(secondaryBeadsDir, true); dbPath != "" {
 						return dbPath
 					}
 				}

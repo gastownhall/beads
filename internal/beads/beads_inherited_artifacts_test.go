@@ -1487,3 +1487,92 @@ func TestFindBeadsDir_WorktreeMetadatalessStoreWarnsOnce(t *testing.T) {
 		}
 	}
 }
+
+// TestFindBeadsDir_JJSecondaryMetadatalessStoreYieldsToPrimary is GH#6552 in
+// a jj secondary workspace: an embedded store with no workspace metadata of
+// its own yields to the recognized primary workspace consistently in
+// directory, database-path and start-directory discovery.
+func TestFindBeadsDir_JJSecondaryMetadatalessStoreYieldsToPrimary(t *testing.T) {
+	unsetDiscoveryEnvForTest(t)
+
+	tmpDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	primaryDir := filepath.Join(tmpDir, "primary")
+	if err := os.MkdirAll(filepath.Join(primaryDir, ".jj", "repo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	secondaryDir := filepath.Join(primaryDir, "workspaces", "secondary")
+	if err := os.MkdirAll(filepath.Join(secondaryDir, ".jj"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	primaryRepoPath := filepath.Join(primaryDir, ".jj", "repo")
+	if err := os.WriteFile(filepath.Join(secondaryDir, ".jj", "repo"), []byte(primaryRepoPath+"\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := func() error {
+		cmd := exec.Command("git", "init")
+		cmd.Dir = primaryDir
+		return cmd.Run()
+	}(); err != nil {
+		t.Skipf("git not available: %v", err)
+	}
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := gitCommand(args...)
+		cmd.Dir = dir
+		out, gitErr := cmd.CombinedOutput()
+		if gitErr != nil {
+			t.Fatalf("git %v in %s: %v\n%s", args, dir, gitErr, out)
+		}
+	}
+	runGit(primaryDir, "config", "user.email", "test@example.com")
+	runGit(primaryDir, "config", "user.name", "Test User")
+
+	// Primary: recognized metadata-backed embedded workspace.
+	primaryBeadsDir := filepath.Join(primaryDir, ".beads")
+	if err := os.MkdirAll(filepath.Join(primaryBeadsDir, "embeddeddolt", "myproject"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(primaryBeadsDir, "metadata.json"),
+		[]byte(`{"backend":"dolt","dolt_mode":"embedded","dolt_database":"myproject"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(primaryDir, "README.md"), []byte("# Test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(primaryDir, "add", "README.md")
+	runGit(primaryDir, "commit", "-m", "initial")
+
+	// Secondary: a metadata-less phantom embedded store, nothing else.
+	secondaryBeadsDir := filepath.Join(secondaryDir, ".beads")
+	if err := os.MkdirAll(filepath.Join(secondaryBeadsDir, "embeddeddolt", "beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(secondaryDir)
+	git.ResetCaches()
+
+	primaryBeadsDirResolved := resolveForTest(t, primaryBeadsDir)
+
+	if got := FindBeadsDir(); resolveForTest(t, got) != primaryBeadsDirResolved {
+		t.Errorf("FindBeadsDir() = %q, want primary workspace .beads %q", got, primaryBeadsDir)
+	}
+	wantDB := filepath.Join(primaryBeadsDir, "embeddeddolt")
+	if got := FindDatabasePath(); resolveForTest(t, got) != resolveForTest(t, wantDB) {
+		t.Errorf("FindDatabasePath() = %q, want %q", got, wantDB)
+	}
+	if got := FindBeadsDirFrom(secondaryDir); resolveForTest(t, got) != primaryBeadsDirResolved {
+		t.Errorf("FindBeadsDirFrom(secondaryDir) = %q, want primary workspace .beads %q", got, primaryBeadsDir)
+	}
+	subDir := filepath.Join(secondaryDir, "src", "pkg")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := FindBeadsDirFrom(subDir); resolveForTest(t, got) != primaryBeadsDirResolved {
+		t.Errorf("FindBeadsDirFrom(subDir) = %q, want primary workspace .beads %q", got, primaryBeadsDir)
+	}
+}
