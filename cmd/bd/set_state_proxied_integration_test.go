@@ -4,7 +4,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"reflect"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -139,6 +143,49 @@ func TestProxiedServerSetState(t *testing.T) {
 		labels := getProxiedLabels(t, db, m.ID)
 		if !containsStr(labels, "phase:planning") || !containsStr(labels, "env:staging") {
 			t.Errorf("expected both phase:planning and env:staging labels, got %v", labels)
+		}
+	})
+
+	// GH#5657: two set-state calls that overlap on one issue each read
+	// {state:a, keep} and each swap the dimension. Without a conflict the two
+	// swaps merged into {state:b, state:c, keep}; the dimension must end with
+	// exactly one of the requested values. The race is a timing window, so it
+	// runs a bounded number of rounds, each on a fresh issue.
+	t.Run("overlapping_set_state_leaves_one_value", func(t *testing.T) {
+		const rounds = 8
+		for round := 0; round < rounds; round++ {
+			target := bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Overlapping set-state %d", round))
+			for _, label := range []string{"state:a", "keep"} {
+				if out, err := bdProxiedRun(t, bd, p.dir, "label", "add", target.ID, label); err != nil {
+					t.Fatalf("seed label %s: %v\n%s", label, err, out)
+				}
+			}
+			specs := []string{"state=b", "state=c"}
+			errs := make([]error, len(specs))
+			outs := make([][]byte, len(specs))
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			for i, spec := range specs {
+				wg.Add(1)
+				go func(i int, spec string) {
+					defer wg.Done()
+					<-start
+					outs[i], errs[i] = bdProxiedRun(t, bd, p.dir, "set-state", target.ID, spec)
+				}(i, spec)
+			}
+			close(start)
+			wg.Wait()
+			for i, err := range errs {
+				if err != nil {
+					t.Fatalf("round %d: set-state %s: %v\n%s", round, specs[i], err, outs[i])
+				}
+			}
+
+			labels := getProxiedLabels(t, openProxiedDB(t, p), target.ID)
+			sort.Strings(labels)
+			if !reflect.DeepEqual(labels, []string{"keep", "state:b"}) && !reflect.DeepEqual(labels, []string{"keep", "state:c"}) {
+				t.Fatalf("round %d: labels after overlapping set-state = %v, want keep plus exactly one of state:b / state:c", round, labels)
+			}
 		}
 	})
 
