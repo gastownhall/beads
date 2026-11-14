@@ -76,7 +76,7 @@ func CursorManagedHookEvents(config map[string]interface{}) []string {
 // only.
 func cursorHooksTargetPath(global bool) (string, error) {
 	if !global {
-		return cursorHooksPath, nil
+		return ProjectPath(cursorHooksPath), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -137,7 +137,7 @@ func InstallCursor(global bool) error {
 
 	fmt.Printf("\n✓ Cursor integration installed\n")
 	if !global {
-		fmt.Printf("  Rules: %s\n", cursorRulesPath)
+		fmt.Printf("  Rules: %s\n", cursorRulesTargetPath())
 	}
 	fmt.Printf("  Skill: %s\n", agentSkillPath(skillEnv.projectDir))
 	fmt.Printf("  Hooks: %s (sessionStart, preCompact, postToolUse)\n", hooksPath)
@@ -171,7 +171,7 @@ func InstallCursorProjectTo(out ProjectInstallOutput) error {
 	if err := installAgentSkill(skillEnv); err != nil {
 		return err
 	}
-	if err := installCursorHooks(cursorHooksPath); err != nil {
+	if err := installCursorHooks(ProjectPath(cursorHooksPath)); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintln(out.stdout(), "✓ Cursor integration installed (rules + skill + hooks)")
@@ -183,7 +183,10 @@ func InstallCursorProjectTo(out ProjectInstallOutput) error {
 // (global). This is the same skill Codex installs; Cursor loads .agents/skills/
 // natively, so Cursor-only users get it too. See installAgentSkill.
 func cursorAgentSkillEnv(global bool) (agentSkillEnv, error) {
-	base := "."
+	base, err := workingProjectDir()
+	if err != nil {
+		return agentSkillEnv{}, err
+	}
 	if global {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -204,11 +207,19 @@ func cursorAgentSkillEnv(global bool) (agentSkillEnv, error) {
 	}, nil
 }
 
+// cursorRulesTargetPath is where the project rules file lives: under the
+// selected project (the -C target while bd setup binds one, GH#8283), else
+// the process working directory, spelled relatively as before.
+func cursorRulesTargetPath() string {
+	return ProjectPath(cursorRulesPath)
+}
+
 func installCursorRules() error {
-	if err := EnsureDir(filepath.Dir(cursorRulesPath), 0o755); err != nil {
+	rulesPath := cursorRulesTargetPath()
+	if err := EnsureDir(filepath.Dir(rulesPath), 0o755); err != nil {
 		return err
 	}
-	if err := atomicWriteFile(cursorRulesPath, []byte(cursorRulesTemplate)); err != nil {
+	if err := atomicWriteFile(rulesPath, []byte(cursorRulesTemplate)); err != nil {
 		return fmt.Errorf("write rules: %w", err)
 	}
 	return nil
