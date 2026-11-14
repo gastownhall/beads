@@ -40,6 +40,7 @@ go_test(
     srcs = [
         "agents_file_test.go",
         "config_test.go",
+        "federation_allowed_remote_patterns_test.go",
         "git_routing_test.go",
         "permissions_linux_test.go",
         "permissions_test.go",

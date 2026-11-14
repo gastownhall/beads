@@ -11,6 +11,7 @@ go_library(
     deps = [
         "//internal/configfile",
         "//internal/debug",
+        "//internal/doltremote",
         "//internal/doltversion",
         "//internal/githooksenv",
         "//internal/gittraceenv",
@@ -25,6 +26,7 @@ go_test(
     srcs = [
         "cache_test.go",
         "doltcmd_test.go",
+        "remote_policy_test.go",
         "url_test.go",
         "version_floor_test.go",
     ],

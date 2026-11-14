@@ -7,6 +7,8 @@ import (
 	"path"
 	"regexp"
 	"strings"
+
+	"github.com/steveyegge/beads/internal/doltremote"
 )
 
 // remoteSchemes lists URL scheme prefixes recognized as dolt remote URLs.
@@ -323,6 +325,72 @@ func ValidateRemoteURLWithPatterns(rawURL string, patterns []string) error {
 		}
 	}
 	return fmt.Errorf("remote URL %q does not match any allowed pattern", rawURL)
+}
+
+// RemotePolicyError is the refusal every federation.allowed-remote-patterns
+// gate returns: the allowlist is configured and the destination is outside
+// it, or the destination could not be resolved far enough to check. It is a
+// distinct type so callers can classify a policy refusal (never retried,
+// never converted to a benign no-remote result) without matching message
+// text.
+//
+// Subject names what was refused — a config key ("federation.remote",
+// "sync.remote") or a remote/peer name ("remote \"origin\""). Cause is a
+// short, credential-free explanation. Neither field carries the URL or the
+// patterns: both can embed userinfo (https://user:token@host/...) and a
+// refusal is echoed into errors, hints and JSON by every layer above.
+type RemotePolicyError struct {
+	Subject string
+	Cause   string
+}
+
+func (e *RemotePolicyError) Error() string {
+	return fmt.Sprintf("%s is refused by federation.allowed-remote-patterns: %s", e.Subject, e.Cause)
+}
+
+// ValidateRemoteWithPolicy enforces the federation.allowed-remote-patterns
+// allowlist (patterns) against rawURL and returns nil when the destination is
+// allowed. This is the one shared gate every runtime enforcement point and
+// the config lint call (GH#6233); ValidateRemoteURLWithPatterns above stays
+// for callers that match the raw spelling.
+//
+// patterns is the effective config value: absent or empty means the setting
+// is off, and the call is a no-op — enforcement is opt-in and must not change
+// any behavior of a workspace that never configured a list. Blank entries
+// are kept: path.Match("", url) never matches, so a list of blank entries
+// denies every remote rather than allowing all of them, and dropping them
+// would turn a deny-all list into an allow-all one.
+//
+// The destination is evaluated in its Dolt-normalized form
+// (doltremote.Normalize), the same transform registration applies through
+// doltRemoteURL before the URL reaches Dolt. Typed and registered spellings
+// of one destination therefore get one verdict: https://github.com/org/repo
+// and git+https://github.com/org/repo both satisfy git+https://github.com/org/*
+// and neither satisfies a different organization's pattern. Patterns
+// themselves are matched literally (path.Match semantics): * does not cross
+// /, and a malformed entry matches nothing rather than failing the check.
+//
+// Under a non-empty list the normalized destination must also pass the
+// structural validation (ValidateRemoteURL), so no pattern — not even "*" —
+// can admit a URL the structural rules refuse. The error is always a
+// *RemotePolicyError and names subject without echoing the URL or patterns.
+func ValidateRemoteWithPolicy(patterns []string, subject, rawURL string) error {
+	if len(patterns) == 0 {
+		return nil
+	}
+	dest := doltremote.Normalize(rawURL)
+	if err := ValidateRemoteURL(dest); err != nil {
+		// The structural detail is dropped, not wrapped: url.Parse errors
+		// embed the raw URL, and the lint reports structural problems
+		// separately with its own redacted wording.
+		return &RemotePolicyError{Subject: subject, Cause: "its remote URL is not structurally valid"}
+	}
+	for _, p := range patterns {
+		if MatchesRemotePattern(dest, p) {
+			return nil
+		}
+	}
+	return &RemotePolicyError{Subject: subject, Cause: "its remote URL matches no pattern in the list"}
 }
 
 func sortedSchemes() []string {

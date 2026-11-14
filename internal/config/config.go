@@ -1401,15 +1401,34 @@ type FederationConfig struct {
 	Remote       string      // dolthub://org/beads, gs://bucket/beads, s3://bucket/beads
 	Sovereignty  Sovereignty // T1, T2, T3, T4
 	ExcludeTypes []string    // issue types excluded from federation push (e.g. ["wisp"])
+	// AllowedRemotePatterns is the federation.allowed-remote-patterns
+	// allowlist, enforced at remote registration and transfer (see
+	// AllowedRemotePatterns). Empty means unrestricted.
+	AllowedRemotePatterns []string
 }
 
 // GetFederationConfig returns the current federation configuration.
 func GetFederationConfig() FederationConfig {
 	return FederationConfig{
-		Remote:       GetString("federation.remote"),
-		Sovereignty:  GetSovereignty(),
-		ExcludeTypes: GetStringSlice("federation.exclude_types"),
+		Remote:                GetString("federation.remote"),
+		Sovereignty:           GetSovereignty(),
+		ExcludeTypes:          GetStringSlice("federation.exclude_types"),
+		AllowedRemotePatterns: AllowedRemotePatterns(),
 	}
+}
+
+// AllowedRemotePatterns returns the effective
+// federation.allowed-remote-patterns allowlist from the merged configuration
+// (workspace config.yaml over the user config, with the BD_* environment on
+// top). An absent or empty list means "unrestricted": every gate reading it
+// becomes a no-op, so configuring nothing changes nothing.
+//
+// Blank entries are preserved on purpose. A non-empty list is
+// deny-by-default and a blank pattern matches no URL, so a list of blank
+// entries denies every remote; dropping them here would silently turn that
+// deny-all list into an allow-all one.
+func AllowedRemotePatterns() []string {
+	return GetStringSlice("federation.allowed-remote-patterns")
 }
 
 // GetCustomTypesFromYAML retrieves custom issue types from config.yaml.
