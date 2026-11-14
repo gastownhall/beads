@@ -1109,3 +1109,50 @@ func TestFindBeadsDir_WorktreeMetadatalessStoreYieldsToSharedWorkspace(t *testin
 		})
 	}
 }
+
+// TestFindBeadsDirFrom_WorktreeMetadatalessStoreYieldsToSharedWorkspace is
+// GH#6552 with the process cwd outside the repository: FindBeadsDirFrom must
+// resolve the shared main workspace for the worktree root and for a
+// directory inside it, instead of the worktree's metadata-less phantom
+// store.
+func TestFindBeadsDirFrom_WorktreeMetadatalessStoreYieldsToSharedWorkspace(t *testing.T) {
+	unsetDiscoveryEnvForTest(t)
+
+	fx := newGH6552Fixture(t,
+		`{"backend":"dolt","dolt_mode":"embedded","dolt_database":"myproject"}`,
+		filepath.Join("embeddeddolt", "myproject"),
+		"beads")
+
+	// The process cwd stays outside the repository, so only the explicit
+	// startDir arguments reach the worktree.
+	outside := filepath.Join(fx.tmpDir, "unrelated")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(outside)
+	git.ResetCaches()
+
+	mainBeads := resolveForTest(t, fx.mainBeadsDir)
+	subDir := filepath.Join(fx.worktreeDir, "src", "pkg")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, start := range []struct {
+		name string
+		dir  string
+	}{
+		{"worktree root", fx.worktreeDir},
+		{"subdirectory", subDir},
+	} {
+		t.Run(start.name, func(t *testing.T) {
+			got := FindBeadsDirFrom(start.dir)
+			if got == "" {
+				t.Fatalf("FindBeadsDirFrom(%q) = empty, want shared .beads %q", start.dir, fx.mainBeadsDir)
+			}
+			if resolved := resolveForTest(t, got); resolved != mainBeads {
+				t.Errorf("FindBeadsDirFrom(%q) = %q, want shared .beads %q (GH#6552: the metadata-less worktree store must yield)", start.dir, got, fx.mainBeadsDir)
+			}
+		})
+	}
+}

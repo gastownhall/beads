@@ -723,6 +723,13 @@ func FindBeadsDirFrom(startDir string) string {
 				// A jj secondary workspace can likewise contain inherited
 				// .beads metadata without the ignored database directory.
 				// Match FindBeadsDir by preferring the primary workspace DB.
+			} else if isWorktreeRoot && localStoreYieldsToShared(resolved, fallbackBeadsDir) {
+				// GH#6552: the worktree root owns a database directory but
+				// no workspace metadata of its own, while the shared
+				// workspace is recognized by readable metadata. Match
+				// FindBeadsDir step 3b by passing over the metadata-less
+				// store; the shared fallback after this walk (or a nested
+				// workspace found further up) answers for it.
 			} else if hasBeadsProjectFiles(resolved) {
 				return resolved
 			}
