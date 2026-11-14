@@ -256,3 +256,87 @@ func TestFederationSyncStrategyOursKeepsLocalAndConcludesMerge(t *testing.T) {
 		t.Errorf("HEAD's history contains %d of the 2 pre-merge heads; the merge was not concluded as a two-parent commit", ancestors)
 	}
 }
+
+// TestFederationSyncStrategyConfigConflictConverges covers GH#5564 AC-3: a
+// config key diverged on both clones is resolved by the strategy, committed
+// as part of the concluded merge (config included — GH#2455's plain-Commit
+// exclusion is what used to wedge config-only resolutions), and a repeat
+// sync with no new peer edits neither fails nor leaves an open merge.
+func TestFederationSyncStrategyConfigConflictConverges(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		key      string
+		local    string
+		peer     string
+		strategy string
+		want     string
+	}{
+		// A non-memory config key is a real semantic conflict the
+		// auto-resolver always declines; the strategy resolves it.
+		{name: "issue_prefix theirs", key: "issue_prefix", local: "fss-loc", peer: "fss-peer", strategy: "theirs", want: "fss-peer"},
+		// kv.memory.* rows are the config class memory sync rides on; an
+		// add/add conflict on one resolves with ours like any other table.
+		{name: "kv.memory ours", key: "kv.memory.fss-cfg", local: "local-kept", peer: "peer-edit", strategy: "ours", want: "local-kept"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := setupSyncPeerClone(t, "fsscfg-"+tc.strategy)
+
+			f.peerExec(t, "peer config edit",
+				fmt.Sprintf("REPLACE INTO config (`key`, value) VALUES ('%s', '%s')", tc.key, tc.peer))
+			f.peerExec(t, "peer commit", "CALL DOLT_COMMIT('-Am', 'peer config edit')")
+			f.peerExec(t, "peer push", "CALL DOLT_PUSH('origin', 'main')")
+
+			ctx, cancel := testContext(t)
+			defer cancel()
+			if _, err := f.db.ExecContext(ctx,
+				"REPLACE INTO config (`key`, value) VALUES (?, ?)", tc.key, tc.local); err != nil {
+				t.Fatalf("local config edit: %v", err)
+			}
+			if _, err := f.db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'local config edit')"); err != nil {
+				t.Fatalf("commit local config edit: %v", err)
+			}
+
+			result, err := f.store.Sync(ctx, "peer", tc.strategy)
+			if err != nil {
+				t.Fatalf("Sync(--strategy %s) should resolve the config conflict, got: %v", tc.strategy, err)
+			}
+			if !result.Merged || !result.ConflictsResolved {
+				t.Errorf("Sync result = merged:%v conflictsResolved:%v; want both true",
+					result.Merged, result.ConflictsResolved)
+			}
+
+			// The chosen value is committed in HEAD, not just sitting in the
+			// working set, and config has no pending merge changes left.
+			for _, q := range []string{
+				fmt.Sprintf("SELECT value FROM config AS OF 'HEAD' WHERE `key` = '%s'", tc.key),
+				fmt.Sprintf("SELECT value FROM config WHERE `key` = '%s'", tc.key),
+			} {
+				var value string
+				if err := f.db.QueryRowContext(ctx, q).Scan(&value); err != nil {
+					t.Fatalf("read config (%q): %v", q, err)
+				}
+				if value != tc.want {
+					t.Errorf("config %s = %q (%q), want %q", tc.key, value, q, tc.want)
+				}
+			}
+			var dirtyConfig int
+			if err := f.db.QueryRowContext(ctx,
+				"SELECT COUNT(*) FROM dolt_status WHERE table_name = 'config'").Scan(&dirtyConfig); err != nil {
+				t.Fatalf("count dolt_status config rows: %v", err)
+			}
+			if dirtyConfig != 0 {
+				t.Errorf("config still has %d pending change(s); the resolution was not committed", dirtyConfig)
+			}
+			assertSyncConcluded(t, f.db, ctx)
+
+			// Repeat with no new peer edits: neither call may fail or leave
+			// an open merge behind. (The repeat may commit advisory
+			// metadata — the last-sync timestamp — so identical HEAD is not
+			// required.)
+			if _, err := f.store.Sync(ctx, "peer", tc.strategy); err != nil {
+				t.Fatalf("repeat Sync should find nothing to merge, got: %v", err)
+			}
+			assertSyncConcluded(t, f.db, ctx)
+		})
+	}
+}
