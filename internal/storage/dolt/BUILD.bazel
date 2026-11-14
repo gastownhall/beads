@@ -297,6 +297,7 @@ go_test(
         "lenient_open_dirty_tables_integration_test.go",
         "lifecycle_close_reopen_contract_test.go",
         "lifecycle_create_contract_test.go",
+        "lifecycle_delete_sweep_publication_ordering_test.go",
         "lifecycle_role_hooks_test.go",
         "lifecycle_update_contract_test.go",
         "lock_error_test.go",
