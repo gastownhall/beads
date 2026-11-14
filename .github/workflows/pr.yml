@@ -70,7 +70,7 @@ jobs:
   # out.
   scope:
     name: Scope
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository == 'gastownhall/beads' && (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -110,7 +110,7 @@ jobs:
     name: Fast checks (frozen migrations, .beads diff)
     needs: scope
     if: ${{ needs.scope.outputs.linux == 'true' }}
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository == 'gastownhall/beads' && (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 10
     outputs:
       migration-hygiene: ${{ steps.migration-hygiene.outcome }}
@@ -189,7 +189,7 @@ jobs:
     name: Test (Windows) cmd/bd liveness regression
     needs: scope
     if: ${{ needs.scope.outputs.platforms == 'true' }}
-    runs-on: ${{ 'blacksmith-4vcpu-windows-2025' }}
+    runs-on: ${{ github.repository == 'gastownhall/beads' && 'blacksmith-4vcpu-windows-2025' || 'windows-2025' }}
     # F7b review fix (S6): raised from 15 to 20, matching open PR #7143's own
     # measurement on this exact job (retained runs take about 8m; one run's
     # own step timing showed 451s total with a 403s compile step) and
@@ -308,7 +308,7 @@ jobs:
     name: Test (Windows) small packages (doltversion, dbproxy server)
     needs: scope
     if: ${{ needs.scope.outputs.platforms == 'true' }}
-    runs-on: ${{ 'blacksmith-2vcpu-windows-2025' }}
+    runs-on: ${{ github.repository == 'gastownhall/beads' && 'blacksmith-2vcpu-windows-2025' || 'windows-2025' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -366,7 +366,7 @@ jobs:
     name: Worktree remove boundary (Windows)
     needs: scope
     if: ${{ needs.scope.outputs.platforms == 'true' }}
-    runs-on: ${{ 'blacksmith-4vcpu-windows-2025' }}
+    runs-on: ${{ github.repository == 'gastownhall/beads' && 'blacksmith-4vcpu-windows-2025' || 'windows-2025' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -430,7 +430,7 @@ jobs:
     name: Check doc flags freshness
     needs: scope
     if: ${{ needs.scope.outputs.linux == 'true' }}
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository == 'gastownhall/beads' && (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -762,7 +762,7 @@ jobs:
     name: Advisory reports (examples build, complexity)
     needs: scope
     if: ${{ needs.scope.outputs.advisory == 'true' }}
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository == 'gastownhall/beads' && (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     # Review N-2 (2026-10-03): step timeouts sum to 42 min; 60 (not 45) keeps
     # job setup/post overhead from turning a stacked near-timeout stall into a
     # job-level cancel, which would red this advisory check through "another
@@ -916,7 +916,7 @@ jobs:
     name: Windows Make shell (native, msys2, cygwin)
     needs: scope
     if: ${{ needs.scope.outputs.platforms == 'true' }}
-    runs-on: ${{ 'blacksmith-4vcpu-windows-2025' }}
+    runs-on: ${{ github.repository == 'gastownhall/beads' && 'blacksmith-4vcpu-windows-2025' || 'windows-2025' }}
     # Above the step caps' sum (34) plus 5 minutes for the uncapped steps, so
     # a fallback that runs to its cap fails its own step and the later legs
     # still run (TestWindowsMakeShellNetworkFallbacksAreBoundedAndRetried).
@@ -1552,7 +1552,7 @@ jobs:
     # GitHub-saved cache. Must match the TestSameRepoBlacksmithRunners pin;
     # the gate's NAME must never change (ruleset requires exactly "CI Gate /
     # Required").
-    runs-on: ${{ (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository == 'gastownhall/beads' && (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')) && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     # F3: now on Blacksmith for same-repo PRs; a hang used to burn only the
     # default 360 minutes of a free GitHub-hosted runner, now Blacksmith
     # minutes too.
