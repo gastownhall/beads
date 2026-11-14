@@ -129,6 +129,16 @@ func titleOf(t *testing.T, db *sql.DB, ctx context.Context, issueID string) stri
 	return title
 }
 
+// localHashOf evaluates HASHOF(expr) on the local store.
+func localHashOf(t *testing.T, db *sql.DB, ctx context.Context, expr string) string {
+	t.Helper()
+	var h string
+	if err := db.QueryRowContext(ctx, "SELECT HASHOF(?)", expr).Scan(&h); err != nil {
+		t.Fatalf("HASHOF(%s): %v", expr, err)
+	}
+	return h
+}
+
 // assertSyncConcluded fails when a live conflict or an open merge survives a
 // sync: a concluded strategy merge leaves neither.
 func assertSyncConcluded(t *testing.T, db *sql.DB, ctx context.Context) {
@@ -194,5 +204,55 @@ func TestFederationSyncStrategyResolvesRealConflict(t *testing.T) {
 	peerScalar(t, f, "SELECT title FROM issues AS OF 'remotes/origin/main' WHERE id = '"+issueID+"'", &remoteTitle)
 	if remoteTitle != "theirs" {
 		t.Errorf("peer remote title = %q after sync push, want %q", remoteTitle, "theirs")
+	}
+}
+
+// TestFederationSyncStrategyOursKeepsLocalAndConcludesMerge is the
+// --strategy ours counterpart (GH#5564 AC-2): the resolution keeps the local
+// value and stages nothing new, yet the merge must still conclude with both
+// pre-merge heads in its ancestry — the merge-closing commit concludeMerge
+// runs while the merge is open (the GH#7811 --ours shape). Ancestry is
+// asserted through dolt_log because the post-merge is_blocked recompute may
+// add a commit on top of the merge commit.
+func TestFederationSyncStrategyOursKeepsLocalAndConcludesMerge(t *testing.T) {
+	const issueID = "fsspeer-ours"
+	f := setupSyncPeerClone(t, issueID)
+	f.divergeRetitles(t, issueID)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+	ourHead := localHashOf(t, f.db, ctx, "HEAD")
+	var theirHead string
+	peerScalar(t, f, "SELECT HASHOF('HEAD')", &theirHead)
+
+	result, err := f.store.Sync(ctx, "peer", "ours")
+	if err != nil {
+		t.Fatalf("Sync(--strategy ours) should resolve the conflict, got: %v", err)
+	}
+	if !result.Merged || !result.ConflictsResolved {
+		t.Errorf("Sync result = merged:%v conflictsResolved:%v; want both true",
+			result.Merged, result.ConflictsResolved)
+	}
+	if !result.Pushed {
+		t.Errorf("Pushed = false after a resolved --ours sync (push error: %v)", result.PushError)
+	}
+
+	if got := titleOf(t, f.db, ctx, issueID); got != "ours" {
+		t.Errorf("title = %q after Sync --strategy ours, want %q", got, "ours")
+	}
+	assertSyncConcluded(t, f.db, ctx)
+
+	head := localHashOf(t, f.db, ctx, "HEAD")
+	var ancestors int
+	// ourHead/theirHead/head come from HASHOF, so they are valid Dolt commit
+	// literals; dolt_log AS OF requires literals.
+	//nolint:gosec // G201: hashes read from HASHOF in this test.
+	if err := f.db.QueryRowContext(ctx, fmt.Sprintf(
+		"SELECT COUNT(*) FROM dolt_log AS OF '%s' WHERE commit_hash IN ('%s', '%s')",
+		head, ourHead, theirHead)).Scan(&ancestors); err != nil {
+		t.Fatalf("count merge ancestry: %v", err)
+	}
+	if ancestors != 2 {
+		t.Errorf("HEAD's history contains %d of the 2 pre-merge heads; the merge was not concluded as a two-parent commit", ancestors)
 	}
 }
