@@ -8,6 +8,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
@@ -194,4 +195,69 @@ func TestEmbeddedIgnoredSentinelHealsALostWispIsBlockedColumn(t *testing.T) {
 			applied, schema.LatestIgnoredVersion())
 	}
 	requireHealedWispIsBlocked(t, ctx, conn)
+}
+
+// TestEmbeddedHealedWispIsBlockedServesBlockedStateAPIs pins the other half
+// of the gh 5257 harm: the missing column did not just break migrations, it
+// poisoned the blocked-state surface (bd doctor's check, the targeted and
+// full recomputes). After the heal all three work against the re-added
+// column, and a realistic post-heal drift -- a blocker closed by raw SQL,
+// bypassing the recompute -- is detected, repaired by the targeted recompute,
+// and left converged for the full one.
+func TestEmbeddedHealedWispIsBlockedServesBlockedStateAPIs(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	conn, closeConn := openFullyMigratedStore(t, ctx)
+	defer closeConn()
+	seedWispIsBlockedHealFixture(t, ctx, conn)
+	dropWispIsBlockedForHeal(t, ctx, conn)
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("heal MigrateUp: %v", err)
+	}
+
+	// The doctor check reads the healed, converged store at zero.
+	if n, err := issueops.CountIsBlockedInconsistenciesInTx(ctx, conn); err != nil {
+		t.Fatalf("count inconsistencies on the healed store: %v", err)
+	} else if n != 0 {
+		t.Fatalf("inconsistencies on the healed store = %d, want 0", n)
+	}
+
+	// Post-heal drift the recompute APIs exist for: closing the blocker
+	// issue out of band leaves the issue-blocked wisp flagged though nothing
+	// blocks it anymore. (The wisp-blocked wisp stays blocked: its wisp
+	// blocker is still open.)
+	execFrozenGuard(t, ctx, conn,
+		"UPDATE issues SET status = 'closed', closed_at = '2025-05-02 09:00:00' WHERE id = '"+wispIsBlockedHealBlocker.id+"'")
+	commitFixture(t, ctx, conn, "test: blocker issue closed out of band")
+	if n, err := issueops.CountIsBlockedInconsistenciesInTx(ctx, conn); err != nil {
+		t.Fatalf("count inconsistencies after out-of-band close: %v", err)
+	} else if n != 1 {
+		t.Fatalf("inconsistencies after out-of-band close = %d, want 1 (the issue-blocked wisp)", n)
+	}
+
+	// The targeted recompute repairs exactly the wisps it is handed.
+	if err := issueops.RecomputeIsBlockedInTx(ctx, conn, nil,
+		[]string{wispIsBlockedHealWisps[0].id, wispIsBlockedHealWisps[3].id}, "fixture"); err != nil {
+		t.Fatalf("targeted recompute: %v", err)
+	}
+	if got := readIsBlocked(t, ctx, conn, "wisps", wispIsBlockedHealWisps[0].id); got {
+		t.Errorf("wisps %s: is_blocked = true after its blocker closed, want false", wispIsBlockedHealWisps[0].id)
+	}
+	if got := readIsBlocked(t, ctx, conn, "wisps", wispIsBlockedHealWisps[3].id); !got {
+		t.Errorf("wisps %s: is_blocked = false though its wisp blocker is open, want true", wispIsBlockedHealWisps[3].id)
+	}
+	if n, err := issueops.CountIsBlockedInconsistenciesInTx(ctx, conn); err != nil {
+		t.Fatalf("count inconsistencies after targeted recompute: %v", err)
+	} else if n != 0 {
+		t.Fatalf("inconsistencies after targeted recompute = %d, want 0", n)
+	}
+	// No commit here: the recompute wrote only the dolt-ignored wisps plane.
+
+	// The full repair (bd doctor --fix) succeeds on the healed store and
+	// changes nothing further.
+	if n, err := issueops.RecomputeAllIsBlockedInTx(ctx, conn); err != nil {
+		t.Fatalf("full recompute on the healed store: %v", err)
+	} else if n != 0 {
+		t.Errorf("full recompute changed %d rows on a converged store, want 0", n)
+	}
 }
