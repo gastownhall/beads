@@ -743,6 +743,61 @@ func TestPRCIGateRequiresWindowsGlobalPrimeOverride(t *testing.T) {
 	}
 }
 
+// #8170: worktree-remove-windows is the only native run of the
+// internal/workspacegate gate-parent tests (the junction, alias,
+// cross-process and plain-parent tests are //go:build windows), and ci-gate
+// requires it, so a Windows regression of gate-parent resolution fails the
+// merge. The step must run even after the worktree removal tests fail, and
+// fail the job itself. Its anchored selector names exactly these tests: a
+// dropped name would stop running natively without any lane noticing, and a
+// widened pattern would pull in TestExclusiveHolderErrorReturn, which fails
+// on Windows.
+func TestPRCIGateRequiresWindowsWorkspaceGateTests(t *testing.T) {
+	const (
+		prefix = "go test -tags gms_pure_go -count=1 -v -run '^("
+		suffix = ")$' ./internal/workspacegate/"
+	)
+	wantTests := []string{ // sorted
+		"TestCrossProcessExclusionAcrossJunctionWindows",
+		"TestFinalPathToGateParent",
+		"TestForDirBeneathJunctionWindows",
+		"TestForDirMissingParent",
+		"TestGateFileLocation",
+		"TestJunctionAliasesShareOneGateWindows",
+		"TestPlainParentKeepsDriveLetterSpellingWindows",
+		"TestResolveParent",
+	}
+	workflow := readCIWorkflow(t, "pr.yml")
+	job := workflow.job(t, "worktree-remove-windows")
+	step := job.step(t, "Run workspacegate gate-parent tests on Windows")
+	if job.If != ciScopePlatformsIf || job.ContinueOnError || !strings.Contains(step.If, "!cancelled()") || stepContinueOnError(step) {
+		t.Errorf("workspacegate step must run on the platforms switch, also after a worktree removal failure, and fail its job: job if=%q continue-on-error=%v, step if=%q continue-on-error=%v",
+			job.If, job.ContinueOnError, step.If, step.ContinueOnError)
+	}
+	if got := step.Env["CGO_ENABLED"]; got != "0" {
+		t.Errorf("workspacegate step env CGO_ENABLED = %q, want %q", got, "0")
+	}
+	run := strings.TrimSpace(step.Run)
+	selector, ok := strings.CutPrefix(run, prefix)
+	if ok {
+		selector, ok = strings.CutSuffix(selector, suffix)
+	}
+	if !ok {
+		t.Fatalf("workspacegate step run = %q, want %s<tests>%s", run, prefix, suffix)
+	}
+	gotTests := strings.Split(selector, "|")
+	slices.Sort(gotTests)
+	if !slices.Equal(gotTests, wantTests) {
+		t.Errorf("workspacegate step selects %q, want exactly %q", gotTests, wantTests)
+	}
+	gate := workflow.job(t, "ci-gate")
+	env := gate.step(t, "Evaluate CI gate").Env
+	if !contains(gate.Needs, "worktree-remove-windows") || env["WORKTREE_REMOVE_WINDOWS"] != "${{ needs.worktree-remove-windows.result }}" ||
+		!contains(strings.Fields(env["CI_GATE_REQUIRED"]), "WORKTREE_REMOVE_WINDOWS") {
+		t.Error("CI gate must require worktree-remove-windows (WORKTREE_REMOVE_WINDOWS), the job that runs the workspacegate gate-parent tests")
+	}
+}
+
 func TestPRCIGateRequiresGeneratedHookTimeoutProcessBoundary(t *testing.T) {
 	const (
 		jobName     = "pr-preflight-platforms"
@@ -1104,7 +1159,7 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertStepsBefore(t, mainWindows, []string{"Build (pure Go regex)", "Smoke test - version", "Smoke test - help"}, []string{"Save Go module cache", "Save non-race Go build cache"})
 
 	assertStepsBefore(t, workflows["pr.yml"].job(t, "worktree-remove-windows"),
-		[]string{"Restore Go module cache", "Restore non-race Go build cache"}, []string{"Run native Windows worktree removal boundary tests"})
+		[]string{"Restore Go module cache", "Restore non-race Go build cache"}, []string{"Run native Windows worktree removal boundary tests", "Run workspacegate gate-parent tests on Windows"})
 	assertStepsBefore(t, workflows["pr.yml"].job(t, "check-doc-freshness-platforms"),
 		[]string{"Restore Go module cache"}, []string{"Exercise native date and Bash process boundary"})
 	assertStepsBefore(t, workflows["pr.yml"].job(t, "pr-preflight-platforms"),
@@ -1116,6 +1171,7 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test"), "Test", "race")
 	assertGoCacheEnv(t, workflows["main.yml"].job(t, "test-windows"), "Build (pure Go regex)", "non-race")
 	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "worktree-remove-windows"), "Run native Windows worktree removal boundary tests", "non-race")
+	assertGoCacheEnv(t, workflows["pr.yml"].job(t, "worktree-remove-windows"), "Run workspacegate gate-parent tests on Windows", "non-race")
 	for _, workflowName := range []string{"pr.yml", "pr-risk.yml"} {
 		for jobName, job := range workflows[workflowName].Jobs {
 			for _, step := range job.Steps {

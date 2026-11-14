@@ -23,6 +23,10 @@ import (
 
 // mklinkJunction creates the junction link -> target and removes it (the
 // link only, never the target's contents) before the temp dir is cleaned.
+// mklink's exit status alone does not prove the junction (Wine's mklink
+// exits 0 without creating one), so the link must Lstat as a junction and
+// resolve to a directory: a broken fixture then fails here, by name,
+// instead of as "path not found" inside the code under test.
 func mklinkJunction(t *testing.T, link, target string) {
 	t.Helper()
 	out, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", link, target).CombinedOutput()
@@ -34,6 +38,14 @@ func mklinkJunction(t *testing.T, link, target string) {
 			t.Errorf("removing junction %s: %v", link, err)
 		}
 	})
+	// Go 1.23+ reports a junction as ModeIrregular (ModeSymlink under
+	// GODEBUG=winsymlink=0), never as a plain directory.
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&(os.ModeIrregular|os.ModeSymlink) == 0 {
+		t.Fatalf("mklink /J %s %s exited 0 but left no junction (lstat: %v)\n%s", link, target, err, out)
+	}
+	if fi, err := os.Stat(link); err != nil || !fi.IsDir() {
+		t.Fatalf("junction %s -> %s does not resolve to a directory (stat: %v)", link, target, err)
+	}
 }
 
 // junctionFixture builds <tmp>\real\proj and the junction <tmp>\j ->

@@ -32,13 +32,16 @@ const maxFinalPathLen = 32768
 // so every parent beneath a directory-mounted volume (a Dev Drive at
 // C:\Code) or a junction fails with "The system cannot find the path
 // specified". Instead the parent is opened (following reparse points)
-// and its final path asked of the handle: drive-letter spelling first,
-// volume-GUID spelling only for a volume with no DOS name, and
-// EvalSymlinks last, for filesystems that do not answer the query. The
-// spelling is chosen per volume by the mount manager, so drive-letter,
-// folder-mount, junction, case-variant, 8.3 and \\?\ spellings of one
-// directory converge; for a plain path the result equals what
-// EvalSymlinks returned before.
+// and its final path asked of the handle: the DOS spelling first (a
+// drive-letter path, or \\srv\share\... on a network share, so a mapped
+// or subst drive letter gives way to the share or the backing
+// directory), volume-GUID spelling only for a volume with no DOS name,
+// and EvalSymlinks last, for filesystems that do not answer the query.
+// The spelling is chosen per volume by the mount manager, so
+// drive-letter, folder-mount, junction, case-variant, 8.3 and \\?\
+// spellings of one directory converge; for a plain local path (a drive
+// letter that is neither mapped nor subst, and no junction or mount
+// point on the way) the result equals what EvalSymlinks returned before.
 //
 // A missing parent returns the open's fs.ErrNotExist error, and nothing
 // is ever created (OPEN_EXISTING).

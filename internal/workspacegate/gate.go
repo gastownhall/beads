@@ -171,9 +171,9 @@ func gateFileName(base string) string {
 // that reaches the same physical parent agrees on one gate file, no
 // matter which path spelling it used. Outside Windows canonicalParent is
 // filepath.EvalSymlinks; on Windows it asks a directory handle for its
-// final path (drive-letter spelling, or volume-GUID spelling for a volume
-// with no drive letter), because EvalSymlinks cannot walk through
-// junctions or directory-mounted volumes (see canon_windows.go).
+// final path (its DOS spelling, or the volume-GUID spelling for a volume
+// with no DOS name), because EvalSymlinks cannot walk through junctions
+// or directory-mounted volumes (see canon_windows.go).
 func forDir(dir string) (Gate, error) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
