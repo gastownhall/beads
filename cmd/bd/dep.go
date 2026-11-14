@@ -1753,7 +1753,7 @@ func init() {
 	depTreeCmd.Flags().IntP("max-depth", "d", 50, "Maximum tree depth to display (safety limit)")
 	depTreeCmd.Flags().Bool("reverse", false, "Show dependent tree (deprecated: use --direction=up)")
 	depTreeCmd.Flags().String("direction", "", "Tree direction: 'down' (dependencies), 'up' (dependents), or 'both'")
-	depTreeCmd.Flags().String("status", "", "Filter to only show issues with this status (open, in_progress, blocked, deferred, closed)")
+	addOnceFilterFlag(depTreeCmd.Flags(), "status", "", "", "Filter to only show issues with this status (open, in_progress, blocked, deferred, closed)")
 	depTreeCmd.Flags().String("format", "", "Output format: 'mermaid' for Mermaid.js flowchart")
 	// Defensive row cap (be-x42v): applied to the node count after the walk, by
 	// the role, on BOTH routes — hence the routed variant of the flag.
@@ -1762,7 +1762,7 @@ func init() {
 	// dependency type info so filtering is not possible. Use 'bd dep list --type' instead.
 
 	depListCmd.Flags().String("direction", "down", "Direction: 'down' (dependencies), 'up' (dependents)")
-	depListCmd.Flags().StringP("type", "t", "", "Filter by dependency type (e.g., tracks, blocks, parent-child)")
+	addOnceFilterFlag(depListCmd.Flags(), "type", "t", "", "Filter by dependency type (e.g., tracks, blocks, parent-child)")
 
 	// Widens the report, never narrows it: every cycle the default walk finds is
 	// kept, and cycles that close through tracks edges are added. A loop made
