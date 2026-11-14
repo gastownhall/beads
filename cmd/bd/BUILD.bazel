@@ -1449,6 +1449,7 @@ go_test(
         "//internal/gitlab",
         "//internal/hooks",
         "//internal/httpapi",
+        "//internal/httpapi/apigen",
         "//internal/httpclient",
         "//internal/httpclient/encode",
         "//internal/httpclient/wire",
