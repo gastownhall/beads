@@ -494,16 +494,7 @@ func runNotionSync(cmd *cobra.Command, _ []string) error {
 		conflictResolution = tracker.ConflictExternal
 	}
 
-	state, _ := cmd.Flags().GetString("state")
-	syncOpts := tracker.SyncOptions{
-		Pull:               pull,
-		Push:               push,
-		DryRun:             notionSyncDryRun,
-		CreateOnly:         notionCreateOnly,
-		State:              state,
-		ExcludeEphemeral:   true,
-		ConflictResolution: conflictResolution,
-	}
+	syncOpts := notionSyncOptions(cmd, pull, push, conflictResolution)
 
 	if err := applySelectiveSyncFlags(cmd, &syncOpts, push); err != nil {
 		return HandleError("%v", err)
@@ -522,6 +513,22 @@ func runNotionSync(cmd *cobra.Command, _ []string) error {
 	}
 	renderNotionSyncResult(cmd, result)
 	return nil
+}
+
+// notionSyncOptions builds the SyncOptions of one notion sync invocation.
+// --state is a once-only filter value with no bound global, so it is read back
+// from cmd's own flags here.
+func notionSyncOptions(cmd *cobra.Command, pull, push bool, conflictResolution tracker.ConflictResolution) tracker.SyncOptions {
+	state, _ := cmd.Flags().GetString("state")
+	return tracker.SyncOptions{
+		Pull:               pull,
+		Push:               push,
+		DryRun:             notionSyncDryRun,
+		CreateOnly:         notionCreateOnly,
+		State:              state,
+		ExcludeEphemeral:   true,
+		ConflictResolution: conflictResolution,
+	}
 }
 
 func renderNotionSyncResult(cmd *cobra.Command, result *tracker.SyncResult) {

@@ -959,3 +959,50 @@ func TestGitLabRepeatedFiltersReachCLIFilter(t *testing.T) {
 		t.Errorf("SyncOptions TypeFilter = %v after a run without --type, want none (earlier types leaked)", got)
 	}
 }
+
+// TestGitLabSyncRunELoadsFilterFlags pins the wiring the test above calls by
+// hand: the filter globals are no longer bound to the flags, so only
+// runGitLabSync's loadGitLabFilterFlags call carries an invocation's --label,
+// --assignee and --type into them. Without it, a sync silently runs
+// unfiltered. The command's real RunE runs in proxied-server mode, whose
+// refusal comes after that call and before any config, store or network work.
+func TestGitLabSyncRunELoadsFilterFlags(t *testing.T) {
+	// Not parallel: it parses the shared command tree's flags and sets globals.
+	savedLabel, savedAssignee, savedType := gitlabFilterLabel, gitlabFilterAssignee, gitlabTypeFilter
+	savedProxied := proxiedServerMode
+	t.Cleanup(func() {
+		resetCommandFlags(rootCmd)
+		gitlabFilterLabel, gitlabFilterAssignee, gitlabTypeFilter = savedLabel, savedAssignee, savedType
+		proxiedServerMode = savedProxied
+	})
+	proxiedServerMode = true
+	if !usesProxiedServer() {
+		t.Fatal("proxiedServerMode=true does not select the proxied route here; RunE would reach config and store work")
+	}
+
+	runSync := func(args ...string) {
+		t.Helper()
+		resetCommandFlags(rootCmd)
+		if err := gitlabSyncCmd.Flags().Parse(args); err != nil {
+			t.Fatalf("parse %q: %v", args, err)
+		}
+		err := gitlabSyncCmd.RunE(gitlabSyncCmd, nil)
+		if code, ok := exitCodeFromError(err); !ok || code != 1 {
+			t.Fatalf("gitlab sync RunE %q: err = %v, want the proxied-server refusal (exit 1)", args, err)
+		}
+	}
+
+	// Values left over from an earlier in-process invocation.
+	gitlabFilterLabel, gitlabFilterAssignee, gitlabTypeFilter = "stale", "stale", "stale"
+	runSync("--label", "a", "--label", "b", "--assignee", "kyriakos", "--type", "epic", "--type", "task")
+	if gitlabFilterLabel != "a,b" || gitlabFilterAssignee != "kyriakos" || gitlabTypeFilter != "epic,task" {
+		t.Errorf("after RunE: label=%q assignee=%q type=%q, want %q %q %q",
+			gitlabFilterLabel, gitlabFilterAssignee, gitlabTypeFilter, "a,b", "kyriakos", "epic,task")
+	}
+
+	runSync()
+	if gitlabFilterLabel != "" || gitlabFilterAssignee != "" || gitlabTypeFilter != "" {
+		t.Errorf("after a RunE without filters: label=%q assignee=%q type=%q, want all empty (the earlier invocation's filters leaked)",
+			gitlabFilterLabel, gitlabFilterAssignee, gitlabTypeFilter)
+	}
+}
