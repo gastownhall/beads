@@ -618,3 +618,26 @@ func TestResolveProxiedServerUOWTopology_ExcursionIdentity_SkipEnvBypassesPlainO
 	require.Error(t, err, "a team-server workspace with no local identity is still refused")
 	assert.Contains(t, err.Error(), "no project identity")
 }
+
+// The help for --database and `bd sql` must describe the plain excursion
+// identity guard (gastownhall/beads#5572), its explicit environment hatch,
+// and that the hatch does not reach team-server workspaces.
+func TestDatabaseOverrideHelpDescribesExcursionIdentityGuard(t *testing.T) {
+	flag := rootCmd.PersistentFlags().Lookup("database")
+	require.NotNil(t, flag)
+	for name, text := range map[string]string{
+		"--database usage": flag.Usage,
+		"bd sql Long":      sqlCmd.Long,
+	} {
+		for _, want := range []string{
+			"another beads project",
+			"BEADS_SKIP_IDENTITY_CHECK=1",
+			"no beads project identity",
+			"Team-server workspaces",
+		} {
+			assert.Contains(t, text, want, "%s must mention %q", name, want)
+		}
+		assert.NotRegexp(t, `(?i)team-server[^.]*(skip|bypass)ed by`, text,
+			"%s must not suggest the environment hatch bypasses team-server", name)
+	}
+}
