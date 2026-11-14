@@ -33,7 +33,7 @@ jobs:
   test:
     name: Test (macOS)
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dc-use')
-    runs-on: ${{ 'blacksmith-6vcpu-macos-26' }}
+    runs-on: ${{ github.repository == 'gastownhall/beads' && 'blacksmith-6vcpu-macos-26' || 'macos-26' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -124,7 +124,7 @@ jobs:
     # here (the repository check closes the fork gap). Pinned by
     # TestBlacksmithSaverJobsGuardedAgainstPullRequest.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'gastownhall/beads'
-    runs-on: ${{ 'blacksmith-4vcpu-windows-2025' }}
+    runs-on: ${{ github.repository == 'gastownhall/beads' && 'blacksmith-4vcpu-windows-2025' || 'windows-2025' }}
     # F7b review fix (S8): paid Blacksmith Windows (4x billing). 20 matches
     # test-windows-liveness's timeout (S6) for consistency.
     timeout-minutes: 20
@@ -234,7 +234,7 @@ jobs:
   windows-make-shell-toolchains:
     name: Warm Windows Make shell toolchain caches
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'gastownhall/beads'
-    runs-on: ${{ 'blacksmith-4vcpu-windows-2025' }}
+    runs-on: ${{ github.repository == 'gastownhall/beads' && 'blacksmith-4vcpu-windows-2025' || 'windows-2025' }}
     # Above the step caps' sum (32) plus 5 minutes for the uncapped steps,
     # like pr.yml's windows-make-shell.
     timeout-minutes: 40
@@ -366,7 +366,7 @@ jobs:
   # TestBlacksmithMacOSSaverMatchesPRLegs.
   blacksmith-macos-go-build-cache:
     name: Warm macOS Go build cache
-    runs-on: ${{ 'blacksmith-6vcpu-macos-26' }}
+    runs-on: ${{ github.repository == 'gastownhall/beads' && 'blacksmith-6vcpu-macos-26' || 'macos-26' }}
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'gastownhall/beads'
     timeout-minutes: 20
     steps:
