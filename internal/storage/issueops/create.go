@@ -472,6 +472,9 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 	result := CreateIssuesResult{}
 	accepted := issues[:0:0]
 	var toVersion []deferredVersion
+	// fresh holds the ids this batch inserted as new rows (CreateIssueResult.isNew),
+	// for the blocked-state shortcut below (freshEdgelessIDs).
+	fresh := map[string]bool{}
 	record := func(issue *types.Issue, issueResult CreateIssueResult) {
 		result.merge(issueResult.ChangedTables)
 		if issueResult.versionDeferred {
@@ -481,6 +484,9 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 			// A stale snapshot or a retired id: nothing of the issue was
 			// written, so keep its deps out of the batch too.
 			return
+		}
+		if issueResult.isNew {
+			fresh[issue.ID] = true
 		}
 		accepted = append(accepted, issue)
 	}
@@ -549,12 +555,18 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 	for table := range changedCounters {
 		result.markChanged(table)
 	}
-	issueIDs, wispIDs, err := createBlockedRecomputeIDs(ctx, tx, issues, depResult.persistedDependencies)
+	// A row this batch inserted new, with no edge of its own written by the
+	// dependency pass, is not recomputed at all (freshEdgelessIDs); the
+	// recompute sees only the rest of the batch and the rows its edges affect.
+	issueIDs, wispIDs, err := createBlockedRecomputeIDs(ctx, tx, issues, depResult.persistedDependencies,
+		freshEdgelessIDs(fresh, depResult.persistedDependencies))
 	if err != nil {
 		return CreateIssuesResult{}, err
 	}
-	// The ids are this batch's rows, most of them fresh and edgeless: let the
-	// recompute skip the union statements for those (planRecomputeInTx).
+	// The ids left are this batch's rows with edges and the rows those edges
+	// affect, plus upserted rows, whose edges are unknown: let the recompute
+	// probe for edgeless ones and keep them off the union statements
+	// (planRecomputeInTx).
 	recomputed, err := recomputeIsBlockedInTxWithResult(ctx, tx, issueIDs, wispIDs, actor, recomputeOptions{splitEdgeless: true})
 	if err != nil {
 		return CreateIssuesResult{}, err
@@ -690,7 +702,53 @@ func validateCreateIssuesMixedBucketDependencies(issues []*types.Issue) error {
 	return nil
 }
 
-func createBlockedRecomputeIDs(ctx context.Context, tx DBTX, issues []*types.Issue, dependencies []persistedDependency) ([]string, []string, error) {
+// freshEdgelessIDs returns the ids of a create batch whose blocked state the
+// recompute cannot change, so CreateIssuesInTxWithContext leaves them out of
+// it: rows the batch inserted new (fresh, from CreateIssueResult.isNew) for
+// which the dependency pass wrote no edge of their own (no persisted
+// dependency has the id as its source).
+//
+// Why that is exact: no create writes is_blocked, so a new row lands with
+// the column's default 0, and every leg of the should-be-blocked union the
+// mark template probes selects a row by that row's own dependency rows
+// (planRecomputeInTx) — of which a row the batch just inserted has exactly
+// the ones the batch wrote for it. That last step is an assumption about
+// the schema, not about this code: every dependency row's source column
+// (issue_id, both tables) is a foreign key onto its row table with ON DELETE
+// CASCADE (fk_dep_issue, migration 0043; fk_wisp_dep_issue, migration 0047),
+// so no dependency row outlives its source row to be waiting for a new row
+// that takes the same id. So mark cannot select such a row and
+// unmark (is_blocked = 1 -> 0) matches nothing: the four statements the
+// recompute spent on it (the edgeless probe, the plain unmark and, with the
+// events journal on, two snapshots) returned nothing on every create. A row
+// the batch upserted (not fresh) keeps the probe, since its edges predate the
+// batch; a fresh row that is a source keeps the full recompute, and a fresh
+// row an edge affects is added back by createBlockedRecomputeIDs's
+// dependency expansion, so the skip never hides a row from the recompute it
+// needs. That expansion adds every persisted edge's source too, so dropping
+// the sources here changes no outcome: it states the rule in one place
+// instead of leaning on the expansion to restore it.
+//
+// Like the batch's other shortcuts it is off under createFastPathsDisabled,
+// so the fast-vs-per-row equivalence tests compare the skip against the probe.
+func freshEdgelessIDs(fresh map[string]bool, dependencies []persistedDependency) map[string]bool {
+	if len(fresh) == 0 || createFastPathsDisabled.Load() {
+		return nil
+	}
+	settled := make(map[string]bool, len(fresh))
+	for id := range fresh {
+		settled[id] = true
+	}
+	for _, dependency := range dependencies {
+		delete(settled, dependency.source)
+	}
+	return settled
+}
+
+// createBlockedRecomputeIDs returns the ids a create batch recomputes blocked
+// state for: the batch's own rows, less settled (see freshEdgelessIDs), plus
+// the rows the batch's edges affect, which join whether settled or not.
+func createBlockedRecomputeIDs(ctx context.Context, tx DBTX, issues []*types.Issue, dependencies []persistedDependency, settled map[string]bool) ([]string, []string, error) {
 	issueSeen := make(map[string]bool, len(issues))
 	wispSeen := make(map[string]bool, len(issues))
 	issueIDs := make([]string, 0, len(issues))
@@ -712,7 +770,7 @@ func createBlockedRecomputeIDs(ctx context.Context, tx DBTX, issues []*types.Iss
 		}
 	}
 	for _, issue := range issues {
-		if issue == nil {
+		if issue == nil || settled[issue.ID] {
 			continue
 		}
 		isWisp := IsWisp(issue)

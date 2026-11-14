@@ -334,13 +334,7 @@ func closeIssueInTx(ctx context.Context, tx DBTX, id string, reason, actor, sess
 	isWisp := IsActiveWispInTx(ctx, tx, id)
 	issueTable, _, eventTable, _ := WispTableRouting(isWisp)
 
-	var affectedIssues, affectedWisps []string
-	var aerr error
-	if isWisp {
-		affectedIssues, affectedWisps, aerr = AffectedByStatusChangeForWispInTx(ctx, tx, id)
-	} else {
-		affectedIssues, affectedWisps, aerr = AffectedByStatusChangeInTx(ctx, tx, id)
-	}
+	affectedIssues, affectedWisps, blocked, aerr := AffectedByStatusChangeAndFlagInTx(ctx, tx, id, isWisp)
 	if aerr != nil {
 		return nil, fmt.Errorf("affected by close for %s: %w", id, aerr)
 	}
@@ -381,9 +375,12 @@ func closeIssueInTx(ctx context.Context, tx DBTX, id string, reason, actor, sess
 		return nil, fmt.Errorf("failed to close issue: %s", id)
 	}
 
-	// A closed issue holds no lease (no-op for wisps, which are never leased).
-	if err := DeleteLeaseInTx(ctx, tx, id); err != nil {
-		return nil, err
+	// A closed issue holds no lease. Wisps are never leased and never get a
+	// leases row (UpsertLeaseInTx), so a wisp close skips the delete.
+	if !isWisp {
+		if err := DeleteLeaseInTx(ctx, tx, id); err != nil {
+			return nil, err
+		}
 	}
 
 	if recordEvent {
@@ -393,8 +390,15 @@ func closeIssueInTx(ctx context.Context, tx DBTX, id string, reason, actor, sess
 	}
 
 	// The UPDATE above just closed id, so the recompute settles the row itself
-	// without its union statements; the rows it unblocks are recomputed in full.
-	recompute, err := recomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps, actor, settledRowRecompute(id, isWisp))
+	// without its union statements, and not at all when its flag was already
+	// 0 (DropSettledUnblockedRow); the rows it unblocks are recomputed in full.
+	var opts recomputeOptions
+	if blocked {
+		opts = settledRowRecompute(id, isWisp)
+	} else {
+		affectedIssues, affectedWisps = DropSettledUnblockedRow(affectedIssues, affectedWisps, id, isWisp)
+	}
+	recompute, err := recomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps, actor, opts)
 	if err != nil {
 		return nil, fmt.Errorf("recompute is_blocked after close for %s: %w", id, err)
 	}

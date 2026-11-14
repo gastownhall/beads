@@ -21,7 +21,9 @@ import (
 // legacy close-gate epic whose children are explained by its subtree; wisps
 // and issues on both ends of cross-plane edges; one id held by both planes;
 // updates to pinned, back to open and to closed on both planes; edges added in
-// the same transaction just before the close; and a stale parent-child cycle.
+// the same transaction just before the close; a stale parent-child cycle; and
+// one id held by both planes whose issues-plane twin has a child and waiters
+// of its own.
 //
 // Two closes were built to pin when the shortcut clears the row, which it
 // moves out of the chunk's unmark statement into a statement of its own. Each
@@ -35,6 +37,15 @@ import (
 // no longer pin that order. The order still matters for an edgeless row with
 // a stale flag that is neither closed nor pinned (runRecomputePassInTx),
 // which no step here drives.
+//
+// K closes a wisp whose id an issues row also holds (as E does), with that
+// issues-plane twin blocked by the wisp, a child under the twin, and an issue
+// and a wisp waiting on the twin. The affected set of a status change names
+// the changed row by id alone in two places, and K holds both to the plane:
+// the descendant expansion must still read the twin's children (the child
+// clears only through the twin), and the waits-for rows on the other plane's
+// target column must still be seeds (the waiters' flags were never raised, and
+// only this recompute raises them).
 //
 // It records every row's status and is_blocked after each step, and Run
 // compares the stored outcome with the shortcut on and off (compare).
@@ -133,13 +144,19 @@ func seedSettled() []*types.Issue {
 		issue("zJ-t", "blocker of the row with the dependers"),
 		withDeps(issue("zJ-c", "child of the row, in the cycle"), dep(id("zJ-c"), id("zJ-x"), types.DepParentChild)),
 		wisp(issue("zJ-w", "wisp in the cycle")),
+		// K: one id in both planes, with a child under the issues-plane twin
+		// and a waiter on it from each plane (the twin, its child, the issue
+		// waiter and every edge are planted).
+		wisp(issue("zK-dup", "wisp-plane twin that is closed")),
+		wisp(issue("zK-ww", "wisp waiting on the issues-plane twin")),
 	}
 }
 
 // afterSeedSettled plants what no write path creates: the bulk parent's
 // children (darkened, as the cascade leaves them), the legacy close-gate
-// edges, the issues-plane twin of a wisp id, stale parent-child cycles, a
-// stale flag, and J's chunk of dependers. Every planted row carries the
+// edges, the issues-plane twins of two wisp ids (K's with a child and two
+// waiters), stale parent-child cycles, a stale flag, and J's chunk of
+// dependers. Every planted row carries the
 // scenario's fixed timestamps. Then it declares the issues rows
 // participating, as stampParticipation does.
 func afterSeedSettled(t *testing.T, db *sql.DB) {
@@ -242,6 +259,21 @@ func afterSeedSettled(t *testing.T, db *sql.DB) {
 	}
 	planted(dependers)
 	edges(dependerEdges)
+
+	// K: the issues-plane twin of the wisp zK-dup, blocked by the wisp alone,
+	// and a child that is blocked only through the twin.
+	planted([]string{id("zK-dup"), "blocked", id("zK-c"), "blocked", id("zK-w"), "open"})
+	edges([][4]string{
+		{id("zK-dup"), "depends_on_wisp_id", id("zK-dup"), "blocks"},
+		{id("zK-c"), "depends_on_issue_id", id("zK-dup"), "parent-child"},
+	})
+	// K: an issue and a wisp that wait on the issues-plane twin, which stays
+	// open, so both should be blocked; their flags were never raised. Closing
+	// the wisp finds them through the id it shares with the twin.
+	exec(`INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_by, created_at, metadata)
+		VALUES (?, ?, ?, 'waits-for', 'planted', ?, ?)`, "settled-planted-k001", id("zK-w"), id("zK-dup"), fixedAt, `{"also_blocks":"true"}`)
+	exec(`INSERT INTO wisp_dependencies (id, issue_id, depends_on_issue_id, type, created_by, created_at, metadata)
+		VALUES (?, ?, ?, 'waits-for', 'planted', ?, ?)`, "settled-planted-wk01", id("zK-ww"), id("zK-dup"), fixedAt, `{"also_blocks":"true"}`)
 
 	stampParticipation(t, db)
 }
@@ -362,6 +394,7 @@ func runSettled(ctx context.Context, tx *sql.Tx) ([]string, error) {
 		{"H: close the stale edgeless row", closeIssue("zH-x")},
 		{"I: close the row above a stale cross-plane cycle", closeIssue("zI-a")},
 		{"J: close the row whose dependers fill its recompute chunk", closeIssue("zJ-x")},
+		{"K: close the wisp twin above its issues twin's child and waiters", closeIssue("zK-dup")},
 	}
 	if err := snapshot("seeded"); err != nil {
 		return nil, err

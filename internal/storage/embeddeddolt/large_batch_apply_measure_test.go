@@ -446,10 +446,24 @@ func TestLargeBatchApplyWallClock_Embedded(t *testing.T) {
 // id tombstone tables — in ONE statement where it used to read the two row
 // tables in two: -1 statement per create item (356: 102 creates, -102; 712:
 // 204, -204; classic: 10, -10).
+//
+// Re-pinned for the op write statement cut (was 6090 / 12178 / 805). Two
+// changes, each measured on its own against the Dolt server backend:
+//   - A row a create inserts new with no edge of its own leaves the create's
+//     blocked-state recompute (freshEdgelessIDs): -2 per create item with the
+//     journal off, the edgeless probe and the plain unmark (356: 102 creates,
+//     -204; 712: 204, -408 less the shape's 1-statement jitter; classic: 10,
+//     -20).
+//   - HydrateIssueOperationResult no longer re-reads labels GetIssueInTx
+//     already fetched: -2 per hydrated result, the plane probe and the label
+//     read. A create and an update item hydrate, an edge item does not (356:
+//     118 results, -236; 712: 236, -472 plus the jitter; classic: 20, -40).
+//
+// Net: 356 -440, 712 -880, classic -60. The two backends agree exactly.
 var pinnedEmbeddedStatementCounts = map[string]int64{
-	"356 (mol 1x)":    6090,
-	large712ShapeName: 12178,
-	"40 (classic)":    805,
+	"356 (mol 1x)":    5650,
+	large712ShapeName: 11298,
+	"40 (classic)":    745,
 }
 
 // BenchmarkLargeBatchApply_Embedded benchmarks issueops.ApplyBatchInTx on
