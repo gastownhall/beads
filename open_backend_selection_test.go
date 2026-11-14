@@ -866,3 +866,45 @@ func TestOpenBestAvailableProxiedServerRefusalIgnoresEnvForcedServerMode(t *test
 		}
 	}
 }
+
+// TestOpenBestAvailableProxiedServerRefusalNamesModeFileAndCLI pins AC-4: the
+// refusal quotes the dolt_mode as written, names the file that declares it,
+// carries the shared data-safety guarantee and points at the bd CLI. It must
+// not point at OpenFromConfig (which would dial around the proxy), at
+// bd init --server, or at CGO.
+func TestOpenBestAvailableProxiedServerRefusalNamesModeFileAndCLI(t *testing.T) {
+	isolateProxiedServerEnv(t, "", "")
+	layouts := []struct{ file, other string }{
+		{"metadata.json", "config.json"},
+		{"config.json", "metadata.json"},
+	}
+	for _, layout := range layouts {
+		for _, spelling := range []string{"proxied-server", "Proxied-Server"} {
+			for name, open := range bestAvailableOpens {
+				t.Run(layout.file+"/"+spelling+"/"+name, func(t *testing.T) {
+					_, beadsDir := writeProxiedServerWorkspace(t, layout.file, "dolt", spelling)
+					_, err := openClosing(t, open, beadsDir)
+					if err == nil {
+						t.Fatalf("%s opened a proxied-server workspace", name)
+					}
+					msg := err.Error()
+					for _, want := range []string{
+						strconv.Quote(spelling),
+						filepath.Join(beadsDir, layout.file),
+						"no storage database was opened or modified",
+						"bd CLI",
+					} {
+						if !strings.Contains(msg, want) {
+							t.Errorf("%s error = %q, want it to contain %q", name, msg, want)
+						}
+					}
+					for _, unwanted := range []string{layout.other, "OpenFromConfig", "bd init --server", "CGO"} {
+						if strings.Contains(msg, unwanted) {
+							t.Errorf("%s error = %q, must not contain %q", name, msg, unwanted)
+						}
+					}
+				})
+			}
+		}
+	}
+}
