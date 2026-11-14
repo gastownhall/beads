@@ -248,3 +248,36 @@ func TestTeamServerMode_Integration(t *testing.T) {
 			"refused team-server open must not migrate the database")
 	})
 }
+
+// TestPlainProxiedServerMode_ForeignProjectIdentityRefused_Integration is the
+// bd-rgvivq (gastownhall/beads#5572) repro: a plain (non-team-server)
+// proxied open that carries the workspace's project identity must not attach
+// to a beads database that belongs to a DIFFERENT project. The CLI wiring
+// (resolveProxiedServerUOWTopology) passes persisted.ProjectID as
+// expectedProjectID for plain proxied workspaces too; only the team-server
+// branch of initSchemaAttempt ever asserted it.
+func TestPlainProxiedServerMode_ForeignProjectIdentityRefused_Integration(t *testing.T) {
+	h := newTeamServerHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	const database = "beads_other_project"
+
+	// Another project's beads database on the same server.
+	provisioner, err := h.openProvider(ctx, database, false, "")
+	require.NoError(t, err)
+	require.NoError(t, provisioner.Close(ctx))
+
+	direct := h.directDB(t, database)
+	_, err = direct.ExecContext(ctx,
+		"REPLACE INTO metadata (`key`, value) VALUES (?, ?)", "_project_id", "project-owning-this-db")
+	require.NoError(t, err)
+
+	// A plain proxied workspace of another project names it via --database.
+	p, err := h.openProvider(ctx, database, false, "project-somewhere-else")
+	if p != nil {
+		_ = p.Close(ctx)
+	}
+	require.Error(t, err, "plain proxied open attached to a foreign project's beads database with no identity assertion")
+	assert.Contains(t, err.Error(), "PROJECT IDENTITY MISMATCH")
+}

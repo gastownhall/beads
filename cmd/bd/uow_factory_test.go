@@ -236,6 +236,70 @@ func TestResolveProxiedServerUOWTopology_AbsentFilesResolveDefaults(t *testing.T
 	assert.Nil(t, topology.external)
 }
 
+// writeTopologyConfig writes a proxied-server workspace's metadata.json for
+// the resolveProxiedServerUOWTopology tests below.
+func writeTopologyConfig(t *testing.T, beadsDir string, cfg map[string]any) {
+	t.Helper()
+	cfg["backend"] = "dolt"
+	cfg["dolt_mode"] = configfile.DoltModeProxiedServer
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal topology config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, configfile.ConfigFileName), b, 0o600); err != nil {
+		t.Fatalf("write topology config: %v", err)
+	}
+}
+
+// TestResolveProxiedServerUOWTopology_ExcursionIdentity pins the bd-rgvivq
+// wiring (gastownhall/beads#5572): a plain workspace's identity expectation
+// reaches the provider only when the invocation explicitly overrides the
+// database to a DIFFERENT name — the excursion uow.checkExcursionIdentity
+// asserts. The resolved database itself must stay the override.
+func TestResolveProxiedServerUOWTopology_ExcursionIdentity(t *testing.T) {
+	t.Setenv("BEADS_SKIP_IDENTITY_CHECK", "")
+
+	t.Run("plain excursion retains the workspace identity and resolves the override", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		writeTopologyConfig(t, beadsDir, map[string]any{
+			"dolt_database": "beads_ws",
+			"project_id":    "project-AAAA",
+		})
+
+		topology, err := resolveProxiedServerUOWTopology(beadsDir, "beads_other", assertWorkspaceIdentity)
+		require.NoError(t, err)
+		assert.Equal(t, "beads_other", topology.database, "the override names the database this invocation opens")
+		assert.Equal(t, "project-AAAA", topology.expectedProjectID, "a plain excursion carries the workspace identity to assert")
+	})
+
+	t.Run("team-server retains the identity on an excursion", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		writeTopologyConfig(t, beadsDir, map[string]any{
+			"dolt_database":    "beads_ws",
+			"project_id":       "project-AAAA",
+			"dolt_team_server": true,
+		})
+
+		topology, err := resolveProxiedServerUOWTopology(beadsDir, "beads_other", assertWorkspaceIdentity)
+		require.NoError(t, err)
+		assert.Equal(t, "beads_other", topology.database)
+		assert.Equal(t, "project-AAAA", topology.expectedProjectID,
+			"the team-server branch keeps its strict every-open posture, override or not")
+	})
+
+	t.Run("team-server without a local identity still refuses", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		writeTopologyConfig(t, beadsDir, map[string]any{
+			"dolt_database":    "beads_ws",
+			"dolt_team_server": true,
+		})
+
+		_, err := resolveProxiedServerUOWTopology(beadsDir, "beads_other", assertWorkspaceIdentity)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no project identity")
+	})
+}
+
 func TestNewExternalProxiedServerUOWProvider_CreatesRootDir(t *testing.T) {
 	beadsDir := t.TempDir()
 	external := &configfile.ExternalDoltConfig{Host: "db.invalid"}

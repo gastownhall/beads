@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -135,11 +136,14 @@ func resolveAndProbeDolt(ctx context.Context, errPrefix string, quiet bool) (dol
 type sqlServerUOWTopology struct {
 	database   string
 	teamServer bool
-	// expectedProjectID is the workspace identity a team-server open asserts
-	// against the shared database. Empty means nothing to assert: either the
-	// caller adopts (see newProxiedServerUOWProviderAdopting), or the workspace
-	// is not team-server managed. Server mode never sets teamServer, so it
-	// leaves this empty too.
+	// expectedProjectID is the workspace identity asserted against the opened
+	// database: by every team-server open (checkTeamServerIdentity), and — for
+	// a plain (non-team-server) workspace — only by an explicit --database
+	// excursion to a different database (see plainExcursionAssertsIdentity).
+	// Empty means nothing to assert: the caller adopts
+	// (newProxiedServerUOWProviderAdopting), the open is a plain workspace's
+	// ordinary configured-database open, or the explicit bypass is set. Server
+	// mode never sets teamServer and leaves this empty too.
 	expectedProjectID string
 	proxyPort         int
 	proxyIdle         time.Duration
@@ -337,8 +341,18 @@ func resolveProxiedServerUOWTopology(beadsDir, databaseOverride string, posture 
 			}
 		}
 	}
+	// The configured name is captured before the invocation override replaces
+	// it: plainExcursionAssertsIdentity compares the override against it.
+	configuredDatabase := topology.database
 	if databaseOverride != "" {
 		topology.database = databaseOverride
+	}
+	// A plain (non-team-server) workspace asserts its identity only on a
+	// genuine excursion; every other plain open clears the expectation (see
+	// plainExcursionAssertsIdentity). The team-server branch above keeps its
+	// strict posture untouched.
+	if !topology.teamServer && !plainExcursionAssertsIdentity(configuredDatabase, databaseOverride) {
+		topology.expectedProjectID = ""
 	}
 
 	info, err := configfile.LoadProxiedServerClientInfo(beadsDir)
@@ -356,6 +370,32 @@ func resolveProxiedServerUOWTopology(beadsDir, databaseOverride string, posture 
 		}
 	}
 	return topology, nil
+}
+
+// plainExcursionAssertsIdentity reports whether a plain (non-team-server)
+// proxied open should assert the workspace's project identity against the
+// resolved database (gastownhall/beads#5572): only when the invocation
+// explicitly overrides the database to a name that differs from the
+// workspace's configured one (case-insensitively — schema names compare the
+// way MySQL compares them), and the explicit BEADS_SKIP_IDENTITY_CHECK
+// override is unset. uow.checkExcursionIdentity performs the assertion.
+//
+// Every other plain open clears the expectation instead:
+//
+//   - No override, or an override naming the configured database itself, is
+//     the workspace's ordinary open. Plain init does not persist the identity
+//     it adopts from an already-identified database (only --team-server
+//     does), so plain co-tenant workspaces can carry a stale local project
+//     ID; asserting it here would refuse exactly those workspaces on their
+//     own database.
+//   - BEADS_SKIP_IDENTITY_CHECK=1 is the deliberate cross-project escape
+//     hatch. It weakens nothing else: this predicate is consulted for plain
+//     workspaces only, and the team-server check honors no bypass.
+func plainExcursionAssertsIdentity(configured, override string) bool {
+	if override == "" || strings.EqualFold(override, configured) {
+		return false
+	}
+	return os.Getenv("BEADS_SKIP_IDENTITY_CHECK") != "1"
 }
 
 // proxiedFreshStoreRefusal is the proxied-mode twin of
