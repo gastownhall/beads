@@ -1024,3 +1024,19 @@ func TestFindBeadsDir_WorktreeMetadatalessStoreYieldsToSharedWorkspace(t *testin
 		})
 	}
 }
+
+// TestFindBeadsDir_WorktreeMetadatalessStoreYieldsToSharedServer covers the
+// server-mode main checkout with no local data directory: its metadata alone
+// makes it the shared workspace the metadata-less worktree store yields to.
+func TestFindBeadsDir_WorktreeMetadatalessStoreYieldsToSharedServer(t *testing.T) {
+	f := newMetadatalessStoreFixture(t, mainServerMetadata, "")
+	for _, start := range []string{f.worktree, f.subdir} {
+		chdirForDiscovery(t, start)
+		assertSamePath(t, "FindBeadsDir() from "+start, FindBeadsDir(), f.mainBeads)
+		dbPath := FindDatabasePath()
+		assertSamePath(t, "FindDatabasePath() from "+start, dbPath, filepath.Join(f.mainBeads, "dolt"))
+		if pathWithin(dbPath, f.worktree) {
+			t.Errorf("FindDatabasePath() from %s = %q, lies under the worktree %q", start, dbPath, f.worktree)
+		}
+	}
+}
