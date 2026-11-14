@@ -163,10 +163,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   passing both lifts both sets of default exclusions, which is not the same as
   an unfiltered listing (explicit filters, `--exclude-type` and an explicit
   `--limit` still apply). `--wisp-type` accepts the new flag as a plane
-  selector. Against a `bd serve` HTTP workspace the flag is refused with the
-  existing typed error rather than answered with a narrower listing: the v0
-  wire publishes only the four narrow include intents (GH#5694, first fixed by
-  @kyoto-bonsai in #8191).
+  selector. The current `bd serve` HTTP transport refuses the flag with its
+  existing typed error, as it already does for every other caller of that
+  field (GH#5694, first fixed by @kyoto-bonsai in #8191).
 
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
   While a workspace journals, every `ephemeral` or `no_history` bead it creates
