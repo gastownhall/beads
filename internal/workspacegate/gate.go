@@ -167,9 +167,12 @@ func gateFileName(base string) string {
 // forDir builds the gate for a guarded directory: the gate file sits in
 // the directory's parent. The parent must exist; the guarded directory
 // itself may not exist yet (bd init gates the workspace it is creating).
-// The parent is canonicalized (symlinks resolved) so that every process
-// that reaches the same physical parent agrees on one gate file, no
-// matter which path spelling it used.
+// The parent is canonicalized so that every process that reaches the same
+// physical parent agrees on one gate file, no matter which path spelling
+// it used: symlinks are resolved, and on Windows the parent is resolved
+// through a directory handle and its final path, because
+// filepath.EvalSymlinks refuses to traverse the mount points a
+// directory-mounted volume or junction is (see canonicalParent).
 func forDir(dir string) (Gate, error) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
@@ -195,7 +198,7 @@ func forDir(dir string) (Gate, error) {
 	case "", ".", "..":
 		return Gate{}, fmt.Errorf("workspacegate: cannot gate %q: the guarded path must be a named directory", dir)
 	}
-	canonParent, err := filepath.EvalSymlinks(filepath.Clean(parent))
+	canonParent, err := canonicalParent(filepath.Clean(parent))
 	if err != nil {
 		return Gate{}, fmt.Errorf("workspacegate: gate parent %s must exist: %w", parent, err)
 	}

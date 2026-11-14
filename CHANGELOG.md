@@ -1281,6 +1281,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd` now works in a workspace beneath a Windows directory-mounted
+  volume (such as a Dev Drive mounted at `C:\Code`) or a junction**
+  (#8170, building on PR #8173 by bgrainger). Every gated command
+  canonicalized the workspace's parent directory with
+  `filepath.EvalSymlinks`, which on Windows refuses to traverse the
+  mount-point reparse point a directory-mounted volume (or a plain
+  `mklink /J` junction) is, failing `bd init` and friends with
+  `workspacegate: gate parent ... must exist` even though the directory
+  exists. The parent is now resolved through a directory handle and its
+  final path — drive-letter spelling first, volume-GUID only for volumes
+  without a drive letter — so mount, junction, drive-letter and case
+  aliases of one directory share one gate lock. Non-Windows resolution
+  is unchanged, and a missing parent still fails with the same error as
+  before.
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
