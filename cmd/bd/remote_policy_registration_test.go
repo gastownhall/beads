@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"reflect"
@@ -91,6 +92,38 @@ func TestApplyRemoteRefusesDisallowedFederationRemote(t *testing.T) {
 		}
 		if strings.Contains(result.Message+result.Error, "evil.example.com") {
 			t.Errorf("applyRemote(dryRun=%v) names the URL: %+v", dryRun, result)
+		}
+	}
+}
+
+// GH#6233: on a rig with no remote at all, bd sync under a non-empty
+// federation.allowed-remote-patterns reports the benign no-remote result
+// (exit 0, JSON status "no-remote") without attempting a transfer the policy
+// would refuse for want of a URL to check.
+func TestSyncAllowedRemotePatternsNoRemote(t *testing.T) {
+	policyRefusal := &remotecache.RemotePolicyError{Subject: remotecache.RemoteSubject("origin"), Reason: "remote not found, so its URL cannot be checked against " + remotecache.AllowedRemotePatternsKey}
+	for _, asJSON := range []bool{false, true} {
+		fake := &fakeSyncStore{pullErr: policyRefusal, pushErr: policyRefusal}
+		setupSyncCommandTest(t, fake)
+		config.Set(remotecache.AllowedRemotePatternsKey, []string{"dolthub://myorg/*"})
+		jsonOutput = asJSON
+
+		var runErr error
+		stdout, _ := captureStdio(t, func() { runErr = runSyncCommand(syncCmd, nil) })
+		if runErr != nil {
+			t.Fatalf("json=%v: runSyncCommand() error = %v, want nil (no remote is the benign case)", asJSON, runErr)
+		}
+		if asJSON {
+			var got syncOutcome
+			if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+				t.Fatalf("json.Unmarshal(%q): %v", stdout, err)
+			}
+			if got.Status != syncStatusNoRemote {
+				t.Errorf("Status = %q, want %q", got.Status, syncStatusNoRemote)
+			}
+		}
+		if fake.pullCalls+fake.pushCalls != 0 {
+			t.Errorf("json=%v: %d pull and %d push attempts on a rig with no remote, want none", asJSON, fake.pullCalls, fake.pushCalls)
 		}
 	}
 }
