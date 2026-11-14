@@ -155,7 +155,8 @@ func runCloseProxiedIfRevision(ctx context.Context, id, reason string, force boo
 
 // reportClosedIfRevisionResult is the one-id success report shared by both
 // --if-revision close routes: the audit entry (suppressed for an idempotent
-// re-close, matching close.go's batch behavior) and the human/--json output.
+// re-close, matching close.go's batch behavior) and the human/--json output,
+// which reports an idempotent re-close as already closed (bd-th8229).
 //
 // ON_CLOSE HOOK FIRING IS DELIBERATELY NOT GATED HERE (mc-zndi7.75 item 2).
 // ops.Close above reaches hookIssueOperations.Close (embedded) or
@@ -183,8 +184,14 @@ func reportClosedIfRevisionResult(id, reason, preCloseStatus string, closeResult
 	}
 	if jsonOutput {
 		if closedIssue != nil {
-			_ = outputJSON([]closedIssueJSON{newClosedIssueJSON(closedIssue, closeResult.AutoClosedMolecule, closeResult.MoleculeAutoCloseRefusal, false)})
+			_ = outputJSON([]closedIssueJSON{newClosedIssueJSON(closedIssue, closeResult.AutoClosedMolecule, closeResult.MoleculeAutoCloseRefusal, !closeResult.Changed)})
 		}
+		return
+	}
+	if !closeResult.Changed {
+		// An already-closed no-op kept its first reason (bd-th8229): report
+		// it as the batch routes do, never as a close carrying reason.
+		debug.PrintNormal("%s\n", alreadyClosedNotice(id, closedIssue))
 		return
 	}
 	title := ""

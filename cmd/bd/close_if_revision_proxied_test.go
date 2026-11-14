@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -76,5 +77,39 @@ func TestProxiedServerIfRevisionCloseWarnsOnForcedOpenChildren(t *testing.T) {
 	db := openProxiedDB(t, p)
 	if got := readStatus(t, db, parent.ID); got != types.StatusClosed {
 		t.Errorf("guarded proxied forced close did not apply: status = %q, want closed", got)
+	}
+}
+
+// TestProxiedServerIfRevisionCloseAlreadyClosedReportsNoOp is
+// TestEmbeddedIfRevisionCloseAlreadyClosedReportsNoOp's proxied-server twin
+// (bd-th8229, GH#4816).
+func TestProxiedServerIfRevisionCloseAlreadyClosedReportsNoOp(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+	p := newSharedProxiedProject(t, bd, "ivn")
+
+	issue := bdProxiedCreate(t, bd, p.dir, "Guarded proxied reclose")
+	bdProxiedClose(t, bd, p.dir, issue.ID, "--reason", "FIRST")
+
+	out := bdProxiedClose(t, bd, p.dir, issue.ID, "--if-revision", proxiedRevStr(bdProxiedShowRevision(t, bd, p.dir, issue.ID)), "--reason", "SECOND")
+	want := fmt.Sprintf("Already closed %s — Guarded proxied reclose (close reason unchanged: FIRST)", issue.ID)
+	if !strings.Contains(out, want) {
+		t.Errorf("guarded proxied re-close should report %q, got:\n%s", want, out)
+	}
+	if strings.Contains(out, "✓ Closed") || strings.Contains(out, "SECOND") {
+		t.Errorf("guarded proxied re-close reports a close with the dropped reason:\n%s", out)
+	}
+
+	out = bdProxiedClose(t, bd, p.dir, issue.ID, "--if-revision", proxiedRevStr(bdProxiedShowRevision(t, bd, p.dir, issue.ID)), "--reason", "THIRD", "--json")
+	entries := decodeCloseJSON(t, out, []string{issue.ID})
+	requireCloseJSONMarksAlreadyClosed(t, entries, map[string]bool{issue.ID: true})
+	if got := entries[0].CloseReason; got != "FIRST" {
+		t.Errorf("guarded proxied re-close --json close_reason = %q, want %q", got, "FIRST")
+	}
+
+	db := openProxiedDB(t, p)
+	if got := readCloseReason(t, db, issue.ID); got != "FIRST" {
+		t.Errorf("close_reason = %q after guarded proxied re-closes, want %q (first close wins)", got, "FIRST")
 	}
 }
