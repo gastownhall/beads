@@ -566,6 +566,7 @@ go_test(
         "auto_import_upgrade_embedded_test.go",
         "auto_import_upgrade_unit_test.go",
         "autocommit_embedded_test.go",
+        "autopush_policy_embedded_test.go",
         "backend_registry_contract_test.go",
         "backup_auto_proxied_local_integration_test.go",
         "backup_auto_proxied_test.go",
