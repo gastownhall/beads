@@ -184,6 +184,26 @@ bd create "Found issue" --deps discovered-from:bd-a1b2   # Track discovered work
 
 In orchestrated workflows an orchestrator usually assigns work (`bd assign`); agents picking work directly should use the atomic `--claim`. For multiple concurrent processes on one machine, use server mode; for distributed setups, Dolt's cell-level merge and [federation](/multi-agent/federation) let agents work independently and merge like developers do. See [Agent Coordination](/multi-agent/coordination).
 
+### What happens when I repeat a filter flag?
+
+A filter that takes a set of values reads a repeated flag as one comma list,
+so these two commands match the same beads:
+
+```bash
+bd search auth --status open --status blocked
+bd search auth --status open,blocked
+```
+
+This holds for `bd list --status`/`--state`/`--id`, `bd search --status`,
+`bd human list --status`, `bd count --id`, and `bd gitlab sync --label`/`--type`.
+GitLab labels keep their meaning: a bead must carry every listed label.
+
+A filter that takes one value, such as `--assignee`, `--type` on `bd ready`,
+or `--state` on `bd jira sync`, refuses a second value with
+`--<flag> given more than once` instead of silently keeping the last one.
+Flags that set a value (`bd create --type`, `bd update --status`) still keep
+the last value given.
+
 ### Does beads work offline?
 
 Yes — beads is offline-first. All queries run against the local Dolt database, no command needs the network, and sync happens via `bd dolt push` / `bd dolt pull` when you're online. That makes it suitable for planes, unstable connections, air-gapped environments, and privacy-sensitive projects.
