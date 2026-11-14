@@ -3,6 +3,7 @@ package domain
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -361,7 +362,12 @@ type UpdateSpec struct {
 	AddLabels       []string
 	RemoveLabels    []string
 	SetLabels       *[]string
-	Reparent        *string
+	// RemoveLabelPrefixes drops every current (or SetLabels) label starting
+	// with one of these literal prefixes before AddLabels and RemoveLabels
+	// apply, the uow twin of publicops.LabelPatch.RemovePrefixes. ApplyUpdate
+	// resolves it against the labels it reads inside its own transaction.
+	RemoveLabelPrefixes []string
+	Reparent            *string
 
 	// ExpectedAssignee and ExpectedStatus are the bd-wsqvw compare-and-set
 	// guards (`bd update --if-assignee/--if-status`): when non-nil, the whole
@@ -790,6 +796,56 @@ func (u *issueUseCaseImpl) claim(ctx context.Context, id, actor string, useWisp 
 	}
 }
 
+// labelPrefixPatchTarget evaluates spec's label edits in LabelPatch order
+// (SetLabels, then RemoveLabelPrefixes, then AddLabels, then RemoveLabels)
+// against the issue's current labels and returns the final set. Empty labels
+// and empty prefixes are dropped, as the direct route drops them.
+func (u *issueUseCaseImpl) labelPrefixPatchTarget(ctx context.Context, id string, spec UpdateSpec, useWisp bool) ([]string, error) {
+	var start []string
+	if spec.SetLabels != nil {
+		start = *spec.SetLabels
+	} else {
+		var err error
+		if useWisp {
+			start, err = u.labelUC.GetWispLabels(ctx, id)
+		} else {
+			start, err = u.labelUC.GetLabels(ctx, id)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("ApplyUpdate: read labels of %s: %w", id, err)
+		}
+	}
+	target := make(map[string]struct{}, len(start)+len(spec.AddLabels))
+	for _, label := range start {
+		if label != "" && !hasAnyLabelPrefix(label, spec.RemoveLabelPrefixes) {
+			target[label] = struct{}{}
+		}
+	}
+	for _, label := range spec.AddLabels {
+		if label != "" {
+			target[label] = struct{}{}
+		}
+	}
+	for _, label := range spec.RemoveLabels {
+		delete(target, label)
+	}
+	out := make([]string, 0, len(target))
+	for label := range target {
+		out = append(out, label)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func hasAnyLabelPrefix(label string, prefixes []string) bool {
+	for _, prefix := range prefixes {
+		if prefix != "" && strings.HasPrefix(label, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // ApplyUpdate applies spec's guarded field updates and returns the resulting
 // issue. When ExpectedAssignee is set, the guard compares under
 // validation.ActorMatches, not verbatim ==, so two spellings of the same
@@ -867,6 +923,20 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 				return nil, err
 			}
 		}
+	}
+
+	if len(spec.RemoveLabelPrefixes) > 0 {
+		// Resolve the whole patch to its final set against this transaction's
+		// labels, then let the diffing SetLabels path write only what differs:
+		// clearing and re-adding the dimension's one existing value is then a
+		// true no-op that writes no row, event or coordination cell.
+		target, err := u.labelPrefixPatchTarget(ctx, id, spec, useWisp)
+		if err != nil {
+			return nil, err
+		}
+		spec.SetLabels = &target
+		spec.AddLabels = nil
+		spec.RemoveLabels = nil
 	}
 
 	if spec.SetLabels != nil {

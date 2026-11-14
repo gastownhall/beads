@@ -165,6 +165,7 @@ func nonCoordinationPatchSignals(patch issueops.IssuePatch) []bool {
 		patch.ParentID.Set,
 		len(patch.Labels.Add) != 0,
 		len(patch.Labels.Remove) != 0,
+		len(patch.Labels.RemovePrefixes) != 0,
 		patch.Labels.Replace.Set,
 		len(patch.Metadata.Set) != 0,
 		len(patch.Metadata.Unset) != 0,
