@@ -1222,11 +1222,13 @@ func TestSetupCopilot_RemoveKeepsUserInstructions(t *testing.T) {
 }
 
 // AC-5: install and remove refuse instructions whose beads markers are
-// malformed, naming the file, and leave both recipe files as they were.
+// malformed, naming the file, and leave both recipe files as they were;
+// --check fails on them. A mention of the markers in the user's own text is
+// malformed too, never bd's section.
 func TestSetupCopilot_RefusesMalformedMarkers(t *testing.T) {
 	const begin = "<!-- BEGIN BEADS INTEGRATION -->"
 	const end = "<!-- END BEADS INTEGRATION -->"
-	for _, mode := range []string{"", "remove"} {
+	for _, mode := range []string{"", "check", "remove"} {
 		for _, tt := range []struct{ name, content string }{
 			{"dangling BEGIN", "# Team rules\n\n" + begin + "\nOld guidance.\n"},
 			{"dangling END", "# Team rules\n\nOld guidance.\n" + end + "\n"},
@@ -1234,10 +1236,12 @@ func TestSetupCopilot_RefusesMalformedMarkers(t *testing.T) {
 			{"two sections", begin + "\nA\n" + end + "\n\n" + begin + "\nB\n" + end + "\n"},
 			{"nested", begin + "\n" + begin + "\nA\n" + end + "\n" + end + "\n"},
 			{"unterminated BEGIN comment", "<!-- BEGIN BEADS INTEGRATION\nA\n" + end + "\n"},
+			{"markers mentioned inline", "# Team rules\n\nbd keeps its guidance between `" + begin + "` and `" + end + "`; never edit inside them.\n"},
+			{"markers in an indented code block", "# Team rules\n\nExample:\n\n    " + begin + "\n    Old guidance.\n    " + end + "\n"},
 		} {
 			t.Run(mode+"/"+tt.name, func(t *testing.T) {
 				copilotTestWorkspace(t)
-				hadManifest := mode == "remove"
+				hadManifest := mode != ""
 				if hadManifest {
 					writeWorkspaceFile(t, copilotManifestFile, copilotManifest(t))
 				}
@@ -1247,8 +1251,8 @@ func TestSetupCopilot_RefusesMalformedMarkers(t *testing.T) {
 				if err == nil {
 					t.Fatalf("bd setup copilot %s accepted malformed markers:\n%s", mode, out)
 				}
-				if !strings.Contains(out, copilotInstructionsFile) {
-					t.Errorf("refusal does not name %s:\n%s", copilotInstructionsFile, out)
+				if !strings.Contains(out, copilotInstructionsFile) || !strings.Contains(out, "malformed beads integration markers") {
+					t.Errorf("refusal does not name %s and its malformed markers:\n%s", copilotInstructionsFile, out)
 				}
 				if got, _ := readWorkspaceFile(t, copilotInstructionsFile); got != tt.content {
 					t.Errorf("instructions changed to %q", got)
@@ -1261,8 +1265,40 @@ func TestSetupCopilot_RefusesMalformedMarkers(t *testing.T) {
 	}
 }
 
+// A byte order mark that an editor saved at the start of the instructions
+// file is not text before the BEGIN marker: setup leaves the section behind
+// it as it is, --check passes, and --remove takes out only the section,
+// keeping the mark and the user's text.
+func TestSetupCopilot_SectionBehindByteOrderMark(t *testing.T) {
+	const bom = "\ufeff"
+	const user = "## Team rules\n\n- Prefer small PRs.\n"
+	copilotTestWorkspace(t)
+	writeWorkspaceFile(t, copilotManifestFile, copilotManifest(t))
+	content := bom + copilotSection() + "\n" + user
+	writeWorkspaceFile(t, copilotInstructionsFile, content)
+
+	if out, err := runCopilotSetup(t, ""); err != nil {
+		t.Fatalf("bd setup copilot: %v\n%s", err, out)
+	}
+	if got, _ := readWorkspaceFile(t, copilotInstructionsFile); got != content {
+		t.Fatalf("setup changed the instructions to %q, want %q", got, content)
+	}
+	if out, err := runCopilotSetup(t, "check"); err != nil || !strings.Contains(out, "integration installed") {
+		t.Fatalf("bd setup copilot --check: %v\n%s", err, out)
+	}
+	if out, err := runCopilotSetup(t, "remove"); err != nil {
+		t.Fatalf("bd setup copilot --remove: %v\n%s", err, out)
+	}
+	if got, ok := readWorkspaceFile(t, copilotInstructionsFile); !ok || got != bom+user {
+		t.Fatalf("instructions after remove = %q (exists %v), want %q", got, ok, bom+user)
+	}
+	if _, ok := readWorkspaceFile(t, copilotManifestFile); ok {
+		t.Errorf("remove kept the manifest")
+	}
+}
+
 // legacyCopilotInstructions is the instructions file bd setup copilot wrote,
-// unmarked, before it kept a marked section (v1.0.5 through v1.3.2).
+// unmarked, in every release from v1.0.5 until it kept a marked section.
 const legacyCopilotInstructions = `# GitHub Copilot Instructions
 
 This repository uses **Beads (bd)** for issue tracking.
@@ -1285,16 +1321,18 @@ If the Beads Copilot plugin is installed, Copilot CLI will automatically run
 `
 
 // AC-6: an instructions file that is exactly the old unmarked template
-// passes --check, and setup turns it into one marked section.
+// passes --check, and setup turns it into one marked section, keeping a byte
+// order mark the file starts with.
 func TestSetupCopilot_ConvertsLegacyInstructions(t *testing.T) {
-	for _, tt := range []struct{ name, content string }{
-		{"as written", legacyCopilotInstructions},
-		{"CRLF and trailing blank lines", strings.ReplaceAll(legacyCopilotInstructions, "\n", "\r\n") + "\r\n  \n"},
+	for _, tt := range []struct{ name, bom, content string }{
+		{"as written", "", legacyCopilotInstructions},
+		{"CRLF and trailing blank lines", "", strings.ReplaceAll(legacyCopilotInstructions, "\n", "\r\n") + "\r\n  \n"},
+		{"behind a byte order mark", "\ufeff", legacyCopilotInstructions},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			copilotTestWorkspace(t)
 			writeWorkspaceFile(t, copilotManifestFile, copilotManifest(t))
-			writeWorkspaceFile(t, copilotInstructionsFile, tt.content)
+			writeWorkspaceFile(t, copilotInstructionsFile, tt.bom+tt.content)
 
 			if out, err := runCopilotSetup(t, "check"); err != nil {
 				t.Fatalf("bd setup copilot --check over the legacy template: %v\n%s", err, out)
@@ -1303,8 +1341,8 @@ func TestSetupCopilot_ConvertsLegacyInstructions(t *testing.T) {
 				t.Fatalf("bd setup copilot: %v\n%s", err, out)
 			}
 			got, _ := readWorkspaceFile(t, copilotInstructionsFile)
-			if got != copilotSection() {
-				t.Fatalf("legacy instructions became %q, want one section %q", got, copilotSection())
+			if want := tt.bom + copilotSection(); got != want {
+				t.Fatalf("legacy instructions became %q, want one section %q", got, want)
 			}
 		})
 	}

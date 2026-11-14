@@ -18,6 +18,19 @@ const (
 	sharedEndPrefix   = "<!-- END BEADS INTEGRATION"
 )
 
+// utf8BOM is the byte order mark some editors save at the start of a UTF-8
+// file. It is not the file's text: a marker right after it starts the first
+// line, and bd keeps it where it is.
+const utf8BOM = "\ufeff"
+
+// splitBOM splits a leading byte order mark (utf8BOM) off content.
+func splitBOM(content string) (bom, text string) {
+	if strings.HasPrefix(content, utf8BOM) {
+		return utf8BOM, content[len(utf8BOM):]
+	}
+	return "", content
+}
+
 // ErrMalformedSection is the error, wrapped with what is wrong, for a
 // shared file whose beads markers do not make exactly one section.
 var ErrMalformedSection = errors.New("malformed beads integration markers")
@@ -42,10 +55,12 @@ const (
 )
 
 // isLegacySharedFile reports whether content is exactly legacy, the whole
-// file an older bd wrote, but for CRLF line breaks and trailing whitespace.
-// A file holding legacy and anything else is the user's.
+// file an older bd wrote, but for a leading byte order mark, CRLF line
+// breaks and trailing whitespace. A file holding legacy and anything else is
+// the user's.
 func isLegacySharedFile(content, legacy string) bool {
 	normalize := func(s string) string {
+		_, s = splitBOM(s)
 		return strings.TrimRightFunc(strings.ReplaceAll(s, "\r\n", "\n"), unicode.IsSpace)
 	}
 	return legacy != "" && normalize(content) == normalize(legacy)
@@ -74,7 +89,10 @@ func wrapSharedSection(body string) string {
 // where it starts (its BEGIN comment) and ends (just past its END comment).
 // A section is present only when content holds one BEGIN comment, bare or
 // with the metadata bd writes into AGENTS.md, closed on its own line, and
-// one END comment after it; any other use of the markers is malformed.
+// one END comment after it, each alone on its line (markerAloneOnLine), as
+// bd writes them. Any other use of the markers is malformed, so a mention
+// of them in the file's own text, inline or indented, is never taken for
+// bd's section.
 func sharedSectionSpan(content string) (start, end int, state SharedSectionState, err error) {
 	begins := strings.Count(content, sharedBeginPrefix)
 	ends := strings.Count(content, sharedEndPrefix)
@@ -100,7 +118,26 @@ func sharedSectionSpan(content string) (start, end int, state SharedSectionState
 	if !strings.HasPrefix(rest, " ") || closeAt < 0 || strings.ContainsAny(rest[:closeAt], "\r\n") || start+len(sharedBeginPrefix)+closeAt > endAt {
 		return malformed("the BEGIN marker is not one complete comment on its line")
 	}
-	return start, endAt + len(agentsEndMarker), SharedSectionPresent, nil
+	end = endAt + len(agentsEndMarker)
+	if !markerAloneOnLine(content, start, start+len(sharedBeginPrefix)+closeAt+len("-->")) {
+		return malformed("the BEGIN marker is not alone on its line")
+	}
+	if !markerAloneOnLine(content, endAt, end) {
+		return malformed("the END marker is not alone on its line")
+	}
+	return start, end, SharedSectionPresent, nil
+}
+
+// markerAloneOnLine reports whether the marker content[from:to] is alone on
+// its line: it starts the line (the first one, behind a byte order mark
+// too), and nothing but spaces, tabs or CRs follows it before the next LF or
+// the end of content.
+func markerAloneOnLine(content string, from, to int) bool {
+	if from > 0 && content[from-1] != '\n' && content[:from] != utf8BOM {
+		return false
+	}
+	line, _, _ := strings.Cut(content[to:], "\n")
+	return strings.Trim(line, " \t\r") == ""
 }
 
 // UpsertSharedSection returns content with body as its beads section. An
@@ -108,21 +145,23 @@ func sharedSectionSpan(content string) (start, end int, state SharedSectionState
 // marker, the bytes before and after it untouched, so running it again
 // changes nothing. A file with no beads markers gets the section appended,
 // set off by a blank line as AGENTS.md's is, its own bytes kept as they
-// are; an empty one, or one that is exactly legacy, gets just the section.
-// Malformed markers are an error, content unchanged.
+// are; an empty one, or one that is exactly legacy, gets just the section,
+// behind the byte order mark it starts with, if any. Malformed markers are
+// an error, content unchanged.
 func UpsertSharedSection(content, body, legacy string) (string, error) {
 	wrapped := wrapSharedSection(body)
 	start, end, state, err := classifySharedSection(content, legacy)
+	bom, text := splitBOM(content)
 	switch {
 	case err != nil:
 		return content, err
 	case state == SharedSectionLegacy:
-		return wrapped, nil
+		return bom + wrapped, nil
 	case state == SharedSectionPresent:
 		// The line break that ends the END marker's line stays in content.
 		return content[:start] + strings.TrimSuffix(wrapped, "\n") + content[end:], nil
-	case content == "":
-		return wrapped, nil
+	case text == "":
+		return bom + wrapped, nil
 	default:
 		return addBeadsSection(content, wrapped, ""), nil
 	}
@@ -192,20 +231,26 @@ func CheckSharedFile(path, legacy string) (SharedSectionState, error) {
 
 // StripSharedSection returns content without its beads section, removed by
 // removeBeadsSection, which drops the line breaks that set the section off
-// and rejoins the text around it. stripped reports a section was removed,
-// and empty that nothing but whitespace is left, so the file is bd's alone.
-// A file that is exactly legacy is bd's alone too. Malformed markers are an
-// error, content unchanged.
+// and rejoins the text around it; a byte order mark the file starts with
+// stays. stripped reports a section was removed, and empty that nothing but
+// whitespace is left, so the file is bd's alone. A file that is exactly
+// legacy is bd's alone too. Malformed markers are an error, content
+// unchanged.
 func StripSharedSection(content, legacy string) (remainder string, stripped, empty bool, err error) {
-	_, _, state, err := classifySharedSection(content, legacy)
+	_, end, state, err := classifySharedSection(content, legacy)
 	switch {
 	case state == SharedSectionLegacy:
 		return "", true, true, nil
 	case err != nil || state != SharedSectionPresent:
 		return content, false, false, err
 	}
-	remainder = removeBeadsSection(content)
-	return remainder, true, strings.TrimSpace(remainder) == "", nil
+	// Nothing but spaces, tabs or CRs can follow the END marker on its line
+	// (markerAloneOnLine). They go with the section, so removeBeadsSection
+	// sees the marker end its line and rejoins the text around it.
+	line, _, _ := strings.Cut(content[end:], "\n")
+	bom, text := splitBOM(content[:end] + content[end+len(line):])
+	text = removeBeadsSection(text)
+	return bom + text, true, strings.TrimSpace(text) == "", nil
 }
 
 // SharedRemoval is what RemoveSharedFile did.
@@ -221,8 +266,8 @@ const (
 )
 
 // RemoveSharedFile takes bd's section out of path (StripSharedSection),
-// deleting the file only when nothing but whitespace is left, or when it is
-// exactly legacy.
+// deleting the file only when nothing but whitespace (or a byte order mark)
+// is left, or when it is exactly legacy.
 func RemoveSharedFile(path, legacy string) (SharedRemoval, error) {
 	if err := refuseSharedSymlink(path); err != nil {
 		return SharedRemovedNothing, err

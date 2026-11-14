@@ -315,7 +315,7 @@ bd init --quiet
 
 # 3. Setup editor integration (choose one)
 bd setup claude   # Claude Code - installs SessionStart hooks
-bd setup copilot  # GitHub Copilot CLI - creates .copilot-plugin/plugin.json + a section in .github/copilot-instructions.md
+bd setup copilot  # GitHub Copilot CLI - creates .copilot-plugin/plugin.json + .github/copilot-instructions.md
 bd setup cursor   # Cursor IDE - creates .cursor/rules/beads.mdc
 bd setup aider    # Aider - creates .aider.conf.yml
 bd setup codex    # Codex CLI - installs Beads skill, AGENTS.md guidance, and native hooks
@@ -364,10 +364,10 @@ For the **GitHub Copilot CLI** terminal integration:
 
 ```bash
 bd setup copilot         # Install project Copilot plugin + repository instructions
-bd setup copilot --check # Verify the manifest and the beads section are installed
+bd setup copilot --check # Verify the project integration files exist
 ```
 
-This setup is currently project-scoped only. It writes `.copilot-plugin/plugin.json` and keeps a marked beads section in `.github/copilot-instructions.md`, leaving your own instructions in that file alone; there is no separate `--global` or `--project` mode for Copilot today, and it does not manage `~/.copilot/...` paths. See [Copilot CLI](/integrations/copilot-cli) for the full guide.
+This setup is currently project-scoped only. It writes `.copilot-plugin/plugin.json` and `.github/copilot-instructions.md`; there is no separate `--global` or `--project` mode for Copilot today, and it does not manage `~/.copilot/...` paths. bd releases before v1.5.0, v1.4.x included, write the instructions file whole, replacing any instructions already in it, and `--remove` deletes it; bd v1.5.0 and later keep a marked beads section in it and leave your own instructions alone. See [Copilot CLI](/integrations/copilot-cli) for the full guide.
 
 ### MCP Server (Alternative)
 

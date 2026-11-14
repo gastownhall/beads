@@ -36,8 +36,8 @@ For **VS Code + MCP**, see [GitHub Copilot](/integrations/github-copilot).
 3. **Lower maintenance burden**
    - No Copilot-specific install/check/remove implementation in core
    - No Copilot-specific doctor checks
-   - The recipe writes the native plugin file and keeps a marked section in
-     the instruction file
+   - The recipe writes the native plugin file and the beads guidance in the
+     instruction file
 
 ## Why Copilot CLI Over MCP for Terminal Work?
 
@@ -71,13 +71,24 @@ bd setup copilot --remove
   - `SessionStart` hook: Runs `bd prime` when Copilot CLI starts a session
   - `PreCompact` hook: Runs `bd prime` before context compaction
 - `.github/copilot-instructions.md`
-  - Repository workflow guidance for Copilot CLI, kept as a marked section
+  - Repository workflow guidance for Copilot CLI
 
 ## Sharing `.github/copilot-instructions.md`
 
 `.github/copilot-instructions.md` is where a repository keeps its own Copilot
-instructions, so `bd setup copilot` does not own the whole file. It keeps
-the beads guidance between `<!-- BEGIN BEADS INTEGRATION -->` and
+instructions.
+
+<Warning>
+bd releases before v1.5.0, v1.4.x included, write the beads guidance over the
+whole file, replacing any instructions already in it, and
+`bd setup copilot --remove` deletes the file. With those releases, commit or
+copy your own instructions before you run either command. The behavior below
+needs bd v1.5.0 or later on every machine that runs `bd setup copilot` in the
+repository.
+</Warning>
+
+In bd v1.5.0 and later, `bd setup copilot` does not own the whole file. It
+keeps the beads guidance between `<!-- BEGIN BEADS INTEGRATION -->` and
 `<!-- END BEADS INTEGRATION -->` markers and leaves everything else alone:
 
 - **Setup** creates the file holding just the section when it is missing or
@@ -86,17 +97,26 @@ the beads guidance between `<!-- BEGIN BEADS INTEGRATION -->` and
 - **`--check`** fails, naming the file, when it is missing, holds no beads
   section, or has malformed markers. It also needs the plugin manifest.
 - **`--remove`** takes out only the section, rejoining the text around it
-  with the blank line that set it off, and deletes the file only when nothing
-  but whitespace is left.
-- **Earlier releases** wrote the template as the whole file, unmarked. A
-  file that is exactly that template passes `--check`, and setup converts it
-  to one marked section. If you edited that file, setup appends a new
-  section; delete the old unmarked guidance by hand.
+  with the blank line that set it off. It deletes the file only when nothing
+  but whitespace is left, or when the file is exactly the unmarked template
+  an older release wrote.
+- **A file an older release wrote** holds the template as the whole file,
+  unmarked. A file that is exactly that template passes `--check`, and setup
+  converts it to one marked section. If you edited that file, setup appends
+  a new section; delete the old unmarked guidance by hand.
 - **Refusals:** setup and remove change nothing, and exit non-zero, when the
   file's markers are malformed (a dangling, reversed, nested or repeated
-  marker) or when `.github/copilot-instructions.md` is itself a symbolic
-  link. Fix the markers, or replace the link with a regular file, and run
-  the command again. A symlinked `.github` directory works as before.
+  marker, or one that is not alone on its line, as when your own text
+  mentions the markers in a sentence or an indented code block) or when
+  `.github/copilot-instructions.md` is itself a symbolic link. Fix the
+  markers, or replace the link with a regular file, and run the command
+  again. A symlinked `.github` directory works as before.
+- **Known limitation:** bd reads the file line by line, not as Markdown, so
+  it cannot tell a fenced code block from your text. If the file has no
+  beads section and a fenced block shows both markers, each alone on its
+  line, bd takes them for its section: setup writes the beads guidance
+  between them, and `--remove` deletes them and everything between them.
+  Keep the markers out of fenced examples in this file.
 
 `.copilot-plugin/plugin.json` is bd's own: setup writes it whole, and
 `--remove` deletes it.
