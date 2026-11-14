@@ -575,3 +575,39 @@ func TestMolBondProxiedDryRunPreviewsRoutedHome(t *testing.T) {
 		})
 	}
 }
+
+// TestMolBondProxiedRefusesCrossStorePairs: operands in different logical
+// stores (the served database and a rig, or two rigs) are refused with the
+// different-stores error before any writable open, dry run or not.
+func TestMolBondProxiedRefusesCrossStorePairs(t *testing.T) {
+	f := newMolBondProxiedFixture(t)
+
+	for _, pair := range [][2]string{
+		{"hq-served", "gt-mol1"},
+		{"gt-mol1", "hq-served"},
+		{"gt-mol1", "zz-other"},
+		{"zz-other", "gt-mol1"},
+	} {
+		for _, dryRun := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s_%s_dry_run_%t", pair[0], pair[1], dryRun), func(t *testing.T) {
+				reopens := f.reopens
+				runErr, _, stderr := f.bond(molBondInput{argA: pair[0], argB: pair[1], dryRun: dryRun})
+				if runErr == nil {
+					t.Fatalf("bond %s %s succeeded, want the different-stores refusal", pair[0], pair[1])
+				}
+				if !strings.Contains(stderr, "they live in different stores/rigs") {
+					t.Errorf("bond %s %s: stderr lacks the different-stores refusal:\n%s", pair[0], pair[1], stderr)
+				}
+				if f.reopens != reopens {
+					t.Errorf("refused bond reopened a routed home writable")
+				}
+				for _, id := range []string{"gt-mol1", "zz-other"} {
+					if deps := f.rigDependencies(id); len(deps) != 0 {
+						t.Errorf("refused bond wrote dependencies on %s: %+v", id, deps)
+					}
+				}
+				f.assertServedUnwritten("cross-store refusal")
+			})
+		}
+	}
+}
