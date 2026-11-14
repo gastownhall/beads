@@ -1006,6 +1006,7 @@ go_test(
         "list_footer_counts_test.go",
         "list_format_json_test.go",
         "list_helpers_test.go",
+        "list_include_all_types_test.go",
         "list_limit_policy_test.go",
         "list_output_test.go",
         "list_page_edges_embedded_test.go",
