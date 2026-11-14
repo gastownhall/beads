@@ -182,3 +182,52 @@ func TestEmbeddedReadOpenWriteAccessDenied(t *testing.T) {
 		}
 	}
 }
+
+// TestEmbeddedWritableStoreOpensWithoutWriteAccessDiagnostic is the control
+// for TestEmbeddedReadOpenWriteAccessDenied: on a store the process may write,
+// every opener still succeeds and reads the sample issue, the writable opens
+// still write, and the write-refusing opens still refuse with ErrReadOnly. No
+// successful open and no refusal carries the GH#7445 write-access diagnostic.
+func TestEmbeddedWritableStoreOpensWithoutWriteAccessDiagnostic(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
+	}
+
+	for _, opener := range writeAccessOpeners {
+		t.Run(opener.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+			defer cancel()
+			beadsDir := newWriteAccessFixture(t, ctx)
+
+			store, err := opener.open(ctx, beadsDir, "accessdb", "main")
+			if err != nil {
+				t.Fatalf("%s on a writable store: %v", opener.name, err)
+			}
+			defer func() { _ = store.Close() }()
+
+			issue, err := store.GetIssue(ctx, "accessdb-1")
+			if err != nil {
+				t.Fatalf("GetIssue after %s: %v", opener.name, err)
+			}
+			if issue.Title != "sample issue" {
+				t.Fatalf("GetIssue after %s = %q, want the sample issue", opener.name, issue.Title)
+			}
+
+			writeErr := store.SetLocalMetadata(ctx, "write_access_control", "written")
+			switch opener.name {
+			case "OpenReadOnly", "OpenForPreviewCommand":
+				if !errors.Is(writeErr, embeddeddolt.ErrReadOnly) {
+					t.Fatalf("write through %s = %v, want ErrReadOnly", opener.name, writeErr)
+				}
+			default:
+				if writeErr != nil {
+					t.Fatalf("write through %s: %v", opener.name, writeErr)
+				}
+			}
+			if errors.Is(writeErr, embeddeddolt.ErrStoreRequiresWriteAccess) ||
+				(writeErr != nil && strings.Contains(writeErr.Error(), "require write access")) {
+				t.Fatalf("write through %s on a writable store carries the write-access diagnostic: %v", opener.name, writeErr)
+			}
+		})
+	}
+}
