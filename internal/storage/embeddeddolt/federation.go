@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
@@ -123,6 +124,10 @@ func (s *EmbeddedDoltStore) decryptPassword(encrypted []byte) (string, error) {
 // ---------------------------------------------------------------------------
 
 func (s *EmbeddedDoltStore) AddFederationPeer(ctx context.Context, peer *storage.FederationPeer) error {
+	// GH#6233: refuse before the peer row or its credentials are written.
+	if err := remotecache.CheckProposedRemote(peer.Name, peer.RemoteURL); err != nil {
+		return err
+	}
 	encryptedPwd, err := s.encryptPassword(peer.Password)
 	if err != nil {
 		return fmt.Errorf("encrypt password: %w", err)
@@ -181,7 +186,15 @@ var federationEnvMutex sync.Mutex
 //
 // Stored credentials are bound to the peer's canonical remote URL, not only
 // to its name (see verifyPeerRemoteURL).
+//
+// It is also the allowlist gate for those verbs (checkRemotePolicy).
 func (s *EmbeddedDoltStore) withPeerAuth(ctx context.Context, peer string, fn func(user string) error) error {
+	// GH#6233: every remote verb funnels through here, so the allowlist is
+	// checked once, before any credential is resolved or installed and before
+	// fn dispatches the transfer.
+	if err := s.checkRemotePolicy(ctx, peer); err != nil {
+		return err
+	}
 	p, err := s.GetFederationPeer(ctx, peer)
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
 		return fmt.Errorf("resolve peer credentials: %w", err)

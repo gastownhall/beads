@@ -40,6 +40,9 @@ func (s *DoltStore) PushTo(ctx context.Context, peer string) error {
 // pushRefToPeer pushes a specific refspec to a peer remote. The refspec can be
 // a simple branch name ("main") or a mapping ("staging:main").
 func (s *DoltStore) pushRefToPeer(ctx context.Context, peer string, refspec string) error {
+	if err := s.checkRemotePolicy(ctx, peer); err != nil {
+		return err
+	}
 	if useCLI, err := s.prepareCLIRouteForPeerGitProtocol(ctx, peer); err != nil {
 		return err
 	} else if useCLI {
@@ -68,6 +71,10 @@ func (s *DoltStore) pushRefToPeer(ctx context.Context, peer string, refspec stri
 // timeouts. Every route fetches and merges <peer>/<branch> (bd-e2q8zs).
 // Returns any merge conflicts if present.
 func (s *DoltStore) PullFrom(ctx context.Context, peer string) ([]storage.Conflict, error) {
+	// GH#6233: before the write circuit and the pre-pull commit; see pullFromRemote.
+	if err := s.checkRemotePolicy(ctx, peer); err != nil {
+		return nil, err
+	}
 	var conflicts []storage.Conflict
 	err := s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		var err error
@@ -172,6 +179,9 @@ func (s *DoltStore) finishPeerPull(ctx context.Context, conflicts []storage.Conf
 // If credentials are stored for this peer, they are used automatically.
 // For git-protocol remotes, uses CLI `dolt fetch` to avoid MySQL connection timeouts.
 func (s *DoltStore) Fetch(ctx context.Context, peer string) error {
+	if err := s.checkRemotePolicy(ctx, peer); err != nil {
+		return err
+	}
 	if useCLI, err := s.prepareCLIRouteForPeerGitProtocol(ctx, peer); err != nil {
 		return err
 	} else if useCLI {
@@ -396,6 +406,14 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 	result := &SyncResult{
 		Peer:      peer,
 		StartTime: time.Now(),
+	}
+
+	// GH#6233: refuse a peer outside the allowlist before the pre-sync commit
+	// and before Fetch; filteredPushToPeer would otherwise stage a branch for
+	// a push its own pushRefToPeer gate then refuses.
+	if err := s.checkRemotePolicy(ctx, peer); err != nil {
+		result.Error = err
+		return result, err
 	}
 
 	// GH#2474: match PullFrom — commit pending changes before the merge,

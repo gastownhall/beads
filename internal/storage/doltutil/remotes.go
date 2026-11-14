@@ -224,6 +224,18 @@ func AddCLIRemote(dbPath, name, url string) error {
 // lives on the git ref ref (`dolt remote add --ref`). An empty ref is
 // AddCLIRemote.
 func AddCLIRemoteWithRef(dbPath, name, url, ref string) error {
+	// GH#6233: a URL the allowlist refuses is never registered.
+	if err := remotecache.CheckProposedRemote(name, url); err != nil {
+		return err
+	}
+	return addCLIRemoteWithRef(dbPath, name, url, ref)
+}
+
+// addCLIRemoteWithRef is AddCLIRemoteWithRef without the allowlist check, for
+// EnsureCLIRemote, which checks the proposed URL once up front and must still
+// be able to put back the record it replaced (and its probe of the proposed
+// URL) whatever the list says about it.
+func addCLIRemoteWithRef(dbPath, name, url, ref string) error {
 	if err := remotecache.ValidateRemoteName(name); err != nil {
 		return fmt.Errorf("invalid remote name: %w", err)
 	}
@@ -334,7 +346,7 @@ func probeCLIRemoteRef(dbPath, url, ref string) error {
 		return nil
 	}
 	probe := ownCLIRefProbe()
-	if err := AddCLIRemoteWithRef(dbPath, probe, url, ref); err != nil {
+	if err := addCLIRemoteWithRef(dbPath, probe, url, ref); err != nil {
 		return fmt.Errorf("cannot record git data ref %s on the CLI mirror in %s (a dolt sql-server serving this directory refuses remote parameters over the CLI): %w", ref, dbPath, err)
 	}
 	if err := RemoveCLIRemote(dbPath, probe); err != nil {
@@ -396,6 +408,11 @@ func FindCLIRemoteRef(dbPath, name string) (string, error) {
 // mirror is already correct, and continuing would push onto whatever ref the
 // mirror is secretly pinned to. Failing is loud and mutates nothing.
 func EnsureCLIRemote(dbPath, name, url, ref string) error {
+	// GH#6233: refuse a URL the allowlist rejects before anything is
+	// removed, so the mirror keeps the record it had.
+	if err := remotecache.CheckProposedRemote(name, url); err != nil {
+		return err
+	}
 	if err := remotecache.ValidateRemoteName(name); err != nil {
 		return fmt.Errorf("invalid remote name: %w", err)
 	}
@@ -429,11 +446,11 @@ func EnsureCLIRemote(dbPath, name, url, ref string) error {
 			return err
 		}
 	}
-	if err := AddCLIRemoteWithRef(dbPath, name, url, ref); err != nil {
+	if err := addCLIRemoteWithRef(dbPath, name, url, ref); err != nil {
 		if current == "" {
 			return err
 		}
-		if restoreErr := AddCLIRemoteWithRef(dbPath, name, current, currentRef); restoreErr != nil {
+		if restoreErr := addCLIRemoteWithRef(dbPath, name, current, currentRef); restoreErr != nil {
 			return fmt.Errorf("add replacement CLI remote failed: %w; additionally failed to restore previous URL %q: %v", err, current, restoreErr)
 		}
 		return fmt.Errorf("add replacement CLI remote failed; previous URL %q restored: %w", current, err)

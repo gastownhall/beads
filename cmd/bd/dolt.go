@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
@@ -670,6 +671,12 @@ func adoptGitOriginRemoteForPush(ctx context.Context, st storage.DoltStorage, po
 	}
 	remoteURL := normalizeRemoteURL(originURL)
 
+	// GH#6233: an origin federation.allowed-remote-patterns refuses is never
+	// offered for consent, let alone adopted.
+	if err := remotecache.CheckProposedRemote("origin", remoteURL); err != nil {
+		return false, err
+	}
+
 	if proceed, err := applyAdoptionConsent(remoteURL, policy, optIn); err != nil || !proceed {
 		return false, err
 	}
@@ -823,6 +830,15 @@ or 'bd dolt push --remote <remote>'. The remote must already exist (see
 		} else if adopted {
 			fmt.Println("Configured Dolt remote origin from git origin.")
 		}
+		// GH#6233: under a non-empty allowlist the store's transfer gate fails
+		// closed on an unresolved default remote (refused, not dialed), so the
+		// benign no-remote case would surface as a policy refusal instead of
+		// Dolt's no-remote error. Confirm the emptiness with the same evidence
+		// isConfirmedNoRemote proves below and keep the exit-0 skip.
+		if len(config.AllowedRemotePatterns()) > 0 && hasNoRemoteConfigured(ctx, st) {
+			printNoRemoteGuidance()
+			return nil
+		}
 		fmt.Println("Pushing to Dolt remote...")
 
 		var pushErr error
@@ -943,6 +959,13 @@ reports conflicts.`,
 		var leftover *remoteOnlyInLeftoverDatabaseError
 		if _, err := hasConfiguredRemote(ctx, st); errors.As(err, &leftover) {
 			return HandleError("%v", err)
+		}
+		// GH#6233: see the push twin: the allowlist gate's fail-closed refusal
+		// on an unresolved default remote must not turn the benign no-remote
+		// skip into a policy error.
+		if len(config.AllowedRemotePatterns()) > 0 && hasNoRemoteConfigured(ctx, st) {
+			printNoRemoteGuidance()
+			return nil
 		}
 		fmt.Println("Pulling from Dolt remote...")
 		if strategy != "" {
@@ -2062,6 +2085,12 @@ func registerPersistedDoltRemote(ctx context.Context, st doltRemoteAddStore, per
 }
 
 func ensureDoltRemote(ctx context.Context, st doltRemoteAddStore, name, url string, confirm doltRemoteOverwriteConfirmer) (doltRemoteAddResult, error) {
+	// GH#6233: a URL federation.allowed-remote-patterns refuses is refused
+	// before the overwrite prompt and the remove, so the remote already
+	// registered under name stays as it was.
+	if err := remotecache.CheckProposedRemote(name, url); err != nil {
+		return doltRemoteAddResult{}, err
+	}
 	remotes, err := st.ListRemotes(ctx)
 	if err != nil {
 		return doltRemoteAddResult{}, fmt.Errorf("list existing remotes: %w", err)

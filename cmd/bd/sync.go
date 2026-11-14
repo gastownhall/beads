@@ -807,6 +807,16 @@ func runSyncCommand(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
+	// Under a federation.allowed-remote-patterns policy every transfer with a
+	// remote bd cannot find is refused, so a rig with no remote at all would
+	// only reach the benign no-remote result through a refused pull. Confirm
+	// the emptiness first and report it without attempting a transfer
+	// (GH#6233). Default-remote path only, as the exit-0 gate below: an
+	// explicitly named remote that cannot resolve stays an error.
+	if remote == "" && len(config.AllowedRemotePatterns()) > 0 && hasNoRemoteConfigured(rootCtx, st) {
+		return reportConfirmedNoRemote()
+	}
+
 	// A no-push rig still wants the pull and the recompute; only the publish
 	// step is off. Reporting that as a push failure would make every tick of a
 	// local-only mirror look broken.
@@ -866,16 +876,7 @@ func runSyncCommand(cmd *cobra.Command, _ []string) error {
 		// on the default-remote path: an explicitly named remote that does not
 		// exist is a misconfiguration and stays an error.
 		if remote == "" && isNoRemoteConfiguredErr(err) && hasNoRemoteConfigured(rootCtx, st) {
-			if jsonOutput {
-				return outputJSON(&syncOutcome{Status: syncStatusNoRemote})
-			}
-			// This is the benign case, not an error -q means to keep: a solo
-			// rig with no remote configured at all should not print ~15 lines
-			// of onboarding guidance every tick of an unattended timer.
-			if !isQuiet() {
-				printNoRemoteGuidance()
-			}
-			return nil
+			return reportConfirmedNoRemote()
 		}
 		exitErr := HandleErrorRespectJSON("sync failed: %s", syncFailureText(err))
 		if !jsonOutput {
@@ -906,6 +907,23 @@ func runSyncCommand(cmd *cobra.Command, _ []string) error {
 	default:
 		return nil
 	}
+}
+
+// reportConfirmedNoRemote reports `bd sync`'s benign solo-rig outcome: the
+// confirmed-no-remote exit-0 skip, shared by the error path (Dolt's no-remote
+// failure) and the allowlist pre-check (GH#6233, the store gate's fail-closed
+// refusal on an unresolved default remote) so the two report identically.
+func reportConfirmedNoRemote() error {
+	if jsonOutput {
+		return outputJSON(&syncOutcome{Status: syncStatusNoRemote})
+	}
+	// This is the benign case, not an error -q means to keep: a solo
+	// rig with no remote configured at all should not print ~15 lines
+	// of onboarding guidance every tick of an unattended timer.
+	if !isQuiet() {
+		printNoRemoteGuidance()
+	}
+	return nil
 }
 
 // sshDialTimeoutLine is deliberately narrower than a generic timeout: Dolt's

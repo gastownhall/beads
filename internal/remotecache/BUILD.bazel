@@ -4,13 +4,16 @@ go_library(
     name = "remotecache",
     srcs = [
         "cache.go",
+        "policy.go",
         "url.go",
     ],
     importpath = "github.com/steveyegge/beads/internal/remotecache",
     visibility = ["//:__subpackages__"],
     deps = [
+        "//internal/config",
         "//internal/configfile",
         "//internal/debug",
+        "//internal/doltremote",
         "//internal/doltversion",
         "//internal/githooksenv",
         "//internal/gittraceenv",
@@ -23,13 +26,16 @@ go_library(
 go_test(
     name = "remotecache_test",
     srcs = [
+        "cache_policy_test.go",
         "cache_test.go",
         "doltcmd_test.go",
+        "policy_test.go",
         "url_test.go",
         "version_floor_test.go",
     ],
     embed = [":remotecache"],
     deps = [
+        "//internal/config",
         "//internal/doltversion",
         "//internal/githooksenv",
     ],
