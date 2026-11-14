@@ -703,18 +703,6 @@ func (r *issueSQLRepositoryImpl) Taken(ctx context.Context, id string) (bool, er
 	return taken, nil
 }
 
-// Retired reports whether a retaining sweep retired id.
-func (r *issueSQLRepositoryImpl) Retired(ctx context.Context, id string) (bool, error) {
-	if id == "" {
-		return false, errors.New("db: Retired: id must not be empty")
-	}
-	retired, err := issueops.IDRetiredInTx(ctx, r.runner, id)
-	if err != nil {
-		return false, fmt.Errorf("db: Retired %s: %w", id, err)
-	}
-	return retired, nil
-}
-
 // RetiredIDs returns which of ids a tombstone in either table retired
 // (issueops.RetiredIDsInTx), in this repository's transaction.
 func (r *issueSQLRepositoryImpl) RetiredIDs(ctx context.Context, ids []string) (map[string]time.Time, error) {
@@ -805,6 +793,18 @@ func (r *issueSQLRepositoryImpl) NextCounterID(ctx context.Context, prefix strin
 		return 0, fmt.Errorf("db: NextCounterID: read last_id %q: %w", prefix, err)
 	}
 	return nextID, nil
+}
+
+// AdvanceCounterPastHeld moves prefix's counter over the held run right above
+// it (issueops.AdvanceCounterPastHeldIDsTx), in this repository's transaction.
+func (r *issueSQLRepositoryImpl) AdvanceCounterPastHeld(ctx context.Context, prefix string, claimed map[string]bool) error {
+	if prefix == "" {
+		return errors.New("db: AdvanceCounterPastHeld: prefix must not be empty")
+	}
+	if err := issueops.AdvanceCounterPastHeldIDsTx(ctx, r.runner, prefix, claimed); err != nil {
+		return fmt.Errorf("db: AdvanceCounterPastHeld %s: %w", prefix, err)
+	}
+	return nil
 }
 
 func (r *issueSQLRepositoryImpl) seedCounterFromExisting(ctx context.Context, prefix string) error {

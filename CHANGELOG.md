@@ -1281,6 +1281,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Counter mode no longer hands out an ID that an existing issue or wisp
+  already holds** (#8456; first fixed by @quad341 in #6754, stacked into
+  #6831, and #6845). An explicit `--id`, an import or a wisp does not move
+  the `issue_id_mode=counter` counter, so it could fall behind a row that
+  already used its next number. The next `bd create` without an ID was then
+  refused with "issue already exists" on every retry, while `bd q`,
+  `bd todo add`, `bd batch` creates, `bd create --form` without dependencies
+  and tracker sync silently replaced that issue's content and exited 0. If
+  you use counter mode with explicit or imported IDs, `bd history <id>` shows
+  whether such an issue was overwritten. The counter now skips every number
+  a live issue, a wisp or a retired ID holds and returns the next free one,
+  however far it lags: past 1,000 held numbers in a row, as a large import
+  ahead of the counter leaves, it skips the rest of the run in one read
+  instead of failing every create. Its counter tests for the server and
+  embedded stores are ported from #6754.
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc

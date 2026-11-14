@@ -107,21 +107,6 @@ func IDTakenInTx(ctx context.Context, tx DBTX, id string) (bool, error) {
 	return count > 0, nil
 }
 
-// idRetiredSQL counts id's tombstones across both tombstone tables in one
-// statement.
-const idRetiredSQL = `SELECT (SELECT COUNT(*) FROM id_tombstones WHERE id = ?) + (SELECT COUNT(*) FROM wisp_id_tombstones WHERE id = ?)`
-
-// IDRetiredInTx reports whether a tombstone in either table retired id. It is
-// one statement, for the paths that ask about one id at a time (the counter
-// mints); RetiredIDsInTx serves id lists.
-func IDRetiredInTx(ctx context.Context, tx DBTX, id string) (bool, error) {
-	var count int
-	if err := tx.QueryRowContext(ctx, idRetiredSQL, id, id).Scan(&count); err != nil {
-		return false, fmt.Errorf("check whether %q is retired: %w", id, err)
-	}
-	return count > 0, nil
-}
-
 // idempotencyExpired is the typed refusal for a create of a retired id.
 func idempotencyExpired(retired *RetiredID) error {
 	return &publicops.IdempotencyExpiredError{ID: retired.ID, ClosedAt: retired.ClosedAt}
