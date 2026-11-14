@@ -220,18 +220,31 @@ func (s *DoltStore) runDoltTransaction(ctx, fn, commitMsg) error {
 > the SQL transaction. `DOLT_ADD` stages a whole table from the session's
 > BEGIN-time root, so a Dolt commit minted before `COMMIT` writes every row a
 > concurrent writer committed in the meantime back to its BEGIN-time value.
-> Every store write now commits its SQL transaction first and then stages and
-> Dolt-commits on its own connection (`publishCommittedOperation` →
-> `stageAndCommit`), honoring deferred version commits and skipping an empty
-> staged set. A failure there cannot unwind the committed write: the write
-> reports success, and the dropped publication is logged and counted on
-> `bd.db.post_tx_commit_dropped`; the next explicit or automatic commit picks
-> the change up. `TestNoDoltAddOrCommitInsideOpenTransaction`
+> `DoltStore` writes now commit their SQL transaction first and publish after
+> it, in one of two ways:
+>
+> - The writes that publish through `publishCommittedOperation` (issue
+>   updates, claims, closes, reopens and deletes, metadata and slot writes,
+>   wisp promotion and demotion, lifecycle transactions, the role deleter and
+>   the sweeper, among others) stage and Dolt-commit on a fresh pooled
+>   connection (`publishCommittedOperation` → `stageAndCommit`), honoring
+>   deferred version commits and skipping an empty staged set. A failure
+>   there cannot unwind the committed write: the write reports success, and
+>   the dropped publication is logged and counted on
+>   `bd.db.post_tx_commit_dropped`; the next explicit or automatic commit
+>   picks the change up.
+> - `RunInTransaction`, which CLI commands use for multi-statement writes,
+>   stages and Dolt-commits on the transaction's own pinned connection after
+>   the SQL commit, and returns `ErrCommitIndeterminate` when that trailing
+>   commit fails.
+>
+> `TestNoDoltAddOrCommitInsideOpenTransaction`
 > (`internal/storage/dolt/publication_guard_test.go`) keeps
 > `DOLT_ADD`/`DOLT_COMMIT` literals to an approved list of publishers that run
 > outside any transaction. The unit-of-work transaction
-> (`internal/storage/uow/doltserver_tx.go`) still commits inside its
-> transaction and documents that hazard.
+> (`internal/storage/uow/doltserver_tx.go`), which proxied-server mode writes
+> through, still commits inside its transaction; GH#5752 stays open until it
+> publishes after the SQL commit too.
 
 #### `dolt_autocommit.go`: Retire or Simplify
 

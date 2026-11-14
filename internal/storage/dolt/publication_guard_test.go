@@ -37,9 +37,12 @@ var approvedDoltPublishers = map[string]string{
 }
 
 // doltPublicationCall matches a DOLT_ADD or DOLT_COMMIT procedure call in a
-// string literal, in any case. A trailing "(" keeps the dolt_commits system
+// string literal, in any case: the call with its argument list ("CALL
+// DOLT_ADD(?)"), or a CALL of the bare procedure name that a helper completes
+// with one placeholder per table ("CALL DOLT_ADD"). The trailing "(" of the
+// first form and the word boundary of the second keep the dolt_commits system
 // table and the DOLT_COMMIT_* names out.
-var doltPublicationCall = regexp.MustCompile(`(?i)\bdolt_(add|commit)\s*\(`)
+var doltPublicationCall = regexp.MustCompile(`(?i)\bdolt_(add|commit)\s*\(|\bcall\s+dolt_(add|commit)\b`)
 
 // TestNoDoltAddOrCommitInsideOpenTransaction is the structural guard for
 // GH#5752: no write may stage or Dolt-commit inside its open SQL
@@ -54,11 +57,12 @@ var doltPublicationCall = regexp.MustCompile(`(?i)\bdolt_(add|commit)\s*\(`)
 // Known limit: the guard is literal-based over this package's non-test
 // syntax (nested function literals count toward their enclosing function, and
 // package-level constants or variables count as a publisher of their own). It
-// cannot see SQL assembled indirectly — a procedure name built by
-// concatenation or formatting, or a call issued from another package (schema,
-// issueops, uow) — so those still need review. The UOW transaction's
-// in-transaction publication (internal/storage/uow/doltserver_tx.go) is such
-// an out-of-package case; its hazard is documented there.
+// sees a "CALL DOLT_ADD" literal handed to a helper that appends the argument
+// list, but it cannot see a procedure name itself built by concatenation or
+// formatting, or a call issued from another package (schema, issueops, uow),
+// so those still need review. The UOW transaction's in-transaction
+// publication (internal/storage/uow/doltserver_tx.go) is such an
+// out-of-package case: it is not migrated yet, and GH#5752 stays open for it.
 func TestNoDoltAddOrCommitInsideOpenTransaction(t *testing.T) {
 	publishers, err := scanDoltPublishersInDir(".")
 	if err != nil {
@@ -89,8 +93,10 @@ func TestNoDoltAddOrCommitInsideOpenTransaction(t *testing.T) {
 
 // TestDoltPublicationGuardDetectors proves the guard's two verdicts on
 // fixtures: an unapproved publisher (a function literal inside a method, as
-// the deleter's inline copy was) is rejected, and a stale exemption — an
-// approved name whose function no longer holds a literal — is rejected too.
+// the deleter's inline copy was, or a bare "CALL DOLT_ADD" handed to a helper
+// that appends one placeholder per table) is rejected, and a stale exemption —
+// an approved name whose function no longer holds a literal — is rejected too.
+// Neither the dolt_commits system table nor a DOLT_COMMIT_* name counts.
 func TestDoltPublicationGuardDetectors(t *testing.T) {
 	const fixture = `package fixture
 
@@ -103,7 +109,13 @@ func (s *DoltStore) inlinePublisher() {
 	_ = run
 }
 
+func (s *DoltStore) builtPublisher(tables []string) (string, []any) {
+	return callNamingTables("CALL DOLT_ADD", tables)
+}
+
 func (s *DoltStore) readsHistory() string { return "SELECT * FROM dolt_commits" }
+
+func (s *DoltStore) readsCommitHash() string { return "CALL DOLT_COMMIT_HASH_OF_HEAD()" }
 
 const pkgLevel = "CALL DOLT_COMMIT('-Am', ?)"
 `
@@ -115,7 +127,7 @@ const pkgLevel = "CALL DOLT_COMMIT('-Am', ?)"
 	if err != nil {
 		t.Fatalf("scan fixture: %v", err)
 	}
-	if got, want := publisherKeys(found), []string{"<package scope>", "DoltStore.inlinePublisher", "DoltStore.stageAndCommit"}; strings.Join(got, ",") != strings.Join(want, ",") {
+	if got, want := publisherKeys(found), []string{"<package scope>", "DoltStore.builtPublisher", "DoltStore.inlinePublisher", "DoltStore.stageAndCommit"}; strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("fixture publishers = %v, want %v", got, want)
 	}
 
@@ -126,6 +138,7 @@ const pkgLevel = "CALL DOLT_COMMIT('-Am', ?)"
 	joined := strings.Join(problems, "\n")
 	for _, want := range []string{
 		"unapproved publisher DoltStore.inlinePublisher",
+		"unapproved publisher DoltStore.builtPublisher",
 		"unapproved publisher <package scope>",
 		"stale exemption DoltStore.readsHistory",
 	} {

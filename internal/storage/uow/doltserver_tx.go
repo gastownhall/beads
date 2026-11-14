@@ -274,10 +274,11 @@ func (t *doltServerTx) commitStatement(ctx context.Context, message string) (str
 	// DoltStore write, this form mints the Dolt commit INSIDE the still-open
 	// transaction, so '-Am' stages from the session's BEGIN-time root and can
 	// write rows a concurrent writer committed in the meantime back to their
-	// old values. It is the known exception to the post-commit publication
-	// ordering that internal/storage/dolt's
-	// TestNoDoltAddOrCommitInsideOpenTransaction enforces (that literal guard
-	// does not scan this package). Callers racing concurrent writers on the
+	// old values. It is not migrated yet to the post-commit ordering that
+	// internal/storage/dolt's TestNoDoltAddOrCommitInsideOpenTransaction
+	// enforces there (that literal guard does not scan this package), and
+	// GH#5752 stays open until it is: CommitScoped is the post-commit form it
+	// would move to. Until then, callers racing concurrent writers on the
 	// same tables should prefer RunTxScoped/CommitScoped.
 	stmt, args := "CALL DOLT_COMMIT('-Am', ?);", []interface{}{message}
 	if message == "" {

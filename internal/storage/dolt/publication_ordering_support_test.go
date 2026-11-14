@@ -333,7 +333,8 @@ func mutationCommitIndex(evs []pubEvent, mutation func(pubEvent) bool) int {
 // requirePublishedAfterCommit asserts the post-commit publication contract on
 // recorded events: every DOLT_ADD and DOLT_COMMIT ran with no SQL transaction
 // open on its connection, after the mutation's SQL COMMIT, on one connection;
-// and it returns what was published.
+// and it returns what was published: every table any DOLT_ADD named, however
+// many tables each call bound, and the DOLT_COMMIT message.
 func requirePublishedAfterCommit(t *testing.T, name string, evs []pubEvent, mutation func(pubEvent) bool) publication {
 	t.Helper()
 	commitIdx := mutationCommitIndex(evs, mutation)
@@ -364,8 +365,11 @@ func requirePublishedAfterCommit(t *testing.T, name string, evs []pubEvent, muta
 				name, i, ev.conn, pubConn, formatPubEvents(evs))
 		}
 		if isDoltAdd(ev) {
-			if len(ev.args) == 1 {
-				pub.tables = append(pub.tables, fmt.Sprint(ev.args[0]))
+			// Every argument names a staged table. The staged set is the
+			// contract, not the call shape: one DOLT_ADD per table and one
+			// DOLT_ADD naming them all stage the same set.
+			for _, arg := range ev.args {
+				pub.tables = append(pub.tables, fmt.Sprint(arg))
 			}
 			continue
 		}

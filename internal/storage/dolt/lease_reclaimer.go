@@ -21,11 +21,11 @@ func (s *DoltStore) LeaseReclaimer() (issueops.LeaseReclaimer, error) {
 // the shared body, storeops.ExecuteReclaimInTx.
 //
 // THE VERSION-CONTROL ENTRY GOES THROUGH runIssueOperationTxWithMessage, the
-// funnel Releaser uses, rather than the raw ReclaimExpiredLeases' in-transaction
-// DOLT_COMMIT: the funnel is what honors a deferred version commit on the
-// context (dolt.auto-commit batch/off), which a role a front door calls has to,
-// and a sweep that reverted nothing composes no staged set and so records no
-// entry describing a no-op.
+// funnel Releaser and the raw ReclaimExpiredLeases use: it makes the Dolt
+// commit only after the SQL commit (GH#5752), it honors a deferred version
+// commit on the context (dolt.auto-commit batch/off), which a role a front
+// door calls has to, and a sweep that reverted nothing composes no staged set
+// and so records no entry describing a no-op.
 type leaseReclaimer struct{ store *DoltStore }
 
 var _ issueops.LeaseReclaimer = (*leaseReclaimer)(nil)

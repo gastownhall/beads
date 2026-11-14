@@ -102,6 +102,15 @@ func (s *DoltStore) runIssueOperationTxWithMessage(ctx context.Context, fn func(
 // the next Dolt commit on the branch. Version-commit deferral, the staged-set
 // guard (no empty commits) and the nothing-to-commit tolerance live in
 // doltAddAndCommit.
+//
+// Recheck ordering (a known exception): the runners these callers use
+// (withRetryTx, withWriteTx, withDeleteFence) settle the post-commit
+// blocked-state recheck before they return. When that recheck changes an
+// issues row (the gastownhall/beads#6716 race), its Dolt commit therefore
+// comes BEFORE this publication and stages this mutation's committed issues
+// rows under the recheck's message. The data is intact; only the audit
+// attribution differs from runDoltTransaction and RemoveDependency, which
+// settle the recheck after their own Dolt commit.
 func (s *DoltStore) publishCommittedOperation(ctx context.Context, tables []string, commitMsg string) {
 	if len(tables) == 0 {
 		return
