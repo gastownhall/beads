@@ -5,8 +5,10 @@ package embeddeddolt
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -170,5 +172,43 @@ func TestRemotePolicyRefusesEmbeddedPeerBeforeCredentials(t *testing.T) {
 	}
 	if v := os.Getenv("DOLT_REMOTE_USER"); v != "envuser" {
 		t.Fatalf("DOLT_REMOTE_USER = %q, want the ambient value untouched", v)
+	}
+}
+
+// GH#6233: a pattern that accepts the remote's URL (exact, or a glob over its
+// parent directory) lets every embedded transfer run as it would with no list.
+func TestRemotePolicyAcceptsMatchingEmbeddedRemote(t *testing.T) {
+	ctx := t.Context()
+	setAllowedRemotePatterns(t)
+	store, remoteURL := newFileRemoteStore(t)
+
+	for i, patterns := range [][]string{
+		{remoteURL},
+		{"dolthub://myorg/*", remoteURL[:strings.LastIndex(remoteURL, "/")] + "/*"},
+	} {
+		config.Set(remotecache.AllowedRemotePatternsKey, patterns)
+		createAndCommitIssue(t, store, fmt.Sprintf("fedauth-accept-%d", i))
+		head, err := store.GetCurrentCommit(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Push(ctx); err != nil {
+			t.Fatalf("patterns %d: Push: %v", i, err)
+		}
+		if err := store.PushTo(ctx, "team"); err != nil {
+			t.Fatalf("patterns %d: PushTo: %v", i, err)
+		}
+		if err := store.Fetch(ctx, defaultRemote); err != nil {
+			t.Fatalf("patterns %d: Fetch: %v", i, err)
+		}
+		if got := remoteBranchHash(t, ctx, store, defaultRemote); got != head {
+			t.Fatalf("patterns %d: remote main = %s, want the pushed %s", i, got, head)
+		}
+		if err := store.Pull(ctx); err != nil {
+			t.Fatalf("patterns %d: Pull: %v", i, err)
+		}
+		if _, err := store.PullFrom(ctx, "team"); err != nil {
+			t.Fatalf("patterns %d: PullFrom: %v", i, err)
+		}
 	}
 }

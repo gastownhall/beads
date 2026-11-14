@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -142,5 +143,64 @@ func TestRemotePolicyRefusesServerTransfers(t *testing.T) {
 	}
 	if got := remoteMainHash(t, ctx, store, "origin"); got != seeded {
 		t.Fatalf("remote main = %s after refused pushes, want the seeded %s: a refused push transferred data", got, seeded)
+	}
+}
+
+// GH#6233: a pattern that accepts the remote's URL (exact, or a glob over its
+// parent directory) lets every server-mode transfer run as it would with no
+// list.
+func TestRemotePolicyAcceptsMatchingServerRemote(t *testing.T) {
+	skipIfNoDolt(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	setAllowedRemotePatterns(t)
+	store, _ := newFileRemoteServerStore(t, ctx)
+	remotes, err := store.ListRemotes(ctx)
+	if err != nil {
+		t.Fatalf("ListRemotes: %v", err)
+	}
+	var remoteURL string
+	for _, r := range remotes {
+		if r.Name == "origin" {
+			remoteURL = r.URL
+		}
+	}
+	if remoteURL == "" {
+		t.Fatal("fixture: origin is not registered")
+	}
+
+	for i, patterns := range [][]string{
+		{remoteURL},
+		{"dolthub://myorg/*", remoteURL[:strings.LastIndex(remoteURL, "/")] + "/*"},
+	} {
+		config.Set(remotecache.AllowedRemotePatternsKey, patterns)
+		if _, err := store.db.ExecContext(ctx, "INSERT INTO policy_marker VALUES (?)", 10+i); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'test: accepted')"); err != nil {
+			t.Fatal(err)
+		}
+		head, err := store.GetCurrentCommit(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Push(ctx); err != nil {
+			t.Fatalf("patterns %d: Push: %v", i, err)
+		}
+		if err := store.PushTo(ctx, "team"); err != nil {
+			t.Fatalf("patterns %d: PushTo: %v", i, err)
+		}
+		if err := store.Fetch(ctx, "origin"); err != nil {
+			t.Fatalf("patterns %d: Fetch: %v", i, err)
+		}
+		if got := remoteMainHash(t, ctx, store, "origin"); got != head {
+			t.Fatalf("patterns %d: remote main = %s, want the pushed %s", i, got, head)
+		}
+		if err := store.Pull(ctx); err != nil {
+			t.Fatalf("patterns %d: Pull: %v", i, err)
+		}
+		if _, err := store.PullFrom(ctx, "team"); err != nil {
+			t.Fatalf("patterns %d: PullFrom: %v", i, err)
+		}
 	}
 }
