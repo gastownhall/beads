@@ -805,6 +805,22 @@ func TestOpenBestAvailableRefusesProxiedServerWorkspace(t *testing.T) {
 		// come before Load, which would migrate that file into metadata.json.
 		{name: "config.json/dolt/no-env/OpenBestAvailable", file: "config.json", backend: "dolt", spelling: "proxied-server"},
 		{name: "config.json/backend-omitted/no-env/OpenBestAvailableWith", file: "config.json", spelling: "proxied-server", openWith: true},
+		// Env that IsDoltServerMode checks before dolt_mode must not let the
+		// open dial a server behind the proxy's back: the refusal still wins.
+		{
+			name:     "metadata.json/dolt/BEADS_DOLT_SERVER_MODE=1/OpenBestAvailable",
+			file:     "metadata.json",
+			backend:  "dolt",
+			spelling: "proxied-server",
+			env:      map[string]string{"BEADS_DOLT_SERVER_MODE": "1"},
+		},
+		{
+			name:     "metadata.json/dolt/BEADS_DOLT_SHARED_SERVER=1/OpenBestAvailable",
+			file:     "metadata.json",
+			backend:  "dolt",
+			spelling: "proxied-server",
+			env:      map[string]string{"BEADS_DOLT_SHARED_SERVER": "1"},
+		},
 	}
 	for _, tt := range rows {
 		t.Run(tt.name, func(t *testing.T) {
