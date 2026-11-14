@@ -60,11 +60,9 @@ func defaultClaudeEnv() (claudeEnv, error) {
 	if err != nil {
 		return claudeEnv{}, fmt.Errorf("home directory: %w", err)
 	}
-	// The project is the -C target while bd setup binds one (GH#8283), the
-	// process working directory otherwise.
 	workDir, err := workingProjectDir()
 	if err != nil {
-		return claudeEnv{}, err
+		return claudeEnv{}, fmt.Errorf("working directory: %w", err)
 	}
 	return claudeEnvIn(home, workDir), nil
 }

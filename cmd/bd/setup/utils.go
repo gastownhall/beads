@@ -11,56 +11,6 @@ import (
 
 var errRefuseSymlinkWrite = errors.New("refusing to write through symlink")
 
-// setupProjectDir is the directory bd setup's project-scoped files are
-// written in, checked against and removed from: the -C target while a bd
-// setup invocation binds it (SetProjectDir), and none otherwise, so the
-// process working directory keeps deciding, as before -C gained a project
-// meaning (GH#8283). Global-scope files stay on the user's home directory
-// and CODEX_HOME whatever this holds. Process-global: a test that binds it
-// must not run in parallel with one that reads it.
-var setupProjectDir string
-
-// SetProjectDir binds dir as the directory bd setup's project-scoped
-// operations run in (workingProjectDir, ProjectPath), replacing any earlier
-// binding, and returns the restore that puts the previous binding back. A
-// bd setup invocation binds the -C target for its own duration and defers
-// the restore, so the binding unwinds on success and error alike; empty
-// unbinds, selecting the process working directory.
-func SetProjectDir(dir string) (restore func()) {
-	prev := setupProjectDir
-	setupProjectDir = dir
-	return func() { setupProjectDir = prev }
-}
-
-// workingProjectDir is the directory a project-scoped setup operation runs
-// in: the bound -C target when one is bound, else the process working
-// directory. It errors only on the unbound branch, when the working
-// directory cannot be found.
-func workingProjectDir() (string, error) {
-	if setupProjectDir != "" {
-		return setupProjectDir, nil
-	}
-	wd, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("working directory: %w", err)
-	}
-	return wd, nil
-}
-
-// ProjectPath anchors the relative path rel in the directory bd setup's
-// project-scoped operations run in: the bound -C target when one is bound
-// (SetProjectDir). Unbound, rel is returned as is, so the process working
-// directory decides and today's relative spelling — paths and output alike —
-// is preserved exactly. An empty rel stays empty (it names no file), and an
-// absolute rel is returned as is: it is already rooted, by the caller rather
-// than by the project.
-func ProjectPath(rel string) string {
-	if rel == "" || filepath.IsAbs(rel) || setupProjectDir == "" {
-		return rel
-	}
-	return filepath.Join(setupProjectDir, rel)
-}
-
 // atomicWriteFile writes data to a file atomically using a unique temporary file.
 // This prevents race conditions when multiple processes write to the same file.
 // If path is a symlink, the write is refused; callers that deliberately want
@@ -199,4 +149,44 @@ func removeEmptyDir(dir string, remove func(string) error) error {
 		return err
 	}
 	return nil
+}
+
+// boundProjectDir is the project directory bd setup installs, checks and
+// removes a project's integration files in when it is not the process's
+// working directory: the absolute directory bd -C names (SetProjectDir). ""
+// means the working directory, and every project path stays as it was.
+var boundProjectDir string
+
+// SetProjectDir makes the project-scope integration files of bd setup's
+// recipes resolve under dir, an absolute path, instead of the working
+// directory, until the returned restore runs. bd -C <dir> setup uses it: -C
+// selects the project without changing the working directory, so a recipe
+// that wrote relative to it would write into the directory bd was launched
+// in (#8283). "" restores the working directory. It is process-global: a
+// test that calls it must not run in parallel with one that runs a recipe.
+func SetProjectDir(dir string) (restore func()) {
+	prev := boundProjectDir
+	boundProjectDir = dir
+	return func() { boundProjectDir = prev }
+}
+
+// workingProjectDir is the absolute project directory a recipe's default
+// environment installs into: the bound one (SetProjectDir), else the working
+// directory.
+func workingProjectDir() (string, error) {
+	if boundProjectDir != "" {
+		return boundProjectDir, nil
+	}
+	return os.Getwd()
+}
+
+// ProjectPath returns rel, a project-relative path, under the bound project
+// directory (SetProjectDir). It returns rel as it is when no directory is
+// bound, so output without bd -C is unchanged, and when rel is empty, which
+// names no file, or absolute, which is already rooted.
+func ProjectPath(rel string) string {
+	if boundProjectDir == "" || rel == "" || filepath.IsAbs(rel) {
+		return rel
+	}
+	return filepath.Join(boundProjectDir, rel)
 }

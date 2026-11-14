@@ -294,49 +294,32 @@ func recipePathRefusal(err error) string {
 	return fmt.Sprintf("cannot be checked: %v", remedy.PrintedError(err))
 }
 
-// selectSetupProjectDir resolves the directory -C selected for bd setup: the
-// directory the user named, made absolute against the launch directory —
-// primeWorkspaceDir's target semantics, so a project subdirectory is the
-// target, not the parent of the resolved beads dir. Without -C it returns
-// "", leaving setup's project scope on the process working directory. An
-// error means -C was given and its directory cannot be made absolute; setup
-// fails rather than fall back to the launch directory and write there
-// (GH#8283).
-func selectSetupProjectDir() (string, error) {
+// setupProjectDir returns the directory bd setup installs, checks and
+// removes a project's integration files in: the -C directory, made absolute
+// against the working directory, or "" for the working directory itself.
+// It is the directory the user named, as primeWorkspaceDir's is, not the
+// parent of the beads directory -C resolved, which may have followed a
+// .beads/redirect or walked up from a subdirectory. -C selects the project
+// without changing the working directory, so without this a recipe writes
+// into the directory bd was launched in (#8283).
+func setupProjectDir() (string, error) {
 	if strings.TrimSpace(changeDir) == "" {
 		return "", nil
 	}
 	abs, err := filepath.Abs(changeDir)
 	if err != nil {
-		return "", fmt.Errorf("cannot resolve -C directory %q: %w", changeDir, err)
+		return "", fmt.Errorf("cannot resolve -C directory %s: %w", remedy.PrintedValue(changeDir), err)
 	}
 	return abs, nil
 }
 
-// bindSetupProjectDir binds the directory -C selected (selectSetupProjectDir)
-// as bd setup's project directory (setup.SetProjectDir) for the caller's
-// duration, and returns the restore to defer. Without -C it binds nothing,
-// so setup's project scope keeps the process working directory.
-func bindSetupProjectDir() (restore func(), err error) {
-	dir, err := selectSetupProjectDir()
-	if err != nil {
-		return nil, err
-	}
-	if dir == "" {
-		return func() {}, nil
-	}
-	return setup.SetProjectDir(dir), nil
-}
-
 func runRecipe(name string) error {
-	// -C selects the project every project-scoped integration of this run is
-	// installed in (GH#8283); without it the binding is a no-op and the
-	// process working directory decides, as before.
-	restore, err := bindSetupProjectDir()
+	projectDir, err := setupProjectDir()
 	if err != nil {
 		return HandleError("%v", err)
 	}
-	defer restore()
+	defer setup.SetProjectDir(projectDir)()
+
 	switch name {
 	case "claude":
 		return runClaudeRecipe()
@@ -457,9 +440,6 @@ func runRecipe(name string) error {
 	fmt.Printf("Installing %s integration...\n", remedy.PrintedValue(recipe.Name))
 
 	for _, path := range paths {
-		// The file lands under the selected project (-C target) while the
-		// recipe's own relative key still selects its content
-		// (recipes.ContentForPath).
 		dir := filepath.Dir(path)
 		if dir != "." && dir != "" {
 			if err := os.MkdirAll(setup.ProjectPath(dir), 0o755); err != nil {
@@ -467,6 +447,8 @@ func runRecipe(name string) error {
 			}
 		}
 
+		// The recipe's contents are keyed by the path it names, not the
+		// path under the -C directory it is written to.
 		content, err := recipes.ContentForPath(*recipe, path)
 		if err != nil {
 			return HandleError("%v", err)
