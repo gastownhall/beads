@@ -156,7 +156,7 @@ func TestRetargetGitContextPropagatesGitErrors(t *testing.T) {
 	cases := []struct {
 		name    string
 		fixture func(t *testing.T, dir string)
-		want    string
+		want    []string
 	}{
 		{
 			name: "broken gitfile",
@@ -166,16 +166,25 @@ func TestRetargetGitContextPropagatesGitErrors(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			want: "not a git repository:",
+			// git's wording for a dangling gitfile changed across releases
+			// ("not a git repository:" before 2.5x, "gitfile does not point to
+			// a valid repo" after); the contract is that git's own failure
+			// reaches the caller, so assert bd's rev-parse wrapper for this
+			// directory plus git's own fatal stderr marker.
+			want: []string{"rev-parse --is-inside-work-tree in -C directory", "fatal:"},
 		},
 		{
 			name: "dubious ownership",
 			fixture: func(t *testing.T, dir string) {
 				initChangeDirTestRepo(t, dir)
-				// git's own knob for the safe.directory ownership check.
+				// git's own knob for the safe.directory ownership check. A
+				// runner-wide safe.directory (CI sets "*") would bypass the
+				// check, so the global and system config are kept out.
+				t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+				t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 				t.Setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
 			},
-			want: "dubious ownership",
+			want: []string{"dubious ownership"},
 		},
 	}
 	for _, tc := range cases {
@@ -187,10 +196,12 @@ func TestRetargetGitContextPropagatesGitErrors(t *testing.T) {
 
 			err := retargetGitContext(dir)
 			if err == nil {
-				t.Fatalf("retargetGitContext(%q) = nil, want git error containing %q", dir, tc.want)
+				t.Fatalf("retargetGitContext(%q) = nil, want git error containing %s", dir, strings.Join(tc.want, ", "))
 			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("retargetGitContext error = %q, want it to contain %q", err, tc.want)
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("retargetGitContext error = %q, want it to contain %q", err, want)
+				}
 			}
 			assertGitEnvUnset(t)
 		})
