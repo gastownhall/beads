@@ -110,7 +110,12 @@ func checkProxiedServerWorkspace(beadsDir string) error {
 	if cfg == nil || !cfg.IsDoltProxiedServerMode() {
 		return nil
 	}
-	return fmt.Errorf("%w (dolt_mode %q)", ErrProxiedServerUnsupported, cfg.DoltMode)
+	// MetadataFilePath names the legacy config.json when that file holds the
+	// setting; BackendNotOpenedGuarantee is the shared data-safety text. The
+	// message points at the bd CLI, not OpenFromConfig: OpenFromConfig never
+	// reads the proxy's data port, so it would dial around the proxy.
+	return fmt.Errorf("%w: %s sets dolt_mode %q, which only the bd CLI can serve; %s. Run bd in that workspace instead",
+		ErrProxiedServerUnsupported, configfile.MetadataFilePath(beadsDir), cfg.DoltMode, configfile.BackendNotOpenedGuarantee)
 }
 
 // configuredBackendUnavailable is the public open path's fail-closed refusal for
