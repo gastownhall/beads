@@ -513,6 +513,14 @@ func init() {
 	// with no narrow way to match anything.
 	listCmd.Flags().Bool("include-ephemeral", false, "Include ephemeral wisp-plane rows in output (normally hidden)")
 
+	// The union of the four include flags above: ListRequest.IncludeAllTypes
+	// skips applyTypeSuppressions entirely (internal/workapi/list.go), so it
+	// lifts every default type/plane suppression — including one added after
+	// this flag was written, which is exactly what the narrow enumeration
+	// cannot promise. It is not --all: the default status and pinned
+	// exclusions are a separate axis and still apply.
+	listCmd.Flags().Bool("include-all-types", false, "Include all issue types and the ephemeral wisp plane (default status and pinned exclusions still apply; see --all)")
+
 	// Explicit type exclusion
 	listCmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)")
 
