@@ -413,6 +413,27 @@ jobs:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test -tags gms_pure_go -count=1 -run '^TestWorktreeRemove' ./cmd/bd
 
+      # internal/workspacegate resolves a gate's parent directory on Windows
+      # through a directory handle (#8170): filepath.EvalSymlinks cannot walk
+      # through a junction or a directory-mounted volume such as a Dev Drive.
+      # The junction, alias, cross-process and plain-parent tests behind that
+      # fix are //go:build windows, so no Linux lane executes them. This step
+      # runs them natively, with the portable gate-parent tests and
+      # TestGateFileLocation. It sits in this job because ci-gate requires the
+      # job (WORKTREE_REMOVE_WINDOWS), so a Windows regression of gate-parent
+      # resolution fails the merge; `if: ${{ !cancelled() }}` runs it after a
+      # worktree removal failure too. The selector is deliberate: the
+      # package's other tests are not checked natively, and
+      # TestExclusiveHolderErrorReturn fails on Windows (its chmod 000 does not
+      # deny reads there). Junctions need no privilege, and a junction the
+      # runner cannot create fails its test rather than skipping it.
+      - name: Run workspacegate gate-parent tests on Windows
+        if: ${{ !cancelled() }}
+        env:
+          CGO_ENABLED: "0"
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
+        run: go test -tags gms_pure_go -count=1 -v -run '^(TestForDirBeneathJunctionWindows|TestJunctionAliasesShareOneGateWindows|TestCrossProcessExclusionAcrossJunctionWindows|TestPlainParentKeepsDriveLetterSpellingWindows|TestForDirMissingParent|TestFinalPathToGateParent|TestResolveParent|TestGateFileLocation)$' ./internal/workspacegate/
+
   # Check documentation references match actual CLI flags
   #
   # Stays a job: the generated CLI docs describe the release pinned in

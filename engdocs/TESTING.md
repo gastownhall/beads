@@ -199,6 +199,13 @@ run`; that warning from every shard means the test did not run. Under
   `//internal/storage/embeddeddolt:embeddeddolt_embedded_test` instead.
 - **Tests in a file `BUILD.bazel` does not list** are not compiled. Run
   `make bazel-sync` after adding a test file.
+- **Tests in `//go:build windows` files** are not compiled either: the Bazel
+  lanes run on Linux. Only the `go test` steps of `pr.yml`'s Windows jobs
+  run such a test, when a step runs its package and the step's `-run`
+  pattern, if any, matches it; for example `worktree-remove-windows`, which
+  `CI Gate / Required` requires, runs the `internal/workspacegate`
+  gate-parent tests (#8170). A new Windows-only test outside those steps
+  runs nowhere.
 
 Lane targets that are `sh_test`s run the test binary through a wrapper or
 shard script, which can pass its own `-test.run` and so override
