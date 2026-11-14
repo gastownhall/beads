@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -88,60 +89,60 @@ func TestResolveParent(t *testing.T) {
 	_, shapeErr := finalPathToGateParent(`\Device\HarddiskVolume3\x`)
 
 	cases := []struct {
-		name        string
-		dos, guid   stubResolver
-		eval        stubResolver
-		want        string
-		wantErr     bool
-		wantErrIs   error   // errors.Is on the returned error
-		wantErrText string  // substring when wantErr
+		name                                       string
+		dos, guid                                  stubResolver
+		eval                                       stubResolver
+		want                                       string
+		wantErr                                    bool
+		wantErrIs                                  error  // errors.Is on the returned error
+		wantErrText                                string // substring when wantErr
 		wantDosCalls, wantGUIDCalls, wantEvalCalls int
 	}{
 		{
-			name: "dos accepted, later resolvers never run",
-			dos:  stubResolver{out: sentinelDos},
-			want: sentinelDos,
+			name:         "dos accepted, later resolvers never run",
+			dos:          stubResolver{out: sentinelDos},
+			want:         sentinelDos,
 			wantDosCalls: 1,
 		},
 		{
-			name: "dos query failure falls to guid",
-			dos:  stubResolver{err: queryErr},
-			guid: stubResolver{out: sentinelGUID},
-			want: sentinelGUID,
+			name:         "dos query failure falls to guid",
+			dos:          stubResolver{err: queryErr},
+			guid:         stubResolver{out: sentinelGUID},
+			want:         sentinelGUID,
 			wantDosCalls: 1, wantGUIDCalls: 1,
 		},
 		{
-			name: "dos shape rejected falls to guid",
-			dos:  stubResolver{err: shapeErr},
-			guid: stubResolver{out: sentinelGUID},
-			want: sentinelGUID,
+			name:         "dos shape rejected falls to guid",
+			dos:          stubResolver{err: shapeErr},
+			guid:         stubResolver{out: sentinelGUID},
+			want:         sentinelGUID,
 			wantDosCalls: 1, wantGUIDCalls: 1,
 		},
 		{
-			name: "guid failure falls to evalsymlinks",
-			dos:  stubResolver{err: queryErr},
-			guid: stubResolver{err: queryErr},
-			eval: stubResolver{out: sentinelEval},
-			want: sentinelEval,
+			name:         "guid failure falls to evalsymlinks",
+			dos:          stubResolver{err: queryErr},
+			guid:         stubResolver{err: queryErr},
+			eval:         stubResolver{out: sentinelEval},
+			want:         sentinelEval,
 			wantDosCalls: 1, wantGUIDCalls: 1, wantEvalCalls: 1,
 		},
 		{
-			name:        "all fail, not-exist preserved and joined",
-			dos:         stubResolver{err: queryErr},
-			guid:        stubResolver{err: queryErr},
-			eval:        stubResolver{err: fs.ErrNotExist},
-			wantErr:     true,
-			wantErrIs:   fs.ErrNotExist,
-			wantErrText: "dos volume name",
+			name:         "all fail, not-exist preserved and joined",
+			dos:          stubResolver{err: queryErr},
+			guid:         stubResolver{err: queryErr},
+			eval:         stubResolver{err: fs.ErrNotExist},
+			wantErr:      true,
+			wantErrIs:    fs.ErrNotExist,
+			wantErrText:  "dos volume name",
 			wantDosCalls: 1, wantGUIDCalls: 1, wantEvalCalls: 1,
 		},
 		{
-			name:        "all fail without not-exist",
-			dos:         stubResolver{err: queryErr},
-			guid:        stubResolver{err: errors.New("guid nope")},
-			eval:        stubResolver{err: errors.New("eval nope")},
-			wantErr:     true,
-			wantErrText: "evalsymlinks",
+			name:         "all fail without not-exist",
+			dos:          stubResolver{err: queryErr},
+			guid:         stubResolver{err: errors.New("guid nope")},
+			eval:         stubResolver{err: errors.New("eval nope")},
+			wantErr:      true,
+			wantErrText:  "evalsymlinks",
 			wantDosCalls: 1, wantGUIDCalls: 1, wantEvalCalls: 1,
 		},
 	}
@@ -201,5 +202,49 @@ func TestForDirMissingParent(t *testing.T) {
 	}
 	if _, serr := os.Lstat(missing); !errors.Is(serr, fs.ErrNotExist) {
 		t.Fatalf("resolution must not create the parent: Lstat(%s) = %v, want not-exist", missing, serr)
+	}
+}
+
+// TestNonWindowsCanonicalParentMatchesEvalSymlinks pins the non-Windows
+// resolution to exactly filepath.EvalSymlinks, byte for byte: nothing
+// about gate identity changes on those platforms when Windows switches to
+// handle-based resolution. Windows canonicalization is deliberately
+// different (see gate_windows_test.go).
+func TestNonWindowsCanonicalParentMatchesEvalSymlinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("windows canonicalization is handle-based; see gate_windows_test.go")
+	}
+	dir := t.TempDir()
+
+	got, err := canonicalParent(dir)
+	if err != nil {
+		t.Fatalf("canonicalParent(%s): %v", dir, err)
+	}
+	if want := mustEval(t, dir); got != want {
+		t.Fatalf("canonicalParent(%s) = %q, want %q (EvalSymlinks, byte for byte)", dir, got, want)
+	}
+
+	// A symlinked spelling resolves to the physical directory, as
+	// EvalSymlinks does.
+	real := filepath.Join(dir, "real")
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	got, err = canonicalParent(link)
+	if err != nil {
+		t.Fatalf("canonicalParent(%s): %v", link, err)
+	}
+	if want := mustEval(t, link); got != want {
+		t.Fatalf("canonicalParent(%s) = %q, want %q", link, got, want)
+	}
+
+	// A missing parent errors with fs.ErrNotExist, as EvalSymlinks does.
+	_, err = canonicalParent(filepath.Join(dir, "gone"))
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("canonicalParent(missing) = %v, want fs.ErrNotExist", err)
 	}
 }
