@@ -1622,6 +1622,68 @@ func TestCookFormulaConditionDroppedNeedsTargetErrors(t *testing.T) {
 	}
 }
 
+// onCompleteSurveyFormula is the GH#3782 survey formula: a step whose
+// on_complete promises to bond one molecule per item of its output.
+func onCompleteSurveyFormula(name string) string {
+	return `formula = "` + name + `"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "survey-workers"
+title = "Survey workers"
+
+[steps.on_complete]
+for_each = "output.workers"
+bond = "mol-worker"
+
+[steps.on_complete.vars]
+worker_name = "{item.name}"
+`
+}
+
+// TestCookFormulaOnCompleteRefused: a formula whose step sets on_complete
+// must fail both cook paths — bd mol pour|wisp|bond|seed via
+// resolveAndCookFormulaWithVars and bd cook via loadAndResolveFormula —
+// not cook cleanly and silently spawn nothing at close time (GH#3782).
+func TestCookFormulaOnCompleteRefused(t *testing.T) {
+	const name = "survey"
+	sg, err := cookFormulaTOMLWithVars(t, name, onCompleteSurveyFormula(name), nil)
+	if err == nil {
+		t.Fatalf("cook succeeded although survey-workers sets on_complete; issues %v", allIssueIDs(sg))
+	}
+	if sg != nil {
+		t.Errorf("cook returned a subgraph alongside the error")
+	}
+	if !errors.Is(err, formula.ErrValidation) {
+		t.Errorf("errors.Is(err, formula.ErrValidation) = false for %v", err)
+	}
+	for _, want := range []string{"survey-workers", "on_complete is not supported"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+
+	t.Run("bd cook path", func(t *testing.T) {
+		dir := writePipelineFormula(t, name, onCompleteSurveyFormula(name))
+		f, err := loadAndResolveFormula(name, []string{dir})
+		if err == nil {
+			t.Fatalf("loadAndResolveFormula returned %d steps although survey-workers sets on_complete", len(f.Steps))
+		}
+		if f != nil {
+			t.Errorf("loadAndResolveFormula returned a formula alongside the error")
+		}
+		if !errors.Is(err, formula.ErrValidation) {
+			t.Errorf("errors.Is(err, formula.ErrValidation) = false for %v", err)
+		}
+		for _, want := range []string{"survey-workers", "on_complete is not supported"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not mention %q", err, want)
+			}
+		}
+	})
+}
+
 // TestCookFormulaConditionDroppedWaitsForSpawnerErrors: a gate whose
 // waits_for spawner is dropped by its condition must fail the cook, not pour
 // a gate:<value> step that waits for no one (GH#6437, PR #6642).
