@@ -698,12 +698,14 @@ func FindBeadsDirFrom(startDir string) string {
 	}
 
 	fallbackBeadsDir := ""
+	fallbackResolved := ""
 	fallbackHasDB := false
 	if repoRoot != "" {
 		fallbackBeadsDir = worktreeFallbackBeadsDirForRepo(repoRoot)
 		if fallbackBeadsDir != "" {
 			if fbInfo, err := os.Stat(fallbackBeadsDir); err == nil && fbInfo.IsDir() {
-				fallbackHasDB = hasBeadsDatabase(FollowRedirect(fallbackBeadsDir))
+				fallbackResolved = FollowRedirect(fallbackBeadsDir)
+				fallbackHasDB = hasBeadsDatabase(fallbackResolved)
 			}
 		}
 	}
@@ -719,6 +721,9 @@ func FindBeadsDirFrom(startDir string) string {
 				// A worktree root can contain tracked .beads metadata without
 				// owning the ignored database directory. Match FindBeadsDir by
 				// preferring the shared worktree database in that case.
+			} else if isWorktreeRoot && resolved == beadsDir && yieldLocalStore(beadsDir, fallbackResolved) {
+				// A metadata-less worktree store yields to the metadata-backed
+				// shared workspace, as in FindBeadsDir (GH#6552).
 			} else if isJJSecondaryRoot && jjPrimaryHasDB && !hasBeadsDatabase(resolved) {
 				// A jj secondary workspace can likewise contain inherited
 				// .beads metadata without the ignored database directory.

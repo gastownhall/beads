@@ -1040,3 +1040,14 @@ func TestFindBeadsDir_WorktreeMetadatalessStoreYieldsToSharedServer(t *testing.T
 		}
 	}
 }
+
+// TestFindBeadsDirFrom_WorktreeMetadatalessStoreYieldsToSharedWorkspace
+// covers FindBeadsDirFrom called with the worktree root or a subdirectory
+// while the process cwd is outside the repository.
+func TestFindBeadsDirFrom_WorktreeMetadatalessStoreYieldsToSharedWorkspace(t *testing.T) {
+	f := newMetadatalessStoreFixture(t, mainEmbeddedMetadata, "myproject")
+	chdirForDiscovery(t, t.TempDir())
+	for _, start := range []string{f.worktree, f.subdir} {
+		assertSamePath(t, "FindBeadsDirFrom("+start+")", FindBeadsDirFrom(start), f.mainBeads)
+	}
+}
