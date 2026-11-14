@@ -35,7 +35,11 @@ rows they return (or "OK").
 In proxied-server mode, multiple statements separated by ';' run as a single
 committed batch and report "OK", and --database runs the query against a
 different server database (equivalent to a session USE) without changing the
-project's configured database.
+project's configured database. A --database that names a beads database
+belonging to a different project is refused with PROJECT IDENTITY MISMATCH
+before any statement runs; set BEADS_SKIP_IDENTITY_CHECK=1 to access such a
+database deliberately. This check governs plain workspaces' excursions;
+team-server workspaces verify identity on every open and honor no bypass.
 
 WARNING: Direct database access bypasses the storage layer. Use with caution.`,
 	Args:          cobra.ExactArgs(1),
