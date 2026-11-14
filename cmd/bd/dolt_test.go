@@ -24,6 +24,7 @@ import (
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/testutil"
 )
@@ -3350,6 +3351,54 @@ func TestDoltPushPositionalRemoteIsNotSilentlyIgnored(t *testing.T) {
 			}
 			if !slices.Equal(fake.calls, tt.wantCalls) {
 				t.Errorf("store calls = %q, want %q; output: %q", fake.calls, tt.wantCalls, out)
+			}
+		})
+	}
+}
+
+// TestDoltPushPullAllowedRemotePatternsNoRemote is the `bd dolt push` /
+// `bd dolt pull` twin of TestSyncAllowedRemotePatternsNoRemote (GH#6233):
+// under a non-empty federation.allowed-remote-patterns the store's transfer
+// gate fails closed on an unresolved default remote, so a rig with no remote
+// at all must confirm the emptiness before dispatch and keep the exit-0
+// no-remote skip. The fake's transfer returns a policy refusal no no-remote
+// classifier accepts, so only the pre-dispatch check can pass this.
+func TestDoltPushPullAllowedRemotePatternsNoRemote(t *testing.T) {
+	refusal := &remotecache.RemotePolicyError{Subject: remotecache.RemoteSubject("origin")}
+	for _, verb := range []struct {
+		name string
+		run  func() error
+	}{
+		{"bd dolt push", func() error { return doltPushCmd.RunE(doltPushCmd, nil) }},
+		{"bd dolt pull", func() error { return doltPullCmd.RunE(doltPullCmd, nil) }},
+	} {
+		t.Run(verb.name, func(t *testing.T) {
+			isolateBeadsDirForTest(t)
+			t.Setenv("BD_NO_REMOTE_ADOPT", "1")
+			t.Chdir(t.TempDir())
+			// The push reads the (absent) git origin through the process-wide
+			// git caches; reset them both ways so neither this test nor the
+			// next one sees another directory's repository.
+			beads.ResetCaches()
+			git.ResetCaches()
+			t.Cleanup(func() {
+				beads.ResetCaches()
+				git.ResetCaches()
+			})
+			fake := &fakeSyncStore{pullErr: refusal, pushErr: refusal}
+			setupSyncCommandTest(t, fake)
+			config.Set(remotecache.AllowedRemotePatternsKey, []string{"dolthub://myorg/*"})
+
+			var runErr error
+			stdout, _ := captureStdio(t, func() { runErr = verb.run() })
+			if runErr != nil {
+				t.Fatalf("%s error = %v, want nil (no remote is the benign case)", verb.name, runErr)
+			}
+			if fake.pullCalls+fake.pushCalls != 0 {
+				t.Errorf("%s: %d pull and %d push attempts on a rig with no remote, want none", verb.name, fake.pullCalls, fake.pushCalls)
+			}
+			if !strings.Contains(stdout, "No remote is configured") {
+				t.Errorf("%s stdout = %q, want the no-remote guidance", verb.name, stdout)
 			}
 		})
 	}
