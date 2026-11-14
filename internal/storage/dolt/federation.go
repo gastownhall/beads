@@ -421,6 +421,19 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 	}
 	result.Fetched = true
 
+	// A successful Fetch stamps federation_peers.last_sync (withPeerCredentials)
+	// AFTER the pre-sync commit above, and Dolt refuses to merge over a dirty
+	// table ("local changes would be stomped by merge") whenever that stamp
+	// lands in a new second. Commit it the same way before merging (bd-sesknw).
+	if !s.readOnly {
+		if err := s.commitBeforePull(ctx, "auto-commit before sync merge"); err != nil {
+			if !isDoltNothingToCommit(err) {
+				result.Error = fmt.Errorf("failed to commit pending changes before sync merge: %w", err)
+				return result, result.Error
+			}
+		}
+	}
+
 	// Step 2: Get status before merge
 	beforeCommit, _ := s.GetCurrentCommit(ctx) // Best effort: empty commit hash means diff won't be logged
 

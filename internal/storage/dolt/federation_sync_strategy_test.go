@@ -3,6 +3,7 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -45,6 +46,13 @@ func newFedSyncPeer(t *testing.T, ctx context.Context, seed ...string) *fedSyncP
 	if err := store.PushTo(ctx, "peer"); err != nil {
 		t.Fatalf("push to peer remote: %v", err)
 	}
+	// Commit a stale peer last_sync so the stamp Sync's own Fetch writes always
+	// dirties federation_peers before the merge (otherwise only when the clock
+	// crosses a second): Dolt refuses to merge over that dirty table.
+	fedExec(t, ctx, db, "local",
+		"UPDATE federation_peers SET last_sync = '2000-01-01 00:00:00' WHERE name = 'peer'",
+		"CALL DOLT_COMMIT('-Am', 'pin stale peer last_sync')",
+	)
 	if _, err := db.ExecContext(ctx, "CALL DOLT_CLONE(?, ?)", remoteURL, peerDB); err != nil {
 		t.Fatalf("clone peer database: %v", err)
 	}
@@ -132,9 +140,12 @@ func assertMergeSettled(t *testing.T, ctx context.Context, db *sql.DB) {
 	if merging {
 		t.Errorf("merge is still open (dolt_merge_status.is_merging)")
 	}
-	// Sync's last-sync timestamp is an advisory, uncommitted metadata write;
-	// any other dirty table is merge output the conclusion failed to commit.
-	rows, err := db.QueryContext(ctx, "SELECT table_name FROM dolt_status WHERE table_name <> 'metadata'")
+	// Sync's advisory timestamps — metadata last_sync_<peer> and the
+	// federation_peers.last_sync stamp a successful push writes — stay
+	// uncommitted by design; any other dirty table is merge output the
+	// conclusion failed to commit.
+	rows, err := db.QueryContext(ctx,
+		"SELECT table_name FROM dolt_status WHERE table_name NOT IN ('metadata', 'federation_peers')")
 	if err != nil {
 		t.Fatalf("read dolt_status: %v", err)
 	}
@@ -195,4 +206,34 @@ func TestFederationSyncStrategyResolvesRealConflict(t *testing.T) {
 	}
 	assertMergeSettled(t, ctx, f.db)
 	f.assertPeerHasLocalHead(t, ctx)
+}
+
+// TestFederationSyncNoStrategyConflictFails covers AC-5: without a strategy a
+// genuine conflict fails the sync with the --strategy hint, merges and pushes
+// nothing, and leaves no conflict or open merge behind.
+func TestFederationSyncNoStrategyConflictFails(t *testing.T) {
+	ctx, cancel := testContext(t)
+	defer cancel()
+	f := newFedSyncPeer(t, ctx, seedIssue("fssnone-x"))
+	_, peerHead := f.retitleConflict(t, ctx, "fssnone-x")
+
+	result, err := f.store.Sync(ctx, "peer", "")
+	if err == nil {
+		t.Fatal("Sync without a strategy succeeded over a real conflict")
+	}
+	if !strings.Contains(err.Error(), "--strategy") {
+		t.Errorf("error = %v, want it to name the --strategy escape hatch", err)
+	}
+	if result == nil || result.Merged || result.Pushed {
+		t.Errorf("result = %+v, want Merged and Pushed false", result)
+	}
+	if title := fedTitle(t, ctx, f.db, "fssnone-x"); title != "ours" {
+		t.Errorf("committed title = %q, want the local %q", title, "ours")
+	}
+	var merged int
+	fedScalar(t, ctx, f.db, &merged, "SELECT COUNT(*) FROM dolt_log WHERE commit_hash = ?", peerHead)
+	if merged != 0 {
+		t.Errorf("peer head %s was merged into HEAD by a failed sync", peerHead)
+	}
+	assertMergeSettled(t, ctx, f.db)
 }
