@@ -801,6 +801,10 @@ func TestOpenBestAvailableRefusesProxiedServerWorkspace(t *testing.T) {
 			opts:     beads.OpenOptions{UserAgent: "test-agent/1.0"},
 			openWith: true,
 		},
+		// The mode may live only in a legacy config.json; the refusal must
+		// come before Load, which would migrate that file into metadata.json.
+		{name: "config.json/dolt/no-env/OpenBestAvailable", file: "config.json", backend: "dolt", spelling: "proxied-server"},
+		{name: "config.json/backend-omitted/no-env/OpenBestAvailableWith", file: "config.json", spelling: "proxied-server", openWith: true},
 	}
 	for _, tt := range rows {
 		t.Run(tt.name, func(t *testing.T) {
@@ -821,6 +825,10 @@ func TestOpenBestAvailableRefusesProxiedServerWorkspace(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(beadsDir, tt.file), []byte(metadata), 0o600); err != nil {
 				t.Fatalf("write %s: %v", tt.file, err)
 			}
+			// The refusal must leave the workspace exactly as it found it:
+			// no embedded store minted, and neither metadata file created or
+			// rewritten (the future_binding key would not survive a Load).
+			before := workspaceTreeDigest(t, root)
 
 			var store beads.Storage
 			var err error
@@ -831,6 +839,11 @@ func TestOpenBestAvailableRefusesProxiedServerWorkspace(t *testing.T) {
 			}
 			if store != nil {
 				_ = store.Close()
+			}
+			if after := workspaceTreeDigest(t, root); !maps.Equal(after, before) {
+				t.Fatalf("open changed the workspace: before %v, after %v", slices.Sorted(maps.Keys(before)), slices.Sorted(maps.Keys(after)))
+			}
+			if store != nil {
 				t.Fatalf("returned a non-nil %T alongside the proxied refusal", store)
 			}
 			if !errors.Is(err, beads.ErrProxiedServerUnsupported) {
