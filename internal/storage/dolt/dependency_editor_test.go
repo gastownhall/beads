@@ -1,6 +1,7 @@
 package dolt
 
 import (
+	"context"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -46,7 +47,9 @@ func TestDoltStoreDependencyEditorBatchNamesItsHistoryEntry(t *testing.T) {
 	if !doltHasCommitMessage(ctx, t, store, "dependency: add 2 edges") {
 		t.Fatal("no commit named the edge count")
 	}
-	requireCleanTables(ctx, t, store, "dependencies")
+	// The blocks edge flipped test-dep-add-a's is_blocked, so `issues` rode
+	// the same commit (GH#6647).
+	requireCleanTables(ctx, t, store, "issues", "dependencies")
 }
 
 // TestDoltStoreDependencyEditorSingleEdgeNamesTheHistoryEntry pins the other
@@ -102,7 +105,7 @@ func TestDoltStoreDependencyEditorRemoveNamesTheHistoryEntry(t *testing.T) {
 	if !doltHasCommitMessage(ctx, t, store, "bd: dep remove test-dep-rm-a test-dep-rm-b") {
 		t.Fatal("the removal did not name the edge in history")
 	}
-	requireCleanTables(ctx, t, store, "dependencies")
+	requireCleanTables(ctx, t, store, "issues", "dependencies")
 }
 
 // TestDoltStoreDependencyEditorNoOpRemoveLeavesPendingRowsUncommitted is the
@@ -156,4 +159,186 @@ func TestDoltStoreDependencyEditorNoOpRemoveLeavesPendingRowsUncommitted(t *test
 	if dirty == 0 {
 		t.Fatal("dependencies is clean: the no-op removal committed a row it never wrote")
 	}
+}
+
+// headIsBlocked reads id's is_blocked as committed at HEAD, which is what a
+// push, a peer pull or a branch read sees.
+func headIsBlocked(ctx context.Context, t *testing.T, store *DoltStore, id string) bool {
+	t.Helper()
+	var blocked bool
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT is_blocked FROM issues AS OF 'HEAD' WHERE id = ?", id).Scan(&blocked); err != nil {
+		t.Fatalf("read HEAD is_blocked of %s: %v", id, err)
+	}
+	return blocked
+}
+
+// TestDoltStoreDependencyEditorBlockingAddCommitsIsBlocked is GH#6647 on the
+// `bd dep add B A` path: the is_blocked flip a blocking edge writes rides the
+// edge's own commit, so the working set is clean afterwards and a full
+// recompute is not refused for a dirty graph.
+func TestDoltStoreDependencyEditorBlockingAddCommitsIsBlocked(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	seedIssues(ctx, t, store, "test-dep-flip-a", "test-dep-flip-b")
+	requireCleanTables(ctx, t, store, "issues", "dependencies")
+
+	editor, err := store.DependencyEditor()
+	if err != nil {
+		t.Fatalf("DependencyEditor(): %v", err)
+	}
+	if _, err := editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{{IssueID: "test-dep-flip-b", DependsOnID: "test-dep-flip-a", Type: publicops.DepBlocks}},
+	}); err != nil {
+		t.Fatalf("AddDependencies: %v", err)
+	}
+
+	requireCleanTables(ctx, t, store, "issues", "dependencies")
+	if !headIsBlocked(ctx, t, store, "test-dep-flip-b") {
+		t.Fatal("HEAD has test-dep-flip-b is_blocked=0 despite an open blocker")
+	}
+	if _, err := store.RecomputeAllBlocked(ctx); err != nil {
+		t.Fatalf("RecomputeAllBlocked after dep add: %v", err)
+	}
+}
+
+// TestDoltStoreDependencyEditorRemoveCommitsUnblock is GH#6647 on the
+// `bd dep remove` path: removing the only blocker clears the source's
+// is_blocked in the removal's own commit, not just in the working set.
+func TestDoltStoreDependencyEditorRemoveCommitsUnblock(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	seedIssues(ctx, t, store, "test-dep-unflip-a", "test-dep-unflip-b")
+
+	editor, err := store.DependencyEditor()
+	if err != nil {
+		t.Fatalf("DependencyEditor(): %v", err)
+	}
+	if _, err := editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{{IssueID: "test-dep-unflip-b", DependsOnID: "test-dep-unflip-a", Type: publicops.DepBlocks}},
+	}); err != nil {
+		t.Fatalf("AddDependencies: %v", err)
+	}
+	// Commit the edge and the flip explicitly so the removal starts from a
+	// clean HEAD where B is blocked, whatever the add staged.
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'seed blocked edge')"); err != nil && !isDoltNothingToCommit(err) {
+		t.Fatalf("commit seed: %v", err)
+	}
+	requireCleanTables(ctx, t, store, "issues", "dependencies")
+	if !headIsBlocked(ctx, t, store, "test-dep-unflip-b") {
+		t.Fatal("precondition: HEAD must have test-dep-unflip-b blocked")
+	}
+
+	if _, err := editor.RemoveDependency(ctx, publicops.RemoveDependencyRequest{
+		Actor: "writer", IssueID: "test-dep-unflip-b", DependsOnID: "test-dep-unflip-a",
+	}); err != nil {
+		t.Fatalf("RemoveDependency: %v", err)
+	}
+
+	requireCleanTables(ctx, t, store, "issues", "dependencies")
+	if headIsBlocked(ctx, t, store, "test-dep-unflip-b") {
+		t.Fatal("HEAD still has test-dep-unflip-b is_blocked=1 after its only blocker was removed")
+	}
+}
+
+// TestDoltStoreDependencyEditorNonFlippingAddLeavesPendingIssuesUncommitted
+// is the GH#2455 half of the GH#6647 staging rule: `issues` is staged only
+// when the edge flipped a durable is_blocked. A blocking edge onto a closed
+// target flips nothing, so another writer's pending issues edit must not ride
+// the edge's commit.
+func TestDoltStoreDependencyEditorNonFlippingAddLeavesPendingIssuesUncommitted(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	seedIssues(ctx, t, store, "test-dep-closed-b", "test-dep-closed-c", "test-dep-closed-d")
+	if _, err := store.db.ExecContext(ctx,
+		"UPDATE issues SET status = 'closed', closed_at = NOW() WHERE id = 'test-dep-closed-d'"); err != nil {
+		t.Fatalf("close target: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'seed closed target')"); err != nil && !isDoltNothingToCommit(err) {
+		t.Fatalf("commit seed: %v", err)
+	}
+	requireCleanTables(ctx, t, store, "issues", "dependencies")
+
+	// A pending issues edit that belongs to nobody's transaction.
+	if _, err := store.db.ExecContext(ctx,
+		"UPDATE issues SET title = 'pending elsewhere' WHERE id = 'test-dep-closed-c'"); err != nil {
+		t.Fatalf("stage a pending title edit: %v", err)
+	}
+
+	editor, err := store.DependencyEditor()
+	if err != nil {
+		t.Fatalf("DependencyEditor(): %v", err)
+	}
+	if _, err := editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{{IssueID: "test-dep-closed-b", DependsOnID: "test-dep-closed-d", Type: publicops.DepBlocks}},
+	}); err != nil {
+		t.Fatalf("AddDependencies: %v", err)
+	}
+
+	requireCleanTables(ctx, t, store, "dependencies")
+	var edges int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dependencies AS OF 'HEAD' WHERE issue_id = 'test-dep-closed-b' AND depends_on_issue_id = 'test-dep-closed-d'").Scan(&edges); err != nil {
+		t.Fatalf("read HEAD edge: %v", err)
+	}
+	if edges != 1 {
+		t.Fatalf("HEAD has %d edges B->D, want 1", edges)
+	}
+	var headTitle string
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT title FROM issues AS OF 'HEAD' WHERE id = 'test-dep-closed-c'").Scan(&headTitle); err != nil {
+		t.Fatalf("read HEAD title: %v", err)
+	}
+	if headTitle != "test-dep-closed-c" {
+		t.Fatalf("HEAD title of test-dep-closed-c = %q: the non-flipping add swept a pending issues edit into its commit", headTitle)
+	}
+	var dirty int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dolt_status WHERE table_name = 'issues'").Scan(&dirty); err != nil {
+		t.Fatalf("query dolt_status: %v", err)
+	}
+	if dirty == 0 {
+		t.Fatal("issues is clean: the non-flipping add committed a row it never wrote")
+	}
+}
+
+// TestDoltStoreDependencyEditorWispSourceCommitsDurableIsBlocked is GH#6647
+// on the editor's wisp-sourced edges (`bd dep add <wisp> <target>`, `bd dep
+// remove <wisp> <target>`). The edge itself stages nothing, since the wisp
+// plane is dolt-ignored, but it blocks and unblocks the wisp's durable child,
+// and that issues row is committed with it.
+func TestDoltStoreDependencyEditorWispSourceCommitsDurableIsBlocked(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	seedWispParentOfDurableChild(ctx, t, store, "ewbm-w", "ewbm-d", "ewbm-a")
+
+	editor, err := store.DependencyEditor()
+	if err != nil {
+		t.Fatalf("DependencyEditor(): %v", err)
+	}
+	if _, err := editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{{IssueID: "ewbm-w", DependsOnID: "ewbm-a", Type: publicops.DepBlocks}},
+	}); err != nil {
+		t.Fatalf("AddDependencies: %v", err)
+	}
+	requireCommittedIsBlocked(ctx, t, store, "editor wisp dep add", "ewbm-d", true)
+
+	if _, err := editor.RemoveDependency(ctx, publicops.RemoveDependencyRequest{
+		Actor: "writer", IssueID: "ewbm-w", DependsOnID: "ewbm-a",
+	}); err != nil {
+		t.Fatalf("RemoveDependency: %v", err)
+	}
+	requireCommittedIsBlocked(ctx, t, store, "editor wisp dep remove", "ewbm-d", false)
 }

@@ -63,7 +63,8 @@ func writeSuiteOwnerMarkerPID(root string, pid int) error {
 // plausible PID — all of which mean "owner unknown", never "owner dead".
 func readSuiteOwnerMarker(root string) (pid int, ok bool) {
 	// #nosec G304 -- the path is this package's own constant joined to a
-	// temp root the caller vouches for; nothing here comes from user input.
+	// temp root the caller vouches for, or to $HOME when homeIsSuiteRoot asks
+	// whether HOME is one; either way only a PID is parsed from the file.
 	data, err := os.ReadFile(filepath.Join(root, SuiteOwnerMarkerName))
 	if err != nil {
 		return 0, false

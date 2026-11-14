@@ -48,7 +48,7 @@ func ensureStoreActiveWithContext(ctx context.Context) error {
 	// based on metadata.json configuration and build tags
 	store, err := newDoltStoreFromConfig(ctx, beadsDir)
 	if err != nil {
-		return fmt.Errorf("failed to open database: %w\nHint: %s", err, diagHint())
+		return fmt.Errorf("%w\nHint: %s", openStoreError(backendNameForErrorFraming(beadsDir), err), diagHint())
 	}
 
 	// Update the database path for compatibility with code that expects it

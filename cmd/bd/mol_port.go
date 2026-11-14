@@ -14,6 +14,12 @@ import (
 	"github.com/steveyegge/beads/internal/workapi"
 )
 
+// TODO(batchgetter): GetIssuesByIDs below reads an unbounded id list;
+// issueops.BatchGetter caps a request at MaxGetManyIDs (1000) and this
+// interface's one implementation (uowMolReader) has not been audited for id
+// volume or given chunking, so it still forwards to
+// IssueUseCase().GetIssuesByIDs rather than GetMany. See
+// issueops.BatchGetter's doc.
 type molReader interface {
 	GetIssue(ctx context.Context, id string) (*types.Issue, error)
 	GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error)
@@ -31,7 +37,6 @@ type molReader interface {
 	GetConfig(ctx context.Context, key string) (string, error)
 	IsInfraTypeCtx(ctx context.Context, t types.IssueType) bool
 	GetCustomStatusesDetailed(ctx context.Context) ([]types.CustomStatus, error)
-	GetMoleculeProgress(ctx context.Context, moleculeID string) (*types.MoleculeProgressStats, error)
 	GetMoleculeLastActivity(ctx context.Context, moleculeID string) (*types.MoleculeLastActivity, error)
 	FindWispDependentsRecursive(ctx context.Context, ids []string) (map[string]bool, error)
 }
@@ -52,7 +57,6 @@ type molWriter interface {
 	CloseIssue(ctx context.Context, id, reason, actor string) error
 	DeleteIssue(ctx context.Context, id, actor string) error
 	SetConfig(ctx context.Context, key, value string) error
-	ClaimStepIfOpen(ctx context.Context, id, actor string) error
 }
 
 type storeMolWriter struct {
@@ -95,26 +99,6 @@ func (w storeMolWriter) GetConfig(ctx context.Context, key string) (string, erro
 		return w.tx.GetConfig(ctx, key)
 	}
 	return w.DoltStorage.GetConfig(ctx, key)
-}
-
-func (w storeMolWriter) ClaimStepIfOpen(ctx context.Context, id, actor string) error {
-	return w.DoltStorage.RunInTransaction(ctx, fmt.Sprintf("bd: advance to step %s", id), func(tx storage.Transaction) error {
-		current, err := tx.GetIssue(ctx, id)
-		if err != nil {
-			return err
-		}
-		if current == nil {
-			return fmt.Errorf("step %s not found", id)
-		}
-		if current.Status != types.StatusOpen {
-			return fmt.Errorf("step %s already claimed (status: %s)", id, current.Status)
-		}
-		return tx.UpdateIssue(ctx, id, map[string]interface{}{"status": types.StatusInProgress}, actor)
-	})
-}
-
-func newStandaloneStoreMolWriter(store storage.DoltStorage) storeMolWriter {
-	return storeMolWriter{DoltStorage: store}
 }
 
 type uowMolReader struct {
@@ -258,40 +242,6 @@ func (r uowMolReader) IsInfraTypeCtx(ctx context.Context, t types.IssueType) boo
 
 func (r uowMolReader) GetCustomStatusesDetailed(ctx context.Context) ([]types.CustomStatus, error) {
 	return r.uw.ConfigUseCase().GetCustomStatuses(ctx)
-}
-
-func (r uowMolReader) GetMoleculeProgress(ctx context.Context, moleculeID string) (*types.MoleculeProgressStats, error) {
-	stats := &types.MoleculeProgressStats{MoleculeID: moleculeID}
-
-	root, err := r.GetIssue(ctx, moleculeID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get molecule: %w", err)
-	}
-	if root != nil {
-		stats.MoleculeTitle = root.Title
-	}
-
-	dependents, err := r.GetDependentsWithMetadata(ctx, moleculeID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get molecule children: %w", err)
-	}
-
-	for _, dependent := range dependents {
-		if dependent.DependencyType != types.DepParentChild {
-			continue
-		}
-		stats.Total++
-		switch dependent.Status {
-		case types.StatusClosed:
-			stats.Completed++
-		case types.StatusInProgress:
-			stats.InProgress++
-			if stats.CurrentStepID == "" {
-				stats.CurrentStepID = dependent.ID
-			}
-		}
-	}
-	return stats, nil
 }
 
 func (r uowMolReader) GetMoleculeLastActivity(ctx context.Context, moleculeID string) (*types.MoleculeLastActivity, error) {
@@ -452,17 +402,4 @@ func (w *uowMolWriter) DeleteIssue(ctx context.Context, id, actor string) error 
 
 func (w *uowMolWriter) SetConfig(ctx context.Context, key, value string) error {
 	return w.uw.ConfigUseCase().SetConfig(ctx, key, value)
-}
-
-func (w *uowMolWriter) ClaimStepIfOpen(ctx context.Context, id, actor string) error {
-	isWisp, err := w.isWisp(ctx, id)
-	if err != nil {
-		return err
-	}
-	if isWisp {
-		_, err := w.uw.IssueUseCase().ClaimWispIfOpen(ctx, id, actor)
-		return err
-	}
-	_, err = w.uw.IssueUseCase().ClaimIssueIfOpen(ctx, id, actor)
-	return err
 }

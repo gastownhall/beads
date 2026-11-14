@@ -49,7 +49,7 @@ func bdDuplicatesJSON(t *testing.T, bd, dir string, args ...string) map[string]i
 	return m
 }
 
-func TestEmbeddedDuplicates(t *testing.T) {
+func TestEmbeddedDuplicatesSharedFixture(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -76,6 +76,49 @@ func TestEmbeddedDuplicates(t *testing.T) {
 		}
 	})
 
+	// ===== JSON output =====
+
+	t.Run("json_output_structure", func(t *testing.T) {
+		m := bdDuplicatesJSON(t, bd, dir)
+		if _, ok := m["duplicate_groups"]; !ok {
+			t.Error("expected 'duplicate_groups' key")
+		}
+		if _, ok := m["groups"]; !ok {
+			t.Error("expected 'groups' key")
+		}
+	})
+
+	// ===== Dry run =====
+
+	t.Run("dry_run", func(t *testing.T) {
+		m := bdDuplicatesJSON(t, bd, dir, "--dry-run")
+		if _, ok := m["merge_commands"]; !ok {
+			t.Error("expected 'merge_commands' key with --dry-run")
+		}
+		// Dry run should NOT have merge_results
+		if _, ok := m["merge_results"]; ok {
+			t.Error("dry run should not have merge_results")
+		}
+	})
+
+	// ===== Human-readable output =====
+
+	t.Run("human_readable", func(t *testing.T) {
+		out := bdDuplicates(t, bd, dir)
+		if !strings.Contains(out, "duplicate") && !strings.Contains(out, "Duplicate") && !strings.Contains(out, "No duplicates") {
+			t.Errorf("expected duplicate info in output: %s", out)
+		}
+	})
+}
+
+func TestEmbeddedDuplicatesOwnWorkspaces(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
 	// ===== No duplicates when all unique =====
 
 	t.Run("no_duplicates", func(t *testing.T) {
@@ -86,18 +129,6 @@ func TestEmbeddedDuplicates(t *testing.T) {
 		groups := int(m["duplicate_groups"].(float64))
 		if groups != 0 {
 			t.Errorf("expected 0 duplicate groups, got %d", groups)
-		}
-	})
-
-	// ===== JSON output =====
-
-	t.Run("json_output_structure", func(t *testing.T) {
-		m := bdDuplicatesJSON(t, bd, dir)
-		if _, ok := m["duplicate_groups"]; !ok {
-			t.Error("expected 'duplicate_groups' key")
-		}
-		if _, ok := m["groups"]; !ok {
-			t.Error("expected 'groups' key")
 		}
 	})
 
@@ -142,19 +173,6 @@ func TestEmbeddedDuplicates(t *testing.T) {
 		}
 	})
 
-	// ===== Dry run =====
-
-	t.Run("dry_run", func(t *testing.T) {
-		m := bdDuplicatesJSON(t, bd, dir, "--dry-run")
-		if _, ok := m["merge_commands"]; !ok {
-			t.Error("expected 'merge_commands' key with --dry-run")
-		}
-		// Dry run should NOT have merge_results
-		if _, ok := m["merge_results"]; ok {
-			t.Error("dry run should not have merge_results")
-		}
-	})
-
 	// ===== Excludes closed issues =====
 
 	t.Run("excludes_closed", func(t *testing.T) {
@@ -168,15 +186,6 @@ func TestEmbeddedDuplicates(t *testing.T) {
 		groups := int(m["duplicate_groups"].(float64))
 		if groups > 0 {
 			t.Log("mixed open/closed duplicates detected — expected 0 groups due to status mismatch")
-		}
-	})
-
-	// ===== Human-readable output =====
-
-	t.Run("human_readable", func(t *testing.T) {
-		out := bdDuplicates(t, bd, dir)
-		if !strings.Contains(out, "duplicate") && !strings.Contains(out, "Duplicate") && !strings.Contains(out, "No duplicates") {
-			t.Errorf("expected duplicate info in output: %s", out)
 		}
 	})
 }

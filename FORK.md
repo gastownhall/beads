@@ -1,50 +1,35 @@
-# This fork
+# Datacosmos fork workflow
 
-This repository is a fork of its GitHub parent. Its integration branch (the
-repository's default branch) tracks the parent's default branch, plus a small
-set of fork plumbing and a few product patches. Fork releases are prereleases
-named `vX.Y.Z-<label>.N`: `vX.Y.Z` is the newest upstream release the branch
-contains, `<label>` is this fork's release label, and the tag annotation
-records the upstream commit the release is built on.
+This fork publishes qualified beads releases from `dc-use`. Keep only changes
+with a current downstream consumer.
 
-## Policy
+| Branch | Purpose |
+| --- | --- |
+| `main` | Exact mirror of the official `main`. The sync job advances it by fast-forward only. A divergent mirror fails the job without publishing. |
+| `dc-use` | Reviewed integration and release lane. Merge the mirrored upstream SHA before qualifying a release. |
+| `contrib/<subject>` | One generally useful change based on official `main`. Open its PR directly against the upstream repository. |
+| `adopt/<subject>` | An upstream PR or other third-party change awaiting integration. Record its source SHA and preserve authorship. |
+| `super/<integration>` | A dedicated working branch for a cross-component integration or large change. Integrate only qualified changes into `dc-use`; never release from this branch. |
 
-- **Product code equals upstream plus named patches.** `git diff $(git merge-base
-  upstream/<branch> origin/<default-branch>) origin/<default-branch>` lists only
-  fork plumbing (this file, `scripts/fork/`, the fork release workflow, the
-  integration branch in workflow triggers) and the product patches below.
-- **A product patch needs a reason.** Each one is developed on its own
-  `feat/<slug>` branch from the integration branch, as one surgical commit that
-  can become an upstream pull request, and exists only for a defect or need we
-  hit at runtime with no upstream fix. Refactors, style changes and dead-code
-  removal of upstream code go upstream, never here.
-- **Upstream's own mechanisms come first.** Before patching, look for an
-  existing configuration key, environment variable, extension point or
-  upstream commit.
+Before retaining a local change, reproduce the consumer's need on upstream
+`main` and check existing upstream PRs. Use the upstream implementation when
+it covers that need. Remove the downstream copy once the official history
+carries it. For a remaining generic gap, submit the smallest fix upstream
+and link its PR in the fork integration PR.
+
+The sync workflow belongs on the default branch `dc-use` so scheduled runs
+can update the mirror without putting workflow files on `main`. A sync that
+advances the mirror does not release anything: integrate it into `dc-use`
+through one reviewed PR with the native checks.
+
+For a legacy divergent fork `main`, preserve it under a durable branch and
+reconcile the migration with the repository owner before enabling the mirror.
+The job never rewrites branch history.
+
 - **Migrations are upstream's.** The fork ships none of its own. Stores that
   recorded upstream main's earlier `ignored/0026_add_wisps_current_revision`
   converge through upstream's own renumbering to `ignored/0027`, whose guard
   makes the re-run a no-op.
-
-## Sync with upstream
-
-```bash
-scripts/fork/fork.sh sync
-```
-
-`sync` does the following:
-1. Fetches the parent's default branch and creates
-   `lane/<default-branch>-<upstream-branch>-<sha>` in a linked worktree next to
-   the other worktrees.
-2. Branches from that upstream commit and merges the default branch in with
-   `-s ours`, so the tree equals upstream and the PR merges completely.
-3. Re-applies the fork delta (`git diff <last-synced-upstream> origin/<default-branch>`)
-   with `git apply --3way`. A conflict stops the script.
-4. Refreshes the bd pairing, where this repository has one.
-5. Pushes the lane and opens a draft PR.
-
-When the default branch already contains the upstream head, `sync` prints
-`already at upstream <branch> <sha>` and changes nothing.
 
 ## Release
 
@@ -54,9 +39,9 @@ After the PR is merged:
 scripts/fork/fork.sh release
 ```
 
-This tags the merged head as the next `<base>-<label>.N`, records the synced
+This tags the merged head as the next `<upstream-version>-dc.N`, records the synced
 upstream commit in the tag annotation, and pushes the tag. The fork release
-workflow then builds and publishes the prerelease.
+workflow then builds and publishes the release.
 
 ## bd ↔ gc pairing
 

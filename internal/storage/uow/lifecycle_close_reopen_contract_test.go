@@ -63,8 +63,14 @@ func TestLifecycleCloseReopenContract(t *testing.T) {
 	t.Run("ResultsAreHydratedPostStateSnapshots", func(t *testing.T) {
 		conformance.RunLifecycleResultsAreHydratedPostStateSnapshots(t, ctx, fixture)
 	})
+	t.Run("ResultsCarryThePostWriteRowVersion", func(t *testing.T) {
+		conformance.RunLifecycleResultsCarryThePostWriteRowVersion(t, ctx, fixture)
+	})
 	t.Run("CloseAndReopenRequireActorAndIssueID", func(t *testing.T) {
 		conformance.RunLifecycleCloseAndReopenRequireActorAndIssueID(t, ctx, fixture)
+	})
+	t.Run("EventActorMatchesTheRequest", func(t *testing.T) {
+		conformance.RunLifecycleEventActorMatchesTheRequest(t, ctx, fixture)
 	})
 	t.Run("CloseSettlesItsTransitiveAndCrossPlaneDependers", func(t *testing.T) {
 		conformance.RunLifecycleCloseSettlesItsTransitiveAndCrossPlaneDependers(t, ctx, fixture)
@@ -77,6 +83,9 @@ func TestLifecycleCloseReopenContract(t *testing.T) {
 	})
 	t.Run("ReopenReblocksItsDependers", func(t *testing.T) {
 		conformance.RunLifecycleReopenReblocksItsDependers(t, ctx, fixture)
+	})
+	t.Run("CloseEnforcesTheCloseGuards", func(t *testing.T) {
+		conformance.RunLifecycleCloseEnforcesTheCloseGuards(t, ctx, fixture)
 	})
 }
 

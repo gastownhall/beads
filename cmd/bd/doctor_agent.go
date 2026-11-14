@@ -19,7 +19,8 @@ type agentDoctorResult struct {
 
 // buildAgentResult converts a standard doctorResult to an agent-enriched result.
 // Only non-OK checks are included in diagnostics — agents don't need 45 "ok" entries.
-func buildAgentResult(result doctorResult) agentDoctorResult {
+// The gate is applied to each enriched command list; see doctor.EnrichForAgent.
+func buildAgentResult(result doctorResult, gate doctor.FixGate) agentDoctorResult {
 	ar := agentDoctorResult{
 		Path:       result.Path,
 		OverallOK:  result.OverallOK,
@@ -40,7 +41,7 @@ func buildAgentResult(result doctorResult) agentDoctorResult {
 				Detail:   check.Detail,
 				Fix:      check.Fix,
 				Category: check.Category,
-			}))
+			}, gate))
 		case statusWarning:
 			warnCount++
 			ar.Diagnostics = append(ar.Diagnostics, doctor.EnrichForAgent(doctor.DoctorCheck{
@@ -50,7 +51,7 @@ func buildAgentResult(result doctorResult) agentDoctorResult {
 				Detail:   check.Detail,
 				Fix:      check.Fix,
 				Category: check.Category,
-			}))
+			}, gate))
 		}
 	}
 
@@ -99,6 +100,7 @@ func printAgentDiagnostics(ar agentDoctorResult) {
 }
 
 func printAgentDiagnostic(d doctor.AgentDiagnostic) {
+	d = d.Printed()
 	severity := strings.ToUpper(d.Status)
 	fmt.Printf("### %s: %s", severity, d.Name)
 	if d.Category != "" {
@@ -116,7 +118,7 @@ func printAgentDiagnostic(d doctor.AgentDiagnostic) {
 	if len(d.Commands) > 0 {
 		fmt.Println("- **To fix:**")
 		for _, cmd := range d.Commands {
-			fmt.Printf("  - `%s`\n", cmd)
+			fmt.Printf("  - %s\n", agentCodeSpan(cmd))
 		}
 	}
 
@@ -125,4 +127,42 @@ func printAgentDiagnostic(d doctor.AgentDiagnostic) {
 	}
 
 	fmt.Println()
+}
+
+// agentCodeSpan shows cmd as a Markdown code span. A command without a
+// backtick gets the single-backtick span it always had. One that holds a
+// backtick (a check's Fix can carry a value remedy.CommandArg single-quoted
+// from a committed file name) gets a fence longer than its longest backtick
+// run, so the backtick cannot close the span (CommonMark). The fence length
+// is even: pasted into sh, bash or zsh, an even fence is only empty command
+// substitutions, so the span runs its command as written and a backtick
+// inside the command's single quotes stays literal. That is all the fence
+// does for a paste: a backtick the command leaves outside quotes still starts
+// a substitution, so bd's own commands and advice hold none (the fix gate's
+// Reason names the 'bd doctor --fix' it withholds in single quotes).
+func agentCodeSpan(cmd string) string {
+	longest, run := 0, 0
+	for _, r := range cmd {
+		if r == '`' {
+			run++
+			if run > longest {
+				longest = run
+			}
+			continue
+		}
+		run = 0
+	}
+	if longest == 0 {
+		return "`" + cmd + "`"
+	}
+	n := longest + 1
+	if n%2 != 0 {
+		n++
+	}
+	fence := strings.Repeat("`", n)
+	if strings.HasPrefix(cmd, "`") || strings.HasSuffix(cmd, "`") {
+		// CommonMark strips one space from each side of such a span.
+		cmd = " " + cmd + " "
+	}
+	return fence + cmd + fence
 }

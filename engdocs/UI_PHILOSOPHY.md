@@ -106,6 +106,113 @@ Following Tufte's principle of layered information:
 5. **Descriptions** - Plain, primary content
 6. **Examples** - Plain, copy-paste friendly
 
+## Visual Design System
+
+When adding CLI output features, follow these design principles for consistent,
+cognitively friendly visuals.
+
+### No Emoji-Style Icons
+
+Do not use large colored emoji icons like red/orange/yellow/blue/white circles
+for priorities or status. They cause cognitive overload and break visual
+consistency.
+
+Use small Unicode symbols with semantic colors applied via lipgloss:
+
+- Status: `○ ◐ ● ✓ ❄`
+- Priority: `P0`–`P4` label with color (no status glyph)
+
+### Status Icons
+
+Use these symbols consistently across all commands:
+
+```text
+○ open        - Available to work (white/default)
+◐ in_progress - Currently being worked (yellow)
+● blocked     - Waiting on dependencies (red)
+✓ closed      - Completed (muted gray)
+❄ deferred    - Scheduled for later (blue/muted)
+```
+
+### Priority Labels and Colors
+
+Format priority as the P-label with color only (no status glyph — `●` is blocked status):
+
+- `P0`: Red + bold (critical)
+- `P1`: Orange (high)
+- `P2`: Amber (elevated)
+- `P3`–`P4`: Default text
+
+### Issue Type Colors
+
+- `bug`: Red (problems need attention)
+- `epic`: Purple (larger scope)
+- Others: Default text
+
+### Design Principles
+
+1. Small Unicode symbols only; avoid emoji blobs.
+2. Semantic colors only for actionable items; do not color everything.
+3. Closed items fade using muted gray.
+4. Prefer icons over text labels for scanability.
+5. Keep icons consistent across list, graph, show, and related commands.
+6. Use tree connectors (`├──`, `└──`, `│`) for hierarchies.
+7. Reduce cognitive noise; do not show `needs:1` when it is just the parent epic.
+
+### Semantic Styles
+
+Use exported styles from `internal/ui/styles.go`:
+
+```go
+// Status styles
+ui.StatusInProgressStyle  // Yellow - active work
+ui.StatusBlockedStyle     // Red - needs attention
+ui.StatusClosedStyle      // Muted gray - done
+
+// Priority styles
+ui.PriorityP0Style        // Red + bold
+ui.PriorityP1Style        // Orange
+
+// Type styles
+ui.TypeBugStyle           // Red
+ui.TypeEpicStyle          // Purple
+
+// General styles
+ui.PassStyle, ui.WarnStyle, ui.FailStyle
+ui.MutedStyle, ui.AccentStyle
+ui.RenderMuted(text), ui.RenderAccent(text)
+```
+
+Example:
+
+```go
+switch issue.Status {
+case types.StatusOpen:
+    icon = "○"
+case types.StatusInProgress:
+    icon = ui.StatusInProgressStyle.Render("◐")
+case types.StatusBlocked:
+    icon = ui.StatusBlockedStyle.Render("●")
+case types.StatusClosed:
+    icon = ui.StatusClosedStyle.Render("✓")
+}
+```
+
+## CLI Design Principles
+
+**Minimize cognitive overload.** Every new command, flag, or option adds cognitive burden for users. Before adding anything:
+
+1. **Recovery/fix operations → `bd doctor --fix`**: Don't create separate commands like `bd recover` or `bd repair`. Doctor already detects problems - let `--fix` handle remediation. This keeps all health-related operations in one discoverable place.
+   For git hook marker migration specifically: use `bd migrate hooks --dry-run` to preview operations, and `bd doctor --fix` for the standard apply path.
+
+2. **Prefer flags on existing commands**: Before creating a new command, ask: "Can this be a flag on an existing command?" Example: `bd list --stale` instead of `bd stale`.
+
+3. **Consolidate related operations**: Related operations should live together. Version control uses `bd vc {log,diff,commit}`, not separate top-level commands.
+
+4. **Count the commands**: Run `bd --help` and count. If we're approaching 30+ commands, we have a discoverability problem. Consider subcommand grouping.
+
+5. **New commands need strong justification**: A new command should represent a fundamentally different operation, not just a convenience wrapper.
+
 ## References
 
 - Tufte, E. (2001). *The Visual Display of Quantitative Information*

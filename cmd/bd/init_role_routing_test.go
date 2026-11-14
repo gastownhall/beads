@@ -39,7 +39,7 @@ func TestBeadsRoleWriterIgnoresInheritedGitRouting(t *testing.T) {
 	// value physically landed rather than what discovery would resolve to.
 	localRole := func(t *testing.T, repo string) string {
 		t.Helper()
-		cmd := exec.Command("git", "config", "--local", "--get", "beads.role")
+		cmd := gitCommand("config", "--local", "--get", "beads.role")
 		cmd.Dir = repo
 		cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
 		out, err := cmd.Output()
@@ -50,7 +50,7 @@ func TestBeadsRoleWriterIgnoresInheritedGitRouting(t *testing.T) {
 	}
 	setLocalRole := func(t *testing.T, repo, role string) {
 		t.Helper()
-		cmd := exec.Command("git", "config", "--local", "beads.role", role)
+		cmd := gitCommand("config", "--local", "beads.role", role)
 		cmd.Dir = repo
 		cmd.Env = gitenv.ScrubRoutingAndSuppression(os.Environ())
 		if out, err := cmd.CombinedOutput(); err != nil {

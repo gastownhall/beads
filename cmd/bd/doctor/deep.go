@@ -2,13 +2,16 @@
 package doctor
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
 // DeepValidationResult holds all deep validation check results
@@ -122,6 +125,10 @@ func RunDeepValidation(path string) DeepValidationResult {
 	return result
 }
 
+// deepBrokenDepCap is how many broken edges the --deep dependency checks
+// collect, as their former SQL LIMIT 10 did.
+const deepBrokenDepCap = 10
+
 // checkParentConsistency verifies that all parent-child dependencies point to existing issues
 func checkParentConsistency(db *sql.DB) DoctorCheck {
 	check := DoctorCheck{
@@ -129,10 +136,27 @@ func checkParentConsistency(db *sql.DB) DoctorCheck {
 		Category: CategoryMetadata,
 	}
 
-	// Find parent-child deps where either side doesn't exist
+	// Read the held prefixes before the query opens its rows: the pool can
+	// be a single connection.
+	issuePrefix, allowedPrefixes, err := fix.LoadDepTargetPrefixes(context.Background(), db)
+	if err != nil {
+		check.Status = StatusWarning
+		check.Message = "Unable to check parent consistency"
+		check.Detail = err.Error()
+		return check
+	}
+
+	// Find parent-child deps where either side doesn't exist. A missing
+	// source is always broken; a missing target is skipped in Go when it is
+	// one this database cannot verify (fix.IsUnverifiableDepTarget). The
+	// 10-row cap is applied after that filter, so exempt rows cannot fill it
+	// and hide a broken one.
 	//nolint:gosec // G202: doctorDependencyUnionSQL returns a fixed internal SELECT fragment.
 	query := `
-		SELECT d.issue_id, d.depends_on_id
+		SELECT d.issue_id, d.depends_on_id,
+		  CASE WHEN (d.dep_table = 'dependencies' AND NOT EXISTS (SELECT 1 FROM issues WHERE id = d.issue_id))
+		    OR (d.dep_table = 'wisp_dependencies' AND NOT EXISTS (SELECT 1 FROM wisps WHERE id = d.issue_id))
+		  THEN 1 ELSE 0 END AS source_missing
 		FROM (` + doctorDependencyUnionSQL() + `) d
 		WHERE d.type = 'parent-child'
 		  AND (
@@ -142,8 +166,7 @@ func checkParentConsistency(db *sql.DB) DoctorCheck {
 		      NOT EXISTS (SELECT 1 FROM issues WHERE id = d.depends_on_id)
 		      AND NOT EXISTS (SELECT 1 FROM wisps WHERE id = d.depends_on_id)
 		    )
-		  )
-		LIMIT 10`
+		  )`
 
 	rows, err := db.Query(query)
 	if err != nil {
@@ -155,9 +178,13 @@ func checkParentConsistency(db *sql.DB) DoctorCheck {
 	defer rows.Close()
 
 	var orphanedDeps []string
-	for rows.Next() {
+	for len(orphanedDeps) < deepBrokenDepCap && rows.Next() {
 		var issueID, parentID string
-		if err := rows.Scan(&issueID, &parentID); err == nil {
+		var sourceMissing int
+		if err := rows.Scan(&issueID, &parentID, &sourceMissing); err == nil {
+			if sourceMissing == 0 && fix.IsUnverifiableDepTarget(issueID, parentID, issuePrefix, allowedPrefixes) {
+				continue
+			}
 			orphanedDeps = append(orphanedDeps, fmt.Sprintf("%s→%s", issueID, parentID))
 		}
 	}
@@ -188,10 +215,26 @@ func checkDependencyIntegrity(db *sql.DB) DoctorCheck {
 		Category: CategoryMetadata,
 	}
 
-	// Find any deps where either side is missing
+	// Read the held prefixes before the query opens its rows: the pool can
+	// be a single connection.
+	issuePrefix, allowedPrefixes, err := fix.LoadDepTargetPrefixes(context.Background(), db)
+	if err != nil {
+		check.Status = StatusWarning
+		check.Message = "Unable to check dependency integrity"
+		check.Detail = err.Error()
+		return check
+	}
+
+	// Find any deps where either side is missing. A missing source is always
+	// broken; a missing target is skipped in Go when it is one this database
+	// cannot verify (fix.IsUnverifiableDepTarget). The 10-row cap is applied
+	// after that filter, so exempt rows cannot fill it and hide a broken one.
 	//nolint:gosec // G202: doctorDependencyUnionSQL returns a fixed internal SELECT fragment.
 	query := `
-		SELECT d.issue_id, d.depends_on_id, d.type
+		SELECT d.issue_id, d.depends_on_id, d.type,
+		  CASE WHEN (d.dep_table = 'dependencies' AND NOT EXISTS (SELECT 1 FROM issues WHERE id = d.issue_id))
+		    OR (d.dep_table = 'wisp_dependencies' AND NOT EXISTS (SELECT 1 FROM wisps WHERE id = d.issue_id))
+		  THEN 1 ELSE 0 END AS source_missing
 		FROM (` + doctorDependencyUnionSQL() + `) d
 		WHERE (
 		    (d.dep_table = 'dependencies' AND NOT EXISTS (SELECT 1 FROM issues WHERE id = d.issue_id))
@@ -201,8 +244,7 @@ func checkDependencyIntegrity(db *sql.DB) DoctorCheck {
 		      AND NOT EXISTS (SELECT 1 FROM issues WHERE id = d.depends_on_id)
 		      AND NOT EXISTS (SELECT 1 FROM wisps WHERE id = d.depends_on_id)
 		    )
-		  )
-		LIMIT 10`
+		  )`
 
 	rows, err := db.Query(query)
 	if err != nil {
@@ -214,9 +256,13 @@ func checkDependencyIntegrity(db *sql.DB) DoctorCheck {
 	defer rows.Close()
 
 	var brokenDeps []string
-	for rows.Next() {
+	for len(brokenDeps) < deepBrokenDepCap && rows.Next() {
 		var issueID, dependsOnID, depType string
-		if err := rows.Scan(&issueID, &dependsOnID, &depType); err == nil {
+		var sourceMissing int
+		if err := rows.Scan(&issueID, &dependsOnID, &depType, &sourceMissing); err == nil {
+			if sourceMissing == 0 && fix.IsUnverifiableDepTarget(issueID, dependsOnID, issuePrefix, allowedPrefixes) {
+				continue
+			}
 			brokenDeps = append(brokenDeps, fmt.Sprintf("%s→%s (%s)", issueID, dependsOnID, depType))
 		}
 	}
@@ -240,52 +286,38 @@ func checkDependencyIntegrity(db *sql.DB) DoctorCheck {
 	return check
 }
 
-// checkEpicCompleteness finds epics that could be closed (all children closed)
+// checkEpicCompleteness finds epics that could be closed (all children closed
+// as completed work).
+//
+// This routes through the shared eligibility query rather than re-deriving
+// "all children closed" from raw counts in local SQL. A child closed as
+// duplicate/wontfix/superseded redirects the work rather than finishing it and
+// must not make its epic look closeable (GH#5026); a second local classifier
+// here would let `bd doctor --deep` report an epic "ready to close" — with a
+// Fix line prescribing `bd close` — while `bd doctor`'s own Stale Molecules
+// check, which reads EpicStatus.EligibleForClose, reports the same epic on the
+// same repository as not stale.
 func checkEpicCompleteness(db *sql.DB) DoctorCheck {
 	check := DoctorCheck{
 		Name:     "Epic Completeness",
 		Category: CategoryMetadata,
 	}
 
-	// Find epics where all children are closed but epic is still open
-	//nolint:gosec // G202: doctorDependencyUnionSQL returns a fixed internal SELECT fragment.
-	query := `
-		SELECT e.id, e.title,
-		       COUNT(COALESCE(c.id, cw.id)) as total_children,
-		       SUM(CASE WHEN COALESCE(c.status, cw.status) = 'closed' THEN 1 ELSE 0 END) as closed_children
-		FROM issues e
-		JOIN (` + doctorDependencyUnionSQL() + `) d ON d.depends_on_id = e.id AND d.type = 'parent-child'
-		LEFT JOIN issues c ON c.id = d.issue_id
-		LEFT JOIN wisps cw ON cw.id = d.issue_id
-		WHERE e.issue_type = 'epic'
-		  AND e.status != 'closed'
-		  AND COALESCE(c.id, cw.id) IS NOT NULL
-		GROUP BY e.id
-		HAVING total_children > 0 AND total_children = closed_children
-		LIMIT 20`
-
-	rows, err := db.Query(query)
+	epicStatuses, err := issueops.GetEpicsEligibleForClosureInTx(context.Background(), db)
 	if err != nil {
 		check.Status = StatusWarning
 		check.Message = "Unable to check epic completeness"
 		check.Detail = err.Error()
 		return check
 	}
-	defer rows.Close()
 
 	var completedEpics []string
-	for rows.Next() {
-		var id, title string
-		var total, closed int
-		if err := rows.Scan(&id, &title, &total, &closed); err == nil {
-			completedEpics = append(completedEpics, fmt.Sprintf("%s (%d/%d)", id, closed, total))
+	for _, es := range epicStatuses {
+		if !es.EligibleForClose || es.Epic == nil {
+			continue
 		}
-	}
-	if err := rows.Err(); err != nil {
-		check.Status = StatusWarning
-		check.Message = "Row iteration error checking epic completeness"
-		check.Detail = err.Error()
-		return check
+		completedEpics = append(completedEpics,
+			fmt.Sprintf("%s (%d/%d)", es.Epic.ID, es.ClosedChildren, es.TotalChildren))
 	}
 
 	if len(completedEpics) == 0 {
@@ -494,6 +526,9 @@ func PrintDeepValidationResult(result DeepValidationResult) {
 	fmt.Printf("Scanned: %d issues, %d dependencies\n\n", result.TotalIssues, result.TotalDependencies)
 
 	for _, check := range result.AllChecks {
+		// Detail names IDs from pulled rows: spelled as every check printer
+		// spells a check.
+		check = check.Printed()
 		var icon string
 		switch check.Status {
 		case StatusOK:

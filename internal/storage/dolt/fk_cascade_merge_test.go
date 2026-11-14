@@ -381,3 +381,99 @@ func TestFKCascadeRepairRefusesUnknownTable(t *testing.T) {
 		t.Errorf("refused merge still landed %d row(s) in the working set", rows)
 	}
 }
+
+// TestFKCascadeRepairKeepsCleanMergedTables (GH#7811) is the server-mode
+// counterpart of the embedded TestEmbeddedMergeAndSettleFKRepairKeepsCleanMergedTables,
+// on both settle routes: a merge whose only artifact is an FK cascade
+// violation the repair clears must be concluded by the settle pass with its
+// full result. Left open, it was concluded by the next commit, and a plain
+// server-mode commit never stages config (GH#2455), so the peer's ride-along
+// is a config row. No trailing DOLT_COMMIT('-Am'), which would sweep the
+// working set afterwards and hide the drop.
+func TestFKCascadeRepairKeepsCleanMergedTables(t *testing.T) {
+	for _, route := range []string{"sql", "cli"} {
+		t.Run(route, func(t *testing.T) {
+			store, cleanup := setupTestStore(t)
+			defer cleanup()
+			ctx, cancel := testContext(t)
+			defer cancel()
+			db := store.db
+
+			var currentBranch string
+			if err := db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&currentBranch); err != nil {
+				t.Fatalf("get current branch: %v", err)
+			}
+			tc := fkCascadeCases[1] // labels
+			peerBranch := seedFKCascadeDivergence(ctx, t, db, tc)
+			for _, step := range []struct {
+				query string
+				args  []any
+			}{
+				{"CALL DOLT_CHECKOUT(?)", []any{peerBranch}},
+				{"INSERT INTO config (`key`, value) VALUES ('kv.fk_ride_along', 'peer')", nil},
+				{"CALL DOLT_COMMIT('-Am', 'peer config ride-along')", nil},
+				{"CALL DOLT_CHECKOUT(?)", []any{currentBranch}},
+			} {
+				if _, err := db.ExecContext(ctx, step.query, step.args...); err != nil {
+					t.Fatalf("%s: %v", step.query, err)
+				}
+			}
+
+			switch route {
+			case "sql":
+				if err := settleForcedMerge(ctx, t, store, peerBranch); err != nil {
+					t.Fatalf("settling FK-violating merge: %v", err)
+				}
+			case "cli":
+				// What a CLI pull leaves behind: the forced merge committed
+				// with its violations, unsettled (as in
+				// TestFKCascadeViolationRepairOnCLIPull).
+				tx, err := db.BeginTx(ctx, nil)
+				if err != nil {
+					t.Fatalf("begin merge tx: %v", err)
+				}
+				for _, q := range []string{"SET @@dolt_allow_commit_conflicts = 1", "SET @@dolt_force_transaction_commit = 1"} {
+					if _, err := tx.ExecContext(ctx, q); err != nil {
+						t.Fatalf("%s: %v", q, err)
+					}
+				}
+				if _, err := tx.ExecContext(ctx, "CALL DOLT_MERGE(?)", peerBranch); err != nil {
+					t.Fatalf("forced merge: %v", err)
+				}
+				if err := tx.Commit(); err != nil {
+					t.Fatalf("commit violated working set: %v", err)
+				}
+				resolved, err := store.autoResolveConflictsAfterCLIPull(ctx)
+				if err != nil {
+					t.Fatalf("autoResolveConflictsAfterCLIPull: %v", err)
+				}
+				if !resolved {
+					t.Fatal("expected the CLI-pull resolver to repair the FK cascade violation")
+				}
+			}
+
+			var value string
+			if err := db.QueryRowContext(ctx,
+				"SELECT value FROM config AS OF 'HEAD' WHERE `key` = 'kv.fk_ride_along'").Scan(&value); err != nil {
+				t.Fatalf("read the peer's config row AS OF 'HEAD' (the merge commit does not carry it): %v", err)
+			}
+			if value != "peer" {
+				t.Errorf("HEAD config kv.fk_ride_along = %q, want %q", value, "peer")
+			}
+			var dirty int
+			if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_status").Scan(&dirty); err != nil {
+				t.Fatalf("count dolt_status: %v", err)
+			}
+			if dirty != 0 {
+				t.Errorf("%d table(s) left uncommitted after the settlement", dirty)
+			}
+			var merging bool
+			if err := db.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&merging); err != nil {
+				t.Fatalf("read dolt_merge_status: %v", err)
+			}
+			if merging {
+				t.Error("merge left open (dolt_merge_status.is_merging = 1) after the settlement")
+			}
+		})
+	}
+}

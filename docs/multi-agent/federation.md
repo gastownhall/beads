@@ -273,9 +273,10 @@ local heartbeat is keeping it alive:
   row from the snapshot, granting replica included — so this node's own stale
   lease can come back labelled with a remote one.
 
-(The one path that moves a lease the other way is a heartbeat whose holder is a
-different *spelling* of the lease row's holder: it re-arms through the upsert,
-which stamps this node.)
+(No heartbeat moves an existing lease, including one whose holder is a
+different *spelling* of the lease row's holder: that row is refreshed in place
+and keeps its granting replica. Only a re-arm, which grants a lease to a live
+claim that had none, stamps this node.)
 
 Recover a stranded lease with `bd reclaim --any-replica`, once you have
 confirmed the granting replica is not still reaping — that confirmation is the

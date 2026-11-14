@@ -256,11 +256,15 @@ func eventuallyInternal(t *testing.T, timeout time.Duration, check func() bool, 
 	t.Fatalf("eventually: %s", message)
 }
 
-func dialInternalProxy(t *testing.T, port int) net.Conn {
+func dialInternalProxy(t *testing.T, running *runningExternalProxy) net.Conn {
 	t.Helper()
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(port)), 2*time.Second)
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(running.port)), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial proxy: %v", err)
+	}
+	if err := clientDataHandshake(context.Background(), conn, running.proxy.data.secret, running.proxy.data.port); err != nil {
+		_ = conn.Close()
+		t.Fatalf("authenticate proxy: %v", err)
 	}
 	return conn
 }
@@ -288,7 +292,7 @@ func TestExternalProxyEstablishedTunnelClientCloseDrainsTCPAndUnix(t *testing.T)
 			fixture := newExternalTransportFixture(t, network, address, true)
 			running := startExternalProxy(t, fixture)
 			consumeReadiness(t, fixture)
-			client := dialInternalProxy(t, running.port)
+			client := dialInternalProxy(t, running)
 			defer client.Close()
 			fixture.nextAccepted(5 * time.Second)
 			client.Close()
@@ -325,7 +329,7 @@ func TestExternalProxyShutdownClosesEstablishedTCPAndUnixTunnels(t *testing.T) {
 			fixture := newExternalTransportFixture(t, network, address, true)
 			running := startExternalProxy(t, fixture)
 			consumeReadiness(t, fixture)
-			client := dialInternalProxy(t, running.port)
+			client := dialInternalProxy(t, running)
 			fixture.nextAccepted(5 * time.Second)
 			running.cancel()
 			select {
@@ -360,7 +364,7 @@ func TestExternalProxyOutageAndRestoreReDialsTCPAndUnix(t *testing.T) {
 			fixture := newExternalTransportFixture(t, network, address, false)
 			running := startExternalProxy(t, fixture)
 			consumeReadiness(t, fixture)
-			client := dialInternalProxy(t, running.port)
+			client := dialInternalProxy(t, running)
 			fixture.nextAccepted(5 * time.Second)
 			marker := []byte("proxy-recovery-marker")
 			if _, err := client.Write(marker); err != nil {
@@ -380,19 +384,23 @@ func TestExternalProxyOutageAndRestoreReDialsTCPAndUnix(t *testing.T) {
 			// Close the restored listener to create a deterministic outage, then
 			// rebind it in the same test so the proxy must re-dial the endpoint.
 			fixture.Close()
-			failed := dialInternalProxy(t, running.port)
+			// The outage is reported to the client as a MySQL ERR packet in
+			// place of the greeting (upstream_error.go), then the connection
+			// closes; no upstream data is ever relayed.
+			failed := dialInternalProxy(t, running)
 			_ = failed.SetReadDeadline(time.Now().Add(2 * time.Second))
-			var b [1]byte
-			if _, err := failed.Read(b[:]); err == nil {
-				t.Fatal("outage client unexpectedly received data")
+			outage, err := io.ReadAll(failed)
+			if err != nil {
+				t.Fatalf("read outage response: %v", err)
 			}
+			requireUpstreamErrorPacket(t, outage)
 			_ = failed.Close()
 			eventuallyInternal(t, 2*time.Second, func() bool {
 				return running.proxy.stats.Snapshot().BackendDialErrors >= 1
 			}, "proxy did not record outage dial error")
 
 			fixture = newExternalTransportFixture(t, network, fixture.address, false)
-			recovered := dialInternalProxy(t, running.port)
+			recovered := dialInternalProxy(t, running)
 			defer recovered.Close()
 			fixture.nextAccepted(5 * time.Second)
 			if _, err := recovered.Write(marker); err != nil {

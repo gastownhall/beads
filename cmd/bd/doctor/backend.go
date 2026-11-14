@@ -38,6 +38,26 @@ func resolveBeadsDirForRepoUncached(repoPath string) string {
 	return beads.ResolveBeadsDirForRepo(repoPath)
 }
 
+// BeadsManagedStorageHooksDir returns the hooks directory that
+// `bd hooks install --beads` writes to core.hooksPath — <effective .beads>/hooks
+// — or "" when no beads storage resolves.
+//
+// install resolves that directory with beads.FindBeadsDir, which honors
+// BEADS_DIR and .beads/redirect and can therefore land outside the repository.
+// Uninstall and `bd doctor --fix` must resolve it exactly the same way: a value
+// they cannot recognize is a value they cannot clear, which leaves
+// core.hooksPath pointing at a hooks directory whose files uninstall just
+// deleted (every hook silently disabled, beads-managed config still installed —
+// the GH#4440 contract). Deliberately not ResolveBeadsDirForRepo, which is
+// repo-anchored and blind to BEADS_DIR.
+func BeadsManagedStorageHooksDir() string {
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		return ""
+	}
+	return filepath.Join(beadsDir, "hooks")
+}
+
 func resolvedBeadsRepoRoot(repoPath string) string {
 	return filepath.Dir(ResolveBeadsDirForRepo(repoPath))
 }

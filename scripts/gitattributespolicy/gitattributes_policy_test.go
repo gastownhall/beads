@@ -111,7 +111,9 @@ func TestRepositoryTextPolicyKeepsLFWithAutoCrlf(t *testing.T) {
 		"--",
 		"fixture.go",
 		"future.unlisted",
-		"fixture.jpg")
+		"fixture.jpg",
+		"CHANGELOG.md",
+		"nested/CHANGELOG.md")
 	attributeRecords, err := parseGitAttributeRecords(attributesOutput)
 	if err != nil {
 		t.Fatalf("parse exact Git attributes: %v", err)
@@ -248,6 +250,17 @@ func expectedGitAttributeRecords() map[gitAttributeKey]string {
 		{path: "fixture.jpg", attribute: "diff"}:      "unset",
 		{path: "fixture.jpg", attribute: "merge"}:     "unset",
 		{path: "fixture.jpg", attribute: "eol"}:       "lf",
+		// The merge driver keeps both sides of an add/add conflict only where
+		// a clone configures it (changelog_merge_driver_test.go); everywhere
+		// else an unconfigured driver name merges as text.
+		{path: "CHANGELOG.md", attribute: "text"}:         "auto",
+		{path: "CHANGELOG.md", attribute: "diff"}:         "unspecified",
+		{path: "CHANGELOG.md", attribute: "merge"}:        "changelog",
+		{path: "CHANGELOG.md", attribute: "eol"}:          "lf",
+		{path: "nested/CHANGELOG.md", attribute: "text"}:  "auto",
+		{path: "nested/CHANGELOG.md", attribute: "diff"}:  "unspecified",
+		{path: "nested/CHANGELOG.md", attribute: "merge"}: "changelog",
+		{path: "nested/CHANGELOG.md", attribute: "eol"}:   "lf",
 	}
 }
 

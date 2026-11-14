@@ -20,6 +20,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
 // ProcessRegistry tracks spawned processes and ensures cleanup via t.Cleanup.
@@ -113,15 +115,60 @@ func NewSubprocessRunner(modRoot, pkg string) *SubprocessRunner {
 	}
 }
 
+// GoBinaryEnv names the variable that points SubprocessRunner at a Go
+// command other than the `go` on PATH. Under Bazel there is no toolchain on
+// PATH, so a go_test that builds through SubprocessRunner declares the pinned
+// SDK as data and sets it from its BUILD file:
+//
+//	data = ["@go_sdk//:bin/go", "@go_sdk//:tools", "//:go.mod", "//:go.sum"],
+//	env = {"BEADS_TEST_GO_BINARY": "$(rlocationpath @go_sdk//:bin/go)"},
+const GoBinaryEnv = "BEADS_TEST_GO_BINARY"
+
+// goBinary returns the go command to build with: "go" from PATH unless
+// BEADS_TEST_GO_BINARY is set, which is then resolved like any other runfile.
+func goBinary() (string, error) {
+	if os.Getenv(GoBinaryEnv) == "" {
+		return "go", nil
+	}
+	return bazeltest.RunfileEnv(GoBinaryEnv)
+}
+
+// PrebuiltTestBinaryEnv names a variable that hands SubprocessRunner an
+// already-built test binary of the package it would compile, instead of
+// running `go test -c`. Under Bazel no action has the module's source tree
+// and module cache that `go test -c` needs, but the test binary that is
+// running is that package's test binary, integration-tagged, so the target
+// passes it (resolved like any other runfile):
+//
+//	env = {"BEADS_TEST_SUBPROCESS_BINARY": "$(rlocationpath <the go_test>)"},
+const PrebuiltTestBinaryEnv = "BEADS_TEST_SUBPROCESS_BINARY"
+
 // Build compiles the test binary (once). Returns the path to the binary.
+// With BEADS_TEST_SUBPROCESS_BINARY set it compiles nothing and returns that
+// binary.
 func (r *SubprocessRunner) Build(t *testing.T) string {
 	t.Helper()
 	r.once.Do(func() {
+		if os.Getenv(PrebuiltTestBinaryEnv) != "" {
+			bin, err := bazeltest.RunfileEnv(PrebuiltTestBinaryEnv)
+			if err != nil {
+				r.buildErr = fmt.Errorf("prebuilt test binary: %w", err)
+				return
+			}
+			t.Logf("SubprocessRunner: using prebuilt test binary %s (%s) for %s", bin, PrebuiltTestBinaryEnv, r.pkg)
+			r.testBin = bin
+			return
+		}
 		r.testBin = filepath.Join(t.TempDir(), "integration.test")
 		t.Logf("SubprocessRunner: building test binary: go test -tags %s -c -o %s %s", r.tags, r.testBin, r.pkg)
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		build := exec.CommandContext(ctx, "go", "test",
+		goBin, err := goBinary()
+		if err != nil {
+			r.buildErr = fmt.Errorf("failed to build test binary: %w", err)
+			return
+		}
+		build := exec.CommandContext(ctx, goBin, "test",
 			"-tags", r.tags,
 			"-c",
 			"-o", r.testBin,
@@ -136,7 +183,7 @@ func (r *SubprocessRunner) Build(t *testing.T) string {
 			r.buildErr = fmt.Errorf("failed to build test binary: %w\nstderr: %s\nstdout: %s", err, stderr.String(), stdout.String())
 			return
 		}
-		if err := os.Chmod(r.testBin, 0700); err != nil {
+		if err := os.Chmod(r.testBin, 0700); err != nil { //nolint:gosec // G302: the test binary must be executable
 			r.buildErr = fmt.Errorf("failed to chmod test binary: %w", err)
 		}
 	})
@@ -302,7 +349,7 @@ func WaitForPort(t *testing.T, host string, port int, timeout time.Duration) {
 
 // ReadPIDFile reads and parses a PID file, returning 0 if missing or corrupt.
 func ReadPIDFile(path string) int {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: a state file path the harness itself derived
 	if err != nil {
 		return 0
 	}
@@ -315,7 +362,7 @@ func ReadPIDFile(path string) int {
 
 // ReadPortFile reads and parses a port file, returning 0 if missing or corrupt.
 func ReadPortFile(path string) int {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: a state file path the harness itself derived
 	if err != nil {
 		return 0
 	}

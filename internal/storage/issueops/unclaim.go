@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -59,7 +60,7 @@ func UnclaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string, for
 	// spelling (ga-5ksp5) is not refused as a stranger.
 	if !force && !actorMatches(oldIssue.Assignee, actor) {
 		return fmt.Errorf("%w: %s is held by %s; coordinate with the holder — pass --force only if their claim is abandoned (crashed agent, expired lease)",
-			storage.ErrNotOwner, id, oldIssue.Assignee)
+			storage.ErrNotOwner, id, remedy.PrintedValue(oldIssue.Assignee))
 	}
 
 	now := time.Now().UTC()
@@ -101,7 +102,7 @@ func UnclaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string, for
 		}
 		if !force && !actorMatches(current.Assignee, actor) {
 			return fmt.Errorf("%w: %s is held by %s; coordinate with the holder — pass --force only if their claim is abandoned (crashed agent, expired lease)",
-				storage.ErrNotOwner, id, current.Assignee)
+				storage.ErrNotOwner, id, remedy.PrintedValue(current.Assignee))
 		}
 		return fmt.Errorf("failed to unclaim issue %s: no matching row", id)
 	}

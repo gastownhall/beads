@@ -62,12 +62,52 @@ func TestInitSchemaPreviewMissingDatabaseFailsClosed(t *testing.T) {
 }
 
 // TestApplyProviderOptions keeps the option plumbing honest: the ordinary
-// callers pass nothing and must stay on the mutating open.
+// callers pass nothing and must stay on the mutating open, and only an open
+// that asks for it is treated as proxied-server mode.
 func TestApplyProviderOptions(t *testing.T) {
-	if got := applyProviderOptions(nil); got.preview {
+	got := applyProviderOptions(nil)
+	if got.preview {
 		t.Fatal("applyProviderOptions(nil).preview = true, want false")
+	}
+	if got.proxiedServerMode {
+		t.Fatal("applyProviderOptions(nil).proxiedServerMode = true, want false")
 	}
 	if got := applyProviderOptions([]ProviderOption{WithPreview()}); !got.preview {
 		t.Fatal("applyProviderOptions(WithPreview()).preview = false, want true")
+	}
+	// The proxied marker changes what a refusal says, not how the open
+	// behaves, so it must not switch on either open posture as well.
+	if got := applyProviderOptions([]ProviderOption{WithProxiedServerMode()}); !got.proxiedServerMode || got.preview || got.readOnly {
+		t.Fatalf("applyProviderOptions(WithProxiedServerMode()) = %+v, want only proxiedServerMode set", got)
+	}
+	// Rotation is off unless the caller says it owns the server log.
+	if applyProviderOptions(nil).rotateServerLog {
+		t.Fatal("applyProviderOptions(nil).rotateServerLog = true, want false")
+	}
+	if got := applyProviderOptions([]ProviderOption{WithServerLogRotation()}); got != (providerOptions{rotateServerLog: true}) {
+		t.Fatalf("applyProviderOptions(WithServerLogRotation()) = %+v, want only rotateServerLog set", got)
+	}
+}
+
+// TestOpensForBeadWrites pins which postures events-journal activation treats
+// as writing beads: only the ordinary open. A preview, a read-only open and a
+// working-set reconcile write none, so a journal table the journal cannot run
+// against must not refuse them — and the reconcile marker must not change the
+// open itself.
+func TestOpensForBeadWrites(t *testing.T) {
+	if !OpensForBeadWrites() {
+		t.Fatal("OpensForBeadWrites() = false, want true for the ordinary open")
+	}
+	for name, opt := range map[string]ProviderOption{
+		"preview":               WithPreview(),
+		"read-only":             WithReadOnly(),
+		"working-set reconcile": WithWorkingSetReconcile(),
+	} {
+		if OpensForBeadWrites(opt) {
+			t.Errorf("OpensForBeadWrites(%s) = true, want false", name)
+		}
+	}
+	if got := applyProviderOptions([]ProviderOption{WithWorkingSetReconcile()}); got.preview || got.readOnly {
+		t.Errorf("WithWorkingSetReconcile changed the open itself: %+v", got)
 	}
 }

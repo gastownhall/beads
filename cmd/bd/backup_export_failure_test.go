@@ -63,13 +63,10 @@ func TestRunBackupExport_PersistsThrottleOnFailure(t *testing.T) {
 		t.Fatalf("precondition: expected zero timestamp, got %v", st.Timestamp)
 	}
 
-	oldStore := store
 	fake := &failingBackupStore{commit: "deadbeef", backupErr: errors.New("sync to backup: server too busy")}
-	store = fake
-	t.Cleanup(func() { store = oldStore })
 
 	before := time.Now().UTC()
-	if _, err := runBackupExport(context.Background(), true); err == nil {
+	if _, err := runBackupExport(context.Background(), directLocalBackup{store: fake}, true); err == nil {
 		t.Fatal("expected runBackupExport to return the sync error, got nil")
 	}
 	if fake.backupCalls != 1 {

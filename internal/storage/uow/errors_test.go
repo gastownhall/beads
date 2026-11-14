@@ -59,6 +59,37 @@ func TestIsDatabaseNotFoundError(t *testing.T) {
 	}
 }
 
+// The DoltStore's table for its twin classifier, plus the prefix boundary:
+// commitStagedTables replays exactly what this accepts, so a false positive
+// re-runs a Dolt commit that failed for another reason.
+func TestIsDoltAutocommitRollbackError(t *testing.T) {
+	exact := &mysql.MySQLError{
+		Number:  1105,
+		Message: "Merge conflict detected, @autocommit transaction rolled back",
+	}
+
+	for _, tt := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "exact typed Dolt rollback", err: fmt.Errorf("dolt commit: %w", exact), want: true},
+		{name: "typed Dolt rollback with recovery guidance", err: &mysql.MySQLError{Number: 1105, Message: exact.Message + ". @autocommit must be disabled"}, want: true},
+		{name: "typed text running on past the message", err: &mysql.MySQLError{Number: 1105, Message: exact.Message + "ward"}, want: false},
+		{name: "untyped matching text", err: errors.New(exact.Error()), want: false},
+		{name: "other typed 1105", err: &mysql.MySQLError{Number: 1105, Message: "Merge conflict detected"}, want: false},
+		{name: "typed connection-like 1105", err: &mysql.MySQLError{Number: 1105, Message: "connection lost while validating commit"}, want: false},
+		{name: "same text wrong code", err: &mysql.MySQLError{Number: 1213, Message: exact.Message}, want: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isDoltAutocommitRollbackError(tt.err); got != tt.want {
+				t.Fatalf("isDoltAutocommitRollbackError(%v) = %t, want %t", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestClassifyUseDatabaseError(t *testing.T) {
 	// The exact server errors observed from dolt 2.1.8 against a credential
 	// granted only one database.

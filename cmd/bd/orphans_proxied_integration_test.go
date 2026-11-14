@@ -4,7 +4,6 @@ package main
 
 import (
 	"encoding/json"
-	"os/exec"
 	"strings"
 	"testing"
 )
@@ -17,7 +16,7 @@ func TestProxiedServerOrphans(t *testing.T) {
 
 	gitCommit := func(t *testing.T, message string) {
 		t.Helper()
-		cmd := exec.Command("git", "commit", "--allow-empty", "-m", message)
+		cmd := gitCommand("commit", "--allow-empty", "-m", message)
 		cmd.Dir = p.dir
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git commit: %v\n%s", err, out)

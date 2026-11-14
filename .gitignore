@@ -261,12 +261,3 @@ tmp/docs/CLI_REFERENCE.md
 /bazel-*
 /.bazelrc.local
 /user.bazelrc
-
-# BEGIN ai-hub projection destinations (generated from config/workspaces.yaml; do not edit; regenerate: make workspace-config in ai-hub)
-/.cursorrules
-/.windsurfrules
-/CODEBUDDY.md
-/GEMINI.md
-/QODER.md
-/opencode.jsonc
-# END ai-hub projection destinations

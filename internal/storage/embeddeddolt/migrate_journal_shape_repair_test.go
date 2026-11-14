@@ -156,6 +156,10 @@ VALUES (?, ?, ?, 'bd-t9ovd', ?, ?, ?)`, s.seq, s.ts, s.op, s.issueJSON, s.depJSO
 // first run must change nothing. SHOW CREATE TABLE before and after is the
 // whole assertion — it carries the column types, the index set, and their
 // order, so any DDL that fired would show up in it.
+//
+// The pass stops right after 0023, so the comparison is 0023's alone: a LATER
+// ignored migration is free to change these tables (ignored/0029 adds
+// uk_wisps_arrival_seq to wisps), and that is not this migration's business.
 func TestEmbeddedIgnoredMigration0023NoopsOnHealthyWorkspace(t *testing.T) {
 	requireEmbedded(t)
 	ctx := t.Context()
@@ -168,10 +172,23 @@ func TestEmbeddedIgnoredMigration0023NoopsOnHealthyWorkspace(t *testing.T) {
 		before[table] = showCreateTable(t, ctx, conn, table)
 	}
 
-	if _, err := schema.MigrateUp(ctx, conn); err != nil {
-		t.Fatalf("MigrateUp on healthy workspace: %v", err)
+	restore := schema.SetMigrateStepFaultHookForTest(func(ctx context.Context, db schema.DBConn, version int) error {
+		if version != migration0023Version {
+			return nil
+		}
+		if v, err := schema.CurrentVersion(ctx, db); err != nil || v != schema.LatestVersion() {
+			return nil
+		}
+		return errStopAfter0023
+	})
+	_, err := schema.MigrateUp(ctx, conn)
+	restore()
+	if !errors.Is(err, errStopAfter0023) {
+		t.Fatalf("MigrateUp on healthy workspace = %v, want the injected stop right after migration 0023", err)
 	}
-	requireIgnoredCursorAtLatest(t, ctx, conn)
+	if got := scalarInt(t, ctx, conn, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations"); got != migration0023Version {
+		t.Fatalf("ignored cursor = %d, want %d", got, migration0023Version)
+	}
 
 	for _, table := range tables {
 		if after := showCreateTable(t, ctx, conn, table); after != before[table] {
@@ -179,6 +196,10 @@ func TestEmbeddedIgnoredMigration0023NoopsOnHealthyWorkspace(t *testing.T) {
 		}
 	}
 }
+
+// errStopAfter0023 aborts the pass right after migration 0023 applies, so a
+// comparison reads 0023's effect and no later migration's.
+var errStopAfter0023 = errors.New("test: stop the ignored pass right after migration 0023")
 
 // TestEmbeddedIgnoredMigration0023NoopsWithoutItsTables covers the third
 // intermediate state 0023 has to survive: neither table present. The column

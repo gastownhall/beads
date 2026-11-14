@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/doltversion"
 )
 
 // TestPrepareDoltCLITransferCommandScrubsGitRoutingEnv proves the dolt child
@@ -17,7 +19,11 @@ func TestPrepareDoltCLITransferCommandScrubsGitRoutingEnv(t *testing.T) {
 	t.Setenv("GIT_WORK_TREE", "/caller/repo")
 	t.Setenv("GIT_INDEX_FILE", "/caller/repo/.git/index")
 
-	cmd, _, cancel := prepareDoltCLITransferCommand(context.Background(), t.TempDir(), nil, false, "push", "origin", "main")
+	stubDoltVersionOnPath(t, doltversion.RequiredMin.String())
+	cmd, _, cancel, err := prepareDoltCLITransferCommand(context.Background(), t.TempDir(), nil, false, "push", "origin", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer cancel()
 
 	visible := map[string]string{}

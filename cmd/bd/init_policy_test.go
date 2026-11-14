@@ -123,6 +123,8 @@ func TestDetectInitRemoteHostConflict(t *testing.T) {
 		},
 		{name: "localhost environment overrides remote config", configHost: "100.111.197.110", envHost: "localhost"},
 		{name: "loopback environment overrides remote config", configHost: "100.111.197.110", envHost: "127.0.0.1"},
+		{name: "IPv6 loopback environment, bare", configHost: "100.111.197.110", envHost: "::1"},
+		{name: "IPv6 loopback environment, bracketed", configHost: "100.111.197.110", envHost: "[::1]"},
 		{
 			name:       "remote environment takes precedence",
 			configHost: "127.0.0.1",

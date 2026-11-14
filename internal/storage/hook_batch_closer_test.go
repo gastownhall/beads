@@ -30,6 +30,33 @@ type batchCloserStore struct {
 
 func (s batchCloserStore) BatchCloser() (issueops.BatchCloser, error) { return s.closer, s.err }
 
+type policyBatchCloserStore struct {
+	batchCloserStore
+	policy BatchClosePolicy
+}
+
+func (s *policyBatchCloserStore) BatchCloserWithPolicy(policy BatchClosePolicy) (issueops.BatchCloser, error) {
+	s.policy = policy
+	return s.BatchCloser()
+}
+
+func TestHookFiringStoreForwardsBatchClosePolicy(t *testing.T) {
+	inner := &fakeBatchCloser{}
+	raw := &policyBatchCloserStore{batchCloserStore: batchCloserStore{closer: inner}}
+	store := &HookFiringStore{inner: raw}
+	closer, err := BatchCloserWithPolicy(store, NewBatchClosePolicy(map[string][]string{"blocked": {"external:p:c"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(raw.policy.CheckClose("blocked", false), ErrCloseBlocked) {
+		t.Fatal("hook wrapper dropped external policy")
+	}
+	hooked, ok := closer.(*hookBatchCloser)
+	if !ok || hooked.inner != inner || hooked.hooks != store {
+		t.Fatalf("policy accessor lost hook layer: %T", closer)
+	}
+}
+
 // TestHookFiringStoreBatchCloserLayersHooksOverInner pins the recursion, for
 // the reason its Lifecycle sibling pins it: delegating would compile, satisfy
 // Storage, and silently stop running every on_close script.

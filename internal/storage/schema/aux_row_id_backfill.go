@@ -459,8 +459,10 @@ func rekeyAuxRowIDsPending(ctx context.Context, db DBConn, mainVersionBefore int
 		wrote = wrote || w
 		if err != nil {
 			// #4380: a table carrying dolthub/dolt#11131 schema-encoding drift
-			// cannot be re-keyed at all — every read of an affected cell panics
-			// server-side, and no SQL write can repair or remove the row. Before
+			// cannot be re-keyed at all — every read of an affected cell fails
+			// inside the storage engine (a recovered panic on older Dolt, a
+			// malformed-adaptive-value error on Dolt 2.6), and no SQL write can
+			// repair or remove the row. Before
 			// this, that aborted the whole MigrateUp pass, which also made the
 			// database unopenable by any rekey-aware binary: the migration is
 			// re-attempted on open, so the panic recurred on every start and the
@@ -512,16 +514,32 @@ func rekeyAuxRowIDsPending(ctx context.Context, db DBConn, mainVersionBefore int
 	return wrote, nil
 }
 
-// isSchemaEncodingDriftErr reports whether err carries the dolthub/dolt#11131
+// isSchemaEncodingDriftErr reports whether err carries a dolthub/dolt#11131
 // schema-encoding-drift signature: a TEXT/LONGTEXT column whose on-disk
 // storage-encoding tag was re-derived without rewriting rows, so decoding a
-// cell reads an address of the wrong width and panics inside the storage
-// engine. The engine recovers it per query and surfaces
-// "Error 1105 (HY000): panic recovered: invalid hash length: 19". Only this
-// class is tolerated by the re-key; every other failure still aborts the pass.
+// cell reads an address of the wrong width and fails inside the storage
+// engine. Only this class is tolerated by the re-key; every other failure
+// still aborts the pass. The engine reports it in one of two ways:
 //
-// Deliberately matched on the bare hash-length phrase, not on ": 19" and not
-// on the "panic recovered" wrapper:
+//   - Dolt <=2.2 (bd 1.3.4) panics in hash.New, recovers it per query and
+//     surfaces "Error 1105 (HY000): panic recovered: invalid hash length: 19".
+//     Dolt 2.6 still raises this for the opposite tag flip (an address-encoded
+//     column holding adaptive bytes), so the phrase stays matched.
+//   - Dolt 2.6 validates the out-of-band adaptive value before hash.New and
+//     returns ErrInvalidAddressLen ("malformed out-of-band adaptive value:
+//     invalid address length: expected 20-byte address, got 19") or, when the
+//     length prefix itself is cut short, ErrTruncatedVarint ("malformed
+//     out-of-band adaptive value: truncated length varint") (#8372).
+//
+// The match is on text, not errors.Is: server mode receives the error as a
+// 1105 plus message over the MySQL wire, embedded mode receives the same text
+// after the driver flattens it into a MySQL error, so the sentinel's identity
+// is gone in both — and importing the engine's store/val package to compare
+// against it would be engine introspection across the storage boundary.
+//
+// Deliberately matched on bare phrases, not on ": 19", not on the "panic
+// recovered" wrapper, and on the shared "malformed out-of-band adaptive value"
+// prefix rather than either full 2.6 sentinel:
 //
 //   - the width varies with the direction of the tag flip — migration 0057
 //     documents this same drift from bd's own side (0048 re-widening an
@@ -530,12 +548,17 @@ func rekeyAuxRowIDsPending(ctx context.Context, db DBConn, mainVersionBefore int
 //     insert/merge;
 //   - the wrapper is added by the SQL engine, so a path that surfaced the
 //     panic unwrapped would fall through to the abort that leaves affected
-//     databases unopenable — the failure this whole change exists to end.
+//     databases unopenable — the failure this whole change exists to end;
+//   - the prefix covers both 2.6 sentinels (the same drift decoded at a
+//     different corruption point) and nothing else: the engine's caller-misuse
+//     errors ("cannot get address from null/inline adaptive value") do not
+//     carry it and keep aborting.
 //
 // The cost of the wider match is bounded: a non-#11131 "invalid hash length"
-// (dolt raises it from hash.New generally) means storage this re-key cannot
-// read either, so skipping the table and recording it is the same correct
-// answer. The pass still aborts on every error that does not carry the phrase.
+// (dolt raises it from hash.New generally) or "malformed out-of-band adaptive
+// value" means storage this re-key cannot read either, so skipping the table
+// and recording it is the same correct answer. The pass still aborts on every
+// error that carries neither phrase.
 //
 // What it cannot catch: the same drift also produces cells that decode to
 // garbage instead of panicking (#4380 reports ~10% of affected cells returning
@@ -547,7 +570,9 @@ func isSchemaEncodingDriftErr(err error) bool {
 	if err == nil {
 		return false
 	}
-	return strings.Contains(strings.ToLower(err.Error()), "invalid hash length")
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "invalid hash length") ||
+		strings.Contains(msg, "malformed out-of-band adaptive value")
 }
 
 // rekeyAuxRowTable re-derives the ids of one table. The whole table is grouped

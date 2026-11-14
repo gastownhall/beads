@@ -112,9 +112,10 @@ func (s *testSuite) TestConfig_ReadFailuresAreNotMissing() {
 				s.Require().Error(roleErr)
 				s.ErrorAs(roleErr, &exitErr)
 			} else if tc.name == "invalid_routing_boolean" {
-				_, found, roleErr := domain.NewGitUseCase(s.tmpDir, s.repo).BeadsRole(s.Ctx())
+				role, found, roleErr := domain.NewGitUseCase(s.tmpDir, s.repo).BeadsRole(s.Ctx())
 				s.Require().NoError(roleErr)
 				s.False(found)
+				s.Empty(role)
 			}
 		})
 	}
@@ -347,7 +348,7 @@ func TestRoleConfigIgnoresInheritedGitRouting(t *testing.T) {
 	}
 	runGit := func(t *testing.T, dir string, args ...string) string {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "fixture git %v: %s", args, out)
@@ -440,7 +441,7 @@ func TestRoleConfigKeySpellingTakesScrubbedPath(t *testing.T) {
 	}
 	runGit := func(t *testing.T, dir string, args ...string) string {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "fixture git %v: %s", args, out)
@@ -486,7 +487,7 @@ func TestInitGitRepositoryUsesSelectedDirectory(t *testing.T) {
 	}
 	runGit := func(dir string, args ...string) string {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "fixture git %v: %s", args, out)
@@ -599,7 +600,7 @@ func TestInitGitRepositoryRoleIgnoresInheritedConfigSuppression(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[beads]\n\trole = contributor\n"), 0600))
 	// No local role in the target: the global file is the only place the answer
 	// can come from, so blinding it is visible as a miss.
-	initCmd := exec.Command("git", "init", "--quiet")
+	initCmd := gitCommand("init", "--quiet")
 	initCmd.Dir, initCmd.Env = target, gitenv.ScrubRouting(os.Environ())
 	out, err := initCmd.CombinedOutput()
 	require.NoError(t, err, "fixture git init: %s", out)
@@ -623,4 +624,15 @@ func TestInitGitRepositoryRoleIgnoresInheritedConfigSuppression(t *testing.T) {
 			require.Equal(t, "contributor", role)
 		})
 	}
+}
+
+// noAutoMaintenance keeps a fixture's git commit from spawning the detached
+// "git maintenance run --auto" child whose worktree-prune races the fixture's
+// next "git worktree add" (gastownhall/beads#7314, #7349). Flags ride the
+// command line, never env config: the routing-key scrub drops env config.
+var noAutoMaintenance = []string{"-c", "maintenance.auto=false", "-c", "gc.auto=0"}
+
+// gitCommand builds a git command for a fixture with noAutoMaintenance applied.
+func gitCommand(args ...string) *exec.Cmd {
+	return exec.Command("git", append(append([]string{}, noAutoMaintenance...), args...)...)
 }

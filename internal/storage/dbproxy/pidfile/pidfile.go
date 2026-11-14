@@ -19,9 +19,19 @@ type PidFile struct {
 	Birth       string `json:"birth,omitempty"`
 	RootID      string `json:"root_id,omitempty"`
 	ControlPort int    `json:"control_port,omitempty"`
+	// ControlProto records the control-listener authentication protocol the
+	// proxy answers: ControlProtoIdentMAC for the request-MAC IDENT
+	// handshake. Records written before that handshake existed carry no
+	// marker, which is the positive evidence discovery needs to tell a
+	// pre-upgrade proxy from a current one that is merely refusing a probe.
+	ControlProto int `json:"control_proto,omitempty"`
 }
 
 const SchemaV2 = 2
+
+// ControlProtoIdentMAC is the control-listener protocol in which an IDENT
+// request carries a request MAC instead of the raw secret.
+const ControlProtoIdentMAC = 1
 
 const (
 	KindProxy       = "db-proxy"

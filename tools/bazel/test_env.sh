@@ -14,19 +14,68 @@
 set -euo pipefail
 
 root="$(mktemp -d /tmp/bbt.XXXXXX)"
+# Kill every process that still names this action's private root in its
+# command line: a detached bd db-proxy-child (Setsid, its own process group)
+# and the dolt sql-server it started carry $root in --root, --config or
+# --logpath. When Bazel times a test out it signals the process group, which
+# misses them, and a proxy that dies without an idle timeout leaves its server
+# orphaned on a persistent remote worker. $root is a fresh mktemp path, so the
+# match cannot reach an unrelated process; this wrapper's own command line
+# never contains it, and pkill never matches itself. The '.' in bbt.XXXXXX is
+# escaped because pkill -f takes an extended regex. Two passes: a proxy killed
+# in the middle of the first may have forked a new server. Without pkill, fall
+# back to scanning /proc; without either, skip.
+# shellcheck disable=SC2317 # invoked from the EXIT trap
+reap_root_processes() {
+	local uid pid cmd argv
+	uid="$(id -u 2>/dev/null)" || return 0
+	if command -v pkill >/dev/null 2>&1; then
+		local pattern="${root//./\\.}/"
+		pkill -KILL -U "$uid" -f -- "$pattern" 2>/dev/null || true
+		pkill -KILL -U "$uid" -f -- "$pattern" 2>/dev/null || true
+	elif [[ -d /proc/self ]]; then
+		for _ in 1 2; do
+			for cmd in /proc/[0-9]*/cmdline; do
+				pid="${cmd#/proc/}"
+				pid="${pid%/cmdline}"
+				[[ "$pid" == "$$" || "$pid" == "$BASHPID" ]] && continue
+				argv="$(tr '\0' ' ' <"$cmd" 2>/dev/null)" || continue
+				if [[ "$argv" == *"$root/"* ]]; then
+					kill -KILL "$pid" 2>/dev/null || true
+				fi
+			done
+		done
+	fi
+	return 0
+}
 # Cleanup must never change the test's exit status: a child the test left
 # running (a detached bd or a Dolt server shutting down) can still be writing
 # when rm runs, and Bazel only reaps it after this wrapper exits.
-trap 'chmod -R u+w "$root" 2>/dev/null || true; rm -rf "$root" 2>/dev/null || true' EXIT
+trap 'reap_root_processes 2>/dev/null || true; chmod -R u+w "$root" 2>/dev/null || true; rm -rf "$root" 2>/dev/null || true' EXIT
 
 mkdir -p "$root/home" "$root/xdg-config" "$root/dolt-root" "$root/tmp"
 : >"$root/gitconfig"
+# The global git identity of the CI jobs that run `git config --global
+# user.name/user.email` before their tests (PR Risk's server-Dolt and
+# proxied-server jobs): a target mirroring such a job sets
+# BEADS_TEST_GIT_IDENTITY=1 in its env. Everything else keeps pr-core's empty
+# global gitconfig.
+if [[ "${BEADS_TEST_GIT_IDENTITY:-}" == 1 ]]; then
+	printf '[user]\n\tname = CI Bot\n\temail = ci@beads.test\n' >"$root/gitconfig"
+fi
 # Dolt identity, as beads_test_env_enter sets with `dolt config --global`:
 # tests that shell out to dolt commit need an author. Written directly so the
-# wrapper does not depend on a dolt binary.
+# wrapper does not depend on a dolt binary. The two *.disabled keys stop every
+# dolt command from checking for a newer release and from sending usage
+# events over the network: calls a hermetic test must not depend on (they
+# change no behavior, only drop a "newer version available" stderr line).
+# They do not stop dolt from forking a detached `dolt send-metrics` child on
+# exit, which outlives the command and re-creates $DOLT_ROOT_PATH/.dolt under
+# a test that already removed it; DOLT_DISABLE_EVENT_FLUSH does.
 mkdir -p "$root/dolt-root/.dolt"
-printf '%s\n' '{"user.email":"test@beads.local","user.name":"beads-test"}' \
+printf '%s\n' '{"user.email":"test@beads.local","user.name":"beads-test","metrics.disabled":"true","versioncheck.disabled":"true"}' \
 	>"$root/dolt-root/.dolt/config_global.json"
+export DOLT_DISABLE_EVENT_FLUSH=1
 
 export HOME="$root/home"
 export USERPROFILE="$root/home"

@@ -16,10 +16,11 @@ import (
 // plane (bd-aq0ql). The worker contract is the exit code (workers call
 // heartbeat every ~90s and only check rc), the --json success shape is
 // {"id","status":"heartbeat","owner"}, and — the bd-lrgn1 invariant — a
-// heartbeat mints exactly ZERO Dolt commits: the lease write lands in the
+// refresh mints exactly ZERO Dolt commits: the lease write lands in the
 // dolt_ignored leases table via the SQL-only ephemeral commit, with the same
 // timestamps/format classic `bd reclaim` staleness semantics consume (the
-// SQL body is literally issueops.HeartbeatIssueInTx in both modes).
+// SQL body is literally issueops.HeartbeatIssueInTx in both modes). A re-arm
+// is recorded as a mutation and mints exactly one (rearms_hand_doled_claim).
 func TestProxiedServerHeartbeat(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
@@ -209,9 +210,9 @@ func TestProxiedServerHeartbeat(t *testing.T) {
 	t.Run("rearms_hand_doled_claim", func(t *testing.T) {
 		// A claim hand-doled through a generic update never arms a lease
 		// (bd-9hpgf); the holder's first heartbeat opts into lease semantics.
-		// This is the INSERT path of the lease write, so it doubles as the
-		// zero-Dolt-commit proof for UpsertLeaseInTx under the ephemeral
-		// commit.
+		// That re-arm is recorded as a mutation (row_lock reminted so it
+		// collides with a racing release or close), so it mints exactly one
+		// Dolt commit; the refresh after it mints none.
 		issue := bdProxiedCreate(t, bd, p.dir, "Hand-doled claim", "--type", "task")
 		bdProxiedUpdate(t, bd, p.dir, issue.ID, "--assignee", "hand-worker", "--status", "in_progress")
 		if _, _, _, ok := leaseRow(t, issue.ID); ok {
@@ -223,8 +224,9 @@ func TestProxiedServerHeartbeat(t *testing.T) {
 		if err != nil {
 			t.Fatalf("re-arm heartbeat: %v\nstdout:\n%s\nstderr:\n%s", err, out, stderr)
 		}
-		if commitsAfter := doltCommits(t); commitsAfter != commitsBefore {
-			t.Errorf("re-arm heartbeat minted Dolt commits: %d -> %d", commitsBefore, commitsAfter)
+		commitsAfter := doltCommits(t)
+		if commitsAfter != commitsBefore+1 {
+			t.Errorf("re-arm heartbeat Dolt commits: %d -> %d, want exactly one (a re-arm is recorded as a mutation)", commitsBefore, commitsAfter)
 		}
 		holder, expires, _, ok := leaseRow(t, issue.ID)
 		if !ok || holder != "hand-worker" {
@@ -232,6 +234,13 @@ func TestProxiedServerHeartbeat(t *testing.T) {
 		}
 		if !expires.After(time.Now().UTC()) {
 			t.Errorf("re-armed lease_expires_at should be in the future, got %v", expires)
+		}
+		refreshOut, refreshErrOut, refreshErr := bdProxiedRunBuffers(t, bd, p.dir, "--actor", "hand-worker", "heartbeat", issue.ID)
+		if refreshErr != nil {
+			t.Fatalf("refresh heartbeat after the re-arm: %v\nstdout:\n%s\nstderr:\n%s", refreshErr, refreshOut, refreshErrOut)
+		}
+		if commitsRefresh := doltCommits(t); commitsRefresh != commitsAfter {
+			t.Errorf("refresh heartbeat minted Dolt commits: %d -> %d, want none", commitsAfter, commitsRefresh)
 		}
 	})
 }

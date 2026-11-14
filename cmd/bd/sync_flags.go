@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // registerSelectiveSyncFlags adds --issues and --parent flags to a tracker sync command.
@@ -43,4 +46,36 @@ func applySelectiveSyncFlags(cmd *cobra.Command, opts *tracker.SyncOptions, push
 		opts.ParentID = parentID
 	}
 	return nil
+}
+
+// buildSyncDescendantSet resolves opts.ParentID into the set of issue IDs
+// --parent selects: the parent itself plus every bead reachable from it
+// through parent-child dependency edges. A nil result means no subtree scope
+// was requested; callers filtering by it must treat a non-nil set as a
+// membership requirement.
+//
+// Shared by the GitLab and GitHub relationship passes so a subtree-scoped push
+// and its relationship pass agree on what "in scope" means. The engine has its
+// own copy for the content push (Engine.buildDescendantSet,
+// internal/tracker/engine.go); these two must stay in agreement. The ADO
+// relationship pass is not converted: pushADOLinks (ado.go) takes no sync
+// options, so --parent and --issues do not narrow the ADO relations it writes.
+func buildSyncDescendantSet(ctx context.Context, st storage.Storage, parentID string) (map[string]bool, error) {
+	result := map[string]bool{parentID: true}
+	queue := []string{parentID}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		dependents, err := st.GetDependentsWithMetadata(ctx, current)
+		if err != nil {
+			return nil, fmt.Errorf("getting dependents of %s: %w", current, err)
+		}
+		for _, dep := range dependents {
+			if dep.DependencyType == types.DepParentChild && !result[dep.Issue.ID] {
+				result[dep.Issue.ID] = true
+				queue = append(queue, dep.Issue.ID)
+			}
+		}
+	}
+	return result, nil
 }

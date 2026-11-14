@@ -34,8 +34,6 @@ func TestConcurrencyMultiProcess(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), timeout)
 	defer cancel()
 
-	modRoot := mustFindModuleRoot(t)
-
 	// All subprocesses share one directory to stress filesystem locking.
 	sharedDir := filepath.Join(t.TempDir(), "embeddeddolt-test")
 	if err := os.MkdirAll(sharedDir, 0o755); err != nil {
@@ -81,7 +79,9 @@ func TestConcurrencyMultiProcess(t *testing.T) {
 			"-o", testBin,
 			"./internal/storage/embeddeddolt/",
 		)
-		build.Dir = modRoot
+		// Only this build needs the module root: a pre-built binary (PR
+		// Risk's, or Bazel's, whose runfiles hold no go.mod) runs anywhere.
+		build.Dir = mustFindModuleRoot(t)
 		build.Env = append(os.Environ(), "CGO_ENABLED=1")
 		if out, err := build.CombinedOutput(); err != nil {
 			t.Fatalf("build test binary: %v\n%s", err, string(out))

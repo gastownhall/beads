@@ -16,6 +16,21 @@
 // or ask a server for it; a release cut mid-slice never advertises an operation
 // that does not work.
 //
+// Every registration on the router is one entry of s.mounts() (server.go): a
+// route table row, the dispatcher the custom-method rows share, or the
+// catch-all, and nothing in this package mounts or serves a handler any other
+// way (TestNothingIsMountedOutsideTheMountTable names the shapes it rules
+// out). handler() puts the Host policy in front of the whole router, and
+// TestEveryMountedHandlerRunsTheRequestPipeline holds every mount to that
+// policy and to the posture its rows declare: the bearer credential, the
+// Config.RequestContext hook, the project stamp, the wire-revision floor and
+// a database slot, in that order. It holds each stage for a request that
+// presents nothing, and for one that got past the stages in front of it, on a
+// server that configures any combination of them: a valid credential, a hook
+// that hands the request on, a matching stamp, the current wire revision. It
+// holds the Host policy with none of those configured and with all of them.
+// A new surface is served by adding mounts there, never beside them.
+//
 // Two rows answer from the process itself and touch no database (GET /healthz
 // and GET /v0/beads/context); they carry bypassSemaphore for that reason, and
 // nothing else may.

@@ -11,7 +11,117 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
+
+// TestProxyMaintenanceAllowsTheSharedConsentVerb pins the capability facts the
+// #6575 proxied data-behind guidance is written against: the consent command
+// that guidance prescribes is NOT refused at the proxied front door, while the
+// bare `bd migrate` verb, the `bd dolt pull` remedy and the other refusals the
+// guidance names (`bd dolt push`, `bd conflicts`) are.
+//
+// The capability registry keys on the full command path. It refuses the bare
+// `migrate` verb and `migrate hooks` / `migrate issues` / `migrate sync`, but
+// permits `migrate schema` — so that path passes
+// validateProxyRegistryBeforeProvider and reaches `bd migrate schema`'s own
+// proxied arm, which reports the migration the provider open already applied
+// under this verb's consent.
+//
+// An earlier revision of that guidance asserted the opposite on three runtime
+// surfaces and nothing failed, because no test called the front door with this
+// command. The wording is not cosmetic: forceOrEnvConsent honors `--force`
+// BEFORE the data-behind stop is routed, so an operator told "it is refused
+// here anyway" who types it to confirm takes the exact wedge the stop exists
+// to prevent.
+//
+// The command is resolved from the constant the gate prescribes rather than
+// retyped here, so drift on either side has to face this test.
+func TestProxyMaintenanceAllowsTheSharedConsentVerb(t *testing.T) {
+	oldJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = oldJSON })
+
+	args := strings.Fields(strings.TrimPrefix(schema.SharedConsentCommandForced, "bd "))
+	target, _, err := rootCmd.Find(args)
+	if err != nil || target == rootCmd {
+		t.Fatalf("the gate prescribes %q, which does not resolve to a subcommand: %v",
+			schema.SharedConsentCommandForced, err)
+	}
+	if path := commandRegistryPath(target); path != "migrate schema" {
+		t.Fatalf("prescribed consent command resolves to path %q, want %q", path, "migrate schema")
+	}
+
+	find := func(t *testing.T, args ...string) *cobra.Command {
+		t.Helper()
+		cmd, _, err := rootCmd.Find(args)
+		if err != nil || cmd == rootCmd {
+			t.Fatalf("bd %s does not resolve: %v", strings.Join(args, " "), err)
+		}
+		return cmd
+	}
+	bareMigrate := find(t, "migrate")
+	doltPull := find(t, "dolt", "pull")
+	doltPush := find(t, "dolt", "push")
+	// `conflicts` itself is a parent group that cobra answers with help before
+	// any gate runs, so the refusal the guidance relies on lives on its leaves;
+	// resolve is the one a diverged pull's conflicts would need.
+	conflictsResolve := find(t, "conflicts", "resolve")
+
+	for _, topology := range []ProxyTopology{
+		ProxyTopologyManagedLocal, ProxyTopologyExternalTCP,
+		ProxyTopologyExternalUnix, ProxyTopologyTeamServer,
+	} {
+		t.Run(string(topology), func(t *testing.T) {
+			var allowErr error
+			out := captureStdout(t, func() error {
+				allowErr = validateProxyRegistryBeforeProvider(target, topology)
+				if allowErr == nil {
+					allowErr = validateProxyCapabilitiesBeforeProvider(target)
+				}
+				return nil
+			})
+			if allowErr != nil {
+				t.Errorf("%q is refused before the provider (%v), but the #6575 proxied data-behind guidance tells the operator it can be run from this workspace",
+					schema.SharedConsentCommandForced, allowErr)
+			}
+			if out != "" {
+				t.Errorf("a non-refusal still emitted a typed error: %s", out)
+			}
+
+			// The counterfactuals, so "only the bare `bd migrate` verb is
+			// refused here" and "the pull cannot be run from here" are claims
+			// and not vacuous ones. The push and conflicts rows hold the rest
+			// of the refusal list the proxied body recites: `dolt push` is
+			// refused as unimplemented, the class of row that flips to allowed
+			// once a route lands (as `dolt commit`'s did), and the body would
+			// then name a refusal that no longer exists.
+			for _, tc := range []struct {
+				cmd  *cobra.Command
+				code string
+			}{
+				{bareMigrate, "proxy.migrate.unsupported"},
+				{doltPull, "proxy.dolt_pull.unsupported"},
+				{doltPush, "proxy.dolt_push.unsupported"},
+				{conflictsResolve, "proxy.conflicts.unsupported"},
+			} {
+				var refuseErr error
+				refusal := captureStdout(t, func() error {
+					refuseErr = validateProxyRegistryBeforeProvider(tc.cmd, topology)
+					return nil
+				})
+				if refuseErr == nil {
+					t.Errorf("bd %s is no longer refused in proxied-server mode; the data-behind guidance says it is",
+						commandRegistryPath(tc.cmd))
+					continue
+				}
+				if !strings.Contains(refusal, `"code": "`+tc.code+`"`) {
+					t.Errorf("bd %s refusal = %q, want %s", commandRegistryPath(tc.cmd), refusal, tc.code)
+				}
+			}
+		})
+	}
+}
 
 func TestProxyCapabilityMatrix(t *testing.T) {
 	for _, capability := range []ProxyCapability{ProxyCapReadonly, ProxyCapMaxRows} {
@@ -470,7 +580,7 @@ func TestProxyCapabilityCommandRows(t *testing.T) {
 		{"ready", "--max-rows", ProxyOutcomeRefused},
 		{"graph", "--max-rows", ProxyOutcomeRefused},
 		{"find-duplicates", "--max-rows", ProxyOutcomeRefused},
-		{"show", "--watch", ProxyOutcomeRefused},
+		{"show", "--watch", ProxyOutcomeHonored},
 		{"list", "--watch", ProxyOutcomeHonored},
 	}
 	for _, topology := range []ProxyTopology{ProxyTopologyManagedLocal, ProxyTopologyExternalTCP, ProxyTopologyExternalUnix} {
@@ -634,21 +744,21 @@ func TestProxyMaintenanceRefusalLeavesFilesUntouched(t *testing.T) {
 	}
 }
 
-// newWatchShowCommand builds `bd show --watch`. The root matters: the front
-// door keys on a command's path below its root, so a parentless command has no
-// path and matches no rule — which is how a test tree can report success for a
-// refusal that never fired.
-func newWatchShowCommand(t *testing.T) *cobra.Command {
+// newProxyFrontDoorCommand builds `bd <use> --<flag>` under a real root. The
+// root matters: the front door keys on a command's path below its root, so a
+// parentless command has no path and matches no rule — which is how a test
+// tree can report success for a refusal that never fired.
+func newProxyFrontDoorCommand(t *testing.T, use, flag string) *cobra.Command {
 	t.Helper()
 	root := &cobra.Command{Use: "bd"}
-	cmd := &cobra.Command{Use: "show"}
-	cmd.Flags().Bool("watch", false, "")
+	cmd := &cobra.Command{Use: use}
+	cmd.Flags().Bool(flag, false, "")
 	root.AddCommand(cmd)
-	if err := cmd.Flags().Set("watch", "true"); err != nil {
+	if err := cmd.Flags().Set(flag, "true"); err != nil {
 		t.Fatal(err)
 	}
-	if got := commandRegistryPath(cmd); got != "show" {
-		t.Fatalf("test command path = %q, want %q", got, "show")
+	if got := commandRegistryPath(cmd); got != use {
+		t.Fatalf("test command path = %q, want %q", got, use)
 	}
 	return cmd
 }
@@ -657,9 +767,9 @@ func TestProxyCapabilityRefusalFrontDoorTextBeforeProvider(t *testing.T) {
 	oldJSON := jsonOutput
 	jsonOutput = false
 	t.Cleanup(func() { jsonOutput = oldJSON })
-	cmd := newWatchShowCommand(t)
+	cmd := newProxyFrontDoorCommand(t, "create", "repo")
 	got := captureStderr(t, func() { _ = validateProxyCapabilitiesBeforeProvider(cmd) })
-	if !strings.Contains(got, "watch mode not supported in proxied-server mode") {
+	if !strings.Contains(got, "--repo is not supported with --proxied-server") {
 		t.Fatalf("text refusal = %q", got)
 	}
 }
@@ -668,13 +778,34 @@ func TestProxyCapabilityRefusalFrontDoorJSONIncludesCode(t *testing.T) {
 	oldJSON := jsonOutput
 	jsonOutput = true
 	t.Cleanup(func() { jsonOutput = oldJSON })
-	cmd := newWatchShowCommand(t)
+	cmd := newProxyFrontDoorCommand(t, "create", "repo")
 	out := captureStdout(t, func() error {
 		_ = validateProxyCapabilitiesBeforeProvider(cmd)
 		return nil
 	})
-	if !strings.Contains(out, `"code": "proxy.watch.unsupported"`) {
+	if !strings.Contains(out, `"code": "proxy.repo.unsupported"`) {
 		t.Fatalf("JSON refusal = %q", out)
+	}
+}
+
+// TestProxyFrontDoorAdmitsShowWatch pins that `bd show --watch` reaches the
+// proxied provider. It used to be refused here with proxy.watch.unsupported,
+// although the provider can answer the poll exactly as `list --watch` does.
+func TestProxyFrontDoorAdmitsShowWatch(t *testing.T) {
+	oldJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = oldJSON })
+	cmd := newProxyFrontDoorCommand(t, "show", "watch")
+	var err error
+	out := captureStdout(t, func() error {
+		err = validateProxyCapabilitiesBeforeProvider(cmd)
+		return nil
+	})
+	if err != nil || strings.Contains(out, "proxy.watch.unsupported") {
+		t.Fatalf("front door refused show --watch: err=%v out=%q", err, out)
+	}
+	if err := AssertProxyCommandCapability("show", ProxyModeProxied, ProxyCapWatch); err != nil {
+		t.Fatalf("show --watch capability refused: %v", err)
 	}
 }
 

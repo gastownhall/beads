@@ -260,7 +260,7 @@ func readyRoleRequest(in readyInput) issueops.ReadyRequest {
 // claimNextRequest is `bd ready --claim`'s request to the ReadyClaimer role:
 // the shared ready question above, plus the claimant.
 func claimNextRequest(in readyInput) issueops.ClaimNextRequest {
-	return issueops.ClaimNextRequest{Actor: actor, Filter: readyRoleRequest(in)}
+	return issueops.ClaimNextRequest{Actor: currentActor(), Filter: readyRoleRequest(in)}
 }
 
 // briefModeConflict reports the usage error for a --brief combination that no

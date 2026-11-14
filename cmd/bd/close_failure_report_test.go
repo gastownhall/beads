@@ -279,3 +279,109 @@ func TestCloseProxiedFailuresKeepPolicyRefusalsAndTypedOrder(t *testing.T) {
 		t.Errorf("failures[0].Error = %q, want the display line %q as the fallback", got[0].Error, policyRefusal)
 	}
 }
+
+// closeGuardServedEnvelope stands in for the problem envelope a served refusal
+// arrives in (wire.ProblemError): a message of its own that never repeats the
+// guard's sentence, with the typed refusal reachable only through Unwrap.
+type closeGuardServedEnvelope struct{ inner error }
+
+func (e closeGuardServedEnvelope) Error() string {
+	return "closeIssue: bd serve at http://127.0.0.1:1 answered 409 issue_pinned: this issue is pinned"
+}
+
+func (e closeGuardServedEnvelope) Unwrap() error { return e.inner }
+
+// The close guards are the role's now, so they reach the CLI as typed refusals
+// — and the line a person reads, and the failed[].error a --json consumer
+// reads, must still be the sentence `bd close` printed when they were a CLI
+// pre-read: on both routes, and however far the refusal traveled. Each guard's
+// message already names its subject and its --force hint, so every printer
+// hands it back BARE, with no "Error closing <id>:" prefix and no second hint.
+//
+// The "want" column is transcribed from the pre-read's validators
+// (validation.NotTemplate, NotPinned, AssigneeMatches before the move), so the
+// sentences themselves are pinned, not only their relationship to the typed
+// errors. The bare rows catch the decorating printers; the wrapped rows are
+// the ones that catch the typed printers, which would otherwise hand back the
+// whole chain.
+func TestCloseGuardRefusalsPrintTheGuardSentenceOnEveryRoute(t *testing.T) {
+	guards := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "template",
+			err:  &issueops.TemplateReadOnlyError{IssueID: "gr-1"},
+			want: "cannot modify template gr-1: templates are read-only; use 'bd mol pour' to create a work item",
+		},
+		{
+			name: "pinned",
+			err:  &issueops.PinnedError{IssueID: "gr-1"},
+			want: "cannot modify pinned issue gr-1 (use --force to override)",
+		},
+		{
+			name: "not assignee",
+			err:  &issueops.CloseNotAssigneeError{IssueID: "gr-1", Assignee: "alice", Actor: "bob"},
+			want: `cannot close gr-1: assignee is "alice", actor is "bob"; reclaim or use --force to override`,
+		},
+	}
+	// How the refusal reaches the printer: as the engine minted it (the direct
+	// route), wrapped by the use case and the SQL repository (the proxied route;
+	// see TestCloseProxiedTypedRefusalUnwrapsTheRoleWrappers), or inside a
+	// served problem envelope.
+	travels := []struct {
+		name string
+		wrap func(error) error
+	}{
+		{name: "bare", wrap: func(err error) error { return err }},
+		{name: "wrapped by the role", wrap: func(err error) error {
+			return fmt.Errorf("close gr-1: %w", fmt.Errorf("db: IssueSQLRepository.CloseChecked gr-1: %w", err))
+		}},
+		{name: "in a served envelope", wrap: func(err error) error { return closeGuardServedEnvelope{inner: err} }},
+	}
+	printers := []struct {
+		name  string
+		print func(error) string
+	}{
+		{name: "closeDirectRefusal", print: func(err error) string { return closeDirectRefusal("gr-1", err) }},
+		{name: "closeDirectTypedRefusal", print: closeDirectTypedRefusal},
+		{name: "closeProxiedRefusal", print: func(err error) string { return closeProxiedRefusal("gr-1", err) }},
+		{name: "closeProxiedTypedRefusal", print: closeProxiedTypedRefusal},
+	}
+
+	for _, g := range guards {
+		for _, tr := range travels {
+			for _, p := range printers {
+				t.Run(g.name+"/"+tr.name+"/"+p.name, func(t *testing.T) {
+					if got := p.print(tr.wrap(g.err)); got != g.want {
+						t.Errorf("%s = %q, want the guard's own sentence %q", p.name, got, g.want)
+					}
+				})
+			}
+		}
+	}
+
+	// And through the proxied route's own bookkeeping, which is where the two
+	// printers meet: the stderr line and failed[].error are the same sentence,
+	// because the hint a guard needs is already in it.
+	pinned := guards[1]
+	args := []string{"gr-1"}
+	pre := closeProxiedPreflight{
+		items:         []issueops.BatchCloseItem{{IssueID: "gr-1", Reason: "done"}},
+		itemArgs:      []int{0},
+		before:        map[string]*types.Issue{},
+		errors:        make([]string, len(args)),
+		failureErrors: make([]string, len(args)),
+	}
+	closeProxiedOutcomes(&pre, issueops.CloseBatchResult{
+		Outcomes: []issueops.CloseOutcome{{IssueID: "gr-1", Err: travels[1].wrap(pinned.err)}},
+	})
+	failures := closeProxiedFailures(&pre, args)
+	if len(failures) != 1 || failures[0].Error != pinned.want {
+		t.Errorf("failures = %+v, want one entry whose error is %q", failures, pinned.want)
+	}
+	if pre.errors[0] != pinned.want {
+		t.Errorf("stderr line = %q, want %q", pre.errors[0], pinned.want)
+	}
+}

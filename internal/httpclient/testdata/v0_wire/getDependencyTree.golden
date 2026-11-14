@@ -1,0 +1,21 @@
+=== request 1 of 2: getContext
+GET /v0/beads/context
+Accept: application/json, application/problem+json
+Accept-Encoding: gzip
+Authorization: Bearer <BEADS_HTTP_TOKEN>
+Bd-Project-Id: proj-v0-wire-golden
+Bd-Wire-Revision: 2
+User-Agent: bd-http-backend/v0
+
+=== request 2 of 2: getDependencyTree
+GET /v0/beads/dependencies/tree
+  ?direction=down
+  ?max_depth=3
+  ?root_id=bd-1
+  ?status=open
+Accept: application/json, application/problem+json
+Accept-Encoding: gzip
+Authorization: Bearer <BEADS_HTTP_TOKEN>
+Bd-Project-Id: proj-v0-wire-golden
+Bd-Wire-Revision: 2
+User-Agent: bd-http-backend/v0

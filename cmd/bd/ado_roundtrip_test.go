@@ -259,6 +259,13 @@ func (m *mockADOServer) itemCount() int {
 // container infrastructure. Uses newTestStoreIsolatedDB for per-test DB isolation.
 func adoTestStore(t *testing.T, prefix string) *dolt.DoltStore {
 	t.Helper()
+	// ado.pat is a secret, read from config.yaml or AZURE_DEVOPS_PAT and
+	// never from the database (config.IsYamlOnlyKey), so a SetConfig of it
+	// on the store would leave the tracker without a PAT.
+	t.Setenv("AZURE_DEVOPS_PAT", "test-pat")
+	// The endpoint trust gate needs a workspace to key the pin on and
+	// isolated HOME/XDG to write it into.
+	setupEndpointTrustWorkspaceForTest(t)
 	dbPath := filepath.Join(t.TempDir(), ".beads", "dolt")
 	return newTestStoreIsolatedDB(t, dbPath, prefix)
 }
@@ -277,10 +284,12 @@ func TestADORoundTripCoreFields(t *testing.T) {
 	mock := newMockADOServer(project)
 	server := httptest.NewServer(mock)
 	defer server.Close()
+	// The store-config ado.url is shared configuration; a private source
+	// must confirm the endpoint before the credential goes out.
+	t.Setenv("AZURE_DEVOPS_URL", server.URL)
 
 	// Configure ADO settings in source store
 	for k, v := range map[string]string{
-		"ado.pat":     "test-pat",
 		"ado.url":     server.URL,
 		"ado.project": project,
 	} {
@@ -359,7 +368,6 @@ func TestADORoundTripCoreFields(t *testing.T) {
 	targetStore := adoTestStore(t, "bd")
 
 	for k, v := range map[string]string{
-		"ado.pat":     "test-pat",
 		"ado.url":     server.URL,
 		"ado.project": project,
 	} {
@@ -455,9 +463,12 @@ func TestADORoundTripBlockedStatus(t *testing.T) {
 	mock := newMockADOServer(project)
 	server := httptest.NewServer(mock)
 	defer server.Close()
+	// The store-config ado.url is shared configuration; a private source
+	// must confirm the endpoint before the credential goes out.
+	t.Setenv("AZURE_DEVOPS_URL", server.URL)
 
 	for k, v := range map[string]string{
-		"ado.pat": "test-pat", "ado.url": server.URL,
+		"ado.url":     server.URL,
 		"ado.project": project,
 	} {
 		if err := sourceStore.SetConfig(ctx, k, v); err != nil {
@@ -490,7 +501,7 @@ func TestADORoundTripBlockedStatus(t *testing.T) {
 	// Pull into fresh DB
 	targetStore := adoTestStore(t, "bd")
 	for k, v := range map[string]string{
-		"ado.pat": "test-pat", "ado.url": server.URL,
+		"ado.url":     server.URL,
 		"ado.project": project,
 	} {
 		if err := targetStore.SetConfig(ctx, k, v); err != nil {
@@ -536,9 +547,12 @@ func TestADORoundTripLossyPriority(t *testing.T) {
 	mock := newMockADOServer(project)
 	server := httptest.NewServer(mock)
 	defer server.Close()
+	// The store-config ado.url is shared configuration; a private source
+	// must confirm the endpoint before the credential goes out.
+	t.Setenv("AZURE_DEVOPS_URL", server.URL)
 
 	for k, v := range map[string]string{
-		"ado.pat": "test-pat", "ado.url": server.URL,
+		"ado.url":     server.URL,
 		"ado.project": project,
 	} {
 		if err := sourceStore.SetConfig(ctx, k, v); err != nil {
@@ -573,7 +587,7 @@ func TestADORoundTripLossyPriority(t *testing.T) {
 	// Pull into fresh DB (simulating a different machine)
 	targetStore := adoTestStore(t, "bd")
 	for k, v := range map[string]string{
-		"ado.pat": "test-pat", "ado.url": server.URL,
+		"ado.url":     server.URL,
 		"ado.project": project,
 	} {
 		if err := targetStore.SetConfig(ctx, k, v); err != nil {
@@ -630,9 +644,12 @@ func TestADORoundTripLabels(t *testing.T) {
 	mock := newMockADOServer(project)
 	server := httptest.NewServer(mock)
 	defer server.Close()
+	// The store-config ado.url is shared configuration; a private source
+	// must confirm the endpoint before the credential goes out.
+	t.Setenv("AZURE_DEVOPS_URL", server.URL)
 
 	for k, v := range map[string]string{
-		"ado.pat": "test-pat", "ado.url": server.URL,
+		"ado.url":     server.URL,
 		"ado.project": project,
 	} {
 		if err := sourceStore.SetConfig(ctx, k, v); err != nil {
@@ -665,7 +682,7 @@ func TestADORoundTripLabels(t *testing.T) {
 	// Pull into fresh DB
 	targetStore := adoTestStore(t, "bd")
 	for k, v := range map[string]string{
-		"ado.pat": "test-pat", "ado.url": server.URL,
+		"ado.url":     server.URL,
 		"ado.project": project,
 	} {
 		if err := targetStore.SetConfig(ctx, k, v); err != nil {

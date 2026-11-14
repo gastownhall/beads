@@ -191,6 +191,7 @@ func RemoveJunie() error {
 	fmt.Println("Removing Junie integration...")
 
 	removed := false
+	removedMCP := false
 
 	if err := os.Remove(guidelinesPath); err != nil {
 		if !os.IsNotExist(err) {
@@ -205,11 +206,18 @@ func RemoveJunie() error {
 			return HandleError("failed to remove MCP config: %v", err)
 		}
 	} else {
-		removed = true
+		removed, removedMCP = true, true
 	}
 
-	_ = os.Remove(mcpDir)
-	_ = os.Remove(junieDir)
+	// Only a directory this run took a file out of, .junie/mcp before
+	// .junie, which holds both files, and each only if that left it empty;
+	// never a symlinked one (RemoveEmptyDir).
+	if removedMCP {
+		_ = RemoveEmptyDir(mcpDir)
+	}
+	if removed {
+		_ = RemoveEmptyDir(junieDir)
+	}
 
 	if !removed {
 		fmt.Println("No Junie integration files found")

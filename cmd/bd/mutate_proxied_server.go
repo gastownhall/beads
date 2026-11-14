@@ -54,23 +54,94 @@ func proxiedUpdateIssueFields(ctx context.Context, id, commitMsg string, updates
 		// bd-98s5c: an unguarded assignee update (bd assign via the proxied
 		// server) must not silently overwrite another actor's live claim.
 		if newAssignee, ok := updates["assignee"].(string); ok {
-			if err := validateIssueReassignable(id, issue, actor, newAssignee,
+			if err := validateIssueReassignable(id, issue, currentActor(), newAssignee,
 				uowClaimPoolAliases(ctx, uw), force); err != nil {
 				return err
 			}
 		}
 		if isWisp {
-			return uw.IssueUseCase().UpdateWisp(ctx, issue.ID, updates, actor)
+			return uw.IssueUseCase().UpdateWisp(ctx, issue.ID, updates, currentActor())
 		}
-		return uw.IssueUseCase().UpdateIssue(ctx, issue.ID, updates, actor)
+		return uw.IssueUseCase().UpdateIssue(ctx, issue.ID, updates, currentActor())
 	})
 }
 
-func runAssignProxiedServer(ctx context.Context, args []string, force bool) error {
+// proxiedAssign is bd assign's proxied-server write. A8 (beads#4682) routes
+// the write through issueops.Lifecycle.Update — the same role the direct
+// route's writeOps call uses — instead of the raw
+// proxiedUpdateIssueFields/UpdateIssue path, so --if-revision has a checked
+// write to guard (bd assign had no compare-and-set surface at all before
+// this). The pre-read and the live-claim reassign fence (bd-98s5c) still run
+// first over the same UnitOfWorkProvider surface proxiedMutateIssue always
+// used, rather than the separate issue-query role's accessor, so this verb's
+// capability footprint is unchanged.
+func proxiedAssign(ctx context.Context, id, assignee string, force bool, ifRevision *int64) (*types.Issue, error) {
+	if uowProvider == nil {
+		return nil, fmt.Errorf("proxied-server UOW provider not initialized")
+	}
+	_, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (struct{}, error) {
+		current, _, rerr := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), id)
+		if errors.Is(rerr, storage.ErrNotFound) {
+			// Wrapped, not flattened, so runAssignProxiedServer classifies a
+			// guarded assign that lost to a concurrent delete as
+			// precondition_failed (reportIfRevisionFailure).
+			return struct{}{}, fmt.Errorf("issue %s %w", id, storage.ErrNotFound) // "issue <id> not found", as before
+		}
+		if rerr != nil {
+			return struct{}{}, fmt.Errorf("resolving %s: %w", id, rerr)
+		}
+		// The template guard is the role's, enforced by the Lifecycle.Update
+		// below; runAssignProxiedServer prints its refusal as before.
+		// mc-zndi7.74: skipped when this pre-read is already stale against an
+		// active --if-revision guard, so a lost race reports precondition_failed
+		// from the guarded write below instead of this policy refusal — see
+		// ifRevisionAlreadyStale's doc.
+		if !ifRevisionAlreadyStale(current, ifRevision) {
+			if verr := validateIssueReassignable(id, current, currentActor(), assignee,
+				uowClaimPoolAliases(ctx, uw), force); verr != nil {
+				return struct{}{}, verr
+			}
+		}
+		return struct{}{}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	ops, err := proxiedIssueLifecycle()
+	if err != nil {
+		return nil, err
+	}
+	result, err := runCommandUpdateMutation(ctx, ops, commandUpdateMutation{
+		actor:   currentActor(),
+		issueID: id,
+		patch: issueops.IssuePatch{
+			Assignee: issueops.Field[string]{Set: true, Value: assignee},
+		},
+		force:           force,
+		expectedVersion: ifRevision,
+		provenance:      "bd: assign " + id,
+	})
+	if err != nil {
+		return nil, err
+	}
+	commandDidWrite.Store(true)
+	return result.Issue, nil
+}
+
+func runAssignProxiedServer(ctx context.Context, args []string, force bool, ifRevision *int64) error {
 	id := args[0]
 	assignee := args[1]
-	updated, err := proxiedUpdateIssueFields(ctx, id, "bd: assign "+id, map[string]any{"assignee": assignee}, force)
+	updated, err := proxiedAssign(ctx, id, assignee, force, ifRevision)
 	if err != nil {
+		if ifRevision != nil {
+			if reported, ok := reportIfRevisionFailure("assigning", id, err, ifRevision); ok {
+				return reported
+			}
+		}
+		if refusal, ok := templateReadOnlyRefusal(id, err); ok {
+			err = refusal
+		}
 		return HandleErrorRespectJSON("assign %s: %v", id, err)
 	}
 	if jsonOutput {
@@ -117,9 +188,9 @@ func runNoteProxiedServer(ctx context.Context, id, noteText string) error {
 		combined += noteText
 		updates := map[string]any{"notes": combined}
 		if isWisp {
-			return uw.IssueUseCase().UpdateWisp(ctx, issue.ID, updates, actor)
+			return uw.IssueUseCase().UpdateWisp(ctx, issue.ID, updates, currentActor())
 		}
-		return uw.IssueUseCase().UpdateIssue(ctx, issue.ID, updates, actor)
+		return uw.IssueUseCase().UpdateIssue(ctx, issue.ID, updates, currentActor())
 	})
 	if err != nil {
 		return HandleErrorRespectJSON("note %s: %v", id, err)
@@ -145,10 +216,10 @@ func runNoteProxiedServer(ctx context.Context, id, noteText string) error {
 // UpdateRequest.IssuePlaneOnly stays false, so the role resolves the plane
 // inside its own transaction and there is no boolean here to get backwards.
 //
-// The two reads it still makes are front-door work rather than plumbing.
-// issueops.Reader.Get supplies the issue the template guard needs — the roles
-// have no opinion about templates, and the direct route refuses one — and the
-// role takes an exact id by contract, which Get's issue-then-wisp lookup is.
+// The read it still makes is front-door work rather than plumbing: the role
+// takes an exact id by contract, and issueops.Reader.Get's issue-then-wisp
+// lookup supplies one. The template guard is the role's: Lifecycle.Update
+// refuses a template inside its own transaction.
 // The label arrives already normalized: tag.go does that before choosing a
 // route, so this path and the direct one cannot disagree about what was stored.
 func runTagProxiedServer(ctx context.Context, id, label string) error {
@@ -163,9 +234,8 @@ func runTagProxiedServer(ctx context.Context, id, label string) error {
 	if err != nil {
 		return HandleErrorRespectJSON("tag %s: resolving %s: %v", id, id, err)
 	}
-	if verr := validateIssueUpdatable(id, &details.Issue); verr != nil {
-		return HandleErrorRespectJSON("tag %s: %v", id, verr)
-	}
+	// The template guard is the role's, enforced by the Lifecycle.Update
+	// below, whose refusal prints as this route always printed it.
 
 	lifecycle, err := openIssueLifecycle()
 	if err != nil {
@@ -179,11 +249,14 @@ func runTagProxiedServer(ctx context.Context, id, label string) error {
 		return HandleErrorRespectJSON("tag %s: %v", id, err)
 	}
 	result, err := lifecycle.Update(ctx, issueops.UpdateRequest{
-		Actor:   actor,
+		Actor:   currentActor(),
 		IssueID: details.ID,
 		Patch:   issueops.IssuePatch{Labels: issueops.LabelPatch{Add: []string{label}}},
 	})
 	if err != nil {
+		if refusal, ok := templateReadOnlyRefusal(id, err); ok {
+			err = refusal
+		}
 		return HandleErrorRespectJSON("tag %s: %v", id, err)
 	}
 	commandDidWrite.Store(true)

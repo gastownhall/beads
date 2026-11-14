@@ -113,6 +113,18 @@ func TestBatchApplyContract(t *testing.T) {
 	t.Run("NormalizesTheWaitsForGate", func(t *testing.T) {
 		conformance.RunBatchApplyNormalizesTheWaitsForGate(t, ctx, fixture)
 	})
+	t.Run("StampsSpawnerIDOnlyWhenNamed", func(t *testing.T) {
+		conformance.RunBatchApplyStampsSpawnerIDOnlyWhenNamed(t, ctx, fixture)
+	})
+	t.Run("CarriesThreadIDOntoTheStoredEdge", func(t *testing.T) {
+		conformance.RunBatchApplyCarriesThreadIDOntoTheStoredEdge(t, ctx, fixture)
+	})
+	t.Run("CarriesThreadIDOntoAnExistingEdge", func(t *testing.T) {
+		conformance.RunBatchApplyCarriesThreadIDOntoAnExistingEdge(t, ctx, fixture)
+	})
+	t.Run("RefusesAThreadIDLongerThanItsColumn", func(t *testing.T) {
+		conformance.RunBatchApplyRefusesAThreadIDLongerThanItsColumn(t, ctx, fixture)
+	})
 	t.Run("SplicesAForwardMetadataRef", func(t *testing.T) {
 		conformance.RunBatchApplySplicesAForwardMetadataRef(t, ctx, fixture)
 	})
@@ -132,6 +144,38 @@ func TestBatchApplyContract(t *testing.T) {
 		conformance.RunBatchApplyLandsAnIdempotencyRecordWithItsWork(t, ctx, fixture)
 	})
 	t.Run("BoundsTheItemCount", func(t *testing.T) {
+		if raceEnabled {
+			// Under -race this subtest alone measured 903-945s (the
+			// in-process Dolt engine's own goroutine/lock machinery runs
+			// inside this instrumented binary; see race_detector_on_test.go),
+			// which twice pushed shard 4/20 over its 19-minute budget. The
+			// true production boundary (MaxApplyBatchItems accepted, one
+			// more refused) is NOT what this shrinks: see
+			// RunBatchApplyBoundsTheItemCountAtScale's doc comment — that
+			// boundary is independently pinned, for real and
+			// sub-millisecond, by internal/storage/batch_apply_test.go's
+			// TestPlanApplyBatchAcceptsTheBoundary (the SAME
+			// storage.PlanApplyBatch every backend calls before touching
+			// storage at all), and the refusing half below still runs at
+			// the true MaxApplyBatchItems+1 count because that half never
+			// reaches a transaction either way. Only the "at bound" half's
+			// REAL applied count drops here, from 1000 to 150 — still
+			// large enough to prove this backend's own write body (the
+			// version-commit-published-after-the-tx wrapper that is
+			// unique to this backend) does not drop, double or truncate a
+			// big accepted batch. The SAME inner write body
+			// (internal/storage/issueops.ApplyBatchInTx) this backend
+			// shares with internal/storage/dolt still gets a real, full
+			// 1000-item run there, non-race
+			// (TestBatchApplyContract/BoundsTheItemCount on the
+			// server-Dolt tier's dolt_race_off build) — unconditionally on
+			// merge_group/push, conditionally on PRs (full_embedded gating
+			// in .github/scripts/ci-embedded-tier.sh), not "every PR". See
+			// large_batch_apply_measure_test.go's updated note for the
+			// embedded-specific coverage this leaves.
+			conformance.RunBatchApplyBoundsTheItemCountAtScale(t, ctx, fixture, 150)
+			return
+		}
 		conformance.RunBatchApplyBoundsTheItemCount(t, ctx, fixture)
 	})
 	t.Run("ReplayMintsANewSetOfRows", func(t *testing.T) {
@@ -142,6 +186,24 @@ func TestBatchApplyContract(t *testing.T) {
 	})
 	t.Run("RefusesAnUnusableRequest", func(t *testing.T) {
 		conformance.RunBatchApplyRefusesAnUnusableRequest(t, ctx, fixture)
+	})
+	t.Run("UpdateItemsRefuseATemplate", func(t *testing.T) {
+		conformance.RunBatchApplyUpdateItemsRefuseATemplate(t, ctx, fixture)
+	})
+	t.Run("SplicesTheMetadataOfATemplateItCreates", func(t *testing.T) {
+		conformance.RunBatchApplySplicesTheMetadataOfATemplateItCreates(t, ctx, fixture)
+	})
+	t.Run("CloseItemsAnswerToTheCloseGuards", func(t *testing.T) {
+		conformance.RunBatchApplyCloseItemsAnswerToTheCloseGuards(t, ctx, fixture)
+	})
+	t.Run("RefusesADottedChildGatedOnItsOwnParent", func(t *testing.T) {
+		conformance.RunBatchApplyRefusesADottedChildGatedOnItsOwnParent(t, ctx, fixture)
+	})
+	t.Run("AppliesTheDefaultPriority", func(t *testing.T) {
+		conformance.RunBatchApplyAppliesTheDefaultPriority(t, ctx, fixture)
+	})
+	t.Run("CarriesTheGateMembers", func(t *testing.T) {
+		conformance.RunBatchApplyCarriesTheGateMembers(t, ctx, fixture)
 	})
 }
 

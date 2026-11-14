@@ -34,10 +34,14 @@ type IssueTemplate struct {
 	Design             string
 	AcceptanceCriteria string
 	Priority           int
-	IssueType          types.IssueType
-	Assignee           string
-	Labels             []string
-	Dependencies       []string
+	// PrioritySet records that the file named a priority. Without one the
+	// create asks the role for its default (BatchCreateItem.DefaultPriority);
+	// Priority then only carries that default for display.
+	PrioritySet  bool
+	IssueType    types.IssueType
+	Assignee     string
+	Labels       []string
+	Dependencies []string
 }
 
 // parseStringList extracts a list of strings from content, splitting by comma or whitespace.
@@ -77,6 +81,10 @@ func processIssueSection(issue *IssueTemplate, section, content string) {
 	case "priority":
 		if p := validation.ParsePriority(content); p != -1 {
 			issue.Priority = p
+			issue.PrioritySet = true
+		} else {
+			fmt.Fprintf(os.Stderr, "Warning: invalid priority '%s' in '%s', using default P%d\n",
+				content, issue.Title, issueops.DefaultCreatePriority)
 		}
 	case "type":
 		t, err := validation.ParseIssueType(content)
@@ -160,7 +168,9 @@ func validateMarkdownPath(path string) (string, error) {
 //	label1, label2
 //
 //	### Dependencies
-//	bd-10, bd-20
+//	bd-10, depends-on:bd-20, blocks:bd-30, discovered-from:bd-40
+//
+// Dependency entries use the bd create --deps grammar (parseMarkdownDependencies).
 //
 // markdownParseState holds state for parsing markdown files
 type markdownParseState struct {
@@ -193,8 +203,8 @@ func (s *markdownParseState) handleH2Header(matches []string) {
 	// Start new issue
 	s.currentIssue = &IssueTemplate{
 		Title:     strings.TrimSpace(matches[1]),
-		Priority:  2,      // Default priority
-		IssueType: "task", // Default type
+		Priority:  issueops.DefaultCreatePriority, // the role's default, for display; see PrioritySet
+		IssueType: "task",                         // Default type
 	}
 	s.currentSection = ""
 }
@@ -383,19 +393,30 @@ func buildMarkdownBatchRequest(templates []*IssueTemplate, in createInput) (issu
 				Description:        template.Description,
 				Design:             template.Design,
 				AcceptanceCriteria: template.AcceptanceCriteria,
-				Status:             types.StatusOpen,
-				Priority:           template.Priority,
-				IssueType:          template.IssueType,
-				Assignee:           template.Assignee,
-				Labels:             template.Labels,
-				Ephemeral:          ephemeral,
-				NoHistory:          in.noHistory,
-				StorageClass:       storageClass,
-				MolType:            in.molType,
-				CreatedBy:          in.createdBy,
-				Owner:              in.owner,
+				// Status is left unset rather than spelled out as
+				// types.StatusOpen: PreparePublicCreateRequest (shared by every
+				// backend, including the http client store's server) already
+				// defaults an empty Status to StatusOpen, so an explicit "open"
+				// here was never a different outcome — only a populated member
+				// the http wire's BatchCreateItem has no slot for and the role
+				// (correctly) refuses rather than drops. Leaving it unset removes
+				// that one refusal without changing what gets created; the http
+				// wire still refuses this request's Provenance and Owner (see
+				// internal/httpclient/batchcreator.go), so `--file` is not
+				// servable there yet.
+				Priority:     markdownItemPriority(template),
+				IssueType:    template.IssueType,
+				Assignee:     template.Assignee,
+				Labels:       template.Labels,
+				Ephemeral:    ephemeral,
+				NoHistory:    in.noHistory,
+				StorageClass: storageClass,
+				MolType:      in.molType,
+				CreatedBy:    in.createdBy,
+				Owner:        in.owner,
 			},
-			Dependencies: dependencies,
+			Dependencies:    dependencies,
+			DefaultPriority: !template.PrioritySet,
 		})
 	}
 	return issueops.CreateBatchRequest{
@@ -415,8 +436,8 @@ func markdownBatchActor(in createInput) string {
 	if in.createdBy != "" {
 		return in.createdBy
 	}
-	if actor != "" {
-		return actor
+	if currentActor() != "" {
+		return currentActor()
 	}
 	return "bd"
 }
@@ -444,35 +465,23 @@ func lintMarkdownTemplates(templates []*IssueTemplate, in createInput) error {
 	return nil
 }
 
-// parseMarkdownDependencies reads a template's `### Dependencies` section as
-// the role's edge specs. `type:target` names the type; a bare target blocks.
+// parseMarkdownDependencies reads a template's `### Dependencies` (or
+// `### Deps`) section with the --deps grammar: a bare id, depends-on:id or
+// blocked-by:id makes the new issue depend on id, blocks:id makes id depend
+// on it, another well-known type:id names that type, and a type --deps
+// refuses is refused here too (GH#7508).
 func parseMarkdownDependencies(deps []string, templateTitle string) ([]issueops.CreateDependency, error) {
-	var out []issueops.CreateDependency
 	for _, raw := range deps {
 		raw = strings.TrimSpace(raw)
-		if raw == "" {
-			continue
+		if _, target, ok := strings.Cut(raw, ":"); ok && strings.TrimSpace(target) == "" {
+			return nil, fmt.Errorf("dependency %q for issue %q has no target; write type:id with no space after the colon", raw, templateTitle)
 		}
-
-		var depType types.DependencyType
-		var target string
-		if strings.Contains(raw, ":") {
-			parts := strings.SplitN(raw, ":", 2)
-			if len(parts) != 2 {
-				return nil, fmt.Errorf("invalid dependency format %q for issue %q", raw, templateTitle)
-			}
-			depType = types.DependencyType(strings.TrimSpace(parts[0]))
-			target = strings.TrimSpace(parts[1])
-		} else {
-			depType = types.DepBlocks
-			target = raw
-		}
-		if !depType.IsValid() {
-			return nil, fmt.Errorf("invalid dependency type %q for issue %q", depType, templateTitle)
-		}
-		out = append(out, issueops.CreateDependency{Type: depType, TargetID: target})
 	}
-	return out, nil
+	specs, err := parseDepSpecs(deps)
+	if err != nil {
+		return nil, fmt.Errorf("dependencies for issue %q: %w", templateTitle, err)
+	}
+	return createDependencyRequests(specs), nil
 }
 
 // reportMarkdownBatch prints what the batch created, in the one shape both
@@ -486,4 +495,14 @@ func reportMarkdownBatch(issues []*types.Issue, in createInput) error {
 		fmt.Printf("  %s: %s [P%d, %s]\n", issue.ID, issue.Title, issue.Priority, issue.IssueType)
 	}
 	return nil
+}
+
+// markdownItemPriority is the priority a template's create item carries: its
+// own when the file named one, otherwise zero, because the item then asks the
+// role for its default (BatchCreateItem.DefaultPriority).
+func markdownItemPriority(template *IssueTemplate) int {
+	if template.PrioritySet {
+		return template.Priority
+	}
+	return 0
 }

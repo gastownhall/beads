@@ -1,0 +1,10 @@
+{
+  "shape": "mc-list-label-text",
+  "exit": 0,
+  "requests": [
+    {"method":"GET","operation_id":"getContext","path":"/v0/beads/context","status":200},
+    {"method":"GET","operation_id":"listSettings","path":"/v0/beads/config","status":200},
+    {"method":"GET","operation_id":"listIssues","path":"/v0/beads/issues","query":["label","limit"],"status":200},
+    {"method":"GET","operation_id":"listDependencies","path":"/v0/beads/dependencies","query":["issue_id"],"status":200}
+  ]
+}

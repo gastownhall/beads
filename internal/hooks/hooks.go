@@ -3,6 +3,9 @@
 package hooks
 
 import (
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -10,6 +13,8 @@ import (
 
 	"github.com/steveyegge/beads/internal/types"
 )
+
+var errHookExecutionUnsupported = errors.New("hook execution is not supported on js/wasm")
 
 // Event types
 const (
@@ -71,13 +76,22 @@ func (r *Runner) Run(event string, issue *types.Issue) {
 		return // Not executable, skip
 	}
 
-	// Run asynchronously (ignore error as this is fire-and-forget).
-	// runHook is the same body RunSync runs, so the async path is under the
-	// same per-hook timeout and the same process-group kill on expiry.
+	r.runAsync(hookPath, event, issue, os.Stderr)
+}
+
+// runAsync owns the fire-and-forget boundary after Run has established that a
+// configured executable hook exists. The mutation still cannot fail because a
+// hook did, but a platform capability refusal must not disappear with the
+// discarded error.
+// Both async and sync use the same runHook body, with the same per-hook timeout
+// and platform-specific cleanup on expiry.
+func (r *Runner) runAsync(hookPath, event string, issue *types.Issue, stderr io.Writer) {
 	r.inFlight.Add(1)
 	go func() {
 		defer r.inFlight.Done()
-		_ = r.runHook(hookPath, event, issue) // Best effort: hook failures should not block the triggering operation
+		if err := r.runHook(hookPath, event, issue); errors.Is(err, errHookExecutionUnsupported) {
+			_, _ = fmt.Fprintf(stderr, "warning: hook %q was not run: %v\n", hookPath, err)
+		}
 	}()
 }
 

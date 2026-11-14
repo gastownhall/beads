@@ -1,6 +1,6 @@
 ---
 title: "bd compact"
-description: "Squash Dolt commits older than N days into a single commit."
+description: "Squash old Dolt commits to reduce history size"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -21,7 +21,26 @@ How it works:
   2. Creates a squashed base commit from all old history
   3. Cherry-picks recent commits on top
   4. Swaps main branch to the compacted version
-  5. Runs Dolt GC to reclaim space
+  5. Prunes remote-tracking refs (they would keep the old history alive;
+     the next push or fetch re-creates them at the new tip)
+  6. Runs a full Dolt GC (all storage generations) to reclaim the old history
+
+Compact refuses, and changes nothing, when commit dates are out of history
+order across the cutoff: a recent commit that comes at or before an old commit
+in history is already part of the squashed base, and replaying it again could
+change data. The error names both commits; --force does not override it, and
+--dry-run reports the refusal. Before swapping main, compact also checks that
+the replayed history holds the same committed data main held when compact read
+its history, and aborts without resetting main if it does not. A write that
+reaches main while compact runs is kept, not counted as a difference:
+uncommitted changes stay pending, and a commit that lands meanwhile is kept in
+one follow-up commit.
+
+The GC pass is a full collection: Dolt storage is generational, and a default
+GC never revisits data an earlier GC moved to the old generation. On any store
+that has been GC'd before (bd gc, or a previous flatten or compact), only a
+full collection reclaims the squashed history. A full GC can take minutes on
+multi-gigabyte stores.
 
 Examples:
   bd compact --dry-run               # Preview: show commit breakdown

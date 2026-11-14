@@ -1,10 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -271,13 +271,9 @@ func TestAddToGitignore(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to read .gitignore: %v", err)
 		}
-		content := string(updated)
-
-		if count := strings.Count(content, "# bd worktree"); count != 1 {
-			t.Fatalf("expected one worktree marker, got %d:\n%s", count, content)
-		}
-		if count := strings.Count(content, entry+"/"); count != 1 {
-			t.Fatalf("expected one worktree entry, got %d:\n%s", count, content)
+		want := []byte("node_modules/\n# bd worktree\nworktree-feature/\n")
+		if !bytes.Equal(updated, want) {
+			t.Fatalf(".gitignore bytes after two appends:\nwant: %q\ngot:  %q", want, updated)
 		}
 	})
 }
@@ -287,13 +283,13 @@ func TestEnsureCreatedWorktreeCleanRejectsDirtyWorktree(t *testing.T) {
 	commitTestFile(t, repoRoot, "README.md", "# Test\n", "initial commit")
 
 	worktreePath := filepath.Join(t.TempDir(), "dirty-worktree")
-	cmd := exec.Command("git", "worktree", "add", worktreePath, "HEAD")
+	cmd := gitCommand("worktree", "add", worktreePath, "HEAD")
 	cmd.Dir = repoRoot
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("failed to create worktree: %v\n%s", err, output)
 	}
 	t.Cleanup(func() {
-		cmd := exec.Command("git", "worktree", "remove", "--force", worktreePath)
+		cmd := gitCommand("worktree", "remove", "--force", worktreePath)
 		cmd.Dir = repoRoot
 		_ = cmd.Run()
 	})
@@ -369,7 +365,7 @@ func initGitRepoForGitignoreTest(t *testing.T) string {
 	t.Helper()
 	repoRoot := t.TempDir()
 
-	cmd := exec.Command("git", "init")
+	cmd := gitCommand("init")
 	cmd.Dir = repoRoot
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("failed to init git repo: %v\n%s", err, string(output))
@@ -387,12 +383,12 @@ func commitTestFile(t *testing.T, repoRoot, relPath, content, message string) {
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatalf("failed to write %s: %v", relPath, err)
 	}
-	cmd := exec.Command("git", "add", relPath)
+	cmd := gitCommand("add", relPath)
 	cmd.Dir = repoRoot
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git add %s failed: %v\n%s", relPath, err, output)
 	}
-	cmd = exec.Command("git", "commit", "-m", message)
+	cmd = gitCommand("commit", "-m", message)
 	cmd.Dir = repoRoot
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git commit failed: %v\n%s", err, output)

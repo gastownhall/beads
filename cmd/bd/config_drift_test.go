@@ -238,3 +238,25 @@ func TestRunDriftChecksReturnsResults(t *testing.T) {
 		}
 	}
 }
+
+func TestIssuePrefixDriftItem(t *testing.T) {
+	tests := []struct {
+		name       string
+		configured string
+		stored     string
+		wantStatus string
+	}{
+		{name: "missing declaration is skipped", wantStatus: driftStatusSkipped},
+		{name: "missing database value drifts", configured: "dc_recon", wantStatus: driftStatusDrift},
+		{name: "matching values are clean", configured: "dc_recon", stored: "dc_recon", wantStatus: driftStatusOK},
+		{name: "different stored value drifts", configured: "dc_recon", stored: "other", wantStatus: driftStatusDrift},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			item := issuePrefixDriftItem(tt.configured, tt.stored)
+			if item.Status != tt.wantStatus {
+				t.Fatalf("status = %q, want %q: %+v", item.Status, tt.wantStatus, item)
+			}
+		})
+	}
+}

@@ -369,17 +369,26 @@ install_from_release() {
         mkdir -p "$install_dir"
     fi
 
-    # Install binary
+    # Install binary. Stage a copy inside $install_dir, then rename it over
+    # bd: the rename is same-filesystem, so the live path never holds a
+    # partial binary. A plain mv from $tmp_dir (often tmpfs) copies straight
+    # onto the live path instead (#5611, #5616). cp applies the caller's
+    # umask, so set the staged copy to 0755 before the rename: under umask
+    # 027 or 077 a root install would otherwise leave a bd other users
+    # cannot run.
+    local staged_bd="$install_dir/.bd.install.tmp.$$"
     log_info "Installing to $install_dir..."
     if [[ -w "$install_dir" ]]; then
-        if ! mv "$extracted_bd" "$install_dir/bd"; then
+        if ! { cp "$extracted_bd" "$staged_bd" && chmod 0755 "$staged_bd" && mv -f "$staged_bd" "$install_dir/bd"; }; then
+            rm -f "$staged_bd"
             log_error "Failed to install bd to $install_dir"
             cd - > /dev/null || cd "$HOME"
             rm -rf "$tmp_dir"
             return 1
         fi
     else
-        if ! sudo mv "$extracted_bd" "$install_dir/bd"; then
+        if ! { sudo cp "$extracted_bd" "$staged_bd" && sudo chmod 0755 "$staged_bd" && sudo mv -f "$staged_bd" "$install_dir/bd"; }; then
+            sudo rm -f "$staged_bd"
             log_error "Failed to install bd to $install_dir"
             cd - > /dev/null || cd "$HOME"
             rm -rf "$tmp_dir"

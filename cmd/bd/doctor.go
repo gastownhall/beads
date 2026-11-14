@@ -7,12 +7,14 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -30,6 +32,16 @@ type doctorCheck struct {
 	Detail   string `json:"detail,omitempty"` // Additional detail like storage type
 	Fix      string `json:"fix,omitempty"`
 	Category string `json:"category,omitempty"` // category for grouping in output
+}
+
+// printed returns c as every text printer of checks shows it, each text
+// field spelled by remedy.PrintedText (doctor.DoctorCheck.Printed).
+func (c doctorCheck) printed() doctorCheck {
+	c.Name = remedy.PrintedText(c.Name)
+	c.Message = remedy.PrintedText(c.Message)
+	c.Detail = remedy.PrintedText(c.Detail)
+	c.Fix = remedy.PrintedText(c.Fix)
+	return c
 }
 
 type doctorResult struct {
@@ -121,7 +133,8 @@ Deep Validation Mode (--deep):
   Additional checks:
   - Parent consistency: All parent-child deps point to existing issues
   - Dependency integrity: All deps reference valid issues
-  - Epic completeness: Find epics ready to close (all children closed)
+  - Epic completeness: Find epics ready to close (all children closed as
+    completed work; duplicate/wontfix/superseded closes do not count)
   - Agent bead integrity: Agent beads have valid state values
   - Mail thread integrity: Thread IDs reference existing issues
   - Molecule integrity: Molecules have valid parent-child structures
@@ -129,7 +142,7 @@ Deep Validation Mode (--deep):
 Server Mode (--server):
   Run health checks for Dolt server mode connections (bd-dolt.2.3):
   - Server reachable: Can connect to configured host:port?
-  - Dolt version: Is it a Dolt server (not vanilla MySQL)?
+  - Dolt version: Is it a Dolt server (not vanilla MySQL) at 2.6.0 or newer?
   - Database exists: Does the 'beads' database exist?
   - Schema compatible: Can query beads tables?
   - Connection pool: Pool health metrics
@@ -172,8 +185,6 @@ Examples:
   bd doctor --fix --yes  # Automatically fix issues (no confirmation)
   bd doctor --fix -i     # Confirm each fix individually
   bd doctor --fix --fix-child-parent  # Also fix child→parent deps (opt-in)
-  bd doctor --fix --force # Force repair even when database can't be opened
-  bd doctor --fix --source=jsonl # Rebuild database from a JSONL export
   bd doctor --dry-run    # Preview what --fix would do without making changes
   bd doctor --perf       # Performance diagnostics
   bd doctor --output diagnostics.json  # Export diagnostics to file
@@ -218,7 +229,7 @@ Examples:
 		if err := validateDoctorWorkspaceBackend(absPath); isLegacyUpgradeRefusal(err) {
 			return printLegacyUpgradeDiagnostic(err)
 		} else if err != nil {
-			return HandleError("%v", err)
+			return handleWorkspaceGuardError(err)
 		}
 
 		if doctorFix && isOrchestratorRoot(absPath) {
@@ -247,10 +258,19 @@ Examples:
 			return nil
 		}
 
+		// GH#4993: assess once, before any branch that can write. Lazy so
+		// read-only paths skip the probe; memoised so repeats cannot disagree.
+		schemaGate := newSchemaGate(absPath)
+
 		// artifacts, conventions, and pollution work in embedded mode and run
 		// unconditionally; validate still requires a server-mode connection
 		// and stays gated (GH#3597).
 		if doctorCheckFlag != "" {
+			// GH#4993: these handlers return directly, so their destructive
+			// paths bypassed the gate. Refuse at the single branch point.
+			if err := destructiveCheckRefusal(doctorCheckFlag, doctorClean, doctorFix, schemaGate); err != nil {
+				return err
+			}
 			switch doctorCheckFlag {
 			case "artifacts":
 				return runArtifactsCheck(absPath, doctorClean, doctorYes)
@@ -294,12 +314,17 @@ Examples:
 
 		result := runDiagnostics(absPath)
 
+		// GH#4993: guard once, on the result, before any emitter reads it.
+		// Per-renderer sanitizing exempted --json, --agent and --output.
+		sanitizeFixAdvice(&result, schemaGate())
+
 		if doctorDryRun {
-			previewFixes(result)
+			previewFixes(result, schemaGate())
 		} else if doctorFix {
-			applyFixes(result)
+			applyFixes(result, schemaGate())
 			fmt.Println("\nVerifying fixes...")
 			result = runDiagnostics(absPath)
+			sanitizeFixAdvice(&result, schemaGate())
 		}
 
 		if doctorOutput != "" || jsonOutput {
@@ -315,7 +340,7 @@ Examples:
 		}
 
 		if doctorAgent {
-			agentResult := buildAgentResult(result)
+			agentResult := buildAgentResult(result, schemaGate())
 			if jsonOutput {
 				if err := outputJSON(agentResult); err != nil {
 					return err
@@ -328,7 +353,7 @@ Examples:
 				return err
 			}
 		} else if doctorOutput == "" {
-			printDiagnostics(result)
+			printDiagnostics(result, schemaGate())
 		}
 
 		if !result.OverallOK {
@@ -451,7 +476,7 @@ func printEmbeddedUnsupported(commandLabel string) {
 	hints := []string{
 		"Verify database exists:  ls -la .beads/embeddeddolt/",
 		"Check bd version:        bd version",
-		"Reinitialize if needed:  bd init --reinit-local",
+		"If it will not open:     preserve it first, then recover: " + doctor.EngineWontOpenRecoveryURL,
 		"Switch to server mode:   bd init --server",
 	}
 	supported := []string{"artifacts", "conventions", "pollution"}
@@ -781,7 +806,7 @@ func runDiagnostics(path string) doctorResult {
 
 	// Check 10b: Rekey-backfill leftovers — randomly-keyed or targetless
 	// dependency rows that survive the #4259 migration backfill (bd-6dnrw.17).
-	depKeyCheck := convertWithCategory(doctor.CheckDependencyKeysWithStore(sharedStore), doctor.CategoryMetadata)
+	depKeyCheck := convertWithCategory(doctor.CheckDependencyKeysWithStore(path, sharedStore), doctor.CategoryMetadata)
 	result.Checks = append(result.Checks, depKeyCheck)
 	if depKeyCheck.Status == statusError || depKeyCheck.Status == statusWarning {
 		result.OverallOK = false
@@ -794,7 +819,7 @@ func runDiagnostics(path string) doctorResult {
 	// patch, and is_blocked is self-healing via 'bd doctor --fix' / the next
 	// pull's recompute — surface it as actionable without turning doctor red
 	// across the fleet if an unforeseen dependency shape trips the predicate.
-	blockedConsistencyCheck := convertWithCategory(doctor.CheckBlockedConsistencyWithStore(sharedStore), doctor.CategoryData)
+	blockedConsistencyCheck := convertWithCategory(doctor.CheckBlockedConsistencyWithStore(path, sharedStore), doctor.CategoryData)
 	result.Checks = append(result.Checks, blockedConsistencyCheck)
 
 	// Check 10d: label whitespace damage (#5812) — labels written by a bd that
@@ -953,7 +978,7 @@ func runDiagnostics(path string) doctorResult {
 	// Don't fail overall check for untracked files, just warn
 
 	// Check 21: Orphaned dependencies (from bd repair-deps, bd validate)
-	orphanedDepsCheck := convertDoctorCheck(doctor.CheckOrphanedDependencies(path))
+	orphanedDepsCheck := convertDoctorCheck(doctor.CheckOrphanedDependencies(path, sharedStore))
 	result.Checks = append(result.Checks, orphanedDepsCheck)
 	// Don't fail overall check for orphaned deps, just warn
 
@@ -963,9 +988,14 @@ func runDiagnostics(path string) doctorResult {
 	// Don't fail overall check for severed clone-local FKs, just warn
 
 	// Check 22a: Child→parent dependencies (anti-pattern)
-	childParentDepsCheck := convertDoctorCheck(doctor.CheckChildParentDependencies(path))
+	childParentDepsCheck := convertDoctorCheck(doctor.CheckChildParentDependencies(path, sharedStore))
 	result.Checks = append(result.Checks, childParentDepsCheck)
 	// Don't fail overall check for child→parent deps, just warn
+
+	// Check 22b: Parent→own-child close gates (informational, #6506)
+	parentCloseGateCheck := convertDoctorCheck(doctor.CheckParentBlocksOwnChild(path))
+	result.Checks = append(result.Checks, parentCloseGateCheck)
+	// Informational only: these edges are legal and never fail the overall check.
 
 	// Check 23: Duplicate issues (from bd validate)
 	duplicatesCheck := convertDoctorCheck(doctor.CheckDuplicateIssues(path, doctorOrchestrator, orchestratorDuplicatesThreshold))
@@ -1184,7 +1214,96 @@ func exportDiagnostics(result doctorResult, outputPath string) error {
 	return nil
 }
 
-func printDiagnostics(result doctorResult) {
+// checkFlagWrites reports whether a `--check=<flag>` can modify state and so
+// must clear the schema gate (GH#4993). New destructive checks go here.
+func checkFlagWrites(flag string, clean, fix bool) bool {
+	switch flag {
+	case "artifacts", "pollution":
+		return clean
+	case "validate":
+		return fix
+	}
+	return false
+}
+
+// checkFlagFixName names the classified repair a destructive `--check=<flag>`
+// performs, so the schema gate can admit it through the same policy that governs
+// the equivalent `bd doctor --fix` repair (GH#4993). "" means the flag's
+// destructive work maps to no single classified fix and is therefore treated as
+// schema-writing, exactly like an unlisted fix name in filesystemOnlyFixes.
+//
+// `pollution --clean` and `validate --fix` deliberately have no entry: both
+// delete or rewrite rows through an opened store.
+func checkFlagFixName(flag string) string {
+	if flag == "artifacts" {
+		// --clean removes the same on-disk artifacts as the "Classic Artifacts"
+		// fix, which fix_gate.go classifies filesystem-only.
+		return "Classic Artifacts"
+	}
+	return ""
+}
+
+// assessSchemaFixGate is the schema-gate assessor, indirected so tests can
+// observe when and how often it is evaluated. Production always uses
+// doctor.AssessSchemaFixGate.
+var assessSchemaFixGate = doctor.AssessSchemaFixGate
+
+// newSchemaGate returns this invocation's schema gate accessor (GH#4993). Lazy
+// so a read-only path never probes the database, and memoised so every consumer
+// in one invocation sees one verdict that repeats cannot disagree with.
+func newSchemaGate(absPath string) func() doctor.FixGate {
+	return sync.OnceValue(func() doctor.FixGate {
+		return assessSchemaFixGate(absPath)
+	})
+}
+
+// destructiveCheckRefusal returns the refusal for a destructive `bd doctor
+// --check=<flag>` the schema gate does not admit, or nil when the command may
+// proceed (GH#4993). gate is an accessor rather than a value so a read-only
+// --check never probes the database.
+//
+// The gate is consulted here, before the caller's switch dispatches to a
+// handler, because the handler's own store open is the hazard: the migrating
+// factory auto-starts a stopped server and applies pending migrations before the
+// write lands.
+func destructiveCheckRefusal(flag string, clean, fix bool, gate func() doctor.FixGate) error {
+	if !checkFlagWrites(flag, clean, fix) {
+		return nil
+	}
+	g := gate()
+	if !g.BlocksDestructiveWrites() {
+		return nil
+	}
+	// Filesystem-only cleanup is not what the gate is about: `bd doctor --fix`
+	// admits the same repair under the same blocked gate, so refusing it here
+	// would leave the two planes disagreeing about one operation.
+	if name := checkFlagFixName(flag); name != "" && g.AllowsFix(name) {
+		return nil
+	}
+	return HandleErrorWithHint(
+		fmt.Sprintf("refusing destructive 'bd doctor --check=%s': %s", flag, g.Reason),
+		"Re-run without --clean/--fix to inspect read-only, or resolve the schema state first",
+	)
+}
+
+// sanitizeFixAdvice rewrites each Fix tip in place so no emitter publishes
+// advice the gate ruled unsafe (GH#4993). Index-based write is load-bearing:
+// ranging by value over []doctorCheck mutates a copy.
+func sanitizeFixAdvice(result *doctorResult, gate doctor.FixGate) {
+	if result == nil {
+		return
+	}
+	for i := range result.Checks {
+		if result.Checks[i].Fix == "" {
+			continue
+		}
+		result.Checks[i].Fix = doctor.SanitizeFixRecommendation(result.Checks[i].Fix, gate)
+	}
+}
+
+func printDiagnostics(result doctorResult, gate doctor.FixGate) {
+	// GH#4993: tips arrive already sanitized; do not re-assess the gate here.
+
 	// Pre-calculate counts and collect issues grouped by category
 	checksByCategory := make(map[string][]doctorCheck)
 	issuesByCategory := make(map[string][]doctorCheck)
@@ -1192,6 +1311,7 @@ func printDiagnostics(result doctorResult) {
 	hasIssues := false
 
 	for _, check := range result.Checks {
+		check = check.printed()
 		cat := check.Category
 		if cat == "" {
 			cat = "Other"
@@ -1330,6 +1450,11 @@ func printDiagnostics(result doctorResult) {
 		}
 		fmt.Printf("%s\n", ui.RenderMuted(fmt.Sprintf("(%d %s suppressed via doctor.suppress config)", result.SuppressedCount, noun)))
 	}
+
+	// GH#4993: surface the schema gate verdict assessed once in RunE.
+	if gate.Reason != "" {
+		fmt.Printf("\n%s Schema fix-gate: %s\n", ui.RenderWarn("⚠"), gate.Reason)
+	}
 }
 
 // printAllChecks prints all checks grouped by category with section headers.
@@ -1434,7 +1559,9 @@ func runMigrationValidation(path string, phase string) error {
 		return nil
 	}
 
-	// Human-readable output
+	// Human-readable output, every check field and message spelled as the
+	// other check printers spell them (remedy.PrintedText).
+	check = check.printed()
 	fmt.Printf("\nbd doctor --migration=%s v%s\n\n", phase, Version)
 
 	// Print main status
@@ -1476,7 +1603,7 @@ func runMigrationValidation(path string, phase string) error {
 		fmt.Println()
 		fmt.Println(ui.RenderCategory("Warnings"))
 		for _, warn := range result.Warnings {
-			fmt.Printf("  %s  %s\n", ui.RenderWarnIcon(), warn)
+			fmt.Printf("  %s  %s\n", ui.RenderWarnIcon(), remedy.PrintedText(warn))
 		}
 	}
 
@@ -1485,7 +1612,7 @@ func runMigrationValidation(path string, phase string) error {
 		fmt.Println()
 		fmt.Println(ui.RenderCategory("Errors"))
 		for _, err := range result.Errors {
-			fmt.Printf("  %s  %s\n", ui.RenderFailIcon(), err)
+			fmt.Printf("  %s  %s\n", ui.RenderFailIcon(), remedy.PrintedText(err))
 		}
 	}
 

@@ -176,7 +176,6 @@ func issueContentSize(issue *types.Issue) int {
 }
 
 func init() {
-	restoreCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output restore results in JSON format")
 	restoreCmd.Flags().BoolVar(&restoreApply, "apply", false, "Write the restored content back into the issue (default: display only)")
 	rootCmd.AddCommand(restoreCmd)
 }

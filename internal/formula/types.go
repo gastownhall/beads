@@ -28,9 +28,16 @@
 package formula
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
+
+// ErrValidation wraps a formula validation failure so callers with a fallback
+// resolution path (e.g. "is this actually a proto/issue ID rather than a
+// formula name?") can tell "not a formula" from "is a formula, but it does not
+// validate" with errors.Is, instead of reporting the latter as not found.
+var ErrValidation = errors.New("formula validation failed")
 
 // FormulaType categorizes formulas by their purpose.
 type FormulaType string
@@ -216,12 +223,13 @@ type Step struct {
 	// Priority is the issue priority (0-4).
 	Priority *int `json:"priority,omitempty"`
 
-	// Labels are applied to the created issue.
+	// Labels are applied to the created issue (supports substitution).
 	Labels []string `json:"labels,omitempty"`
 
 	// Metadata is carried through to the created issue's Metadata field as
 	// JSON. Lets formulas pre-declare keys that downstream tooling can project
-	// without a post-pour compose step.
+	// without a post-pour compose step. String values support substitution at
+	// any nesting depth; keys are never rewritten.
 	Metadata map[string]interface{} `json:"metadata,omitempty" toml:"metadata,omitempty"`
 
 	// DependsOn lists step IDs this step blocks on (within the formula).
@@ -231,9 +239,18 @@ type Step struct {
 	// Either Needs or DependsOn can be used; they are merged during cooking.
 	Needs []string `json:"needs,omitempty" toml:"needs,omitempty"`
 
+	// generatedNeeds lists the Needs entries a transform added on its own
+	// (loop iteration chaining, compose.branch, advice) rather than the
+	// formula text. FilterStepsByCondition routes such an edge around a step
+	// it drops; a reference the formula wrote to that step is an error.
+	generatedNeeds []string
+
 	// WaitsFor specifies a fanout gate type for this step.
 	// Values: "all-children" (wait for all dynamic children) or "any-children" (wait for first).
 	// When set, the cooked issue gets a "gate:<value>" label.
+	// Requires needs: the gate waits on the children of the
+	// step it names, so with nothing to name there is nothing to wait for and
+	// the cooked gate would carry the label but no dependency edge at all.
 	WaitsFor string `json:"waits_for,omitempty" toml:"waits_for,omitempty"`
 
 	// Assignee is the default assignee (supports substitution).
@@ -257,8 +274,11 @@ type Step struct {
 	Children []*Step `json:"children,omitempty"`
 
 	// Gate defines an async wait condition for this step.
-	// When set, bd cook creates a gate issue that blocks this step.
-	// Close the gate issue (bd close bd-xxx.gate-stepid) to unblock.
+	// When set, bd cook creates a companion gate issue that blocks this step
+	// (an entry-gate). Close the gate issue (bd close bd-xxx.gate-stepid) to
+	// unblock. If the step is declared type = "gate", the companion is an
+	// exit-gate instead: the step becomes a task that blocks the companion,
+	// and steps that reference the step id wait for both (GH#3316).
 	Gate *Gate `json:"gate,omitempty"`
 
 	// Loop defines iteration for this step.
@@ -284,6 +304,8 @@ type Step struct {
 // Gate defines an async wait condition for formula steps.
 // When a step has a Gate, bd cook creates a gate issue that blocks the step.
 // The gate must be closed (manually or via watchers) to unblock the step.
+// For a step declared type = "gate" the direction is reversed: the step's
+// task blocks the gate, and steps referencing the step wait on both.
 type Gate struct {
 	// Type is the condition type: gh:run, gh:pr, timer, human, mail.
 	Type string `json:"type"`
@@ -630,7 +652,7 @@ func (f *Formula) Validate() error {
 		// Validate waits_for field
 		// Valid formats: "all-children", "any-children", "children-of(step-id)"
 		if step.WaitsFor != "" {
-			if err := validateWaitsFor(step.WaitsFor, stepIDLocations); err != nil {
+			if err := validateWaitsFor(step.WaitsFor, stepIDLocations, step.Needs); err != nil {
 				errs = append(errs, fmt.Sprintf("steps[%d] (%s): %s", i, step.ID, err.Error()))
 			}
 		}
@@ -674,7 +696,7 @@ func (f *Formula) Validate() error {
 	}
 
 	if len(errs) > 0 {
-		return fmt.Errorf("formula validation failed:\n  - %s", strings.Join(errs, "\n  - "))
+		return fmt.Errorf("%w:\n  - %s", ErrValidation, strings.Join(errs, "\n  - "))
 	}
 
 	return nil
@@ -747,9 +769,17 @@ func ParseWaitsFor(value string) *WaitsForSpec {
 //   - "all-children": wait for all dynamically-bonded children
 //   - "any-children": wait for first child to complete
 //   - "children-of(step-id)": wait for children of a specific step
-func validateWaitsFor(value string, stepIDLocations map[string]string) error {
+//
+// The bare gates name no spawner, so cooking infers one from needs[0] and emits
+// no dependency at all when there is nothing to infer from. A step that gates on
+// nothing is rejected here rather than cooked into a step that carries a
+// gate:<value> label, waits for no one and is immediately ready.
+func validateWaitsFor(value string, stepIDLocations map[string]string, needs []string) error {
 	// Simple gate types
 	if value == "all-children" || value == "any-children" {
+		if len(needs) == 0 {
+			return fmt.Errorf("waits_for %q waits for the children of needs[0], but this step declares no needs (add needs, or name the spawner with children-of(step-id))", value)
+		}
 		return nil
 	}
 
@@ -785,7 +815,7 @@ func validateChildDependsOn(children []*Step, idLocations map[string]string, err
 		}
 		// Validate waits_for field
 		if child.WaitsFor != "" {
-			if err := validateWaitsFor(child.WaitsFor, idLocations); err != nil {
+			if err := validateWaitsFor(child.WaitsFor, idLocations, child.Needs); err != nil {
 				*errs = append(*errs, fmt.Sprintf("%s (%s): %s", childPrefix, child.ID, err.Error()))
 			}
 		}

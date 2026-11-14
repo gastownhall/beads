@@ -52,7 +52,8 @@ func canonicalCaseFast(path string) (string, error) {
 	buf := make([]byte, unix.PathMax)
 	// F_GETPATH has no typed wrapper in x/sys/unix: it writes a NUL-terminated
 	// path of up to MAXPATHLEN bytes into the buffer named by the third arg.
-	_, _, errno := unix.Syscall( // nolint:gosec // buf is a live []byte of PathMax bytes, the exact contract F_GETPATH requires
+	//nolint:gosec // G103: buf is a live []byte of PathMax bytes, the exact contract F_GETPATH requires.
+	_, _, errno := unix.Syscall(
 		unix.SYS_FCNTL,
 		uintptr(fd),
 		uintptr(unix.F_GETPATH),

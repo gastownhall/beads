@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	mysql "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/testutil"
@@ -348,4 +350,212 @@ func TestNewExternalDoltServerUOWProvider_PreexistingDirtyDatabaseIsNotHealed(t 
 	require.NoError(t, admin.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM beads_loser.dolt_status WHERE table_name = 'issues'").Scan(&count))
 	require.Equal(t, 1, count, "issues working-set dirt was discarded by a non-creator init")
+}
+
+// TestExternalProviderRediscoversAfterProxyRetirement pins #7295 for the
+// external-server constructor: its upstream is external, but the proxy in front
+// of it is local and retires on idle. The next physical connection must reach a
+// rediscovered proxy and, through it, the same upstream, database, credentials
+// and ClientFoundRows semantics.
+func TestExternalProviderRediscoversAfterProxyRetirement(t *testing.T) {
+	upstreamPort, err := strconv.Atoi(testutil.StartIsolatedDoltContainer(t))
+	require.NoError(t, err)
+
+	bdBin := buildBDBinary(t)
+	prev := proxy.ResolveExecutable
+	proxy.ResolveExecutable = func() (string, error) { return bdBin, nil }
+	t.Cleanup(func() { proxy.ResolveExecutable = prev })
+	t.Setenv("HOME", t.TempDir())
+
+	storeRootDir := t.TempDir()
+	shutdownOnInterrupt(t, storeRootDir)
+	verifiedShutdownCleanup(t, storeRootDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	const database = "external_rediscovery"
+	provider, err := NewExternalDoltServerUOWProvider(ctx, storeRootDir, database,
+		filepath.Join(t.TempDir(), "server.log"),
+		configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: upstreamPort},
+		"root", "", 0, retirementIdleTimeout, false, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = provider.Close(context.Background()) })
+	p, ok := provider.(*doltSQLProvider)
+	require.True(t, ok, "NewExternalDoltServerUOWProvider returned %T, want *doltSQLProvider", provider)
+
+	commitProbeRow(ctx, t, p, "rediscovery_probe", "persisted before idle")
+	p.SetPoolLimits(PoolLimits{MaxIdleConns: -1})
+
+	old := waitForProxyRetirement(t, storeRootDir)
+	stale := listenOnRetiredPort(t, old.Port)
+
+	request, done := context.WithTimeout(ctx, 30*time.Second)
+	defer done()
+	tx, err := p.BeginTx(request)
+	require.NoError(t, err, "unit of work after the local proxy retired on idle")
+	defer func() { _ = tx.Rollback(request) }()
+	conn := tx.(*doltServerTx).conn
+
+	var gotDatabase, user, value string
+	var serverPort int
+	require.NoError(t, conn.QueryRowContext(request,
+		"SELECT DATABASE(), CURRENT_USER(), @@port, value FROM rediscovery_probe WHERE id = 1",
+	).Scan(&gotDatabase, &user, &serverPort, &value))
+	assert.Equal(t, database, gotDatabase)
+	assert.Equal(t, "persisted before idle", value)
+	assert.Contains(t, user, "root@", "credentials")
+	assert.Equal(t, upstreamPort, serverPort, "the rediscovered proxy must front the original external upstream")
+	// A no-op UPDATE reports its matched row only under ClientFoundRows, which
+	// the provider's writes rely on.
+	res, err := conn.ExecContext(request, "UPDATE rediscovery_probe SET value = value WHERE id = 1")
+	require.NoError(t, err)
+	affected, err := res.RowsAffected()
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), affected, "ClientFoundRows must survive rediscovery")
+	assert.Zero(t, stale.accepts.Load(), "the provider dialed the retired proxy's port")
+
+	fresh, err := pidfile.Read(storeRootDir, proxy.PIDFileName)
+	require.NoError(t, err)
+	require.NotNil(t, fresh)
+	assert.NotEqual(t, old.Port, fresh.Port, "replacement proxy port")
+}
+
+// TestExternalDoltServerOpenRefusesForwardDrift is the end-to-end leg of
+// gastownhall/beads#8121: an existing database whose schema cursor is AHEAD of
+// this binary is refused by the real provider open, on the converged fast path
+// and on the locked path, and BD_IGNORE_SCHEMA_SKEW=1 lets both through with
+// one warning. The unit seam in forward_drift_open_test.go cannot prove the
+// real gate composition or a successful locked-path open; this does.
+func TestExternalDoltServerOpenRefusesForwardDrift(t *testing.T) {
+	port := testutil.StartIsolatedDoltContainer(t)
+	portInt, err := strconv.Atoi(port)
+	require.NoError(t, err)
+
+	bdBin := buildBDBinary(t)
+	prev := proxy.ResolveExecutable
+	proxy.ResolveExecutable = func() (string, error) { return bdBin, nil }
+	t.Cleanup(func() { proxy.ResolveExecutable = prev })
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("BD_IGNORE_SCHEMA_SKEW", "")
+
+	storeRootDir := t.TempDir()
+	shutdownOnInterrupt(t, storeRootDir)
+	verifiedShutdownCleanup(t, storeRootDir)
+	logPath := filepath.Join(t.TempDir(), "server.log")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	const database = "beads_ahead"
+	open := func() (UnitOfWorkProvider, error) {
+		return NewExternalDoltServerUOWProvider(
+			ctx,
+			storeRootDir,
+			database,
+			logPath,
+			configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: portInt},
+			"root",
+			"",
+			0,
+			0,
+			false,
+			"",
+		)
+	}
+	openAndClose := func(t *testing.T) error {
+		t.Helper()
+		provider, err := open()
+		if provider != nil {
+			require.NoError(t, provider.Close(context.Background()))
+		}
+		return err
+	}
+
+	// A normal first open creates and migrates the database to latest.
+	require.NoError(t, openAndClose(t))
+
+	admin, err := sql.Open("mysql", fmt.Sprintf("root:@tcp(127.0.0.1:%d)/%s?parseTime=true", portInt, database))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = admin.Close() })
+
+	// A newer bd has migrated the database one version past this binary.
+	ahead := schema.LatestVersion() + 1
+	_, err = admin.ExecContext(ctx, "INSERT INTO schema_migrations (version) VALUES (?)", ahead)
+	require.NoError(t, err)
+	_, err = admin.ExecContext(ctx, "CALL DOLT_COMMIT('-am', 'test: schema cursor ahead of this binary')")
+	require.NoError(t, err)
+
+	headHash := func(t *testing.T) string {
+		t.Helper()
+		var h string
+		require.NoError(t, admin.QueryRowContext(ctx, "SELECT DOLT_HASHOF('HEAD')").Scan(&h))
+		return h
+	}
+	dirtyTables := func(t *testing.T) []string {
+		t.Helper()
+		rows, err := admin.QueryContext(ctx, "SELECT table_name FROM dolt_status")
+		require.NoError(t, err)
+		defer rows.Close()
+		var names []string
+		for rows.Next() {
+			var name string
+			require.NoError(t, rows.Scan(&name))
+			names = append(names, name)
+		}
+		require.NoError(t, rows.Err())
+		return names
+	}
+	tempPatternSeeded := func(t *testing.T) bool {
+		t.Helper()
+		var n int
+		require.NoError(t, admin.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM dolt_ignore WHERE pattern = '__temp__%'").Scan(&n))
+		return n > 0
+	}
+	requireSkew := func(t *testing.T, err error) {
+		t.Helper()
+		var skew *schema.SchemaSkewError
+		require.ErrorAs(t, err, &skew)
+		require.Equal(t, ahead, skew.DBVersion)
+		require.Equal(t, schema.LatestVersion(), skew.BinaryVersion)
+	}
+	openWithOverride := func(t *testing.T) {
+		t.Helper()
+		t.Setenv("BD_IGNORE_SCHEMA_SKEW", "1")
+		// t is the parent test: put the variable back for the steps after.
+		defer t.Setenv("BD_IGNORE_SCHEMA_SKEW", "")
+		var openErr error
+		stderr := captureStderr(t, func() { openErr = openAndClose(t) })
+		require.NoError(t, openErr, "BD_IGNORE_SCHEMA_SKEW=1 must let the open through")
+		require.Equal(t, 1, strings.Count(stderr, skewIgnoredWarning),
+			"want exactly one skew-ignored warning, stderr:\n%s", stderr)
+	}
+
+	// Converged shape: seeded, clean, cursors at or past latest. The open is
+	// refused and writes nothing.
+	head := headHash(t)
+	requireSkew(t, openAndClose(t))
+	require.Equal(t, head, headHash(t), "the refused open committed to the ahead database")
+	require.Empty(t, dirtyTables(t), "the refused open wrote to the ahead database")
+	openWithOverride(t)
+
+	// Locked shape: an under-seeded dolt_ignore makes the convergence probe
+	// decline, so the open takes the migration lock and runs the gate. The
+	// refusal must land before MigrateUp re-seeds the pattern.
+	_, err = admin.ExecContext(ctx, "DELETE FROM dolt_ignore WHERE pattern = '__temp__%'")
+	require.NoError(t, err)
+	_, err = admin.ExecContext(ctx, "CALL DOLT_COMMIT('-am', 'test: drop the __temp__ ignore pattern')")
+	require.NoError(t, err)
+	require.False(t, tempPatternSeeded(t))
+	head = headHash(t)
+	requireSkew(t, openAndClose(t))
+	require.False(t, tempPatternSeeded(t), "MigrateUp seeded dolt_ignore on the ahead database before the refusal")
+	require.Equal(t, head, headHash(t), "the refused open committed to the ahead database")
+	require.Empty(t, dirtyTables(t), "the refused open wrote to the ahead database")
+
+	// With the override, the locked path proceeds and MigrateUp heals the
+	// pattern — still one warning.
+	openWithOverride(t)
+	require.True(t, tempPatternSeeded(t), "the overridden locked-path open did not run MigrateUp")
 }

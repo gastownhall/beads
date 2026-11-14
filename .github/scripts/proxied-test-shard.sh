@@ -3,13 +3,24 @@
 #
 # Usage: proxied-test-shard.sh <shard_number> <total_shards>
 #
-# Discovers all TestProxiedServer* top-level functions across cmd/bd/*_test.go
-# (the proxied integration suites plus TestProxiedServerExternalCreate and the
-# TestProxiedServerPathHelpers unit test, matching the lane's historical
-# `-run '^TestProxiedServer'`). Tests listed in proxied-cmd-test-shards.txt for
-# the requested shard count use that committed assignment; newly-added tests
-# fall back to hash(name) % total. Runs the matching subset using the pre-built
-# test binary at BEADS_TEST_CMD_BINARY (or /tmp/bd-cmd-test).
+# Discovers all TestProxiedServer* and TestServerMode* top-level functions
+# across cmd/bd/*_test.go (the proxied integration suites plus
+# TestProxiedServerExternalCreate and the TestProxiedServerPathHelpers unit
+# test, widening the lane's historical `-run '^TestProxiedServer'`). The
+# TestServerMode* suites all gate on requireSharedProxiedServer and drive the
+# same shared dolt sql-server, and this lane is the only one that sets
+# BEADS_TEST_PROXIED_SERVER=1, so it is the only place they run: before the
+# widening a top-level TestServerMode* entry point matched no discovery pattern
+# here, so it skipped everywhere else and was never executed by CI at all.
+# The TestProxiedServer* side is mixed and should not be generalized over: most
+# gate on requireSharedProxiedServer, the rest on requireProxiedServerEnv, and
+# TestProxiedServerPathHelpers (pure path helpers) has no gate and no build tag,
+# so that one also runs in every ordinary `go test ./cmd/bd/` lane.
+#
+# Tests listed in proxied-cmd-test-shards.txt for the requested shard count use
+# that committed assignment; newly-added tests fall back to hash(name) % total.
+# Runs the matching subset using the pre-built test binary at
+# BEADS_TEST_CMD_BINARY (or /tmp/bd-cmd-test).
 #
 # Environment:
 #   BEADS_TEST_PROXIED_SERVER=1   required (tests skip without it)
@@ -36,16 +47,17 @@ fi
 SHARD_INDEX=$(( SHARD_NUMBER - 1 ))
 MANIFEST="${BEADS_TEST_SHARD_MANIFEST:-.github/scripts/proxied-cmd-test-shards.txt}"
 
-# Discover all top-level TestProxiedServer* functions across every cmd/bd test
-# file (integration suites live in *_proxied_integration_test.go, but
-# TestProxiedServerExternalCreate and TestProxiedServerPathHelpers do not, so
-# match by name rather than by file glob).
-ALL_TESTS=$(grep -rh '^func TestProxiedServer' cmd/bd/*_test.go \
-  | sed 's/func \(TestProxiedServer[A-Za-z0-9_]*\).*/\1/' \
+# Discover all top-level TestProxiedServer*/TestServerMode* functions across
+# every cmd/bd test file (integration suites live in
+# *_proxied_integration_test.go, but TestProxiedServerExternalCreate,
+# TestProxiedServerPathHelpers and the TestServerMode* suites do not, so match
+# by name rather than by file glob).
+ALL_TESTS=$(grep -rhE '^func Test(ProxiedServer|ServerMode)' cmd/bd/*_test.go \
+  | sed -E 's/func (Test(ProxiedServer|ServerMode)[A-Za-z0-9_]*).*/\1/' \
   | sort -u)
 
 if [ -z "$ALL_TESTS" ]; then
-  echo "No TestProxiedServer* functions found" >&2
+  echo "No TestProxiedServer*/TestServerMode* functions found" >&2
   exit 1
 fi
 
@@ -62,7 +74,7 @@ if [ -f "$MANIFEST" ]; then
     if [ -z "${manifest_total:-}" ]; then
       continue
     fi
-    if [ -n "${extra:-}" ] || ! [[ "$manifest_total" =~ ^[0-9]+$ ]] || ! [[ "$manifest_shard" =~ ^[0-9]+$ ]] || ! [[ "$test_name" =~ ^TestProxiedServer[A-Za-z0-9_]+$ ]]; then
+    if [ -n "${extra:-}" ] || ! [[ "$manifest_total" =~ ^[0-9]+$ ]] || ! [[ "$manifest_shard" =~ ^[0-9]+$ ]] || ! [[ "$test_name" =~ ^Test(ProxiedServer|ServerMode)[A-Za-z0-9_]+$ ]]; then
       echo "Invalid shard manifest line: $line" >&2
       exit 1
     fi

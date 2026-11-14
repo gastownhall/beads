@@ -49,6 +49,11 @@ func init() {
 	registerContractLeg(contractLeg{name: "dolt", wiringRoot: "internal/storage/dolt"})
 	registerContractLeg(contractLeg{name: "embeddeddolt", wiringRoot: "internal/storage/embeddeddolt"})
 	registerContractLeg(contractLeg{name: "uow", wiringRoot: "internal/storage/uow"})
+	registerContractLeg(contractLeg{
+		name:            "http",
+		wiringRoot:      "internal/httpclient",
+		adoptionCeiling: 0,
+	})
 }
 
 // contractLeg is one registered backend leg: what the lock calls it, where its

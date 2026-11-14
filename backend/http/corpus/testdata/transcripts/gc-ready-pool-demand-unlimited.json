@@ -1,0 +1,6 @@
+{
+  "shape": "gc-ready-pool-demand-unlimited",
+  "requests": [
+    {"method":"GET","operation_id":"listReadyWork","path":"/v0/beads/ready","query":["exclude_label","exclude_type","include_ephemeral","limit","metadata_field","sort","unassigned"],"status":200}
+  ]
+}

@@ -1,0 +1,29 @@
+=== request 1 of 2: getContext
+GET /v0/beads/context
+Accept: application/json, application/problem+json
+Accept-Encoding: gzip
+Authorization: Bearer <BEADS_HTTP_TOKEN>
+Bd-Project-Id: proj-v0-wire-golden
+Bd-Wire-Revision: 2
+User-Agent: bd-http-backend/v0
+
+=== request 2 of 2: deleteIssues
+POST /v0/beads/issues:delete
+Accept: application/json, application/problem+json
+Accept-Encoding: gzip
+Authorization: Bearer <BEADS_HTTP_TOKEN>
+Bd-Project-Id: proj-v0-wire-golden
+Bd-Wire-Revision: 2
+Content-Length: 84
+Content-Type: application/json
+User-Agent: bd-http-backend/v0
+
+{
+  "actor": "golden-actor",
+  "cascade": false,
+  "dry_run": true,
+  "force": false,
+  "ids": [
+    "bd-1"
+  ]
+}

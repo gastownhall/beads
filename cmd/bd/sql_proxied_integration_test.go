@@ -179,3 +179,80 @@ func sqlValueEquals(v any, want float64) bool {
 		return false
 	}
 }
+
+// TestProxiedServerSQLStatementRouting pins how proxied `bd sql` routes
+// statements that a prefix scan misreads: CTE reads must return their rows,
+// CTE writes must commit, and a statement that writes and returns a result set
+// must render that result set instead of reporting "0 rows affected".
+func TestProxiedServerSQLStatementRouting(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+	p := newSharedProxiedProject(t, bd, "sqlcte")
+
+	one := bdProxiedCreate(t, bd, p.dir, "CTE issue one", "--type", "task", "--priority", "1")
+	two := bdProxiedCreate(t, bd, p.dir, "CTE issue two", "--type", "task", "--priority", "2")
+
+	t.Run("cte_column_list_select_returns_rows", func(t *testing.T) {
+		rows := bdProxiedSQLJSON(t, bd, p.dir,
+			"WITH t(issue_id) AS (SELECT id FROM issues WHERE id = '"+one.ID+"') SELECT issue_id FROM t")
+		if len(rows) != 1 {
+			t.Fatalf("expected 1 row, got %d: %v", len(rows), rows)
+		}
+		if rows[0]["issue_id"] != one.ID {
+			t.Errorf("expected issue_id=%q, got %v", one.ID, rows[0]["issue_id"])
+		}
+	})
+
+	t.Run("recursive_cte_select_returns_rows", func(t *testing.T) {
+		query := "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 3) SELECT i FROM n"
+		rows := bdProxiedSQLJSON(t, bd, p.dir, query)
+		if len(rows) != 3 {
+			t.Fatalf("expected 3 rows, got %d: %v", len(rows), rows)
+		}
+		stdout, _ := bdProxiedSQL(t, bd, p.dir, query)
+		if !strings.Contains(stdout, "(3 rows)") {
+			t.Errorf("expected '(3 rows)' in table output, got:\n%s", stdout)
+		}
+	})
+
+	t.Run("cte_write_commits", func(t *testing.T) {
+		stdout, _ := bdProxiedSQL(t, bd, p.dir, "--json",
+			"WITH t(issue_id) AS (SELECT id FROM issues WHERE id = '"+two.ID+"') "+
+				"UPDATE issues SET priority = 0 WHERE id IN (SELECT issue_id FROM t)")
+		start := strings.Index(stdout, "{")
+		if start < 0 {
+			t.Fatalf("no JSON object in exec output:\n%s", stdout)
+		}
+		var res map[string]interface{}
+		if err := json.Unmarshal([]byte(stdout[start:]), &res); err != nil {
+			t.Fatalf("parse exec JSON: %v\nraw: %s", err, stdout[start:])
+		}
+		if !sqlValueEquals(res["rows_affected"], 1) {
+			t.Errorf("expected rows_affected=1, got %v", res["rows_affected"])
+		}
+
+		db := openProxiedDB(t, p)
+		var priority int
+		if err := db.QueryRow("SELECT priority FROM issues WHERE id = ?", two.ID).Scan(&priority); err != nil {
+			t.Fatalf("query priority for %s: %v", two.ID, err)
+		}
+		if priority != 0 {
+			t.Errorf("expected committed priority=0, got %d", priority)
+		}
+	})
+
+	t.Run("call_renders_result_set", func(t *testing.T) {
+		rows := bdProxiedSQLJSON(t, bd, p.dir, "CALL DOLT_BRANCH('sql-routing-probe')")
+		if len(rows) != 1 {
+			t.Fatalf("expected the procedure's 1 status row, got %d: %v", len(rows), rows)
+		}
+		if _, ok := rows[0]["status"]; !ok {
+			t.Errorf("expected a status column, got %v", rows[0])
+		}
+		branches := bdProxiedSQLJSON(t, bd, p.dir, "SELECT name FROM dolt_branches WHERE name = 'sql-routing-probe'")
+		if len(branches) != 1 {
+			t.Errorf("expected the CALL to have created branch sql-routing-probe, got %v", branches)
+		}
+	})
+}

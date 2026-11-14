@@ -52,7 +52,7 @@ const IssueBaseColumns = `id, content_hash, title, description, design, acceptan
 	       mol_type,
 	       event_kind, actor, target, payload,
 	       due_at, defer_until,
-	       work_type, source_system, metadata, row_lock, storage_class`
+	       work_type, source_system, metadata, row_lock, storage_class, arrival_seq`
 
 // IssueBaseColumnsLite is IssueBaseColumns minus the heavy TEXT columns
 // (issueops.HeavyDropList). It lives here rather than beside its scan function
@@ -70,7 +70,7 @@ const IssueBaseColumnsLite = `id, content_hash, title,
 	       mol_type,
 	       event_kind, actor, target,
 	       due_at, defer_until,
-	       work_type, source_system, metadata, row_lock, storage_class`
+	       work_type, source_system, metadata, row_lock, storage_class, arrival_seq`
 
 // LeaseSelectColumns is the lease overlay for full issue hydration. Leases
 // live in the ephemeral leases table (bd-lrgn1), not on the issues row, so
@@ -107,13 +107,24 @@ const QueryBatchSize = 200
 // QualifyColumns prefixes every column in a comma-separated list (e.g.
 // IssueSelectColumns) with the given table qualifier such as "i.".
 func QualifyColumns(columns, prefix string) string {
+	parts := ColumnNames(columns)
+	for i, p := range parts {
+		parts[i] = prefix + p
+	}
+	return strings.Join(parts, ", ")
+}
+
+// ColumnNames splits a comma-separated column list such as IssueBaseColumns
+// into its entries, trimmed of the newlines and indentation the constants are
+// laid out with.
+func ColumnNames(columns string) []string {
 	raw := strings.ReplaceAll(columns, "\n", " ")
 	raw = strings.ReplaceAll(raw, "\t", " ")
 	parts := strings.Split(raw, ",")
 	for i, p := range parts {
-		parts[i] = prefix + strings.TrimSpace(p)
+		parts[i] = strings.TrimSpace(p)
 	}
-	return strings.Join(parts, ", ")
+	return parts
 }
 
 // InPlaceholders renders "?,?,..." and the matching arg slice for an IN clause.
