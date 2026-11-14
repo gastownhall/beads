@@ -27,7 +27,14 @@ func (s *EmbeddedDoltStore) CreateIssue(ctx context.Context, issue *types.Issue,
 		issue.Ephemeral = true
 	}
 
-	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+	// A failed create resets the identities it generated — the minted id
+	// above all — on the caller's struct: the rows they named rolled back, so
+	// the ids are nobody's. A caller-supplied id is never recorded and never
+	// cleared, and an indeterminate commit keeps what it may have landed
+	// (bd-t4h0n7, PR #6754).
+	identities := issueops.RecordCreateIdentities([]*types.Issue{issue})
+	if err := s.withConn(ctx, true, func(tx *sql.Tx) error {
+		identities.Reset()
 		// SkipPrefixValidation matches DoltStore.CreateIssue, which does not
 		// validate prefixes for explicit IDs on the single-issue path.
 		bc, err := issueops.NewBatchContext(ctx, tx, storage.BatchCreateOptions{
@@ -37,7 +44,11 @@ func (s *EmbeddedDoltStore) CreateIssue(ctx context.Context, issue *types.Issue,
 			return err
 		}
 		return issueops.CreateIssueInTx(ctx, tx, bc, issue, actor)
-	})
+	}); err != nil {
+		identities.ResetOnFailedTransaction(err)
+		return err
+	}
+	return nil
 }
 
 func (s *EmbeddedDoltStore) CreateIssues(ctx context.Context, issues []*types.Issue, actor string) error {
@@ -70,7 +81,16 @@ func (s *EmbeddedDoltStore) CreateIssuesWithFullOptions(ctx context.Context, iss
 		}
 	}
 
-	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+	// The batch follows the single create's failure contract: generated
+	// identities reset on definite failure, supplied ones remain, an
+	// indeterminate commit retains what it may have landed.
+	identities := issueops.RecordCreateIdentities(issues)
+	if err := s.withConn(ctx, true, func(tx *sql.Tx) error {
+		identities.Reset()
 		return issueops.CreateIssuesInTx(ctx, tx, issues, actor, opts)
-	})
+	}); err != nil {
+		identities.ResetOnFailedTransaction(err)
+		return err
+	}
+	return nil
 }

@@ -1,12 +1,49 @@
 package dolt
 
 import (
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// TestCreateIssue_ResetsGeneratedIDsOnDefiniteFailure pins the server-side
+// failure half of the identity contract (bd-t4h0n7, PR #6754): a create
+// whose transaction fails definitely leaves no phantom identities on the
+// caller's struct, while a caller-supplied id survives the same failure. The
+// deterministic post-assignment failure lever is an over-length label: it
+// is refused after the mint and the row insert.
+func TestCreateIssue_ResetsGeneratedIDsOnDefiniteFailure(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	generated := &types.Issue{
+		Title: "generated then failed", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+		Labels: []string{strings.Repeat("x", 300)},
+	}
+	if err := store.CreateIssue(ctx, generated, "tester"); err == nil {
+		t.Fatal("CreateIssue(over-length label) = nil error, want the label refusal")
+	}
+	if generated.ID != "" {
+		t.Errorf("failed create kept the generated id %q, want it reset: the row it named was rolled back", generated.ID)
+	}
+
+	supplied := &types.Issue{
+		ID: "test-named", Title: "supplied then failed", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+		Labels: []string{strings.Repeat("x", 300)},
+	}
+	if err := store.CreateIssue(ctx, supplied, "tester"); err == nil {
+		t.Fatal("CreateIssue(over-length label, supplied id) = nil error, want the label refusal")
+	}
+	if supplied.ID != "test-named" {
+		t.Errorf("failed create changed the supplied id to %q, want test-named", supplied.ID)
+	}
+}
 
 // TestCreateIssue_ReplayRemintsAutoMintedID (bd-t4h0n7, PR #6754): a server
 // single-create whose first attempt mints an id, then loses its commit to a
