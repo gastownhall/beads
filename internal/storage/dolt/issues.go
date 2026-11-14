@@ -129,12 +129,24 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 				issue.Ephemeral = true
 			}
 		}
+		// A replayed attempt re-derives every identity the batch generates
+		// (issue ids, comment ids, defaulted dependency owners), like the
+		// single-create path above.
+		identities := issueops.RecordCreateIdentities(issues)
 		var result issueops.CreateIssuesResult
 		if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+			identities.Reset()
 			var err error
 			result, err = issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
-			return err
+			if err != nil {
+				return err
+			}
+			if s.createAttemptHook != nil {
+				s.createAttemptHook()
+			}
+			return nil
 		}); err != nil {
+			identities.ResetOnFailedTransaction(err)
 			return err
 		}
 		s.commitWispDurable(ctx, wispDurable{issues: result.ChangedTables["issues"]},
@@ -142,12 +154,24 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 		return nil
 	}
 
+	// Same replay rule for a durable batch: identities are re-derived per
+	// attempt, reset again on definite failure, kept on an indeterminate
+	// commit that may have landed.
+	identities := issueops.RecordCreateIdentities(issues)
 	var result issueops.CreateIssuesResult
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		identities.Reset()
 		var err error
 		result, err = issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
-		return err
+		if err != nil {
+			return err
+		}
+		if s.createAttemptHook != nil {
+			s.createAttemptHook()
+		}
+		return nil
 	}); err != nil {
+		identities.ResetOnFailedTransaction(err)
 		return err
 	}
 

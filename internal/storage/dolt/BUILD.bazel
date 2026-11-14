@@ -189,6 +189,7 @@ go_test(
         "create_batch_equivalence_test.go",
         "create_guard_test.go",
         "create_issue_commit_test.go",
+        "create_replay_batch_test.go",
         "create_replay_test.go",
         "create_rollback_test.go",
         "credentials_peer_test.go",
