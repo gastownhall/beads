@@ -43,11 +43,11 @@ var _ issueops.MetadataCAS = (*metadataCAS)(nil)
 // re-read is what makes a lost race report the value that actually beat it
 // rather than a value from a transaction that never landed.
 //
-// THE VERSION-CONTROL ENTRY IS ONE PER SWAP THAT WROTE. A lost race and a swap
-// over an already-equal value stage nothing, and an ephemeral row's tables are
-// ignored by this plane, so the staged-set guard inside doltAddAndCommitInTx
-// finds nothing to commit and records none — which is why this leg needs no
-// separate wisp path.
+// THE VERSION-CONTROL ENTRY IS ONE PER SWAP THAT WROTE, minted after the SQL
+// commit (GH#5752). A lost race and a swap over an already-equal value stage
+// nothing, and an ephemeral row's tables are ignored by this plane, so the
+// post-commit publication's staged-set guard finds nothing to commit and
+// records none — which is why this leg needs no separate wisp path.
 func (m *metadataCAS) CompareAndSetKey(ctx context.Context, req issueops.CompareAndSetKeyRequest) (issueops.CompareAndSetKeyResult, error) {
 	plan, err := storage.PlanCompareAndSetKey(req)
 	if err != nil {
@@ -55,22 +55,23 @@ func (m *metadataCAS) CompareAndSetKey(ctx context.Context, req issueops.Compare
 	}
 
 	var result issueops.CompareAndSetKeyResult
-	if err := m.store.withRetryTx(ctx, func(tx *sql.Tx) error {
+	if err := m.store.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (storeops.ChangedTables, string, error) {
+		result = issueops.CompareAndSetKeyResult{}
 		swap, write, err := storeops.CompareAndSetMetadataKeyInTx(ctx, tx, plan)
 		if err != nil {
-			return err
+			return nil, "", err
 		}
 		result = swap
 		if len(write.Tables) == 0 {
 			// Nothing was written, or what was written is ephemeral and lives in
 			// tables this plane ignores. Either way there is nothing to version;
-			// withRetryTx still commits the SQL transaction.
-			return nil
+			// the funnel still commits the SQL transaction.
+			return nil, "", nil
 		}
 		// The swap routes through UpdateIssueInTx, which also writes an
 		// EventUpdated row, so stage both tables (mirrors MergeMetadata).
-		return m.store.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"},
-			fmt.Sprintf("bd: compare-and-set metadata %s.%s", plan.IssueID, plan.Key))
+		return changedTables("issues", "events"),
+			fmt.Sprintf("bd: compare-and-set metadata %s.%s", plan.IssueID, plan.Key), nil
 	}); err != nil {
 		return issueops.CompareAndSetKeyResult{}, err
 	}

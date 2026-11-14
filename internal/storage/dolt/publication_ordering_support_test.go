@@ -38,6 +38,9 @@ type publicationOrderDriver struct {
 	// issueStatus/issueAssignee shape every canned issue row.
 	issueStatus   types.Status
 	issueAssignee string
+	issueMetadata string
+	// wispExists makes every wisp probe find the id (an active wisp).
+	wispExists bool
 	// stagedCount is what the staged-set guard reads from dolt_status.
 	stagedCount int64
 
@@ -159,7 +162,16 @@ func (d *publicationOrderDriver) defaultRows(query string, args []driver.NamedVa
 	case strings.Contains(query, "FROM dolt_status"):
 		return &valRows{cols: []string{"count"}, vals: [][]driver.Value{{d.stagedCount}}}
 	case strings.Contains(query, "SELECT 1 FROM wisps"):
+		if d.wispExists {
+			return &valRows{cols: []string{"exists"}, vals: [][]driver.Value{{int64(1)}}}
+		}
 		return &valRows{cols: []string{"exists"}}
+	case strings.Contains(query, "SELECT metadata FROM issues WHERE id"):
+		metadata := d.issueMetadata
+		if metadata == "" {
+			metadata = "{}"
+		}
+		return &valRows{cols: []string{"metadata"}, vals: [][]driver.Value{{metadata}}}
 	case strings.Contains(query, "SELECT assignee, status FROM issues"):
 		return &valRows{cols: []string{"assignee", "status"}, vals: [][]driver.Value{{d.issueAssignee, string(d.issueStatus)}}}
 	case strings.Contains(query, "SELECT is_template, pinned, status, assignee FROM issues"):
@@ -196,6 +208,10 @@ func (d *publicationOrderDriver) issueValues(id string) []driver.Value {
 		case "assignee":
 			if d.issueAssignee != "" {
 				values[i] = d.issueAssignee
+			}
+		case "metadata":
+			if d.issueMetadata != "" {
+				values[i] = d.issueMetadata
 			}
 		}
 	}

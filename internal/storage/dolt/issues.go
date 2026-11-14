@@ -281,12 +281,12 @@ func (s *DoltStore) updateIssueChecked(ctx context.Context, id string, updates m
 	_, settingNoHistory := updates["no_history"]
 	_, settingWisp := updates["wisp"]
 	if settingNoHistory || settingWisp {
-		return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		return s.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (issueops.ChangedTables, string, error) {
 			if err := checkExpectedVersionInTx(ctx, tx, id, opts.ExpectedVersion); err != nil {
-				return err
+				return nil, "", err
 			}
 			if err := issueops.CheckExpectedFieldsInTx(ctx, tx, id, opts.ExpectedAssignee, opts.ExpectedStatus); err != nil {
-				return err
+				return nil, "", err
 			}
 			return s.demoteToWispInTx(ctx, tx, id, updates, actor)
 		})

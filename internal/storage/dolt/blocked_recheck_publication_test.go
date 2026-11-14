@@ -36,7 +36,7 @@ func TestPostCommitRecheckPublishesOutsideItsTransaction(t *testing.T) {
 		postTx  = "doltAddAndCommitPostTx"
 		recheck = "DoltStore.recheckBlockedAfterCommit"
 		// Anchors: one function known to publish with each ordering.
-		knownInTxPublisher   = "DoltStore.demoteToWispInTx"
+		knownInTxPublisher   = "DoltStore.deleteIssue"
 		knownPostTxPublisher = "DoltStore.publishCommittedOperation"
 	)
 	publishes := func(key, helper string) bool {
