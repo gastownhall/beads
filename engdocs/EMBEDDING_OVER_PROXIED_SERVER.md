@@ -2,14 +2,16 @@
 
 Last reviewed: 2026-11-14
 
-Read at: `e1e1158dd` (`v1.3.1-rc.1-2-ge1e1158dd`). Because this document
-describes observed behaviour rather than a contract, a stale marker makes it
-wrong, not merely old. Re-read it against the sources below before trusting it
-against a later build.
+Read at: `e1e1158dd` (`v1.3.1-rc.1-2-ge1e1158dd`), except §8's routing fact
+and §3's #7885 note, which were re-read for the GH#8323 fix on top of
+`8cdfa796a8` (see §8). Because this document describes observed behaviour
+rather than a contract, a stale marker makes it wrong, not merely old. Re-read
+it against the sources below before trusting it against a later build.
 
 Freshness source: `internal/storage/dbproxy/pidfile/pidfile.go`,
-`internal/storage/dbproxy/proxy/` (`endpoint.go`, `server.go`, `shutdown.go`,
-`read_status.go`, `backend.go`), `internal/storage/dbproxy/server/doltserver.go`,
+`internal/storage/dbproxy/proxy/` (`endpoint.go`, `server.go`, `data_auth.go`,
+`shutdown.go`, `read_status.go`, `backend.go`),
+`internal/storage/dbproxy/server/doltserver.go`,
 `internal/configfile/proxied_server_client_info.go`,
 `internal/configfile/configfile.go` (the storage-mode predicates),
 `internal/doltserver/physical_root.go`,
@@ -19,6 +21,7 @@ Freshness source: `internal/storage/dbproxy/pidfile/pidfile.go`,
 `internal/storage/schema/smart_remote_migrate_gate.go`,
 `internal/storage/schema/lock.go`, `internal/storage/storage.go`,
 `internal/storage/dolt/store.go` (the server-mode shared-gate call site),
+`internal/storage/doltutil/dsn.go`,
 `internal/storage/embeddeddolt/` (`store.go`, `cache.go`, `detection.go`),
 `cmd/bd/db_proxy_child.go`, `cmd/bd/dolt.go`,
 `cmd/bd/dolt_proxied_lifecycle.go`, `cmd/bd/migrate.go`, `cmd/bd/main.go`,
@@ -230,6 +233,18 @@ section, and the proxy's lack of protocol handling — not an observed connectio
 The proxy dials the backend per accepted connection and closes the client on any
 dial or handshake failure, so treat a successful connect as the thing to check
 first, not as given.
+
+**Since #7885 a plain client gets no session there.** The paragraph above is
+the 1.3.1 reading. A proxy started by a bd that has #7885 (first tagged in
+v1.4.0-rc.1) authenticates every data-port connection before any MySQL byte:
+the client opens with a `BDPROXY1` line keyed by the owner-only
+`proxy.secret`, and the proxy closes a connection that sends anything else, or
+nothing within five seconds, without answering it or dialing its backend
+(`internal/storage/dbproxy/proxy/data_auth.go`, checked first in
+`proxyServer.handleConn`). A plain MySQL client sends no such line, so only bd
+connects to that port now (`bd sql` runs ad-hoc queries), and the loopback
+bind below is no longer the data port's whole access control. The byte pump
+behind that exchange and the backend's credentials are unchanged.
 
 Three qualifications worth carrying:
 
@@ -602,26 +617,48 @@ which handles embedded Dolt, dolt-server mode and registered extension
 backends; and `beads_nocgo.go` (`//go:build !cgo`), which handles the latter two
 and returns an error for embedded Dolt.
 
-**First, a routing fact worth knowing before the interface question.** Neither
-copy has a proxied-server arm, and neither serves a proxied workspace: both
-refuse it with `beads.ErrProxiedServerUnsupported` (GH#8323). The check
+**First, a routing fact worth knowing before the interface question.** This
+routing fact, up to the `SetEventsJournalEnabled` paragraph, was re-read for
+the GH#8323 fix on top of `8cdfa796a8`, not at `e1e1158dd`. Neither copy has a
+proxied-server arm, and neither routes a proxied workspace through its proxy.
+Both refuse it with `beads.ErrProxiedServerUnsupported` (GH#8323) unless the
+environment forces server mode and names the port to dial. The check
 (`checkProxiedServerWorkspace` in `beads.go`) runs right after the backend
 check, before `configfile.Load`, the per-open option refusals and every Dolt
-arm, and reads metadata without rewriting it. So nothing is opened, created or
-migrated, a legacy `config.json` is left in place, and `BEADS_DOLT_SERVER_MODE`
-or `BEADS_DOLT_SHARED_SERVER` (which make `configfile.IsDoltServerMode` true
-ahead of `dolt_mode`) cannot send the open to a server behind the proxy's back.
-The refusal quotes the `dolt_mode` value and names the metadata file that
-declares it. A registered extension backend is unaffected:
-`IsDoltProxiedServerMode` is false for any backend but `dolt`.
+arm, and reads metadata without rewriting it. A refused open opens, creates and
+migrates nothing, and leaves a legacy `config.json` in place. The refusal
+quotes the `dolt_mode` value and names the metadata file that declares it. A
+registered extension backend is unaffected: `IsDoltProxiedServerMode` is false
+for any backend but `dolt`.
 
-Before that refusal, both copies dispatched on `cfg.IsDoltServerMode()` alone,
-and `configfile.IsDoltServerMode` and `IsDoltProxiedServerMode` are mutually
-exclusive — proxied workspaces are explicitly exempt from the host-based
-server-mode inference. A proxied-server workspace therefore fell through to
-`embeddeddolt.Open` on cgo builds (and to the embedded-Dolt-requires-CGO error
-on pure-Go builds). Why that had to become a refusal is the directory layout,
-which still holds.
+The exception comes from the environment. `BEADS_DOLT_SERVER_MODE=1` or
+`BEADS_DOLT_SHARED_SERVER` makes `configfile.IsDoltServerMode` true ahead of
+`dolt_mode`, so the two predicates are not mutually exclusive once the
+environment forces server mode: proxied workspaces are exempt only from the
+host-based server-mode inference. Such an open takes the server arm and dials
+the port the store resolves:
+
+- With `BEADS_DOLT_SERVER_PORT` set, that is the port it names, ahead of every
+  other source. The check lets this open through, so it behaves as it did
+  before the refusal. Gas City's proxied-native lane opens this way, with
+  `BEADS_DOLT_SERVER_MODE=1` and `BEADS_DOLT_SERVER_HOST` and
+  `BEADS_DOLT_SERVER_PORT` naming the proxy's data port from `proxy.pid`, but
+  the open gets no session from a proxy that has #7885 (see below).
+- Without it, the port comes from bd's own sources (the `dolt-server.port`
+  file, config, defaults), and none of them holds the proxy's data port, which
+  only `proxy.pid` records. Under `BEADS_DOLT_SERVER_MODE`, with no
+  `dolt-server.port` file, it is the `listener.port` the generated
+  `.beads/dolt/config.yaml` gives the proxy's own Dolt child (§3), so the open
+  would reach the live database around the proxy. The check refuses this open.
+  The legacy `BEADS_DOLT_PORT` does not count as naming the port, because a
+  persisted port outranks it. Neither does `BEADS_DOLT_SERVER_SOCKET`, because
+  the proxy listens on TCP only.
+
+Before the refusal, both copies dispatched on `cfg.IsDoltServerMode()` alone.
+Unless the environment forces it, that predicate is false for a proxied-server
+workspace, so the open fell through to `embeddeddolt.Open` on cgo builds (and
+to the embedded-Dolt-requires-CGO error on pure-Go builds). Why that had to
+become a refusal is the directory layout, which still holds.
 
 The two paths look at **different directories entirely**. `embeddeddolt`
 joins its data directory as `<beadsDir>/embeddeddolt` and does so in four
@@ -647,11 +684,28 @@ The read-only join site behaves the other way: `openReadOnly` does **not**
 create. It `os.Stat`s the same directory and returns
 `embeddeddolt: no embedded database at …` when it is absent.
 
-`OpenBestAvailable` is no longer a way into a proxied workspace. An embedder
-that wants the proxied endpoint should connect to the data port (§3), or run bd
-in that workspace. `Open`, `OpenFromConfig` and `OpenGated` have no proxied
-guard yet: they open through `dolt.New`/`NewFromConfigWithOptions`, which never
-read the proxy's data port, so do not use them as a way around the refusal.
+So `OpenBestAvailable` never finds the proxy by itself, and naming its data
+port does not get an embedder in either. Since #7885 the proxy authenticates
+every data-port connection with the `BDPROXY1` exchange (§3), which only bd's
+unit-of-work providers make: they dial `proxy.DataNetwork`. The server arm the
+named-port open reaches builds a plain `tcp` MySQL DSN
+(`internal/storage/doltutil/dsn.go`), so a proxy that has #7885 closes its
+connection and the open fails with a connection error, not
+`ErrProxiedServerUnsupported`. It works only against a proxy started by an
+older bd. A plain MySQL client fails the same way. An embedder that needs a
+proxied workspace runs bd in it (`bd sql` for ad-hoc queries).
+
+`Open`, `OpenFromConfig` and `OpenGated` have no proxied guard, so do not use
+them on a proxied-server workspace either. They always open a server store
+through `dolt.New`/`NewFromConfigWithOptions`, with `CreateIfMissing` set, and
+never read `proxy.pid`. Without `BEADS_DOLT_SERVER_PORT` they resolve the port
+from bd's own sources, as the refused env-forced open would: with no
+`dolt-server.port` file, the Dolt child's `listener.port`. So with the proxy up
+they open the live database around the proxy. With the proxy down nothing
+marks the server as externally managed (`doltserver.ResolveServerMode` returns
+`ServerModeOwned`), so `OpenFromConfig` and `OpenGated`, which leave the
+store's auto-start on by default, can start a `dolt sql-server` of their own
+over the proxied root.
 
 `SetEventsJournalEnabled(enabled bool)` is **not a method on the `Storage`
 interface.** `beads.Storage` aliases `internal/beads.Storage`, which aliases
@@ -665,7 +719,9 @@ The two concrete types `OpenBestAvailable` can return from its Dolt arms do
 implement it: `dolt.DoltStore` and `embeddeddolt.EmbeddedDoltStore` each declare
 the method. (bd's own proxied path forwards it through the unit-of-work provider,
 but that provider is not something `OpenBestAvailable` returns: it refuses a
-proxied workspace, see the routing fact above.) An embedder reaches it by type assertion:
+proxied workspace, or, when the environment names the port, returns the server
+arm's `dolt.DoltStore`; see the routing fact above.) An embedder reaches it by
+type assertion:
 
 ```go
 store, err := beads.OpenBestAvailable(ctx, beadsDir)
@@ -885,7 +941,18 @@ live proxy to confirm end to end, and are therefore inferred from the code:
   handed back a usable but separate store. The *routing* and the *directory*
   were read off the source; the refusal that replaced it is pinned by tests in
   `open_backend_selection_test.go`, but it was not run against a live proxied
-  workspace.
+  workspace. Those tests pin the env-forced open at a named port only up to its
+  dial: it reaches the server arm and fails to connect at the named endpoint,
+  where no proxy listens.
+- That the env-forced `OpenBestAvailable` open at a named port, and a plain
+  MySQL client, get no session from a proxy that has #7885 (§3, §8). The
+  proxy's data-port authentication and the server arm's plain `tcp` DSN were
+  read off the source at `8cdfa796a8`; the open was not run against a live
+  proxy.
+- That `Open`, `OpenFromConfig` and `OpenGated` reach the Dolt child's
+  `listener.port` with the proxy up, and that the latter two can auto-start a
+  server with it down (§8). Both were read off the port chain and the
+  auto-start rule, not run.
 
 Everything else — field names, JSON keys and their types, argv and flag
 spellings, exported Go symbols, default values, and which code path decides

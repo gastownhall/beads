@@ -16,7 +16,10 @@ import (
 // supported; embedded Dolt returns an error directing the user to server mode.
 // A Dolt workspace in proxied-server mode is refused with
 // ErrProxiedServerUnsupported in every build, before anything is opened or
-// created; only the bd CLI serves that mode.
+// created; only the bd CLI serves that mode. The exception is an environment
+// that forces server mode and names the port (BEADS_DOLT_SERVER_PORT): that
+// open dials the named endpoint as in server mode, which the data port of a
+// proxy this bd starts does not accept (see ErrProxiedServerUnsupported).
 //
 // beadsDir is the path to the .beads directory.
 //
@@ -40,9 +43,10 @@ func OpenBestAvailableWith(ctx context.Context, beadsDir string, opts OpenOption
 	if err := checkDiscoveredBackend(beadsDir); err != nil {
 		return nil, err
 	}
-	// A proxied-server workspace is served only through its proxy, which the
-	// SDK cannot reach: refuse it before Load, the option refusals and every
-	// Dolt arm (GH#8323).
+	// A proxied-server workspace is served through its proxy, whose data port
+	// the SDK cannot find: refuse it before Load, the option refusals and
+	// every Dolt arm, unless the env forces server mode at a port it names
+	// (GH#8323).
 	if err := checkProxiedServerWorkspace(beadsDir); err != nil {
 		return nil, err
 	}

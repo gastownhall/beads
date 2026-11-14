@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/steveyegge/beads/internal/beads"
@@ -88,20 +89,41 @@ var ErrUnsupportedCredential = backends.ErrUnsupportedCredential
 // ErrProxiedServerUnsupported is returned by OpenBestAvailable and
 // OpenBestAvailableWith for a Dolt workspace in proxied-server mode, which
 // only the bd CLI serves (through the workspace's proxy). Nothing is opened
-// or created. Match it with errors.Is.
+// or created. The one such open they do not refuse is one the environment
+// forces into server mode at a port it names (BEADS_DOLT_SERVER_PORT), which
+// dials that endpoint as a plain MySQL client. That is no way into a proxy
+// this bd starts: its data port closes every connection that does not open
+// with bd's authenticated BDPROXY1 exchange. Match it with errors.Is.
 var ErrProxiedServerUnsupported = errors.New("beads: the Go SDK cannot open a proxied-server workspace")
 
 // checkProxiedServerWorkspace refuses a Dolt workspace in proxied-server mode
-// with ErrProxiedServerUnsupported. OpenBestAvailableWith runs it right after
-// checkDiscoveredBackend: before configfile.Load (which would migrate a
+// with ErrProxiedServerUnsupported (GH#8323), unless the environment forces
+// server mode and names the port to dial. OpenBestAvailableWith runs it right
+// after checkDiscoveredBackend: before configfile.Load (which would migrate a
 // legacy config.json), before the per-open option refusals (the workspace
-// cannot be opened whatever the options are), and before every Dolt arm, so
-// neither BEADS_DOLT_SERVER_MODE nor BEADS_DOLT_SHARED_SERVER can send it to
-// a server behind its proxy's back, as the CLI store factories refuse it
-// before choosing a server or embedded store. It reads metadata as
-// checkDiscoveredBackend does, which never rewrites the workspace; metadata
-// that does not load is left to Load to report. IsDoltProxiedServerMode is
-// false for any backend but Dolt, so a registered backend still dispatches.
+// cannot be opened whatever the options are), and before every Dolt arm.
+//
+// An open the check refuses would not go through the proxy: the embedded arm
+// (cgo builds) creates a second database under .beads/embeddeddolt beside the
+// proxied root, the pure-Go build reports that embedded Dolt needs CGO, and a
+// bare BEADS_DOLT_SERVER_MODE or BEADS_DOLT_SHARED_SERVER dials a port bd
+// resolves itself (its port file, config, defaults). That is never the
+// proxy's data port, which only the proxy's own proxy.pid holds; with
+// BEADS_DOLT_SERVER_MODE in the default layout it is the listener.port of the
+// proxy's Dolt child (.beads/dolt/config.yaml), the live database behind the
+// proxy. An open that names the port reaches the server arm and dials that
+// endpoint, as it did before this check. Gas City's proxied-native lane opens
+// that way, naming the proxy's data port (BEADS_DOLT_SERVER_MODE=1 with
+// BEADS_DOLT_SERVER_HOST and BEADS_DOLT_SERVER_PORT), but the server arm
+// connects as a plain MySQL client, so a proxy started by a bd that
+// authenticates its data port (BDPROXY1) closes that connection. The CLI store
+// factories never take that route: they check proxied-server mode before
+// choosing a server or embedded store.
+//
+// It reads metadata as checkDiscoveredBackend does, which never rewrites the
+// workspace; metadata that does not load is left to Load to report.
+// IsDoltProxiedServerMode is false for any backend but Dolt, so a registered
+// backend still dispatches.
 func checkProxiedServerWorkspace(beadsDir string) error {
 	cfg, err := configfile.LoadDiscoveredForOpen(beadsDir)
 	if err != nil {
@@ -110,12 +132,30 @@ func checkProxiedServerWorkspace(beadsDir string) error {
 	if cfg == nil || !cfg.IsDoltProxiedServerMode() {
 		return nil
 	}
+	// On a proxied workspace only BEADS_DOLT_SERVER_MODE or
+	// BEADS_DOLT_SHARED_SERVER makes IsDoltServerMode true (host inference
+	// exempts the mode), and then the open takes the server arm.
+	if cfg.IsDoltServerMode() && envNamesDoltServerPort() {
+		return nil
+	}
 	// MetadataFilePath names the legacy config.json when that file holds the
 	// setting; BackendNotOpenedGuarantee is the shared data-safety text. The
 	// message points at the bd CLI, not OpenFromConfig: OpenFromConfig never
 	// reads the proxy's data port, so it would dial around the proxy.
 	return fmt.Errorf("%w: %s sets dolt_mode %q, which only the bd CLI can serve; %s. Run bd in that workspace instead",
 		ErrProxiedServerUnsupported, configfile.MetadataFilePath(beadsDir), cfg.DoltMode, configfile.BackendNotOpenedGuarantee)
+}
+
+// envNamesDoltServerPort reports whether BEADS_DOLT_SERVER_PORT names a port,
+// parsed as the store parses it (dolt.ResolveServerPort). It is the one
+// setting that fixes the port the server arm dials ahead of every other
+// source. The legacy BEADS_DOLT_PORT does not count, because a port persisted
+// in config.yaml or metadata.json outranks it. Nor does
+// BEADS_DOLT_SERVER_SOCKET: bd's proxy listens on TCP only, and a socket that
+// does not answer falls back to TCP on a port bd resolves.
+func envNamesDoltServerPort() bool {
+	port, err := strconv.Atoi(os.Getenv("BEADS_DOLT_SERVER_PORT"))
+	return err == nil && port > 0
 }
 
 // configuredBackendUnavailable is the public open path's fail-closed refusal for
