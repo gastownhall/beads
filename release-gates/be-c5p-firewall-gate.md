@@ -20,7 +20,7 @@
 | 3 | Tests pass | PASS | `make test` (with `gms_pure_go`) on `release/be-c5p-firewall` produces an **identical 35-test failure set** to `origin/main` under the same rig environment. **Zero regressions introduced.** Failure set is pre-existing worktree-/HOME-/env-coupled config tests, independent of be-c5p (mirrors be-ripy reviewer's note: "pre-existing failures independently confirmed via revert"). The directly relevant `internal/storage/dolt` package passes (`ok 0.092s`) under a clean env, including the highest-risk Rule 1 test `TestApplyConfigDefaults_TestModeBlocksProdPort`. |
 | 4 | No HIGH-severity review findings open | PASS | 0 HIGH/blocker findings. 1 MEDIUM finding (coverage gap) — not blocking, filed as **be-z62** with 8 suggested unit tests. 1 LOW finding (descriptive nit on bead description) — not blocking. |
 | 5 | Final branch is clean | PASS | `git status` clean (untracked `.gc/`, `.gitkeep` are gc-management infra, not code). |
-| 6 | Branch diverges cleanly from main | PASS | Cherry-pick of `47dcc380` onto `origin/main@8694c535` applied cleanly with no conflicts. Single commit on top of main: `064a9fa9 feat(storage): be-c5p AD-01 isProductionPort + DB-name firewall` (15 files, +195 / −10). |
+| 6 | Branch diverges cleanly from main | PASS | Cherry-pick of `47dcc380` onto `origin/main@8694c535` applied cleanly with no conflicts. Single commit on top of main: `064a9fa9 feat(storage): be-c5p AD-01 isProductionPort + DB-name firewall` (15 files, +195 / -10). |
 
 ## Acceptance check (be-m1u)
 

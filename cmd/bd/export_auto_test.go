@@ -1709,7 +1709,7 @@ func TestTryIncrementalExport_PatchesChangedIssuesAndDropsRemoved(t *testing.T) 
 		t.Fatal("expected incremental path to succeed")
 	}
 	if issueCount != 4 {
-		t.Errorf("issueCount = %d, want 4 (5 baseline − 1 deleted)", issueCount)
+		t.Errorf("issueCount = %d, want 4 (5 baseline - 1 deleted)", issueCount)
 	}
 	_ = memoryCount
 

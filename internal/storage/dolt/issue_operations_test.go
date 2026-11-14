@@ -79,7 +79,7 @@ func TestNonCoordinationPatchSignalsCountMatchesStruct(t *testing.T) {
 	got := len(nonCoordinationPatchSignals(issueops.IssuePatch{}))
 	if got != want {
 		t.Fatalf("nonCoordinationPatchSignals length = %d, want %d "+
-			"(%d scalar Field[T] − %d coordination + %d LabelPatch + %d MetadataPatch); "+
+			"(%d scalar Field[T] - %d coordination + %d LabelPatch + %d MetadataPatch); "+
 			"add the new patch field to nonCoordinationPatchSignals",
 			got, want, scalar, len(coordinationFields), labelFields, metadataFields)
 	}
