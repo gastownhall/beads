@@ -22,8 +22,11 @@ func (s *DoltStore) settleBlockedRecheck(ctx context.Context, pending issueops.B
 // (commitWispDurable), then settles the dependents tx's unblocking writes
 // recorded. The wisp writers run on raw transactions outside withWriteTx, so
 // without the recheck their writes would record into nothing and keep the
-// #6716 race. The order is the durable writers': the write's own commit first,
-// then the commit of its durable rows, then the recheck's.
+// #6716 race. The order is the one runDoltTransaction and RemoveDependency
+// keep: the write's own commit first, then the commit of its durable rows,
+// then the recheck's. The writers that publish through
+// publishCommittedOperation settle the recheck first; see the exception
+// documented there.
 func (s *DoltStore) commitWispTxAndRecheck(ctx context.Context, op string, tx *sql.Tx, changed wispDurable, commitMsg string) error {
 	if err := s.commitSQLTx(ctx, op, tx); err != nil {
 		return err

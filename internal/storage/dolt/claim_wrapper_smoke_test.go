@@ -15,8 +15,8 @@ import (
 // Claimer contract exercises. It decides for itself, inside its own
 // withCircuitWrite, whether an id belongs to the wisps plane, and routes there
 // through claimWisp — a different transaction wrapper, with no Dolt version
-// commit — or to withRetryTx over issueops.ClaimIssueInTx plus a
-// doltAddAndCommitInTx it spells itself. The ROLE path never calls this method:
+// commit — or to the issue-operation funnel over issueops.ClaimIssueInTx,
+// which publishes after the SQL commit. The ROLE path never calls this method:
 // issueClaimer.Claim goes through runIssueOperationTx to
 // issueops.ExecuteClaim, and ExecuteClaim REFUSES every wisp id before the CAS
 // (issueops/claimer.go's "A wisp id is ErrNotFound"). So the wisp branch of
@@ -99,7 +99,7 @@ func TestClaimIssueWrapperRoutesItsOwnBranches(t *testing.T) {
 	// delta assertion green: routing the wisp through the DURABLE branch
 	// instead (the durable branch stages "issues" and "events", neither of
 	// which a wisp claim dirties, so the empty-staged-set guard suppresses the
-	// commit), and adding a doltAddAndCommitInTx over the wisp tables to
+	// commit), and adding a DOLT_ADD/DOLT_COMMIT over the wisp tables to
 	// claimWisp itself (DOLT_ADD stages nothing for an ignored table, so the
 	// same guard fires). The property is enforced by the dolt_ignore
 	// configuration, one layer below this wrapper, and a case asserting it here

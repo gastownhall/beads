@@ -189,7 +189,7 @@ func epochPublishIndex(events []string, pred func(string) bool) int {
 // TestEpochWritesPublishToDoltOnlyAfterTheSQLCommit is the ordering contract
 // of dolt_commit_ordering_test.go applied to the epoch methods. Staging and
 // Dolt-committing store_epoch or epoch_minted_addresses inside the still-open
-// SQL transaction is the lost-update hazard documented on doltAddAndCommitInTx
+// SQL transaction is the lost-update hazard of GH#5752
 // (LatentLabsSpace/NEXUS#92), and it costs more here than on issues: both
 // tables are append-only, so a row reverted to its BEGIN-time value is never
 // rewritten.

@@ -24,9 +24,9 @@ func (s *EmbeddedDoltStore) MetadataCAS() (issueops.MetadataCAS, error) {
 // compare and the write need a TRANSACTION, which storage.DoltStorage does not
 // publish, so the sharing with the server-backed store happens at
 // issueops.CompareAndSetMetadataKeyInTx. The two differ only in how they reach
-// a transaction and in WHEN the version-control entry lands: the server writes
-// it inside the write transaction, this one after the SQL commit on a second
-// connection.
+// a transaction and in which connection writes the version-control entry:
+// both write it after the SQL commit (GH#5752), the server on a fresh pooled
+// connection, this one on a second connection.
 type metadataCAS struct{ store *EmbeddedDoltStore }
 
 var _ issueops.MetadataCAS = (*metadataCAS)(nil)

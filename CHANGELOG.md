@@ -1281,6 +1281,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Concurrent server-mode writes no longer revert each other in Dolt
+  history** (part of #5752). In server mode, updates, claims, unclaims,
+  closes, reopens, metadata and slot writes, wisp promotion and demotion,
+  lifecycle transactions, deletes and the sweeper staged and Dolt-committed
+  their tables inside the still-open SQL transaction. `DOLT_ADD` stages a
+  whole table from the transaction's starting snapshot, so on a busy server
+  that commit could write rows another writer had just committed back to
+  their old values. Each of these writes now commits its SQL transaction
+  first and then makes its Dolt commit. If that trailing commit fails, the
+  write still reports success (it is already durable), the failure is logged
+  and counted on `bd.db.post_tx_commit_dropped`, and the next commit picks
+  the change up; previously some of these paths returned an error for a
+  write that had landed. A lost SQL `COMMIT` response is still reported as
+  indeterminate and never retried. The sweeper now honors `dolt.auto-commit`
+  `batch`/`off` like the role deleter, and neither sends a `DOLT_COMMIT` when
+  nothing was staged. Writes in proxied-server mode still make their Dolt
+  commit inside the transaction; #5752 stays open for them.
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
