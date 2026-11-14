@@ -1181,6 +1181,39 @@ func captureStderrForTest(t *testing.T, fn func()) string {
 	return string(out)
 }
 
+// captureOutputForTest swaps os.Stdout and os.Stderr for the duration of fn
+// and returns what was written to each.
+func captureOutputForTest(t *testing.T, fn func()) (stdout, stderr string) {
+	t.Helper()
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	savedOut, savedErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = outW, errW
+	defer func() { os.Stdout, os.Stderr = savedOut, savedErr }()
+	fn()
+	if err := outW.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := errW.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stdoutBytes, err := io.ReadAll(outR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderrBytes, err := io.ReadAll(errR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(stdoutBytes), string(stderrBytes)
+}
+
 // TestFindBeadsDir_WorktreeStoreWithMetadataNotYielded is the AC-4 guard for
 // the GH#6552 fix: a worktree store that carries readable workspace metadata
 // of its own — however it got there, and whether or not it names a database
@@ -1397,4 +1430,60 @@ func TestFindBeadsDir_ExplicitOverridesBypassYield(t *testing.T) {
 			t.Errorf("no missing-metadata warning expected for an explicit redirect, got stderr:\n%s", stderr)
 		}
 	})
+}
+
+// TestFindBeadsDir_WorktreeMetadatalessStoreWarnsOnce covers the GH#6552
+// warning: invoking every discovery entry point repeatedly in one process
+// yields exactly one warning on stderr — naming the skipped and shared
+// directories, the missing-metadata reason, the observed and declared
+// database names, and the BEADS_DIR inspection override — and writes
+// nothing to stdout.
+func TestFindBeadsDir_WorktreeMetadatalessStoreWarnsOnce(t *testing.T) {
+	unsetDiscoveryEnvForTest(t)
+
+	fx := newGH6552Fixture(t,
+		`{"backend":"dolt","dolt_mode":"embedded","dolt_database":"myproject"}`,
+		filepath.Join("embeddeddolt", "myproject"),
+		"beads")
+
+	// Give the phantom a recognizable database marker so the warning can
+	// name it: the marker probe requires a nonempty .dolt directory.
+	markerDir := filepath.Join(fx.worktreeBeadsDir, "embeddeddolt", "beads", ".dolt")
+	if err := os.MkdirAll(markerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(markerDir, "placeholder"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(fx.worktreeDir)
+	git.ResetCaches()
+
+	stdout, stderr := captureOutputForTest(t, func() {
+		for i := 0; i < 3; i++ {
+			_ = FindBeadsDir()
+			_ = FindDatabasePath()
+			_ = FindBeadsDirFrom(fx.worktreeDir)
+		}
+	})
+
+	if strings.TrimSpace(stdout) != "" {
+		t.Errorf("discovery wrote diagnostics to stdout:\n%s", stdout)
+	}
+
+	if count := strings.Count(stderr, "GH#6552"); count != 1 {
+		t.Errorf("got %d missing-metadata warnings for repeated discovery of one store, want exactly 1; stderr:\n%s", count, stderr)
+	}
+	for _, want := range []string{
+		fx.worktreeBeadsDir,
+		fx.mainBeadsDir,
+		"no metadata.json or config.json",
+		"marker probe, not a content check): beads",
+		`dolt_database "myproject"`,
+		"BEADS_DIR='" + fx.worktreeBeadsDir + "' bd list",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("warning is missing %q; stderr:\n%s", want, stderr)
+		}
+	}
 }

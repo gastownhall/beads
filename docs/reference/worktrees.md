@@ -52,6 +52,55 @@ Key points:
 - Cross-clone sync uses `bd dolt pull` and `bd dolt push`.
 - No `sync.branch` or beads-managed Git worktree is required.
 
+### Worktree stores without metadata yield to the shared workspace
+
+When automatic discovery finds a worktree-local `.beads` that owns a database
+directory (`embeddeddolt/`, `dolt/`, or a `*.db` file) but has **no
+workspace metadata of its own** — no `metadata.json` and no legacy
+`config.json` — and the shared workspace is itself recognized by readable
+metadata, discovery selects the shared workspace and skips the local store.
+Such a metadata-less store is usually accidental: a command whose embedded
+fallback ran inside the worktree (for example `bd prime`) can leave an empty
+embedded store there, and without this rule it would silently shadow the
+repository's real database for every command.
+
+The skip emits one warning per worktree store per `bd` process (stderr
+only), naming the skipped and shared directories, the embedded database
+names observed in the skipped store (a directory-marker probe, not a content
+check), the shared workspace's declared `dolt_database`, and an explicit
+inspection command:
+
+```text
+Warning: skipping the beads store at /path/worktree/.beads: it has no
+metadata.json or config.json, so discovery cannot tell it from an
+accidentally created store (GH#6552); using the shared workspace at
+/path/main/.beads instead.
+  ...
+  To inspect the skipped store, run: BEADS_DIR='/path/worktree/.beads' bd list
+```
+
+Nothing is deleted, moved, initialized, or migrated; preserve any unique
+data in the skipped store before removing the directory. Do not run
+`bd init` inside the worktree as a repair — in a linked worktree that
+targets the main repository.
+
+The rule is conditional, and its limits matter:
+
+- A worktree store **with its own metadata** — however it got there, and
+  whether or not it names a `dolt_database` — is deliberate
+  separate-database mode and keeps priority (see
+  [Multiple `.beads` Directories](#multiple-beads-directories)).
+- The yield never applies to explicit choices: `BEADS_DIR`, `BEADS_DB`, and
+  a valid per-worktree `redirect` file all take precedence and produce no
+  warning.
+- A shared candidate that is not a recognized workspace (no readable
+  metadata, or only project files) does not displace the local store, and a
+  standalone repository — not a worktree — is never subject to the rule.
+- Metadata is a routing signal, not proof of intent: a deliberately created
+  metadata-less store beside a recognized shared workspace is routed to the
+  shared one. To keep such a store local, give the worktree `.beads` its own
+  `metadata.json` or point `BEADS_DIR` at it.
+
 ## Basic Usage
 
 Initialize beads once in the repository:
@@ -140,6 +189,13 @@ If the repository has no beads workspace yet, run `bd init` from the main
 repository.
 
 ### Multiple `.beads` Directories
+
+A worktree `.beads` with its own `metadata.json` (or legacy `config.json`) is
+a separate-database workspace by design: discovery keeps selecting it, and it
+does not warn. A worktree `.beads` that owns a database directory but no
+metadata is skipped in favor of a recognized shared workspace, with the
+warning described in
+[Worktree stores without metadata yield to the shared workspace](#worktree-stores-without-metadata-yield-to-the-shared-workspace).
 
 If a worktree has its own accidental `.beads` directory, remove or archive the
 extra copy after confirming it does not contain unique issue data. By default,

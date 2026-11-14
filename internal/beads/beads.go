@@ -974,7 +974,8 @@ func hasBeadsDatabase(beadsDir string) bool {
 // names: an embedded store's directory name is not identity, and discovery
 // stays metadata-driven. Callers apply it only in the implicit worktree and
 // secondary-workspace selection, after explicit redirects and environment
-// overrides have had their say.
+// overrides have had their say. An actual yield reports
+// warnMetadatalessStoreYieldOnce — once per local store per process.
 func localStoreYieldsToShared(local, shared string) bool {
 	if local == "" || shared == "" {
 		return false
@@ -985,7 +986,62 @@ func localStoreYieldsToShared(local, shared string) bool {
 	if cfg, err := configfile.LoadForDiscovery(local); err != nil || cfg != nil {
 		return false
 	}
-	return sharedWorkspaceIsRecognized(shared, local)
+	if !sharedWorkspaceIsRecognized(shared, local) {
+		return false
+	}
+	warnMetadatalessStoreYieldOnce(local, shared)
+	return true
+}
+
+// metadatalessStoreYieldWarned tracks the local .beads directories whose
+// GH#6552 yield has already been reported in this process. Every resolver
+// consults the same decision, so without the guard one bd invocation would
+// warn once per resolver per call for the same store.
+var metadatalessStoreYieldWarned sync.Map
+
+// warnMetadatalessStoreYieldOnce explains an actual implicit yield: the
+// metadata-less local store discovery is passing over, the shared workspace
+// selected in its place, and how to inspect the skipped store — at most once
+// per canonical local path per process, mirroring
+// warnInvalidRedirectTargetOnce.
+//
+// The names it reports are evidence, not verdicts: the skipped store's
+// embedded database names come from a directory-marker probe, and the shared
+// workspace's dolt_database is the declared metadata value, which the
+// environment can override. It deliberately does not suggest running
+// `bd init` as a repair — in a linked worktree that targets the main
+// repository — and discovery itself never deletes, renames, initializes, or
+// migrates the skipped store.
+func warnMetadatalessStoreYieldOnce(local, shared string) {
+	key := utils.CanonicalizePath(local)
+	if _, alreadyWarned := metadatalessStoreYieldWarned.LoadOrStore(key, struct{}{}); alreadyWarned {
+		return
+	}
+
+	sharedResolved := FollowRedirect(shared)
+
+	var msg strings.Builder
+	fmt.Fprintf(&msg, "Warning: skipping the beads store at %s: it has no metadata.json or config.json, so discovery cannot tell it from an accidentally created store (GH#6552); using the shared workspace at %s instead.\n", local, sharedResolved)
+	if names := configfile.EmbeddedDoltDatabases(local); len(names) > 0 {
+		fmt.Fprintf(&msg, "  Embedded databases observed in the skipped store (marker probe, not a content check): %s\n", strings.Join(names, ", "))
+	} else {
+		fmt.Fprintf(&msg, "  The skipped store's embedded directories show no recognized database markers.\n")
+	}
+	if cfg, err := configfile.LoadForDiscovery(sharedResolved); err == nil && cfg != nil && cfg.DoltDatabase != "" {
+		fmt.Fprintf(&msg, "  The shared workspace declares dolt_database %q (a declared name; the environment can override the effective one).\n", cfg.DoltDatabase)
+	} else {
+		fmt.Fprintf(&msg, "  The shared workspace declares no dolt_database; its effective database name may come from the environment.\n")
+	}
+	fmt.Fprintf(&msg, "  To inspect the skipped store, run: BEADS_DIR=%s bd list\n", shellSingleQuoted(local))
+	fmt.Fprintf(&msg, "  Nothing was changed or removed; preserve any data in the skipped store you still need before deleting it.\n")
+
+	fmt.Fprint(os.Stderr, msg.String())
+}
+
+// shellSingleQuoted wraps s in single quotes for a shell command line,
+// escaping any embedded single quote the portable way ('...'+'\'').
+func shellSingleQuoted(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // sharedWorkspaceIsRecognized reports whether shared, a candidate shared
