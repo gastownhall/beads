@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -150,7 +151,11 @@ func TestReopenIssuePromotionRaceUsesTransactionRouting(t *testing.T) {
 	if !routingDriver.issueUpdated {
 		t.Fatal("promoted permanent issue was not updated")
 	}
-	if got, want := routingDriver.doltAddTables, []string{"issues", "events"}; !reflect.DeepEqual(got, want) {
+	// The post-tx publisher (GH#5752) stages the table set in sorted order; the
+	// contract is the SET {issues, events}, not the call order.
+	got := append([]string(nil), routingDriver.doltAddTables...)
+	sort.Strings(got)
+	if want := []string{"events", "issues"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("DOLT_ADD tables = %v, want %v for promoted permanent issue", got, want)
 	}
 	if !routingDriver.doltCommitCalled {

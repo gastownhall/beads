@@ -3,7 +3,6 @@ package dolt
 import (
 	"context"
 	"database/sql"
-	"log"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
 )
@@ -50,22 +49,16 @@ type wispDurable struct {
 // wisp tables are dolt-ignored and commit with the SQL transaction, but those
 // rows would otherwise sit in the working set (GH#6647). It runs after the
 // SQL commit, so the write is already durable: a failed history commit is
-// counted and logged like runIssueOperationTxWithMessage's trailing commit,
+// counted and logged like the shared post-tx publisher's trailing commit,
 // never returned, and the rows ride the next Dolt commit. Retrying the write
 // does not publish them either, since a change-free retry changes no row.
 func (s *DoltStore) commitWispDurable(ctx context.Context, changed wispDurable, commitMsg string) {
-	var tables []string
+	var tables issueops.ChangedTables
 	if changed.dependencies {
-		tables = append(tables, "dependencies")
+		tables["dependencies"] = true
 	}
 	if changed.issues {
-		tables = append(tables, "issues")
+		tables["issues"] = true
 	}
-	if len(tables) == 0 {
-		return
-	}
-	if err := s.doltAddAndCommitPostTx(ctx, tables, commitMsg); err != nil {
-		doltMetrics.postTxCommitDropped.Add(ctx, 1)
-		log.Printf("dolt: post-tx dolt commit failed for %q (data already committed; change rides the next dolt commit): %v", commitMsg, err)
-	}
+	s.publishCommittedOperation(ctx, tables, commitMsg)
 }

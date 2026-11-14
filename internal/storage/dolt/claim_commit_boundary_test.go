@@ -237,8 +237,14 @@ func newClaimCommitBoundaryStore(d *claimCommitBoundaryDriver) *DoltStore {
 	return &DoltStore{db: sql.OpenDB(d)}
 }
 
-func TestClaimIssueDoltCommitResponseLossIsIndeterminateAndNotReplayed(t *testing.T) {
-	driver := &claimCommitBoundaryDriver{commitErr: testConnectionLoss}
+// TestClaimIssueTxCommitResponseLossIsIndeterminateAndNotReplayed keeps the
+// indeterminate-commit contract at the claim seam after GH#5752 moved the Dolt
+// history commit out of the SQL transaction: a connection loss during the SQL
+// COMMIT itself is still ambiguous, must surface ErrCommitIndeterminate, must
+// not replay the claim, and must mint no trailing Dolt publication (which
+// would stage the shared working set off an ambiguous commit).
+func TestClaimIssueTxCommitResponseLossIsIndeterminateAndNotReplayed(t *testing.T) {
+	driver := &claimCommitBoundaryDriver{sqlCommitErr: testConnectionLoss}
 	store := newClaimCommitBoundaryStore(driver)
 	t.Cleanup(func() { _ = store.db.Close() })
 
@@ -255,23 +261,53 @@ func TestClaimIssueDoltCommitResponseLossIsIndeterminateAndNotReplayed(t *testin
 	if driver.claimMutations != 1 {
 		t.Fatalf("claim mutations = %d, want 1", driver.claimMutations)
 	}
-	if driver.doltCommits != 1 {
-		t.Fatalf("DOLT_COMMIT calls = %d, want 1", driver.doltCommits)
+	if driver.doltCommits != 0 {
+		t.Fatalf("DOLT_COMMIT calls = %d, want 0 (no trailing publication off an ambiguous SQL commit)", driver.doltCommits)
 	}
-	if driver.txCommits != 0 || driver.txRollbacks != 1 {
-		t.Fatalf("SQL transaction outcomes = commits:%d rollbacks:%d, want commits:0 rollbacks:1", driver.txCommits, driver.txRollbacks)
+	if driver.txAttempts != 1 {
+		t.Fatalf("transaction attempts = %d, want 1 (no replay)", driver.txAttempts)
 	}
 }
 
-func TestClaimIssueDoltAddFailureCannotReportSuccess(t *testing.T) {
+// TestClaimIssueTrailingDoltCommitFailureReportsSuccess pins the GH#5752
+// failure contract at the claim seam: a DOLT_COMMIT connection loss AFTER the
+// SQL transaction committed is a trailing history-publication failure — the
+// claim IS applied — so the operation reports success, the drop is counted and
+// logged, and the claim is never replayed.
+func TestClaimIssueTrailingDoltCommitFailureReportsSuccess(t *testing.T) {
+	driver := &claimCommitBoundaryDriver{commitErr: testConnectionLoss}
+	store := newClaimCommitBoundaryStore(driver)
+	t.Cleanup(func() { _ = store.db.Close() })
+
+	if err := store.ClaimIssue(context.Background(), "claim-boundary", "alice"); err != nil {
+		t.Fatalf("ClaimIssue() error = %v, want nil (data committed; trailing dolt commit failure is dropped)", err)
+	}
+
+	driver.mu.Lock()
+	defer driver.mu.Unlock()
+	if driver.claimMutations != 1 {
+		t.Fatalf("claim mutations = %d, want 1 (no replay)", driver.claimMutations)
+	}
+	if driver.doltCommits != 1 {
+		t.Fatalf("DOLT_COMMIT calls = %d, want 1 (attempted once, then dropped)", driver.doltCommits)
+	}
+	if driver.txCommits != 1 || driver.txRollbacks != 0 {
+		t.Fatalf("SQL transaction outcomes = commits:%d rollbacks:%d, want commits:1 rollbacks:0", driver.txCommits, driver.txRollbacks)
+	}
+}
+
+// TestClaimIssueTrailingDoltAddFailureStillReportsSuccess pins the stage-fail
+// facet of the GH#5752 trailing-publication contract: a post-SQL-commit
+// DOLT_ADD failure also cannot fail the claim (the change rides the next dolt
+// commit), and no DOLT_COMMIT is attempted after staging failed.
+func TestClaimIssueTrailingDoltAddFailureStillReportsSuccess(t *testing.T) {
 	stageErr := errors.New("stage failed")
 	driver := &claimCommitBoundaryDriver{stageErr: stageErr, nothingToCommit: true}
 	store := newClaimCommitBoundaryStore(driver)
 	t.Cleanup(func() { _ = store.db.Close() })
 
-	err := store.ClaimIssue(context.Background(), "claim-boundary", "alice")
-	if !errors.Is(err, stageErr) {
-		t.Fatalf("ClaimIssue() error = %v, want stage failure %v", err, stageErr)
+	if err := store.ClaimIssue(context.Background(), "claim-boundary", "alice"); err != nil {
+		t.Fatalf("ClaimIssue() error = %v, want nil (data committed; trailing dolt add failure is dropped)", err)
 	}
 
 	driver.mu.Lock()
@@ -282,12 +318,17 @@ func TestClaimIssueDoltAddFailureCannotReportSuccess(t *testing.T) {
 	if driver.doltCommits != 0 {
 		t.Fatalf("DOLT_COMMIT calls = %d, want 0 after staging failure", driver.doltCommits)
 	}
-	if driver.txCommits != 0 || driver.txRollbacks != 1 {
-		t.Fatalf("SQL transaction outcomes = commits:%d rollbacks:%d, want commits:0 rollbacks:1", driver.txCommits, driver.txRollbacks)
+	if driver.txCommits != 1 || driver.txRollbacks != 0 {
+		t.Fatalf("SQL transaction outcomes = commits:%d rollbacks:%d, want commits:1 rollbacks:0", driver.txCommits, driver.txRollbacks)
 	}
 }
 
-func TestClaimReadyIssueDoltCommitResponseLossDoesNotDoubleClaim(t *testing.T) {
+// TestClaimReadyIssueTrailingDoltCommitFailureDoesNotDoubleClaim pins the
+// ready-claim facet of the GH#5752 contract: a trailing DOLT_COMMIT failure
+// resolves as a SUCCESSFUL claim of the issue the transaction actually won —
+// never an indeterminate error that a caller could retry onto the next ready
+// issue (double-claim).
+func TestClaimReadyIssueTrailingDoltCommitFailureDoesNotDoubleClaim(t *testing.T) {
 	driver := &claimCommitBoundaryDriver{
 		commitErr: testConnectionLoss,
 		readyIDs:  []string{"ready-first", "ready-second"},
@@ -296,11 +337,11 @@ func TestClaimReadyIssueDoltCommitResponseLossDoesNotDoubleClaim(t *testing.T) {
 	t.Cleanup(func() { _ = store.db.Close() })
 
 	claimed, err := store.ClaimReadyIssue(context.Background(), types.WorkFilter{}, "alice")
-	if !errors.Is(err, ErrCommitIndeterminate) {
-		t.Fatalf("ClaimReadyIssue() error = %v, want ErrCommitIndeterminate", err)
+	if err != nil {
+		t.Fatalf("ClaimReadyIssue() error = %v, want nil (data committed; trailing dolt commit failure is dropped)", err)
 	}
-	if claimed != nil {
-		t.Fatalf("ClaimReadyIssue() claimed = %+v, want nil while commit outcome is indeterminate", claimed)
+	if claimed == nil || claimed.ID != "ready-first" {
+		t.Fatalf("ClaimReadyIssue() claimed = %+v, want ready-first", claimed)
 	}
 
 	driver.mu.Lock()
@@ -312,7 +353,7 @@ func TestClaimReadyIssueDoltCommitResponseLossDoesNotDoubleClaim(t *testing.T) {
 		t.Fatalf("transaction attempts = %d, want 1", driver.txAttempts)
 	}
 	if driver.doltCommits != 1 {
-		t.Fatalf("DOLT_COMMIT calls = %d, want 1", driver.doltCommits)
+		t.Fatalf("DOLT_COMMIT calls = %d, want 1 (attempted once, then dropped)", driver.doltCommits)
 	}
 }
 
@@ -500,9 +541,15 @@ func TestIssueOperationsUpdateGuardedVerifyFailureDoesNotRecordCircuitSuccess(t 
 	}
 }
 
-func TestUpdateIssueCheckedMixedCoordinationCommitLossIsNotMasked(t *testing.T) {
+// TestUpdateIssueCheckedMixedCoordinationTxCommitLossIsNotMasked keeps the
+// indeterminate-commit contract for a guarded mixed-field update after GH#5752
+// moved the Dolt history commit out of the SQL transaction: a connection loss
+// during the SQL COMMIT itself surfaces ErrCommitIndeterminate — never masked
+// into success — with the write applied at most once and no trailing
+// publication off the ambiguous commit.
+func TestUpdateIssueCheckedMixedCoordinationTxCommitLossIsNotMasked(t *testing.T) {
 	driver := &claimCommitBoundaryDriver{
-		commitErr:      testConnectionLoss,
+		sqlCommitErr:   testConnectionLoss,
 		checkedUpdate:  true,
 		verifyAssignee: "alice",
 		verifyStatus:   types.StatusInProgress,
@@ -533,8 +580,51 @@ func TestUpdateIssueCheckedMixedCoordinationCommitLossIsNotMasked(t *testing.T) 
 	if driver.updateMutations != 1 || driver.eventInserts != 1 {
 		t.Fatalf("mixed update attempts = updates:%d events:%d, want updates:1 events:1", driver.updateMutations, driver.eventInserts)
 	}
-	if driver.txAttempts != 1 || driver.doltCommits != 1 || driver.txRollbacks != 1 {
-		t.Fatalf("transaction outcomes = attempts:%d Dolt commits:%d rollbacks:%d, want 1, 1, 1", driver.txAttempts, driver.doltCommits, driver.txRollbacks)
+	if driver.txAttempts != 1 {
+		t.Fatalf("transaction attempts = %d, want 1", driver.txAttempts)
+	}
+	if driver.doltCommits != 0 {
+		t.Fatalf("Dolt commits = %d, want 0 (no trailing publication off an ambiguous SQL commit)", driver.doltCommits)
+	}
+}
+
+// TestUpdateIssueCheckedTrailingDoltCommitLossResolvesApplied pins the guarded
+// update's trailing-publication contract (GH#5752): a DOLT_COMMIT loss after
+// the SQL commit and the verify-by-re-read both confirm the applied write, so
+// the guarded update reports success — the failure is dropped (counted and
+// logged) like every other migrated path.
+func TestUpdateIssueCheckedTrailingDoltCommitLossResolvesApplied(t *testing.T) {
+	driver := &claimCommitBoundaryDriver{
+		commitErr:      testConnectionLoss,
+		checkedUpdate:  true,
+		verifyAssignee: "alice",
+		verifyStatus:   types.StatusInProgress,
+	}
+	store := newClaimCommitBoundaryStore(driver)
+	store.serverMode = true
+	t.Cleanup(func() { _ = store.db.Close() })
+
+	expectedAssignee := ""
+	expectedStatus := string(types.StatusOpen)
+	err := store.UpdateIssueChecked(context.Background(), "claim-boundary", map[string]interface{}{
+		"assignee": "alice",
+		"status":   string(types.StatusInProgress),
+		"title":    "ordinary field",
+	}, "alice", storage.UpdateIssueOptions{
+		ExpectedAssignee: &expectedAssignee,
+		ExpectedStatus:   &expectedStatus,
+	})
+	if err != nil {
+		t.Fatalf("UpdateIssueChecked() error = %v, want nil (write committed and verified; trailing dolt commit failure is dropped)", err)
+	}
+
+	driver.mu.Lock()
+	defer driver.mu.Unlock()
+	if driver.updateMutations != 1 || driver.eventInserts != 1 {
+		t.Fatalf("mixed update attempts = updates:%d events:%d, want updates:1 events:1", driver.updateMutations, driver.eventInserts)
+	}
+	if driver.txAttempts != 1 || driver.doltCommits != 1 || driver.txRollbacks != 0 {
+		t.Fatalf("transaction outcomes = attempts:%d Dolt commits:%d rollbacks:%d, want 1, 1, 0", driver.txAttempts, driver.doltCommits, driver.txRollbacks)
 	}
 }
 

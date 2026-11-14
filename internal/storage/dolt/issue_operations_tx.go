@@ -82,9 +82,26 @@ func (s *DoltStore) runIssueOperationTxWithMessage(ctx context.Context, fn func(
 		// resolves the true outcome.
 		return err
 	}
+	s.publishCommittedOperation(ctx, tables, commitMsg)
+	return nil
+}
+
+// publishCommittedOperation is the one post-tx publication tail every
+// SQL-committed issue mutation funnels through (GH#5752): it stages tables and
+// mints the trailing Dolt history commit strictly AFTER the SQL transaction
+// committed — never inside it. See runIssueOperationTxWithMessage for the
+// lost-update rationale and the failure-mode note this tail implements: a
+// publication failure is counted and logged, never propagated, because the
+// data change already committed and rides the next dolt commit on the branch.
+//
+// Only call this once the SQL transaction has committed successfully — never
+// from inside one, never after an error path where the commit outcome is
+// ambiguous (ErrCommitIndeterminate): staging the shared branch working set
+// off an ambiguous commit mints phantom audit evidence.
+func (s *DoltStore) publishCommittedOperation(ctx context.Context, tables storageissueops.ChangedTables, commitMsg string) {
 	staged := sortedDirtyTables(tables)
 	if len(staged) == 0 {
-		return nil
+		return
 	}
 	if commitMsg == "" {
 		// A body can dirty tables without composing a message (e.g. a ready
@@ -93,11 +110,7 @@ func (s *DoltStore) runIssueOperationTxWithMessage(ctx context.Context, fn func(
 		commitMsg = "bd: issue operation"
 	}
 	if err := s.doltAddAndCommitPostTx(ctx, staged, commitMsg); err != nil {
-		// See the failure-mode note above: the mutation is applied and
-		// durable; only the trailing history commit is missing, and the
-		// change rides the next dolt commit on the branch.
 		doltMetrics.postTxCommitDropped.Add(ctx, 1)
 		log.Printf("dolt: post-tx dolt commit failed for %q (data already committed; change rides the next dolt commit): %v", commitMsg, err)
 	}
-	return nil
 }

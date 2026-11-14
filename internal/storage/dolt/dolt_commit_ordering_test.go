@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -71,9 +72,32 @@ type seqConnector struct {
 	queryErr func(query string) error
 	// rows, when set, serves a canned result set for matching queries.
 	rows func(query string) (driver.Rows, bool)
+	// execRows, when set, overrides the RowsAffected result for matching
+	// Exec statements — e.g. reporting 0 for a derived fixpoint UPDATE
+	// (is_blocked maintenance) so the loop converges instead of spinning on
+	// the driver's default 1.
+	execRows func(query string) (int64, bool)
 	// commitErr, when set, can fail the driver-level tx COMMIT after it is
 	// recorded (for exercising the ambiguous commit-phase path).
 	commitErr func() error
+}
+
+// renderSeqEvent renders one recorded statement. Dolt procedure calls carry
+// their interesting payload (staged table, commit message) as bind arguments
+// the query string does not show, so append them: a DOLT_ADD event reads
+// "CALL DOLT_ADD(?) issues" and a DOLT_COMMIT event carries its message.
+func renderSeqEvent(query string, args []driver.NamedValue) string {
+	if !strings.Contains(query, "DOLT_") {
+		return query
+	}
+	var parts []string
+	for _, a := range args {
+		parts = append(parts, fmt.Sprintf("%v", a.Value))
+	}
+	if len(parts) == 0 {
+		return query
+	}
+	return query + " " + strings.Join(parts, " ")
 }
 
 func (c *seqConnector) Connect(context.Context) (driver.Conn, error) {
@@ -101,18 +125,23 @@ func (c *seqConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) 
 	return &seqTx{rec: c.parent.rec, conn: c.id, commitErr: c.parent.commitErr}, nil
 }
 
-func (c *seqConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
-	c.parent.rec.add(c.id, query)
+func (c *seqConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	c.parent.rec.add(c.id, renderSeqEvent(query, args))
 	if c.parent.queryErr != nil {
 		if err := c.parent.queryErr(query); err != nil {
 			return nil, err
 		}
 	}
+	if c.parent.execRows != nil {
+		if n, ok := c.parent.execRows(query); ok {
+			return driver.RowsAffected(n), nil
+		}
+	}
 	return driver.RowsAffected(1), nil
 }
 
-func (c *seqConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
-	c.parent.rec.add(c.id, query)
+func (c *seqConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	c.parent.rec.add(c.id, renderSeqEvent(query, args))
 	if c.parent.queryErr != nil {
 		if err := c.parent.queryErr(query); err != nil {
 			return nil, err

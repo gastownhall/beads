@@ -232,19 +232,27 @@ func (s *DoltStore) updateIssue(ctx context.Context, id string, updates map[stri
 	// retried rather than surfaced as a hard failure. Dolt has no real row
 	// locking — FOR UPDATE / SKIP LOCKED are parse-only no-ops
 	// (https://www.dolthub.com/blog/2023-10-23-hold-my-beer/) — so retry is the
-	// only safety net. withRetryTx owns BeginTx and the final Commit.
-	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	// only safety net. withRetryTx owns BeginTx and the final Commit. The Dolt
+	// history commit runs after it, via the shared post-tx publisher (GH#5752).
+	var tables issueops.ChangedTables
+	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		result, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor)
 		if err != nil {
 			return err
 		}
-		if !result.Changed {
-			return nil
+		// Plain assignment (not append-into-captured-state): a retried tx
+		// re-runs the body and overwrites the captured publication intent.
+		tables = nil
+		if result.Changed {
+			tables = issueops.ChangedTables{"issues": true, "events": true}
 		}
-
-		commitMsg := fmt.Sprintf("bd: update %s", id)
-		return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, commitMsg)
+		return nil
 	})
+	if err != nil {
+		return err
+	}
+	s.publishCommittedOperation(ctx, tables, fmt.Sprintf("bd: update %s", id))
+	return nil
 }
 
 // UpdateIssueChecked applies the update like UpdateIssue, adding an optional
@@ -304,7 +312,8 @@ func (s *DoltStore) updateIssueChecked(ctx context.Context, id string, updates m
 	// and is replayed by withRetryTx, which re-reads the preconditions here and
 	// refuses. withRetryTx owns BeginTx and the final Commit.
 	write := func() error {
-		return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		var tables issueops.ChangedTables
+		err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 			if err := checkExpectedVersionInTx(ctx, tx, id, opts.ExpectedVersion); err != nil {
 				return err
 			}
@@ -315,13 +324,19 @@ func (s *DoltStore) updateIssueChecked(ctx context.Context, id string, updates m
 			if err != nil {
 				return err
 			}
-			if !result.Changed {
-				return nil
+			// Plain assignment: a retried tx re-runs the body and overwrites
+			// the captured publication intent.
+			tables = nil
+			if result.Changed {
+				tables = issueops.ChangedTables{"issues": true, "events": true}
 			}
-
-			commitMsg := fmt.Sprintf("bd: update %s", id)
-			return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, commitMsg)
+			return nil
 		})
+		if err != nil {
+			return err
+		}
+		s.publishCommittedOperation(ctx, tables, fmt.Sprintf("bd: update %s", id))
+		return nil
 	}
 
 	// A guarded update that writes the coordination fields (a reassign or a
@@ -359,19 +374,27 @@ func (s *DoltStore) claimIssue(ctx context.Context, id string, actor string) err
 	// retried instead of surfaced as a hard failure. Dolt has no real row
 	// locking — FOR UPDATE / SKIP LOCKED are parse-only no-ops
 	// (https://www.dolthub.com/blog/2023-10-23-hold-my-beer/) — so retry is the
-	// only safety net under concurrent claimants. The body stays a single tx
-	// (CAS + DOLT_COMMIT); withRetryTx owns BeginTx and the final Commit.
-	// The whole write is then resolved by verify-by-re-read (bd-zccb9): under a
-	// degraded server the exit status is not truth in either direction.
+	// only safety net under concurrent claimants. withRetryTx owns BeginTx and
+	// the final Commit; the Dolt history commit runs after it via the shared
+	// post-tx publisher (GH#5752). The whole write is then resolved by
+	// verify-by-re-read (bd-zccb9): under a degraded server the exit status is
+	// not truth in either direction.
 	return s.verifiedClaimWrite(ctx, id, claimedBy(actor), func() error {
-		return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		var tables issueops.ChangedTables
+		err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 			if _, err := issueops.ClaimIssueInTx(ctx, tx, id, actor); err != nil {
 				return err
 			}
-
-			commitMsg := fmt.Sprintf("bd: claim %s", id)
-			return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, commitMsg)
+			// Plain assignment: a retried tx re-runs the body and overwrites
+			// the captured publication intent.
+			tables = issueops.ChangedTables{"issues": true, "events": true}
+			return nil
 		})
+		if err != nil {
+			return err
+		}
+		s.publishCommittedOperation(ctx, tables, fmt.Sprintf("bd: claim %s", id))
+		return nil
 	})
 }
 
@@ -394,20 +417,28 @@ func (s *DoltStore) ClaimReadyIssue(ctx context.Context, filter types.WorkFilter
 	err := s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		write := func() (*types.Issue, error) {
 			var got *types.Issue
+			var tables issueops.ChangedTables
 			werr := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 				var err error
 				got, err = issueops.ClaimReadyIssueInTx(ctx, tx, filter, actor)
 				if err != nil {
 					return err
 				}
-				if got == nil {
-					return nil
+				// Plain assignment: a retried tx re-runs the body and
+				// overwrites both captured values.
+				tables = nil
+				if got != nil {
+					tables = issueops.ChangedTables{"issues": true, "events": true}
 				}
-
-				commitMsg := fmt.Sprintf("bd: claim ready %s", got.ID)
-				return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, commitMsg)
+				return nil
 			})
-			return got, werr
+			if werr != nil {
+				return got, werr
+			}
+			if got != nil {
+				s.publishCommittedOperation(ctx, tables, fmt.Sprintf("bd: claim ready %s", got.ID))
+			}
+			return got, nil
 		}
 		var verr error
 		claimed, verr = s.verifiedReadyClaim(ctx, actor, write)
@@ -497,20 +528,24 @@ func (s *DoltStore) HeartbeatIssue(ctx context.Context, id, actor string) error 
 func (s *DoltStore) ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error) {
 	cutoff := time.Now().UTC().Add(-olderThan)
 	var reclaimed []types.ReclaimedLease
+	var publish bool
 	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		var err error
 		reclaimed, err = issueops.ReclaimExpiredLeasesInTx(ctx, tx, cutoff, filter, actor)
 		if err != nil {
 			return err
 		}
-		if len(reclaimed) == 0 {
-			return nil
-		}
-		commitMsg := fmt.Sprintf("bd: reclaim %d expired lease(s)", len(reclaimed))
-		return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, commitMsg)
+		// Plain assignment: a retried tx re-runs the body and overwrites the
+		// captured publication intent.
+		publish = len(reclaimed) > 0
+		return nil
 	})
 	if err != nil {
 		return nil, err
+	}
+	if publish {
+		s.publishCommittedOperation(ctx, issueops.ChangedTables{"issues": true, "events": true},
+			fmt.Sprintf("bd: reclaim %d expired lease(s)", len(reclaimed)))
 	}
 	return reclaimed, nil
 }
@@ -533,14 +568,21 @@ func (s *DoltStore) UnclaimIssue(ctx context.Context, id string, actor string, f
 	// the release landed — never the moment withRetryTx's SQL commit returns.
 	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		return s.verifiedClaimWrite(ctx, id, unclaimed(), func() error {
-			return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+			var tables issueops.ChangedTables
+			err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 				if err := issueops.UnclaimIssueInTx(ctx, tx, id, actor, force); err != nil {
 					return err
 				}
-
-				commitMsg := fmt.Sprintf("bd: unclaim %s", id)
-				return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, commitMsg)
+				// Plain assignment: a retried tx re-runs the body and
+				// overwrites the captured publication intent.
+				tables = issueops.ChangedTables{"issues": true, "events": true}
+				return nil
 			})
+			if err != nil {
+				return err
+			}
+			s.publishCommittedOperation(ctx, tables, fmt.Sprintf("bd: unclaim %s", id))
+			return nil
 		})
 	})
 }
@@ -559,14 +601,21 @@ func (s *DoltStore) UnclaimIssueIfAssignee(ctx context.Context, id string, actor
 	// release landed.
 	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		return s.verifiedClaimWrite(ctx, id, unclaimed(), func() error {
-			return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+			var tables issueops.ChangedTables
+			err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 				if err := issueops.UnclaimIssueIfAssigneeInTx(ctx, tx, id, actor, expectedAssignee); err != nil {
 					return err
 				}
-
-				commitMsg := fmt.Sprintf("bd: unclaim %s", id)
-				return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, commitMsg)
+				// Plain assignment: a retried tx re-runs the body and
+				// overwrites the captured publication intent.
+				tables = issueops.ChangedTables{"issues": true, "events": true}
+				return nil
 			})
+			if err != nil {
+				return err
+			}
+			s.publishCommittedOperation(ctx, tables, fmt.Sprintf("bd: unclaim %s", id))
+			return nil
 		})
 	})
 }
@@ -574,23 +623,29 @@ func (s *DoltStore) UnclaimIssueIfAssignee(ctx context.Context, id string, actor
 // ReopenIssue reopens a done-category issue atomically and stages only the
 // versioned tables that this transaction concretely changed.
 func (s *DoltStore) ReopenIssue(ctx context.Context, id string, reason string, actor string) error {
-	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	var tables issueops.ChangedTables
+	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		res, err := issueops.ReopenIssueInTx(ctx, tx, id, reason, actor)
 		if err != nil {
 			return err
 		}
-		if !res.Changed {
-			return nil
-		}
+		// Plain assignment: a retried tx re-runs the body and overwrites the
+		// captured publication intent.
+		tables = nil
 		switch {
+		case !res.Changed:
 		case !res.IsWisp:
-			return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, fmt.Sprintf("bd: reopen %s", id))
+			tables = issueops.ChangedTables{"issues": true, "events": true}
 		case res.IssueRowsChanged:
-			return s.doltAddAndCommitInTx(ctx, tx, []string{"issues"}, fmt.Sprintf("bd: reopen %s", id))
-		default:
-			return nil
+			tables = issueops.ChangedTables{"issues": true}
 		}
+		return nil
 	})
+	if err != nil {
+		return err
+	}
+	s.publishCommittedOperation(ctx, tables, fmt.Sprintf("bd: reopen %s", id))
+	return nil
 }
 
 // UpdateIssueType changes the issue_type field of an issue.
@@ -620,15 +675,23 @@ func (s *DoltStore) closeIssue(ctx context.Context, id string, reason string, ac
 	// retried rather than surfaced as a hard failure. Dolt has no real row
 	// locking — FOR UPDATE / SKIP LOCKED are parse-only no-ops
 	// (https://www.dolthub.com/blog/2023-10-23-hold-my-beer/) — so retry is the
-	// only safety net. withRetryTx owns BeginTx and the final Commit.
-	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	// only safety net. withRetryTx owns BeginTx and the final Commit. The Dolt
+	// history commit runs after it, via the shared post-tx publisher (GH#5752).
+	var tables issueops.ChangedTables
+	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		if _, err := issueops.CloseIssueInTx(ctx, tx, id, reason, actor, session); err != nil {
 			return err
 		}
-
-		commitMsg := fmt.Sprintf("bd: close %s", id)
-		return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, commitMsg)
+		// Plain assignment: a retried tx re-runs the body and overwrites the
+		// captured publication intent.
+		tables = issueops.ChangedTables{"issues": true, "events": true}
+		return nil
 	})
+	if err != nil {
+		return err
+	}
+	s.publishCommittedOperation(ctx, tables, fmt.Sprintf("bd: close %s", id))
+	return nil
 }
 
 // CloseIssueChecked closes an issue but refuses with storage.ErrCloseBlocked
@@ -662,20 +725,27 @@ func (s *DoltStore) closeIssueChecked(ctx context.Context, id string, actor stri
 	// server-side rollback) is retried. A blocked-guard rejection
 	// (storage.ErrCloseBlocked) is NOT a serialization error, so withRetryTx
 	// surfaces it permanently and the transaction rolls back — no close and no
-	// event are written (the atomic-refuse property).
+	// event are written (the atomic-refuse property). The Dolt history commit
+	// runs after the SQL commit, via the shared post-tx publisher (GH#5752).
 	var result storage.CloseIssueResult
-	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	var tables issueops.ChangedTables
+	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		res, err := issueops.CloseIssueCheckedInTx(ctx, tx, id, opts.Reason, actor, opts.Session, opts.Force, opts.ExpectedVersion)
 		if err != nil {
 			return err
 		}
 		result = storage.CloseIssueResult{Unchanged: res.AlreadyClosed, OpenChildren: res.OpenChildren}
-
-		commitMsg := fmt.Sprintf("bd: close %s", id)
-		return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, commitMsg)
-	}); err != nil {
+		// Plain assignment: a retried tx re-runs the body and overwrites both
+		// captured values. The base behavior publishes even an AlreadyClosed
+		// no-op close; the staged-set guard inside the publisher makes that a
+		// no-op Dolt-wise, preserving the current eligibility exactly.
+		tables = issueops.ChangedTables{"issues": true, "events": true}
+		return nil
+	})
+	if err != nil {
 		return storage.CloseIssueResult{}, err
 	}
+	s.publishCommittedOperation(ctx, tables, fmt.Sprintf("bd: close %s", id))
 	return result, nil
 }
 
