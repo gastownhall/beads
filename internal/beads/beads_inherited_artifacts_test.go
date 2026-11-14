@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1109,5 +1110,66 @@ func TestFindBeadsDir_ExplicitBeadsDirKeepsMetadatalessWorktreeStore(t *testing.
 	assertSamePath(t, "FindDatabasePath()", dbPath, filepath.Join(f.worktreeBeads, "embeddeddolt"))
 	if strings.Contains(stderr, "no metadata.json or config.json") {
 		t.Errorf("unexpected missing-metadata warning under explicit BEADS_DIR:\n%s", stderr)
+	}
+}
+
+// captureStdout redirects os.Stdout for the duration of fn and returns
+// whatever was written to it.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	orig := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = orig }()
+
+	fn()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("closing stdout pipe writer: %v", err)
+	}
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+	return buf.String()
+}
+
+// TestFindBeadsDir_WorktreeMetadatalessStoreWarnsOnce asserts the yield is
+// reported exactly once per process on stderr, naming both directories, the
+// reason, the observed and declared database names and an explicit
+// inspection command, and that nothing reaches stdout.
+func TestFindBeadsDir_WorktreeMetadatalessStoreWarnsOnce(t *testing.T) {
+	f := newMetadatalessStoreFixture(t, mainEmbeddedMetadata, "myproject")
+	chdirForDiscovery(t, f.worktree)
+	var stderr string
+	stdout := captureStdout(t, func() {
+		stderr = captureStderr(t, func() {
+			for i := 0; i < 3; i++ {
+				_ = FindBeadsDir()
+				_ = FindDatabasePath()
+				_ = FindBeadsDirFrom(f.worktree)
+				_ = FindBeadsDirFrom(f.subdir)
+			}
+		})
+	})
+	if stdout != "" {
+		t.Errorf("discovery wrote to stdout:\n%s", stdout)
+	}
+	if n := strings.Count(stderr, "no metadata.json or config.json"); n != 1 {
+		t.Fatalf("missing-metadata warning count = %d, want 1; stderr:\n%s", n, stderr)
+	}
+	local := utils.CanonicalizePath(f.worktreeBeads)
+	for _, want := range []string{
+		local,
+		utils.CanonicalizePath(f.mainBeads),
+		"no metadata.json or config.json",
+		`embedded databases observed: beads`,
+		`declares dolt_database "myproject"`,
+		"BEADS_DIR='" + local + "' bd list",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("warning missing %q; stderr:\n%s", want, stderr)
+		}
 	}
 }

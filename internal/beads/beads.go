@@ -979,9 +979,52 @@ func localStoreYieldsToShared(local, shared string) bool {
 }
 
 // yieldLocalStore applies localStoreYieldsToShared at a discovery decision
-// point.
+// point and, when the local store yields, reports it once per process
+// (warnYieldedLocalStoreOnce).
 func yieldLocalStore(local, shared string) bool {
-	return localStoreYieldsToShared(local, shared)
+	if !localStoreYieldsToShared(local, shared) {
+		return false
+	}
+	warnYieldedLocalStoreOnce(local, shared)
+	return true
+}
+
+// yieldedLocalStoreWarned holds the canonical local .beads paths that have
+// already received the yield warning in this process. Discovery resolves the
+// workspace several times per bd invocation; one warning is enough.
+var yieldedLocalStoreWarned sync.Map
+
+// warnYieldedLocalStoreOnce tells the user, on stderr and at most once per
+// canonical local path per process, that discovery skipped a metadata-less
+// local store in favor of the shared workspace. Database names are reported
+// as observed on disk (embedded store directories) and as declared in the
+// shared metadata; neither proves the skipped store is empty, so the warning
+// gives an explicit command to inspect it instead of suggesting removal.
+func warnYieldedLocalStoreOnce(local, shared string) {
+	local = utils.CanonicalizePath(local)
+	shared = utils.CanonicalizePath(shared)
+	if _, alreadyWarned := yieldedLocalStoreWarned.LoadOrStore(local, struct{}{}); alreadyWarned {
+		return
+	}
+
+	observed := "no embedded databases observed"
+	if names := configfile.EmbeddedDoltDatabases(local); len(names) > 0 {
+		observed = "embedded databases observed: " + strings.Join(names, ", ")
+	}
+	declared := "shared metadata declares no dolt_database"
+	if cfg, err := configfile.LoadForDiscovery(shared); err == nil && cfg != nil && cfg.DoltDatabase != "" {
+		declared = fmt.Sprintf("shared metadata declares dolt_database %q", cfg.DoltDatabase)
+	}
+
+	fmt.Fprintf(os.Stderr, "Warning: ignoring the beads database in %s because it has no metadata.json or config.json; using the shared workspace %s instead\n", local, shared)
+	fmt.Fprintf(os.Stderr, "  (%s; %s)\n", observed, declared)
+	fmt.Fprintf(os.Stderr, "  To inspect the skipped database: BEADS_DIR=%s bd list\n", shellSingleQuote(local))
+	fmt.Fprintln(os.Stderr, "  Preserve any data you need from it before removing it.")
+}
+
+// shellSingleQuote quotes s for a POSIX shell.
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // userHomeDir is the home directory whose .beads the ancestor walks pass over
