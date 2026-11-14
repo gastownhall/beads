@@ -100,8 +100,10 @@ func runDriftChecks() []DriftItem {
 func configuredIssuePrefix() string {
 	// Use the same YAML resolver as bd create. The reconciler must persist the
 	// value the create path already treats as effective, including legacy names
-	// whose validation predates the current stored-prefix contract.
-	return overlayYAMLPrefix("")
+	// whose validation predates the current stored-prefix contract. Storage
+	// strips one trailing hyphen from issue_prefix (issueops.SetConfigInTx), so
+	// compare and seed the same normalized form or "gt-" never converges.
+	return strings.TrimSuffix(overlayYAMLPrefix(""), "-")
 }
 
 func issuePrefixDriftItem(configured, stored string) DriftItem {

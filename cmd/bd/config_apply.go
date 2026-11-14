@@ -64,6 +64,11 @@ Examples:
 		}()
 
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		if !dryRun {
+			// apply mutates hooks, the server, the remote and issue_prefix:
+			// a write command under the root read-only and freeze policy.
+			CheckReadonly("config apply")
+		}
 		results := runApply(dryRun)
 
 		if jsonOutput {
@@ -98,16 +103,18 @@ func runApply(dryRun bool) []ApplyResult {
 
 	var results []ApplyResult
 	results = append(results, applyHooks(hasDrift["hooks"], dryRun))
-	results = append(results, applyIssuePrefix(dryRun))
 	serverResult := applyServer(hasDrift["server"], dryRun)
 	results = append(results, serverResult)
+	// After the server step: the store open below disables auto-start, so a
+	// shared server this run just started must already be up to be seeded.
+	results = append(results, applyIssuePrefix(dryRun))
 	results = append(results, remoteApplyResult(driftItems, serverResult, dryRun, checkRemoteDrift))
 	return results
 }
 
 type issuePrefixConfigStore interface {
 	GetConfig(context.Context, string) (string, error)
-	SetConfig(context.Context, string, string) error
+	SeedConfigIfAbsent(context.Context, string, string) (string, bool, error)
 }
 
 func applyIssuePrefixStore(ctx context.Context, st issuePrefixConfigStore, configured string, dryRun bool) ApplyResult {
@@ -124,8 +131,17 @@ func applyIssuePrefixStore(ctx context.Context, st issuePrefixConfigStore, confi
 	if dryRun {
 		return ApplyResult{Check: "issue_prefix", Action: "seed", Status: applyStatusDryRun, Message: fmt.Sprintf("Would seed database issue_prefix from config.yaml: %s", configured)}
 	}
-	if err := st.SetConfig(ctx, "issue_prefix", configured); err != nil {
+	// The read above only reports; the seed itself re-checks inside one
+	// transaction so a namespace another writer set meanwhile survives.
+	stored, seeded, err := st.SeedConfigIfAbsent(ctx, "issue_prefix", configured)
+	if err != nil {
 		return ApplyResult{Check: "issue_prefix", Action: "seed", Status: applyStatusError, Message: "Failed to seed database issue_prefix from config.yaml", Error: err.Error()}
+	}
+	if !seeded {
+		if stored == configured {
+			return ApplyResult{Check: "issue_prefix", Action: "none", Status: applyStatusOK, Message: "Database issue_prefix matches config.yaml"}
+		}
+		return ApplyResult{Check: "issue_prefix", Action: "none", Status: applyStatusError, Message: "Database issue_prefix differs from config.yaml; use bd rename-prefix to change an established namespace", Error: fmt.Sprintf("database=%q config.yaml=%q", stored, configured)}
 	}
 	return ApplyResult{Check: "issue_prefix", Action: "seed", Status: applyStatusApplied, Message: fmt.Sprintf("Seeded database issue_prefix from config.yaml: %s", configured)}
 }
