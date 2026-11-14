@@ -305,6 +305,7 @@ go_test(
         "metadata_cas_contract_test.go",
         "metadata_merge_test.go",
         "metadata_number_fidelity_test.go",
+        "metadata_route_publication_ordering_test.go",
         "metadata_schema_test.go",
         "metadata_validation_test.go",
         "migrate_updated_at_preservation_test.go",
