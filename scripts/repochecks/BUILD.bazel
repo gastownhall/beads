@@ -286,6 +286,7 @@ repo_subset(
         "internal/storage/dolt/store.go",
         "internal/telemetry/BUILD.bazel",
         "scripts/check-doc-freshness.sh",
+        "scripts/ci/fmt-check.sh",
         "scripts/ci/pr-lint.sh",
         "scripts/pr-lint/BUILD.bazel",
     ],
