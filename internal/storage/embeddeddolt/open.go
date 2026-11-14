@@ -70,8 +70,11 @@ func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func()
 		return errors.Join(dbErr, connErr)
 	}
 
+	// The first connect is where the engine opens the store's files, for
+	// writing even on a read-only open (GH#7445); classify only that error,
+	// not the cleanup's, so an access refusal says it is permanent.
 	if err := db.PingContext(ctx); err != nil {
-		return nil, nil, errors.Join(err, cleanup())
+		return nil, nil, errors.Join(classifyOpenError(dir, err), cleanup())
 	}
 
 	if strings.TrimSpace(database) != "" {
