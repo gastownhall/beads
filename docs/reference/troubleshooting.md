@@ -828,6 +828,35 @@ If staleness errors persist, `bd doctor --fix` forces a metadata refresh
 (low risk — it updates tracking metadata, not issues). Background:
 [GH#353](https://github.com/gastownhall/beads/issues/353).
 
+### Read-only sandboxes: `bd --readonly` still needs write access to an embedded store
+
+`bd --readonly` blocks write operations at the command level. That is about
+what bd is allowed to do, not about what the filesystem allows bd to do —
+and in embedded mode the filesystem layer has its own requirement: the
+embedded Dolt engine opens its lock and chunk-journal files for writing on
+every open, read-only commands included. A store whose files the process
+cannot write (a sandbox like Codex CLI `--sandbox read-only`, a read-only
+mount, or files marked read-only) cannot be opened at all in embedded mode,
+not even to list issues.
+
+The failure is permanent, not lock contention: retrying cannot succeed until
+the process's access to the store changes. Builds that include the fix for
+[GH#7445](https://github.com/gastownhall/beads/issues/7445) say so in the
+error itself, naming the store directory:
+
+```text
+Error: failed to open database: embeddeddolt: open db: embeddeddolt: store requires write access: embedded stores require write access even for --readonly; retrying will not help until access changes; run where the process has read/write access to the store (…/.beads/embeddeddolt): … permission denied
+```
+
+Older builds report the same refusal as a bare permission-denied on the
+engine's files. Treat that as permanent too: do not retry it as transient
+contention.
+
+To read an embedded store, run bd where the process has read/write access
+to the `.beads/embeddeddolt` directory — outside the read-only sandbox, or
+after the store's write permissions are restored. Server mode is not a
+validated zero-local-write workaround for this.
+
 ## Platform-Specific Issues
 
 ### Windows: Path issues
