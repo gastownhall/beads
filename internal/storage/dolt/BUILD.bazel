@@ -325,6 +325,7 @@ go_test(
         "prune_remote_refs_test.go",
         "public_write_circuit_test.go",
         "publication_failure_test.go",
+        "publication_guard_test.go",
         "publication_ordering_support_test.go",
         "pull_branch_tracking_test.go",
         "pull_config_wedge_test.go",

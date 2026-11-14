@@ -269,6 +269,16 @@ func (t *doltServerTx) commitStatement(ctx context.Context, message string) (str
 	//     blanking just above (GH#4995). There the writes are ordinary versioned
 	//     rows and the ONLY-dolt_ignored-state rationale does not apply: the
 	//     working set is meant to hold them until the explicit flush point.
+	//
+	// HAZARD (GH#5752, LatentLabsSpace/NEXUS#92): unlike CommitScoped and every
+	// DoltStore write, this form mints the Dolt commit INSIDE the still-open
+	// transaction, so '-Am' stages from the session's BEGIN-time root and can
+	// write rows a concurrent writer committed in the meantime back to their
+	// old values. It is the known exception to the post-commit publication
+	// ordering that internal/storage/dolt's
+	// TestNoDoltAddOrCommitInsideOpenTransaction enforces (that literal guard
+	// does not scan this package). Callers racing concurrent writers on the
+	// same tables should prefer RunTxScoped/CommitScoped.
 	stmt, args := "CALL DOLT_COMMIT('-Am', ?);", []interface{}{message}
 	if message == "" {
 		stmt, args = "COMMIT;", nil
