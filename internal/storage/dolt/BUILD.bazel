@@ -186,6 +186,7 @@ go_test(
         "count_include_wisps_test.go",
         "counter_contract_test.go",
         "counts_wisp_test.go",
+        "create_auto_mint_test.go",
         "create_batch_equivalence_test.go",
         "create_guard_test.go",
         "create_issue_commit_test.go",
