@@ -1,6 +1,6 @@
 # OpenTelemetry Data Model
 
-Last reviewed: 2026-08-07
+Last reviewed: 2026-11-14
 
 Freshness source: `internal/telemetry/`, `internal/storage/dolt/store.go`,
 `internal/compact/haiku.go`, `cmd/bd/find_duplicates.go`, and hook execution
@@ -55,12 +55,13 @@ OTel SDK names use **dot notation** internally. Prometheus-compatible backends (
 
 ### 1.1 Instance
 
-The outermost grouping. Derived at command startup time from the machine hostname and the working directory.
+The outermost grouping: the OTel resource built once at telemetry init (`buildResource` in `internal/telemetry/telemetry.go`). `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` override it.
 
 | Attribute | Type | Description |
 |---|---|---|
-| `host` | string | System hostname |
-| `os` | string | System OS information |
+| `service.name`, `service.version` | string | Service name and bd version |
+| `host.name` | string | System hostname (SDK host detector) |
+| `process.*` | various | PID, executable, runtime and owner (SDK process detector) |
 
 ### 1.2 Command
 
@@ -197,18 +198,19 @@ UpdateIssueType
 
 **Issueops role operations** — `storage.<Role>.<Method>`, emitted when a caller
 goes through the guarded issueops surface instead of calling storage directly
-(39 spans):
+(43 spans):
 
 ```
-BatchCloser.CloseBatch BatchCreator.CreateBatch
+BatchApplier.ApplyBatch BatchCloser.CloseBatch BatchCreator.CreateBatch
 BlockingAnnotator.AnnotateBlocking Bootstrapper.Bootstrap Commenter.AddComment
 Counter.Count Counter.CountByGroup CycleDetector.DetectCycles Deleter.Delete
 DependencyEditor.AddDependencies DependencyEditor.RemoveDependency
-EdgeReader.ReadEdges InitVerifier.VerifyIdentity IssueClaimer.Claim
-IssueOperations.Close IssueOperations.Create IssueOperations.Reopen
-IssueOperations.Update IssueReader.Get IssueReader.List IssueReader.Ready
-IssueRelations.Related Memories.Forget Memories.List Memories.Recall
-Memories.Remember Querier.Query ReadyClaimer.ClaimNext ReadyCounter.CountReady
+EdgeReader.ReadEdges GraphCounter.CountEdges InitVerifier.VerifyIdentity
+IssueClaimer.Claim IssueOperations.Close IssueOperations.Create
+IssueOperations.Reopen IssueOperations.Update IssueReader.Get IssueReader.List
+IssueReader.Ready IssueRelations.Related Memories.Forget Memories.List
+Memories.Recall Memories.Remember MetadataCAS.CompareAndSetKey Querier.Query
+ReadyClaimer.ClaimNext ReadyCounter.CountReady Releaser.Release
 StatsReporter.AssigneeStats StatsReporter.Stats Sweeper.Sweep
 TreeWalker.WalkTree VersionReconciler.ReconcileVersion
 VersionReconciler.RecordedVersion WorkspaceConfig.GetSetting
@@ -259,7 +261,7 @@ Emitted for single-row queries via `queryRowContext()`.
 
 ### `dolt.commit`
 
-Emitted for DOLT_COMMIT operations. Carries only the shared `doltSpanAttrs()` (see the note at the top of this section) — the commit message no longer appears on this span. It survives only as `db.commit_msg` on the `storage.RunInTransaction` / `storage.RunInIssueLifecycleTransaction` spans (`internal/telemetry/storage.go:556,564`).
+Emitted for DOLT_COMMIT operations. Carries only the shared `doltSpanAttrs()` (see the note at the top of this section) — the commit message no longer appears on this span. It survives only as `db.commit_msg` on the `storage.RunInTransaction` / `storage.RunInIssueLifecycleTransaction` spans (`internal/telemetry/storage.go:590,598`).
 
 ### `dolt.push`
 
@@ -296,6 +298,7 @@ Emitted for `bd vc merge --strategy` merges (pinned-connection merge/resolve/com
 |---|---|---|
 | `dolt.merge_branch` | string | Branch being merged |
 | `dolt.merge_strategy` | string | Conflict-resolution strategy |
+| `dolt.conflicts` | int | Conflict count (set when conflicts are detected) |
 
 ### `dolt.branch`
 
@@ -340,7 +343,7 @@ Emitted for DOLT_CHECKOUT operations.
 
 ### `hook.exec`
 
-Emitted for hook execution. **Span only** — no metric counters or histograms exist for hooks. Duration aggregation is a Tier 3 roadmap item.
+Emitted for hook execution on Unix and Windows, and for the refused attempt on js/wasm (where hooks cannot run, so the span records the error). **Span only** — no metric counters or histograms exist for hooks. Duration aggregation is a Tier 3 roadmap item.
 
 | Attribute | Type | Description |
 |---|---|---|
@@ -397,6 +400,9 @@ One span per Anthropic API call. The `bd.ai.operation` attribute distinguishes t
 | `bd.db.pool_wait_ms` | Histogram | — | ✅ Implemented |
 | `bd.claim_verify_lost_total` | Counter | `op` (`claim` \| `unclaim` \| `guarded-update` \| `ready-claim`) | ✅ Implemented |
 | `bd.claim_verify_recovered_total` | Counter | `op`, `outcome` | 🔲 Registered, not recorded |
+| `bd.db.post_tx_commit_dropped` | Counter | — | ✅ Implemented |
+| `bd.db.blocked_recheck_dropped` | Counter | — | ✅ Implemented |
+| `bd.db.ignored_tx_fresh_pool` | Counter | — | ✅ Implemented |
 | `bd.ai.input_tokens` | Counter | `bd.ai.model` | ✅ Implemented (compact only) |
 | `bd.ai.output_tokens` | Counter | `bd.ai.model` | ✅ Implemented (compact only) |
 | `bd.ai.request.duration` | Histogram (ms) | `bd.ai.model` | ✅ Implemented (compact only) |
@@ -406,7 +412,7 @@ One span per Anthropic API call. The `bd.ai.operation` attribute distinguishes t
 ## 9. Recommended Indexed Attributes
 
 ```
-host, os, bd.command, bd.version, bd.actor, db.operation, db.statement,
+host.name, bd.command, bd.version, bd.actor, db.operation, db.statement,
 bd.issue.id, bd.issue.type, hook.event, hook.path, bd.ai.model, bd.ai.operation
 ```
 
@@ -422,7 +428,7 @@ Key variables: `BD_OTEL_ENABLED=true` (master switch) plus the standard SDK vars
 
 ## Appendix: Source Reference Audit
 
-Audited against **`main` @ `5eb7c25dd`**. All line numbers below refer to that commit.
+Audited against **`dc-use` @ `6ee1eadee`** (2026-11-14 review). All line numbers below refer to that commit.
 
 Every metric name, span name, and attribute listed in this document is backed by a specific source location. This table exists to prevent documentation drift and to make re-verification straightforward after code changes.
 
@@ -434,17 +440,20 @@ Every metric name, span name, and attribute listed in this document is backed by
 | `bd.storage.operation.duration` | Histogram | `storage.go:49` — `m.Float64Histogram("bd.storage.operation.duration")` |
 | `bd.storage.errors` | Counter | `storage.go:53` — `m.Int64Counter("bd.storage.errors")` |
 | `bd.issue.count` | Gauge | `storage.go:56` — `m.Int64Gauge("bd.issue.count")` |
-| `bd.db.retry_count` | Counter | `store.go:872` — `m.Int64Counter("bd.db.retry_count")` |
-| `bd.db.lock_wait_ms` | Histogram | `store.go:876` — registered; `.Record()` not called anywhere |
-| `bd.db.circuit_trips` | Counter | `store.go:880` — `m.Int64Counter("bd.db.circuit_trips")` |
-| `bd.db.circuit_rejected` | Counter | `store.go:884` — `m.Int64Counter("bd.db.circuit_rejected")` |
-| `bd.db.serialization_errors` | Counter | `store.go:888` — registered; recorded at `store.go:1103,1116` |
-| `bd.write_retries_total` | Counter | `store.go:892` — registered; recorded at `store.go:1104,1117,1124` (`type=serialization\|connection`) |
-| `bd.db.conn_acquire_ms` | Histogram | `store.go:896` — registered; recorded at `transaction.go:167` |
-| `bd.db.pool_wait_count` | Counter | `store.go:900` — registered; recorded at `transaction.go:174` |
-| `bd.db.pool_wait_ms` | Histogram | `store.go:904` — registered; recorded at `transaction.go:176` |
-| `bd.claim_verify_lost_total` | Counter | `store.go:908` — registered; recorded at `claim_verify.go:196`, `issues.go:439` |
-| `bd.claim_verify_recovered_total` | Counter | `store.go:912` — registered; `.Add()` not called anywhere |
+| `bd.db.retry_count` | Counter | `store.go:918` — registered; recorded at `store.go:837` |
+| `bd.db.lock_wait_ms` | Histogram | `store.go:922` — registered; `.Record()` not called anywhere |
+| `bd.db.circuit_trips` | Counter | `store.go:926` — registered; recorded at `store.go:886,1237,3864` |
+| `bd.db.circuit_rejected` | Counter | `store.go:930` — registered; recorded at `store.go:813,826,1188,1889` |
+| `bd.db.serialization_errors` | Counter | `store.go:934` — registered; recorded at `store.go:1212,1225`, `ephemeral_routing.go:483` |
+| `bd.write_retries_total` | Counter | `store.go:938` — registered; recorded at `store.go:1213,1226,1233`, `ephemeral_routing.go:484` (`type=serialization\|connection`) |
+| `bd.db.post_tx_commit_dropped` | Counter | `store.go:942` — registered; recorded at `issue_operations_tx.go:99` |
+| `bd.db.blocked_recheck_dropped` | Counter | `store.go:946` — registered; recorded at `store.go:1333` |
+| `bd.db.conn_acquire_ms` | Histogram | `store.go:950` — registered; recorded at `transaction.go:171` |
+| `bd.db.pool_wait_count` | Counter | `store.go:954` — registered; recorded at `transaction.go:178` |
+| `bd.db.pool_wait_ms` | Histogram | `store.go:958` — registered; recorded at `transaction.go:180` |
+| `bd.claim_verify_lost_total` | Counter | `store.go:962` — registered; recorded at `claim_verify.go:208`, `issues.go:440` |
+| `bd.claim_verify_recovered_total` | Counter | `store.go:966` — registered; `.Add()` not called anywhere |
+| `bd.db.ignored_tx_fresh_pool` | Counter | `store.go:970` — registered; recorded at `transaction.go:337` |
 | `bd.ai.input_tokens` | Counter | `haiku.go:117` — `m.Int64Counter("bd.ai.input_tokens")` |
 | `bd.ai.output_tokens` | Counter | `haiku.go:121` — `m.Int64Counter("bd.ai.output_tokens")` |
 | `bd.ai.request.duration` | Histogram | `haiku.go:125` — `m.Float64Histogram("bd.ai.request.duration")` |
@@ -453,21 +462,21 @@ Every metric name, span name, and attribute listed in this document is backed by
 
 | Span name | Attributes | Source |
 |-----------|-----------|--------|
-| `bd.command.<name>` | `bd.command`, `bd.version`, `bd.args` (scrubbed) | built in `cmd/bd/command_telemetry.go` (`startCommandSpan`/`commandSpanAttrs`), called from `cmd/bd/main.go:938` |
-| `bd.command.<name>` | `bd.actor` (added later) | `cmd/bd/main.go:1367` |
-| `storage.<op>` / `storage.<Role>.<Method>` (all methods) | `db.operation` + method-specific attrs | `internal/telemetry/storage.go:75-76` (role decorators throughout `internal/telemetry/`) |
-| `dolt.query` | `db.operation="query"`, `db.statement` + `doltSpanAttrs()` | `store.go:1309` |
-| `dolt.exec` | `db.operation="exec"`, `db.statement` + `doltSpanAttrs()` | `store.go:1168` |
-| `dolt.query_row` | `db.operation="query_row"`, `db.statement` + `doltSpanAttrs()` | `store.go:1338` |
-| `dolt.commit` | `doltSpanAttrs()` only | `store.go:2901` |
-| `dolt.push` / `dolt.force_push` | `dolt.remote`, `dolt.branch` | `store.go:3674-3682` |
-| `dolt.pull` | `dolt.remote`, `dolt.branch` | `store.go:3777-3781` |
-| `dolt.merge` | `dolt.merge_branch`; `dolt.conflicts` | `store.go:4348`; conflicts at `store.go:4370` |
-| `dolt.merge_with_strategy` | `dolt.merge_branch`, `dolt.merge_strategy` | `store.go:4395` |
-| `dolt.branch` | `dolt.branch` | `store.go:4309-4312` |
-| `dolt.checkout` | `dolt.branch` | `store.go:4326-4329` |
-| `hook.exec` | `hook.event`, `hook.path`, `bd.issue_id` | `hooks_unix.go:31-36` |
+| `bd.command.<name>` | `bd.command`, `bd.version`, `bd.args` (scrubbed) | built in `cmd/bd/command_telemetry.go` (`startCommandSpan`/`commandSpanAttrs`), called from `cmd/bd/main.go:1172` |
+| `bd.command.<name>` | `bd.actor` (added later) | `cmd/bd/main.go:1642` |
+| `storage.<op>` / `storage.<Role>.<Method>` (all methods) | `db.operation` + method-specific attrs | `internal/telemetry/storage.go:75-77` (role decorators throughout `internal/telemetry/`) |
+| `dolt.query` | `db.operation="query"`, `db.statement` + `doltSpanAttrs()` | `store.go:1532` |
+| `dolt.exec` | `db.operation="exec"`, `db.statement` + `doltSpanAttrs()` | `store.go:1391` |
+| `dolt.query_row` | `db.operation="query_row"`, `db.statement` + `doltSpanAttrs()` | `store.go:1561` |
+| `dolt.commit` | `doltSpanAttrs()` only | `store.go:3544` |
+| `dolt.push` / `dolt.force_push` | `dolt.remote`, `dolt.branch` | `store.go:4455-4464` |
+| `dolt.pull` | `dolt.remote`, `dolt.branch` | `store.go:4559-4563` |
+| `dolt.merge` | `dolt.merge_branch`; `dolt.conflicts` | `store.go:5443-5446`; conflicts at `store.go:5465` |
+| `dolt.merge_with_strategy` | `dolt.merge_branch`, `dolt.merge_strategy`; `dolt.conflicts` | `store.go:5490-5494`; conflicts at `store.go:5518` |
+| `dolt.branch` | `dolt.branch` | `store.go:5404-5407` |
+| `dolt.checkout` | `dolt.branch` | `store.go:5421-5424` |
+| `hook.exec` | `hook.event`, `hook.path`, `bd.issue_id` | `hooks_unix.go:31-35`, `hooks_windows.go:30-34`, `hooks_wasm.go:23-27` |
 | `hook.exec` events | `hook.stdout` / `hook.stderr` with `output`, `bytes` | `hooks_otel.go:14, 20` |
 | `anthropic.messages.new` | `bd.ai.model`, `bd.ai.operation` | `haiku.go:133-138` |
-| `anthropic.messages.new` | `bd.ai.input_tokens`, `bd.ai.output_tokens`, `bd.ai.attempts` | `haiku.go:171-175` |
+| `anthropic.messages.new` | `bd.ai.input_tokens`, `bd.ai.output_tokens`, `bd.ai.attempts` | `haiku.go:172-174` |
 | `anthropic.messages.new` | `bd.ai.batch_size`; `bd.ai.duration_ms` (find_duplicates only) | `find_duplicates.go:466-470`; `find_duplicates.go:491` |

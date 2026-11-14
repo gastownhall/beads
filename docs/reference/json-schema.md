@@ -3,7 +3,7 @@ title: JSON Output Schema Contract
 description: The stable JSON output contract for bd --json commands, covering the schema_version envelope, per-command fields, and consumer guidelines.
 ---
 
-Last reviewed: 2026-08-07
+Last reviewed: 2026-11-14
 
 Freshness source: `cmd/bd/output.go`, `cmd/bd/errors.go`, and
 `cmd/bd/protocol/json_contract_test.go`.
@@ -154,7 +154,19 @@ though some command-result error paths emit the same shape to stdout:
 `error` and `schema_version` are always present. In envelope mode
 (`BD_JSON_ENVELOPE=1`) the error payload moves inside the envelope:
 `{"schema_version": 1, "data": {"error": ..., "code": ..., "hint": ...}}`.
-JSON-mode errors exit with code 1.
+
+A capability refusal (a command or flag the connected backend cannot honor,
+for example in proxied-server mode) is written to stdout with a fixed
+`{error, code, mutates}` shape plus `schema_version`; `code` is a dotted
+refusal identifier (e.g. `proxy.readonly.unsupported`), `mutates` says whether
+the refused operation would have written, and an optional `reason`
+(`design` or `unimplemented`) appears only on refusals from the capability
+registry.
+
+JSON-mode errors exit with code 1, except where a command documents its own
+exit code: an all-guard-mismatch `bd update` exits 13, and a write refused by
+an active migration freeze exits 14 with a plain-text message on stderr (no
+JSON payload).
 
 ## Field Contracts by Command
 

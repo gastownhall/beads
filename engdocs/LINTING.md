@@ -1,6 +1,6 @@
 # Linting Policy
 
-Last reviewed: 2026-08-10
+Last reviewed: 2026-11-14
 
 Freshness source: `.golangci.yml`, `scripts/ci/pr-lint.sh`, `Makefile`,
 `.github/workflows/pr.yml`, and `.github/workflows/main.yml`.
@@ -19,7 +19,7 @@ zero issues in its own scope.
   `ci-pr-lint` wrapper with `BD_LINT_NEW_FROM_MERGE_BASE`. A finding in code the
   PR did not touch does not block it.
 - **The main lane sweeps the whole tree.** Both jobs run unscoped on every push
-  to `main`, so a finding that lands there reds main's own run rather than every
+  to `main` (and to this fork's integration branch `dc-use`), so a finding that lands there reds main's own run rather than every
   open PR.
 
 Run the wrapper locally with:
@@ -37,7 +37,8 @@ answered.
 
 The wrapper runs:
 
-- `make fmt-check`;
+- `scripts/ci/fmt-check.sh` (the same script `make fmt-check` runs; it uses the
+  `gofmt` of the active Go toolchain, `$(go env GOROOT)/bin/gofmt`);
 - golangci-lint with `.golangci.yml`, readonly module downloads, a five-minute
   timeout, the `gms_pure_go` build tag, and `--new-from-merge-base` when
   `BD_LINT_NEW_FROM_MERGE_BASE` names a ref; and
@@ -62,8 +63,9 @@ test-fixture file reads, and documented security false positives.
 
 ## CI Cleanup Decision
 
-`pr-lint` stays separate from `pr-policy` and `pr-core` so failures are easy to
-identify and rerun. Its repository-owned wrapper is
+The `pr-lint-wrapper` job stays separate from `pr-policy-wrapper` and
+`pr-core-wrapper` (and from the standalone `fmt-check` and `lint` jobs) so
+failures are easy to identify and rerun. Its repository-owned wrapper is
 `scripts/ci/pr-lint.sh`, exposed as `make ci-pr-lint`.
 
 See [`CI_CLEANUP_PLAN.md`](CI_CLEANUP_PLAN.md) for the full CI tier policy.
