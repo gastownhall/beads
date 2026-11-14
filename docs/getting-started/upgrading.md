@@ -146,6 +146,17 @@ bd migrate schema
 bd migrate --yes
 ```
 
+**Automatic repair of lost clone-local columns.** The `wisps` plane of each
+clone is not kept in Dolt history, so a database copied or restored out of
+band (a file copy, a dump restore) can arrive believing its migrations are
+fully applied while the `wisps.is_blocked` column is missing. On the first
+write-capable open, bd detects the contradiction and repairs it in place: the
+column and its index are re-added and blocked flags are recomputed from the
+dependency graph, without touching `updated_at` timestamps and without
+re-running the older migrations that could. No manual action is needed; if
+the repair runs you will see the affected migrations listed as applied again
+in the migration output (gh 5257).
+
 ### Upgrading to 1.3.0
 
 A 1.2.2 or 1.1.x database sits at schema v53, and 1.3.0 knows v66. That is more
