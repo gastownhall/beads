@@ -1171,6 +1171,7 @@ go_test(
         "remote_migrate_gate_test.go",
         "remote_policy_autopush_test.go",
         "remote_policy_clone_test.go",
+        "remote_policy_lint_test.go",
         "remote_policy_registration_test.go",
         "remote_sync_open_test.go",
         "removed_backend_heal_embedded_test.go",
