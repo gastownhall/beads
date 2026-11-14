@@ -236,6 +236,7 @@ go_test(
         "race_detector_on_test.go",
         "reader_contract_test.go",
         "readonly_files_test.go",
+        "readonly_writeaccess_internal_test.go",
         "readonly_writeaccess_test.go",
         "ready_claimer_contract_test.go",
         "ready_counter_contract_test.go",

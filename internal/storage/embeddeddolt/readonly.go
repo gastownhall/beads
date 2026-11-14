@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"syscall"
 
 	"github.com/steveyegge/beads/internal/remedy"
 )
@@ -48,24 +49,25 @@ var ErrNoEmbeddedDatabase = errors.New("embeddeddolt: no embedded database")
 var ErrStoreRequiresWriteAccess = errors.New("embeddeddolt: store requires write access")
 
 // classifyOpenError explains an embedded engine-open failure the filesystem
-// refused with a permission error: that refusal is permanent — no retry can
-// succeed until the process's access to dir changes, so the error says so.
-// Matching goes by errno (errors.Is against fs.ErrPermission, which covers
-// Unix EACCES/EPERM and Windows ERROR_ACCESS_DENIED alike), never by message
-// text, and the original error is preserved for errors.Is/errors.As: a
-// permission errno does not prove which particular file operation was
-// refused — it can also reflect an unreadable path or an ACL — only that
-// access was denied, so the cause is kept for diagnosis rather than guessed
-// at.
+// refused with a permission error or from a read-only filesystem: that
+// refusal is permanent — no retry can succeed until the process's access to
+// dir changes, so the error says so. Matching goes by errno (errors.Is
+// against fs.ErrPermission, which covers Unix EACCES/EPERM and Windows
+// ERROR_ACCESS_DENIED alike, and against syscall.EROFS, a distinct errno a
+// read-only filesystem reports), never by message text, and the original
+// error is preserved for errors.Is/errors.As: a permission errno does not
+// prove which particular file operation was refused — it can also reflect an
+// unreadable path or an ACL — only that access was denied, so the cause is
+// kept for diagnosis rather than guessed at.
 //
-// The error is returned unchanged when it is nil or carries no permission
-// errno, so only the engine-open boundary classifies (OpenSQL's initial
-// ping): cleanup failures and later SQL errors keep their own meaning.
+// The error is returned unchanged when it is nil or carries neither errno,
+// so only the engine-open boundary classifies (OpenSQL's initial ping):
+// cleanup failures and later SQL errors keep their own meaning.
 func classifyOpenError(dir string, err error) error {
 	if err == nil {
 		return nil
 	}
-	if !errors.Is(err, fs.ErrPermission) {
+	if !errors.Is(err, fs.ErrPermission) && !errors.Is(err, syscall.EROFS) {
 		return err
 	}
 	return fmt.Errorf("%w: embedded stores require write access even for --readonly; retrying will not help until access changes; run where the process has read/write access to the store (%s): %w",
