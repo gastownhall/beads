@@ -340,9 +340,21 @@ func TestProxiedServerCloseB(t *testing.T) {
 		issue := bdProxiedCreate(t, bd, p.dir, "Double close")
 		bdProxiedClose(t, bd, p.dir, issue.ID, "--reason", "first")
 		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "close", issue.ID, "--reason", "second")
-		_ = stdout
-		_ = stderr
-		_ = err
+		if err != nil {
+			t.Fatalf("re-close of an already-closed issue is an idempotent no-op and must exit 0: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		// The proxied batch route must report the no-op the way the direct one
+		// does (bd-th8229 / #4816): already closed, stored reason shown as
+		// unchanged, the requested replacement never presented as applied.
+		if !strings.Contains(stdout, "Already closed ") {
+			t.Errorf("re-close stdout must report the no-op as already closed, got:\n%s", stdout)
+		}
+		if !strings.Contains(stdout, "(close reason unchanged: first)") {
+			t.Errorf("re-close stdout must show the stored first reason, got:\n%s", stdout)
+		}
+		if strings.Contains(stdout, "second") {
+			t.Errorf("re-close stdout must not present the dropped reason as applied, got:\n%s", stdout)
+		}
 		db := openProxiedDB(t, p)
 		if got := readCloseReason(t, db, issue.ID); got != "first" {
 			t.Errorf("re-close must not overwrite reason: got %q, want %q", got, "first")

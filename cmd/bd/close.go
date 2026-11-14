@@ -41,6 +41,11 @@ When closing multiple issues, provide one --reason for all IDs or repeat
 to the first ID, the second --reason to the second ID, regardless of where
 the flags appear in the command line.
 
+Closing an already-closed issue is an idempotent no-op: the command still
+exits 0 and still names the issue, but reports it as already closed with its
+stored reason — a new --reason is not applied (the first close's reason
+wins). Reopen the issue first to change the close reason.
+
 Closing a molecule's last open step also closes the molecule's root, with
 the reason "all steps complete", when the root is a poured molecule, a wisp,
 or an epic labeled "template"; any other epic stays open as close-eligible
@@ -234,16 +239,16 @@ in the molecule for you; add --no-auto to only show it.`,
 
 			if !res.Changed {
 				// Already closed: an idempotent no-op on the step's stored state. The
-				// old CloseIssue path also returned nil here and still reported the
-				// (already-closed) issue, so keep OUTPUT parity via the shared display
-				// block below — the issue stays in --json output and the text report
-				// exactly as before. Suppress the step's own real-state-change side
-				// effects (the audit entry, so no spurious closed→closed; the
-				// closedCount bump; step-level pending-commit tracking, since the step
-				// write itself is a no-op), but still count the command as a successful
-				// close for its retry-safe post-close contracts (last-touched,
-				// --continue, --suggest-next, --claim-next) via alreadyClosed below.
-				// Exit stays 0.
+				// issue stays in --json output and the text report via the shared
+				// display block below, but as an already-closed no-op — the report
+				// names the stored reason as unchanged instead of presenting the
+				// requested one as applied (bd-th8229 / #4816). Suppress the step's
+				// own real-state-change side effects (the audit entry, so no spurious
+				// closed→closed; the closedCount bump; step-level pending-commit
+				// tracking, since the step write itself is a no-op), but still count
+				// the command as a successful close for its retry-safe post-close
+				// contracts (last-touched, --continue, --suggest-next, --claim-next)
+				// via alreadyClosed below. Exit stays 0.
 				alreadyClosed++
 
 				// The molecule auto-close is state-derived, so the library
@@ -292,8 +297,14 @@ in the molecule for you; add --no-auto to only show it.`,
 				if closedIssue != nil {
 					closedIssues = append(closedIssues, newClosedIssueJSON(closedIssue, res.AutoClosedMolecule, res.MoleculeAutoCloseRefusal))
 				}
-			} else {
+			} else if res.Changed {
 				debug.PrintNormal("%s Closed %s: %s\n", ui.RenderPass("✓"), printedFeedbackID(id, issueTitleOrEmpty(issue)), reason)
+			} else {
+				// The no-op arm: never a success line for a reason the store kept
+				// ignoring. The line still falls through to everything below
+				// (molecule reports, last-touched, post-close flags) — only the
+				// claim this command changed the issue's state is withdrawn.
+				debug.PrintNormal("%s\n", formatAlreadyClosedLine(id, closedIssue))
 			}
 		}
 
@@ -804,6 +815,30 @@ func printNewlyUnblocked(unblocked []*types.Issue) {
 	for _, issue := range unblocked {
 		fmt.Printf("  • %s (P%d)\n", printedFeedbackID(issue.ID, issue.Title), issue.Priority)
 	}
+}
+
+// formatAlreadyClosedLine is `bd close`'s report for an id the command settled
+// without changing: the issue was already closed, so the close was an
+// idempotent no-op and any --reason it carried was not applied (#4816,
+// bd-th8229). The old report printed the success line with the REQUESTED
+// reason, claiming a store the first-close-wins rule (#4025) never made — a
+// false report of a durable state change. This line names the id as already
+// closed and shows the STORED reason as unchanged; the requested reason is
+// deliberately absent. post is the operation's own post-state snapshot, the
+// same source the success line's title comes from: its CloseReason is the
+// stored first close's. A nil post or an empty stored reason prints the bare
+// "(close reason unchanged)" tail rather than inventing a value, and the
+// stored reason is spelled by remedy.PrintedValue so a line feed or escape in
+// it cannot redraw the line. The check is muted — the documented closed-status
+// symbol (engdocs/UI_PHILOSOPHY.md), not the green success marker — because
+// nothing was achieved: an existing state was confirmed.
+func formatAlreadyClosedLine(id string, post *types.Issue) string {
+	if post == nil || post.CloseReason == "" {
+		return fmt.Sprintf("%s Already closed %s (close reason unchanged)",
+			ui.RenderMuted("✓"), printedFeedbackID(id, issueTitleOrEmpty(post)))
+	}
+	return fmt.Sprintf("%s Already closed %s (close reason unchanged: %s)",
+		ui.RenderMuted("✓"), printedFeedbackID(id, issueTitleOrEmpty(post)), remedy.PrintedValue(post.CloseReason))
 }
 
 // closedIssueJSON is one entry of `bd close --json`'s list of closed issues:

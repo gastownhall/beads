@@ -30,7 +30,12 @@
 // refactor. All four have now landed; every remaining assertion is unchanged
 // from the pre-rewire CLI and must stay that way. Waiver: the close exit-code
 // contract (#6648: partial batch failure exits nonzero) intentionally flips
-// the TestParityClose* assertions that pinned exit 0.
+// the TestParityClose* assertions that pinned exit 0. Waiver: bd-th8229 /
+// #4816 flips the already-closed re-close display from "✓ Closed <id>:
+// <requested reason>" — a reason the store ignored — to a muted "✓ Already
+// closed <id> … (close reason unchanged: <stored reason>)" line and adds
+// already_closed to the re-close's --json entry;
+// TestParityCloseAlreadyClosedIsIdempotentSuccess pins the new contract.
 //
 // Harness: the commands' RunE functions are invoked in-process against a real
 // storage.DoltStorage, with stdout/stderr captured and the returned error
@@ -1729,26 +1734,50 @@ func TestParityCloseJSONFailureReport(t *testing.T) {
 }
 
 // TestParityCloseAlreadyClosedIsIdempotentSuccess pins the re-close no-op:
-// exit 0, the issue still reported on stdout, last-touched still recorded, and
-// NO second close event. Source: cmd/bd/close.go:167-195.
+// exit 0, the issue still reported on stdout — as ALREADY closed, with its
+// stored first reason, never presenting the requested replacement as applied
+// (bd-th8229 / #4816) — last-touched still recorded, and NO second close
+// event. Source: cmd/bd/close.go (the !res.Changed arm and the shared display
+// block).
 func TestParityCloseAlreadyClosedIsIdempotentSuccess(t *testing.T) {
 	env := newParityEnv(t)
-	env.seed("test-cls7", "Already closed", nil)
+	// Neutral title: the assertion below must not be satisfiable by the
+	// fixture's own text ("Already closed" as a title would match the no-op
+	// prefix even if the command printed the old false success line).
+	env.seed("test-cls7", "Idempotent reclose", nil)
 
-	env.setFlags(closeCmd, nil)
+	env.setFlags(closeCmd, map[string]string{"reason": "FIRST"})
 	if res := env.run(closeCmd, "test-cls7"); res.exitCode != 0 {
 		t.Fatalf("first close failed: exit=%d stderr=%s", res.exitCode, res.stderr)
+	}
+	if got := env.get("test-cls7").CloseReason; got != "FIRST" {
+		t.Fatalf("precondition: first close stored reason = %q, want %q", got, "FIRST")
 	}
 	closedEventsAfterFirst := countOf(env.eventTypes("test-cls7"), string(types.EventClosed))
 	env.clearLastTouched()
 	env.store.reset()
 
+	// The --reason flag accumulates (closeReasonFlagValue.Set appends), so
+	// replace the first close's value instead of joining it.
+	if v, ok := closeCmd.Flags().Lookup("reason").Value.(*closeReasonFlagValue); ok {
+		v.values = nil
+	}
+	if err := closeCmd.Flags().Set("reason", "SECOND"); err != nil {
+		t.Fatalf("set --reason=SECOND: %v", err)
+	}
 	res := env.run(closeCmd, "test-cls7")
 	if res.exitCode != 0 {
 		t.Fatalf("re-close exit = %d, want 0\nstderr:\n%s", res.exitCode, res.stderr)
 	}
-	if !strings.HasPrefix(res.stdout, "✓ Closed ") {
-		t.Errorf("re-close stdout = %q; today an already-closed re-close still reports success", res.stdout)
+	// The no-op report: the ID named as already closed under a muted check,
+	// the STORED reason shown as unchanged, and no claim that SECOND was
+	// stored.
+	want := fmt.Sprintf("✓ Already closed %s (close reason unchanged: FIRST)\n", formatFeedbackID("test-cls7", "Idempotent reclose"))
+	if res.stdout != want {
+		t.Errorf("re-close stdout mismatch\n got: %q\nwant: %q", res.stdout, want)
+	}
+	if got := env.get("test-cls7").CloseReason; got != "FIRST" {
+		t.Errorf("stored close_reason = %q after re-close, want %q (first close wins, #4025)", got, "FIRST")
 	}
 	if got := env.lastTouched(); got != "test-cls7" {
 		t.Errorf("last-touched = %q, want %q (retry-safe post-close contract)", got, "test-cls7")

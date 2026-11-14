@@ -12,6 +12,11 @@ When closing multiple issues, provide one --reason for all IDs or repeat
 to the first ID, the second --reason to the second ID, regardless of where
 the flags appear in the command line.
 
+Closing an already-closed issue is an idempotent no-op: the command still
+exits 0 and still names the issue, but reports it as already closed with its
+stored reason — a new --reason is not applied (the first close's reason
+wins). Reopen the issue first to change the close reason.
+
 Closing a molecule's last open step also closes the molecule's root, with
 the reason "all steps complete", when the root is a poured molecule, a wisp,
 or an epic labeled "template"; any other epic stays open as close-eligible
