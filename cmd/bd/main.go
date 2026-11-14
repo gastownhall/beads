@@ -1217,7 +1217,7 @@ func init() {
 	}
 
 	// Register persistent flags
-	rootCmd.PersistentFlags().StringVarP(&changeDir, "directory", "C", "", "Change to this directory before running the command (like git -C)")
+	rootCmd.PersistentFlags().StringVarP(&changeDir, "directory", "C", "", "Select the beads project in this directory; relative path arguments still use the current directory (init unsupported)")
 	rootCmd.PersistentFlags().StringVar(&dbPath, "db", "", "Database path (default: auto-discover .beads/*.db). In proxied-server mode, a value that isn't an existing path is treated as a database name override (see --database)")
 	rootCmd.PersistentFlags().StringVar(&databaseFlag, "database", "", "Run against a different server database for this invocation, without changing the project's configured database (proxied-server mode only)")
 	rootCmd.PersistentFlags().StringVar(&actor, "actor", "", "Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)")
@@ -1362,6 +1362,13 @@ var rootCmd = &cobra.Command{
 		_ = cmd.Help() // Help() always returns nil for cobra commands
 	},
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) (retErr error) {
+		// Refuse bd -C <dir> init before anything else runs: -C selects
+		// an existing beads project and never changes the process
+		// directory (GH#3442), so init would create the project in the
+		// launch directory instead (GH#8283). --force does not lift it.
+		if err := refuseInitWithChangeDir(cmd); err != nil {
+			return err
+		}
 		if err := clearWorktreeGitRoutingEnv(cmd); err != nil {
 			return err
 		}
@@ -3306,4 +3313,24 @@ func scrubUserinfoPassword(a string) string {
 		return a // no "user:pass" userinfo, nothing to redact
 	}
 	return head[:start+colon+1] + "xxxxx" + a[at:]
+}
+
+// refuseInitWithChangeDir refuses bd init under -C (--directory). The flag
+// selects the beads project in a directory without changing the process
+// directory, so init has no supported way to create a project there; the
+// hint names the directory the user gave, rendered so pasting it runs no
+// part of it.
+func refuseInitWithChangeDir(cmd *cobra.Command) error {
+	if cmd != initCmd || strings.TrimSpace(changeDir) == "" {
+		return nil
+	}
+	dir, err := filepath.Abs(changeDir)
+	if err != nil {
+		dir = changeDir
+	}
+	arg, note := remedy.CommandArg(runtime.GOOS, dir, "<dir>")
+	return HandleErrorWithHint(
+		"bd init does not support -C (--directory)",
+		"run bd init from the directory instead: cd "+arg+" && bd init"+note,
+	)
 }

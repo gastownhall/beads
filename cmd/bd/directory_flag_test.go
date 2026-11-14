@@ -3,9 +3,14 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/beads/internal/remedy"
 )
 
 func TestResolveChangeDirBeadsDirDoesNotChangeCWD(t *testing.T) {
@@ -222,4 +227,121 @@ func TestIsPreviewCommand(t *testing.T) {
 			}
 		})
 	}
+}
+
+// listTreeForInitTest maps every path under root (relative, slash-separated)
+// to its file content, or to "<dir>" for a directory, so a test can tell that
+// a refused command left the tree exactly as it found it.
+func listTreeForInitTest(t *testing.T, root string) map[string]string {
+	t.Helper()
+	tree := map[string]string{}
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		if info.IsDir() {
+			tree[filepath.ToSlash(rel)] = "<dir>"
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		tree[filepath.ToSlash(rel)] = string(data)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+	return tree
+}
+
+// GH#8283: -C selects a beads project, it does not change the process
+// directory, so bd init has no directory to create a project in that the
+// flag could name. The root command refuses the combination before any
+// setup work, --force included, and points at the supported spelling.
+func TestInitThroughRootCmd_RejectsChangeDir(t *testing.T) {
+	cases := []struct {
+		name        string
+		initialized bool
+		dirName     string
+		relative    bool
+		extra       []string
+	}{
+		{name: "fresh target", dirName: "proj"},
+		{name: "initialized target", initialized: true, dirName: "proj"},
+		{name: "initialized target with force", initialized: true, dirName: "proj", extra: []string{"--force"}},
+		{name: "fresh target skipping agents and hooks", dirName: "proj", extra: []string{"--skip-agents", "--skip-hooks", "--force"}},
+		{name: "relative target", dirName: "proj", relative: true},
+		{name: "target needing quotes", dirName: "my proj $(touch pwned)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			launch := t.TempDir()
+			if resolved, err := filepath.EvalSymlinks(launch); err == nil {
+				launch = resolved
+			}
+			target := filepath.Join(launch, tc.dirName)
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tc.initialized {
+				if err := os.MkdirAll(filepath.Join(target, ".beads"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(target, ".beads", "metadata.json"), []byte(primeTestMetadata), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := listTreeForInitTest(t, launch)
+
+			arg := target
+			if tc.relative {
+				arg = tc.dirName
+			}
+			args := append([]string{"-C", arg, "init"}, tc.extra...)
+			exit, stdout, stderr := runInUserGlobalHome(t, home, launch, map[string]string{"BD_DISABLE_METRICS": "1"}, args...)
+
+			if exit != 1 {
+				t.Fatalf("bd %s exit = %d, want 1\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), exit, stdout, stderr)
+			}
+			if !strings.Contains(stderr, "Error: bd init does not support -C (--directory)") {
+				t.Fatalf("stderr does not name the unsupported combination:\n%s", stderr)
+			}
+			dirArg, note := remedy.CommandArg(runtime.GOOS, target, "<dir>")
+			wantHint := "Hint: run bd init from the directory instead: cd " + dirArg + " && bd init" + note
+			if !strings.Contains(stderr, wantHint) {
+				t.Fatalf("stderr hint = %q, want it to contain %q", stderr, wantHint)
+			}
+			if strings.Contains(stderr, "--force") {
+				t.Fatalf("refusal suggests --force:\n%s", stderr)
+			}
+			if after := listTreeForInitTest(t, launch); !reflect.DeepEqual(before, after) {
+				t.Fatalf("refused init changed the tree\nbefore: %v\nafter:  %v", before, after)
+			}
+		})
+	}
+
+	t.Run("help still works", func(t *testing.T) {
+		home := t.TempDir()
+		target := t.TempDir()
+		exit, stdout, stderr := runInUserGlobalHome(t, home, t.TempDir(), nil, "-C", target, "init", "--help")
+		if exit != 0 {
+			t.Fatalf("bd -C <dir> init --help exit = %d\nstderr:\n%s", exit, stderr)
+		}
+		if !strings.Contains(stdout, "Usage:") || !strings.Contains(stdout, "bd init") {
+			t.Fatalf("help output missing usage:\n%s", stdout)
+		}
+		if _, err := os.Stat(filepath.Join(target, ".beads")); !os.IsNotExist(err) {
+			t.Fatalf("help created %s/.beads (err=%v)", target, err)
+		}
+	})
 }

@@ -69,7 +69,7 @@ type agentsIntegration struct {
 
 func defaultAgentsEnv() agentsEnv {
 	return agentsEnv{
-		agentsPath: config.SafeAgentsFile(),
+		agentsPath: ProjectPath(config.SafeAgentsFile()),
 		stdout:     os.Stdout,
 		stderr:     os.Stderr,
 	}

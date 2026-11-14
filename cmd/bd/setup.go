@@ -202,10 +202,15 @@ func addRecipe(name, path string) error {
 		return setupWorkspaceError()
 	}
 	// bd setup refuses a recipe of .beads/recipes.toml whose path leaves the
-	// directory it runs in (recipes.PathInside), so --add does not save one.
+	// directory it runs in, or the -C directory it installs into
+	// (recipes.PathInside), so --add does not save one.
 	if path != "" {
-		if err := recipes.PathInside(".", path); err != nil {
-			return fmt.Errorf("recipe path %s %s; %s", recipeRefusalWord(path), recipePathRefusal(err), recipePathRule)
+		projectDir, err := setupProjectDir()
+		if err != nil {
+			return err
+		}
+		if err := recipes.PathInside(setupRecipeRoot(projectDir), path); err != nil {
+			return fmt.Errorf("recipe path %s %s; %s", recipeRefusalWord(path), recipePathRefusalIn(projectDir, err), recipePathRuleIn(projectDir))
 		}
 	}
 
@@ -237,6 +242,43 @@ func recipeRefusalWord(value string) string {
 // paths to (recipes.PathInside), as its refusals state it.
 const recipePathRule = "a .beads/recipes.toml recipe can only name a relative path with no '..' or symbolic link leading out of the directory bd setup runs in, and no dangling or looping link along it"
 
+// setupRecipeDirWords is how bd setup's refusals name the directory a
+// .beads/recipes.toml recipe's paths must stay inside.
+const setupRecipeDirWords = "the directory bd setup runs in"
+
+// setupChangeDirWords names that directory under bd -C, where it is the -C
+// directory rather than the one bd setup runs in.
+const setupChangeDirWords = "the -C directory bd setup installs into"
+
+// setupRecipeRoot is the directory a .beads/recipes.toml recipe's paths must
+// stay inside: projectDir (setupProjectDir) under bd -C, else the working
+// directory.
+func setupRecipeRoot(projectDir string) string {
+	if projectDir == "" {
+		return "."
+	}
+	return projectDir
+}
+
+// recipePathRuleIn is recipePathRule for a run whose project directory is
+// projectDir (setupProjectDir): under bd -C it names the -C directory.
+func recipePathRuleIn(projectDir string) string {
+	if projectDir == "" {
+		return recipePathRule
+	}
+	return strings.Replace(recipePathRule, setupRecipeDirWords, setupChangeDirWords, 1)
+}
+
+// recipePathRefusalIn is recipePathRefusal for a run whose project directory
+// is projectDir (setupProjectDir): under bd -C it names the -C directory.
+func recipePathRefusalIn(projectDir string, err error) string {
+	why := recipePathRefusal(err)
+	if projectDir == "" {
+		return why
+	}
+	return strings.Replace(why, setupRecipeDirWords, setupChangeDirWords, 1)
+}
+
 // recipePathRefusal says why recipes.PathInside refused a path: it is not
 // inside the directory bd setup runs in, or it runs through a link bd setup
 // cannot follow (a dangling or looping one), whose target may be inside, or
@@ -252,7 +294,32 @@ func recipePathRefusal(err error) string {
 	return fmt.Sprintf("cannot be checked: %v", remedy.PrintedError(err))
 }
 
+// setupProjectDir returns the directory bd setup installs, checks and
+// removes a project's integration files in: the -C directory, made absolute
+// against the working directory, or "" for the working directory itself.
+// It is the directory the user named, as primeWorkspaceDir's is, not the
+// parent of the beads directory -C resolved, which may have followed a
+// .beads/redirect or walked up from a subdirectory. -C selects the project
+// without changing the working directory, so without this a recipe writes
+// into the directory bd was launched in (#8283).
+func setupProjectDir() (string, error) {
+	if strings.TrimSpace(changeDir) == "" {
+		return "", nil
+	}
+	abs, err := filepath.Abs(changeDir)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve -C directory %s: %w", remedy.PrintedValue(changeDir), err)
+	}
+	return abs, nil
+}
+
 func runRecipe(name string) error {
+	projectDir, err := setupProjectDir()
+	if err != nil {
+		return HandleError("%v", err)
+	}
+	defer setup.SetProjectDir(projectDir)()
+
 	switch name {
 	case "claude":
 		return runClaudeRecipe()
@@ -301,7 +368,8 @@ func runRecipe(name string) error {
 	// can commit, names the files --check reads, install writes and --remove
 	// deletes, and the directories install creates and --remove drops when
 	// empty: bd setup refuses it, touching none of them, unless each stays
-	// inside the directory it runs in (recipes.PathInside). The refusal
+	// inside the directory it runs in, or under bd -C the -C directory it
+	// installs into (recipes.PathInside). The refusal
 	// names the key and the path by recipeRefusalWord, and says whether the
 	// path leads out or runs through a link bd setup cannot follow
 	// (recipePathRefusal). An empty path names
@@ -312,10 +380,10 @@ func runRecipe(name string) error {
 			if path == "" {
 				continue
 			}
-			if err := recipes.PathInside(".", path); err != nil {
+			if err := recipes.PathInside(setupRecipeRoot(projectDir), path); err != nil {
 				return HandleErrorWithHint(
-					fmt.Sprintf("recipe %s names %s, which %s", recipeRefusalWord(name), recipeRefusalWord(path), recipePathRefusal(err)),
-					recipePathRule)
+					fmt.Sprintf("recipe %s names %s, which %s", recipeRefusalWord(name), recipeRefusalWord(path), recipePathRefusalIn(projectDir, err)),
+					recipePathRuleIn(projectDir))
 			}
 		}
 	}
@@ -323,8 +391,8 @@ func runRecipe(name string) error {
 	if setupCheck {
 		var missing []string
 		for _, path := range paths {
-			if _, err := os.Stat(path); os.IsNotExist(err) {
-				missing = append(missing, path)
+			if _, err := os.Stat(setup.ProjectPath(path)); os.IsNotExist(err) {
+				missing = append(missing, setup.ProjectPath(path))
 			}
 		}
 		if len(missing) > 0 {
@@ -338,7 +406,7 @@ func runRecipe(name string) error {
 		}
 		fmt.Printf("✓ %s integration installed\n", remedy.PrintedValue(recipe.Name))
 		for _, path := range paths {
-			fmt.Printf("  File: %s\n", remedy.PrintedValue(path))
+			fmt.Printf("  File: %s\n", remedy.PrintedValue(setup.ProjectPath(path)))
 		}
 		return nil
 	}
@@ -346,7 +414,7 @@ func runRecipe(name string) error {
 	if setupRemove {
 		removed := false
 		for _, path := range paths {
-			if err := os.Remove(path); err != nil {
+			if err := os.Remove(setup.ProjectPath(path)); err != nil {
 				if os.IsNotExist(err) {
 					continue
 				}
@@ -355,8 +423,11 @@ func runRecipe(name string) error {
 			removed = true
 			// Drop the file's directory if that left it empty, but never a
 			// symlinked one, which removing would unlink whatever its
-			// target holds (setup.RemoveEmptyDir).
-			_ = setup.RemoveEmptyDir(filepath.Dir(path))
+			// target holds (setup.RemoveEmptyDir), and never the project
+			// directory itself, which a bare file name's directory is.
+			if dir := filepath.Dir(path); dir != "." && dir != "" {
+				_ = setup.RemoveEmptyDir(setup.ProjectPath(dir))
+			}
 		}
 		if !removed {
 			fmt.Println("No integration files found")
@@ -371,23 +442,25 @@ func runRecipe(name string) error {
 	for _, path := range paths {
 		dir := filepath.Dir(path)
 		if dir != "." && dir != "" {
-			if err := os.MkdirAll(dir, 0o755); err != nil {
+			if err := os.MkdirAll(setup.ProjectPath(dir), 0o755); err != nil {
 				return HandleError("create directory: %v", remedy.PrintedError(err))
 			}
 		}
 
+		// The recipe's contents are keyed by the path it names, not the
+		// path under the -C directory it is written to.
 		content, err := recipes.ContentForPath(*recipe, path)
 		if err != nil {
 			return HandleError("%v", err)
 		}
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil { // #nosec G306 -- config files need to be readable
+		if err := os.WriteFile(setup.ProjectPath(path), []byte(content), 0o644); err != nil { // #nosec G306 -- config files need to be readable
 			return HandleError("write file: %v", remedy.PrintedError(err))
 		}
 	}
 
 	fmt.Printf("\n✓ %s integration installed\n", remedy.PrintedValue(recipe.Name))
 	for _, path := range paths {
-		fmt.Printf("  File: %s\n", remedy.PrintedValue(path))
+		fmt.Printf("  File: %s\n", remedy.PrintedValue(setup.ProjectPath(path)))
 	}
 	return nil
 }

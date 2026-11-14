@@ -109,16 +109,16 @@ func junieMCPConfig() map[string]interface{} {
 }
 
 func InstallJunie() error {
-	guidelinesPath := ".junie/guidelines.md"
-	mcpPath := ".junie/mcp/mcp.json"
+	guidelinesPath := ProjectPath(".junie/guidelines.md")
+	mcpPath := ProjectPath(".junie/mcp/mcp.json")
 
 	fmt.Println("Installing Junie integration...")
 
-	if err := EnsureDir(".junie", 0755); err != nil {
+	if err := EnsureDir(ProjectPath(".junie"), 0755); err != nil {
 		return HandleError("%v", err)
 	}
 
-	if err := EnsureDir(".junie/mcp", 0755); err != nil {
+	if err := EnsureDir(ProjectPath(".junie/mcp"), 0755); err != nil {
 		return HandleError("%v", err)
 	}
 
@@ -145,8 +145,8 @@ func InstallJunie() error {
 }
 
 func CheckJunie() error {
-	guidelinesPath := ".junie/guidelines.md"
-	mcpPath := ".junie/mcp/mcp.json"
+	guidelinesPath := ProjectPath(".junie/guidelines.md")
+	mcpPath := ProjectPath(".junie/mcp/mcp.json")
 
 	guidelinesExists := false
 	mcpExists := false
@@ -183,10 +183,10 @@ func CheckJunie() error {
 }
 
 func RemoveJunie() error {
-	guidelinesPath := ".junie/guidelines.md"
-	mcpPath := ".junie/mcp/mcp.json"
-	mcpDir := ".junie/mcp"
-	junieDir := ".junie"
+	guidelinesPath := ProjectPath(".junie/guidelines.md")
+	mcpPath := ProjectPath(".junie/mcp/mcp.json")
+	mcpDir := ProjectPath(".junie/mcp")
+	junieDir := ProjectPath(".junie")
 
 	fmt.Println("Removing Junie integration...")
 

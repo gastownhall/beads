@@ -76,7 +76,7 @@ func CursorManagedHookEvents(config map[string]interface{}) []string {
 // only.
 func cursorHooksTargetPath(global bool) (string, error) {
 	if !global {
-		return cursorHooksPath, nil
+		return ProjectPath(cursorHooksPath), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -137,7 +137,7 @@ func InstallCursor(global bool) error {
 
 	fmt.Printf("\n✓ Cursor integration installed\n")
 	if !global {
-		fmt.Printf("  Rules: %s\n", cursorRulesPath)
+		fmt.Printf("  Rules: %s\n", ProjectPath(cursorRulesPath))
 	}
 	fmt.Printf("  Skill: %s\n", agentSkillPath(skillEnv.projectDir))
 	fmt.Printf("  Hooks: %s (sessionStart, preCompact, postToolUse)\n", hooksPath)
@@ -171,7 +171,7 @@ func InstallCursorProjectTo(out ProjectInstallOutput) error {
 	if err := installAgentSkill(skillEnv); err != nil {
 		return err
 	}
-	if err := installCursorHooks(cursorHooksPath); err != nil {
+	if err := installCursorHooks(ProjectPath(cursorHooksPath)); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintln(out.stdout(), "✓ Cursor integration installed (rules + skill + hooks)")
@@ -183,7 +183,7 @@ func InstallCursorProjectTo(out ProjectInstallOutput) error {
 // (global). This is the same skill Codex installs; Cursor loads .agents/skills/
 // natively, so Cursor-only users get it too. See installAgentSkill.
 func cursorAgentSkillEnv(global bool) (agentSkillEnv, error) {
-	base := "."
+	base := ProjectPath(".")
 	if global {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -205,10 +205,11 @@ func cursorAgentSkillEnv(global bool) (agentSkillEnv, error) {
 }
 
 func installCursorRules() error {
-	if err := EnsureDir(filepath.Dir(cursorRulesPath), 0o755); err != nil {
+	rulesPath := ProjectPath(cursorRulesPath)
+	if err := EnsureDir(filepath.Dir(rulesPath), 0o755); err != nil {
 		return err
 	}
-	if err := atomicWriteFile(cursorRulesPath, []byte(cursorRulesTemplate)); err != nil {
+	if err := atomicWriteFile(rulesPath, []byte(cursorRulesTemplate)); err != nil {
 		return fmt.Errorf("write rules: %w", err)
 	}
 	return nil
@@ -236,10 +237,11 @@ func CheckCursor(global bool) error {
 	missing := false
 
 	if !global {
-		if FileExists(cursorRulesPath) {
-			fmt.Printf("✓ Cursor rules installed: %s\n", cursorRulesPath)
+		rulesPath := ProjectPath(cursorRulesPath)
+		if FileExists(rulesPath) {
+			fmt.Printf("✓ Cursor rules installed: %s\n", rulesPath)
 		} else {
-			fmt.Printf("✗ Cursor rules not installed: %s\n", cursorRulesPath)
+			fmt.Printf("✗ Cursor rules not installed: %s\n", rulesPath)
 			missing = true
 		}
 	}
@@ -289,14 +291,15 @@ func RemoveCursor(global bool) error {
 
 	rulesExisted := false
 	if !global {
-		rulesExisted = FileExists(cursorRulesPath)
+		rulesPath := ProjectPath(cursorRulesPath)
+		rulesExisted = FileExists(rulesPath)
 		if rulesExisted {
-			if err := os.Remove(cursorRulesPath); err != nil && !os.IsNotExist(err) {
+			if err := os.Remove(rulesPath); err != nil && !os.IsNotExist(err) {
 				return HandleError("failed to remove rules: %v", err)
 			}
 			// Best-effort: drop the rules dir if that left it empty, but
 			// never a symlinked one (RemoveEmptyDir).
-			_ = RemoveEmptyDir(filepath.Dir(cursorRulesPath))
+			_ = RemoveEmptyDir(filepath.Dir(rulesPath))
 		}
 	}
 
