@@ -151,6 +151,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd rename-prefix <new> --mint-only` changes the prefix for new issues
+  only.** It sets `issue_prefix` and adds the old prefix to
+  `allowed_prefixes`, so existing IDs, text references, explicit `--id`
+  values and children of existing issues (`bd create --parent taxdb-u6ch`)
+  keep working while new roots mint under the new prefix. No issue is
+  enumerated or rewritten. `--dry-run` reports the change without writing it,
+  `--json` writes one object (`old_prefix`, `new_prefix`, `mint_only`,
+  `dry_run`, `allowed_prefixes_added`), `--repair` is refused alongside it,
+  and a `config.yaml` `issue-prefix` that would still win for `bd create` is
+  named on stderr. A dependency between an old-prefix and a new-prefix issue
+  does not block: storage keeps an edge between two prefixes as a reference
+  to another repository, which `bd ready` ignores, and the command says so on
+  stderr. A later `bd rename-prefix <new> --repair` consolidates the prefixes
+  and re-points those dependencies; while every issue still carries the old
+  prefix, it (like `bd rename-prefix <new>`) renames them all instead of
+  refusing `<new>` as the current prefix. (#6591)
+
 - **`arrival_seq`, a commit-ordered create sequence on wisp-plane rows.**
   While a workspace journals, every `ephemeral` or `no_history` bead it creates
   is stamped with the `seq` of its own `create` journal record, in the same
@@ -1280,6 +1297,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no longer colored.
 
 ### Fixed
+
+- **`bd rename-prefix --repair` keeps each issue's suffix instead of minting
+  a new hash ID.** `taxdb-u6ch` becomes `kb-u6ch`, `cre-db-c2a.3` becomes
+  `kb-c2a.3`, and issues already on the target prefix (including custom IDs
+  like `kb-adr-0001`) are left alone. Source IDs are split by the database's
+  `issue_prefix`, its `allowed_prefixes` and the prefixes found on the rows,
+  so declaring `cre-db` in `allowed_prefixes` maps `cre-db-wxyz` to
+  `kb-wxyz`. When a family's root is taken by a live issue, by an earlier
+  family, or by a retired ID, the whole family (root and dotted children)
+  moves to one fresh `kb-<8 hex>` root and the move is reported. Text
+  references inside the renamed issues follow the renames (text in issues
+  already on the target prefix is left as it is), and so do dependencies,
+  including edges across the old prefixes. Such an edge is re-pointed by
+  removing and re-adding it in a transaction of its own, so it records the
+  repair's actor and time; that includes an edge between two prefixes that a
+  database from before the dependency-target split, or `bd rename`, already
+  keeps as a local one. Parent-child edges are re-pointed first, so every
+  other edge is checked against the re-pointed hierarchy. An edge storage
+  refuses to re-add (the re-add is checked like a new edge, and an edge
+  stored across prefixes never went through the hierarchy check) is left as
+  it was and reported. So is a blocking edge without which storage would
+  accept a parent-child edge it refused for a cycle, such as an epic's close
+  gate on a child already on the target prefix: re-pointed, it would start
+  to block while the child stays detached. The run still sets
+  `issue_prefix`; any other failure stops the run and names the edges
+  refused before it. `--dry-run` reports the same renames and collisions the
+  real run makes. `--repair --json` now
+  writes one object (`target_prefix`, `prefixes_found`, `issues_repaired`,
+  `issues_unchanged`, `dry_run`, `renames`, `collisions`, and
+  `unrepointed_edges`, which only a real run fills) with no progress text.
+  (#6591)
 
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
