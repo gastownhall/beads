@@ -261,3 +261,61 @@ func TestEmbeddedHealedWispIsBlockedServesBlockedStateAPIs(t *testing.T) {
 		t.Errorf("full recompute changed %d rows on a converged store, want 0", n)
 	}
 }
+
+// TestEmbeddedWispIsBlockedHealIsQuietAndRepeatable pins the clamp's borders:
+// a corroborated cursor applies nothing on the next open (the heal must not
+// re-arm a replay loop), the drift recurring heals again through the same
+// tail, and a store that never lost the column stays quiet throughout.
+func TestEmbeddedWispIsBlockedHealIsQuietAndRepeatable(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	conn, closeConn := openFullyMigratedStore(t, ctx)
+	defer closeConn()
+	seedWispIsBlockedHealFixture(t, ctx, conn)
+
+	// Quiet before any drift, and after one full heal.
+	for _, phase := range []string{"before any drift", "after one heal"} {
+		if phase == "after one heal" {
+			dropWispIsBlockedForHeal(t, ctx, conn)
+			applied, err := migrateUpRecordingSteps(t, ctx, conn)
+			if err != nil {
+				t.Fatalf("heal MigrateUp (%s): %v", phase, err)
+			}
+			if !slices.Equal(applied, wispIsBlockedHealTail()) {
+				t.Fatalf("heal (%s) applied %v, want the 0015..%d tail", phase, applied, schema.LatestIgnoredVersion())
+			}
+		}
+		applied, err := migrateUpRecordingSteps(t, ctx, conn)
+		if err != nil {
+			t.Fatalf("quiet MigrateUp (%s): %v", phase, err)
+		}
+		if len(applied) != 0 {
+			t.Errorf("MigrateUp (%s) applied %v, want none: a corroborated cursor must stay quiet", phase, applied)
+		}
+	}
+
+	// The drift recurring heals again, through the same tail, to the same
+	// end state -- the recorded cursor rows the heal replays over never strand
+	// the store.
+	dropWispIsBlockedForHeal(t, ctx, conn)
+	applied, err := migrateUpRecordingSteps(t, ctx, conn)
+	if err != nil {
+		t.Fatalf("re-heal MigrateUp: %v", err)
+	}
+	if !slices.Equal(applied, wispIsBlockedHealTail()) {
+		t.Errorf("re-heal applied %v, want the 0015..%d tail again", applied, schema.LatestIgnoredVersion())
+	}
+	requireHealedWispIsBlocked(t, ctx, conn)
+
+	// Healthy control: a store that never lost the column is quiet.
+	healthyConn, closeHealthy := openFullyMigratedStore(t, ctx)
+	defer closeHealthy()
+	seedWispIsBlockedHealFixture(t, ctx, healthyConn)
+	applied, err = migrateUpRecordingSteps(t, ctx, healthyConn)
+	if err != nil {
+		t.Fatalf("healthy-control MigrateUp: %v", err)
+	}
+	if len(applied) != 0 {
+		t.Errorf("healthy control applied %v, want none", applied)
+	}
+}
