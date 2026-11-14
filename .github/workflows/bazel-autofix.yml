@@ -107,6 +107,13 @@ jobs:
           dir="${RUNNER_TEMP}/bazel-patch"
           mkdir -p "$dir"
           gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > "${RUNNER_TEMP}/bazel-patch.zip"
+          # Check the archive entry before extraction: some unzip builds
+          # discard symlinks, which otherwise look like missing files.
+          entries="$(unzip -Z -l "${RUNNER_TEMP}/bazel-patch.zip")"
+          if printf '%s\n' "$entries" | awk '$NF ~ /^(bazel-sync\.patch|bazel-sync-meta\.txt)$/ && $1 ~ /^[ldbcps]/ { bad=1 } END { exit !bad }'; then
+            echo "::error::artifact entry is not a regular file"
+            exit 1
+          fi
           # Extract only the two expected names, and only as regular files.
           unzip -o "${RUNNER_TEMP}/bazel-patch.zip" bazel-sync.patch bazel-sync-meta.txt -d "$dir" || true
           ls -la "$dir"
