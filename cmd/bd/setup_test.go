@@ -1540,3 +1540,51 @@ func TestSetupChangeDir_OutputStaysLaunchRelative(t *testing.T) {
 		}
 	}
 }
+
+// TestSetupThroughRootCmd_ChangeDirWritesTarget runs the #8283 report through
+// rootCmd, so -C is parsed and the project selected the way the binary does
+// it: bd -C T setup claude/codex, --check and --remove from L act on T's
+// project files and leave L as it was.
+func TestSetupThroughRootCmd_ChangeDirWritesTarget(t *testing.T) {
+	home, launch, target := changeDirTempDir(t), changeDirTempDir(t), changeDirTempDir(t)
+	if err := os.MkdirAll(filepath.Join(target, ".beads"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, ".beads", "metadata.json"), []byte(`{"backend":"dolt"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(setup.SetClaudeManagedSettingsDirForTest(""))
+	env := map[string]string{"CODEX_HOME": "", "BD_DISABLE_METRICS": "1"}
+	launchBefore := treeSnapshot(t, launch)
+
+	run := func(wantExit int, args ...string) {
+		t.Helper()
+		full := append([]string{"-C", target, "setup"}, args...)
+		exit, stdout, stderr := runInUserGlobalHome(t, home, launch, env, full...)
+		if exit != wantExit {
+			t.Fatalf("bd %s exit = %d, want %d\nstdout:\n%s\nstderr:\n%s", strings.Join(full, " "), exit, wantExit, stdout, stderr)
+		}
+		assertSameTree(t, "launch", launch, launchBefore)
+	}
+	exists := func(rel string) bool {
+		_, err := os.Stat(filepath.Join(target, filepath.FromSlash(rel)))
+		return err == nil
+	}
+
+	run(0, "claude")
+	run(0, "codex")
+	for _, rel := range []string{".claude/settings.json", "AGENTS.md", ".agents/skills/beads/SKILL.md"} {
+		if !exists(rel) {
+			t.Fatalf("bd -C T setup did not write T/%s", rel)
+		}
+	}
+	run(0, "claude", "--check")
+	run(0, "codex", "--check")
+
+	run(0, "claude", "--remove")
+	run(0, "codex", "--remove")
+	run(1, "claude", "--check")
+	if exists(".agents/skills/beads/SKILL.md") {
+		t.Fatal("bd -C T setup codex --remove left T/.agents/skills/beads/SKILL.md")
+	}
+}
