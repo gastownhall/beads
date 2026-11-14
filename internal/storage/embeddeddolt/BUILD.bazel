@@ -221,6 +221,7 @@ go_test(
         "migrate_transaction_commit_4470_test.go",
         "migrate_updated_at_preservation_test.go",
         "migrate_wisp_dep_forward_repair_test.go",
+        "migrate_wisp_is_blocked_sentinel_test.go",
         "minted_id_collision_test.go",
         "molecule_contract_test.go",
         "new_methods_test.go",
