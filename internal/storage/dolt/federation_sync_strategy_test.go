@@ -208,6 +208,39 @@ func TestFederationSyncStrategyResolvesRealConflict(t *testing.T) {
 	f.assertPeerHasLocalHead(t, ctx)
 }
 
+// TestFederationSyncStrategyOursConcludesMerge covers AC-2: --strategy ours
+// keeps the local title and still concludes a real two-parent merge — even
+// though resolving every conflict back to ours stages no new issue content —
+// so the peer's head is in local history and the next sync is not wedged.
+func TestFederationSyncStrategyOursConcludesMerge(t *testing.T) {
+	ctx, cancel := testContext(t)
+	defer cancel()
+	f := newFedSyncPeer(t, ctx, seedIssue("fssours-x"))
+	localHead, peerHead := f.retitleConflict(t, ctx, "fssours-x")
+
+	result, err := f.store.Sync(ctx, "peer", "ours")
+	if err != nil {
+		t.Fatalf("Sync(--strategy ours) should resolve the conflict, got: %v", err)
+	}
+	if !result.Merged || !result.ConflictsResolved {
+		t.Errorf("result Merged=%v ConflictsResolved=%v, want both true", result.Merged, result.ConflictsResolved)
+	}
+	if !hasConflictOn(result.Conflicts, "issues") {
+		t.Errorf("reported conflicts %+v do not name the issues table", result.Conflicts)
+	}
+	if title := fedTitle(t, ctx, f.db, "fssours-x"); title != "ours" {
+		t.Errorf("committed title = %q after Sync --strategy ours, want %q", title, "ours")
+	}
+	for name, h := range map[string]string{"local": localHead, "peer": peerHead} {
+		var n int
+		fedScalar(t, ctx, f.db, &n, "SELECT COUNT(*) FROM dolt_log WHERE commit_hash = ?", h)
+		if n != 1 {
+			t.Errorf("%s pre-merge head %s is not an ancestor of HEAD: the merge was not concluded", name, h)
+		}
+	}
+	assertMergeSettled(t, ctx, f.db)
+}
+
 // TestFederationSyncNoStrategyConflictFails covers AC-5: without a strategy a
 // genuine conflict fails the sync with the --strategy hint, merges and pushes
 // nothing, and leaves no conflict or open merge behind.
