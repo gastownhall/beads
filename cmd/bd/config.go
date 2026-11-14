@@ -1113,11 +1113,14 @@ func validateSyncConfig(repoPath string) []string {
 		}
 	}
 
-	// Validate against allowed-remote-patterns if configured
+	// Validate against allowed-remote-patterns if configured. The lint uses
+	// the same normalized-destination gate as every runtime enforcement
+	// point (GH#6233): a typed URL and its registered spelling get one
+	// verdict, and the diagnostic names the key without echoing the URL.
 	if federationRemote != "" {
 		patterns := v.GetStringSlice("federation.allowed-remote-patterns")
 		if len(patterns) > 0 {
-			if err := remotecache.ValidateRemoteURLWithPatterns(federationRemote, patterns); err != nil {
+			if err := remotecache.ValidateRemoteWithPolicy(patterns, "federation.remote", federationRemote); err != nil {
 				issues = append(issues, fmt.Sprintf("federation.remote: %s", err))
 			}
 		}

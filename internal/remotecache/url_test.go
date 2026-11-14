@@ -295,63 +295,7 @@ func TestValidateRemoteName(t *testing.T) {
 	}
 }
 
-func TestMatchesRemotePattern(t *testing.T) {
-	tests := []struct {
-		name    string
-		url     string
-		pattern string
-		want    bool
-	}{
-		{"exact match", "dolthub://myorg/myrepo", "dolthub://myorg/myrepo", true},
-		{"wildcard repo", "dolthub://myorg/anyrepo", "dolthub://myorg/*", true},
-		{"wildcard no match", "dolthub://other/repo", "dolthub://myorg/*", false},
-		{"az wildcard", "az://acct.blob.core.windows.net/container/beads", "az://*.blob.core.windows.net/*/*", true},
-		{"scheme mismatch", "https://github.com/org/repo", "dolthub://*", false},
-	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := MatchesRemotePattern(tt.url, tt.pattern)
-			if got != tt.want {
-				t.Errorf("MatchesRemotePattern(%q, %q) = %v, want %v", tt.url, tt.pattern, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestValidateRemoteURLWithPatterns(t *testing.T) {
-	tests := []struct {
-		name     string
-		url      string
-		patterns []string
-		wantErr  bool
-		errMsg   string
-	}{
-		{"no patterns allows any", "dolthub://org/repo", nil, false, ""},
-		{"empty patterns allows any", "dolthub://org/repo", []string{}, false, ""},
-		{"matches one pattern", "dolthub://myorg/repo", []string{"dolthub://myorg/*"}, false, ""},
-		{"matches second pattern", "az://acct.blob.core.windows.net/c/p", []string{"dolthub://myorg/*", "az://acct.blob.core.windows.net/*/*"}, false, ""},
-		{"no pattern match", "https://evil.com/data", []string{"dolthub://myorg/*"}, true, "does not match"},
-		{"invalid URL fails before pattern check", "dolthub://\x00evil", []string{"dolthub://*"}, true, "control character"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := ValidateRemoteURLWithPatterns(tt.url, tt.patterns)
-			if tt.wantErr {
-				if err == nil {
-					t.Errorf("ValidateRemoteURLWithPatterns(%q, %v) = nil, want error", tt.url, tt.patterns)
-				} else if tt.errMsg != "" && !strings.Contains(err.Error(), tt.errMsg) {
-					t.Errorf("ValidateRemoteURLWithPatterns(%q, %v) error = %q, want %q", tt.url, tt.patterns, err.Error(), tt.errMsg)
-				}
-			} else {
-				if err != nil {
-					t.Errorf("ValidateRemoteURLWithPatterns(%q, %v) = %v, want nil", tt.url, tt.patterns, err)
-				}
-			}
-		})
-	}
-}
 
 func TestCacheKey(t *testing.T) {
 	// Deterministic

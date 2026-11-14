@@ -309,24 +309,6 @@ func MatchesRemotePattern(rawURL, pattern string) bool {
 	return matched
 }
 
-// ValidateRemoteURLWithPatterns validates a URL and optionally checks it
-// against an allowlist of glob patterns. If patterns is empty, only
-// structural validation is performed.
-func ValidateRemoteURLWithPatterns(rawURL string, patterns []string) error {
-	if err := ValidateRemoteURL(rawURL); err != nil {
-		return err
-	}
-	if len(patterns) == 0 {
-		return nil
-	}
-	for _, p := range patterns {
-		if MatchesRemotePattern(rawURL, p) {
-			return nil
-		}
-	}
-	return fmt.Errorf("remote URL %q does not match any allowed pattern", rawURL)
-}
-
 // RemotePolicyError is the refusal every federation.allowed-remote-patterns
 // gate returns: the allowlist is configured and the destination is outside
 // it, or the destination could not be resolved far enough to check. It is a
@@ -350,9 +332,9 @@ func (e *RemotePolicyError) Error() string {
 
 // ValidateRemoteWithPolicy enforces the federation.allowed-remote-patterns
 // allowlist (patterns) against rawURL and returns nil when the destination is
-// allowed. This is the one shared gate every runtime enforcement point and
-// the config lint call (GH#6233); ValidateRemoteURLWithPatterns above stays
-// for callers that match the raw spelling.
+// allowed. This is the one shared gate every caller uses — every runtime
+// enforcement point and the config lint (GH#6233) — so lint and runtime can
+// never disagree about a destination.
 //
 // patterns is the effective config value: absent or empty means the setting
 // is off, and the call is a no-op — enforcement is opt-in and must not change

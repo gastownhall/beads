@@ -151,7 +151,7 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `external_projects` | — | — | `{}` | Map project names → paths for cross-project deps |
 | `federation.remote` | — | `BD_FEDERATION_REMOTE` | (none) | Dolt remote URL (`dolthub://`, `gs://`, `s3://`, `az://`, `file://`) |
 | `federation.sovereignty` | — | `BD_FEDERATION_SOVEREIGNTY` | (none) | Sovereignty tier: `T1`, `T2`, `T3`, `T4` (see [below](#sync-and-federation)) |
-| `federation.allowed-remote-patterns` | — | — | `[]` | Glob patterns restricting allowed remote URLs |
+| `federation.allowed-remote-patterns` | — | — | `[]` | Glob allowlist of remote destinations, enforced on every transfer, registration, clone and cache push; empty = unrestricted |
 | `federation.exclude_types` | — | — | `[wisp]` | Issue types excluded from federation push |
 | `sync.require_confirmation_on_mass_delete` | — | — | `false` | Prompt before pushing when a merge deletes most issues |
 | `output.title-length` | — | — | `255` | Title display in feedback (`0` hides); see routing note below |
@@ -450,6 +450,8 @@ federation:
   - `T4`: No restrictions — data can be anywhere
 
 `bd config validate` checks the remote URL format, the sovereignty tier, `federation.allowed-remote-patterns`, and `routing.mode`.
+
+`federation.allowed-remote-patterns` is enforced, not just linted: every transfer (push, pull, fetch, sync), remote registration, clone and remote-cache operation refuses a destination outside the list, before any data moves. Destinations are matched in their Dolt-normalized form, so a typed `https://github.com/org/repo` and its registered `git+https://github.com/org/repo` spelling receive one verdict — in `bd config validate` and at runtime alike. An empty list leaves remotes unrestricted.
 
 ## Integration Configuration
 
