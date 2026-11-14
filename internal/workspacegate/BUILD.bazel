@@ -4,11 +4,20 @@ go_library(
     name = "workspacegate",
     srcs = [
         "canon.go",
+        "canon_other.go",
+        "canon_windows.go",
         "gate.go",
     ],
     importpath = "github.com/steveyegge/beads/internal/workspacegate",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/lockfile"],
+    deps = [
+        "//internal/lockfile",
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 go_test(
@@ -17,10 +26,18 @@ go_test(
         "canon_other_test.go",
         "canon_test.go",
         "gate_test.go",
+        "gate_windows_test.go",
         "readonly_wait_test.go",
     ],
     embed = [":workspacegate"],
-    deps = ["//internal/testutil/bazeltest"],
+    deps = [
+        "//internal/testutil/bazeltest",
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # --- begin repo_files (managed by tools/bazel/go_srcs.py; run `make bazel-sync`) ---
