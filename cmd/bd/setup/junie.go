@@ -145,8 +145,8 @@ func InstallJunie() error {
 }
 
 func CheckJunie() error {
-	guidelinesPath := ".junie/guidelines.md"
-	mcpPath := ".junie/mcp/mcp.json"
+	guidelinesPath := ProjectPath(".junie/guidelines.md")
+	mcpPath := ProjectPath(".junie/mcp/mcp.json")
 
 	guidelinesExists := false
 	mcpExists := false

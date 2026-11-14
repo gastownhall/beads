@@ -365,8 +365,8 @@ func runRecipe(name string) error {
 	if setupCheck {
 		var missing []string
 		for _, path := range paths {
-			if _, err := os.Stat(path); os.IsNotExist(err) {
-				missing = append(missing, path)
+			if _, err := os.Stat(setup.ProjectPath(path)); os.IsNotExist(err) {
+				missing = append(missing, setup.ProjectPath(path))
 			}
 		}
 		if len(missing) > 0 {
@@ -380,7 +380,7 @@ func runRecipe(name string) error {
 		}
 		fmt.Printf("✓ %s integration installed\n", remedy.PrintedValue(recipe.Name))
 		for _, path := range paths {
-			fmt.Printf("  File: %s\n", remedy.PrintedValue(path))
+			fmt.Printf("  File: %s\n", remedy.PrintedValue(setup.ProjectPath(path)))
 		}
 		return nil
 	}
