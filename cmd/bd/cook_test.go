@@ -1674,6 +1674,54 @@ func TestCookFormulaOnCompleteRefused(t *testing.T) {
 	})
 }
 
+// TestCookFormulaWithoutStepOnCompleteSucceeds: refusing step-level
+// on_complete leaves formulas that do not set it alone, including one whose
+// unrelated top-level [squash] table says trigger = "on_complete" (GH#3782).
+func TestCookFormulaWithoutStepOnCompleteSucceeds(t *testing.T) {
+	const src = `formula = "plain"
+version = 1
+type = "workflow"
+
+[squash]
+trigger = "on_complete"
+
+[[steps]]
+id = "parent"
+title = "Parent"
+
+[[steps.children]]
+id = "child"
+title = "Child"
+
+[[steps]]
+id = "repeat"
+title = "Repeat"
+needs = ["parent"]
+
+[steps.loop]
+count = 2
+
+[[steps.loop.body]]
+id = "body"
+title = "Body"
+`
+	sg, err := cookFormulaTOMLWithVars(t, "plain", src, nil)
+	if err != nil {
+		t.Fatalf("resolveAndCookFormulaWithVars: %v", err)
+	}
+	if sg == nil || len(sg.Issues) == 0 {
+		t.Fatalf("cook returned no issues: %+v", sg)
+	}
+	dir := writePipelineFormula(t, "plain", src)
+	f, err := loadAndResolveFormula("plain", []string{dir})
+	if err != nil {
+		t.Fatalf("loadAndResolveFormula: %v", err)
+	}
+	if err := f.Validate(); err != nil {
+		t.Fatalf("Validate after resolve: %v", err)
+	}
+}
+
 // TestCookFormulaConditionDroppedWaitsForSpawnerErrors: a gate whose
 // waits_for spawner is dropped by its condition must fail the cook, not pour
 // a gate:<value> step that waits for no one (GH#6437, PR #6642).
