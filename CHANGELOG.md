@@ -1281,6 +1281,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd -C <project> setup` now installs into the selected project** (#8283).
+  `-C` selected only the database, so every project-scoped integration —
+  Claude, Codex, Cursor, Factory, OpenCode, Gemini `--project`, Aider,
+  Junie, Mux `--project` and the built-in and `.beads/recipes.toml` recipes
+  — was installed into, checked in and removed from the working directory
+  the command ran from, while `--check` judged the wrong directory's files
+  and a workspace recipe's paths were confined to it. Install, `--check`,
+  `--remove` and `--add` now run against the `-C` directory (a workspace
+  recipe's paths must stay inside it), global destinations such as
+  `~/.claude` and `~/.gemini` are untouched, and without `-C` behavior and
+  output are unchanged. `bd -C <dir> init` is refused with the `cd <dir> &&
+  bd init` remedy, and `-C`'s help now says what it selects.
+
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc

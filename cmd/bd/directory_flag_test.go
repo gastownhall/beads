@@ -314,3 +314,30 @@ func TestInitThroughRootCmd_RejectsChangeDir(t *testing.T) {
 		}
 	})
 }
+
+// TestSetupThroughRootCmd_ChangeDirWritesTarget pins the -C wiring end to
+// end (#8283): `bd -C <dir> setup <recipe>` selects <dir> as the project and
+// the recipe's files land there, not in the working directory the command
+// ran from — the working directory is never changed.
+func TestSetupThroughRootCmd_ChangeDirWritesTarget(t *testing.T) {
+	launch := t.TempDir()
+	target := primeTestWorkspace(t, map[string]string{".beads/metadata.json": primeTestMetadata})
+	t.Chdir(launch)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("BEADS_DIR", filepath.Join(target, ".beads"))
+	t.Setenv("CODEX_HOME", "")
+	t.Cleanup(func() { changeDir = "" })
+
+	if _, err := runRootForTest(t, []string{"-C", target, "setup", "windsurf"}); err != nil {
+		t.Fatalf("bd -C <dir> setup windsurf: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(target, ".windsurf", "rules", "beads.md")); err != nil {
+		t.Errorf("bd -C <dir> setup windsurf did not write the selected project's file: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(launch, ".windsurf")); !os.IsNotExist(err) {
+		t.Errorf("bd -C <dir> setup windsurf wrote into the working directory (stat err=%v)", err)
+	}
+	if wd, err := os.Getwd(); err != nil || wd != launch {
+		t.Errorf("bd -C <dir> setup moved the working directory to %q (err=%v); want %q", wd, err, launch)
+	}
+}
