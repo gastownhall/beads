@@ -73,6 +73,14 @@ func BootstrapFromRemoteWithDBRef(ctx context.Context, doltDir, remoteURL, datab
 		return false, fmt.Errorf("invalid remote URL: %w", err)
 	}
 
+	// GH#6233: the allowlist gates the clone before anything is created. It
+	// sits after the already-exists no-op above so an already-bootstrapped
+	// rig is unaffected by a later lockdown, and before the dolt CLI lookup
+	// so the refusal creates no parent directory and needs no binary.
+	if err := checkCloneURLPolicy(remoteURL); err != nil {
+		return false, err
+	}
+
 	if err := ValidateDatabaseName(database); err != nil {
 		return false, fmt.Errorf("invalid database name %q (use cfg.GetDoltDatabase() to resolve the configured name): %w", database, err)
 	}

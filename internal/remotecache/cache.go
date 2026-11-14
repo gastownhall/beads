@@ -88,6 +88,12 @@ func (c *Cache) Ensure(ctx context.Context, remoteURL string) (string, error) {
 	if err := ValidateRemoteURL(remoteURL); err != nil {
 		return "", fmt.Errorf("invalid remote URL: %w", err)
 	}
+	// GH#6233: the allowlist gate sits before the dolt lookup, the entry
+	// directory and the lock, so a refused remote creates nothing and
+	// acquires nothing.
+	if err := c.checkPolicy(remoteURL); err != nil {
+		return "", err
+	}
 	doltBin, err := exec.LookPath("dolt")
 	if err != nil {
 		return "", fmt.Errorf("dolt CLI not found (required for remote cache): %w", err)
@@ -145,6 +151,11 @@ func (c *Cache) Ensure(ctx context.Context, remoteURL string) (string, error) {
 
 // Push pushes local commits in the cached clone back to the remote.
 func (c *Cache) Push(ctx context.Context, remoteURL string) error {
+	// GH#6233: refuse before the lock and any dolt invocation; a warm entry
+	// also has its recorded origin checked (see checkPolicy).
+	if err := c.checkPolicy(remoteURL); err != nil {
+		return err
+	}
 	target := c.cloneTarget(remoteURL)
 	if !c.doltExists(target) {
 		return fmt.Errorf("no cached clone for %s", remoteURL)

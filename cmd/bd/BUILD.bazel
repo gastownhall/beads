@@ -607,6 +607,7 @@ go_test(
         "claim_pools_embedded_test.go",
         "classified_read_test.go",
         "cli_fast_test.go",
+        "clone_policy_guard_test.go",
         "close_embedded_test.go",
         "close_failure_report_test.go",
         "close_fanin_proxied_integration_test.go",

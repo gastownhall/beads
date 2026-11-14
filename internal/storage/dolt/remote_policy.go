@@ -55,6 +55,18 @@ func (s *DoltStore) checkRemoteURLPolicy(subject, url string) error {
 	return remotecache.ValidateRemoteWithPolicy(patterns, subject, url)
 }
 
+// checkCloneURLPolicy is checkRemoteURLPolicy's clone funnel (GH#6233): a
+// bootstrap clone dials the remote before any remote is registered to
+// resolve by name, so the destination URL is in hand and no store is open.
+// An empty allowlist is no gate.
+func checkCloneURLPolicy(remoteURL string) error {
+	patterns := config.AllowedRemotePatterns()
+	if len(patterns) == 0 {
+		return nil
+	}
+	return remotecache.ValidateRemoteWithPolicy(patterns, "clone remote", remoteURL)
+}
+
 // remoteURLForPolicy resolves the URL a transfer with remote name would use.
 // See checkRemotePolicy for the precedence and refusal rules.
 func (s *DoltStore) remoteURLForPolicy(ctx context.Context, remote string) (string, error) {

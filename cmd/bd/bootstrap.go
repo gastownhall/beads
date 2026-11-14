@@ -26,6 +26,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -1731,6 +1732,22 @@ var (
 )
 
 func cloneFromRemoteWithMode(ctx context.Context, beadsDir, remoteURL, dbName string, cfg *configfile.Config, cloneMode remoteCloneMode) error {
+	// GH#6233: the allowlist gates the clone before any mode resolution or
+	// dispatch — every funnel refuses before it transfers or creates
+	// anything. The policy read targets the workspace being cloned into:
+	// bd bootstrap can run from outside that workspace, so the check runs
+	// under that directory's config rather than the process's. A config
+	// that cannot load refuses the clone rather than failing open.
+	var clonePolicyErr error
+	if err := config.WithBeadsDir(beadsDir, func() {
+		clonePolicyErr = remotecache.ValidateRemoteWithPolicy(config.AllowedRemotePatterns(), "clone remote", remoteURL)
+	}); err != nil {
+		return fmt.Errorf("load the workspace config to enforce federation.allowed-remote-patterns: %w", err)
+	}
+	if clonePolicyErr != nil {
+		return clonePolicyErr
+	}
+
 	mode := resolveRemoteCloneMode(beadsDir, cfg, cloneMode)
 
 	switch mode {

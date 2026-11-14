@@ -1,11 +1,15 @@
 package dolt
 
 import (
+	"context"
 	"database/sql"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -230,5 +234,34 @@ func TestRemoteRegistrationRefusedByAllowedRemotePatterns(t *testing.T) {
 	}
 	if evilRows != 0 {
 		t.Errorf("federation_peers holds %d refused peer row(s)", evilRows)
+	}
+}
+
+// TestBootstrapFromRemoteRefusedByAllowedRemotePatterns: the bootstrap clone
+// is the funnel that dials a remote before any remote is registered to
+// resolve by name, so the allowlist gate must refuse it before the parent
+// dolt directory is created — while an already-bootstrapped rig stays a
+// no-op even after the list tightens.
+func TestBootstrapFromRemoteRefusedByAllowedRemotePatterns(t *testing.T) {
+	setAllowedRemotePatternsForTest(t, []string{"git+https://github.com/myorg/*"})
+	remote := "https://evil.example.com/attacker/repo.git"
+
+	// Already bootstrapped: the no-op wins over the gate, exactly as with no
+	// list at all.
+	warm := filepath.Join(t.TempDir(), "dolt")
+	if err := os.MkdirAll(filepath.Join(warm, configfile.DefaultDoltDatabase, ".dolt"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if cloned, err := BootstrapFromRemote(context.Background(), warm, remote); cloned || err != nil {
+		t.Fatalf("BootstrapFromRemote on an existing rig = (%v, %v), want the no-op (false, nil)", cloned, err)
+	}
+
+	// Cold: refused before anything is created.
+	cold := filepath.Join(t.TempDir(), "dolt")
+	if _, err := BootstrapFromRemote(context.Background(), cold, remote); !policyRefusal(err) {
+		t.Fatalf("BootstrapFromRemote error = %v, want *RemotePolicyError", err)
+	}
+	if _, statErr := os.Stat(cold); !os.IsNotExist(statErr) {
+		t.Errorf("the refused clone created %s (stat err = %v)", cold, statErr)
 	}
 }
