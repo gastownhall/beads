@@ -20,7 +20,7 @@ ERRORS=0
 
 DOCS=(
     "docs/reference/configuration.md|cmd/bd/main.go;cmd/bd/config.go;internal/configfile/"
-    "docs/getting-started/ide-setup.md|cmd/bd/setup*.go;internal/recipes/"
+    "docs/getting-started/ide-setup.md|cmd/bd/setup*.go;cmd/bd/init.go;internal/recipes/"
     "docs/integrations/azure-devops.md|cmd/bd/ado*.go;internal/ado/"
     "docs/reference/json-schema.md|cmd/bd/output.go;cmd/bd/errors.go;cmd/bd/protocol/json_contract_test.go"
     "docs/recovery/init-safety.md|cmd/bd/init.go;cmd/bd/init_safety.go;cmd/bd/init_safety_test.go;cmd/bd/init_safety_help.go;cmd/bd/dolt.go"

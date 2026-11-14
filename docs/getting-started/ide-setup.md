@@ -7,7 +7,7 @@ Configure your IDE or coding agent for optimal beads integration.
 
 Last reviewed: 2026-11-14
 
-Freshness source: `cmd/bd/setup*.go` and `internal/recipes/`.
+Freshness source: `cmd/bd/setup*.go`, `cmd/bd/init.go`, and `internal/recipes/`.
 
 ## How `bd setup` Works
 

@@ -196,7 +196,7 @@ func TestRetargetGitContextPropagatesGitErrors(t *testing.T) {
 
 			err := retargetGitContext(dir)
 			if err == nil {
-				t.Fatalf("retargetGitContext(%q) = nil, want git error containing %q", dir, tc.want)
+				t.Fatalf("retargetGitContext(%q) = nil, want git error containing %s", dir, strings.Join(tc.want, ", "))
 			}
 			for _, want := range tc.want {
 				if !strings.Contains(err.Error(), want) {
