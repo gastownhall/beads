@@ -24,6 +24,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/gitenv"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/utils"
@@ -721,16 +722,21 @@ func FindBeadsDirFrom(startDir string) string {
 				// A worktree root can contain tracked .beads metadata without
 				// owning the ignored database directory. Match FindBeadsDir by
 				// preferring the shared worktree database in that case.
-			} else if isWorktreeRoot && resolved == beadsDir && yieldLocalStore(beadsDir, fallbackResolved) {
+			} else if isWorktreeRoot && yieldLocalStore(beadsDir, fallbackResolved) {
 				// A metadata-less worktree store yields to the metadata-backed
-				// shared workspace, as in FindBeadsDir (GH#6552).
+				// shared workspace (GH#6552). Return that workspace, as
+				// FindBeadsDir's 3c does: walking on would reach ancestors
+				// outside the repository, such as an unrelated parent .beads.
+				return fallbackResolved
 			} else if isJJSecondaryRoot && jjPrimaryHasDB && !hasBeadsDatabase(resolved) {
 				// A jj secondary workspace can likewise contain inherited
 				// .beads metadata without the ignored database directory.
 				// Match FindBeadsDir by preferring the primary workspace DB.
-			} else if isJJSecondaryRoot && resolved == beadsDir && yieldLocalStore(beadsDir, jjPrimaryBeadsDir) {
+			} else if isJJSecondaryRoot && yieldLocalStore(beadsDir, jjPrimaryBeadsDir) {
 				// A metadata-less secondary store yields to the metadata-backed
-				// primary workspace, as in FindBeadsDir (GH#6552).
+				// primary workspace (GH#6552); return it, as FindBeadsDir's
+				// 3'c does.
+				return jjPrimaryBeadsDir
 			} else if hasBeadsProjectFiles(resolved) {
 				return resolved
 			}
@@ -934,14 +940,21 @@ func hasBeadsDatabase(beadsDir string) bool {
 	if info, err := os.Stat(filepath.Join(beadsDir, "embeddeddolt")); err == nil && info.IsDir() {
 		return true
 	}
+	return len(beadsDatabaseFiles(beadsDir)) > 0
+}
+
+// beadsDatabaseFiles names, sorted, the *.db files in beadsDir that
+// hasBeadsDatabase counts as a database: all but backups and vc.db.
+func beadsDatabaseFiles(beadsDir string) []string {
 	dbMatches, _ := filepath.Glob(filepath.Join(beadsDir, "*.db"))
+	var files []string
 	for _, match := range dbMatches {
 		baseName := filepath.Base(match)
 		if !strings.Contains(baseName, ".backup") && baseName != "vc.db" {
-			return true
+			files = append(files, baseName)
 		}
 	}
-	return false
+	return files
 }
 
 // localStoreYieldsToShared decides whether an implicitly selected worktree or
@@ -954,6 +967,10 @@ func hasBeadsDatabase(beadsDir string) bool {
 //   - local owns a database (hasBeadsDatabase) but has neither metadata.json
 //     nor config.json. Any local metadata, and any error reading it, keeps
 //     the existing separate-database precedence.
+//   - local holds no redirect file. A redirect is an explicit selection even
+//     when its target is invalid: FindBeadsDir and findDatabaseInTree settle
+//     a worktree's redirect (step 3a) before they reach this decision, and
+//     refusing here gives FindBeadsDirFrom and the jj paths the same rule.
 //   - shared is a different existing directory that discovery accepts as a
 //     workspace (hasBeadsProjectFiles) and whose metadata reads cleanly.
 //
@@ -962,6 +979,9 @@ func hasBeadsDatabase(beadsDir string) bool {
 // require opening the store. Neither directory is modified.
 func localStoreYieldsToShared(local, shared string) bool {
 	if local == "" || shared == "" || !hasBeadsDatabase(local) {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(local, RedirectFileName)); err == nil {
 		return false
 	}
 	if cfg, err := configfile.LoadForDiscovery(local); err != nil || cfg != nil {
@@ -999,10 +1019,17 @@ var yieldedLocalStoreWarned sync.Map
 
 // warnYieldedLocalStoreOnce tells the user, on stderr and at most once per
 // canonical local path per process, that discovery skipped a metadata-less
-// local store in favor of the shared workspace. Database names are reported
-// as observed on disk (embedded store directories) and as declared in the
-// shared metadata; neither proves the skipped store is empty, so the warning
-// gives an explicit command to inspect it instead of suggesting removal.
+// local store in favor of the shared workspace. It names what was found in
+// the skipped directory (localStoreContents) and the database the shared
+// metadata declares; neither proves the skipped store is empty.
+//
+// It gives no command to run against the skipped directory. Without metadata,
+// bd pointed there by BEADS_DIR picks the default database name (creating
+// that database when the store has another) or a Dolt server that the
+// environment or config.yaml selects, so such a command could show real data
+// as empty and add a database to the store. The warning asks for a backup and
+// points at docs/reference/worktrees.md, which shows how to inspect a copy.
+// Paths and names read from disk are printed through internal/remedy.
 func warnYieldedLocalStoreOnce(local, shared string) {
 	local = utils.CanonicalizePath(local)
 	shared = utils.CanonicalizePath(shared)
@@ -1010,24 +1037,35 @@ func warnYieldedLocalStoreOnce(local, shared string) {
 		return
 	}
 
-	observed := "no embedded databases observed"
-	if names := configfile.EmbeddedDoltDatabases(local); len(names) > 0 {
-		observed = "embedded databases observed: " + strings.Join(names, ", ")
-	}
 	declared := "shared metadata declares no dolt_database"
 	if cfg, err := configfile.LoadForDiscovery(shared); err == nil && cfg != nil && cfg.DoltDatabase != "" {
 		declared = fmt.Sprintf("shared metadata declares dolt_database %q", cfg.DoltDatabase)
 	}
 
-	fmt.Fprintf(os.Stderr, "Warning: ignoring the beads database in %s because it has no metadata.json or config.json; using the shared workspace %s instead\n", local, shared)
-	fmt.Fprintf(os.Stderr, "  (%s; %s)\n", observed, declared)
-	fmt.Fprintf(os.Stderr, "  To inspect the skipped database: BEADS_DIR=%s bd list\n", shellSingleQuote(local))
-	fmt.Fprintln(os.Stderr, "  Preserve any data you need from it before removing it.")
+	fmt.Fprintf(os.Stderr, "Warning: ignoring the beads database in %s because it has no metadata.json or config.json; using the shared workspace %s instead\n", remedy.PrintedValue(local), remedy.PrintedValue(shared))
+	fmt.Fprintf(os.Stderr, "  (%s; %s)\n", localStoreContents(local), declared)
+	fmt.Fprintln(os.Stderr, "  It may hold issues: back it up before you change or remove it. BEADS_DIR alone can open")
+	fmt.Fprintln(os.Stderr, "  or create a different database; to inspect a copy, see")
+	fmt.Fprintln(os.Stderr, "  docs/reference/worktrees.md#which-beads-a-worktree-uses")
 }
 
-// shellSingleQuote quotes s for a POSIX shell.
-func shellSingleQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+// localStoreContents names, for the yield warning, each database marker
+// hasBeadsDatabase counts in beadsDir: the embedded databases by name (or an
+// embeddeddolt/ directory holding none), a dolt/ directory, and *.db files.
+func localStoreContents(beadsDir string) string {
+	var found []string
+	if names := configfile.EmbeddedDoltDatabases(beadsDir); len(names) > 0 {
+		found = append(found, "embedded databases observed: "+remedy.PrintedList(names, ", "))
+	} else if info, err := os.Stat(filepath.Join(beadsDir, "embeddeddolt")); err == nil && info.IsDir() {
+		found = append(found, "embeddeddolt/ with no databases observed")
+	}
+	if info, err := os.Stat(filepath.Join(beadsDir, "dolt")); err == nil && info.IsDir() {
+		found = append(found, "a dolt/ directory observed")
+	}
+	if files := beadsDatabaseFiles(beadsDir); len(files) > 0 {
+		found = append(found, "database files observed: "+remedy.PrintedList(files, ", "))
+	}
+	return strings.Join(found, "; ")
 }
 
 // userHomeDir is the home directory whose .beads the ancestor walks pass over

@@ -58,33 +58,63 @@ From a linked Git worktree (or a jj secondary workspace), automatic discovery
 checks these in order:
 
 1. `BEADS_DIR`, when set, always wins.
-2. A valid `.beads/redirect` file in the worktree.
+2. A `.beads/redirect` file in the worktree. If its target is missing or holds
+   no workspace, `bd` warns and uses the worktree's own `.beads`.
 3. The worktree's own `.beads`, when it holds a database (`embeddeddolt/`,
    `dolt/`, or a `*.db` file). This is separate-database mode.
-4. The main repository's shared `.beads`.
+4. The main repository's shared `.beads`, when it holds a database.
+5. Otherwise the worktree's own `.beads` if it has project files such as the
+   tracked `config.yaml`, and the shared `.beads` if not. A main repository
+   whose data lives on a shared or external Dolt server has no database in
+   `.beads`, so its worktrees usually end here.
 
 Step 3 has one exception. A worktree database with no `metadata.json` (or
 legacy `config.json`) beside it yields to the shared `.beads` when that
-directory has readable `metadata.json`. `bd init` writes metadata, so an
-initialized separate database keeps working; a store with none is usually left
-behind by a command that fell back to embedded mode inside the worktree. The
-first time this happens in a process, `bd` prints a warning to stderr naming
-both directories:
+directory has readable `metadata.json`, and `bd` then uses the shared `.beads`
+even if it holds no database. `bd init` writes metadata, so an initialized
+separate database keeps working; a store with none is usually left behind by a
+command that fell back to embedded mode inside the worktree. The first time
+this happens in a process, `bd` prints a warning to stderr naming both
+directories:
 
 ```text
 Warning: ignoring the beads database in /path/to/worktree/.beads because it has no metadata.json or config.json; using the shared workspace /path/to/main/.beads instead
   (embedded databases observed: beads; shared metadata declares dolt_database "myproject")
-  To inspect the skipped database: BEADS_DIR='/path/to/worktree/.beads' bd list
-  Preserve any data you need from it before removing it.
+  It may hold issues: back it up before you change or remove it. BEADS_DIR alone can open
+  or create a different database; to inspect a copy, see
+  docs/reference/worktrees.md#which-beads-a-worktree-uses
 ```
 
-The names in the warning are what is on disk and what the shared metadata
-declares; they do not prove the skipped database is empty. Discovery never
-opens, changes, or deletes either database. The exception does not apply when
-the worktree `.beads` has its own metadata (even metadata copied from the main
-repository), when the shared `.beads` has no readable metadata, or when the
-worktree is not linked to a shared workspace: those keep the worktree's
-database, as before.
+The warning names what it found in the skipped directory (embedded databases,
+a `dolt/` directory, or `*.db` files) and the database the shared metadata
+declares. Neither shows whether the skipped database holds issues. Discovery
+never opens, changes, or deletes either database. The exception does not apply
+when the worktree `.beads` has its own metadata (even metadata copied from the
+main repository) or a `redirect` file, when the shared `.beads` has no
+readable metadata, or when the worktree is not linked to a shared workspace:
+those keep the worktree's database, as before.
+
+To look inside a skipped embedded database, open a copy that has metadata
+naming it. Pointing `BEADS_DIR` at the original is not safe: without metadata,
+`bd` can pick the default database name `beads`, creating that database when
+the store holds another, or a Dolt server that `config.yaml` or the
+environment selects.
+
+```bash
+mkdir /tmp/skipped
+cp -R /path/to/worktree/.beads /tmp/skipped/.beads
+# A server setting in the copied config.yaml would send bd to the server.
+rm -f /tmp/skipped/.beads/config.yaml
+echo '{"backend":"dolt","dolt_mode":"embedded","dolt_database":"beads"}' > /tmp/skipped/.beads/metadata.json
+BEADS_DIR=/tmp/skipped/.beads bd list --all
+```
+
+Set `dolt_database` to a name from the warning's `embedded databases observed`
+list, one copy per name. If `bd` still connects to a Dolt server, a server
+setting in your environment or user-level config applies; clear it for that
+command. Keep a backup of a skipped `dolt/` directory or `*.db` file too: a
+`*.db` file is a pre-Dolt SQLite database, which needs a
+[cross-era upgrade](/getting-started/upgrading#cross-era-upgrades).
 
 ## Basic Usage
 
@@ -181,14 +211,14 @@ worktrees should share the repository workspace.
 
 A worktree database without `metadata.json` is skipped in favor of the shared
 workspace, with a warning (see
-[Which `.beads` a worktree uses](#which-beads-a-worktree-uses)). Inspect it
-with the command in the warning, for example
-`BEADS_DIR='/path/to/worktree/.beads' bd list`, before removing it. Do not run
-`bd init` in the worktree to repair it: in a linked worktree, `bd init` targets
-the main repository's workspace.
+[Which `.beads` a worktree uses](#which-beads-a-worktree-uses)). Back it up
+and inspect a copy as shown there before removing it. Do not run `bd init` in
+the worktree to repair it: in a linked worktree, `bd init` targets the main
+repository's workspace.
 
-If the worktree's own database was intentional, use `BEADS_DIR` to select it
-explicitly.
+If the worktree's own database was intentional, give its `.beads` a
+`metadata.json` naming that database, like the one in the inspection example.
+A worktree database with its own metadata keeps separate-database mode.
 
 ### Concurrent Writers
 
