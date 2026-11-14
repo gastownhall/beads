@@ -8,6 +8,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
@@ -190,4 +191,70 @@ func TestEmbeddedIgnoredSentinelHealsALostWispIsBlockedColumn(t *testing.T) {
 		"SELECT COUNT(*) FROM wisp_labels WHERE issue_id = 'hb-wisp-free' AND label = 'kept'"); got != 1 {
 		t.Errorf("seeded wisp label rows after the heal = %d, want 1", got)
 	}
+}
+
+// TestEmbeddedRepairedWispIsBlockedServesBlockedStateRecompute is gh 5257's
+// AC-3: once MigrateUp has healed the lost column, the runtime blocked-state
+// paths the report saw fail with `does not have column "is_blocked"` work
+// again: the doctor consistency count, a status change that unblocks a wisp's
+// dependent, the per-row recompute, and the full repair, each leaving the
+// derived flags consistent with the graph.
+func TestEmbeddedRepairedWispIsBlockedServesBlockedStateRecompute(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+	conn := seedLostIsBlockedStore(t, ctx)
+	dropWispIsBlocked(t, ctx, conn)
+	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		t.Fatalf("MigrateUp: %v", err)
+	}
+	// The repair itself must not stamp the rows; read before any user write.
+	for _, w := range lostIsBlockedWisps {
+		requireStamp(t, ctx, conn, "wisps", w.id, w.stamp)
+	}
+
+	requireConsistent := func(when string) {
+		t.Helper()
+		n, err := issueops.CountIsBlockedInconsistenciesInTx(ctx, conn)
+		if err != nil {
+			t.Fatalf("doctor blocked-state count %s: %v", when, err)
+		}
+		if n != 0 {
+			t.Errorf("doctor blocked-state count %s = %d stale rows, want 0", when, n)
+		}
+	}
+	requireConsistent("right after the repair")
+
+	// Status transition: closing the wisp blocker unblocks its dependent.
+	if _, err := issueops.CloseIssueInTx(ctx, conn, "hb-wisp-blocker", "done", "fixture", ""); err != nil {
+		t.Fatalf("close the wisp blocker: %v", err)
+	}
+	if readIsBlocked(t, ctx, conn, "wisps", "hb-wisp-by-wisp") {
+		t.Error("hb-wisp-by-wisp is still blocked after its only blocker closed")
+	}
+	if !readIsBlocked(t, ctx, conn, "wisps", "hb-wisp-by-issue") {
+		t.Error("hb-wisp-by-issue lost its block on an open issue")
+	}
+	requireConsistent("after the status change")
+
+	ids := make([]string, 0, len(lostIsBlockedWisps))
+	for _, w := range lostIsBlockedWisps {
+		ids = append(ids, w.id)
+	}
+	if err := issueops.RecomputeIsBlockedInTx(ctx, conn, []string{lostIsBlockedIssueBlocker.id}, ids, "fixture"); err != nil {
+		t.Fatalf("per-row blocked-state recompute: %v", err)
+	}
+	requireConsistent("after the per-row recompute")
+
+	// Full repair: a stale flag the count sees is one the recompute fixes.
+	execFrozenGuard(t, ctx, conn, "UPDATE wisps SET is_blocked = 1 WHERE id = 'hb-wisp-free'")
+	if n, err := issueops.CountIsBlockedInconsistenciesInTx(ctx, conn); err != nil || n == 0 {
+		t.Fatalf("doctor blocked-state count over a stale flag = %d, %v; want > 0, nil", n, err)
+	}
+	if _, err := issueops.RecomputeAllIsBlockedInTx(ctx, conn); err != nil {
+		t.Fatalf("full blocked-state recompute: %v", err)
+	}
+	if readIsBlocked(t, ctx, conn, "wisps", "hb-wisp-free") {
+		t.Error("full recompute left the free wisp blocked")
+	}
+	requireConsistent("after the full recompute")
 }
