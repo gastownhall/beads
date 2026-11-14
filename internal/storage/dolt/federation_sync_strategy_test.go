@@ -241,6 +241,61 @@ func TestFederationSyncStrategyOursConcludesMerge(t *testing.T) {
 	assertMergeSettled(t, ctx, f.db)
 }
 
+// TestFederationSyncStrategyConfigConflict covers AC-3: a config-row conflict
+// (issue_prefix, or a kv.memory.* row from `bd remember`) resolves with the
+// chosen side committed into HEAD, leaves config clean, and a repeated sync
+// with no new peer edits neither fails nor re-opens a merge (GH#2455/GH#2474).
+func TestFederationSyncStrategyConfigConflict(t *testing.T) {
+	cases := []struct {
+		key, strategy, want string
+	}{
+		{key: "issue_prefix", strategy: "theirs", want: "peerpfx"},
+		{key: "kv.memory.fedsync", strategy: "ours", want: "localval"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.strategy, func(t *testing.T) {
+			ctx, cancel := testContext(t)
+			defer cancel()
+			f := newFedSyncPeer(t, ctx,
+				"REPLACE INTO config (`key`, value) VALUES ('"+tc.key+"', 'basepfx')")
+			fedExec(t, ctx, f.peer, "peer",
+				"UPDATE config SET value = 'peerpfx' WHERE `key` = '"+tc.key+"'",
+				"CALL DOLT_COMMIT('-Am', 'peer config')",
+				"CALL DOLT_PUSH('origin', 'main')",
+			)
+			local := "localpfx"
+			if tc.want == "localval" {
+				local = "localval"
+			}
+			fedExec(t, ctx, f.db, "local",
+				"UPDATE config SET value = '"+local+"' WHERE `key` = '"+tc.key+"'",
+				"CALL DOLT_COMMIT('-Am', 'local config')",
+			)
+
+			for i := 1; i <= 2; i++ {
+				result, err := f.store.Sync(ctx, "peer", tc.strategy)
+				if err != nil {
+					t.Fatalf("Sync #%d (--strategy %s): %v", i, tc.strategy, err)
+				}
+				if i == 1 && !hasConflictOn(result.Conflicts, "config") {
+					t.Errorf("Sync #1 reported conflicts %+v, want the config table", result.Conflicts)
+				}
+				var got string
+				fedScalar(t, ctx, f.db, &got, "SELECT value FROM config AS OF 'HEAD' WHERE `key` = ?", tc.key)
+				if got != tc.want {
+					t.Errorf("after Sync #%d HEAD config %s = %q, want %q", i, tc.key, got, tc.want)
+				}
+				var pending int
+				fedScalar(t, ctx, f.db, &pending, "SELECT COUNT(*) FROM dolt_status WHERE table_name = 'config'")
+				if pending != 0 {
+					t.Errorf("after Sync #%d config has pending changes", i)
+				}
+				assertMergeSettled(t, ctx, f.db)
+			}
+		})
+	}
+}
+
 // TestFederationSyncNoStrategyConflictFails covers AC-5: without a strategy a
 // genuine conflict fails the sync with the --strategy hint, merges and pushes
 // nothing, and leaves no conflict or open merge behind.
