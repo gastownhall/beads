@@ -157,6 +157,124 @@ func deriveSweptFilterFlags(t *testing.T, kinds ...string) []struct {
 	return out
 }
 
+// sweptFilterClassification is the reviewed classification of every filter
+// registration among the six names: "union" where the downstream consumer
+// already accepts a comma-separated OR set, "once" where it is single-valued
+// all the way down and a repeat must fail loudly instead of narrowing. bd
+// list's five flags (#5739) are included so the table is the complete
+// classification, not just the new sweep. The migration alias shares bd
+// migrate issues's FlagSet and is recorded at its own path too.
+var sweptFilterClassification = map[string]map[string]string{
+	"bd list":            {"status": "union", "state": "union", "id": "union", "type": "once", "assignee": "once"},
+	"bd count":           {"status": "once", "assignee": "once", "type": "once", "id": "union"},
+	"bd search":          {"status": "union", "assignee": "once", "type": "once"},
+	"bd human list":      {"status": "union"},
+	"bd gitlab sync":     {"label": "union", "type": "union", "assignee": "once"},
+	"bd ready":           {"assignee": "once", "type": "once"},
+	"bd stale":           {"status": "once"},
+	"bd find-duplicates": {"status": "once"},
+	"bd dep tree":        {"status": "once"},
+	"bd dep list":        {"type": "once"},
+	"bd lint":            {"status": "once", "type": "once"},
+	"bd migrate issues":  {"status": "once", "type": "once"},
+	"bd migrate-issues":  {"status": "once", "type": "once"},
+	"bd formula list":    {"type": "once"},
+	"bd mol wisp list":   {"type": "once"},
+	"bd gate check":      {"type": "once"},
+	"bd jira sync":       {"state": "once"},
+	"bd linear sync":     {"state": "once"},
+	"bd notion sync":     {"state": "once"},
+}
+
+// setterFilterFlagExemptions lists the plain-string registrations that are
+// deliberately NOT swept: value-setting flags, where the shell's own
+// last-one-wins override idiom (`bd create $DEFAULTS --type bug`) narrows
+// nothing, and action-target flags that select one object. Every entry must
+// exist, remain a plain string, and keep last-value-wins; the exemption test
+// enforces all three directions.
+var setterFilterFlagExemptions = map[string]map[string]string{
+	"bd create":        {"type": "sets the created issue's type", "status": "sets the created issue's initial status", "id": "sets the created issue's explicit ID", "assignee": "sets the created issue's assignee"},
+	"bd update":        {"status": "sets the new status", "type": "sets the new type", "assignee": "sets the new assignee"},
+	"bd q":             {"type": "sets the created issue's type"},
+	"bd dep add":       {"type": "sets the created dependency's type"},
+	"bd link":          {"type": "sets the created dependency's type"},
+	"bd gate create":   {"type": "sets the created gate's type"},
+	"bd mol bond":      {"type": "sets the created bond's type"},
+	"bd mol pour":      {"assignee": "sets the spawned root issue's assignee"},
+	"bd audit label":   {"label": "records the label value being audited"},
+	"bd admin compact": {"id": "selects the one issue to compact"},
+}
+
+// TestNoPlainStringFilterFlagSurvives is the fail-closed invariant: after
+// the sweep, no filter flag among the six names may remain a plain pflag
+// string (silent last-value-wins) outside the reasoned setter-exemption
+// table. A new registration breaks this test the day it lands.
+func TestNoPlainStringFilterFlagSurvives(t *testing.T) {
+	var survivors []string
+	walkFilterFlagRegistrations(rootCmd, func(path string, f *pflag.Flag) {
+		switch stringFilterFlagKind(f) {
+		case "union", "once":
+			return
+		case "plain":
+			if setterFilterFlagExemptions[path][f.Name] != "" {
+				return
+			}
+			survivors = append(survivors, path+" --"+f.Name)
+		case "other":
+			survivors = append(survivors, path+" --"+f.Name+" (unclassified custom string value)")
+		}
+	})
+	if len(survivors) > 0 {
+		t.Errorf("%d filter flag(s) still silently keep the last value on repeat (register them union/once, or add a reasoned setter exemption):\n  %s",
+			len(survivors), strings.Join(survivors, "\n  "))
+	}
+}
+
+// TestFilterFlagClassification pins the reviewed union/once choice for every
+// swept registration in both directions: each table entry exists with the
+// reviewed kind, and every union/once registration in the tree is in the
+// table. The kind cannot be derived from the value type alone — a wrong
+// union/once choice (count --status unioning into a silent zero) is exactly
+// what this table catches.
+func TestFilterFlagClassification(t *testing.T) {
+	wantTotal := 0
+	for _, flags := range sweptFilterClassification {
+		wantTotal += len(flags)
+	}
+	if wantTotal != 34 {
+		t.Errorf("classification table has %d entries, want the reviewed 34 (29 swept pairs incl. the migration alias + bd list's five)", wantTotal)
+	}
+
+	kindByRegistration := map[string]string{}
+	walkFilterFlagRegistrations(rootCmd, func(path string, f *pflag.Flag) {
+		if k := stringFilterFlagKind(f); k == "union" || k == "once" {
+			kindByRegistration[path+" --"+f.Name] = k
+		}
+	})
+
+	var problems []string
+	for path, flags := range sweptFilterClassification {
+		for name, want := range flags {
+			got, ok := kindByRegistration[path+" --"+name]
+			switch {
+			case !ok:
+				problems = append(problems, path+" --"+name+": no union/once registration found")
+			case got != want:
+				problems = append(problems, fmt.Sprintf("%s --%s: is %s, reviewed classification says %s", path, name, got, want))
+			}
+		}
+	}
+	for reg, kind := range kindByRegistration {
+		path, name, _ := strings.Cut(reg, " --")
+		if sweptFilterClassification[path][name] == "" {
+			problems = append(problems, reg+": "+kind+" registration is not in the reviewed classification table")
+		}
+	}
+	if len(problems) > 0 {
+		t.Errorf("classification mismatches:\n  %s", strings.Join(problems, "\n  "))
+	}
+}
+
 // TestRepeatedUnionFilterFlagsUnion derives every union filter from the
 // registrations, so a new union flag is covered the day it lands.
 func TestRepeatedUnionFilterFlagsUnion(t *testing.T) {
