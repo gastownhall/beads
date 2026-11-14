@@ -721,3 +721,93 @@ func TestPublicOpensRefuseHistoricalSQLiteWorkspace(t *testing.T) {
 		}
 	}
 }
+
+// bestAvailableOpens are the public opens that choose a backend from the
+// workspace's metadata, keyed by subtest name. "OpenBestAvailableWith+UserAgent"
+// carries a per-open option Dolt refuses, so a proxied workspace's refusal must
+// win over the option refusal: the workspace cannot be opened whatever the
+// options are.
+var bestAvailableOpens = map[string]func(context.Context, string) (beads.Storage, error){
+	"OpenBestAvailable": beads.OpenBestAvailable,
+	"OpenBestAvailableWith": func(ctx context.Context, beadsDir string) (beads.Storage, error) {
+		return beads.OpenBestAvailableWith(ctx, beadsDir, beads.OpenOptions{})
+	},
+	"OpenBestAvailableWith+UserAgent": func(ctx context.Context, beadsDir string) (beads.Storage, error) {
+		return beads.OpenBestAvailableWith(ctx, beadsDir, beads.OpenOptions{UserAgent: "x"})
+	},
+}
+
+// isolateProxiedServerEnv pins the env every proxied-server open test runs
+// under. Before the fix, a server arm must fail fast on a port nobody listens
+// on (TestMain's shared test server is otherwise reachable through
+// BEADS_DOLT_PORT), never auto-start a server, and never read the developer's
+// home. serverMode and sharedServer set BEADS_DOLT_SERVER_MODE and
+// BEADS_DOLT_SHARED_SERVER; empty clears an ambient value.
+func isolateProxiedServerEnv(t *testing.T, serverMode, sharedServer string) {
+	t.Helper()
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("BEADS_DOLT_SERVER_MODE", serverMode)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", sharedServer)
+}
+
+// writeProxiedServerWorkspace builds <root>/.beads holding a stand-in proxied
+// root (.beads/dolt/.dolt) and one metadata file (metadata.json or the legacy
+// config.json) declaring dolt_mode. backend "" omits the key, which selects
+// Dolt. The unknown future_binding key exposes any configfile.Load rewrite.
+func writeProxiedServerWorkspace(t *testing.T, file, backend, doltMode string) (root, beadsDir string) {
+	t.Helper()
+	root = t.TempDir()
+	beadsDir = filepath.Join(root, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "dolt", ".dolt"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	backendField := ""
+	if backend != "" {
+		backendField = `"backend":` + strconv.Quote(backend) + `,`
+	}
+	metadata := `{` + backendField + `"dolt_mode":` + strconv.Quote(doltMode) + `,"dolt_database":"beads_legacy","future_binding":"keep-me"}`
+	if err := os.WriteFile(filepath.Join(beadsDir, file), []byte(metadata), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return root, beadsDir
+}
+
+// openClosing runs open and closes any store it returns, so a regression that
+// opens a store does not leak it past the assertions.
+func openClosing(t *testing.T, open func(context.Context, string) (beads.Storage, error), beadsDir string) (bool, error) {
+	t.Helper()
+	store, err := open(t.Context(), beadsDir)
+	if store != nil {
+		_ = store.Close()
+	}
+	return store != nil, err
+}
+
+// TestOpenBestAvailableRefusesProxiedServerWorkspace pins GH#8323 (AC-1): a
+// Dolt workspace whose metadata.json sets dolt_mode "proxied-server" is
+// refused with ErrProxiedServerUnsupported and a nil Storage, in cgo and
+// CGO_ENABLED=0 builds alike. Before the fix the cgo build fell through to
+// embeddeddolt.Open and returned a new, empty store with err == nil, and the
+// pure build returned the embedded-Dolt-requires-CGO error.
+func TestOpenBestAvailableRefusesProxiedServerWorkspace(t *testing.T) {
+	isolateProxiedServerEnv(t, "", "")
+	for _, backend := range []string{"dolt", ""} {
+		for _, spelling := range []string{"proxied-server", "Proxied-Server"} {
+			for name, open := range bestAvailableOpens {
+				t.Run("backend="+backend+"/"+spelling+"/"+name, func(t *testing.T) {
+					_, beadsDir := writeProxiedServerWorkspace(t, "metadata.json", backend, spelling)
+					gotStore, err := openClosing(t, open, beadsDir)
+					if gotStore {
+						t.Errorf("%s returned a store for a proxied-server workspace (err=%v)", name, err)
+					}
+					if !errors.Is(err, beads.ErrProxiedServerUnsupported) {
+						t.Fatalf("%s error = %v, want errors.Is ErrProxiedServerUnsupported", name, err)
+					}
+				})
+			}
+		}
+	}
+}

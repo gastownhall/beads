@@ -18,6 +18,8 @@ import (
 //
 //   - Embedded Dolt (default): Opens via the CGo embedded Dolt engine.
 //   - Dolt server: Connects to a dolt sql-server via OpenFromConfig.
+//   - Dolt proxied-server: Refused with ErrProxiedServerUnsupported, before
+//     anything is opened or created; only the bd CLI serves that mode.
 //
 // The returned Storage must be closed when no longer needed.
 //
@@ -49,6 +51,12 @@ func OpenBestAvailableWith(ctx context.Context, beadsDir string, opts OpenOption
 	// Before Load, which can migrate a legacy config.json, and before any
 	// backend is chosen; IsSupportedBackend below re-checks the loaded config.
 	if err := checkDiscoveredBackend(beadsDir); err != nil {
+		return nil, err
+	}
+	// A proxied-server workspace is served only through its proxy, which the
+	// SDK cannot reach: refuse it before Load, the option refusals and every
+	// Dolt arm (GH#8323).
+	if err := checkProxiedServerWorkspace(beadsDir); err != nil {
 		return nil, err
 	}
 	cfg, err := configfile.Load(beadsDir)
