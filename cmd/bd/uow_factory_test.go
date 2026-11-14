@@ -551,3 +551,43 @@ func writeProxiedMetadata(t *testing.T, beadsDir string, fields map[string]strin
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(configfile.ConfigPath(beadsDir), data, 0o644))
 }
+
+// writePlainProxiedWorkspace writes a plain (non-team-server) proxied-server
+// metadata.json whose configured database is "beads_mine".
+func writePlainProxiedWorkspace(t *testing.T, projectID string) string {
+	t.Helper()
+	beadsDir := t.TempDir()
+	metadata := fmt.Sprintf(`{"backend": "dolt", "dolt_mode": "proxied-server", "dolt_database": "beads_mine", "project_id": %q}`, projectID)
+	require.NoError(t, os.WriteFile(configfile.ConfigPath(beadsDir), []byte(metadata), 0o644))
+	return beadsDir
+}
+
+// gastownhall/beads#5572 scopes the plain-mode identity guard to an explicit
+// excursion. Opening the configured database — with no override, or an
+// override naming it in another case — must carry no expected identity, so a
+// plain workspace whose local ID is stale (plain init does not persist an
+// adopted ID) keeps opening exactly as before.
+func TestResolveProxiedServerUOWTopology_ExcursionIdentity_ConfiguredDatabaseAssertsNothing(t *testing.T) {
+	t.Setenv("BEADS_SKIP_IDENTITY_CHECK", "")
+	beadsDir := writePlainProxiedWorkspace(t, "proj-stale-local")
+
+	for _, override := range []string{"", "beads_mine", "BEADS_Mine"} {
+		topology, err := resolveProxiedServerUOWTopology(beadsDir, override, assertWorkspaceIdentity)
+		require.NoError(t, err)
+		assert.Empty(t, topology.expectedProjectID,
+			"override %q opens the configured database: no identity comparison", override)
+		want := "beads_mine"
+		if override != "" {
+			want = override
+		}
+		assert.Equal(t, want, topology.database, "the resolved database itself is unchanged")
+		assert.False(t, topology.teamServer)
+	}
+
+	// Positive control: the clearing is scoped, not blanket. An excursion to
+	// a different database keeps the identity for the open to assert.
+	topology, err := resolveProxiedServerUOWTopology(beadsDir, "beads_theirs", assertWorkspaceIdentity)
+	require.NoError(t, err)
+	assert.Equal(t, "proj-stale-local", topology.expectedProjectID)
+	assert.Equal(t, "beads_theirs", topology.database)
+}
