@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -90,6 +92,64 @@ func TestEmbeddedState(t *testing.T) {
 		out := bdState(t, bd, dir, issue.ID, "phase")
 		if !strings.Contains(out, "testing") {
 			t.Errorf("expected 'testing' after overwrite, got: %s", out)
+		}
+	})
+
+	// GH#5657: a stale read-modify-write can leave two values of one
+	// dimension. Setting one of them must heal the dimension to that value
+	// alone, and only a dimension that already holds exactly that one label
+	// is a no-op that writes no event bead.
+	t.Run("set_state_heals_a_duplicated_dimension", func(t *testing.T) {
+		dup := bdCreate(t, bd, dir, "Duplicated dimension", "--type", "task")
+		for _, label := range []string{"state:b", "state:c", "keep"} {
+			bdCommand(t, bd, dir, "label", "add", dup.ID, label)
+		}
+		events := func() int {
+			t.Helper()
+			n := 0
+			for _, issue := range bdListJSONAllowError(t, bd, dir, "--all", "--type", "event", "--limit", "0") {
+				if issue.Title == "State change: state → b" {
+					n++
+				}
+			}
+			return n
+		}
+		setState := func() map[string]interface{} {
+			t.Helper()
+			out := bdSetState(t, bd, dir, dup.ID, "state=b", "--json")
+			var m map[string]interface{}
+			if err := json.Unmarshal([]byte(out[strings.Index(out, "{"):]), &m); err != nil {
+				t.Fatalf("set-state --json output is not JSON: %v\n%s", err, out)
+			}
+			return m
+		}
+		labels := func() []string {
+			t.Helper()
+			got := append([]string(nil), bdShow(t, bd, dir, dup.ID).Labels...)
+			sort.Strings(got)
+			return got
+		}
+
+		before := events()
+		if healed := setState(); healed["changed"] != true {
+			t.Fatalf("set-state state=b over {state:b, state:c} = %v, want changed=true", healed)
+		}
+		if got := labels(); !reflect.DeepEqual(got, []string{"keep", "state:b"}) {
+			t.Fatalf("labels after healing = %v, want [keep state:b]", got)
+		}
+		healedEvents := events()
+		if healedEvents != before+1 {
+			t.Fatalf("healing wrote %d event beads, want 1", healedEvents-before)
+		}
+
+		if repeated := setState(); repeated["changed"] != false {
+			t.Fatalf("repeated set-state state=b = %v, want changed=false", repeated)
+		}
+		if got := events(); got != healedEvents {
+			t.Fatalf("repeated set-state wrote %d event beads, want none", got-healedEvents)
+		}
+		if got := labels(); !reflect.DeepEqual(got, []string{"keep", "state:b"}) {
+			t.Fatalf("labels after the repeat = %v, want [keep state:b]", got)
 		}
 	})
 
