@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -158,6 +159,114 @@ func TestCreateIssueReplayRemintsAfterSameIDCommit(t *testing.T) {
 			requireIssueTitle(t, ctx, store, loser.ID, "loser")
 			requireOneCreatedEvent(t, ctx, store, *firstID)
 			requireOneCreatedEvent(t, ctx, store, loser.ID)
+		})
+	}
+}
+
+// requireOnlyComment fails t unless id has exactly one comment, with text, and
+// returns its id.
+func requireOnlyComment(t *testing.T, ctx context.Context, store *DoltStore, id, text string) string {
+	t.Helper()
+	comments, err := store.GetIssueComments(ctx, id)
+	if err != nil {
+		t.Fatalf("GetIssueComments(%s): %v", id, err)
+	}
+	if len(comments) != 1 || comments[0].Text != text {
+		got := make([]string, len(comments))
+		for i, c := range comments {
+			got[i] = c.Text
+		}
+		t.Fatalf("%s comments = %q, want only %q", id, got, text)
+	}
+	return comments[0].ID
+}
+
+// requireOnlyEdgeTo fails t unless id's only dependency targets dependsOn.
+func requireOnlyEdgeTo(t *testing.T, ctx context.Context, store *DoltStore, id, dependsOn string) {
+	t.Helper()
+	deps, err := store.GetDependencyRecords(ctx, id)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords(%s): %v", id, err)
+	}
+	if len(deps) != 1 || deps[0].IssueID != id || deps[0].DependsOnID != dependsOn {
+		got := make([]string, len(deps))
+		for i, d := range deps {
+			got[i] = d.IssueID + "->" + d.DependsOnID
+		}
+		t.Fatalf("%s edges = %q, want only %s->%s", id, got, id, dependsOn)
+	}
+}
+
+// TestCreateIssuesReplayKeepsEdgesOnRemintedID pins the batch replay leg of
+// bd-t4h0n7 (PR #6754) on both server batch arms: a concurrent writer commits
+// an explicit issue (with its own comment and edge) under the id an open
+// batch minted for its auto-minted item. On the replay the item must take a
+// fresh id, and the comment id derived from the lost id and the edge owner
+// defaulted to it must follow the new id rather than land on the winner,
+// whose comment and edge stay exactly as it wrote them.
+func TestCreateIssuesReplayKeepsEdgesOnRemintedID(t *testing.T) {
+	for _, arm := range []struct {
+		name      string
+		ephemeral bool
+	}{{"durable", false}, {"all wisps", true}} {
+		t.Run(arm.name, func(t *testing.T) {
+			store, cleanup := setupConcurrentTestStore(t)
+			defer cleanup()
+			ctx, cancel := testContext(t)
+			defer cancel()
+			for _, id := range []string{"test-winnertarget", "test-losertarget"} {
+				target := &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+				if err := store.CreateIssue(ctx, target, "tester"); err != nil {
+					t.Fatalf("CreateIssue(%s): %v", id, err)
+				}
+			}
+
+			loser := autoMintIssue("loser")
+			loser.Ephemeral = arm.ephemeral
+			loser.Comments = []*types.Comment{{Author: "tester", Text: "loser note"}}
+			loser.Dependencies = []*types.Dependency{{DependsOnID: "test-losertarget", Type: types.DepBlocks}}
+			explicit := &types.Issue{ID: "test-explicit", Title: "explicit", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: arm.ephemeral}
+			var firstCommentID string
+			firstID, attempts := commitWinnerOnFirstAttempt(t, store, loser, func(_ context.Context, mintedID string) error {
+				firstCommentID = loser.Comments[0].ID
+				winner := &types.Issue{
+					ID: mintedID, Title: "winner", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeBug, Ephemeral: arm.ephemeral,
+					Comments:     []*types.Comment{{Author: "rival", Text: "winner note"}},
+					Dependencies: []*types.Dependency{{DependsOnID: "test-winnertarget", Type: types.DepBlocks}},
+				}
+				// The batch path, since it is the one that persists Dependencies.
+				return store.CreateIssuesWithFullOptions(ctx, []*types.Issue{winner}, "rival", storage.BatchCreateOptions{SkipPrefixValidation: true})
+			})
+			if err := store.CreateIssues(ctx, []*types.Issue{loser, explicit}, "tester"); err != nil {
+				t.Fatalf("CreateIssues(loser, explicit): %v", err)
+			}
+			if *attempts < 2 {
+				t.Fatalf("loser made %d attempt(s); the winner's commit must force a replay", *attempts)
+			}
+			if loser.ID == "" || loser.ID == *firstID {
+				t.Fatalf("loser id = %q after replay, want a fresh id distinct from the lost %q", loser.ID, *firstID)
+			}
+			if explicit.ID != "test-explicit" {
+				t.Errorf("explicit id = %q, want the supplied test-explicit", explicit.ID)
+			}
+
+			requireIssueTitle(t, ctx, store, *firstID, "winner")
+			requireOnlyComment(t, ctx, store, *firstID, "winner note")
+			requireOnlyEdgeTo(t, ctx, store, *firstID, "test-winnertarget")
+			requireOneCreatedEvent(t, ctx, store, *firstID)
+
+			requireIssueTitle(t, ctx, store, loser.ID, "loser")
+			commentID := requireOnlyComment(t, ctx, store, loser.ID, "loser note")
+			if commentID == firstCommentID || loser.Comments[0].ID != commentID {
+				t.Errorf("loser comment id = %q (stored %q), want one re-derived for %s, not the lost attempt's %q",
+					loser.Comments[0].ID, commentID, loser.ID, firstCommentID)
+			}
+			requireOnlyEdgeTo(t, ctx, store, loser.ID, "test-losertarget")
+			if loser.Dependencies[0].IssueID != loser.ID {
+				t.Errorf("loser edge owner = %q, want %s", loser.Dependencies[0].IssueID, loser.ID)
+			}
+			requireOneCreatedEvent(t, ctx, store, loser.ID)
+			requireIssueTitle(t, ctx, store, "test-explicit", "explicit")
 		})
 	}
 }
