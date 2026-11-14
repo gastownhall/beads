@@ -291,3 +291,71 @@ func containsStatus(statuses []types.Status, want types.Status) bool {
 	}
 	return false
 }
+
+// TestGatherListInput_ExistingFlagsKeepTheirRequestIdentity: an invocation
+// that does not name --include-all-types builds the same ListRequest and the
+// same filter whether or not the flag is registered, and leaves
+// IncludeAllTypes false. --all in particular stays off the type axis: it
+// lifts the status and pinned defaults and the default limit only.
+func TestGatherListInput_ExistingFlagsKeepTheirRequestIdentity(t *testing.T) {
+	defer func(prev bool) { jsonOutput = prev }(jsonOutput)
+	jsonOutput = false
+	useListTypeAxisConfig(t)
+
+	invocations := [][]string{
+		{},
+		{"all", "true"},
+		{"all", "true", "limit", "5"},
+		{"limit", "5"},
+		{"include-gates", "true"},
+		{"include-templates", "true"},
+		{"include-infra", "true"},
+		{"include-ephemeral", "true"},
+		{"all", "true", "include-infra", "true"},
+		{"include-ephemeral", "true", "wisp-type", "heartbeat"},
+		{"exclude-type", "epic"},
+		{"type", "gate"},
+	}
+	for _, args := range invocations {
+		before := gatherListInputWith(t, newListTypeAxisInputCmd(), args...)
+		after := gatherListInputWith(t, newIncludeAllTypesInputCmd(), args...)
+		if after.IncludeAllTypes {
+			t.Errorf("%v: IncludeAllTypes must stay false unless --include-all-types is given", args)
+		}
+		if !reflect.DeepEqual(before.ListRequest, after.ListRequest) {
+			t.Errorf("%v: ListRequest changed:\nwithout the flag %+v\nwith it          %+v", args, before.ListRequest, after.ListRequest)
+		}
+		if before.effectiveLimit != after.effectiveLimit {
+			t.Errorf("%v: effective limit changed: %d, want %d", args, after.effectiveLimit, before.effectiveLimit)
+		}
+		beforeFilter, err := workapi.BuildListFilter(before.ListRequest, workapi.ListConfig{})
+		if err != nil {
+			t.Fatalf("%v: BuildListFilter (without the flag): %v", args, err)
+		}
+		afterFilter, err := workapi.BuildListFilter(after.ListRequest, workapi.ListConfig{})
+		if err != nil {
+			t.Fatalf("%v: BuildListFilter (with it): %v", args, err)
+		}
+		if !reflect.DeepEqual(beforeFilter, afterFilter) {
+			t.Errorf("%v: filter changed:\nwithout the flag %+v\nwith it          %+v", args, beforeFilter, afterFilter)
+		}
+	}
+
+	all := gatherListInputWith(t, newIncludeAllTypesInputCmd(), "all", "true")
+	f, err := workapi.BuildListFilter(all.ListRequest, workapi.ListConfig{})
+	if err != nil {
+		t.Fatalf("BuildListFilter (--all): %v", err)
+	}
+	if len(f.ExcludeStatus) != 0 || f.Pinned != nil {
+		t.Errorf("--all must lift the default status and pinned exclusions, got ExcludeStatus=%v Pinned=%v", f.ExcludeStatus, f.Pinned)
+	}
+	if !f.SkipWisps || len(f.ExcludeTypes) == 0 || f.IsTemplate == nil || *f.IsTemplate {
+		t.Errorf("--all must leave the type and plane suppressions on, got SkipWisps=%v ExcludeTypes=%v IsTemplate=%v", f.SkipWisps, f.ExcludeTypes, f.IsTemplate)
+	}
+	if all.effectiveLimit != 0 {
+		t.Errorf("--all lifts the default limit, got %d", all.effectiveLimit)
+	}
+	if limited := gatherListInputWith(t, newIncludeAllTypesInputCmd(), "all", "true", "limit", "5"); limited.effectiveLimit != 5 {
+		t.Errorf("an explicit --limit wins over --all, got %d", limited.effectiveLimit)
+	}
+}
