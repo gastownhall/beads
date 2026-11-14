@@ -1174,3 +1174,47 @@ func TestSetupChangeDir_RemoveTouchesOnlyTarget(t *testing.T) {
 		}
 	})
 }
+
+// runSetupErrIn is runSetupIn returning bd setup's error as well.
+func runSetupErrIn(t *testing.T, changeDirArg string, args ...string) (string, error) {
+	t.Helper()
+	var err error
+	orig := changeDir
+	changeDir = changeDirArg
+	defer func() { changeDir = orig }()
+	out := captureStdout(t, func() error {
+		err = runSetup(setupCmd, args)
+		return nil
+	})
+	return out, err
+}
+
+// TestSetupChangeDir_CheckReadsTarget pins #8283 for --check: with the
+// integration installed only in L and nothing in an empty user home, bd -C T
+// setup <recipe> --check run from L reports it missing in T, not L's as
+// installed; once it is installed in T, the same check passes.
+func TestSetupChangeDir_CheckReadsTarget(t *testing.T) {
+	for _, tc := range changeDirProjectRecipes {
+		t.Run(tc.recipe, func(t *testing.T) {
+			launch, target, _ := changeDirSetupFixture(t)
+			setupProject = tc.project
+			runSetupIn(t, "", tc.recipe) // installed in L only
+			launchBefore := treeSnapshot(t, launch)
+
+			setupCheck = true
+			if out, err := runSetupErrIn(t, target, tc.recipe); err == nil {
+				t.Errorf("bd -C T setup %s --check = nil with nothing in T; it read L:\n%s", tc.recipe, out)
+			} else if tc.printed && !strings.Contains(out, "  Missing: "+filepath.Join(target, filepath.FromSlash(tc.files[0]))+"\n") {
+				t.Errorf("bd -C T setup %s --check did not name T's missing file:\n%s", tc.recipe, out)
+			}
+			assertSameTree(t, "L after bd -C T setup "+tc.recipe+" --check", launch, launchBefore)
+
+			setupCheck = false
+			runSetupIn(t, target, tc.recipe)
+			setupCheck = true
+			if out, err := runSetupErrIn(t, target, tc.recipe); err != nil {
+				t.Errorf("bd -C T setup %s --check = %v with it installed in T:\n%s", tc.recipe, err, out)
+			}
+		})
+	}
+}

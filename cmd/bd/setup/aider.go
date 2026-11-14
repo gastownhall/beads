@@ -185,7 +185,7 @@ func InstallAider() error {
 }
 
 func CheckAider() error {
-	configPath := ".aider.conf.yml"
+	configPath := ProjectPath(".aider.conf.yml")
 
 	if !FileExists(configPath) {
 		return HandleErrorWithHint("Aider integration not installed", "Run: bd setup aider")
