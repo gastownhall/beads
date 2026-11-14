@@ -499,7 +499,7 @@ jobs:
         include:
           - os: macos-latest
             expected_goos: darwin
-            runner: blacksmith-6vcpu-macos-26
+            runner: ${{ github.repository == 'gastownhall/beads' && 'blacksmith-6vcpu-macos-26' || 'macos-26' }}
           - os: windows-latest
             expected_goos: windows
             runner: blacksmith-4vcpu-windows-2025
@@ -583,7 +583,7 @@ jobs:
         include:
           - os: macos-latest
             expected_goos: darwin
-            runner: blacksmith-6vcpu-macos-26
+            runner: ${{ github.repository == 'gastownhall/beads' && 'blacksmith-6vcpu-macos-26' || 'macos-26' }}
           - os: windows-latest
             expected_goos: windows
             runner: blacksmith-4vcpu-windows-2025
