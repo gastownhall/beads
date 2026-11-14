@@ -12,23 +12,32 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
-// TestEnsureWispsColumnsForMigration0053CoversColumnsAddedAfter0020 keeps the
-// #6080 repair honest against the frozen SQL it exists to protect. Migration
-// 0053 copies a fixed column list from the clone-local wisps table into
-// issues; every one of those columns that migration 0020 did NOT create can
-// be missing on a clone whose wisps table was built later from an older
-// shape, because the only migrations that add such columns (0023, 0027) no-op
-// unless wisps already exists when they run — and wisps never syncs between
-// clones. That is exactly the gap ensureWispsLateColumns repairs, so the
-// repair's column set must equal 0053's selected columns minus 0020's created
-// columns, no more and no less, and each ADD COLUMN it issues must be
-// byte-identical to the original migration's statement.
+// TestEnsureWispsColumnsForMigration0053CoversColumnsAddedAfter0020 pins the
+// #6080 repair to the frozen SQL it exists to protect. Migration 0053 copies
+// a fixed column list from the clone-local wisps table into issues; every one
+// of those columns that migration 0020 did NOT create can be missing on a
+// clone whose wisps table was built later from an older shape, because the
+// only migrations that add such columns (0023, 0027) no-op unless wisps
+// already exists when they run — and wisps never syncs between clones. That
+// is exactly the gap ensureWispsLateColumns repairs.
 //
-// The parsing is deliberately narrow (substring extraction on known frozen
-// files, not a SQL parser): a change to any of these shipped files re-pins
-// the freeze hashes, and any future migration that widens 0053's wisps column
-// list or adds a new wisps column fails here until the repair is extended to
-// cover it.
+// Everything expected here is read out of those four frozen files (substring
+// extraction on known shipped bodies, not a SQL parser). First, 0053's
+// selected wisps columns minus 0020's created columns must equal the columns
+// 0023/0027 add to wisps. TestShippedMigrationsAreFrozen hash-pins all four
+// files, so this parity cannot drift on its own: it records, from the
+// shipped SQL itself, why the repair covers exactly no_history and
+// started_at. Second, the repair, driven through a mock wisps table missing
+// both columns, must issue each 0023/0027 wisps ADD COLUMN statement, then
+// only re-probe on a repeated invocation. TestEnsureWispsLateColumns pins the
+// same statement sequences with literal DDL; deriving the expected DDL from
+// the frozen files means an edit to the repair's DDL fails here even when
+// those literals are edited with it. sqlmock's default matcher collapses
+// whitespace before comparing, so the DDL match is exact up to whitespace,
+// not byte-for-byte.
+//
+// No migration after 0053 is read: a wisps column that a later migration
+// adds is outside 0053's frozen column list, and nothing here checks it.
 func TestEnsureWispsColumnsForMigration0053CoversColumnsAddedAfter0020(t *testing.T) {
 	const (
 		file0020 = "migrations/0020_create_wisps.up.sql"
@@ -100,9 +109,9 @@ func TestEnsureWispsColumnsForMigration0053CoversColumnsAddedAfter0020(t *testin
 	}
 	sort.Strings(late)
 
-	// 0023/0027's wisps ADD COLUMN statements, quoted verbatim out of the
+	// 0023/0027's wisps ADD COLUMN statements, extracted verbatim from the
 	// frozen bodies. Their column set must be exactly the late columns, and
-	// the repair must issue their DDL byte-for-byte.
+	// the repair must issue their DDL (matched up to whitespace by sqlmock).
 	alterRe := regexp.MustCompile(`ALTER TABLE wisps ADD COLUMN (\w+) ([^']+)`)
 	type addColumn struct{ name, ddl string }
 	var adds []addColumn
@@ -124,8 +133,9 @@ func TestEnsureWispsColumnsForMigration0053CoversColumnsAddedAfter0020(t *testin
 	}
 
 	// The repair, driven through a mock wisps table missing both columns,
-	// must issue each original ADD COLUMN verbatim, then re-probe as a no-op
-	// on a repeated invocation.
+	// must issue each original ADD COLUMN (sqlmock's default matcher
+	// collapses whitespace on both sides), then re-probe as a no-op on a
+	// repeated invocation.
 	failOnSwallowedAdvisory(t)
 	db, mock, err := sqlmock.New()
 	if err != nil {

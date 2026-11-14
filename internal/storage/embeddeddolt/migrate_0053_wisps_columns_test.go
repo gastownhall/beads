@@ -128,9 +128,9 @@ type wispsLateColumnsCase6080 struct {
 // The stamps are months-old wall-clock values, so no migration-time
 // CURRENT_TIMESTAMP can collide with them.
 const (
-	rigID6080   = "w6080-rig"
-	taskID6080  = "w6080-task"
-	rigLabel608 = "rig-keep-6080"
+	rigID6080    = "w6080-rig"
+	taskID6080   = "w6080-task"
+	rigLabel6080 = "rig-keep-6080"
 )
 
 var (
@@ -166,7 +166,7 @@ func seedWispsFixture6080(t *testing.T, ctx context.Context, conn *sql.Conn, tc 
 	// The rig's label: 0053 must carry it from the clone-local wisp_labels
 	// to the shared labels table.
 	if _, err := conn.ExecContext(ctx,
-		"INSERT INTO wisp_labels (issue_id, label) VALUES (?, ?)", rigID6080, rigLabel608); err != nil {
+		"INSERT INTO wisp_labels (issue_id, label) VALUES (?, ?)", rigID6080, rigLabel6080); err != nil {
 		t.Fatalf("seed wisp label for %s: %v", rigID6080, err)
 	}
 	// An unrelated ephemeral task wisp: promoted nowhere, must survive
@@ -241,11 +241,11 @@ func assertRigPromotion6080(t *testing.T, ctx context.Context, conn *sql.Conn, t
 
 	var labels int
 	if err := conn.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM labels WHERE issue_id = ? AND label = ?", rigID6080, rigLabel608).Scan(&labels); err != nil {
+		"SELECT COUNT(*) FROM labels WHERE issue_id = ? AND label = ?", rigID6080, rigLabel6080).Scan(&labels); err != nil {
 		t.Fatalf("count promoted labels for %s: %v", rigID6080, err)
 	}
 	if labels != 1 {
-		t.Errorf("labels rows for %s/%s = %d, want 1", rigID6080, rigLabel608, labels)
+		t.Errorf("labels rows for %s/%s = %d, want 1", rigID6080, rigLabel6080, labels)
 	}
 	requireGone(t, ctx, conn, "wisps", rigID6080)
 	// Exactly one promoted rig row: a re-entry pass must not duplicate it.
