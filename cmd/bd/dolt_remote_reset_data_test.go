@@ -13,9 +13,11 @@ import (
 	"testing"
 
 	"github.com/dolthub/dolt/go/store/blobstore"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/execenv"
 	"github.com/steveyegge/beads/internal/githooksenv"
+	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -1030,5 +1032,46 @@ func TestResetDataGitCommandsRejectOptionRemote(t *testing.T) {
 	}
 	if _, err := os.Stat(pwned); err == nil {
 		t.Fatal("an injected git option ran a command")
+	}
+}
+
+// GH#6233: reset-data refuses a remote federation.allowed-remote-patterns
+// rejects before it deletes anything. The rebuild is a push the store refuses
+// for such a remote, so a refusal only there would leave the remote's data
+// deleted and not rebuilt: here the file store keeps its manifest, and no push
+// is attempted.
+func TestResetDataRefusedByAllowedRemotePatternsBeforeClearing(t *testing.T) {
+	isolateBeadsDirForTest(t)
+	t.Chdir(t.TempDir())
+	storeDir := t.TempDir()
+	manifest := filepath.Join(storeDir, "manifest")
+	if err := os.WriteFile(manifest, []byte("manifest"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeSyncStore{remotes: []storage.RemoteInfo{{Name: "origin", URL: "file://" + storeDir}}}
+	setupSyncCommandTest(t, fake)
+	config.Set(remotecache.AllowedRemotePatternsKey, []string{"dolthub://myorg/*"})
+	oldYes := doltRemoteResetDataYes
+	doltRemoteResetDataYes = true
+	t.Cleanup(func() { doltRemoteResetDataYes = oldYes })
+
+	var runErr error
+	_, stderr := captureStdio(t, func() {
+		runErr = doltRemoteResetDataCmd.RunE(doltRemoteResetDataCmd, []string{"origin"})
+	})
+	if runErr == nil {
+		t.Fatal("reset-data succeeded for a remote the allowlist rejects")
+	}
+	if !strings.Contains(stderr, `remote "origin" is not permitted`) || !strings.Contains(stderr, remotecache.AllowedRemotePatternsKey) {
+		t.Errorf("stderr = %q, want the %s refusal of remote \"origin\"", stderr, remotecache.AllowedRemotePatternsKey)
+	}
+	if strings.Contains(stderr, storeDir) {
+		t.Errorf("refusal names the remote's URL: %q", stderr)
+	}
+	if _, err := os.Stat(manifest); err != nil {
+		t.Errorf("the refused reset cleared the remote's file store: %v", err)
+	}
+	if fake.pushRemoteCalls != 0 {
+		t.Errorf("PushRemote called %d times for a refused remote", fake.pushRemoteCalls)
 	}
 }

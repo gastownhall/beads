@@ -641,6 +641,15 @@ func printNoRemoteGuidance() {
 	fmt.Println("  • Azure Blob Storage: az://account.blob.core.windows.net/container/path")
 }
 
+// adoptionOriginURL reads the git origin URL git-origin adoption derives the
+// Dolt remote from. It is a variable only so tests can name an origin without
+// a git repository or the process-wide repository caches.
+var adoptionOriginURL = gitOriginGetURLForActiveRepo
+
+// adoptionPolicySubject names the git origin in a federation.allowed-remote-patterns
+// refusal of adoption: no Dolt remote exists yet to name.
+const adoptionPolicySubject = "git origin"
+
 // adoptGitOriginRemoteForPush gives a rig with no Dolt remote the one its git
 // origin implies, so `bd dolt push` works out of the box.
 //
@@ -665,15 +674,21 @@ func adoptGitOriginRemoteForPush(ctx context.Context, st storage.DoltStorage, po
 	// Workspace resolution is deliberately NOT done yet: selectedDoltBeadsDir
 	// calls prepareSelectedNoDBContext, which mutates process and on-disk
 	// workspace state, and nothing may mutate before consent is established.
-	originURL, err := gitOriginGetURLForActiveRepo(ctx)
+	originURL, err := adoptionOriginURL(ctx)
 	if err != nil || originURL == "" {
 		return false, nil
 	}
 	remoteURL := normalizeRemoteURL(originURL)
 
+	// --no-adopt / BD_NO_REMOTE_ADOPT: nothing will be adopted, so there is
+	// nothing to vet, and the caller's no-remote handling runs as it would
+	// without an allowlist (applyAdoptionConsent's "not an error" refusal).
+	if decision, refusal := decideRemoteAdoption(policy); decision == adoptRefuse && refusal == adoptRefusedDisabled {
+		return false, nil
+	}
 	// GH#6233: an origin federation.allowed-remote-patterns refuses is never
 	// offered for consent, let alone adopted.
-	if err := remotecache.CheckProposedRemote("origin", remoteURL); err != nil {
+	if err := remotecache.CheckRemotePolicy(adoptionPolicySubject, remoteURL, config.AllowedRemotePatterns()); err != nil {
 		return false, err
 	}
 

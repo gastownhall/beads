@@ -15,12 +15,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   outside it. A non-empty list now refuses such a remote before any transfer
   or write, in server and embedded mode: `bd dolt push`/`pull`, `bd sync`,
   auto-push (the local write is kept), federation peers, `bd dolt remote add`,
-  git-origin adoption, `bd config apply`, bootstrap clones, and the remote
-  cache. Patterns match the URL in the form Dolt stores it, so a typed
-  `https://github.com/org/repo` needs a `git+https://github.com/org/*`
-  pattern; `bd config validate` now uses the same rule, the effective
-  (user, environment and project) list, and checks `sync.remote` too.
-  Refusals name the remote or key, never the URL. An empty list (the
+  `bd dolt remote reset-data`, git-origin adoption, `bd config apply`,
+  bootstrap clones, and the remote cache. `bd backup` destinations are not
+  covered. An `http(s)://`, `ssh://` or `git+` URL matches a pattern in its
+  `git+` spelling or its plain one, so `https://github.com/org/*` and
+  `git+https://github.com/org/*` both allow a GitHub remote, and a Dolt
+  remotesapi endpoint matches a pattern written the way
+  `bd dolt remote list` shows it. A URL with a query, a fragment or a `..`
+  path segment is allowed only by an entry equal to the whole URL, so
+  `s3://bucket/*` does not allow `s3://bucket/db?endpoint=...`. An entry
+  equal to a remote's URL always allows it, including a bracketed host
+  (an IPv6 literal, or Dolt's `aws://[bucket:table]`, which bd's URL check
+  now accepts although Go's net/url refuses it since Go 1.25.2). In a
+  glob, a wildcard does not reach past the `@` that ends user info, so
+  `gs://acme-*/*` does not allow `gs://acme-x@attacker/db`.
+  `bd config validate` now uses the same rule, the effective list, and
+  checks `sync.remote` too. The list is read like any other key: a
+  project's config replaces a user-level list, and
+  `BD_FEDERATION_ALLOWED_REMOTE_PATTERNS` (whitespace-separated) replaces
+  both. Refusals name the remote or key, never the URL. An empty list (the
   default) keeps the old behavior. (#6233)
 
 - **Release binaries are built with Go 1.27.4.** Go 1.27.0-1.27.3 (and

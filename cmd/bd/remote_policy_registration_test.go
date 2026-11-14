@@ -4,12 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
@@ -54,27 +52,108 @@ func TestEnsureDoltRemoteRefusesDisallowedURLBeforeAnyWrite(t *testing.T) {
 	}
 }
 
-// GH#6233: a git origin the allowlist rejects is refused before consent is
-// asked for, so nothing is adopted even with --yes.
-func TestAdoptGitOriginRemoteRefusedByAllowedRemotePatterns(t *testing.T) {
-	beadsDir := newForgeSyncRemoteWorkspace(t, "")
-	repo := filepath.Dir(beadsDir)
-	initGitRepoAt(t, repo)
-	runGitForBootstrapTest(t, repo, "remote", "add", "origin", policyRejectedURL)
-	beads.ResetCaches()
-	t.Cleanup(beads.ResetCaches)
-	setRegistrationPolicy(t, "git+https://github.com/myorg/*")
+// stubAdoptionOriginURL makes git-origin adoption read url as the git origin,
+// with no git repository and without the process-wide repository caches, which
+// hold whatever repository an earlier test in this binary resolved.
+func stubAdoptionOriginURL(t *testing.T, url string) {
+	t.Helper()
+	old := adoptionOriginURL
+	adoptionOriginURL = func(context.Context) (string, error) { return url, nil }
+	t.Cleanup(func() { adoptionOriginURL = old })
+}
 
-	raw := &fakeAdoptingDoltStore{}
-	adopted, err := adoptGitOriginRemoteForPush(context.Background(), raw, adoptPolicy{AssumeYes: true}, pushAdoptOptIn)
-	if adopted || !errors.Is(err, remotecache.ErrRemoteNotAllowed) {
-		t.Fatalf("adoptGitOriginRemoteForPush = (%v, %v), want (false, a %s refusal)", adopted, err, remotecache.AllowedRemotePatternsKey)
+// GH#6233: a git origin the allowlist rejects is refused before consent is
+// asked for, so nothing is adopted even with --yes, and the refusal names the
+// git origin rather than a Dolt remote that does not exist. --no-adopt adopts
+// nothing, so it vets nothing: the caller's no-remote handling runs, as it
+// does without an allowlist.
+func TestAdoptGitOriginRemoteRefusedByAllowedRemotePatterns(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		policy  adoptPolicy
+		refused bool
+	}{
+		{"--yes", adoptPolicy{AssumeYes: true}, true},
+		{"interactive", adoptPolicy{Interactive: true}, true},
+		{"non-interactive", adoptPolicy{}, true},
+		{"--no-adopt", adoptPolicy{Disabled: true, Interactive: true}, false},
+		{"--no-adopt beats --yes", adoptPolicy{Disabled: true, AssumeYes: true}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			newForgeSyncRemoteWorkspace(t, "")
+			t.Setenv("BD_NO_REMOTE_ADOPT", "")
+			stubAdoptionOriginURL(t, policyRejectedURL)
+			setRegistrationPolicy(t, "git+https://github.com/myorg/*")
+
+			raw := &fakeAdoptingDoltStore{}
+			var adopted bool
+			var err error
+			_, stderr := captureStdio(t, func() {
+				adopted, err = adoptGitOriginRemoteForPush(context.Background(), raw, tc.policy, pushAdoptOptIn)
+			})
+			if adopted {
+				t.Fatal("adoptGitOriginRemoteForPush adopted an origin the allowlist rejects")
+			}
+			if tc.refused {
+				if !errors.Is(err, remotecache.ErrRemoteNotAllowed) {
+					t.Fatalf("adoptGitOriginRemoteForPush error = %v, want a %s refusal", err, remotecache.AllowedRemotePatternsKey)
+				}
+				if msg := err.Error(); !strings.HasPrefix(msg, adoptionPolicySubject+" is not permitted") || strings.Contains(msg, "evil.example.com") {
+					t.Errorf("refusal %q: want it to name the git origin, and never the URL", msg)
+				}
+			} else if err != nil {
+				t.Fatalf("adoptGitOriginRemoteForPush error = %v, want nil: --no-adopt is a request, not a failure", err)
+			}
+			if strings.Contains(stderr, "Adopt this remote") {
+				t.Errorf("consent was asked for an origin the allowlist rejects:\n%s", stderr)
+			}
+			if raw.addRemoteCalls != 0 {
+				t.Errorf("AddRemote called %d times for a refused origin", raw.addRemoteCalls)
+			}
+			if got := config.GetString("sync.remote"); got != "" {
+				t.Errorf("sync.remote = %q after a refused adoption, want unset", got)
+			}
+		})
 	}
-	if raw.addRemoteCalls != 0 {
-		t.Errorf("AddRemote called %d times for a refused origin", raw.addRemoteCalls)
-	}
-	if got := config.GetString("sync.remote"); got != "" {
-		t.Errorf("sync.remote = %q after a refused adoption, want unset", got)
+}
+
+// GH#6233: --no-adopt (here BD_NO_REMOTE_ADOPT=1) on a rig with no Dolt remote
+// and a git origin the allowlist rejects is the benign no-remote case it is
+// without an allowlist: `bd dolt push` and `bd sync`, through the production
+// syncAdoptGitOrigin binding, exit 0 and attempt no transfer.
+func TestNoAdoptOriginOutsideAllowedRemotePatternsKeepsNoRemoteSkip(t *testing.T) {
+	refusal := &remotecache.RemotePolicyError{Subject: remotecache.RemoteSubject("origin")}
+	for _, verb := range []struct {
+		name string
+		run  func() error
+	}{
+		{"bd dolt push", func() error { return doltPushCmd.RunE(doltPushCmd, nil) }},
+		{"bd sync", func() error {
+			syncAdoptGitOrigin = adoptGitOriginRemoteForPush
+			return runSyncCommand(syncCmd, nil)
+		}},
+	} {
+		t.Run(verb.name, func(t *testing.T) {
+			isolateBeadsDirForTest(t)
+			t.Chdir(t.TempDir())
+			t.Setenv("BD_NO_REMOTE_ADOPT", "1")
+			fake := &fakeSyncStore{pullErr: refusal, pushErr: refusal}
+			setupSyncCommandTest(t, fake)
+			stubAdoptionOriginURL(t, policyRejectedURL)
+			config.Set(remotecache.AllowedRemotePatternsKey, []string{"git+https://github.com/myorg/*"})
+
+			var runErr error
+			stdout, stderr := captureStdio(t, func() { runErr = verb.run() })
+			if runErr != nil {
+				t.Fatalf("%s error = %v, want nil (--no-adopt on a rig with no remote is the benign case)\nstderr:\n%s", verb.name, runErr, stderr)
+			}
+			if fake.pullCalls+fake.pushCalls != 0 {
+				t.Errorf("%s: %d pull and %d push attempts on a rig with no remote, want none", verb.name, fake.pullCalls, fake.pushCalls)
+			}
+			if !strings.Contains(stdout, "No remote is configured") {
+				t.Errorf("%s stdout = %q, want the no-remote guidance", verb.name, stdout)
+			}
+		})
 	}
 }
 

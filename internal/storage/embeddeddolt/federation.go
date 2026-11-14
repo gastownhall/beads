@@ -380,8 +380,9 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 	// and a leftover dirty working set (e.g. a `bd remember` write) would
 	// otherwise make DOLT_MERGE refuse to start ("cannot merge with uncommitted
 	// changes"). CommitPending is a no-op when the working set is already clean.
-	if _, err := s.CommitPending(ctx, "beads"); err != nil {
-		result.Error = fmt.Errorf("commit pending before sync: %w", err)
+	// GH#6233: a peer the allowlist refuses is refused before that commit.
+	if err := s.commitPendingBeforeTransfer(ctx, peer, "sync"); err != nil {
+		result.Error = err
 		return result, result.Error
 	}
 

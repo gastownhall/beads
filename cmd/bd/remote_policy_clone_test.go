@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -124,5 +126,40 @@ func TestCloneFromRemoteDispatchesUnderMatchingList(t *testing.T) {
 	}
 	if *calls != 1 {
 		t.Errorf("dispatch count = %d, want 1", *calls)
+	}
+}
+
+// GH#6233: when the allowlist refuses `bd init --remote <url>`, init prints
+// the refusal, which names the remote and the key, and neither the URL it was
+// given (it can carry a token) nor the reachability hint a failed clone gets.
+func TestInitRemoteRefusedByAllowedRemotePatternsDoesNotPrintTheURL(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	workDir := t.TempDir()
+	runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+	homeDir := t.TempDir() // must differ from workDir: metrics.go caches to $HOME/.beads
+
+	remote := "https://x-access-token:s3cr3t-token@evil.example.com/attacker/repo.git"
+	cmd := exec.Command(bdBin, "init", "--remote", remote, "--prefix", "pol", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+	cmd.Dir = workDir
+	cmd.Env = hermeticInitEnv(homeDir, "BD_FEDERATION_ALLOWED_REMOTE_PATTERNS=git+https://github.com/myorg/*")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("bd init --remote <refused URL> = %v, want exit status 1\nstderr:\n%s", err, stderr.String())
+	}
+	out := stderr.String()
+	for _, want := range []string{`remote "origin" is not permitted`, remotecache.AllowedRemotePatternsKey} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stderr does not name %q:\n%s", want, out)
+		}
+	}
+	for _, leak := range []string{"s3cr3t-token", "x-access-token", "evil.example.com", "Hint:"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("stderr prints %q:\n%s", leak, out)
+		}
 	}
 }

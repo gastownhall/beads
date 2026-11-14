@@ -94,6 +94,8 @@ func TestValidateRemoteURL(t *testing.T) {
 		{"http localhost", "http://localhost:50051/mydb", false, ""},
 		{"s3 bucket", "s3://my-bucket/beads", false, ""},
 		{"aws bucket", "aws://my-bucket/beads", false, ""},
+		// Dolt's bracketed host, which net/url rejects since Go 1.25.2.
+		{"aws bucket and table", "aws://[tbl:bucket]/beads", false, ""},
 		{"gs bucket", "gs://my-bucket/beads", false, ""},
 		{"az storage", "az://account.blob.core.windows.net/container/beads", false, ""},
 		{"oci storage", "oci://namespace/bucket/path", false, ""},
@@ -151,6 +153,7 @@ func TestValidateRemoteURL(t *testing.T) {
 		{"git+http no host", "git+http:///path", true, "hostname"},
 		{"s3 no bucket", "s3:///path", true, "bucket"},
 		{"aws no bucket", "aws:///path", true, "bucket"},
+		{"aws unclosed bracket", "aws://[tbl:bucket/path", true, "malformed"},
 		{"gs no bucket", "gs:///path", true, "bucket"},
 		{"az no host", "az:///path", true, "hostname"},
 		{"oci no host", "oci:///path", true, "host"},

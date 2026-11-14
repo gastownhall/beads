@@ -27,6 +27,7 @@ import (
 	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
@@ -1598,6 +1599,14 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				// into, and the store would refuse it too. The advice is
 				// the store open's for that server: name the port.
 				fmt.Fprintf(os.Stderr, "Error: failed to clone remote %q: %v\n\n%s", syncURL, dolt.ErrUnresolvedServerPort, advice)
+				return &exitError{Code: 1}
+			} else if errors.Is(err, remotecache.ErrRemoteNotAllowed) {
+				// GH#6233: federation.allowed-remote-patterns refused the
+				// remote before anything was dialed. The refusal names the
+				// remote, never its URL, which can carry credentials, and
+				// reachability is not at fault, so neither the URL nor the
+				// hint below is printed.
+				fmt.Fprintf(os.Stderr, "Error: failed to clone remote: %s\n", remedy.PrintedText(err.Error()))
 				return &exitError{Code: 1}
 			} else if err != nil {
 				// The clone error is bd's own and repeats sync.remote, which

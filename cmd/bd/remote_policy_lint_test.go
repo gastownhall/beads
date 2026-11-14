@@ -30,10 +30,22 @@ func TestAllowedRemotePatternsNormalizedDestinationParity(t *testing.T) {
 			patterns: []string{"git+https://github.com/org/*"},
 		},
 		{
-			name:     "typed https refused by a bare https pattern",
+			name:     "typed https accepted by a bare https pattern",
 			key:      "federation.remote",
 			remote:   "https://github.com/org/repo",
 			patterns: []string{"https://github.com/org/*"},
+		},
+		{
+			name:     "remotesapi endpoint accepted as registered",
+			key:      "federation.remote",
+			remote:   "https://doltremoteapi.dolthub.com/myorg/beads",
+			patterns: []string{"https://doltremoteapi.dolthub.com/myorg/*"},
+		},
+		{
+			name:     "query under a glob refused",
+			key:      "federation.remote",
+			remote:   "s3://corp-bucket/beads?endpoint=https%3A%2F%2Fattacker.example",
+			patterns: []string{"s3://corp-bucket/*"},
 		},
 		{
 			name:     "credentialed remote refused without echoing it",

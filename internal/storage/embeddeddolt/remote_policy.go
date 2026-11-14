@@ -1,7 +1,10 @@
+//go:build cgo
+
 package embeddeddolt
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/remotecache"
@@ -28,4 +31,19 @@ func (s *EmbeddedDoltStore) checkRemotePolicy(ctx context.Context, name string) 
 		}
 	}
 	return &remotecache.RemotePolicyError{Subject: subject, Reason: "remote not found, so its URL cannot be checked against " + remotecache.AllowedRemotePatternsKey}
+}
+
+// commitPendingBeforeTransfer is the pre-transfer commit a remote verb makes
+// (CommitPending), taken only once the allowlist admits remote (GH#6233): a
+// refused transfer leaves local history as it was, as server mode's does.
+// what names the transfer in a commit error ("push", "pull", "sync").
+// withPeerAuth checks the remote again before it dispatches the transfer.
+func (s *EmbeddedDoltStore) commitPendingBeforeTransfer(ctx context.Context, remote, what string) error {
+	if err := s.checkRemotePolicy(ctx, remote); err != nil {
+		return err
+	}
+	if _, err := s.CommitPending(ctx, "beads"); err != nil {
+		return fmt.Errorf("commit pending before %s: %w", what, err)
+	}
+	return nil
 }

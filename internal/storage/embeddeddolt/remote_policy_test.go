@@ -90,9 +90,23 @@ func createAndCommitIssue(t *testing.T, s *EmbeddedDoltStore, id string) {
 	}
 }
 
+// pendingTableCount counts the tables with uncommitted changes.
+func pendingTableCount(t *testing.T, ctx context.Context, s *EmbeddedDoltStore) int {
+	t.Helper()
+	var n int
+	if err := s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		return db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_status").Scan(&n)
+	}); err != nil {
+		t.Fatalf("count dolt_status: %v", err)
+	}
+	return n
+}
+
 // GH#6233: with an allowlist that rejects a remote registered before the list
 // was tightened, every embedded remote verb refuses with a policy error before
-// it reaches Dolt, and the remote keeps the history it had.
+// it reaches Dolt, and the remote keeps the history it had. The refusal also
+// comes before the verb's pre-transfer commit, as in server mode: pending
+// local changes stay uncommitted and HEAD does not move.
 func TestRemotePolicyRefusesEmbeddedTransfers(t *testing.T) {
 	ctx := t.Context()
 	setAllowedRemotePatterns(t)
@@ -102,6 +116,16 @@ func TestRemotePolicyRefusesEmbeddedTransfers(t *testing.T) {
 		t.Fatal(err)
 	}
 	createAndCommitIssue(t, store, "fedauth-local")
+	if err := store.CreateIssue(ctx, &types.Issue{ID: "fedauth-pending", Title: "pending", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "tester"); err != nil {
+		t.Fatalf("CreateIssue(fedauth-pending): %v", err)
+	}
+	if pendingTableCount(t, ctx, store) == 0 {
+		t.Fatal("fixture: the uncommitted issue left no pending change for a pre-transfer commit to take")
+	}
+	head, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	config.Set(remotecache.AllowedRemotePatternsKey, []string{"dolthub://myorg/*"})
 
@@ -120,6 +144,7 @@ func TestRemotePolicyRefusesEmbeddedTransfers(t *testing.T) {
 		{"PullRemoteWithStrategy", func() error { return store.PullRemoteWithStrategy(ctx, "team", "ours") }},
 		{"PullFrom", func() error { _, err := store.PullFrom(ctx, "team"); return err }},
 		{"Fetch", func() error { return store.Fetch(ctx, "team") }},
+		{"Sync", func() error { _, err := store.Sync(ctx, "team", "ours"); return err }},
 		{"unknown remote", func() error { return store.PushRemote(ctx, "nosuch", false) }},
 	}
 	for _, v := range verbs {
@@ -128,7 +153,13 @@ func TestRemotePolicyRefusesEmbeddedTransfers(t *testing.T) {
 			if !errors.Is(err, remotecache.ErrRemoteNotAllowed) {
 				t.Fatalf("%s error = %v, want a %s refusal", v.name, err, remotecache.AllowedRemotePatternsKey)
 			}
+			if got, err := store.GetCurrentCommit(ctx); err != nil || got != head {
+				t.Fatalf("HEAD = %s (err %v) after a refused %s, want %s: the refused transfer committed local changes", got, err, v.name, head)
+			}
 		})
+	}
+	if pendingTableCount(t, ctx, store) == 0 {
+		t.Fatal("the pending change was committed by a refused transfer")
 	}
 
 	// Lift the policy and fetch: the remote still holds only the seed.
