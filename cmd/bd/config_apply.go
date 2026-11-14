@@ -159,7 +159,7 @@ func applyIssuePrefix(dryRun bool) ApplyResult {
 	st, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: dryRun, DisableAutoStart: true})
 	// Activation configures this same instance (closing it on failure), so the
 	// seed below journals like every other store-backed mutation.
-	_, err = activateEventsJournalStore(beadsDir, st, err)
+	_, err = activateEventsJournalStore(beadsDir, !dryRun, st, err)
 	if err != nil {
 		return ApplyResult{Check: "issue_prefix", Action: "seed", Status: applyStatusSkipped, Message: fmt.Sprintf("Cannot open Dolt store: %v", err)}
 	}

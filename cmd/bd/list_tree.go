@@ -3,6 +3,8 @@ package main
 import (
 	"cmp"
 	"fmt"
+	"io"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -163,7 +165,7 @@ const treeCycleMarker = "(cycle: shown above; parent-child cycle in stored edges
 // precedence and the requested order breaks ties. When dr is set, each node's
 // dependency edges are annotated just beneath it.
 func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, prefix string, dr *depRender, compare func(a, b *types.Issue) int, gated map[string][]string) {
-	printPrettyTreePath(childrenMap, parentID, prefix, dr, compare, gated, map[string]bool{parentID: true}, 0)
+	printPrettyTreePath(os.Stdout, childrenMap, parentID, prefix, dr, compare, gated, map[string]bool{parentID: true}, 0)
 }
 
 // printPrettyTreePath is printPrettyTree carrying the set of ancestors on the
@@ -176,7 +178,7 @@ func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, pre
 // renders under both; only a true ancestor counts as a cycle. Like the
 // "(shown above)" arm of bd dep tree, the marked line carries no --deps
 // annotations: they were printed with the node's first appearance.
-func printPrettyTreePath(childrenMap map[string][]*types.Issue, parentID string, prefix string, dr *depRender, compare func(a, b *types.Issue) int, gated map[string][]string, onPath map[string]bool, depth int) {
+func printPrettyTreePath(out io.Writer, childrenMap map[string][]*types.Issue, parentID string, prefix string, dr *depRender, compare func(a, b *types.Issue) int, gated map[string][]string, onPath map[string]bool, depth int) {
 	children := childrenMap[parentID]
 
 	if dr != nil {
@@ -192,7 +194,7 @@ func printPrettyTreePath(childrenMap map[string][]*types.Issue, parentID string,
 			connector = "└── "
 		}
 		if onPath[child.ID] {
-			fmt.Printf("%s%s%s %s\n", prefix, connector, formatPrettyIssueGated(child, gated[child.ID]), ui.RenderMuted(treeCycleMarker)) //nolint:forbidigo // Pretty-tree output is outside the --format contract.
+			fmt.Fprintf(out, "%s%s%s %s\n", prefix, connector, formatPrettyIssueGated(child, gated[child.ID]), ui.RenderMuted(treeCycleMarker))
 			continue
 		}
 		extension := "│   "
@@ -205,13 +207,13 @@ func printPrettyTreePath(childrenMap map[string][]*types.Issue, parentID string,
 		if atCeiling && len(childrenMap[child.ID]) > 0 {
 			line += ui.RenderWarn(" …")
 		}
-		fmt.Printf("%s%s%s\n", prefix, connector, line)
+		fmt.Fprintf(out, "%s%s%s\n", prefix, connector, line)
 		dr.annotationsFor(child.ID, prefix+extension)
 		if atCeiling {
 			continue
 		}
 		onPath[child.ID] = true
-		printPrettyTreePath(childrenMap, child.ID, prefix+extension, dr, compare, gated, onPath, depth+1)
+		printPrettyTreePath(out, childrenMap, child.ID, prefix+extension, dr, compare, gated, onPath, depth+1)
 		delete(onPath, child.ID)
 	}
 }

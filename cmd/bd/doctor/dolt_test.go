@@ -144,7 +144,7 @@ func TestDoltConnectionFixFollowsStoreOwnership(t *testing.T) {
 				if !strings.Contains(check.Fix, tt.wantFix) {
 					t.Fatalf("Fix = %q, want it to contain %q", check.Fix, tt.wantFix)
 				}
-				agent := EnrichForAgent(check)
+				agent := EnrichForAgent(check, safeGate())
 				if len(agent.Commands) != 2 || agent.Commands[1] != check.Fix {
 					t.Fatalf("agent commands = %q, want bd doctor --fix then the check's Fix", agent.Commands)
 				}

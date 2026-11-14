@@ -133,7 +133,7 @@ func checkIssuePrefixDrift() []DriftItem {
 	}
 	ctx := context.Background()
 	st, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true, DisableAutoStart: true})
-	_, err = activateEventsJournalStore(beadsDir, st, err)
+	_, err = activateEventsJournalStore(beadsDir, false, st, err)
 	if err != nil {
 		return []DriftItem{{Check: "issue_prefix", Status: driftStatusSkipped, Message: fmt.Sprintf("Cannot open Dolt store: %v", err)}}
 	}

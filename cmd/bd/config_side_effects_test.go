@@ -174,8 +174,9 @@ func TestCheckConfigSetSideEffects_UnknownKey(t *testing.T) {
 // writer only. `bd config set ... true` is the moment someone turns it on, so it
 // is where that caveat belongs -- said once, at the command that has the effect.
 func TestVersionedHistoryConfigSetHintsAboutReplicationAndSingleWriter(t *testing.T) {
+	beadsDir := sideEffectStore(t, "")
 	for _, on := range []string{"true", "TRUE", " true ", "1", "t"} {
-		effects := checkConfigSetSideEffects(versionedHistorySettingKey, on)
+		effects := setEffects(t, beadsDir, versionedHistorySettingKey, on)
 		if len(effects) != 1 {
 			t.Errorf("value %q turns recording on: expected 1 hint, got %d", on, len(effects))
 			continue
@@ -188,11 +189,11 @@ func TestVersionedHistoryConfigSetHintsAboutReplicationAndSingleWriter(t *testin
 	}
 	// Turning it off, or anything that does not turn it on, needs no caveat.
 	for _, off := range []string{"false", "0", "", "off", "nonsense"} {
-		if effects := checkConfigSetSideEffects(versionedHistorySettingKey, off); len(effects) != 0 {
+		if effects := setEffects(t, beadsDir, versionedHistorySettingKey, off); len(effects) != 0 {
 			t.Errorf("value %q does not turn recording on: expected no hint, got %d", off, len(effects))
 		}
 	}
-	if effects := checkConfigUnsetSideEffects(versionedHistorySettingKey); len(effects) != 0 {
+	if effects := unsetEffects(t, beadsDir, versionedHistorySettingKey); len(effects) != 0 {
 		t.Errorf("unsetting the key needs no hint, got %d", len(effects))
 	}
 }

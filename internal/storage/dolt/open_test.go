@@ -786,7 +786,7 @@ func TestConfigOpenWithMetadataSocketDoesNotAutoStart(t *testing.T) {
 		return 0, false, errors.New("stub: auto-start refused")
 	}
 
-	_, err := newServerMode(context.Background(), cfg)
+	_, err = newServerMode(context.Background(), cfg)
 	if starts != 0 {
 		t.Errorf("auto-start ran %d time(s) for a workspace whose metadata.json names socket %s", starts, socket)
 	}

@@ -38,7 +38,11 @@ func TestWithoutGitRepoLocationEnvKeepsWrapperGitControls(t *testing.T) {
 }
 
 func TestUnsetGitRepoLocationEnvKeepsWrapperGitControls(t *testing.T) {
-	for _, key := range gitRepoLocationKeys {
+	repoLocationKeys := []string{
+		"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_CONFIG", "GIT_DIR",
+		"GIT_INDEX_FILE", "GIT_NAMESPACE", "GIT_OBJECT_DIRECTORY", "GIT_WORK_TREE",
+	}
+	for _, key := range repoLocationKeys {
 		t.Setenv(key, "/host/"+key)
 	}
 	for _, entry := range wrapperGitEnv {
@@ -49,7 +53,7 @@ func TestUnsetGitRepoLocationEnvKeepsWrapperGitControls(t *testing.T) {
 	if err := UnsetGitRepoLocationEnv(); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range gitRepoLocationKeys {
+	for _, key := range repoLocationKeys {
 		if value, ok := os.LookupEnv(key); ok {
 			t.Errorf("%s=%q survived UnsetGitRepoLocationEnv", key, value)
 		}

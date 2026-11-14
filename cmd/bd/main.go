@@ -1375,7 +1375,8 @@ func retargetGitContext(dir string) error {
 // wrong repository) and with LC_ALL=C so the not-a-repository condition is
 // recognized reliably; it alone maps to errNotGitRepo.
 func revParseGitContext(dir string, args ...string) ([]string, error) {
-	cmd := exec.Command("git", append([]string{"-C", dir, "rev-parse"}, args...)...)
+	cmd := exec.Command("git", append([]string{"rev-parse"}, args...)...)
+	cmd.Dir = dir
 	env := make([]string, 0, len(os.Environ())+1)
 	for _, kv := range os.Environ() {
 		if strings.HasPrefix(kv, "GIT_DIR=") || strings.HasPrefix(kv, "GIT_WORK_TREE=") ||
