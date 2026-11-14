@@ -1281,6 +1281,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A repeated `--status`, `--state`, `--id`, `--type`, `--assignee` or
+  `--label` filter no longer silently keeps only its last value.**
+  Set filters (`bd search --status`, `bd human list --status`, `bd count
+  --id`, `bd gitlab sync --label`/`--type`) now read `--status open --status
+  blocked` the same as `--status open,blocked`, as `bd list` already did.
+  Single-valued filters (such as `--assignee` and `--type` on `bd ready`,
+  `--status` on `bd count`, `bd stale` and `bd lint`, and `--state` on the
+  Jira, Linear and Notion syncs) refuse a second value with `--<flag> given
+  more than once`; an explicit empty value resets first, so `--assignee=
+  --assignee bob` still overrides. Setters such as `bd create --type` are
+  unchanged, and filters under other names (`bd ready --parent`, `bd gitlab
+  sync --exclude-type`, ...) still keep their last value.
+
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc

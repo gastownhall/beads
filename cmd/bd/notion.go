@@ -79,7 +79,6 @@ var (
 	notionPreferLocal  bool
 	notionPreferNotion bool
 	notionCreateOnly   bool
-	notionSyncState    string
 )
 
 var newNotionStatusClient = notion.NewClient
@@ -139,7 +138,7 @@ func init() {
 	notionSyncCmd.Flags().BoolVar(&notionPreferLocal, "prefer-local", false, "On conflict, keep the local beads version")
 	notionSyncCmd.Flags().BoolVar(&notionPreferNotion, "prefer-notion", false, "On conflict, use the Notion version")
 	notionSyncCmd.Flags().BoolVar(&notionCreateOnly, "create-only", false, "Only create missing remote pages, do not update existing ones")
-	notionSyncCmd.Flags().StringVar(&notionSyncState, "state", "all", "Issue state to sync: open, closed, or all")
+	addOnceFilterFlag(notionSyncCmd.Flags(), "state", "", "all", "Issue state to sync: open, closed, or all")
 	registerSelectiveSyncFlags(notionSyncCmd)
 
 	notionCmd.AddCommand(
@@ -495,15 +494,7 @@ func runNotionSync(cmd *cobra.Command, _ []string) error {
 		conflictResolution = tracker.ConflictExternal
 	}
 
-	syncOpts := tracker.SyncOptions{
-		Pull:               pull,
-		Push:               push,
-		DryRun:             notionSyncDryRun,
-		CreateOnly:         notionCreateOnly,
-		State:              notionSyncState,
-		ExcludeEphemeral:   true,
-		ConflictResolution: conflictResolution,
-	}
+	syncOpts := notionSyncOptions(cmd, pull, push, conflictResolution)
 
 	if err := applySelectiveSyncFlags(cmd, &syncOpts, push); err != nil {
 		return HandleError("%v", err)
@@ -522,6 +513,22 @@ func runNotionSync(cmd *cobra.Command, _ []string) error {
 	}
 	renderNotionSyncResult(cmd, result)
 	return nil
+}
+
+// notionSyncOptions builds the SyncOptions of one notion sync invocation.
+// --state is a once-only filter value with no bound global, so it is read back
+// from cmd's own flags here.
+func notionSyncOptions(cmd *cobra.Command, pull, push bool, conflictResolution tracker.ConflictResolution) tracker.SyncOptions {
+	state, _ := cmd.Flags().GetString("state")
+	return tracker.SyncOptions{
+		Pull:               pull,
+		Push:               push,
+		DryRun:             notionSyncDryRun,
+		CreateOnly:         notionCreateOnly,
+		State:              state,
+		ExcludeEphemeral:   true,
+		ConflictResolution: conflictResolution,
+	}
 }
 
 func renderNotionSyncResult(cmd *cobra.Command, result *tracker.SyncResult) {
