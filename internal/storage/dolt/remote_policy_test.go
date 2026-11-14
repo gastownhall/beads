@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -243,5 +244,20 @@ func TestRemotePolicyRefusesServerRegistration(t *testing.T) {
 	}
 	if fmt.Sprint(after) != fmt.Sprint(before) {
 		t.Fatalf("remotes = %+v after refused registrations, want the prior %+v", after, before)
+	}
+}
+
+// GH#6233: a bootstrap clone from a source the allowlist rejects is refused
+// before the dolt directory is created.
+func TestBootstrapFromRemoteRefusesDisallowedSource(t *testing.T) {
+	setAllowedRemotePatterns(t, "dolthub://myorg/*")
+	doltDir := filepath.Join(t.TempDir(), "dolt")
+	source := "file://" + filepath.Join(t.TempDir(), "remote")
+	cloned, err := BootstrapFromRemoteWithDBRef(context.Background(), doltDir, source, "beads", "")
+	if cloned || !errors.Is(err, remotecache.ErrRemoteNotAllowed) {
+		t.Fatalf("BootstrapFromRemoteWithDBRef = (%v, %v), want (false, a policy refusal)", cloned, err)
+	}
+	if _, statErr := os.Stat(doltDir); !os.IsNotExist(statErr) {
+		t.Fatalf("refused bootstrap left %s behind (stat: %v)", doltDir, statErr)
 	}
 }
