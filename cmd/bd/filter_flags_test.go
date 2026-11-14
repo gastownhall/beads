@@ -587,3 +587,40 @@ func TestFilterFlagSetterExemptionsAllExist(t *testing.T) {
 		})
 	}
 }
+
+// TestFilterFlagsAllocatedPerRegistration: registerCountFlags on two
+// independent commands gives each its own filter values, so parsing one
+// command's filters leaves the other's values and Changed bits untouched.
+func TestFilterFlagsAllocatedPerRegistration(t *testing.T) {
+	a, b := newCountFlagSet(t), newCountFlagSet(t)
+	names := []string{"status", "assignee", "type", "id"}
+	for _, name := range names {
+		fa, fb := a.Flags().Lookup(name), b.Flags().Lookup(name)
+		if filterFlagKind(fa) == "plain" || filterFlagKind(fb) == "plain" {
+			t.Errorf("count --%s: values %T/%T, want union/once filter values", name, fa.Value, fb.Value)
+		}
+		if fa.Value == fb.Value || fa.Value == countCmd.Flags().Lookup(name).Value {
+			t.Errorf("count --%s: two registrations share one value instance", name)
+		}
+	}
+	if err := a.Flags().Parse([]string{"--status", "open", "--assignee", "alice", "--type", "bug", "--id", "bd-1", "--id", "bd-2"}); err != nil {
+		t.Fatalf("parse on the first command: %v", err)
+	}
+	for _, name := range names {
+		fb := b.Flags().Lookup(name)
+		if fb.Changed || fb.Value.String() != "" {
+			t.Errorf("count --%s on the second command: value %q changed=%v after parsing the first; want untouched", name, fb.Value.String(), fb.Changed)
+		}
+	}
+	// And the other way: the second command now parses its own repeat-free
+	// values without tripping on the first command's occurrences.
+	if err := b.Flags().Parse([]string{"--status", "closed", "--type", "task"}); err != nil {
+		t.Fatalf("parse on the second command: %v", err)
+	}
+	if got, _ := a.Flags().GetString("status"); got != "open" {
+		t.Errorf("first command's --status = %q after parsing the second, want open", got)
+	}
+	if got, _ := b.Flags().GetString("status"); got != "closed" {
+		t.Errorf("second command's --status = %q, want closed", got)
+	}
+}
