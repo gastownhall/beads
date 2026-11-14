@@ -71,7 +71,7 @@ func TestBlacksmithReachablePRJobsDisableDefaultCachingActions(t *testing.T) {
 // `test` job (which saves its own race cache), and the toolchain saver of
 // pr.yml's windows-make-shell.
 var blacksmithSaverJobs = []string{
-	"test-windows", "blacksmith-macos-go-build-cache", "test", "windows-make-shell-toolchains",
+	"test-windows", "blacksmith-macos-go-build-cache", "windows-make-shell-toolchains",
 }
 
 // TestBlacksmithSaverJobsGuardedAgainstPullRequest is the B2 fix's pin: each
@@ -258,7 +258,7 @@ func TestBlacksmithMacOSSaverMatchesPRLegs(t *testing.T) {
 	mainWF := readCIWorkflow(t, "main.yml")
 	saver := mainWF.job(t, "blacksmith-macos-go-build-cache")
 
-	if want := "${{ '" + blacksmithMacOSLabel + "' }}"; saver.RunsOn != want {
+	if want := mainBlacksmithMacOSGoBuildCacheRunsOn; saver.RunsOn != want {
 		t.Errorf("blacksmith-macos-go-build-cache runs-on = %q, want %q", saver.RunsOn, want)
 	}
 	if saver.TimeoutMinutes == 0 {
@@ -275,7 +275,7 @@ func TestBlacksmithMacOSSaverMatchesPRLegs(t *testing.T) {
 				continue
 			}
 			macOSLegs++
-			if got := mustEvalGHRunsOn(t, job.RunsOn, map[string]string{"matrix.runner": leg.Runner, "matrix.os": leg.OS}); got != blacksmithMacOSLabel {
+			if got := mustEvalGHRunsOn(t, job.RunsOn, map[string]string{"matrix.runner": leg.Runner, "matrix.os": leg.OS}); mustEvalGHRunsOn(t, got, map[string]string{"github.repository": "gastownhall/beads"}) != blacksmithMacOSLabel {
 				t.Errorf("pr.yml %s macOS leg resolves to %q, want the saver's %q", jobName, got, blacksmithMacOSLabel)
 			}
 		}

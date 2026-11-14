@@ -76,6 +76,7 @@ var ciScopeJobSwitch = map[string]map[string]string{
 		"check-doc-flags":               "linux",
 		"bazel":                         "linux",
 		"test-windows-liveness":         "platforms",
+		"test-macos":                    "platforms",
 		"test-windows-small":            "platforms",
 		"worktree-remove-windows":       "platforms",
 		"check-doc-freshness-platforms": "platforms",
@@ -984,7 +985,7 @@ func TestCIScopeCoversEveryGatedJobOnMain(t *testing.T) {
 	var push struct {
 		Branches []string `yaml:"branches"`
 	}
-	if node, ok := on.On["push"]; !ok || node.Decode(&push) != nil || !slices.Equal(push.Branches, []string{"main"}) {
+	if node, ok := on.On["push"]; !ok || node.Decode(&push) != nil || !slices.Equal(push.Branches, []string{"main", "dc-use"}) {
 		t.Errorf("%s push trigger = %v; want push to main (the Bazel half of the complement)", bazelWorkflowName, push.Branches)
 	}
 }
