@@ -331,6 +331,46 @@ func TestFilterFlagSetterExemptionsAllExist(t *testing.T) {
 	}
 }
 
+// TestFilterFlagsAllocatedPerRegistration pins the allocation discipline the
+// helpers in filter_flags.go follow: every registration gets its own
+// unionStringFlag/onceStringFlag value, never a shared package-level var.
+// A shared value would leak parses between commands (two bd invocations in
+// one process, or test commands after a parse) and turn the refusal into a
+// false positive. Guard by design: the helpers have allocated per
+// registration since they landed in AC-1, so no base-red exists.
+func TestFilterFlagsAllocatedPerRegistration(t *testing.T) {
+	first, second := &cobra.Command{}, &cobra.Command{}
+	registerCountFlags(first)
+	registerCountFlags(second)
+
+	if err := first.ParseFlags([]string{"--status", "open", "--id", "bd-1"}); err != nil {
+		t.Fatalf("parse on first command: %v", err)
+	}
+
+	for _, name := range []string{"status", "assignee", "type", "id"} {
+		f1, f2 := first.Flags().Lookup(name), second.Flags().Lookup(name)
+		if f1 == nil || f2 == nil {
+			t.Fatalf("--%s missing from one of the two registrations", name)
+		}
+		if reflect.ValueOf(f1.Value).Pointer() == reflect.ValueOf(f2.Value).Pointer() {
+			t.Errorf("--%s: both registrations share one value (package-level var): a parse on one command would surface on the other", name)
+		}
+		if f2.Changed {
+			t.Errorf("--%s: second command shows Changed after parsing only the first command", name)
+		}
+		if v, _ := second.Flags().GetString(name); v != "" {
+			t.Errorf("--%s: second command holds %q after parsing only the first command", name, v)
+		}
+	}
+
+	if v, _ := first.Flags().GetString("status"); v != "open" {
+		t.Errorf("first command --status = %q, want open", v)
+	}
+	if v, _ := first.Flags().GetString("id"); v != "bd-1" {
+		t.Errorf("first command --id = %q, want bd-1", v)
+	}
+}
+
 // TestRepeatedUnionFilterFlagsUnion derives every union filter from the
 // registrations, so a new union flag is covered the day it lands.
 func TestRepeatedUnionFilterFlagsUnion(t *testing.T) {
