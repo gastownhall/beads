@@ -1051,3 +1051,44 @@ func TestFindBeadsDirFrom_WorktreeMetadatalessStoreYieldsToSharedWorkspace(t *te
 		assertSamePath(t, "FindBeadsDirFrom("+start+")", FindBeadsDirFrom(start), f.mainBeads)
 	}
 }
+
+// TestFindBeadsDir_WorktreeStoreWithMetadataPreservesLocal guards the
+// separate-database precedence: any readable or unreadable local metadata
+// keeps the worktree store selected and emits no missing-metadata warning.
+func TestFindBeadsDir_WorktreeStoreWithMetadataPreservesLocal(t *testing.T) {
+	cases := []struct {
+		name     string
+		file     string
+		body     string
+		wantDBIn bool // FindDatabasePath selects the local embedded store
+	}{
+		{name: "own metadata", file: "metadata.json", body: `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"wtdb"}`, wantDBIn: true},
+		{name: "inherited metadata", file: "metadata.json", body: mainEmbeddedMetadata, wantDBIn: true},
+		{name: "metadata without database name", file: "metadata.json", body: `{"backend":"dolt","dolt_mode":"embedded"}`, wantDBIn: true},
+		{name: "legacy config.json", file: "config.json", body: `{"backend":"dolt","dolt_mode":"embedded"}`, wantDBIn: true},
+		{name: "malformed metadata", file: "metadata.json", body: `{not json`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newMetadatalessStoreFixture(t, mainEmbeddedMetadata, "myproject")
+			writeFixtureFile(t, filepath.Join(f.worktreeBeads, tc.file), tc.body)
+			chdirForDiscovery(t, f.worktree)
+			var dir, dbPath string
+			stderr := captureStderr(t, func() {
+				dir = FindBeadsDir()
+				dbPath = FindDatabasePath()
+				_ = FindBeadsDirFrom(f.subdir)
+			})
+			assertSamePath(t, "FindBeadsDir()", dir, f.worktreeBeads)
+			if tc.wantDBIn {
+				assertSamePath(t, "FindDatabasePath()", dbPath, filepath.Join(f.worktreeBeads, "embeddeddolt"))
+			}
+			if strings.Contains(stderr, "no metadata.json or config.json") {
+				t.Errorf("unexpected missing-metadata warning with local %s:\n%s", tc.file, stderr)
+			}
+			if _, err := os.Stat(filepath.Join(f.worktreeBeads, tc.file)); err != nil {
+				t.Errorf("local %s changed by discovery: %v", tc.file, err)
+			}
+		})
+	}
+}
