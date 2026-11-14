@@ -863,7 +863,32 @@ func TestOpenBestAvailableRefusesProxiedServerWorkspace(t *testing.T) {
 				t.Fatalf("returned a non-nil %T alongside the proxied refusal", store)
 			}
 			if !errors.Is(err, beads.ErrProxiedServerUnsupported) {
-				t.Fatalf("error = %v, want ErrProxiedServerUnsupported", err)
+				t.Errorf("error = %v, want ErrProxiedServerUnsupported", err)
+			}
+			if err != nil {
+				// The refusal message names the mode exactly as written, the
+				// file that declares it, the data-safety guarantee and the
+				// bd CLI — and never the other metadata file or advice that
+				// would dial around the proxy.
+				for _, want := range []string{
+					strconv.Quote(tt.spelling),
+					filepath.Join(beadsDir, tt.file),
+					"no storage database was opened or modified",
+					"bd CLI",
+				} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("refusal missing %q: %v", want, err)
+					}
+				}
+				otherFile := "metadata.json"
+				if tt.file == "metadata.json" {
+					otherFile = "config.json"
+				}
+				for _, banned := range []string{otherFile, "OpenFromConfig", "bd init --server", "CGO"} {
+					if strings.Contains(err.Error(), banned) {
+						t.Errorf("refusal must not mention %q: %v", banned, err)
+					}
+				}
 			}
 		})
 	}
