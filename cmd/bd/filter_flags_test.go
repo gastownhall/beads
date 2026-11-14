@@ -624,3 +624,34 @@ func TestFilterFlagsAllocatedPerRegistration(t *testing.T) {
 		t.Errorf("second command's --status = %q, want closed", got)
 	}
 }
+
+// TestNotionStateFilterFeedsSyncOptions pins the read that fills
+// tracker.SyncOptions.State: --state is now a custom once value with no bound
+// global, so runNotionSync reads it back with cmd.Flags().GetString("state")
+// (notion.go). That read must return exactly what the user passed, and the
+// fresh default must still read "all".
+func TestNotionStateFilterFeedsSyncOptions(t *testing.T) {
+	const path = "bd notion sync"
+	syncState := func(stage string) string {
+		t.Helper()
+		got, err := commandsByPath(rootCmd)[path].Flags().GetString("state")
+		if err != nil {
+			t.Fatalf("%s: GetString(state): %v", stage, err)
+		}
+		return got
+	}
+
+	if _, err := parseFilterArgs(t, path, "state"); err != nil {
+		t.Fatalf("parse with no args: %v", err)
+	}
+	if got := syncState("fresh"); got != "all" {
+		t.Errorf("fresh: SyncOptions.State would be %q, want default all", got)
+	}
+
+	if _, err := parseFilterArgs(t, path, "state", "--state", "open"); err != nil {
+		t.Fatalf("--state open: %v", err)
+	}
+	if got := syncState("--state open"); got != "open" {
+		t.Errorf("--state open: SyncOptions.State would be %q, want open", got)
+	}
+}
