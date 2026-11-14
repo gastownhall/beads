@@ -591,3 +591,30 @@ func TestResolveProxiedServerUOWTopology_ExcursionIdentity_ConfiguredDatabaseAss
 	assert.Equal(t, "proj-stale-local", topology.expectedProjectID)
 	assert.Equal(t, "beads_theirs", topology.database)
 }
+
+// BEADS_SKIP_IDENTITY_CHECK=1 is the deliberate hatch for a plain cross-project
+// excursion. It must not reach the team-server guard, which stays strict.
+func TestResolveProxiedServerUOWTopology_ExcursionIdentity_SkipEnvBypassesPlainOnly(t *testing.T) {
+	t.Setenv("BEADS_SKIP_IDENTITY_CHECK", "1")
+
+	plain := writePlainProxiedWorkspace(t, "proj-mine")
+	topology, err := resolveProxiedServerUOWTopology(plain, "beads_theirs", assertWorkspaceIdentity)
+	require.NoError(t, err)
+	assert.Empty(t, topology.expectedProjectID, "the plain excursion is deliberately unchecked")
+	assert.Equal(t, "beads_theirs", topology.database)
+
+	team := t.TempDir()
+	require.NoError(t, os.WriteFile(configfile.ConfigPath(team), []byte(
+		`{"backend": "dolt", "dolt_mode": "proxied-server", "dolt_database": "team", "project_id": "proj-team", "dolt_team_server": true}`), 0o644))
+	topology, err = resolveProxiedServerUOWTopology(team, "team_other", assertWorkspaceIdentity)
+	require.NoError(t, err)
+	assert.True(t, topology.teamServer)
+	assert.Equal(t, "proj-team", topology.expectedProjectID, "team-server keeps asserting under the env var")
+
+	noID := t.TempDir()
+	require.NoError(t, os.WriteFile(configfile.ConfigPath(noID), []byte(
+		`{"backend": "dolt", "dolt_mode": "proxied-server", "dolt_database": "team", "dolt_team_server": true}`), 0o644))
+	_, err = resolveProxiedServerUOWTopology(noID, "team_other", assertWorkspaceIdentity)
+	require.Error(t, err, "a team-server workspace with no local identity is still refused")
+	assert.Contains(t, err.Error(), "no project identity")
+}

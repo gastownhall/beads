@@ -347,8 +347,12 @@ func resolveProxiedServerUOWTopology(beadsDir, databaseOverride string, posture 
 	// identity it adopted from an existing database, so a co-tenant
 	// workspace's local ID can be stale; asserting it there would refuse
 	// workspaces that work today. Schema names compare case-insensitively,
-	// matching MySQL.
-	if !topology.teamServer && (databaseOverride == "" || strings.EqualFold(databaseOverride, topology.database)) {
+	// matching MySQL. BEADS_SKIP_IDENTITY_CHECK=1 is the deliberate
+	// cross-project hatch, as on the pre-open check in main.go; it never
+	// reaches the team-server guard, which stays strict.
+	if !topology.teamServer && (databaseOverride == "" ||
+		strings.EqualFold(databaseOverride, topology.database) ||
+		os.Getenv("BEADS_SKIP_IDENTITY_CHECK") == "1") {
 		topology.expectedProjectID = ""
 	}
 	if databaseOverride != "" {
