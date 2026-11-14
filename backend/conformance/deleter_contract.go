@@ -5,8 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
@@ -31,16 +34,29 @@ import (
 // inside the transaction, the history entry, and the ExpectedVersion
 // precondition.
 //
-// ONE PROMISE ABOUT ExpectedVersion IS STRUCTURAL RATHER THAN OBSERVABLE, and
-// the four version cases say so here instead of faking it: the leaf promises
-// the version read shares the deleting transaction, and a single-threaded case
-// cannot tell one transaction from two when nothing else is writing. What holds
-// it is the SHAPE of the bodies — the store legs call CheckVersionInTx on the
-// transaction they delete in, and the unit-of-work leg compares a row its own
-// existence probe loaded inside the same unit of work — so there is no
-// two-call composition to regress into. A concurrent case would be flaky at
-// three engines and buy a suite people re-run rather than a guarantee. What
-// would upgrade it is a transaction-counting seam on the fixture kit.
+// ONE PROMISE ABOUT ExpectedVersion IS ONLY OBSERVABLE UNDER CONCURRENCY: the
+// leaf promises the version read shares the deleting transaction, so the pair
+// is a true compare-and-delete, and a single-threaded case cannot tell one
+// transaction from two when nothing else is writing. The four sequential
+// version cases pin what the token means. The two race cases after them
+// (RunDeleterExpectedVersionSingleWinnerUnderConcurrency and its Cascade
+// sibling) pin the compare-and-delete itself: sixteen racers share one token,
+// exactly one deletes, every other is refused and deletes nothing, and the
+// history gains exactly one entry.
+//
+// THE RACE CASES ARE NOT FLAKY ON A CORRECT BACKEND. One winner comes from
+// construction, not timing: the per-id delete fence on a Dolt sql-server
+// (withDeleteFence, in the store body and in the unit-of-work body), or an
+// engine that admits one writer at a time. Only a broken backend depends on
+// timing, and it fails most runs. The cases can only fail where racers really
+// overlap: the unit-of-work leg, and the server-backed store's own
+// multi-connection wiring (internal/storage/dolt TestDeleterContractRaces;
+// its shared branch store has one connection and would queue them). The
+// embedded engine, and the served leg's embedded store, serialize their
+// writers, so there the cases pin the outcome and the history entry, not the
+// fence. No wiring here reaches a production `bd serve`'s per-request provider
+// arm (internal/httpapi's timedProvider over a unit-of-work provider), whose
+// fence is the subject of gastownhall/beads#8227.
 //
 // EVERY CASE NAMESPACES ITS SEEDS with fixture.IssuePrefix and its own tag: the
 // three wirings share one database across the whole role suite, and a delete
@@ -280,8 +296,8 @@ func RunDeleterForceOrphansDependents(t *testing.T, ctx context.Context, fixture
 }
 
 // RunDeleterCascadeDeletesTheClosure pins the other mode (issueops/deleter.go,
-// DeleteRequest.Cascade) over a chain rather than a single edge, because
-// "transitive" is the whole claim and a one-edge fixture cannot tell a
+// DeleteRequest.Cascade) over a parent-child chain rather than a single edge,
+// because "transitive" is the whole claim and a one-edge fixture cannot tell a
 // transitive expansion from a direct one. It also pins the interaction the leaf
 // spells out: a request carrying BOTH Cascade and Force is legal and behaves as
 // Cascade.
@@ -291,8 +307,8 @@ func RunDeleterCascadeDeletesTheClosure(t *testing.T, ctx context.Context, fixtu
 	middle := deleterSeedIssue(t, ctx, fixture, "casc", "middle")
 	leaf := deleterSeedIssue(t, ctx, fixture, "casc", "leaf")
 	bystander := deleterSeedIssue(t, ctx, fixture, "casc", "bystander")
-	deleterAddEdge(t, ctx, fixture, middle, root)
-	deleterAddEdge(t, ctx, fixture, leaf, middle)
+	deleterAddParentChildEdge(t, ctx, fixture, middle, root)
+	deleterAddParentChildEdge(t, ctx, fixture, leaf, middle)
 
 	result := deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
 		IDs:     []string{root},
@@ -300,10 +316,10 @@ func RunDeleterCascadeDeletesTheClosure(t *testing.T, ctx context.Context, fixtu
 		Force:   true,
 	})
 	if result.Deleted != 3 {
-		t.Errorf("Deleted = %d, want 3 — the closure is root, its dependent and ITS dependent", result.Deleted)
+		t.Errorf("Deleted = %d, want 3 — the closure is root, its child and ITS child", result.Deleted)
 	}
 	if len(result.Orphaned) != 0 {
-		t.Errorf("Orphaned = %v, want empty: a cascade leaves nothing outside the set to orphan", result.Orphaned)
+		t.Errorf("Orphaned = %v, want empty: nothing outside the tree depends on it", result.Orphaned)
 	}
 	deleterAssertIssueRows(t, ctx, fixture, 0, root, middle, leaf)
 	deleterAssertIssueRows(t, ctx, fixture, 1, bystander)
@@ -311,8 +327,7 @@ func RunDeleterCascadeDeletesTheClosure(t *testing.T, ctx context.Context, fixtu
 
 // RunDeleterCascadeFromAWispRootDeletesTheClosure pins the CROSS-PLANE quadrant
 // of the cascade (issueops/deleter.go, DeleteRequest.Cascade: "also deletes the
-// TRANSITIVE CLOSURE of everything that depends on the named rows, IN BOTH
-// PLANES").
+// named rows' parent-child descendants, transitively, IN BOTH PLANES").
 //
 // The other cascade cases are durable-only or edge-free, so nothing else
 // asserts what a cascade rooted at a WISP does to the durable rows hanging off
@@ -327,8 +342,8 @@ func RunDeleterCascadeFromAWispRootDeletesTheClosure(t *testing.T, ctx context.C
 	dependent := deleterSeedIssue(t, ctx, fixture, "wcasc", "dependent")
 	grandchild := deleterSeedIssue(t, ctx, fixture, "wcasc", "grandchild")
 	bystander := deleterSeedIssue(t, ctx, fixture, "wcasc", "bystander")
-	deleterAddEdge(t, ctx, fixture, dependent, root)
-	deleterAddEdge(t, ctx, fixture, grandchild, dependent)
+	deleterAddParentChildEdge(t, ctx, fixture, dependent, root)
+	deleterAddParentChildEdge(t, ctx, fixture, grandchild, dependent)
 
 	result := deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
 		IDs:     []string{root},
@@ -336,11 +351,154 @@ func RunDeleterCascadeFromAWispRootDeletesTheClosure(t *testing.T, ctx context.C
 		Force:   true,
 	})
 	if result.Deleted != 3 {
-		t.Errorf("Deleted = %d, want 3 — the wisp, the durable row that depends on it, and ITS dependent", result.Deleted)
+		t.Errorf("Deleted = %d, want 3 — the wisp, the durable child it contains, and ITS child", result.Deleted)
 	}
 	deleterAssertWispRows(t, ctx, fixture, 0, root)
 	deleterAssertIssueRows(t, ctx, fixture, 0, dependent, grandchild)
 	deleterAssertIssueRows(t, ctx, fixture, 1, bystander)
+}
+
+// deleterContainment is the cascade-boundary fixture: epic A with a
+// two-level containment tree in mixed statuses, and three rows joined to that
+// tree by association edges only, one of which is an epic with a child of its
+// own.
+type deleterContainment struct {
+	A, A1, A2, A11 string // the containment tree a cascade from A deletes
+	B, B1          string // an unrelated epic discovered-from A, and its child
+	C, C1          string // another epic whose child C1 is blocked by A1
+	S              string // a standalone row related to A
+}
+
+// deleted is the tree a cascade from A deletes, in ascending id order.
+func (f deleterContainment) deleted() []string { return []string{f.A, f.A1, f.A11, f.A2} }
+
+// survivors is every row outside that tree.
+func (f deleterContainment) survivors() []string {
+	return []string{f.B, f.B1, f.C, f.C1, f.S}
+}
+
+func deleterSeedContainment(t *testing.T, ctx context.Context, fixture DeleterFixture, tag string) deleterContainment {
+	t.Helper()
+	seed := func(name string, status types.Status) string {
+		issue := deleterIssue(fixture, tag, name, false)
+		issue.Status = status
+		if status == types.StatusClosed {
+			closedAt := time.Now().UTC().Add(-time.Hour)
+			issue.ClosedAt = &closedAt
+		}
+		return deleterSeed(t, ctx, fixture, issue)
+	}
+	f := deleterContainment{
+		A:   seed("a", types.StatusOpen),
+		A1:  seed("a1", types.StatusOpen),
+		A2:  seed("a2", types.StatusClosed),
+		A11: seed("a11", types.StatusInProgress),
+		B:   seed("b", types.StatusOpen),
+		B1:  seed("b1", types.StatusOpen),
+		C:   seed("c", types.StatusOpen),
+		C1:  seed("c1", types.StatusOpen),
+		S:   seed("s", types.StatusOpen),
+	}
+	deleterAddParentChildEdge(t, ctx, fixture, f.A1, f.A)
+	deleterAddParentChildEdge(t, ctx, fixture, f.A2, f.A)
+	deleterAddParentChildEdge(t, ctx, fixture, f.A11, f.A1)
+	deleterAddParentChildEdge(t, ctx, fixture, f.B1, f.B)
+	deleterAddParentChildEdge(t, ctx, fixture, f.C1, f.C)
+	deleterAddTypedEdge(t, ctx, fixture, f.B, f.A, types.DepDiscoveredFrom)
+	deleterAddTypedEdge(t, ctx, fixture, f.C1, f.A1, types.DepBlocks)
+	deleterAddTypedEdge(t, ctx, fixture, f.S, f.A, types.DepRelated)
+	return f
+}
+
+// RunDeleterCascadeFollowsOnlyContainment pins the cascade's boundary
+// (issueops/deleter.go, DeleteRequest.Cascade: "the named rows' parent-child
+// descendants"): a cascade from an epic deletes its containment tree, in
+// whatever status its rows are in, and nothing an association edge reaches.
+//
+// GH#6301 is the failure this case is shaped after: a cascade that followed
+// every edge type took an unrelated epic and its child through one
+// discovered-from edge, another epic's child through a blocks edge, and a
+// standalone row through a related edge.
+func RunDeleterCascadeFollowsOnlyContainment(t *testing.T, ctx context.Context, fixture DeleterFixture) {
+	t.Helper()
+	for _, mode := range []struct {
+		tag   string
+		force bool
+	}{
+		{tag: "contain", force: true},
+		{tag: "containnf", force: false},
+	} {
+		f := deleterSeedContainment(t, ctx, fixture, mode.tag)
+		request := publicops.DeleteRequest{IDs: []string{f.A}, Cascade: true, Force: mode.force}
+		want := append([]string(nil), f.deleted()...)
+		sort.Strings(want)
+
+		// DeletedIDs names the rows Deleted counts, sorted, and the preview
+		// names the same rows the deletion then removes.
+		previewRequest := request
+		previewRequest.DryRun = true
+		preview := deleterDelete(t, ctx, fixture, previewRequest)
+		if !reflect.DeepEqual(preview.DeletedIDs, want) {
+			t.Errorf("Force=%v: preview DeletedIDs = %v, want %v", mode.force, preview.DeletedIDs, want)
+		}
+		result := deleterDelete(t, ctx, fixture, request)
+		if result.Deleted != 4 {
+			t.Errorf("Force=%v: Deleted = %d, want 4 — A and its three parent-child descendants", mode.force, result.Deleted)
+		}
+		if !reflect.DeepEqual(result.DeletedIDs, want) || len(result.DeletedIDs) != result.Deleted {
+			t.Errorf("Force=%v: DeletedIDs = %v (Deleted %d), want %v", mode.force, result.DeletedIDs, result.Deleted, want)
+		}
+		deleterAssertIssueRows(t, ctx, fixture, 0, f.deleted()...)
+		for _, id := range f.survivors() {
+			deleterAssertIssueRows(t, ctx, fixture, 1, id)
+		}
+	}
+}
+
+// RunDeleterCascadeReportsSurvivingDependents pins what a containment-only
+// cascade owes the rows it leaves behind (issueops/deleter.go,
+// DeleteResult.Orphaned): every surviving DIRECT dependent of a deleted row is
+// named, in ascending id order, whether or not the request carried Force, and
+// the preview names the same rows the deletion does.
+//
+// B1 and C are not named — B1 depends on B and C is C1's parent, neither of
+// which is deleted — and the deleted tree's own internal edges orphan nothing.
+// The survivors' edges into the tree go with it, so C1, blocked by A1 until
+// now, is left unblocked.
+func RunDeleterCascadeReportsSurvivingDependents(t *testing.T, ctx context.Context, fixture DeleterFixture) {
+	t.Helper()
+	for _, mode := range []struct {
+		tag   string
+		force bool
+	}{
+		{tag: "corph", force: true},
+		{tag: "corphnf", force: false},
+	} {
+		f := deleterSeedContainment(t, ctx, fixture, mode.tag)
+		want := []string{f.B, f.C1, f.S}
+		request := publicops.DeleteRequest{IDs: []string{f.A}, Cascade: true, Force: mode.force}
+
+		probe := newBlockedStateProbe(ctx, fixture.QueryScalar)
+		probe.requireBlockedByOpenBlocker(t, blockedIssue(f.C1), blockedIssue(f.A1), "C1 is blocked by a row the cascade deletes")
+
+		previewRequest := request
+		previewRequest.DryRun = true
+		preview := deleterDelete(t, ctx, fixture, previewRequest)
+		if !reflect.DeepEqual(preview.Orphaned, want) {
+			t.Errorf("Force=%v: preview Orphaned = %v, want %v", mode.force, preview.Orphaned, want)
+		}
+
+		result := deleterDelete(t, ctx, fixture, request)
+		if !reflect.DeepEqual(result.Orphaned, want) {
+			t.Errorf("Force=%v: Orphaned = %v, want %v — the surviving direct dependents of the deleted tree", mode.force, result.Orphaned, want)
+		}
+		deleterAssertEdgeRows(t, ctx, fixture, 0, f.B, f.A)
+		deleterAssertEdgeRows(t, ctx, fixture, 0, f.C1, f.A1)
+		deleterAssertEdgeRows(t, ctx, fixture, 0, f.S, f.A)
+		deleterAssertEdgeRows(t, ctx, fixture, 1, f.C1, f.C)
+		deleterAssertEdgeRows(t, ctx, fixture, 1, f.B1, f.B)
+		probe.requireUnblocked(t, blockedIssue(f.C1), "C1's only blocker was deleted by the cascade")
+	}
 }
 
 // RunDeleterGuardsAWispNamedWithADurableDependent pins that the dependents
@@ -524,7 +682,7 @@ func RunDeleterNeverCallsALiveRowDeleted(t *testing.T, ctx context.Context, fixt
 	survivor := deleterIssue(fixture, "live", "survivor", false)
 	survivor.Description = "unblocks " + dependent + ", tracked under " + root
 	deleterSeed(t, ctx, fixture, survivor)
-	deleterAddEdge(t, ctx, fixture, dependent, root)
+	deleterAddParentChildEdge(t, ctx, fixture, dependent, root)
 	deleterAddEdge(t, ctx, fixture, dependent, survivor.ID)
 
 	deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
@@ -650,6 +808,72 @@ func RunDeleterRewritesReferencesInNeighbors(t *testing.T, ctx context.Context, 
 	if got := deleterText(t, ctx, fixture, fixture.IssuePrefix+"-refs-stranger", "description"); strings.Contains(got, marker) {
 		t.Errorf("a row with no edge to the deleted id was rewritten: %q", got)
 	}
+}
+
+// RunDeleterAttributesTheRewriteToTheActor pins the one place a deletion's
+// attribution SURVIVES it (issueops/deleter.go, DeleteRequest.Actor: "It DOES
+// reach the rewritten neighbors, which survive, so a workspace that cares who
+// rewrote a description passes one"): everything the deletion records in a
+// surviving neighbor's history names the request's Actor.
+//
+// THE EMPTY ACTOR IS HALF THE CASE. The role accepts one ("an empty Actor is
+// accepted"), and the served handler infers none ("NO ACTOR IS INFERRED"), so
+// the answer on every leg is a deletion that succeeds and a rewrite entry that
+// names NO ONE — never an identity the implementation made up, which a reader
+// of that history would take for a real writer. A whitespace-only actor is
+// deliberately not asserted: the store legs record it verbatim and the served
+// client omits it, and which answer is right has not been ruled.
+//
+// The deleted row's own history goes with it (DeleteResult.Events), so the
+// neighbor's is the only history a case can read the attribution from.
+func RunDeleterAttributesTheRewriteToTheActor(t *testing.T, ctx context.Context, fixture DeleterFixture) {
+	t.Helper()
+	for _, test := range []struct{ name, tag, actor string }{
+		{"a named actor", "attr", "deleter-attribution"},
+		{"an empty actor", "attr-none", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			target := deleterSeedIssue(t, ctx, fixture, test.tag, "target")
+			neighbor := deleterIssue(fixture, test.tag, "neighbor", false)
+			neighbor.Description = "blocked by " + target + "."
+			deleterSeed(t, ctx, fixture, neighbor)
+			deleterAddEdge(t, ctx, fixture, neighbor.ID, target)
+
+			total := deleterEventsBy(t, ctx, fixture, neighbor.ID, nil)
+			mine := deleterEventsBy(t, ctx, fixture, neighbor.ID, &test.actor)
+			result := deleterDelete(t, ctx, fixture, publicops.DeleteRequest{
+				IDs: []string{target}, Force: true, Actor: test.actor,
+			})
+			if result.ReferencesUpdated != 1 {
+				t.Fatalf("ReferencesUpdated = %d, want 1: the neighbor's rewrite is the history this case reads", result.ReferencesUpdated)
+			}
+			added := deleterEventsBy(t, ctx, fixture, neighbor.ID, nil) - total
+			attributed := deleterEventsBy(t, ctx, fixture, neighbor.ID, &test.actor) - mine
+			if added < 1 {
+				t.Errorf("the rewrite of %s recorded no history entry: the one surviving trace of who deleted %s is missing",
+					neighbor.ID, target)
+			}
+			if attributed != added {
+				t.Errorf("the deletion recorded %d entr(ies) on %s, %d of them attributed to the request's actor %q",
+					added, neighbor.ID, attributed, test.actor)
+			}
+		})
+	}
+}
+
+// deleterEventsBy counts id's events, all of them when actor is nil and only
+// those attributed to *actor otherwise.
+func deleterEventsBy(t *testing.T, ctx context.Context, fixture DeleterFixture, id string, actor *string) int {
+	t.Helper()
+	query, args := "SELECT COUNT(*) FROM events WHERE issue_id = ?", []any{id}
+	if actor != nil {
+		query, args = query+" AND actor = ?", append(args, *actor)
+	}
+	var got int
+	if err := fixture.QueryScalar(ctx, query, args, &got); err != nil {
+		t.Fatalf("count events for %s: %v", id, err)
+	}
+	return got
 }
 
 // RunDeleterDryRunChangesNothing pins the preview promise
@@ -1198,6 +1422,170 @@ func RunDeleterRefusesAnExpectedVersionAcrossSeveralIDs(t *testing.T, ctx contex
 	deleterAssertIssueRows(t, ctx, fixture, 1, second)
 }
 
+// RunDeleterExpectedVersionSingleWinnerUnderConcurrency pins the
+// compare-and-delete promise where it can actually break: under concurrency
+// (issueops/deleter.go, Deleter.Delete: "THE VERSION READ SHARES THE DELETING
+// TRANSACTION, so the pair is a true compare-and-delete rather than a read
+// followed by a hopeful write"), for `bd delete --if-revision` and a
+// POST /v0/beads/issues:delete carrying expected_version (mc-zndi7.73,
+// gastownhall/beads#7243).
+//
+// N racers delete ONE row with the SAME token, the row's version before any of
+// them ran. Exactly one may report success; every other must be refused and
+// must delete nothing; the row is gone afterwards; and the history gains
+// exactly ONE entry, not one per racer.
+//
+// A DELETE NEEDS A RACE OF ITS OWN. The update and close races
+// (RunLifecycleUpdateExpectedVersionSingleWinnerUnderConcurrency and its
+// siblings) are held by a real write-write conflict: every winner remints
+// row_lock, so a second committer collides on that cell. A delete writes no
+// cell. Two transactions that erase the same row produce identical "row
+// absent" diffs, which Dolt's commit-time merge lands without a conflict, so a
+// body with no fence answers EVERY racer Deleted = 1 and lands one "bd: delete"
+// entry per racer. On a Dolt sql-server the per-id delete fence
+// (withDeleteFence, in both the store body and the unit-of-work body) is the
+// only thing that turns the race into a queue, and this case is its only
+// role-level pin.
+//
+// WHAT A LOSER MAY ANSWER. A racer that runs after the winner finds no row, and
+// the existence probe outranks the version precondition, so the usual refusal
+// is ErrNotFound. ErrVersionMismatch is accepted too: which of the two a loser
+// sees depends on where the backend serializes it, and the contract promises
+// only that a loser is refused and deletes nothing. A nil error is never a
+// loss. It is a claimed success, and two of them is the defect.
+//
+// IT IS DETERMINISTIC ON A CORRECT BACKEND. A fence, or an engine that admits
+// one writer at a time, produces one winner by construction and not by timing.
+// Only a broken backend depends on timing, and it fails most runs. The racers
+// wait on one start signal so they overlap as much as the backend allows.
+func RunDeleterExpectedVersionSingleWinnerUnderConcurrency(t *testing.T, ctx context.Context, fixture DeleterFixture) {
+	t.Helper()
+	target := deleterSeedIssue(t, ctx, fixture, "race", "target")
+	token := deleterRowVersion(t, ctx, fixture, "issues", target)
+	deleterRaceOneToken(t, ctx, fixture, publicops.DeleteRequest{
+		IDs:             []string{target},
+		ExpectedVersion: &token,
+	}, []string{target})
+}
+
+// RunDeleterExpectedVersionCascadeSingleWinnerUnderConcurrency is the same race
+// with Cascade set, over a three-row parent-child chain.
+//
+// IT IS A SEPARATE CASE BECAUSE THE FENCE IS A SEPARATE DECISION. Both bodies
+// take the fence on ExpectedVersion alone, whatever Cascade says
+// (DeleteRequest.ExpectedVersion: "NEITHER Cascade NOR Force BYPASSES IT"). A
+// body that skipped the fence for a cascade would pass every other case here:
+// the stale-token refusal under Cascade (RunDeleterVersionOutranksForceAndCascade)
+// is answered by the version check, not by the fence. Only a race shows it,
+// and the unforced plain race above does not send Cascade.
+//
+// The token is read AFTER the edges are seeded, so it is the root's current
+// version whatever a dependency write does to row_lock. Every winner must have
+// taken the whole closure (Deleted = 3), and the closure must be gone.
+func RunDeleterExpectedVersionCascadeSingleWinnerUnderConcurrency(t *testing.T, ctx context.Context, fixture DeleterFixture) {
+	t.Helper()
+	root := deleterSeedIssue(t, ctx, fixture, "race-cascade", "root")
+	child := deleterSeedIssue(t, ctx, fixture, "race-cascade", "child")
+	grandchild := deleterSeedIssue(t, ctx, fixture, "race-cascade", "grandchild")
+	deleterAddParentChildEdge(t, ctx, fixture, child, root)
+	deleterAddParentChildEdge(t, ctx, fixture, grandchild, child)
+	token := deleterRowVersion(t, ctx, fixture, "issues", root)
+	deleterRaceOneToken(t, ctx, fixture, publicops.DeleteRequest{
+		IDs:             []string{root},
+		Cascade:         true,
+		ExpectedVersion: &token,
+	}, []string{root, child, grandchild})
+}
+
+// deleterRacers is how many requests race one token: the count the update and
+// close races use, and no more than internal/httpapi's maxInflight, so the
+// served leg admits every racer at once rather than queueing one behind its
+// semaphore.
+const deleterRacers = 16
+
+// deleterRaceOneToken sends request from deleterRacers goroutines at once and
+// asserts the single-winner outcome: one success that deleted every row of
+// closure, every other racer refused with ErrNotFound or ErrVersionMismatch
+// and nothing deleted, closure gone, and exactly one history entry.
+//
+// Each racer gets its OWN copy of the token, so no racer can see another's
+// pointer, and its own Actor.
+//
+// The history delta is a clause, not a precondition: a backend without the two
+// history hooks still runs the race, and the clause SKIPS loudly in its own
+// subtest.
+func deleterRaceOneToken(t *testing.T, ctx context.Context, fixture DeleterFixture, request publicops.DeleteRequest, closure []string) {
+	t.Helper()
+	observable := fixture.CountHistory != nil && fixture.CommitPending != nil
+	var before int
+	if observable {
+		if err := fixture.CommitPending(ctx); err != nil {
+			t.Fatalf("CommitPending() after seeding: %v", err)
+		}
+		before = deleterHistory(t, ctx, fixture)
+	}
+
+	type outcome struct {
+		result publicops.DeleteResult
+		err    error
+	}
+	outcomes := make([]outcome, deleterRacers)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(deleterRacers)
+	for i := 0; i < deleterRacers; i++ {
+		go func() {
+			defer wg.Done()
+			racer := request
+			racer.IDs = append([]string(nil), request.IDs...)
+			token := *request.ExpectedVersion
+			racer.ExpectedVersion = &token
+			racer.Actor = fmt.Sprintf("deleter-racer-%d", i)
+			<-start
+			result, err := fixture.Deleter.Delete(ctx, racer)
+			outcomes[i] = outcome{result: result, err: err}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	winners := 0
+	for i, o := range outcomes {
+		switch {
+		case o.err == nil:
+			winners++
+			if o.result.Deleted != len(closure) {
+				t.Errorf("racer %d won and reported Deleted = %d, want %d (%v)", i, o.result.Deleted, len(closure), closure)
+			}
+		case errors.Is(o.err, publicops.ErrNotFound), errors.Is(o.err, publicops.ErrVersionMismatch):
+			if o.result.Deleted != 0 {
+				t.Errorf("racer %d was refused (%v) and reported Deleted = %d, want 0", i, o.err, o.result.Deleted)
+			}
+		default:
+			t.Errorf("racer %d: err = %v, want nil (won), ErrNotFound or ErrVersionMismatch (lost)", i, o.err)
+		}
+	}
+	if winners != 1 {
+		errs := make([]error, len(outcomes))
+		for i, o := range outcomes {
+			errs[i] = o.err
+		}
+		t.Fatalf("%d racers shared one --if-revision token %d on %v; got %d winners, want exactly 1 (errs=%v)",
+			deleterRacers, *request.ExpectedVersion, request.IDs, winners, errs)
+	}
+	deleterAssertIssueRows(t, ctx, fixture, 0, closure...)
+
+	t.Run("HistoryGainsExactlyOneEntry", func(t *testing.T) {
+		if !observable {
+			t.Skip("this backend cannot observe or settle its history, so the one-entry-per-race clause is unobservable here")
+		}
+		if after := deleterHistory(t, ctx, fixture); after != before+1 {
+			t.Errorf("history went %d -> %d across %d racers on one token, want exactly one more entry: one row was deleted once",
+				before, after, deleterRacers)
+		}
+	})
+}
+
 // deleterRowVersion reads the RowVersion token straight off the row, in the
 // plane the caller names.
 //
@@ -1271,13 +1659,20 @@ func deleterSeedWisp(t *testing.T, ctx context.Context, fixture DeleterFixture, 
 // deleterAddEdge makes dependent depend on blocker.
 func deleterAddEdge(t *testing.T, ctx context.Context, fixture DeleterFixture, dependent, blocker string) {
 	t.Helper()
+	deleterAddTypedEdge(t, ctx, fixture, dependent, blocker, types.DepBlocks)
+}
+
+// deleterAddTypedEdge makes dependent depend on target through an edge of
+// depType.
+func deleterAddTypedEdge(t *testing.T, ctx context.Context, fixture DeleterFixture, dependent, target string, depType types.DependencyType) {
+	t.Helper()
 	err := fixture.AddDependency(ctx, &types.Dependency{
 		IssueID:     dependent,
-		DependsOnID: blocker,
-		Type:        types.DepBlocks,
+		DependsOnID: target,
+		Type:        depType,
 	}, "deleter-seed")
 	if err != nil {
-		t.Fatalf("seeding edge %s -> %s: %v", dependent, blocker, err)
+		t.Fatalf("seeding %s edge %s -> %s: %v", depType, dependent, target, err)
 	}
 }
 

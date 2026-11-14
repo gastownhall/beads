@@ -1,0 +1,9 @@
+{
+  "shape": "gc-update-claim-conflict",
+  "exit": 1,
+  "requests": [
+    {"method":"GET","operation_id":"getContext","path":"/v0/beads/context","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-t-claimx","status":200},
+    {"method":"PATCH","operation_id":"updateIssue","path":"/v0/beads/issues/e2e-t-claimx","body":["actor","claim","patch"],"status":409}
+  ]
+}

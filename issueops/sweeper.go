@@ -27,6 +27,21 @@ const (
 	// it — carries the require-a-filter refusal SweepRequest.ClosedBefore
 	// describes.
 	SweepDurable SweepTier = "durable"
+	// SweepWispsPlane clears CLOSED rows by STORAGE PLANE rather than by
+	// tier: every closed row stored in the wisps table, whatever its flags —
+	// ephemeral wisps and no-history beads alike. `bd purge --wisps-plane`.
+	//
+	// It is the one tier that is NOT disjoint from the other two, and that is
+	// the point of it. A no-history bead lives in the wisps plane but is
+	// durable-tier (it is not ephemeral and carries no wisp_type), so neither
+	// SweepEphemeral nor SweepDurable can say "the wisps table" — the unit an
+	// orchestrator's retention policy is written in. Conversely a legacy
+	// typed wisp stored in the issues table is ephemeral-tier and NOT in this
+	// plane.
+	//
+	// Because it reaches durable-tier rows, it carries the durable tier's
+	// require-a-filter gate (SweepRequest.ClosedBefore).
+	SweepWispsPlane SweepTier = "wisps-plane"
 )
 
 // SweepRequest describes one bulk clearance of closed rows: which tier, which
@@ -68,6 +83,9 @@ type SweepRequest struct {
 	// says so with IDPattern "*", which is a deliberate keystroke rather than
 	// an omitted one.
 	//
+	// SweepWispsPlane carries the same gate, because the wisps plane holds
+	// no-history beads, which are durable-tier.
+	//
 	// The EPHEMERAL tier carries no such gate: an unfiltered sweep of closed
 	// wisps is the ordinary use of `bd purge`, and the tier is transient by
 	// definition.
@@ -108,11 +126,125 @@ type SweepRequest struct {
 	// `bd purge` does not, because a wisp's citations are as transient as the
 	// wisp.
 	ProtectReferenced bool
+	// ProtectLiveDependents skips candidates that a LIVE row depends on
+	// through a structural edge — a closed parent whose child is still open,
+	// a closed bead a live convoy tracks, a closed blocker of a live bead —
+	// so a sweep never deletes the root, container or gate of work that is
+	// still in progress.
+	//
+	// WHICH EDGES are SweepLiveDependentEdgeTypes: parent-child, tracks and
+	// blocks, from either plane's dependency table. Other edge types (related,
+	// discovered-from, ...) are links rather than structure and do not protect.
+	//
+	// WHICH ROWS ARE LIVE is the same not-done set ProtectReferenced asks: the
+	// built-in active statuses (open, in_progress, blocked, deferred, pinned,
+	// hooked) plus every configured custom status whose category is not
+	// "done", with the same REQUIRED read of the custom statuses.
+	//
+	// Unlike ProtectReferenced it is a stored-edge lookup, not a text scan, so
+	// it costs one read of the edges pointing at the candidates and one of
+	// their sources. `bd purge` always asks for it; `bd prune` does not.
+	ProtectLiveDependents bool
+	// Limit, when positive, caps how many rows ONE sweep deletes, taking the
+	// OLDEST-CLOSED first (closed_at ascending, then id). The rest are left
+	// for the next call and counted in SweepResult.Remaining, so a caller can
+	// drain a large backlog in bounded transactions instead of one that grows
+	// with the backlog and can outlive the caller's deadline. It applies after
+	// every protection, so it caps rows that would actually go. Zero means no
+	// cap; a negative value is ErrValidation.
+	Limit int
 	// DryRun reports what the sweep WOULD do and deletes nothing. The result
 	// is otherwise the same result — the same counts, the same skips, the same
 	// refusals — computed against the same snapshot the real sweep would have
 	// used, which is what makes a preview worth reading.
 	DryRun bool
+	// RetainIDs retires every id this sweep deletes: in the SAME transaction
+	// as the delete, the sweep writes one permanent tombstone per deleted row
+	// — its id and its closed_at, nothing else — into the tombstone table of
+	// the row's own storage plane. From then on no create path commits a row
+	// with that id again: a create naming it is refused with
+	// *IdempotencyExpiredError, an import skips the row and reports it
+	// (ImportBatchResult.RetiredIDs), and id generation never produces it.
+	//
+	// It is what lets a caller sweep rows whose ids are IDEMPOTENCY KEYS — a
+	// pinned id that names an operation which must never run twice — without
+	// a late retry of that operation re-creating the row it already created.
+	//
+	// IT IS OPT-IN, because only the caller knows the ids are keys: a sweep
+	// without it behaves exactly as it always has, and a swept id stays
+	// reusable. Tombstones are permanent; no API removes one.
+	//
+	// ONLY A RETAINING SWEEP RETIRES. Every other way a row leaves the store
+	// leaves its id reusable: a sweep without this flag (a plain `bd prune` or
+	// `bd purge`, whose durable tier also selects no-history rows), the
+	// Deleter role (`bd delete`, and the bulk commands that delete through
+	// it: `bd admin cleanup`, `bd mol wisp gc`, `bd mol burn`), `bd gc`'s
+	// decay, the stale-closed-issues `bd doctor --fix`, and raw SQL.
+	//
+	// A WORKSPACE KEEPS ITS KEYED ROWS OUT OF THE PLAIN SWEEPS by naming their
+	// issue types in the SettingKeyTypesRetained setting: a sweep without
+	// this flag then holds every closed row of those types back
+	// (SweepSkips.RetentionRequired). With this flag set the setting holds
+	// nothing back, so the retaining sweep is the one retention door those
+	// rows may leave by.
+	//
+	// THE SETTING'S SCOPE IS THE RETENTION DOORS: the commands whose selection
+	// is a retention policy over closed rows. They are this role, in both of
+	// its bodies (`bd prune`, `bd purge`, POST issues:sweep); `bd gc`'s decay;
+	// `bd admin cleanup`, which refuses --cascade while the setting names a
+	// type; and the stale-closed-issues `bd doctor --fix`. Its semantics:
+	//
+	//   - per row: a retained row protects itself only, never its dependents
+	//     or parents, and no in-scope door cascades;
+	//   - closed rows only: every in-scope door selects closed rows;
+	//   - order: here the partition runs after the pinned and closed_at
+	//     rechecks and before the live-dependent and reference protections
+	//     and Limit, so a held-back row never consumes Limit;
+	//   - database only: the setting is read from the workspace database, and
+	//     a read error fails the door. This role's bodies read it on the
+	//     transaction or unit of work that deletes. `bd gc`'s decay,
+	//     `bd admin cleanup` and the doctor fix read it with their selection,
+	//     on the selection's snapshot (storage.SearchIssuesWithConfig, or the
+	//     proxied decay's read unit of work; over http, which has no
+	//     transaction, `bd gc` reads it in the request after the selection's),
+	//     and delete afterwards: a change made after they select does not
+	//     reach that run's deletes;
+	//   - one canonicalizing read (workapi.RetainedTypesFromSetting): a name
+	//     protects itself, its alias-canonical forms and, for a built-in
+	//     type, its lower-case form, and a name the write check would refuse
+	//     (`[op]`, `op fact`) also protects each name inside it, so matching
+	//     can only over-protect.
+	//
+	// NOT IN SCOPE, BY DESIGN: `bd mol wisp gc`, which selects only
+	// ephemeral = 1 rows; the doctor's Patrol Pollution and test-pollution
+	// deletes, which are heuristics; `bd migrate-personal`, a cross-store
+	// move; the deletes that name what they delete (the Deleter role's
+	// `bd delete`, --cascade included, `bd mol burn`/`squash`,
+	// `bd cook --force`, `bd repo remove`); and raw SQL. None consults the
+	// setting. A caller whose ids are keys keeps those doors off them by its
+	// own rule.
+	//
+	// A tombstone is exactly as durable as the row it replaces: a durable
+	// row's tombstone is versioned and replicates with it, a wisps-plane row's
+	// is clone-local like the wisps table. A store that loses its clone-local
+	// tables loses those tombstones with the rows.
+	//
+	// ITS LOCK FOOTPRINT IS ITS SIZE. To order itself against a racing create
+	// of an id it retires, a retaining sweep takes, before it deletes, the
+	// create-coordination cell of every id it will retire. Cells are 4096
+	// shards of the id space, shared by unrelated ids, so a sweep of N rows
+	// holds about 4096·(1-e^(-N/4096)) of them until it commits: about 22% of
+	// all shards at N = 1000, about 2.4% at N = 100. Every create, upsert and
+	// import of an explicit id in one of those shards meets the sweep: on
+	// Postgres it waits for the sweep's commit; on a Dolt sql-server, where
+	// there is no lock wait, whichever commits second conflicts and replays
+	// (the stores' sweepers replay a sweep that lost; a large sweep under
+	// heavy create traffic can lose repeatedly). Size Limit to keep the
+	// footprint small — around 100 rows per call — and loop on Remaining.
+	//
+	// A dry run writes no tombstone. A backend that cannot retain ids refuses
+	// the request with *ErrUnsupported rather than sweeping without them.
+	RetainIDs bool
 }
 
 // SweepSkips reports the candidates a sweep declined to delete, bucketed by
@@ -132,6 +264,9 @@ type SweepSkips struct {
 	// 0 when that field is false; a caller that reads a 0 without having asked
 	// for the protection has learned nothing about whether rows are cited.
 	Referenced int
+	// LiveDependent counts candidates skipped by ProtectLiveDependents, under
+	// the same always-0-when-not-asked rule as Referenced.
+	LiveDependent int
 	// NotClosed, UnknownClosedAt and ClosedAtOrAfterCutoff count candidates
 	// the tier's own query returned and the sweep rechecked and rejected: a
 	// status that is not closed, a closed row with no closed_at stamp at all,
@@ -149,6 +284,17 @@ type SweepSkips struct {
 	// Unreadable counts rows the tier's query returned as nothing at all. It
 	// is a defense of the same kind, on a shape rather than a value.
 	Unreadable int
+	// RetentionRequired counts candidates held back because their issue type
+	// is one the workspace RETAINS (the SettingKeyTypesRetained setting) and
+	// the request did not set RetainIDs. Such a row's id is an idempotency
+	// key, and deleting it without a tombstone would let a late retry of the
+	// operation it names run again; so only a retaining sweep — which
+	// deletes it AND retires its id — may take it. It is always 0 under
+	// RetainIDs.
+	//
+	// It is a protection, like Pinned, and a caller that wants those rows
+	// gone re-runs with RetainIDs rather than overriding it.
+	RetentionRequired int
 }
 
 // SweepResult reports one sweep.
@@ -173,6 +319,13 @@ type SweepResult struct {
 	Events       int
 	// Skipped reports the candidates the sweep held back and why.
 	Skipped SweepSkips
+	// Remaining is how many rows the sweep WOULD also have deleted but left
+	// because of SweepRequest.Limit. Zero when there is no limit or the
+	// backlog fit; a caller loops while it is non-zero.
+	Remaining int
+	// RetainIDs echoes the request: true means every row Swept counts is now
+	// a retired id (under DryRun, would be).
+	RetainIDs bool
 	// ReferencedIDs is a BOUNDED SAMPLE of the ids Skipped.Referenced counts —
 	// at most SweepReferencedSampleLimit of them, in the order the candidate
 	// query returned them. It is a sample and not the set: a caller that needs
@@ -183,6 +336,11 @@ type SweepResult struct {
 	// beside it.
 	ReferencedIDs []string
 }
+
+// SweepLiveDependentEdgeTypes are the edge types through which a live row
+// protects a closed candidate under SweepRequest.ProtectLiveDependents. It is
+// published so a caller can state the same policy without copying the list.
+var SweepLiveDependentEdgeTypes = []DependencyType{DepParentChild, DepTracks, DepBlocks}
 
 // SweepReferencedSampleLimit bounds SweepResult.ReferencedIDs. It is published
 // so a caller can tell a truncated sample from a complete one by comparing the
@@ -255,22 +413,36 @@ type Sweeper interface {
 	//
 	// THE ORDER THE NARROWING HAPPENS IN IS PART OF THE ANSWER, because the
 	// skip counters are counted along the way: the tier's closed rows, then
-	// IDPattern, then the pinned and closed_at rechecks, then the reference
-	// protection. A pinned row excluded by the pattern is therefore NOT
-	// counted in Skipped.Pinned — it was never a candidate — and the counters
-	// describe the set the request actually reached.
+	// IDPattern, then the pinned and closed_at rechecks, then the
+	// retained-type protection (without RetainIDs), then the live-dependent
+	// protection, then the reference protection, then Limit (oldest-closed
+	// first). A pinned row
+	// excluded by the pattern is therefore NOT counted in Skipped.Pinned — it
+	// was never a candidate — and the counters describe the set the request
+	// actually reached.
 	//
 	// REFUSALS, all ErrValidation and all before anything is read:
 	//
 	//   - an unset or unrecognized Tier;
-	//   - a SweepDurable request with neither ClosedBefore nor IDPattern (see
-	//     SweepRequest.ClosedBefore for why this lives here);
-	//   - an IDPattern that is not a well-formed glob.
+	//   - a SweepDurable or SweepWispsPlane request with neither ClosedBefore
+	//     nor IDPattern (see SweepRequest.ClosedBefore for why this lives here);
+	//   - an IDPattern that is not a well-formed glob;
+	//   - a negative Limit.
+	//
+	// THE RETAINED TYPES ARE READ ON THE SWEEP'S OWN TRANSACTION, from the
+	// workspace setting SettingKeyTypesRetained. A failure to read them fails
+	// the sweep and deletes nothing: a sweep that could not tell which rows
+	// are keys must not guess that none are.
 	//
 	// A REQUEST THAT MATCHES NOTHING IS A ZERO RESULT AND A NIL ERROR, not a
 	// not-found: an empty set of closed rows is the steady state of a swept
 	// workspace, and it is the answer a scheduled sweep gets every time it
 	// runs after the first.
+	//
+	// WITH RetainIDs THE SET IT DELETED IS THE SET IT RETIRED: the tombstones
+	// are written in the same transaction as the delete, so a failure to write
+	// them deletes nothing, and no row the sweep held back (pinned, protected,
+	// over the limit) is retired.
 	//
 	// A DRY RUN CHANGES NOTHING, including history: an implementation that
 	// records a version-control entry for a sweep records none for a dry run

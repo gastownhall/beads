@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -78,10 +79,11 @@ Examples:
 				diagHint())
 		}
 		for _, id := range args {
-			// Resolve with prefix routing
-			result, err := resolveAndGetIssueWithRouting(ctx, store, id)
+			// Resolve with routing, opening a routed target writable so the
+			// unclaim commits where the issue lives (as bd update --claim does).
+			result, err := resolveAndGetIssueForMutation(ctx, store, id)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
+				fmt.Fprintf(os.Stderr, "Error resolving %s: %s\n", id, remedy.PrintedMessage(err))
 				hasError = true
 				continue
 			}
@@ -90,21 +92,38 @@ Examples:
 
 			var unclaimErr error
 			if conditional {
-				unclaimErr = issueStore.UnclaimIssueIfAssignee(ctx, fullID, actor, ifAssignee)
+				unclaimErr = issueStore.UnclaimIssueIfAssignee(ctx, fullID, currentActor(), ifAssignee)
 			} else {
-				unclaimErr = issueStore.UnclaimIssue(ctx, fullID, actor, force)
+				unclaimErr = issueStore.UnclaimIssue(ctx, fullID, currentActor(), force)
 			}
 			if unclaimErr != nil {
-				fmt.Fprintf(os.Stderr, "Error unclaiming %s: %v\n", fullID, unclaimErr)
+				fmt.Fprintf(os.Stderr, "Error unclaiming %s: %s\n", fullID, remedy.PrintedMessage(unclaimErr))
 				hasError = true
+				// An unclaim whose routed commit failed left its release in
+				// the target's working set, where this run finds the issue
+				// unassigned. Nothing else commits a routed target, so
+				// commit the release here.
+				if result.Issue != nil && result.Issue.Assignee == "" {
+					if err := commitRoutedWrite(ctx, result, "unclaim"); err != nil {
+						fmt.Fprintf(os.Stderr, "Error committing unclaim of %s: %v\n", fullID, err)
+					}
+				}
 				result.Close()
 				continue
 			}
 
 			if reason != "" {
-				if _, err := issueStore.AddIssueComment(ctx, fullID, actor, reason); err != nil {
+				if _, err := issueStore.AddIssueComment(ctx, fullID, currentActor(), reason); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: failed to add reason comment: %v\n", err)
 				}
+			}
+
+			// A release whose commit failed is not reported as unclaimed.
+			if err := commitRoutedWrite(ctx, result, "unclaim"); err != nil {
+				fmt.Fprintf(os.Stderr, "Error committing unclaim of %s: %v\n", fullID, err)
+				hasError = true
+				result.Close()
+				continue
 			}
 
 			if jsonOutput {

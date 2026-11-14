@@ -89,6 +89,20 @@ func TestResolveLocalActiveDatabaseDir(t *testing.T) {
 			},
 		},
 		{
+			name: "IPv6 loopback",
+			setup: func(_ *testing.T, cfg *Config) {
+				cfg.ServerHost = "::1"
+			},
+		},
+		{
+			name: "bracketed IPv6 loopback in shared mode",
+			setup: func(t *testing.T, cfg *Config) {
+				t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+				t.Setenv("BEADS_SHARED_SERVER_DIR", t.TempDir())
+				cfg.ServerHost = "[::1]"
+			},
+		},
+		{
 			name: "socket",
 			setup: func(_ *testing.T, cfg *Config) {
 				cfg.ServerSocket = "/tmp/dolt.sock"

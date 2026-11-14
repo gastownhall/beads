@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/gitenv"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -292,7 +293,7 @@ func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage
 	if existing, err := store.GetConfig(ctx, "routing.contributor"); err == nil && existing != "" {
 		if !quiet {
 			fmt.Printf("\n  %s Fork detected (upstream: %s)\n", ui.RenderWarn("⚠"), upstreamURL)
-			fmt.Printf("    Contributor routing already configured → %s\n", existing)
+			fmt.Printf("    Contributor routing already configured → %s\n", remedy.PrintedValue(existing))
 			fmt.Printf("    Skipping auto-setup. To reconfigure: bd init --contributor\n")
 		}
 		return nil
@@ -301,7 +302,7 @@ func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage
 		if yamlVal := strings.TrimSpace(config.GetString("routing.contributor")); yamlVal != "" {
 			if !quiet {
 				fmt.Printf("\n  %s Fork detected (upstream: %s)\n", ui.RenderWarn("⚠"), upstreamURL)
-				fmt.Printf("    Contributor routing configured via config.yaml → %s\n", yamlVal)
+				fmt.Printf("    Contributor routing configured via config.yaml → %s\n", remedy.PrintedValue(yamlVal))
 				fmt.Printf("    Skipping auto-setup. To reconfigure: bd init --contributor\n")
 			}
 			return nil
@@ -328,8 +329,11 @@ func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage
 		if err := os.MkdirAll(planningBeadsDir, 0750); err != nil {
 			return fmt.Errorf("failed to create .beads in planning repo: %w", err)
 		}
-		// Initialize the planning Dolt schema so commands like bd migrate-personal
-		// can open the store immediately without hitting an uninitialized DB.
+		// Initialize a planning Dolt schema so the repo has a store on disk
+		// before first use. The first routed bd create, and bd
+		// migrate-personal, adopt this database, writing the metadata.json
+		// that names it, rather than creating another beside it
+		// (ensureBeadsDirForPath).
 		// Non-fatal: no-CGO and server-mode builds skip this silently; the schema
 		// initializes on first use once a Dolt server is running for that path.
 		if planningStore, storeErr := newDoltStoreFromConfig(ctx, planningBeadsDir); storeErr == nil {

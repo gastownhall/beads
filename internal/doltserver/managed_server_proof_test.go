@@ -3,8 +3,12 @@ package doltserver
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/lockfile"
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 // TestManagesLiveServerOnPort pins the ownership proof: both state files, a
@@ -117,5 +121,174 @@ func TestManagesLiveServerOnPort(t *testing.T) {
 				t.Fatalf("%s was removed: %v — the predicate must not repair state it merely reads", name, err)
 			}
 		}
+	})
+}
+
+// TestServesDatabaseDirOnPort pins the served-directory proof the CLI routes
+// take, the dolt CLI's own test for handing a command to a server: a dolt
+// process holds the database's lock, and the first sql-server.info the dolt
+// CLI would find for the database directory, in its own .dolt or else its
+// parent's, names the dialed port and a process that is live by the dolt
+// CLI's test. A dead process's file ends the search, since the dolt CLI
+// command bd runs removes it and works on the directory's files without
+// reading the parent's. A copy of a served database carries its server's
+// file, but nothing holds its lock, so it is no server's; nor is a directory
+// a stopped server left its file in, whatever process the file's PID names
+// now. The proof reads no process list, which can be refused (GH#7214).
+func TestServesDatabaseDirOnPort(t *testing.T) {
+	const port = 3307
+	const dead = 2147483646
+	live := os.Getpid()
+	p := strconv.Itoa(port)
+	info := func(t *testing.T, dir string, pid int, port string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(dir, ".dolt"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".dolt", ServerInfoFileName), []byte(strconv.Itoa(pid)+":"+port+":secret"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// locked holds db's lock as a dolt process that has it open does.
+	locked := func(t *testing.T, db string) { testutil.HoldDoltDatabaseLock(t, db) }
+	// unlocked gives db the lock file a copy of a served database carries,
+	// which no process holds.
+	unlocked := func(t *testing.T, db string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(db, ".dolt", "noms"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(db, ".dolt", "noms", "LOCK"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	newDB := func(t *testing.T) (root, db string) {
+		root = filepath.Join(t.TempDir(), "dolt")
+		db = filepath.Join(root, "testdb")
+		if err := os.MkdirAll(filepath.Join(db, ".dolt"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return root, db
+	}
+	// noProcessList fails the test if the proof reads the process list.
+	noProcessList := func(t *testing.T) {
+		stubProcessList(t, func() ([]int, error) {
+			t.Error("the served-directory proof read the process list")
+			return nil, errProcessListUnreadable
+		})
+	}
+	type testCase struct {
+		name  string
+		setup func(t *testing.T, root, db string)
+		port  int
+		want  bool
+	}
+	cases := []testCase{
+		{"nothing serves it", func(t *testing.T, root, db string) {}, port, false},
+		{"multi-database server on the dialed port", func(t *testing.T, root, db string) {
+			info(t, root, live, p)
+			locked(t, db)
+		}, port, true},
+		{"server started in the database itself", func(t *testing.T, root, db string) {
+			info(t, db, live, p)
+			locked(t, db)
+		}, port, true},
+		// A cp -a of .beads/dolt taken while its server ran: the server's
+		// file names the dialed port and a live process, and nothing holds
+		// the copy's lock, so the dolt CLI works on the copy's files.
+		{"a copy of a served database", func(t *testing.T, root, db string) {
+			info(t, root, live, p)
+			unlocked(t, db)
+		}, port, false},
+		{"a server's file beside a database no dolt process opened", func(t *testing.T, root, db string) { info(t, root, live, p) }, port, false},
+		// A dolt process has the database open, with no server's file for
+		// the dolt CLI to hand a command to.
+		{"locked, with no server info file", func(t *testing.T, root, db string) { locked(t, db) }, port, false},
+		{"server on another port", func(t *testing.T, root, db string) {
+			info(t, root, live, "3308")
+			locked(t, db)
+		}, port, false},
+		// The file's server has exited while another dolt process holds the
+		// lock.
+		{"server gone", func(t *testing.T, root, db string) {
+			info(t, root, dead, p)
+			locked(t, db)
+		}, port, false},
+		{"socket-only server", func(t *testing.T, root, db string) {
+			info(t, root, live, "-")
+			locked(t, db)
+		}, port, false},
+		{"first live file found decides", func(t *testing.T, root, db string) {
+			info(t, db, live, "3308")
+			info(t, root, live, p)
+			locked(t, db)
+		}, port, false},
+		{"a dead server's file in the database ends the search", func(t *testing.T, root, db string) {
+			info(t, db, dead, p)
+			info(t, root, live, p)
+			locked(t, db)
+		}, port, false},
+		{"a dead socket-only server's file in the database ends the search", func(t *testing.T, root, db string) {
+			info(t, db, dead, "-")
+			info(t, root, live, p)
+			locked(t, db)
+		}, port, false},
+		{"a dead server's file in the database, nothing in its parent", func(t *testing.T, root, db string) {
+			info(t, db, dead, p)
+			locked(t, db)
+		}, port, false},
+		{"no dialed port", func(t *testing.T, root, db string) {
+			info(t, root, live, "0")
+			locked(t, db)
+		}, 0, false},
+	}
+	if runtime.GOOS != "windows" {
+		// PID 1 is root's: a signal from an unprivileged test fails with
+		// EPERM, which the dolt CLI takes as a live process. Beside a held
+		// lock it is a server another account runs. Beside a lock nobody
+		// holds it is the host's init, named by a file a stopped container
+		// server left on a bind mount.
+		cases = append(cases,
+			testCase{"a server of another user", func(t *testing.T, root, db string) {
+				info(t, root, 1, p)
+				locked(t, db)
+			}, port, true},
+			testCase{"a stopped container server's file naming the host's PID 1", func(t *testing.T, root, db string) {
+				info(t, root, 1, p)
+				unlocked(t, db)
+			}, port, false})
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			noProcessList(t)
+			root, db := newDB(t)
+			tc.setup(t, root, db)
+			if got := ServesDatabaseDirOnPort(db, tc.port); got != tc.want {
+				t.Errorf("ServesDatabaseDirOnPort = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	// Read-only: asking creates no lock file and leaves a free lock free.
+	t.Run("does not take or create the lock", func(t *testing.T) {
+		noProcessList(t)
+		root, db := newDB(t)
+		info(t, root, live, p)
+		lockPath := filepath.Join(db, ".dolt", "noms", "LOCK")
+		ServesDatabaseDirOnPort(db, port)
+		if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+			t.Fatalf("the proof created %s (stat error: %v)", lockPath, err)
+		}
+		unlocked(t, db)
+		ServesDatabaseDirOnPort(db, port)
+		f, err := os.OpenFile(lockPath, os.O_RDWR, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = f.Close() }()
+		if err := lockfile.FlockExclusiveNonBlocking(f); err != nil {
+			t.Fatalf("the database's lock is still taken after the proof: %v", err)
+		}
+		_ = lockfile.FlockUnlock(f)
 	})
 }

@@ -97,8 +97,8 @@ func DeleteInTx(ctx context.Context, tx *sql.Tx, req publicops.DeleteRequest) (p
 	}
 
 	// The guard runs only when the request did not already say what to do
-	// about dependents. Under Cascade there is nothing outside the set by
-	// construction, which is why the expansion below is not asked about it.
+	// about dependents. Under Cascade it is not asked: the dependents that
+	// survive a cascade are reported once the whole deletion set is known.
 	//
 	// IT ASKS ABOUT EVERY NAMED ID, IN BOTH PLANES: the leaf says "a NAMED ROW
 	// that some row OUTSIDE the request depends on is refused" with no wisp
@@ -120,13 +120,7 @@ func DeleteInTx(ctx context.Context, tx *sql.Tx, req publicops.DeleteRequest) (p
 				}
 			}
 		} else {
-			orphaned := make(map[string]bool)
-			for _, deps := range external {
-				for _, id := range deps {
-					orphaned[id] = true
-				}
-			}
-			result.Orphaned = workapi.SortedDeleteIDs(orphaned)
+			result.Orphaned = orphanedIDs(external)
 		}
 	}
 
@@ -138,6 +132,23 @@ func DeleteInTx(ctx context.Context, tx *sql.Tx, req publicops.DeleteRequest) (p
 	set, err := ResolveDeletionSetInTx(ctx, tx, ids, req.Cascade)
 	if err != nil {
 		return publicops.DeleteResult{}, fmt.Errorf("delete: %w", err)
+	}
+
+	// A CASCADE ORPHANS TOO, now that it follows containment only (GH#6301):
+	// a row joined to the tree by any other edge survives and loses that edge.
+	// It is asked about the WHOLE set, not the named ids, because a row
+	// blocked by a cascade-deleted descendant is orphaned as surely as one
+	// blocked by the root.
+	if req.Cascade {
+		deletedSet := make(map[string]bool, len(set.All))
+		for _, id := range set.All {
+			deletedSet[id] = true
+		}
+		external, err := ExternalDependentsBySourceInTx(ctx, tx, set.All, deletedSet)
+		if err != nil {
+			return publicops.DeleteResult{}, fmt.Errorf("delete: check dependents: %w", err)
+		}
+		result.Orphaned = orphanedIDs(external)
 	}
 
 	// The neighborhood is read BEFORE the deletion, because after it the
@@ -162,6 +173,7 @@ func DeleteInTx(ctx context.Context, tx *sql.Tx, req publicops.DeleteRequest) (p
 	result.Dependencies = deleted.DependenciesCount
 	result.Labels = deleted.LabelsCount
 	result.Events = deleted.EventsCount
+	result.DeletedIDs = sortedUniqueIDs(set.All)
 
 	if req.DryRun {
 		return result, nil
@@ -235,6 +247,18 @@ func ExternalDependentsBySourceInTx(ctx context.Context, tx DBTX, ids []string, 
 		out[target] = workapi.SortedDeleteIDs(dependents)
 	}
 	return out, nil
+}
+
+// orphanedIDs flattens ExternalDependentsBySourceInTx's answer into the
+// ascending, duplicate-free list DeleteResult.Orphaned carries.
+func orphanedIDs(external map[string][]string) []string {
+	orphaned := make(map[string]bool)
+	for _, deps := range external {
+		for _, id := range deps {
+			orphaned[id] = true
+		}
+	}
+	return workapi.SortedDeleteIDs(orphaned)
 }
 
 // deleteNeighborsInTx hydrates the SURVIVING rows joined to the deletion set
@@ -366,4 +390,17 @@ func RewriteDeletedReferencesInTx(ctx context.Context, tx DBTX, deletedIDs []str
 // `be-12`.
 func DeletedReferencePattern(id string) *regexp.Regexp {
 	return regexp.MustCompile(`(^|[^A-Za-z0-9_-])(` + regexp.QuoteMeta(id) + `)($|[^A-Za-z0-9_-])`)
+}
+
+// sortedUniqueIDs returns ids in ascending order without duplicates, the
+// shape DeleteResult.DeletedIDs promises.
+func sortedUniqueIDs(ids []string) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		set[id] = true
+	}
+	return workapi.SortedDeleteIDs(set)
 }

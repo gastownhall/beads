@@ -224,7 +224,18 @@ func TestProxiedServerDep(t *testing.T) {
 				t.Errorf("expected 'cycle' error: %s", out)
 			}
 		})
+	})
+}
 
+// TestProxiedServerDepB holds more of TestProxiedServerDep's Add cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerDepB(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	t.Run("Add", func(t *testing.T) {
+		t.Parallel()
 		t.Run("child_parent_antipattern", func(t *testing.T) {
 			t.Parallel()
 			p := newSharedProxiedProject(t, bd, "dpa8")
@@ -378,8 +389,34 @@ func TestProxiedServerDep(t *testing.T) {
 				t.Fatalf("expected 1-edge bulk add summary or clear external-ref error: %s", out)
 			}
 		})
-	})
 
+		// GH#6556: the proxied writers resolve no IDs, so the server stores a
+		// bare cross-prefix typo as before; the notice now comes from a lookup
+		// once it is stored, naming the target and the command that removes it.
+		t.Run("unresolved_cross_prefix_warns", func(t *testing.T) {
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpa16")
+			src := bdProxiedCreate(t, bd, p.dir, "Unresolved target source", "--type", "task")
+			cmd := exec.Command(bd, "dep", "add", src.ID, "zz-404")
+			cmd.Dir = p.dir
+			cmd.Env = bdProxiedEnv(p.dir)
+			stdout, stderr, err := runCommandBuffers(t, cmd)
+			if err != nil {
+				t.Fatalf("bd dep add %s zz-404: %v\nstdout:\n%s\nstderr:\n%s", src.ID, err, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "Added dependency") {
+				t.Errorf("stdout = %q, want the usual Added dependency line", stdout.String())
+			}
+			remove := "bd dep remove " + src.ID + " zz-404"
+			if !strings.Contains(stderr.String(), "zz-404 was not found") || !strings.Contains(stderr.String(), remove) {
+				t.Fatalf("stderr = %q, want the unresolved-target warning naming zz-404 and %q", stderr.String(), remove)
+			}
+			// The printed remedy removes the stored row.
+			if out := bdProxiedDep(t, bd, p.dir, "remove", src.ID, "zz-404"); !strings.Contains(out, "Removed dependency") {
+				t.Fatalf("printed remove did not remove the edge: %s", out)
+			}
+		})
+	})
 }
 
 func TestProxiedServerDep2(t *testing.T) {
@@ -550,6 +587,15 @@ func TestProxiedServerDep2(t *testing.T) {
 			}
 		})
 	})
+}
+
+// TestProxiedServerDep2B is the next slice of TestProxiedServerDep2's cases, a
+// separate top-level test so the bd_proxied_test shard manifest can place it
+// on its own shard.
+func TestProxiedServerDep2B(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("Tree", func(t *testing.T) {
 		t.Parallel()
@@ -635,7 +681,18 @@ func TestProxiedServerDep2(t *testing.T) {
 			bdProxiedDep(t, bd, p.dir, "add", root.ID, dep.ID)
 			_ = bdProxiedDep(t, bd, p.dir, "tree", root.ID, "--status", "open")
 		})
+	})
+}
 
+// TestProxiedServerDep2C holds more of TestProxiedServerDep2's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerDep2C(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	t.Run("Tree", func(t *testing.T) {
+		t.Parallel()
 		t.Run("format_mermaid", func(t *testing.T) {
 			t.Parallel()
 			p := newSharedProxiedProject(t, bd, "dpt7")
@@ -721,7 +778,8 @@ func TestProxiedServerDep2(t *testing.T) {
 		})
 
 		// --show-all-paths is a DOCUMENTED NO-OP (Q7). It is still accepted so no
-		// script breaks, and a diamond is still rendered once.
+		// script breaks, and a diamond still expands the shared node once; the
+		// second parent's edge into it is a `deduped` stub either way.
 		t.Run("show_all_paths_is_an_accepted_no_op", func(t *testing.T) {
 			t.Parallel()
 			p := newSharedProxiedProject(t, bd, "dptd")
@@ -739,18 +797,23 @@ func TestProxiedServerDep2(t *testing.T) {
 				{"tree", root.ID, "--show-all-paths"},
 			} {
 				arr := bdProxiedDepJSONArray(t, bd, p.dir, args...)
-				count := 0
+				expanded, stubs := 0, 0
 				for _, node := range arr {
 					m, ok := node.(map[string]interface{})
 					if !ok {
 						continue
 					}
-					if id, _ := m["id"].(string); id == shared.ID {
-						count++
+					if id, _ := m["id"].(string); id != shared.ID {
+						continue
+					}
+					if deduped, _ := m["deduped"].(bool); deduped {
+						stubs++
+					} else {
+						expanded++
 					}
 				}
-				if count != 1 {
-					t.Errorf("%v: shared node appears %d times, want 1", args, count)
+				if expanded != 1 || stubs != 1 {
+					t.Errorf("%v: shared node expanded %d times with %d stubs, want 1 and 1", args, expanded, stubs)
 				}
 			}
 		})

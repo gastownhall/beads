@@ -1,0 +1,13 @@
+{
+  "data": [
+    {
+      "actor": "protocol-test",
+      "created_at": "<TS>",
+      "event_type": "created",
+      "issue_id": "<MINTED:todo_add>",
+      "new_value": "",
+      "old_value": ""
+    }
+  ],
+  "schema_version": 1
+}

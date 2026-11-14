@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
 // TestIsBootstrapPreviewErr pins the classifier that decides whether the
@@ -22,8 +24,30 @@ import (
 // shape embeddeddolt produces for "no database on disk yet" and nothing else,
 // including an error that merely happens to also be wrapped.
 func TestIsBootstrapPreviewErr(t *testing.T) {
-	wrappedNotExist := fmt.Errorf("embeddeddolt: no embedded database at %s: %w", "/tmp/x/embeddeddolt", os.ErrNotExist)
+	// The bootstrap shape, built the way embeddeddolt's read-only open builds
+	// it around its failed stat of the data dir.
+	dataDir := filepath.Join(t.TempDir(), "embeddeddolt")
+	_, statErr := os.Stat(dataDir)
+	noEmbeddedDB := fmt.Errorf("%w at %s: %w", embeddeddolt.ErrNoEmbeddedDatabase, dataDir, statErr)
+	unreadableDataDir := fmt.Errorf("%w at %s: %w", embeddeddolt.ErrNoEmbeddedDatabase, dataDir, os.ErrPermission)
 	wrappedOther := fmt.Errorf("dial tcp 127.0.0.1:3306: %w", errors.New("connect: connection refused"))
+
+	// Real ENOENTs from sources that are not "no local database yet" (bd-wlygc).
+	// A hand-built errors.New can never satisfy errors.Is(err, os.ErrNotExist),
+	// so only a real syscall error tells a narrow classifier from one that
+	// matches every ENOENT. The dial is what dolt server mode wraps for a
+	// configured socket nothing listens on; it is relative to a fresh cwd so
+	// the path stays under the unix socket path limit wherever t.TempDir lives.
+	t.Chdir(t.TempDir())
+	_, dialErr := net.Dial("unix", "absent.sock")
+	absentSocket := fmt.Errorf("Dolt server unreachable at %s: %w", "absent.sock", dialErr)
+	_, manifestErr := os.Stat(filepath.Join(t.TempDir(), "beads", ".dolt", "noms", "manifest"))
+	guttedDataDir := fmt.Errorf("embeddeddolt: open db: %w", manifestErr)
+	for _, err := range []error{absentSocket, guttedDataDir} {
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("precondition: %v is not an ENOENT, so it cannot tell a narrow classifier from a broad one", err)
+		}
+	}
 
 	tests := []struct {
 		name string
@@ -31,8 +55,11 @@ func TestIsBootstrapPreviewErr(t *testing.T) {
 		want bool
 	}{
 		{"nil error", nil, false},
-		{"direct os.ErrNotExist", os.ErrNotExist, true},
-		{"wrapped os.ErrNotExist (embedded store shape)", wrappedNotExist, true},
+		{"embedded store's no-database error", noEmbeddedDB, true},
+		{"bare os.ErrNotExist", os.ErrNotExist, false},
+		{"embedded store's data dir unreadable", unreadableDataDir, false},
+		{"real ENOENT dialing an absent unix socket", absentSocket, false},
+		{"real ENOENT from a file missing inside the data dir", guttedDataDir, false},
 		{"generic non-ENOENT error", errors.New("connection refused"), false},
 		{"wrapped non-ENOENT error", wrappedOther, false},
 	}

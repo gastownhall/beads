@@ -3,7 +3,6 @@ package doctor
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -31,8 +30,13 @@ func initGitTemplate() {
 		}
 		gitTemplateDir = dir
 
-		cmd := exec.Command("git", "init", "--initial-branch=main")
+		// The template is built once, inside whichever test asks first. Its
+		// writes must land in dir even if that test set GIT_DIR/GIT_WORK_TREE,
+		// or they hit that repository (the r880 clobber class, wy-qlvlmf).
+		env := testutil.WithoutGitRepoLocationEnv(os.Environ())
+		cmd := gitCommand("init", "--initial-branch=main")
 		cmd.Dir = dir
+		cmd.Env = env
 		if err := cmd.Run(); err != nil {
 			gitTemplateErr = fmt.Errorf("git init failed: %w", err)
 			return
@@ -42,8 +46,9 @@ func initGitTemplate() {
 			{"config", "user.email", "test@test.com"},
 			{"config", "user.name", "Test User"},
 		} {
-			cmd = exec.Command("git", args...)
+			cmd = gitCommand(args...)
 			cmd.Dir = dir
+			cmd.Env = env
 			if err := cmd.Run(); err != nil {
 				gitTemplateErr = fmt.Errorf("git %v failed: %w", args, err)
 				return
@@ -113,13 +118,13 @@ func TestNewGitRepo_UsesRepoLocalHooksPathDespiteGlobalConfig(t *testing.T) {
 		t.Fatalf("failed to create fake global hooks dir: %v", err)
 	}
 
-	setGlobal := exec.Command("git", "config", "--global", "core.hooksPath", globalHooks)
+	setGlobal := gitCommand("config", "--global", "core.hooksPath", globalHooks)
 	if out, err := setGlobal.CombinedOutput(); err != nil {
 		t.Fatalf("failed to set global core.hooksPath: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
 
 	repoDir := newGitRepo(t)
-	getLocal := exec.Command("git", "config", "--get", "core.hooksPath")
+	getLocal := gitCommand("config", "--get", "core.hooksPath")
 	getLocal.Dir = repoDir
 	out, err := getLocal.CombinedOutput()
 	if err != nil {

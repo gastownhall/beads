@@ -6,11 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remedy"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
@@ -183,11 +185,7 @@ func distillSubgraph(epicID string, subgraph *TemplateSubgraph, in molDistillInp
 	} else {
 		outputPath = findWritableFormulaDir(formulaName)
 		if outputPath == "" {
-			hint := "Try creating one of the formula search paths"
-			if searchPaths := getFormulaSearchPaths(); len(searchPaths) > 0 {
-				hint = fmt.Sprintf("Try: mkdir -p %s", searchPaths[0])
-			}
-			return HandleErrorWithHint("no writable formula directory found", hint)
+			return HandleErrorWithHint("no writable formula directory found", formulaDirHint(getFormulaSearchPaths()))
 		}
 	}
 
@@ -264,7 +262,12 @@ func sanitizeFormulaName(title string) string {
 // findWritableFormulaDir finds the first writable formula directory
 func findWritableFormulaDir(formulaName string) string {
 	searchPaths := getFormulaSearchPaths()
+	readOnlyDir := readOnlyFormulaDir()
 	for _, dir := range searchPaths {
+		// Never probe or write the GT_ROOT directory a project .env named.
+		if dir == readOnlyDir {
+			continue
+		}
 		// Try to create the directory if it doesn't exist
 		if err := os.MkdirAll(dir, 0755); err == nil {
 			// Check if we can write to it
@@ -385,4 +388,17 @@ func init() {
 	molDistillCmd.Flags().String("output", "", "Output directory for formula file")
 
 	molCmd.AddCommand(molDistillCmd)
+}
+
+// formulaDirHint is the hint for a distill with no writable formula
+// directory: create the first search path. The path holds the workspace's
+// own directory, so it goes into the mkdir command through the remedy
+// printer: one shell word, or a <dir> placeholder with the path named
+// escaped beside it.
+func formulaDirHint(searchPaths []string) string {
+	if len(searchPaths) == 0 {
+		return "Try creating one of the formula search paths"
+	}
+	dir, note := remedy.CommandArg(runtime.GOOS, searchPaths[0], "<dir>")
+	return fmt.Sprintf("Try: mkdir -p %s%s", dir, note)
 }

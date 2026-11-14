@@ -4,10 +4,14 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/kvkeys"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
+
+// CommandSettingKeys cannot be written to replicated workspace settings.
+var CommandSettingKeys = config.CommandSettingKeys
 
 // The single definition of what a write to the workspace's durable settings
 // plane is allowed to be and of what a READ of it may carry — either by
@@ -20,7 +24,9 @@ import (
 //
 // It is deliberately NOT the whole of `bd config set`. Which SOURCE a key
 // belongs to (config.yaml, git config, this plane) is resolved by the front
-// door; see issueops/workspaceconfig.go.
+// door; see issueops/workspaceconfig.go. The one routing fact the write rule
+// does state is the refusal: a config.yaml-only key is never stored here,
+// whichever door sent it (#7559).
 
 // ValidateSettingKey checks a key a caller wants to READ or REMOVE, and
 // returns it unchanged.
@@ -42,6 +48,52 @@ func ValidateSettingWrite(key, value string) (string, error) {
 	if _, err := ValidateSettingKey(key); err != nil {
 		return "", err
 	}
+	// THE LENGTH BOUNDS ARE THE ROLE'S, so every leg refuses the same set.
+	// The Dolt schema stores config.key in VARCHAR(255) and config.value in
+	// TEXT, so a row past either bound was already refused below this rule —
+	// but by the column, as a driver error no caller can classify, while the
+	// HTTP operation refused the same write as a typed, member-named
+	// ErrValidation at its edge. Stating the bound here makes every leg's
+	// answer the typed refusal, and holds for a backend whose columns are
+	// unbounded text, where nothing below the edge would refuse it at all.
+	// Keyed on storage's own constants: the key in CHARACTERS, the value in
+	// BYTES, which is how each column counts. Both errors also carry
+	// types.ErrFieldTooLong, so a caller can tell "too long" from the other
+	// refusals here without matching a message.
+	//
+	// The bound is on the WRITE only. A read or a removal compares the key and
+	// never stores it, so an over-long key there matches nothing and already
+	// has an answer (ValidateSettingKey).
+	if err := types.CheckFieldLen("config key", key); err != nil {
+		return "", fmt.Errorf("%w: %w", issueops.ErrValidation, err)
+	}
+	if err := types.CheckTextLen("config value", value); err != nil {
+		return "", fmt.Errorf("%w: %w", issueops.ErrValidation, err)
+	}
+	if config.IsCommandSettingKey(key) {
+		return "", fmt.Errorf("%w: %q must come from your shell environment or user config", issueops.ErrValidation, key)
+	}
+	// A CONFIG.YAML-ONLY KEY NEVER BECOMES A ROW (#7559). These are the
+	// startup settings and the tracker secrets (github.token, linear.api_key,
+	// jira.api_token, ...), and this table is replicated by bd dolt push, pull
+	// and clone, so a secret stored here reaches every remote. `bd config set`
+	// routes these keys to config.yaml before it reaches this role, but it is
+	// not the only door: the settings HTTP surface (PUT /v0/beads/config/{key})
+	// has no config.yaml it could write for the caller, so the refusal belongs
+	// HERE, where every leg passes — the issue_prefix precedent below. It is
+	// unconditional rather than limited to secrets: a non-secret yaml-only key
+	// stored here is a write that reports success and that no reader consults
+	// (the GH#536 class). The message never carries the value.
+	//
+	// After the command-setting check, so mail.delegate (on both lists) keeps
+	// that rule's more precise message, and after the length bounds, so an
+	// over-long key still carries types.ErrFieldTooLong. ValidateSettingKey is
+	// left alone, so a legacy row can still be read (redacted) and removed.
+	if config.IsYamlOnlyKey(key) {
+		return "", fmt.Errorf("%w: %q is a config.yaml-only key and is never stored in the workspace settings table, "+
+			"whose rows bd dolt push replicates to every remote; set it with \"bd config set %s <value>\" in the workspace instead",
+			issueops.ErrValidation, key, key)
+	}
 	// The prefix is owned by bd init --prefix, bd bootstrap and bd
 	// rename-prefix. Refused HERE rather than at the front door because `bd
 	// config set` is not the only door that reaches this plane: before this
@@ -58,6 +110,15 @@ func ValidateSettingWrite(key, value string) (string, error) {
 	// makes the refusal a validation error rather than a storage failure.
 	if key == issueops.SettingKeyStatusCustom && value != "" {
 		if _, err := types.ParseCustomStatusConfig(value); err != nil {
+			return "", fmt.Errorf("%w: invalid %s value: %v", issueops.ErrValidation, key, err)
+		}
+	}
+	// types.retained is a SAFETY setting read leniently by every sweep, so a
+	// value that would read as names no row carries is refused here, where
+	// every WorkspaceConfig body passes and where `bd config set-many`, which
+	// writes its batch outside the role, validates each pair before any write.
+	if key == issueops.SettingKeyTypesRetained {
+		if err := ValidateRetainedTypesValue(value); err != nil {
 			return "", fmt.Errorf("%w: invalid %s value: %v", issueops.ErrValidation, key, err)
 		}
 	}

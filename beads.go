@@ -24,6 +24,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/schema"
@@ -36,6 +37,53 @@ import (
 // retry it explicitly after a callback has started when their operation is
 // safe to repeat.
 type Storage = beads.Storage
+
+// OpenOptions carries per-open injections (Credential, HTTPClient,
+// UserAgent) for OpenBestAvailableWith. A registered backend's OpenWith may
+// use these; Dolt and embedded Dolt have no per-open seam and never see
+// them — instead, a non-nil Credential, non-nil HTTPClient, or non-empty
+// UserAgent is always refused rather than silently dropped (see
+// OpenBestAvailableWith). A nil Credential means "use the backend's own
+// default authentication, which may include ambient environment state
+// (env vars, a config file, a logged-in CLI session, ...)"; a multi-tenant
+// embedder (one process serving many workspaces, such as gc, Gas City) MUST
+// pass a non-nil Credential for every open, since ambient auth cannot
+// distinguish one tenant's workspace from another's.
+type OpenOptions = backends.OpenOptions
+
+// Credential is the opaque per-open credential marker OpenOptions.Credential
+// carries. See backends.Credential for the full contract: this package
+// assigns it no methods and performs no assertions against it, so an
+// embedder (for example gc, Gas City) can carry a per-workspace credential
+// through OpenBestAvailableWith without this package knowing its shape.
+type Credential = backends.Credential
+
+// ErrCredentialWithoutOpenWith is returned by OpenBestAvailableWith when
+// opts.Credential is set but nothing can honor it: either a registered
+// backend has no OpenWith, or no backend is registered at all and the
+// workspace is plain Dolt, which has no per-open credential seam. It is
+// aliased here, not just in internal/storage/backends, because that package
+// is unimportable outside this module: an embedder checking this error with
+// errors.Is must do it through the public beads package.
+var ErrCredentialWithoutOpenWith = backends.ErrCredentialWithoutOpenWith
+
+// ErrHTTPClientWithoutOpenWith is returned by OpenBestAvailableWith when
+// opts.HTTPClient is set but nothing can honor it. Same fail-closed family
+// and aliasing rationale as ErrCredentialWithoutOpenWith.
+var ErrHTTPClientWithoutOpenWith = backends.ErrHTTPClientWithoutOpenWith
+
+// ErrUserAgentWithoutOpenWith is returned by OpenBestAvailableWith when
+// opts.UserAgent is set but nothing can honor it. Same fail-closed family
+// and aliasing rationale as ErrCredentialWithoutOpenWith.
+var ErrUserAgentWithoutOpenWith = backends.ErrUserAgentWithoutOpenWith
+
+// ErrUnsupportedCredential is the typed refusal a registered backend's
+// OpenWith returns (directly or wrapped) when opts.Credential is non-nil but
+// does not match the concrete credential type that backend's OpenWith
+// expects. See backends.ErrUnsupportedCredential for the full contract.
+// Aliased here for the same reason as ErrCredentialWithoutOpenWith: callers
+// outside this module cannot import internal/storage/backends directly.
+var ErrUnsupportedCredential = backends.ErrUnsupportedCredential
 
 // configuredBackendUnavailable is the public open path's fail-closed refusal for
 // metadata naming a removed or unrecognized backend. beadsDir and cfg let the
@@ -50,6 +98,36 @@ func configuredBackendUnavailable(backend, beadsDir string, cfg *configfile.Conf
 		return configfile.UnknownBackendErrorAt(backend, beadsDir, cfg)
 	}
 }
+
+// checkDiscoveredBackend refuses a workspace that OpenBestAvailableWith cannot
+// open, reading its metadata as configfile.LoadForDiscovery does, which never
+// rewrites the workspace: a historical SQLite workspace
+// (configfile.LoadDiscoveredForOpen), or a removed or unrecognized backend
+// (configuredBackendUnavailable). It runs before configfile.Load, which
+// migrates a legacy config.json into metadata.json and drops the keys Config
+// does not know, and before anything that creates a database or gate file, as
+// the CLI's command admission checks the same read before any Load. Metadata
+// that does not load is left to Load to report; no metadata at all (and no
+// SQLite database) selects Dolt.
+func checkDiscoveredBackend(beadsDir string) error {
+	cfg, err := configfile.LoadDiscoveredForOpen(beadsDir)
+	if err != nil {
+		return err
+	}
+	if cfg != nil && !configfile.IsSupportedBackend(cfg.Backend) {
+		return configuredBackendUnavailable(cfg.Backend, beadsDir, cfg)
+	}
+	return nil
+}
+
+// LegacyWorkspaceError is returned by Open, OpenBestAvailable,
+// OpenBestAvailableWith, OpenFromConfig and OpenGated for a workspace a
+// pre-Dolt bd left behind: a historical SQLite workspace, whose SQLite
+// database is still the only copy of its data. Nothing was opened, created or
+// modified, and its text is the refusal the bd CLI prints when run inside that
+// workspace: migrate it explicitly first. Match it with errors.As. Aliased
+// here because internal/configfile is unimportable outside this module.
+type LegacyWorkspaceError = configfile.LegacyWorkspaceError
 
 // Transaction provides atomic multi-operation support within a database transaction.
 // Use Storage.RunInTransaction() to obtain a Transaction instance.
@@ -309,11 +387,27 @@ func AllowSharedSchemaMigration(allow bool) {
 	schema.SetSharedMigrateConsent(allow)
 }
 
-// Open opens a Dolt-backed beads database at the given path.
-// This always opens in embedded mode. Use OpenFromConfig to respect
-// server mode settings from metadata.json.
+// Open opens a Dolt-backed beads database at the given path, connecting to
+// a Dolt sql-server. Use OpenFromConfig to respect server mode settings
+// from metadata.json.
+//
+// The workspace holding dbPath (its parent directory) is refused, before
+// anything is written there, when bd run in it would refuse it from its
+// contents (checkDiscoveredBackend): a historical SQLite workspace
+// (*LegacyWorkspaceError), or a removed or unknown backend. An existing
+// database whose project ID differs from the one in that workspace's
+// metadata.json is refused as well, with an untyped PROJECT IDENTITY
+// MISMATCH error (GH#5559).
 func Open(ctx context.Context, dbPath string) (Storage, error) {
-	return dolt.New(ctx, &dolt.Config{Path: dbPath, CreateIfMissing: true})
+	if err := checkDiscoveredBackend(filepath.Dir(dbPath)); err != nil {
+		return nil, err
+	}
+	st, err := dolt.New(ctx, &dolt.Config{Path: dbPath, CreateIfMissing: true})
+	if err != nil {
+		// An untyped nil, as the other public opens return.
+		return nil, err
+	}
+	return st, nil
 }
 
 // OpenFromConfig opens the Dolt implementation using configuration from
@@ -321,7 +415,17 @@ func Open(ctx context.Context, dbPath string) (Storage, error) {
 // name configuration.
 // beadsDir is the path to the .beads directory.
 func OpenFromConfig(ctx context.Context, beadsDir string) (Storage, error) {
-	return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{CreateIfMissing: true})
+	// NewFromConfigWithOptions refuses a historical SQLite workspace or an
+	// unsupported backend (dolt.RequireDiscoveredDoltBackend) before its Load
+	// can migrate a legacy config.json.
+	st, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{CreateIfMissing: true})
+	if err != nil {
+		// An untyped nil, as the other public opens return: a nil
+		// *DoltStore in the Storage interface is non-nil, and Close on it
+		// panics.
+		return nil, err
+	}
+	return st, nil
 }
 
 // OpenGated is OpenFromConfig plus participation in the workspace
@@ -355,6 +459,12 @@ func OpenFromConfig(ctx context.Context, beadsDir string) (Storage, error) {
 // operation holds one exclusively; zero means fail fast. A busy gate is
 // reported as ErrGateBusy (match with errors.Is).
 func OpenGated(ctx context.Context, beadsDir string, wait time.Duration) (Storage, error) {
+	// Before the gates: taking them creates gate files in and beside a
+	// workspace this build must leave untouched. This is the refusal the
+	// Dolt open below makes before its own Load.
+	if err := dolt.RequireDiscoveredDoltBackend(beadsDir); err != nil {
+		return nil, err
+	}
 	wsGate, err := workspacegate.ForWorkspace(beadsDir)
 	if err != nil {
 		return nil, err
@@ -550,8 +660,12 @@ var (
 	ErrNotClaimable    = storage.ErrNotClaimable
 	ErrCloseBlocked    = storage.ErrCloseBlocked
 	ErrVersionMismatch = storage.ErrVersionMismatch
-	ErrSelfDependency  = domain.ErrSelfDependency
-	ErrDependencyCycle = domain.ErrDependencyCycle
+	// ErrIdempotencyExpired matches a create refused because a retaining
+	// retention sweep retired its id: the create that used the id already
+	// happened and a create of it never runs again.
+	ErrIdempotencyExpired = storage.ErrIdempotencyExpired
+	ErrSelfDependency     = domain.ErrSelfDependency
+	ErrDependencyCycle    = domain.ErrDependencyCycle
 	// ErrDependencySourceNotFound and ErrDependencyTargetNotFound are the two
 	// endpoint-existence refusals AddDependency and AddDependencies raise; the
 	// typed value carrying the missing id is DependencyEndpointNotFoundError.

@@ -27,7 +27,10 @@ func setupIntegrationTestMain(root string) (func(), error) {
 	os.Setenv("BEADS_TEST_SERVER", "1")
 
 	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
-		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)
+		if testutil.DoltUnavailableForTestMain(err) {
+			cleanup()
+			return nil, err
+		}
 		return cleanup, nil
 	}
 

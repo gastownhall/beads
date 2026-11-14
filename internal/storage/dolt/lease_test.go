@@ -848,6 +848,106 @@ func TestHeartbeatRevivesExpiredLease(t *testing.T) {
 	}
 }
 
+// TestHeartbeatIssueCommitsARefusalOnlyWhenItReadTheIssue pins the legacy
+// door's commit rule for a refusal (issueops.LeaseRenewalRefusalCommits, the
+// role's HeartbeatRefusalCommits rule). A refusal that read the issue row
+// commits, so the orphaned lease row it deletes stays deleted. A refusal whose
+// issue read failed rolls back: a lease row with no issue row takes the fast
+// path's UPDATE, which extends its expiry, then fails the live-claim check, and
+// committing that would keep the extension while answering an error. It also
+// pins the delete's holder fence: the caller's orphan held under another
+// spelling of its identity is deleted, another identity's orphan survives.
+func TestHeartbeatIssueCommitsARefusalOnlyWhenItReadTheIssue(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	plantLease := func(id, holder string) {
+		t.Helper()
+		granted := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+		if _, err := store.db.ExecContext(ctx, `
+			INSERT INTO leases (issue_id, holder, granted_at, lease_expires_at, heartbeat_at, granted_node)
+			VALUES (?, ?, ?, ?, ?, '')
+		`, id, holder, granted, granted.Add(time.Minute), granted); err != nil {
+			t.Fatalf("plant a lease row on %s: %v", id, err)
+		}
+	}
+	seedOpenIssue := func(id string) {
+		t.Helper()
+		if err := store.CreateIssue(ctx, &types.Issue{
+			ID: id, Title: "lease " + id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+		}, "seeder"); err != nil {
+			t.Fatalf("seed %s: %v", id, err)
+		}
+	}
+	leaseRows := func(id string) int {
+		t.Helper()
+		var rows int
+		if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM leases WHERE issue_id = ?`, id).Scan(&rows); err != nil {
+			t.Fatalf("count lease rows on %s: %v", id, err)
+		}
+		return rows
+	}
+	hbCtx := issueops.WithLeaseTTL(ctx, time.Hour)
+
+	// No issue row: the refusal read nothing, so the fast path's extension
+	// must roll back.
+	plantLease("lease-noissue", "alice")
+	var before string
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT CAST(lease_expires_at AS CHAR) FROM leases WHERE issue_id = ?`, "lease-noissue",
+	).Scan(&before); err != nil {
+		t.Fatalf("read planted expiry: %v", err)
+	}
+	if err := store.HeartbeatIssue(hbCtx, "lease-noissue", "alice"); !errors.Is(err, storage.ErrNotClaimable) {
+		t.Fatalf("heartbeat on a lease row with no issue row err = %v, want ErrNotClaimable", err)
+	}
+	var after string
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT CAST(lease_expires_at AS CHAR) FROM leases WHERE issue_id = ?`, "lease-noissue",
+	).Scan(&after); err != nil {
+		t.Fatalf("read expiry after the refusal: %v", err)
+	}
+	if after != before {
+		t.Errorf("refused heartbeat committed the fast path's extension: lease_expires_at %s -> %s, want unchanged", before, after)
+	}
+
+	// An open issue: the refusal read it and deleted the caller's orphaned
+	// row, and that delete must commit.
+	seedOpenIssue("lease-orphan")
+	plantLease("lease-orphan", "alice")
+	if err := store.HeartbeatIssue(hbCtx, "lease-orphan", "alice"); !errors.Is(err, storage.ErrNotClaimable) {
+		t.Fatalf("heartbeat over an orphaned lease on an open issue err = %v, want ErrNotClaimable", err)
+	}
+	if rows := leaseRows("lease-orphan"); rows != 0 {
+		t.Errorf("lease rows on lease-orphan after the refusal = %d, want 0: the refusal's orphan delete must commit", rows)
+	}
+
+	// The caller's orphan held under another spelling of its identity
+	// (ga-v2k49): the delete's holder fence is judged under actorMatches, as
+	// the in-place refresh's is, so the row is the caller's and is deleted.
+	seedOpenIssue("lease-orphan-spelling")
+	plantLease("lease-orphan-spelling", "gastown.mayor")
+	if err := store.HeartbeatIssue(hbCtx, "lease-orphan-spelling", "gastown__mayor"); !errors.Is(err, storage.ErrNotClaimable) {
+		t.Fatalf("cross-spelling heartbeat over an orphaned lease err = %v, want ErrNotClaimable", err)
+	}
+	if rows := leaseRows("lease-orphan-spelling"); rows != 0 {
+		t.Errorf("lease rows on lease-orphan-spelling after a cross-spelling refusal = %d, want 0: the orphan is the caller's under another spelling", rows)
+	}
+
+	// Control: a genuinely different identity's orphan is not the caller's,
+	// so the refusal leaves it alone.
+	seedOpenIssue("lease-orphan-other")
+	plantLease("lease-orphan-other", "gastown.dog-3")
+	if err := store.HeartbeatIssue(hbCtx, "lease-orphan-other", "gastown__mayor"); !errors.Is(err, storage.ErrNotClaimable) {
+		t.Fatalf("heartbeat over another identity's orphaned lease err = %v, want ErrNotClaimable", err)
+	}
+	if rows := leaseRows("lease-orphan-other"); rows != 1 {
+		t.Errorf("lease rows on lease-orphan-other after the refusal = %d, want 1: a refusal deletes only the caller's own row", rows)
+	}
+}
+
 // TestConcurrentReapersAreBenign pins L5.5: two reapers racing the same stale
 // set neither error nor double-report a reclaim, and do not disturb live work.
 func TestConcurrentReapersAreBenign(t *testing.T) {

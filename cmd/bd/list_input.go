@@ -43,6 +43,10 @@ type listInput struct {
 func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	in := listInput{}
 
+	// The custom filter values persist across in-process Execute() calls;
+	// clear them once this read has copied them out.
+	defer resetListFilterFlags(cmd.Flags())
+
 	in.Status, _ = cmd.Flags().GetString("status")
 	if in.Status == "" {
 		in.Status, _ = cmd.Flags().GetString("state")
@@ -276,7 +280,7 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	// issueops.Reader.List, whose query reads types.IssueFilter.Lite; the three
 	// below leave that query.
 	//
-	//   --watch re-queries on a ticker through loadWatchedIssues, whose --ready
+	//   --watch re-queries every poll interval through loadWatchedIssues, whose --ready
 	//   arm calls the bare GetReadyWork and whose --parent arm walks the tree;
 	//   neither reads Lite.
 	//

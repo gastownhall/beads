@@ -18,6 +18,7 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/procid"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/identity"
@@ -46,6 +47,19 @@ type ProxyOpts struct {
 	// against it; tests use Snapshot() to assert. Production code should
 	// leave this nil.
 	Stats *Stats
+	// TraceConnections writes the per-connection trace lines (accept,
+	// handleConn start/end, backend dial ok, copy done) to proxy.log. Every
+	// bd command opens connections through the proxy, so these lines are
+	// off by default; db-proxy-child sets this from BD_DEBUG. Lifecycle and
+	// error lines are always written.
+	TraceConnections bool
+	// ServerLogPath is the backend server log the proxy bounds while it
+	// runs, alongside proxy.log (see logSizeWatcher). Set it only for a log
+	// bd owns (OpenOpts.RotateLogFile); empty leaves the server log alone.
+	ServerLogPath string
+	// LogSizeCheckInterval is how often the running proxy checks its logs'
+	// size; zero means defaultLogSizeCheckInterval.
+	LogSizeCheckInterval time.Duration
 }
 
 type proxyServer struct {
@@ -55,6 +69,19 @@ type proxyServer struct {
 	server      server.DatabaseServer
 	stats       *Stats
 	stopEpoch   string
+
+	traceConnections bool
+	// data authenticates every data-port connection (data_auth.go); its
+	// zero value admits none.
+	data dataAuth
+
+	serverLogPath        string
+	logSizeCheckInterval time.Duration
+
+	// reportUpstreamOutage answers a connection whose upstream is not
+	// serving with a MySQL error instead of a bare close; see
+	// upstream_error.go. Set for external backends only.
+	reportUpstreamOutage bool
 
 	logger      *log.Logger
 	listener    net.Listener
@@ -101,11 +128,26 @@ func NewProxyServer(opts ProxyOpts) *proxyServer {
 		server:      opts.Server,
 		stats:       opts.Stats,
 		stopEpoch:   opts.StopEpoch,
+
+		traceConnections: opts.TraceConnections,
+
+		serverLogPath:        opts.ServerLogPath,
+		logSizeCheckInterval: opts.LogSizeCheckInterval,
+
+		reportUpstreamOutage: reportsUpstreamOutage(opts.Server),
 	}
 }
 
 func (p *proxyServer) tracef(format string, args ...any) {
 	p.logger.Printf(format, args...)
+}
+
+// connTracef writes a per-connection trace line, only when TraceConnections
+// is set. Lifecycle and error lines use tracef and are always written.
+func (p *proxyServer) connTracef(format string, args ...any) {
+	if p.traceConnections {
+		p.logger.Printf(format, args...)
+	}
 }
 
 func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
@@ -145,6 +187,9 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 	}
 
 	logPath := filepath.Join(p.rootDir, LogFileName)
+	// forkExecChild already rotated it for a spawned proxy; this covers
+	// in-process callers and is a no-op on the fresh file otherwise.
+	doltserver.MaybeRotateLogFile(logPath)
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) // #nosec G304 -- logPath is derived from operator-supplied config, not untrusted request input
 	if err != nil {
 		return fmt.Errorf("open proxy log %q: %w", logPath, err)
@@ -237,9 +282,11 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 		return fmt.Errorf("proxy: unexpected data listener address %T", ln.Addr())
 	}
 
-	if _, err := identity.WriteSecret(p.rootDir); err != nil {
+	secret, err := identity.WriteSecret(p.rootDir)
+	if err != nil {
 		return fmt.Errorf("write proxy secret: %w", err)
 	}
+	p.data = newDataAuth(secret, dataPort.Port)
 
 	var identMu sync.RWMutex
 	identReply := identity.IdentReply{
@@ -316,14 +363,15 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 	}
 
 	if err := pidfile.Write(p.rootDir, PIDFileName, pidfile.PidFile{
-		Pid:         os.Getpid(),
-		Port:        dataPort.Port,
-		UpstreamID:  upstreamID,
-		Schema:      pidfile.SchemaV2,
-		Kind:        pidfile.KindProxy,
-		Birth:       string(birth),
-		RootID:      rootID,
-		ControlPort: control.Port(),
+		Pid:          os.Getpid(),
+		Port:         dataPort.Port,
+		UpstreamID:   upstreamID,
+		Schema:       pidfile.SchemaV2,
+		Kind:         pidfile.KindProxy,
+		Birth:        string(birth),
+		RootID:       rootID,
+		ControlPort:  control.Port(),
+		ControlProto: pidfile.ControlProtoIdentMAC,
 	}); err != nil {
 		p.stats.IncBackendStop()
 		_ = stopBackendBounded(p.server)
@@ -334,11 +382,13 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
 		<-gctx.Done()
+		_ = pidfile.Remove(p.rootDir, PIDFileName)
 		_ = p.listener.Close()
 		_ = control.Close()
 		return nil
 	})
 	g.Go(func() error { return p.idleWatcher(gctx) })
+	g.Go(func() error { return p.logSizeWatcher(gctx) })
 	g.Go(func() error {
 		t := time.NewTicker(backendHealthInterval)
 		defer t.Stop()
@@ -435,7 +485,7 @@ func (p *proxyServer) acceptLoop(ctx context.Context) error {
 			_ = tc.SetKeepAlive(true)
 			_ = tc.SetKeepAlivePeriod(tcpKeepAlivePeriod)
 		}
-		p.tracef("acceptLoop accepted (remote=%s)", conn.RemoteAddr())
+		p.connTracef("acceptLoop accepted (remote=%s)", conn.RemoteAddr())
 		p.stats.IncAccept()
 		p.conns.Go(func() error {
 			return p.handleConn(ctx, conn)
@@ -445,11 +495,21 @@ func (p *proxyServer) acceptLoop(ctx context.Context) error {
 
 func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 	addr := client.RemoteAddr()
-	p.tracef("handleConn(%s) start", addr)
+	p.connTracef("handleConn(%s) start", addr)
+
+	// Authenticate before counting the connection or dialing the backend:
+	// an unauthenticated connection must neither hold the idle watcher off
+	// nor cost the backend a session.
+	if ok, err := p.data.accept(client); !ok || err != nil {
+		p.connTracef("handleConn(%s) data authentication failed", addr)
+		_ = client.Close()
+		return err
+	}
+
 	p.activeConns.Add(1)
 	defer func() {
 		p.activeConns.Add(-1)
-		p.tracef("handleConn(%s) end (active=%d)", addr, p.activeConns.Load())
+		p.connTracef("handleConn(%s) end (active=%d)", addr, p.activeConns.Load())
 	}()
 
 	p.stats.IncBackendDialAttempt()
@@ -459,10 +519,13 @@ func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 	if err != nil {
 		p.tracef("handleConn(%s) backend dial error: %v", addr, err)
 		p.stats.IncBackendDialError()
+		if p.reportUpstreamOutage && isUpstreamUnreachableDialError(err) {
+			p.writeUpstreamOutage(client, dialFailureMessage(err))
+		}
 		_ = client.Close()
 		return err
 	}
-	p.tracef("handleConn(%s) backend dial ok", addr)
+	p.connTracef("handleConn(%s) backend dial ok", addr)
 	p.stats.IncBackendDialSuccess()
 	p.stats.IncHandledConn()
 
@@ -487,7 +550,7 @@ func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 		defer func() { _ = client.Close() }()
 		n, err := io.Copy(backend, client)
 		p.stats.AddBytesClientToBackend(n)
-		p.tracef("handleConn(%s) client→backend done (n=%d, err=%v)", addr, n, err)
+		p.connTracef("handleConn(%s) client→backend done (n=%d, err=%v)", addr, n, err)
 		return err
 	})
 	g.Go(func() error {
@@ -496,7 +559,17 @@ func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 		defer func() { _ = client.Close() }()
 		n, err := io.Copy(client, backend)
 		p.stats.AddBytesBackendToClient(n)
-		p.tracef("handleConn(%s) backend→client done (n=%d, err=%v)", addr, n, err)
+		p.connTracef("handleConn(%s) backend→client done (n=%d, err=%v)", addr, n, err)
+		// A MySQL server speaks first, so a backend that reaches EOF having
+		// sent nothing never served this connection: a front whose own
+		// target is gone, or a server at its connection limit or shutting
+		// down. That is not proof of an outage (see upstream_error.go), so
+		// the client retries the report briefly rather than failing on it.
+		// A client that hung up first closes backend, which makes this Copy
+		// fail rather than return a clean EOF, so that case stays silent.
+		if p.reportUpstreamOutage && n == 0 && err == nil {
+			p.writeUpstreamOutage(client, closedBeforeGreetingMessage(backend))
+		}
 		return err
 	})
 	return g.Wait()
@@ -519,6 +592,15 @@ func waitForServerReady(ctx context.Context, s server.DatabaseServer, timeout ti
 			return err
 		}
 		_ = conn.Close()
+		// The dial proves something answers on the backend's address, not
+		// that the backend does. A local backend's Start has already proved
+		// its own process owns the port (see server.DoltServer.waitReady),
+		// and while it runs nobody else can bind it, so re-checking Running
+		// after the dial closes the gap where the backend exited in between
+		// and another process took the port.
+		if !s.Running(ctx) {
+			return errors.New("database server exited during readiness check")
+		}
 		return nil
 	}, backoff.WithContext(bo, ctx))
 }

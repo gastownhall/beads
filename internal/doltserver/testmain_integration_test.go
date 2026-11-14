@@ -34,6 +34,9 @@ var integrationSuiteTempRoot string
 // the case Pdeathsig is meant to protect. See procattr_linux.go for why
 // this is a narrower, separate flag from BEADS_TEST_MODE.
 func TestMain(m *testing.M) {
+	if os.Getenv(fakeDoltEnv) != "" {
+		os.Exit(fakeDolt(os.Args[1:]))
+	}
 	os.Exit(runIntegrationTests(m))
 }
 

@@ -127,6 +127,52 @@ func TestSecretGitTrackingIgnoresInheritedGitRouting(t *testing.T) {
 			}
 		})
 	}
+
+	// The scrub alone narrows the probe to upward discovery from the config
+	// file's directory. A detached work tree — GIT_DIR plus GIT_WORK_TREE with
+	// no in-tree .git beside the config — is reachable only through the
+	// inherited context, so without the inherited fallback the guard reports
+	// "untracked" and writes the secret into a tracked file.
+	t.Run("legitimate routing", func(t *testing.T) {
+		gitDir := filepath.Join(t.TempDir(), "repo.git")
+		if err := os.MkdirAll(gitDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		runConfigProbeGit(t, gitDir, "init", "--bare", "--quiet")
+		work := t.TempDir()
+		beadsDir := filepath.Join(work, ".beads")
+		if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		detachedTracked := filepath.Join(beadsDir, "config.yaml")
+		detachedUntracked := filepath.Join(beadsDir, "untracked.yaml")
+		for _, path := range []string{detachedTracked, detachedUntracked} {
+			if err := os.WriteFile(path, []byte("json: false\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		runConfigProbeGit(t, work, "--git-dir", gitDir, "--work-tree", work, "add", "--", detachedTracked)
+
+		t.Setenv("GIT_DIR", gitDir)
+		t.Setenv("GIT_WORK_TREE", work)
+		// Guard the fixture: the scrubbed probe must not see this repository at
+		// all, or the fallback below would be satisfied by discovery instead.
+		if isGitTrackedWithEnv(detachedTracked, gitenv.ScrubRouting(os.Environ())) {
+			t.Fatal("scrubbed discovery reached the detached work tree; fixture cannot exercise the fallback")
+		}
+		if !isGitTracked(detachedTracked) {
+			t.Error("legitimate routing lost the tracked file; the secret guard would write into it")
+		}
+		if isGitTracked(detachedUntracked) {
+			t.Error("untracked file reported as tracked")
+		}
+		if err := checkSecretGitTracked(detachedTracked, "linear.api_key"); err == nil || !strings.Contains(err.Error(), "refusing to write secret key") {
+			t.Errorf("tracked secret refusal = %v", err)
+		}
+		if err := checkSecretGitTracked(detachedUntracked, "linear.api_key"); err != nil {
+			t.Errorf("untracked secret refused: %v", err)
+		}
+	})
 }
 
 // A checkout reachable only through inherited Git routing is the case a

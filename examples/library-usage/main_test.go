@@ -9,8 +9,21 @@ import (
 	"github.com/steveyegge/beads"
 )
 
+// clearServerModeEnv clears the environment switches that put workspace
+// discovery and opens into Dolt server mode. With any of them exported,
+// discovery routes to .beads/dolt and OpenBestAvailable connects to (or
+// auto-starts) a SQL server instead of using the test's embedded fixture.
+func clearServerModeEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+}
+
 // TestExampleCompiles ensures the example code compiles and basic API works
 func TestExampleCompiles(t *testing.T) {
+	clearServerModeEnv(t)
+
 	// Create temporary database for testing
 	tmpDir, err := os.MkdirTemp("", "beads-example-test-*")
 	if err != nil {
@@ -143,24 +156,26 @@ func TestDependencyConstants(t *testing.T) {
 
 // TestFindDatabasePath tests database discovery
 func TestFindDatabasePath(t *testing.T) {
-	// Create temp directory with .beads
-	tmpDir, err := os.MkdirTemp("", "beads-finddb-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	// BEADS_DIR and BEADS_DB are consulted before the directory search, so
+	// clear them: an ambient workspace must not answer for this one. The
+	// server-mode switches would route discovery to .beads/dolt, so clear
+	// those too.
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_DB", "")
+	clearServerModeEnv(t)
 
+	// Lay out the embedded Dolt workspace bd init creates by default.
+	// Discovery is Dolt-only: a bare .beads/*.db file (the removed SQLite
+	// backend's layout) is not a database.
+	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
-	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
-		t.Fatalf("Failed to create .beads dir: %v", err)
+	dataDir := filepath.Join(beadsDir, "embeddeddolt")
+	if err := os.MkdirAll(dataDir, 0o750); err != nil {
+		t.Fatalf("Failed to create embedded Dolt dir: %v", err)
 	}
-
-	dbPath := filepath.Join(beadsDir, "test.db")
-	f, err := os.Create(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create db file: %v", err)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt"}`), 0o600); err != nil {
+		t.Fatalf("Failed to create metadata.json: %v", err)
 	}
-	f.Close()
 
 	// Change to temp directory
 	t.Chdir(tmpDir)
@@ -168,7 +183,21 @@ func TestFindDatabasePath(t *testing.T) {
 	// Test FindDatabasePath
 	found := beads.FindDatabasePath()
 	if found == "" {
-		t.Error("Expected to find database, got empty string")
+		t.Fatal("Expected to find database, got empty string")
+	}
+
+	// The result is canonicalized (temp dirs are symlinked on macOS), so
+	// compare by file identity rather than by string.
+	foundInfo, err := os.Stat(found)
+	if err != nil {
+		t.Fatalf("Failed to stat found database %q: %v", found, err)
+	}
+	wantInfo, err := os.Stat(dataDir)
+	if err != nil {
+		t.Fatalf("Failed to stat embedded Dolt dir: %v", err)
+	}
+	if !os.SameFile(foundInfo, wantInfo) {
+		t.Errorf("FindDatabasePath() = %q, want %q", found, dataDir)
 	}
 
 	t.Logf("Found database: %s", found)

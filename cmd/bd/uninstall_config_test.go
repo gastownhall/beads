@@ -10,7 +10,45 @@ import (
 
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/gitenv"
+	"github.com/steveyegge/beads/internal/utils"
+	"github.com/stretchr/testify/require"
 )
+
+func TestStandaloneHooksAbsoluteFallbackHasNoConfigAuthority(t *testing.T) {
+	oldJSON := jsonOutput
+	jsonOutput = true // Reproduce the prior-command state observed in the full CI suite.
+	t.Cleanup(func() { jsonOutput = oldJSON })
+	for _, name := range []string{"nonrepo", "bare"} {
+		t.Run(name, func(t *testing.T) {
+			_, decoy, _, _ := newInitHooksFixture(t)
+			require.True(t, utils.PathsEqual(decoy, git.GetRepoRoot()), "seed stale config authority")
+			workDir, hooksDir := t.TempDir(), t.TempDir()
+			if name == "bare" {
+				initExcludeGit(t, workDir, "init", "--bare")
+			}
+			for _, key := range []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"} {
+				t.Setenv(key, "")
+				require.NoError(t, os.Unsetenv(key))
+			}
+			initExcludeGit(t, decoy, "config", "--global", "core.hooksPath", hooksDir)
+			t.Chdir(workDir)
+			preserveStandaloneHookInputs(t, filepath.Join(decoy, ".git", "config"), filepath.Join(os.Getenv("HOME"), ".gitconfig"))
+			for _, mode := range []string{"shared", "beads"} {
+				setStandaloneHookMode(t, mode)
+				var err error
+				stderr := captureStderr(t, func() { err = hooksInstallCmd.RunE(hooksInstallCmd, nil) })
+				require.Equal(t, &exitError{Code: 1}, err)
+				require.Contains(t, stderr, "require a working Git repository")
+				require.NoFileExists(t, filepath.Join(hooksDir, "pre-commit"))
+			}
+			setStandaloneHookMode(t, "")
+			require.NoError(t, hooksInstallCmd.RunE(hooksInstallCmd, nil))
+			require.Contains(t, string(readInitHooksFile(t, filepath.Join(hooksDir, "pre-commit"))), hookSectionBeginPrefix)
+			require.NoError(t, hooksUninstallCmd.RunE(hooksUninstallCmd, nil))
+			require.NoFileExists(t, filepath.Join(hooksDir, "pre-commit"))
+		})
+	}
+}
 
 // TestUninstallHooksUnsetsBeadsRole verifies AC2: bd hooks uninstall clears
 // beads.role in addition to core.hooksPath, so a manual `rm -rf .beads/`
@@ -19,7 +57,7 @@ import (
 func TestUninstallHooksUnsetsBeadsRole(t *testing.T) {
 	tmpDir := newGitRepo(t)
 	runInDir(t, tmpDir, func() {
-		cmd := exec.Command("git", "config", "beads.role", "primary")
+		cmd := gitCommand("config", "beads.role", "primary")
 		cmd.Dir = tmpDir
 		if err := cmd.Run(); err != nil {
 			t.Fatalf("failed to set beads.role: %v", err)
@@ -29,7 +67,7 @@ func TestUninstallHooksUnsetsBeadsRole(t *testing.T) {
 			t.Fatalf("uninstallHooks() failed: %v", err)
 		}
 
-		getCmd := exec.Command("git", "config", "--local", "--get", "beads.role")
+		getCmd := gitCommand("config", "--local", "--get", "beads.role")
 		getCmd.Dir = tmpDir
 		out, err := getCmd.Output()
 		if err == nil {
@@ -58,7 +96,7 @@ func TestUninstallHooksReportsAmbiguousBeadsRole(t *testing.T) {
 	tmpDir := newGitRepo(t)
 	runInDir(t, tmpDir, func() {
 		for _, value := range []string{"primary", "secondary"} {
-			cmd := exec.Command("git", "config", "--add", "beads.role", value)
+			cmd := gitCommand("config", "--add", "beads.role", value)
 			cmd.Dir = tmpDir
 			if err := cmd.Run(); err != nil {
 				t.Fatalf("failed to add beads.role=%s: %v", value, err)
@@ -74,7 +112,7 @@ func TestUninstallHooksReportsAmbiguousBeadsRole(t *testing.T) {
 		}
 
 		// And the key really is still set — the error was not spurious.
-		getCmd := exec.Command("git", "config", "--local", "--get-all", "beads.role")
+		getCmd := gitCommand("config", "--local", "--get-all", "beads.role")
 		getCmd.Dir = tmpDir
 		out, getErr := getCmd.Output()
 		if getErr != nil {
@@ -103,7 +141,7 @@ func TestResetHooksPathIfBeadsManagedReportsFailureLoudly(t *testing.T) {
 		// There has to be something to unset, or there is no git invocation to
 		// fail: the reset reads beads.role first and only unsets it when it is
 		// actually present.
-		setCmd := exec.Command("git", "config", "beads.role", "primary")
+		setCmd := gitCommand("config", "beads.role", "primary")
 		setCmd.Dir = tmpDir
 		if err := setCmd.Run(); err != nil {
 			t.Fatalf("failed to set beads.role: %v", err)
@@ -185,7 +223,7 @@ func TestResetRolePreservesSelectedGitContext(t *testing.T) {
 				t.Fatal(err)
 			}
 			query := func(dir string, args ...string) ([]byte, error) {
-				cmd := exec.Command("git", args...)
+				cmd := gitCommand(args...)
 				cmd.Dir, cmd.Env = dir, gitenv.ScrubRouting(os.Environ())
 				return cmd.CombinedOutput()
 			}
@@ -230,7 +268,7 @@ func TestResetRolePreservesSelectedGitContext(t *testing.T) {
 				t.Setenv("GIT_CONFIG_VALUE_0", "forged")
 			case "selected_config":
 				t.Setenv("GIT_CONFIG", filepath.Join(decoy, ".git", "config"))
-				probe := exec.Command("git", "--git-dir", selected, "config", "beads.routing-test", "selected-file")
+				probe := gitCommand("--git-dir", selected, "config", "beads.routing-test", "selected-file")
 				probe.Dir = cwd // This fixture precondition deliberately inherits GIT_CONFIG.
 				if out, err := probe.CombinedOutput(); err != nil {
 					t.Fatalf("selected-file probe: %v\n%s", err, out)

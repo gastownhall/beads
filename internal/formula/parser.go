@@ -71,18 +71,34 @@ func NewParser(searchPaths ...string) *Parser {
 // the command surface. If no beads project is resolved, fall back to cwd/.beads
 // so formula registries can still be used before a project is initialized.
 func DefaultSearchPaths() []string {
-	var paths []string
+	paths, _ := defaultSearchPaths()
+	return paths
+}
 
-	addPath := func(path string) {
+// OrchestratorOnlySearchPath returns $GT_ROOT/.beads/formulas when GT_ROOT is
+// set and that directory is its own entry in DefaultSearchPaths, i.e. it is not
+// also the project, checkout or user formula directory. It returns "" when
+// GT_ROOT is unset or its formula directory coincides with an earlier path.
+// Commands that write formula files use it to recognize the orchestrator-only
+// directory, which may be off limits for writes depending on where GT_ROOT
+// came from.
+func OrchestratorOnlySearchPath() string {
+	_, orchestratorDir := defaultSearchPaths()
+	return orchestratorDir
+}
+
+func defaultSearchPaths() (paths []string, orchestratorDir string) {
+	addPath := func(path string) bool {
 		if path == "" {
-			return
+			return false
 		}
 		for _, existing := range paths {
 			if existing == path {
-				return
+				return false
 			}
 		}
 		paths = append(paths, path)
+		return true
 	}
 
 	// Project-level formulas via resolved beads directory.
@@ -109,10 +125,13 @@ func DefaultSearchPaths() []string {
 
 	// Orchestrator formulas (via GT_ROOT)
 	if gtRoot := os.Getenv("GT_ROOT"); gtRoot != "" {
-		addPath(filepath.Join(gtRoot, ".beads", "formulas"))
+		dir := filepath.Join(gtRoot, ".beads", "formulas")
+		if addPath(dir) {
+			orchestratorDir = dir
+		}
 	}
 
-	return paths
+	return paths, orchestratorDir
 }
 
 // ParseFile parses a formula from a file path.
@@ -400,13 +419,24 @@ func ExtractVariables(formula *Formula) []string {
 	// Extract from formula fields
 	extract(formula.Description)
 
-	// Extract from steps
+	// Extract from steps. The fields scanned here must stay in sync with the
+	// fields substituteStepVars (cook) and cloneSubgraphInto (pour) resolve -
+	// a scanned-but-unresolved field demands a variable it then ignores, and a
+	// resolved-but-unscanned field ships a literal placeholder (GH#5110,
+	// GH#5754).
 	var extractFromStep func(*Step)
 	extractFromStep = func(step *Step) {
 		extract(step.Title)
 		extract(step.Description)
+		extract(step.Notes)
 		extract(step.Assignee)
 		extract(step.Condition)
+		for _, label := range step.Labels {
+			extract(label)
+		}
+		for _, s := range metadataStrings(step.Metadata, 0) {
+			extract(s)
+		}
 		if step.Gate != nil {
 			extract(step.Gate.Type)
 			extract(step.Gate.ID)
@@ -424,6 +454,37 @@ func ExtractVariables(formula *Formula) []string {
 	}
 
 	return vars
+}
+
+// maxMetadataScanDepth bounds metadataStrings' recursion into decoded step
+// metadata, which is arbitrary user-supplied TOML/JSON.
+const maxMetadataScanDepth = 32
+
+// metadataStrings returns every string leaf of a decoded step metadata value,
+// at any nesting depth. Map keys are excluded: substitution does not rewrite
+// them, so scanning them would surface a variable that never resolves.
+func metadataStrings(v interface{}, depth int) []string {
+	if depth >= maxMetadataScanDepth {
+		return nil
+	}
+	switch val := v.(type) {
+	case string:
+		return []string{val}
+	case map[string]interface{}:
+		var out []string
+		for _, elem := range val {
+			out = append(out, metadataStrings(elem, depth+1)...)
+		}
+		return out
+	case []interface{}:
+		var out []string
+		for _, elem := range val {
+			out = append(out, metadataStrings(elem, depth+1)...)
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 // Substitute replaces {{variable}} placeholders with values.

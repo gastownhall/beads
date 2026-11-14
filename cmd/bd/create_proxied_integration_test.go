@@ -183,6 +183,14 @@ func TestProxiedServerCreate2(t *testing.T) {
 			t.Errorf("metadata: got %v, want key=value", m)
 		}
 	})
+}
+
+// TestProxiedServerCreate2B holds more of TestProxiedServerCreate2's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerCreate2B(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("dry_run", func(t *testing.T) {
 		t.Parallel()
@@ -349,6 +357,14 @@ A new feature
 			t.Errorf("source_repo: got %q, want %q", sourceRepo, "/path/to/repo")
 		}
 	})
+}
+
+// TestProxiedServerCreate2C holds more of TestProxiedServerCreate2's cases, split
+// off so the bd_proxied_test shard manifest can place them on another shard.
+func TestProxiedServerCreate2C(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	// RULING R1 (TestParityCreateOnOccupiedIDRefuses): `bd create --id` on an
 	// occupied ID refuses with exit 1 and a fixed message, leaving the

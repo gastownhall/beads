@@ -1,0 +1,636 @@
+#!/usr/bin/env bash
+# worker-env-sync-verify: may the worker-env sync PR merge without a review?
+#
+#   tools/rbe/worker-env-sync-verify [PR]
+#
+# worker-env-autosync.yml opens the sync PR (bot/worker-env-sync) when
+# gascity re-pins the rbe-west worker env, and until it lands every beads
+# PR's Bazel preflight fails. worker-env-sync-automerge.yml queues it without
+# a review, and only on this script's verdict "arm" for the PR's exact head
+# commit. It reads the PR from GitHub's API, as data: it never checks out,
+# builds or runs anything from the PR. The checks:
+#   author      opened by gascity-autofix[bot] (the autosync's PR token)
+#   head-repo   from a branch of this repository, not a fork
+#   head-ref    from bot/worker-env-sync exactly
+#   base-ref    into main
+#   draft       not a draft
+#   open        still open
+#   sender      on a synchronize event, pushed by gastownhall-autofix[bot]
+#   commits     every commit of main...<head> authored and committed by
+#               gastownhall-autofix[bot] (the GitHub users their emails
+#               resolve to)
+#   pusher      the branch's newest push, force push or creation (the
+#               repository activity API) left it at the head commit and was
+#               gastownhall-autofix[bot]'s, the autosync's push token: a
+#               commit's author is whatever its pusher wrote, the pusher is
+#               who GitHub authenticated
+#   files       main...<head> changes platforms/BUILD.bazel and
+#               tools/rbe/worker-env.txt, both modified, and nothing else
+#   build-file  the head's platforms/BUILD.bazel differs from beads main's in
+#               the worker-env pin line alone
+#   pin         that pin is the sha256 of the head's tools/rbe/worker-env.txt
+#   gascity     both are gascity main's: the trusted worker-env-sync next to
+#               this script, run on the head's two files in a scratch
+#               directory, with main resolved to a commit
+# and, to read the PR at all: pr (its number and head) and merge-queue (its
+# queue and auto-merge state). Everything is read at the head commit the PR
+# showed first (head-sha), so a push in between cannot mix two heads.
+#
+# Verdict: arm (every check passed), refuse (one failed), unknown (one could
+# not be decided: GitHub or gascity unreachable, or the activity API not yet
+# showing the head's push), or none (no open sync PR). Unknown never arms. A
+# queue entry for the head may stay (hold) on arm, and on unknown only while
+# GitHub or gascity did not answer a read: who pushed the head is no outage.
+# Arming waits until the PR's required checks, CI Gate / Required and PR
+# Risk Gate / Required, have both passed on the head: GitHub then queues it
+# at once, from that head, and nothing stays armed for a later push to
+# inherit. It stops after the PR has been queued three times at one head
+# (two re-arms after merge-queue ejections). The act job re-reads the PR and
+# acts only on what it finds (see the workflow); this script also decides
+# the refusal comment (once per head commit), the fallback label (once, if
+# arming is refused for lack of permission and the PR is in no review
+# already) and the CI re-run (once per head: a verified PR's PR or PR Risk
+# run of its head that failed, was cancelled or timed out on its first
+# attempt).
+#
+# Everything it prints, on stdout and stderr, goes through defang below: the
+# runner reads workflow commands from a step's output, ::name:: at the
+# start of a line and the legacy ##[name] anywhere in one, and much of what
+# this prints (a PR's file names, its diff) is the PR's.
+#
+# It never writes to GitHub: the act and rerun jobs carry out what it
+# decides, with tokens it never sees. So it is also the dry run: on Linux,
+# from a checkout, with gh logged in (read access),
+#   tools/rbe/worker-env-sync-verify 7746
+# prints every check and what the guard would do. With no PR it finds the
+# open sync PR itself, as a re-check does.
+#
+# Exit 0 (arm, none), 1 (refuse), 2 (unknown), 3 (it could not run). With
+# GITHUB_OUTPUT set it also writes pr, head-sha, verdict, arm, hold,
+# comment, fallback-label, rerun (run ids) and reason.
+#
+# Env: REPO (default $GITHUB_REPOSITORY, then gastownhall/beads); the
+# event: EVENT_NAME, EVENT_ACTION, EVENT_SENDER (unset: a manual re-check).
+# Tests only: WORKER_ENV_SYNC_VERIFY_RETRY_DELAY (seconds between activity
+# reads, default 10), and worker-env-sync's WORKER_ENV_SYNC_URL and
+# WORKER_ENV_SYNC_GIT_URL.
+set -uo pipefail
+
+repo=${REPO:-${GITHUB_REPOSITORY:-gastownhall/beads}}
+event=${EVENT_NAME:-}
+action=${EVENT_ACTION:-}
+sender=${EVENT_SENDER:-}
+retry_delay=${WORKER_ENV_SYNC_VERIFY_RETRY_DELAY:-10}
+
+readonly branch=bot/worker-env-sync base=main
+readonly pr_bot='gascity-autofix[bot]' push_bot='gastownhall-autofix[bot]'
+readonly manifest=tools/rbe/worker-env.txt build=platforms/BUILD.bazel
+readonly review_label=status/needs-review-auto
+readonly marker='<!-- worker-env-sync-automerge refused'
+# The review-pipeline labels (CONTRIBUTING.md's pull request pipeline table
+# plus status/awaiting-approval), the list worker-env-autosync.yml's PR step
+# uses: a PR carrying one is in the review already.
+readonly review_labels='["status/needs-review","status/needs-review-auto","status/reviewing","status/awaiting-approval","status/review-failed","status/merge-ready","status/merge-queued","status/merge-failed"]'
+# main's required checks (the "beads main: required CI gates" ruleset), as
+# the GitHub Actions app (id 15368) reports them.
+readonly -a required_checks=("CI Gate / Required" "PR Risk Gate / Required")
+readonly actions_app=15368
+# The first queueing and two re-arms after merge-queue ejections, per head.
+readonly max_queue_entries=3
+
+# defang: stdin with every workflow-command opener broken (:: becomes : :,
+# ##[ becomes # #[), however many there are in a row.
+defang() { sed -e ':a' -e 's/::/: :/g' -e 'ta' -e ':b' -e 's/##\[/# #[/g' -e 'tb'; }
+
+failed=()
+undecided=()
+# Set when the activity API does not show the head's push: undecided, but
+# not a read GitHub or gascity failed to answer, so it holds no queue entry.
+unattributed=false
+log() { printf '%s\n' "$*" | tee -a "$tmp/checks"; }
+pass() { log "PASS $*"; }
+fail() {
+	log "FAIL $*"
+	failed+=("$*")
+}
+unknown() {
+	log "UNKNOWN $*"
+	undecided+=("$*")
+}
+skip() { log "SKIP $*"; }
+wait_for() { log "WAIT $*"; }
+# quote: TEXT indented, for reading; defang is what keeps it from being a
+# workflow command.
+quote() { sed 's/^/  | /' <<<"$1"; }
+# clean: API text with its control characters dropped, safe on one line.
+clean() { printf '%s' "$1" | tr -d '\000-\037\177'; }
+# annotate PREFIX TEXT: one workflow command of this script's own, on the
+# real stdout (fd 3), with TEXT defanged and its % escaped: the runner
+# decodes %25, %0D and %0A in a command's message, so a file name holding
+# %0A would otherwise show as a line break.
+annotate() { printf '%s%s\n' "$1" "$(clean "$2" | defang | sed 's/%/%25/g')" >&3; }
+# fence FILE: a run of backticks longer than any in FILE, to wrap it in a
+# markdown code block it cannot close.
+fence() {
+	local f='```'
+	while grep -qF -- "$f" "$1"; do
+		f="$f\`"
+	done
+	printf '%s' "$f"
+}
+
+# Reads only, all of them: this script never writes to GitHub.
+get() { gh api "$1"; }
+get_all() { gh api --paginate "$1" | jq -s 'add // []'; }
+get_raw() { gh api -H 'Accept: application/vnd.github.raw' "$1" >"$2"; }
+
+pr="" head_sha="" state="" head_ref="" head_repo="" none="" head_pushed_at=""
+armed=false queued=false labels='[]' green=false queue_entries=0
+
+# The PR a re-check (schedule, dispatch, workflow_run, a dry run with no PR)
+# is about: the open one from this repository's bot/worker-env-sync (the
+# head filter is owner:branch, so a fork owned by someone else is not
+# listed; one under this owner is filtered out below).
+find_pr() {
+	local list
+	if ! list=$(get_all "repos/$repo/pulls?state=open&base=$base&head=${repo%%/*}:$branch&per_page=100"); then
+		unknown "pr: could not list the open PRs from $branch"
+		return
+	fi
+	pr=$(jq -r --arg repo "$repo" --arg branch "$branch" \
+		'[.[] | select(.head.repo.full_name == $repo and .head.ref == $branch)] | first | .number // empty' <<<"$list")
+	if [ -z "$pr" ]; then
+		none="no open PR from $repo:$branch into $base"
+	fi
+}
+
+check_pr() {
+	local pull author base_repo base_ref draft merged
+	if ! [[ $pr =~ ^[0-9]+$ ]]; then
+		unknown "pr: '$(clean "$pr")' is not a PR number"
+		pr=""
+		return 1
+	fi
+	if ! pull=$(get "repos/$repo/pulls/$pr"); then
+		unknown "pr: could not read $repo#$pr"
+		return 1
+	fi
+	head_sha=$(jq -r '.head.sha // ""' <<<"$pull")
+	if ! [[ $head_sha =~ ^[0-9a-f]{40}$ ]]; then
+		head_sha=""
+		unknown "pr: $repo#$pr has no head commit"
+		return 1
+	fi
+	state=$(clean "$(jq -r '.state // ""' <<<"$pull")")
+	labels=$(jq -c '[(.labels // [])[].name]' <<<"$pull")
+	author=$(clean "$(jq -r '.user.login // ""' <<<"$pull")")
+	head_repo=$(clean "$(jq -r '.head.repo.full_name // ""' <<<"$pull")")
+	base_repo=$(clean "$(jq -r '.base.repo.full_name // ""' <<<"$pull")")
+	head_ref=$(clean "$(jq -r '.head.ref // ""' <<<"$pull")")
+	base_ref=$(clean "$(jq -r '.base.ref // ""' <<<"$pull")")
+	draft=$(jq -r '.draft // false' <<<"$pull")
+	merged=$(jq -r '.merged // false' <<<"$pull")
+	log "worker-env-sync-verify: $repo#$pr at $head_sha (event ${event:-none}${action:+/$action})"
+
+	if [ "$author" = "$pr_bot" ]; then
+		pass "author: opened by $author"
+	else
+		fail "author: opened by '$author', not $pr_bot"
+	fi
+	if [ "$head_repo" = "$repo" ] && [ "$base_repo" = "$repo" ]; then
+		pass "head-repo: a branch of $repo"
+	else
+		fail "head-repo: from '${head_repo:-a deleted repository}' into '$base_repo'; want both $repo"
+	fi
+	if [ "$head_ref" = "$branch" ]; then
+		pass "head-ref: $branch"
+	else
+		fail "head-ref: from '$head_ref', not $branch"
+	fi
+	if [ "$base_ref" = "$base" ]; then
+		pass "base-ref: into $base"
+	else
+		fail "base-ref: into '$base_ref', not $base"
+	fi
+	if [ "$draft" = false ]; then
+		pass "draft: not a draft"
+	else
+		fail "draft: a draft"
+	fi
+	if [ "$state" = open ]; then
+		pass "open: open"
+	else
+		fail "open: $state$([ "$merged" = true ] && echo ', merged')"
+	fi
+	if [ "$event" = pull_request_target ] && [ "$action" = synchronize ]; then
+		if [ "$sender" = "$push_bot" ]; then
+			pass "sender: this synchronize was $push_bot's push"
+		else
+			fail "sender: this synchronize was a push by '$(clean "$sender")', not $push_bot"
+		fi
+	else
+		skip "sender: not a synchronize event"
+	fi
+
+	check_compare
+	check_pusher
+
+	mkdir -p "$tmp/head/tools/rbe" "$tmp/head/platforms"
+	if get_raw "repos/$repo/contents/$manifest?ref=$head_sha" "$tmp/head/$manifest" &&
+		get_raw "repos/$repo/contents/$build?ref=$head_sha" "$tmp/head/$build" &&
+		get_raw "repos/$repo/contents/$build?ref=$base" "$tmp/main-build"; then
+		check_content
+	else
+		unknown "content: could not read the head's $manifest and $build, or $base's $build"
+	fi
+
+	check_queue
+	if [ "$state" = open ]; then
+		check_ci
+	fi
+}
+
+# The commits and the files of main...<head>, the head this run read: the
+# PR's own commit and file lists follow its current head, which a push can
+# move while this runs.
+check_compare() {
+	local cmp total n bad got want shown count
+	if ! cmp=$(get "repos/$repo/compare/$base...$head_sha?per_page=100"); then
+		unknown "commits: could not compare $base with the head"
+		unknown "files: could not compare $base with the head"
+		return
+	fi
+	total=$(jq -r '.total_commits // 0' <<<"$cmp")
+	n=$(jq '(.commits // []) | length' <<<"$cmp")
+	bad=$(jq -r --arg bot "$push_bot" '[(.commits // [])[] | select(.author.login != $bot or .committer.login != $bot)
+		| "\(.sha[0:12]) (author \(.author.login // "no GitHub user"), committer \(.committer.login // "no GitHub user"))"]
+		| join("; ")' <<<"$cmp")
+	if [ "$n" != "$total" ]; then
+		fail "commits: the API listed $n of the head's $total commits, so not every one was checked"
+	elif [ -n "$bad" ]; then
+		fail "commits: not all authored and committed by $push_bot: $(clean "$bad")"
+	else
+		pass "commits: $n, each authored and committed by $push_bot"
+	fi
+	got=$(jq -r '(.files // [])[] | "\(.status) \(.filename | @json)"' <<<"$cmp" | LC_ALL=C sort)
+	want=$(printf 'modified "%s"\nmodified "%s"\n' "$build" "$manifest" | LC_ALL=C sort)
+	if [ "$got" = "$want" ]; then
+		pass "files: $build and $manifest, both modified, and nothing else"
+	else
+		count=$(jq '(.files // []) | length' <<<"$cmp")
+		shown=$(head -n 5 <<<"$got" | tr '\n' ';' | sed 's/;$//; s/;/; /g')
+		if [ "$count" -gt 5 ]; then
+			shown="$shown; and $((count - 5)) more"
+		fi
+		fail "files: $(clean "$shown"); want exactly $build and $manifest, both modified"
+	fi
+}
+
+# The pusher check reads bot/worker-env-sync's activity, so it says nothing
+# about a PR from another branch or repository (head-ref or head-repo fails
+# it). The activity API can lag a push by seconds: an open PR's head that
+# is not yet the newest push is read again, twice, before it is unknown.
+check_pusher() {
+	if [ "$head_ref" != "$branch" ] || [ "$head_repo" != "$repo" ]; then
+		skip "pusher: not a $repo:$branch PR"
+		return
+	fi
+	local activity newest after actor kind when attempt=1
+	while :; do
+		if ! activity=$(get "repos/$repo/activity?ref=refs/heads/$branch&per_page=100"); then
+			unknown "pusher: could not read refs/heads/$branch's activity"
+			return
+		fi
+		newest=$(jq -c '[.[] | select(.activity_type == "push" or .activity_type == "force_push" or .activity_type == "branch_creation")] | first // {}' <<<"$activity")
+		after=$(jq -r '.after // ""' <<<"$newest")
+		actor=$(clean "$(jq -r '.actor.login // ""' <<<"$newest")")
+		kind=$(clean "$(jq -r '.activity_type // "no push"' <<<"$newest")")
+		when=$(clean "$(jq -r '.timestamp // ""' <<<"$newest")")
+		if [ "$after" = "$head_sha" ]; then
+			if [ "$actor" = "$push_bot" ]; then
+				head_pushed_at=$when
+				pass "pusher: $actor's $kind ($when) left $branch at the head"
+			else
+				fail "pusher: the $kind that left $branch at the head ($when) was by '$actor', not $push_bot"
+			fi
+			return
+		fi
+		if [ "$attempt" -ge 3 ] || [ "$state" != open ]; then
+			unknown "pusher: the newest push to $branch the activity API shows ($kind) left it at '$(clean "$after")', not the head; it may not show the head's push yet"
+			unattributed=true
+			return
+		fi
+		attempt=$((attempt + 1))
+		sleep "$retry_delay"
+	done
+}
+
+check_content() {
+	local npins pin sum out rc delta
+	npins=$(grep -cE '^ *"worker-env": "sha256:[0-9a-f]{64}",$' "$tmp/head/$build")
+	pin=$(sed -nE 's/^ *"worker-env": "(sha256:[0-9a-f]{64})",$/\1/p' "$tmp/head/$build")
+	if [ "$npins" != 1 ]; then
+		fail "build-file: the head's $build has $npins worker-env pin lines, want 1"
+	elif ! delta=$(diff -u --label "$base $build" --label "head $build" <(pin_free "$tmp/main-build") <(pin_free "$tmp/head/$build")); then
+		fail "build-file: the head's $build differs from $base's beyond the worker-env pin line"
+		quote "$delta"
+	else
+		pass "build-file: differs from $base's in the worker-env pin line alone"
+	fi
+	if [ "$npins" != 1 ]; then
+		skip "pin: no single worker-env pin to check"
+	else
+		sum="sha256:$(sha256sum "$tmp/head/$manifest" | cut -d' ' -f1)"
+		if [ "$pin" = "$sum" ]; then
+			pass "pin: $pin is the sha256 of the head's $manifest"
+		else
+			fail "pin: the head pins $pin, but its $manifest hashes to $sum"
+		fi
+	fi
+	out=$(cd "$tmp/head" && env -u GITHUB_STEP_SUMMARY -u WORKER_ENV_SYNC_REPORT "$here/worker-env-sync" main 2>&1)
+	rc=$?
+	case $rc in
+	0) pass "gascity: $(grep -m1 '^worker-env: in step' <<<"$out")" ;;
+	1)
+		fail "gascity: the head's $manifest or its pin differs from gascity main's"
+		quote "$out"
+		;;
+	*)
+		unknown "gascity: could not compare with gascity main (worker-env-sync exit $rc)"
+		quote "$out"
+		;;
+	esac
+}
+
+# pin_free FILE: FILE with the worker-env pin's value replaced, so two
+# platforms/BUILD.bazel files compare equal when only their pins differ.
+pin_free() {
+	sed -E 's/^( *"worker-env": ")sha256:[0-9a-f]{64}(",)$/\1PIN\2/' "$1"
+}
+
+# The queue and auto-merge state, and how often the PR has been queued since
+# the head's push (to bound re-arms after merge-queue ejections).
+check_queue() {
+	local q since
+	if ! q=$(gh api graphql -f owner="${repo%%/*}" -f name="${repo#*/}" -F number="$pr" \
+		-f query='query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { isInMergeQueue autoMergeRequest { enabledAt } timelineItems(itemTypes: [ADDED_TO_MERGE_QUEUE_EVENT], last: 100) { nodes { ... on AddedToMergeQueueEvent { createdAt } } } } } }') ||
+		! queued=$(jq -er '.data.repository.pullRequest.isInMergeQueue | if . == true then "true" elif . == false then "false" else error end' <<<"$q"); then
+		queued=false
+		unknown "merge-queue: could not read whether $repo#$pr is in the merge queue"
+		return
+	fi
+	armed=$(jq -r 'if .data.repository.pullRequest.autoMergeRequest then "true" else "false" end' <<<"$q")
+	since=${head_pushed_at:-9999}
+	queue_entries=$(jq -r --arg since "$since" '[(.data.repository.pullRequest.timelineItems.nodes // [])[] | select((.createdAt // "") >= $since)] | length' <<<"$q")
+	pass "merge-queue: $([ "$queued" = true ] && echo queued || echo 'not queued'), auto-merge $([ "$armed" = true ] && echo armed || echo 'not armed'), queued $queue_entries time(s) at this head"
+}
+
+# Arming waits for main's required checks on the head: armed on a green
+# head, GitHub queues the PR at once, from that head.
+check_ci() {
+	local name enc runs got
+	green=true
+	for name in "${required_checks[@]}"; do
+		enc=$(jq -rn --arg s "$name" '$s | @uri')
+		if ! runs=$(get "repos/$repo/commits/$head_sha/check-runs?check_name=$enc&filter=latest&app_id=$actions_app&per_page=100"); then
+			green=false
+			wait_for "ci: could not read $name on the head"
+			continue
+		fi
+		got=$(jq -r '(.check_runs // []) | max_by(.id) // {} | "\(.status // "not started")\(if .conclusion then " " + .conclusion else "" end)"' <<<"$runs")
+		if [ "$got" = "completed success" ]; then
+			pass "ci: $name passed on the head"
+		else
+			green=false
+			wait_for "ci: $name is $(clean "$got") on the head"
+		fi
+	done
+}
+
+verdict="" arm=false hold=false comment=false fallback=false
+rerun=()
+notes=()
+
+decide() {
+	if [ -n "$none" ]; then
+		verdict=none
+	elif [ "${#failed[@]}" -gt 0 ]; then
+		verdict=refuse
+	elif [ "${#undecided[@]}" -gt 0 ] || [ -z "$head_sha" ]; then
+		verdict=unknown
+	else
+		verdict=arm
+	fi
+	[ "$state" = open ] || return 0
+	case $verdict in
+	arm) hold=true ;;
+	unknown)
+		if [ "$unattributed" = true ]; then
+			notes+=("the activity API does not show who pushed the head, so the act job holds no queue entry for it")
+		else
+			hold=true
+		fi
+		;;
+	esac
+	if [ "$verdict" = arm ]; then
+		if [ "$queued" = true ]; then
+			notes+=("queued already")
+		elif [ "$armed" = true ]; then
+			notes+=("auto-merge is armed but the PR is not queued: the act job disables it, and a later run arms afresh")
+		elif [ "$green" != true ]; then
+			notes+=("not armed until ${required_checks[0]} and ${required_checks[1]} pass on the head (a PR or PR Risk run's completion, or the 15-minute re-check, looks again)")
+		elif [ "$queue_entries" -ge "$max_queue_entries" ]; then
+			notes+=("queued $queue_entries times at this head (merge-queue ejections); not re-armed: look at its merge groups")
+		else
+			arm=true
+		fi
+		decide_rerun
+	fi
+	if [ "$verdict" = refuse ]; then
+		decide_comment
+	fi
+	if [ "$arm" = true ]; then
+		decide_fallback
+	fi
+}
+
+# One comment per refused head commit: the marker carries the commit, and
+# only the PR's own author bot (the act job's token) writes it.
+decide_comment() {
+	local comments
+	if ! comments=$(get_all "repos/$repo/issues/$pr/comments?per_page=100"); then
+		notes+=("could not read the PR's comments; no comment (it could be a second one)")
+		return
+	fi
+	if jq -e --arg bot "$pr_bot" --arg m "$marker $head_sha -->" \
+		'any(.[]; .user.login == $bot and ((.body // "") | contains($m)))' <<<"$comments" >/dev/null; then
+		notes+=("this head's refusal is commented already")
+	else
+		comment=true
+	fi
+}
+
+# The fallback, should arming be refused for lack of permission: label the
+# PR for review, once (never if it was labeled for review before), and only
+# if it is not in the review pipeline already.
+decide_fallback() {
+	local events
+	if jq -e --argjson pipeline "$review_labels" 'any(.[]; IN($pipeline[]))' <<<"$labels" >/dev/null; then
+		notes+=("carries a review-pipeline label; no fallback label")
+		return
+	fi
+	if ! events=$(get_all "repos/$repo/issues/$pr/events?per_page=100"); then
+		notes+=("could not read the PR's events; no fallback label")
+		return
+	fi
+	if jq -e --arg l "$review_label" 'any(.[]; .event == "labeled" and .label.name == $l)' <<<"$events" >/dev/null; then
+		notes+=("labeled $review_label before; no fallback label")
+		return
+	fi
+	fallback=true
+}
+
+# A re-pin moves every action key, so the sync PR's first CI run is
+# uncached and its release cross-compile can hit its timeout. A re-check
+# (a PR or PR Risk run's completion, the schedule, a dispatch, a dry run)
+# re-runs the failed jobs of the newest PR and PR Risk run of the head when
+# that run failed, was cancelled or timed out, and no run of the head has
+# been re-run before (run_attempt > 1).
+decide_rerun() {
+	case $event in
+	workflow_run | schedule | workflow_dispatch | '') ;;
+	*) return 0 ;;
+	esac
+	local wf runs id
+	for wf in pr.yml pr-risk.yml; do
+		if ! runs=$(get "repos/$repo/actions/workflows/$wf/runs?event=pull_request&head_sha=$head_sha&per_page=100"); then
+			notes+=("could not list $wf's runs of the head; not re-run")
+			continue
+		fi
+		id=$(jq -r '(.workflow_runs // []) as $r
+			| if ($r | length) == 0 or any($r[]; .run_attempt > 1) then empty
+			  else $r | max_by(.id)
+			    | select(.status == "completed" and (.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out"))
+			    | .id end' <<<"$runs")
+		if [[ $id =~ ^[0-9]+$ ]]; then
+			rerun+=("$id")
+		fi
+	done
+}
+
+report() {
+	local reasons=() would=() line delim f
+	case $verdict in
+	refuse) reasons=("${failed[@]}") ;;
+	unknown) reasons=("${undecided[@]}") ;;
+	esac
+	echo
+	case $verdict in
+	arm) echo "verdict: arm -- every check passed" ;;
+	refuse) echo "verdict: refuse -- ${#failed[@]} check(s) failed" ;;
+	unknown) echo "verdict: unknown -- ${#undecided[@]} check(s) undecided; unknown never arms" ;;
+	none) echo "verdict: none -- $none" ;;
+	esac
+	# What the act job does with this verdict, from the state read here
+	# (it re-reads the PR itself before acting).
+	if [ "$state" = open ]; then
+		if [ "$hold" != true ]; then
+			if [ "$queued" = true ]; then
+				would+=("take #$pr out of the merge queue")
+			fi
+			if [ "$armed" = true ]; then
+				would+=("disable auto-merge on #$pr")
+			fi
+		elif [ "$armed" = true ] && [ "$queued" = true ]; then
+			would+=("disable auto-merge on #$pr, keeping it in the merge queue")
+		elif [ "$armed" = true ]; then
+			would+=("disable the pending auto-merge on #$pr")
+		elif [ "$arm" = true ]; then
+			would+=("arm auto-merge on #$pr at $head_sha; both required checks passed, so GitHub queues it at once")
+			if [ "$fallback" = true ]; then
+				would+=("label #$pr $review_label instead, should arming be refused for lack of permission")
+			fi
+		fi
+		if [ "$hold" = true ] && [ "$verdict" = unknown ] && [ "$queued" = true ]; then
+			would+=("hold #$pr in the merge queue (unknown is transient; a refusal or a new head takes it out)")
+		fi
+	fi
+	[ "$comment" = true ] && would+=("comment the refusal on #$pr")
+	for line in "${rerun[@]}"; do
+		would+=("re-run the failed jobs of run $line")
+	done
+	[ "${#would[@]}" -gt 0 ] || would=("nothing")
+	for line in "${would[@]}"; do
+		echo "the guard would: $line"
+	done
+	for line in "${notes[@]}"; do
+		echo "note: $line"
+	done
+	case $verdict in
+	refuse) annotate "::error title=worker-env sync PR refused::" "#$pr: $(printf '%s; ' "${reasons[@]}" | sed 's/; $//')" ;;
+	unknown) annotate "::warning title=worker-env sync PR not verified::" "#${pr:-?}: $(printf '%s; ' "${reasons[@]}" | sed 's/; $//')" ;;
+	esac
+	if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -s "$tmp/checks" ]; then
+		f=$(fence "$tmp/checks")
+		{
+			echo "### worker-env sync PR: $verdict"
+			echo
+			echo "${f}text"
+			cat "$tmp/checks"
+			echo "$f"
+		} >>"$GITHUB_STEP_SUMMARY"
+	fi
+	if [ -n "${GITHUB_OUTPUT:-}" ]; then
+		delim="WORKER_ENV_SYNC_VERIFY_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+		{
+			echo "pr=$pr"
+			echo "head-sha=$head_sha"
+			echo "verdict=$verdict"
+			echo "arm=$arm"
+			echo "hold=$hold"
+			echo "comment=$comment"
+			echo "fallback-label=$fallback"
+			echo "rerun=${rerun[*]}"
+			echo "reason<<$delim"
+			for line in "${reasons[@]}"; do
+				clean "$line" | defang
+				echo
+			done
+			echo "$delim"
+		} >>"$GITHUB_OUTPUT"
+	fi
+}
+
+main() {
+	local tool
+	for tool in gh jq sha256sum cmp diff sed grep od tee; do
+		if ! command -v "$tool" >/dev/null; then
+			echo "worker-env-sync-verify: $tool not found"
+			exit 3
+		fi
+	done
+	here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) || exit 3
+	tmp=$(mktemp -d) || exit 3
+	trap 'rm -rf "$tmp"' EXIT
+
+	pr=${1:-}
+	if [ -z "$pr" ]; then
+		find_pr
+	fi
+	if [ -n "$pr" ] && [ -z "$none" ]; then
+		check_pr
+	fi
+	decide
+	report
+	case $verdict in
+	arm | none) exit 0 ;;
+	refuse) exit 1 ;;
+	*) exit 2 ;;
+	esac
+}
+
+# fd 3 is the real stdout, for annotate; everything else, stderr included,
+# is defanged on its way out.
+exec 3>&1
+main "$@" 2>&1 | defang
+exit "${PIPESTATUS[0]}"

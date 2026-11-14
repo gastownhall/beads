@@ -1,0 +1,15 @@
+=== request 1 of 1: listReadyWork
+GET /v0/beads/ready
+  ?assignee=alice
+  ?label=b
+  ?label=a
+  ?limit=5
+  ?priority=1
+  ?sort=hybrid
+  ?type=bug
+Accept: application/json, application/problem+json
+Accept-Encoding: gzip
+Authorization: Bearer <BEADS_HTTP_TOKEN>
+Bd-Project-Id: proj-v0-wire-golden
+Bd-Wire-Revision: 2
+User-Agent: bd-http-backend/v0

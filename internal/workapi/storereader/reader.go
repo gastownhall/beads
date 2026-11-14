@@ -114,7 +114,7 @@ func (r *storeReader) List(ctx context.Context, req issueops.ListRequest) (issue
 	if req.ReadyFlag {
 		items, err = r.store.GetReadyWorkWithCounts(ctx, workapi.ReadyFilterFromIssueFilter(filter))
 	} else {
-		items, err = r.store.SearchIssuesWithCounts(ctx, "", filter)
+		items, err = r.store.SearchIssuesWithCounts(ctx, req.Query, filter)
 	}
 	if err != nil {
 		return issueops.IssuePage{}, err

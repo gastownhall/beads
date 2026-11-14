@@ -69,6 +69,7 @@ func TestResolveCloseTargets(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			initConfigForTest(t)
+			neutralizeRoutingModeEnv(t)
 
 			tmpDir := t.TempDir()
 			repoDir := filepath.Join(tmpDir, "repo")
@@ -113,6 +114,10 @@ func TestResolveCloseTargets(t *testing.T) {
 			if err := os.Chdir(repoDir); err != nil {
 				t.Fatalf("chdir repoDir: %v", err)
 			}
+			// Role detection reads the process-wide RepoContext cache, which the
+			// previous case built for its own, now-deleted repo. Rebuild it from
+			// repoDir.
+			resetRepoContextCachesForTest(t)
 
 			results, cleanup, err := resolveCloseTargets(ctx, primaryStore, tc.inputIDs)
 			if err != nil {

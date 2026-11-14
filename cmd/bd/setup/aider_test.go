@@ -2,6 +2,7 @@ package setup
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -419,5 +420,77 @@ func TestAiderFilePaths(t *testing.T) {
 		if !FileExists(path) {
 			t.Errorf("Expected file at %s", path)
 		}
+	}
+}
+
+// Remove takes bd's files out of .aider and then removes .aider if they were
+// all it held, but it never removes a .aider that is a symlink, since that
+// unlinks it whatever its target holds, nor a .aider it took no file from.
+func TestRemoveAiderKeepsAiderDirItDidNotEmpty(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		link    bool   // .aider is a symlink to a directory beside the workspace
+		install bool   // bd setup aider ran first
+		config  bool   // bd's .aider.conf.yml is the one file there to remove
+		drop    string // a file of bd's the user then deleted by hand
+		kept    bool
+	}{
+		{name: "linked .aider bd installed its files through", link: true, install: true, kept: true},
+		{name: "linked .aider bd installed nothing in", link: true, kept: true},
+		{name: "real .aider bd installed nothing in", kept: true},
+		{name: "real .aider bd took no file from", config: true, kept: true},
+		{name: "real .aider holding only bd's files", install: true},
+		{name: "real .aider, BEADS.md deleted by hand", install: true, drop: filepath.Join(".aider", "BEADS.md")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			ws := filepath.Join(root, "ws")
+			dir := filepath.Join(ws, ".aider")
+			target := dir
+			if tt.link {
+				target = filepath.Join(root, "shared-aider")
+			}
+			if err := os.MkdirAll(ws, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tt.link {
+				symlinkDir(t, target, dir)
+			} else if !tt.install {
+				if err := os.Mkdir(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Chdir(ws)
+			if tt.install {
+				if err := InstallAider(); err != nil {
+					t.Fatalf("InstallAider: %v", err)
+				}
+			}
+			if tt.drop != "" {
+				if err := os.Remove(tt.drop); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.config {
+				if err := os.WriteFile(".aider.conf.yml", []byte(aiderConfigTemplate), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if err := RemoveAider(); err != nil {
+				t.Fatalf("RemoveAider: %v", err)
+			}
+			for _, path := range []string{".aider.conf.yml", filepath.Join(target, "BEADS.md"), filepath.Join(target, "README.md")} {
+				requireGone(t, path)
+			}
+			switch {
+			case !tt.kept:
+				requireGone(t, dir)
+			case tt.link:
+				requireLinkKept(t, dir)
+			default:
+				requireDirKept(t, dir)
+			}
+		})
 	}
 }

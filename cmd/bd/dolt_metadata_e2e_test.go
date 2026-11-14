@@ -91,18 +91,22 @@ func TestE2E_DoctorFixMetadataRoundtrip(t *testing.T) {
 	_ = runCommandInDir(tmpDir, "git", "config", "user.name", "Test User")
 	_ = runCommandInDir(tmpDir, "git", "config", "remote.origin.url", "https://github.com/test/repo.git")
 
-	env := append(os.Environ(),
-		"BEADS_TEST_MODE=1",
-	)
+	env := repoLocalServerEnv(t, tmpDir)
 
 	// Init dolt backend (which now writes metadata via Phase 1)
-	initOut, initErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")
+	initOut, initErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "init", "--backend", "dolt", "--server", "--prefix", "test", "--quiet")
 	if initErr != nil {
 		lower := strings.ToLower(initOut)
 		if strings.Contains(lower, "dolt") && (strings.Contains(lower, "not supported") || strings.Contains(lower, "not available") || strings.Contains(lower, "unknown")) {
 			t.Skipf("dolt backend not available: %s", initOut)
 		}
 		t.Fatalf("bd init --backend dolt failed: %v\n%s", initErr, initOut)
+	}
+
+	// BEADS_TEST_MODE=1 never auto-starts a server (dolt.New pins an
+	// unresolved port to 1, an immediate failure), so start it explicitly.
+	if out, err := runBDExecAllowErrorWithEnv(t, tmpDir, env, "dolt", "start"); err != nil {
+		t.Fatalf("bd dolt start failed: %v\n%s", err, out)
 	}
 
 	// Delete metadata to simulate a pre-Phase-1 database
@@ -161,12 +165,10 @@ func TestE2E_MigrateDoltMetadata(t *testing.T) {
 	_ = runCommandInDir(tmpDir, "git", "config", "user.name", "Test User")
 	_ = runCommandInDir(tmpDir, "git", "config", "remote.origin.url", "https://github.com/test/repo.git")
 
-	env := append(os.Environ(),
-		"BEADS_TEST_MODE=1",
-	)
+	env := repoLocalServerEnv(t, tmpDir)
 
 	// Init dolt backend (writes all metadata via Phase 1)
-	initOut, initErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "init", "--backend", "dolt", "--prefix", "test", "--quiet")
+	initOut, initErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "init", "--backend", "dolt", "--server", "--prefix", "test", "--quiet")
 	if initErr != nil {
 		lower := strings.ToLower(initOut)
 		if strings.Contains(lower, "dolt") && (strings.Contains(lower, "not supported") || strings.Contains(lower, "not available") || strings.Contains(lower, "unknown")) {
@@ -175,10 +177,16 @@ func TestE2E_MigrateDoltMetadata(t *testing.T) {
 		t.Fatalf("bd init --backend dolt failed: %v\n%s", initErr, initOut)
 	}
 
+	// BEADS_TEST_MODE=1 never auto-starts a server (dolt.New pins an
+	// unresolved port to 1, an immediate failure), so start it explicitly.
+	if out, err := runBDExecAllowErrorWithEnv(t, tmpDir, env, "dolt", "start"); err != nil {
+		t.Fatalf("bd dolt start failed: %v\n%s", err, out)
+	}
+
 	// Delete repo_id and clone_id to simulate a pre-Phase-3 database
 	// (bd_version is set by init, but identity fields are missing)
 	sqlOut, sqlErr := runBDExecAllowErrorWithEnv(t, tmpDir, env, "sql",
-		"DELETE FROM metadata WHERE key IN ('repo_id', 'clone_id')")
+		"DELETE FROM metadata WHERE `key` IN ('repo_id', 'clone_id')")
 	if sqlErr != nil {
 		t.Fatalf("bd sql DELETE failed: %v\n%s", sqlErr, sqlOut)
 	}
@@ -208,4 +216,24 @@ func TestE2E_MigrateDoltMetadata(t *testing.T) {
 			t.Errorf("bd doctor reported metadata warning %q after migrate; output:\n%s", warning, doctorOut)
 		}
 	}
+}
+
+// repoLocalServerEnv is the environment for a subprocess bd that runs a
+// repo-local dolt sql-server of its own under dir/.beads (bd init --server):
+// bd init now defaults to embedded mode, where `bd sql` and `bd dolt start`
+// are refused, so tests that need SQL access to the workspace's database
+// init with --server. The suite's BEADS_DOLT_PORT / BEADS_DOLT_SERVER_PORT
+// point at the shared test server and are cleared, so bd starts its own
+// server on a port it derives (never the shared server's, never a fixed
+// default), and the server is stopped when the test ends. BEADS_TEST_MODE=1
+// never auto-starts it: run `bd dolt start` after init.
+func repoLocalServerEnv(t *testing.T, dir string) []string {
+	t.Helper()
+	stopDoltServerCleanup(t, filepath.Join(dir, ".beads"))
+	return append(os.Environ(),
+		"BEADS_TEST_MODE=1",
+		"BEADS_DOLT_PORT=",
+		"BEADS_DOLT_SERVER_PORT=",
+		"BEADS_DOLT_SHARED_SERVER=",
+	)
 }

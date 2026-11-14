@@ -1,0 +1,12 @@
+{
+  "shape": "gc-create-graph-ephemeral",
+  "requests": [
+    {"method":"GET","operation_id":"getContext","path":"/v0/beads/context","status":200},
+    {"method":"GET","operation_id":"listSettings","path":"/v0/beads/config","status":200},
+    {"method":"GET","operation_id":"getSetting","path":"/v0/beads/config/issue_prefix","status":200},
+    {"method":"GET","operation_id":"getSetting","path":"/v0/beads/config/allowed_prefixes","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-wisp-g-root","status":404},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-wisp-g-s1","status":404},
+    {"method":"POST","operation_id":"applyBatch","path":"/v0/beads/issues:batchApply","body":["actor","items","provenance"],"status":200}
+  ]
+}

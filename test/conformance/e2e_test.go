@@ -1,4 +1,7 @@
-//go:build e2e
+//go:build e2e || integration
+
+// Built under e2e (scripts/conformance.sh) or integration (Bazel's
+// --config=integration lane, //test/conformance:conformance_test).
 
 package conformance
 
@@ -88,7 +91,7 @@ var corpus = []scenario{
 		{"create", "st", "--id", "cf-st1", "-t", "task"},
 		{"stale", "--days", "1", "--json"},
 	}},
-	// Promote a wisp to a durable issue (PromoteFromEphemeral) — CLI-level differential
+	// Promote a wisp to a durable issue (issueops.Promote) — CLI-level differential
 	// for one of the backfilled writes.
 	{name: "promote", steps: [][]string{
 		{"create", "w", "--id", "cf-pw1", "-t", "task", "--ephemeral"},

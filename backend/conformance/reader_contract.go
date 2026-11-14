@@ -113,6 +113,10 @@ type ReaderFixture struct {
 	AddDependency func(context.Context, *types.Dependency, string) error
 	// AddComment puts one comment on a durable issue.
 	AddComment func(ctx context.Context, issueID, author, text string) error
+	// PromoteWisp moves a seeded wisp into the durable plane. It is the only
+	// way to seed a DURABLE row of an infra type: creating one routes it to the
+	// wisps plane on every backend.
+	PromoteWisp func(ctx context.Context, id, actor string) error
 }
 
 // RunReaderReadyDefaultTypeExclusionsYieldToAnExplicitType pins
@@ -784,6 +788,112 @@ func RunReaderListReadyFlagRefusesAFilterItCannotCarry(t *testing.T, ctx context
 		t.Fatalf("List --id without --ready: %v", err)
 	}
 	assertReaderPageIDs(t, "List --id without --ready", page, []string{one})
+}
+
+// RunReaderListQueryMatchesTheTitleOrTheID pins ListRequest.Query: `bd
+// search`'s text, which matches a row whose title OR id contains it, case
+// insensitively, and which narrows without lifting a default exclusion — and
+// issueops.SearchListRequest, the request every `bd search` route sends, which
+// does lift them.
+//
+// EVERY KIND OF ROW the search scope promises is seeded with the text, because
+// a scope that silently loses one kind answers every other row correctly: a
+// template, a gate, a wisp of an infra type, and a DURABLE row of that type —
+// a promoted wisp, which a type filter that narrows an infra type to its
+// ephemeral rows drops with no error. Each must come back under the bare scope
+// and under its own type.
+//
+// It scopes itself with a label rather than an id set, so the served leg runs
+// it as written: listIssues publishes no id parameter.
+func RunReaderListQueryMatchesTheTitleOrTheID(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	if fixture.PromoteWisp == nil {
+		t.Fatal("fixture has no PromoteWisp: a durable row of an infra type cannot be seeded, and it is the row a narrowed type filter drops")
+	}
+	scope := readerLabel(fixture, "lsquery")
+	needle := strings.ToLower(fixture.IssuePrefix) + "qneedle"
+	titleHit := readerID(fixture, "lsquery", "title")
+	idHit := readerID(fixture, "lsquery", "idhit")
+	closedHit := readerID(fixture, "lsquery", "closed")
+	miss := readerID(fixture, "lsquery", "miss")
+	template := readerID(fixture, "lsquery", "template")
+	gate := readerID(fixture, "lsquery", "gate")
+	wispMessage := readerID(fixture, "lsquery", "wispmsg")
+	promotedMessage := readerID(fixture, "lsquery", "promotedmsg")
+
+	// The title carries the needle in UPPER case and the request asks in lower,
+	// so a case-sensitive match finds nothing.
+	titleIssue := readerIssue(titleHit, types.TypeTask, scope)
+	titleIssue.Title = "fix the " + strings.ToUpper(needle) + " path"
+	// The id-hit's title says nothing about it: only its id can match.
+	idIssue := readerIssue(idHit, types.TypeTask, scope)
+	idIssue.Title = "unrelated words"
+	closedIssue := readerIssue(closedHit, types.TypeTask, scope)
+	closedIssue.Title = "old " + needle
+	closedIssue.Status = types.StatusClosed
+	missIssue := readerIssue(miss, types.TypeTask, scope)
+	missIssue.Title = "nothing to see"
+	templateIssue := readerIssue(template, types.TypeTask, scope)
+	templateIssue.Title = needle + " template"
+	templateIssue.IsTemplate = true
+	gateIssue := readerIssue(gate, types.TypeGate, scope)
+	gateIssue.Title = needle + " gate"
+	for _, issue := range []*types.Issue{titleIssue, idIssue, closedIssue, missIssue, templateIssue, gateIssue} {
+		seedReaderIssue(t, ctx, fixture, issue)
+	}
+	// Two rows of the same infra type, one per plane. `message` is built in,
+	// so the type is valid on every backend without configuration.
+	for _, id := range []string{wispMessage, promotedMessage} {
+		message := readerIssue(id, types.TypeMessage, scope)
+		message.Title = needle + " message"
+		message.Ephemeral = true
+		seedReaderWisp(t, ctx, fixture, message)
+	}
+	if err := fixture.PromoteWisp(ctx, promotedMessage, "seed"); err != nil {
+		t.Fatalf("promote wisp %s: %v", promotedMessage, err)
+	}
+
+	searchType := func(issueType types.IssueType) publicops.ListRequest {
+		req := searchScoped(needle, scope)
+		req.IssueType = string(issueType)
+		return req
+	}
+
+	for _, tc := range []struct {
+		name string
+		req  publicops.ListRequest
+		want []string
+	}{
+		{"a title match, case-insensitively, under the default exclusions", publicops.ListRequest{Labels: []string{scope}, Query: needle}, []string{titleHit}},
+		{"AllFlag takes the closed match back", publicops.ListRequest{Labels: []string{scope}, Query: needle, AllFlag: true}, []string{titleHit, closedHit}},
+		{"an id match whose title does not contain the text", publicops.ListRequest{Labels: []string{scope}, Query: idHit, AllFlag: true}, []string{idHit}},
+		{"text nothing contains", publicops.ListRequest{Labels: []string{scope}, Query: needle + "-absent", AllFlag: true}, nil},
+		{"no text narrows nothing", publicops.ListRequest{Labels: []string{scope}}, []string{titleHit, idHit, miss}},
+		{"SearchListRequest, `bd search`'s scope, takes every status and every kind of row back", searchScoped(needle, scope), []string{titleHit, closedHit, template, gate, wispMessage, promotedMessage}},
+		{"SearchListRequest under an infra type keeps both planes' rows of it", searchType(types.TypeMessage), []string{wispMessage, promotedMessage}},
+		{"SearchListRequest under the gate type", searchType(types.TypeGate), []string{gate}},
+		{"SearchListRequest under a plain type keeps its templates", searchType(types.TypeTask), []string{titleHit, closedHit, template}},
+		// Outside the search scope an infra type alone reads only its
+		// ephemeral rows, which is where creating one puts it; IncludeEphemeral
+		// is what lifts that narrowing to the durable rows as well.
+		{"an infra type alone reads only its ephemeral rows", publicops.ListRequest{Labels: []string{scope}, Query: needle, IssueType: string(types.TypeMessage)}, []string{wispMessage}},
+		{"IncludeEphemeral lifts that narrowing", publicops.ListRequest{Labels: []string{scope}, Query: needle, IssueType: string(types.TypeMessage), IncludeEphemeral: true}, []string{wispMessage, promotedMessage}},
+	} {
+		page, err := fixture.Reader.List(ctx, tc.req)
+		if err != nil {
+			t.Errorf("List %s: %v", tc.name, err)
+			continue
+		}
+		assertReaderPageIDSet(t, "List "+tc.name, page, tc.want)
+	}
+}
+
+// searchScoped is the library's search request narrowed to one case's label,
+// the request every `bd search` route sends.
+func searchScoped(query, label string) publicops.ListRequest {
+	req := publicops.SearchListRequest(query)
+	req.Labels = []string{label}
+	return req
 }
 
 // RunReaderListEmptyPageIsWellFormed pins the page shape when nothing matches
@@ -3063,6 +3173,335 @@ func assertReaderBriefRow(t *testing.T, what string, brief, full *types.Issue) {
 	if brief.Priority != full.Priority {
 		t.Errorf("%s returned Priority = %d, want %d", what, brief.Priority, full.Priority)
 	}
+}
+
+// RunReaderListTimeBoundsAreStrictAndWholeSecond pins the eight time bounds
+// ListRequest carries beside the created pair — UpdatedAfter/Before,
+// ClosedAfter/Before, DeferAfter/Before and DueAfter/Before — at their exact
+// boundaries (reader.go: each is a strict bound on its column).
+//
+// THE BOUNDARY IS THE ASSERTION. Three rows sit one second apart around an
+// instant T, so a body that compared inclusively, swapped the two ends, or
+// bound the wrong column fails on a row rather than on nothing:
+//
+//   - after=T selects exactly the T+1s row and before=T exactly the T-1s row,
+//     so the row AT T is excluded by both;
+//   - a bound carrying a sub-second remainder (T+900ms) behaves as T on both
+//     ends, because the bound is compared at whole-second precision (the
+//     storage builder formats it as RFC 3339 without a fraction);
+//   - a row whose column is NULL — an open row's closed_at, an unset
+//     defer_until or due_at — never matches either bound;
+//   - a bound spelled in a non-UTC zone selects exactly what the same instant
+//     spelled in UTC does. An offset is part of the instant, not decoration,
+//     and a body that dropped it would move the bound by the offset.
+//
+// Every family scopes itself by id and seeds no labels, so no write after the
+// insert can move updated_at off the instant it was seeded at; AllFlag keeps
+// the closed rows in view.
+func RunReaderListTimeBoundsAreStrictAndWholeSecond(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	at := time.Now().UTC().Truncate(time.Second).Add(-3 * time.Hour)
+	created := at.Add(-time.Hour)
+	instants := []struct {
+		tag string
+		at  time.Time
+	}{
+		{"early", at.Add(-time.Second)},
+		{"exact", at},
+		{"late", at.Add(time.Second)},
+	}
+
+	for _, family := range []struct {
+		name string
+		// set stamps the family's column onto a seed.
+		set func(issue *types.Issue, v time.Time)
+		// nullable seeds a fourth row with the column NULL.
+		nullable bool
+		after    func(*publicops.ListRequest, *time.Time)
+		before   func(*publicops.ListRequest, *time.Time)
+	}{
+		{
+			name:   "updated",
+			set:    func(issue *types.Issue, v time.Time) { issue.UpdatedAt = v },
+			after:  func(r *publicops.ListRequest, v *time.Time) { r.UpdatedAfter = v },
+			before: func(r *publicops.ListRequest, v *time.Time) { r.UpdatedBefore = v },
+		},
+		{
+			name: "closed",
+			set: func(issue *types.Issue, v time.Time) {
+				issue.Status = types.StatusClosed
+				issue.UpdatedAt = v
+				issue.ClosedAt = &v
+			},
+			nullable: true,
+			after:    func(r *publicops.ListRequest, v *time.Time) { r.ClosedAfter = v },
+			before:   func(r *publicops.ListRequest, v *time.Time) { r.ClosedBefore = v },
+		},
+		{
+			name:     "defer",
+			set:      func(issue *types.Issue, v time.Time) { issue.DeferUntil = &v },
+			nullable: true,
+			after:    func(r *publicops.ListRequest, v *time.Time) { r.DeferAfter = v },
+			before:   func(r *publicops.ListRequest, v *time.Time) { r.DeferBefore = v },
+		},
+		{
+			name:     "due",
+			set:      func(issue *types.Issue, v time.Time) { issue.DueAt = &v },
+			nullable: true,
+			after:    func(r *publicops.ListRequest, v *time.Time) { r.DueAfter = v },
+			before:   func(r *publicops.ListRequest, v *time.Time) { r.DueBefore = v },
+		},
+	} {
+		caseTag := "ltb" + family.name
+		ids := map[string]string{}
+		var scope []string
+		for _, inst := range instants {
+			id := readerID(fixture, caseTag, inst.tag)
+			ids[inst.tag] = id
+			scope = append(scope, id)
+			issue := readerIssue(id, types.TypeTask, "")
+			issue.CreatedAt, issue.UpdatedAt = created, created
+			family.set(issue, inst.at)
+			seedReaderIssue(t, ctx, fixture, issue)
+		}
+		if family.nullable {
+			id := readerID(fixture, caseTag, "null")
+			scope = append(scope, id)
+			issue := readerIssue(id, types.TypeTask, "")
+			issue.CreatedAt, issue.UpdatedAt = created, created
+			seedReaderIssue(t, ctx, fixture, issue)
+		}
+		idScope := readerIDFilter(scope...)
+
+		list := func(what string, apply func(*publicops.ListRequest, *time.Time), bound time.Time) []string {
+			t.Helper()
+			req := publicops.ListRequest{IDFilter: idScope, AllFlag: true}
+			apply(&req, &bound)
+			page, err := fixture.Reader.List(ctx, req)
+			if err != nil {
+				t.Fatalf("List (%s %s): %v", family.name, what, err)
+			}
+			assertReaderPageNotNil(t, "List ("+family.name+" "+what+")", page)
+			got := readerPageIDs(page)
+			slices.Sort(got)
+			return got
+		}
+		expect := func(what string, apply func(*publicops.ListRequest, *time.Time), bound time.Time, want string) {
+			t.Helper()
+			if got := list(what, apply, bound); !slices.Equal(got, []string{want}) {
+				t.Errorf("List (%s %s %s) = %v, want exactly [%s]", family.name, what, bound.Format(time.RFC3339Nano), got, want)
+			}
+		}
+
+		plus2 := time.FixedZone("UTC+2", 2*60*60)
+		for _, bound := range []struct {
+			what string
+			v    time.Time
+		}{
+			{"at T", at},
+			{"at T with a sub-second remainder", at.Add(900 * time.Millisecond)},
+			{"at T spelled in a +02:00 zone", at.In(plus2)},
+		} {
+			expect("after "+bound.what, family.after, bound.v, ids["late"])
+			expect("before "+bound.what, family.before, bound.v, ids["early"])
+		}
+
+		// The NULL row is outside even the widest bounds on both ends.
+		if family.nullable {
+			wide := at.Add(-24 * time.Hour)
+			if got, want := list("after a day earlier", family.after, wide), sortedCopy(ids["early"], ids["exact"], ids["late"]); !slices.Equal(got, want) {
+				t.Errorf("List (%s after a day earlier) = %v, want %v — a NULL column never matches", family.name, got, want)
+			}
+			if got, want := list("before a day later", family.before, at.Add(24*time.Hour)), sortedCopy(ids["early"], ids["exact"], ids["late"]); !slices.Equal(got, want) {
+				t.Errorf("List (%s before a day later) = %v, want %v — a NULL column never matches", family.name, got, want)
+			}
+		}
+	}
+}
+
+// RunReaderListFilterFamiliesNarrowToTheirRows pins one included and one
+// excluded row for each remaining ListRequest filter family that `bd list`
+// publishes beyond the scope filters: the priority trio, the three text
+// substrings, the empty-description and no-labels predicates, the top-level
+// predicate, the type exclusion, the spec prefix, the label pattern and
+// regex, the external-ref pair, the pinned-flag pair, the deferred and
+// overdue predicates, the status exclusion and the molecule type.
+//
+// Each row is scoped by id and every arm asks AllFlag (the pinned arms
+// excepted, which are about that interplay), so an arm whose filter the body
+// dropped answers its whole scope and fails, and one whose filter the body
+// inverted answers the other row.
+//
+// PinnedFlag with NoPinnedFlag is a contradiction, and the role refuses it as
+// a validation error rather than letting one of the two silently win.
+// ParentID with NoParent is refused the same way, as CountRequest refuses it.
+func RunReaderListFilterFamiliesNarrowToTheirRows(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	id := func(name string) string { return readerID(fixture, "lff", name) }
+	seed := func(name string, mutate func(*types.Issue)) string {
+		t.Helper()
+		issue := readerIssue(id(name), types.TypeTask, "")
+		if mutate != nil {
+			mutate(issue)
+		}
+		seedReaderIssue(t, ctx, fixture, issue)
+		return issue.ID
+	}
+	intp := func(v int) *int { return &v }
+	past := time.Now().UTC().Truncate(time.Second).Add(-48 * time.Hour)
+	future := time.Now().UTC().Truncate(time.Second).Add(48 * time.Hour)
+	label := readerLabel(fixture, "lffpat")
+	external := fixture.IssuePrefix + "-LFF-ext-17"
+	spec := "docs/" + fixture.IssuePrefix + "-lff/"
+
+	p0 := seed("p0", func(i *types.Issue) { i.Priority = 0 })
+	p2 := seed("p2", func(i *types.Issue) { i.Priority = 2 })
+	p4 := seed("p4", func(i *types.Issue) { i.Priority = 4 })
+
+	textT := seed("text-t", func(i *types.Issue) { i.Title = "a title carrying ttok-lff" })
+	textD := seed("text-d", func(i *types.Issue) { i.Description = "a description carrying dtok-lff" })
+	textN := seed("text-n", func(i *types.Issue) { i.Notes = "notes carrying ntok-lff" })
+
+	labeled := seed("labeled", func(i *types.Issue) { i.Labels = []string{label} })
+	unlabeled := seed("unlabeled", nil)
+
+	parent := seed("parent", func(i *types.Issue) { i.IssueType = types.TypeEpic })
+	child := seed("child", nil)
+	if err := fixture.AddDependency(ctx, &types.Dependency{IssueID: child, DependsOnID: parent, Type: types.DepParentChild}, "seed"); err != nil {
+		t.Fatalf("seed edge %s -> %s: %v", child, parent, err)
+	}
+	loose := seed("loose", nil)
+
+	typeTask := seed("type-task", nil)
+	typeBug := seed("type-bug", func(i *types.Issue) { i.IssueType = types.TypeBug })
+	typeChore := seed("type-chore", func(i *types.Issue) { i.IssueType = types.TypeChore })
+
+	specced := seed("specced", func(i *types.Issue) { i.SpecID = spec + "design.md" })
+	unspecced := seed("unspecced", nil)
+
+	extRow := seed("ext", func(i *types.Issue) { i.ExternalRef = &external })
+	extOther := seed("ext-other", func(i *types.Issue) {
+		other := fixture.IssuePrefix + "-other-99"
+		i.ExternalRef = &other
+	})
+
+	pinned := seed("pinned", func(i *types.Issue) { i.Pinned = true })
+	unpinned := seed("unpinned", nil)
+
+	deferred := seed("deferred", func(i *types.Issue) { i.DeferUntil = &future })
+	undeferred := seed("undeferred", nil)
+
+	overdue := seed("overdue", func(i *types.Issue) { i.DueAt = &past })
+	dueLater := seed("due-later", func(i *types.Issue) { i.DueAt = &future })
+	closedOverdue := seed("closed-overdue", func(i *types.Issue) {
+		i.Status = types.StatusClosed
+		closedAt := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
+		i.ClosedAt = &closedAt
+		i.DueAt = &past
+	})
+	noDue := seed("no-due", nil)
+
+	swarm := seed("mol-swarm", func(i *types.Issue) { i.MolType = types.MolTypeSwarm })
+	patrol := seed("mol-patrol", func(i *types.Issue) { i.MolType = types.MolTypePatrol })
+
+	stOpen := seed("st-open", nil)
+	stProgress := seed("st-progress", func(i *types.Issue) { i.Status = types.StatusInProgress })
+	stBlocked := seed("st-blocked", func(i *types.Issue) { i.Status = types.StatusBlocked })
+	stClosed := seed("st-closed", func(i *types.Issue) {
+		i.Status = types.StatusClosed
+		closedAt := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
+		i.ClosedAt = &closedAt
+	})
+	statusScope := readerIDFilter(stOpen, stProgress, stBlocked, stClosed)
+
+	molType := func(m types.MolType) *publicops.MolType { return &m }
+	scoped := func(ids ...string) publicops.ListRequest {
+		return publicops.ListRequest{IDFilter: readerIDFilter(ids...), AllFlag: true}
+	}
+	with := func(req publicops.ListRequest, mutate func(*publicops.ListRequest)) publicops.ListRequest {
+		mutate(&req)
+		return req
+	}
+
+	for _, test := range []struct {
+		name string
+		req  publicops.ListRequest
+		want []string
+	}{
+		{"Priority is exact", with(scoped(p0, p2, p4), func(r *publicops.ListRequest) { r.Priority = intp(2) }), []string{p2}},
+		{"Priority 0 is a value, not unset", with(scoped(p0, p2, p4), func(r *publicops.ListRequest) { r.Priority = intp(0) }), []string{p0}},
+		{"PriorityMin is inclusive", with(scoped(p0, p2, p4), func(r *publicops.ListRequest) { r.PriorityMin = intp(2) }), []string{p2, p4}},
+		{"PriorityMax is inclusive", with(scoped(p0, p2, p4), func(r *publicops.ListRequest) { r.PriorityMax = intp(2) }), []string{p0, p2}},
+		{"PriorityMin and PriorityMax compose", with(scoped(p0, p2, p4), func(r *publicops.ListRequest) { r.PriorityMin, r.PriorityMax = intp(1), intp(3) }), []string{p2}},
+
+		{"TitleContains is a case-insensitive substring", with(scoped(textT, textD, textN), func(r *publicops.ListRequest) { r.TitleContains = "TTOK-LFF" }), []string{textT}},
+		{"DescContains reads the description only", with(scoped(textT, textD, textN), func(r *publicops.ListRequest) { r.DescContains = "dtok-lff" }), []string{textD}},
+		{"NotesContains reads the notes only", with(scoped(textT, textD, textN), func(r *publicops.ListRequest) { r.NotesContains = "ntok-lff" }), []string{textN}},
+		{"EmptyDesc keeps the rows with no description", with(scoped(textT, textD, textN), func(r *publicops.ListRequest) { r.EmptyDesc = true }), []string{textT, textN}},
+
+		{"NoLabels keeps the unlabeled row", with(scoped(labeled, unlabeled), func(r *publicops.ListRequest) { r.NoLabels = true }), []string{unlabeled}},
+		{"LabelPattern is a glob", with(scoped(labeled, unlabeled), func(r *publicops.ListRequest) { r.LabelPattern = fixture.IssuePrefix + "-scope-lff*" }), []string{labeled}},
+		{"LabelRegex is a regular expression", with(scoped(labeled, unlabeled), func(r *publicops.ListRequest) { r.LabelRegex = "-scope-lffp.t$" }), []string{labeled}},
+
+		{"NoParent keeps the top-level rows", with(scoped(parent, child, loose), func(r *publicops.ListRequest) { r.NoParent = true }), []string{parent, loose}},
+
+		{"ExcludeTypes drops the named type", with(scoped(typeTask, typeBug, typeChore), func(r *publicops.ListRequest) { r.ExcludeTypes = []string{"bug"} }), []string{typeTask, typeChore}},
+		{"ExcludeTypes takes a comma-separated value", with(scoped(typeTask, typeBug, typeChore), func(r *publicops.ListRequest) { r.ExcludeTypes = []string{"bug,chore"} }), []string{typeTask}},
+
+		{"SpecPrefix is a prefix", with(scoped(specced, unspecced), func(r *publicops.ListRequest) { r.SpecPrefix = spec }), []string{specced}},
+
+		{"ExternalContains is a case-insensitive substring", with(scoped(extRow, extOther), func(r *publicops.ListRequest) { r.ExternalContains = "lff-EXT" }), []string{extRow}},
+		{"ExternalRef is exact", with(scoped(extRow, extOther), func(r *publicops.ListRequest) { r.ExternalRef = external }), []string{extRow}},
+
+		{"AllFlag alone admits both pinned-flag states", scoped(pinned, unpinned), []string{pinned, unpinned}},
+		{"PinnedFlag selects the flagged row", publicops.ListRequest{IDFilter: readerIDFilter(pinned, unpinned), PinnedFlag: true}, []string{pinned}},
+		{"NoPinnedFlag holds the unflagged predicate under AllFlag", with(scoped(pinned, unpinned), func(r *publicops.ListRequest) { r.NoPinnedFlag = true }), []string{unpinned}},
+
+		{"DeferredFlag keeps the deferred row", with(scoped(deferred, undeferred), func(r *publicops.ListRequest) { r.DeferredFlag = true }), []string{deferred}},
+
+		{"OverdueFlag keeps the open row past its due date", with(scoped(overdue, dueLater, closedOverdue, noDue), func(r *publicops.ListRequest) { r.OverdueFlag = true }), []string{overdue}},
+
+		{"ExcludeStatus under AllFlag keeps every status not named", with(scoped(stOpen, stProgress, stBlocked, stClosed), func(r *publicops.ListRequest) { r.ExcludeStatus = []string{"closed"} }), []string{stOpen, stProgress, stBlocked}},
+		{"ExcludeStatus takes repeated and comma-separated values", with(scoped(stOpen, stProgress, stBlocked, stClosed), func(r *publicops.ListRequest) { r.ExcludeStatus = []string{"blocked,in_progress", " closed "} }), []string{stOpen}},
+		{"ExcludeStatus adds to the default exclusions rather than replacing them", publicops.ListRequest{IDFilter: statusScope, ExcludeStatus: []string{"blocked"}}, []string{stOpen, stProgress}},
+		{"ExcludeStatus narrows an explicit Status", publicops.ListRequest{IDFilter: statusScope, Status: "open,blocked,closed", ExcludeStatus: []string{"blocked"}}, []string{stOpen, stClosed}},
+
+		{"MolType is exact", with(scoped(swarm, patrol), func(r *publicops.ListRequest) { r.MolType = molType(types.MolTypeSwarm) }), []string{swarm}},
+	} {
+		page, err := fixture.Reader.List(ctx, test.req)
+		if err != nil {
+			t.Errorf("List (%s): %v", test.name, err)
+			continue
+		}
+		assertReaderPageIDSet(t, "List ("+test.name+")", page, test.want)
+	}
+
+	// An exclusion naming no status in the workspace vocabulary is refused,
+	// never an exclusion that silently excludes nothing.
+	if _, err := fixture.Reader.List(ctx, publicops.ListRequest{IDFilter: statusScope, ExcludeStatus: []string{"clsoed"}}); !errors.Is(err, publicops.ErrValidation) {
+		t.Errorf("List with ExcludeStatus naming an unknown status = %v, want an error wrapping ErrValidation", err)
+	}
+
+	_, err := fixture.Reader.List(ctx, publicops.ListRequest{
+		IDFilter: readerIDFilter(pinned, unpinned), PinnedFlag: true, NoPinnedFlag: true,
+	})
+	if !errors.Is(err, publicops.ErrValidation) {
+		t.Errorf("List with PinnedFlag and NoPinnedFlag = %v, want an error wrapping ErrValidation", err)
+	}
+
+	_, err = fixture.Reader.List(ctx, publicops.ListRequest{
+		IDFilter: readerIDFilter(parent, child, loose), ParentID: parent, NoParent: true,
+	})
+	if !errors.Is(err, publicops.ErrValidation) {
+		t.Errorf("List with ParentID and NoParent = %v, want an error wrapping ErrValidation", err)
+	}
+}
+
+// sortedCopy returns its arguments as a sorted slice.
+func sortedCopy(ids ...string) []string {
+	out := slices.Clone(ids)
+	slices.Sort(out)
+	return out
 }
 
 // readerIssue builds the seed every case starts from: an open, unassigned,

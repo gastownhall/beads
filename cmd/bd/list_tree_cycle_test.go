@@ -112,7 +112,7 @@ func TestPrintPrettyTree_CycleRendersAncestorOnce(t *testing.T) {
 	}
 
 	out, terminated := captureBoundedStdout(t, func() {
-		printPrettyTree(childrenMap, "bd-a", "", nil, compareIssuesByPriority)
+		printPrettyTree(childrenMap, "bd-a", "", nil, compareIssuesByPriority, nil)
 	})
 	if !terminated {
 		t.Fatalf("printPrettyTree did not return within %v on a cyclic tree; first output:\n%s", captureDeadline, head(out, 20))
@@ -149,7 +149,7 @@ func TestPrintPrettyTree_DiamondRendersUnderBothParents(t *testing.T) {
 	}
 
 	out, terminated := captureBoundedStdout(t, func() {
-		printPrettyTree(childrenMap, "bd-a", "", nil, compareIssuesByPriority)
+		printPrettyTree(childrenMap, "bd-a", "", nil, compareIssuesByPriority, nil)
 	})
 	if !terminated {
 		t.Fatalf("printPrettyTree did not return on an acyclic diamond:\n%s", head(out, 20))
@@ -171,7 +171,7 @@ func TestPrintPrettyTree_DepthCeilingIsVisible(t *testing.T) {
 		children[parent] = []*types.Issue{child}
 	}
 	out, terminated := captureBoundedStdout(t, func() {
-		printPrettyTree(children, "bd-00", "", nil, compareIssuesByPriority)
+		printPrettyTree(children, "bd-00", "", nil, compareIssuesByPriority, nil)
 	})
 	if !terminated {
 		t.Fatalf("depth-limited tree did not return within %v", captureDeadline)
@@ -271,7 +271,7 @@ func TestDisplayPrettyListWithDepsMode_CycleMarkerCarriesNoAnnotations(t *testin
 	}
 
 	out, terminated := captureBoundedStdout(t, func() {
-		displayPrettyListWithDepsMode(issues, false, allDeps, "all", false, false, "", "", false)
+		displayPrettyListWithDepsMode(issues, false, allDeps, "all", false, false, "", "", false, nil)
 	})
 	if !terminated {
 		t.Fatalf("bd list --tree --deps did not return within %v on a parent-child cycle; first output:\n%s", captureDeadline, head(out, 20))

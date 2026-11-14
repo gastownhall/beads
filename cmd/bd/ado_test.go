@@ -573,6 +573,7 @@ func TestADOStatusWithCustomURL(t *testing.T) {
 
 // TestADOProjectsWithMockServer tests ado projects using a mock HTTP server.
 func TestADOProjectsWithMockServer(t *testing.T) {
+	setupEndpointTrustWorkspaceForTest(t)
 	oldDBPath, oldStore := dbPath, store
 	oldJSON := jsonOutput
 	dbPath, store = "", nil
@@ -630,6 +631,7 @@ func TestADOProjectsWithMockServer(t *testing.T) {
 
 // TestADOProjectsJSONOutput tests ado projects JSON output with mock server.
 func TestADOProjectsJSONOutput(t *testing.T) {
+	setupEndpointTrustWorkspaceForTest(t)
 	oldDBPath, oldStore := dbPath, store
 	oldJSON := jsonOutput
 	dbPath, store = "", nil
@@ -691,6 +693,7 @@ func TestADOProjectsJSONOutput(t *testing.T) {
 
 // TestADOProjectsEmptyList tests ado projects with no projects found.
 func TestADOProjectsEmptyList(t *testing.T) {
+	setupEndpointTrustWorkspaceForTest(t)
 	oldDBPath, oldStore := dbPath, store
 	oldJSON := jsonOutput
 	dbPath, store = "", nil
@@ -794,6 +797,9 @@ func TestADOClientCreation(t *testing.T) {
 
 // TestADOClientCreationWithURL verifies client with custom base URL.
 func TestADOClientCreationWithURL(t *testing.T) {
+	setupEndpointTrustWorkspaceForTest(t)
+	// The configured ado.url is shared; confirm it privately via env.
+	t.Setenv("AZURE_DEVOPS_URL", "https://tfs.corp.com/DefaultCollection")
 	cfg := ADOConfig{
 		PAT:     "test-pat",
 		Org:     "",
@@ -814,6 +820,7 @@ func TestADOClientCreationWithURL(t *testing.T) {
 
 // TestADOProjectsHTTPError verifies error handling for HTTP failures.
 func TestADOProjectsHTTPError(t *testing.T) {
+	setupEndpointTrustWorkspaceForTest(t)
 	oldDBPath, oldStore := dbPath, store
 	dbPath, store = "", nil
 	t.Cleanup(func() { dbPath, store = oldDBPath, oldStore })

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/testutil/bazeltest"
 )
 
@@ -67,6 +68,10 @@ func TestSuiteFixtureLeakFailsOwningSuite(t *testing.T) {
 	defer writeEnd.Close()
 	t.Setenv("BEADS_SUITE_LEAK_PROBE", "1")
 	t.Setenv("BEADS_TEST_SKIP", "dolt")
+	// The child skips Dolt on purpose, so a lane's fail-closed switch (set
+	// when this suite runs against a required server) must not turn that
+	// skip into a FATAL before the child reaches its leak sweep.
+	t.Setenv(testutil.EnvRequireDoltContainer, "")
 	t.Setenv(doltserver.AllowLeakEnv, "")
 	// This child is a complete suite, not one of the schema-init helpers
 	// which deliberately bypass suite ownership and shutdown.

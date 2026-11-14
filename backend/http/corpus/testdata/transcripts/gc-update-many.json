@@ -1,0 +1,10 @@
+{
+  "shape": "gc-update-many",
+  "requests": [
+    {"method":"GET","operation_id":"getContext","path":"/v0/beads/context","status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-t-m1","status":200},
+    {"method":"PATCH","operation_id":"updateIssue","path":"/v0/beads/issues/e2e-t-m1","body":["actor","patch"],"status":200},
+    {"method":"GET","operation_id":"getIssue","path":"/v0/beads/issues/e2e-t-m2","status":200},
+    {"method":"PATCH","operation_id":"updateIssue","path":"/v0/beads/issues/e2e-t-m2","body":["actor","patch"],"status":200}
+  ]
+}

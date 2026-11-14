@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -329,5 +330,332 @@ func TestChildParentDependencies_PreservesParentChildType(t *testing.T) {
 	}
 	if parentChildCount != 1 {
 		t.Errorf("Expected 1 'parent-child' dependency preserved, got %d", parentChildCount)
+	}
+}
+
+// TestChildParentDependencies_PreservesParentGateOnOwnChild verifies the fix
+// leaves a parent's gate on its own child alone, in both forms: the waits-for
+// gate the write path recommends and a legacy blocks row it now refuses.
+// Since gastownhall/beads#6506 neither holds back the child, so deleting them
+// would only let the parent close before its children. The parent stays
+// blocked and the children stay ready through the whole --fix-child-parent
+// pass, including the blocked-state recompute that runs last (adapted from
+// PR#5131's reversed-direction test).
+func TestChildParentDependencies_PreservesParentGateOnOwnChild(t *testing.T) {
+	dir := t.TempDir()
+	store := newFixTestStore(t, dir, "bd")
+	ctx := context.Background()
+
+	for _, id := range []string{"bd-gate", "bd-gate.1", "bd-gate.1.1", "bd-gate.2"} {
+		issue := &types.Issue{
+			ID:        id,
+			Title:     "Issue " + id,
+			Status:    types.StatusOpen,
+			IssueType: types.TypeTask,
+			CreatedAt: time.Now(),
+		}
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Real parent-child edges, and a live waits-for gate: bd-gate.1 has an
+	// open child of its own.
+	for _, dep := range []*types.Dependency{
+		{IssueID: "bd-gate.1", DependsOnID: "bd-gate", Type: types.DepParentChild},
+		{IssueID: "bd-gate.1.1", DependsOnID: "bd-gate.1", Type: types.DepParentChild},
+		{IssueID: "bd-gate.2", DependsOnID: "bd-gate", Type: types.DepParentChild},
+		{IssueID: "bd-gate", DependsOnID: "bd-gate.1", Type: types.DepWaitsFor},
+	} {
+		dep.CreatedAt = time.Now()
+		dep.CreatedBy = "test"
+		if err := store.AddDependency(ctx, dep, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The legacy blocks row goes in raw because the write path refuses it.
+	// The derived flags are then inverted, so the flag and ready-work checks
+	// below pass only if the recompute really ran and derived them from these
+	// edges.
+	db := store.UnderlyingDB()
+	for _, stmt := range []string{
+		"INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (UUID(), 'bd-gate', 'bd-gate.2', 'blocks', NOW(), 'test')",
+		"UPDATE issues SET is_blocked = CASE WHEN id = 'bd-gate' THEN 0 ELSE 1 END WHERE id LIKE 'bd-gate%'",
+		"CALL DOLT_COMMIT('-Am', 'test: seed parent close gates')",
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+
+	// The --fix --fix-child-parent pass: this fix, then the blocked-state
+	// recompute that orderDoctorFixes runs last.
+	if err := ChildParentDependencies(dir, false); err != nil {
+		t.Fatalf("ChildParentDependencies failed: %v", err)
+	}
+	if err := RecomputeBlocked(dir); err != nil {
+		t.Fatalf("RecomputeBlocked failed: %v", err)
+	}
+
+	for depType, want := range map[string]int{"waits-for": 1, "blocks": 1, "parent-child": 3} {
+		var got int
+		if err := db.QueryRow("SELECT COUNT(*) FROM dependencies WHERE type = ?", depType).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Errorf("%s dependencies after fix = %d, want %d", depType, got, want)
+		}
+	}
+
+	// The recompute's own output: every seeded flag inverted back.
+	for id, want := range map[string]bool{"bd-gate": true, "bd-gate.1": false, "bd-gate.1.1": false, "bd-gate.2": false} {
+		var got bool
+		if err := db.QueryRow("SELECT is_blocked FROM issues WHERE id = ?", id).Scan(&got); err != nil {
+			t.Fatalf("read is_blocked of %s: %v", id, err)
+		}
+		if got != want {
+			t.Errorf("%s is_blocked after the fix = %v, want %v", id, got, want)
+		}
+	}
+
+	ready, err := store.GetReadyWork(ctx, types.WorkFilter{Status: types.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inReady := map[string]bool{}
+	for _, issue := range ready {
+		inReady[issue.ID] = true
+	}
+	for _, id := range []string{"bd-gate.1", "bd-gate.1.1", "bd-gate.2"} {
+		if !inReady[id] {
+			t.Errorf("%s missing from ready work after the fix", id)
+		}
+	}
+	if inReady["bd-gate"] {
+		t.Error("bd-gate is ready after the fix, but it still waits for and blocks on open children")
+	}
+}
+
+// TestChildParentDependencies_PreservesDottedEdgeWithoutRealParentChildLink
+// verifies a dotted-ID coincidence alone never removes an issue's edge onto
+// its dotted look-alike child; the fix matches on the dotted prefix alone only
+// in the child→parent direction. An orphaned-dotted subtask (dotted ID
+// surviving a reparent or import, with no --parent edge) that its "epic"
+// blocks on is an ordinary "epic waits for its subtask" shape, not a
+// deadlock, and must survive the fix (bee-ghosttrack review, PR#5131).
+func TestChildParentDependencies_PreservesDottedEdgeWithoutRealParentChildLink(t *testing.T) {
+	dir := t.TempDir()
+	store := newFixTestStore(t, dir, "bd")
+	ctx := context.Background()
+
+	for _, id := range []string{"bd-abc", "bd-abc.1"} {
+		issue := &types.Issue{
+			ID:        id,
+			Title:     "Issue " + id,
+			Status:    types.StatusOpen,
+			IssueType: types.TypeTask,
+			CreatedAt: time.Now(),
+		}
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// No parent-child edge is added: bd-abc.1's dotted ID is coincidental
+	// (e.g. it survives a reparent or import), not a structural child of
+	// bd-abc.
+	blockDep := &types.Dependency{
+		IssueID:     "bd-abc",
+		DependsOnID: "bd-abc.1",
+		Type:        types.DepBlocks,
+		CreatedAt:   time.Now(),
+		CreatedBy:   "test",
+	}
+	if err := store.AddDependency(ctx, blockDep, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run fix
+	if err := ChildParentDependencies(dir, false); err != nil {
+		t.Errorf("ChildParentDependencies failed: %v", err)
+	}
+
+	// The healthy edge (no real parent-child link) must survive.
+	db := store.UnderlyingDB()
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM dependencies WHERE type = 'blocks'").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("Expected the healthy dotted-ID edge (no real parent-child link) to survive, got %d", count)
+	}
+}
+
+// insertFixExternalTargetDep writes a raw edge whose target sits in
+// depends_on_external, the shape migrations 0041/0047/0035 leave for every
+// missing target, same-prefix ones included.
+func insertFixExternalTargetDep(t *testing.T, db *sql.DB, table, source, target string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 0"); err != nil {
+		t.Fatal(err)
+	}
+	//nolint:gosec // G202: table is a fixed test-chosen name.
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO "+table+" (id, issue_id, depends_on_external, type, created_at, created_by) VALUES (UUID(), ?, ?, 'blocks', NOW(), 'test')",
+		source, target); err != nil {
+		t.Fatalf("insert %s %s→%s: %v", table, source, target, err)
+	}
+	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 1"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func countFixDepRows(t *testing.T, db *sql.DB, table, source, target string) int {
+	t.Helper()
+	var n int
+	//nolint:gosec // G202: table is a fixed test-chosen name.
+	if err := db.QueryRow("SELECT COUNT(*) FROM "+table+" WHERE issue_id = ? AND "+fixDependencyTargetExpr+" = ?", source, target).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func createFixIssue(t *testing.T, store *dolt.DoltStore, id string, ephemeral bool) {
+	t.Helper()
+	issue := &types.Issue{ID: id, Title: "Issue " + id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: ephemeral, CreatedAt: time.Now()}
+	if err := store.CreateIssue(context.Background(), issue, "test"); err != nil {
+		t.Fatalf("CreateIssue %s: %v", id, err)
+	}
+}
+
+func addFixDep(t *testing.T, store *dolt.DoltStore, source, target string) {
+	t.Helper()
+	dep := &types.Dependency{IssueID: source, DependsOnID: target, Type: types.DepBlocks, CreatedAt: time.Now(), CreatedBy: "test"}
+	if err := store.AddDependency(context.Background(), dep, "test"); err != nil {
+		t.Fatalf("AddDependency %s→%s: %v", source, target, err)
+	}
+}
+
+// TestOrphanedDependencies_KeepsCrossPrefixTarget: bd dep add stores a bare
+// target under another repository's prefix unverified, so bd doctor --fix
+// must not delete it as an orphan (bd-zcpo44, AC-2).
+func TestOrphanedDependencies_KeepsCrossPrefixTarget(t *testing.T) {
+	t.Run("dependencies", func(t *testing.T) {
+		dir := t.TempDir()
+		store := newFixTestStore(t, dir, "bd")
+		createFixIssue(t, store, "bd-1", false)
+		addFixDep(t, store, "bd-1", "gt-9")
+
+		var fixErr error
+		out := captureFixStdout(t, func() { fixErr = OrphanedDependencies(dir, false) })
+		if fixErr != nil {
+			t.Fatalf("OrphanedDependencies: %v", fixErr)
+		}
+		if !strings.Contains(out, "No orphaned dependencies to fix") {
+			t.Fatalf("output = %q, want it to say there is nothing to fix", out)
+		}
+		var n int
+		if err := store.UnderlyingDB().QueryRow(
+			"SELECT COUNT(*) FROM dependencies WHERE issue_id = 'bd-1' AND depends_on_external = 'gt-9'").Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 1 {
+			t.Fatalf("bd-1→gt-9 rows = %d, want 1 (cross-repository edge deleted)", n)
+		}
+	})
+
+	t.Run("wisp_dependencies", func(t *testing.T) {
+		dir := t.TempDir()
+		store := newFixTestStore(t, dir, "bd")
+		createFixIssue(t, store, "bd-wisp-src", true)
+		addFixDep(t, store, "bd-wisp-src", "gt-9")
+		db := store.UnderlyingDB()
+		if n := countFixDepRows(t, db, "wisp_dependencies", "bd-wisp-src", "gt-9"); n != 1 {
+			t.Fatalf("fixture: wisp_dependencies bd-wisp-src→gt-9 rows = %d, want 1", n)
+		}
+
+		var fixErr error
+		out := captureFixStdout(t, func() { fixErr = OrphanedDependencies(dir, false) })
+		if fixErr != nil {
+			t.Fatalf("OrphanedDependencies: %v", fixErr)
+		}
+		if !strings.Contains(out, "No orphaned dependencies to fix") {
+			t.Fatalf("output = %q, want it to say there is nothing to fix", out)
+		}
+		if n := countFixDepRows(t, db, "wisp_dependencies", "bd-wisp-src", "gt-9"); n != 1 {
+			t.Fatalf("wisp bd-wisp-src→gt-9 rows = %d, want 1 (cross-repository edge deleted)", n)
+		}
+	})
+}
+
+// TestOrphanedDependencies_RemovesOnlySamePrefixOrphan: of a cross-repository
+// edge, a wisp cross-repository edge and a same-prefix edge whose target is
+// gone (stored in depends_on_external), the repair deletes only the last
+// (bd-zcpo44, AC-3).
+func TestOrphanedDependencies_RemovesOnlySamePrefixOrphan(t *testing.T) {
+	dir := t.TempDir()
+	store := newFixTestStore(t, dir, "bd")
+	createFixIssue(t, store, "bd-1", false)
+	addFixDep(t, store, "bd-1", "gt-9")
+	createFixIssue(t, store, "bd-wisp-src", true)
+	addFixDep(t, store, "bd-wisp-src", "gt-8")
+	db := store.UnderlyingDB()
+	insertFixExternalTargetDep(t, db, "dependencies", "bd-1", "bd-gone")
+	if n := countFixDepRows(t, db, "wisp_dependencies", "bd-wisp-src", "gt-8"); n != 1 {
+		t.Fatalf("fixture: wisp_dependencies bd-wisp-src→gt-8 rows = %d, want 1", n)
+	}
+
+	var fixErr error
+	out := captureFixStdout(t, func() { fixErr = OrphanedDependencies(dir, false) })
+	if fixErr != nil {
+		t.Fatalf("OrphanedDependencies: %v", fixErr)
+	}
+	if !strings.Contains(out, "Fixed 1 orphaned dependency reference(s)") {
+		t.Fatalf("output = %q, want exactly one removal", out)
+	}
+	if n := countFixDepRows(t, db, "dependencies", "bd-1", "bd-gone"); n != 0 {
+		t.Fatalf("bd-1→bd-gone rows = %d, want 0 (same-prefix orphan kept)", n)
+	}
+	if n := countFixDepRows(t, db, "dependencies", "bd-1", "gt-9"); n != 1 {
+		t.Fatalf("bd-1→gt-9 rows = %d, want 1", n)
+	}
+	if n := countFixDepRows(t, db, "wisp_dependencies", "bd-wisp-src", "gt-8"); n != 1 {
+		t.Fatalf("bd-wisp-src→gt-8 rows = %d, want 1", n)
+	}
+}
+
+// TestOrphanedDependencies_RemovesDeletedHeldPrefixTarget: a missing target
+// under issue_prefix or allowed_prefixes (multi-hyphen ones included) is this
+// database's own and so a genuine orphan; only another repository's prefix is
+// kept (bd-zcpo44, AC-4).
+func TestOrphanedDependencies_RemovesDeletedHeldPrefixTarget(t *testing.T) {
+	dir := t.TempDir()
+	store := newFixTestStore(t, dir, "bd")
+	createFixIssue(t, store, "bd-1", false)
+	db := store.UnderlyingDB()
+	if err := store.SetConfig(context.Background(), "allowed_prefixes", "gt, hq-cv"); err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{"bd-gone", "gt-9", "hq-cv-9", "zz-5"} {
+		insertFixExternalTargetDep(t, db, "dependencies", "bd-1", target)
+	}
+
+	var fixErr error
+	out := captureFixStdout(t, func() { fixErr = OrphanedDependencies(dir, false) })
+	if fixErr != nil {
+		t.Fatalf("OrphanedDependencies: %v", fixErr)
+	}
+	if !strings.Contains(out, "Fixed 3 orphaned dependency reference(s)") {
+		t.Fatalf("output = %q, want three removals", out)
+	}
+	for _, target := range []string{"bd-gone", "gt-9", "hq-cv-9"} {
+		if n := countFixDepRows(t, db, "dependencies", "bd-1", target); n != 0 {
+			t.Errorf("bd-1→%s rows = %d, want 0 (held-prefix orphan kept)", target, n)
+		}
+	}
+	if n := countFixDepRows(t, db, "dependencies", "bd-1", "zz-5"); n != 1 {
+		t.Errorf("bd-1→zz-5 rows = %d, want 1 (cross-repository edge deleted)", n)
 	}
 }

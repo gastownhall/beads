@@ -44,7 +44,7 @@ func TestFindBeadsDir_WorktreeWithInheritedArtifacts(t *testing.T) {
 
 	runGit := func(dir string, args ...string) {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = dir
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -154,7 +154,7 @@ func TestFindBeadsDir_WorktreeSeparateDBPreservesLocal(t *testing.T) {
 
 	runGit := func(dir string, args ...string) {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = dir
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -258,7 +258,7 @@ func runWorktreeSeparateDBPreservedTest(t *testing.T, databaseMarker string) {
 
 	runGit := func(dir string, args ...string) {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = dir
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -356,7 +356,7 @@ func TestFindBeadsDir_WorktreeNoDatabaseAnywhereFallsBackToLocal(t *testing.T) {
 
 	runGit := func(dir string, args ...string) {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = dir
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -457,7 +457,7 @@ func TestFindDatabasePath_WorktreeServerModeSharesMainRepo(t *testing.T) {
 
 	runGit := func(dir string, args ...string) {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = dir
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -594,7 +594,7 @@ func TestFindBeadsDir_JJSecondaryWithInheritedArtifacts(t *testing.T) {
 	// Set up git in the primary (so git rev-parse works from the secondary).
 	runGit := func(dir string, args ...string) {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = dir
 		out, gitErr := cmd.CombinedOutput()
 		if gitErr != nil {
@@ -717,7 +717,7 @@ func TestFindBeadsDir_JJSecondarySeparateDBPreservesLocal(t *testing.T) {
 	}
 	runGit := func(dir string, args ...string) {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = dir
 		out, gitErr := cmd.CombinedOutput()
 		if gitErr != nil {
@@ -806,7 +806,7 @@ func TestFindDatabasePath_WorktreeServerModeFromSubdir(t *testing.T) {
 
 	runGit := func(dir string, args ...string) {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitCommand(args...)
 		cmd.Dir = dir
 		out, err := cmd.CombinedOutput()
 		if err != nil {

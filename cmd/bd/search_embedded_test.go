@@ -64,7 +64,7 @@ func bdSearchJSON(t *testing.T, bd, dir string, args ...string) []map[string]int
 	return results
 }
 
-func TestEmbeddedSearch(t *testing.T) {
+func TestEmbeddedSearchQueryStatusAssigneeLabels(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -137,42 +137,6 @@ func TestEmbeddedSearch(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("expected to find closed task with --status closed")
-		}
-	})
-
-	t.Run("search_status_all", func(t *testing.T) {
-		// Use prefix to match all issues
-		results := bdSearchJSON(t, bd, dir, "sr-", "--status", "all")
-		ids := map[string]bool{}
-		for _, r := range results {
-			ids[r["id"].(string)] = true
-		}
-		if !ids[taskA.ID] || !ids[closedTask.ID] {
-			t.Error("expected both open and closed issues with --status all")
-		}
-	})
-
-	t.Run("search_default_includes_closed", func(t *testing.T) {
-		// bd-t5yex: "was this already filed/fixed?" is the dominant search
-		// query, so the default must not silently hide closed issues.
-		results := bdSearchJSON(t, bd, dir, "sr-")
-		ids := map[string]bool{}
-		for _, r := range results {
-			ids[r["id"].(string)] = true
-		}
-		if !ids[taskA.ID] || !ids[closedTask.ID] {
-			t.Error("expected default search to include open and closed issues")
-		}
-	})
-
-	t.Run("search_status_comma_separated", func(t *testing.T) {
-		results := bdSearchJSON(t, bd, dir, "sr-", "--status", "open,closed")
-		ids := map[string]bool{}
-		for _, r := range results {
-			ids[r["id"].(string)] = true
-		}
-		if !ids[taskA.ID] || !ids[closedTask.ID] {
-			t.Error("expected both open and closed issues with --status open,closed")
 		}
 	})
 
@@ -257,6 +221,97 @@ func TestEmbeddedSearch(t *testing.T) {
 		}
 	})
 
+	// ===== Description Filters =====
+
+	t.Run("search_desc_contains", func(t *testing.T) {
+		results := bdSearchJSON(t, bd, dir, "sr-", "--desc-contains", "alpha")
+		found := false
+		for _, r := range results {
+			if r["id"] == taskA.ID {
+				found = true
+			}
+		}
+		if !found {
+			t.Error("expected to find taskA with --desc-contains alpha")
+		}
+	})
+
+	t.Run("search_empty_description", func(t *testing.T) {
+		results := bdSearchJSON(t, bd, dir, "sr-", "--empty-description")
+		found := false
+		for _, r := range results {
+			if r["id"] == taskD.ID {
+				found = true
+			}
+		}
+		if !found {
+			t.Error("expected to find task without description")
+		}
+		for _, r := range results {
+			if r["id"] == taskA.ID {
+				t.Error("task with description should not appear with --empty-description")
+			}
+		}
+	})
+
+	_ = taskB
+	_ = taskC
+	_ = taskD
+}
+
+func TestEmbeddedSearchStatusLimitSortDatesMetadata(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "sr")
+
+	// Create test fixtures
+	taskA := bdCreate(t, bd, dir, "Alpha task", "--type", "task", "--priority", "1", "--assignee", "alice", "--description", "Important alpha work", "--label", "urgent")
+	taskB := bdCreate(t, bd, dir, "Beta bug", "--type", "bug", "--priority", "3", "--assignee", "bob", "--description", "Beta bug description", "--label", "backend")
+	taskC := bdCreate(t, bd, dir, "Gamma feature", "--type", "feature", "--priority", "2", "--label", "urgent", "--label", "frontend")
+	taskD := bdCreate(t, bd, dir, "Delta task no desc", "--type", "task")
+	closedTask := bdCreate(t, bd, dir, "Closed epsilon", "--type", "task")
+	bdClose(t, bd, dir, closedTask.ID)
+
+	t.Run("search_status_all", func(t *testing.T) {
+		// Use prefix to match all issues
+		results := bdSearchJSON(t, bd, dir, "sr-", "--status", "all")
+		ids := map[string]bool{}
+		for _, r := range results {
+			ids[r["id"].(string)] = true
+		}
+		if !ids[taskA.ID] || !ids[closedTask.ID] {
+			t.Error("expected both open and closed issues with --status all")
+		}
+	})
+
+	t.Run("search_default_includes_closed", func(t *testing.T) {
+		// bd-t5yex: "was this already filed/fixed?" is the dominant search
+		// query, so the default must not silently hide closed issues.
+		results := bdSearchJSON(t, bd, dir, "sr-")
+		ids := map[string]bool{}
+		for _, r := range results {
+			ids[r["id"].(string)] = true
+		}
+		if !ids[taskA.ID] || !ids[closedTask.ID] {
+			t.Error("expected default search to include open and closed issues")
+		}
+	})
+
+	t.Run("search_status_comma_separated", func(t *testing.T) {
+		results := bdSearchJSON(t, bd, dir, "sr-", "--status", "open,closed")
+		ids := map[string]bool{}
+		for _, r := range results {
+			ids[r["id"].(string)] = true
+		}
+		if !ids[taskA.ID] || !ids[closedTask.ID] {
+			t.Error("expected both open and closed issues with --status open,closed")
+		}
+	})
+
 	// ===== Limit =====
 
 	t.Run("search_limit", func(t *testing.T) {
@@ -319,39 +374,6 @@ func TestEmbeddedSearch(t *testing.T) {
 			pri := int(r["priority"].(float64))
 			if pri > 2 {
 				t.Errorf("expected priority <= 2 with --priority-max 2, got %d for %s", pri, r["id"])
-			}
-		}
-	})
-
-	// ===== Description Filters =====
-
-	t.Run("search_desc_contains", func(t *testing.T) {
-		results := bdSearchJSON(t, bd, dir, "sr-", "--desc-contains", "alpha")
-		found := false
-		for _, r := range results {
-			if r["id"] == taskA.ID {
-				found = true
-			}
-		}
-		if !found {
-			t.Error("expected to find taskA with --desc-contains alpha")
-		}
-	})
-
-	t.Run("search_empty_description", func(t *testing.T) {
-		results := bdSearchJSON(t, bd, dir, "sr-", "--empty-description")
-		found := false
-		for _, r := range results {
-			if r["id"] == taskD.ID {
-				found = true
-			}
-		}
-		if !found {
-			t.Error("expected to find task without description")
-		}
-		for _, r := range results {
-			if r["id"] == taskA.ID {
-				t.Error("task with description should not appear with --empty-description")
 			}
 		}
 	})

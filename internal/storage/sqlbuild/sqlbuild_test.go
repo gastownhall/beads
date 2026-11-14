@@ -2,6 +2,8 @@ package sqlbuild
 
 import (
 	"fmt"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -89,6 +91,126 @@ func TestLessIDHonorsSortDesc(t *testing.T) {
 	}
 }
 
+// TestLessSummaryMirrorsOrderBy is TestLessMirrorsOrderBy's sibling for
+// LessSummary/types.IssueSummary. Less and LessSummary share the lessFields
+// core, so this mostly guards against a future adapter (summarySortFields)
+// dropping or mis-mapping a field rather than the tie-break logic itself.
+func TestLessSummaryMirrorsOrderBy(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	older := now.Add(-time.Hour)
+	a := &types.IssueSummary{ID: "a", Priority: 1, CreatedAt: now}
+	b := &types.IssueSummary{ID: "b", Priority: 2, CreatedAt: now}
+	if !LessSummary(a, b, "", false) || LessSummary(b, a, "", false) {
+		t.Error("default sort must order priority 1 before priority 2")
+	}
+	c := &types.IssueSummary{ID: "c", Priority: 1, CreatedAt: older}
+	if !LessSummary(a, c, "", false) {
+		t.Error("equal priority must order newer created_at first (created_at DESC)")
+	}
+	d := &types.IssueSummary{ID: "d", Priority: 1, CreatedAt: now}
+	if !LessSummary(a, d, "", false) || LessSummary(d, a, "", false) {
+		t.Error("full tie must break by id ASC")
+	}
+}
+
+// TestLessSummaryMatchesLessAcrossSortKeys is TestLessSummaryMirrorsOrderBy's
+// broader sibling: instead of spot-checking only the default tie-break chain,
+// it sorts a parallel Issue/IssueSummary fixture with Less and LessSummary
+// for every SortDefs key (plus "id") in both directions and asserts the two
+// produce identical ID order. Less and LessSummary already share the
+// lessFields core, so this mainly guards summarySortFields: if a future field
+// is added to sortFields without updating summarySortFields, the two
+// adapters silently diverge and this is what would catch it.
+func TestLessSummaryMatchesLessAcrossSortKeys(t *testing.T) {
+	t.Parallel()
+
+	day := func(d int) time.Time { return time.Date(2026, 1, d, 0, 0, 0, 0, time.UTC) }
+	closedOn := func(d int) *time.Time { c := day(d); return &c }
+
+	type row struct {
+		id        string
+		priority  int
+		createdAt time.Time
+		updatedAt time.Time
+		closedAt  *time.Time
+		status    types.Status
+		issueType types.IssueType
+		assignee  string
+		title     string
+	}
+	// Distinct (and, for priority, partially tied) values on every field so
+	// each sort key — including the tie-break chain the "" and "priority"
+	// keys share — produces a non-trivial, checkable order.
+	rows := []row{
+		{"p1", 3, day(1), day(5), nil, types.StatusOpen, types.TypeBug, "alice", "Zebra"},
+		{"p2", 1, day(3), day(2), closedOn(10), types.StatusBlocked, types.TypeEpic, "bob", "apple"},
+		{"p3", 2, day(5), day(4), closedOn(8), types.StatusClosed, types.TypeTask, "carol", "Mango"},
+		{"p4", 1, day(2), day(1), nil, types.StatusInProgress, types.TypeChore, "dave", "banana"},
+		{"p5", 4, day(4), day(3), closedOn(6), types.StatusOpen, types.TypeBug, "eve", "Orange"},
+	}
+
+	issues := make([]*types.Issue, len(rows))
+	summaries := make([]*types.IssueSummary, len(rows))
+	for i, r := range rows {
+		issues[i] = &types.Issue{
+			ID: r.id, Priority: r.priority, CreatedAt: r.createdAt, UpdatedAt: r.updatedAt,
+			ClosedAt: r.closedAt, Status: r.status, IssueType: r.issueType, Assignee: r.assignee, Title: r.title,
+		}
+		summaries[i] = &types.IssueSummary{
+			ID: r.id, Priority: r.priority, CreatedAt: r.createdAt, UpdatedAt: r.updatedAt,
+			ClosedAt: r.closedAt, Status: r.status, IssueType: r.issueType, Assignee: r.assignee, Title: r.title,
+		}
+	}
+
+	keys := make([]string, 0, len(SortDefs)+1)
+	for key := range SortDefs {
+		keys = append(keys, key)
+	}
+	keys = append(keys, "id")
+
+	for _, key := range keys {
+		for _, desc := range []bool{false, true} {
+			name := key
+			if name == "" {
+				name = "default"
+			}
+			if desc {
+				name += "/desc"
+			} else {
+				name += "/asc"
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+
+				sortedIssues := append([]*types.Issue(nil), issues...)
+				sort.Slice(sortedIssues, func(i, j int) bool {
+					return Less(sortedIssues[i], sortedIssues[j], key, desc)
+				})
+				sortedSummaries := append([]*types.IssueSummary(nil), summaries...)
+				sort.Slice(sortedSummaries, func(i, j int) bool {
+					return LessSummary(sortedSummaries[i], sortedSummaries[j], key, desc)
+				})
+
+				gotIssues := make([]string, len(sortedIssues))
+				for i, is := range sortedIssues {
+					gotIssues[i] = is.ID
+				}
+				gotSummaries := make([]string, len(sortedSummaries))
+				for i, s := range sortedSummaries {
+					gotSummaries[i] = s.ID
+				}
+
+				if !slices.Equal(gotIssues, gotSummaries) {
+					t.Errorf("Less vs LessSummary order diverge for sortBy=%q sortDesc=%v:\n  Less:        %v\n  LessSummary: %v",
+						key, desc, gotIssues, gotSummaries)
+				}
+			})
+		}
+	}
+}
+
 func TestBuildReadyWorkOrderPriorityFIFO(t *testing.T) {
 	t.Parallel()
 
@@ -154,12 +276,126 @@ func TestBuildReadyWorkWhereBatchesIDSets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := strings.Count(where, "id NOT IN ("); got != 2 {
+	if got := strings.Count(where, "id NOT IN (?"); got != 2 {
 		t.Errorf("expected 2 batched NOT IN clauses for %d IDs, got %d", len(ids), got)
 	}
 	wantArgs := len(ids) + len(ReadyWorkExcludeTypes(nil))
 	if len(args) != wantArgs {
 		t.Errorf("args = %d, want %d", len(args), wantArgs)
+	}
+}
+
+// GH#3268: ready trusted a bare is_blocked = 0, so a stale flag on a row with
+// no ready-affecting dependency rows hid it. The stale rows are resolved per
+// family (StaleBlockedIDsSQL) and listed by id; with none, the WHERE keeps the
+// bare indexed is_blocked = 0, so the common case reads no dependency table.
+func TestBuildReadyWorkWhereIsBlockedGuard(t *testing.T) {
+	t.Parallel()
+
+	blockedTerm := func(t *testing.T, where string) string {
+		t.Helper()
+		for _, term := range strings.Split(strings.TrimPrefix(where, "WHERE "), " AND ") {
+			if strings.Contains(term, "is_blocked") {
+				return strings.TrimSpace(term)
+			}
+		}
+		t.Fatalf("no is_blocked clause at all; blocked rows would be ready: %s", where)
+		return ""
+	}
+
+	for _, tables := range []FilterTables{IssuesFilterTables, WispsFilterTables} {
+		t.Run(tables.Main+"/no_stale_flag", func(t *testing.T) {
+			where, _, err := BuildReadyWorkWhere(types.WorkFilter{}, tables, ReadyWorkWhereInputs{})
+			if err != nil {
+				t.Fatalf("BuildReadyWorkWhere: %v", err)
+			}
+			if got := blockedTerm(t, where); got != "is_blocked = 0" {
+				t.Errorf("blocked term = %q, want the bare indexed is_blocked = 0", got)
+			}
+			if strings.Contains(where, tables.Dependencies+" WHERE issue_id IS NOT NULL") || strings.Contains(where, "type IN (") {
+				t.Errorf("the WHERE must not read the dependency table when no flag is stale: %s", where)
+			}
+		})
+
+		t.Run(tables.Main+"/stale_flags", func(t *testing.T) {
+			stale := make([]string, QueryBatchSize+2)
+			for i := range stale {
+				stale[i] = fmt.Sprintf("st-%d", i)
+			}
+			where, args, err := BuildReadyWorkWhere(types.WorkFilter{Status: types.StatusOpen}, tables,
+				ReadyWorkWhereInputs{StaleBlockedIDs: map[string][]string{tables.Main: stale}})
+			if err != nil {
+				t.Fatalf("BuildReadyWorkWhere: %v", err)
+			}
+			got := blockedTerm(t, where)
+			if !strings.HasPrefix(got, "(is_blocked = 0 OR id IN (?") || !strings.HasSuffix(got, ")") {
+				t.Fatalf("blocked term = %q, want (is_blocked = 0 OR id IN (...) ...)", got)
+			}
+			if n := strings.Count(got, "id IN (?"); n != 2 {
+				t.Errorf("%d stale ids rendered %d IN batches, want 2: %s", len(stale), n, got)
+			}
+			// The status arg leads, then the stale ids in order.
+			if len(args) < 1+len(stale) || args[0] != string(types.StatusOpen) {
+				t.Fatalf("args = %v, want the status arg then %d stale ids", args, len(stale))
+			}
+			for i, id := range stale {
+				if args[1+i] != id {
+					t.Fatalf("args[%d] = %v, want stale id %q", 1+i, args[1+i], id)
+				}
+			}
+		})
+
+		// The set is keyed by family: an id can name a row in both tables,
+		// and the other family's stale row must not unhide this one.
+		t.Run(tables.Main+"/other_familys_stale_flags", func(t *testing.T) {
+			other := IssuesFilterTables.Main
+			if tables.Main == other {
+				other = WispsFilterTables.Main
+			}
+			where, args, err := BuildReadyWorkWhere(types.WorkFilter{}, tables,
+				ReadyWorkWhereInputs{StaleBlockedIDs: map[string][]string{other: {"st-1"}}})
+			if err != nil {
+				t.Fatalf("BuildReadyWorkWhere: %v", err)
+			}
+			if got := blockedTerm(t, where); got != "is_blocked = 0" {
+				t.Errorf("blocked term = %q, want the bare is_blocked = 0: the stale id is the %s family's", got, other)
+			}
+			if slices.Contains(args, any("st-1")) {
+				t.Errorf("args carry the other family's stale id: %v", args)
+			}
+		})
+
+		t.Run(tables.Main+"/stale_query", func(t *testing.T) {
+			q := StaleBlockedIDsSQL(tables)
+			if !strings.HasPrefix(q, "SELECT t.id FROM "+tables.Main+" t WHERE t.is_blocked = 1 AND NOT EXISTS (") {
+				t.Fatalf("stale query must select the family's flagged rows with no edge of their own: %s", q)
+			}
+			if !strings.Contains(q, "FROM "+tables.Dependencies+" d WHERE d.issue_id = t.id AND ") {
+				t.Fatalf("stale query must probe %s by the row's own id: %s", tables.Dependencies, q)
+			}
+			typesStart := strings.Index(q, "d.type IN (")
+			if typesStart < 0 {
+				t.Fatalf("stale query does not restrict dependency types: %s", q)
+			}
+			list := q[typesStart+len("d.type IN ("):]
+			list = list[:strings.Index(list, ")")]
+			got := map[string]bool{}
+			for _, lit := range strings.Split(list, ",") {
+				got[strings.Trim(strings.TrimSpace(lit), "'")] = true
+			}
+			want := map[string]bool{}
+			for _, d := range types.ReadyAffectingDependencyTypes() {
+				want[string(d)] = true
+			}
+			if len(got) != len(want) {
+				t.Errorf("stale query types = %v, want %v", got, want)
+			}
+			for d := range want {
+				if !got[d] {
+					t.Errorf("stale query omits ready-affecting type %q: %s", d, q)
+				}
+			}
+		})
 	}
 }
 
@@ -178,7 +414,7 @@ func TestBuildReadyWorkWhereAppliesPolicyIDExclusions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildReadyWorkWhere: %v", err)
 	}
-	if got := strings.Count(where, "id NOT IN ("); got != 2 {
+	if got := strings.Count(where, "id NOT IN (?"); got != 2 {
 		t.Fatalf("external policy exclusions produced %d NOT IN clauses, want 2", got)
 	}
 	wantArgs := len(ids) + len(ReadyWorkExcludeTypes(nil))
@@ -489,5 +725,28 @@ func TestOptionalWispTable(t *testing.T) {
 		if OptionalWispTable(name) {
 			t.Errorf("OptionalWispTable(%q) = true, want false", name)
 		}
+	}
+}
+
+// TestColumnNames pins the split the readable-schema check depends on: every
+// entry of the row projection comes back bare, with arrival_seq last, and
+// QualifyColumns rebuilds the list from the same entries.
+func TestColumnNames(t *testing.T) {
+	t.Parallel()
+
+	names := ColumnNames(IssueBaseColumns)
+	if got, want := names[0], "id"; got != want {
+		t.Errorf("first column = %q, want %q", got, want)
+	}
+	if got, want := names[len(names)-1], "arrival_seq"; got != want {
+		t.Errorf("last column = %q, want %q", got, want)
+	}
+	for _, name := range names {
+		if name == "" || strings.ContainsAny(name, " \t\n,") {
+			t.Errorf("ColumnNames entry %q is not a bare column name", name)
+		}
+	}
+	if got, want := QualifyColumns(IssueBaseColumns, "i."), "i."+strings.Join(names, ", i."); got != want {
+		t.Errorf("QualifyColumns = %q, want %q", got, want)
 	}
 }

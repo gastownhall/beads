@@ -1,0 +1,8 @@
+=== request 1 of 1: health
+GET /healthz
+Accept: application/json, application/problem+json
+Accept-Encoding: gzip
+Authorization: Bearer <BEADS_HTTP_TOKEN>
+Bd-Project-Id: proj-v0-wire-golden
+Bd-Wire-Revision: 2
+User-Agent: bd-http-backend/v0

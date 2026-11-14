@@ -58,9 +58,9 @@ func int64Ptr(v int64) *int64 { return &v }
 // every one of them is knowable from the request alone, so a request refused
 // here has provably touched no database.
 func TestPlanApplyBatchRefusesAnUnusableRequest(t *testing.T) {
-	hundredAndOne := make([]issueops.ApplyItem, 101)
-	for i := range hundredAndOne {
-		hundredAndOne[i] = planApplyCreate("")
+	overCap := make([]issueops.ApplyItem, issueops.MaxApplyBatchItems+1)
+	for i := range overCap {
+		overCap[i] = planApplyCreate("")
 	}
 
 	for _, test := range []struct {
@@ -70,7 +70,7 @@ func TestPlanApplyBatchRefusesAnUnusableRequest(t *testing.T) {
 	}{
 		{"no actor", issueops.ApplyBatchRequest{Items: []issueops.ApplyItem{planApplyCreate("")}}, "requires an actor"},
 		{"no items", issueops.ApplyBatchRequest{Actor: "planner"}, "at least one item"},
-		{"too many items", issueops.ApplyBatchRequest{Actor: "planner", Items: hundredAndOne}, "at most 100 items"},
+		{"too many items", issueops.ApplyBatchRequest{Actor: "planner", Items: overCap}, fmt.Sprintf("at most %d items", issueops.MaxApplyBatchItems)},
 		{"no payload", planApplyRequest(issueops.ApplyItem{Kind: issueops.ItemCreate}), "exactly one payload"},
 		{
 			"two payloads",

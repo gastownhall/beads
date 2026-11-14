@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -41,6 +42,7 @@ func TestExternalDoltEndpoint(t *testing.T) {
 	}{
 		{"tcp", configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: 3310}, "127.0.0.1:3310"},
 		{"ipv6", configfile.ExternalDoltConfig{Host: "::1", Port: 3310}, "[::1]:3310"},
+		{"ipv6 bracketed", configfile.ExternalDoltConfig{Host: "[::1]", Port: 3310}, "[::1]:3310"},
 		{"socket wins", configfile.ExternalDoltConfig{Socket: "/tmp/dolt.sock"}, "unix:/tmp/dolt.sock"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -107,6 +109,28 @@ func TestCollectProxiedDoltStatusExternalTopology(t *testing.T) {
 	}
 }
 
+// TestCollectProxiedDoltStatusLegacySidecarReportsDefaultIdleTimeout covers a
+// workspace provisioned before the sidecar persisted its effective idle
+// timeout: the key is absent on disk, yet the proxy still reaps at the default.
+// Status must report that default as it does for a fresh workspace, not drop
+// the field as if no timeout applied (bd-mnhq6).
+func TestCollectProxiedDoltStatusLegacySidecarReportsDefaultIdleTimeout(t *testing.T) {
+	beadsDir := t.TempDir()
+	root := filepath.Join(beadsDir, "dolt")
+	t.Setenv("BEADS_PROXIED_SERVER_ROOT_PATH", root)
+	if err := os.WriteFile(configfile.ProxiedServerClientInfoPath(beadsDir), []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("seed legacy sidecar: %v", err)
+	}
+
+	status, err := collectProxiedDoltStatus(beadsDir)
+	if err != nil {
+		t.Fatalf("collectProxiedDoltStatus: %v", err)
+	}
+	if want := configfile.DefaultProxyIdleTimeout.String(); status.IdleTimeout != want {
+		t.Errorf("idle_timeout = %q, want %q", status.IdleTimeout, want)
+	}
+}
+
 func TestRenderProxiedDoltStatus(t *testing.T) {
 	running := proxiedDoltStatus{
 		Mode: "proxied-server", Root: "/w/.beads/dolt", Running: true,
@@ -151,6 +175,28 @@ func TestRenderProxiedDoltStatus(t *testing.T) {
 		}
 	})
 
+	t.Run("text does not call a proxy over a dead managed backend running", func(t *testing.T) {
+		defer restoreJSONOutput(t)()
+		jsonOutput = false
+		stranded := running
+		stranded.Running = false
+		stranded.BackendRunning, stranded.BackendPID, stranded.BackendPort = false, 0, 0
+		out := captureStdout(t, func() error { renderProxiedDoltStatus(stranded); return nil })
+		if strings.Contains(out, "Dolt server: running") {
+			t.Errorf("proxy with a dead backend reported as running:\n%s", out)
+		}
+		for _, want := range []string{
+			"Dolt server: not serving (proxied-server)",
+			"Proxy PID:  111",
+			"Backend:    not running",
+			"bd dolt stop",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("missing %q in:\n%s", want, out)
+			}
+		}
+	})
+
 	t.Run("text marks an external backend as somebody else's", func(t *testing.T) {
 		defer restoreJSONOutput(t)()
 		jsonOutput = false
@@ -178,6 +224,24 @@ func TestRenderProxiedDoltStatus(t *testing.T) {
 			t.Errorf("round-trip mismatch:\ngot  %+v\nwant %+v", got, running)
 		}
 	})
+}
+
+func TestProxiedStatusServing(t *testing.T) {
+	for _, tc := range []struct {
+		name                                  string
+		proxyRunning, managed, backendRunning bool
+		want                                  bool
+	}{
+		{"managed pair live", true, true, true, true},
+		{"proxy over dead managed backend", true, true, false, false},
+		{"external backend", true, false, false, true},
+		{"proxy down", false, true, true, false},
+		{"nothing running", false, true, false, false},
+	} {
+		if got := proxiedStatusServing(tc.proxyRunning, tc.managed, tc.backendRunning); got != tc.want {
+			t.Errorf("%s: proxiedStatusServing(%v, %v, %v) = %v, want %v", tc.name, tc.proxyRunning, tc.managed, tc.backendRunning, got, tc.want)
+		}
+	}
 }
 
 func restoreJSONOutput(t *testing.T) func() {

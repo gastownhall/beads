@@ -1,0 +1,356 @@
+package doltserver
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"os/exec"
+	"strconv"
+	"sync"
+	"time"
+)
+
+// startedServer is a dolt sql-server child Start launched. A goroutine waits
+// on it, which both reports its exit and reaps it: without that, a child that
+// exits while bd is still running stays a zombie, and a zombie still answers
+// kill(pid, 0), so Start could not see that its server had died.
+type startedServer struct {
+	pid    int
+	proc   *os.Process
+	exited chan struct{}
+}
+
+// launchedServers holds, by PID, each child launchServer started whose wait
+// has not returned. The wait reaps the child just before it removes the
+// entry, and until a child is reaped its PID cannot name another process.
+var launchedServers sync.Map // int -> *startedServer
+
+func launchServer(cmd *exec.Cmd) (*startedServer, error) {
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	s := &startedServer{pid: cmd.Process.Pid, proc: cmd.Process, exited: make(chan struct{})}
+	launchedServers.Store(s.pid, s)
+	go func() {
+		_, _ = s.proc.Wait()
+		launchedServers.CompareAndDelete(s.pid, s)
+		close(s.exited)
+	}()
+	return s, nil
+}
+
+// launchedHere reports whether pid is a dolt sql-server this process launched
+// and has not seen exit. That identifies the server Start recorded without
+// the process list, which a sandbox can refuse (GH#7214).
+func launchedHere(pid int) bool {
+	_, ok := launchedServers.Load(pid)
+	return ok
+}
+
+func (s *startedServer) hasExited() bool {
+	select {
+	case <-s.exited:
+		return true
+	default:
+		return false
+	}
+}
+
+// killExitWait bounds how long killAndWait waits for a killed child to exit.
+const killExitWait = 5 * time.Second
+
+// killAndWait kills the child (and, on unix, the process group it leads, so
+// a dolt behind a wrapper that did not exec goes too) and waits briefly for
+// it to exit. The wait matters before a retry: the next attempt opens the
+// same database, and the killed child holds dolt's database lock until the
+// kernel has finished its exit.
+func (s *startedServer) killAndWait() {
+	if s == nil {
+		return
+	}
+	if !s.hasExited() {
+		killProcessGroup(s.pid)
+	}
+	_ = s.proc.Kill()
+	select {
+	case <-s.exited:
+	case <-time.After(killExitWait):
+	}
+}
+
+// writeServerStateFiles records a launched server in the PID and port files.
+func writeServerStateFiles(beadsDir string, pid, port int) error {
+	if err := os.WriteFile(pidPath(beadsDir), []byte(strconv.Itoa(pid)), 0600); err != nil {
+		return fmt.Errorf("writing PID file: %w", err)
+	}
+	if err := writePortFile(beadsDir, port); err != nil {
+		_ = os.Remove(pidPath(beadsDir))
+		return fmt.Errorf("writing port file: %w", err)
+	}
+	return nil
+}
+
+func removeServerStateFiles(beadsDir string) {
+	_ = os.Remove(pidPath(beadsDir))
+	_ = os.Remove(portPath(beadsDir))
+}
+
+// pinnedPortRemedy says why Start did not move off port, which another
+// process holds, and what the operator can do, worded by where the port came
+// from.
+func pinnedPortRemedy(cfg *Config, beadsDir string, port int) string {
+	switch {
+	case cfg.PortSource == PortSourceSharedServerDefault:
+		return fmt.Sprintf("port %d is the shared-server default port, which every project on this host dials, so bd will not move it: "+
+			"free it, or configure a different shared-server port with BEADS_DOLT_SERVER_PORT or dolt.port", port)
+	case cfg.PortSource == PortSourcePortFile:
+		return fmt.Sprintf("port %d is the shared server's recorded port (%s), which other projects dial, so bd will not move it: "+
+			"free it, or stop the shared server and delete that file", port, portPath(beadsDir))
+	default:
+		src := string(cfg.PortSource)
+		for _, ps := range portSources {
+			if ps.source == cfg.PortSource {
+				src = ps.label
+			}
+		}
+		switch cfg.PortSource {
+		case PortSourceCallerExplicit:
+			src = "an explicit port setting (e.g. bd init --server-port)"
+		case PortSourceUnset:
+			src = "an explicit setting"
+		}
+		return fmt.Sprintf("port %d comes from %s, which bd will not override: free it, or configure a different one with: bd dolt set port <port>", port, src)
+	}
+}
+
+// Ownership is what ClassifyListener can tell about the TCP listener on a
+// port: whether it belongs to a given process or one of its descendants.
+type Ownership int
+
+const (
+	// OwnershipUnknown: the platform or the sandbox cannot tell. There is no
+	// check on this platform, or /proc, lsof or ps cannot answer.
+	OwnershipUnknown Ownership = iota
+	// OwnershipUnlisted: the check ran but lists no listener on the port,
+	// although one answered there. The listener is out of this process's
+	// sight: another user's socket, which lsof cannot see without privilege;
+	// one reached through a forward, such as a Windows listener under WSL2's
+	// mirrored networking; or a /proc that lists no sockets at all (WSL1,
+	// some sandboxes). Only ListenerOwnershipProvable tells the first two
+	// from the last.
+	OwnershipUnlisted
+	// OwnershipForeign: the listener on the port is listed and belongs to
+	// another process, or the process asked about no longer exists.
+	OwnershipForeign
+	// OwnershipOwned: the listener belongs to the process or one of its
+	// descendants.
+	OwnershipOwned
+)
+
+// ClassifyListener reports who holds the TCP listener on port, relative to
+// pid (linux via /proc, darwin via lsof and ps). The proxied-server launcher
+// in dbproxy/server uses it, as awaitOwnedListener uses listenerOwnership,
+// for a config whose log level hides dolt's ready line.
+func ClassifyListener(pid, port int) Ownership {
+	return classifyListener(pid, port)
+}
+
+// listenerOwnershipProvable is ListenerOwnershipProvable; tests replace it.
+var listenerOwnershipProvable = ListenerOwnershipProvable
+
+// listenerOwnership is classifyListener as awaitOwnedListener reads it:
+// owned when the listener is pid's, known when that is shown either way.
+//
+// An unlisted listener counts as another process's where the host is shown
+// to list this process's own listeners (ListenerOwnershipProvable), as the
+// proxied launcher counts it: the child runs as this user in this network
+// namespace, so its listener would be listed, and what answered is another
+// user's socket (darwin's lsof cannot see one without privilege) or one
+// reached through a forward. Accepting its greeting would hand every
+// server-mode connection to that listener. Where the host lists no sockets
+// at all (WSL1, some sandboxes), an unlisted listener stays unknown, which
+// leaves server mode on its fallback evidence.
+func listenerOwnership(pid, port int) (owned, known bool) {
+	switch classifyListener(pid, port) {
+	case OwnershipOwned:
+		return true, true
+	case OwnershipForeign:
+		return false, true
+	case OwnershipUnlisted:
+		return false, listenerOwnershipProvable()
+	}
+	return false, false
+}
+
+// ListenerOwnershipProvable reports whether ClassifyListener can prove on
+// this host that a listener belongs to the process holding it: it listens on
+// a loopback port and asks about this process. It is false where the
+// platform has no ownership check (Windows and others) and where /proc or
+// lsof cannot see the listener (WSL1, some sandboxes). There a config whose
+// log level hides dolt's ready line leaves no proof that the listener on its
+// port is the dolt Beads started, so cmd/bd generates its proxied-server
+// config at such a level only where this is true. Where it is true, the
+// host lists this user's listeners in this network namespace, so a listener
+// it lists no holder for (OwnershipUnlisted) is not held by a child this
+// process launched.
+func ListenerOwnershipProvable() bool {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return false
+	}
+	defer func() { _ = ln.Close() }()
+	return classifyListener(os.Getpid(), ln.Addr().(*net.TCPAddr).Port) == OwnershipOwned
+}
+
+// startupProbe describes how awaitOwnedListener decides that the child it
+// launched is the dolt sql-server answering on host:port.
+type startupProbe struct {
+	host string
+	port int
+	// logPath and logOffset locate the child's output: it writes straight to
+	// the server log (it outlives bd, so it cannot write to a pipe into bd),
+	// and everything after logOffset is this child's.
+	logPath   string
+	logOffset int64
+	// readyLineLogged is true when the child's log level lets dolt log
+	// DoltReadyLine; the default warning level does not.
+	readyLineLogged bool
+	timeout         time.Duration
+	// owner is listenerOwnership; tests replace it.
+	owner func(pid, port int) (owned, known bool)
+}
+
+const (
+	startupProbeDialTimeout = 500 * time.Millisecond
+	startupProbeInterval    = 250 * time.Millisecond
+)
+
+// awaitOwnedListener waits until the dolt sql-server srv is accepting
+// connections on its port.
+//
+// A MySQL greeting on the port is not enough on its own: the port is chosen
+// before dolt binds it, and if another process (another dolt, say) takes it
+// in between, the greeting comes from that process while this child logs
+// "Port N already in use." and exits. dolt only reaches that check after its
+// own startup, which under load takes longer than any fixed grace period, so
+// a greeting only counts once the listener is shown to be the child's: by
+// dolt's ready line in the child's output when its log level emits one, or
+// else by the listening socket belonging to the child's process tree (Linux
+// via /proc, darwin via lsof and ps). When the socket is shown to belong to someone else the wait
+// ends at once with ErrPortInUse. Where neither proof is available the
+// greeting decides, as before, unless the log level promises a ready line.
+// Either way a child that exits, or says its port is taken, ends the wait,
+// with ErrPortInUse in the latter case.
+func awaitOwnedListener(srv *startedServer, p startupProbe) error {
+	addr := net.JoinHostPort(p.host, strconv.Itoa(p.port))
+	owner := p.owner
+	if owner == nil {
+		owner = listenerOwnership
+	}
+	watch := NewStartupWatch(nil, p.port)
+	tail := logTail{path: p.logPath, off: p.logOffset}
+	deadline := time.Now().Add(p.timeout)
+	answeredUnproven := false
+	for {
+		if err := childStartupFailure(srv, &tail, watch, addr); err != nil {
+			return err
+		}
+		greeted, _ := ProbeSQLServer("tcp", addr, startupProbeDialTimeout) //nolint:gosec // G704: addr is built from internal host+port, not user input
+		if greeted {
+			// Re-read the output before judging: a child that lost the port
+			// may have said so (and been reaped) since the check above.
+			if err := childStartupFailure(srv, &tail, watch, addr); err != nil {
+				return err
+			}
+			owned, known := watch.IsReady(), true
+			if !owned {
+				owned, known = owner(srv.pid, p.port)
+			}
+			switch {
+			case owned || (!known && !p.readyLineLogged):
+				if err := childStartupFailure(srv, &tail, watch, addr); err != nil {
+					return err
+				}
+				return nil
+			case known:
+				// Proven: the listener belongs to another process. The child
+				// cannot bind this port; do not wait for it to find out.
+				return fmt.Errorf("%w: another process (not dolt sql-server PID %d) holds %s", ErrPortInUse, srv.pid, addr)
+			default:
+				answeredUnproven = true
+			}
+		}
+		if time.Now().After(deadline) {
+			return startupTimeout(p, addr, srv.pid, answeredUnproven)
+		}
+		wait := startupProbeInterval
+		if left := time.Until(deadline); left < wait {
+			wait = left
+		}
+		select {
+		case <-srv.exited:
+		case <-time.After(wait):
+			if time.Now().After(deadline) {
+				return startupTimeout(p, addr, srv.pid, answeredUnproven)
+			}
+		}
+	}
+}
+
+func startupTimeout(p startupProbe, addr string, pid int, answeredUnproven bool) error {
+	if answeredUnproven {
+		return fmt.Errorf("timeout after %s: something answered at %s, but dolt sql-server (PID %d) never logged %q, "+
+			"which proves the listener is its own at log level debug; if a wrapper filters dolt's output, turn off debug mode (BEADS_DOLT_DEBUG, dolt.debug)",
+			p.timeout, addr, pid, DoltReadyLine)
+	}
+	return fmt.Errorf("timeout after %s waiting for server at %s", p.timeout, addr)
+}
+
+// childStartupFailure reads the child's latest output and returns why srv
+// cannot become ready, or nil while it still may. The output is read every
+// time, not only once the exit has been observed: the reaper goroutine can
+// lag the child's death, and the port-in-use line is already in the log.
+func childStartupFailure(srv *startedServer, tail *logTail, watch *StartupWatch, addr string) error {
+	exited := srv.hasExited()
+	tail.feed(watch)
+	if watch.SawPortInUse() {
+		return fmt.Errorf("%w: dolt sql-server (PID %d) could not bind %s", ErrPortInUse, srv.pid, addr)
+	}
+	if exited {
+		return errors.New("dolt sql-server (PID " + strconv.Itoa(srv.pid) + ") exited before accepting connections")
+	}
+	return nil
+}
+
+// logTail reads what has been appended to a file since off.
+type logTail struct {
+	path string
+	off  int64
+}
+
+func (t *logTail) feed(w io.Writer) {
+	f, err := os.Open(t.path)
+	if err != nil {
+		return
+	}
+	defer func() { _ = f.Close() }()
+	if st, err := f.Stat(); err == nil && st.Size() < t.off {
+		// Truncated underneath us (an external copytruncate rotation):
+		// everything now in the file is new.
+		t.off = 0
+	}
+	n, _ := io.Copy(w, io.NewSectionReader(f, t.off, 1<<62))
+	t.off += n
+}
+
+// logSize returns the current size of f, the offset a newly launched child's
+// output will start at.
+func logSize(f *os.File) int64 {
+	st, err := f.Stat()
+	if err != nil {
+		return 0
+	}
+	return st.Size()
+}

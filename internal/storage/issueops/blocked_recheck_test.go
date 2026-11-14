@@ -34,10 +34,10 @@ func scopedRecheckTx(t *testing.T) DBTX {
 func TestBlockedRecheck_RecordsEveryUnblockingWrite(t *testing.T) {
 	tx := scopedRecheckTx(t)
 
-	noteBlockedRecheck(tx, "close of rb-a", []string{"rb-a"}, []string{"rb-a", "rb-c"}, nil)
-	noteBlockedRecheck(tx, "dependency removal rb-c -> rb-b", nil, []string{"rb-c"}, []string{"rb-w"})
-	noteBlockedRecheck(tx, deleteRecheckLabel([]string{"rb-b"}, ""), []string{"rb-b"}, []string{"rb-b", "rb-d"}, nil)
-	noteBlockedRecheck(tx, "close of rb-a", []string{"rb-a"}, []string{"rb-c"}, nil)
+	noteBlockedRecheck(tx, "close of rb-a", "actor", []string{"rb-a"}, []string{"rb-a", "rb-c"}, nil)
+	noteBlockedRecheck(tx, "dependency removal rb-c -> rb-b", "actor", nil, []string{"rb-c"}, []string{"rb-w"})
+	noteBlockedRecheck(tx, deleteRecheckLabel([]string{"rb-b"}, ""), "actor", []string{"rb-b"}, []string{"rb-b", "rb-d"}, nil)
+	noteBlockedRecheck(tx, "close of rb-a", "actor", []string{"rb-a"}, []string{"rb-c"}, nil)
 
 	pending := TakeBlockedRecheck(tx)
 	if want := []string{"rb-c", "rb-d"}; !slices.Equal(pending.IssueIDs, want) {
@@ -54,6 +54,76 @@ func TestBlockedRecheck_RecordsEveryUnblockingWrite(t *testing.T) {
 	}
 }
 
+// TestBlockedRecheck_CarriesTheWritersActor pins who the recheck's derived
+// is_blocked records name: the actor of the writes
+// that recorded its ids, so a dependent a racing close leaves stale and the
+// recheck settles is attributed to the user whose write caused it. Writes by
+// different actors in one transaction leave it naming no one rather than
+// attributing one actor's change to the other — also when the later write
+// names only ids an earlier one already recorded, since the recheck settles
+// them for both. A write that names only its own excluded row does not vote,
+// and Merge keeps an actor only when both sides agree.
+func TestBlockedRecheck_CarriesTheWritersActor(t *testing.T) {
+	t.Run("one actor", func(t *testing.T) {
+		tx := scopedRecheckTx(t)
+		NoteStatusChangeBlockedRecheck(tx, "rb-a", "closed", "user-a", []string{"rb-c"}, nil)
+		NoteDependencyRemovalBlockedRecheck(tx, "rb-d", "rb-e", "user-a", []string{"rb-d"}, nil)
+		if got := TakeBlockedRecheck(tx).Actor; got != "user-a" {
+			t.Fatalf("Actor = %q, want user-a", got)
+		}
+	})
+	t.Run("writes by different actors sharing an id name no one", func(t *testing.T) {
+		tx := scopedRecheckTx(t)
+		NoteStatusChangeBlockedRecheck(tx, "rb-a", "closed", "user-a", []string{"rb-c"}, nil)
+		NoteStatusChangeBlockedRecheck(tx, "rb-b", "closed", "user-b", []string{"rb-c"}, nil)
+		if got := TakeBlockedRecheck(tx).Actor; got != NoRequestActor {
+			t.Fatalf("Actor = %q, want NoRequestActor", got)
+		}
+	})
+	t.Run("a write that names only its own excluded row does not vote", func(t *testing.T) {
+		tx := scopedRecheckTx(t)
+		NoteStatusChangeBlockedRecheck(tx, "rb-a", "closed", "user-a", []string{"rb-c"}, nil)
+		NoteStatusChangeBlockedRecheck(tx, "rb-b", "closed", "user-b", []string{"rb-b"}, nil)
+		if got := TakeBlockedRecheck(tx).Actor; got != "user-a" {
+			t.Fatalf("Actor = %q, want user-a", got)
+		}
+	})
+	t.Run("mixed actors name no one", func(t *testing.T) {
+		tx := scopedRecheckTx(t)
+		NoteStatusChangeBlockedRecheck(tx, "rb-a", "closed", "user-a", []string{"rb-c"}, nil)
+		NoteDeleteBlockedRecheck(tx, []string{"rb-b"}, "", "user-b", []string{"rb-d"}, nil)
+		NoteStatusChangeBlockedRecheck(tx, "rb-e", "closed", "user-a", []string{"rb-f"}, nil)
+		if got := TakeBlockedRecheck(tx).Actor; got != NoRequestActor {
+			t.Fatalf("Actor = %q, want NoRequestActor", got)
+		}
+	})
+	t.Run("a system write names no one", func(t *testing.T) {
+		tx := scopedRecheckTx(t)
+		NoteDeleteBlockedRecheck(tx, []string{"rb-b"}, "from repo", NoRequestActor, []string{"rb-d"}, nil)
+		if got := TakeBlockedRecheck(tx).Actor; got != NoRequestActor {
+			t.Fatalf("Actor = %q, want NoRequestActor", got)
+		}
+	})
+	t.Run("merge", func(t *testing.T) {
+		a := BlockedRecheck{IssueIDs: []string{"rb-c"}, SourceCount: 1, Actor: "user-a"}
+		b := BlockedRecheck{WispIDs: []string{"rb-w"}, SourceCount: 1, Actor: "user-b"}
+		for _, tc := range []struct {
+			name string
+			got  BlockedRecheck
+			want string
+		}{
+			{"with an empty side", a.Merge(BlockedRecheck{}), "user-a"},
+			{"onto an empty side", BlockedRecheck{}.Merge(a), "user-a"},
+			{"agreeing", a.Merge(BlockedRecheck{WispIDs: []string{"rb-w"}, SourceCount: 1, Actor: "user-a"}), "user-a"},
+			{"disagreeing", a.Merge(b), NoRequestActor},
+		} {
+			if tc.got.Actor != tc.want {
+				t.Errorf("%s: Actor = %q, want %q", tc.name, tc.got.Actor, tc.want)
+			}
+		}
+	})
+}
+
 // TestBlockedRecheck_BoundsTheCommitMessage: one transaction can close or
 // delete an unbounded number of issues, so the recheck's commit message names
 // at most recheckSourceLimit writes and counts the rest — it keeps naming the
@@ -64,13 +134,13 @@ func TestBlockedRecheck_BoundsTheCommitMessage(t *testing.T) {
 	tx := scopedRecheckTx(t)
 
 	// A write whose only recomputed id is its own excluded row adds nothing.
-	noteBlockedRecheck(tx, "close of rb-lonely", []string{"rb-lonely"}, []string{"rb-lonely"}, nil)
+	noteBlockedRecheck(tx, "close of rb-lonely", "actor", []string{"rb-lonely"}, []string{"rb-lonely"}, nil)
 	if pending := TakeBlockedRecheck(tx); !pending.Empty() || len(pending.Sources) != 0 || pending.SourceCount != 0 {
 		t.Fatalf("a write that recorded no id left %+v, want an untouched scope", pending)
 	}
 
 	for _, id := range []string{"rb-1", "rb-2", "rb-3", "rb-4"} {
-		noteBlockedRecheck(tx, "close of blocker-"+id, nil, []string{id}, nil)
+		noteBlockedRecheck(tx, "close of blocker-"+id, "actor", nil, []string{id}, nil)
 	}
 	pending := TakeBlockedRecheck(tx)
 	if pending.SourceCount != 4 || len(pending.Sources) != recheckSourceLimit {
@@ -91,8 +161,8 @@ func TestBlockedRecheck_CountsOnlyTheWritesItDidNotName(t *testing.T) {
 	tx := scopedRecheckTx(t)
 
 	label := deleteRecheckLabel([]string{"rb-1", "rb-2", "rb-3", "rb-4"}, "")
-	noteBlockedRecheck(tx, label, nil, []string{"rb-c"}, nil)
-	noteBlockedRecheck(tx, label, nil, []string{"rb-d"}, nil)
+	noteBlockedRecheck(tx, label, "actor", nil, []string{"rb-c"}, nil)
+	noteBlockedRecheck(tx, label, "actor", nil, []string{"rb-d"}, nil)
 
 	pending := TakeBlockedRecheck(tx)
 	if pending.SourceCount != 2 || len(pending.Sources) != 1 {
@@ -117,7 +187,7 @@ func TestBlockedRecheck_UnscopedTransactionRecordsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
 	}
-	noteBlockedRecheck(tx, "close of rb-a", []string{"rb-a"}, []string{"rb-c"}, nil)
+	noteBlockedRecheck(tx, "close of rb-a", "actor", []string{"rb-a"}, []string{"rb-c"}, nil)
 	if pending := TakeBlockedRecheck(tx); !pending.Empty() {
 		t.Fatalf("unscoped tx recorded %+v, want nothing", pending)
 	}

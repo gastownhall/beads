@@ -47,13 +47,11 @@ status (1 for every `HandleError*` helper).
   and the usage text on top of the real message
 
 **Narrow exceptions still using `os.Exit`:** process-level gates that run before
-or outside the `RunE` error path — `CheckReadonly`, which aborts a blocked
-command after flushing metrics first (exit 1 in read-only mode, exit 14,
-`ExitMigrationFrozen`, under an active migration freeze), plus `main()`'s own
-exit mapping, its second-signal force exit, and the `send-metrics` flusher. No
-direct `os.Exit` remains inside command handler bodies; new command code must
-return a `HandleError*` value (or an `*exitError` with a documented code, such
-as `ExitGuardMismatch` or the `ExitSync*` codes) instead.
+or outside the `RunE` error path — e.g. `CheckReadonly`, which aborts a blocked
+command after flushing metrics first (exit 1 in read-only mode,
+`ExitMigrationFrozen` under a migration freeze). A handful of pre-existing direct
+`os.Exit(1)` calls also remain inside handler bodies; new command code should
+return a `HandleError*` value instead of adding more.
 
 **Files using this pattern:** nearly every command in `cmd/bd/` — search for
 `return HandleError` (e.g. `create.go`, `defer.go`, `dolt.go`, `unclaim.go`,
@@ -84,12 +82,9 @@ if err := createConfigYaml(beadsDir, false, prefix); err != nil {
 - Core functionality still works
 
 **Files using this pattern:**
-- `cmd/bd/init.go` (the `.beads` permission, `.gitignore`/git-exclude, and
-  tracking-metadata warnings in the init run body; `verifyMetadata`)
-- `cmd/bd/migrate.go` (`repo_id` / `clone_id` / `issue_prefix` backfill warnings;
-  the `issue_prefix` backfill is a deliberate exception to the Pattern A rule for
-  configuration metadata below: it infers a missing prefix from existing IDs during
-  migration, so a failed write warns instead of aborting the migration)
+- `cmd/bd/init.go` — search for `"Warning: failed` (config.yaml, `.gitignore`,
+  git exclude, and tracking-metadata writes)
+- `cmd/bd/create.go`, `cmd/bd/gc.go` — search for `WarnError(`
 
 ---
 
@@ -113,7 +108,7 @@ _ = os.Remove(tempPath)
 - Primary error already reported
 
 **Files using this pattern:**
-- `cmd/bd/init.go` (`_ = store.Close()` on each early-return error path)
+- `cmd/bd/init.go` — search for `_ = store.Close()`
 - Dozens of other locations throughout the codebase
 
 ---
@@ -190,8 +185,8 @@ defer func() {
 ### Optional Metadata Updates → Pattern B (Warn)
 
 ```go
-if err := store.SetMetadata(ctx, "repo_id", computed); err != nil {
-    fmt.Fprintf(os.Stderr, "Warning: failed to set repo_id: %v\n", err)
+if err := store.SetLocalMetadata(ctx, "bd_version", Version); err != nil {
+    fmt.Fprintf(os.Stderr, "Warning: failed to write bd_version local metadata: %v\n", err)
 }
 ```
 
@@ -289,15 +284,10 @@ defer store.Close()
 if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
     return HandleError("failed to set issue prefix: %v", err)
 }
-
-if err := store.SetConfig(ctx, "sync.branch", branch); err != nil {
-    return HandleError("failed to set sync branch: %v", err)
-}
 ```
 
 **Examples:**
 - `issue_prefix` - Defines how all issue IDs are generated
-- `sync.branch` - Critical for git synchronization workflow
 
 **Rationale:** These settings are prerequisites for basic operation. Without them, the system cannot function correctly. A failure here indicates a serious problem (e.g., filesystem issues, database corruption).
 
@@ -307,13 +297,15 @@ Tracking metadata **enhances functionality** but the system works without it:
 
 ```go
 // Pattern B: Warn and continue
+// bd_version is clone-local state, so it goes through SetLocalMetadata.
 if err := store.SetLocalMetadata(ctx, "bd_version", Version); err != nil {
     fmt.Fprintf(os.Stderr, "Warning: failed to write bd_version local metadata: %v\n", err)
     // Non-fatal - continue anyway
 }
 
-if err := store.SetMetadata(ctx, "repo_id", repoID); err != nil {
-    fmt.Fprintf(os.Stderr, "Warning: failed to set repo_id: %v\n", err)
+// verifyMetadata writes the field, reads it back, and warns on failure.
+if verifyMetadata(ctx, store, "repo_id", repoID) && !quiet {
+    fmt.Printf("  Repository ID: %s\n", repoID[:8])
 }
 ```
 
@@ -323,9 +315,7 @@ if err := store.SetMetadata(ctx, "repo_id", repoID); err != nil {
 
 **Rationale:** System degrades gracefully if tracking metadata is unavailable. Core functionality (creating issues, importing data) still works. Failures here might indicate temporary issues (e.g., read-only filesystem) that shouldn't block the entire operation.
 
-**See also:** the `CONFIGURATION METADATA (Pattern A: Fatal)` and `TRACKING
-METADATA (Pattern B: Warn and Continue)` comment blocks in `cmd/bd/init.go` for
-detailed inline documentation of this distinction.
+**See also:** the `CONFIGURATION METADATA` and `TRACKING METADATA` comment blocks in `cmd/bd/init.go` for inline documentation of this distinction.
 
 ### File Permission Errors
 
@@ -379,9 +369,9 @@ func HandleErrorWithHintRespectJSON(message, hint string) error
 // Exit 1 with no message, when the error was already reported
 func SilentExit() error
 
-// Renders a *ProxyCapabilityError refusal ({error, code, mutates[, reason]}
-// JSON on stdout under --json, "Error: ..." otherwise); other errors fall
-// through to HandleErrorRespectJSON
+// Proxied-server capability refusals: a nil error passes through as nil, a
+// *ProxyCapabilityError is rendered (JSON-aware) with its own exit code, and
+// any other error falls back to HandleErrorRespectJSON
 func HandleProxyCapabilityError(err error) error
 
 // Pattern B — prints "Warning: ..." to stderr and returns nothing
@@ -399,4 +389,3 @@ func WarnError(format string, args ...interface{})
 - `cmd/bd/errors.go` - The `HandleError*` / `WarnError` / `SilentExit` helpers and the `exitError` sentinel that `main()` maps to an exit code
 - `cmd/bd/defer.go` - Clean example of Pattern A: `return HandleError(...)` from a `RunE` with `SilenceUsage`/`SilenceErrors` set
 - `cmd/bd/init.go` - Examples of all three patterns
-- `cmd/bd/migrate.go` - Examples of Pattern B for tracking-metadata backfill

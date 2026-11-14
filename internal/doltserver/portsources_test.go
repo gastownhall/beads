@@ -9,12 +9,30 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 )
 
+// isolateUserConfig points the user-level config locations (HOME, XDG, and
+// USERPROFILE) at an empty directory. config.Initialize merges the
+// user-level configs (~/.config/bd/config.yaml, legacy ~/.beads/config.yaml),
+// and the integration TestMain does not redirect HOME, so without this an
+// operator's dolt.shared-server: true switches DefaultConfig to the shared
+// server's state dir and its port file. It also drops any config an earlier
+// test in the run loaded (from the real HOME), and does so again afterwards.
+func isolateUserConfig(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+}
+
 // Asserts the precedence chain against DefaultConfig itself by layering each
 // source on top of the previous ones: env > port file > Dolt server
 // config.yaml > Beads config.yaml > metadata.json (GH#4511).
 func TestDefaultConfigPrecedenceChain(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	isolateUserConfig(t)
 
 	beadsDir := t.TempDir()
 
@@ -81,6 +99,7 @@ func TestDefaultConfigPrecedenceChain(t *testing.T) {
 func TestDefaultConfigPortSource(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	isolateUserConfig(t)
 
 	beadsDir := t.TempDir()
 
@@ -221,5 +240,75 @@ func writeMetadataPort(t *testing.T, beadsDir string, port int) {
 	}
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestResolversLeaveLegacyConfigJSONUnchanged pins that doltserver's
+// resolvers never migrate a workspace's legacy config.json. They run for
+// workspaces bd was not launched in (beads.Open of another path reaches
+// DefaultConfig through the Dolt constructor; DefaultConfigForMode serves
+// diagnostics of another workspace; EnsureRunning's error path reads the
+// host) before anything has admitted them, so a migrating configfile.Load
+// there rewrote a pre-Dolt workspace's config.json into metadata.json,
+// dropping the keys Config does not know. A resolver that reads the legacy
+// file still sees its settings in place.
+func TestResolversLeaveLegacyConfigJSONUnchanged(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_PORT", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_DATA_DIR", "")
+	isolateUserConfig(t)
+
+	const legacy = `{"database":"beads.db","version":"0.20.1","jsonl_export":"issues.jsonl","dolt_mode":"server","dolt_server_host":"db.example.internal","dolt_server_port":5009}`
+	resolvers := map[string]func(t *testing.T, beadsDir string){
+		"DefaultConfig": func(t *testing.T, beadsDir string) {
+			if got := DefaultConfig(beadsDir).Port; got != 5009 {
+				t.Errorf("DefaultConfig port = %d, want config.json's 5009 read in place", got)
+			}
+		},
+		"DialConfig": func(_ *testing.T, beadsDir string) { _ = DialConfig(beadsDir) },
+		"DefaultConfigForMode/owned": func(t *testing.T, beadsDir string) {
+			if got := DefaultConfigForMode(beadsDir, false).Port; got != 5009 {
+				t.Errorf("DefaultConfigForMode port = %d, want config.json's 5009 read in place", got)
+			}
+		},
+		"DefaultConfigForMode/shared": func(_ *testing.T, beadsDir string) { _ = DefaultConfigForMode(beadsDir, true) },
+		"externalNonLocalhostHost": func(t *testing.T, beadsDir string) {
+			if host, ok := externalNonLocalhostHost(beadsDir); !ok || host != "db.example.internal" {
+				t.Errorf("externalNonLocalhostHost = %q, %v, want config.json's host read in place", host, ok)
+			}
+		},
+		"ResolveServerMode":        func(_ *testing.T, beadsDir string) { _ = ResolveServerMode(beadsDir) },
+		"ResolveRemotesAPIPort":    func(_ *testing.T, beadsDir string) { _ = ResolveRemotesAPIPort(beadsDir) },
+		"ResolveDoltDir":           func(_ *testing.T, beadsDir string) { _ = ResolveDoltDir(beadsDir) },
+		"ResolvePhysicalRoots":     func(_ *testing.T, beadsDir string) { _, _ = ResolvePhysicalRoots(beadsDir) },
+		"LibraryOpenRootPath":      func(_ *testing.T, beadsDir string) { _ = LibraryOpenRootPath(beadsDir) },
+		"ExternalPortSetting":      func(_ *testing.T, beadsDir string) { _ = ExternalPortSetting(beadsDir, PortSourceMetadataJSON, 5009) },
+		"IsSharedServerModeForDir": func(_ *testing.T, beadsDir string) { _ = IsSharedServerModeForDir(beadsDir) },
+	}
+	for name, resolve := range resolvers {
+		t.Run(name, func(t *testing.T) {
+			beadsDir := t.TempDir()
+			legacyPath := filepath.Join(beadsDir, "config.json")
+			if err := os.WriteFile(legacyPath, []byte(legacy), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			resolve(t, beadsDir)
+			entries, err := os.ReadDir(beadsDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 1 || entries[0].Name() != "config.json" {
+				names := make([]string, 0, len(entries))
+				for _, e := range entries {
+					names = append(names, e.Name())
+				}
+				t.Fatalf("%s changed the workspace: entries %v, want only config.json", name, names)
+			}
+			if data, err := os.ReadFile(legacyPath); err != nil || string(data) != legacy {
+				t.Fatalf("%s rewrote config.json: %q, %v", name, data, err)
+			}
+		})
 	}
 }
