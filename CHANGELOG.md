@@ -1318,6 +1318,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd federation sync --strategy ours|theirs` resolves real conflicts
+  again** (#5564). Sync merged the peer's branch under autocommit, so Dolt
+  rejected any genuine conflict before the strategy applied and the sync
+  failed. It now resolves the conflicted tables, commits the merge
+  (including FK repairs for rows that reference issues deleted on the other
+  side) and only then pushes, on both server and embedded stores. Without
+  `--strategy`, a conflict fails the sync with that peer and leaves nothing
+  merged; the help no longer promises an interactive pause.
+
 - **`bd doctor` ranks a release candidate below its release** (#6595). The
   version comparison split `1.3.1-rc.1` into `1.3.1.1`, so a candidate
   sorted above its own release and `bd doctor` never told an rc user that
