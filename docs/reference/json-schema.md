@@ -161,7 +161,8 @@ for example in proxied-server mode) is written to stdout with a fixed
 refusal identifier (e.g. `proxy.readonly.unsupported`), `mutates` says whether
 the refused operation would have written, and an optional `reason`
 (`design` or `unimplemented`) appears only on refusals from the capability
-registry.
+registry. With `BD_JSON_ENVELOPE=1` these fields are nested under `data`, like
+every other envelope payload.
 
 JSON-mode errors exit with code 1, except where a command documents its own
 exit code: an all-guard-mismatch `bd update` exits 13, and a write refused by

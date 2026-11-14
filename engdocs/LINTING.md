@@ -2,7 +2,7 @@
 
 Last reviewed: 2026-11-14
 
-Freshness source: `.golangci.yml`, `scripts/ci/pr-lint.sh`, `Makefile`,
+Freshness source: `.golangci.yml`, `scripts/ci/pr-lint.sh`, `scripts/ci/fmt-check.sh`, `Makefile`,
 `.github/workflows/pr.yml`, and `.github/workflows/main.yml`.
 
 This document explains the required Go lint gate for this codebase.

@@ -245,8 +245,8 @@ So `max_connections` on a shared server must cover roughly `22 × (number of bd
 serve processes)` plus every other `bd` process pointed at the same server,
 each of which claims its own. Idle connections are reclaimed after 20 seconds
 (kept below Dolt's 30-second `wait_timeout`, so a request never receives a
-connection the server already reaped) and recycled after an hour, so a bursty deployment settles below the worst case —
-but size for the worst case.
+connection the server already reaped) and recycled after an hour, so a bursty
+deployment settles below the worst case — but size for the worst case.
 
 Those pool limits are applied only if the unit-of-work provider exposes the
 knob. If it does not, `bd serve` says so at startup with

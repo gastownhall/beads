@@ -86,7 +86,10 @@ if err := createConfigYaml(beadsDir, false, prefix); err != nil {
 **Files using this pattern:**
 - `cmd/bd/init.go` (the `.beads` permission, `.gitignore`/git-exclude, and
   tracking-metadata warnings in the init run body; `verifyMetadata`)
-- `cmd/bd/migrate.go` (`repo_id` / `clone_id` / `issue_prefix` backfill warnings)
+- `cmd/bd/migrate.go` (`repo_id` / `clone_id` / `issue_prefix` backfill warnings;
+  the `issue_prefix` backfill is a deliberate exception to the Pattern A rule for
+  configuration metadata below: it infers a missing prefix from existing IDs during
+  migration, so a failed write warns instead of aborting the migration)
 
 ---
 

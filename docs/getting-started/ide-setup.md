@@ -95,7 +95,7 @@ bd setup claude --global   # Global install: ~/.claude/settings.json
 
 This installs:
 - **SessionStart hook** - Runs `bd prime --hook-json`, which wraps the workflow context in the JSON envelope Claude Code expects. SessionStart fires when a session starts, resumes, or clears, and again after context compaction — no separate compaction hook is needed.
-- **Minimal beads section in `CLAUDE.md`** - A pointer to `bd prime`, managed with hash/version markers for safe updates and `--check` freshness detection. If `CLAUDE.md` is a thin stub that imports `AGENTS.md` with an `@AGENTS.md` line (outside a code fence), the section is written to `AGENTS.md` instead and any stale block left in `CLAUDE.md` is removed.
+- **Minimal beads section in `CLAUDE.md`** - A pointer to `bd prime`, managed with hash/version markers for safe updates and `--check` freshness detection. If `CLAUDE.md` is a thin stub that imports `AGENTS.md` with an `@AGENTS.md` line (outside a code fence) and `AGENTS.md` exists, the section is written to `AGENTS.md` instead and any stale block left in `CLAUDE.md` is removed.
 
 If the [beads Claude Code plugin](/integrations/claude-code-plugin) is installed, hooks are plugin-managed and `bd setup claude` skips writing them, so `bd prime` doesn't fire twice per session.
 
@@ -209,7 +209,7 @@ bd setup opencode   # OpenCode — AGENTS.md section
 bd setup codex      # Codex — beads skill + AGENTS.md guidance + native hooks
 ```
 
-These create or update a managed section in `AGENTS.md` (see Managed Sections above). `bd init` runs the project Claude, Codex, and Cursor setup automatically unless `--skip-agents` or `--stealth` is used. In worktree, shared, or `BEADS_DIR` setups, use `bd where` to confirm the resolved workspace — these integrations do not require a local `./.beads`. Restart the tool after setup if it is already running.
+These create or update a managed section in `AGENTS.md` (see Managed Sections above). `bd init` runs the project Claude, Codex, and Cursor setup automatically unless `--skip-agents` or `--stealth` is used, and skips it in a bare Git repository. In worktree, shared, or `BEADS_DIR` setups, use `bd where` to confirm the resolved workspace — these integrations do not require a local `./.beads`. Restart the tool after setup if it is already running.
 
 Details: [Factory.ai Droid](/integrations/factory), [Mux](/integrations/mux), [OpenCode](/integrations/opencode), [Codex](/integrations/codex).
 
