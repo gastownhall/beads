@@ -551,3 +551,39 @@ func TestFilterFlagClassification(t *testing.T) {
 		t.Errorf("reviewedFilterFlags has %d rows, want 34 (bd list's 5 plus the 29 swept command-path/flag pairs); update this count only with a reviewed row", len(reviewedFilterFlags))
 	}
 }
+
+// TestFilterFlagSetterExemptionsAllExist: every exemption names an existing
+// plain string flag and carries a reason, and repeating it still lets the
+// last value win, as a setter override should.
+func TestFilterFlagSetterExemptionsAllExist(t *testing.T) {
+	if len(filterFlagSetterExemptions) == 0 {
+		t.Fatal("filterFlagSetterExemptions is empty")
+	}
+	seen := map[string]bool{}
+	for _, e := range filterFlagSetterExemptions {
+		key := e.path + " --" + e.flag
+		t.Run(strings.ReplaceAll(e.path, " ", "_")+"/--"+e.flag, func(t *testing.T) {
+			if seen[key] {
+				t.Errorf("%s is listed twice", key)
+			}
+			seen[key] = true
+			if strings.TrimSpace(e.reason) == "" {
+				t.Errorf("%s: exemption has no reason", key)
+			}
+			if slices.ContainsFunc(reviewedFilterFlags, func(r reviewedFilterFlag) bool { return r.path == e.path && r.flag == e.flag }) {
+				t.Errorf("%s is both exempt and a reviewed filter", key)
+			}
+			_, fl := lookupFilterFlag(t, e.path, e.flag)
+			if fl.Value.Type() != "string" || filterFlagKind(fl) != "plain" {
+				t.Fatalf("%s: value %T (type %s), want a plain string setter", key, fl.Value, fl.Value.Type())
+			}
+			fl, err := parseFilterArgs(t, e.path, e.flag, "--"+e.flag, "first", "--"+e.flag, "second")
+			if err != nil {
+				t.Fatalf("%s repeated: %v; a setter repeat must be accepted", key, err)
+			}
+			if got := fl.Value.String(); got != "second" {
+				t.Errorf("%s repeated: value %q, want the last value %q", key, got, "second")
+			}
+		})
+	}
+}
