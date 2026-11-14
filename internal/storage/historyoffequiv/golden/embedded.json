@@ -1,5 +1,5 @@
 {
-  "recorded_from": "29472cad3 + gascity/bd-enterprise#210",
+  "recorded_from": "8cdfa796a8f5 + bd-tfz3pk (GH#5657 label write coordination)",
   "steps": [
     "create a",
     "create b blocked by a",
@@ -350,8 +350,8 @@
         "key",
         "value"
       ],
-      "rows": 37,
-      "sha256": "11ab6875bdbc3b120b41dd722b1d9bb7e7889b851f85926a72c1a86d9a52b012"
+      "rows": 42,
+      "sha256": "476beb819a3b1b344fe1e2d1b1d62f219bb5347d07186f6fa80864b7a19f18e7"
     },
     "metadata": {
       "columns": [
