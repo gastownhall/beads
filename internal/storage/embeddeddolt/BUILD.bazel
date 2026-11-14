@@ -128,6 +128,7 @@ go_test(
         "child_id_test.go",
         "claim_wrapper_smoke_test.go",
         "claimer_contract_test.go",
+        "classify_open_error_internal_test.go",
         "commenter_contract_test.go",
         "comments_page_test.go",
         "commit_all_cgo_test.go",
