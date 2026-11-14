@@ -3,12 +3,14 @@ package uow
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"io"
 	"os"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 
@@ -278,5 +280,106 @@ func TestCheckTeamServerIdentity_ReadError_Surfaces(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "beads_team") {
 		t.Errorf("error %q should name the database", err)
+	}
+}
+
+// expectExcursionIdentityRead scripts checkExcursionIdentity's read sequence
+// against an existing database that has a metadata table: existence probe,
+// USE, session-database assertion, metadata-table probe, identity read.
+func expectExcursionIdentityRead(mock sqlmock.Sqlmock, database, storedProjectID string) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = ?")).
+		WithArgs(database).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectExec(regexp.QuoteMeta("USE `" + database + "`")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT DATABASE()")).
+		WillReturnRows(sqlmock.NewRows([]string{"DATABASE()"}).AddRow(database))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ? AND table_name = 'metadata'")).
+		WithArgs(database).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	expectProjectIDQuery(mock, storedProjectID)
+}
+
+func pinMockConn(t *testing.T) (sqlmock.Sqlmock, *sql.Conn) {
+	t.Helper()
+	sqlDB, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	conn, err := sqlDB.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("pin conn: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return mock, conn
+}
+
+func assertExcursionMismatch(t *testing.T, err error, database, local, stored string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("got nil, want PROJECT IDENTITY MISMATCH for %q", database)
+	}
+	for _, want := range []string{"PROJECT IDENTITY MISMATCH", local, stored, database, "BEADS_SKIP_IDENTITY_CHECK=1"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should contain %q", err, want)
+		}
+	}
+	// Plain mode has no team server: its remedies must not leak in.
+	for _, unwanted := range []string{"bts ", "bd init --team-server"} {
+		if strings.Contains(err.Error(), unwanted) {
+			t.Errorf("plain-mode refusal %q must not recommend %q", err, unwanted)
+		}
+	}
+}
+
+// gastownhall/beads#5572: an excursion that selects another beads project's
+// database is refused, naming both identities and the database.
+func TestCheckExcursionIdentity_ForeignProjectID_Refuses(t *testing.T) {
+	mock, conn := pinMockConn(t)
+	expectExcursionIdentityRead(mock, "beads_other", "project-BBBB")
+
+	err := checkExcursionIdentity(context.Background(), conn, "beads_other", "project-AAAA")
+	assertExcursionMismatch(t, err, "beads_other", "project-AAAA", "project-BBBB")
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// The refusal must come before ANY open work on the target: no migration
+// lock, CREATE, migration, or preview attach. sqlmock is ordered and holds
+// only the identity reads, and the migrate seam fails the test if reached.
+func TestInitSchemaAttempt_ExcursionMismatchStopsBeforeOpen(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		preview bool
+	}{
+		{name: "ordinary", preview: false},
+		{name: "preview", preview: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			migrateCalls := stubConvergedMigrateUp(t)
+			sqlDB, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer func() { _ = sqlDB.Close() }()
+			expectExcursionIdentityRead(mock, "beads_other", "project-BBBB")
+
+			p := &doltSQLProvider{defaultBranch: defaultBranch, db: sqlDB, preview: tc.preview, expectedProjectID: "project-AAAA"}
+			start := time.Now()
+			err = p.initSchema(context.Background(), "beads_other")
+			assertExcursionMismatch(t, err, "beads_other", "project-AAAA", "project-BBBB")
+			// Permanent: the backoff loop must not retry a mismatch.
+			if elapsed := time.Since(start); elapsed > 5*time.Second {
+				t.Errorf("mismatch took %s; it must be a permanent (unretried) failure", elapsed)
+			}
+			if *migrateCalls != 0 {
+				t.Errorf("migrateUpWithLock called %d times after a mismatch, want 0", *migrateCalls)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet or extra statements: %v", err)
+			}
+		})
 	}
 }
