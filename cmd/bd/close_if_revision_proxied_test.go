@@ -52,6 +52,55 @@ func TestProxiedServerIfRevisionCloseReplaysMoleculeAutoClose(t *testing.T) {
 	}
 }
 
+// TestProxiedServerIfRevisionCloseReportsAlreadyClosedNoOp is
+// TestEmbeddedIfRevisionCloseReportsAlreadyClosedNoOp's proxied-server twin:
+// the guarded proxied re-close of an already-closed issue reports the no-op
+// the way every other close route does (bd-th8229 / #4816), in text and in
+// --json, with the stored first reason.
+func TestProxiedServerIfRevisionCloseReportsAlreadyClosedNoOp(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+	p := newSharedProxiedProject(t, bd, "ivn")
+
+	issue := bdProxiedCreate(t, bd, p.dir, "Guarded proxied already closed")
+	bdProxiedClose(t, bd, p.dir, issue.ID, "--reason", "FIRST")
+
+	rev := bdProxiedShowRevision(t, bd, p.dir, issue.ID)
+
+	stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "close", issue.ID, "--if-revision", proxiedRevStr(rev), "--reason", "SECOND")
+	if err != nil {
+		t.Fatalf("guarded re-close of an already-closed issue is an idempotent no-op and must exit 0: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Already closed ") {
+		t.Errorf("guarded proxied re-close must report the no-op as already closed, got:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "(close reason unchanged: FIRST)") {
+		t.Errorf("guarded proxied re-close must show the stored first reason, got:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "SECOND") {
+		t.Errorf("guarded proxied re-close must not present the dropped reason as applied, got:\n%s", stdout)
+	}
+	db := openProxiedDB(t, p)
+	if got := readCloseReason(t, db, issue.ID); got != "FIRST" {
+		t.Errorf("close_reason = %q after guarded proxied re-close, want %q", got, "FIRST")
+	}
+
+	// The --json twin of the same no-op; the row did not move, so the same
+	// revision still guards it.
+	stdout, stderr, err = bdProxiedRunBuffers(t, bd, p.dir, "close", issue.ID, "--if-revision", proxiedRevStr(rev), "--json", "--reason", "THIRD")
+	if err != nil {
+		t.Fatalf("guarded proxied re-close --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	entry := decodeCloseJSON(t, stdout, []string{issue.ID})[0]
+	if entry.AlreadyClosed == nil || !*entry.AlreadyClosed {
+		t.Errorf("guarded proxied re-close --json entry must carry already_closed: true, got %+v", entry.AlreadyClosed)
+	}
+	if entry.CloseReason != "FIRST" {
+		t.Errorf("guarded proxied re-close --json close_reason = %q, want the stored %q", entry.CloseReason, "FIRST")
+	}
+}
+
 // TestProxiedServerIfRevisionCloseWarnsOnForcedOpenChildren is
 // TestEmbeddedIfRevisionCloseWarnsOnForcedOpenChildren's proxied-server twin, pinning
 // mc-zndi7.75 item 3 on the proxied route.

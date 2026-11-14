@@ -60,6 +60,53 @@ func TestEmbeddedIfRevisionCloseReplaysMoleculeAutoClose(t *testing.T) {
 	}
 }
 
+// TestEmbeddedIfRevisionCloseReportsAlreadyClosedNoOp pins the guarded
+// direct route's half of bd-th8229 / #4816: an already-closed issue
+// re-closed under --if-revision with a different reason must be reported
+// like the batch routes report it — as an already-closed no-op with the
+// stored first reason, in text and in --json — while the stored reason
+// stays put.
+func TestEmbeddedIfRevisionCloseReportsAlreadyClosedNoOp(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "rca")
+
+	issue := bdCreate(t, bd, dir, "Guarded already closed", "--type", "task")
+	bdClose(t, bd, dir, issue.ID, "--reason", "FIRST")
+
+	// The revision the closed row answers with now; the no-op below must not
+	// move it, so the same value guards the --json re-close too.
+	rev := bdShowRevision(t, bd, dir, issue.ID)
+
+	out := bdClose(t, bd, dir, issue.ID, "--if-revision", revStr(rev), "--reason", "SECOND")
+	if !strings.Contains(out, "Already closed ") {
+		t.Errorf("guarded re-close must report the no-op as already closed, got:\n%s", out)
+	}
+	if !strings.Contains(out, "(close reason unchanged: FIRST)") {
+		t.Errorf("guarded re-close must show the stored first reason, got:\n%s", out)
+	}
+	if strings.Contains(out, "SECOND") {
+		t.Errorf("guarded re-close must not present the dropped reason as applied, got:\n%s", out)
+	}
+	if got := bdShow(t, bd, dir, issue.ID).CloseReason; got != "FIRST" {
+		t.Errorf("close_reason = %q after guarded re-close, want %q", got, "FIRST")
+	}
+
+	// The --json twin of the same no-op.
+	outJSON := bdClose(t, bd, dir, issue.ID, "--if-revision", revStr(rev), "--json", "--reason", "THIRD")
+	entry := decodeCloseJSON(t, outJSON, []string{issue.ID})[0]
+	if entry.AlreadyClosed == nil || !*entry.AlreadyClosed {
+		t.Errorf("guarded re-close --json entry must carry already_closed: true, got %+v", entry.AlreadyClosed)
+	}
+	if entry.CloseReason != "FIRST" {
+		t.Errorf("guarded re-close --json close_reason = %q, want the stored %q", entry.CloseReason, "FIRST")
+	}
+}
+
 // TestEmbeddedIfRevisionCloseWarnsOnForcedOpenChildren pins mc-zndi7.75 item 3: the
 // "warning: closing X with N open child issue(s) still active" line
 // (close.go:194-196) must still print on the guarded direct close route when

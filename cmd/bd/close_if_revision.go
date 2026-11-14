@@ -187,6 +187,15 @@ func reportClosedIfRevisionResult(id, reason, preCloseStatus string, closeResult
 		}
 		return
 	}
+	if !closeResult.Changed {
+		// The guarded twin of the batch routes' no-op arm (bd-th8229 / #4816):
+		// report the id as already closed with its stored reason, never as a
+		// close that applied this command's. Everything around the report —
+		// last-touched, molecule auto-close, the on_close hook contract above —
+		// already ran and is unchanged.
+		debug.PrintNormal("%s\n", formatAlreadyClosedLine(id, closedIssue))
+		return
+	}
 	title := ""
 	if closedIssue != nil {
 		title = closedIssue.Title
