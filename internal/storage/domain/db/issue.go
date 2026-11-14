@@ -807,6 +807,20 @@ func (r *issueSQLRepositoryImpl) NextCounterID(ctx context.Context, prefix strin
 	return nextID, nil
 }
 
+// RaiseCounterPastHeldIDs raises the issue counter for prefix to the highest
+// numeric suffix the id space holds for it — both row tables and both
+// tombstone tables, one scan (issueops.JumpCounterPastHeldSuffixesInTx) — in
+// this repository's transaction. It only raises, never lowers.
+func (r *issueSQLRepositoryImpl) RaiseCounterPastHeldIDs(ctx context.Context, prefix string) error {
+	if prefix == "" {
+		return errors.New("db: RaiseCounterPastHeldIDs: prefix must not be empty")
+	}
+	if err := issueops.JumpCounterPastHeldSuffixesInTx(ctx, r.runner, prefix); err != nil {
+		return fmt.Errorf("db: RaiseCounterPastHeldIDs %q: %w", prefix, err)
+	}
+	return nil
+}
+
 func (r *issueSQLRepositoryImpl) seedCounterFromExisting(ctx context.Context, prefix string) error {
 	var existing int
 	err := r.runner.QueryRowContext(ctx, "SELECT last_id FROM issue_counter WHERE prefix = ?", prefix).Scan(&existing)

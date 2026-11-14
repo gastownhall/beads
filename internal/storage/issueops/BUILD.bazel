@@ -155,6 +155,7 @@ go_test(
         "close_test.go",
         "config_helpers_test.go",
         "config_prefix_test.go",
+        "counter_jump_test.go",
         "counts_missing_table_test.go",
         "create_batch_cache_test.go",
         "create_existence_reads_test.go",

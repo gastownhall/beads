@@ -209,29 +209,35 @@ func TestGenerateIssueIDSkipsARetiredCandidate(t *testing.T) {
 	}
 }
 
-// TestGenerateIssueIDCounterModeWalksPastARetiredValue pins counter mode: a
-// counter value a sweep retired is skipped and the counter advanced again, and
-// each candidate costs one tombstone read, not one per tombstone table.
-func TestGenerateIssueIDCounterModeWalksPastARetiredValue(t *testing.T) {
+// TestGenerateIssueIDCounterModeJumpsPastARetiredValue pins counter mode: a
+// counter value a sweep retired is taken like one a live row holds — the one
+// taken read covers both tombstone tables — and the first taken candidate
+// jumps the counter to the highest held suffix in one scan, so the next value
+// is one past it.
+func TestGenerateIssueIDCounterModeJumpsPastARetiredValue(t *testing.T) {
 	db, mock := newIDRetentionMock(t)
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT value FROM config WHERE `key` = ?")).
 		WithArgs("issue_id_mode").WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow("counter"))
-	expectCounter := func(next int, retired bool) {
+	bump := func(next int) {
 		mock.ExpectExec(regexp.QuoteMeta("UPDATE issue_counter SET last_id = last_id + 1 WHERE prefix = ?")).
 			WithArgs("bd").WillReturnResult(sqlmock.NewResult(0, 1))
 		mock.ExpectQuery(regexp.QuoteMeta("SELECT last_id FROM issue_counter WHERE prefix = ?")).
 			WithArgs("bd").WillReturnRows(sqlmock.NewRows([]string{"last_id"}).AddRow(next))
-		id := fmt.Sprintf("bd-%d", next)
-		count := 0
-		if retired {
-			count = 1
-		}
-		// One statement per candidate reads both tombstone tables.
-		mock.ExpectQuery(regexp.QuoteMeta(idRetiredSQL)).WithArgs(id, id).
+	}
+	taken := func(id string, count int) {
+		mock.ExpectQuery(regexp.QuoteMeta(idTakenSQL)).WithArgs(id, id, id, id).
 			WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(count))
 	}
-	expectCounter(5, true)
-	expectCounter(6, false)
+	bump(5)
+	taken("bd-5", 1) // retired: the tombstone side of the one taken read
+	// The jump: one scan over both planes and both tombstone tables finds the
+	// highest held suffix, and the raise-only update lands the counter on it.
+	mock.ExpectQuery(regexp.QuoteMeta(counterHeldIDsScanSQL)).WithArgs("bd", "bd", "bd", "bd").
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("bd-5"))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE issue_counter SET last_id = ? WHERE prefix = ? AND last_id < ?")).
+		WithArgs(5, "bd", 5).WillReturnResult(sqlmock.NewResult(0, 1))
+	bump(6)
+	taken("bd-6", 0)
 	id, err := GenerateIssueIDInTable(context.Background(), db, "issues", "bd", &types.Issue{}, "actor", nil)
 	if err != nil {
 		t.Fatalf("GenerateIssueIDInTable(counter) = %v", err)

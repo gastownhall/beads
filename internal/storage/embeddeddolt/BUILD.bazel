@@ -136,6 +136,7 @@ go_test(
         "concurrency_test.go",
         "conformance_test.go",
         "counter_contract_test.go",
+        "counter_jump_test.go",
         "counts_missing_table_test.go",
         "counts_wisp_test.go",
         "create_batch_equivalence_test.go",

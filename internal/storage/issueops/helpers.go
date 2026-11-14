@@ -273,22 +273,26 @@ func RecordEventInTable(ctx context.Context, tx DBTX, table, issueID string, eve
 	})
 }
 
-// maxRetiredCounterSkips bounds how many retired counter values one
-// counter-mode create walks past before giving up with an error rather than
-// looping on a counter that a sweep retired a long run of.
-const maxRetiredCounterSkips = 1000
+// maxHeldCounterSkips bounds how many held or claimed counter values one
+// counter-mode mint walks past before giving up with an error rather than
+// looping on a counter that cannot get ahead of the id space.
+const maxHeldCounterSkips = 1000
 
 // GenerateIssueIDInTable generates an ID for an issue bound for table that
-// claimed does not name and no tombstone retired. Supports counter mode for
-// non-ephemeral issues. Only hash mode also probes for live rows, in both
-// planes (IDTakenInTx); counter mode takes the counter's next value on trust.
+// claimed does not name and the id space does not hold: no live row of either
+// plane, no tombstone of either table. Supports counter mode for non-ephemeral
+// issues. Hash mode probes each candidate (IDTakenInTx); counter mode probes
+// the counter's next value the same way, and the first held candidate JUMPS
+// the counter to the highest numeric suffix the id space holds for the prefix
+// (JumpCounterPastHeldSuffixesInTx, one scan, at most once per mint), so a
+// counter lagging behind explicit creates — which need not advance it —
+// catches up in one step instead of handing out held ids one at a time.
 //
 // A RETIRED ID IS TAKEN: a candidate a retaining sweep retired (either
 // tombstone table) is skipped exactly like one a live row holds, so a fresh
 // create is never refused with *IdempotencyExpiredError for an id it did not
 // choose. Hash mode folds the tombstone check into the one collision read it
-// already made; counter mode walks past retired values, at most
-// maxRetiredCounterSkips of them.
+// already made; counter mode jumps past a retired run in the one scan.
 //
 // CLAIMED IS THE CALLER'S OWN BATCH: the ids it will write but has not yet,
 // explicit and minted. The probe reads rows, so a caller that assigns every
@@ -338,28 +342,103 @@ func GenerateIssueIDInTable(ctx context.Context, tx DBTX, table, prefix string, 
 	return "", fmt.Errorf("failed to generate unique ID after trying lengths %d-%d with 10 nonces each", baseLength, maxLength)
 }
 
-// nextUnretiredCounterIDTx is NextCounterIDTx skipping counter values a
-// retaining sweep retired or the caller's batch claimed. The counter only ever
-// advances, so a skipped value is never offered again.
+// nextUnretiredCounterIDTx is NextCounterIDTx skipping counter values the id
+// space holds — a live row of either plane, or a tombstone of either table —
+// or the caller's batch claimed. The counter only ever advances, so a skipped
+// value is never offered again. The first held candidate JUMPS the counter to
+// the highest numeric suffix the id space holds for the prefix
+// (JumpCounterPastHeldSuffixesInTx), so a counter lagging behind explicit
+// creates catches up in one scan instead of handing out ids one collision at
+// a time; a claimed candidate is skipped without a probe and without a jump,
+// because the rows it names are in no table yet for a scan to see.
 func nextUnretiredCounterIDTx(ctx context.Context, tx DBTX, prefix string, claimed map[string]bool) (string, error) {
+	jumped := false
 	for skips := 0; ; skips++ {
 		candidate, err := NextCounterIDTx(ctx, tx, prefix)
 		if err != nil {
 			return "", err
 		}
 		if !claimed[candidate] {
-			retired, err := IDRetiredInTx(ctx, tx, candidate)
+			taken, err := IDTakenInTx(ctx, tx, candidate)
 			if err != nil {
 				return "", err
 			}
-			if !retired {
+			if !taken {
 				return candidate, nil
 			}
+			if !jumped {
+				if err := JumpCounterPastHeldSuffixesInTx(ctx, tx, prefix); err != nil {
+					return "", err
+				}
+				jumped = true
+			}
 		}
-		if skips >= maxRetiredCounterSkips {
-			return "", fmt.Errorf("issue counter for prefix %q walked past %d retired or claimed ids without finding a free one", prefix, maxRetiredCounterSkips)
+		if skips >= maxHeldCounterSkips {
+			return "", fmt.Errorf("issue counter for prefix %q walked past %d held or claimed ids without finding a free one", prefix, maxHeldCounterSkips)
 		}
 	}
+}
+
+// counterHeldIDsScanSQL reads, in ONE statement, every id the id space holds
+// for a prefix: a live row of either plane, or a tombstone of either table.
+// The counter mint's jump scans it once to find the highest numeric suffix
+// held, the same ids the seed counts, both planes and both tombstone tables.
+const counterHeldIDsScanSQL = `SELECT id FROM issues WHERE id LIKE CONCAT(?, '-%')
+UNION ALL SELECT id FROM wisps WHERE id LIKE CONCAT(?, '-%')
+UNION ALL SELECT id FROM id_tombstones WHERE id LIKE CONCAT(?, '-%')
+UNION ALL SELECT id FROM wisp_id_tombstones WHERE id LIKE CONCAT(?, '-%')`
+
+// counterNumericSuffix parses id as prefix-<n>: an exact-prefix counter id —
+// numeric suffix, no child extension. It is the parser both the counter seed
+// and the counter mint's jump use, so the two agree on which ids hold a
+// counter value back. ok is false for anything else: another prefix, a dotted
+// child, a hash or wisp suffix, a number the counter could not hand out.
+func counterNumericSuffix(id, prefix string) (n int, ok bool) {
+	suffix, isPrefix := strings.CutPrefix(id, prefix+"-")
+	if !isPrefix || suffix == "" || strings.Contains(suffix, ".") {
+		return 0, false
+	}
+	n, err := strconv.Atoi(suffix)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// JumpCounterPastHeldSuffixesInTx raises the issue counter for prefix to the
+// highest numeric suffix the id space holds for it — both row tables and both
+// tombstone tables, one scan (counterHeldIDsScanSQL) — so the value the
+// counter hands out next is one past every held counter id, whatever plane
+// holds it. The UPDATE only raises (last_id < ?), never lowers, and a prefix
+// whose counter row is missing is left for NextCounterIDTx to seed. A prefix
+// nothing holds above zero is left alone. Exported for the domain repository,
+// whose unit-of-work counter mint jumps the same way the SQL one does.
+func JumpCounterPastHeldSuffixesInTx(ctx context.Context, tx DBTX, prefix string) error {
+	rows, err := tx.QueryContext(ctx, counterHeldIDsScanSQL, prefix, prefix, prefix, prefix)
+	if err != nil {
+		return fmt.Errorf("scan held ids for prefix %q: %w", prefix, err)
+	}
+	defer rows.Close()
+	maxNum := 0
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf("scan held ids for prefix %q: %w", prefix, err)
+		}
+		if n, ok := counterNumericSuffix(id, prefix); ok && n > maxNum {
+			maxNum = n
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("scan held ids for prefix %q: %w", prefix, err)
+	}
+	if maxNum == 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE issue_counter SET last_id = ? WHERE prefix = ? AND last_id < ?", maxNum, prefix, maxNum); err != nil {
+		return fmt.Errorf("raise issue counter for prefix %q to %d: %w", prefix, maxNum, err)
+	}
+	return nil
 }
 
 // IsCounterModeTx checks whether issue_id_mode=counter is configured.
@@ -432,17 +511,15 @@ func SeedCounterFromExistingIssuesTx(ctx context.Context, tx DBTX, prefix string
 	defer rows.Close()
 
 	maxNum := 0
-	pfxDash := prefix + "-"
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			continue
 		}
-		suffix := strings.TrimPrefix(id, pfxDash)
-		if strings.Contains(suffix, ".") {
-			continue // skip child IDs
-		}
-		if n, err := strconv.Atoi(suffix); err == nil && n > maxNum {
+		// counterNumericSuffix, the parser the counter mint's jump shares, so
+		// the seed and the jump count the same ids: exact prefix, numeric
+		// suffix, no child extension.
+		if n, ok := counterNumericSuffix(id, prefix); ok && n > maxNum {
 			maxNum = n
 		}
 	}

@@ -2940,6 +2940,75 @@ func TestCreateIssue_CounterMode(t *testing.T) {
 	}
 }
 
+func TestCreateIssue_CounterModeJumpsPastExplicitIDs(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Enable counter mode
+	if err := store.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+		t.Fatalf("failed to set issue_id_mode: %v", err)
+	}
+
+	// test-1 seeds the counter row at 1 while the id space holds nothing
+	// above it, so only the explicit creates below lag the counter.
+	first := &types.Issue{Title: "auto one", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, first, "tester"); err != nil {
+		t.Fatalf("failed to create first: %v", err)
+	}
+	if first.ID != "test-1" {
+		t.Fatalf("first.ID = %q, want test-1", first.ID)
+	}
+
+	// Explicit test-2 in the issues plane, explicit test-100 in the wisps
+	// plane: neither advances the counter (bd-t4h0n7, PR #6754).
+	explicit := &types.Issue{ID: "test-2", Title: "explicit two", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, explicit, "tester"); err != nil {
+		t.Fatalf("failed to create explicit test-2: %v", err)
+	}
+	wisp := &types.Issue{ID: "test-100", Title: "explicit wisp hundred", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: true}
+	if err := store.CreateIssue(ctx, wisp, "tester"); err != nil {
+		t.Fatalf("failed to create explicit test-100 wisp: %v", err)
+	}
+
+	// The counter at 1 hands out test-2 next, which is held: the mint probes
+	// the candidate, jumps past the highest held suffix, and returns test-101
+	// instead of colliding — the occupants in both planes survive.
+	auto := &types.Issue{Title: "auto over the lag", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, auto, "tester"); err != nil {
+		t.Fatalf("failed to create auto over the lag: %v", err)
+	}
+	if auto.ID != "test-101" {
+		t.Fatalf("auto.ID = %q, want test-101, one past the highest held suffix", auto.ID)
+	}
+
+	got, err := store.GetIssue(ctx, "test-2")
+	if err != nil {
+		t.Fatalf("failed to get test-2: %v", err)
+	}
+	if got.Title != "explicit two" {
+		t.Errorf("test-2 title = %q, want %q: the occupant must survive the mint", got.Title, "explicit two")
+	}
+	gotWisp, err := store.GetIssue(ctx, "test-100")
+	if err != nil {
+		t.Fatalf("failed to get test-100: %v", err)
+	}
+	if gotWisp.Title != "explicit wisp hundred" {
+		t.Errorf("test-100 title = %q, want %q: the wisp occupant must survive the mint", gotWisp.Title, "explicit wisp hundred")
+	}
+
+	// The jump persisted: the next mint is the next sequential value.
+	next := &types.Issue{Title: "auto sequential", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, next, "tester"); err != nil {
+		t.Fatalf("failed to create next: %v", err)
+	}
+	if next.ID != "test-102" {
+		t.Fatalf("next.ID = %q, want test-102: the jump must persist in the counter", next.ID)
+	}
+}
+
 func TestCreateIssue_ExplicitIDOverridesCounter(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()

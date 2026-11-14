@@ -103,6 +103,14 @@ type IssueSQLRepository interface {
 	CoordinateCreates(ctx context.Context, ids []string) error
 	CountForPrefix(ctx context.Context, prefix string, opts IssueTableOpts) (int, error)
 	NextCounterID(ctx context.Context, prefix string) (int, error)
+	// RaiseCounterPastHeldIDs raises the issue counter for prefix to the
+	// highest numeric suffix the id space holds for it — both row tables and
+	// both tombstone tables, one scan
+	// (issueops.JumpCounterPastHeldSuffixesInTx) — in this repository's
+	// transaction. It only raises, never lowers; the counter mint calls it on
+	// the first candidate the id space holds, so a counter lagging behind
+	// explicit creates catches up in one scan.
+	RaiseCounterPastHeldIDs(ctx context.Context, prefix string) error
 	SearchAcrossIssuesAndWisps(ctx context.Context, query string, filter types.IssueFilter) (SearchPage, error)
 	SearchAcrossIssuesAndWispsWithCounts(ctx context.Context, query string, filter types.IssueFilter) (SearchCountsPage, error)
 	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)
@@ -1782,15 +1790,21 @@ func (u *issueUseCaseImpl) mintTopLevelID(ctx context.Context, issue *types.Issu
 	return "", fmt.Errorf("failed to generate unique ID for prefix %q after lengths %d..%d with 10 nonces each", prefix, baseLength, cfg.MaxLength)
 }
 
-// maxRetiredCounterSkips bounds how many retired counter values one
+// maxHeldCounterSkips bounds how many held or claimed counter values one
 // counter-mode mint walks past (issueops.GenerateIssueIDInTable's bound).
-const maxRetiredCounterSkips = 1000
+const maxHeldCounterSkips = 1000
 
-// nextUnretiredCounterID is the counter-mode mint skipping values a retaining
-// sweep retired or the caller's batch claimed, so a fresh create is never
-// handed an id it would be refused. The counter only advances, so a skipped
-// value is never offered again.
+// nextUnretiredCounterID is the counter-mode mint skipping values the id
+// space holds — a live row of either plane, or a tombstone of either table —
+// or the caller's batch claimed, so a fresh create is never handed an id it
+// would be refused. The counter only advances, so a skipped value is never
+// offered again. The first held candidate JUMPS the counter to the highest
+// numeric suffix the id space holds for the prefix
+// (RaiseCounterPastHeldIDs, one scan, at most once per mint), so a counter
+// lagging behind explicit creates — which need not advance it — catches up in
+// one step instead of handing out held ids one at a time.
 func (u *issueUseCaseImpl) nextUnretiredCounterID(ctx context.Context, prefix string, claimed map[string]bool) (string, error) {
+	jumped := false
 	for skips := 0; ; skips++ {
 		n, err := u.issueRepo.NextCounterID(ctx, prefix)
 		if err != nil {
@@ -1798,16 +1812,22 @@ func (u *issueUseCaseImpl) nextUnretiredCounterID(ctx context.Context, prefix st
 		}
 		candidate := fmt.Sprintf("%s-%d", prefix, n)
 		if !claimed[candidate] {
-			retired, err := u.issueRepo.Retired(ctx, candidate)
+			taken, err := u.issueRepo.Taken(ctx, candidate)
 			if err != nil {
 				return "", err
 			}
-			if !retired {
+			if !taken {
 				return candidate, nil
 			}
+			if !jumped {
+				if err := u.issueRepo.RaiseCounterPastHeldIDs(ctx, prefix); err != nil {
+					return "", err
+				}
+				jumped = true
+			}
 		}
-		if skips >= maxRetiredCounterSkips {
-			return "", fmt.Errorf("issue counter for prefix %q walked past %d retired or claimed ids without finding a free one", prefix, maxRetiredCounterSkips)
+		if skips >= maxHeldCounterSkips {
+			return "", fmt.Errorf("issue counter for prefix %q walked past %d held or claimed ids without finding a free one", prefix, maxHeldCounterSkips)
 		}
 	}
 }
