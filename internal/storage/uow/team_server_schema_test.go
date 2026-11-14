@@ -511,6 +511,40 @@ func TestCheckExcursionIdentity_MissingIdentityRow_Skips(t *testing.T) {
 	}
 }
 
+// An explicitly empty stored identity means the same as a missing one for a
+// plain excursion (unlike team-server, where it is an invalid state worth
+// refusing).
+func TestCheckExcursionIdentity_EmptyStoredIdentity_Skips(t *testing.T) {
+	mock, db, closeDB := newVersionMockDB(t)
+	defer closeDB()
+	expectExcursionSelection(mock, "beads_other")
+	expectExcursionIdentityQuery(mock, "")
+
+	if err := checkExcursionIdentity(context.Background(), db, "beads_other", "project-AAAA"); err != nil {
+		t.Fatalf("checkExcursionIdentity = %v, want nil on an empty stored identity", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// The cooperative case: the target's stored identity matches the workspace's
+// own identity, so this workspace already owns (or deliberately adopted)
+// that database and the open passes without further ceremony.
+func TestCheckExcursionIdentity_MatchingProjectID_OK(t *testing.T) {
+	mock, db, closeDB := newVersionMockDB(t)
+	defer closeDB()
+	expectExcursionSelection(mock, "beads_other")
+	expectExcursionIdentityQuery(mock, "project-AAAA")
+
+	if err := checkExcursionIdentity(context.Background(), db, "beads_other", "project-AAAA"); err != nil {
+		t.Fatalf("checkExcursionIdentity = %v, want nil on a matching identity", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
 // TestInitSchemaAttempt_ExcursionMismatchStopsBeforeOpen pins where the
 // excursion identity refusal lands in the plain proxied open: on the pinned
 // connection, after the team-server branch, before the preview split and

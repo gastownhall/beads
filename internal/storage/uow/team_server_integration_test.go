@@ -345,3 +345,69 @@ func TestPlainProxiedExcursionIdentity_NonBeadsTarget_Integration(t *testing.T) 
 		"SELECT COUNT(*) FROM excursion_widgets.metadata WHERE `key` = '_project_id'").Scan(&minted))
 	assert.Zero(t, minted, "repeated excursion must not adopt or mint an identity either")
 }
+
+// TestPlainProxiedExcursionIdentity_MatchingAndEmpty_Integration pins the
+// no-op cases: a stored identity that matches the workspace's own, or no
+// stored identity at all, opens without minting, changing, or adopting
+// anything.
+func TestPlainProxiedExcursionIdentity_MatchingAndEmpty_Integration(t *testing.T) {
+	h := newTeamServerHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	// cleanupCtx: t.Cleanup functions run after the parent's deferred
+	// cancel(), so they cannot borrow ctx.
+	freshCleanupCtx := func(t *testing.T) context.Context {
+		t.Helper()
+		c, done := context.WithTimeout(context.Background(), 30*time.Second)
+		t.Cleanup(func() { done() })
+		return c
+	}
+
+	t.Run("matching identity is permitted and left untouched", func(t *testing.T) {
+		const database = "excursion_match"
+		provisioner, err := h.openProvider(ctx, database, false, "")
+		require.NoError(t, err)
+		require.NoError(t, provisioner.Close(ctx))
+
+		direct := h.directDB(t, database)
+		_, err = direct.ExecContext(ctx,
+			"REPLACE INTO metadata (`key`, value) VALUES (?, ?)", "_project_id", "project-workspace")
+		require.NoError(t, err)
+		cleanupCtx := freshCleanupCtx(t)
+		t.Cleanup(func() {
+			_, err := direct.ExecContext(cleanupCtx, "DELETE FROM metadata WHERE `key` = ?", "_project_id")
+			assert.NoError(t, err)
+		})
+
+		p, err := h.openProvider(ctx, database, false, "project-workspace")
+		require.NoError(t, err, "an excursion whose identity matches the stored one must open")
+		require.NoError(t, p.Close(ctx))
+
+		var stored string
+		require.NoError(t, direct.QueryRowContext(ctx,
+			"SELECT value FROM metadata WHERE `key` = '_project_id'").Scan(&stored))
+		assert.Equal(t, "project-workspace", stored, "a matching excursion must not rewrite the stored identity")
+	})
+
+	t.Run("empty stored identity is permitted", func(t *testing.T) {
+		const database = "excursion_empty"
+		provisioner, err := h.openProvider(ctx, database, false, "")
+		require.NoError(t, err)
+		require.NoError(t, provisioner.Close(ctx))
+
+		direct := h.directDB(t, database)
+		_, err = direct.ExecContext(ctx,
+			"REPLACE INTO metadata (`key`, value) VALUES (?, ?)", "_project_id", "")
+		require.NoError(t, err)
+		cleanupCtx := freshCleanupCtx(t)
+		t.Cleanup(func() {
+			_, err := direct.ExecContext(cleanupCtx, "DELETE FROM metadata WHERE `key` = ?", "_project_id")
+			assert.NoError(t, err)
+		})
+
+		p, err := h.openProvider(ctx, database, false, "project-workspace")
+		require.NoError(t, err, "an empty stored identity asserts nothing")
+		require.NoError(t, p.Close(ctx))
+	})
+}
