@@ -1189,3 +1189,27 @@ func TestProxiedServerCloseBeadGate(t *testing.T) {
 		}
 	})
 }
+
+// TestProxiedServerCloseRealCloseOutputUnchanged is
+// TestEmbeddedCloseRealCloseOutputUnchanged's proxied-server twin
+// (bd-th8229, AC-4).
+func TestProxiedServerCloseRealCloseOutputUnchanged(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+	p := newSharedProxiedProject(t, bd, "pco")
+
+	batchText := bdProxiedCreate(t, bd, p.dir, "Real batch text")
+	requireRealCloseText(t, bdProxiedClose(t, bd, p.dir, batchText.ID, "--reason", "done"), batchText.ID, "Real batch text", "done")
+
+	batchJSON := bdProxiedCreate(t, bd, p.dir, "Real batch json")
+	requireRealCloseJSON(t, bdProxiedClose(t, bd, p.dir, batchJSON.ID, "--reason", "done", "--json"), batchJSON.ID, "done")
+
+	guardedText := bdProxiedCreate(t, bd, p.dir, "Real guarded text")
+	out := bdProxiedClose(t, bd, p.dir, guardedText.ID, "--if-revision", proxiedRevStr(bdProxiedShowRevision(t, bd, p.dir, guardedText.ID)), "--reason", "done")
+	requireRealCloseText(t, out, guardedText.ID, "Real guarded text", "done")
+
+	guardedJSON := bdProxiedCreate(t, bd, p.dir, "Real guarded json")
+	out = bdProxiedClose(t, bd, p.dir, guardedJSON.ID, "--if-revision", proxiedRevStr(bdProxiedShowRevision(t, bd, p.dir, guardedJSON.ID)), "--reason", "done", "--json")
+	requireRealCloseJSON(t, out, guardedJSON.ID, "done")
+}

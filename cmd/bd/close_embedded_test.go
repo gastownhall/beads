@@ -988,3 +988,58 @@ func TestEmbeddedCloseAlreadyClosedNewReasonNotReportedAsApplied(t *testing.T) {
 		t.Errorf("re-close of already-closed %s should report %q, got:\n%s", issue.ID, want, out)
 	}
 }
+
+// requireRealCloseText asserts bd close's text report of a real close of id:
+// the success line it has always printed, and no already-closed line
+// (bd-th8229 changes only the no-op's report).
+func requireRealCloseText(t *testing.T, out, id, title, reason string) {
+	t.Helper()
+	want := fmt.Sprintf("✓ Closed %s — %s: %s\n", id, title, reason)
+	if !strings.Contains(out, want) {
+		t.Errorf("real close of %s should print %q, got:\n%s", id, want, out)
+	}
+	if strings.Contains(out, "Already closed") {
+		t.Errorf("real close of %s reports an already-closed no-op:\n%s", id, out)
+	}
+}
+
+// requireRealCloseJSON asserts bd close --json's report of a real close of
+// id: one closed entry with the stored reason and no already_closed member.
+func requireRealCloseJSON(t *testing.T, out, id, reason string) {
+	t.Helper()
+	entries := decodeCloseJSON(t, out, []string{id})
+	requireCloseJSONMarksAlreadyClosed(t, entries, nil)
+	if strings.Contains(out, "already_closed") {
+		t.Errorf("real close --json of %s carries already_closed:\n%s", id, out)
+	}
+	if got := entries[0].CloseReason; got != reason {
+		t.Errorf("real close --json of %s close_reason = %q, want %q", id, got, reason)
+	}
+}
+
+// TestEmbeddedCloseRealCloseOutputUnchanged pins bd-th8229's AC-4 on the
+// direct routes: a real close, batch or --if-revision, in text or --json,
+// reports exactly what it did before the already-closed report changed.
+func TestEmbeddedCloseRealCloseOutputUnchanged(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "rco")
+
+	batchText := bdCreate(t, bd, dir, "Real batch text", "--type", "task")
+	requireRealCloseText(t, bdClose(t, bd, dir, batchText.ID, "--reason", "done"), batchText.ID, "Real batch text", "done")
+
+	batchJSON := bdCreate(t, bd, dir, "Real batch json", "--type", "task")
+	requireRealCloseJSON(t, bdClose(t, bd, dir, batchJSON.ID, "--reason", "done", "--json"), batchJSON.ID, "done")
+
+	guardedText := bdCreate(t, bd, dir, "Real guarded text", "--type", "task")
+	out := bdClose(t, bd, dir, guardedText.ID, "--if-revision", revStr(bdShowRevision(t, bd, dir, guardedText.ID)), "--reason", "done")
+	requireRealCloseText(t, out, guardedText.ID, "Real guarded text", "done")
+
+	guardedJSON := bdCreate(t, bd, dir, "Real guarded json", "--type", "task")
+	out = bdClose(t, bd, dir, guardedJSON.ID, "--if-revision", revStr(bdShowRevision(t, bd, dir, guardedJSON.ID)), "--reason", "done", "--json")
+	requireRealCloseJSON(t, out, guardedJSON.ID, "done")
+}
