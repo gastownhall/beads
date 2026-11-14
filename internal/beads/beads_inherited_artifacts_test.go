@@ -871,3 +871,208 @@ func TestFindDatabasePath_WorktreeServerModeFromSubdir(t *testing.T) {
 		t.Errorf("FindDatabasePath() from subdir = %q, want main repo dolt dir %q", result, mainDoltDir)
 	}
 }
+
+// unsetDiscoveryEnvForTest removes environment variables that redirect beads
+// discovery or Dolt mode resolution, so a fixture's on-disk layout is the
+// only input to the resolver under test. t.Setenv records each restore; the
+// empty-then-unset dance keeps an ambient value (agent hosts export
+// BEADS_DIR) from leaking into the test body.
+func unsetDiscoveryEnvForTest(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"BEADS_DIR", "BEADS_DB",
+		"BEADS_DOLT_SERVER_DATABASE", "BEADS_DOLT_SERVER_MODE",
+		"BEADS_DOLT_SHARED_SERVER", "BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_DATA_DIR", "BEADS_DOLT_CREDENTIAL_COMMAND",
+		"BEADS_CEILING_DIRECTORIES",
+		"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CEILING_DIRECTORIES",
+	} {
+		t.Setenv(name, "")
+		os.Unsetenv(name)
+	}
+}
+
+// resolveForTest canonicalizes a discovered path for comparison, failing the
+// test when it cannot be resolved (discovery returned a path that does not
+// exist).
+func resolveForTest(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("resolving discovered path %q: %v", path, err)
+	}
+	return resolved
+}
+
+// gh6552Fixture is the GH#6552 layout: a main repository whose .beads is a
+// recognized metadata-backed workspace, and a linked worktree whose .beads
+// holds only a metadata-less embedded store (the phantom).
+type gh6552Fixture struct {
+	tmpDir           string
+	mainRepoDir      string
+	mainBeadsDir     string
+	worktreeDir      string
+	worktreeBeadsDir string
+}
+
+// newGH6552Fixture builds the layout. mainMetadata is the main .beads/
+// metadata.json body (machine-local: written in the main checkout only,
+// never committed, matching the gitignore template bd init writes).
+// mainStoreRel is the main store directory to create relative to the main
+// .beads (e.g. embeddeddolt/myproject or dolt/myproject), or "" for no local
+// data directory (a server-mode main). phantomDB names the phantom database
+// directory created under the worktree's .beads/embeddeddolt/.
+func newGH6552Fixture(t *testing.T, mainMetadata, mainStoreRel, phantomDB string) *gh6552Fixture {
+	t.Helper()
+
+	fx := &gh6552Fixture{
+		tmpDir: t.TempDir(),
+	}
+	fx.mainRepoDir = filepath.Join(fx.tmpDir, "main-repo")
+	if err := os.MkdirAll(fx.mainRepoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fx.mainBeadsDir = filepath.Join(fx.mainRepoDir, ".beads")
+	fx.worktreeDir = filepath.Join(fx.tmpDir, "worktree")
+	fx.worktreeBeadsDir = filepath.Join(fx.worktreeDir, ".beads")
+
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := gitCommand(args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+		}
+	}
+
+	cmd := gitCommand("init")
+	cmd.Dir = fx.mainRepoDir
+	if err := cmd.Run(); err != nil {
+		t.Skipf("git not available: %v", err)
+	}
+	// Keep the fixture's commits off any host-level hook configuration.
+	runGit(fx.mainRepoDir, "config", "core.hooksPath", ".git/hooks")
+	runGit(fx.mainRepoDir, "config", "user.email", "test@example.com")
+	runGit(fx.mainRepoDir, "config", "user.name", "Test User")
+
+	mustMkdir := func(dir string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite := func(path, body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Main repository: a recognized shared workspace. metadata.json is
+	// machine-local (gitignored); config.yaml is tracked, so the worktree
+	// checks it out — the issue's exact layout.
+	mustMkdir(fx.mainBeadsDir)
+	mustWrite(filepath.Join(fx.mainBeadsDir, "metadata.json"), mainMetadata)
+	mustWrite(filepath.Join(fx.mainBeadsDir, "config.yaml"), "issue-prefix: \"MyProject\"\n")
+	mustWrite(filepath.Join(fx.mainBeadsDir, ".gitignore"), "metadata.json\ndolt/\nembeddeddolt/\n*.db\n")
+	if mainStoreRel != "" {
+		mustMkdir(filepath.Join(fx.mainBeadsDir, mainStoreRel))
+	}
+	mustWrite(filepath.Join(fx.mainRepoDir, "README.md"), "# Test\n")
+	runGit(fx.mainRepoDir, "add", "README.md", ".beads/config.yaml", ".beads/.gitignore")
+	runGit(fx.mainRepoDir, "commit", "-m", "initial")
+
+	runGit(fx.mainRepoDir, "worktree", "add", fx.worktreeDir, "HEAD")
+	t.Cleanup(func() {
+		remove := exec.Command("git", "worktree", "remove", "--force", fx.worktreeDir)
+		remove.Dir = fx.mainRepoDir
+		_ = remove.Run()
+	})
+
+	// The phantom: a metadata-less embedded store in the worktree, as left
+	// behind by an embedded fallback (e.g. `bd prime`) run there.
+	mustMkdir(filepath.Join(fx.worktreeBeadsDir, "embeddeddolt", phantomDB))
+
+	// Preconditions: the worktree inherited the tracked config but no
+	// metadata file, and its .beads owns a database directory.
+	if _, err := os.Stat(filepath.Join(fx.worktreeBeadsDir, "config.yaml")); err != nil {
+		t.Fatalf("precondition: worktree .beads should have inherited config.yaml, got: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(fx.worktreeBeadsDir, "metadata.json")); err == nil {
+		t.Fatal("precondition: worktree .beads must not have metadata.json (gitignored)")
+	}
+	if !hasBeadsDatabase(fx.worktreeBeadsDir) {
+		t.Fatal("precondition: worktree .beads should satisfy hasBeadsDatabase via the phantom embedded store")
+	}
+	return fx
+}
+
+// TestFindBeadsDir_WorktreeMetadatalessStoreYieldsToSharedWorkspace covers
+// GH#6552: a worktree whose .beads holds only a metadata-less embedded store
+// (the phantom left behind by an embedded fallback) must yield to the main
+// repository's recognized workspace in directory and database-path
+// discovery, from the worktree root and from an ordinary subdirectory.
+// Database names do not participate: the yield is the same when the phantom
+// is named like the main database and when both carry the default name.
+func TestFindBeadsDir_WorktreeMetadatalessStoreYieldsToSharedWorkspace(t *testing.T) {
+	unsetDiscoveryEnvForTest(t)
+
+	embeddedMain := `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"myproject"}`
+	cases := []struct {
+		name         string
+		mainMetadata string
+		mainStoreRel string
+		phantomDB    string
+	}{
+		{
+			name:         "embedded main, differently named phantom",
+			mainMetadata: embeddedMain,
+			mainStoreRel: filepath.Join("embeddeddolt", "myproject"),
+			phantomDB:    "beads",
+		},
+		{
+			name:         "phantom named like the main database",
+			mainMetadata: embeddedMain,
+			mainStoreRel: filepath.Join("embeddeddolt", "myproject"),
+			phantomDB:    "myproject",
+		},
+		{
+			name:         "both databases carry the default name",
+			mainMetadata: `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"beads"}`,
+			mainStoreRel: filepath.Join("embeddeddolt", "beads"),
+			phantomDB:    "beads",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newGH6552Fixture(t, tc.mainMetadata, tc.mainStoreRel, tc.phantomDB)
+			mainBeads := resolveForTest(t, fx.mainBeadsDir)
+			mainEmbedded := resolveForTest(t, filepath.Join(fx.mainBeadsDir, "embeddeddolt"))
+
+			for _, from := range []struct {
+				name string
+				dir  string
+			}{
+				{"from worktree root", fx.worktreeDir},
+				{"from ordinary subdirectory", filepath.Join(fx.worktreeDir, "src", "pkg")},
+			} {
+				t.Run(from.name, func(t *testing.T) {
+					if err := os.MkdirAll(from.dir, 0o755); err != nil {
+						t.Fatal(err)
+					}
+					t.Chdir(from.dir)
+					git.ResetCaches()
+
+					if got := resolveForTest(t, FindBeadsDir()); got != mainBeads {
+						t.Errorf("FindBeadsDir() = %q, want shared .beads %q (GH#6552: the metadata-less worktree store must yield)", FindBeadsDir(), fx.mainBeadsDir)
+					}
+					if got := resolveForTest(t, FindDatabasePath()); got != mainEmbedded {
+						t.Errorf("FindDatabasePath() = %q, want main embedded store %q", FindDatabasePath(), filepath.Join(fx.mainBeadsDir, "embeddeddolt"))
+					}
+				})
+			}
+		})
+	}
+}
