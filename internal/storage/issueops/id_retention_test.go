@@ -226,11 +226,18 @@ func TestGenerateIssueIDCounterModeWalksPastARetiredValue(t *testing.T) {
 		if retired {
 			count = 1
 		}
-		// One statement per candidate reads both tombstone tables.
-		mock.ExpectQuery(regexp.QuoteMeta(idRetiredSQL)).WithArgs(id, id).
+		// One statement per candidate reads both planes and both
+		// tombstone tables.
+		mock.ExpectQuery(regexp.QuoteMeta(idTakenSQL)).WithArgs(id, id, id, id).
 			WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(count))
 	}
 	expectCounter(5, true)
+	// The held bd-5 makes the counter jump past the highest held suffix,
+	// which is bd-5 itself here.
+	mock.ExpectQuery(regexp.QuoteMeta(heldCounterIDsSQL)).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow("bd-5"))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE issue_counter SET last_id = ? WHERE prefix = ? AND last_id < ?")).
+		WithArgs(5, "bd", 5).WillReturnResult(sqlmock.NewResult(0, 0))
 	expectCounter(6, false)
 	id, err := GenerateIssueIDInTable(context.Background(), db, "issues", "bd", &types.Issue{}, "actor", nil)
 	if err != nil {

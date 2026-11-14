@@ -112,8 +112,8 @@ func IDTakenInTx(ctx context.Context, tx DBTX, id string) (bool, error) {
 const idRetiredSQL = `SELECT (SELECT COUNT(*) FROM id_tombstones WHERE id = ?) + (SELECT COUNT(*) FROM wisp_id_tombstones WHERE id = ?)`
 
 // IDRetiredInTx reports whether a tombstone in either table retired id. It is
-// one statement, for the paths that ask about one id at a time (the counter
-// mints); RetiredIDsInTx serves id lists.
+// one statement, for the paths that ask about one id at a time (the domain
+// counter mint); RetiredIDsInTx serves id lists.
 func IDRetiredInTx(ctx context.Context, tx DBTX, id string) (bool, error) {
 	var count int
 	if err := tx.QueryRowContext(ctx, idRetiredSQL, id, id).Scan(&count); err != nil {
