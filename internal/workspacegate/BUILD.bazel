@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "workspacegate",
-    srcs = ["gate.go"],
+    srcs = [
+        "canon.go",
+        "gate.go",
+    ],
     importpath = "github.com/steveyegge/beads/internal/workspacegate",
     visibility = ["//:__subpackages__"],
     deps = ["//internal/lockfile"],
@@ -11,6 +14,7 @@ go_library(
 go_test(
     name = "workspacegate_test",
     srcs = [
+        "canon_test.go",
         "gate_test.go",
         "readonly_wait_test.go",
     ],
