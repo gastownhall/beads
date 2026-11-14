@@ -3,6 +3,7 @@
 package workspacegate
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -144,4 +145,60 @@ func TestForDirBeneathJunctionWindows(t *testing.T) {
 			t.Fatalf("volume-GUID junction gate path = %s, want %s", g.Path(), want)
 		}
 	})
+}
+
+// TestJunctionAliasesShareOneGateWindows: every spelling of one physical
+// parent — through the junction, directly, upper-cased, and a parent that
+// is itself the junction versus the directory it points to — must produce
+// one gate file, so AcquireAll sees (and dedupes to) a single lock. Before
+// handle-based resolution the junction spellings either errored (junction
+// mid-path) or silently keyed a second gate (junction as the parent's last
+// component).
+func TestJunctionAliasesShareOneGateWindows(t *testing.T) {
+	f := newJunctionFixture(t)
+
+	t.Run("parent beneath the junction", func(t *testing.T) {
+		guarded := []string{
+			filepath.Join(f.junction, "proj", ".beads"),
+			filepath.Join(f.real, "proj", ".beads"),
+			filepath.Join(strings.ToUpper(f.real), strings.ToUpper("proj"), ".beads"),
+		}
+		want := filepath.Join(mustEval(t, f.proj), ".beads.gate.lock")
+		assertOneGateOneLock(t, want, guarded)
+	})
+
+	t.Run("parent that is the junction itself", func(t *testing.T) {
+		guarded := []string{
+			filepath.Join(f.junction, ".beads"),
+			filepath.Join(f.real, ".beads"),
+		}
+		want := filepath.Join(mustEval(t, f.real), ".beads.gate.lock")
+		assertOneGateOneLock(t, want, guarded)
+	})
+}
+
+// assertOneGateOneLock builds a gate per guarded spelling, requires every
+// Path() to be identical, then takes the whole set exclusively in one
+// AcquireAll and requires it to dedupe to a single held lock.
+func assertOneGateOneLock(t *testing.T, want string, guarded []string) {
+	t.Helper()
+	gates := make([]Gate, 0, len(guarded))
+	for _, p := range guarded {
+		g, err := ForWorkspace(p)
+		if err != nil {
+			t.Fatalf("ForWorkspace(%s): %v", p, err)
+		}
+		if g.Path() != want {
+			t.Fatalf("ForWorkspace(%s).Path() = %s, want %s", p, g.Path(), want)
+		}
+		gates = append(gates, g)
+	}
+	m, err := AcquireAll(context.Background(), Exclusive, Options{}, gates...)
+	if err != nil {
+		t.Fatalf("AcquireAll over alias spellings: %v", err)
+	}
+	defer m.Release()
+	if len(m.handles) != 1 {
+		t.Fatalf("alias spellings held %d locks, want 1 (dedupe by canonical path)", len(m.handles))
+	}
 }
