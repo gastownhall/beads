@@ -754,6 +754,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (fail-closed): formulas that set a step's `on_complete` are
+  refused.** `bd cook` and `bd mol pour`, `wisp`, `bond` and `seed` now fail
+  with a validation error naming each step that sets it (in steps, children,
+  loop bodies and expansion templates). 0.37.0 declared the field, but bd
+  never executed it: such a formula cooked and poured cleanly, and completing
+  the step spawned nothing. To fan out per item with bd, run `bd mol bond`
+  once per item. `bd formula show --json` and `convert` still display the
+  field. (#3782, reported by jjgarzella)
 - **`bd dolt pull` on an embedded rig with no remote exits 0 (bd-e2q8zs).**
   It prints `No remote is configured — skipping.` and the setup guidance,
   as server mode already did; in embedded mode it used to exit 1. A pull

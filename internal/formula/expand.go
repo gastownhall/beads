@@ -65,6 +65,9 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 		if err != nil {
 			return nil, fmt.Errorf("expand: loading %q: %w", rule.With, err)
 		}
+		if err := refuseOnCompleteIn(expFormula); err != nil {
+			return nil, fmt.Errorf("expand: %q: %w", rule.With, err)
+		}
 
 		if expFormula.Type != TypeExpansion {
 			return nil, fmt.Errorf("expand: %q is not an expansion formula (type=%s)", rule.With, expFormula.Type)
@@ -109,6 +112,9 @@ func ApplyExpansions(steps []*Step, compose *ComposeRules, parser *Parser) ([]*S
 		expFormula, err := parser.LoadByName(rule.With)
 		if err != nil {
 			return nil, fmt.Errorf("map: loading %q: %w", rule.With, err)
+		}
+		if err := refuseOnCompleteIn(expFormula); err != nil {
+			return nil, fmt.Errorf("map: %q: %w", rule.With, err)
 		}
 
 		if expFormula.Type != TypeExpansion {
@@ -528,6 +534,21 @@ func ApplyInlineExpansions(steps []*Step, parser *Parser) ([]*Step, error) {
 	return applyInlineExpansionsRecursive(steps, parser, 0)
 }
 
+// refuseOnCompleteIn refuses an expansion formula whose steps or template
+// steps set on_complete. compose.expand, compose.map and an inline expand load
+// the expansion formula by name without Validate, so this check is what
+// refuses its on_complete there. bd never runs on_complete, so an expansion
+// that set it would cook into steps whose completion spawns nothing (GH#3782).
+func refuseOnCompleteIn(f *Formula) error {
+	var errs []string
+	refuseOnComplete(f.Steps, "steps", &errs)
+	refuseOnComplete(f.Template, "template", &errs)
+	if len(errs) > 0 {
+		return fmt.Errorf("%w:\n  - %s", ErrValidation, strings.Join(errs, "\n  - "))
+	}
+	return nil
+}
+
 // applyInlineExpansionsRecursive handles inline expansions for a slice of steps.
 // depth tracks recursion to prevent infinite expansion loops.
 func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int) ([]*Step, error) {
@@ -544,6 +565,9 @@ func applyInlineExpansionsRecursive(steps []*Step, parser *Parser, depth int) ([
 			expFormula, err := parser.LoadByName(step.Expand)
 			if err != nil {
 				return nil, fmt.Errorf("inline expand on step %q: loading %q: %w", step.ID, step.Expand, err)
+			}
+			if err := refuseOnCompleteIn(expFormula); err != nil {
+				return nil, fmt.Errorf("inline expand on step %q: %q: %w", step.ID, step.Expand, err)
 			}
 
 			if expFormula.Type != TypeExpansion {
