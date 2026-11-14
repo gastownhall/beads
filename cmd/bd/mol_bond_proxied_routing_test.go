@@ -775,3 +775,66 @@ func TestMolBondProxiedRefusesAChangedRoutedHome(t *testing.T) {
 	}
 	f.assertServedUnwritten("changed home")
 }
+
+// TestMolBondProxiedServedHomeCommitsOnce: a bond whose operands the served
+// database holds stays one served unit of work with one commit, and opens no
+// routed home.
+func TestMolBondProxiedServedHomeCommitsOnce(t *testing.T) {
+	f := newMolBondProxiedFixture(t)
+	for _, id := range []string{"hq-a", "hq-b"} {
+		f.served.issues[id] = &types.Issue{ID: id, Title: id, Status: types.StatusOpen, IssueType: types.TypeTask}
+	}
+
+	runErr, _, stderr := f.bond(molBondInput{argA: "hq-a", argB: "hq-b"})
+	if runErr != nil {
+		t.Fatalf("bond hq-a hq-b: %v\nstderr:\n%s", runErr, stderr)
+	}
+	if want := []string{"bd: mol bond hq-a hq-b"}; fmt.Sprint(f.served.commits) != fmt.Sprint(want) {
+		t.Errorf("served commits = %q, want %q", f.served.commits, want)
+	}
+	if len(f.served.deps) != 1 || f.served.deps[0].IssueID != "hq-b" || f.served.deps[0].DependsOnID != "hq-a" || f.served.deps[0].Type != types.DepBlocks {
+		t.Errorf("served dependencies = %+v, want hq-b blocks on hq-a", f.served.deps)
+	}
+	if f.reopens != 0 {
+		t.Errorf("served bond reopened a routed home %d time(s)", f.reopens)
+	}
+}
+
+// TestMolBondProxiedServedIssueGoneFailsWithoutFormulaFallback: a served
+// issue the planner resolved but that is gone when the write transaction
+// re-reads it fails the bond; a formula of the same name is not cooked in
+// its place.
+func TestMolBondProxiedServedIssueGoneFailsWithoutFormulaFallback(t *testing.T) {
+	f := newMolBondProxiedFixture(t)
+	for _, id := range []string{"hq-a", "hq-gone"} {
+		f.served.issues[id] = &types.Issue{ID: id, Title: id, Status: types.StatusOpen, IssueType: types.TypeTask}
+	}
+	data, err := json.Marshal(&formula.Formula{
+		Formula: "hq-gone",
+		Version: 1,
+		Type:    formula.TypeWorkflow,
+		Steps:   []*formula.Step{{ID: "only", Title: "Only step", Type: "task"}},
+	})
+	if err != nil {
+		t.Fatalf("marshal formula: %v", err)
+	}
+	f.writeFormula("hq-gone", data)
+	// Opens 1 and 2 are the planner's reads, one per operand; open 3 is the
+	// write transaction, which must find hq-gone deleted.
+	f.served.onOpen = func(open int) {
+		if open == 3 {
+			f.served.mu.Lock()
+			delete(f.served.issues, "hq-gone")
+			f.served.mu.Unlock()
+		}
+	}
+
+	runErr, _, stderr := f.bond(molBondInput{argA: "hq-gone", argB: "hq-a"})
+	if f.served.opens < 3 {
+		t.Fatalf("bond opened %d served unit(s) of work, want the planner's 2 reads and the write transaction (stderr:\n%s)", f.served.opens, stderr)
+	}
+	if runErr == nil {
+		t.Fatalf("bond with a deleted planned issue succeeded")
+	}
+	f.assertServedUnwritten("deleted planned issue")
+}
