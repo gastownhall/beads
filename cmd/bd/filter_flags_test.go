@@ -275,6 +275,62 @@ func TestFilterFlagClassification(t *testing.T) {
 	}
 }
 
+// TestFilterFlagSetterExemptionsAllExist keeps the setter-exemption table
+// honest in both directions and pins the last-one-wins override idiom it
+// protects: every entry must resolve to a real plain-string registration
+// (an exemption for a swept or missing flag is a stale row), and repeating
+// each of the 15 exempted flags keeps only the last value, exactly what the
+// shell override idiom (`bd create $DEFAULTS --type bug`) relies on. This is
+// a guard, not a regression test: the plain registrations never regressed,
+// so there is no red-at-base — it locks the carve-out against drift from
+// both sides (over-broad exemption, accidental sweep).
+func TestFilterFlagSetterExemptionsAllExist(t *testing.T) {
+	total := 0
+	for path, flags := range setterFilterFlagExemptions {
+		for name := range flags {
+			total++
+			_, fl := lookupFilterFlag(t, path, name)
+			if kind := stringFilterFlagKind(fl); kind != "plain" {
+				t.Errorf("%s --%s: exemption is a %s registration, not a plain string", path, name, kind)
+			}
+		}
+	}
+	if total != 15 {
+		t.Errorf("setter exemption table has %d entries, want the reviewed 15", total)
+	}
+
+	repeats := []struct {
+		path, flag, v1, v2 string
+	}{
+		{"bd create", "type", "task", "bug"},
+		{"bd create", "status", "open", "in_progress"},
+		{"bd create", "id", "bd-seed", "bd-42"},
+		{"bd create", "assignee", "alice", "bob"},
+		{"bd update", "status", "open", "closed"},
+		{"bd update", "type", "bug", "task"},
+		{"bd update", "assignee", "alice", "bob"},
+		{"bd q", "type", "bug", "task"},
+		{"bd dep add", "type", "blocks", "related"},
+		{"bd link", "type", "blocks", "related"},
+		{"bd gate create", "type", "hard", "soft"},
+		{"bd mol bond", "type", "ionic", "covalent"},
+		{"bd mol pour", "assignee", "alice", "bob"},
+		{"bd audit label", "label", "needs-triage", "backend"},
+		{"bd admin compact", "id", "bd-1", "bd-2"},
+	}
+	for _, tc := range repeats {
+		t.Run(tc.path+" --"+tc.flag, func(t *testing.T) {
+			if err := parseFilterFlags(t, tc.path, []string{"--" + tc.flag, tc.v1, "--" + tc.flag, tc.v2}); err != nil {
+				t.Fatalf("repeat refused, but %s --%s is an exempted setter: %v", tc.path, tc.flag, err)
+			}
+			if got := filterFlagValue(t, tc.path, tc.flag); got != tc.v2 {
+				t.Errorf("%s --%s %s --%s %s: got %q, want last value %q (setter exemption must keep last-one-wins)",
+					tc.path, tc.flag, tc.v1, tc.flag, tc.v2, got, tc.v2)
+			}
+		})
+	}
+}
+
 // TestRepeatedUnionFilterFlagsUnion derives every union filter from the
 // registrations, so a new union flag is covered the day it lands.
 func TestRepeatedUnionFilterFlagsUnion(t *testing.T) {
