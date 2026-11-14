@@ -59,6 +59,66 @@ func TestFindStateLabel(t *testing.T) {
 	}
 }
 
+// TestFindStateLabels pins the plural collector set-state's dimension swap
+// heals from: every label the dimension carries, including a second value a
+// lost update left behind, and the boundary findStateLabel cannot spell (a
+// dimension whose value holds colons stays whole).
+func TestFindStateLabels(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		labels    []string
+		dimension string
+		want      []string
+	}{
+		{
+			name:      "one value is the invariant",
+			labels:    []string{"keep", "mode:normal"},
+			dimension: "mode",
+			want:      []string{"mode:normal"},
+		},
+		{
+			name:      "collects every value a duplicated dimension holds",
+			labels:    []string{"keep", "state:b", "state:c", "stateful"},
+			dimension: "state",
+			want:      []string{"state:b", "state:c"},
+		},
+		{
+			name:      "retains colons in value",
+			labels:    []string{"error:code:500"},
+			dimension: "error",
+			want:      []string{"error:code:500"},
+		},
+		{
+			name:      "does not match dimension prefix without colon",
+			labels:    []string{"mode-extra:degraded"},
+			dimension: "mode",
+			want:      nil,
+		},
+		{
+			name:      "missing dimension",
+			labels:    []string{"mode:normal"},
+			dimension: "health",
+			want:      nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := findStateLabels(tt.labels, tt.dimension)
+			if len(got) != len(tt.want) {
+				t.Fatalf("findStateLabels(%q, %q) = %q, want %q", tt.labels, tt.dimension, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("findStateLabels(%q, %q) = %q, want %q", tt.labels, tt.dimension, got, tt.want)
+				}
+			}
+		})
+	}
+}
+
 func TestCollectStateLabels(t *testing.T) {
 	t.Parallel()
 

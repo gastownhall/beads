@@ -118,7 +118,7 @@ var setStateCmd = &cobra.Command{
 
 This command:
 1. Creates an event bead recording the state change (source of truth)
-2. Removes any existing label for the dimension
+2. Removes every existing label for the dimension (healing duplicates)
 3. Adds the new dimension:value label (fast lookup cache)
 
 State labels follow the convention <dimension>:<value>, for example:
@@ -168,15 +168,26 @@ func runSetState(ctx context.Context, issueID, dimension, newValue, reason strin
 	}
 	fullID := details.ID
 
-	oldValue, found := findStateLabel(details.Labels, dimension)
-	oldLabel := ""
-	if found {
-		oldLabel = dimension + ":" + oldValue
+	// EVERY label the dimension carries, not just the first one the label
+	// read returns. One is the invariant; two or more are the residue of a
+	// lost update, and the swap below heals them back to one value rather
+	// than leaving a second for findStateLabel to resolve by label-read
+	// order.
+	oldLabels := findStateLabels(details.Labels, dimension)
+	oldValues := make([]string, len(oldLabels))
+	for i, label := range oldLabels {
+		oldValues[i] = strings.TrimPrefix(label, dimension+":")
 	}
+	oldValue := strings.Join(oldValues, ", ")
 
 	newLabel := dimension + ":" + newValue
 
-	if oldLabel == newLabel {
+	// The no-change report is earned only by a dimension holding EXACTLY the
+	// requested value. A dimension holding two values falls through to the
+	// swap: a repeated `bd set-state <dim>=<v>` on a wedged dimension heals
+	// it on the first run and reports no change on the second, without
+	// minting a second event bead for the same value.
+	if len(oldLabels) == 1 && oldLabels[0] == newLabel {
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
 				"issue_id":  fullID,
@@ -191,10 +202,13 @@ func runSetState(ctx context.Context, issueID, dimension, newValue, reason strin
 
 	eventTitle := fmt.Sprintf("State change: %s → %s", dimension, newValue)
 	eventDesc := ""
-	if oldValue != "" {
-		eventDesc = fmt.Sprintf("Changed %s from %s to %s", dimension, oldValue, newValue)
-	} else {
+	switch {
+	case len(oldLabels) == 0:
 		eventDesc = fmt.Sprintf("Set %s to %s", dimension, newValue)
+	case len(oldLabels) == 1:
+		eventDesc = fmt.Sprintf("Changed %s from %s to %s", dimension, oldValue, newValue)
+	default:
+		eventDesc = fmt.Sprintf("Healed %s to %s (was %s)", dimension, newValue, oldValue)
 	}
 	if reason != "" {
 		// The same marker types.GateDescription writes, from the one constant
@@ -248,16 +262,21 @@ func runSetState(ctx context.Context, issueID, dimension, newValue, reason strin
 	// label and added the new one as two writes, and both treated a failed
 	// removal as a warning — which leaves an issue carrying two values for
 	// one dimension, a state findStateLabel resolves by whichever the label
-	// read happens to return first. A LabelPatch applies Add and Remove in
-	// one guarded update, so the dimension has one value or the command
-	// failed. The plane needs no branch: IssuePlaneOnly stays false and the
-	// role resolves it inside its own transaction.
+	// read happens to return first. The LabelPatch now swaps the dimension
+	// by PREFIX — RemovePrefixes drops every label the dimension holds,
+	// healing any duplicates a lost update left, and Add lands the new value
+	// after it — so the dimension has one value or the command failed, and
+	// two overlapping set-state calls serialize on the label write's own
+	// coordination cell (the loser replays against the winner's set) instead
+	// of cell-merging into both values. The plane needs no branch:
+	// IssuePlaneOnly stays false and the role resolves it inside its own
+	// transaction.
 	if _, err := lifecycle.Update(ctx, issueops.UpdateRequest{
 		Actor:   currentActor(),
 		IssueID: fullID,
 		Patch: issueops.IssuePatch{Labels: issueops.LabelPatch{
-			Add:    []string{newLabel},
-			Remove: removeStateLabel(oldLabel),
+			Add:            []string{newLabel},
+			RemovePrefixes: []string{dimension + ":"},
 		}},
 		// bd set-state has always edited templates; the role's template guard
 		// stands down for it (issueops.UpdateRequest.AllowTemplate).
@@ -371,16 +390,18 @@ func findStateLabel(labels []string, dimension string) (string, bool) {
 	return "", false
 }
 
-// removeStateLabel is the Remove member of the dimension swap: the old label
-// when there was one, and nothing when the dimension is being set for the
-// first time. A nil slice rather than a one-entry slice holding "" matters —
-// LabelPatch drops an empty entry, so both spell "remove nothing", but only
-// one of them says so.
-func removeStateLabel(oldLabel string) []string {
-	if oldLabel == "" {
-		return nil
+// findStateLabels collects EVERY label the dimension carries, in the label
+// read's order. One is the invariant set-state maintains; a second is the
+// residue of a lost update, and set-state's dimension swap heals it.
+func findStateLabels(labels []string, dimension string) []string {
+	prefix := dimension + ":"
+	var found []string
+	for _, label := range labels {
+		if strings.HasPrefix(label, prefix) {
+			found = append(found, label)
+		}
 	}
-	return []string{oldLabel}
+	return found
 }
 
 func collectStateLabels(labels []string) map[string]string {
