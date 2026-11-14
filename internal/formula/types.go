@@ -656,13 +656,13 @@ func (f *Formula) Validate() error {
 				errs = append(errs, fmt.Sprintf("steps[%d] (%s): %s", i, step.ID, err.Error()))
 			}
 		}
-		// Validate on_complete field - runtime expansion
-		if step.OnComplete != nil {
-			validateOnComplete(step.OnComplete, &errs, fmt.Sprintf("steps[%d] (%s)", i, step.ID))
-		}
 		// Validate children's depends_on and needs recursively
 		validateChildDependsOn(step.Children, stepIDLocations, &errs, fmt.Sprintf("steps[%d]", i))
 	}
+
+	// on_complete is declared but never executed: refuse it wherever it appears.
+	refuseOnComplete(f.Steps, "steps", &errs)
+	refuseOnComplete(f.Template, "template", &errs)
 
 	// Validate compose rules
 	if f.Compose != nil {
@@ -819,36 +819,35 @@ func validateChildDependsOn(children []*Step, idLocations map[string]string, err
 				*errs = append(*errs, fmt.Sprintf("%s (%s): %s", childPrefix, child.ID, err.Error()))
 			}
 		}
-		// Validate on_complete field
-		if child.OnComplete != nil {
-			validateOnComplete(child.OnComplete, errs, fmt.Sprintf("%s (%s)", childPrefix, child.ID))
-		}
 		validateChildDependsOn(child.Children, idLocations, errs, childPrefix)
 	}
 }
 
-// validateOnComplete validates an OnCompleteSpec.
-func validateOnComplete(oc *OnCompleteSpec, errs *[]string, prefix string) {
-	// Check that for_each and bond are both present or both absent
-	if oc.ForEach != "" && oc.Bond == "" {
-		*errs = append(*errs, fmt.Sprintf("%s.on_complete: bond is required when for_each is set", prefix))
-	}
-	if oc.ForEach == "" && oc.Bond != "" {
-		*errs = append(*errs, fmt.Sprintf("%s.on_complete: for_each is required when bond is set", prefix))
-	}
-
-	// Validate for_each path format
-	if oc.ForEach != "" {
-		if !strings.HasPrefix(oc.ForEach, "output.") {
-			*errs = append(*errs, fmt.Sprintf("%s.on_complete: for_each must start with 'output.' (got %q)", prefix, oc.ForEach))
+// refuseOnComplete appends one error for every step in steps (and in their
+// children and loop bodies, at any depth) that sets on_complete. bd parses the
+// field but has never executed it, so a formula that sets it would cook and
+// pour cleanly and then spawn nothing when the step closes (GH#3782). The
+// spec's shape is deliberately not checked: every shape is refused.
+func refuseOnComplete(steps []*Step, prefix string, errs *[]string) {
+	for i, step := range steps {
+		if step == nil {
+			continue
+		}
+		stepPrefix := fmt.Sprintf("%s[%d]", prefix, i)
+		if step.OnComplete != nil {
+			*errs = append(*errs, fmt.Sprintf("%s (%s): %s", stepPrefix, step.ID, onCompleteRefusal))
+		}
+		refuseOnComplete(step.Children, stepPrefix+".children", errs)
+		if step.Loop != nil {
+			refuseOnComplete(step.Loop.Body, stepPrefix+".loop.body", errs)
 		}
 	}
-
-	// Check parallel and sequential are mutually exclusive
-	if oc.Parallel && oc.Sequential {
-		*errs = append(*errs, fmt.Sprintf("%s.on_complete: cannot set both parallel and sequential", prefix))
-	}
 }
+
+// onCompleteRefusal is the reason given for every step that sets on_complete.
+// "on_complete is not supported" is the stable substring callers may match.
+const onCompleteRefusal = "on_complete is not supported: bd never runs it, so completing this step would spawn nothing; " +
+	"remove it and bond one molecule per item with 'bd mol bond' instead"
 
 // GetRequiredVars returns the names of all required variables.
 func (f *Formula) GetRequiredVars() []string {
