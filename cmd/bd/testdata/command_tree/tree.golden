@@ -6276,11 +6276,18 @@ bd rename-prefix
     | split by issue_prefix, allowed_prefixes and the prefixes found on the rows. When
     | a family's root is already live, claimed by another family or retired, the whole
     | family moves to one new hash root (mtg-<8 hex>) and the move is reported.
+    | Text references are rewritten only inside the renamed issues. Dependencies
+    | follow the renames. An edge between two prefixes is re-pointed by removing
+    | and re-adding it, so it records the repair's actor and time; one that storage
+    | refuses to re-add is left as it was and reported.
     |
     | Changing the prefix for new issues only:
     | --mint-only makes new issues use the new prefix and leaves every existing ID
     | and text reference as it is. The old prefix is added to allowed_prefixes, so
-    | explicit --id values and children of existing issues keep working.
+    | explicit --id values and children of existing issues keep working. A
+    | dependency between an old-prefix and a new-prefix issue does not block: it is
+    | stored as a reference to another repository, which bd ready ignores. A later
+    | --repair consolidates the prefixes and re-points those dependencies.
     |
     | EXAMPLES:
     |   bd rename-prefix kw-                # Rename from 'knowledge-work-' to 'kw-'

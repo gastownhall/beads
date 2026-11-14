@@ -323,7 +323,7 @@ These are written to the Dolt database by `bd config set` and have no env var ov
 | `versioned-history.enabled` | `true` records a version row for every issue write to this store; off by default. Unlike the rest of this table it also honors an environment variable, which can only turn it on (see [below](#versioned-issue-history)) |
 | `doctor.suppress.*` | Suppress specific `bd doctor` warnings by check slug (warnings only; errors always show) |
 
-Issue prefix (`issue_prefix`) is **not** settable via `bd config set` — use `bd init --prefix`, `bd bootstrap`, or `bd rename-prefix`. To change only the prefix new issues get, run `bd rename-prefix <new-prefix> --mint-only`: existing IDs stay, and the old prefix is added to `allowed_prefixes` so they remain valid.
+Issue prefix (`issue_prefix`) is **not** settable via `bd config set` — use `bd init --prefix`, `bd bootstrap`, or `bd rename-prefix`. To change only the prefix new issues get, run `bd rename-prefix <new-prefix> --mint-only`: existing IDs stay, and the old prefix is added to `allowed_prefixes` so they remain valid. A dependency between an old-prefix and a new-prefix issue does not block, though (see [Prefix Rename](/reference/advanced#prefix-rename)).
 
 ### Custom Statuses and Types
 

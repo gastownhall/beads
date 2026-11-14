@@ -39,9 +39,18 @@ family whose destination is taken — by a live issue, a retired id, or
 another family in the same repair — moves whole to a generated id, dotted
 child paths intact, with every such collision reported. Run it with
 `--dry-run --json` first to preview the complete rename list and every
-collision before anything is written. To change only the prefix new issues
-mint, leaving existing IDs alone, use `bd rename-prefix <prefix> --mint-only`.
-See [bd rename-prefix](/cli-reference/rename-prefix).
+collision before anything is written. A repair rewrites text references
+inside the renamed issues only; issues already on the target prefix keep
+their text. Dependencies follow the renames: an edge between two prefixes is
+re-pointed by removing and re-adding it, so it records the repair's actor and
+time, and one that storage refuses to re-add is left as it was and reported.
+
+To change only the prefix new issues mint, leaving existing IDs alone, use
+`bd rename-prefix <prefix> --mint-only`. A dependency between an old-prefix
+and a new-prefix issue then does not block: storage keeps an edge between
+two prefixes as a reference to another repository, so `bd ready` lists the
+dependent. A later `--repair` consolidates the prefixes and re-points those
+dependencies. See [bd rename-prefix](/cli-reference/rename-prefix).
 
 ## Duplicate Detection and Merge
 
