@@ -645,9 +645,15 @@ func TestEmbeddedCloseAlreadyClosedContinue(t *testing.T) {
 
 		// Retry the close WITH --continue against the now already-closed step. The
 		// idempotent re-close must advance the molecule AND persist the advance, not
-		// just mutate the in-memory working set.
+		// just mutate the in-memory working set — while reporting the step as
+		// already closed with its stored reason, never as a close that applied
+		// this command's (bd-th8229 / #4816).
 		beforeCommits := countCommits()
-		_ = bdClose(t, bd, cdir, step1.ID, "--reason", "retry", "--continue")
+		out := bdClose(t, bd, cdir, step1.ID, "--reason", "retry", "--continue")
+		if !strings.Contains(out, "Already closed ") || !strings.Contains(out, "(close reason unchanged: first)") {
+			t.Errorf("already-closed --continue retry must report the no-op with the stored reason %q, not a close that applied %q, got:\n%s",
+				"first", "retry", out)
+		}
 
 		got, err := os.ReadFile(filepath.Join(cbeads, "last-touched"))
 		if err != nil {
@@ -721,7 +727,15 @@ func TestEmbeddedCloseAlreadyClosedClaimNextAndMolecule(t *testing.T) {
 		// re-running `bd close X --claim-next` got its next work item — and that
 		// property is what the adjudication traded away; bd-yby99.30 carries it.
 		beforeCommits := countCommits()
-		_ = bdClose(t, bd, cdir, target.ID, "--claim-next")
+		out := bdClose(t, bd, cdir, target.ID, "--claim-next")
+		// The report is still truthful about the close itself: the target was
+		// closed bare, so its stored reason is the CLI default "Closed", and the
+		// re-close must say already closed with that, not "Closed" as if this
+		// command had closed it (bd-th8229 / #4816).
+		if !strings.Contains(out, "Already closed ") || !strings.Contains(out, "(close reason unchanged: Closed)") {
+			t.Errorf("already-closed --claim-next retry must report the no-op with the stored default reason %q, got:\n%s",
+				"Closed", out)
+		}
 
 		got := bdShow(t, bd, cdir, next.ID)
 		if got.Status != types.StatusOpen || got.Assignee != "" {
@@ -767,8 +781,18 @@ func TestEmbeddedCloseAlreadyClosedClaimNextAndMolecule(t *testing.T) {
 		}
 
 		// Re-close the already-closed final step. The idempotent re-close must replay
-		// molecule auto-close and re-close the stranded-open root.
-		_ = bdClose(t, bd, mdir, step2.ID, "--reason", "retry")
+		// molecule auto-close and re-close the stranded-open root — and report BOTH
+		// halves truthfully (bd-th8229 / #4816): the step as already closed with
+		// its stored reason, never as a close that applied "retry", and the healed
+		// root as the molecule auto-close it performed.
+		out := bdClose(t, bd, mdir, step2.ID, "--reason", "retry")
+		if !strings.Contains(out, "Already closed ") || !strings.Contains(out, "(close reason unchanged: two)") {
+			t.Errorf("already-closed re-close of the final step must report the no-op with the stored reason %q, not a close that applied %q, got:\n%s",
+				"two", "retry", out)
+		}
+		if !strings.Contains(out, "Auto-closed completed molecule") {
+			t.Errorf("already-closed re-close that healed the root must still report the molecule auto-close it performed, got:\n%s", out)
+		}
 
 		if got := bdShow(t, bd, mdir, root.ID); got.Status != types.StatusClosed {
 			t.Errorf("expected stranded-open molecule root %s re-closed by an already-closed re-close of the final step, got %s",
