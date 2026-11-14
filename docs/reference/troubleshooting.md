@@ -828,6 +828,60 @@ If staleness errors persist, `bd doctor --fix` forces a metadata refresh
 (low risk — it updates tracking metadata, not issues). Background:
 [GH#353](https://github.com/gastownhall/beads/issues/353).
 
+### Read-only sandboxes and read-only files
+
+`bd --readonly` blocks commands that would change issues. It does not let bd
+open the database without filesystem write access. In embedded mode, the
+embedded Dolt engine opens its lock and chunk-journal files under
+`.beads/embeddeddolt/` for writing on every open, read-only commands included
+(`bd --readonly list`, `bd show`). A sandbox that denies file
+writes (for example Codex CLI's `--sandbox read-only`), read-only files, or a
+read-only filesystem therefore stops every bd command from opening the
+database.
+
+That failure is permanent until access changes: retrying the same command
+under the same permissions fails the same way, even though a Windows
+`Access is denied` error can look like another process holding a lock. bd
+builds that include the fix for
+[GH#7445](https://github.com/gastownhall/beads/issues/7445) say so in the
+error:
+
+```text
+Error: failed to open database: ... store requires write access to open at .../.beads/embeddeddolt
+(embedded stores require write access even for --readonly; retrying will not help until access changes; ...)
+```
+
+Earlier builds print only the underlying error, such as `permission denied`
+or `Access is denied` on a file under `.beads/embeddeddolt/`. Treat that as
+permanent too: do not retry it as transient lock contention.
+
+To fix it, run bd where the process can read and write `.beads/embeddeddolt/`:
+widen the sandbox's writable paths to include it, or clear the read-only
+attribute on its files. Use `--readonly` for what it guarantees, which is
+that bd makes no changes to your issues.
+
+A sandbox that makes only `.beads/embeddeddolt/` writable can still trip on
+two other paths:
+
+- **Dolt's global configuration.** The embedded engine reads
+  `.dolt/config_global.json` under your home directory (under
+  `DOLT_ROOT_PATH` instead when that is set) and creates it on the first open
+  when it is missing. If it cannot create it, the engine skips the database
+  and bd fails with `Error 1049: database not found`. In a read-only sandbox
+  that error means this, not missing data. Create the file before the
+  sandbox starts by running one bd command that opens the database, such as
+  `bd list`, outside the sandbox with the same home directory, or set
+  `DOLT_ROOT_PATH` to a writable directory.
+- **Workspace gate files.** While a command runs, bd locks
+  `.beads.gate.lock` beside `.beads/` and `.beads/embeddeddolt.gate.lock`,
+  creating them when they are missing; only `bd --readonly` opens them
+  read-only and passes over the ones that do not exist. When bd cannot open
+  them for writing, it prints
+  `warning: workspace gate acquisition failed, continuing ungated` and runs
+  without the lock that maintenance commands such as `bd backup restore` use
+  to see other bd commands at work. Make both files writable too, or, while
+  they do not exist yet, the directories that hold them.
+
 ## Platform-Specific Issues
 
 ### Windows: Path issues
