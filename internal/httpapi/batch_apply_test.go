@@ -77,7 +77,7 @@ func TestApplyBatchForwardsEveryLevelOfTheDocumentedBody(t *testing.T) {
 				"expected_status":"open","expected_assignee":"bob",
 				"force_close_policy":true,"force_assignee_transfer":true,"force_notes_overwrite":true,
 				"patch":{"title":"renamed","status":"closed","assignee":"dave","owner":"erin","notes":"replacement",
-					"labels":{"replace":["a"],"add":["b"],"remove":["c"]},
+					"labels":{"replace":["a"],"remove_prefixes":["state:"],"add":["b"],"remove":["c"]},
 					"metadata":{"set":{"k":null},"unset":["old"]},
 					"estimated_minutes":null}}},
 			{"kind":"close","close":{
@@ -208,6 +208,9 @@ func TestApplyBatchForwardsEveryLevelOfTheDocumentedBody(t *testing.T) {
 	if !labels.Replace.Set || len(labels.Replace.Value) != 1 || len(labels.Add) != 1 || len(labels.Remove) != 1 {
 		t.Errorf("update.patch.labels = %+v, want replace, add and remove all carried", labels)
 	}
+	if len(labels.RemovePrefixes) != 1 || labels.RemovePrefixes[0] != "state:" {
+		t.Errorf("update.patch.labels.remove_prefixes = %v, want [state:] — the dimension swap travels whole", labels.RemovePrefixes)
+	}
 	if got, ok := update.Patch.Metadata.Set["k"]; !ok || string(got) != "null" {
 		t.Errorf("update.patch.metadata.set[k] = %s, want the literal null: a present null is a VALUE", got)
 	}
@@ -246,6 +249,28 @@ func TestApplyBatchForwardsEveryLevelOfTheDocumentedBody(t *testing.T) {
 	// gates whether a CLIENT sends them, and this server always reads them.
 	if !depAdd.HasSpawner || depAdd.ThreadID != "th-plan" {
 		t.Errorf("dep_add.has_spawner/thread_id = %v/%q, want true/%q", depAdd.HasSpawner, depAdd.ThreadID, "th-plan")
+	}
+}
+
+// TestApplyBatchAcceptsTheLabelPrefixMember: the batch label patch grows the
+// same fourth edit the issue PATCH did — `remove_prefixes`, the "drop this
+// dimension, then land the new value" shape a plan writes when it retargets a
+// state — and an item carrying it must be applied rather than refused as an
+// unknown member.
+func TestApplyBatchAcceptsTheLabelPrefixMember(t *testing.T) {
+	applier := &roleBatchApplier{result: issueops.ApplyBatchResult{
+		Items: []issueops.ItemResult{{Kind: issueops.ItemUpdate, IssueID: "bd-1", Changed: true}},
+	}}
+	ts := newApplyBatchServer(t, applier)
+
+	resp := ts.claim(t, batchApplyPath, `{"actor":"alice","items":[{"kind":"update","update":{
+		"target":{"id":"bd-1"},
+		"patch":{"labels":{"replace":["a"],"remove_prefixes":["state:"],"add":["state:c"]}}}}]}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+	}
+	if len(applier.requests()) != 1 {
+		t.Fatalf("the role was called %d times, want 1", len(applier.requests()))
 	}
 }
 

@@ -287,6 +287,7 @@ go_test(
         "journal_test.go",
         "keyset_search_test.go",
         "label_coordination_test.go",
+        "label_prefix_patch_test.go",
         "label_rename_test.go",
         "labels_test.go",
         "large_batch_apply_measure_test.go",
