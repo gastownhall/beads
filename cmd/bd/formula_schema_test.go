@@ -78,6 +78,14 @@ func TestFormulaSchemaShow_AliasResolution(t *testing.T) {
 		if !strings.Contains(out, "for_each") {
 			t.Errorf("%q output missing for_each field", input)
 		}
+		// bd never runs on_complete and Validate refuses it; the schema must
+		// say so instead of advertising runtime expansion (GH#3782).
+		if !strings.Contains(out, "bd refuses formulas that set on_complete") {
+			t.Errorf("%q output does not state that bd refuses on_complete; output:\n%s", input, out)
+		}
+		if strings.Contains(strings.ToLower(out), "runtime expansion") {
+			t.Errorf("%q output still advertises runtime expansion; output:\n%s", input, out)
+		}
 	}
 }
 
