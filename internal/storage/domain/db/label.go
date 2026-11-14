@@ -74,6 +74,12 @@ func (r *labelSQLRepositoryImpl) Insert(ctx context.Context, issueID, label, act
 		}
 		return nil
 	}
+	// The row landed: make any overlapping label edit of this issue conflict
+	// at commit (GH#5657), on this same transaction and label tier, as
+	// issueops.AddLabelInTx does on the direct route.
+	if err := issueops.TouchLabelCoordinationInTx(ctx, r.runner, issueID, table); err != nil {
+		return fmt.Errorf("db: LabelSQLRepository.Insert %s/%s: %w", issueID, label, err)
+	}
 	if err := r.events.Record(ctx, domain.Event{
 		IssueID:  issueID,
 		Type:     types.EventLabelAdded,
@@ -125,6 +131,9 @@ func (r *labelSQLRepositoryImpl) Delete(ctx context.Context, issueID, label, act
 	}
 	if rows == 0 {
 		return nil
+	}
+	if err := issueops.TouchLabelCoordinationInTx(ctx, r.runner, issueID, table); err != nil {
+		return fmt.Errorf("db: LabelSQLRepository.Delete %s/%s: %w", issueID, label, err)
 	}
 	if err := r.events.Record(ctx, domain.Event{
 		IssueID:  issueID,
