@@ -398,6 +398,14 @@ type DoltStore struct {
 	// createdDatabase reports whether this store's open created its database
 	// (serverConnFacts.created); see CreatedDatabase.
 	createdDatabase bool
+
+	// createAttemptHook, when non-nil, runs after a create body has succeeded
+	// inside its retried write transaction, before that transaction commits.
+	// It is a test seam for the create replay tests: a test pauses the first
+	// attempt there to land a conflicting writer on another connection, so
+	// the commit conflicts and withRetryTx replays the whole body. Nil in
+	// production; never set outside tests.
+	createAttemptHook func()
 }
 
 // Config holds Dolt database configuration

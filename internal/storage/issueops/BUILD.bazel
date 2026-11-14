@@ -37,6 +37,7 @@ go_library(
         "create_batch_cache.go",
         "create_dep_batch.go",
         "create_fastpath_testhook.go",
+        "create_identity_reset.go",
         "create_only_guard.go",
         "cycle_report.go",
         "cycles.go",

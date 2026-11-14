@@ -39,7 +39,15 @@ func (s *DoltStore) createIssue(ctx context.Context, issue *types.Issue, actor s
 	}
 
 	var result issueops.CreateIssueResult
+	// A replayed attempt must re-derive every identity the create assigns —
+	// the minted id, the dependency owners that default to it, the comment
+	// ids — so record which fields were the caller's empties and clear them
+	// at each attempt's start; a definite failure clears them again for the
+	// caller, while an indeterminate commit keeps what it may have landed
+	// (bd-t4h0n7, PR #6754).
+	identities := issueops.RecordCreateIdentities([]*types.Issue{issue})
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		identities.Reset()
 		// SkipPrefixValidation matches legacy behavior: single-issue path does
 		// not validate prefixes for explicit IDs.
 		bc, err := issueops.NewBatchContext(ctx, tx, storage.BatchCreateOptions{
@@ -49,8 +57,15 @@ func (s *DoltStore) createIssue(ctx context.Context, issue *types.Issue, actor s
 			return err
 		}
 		result, err = issueops.CreateIssueInTxWithResult(ctx, tx, bc, issue, actor)
-		return err
+		if err != nil {
+			return err
+		}
+		if s.createAttemptHook != nil {
+			s.createAttemptHook()
+		}
+		return nil
 	}); err != nil {
+		identities.ResetOnFailedTransaction(err)
 		return err
 	}
 
