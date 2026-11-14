@@ -4,11 +4,15 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
 const sharedBody = "# Beads\n\nUse bd ready.\n"
+
+// testBOM is the UTF-8 byte order mark an editor may save at the start of a file.
+const testBOM = "\ufeff"
 
 func sharedWrapped() string {
 	return agentsBeginMarker + "\n" + sharedBody + agentsEndMarker + "\n"
@@ -30,6 +34,8 @@ func TestSharedSectionUpsertAppends(t *testing.T) {
 		{"no final line break", "# Mine", "# Mine\n\n" + sharedWrapped()},
 		{"CRLF", "# Mine\r\n", "# Mine\r\n\n" + sharedWrapped()},
 		{"whitespace only is kept", " \n", " \n\n" + sharedWrapped()},
+		{"byte order mark only", testBOM, testBOM + sharedWrapped()},
+		{"byte order mark and user content", testBOM + "# Mine\n", testBOM + "# Mine\n\n" + sharedWrapped()},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := UpsertSharedSection(tt.content, sharedBody, "")
@@ -63,7 +69,7 @@ func TestSharedSectionInstallFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode = %v, want the file's 0600 kept", info.Mode().Perm())
 	}
 	if _, err := InstallSharedFile(filepath.Join(t.TempDir(), "missing", "x.md"), sharedBody, ""); err == nil || errors.Is(err, ErrMalformedSection) {
@@ -93,6 +99,16 @@ func TestSharedSectionUpsertReplacesInPlace(t *testing.T) {
 			content: "# Mine\r\n\r\n" + agentsBeginMarker + "\r\nOld.\r\n" + agentsEndMarker + "\r\n\r\nAfter\r\n",
 			want:    "# Mine\r\n\r\n" + strings.TrimSuffix(sharedWrapped(), "\n") + "\r\n\r\nAfter\r\n",
 		},
+		{
+			name:    "spaces after the markers",
+			content: "# Mine\n\n" + agentsBeginMarker + " \t\nOld.\n" + agentsEndMarker + " \n",
+			want:    "# Mine\n\n" + strings.TrimSuffix(sharedWrapped(), "\n") + " \n",
+		},
+		{
+			name:    "section behind a byte order mark",
+			content: testBOM + agentsBeginMarker + "\nOld.\n" + agentsEndMarker + "\n\n## After\n",
+			want:    testBOM + sharedWrapped() + "\n## After\n",
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := UpsertSharedSection(tt.content, sharedBody, "")
@@ -119,6 +135,7 @@ func TestSharedSectionCheckFile(t *testing.T) {
 	}{
 		{name: "user content only", content: "# Mine\n", want: SharedSectionNone},
 		{name: "section", content: "# Mine\n\n" + sharedWrapped(), want: SharedSectionPresent},
+		{name: "section behind a byte order mark", content: testBOM + sharedWrapped() + "\n# Mine\n", want: SharedSectionPresent},
 		{name: "dangling BEGIN", content: agentsBeginMarker + "\n", want: SharedSectionMalformed, malformed: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -151,6 +168,13 @@ func TestSharedSectionStrip(t *testing.T) {
 		{name: "extra blank lines", content: "# Mine\n\n\n\n" + sharedWrapped() + "\n\n\n## After\n", want: "# Mine\n\n## After\n", stripped: true},
 		{name: "section only", content: sharedWrapped(), want: "", stripped: true, empty: true},
 		{name: "section and whitespace", content: "\n\n" + sharedWrapped() + "\n  \n", want: "  \n", stripped: true, empty: true},
+		{name: "section behind a byte order mark", content: testBOM + sharedWrapped() + "\n## After\n", want: testBOM + "## After\n", stripped: true},
+		{name: "byte order mark and section only", content: testBOM + sharedWrapped(), want: testBOM, stripped: true, empty: true},
+		// Spaces or tabs after the END marker are its line's, so they go
+		// with the section and the text around it is rejoined as usual.
+		{name: "spaces after the END marker", content: "# Mine\n\n" + agentsBeginMarker + "\nOld.\n" + agentsEndMarker + " \t\n\n## After\n", want: "# Mine\n\n## After\n", stripped: true},
+		{name: "spaces after the END marker ending the file", content: "# Mine\n\n" + agentsBeginMarker + "\nOld.\n" + agentsEndMarker + "  ", want: "# Mine\n", stripped: true},
+		{name: "spaces after the END marker with CRLF", content: "# Mine\r\n\r\n" + agentsBeginMarker + "\r\nOld.\r\n" + agentsEndMarker + " \r\n\r\n## After\r\n", want: "# Mine\r\n\r\n## After\r\n", stripped: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got, stripped, empty, err := StripSharedSection(tt.content, "")
@@ -180,7 +204,7 @@ func TestSharedSectionRemoveFile(t *testing.T) {
 	if data, _ := os.ReadFile(mine); string(data) != "# Mine\n" {
 		t.Fatalf("file = %q, want the user's content", data)
 	}
-	if info, err := os.Stat(mine); err != nil || info.Mode().Perm() != 0o600 {
+	if info, err := os.Stat(mine); err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
 		t.Fatalf("mode after strip = %v, %v; want 0600 kept", info, err)
 	}
 	if got, err := RemoveSharedFile(mine, ""); err != nil || got != SharedRemovedNothing {
@@ -192,6 +216,13 @@ func TestSharedSectionRemoveFile(t *testing.T) {
 	}
 	if _, err := os.Stat(only); !os.IsNotExist(err) {
 		t.Fatalf("section-only file kept, err = %v", err)
+	}
+	bomOnly := write("bom-only.md", testBOM+sharedWrapped())
+	if got, err := RemoveSharedFile(bomOnly, ""); err != nil || got != SharedRemovedFile {
+		t.Fatalf("RemoveSharedFile(byte order mark and section) = %v, %v", got, err)
+	}
+	if _, err := os.Stat(bomOnly); !os.IsNotExist(err) {
+		t.Fatalf("file of a byte order mark and the section kept, err = %v", err)
 	}
 	if got, err := RemoveSharedFile(filepath.Join(dir, "missing.md"), ""); err != nil || got != SharedRemovedNothing {
 		t.Fatalf("RemoveSharedFile(missing) = %v, %v", got, err)
@@ -213,6 +244,17 @@ func TestSharedSectionMalformed(t *testing.T) {
 		{"BEGIN closed after END", "<!-- BEGIN BEADS INTEGRATION " + end + " -->\n"},
 		{"BEGIN prefix of another word", "<!-- BEGIN BEADS INTEGRATIONS -->\nA\n" + end + "\n"},
 		{"END with extra text", begin + "\nA\n<!-- END BEADS INTEGRATION v:1 -->\n"},
+		{"BEGIN comment spans lines", "<!-- BEGIN BEADS INTEGRATION v:1\n<!-- note -->\nA\n" + end + "\n"},
+		// A marker bd did not write alone on its line is the file's own
+		// text, such as a mention of the markers.
+		{"markers mentioned inline", "# Mine\n\nbd keeps its guidance between `" + begin + "` and `" + end + "`; never edit inside them.\n"},
+		{"markers in an indented code block", "# Mine\n\nExample:\n\n    " + begin + "\n    A\n    " + end + "\n"},
+		{"text before the BEGIN marker", "Note: " + begin + "\nA\n" + end + "\n"},
+		{"text after the BEGIN marker", begin + " keep this\nA\n" + end + "\n"},
+		{"text before the END marker", begin + "\nA " + end + "\n"},
+		{"text after the END marker", begin + "\nA\n" + end + " keep this\n"},
+		// Only a byte order mark that starts the file is not its text.
+		{"byte order mark inside the file", "# Mine\n" + testBOM + begin + "\nA\n" + end + "\n"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if got, err := UpsertSharedSection(tt.content, sharedBody, ""); !errors.Is(err, ErrMalformedSection) || got != tt.content {
@@ -270,6 +312,7 @@ func TestSharedSectionLegacy(t *testing.T) {
 		{"CRLF", strings.ReplaceAll(sharedLegacy, "\n", "\r\n"), true},
 		{"trailing whitespace", sharedLegacy + "\n \t\n", true},
 		{"no final line break", strings.TrimSuffix(sharedLegacy, "\n"), true},
+		{"byte order mark", testBOM + sharedLegacy, true},
 		{"user addition after", sharedLegacy + "\n## Mine\n", false},
 		{"user addition before", "# Mine\n\n" + sharedLegacy, false},
 		{"leading whitespace", "\n" + sharedLegacy, false},
@@ -284,8 +327,12 @@ func TestSharedSectionLegacy(t *testing.T) {
 				t.Fatal(err)
 			}
 			if tt.legacy {
-				if upserted != sharedWrapped() {
-					t.Errorf("legacy upsert = %q, want only the section", upserted)
+				want := sharedWrapped()
+				if strings.HasPrefix(tt.content, testBOM) {
+					want = testBOM + want
+				}
+				if upserted != want {
+					t.Errorf("legacy upsert = %q, want only the section %q", upserted, want)
 				}
 				if !stripped || !empty || remainder != "" {
 					t.Errorf("legacy strip = %q, %v, %v; want the whole file bd's", remainder, stripped, empty)

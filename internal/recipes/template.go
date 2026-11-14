@@ -88,11 +88,11 @@ If the Beads Copilot plugin is installed, Copilot CLI will automatically run
 `
 
 // LegacyCopilotInstructions is the .github/copilot-instructions.md that bd
-// setup copilot wrote, the whole file and unmarked, before it kept a marked
-// section there (v1.0.5 through v1.3.2). bd treats a file that is exactly
-// this text as its own, so --check accepts it and setup converts it to a
-// section rather than adding a second copy of the guidance. Keep it frozen:
-// it must not follow edits to CopilotInstructionsTemplate.
+// setup copilot wrote, the whole file and unmarked, in every release from
+// v1.0.5 until it kept a marked section there. bd treats a file that is
+// exactly this text as its own, so --check accepts it and setup converts it
+// to a section rather than adding a second copy of the guidance. Keep it
+// frozen: it must not follow edits to CopilotInstructionsTemplate.
 const LegacyCopilotInstructions = `# GitHub Copilot Instructions
 
 This repository uses **Beads (bd)** for issue tracking.

@@ -446,7 +446,7 @@ func preflightSharedPaths(recipe *recipes.Recipe, paths []string) error {
 		case errors.Is(err, setup.ErrMalformedSection):
 			return HandleErrorWithHint(
 				fmt.Sprintf("%s: %v; no files were changed", remedy.PrintedValue(path), remedy.PrintedError(err)),
-				"edit the file so it holds at most one <!-- BEGIN BEADS INTEGRATION --> ... <!-- END BEADS INTEGRATION --> pair, then run bd setup again")
+				"edit the file so it holds at most one <!-- BEGIN BEADS INTEGRATION --> ... <!-- END BEADS INTEGRATION --> pair, each marker alone on its line, and no other mention of the markers, then run bd setup again")
 		case errors.Is(err, setup.ErrRefuseSymlinkWrite):
 			return HandleErrorWithHint(
 				fmt.Sprintf("%s is a symbolic link; bd setup will not write or delete through it, and no files were changed", remedy.PrintedValue(path)),
