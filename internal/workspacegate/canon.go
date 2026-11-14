@@ -1,6 +1,7 @@
 package workspacegate
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -58,4 +59,43 @@ func isDriveAbs(s string) bool {
 	}
 	c := s[0] | 0x20 // ASCII lower-case
 	return 'a' <= c && c <= 'z'
+}
+
+// resolveParent runs the gate-parent resolvers in preference order and
+// returns the first accepted result:
+//
+//  1. dos: the handle's final path in drive-letter (or UNC) spelling;
+//  2. guid: the handle's final path in volume-GUID spelling, for a volume
+//     with no DOS name;
+//  3. eval: filepath.EvalSymlinks, for filesystems that do not implement
+//     the final-path query, so nothing that resolved before stops
+//     resolving.
+//
+// Resolvers run lazily: a later one never runs once an earlier one is
+// accepted. A resolver is accepted when it returns a non-empty path and a
+// nil error (dos and guid have already been filtered through
+// finalPathToGateParent). When all three fail the result is the joined
+// errors, so errors.Is still finds fs.ErrNotExist; the unresolved input
+// path is never returned as a fallback.
+func resolveParent(dos, guid, eval func() (string, error)) (string, error) {
+	steps := []struct {
+		name    string
+		resolve func() (string, error)
+	}{
+		{"final path (DOS)", dos},
+		{"final path (volume GUID)", guid},
+		{"EvalSymlinks", eval},
+	}
+	errs := make([]error, 0, len(steps))
+	for _, s := range steps {
+		p, err := s.resolve()
+		if err == nil && p != "" {
+			return p, nil
+		}
+		if err == nil {
+			err = errors.New("empty path")
+		}
+		errs = append(errs, fmt.Errorf("%s: %w", s.name, err))
+	}
+	return "", errors.Join(errs...)
 }
