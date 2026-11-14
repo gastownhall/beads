@@ -353,8 +353,15 @@ func (s *EmbeddedDoltStore) RemoveFederationPeer(ctx context.Context, name strin
 
 // Sync performs a full bidirectional sync with a peer:
 // 1. Fetch from peer
-// 2. Merge peer's changes (handling conflicts per strategy)
+// 2. Merge peer's changes — an explicit strategy via MergeWithStrategy, the
+//    pinned-session merge/resolve/repair/commit sequence that can resolve a
+//    real conflict (GH#5564, bd-sesknw); the bare Merge's CALL DOLT_MERGE
+//    runs on a pool connection and is rejected on a genuine conflict before
+//    any strategy could apply
 // 3. Push local changes to peer
+//
+// A strategy merge is concluded (committed, full result, config included)
+// before Sync pushes, so the peer receives the resolution.
 func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy string) (*storage.SyncResult, error) {
 	result := &storage.SyncResult{
 		Peer:      peer,
@@ -382,15 +389,32 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 	// Step 2: Get commit before merge for change detection
 	beforeCommit, _ := s.GetCurrentCommit(ctx)
 
-	// Step 3: Merge peer's branch
+	// Step 3: Merge peer's branch. GH#5564 (bd-sesknw): an explicit strategy
+	// must reach MergeWithStrategy — the pinned-session sequence that sets the
+	// conflict-tolerance flags, resolves every conflicted table with the
+	// operator's strategy, repairs FK cascade violations, and concludes the
+	// merge — because the bare Merge's CALL DOLT_MERGE runs on a pool
+	// connection under autocommit and is rejected on a real conflict (Error
+	// 1105) before any strategy could apply. The resolve/commit tail this
+	// function used to run after a bare conflicted merge was therefore dead
+	// code on genuine conflicts. MergeWithStrategy also runs the is_blocked
+	// recompute itself on success.
 	remoteBranch := fmt.Sprintf("%s/%s", peer, s.branch)
-	conflicts, err := s.Merge(ctx, remoteBranch)
+	var conflicts []storage.Conflict
+	var err error
+	if strategy != "" {
+		conflicts, err = s.MergeWithStrategy(ctx, remoteBranch, strategy)
+	} else {
+		conflicts, err = s.Merge(ctx, remoteBranch)
+	}
 	if err != nil {
 		result.Error = fmt.Errorf("merge failed: %w", err)
 		return result, result.Error
 	}
 
-	// Step 4: Handle conflicts
+	// Step 4: Report conflicts. With a strategy they were resolved and the
+	// merge concluded inside MergeWithStrategy; without one a genuine
+	// conflict stays the operator's to resolve on a retry.
 	if len(conflicts) > 0 {
 		result.Conflicts = conflicts
 
@@ -398,33 +422,7 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 			result.Error = fmt.Errorf("merge conflicts require resolution (use --strategy ours|theirs)")
 			return result, result.Error
 		}
-
-		for _, c := range conflicts {
-			if err := s.ResolveConflicts(ctx, c.Field, strategy); err != nil {
-				result.Error = fmt.Errorf("conflict resolution failed for %s: %w", c.Field, err)
-				return result, result.Error
-			}
-		}
 		result.ConflictsResolved = true
-
-		// CommitMergeResolution, not Commit: Commit's GH#3886 nothing-to-commit
-		// tolerance would swallow the --ours case (resolution dirties nothing)
-		// as a silent no-op here, leaving dolt_merge_status.is_merging true while
-		// this function reports result.Merged = true and pushes — the exact
-		// re-wedge CommitMergeResolution's doc comment describes. See the
-		// server-mode twin, dolt/federation.go's Sync.
-		if err := s.CommitMergeResolution(ctx, fmt.Sprintf("Resolve conflicts from %s using %s strategy", peer, strategy)); err != nil {
-			result.Error = fmt.Errorf("commit conflict resolution: %w", err)
-			return result, result.Error
-		}
-
-		// bd-578h9.11: the conflicted merge skipped the automatic is_blocked
-		// recompute (unresolved rows would have fed it garbage); now that the
-		// resolution is committed, cover the whole merge+resolution window.
-		if err := s.RecomputeBlockedAfterMerge(ctx, beforeCommit); err != nil {
-			result.Error = fmt.Errorf("conflicts resolved but is_blocked recompute failed: %w", err)
-			return result, result.Error
-		}
 	}
 	result.Merged = true
 

@@ -6,9 +6,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
@@ -227,5 +229,114 @@ func TestEmbeddedSyncCommitsConfigBeforeMerge(t *testing.T) {
 
 	if statusHasConfig(t, ctx, te) {
 		t.Fatal("embedded Sync left config dirty before merge; bd federation sync would wedge DOLT_MERGE (GH#2474)")
+	}
+}
+
+// TestSyncWithStrategy_TheirsResolvesPeerConflict is the embedded-engine
+// counterpart of server-mode TestFederationSyncStrategyResolvesRealConflict
+// (GH#5564, bd-sesknw): EmbeddedDoltStore.Sync had the same dead --strategy
+// branch — it merged through the bare Merge, whose CALL DOLT_MERGE runs
+// under autocommit and is rejected on a real conflict before the strategy
+// could apply. The peer is a real file:// remote cloned into a second
+// embedded database (remote_git_ref_test.go's clone pattern), so the test
+// exercises the fetch/merge/push loop Sync actually runs. Both sides pin
+// updated_at so the LWW auto-resolver would decline the conflict and only
+// the strategy can resolve it.
+func TestSyncWithStrategy_TheirsResolvesPeerConflict(t *testing.T) {
+	te := newTestEnv(t, "syncstrat")
+	ctx := t.Context()
+
+	// Seed one issue and commit it. All local writes go through te.exec's
+	// short-lived handles: a second long-lived engine handle alongside the
+	// store's own (openSettleConn) makes the store's next OpenSQL wait on the
+	// engine lock forever, so each statement opens, runs, and closes.
+	te.exec(t, ctx,
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES ('mssync-1', 'base', '', '', '', '', 'open', 2, 'task')")
+	te.exec(t, ctx, "CALL DOLT_COMMIT('-Am', 'seed issue')")
+
+	// Register the peer on a file remote and commit the registration so the
+	// working set Sync merges on is clean.
+	remoteDir := filepath.Join(t.TempDir(), "remote")
+	if err := te.store.AddFederationPeer(ctx, &storage.FederationPeer{
+		Name:        "peer",
+		RemoteURL:   "file://" + remoteDir,
+		Sovereignty: "T2",
+	}); err != nil {
+		t.Fatalf("add federation peer: %v", err)
+	}
+	if err := te.store.Commit(ctx, "register sync peer"); err != nil {
+		t.Fatalf("commit peer registration: %v", err)
+	}
+	if err := te.store.PushTo(ctx, "peer"); err != nil {
+		t.Fatalf("push to peer remote: %v", err)
+	}
+
+	// Clone the remote into a second embedded database, retitle there, and
+	// push back (clone-created remotes carry branch tracking).
+	cloneDir := t.TempDir()
+	boot, bootCleanup, err := embeddeddolt.OpenSQL(ctx, cloneDir, "", "")
+	if err != nil {
+		t.Fatalf("OpenSQL for clone: %v", err)
+	}
+	if err := versioncontrolops.DoltClone(ctx, boot, "file://"+remoteDir, "peerdb", ""); err != nil {
+		_ = bootCleanup()
+		t.Fatalf("clone peer database: %v", err)
+	}
+	_ = bootCleanup()
+	peerDB, peerCleanup, err := embeddeddolt.OpenSQL(ctx, cloneDir, "peerdb", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL on clone: %v", err)
+	}
+	defer func() { _ = peerCleanup() }()
+	for _, q := range []string{
+		"UPDATE issues SET title = 'theirs', updated_at = '2026-01-01 00:00:00' WHERE id = 'mssync-1'",
+		"CALL DOLT_COMMIT('-Am', 'peer retitles')",
+		"CALL DOLT_PUSH('origin', 'main')",
+	} {
+		if _, err := peerDB.ExecContext(ctx, q); err != nil {
+			t.Fatalf("peer %q: %v", q, err)
+		}
+	}
+
+	// Local: conflicting retitle, committed.
+	te.exec(t, ctx,
+		"UPDATE issues SET title = 'ours', updated_at = '2026-01-01 00:00:00' WHERE id = 'mssync-1'")
+	te.exec(t, ctx, "CALL DOLT_COMMIT('-Am', 'local retitles')")
+
+	result, err := te.store.Sync(ctx, "peer", "theirs")
+	if err != nil {
+		t.Fatalf("Sync(--strategy theirs) should resolve the conflict, got: %v", err)
+	}
+	if !result.Merged || !result.ConflictsResolved || !result.Pushed {
+		t.Errorf("Sync result = merged:%v conflictsResolved:%v pushed:%v; want all true",
+			result.Merged, result.ConflictsResolved, result.Pushed)
+	}
+	foundIssues := false
+	for _, c := range result.Conflicts {
+		if c.Field == "issues" {
+			foundIssues = true
+		}
+	}
+	if !foundIssues {
+		t.Errorf("reported conflicts %+v do not name the issues table", result.Conflicts)
+	}
+
+	// The peer's title is committed and nothing is left wedged. The reads go
+	// through fresh handles (te.queryScalar); the merge is committed, so the
+	// state is visible across handles.
+	var title string
+	te.queryScalar(t, ctx, "SELECT title FROM issues WHERE id = 'mssync-1'", nil, &title)
+	if title != "theirs" {
+		t.Errorf("title = %q after Sync --strategy theirs, want %q", title, "theirs")
+	}
+	var liveConflicts int
+	te.queryScalar(t, ctx, "SELECT COUNT(*) FROM dolt_conflicts", nil, &liveConflicts)
+	if liveConflicts != 0 {
+		t.Errorf("%d conflicted table(s) remain after strategy resolution", liveConflicts)
+	}
+	var merging int
+	te.queryScalar(t, ctx, "SELECT COUNT(*) FROM dolt_merge_status WHERE is_merging", nil, &merging)
+	if merging != 0 {
+		t.Error("a merge is still open after sync; the next sync would wedge")
 	}
 }
