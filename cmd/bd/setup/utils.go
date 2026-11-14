@@ -150,3 +150,43 @@ func removeEmptyDir(dir string, remove func(string) error) error {
 	}
 	return nil
 }
+
+// boundProjectDir is the project directory bd setup installs, checks and
+// removes a project's integration files in when it is not the process's
+// working directory: the absolute directory bd -C names (SetProjectDir). ""
+// means the working directory, and every project path stays as it was.
+var boundProjectDir string
+
+// SetProjectDir makes the project-scope integration files of bd setup's
+// recipes resolve under dir, an absolute path, instead of the working
+// directory, until the returned restore runs. bd -C <dir> setup uses it: -C
+// selects the project without changing the working directory, so a recipe
+// that wrote relative to it would write into the directory bd was launched
+// in (#8283). "" restores the working directory. It is process-global: a
+// test that calls it must not run in parallel with one that runs a recipe.
+func SetProjectDir(dir string) (restore func()) {
+	prev := boundProjectDir
+	boundProjectDir = dir
+	return func() { boundProjectDir = prev }
+}
+
+// workingProjectDir is the absolute project directory a recipe's default
+// environment installs into: the bound one (SetProjectDir), else the working
+// directory.
+func workingProjectDir() (string, error) {
+	if boundProjectDir != "" {
+		return boundProjectDir, nil
+	}
+	return os.Getwd()
+}
+
+// ProjectPath returns rel, a project-relative path, under the bound project
+// directory (SetProjectDir). It returns rel as it is when no directory is
+// bound, so output without bd -C is unchanged, and when rel is empty, which
+// names no file, or absolute, which is already rooted.
+func ProjectPath(rel string) string {
+	if boundProjectDir == "" || rel == "" || filepath.IsAbs(rel) {
+		return rel
+	}
+	return filepath.Join(boundProjectDir, rel)
+}

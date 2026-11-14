@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/cmd/bd/setup"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/recipes"
@@ -931,4 +932,216 @@ func TestAddRecipe_RefusesPathOutsideDir(t *testing.T) {
 			t.Errorf("bd setup --add myeditor %q saved %+v, %v", path, saved["myeditor"], err)
 		}
 	}
+}
+
+// TestSetupClaude_ChangeDirWritesToSelectedProject pins #8283: `bd -C <project>
+// setup claude` must write the project's Claude integration under <project>,
+// not under the process working directory, as `cd <project> && bd setup
+// claude` does.
+func TestSetupClaude_ChangeDirWritesToSelectedProject(t *testing.T) {
+	startDir := t.TempDir()
+	projectDir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(projectDir); err == nil {
+		projectDir = resolved
+	}
+	beadsDir := filepath.Join(projectDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(startDir)
+	resetSetupResolutionCaches(t)
+	resetSetupGlobals(t)
+	restoreManaged := setup.SetClaudeManagedSettingsDirForTest("")
+	t.Cleanup(restoreManaged)
+
+	origChangeDir := changeDir
+	changeDir = projectDir
+	t.Cleanup(func() { changeDir = origChangeDir })
+	t.Setenv("BEADS_DIR", beadsDir)
+
+	_ = captureStdout(t, func() error {
+		return runRecipe("claude")
+	})
+
+	if _, err := os.Stat(filepath.Join(startDir, ".claude")); !os.IsNotExist(err) {
+		t.Errorf("bd -C %s setup claude wrote .claude into the process cwd %s (stat err=%v)", projectDir, startDir, err)
+	}
+	if _, err := os.Stat(filepath.Join(projectDir, ".claude", "settings.json")); err != nil {
+		t.Errorf("bd -C %s setup claude did not write the selected project's .claude/settings.json: %v", projectDir, err)
+	}
+}
+
+// changeDirTempDir is a t.TempDir with its symlinks resolved, so paths bd
+// prints and the paths a test builds compare equal on macOS too.
+func changeDirTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	return dir
+}
+
+// changeDirSetupFixture runs bd setup as bd -C <target> setup does from
+// launch: launch is the working directory, target a separate beads
+// workspace, and home an empty user home. It sets the -C flag and BEADS_DIR
+// as applyChangeDirSelection does, without changing the working directory,
+// and clears what a host could leak in (CODEX_HOME, Claude Code's managed
+// settings, discovery caches, bd setup's flags).
+func changeDirSetupFixture(t *testing.T) (launch, target, home string) {
+	t.Helper()
+	launch, target, home = changeDirTempDir(t), changeDirTempDir(t), changeDirTempDir(t)
+	beadsDir := filepath.Join(target, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("BEADS_DB", "")
+	t.Setenv("BD_DB", "")
+	t.Chdir(launch)
+	resetSetupResolutionCaches(t)
+	resetSetupGlobals(t)
+	t.Cleanup(setup.SetClaudeManagedSettingsDirForTest(""))
+
+	origChangeDir := changeDir
+	changeDir = target
+	t.Cleanup(func() { changeDir = origChangeDir })
+	t.Setenv("BEADS_DIR", beadsDir)
+	return launch, target, home
+}
+
+// treeSnapshot maps every entry below dir, by its slash-separated path
+// relative to dir, to what it is: a file's content, "<dir>" for a
+// directory, or "-> target" for a symbolic link.
+func treeSnapshot(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	snap := map[string]string{}
+	if err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil || rel == "." {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		switch {
+		case d.Type()&os.ModeSymlink != 0:
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			snap[rel] = "-> " + target
+		case d.IsDir():
+			snap[rel] = "<dir>"
+		default:
+			data, err := os.ReadFile(path) // #nosec G304 -- test fixture
+			if err != nil {
+				return err
+			}
+			snap[rel] = string(data)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return snap
+}
+
+// assertSameTree fails t when dir's tree is no longer before.
+func assertSameTree(t *testing.T, what, dir string, before map[string]string) {
+	t.Helper()
+	after := treeSnapshot(t, dir)
+	for name, was := range before {
+		if now, ok := after[name]; !ok {
+			t.Errorf("%s: %s was removed", what, name)
+		} else if now != was {
+			t.Errorf("%s: %s changed", what, name)
+		}
+	}
+	for name := range after {
+		if _, ok := before[name]; !ok {
+			t.Errorf("%s: %s was created", what, name)
+		}
+	}
+}
+
+// changeDirProjectRecipes are the project-scope recipes bd setup installs,
+// with flags, and files each writes under the project it installs into.
+// Claude Code reads the shared skill from its plugin, so bd setup claude
+// does not install .agents/skills/beads as codex and cursor do.
+var changeDirProjectRecipes = []struct {
+	recipe  string
+	project bool     // --project
+	files   []string // slash-separated, relative to the project
+	printed bool     // a generic recipe, which prints each file it wrote
+}{
+	{recipe: "claude", files: []string{".claude/settings.json"}},
+	{recipe: "codex", files: []string{"AGENTS.md", ".agents/skills/beads/SKILL.md"}},
+	{recipe: "cursor", files: []string{".cursor/rules/beads.mdc", ".cursor/hooks.json", ".agents/skills/beads/SKILL.md"}},
+	{recipe: "factory", files: []string{"AGENTS.md"}},
+	{recipe: "opencode", files: []string{"AGENTS.md"}},
+	{recipe: "aider", files: []string{".aider.conf.yml", ".aider/BEADS.md", ".aider/README.md"}},
+	{recipe: "junie", files: []string{".junie/guidelines.md", ".junie/mcp/mcp.json"}},
+	{recipe: "windsurf", files: []string{".windsurf/rules/beads.md"}, printed: true},
+	{recipe: "cody", files: []string{".cody/rules/beads.md"}, printed: true},
+	{recipe: "kilocode", files: []string{".kilocode/rules/beads.md"}, printed: true},
+	{recipe: "kiro", files: []string{".kiro/steering/beads.md"}, printed: true},
+	{recipe: "copilot", files: []string{".copilot-plugin/plugin.json", ".github/copilot-instructions.md"}, printed: true},
+	{recipe: "gemini", project: true, files: []string{".gemini/settings.json", "GEMINI.md"}},
+	{recipe: "mux", project: true, files: []string{"AGENTS.md", ".mux/AGENTS.md"}},
+}
+
+// TestSetupChangeDir_InstallWritesTarget pins #8283 for install: bd -C T
+// setup <recipe> run from L writes the recipe's project files under T, as
+// cd T && bd setup <recipe> does, and leaves L as it was. It runs the
+// recipes through runSetup with their real default environments, which
+// resolved the project from the working directory.
+func TestSetupChangeDir_InstallWritesTarget(t *testing.T) {
+	for _, tc := range changeDirProjectRecipes {
+		t.Run(tc.recipe, func(t *testing.T) {
+			launch, target, _ := changeDirSetupFixture(t)
+			setupProject = tc.project
+
+			out := captureStdout(t, func() error { return runSetup(setupCmd, []string{tc.recipe}) })
+
+			for _, file := range tc.files {
+				path := filepath.Join(target, filepath.FromSlash(file))
+				if _, err := os.Stat(path); err != nil {
+					t.Errorf("bd -C T setup %s did not write T/%s: %v\n%s", tc.recipe, file, err, out)
+				}
+				if tc.printed && !strings.Contains(out, "  File: "+path+"\n") {
+					t.Errorf("bd -C T setup %s did not report %s:\n%s", tc.recipe, path, out)
+				}
+			}
+			assertSameTree(t, "L after bd -C T setup "+tc.recipe, launch, map[string]string{})
+		})
+	}
+
+	// A workspace recipe from T's .beads/recipes.toml installs into T too.
+	t.Run("workspace recipe", func(t *testing.T) {
+		launch, target, _ := changeDirSetupFixture(t)
+		if err := os.WriteFile(filepath.Join(target, ".beads", "recipes.toml"), []byte("[recipes.myed]\npath = \".myed/rules.md\"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out := captureStdout(t, func() error { return runSetup(setupCmd, []string{"myed"}) })
+		path := filepath.Join(target, ".myed", "rules.md")
+		if data, err := os.ReadFile(path); err != nil || string(data) != recipes.Template {
+			t.Errorf("bd -C T setup myed wrote T/.myed/rules.md = %q, %v\n%s", data, err, out)
+		}
+		if !strings.Contains(out, "  File: "+path+"\n") {
+			t.Errorf("bd -C T setup myed did not report %s:\n%s", path, out)
+		}
+		assertSameTree(t, "L after bd -C T setup myed", launch, map[string]string{})
+	})
 }

@@ -252,7 +252,32 @@ func recipePathRefusal(err error) string {
 	return fmt.Sprintf("cannot be checked: %v", remedy.PrintedError(err))
 }
 
+// setupProjectDir returns the directory bd setup installs, checks and
+// removes a project's integration files in: the -C directory, made absolute
+// against the working directory, or "" for the working directory itself.
+// It is the directory the user named, as primeWorkspaceDir's is, not the
+// parent of the beads directory -C resolved, which may have followed a
+// .beads/redirect or walked up from a subdirectory. -C selects the project
+// without changing the working directory, so without this a recipe writes
+// into the directory bd was launched in (#8283).
+func setupProjectDir() (string, error) {
+	if strings.TrimSpace(changeDir) == "" {
+		return "", nil
+	}
+	abs, err := filepath.Abs(changeDir)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve -C directory %s: %w", remedy.PrintedValue(changeDir), err)
+	}
+	return abs, nil
+}
+
 func runRecipe(name string) error {
+	projectDir, err := setupProjectDir()
+	if err != nil {
+		return HandleError("%v", err)
+	}
+	defer setup.SetProjectDir(projectDir)()
+
 	switch name {
 	case "claude":
 		return runClaudeRecipe()
@@ -371,23 +396,25 @@ func runRecipe(name string) error {
 	for _, path := range paths {
 		dir := filepath.Dir(path)
 		if dir != "." && dir != "" {
-			if err := os.MkdirAll(dir, 0o755); err != nil {
+			if err := os.MkdirAll(setup.ProjectPath(dir), 0o755); err != nil {
 				return HandleError("create directory: %v", remedy.PrintedError(err))
 			}
 		}
 
+		// The recipe's contents are keyed by the path it names, not the
+		// path under the -C directory it is written to.
 		content, err := recipes.ContentForPath(*recipe, path)
 		if err != nil {
 			return HandleError("%v", err)
 		}
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil { // #nosec G306 -- config files need to be readable
+		if err := os.WriteFile(setup.ProjectPath(path), []byte(content), 0o644); err != nil { // #nosec G306 -- config files need to be readable
 			return HandleError("write file: %v", remedy.PrintedError(err))
 		}
 	}
 
 	fmt.Printf("\n✓ %s integration installed\n", remedy.PrintedValue(recipe.Name))
 	for _, path := range paths {
-		fmt.Printf("  File: %s\n", remedy.PrintedValue(path))
+		fmt.Printf("  File: %s\n", remedy.PrintedValue(setup.ProjectPath(path)))
 	}
 	return nil
 }

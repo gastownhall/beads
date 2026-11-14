@@ -51,7 +51,7 @@ func defaultCodexEnv() (codexEnv, error) {
 	if err != nil {
 		return codexEnv{}, fmt.Errorf("home directory: %w", err)
 	}
-	workDir, err := os.Getwd()
+	workDir, err := workingProjectDir()
 	if err != nil {
 		return codexEnv{}, fmt.Errorf("working directory: %w", err)
 	}
