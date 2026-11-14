@@ -1317,6 +1317,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   identity and mutates as another (`AddParentChild` and `SetStatus` stay
   optional), and must stamp the request's actor on its derived `is_blocked`
   updates.
+- **An embedded store the process cannot write now says it needs write
+  access and that retrying will not help** (#7445). The embedded Dolt engine
+  opens the store's lock and chunk-journal files for writing on every open,
+  `bd --readonly` included, so in a read-only sandbox (for example Codex
+  CLI's `--sandbox read-only`), on read-only files or on a read-only
+  filesystem every command that opens the database failed with only the
+  engine's `permission denied` (`Access is denied` on Windows), which agents
+  retried as lock contention. The error now reads `store requires write
+  access to open at <dir> (embedded stores require write access even for
+  --readonly; retrying will not help until access changes; ...)`, followed
+  by the engine's error; inside bd it wraps the new
+  `embeddeddolt.ErrStoreRequiresWriteAccess` sentinel. Lock contention and
+  other open failures read as before. See
+  [Read-only sandboxes and read-only files](docs/reference/troubleshooting.md#read-only-sandboxes-and-read-only-files),
+  which also names the other paths a sandbox must leave writable.
 - **The aux row id re-key again skips tables with dolthub/dolt#11131
   encoding drift instead of aborting the migration on every open** (#8372).
   The Dolt 2.6 engine reports the drift as `malformed out-of-band adaptive
