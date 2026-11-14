@@ -125,3 +125,46 @@ func TestRemoteTransfersRefusedByAllowedRemotePatterns(t *testing.T) {
 		t.Errorf("remote received %d 'policy-late' row(s): data crossed despite the policy refusal", remoteLate)
 	}
 }
+
+// The accepting half of GH#6233: a list that matches the remote's normalized
+// destination must not change what a transfer does. file:// URLs are native
+// (doltremote.Normalize leaves them alone), so the pattern matches the URL
+// exactly as registered. The no-list behavior of these same funnels is pinned
+// by the federation tests that run without a list; this pins that adding a
+// matching entry is the same contract.
+func TestRemoteTransfersSucceedUnderMatchingAllowedRemotePatterns(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	db := store.db
+
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) "+
+			"VALUES ('policy-ok', 'policy-ok', '', '', '', '', 'open', 2, 'task')"); err != nil {
+		t.Fatalf("seed issue: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'seed issue')"); err != nil {
+		t.Fatalf("commit seed: %v", err)
+	}
+
+	peerDB := uniqueTestDBName(t)
+	remoteURL := "file:///tmp/" + peerDB + "_remote"
+	if err := store.AddFederationPeer(ctx, &storage.FederationPeer{Name: "peer", RemoteURL: remoteURL}); err != nil {
+		t.Fatalf("add federation peer: %v", err)
+	}
+	setAllowedRemotePatternsForTest(t, []string{"file:///tmp/" + peerDB + "*"})
+
+	if err := store.PushTo(ctx, "peer"); err != nil {
+		t.Fatalf("PushTo under a matching list: %v", err)
+	}
+	if err := store.PushRemote(ctx, "peer", false); err != nil {
+		t.Fatalf("PushRemote under a matching list: %v", err)
+	}
+	if err := store.Fetch(ctx, "peer"); err != nil {
+		t.Fatalf("Fetch under a matching list: %v", err)
+	}
+	if _, err := store.PullFrom(ctx, "peer"); err != nil {
+		t.Fatalf("PullFrom under a matching list: %v", err)
+	}
+}

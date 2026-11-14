@@ -166,3 +166,30 @@ func TestRemoteVerbsRefusedByAllowedRemotePatternsBeforeDispatch(t *testing.T) {
 		}
 	})
 }
+
+// The accepting half of GH#6233: a list that matches the remote's
+// destination leaves the verb's behavior unchanged — it passes the gate and
+// reaches its remote entry point exactly as it does with no list (pinned for
+// the no-list case by TestRemoteVerbsPresentStoredPeerCredentials). The seam
+// returning errStopRemote is the proof of dispatch.
+func TestRemoteVerbsDispatchUnderMatchingAllowedRemotePatterns(t *testing.T) {
+	ctx := t.Context()
+	store := newPeerAuthTestStore(t)
+
+	if err := store.AddFederationPeer(ctx, &storage.FederationPeer{
+		Name: "team", RemoteURL: "file:///tmp/beads-policy-ok-team",
+	}); err != nil {
+		t.Fatalf("AddFederationPeer: %v", err)
+	}
+	setAllowedRemotePatternsForTest(t, []string{"git+https://github.com/myorg/*", "file:///tmp/beads-policy-ok-*"})
+
+	var got presentedAuth
+	captureRemoteEntryPoints(t, &got)
+
+	if err := store.PushRemote(ctx, "team", false); !errors.Is(err, errStopRemote) {
+		t.Fatalf("PushRemote error = %v, want errStopRemote (dispatch under a matching list)", err)
+	}
+	if got.remote != "team" {
+		t.Errorf("remote = %q, want %q (the verb must reach the entry point under a matching list)", got.remote, "team")
+	}
+}
