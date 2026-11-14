@@ -1351,3 +1351,42 @@ func TestFindBeadsDir_YieldRequiresRecognizedSharedWorkspace(t *testing.T) {
 		}
 	})
 }
+
+// TestFindBeadsDir_ExplicitOverridesKeepMetadatalessWorktreeStore guards the
+// remaining explicit selections: BEADS_DB naming the metadata-less local
+// .beads, and a valid worktree redirect, win before the implicit yield and
+// emit no missing-metadata warning.
+func TestFindBeadsDir_ExplicitOverridesKeepMetadatalessWorktreeStore(t *testing.T) {
+	t.Run("BEADS_DB names the local store", func(t *testing.T) {
+		f := newMetadatalessStoreFixture(t, mainEmbeddedMetadata, "myproject")
+		chdirForDiscovery(t, f.worktree)
+		t.Setenv("BEADS_DB", f.worktreeBeads)
+		var dbPath string
+		stderr := captureStderr(t, func() {
+			dbPath = FindDatabasePath()
+		})
+		assertSamePath(t, "FindDatabasePath()", dbPath, filepath.Join(f.worktreeBeads, "embeddeddolt"))
+		if strings.Contains(stderr, "no metadata.json or config.json") {
+			t.Errorf("unexpected missing-metadata warning under explicit BEADS_DB:\n%s", stderr)
+		}
+	})
+
+	t.Run("valid worktree redirect wins before the yield", func(t *testing.T) {
+		f := newMetadatalessStoreFixture(t, mainEmbeddedMetadata, "myproject")
+		external := filepath.Join(filepath.Dir(f.worktree), "external", ".beads")
+		writeFixtureFile(t, filepath.Join(external, "metadata.json"), `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"ext"}`)
+		writeEmbeddedStore(t, external, "ext")
+		writeFixtureFile(t, filepath.Join(f.worktreeBeads, "redirect"), external+"\n")
+		chdirForDiscovery(t, f.worktree)
+		var dir, dbPath string
+		stderr := captureStderr(t, func() {
+			dir = FindBeadsDir()
+			dbPath = FindDatabasePath()
+		})
+		assertSamePath(t, "FindBeadsDir()", dir, external)
+		assertSamePath(t, "FindDatabasePath()", dbPath, filepath.Join(external, "embeddeddolt"))
+		if strings.Contains(stderr, "no metadata.json or config.json") {
+			t.Errorf("unexpected missing-metadata warning under a valid redirect:\n%s", stderr)
+		}
+	})
+}
