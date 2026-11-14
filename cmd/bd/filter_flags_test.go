@@ -1,3 +1,10 @@
+//go:build cgo
+
+// cgo only, like the two helpers it calls: goldenLocalFlags
+// (command_tree_golden_test.go) and newCountFlagSet (count_filter_test.go)
+// exist only in the cgo build, so without this constraint the !cgo test
+// package (the pure-Go and native Windows lanes) does not compile.
+
 package main
 
 import (
@@ -8,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi"
 )
@@ -632,33 +640,29 @@ func TestFilterFlagsAllocatedPerRegistration(t *testing.T) {
 	}
 }
 
-// TestNotionStateFilterFeedsSyncOptions pins the read that fills
+// TestNotionStateFilterFeedsSyncOptions pins what fills
 // tracker.SyncOptions.State: --state is now a custom once value with no bound
-// global, so runNotionSync reads it back with cmd.Flags().GetString("state")
-// (notion.go). That read must return exactly what the user passed, and the
-// fresh default must still read "all".
+// global, so notionSyncOptions, which builds runNotionSync's options, reads it
+// back with cmd.Flags().GetString("state") (notion.go). The options must carry
+// exactly what the user passed, and the fresh default must still be "all".
 func TestNotionStateFilterFeedsSyncOptions(t *testing.T) {
 	const path = "bd notion sync"
-	syncState := func(stage string) string {
+	syncState := func() string {
 		t.Helper()
-		got, err := commandsByPath(rootCmd)[path].Flags().GetString("state")
-		if err != nil {
-			t.Fatalf("%s: GetString(state): %v", stage, err)
-		}
-		return got
+		return notionSyncOptions(commandsByPath(rootCmd)[path], true, true, tracker.ConflictTimestamp).State
 	}
 
 	if _, err := parseFilterArgs(t, path, "state"); err != nil {
 		t.Fatalf("parse with no args: %v", err)
 	}
-	if got := syncState("fresh"); got != "all" {
-		t.Errorf("fresh: SyncOptions.State would be %q, want default all", got)
+	if got := syncState(); got != "all" {
+		t.Errorf("fresh: SyncOptions.State = %q, want default all", got)
 	}
 
 	if _, err := parseFilterArgs(t, path, "state", "--state", "open"); err != nil {
 		t.Fatalf("--state open: %v", err)
 	}
-	if got := syncState("--state open"); got != "open" {
-		t.Errorf("--state open: SyncOptions.State would be %q, want open", got)
+	if got := syncState(); got != "open" {
+		t.Errorf("--state open: SyncOptions.State = %q, want open", got)
 	}
 }

@@ -183,10 +183,11 @@ bd list --status open --priority 1 --type bug --json
 
 Set-valued filters treat a repeated flag like their comma form: `bd list
 --status open --status closed` and `bd list --status open,closed` mean the
-same thing. This holds for every filter that already accepts a comma list —
-`bd list` / `bd search` / `bd human list --status`, `bd list` / `bd count
---id`, and `bd gitlab sync --label` / `--type` (labels keep their documented
-AND meaning).
+same thing. This holds for these comma-list filters: `bd list` / `bd search`
+/ `bd human list --status`, `bd list` / `bd count --id`, and `bd gitlab sync
+--label` / `--type` (labels keep their documented AND meaning). Other
+comma-list flags, such as `bd gitlab sync --exclude-type`, still keep only
+their last value, so pass them a single comma list.
 
 Single-valued filters (`--type`, `--assignee`, single-status `--status`
 filters such as `bd count --status`, the sync commands' `--state`, …)
