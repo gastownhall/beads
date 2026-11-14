@@ -1532,6 +1532,45 @@ func TestParityCloseJSONShape(t *testing.T) {
 	if arr[0]["close_reason"] != "done here" {
 		t.Errorf("close_reason = %v, want %q", arr[0]["close_reason"], "done here")
 	}
+	// A real close omits already_closed entirely (bd-th8229 / #4816): the
+	// member marks only the idempotent no-op.
+	if _, ok := arr[0]["already_closed"]; ok {
+		t.Error("close --json carried already_closed on a real close; it marks only an already-closed no-op")
+	}
+}
+
+// TestParityCloseMixedBatchTextKeepsRealCloseLine pins the other half of the
+// bd-th8229 / #4816 correction: a mixed text batch reports the already-closed
+// id as the no-op while the real close beside it keeps its exact success
+// line — the correction changed only what a no-op prints.
+func TestParityCloseMixedBatchTextKeepsRealCloseLine(t *testing.T) {
+	env := newParityEnv(t)
+	env.seed("test-clsm1", "Mixed stale", nil)
+	env.seed("test-clsm2", "Mixed fresh", nil)
+
+	env.setFlags(closeCmd, map[string]string{"reason": "one reason"})
+	if res := env.run(closeCmd, "test-clsm1"); res.exitCode != 0 {
+		t.Fatalf("pre-close failed: exit=%d stderr=%s", res.exitCode, res.stderr)
+	}
+	env.clearLastTouched()
+	env.store.reset()
+
+	res := env.run(closeCmd, "test-clsm1", "test-clsm2")
+	if res.exitCode != 0 {
+		t.Fatalf("mixed re-close exit = %d, want 0\nstderr:\n%s", res.exitCode, res.stderr)
+	}
+	lines := strings.Split(strings.TrimRight(res.stdout, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("stdout lines = %d, want 2 (one per id, argument order):\n%s", len(lines), res.stdout)
+	}
+	wantNoOp := fmt.Sprintf("✓ Already closed %s (close reason unchanged: one reason)", formatFeedbackID("test-clsm1", "Mixed stale"))
+	if lines[0] != wantNoOp {
+		t.Errorf("already-closed line mismatch\n got: %q\nwant: %q", lines[0], wantNoOp)
+	}
+	wantReal := fmt.Sprintf("✓ Closed %s: one reason", formatFeedbackID("test-clsm2", "Mixed fresh"))
+	if lines[1] != wantReal {
+		t.Errorf("real-close line mismatch\n got: %q\nwant: %q", lines[1], wantReal)
+	}
 }
 
 // TestParityCloseHumanOutput pins the human success line, byte for byte, and
