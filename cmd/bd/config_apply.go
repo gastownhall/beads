@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -289,6 +290,19 @@ func applyRemote(drifted bool, dryRun bool) ApplyResult {
 			Action:  "configure",
 			Status:  applyStatusError,
 			Message: "federation.remote is not a usable remote URL",
+			Error:   err.Error(),
+		}
+	}
+	// GH#6233: refuse an out-of-policy federation.remote before the existing
+	// origin remote is removed. The remove-then-add below would otherwise
+	// drop the prior record for a URL the workspace refuses to dial, and its
+	// add-failure restore cannot be relied on when the refusal is policy.
+	if err := remotecache.ValidateRemoteWithPolicy(config.AllowedRemotePatterns(), "federation.remote", federationRemote); err != nil {
+		return ApplyResult{
+			Check:   "remote",
+			Action:  "update_remote",
+			Status:  applyStatusError,
+			Message: "federation.remote is refused by federation.allowed-remote-patterns",
 			Error:   err.Error(),
 		}
 	}

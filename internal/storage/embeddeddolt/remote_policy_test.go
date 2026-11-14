@@ -193,3 +193,56 @@ func TestRemoteVerbsDispatchUnderMatchingAllowedRemotePatterns(t *testing.T) {
 		t.Errorf("remote = %q, want %q (the verb must reach the entry point under a matching list)", got.remote, "team")
 	}
 }
+
+// GH#6233, registration half: an out-of-policy proposed URL must be refused
+// before any record is written — no dolt remote, no federation_peers row —
+// and the prior registrations must survive the refusal untouched.
+func TestRemoteRegistrationRefusedByAllowedRemotePatterns(t *testing.T) {
+	ctx := t.Context()
+	store := newPeerAuthTestStore(t)
+
+	// Prior records, registered under an empty list.
+	if err := store.AddFederationPeer(ctx, &storage.FederationPeer{
+		Name: "team", RemoteURL: "file:///tmp/beads-policy-reg-team",
+	}); err != nil {
+		t.Fatalf("add prior federation peer: %v", err)
+	}
+	if err := store.AddRemote(ctx, "secondary", "file:///tmp/beads-policy-reg-secondary"); err != nil {
+		t.Fatalf("add prior dolt remote: %v", err)
+	}
+
+	// Tighten after the fact; nothing in the list matches the proposals.
+	setAllowedRemotePatternsForTest(t, []string{"git+https://github.com/myorg/*"})
+
+	if err := store.AddRemote(ctx, "evil", "https://evil.example.com/attacker"); !policyRefusal(err) {
+		t.Fatalf("AddRemote error = %v, want *RemotePolicyError", err)
+	}
+	if err := store.AddFederationPeer(ctx, &storage.FederationPeer{
+		Name: "evilpeer", RemoteURL: "https://evil.example.com/attacker/peer",
+	}); !policyRefusal(err) {
+		t.Fatalf("AddFederationPeer error = %v, want *RemotePolicyError", err)
+	}
+
+	// The prior records survive; nothing refused is registered.
+	remotes, err := store.ListRemotes(ctx)
+	if err != nil {
+		t.Fatalf("list remotes: %v", err)
+	}
+	got := map[string]string{}
+	for _, r := range remotes {
+		got[r.Name] = r.URL
+	}
+	if got["team"] != "file:///tmp/beads-policy-reg-team" || got["secondary"] != "file:///tmp/beads-policy-reg-secondary" {
+		t.Errorf("prior remotes after refusal = %v, want team and secondary at their registered URLs", got)
+	}
+	if _, ok := got["evil"]; ok {
+		t.Errorf("refused remote %q is registered", "evil")
+	}
+	peer, err := store.GetFederationPeer(ctx, "team")
+	if err != nil || peer.RemoteURL != "file:///tmp/beads-policy-reg-team" {
+		t.Errorf("prior federation peer after refusal = (%+v, %v), want its registered URL", peer, err)
+	}
+	if _, err := store.GetFederationPeer(ctx, "evilpeer"); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("refused peer row exists or misreported: %v, want storage.ErrNotFound", err)
+	}
+}

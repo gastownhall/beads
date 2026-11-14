@@ -6705,6 +6705,10 @@ func (s *DoltStore) AddRemote(ctx context.Context, name, url string) error {
 // AddRemoteWithRef adds a remote whose Dolt data lives on the git ref ref;
 // see storage.RemoteStore.
 func (s *DoltStore) AddRemoteWithRef(ctx context.Context, name, url, ref string) error {
+	// GH#6233: refuse an out-of-policy URL before the remote exists.
+	if err := s.checkRemoteURLPolicy(remotePolicySubject(name), url); err != nil {
+		return err
+	}
 	if err := versioncontrolops.AddRemote(ctx, s.db, name, url, ref); err != nil {
 		return fmt.Errorf("failed to add remote %s: %w", name, err)
 	}

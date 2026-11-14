@@ -168,3 +168,67 @@ func TestRemoteTransfersSucceedUnderMatchingAllowedRemotePatterns(t *testing.T) 
 		t.Fatalf("PullFrom under a matching list: %v", err)
 	}
 }
+
+// GH#6233, registration half: an out-of-policy proposed URL must be refused
+// before any record is written, and the prior registrations (a federation
+// peer, a plain Dolt remote) must survive the refusal untouched.
+func TestRemoteRegistrationRefusedByAllowedRemotePatterns(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	db := store.db
+
+	// Prior records, registered under an empty list.
+	peerDB := uniqueTestDBName(t)
+	remoteURL := "file:///tmp/" + peerDB + "_remote"
+	if err := store.AddFederationPeer(ctx, &storage.FederationPeer{Name: "peer", RemoteURL: remoteURL}); err != nil {
+		t.Fatalf("add prior federation peer: %v", err)
+	}
+	if err := store.AddRemote(ctx, "secondary", remoteURL); err != nil {
+		t.Fatalf("add prior dolt remote: %v", err)
+	}
+
+	// Tighten after the fact; nothing in the list matches the proposals.
+	setAllowedRemotePatternsForTest(t, []string{"git+https://github.com/myorg/*"})
+
+	if err := store.AddRemote(ctx, "evil", "https://evil.example.com/attacker"); !policyRefusal(err) {
+		t.Fatalf("AddRemote error = %v, want *RemotePolicyError", err)
+	}
+	if err := store.AddFederationPeer(ctx, &storage.FederationPeer{
+		Name: "evilpeer", RemoteURL: "https://evil.example.com/attacker/peer",
+	}); !policyRefusal(err) {
+		t.Fatalf("AddFederationPeer error = %v, want *RemotePolicyError", err)
+	}
+
+	// The prior records survive.
+	remotes, err := store.ListRemotes(ctx)
+	if err != nil {
+		t.Fatalf("list remotes: %v", err)
+	}
+	got := map[string]string{}
+	for _, r := range remotes {
+		got[r.Name] = r.URL
+	}
+	if got["peer"] != remoteURL || got["secondary"] != remoteURL {
+		t.Errorf("prior remotes after refusal = %v, want peer and secondary at %s", got, remoteURL)
+	}
+	if _, ok := got["evil"]; ok {
+		t.Errorf("refused remote %q is registered", "evil")
+	}
+	peer, err := store.GetFederationPeer(ctx, "peer")
+	if err != nil || peer.RemoteURL != remoteURL {
+		t.Errorf("prior federation peer after refusal = (%+v, %v), want URL %s", peer, err, remoteURL)
+	}
+	if _, err := store.GetFederationPeer(ctx, "evilpeer"); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("refused peer row exists or misreported: %v, want storage.ErrNotFound", err)
+	}
+	var evilRows int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM federation_peers WHERE name = 'evilpeer'").Scan(&evilRows); err != nil {
+		t.Fatalf("count refused peer rows: %v", err)
+	}
+	if evilRows != 0 {
+		t.Errorf("federation_peers holds %d refused peer row(s)", evilRows)
+	}
+}

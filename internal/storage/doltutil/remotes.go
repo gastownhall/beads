@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/doltremote"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
@@ -220,6 +221,18 @@ func AddCLIRemote(dbPath, name, url string) error {
 	return AddCLIRemoteWithRef(dbPath, name, url, "")
 }
 
+// checkRemoteAllowedByPatterns applies federation.allowed-remote-patterns to
+// a remote about to be registered in a database directory (GH#6233). An empty
+// list is no gate. The refusal names the remote and never echoes the URL,
+// which can carry credentials.
+func checkRemoteAllowedByPatterns(name, url string) error {
+	patterns := config.AllowedRemotePatterns()
+	if len(patterns) == 0 {
+		return nil
+	}
+	return remotecache.ValidateRemoteWithPolicy(patterns, fmt.Sprintf("remote %q", name), url)
+}
+
 // AddCLIRemoteWithRef is AddCLIRemote for a git-backed remote whose Dolt data
 // lives on the git ref ref (`dolt remote add --ref`). An empty ref is
 // AddCLIRemote.
@@ -229,6 +242,11 @@ func AddCLIRemoteWithRef(dbPath, name, url, ref string) error {
 	}
 	if err := remotecache.ValidateRemoteURL(url); err != nil {
 		return fmt.Errorf("invalid remote URL: %w", err)
+	}
+	// GH#6233: the allowlist applies where the URL is proposed, before the
+	// dolt subprocess records it.
+	if err := checkRemoteAllowedByPatterns(name, url); err != nil {
+		return err
 	}
 	ref = strings.TrimSpace(ref)
 	if err := ValidateGitDataRefArg(ref); err != nil {
@@ -401,6 +419,14 @@ func EnsureCLIRemote(dbPath, name, url, ref string) error {
 	}
 	if err := remotecache.ValidateRemoteURL(url); err != nil {
 		return fmt.Errorf("invalid remote URL: %w", err)
+	}
+	// GH#6233: refuse an out-of-policy URL before any mutation — the sweep,
+	// the probe and the remove-then-add below must not run. The add-failure
+	// restore path cannot be relied on to preserve the prior remote when the
+	// refusal is policy rather than transport: refusing up front is the only
+	// ordering that keeps the prior record.
+	if err := checkRemoteAllowedByPatterns(name, url); err != nil {
+		return err
 	}
 	if err := ValidateGitDataRefArg(strings.TrimSpace(ref)); err != nil {
 		return fmt.Errorf("invalid git data ref: %w", err)

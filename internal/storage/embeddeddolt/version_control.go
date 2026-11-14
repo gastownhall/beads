@@ -219,6 +219,10 @@ func (s *EmbeddedDoltStore) AddRemote(ctx context.Context, name, url string) err
 // AddRemoteWithRef adds a remote whose Dolt data lives on the git ref ref;
 // see storage.RemoteStore.
 func (s *EmbeddedDoltStore) AddRemoteWithRef(ctx context.Context, name, url, ref string) error {
+	// GH#6233: refuse an out-of-policy URL before the remote exists.
+	if err := s.checkRemoteURLPolicy(remotePolicySubject(name), url); err != nil {
+		return err
+	}
 	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		return versioncontrolops.AddRemote(ctx, db, name, url, ref)
 	})

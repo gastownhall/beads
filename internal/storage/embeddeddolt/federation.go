@@ -123,6 +123,11 @@ func (s *EmbeddedDoltStore) decryptPassword(encrypted []byte) (string, error) {
 // ---------------------------------------------------------------------------
 
 func (s *EmbeddedDoltStore) AddFederationPeer(ctx context.Context, peer *storage.FederationPeer) error {
+	// GH#6233: refuse an out-of-policy destination before any record is
+	// written — no peer row, no Dolt remote, no key file.
+	if err := s.checkRemoteURLPolicy(fmt.Sprintf("federation peer %q", peer.Name), peer.RemoteURL); err != nil {
+		return err
+	}
 	encryptedPwd, err := s.encryptPassword(peer.Password)
 	if err != nil {
 		return fmt.Errorf("encrypt password: %w", err)

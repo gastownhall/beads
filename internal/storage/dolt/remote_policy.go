@@ -43,6 +43,18 @@ func remotePolicySubject(remote string) string {
 	return fmt.Sprintf("remote %q", remote)
 }
 
+// checkRemoteURLPolicy enforces the allowlist for a URL a caller is about to
+// register (AddRemoteWithRef, AddFederationPeer): no name resolution, the
+// destination is in hand. Registration gates refuse before any record is
+// written, so a refused proposal leaves prior records untouched.
+func (s *DoltStore) checkRemoteURLPolicy(subject, url string) error {
+	patterns := config.AllowedRemotePatterns()
+	if len(patterns) == 0 {
+		return nil
+	}
+	return remotecache.ValidateRemoteWithPolicy(patterns, subject, url)
+}
+
 // remoteURLForPolicy resolves the URL a transfer with remote name would use.
 // See checkRemotePolicy for the precedence and refusal rules.
 func (s *DoltStore) remoteURLForPolicy(ctx context.Context, remote string) (string, error) {

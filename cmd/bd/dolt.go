@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
@@ -651,6 +652,15 @@ func printNoRemoteGuidance() {
 // deliberately pointed elsewhere, or a renamed/redirected origin — the rig
 // starts pushing somewhere else on the strength of a stale listing (wy-82hc5).
 //
+// adoptGitOriginURL resolves the git origin URL adoption would register. Held
+// in a variable purely as a test seam: the resolver goes through the
+// process-wide RepoContext cache, which a unit test cannot point at a repo of
+// its own (see the environment-dependence note in
+// TestAdoptGitOriginRemoteForPush_PersistedRemoteVetoesAdoption), while the
+// allowlist gate between the URL and the consent prompt is exactly what tests
+// must reach. The production binding is pinned by TestAdoptGitOriginURLIsWired.
+var adoptGitOriginURL = gitOriginGetURLForActiveRepo
+
 // Adoption requires consent (#5068). The policy is decided by
 // decideRemoteAdoption in dolt_remote_adopt.go and applied here, after the URL
 // is known and before anything is written: nothing below this point is
@@ -664,11 +674,19 @@ func adoptGitOriginRemoteForPush(ctx context.Context, st storage.DoltStorage, po
 	// Workspace resolution is deliberately NOT done yet: selectedDoltBeadsDir
 	// calls prepareSelectedNoDBContext, which mutates process and on-disk
 	// workspace state, and nothing may mutate before consent is established.
-	originURL, err := gitOriginGetURLForActiveRepo(ctx)
+	originURL, err := adoptGitOriginURL(ctx)
 	if err != nil || originURL == "" {
 		return false, nil
 	}
 	remoteURL := normalizeRemoteURL(originURL)
+
+	// GH#6233: the allowlist refusal comes before the consent prompt —
+	// consent cannot be spent on a URL the workspace refuses to adopt — and
+	// before any write (the store gate would refuse the AddRemote below, but
+	// only after the operator answered the prompt).
+	if err := remotecache.ValidateRemoteWithPolicy(config.AllowedRemotePatterns(), fmt.Sprintf("remote %q", "origin"), remoteURL); err != nil {
+		return false, err
+	}
 
 	if proceed, err := applyAdoptionConsent(remoteURL, policy, optIn); err != nil || !proceed {
 		return false, err
@@ -2078,6 +2096,12 @@ func registerPersistedDoltRemote(ctx context.Context, st doltRemoteAddStore, per
 }
 
 func ensureDoltRemote(ctx context.Context, st doltRemoteAddStore, name, url string, confirm doltRemoteOverwriteConfirmer) (doltRemoteAddResult, error) {
+	// GH#6233: the allowlist refusal must arrive before any mutation — the
+	// overwrite path below removes the existing remote before adding, and a
+	// policy-refused add would otherwise leave the prior record gone.
+	if err := remotecache.ValidateRemoteWithPolicy(config.AllowedRemotePatterns(), fmt.Sprintf("remote %q", name), url); err != nil {
+		return doltRemoteAddResult{}, err
+	}
 	remotes, err := st.ListRemotes(ctx)
 	if err != nil {
 		return doltRemoteAddResult{}, fmt.Errorf("list existing remotes: %w", err)

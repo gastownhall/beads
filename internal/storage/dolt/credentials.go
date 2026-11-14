@@ -284,6 +284,12 @@ func (s *DoltStore) decryptPassword(encrypted []byte) (string, error) {
 // AddFederationPeer adds or updates a federation peer with credentials.
 // This stores credentials in the database and also adds the Dolt remote.
 func (s *DoltStore) AddFederationPeer(ctx context.Context, peer *storage.FederationPeer) error {
+	// GH#6233: refuse an out-of-policy destination before any record is
+	// written — no upsert, no Dolt remote, no commit — and outside the
+	// circuit wrapper: a policy refusal is not a write attempt.
+	if err := s.checkRemoteURLPolicy(fmt.Sprintf("federation peer %q", peer.Name), peer.RemoteURL); err != nil {
+		return err
+	}
 	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		return s.addFederationPeer(ctx, peer)
 	})
