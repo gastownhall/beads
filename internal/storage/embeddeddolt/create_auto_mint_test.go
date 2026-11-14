@@ -4,6 +4,7 @@ package embeddeddolt_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -133,4 +134,77 @@ func assertTitle(t *testing.T, ctx context.Context, te *testEnv, id, title strin
 	if got.Title != title {
 		t.Fatalf("%s title = %q, want %q: an auto-minted create overwrote it", id, got.Title, title)
 	}
+}
+
+// TestCreateFailureResetsAssignedIDs pins the failure leg of bd-t4h0n7 (PR
+// #6754) on the embedded single and batch creates, which run one attempt: when
+// the transaction fails, the issue id, comment ids and default edge owners the
+// create assigned before the failing statement go back to empty while the
+// supplied ids stay, and a retry with the bad value fixed mints and lands.
+func TestCreateFailureResetsAssignedIDs(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	tooLong := strings.Repeat("x", 300) // past the VARCHAR(255) column
+
+	t.Run("single", func(t *testing.T) {
+		te := newTestEnv(t, "cl")
+		ctx := t.Context()
+		issue := autoMintIssue("minted")
+		issue.Comments = []*types.Comment{
+			{ID: "supplied-comment", Author: "tester", Text: "supplied"},
+			{Author: "tester", Text: "derived"},
+			{Author: tooLong, Text: "fails"},
+		}
+		if err := te.store.CreateIssue(ctx, issue, "tester"); err == nil {
+			t.Fatal("CreateIssue with an over-long comment author succeeded, want a failure")
+		}
+		if issue.ID != "" || issue.Comments[1].ID != "" {
+			t.Errorf("after the failure id = %q, derived comment id = %q; want both empty", issue.ID, issue.Comments[1].ID)
+		}
+		if issue.Comments[0].ID != "supplied-comment" {
+			t.Errorf("supplied comment id = %q, want supplied-comment", issue.Comments[0].ID)
+		}
+
+		issue.Comments[2].Author = "tester"
+		if err := te.store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("retried CreateIssue: %v", err)
+		}
+		if issue.ID == "" || issue.Comments[1].ID == "" {
+			t.Fatalf("retry assigned id %q, derived comment id %q; want both set", issue.ID, issue.Comments[1].ID)
+		}
+		te.assertRowExists(t, ctx, "issues", issue.ID)
+	})
+
+	t.Run("batch", func(t *testing.T) {
+		te := newTestEnv(t, "cl")
+		ctx := t.Context()
+		target := &types.Issue{ID: "cl-target", Title: "target", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+		if err := te.store.CreateIssue(ctx, target, "tester"); err != nil {
+			t.Fatalf("CreateIssue(target): %v", err)
+		}
+		minted := autoMintIssue("minted")
+		minted.Comments = []*types.Comment{{Author: "tester", Text: "derived"}}
+		minted.Dependencies = []*types.Dependency{{DependsOnID: "cl-target", Type: types.DepBlocks, ThreadID: tooLong}}
+		explicit := &types.Issue{ID: "cl-explicit", Title: "explicit", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+			Comments: []*types.Comment{{ID: "supplied-comment", Author: "tester", Text: "supplied"}}}
+		issues := []*types.Issue{minted, explicit}
+		if err := te.store.CreateIssues(ctx, issues, "tester"); err == nil {
+			t.Fatal("CreateIssues with an over-long edge thread id succeeded, want a failure")
+		}
+		if minted.ID != "" || minted.Comments[0].ID != "" || minted.Dependencies[0].IssueID != "" {
+			t.Errorf("after the failure id = %q, comment id = %q, edge owner = %q; want all empty",
+				minted.ID, minted.Comments[0].ID, minted.Dependencies[0].IssueID)
+		}
+		if explicit.ID != "cl-explicit" || explicit.Comments[0].ID != "supplied-comment" {
+			t.Errorf("explicit id = %q, comment id = %q; want the supplied cl-explicit, supplied-comment", explicit.ID, explicit.Comments[0].ID)
+		}
+
+		minted.Dependencies[0].ThreadID = ""
+		if err := te.store.CreateIssues(ctx, issues, "tester"); err != nil {
+			t.Fatalf("retried CreateIssues: %v", err)
+		}
+		if minted.ID == "" || minted.Dependencies[0].IssueID != minted.ID {
+			t.Fatalf("retry assigned id %q, edge owner %q; want a fresh id owning the edge", minted.ID, minted.Dependencies[0].IssueID)
+		}
+		te.assertRowExists(t, ctx, "issues", minted.ID)
+	})
 }

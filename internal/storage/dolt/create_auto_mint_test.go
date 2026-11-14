@@ -2,6 +2,8 @@ package dolt
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -268,5 +270,88 @@ func TestCreateIssuesReplayKeepsEdgesOnRemintedID(t *testing.T) {
 			requireOneCreatedEvent(t, ctx, store, loser.ID)
 			requireIssueTitle(t, ctx, store, "test-explicit", "explicit")
 		})
+	}
+}
+
+// TestCreateFailureResetsAssignedIDs pins the failure leg of bd-t4h0n7 (PR
+// #6754) on the server single and batch creates: when the transaction fails
+// definitely, the issue id, comment id and default edge owner the attempt
+// assigned go back to empty (so a caller's retry mints afresh), while the
+// supplied explicit id stays; when the failure says the commit may have
+// landed, the assigned values stay, since they may name the caller's rows.
+func TestCreateFailureResetsAssignedIDs(t *testing.T) {
+	failures := []struct {
+		name      string
+		err       error
+		wantReset bool
+	}{
+		{"definite", errors.New("injected failure"), true},
+		{"indeterminate", fmt.Errorf("injected: %w", storage.ErrCommitIndeterminate), false},
+	}
+	creates := []struct {
+		name  string
+		batch bool
+	}{{"single", false}, {"batch", true}}
+	for _, create := range creates {
+		for _, failure := range failures {
+			t.Run(create.name+"/"+failure.name, func(t *testing.T) {
+				store, cleanup := setupConcurrentTestStore(t)
+				defer cleanup()
+				ctx, cancel := testContext(t)
+				defer cancel()
+				target := &types.Issue{ID: "test-target", Title: "target", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+				if err := store.CreateIssue(ctx, target, "tester"); err != nil {
+					t.Fatalf("CreateIssue(target): %v", err)
+				}
+
+				minted := autoMintIssue("minted")
+				minted.Comments = []*types.Comment{{Author: "tester", Text: "note"}}
+				issues := []*types.Issue{minted}
+				explicit := &types.Issue{ID: "test-explicit", Title: "explicit", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+				if create.batch {
+					minted.Dependencies = []*types.Dependency{{DependsOnID: "test-target", Type: types.DepBlocks}}
+					issues = append(issues, explicit)
+				}
+				var assignedID, assignedComment, assignedOwner string
+				store.createAttemptHook = func(_ context.Context, attempt []*types.Issue) error {
+					if attempt[0] != minted {
+						return nil
+					}
+					assignedID, assignedComment = minted.ID, minted.Comments[0].ID
+					if create.batch {
+						assignedOwner = minted.Dependencies[0].IssueID
+					}
+					return failure.err
+				}
+
+				var err error
+				if create.batch {
+					err = store.CreateIssues(ctx, issues, "tester")
+				} else {
+					err = store.CreateIssue(ctx, minted, "tester")
+				}
+				if !errors.Is(err, failure.err) {
+					t.Fatalf("create error = %v, want the injected %v", err, failure.err)
+				}
+				if assignedID == "" || assignedComment == "" || (create.batch && assignedOwner != assignedID) {
+					t.Fatalf("attempt assigned id %q, comment %q, edge owner %q; want all three set", assignedID, assignedComment, assignedOwner)
+				}
+				wantID, wantComment, wantOwner := assignedID, assignedComment, assignedOwner
+				if failure.wantReset {
+					wantID, wantComment, wantOwner = "", "", ""
+				}
+				if minted.ID != wantID || minted.Comments[0].ID != wantComment {
+					t.Errorf("after the failure id = %q, comment id = %q; want %q, %q", minted.ID, minted.Comments[0].ID, wantID, wantComment)
+				}
+				if create.batch {
+					if minted.Dependencies[0].IssueID != wantOwner {
+						t.Errorf("after the failure edge owner = %q, want %q", minted.Dependencies[0].IssueID, wantOwner)
+					}
+					if explicit.ID != "test-explicit" {
+						t.Errorf("explicit id = %q, want the supplied test-explicit", explicit.ID)
+					}
+				}
+			})
+		}
 	}
 }
