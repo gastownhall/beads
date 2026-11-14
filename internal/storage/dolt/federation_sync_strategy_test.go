@@ -325,3 +325,37 @@ func TestFederationSyncNoStrategyConflictFails(t *testing.T) {
 	}
 	assertMergeSettled(t, ctx, f.db)
 }
+
+// TestFederationSyncStrategyRepairsFKCascadeViolation covers AC-6: a committed
+// local issue deletion against a peer's label on that issue merges with no
+// row conflict, only an FK violation. A strategy sync must settle it like
+// PullFrom does (bd-578h9.3) and push a committed, violation-free result.
+func TestFederationSyncStrategyRepairsFKCascadeViolation(t *testing.T) {
+	ctx, cancel := testContext(t)
+	defer cancel()
+	f := newFedSyncPeer(t, ctx, seedIssue("fssfk-x"))
+	fedExec(t, ctx, f.peer, "peer",
+		"INSERT INTO labels (issue_id, label) VALUES ('fssfk-x', 'late-label')",
+		"CALL DOLT_COMMIT('-Am', 'peer adds label')",
+		"CALL DOLT_PUSH('origin', 'main')",
+	)
+	fedExec(t, ctx, f.db, "local",
+		"DELETE FROM issues WHERE id = 'fssfk-x'",
+		"CALL DOLT_COMMIT('-Am', 'delete issue')",
+	)
+
+	result, err := f.store.Sync(ctx, "peer", "theirs")
+	if err != nil {
+		t.Fatalf("Sync(--strategy theirs) should settle the FK cascade violation, got: %v", err)
+	}
+	if !result.Merged || !result.Pushed {
+		t.Errorf("result Merged=%v Pushed=%v (PushError=%v), want both true", result.Merged, result.Pushed, result.PushError)
+	}
+	var orphans int
+	fedScalar(t, ctx, f.db, &orphans, "SELECT COUNT(*) FROM labels AS OF 'HEAD' WHERE issue_id = 'fssfk-x'")
+	if orphans != 0 {
+		t.Errorf("HEAD carries %d dangling label row(s) for the deleted issue", orphans)
+	}
+	assertMergeSettled(t, ctx, f.db)
+	f.assertPeerHasLocalHead(t, ctx)
+}

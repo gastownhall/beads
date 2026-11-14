@@ -308,7 +308,32 @@ func MergeWithStrategy(ctx context.Context, db DBConn, ref, author, strategy str
 	}
 
 	if len(conflicts) == 0 {
-		if mergeErr != nil {
+		// bd-sesknw: a merge with no row conflict can still stop on FK
+		// cascade violations (a local issue deletion against a peer's new
+		// child row, bd-6dnrw.4): the force flag above parks it in the
+		// working set, unconcluded. Repair or refuse it exactly as SettleMerge
+		// does, before any unrelated merge error is surfaced as-is.
+		repaired, had, violErr := TryRepairFKCascadeViolations(ctx, db)
+		switch {
+		case violErr != nil:
+			abortMerge(ctx, db, preMergeClean)
+			if mergeErr != nil {
+				return nil, fmt.Errorf("merge branch %s: %w", ref, mergeErr)
+			}
+			return nil, violErr
+		case had && !repaired:
+			abortMerge(ctx, db, preMergeClean)
+			if mergeErr != nil {
+				return nil, fmt.Errorf("merge branch %s: %w", ref, mergeErr)
+			}
+			return nil, fmt.Errorf("merge of %s left constraint violations bd cannot auto-repair; inspect dolt_constraint_violations and resolve before retrying", ref)
+		case repaired:
+			if err := concludeMerge(ctx, db,
+				"auto-repair merge FK cascade violations: deleted rows referencing issues deleted on the other side", author); err != nil {
+				abortMerge(ctx, db, preMergeClean)
+				return nil, fmt.Errorf("FK cascade violations repaired but commit failed: %w", err)
+			}
+		case mergeErr != nil:
 			// Not a conflict: some other merge failure (unknown branch, dirty
 			// working set, ...). Nothing to resolve — surface it as-is.
 			abortMerge(ctx, db, preMergeClean)
