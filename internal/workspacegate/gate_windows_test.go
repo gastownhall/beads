@@ -250,3 +250,26 @@ func TestCrossProcessExclusionAcrossJunctionWindows(t *testing.T) {
 	}
 	_ = h2.Release()
 }
+
+// TestPlainParentKeepsDriveLetterSpellingWindows: for a directory with no
+// reparse points, resolution keeps today's behavior — the drive-letter
+// spelling filepath.EvalSymlinks produces, with no extended-length prefix
+// — so existing gate paths do not move and TestGateFileLocation keeps
+// passing unchanged.
+func TestPlainParentKeepsDriveLetterSpellingWindows(t *testing.T) {
+	dir := t.TempDir()
+	g, err := ForWorkspace(filepath.Join(dir, ".beads"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(mustEval(t, dir), ".beads.gate.lock")
+	if g.Path() != want {
+		t.Fatalf("gate path = %s, want %s", g.Path(), want)
+	}
+	if strings.HasPrefix(g.Path(), `\\?\`) {
+		t.Fatalf("gate path %s carries an extended-length prefix", g.Path())
+	}
+	if vol := filepath.VolumeName(g.Path()); len(vol) != 2 || vol[0] < 'A' || vol[0] > 'Z' || vol[1] != ':' {
+		t.Fatalf("gate path %s is not in drive-letter spelling", g.Path())
+	}
+}
