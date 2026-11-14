@@ -313,3 +313,69 @@ func TestPlainProxiedServerMode_ForeignProjectIdentityRefused_Integration(t *tes
 		})
 	}
 }
+
+// TestPlainProxiedExcursionIdentity_Integration pins the lenient half of the
+// plain excursion guard (gastownhall/beads#5572) against a real server: a
+// target with no identity, or the workspace's own, opens as it did before the
+// guard, and the guard mints, changes, and adopts nothing.
+func TestPlainProxiedExcursionIdentity_Integration(t *testing.T) {
+	h := newTeamServerHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	const mine = "project-mine"
+
+	t.Run("matching identity opens unchanged", func(t *testing.T) {
+		const database = "beads_mine_too"
+		provisioner, err := h.openProvider(ctx, database, false, "")
+		require.NoError(t, err)
+		require.NoError(t, provisioner.Close(ctx))
+		direct := h.directDB(t, database)
+		_, err = direct.ExecContext(ctx, "REPLACE INTO metadata (`key`, value) VALUES (?, ?)", "_project_id", mine)
+		require.NoError(t, err)
+
+		p, err := h.openProvider(ctx, database, false, mine)
+		require.NoError(t, err)
+		require.NoError(t, p.Close(ctx))
+		assert.Equal(t, mine, readProjectID(t, ctx, direct))
+	})
+
+	t.Run("absent database keeps the existing open paths", func(t *testing.T) {
+		p, err := h.openProvider(ctx, "beads_absent_preview", false, mine, WithPreview())
+		require.Error(t, err, "preview still refuses to create a database")
+		assert.Nil(t, p)
+		assert.Contains(t, err.Error(), "--dry-run")
+		assert.NotContains(t, err.Error(), "PROJECT IDENTITY MISMATCH")
+
+		const database = "beads_absent_created"
+		p, err = h.openProvider(ctx, database, false, mine)
+		require.NoError(t, err, "the ordinary open still creates the database")
+		require.NoError(t, p.Close(ctx))
+		assert.Empty(t, readProjectID(t, ctx, h.directDB(t, database)),
+			"the guard must not mint or adopt an identity")
+	})
+
+	t.Run("non-beads database opens repeatedly", func(t *testing.T) {
+		const database = "df_widgets"
+		root := h.directDB(t, "")
+		_, err := root.ExecContext(ctx, "CREATE DATABASE "+database)
+		require.NoError(t, err)
+		direct := h.directDB(t, database)
+		_, err = direct.ExecContext(ctx, "CREATE TABLE widgets (id INT PRIMARY KEY, name VARCHAR(64))")
+		require.NoError(t, err)
+
+		// The first open installs beads schema with no identity; the second
+		// then finds a metadata table with no _project_id row.
+		for i := 1; i <= 2; i++ {
+			p, err := h.openProvider(ctx, database, false, mine)
+			require.NoError(t, err, "open %d of a non-beads database", i)
+			require.NoError(t, p.Close(ctx))
+			_, err = direct.ExecContext(ctx, "INSERT INTO widgets VALUES (?, ?)", i, fmt.Sprintf("w%d", i))
+			require.NoError(t, err)
+		}
+		var n int
+		require.NoError(t, direct.QueryRowContext(ctx, "SELECT COUNT(*) FROM widgets").Scan(&n))
+		assert.Equal(t, 2, n)
+		assert.Empty(t, readProjectID(t, ctx, direct), "the guard must not mint or adopt an identity")
+	})
+}
