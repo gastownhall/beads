@@ -40,6 +40,9 @@ func TestLifecycleUpdateContract(t *testing.T) {
 	t.Run("ReplacesTheLabelSet", func(t *testing.T) {
 		conformance.RunLifecycleUpdateReplacesTheLabelSet(t, ctx, fixture)
 	})
+	t.Run("RemovesLabelsByPrefix", func(t *testing.T) {
+		conformance.RunLifecycleUpdateRemovesLabelsByPrefix(t, ctx, fixture)
+	})
 	t.Run("ResolvesBothPlanesUnlessRestricted", func(t *testing.T) {
 		conformance.RunLifecycleUpdateResolvesBothPlanesUnlessRestricted(t, ctx, fixture)
 	})

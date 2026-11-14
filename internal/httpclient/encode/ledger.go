@@ -949,9 +949,9 @@ func writeSideRows() []Row {
 		{
 			ID: "W-IssuePatch.Labels", Kind: KindRetired,
 			Type: tyIssuePatch, Field: "Labels",
-			What: "RETIRED — the whole ordered label edit crosses: `labels` replaces, `add_labels` adds, `remove_labels` removes",
+			What: "RETIRED — the whole ordered label edit crosses: `labels` replaces, `remove_label_prefixes` drops by literal prefix, `add_labels` adds, `remove_labels` removes",
 			Why: "upstream #5510 published add_labels and remove_labels on IssuePatchBody and client wave ga-jpywb emits both, which is the retirement path this row named. " +
-				"The three travel as FLAT siblings where applyBatch nests them under one object, and the server assembles all three into ONE issueops.LabelPatch — so the algebra the role states (replace, then add, then remove; removal wins) is applied server-side and is never this client's to arrange. " +
+				"The three travel as FLAT siblings where applyBatch nests them under one object, and the server assembles all three into ONE issueops.LabelPatch — so the algebra the role states (replace, then the prefix drop, then add, then remove; removal wins) is applied server-side and is never this client's to arrange. " +
 				"WHAT THE REFUSAL WAS PROTECTING is worth keeping after the refusal is gone: degrading an incremental edit onto the replace-only member would have meant reading the set, adding to it and writing it back, which silently drops any label another writer added in between. `bd label add` and every agent that tags work concurrently are exactly that caller, so the refusal was right for as long as the members did not exist — and it is the members that retire it, not a change of mind about the read-modify-write",
 			SpecRow:  "D8 refuse-not-drop, open questions (tracked-refusal roadmap)",
 			PinnedBy: pinnedByS3Conformance,

@@ -59,8 +59,12 @@ type Field[T any] struct {
 }
 
 // LabelPatch describes ordered label replacement and incremental edits.
-// Operations apply Replace, then Add, then Remove, so removal wins when the
-// same label appears in more than one edit.
+// Operations apply Replace, then RemovePrefixes, then Add, then Remove, so
+// removal wins when the same label appears in more than one edit. The whole
+// patch is evaluated against the issue's labels inside the update's own
+// transaction and only the difference is written, so a patch whose result
+// equals the current set (clearing and re-adding the one existing value of a
+// dimension, say) changes nothing and reports Changed false.
 //
 // The VALUES an edit carries answer to the same field rules a create's labels
 // do: a label longer than the column is refused with ErrFieldTooLong and the
@@ -81,6 +85,14 @@ type LabelPatch struct {
 	Add []string
 	// Remove contains labels to remove after replacement and addition.
 	Remove []string
+	// RemovePrefixes removes every label that starts with one of these
+	// strings, after any replacement and before Add. Matching is a literal
+	// string prefix (no wildcards: "%" and "_" match only themselves), so
+	// RemovePrefixes ["state:"] with Add ["state:b"] replaces whatever values
+	// the state dimension holds, including several, with exactly state:b. An
+	// empty prefix is dropped rather than matching every label; a prefix
+	// longer than a label can be is refused with ErrFieldTooLong.
+	RemovePrefixes []string
 	// Replace supplies the starting complete label set when Set is true.
 	Replace Field[[]string]
 }

@@ -708,6 +708,9 @@ type ApplyLabelPatch struct {
 	// Remove Labels to remove after replacement and addition.
 	Remove *[]string `json:"remove,omitempty"`
 
+	// RemovePrefixes Removes every label that starts with one of these strings, applied after `replace` and before `add`, so `remove_prefixes: ["state:"]` with `add: ["state:b"]` leaves exactly `state:b` in that dimension however many values it held. Matching is a literal string prefix: `%` and `_` match only themselves. An empty prefix is dropped rather than matching every label.
+	RemovePrefixes *[]string `json:"remove_prefixes,omitempty"`
+
 	// Replace The complete starting label set. An empty array CLEARS every label; omitting the member leaves the current set as the starting point.
 	Replace *[]string `json:"replace,omitempty"`
 }
@@ -1690,6 +1693,9 @@ type IssuePatchBody struct {
 	// A PLANE MOVE IS AN AGGREGATE MIGRATION, not a field write, and it is applied LAST, after every other member of the patch, so the edit and the move commit together or not at all. Advertised by the `issues.update.persistence` capability token; a server that predates the member refuses it as an unknown parameter, and a client that does not see the token refuses the move before the dial rather than sending it.
 	Persistence *string `json:"persistence,omitempty"`
 	Priority    *int    `json:"priority,omitempty"`
+
+	// RemoveLabelPrefixes Removes every label that starts with one of these strings, applied after `labels` and before `add_labels`, so `remove_label_prefixes: ["state:"]` with `add_labels: ["state:b"]` leaves exactly `state:b` in that dimension however many values it held. Matching is a literal string prefix: `%` and `_` match only themselves. An empty prefix is dropped rather than matching every label, and the whole patch is evaluated against the issue's labels in the update's own transaction, so a result equal to the current set changes no labels.
+	RemoveLabelPrefixes *[]string `json:"remove_label_prefixes,omitempty"`
 
 	// RemoveLabels Labels to remove, applied AFTER `labels` and `add_labels`, so REMOVAL WINS over both.
 	//

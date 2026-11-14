@@ -40,6 +40,7 @@ func TestCloneIssueOperationRequestsDeepCopyMutableFields(t *testing.T) {
 	update := publicops.UpdateRequest{Patch: publicops.IssuePatch{Metadata: publicops.MetadataPatch{Set: map[string]json.RawMessage{"key": metadata}, Unset: []string{"remove"}, Replace: publicops.Field[json.RawMessage]{Set: true, Value: metadata}}}}
 	update.Patch.Labels.Add = []string{"add"}
 	update.Patch.Labels.Remove = []string{"remove-label"}
+	update.Patch.Labels.RemovePrefixes = []string{"prefix:"}
 	update.Patch.Labels.Replace = publicops.Field[[]string]{Set: true, Value: []string{"replacement"}}
 	update.Patch.EstimatedMinutes = publicops.Field[*int]{Set: true, Value: &value}
 	update.Patch.ExternalRef = publicops.Field[*string]{Set: true, Value: &ref}
@@ -56,12 +57,13 @@ func TestCloneIssueOperationRequestsDeepCopyMutableFields(t *testing.T) {
 	updateClone.Patch.Metadata.Replace.Value[0] = '{'
 	updateClone.Patch.Labels.Add[0] = "changed"
 	updateClone.Patch.Labels.Remove[0] = "changed"
+	updateClone.Patch.Labels.RemovePrefixes[0] = "changed"
 	updateClone.Patch.Labels.Replace.Value[0] = "changed"
 	*updateClone.Patch.EstimatedMinutes.Value = 5
 	*updateClone.Patch.ExternalRef.Value = "changed"
 	*updateClone.Patch.DueAt.Value = now.Add(time.Hour)
 	*updateClone.Patch.DeferUntil.Value = now.Add(time.Hour)
-	if string(update.Patch.Metadata.Set["key"]) != `{"key":"value"}` || update.Patch.Metadata.Unset[0] != "remove" || string(update.Patch.Metadata.Replace.Value) != `{"key":"value"}` || update.Patch.Labels.Add[0] != "add" || update.Patch.Labels.Remove[0] != "remove-label" || update.Patch.Labels.Replace.Value[0] != "replacement" || *update.Patch.EstimatedMinutes.Value != 3 || *update.Patch.ExternalRef.Value != "ref" || !update.Patch.DueAt.Value.Equal(now) || !update.Patch.DeferUntil.Value.Equal(now) {
+	if string(update.Patch.Metadata.Set["key"]) != `{"key":"value"}` || update.Patch.Metadata.Unset[0] != "remove" || string(update.Patch.Metadata.Replace.Value) != `{"key":"value"}` || update.Patch.Labels.Add[0] != "add" || update.Patch.Labels.Remove[0] != "remove-label" || update.Patch.Labels.RemovePrefixes[0] != "prefix:" || update.Patch.Labels.Replace.Value[0] != "replacement" || *update.Patch.EstimatedMinutes.Value != 3 || *update.Patch.ExternalRef.Value != "ref" || !update.Patch.DueAt.Value.Equal(now) || !update.Patch.DeferUntil.Value.Equal(now) {
 		t.Fatal("CloneUpdateRequest() retained mutable caller-owned state")
 	}
 }
@@ -90,7 +92,7 @@ func TestIssueOperationCloneFunctionsKeepFrozenRequestFields(t *testing.T) {
 		}
 	}
 
-	assertMutableFields(t, reflect.TypeOf(publicops.LabelPatch{}), map[string]bool{"Add": true, "Remove": true})
+	assertMutableFields(t, reflect.TypeOf(publicops.LabelPatch{}), map[string]bool{"Add": true, "Remove": true, "RemovePrefixes": true})
 	assertMutableFields(t, reflect.TypeOf(publicops.MetadataPatch{}), map[string]bool{"Set": true, "Unset": true})
 	assertFieldValueMutable(t, reflect.TypeOf(publicops.Field[[]string]{}), "LabelPatch.Replace")
 	assertFieldValueMutable(t, reflect.TypeOf(publicops.Field[json.RawMessage]{}), "MetadataPatch.Replace")

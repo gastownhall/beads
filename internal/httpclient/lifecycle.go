@@ -1036,6 +1036,9 @@ func encodeIssuePatch(patch issueops.IssuePatch) (map[string]any, error) {
 	if len(patch.Labels.Remove) > 0 {
 		out["remove_labels"] = append([]string(nil), patch.Labels.Remove...)
 	}
+	if len(patch.Labels.RemovePrefixes) > 0 {
+		out["remove_label_prefixes"] = append([]string(nil), patch.Labels.RemovePrefixes...)
+	}
 	return out, nil
 }
 

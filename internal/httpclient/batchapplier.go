@@ -638,6 +638,9 @@ func encodeApplyLabelPatch(patch issueops.LabelPatch) map[string]any {
 	if len(patch.Remove) > 0 {
 		out["remove"] = append([]string(nil), patch.Remove...)
 	}
+	if len(patch.RemovePrefixes) > 0 {
+		out["remove_prefixes"] = append([]string(nil), patch.RemovePrefixes...)
+	}
 	return out
 }
 

@@ -11819,6 +11819,18 @@ components:
             type: string
             maxLength: 255
           description: Labels to remove after replacement and addition.
+        remove_prefixes:
+          type: array
+          items:
+            type: string
+            maxLength: 255
+          description: >-
+            Removes every label that starts with one of these strings, applied
+            after `replace` and before `add`, so `remove_prefixes: ["state:"]`
+            with `add: ["state:b"]` leaves exactly `state:b` in that dimension
+            however many values it held. Matching is a literal string prefix:
+            `%` and `_` match only themselves. An empty prefix is dropped
+            rather than matching every label.
 
     ApplyMetadataPatch:
       type: object
@@ -13422,6 +13434,21 @@ components:
             longer than the column is refused here as it is there — the length
             rule is about what a label may BE, not about whether this particular
             row happens to carry one.
+        remove_label_prefixes:
+          type: array
+          items:
+            type: string
+            maxLength: 255
+          description: >-
+            Removes every label that starts with one of these strings, applied
+            after `labels` and before `add_labels`, so
+            `remove_label_prefixes: ["state:"]` with `add_labels: ["state:b"]`
+            leaves exactly `state:b` in that dimension however many values it
+            held. Matching is a literal string prefix: `%` and `_` match only
+            themselves. An empty prefix is dropped rather than matching every
+            label, and the whole patch is evaluated against the issue's labels
+            in the update's own transaction, so a result equal to the current
+            set changes no labels.
         estimated_minutes:
           type: integer
           nullable: true
