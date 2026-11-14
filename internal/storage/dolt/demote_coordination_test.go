@@ -31,7 +31,7 @@ func TestDemoteToWispCoordinatesBeforeItTouchesTheRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := &DoltStore{}
-	if err := store.demoteToWispInTx(context.Background(), tx, "bd-1", map[string]interface{}{"wisp": true}, "actor"); err == nil {
+	if _, err := store.demoteToWispInTx(context.Background(), tx, "bd-1", map[string]interface{}{"wisp": true}, "actor"); err == nil {
 		t.Fatal("demoteToWispInTx() = nil; the mock fails the coordination write")
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {

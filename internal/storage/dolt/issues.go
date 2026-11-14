@@ -286,19 +286,30 @@ func (s *DoltStore) updateIssueChecked(ctx context.Context, id string, updates m
 	// If updating a regular issue to no-history or ephemeral, migrate it to the
 	// wisps table instead of updating in-place (mirrors UpdateIssue). The
 	// precondition checks share the demotion transaction so the CAS stays
-	// atomic on this path.
+	// atomic on this path; the demotion's Dolt history commit is published
+	// after the SQL commit (GH#5752).
 	_, settingNoHistory := updates["no_history"]
 	_, settingWisp := updates["wisp"]
 	if settingNoHistory || settingWisp {
-		return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		var tables issueops.ChangedTables
+		err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 			if err := checkExpectedVersionInTx(ctx, tx, id, opts.ExpectedVersion); err != nil {
 				return err
 			}
 			if err := issueops.CheckExpectedFieldsInTx(ctx, tx, id, opts.ExpectedAssignee, opts.ExpectedStatus); err != nil {
 				return err
 			}
-			return s.demoteToWispInTx(ctx, tx, id, updates, actor)
+			// Plain assignment: a retried tx re-runs the body and overwrites
+			// the captured publication intent.
+			var err error
+			tables, err = s.demoteToWispInTx(ctx, tx, id, updates, actor)
+			return err
 		})
+		if err != nil {
+			return err
+		}
+		s.publishCommittedOperation(ctx, tables, demoteToWispCommitMsg(id))
+		return nil
 	}
 
 	// Wrap in withRetryTx exactly like UpdateIssue so a concurrent writer that

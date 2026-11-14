@@ -44,10 +44,10 @@ var _ issueops.MetadataCAS = (*metadataCAS)(nil)
 // rather than a value from a transaction that never landed.
 //
 // THE VERSION-CONTROL ENTRY IS ONE PER SWAP THAT WROTE. A lost race and a swap
-// over an already-equal value stage nothing, and an ephemeral row's tables are
-// ignored by this plane, so the staged-set guard inside doltAddAndCommitInTx
-// finds nothing to commit and records none — which is why this leg needs no
-// separate wisp path.
+// over an already-equal value report an empty table set, and an ephemeral row's
+// tables are ignored by this plane, so the shared post-tx publisher
+// (publishCommittedOperation, GH#5752) stages nothing and records none — which
+// is why this leg needs no separate wisp path.
 func (m *metadataCAS) CompareAndSetKey(ctx context.Context, req issueops.CompareAndSetKeyRequest) (issueops.CompareAndSetKeyResult, error) {
 	plan, err := storage.PlanCompareAndSetKey(req)
 	if err != nil {
@@ -55,24 +55,24 @@ func (m *metadataCAS) CompareAndSetKey(ctx context.Context, req issueops.Compare
 	}
 
 	var result issueops.CompareAndSetKeyResult
+	var tables storeops.ChangedTables
 	if err := m.store.withRetryTx(ctx, func(tx *sql.Tx) error {
 		swap, write, err := storeops.CompareAndSetMetadataKeyInTx(ctx, tx, plan)
 		if err != nil {
 			return err
 		}
+		// Plain assignment: a retried tx re-runs the body and overwrites both
+		// captured values.
 		result = swap
-		if len(write.Tables) == 0 {
-			// Nothing was written, or what was written is ephemeral and lives in
-			// tables this plane ignores. Either way there is nothing to version;
-			// withRetryTx still commits the SQL transaction.
-			return nil
-		}
-		// The swap routes through UpdateIssueInTx, which also writes an
-		// EventUpdated row, so stage both tables (mirrors MergeMetadata).
-		return m.store.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"},
-			fmt.Sprintf("bd: compare-and-set metadata %s.%s", plan.IssueID, plan.Key))
+		tables = write.Tables
+		return nil
 	}); err != nil {
 		return issueops.CompareAndSetKeyResult{}, err
 	}
+	// Post-tx publication (GH#5752): a swap that wrote tables gets its history
+	// commit only after the SQL transaction committed. Nothing was written, or
+	// what was written is ephemeral (empty table set), publishes nothing.
+	m.store.publishCommittedOperation(ctx, tables,
+		fmt.Sprintf("bd: compare-and-set metadata %s.%s", plan.IssueID, plan.Key))
 	return result, nil
 }

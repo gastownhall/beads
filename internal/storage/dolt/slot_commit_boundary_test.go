@@ -190,7 +190,12 @@ func metadataSlotWriteCases() []struct {
 	}
 }
 
-func TestMetadataSlotWritesSurfaceDoltAddFailure(t *testing.T) {
+// TestMetadataSlotWritesTrailingDoltAddFailureReportsSuccess pins the GH#5752
+// trailing-publication contract for metadata slot writes: a post-SQL-commit
+// DOLT_ADD failure is dropped (counted and logged) — the metadata change is
+// durable in the working set and rides the next dolt commit — with no
+// DOLT_COMMIT attempted after staging failed and no replay of the write.
+func TestMetadataSlotWritesTrailingDoltAddFailureReportsSuccess(t *testing.T) {
 	for _, tc := range metadataSlotWriteCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			stageErr := errors.New("stage failed")
@@ -202,9 +207,8 @@ func TestMetadataSlotWritesSurfaceDoltAddFailure(t *testing.T) {
 			store := newSlotCommitBoundaryStore(driver)
 			t.Cleanup(func() { _ = store.db.Close() })
 
-			err := tc.run(store)
-			if !errors.Is(err, stageErr) {
-				t.Fatalf("metadata slot write error = %v, want stage failure %v", err, stageErr)
+			if err := tc.run(store); err != nil {
+				t.Fatalf("metadata slot write error = %v, want nil (data committed; trailing dolt add failure is dropped)", err)
 			}
 
 			driver.mu.Lock()
@@ -218,19 +222,58 @@ func TestMetadataSlotWritesSurfaceDoltAddFailure(t *testing.T) {
 			if driver.metadataUpdates != 1 || driver.eventInserts != 1 {
 				t.Fatalf("mutation attempts = updates:%d events:%d, want updates:1 events:1", driver.metadataUpdates, driver.eventInserts)
 			}
-			if driver.txAttempts != 1 || driver.txCommits != 0 || driver.txRollbacks != 1 {
-				t.Fatalf("SQL transaction outcomes = attempts:%d commits:%d rollbacks:%d, want attempts:1 commits:0 rollbacks:1", driver.txAttempts, driver.txCommits, driver.txRollbacks)
+			if driver.txAttempts != 1 || driver.txCommits != 1 || driver.txRollbacks != 0 {
+				t.Fatalf("SQL transaction outcomes = attempts:%d commits:%d rollbacks:%d, want attempts:1 commits:1 rollbacks:0", driver.txAttempts, driver.txCommits, driver.txRollbacks)
 			}
 		})
 	}
 }
 
-func TestMetadataSlotWritesDoltCommitResponseLossIsIndeterminateAndNotReplayed(t *testing.T) {
+// TestMetadataSlotWritesTrailingDoltCommitFailureReportsSuccess pins the
+// DOLT_COMMIT-loss facet of the GH#5752 contract: after the SQL transaction
+// committed, a connection loss in the trailing history commit resolves as
+// success (the change is durable; the failure is counted and logged), never
+// as an indeterminate error a caller could retry into a duplicate write.
+func TestMetadataSlotWritesTrailingDoltCommitFailureReportsSuccess(t *testing.T) {
 	for _, tc := range metadataSlotWriteCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			driver := &slotCommitBoundaryDriver{
 				metadata:  tc.metadata,
 				commitErr: testConnectionLoss,
+			}
+			store := newSlotCommitBoundaryStore(driver)
+			t.Cleanup(func() { _ = store.db.Close() })
+
+			if err := tc.run(store); err != nil {
+				t.Fatalf("metadata slot write error = %v, want nil (data committed; trailing dolt commit failure is dropped)", err)
+			}
+
+			driver.mu.Lock()
+			defer driver.mu.Unlock()
+			if driver.metadataUpdates != 1 || driver.eventInserts != 1 {
+				t.Fatalf("mutation attempts = updates:%d events:%d, want updates:1 events:1 (no replay)", driver.metadataUpdates, driver.eventInserts)
+			}
+			if driver.stageCalls != 2 || driver.doltCommits != 1 {
+				t.Fatalf("Dolt calls = adds:%d commits:%d, want adds:2 commits:1", driver.stageCalls, driver.doltCommits)
+			}
+			if driver.txAttempts != 1 || driver.txCommits != 1 || driver.txRollbacks != 0 {
+				t.Fatalf("SQL transaction outcomes = attempts:%d commits:%d rollbacks:%d, want attempts:1 commits:1 rollbacks:0", driver.txAttempts, driver.txCommits, driver.txRollbacks)
+			}
+		})
+	}
+}
+
+// TestMetadataSlotWritesSQLCommitResponseLossIsIndeterminateAndNotReplayed
+// keeps the indeterminate-commit contract for permanent metadata writes after
+// GH#5752: a connection loss during the SQL COMMIT itself still surfaces
+// ErrCommitIndeterminate, applies the write at most once, and mints no
+// trailing publication off the ambiguous commit.
+func TestMetadataSlotWritesSQLCommitResponseLossIsIndeterminateAndNotReplayed(t *testing.T) {
+	for _, tc := range metadataSlotWriteCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			driver := &slotCommitBoundaryDriver{
+				metadata:     tc.metadata,
+				sqlCommitErr: testConnectionLoss,
 			}
 			store := newSlotCommitBoundaryStore(driver)
 			t.Cleanup(func() { _ = store.db.Close() })
@@ -248,11 +291,11 @@ func TestMetadataSlotWritesDoltCommitResponseLossIsIndeterminateAndNotReplayed(t
 			if driver.metadataUpdates != 1 || driver.eventInserts != 1 {
 				t.Fatalf("mutation attempts = updates:%d events:%d, want updates:1 events:1 (no replay)", driver.metadataUpdates, driver.eventInserts)
 			}
-			if driver.stageCalls != 2 || driver.doltCommits != 1 {
-				t.Fatalf("Dolt calls = adds:%d commits:%d, want adds:2 commits:1", driver.stageCalls, driver.doltCommits)
+			if driver.stageCalls != 0 || driver.doltCommits != 0 {
+				t.Fatalf("Dolt calls = adds:%d commits:%d, want 0/0 (no trailing publication off an ambiguous SQL commit)", driver.stageCalls, driver.doltCommits)
 			}
-			if driver.txAttempts != 1 || driver.txCommits != 0 || driver.txRollbacks != 1 {
-				t.Fatalf("SQL transaction outcomes = attempts:%d commits:%d rollbacks:%d, want attempts:1 commits:0 rollbacks:1", driver.txAttempts, driver.txCommits, driver.txRollbacks)
+			if driver.txAttempts != 1 {
+				t.Fatalf("SQL transaction attempts = %d, want 1", driver.txAttempts)
 			}
 		})
 	}

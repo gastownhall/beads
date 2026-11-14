@@ -35,8 +35,13 @@ func TestPostCommitRecheckPublishesOutsideItsTransaction(t *testing.T) {
 		inTx    = "doltAddAndCommitInTx"
 		postTx  = "doltAddAndCommitPostTx"
 		recheck = "DoltStore.recheckBlockedAfterCommit"
-		// Anchors: one function known to publish with each ordering.
-		knownInTxPublisher   = "DoltStore.demoteToWispInTx"
+		// Anchors: one function known to publish with each ordering. The in-tx
+		// anchor names the LAST remaining in-tx publisher as the GH#5752
+		// migration proceeds (demoteToWispInTx has moved; the lifecycle
+		// transaction runner is next); when the helper is deleted outright the
+		// approved-publisher guard in version_staging_completeness_test.go
+		// carries the in-tx policing and this anchor goes with it.
+		knownInTxPublisher   = "DoltStore.runInIssueLifecycleTransaction"
 		knownPostTxPublisher = "DoltStore.publishCommittedOperation"
 	)
 	publishes := func(key, helper string) bool {

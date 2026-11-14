@@ -208,15 +208,38 @@ func (s *DoltStore) PartitionWispIDs(ctx context.Context, ids []string) (wispIDs
 // Uses direct SQL inserts to bypass IsEphemeralID routing, which would otherwise
 // redirect label/dependency/event writes back to wisp tables.
 func (s *DoltStore) PromoteFromEphemeral(ctx context.Context, id string, actor string) error {
-	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	var tables issueops.ChangedTables
+	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		if err := issueops.PromoteFromEphemeralInTx(ctx, tx, id, actor); err != nil {
 			return err
 		}
-		return s.doltAddAndCommitInTx(ctx, tx, permanentIssueAuxTables, fmt.Sprintf("bd: promote %s", id))
-	}); err != nil {
+		// Plain assignment: a retried tx re-runs the body and overwrites the
+		// captured publication intent.
+		tables = permanentIssueAuxTablesChanged()
+		return nil
+	})
+	if err != nil {
 		return err
 	}
+	// Post-tx publication (GH#5752): stage and Dolt-commit after the SQL commit.
+	s.publishCommittedOperation(ctx, tables, fmt.Sprintf("bd: promote %s", id))
 	return nil
+}
+
+// permanentIssueAuxTablesChanged is permanentIssueAuxTables as a ChangedTables
+// set, the shape publishCommittedOperation consumes.
+func permanentIssueAuxTablesChanged() issueops.ChangedTables {
+	tables := issueops.ChangedTables{}
+	for _, t := range permanentIssueAuxTables {
+		tables[t] = true
+	}
+	return tables
+}
+
+// demoteToWispCommitMsg is the history message both demotion entry points
+// publish under (DemoteToWisp and UpdateIssueChecked's demotion branch).
+func demoteToWispCommitMsg(id string) string {
+	return fmt.Sprintf("bd: demote %s to wisp", id)
 }
 
 // DemoteToWisp moves an issue from the issues table to the wisps table.
@@ -227,54 +250,66 @@ func (s *DoltStore) PromoteFromEphemeral(ctx context.Context, id string, actor s
 //
 // Called by UpdateIssue when no_history=true or wisp=true is set on a regular issue.
 func (s *DoltStore) DemoteToWisp(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
-	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
-		return s.demoteToWispInTx(ctx, tx, id, updates, actor)
+	var tables issueops.ChangedTables
+	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		// Plain assignment: a retried tx re-runs the body and overwrites the
+		// captured publication intent.
+		tables, err = s.demoteToWispInTx(ctx, tx, id, updates, actor)
+		return err
 	})
+	if err != nil {
+		return err
+	}
+	// Post-tx publication (GH#5752): stage and Dolt-commit after the SQL commit.
+	s.publishCommittedOperation(ctx, tables, demoteToWispCommitMsg(id))
+	return nil
 }
 
 // demoteToWispInTx is DemoteToWisp's transaction body: it applies the field
 // update without an intermediate event, then migrates the issue to the wisps
-// table (insert into wisps, copy auxiliary rows, delete from issues) and stages
-// the demotion commit. Extracted so UpdateIssueChecked can wrap it with an
-// atomic version precondition in the same transaction; DemoteToWisp's behavior
-// is unchanged.
+// table (insert into wisps, copy auxiliary rows, delete from issues) and
+// reports the changed-table set its caller publishes AFTER the SQL commit
+// (GH#5752). Extracted so UpdateIssueChecked can wrap it with an atomic
+// version precondition in the same transaction; DemoteToWisp's behavior is
+// unchanged.
 //
 // It takes the id's create-coordination cell before its first read of the
 // row, as the shared persistence move and promotion do: a retaining sweep takes
 // the same cell before it deletes and tombstones the row, so the demotion
 // either commits first or finds the row gone, and never re-inserts into wisps
 // a row the sweep retired.
-func (s *DoltStore) demoteToWispInTx(ctx context.Context, tx *sql.Tx, id string, updates map[string]interface{}, actor string) error {
+func (s *DoltStore) demoteToWispInTx(ctx context.Context, tx *sql.Tx, id string, updates map[string]interface{}, actor string) (issueops.ChangedTables, error) {
 	if err := issueops.CoordinateIDCreatesInTx(ctx, tx, []string{id}); err != nil {
-		return fmt.Errorf("coordinate demotion of %s: %w", id, err)
+		return nil, fmt.Errorf("coordinate demotion of %s: %w", id, err)
 	}
 	if _, err := issueops.UpdateIssueWithoutEventInTx(ctx, tx, id, updates, actor); err != nil {
-		return fmt.Errorf("update issue before demotion: %w", err)
+		return nil, fmt.Errorf("update issue before demotion: %w", err)
 	}
 
 	issue, err := scanIssueTxFromTable(ctx, tx, "issues", id)
 	if err != nil {
-		return fmt.Errorf("failed to get updated issue for demotion: %w", err)
+		return nil, fmt.Errorf("failed to get updated issue for demotion: %w", err)
 	}
 
 	if err := insertIssueTxIntoTable(ctx, tx, "wisps", issue); err != nil {
-		return fmt.Errorf("failed to insert issue into wisps: %w", err)
+		return nil, fmt.Errorf("failed to insert issue into wisps: %w", err)
 	}
 	// Carry the row's versioned-history participation onto the wisps row
 	// while the issues row still exists, so a move back out restores it
 	// rather than starting history for a legacy row (R2.3).
 	if err := issueops.CarryParticipationToWispInTx(ctx, tx, id); err != nil {
-		return err
+		return nil, err
 	}
 
 	if _, err := tx.ExecContext(ctx, `
 		INSERT IGNORE INTO wisp_labels (issue_id, label)
 		SELECT issue_id, label FROM labels WHERE issue_id = ?
 	`, id); err != nil {
-		return fmt.Errorf("copy labels for demoted issue %s: %w", id, err)
+		return nil, fmt.Errorf("copy labels for demoted issue %s: %w", id, err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM labels WHERE issue_id = ?`, id); err != nil {
-		return fmt.Errorf("delete copied labels for demoted issue %s: %w", id, err)
+		return nil, fmt.Errorf("delete copied labels for demoted issue %s: %w", id, err)
 	}
 
 	// Demotion is the inverse of promotion: carry id across so the wisp edge
@@ -286,10 +321,10 @@ func (s *DoltStore) demoteToWispInTx(ctx context.Context, tx *sql.Tx, id string,
 		SELECT id, issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type, created_at, created_by, metadata, thread_id
 		FROM dependencies WHERE issue_id = ?
 	`, id); err != nil {
-		return fmt.Errorf("copy dependencies for demoted issue %s: %w", id, err)
+		return nil, fmt.Errorf("copy dependencies for demoted issue %s: %w", id, err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM dependencies WHERE issue_id = ?`, id); err != nil {
-		return fmt.Errorf("delete copied dependencies for demoted issue %s: %w", id, err)
+		return nil, fmt.Errorf("delete copied dependencies for demoted issue %s: %w", id, err)
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -297,10 +332,10 @@ func (s *DoltStore) demoteToWispInTx(ctx context.Context, tx *sql.Tx, id string,
 		SELECT id, issue_id, event_type, actor, old_value, new_value, comment, created_at
 		FROM events WHERE issue_id = ?
 	`, id); err != nil {
-		return fmt.Errorf("copy events for demoted issue %s: %w", id, err)
+		return nil, fmt.Errorf("copy events for demoted issue %s: %w", id, err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM events WHERE issue_id = ?`, id); err != nil {
-		return fmt.Errorf("delete copied events for demoted issue %s: %w", id, err)
+		return nil, fmt.Errorf("delete copied events for demoted issue %s: %w", id, err)
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -308,34 +343,34 @@ func (s *DoltStore) demoteToWispInTx(ctx context.Context, tx *sql.Tx, id string,
 		SELECT id, issue_id, author, text, created_at
 		FROM comments WHERE issue_id = ?
 	`, id); err != nil {
-		return fmt.Errorf("copy comments for demoted issue %s: %w", id, err)
+		return nil, fmt.Errorf("copy comments for demoted issue %s: %w", id, err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM comments WHERE issue_id = ?`, id); err != nil {
-		return fmt.Errorf("delete copied comments for demoted issue %s: %w", id, err)
+		return nil, fmt.Errorf("delete copied comments for demoted issue %s: %w", id, err)
 	}
 
 	if err := issueops.RecordFullEventInTable(ctx, tx, "wisp_events", id, types.EventUpdated, actor, "", "demoted to wisp"); err != nil {
-		return fmt.Errorf("record demotion event for demoted issue %s: %w", id, err)
+		return nil, fmt.Errorf("record demotion event for demoted issue %s: %w", id, err)
 	}
 
 	if err := issueops.RetargetInboundDependenciesToWispInTx(ctx, tx, id); err != nil {
-		return err
+		return nil, err
 	}
 
 	if _, err := tx.ExecContext(ctx, "DELETE FROM issues WHERE id = ?", id); err != nil {
-		return fmt.Errorf("failed to delete issue from issues: %w", err)
+		return nil, fmt.Errorf("failed to delete issue from issues: %w", err)
 	}
 	// Wisps are never leased: drop any lease the issue held.
 	if err := issueops.DeleteLeaseInTx(ctx, tx, id); err != nil {
-		return err
+		return nil, err
 	}
 
 	affectedIssues, affectedWisps, aerr := issueops.AffectedByStatusChangeForWispInTx(ctx, tx, id)
 	if aerr != nil {
-		return fmt.Errorf("affected by demote for %s: %w", id, aerr)
+		return nil, fmt.Errorf("affected by demote for %s: %w", id, aerr)
 	}
 	if err := issueops.RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps, actor); err != nil {
-		return fmt.Errorf("recompute is_blocked after demote for %s: %w", id, err)
+		return nil, fmt.Errorf("recompute is_blocked after demote for %s: %w", id, err)
 	}
 
 	// The bead keeps its id across demotion; only its plane changes. Journal one
@@ -344,10 +379,12 @@ func (s *DoltStore) demoteToWispInTx(ctx context.Context, tx *sql.Tx, id string,
 	// the human audit event — its own journal row already recorded the field
 	// change, and this one records the plane move.
 	if err := issueops.RecordEventInTx(ctx, tx, issueops.EventUpdate, id, actor); err != nil {
-		return err
+		return nil, err
 	}
 
-	return s.doltAddAndCommitInTx(ctx, tx, permanentIssueAuxTables, fmt.Sprintf("bd: demote %s to wisp", id))
+	// The demotion commit is minted by the caller AFTER the SQL transaction
+	// commits (GH#5752): report the plane-move table set to publish.
+	return permanentIssueAuxTablesChanged(), nil
 }
 
 // doltAddAndCommitInTx stages and Dolt-commits INSIDE a still-open SQL

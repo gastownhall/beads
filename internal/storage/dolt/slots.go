@@ -32,18 +32,25 @@ func (s *DoltStore) MergeMetadata(ctx context.Context, issueID, key string, valu
 
 		// withRetryTx owns BeginTx and the final Commit. The read+merge+write inside
 		// the fn is a single transaction; the retry is what fixes the cross-tx
-		// clobber the old SlotSet suffered from.
-		return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		// clobber the old SlotSet suffered from. The Dolt history commit runs
+		// after the SQL commit, via the shared post-tx publisher (GH#5752).
+		var tables issueops.ChangedTables
+		err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 			if err := issueops.MergeMetadataInTx(ctx, tx, issueID, key, value, actor); err != nil {
 				return err
 			}
-
-			// Dolt versioning for permanent issues. The merge routes through
-			// UpdateIssueInTx, which also writes an EventUpdated row into events, so
-			// stage both tables before committing (mirrors CloseIssue).
-			commitMsg := fmt.Sprintf("bd: merge metadata %s.%s", issueID, key)
-			return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, commitMsg)
+			// Plain assignment: a retried tx re-runs the body and overwrites
+			// the captured publication intent. The merge routes through
+			// UpdateIssueInTx, which also writes an EventUpdated row into
+			// events, so stage both tables (mirrors CloseIssue).
+			tables = issueops.ChangedTables{"issues": true, "events": true}
+			return nil
 		})
+		if err != nil {
+			return err
+		}
+		s.publishCommittedOperation(ctx, tables, fmt.Sprintf("bd: merge metadata %s.%s", issueID, key))
+		return nil
 	})
 }
 
@@ -135,17 +142,23 @@ func (s *DoltStore) SlotClear(ctx context.Context, issueID, key, actor string) e
 			return s.clearMetadataWisp(ctx, issueID, key, actor)
 		}
 
-		return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		var tables issueops.ChangedTables
+		err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 			if err := issueops.DeleteMetadataInTx(ctx, tx, issueID, key, actor); err != nil {
 				return err
 			}
-
-			// DeleteMetadataInTx routes through UpdateIssueInTx (issues + events),
-			// so stage both before committing. A no-op clear writes nothing, which
-			// DOLT_COMMIT reports as nothing-to-commit (handled by the helper).
-			commitMsg := fmt.Sprintf("bd: clear metadata %s.%s", issueID, key)
-			return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, commitMsg)
+			// Plain assignment: a retried tx re-runs the body and overwrites
+			// the captured publication intent. DeleteMetadataInTx routes through
+			// UpdateIssueInTx (issues + events), so stage both. A no-op clear
+			// writes nothing; the publisher's staged-set guard skips its commit.
+			tables = issueops.ChangedTables{"issues": true, "events": true}
+			return nil
 		})
+		if err != nil {
+			return err
+		}
+		s.publishCommittedOperation(ctx, tables, fmt.Sprintf("bd: clear metadata %s.%s", issueID, key))
+		return nil
 	})
 }
 
