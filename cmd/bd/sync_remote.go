@@ -26,7 +26,11 @@ func resolveSyncRemote() string {
 
 // resolveSyncRemoteChecked is resolveSyncRemote for paths that hand the value
 // to git or dolt: a committed config.yaml can set it, so a value git would
-// parse as an option is refused, naming the key that set it.
+// parse as an option is refused, naming the key that set it. The same trust
+// boundary makes it the enforcement point for federation.allowed-remote-patterns
+// (GH#6233): a sync remote outside the allowlist is refused here, before any
+// transport sees it. The refusal names the key and never echoes the URL,
+// which can carry credentials.
 func resolveSyncRemoteChecked() (string, error) {
 	key := "sync.remote"
 	v := config.GetString(key)
@@ -35,6 +39,9 @@ func resolveSyncRemoteChecked() (string, error) {
 		v = config.GetString(key)
 	}
 	if err := checkRemoteNotOption(key, v); err != nil {
+		return "", err
+	}
+	if err := remotecache.ValidateRemoteWithPolicy(config.AllowedRemotePatterns(), key, v); err != nil {
 		return "", err
 	}
 	return v, nil

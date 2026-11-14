@@ -5511,6 +5511,11 @@ func logRouteDecision(op, remote string, cli bool) {
 // pushToRemote is the internal implementation for all push operations.
 // It routes through CLI or SQL based on the remote's protocol and credentials.
 func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool) (retErr error) {
+	// GH#6233: every push route funnels here, so the allowlist gate placed at
+	// the top covers them all before any routing or transfer starts.
+	if err := s.checkRemotePolicy(ctx, remote); err != nil {
+		return err
+	}
 	spanName := "dolt.push"
 	if force {
 		spanName = "dolt.force_push"
@@ -5624,6 +5629,11 @@ func (s *DoltStore) PullRemote(ctx context.Context, remote string) error {
 // pullFromRemote is the internal implementation for all pull operations.
 // It routes through CLI or SQL based on the remote's protocol and credentials.
 func (s *DoltStore) pullFromRemote(ctx context.Context, remote string) (retErr error) {
+	// GH#6233: gate before the circuit wrapper — a policy refusal is not a
+	// write attempt and must not consume a circuit slot or auto-commit.
+	if err := s.checkRemotePolicy(ctx, remote); err != nil {
+		return err
+	}
 	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		return s.pullFromRemoteUnchecked(ctx, remote)
 	})

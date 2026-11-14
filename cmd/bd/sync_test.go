@@ -1552,6 +1552,35 @@ func TestRunSyncCommandNoRemoteJSON(t *testing.T) {
 	}
 }
 
+// TestRunSyncCommandAllowedRemotePatternsNoRemoteExitsZero covers the
+// allowlist-era solo rig (GH#6233): under a non-empty
+// federation.allowed-remote-patterns the store's transfer gates fail closed
+// on an unresolved default remote, so without the pre-dispatch check the
+// benign no-remote case would surface as a policy refusal and fail every
+// tick of the timer. The confirmed-no-remote exit-0 contract must survive
+// the gate, reporting the same status the Dolt-wording path reports.
+func TestRunSyncCommandAllowedRemotePatternsNoRemoteExitsZero(t *testing.T) {
+	fake := &fakeSyncStore{
+		pullErr: errors.New(`remote "origin" is refused by federation.allowed-remote-patterns: its URL could not be resolved to enforce the allowlist (the remote is not registered)`),
+		remotes: nil,
+	}
+	setupSyncCommandTest(t, fake)
+	config.Set("federation.allowed-remote-patterns", []string{"git+https://github.com/myorg/*"})
+	jsonOutput = true
+
+	out := captureStdout(t, func() error { return runSyncCommand(syncCmd, nil) })
+	if fake.pullCalls != 0 {
+		t.Errorf("pull attempted %d time(s) on a rig confirmed to have no remote", fake.pullCalls)
+	}
+	var got syncOutcome
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("json.Unmarshal(%q): %v", out, err)
+	}
+	if got.Status != syncStatusNoRemote {
+		t.Errorf("Status = %q, want %q", got.Status, syncStatusNoRemote)
+	}
+}
+
 // TestRunSyncCommandNoPushSetsPushSkipped covers the noPush -> PushSkipped
 // correction: a successful ok-status run with BD_NO_PUSH=true must not call
 // Push, and the outcome the operator sees must say so (PushSkipped=true,
