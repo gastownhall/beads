@@ -807,6 +807,21 @@ func runSyncCommand(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
+	// Under a federation.allowed-remote-patterns policy every transfer with a
+	// remote bd cannot find is refused, so a rig with no remote at all would
+	// only reach the benign no-remote result through a refused pull. Confirm
+	// the emptiness first and report it without attempting a transfer
+	// (GH#6233). Default-remote path only, as the exit-0 gate below.
+	if remote == "" && len(config.AllowedRemotePatterns()) > 0 && hasNoRemoteConfigured(rootCtx, st) {
+		if jsonOutput {
+			return outputJSON(&syncOutcome{Status: syncStatusNoRemote})
+		}
+		if !isQuiet() {
+			printNoRemoteGuidance()
+		}
+		return nil
+	}
+
 	// A no-push rig still wants the pull and the recompute; only the publish
 	// step is off. Reporting that as a push failure would make every tick of a
 	// local-only mirror look broken.

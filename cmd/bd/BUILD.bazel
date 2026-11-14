@@ -1169,6 +1169,7 @@ go_test(
         "remedy_printing_test.go",
         "remedy_store_hint_pure_test.go",
         "remote_migrate_gate_test.go",
+        "remote_policy_autopush_test.go",
         "remote_policy_clone_test.go",
         "remote_policy_registration_test.go",
         "remote_sync_open_test.go",
