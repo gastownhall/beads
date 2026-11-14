@@ -43,6 +43,7 @@ with my config?" — no mutations are performed.
 
 Checks:
   - hooks     Git hooks installed and up-to-date
+  - issue_prefix  Database prefix matches config.yaml
   - remote    Dolt remote matches federation.remote config
   - server    Server state matches dolt.shared-server config
 
@@ -90,9 +91,55 @@ func init() {
 func runDriftChecks() []DriftItem {
 	var items []DriftItem
 	items = append(items, checkHooksDrift()...)
+	items = append(items, checkIssuePrefixDrift()...)
 	items = append(items, checkRemoteDrift()...)
 	items = append(items, checkServerDrift()...)
 	return items
+}
+
+func configuredIssuePrefix() string {
+	// Use the same YAML resolver as bd create. The reconciler must persist the
+	// value the create path already treats as effective, including legacy names
+	// whose validation predates the current stored-prefix contract.
+	return overlayYAMLPrefix("")
+}
+
+func issuePrefixDriftItem(configured, stored string) DriftItem {
+	if configured == "" {
+		return DriftItem{Check: "issue_prefix", Status: driftStatusSkipped, Message: "No valid issue-prefix is declared in config.yaml"}
+	}
+	if stored == "" {
+		return DriftItem{Check: "issue_prefix", Status: driftStatusDrift, Message: "config.yaml declares an issue-prefix but the database has no issue_prefix", Expected: configured, Actual: "(not set)"}
+	}
+	if stored != configured {
+		return DriftItem{Check: "issue_prefix", Status: driftStatusDrift, Message: "database issue_prefix differs from config.yaml; use bd rename-prefix to change an established namespace", Expected: configured, Actual: stored}
+	}
+	return DriftItem{Check: "issue_prefix", Status: driftStatusOK, Message: "Database issue_prefix matches config.yaml"}
+}
+
+// checkIssuePrefixDrift compares the YAML declaration to the durable value.
+// A missing database value is repairable by config apply; a disagreement is
+// deliberately not auto-repaired because it can change an existing ID namespace.
+func checkIssuePrefixDrift() []DriftItem {
+	configured := configuredIssuePrefix()
+	if configured == "" {
+		return []DriftItem{issuePrefixDriftItem(configured, "")}
+	}
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		return []DriftItem{{Check: "issue_prefix", Status: driftStatusSkipped, Message: "No active beads workspace found"}}
+	}
+	ctx := context.Background()
+	st, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true, DisableAutoStart: true})
+	if err != nil {
+		return []DriftItem{{Check: "issue_prefix", Status: driftStatusSkipped, Message: fmt.Sprintf("Cannot open Dolt store: %v", err)}}
+	}
+	defer func() { _ = st.Close() }()
+	stored, err := st.GetConfig(ctx, "issue_prefix")
+	if err != nil {
+		return []DriftItem{{Check: "issue_prefix", Status: driftStatusSkipped, Message: fmt.Sprintf("Cannot read database issue_prefix: %v", err)}}
+	}
+	return []DriftItem{issuePrefixDriftItem(configured, stored)}
 }
 
 // checkHooksDrift checks whether git hooks are installed and current.

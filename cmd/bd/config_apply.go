@@ -42,6 +42,7 @@ var configApplyCmd = &cobra.Command{
 Runs drift detection and then fixes any mismatches it finds:
 
   - hooks     Reinstall git hooks if missing or outdated
+  - issue_prefix  Seed a missing database prefix from config.yaml; never overwrite one
   - remote    Add/update Dolt origin remote to match federation.remote
   - server    Start Dolt server if dolt.shared-server is enabled
 
@@ -97,10 +98,61 @@ func runApply(dryRun bool) []ApplyResult {
 
 	var results []ApplyResult
 	results = append(results, applyHooks(hasDrift["hooks"], dryRun))
+	results = append(results, applyIssuePrefix(dryRun))
 	serverResult := applyServer(hasDrift["server"], dryRun)
 	results = append(results, serverResult)
 	results = append(results, remoteApplyResult(driftItems, serverResult, dryRun, checkRemoteDrift))
 	return results
+}
+
+type issuePrefixConfigStore interface {
+	GetConfig(context.Context, string) (string, error)
+	SetConfig(context.Context, string, string) error
+}
+
+func applyIssuePrefixStore(ctx context.Context, st issuePrefixConfigStore, configured string, dryRun bool) ApplyResult {
+	stored, err := st.GetConfig(ctx, "issue_prefix")
+	if err != nil {
+		return ApplyResult{Check: "issue_prefix", Action: "seed", Status: applyStatusError, Message: "Failed to read database issue_prefix", Error: err.Error()}
+	}
+	if stored == configured {
+		return ApplyResult{Check: "issue_prefix", Action: "none", Status: applyStatusOK, Message: "Database issue_prefix matches config.yaml"}
+	}
+	if stored != "" {
+		return ApplyResult{Check: "issue_prefix", Action: "none", Status: applyStatusError, Message: "Database issue_prefix differs from config.yaml; use bd rename-prefix to change an established namespace", Error: fmt.Sprintf("database=%q config.yaml=%q", stored, configured)}
+	}
+	if dryRun {
+		return ApplyResult{Check: "issue_prefix", Action: "seed", Status: applyStatusDryRun, Message: fmt.Sprintf("Would seed database issue_prefix from config.yaml: %s", configured)}
+	}
+	if err := st.SetConfig(ctx, "issue_prefix", configured); err != nil {
+		return ApplyResult{Check: "issue_prefix", Action: "seed", Status: applyStatusError, Message: "Failed to seed database issue_prefix from config.yaml", Error: err.Error()}
+	}
+	return ApplyResult{Check: "issue_prefix", Action: "seed", Status: applyStatusApplied, Message: fmt.Sprintf("Seeded database issue_prefix from config.yaml: %s", configured)}
+}
+
+func applyIssuePrefix(dryRun bool) ApplyResult {
+	configured := configuredIssuePrefix()
+	if configured == "" {
+		return ApplyResult{Check: "issue_prefix", Action: "none", Status: applyStatusSkipped, Message: "No valid issue-prefix is declared in config.yaml"}
+	}
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		return ApplyResult{Check: "issue_prefix", Action: "seed", Status: applyStatusSkipped, Message: "No active beads workspace found"}
+	}
+	ctx := context.Background()
+	st, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: dryRun, DisableAutoStart: true})
+	if err != nil {
+		return ApplyResult{Check: "issue_prefix", Action: "seed", Status: applyStatusSkipped, Message: fmt.Sprintf("Cannot open Dolt store: %v", err)}
+	}
+	defer func() { _ = st.Close() }()
+	result := applyIssuePrefixStore(ctx, st, configured, dryRun)
+	if result.Status != applyStatusApplied {
+		return result
+	}
+	if err := st.CommitWithConfig(ctx, "bd config apply: seed issue_prefix from config.yaml"); err != nil {
+		return ApplyResult{Check: "issue_prefix", Action: "seed", Status: applyStatusError, Message: "Seeded database issue_prefix but failed to commit it", Error: err.Error()}
+	}
+	return result
 }
 
 func shouldRecheckRemoteAfterServerStart(remoteSkipped bool, serverResult ApplyResult) bool {

@@ -197,8 +197,8 @@ func TestRunApplyAllOK(t *testing.T) {
 	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
 	// In a test environment with no drift, all results should be ok or skipped
 	results := runApply(false)
-	if len(results) != 3 {
-		t.Errorf("expected 3 results, got %d", len(results))
+	if len(results) != 4 {
+		t.Errorf("expected 4 results, got %d", len(results))
 	}
 	for _, r := range results {
 		if r.Status == applyStatusError {
@@ -210,14 +210,67 @@ func TestRunApplyAllOK(t *testing.T) {
 func TestRunApplyDryRun(t *testing.T) {
 	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
 	results := runApply(true)
-	if len(results) != 3 {
-		t.Errorf("expected 3 results, got %d", len(results))
+	if len(results) != 4 {
+		t.Errorf("expected 4 results, got %d", len(results))
 	}
 	// In dry-run, no actions should be "applied"
 	for _, r := range results {
 		if r.Status == applyStatusApplied {
 			t.Errorf("dry-run should not apply actions, but check %q was applied", r.Check)
 		}
+	}
+}
+
+type fakeIssuePrefixConfigStore struct {
+	value  string
+	getErr error
+	setErr error
+	sets   int
+}
+
+func (s *fakeIssuePrefixConfigStore) GetConfig(_ context.Context, _ string) (string, error) {
+	return s.value, s.getErr
+}
+
+func (s *fakeIssuePrefixConfigStore) SetConfig(_ context.Context, _ string, value string) error {
+	s.sets++
+	if s.setErr != nil {
+		return s.setErr
+	}
+	s.value = value
+	return nil
+}
+
+func TestApplyIssuePrefixStore(t *testing.T) {
+	tests := []struct {
+		name       string
+		stored     string
+		dryRun     bool
+		getErr     error
+		wantStatus string
+		wantValue  string
+		wantSets   int
+	}{
+		{name: "missing prefix dry run", dryRun: true, wantStatus: applyStatusDryRun, wantSets: 0},
+		{name: "missing prefix seeds durable store", wantStatus: applyStatusApplied, wantValue: "dc_recon", wantSets: 1},
+		{name: "matching prefix is idempotent", stored: "dc_recon", wantStatus: applyStatusOK, wantValue: "dc_recon", wantSets: 0},
+		{name: "different prefix is never overwritten", stored: "other", wantStatus: applyStatusError, wantValue: "other", wantSets: 0},
+		{name: "read failure does not write", getErr: errors.New("unavailable"), wantStatus: applyStatusError, wantSets: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &fakeIssuePrefixConfigStore{value: tt.stored, getErr: tt.getErr}
+			result := applyIssuePrefixStore(context.Background(), store, "dc_recon", tt.dryRun)
+			if result.Status != tt.wantStatus {
+				t.Fatalf("status = %q, want %q: %+v", result.Status, tt.wantStatus, result)
+			}
+			if store.value != tt.wantValue {
+				t.Fatalf("stored prefix = %q, want %q", store.value, tt.wantValue)
+			}
+			if store.sets != tt.wantSets {
+				t.Fatalf("set calls = %d, want %d", store.sets, tt.wantSets)
+			}
+		})
 	}
 }
 
