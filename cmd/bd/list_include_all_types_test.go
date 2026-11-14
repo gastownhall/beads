@@ -1,12 +1,14 @@
 package main
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/httpclient/encode"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workapi"
 )
@@ -58,6 +60,58 @@ func TestListIncludeAllTypesReachable(t *testing.T) {
 	}
 	if !in.IncludeAllTypes {
 		t.Fatal("--include-all-types did not set ListRequest.IncludeAllTypes")
+	}
+}
+
+// TestListAllUsageIsStatusOnly: --all lifts the default status and pinned
+// exclusions and the default limit, nothing on the type axis. Its old help
+// ("overrides default filter") read as lifting every default, which sent
+// callers looking for gates and wisps to a flag that never shows them.
+func TestListAllUsageIsStatusOnly(t *testing.T) {
+	flag := listCmd.Flags().Lookup("all")
+	if flag == nil {
+		t.Fatal("bd list must register --all")
+	}
+	usage := flag.Usage
+	if strings.Contains(usage, "overrides default filter") {
+		t.Errorf("--all must not claim to override the default filter: type and plane suppressions still apply; got %q", usage)
+	}
+	for _, want := range []string{"status", "pinned", "limit", "--include-all-types"} {
+		if !strings.Contains(usage, want) {
+			t.Errorf("--all usage must mention %q, got %q", want, usage)
+		}
+	}
+}
+
+// TestListHelpIsByteIdenticalOutsideIncludeAllTypes: the new flag adds its
+// own line to `bd list --help` and changes no byte of any other. pflag pads
+// every line to the widest flag column, so a flag rendered wider than the
+// widest one (a backticked word in its usage becomes a placeholder) would
+// reflow the whole listing.
+func TestListHelpIsByteIdenticalOutsideIncludeAllTypes(t *testing.T) {
+	flag := listCmd.Flags().Lookup("include-all-types")
+	if flag == nil {
+		t.Fatal("bd list must register --include-all-types")
+	}
+	shown := listCmd.Flags().FlagUsages()
+	defer func(prev bool) { flag.Hidden = prev }(flag.Hidden)
+	flag.Hidden = true
+	hidden := listCmd.Flags().FlagUsages()
+
+	var others []string
+	removed := 0
+	for _, line := range strings.Split(shown, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "--include-all-types") {
+			removed++
+			continue
+		}
+		others = append(others, line)
+	}
+	if removed != 1 {
+		t.Fatalf("want one --include-all-types help line, got %d", removed)
+	}
+	if got := strings.Join(others, "\n"); got != hidden {
+		t.Errorf("--include-all-types changed other bd list help lines:\n--- with it (its line removed)\n%s\n--- without it\n%s", got, hidden)
 	}
 }
 
@@ -292,56 +346,48 @@ func containsStatus(statuses []types.Status, want types.Status) bool {
 	return false
 }
 
-// TestListAllUsageIsStatusOnly: --all lifts the default status and pinned
-// exclusions and the default limit, nothing on the type axis. Its old help
-// ("overrides default filter") read as lifting every default, which sent
-// callers looking for gates and wisps to a flag that never shows them.
-func TestListAllUsageIsStatusOnly(t *testing.T) {
-	flag := listCmd.Flags().Lookup("all")
-	if flag == nil {
-		t.Fatal("bd list must register --all")
-	}
-	usage := flag.Usage
-	if strings.Contains(usage, "overrides default filter") {
-		t.Errorf("--all must not claim to override the default filter: type and plane suppressions still apply; got %q", usage)
-	}
-	for _, want := range []string{"status", "pinned", "limit", "--include-all-types"} {
-		if !strings.Contains(usage, want) {
-			t.Errorf("--all usage must mention %q, got %q", want, usage)
-		}
-	}
-}
+// TestGatherListInput_WispTypeWithIncludeAllTypesIsAccepted: the flag admits
+// the wisp plane, so --wisp-type can match rows and the reachability guard
+// must let it through. Without it the guard still refuses, naming
+// --include-ephemeral.
+func TestGatherListInput_WispTypeWithIncludeAllTypesIsAccepted(t *testing.T) {
+	defer func(prev bool) { jsonOutput = prev }(jsonOutput)
+	jsonOutput = false
 
-// TestListHelpIsByteIdenticalOutsideIncludeAllTypes: the new flag adds its
-// own line to `bd list --help` and changes no byte of any other. pflag pads
-// every line to the widest flag column, so a flag rendered wider than the
-// widest one (a backticked word in its usage becomes a placeholder) would
-// reflow the whole listing.
-func TestListHelpIsByteIdenticalOutsideIncludeAllTypes(t *testing.T) {
-	flag := listCmd.Flags().Lookup("include-all-types")
-	if flag == nil {
-		t.Fatal("bd list must register --include-all-types")
+	cmd := newIncludeAllTypesInputCmd()
+	if err := cmd.Flags().Set("wisp-type", "heartbeat"); err != nil {
+		t.Fatalf("set wisp-type: %v", err)
 	}
-	shown := listCmd.Flags().FlagUsages()
-	defer func(prev bool) { flag.Hidden = prev }(flag.Hidden)
-	flag.Hidden = true
-	hidden := listCmd.Flags().FlagUsages()
+	if err := cmd.Flags().Set("include-all-types", "true"); err != nil {
+		t.Fatalf("set include-all-types: %v", err)
+	}
+	var in listInput
+	var err error
+	_ = captureStderr(t, func() { in, err = gatherListInput(cmd) })
+	if err != nil {
+		t.Fatalf("--wisp-type with --include-all-types must be accepted, got: %v", err)
+	}
+	if in.WispType == nil || string(*in.WispType) != "heartbeat" {
+		t.Errorf("WispType must survive onto the request, got %v", in.WispType)
+	}
+	if !in.IncludeAllTypes {
+		t.Error("IncludeAllTypes must survive onto the request alongside --wisp-type")
+	}
 
-	var others []string
-	removed := 0
-	for _, line := range strings.Split(shown, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "--include-all-types") {
-			removed++
-			continue
+	t.Run("without it the guard still refuses", func(t *testing.T) {
+		cmd := newIncludeAllTypesInputCmd()
+		if err := cmd.Flags().Set("wisp-type", "heartbeat"); err != nil {
+			t.Fatalf("set wisp-type: %v", err)
 		}
-		others = append(others, line)
-	}
-	if removed != 1 {
-		t.Fatalf("want one --include-all-types help line, got %d", removed)
-	}
-	if got := strings.Join(others, "\n"); got != hidden {
-		t.Errorf("--include-all-types changed other bd list help lines:\n--- with it (its line removed)\n%s\n--- without it\n%s", got, hidden)
-	}
+		var err error
+		stderr := captureStderr(t, func() { _, err = gatherListInput(cmd) })
+		if err == nil {
+			t.Fatal("--wisp-type with no plane knob must still be refused")
+		}
+		if !strings.Contains(stderr, "--include-ephemeral") {
+			t.Errorf("the refusal must keep naming --include-ephemeral; got:\n%s", stderr)
+		}
+	})
 }
 
 // TestGatherListInput_ExistingFlagsKeepTheirRequestIdentity: an invocation
@@ -412,18 +458,19 @@ func TestGatherListInput_ExistingFlagsKeepTheirRequestIdentity(t *testing.T) {
 	}
 }
 
-// TestGatherListInput_WispTypeWithIncludeAllTypesIsAccepted: the flag admits
-// the wisp plane, so --wisp-type can match rows and the reachability guard
-// must let it through. Without it the guard still refuses, naming
-// --include-ephemeral.
-func TestGatherListInput_WispTypeWithIncludeAllTypesIsAccepted(t *testing.T) {
+// TestListIncludeAllTypesRefusedOnHttpWire connects the request `bd list
+// --include-all-types` actually gathers to the HTTP v0 wire: the encoder
+// refuses the union intent (ledger E-ListRequest.IncludeAllTypes) instead of
+// restating it as today's four include_* parameters, so a served-mode caller
+// gets the typed refusal — never a silently narrower successful listing. The
+// disposition itself is pinned by TestEncoderHonorsEveryTableDisposition in
+// internal/httpclient/encode; what this adds is the composition: the flag
+// must reach the request the encoder refuses.
+func TestListIncludeAllTypesRefusedOnHttpWire(t *testing.T) {
 	defer func(prev bool) { jsonOutput = prev }(jsonOutput)
 	jsonOutput = false
 
 	cmd := newIncludeAllTypesInputCmd()
-	if err := cmd.Flags().Set("wisp-type", "heartbeat"); err != nil {
-		t.Fatalf("set wisp-type: %v", err)
-	}
 	if err := cmd.Flags().Set("include-all-types", "true"); err != nil {
 		t.Fatalf("set include-all-types: %v", err)
 	}
@@ -431,27 +478,30 @@ func TestGatherListInput_WispTypeWithIncludeAllTypesIsAccepted(t *testing.T) {
 	var err error
 	_ = captureStderr(t, func() { in, err = gatherListInput(cmd) })
 	if err != nil {
-		t.Fatalf("--wisp-type with --include-all-types must be accepted, got: %v", err)
-	}
-	if in.WispType == nil || string(*in.WispType) != "heartbeat" {
-		t.Errorf("WispType must survive onto the request, got %v", in.WispType)
+		t.Fatalf("gatherListInput: %v", err)
 	}
 	if !in.IncludeAllTypes {
-		t.Error("IncludeAllTypes must survive onto the request alongside --wisp-type")
+		t.Fatal("precondition: the gathered request must carry IncludeAllTypes")
 	}
 
-	t.Run("without it the guard still refuses", func(t *testing.T) {
-		cmd := newIncludeAllTypesInputCmd()
-		if err := cmd.Flags().Set("wisp-type", "heartbeat"); err != nil {
-			t.Fatalf("set wisp-type: %v", err)
-		}
-		var err error
-		stderr := captureStderr(t, func() { _, err = gatherListInput(cmd) })
-		if err == nil {
-			t.Fatal("--wisp-type with no plane knob must still be refused")
-		}
-		if !strings.Contains(stderr, "--include-ephemeral") {
-			t.Errorf("the refusal must keep naming --include-ephemeral; got:\n%s", stderr)
-		}
-	})
+	_, encodeErr := encode.ListParams(in.ListRequest)
+	if encodeErr == nil {
+		t.Fatal("the v0 wire encoded ListRequest.IncludeAllTypes instead of refusing it")
+	}
+	if !errors.Is(encodeErr, encode.ErrRefused) {
+		t.Fatalf("want a refusal matching encode.ErrRefused, got %T: %v", encodeErr, encodeErr)
+	}
+	var refused *encode.RefusedError
+	if !errors.As(encodeErr, &refused) {
+		t.Fatalf("want *encode.RefusedError, got %T: %v", encodeErr, encodeErr)
+	}
+	if refused.Row.ID != "E-ListRequest.IncludeAllTypes" {
+		t.Errorf("refusal ledger row = %q, want E-ListRequest.IncludeAllTypes", refused.Row.ID)
+	}
+	if refused.Row.Field != "IncludeAllTypes" {
+		t.Errorf("refusal field = %q, want IncludeAllTypes", refused.Row.Field)
+	}
+	if refused.Row.Type == nil || refused.Row.Type.Name() != "ListRequest" {
+		t.Errorf("refusal type = %v, want ListRequest", refused.Row.Type)
+	}
 }
