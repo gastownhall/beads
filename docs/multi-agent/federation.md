@@ -146,8 +146,10 @@ bd federation status
 bd federation status --peer town-beta
 ```
 
-Without `--strategy`, a sync that hits merge conflicts pauses and reports the
-conflicting tables for manual resolution instead of auto-resolving.
+With `--strategy`, a sync that hits merge conflicts resolves them with that
+strategy, commits the concluded merge, and pushes the result to the peer.
+Without `--strategy`, a sync that hits a genuine conflict fails with the
+conflicting tables and guidance to re-run with `--strategy ours|theirs`.
 
 ### Topologies
 

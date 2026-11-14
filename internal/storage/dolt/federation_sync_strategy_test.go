@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -339,4 +340,33 @@ func TestFederationSyncStrategyConfigConflictConverges(t *testing.T) {
 			assertSyncConcluded(t, f.db, ctx)
 		})
 	}
+}
+
+// TestFederationSyncNoStrategyStillErrorsWithGuidance pins GH#5564 AC-5: the
+// strategy dispatch must not change the no-strategy contract. A genuine
+// conflict without --strategy is an error that names --strategy, marks
+// neither Merged nor Pushed, and leaves the local value and a clean merge
+// state behind.
+func TestFederationSyncNoStrategyStillErrorsWithGuidance(t *testing.T) {
+	const issueID = "fsspeer-nostrat"
+	f := setupSyncPeerClone(t, issueID)
+	f.divergeRetitles(t, issueID)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	result, err := f.store.Sync(ctx, "peer", "")
+	if err == nil {
+		t.Fatal("Sync without --strategy should error on a genuine conflict")
+	}
+	if !strings.Contains(err.Error(), "--strategy") {
+		t.Errorf("error = %v, want it to mention the --strategy escape hatch", err)
+	}
+	if result == nil || result.Merged || result.Pushed {
+		t.Errorf("result = %+v; a refused sync must not report Merged or Pushed", result)
+	}
+	if got := titleOf(t, f.db, ctx, issueID); got != "ours" {
+		t.Errorf("title = %q after refused sync, want the local %q", got, "ours")
+	}
+	assertSyncConcluded(t, f.db, ctx)
 }

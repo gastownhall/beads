@@ -1281,6 +1281,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd federation sync --strategy ours|theirs` now resolves genuine merge
+  conflicts** (#5564). Sync merged the peer branch through a bare
+  `DOLT_MERGE` on the shared connection pool, so Dolt rejected any real
+  conflict (Error 1105) before the strategy could apply — the same shape
+  `bd vc merge --strategy` had before #4992 — and the resolve/commit tail
+  behind it never ran. An explicit strategy now dispatches to the
+  pinned-session merge/resolve/repair/commit sequence (including repairable
+  FK cascade violations and config rows), concludes the merge, and pushes
+  the result to the peer, on both the server and embedded engines. Without
+  `--strategy` a conflicted sync still fails naming `--strategy`; the help
+  text no longer promises a pause-for-manual-resolution that path never
+  delivered.
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
