@@ -1362,6 +1362,26 @@ var rootCmd = &cobra.Command{
 		_ = cmd.Help() // Help() always returns nil for cobra commands
 	},
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) (retErr error) {
+		// `bd -C <dir> init` is refused up front (GH#8283): init creates a
+		// project in the working directory — hooks, agent files, the beads
+		// database — while -C selects an existing project's database, so the
+		// two name different projects; rather than split init's writes, bd
+		// names the cd that runs it in the selected directory. The check is
+		// by identity, not Name(): `bd backup init` and `bd notion init`
+		// also have Name() == "init", and only the top-level init creates a
+		// project. First in this hook, so nothing — not even metrics
+		// bootstrap or env routing — runs before the refusal; --help never
+		// reaches a PreRun, so it keeps working.
+		if cmd == initCmd && strings.TrimSpace(changeDir) != "" {
+			target, absErr := filepath.Abs(changeDir)
+			if absErr != nil {
+				target = changeDir
+			}
+			key, note := remedy.CommandArg(runtime.GOOS, target, "<dir>")
+			return HandleErrorWithHint(
+				"bd init does not support -C (init creates a project in the working directory)",
+				"Run: cd "+key+" && bd init"+note)
+		}
 		if err := clearWorktreeGitRoutingEnv(cmd); err != nil {
 			return err
 		}

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -222,4 +223,94 @@ func TestIsPreviewCommand(t *testing.T) {
 			}
 		})
 	}
+}
+
+// runRootForTest executes argv against the real root command the way bd's
+// main does, capturing stderr and the execution error, with the command
+// tree's flags reset afterwards.
+func runRootForTest(t *testing.T, argv []string) (string, error) {
+	t.Helper()
+	var execErr error
+	stderr := captureStderr(t, func() {
+		rootCmd.SetArgs(argv)
+		defer rootCmd.SetArgs(nil)
+		defer resetCommandFlags(rootCmd)
+		_, execErr = rootCmd.ExecuteC()
+	})
+	return stderr, execErr
+}
+
+// TestInitThroughRootCmd_RejectsChangeDir pins #8283's init ruling: `bd -C
+// <dir> init` is refused in the root command's pre-run, before anything
+// runs — whatever the target holds and whatever init flags were given —
+// with the cd remedy that runs init in the selected directory. `bd -C <dir>
+// init --help` keeps showing init's help.
+func TestInitThroughRootCmd_RejectsChangeDir(t *testing.T) {
+	launch := t.TempDir()
+	t.Chdir(launch)
+	t.Cleanup(func() { changeDir = "" })
+
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, target string)
+		extra []string
+	}{
+		{name: "fresh target"},
+		{name: "existing project", setup: func(t *testing.T, target string) {
+			if err := os.MkdirAll(filepath.Join(target, ".beads"), 0o755); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(target, ".beads", "metadata.json"), []byte(primeTestMetadata), 0o644); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+		}},
+		{name: "with init flags", extra: []string{"--force", "--skip-agents", "--skip-hooks"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target := filepath.Join(launch, "target")
+			if tc.setup != nil {
+				tc.setup(t, target)
+			} else if err := os.MkdirAll(target, 0o755); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+			argv := append([]string{"-C", target, "init"}, tc.extra...)
+
+			stderr, err := runRootForTest(t, argv)
+			if err == nil {
+				t.Errorf("bd -C <dir> init was not refused; stderr:\n%s", stderr)
+			}
+			if !strings.Contains(stderr, "does not support -C") {
+				t.Errorf("bd -C <dir> init refusal does not say -C is unsupported; stderr:\n%s", stderr)
+			}
+			if !strings.Contains(stderr, "cd "+target) {
+				t.Errorf("bd -C <dir> init refusal does not name the cd remedy for the target; stderr:\n%s", stderr)
+			}
+			// The refusal came before init ran: no project appears in the
+			// working directory, and none is added to the target.
+			if _, err := os.Stat(filepath.Join(launch, ".beads")); !os.IsNotExist(err) {
+				t.Errorf("bd -C <dir> init created a project in the working directory (stat err=%v)", err)
+			}
+			if _, err := os.Stat(filepath.Join(target, ".beads", "AGENTS.md")); err == nil {
+				t.Errorf("bd -C <dir> init wrote into the target's project")
+			}
+		})
+	}
+
+	t.Run("help is not refused", func(t *testing.T) {
+		target := filepath.Join(launch, "target")
+		var execErr error
+		out := captureStdout(t, func() error {
+			rootCmd.SetArgs([]string{"-C", target, "init", "--help"})
+			defer rootCmd.SetArgs(nil)
+			defer resetCommandFlags(rootCmd)
+			_, execErr = rootCmd.ExecuteC()
+			return nil
+		})
+		if execErr != nil {
+			t.Fatalf("bd -C <dir> init --help failed: %v", execErr)
+		}
+		if !strings.Contains(out, "Usage:") {
+			t.Errorf("bd -C <dir> init --help did not print init's help; output:\n%s", out)
+		}
+	})
 }
