@@ -1576,3 +1576,131 @@ func TestFindBeadsDir_JJSecondaryMetadatalessStoreYieldsToPrimary(t *testing.T) 
 		t.Errorf("FindBeadsDirFrom(subDir) = %q, want primary workspace .beads %q", got, primaryBeadsDir)
 	}
 }
+
+// TestFindDatabasePath_WorktreeYieldedStoreNotRediscovered pins the
+// readoption half of GH#6552: when a metadata-less worktree store yields to
+// a shared workspace that is recognized by metadata but owns no database
+// directory yet (fresh checkout, data never fetched), neither the lenient
+// branch nor the trailing ancestor walk quietly readopts the yielded phantom
+// store, and discovery does not materialize anything on disk. The jj
+// secondary layout is the same decision's edge case.
+func TestFindDatabasePath_WorktreeYieldedStoreNotRediscovered(t *testing.T) {
+	unsetDiscoveryEnvForTest(t)
+
+	resolveLoose := func(p string) string {
+		if p == "" {
+			return ""
+		}
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return r
+		}
+		return filepath.Clean(p)
+	}
+
+	fx := newGH6552Fixture(t,
+		`{"backend":"dolt","dolt_mode":"embedded","dolt_database":"myproject"}`,
+		"", // no store directory in the shared .beads: recognized by metadata alone
+		"beads",
+	)
+	mainBeadsDirResolved := resolveForTest(t, fx.mainBeadsDir)
+	worktreeDirResolved := resolveForTest(t, fx.worktreeDir)
+
+	for _, cwd := range []string{fx.worktreeDir, filepath.Join(fx.worktreeDir, "src", "pkg")} {
+		if err := os.MkdirAll(cwd, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(cwd)
+		git.ResetCaches()
+
+		if got := FindBeadsDir(); resolveForTest(t, got) != mainBeadsDirResolved {
+			t.Errorf("cwd %s: FindBeadsDir() = %q, want shared workspace .beads %q", cwd, got, fx.mainBeadsDir)
+		}
+		if got := FindDatabasePath(); got != "" &&
+			strings.HasPrefix(resolveLoose(got), worktreeDirResolved+string(os.PathSeparator)) {
+			t.Errorf("cwd %s: FindDatabasePath() = %q readopts the yielded worktree store; want \"\" or a path outside the worktree", cwd, got)
+		}
+	}
+
+	// The jj secondary layout: primary recognized by metadata with no store
+	// directory, secondary holding the metadata-less phantom.
+	jjTmp, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	primaryDir := filepath.Join(jjTmp, "primary")
+	if err := os.MkdirAll(filepath.Join(primaryDir, ".jj", "repo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	secondaryDir := filepath.Join(primaryDir, "workspaces", "secondary")
+	if err := os.MkdirAll(filepath.Join(secondaryDir, ".jj"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(secondaryDir, ".jj", "repo"),
+		[]byte(filepath.Join(primaryDir, ".jj", "repo")+"\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := func() error {
+		cmd := exec.Command("git", "init")
+		cmd.Dir = primaryDir
+		return cmd.Run()
+	}(); err != nil {
+		t.Skipf("git not available: %v", err)
+	}
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := gitCommand(args...)
+		cmd.Dir = dir
+		out, gitErr := cmd.CombinedOutput()
+		if gitErr != nil {
+			t.Fatalf("git %v in %s: %v\n%s", args, dir, gitErr, out)
+		}
+	}
+	runGit(primaryDir, "config", "user.email", "test@example.com")
+	runGit(primaryDir, "config", "user.name", "Test User")
+
+	primaryBeadsDir := filepath.Join(primaryDir, ".beads")
+	if err := os.MkdirAll(primaryBeadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(primaryBeadsDir, "metadata.json"),
+		[]byte(`{"backend":"dolt","dolt_mode":"embedded","dolt_database":"myproject"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(primaryDir, "README.md"), []byte("# Test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(primaryDir, "add", "README.md")
+	runGit(primaryDir, "commit", "-m", "initial")
+	secondaryBeadsDir := filepath.Join(secondaryDir, ".beads")
+	if err := os.MkdirAll(filepath.Join(secondaryBeadsDir, "embeddeddolt", "beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(secondaryDir)
+	git.ResetCaches()
+
+	primaryBeadsDirResolved := resolveForTest(t, primaryBeadsDir)
+	if got := FindBeadsDir(); resolveForTest(t, got) != primaryBeadsDirResolved {
+		t.Errorf("jj secondary: FindBeadsDir() = %q, want primary workspace .beads %q", got, primaryBeadsDir)
+	}
+	if got := FindDatabasePath(); got != "" &&
+		strings.HasPrefix(resolveLoose(got), resolveLoose(secondaryDir)+string(os.PathSeparator)) {
+		t.Errorf("jj secondary: FindDatabasePath() = %q readopts the yielded secondary store; want \"\" or a path outside the secondary", got)
+	}
+
+	// Discovery is read-only: the shared workspace's absent store directory
+	// stays absent, and the yielded local store is neither deleted nor given
+	// metadata.
+	if _, err := os.Stat(filepath.Join(fx.mainBeadsDir, "embeddeddolt")); !os.IsNotExist(err) {
+		t.Errorf("shared .beads materialized a store directory during discovery (stat err: %v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(primaryBeadsDir, "embeddeddolt")); !os.IsNotExist(err) {
+		t.Errorf("jj primary .beads materialized a store directory during discovery (stat err: %v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(fx.worktreeBeadsDir, "metadata.json")); err == nil {
+		t.Error("yielded worktree store gained a metadata.json during discovery")
+	}
+	if _, err := os.Stat(filepath.Join(fx.worktreeBeadsDir, "embeddeddolt", "beads")); err != nil {
+		t.Errorf("yielded worktree store was modified or removed: %v", err)
+	}
+}
