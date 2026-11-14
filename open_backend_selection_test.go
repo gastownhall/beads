@@ -834,3 +834,35 @@ func TestOpenBestAvailableProxiedServerRefusalLeavesWorkspaceUnchanged(t *testin
 		}
 	}
 }
+
+// TestOpenBestAvailableProxiedServerRefusalIgnoresEnvForcedServerMode pins
+// AC-3: BEADS_DOLT_SERVER_MODE and BEADS_DOLT_SHARED_SERVER make
+// IsDoltServerMode true ahead of dolt_mode, but a proxied workspace is still
+// refused rather than dialed behind its proxy's back (here the dial would
+// fail on 127.0.0.1:1 with a connection error, not the sentinel).
+func TestOpenBestAvailableProxiedServerRefusalIgnoresEnvForcedServerMode(t *testing.T) {
+	for _, env := range []struct{ name, serverMode, sharedServer string }{
+		{"BEADS_DOLT_SERVER_MODE", "1", ""},
+		{"BEADS_DOLT_SHARED_SERVER", "", "1"},
+	} {
+		for _, file := range []string{"metadata.json", "config.json"} {
+			for name, open := range bestAvailableOpens {
+				t.Run(env.name+"/"+file+"/"+name, func(t *testing.T) {
+					isolateProxiedServerEnv(t, env.serverMode, env.sharedServer)
+					root, beadsDir := writeProxiedServerWorkspace(t, file, "dolt", "proxied-server")
+					before := workspaceTreeDigest(t, root)
+					gotStore, err := openClosing(t, open, beadsDir)
+					if gotStore {
+						t.Errorf("%s with %s=1 returned a store for a proxied-server workspace (err=%v)", name, env.name, err)
+					}
+					if !errors.Is(err, beads.ErrProxiedServerUnsupported) {
+						t.Fatalf("%s with %s=1 error = %v, want errors.Is ErrProxiedServerUnsupported", name, env.name, err)
+					}
+					if after := workspaceTreeDigest(t, root); !maps.Equal(after, before) {
+						t.Fatalf("%s with %s=1 changed the workspace: before %v, after %v", name, env.name, before, after)
+					}
+				})
+			}
+		}
+	}
+}
