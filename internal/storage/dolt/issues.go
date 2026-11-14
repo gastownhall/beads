@@ -128,11 +128,15 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 				issue.Ephemeral = true
 			}
 		}
+		assigned := issueops.RecordAssignedIDs(issues...)
 		var result issueops.CreateIssuesResult
 		if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+			assigned.Reset()
 			var err error
-			result, err = issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
-			return err
+			if result, err = issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts); err != nil {
+				return err
+			}
+			return s.runCreateAttemptHook(ctx, issues)
 		}); err != nil {
 			return err
 		}
@@ -141,11 +145,17 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 		return nil
 	}
 
+	// A replayed attempt mints afresh, and re-derives the comment ids and
+	// default dependency owners that follow a minted id (bd-t4h0n7).
+	assigned := issueops.RecordAssignedIDs(issues...)
 	var result issueops.CreateIssuesResult
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		assigned.Reset()
 		var err error
-		result, err = issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
-		return err
+		if result, err = issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts); err != nil {
+			return err
+		}
+		return s.runCreateAttemptHook(ctx, issues)
 	}); err != nil {
 		return err
 	}
