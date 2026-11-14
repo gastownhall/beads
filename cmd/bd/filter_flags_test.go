@@ -710,4 +710,48 @@ func TestGitLabRepeatedFiltersReachCLIFilter(t *testing.T) {
 	if filter.Assignee != "alice" {
 		t.Errorf("buildCLIFilter().Assignee = %q, want %q", filter.Assignee, "alice")
 	}
+
+	// The load must re-read the flags every run: after the harness resets the
+	// tree and a later invocation passes no filter flags, the globals carry
+	// no stale union from this parse. A pflag-bound global would have kept
+	// the flags' own reset; the explicit load path has to clear on its own.
+	resetCommandFlags(rootCmd)
+	if err := parseFilterFlags(t, "bd gitlab sync", nil); err != nil {
+		t.Fatalf("ParseFlags after reset: %v", err)
+	}
+	loadGitLabFilterFlags(commandByPath(rootCmd, "bd gitlab sync").Flags())
+	if gitlabFilterLabel != "" {
+		t.Errorf("gitlabFilterLabel = %q after a filter-less run, want cleared", gitlabFilterLabel)
+	}
+	if gitlabTypeFilter != "" {
+		t.Errorf("gitlabTypeFilter = %q after a filter-less run, want cleared", gitlabTypeFilter)
+	}
+	if gitlabFilterAssignee != "" {
+		t.Errorf("gitlabFilterAssignee = %q after a filter-less run, want cleared", gitlabFilterAssignee)
+	}
+	if buildCLIFilter() != nil {
+		t.Error("buildCLIFilter() != nil with no filters loaded")
+	}
+}
+
+// TestNotionStateFilterFeedsSyncOptions pins the read that populates
+// tracker.SyncOptions.State: the --state flag became a custom once value
+// (GH#6548), so the old pflag global binding went and runNotionSync reads
+// the flag back with GetString when building the options (notion.go). The
+// round trip must return exactly what the user passed, and the fresh
+// default must still read "all". Guard by design: the GetString load has
+// existed since the flag was converted, so no base-red exists.
+func TestNotionStateFilterFeedsSyncOptions(t *testing.T) {
+	if err := parseFilterFlags(t, "bd notion sync", nil); err != nil {
+		t.Fatalf("ParseFlags (fresh): %v", err)
+	}
+	if got := filterFlagValue(t, "bd notion sync", "state"); got != "all" {
+		t.Errorf("fresh --state reads %q, want default all", got)
+	}
+	if err := parseFilterFlags(t, "bd notion sync", []string{"--state", "open"}); err != nil {
+		t.Fatalf("ParseFlags --state open: %v", err)
+	}
+	if got := filterFlagValue(t, "bd notion sync", "state"); got != "open" {
+		t.Errorf("--state open reads %q, want open (this GetString is what tracker.SyncOptions.State receives)", got)
+	}
 }
