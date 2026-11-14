@@ -421,3 +421,133 @@ func TestFilterFlagDefaultsSurviveReset(t *testing.T) {
 		t.Fatal("no reviewed filter flag has a non-empty default; nothing was checked")
 	}
 }
+
+// filterFlagNames are the filter names the sweep reviewed. Filters with other
+// names (gitlab --project/--milestone, count --title, ...) are out of scope.
+var filterFlagNames = []string{"status", "state", "id", "type", "assignee", "label"}
+
+type filterFlagExemption struct {
+	path, flag, reason string
+}
+
+// filterFlagSetterExemptions are plain string flags of the reviewed names that
+// SET a value or name ONE action target instead of filtering a result set.
+// For a setter, last-one-wins is the shell's override idiom
+// (`bd create $DEFAULTS --type bug`) and narrows nothing.
+var filterFlagSetterExemptions = []filterFlagExemption{
+	{"bd create", "type", "sets the new issue's type"},
+	{"bd create", "status", "sets the new issue's initial status"},
+	{"bd create", "id", "sets the new issue's explicit id"},
+	{"bd create", "assignee", "sets the new issue's assignee"},
+	{"bd update", "status", "sets the issue's new status"},
+	{"bd update", "type", "sets the issue's new type"},
+	{"bd update", "assignee", "sets the issue's new assignee"},
+	{"bd q", "type", "sets the created issue's type"},
+	{"bd dep add", "type", "sets the new dependency's type"},
+	{"bd link", "type", "sets the new dependency's type"},
+	{"bd gate create", "type", "sets the new gate's type"},
+	{"bd mol bond", "type", "sets the bond type"},
+	{"bd mol pour", "assignee", "sets the poured root's assignee"},
+	{"bd audit label", "label", "records one label value on the entry"},
+	{"bd admin compact", "id", "names the one issue to compact"},
+}
+
+// filterFlagKind classifies a string-typed flag by its value.
+func filterFlagKind(fl *pflag.Flag) string {
+	switch fl.Value.(type) {
+	case *unionStringFlag:
+		return string(unionFilter)
+	case *onceStringFlag:
+		return string(onceFilter)
+	default:
+		return "plain"
+	}
+}
+
+type filterFlagRegistration struct {
+	path, flag, kind string
+}
+
+// stringFilterFlagRegistrations walks root's tree path by path (hidden
+// commands and copied aliases included; a flag set shared by two paths is
+// reported under both) and returns every string-typed flag of the reviewed
+// names, declared locally or persistently on that command.
+func stringFilterFlagRegistrations(root *cobra.Command) []filterFlagRegistration {
+	var out []filterFlagRegistration
+	for path, cmd := range commandsByPath(root) {
+		seen := map[string]bool{}
+		visit := func(fl *pflag.Flag) {
+			if seen[fl.Name] || !slices.Contains(filterFlagNames, fl.Name) || fl.Value.Type() != "string" {
+				return
+			}
+			seen[fl.Name] = true
+			out = append(out, filterFlagRegistration{path, fl.Name, filterFlagKind(fl)})
+		}
+		cmd.PersistentFlags().VisitAll(visit)
+		cmd.LocalNonPersistentFlags().VisitAll(visit)
+	}
+	slices.SortFunc(out, func(a, b filterFlagRegistration) int {
+		return strings.Compare(a.path+" --"+a.flag, b.path+" --"+b.flag)
+	})
+	return out
+}
+
+// TestNoPlainStringFilterFlagSurvives is the fail-closed invariant: a string
+// flag of a reviewed name is a union or once filter, or a reasoned setter
+// exemption. A new plain-string filter breaks this test the day it lands.
+func TestNoPlainStringFilterFlagSurvives(t *testing.T) {
+	exempt := map[string]bool{}
+	for _, e := range filterFlagSetterExemptions {
+		exempt[e.path+" --"+e.flag] = true
+	}
+	regs := stringFilterFlagRegistrations(rootCmd)
+	if len(regs) == 0 {
+		t.Fatal("the command-tree walk found no string flags of the reviewed names")
+	}
+	var survivors []string
+	for _, r := range regs {
+		if r.kind == "plain" && !exempt[r.path+" --"+r.flag] {
+			survivors = append(survivors, r.path+" --"+r.flag)
+		}
+	}
+	if len(survivors) > 0 {
+		t.Errorf("%d plain-string filter flag(s) keep only their last occurrence; register them with addUnionFilterFlag/addOnceFilterFlag (or, for a setter, add a reasoned exemption):\n  %s",
+			len(survivors), strings.Join(survivors, "\n  "))
+	}
+}
+
+// TestFilterFlagClassification checks the tree against the reviewed table in
+// both directions: every reviewed row is registered with exactly the reviewed
+// class, and every union/once value in the tree has a reviewed row. Deriving
+// the class from the registered value alone could not catch a wrong choice
+// (count --status unioned like search --status, gate check --type exempted
+// like gate create --type).
+func TestFilterFlagClassification(t *testing.T) {
+	got := map[string]string{}
+	for _, r := range stringFilterFlagRegistrations(rootCmd) {
+		got[r.path+" --"+r.flag] = r.kind
+	}
+	reviewed := map[string]bool{}
+	for _, r := range reviewedFilterFlags {
+		key := r.path + " --" + r.flag
+		if reviewed[key] {
+			t.Errorf("%s is listed twice in reviewedFilterFlags", key)
+		}
+		reviewed[key] = true
+		kind, ok := got[key]
+		switch {
+		case !ok:
+			t.Errorf("%s: reviewed as %s but not registered as a string flag", key, r.class)
+		case kind != string(r.class):
+			t.Errorf("%s: registered as %s, reviewed as %s", key, kind, r.class)
+		}
+	}
+	for key, kind := range got {
+		if kind != "plain" && !reviewed[key] {
+			t.Errorf("%s: registered as a %s filter but has no row in reviewedFilterFlags; review its consumer and add one", key, kind)
+		}
+	}
+	if len(reviewedFilterFlags) != 34 {
+		t.Errorf("reviewedFilterFlags has %d rows, want 34 (bd list's 5 plus the 29 swept command-path/flag pairs); update this count only with a reviewed row", len(reviewedFilterFlags))
+	}
+}
