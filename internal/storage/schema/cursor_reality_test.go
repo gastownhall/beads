@@ -1,9 +1,13 @@
 package schema
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"maps"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -91,6 +95,28 @@ func allSentinelTablesExcept(tables ...string) map[string]bool {
 	return present
 }
 
+// allSentinelColumns is allSentinelTables for the column sentinels: every
+// "table.column" key stubSentinelColumns reads, all present. The stub reads an
+// omitted key as absent, so a healthy shape must name every sentinel column or
+// it silently contradicts the cursor at the omitted one's floor.
+func allSentinelColumns() map[string]bool {
+	present := make(map[string]bool, len(ignoredSource.sentinelColumns))
+	for _, sc := range ignoredSource.sentinelColumns {
+		present[sc.table+"."+sc.column] = true
+	}
+	return present
+}
+
+// allSentinelColumnsExcept is allSentinelColumns with the named "table.column"
+// keys absent.
+func allSentinelColumnsExcept(columns ...string) map[string]bool {
+	present := allSentinelColumns()
+	for _, column := range columns {
+		delete(present, column)
+	}
+	return present
+}
+
 // TestCursorRealityFloor is the gh 5033 / gh 4356 regression: the cursor is a
 // claim about the schema, and a claim the schema contradicts must not be
 // believed. Before this, a database whose clone-local wisp tables were absent
@@ -149,15 +175,54 @@ func TestCursorRealityFloor(t *testing.T) {
 		{
 			name:        "leases table absent",
 			present:     allSentinelTables(),
-			columns:     map[string]bool{},
+			columns:     allSentinelColumnsExcept("leases.granted_node"),
 			wantFloor:   11,
 			wantLimited: true,
 		},
 		{
 			name:        "leases granted_node absent",
 			present:     allSentinelTables(),
+			columns:     allSentinelColumnsExcept("leases.granted_node"),
+			wantFloor:   11,
+			wantLimited: true,
+		},
+		{
+			// gh 5257: both wisp sentinel tables corroborate the cursor, but
+			// the column ignored/0006 adds to one of them is absent. Floor 14
+			// keeps the pre-0015 repair (ensureWispIsBlockedForRecompute)
+			// pending, so the replay restores the column and its index and
+			// 0015 recomputes the flags without reaching back to 0007.
+			name:        "wisps is_blocked absent",
+			present:     allSentinelTables(),
+			columns:     allSentinelColumnsExcept("wisps.is_blocked"),
+			wantFloor:   14,
+			wantLimited: true,
+		},
+		{
+			// Both column sentinels contradicted: the minimum wins within the
+			// column loop, whichever order the slice lists them in.
+			name:        "leases granted_node and wisps is_blocked both absent",
+			present:     allSentinelTables(),
 			columns:     map[string]bool{},
 			wantFloor:   11,
+			wantLimited: true,
+		},
+		{
+			// Across kinds: the column floor (14) is below the events floor
+			// (18), so it wins.
+			name:        "events absent and wisps is_blocked absent",
+			present:     allSentinelTablesExcept("events"),
+			columns:     allSentinelColumnsExcept("wisps.is_blocked"),
+			wantFloor:   14,
+			wantLimited: true,
+		},
+		{
+			// A missing wisp sentinel table still floors at 0 and short-circuits
+			// before any column probe (TestSentinelTableAbsenceSkipsColumnProbes).
+			name:        "wisps absent and wisps is_blocked absent",
+			present:     allSentinelTablesExcept("wisps"),
+			columns:     allSentinelColumnsExcept("wisps.is_blocked"),
+			wantFloor:   0,
 			wantLimited: true,
 		},
 		{
@@ -172,28 +237,28 @@ func TestCursorRealityFloor(t *testing.T) {
 		{
 			name:        "schema corroborates the cursor",
 			present:     allSentinelTables(),
-			columns:     map[string]bool{"leases.granted_node": true},
+			columns:     allSentinelColumns(),
 			wantFloor:   0,
 			wantLimited: false,
 		},
 		{
 			name:        "events absent",
 			present:     allSentinelTablesExcept("events"),
-			columns:     map[string]bool{"leases.granted_node": true},
+			columns:     allSentinelColumns(),
 			wantFloor:   18,
 			wantLimited: true,
 		},
 		{
 			name:        "bd_events_journal absent",
 			present:     allSentinelTablesExcept("bd_events_journal"),
-			columns:     map[string]bool{"leases.granted_node": true},
+			columns:     allSentinelColumns(),
 			wantFloor:   21,
 			wantLimited: true,
 		},
 		{
 			name:        "bd_events_seq absent",
 			present:     allSentinelTablesExcept("bd_events_seq"),
-			columns:     map[string]bool{"leases.granted_node": true},
+			columns:     allSentinelColumns(),
 			wantFloor:   21,
 			wantLimited: true,
 		},
@@ -209,7 +274,7 @@ func TestCursorRealityFloor(t *testing.T) {
 			// from silently regressing to "last absent sentinel wins".
 			name:        "events and bd_events_journal both absent",
 			present:     allSentinelTablesExcept("events", "bd_events_journal"),
-			columns:     map[string]bool{"leases.granted_node": true},
+			columns:     allSentinelColumns(),
 			wantFloor:   18,
 			wantLimited: true,
 		},
@@ -221,7 +286,7 @@ func TestCursorRealityFloor(t *testing.T) {
 			// whichever ran first.
 			name:        "events absent and leases granted_node absent",
 			present:     allSentinelTablesExcept("events"),
-			columns:     map[string]bool{},
+			columns:     allSentinelColumnsExcept("leases.granted_node"),
 			wantFloor:   11,
 			wantLimited: true,
 		},
@@ -289,7 +354,7 @@ func TestCurrentVersionClampsToSentinelFloor(t *testing.T) {
 			name:    "release lineage upgrade, cursor 11, leases absent",
 			raw:     11,
 			present: allSentinelTables(),
-			columns: map[string]bool{},
+			columns: allSentinelColumnsExcept("leases.granted_node"),
 			want:    11,
 		},
 		{
@@ -299,14 +364,14 @@ func TestCurrentVersionClampsToSentinelFloor(t *testing.T) {
 			name:    "ordinal collision, cursor 17, column absent",
 			raw:     17,
 			present: allSentinelTables(),
-			columns: map[string]bool{},
+			columns: allSentinelColumnsExcept("leases.granted_node"),
 			want:    11,
 		},
 		{
 			name:    "at-latest cursor, column absent",
 			raw:     latest,
 			present: allSentinelTables(),
-			columns: map[string]bool{},
+			columns: allSentinelColumnsExcept("leases.granted_node"),
 			want:    11,
 		},
 		{
@@ -315,7 +380,7 @@ func TestCurrentVersionClampsToSentinelFloor(t *testing.T) {
 			name:    "cursor below the floor is untouched",
 			raw:     8,
 			present: allSentinelTables(),
-			columns: map[string]bool{},
+			columns: allSentinelColumnsExcept("leases.granted_node"),
 			want:    8,
 		},
 		{
@@ -338,28 +403,28 @@ func TestCurrentVersionClampsToSentinelFloor(t *testing.T) {
 			name:    "fully corroborated cursor is believed as read",
 			raw:     latest,
 			present: allSentinelTables(),
-			columns: map[string]bool{"leases.granted_node": true},
+			columns: allSentinelColumns(),
 			want:    latest,
 		},
 		{
 			name:    "events absent, at-latest cursor",
 			raw:     latest,
 			present: allSentinelTablesExcept("events"),
-			columns: map[string]bool{"leases.granted_node": true},
+			columns: allSentinelColumns(),
 			want:    18,
 		},
 		{
 			name:    "bd_events_journal absent, at-latest cursor",
 			raw:     latest,
 			present: allSentinelTablesExcept("bd_events_journal"),
-			columns: map[string]bool{"leases.granted_node": true},
+			columns: allSentinelColumns(),
 			want:    21,
 		},
 		{
 			name:    "bd_events_seq absent, at-latest cursor",
 			raw:     latest,
 			present: allSentinelTablesExcept("bd_events_seq"),
-			columns: map[string]bool{"leases.granted_node": true},
+			columns: allSentinelColumns(),
 			want:    21,
 		},
 		{
@@ -369,8 +434,68 @@ func TestCurrentVersionClampsToSentinelFloor(t *testing.T) {
 			name:    "events absent and leases column absent, at-latest cursor",
 			raw:     latest,
 			present: allSentinelTablesExcept("events"),
+			columns: allSentinelColumnsExcept("leases.granted_node"),
+			want:    11,
+		},
+		// gh 5257: wisps.is_blocked absent behind a cursor that claims
+		// ignored/0006 ran. Above 14 the cursor clamps to 14, which leaves the
+		// pre-0015 repair pending; at or below 14 the cursor already has that
+		// repair (or the pre-0007 one) pending and is never raised.
+		{
+			name:    "wisps is_blocked absent, at-latest cursor",
+			raw:     latest,
+			present: allSentinelTables(),
+			columns: allSentinelColumnsExcept("wisps.is_blocked"),
+			want:    14,
+		},
+		{
+			name:    "wisps is_blocked absent, cursor 15",
+			raw:     15,
+			present: allSentinelTables(),
+			columns: allSentinelColumnsExcept("wisps.is_blocked"),
+			want:    14,
+		},
+		{
+			name:    "wisps is_blocked absent, cursor 14",
+			raw:     14,
+			present: allSentinelTables(),
+			columns: allSentinelColumnsExcept("wisps.is_blocked"),
+			want:    14,
+		},
+		{
+			name:    "wisps is_blocked absent, cursor 11",
+			raw:     11,
+			present: allSentinelTables(),
+			columns: allSentinelColumnsExcept("wisps.is_blocked"),
+			want:    11,
+		},
+		{
+			name:    "wisps is_blocked absent, cursor 6",
+			raw:     6,
+			present: allSentinelTables(),
+			columns: allSentinelColumnsExcept("wisps.is_blocked"),
+			want:    6,
+		},
+		{
+			name:    "both column sentinels absent, at-latest cursor",
+			raw:     latest,
+			present: allSentinelTables(),
 			columns: map[string]bool{},
 			want:    11,
+		},
+		{
+			name:    "events absent and wisps is_blocked absent, at-latest cursor",
+			raw:     latest,
+			present: allSentinelTablesExcept("events"),
+			columns: allSentinelColumnsExcept("wisps.is_blocked"),
+			want:    14,
+		},
+		{
+			name:    "wisp tables absent and wisps is_blocked absent, at-latest cursor",
+			raw:     latest,
+			present: map[string]bool{},
+			columns: allSentinelColumnsExcept("wisps.is_blocked"),
+			want:    0,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -427,7 +552,7 @@ func TestFlooredTableProbeErrorIsNotTreatedAsContradicted(t *testing.T) {
 				}
 				return present[table], nil
 			}
-			columnProbed := stubSentinelColumns(t, map[string]bool{"leases.granted_node": true}, nil)
+			columnProbed := stubSentinelColumns(t, allSentinelColumns(), nil)
 
 			_, limited, err := ignoredSource.cursorRealityFloor(context.Background(), nil)
 			if !errors.Is(err, boom) {
@@ -499,26 +624,21 @@ func TestSentinelTablesAreCreatedByTheSeries(t *testing.T) {
 	}
 }
 
-// TestSentinelColumnsAreCreatedByTheSeries is the column-sentinel analogue of
-// TestSentinelTablesAreCreatedByTheSeries, plus the floor-honesty check the
-// replay clamp depends on. Two things have to hold for every sentinel column:
-//
-//   - The series must ADD the column, and must CREATE the table carrying it.
-//     A sentinel the series cannot repair would be rejected on every open —
-//     a permanent re-migration loop in the field.
-//   - Both of those files must sit strictly ABOVE the sentinel's replayFloor,
-//     or the clamped replay would skip the very migrations that heal it. That
-//     is what makes floor 11 correct today (0012 creates leases, 0016 adds
-//     granted_node) and what makes a future renumbering of either file fail
-//     here instead of stranding users.
-//
-// Versions are parsed per file rather than matched against the concatenated
-// series precisely so the floor can be checked, not just the existence.
-func TestSentinelColumnsAreCreatedByTheSeries(t *testing.T) {
-	if len(ignoredSource.sentinelColumns) == 0 {
-		t.Fatal("ignoredSource has no sentinel columns; the granted_node guard is inert")
-	}
+// sentinelColumnRepairHealers names, per "table.column" sentinel, the
+// pre-migration repair (preMigrationRepairs) that adds the column when the
+// migration that originally adds it sits at or below the sentinel's floor.
+// wisps.is_blocked is added by ignored/0006, but floor 14 keeps 0006 (and
+// frozen 0007's bare recompute) out of the replay; the column comes back from
+// the repair registered before ignored/0015 instead, which
+// TestIgnored15RecomputeHardFailsWithoutIsBlockedRepair exercises against a
+// wisps table missing the column and its index.
+var sentinelColumnRepairHealers = map[string]func(context.Context, DBConn) error{
+	"wisps.is_blocked": ensureWispIsBlockedForRecompute,
+}
 
+// ignoredSeriesBodies maps each ignored migration version to its frozen body.
+func ignoredSeriesBodies(t *testing.T) map[int]string {
+	t.Helper()
 	bodies := make(map[int]string)
 	for _, mf := range ignoredSource.list() {
 		blob, err := ignoredSource.files.ReadFile(ignoredSource.dir + "/" + mf.name)
@@ -527,21 +647,39 @@ func TestSentinelColumnsAreCreatedByTheSeries(t *testing.T) {
 		}
 		bodies[mf.version] = string(blob)
 	}
+	return bodies
+}
 
-	// findVersion returns the lowest migration version whose body matches,
-	// or 0 when nothing does.
-	findVersion := func(re *regexp.Regexp) int {
-		found := 0
+// sentinelColumnFloorProblems reports every way sc's replayFloor fails the
+// schemaSentinelColumn contract against the given series bodies and repair
+// registry. It is a function of its inputs, not of the package registries, so
+// the negative cases below can hand it a broken floor or a registry missing
+// the healer and see the invariant fail.
+func sentinelColumnFloorProblems(
+	sc schemaSentinelColumn,
+	bodies map[int]string,
+	repairs map[repairKey]func(context.Context, DBConn) error,
+	healers map[string]func(context.Context, DBConn) error,
+) []string {
+	// versionsMatching returns every version whose body matches, ascending.
+	versionsMatching := func(re *regexp.Regexp) []int {
+		var found []int
 		for version, body := range bodies {
-			if !re.MatchString(body) {
-				continue
-			}
-			if found == 0 || version < found {
-				found = version
+			if re.MatchString(body) {
+				found = append(found, version)
 			}
 		}
+		slices.Sort(found)
 		return found
 	}
+	lowest := func(versions []int) int {
+		if len(versions) == 0 {
+			return 0
+		}
+		return versions[0]
+	}
+	key := sc.table + "." + sc.column
+	var problems []string
 
 	// The floor exists to exclude ignored/0007's unguarded recompute, whose
 	// bare `UPDATE wisps SET is_blocked = 0` re-fires wisps.updated_at's
@@ -549,47 +687,119 @@ func TestSentinelColumnsAreCreatedByTheSeries(t *testing.T) {
 	// `is_blocked = 0, updated_at = updated_at` and deliberately does not
 	// match. Pinning the file rather than a bare literal keeps the floor
 	// honest if the pair is ever renumbered.
-	unguarded := findVersion(regexp.MustCompile(`(?i)UPDATE\s+wisps\s+SET\s+is_blocked\s*=\s*0\s*;`))
+	unguarded := lowest(versionsMatching(regexp.MustCompile(`(?i)UPDATE\s+wisps\s+SET\s+is_blocked\s*=\s*0\s*;`)))
 	if unguarded == 0 {
-		t.Fatal("the unguarded `UPDATE wisps SET is_blocked = 0` the replay floor exists to exclude is gone; re-derive the floor")
+		return []string{"the unguarded `UPDATE wisps SET is_blocked = 0` the replay floor exists to exclude is gone; re-derive the floor"}
+	}
+	if sc.replayFloor < unguarded {
+		problems = append(problems, fmt.Sprintf("sentinel %s replayFloor %d does not exclude ignored/%04d, whose unguarded UPDATE restamps wisps.updated_at",
+			key, sc.replayFloor, unguarded))
 	}
 
-	for _, sc := range ignoredSource.sentinelColumns {
-		// ignored/0016 adds the column with a guarded, idempotent
-		// `ALTER TABLE <table> ADD COLUMN <column>`, which is also why
-		// re-running it repairs rather than clobbers. Bind the table so a
-		// sentinel naming a column the series only adds to some other table
-		// (or never adds at all) fails here rather than in the field.
-		adder := findVersion(regexp.MustCompile(`(?i)ALTER TABLE\s+` + regexp.QuoteMeta(sc.table) +
-			`\s+ADD COLUMN\s+` + regexp.QuoteMeta(sc.column)))
-		if adder == 0 {
-			t.Errorf("sentinel column %s.%s is never added by the %s series; re-running it could not repair that column",
-				sc.table, sc.column, ignoredSource.dir)
-			continue
+	// Column healers above the floor: a migration that ALTERs the carrier to
+	// add the column (bound to the table, so a column the series only adds to
+	// some other table does not count), or the registered repair this test
+	// names for the sentinel. The repair is matched by function identity, so
+	// registering some other repair at that version does not count either.
+	adders := versionsMatching(regexp.MustCompile(`(?i)ALTER TABLE\s+` + regexp.QuoteMeta(sc.table) +
+		`\s+ADD COLUMN\s+` + regexp.QuoteMeta(sc.column)))
+	healed := slices.ContainsFunc(adders, func(v int) bool { return v > sc.replayFloor })
+	if healer, ok := healers[key]; ok {
+		want := reflect.ValueOf(healer).Pointer()
+		for version := range bodies {
+			repair, registered := repairs[repairKey{ignoredSource.cursorTable, version}]
+			if registered && version > sc.replayFloor && reflect.ValueOf(repair).Pointer() == want {
+				healed = true
+			}
 		}
-		// ignored/0012 builds the carrier table as __temp__<name> and renames
-		// it into place only when <name> is absent. The single COLUMNS probe
-		// cannot tell "table missing" from "column missing", so the replay has
-		// to be able to heal both.
-		creator := findVersion(regexp.MustCompile(regexp.QuoteMeta("__temp__" + sc.table)))
-		if creator == 0 {
-			t.Errorf("carrier table %s for sentinel column %s.%s is never created by the %s series",
-				sc.table, sc.table, sc.column, ignoredSource.dir)
-			continue
-		}
+	}
+	switch {
+	case len(adders) == 0 && healers[key] == nil:
+		problems = append(problems, fmt.Sprintf("sentinel column %s is never added by the %s series; re-running it could not repair that column",
+			key, ignoredSource.dir))
+	case !healed:
+		problems = append(problems, fmt.Sprintf("sentinel column %s has no healer above its replayFloor %d (adders %v, no registered repair above the floor); the clamped replay would skip whatever heals it",
+			key, sc.replayFloor, adders))
+	}
 
-		if adder <= sc.replayFloor {
-			t.Errorf("sentinel column %s.%s is added by ignored/%04d, at or below its replayFloor %d; the clamped replay would skip the migration that heals it",
-				sc.table, sc.column, adder, sc.replayFloor)
+	// The carrier table builds as __temp__<name> and renames into place only
+	// when <name> is absent. The column probe cannot tell "table missing" from
+	// "column missing", so the replay must heal both, unless the carrier is a
+	// floor-0 sentinel table: its absence zeroes the cursor before any column
+	// probe runs, so the whole series (its creator included) replays.
+	creator := lowest(versionsMatching(regexp.MustCompile(regexp.QuoteMeta("__temp__" + sc.table))))
+	switch {
+	case creator == 0:
+		problems = append(problems, fmt.Sprintf("carrier table %s for sentinel column %s is never created by the %s series",
+			sc.table, key, ignoredSource.dir))
+	case creator <= sc.replayFloor && !slices.Contains(ignoredSource.sentinelTables, sc.table):
+		problems = append(problems, fmt.Sprintf("carrier table %s is created by ignored/%04d, at or below sentinel %s's replayFloor %d; a store missing the table entirely would never be repaired",
+			sc.table, creator, key, sc.replayFloor))
+	}
+	return problems
+}
+
+// TestSentinelColumnsAreCreatedByTheSeries is the column-sentinel analogue of
+// TestSentinelTablesAreCreatedByTheSeries, plus the floor-honesty check the
+// replay clamp depends on (schemaSentinelColumn.replayFloor):
+//
+//   - Something above the floor must add the column: the migration that adds
+//     it (leases.granted_node: ignored/0016 over floor 11), or the repair
+//     registered before a migration above the floor (wisps.is_blocked:
+//     ensureWispIsBlockedForRecompute before ignored/0015, over floor 14).
+//   - The carrier table's creator must sit above the floor too, unless the
+//     carrier is a floor-0 sentinel table (wisps).
+//   - The floor must exclude ignored/0007's unguarded restamp.
+//
+// A sentinel the replay cannot heal would be rejected on every open, a
+// permanent re-migration loop in the field; a renumbering or a dropped
+// registration fails here instead.
+func TestSentinelColumnsAreCreatedByTheSeries(t *testing.T) {
+	if len(ignoredSource.sentinelColumns) == 0 {
+		t.Fatal("ignoredSource has no sentinel columns; the granted_node guard is inert")
+	}
+	bodies := ignoredSeriesBodies(t)
+	for _, sc := range ignoredSource.sentinelColumns {
+		for _, problem := range sentinelColumnFloorProblems(sc, bodies, preMigrationRepairs, sentinelColumnRepairHealers) {
+			t.Error(problem)
 		}
-		if creator <= sc.replayFloor {
-			t.Errorf("carrier table %s is created by ignored/%04d, at or below sentinel %s.%s's replayFloor %d; a store missing the table entirely would never be repaired",
-				sc.table, creator, sc.table, sc.column, sc.replayFloor)
+	}
+}
+
+// TestSentinelColumnFloorInvariantRejectsAnUnhealedWispIsBlocked proves the
+// invariant above is not vacuous for the repair-healed sentinel: raising
+// wisps.is_blocked's floor to 15 skips the pre-0015 repair, and dropping that
+// registration leaves nothing above floor 14 to add the column. Either would
+// strand an at-latest store whose column was lost.
+func TestSentinelColumnFloorInvariantRejectsAnUnhealedWispIsBlocked(t *testing.T) {
+	bodies := ignoredSeriesBodies(t)
+	var wispIsBlocked schemaSentinelColumn
+	for _, sc := range ignoredSource.sentinelColumns {
+		if sc.table == "wisps" && sc.column == "is_blocked" {
+			wispIsBlocked = sc
 		}
-		if sc.replayFloor < unguarded {
-			t.Errorf("sentinel %s.%s replayFloor %d does not exclude ignored/%04d, whose unguarded UPDATE restamps wisps.updated_at",
-				sc.table, sc.column, sc.replayFloor, unguarded)
-		}
+	}
+	if wispIsBlocked.table == "" {
+		t.Fatal("ignoredSource has no wisps.is_blocked sentinel column (gh 5257)")
+	}
+	if wispIsBlocked.replayFloor != 14 {
+		t.Fatalf("wisps.is_blocked replayFloor = %d, want 14 (the highest floor that keeps the pre-0015 repair pending)", wispIsBlocked.replayFloor)
+	}
+
+	raised := wispIsBlocked
+	raised.replayFloor = 15
+	if problems := sentinelColumnFloorProblems(raised, bodies, preMigrationRepairs, sentinelColumnRepairHealers); len(problems) == 0 {
+		t.Error("floor 15 for wisps.is_blocked passed the invariant; it skips the pre-0015 repair that heals the column")
+	}
+
+	withoutHealer := maps.Clone(preMigrationRepairs)
+	delete(withoutHealer, repairKey{ignoredSource.cursorTable, 15})
+	if problems := sentinelColumnFloorProblems(wispIsBlocked, bodies, withoutHealer, sentinelColumnRepairHealers); len(problems) == 0 {
+		t.Error("wisps.is_blocked passed the invariant with the pre-0015 repair unregistered; nothing above floor 14 adds the column")
+	}
+
+	if problems := sentinelColumnFloorProblems(wispIsBlocked, bodies, preMigrationRepairs, nil); len(problems) == 0 {
+		t.Error("wisps.is_blocked passed the invariant with no healer named; ignored/0006 alone sits below floor 14")
 	}
 }
 
@@ -751,6 +961,139 @@ func TestMigrationWorkNeededWhenLeaseGrantedNodeAbsent(t *testing.T) {
 	}
 }
 
+// TestMigrationWorkNeededWhenWispIsBlockedAbsent is gh 5257 on the actual
+// MigrateUp short-circuit path, with the real ordered SHOW probes: both cursors
+// claim at-latest, every sentinel table corroborates that claim (wisps and
+// wisp_dependencies included, which is all the gh 5033 check asked), the leases
+// column is there, and only wisps.is_blocked is missing. Believing the cursor
+// here left every blocked-state recompute failing with `table "p" does not
+// have column "is_blocked"`.
+func TestMigrationWorkNeededWhenWispIsBlockedAbsent(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	expectCursorProbe(mock, "schema_migrations", true)
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+	expectCursorProbe(mock, "ignored_schema_migrations", true)
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
+	for _, table := range ignoredSource.sentinelTables {
+		expectShowTable(mock, table, true)
+	}
+	for _, st := range ignoredSource.sentinelFlooredTables {
+		expectShowTable(mock, st.table, true)
+	}
+	sawWispIsBlocked := false
+	for _, sc := range ignoredSource.sentinelColumns {
+		missing := sc.table == "wisps" && sc.column == "is_blocked"
+		sawWispIsBlocked = sawWispIsBlocked || missing
+		expectSentinelColumnProbe(mock, sc, true, !missing)
+	}
+	if !sawWispIsBlocked {
+		t.Fatal("ignoredSource has no wisps.is_blocked sentinel column (gh 5257)")
+	}
+
+	needed, err := migrationWorkNeeded(context.Background(), db)
+	if err != nil {
+		t.Fatalf("migrationWorkNeeded: %v", err)
+	}
+	if !needed {
+		t.Fatal("migrationWorkNeeded = false with an at-latest cursor and missing wisps.is_blocked; the column would never come back (gh 5257)")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet ordered sentinel probes: %v", err)
+	}
+}
+
+// TestSentinelTableAbsenceSkipsColumnProbes keeps gh 5033's shape on its own
+// path once wisps carries a column sentinel too: a missing wisp sentinel table
+// floors the cursor at 0 (the whole series replays, ignored/0001 re-creating
+// the table) before any column sentinel is probed.
+func TestSentinelTableAbsenceSkipsColumnProbes(t *testing.T) {
+	for _, table := range ignoredSource.sentinelTables {
+		t.Run(table, func(t *testing.T) {
+			stubSentinelTables(t, allSentinelTablesExcept(table), nil)
+			columnProbed := stubSentinelColumns(t, allSentinelColumnsExcept("wisps.is_blocked"), nil)
+
+			floor, limited, err := ignoredSource.cursorRealityFloor(context.Background(), nil)
+			if err != nil {
+				t.Fatalf("cursorRealityFloor: %v", err)
+			}
+			if !limited || floor != 0 {
+				t.Errorf("cursorRealityFloor = (%d, %v), want (0, true) with sentinel table %s absent", floor, limited, table)
+			}
+			if len(*columnProbed) != 0 {
+				t.Errorf("column sentinels %v were probed after sentinel table %s read absent", *columnProbed, table)
+			}
+		})
+	}
+}
+
+// TestMigrateResumesAtTheWispIsBlockedHealer is the applier-side half of the
+// wisps.is_blocked clamp. The cursor claims at-latest and only the column is
+// missing, so the replay must start at ignored/0015, whose registered
+// pre-migration repair (ensureWispIsBlockedForRecompute) restores the column
+// and its index before 0015 recomputes the flags with `updated_at =
+// updated_at`. The repair's first query fails distinctively: the error
+// carrying 0015's name proves the first pending step was 0015 and that its
+// repair ran ahead of the body, and the ordered mock admits nothing from
+// 0006 or 0007 (their bodies would be unexpected Execs ahead of the repair).
+func TestMigrateResumesAtTheWispIsBlockedHealer(t *testing.T) {
+	orig := stderr
+	stderr = &bytes.Buffer{}
+	t.Cleanup(func() { stderr = orig })
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectExec(regexp.QuoteMeta("CREATE TABLE IF NOT EXISTS ignored_schema_migrations")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta("SHOW COLUMNS FROM ignored_schema_migrations LIKE 'content_hash'")).
+		WillReturnRows(sqlmock.NewRows([]string{"Field", "Type", "Null", "Key", "Default", "Extra"}).
+			AddRow("content_hash", "char(64)", "YES", "", nil, ""))
+
+	expectCursorProbe(mock, "ignored_schema_migrations", true)
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
+	for _, table := range ignoredSource.sentinelTables {
+		expectShowTable(mock, table, true)
+	}
+	for _, st := range ignoredSource.sentinelFlooredTables {
+		expectShowTable(mock, st.table, true)
+	}
+	for _, sc := range ignoredSource.sentinelColumns {
+		expectSentinelColumnProbe(mock, sc, true, !(sc.table == "wisps" && sc.column == "is_blocked"))
+	}
+
+	// ensureWispIsBlockedForRecompute's first statement: does wisps exist.
+	boom := errors.New("stop here: the replay reached the pre-0015 repair")
+	mock.ExpectQuery(`(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES.*TABLE_NAME = \?`).
+		WithArgs("wisps").WillReturnError(boom)
+
+	_, _, err = ignoredSource.migrate(context.Background(), db, 0)
+	if err == nil {
+		t.Fatal("migrate returned nil with wisps.is_blocked absent behind an at-latest cursor; the column was never restored")
+	}
+	if !errors.Is(err, boom) {
+		t.Fatalf("migrate failed for another reason before the repair: %v", err)
+	}
+	if !strings.Contains(err.Error(), "pre-repair for migration 0015_") {
+		t.Errorf("replay did not resume at ignored/0015's repair: %v", err)
+	}
+	for _, earlier := range []string{"0006_", "0007_"} {
+		if strings.Contains(err.Error(), earlier) {
+			t.Errorf("replay reached back to ignored/%s: %v", earlier, err)
+		}
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
 // TestIgnoredCursorReadWithLeasesAbsentIssuesNoFailingStatement is the
 // missing-carrier shape end to end through the guarded cursor read every
 // write-capable open performs. Every released tree (v1.1.0, v1.1.2, v1.2.x)
@@ -805,7 +1148,14 @@ func TestSentinelColumnProbeNeverAsksAMissingTable(t *testing.T) {
 	if len(ignoredSource.sentinelColumns) == 0 {
 		t.Fatal("ignoredSource has no sentinel columns; this guard is inert")
 	}
-	probed := stubSentinelTables(t, allSentinelTables(), nil)
+	// Every carrier absent, including wisps: allSentinelTables lists it as a
+	// floor-0 sentinel table, and a present carrier would rightly get its
+	// SHOW COLUMNS.
+	absent := allSentinelTables()
+	for _, sc := range ignoredSource.sentinelColumns {
+		delete(absent, sc.table)
+	}
+	probed := stubSentinelTables(t, absent, nil)
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("sqlmock.New: %v", err)
@@ -873,32 +1223,80 @@ func TestSentinelColumnProbeReadsAPresentTableExactly(t *testing.T) {
 // TestCursorProbeErrorIsNotTreatedAsContradicted pins for the table sentinels.
 func TestSentinelColumnCarrierProbeErrorIsNotTreatedAsContradicted(t *testing.T) {
 	boom := errors.New("information_schema unavailable")
-	present := allSentinelTables()
-	orig := sentinelTableExists
-	t.Cleanup(func() { sentinelTableExists = orig })
-	sentinelTableExists = func(_ context.Context, _ DBConn, table string) (bool, error) {
-		for _, sc := range ignoredSource.sentinelColumns {
-			if table == sc.table {
-				return false, boom
+	// One case per column sentinel, failing only that sentinel's carrier
+	// probe. wisps is also a floor-0 sentinel table, probed once in the table
+	// loop before the column loop reaches it, so the error fires on the probe
+	// after those: failing every wisps probe would stop at the table loop and
+	// never reach the column carrier probe this test is about.
+	for _, failing := range ignoredSource.sentinelColumns {
+		t.Run(failing.table+"."+failing.column, func(t *testing.T) {
+			present := allSentinelTables()
+			for _, sc := range ignoredSource.sentinelColumns {
+				present[sc.table] = true
 			}
-		}
-		return present[table], nil
-	}
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("sqlmock.New: %v", err)
-	}
-	defer db.Close()
+			earlierProbes := 0
+			if slices.Contains(ignoredSource.sentinelTables, failing.table) {
+				earlierProbes++
+			}
+			for _, st := range ignoredSource.sentinelFlooredTables {
+				if st.table == failing.table {
+					earlierProbes++
+				}
+			}
+			for _, sc := range ignoredSource.sentinelColumns {
+				if sc == failing {
+					break
+				}
+				if sc.table == failing.table {
+					earlierProbes++
+				}
+			}
+			seen := 0
+			carrierFailed := false
+			orig := sentinelTableExists
+			t.Cleanup(func() { sentinelTableExists = orig })
+			sentinelTableExists = func(_ context.Context, _ DBConn, table string) (bool, error) {
+				if table == failing.table {
+					seen++
+					if seen > earlierProbes {
+						carrierFailed = true
+						return false, boom
+					}
+				}
+				return present[table], nil
+			}
+			// Columns probed before the failing one answer present.
+			orderedShow := func(sc schemaSentinelColumn) string {
+				return regexp.QuoteMeta("SHOW COLUMNS FROM " + sc.table + " LIKE '" + sc.column + "'")
+			}
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+			for _, sc := range ignoredSource.sentinelColumns {
+				if sc == failing {
+					break
+				}
+				mock.ExpectQuery(orderedShow(sc)).WillReturnRows(
+					sqlmock.NewRows([]string{"Field", "Type", "Null", "Key", "Default", "Extra"}).
+						AddRow(sc.column, "varchar(255)", "YES", "", nil, ""))
+			}
 
-	_, limited, err := ignoredSource.cursorRealityFloor(context.Background(), db)
-	if !errors.Is(err, boom) {
-		t.Errorf("carrier probe error was swallowed: err = %v", err)
-	}
-	if limited {
-		t.Error("an unreadable carrier probe reported the cursor as contradicted")
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet SQL expectations: %v", err)
+			_, limited, err := ignoredSource.cursorRealityFloor(context.Background(), db)
+			if !carrierFailed {
+				t.Fatalf("the %s carrier probe never ran; err = %v", failing.table, err)
+			}
+			if !errors.Is(err, boom) {
+				t.Errorf("carrier probe error was swallowed: err = %v", err)
+			}
+			if limited {
+				t.Error("an unreadable carrier probe reported the cursor as contradicted")
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet SQL expectations: %v", err)
+			}
+		})
 	}
 }
 

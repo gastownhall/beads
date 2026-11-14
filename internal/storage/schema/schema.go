@@ -504,15 +504,19 @@ type schemaSentinelColumn struct {
 	//        (#5981 harm class). ignored/0015 is the guarded successor and is
 	//        genuinely pending on those stores, so the recompute still happens
 	//        — just without the timestamp damage.
-	//   (ii) The migration that creates the column AND the migration that
-	//        creates the table carrying it must both be ABOVE the floor, so the
-	//        replay can still heal both shapes the column probe collapses
-	//        (sentinelColumnExists): table absent entirely, and table present
-	//        but column-less. A floor above the table's creator would strand
-	//        the table-absent shape in a permanent re-migration loop.
+	//   (ii) Something ABOVE the floor must heal both shapes the column probe
+	//        collapses (sentinelColumnExists): table absent entirely, and table
+	//        present but column-less. For the column, that is either the
+	//        migration that adds it or a pre-migration repair
+	//        (preMigrationRepairs) that adds it, registered at a version above
+	//        the floor. For the carrier table, it is the migration that creates
+	//        it, unless the table is itself a sentinelTables entry: those floor
+	//        the cursor at 0 when absent, so the column probe never decides the
+	//        table-absent shape. A floor above the only healer would strand the
+	//        sentinel in a permanent re-migration loop.
 	//
-	// TestSentinelColumnsAreCreatedByTheSeries pins the floor to those two
-	// files, so a future renumbering breaks CI rather than users.
+	// TestSentinelColumnsAreCreatedByTheSeries pins the floor to those
+	// healers, so a future renumbering breaks CI rather than users.
 	replayFloor int
 }
 
@@ -584,7 +588,24 @@ var (
 		// 0001–0025 series replays, dragging in ignored/0007 and restamping
 		// wisps.updated_at across the plane. Believing the cursor up to 11
 		// applies exactly the pending tail 0012–0025 instead.
-		sentinelColumns: []schemaSentinelColumn{{table: "leases", column: "granted_node", replayFloor: 11}},
+		//
+		// wisps.is_blocked (gh 5257) is the stamped-but-not-applied shape: a
+		// cursor that records ignored/0006 while the column it adds is absent,
+		// on a wisps table the table sentinels above corroborate. Every
+		// blocked-state recompute reads it, so believing that cursor fails
+		// ordinary status writes with `table "p" does not have column
+		// "is_blocked"`. ignored/0006 is the original creator, but replaying it
+		// would also replay frozen 0007's bare recompute. The selected healer is
+		// instead ensureWispIsBlockedForRecompute, already registered to run
+		// immediately before ignored/0015: it restores the column and
+		// idx_wisps_is_blocked, and 0015 then recomputes the flags with
+		// `updated_at = updated_at`. Floor 14 is the highest floor that keeps
+		// that repair pending; a cursor at or below 14 already has it (or the
+		// 0007 one) pending and is believed as read.
+		sentinelColumns: []schemaSentinelColumn{
+			{table: "leases", column: "granted_node", replayFloor: 11},
+			{table: "wisps", column: "is_blocked", replayFloor: 14},
+		},
 	}
 )
 
