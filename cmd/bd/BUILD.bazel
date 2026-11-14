@@ -150,6 +150,7 @@ go_library(
         "federation.go",
         "federation_nocgo.go",
         "feedback.go",
+        "filter_flags.go",
         "find_duplicates.go",
         "find_duplicates_proxied_server.go",
         "flags.go",
