@@ -209,3 +209,20 @@ func TestCrossProcessExclusionAcrossJunctionWindows(t *testing.T) {
 		})
 	}
 }
+
+// A plain directory keeps the drive-letter gate path EvalSymlinks gave it
+// before handle-based resolution, so existing gate files do not move.
+func TestPlainParentKeepsDriveLetterSpellingWindows(t *testing.T) {
+	dir := t.TempDir()
+	g, err := ForWorkspace(filepath.Join(dir, ".beads"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(mustEval(t, dir), ".beads.gate.lock")
+	if g.Path() != want {
+		t.Fatalf("gate path = %s, want %s", g.Path(), want)
+	}
+	if vol := filepath.VolumeName(g.Path()); len(vol) != 2 || vol[1] != ':' {
+		t.Fatalf("gate path %s has volume %q, want a drive letter and no \\\\?\\ prefix", g.Path(), vol)
+	}
+}
