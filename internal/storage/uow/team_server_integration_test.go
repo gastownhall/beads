@@ -411,3 +411,36 @@ func TestPlainProxiedExcursionIdentity_MatchingAndEmpty_Integration(t *testing.T
 		require.NoError(t, p.Close(ctx))
 	})
 }
+
+// TestPlainProxiedExcursionIdentity_ConfiguredDatabaseNoCompare_Integration
+// pins the stale-workspace case the excursion scope exists for: the
+// workspace's metadata.json can go stale while the database's identity stays
+// correct, and resolveProxiedServerUOWTopology clears the expectation for
+// opens of the configured database — so the provider receives no assertion
+// and must not refuse.
+func TestPlainProxiedExcursionIdentity_ConfiguredDatabaseNoCompare_Integration(t *testing.T) {
+	h := newTeamServerHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	const database = "excursion_stale"
+	provisioner, err := h.openProvider(ctx, database, false, "")
+	require.NoError(t, err)
+	require.NoError(t, provisioner.Close(ctx))
+
+	direct := h.directDB(t, database)
+	_, err = direct.ExecContext(ctx,
+		"REPLACE INTO metadata (`key`, value) VALUES (?, ?)", "_project_id", "project-owning-this-db")
+	require.NoError(t, err)
+	cleanupCtx, cleanupDone := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(func() {
+		defer cleanupDone()
+		_, err := direct.ExecContext(cleanupCtx, "DELETE FROM metadata WHERE `key` = ?", "_project_id")
+		assert.NoError(t, err)
+	})
+
+	// A stale local identity never reaches the provider as an assertion.
+	p, err := h.openProvider(ctx, database, false, "")
+	require.NoError(t, err, "a configured-database open (no assertion) must not compare identities")
+	require.NoError(t, p.Close(ctx))
+}

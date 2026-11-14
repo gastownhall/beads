@@ -300,6 +300,66 @@ func TestResolveProxiedServerUOWTopology_ExcursionIdentity(t *testing.T) {
 	})
 }
 
+// TestResolveProxiedServerUOWTopology_PlainConfiguredOpenClearsIdentity pins
+// the other half of the bd-rgvivq wiring: only a genuine excursion compares
+// identities. Without an override, or with an override naming the configured
+// database (even differing only by case — the way MySQL compares schema
+// names), the resolver clears the expectation, so a plain workspace whose
+// locally recorded identity went stale keeps opening its own database. An
+// adopt posture (bd init) never carries an expectation to begin with.
+func TestResolveProxiedServerUOWTopology_PlainConfiguredOpenClearsIdentity(t *testing.T) {
+	t.Setenv("BEADS_SKIP_IDENTITY_CHECK", "")
+
+	for name, override := range map[string]string{
+		"no override":                     "",
+		"override naming the configured":  "beads_ws",
+		"override differing only by case": "BEADS_WS",
+	} {
+		t.Run(name, func(t *testing.T) {
+			beadsDir := t.TempDir()
+			writeTopologyConfig(t, beadsDir, map[string]any{
+				"dolt_database": "beads_ws",
+				"project_id":    "project-AAAA",
+			})
+
+			topology, err := resolveProxiedServerUOWTopology(beadsDir, override, assertWorkspaceIdentity)
+			require.NoError(t, err)
+			if override == "" {
+				assert.Equal(t, "beads_ws", topology.database)
+			} else {
+				assert.Equal(t, override, topology.database)
+			}
+			assert.Empty(t, topology.expectedProjectID,
+				"opening the configured database must not compare identities — the workspace's local ID can be stale")
+		})
+	}
+
+	t.Run("adopt posture never carries an expectation", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		writeTopologyConfig(t, beadsDir, map[string]any{
+			"dolt_database": "beads_ws",
+			"project_id":    "project-AAAA",
+		})
+
+		topology, err := resolveProxiedServerUOWTopology(beadsDir, "beads_other", adoptWorkspaceIdentity)
+		require.NoError(t, err)
+		assert.Equal(t, "beads_other", topology.database)
+		assert.Empty(t, topology.expectedProjectID, "bd init adopts; it never asserts a pre-existing local identity")
+	})
+
+	t.Run("plain workspace without a local identity excursions unasserted", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		writeTopologyConfig(t, beadsDir, map[string]any{
+			"dolt_database": "beads_ws",
+		})
+
+		topology, err := resolveProxiedServerUOWTopology(beadsDir, "beads_other", assertWorkspaceIdentity)
+		require.NoError(t, err)
+		assert.Empty(t, topology.expectedProjectID,
+			"there is no local identity to assert, so the excursion runs unasserted")
+	})
+}
+
 func TestNewExternalProxiedServerUOWProvider_CreatesRootDir(t *testing.T) {
 	beadsDir := t.TempDir()
 	external := &configfile.ExternalDoltConfig{Host: "db.invalid"}
