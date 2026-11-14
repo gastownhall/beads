@@ -533,3 +533,45 @@ func TestMolBondProxiedMolMolInOneRoutedRig(t *testing.T) {
 	}
 	f.assertServedUnwritten("routed mol + mol")
 }
+
+// TestMolBondProxiedDryRunPreviewsRoutedHome: a dry run over routed operands
+// previews the bond without a writable open, a rig write or a served write.
+func TestMolBondProxiedDryRunPreviewsRoutedHome(t *testing.T) {
+	f := newMolBondProxiedFixture(t)
+
+	for _, tc := range []struct {
+		name       string
+		argA, argB string
+		want       []string
+	}{
+		{name: "formula_and_molecule", argA: molBondProxiedFormula, argB: "gt-mol1", want: []string{
+			"Dry run: bond " + molBondProxiedFormula + " + gt-mol1",
+			"A: " + molBondProxiedFormula + " (formula → will cook as proto)",
+		}},
+		{name: "two_molecules", argA: "gt-mol1", argB: "gt-mol2", want: []string{"Dry run: bond gt-mol1 + gt-mol2"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := f.rigIssueIDs("gt-mol1")
+			reopens := f.reopens
+			runErr, stdout, stderr := f.bond(molBondInput{argA: tc.argA, argB: tc.argB, dryRun: true})
+			if runErr != nil {
+				t.Fatalf("dry-run bond %s %s: %v\nstderr:\n%s", tc.argA, tc.argB, runErr, stderr)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(stdout, want) {
+					t.Errorf("dry-run output lacks %q:\n%s", want, stdout)
+				}
+			}
+			if f.reopens != reopens {
+				t.Errorf("dry run reopened the routed home writable %d time(s)", f.reopens-reopens)
+			}
+			if after := f.rigIssueIDs("gt-mol1"); len(after) != len(before) {
+				t.Errorf("dry run changed the rig: %v -> %v", before, after)
+			}
+			if deps := f.rigDependencies("gt-mol2"); len(deps) != 0 {
+				t.Errorf("dry run wrote dependencies in the rig: %+v", deps)
+			}
+			f.assertServedUnwritten("dry run")
+		})
+	}
+}
