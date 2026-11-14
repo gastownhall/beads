@@ -133,6 +133,45 @@ func TestProxiedServerSQLDatabaseFlag(t *testing.T) {
 		t.Fatalf("--database read output missing 'gear':\n%s", s)
 	}
 
+	// A second write/read pass. The first open installed beads schema in the
+	// other database without a project identity, so this one passes the
+	// plain excursion identity guard (gastownhall/beads#5572) on its
+	// "metadata table, no _project_id" arm rather than its "no metadata
+	// table" one: both must leave the escape hatch open.
+	out, err = bdProxiedRun(t, bd, p.dir, "sql", "--database", other,
+		"INSERT INTO widgets VALUES (2, 'cog')")
+	if err != nil {
+		t.Fatalf("second bd sql --database write failed: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "OK, 1 rows affected" {
+		t.Fatalf("second --database write output = %q, want %q", got, "OK, 1 rows affected")
+	}
+	out, err = bdProxiedRun(t, bd, p.dir, "sql", "--database", other,
+		"SELECT name FROM widgets ORDER BY id")
+	if err != nil {
+		t.Fatalf("second bd sql --database read failed: %v\n%s", err, out)
+	}
+	if s := string(out); !strings.Contains(s, "gear") || !strings.Contains(s, "cog") {
+		t.Fatalf("second --database read output missing 'gear'/'cog':\n%s", s)
+	}
+	var total int
+	if err := db.QueryRowContext(context.Background(),
+		"SELECT COUNT(*) FROM "+other+".widgets").Scan(&total); err != nil {
+		t.Fatalf("count %s.widgets: %v", other, err)
+	}
+	if total != 2 {
+		t.Fatalf("%s.widgets rows = %d, want 2 (repeated --database excursions must keep working)", other, total)
+	}
+	// The workspace's identity must not be minted in the excursion target.
+	var minted int
+	if err := db.QueryRowContext(context.Background(),
+		"SELECT COUNT(*) FROM "+other+".metadata WHERE `key` = '_project_id'").Scan(&minted); err != nil {
+		t.Fatalf("count %s.metadata._project_id: %v", other, err)
+	}
+	if minted != 0 {
+		t.Fatalf("%s.metadata._project_id rows = %d, want 0 (an excursion must not mint an identity)", other, minted)
+	}
+
 	// An invalid database identifier is rejected, not interpolated.
 	out, err = bdProxiedRun(t, bd, p.dir, "sql", "--database", "bad;name",
 		"SELECT 1")
