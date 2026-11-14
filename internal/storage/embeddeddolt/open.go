@@ -71,7 +71,12 @@ func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func()
 	}
 
 	if err := db.PingContext(ctx); err != nil {
-		return nil, nil, errors.Join(err, cleanup())
+		// The engine first opens its files at this ping (lock and chunk
+		// journal, for writing, read command or not). A write-access
+		// refusal there is permanent (GH#7445): classify it — and only it,
+		// not a cleanup failure or a later SQL error — so callers learn
+		// that retrying cannot help until access to the store changes.
+		return nil, nil, errors.Join(classifyOpenError(dir, err), cleanup())
 	}
 
 	if strings.TrimSpace(database) != "" {
