@@ -1622,6 +1622,58 @@ func TestCookFormulaConditionDroppedNeedsTargetErrors(t *testing.T) {
 	}
 }
 
+// surveyOnCompleteFormula is the formula from GH#3782: its step declares an
+// on_complete fan-out that bd never runs.
+const surveyOnCompleteFormula = `formula = "survey"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "survey-workers"
+title = "Survey workers"
+
+[steps.on_complete]
+for_each = "output.workers"
+bond = "mol-worker"
+
+[steps.on_complete.vars]
+worker_name = "{item.name}"
+`
+
+// TestCookFormulaOnCompleteRefused: a formula that sets on_complete must fail
+// the cook on both the pour/wisp/bond/seed path and the bd cook path, instead
+// of cooking into steps whose completion spawns nothing (GH#3782).
+func TestCookFormulaOnCompleteRefused(t *testing.T) {
+	check := func(t *testing.T, gotResult bool, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("cook succeeded although step survey-workers sets on_complete, which bd never runs")
+		}
+		if gotResult {
+			t.Errorf("cook returned a result alongside the error")
+		}
+		if !errors.Is(err, formula.ErrValidation) {
+			t.Errorf("errors.Is(err, formula.ErrValidation) = false for %v", err)
+		}
+		for _, want := range []string{"survey-workers", "on_complete is not supported"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not mention %q", err, want)
+			}
+		}
+	}
+
+	t.Run("resolveAndCookFormulaWithVars", func(t *testing.T) {
+		sg, err := cookFormulaTOMLWithVars(t, "survey", surveyOnCompleteFormula, nil)
+		check(t, sg != nil, err)
+	})
+
+	t.Run("loadAndResolveFormula", func(t *testing.T) {
+		dir := writePipelineFormula(t, "survey", surveyOnCompleteFormula)
+		f, err := loadAndResolveFormula("survey", []string{dir})
+		check(t, f != nil, err)
+	})
+}
+
 // TestCookFormulaConditionDroppedWaitsForSpawnerErrors: a gate whose
 // waits_for spawner is dropped by its condition must fail the cook, not pour
 // a gate:<value> step that waits for no one (GH#6437, PR #6642).
