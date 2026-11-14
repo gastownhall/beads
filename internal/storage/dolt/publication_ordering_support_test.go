@@ -55,6 +55,10 @@ type publicationOrderDriver struct {
 	// recorded.
 	commitErr func(n int) error
 	commits   int
+	// mutationCommitErr, when set, fails the SQL COMMIT of every transaction
+	// that ran a statement matching failCommitOf, after it is recorded.
+	mutationCommitErr error
+	failCommitOf      func(pubEvent) bool
 }
 
 type pubEvent struct {
@@ -224,13 +228,35 @@ func (t *pubTx) Commit() error {
 	d := t.c.d
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	carried := d.mutationCommitErr != nil && d.txCarried(t.c.id, d.failCommitOf)
 	d.record(t.c.id, "COMMIT", "", nil)
 	d.open[t.c.id] = false
 	d.commits++
+	if carried {
+		return d.mutationCommitErr
+	}
 	if d.commitErr != nil {
 		return d.commitErr(d.commits)
 	}
 	return nil
+}
+
+// txCarried reports whether the transaction open on conn ran a statement
+// matching pred. The caller holds d.mu.
+func (d *publicationOrderDriver) txCarried(conn int, pred func(pubEvent) bool) bool {
+	for i := len(d.events) - 1; i >= 0; i-- {
+		ev := d.events[i]
+		if ev.conn != conn {
+			continue
+		}
+		if ev.kind == "BEGIN" {
+			return false
+		}
+		if ev.inTx && pred(ev) {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *pubTx) Rollback() error {
