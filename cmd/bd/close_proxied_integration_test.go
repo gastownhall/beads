@@ -340,9 +340,18 @@ func TestProxiedServerCloseB(t *testing.T) {
 		issue := bdProxiedCreate(t, bd, p.dir, "Double close")
 		bdProxiedClose(t, bd, p.dir, issue.ID, "--reason", "first")
 		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "close", issue.ID, "--reason", "second")
-		_ = stdout
-		_ = stderr
-		_ = err
+		if err != nil {
+			t.Fatalf("re-close of an already-closed issue must exit 0: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		// bd-th8229 / GH#4816: the no-op names the reason the issue kept, never
+		// a close carrying the dropped one.
+		want := fmt.Sprintf("Already closed %s — Double close (close reason unchanged: first)", issue.ID)
+		if !strings.Contains(stdout, want) {
+			t.Errorf("re-close stdout should report %q, got:\n%s", want, stdout)
+		}
+		if strings.Contains(stdout, "✓ Closed") || strings.Contains(stdout, "second") {
+			t.Errorf("re-close stdout reports a close with the dropped reason:\n%s", stdout)
+		}
 		db := openProxiedDB(t, p)
 		if got := readCloseReason(t, db, issue.ID); got != "first" {
 			t.Errorf("re-close must not overwrite reason: got %q, want %q", got, "first")

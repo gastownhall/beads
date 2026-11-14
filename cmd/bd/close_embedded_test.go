@@ -927,3 +927,37 @@ func TestEmbeddedCloseConcurrent(t *testing.T) {
 	t.Logf("created and closed %d issues across %d concurrent workers, %d in DB",
 		len(allIDs), numWorkers, stats.TotalIssues)
 }
+
+// GH#4816 (bd-th8229): re-closing an already-closed issue with a new --reason
+// keeps the first reason (the #4025 idempotency contract), so the CLI must not
+// report a close with the new reason as if it had been applied. It exits 0
+// and names the ID as already closed with the reason it still holds.
+func TestEmbeddedCloseAlreadyClosedNewReasonNotReportedAsApplied(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "rc")
+
+	issue := bdCreate(t, bd, dir, "Reclose reason", "--type", "task")
+	bdClose(t, bd, dir, issue.ID, "--reason", "FIRST")
+	out := bdClose(t, bd, dir, issue.ID, "--reason", "SECOND")
+
+	if got := bdShow(t, bd, dir, issue.ID).CloseReason; got != "FIRST" {
+		t.Fatalf("close_reason = %q after re-close, want %q (first close wins, #4025)", got, "FIRST")
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "Closed") && strings.HasSuffix(strings.TrimSpace(line), ": SECOND") {
+			t.Errorf("re-close of already-closed %s reported success with the dropped reason:\n%s", issue.ID, out)
+		}
+	}
+	if strings.Contains(out, "✓ Closed") || strings.Contains(out, "SECOND") {
+		t.Errorf("re-close of already-closed %s must not report a close or the dropped reason, got:\n%s", issue.ID, out)
+	}
+	want := fmt.Sprintf("Already closed %s — Reclose reason (close reason unchanged: FIRST)", issue.ID)
+	if !strings.Contains(out, want) {
+		t.Errorf("re-close of already-closed %s should report %q, got:\n%s", issue.ID, want, out)
+	}
+}
