@@ -150,6 +150,7 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	in.IncludeGates, _ = cmd.Flags().GetBool("include-gates")
 	in.IncludeInfra, _ = cmd.Flags().GetBool("include-infra")
 	in.IncludeEphemeral, _ = cmd.Flags().GetBool("include-ephemeral")
+	in.IncludeAllTypes, _ = cmd.Flags().GetBool("include-all-types")
 	in.ExcludeTypes, _ = cmd.Flags().GetStringSlice("exclude-type")
 
 	in.ParentID, _ = cmd.Flags().GetString("parent")
