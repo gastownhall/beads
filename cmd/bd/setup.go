@@ -202,10 +202,15 @@ func addRecipe(name, path string) error {
 		return setupWorkspaceError()
 	}
 	// bd setup refuses a recipe of .beads/recipes.toml whose path leaves the
-	// directory it runs in (recipes.PathInside), so --add does not save one.
+	// directory it runs in, or the -C directory it installs into
+	// (recipes.PathInside), so --add does not save one.
 	if path != "" {
-		if err := recipes.PathInside(".", path); err != nil {
-			return fmt.Errorf("recipe path %s %s; %s", recipeRefusalWord(path), recipePathRefusal(err), recipePathRule)
+		projectDir, err := setupProjectDir()
+		if err != nil {
+			return err
+		}
+		if err := recipes.PathInside(setupRecipeRoot(projectDir), path); err != nil {
+			return fmt.Errorf("recipe path %s %s; %s", recipeRefusalWord(path), recipePathRefusalIn(projectDir, err), recipePathRuleIn(projectDir))
 		}
 	}
 
@@ -236,6 +241,43 @@ func recipeRefusalWord(value string) string {
 // recipePathRule is the rule bd setup holds a .beads/recipes.toml recipe's
 // paths to (recipes.PathInside), as its refusals state it.
 const recipePathRule = "a .beads/recipes.toml recipe can only name a relative path with no '..' or symbolic link leading out of the directory bd setup runs in, and no dangling or looping link along it"
+
+// setupRecipeDirWords is how bd setup's refusals name the directory a
+// .beads/recipes.toml recipe's paths must stay inside.
+const setupRecipeDirWords = "the directory bd setup runs in"
+
+// setupChangeDirWords names that directory under bd -C, where it is the -C
+// directory rather than the one bd setup runs in.
+const setupChangeDirWords = "the -C directory bd setup installs into"
+
+// setupRecipeRoot is the directory a .beads/recipes.toml recipe's paths must
+// stay inside: projectDir (setupProjectDir) under bd -C, else the working
+// directory.
+func setupRecipeRoot(projectDir string) string {
+	if projectDir == "" {
+		return "."
+	}
+	return projectDir
+}
+
+// recipePathRuleIn is recipePathRule for a run whose project directory is
+// projectDir (setupProjectDir): under bd -C it names the -C directory.
+func recipePathRuleIn(projectDir string) string {
+	if projectDir == "" {
+		return recipePathRule
+	}
+	return strings.Replace(recipePathRule, setupRecipeDirWords, setupChangeDirWords, 1)
+}
+
+// recipePathRefusalIn is recipePathRefusal for a run whose project directory
+// is projectDir (setupProjectDir): under bd -C it names the -C directory.
+func recipePathRefusalIn(projectDir string, err error) string {
+	why := recipePathRefusal(err)
+	if projectDir == "" {
+		return why
+	}
+	return strings.Replace(why, setupRecipeDirWords, setupChangeDirWords, 1)
+}
 
 // recipePathRefusal says why recipes.PathInside refused a path: it is not
 // inside the directory bd setup runs in, or it runs through a link bd setup
@@ -343,7 +385,8 @@ func runRecipe(name string) error {
 	// can commit, names the files --check reads, install writes and --remove
 	// deletes, and the directories install creates and --remove drops when
 	// empty: bd setup refuses it, touching none of them, unless each stays
-	// inside the directory it runs in (recipes.PathInside). The refusal
+	// inside the directory it runs in, or under bd -C the -C directory it
+	// installs into (recipes.PathInside). The refusal
 	// names the key and the path by recipeRefusalWord, and says whether the
 	// path leads out or runs through a link bd setup cannot follow
 	// (recipePathRefusal). An empty path names
@@ -354,10 +397,10 @@ func runRecipe(name string) error {
 			if path == "" {
 				continue
 			}
-			if err := recipes.PathInside(".", path); err != nil {
+			if err := recipes.PathInside(setupRecipeRoot(projectDir), path); err != nil {
 				return HandleErrorWithHint(
-					fmt.Sprintf("recipe %s names %s, which %s", recipeRefusalWord(name), recipeRefusalWord(path), recipePathRefusal(err)),
-					recipePathRule)
+					fmt.Sprintf("recipe %s names %s, which %s", recipeRefusalWord(name), recipeRefusalWord(path), recipePathRefusalIn(projectDir, err)),
+					recipePathRuleIn(projectDir))
 			}
 		}
 	}
