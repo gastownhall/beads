@@ -5,9 +5,9 @@ description: Configure bd setup recipes, hooks, and instruction files for Claude
 
 Configure your IDE or coding agent for optimal beads integration.
 
-Last reviewed: 2026-07-10
+Last reviewed: 2026-11-14
 
-Freshness source: `cmd/bd/setup*.go` and `internal/recipes/`.
+Freshness source: `cmd/bd/setup*.go`, `cmd/bd/init.go`, and `internal/recipes/`.
 
 ## How `bd setup` Works
 
@@ -23,7 +23,7 @@ bd setup claude --remove    # Uninstall
 | Recipe | Files written | Details |
 |--------|---------------|---------|
 | `claude` | `.claude/settings.json` (or `~/.claude/settings.json` with `--global`) + `CLAUDE.md` section | [Claude Code](/integrations/claude-code) |
-| `cursor` | `.cursor/rules/beads.mdc` | [Cursor](/integrations/cursor) |
+| `cursor` | `.cursor/rules/beads.mdc` + `.agents/skills/beads/` + `.cursor/hooks.json` (or `~/.cursor/hooks.json` with `--global`) | [Cursor](/integrations/cursor) |
 | `gemini` | `~/.gemini/settings.json` (or `.gemini/settings.json` with `--project`) + `GEMINI.md` section | [Gemini CLI](/integrations/gemini) |
 | `copilot` | `.copilot-plugin/plugin.json` + `.github/copilot-instructions.md` | [Copilot CLI](/integrations/copilot-cli) |
 | `codex` | `.agents/skills/beads/` + `AGENTS.md` section + `.codex/` hooks | [Codex](/integrations/codex) |
@@ -95,7 +95,7 @@ bd setup claude --global   # Global install: ~/.claude/settings.json
 
 This installs:
 - **SessionStart hook** - Runs `bd prime --hook-json`, which wraps the workflow context in the JSON envelope Claude Code expects. SessionStart fires when a session starts, resumes, or clears, and again after context compaction — no separate compaction hook is needed.
-- **Minimal beads section in `CLAUDE.md`** - A pointer to `bd prime`, managed with hash/version markers for safe updates and `--check` freshness detection.
+- **Minimal beads section in `CLAUDE.md`** - A pointer to `bd prime`, managed with hash/version markers for safe updates and `--check` freshness detection. If `CLAUDE.md` is a thin stub that imports `AGENTS.md` with an `@AGENTS.md` line (outside a code fence) and `AGENTS.md` exists, the section is written to `AGENTS.md` instead and any stale block left in `CLAUDE.md` is removed.
 
 If the [beads Claude Code plugin](/integrations/claude-code-plugin) is installed, hooks are plugin-managed and `bd setup claude` skips writing them, so `bd prime` doesn't fire twice per session.
 
@@ -143,11 +143,17 @@ If you prefer manual configuration, add the hook to your Claude Code settings:
 ## Cursor IDE
 
 ```bash
-bd setup cursor            # Always-applied rules file
+bd setup cursor            # Rules file + agent skill + project hooks
+bd setup cursor --global   # Skill and hooks under ~/.agents and ~/.cursor
 ```
 
 This creates `.cursor/rules/beads.mdc` with beads-aware rules that Cursor
-re-includes every turn.
+re-includes every turn, installs the shared beads agent skill at
+`.agents/skills/beads/`, and writes `sessionStart`, `preCompact`, and
+`postToolUse` hooks to `.cursor/hooks.json` that run `bd cursor-hook <event>`
+(so `bd` must be on PATH for Cursor). `--global` writes the skill to
+`~/.agents/skills/beads/` and the hooks to `~/.cursor/hooks.json`; rules stay
+project-only.
 
 **Verify:**
 ```bash
@@ -203,7 +209,7 @@ bd setup opencode   # OpenCode — AGENTS.md section
 bd setup codex      # Codex — beads skill + AGENTS.md guidance + native hooks
 ```
 
-These create or update a managed section in `AGENTS.md` (see Managed Sections above). `bd init` runs the project Codex setup automatically unless `--skip-agents` or `--stealth` is used. In worktree, shared, or `BEADS_DIR` setups, use `bd where` to confirm the resolved workspace — these integrations do not require a local `./.beads`. Restart the tool after setup if it is already running.
+These create or update a managed section in `AGENTS.md` (see Managed Sections above). `bd init` runs the project Claude, Codex, and Cursor setup automatically unless `--skip-agents` or `--stealth` is used, and skips it in a bare Git repository. In worktree, shared, or `BEADS_DIR` setups, use `bd where` to confirm the resolved workspace — these integrations do not require a local `./.beads`. Restart the tool after setup if it is already running.
 
 Details: [Factory.ai Droid](/integrations/factory), [Mux](/integrations/mux), [OpenCode](/integrations/opencode), [Codex](/integrations/codex).
 
@@ -349,7 +355,7 @@ bd setup --print
 
 | Type | Description | Used by |
 |------|-------------|---------|
-| `file` | Write the template to a single file | windsurf, cody, kilocode, kiro |
+| `file` | Write the template to a single file | cursor (plus skill and hooks), windsurf, cody, kilocode, kiro |
 | `hooks` | Modify JSON settings to add hooks | claude, gemini |
 | `section` | Inject a marked section into an existing file | factory, codex, mux, opencode |
 | `multifile` | Write multiple files | aider, copilot, junie |
