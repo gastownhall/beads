@@ -138,6 +138,7 @@ go_test(
         "counter_contract_test.go",
         "counts_missing_table_test.go",
         "counts_wisp_test.go",
+        "create_auto_mint_test.go",
         "create_batch_equivalence_test.go",
         "create_batch_participation_generation_test.go",
         "create_issue_test.go",
