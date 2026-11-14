@@ -78,6 +78,11 @@ func TestFormulaSchemaShow_AliasResolution(t *testing.T) {
 		if !strings.Contains(out, "for_each") {
 			t.Errorf("%q output missing for_each field", input)
 		}
+		// GH#3782: the schema entry must state that bd refuses formulas
+		// that set the field, not advertise runtime expansion.
+		if !strings.Contains(out, "refuses formulas that set") {
+			t.Errorf("%q output does not state that bd refuses formulas that set the field; output:\n%s", input, out)
+		}
 	}
 }
 
