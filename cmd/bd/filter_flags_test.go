@@ -292,3 +292,75 @@ func TestCountRepeatedFilterRefusedBeforeRun(t *testing.T) {
 		})
 	}
 }
+
+// TestSweptFilterFlagsKeepSingleAndCommaForms is the negative control for the
+// sweep: a single value, an explicit empty value and a comma form reach the
+// consumer byte for byte as before, with no new validation, and an explicit
+// empty occurrence still resets the value (so `--state open --state=
+// --state closed` is accepted, not refused).
+func TestSweptFilterFlagsKeepSingleAndCommaForms(t *testing.T) {
+	for _, r := range reviewedFilterFlags {
+		t.Run(strings.ReplaceAll(r.path, " ", "_")+"/--"+r.flag, func(t *testing.T) {
+			long := "--" + r.flag
+			for _, tc := range []struct {
+				args []string
+				want string
+			}{
+				{[]string{long, "open"}, "open"},
+				{[]string{long + "="}, ""},
+				{[]string{long, "open,closed"}, "open,closed"},
+				{[]string{long, "open, closed"}, "open, closed"},
+				{[]string{long, "not-a-real-value"}, "not-a-real-value"},
+				{[]string{long, "open", long + "=", long, "closed"}, "closed"},
+			} {
+				fl, err := parseFilterArgs(t, r.path, r.flag, tc.args...)
+				if err != nil {
+					t.Errorf("%s %s: %v; want it accepted as before", r.path, strings.Join(tc.args, " "), err)
+					continue
+				}
+				if got := fl.Value.String(); got != tc.want {
+					t.Errorf("%s %s: value %q, want %q", r.path, strings.Join(tc.args, " "), got, tc.want)
+				}
+			}
+		})
+	}
+
+	t.Run("count --status comma form stays one stored status", func(t *testing.T) {
+		cmd := newCountFlagSet(t)
+		if err := cmd.Flags().Parse([]string{"--status", "open,closed"}); err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		req, _, err := parseCountRequest(cmd)
+		if err != nil {
+			t.Fatalf("parseCountRequest: %v", err)
+		}
+		// Deliberately unchanged: CountRequest.Status is one stored status,
+		// so this still matches nothing rather than being split or refused.
+		if req.Status != "open,closed" {
+			t.Errorf("CountRequest.Status = %q, want %q passed through unchanged", req.Status, "open,closed")
+		}
+	})
+
+	t.Run("search --status all still lifts the status filter", func(t *testing.T) {
+		if _, err := parseFilterArgs(t, "bd search", "status", "--status", "all"); err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		req, err := searchListRequest(searchCmd, "q")
+		if err != nil {
+			t.Fatalf("searchListRequest: %v", err)
+		}
+		if req.Status != "" {
+			t.Errorf("ListRequest.Status = %q, want empty for --status all", req.Status)
+		}
+	})
+
+	t.Run("human list --status all plus open keeps the consumer's refusal", func(t *testing.T) {
+		if _, err := parseFilterArgs(t, "bd human list", "status", "--status", "all", "--status", "open"); err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		status, _ := humanListCmd.Flags().GetString("status")
+		if _, err := humanListFilter(status, workapi.ListConfig{}); err == nil || !strings.Contains(err.Error(), `"all" cannot be combined`) {
+			t.Errorf("humanListFilter(%q): err = %v, want the existing all-plus-status refusal", status, err)
+		}
+	})
+}
