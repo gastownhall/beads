@@ -1942,7 +1942,7 @@ func init() {
 	gateResolveCmd.Flags().StringP("reason", "r", "", "Reason for resolving the gate")
 
 	// gate check flags
-	gateCheckCmd.Flags().StringP("type", "t", "", "Gate type to check (gh, gh:run, gh:pr, timer, bead, all)")
+	addOnceFilterFlag(gateCheckCmd.Flags(), "type", "t", "", "Gate type to check (gh, gh:run, gh:pr, timer, bead, all)")
 	gateCheckCmd.Flags().Bool("dry-run", false, "Show what would happen without making changes")
 	gateCheckCmd.Flags().BoolP("escalate", "e", false, "Escalate failed/expired gates")
 	gateCheckCmd.Flags().IntP("limit", "l", 100, "Limit results (default 100)")
