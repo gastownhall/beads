@@ -3,6 +3,9 @@ package workspacegate
 import (
 	"errors"
 	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -137,5 +140,30 @@ func TestResolveParent(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A missing gate parent is an error that still answers fs.ErrNotExist, on
+// every platform, and resolving it creates nothing (the Windows handle
+// route opens with OPEN_EXISTING).
+func TestForDirMissingParent(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	for name, build := range map[string]func(string) (Gate, error){
+		"ForWorkspace":    ForWorkspace,
+		"ForPhysicalRoot": ForPhysicalRoot,
+	} {
+		g, err := build(filepath.Join(missing, ".beads"))
+		if err == nil {
+			t.Fatalf("%s beneath a missing parent = %s, want an error", name, g.Path())
+		}
+		if !strings.HasPrefix(err.Error(), "workspacegate: gate parent") {
+			t.Errorf("%s error = %q, want it to start %q", name, err, "workspacegate: gate parent")
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s error = %v, want errors.Is(err, fs.ErrNotExist)", name, err)
+		}
+		if _, err := os.Lstat(missing); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("%s left something at the missing parent %s (Lstat err %v)", name, missing, err)
+		}
 	}
 }
