@@ -54,6 +54,9 @@ func TestEmbeddedIfRevisionCloseReplaysMoleculeAutoClose(t *testing.T) {
 	rev := bdShowRevision(t, bd, dir, step2.ID)
 	out := bdClose(t, bd, dir, step2.ID, "--if-revision", revStr(rev), "--reason", "retry", "--json")
 	requireCloseJSONReportsAutoClosedMolecule(t, out, []string{step2.ID}, root.ID)
+	// The step's own close was a no-op, so its entry says so (bd-th8229),
+	// even though the replay it drove closed the root.
+	requireCloseJSONMarksAlreadyClosed(t, decodeCloseJSON(t, out, []string{step2.ID}), map[string]bool{step2.ID: true})
 
 	if got := bdShow(t, bd, dir, root.ID); got.Status != types.StatusClosed {
 		t.Errorf("expected stranded-open molecule root %s healed by a guarded re-close of the final step, got %s",

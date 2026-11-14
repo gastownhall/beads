@@ -619,7 +619,8 @@ func TestEmbeddedCloseAlreadyClosedContinue(t *testing.T) {
 		// idempotent re-close must advance the molecule AND persist the advance, not
 		// just mutate the in-memory working set.
 		beforeCommits := countCommits()
-		_ = bdClose(t, bd, cdir, step1.ID, "--reason", "retry", "--continue")
+		out := bdClose(t, bd, cdir, step1.ID, "--reason", "retry", "--continue")
+		requireAlreadyClosedReport(t, out, step1.ID)
 
 		got, err := os.ReadFile(filepath.Join(cbeads, "last-touched"))
 		if err != nil {
@@ -693,7 +694,8 @@ func TestEmbeddedCloseAlreadyClosedClaimNextAndMolecule(t *testing.T) {
 		// re-running `bd close X --claim-next` got its next work item — and that
 		// property is what the adjudication traded away; bd-yby99.30 carries it.
 		beforeCommits := countCommits()
-		_ = bdClose(t, bd, cdir, target.ID, "--claim-next")
+		out := bdClose(t, bd, cdir, target.ID, "--claim-next")
+		requireAlreadyClosedReport(t, out, target.ID)
 
 		got := bdShow(t, bd, cdir, next.ID)
 		if got.Status != types.StatusOpen || got.Assignee != "" {
@@ -740,7 +742,11 @@ func TestEmbeddedCloseAlreadyClosedClaimNextAndMolecule(t *testing.T) {
 
 		// Re-close the already-closed final step. The idempotent re-close must replay
 		// molecule auto-close and re-close the stranded-open root.
-		_ = bdClose(t, bd, mdir, step2.ID, "--reason", "retry")
+		out := bdClose(t, bd, mdir, step2.ID, "--reason", "retry")
+		requireAlreadyClosedReport(t, out, step2.ID)
+		if want := "Auto-closed completed molecule " + root.ID; !strings.Contains(out, want) {
+			t.Errorf("the replayed molecule auto-close is no longer reported (%q):\n%s", want, out)
+		}
 
 		if got := bdShow(t, bd, mdir, root.ID); got.Status != types.StatusClosed {
 			t.Errorf("expected stranded-open molecule root %s re-closed by an already-closed re-close of the final step, got %s",
@@ -986,6 +992,20 @@ func TestEmbeddedCloseAlreadyClosedNewReasonNotReportedAsApplied(t *testing.T) {
 	want := fmt.Sprintf("Already closed %s — Reclose reason (close reason unchanged: FIRST)", issue.ID)
 	if !strings.Contains(out, want) {
 		t.Errorf("re-close of already-closed %s should report %q, got:\n%s", issue.ID, want, out)
+	}
+}
+
+// requireAlreadyClosedReport asserts that a re-close's text output reports id
+// as the already-closed no-op it was, never as a close (bd-th8229), whatever
+// the retry contracts around it (--continue, --claim-next, molecule replay)
+// went on to do.
+func requireAlreadyClosedReport(t *testing.T, out, id string) {
+	t.Helper()
+	if !strings.Contains(out, "Already closed "+id+" ") {
+		t.Errorf("re-close of already-closed %s should report it as already closed, got:\n%s", id, out)
+	}
+	if strings.Contains(out, "✓ Closed "+id+" ") {
+		t.Errorf("re-close of already-closed %s reports a close:\n%s", id, out)
 	}
 }
 
