@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/doltremote"
 )
 
@@ -78,4 +79,13 @@ func CheckRemotePolicy(subject, rawURL string, patterns []string) error {
 		return &RemotePolicyError{Subject: subject}
 	}
 	return nil
+}
+
+// CheckProposedRemote is CheckRemotePolicy for a remote about to be
+// registered, adopted or applied as name, under the effective
+// federation.allowed-remote-patterns value. Callers run it before they write
+// or remove anything, so a refused URL leaves the existing records as they
+// were.
+func CheckProposedRemote(name, rawURL string) error {
+	return CheckRemotePolicy(RemoteSubject(name), rawURL, config.AllowedRemotePatterns())
 }

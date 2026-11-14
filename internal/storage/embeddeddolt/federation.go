@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
@@ -123,6 +124,10 @@ func (s *EmbeddedDoltStore) decryptPassword(encrypted []byte) (string, error) {
 // ---------------------------------------------------------------------------
 
 func (s *EmbeddedDoltStore) AddFederationPeer(ctx context.Context, peer *storage.FederationPeer) error {
+	// GH#6233: refuse before the peer row or its credentials are written.
+	if err := remotecache.CheckProposedRemote(peer.Name, peer.RemoteURL); err != nil {
+		return err
+	}
 	encryptedPwd, err := s.encryptPassword(peer.Password)
 	if err != nil {
 		return fmt.Errorf("encrypt password: %w", err)

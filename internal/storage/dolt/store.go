@@ -48,6 +48,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/remedy"
+	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -6706,6 +6707,10 @@ func (s *DoltStore) AddRemote(ctx context.Context, name, url string) error {
 // AddRemoteWithRef adds a remote whose Dolt data lives on the git ref ref;
 // see storage.RemoteStore.
 func (s *DoltStore) AddRemoteWithRef(ctx context.Context, name, url, ref string) error {
+	// GH#6233: a URL the allowlist refuses is never registered.
+	if err := remotecache.CheckProposedRemote(name, url); err != nil {
+		return err
+	}
 	if err := versioncontrolops.AddRemote(ctx, s.db, name, url, ref); err != nil {
 		return fmt.Errorf("failed to add remote %s: %w", name, err)
 	}

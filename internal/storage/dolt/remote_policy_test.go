@@ -3,6 +3,7 @@ package dolt
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/remotecache"
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // setAllowedRemotePatterns installs an effective allowlist for one test on an
@@ -202,5 +204,44 @@ func TestRemotePolicyAcceptsMatchingServerRemote(t *testing.T) {
 		if _, err := store.PullFrom(ctx, "team"); err != nil {
 			t.Fatalf("patterns %d: PullFrom: %v", i, err)
 		}
+	}
+}
+
+// GH#6233: AddRemote and AddFederationPeer refuse a URL the allowlist rejects
+// before they write, so no remote, peer row or credential is recorded and the
+// remotes already there are unchanged.
+func TestRemotePolicyRefusesServerRegistration(t *testing.T) {
+	skipIfNoDolt(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	setAllowedRemotePatterns(t)
+	store, _ := newFileRemoteServerStore(t, ctx)
+	before, err := store.ListRemotes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var patterns []string
+	for _, r := range before {
+		patterns = append(patterns, r.URL)
+	}
+	config.Set(remotecache.AllowedRemotePatternsKey, patterns)
+
+	if err := store.AddRemote(ctx, "other", "file://"+t.TempDir()); !errors.Is(err, remotecache.ErrRemoteNotAllowed) {
+		t.Fatalf("AddRemote error = %v, want a policy refusal", err)
+	}
+	if err := store.AddFederationPeer(ctx, &storage.FederationPeer{
+		Name: "peer", RemoteURL: "https://peer.example/team", Username: "u", Password: "p",
+	}); !errors.Is(err, remotecache.ErrRemoteNotAllowed) {
+		t.Fatalf("AddFederationPeer error = %v, want a policy refusal", err)
+	}
+	if _, err := store.GetFederationPeer(ctx, "peer"); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("GetFederationPeer(peer) error = %v, want not found: a refused peer was recorded", err)
+	}
+	after, err := store.ListRemotes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(after) != fmt.Sprint(before) {
+		t.Fatalf("remotes = %+v after refused registrations, want the prior %+v", after, before)
 	}
 }
