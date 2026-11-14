@@ -1438,3 +1438,34 @@ func TestSetupChangeDir_RestoresBinding(t *testing.T) {
 		}
 	})
 }
+
+// TestSetupChangeDir_OutputStaysLaunchRelative pins the #8283 boundary: -C
+// moves only the integration files bd setup manages; a relative path the user
+// passes, such as -o rules.md, still resolves against the directory bd runs
+// in, and the global flag help says so instead of promising a git-style
+// chdir.
+func TestSetupChangeDir_OutputStaysLaunchRelative(t *testing.T) {
+	launch, target, _ := changeDirSetupFixture(t)
+	setupOutput = "rules.md"
+	t.Cleanup(func() { setupOutput = "" })
+	targetBefore := treeSnapshot(t, target)
+
+	runSetupIn(t, target, "claude")
+
+	if _, err := os.Stat(filepath.Join(launch, "rules.md")); err != nil {
+		t.Fatalf("bd -C T setup -o rules.md did not write the launch directory's rules.md: %v", err)
+	}
+	assertSameTree(t, "target", target, targetBefore)
+
+	usage := rootCmd.PersistentFlags().Lookup("directory").Usage
+	for _, stale := range []string{"Change to this directory", "like git -C"} {
+		if strings.Contains(usage, stale) {
+			t.Fatalf("-C help %q still promises a process chdir (%q)", usage, stale)
+		}
+	}
+	for _, want := range []string{"beads project", "relative path arguments", "current directory", "init"} {
+		if !strings.Contains(usage, want) {
+			t.Fatalf("-C help %q does not mention %q", usage, want)
+		}
+	}
+}
