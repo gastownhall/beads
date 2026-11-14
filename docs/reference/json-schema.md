@@ -260,13 +260,19 @@ items, plus:
 ### bd close --json
 
 Returns a top-level JSON array with one entry per closed issue, in the order
-the IDs were given; an issue that was already closed is reported too. Each
-entry is the closed issue (`status` is `closed`, with `closed_at` and
-`close_reason`) without its `dependencies`, plus two optional members present
-only when that close completed a molecule (see
-[Molecules](/workflows/molecules)):
+the IDs were given; an issue that was already closed is reported too, with
+`already_closed: true` and its stored (first) `close_reason`. Each entry is
+the closed issue (`status` is `closed`, with `closed_at` and `close_reason`)
+without its `dependencies`, plus these optional members:
+- `already_closed` (boolean, optional): Present (`true`) only when this
+  entry's issue was already closed — the close was an idempotent no-op, so a
+  `--reason` passed with it was not applied and `close_reason` stays the
+  first close's. Absent for real closes. It describes the entry's own issue
+  only: a molecule root may still have been auto-closed during the replay.
 - `auto_closed_molecule` (object, optional): The molecule root the close also
-  closed, as an issue object whose `close_reason` is `all steps complete`
+  closed, as an issue object whose `close_reason` is `all steps complete`;
+  present only when that close completed a molecule (see
+  [Molecules](/workflows/molecules))
 - `molecule_auto_close_refusal` (string, optional): Why the molecule root
   stayed open — for example an open blocker on the root, or a root assigned
   to someone else. Human-readable prose; the step's close itself succeeded

@@ -215,10 +215,14 @@ func TestProxiedServerServeClose(t *testing.T) {
 
 		fromCLI := bdProxiedCloseOneRaw(t, bd, p.dir, issue.ID, "--reason", "ignored under first-close-wins")
 
-		// The allowlist is EMPTY: both surfaces marshal the same canonical
-		// struct from the same post-state snapshot, so any difference at all is
-		// a real divergence and belongs in review, not in this list.
-		if diff := diffJSONObjects(fromHTTP, fromCLI, nil); diff != "" {
+		// The allowlist names exactly one member, and for a reason the oracle
+		// forced into review (bd-th8229 / #4816): the CLI entry carries the
+		// issue-level no-op marker `already_closed` BESIDE the issue members,
+		// while this response spells the same fact one envelope up, as
+		// CloseIssueResponse.already_closed beside `issue` — the wire name the
+		// CLI member was chosen to match. The issue objects themselves still
+		// agree member for member; any other difference remains a divergence.
+		if diff := diffJSONObjects(fromHTTP, fromCLI, []string{"already_closed"}); diff != "" {
 			t.Errorf("CloseIssueResponse.issue and `bd close --json`[0] disagree:\n%s", diff)
 		}
 	})

@@ -64,6 +64,10 @@ type closeJSONEntry struct {
 	types.Issue
 	AutoClosedMolecule       *types.Issue `json:"auto_closed_molecule"`
 	MoleculeAutoCloseRefusal *string      `json:"molecule_auto_close_refusal"`
+	// AlreadyClosed is present (true) only on an entry whose issue was already
+	// closed — the idempotent no-op (bd-th8229 / #4816). Nil = absent, the
+	// real-close shape.
+	AlreadyClosed *bool `json:"already_closed"`
 }
 
 // decodeCloseJSON decodes the array of closed issues `bd close --json` prints
@@ -166,13 +170,14 @@ func TestEmbeddedCloseBasicSharedStore(t *testing.T) {
 
 	// Mixed batch: one already-closed bead + one live bead. Both must appear in
 	// the JSON array — the already-closed one for output parity, the live one as a
-	// real close.
+	// real close — and only the already-closed entry carries already_closed
+	// (bd-th8229 / #4816), keeping its stored first reason.
 	t.Run("close_json_mixed_batch_includes_already_closed", func(t *testing.T) {
 		already := bdCreate(t, bd, dir, "Mixed already", "--type", "task")
 		fresh := bdCreate(t, bd, dir, "Mixed fresh", "--type", "task")
-		bdClose(t, bd, dir, already.ID) // pre-close one
+		bdClose(t, bd, dir, already.ID, "--reason", "stale reason") // pre-close one
 
-		cmd := exec.Command(bd, "close", already.ID, fresh.ID, "--json")
+		cmd := exec.Command(bd, "close", already.ID, fresh.ID, "--json", "--reason", "batch reason")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
 		stdout, stderr, err := runCommandBuffers(t, cmd)
@@ -184,15 +189,64 @@ func TestEmbeddedCloseBasicSharedStore(t *testing.T) {
 		if start < 0 {
 			t.Fatalf("expected a JSON array for mixed-batch --json close, got: %s", s)
 		}
-		var issues []json.RawMessage
-		if jsonErr := json.Unmarshal([]byte(s[start:]), &issues); jsonErr != nil {
+		var entries []closeJSONEntry
+		if jsonErr := json.Unmarshal([]byte(s[start:]), &entries); jsonErr != nil {
 			t.Fatalf("expected valid JSON array, got: %s (%v)", s[start:], jsonErr)
 		}
-		if len(issues) != 2 {
-			t.Fatalf("expected both issues in JSON (real close + already-closed parity), got %d: %s", len(issues), s[start:])
+		if len(entries) != 2 {
+			t.Fatalf("expected both issues in JSON (real close + already-closed parity), got %d: %s", len(entries), s[start:])
 		}
-		if !strings.Contains(s, already.ID) || !strings.Contains(s, fresh.ID) {
-			t.Errorf("expected both %s and %s in JSON output, got: %s", already.ID, fresh.ID, s)
+		// Argument order survives: the already-closed id first, the fresh one second.
+		if entries[0].ID != already.ID || entries[1].ID != fresh.ID {
+			t.Errorf("entries = [%s, %s], want argument order [%s, %s]", entries[0].ID, entries[1].ID, already.ID, fresh.ID)
+		}
+		if entries[0].AlreadyClosed == nil || !*entries[0].AlreadyClosed {
+			t.Errorf("the already-closed entry for %s must carry already_closed: true, got %+v", already.ID, entries[0].AlreadyClosed)
+		}
+		if entries[0].CloseReason != "stale reason" {
+			t.Errorf("already-closed entry close_reason = %q, want the stored first reason %q", entries[0].CloseReason, "stale reason")
+		}
+		if entries[1].AlreadyClosed != nil {
+			t.Errorf("the real close of %s must omit already_closed, got %v", fresh.ID, *entries[1].AlreadyClosed)
+		}
+		if entries[1].CloseReason != "batch reason" {
+			t.Errorf("real close entry close_reason = %q, want %q", entries[1].CloseReason, "batch reason")
+		}
+	})
+
+	// The wrapped shape: with --suggest-next (and something to report), the
+	// closed array moves under "closed" — the already-closed marker must
+	// survive the wrap, still on the no-op entry only (bd-th8229 / #4816).
+	t.Run("close_json_wrapped_suggest_next_marks_already_closed", func(t *testing.T) {
+		blocker := bdCreate(t, bd, dir, "Wrapped unblock blocker", "--type", "task")
+		blocked := bdCreate(t, bd, dir, "Wrapped unblock blocked", "--type", "task")
+		bdDepAdd(t, bd, dir, blocked.ID, blocker.ID)
+		bdClose(t, bd, dir, blocker.ID, "--reason", "first finish") // real close; unblocks `blocked`
+
+		out := bdClose(t, bd, dir, "--json", "--suggest-next", blocker.ID, "--reason", "second finish")
+		start := strings.Index(out, "{")
+		if start < 0 {
+			t.Fatalf("expected a wrapped JSON object from --suggest-next --json, got: %s", out)
+		}
+		var payload struct {
+			Closed    []closeJSONEntry `json:"closed"`
+			Unblocked []*types.Issue   `json:"unblocked"`
+		}
+		if err := json.Unmarshal([]byte(out[start:]), &payload); err != nil {
+			t.Fatalf("parse wrapped close JSON: %v\n%s", err, out[start:])
+		}
+		if len(payload.Closed) != 1 || payload.Closed[0].ID != blocker.ID {
+			t.Fatalf("closed array = %+v, want exactly the re-closed %s", payload.Closed, blocker.ID)
+		}
+		entry := payload.Closed[0]
+		if entry.AlreadyClosed == nil || !*entry.AlreadyClosed {
+			t.Errorf("the wrapped already-closed entry must carry already_closed: true, got %+v", entry.AlreadyClosed)
+		}
+		if entry.CloseReason != "first finish" {
+			t.Errorf("wrapped already-closed entry close_reason = %q, want the stored first reason %q", entry.CloseReason, "first finish")
+		}
+		if len(payload.Unblocked) == 0 || payload.Unblocked[0].ID != blocked.ID {
+			t.Errorf("unblocked = %+v, want %s still reported by the retry-safe --suggest-next", payload.Unblocked, blocked.ID)
 		}
 	})
 

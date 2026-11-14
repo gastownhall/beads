@@ -369,6 +369,49 @@ func TestProxiedServerCloseB(t *testing.T) {
 			t.Errorf("expected 'not found' error, got: %s", out)
 		}
 	})
+
+	// The proxied twin of TestEmbeddedCloseBasicSharedStore's
+	// close_json_mixed_batch_includes_already_closed (bd-th8229 / #4816): both
+	// entries in argument order, already_closed: true only on the pre-closed
+	// id, whose close_reason stays the first close's.
+	t.Run("close_json_mixed_batch_marks_already_closed", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cmj")
+		already := bdProxiedCreate(t, bd, p.dir, "JSON mixed already")
+		fresh := bdProxiedCreate(t, bd, p.dir, "JSON mixed fresh")
+		bdProxiedClose(t, bd, p.dir, already.ID, "--reason", "first reason")
+
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "close", "--json", "--reason", "batch reason", already.ID, fresh.ID)
+		if err != nil {
+			t.Fatalf("mixed-batch re-close failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		start := strings.Index(stdout, "[")
+		if start < 0 {
+			t.Fatalf("expected a JSON array, got:\n%s", stdout)
+		}
+		var entries []closeJSONEntry
+		if jsonErr := json.Unmarshal([]byte(stdout[start:]), &entries); jsonErr != nil {
+			t.Fatalf("parse close JSON: %v\nraw: %s", jsonErr, stdout[start:])
+		}
+		if len(entries) != 2 {
+			t.Fatalf("entries = %d, want 2:\n%s", len(entries), stdout[start:])
+		}
+		if entries[0].ID != already.ID || entries[1].ID != fresh.ID {
+			t.Errorf("entries = [%s, %s], want argument order [%s, %s]", entries[0].ID, entries[1].ID, already.ID, fresh.ID)
+		}
+		if entries[0].AlreadyClosed == nil || !*entries[0].AlreadyClosed {
+			t.Errorf("the already-closed entry for %s must carry already_closed: true, got %+v", already.ID, entries[0].AlreadyClosed)
+		}
+		if entries[0].CloseReason != "first reason" {
+			t.Errorf("already-closed entry close_reason = %q, want the stored first reason %q", entries[0].CloseReason, "first reason")
+		}
+		if entries[1].AlreadyClosed != nil {
+			t.Errorf("the real close of %s must omit already_closed, got %v", fresh.ID, *entries[1].AlreadyClosed)
+		}
+		if entries[1].CloseReason != "batch reason" {
+			t.Errorf("real close entry close_reason = %q, want %q", entries[1].CloseReason, "batch reason")
+		}
+	})
 }
 
 // TestProxiedServerClose3 was split off TestProxiedServerClose in

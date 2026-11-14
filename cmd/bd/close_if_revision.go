@@ -183,7 +183,7 @@ func reportClosedIfRevisionResult(id, reason, preCloseStatus string, closeResult
 	}
 	if jsonOutput {
 		if closedIssue != nil {
-			_ = outputJSON([]closedIssueJSON{newClosedIssueJSON(closedIssue, closeResult.AutoClosedMolecule, closeResult.MoleculeAutoCloseRefusal)})
+			_ = outputJSON([]closedIssueJSON{newClosedIssueJSON(closedIssue, closeResult.AutoClosedMolecule, closeResult.MoleculeAutoCloseRefusal, !closeResult.Changed)})
 		}
 		return
 	}
