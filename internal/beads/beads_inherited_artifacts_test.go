@@ -925,9 +925,16 @@ type gh6552Fixture struct {
 func newGH6552Fixture(t *testing.T, mainMetadata, mainStoreRel, phantomDB string) *gh6552Fixture {
 	t.Helper()
 
-	fx := &gh6552Fixture{
-		tmpDir: t.TempDir(),
+	fx := &gh6552Fixture{}
+	// Resolve the temp root once (macOS /var -> /private/var) so fixture
+	// paths and discovery's canonicalized answers compare as strings even
+	// when an expected path, like a server-mode dolt/ directory, does not
+	// exist on disk.
+	tmpDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
 	}
+	fx.tmpDir = tmpDir
 	fx.mainRepoDir = filepath.Join(fx.tmpDir, "main-repo")
 	if err := os.MkdirAll(fx.mainRepoDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -1014,34 +1021,52 @@ func newGH6552Fixture(t *testing.T, mainMetadata, mainStoreRel, phantomDB string
 // repository's recognized workspace in directory and database-path
 // discovery, from the worktree root and from an ordinary subdirectory.
 // Database names do not participate: the yield is the same when the phantom
-// is named like the main database and when both carry the default name.
+// is named like the main database and when both carry the default name. A
+// server-mode main with no local data directory also qualifies: its metadata
+// routes discovery, and the configured server database path is returned
+// without falling back to the worktree's phantom.
 func TestFindBeadsDir_WorktreeMetadatalessStoreYieldsToSharedWorkspace(t *testing.T) {
 	unsetDiscoveryEnvForTest(t)
 
 	embeddedMain := `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"myproject"}`
+	serverMain := `{"backend":"dolt","dolt_mode":"server","dolt_database":"myproject"}`
 	cases := []struct {
 		name         string
 		mainMetadata string
 		mainStoreRel string
 		phantomDB    string
+		wantDBRel    string // expected FindDatabasePath relative to the main .beads
 	}{
 		{
 			name:         "embedded main, differently named phantom",
 			mainMetadata: embeddedMain,
 			mainStoreRel: filepath.Join("embeddeddolt", "myproject"),
 			phantomDB:    "beads",
+			wantDBRel:    "embeddeddolt",
 		},
 		{
 			name:         "phantom named like the main database",
 			mainMetadata: embeddedMain,
 			mainStoreRel: filepath.Join("embeddeddolt", "myproject"),
 			phantomDB:    "myproject",
+			wantDBRel:    "embeddeddolt",
 		},
 		{
 			name:         "both databases carry the default name",
 			mainMetadata: `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"beads"}`,
 			mainStoreRel: filepath.Join("embeddeddolt", "beads"),
 			phantomDB:    "beads",
+			wantDBRel:    "embeddeddolt",
+		},
+		{
+			// AC-2: server-mode metadata with no local data directory. The
+			// server database path does not need to exist (server mode has
+			// no local data), so it is compared as a configured path.
+			name:         "server main without local data directories",
+			mainMetadata: serverMain,
+			mainStoreRel: "",
+			phantomDB:    "beads",
+			wantDBRel:    "dolt",
 		},
 	}
 
@@ -1049,7 +1074,7 @@ func TestFindBeadsDir_WorktreeMetadatalessStoreYieldsToSharedWorkspace(t *testin
 		t.Run(tc.name, func(t *testing.T) {
 			fx := newGH6552Fixture(t, tc.mainMetadata, tc.mainStoreRel, tc.phantomDB)
 			mainBeads := resolveForTest(t, fx.mainBeadsDir)
-			mainEmbedded := resolveForTest(t, filepath.Join(fx.mainBeadsDir, "embeddeddolt"))
+			mainDatabase := filepath.Join(fx.mainBeadsDir, tc.wantDBRel)
 
 			for _, from := range []struct {
 				name string
@@ -1068,8 +1093,16 @@ func TestFindBeadsDir_WorktreeMetadatalessStoreYieldsToSharedWorkspace(t *testin
 					if got := resolveForTest(t, FindBeadsDir()); got != mainBeads {
 						t.Errorf("FindBeadsDir() = %q, want shared .beads %q (GH#6552: the metadata-less worktree store must yield)", FindBeadsDir(), fx.mainBeadsDir)
 					}
-					if got := resolveForTest(t, FindDatabasePath()); got != mainEmbedded {
-						t.Errorf("FindDatabasePath() = %q, want main embedded store %q", FindDatabasePath(), filepath.Join(fx.mainBeadsDir, "embeddeddolt"))
+					gotDB := FindDatabasePath()
+					if tc.mainStoreRel != "" {
+						// The expected database directory exists; compare
+						// resolved paths.
+						if got := resolveForTest(t, gotDB); got != resolveForTest(t, mainDatabase) {
+							t.Errorf("FindDatabasePath() = %q, want main database %q", gotDB, mainDatabase)
+						}
+					} else if gotDB != mainDatabase {
+						// Server mode: the configured path need not exist.
+						t.Errorf("FindDatabasePath() = %q, want configured server database path %q", gotDB, mainDatabase)
 					}
 				})
 			}
