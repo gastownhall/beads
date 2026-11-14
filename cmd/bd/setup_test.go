@@ -1390,3 +1390,122 @@ func TestSetupChangeDir_WorkspaceRecipeConfinedToTarget(t *testing.T) {
 		assertSameTree(t, "L after bd -C T setup of inside recipes", launch, map[string]string{})
 	})
 }
+
+// TestSetupChangeDir_GlobalScope pins what bd -C leaves alone: a global
+// install keeps its user-level destination under the home directory and
+// writes nothing into T or L, while Mux, which installs the project's
+// AGENTS.md and hooks with its global layer, puts its global layer in the
+// home directory and its project files, the workspace layer included, in T.
+func TestSetupChangeDir_GlobalScope(t *testing.T) {
+	for _, tc := range []struct {
+		recipe          string
+		project, global bool
+		home, target    []string // files written, slash-separated
+	}{
+		{recipe: "claude", global: true, home: []string{".claude/settings.json"}},
+		{recipe: "codex", global: true, home: []string{".codex/AGENTS.md", ".agents/skills/beads/SKILL.md"}},
+		{recipe: "cursor", global: true, home: []string{".cursor/hooks.json", ".agents/skills/beads/SKILL.md"}},
+		{recipe: "gemini", home: []string{".gemini/settings.json"}},
+		// bd setup mux installs the project's AGENTS.md and Mux hooks with
+		// either layer: those are project files, so they go into T.
+		{recipe: "mux", global: true, home: []string{".mux/AGENTS.md"}, target: []string{"AGENTS.md", ".mux/init"}},
+		{recipe: "mux", project: true, global: true, home: []string{".mux/AGENTS.md"}, target: []string{"AGENTS.md", ".mux/init", ".mux/AGENTS.md"}},
+	} {
+		name := tc.recipe
+		if tc.project {
+			name += " --project"
+		}
+		if tc.global {
+			name += " --global"
+		}
+		t.Run(name, func(t *testing.T) {
+			launch, target, home := changeDirSetupFixture(t)
+			setupProject, setupGlobal = tc.project, tc.global
+			targetBefore := treeSnapshot(t, target)
+
+			out := runSetupIn(t, target, tc.recipe)
+
+			for _, file := range tc.home {
+				if _, err := os.Stat(filepath.Join(home, filepath.FromSlash(file))); err != nil {
+					t.Errorf("bd -C T setup %s did not write ~/%s: %v\n%s", name, file, err, out)
+				}
+			}
+			for _, file := range tc.target {
+				if _, err := os.Stat(filepath.Join(target, filepath.FromSlash(file))); err != nil {
+					t.Errorf("bd -C T setup %s did not write T/%s: %v\n%s", name, file, err, out)
+				}
+			}
+			if len(tc.target) == 0 {
+				assertSameTree(t, "T after bd -C T setup "+name, target, targetBefore)
+			}
+			assertSameTree(t, "L after bd -C T setup "+name, launch, map[string]string{})
+		})
+	}
+}
+
+// TestSetupChangeDir_RestoresBinding pins that bd -C binds the setup
+// directory for one run only: after a -C run, whether it succeeded or
+// failed, setup without -C (or with a blank -C) installs into the working
+// directory, prints the paths it printed before, relative to it, and never
+// moved the working directory. A relative -C names a directory against the
+// working directory, and a -C subdirectory of a workspace is where the
+// files go, not the workspace root that holds .beads.
+func TestSetupChangeDir_RestoresBinding(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		recipe string // the -C run's recipe; an unknown one fails
+	}{{"after success", "windsurf"}, {"after failure", "no-such-recipe"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			launch, target, _ := changeDirSetupFixture(t)
+			_, _ = runSetupErrIn(t, target, tc.recipe)
+			if wd, err := os.Getwd(); err != nil || wd != launch {
+				t.Fatalf("bd -C T setup %s moved the working directory to %q, %v", tc.recipe, wd, err)
+			}
+			for _, blank := range []string{"", "  "} {
+				out, err := runSetupErrIn(t, blank, "kiro")
+				if err != nil {
+					t.Fatalf("bd setup kiro (-C %q) = %v:\n%s", blank, err, out)
+				}
+				if !strings.Contains(out, "  File: .kiro/steering/beads.md\n") {
+					t.Errorf("bd setup kiro (-C %q) no longer prints its relative path:\n%s", blank, out)
+				}
+				if _, err := os.Stat(filepath.Join(launch, ".kiro", "steering", "beads.md")); err != nil {
+					t.Errorf("bd setup kiro (-C %q) after a -C run did not install into L: %v", blank, err)
+				}
+				if _, err := os.Stat(filepath.Join(target, ".kiro")); !os.IsNotExist(err) {
+					t.Errorf("bd setup kiro (-C %q) after a -C run installed into T: %v", blank, err)
+				}
+			}
+		})
+	}
+
+	t.Run("relative -C subdirectory", func(t *testing.T) {
+		_, workspace, _ := changeDirSetupFixture(t)
+		// Run from the workspace's parent, naming its sub directory
+		// relative to it.
+		sub := filepath.Join(workspace, "sub")
+		if err := os.Mkdir(sub, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(filepath.Dir(workspace))
+		rel := filepath.Join(filepath.Base(workspace), "sub")
+		parentBefore := treeSnapshot(t, workspace)
+
+		out, err := runSetupErrIn(t, rel, "cody")
+		if err != nil {
+			t.Fatalf("bd -C %s setup cody = %v:\n%s", rel, err, out)
+		}
+		if _, err := os.Stat(filepath.Join(sub, ".cody", "rules", "beads.md")); err != nil {
+			t.Errorf("bd -C %s setup cody did not install into it: %v\n%s", rel, err, out)
+		}
+		delete(parentBefore, "sub")
+		after := treeSnapshot(t, workspace)
+		for name := range after {
+			if name != "sub" && !strings.HasPrefix(name, "sub/") {
+				if _, ok := parentBefore[name]; !ok {
+					t.Errorf("bd -C %s setup cody wrote %s in the workspace root", rel, name)
+				}
+			}
+		}
+	})
+}
