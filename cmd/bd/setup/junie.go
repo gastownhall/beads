@@ -145,8 +145,10 @@ func InstallJunie() error {
 }
 
 func CheckJunie() error {
-	guidelinesPath := ".junie/guidelines.md"
-	mcpPath := ".junie/mcp/mcp.json"
+	// The files belong to the selected project (the -C target while one is
+	// bound, GH#8283), as InstallJunie writes them.
+	guidelinesPath := ProjectPath(".junie/guidelines.md")
+	mcpPath := ProjectPath(".junie/mcp/mcp.json")
 
 	guidelinesExists := false
 	mcpExists := false

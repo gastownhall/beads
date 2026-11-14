@@ -365,7 +365,7 @@ func runRecipe(name string) error {
 	if setupCheck {
 		var missing []string
 		for _, path := range paths {
-			if _, err := os.Stat(path); os.IsNotExist(err) {
+			if _, err := os.Stat(setup.ProjectPath(path)); os.IsNotExist(err) {
 				missing = append(missing, path)
 			}
 		}
@@ -374,13 +374,13 @@ func runRecipe(name string) error {
 			key, note := remedy.CommandArg(runtime.GOOS, name, "<recipe>")
 			fmt.Printf("  Run: bd setup %s%s\n", key, note)
 			for _, path := range missing {
-				fmt.Printf("  Missing: %s\n", remedy.PrintedValue(path))
+				fmt.Printf("  Missing: %s\n", remedy.PrintedValue(setup.ProjectPath(path)))
 			}
 			return SilentExit()
 		}
 		fmt.Printf("✓ %s integration installed\n", remedy.PrintedValue(recipe.Name))
 		for _, path := range paths {
-			fmt.Printf("  File: %s\n", remedy.PrintedValue(path))
+			fmt.Printf("  File: %s\n", remedy.PrintedValue(setup.ProjectPath(path)))
 		}
 		return nil
 	}

@@ -247,10 +247,13 @@ func CheckCursor(global bool) error {
 	missing := false
 
 	if !global {
-		if FileExists(cursorRulesPath) {
-			fmt.Printf("✓ Cursor rules installed: %s\n", cursorRulesPath)
+		// The rules belong to the selected project (the -C target while one
+		// is bound, GH#8283), as installCursorRules writes them.
+		rulesPath := cursorRulesTargetPath()
+		if FileExists(rulesPath) {
+			fmt.Printf("✓ Cursor rules installed: %s\n", rulesPath)
 		} else {
-			fmt.Printf("✗ Cursor rules not installed: %s\n", cursorRulesPath)
+			fmt.Printf("✗ Cursor rules not installed: %s\n", rulesPath)
 			missing = true
 		}
 	}

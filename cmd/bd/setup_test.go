@@ -1195,3 +1195,49 @@ func TestSetupChangeDir_RemoveTouchesOnlyTarget(t *testing.T) {
 		}
 	})
 }
+
+// TestSetupChangeDir_CheckReadsTarget pins #8283's check half: `bd -C <target>
+// setup <recipe> --check` judges the target, not the process working
+// directory. Installed under the target it reports installed; installed only
+// in the launch directory it reports not installed.
+func TestSetupChangeDir_CheckReadsTarget(t *testing.T) {
+	restoreManaged := setup.SetClaudeManagedSettingsDirForTest("")
+	t.Cleanup(restoreManaged)
+
+	for _, name := range []string{"windsurf", "cursor", "aider", "junie"} {
+		t.Run(name, func(t *testing.T) {
+			// The integration is installed into the launch directory with no
+			// -C binding, the way a pre-#8283 `bd setup <recipe>` from there
+			// left it, and the target stays empty: --check must then report
+			// not installed, which runRecipe signals by returning an error.
+			launch, target := setupChangeDirWorkspace(t)
+			if err := runRecipe(name); err != nil {
+				t.Fatalf("bd setup %s (no -C, seeding the launch directory): %v", name, err)
+			}
+			setupChangeDir(t, target)
+			setupCheck = true
+			_, missingErr := captureStdoutWithError(t, func() error { return runRecipe(name) })
+			if missingErr == nil {
+				t.Errorf("bd -C %s setup %s --check reported installed; the integration is in the launch directory %s, not the target", target, name, launch)
+			}
+			setupCheck = false
+
+			// Installed under the target (with the binding), --check reports
+			// installed, and the generic branch names the target's files.
+			launch, target = setupChangeDirWorkspace(t)
+			setupChangeDir(t, target)
+			if err := runRecipe(name); err != nil {
+				t.Fatalf("bd -C %s setup %s (seeding the target): %v", target, name, err)
+			}
+			setupCheck = true
+			out, checkErr := captureStdoutWithError(t, func() error { return runRecipe(name) })
+			if checkErr != nil {
+				t.Fatalf("bd -C %s setup %s --check reported not installed: %v\noutput:\n%s", target, name, checkErr, out)
+			}
+			if name == "windsurf" && !strings.Contains(out, filepath.Join(target, ".windsurf", "rules", "beads.md")) {
+				t.Errorf("bd -C %s setup windsurf --check did not name the target's file; output:\n%s", target, out)
+			}
+			assertDirEmpty(t, launch, "launch directory")
+		})
+	}
+}
