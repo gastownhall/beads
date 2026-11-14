@@ -1,6 +1,7 @@
 package formula
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1327,4 +1328,71 @@ func TestExpansionVarRefs(t *testing.T) {
 			t.Errorf("expansion without a template: ExpansionVarRefs() = %v, want nil", got)
 		}
 	})
+}
+
+// TestApplyExpansions_TemplateOnCompleteRefused: an expansion formula is loaded
+// by name without Resolve or Validate, and expandStep rebuilds template steps
+// without OnComplete, so a template on_complete was silently dropped. Every
+// expansion route must refuse it instead (GH#3782).
+func TestApplyExpansions_TemplateOnCompleteRefused(t *testing.T) {
+	tmpDir := t.TempDir()
+	const expansion = `formula = "fan-out"
+type = "expansion"
+version = 1
+
+[[template]]
+id = "{target}.survey"
+title = "Survey {target.title}"
+
+[template.on_complete]
+for_each = "output.workers"
+bond = "mol-worker"
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "fan-out.formula.toml"), []byte(expansion), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	parser := NewParser(tmpDir)
+
+	check := func(t *testing.T, result []*Step, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("expansion succeeded although template step sets on_complete; result IDs: %v", stepIDsOf(result))
+		}
+		if !errors.Is(err, ErrValidation) {
+			t.Errorf("errors.Is(err, ErrValidation) = false for %v", err)
+		}
+		for _, want := range []string{`"fan-out"`, "template[0] ({target}.survey)", "on_complete is not supported"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not mention %q", err, want)
+			}
+		}
+	}
+
+	t.Run("compose.expand", func(t *testing.T) {
+		steps := []*Step{{ID: "work", Title: "Work"}}
+		compose := &ComposeRules{Expand: []*ExpandRule{{Target: "work", With: "fan-out"}}}
+		result, err := ApplyExpansions(steps, compose, parser)
+		check(t, result, err)
+	})
+
+	t.Run("compose.map", func(t *testing.T) {
+		steps := []*Step{{ID: "impl.a", Title: "A"}, {ID: "impl.b", Title: "B"}}
+		compose := &ComposeRules{Map: []*MapRule{{Select: "impl.*", With: "fan-out"}}}
+		result, err := ApplyExpansions(steps, compose, parser)
+		check(t, result, err)
+	})
+
+	t.Run("inline expand", func(t *testing.T) {
+		steps := []*Step{{ID: "work", Title: "Work", Expand: "fan-out"}}
+		result, err := ApplyInlineExpansions(steps, parser)
+		check(t, result, err)
+	})
+}
+
+func stepIDsOf(steps []*Step) []string {
+	ids := make([]string, 0, len(steps))
+	for _, s := range steps {
+		ids = append(ids, s.ID)
+	}
+	return ids
 }
