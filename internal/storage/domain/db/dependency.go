@@ -43,28 +43,41 @@ func pickDepTable(useWisps bool) string {
 	return "dependencies"
 }
 
-// pickDepTargetColumn classifies an edge's target the same way the in-tx store
-// bodies do, through issueops.IsExternalDepTarget: a target this database
-// cannot hold — an "external:" reference or an issue belonging to another
-// repository — goes to depends_on_external, which carries no foreign key.
-// Only a target that could plausibly be local is probed against wisps and
-// otherwise treated as a local issue, where fk_dep_issue_target still refuses
-// an id that is genuinely missing.
-func (r *dependencySQLRepositoryImpl) pickDepTargetColumn(ctx context.Context, issueID, dependsOnID string) (string, error) {
-	if issueops.IsExternalDepTarget(issueID, dependsOnID) {
-		return "depends_on_external", nil
-	}
-	var probe int
-	err := r.runner.QueryRowContext(ctx, "SELECT 1 FROM wisps WHERE id = ? LIMIT 1", dependsOnID).Scan(&probe)
-	switch {
-	case err == nil:
-		return "depends_on_wisp_id", nil
-	case errors.Is(err, sql.ErrNoRows):
-		return "depends_on_issue_id", nil
-	case dberrors.IsTableNotExist(err):
-		return "depends_on_issue_id", nil
-	default:
-		return "", fmt.Errorf("classify dep target %s: %w", dependsOnID, err)
+// classifyDepTarget classifies an edge's target by the rule the in-tx store
+// bodies use, issueops.ClassifyDepTargetFrom, reading presence on the runner: a
+// target this database holds is a local edge whatever its prefix, and only an
+// "external:" reference or another prefix's id with no local row goes to
+// depends_on_external, which carries no foreign key. A deployment without a
+// wisps table reads as having no wisps; any other failed read is returned.
+func (r *dependencySQLRepositoryImpl) classifyDepTarget(ctx context.Context, issueID, dependsOnID string) (issueops.DepTargetKind, error) {
+	return issueops.ClassifyDepTargetFrom(issueID, dependsOnID, issueops.DepTargetPresence{
+		IsWisp: func(id string) (bool, error) {
+			exists, err := r.rowExists(ctx, "wisps", id)
+			if err != nil && dberrors.IsTableNotExist(err) {
+				return false, nil
+			}
+			return exists, err
+		},
+		IsIssue: func(id string) (bool, error) {
+			return r.rowExists(ctx, "issues", id)
+		},
+	})
+}
+
+// lazyDepTargetKind classifies dep's target on first use and remembers it, so
+// one Insert reads the target's presence at most once across its hierarchy
+// check and its column choice, and not at all on a path that needs neither.
+func (r *dependencySQLRepositoryImpl) lazyDepTargetKind(ctx context.Context, dep *types.Dependency) func() (issueops.DepTargetKind, error) {
+	var kind *issueops.DepTargetKind
+	return func() (issueops.DepTargetKind, error) {
+		if kind == nil {
+			k, err := r.classifyDepTarget(ctx, dep.IssueID, dep.DependsOnID)
+			if err != nil {
+				return k, err
+			}
+			kind = &k
+		}
+		return *kind, nil
 	}
 }
 
@@ -93,8 +106,9 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 		metadata = "{}"
 	}
 
+	targetKind := r.lazyDepTargetKind(ctx, dep)
 	if !opts.HierarchyValidated {
-		if err := r.ValidateBlockingHierarchy(ctx, dep); err != nil {
+		if err := r.validateBlockingHierarchy(ctx, dep, targetKind); err != nil {
 			return err
 		}
 	}
@@ -165,15 +179,16 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 		return fmt.Errorf("db: DependencySQLRepository.Insert: check existing: %w", err)
 	}
 
-	targetCol, err := r.pickDepTargetColumn(ctx, dep.IssueID, dep.DependsOnID)
+	kind, err := targetKind()
 	if err != nil {
 		return fmt.Errorf("db: DependencySQLRepository.Insert: %w", err)
 	}
+	targetCol := kind.Column()
 
 	// Deterministic id keyed on (issue_id, target), the same derivation as the
 	// embedded/issueops path, so server-mode (use-case) dependency creation stays
 	// merge-safe across clones and works once the DEFAULT (UUID()) is dropped (#4259).
-	//nolint:gosec // G201: table is one of two hardcoded constants; targetCol is from pickDepTargetColumn
+	//nolint:gosec // G201: table is one of two hardcoded constants; targetCol is from DepTargetKind.Column()
 	if _, err := r.runner.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (id, issue_id, %s, type, created_at, created_by, metadata, thread_id)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -323,7 +338,22 @@ func (r *dependencySQLRepositoryImpl) ValidateBlockingHierarchy(ctx context.Cont
 	if dep == nil {
 		return errors.New("db: DependencySQLRepository.ValidateBlockingHierarchy: dep must not be nil")
 	}
-	if issueops.IsExternalDepTarget(dep.IssueID, dep.DependsOnID) {
+	return r.validateBlockingHierarchy(ctx, dep, r.lazyDepTargetKind(ctx, dep))
+}
+
+// validateBlockingHierarchy refuses a blocking edge between endpoints on one
+// hierarchy line. Only a genuinely external target is exempt — it has no local
+// hierarchy — so a local target of another prefix is checked like any other.
+// The target is classified only for a blocking edge, the one kind checked.
+func (r *dependencySQLRepositoryImpl) validateBlockingHierarchy(ctx context.Context, dep *types.Dependency, targetKind func() (issueops.DepTargetKind, error)) error {
+	if dep.Type != types.DepBlocks && dep.Type != types.DepConditionalBlocks {
+		return nil
+	}
+	kind, err := targetKind()
+	if err != nil {
+		return fmt.Errorf("db: DependencySQLRepository.ValidateBlockingHierarchy: %w", err)
+	}
+	if kind == issueops.DepTargetExternal {
 		return nil
 	}
 	return issueops.CheckBlockingHierarchyInTx(ctx, r.runner, dep, nil)

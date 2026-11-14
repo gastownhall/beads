@@ -180,6 +180,15 @@ func TestBatchApplyContract(t *testing.T) {
 func newUOWBatchApplyFixture(t *testing.T, ctx context.Context, prefix string) conformance.BatchApplyFixture {
 	t.Helper()
 	provider := newUOWRoleFixtureProvider(t, ctx, prefix)
+	// The end-gate hierarchy case seeds a local issue of another prefix ("x" +
+	// prefix). This backend validates explicit create IDs against the
+	// configured prefixes, so the fixture allows that one the way a
+	// multi-prefix database does.
+	if err := RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
+		return "bd: allow the cross-prefix seed", uw.ConfigUseCase().SetConfig(ctx, "allowed_prefixes", "x"+prefix)
+	}); err != nil {
+		t.Fatalf("set allowed_prefixes: %v", err)
+	}
 	// Through the capability accessor, not NewBatchApplier: a provider that
 	// stopped offering the role is the regression a constructor call would hide.
 	source, ok := provider.(BatchApplierSource)

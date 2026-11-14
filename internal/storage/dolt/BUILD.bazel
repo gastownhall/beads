@@ -192,6 +192,7 @@ go_test(
         "create_rollback_test.go",
         "credentials_peer_test.go",
         "credentials_test.go",
+        "cross_prefix_local_test.go",
         "cross_project_test.go",
         "cross_record_invariant_contract_test.go",
         "cross_upgrade_merge_test.go",

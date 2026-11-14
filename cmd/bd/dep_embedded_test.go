@@ -262,7 +262,7 @@ func TestEmbeddedDepAAddRejectionsAndBulk(t *testing.T) {
 	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
-	dir, _, _ := bdInit(t, bd, "--prefix", "dp")
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "dp")
 
 	t.Run("add_cycle_rejected", func(t *testing.T) {
 		// A->B already exists, add B->A to create cycle — should be rejected
@@ -332,6 +332,33 @@ func TestEmbeddedDepAAddRejectionsAndBulk(t *testing.T) {
 		}
 		if got := bdShowDetails(t, bd, dir, src.ID)["dependency_count"]; got != float64(1) {
 			t.Fatalf("dependency_count = %v, want 1: the edge must still be stored", got)
+		}
+		// A target this database holds no row for stays another rig's: it is
+		// stored in depends_on_external and gates nothing here (GH#8299 gives
+		// local semantics only to targets that are present).
+		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), "dp", "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		var issueCol, wispCol, externalCol *string
+		var isBlocked int
+		err = db.QueryRowContext(t.Context(),
+			"SELECT d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external, i.is_blocked "+
+				"FROM dependencies d JOIN issues i ON i.id = d.issue_id WHERE d.issue_id = ?",
+			src.ID).Scan(&issueCol, &wispCol, &externalCol, &isBlocked)
+		cleanup()
+		if err != nil {
+			t.Fatalf("read the stored edge: %v", err)
+		}
+		if issueCol != nil || wispCol != nil || externalCol == nil || *externalCol != "zz-404" {
+			t.Errorf("stored target columns = (%v, %v, %v), want only depends_on_external = zz-404", issueCol, wispCol, externalCol)
+		}
+		if isBlocked != 0 {
+			t.Errorf("is_blocked = %d, want 0: an unresolved foreign target is no local blocker", isBlocked)
+		}
+		readyOut, _ := bdRunSplit(t, bd, dir, "ready", "--json", "--limit", "0")
+		if !strings.Contains(readyOut, `"`+src.ID+`"`) {
+			t.Errorf("bd ready does not list %s; an unresolved foreign target must not gate it:\n%s", src.ID, readyOut)
 		}
 		// The printed remedy addresses the stored row.
 		bdDep(t, bd, dir, "remove", src.ID, "zz-404")

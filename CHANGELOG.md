@@ -1281,9 +1281,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`bd doctor` no longer flags cross-repository dependencies as orphans,
-  and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
-  a bare target under another repository's prefix (`bd dep add bd-abc
+- A dependency on a local issue or wisp with another prefix now blocks.
+  bd classified a target by its prefix alone, so in a database with several
+  prefixes (`allowed_prefixes`) an edge onto a present issue of another prefix
+  was stored as an unverified external ID: the source showed as ready, `bd
+  blocked` did not name the blocker, and the parent-child hierarchy check
+  skipped the edge (GH#8299). Every write path (`bd dep add`, create and
+  import with dependencies, batch apply, and server-mode transactions,
+  including a target created earlier in the same transaction) now files a
+  target present in this database as a local issue or wisp. A foreign ID this
+  database holds no row for is stored and warned about as before, and `bd repo
+  remove` keeps an edge onto a removed repository's issue of another prefix as
+  such an ID, as it did before. Edges written before the fix keep their
+  external target; re-adding the same edge does not change it, so remove and
+  re-add one, with its dependency type and metadata, to make it block.
+- **Separately from GH#8299, `bd doctor` no longer flags cross-repository
+  dependencies as orphans or deletes them under `--fix`** (#4647, #8400).
+  `bd dep add` stores a bare target under another repository's prefix (`bd dep add bd-abc
   gt-123`) without verifying it, but the Orphaned Dependencies check, its
   `--fix` repair and the `--deep` Dependency Integrity check exempted only
   `external:` refs, and `--deep` Parent Consistency exempted nothing. They now
