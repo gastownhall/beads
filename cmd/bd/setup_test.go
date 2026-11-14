@@ -1218,3 +1218,104 @@ func TestSetupChangeDir_CheckReadsTarget(t *testing.T) {
 		})
 	}
 }
+
+// TestSetupChangeDir_WorkspaceRecipeConfinedToTarget pins #8283 for the
+// workspace recipe confinement (recipes.PathInside): under bd -C T, a
+// .beads/recipes.toml recipe's paths must stay inside T, not inside L. T/out
+// links outside T while L has no out, so out/x.md is outside T only:
+// install, --check, --remove and --add all refuse it, naming the -C
+// directory, before touching a recipe file or the configuration, and a
+// multifile recipe writes none of its files. Paths inside T, through an
+// inward link too, still install.
+func TestSetupChangeDir_WorkspaceRecipeConfinedToTarget(t *testing.T) {
+	const refusal = "is not inside the -C directory bd setup installs into"
+	// fixture links T/out to outside, which holds x.md, and writes toml
+	// as T's recipes.toml.
+	fixture := func(t *testing.T, toml string) (launch, target, outside string) {
+		t.Helper()
+		launch, target, _ = changeDirSetupFixture(t)
+		outside = changeDirTempDir(t)
+		if err := os.WriteFile(filepath.Join(outside, "x.md"), []byte("victim\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, filepath.Join(target, "out")); err != nil {
+			t.Skipf("symlink: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(target, ".beads", "recipes.toml"), []byte(toml), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return launch, target, outside
+	}
+
+	for _, tc := range []struct {
+		name, toml string
+	}{
+		{"file", "[recipes.lint]\npath = \"out/x.md\"\n"},
+		{"multifile", "[recipes.lint]\ntype = \"multifile\"\npaths = [\"ok.md\", \"out/x.md\"]\n"},
+	} {
+		for _, mode := range []struct {
+			name string
+			flag *bool
+		}{{"install", nil}, {"--check", &setupCheck}, {"--remove", &setupRemove}} {
+			t.Run(tc.name+" "+mode.name, func(t *testing.T) {
+				launch, target, outside := fixture(t, tc.toml)
+				if mode.flag != nil {
+					*mode.flag = true
+				}
+				targetBefore, outsideBefore := treeSnapshot(t, target), treeSnapshot(t, outside)
+
+				var err error
+				_, stderr := captureStdio(t, func() {
+					orig := changeDir
+					changeDir = target
+					defer func() { changeDir = orig }()
+					err = runSetup(setupCmd, []string{"lint"})
+				})
+				what := "bd -C T setup lint " + mode.name
+				if err == nil || !strings.Contains(stderr, "names 'out/x.md', which "+refusal+"\n") {
+					t.Errorf("%s: err %v, stderr\n%s\nwant a refusal naming the -C directory", what, err, stderr)
+				}
+				assertSameTree(t, what+": T", target, targetBefore)
+				assertSameTree(t, what+": outside", outside, outsideBefore)
+				assertSameTree(t, what+": L", launch, map[string]string{})
+			})
+		}
+	}
+
+	t.Run("--add", func(t *testing.T) {
+		_, target, _ := fixture(t, "")
+		err := func() error {
+			orig := changeDir
+			changeDir = target
+			defer func() { changeDir = orig }()
+			return addRecipe("lint", "out/x.md")
+		}()
+		if err == nil || !strings.Contains(err.Error(), "'out/x.md' "+refusal+";") ||
+			!strings.Contains(err.Error(), "leading out of the -C directory bd setup installs into") {
+			t.Errorf("bd -C T setup --add lint out/x.md = %v; want a refusal naming the -C directory", err)
+		}
+		if data, _ := os.ReadFile(filepath.Join(target, ".beads", "recipes.toml")); len(data) != 0 {
+			t.Errorf("bd -C T setup --add lint out/x.md wrote recipes.toml:\n%s", data)
+		}
+	})
+
+	t.Run("inside paths install", func(t *testing.T) {
+		launch, target, _ := fixture(t, "[recipes.deep]\npath = \"a/b/c.md\"\n\n[recipes.inward]\npath = \"in/x.md\"\n")
+		if err := os.Mkdir(filepath.Join(target, "real"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("real", filepath.Join(target, "in")); err != nil {
+			t.Fatal(err)
+		}
+		for recipe, file := range map[string]string{"deep": "a/b/c.md", "inward": "real/x.md"} {
+			out, err := runSetupErrIn(t, target, recipe)
+			if err != nil {
+				t.Errorf("bd -C T setup %s = %v:\n%s", recipe, err, out)
+			}
+			if data, err := os.ReadFile(filepath.Join(target, filepath.FromSlash(file))); err != nil || string(data) != recipes.Template {
+				t.Errorf("bd -C T setup %s wrote T/%s = %q, %v", recipe, file, data, err)
+			}
+		}
+		assertSameTree(t, "L after bd -C T setup of inside recipes", launch, map[string]string{})
+	})
+}
