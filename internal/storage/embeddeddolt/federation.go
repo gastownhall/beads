@@ -181,7 +181,15 @@ var federationEnvMutex sync.Mutex
 //
 // Stored credentials are bound to the peer's canonical remote URL, not only
 // to its name (see verifyPeerRemoteURL).
+//
+// It is also the allowlist gate for those verbs (checkRemotePolicy).
 func (s *EmbeddedDoltStore) withPeerAuth(ctx context.Context, peer string, fn func(user string) error) error {
+	// GH#6233: every remote verb funnels through here, so the allowlist is
+	// checked once, before any credential is resolved or installed and before
+	// fn dispatches the transfer.
+	if err := s.checkRemotePolicy(ctx, peer); err != nil {
+		return err
+	}
 	p, err := s.GetFederationPeer(ctx, peer)
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
 		return fmt.Errorf("resolve peer credentials: %w", err)

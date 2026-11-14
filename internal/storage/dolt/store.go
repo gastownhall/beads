@@ -5523,6 +5523,11 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 		)...),
 	)
 	defer func() { endSpan(span, retErr) }()
+	// GH#6233: the allowlist is checked before any route, credential or
+	// pre-push work, so a refused remote receives nothing.
+	if err := s.checkRemotePolicy(ctx, remote); err != nil {
+		return err
+	}
 	creds := s.credentialsForRemote(remote)
 	// Git-protocol remotes: use CLI to avoid MySQL connection timeout during transfer.
 	// Must check before remoteUser — Hosted Dolt SSH remotes have remoteUser set
@@ -5624,6 +5629,12 @@ func (s *DoltStore) PullRemote(ctx context.Context, remote string) error {
 // pullFromRemote is the internal implementation for all pull operations.
 // It routes through CLI or SQL based on the remote's protocol and credentials.
 func (s *DoltStore) pullFromRemote(ctx context.Context, remote string) (retErr error) {
+	// GH#6233: refuse a remote outside the allowlist before the write circuit
+	// is entered and before the pre-pull commit, so a policy refusal neither
+	// counts against the circuit nor changes local state.
+	if err := s.checkRemotePolicy(ctx, remote); err != nil {
+		return err
+	}
 	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		return s.pullFromRemoteUnchecked(ctx, remote)
 	})
