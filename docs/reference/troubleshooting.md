@@ -828,6 +828,36 @@ If staleness errors persist, `bd doctor --fix` forces a metadata refresh
 (low risk — it updates tracking metadata, not issues). Background:
 [GH#353](https://github.com/gastownhall/beads/issues/353).
 
+### Read-only sandboxes and read-only files
+
+`bd --readonly` blocks commands that would change issues. It does not let bd
+open the database without filesystem write access. In embedded mode, opening
+the database writes to files under `.beads/embeddeddolt/` on every command,
+including `bd --readonly list` and `bd show`. A sandbox that denies file
+writes (for example Codex CLI's `--sandbox read-only`), read-only files, or a
+read-only filesystem therefore stops every bd command from opening the
+database.
+
+That failure is permanent until access changes: retrying the same command
+under the same permissions fails the same way, even though a Windows
+`Access is denied` error can look like another process holding a lock. bd
+builds that include the fix for
+[GH#7445](https://github.com/gastownhall/beads/issues/7445) (releases after
+v1.3.4) say so in the error:
+
+```text
+Error: failed to open database: ... store requires write access to open at .../.beads/embeddeddolt
+(embedded stores require write access even for --readonly; retrying will not help until access changes; ...)
+```
+
+Earlier builds print only the underlying error, such as `permission denied`
+or `Access is denied` on a file under `.beads/embeddeddolt/`.
+
+To fix it, run bd where the process can read and write `.beads/embeddeddolt/`:
+widen the sandbox's writable paths to include it, or clear the read-only
+attribute on its files. Use `--readonly` for what it guarantees, which is
+that bd makes no changes to your issues.
+
 ## Platform-Specific Issues
 
 ### Windows: Path issues
