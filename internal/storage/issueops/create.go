@@ -712,7 +712,12 @@ func validateCreateIssuesMixedBucketDependencies(issues []*types.Issue) error {
 // the column's default 0, and every leg of the should-be-blocked union the
 // mark template probes selects a row by that row's own dependency rows
 // (planRecomputeInTx) — of which a row the batch just inserted has exactly
-// the ones the batch wrote for it. So mark cannot select such a row and
+// the ones the batch wrote for it. That last step is an assumption about
+// the schema, not about this code: every dependency row's source column
+// (issue_id, both tables) is a foreign key onto its row table with ON DELETE
+// CASCADE (fk_dep_issue, migration 0043; fk_wisp_dep_issue, migration 0047),
+// so no dependency row outlives its source row to be waiting for a new row
+// that takes the same id. So mark cannot select such a row and
 // unmark (is_blocked = 1 -> 0) matches nothing: the four statements the
 // recompute spent on it (the edgeless probe, the plain unmark and, with the
 // events journal on, two snapshots) returned nothing on every create. A row
@@ -720,7 +725,9 @@ func validateCreateIssuesMixedBucketDependencies(issues []*types.Issue) error {
 // batch; a fresh row that is a source keeps the full recompute, and a fresh
 // row an edge affects is added back by createBlockedRecomputeIDs's
 // dependency expansion, so the skip never hides a row from the recompute it
-// needs.
+// needs. That expansion adds every persisted edge's source too, so dropping
+// the sources here changes no outcome: it states the rule in one place
+// instead of leaning on the expansion to restore it.
 //
 // Like the batch's other shortcuts it is off under createFastPathsDisabled,
 // so the fast-vs-per-row equivalence tests compare the skip against the probe.

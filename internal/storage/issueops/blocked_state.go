@@ -853,10 +853,13 @@ func affectedByStatusChangeInTx(ctx context.Context, tx DBTX, id string, isWisp,
 	appendUnseen(n.waiterIssuesByWispCol, &issueSeed, issueSeen)
 	appendUnseen(n.waiterWispsByWispCol, &wispSeed, wispSeen)
 	// 4. Parent-child descendants of every seed. id's own children are in
-	//    hand; the expansion reads the rest and does not re-read id's.
+	//    hand; the expansion reads the rest and does not re-read id's. The
+	//    other plane may hold a row with the same id (a seed, if it depends
+	//    or waits on id or hangs under it), and that row's children are not
+	//    in hand: the skip names id's plane.
 	appendUnseen(n.childIssues, &issueSeed, issueSeen)
 	appendUnseen(n.childWisps, &wispSeed, wispSeen)
-	issues, wisps, err := expandByParentChildDescendantsSkippingInTx(ctx, tx, issueSeed, wispSeed, issueSeen, wispSeen, id)
+	issues, wisps, err := expandByParentChildDescendantsSkippingInTx(ctx, tx, issueSeed, wispSeed, issueSeen, wispSeen, id, isWisp)
 	return issues, wisps, n.blocked, err
 }
 
@@ -1378,24 +1381,30 @@ func expandByParentChildDescendantsInTx(
 	issueSeed, wispSeed []string,
 	issueSeen, wispSeen map[string]bool,
 ) ([]string, []string, error) {
-	return expandByParentChildDescendantsSkippingInTx(ctx, tx, issueSeed, wispSeed, issueSeen, wispSeen, "")
+	return expandByParentChildDescendantsSkippingInTx(ctx, tx, issueSeed, wispSeed, issueSeen, wispSeen, "", false)
 }
 
 // expandByParentChildDescendantsSkippingInTx is expandByParentChildDescendantsInTx
 // for a caller that already holds the children of seed row skip (and has put
 // them in the seeds): skip's children are not read again, while skip itself
-// stays in the result like any seed.
+// stays in the result like any seed. skipWisp names skip's plane. One id can
+// be held by a row in each plane, and the caller holds the children of the
+// row in skip's plane only, so skip is dropped from that plane's queue alone;
+// a row in the other plane with the same id has its children read like any
+// seed's. An empty skip skips nothing.
 func expandByParentChildDescendantsSkippingInTx(
 	ctx context.Context, tx DBTX,
 	issueSeed, wispSeed []string,
 	issueSeen, wispSeen map[string]bool,
-	skip string,
+	skip string, skipWisp bool,
 ) ([]string, []string, error) {
 	issueQueue := issueSeed
 	wispQueue := wispSeed
 	issueHead, wispHead := 0, 0
-	parents := func(batch []string) []string {
-		if skip == "" {
+	// parents is the batch whose children are still to be read; wispBatch
+	// says which plane's queue the batch came from.
+	parents := func(batch []string, wispBatch bool) []string {
+		if skip == "" || wispBatch != skipWisp {
 			return batch
 		}
 		return dropID(batch, skip)
@@ -1410,10 +1419,10 @@ func expandByParentChildDescendantsSkippingInTx(
 			batch := issueQueue[issueHead:end]
 			issueHead = end
 
-			if err := appendChildrenInTx(ctx, tx, "dependencies", "depends_on_issue_id", parents(batch), issueSeen, &issueQueue); err != nil {
+			if err := appendChildrenInTx(ctx, tx, "dependencies", "depends_on_issue_id", parents(batch, false), issueSeen, &issueQueue); err != nil {
 				return nil, nil, err
 			}
-			if err := appendChildrenInTx(ctx, tx, "wisp_dependencies", "depends_on_issue_id", parents(batch), wispSeen, &wispQueue); err != nil {
+			if err := appendChildrenInTx(ctx, tx, "wisp_dependencies", "depends_on_issue_id", parents(batch, false), wispSeen, &wispQueue); err != nil {
 				return nil, nil, err
 			}
 		}
@@ -1425,10 +1434,10 @@ func expandByParentChildDescendantsSkippingInTx(
 			batch := wispQueue[wispHead:end]
 			wispHead = end
 
-			if err := appendChildrenInTx(ctx, tx, "dependencies", "depends_on_wisp_id", parents(batch), issueSeen, &issueQueue); err != nil {
+			if err := appendChildrenInTx(ctx, tx, "dependencies", "depends_on_wisp_id", parents(batch, true), issueSeen, &issueQueue); err != nil {
 				return nil, nil, err
 			}
-			if err := appendChildrenInTx(ctx, tx, "wisp_dependencies", "depends_on_wisp_id", parents(batch), wispSeen, &wispQueue); err != nil {
+			if err := appendChildrenInTx(ctx, tx, "wisp_dependencies", "depends_on_wisp_id", parents(batch, true), wispSeen, &wispQueue); err != nil {
 				return nil, nil, err
 			}
 		}

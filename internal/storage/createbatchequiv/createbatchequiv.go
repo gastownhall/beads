@@ -105,7 +105,8 @@ func largeScenarios() []scenario {
 // recorded from the code BEFORE the batch-create fast paths existed
 // (ebe3b6bcb), so the check holds the current code — fast and per-row
 // bodies alike, including changes the fast-path switch does not gate — to
-// what that code stored, apart from five deliberate behavior changes since.
+// what that code stored, apart from five deliberate behavior changes since
+// and one scenario that grew (the sixth note).
 //
 // First, the create role defaults an empty created_by to the request's actor
 // (issueops.PreparePublicCreateRequest), so apply.json's issues, wisps and
@@ -152,6 +153,17 @@ func largeScenarios() []scenario {
 // update rows of the new journal gives back each old digest exactly, on the
 // embedded and the server engine alike. The request's own records and every
 // row count are unchanged, and apply and retired did not move.
+//
+// Sixth, settled.json was re-recorded when the settled scenario gained step K
+// (gastownhall/beads#8225): a wisp closed whose id an issues row also holds,
+// with a child under that issues-plane twin and a waiter on it from each
+// plane. It was recorded from the code before the one-statement affected-set
+// read (8cdfa796a), whose fast and per-row bodies agree on the step, on the
+// embedded engine; the server engine stores the same rows. Only K's rows were
+// added: three issues, two wisps, four dependency rows, and the journal,
+// event and version rows of its close. Every row the old dump held is in the
+// new one unchanged, and each earlier step line reads as it did apart from
+// listing K's rows.
 //
 // settled.json is younger than the rest: it was recorded from the code before
 // the blocked-state settled-row shortcut (fd54802bc8), on the embedded and the

@@ -140,8 +140,37 @@ func opClosePlan(t *testing.T, id string, version int64) storage.ApplyBatchPlan 
 	return plan
 }
 
+// pinnedOpWriteStatements is the Total() statement count of each write
+// TestOpWriteStatements measures, by journal setting. With the journal on,
+// the way gascity runs, the three were 33, 46 and 38 before the op write
+// statement cut: a fresh edgeless row leaves the create's recompute
+// (freshEdgelessIDs), a status change reads its affected set in one statement
+// (affectedByStatusChangeInTx) and skips the settled unmark of a row whose
+// flag is already 0, the result snapshot reuses the labels its row read
+// fetched, and a wisp deletes no lease row.
+//
+// The counts are pinned exactly, unlike the large-batch shapes': each write
+// is one small transaction on a connection of its own, and it issued the same
+// statements on every run measured. Like those pins they follow real driver
+// round trips, so a change for any other reason (a Dolt or driver upgrade, a
+// new read on the write path) is re-measured from this test's log and
+// re-pinned deliberately, with the reason recorded here.
+var pinnedOpWriteStatements = map[string]map[string]int64{
+	"journal=off": {
+		"create(explicit id)":  19,
+		"close(apply, fenced)": 25,
+		"create(minted id)":    24,
+	},
+	"journal=on": {
+		"create(explicit id)":  27,
+		"close(apply, fenced)": 32,
+		"create(minted id)":    32,
+	},
+}
+
 // TestOpWriteStatements logs the statements of an op open and close, with
-// the events journal off and on (gascity enables it on its native store).
+// the events journal off and on (gascity enables it on its native store),
+// and holds each write's total to pinnedOpWriteStatements.
 func TestOpWriteStatements(t *testing.T) {
 	ctx := context.Background()
 	store, cleanup := setupConcurrentTestStore(t)
@@ -157,6 +186,17 @@ func TestOpWriteStatements(t *testing.T) {
 			label = "journal=on"
 		}
 		t.Run(label, func(t *testing.T) {
+			report := func(write string, snap sqlcount.Snapshot, elapsed time.Duration) {
+				t.Helper()
+				log.dump(t, write, snap, elapsed)
+				want, ok := pinnedOpWriteStatements[label][write]
+				if !ok {
+					t.Fatalf("no pinned count for %s %s; read the logged Total and add it to pinnedOpWriteStatements", label, write)
+				}
+				if got := snap.Total(); got != want {
+					t.Errorf("%s %s: Total() = %d, want pinned %d (see pinnedOpWriteStatements)", label, write, got, want)
+				}
+			}
 			id := "gco-op" + strings.ReplaceAll(label, "=", "")
 			var created issueops.CreateResult
 			snap, elapsed := measureTx(ctx, t, db, &counts, &log, journal, func(tx *sql.Tx) error {
@@ -164,20 +204,20 @@ func TestOpWriteStatements(t *testing.T) {
 				created, _, err = storageissueops.ExecuteCreate(ctx, tx, opCreateRequest(id))
 				return err
 			})
-			log.dump(t, "create(explicit id)", snap, elapsed)
+			report("create(explicit id)", snap, elapsed)
 
 			snap, elapsed = measureTx(ctx, t, db, &counts, &log, journal, func(tx *sql.Tx) error {
 				_, _, err := storageissueops.ApplyBatchInTx(ctx, tx, opClosePlan(t, id, created.Issue.RowVersion))
 				return err
 			})
-			log.dump(t, "close(apply, fenced)", snap, elapsed)
+			report("close(apply, fenced)", snap, elapsed)
 
 			minted := opCreateRequest("")
 			snap, elapsed = measureTx(ctx, t, db, &counts, &log, journal, func(tx *sql.Tx) error {
 				_, _, err := storageissueops.ExecuteCreate(ctx, tx, minted)
 				return err
 			})
-			log.dump(t, "create(minted id)", snap, elapsed)
+			report("create(minted id)", snap, elapsed)
 		})
 	}
 }
