@@ -47,8 +47,10 @@ Handles merge conflicts using the configured strategy:
   --strategy ours    Keep local changes on conflict
   --strategy theirs  Accept remote changes on conflict
 
-If no strategy is specified and conflicts occur, the sync will pause
-and report which tables have conflicts for manual resolution.
+With a strategy, conflicts are resolved and the merge is committed
+before local changes are pushed. If no strategy is specified and
+conflicts occur, the sync with that peer fails without merging or
+pushing anything; rerun it with --strategy ours or --strategy theirs.
 
 Examples:
   bd federation sync                      # Sync with all peers
