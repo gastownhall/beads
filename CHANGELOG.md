@@ -1281,6 +1281,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`beads.OpenBestAvailable` no longer opens an empty embedded store on a
+  proxied-server workspace** (#8323). On a workspace whose metadata sets
+  `dolt_mode: proxied-server`, the public open (and `OpenBestAvailableWith`)
+  fell through to the embedded engine: cgo builds created
+  `.beads/embeddeddolt/` beside the workspace's real database and returned a
+  new, empty store with no error, and pure-Go builds returned the misleading
+  "embedded Dolt requires CGO" error. Both now refuse with the new
+  `beads.ErrProxiedServerUnsupported`, naming the mode and the metadata file
+  that sets it, before anything is opened, created or migrated. The same
+  refusal covers an open that `BEADS_DOLT_SERVER_MODE` or
+  `BEADS_DOLT_SHARED_SERVER` forces into server mode without
+  `BEADS_DOLT_SERVER_PORT`, which would dial a port bd resolves itself rather
+  than the proxy's. An open that also sets `BEADS_DOLT_SERVER_PORT` still
+  dials the endpoint it names, as before, but it gets no session from a proxy
+  this release starts: that proxy's data port accepts only bd's authenticated
+  connections (#7884), and the SDK connects as a plain MySQL client. Use the
+  bd CLI on proxied-server workspaces (`bd sql` for ad-hoc queries).
+
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc
