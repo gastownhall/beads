@@ -1281,6 +1281,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A store create that fails and rolls back no longer leaves the IDs it
+  filled on the caller's structs** (#8457, first fixed by @quad341 in #6754
+  and #6831). `CreateIssue` and `CreateIssues` (server and embedded mode)
+  mint an empty `issue.ID` and fill empty comment IDs, and `CreateIssues`
+  backfills empty dependency sources, before later checks can fail, such as
+  an over-length label. On a failed create those fields stayed set, so an SDK
+  caller retrying the same struct took the explicit-ID upsert path and, in
+  counter mode, could overwrite the issue a peer had since created with the
+  rolled-back ID. When the transaction rolled back they are now empty again;
+  an error wrapping `storage.ErrCommitIndeterminate` keeps them. `bd create`
+  was not affected.
+
 - **`bd doctor` no longer flags cross-repository dependencies as orphans,
   and `bd doctor --fix` no longer deletes them** (#4647). `bd dep add` stores
   a bare target under another repository's prefix (`bd dep add bd-abc

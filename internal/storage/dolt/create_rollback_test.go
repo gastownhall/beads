@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -325,4 +326,236 @@ func TestCreateIssueRollsBackFullyOnContextCancelMidTransaction(t *testing.T) {
 	if eventCount != 0 {
 		t.Fatalf("event rows for %s persisted despite context-cancel rollback: found %d rows", issueID, eventCount)
 	}
+}
+
+// overLengthLabel is one rune past types.MaxFieldLen, so the label persist
+// step rejects it with types.ErrFieldTooLong after the create minted its ID.
+var overLengthLabel = strings.Repeat("x", types.MaxFieldLen+1)
+
+func countIssueRows(t *testing.T, ctx context.Context, store *DoltStore, table string) int {
+	t.Helper()
+	var n int
+	//nolint:gosec // G201: table is a test-chosen constant
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table).Scan(&n); err != nil {
+		t.Fatalf("count %s rows: %v", table, err)
+	}
+	return n
+}
+
+// TestCreateIssueFailureRestoresAutoMintedID reproduces bd-wm5ahf (GH#8457):
+// a singular CreateIssue with an empty ID that fails permanently after the ID
+// was minted (ErrFieldTooLong on an over-length label) must hand the caller's
+// struct back with the empty ID it passed in, while an explicit ID survives
+// the same failure, and no row is written.
+func TestCreateIssueFailureRestoresAutoMintedID(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	before := countIssueRows(t, ctx, store, "issues")
+
+	auto := &types.Issue{
+		Title:     "auto-minted create that fails permanently",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Labels:    []string{overLengthLabel},
+	}
+	err := store.CreateIssue(ctx, auto, "tester")
+	if !errors.Is(err, types.ErrFieldTooLong) {
+		t.Fatalf("auto-minted CreateIssue error = %v, want types.ErrFieldTooLong", err)
+	}
+	if auto.ID != "" {
+		t.Fatalf("auto.ID = %q after a failed auto-minted create, want \"\" (minted ID leaked onto the caller's struct)", auto.ID)
+	}
+
+	explicit := &types.Issue{
+		ID:        "test-explicit",
+		Title:     "explicit-ID create that fails permanently",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Labels:    []string{overLengthLabel},
+	}
+	err = store.CreateIssue(ctx, explicit, "tester")
+	if !errors.Is(err, types.ErrFieldTooLong) {
+		t.Fatalf("explicit-ID CreateIssue error = %v, want types.ErrFieldTooLong", err)
+	}
+	if explicit.ID != "test-explicit" {
+		t.Fatalf("explicit.ID = %q after a failed create, want the caller-supplied %q", explicit.ID, "test-explicit")
+	}
+
+	if after := countIssueRows(t, ctx, store, "issues"); after != before {
+		t.Fatalf("issues rows = %d after two failed creates, want %d (unchanged)", after, before)
+	}
+}
+
+// TestCreateIssueRetryAfterFailedAutoMintKeepsPeerRow pins the consequence of
+// GH#8457 in counter mode: the failed create's counter increment rolls back,
+// so a peer's next create receives the same ID. A caller that then retries
+// its own struct must mint a new ID rather than upsert over the peer's row.
+func TestCreateIssueRetryAfterFailedAutoMintKeepsPeerRow(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if err := store.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+		t.Fatalf("set issue_id_mode: %v", err)
+	}
+	seed := &types.Issue{Title: "seed", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, seed, "tester"); err != nil {
+		t.Fatalf("seed create: %v", err)
+	}
+
+	issue := &types.Issue{
+		Title:     "caller",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Labels:    []string{overLengthLabel},
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); !errors.Is(err, types.ErrFieldTooLong) {
+		t.Fatalf("failing create error = %v, want types.ErrFieldTooLong", err)
+	}
+
+	peer := &types.Issue{Title: "peer", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, peer, "peer"); err != nil {
+		t.Fatalf("peer create: %v", err)
+	}
+
+	issue.Labels = []string{"ok"}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("retry create: %v", err)
+	}
+	if issue.ID == peer.ID {
+		t.Fatalf("retry reused the peer's ID %q: the rolled-back minted ID stayed on the caller's struct and the retry upserted over the peer's row", issue.ID)
+	}
+
+	got, err := store.GetIssue(ctx, peer.ID)
+	if err != nil {
+		t.Fatalf("GetIssue(%s): %v", peer.ID, err)
+	}
+	if got.Title != "peer" {
+		t.Fatalf("peer issue %s title = %q after the caller's retry, want %q", peer.ID, got.Title, "peer")
+	}
+}
+
+// TestCreateIssuesFailureRestoresFilledIDs pins GH#8457 for the batch arms of
+// DoltStore.CreateIssues: when the batch transaction rolls back after the
+// create filled caller-left-empty ID fields (a minted issue ID, a fresh
+// comment's ID, a dependency's source IssueID), every one of them is empty
+// again and every caller-supplied ID is unchanged.
+func TestCreateIssuesFailureRestoresFilledIDs(t *testing.T) {
+	newTask := func(title string) *types.Issue {
+		return &types.Issue{Title: title, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	}
+
+	t.Run("durable/label", func(t *testing.T) {
+		store, cleanup := setupTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+
+		explicit := newTask("explicit")
+		explicit.ID = "test-explicit-e"
+		// An auto-minted issue is never deferred, so A, comment included, is
+		// fully written before B's over-length label fails the batch.
+		a := newTask("auto A")
+		a.Comments = []*types.Comment{{Author: "tester", Text: "fresh comment"}}
+		b := newTask("auto B")
+		b.Labels = []string{overLengthLabel}
+
+		before := countIssueRows(t, ctx, store, "issues")
+		err := store.CreateIssues(ctx, []*types.Issue{explicit, a, b}, "tester")
+		if !errors.Is(err, types.ErrFieldTooLong) {
+			t.Fatalf("CreateIssues error = %v, want types.ErrFieldTooLong", err)
+		}
+		if a.ID != "" || b.ID != "" {
+			t.Errorf("auto IDs = %q, %q after a rolled-back batch, want both empty", a.ID, b.ID)
+		}
+		if got := a.Comments[0].ID; got != "" {
+			t.Errorf("fresh comment ID = %q after a rolled-back batch, want empty", got)
+		}
+		if explicit.ID != "test-explicit-e" {
+			t.Errorf("explicit ID = %q, want the caller-supplied %q", explicit.ID, "test-explicit-e")
+		}
+		if after := countIssueRows(t, ctx, store, "issues"); after != before {
+			t.Errorf("issues rows = %d after a rolled-back batch, want %d", after, before)
+		}
+	})
+
+	t.Run("durable/dependency", func(t *testing.T) {
+		store, cleanup := setupTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+
+		grandparent := newTask("grandparent")
+		if err := store.CreateIssue(ctx, grandparent, "tester"); err != nil {
+			t.Fatalf("create grandparent: %v", err)
+		}
+		parent := newTask("parent")
+		parent.Dependencies = []*types.Dependency{{DependsOnID: grandparent.ID, Type: types.DepParentChild}}
+		if err := store.CreateIssues(ctx, []*types.Issue{parent}, "tester"); err != nil {
+			t.Fatalf("create parent: %v", err)
+		}
+
+		// X becomes P's child and blocks on its own grandparent G: the
+		// hierarchy check refuses that only after the dependency pass
+		// backfilled each edge's empty IssueID from X's minted ID.
+		x := newTask("child blocking on its grandparent")
+		x.Dependencies = []*types.Dependency{
+			{DependsOnID: parent.ID, Type: types.DepParentChild},
+			{DependsOnID: grandparent.ID, Type: types.DepBlocks},
+		}
+		err := store.CreateIssues(ctx, []*types.Issue{x}, "tester")
+		var conflict *domain.DependencyHierarchyConflictError
+		if !errors.As(err, &conflict) {
+			t.Fatalf("CreateIssues error = %v, want *domain.DependencyHierarchyConflictError", err)
+		}
+		if x.ID != "" {
+			t.Errorf("auto ID = %q after a rolled-back batch, want empty", x.ID)
+		}
+		for i, dep := range x.Dependencies {
+			if dep.IssueID != "" {
+				t.Errorf("dependency %d IssueID = %q after a rolled-back batch, want empty", i, dep.IssueID)
+			}
+		}
+		if parent.Dependencies[0].IssueID != parent.ID {
+			t.Errorf("seed dependency IssueID = %q, want %q (a committed create keeps its fills)", parent.Dependencies[0].IssueID, parent.ID)
+		}
+	})
+
+	t.Run("all-wisps", func(t *testing.T) {
+		store, cleanup := setupTestStore(t)
+		defer cleanup()
+		ctx, cancel := testContext(t)
+		defer cancel()
+
+		first := newTask("wisp one")
+		first.Ephemeral = true
+		first.Comments = []*types.Comment{{Author: "tester", Text: "fresh wisp comment"}}
+		second := newTask("wisp two")
+		second.Ephemeral = true
+		second.Labels = []string{overLengthLabel}
+
+		before := countIssueRows(t, ctx, store, "wisps")
+		err := store.CreateIssues(ctx, []*types.Issue{first, second}, "tester")
+		if !errors.Is(err, types.ErrFieldTooLong) {
+			t.Fatalf("CreateIssues error = %v, want types.ErrFieldTooLong", err)
+		}
+		if first.ID != "" || second.ID != "" {
+			t.Errorf("auto wisp IDs = %q, %q after a rolled-back batch, want both empty", first.ID, second.ID)
+		}
+		if got := first.Comments[0].ID; got != "" {
+			t.Errorf("fresh wisp comment ID = %q after a rolled-back batch, want empty", got)
+		}
+		if after := countIssueRows(t, ctx, store, "wisps"); after != before {
+			t.Errorf("wisps rows = %d after a rolled-back batch, want %d", after, before)
+		}
+	})
 }
