@@ -196,10 +196,10 @@ func CheckAider() error {
 }
 
 func RemoveAider() error {
-	configPath := ".aider.conf.yml"
-	instructionsPath := ".aider/BEADS.md"
-	readmePath := ".aider/README.md"
-	aiderDir := ".aider"
+	configPath := ProjectPath(".aider.conf.yml")
+	instructionsPath := ProjectPath(".aider/BEADS.md")
+	readmePath := ProjectPath(".aider/README.md")
+	aiderDir := ProjectPath(".aider")
 
 	fmt.Println("Removing Aider integration...")
 

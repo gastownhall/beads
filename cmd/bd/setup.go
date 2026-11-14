@@ -388,7 +388,7 @@ func runRecipe(name string) error {
 	if setupRemove {
 		removed := false
 		for _, path := range paths {
-			if err := os.Remove(path); err != nil {
+			if err := os.Remove(setup.ProjectPath(path)); err != nil {
 				if os.IsNotExist(err) {
 					continue
 				}
@@ -397,8 +397,11 @@ func runRecipe(name string) error {
 			removed = true
 			// Drop the file's directory if that left it empty, but never a
 			// symlinked one, which removing would unlink whatever its
-			// target holds (setup.RemoveEmptyDir).
-			_ = setup.RemoveEmptyDir(filepath.Dir(path))
+			// target holds (setup.RemoveEmptyDir), and never the project
+			// directory itself, which a bare file name's directory is.
+			if dir := filepath.Dir(path); dir != "." && dir != "" {
+				_ = setup.RemoveEmptyDir(setup.ProjectPath(dir))
+			}
 		}
 		if !removed {
 			fmt.Println("No integration files found")

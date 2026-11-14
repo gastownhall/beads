@@ -183,10 +183,10 @@ func CheckJunie() error {
 }
 
 func RemoveJunie() error {
-	guidelinesPath := ".junie/guidelines.md"
-	mcpPath := ".junie/mcp/mcp.json"
-	mcpDir := ".junie/mcp"
-	junieDir := ".junie"
+	guidelinesPath := ProjectPath(".junie/guidelines.md")
+	mcpPath := ProjectPath(".junie/mcp/mcp.json")
+	mcpDir := ProjectPath(".junie/mcp")
+	junieDir := ProjectPath(".junie")
 
 	fmt.Println("Removing Junie integration...")
 
