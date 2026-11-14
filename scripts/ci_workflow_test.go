@@ -2055,7 +2055,7 @@ const wantRBERunsOn = "${{ github.repository_owner_id == '" + gastownhallOwnerID
 // main.yml's push-to-main-only Windows and macOS savers, on the exact labels
 // pr.yml's Windows and macOS legs run on (no GitHub-hosted leg is left to
 // seed, ga-96smfk.22).
-const mainBlacksmithWindows4vcpuRunsOn = blacksmithWindows4vcpuRunsOn
+const mainBlacksmithWindows4vcpuRunsOn = "${{ 'blacksmith-4vcpu-windows-2025' }}"
 const mainBlacksmithMacOSGoBuildCacheRunsOn = "${{ '" + blacksmithMacOSLabel + "' }}"
 
 // main.yml's push-to-main-only macOS test job, on Blacksmith macOS.
@@ -2434,7 +2434,7 @@ func TestSameRepoBlacksmithRunners(t *testing.T) {
 		// is cheap enough to size at 2 vCPU per spec-f7.md §2.2) and moves
 		// to Blacksmith for same-repo PRs/merge_group only; forks,
 		// Dependabot and push stay on ubuntu-latest.
-		"docs-mintlify.yml": {"broken-links": sameRepoBlacksmith2vcpu},
+		"docs-mintlify.yml": {"broken-links": strings.Replace(sameRepoBlacksmith2vcpu, "github.repository == 'gastownhall/beads' && ", "", 1)},
 		// main.yml's push-to-main-only jobs. Tracked here so the "no other
 		// Blacksmith label leaks" sweep below also covers main.yml.
 		"main.yml": {
