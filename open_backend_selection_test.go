@@ -908,3 +908,27 @@ func TestOpenBestAvailableProxiedServerRefusalNamesModeFileAndCLI(t *testing.T) 
 		}
 	}
 }
+
+// TestOpenBestAvailableProxiedServerRefusalSparesRegisteredBackend pins the
+// AC-5 edge: dolt_mode is a Dolt setting, so a registered extension backend
+// whose metadata also carries "proxied-server" still dispatches to the
+// registry, as on main. The server, embedded and option tests guard the
+// other Dolt arms.
+func TestOpenBestAvailableProxiedServerRefusalSparesRegisteredBackend(t *testing.T) {
+	isolateProxiedServerEnv(t, "", "")
+	const backend = "registry-proxied-mode"
+	registerWorkspaceBackend(t, backend)
+	opens := map[string]func(context.Context, string) (beads.Storage, error){
+		"OpenBestAvailable":     bestAvailableOpens["OpenBestAvailable"],
+		"OpenBestAvailableWith": bestAvailableOpens["OpenBestAvailableWith"],
+	}
+	for name, open := range opens {
+		t.Run(name, func(t *testing.T) {
+			_, beadsDir := writeProxiedServerWorkspace(t, "metadata.json", backend, "proxied-server")
+			_, err := openClosing(t, open, beadsDir)
+			if !errors.Is(err, errRegistryBackendOpen) {
+				t.Fatalf("%s error = %v, want dispatch to the registered backend (%v)", name, err, errRegistryBackendOpen)
+			}
+		})
+	}
+}
