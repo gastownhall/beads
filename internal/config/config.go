@@ -357,7 +357,7 @@ func initialize(beadsDirSetting string) error {
 	// Federation configuration (optional Dolt remote)
 	v.SetDefault("federation.remote", "")                          // e.g., dolthub://org/beads, gs://bucket/beads, s3://bucket/beads, az://account.blob.core.windows.net/container/beads
 	v.SetDefault("federation.sovereignty", "")                     // T1 | T2 | T3 | T4 (empty = no restriction)
-	v.SetDefault("federation.allowed-remote-patterns", []string{}) // glob patterns restricting allowed remote URLs (enterprise lockdown)
+	v.SetDefault("federation.allowed-remote-patterns", []string{}) // glob patterns restricting the remote URLs bd syncs, registers and clones (empty = any)
 	v.SetDefault("federation.exclude_types", []string{"wisp"})     // issue types excluded from federation push (privacy filter)
 
 	// Push configuration defaults
@@ -1401,6 +1401,9 @@ type FederationConfig struct {
 	Remote       string      // dolthub://org/beads, gs://bucket/beads, s3://bucket/beads
 	Sovereignty  Sovereignty // T1, T2, T3, T4
 	ExcludeTypes []string    // issue types excluded from federation push (e.g. ["wisp"])
+	// AllowedRemotePatterns is the effective remote allowlist; see
+	// AllowedRemotePatterns.
+	AllowedRemotePatterns []string
 }
 
 // GetFederationConfig returns the current federation configuration.
@@ -1409,7 +1412,23 @@ func GetFederationConfig() FederationConfig {
 		Remote:       GetString("federation.remote"),
 		Sovereignty:  GetSovereignty(),
 		ExcludeTypes: GetStringSlice("federation.exclude_types"),
+
+		AllowedRemotePatterns: AllowedRemotePatterns(),
 	}
+}
+
+// AllowedRemotePatterns returns the effective federation.allowed-remote-patterns
+// list: merged config (project config.yaml over user config) with its BD_
+// environment override, read the way every other key is. Empty means no
+// allowlist: bd syncs, registers and clones any structurally valid remote.
+// A non-empty list restricts the remotes bd itself pushes to, pulls and
+// fetches from, registers and clones (GH#6233); see
+// remotecache.CheckRemotePolicy for the matching rule.
+//
+// Entries are returned as configured, blank ones included: a list whose
+// entries are all blank is a deny-all policy, not an absent one.
+func AllowedRemotePatterns() []string {
+	return GetStringSlice("federation.allowed-remote-patterns")
 }
 
 // GetCustomTypesFromYAML retrieves custom issue types from config.yaml.
