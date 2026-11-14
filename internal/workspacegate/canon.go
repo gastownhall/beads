@@ -6,6 +6,39 @@ import (
 	"strings"
 )
 
+// resolveParent picks the first accepted canonical parent spelling from
+// three injected resolvers, in order: the DOS-volume final path, the
+// volume-GUID final path, and filepath.EvalSymlinks (today's behavior,
+// kept as the last resort so a filesystem whose final-path query is
+// unsupported still resolves exactly as before). Resolvers are called
+// lazily, so the GUID query and EvalSymlinks never run when the DOS query
+// succeeds.
+//
+// An accepted result is a resolver that returned no error — the final-path
+// resolvers fold their query through finalPathToGateParent, so a rejected
+// shape surfaces here as an error and the chain moves on. When every
+// resolver fails, the causes are returned joined: errors.Is chains survive
+// errors.Join, so fs.ErrNotExist (a missing parent) stays detectable. The
+// unresolved input is never returned in place of a resolution.
+func resolveParent(dos, guid, eval func() (string, error)) (string, error) {
+	var errs []error
+	for _, res := range []struct {
+		name string
+		fn   func() (string, error)
+	}{
+		{"dos volume name", dos},
+		{"volume GUID name", guid},
+		{"evalsymlinks", eval},
+	} {
+		s, err := res.fn()
+		if err == nil {
+			return s, nil
+		}
+		errs = append(errs, fmt.Errorf("%s: %w", res.name, err))
+	}
+	return "", errors.Join(errs...)
+}
+
 // finalPathToGateParent converts the string a Windows
 // GetFinalPathNameByHandle query returns into the spelling a gate path
 // uses. The query result always carries the extended-length \\?\ prefix;
