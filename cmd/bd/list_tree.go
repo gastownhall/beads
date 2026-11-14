@@ -165,7 +165,7 @@ const treeCycleMarker = "(cycle: shown above; parent-child cycle in stored edges
 // precedence and the requested order breaks ties. When dr is set, each node's
 // dependency edges are annotated just beneath it.
 func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, prefix string, dr *depRender, compare func(a, b *types.Issue) int, gated map[string][]string) {
-	printPrettyTreePath(os.Stdout, childrenMap, parentID, prefix, dr, compare, gated, map[string]bool{parentID: true}, 0)
+	printPrettyTreePath(os.Stdout, childrenMap, parentID, prefix, dr, compare, gated, map[string]bool{parentID: true}, 0) //nolint:forbidigo // Pretty-tree output is outside the --format contract.
 }
 
 // printPrettyTreePath is printPrettyTree carrying the set of ancestors on the
