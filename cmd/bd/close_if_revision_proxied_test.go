@@ -46,6 +46,9 @@ func TestProxiedServerIfRevisionCloseReplaysMoleculeAutoClose(t *testing.T) {
 	rev := bdProxiedShowRevision(t, bd, p.dir, step2.ID)
 	out := bdProxiedClose(t, bd, p.dir, step2.ID, "--if-revision", proxiedRevStr(rev), "--reason", "retry", "--json")
 	requireCloseJSONReportsAutoClosedMolecule(t, out, []string{step2.ID}, root.ID)
+	// The step's own close was a no-op, so its entry says so (bd-th8229),
+	// even though the replay it drove closed the root.
+	requireCloseJSONMarksAlreadyClosed(t, decodeCloseJSON(t, out, []string{step2.ID}), map[string]bool{step2.ID: true})
 
 	if got := readStatus(t, db, root.ID); got != types.StatusClosed {
 		t.Errorf("expected stranded-open molecule root %s healed by a guarded proxied re-close of the final step, got %q",
