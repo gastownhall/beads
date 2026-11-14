@@ -36,8 +36,9 @@ func TestPostCommitRecheckPublishesOutsideItsTransaction(t *testing.T) {
 	const (
 		postTx  = "doltAddAndCommitPostTx"
 		recheck = "DoltStore.recheckBlockedAfterCommit"
-		// Anchors: one function known to publish with each ordering.
-		knownInTxPublisher   = "DoltStore.deleteIssue"
+		// Anchor: a function known to publish post-commit. No in-transaction
+		// publisher is left to anchor the other ordering (GH#5752 moved every
+		// one of them after its SQL commit).
 		knownPostTxPublisher = "DoltStore.publishCommittedOperation"
 	)
 	publishes := func(key, helper string) bool {
@@ -48,9 +49,6 @@ func TestPostCommitRecheckPublishesOutsideItsTransaction(t *testing.T) {
 		return f.CallsAnyOf(map[string]bool{helper: true})
 	}
 
-	if !publishes(knownInTxPublisher, inTx) {
-		t.Fatalf("%s no longer reads as an in-transaction publisher: the %s analysis is broken, so its verdict on %s means nothing", knownInTxPublisher, inTx, recheck)
-	}
 	if !publishes(knownPostTxPublisher, postTx) {
 		t.Fatalf("%s no longer reads as a post-transaction publisher: the %s analysis is broken, so its verdict on %s means nothing", knownPostTxPublisher, postTx, recheck)
 	}

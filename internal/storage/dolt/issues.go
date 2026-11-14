@@ -684,18 +684,20 @@ func (s *DoltStore) deleteIssue(ctx context.Context, id string) error {
 
 	if err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
 		// storage.DeleteIssue carries no actor, so the journal rows record none.
-		if err := issueops.DeleteIssueInTx(ctx, tx, id, issueops.NoRequestActor); err != nil {
-			return err
-		}
-
-		commitMsg := fmt.Sprintf("bd: delete %s", id)
-		return s.doltAddAndCommitInTx(ctx, tx,
-			[]string{"issues", "dependencies", "labels", "comments", "events", "provenance_events", "child_counters", "issue_snapshots", "compaction_snapshots"},
-			commitMsg)
+		return issueops.DeleteIssueInTx(ctx, tx, id, issueops.NoRequestActor)
 	}); err != nil {
 		return s.recordDoltPublicationFailure(ctx, err)
 	}
+	// Published after the SQL COMMIT, never inside it (GH#5752).
+	s.publishCommittedOperation(ctx, issueDeleteTables, fmt.Sprintf("bd: delete %s", id))
 	return nil
+}
+
+// issueDeleteTables are the versioned tables DeleteIssue and DeleteIssues
+// stage for their Dolt history commit.
+var issueDeleteTables = []string{
+	"issues", "dependencies", "labels", "comments", "events", "provenance_events",
+	"child_counters", "issue_snapshots", "compaction_snapshots",
 }
 
 // DeleteIssues deletes multiple issues in a single transaction.
@@ -770,20 +772,19 @@ func (s *DoltStore) deleteIssues(ctx context.Context, ids []string, cascade bool
 			return err
 		}
 		result = r
-		if dryRun {
-			return nil
-		}
-
-		commitMsg := fmt.Sprintf("bd: delete %d issue(s)", result.DeletedCount)
-		return s.doltAddAndCommitInTx(ctx, tx,
-			[]string{"issues", "dependencies", "labels", "comments", "events", "provenance_events", "child_counters", "issue_snapshots", "compaction_snapshots"},
-			commitMsg)
+		return nil
 	}); err != nil {
 		// Preserve partial result (e.g., OrphanedIssues) on error.
 		if result != nil {
 			result.DeletedCount += wispDeleteCount
 		}
 		return result, s.recordDoltPublicationFailure(ctx, err)
+	}
+	if !dryRun {
+		// Published after the SQL COMMIT, never inside it (GH#5752). The
+		// message counts the durable deletions only, before the wisp count is
+		// folded into the result.
+		s.publishCommittedOperation(ctx, issueDeleteTables, fmt.Sprintf("bd: delete %d issue(s)", result.DeletedCount))
 	}
 	result.DeletedCount += wispDeleteCount
 

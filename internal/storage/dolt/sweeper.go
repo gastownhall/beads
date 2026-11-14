@@ -7,7 +7,6 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	storeops "github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/workapi"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -42,12 +41,15 @@ var _ issueops.Sweeper = (*sweeper)(nil)
 // look like a mutation to everything watching the store.
 //
 // THE VERSION-CONTROL ENTRY IS ONE PER SWEEP, recorded here rather than in the
-// shared body because the two backends mint it differently: this one INSIDE
-// the write transaction, where the embedded store can only publish after its
-// SQL commit, on a second connection. That is why the role promises exactly
-// one entry in the STEADY STATE and only this leg makes it atomic with the
-// sweep. An ephemeral sweep touches only the wisp tables, which this plane
-// ignores, so DOLT_COMMIT finds nothing to commit and records none.
+// shared body, and published AFTER the SQL transaction committed, on a
+// connection with no transaction open, exactly as the embedded store does
+// (GH#5752). The sweep and its history entry are therefore NOT atomic: a
+// publication failure leaves the sweep applied and is counted and logged,
+// which is why the role promises exactly one entry only in the STEADY STATE.
+// A deferred version commit (bd-4wamg) records none here and leaves the rows
+// for the explicit commit point. An ephemeral sweep touches only the wisp
+// tables, which this plane ignores, so the staged-set guard finds nothing and
+// records none.
 func (s *sweeper) Sweep(ctx context.Context, req issueops.SweepRequest) (issueops.SweepResult, error) {
 	if err := workapi.ValidateSweepRequest(req); err != nil {
 		return issueops.SweepResult{}, err
@@ -74,30 +76,17 @@ func (s *sweeper) Sweep(ctx context.Context, req issueops.SweepRequest) (issueop
 	// create committing in any of those shards first conflicts it.
 	if err := s.store.withRetryTx(ctx, func(tx *sql.Tx) error {
 		result = issueops.SweepResult{}
-		if err := run(tx); err != nil {
-			return err
-		}
-		if result.Swept == 0 {
-			return nil
-		}
-		// Through the same funnel the deleter uses. A sweep mints nothing today
-		// — SweepInTx deletes through DeleteIssuesInTx, which rewrites no
-		// neighbor, so there is no surviving row to version — but it shares
-		// this table list and the minting-scoped write transaction with the deleter,
-		// and a staging list that carries the version tables on one and not the
-		// other is the asymmetry the wisp-arm scope comment refused: inert
-		// today, and silently wrong the day a sweep gains a surviving-row write.
-		for _, table := range s.store.withVersionedHistoryTables(ctx, tx, sweptTables) {
-			_ = schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table)
-		}
-		msg := fmt.Sprintf("bd: sweep %d %s bead(s)", result.Swept, req.Tier)
-		if err := schema.DrainCall(ctx, tx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-			msg, s.store.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-			return fmt.Errorf("dolt commit: %w", err)
-		}
-		return nil
+		return run(tx)
 	}); err != nil {
 		return issueops.SweepResult{}, err
+	}
+	// Through the same publisher, with the same table list, as the deleter. A
+	// sweep mints nothing today — SweepInTx deletes through DeleteIssuesInTx,
+	// which rewrites no neighbor, so there is no surviving row to version —
+	// but stageAndCommit appends the versioned-history tables for both alike,
+	// so the day a sweep gains a surviving-row write it is already staged.
+	if result.Swept > 0 {
+		s.store.publishCommittedOperation(ctx, sweptTables, fmt.Sprintf("bd: sweep %d %s bead(s)", result.Swept, req.Tier))
 	}
 	return result, nil
 }
