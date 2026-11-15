@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -140,8 +141,8 @@ func TestIssueIDCompletion(t *testing.T) {
 			completions, directive := issueIDCompletion(cmd, args, tt.toComplete)
 
 			// Check directive
-			if directive != cobra.ShellCompDirectiveNoFileComp {
-				t.Errorf("Expected directive NoFileComp (4), got %d", directive)
+			if directive != issueIDCompletionDirective {
+				t.Errorf("directive = %d, want %d", directive, issueIDCompletionDirective)
 			}
 
 			// Check count
@@ -299,8 +300,8 @@ func TestIssueIDCompletion_UsesWorktreeFallbackWhenStoreNil(t *testing.T) {
 	})
 
 	completions, directive := issueIDCompletion(&cobra.Command{}, nil, "wt-a")
-	if directive != cobra.ShellCompDirectiveNoFileComp {
-		t.Fatalf("directive = %d, want %d", directive, cobra.ShellCompDirectiveNoFileComp)
+	if directive != issueIDCompletionDirective {
+		t.Fatalf("directive = %d, want %d", directive, issueIDCompletionDirective)
 	}
 	if len(completions) != 1 {
 		t.Fatalf("len(completions) = %d, want 1 (%v)", len(completions), completions)
@@ -466,7 +467,16 @@ func TestIssueIDCompletion_EmptyDatabase(t *testing.T) {
 		t.Errorf("Expected 0 completions when database is empty, got %d", len(completions))
 	}
 
-	if directive != cobra.ShellCompDirectiveNoFileComp {
-		t.Errorf("Expected directive NoFileComp (4), got %d", directive)
+	if directive != issueIDCompletionDirective {
+		t.Errorf("directive = %d, want %d", directive, issueIDCompletionDirective)
+	}
+}
+
+func TestCompareIssueIDs(t *testing.T) {
+	ids := []string{"bd-a.10", "bd-a.2", "bd-b", "bd-a.1.2", "bd-a", "bd-a.1", "bd-a.1.10"}
+	slices.SortFunc(ids, compareIssueIDs)
+	want := []string{"bd-a", "bd-a.1", "bd-a.1.2", "bd-a.1.10", "bd-a.2", "bd-a.10", "bd-b"}
+	if !slices.Equal(ids, want) {
+		t.Errorf("sorted = %v, want %v", ids, want)
 	}
 }
