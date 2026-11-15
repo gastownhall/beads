@@ -71,8 +71,10 @@ func TestCheckConfigSideEffects_DoltMemoryLimit(t *testing.T) {
 		"set":   checkConfigSetSideEffects("dolt.memory-limit", "4GiB"),
 		"unset": checkConfigUnsetSideEffects("dolt.memory-limit"),
 	} {
-		if len(effects) != 1 || effects[0].Command != "bd dolt stop && bd dolt start" {
-			t.Errorf("%s dolt.memory-limit: effects = %+v, want one restart hint", name, effects)
+		// bd dolt start is refused on a proxied workspace; the stop alone
+		// applies the limit, since the next bd command restarts the server.
+		if len(effects) != 1 || effects[0].Command != "bd dolt stop" {
+			t.Errorf("%s dolt.memory-limit: effects = %+v, want one bd dolt stop hint", name, effects)
 		}
 	}
 }

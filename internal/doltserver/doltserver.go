@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -1625,10 +1626,8 @@ const serverMemoryLimitConfigKey = "dolt.memory-limit"
 // warning, because the Go runtime aborts at startup on a GOMEMLIMIT it cannot
 // parse.
 func withServerMemoryLimit(env []string) []string {
-	for _, kv := range env {
-		if v, ok := strings.CutPrefix(kv, "GOMEMLIMIT="); ok && v != "" {
-			return env
-		}
+	if envHasValue(env, "GOMEMLIMIT", runtime.GOOS == "windows") {
+		return env
 	}
 	limit := config.GetUserYamlConfig(serverMemoryLimitConfigKey)
 	if limit == "" {
@@ -1639,6 +1638,23 @@ func withServerMemoryLimit(env []string) []string {
 		return env
 	}
 	return append(env, "GOMEMLIMIT="+limit)
+}
+
+// envHasValue reports whether env sets name to a non-empty value. Windows
+// variable names are case-insensitive, both to os/exec, which keeps the last
+// of two spellings, and to the Go runtime that reads GOMEMLIMIT, so an
+// inherited GoMemLimit there is the operator's limit and must be found too.
+func envHasValue(env []string, name string, caseInsensitive bool) bool {
+	for _, kv := range env {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || v == "" {
+			continue
+		}
+		if k == name || (caseInsensitive && strings.EqualFold(k, name)) {
+			return true
+		}
+	}
+	return false
 }
 
 // buildDoltServerArgs returns the argv passed to `dolt` (excluding argv[0]/

@@ -119,6 +119,30 @@ func TestServerSpawnEnvMemoryLimit(t *testing.T) {
 	})
 }
 
+// On Windows an inherited GoMemLimit is the GOMEMLIMIT the server's runtime
+// reads, and os/exec would let an appended GOMEMLIMIT replace it, so the
+// operator's limit must be found in any spelling there. Elsewhere it is a
+// different variable and dolt.memory-limit still applies. Both modes run on
+// every host.
+func TestEnvHasValueFollowsPlatformCase(t *testing.T) {
+	env := []string{"PATH=/bin", "GoMemLimit=4GiB", "EMPTY="}
+	for _, tc := range []struct {
+		name            string
+		caseInsensitive bool
+		want            bool
+	}{
+		{"GOMEMLIMIT", true, true},   // Windows: GoMemLimit is GOMEMLIMIT
+		{"GOMEMLIMIT", false, false}, // POSIX: a different variable
+		{"GoMemLimit", false, true},
+		{"EMPTY", true, false}, // an empty value does not set a limit
+		{"MISSING", true, false},
+	} {
+		if got := envHasValue(env, tc.name, tc.caseInsensitive); got != tc.want {
+			t.Errorf("envHasValue(%q, caseInsensitive=%v) = %v, want %v", tc.name, tc.caseInsensitive, got, tc.want)
+		}
+	}
+}
+
 func TestAllocateEphemeralPort(t *testing.T) {
 	// Should return a valid port in the ephemeral range
 	port, err := allocateEphemeralPort("127.0.0.1")
